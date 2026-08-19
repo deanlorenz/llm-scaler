@@ -1532,6 +1532,36 @@ benchmark-plot-two-variant: ## Plot two-variant replica/latency/throughput graph
 		$$LATEST_DIR && \
 	echo "Two-variant plot: $$LATEST_DIR/metrics/graphs/two_variant_v2_full_pipeline.png"
 
+.PHONY: benchmark-extract-trace
+benchmark-extract-trace: ## Extract the latest run into bundle.json + coverage.json (ported from autoscaling-viz; set RUN_DIR=<dir> to target a specific run)
+	@RUN_DIR="$(RUN_DIR)"; \
+	if [ -z "$$RUN_DIR" ]; then \
+		RUN_DIR=$$(ls -td $(BENCHMARK_WORKSPACE)/$${USER}-*/results/$(BENCHMARK_HARNESS)-*_* 2>/dev/null | head -1); \
+	fi; \
+	if [ -z "$$RUN_DIR" ]; then \
+		echo "ERROR: no run directory found under $(BENCHMARK_WORKSPACE), and RUN_DIR not set"; \
+		exit 1; \
+	fi; \
+	echo "Extracting: $$RUN_DIR"; \
+	python3 $(CURDIR)/hack/benchmark/extract_real_trace.py --run "$$RUN_DIR" \
+		$(if $(CONTROLLER_LOG),--controller-log $(CONTROLLER_LOG),)
+
+.PHONY: benchmark-render-trace
+benchmark-render-trace: ## Render the latest run's bundle.json into panels.png (set RUN_DIR=<dir> to target a specific run)
+	@RUN_DIR="$(RUN_DIR)"; \
+	if [ -z "$$RUN_DIR" ]; then \
+		RUN_DIR=$$(ls -td $(BENCHMARK_WORKSPACE)/$${USER}-*/results/$(BENCHMARK_HARNESS)-*_* 2>/dev/null | head -1); \
+	fi; \
+	if [ -z "$$RUN_DIR" ] || [ ! -f "$$RUN_DIR/bundle.json" ]; then \
+		echo "ERROR: no bundle.json found (run 'make benchmark-extract-trace' first). RUN_DIR=$$RUN_DIR"; \
+		exit 1; \
+	fi; \
+	python3 $(CURDIR)/hack/benchmark/render_real_trace.py --bundle "$$RUN_DIR/bundle.json" && \
+	echo "Panels: $$RUN_DIR/panels.png"
+
+.PHONY: benchmark-viz
+benchmark-viz: benchmark-extract-trace benchmark-render-trace ## Extract + render the latest run in one step
+
 VARIANT_CONFIG ?= $(CURDIR)/hack/benchmark/scenarios/guides/variants/v2-tp1-cheaper.yaml
 WVA_V2_SATURATION_CONFIGMAP ?= $(CURDIR)/hack/benchmark/scenarios/wva_threshold/wva_saturation_v2_config.yaml
 # The name deploy/ installs: config/base names it controller-manager and every
