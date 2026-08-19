@@ -1,0 +1,45 @@
+{
+  "run": "inference-perf-1787138346-49t3k4_1",
+  "harness": "inference-perf",
+  "harness_version": "a40897e6500e4524adf563a91f7c880eb5296e12",
+  "model": "Qwen/Qwen3-32B",
+  "engine": {
+    "num_gpu_blocks": "20673",
+    "block_size": "16",
+    "gpu_memory_utilization": "0.92",
+    "enable_prefix_caching": "True",
+    "cache_dtype": "auto",
+    "sliding_window": "None"
+  },
+  "namespace": "dhl-la-1708",
+  "cluster": "dhl-la-1708/api-pokprod001-ete14-res-ibm-com",
+  "workload": "quick_smoke.yaml",
+  "shape": {
+    "in_tok": 1012,
+    "out_tok": null
+  },
+  "extractor_version": "0.1.0",
+  "extractor_git_sha": "ed233f90cbba2f7f93e4709bbf18e3dd113baed7",
+  "extracted_at": "2026-08-19T18:23:09+0300",
+  "published_at": "2026-08-19T20:08:42+0300",
+  "bundle_sha256": "bd3b1c4e55b6fbe4f3c43a6d3e226f8ec44760cc43a9d398398dc18cfbd24fb3",
+  "bundle_bytes": 243682,
+  "coverage": {
+    "pass": 6,
+    "fail": 10,
+    "not_exercised": [
+      "Characterize saturation",
+      "Exercise the 0.85 ceiling",
+      "Locate the throughput knee",
+      "Scale-down present",
+      "Drain-vs-kill measurable",
+      "Queue (a) material",
+      "Queue (c) material",
+      "Router imbalance measurable",
+      "Capacity model checkable",
+      "Boot lag measured"
+    ]
+  },
+  "time_anchor_trustworthy": true,
+  "source_dir": "dean-20260819-141758-912/results/inference-perf-1787138346-49t3k4_1"
+}

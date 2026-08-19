@@ -87,6 +87,6 @@
   "warnings": [
     "no post_run_analyze.sh output (wva_target_timeseries.json etc.) - WVA decision timeseries unavailable for this run; see plan 1.1a"
   ],
-  "extractor_sha": "42d245cb",
-  "extracted_at": "2026-08-19T14:45:43.276526+00:00"
+  "extractor_sha": "695a8e38",
+  "extracted_at": "2026-08-19T15:23:09.363851+00:00"
 }
