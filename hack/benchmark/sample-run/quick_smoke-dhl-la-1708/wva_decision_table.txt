@@ -1,84 +1,84 @@
-t          variant                 n_replicas  bound_by  k2_priority  analyzer_rc  analyzer_sc  analyzer_prc  analyzer_util  decision_curr  decision_tgt  decision_action  applied_target  analyzer_reason         
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-0          optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-15         optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-30         optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-45         optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-60         optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-75         optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-90         optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-105        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-120        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-135        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-150        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-165        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-180        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-195        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-210        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-225        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-240        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-255        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-270        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-285        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-300        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-315        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-330        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-345        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-360        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-375        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-390        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-405        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-420        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-435        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-450        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-465        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-480        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-495        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-510        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-525        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-540        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-555        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-570        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-585        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-600        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-615        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-630        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-645        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-660        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-675        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-690        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-705        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-721        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-736        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-751        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
-766        optimized-baseline-nvi  0    -    -            0.00     237069.  264614.  0.07    1     1     no-change   1      P3-k2                   
-781        optimized-baseline-nvi  0    -    -            0.00     234555.  264614.  0.08    1     1     no-change   1      P3-k2                   
-796        optimized-baseline-nvi  0    -    -            0.00     228064.  264614.  0.10    1     1     no-change   1      P3-k2                   
-811        optimized-baseline-nvi  0    -    -            0.00     226784.  264614.  0.10    1     1     no-change   1      P3-k2                   
-826        optimized-baseline-nvi  0    -    -            0.00     205228.  264614.  0.16    1     1     no-change   1      P3-k2                   
-841        optimized-baseline-nvi  0    -    -            0.00     213799.  264614.  0.13    1     1     no-change   1      P3-k2                   
-856        optimized-baseline-nvi  0    -    -            0.00     205228.  264614.  0.16    1     1     no-change   1      P3-k2                   
-871        optimized-baseline-nvi  0    -    -            0.00     124264.  264614.  0.37    1     1     no-change   1      P3-k2                   
-886        optimized-baseline-nvi  0    -    -            0.00     61929.7  264614.  0.54    1     1     no-change   1      P3-k2                   
-901        optimized-baseline-nvi  0    -    -            0.00     91805.4  264614.  0.46    1     1     no-change   1      P3-k2                   
-916        optimized-baseline-nvi  0    -    -            0.00     47872.5  264614.  0.57    1     1     no-change   1      P3-k2                   
-931        optimized-baseline-nvi  0    -    -            0.00     13928.2  264614.  0.66    1     1     no-change   1      P3-k2                   
-946        optimized-baseline-nvi  0    -    -            0.00     16579.7  264614.  0.66    1     1     no-change   1      P3-k2                   
-961        optimized-baseline-nvi  0    -    -            0.00     13928.2  264614.  0.66    1     1     no-change   1      P3-k2                   
-976        optimized-baseline-nvi  0    -    -            0.00     13928.2  264614.  0.66    1     1     no-change   1      P3-k2                   
-991        optimized-baseline-nvi  0    -    -            0.00     16579.7  264614.  0.66    1     1     no-change   1      P3-k2                   
-1006       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2                   
-1021       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2                   
-1036       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2                   
-1051       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2                   
-1066       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2                   
-1081       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2                   
-1096       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2                   
-1111       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2                   
-1126       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2                   
-1141       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2                   
-1156       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2                   
-1171       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2                   
-1186       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2                   
+t          variant                 n_replicas  bound_by  k2_priority  analyzer_rc  analyzer_sc  analyzer_prc  analyzer_util  decision_curr  decision_tgt  decision_action  applied_target  analyzer_reason     applied_reason                    
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+0          optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+15         optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+30         optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+45         optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+60         optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+75         optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+90         optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+105        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+120        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+135        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+150        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+165        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+180        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+195        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+210        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+225        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+240        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+255        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+270        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+285        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+300        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+315        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+330        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+345        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+360        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+375        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+390        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+405        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+420        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+435        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+450        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+465        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+480        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+495        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+510        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+525        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+540        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+555        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+570        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+585        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+600        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+615        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+630        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+645        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+660        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+675        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+690        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+705        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+721        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+736        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+751        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1               V2                                
+766        optimized-baseline-nvi  0    -    -            0.00     237069.  264614.  0.07    1     1     no-change   1      P3-k2               V2                                
+781        optimized-baseline-nvi  0    -    -            0.00     234555.  264614.  0.08    1     1     no-change   1      P3-k2               V2                                
+796        optimized-baseline-nvi  0    -    -            0.00     228064.  264614.  0.10    1     1     no-change   1      P3-k2               V2                                
+811        optimized-baseline-nvi  0    -    -            0.00     226784.  264614.  0.10    1     1     no-change   1      P3-k2               V2                                
+826        optimized-baseline-nvi  0    -    -            0.00     205228.  264614.  0.16    1     1     no-change   1      P3-k2               V2                                
+841        optimized-baseline-nvi  0    -    -            0.00     213799.  264614.  0.13    1     1     no-change   1      P3-k2               V2                                
+856        optimized-baseline-nvi  0    -    -            0.00     205228.  264614.  0.16    1     1     no-change   1      P3-k2               V2                                
+871        optimized-baseline-nvi  0    -    -            0.00     124264.  264614.  0.37    1     1     no-change   1      P3-k2               V2                                
+886        optimized-baseline-nvi  0    -    -            0.00     61929.7  264614.  0.54    1     1     no-change   1      P3-k2               V2                                
+901        optimized-baseline-nvi  0    -    -            0.00     91805.4  264614.  0.46    1     1     no-change   1      P3-k2               V2                                
+916        optimized-baseline-nvi  0    -    -            0.00     47872.5  264614.  0.57    1     1     no-change   1      P3-k2               V2                                
+931        optimized-baseline-nvi  0    -    -            0.00     13928.2  264614.  0.66    1     1     no-change   1      P3-k2               V2                                
+946        optimized-baseline-nvi  0    -    -            0.00     16579.7  264614.  0.66    1     1     no-change   1      P3-k2               V2                                
+961        optimized-baseline-nvi  0    -    -            0.00     13928.2  264614.  0.66    1     1     no-change   1      P3-k2               V2                                
+976        optimized-baseline-nvi  0    -    -            0.00     13928.2  264614.  0.66    1     1     no-change   1      P3-k2               V2                                
+991        optimized-baseline-nvi  0    -    -            0.00     16579.7  264614.  0.66    1     1     no-change   1      P3-k2               V2                                
+1006       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2               V2                                
+1021       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2               V2                                
+1036       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2               V2                                
+1051       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2               V2                                
+1066       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2               V2                                
+1081       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2               V2                                
+1096       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2               V2                                
+1111       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2               V2                                
+1126       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2               V2                                
+1141       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2               V2                                
+1156       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2               V2                                
+1171       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2               V2                                
+1186       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2               V2                                
 
-80 row(s). t is seconds since the first row (t0 epoch=1787137615). bound_by: k1=memory-bound won, k2=compute-bound won. decision_curr/tgt/action are the optimizer's PRE-enforcement decision; applied_target is what actually landed after scale-to-zero/min-replica enforcement (from "Applied saturation decision via shared cache") -- the two can legitimately differ. A row with n_replicas/bound_by/k2_priority all '-' has an analyzer-result/scaling-decision match but no saturation_v2 k1/k2 line for this cycle (older bundle, or this cycle's code path never emitted one -- not evidence it doesn't matter, just that this cycle didn't hit it).
+80 row(s). t is seconds since the first row (t0 epoch=1787137615). bound_by: k1=memory-bound won, k2=compute-bound won. decision_curr/tgt/action are the optimizer's PRE-enforcement decision; applied_target is what actually landed after scale-to-zero/min-replica enforcement (from "Applied saturation decision via shared cache") -- the two can legitimately differ. Two DIFFERENT reason fields: analyzer_reason is the analyzer's own capacity-tier/data-source label (e.g. P4-k1, no-data); applied_reason is the engine/enforcer's explanation for the ACTION, and reads '<category> <action> (optimizer: <name>, enforced)' specifically when enforcement overrode the raw decision -- the human-readable why behind a decision_tgt vs applied_target mismatch. A row with n_replicas/bound_by/k2_priority all '-' has an analyzer-result/scaling-decision match but no saturation_v2 k1/k2 line for this cycle (older bundle, or this cycle's code path never emitted one -- not evidence it doesn't matter, just that this cycle didn't hit it).

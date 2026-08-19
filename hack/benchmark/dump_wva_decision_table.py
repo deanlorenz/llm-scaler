@@ -155,6 +155,7 @@ def build_table_legacy(bundle: dict) -> list[dict]:
                 'decision_action': decision.get('action') if decision else None,
                 'decision_at_max': decision.get('at_max') if decision else None,
                 'applied_target': None,
+                'applied_reason': None,
                 'decision_dt_s': (round(decision['t'] - rec['t'], 1)
                                   if decision else None),
             })
@@ -175,7 +176,8 @@ COLUMNS = (
     ('analyzer_rc', 7, '.2f'), ('analyzer_sc', 7, '.2f'), ('analyzer_prc', 7, '.2f'),
     ('analyzer_util', 6, '.2f'),
     ('decision_curr', 4, 'd'), ('decision_tgt', 4, 'd'), ('decision_action', 10, 's'),
-    ('applied_target', 5, 'd'), ('analyzer_reason', 24, 's'),
+    ('applied_target', 5, 'd'), ('analyzer_reason', 18, 's'),
+    ('applied_reason', 34, 's'),
 )
 
 
@@ -217,12 +219,19 @@ def render_text(rows: list[dict]) -> str:
                  f"optimizer's PRE-enforcement decision; applied_target is "
                  f"what actually landed after scale-to-zero/min-replica "
                  f"enforcement (from \"Applied saturation decision via shared "
-                 f"cache\") -- the two can legitimately differ. A row with "
-                 f"n_replicas/bound_by/k2_priority all '-' has an "
-                 f"analyzer-result/scaling-decision match but no saturation_v2 "
-                 f"k1/k2 line for this cycle (older bundle, or this cycle's "
-                 f"code path never emitted one -- not evidence it doesn't "
-                 f"matter, just that this cycle didn't hit it).")
+                 f"cache\") -- the two can legitimately differ. Two DIFFERENT "
+                 f"reason fields: analyzer_reason is the analyzer's own "
+                 f"capacity-tier/data-source label (e.g. P4-k1, no-data); "
+                 f"applied_reason is the engine/enforcer's explanation for the "
+                 f"ACTION, and reads '<category> <action> (optimizer: <name>, "
+                 f"enforced)' specifically when enforcement overrode the raw "
+                 f"decision -- the human-readable why behind a decision_tgt vs "
+                 f"applied_target mismatch. A row with n_replicas/bound_by/"
+                 f"k2_priority all '-' has an analyzer-result/scaling-decision "
+                 f"match but no saturation_v2 k1/k2 line for this cycle (older "
+                 f"bundle, or this cycle's code path never emitted one -- not "
+                 f"evidence it doesn't matter, just that this cycle didn't hit "
+                 f"it).")
     return '\n'.join(lines) + '\n'
 
 

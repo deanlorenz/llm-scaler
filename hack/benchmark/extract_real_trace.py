@@ -1146,6 +1146,17 @@ def build_k2_cycle_row(cycle, variant):
         # above -- this is what dump_k2_decisions.py's "Decision" column
         # shows, kept under an unambiguous name here).
         'applied_target': applied.get('target') if applied else None,
+        # The engine/enforcer's own reason string (domain.VariantDecision.Reason(),
+        # set via SetDecisionReason) -- a DIFFERENT reason from analyzer_reason
+        # above. analyzer_reason is the analyzer's capacity-tier/data-source
+        # label (e.g. "P4-k1", "no-data"); this is the optimizer/enforcer's
+        # explanation for the ACTION, and can reveal enforcement overriding the
+        # raw decision (internal/engines/allocation/enforcer.go's detailed
+        # string is literally "<category> <action> (optimizer: <name>,
+        # enforced)" when that happens) -- exactly the case decision_tgt vs
+        # applied_target diverging flags, but without the human-readable why
+        # until this field is read too.
+        'applied_reason': applied.get('reason') if applied else None,
     }
 
 
