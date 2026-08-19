@@ -1,0 +1,162 @@
+# Benchmark observability: collection audit, and gaps to track as issues
+
+Written while porting benchmark run/collection/extraction/visualization tooling
+from `llm-d-workload-variant-autoscaler`'s `benchmark`/`autoscaling-viz`
+branches into this repo (see the `worktree-benchmark` branch history for the
+individual pieces). This doc is the audit trail for that work's observability
+half: what the new scaler actually emits, what the collection pipeline now
+captures, and what's left open — split into "build later" (in scope, just not
+done yet) and "someone else's code" (out of scope for this port; needs an
+issue against the scaler itself).
+
+**Explicit scope boundary**: instrumenting the scaler's own code (adding new
+log lines, new metrics, changing existing ones) is out of scope for this port.
+Everything here is operator-side collection/extraction tooling reading what
+the scaler *already* emits. Where the existing signal set is insufficient,
+that's recorded below as a gap for a future issue, not patched from here.
+
+## 1. What the scaler actually emits (audit)
+
+- **~100 structured `logger.Info/Error/Warn` call sites** across `internal/`
+  and `cmd/`. Of these, exactly two carry the decision-relevant structured
+  payload this port's extraction depends on: `analyzer-result` and
+  `scaling-decision` (shipped via PR #1318, merged 2026-06-25). Both are
+  parsed by `extract_real_trace.py`'s `read_controller_log()`.
+- Several other log lines *look* decision-adjacent but are redundant with the
+  two above, at a coarser or duplicate grain: `"V2 optimizer produced
+  decisions"` (aggregate count only), `"Applying scaling decisions"`,
+  `"Processing decision for VA"`, `"Applied saturation decision via shared
+  cache"`. Not parsed — no information in them that the two structured lines
+  don't already carry per-variant.
+- **Scale-from-zero is a separate decision surface, not currently parsed.**
+  `internal/engines/scalefromzero/engine.go` logs `"Published scale-from-zero
+  activation for Target Workload"` (variant, model, inferencepool, servingSet)
+  and `"Scale-from-zero decision written to cache"` (variant, namespace,
+  targetReplicas, reason) — a different code path from the steadystate
+  optimizer's `analyzer-result`/`scaling-decision` lines, triggered by KEDA
+  activation (`internal/scaler`'s `StreamIsActive`/`IsActive`) rather than the
+  periodic reconcile loop. **Gap**: not captured by anything in this port. A
+  benchmark that specifically exercises 0→1 cold-start behavior (this
+  scaler's actual external-scaler architecture, not just steady-state
+  scaling) would currently have no decision-log signal for that transition at
+  all. Build later.
+- **The controller's own `/metrics` was never collected at all** before
+  tonight — only vLLM/EPP pod metrics were. Fixed: `scrape_wva_metrics.sh`
+  scrapes it now (authenticated HTTPS, its own port-forward + bearer token),
+  parsed by `extract_real_trace.py`'s `scan_wva_metrics()`. Currently reads 8
+  of the ~28 `wva_*` metrics (`wva_desired_replicas`, `wva_current_replicas`,
+  `wva_desired_ratio`, `wva_saturation_utilization`, `wva_spare_capacity`,
+  `wva_required_capacity`, `wva_kv_cache_tokens_used/capacity`). **Gap**: the
+  rest — `wva_replica_scaling_total`, `wva_errors_total`,
+  `wva_decisions_limited_total`, `wva_available_gpus`,
+  `wva_variant_at_max_replicas`, `wva_unattributed_gpus`,
+  `wva_analyzer_demand`/`wva_analyzer_target`, `wva_scale_from_zero_queue_fallback_active`,
+  `wva_optimizer_active`, `wva_config_info`, etc. — are scraped (the raw file
+  has them) but not yet parsed into the bundle. Build later, as the specific
+  analysis that needs them comes up — parsing everything unconditionally
+  bloats the bundle with numbers nothing reads yet.
+- **A real, live-observed anomaly, not a parsing gap**: `wva_errors_total{error_type="Failed to scrape pod"}`
+  read **11738** during a ~15-minute idle window on `dhl-la-1708` (single
+  scrape, not a rate). Not investigated further tonight — flag for whoever
+  owns collector error budgets; could be benign (scrape retries against a
+  cold pod) or a real problem on this cluster.
+- **A real, live-observed metric-lifecycle gap**: `wva_desired_replicas`/
+  `wva_current_replicas` were still reporting `1`/`1` for the
+  `optimized-baseline-nvidia-gpu-vllm-decode-wva` variant well after its
+  `ScaledObject` was paused and the Deployment was actually at `0` replicas —
+  the gauge is not cleared when a variant becomes inactive. Someone else's
+  code (scaler instrumentation) — open an issue, don't patch from here.
+- **A late, unmerged PR is evolving the log format further**: `#1506`
+  ("Inject trace_id/span_id into structured logs", `internal/tracing/`, OPEN,
+  companion to `#1508`'s OpenTelemetry tracing PR, also OPEN) would add
+  `trace_id`/`span_id` fields to every structured log line, including
+  `analyzer-result`/`scaling-decision`. `read_controller_log()`'s
+  `json.loads()` + `.get()` pattern ignores unknown keys gracefully, so this
+  will not break extraction when it lands — but once merged, those IDs become
+  available for cross-referencing a decision against an OTel trace/span, which
+  could be a real addition to the decision table. Watch for the merge; not
+  actionable before then.
+
+## 2. Is the old "in-flight log capture" design still needed?
+
+The original plan (`benchmark-observability-plan.md`, Parts 1-2, superseded
+before implementation) wanted in-flight capture of the controller log for
+three reasons: (1) get the right info out of a noisy log, (2) survive kubelet
+log rotation, (3) survive an end-of-run failure (a failed write or a failed
+after-the-fact `kubectl logs` fetch).
+
+**Answer: yes, still needed — and this port's current approach is more
+fragile than the old design anticipated, not less.** Tonight's collection was
+a single foreground `oc logs -f --since=1s > controller.log &` on my own
+laptop, started before the run and killed after. It happened to work, but it
+carries every risk the old design was built to avoid, with none of the
+mitigations:
+
+- **No reconnect.** If the port/connection to the API server drops mid-run
+  (the exact kind of interruption this session actually hit twice tonight —
+  once from a laptop sleep, once from a worktree-cwd change that orphaned a
+  background process), `oc logs -f` does not resume; it silently stops
+  receiving new lines. Nothing detects this — the file just stops growing,
+  and the only symptom is a truncated capture discovered after the run.
+- **No durability independent of the client machine.** The old repo's
+  `benchmark` branch used a different pattern for this exact problem — an
+  **in-cluster follower** (`gateway-log-follower.sh`/`.yaml`, originally built
+  for the Envoy access log, same idea applies to the controller log): a small
+  Deployment inside the target namespace that tails the pod's log via the k8s
+  API and appends to a PVC, with an at-least-once watermark design so a
+  restart doesn't lose or duplicate lines. That pattern survives the
+  operator's laptop sleeping, losing network, or the session being killed —
+  none of which this port's simple background-process approach survives.
+- **(1), "get the right info," is at least handled**: `read_controller_log()`
+  filters to the two structured tags it wants, so a full raw capture is fine
+  to keep as an intermediate rather than needing a live grep filter.
+
+**Recommendation (build later, not done tonight)**: port an adapted
+in-cluster follower for the controller log, matching
+`gateway-log-follower.sh`'s namespace-scoped, read-only, no-GPU-request
+safety profile (see that file's own header for the shared-cluster rationale),
+rather than hardening the client-side `oc logs -f` approach in place. A
+client-side capture is fine for a short, attended smoke test; it is the wrong
+tool for anything unattended or longer than a few minutes.
+
+## 3. `analyze_wva_decisions.py` equivalent — design, not yet built
+
+Confirmed lower priority per direction received: not useful for a
+single-variant run (nothing to compare a decision *against*), but needed for
+multi-variant scenarios — exactly the two-variant efficiency-aware benchmark
+this repo already documents (`docs/developer-guide/two-variant-wva-benchmark.md`).
+No multi-variant run exists yet to validate against, so this is a design
+sketch, not an implementation:
+
+- **Input**: the same `wva_decision_table.json` `dump_wva_decision_table.py`
+  now produces, which already has `variant`, `prc` (per-replica capacity /
+  cost proxy), `curr`/`tgt`/`action` per row.
+- **Check**: at each timestamp with more than one variant active, the
+  optimizer should prefer scaling up the variant with the best
+  serving-capacity-per-unit-cost first (this repo's own V2 saturation engine
+  design, per `docs/benchmark.md`'s two-variant section: "scales the most
+  efficient variant first ... routes spillover to the cheaper secondary").
+  The check is: whenever two variants both have `action != no-change` in the
+  same cycle, or one is scaled while a cheaper/more-efficient one sits idle
+  with spare capacity, flag it — that's a candidate cost-inefficiency, not a
+  hard failure (thresholds, cooldowns, and GPU availability all legitimately
+  override pure efficiency ordering).
+- **Output shape**: matching `preflight_shared_cluster.py`'s `Report` pattern
+  (PASS/WARN/FAIL rows with a one-line detail), not a hard exit-code gate —
+  this is an analysis aid for a human reading a multi-variant run, not a CI
+  check.
+
+## 4. Summary: what to open issues for (scaler code, not this repo)
+
+1. `wva_desired_replicas`/`wva_current_replicas` (and likely other per-variant
+   gauges) are not cleared when a variant becomes inactive — stale last-known
+   values persist indefinitely. Confirmed live.
+2. No decision-log-equivalent structured line for scale-from-zero activation
+   (only for the steadystate optimizer path) — makes cold-start/0→1 behavior
+   unobservable through the same pipeline as steady-state scaling.
+3. `wva_errors_total{error_type="Failed to scrape pod"}` was very high (11738)
+   during an idle window on a real cluster — unexplained, worth a look by
+   whoever owns the collector.
+4. (Not a bug, a heads-up) PR #1506/#1508 will add `trace_id`/`span_id` to
+   every structured log line once merged — worth revisiting the decision
+   table to include them for trace cross-referencing once that lands.
