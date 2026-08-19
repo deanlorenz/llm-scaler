@@ -1478,6 +1478,13 @@ benchmark-run: benchmark-guard ## Run a single benchmark workload (set BENCHMARK
 		"$(CURDIR)/hack/benchmark/scenarios/$(BENCHMARK_SPEC).yaml"
 	@rm -f /tmp/wva_replica_samples.json /tmp/wva_replica_samples.json.pid
 	@bash hack/benchmark/sample_replicas.sh start $(BENCHMARK_NAMESPACE) /tmp/wva_replica_samples.json || true
+	@# The controller's own /metrics (wva_desired_replicas, wva_current_replicas,
+	@# wva_saturation_utilization, kv_cache tokens, ...) was never collected at all --
+	@# the harness's scraper only reaches vLLM/EPP pods, and the controller's metrics
+	@# port is authenticated HTTPS. Written to a scratch dir here (the real run dir
+	@# is not known until after the run) and filed alongside the replica samples below.
+	@rm -rf /tmp/wva_metrics_scrape
+	@bash hack/benchmark/scrape_wva_metrics.sh start $(BENCHMARK_NAMESPACE) /tmp/wva_metrics_scrape || true
 	-$(LLMDBENCHMARK) $(BENCHMARK_CLI_FLAGS) run \
 		-p $(BENCHMARK_NAMESPACE) \
 		-l $(BENCHMARK_HARNESS) \
@@ -1490,11 +1497,18 @@ benchmark-run: benchmark-guard ## Run a single benchmark workload (set BENCHMARK
 	@# post-processing step still produced measurements worth reading, and every
 	@# FMA run so far has ended that way.
 	@bash hack/benchmark/sample_replicas.sh stop /tmp/wva_replica_samples.json || true
+	@bash hack/benchmark/scrape_wva_metrics.sh stop /tmp/wva_metrics_scrape || true
 	@LATEST=$$(ls -td $(BENCHMARK_WORKSPACE)/$${USER}-*/results/$(BENCHMARK_HARNESS)-*_* 2>/dev/null | head -1); \
 	if [ -n "$$LATEST" ] && [ -s /tmp/wva_replica_samples.json ]; then \
 		mkdir -p "$$LATEST/metrics/processed"; \
 		cp /tmp/wva_replica_samples.json "$$LATEST/metrics/processed/wva_replica_samples.json"; \
 		echo "Replica samples filed in $$LATEST/metrics/processed/wva_replica_samples.json"; \
+	fi; \
+	if [ -n "$$LATEST" ] && ls /tmp/wva_metrics_scrape/wva-controller_*_metrics.log >/dev/null 2>&1; then \
+		mkdir -p "$$LATEST/metrics/raw"; \
+		cp /tmp/wva_metrics_scrape/wva-controller_*_metrics.log "$$LATEST/metrics/raw/"; \
+		n=$$(ls /tmp/wva_metrics_scrape/wva-controller_*_metrics.log | wc -l | tr -d ' '); \
+		echo "WVA controller metrics filed in $$LATEST/metrics/raw/ ($$n scrape(s))"; \
 	fi
 	@echo ""
 	@echo "========================================="

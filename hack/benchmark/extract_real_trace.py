@@ -88,6 +88,81 @@ EPP_RUNNING = 'inference_objective_running_requests'
 # EPP pods are named ...-gaie-epp-... on some installs and ...-router-epp-... on others.
 EPP_RE = re.compile(r'(gaie-epp|router-epp|[-_]epp[-_])')
 
+# The WVA controller's OWN /metrics (collected by scrape_wva_metrics.sh into
+# metrics/raw/wva-controller_<epoch>_metrics.log -- a separate collector,
+# since the port is authenticated HTTPS and the harness's vLLM/EPP scraper
+# never reaches it). Per-variant gauges, labeled by variant_name.
+#
+# 'current' is Deployment .status.replicas (internal/actuator/actuator.go's
+# GetCurrentScaleTargetReplicasFromScaleTarget), NOT .status.readyReplicas --
+# the controller does not expose a ready-replica metric of its own. Treat it
+# as "replicas that exist", not "replicas serving traffic".
+WVA_LABELED_GAUGE = {
+    'desired': 'wva_desired_replicas',
+    'current': 'wva_current_replicas',
+    'desired_ratio': 'wva_desired_ratio',
+    'saturation_utilization': 'wva_saturation_utilization',
+    'spare_capacity': 'wva_spare_capacity',
+    'required_capacity': 'wva_required_capacity',
+    'kv_tokens_used': 'wva_kv_cache_tokens_used',
+    'kv_tokens_capacity': 'wva_kv_cache_tokens_capacity',
+}
+_WVA_LABELED_LINE = re.compile(r'^([a-zA-Z_:][a-zA-Z0-9_:]*)\{([^}]*)\}\s+(\S+)$')
+
+
+def _parse_prom_labels(label_str: str) -> dict:
+    out = {}
+    for m in re.finditer(r'(\w+)="((?:[^"\\]|\\.)*)"', label_str):
+        out[m.group(1)] = m.group(2).replace('\\"', '"')
+    return out
+
+
+def parse_wva_scrape(path):
+    """One wva-controller scrape -> {variant_name: {metric_key: value}}."""
+    rev = {v: k for k, v in WVA_LABELED_GAUGE.items()}
+    by_variant: dict = {}
+    try:
+        with open(path, errors='replace') as fh:
+            lines = fh.readlines()
+    except OSError:
+        return by_variant
+    for raw in lines:
+        line = raw.strip()
+        if not line or line[0] == '#':
+            continue
+        m = _WVA_LABELED_LINE.match(line)
+        if not m:
+            continue
+        name, label_str, val_str = m.groups()
+        key = rev.get(name)
+        if key is None:
+            continue
+        try:
+            val = float(val_str)
+        except ValueError:
+            continue
+        variant = _parse_prom_labels(label_str).get('variant_name', '?')
+        by_variant.setdefault(variant, {})[key] = val
+    return by_variant
+
+
+def scan_wva_metrics(run_dir):
+    """metrics/raw/wva-controller_<epoch>_metrics.log -> {variant: [{'t':, **fields}]}."""
+    raw = os.path.join(run_dir, 'metrics', 'raw')
+    files = sorted(glob.glob(os.path.join(raw, 'wva-controller_*_metrics.log')))
+    by_variant: dict = {}
+    for path in files:
+        m = re.match(r'^wva-controller_(\d{9,})_metrics\.log$', os.path.basename(path))
+        if not m:
+            continue
+        t = float(m.group(1))
+        for variant, fields in parse_wva_scrape(path).items():
+            by_variant.setdefault(variant, []).append({'t': t, **fields})
+    for samples in by_variant.values():
+        samples.sort(key=lambda r: r['t'])
+    return by_variant
+
+
 WARN: list[str] = []
 
 
@@ -1429,6 +1504,26 @@ def build(run_dir, want_per_request=True, head=None, controller_log=None):
 
     pods, epp_series, cfg = scan_raw(run_dir)
     replicas = read_replicas(run_dir)
+    wva_ctrl_metrics = scan_wva_metrics(run_dir)
+    if not any((r.get('desired') or r.get('ready')) for r in replicas) and wva_ctrl_metrics:
+        # replica_status_timeseries.json had no matching controller (its label
+        # predicate can miss this scaler's llm-d.ai/role=decode convention --
+        # see sample_replicas.sh's fix) but the controller's own gauges are
+        # present: synthesize the replicas series from those instead. 'ready'
+        # here is actually wva_current_replicas == Deployment .status.replicas,
+        # not readyReplicas -- see WVA_LABELED_GAUGE's comment.
+        by_t: dict = {}
+        for samples in wva_ctrl_metrics.values():
+            for s in samples:
+                row = by_t.setdefault(round(s['t']), {'desired': 0, 'ready': 0, 'available': 0})
+                row['desired'] += s.get('desired', 0) or 0
+                row['ready'] += s.get('current', 0) or 0
+                row['available'] += s.get('current', 0) or 0
+        replicas = [{'t': t, **row} for t, row in sorted(by_t.items())]
+        warn('replica_status_timeseries.json had no matching controller; '
+             'replicas synthesized from the WVA controller\'s own '
+             'wva_desired_replicas/wva_current_replicas metrics instead '
+             '("ready" is status.replicas, not readyReplicas)')
     startup = read_json(os.path.join(run_dir, 'metrics', 'processed',
                                      'pod_startup_times.json'), default={})
     wva = read_wva_processed(run_dir)
@@ -1576,6 +1671,12 @@ def build(run_dir, want_per_request=True, head=None, controller_log=None):
             'stable_intervals': len(ivs), 'all_intervals': len(all_ivs),
             'wva_processed_present': sorted(wva),
             'scaling_log': scaling_log,
+            # Per-variant time series from the controller's own /metrics
+            # (scrape_wva_metrics.sh), for anything beyond the replicas
+            # fallback above -- e.g. matching a scaling-decision against the
+            # saturation_utilization/spare_capacity/required_capacity the
+            # controller itself was seeing at that moment (dump_wva_decision_table.py).
+            'wva_controller_metrics': wva_ctrl_metrics,
         },
         'self_checks': self_checks(requests, all_ivs, cap, meta, anchor),
     }
