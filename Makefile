@@ -1343,7 +1343,7 @@ benchmark-deploy-wva: benchmark-guard ## Install WVA from deploy/ into BENCHMARK
 		WVA_DEFAULT_SO_PLAN=$(BENCHMARK_SO_PLAN)
 
 .PHONY: benchmark-run
-benchmark-run: benchmark-guard ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<namespace>, MODEL_ID=<model>, BENCHMARK_HARNESS=guidellm|inference-perf)
+benchmark-run: benchmark-guard ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<namespace>, MODEL_ID=<model>, BENCHMARK_HARNESS=guidellm|inference-perf, BENCHMARK_ENDPOINT_URL=<url> to skip endpoint auto-detection against a stack this repo's benchmark-standup did not create)
 	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-run BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
@@ -1475,6 +1475,7 @@ benchmark-run: benchmark-guard ## Run a single benchmark workload (set BENCHMARK
 		-w $(BENCHMARK_WORKLOAD).yaml \
 		$(if $(BENCHMARK_MODEL_ID),-m $(BENCHMARK_MODEL_ID),) \
 		$(if $(filter true,$(BENCHMARK_MONITORING)),--monitoring,) \
+		$(if $(BENCHMARK_ENDPOINT_URL),-U $(BENCHMARK_ENDPOINT_URL),) \
 		--wait-timeout $(BENCHMARK_WAIT_TIMEOUT)
 	@# Stopped and filed even when the run above failed -- a run that errored in a
 	@# post-processing step still produced measurements worth reading, and every
