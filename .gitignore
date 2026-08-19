@@ -31,9 +31,17 @@ gpu.cluster
 llm-d/
 llm-d-infra/
 llm-d-benchmark/
-# llmdbenchmark workspace directories (created by benchmark runs)
-*-*-*-*-*-*/
+# llmdbenchmark workspace directories (created by benchmark runs), at repo
+# root only (BENCHMARK_WORKSPACE defaults to $(CURDIR)). Naming convention is
+# <user>-<YYYYMMDD>-<HHMMSS>-<ms>/ -- anchored and shaped with digit classes
+# rather than a bare */*/*/*/ glob, which also matched unrelated directories
+# elsewhere in the tree (e.g. hack/benchmark/sample-run/quick_smoke-dhl-la-1708/
+# has the same hyphen count by coincidence). The old *-*-*-*-*-*/ pattern (5
+# hyphens) never matched the real 3-hyphen name either way; found when a real
+# run directory, including its 270MB per-request file, showed up untracked.
+/*-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]-[0-9]*/
 biran-*/
+/latest
 llmd/
 llmd-infra/
 
