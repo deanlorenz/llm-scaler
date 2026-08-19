@@ -78,7 +78,7 @@
     {
       "capability": "Scaling-decision log present",
       "verdict": "PASS",
-      "detail": "analyzers=['saturation'] n_results=80 n_decisions=80 source=/home/dean/code/llm-d/dean-llmd-scaler-sandbox/.claude/worktrees/benchmark/dean-20260819-141758-912/results/inference-perf-1787138346-49t3k4_1/controller.log"
+      "detail": "analyzers=['saturation'] n_results=80 n_decisions=80 source=dean-20260819-141758-912/results/inference-perf-1787138346-49t3k4_1/controller.log"
     }
   ],
   "n_pass": 6,
@@ -87,6 +87,6 @@
   "warnings": [
     "no post_run_analyze.sh output (wva_target_timeseries.json etc.) - WVA decision timeseries unavailable for this run; see plan 1.1a"
   ],
-  "extractor_sha": "e1c81df0",
-  "extracted_at": "2026-08-19T11:32:58.245122+00:00"
+  "extractor_sha": "42d245cb",
+  "extracted_at": "2026-08-19T14:45:43.276526+00:00"
 }

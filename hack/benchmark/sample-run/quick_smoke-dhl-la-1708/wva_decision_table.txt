@@ -1,84 +1,84 @@
-t           analyzer     variant                   role    rc       sc       prc      supply   demand   util    curr   tgt    action      at_max  reason                        
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-0           saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-15          saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-30          saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-45          saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-60          saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-75          saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-90          saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-105         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-120         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-135         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-150         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-165         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-180         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-195         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-210         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-225         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-240         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-255         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-270         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-285         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-300         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-315         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-330         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-345         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-360         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-375         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-390         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-405         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-420         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-435         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-450         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-465         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-480         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-495         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-510         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-525         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-540         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-555         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-570         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-585         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-600         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-615         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-630         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-645         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-660         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-675         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-690         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-705         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-721         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-736         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-751         saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P4-k1                         
-766         saturation   optimized-baseline-nvidi  decode  0.00     237069.  264614.  264614.  19281.0  0.07    1      1      no-change   False   P3-k2                         
-781         saturation   optimized-baseline-nvidi  decode  0.00     234555.  264614.  264614.  21041.0  0.08    1      1      no-change   False   P3-k2                         
-796         saturation   optimized-baseline-nvidi  decode  0.00     228064.  264614.  264614.  25585.0  0.10    1      1      no-change   False   P3-k2                         
-811         saturation   optimized-baseline-nvidi  decode  0.00     226784.  264614.  264614.  26481.0  0.10    1      1      no-change   False   P3-k2                         
-826         saturation   optimized-baseline-nvidi  decode  0.00     205228.  264614.  264614.  41570.0  0.16    1      1      no-change   False   P3-k2                         
-841         saturation   optimized-baseline-nvidi  decode  0.00     213799.  264614.  264614.  35570.0  0.13    1      1      no-change   False   P3-k2                         
-856         saturation   optimized-baseline-nvidi  decode  0.00     205228.  264614.  264614.  41570.0  0.16    1      1      no-change   False   P3-k2                         
-871         saturation   optimized-baseline-nvidi  decode  0.00     124264.  264614.  264614.  98245.0  0.37    1      1      no-change   False   P3-k2                         
-886         saturation   optimized-baseline-nvidi  decode  0.00     61929.7  264614.  264614.  141879.  0.54    1      1      no-change   False   P3-k2                         
-901         saturation   optimized-baseline-nvidi  decode  0.00     91805.4  264614.  264614.  120966.  0.46    1      1      no-change   False   P3-k2                         
-916         saturation   optimized-baseline-nvidi  decode  0.00     47872.5  264614.  264614.  151719.  0.57    1      1      no-change   False   P3-k2                         
-931         saturation   optimized-baseline-nvidi  decode  0.00     13928.2  264614.  264614.  175480.  0.66    1      1      no-change   False   P3-k2                         
-946         saturation   optimized-baseline-nvidi  decode  0.00     16579.7  264614.  264614.  173624.  0.66    1      1      no-change   False   P3-k2                         
-961         saturation   optimized-baseline-nvidi  decode  0.00     13928.2  264614.  264614.  175480.  0.66    1      1      no-change   False   P3-k2                         
-976         saturation   optimized-baseline-nvidi  decode  0.00     13928.2  264614.  264614.  175480.  0.66    1      1      no-change   False   P3-k2                         
-991         saturation   optimized-baseline-nvidi  decode  0.00     16579.7  264614.  264614.  173624.  0.66    1      1      no-change   False   P3-k2                         
-1006        saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P3-k2                         
-1021        saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P3-k2                         
-1036        saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P3-k2                         
-1051        saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P3-k2                         
-1066        saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P3-k2                         
-1081        saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P3-k2                         
-1096        saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P3-k2                         
-1111        saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P3-k2                         
-1126        saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P3-k2                         
-1141        saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P3-k2                         
-1156        saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P3-k2                         
-1171        saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P3-k2                         
-1186        saturation   optimized-baseline-nvidi  decode  0.00     264614.  264614.  264614.  0.00     0.00    1      1      no-change   False   P3-k2                         
+t          variant                 n_replicas  bound_by  k2_priority  analyzer_rc  analyzer_sc  analyzer_prc  analyzer_util  decision_curr  decision_tgt  decision_action  applied_target  analyzer_reason         
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+0          optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+15         optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+30         optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+45         optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+60         optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+75         optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+90         optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+105        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+120        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+135        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+150        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+165        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+180        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+195        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+210        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+225        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+240        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+255        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+270        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+285        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+300        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+315        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+330        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+345        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+360        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+375        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+390        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+405        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+420        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+435        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+450        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+465        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+480        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+495        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+510        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+525        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+540        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+555        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+570        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+585        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+600        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+615        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+630        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+645        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+660        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+675        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+690        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+705        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+721        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+736        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+751        optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P4-k1                   
+766        optimized-baseline-nvi  0    -    -            0.00     237069.  264614.  0.07    1     1     no-change   1      P3-k2                   
+781        optimized-baseline-nvi  0    -    -            0.00     234555.  264614.  0.08    1     1     no-change   1      P3-k2                   
+796        optimized-baseline-nvi  0    -    -            0.00     228064.  264614.  0.10    1     1     no-change   1      P3-k2                   
+811        optimized-baseline-nvi  0    -    -            0.00     226784.  264614.  0.10    1     1     no-change   1      P3-k2                   
+826        optimized-baseline-nvi  0    -    -            0.00     205228.  264614.  0.16    1     1     no-change   1      P3-k2                   
+841        optimized-baseline-nvi  0    -    -            0.00     213799.  264614.  0.13    1     1     no-change   1      P3-k2                   
+856        optimized-baseline-nvi  0    -    -            0.00     205228.  264614.  0.16    1     1     no-change   1      P3-k2                   
+871        optimized-baseline-nvi  0    -    -            0.00     124264.  264614.  0.37    1     1     no-change   1      P3-k2                   
+886        optimized-baseline-nvi  0    -    -            0.00     61929.7  264614.  0.54    1     1     no-change   1      P3-k2                   
+901        optimized-baseline-nvi  0    -    -            0.00     91805.4  264614.  0.46    1     1     no-change   1      P3-k2                   
+916        optimized-baseline-nvi  0    -    -            0.00     47872.5  264614.  0.57    1     1     no-change   1      P3-k2                   
+931        optimized-baseline-nvi  0    -    -            0.00     13928.2  264614.  0.66    1     1     no-change   1      P3-k2                   
+946        optimized-baseline-nvi  0    -    -            0.00     16579.7  264614.  0.66    1     1     no-change   1      P3-k2                   
+961        optimized-baseline-nvi  0    -    -            0.00     13928.2  264614.  0.66    1     1     no-change   1      P3-k2                   
+976        optimized-baseline-nvi  0    -    -            0.00     13928.2  264614.  0.66    1     1     no-change   1      P3-k2                   
+991        optimized-baseline-nvi  0    -    -            0.00     16579.7  264614.  0.66    1     1     no-change   1      P3-k2                   
+1006       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2                   
+1021       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2                   
+1036       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2                   
+1051       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2                   
+1066       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2                   
+1081       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2                   
+1096       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2                   
+1111       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2                   
+1126       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2                   
+1141       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2                   
+1156       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2                   
+1171       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2                   
+1186       optimized-baseline-nvi  0    -    -            0.00     264614.  264614.  0.00    1     1     no-change   1      P3-k2                   
 
-80 row(s). t is seconds since the first row (t0 epoch=1787137615). decision_dt_s (not printed above; see the JSON) is how many seconds after the analyzer-result line the matched scaling-decision line landed.
+80 row(s). t is seconds since the first row (t0 epoch=1787137615). bound_by: k1=memory-bound won, k2=compute-bound won. decision_curr/tgt/action are the optimizer's PRE-enforcement decision; applied_target is what actually landed after scale-to-zero/min-replica enforcement (from "Applied saturation decision via shared cache") -- the two can legitimately differ. A row with n_replicas/bound_by/k2_priority all '-' has an analyzer-result/scaling-decision match but no saturation_v2 k1/k2 line for this cycle (older bundle, or this cycle's code path never emitted one -- not evidence it doesn't matter, just that this cycle didn't hit it).

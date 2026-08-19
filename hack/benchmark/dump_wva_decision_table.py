@@ -24,6 +24,20 @@ port. This is a fresh implementation against the log schema that actually
 shipped (PR #1318: analyzer-result + scaling-decision), plus this scaler's own
 additional fields (supply/demand/util/thresholds/role/atMax) that PR predates.
 
+A separate, pre-existing tool (hack/benchmark/dump_k2_decisions.py, Ofer/
+Evgeny) reads a materially different signal: the saturation_v2 analyzer's own
+per-replica k1/k2 capacity-tier trail (which of 4 priority tiers produced k2,
+which bound -- memory or compute -- won, whether a replica's capacity is
+stale/estimated rather than live). Not redundant with analyzer-result/
+scaling-decision: those are the model-level AGGREGATE result; the k1/k2 lines
+are the per-replica reasoning that produces it. Preferred data source here is
+now bundle.derived.k2_decision_table (extract_real_trace.py's
+build_k2_decision_table), which cycle-clusters BOTH signals into one row per
+(cycle, variant) -- a real superset of what this script originally did alone.
+Falls back to the older analyzer-result/scaling-decision-only nearest-
+timestamp join for a bundle.json produced before that field existed; the k1/k2
+columns simply read "-" on that path, since that signal was never captured.
+
 What it does NOT do
 --------------------
 It reads a bundle.json that already exists (run `benchmark-extract-trace`
@@ -71,22 +85,47 @@ def nearest(rows: list[dict], t: float, tol: float) -> dict | None:
     return best
 
 
-def build_table(bundle: dict) -> list[dict]:
+def _live_metrics_join(rows: list[dict], bundle: dict) -> None:
+    """Cross-references each row against derived.wva_controller_metrics (the
+    controller's own /metrics, scrape_wva_metrics.sh) for that variant at the
+    nearest timestamp -- in place, additive, works on rows from either source
+    below."""
+    wva_metrics = (bundle.get('derived') or {}).get('wva_controller_metrics') or {}
+    metrics_by_variant = {v: sorted(samples, key=lambda r: r['t'])
+                          for v, samples in wva_metrics.items()}
+    for r in rows:
+        live = nearest(metrics_by_variant.get(r.get('variant'), []), r['t'], JOIN_TOLERANCE_S)
+        r['kv_tokens_used'] = live.get('kv_tokens_used') if live else None
+        r['kv_tokens_capacity'] = live.get('kv_tokens_capacity') if live else None
+        r['spare_capacity_live'] = live.get('spare_capacity') if live else None
+
+
+def build_table_from_k2_decision_table(bundle: dict) -> list[dict]:
+    """Preferred path: bundle.derived.k2_decision_table already cycle-clustered
+    the saturation_v2 k1/k2 trail with analyzer-result/scaling-decision (see
+    extract_real_trace.py's build_k2_decision_table). Nothing left to join
+    here -- just add the live-metrics cross-reference and copy through."""
+    rows = [dict(r) for r in (bundle.get('derived') or {}).get('k2_decision_table') or []]
+    _live_metrics_join(rows, bundle)
+    return rows
+
+
+def build_table_legacy(bundle: dict) -> list[dict]:
+    """Fallback for a bundle.json produced before k2_decision_table existed:
+    the original nearest-timestamp join of analyzer-result with
+    scaling-decision only -- no k1/k2 signal, because that bundle never
+    captured it. Field names match build_table_from_k2_decision_table's so
+    render_text/COLUMNS work on either source unmodified.
+    """
     scaling_log = (bundle.get('derived') or {}).get('scaling_log') or {}
     by_analyzer = scaling_log.get('by_analyzer') or {}
     decisions = scaling_log.get('decisions') or []
-    wva_metrics = (bundle.get('derived') or {}).get('wva_controller_metrics') or {}
 
-    # decisions grouped per variant, so each analyzer row only searches its own
-    # variant's decisions rather than the whole run's.
     decisions_by_variant: dict = {}
     for d in decisions:
         decisions_by_variant.setdefault(d.get('variant'), []).append(d)
     for lst in decisions_by_variant.values():
         lst.sort(key=lambda r: r['t'])
-
-    metrics_by_variant = {v: sorted(rows, key=lambda r: r['t'])
-                          for v, rows in wva_metrics.items()}
 
     rows_out = []
     for analyzer_name, lane in by_analyzer.items():
@@ -94,48 +133,56 @@ def build_table(bundle: dict) -> list[dict]:
             variant = rec.get('variant')
             decision = nearest(decisions_by_variant.get(variant, []), rec['t'],
                                JOIN_TOLERANCE_S)
-            live = nearest(metrics_by_variant.get(variant, []), rec['t'],
-                          JOIN_TOLERANCE_S)
             rows_out.append({
                 't': rec['t'],
-                'analyzer': analyzer_name,
                 'variant': variant,
-                'role': rec.get('role'),
-                'reason': rec.get('reason'),
-                'rc': rec.get('rc'),
-                'sc': rec.get('sc'),
-                'prc': rec.get('prc'),
-                'supply': rec.get('supply'),
-                'demand': rec.get('demand'),
-                'util': rec.get('util'),
-                'scaleUpThreshold': rec.get('scaleUpThreshold'),
-                'scaleDownBoundary': rec.get('scaleDownBoundary'),
-                'curr': decision.get('curr') if decision else None,
-                'tgt': decision.get('tgt') if decision else None,
-                'action': decision.get('action') if decision else None,
-                'at_max': decision.get('at_max') if decision else None,
+                'n_replicas': None, 'k2_priority': None,
+                'k1_memory_bound': None, 'k2_compute_bound': None, 'bound_by': None,
+                'tokens_in_use': None, 'local_queue_demand': None,
+                'analyzer_name': analyzer_name,
+                'analyzer_role': rec.get('role'),
+                'analyzer_reason': rec.get('reason'),
+                'analyzer_rc': rec.get('rc'),
+                'analyzer_sc': rec.get('sc'),
+                'analyzer_prc': rec.get('prc'),
+                'analyzer_supply': rec.get('supply'),
+                'analyzer_demand': rec.get('demand'),
+                'analyzer_util': rec.get('util'),
+                'scale_up_threshold': rec.get('scaleUpThreshold'),
+                'scale_down_boundary': rec.get('scaleDownBoundary'),
+                'decision_curr': decision.get('curr') if decision else None,
+                'decision_tgt': decision.get('tgt') if decision else None,
+                'decision_action': decision.get('action') if decision else None,
+                'decision_at_max': decision.get('at_max') if decision else None,
+                'applied_target': None,
                 'decision_dt_s': (round(decision['t'] - rec['t'], 1)
                                   if decision else None),
-                'kv_tokens_used': live.get('kv_tokens_used') if live else None,
-                'kv_tokens_capacity': live.get('kv_tokens_capacity') if live else None,
-                'spare_capacity_live': live.get('spare_capacity') if live else None,
             })
     rows_out.sort(key=lambda r: (r['t'], r['variant'] or ''))
+    _live_metrics_join(rows_out, bundle)
     return rows_out
 
 
+def build_table(bundle: dict) -> list[dict]:
+    if (bundle.get('derived') or {}).get('k2_decision_table'):
+        return build_table_from_k2_decision_table(bundle)
+    return build_table_legacy(bundle)
+
+
 COLUMNS = (
-    ('t', 10, '.0f'), ('analyzer', 11, 's'), ('variant', 24, 's'),
-    ('role', 6, 's'), ('rc', 7, '.2f'), ('sc', 7, '.2f'), ('prc', 7, '.2f'),
-    ('supply', 7, '.2f'), ('demand', 7, '.2f'), ('util', 6, '.2f'),
-    ('curr', 5, 'd'), ('tgt', 5, 'd'), ('action', 10, 's'), ('at_max', 6, 's'),
-    ('reason', 30, 's'),
+    ('t', 9, '.0f'), ('variant', 22, 's'), ('n_replicas', 3, 'd'),
+    ('bound_by', 3, 's'), ('k2_priority', 11, 's'),
+    ('analyzer_rc', 7, '.2f'), ('analyzer_sc', 7, '.2f'), ('analyzer_prc', 7, '.2f'),
+    ('analyzer_util', 6, '.2f'),
+    ('decision_curr', 4, 'd'), ('decision_tgt', 4, 'd'), ('decision_action', 10, 's'),
+    ('applied_target', 5, 'd'), ('analyzer_reason', 24, 's'),
 )
 
 
 def render_text(rows: list[dict]) -> str:
     if not rows:
-        return 'no analyzer-result/scaling-decision lines found in this bundle\n'
+        return ('no analyzer-result/scaling-decision/k1-k2 lines found in this '
+                'bundle\n')
     t0 = rows[0]['t']
     lines = []
     header = '  '.join(name.ljust(width) for name, width, _ in COLUMNS)
@@ -165,9 +212,17 @@ def render_text(rows: list[dict]) -> str:
         lines.append('  '.join(cells))
     lines.append('')
     lines.append(f"{len(rows)} row(s). t is seconds since the first row "
-                 f"(t0 epoch={t0:.0f}). decision_dt_s (not printed above; see "
-                 f"the JSON) is how many seconds after the analyzer-result "
-                 f"line the matched scaling-decision line landed.")
+                 f"(t0 epoch={t0:.0f}). bound_by: k1=memory-bound won, "
+                 f"k2=compute-bound won. decision_curr/tgt/action are the "
+                 f"optimizer's PRE-enforcement decision; applied_target is "
+                 f"what actually landed after scale-to-zero/min-replica "
+                 f"enforcement (from \"Applied saturation decision via shared "
+                 f"cache\") -- the two can legitimately differ. A row with "
+                 f"n_replicas/bound_by/k2_priority all '-' has an "
+                 f"analyzer-result/scaling-decision match but no saturation_v2 "
+                 f"k1/k2 line for this cycle (older bundle, or this cycle's "
+                 f"code path never emitted one -- not evidence it doesn't "
+                 f"matter, just that this cycle didn't hit it).")
     return '\n'.join(lines) + '\n'
 
 

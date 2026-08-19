@@ -918,11 +918,268 @@ def find_controller_log(run_dir):
     return None
 
 
+# General tab-delimited zap-console line: ts, level, caller, message, then a
+# trailing JSON payload. Matched on message name only (not caller path), up to
+# the next tab -- this also matches human-sentence messages with no JSON tag
+# convention of their own, like "Applied saturation decision via shared
+# cache" (see hack/benchmark/dump_k2_decisions.py, the pre-existing tool this
+# generalization is deliberately kept compatible with).
+#
+# Was hardcoded to (analyzer-result|scaling-decision) only. Generalized so the
+# saturation_v2 analyzer's own per-replica/per-cycle diagnostic lines
+# (internal/engines/analyzers/saturation_v2/analyzer.go) can be captured too,
+# without needing to extend this regex again for every new message tag.
 CTRL_LOG_LINE = re.compile(
-    r'^(\S+)\t(\S+)\t(\S+)\t(analyzer-result|scaling-decision)\t(\{.*\})\s*$')
+    r'^(?P<ts>\S+)\t\S+\t\S+\t(?P<msg>[^\t]+)\t(?P<json>\{.*\})\s*$')
 CTRL_LOG_ABSENT = re.compile(
     r'^(\S+)\t\S+\t\S+\t(\w+ analyzer is absent from the configured analyzer list.*?)'
     r'(\{.*\})\s*$')
+
+# The saturation_v2 analyzer's own per-replica/per-cycle diagnostics (see
+# analyzer.go's own header comment for each): the k1/k2 capacity-tier
+# computation trail, distinct from analyzer-result/scaling-decision (which
+# report the model-level result AFTER capacity aggregation). Not something
+# this port audited originally -- these are logged via
+# `logger.V(logging.DEFAULT).Info(...)`, invisible to a `logger\.Info\(`-style
+# grep. hack/benchmark/dump_k2_decisions.py already reads these independently;
+# this scans for the same messages so their signal is available in THIS
+# port's bundle too, without depending on that tool or its output files.
+K2_MSG = 'k2-decision'
+REPLICA_CAPACITY_MSG = 'replica-capacity-decision'
+REPLICA_CAPACITY_SKIPPED_MSG = 'replica-capacity-skipped'
+REPLICA_CAPACITY_FALLBACK_MSG = 'replica-capacity-store-fallback'
+VARIANT_CAPACITY_SOURCE_MSG = 'variant-capacity-source'
+ZERO_REPLICA_ESTIMATE_MSG = 'zero-replica-capacity-estimate'
+SCHEDULER_QUEUE_MSG = 'scheduler-queue-demand'
+APPLIED_DECISION_MSG = 'Applied saturation decision via shared cache'
+
+SATURATION_V2_MESSAGES = {
+    K2_MSG, REPLICA_CAPACITY_MSG, REPLICA_CAPACITY_SKIPPED_MSG,
+    REPLICA_CAPACITY_FALLBACK_MSG, VARIANT_CAPACITY_SOURCE_MSG,
+    ZERO_REPLICA_ESTIMATE_MSG, SCHEDULER_QUEUE_MSG, APPLIED_DECISION_MSG,
+}
+
+
+def scan_saturation_v2_events(path, messages=None):
+    """Every controller.log line whose message tag is in `messages` (default:
+    SATURATION_V2_MESSAGES), as a flat time-sorted list of {'_msg', 't',
+    **payload} dicts -- one entry per log line, payload fields exactly as
+    logged (see analyzer.go/engine.go for the field list per message).
+    Absent controller.log degrades to [].
+    """
+    wanted = messages if messages is not None else SATURATION_V2_MESSAGES
+    events = []
+    if not path or not os.path.exists(path):
+        return events
+    try:
+        with open(path, errors='replace') as fh:
+            for line in fh:
+                m = CTRL_LOG_LINE.match(line)
+                if not m:
+                    continue
+                msg = m.group('msg')
+                if msg not in wanted:
+                    continue
+                t = iso_epoch(m.group('ts'))
+                if t is None:
+                    continue
+                try:
+                    rec = json.loads(m.group('json'))
+                except ValueError:
+                    continue
+                rec['_msg'] = msg
+                rec['t'] = t
+                events.append(rec)
+    except OSError as exc:
+        warn(f'saturation_v2 event scan failed: {exc}')
+        return []
+    events.sort(key=lambda e: e['t'])
+    return events
+
+
+# Cycle-clustering, ported from hack/benchmark/dump_k2_decisions.py
+# (assign_cycles/cycles_merged/resolve_cycles) rather than re-derived: that
+# tool already found and fixed a real bug here (a cycle straddling a second
+# boundary silently became two half-rows under exact-timestamp joining), and
+# this port's own nearest-timestamp join in dump_wva_decision_table.py does
+# not have that fix. Kept as close to the original as the different event
+# shape (a flat, already-time-sorted list, same as here) allows.
+K2_CYCLE_GAP_DEFAULT = 3.0
+K2_CYCLE_GAP_MIN = 1.0
+
+# Messages that occur at most once per optimize cycle per key -- a repeat
+# inside one cluster proves the clustering merged more than one cycle.
+# k2-decision and replica-capacity-decision are absent on purpose (both are
+# per-replica; several replicas of one variant legitimately repeat inside one
+# real cycle). analyzer-result is keyed by analyzer name, not variant: one
+# line already carries every variant for that analyzer as an array.
+K2_CYCLE_UNIQUE_KEYS = {
+    SCHEDULER_QUEUE_MSG: ('modelID',),
+    VARIANT_CAPACITY_SOURCE_MSG: ('variant',),
+    ZERO_REPLICA_ESTIMATE_MSG: ('variant',),
+    APPLIED_DECISION_MSG: ('variant',),
+    'analyzer-result': ('analyzer',),
+}
+
+
+def assign_cycles(events, gap_seconds):
+    cycles = []
+    prev = None
+    for e in events:
+        t = e['t']
+        if prev is None or (t - prev) > gap_seconds:
+            cycles.append([])
+        cycles[-1].append(e)
+        prev = t
+    return cycles
+
+
+def cycles_merged(cycles):
+    for cycle in cycles:
+        counts = {}
+        for e in cycle:
+            key_fields = K2_CYCLE_UNIQUE_KEYS.get(e['_msg'])
+            if key_fields is None:
+                continue
+            k = (e['_msg'],) + tuple(e.get(f) for f in key_fields)
+            counts[k] = counts.get(k, 0) + 1
+        if counts and max(counts.values()) > 1:
+            return True
+    return False
+
+
+def resolve_cycles(events, gap_seconds=K2_CYCLE_GAP_DEFAULT):
+    gap = gap_seconds
+    cycles = assign_cycles(events, gap)
+    while cycles_merged(cycles) and gap > K2_CYCLE_GAP_MIN:
+        gap = max(K2_CYCLE_GAP_MIN, gap / 2.0)
+        cycles = assign_cycles(events, gap)
+    if cycles_merged(cycles):
+        warn(f'saturation_v2 cycle clustering: even gap={gap}s cannot separate '
+             f'this run\'s optimize cycles; some rows may cover more than one cycle')
+    return cycles
+
+
+def build_k2_cycle_row(cycle, variant):
+    """One optimize cycle's events, for one variant -- the k1/k2 capacity-tier
+    trail (dump_k2_decisions.py's own signal) joined with THIS port's
+    analyzer-result/scaling-decision fields, so a reader gets the deep
+    per-replica math and the model-level result/decision in one row instead
+    of two separate reports. Returns None if `variant` did not report in this
+    cycle under any of these messages.
+    """
+    rcs = [e for e in cycle if e['_msg'] == REPLICA_CAPACITY_MSG and e.get('variant') == variant]
+    k2s = [e for e in cycle if e['_msg'] == K2_MSG and e.get('variant') == variant]
+
+    analyzer_variant, analyzer_top = None, None
+    for e in cycle:
+        if e['_msg'] != 'analyzer-result':
+            continue
+        for v in e.get('variants') or []:
+            if v.get('name') == variant:
+                analyzer_variant, analyzer_top = v, e
+                break
+        if analyzer_variant:
+            break
+
+    raw_decision = None
+    for e in cycle:
+        if e['_msg'] != 'scaling-decision':
+            continue
+        for v in e.get('decisions') or []:
+            if v.get('name') == variant:
+                raw_decision = v
+                break
+        if raw_decision:
+            break
+
+    applied = next((e for e in cycle if e['_msg'] == APPLIED_DECISION_MSG
+                    and e.get('variant', '').rsplit('/', 1)[-1] == variant), None)
+
+    if not rcs and not k2s and not analyzer_variant and not raw_decision and not applied:
+        return None
+
+    priorities = [k.get('priority', '?') for k in k2s]
+    k1_vals = [r.get('k1MemoryBound') for r in rcs if r.get('k1MemoryBound') is not None]
+    k2_vals = [r.get('k2ComputeBound') for r in rcs if r.get('k2ComputeBound') is not None]
+    bound_counts: dict = {}
+    for r in rcs:
+        b = {'k1-memory': 'k1', 'k2-compute': 'k2'}.get(r.get('boundBy', '?'), r.get('boundBy', '?'))
+        bound_counts[b] = bound_counts.get(b, 0) + 1
+
+    ts_candidates = [e['t'] for e in (rcs + k2s) ]
+    if analyzer_top is not None:
+        ts_candidates.append(analyzer_top['t'])
+    if applied is not None:
+        ts_candidates.append(applied['t'])
+    ts = min(ts_candidates) if ts_candidates else cycle[0]['t']
+
+    return {
+        't': ts,
+        'variant': variant,
+        'n_replicas': max(len(rcs), len(k2s)),
+        'k2_priority': ','.join(sorted(set(priorities))) if priorities else None,
+        'k1_memory_bound': (sorted(k1_vals)[len(k1_vals) // 2] if k1_vals else None),
+        'k2_compute_bound': (sorted(k2_vals)[len(k2_vals) // 2] if k2_vals else None),
+        'bound_by': ','.join(sorted(bound_counts)) if bound_counts else None,
+        'tokens_in_use': sum(r.get('tokensInUse', 0) or 0 for r in rcs) or None,
+        'local_queue_demand': sum(r.get('localQueueDemand', 0) or 0 for r in rcs) or None,
+        # analyzer-result: the model-level, post-aggregation view.
+        'analyzer_name': analyzer_top.get('analyzer') if analyzer_top else None,
+        'analyzer_role': analyzer_variant.get('role') if analyzer_variant else None,
+        'analyzer_reason': analyzer_variant.get('reason') if analyzer_variant else None,
+        'analyzer_prc': analyzer_variant.get('prc') if analyzer_variant else None,
+        'analyzer_rc': analyzer_top.get('rc') if analyzer_top else None,
+        'analyzer_sc': analyzer_top.get('sc') if analyzer_top else None,
+        'analyzer_supply': analyzer_top.get('supply') if analyzer_top else None,
+        'analyzer_demand': analyzer_top.get('demand') if analyzer_top else None,
+        'analyzer_util': analyzer_top.get('util') if analyzer_top else None,
+        'scale_up_threshold': analyzer_top.get('scaleUpThreshold') if analyzer_top else None,
+        'scale_down_boundary': analyzer_top.get('scaleDownBoundary') if analyzer_top else None,
+        # scaling-decision: the optimizer's raw, pre-enforcement decision.
+        'decision_action': raw_decision.get('action') if raw_decision else None,
+        'decision_curr': raw_decision.get('curr') if raw_decision else None,
+        'decision_tgt': raw_decision.get('tgt') if raw_decision else None,
+        'decision_at_max': raw_decision.get('atMax') if raw_decision else None,
+        # the final, POST-enforcement target actually applied this cycle
+        # (scale-to-zero / min-replica rules can override the raw decision
+        # above -- this is what dump_k2_decisions.py's "Decision" column
+        # shows, kept under an unambiguous name here).
+        'applied_target': applied.get('target') if applied else None,
+    }
+
+
+def build_k2_decision_table(events):
+    """All variants, all cycles -- see build_k2_cycle_row. events must already
+    be time-sorted (scan_saturation_v2_events + the analyzer-result/
+    scaling-decision events from read_controller_log, merged and re-sorted)."""
+    if not events:
+        return []
+    variants = set()
+    for e in events:
+        if e['_msg'] == K2_MSG or e['_msg'] == REPLICA_CAPACITY_MSG:
+            if e.get('variant'):
+                variants.add(e['variant'])
+        elif e['_msg'] == 'analyzer-result':
+            for v in e.get('variants') or []:
+                if v.get('name'):
+                    variants.add(v['name'])
+        elif e['_msg'] == 'scaling-decision':
+            for v in e.get('decisions') or []:
+                if v.get('name'):
+                    variants.add(v['name'])
+        elif e['_msg'] == APPLIED_DECISION_MSG and e.get('variant'):
+            variants.add(e['variant'].rsplit('/', 1)[-1])
+
+    cycles = resolve_cycles(events)
+    rows = []
+    for variant in sorted(variants):
+        for cycle in cycles:
+            row = build_k2_cycle_row(cycle, variant)
+            if row:
+                rows.append(row)
+    rows.sort(key=lambda r: (r['t'], r['variant']))
+    return rows
 
 
 def read_controller_log(path):
@@ -945,12 +1202,14 @@ def read_controller_log(path):
             for line in fh:
                 m = CTRL_LOG_LINE.match(line)
                 if m:
-                    ts, _level, _source, kind, payload = m.groups()
-                    t = iso_epoch(ts)
+                    kind = m.group('msg')
+                    if kind not in ('analyzer-result', 'scaling-decision'):
+                        continue
+                    t = iso_epoch(m.group('ts'))
                     if t is None:
                         continue
                     try:
-                        rec = json.loads(payload)
+                        rec = json.loads(m.group('json'))
                     except ValueError:
                         continue
                     if kind == 'analyzer-result':
@@ -1613,6 +1872,23 @@ def build(run_dir, want_per_request=True, head=None, controller_log=None):
         'saturation_absent_at': absent_at,
     }
 
+    # The saturation_v2 analyzer's own per-replica/per-cycle k1/k2 diagnostics
+    # (see SATURATION_V2_MESSAGES's comment), joined with analyzer-result/
+    # scaling-decision via the same cycle-clustering dump_k2_decisions.py
+    # already validated. Merging both message sets into one flat event list
+    # first, rather than keeping two separate scans, is what lets one variant's
+    # deep k1/k2 math and its model-level result/decision land in the same
+    # cycle-clustered row.
+    k2_events = scan_saturation_v2_events(
+        clog_path, messages=SATURATION_V2_MESSAGES | {'analyzer-result', 'scaling-decision'})
+    k2_decision_table = build_k2_decision_table(k2_events)
+    if clog_path and not k2_decision_table:
+        warn(f'controller.log at {clog_path} yielded no saturation_v2 k1/k2 '
+             'diagnostic lines (k2-decision, replica-capacity-decision, etc.) -- '
+             'either -v suppresses them (shipped default is V(logging.DEFAULT), '
+             'so this would be unusual) or this run\'s code paths never hit them '
+             '(e.g. no zero-replica variant, no capacity-store fallback)')
+
     # run_metadata.yaml does not always carry model/namespace (confirmed absent
     # for the inference-perf dwell/staircase harness runs) -- fall back to the
     # per-cell .env and the per-workload profile YAML before giving up. Neither
@@ -1677,6 +1953,14 @@ def build(run_dir, want_per_request=True, head=None, controller_log=None):
             # saturation_utilization/spare_capacity/required_capacity the
             # controller itself was seeing at that moment (dump_wva_decision_table.py).
             'wva_controller_metrics': wva_ctrl_metrics,
+            # One row per (optimize cycle, variant): the saturation_v2
+            # analyzer's own k1/k2 capacity-tier trail, joined with
+            # analyzer-result/scaling-decision via cycle-clustering (see
+            # SATURATION_V2_MESSAGES / build_k2_decision_table). Empty, not
+            # absent, when this run's code paths never hit these lines --
+            # that is not evidence they don't matter, only that this
+            # particular run didn't exercise them.
+            'k2_decision_table': k2_decision_table,
         },
         'self_checks': self_checks(requests, all_ivs, cap, meta, anchor),
     }
