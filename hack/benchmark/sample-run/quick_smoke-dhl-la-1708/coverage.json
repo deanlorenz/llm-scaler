@@ -1,0 +1,92 @@
+{
+  "rows": [
+    {
+      "capability": "Calibrate A",
+      "verdict": "PASS",
+      "detail": "n=9 bands=3 kv_span=0.52"
+    },
+    {
+      "capability": "Trust B",
+      "verdict": "PASS",
+      "detail": "y_lo=0.0 B_fit=14.126799456924674 B_meas=17.330600041597144 n_low=3"
+    },
+    {
+      "capability": "Characterize saturation",
+      "verdict": "FAIL",
+      "detail": "n=0"
+    },
+    {
+      "capability": "Exercise the 0.85 ceiling",
+      "verdict": "FAIL",
+      "detail": "n_0.80_0.90=0"
+    },
+    {
+      "capability": "Locate the throughput knee",
+      "verdict": "FAIL",
+      "detail": "n=9 left=8 right=0"
+    },
+    {
+      "capability": "Scale-down present",
+      "verdict": "FAIL",
+      "detail": "drain_events=0"
+    },
+    {
+      "capability": "Drain-vs-kill measurable",
+      "verdict": "FAIL",
+      "detail": "needs a scale-down and a per-request trace"
+    },
+    {
+      "capability": "Queue (a) material",
+      "verdict": "FAIL",
+      "detail": "no demand trace"
+    },
+    {
+      "capability": "Queue (c) material",
+      "verdict": "FAIL",
+      "detail": "max=0.0"
+    },
+    {
+      "capability": "Router imbalance measurable",
+      "verdict": "FAIL",
+      "detail": "pods=1 disp_p95=None flips=0 n=0 (boot samples excluded: 1)"
+    },
+    {
+      "capability": "rho model valid at top",
+      "verdict": "PASS",
+      "detail": "preempt/s=None"
+    },
+    {
+      "capability": "Capacity model checkable",
+      "verdict": "FAIL",
+      "detail": "pred=None obs=143.0"
+    },
+    {
+      "capability": "Boot lag measured",
+      "verdict": "FAIL",
+      "detail": "n=0 mean=None"
+    },
+    {
+      "capability": "Signal completeness",
+      "verdict": "PASS",
+      "detail": "xwq9w=15"
+    },
+    {
+      "capability": "Per-request trace present",
+      "verdict": "PASS",
+      "detail": "n=990"
+    },
+    {
+      "capability": "Scaling-decision log present",
+      "verdict": "PASS",
+      "detail": "analyzers=['saturation'] n_results=80 n_decisions=80 source=/home/dean/code/llm-d/dean-llmd-scaler-sandbox/.claude/worktrees/benchmark/dean-20260819-141758-912/results/inference-perf-1787138346-49t3k4_1/controller.log"
+    }
+  ],
+  "n_pass": 6,
+  "n_fail": 10,
+  "saturation_threshold": 0.85,
+  "warnings": [
+    "no post_run_analyze.sh output (wva_target_timeseries.json etc.) - WVA decision timeseries unavailable for this run; see plan 1.1a"
+  ],
+  "extractor_sha": "e1c81df0",
+  "extracted_at": "2026-08-19T11:32:58.245122+00:00"
+}
