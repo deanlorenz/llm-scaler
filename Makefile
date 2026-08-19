@@ -1583,8 +1583,20 @@ benchmark-render-trace: ## Render the latest run's bundle.json into panels.png (
 	python3 $(CURDIR)/hack/benchmark/render_real_trace.py --bundle "$$RUN_DIR/bundle.json" && \
 	echo "Panels: $$RUN_DIR/panels.png"
 
+.PHONY: benchmark-decision-table
+benchmark-decision-table: ## Join analyzer-result with scaling-decision from the latest run's bundle.json (set RUN_DIR=<dir> to target a specific run)
+	@RUN_DIR="$(RUN_DIR)"; \
+	if [ -z "$$RUN_DIR" ]; then \
+		RUN_DIR=$$(ls -td $(BENCHMARK_WORKSPACE)/$${USER}-*/results/$(BENCHMARK_HARNESS)-*_* 2>/dev/null | head -1); \
+	fi; \
+	if [ -z "$$RUN_DIR" ] || [ ! -f "$$RUN_DIR/bundle.json" ]; then \
+		echo "ERROR: no bundle.json found (run 'make benchmark-extract-trace' first). RUN_DIR=$$RUN_DIR"; \
+		exit 1; \
+	fi; \
+	python3 $(CURDIR)/hack/benchmark/dump_wva_decision_table.py --run "$$RUN_DIR"
+
 .PHONY: benchmark-viz
-benchmark-viz: benchmark-extract-trace benchmark-render-trace ## Extract + render the latest run in one step
+benchmark-viz: benchmark-extract-trace benchmark-render-trace benchmark-decision-table ## Extract + render + decision-table for the latest run in one step
 
 VARIANT_CONFIG ?= $(CURDIR)/hack/benchmark/scenarios/guides/variants/v2-tp1-cheaper.yaml
 WVA_V2_SATURATION_CONFIGMAP ?= $(CURDIR)/hack/benchmark/scenarios/wva_threshold/wva_saturation_v2_config.yaml
