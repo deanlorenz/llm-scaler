@@ -76,6 +76,15 @@ A new Makefile target — name TBD, something like `benchmark-cli-install` or
   not yet checked), but no dependency on the clone's `workload/profiles/`
   directory existing at all.
 
+## Confirmed direction (Dean)
+
+Render the substituted workload profile into our own run/results area, not
+into the clone — colocated with the results it produces, not a throwaway
+scratch path — then invoke the CLI with that file's full path via
+`--workload-file-path` (never a bare `-w <name>` resolved against
+`--base-dir`). Same principle for `--spec`: a full path to a file we
+maintain, never a bare name.
+
 ## Open questions to resolve when implementing (not now)
 
 1. Minimum viable `--spec` content for run-only mode — experiment needed.
