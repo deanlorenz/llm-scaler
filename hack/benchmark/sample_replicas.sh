@@ -54,11 +54,18 @@ for item in data.get("items", []):
     tmpl = item.get("spec", {}).get("template", {}).get("metadata", {}).get("labels", {})
     # Same predicate as the harness, WITHOUT the model filter that empties it:
     # a serving pod template, or the FMA requester -- PLUS llm-d.ai/model, the
-    # new scaler's own canonical "this is a model-serving pod" label
+    # canonical "this is a model-serving pod" label the new scaler uses
     # (internal/constants/labels.go: ModelLabelKey). Without this branch every
     # sample here came back "0 controller(s)" against a real decode Deployment
     # labelled llm-d.ai/role=decode, llm-d.ai/model=Qwen3-32B -- neither
-    # inferenceServing=true nor role=requester, which this scaler never sets.
+    # inferenceServing=true nor role=requester, which the new scaler never sets.
+    # NOTE: this whole block is embedded in a single-quoted bash string
+    # (python3 -c ...) -- no apostrophes anywhere in this comment or in any
+    # python string literal below, or bash terminates the string early and
+    # everything after becomes a syntax error. Found the hard way: an earlier
+    # version of this comment used a possessive with an apostrophe and broke
+    # at runtime, never caught because the fix was validated by copying the
+    # predicate into a standalone python snippet instead of running this file.
     if (tmpl.get("llm-d.ai/inferenceServing") != "true"
             and tmpl.get("llm-d.ai/role") != "requester"
             and not tmpl.get("llm-d.ai/model")):
