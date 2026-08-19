@@ -1362,13 +1362,17 @@ benchmark-run: benchmark-guard ## Run a single benchmark workload (set BENCHMARK
 			"$(BENCHMARK_SCENARIOS_DIR)/$(BENCHMARK_WORKLOAD)"; \
 		rm -f "$(BENCHMARK_SCENARIOS_DIR)/$(BENCHMARK_WORKLOAD).bak"; \
 	fi
-	@# Fetch workload from inference-perf catalog if not found locally and harness is inference-perf.
-	@# Every local inference-perf workload in test/benchmark/scenarios actually uses the
-	@# <name>.yaml.in convention (bursty.yaml.in, sharegpt_inferenceperf.yaml.in, ...) -- this
-	@# check was missing that suffix, so any such workload fell through to the catalog fetch
-	@# and failed with "Could not fetch <name> from inference-perf workload-catalog" even
-	@# though the file existed locally. Found running quick_smoke.yaml.in.
-	@if [ "$(BENCHMARK_HARNESS)" = "inference-perf" ] && [ ! -f "$(BENCHMARK_SCENARIOS_DIR)/$(BENCHMARK_WORKLOAD)" ] && [ ! -f "$(BENCHMARK_SCENARIOS_DIR)/$(BENCHMARK_WORKLOAD).in" ] && [ ! -f "$(BENCHMARK_SCENARIOS_DIR)/$(BENCHMARK_WORKLOAD).yaml.in" ]; then \
+	@# Fetch workload from inference-perf catalog only if no local file matches under any
+	@# of the suffixes a workload name can carry (none, .yaml, .yaml.in -- every local
+	@# inference-perf workload in test/benchmark/scenarios uses .yaml.in). A single
+	@# hardcoded suffix here previously fell through to the catalog fetch for any local
+	@# workload using a suffix it didn't check, and failed loudly even though the file
+	@# existed. Found running quick_smoke.yaml.in.
+	@found=""; \
+	for suf in "" ".yaml" ".yaml.in"; do \
+		[ -f "$(BENCHMARK_SCENARIOS_DIR)/$(BENCHMARK_WORKLOAD)$$suf" ] && found=1; \
+	done; \
+	if [ "$(BENCHMARK_HARNESS)" = "inference-perf" ] && [ -z "$$found" ]; then \
 		echo "Fetching $(BENCHMARK_WORKLOAD) from inference-perf workload-catalog..."; \
 		if curl -sfL "https://raw.githubusercontent.com/kubernetes-sigs/inference-perf/main/workload-catalog/$(BENCHMARK_WORKLOAD)/inference-perf.yaml" \
 			-o "$(BENCHMARK_SCENARIOS_DIR)/$(BENCHMARK_WORKLOAD)"; then \
