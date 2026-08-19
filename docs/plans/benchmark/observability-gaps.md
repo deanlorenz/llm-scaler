@@ -37,22 +37,33 @@ audit method, not just a missed message name.
 No file/path collision: Ofer's tool writes `metrics/processed/k2_decisions.json`
 + `metrics/reports/k2_decision_report.md`; this port's writes
 `metrics/processed/wva_decision_table.{txt,json}`. Confirmed intentional
-duplication, not yet consolidated: the two tools currently answer overlapping
-but different questions (deep k1/k2 internals + final applied decision, vs.
-analyzer-result + scaling-decision), and the stated long-term direction is to
-fold Ofer's signal into the new tooling so only one report is needed — not
-done here. Blocked on validation, not effort: last night's real run never
-exercised any of the k1/k2 code paths (confirmed zero matches for all seven
-message names, including the always-on Info-level
-`replica-capacity-skipped`), so there is no real data yet to build and check
-an extraction against. Next step when picking this up: get a run that
-actually hits those paths (likely needs a cold-start / zero-replica-variant
-scenario, per `variant-capacity-source`/`zero-replica-capacity-estimate`'s own
-docstrings), generalize `CTRL_LOG_LINE` to match any message tag (not just
-the two this port currently hardcodes), and port `assign_cycles`/
-`resolve_cycles`/`cycles_merged` (Ofer's adaptive cycle-clustering, which
-already fixed a real second-boundary-straddling bug) rather than rely on this
-port's simpler nearest-timestamp join.
+duplication, not yet fully consolidated: **update — the k1/k2 signal is now
+folded into this port's own tooling** (`extract_real_trace.py`'s
+`scan_saturation_v2_events`/`build_k2_decision_table`, generalized
+`CTRL_LOG_LINE`, ported `assign_cycles`/`cycles_merged`/`resolve_cycles` from
+`dump_k2_decisions.py` rather than relying on this port's weaker
+nearest-timestamp join), exposed as `derived.k2_decision_table` and rendered
+by `dump_wva_decision_table.py`. `dump_k2_decisions.py` itself is untouched
+and still produces its own separate report — the duplication is intentional
+and not yet retired, per the stated long-term direction.
+
+This was originally deferred with the reasoning "last night's real run never
+exercised any of these code paths, so there's no data to validate against" —
+**that reasoning was wrong and got corrected directly**: absence of exercise
+in one smoke test is not evidence a real, currently-used code path is
+low-priority (see `feedback_dont_deprioritize_unexercised_paths.md` in
+memory). The extraction was built anyway, immediately, and validated against
+synthetic log lines constructed to match the exact field names read directly
+from `internal/engines/analyzers/saturation_v2/analyzer.go` (a scale-up
+cycle, a memory-bound cycle, and a zero-replica variant with no per-replica
+data all produced correct, distinctly different rows) — a real substitute
+for live validation, not a reason to skip building it. **Still open**: no
+*real* controller.log has exercised these paths yet, so live validation
+(confirming the parser handles whatever real log lines actually look like,
+not just the synthetic approximation) remains outstanding — get a run that
+hits them (likely needs a cold-start / zero-replica-variant scenario, per
+`variant-capacity-source`/`zero-replica-capacity-estimate`'s own docstrings)
+and re-check.
 
 ## 1. What the scaler actually emits (audit)
 
