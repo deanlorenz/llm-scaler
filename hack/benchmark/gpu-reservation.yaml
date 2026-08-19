@@ -1,0 +1,55 @@
+# Ported from llm-d-workload-variant-autoscaler's benchmark branch. There it
+# parks spare H100 GPU(s) with a near-zero-utilization `pause` container so a
+# scale-up claims a pre-freed GPU instead of racing other tenants for one.
+#
+# CAUTION before using this on pokprod specifically: this cluster runs a sweep
+# agent that reaps idle GPUs and kills their vLLMs (told directly by the repo
+# owner, not discovered independently). A `pause`-container "reservation" pod
+# reporting ~0% GPU utilization is exactly the signature an idle-GPU detector
+# looks for. Do not apply this here without first confirming with whoever
+# operates that sweep agent that a deliberately-idle reservation pod is exempt
+# -- getting it wrong means the reaper evicts the reservation (harmless, it is
+# not real work) but also normalizes the pattern right before a real decode
+# pod could be caught by the same sweep for the same reason. Prefer running a
+# benchmark without pre-reservation (accept the scheduling race) unless a scale
+# transition's timing is itself what is being measured.
+#
+# Manual controls:
+#   oc apply  -f hack/benchmark/gpu-reservation.yaml
+#   oc delete -f hack/benchmark/gpu-reservation.yaml            # frees the GPU(s)
+#   oc scale deploy/gpu-reservation --replicas=0 -n dhl-la-1708 # free the spare
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gpu-reservation
+  namespace: dhl-la-1708
+  labels:
+    app: gpu-reservation
+    purpose: benchmark-gpu-hold
+spec:
+  replicas: 0 # start at 0 -- see the caution above; scale up deliberately, not by default
+  selector:
+    matchLabels:
+      app: gpu-reservation
+  template:
+    metadata:
+      labels:
+        app: gpu-reservation
+    spec:
+      nodeSelector:
+        nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: gpu-reservation
+      containers:
+        - name: hold
+          image: registry.k8s.io/pause:3.9
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+              cpu: "50m"
+              memory: 64Mi
