@@ -203,6 +203,28 @@ BENCHMARK_WVA_UNDEPLOY_TARGET = $(if $(filter openshift,$(ENVIRONMENT)),undeploy
 # cluster's existing Prometheus, which is the usual case for a benchmark cluster.
 BENCHMARK_PROMETHEUS_URL ?= $(PROMETHEUS_URL)
 
+# Environment-specific benchmark settings, selected by name:
+#
+#   make <target> BENCHMARK_ENV=dhl-la-1708   -> hack/benchmark/dhl-la-1708.env
+#
+# The named file is the reproducible record of a run: it declares the cluster
+# it is for (KUBE_CONTEXT, verified against the live context before any
+# destructive target) and every value the run depends on. Prefer editing a
+# named file, or creating one with `make benchmark-init`, over passing values
+# on the command line -- an override still works, but benchmark-guard reports
+# it loudly, and the file stops describing what actually ran.
+#
+# Included here (plain KEY=VALUE assignment, so it overrides the `?=` defaults
+# both above and below regardless of read order) -- but a `make VAR=value`
+# command-line override still wins over this, which is exactly what
+# benchmark-guard is watching for. hack/benchmark/.env (unnamed) is also
+# honoured as a legacy/default path; a named BENCHMARK_ENV wins over it.
+BENCHMARK_ENV ?=
+-include hack/benchmark/.env
+ifneq ($(BENCHMARK_ENV),)
+-include hack/benchmark/$(BENCHMARK_ENV).env
+endif
+
 # Flags for deploy/install.sh (e2e / CI-style cluster infra; no chart VA/HPA).
 CREATE_CLUSTER    ?= false
 DELETE_CLUSTER    ?= false
@@ -712,6 +734,49 @@ LLMDBENCHMARK        = $(shell command -v llmdbenchmark 2>/dev/null || echo $(BE
 # Common llmdbenchmark flags (spec + workspace + base dir for config resolution)
 BENCHMARK_CLI_FLAGS = --spec $(BENCHMARK_SPEC) --workspace $(BENCHMARK_WORKSPACE) --base-dir $(BENCHMARK_REPO_DIR)
 
+# What make will actually use, for env_guard.py to diff against the named env
+# file and report (not block) any override.
+BENCHMARK_GUARD_EFFECTIVE = BENCHMARK_NAMESPACE=$(BENCHMARK_NAMESPACE),IMG=$(IMG),BENCHMARK_MODEL_ID=$(BENCHMARK_MODEL_ID),BENCHMARK_WORKLOAD=$(BENCHMARK_WORKLOAD),BENCHMARK_HARNESS=$(BENCHMARK_HARNESS),PROMETHEUS_URL=$(PROMETHEUS_URL)
+
+.PHONY: benchmark-guard
+benchmark-guard: ## Internal: assert the run is described by a named env file (called by every destructive target)
+	@# GATE for destructive operations only -- starting a run, standup, teardown,
+	@# controller restart, per-run reset (all consume real GPUs or mutate a
+	@# shared-cluster stack). Read-only/local-only targets do not call this.
+	@#
+	@# Refuses on a missing env file, missing required keys, or a kube-context
+	@# mismatch; complains but proceeds on anything else.
+	@# UNSAFE=confirm|once|silent bypasses, at the level you choose.
+	@# See hack/benchmark/env_guard.py.
+	@python3 $(CURDIR)/hack/benchmark/env_guard.py \
+		--env-name "$(BENCHMARK_ENV)" \
+		--env-dir $(CURDIR)/hack/benchmark \
+		--unsafe "$(UNSAFE)" \
+		--effective "$(strip $(BENCHMARK_GUARD_EFFECTIVE))"
+
+.PHONY: benchmark-init
+benchmark-init: ## Create a named benchmark env file interactively (set BENCHMARK_ENV=<name>)
+	@python3 $(CURDIR)/hack/benchmark/env_wizard.py \
+		--name "$(BENCHMARK_ENV)" \
+		--env-dir $(CURDIR)/hack/benchmark
+
+.PHONY: benchmark-preflight
+benchmark-preflight: ## Read-only shared-cluster pre-flight: assert cluster invariants hold (set BENCHMARK_NAMESPACE=<namespace>)
+	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
+		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-preflight BENCHMARK_NAMESPACE=<namespace>"; \
+		exit 1; \
+	fi
+	python3 $(CURDIR)/hack/benchmark/preflight_shared_cluster.py -n $(BENCHMARK_NAMESPACE)
+
+.PHONY: benchmark-reset-run
+benchmark-reset-run: benchmark-guard ## Reset per-run state between runs: leftover harness objects, controller + decode restart (set BENCHMARK_NAMESPACE=<namespace>, BENCHMARK_RESET_APPLY=true to act)
+	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
+		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-reset-run BENCHMARK_NAMESPACE=<namespace>"; \
+		exit 1; \
+	fi
+	python3 $(CURDIR)/hack/benchmark/reset_run.py -n $(BENCHMARK_NAMESPACE) \
+		$(if $(filter true,$(BENCHMARK_RESET_APPLY)),--apply,)
+
 .PHONY: benchmark-install
 benchmark-install: ## Clone llm-d-benchmark at BENCHMARK_REPO_REF (default v0.7.0) and install the llmdbenchmark CLI
 	@if [ ! -d "$(BENCHMARK_REPO_DIR)" ]; then \
@@ -965,7 +1030,7 @@ benchmark-scenarios: ## Copy our scenario specs into the llm-d-benchmark clone (
 	fi
 
 .PHONY: benchmark-standup
-benchmark-standup: ## Stand up the benchmark environment, then install WVA from this repo (set BENCHMARK_NAMESPACE=<namespace>, MODEL_ID=<model>, IMG=<your build>; BENCHMARK_DIRECT_KEDA=true for controller-free EPP+KEDA autoscaling instead of WVA)
+benchmark-standup: benchmark-guard ## Stand up the benchmark environment, then install WVA from this repo (set BENCHMARK_NAMESPACE=<namespace>, MODEL_ID=<model>, IMG=<your build>; BENCHMARK_DIRECT_KEDA=true for controller-free EPP+KEDA autoscaling instead of WVA)
 	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-standup BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
@@ -1205,7 +1270,7 @@ benchmark-standup: ## Stand up the benchmark environment, then install WVA from 
 ## binary is what this target exists to stop happening silently, so it says which
 ## image it is installing.
 .PHONY: benchmark-deploy-wva
-benchmark-deploy-wva: ## Install WVA from deploy/ into BENCHMARK_NAMESPACE (namespace scope) and create its ScaledObjects. Set IMG=<your build>.
+benchmark-deploy-wva: benchmark-guard ## Install WVA from deploy/ into BENCHMARK_NAMESPACE (namespace scope) and create its ScaledObjects. Set IMG=<your build>.
 	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-deploy-wva BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
@@ -1278,7 +1343,7 @@ benchmark-deploy-wva: ## Install WVA from deploy/ into BENCHMARK_NAMESPACE (name
 		WVA_DEFAULT_SO_PLAN=$(BENCHMARK_SO_PLAN)
 
 .PHONY: benchmark-run
-benchmark-run: ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<namespace>, MODEL_ID=<model>, BENCHMARK_HARNESS=guidellm|inference-perf)
+benchmark-run: benchmark-guard ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<namespace>, MODEL_ID=<model>, BENCHMARK_HARNESS=guidellm|inference-perf)
 	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-run BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
@@ -1477,7 +1542,7 @@ WVA_ROLLOUT_TIMEOUT ?= 120s
 WVA_MONITORING_NAMESPACE ?= workload-variant-autoscaler-monitoring
 
 .PHONY: benchmark-add-variant
-benchmark-add-variant: ## Add a secondary WVA variant to the running benchmark (set BENCHMARK_NAMESPACE=<namespace>, optional VARIANT_CONFIG=<path>)
+benchmark-add-variant: benchmark-guard ## Add a secondary WVA variant to the running benchmark (set BENCHMARK_NAMESPACE=<namespace>, optional VARIANT_CONFIG=<path>)
 	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-add-variant BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
@@ -1487,7 +1552,7 @@ benchmark-add-variant: ## Add a secondary WVA variant to the running benchmark (
 		--config $(VARIANT_CONFIG)
 
 .PHONY: benchmark-enable-v2-saturation
-benchmark-enable-v2-saturation: ## Enable WVA saturation V2 analyzer (apply configmap + restart controller)
+benchmark-enable-v2-saturation: benchmark-guard ## Enable WVA saturation V2 analyzer (apply configmap + restart controller)
 	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-enable-v2-saturation BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
@@ -1496,7 +1561,7 @@ benchmark-enable-v2-saturation: ## Enable WVA saturation V2 analyzer (apply conf
 	$(MAKE) benchmark-restart-controller BENCHMARK_NAMESPACE=$(BENCHMARK_NAMESPACE)
 
 .PHONY: benchmark-restart-controller
-benchmark-restart-controller: ## Restart WVA controller to flush in-memory state (e.g., k2 history between runs)
+benchmark-restart-controller: benchmark-guard ## Restart WVA controller to flush in-memory state (e.g., k2 history between runs)
 	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-restart-controller BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
@@ -1509,7 +1574,7 @@ BENCHMARK_WAIT_TIMEOUT ?= 7200
 BENCHMARK_HARNESS_MEMORY ?= 40Gi
 
 .PHONY: benchmark-run-bursty
-benchmark-run-bursty: ## Run bursty traffic benchmark using inference-perf multi-stage rates (set BENCHMARK_NAMESPACE=<namespace>, MODEL_ID=<model>)
+benchmark-run-bursty: benchmark-guard ## Run bursty traffic benchmark using inference-perf multi-stage rates (set BENCHMARK_NAMESPACE=<namespace>, MODEL_ID=<model>)
 	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-run-bursty BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
@@ -1577,7 +1642,7 @@ benchmark-run-all: ## Run all scenarios: teardown → standup → run per scenar
 	@echo "=========================================="
 
 .PHONY: benchmark-teardown
-benchmark-teardown: ## Tear down the benchmark environment (set BENCHMARK_NAMESPACE=<namespace>)
+benchmark-teardown: benchmark-guard ## Tear down the benchmark environment (set BENCHMARK_NAMESPACE=<namespace>)
 	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-teardown BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \

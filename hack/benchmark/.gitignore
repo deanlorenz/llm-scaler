@@ -1,0 +1,5 @@
+# The legacy unnamed env file is local-only; named env files (e.g. dhl-la-1708.env)
+# are the reproducible record of a run and are tracked normally.
+.env
+__pycache__/
+*.pyc
