@@ -15,6 +15,45 @@ Everything here is operator-side collection/extraction tooling reading what
 the scaler *already* emits. Where the existing signal set is insufficient,
 that's recorded below as a gap for a future issue, not patched from here.
 
+## 0. A pre-existing, actively-maintained tool this port must not collide with
+
+`hack/benchmark/dump_k2_decisions.py` + `docs/benchmark-k2-decisions-example.md`
+(Ofer/biran + Evgeny Shindin, 7 commits, `05da6398`..`084eedb3`, most recent
+2026-08-18) landed on `feat/wva-external-scaler` after this worktree branched
+off, so it was simply absent here until brought in verbatim (commit
+`0c642f50`) — not authored by this port. It reads a **materially different**
+signal from what this port's own extraction captures: the saturation_v2
+engine's internal k1/k2 capacity-tier lines (`k2-decision`,
+`replica-capacity-decision`, `replica-capacity-skipped`,
+`replica-capacity-store-fallback`, `variant-capacity-source`,
+`zero-replica-capacity-estimate`, `scheduler-queue-demand`) plus the final
+`"Applied saturation decision via shared cache"` line — none of which
+overlap with `analyzer-result`/`scaling-decision` (which *this* tool captures
+and Ofer's does not). **None of the §1 audit below caught these**: they're
+logged via `logger.V(logging.DEFAULT).Info(...)`, and a `logger\.Info\(`-style
+grep does not match a `.V(...)`-wrapped logger — a real blind spot in the
+audit method, not just a missed message name.
+
+No file/path collision: Ofer's tool writes `metrics/processed/k2_decisions.json`
++ `metrics/reports/k2_decision_report.md`; this port's writes
+`metrics/processed/wva_decision_table.{txt,json}`. Confirmed intentional
+duplication, not yet consolidated: the two tools currently answer overlapping
+but different questions (deep k1/k2 internals + final applied decision, vs.
+analyzer-result + scaling-decision), and the stated long-term direction is to
+fold Ofer's signal into the new tooling so only one report is needed — not
+done here. Blocked on validation, not effort: last night's real run never
+exercised any of the k1/k2 code paths (confirmed zero matches for all seven
+message names, including the always-on Info-level
+`replica-capacity-skipped`), so there is no real data yet to build and check
+an extraction against. Next step when picking this up: get a run that
+actually hits those paths (likely needs a cold-start / zero-replica-variant
+scenario, per `variant-capacity-source`/`zero-replica-capacity-estimate`'s own
+docstrings), generalize `CTRL_LOG_LINE` to match any message tag (not just
+the two this port currently hardcodes), and port `assign_cycles`/
+`resolve_cycles`/`cycles_merged` (Ofer's adaptive cycle-clustering, which
+already fixed a real second-boundary-straddling bug) rather than rely on this
+port's simpler nearest-timestamp join.
+
 ## 1. What the scaler actually emits (audit)
 
 - **~100 structured `logger.Info/Error/Warn` call sites** across `internal/`
