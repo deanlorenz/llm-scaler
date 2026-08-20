@@ -499,16 +499,32 @@ def read_guidellm(path, limit=None):
 
 
 def read_inference_perf(path, limit=None):
-    """Flat array of per-request records; payload lives under info.response_info.
+    """Flat array of per-request records; payload lives under info.response_metrics.
 
-    Two traps, both verified on a real run:
+    Renamed from `info.response_info` at some point upstream -- this file's own
+    prior docstring named `response_info` confidently, but a real capture from
+    harness_version a40897e6500e4524adf563a91f7c880eb5296e12 has
+    `response_info: None` and the exact same payload (output_tokens,
+    server_usage, output_token_times, ...) under `response_metrics` instead.
+    Every downstream `.get()` on `ri` silently degraded to None rather than
+    erroring, so this went unnoticed until a run's own work-throughput panel
+    (bundle field `out_tok`) came back all-zero despite 990 real completed
+    requests -- `response_info` is kept as a fallback in case an older raw
+    capture on disk still uses it, not because both are expected going forward.
+
+    Two more traps, both verified on a real run:
 
     * `start_time` / `end_time` are a *monotonic* clock, not epoch, so these need
       the section-2 anchor (see anchor_offset).
     * the client output count is inflated ~2x versus the server count
       (`output_tokens` 1018 vs `server_usage.completion_tokens` 516 on the
       reference run) because streamed chunks are double-counted. The server
-      count wins, always, and it is also the correct ITL denominator.
+      count wins, always, and it is also the correct ITL denominator. (Not
+      reproduced on the run that found the rename above: 420 vs 421 there --
+      close enough to be the same count, not the 2x split. Left as an
+      always-prefer-server-count rule regardless, since the reference run's
+      inflation was real and this cannot tell the two situations apart from
+      the numbers alone.)
 
     `info.extra_info.raw_response` holds the entire response body; it is never read.
     """
@@ -520,7 +536,9 @@ def read_inference_perf(path, limit=None):
             if t0 is None:
                 continue
             info = rec.get('info') or {}
-            ri = info.get('response_info')
+            ri = info.get('response_metrics')
+            if not isinstance(ri, dict):
+                ri = info.get('response_info')
             if not isinstance(ri, dict):
                 ri = {}
             srv = ri.get('server_usage') or {}
@@ -537,10 +555,19 @@ def read_inference_perf(path, limit=None):
             if ttft is None and tt:
                 ttft = min(tt) - t0
             err = rec.get('error')
+            # request_metrics.text.input_tokens: same value as
+            # server_usage.prompt_tokens on every record checked, but present
+            # even on the rare record where server_usage itself is missing --
+            # a real fallback, not a renamed duplicate of the info.get(
+            # 'input_tokens') this replaced (that top-level key does not
+            # exist on any record read from a real capture).
+            in_tok = srv.get('prompt_tokens')
+            if in_tok is None:
+                in_tok = ((info.get('request_metrics') or {}).get('text') or {}).get('input_tokens')
             out.append({
                 't_arr': t0,
                 't_dep': t1,
-                'in_tok': srv.get('prompt_tokens', info.get('input_tokens')),
+                'in_tok': in_tok,
                 'out_tok': out_tok,
                 'out_tok_client': client_tok,
                 'ttft': ttft,

@@ -16,16 +16,16 @@
   "workload": "quick_smoke.yaml",
   "shape": {
     "in_tok": 1015,
-    "out_tok": null
+    "out_tok": 398
   },
   "extractor_version": "0.1.0",
-  "extractor_git_sha": "ed233f90cbba2f7f93e4709bbf18e3dd113baed7",
-  "extracted_at": "2026-08-20T14:45:36+0300",
-  "published_at": "2026-08-20T14:46:26+0300",
-  "bundle_sha256": "4ec5d3a13fa893a1b0acdd4e80478ba473f617168c6710a29620c9ce957214a0",
-  "bundle_bytes": 221020,
+  "extractor_git_sha": "ed233f90cbba2f7f93e4709bbf18e3dd113baed7+dirty",
+  "extracted_at": "2026-08-20T15:38:15+0300",
+  "published_at": "2026-08-20T15:39:58+0300",
+  "bundle_sha256": "7189a39d50bbfeedd726c9de0e024e0180adf698b2ced2e6895beb2524a30a65",
+  "bundle_bytes": 247889,
   "coverage": {
-    "pass": 6,
+    "pass": 7,
     "fail": 10,
     "not_exercised": [
       "Calibrate A",
@@ -36,8 +36,8 @@
       "Queue (a) material",
       "Queue (c) material",
       "Router imbalance measurable",
-      "Capacity model checkable",
-      "Boot lag measured"
+      "Boot lag measured",
+      "Knee matches shape prediction"
     ]
   },
   "time_anchor_trustworthy": false,

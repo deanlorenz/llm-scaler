@@ -57,8 +57,8 @@
     },
     {
       "capability": "Capacity model checkable",
-      "verdict": "FAIL",
-      "detail": "pred=None obs=19.0"
+      "verdict": "PASS",
+      "detail": "pred=170.17462932454694 obs=19.0"
     },
     {
       "capability": "Boot lag measured",
@@ -79,9 +79,14 @@
       "capability": "Scaling-decision log present",
       "verdict": "PASS",
       "detail": "analyzers=['saturation'] n_results=51 n_decisions=51 source=/tmp/wva-controller-run3.log"
+    },
+    {
+      "capability": "Knee matches shape prediction",
+      "verdict": "FAIL",
+      "detail": "in=1015 out=398 out/in=0.39 (prefill-heavy -> expect y>0); fitted y_lo=0.0"
     }
   ],
-  "n_pass": 6,
+  "n_pass": 7,
   "n_fail": 10,
   "saturation_threshold": 0.85,
   "warnings": [
@@ -89,6 +94,6 @@
     "no post_run_analyze.sh output (wva_target_timeseries.json etc.) - WVA decision timeseries unavailable for this run; see plan 1.1a",
     "time anchor is weak (engine occupancy exceeds request-derived in-system count on 8% of scrapes despite corr=0.9204871233257719); arrival-time panels are unreliable for this run"
   ],
-  "extractor_sha": "77ea1b03",
-  "extracted_at": "2026-08-20T11:45:36.615742+00:00"
+  "extractor_sha": "14bf01de",
+  "extracted_at": "2026-08-20T12:38:15.478719+00:00"
 }
