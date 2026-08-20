@@ -1,0 +1,47 @@
+{
+  "run": "inference-perf-1787168379-sy3tze_1",
+  "harness": "inference-perf",
+  "harness_version": "a40897e6500e4524adf563a91f7c880eb5296e12",
+  "model": "Qwen/Qwen3-0.6B",
+  "engine": {
+    "num_gpu_blocks": "12912",
+    "block_size": "16",
+    "gpu_memory_utilization": "0.3",
+    "enable_prefix_caching": "True",
+    "cache_dtype": "auto",
+    "sliding_window": "None"
+  },
+  "namespace": "dhl-la-1708",
+  "cluster": "dhl-la-1708",
+  "workload": "quick_smoke.yaml",
+  "shape": {
+    "in_tok": 1006,
+    "out_tok": null
+  },
+  "extractor_version": "0.1.0",
+  "extractor_git_sha": "ed233f90cbba2f7f93e4709bbf18e3dd113baed7",
+  "extracted_at": "2026-08-20T12:34:15+0300",
+  "published_at": "2026-08-20T12:43:41+0300",
+  "bundle_sha256": "de44d19215b1f8203252cc05d345e289826ef9de7270fd275e64506ed143823e",
+  "bundle_bytes": 170769,
+  "coverage": {
+    "pass": 4,
+    "fail": 12,
+    "not_exercised": [
+      "Calibrate A",
+      "Characterize saturation",
+      "Exercise the 0.85 ceiling",
+      "Locate the throughput knee",
+      "Scale-down present",
+      "Drain-vs-kill measurable",
+      "Queue (a) material",
+      "Queue (c) material",
+      "Router imbalance measurable",
+      "Capacity model checkable",
+      "Boot lag measured",
+      "Scaling-decision log present"
+    ]
+  },
+  "time_anchor_trustworthy": false,
+  "source_dir": "/home/dean/code/llm-d/dean-llmd-scaler-sandbox/.claude/worktrees/benchmark/dean-20260819-223836-948/results/inference-perf-1787168379-sy3tze_1"
+}

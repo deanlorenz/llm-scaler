@@ -210,3 +210,55 @@ sketch, not an implementation:
 4. (Not a bug, a heads-up) PR #1506/#1508 will add `trace_id`/`span_id` to
    every structured log line once merged — worth revisiting the decision
    table to include them for trace cross-referencing once that lands.
+5. See §5 below — a manual model change on a Deployment leaves the
+   ScaledObject's `modelID` trigger stale, and WVA silently computes zero
+   decisions forever with no warning. Whoever owns `deploy/lib/scaledobject.sh`
+   (or the standup flow that calls it) should decide whether that script
+   should re-derive `modelID` from the live Deployment instead of being
+   handed a value once at creation time, and/or whether the controller should
+   warn when a ScaledObject's `modelID` trigger never matches any scraped
+   metric.
+
+## 5. Run finding: stale ScaledObject `modelID` after a manual model change (dhl-la-1708, 2026-08-19)
+
+Extracting the `quick_smoke` run captured overnight
+(`hack/benchmark/results/20260820-modelid-drift/`) turned up a real,
+reproducible gap — not an extraction bug. Recorded here because it's a
+scaler/deploy-side gap, out of scope for this port to fix (see this doc's
+scope boundary at the top), and it explains why that run's decision table
+came back genuinely empty rather than under-extracted.
+
+**What happened**: the `optimized-baseline-nvidia-gpu-vllm-decode` Deployment
+was hand-patched the night before (with explicit one-time permission, to work
+around the OOM documented in `dhl-la-1708.env`) to serve `Qwen/Qwen3-0.6B`
+instead of `Qwen/Qwen3-32B`. That patch changed the container's `vllm serve`
+model argument, but touched neither:
+
+- the Deployment's own pod-template label `llm-d.ai/model: Qwen3-32B`, nor
+- the `optimized-baseline-nvidia-gpu-vllm-decode-wva` ScaledObject's
+  `spec.triggers[0].metadata.modelID: Qwen/Qwen3-32B` — written by
+  `deploy/lib/scaledobject.sh` (`llm-d.ai/created-by` annotation) at
+  ScaledObject creation time and never revisited.
+
+**Observed effect**: the WVA controller log captured during the run
+(`/tmp/wva-decode-heavy-capture/controller.log`, 19:35–19:50 UTC) shows the
+steadystate engine processing `"modelID": "Qwen/Qwen3-32B"` for the entire
+window — a model no metric on this deployment reports under anymore. Result:
+zero `analyzer-result`/`scaling-decision`/k1-k2 lines the whole run
+(`"decisionsApplied": 0` throughout), and panel 2 of the rendered trace shows
+desired replicas flat at 1 for the full run *despite* panels 1a/3/5 showing a
+real load ramp (arrival rate 3→10 req/s) that visibly builds EPP queue depth
+to ~15 and in-system requests to 20+ — exactly the kind of pressure a working
+saturation analyzer should react to. WVA never saw it, silently.
+
+**Why this isn't fixed here**: the Deployment belongs to llm-d standup, not
+benchmark/WVA tooling — out of scope for this repo's benchmark port to patch,
+full stop (a one-time, explicitly-granted exception was used for the OOM
+workaround; not a standing permission). The ScaledObject trigger is likewise
+not benchmark tooling's to hand-patch: it's written by the scaler's own
+deploy code, driven by whatever process re-points a Deployment at a different
+model — that process is what should keep `modelID` in sync, not an
+after-the-fact patch from the analysis side. This doc records the finding for
+whoever owns that code path (see item 5 above); this port's job stays
+analysis of what's actually emitted, which correctly reported an empty
+decision table rather than fabricating one.
