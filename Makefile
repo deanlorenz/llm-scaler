@@ -982,6 +982,20 @@ benchmark-fma-verify: ## Report where FMA launchers and requesters actually land
 	@bash hack/benchmark/fma_placement.sh verify $(BENCHMARK_NAMESPACE) \
 		"$(CURDIR)/hack/benchmark/scenarios/$(BENCHMARK_SPEC).yaml"
 
+.PHONY: benchmark-verify-scaledobjects
+benchmark-verify-scaledobjects: ## Rescan llm-d model servers and check every ScaledObject's modelID still matches what its container serves (set BENCHMARK_NAMESPACE)
+	@# A hand-changed serving model does not propagate to the ScaledObject that
+	@# already scales it -- nothing re-syncs that automatically. WVA then
+	@# evaluates decisions for a model no metric reports and applies zero of
+	@# them, silently, for the whole run. Found live on dhl-la-1708; see
+	@# docs/plans/benchmark/observability-gaps.md #5. benchmark-run does the
+	@# same check automatically before generating load.
+	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
+		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-verify-scaledobjects BENCHMARK_NAMESPACE=<namespace>"; \
+		exit 1; \
+	fi
+	@bash hack/benchmark/verify_wva_scaledobjects.sh $(BENCHMARK_NAMESPACE) $(if $(filter true,$(BENCHMARK_REPORT_ONLY)),--report-only,)
+
 .PHONY: benchmark-actuation
 benchmark-actuation: ## Measure how fast capacity arrives after a scale-up (set ACTUATION_TARGET=<deployment>; BENCHMARK_NAMESPACE required)
 	@# The claim FMA makes is that capacity arrives sooner -- not that tokens are
@@ -1476,6 +1490,10 @@ benchmark-run: benchmark-guard ## Run a single benchmark workload (set BENCHMARK
 	@# namespace runs no launchers.
 	@bash hack/benchmark/fma_placement.sh verify $(BENCHMARK_NAMESPACE) \
 		"$(CURDIR)/hack/benchmark/scenarios/$(BENCHMARK_SPEC).yaml"
+	@# Rescan and check every ScaledObject's modelID still matches what its
+	@# container actually serves, before spending any load on a run WVA cannot
+	@# act on. See benchmark-verify-scaledobjects above for why this exists.
+	@bash hack/benchmark/verify_wva_scaledobjects.sh $(BENCHMARK_NAMESPACE)
 	@rm -f /tmp/wva_replica_samples.json /tmp/wva_replica_samples.json.pid
 	@bash hack/benchmark/sample_replicas.sh start $(BENCHMARK_NAMESPACE) /tmp/wva_replica_samples.json || true
 	@# The controller's own /metrics (wva_desired_replicas, wva_current_replicas,
