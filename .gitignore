@@ -58,6 +58,11 @@ hack/tls-certs/
 benchmark-scaledobject-plan.yaml
 wva-plan.yaml
 
+# Worktree-local kubeconfig (scoped to one context, never committed --
+# credentials, and other worktrees/sessions on this shared machine must not
+# be able to perturb which context this one uses)
+/.kube/
+
 # Python bytecode from the hack/benchmark scripts
 __pycache__/
 *.pyc
