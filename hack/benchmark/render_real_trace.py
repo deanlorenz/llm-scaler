@@ -477,6 +477,14 @@ def render(bundle, path, title=None, coverage=None):
     a.set_title(f'1a · request throughput + goodput quality  '
                 f'(bars: {BIN:.0f}s bins · curves: {BIN:.0f}s centred sliding)',
                 loc='left', fontsize=10)
+    # sharex=True hides every interior panel's own tick labels by default,
+    # leaving only panel 6 (6 panels below) able to read off an exact time --
+    # too far to cross-reference against panel 1a's own features. Panel 1a
+    # gets its own x-axis back too (Dean: "the bottom axis is too far. Only
+    # show on p1a, p6"); panels 1b-5 stay unlabelled, unchanged.
+    a.tick_params(axis='x', labelbottom=True)
+    a.set_xlabel('seconds since warmup end' if warmup_offset_s
+                 else 'seconds since run start', fontsize=8)
 
     # --- panel 1b: work throughput vs capacity ------------------------------ #
     # Work = OUTPUT TOKENS. Offered work is booked at arrival (the tokens that
@@ -1001,8 +1009,15 @@ def render(bundle, path, title=None, coverage=None):
             # a real render.
             d3.set_ylim(bottom=0)
             d3.invert_yaxis()
-            d3.set_ylabel('mean running/pod', fontsize=8)
-            d3.tick_params(axis='y', labelsize=7)
+            d3.set_ylabel('mean running/pod', fontsize=8, color='#eab308')
+            # Axis coloured to match the line it belongs to (Dean: "make the
+            # axis color yellow to match the inverted graph") -- this panel
+            # briefly carried a second right-side axis (the KV ceiling, see
+            # below) and an uncoloured tick axis reading against a coloured
+            # line, on top of that, was genuinely ambiguous about which
+            # numbers belonged to which.
+            d3.tick_params(axis='y', labelsize=7, colors='#eab308')
+            d3.spines['right'].set_color('#eab308')
             d3.legend(loc='upper right', fontsize=6.5, framealpha=0.85)
         # router-side residual, on the pod grid (nearest system sample)
         sys_by_t = {round(s['t']): s.get('in_system') for s in system
@@ -1040,26 +1055,37 @@ def render(bundle, path, title=None, coverage=None):
             xr, yr = step_series(reps, 'ready', t0)
             ceil_y = [v * cap['max_conc_pred'] for v in yr]
             # A ceiling many times the in-system total compresses the request
-            # stack the same way panel 1b's uncapped ceiling did -- except
-            # here the fix is a secondary axis (not a cap), since the ceiling
-            # is a step line, not a fill the stack needs to stay clear of.
-            insys_max = max((insys_p or [0]), default=0)
-            ceil_max = max(ceil_y, default=0)
-            close = insys_max == 0 or abs(ceil_max - insys_max) <= 0.10 * insys_max
-            if close:
-                d.step(xr, ceil_y, where='post', color=C_CEIL, ls='--', lw=1.6,
-                       zorder=2.5,
-                       label=f"KV ceiling (ready × {cap['max_conc_pred']:.0f}/pod)")
-            else:
-                d2 = d.twinx()
-                d2.step(xr, ceil_y, where='post', color=C_CEIL, ls='--', lw=1.6,
-                        zorder=2.5,
-                        label=f"KV ceiling (ready × {cap['max_conc_pred']:.0f}"
-                              "/pod) [right axis]")
-                d2.set_ylim(0, max(ceil_max * 1.05, 1))
-                d2.tick_params(axis='y', colors=C_CEIL, labelsize=7)
-                d2.spines['right'].set_color(C_CEIL)
-                d2.legend(loc='upper right', fontsize=6.5, framealpha=0.85)
+            # stack the same way panel 1b's uncapped ceiling did. Used to
+            # fix that with a second right-side axis -- but this panel
+            # already has one (mean-running-per-pod, above), and two
+            # independent twinx() calls both put their spine at the same
+            # physical right edge, reading as one garbled overlapping set of
+            # numbers (Dean: "the dual right y-axis is not readable"). Same
+            # fix as panel 1b instead: clip the line to the primary axis's
+            # own range and annotate the real value wherever it's clipped,
+            # rather than adding a second scale to read it off.
+            y_lo, y_hi = d.get_ylim()
+            over = [c > y_hi for c in ceil_y]
+            plot_y = [min(c, y_hi) for c in ceil_y] if any(over) else ceil_y
+            d.step(xr, plot_y, where='post', color=C_CEIL, ls='--', lw=1.6,
+                   zorder=2.5,
+                   label=f"KV ceiling (ready × {cap['max_conc_pred']:.0f}/pod)")
+            if any(over):
+                last_label_x = float('-inf')
+                min_gap = max(1.0, span * 0.05)
+                for i, (x, c, rd) in enumerate(zip(xr, ceil_y, yr)):
+                    if not over[i]:
+                        continue
+                    is_last_of_run = (i + 1 >= len(over)
+                                       or not over[i + 1] or yr[i + 1] != rd)
+                    if not is_last_of_run or x - last_label_x < min_gap:
+                        continue
+                    last_label_x = x
+                    d.annotate(f'×{rd:.0f} ({c:.0f})', xy=(x, y_hi),
+                               xytext=(x, y_hi * 0.94), fontsize=6.5,
+                               color=C_CEIL, ha='left', va='top',
+                               arrowprops=dict(arrowstyle='-|>', color=C_CEIL,
+                                                lw=0.8, shrinkA=0, shrinkB=0))
         # TTFT/wait-time percentiles -- router imbalance moved to panel 4 to make
         # room (this panel's corner was already dense post-Task-2). Reuses
         # the same per-request `reqs` this panel's own bars are unrelated to
@@ -1270,8 +1296,13 @@ def render(bundle, path, title=None, coverage=None):
                       fontsize=6.5, framealpha=0.85, ncol=1)
         cb = fig.colorbar(plt.cm.ScalarMappable(cmap=kv_cmap), ax=e,
                           fraction=0.02, pad=0.04)
-        cb.set_label(f'KV%  (white→green below k_sat={k_sat:.2f}, '
-                     'green→red at/above)', fontsize=7)
+        # A short label plus a real marker at k_sat itself, rather than
+        # spelling the threshold out in the label text (Dean: "shorten the
+        # axis text... or just add a red marker near the bar" -- both,
+        # since the marker only means something once you know it's marking
+        # the saturation threshold).
+        cb.ax.axhline(k_sat, color='#dc2626', lw=1.3, zorder=5)
+        cb.set_label('KV%', fontsize=7)
         cb.ax.tick_params(labelsize=6)
     else:
         empty(e, 'no metrics/raw/ scrapes — per-pod KV% unavailable')
@@ -1283,7 +1314,7 @@ def render(bundle, path, title=None, coverage=None):
     # even though the heatmap body itself is now dense.
     r = der.get('router') or {}
     p95 = r.get('disp_p95')
-    e.text(0.995, 1.14 if pods else 1.02,
+    e.text(0.995, 1.20 if pods else 1.02,
            f"router imbalance p95={'?' if p95 is None else round(p95, 2)}, "
            f"{r.get('leader_flips', '?')} leader flips / {r.get('n', '?')} "
            f"samples (not an oscillation test)",
