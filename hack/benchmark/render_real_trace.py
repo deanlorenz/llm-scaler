@@ -54,6 +54,7 @@ try:
     import matplotlib.pyplot as plt
     from matplotlib.ticker import MaxNLocator, FuncFormatter, FixedLocator, AutoMinorLocator
     from matplotlib.colors import LinearSegmentedColormap, to_rgba
+    from matplotlib.transforms import offset_copy
     import numpy as np
 except ImportError:
     sys.exit('error: matplotlib is required to render.\n'
@@ -656,20 +657,26 @@ def render(bundle, path, title=None, coverage=None):
         dz = [r.get('desired') for r in reps]
         rz = [r.get('ready') for r in reps]
         # Tiny opposite y-offsets, exactly as the synthetic figure: once ready
-        # catches up the two coincide, and neither may hide. A fixed 0.05 was
-        # a sensible fraction of the axis on a run that never leaves 0..1,
-        # but reads as noise-thin on a run spanning 0..10 -- scaled to 3% of
-        # the actual desired/ready range instead. On a run where the two
-        # never differ at all (range 0), fall back to 3% of the value itself
-        # so the offset still means something relative to what's plotted.
-        dr_vals = [v for v in dz + rz if v is not None]
-        dr_range = (max(dr_vals) - min(dr_vals)) if dr_vals else 0
-        dr_scale = dr_range if dr_range > 0 else (max(dr_vals) if dr_vals else 1)
-        offset = min(0.1, max(0.02, 0.03 * dr_scale))
-        c.step(xs, [v + offset if v is not None else None for v in dz], where='post',
-               color=C_DES, lw=2.2, alpha=0.9, label='desired (WVA)')
-        c.step(xs, [v - offset if v is not None else None for v in rz], where='post',
-               color=C_ACT, lw=2.2, alpha=0.9, label='ready (alive)')
+        # catches up the two coincide, and neither may hide. A data-space
+        # offset (tried first: a fixed 0.05, then a %-of-range formula) never
+        # gives a consistent VISUAL gap -- the same number of data units is a
+        # sliver on a 0..10 run and a canyon on a 0..1 one, because the axis
+        # scales differently each time (Dean: "I want the physical gap to be
+        # about the width of the line... not sure about the calculation to
+        # get there for other runs"). offset_copy sidesteps the calculation
+        # entirely: it shifts by a fixed distance in POINTS, after the data
+        # transform, so the two lines sit lw points apart on the page no
+        # matter what the y-axis range is or how it's scaled.
+        LW2 = 2.2
+        c_lw2 = LW2
+        trans_up = offset_copy(c.transData, fig=fig, y=c_lw2 / 2, units='points')
+        trans_down = offset_copy(c.transData, fig=fig, y=-c_lw2 / 2, units='points')
+        dz_plot = [v if v is not None else float('nan') for v in dz]
+        rz_plot = [v if v is not None else float('nan') for v in rz]
+        c.step(xs, dz_plot, where='post', transform=trans_up,
+               color=C_DES, lw=c_lw2, alpha=0.9, label='desired (WVA)')
+        c.step(xs, rz_plot, where='post', transform=trans_down,
+               color=C_ACT, lw=c_lw2, alpha=0.9, label='ready (alive)')
         # A replica that is alive but no longer wanted is draining: still finishing
         # in-flight work, not accepting new work, so NOT usable capacity. Kept even
         # though this run has none -- if a future run drains, the band appears
@@ -1219,13 +1226,24 @@ def render(bundle, path, title=None, coverage=None):
         # 0.85 that is 15% of the colormap's own domain, so a small real
         # excess (0.86, 0.87...) already reads as strongly red: everything
         # "above threshold" looked equally alarming, with no way to tell a
-        # mild overshoot from a severe one (Dean: "there is bad and there is
-        # really bad"). An amber stop halfway between k_sat and 1.0 splits
-        # that range into two: green->amber for a mild overshoot, amber->red
-        # reserved for one that's actually severe.
+        # mild overshoot from a severe one. An amber stop between green and
+        # red splits that into two: green->amber for a mild overshoot,
+        # amber->red for a severe one. Starting the split exactly at k_sat
+        # left too little room either side of it once amber was added in
+        # (Dean, after seeing that render: "transition to red still not
+        # abrupt enough" -- read together with the concrete formula given
+        # alongside it, spreading the ramp wider, not sharper, is what's
+        # being asked for). green_end anchors the ramp a little BEFORE k_sat
+        # instead of exactly at it, per Dean's own suggested shape
+        # (1.25*k_sat - 0.25), clamped so it can never go negative for a low
+        # k_sat. The red threshold MARKER on the colorbar (below) stays at
+        # the real k_sat regardless -- only the colour ramp's own start
+        # moves, not the actual scaling threshold it's illustrating.
+        green_end = max(0.0, 1.25 * k_sat - 0.25)
+        amber_mid = green_end + (1.0 - green_end) * 0.5
         kv_cmap = LinearSegmentedColormap.from_list(
-            'kv_heat', [(0.0, '#ffffff'), (k_sat, '#16a34a'),
-                        (k_sat + (1.0 - k_sat) * 0.5, '#f59e0b'),
+            'kv_heat', [(0.0, '#ffffff'), (green_end, '#16a34a'),
+                        (amber_mid, '#f59e0b'),
                         (1.0, '#dc2626')])
         dead_color = to_rgba('#d1d5db')  # distinct light gray -- never claimed by a real 0.0
         rgba = np.array(
@@ -1423,9 +1441,22 @@ def render(bundle, path, title=None, coverage=None):
             f.step(xs_sd, supply_req, where='post', color='#7c3aed', ls=':',
                    lw=1.5, alpha=0.85, zorder=2.6,
                    label=f'WVA supply (≈{kv_tok_per_req:.0f} kv-tok/req, approx)')
+            # demand runs structurally higher than in_system/being served BY
+            # DESIGN, not as a measurement error -- confirmed by tracing
+            # saturation_v2/analyzer.go directly: it charges each request's
+            # KV footprint at its LAST decode step (a peak, no-preemption
+            # planning charge), sums two 1-minute maxima that need not have
+            # coincided at any single real instant, and prices a queued
+            # request's expected footprint on top of that -- three separate,
+            # explicitly-documented biases, all toward over-provisioning on
+            # purpose ("under-provisioning decode capacity causes preemption
+            # and recompute thrash, which costs more than a spare replica").
+            # Labelled as a capacity PLAN, not a concurrency estimate, so it
+            # doesn't read as this panel's other lines all disagreeing with
+            # each other.
             f.step(xs_sd, demand_req, where='post', color='#f97316', ls=':',
                    lw=1.5, alpha=0.85, zorder=2.6,
-                   label='WVA demand (requests, approx)')
+                   label='WVA demand (peak capacity plan, not concurrent — approx)')
     if nsys_g or served_g:
         fit = der.get('itl_fit') or {}
         if fit.get('A_ms_per_req'):
