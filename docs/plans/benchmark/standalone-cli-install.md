@@ -121,3 +121,79 @@ maintain, never a bare name.
   `benchmark-install` — this plan is additive, for the run-only-against-an-
   existing-stack path specifically, not a replacement.
 - Nothing here is implemented. This is scoped as a future work item.
+
+## Update 2026-08-20: the pip-install premise is disproved; a better path exists, with one real open gap
+
+Revisited this plan in a later session (Dean: "I prefer (4)"). Two rounds of
+research, read-only against the actual `llm-d-benchmark` clone already
+checked out in this worktree (pinned `v0.7.8`), changed the shape of this
+plan substantially.
+
+**The original "standalone pip install of the full CLI" premise is disproved.**
+`ExecutionContext.base_dir` (`llmdbenchmark/executor/context.py`) is never
+wired up from `--base-dir` in any of the CLI's four dispatch call sites
+(`llmdbenchmark/cli.py`, the `ExecutionContext(...)` constructions for
+standup/smoketest/teardown/run) — it is always `None`. Every `run`-mode step
+that needs an asset tree therefore always falls back to
+`Path(__file__).resolve().parents[3])`, which only "works" today because an
+*editable* install's `__file__` happens to sit inside the git checkout. None
+of `workload/harnesses/`, `workload/profiles/<harness>/`, or
+`config/templates/jinja/20_harness_pod.yaml.j2` are declared as package data
+in `pyproject.toml` (`[tool.setuptools.packages.find]` only discovers the
+`llmdbenchmark` Python package; `[tool.setuptools.package-data]` ships only
+`llmdbenchmark/analysis/scripts/*` and `llmdbenchmark/agent/*.yaml`) — a
+non-editable install silently drops the other two trees, breaking
+ConfigMap-building (step_06) and harness-pod deployment (step_07). `run` also
+always needs a full `template_dir`/`values_file`/`scenario_file` spec triple
+(no minimal-spec code path exists), and the shared CLI dispatch calls
+`helmfile template` even for `run` unless the scenario's `config.yaml`
+disables `modelservice`. None of this is fixable from our side with flags
+alone — `--base-dir` is dead code upstream.
+
+**A much better-fitting path exists and was previously unknown to this port:**
+`llm-d-benchmark/existing_stack/run_only.sh` + a sibling
+`config_template.yaml` (Dean's own recollection: "the old run_only.sh scripts
+just used the harness directly" — correct, and still present at that path).
+Pure bash, no Python, no CLI, no venv, no template tree: reads one YAML
+config via `yq` (confirmed `mikefarah/yq` v4.53.2 already installed
+system-wide — the exact flavor its `-o shell`/`explode()` syntax needs),
+creates its own namespace-scoped ServiceAccount/Role/RoleBinding, verifies
+the HF secret and endpoint reachability, builds a ConfigMap directly from
+the config's own inline `workload.<name>` block (same schema as this repo's
+`test/benchmark/scenarios/*.yaml.in` files, no translation needed), launches
+a bare Pod (no helm/helmfile/jinja) running `harness.image`, `exec`s
+`llm-d-benchmark.sh --harness=... --workload=...` inside it, and
+reports/copies results. `dhl-la-1708` already has a PVC literally named
+`workload-pvc` — the config template's own default — no customization
+needed there either.
+
+**But it has a real gap, found while sanity-checking the plan (Dean: "Not
+sure the run_only script does all the post benchmark processing the regular
+run does" — correct, it doesn't):** `llmdbenchmark/run/steps/step_07_deploy_harness.py`
+has this comment on its full-CLI pod spec: `# Inject base64-encoded
+kubeconfig so kubectl works inside the pod (needed by collect_metrics.sh and
+llm-d-benchmark.sh vLLM scraping)`. `collect_metrics.sh`
+(`workload/harnesses/collect_metrics.sh`) runs *inside* the harness pod,
+using that injected kubeconfig, to scrape vLLM/EPP `/metrics` into the
+`metrics/raw/*_metrics.log` files this port's own `extract_real_trace.py`
+depends on for panel 3 (running/waiting bars), panel 4 (KV% heatmap), and
+most of panel 5. `run_only.sh`'s bare pod spec injects no kubeconfig and
+mounts no `llmdbench-harness-scripts` ConfigMap (only `${harness_name}-profiles`)
+— it has neither the script nor the credentials to do this. A `run_only.sh`-
+driven run would produce real per-request output but no pod-level metrics
+scrapes at all, gutting the part of the pipeline this port exists for.
+
+**Status: paused pending a decision on the gap, not ready to implement.**
+Two ways to close it, neither evaluated yet:
+1. Carry `collect_metrics.sh` + kubeconfig injection into our own copy of the
+   pod spec (stops this being a verbatim, unmodified import of `run_only.sh`;
+   also means deciding how comfortable we are injecting a kubeconfig into a
+   namespace-scoped pod, versus scraping from outside it).
+2. Write our own client-side vLLM/EPP scraper, extending the exact pattern
+   `hack/benchmark/scrape_wva_metrics.sh` already uses for the WVA
+   controller's own authenticated `/metrics` (port-forward + scrape from the
+   machine driving the run, not from inside the harness pod) — no kubeconfig
+   injection into the cluster at all, everything stays client-side like the
+   rest of this port's collection scripts.
+(2) fits this port's own established pattern more closely and avoids putting
+a kubeconfig inside a pod; not yet attempted or verified.
