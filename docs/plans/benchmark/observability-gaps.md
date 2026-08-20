@@ -218,6 +218,14 @@ sketch, not an implementation:
    handed a value once at creation time, and/or whether the controller should
    warn when a ScaledObject's `modelID` trigger never matches any scraped
    metric.
+6. See §6 below — `waitingQueueDemand`'s per-request KV charge uses the
+   request's full `I + O` (prompt + complete generation) as its "last decode
+   step" planning size. Dean: quite possibly should be `I + 0.5*O` instead —
+   but there is no ground truth in this port's own data to say which is
+   right (no token-by-token KV occupancy trace exists, only each request's
+   final `in_tok`/`out_tok`). Whoever owns `saturation_v2/analyzer.go` is in
+   a better position to judge this than benchmark tooling reading its output
+   after the fact.
 
 ## 5. Run finding: stale ScaledObject `modelID` after a manual model change (dhl-la-1708, 2026-08-19)
 
@@ -281,3 +289,59 @@ manual log archaeology. It reuses `deploy/lib/scaledobject.sh`'s own discovery
 (`install_default_scaledobjects` in `plan` mode, `so_plan_rows`) rather than
 reimplementing model detection, and never mutates anything — same read-only
 boundary this doc's scope note describes above.
+
+## 6. Run finding: WVA's `demand` signal runs well above observed concurrency, by design (decode_heavy, dhl-la-1708, 2026-08-20)
+
+Adding a supply/demand overlay to panel 5 (`render_real_trace.py`, converting
+the analyzer-result records' `demand`/`supply` fields from KV-cache-token
+units into this panel's own request units via this run's own measured mean
+KV-tokens-per-running-request) turned up something worth flagging on the
+`decode_heavy` run: `demand` peaks at ≈3400 request-equivalents, while
+`in_system L(t)` (the per-request-derived concurrency reconstruction) peaks
+at only ≈1600 at roughly the same time — demand running more than 2x above
+observed concurrency.
+
+**Not a conversion bug** — checked directly: the divisor is stable across
+the run (2442 whole-run average vs 2501 computed in just the 30-60s window
+around the peak, a 2.4% difference), and `supply` independently validates
+against `usable slot capacity` (both represent ready-replica capacity,
+computed two different ways, and track each other closely on every run
+checked).
+
+**Traced to `internal/engines/analyzers/saturation_v2/analyzer.go` directly**,
+`waitingQueueDemand`'s own doc comment names three explicit, deliberate
+biases, all toward over-provisioning:
+
+1. Each request's KV footprint is charged at its *last* decode step — `I + O`
+   (full prompt + full generation), a peak/no-preemption planning size, not
+   its footprint at any single real instant. Confirmed numerically at the
+   `decode_heavy` peak (t≈221s): 1549 requests actually active, mean
+   `in_tok=1000`, mean `out_tok`-so-far `=2438` of a 4000-token target — real
+   footprint ≈3438/request, charged as if every one would reach the full
+   1000+4000=5000.
+2. This term and a second "resident" term are each their own 1-minute
+   maximum (`max_over_time`), summed even though the two maxima need not
+   have occurred at the same real instant.
+3. A queued (not yet running) request is priced into the same total ahead of
+   time.
+
+The doc comment's own stated reasoning: "under-provisioning decode capacity
+causes preemption and recompute thrash, which costs more than a spare
+replica" — i.e. deliberate, not an oversight.
+
+**Dean's follow-up question, recorded rather than answered here**: item 1's
+charge uses the request's full `I + O`. Quite possibly `I + 0.5*O` (roughly
+the request's *mean* footprint over its lifetime, rather than its peak)
+would be a better planning size — but this port has no ground truth to
+judge that against: no token-by-token KV occupancy trace exists for any
+captured run, only each request's final `in_tok`/`out_tok`. Whoever owns
+`saturation_v2/analyzer.go` is in a much better position to know what the
+right charge is (and why `I + O` was chosen over it) than benchmark tooling
+reading the analyzer's output after the fact — recorded here as a real
+question for them, not a recommendation to change it.
+
+**What this repo's benchmark tooling did**: relabelled the panel 5 legend
+entry from "WVA demand (requests, approx)" to "WVA demand (peak capacity
+plan, not concurrent — approx)" so the gap against `in_system`/`being served`
+reads as expected/by-design rather than as the panel's lines disagreeing
+with each other.

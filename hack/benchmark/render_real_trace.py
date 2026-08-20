@@ -1347,7 +1347,7 @@ def render(bundle, path, title=None, coverage=None):
     # even though the heatmap body itself is now dense.
     r = der.get('router') or {}
     p95 = r.get('disp_p95')
-    e.text(0.995, 1.20 if pods else 1.02,
+    e.text(0.995, 1.05 if pods else 1.02,
            f"router imbalance p95={'?' if p95 is None else round(p95, 2)}, "
            f"{r.get('leader_flips', '?')} leader flips / {r.get('n', '?')} "
            f"samples (not an oscillation test)",
