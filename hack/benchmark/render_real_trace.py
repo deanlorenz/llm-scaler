@@ -52,7 +52,7 @@ try:
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    from matplotlib.ticker import MaxNLocator, FuncFormatter
+    from matplotlib.ticker import MaxNLocator, FuncFormatter, FixedLocator
     from matplotlib.colors import LinearSegmentedColormap, to_rgba
     import numpy as np
 except ImportError:
@@ -678,6 +678,14 @@ def render(bundle, path, title=None, coverage=None):
     else:
         empty(c, 'no replica_status_timeseries.json')
     c.set_ylabel('replicas')
+    # MaxNLocator(integer=True) does not guarantee integer TICK VALUES, only
+    # integer STEP sizes -- on a near-flat series (desired==ready==1 the whole
+    # run, offset by the +-0.05 trick above to keep both lines visible) the
+    # view spans only [0.95, 1.05], no integer step fits, and it falls back to
+    # evenly-spaced fractional ticks (0.945, 0.96, ... 1.05). Anchoring the
+    # bottom at 0 gives it enough real span to find integers reliably at any
+    # replica count -- confirmed 0..1 and 0..10 both come back clean.
+    c.set_ylim(bottom=0)
     c.yaxis.set_major_locator(MaxNLocator(integer=True))
     c.set_title('2 · autoscaling: desired vs ready replicas', loc='left', fontsize=10)
 
@@ -702,7 +710,25 @@ def render(bundle, path, title=None, coverage=None):
     if pods:
         pgrid = sorted({round(s['t']) for p in pods.values() for s in p['series']})
         xs = [t - t0 for t in pgrid]
-        width = max(1.0, span / max(1, len(pgrid)) * 0.95)
+        # One width for every bar (the run's average tick spacing) does not
+        # match reality when the real scrape cadence varies tick to tick
+        # (confirmed on a real run: local gaps ranging 16-19s, average 17.1s)
+        # -- wherever the local gap is smaller than that average, neighbouring
+        # bars overlap; wherever it's larger, they show a gap that isn't
+        # real. Each bar's width is instead its own Voronoi cell on the
+        # timeline -- half-way to its previous neighbour on the left,
+        # half-way to its next neighbour on the right -- so consecutive bars
+        # abut exactly, with no overlap and no gap, matching the actual
+        # scrape they each represent. Edge bars mirror their one real
+        # neighbour gap since they have no neighbour on the other side.
+        if len(xs) > 1:
+            width = []
+            for i in range(len(xs)):
+                left = (xs[i - 1] + xs[i]) / 2 if i > 0 else xs[i] - (xs[i + 1] - xs[i]) / 2
+                right = (xs[i] + xs[i + 1]) / 2 if i < len(xs) - 1 else xs[i] + (xs[i] - xs[i - 1]) / 2
+                width.append(max(1.0, right - left))
+        else:
+            width = [max(1.0, span)] if xs else []
         bottom = [0.0] * len(pgrid)
         run_tot = [0.0] * len(pgrid)
         drain_tot = [0.0] * len(pgrid)
@@ -1499,6 +1525,21 @@ def render(bundle, path, title=None, coverage=None):
         g.axhline(0, color=INK, lw=0.8, alpha=0.5, zorder=2.0)
         # Ticks must read as real replica-delta values ("±2, ±4, ±8..."), not
         # the log-space numbers the line/scatter data is actually plotted at.
+        #
+        # The default locator picks positions evenly spaced in LOG-SPACE
+        # (where the axis actually lives), then the formatter below inverts
+        # each one back to a real value -- but inv_signed_log2 rounds to the
+        # nearest integer, and several nearby log-space positions invert to
+        # the SAME rounded real value (e.g. signed_log2(0.5)=~0.41 rounds to
+        # "0", same as signed_log2(0)=0 itself) or to "-0"/"0" pairs that read
+        # as duplicates. A FixedLocator placed at the exact signed_log2(y)
+        # position of each of these real values is losslessly invertible --
+        # every tick maps to one distinct, real replica-delta, no rounding
+        # collision possible. Matplotlib clips whichever of these fall
+        # outside the current view, so listing all of them is safe on any
+        # run regardless of how wide its actual range is.
+        g.yaxis.set_major_locator(
+            FixedLocator([signed_log2(y) for y in (-8, -4, -2, -1, 0, 1, 2, 4, 8)]))
         g.yaxis.set_major_formatter(FuncFormatter(inv_signed_log2))
         # The old shipped version placed this text differently depending on
         # whether saturation had its own horizontal lane -- panel 6 no longer

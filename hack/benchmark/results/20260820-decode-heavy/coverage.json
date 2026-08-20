@@ -1,0 +1,98 @@
+{
+  "rows": [
+    {
+      "capability": "Calibrate A",
+      "verdict": "PASS",
+      "detail": "n=212 bands=6 kv_span=1.00"
+    },
+    {
+      "capability": "Trust B",
+      "verdict": "PASS",
+      "detail": "y_lo=0.0 B_fit=2.7650993210946675 B_meas=2.865178696715571 n_low=146"
+    },
+    {
+      "capability": "Characterize saturation",
+      "verdict": "PASS",
+      "detail": "n=15"
+    },
+    {
+      "capability": "Exercise the 0.85 ceiling",
+      "verdict": "FAIL",
+      "detail": "n_0.80_0.90=0"
+    },
+    {
+      "capability": "Locate the throughput knee",
+      "verdict": "FAIL",
+      "detail": "n=227 left=225 right=1"
+    },
+    {
+      "capability": "Scale-down present",
+      "verdict": "PASS",
+      "detail": "drain_events=6"
+    },
+    {
+      "capability": "Drain-vs-kill measurable",
+      "verdict": "PASS",
+      "detail": "needs a scale-down and a per-request trace"
+    },
+    {
+      "capability": "Queue (a) material",
+      "verdict": "FAIL",
+      "detail": "no demand trace"
+    },
+    {
+      "capability": "Queue (c) material",
+      "verdict": "PASS",
+      "detail": "max=1390.0"
+    },
+    {
+      "capability": "Router imbalance measurable",
+      "verdict": "PASS",
+      "detail": "pods=10 disp_p95=0.6095617529880478 flips=17 n=26 (boot samples excluded: 8)"
+    },
+    {
+      "capability": "rho model valid at top",
+      "verdict": "FAIL",
+      "detail": "preempt/s=4.174291938997821"
+    },
+    {
+      "capability": "Capacity model checkable",
+      "verdict": "PASS",
+      "detail": "pred=68.84105298233922 obs=159.0"
+    },
+    {
+      "capability": "Boot lag measured",
+      "verdict": "PASS",
+      "detail": "n=2 mean=30.5"
+    },
+    {
+      "capability": "Signal completeness",
+      "verdict": "PASS",
+      "detail": "4fzwq=43; 78k2z=43; c5c69=41; flmlc=40; gxvgh=41; l5lp2=34; rhkzh=55; vhjd9=42; wwkvg=44; x2qz8=33"
+    },
+    {
+      "capability": "Per-request trace present",
+      "verdict": "PASS",
+      "detail": "n=5811"
+    },
+    {
+      "capability": "Scaling-decision log present",
+      "verdict": "PASS",
+      "detail": "analyzers=['saturation'] n_results=96 n_decisions=96 source=/home/dean/code/llm-d/dean-llmd-scaler-sandbox/.claude/worktrees/benchmark/dean-20260820-152419-492/results/guidellm-1787228725-a32uh3_1/controller.log"
+    },
+    {
+      "capability": "Knee matches shape prediction",
+      "verdict": "PASS",
+      "detail": "in=1001 out=4000 out/in=4.00 (decode-heavy -> expect y=0); fitted y_lo=0.0"
+    }
+  ],
+  "n_pass": 13,
+  "n_fail": 4,
+  "saturation_threshold": 0.85,
+  "warnings": [
+    "replica_status_timeseries.json had no matching controller; replicas synthesized from the WVA controller's own wva_desired_replicas/wva_current_replicas metrics instead (\"ready\" is status.replicas, not readyReplicas)",
+    "no post_run_analyze.sh output (wva_target_timeseries.json etc.) - WVA decision timeseries unavailable for this run; see plan 1.1a"
+  ],
+  "extractor_sha": "d6c4415b",
+  "extracted_at": "2026-08-20T12:54:08.539882+00:00"
+}

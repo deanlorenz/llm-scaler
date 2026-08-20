@@ -1,0 +1,39 @@
+{
+  "run": "guidellm-1787228725-a32uh3_1",
+  "harness": "guidellm",
+  "harness_version": "guidellm version: 0.7.3",
+  "model": "Qwen/Qwen3-0.6B",
+  "engine": {
+    "num_gpu_blocks": "12912",
+    "block_size": "16",
+    "gpu_memory_utilization": "0.3",
+    "enable_prefix_caching": "True",
+    "cache_dtype": "auto",
+    "sliding_window": "None"
+  },
+  "namespace": "dhl-la-1708",
+  "cluster": "dhl-la-1708",
+  "workload": "decode_heavy.yaml",
+  "shape": {
+    "in_tok": 1001,
+    "out_tok": 4000
+  },
+  "extractor_version": "0.1.0",
+  "extractor_git_sha": "d6c4415bddb9722286ddd4b60efbde26c35c65b5",
+  "extracted_at": "2026-08-20T15:54:08+0300",
+  "published_at": "2026-08-20T16:28:54+0300",
+  "bundle_sha256": "5ff12129b56f2c5e6e27fd52351d3fd213f3a11bc1c64122d34480f509d2d97e",
+  "bundle_bytes": 1100023,
+  "coverage": {
+    "pass": 13,
+    "fail": 4,
+    "not_exercised": [
+      "Exercise the 0.85 ceiling",
+      "Locate the throughput knee",
+      "Queue (a) material",
+      "rho model valid at top"
+    ]
+  },
+  "time_anchor_trustworthy": null,
+  "source_dir": "/home/dean/code/llm-d/dean-llmd-scaler-sandbox/.claude/worktrees/benchmark/dean-20260820-152419-492/results/guidellm-1787228725-a32uh3_1"
+}
