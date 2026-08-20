@@ -1,0 +1,45 @@
+{
+  "run": "inference-perf-1787225821-3dl4q4_1",
+  "harness": "inference-perf",
+  "harness_version": "a40897e6500e4524adf563a91f7c880eb5296e12",
+  "model": "Qwen/Qwen3-0.6B",
+  "engine": {
+    "num_gpu_blocks": "12912",
+    "block_size": "16",
+    "gpu_memory_utilization": "0.3",
+    "enable_prefix_caching": "True",
+    "cache_dtype": "auto",
+    "sliding_window": "None"
+  },
+  "namespace": "dhl-la-1708",
+  "cluster": "dhl-la-1708",
+  "workload": "quick_smoke.yaml",
+  "shape": {
+    "in_tok": 1015,
+    "out_tok": null
+  },
+  "extractor_version": "0.1.0",
+  "extractor_git_sha": "ed233f90cbba2f7f93e4709bbf18e3dd113baed7",
+  "extracted_at": "2026-08-20T14:45:36+0300",
+  "published_at": "2026-08-20T14:46:26+0300",
+  "bundle_sha256": "4ec5d3a13fa893a1b0acdd4e80478ba473f617168c6710a29620c9ce957214a0",
+  "bundle_bytes": 221020,
+  "coverage": {
+    "pass": 6,
+    "fail": 10,
+    "not_exercised": [
+      "Calibrate A",
+      "Characterize saturation",
+      "Exercise the 0.85 ceiling",
+      "Scale-down present",
+      "Drain-vs-kill measurable",
+      "Queue (a) material",
+      "Queue (c) material",
+      "Router imbalance measurable",
+      "Capacity model checkable",
+      "Boot lag measured"
+    ]
+  },
+  "time_anchor_trustworthy": false,
+  "source_dir": "/home/dean/code/llm-d/dean-llmd-scaler-sandbox/.claude/worktrees/benchmark/dean-20260820-143619-338/results/inference-perf-1787225821-3dl4q4_1"
+}

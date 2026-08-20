@@ -1,0 +1,94 @@
+{
+  "rows": [
+    {
+      "capability": "Calibrate A",
+      "verdict": "FAIL",
+      "detail": "n=12 bands=2 kv_span=0.11"
+    },
+    {
+      "capability": "Trust B",
+      "verdict": "PASS",
+      "detail": "y_lo=0.0 B_fit=1.9699245803450443 B_meas=2.0726894419554007 n_low=10"
+    },
+    {
+      "capability": "Characterize saturation",
+      "verdict": "FAIL",
+      "detail": "n=0"
+    },
+    {
+      "capability": "Exercise the 0.85 ceiling",
+      "verdict": "FAIL",
+      "detail": "n_0.80_0.90=0"
+    },
+    {
+      "capability": "Locate the throughput knee",
+      "verdict": "PASS",
+      "detail": "n=12 left=5 right=5"
+    },
+    {
+      "capability": "Scale-down present",
+      "verdict": "FAIL",
+      "detail": "drain_events=0"
+    },
+    {
+      "capability": "Drain-vs-kill measurable",
+      "verdict": "FAIL",
+      "detail": "needs a scale-down and a per-request trace"
+    },
+    {
+      "capability": "Queue (a) material",
+      "verdict": "FAIL",
+      "detail": "no demand trace"
+    },
+    {
+      "capability": "Queue (c) material",
+      "verdict": "FAIL",
+      "detail": "max=0.0"
+    },
+    {
+      "capability": "Router imbalance measurable",
+      "verdict": "FAIL",
+      "detail": "pods=1 disp_p95=None flips=0 n=0 (boot samples excluded: 1)"
+    },
+    {
+      "capability": "rho model valid at top",
+      "verdict": "PASS",
+      "detail": "preempt/s=None"
+    },
+    {
+      "capability": "Capacity model checkable",
+      "verdict": "FAIL",
+      "detail": "pred=None obs=19.0"
+    },
+    {
+      "capability": "Boot lag measured",
+      "verdict": "FAIL",
+      "detail": "n=0 mean=None"
+    },
+    {
+      "capability": "Signal completeness",
+      "verdict": "PASS",
+      "detail": "rhkzh=13"
+    },
+    {
+      "capability": "Per-request trace present",
+      "verdict": "PASS",
+      "detail": "n=990"
+    },
+    {
+      "capability": "Scaling-decision log present",
+      "verdict": "PASS",
+      "detail": "analyzers=['saturation'] n_results=51 n_decisions=51 source=/tmp/wva-controller-run3.log"
+    }
+  ],
+  "n_pass": 6,
+  "n_fail": 10,
+  "saturation_threshold": 0.85,
+  "warnings": [
+    "replica_status_timeseries.json had no matching controller; replicas synthesized from the WVA controller's own wva_desired_replicas/wva_current_replicas metrics instead (\"ready\" is status.replicas, not readyReplicas)",
+    "no post_run_analyze.sh output (wva_target_timeseries.json etc.) - WVA decision timeseries unavailable for this run; see plan 1.1a",
+    "time anchor is weak (engine occupancy exceeds request-derived in-system count on 8% of scrapes despite corr=0.9204871233257719); arrival-time panels are unreliable for this run"
+  ],
+  "extractor_sha": "77ea1b03",
+  "extracted_at": "2026-08-20T11:45:36.615742+00:00"
+}
