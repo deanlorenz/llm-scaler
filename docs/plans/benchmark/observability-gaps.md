@@ -345,3 +345,74 @@ entry from "WVA demand (requests, approx)" to "WVA demand (peak capacity
 plan, not concurrent — approx)" so the gap against `in_system`/`being served`
 reads as expected/by-design rather than as the panel's lines disagreeing
 with each other.
+
+## 7. Time-anchor cross-correlation weakness on `quick_smoke` — investigated, no fix found (dhl-la-1708, run captured 2026-08-20, investigated 2026-08-21)
+
+`extract_real_trace.py`'s `anchor_offset()` cross-correlates inference-perf's
+monotonic per-request trace against pod-scraped `run+wait` occupancy to place
+it on the wall clock. On the `quick_smoke` run
+(`results/20260820-real-decisions/bundle.json`), the fit comes back weak:
+`corr=0.92`, `trustworthy: false` — the physical check ("engine occupancy can
+never exceed the request-derived in-system count") fails on 1 of 13 scrapes,
+by up to 54.5%.
+
+**Root cause, confirmed empirically, not assumed**: `n_scrapes=13` at ~17s
+cadence is genuinely too sparse to align against a 990-request/183s-span
+demand curve without occasionally, unavoidably tripping the physical-check
+tolerance. This is structural, not a search bug:
+
+- `quick_smoke` runs a single decode replica, so there is no multi-pod
+  scrape-phase interleaving to fall back on. This is exactly why
+  `decode_heavy` (10 decode replicas, the same per-pod ~18s scrape cadence,
+  but each replica scraped at a different phase) needs no anchor at all *and*
+  shows far fewer run-vs-`in_system` disagreements once rendered: the same
+  per-pod cadence becomes far denser once pooled across 10 independently
+  phase-scraped pods — a "free" density win single-replica runs don't get.
+- An exhaustive scan across the full ±180s offset range (refined down to a
+  0.05s step) confirms **no offset achieves zero physical violations** for
+  this run — the best-correlating offset is also the best (tied-best) one by
+  the physical check. The algorithm is already picking the best alignment
+  available; there is no better one hiding nearby.
+
+**Alternative already-collected signals tested as a denser substitute for the
+sparse pod scrapes, all rejected** (this directly answers "are the unparsed
+`wva_*` metrics/EPP signal valuable here" — tested, not assumed):
+
+1. Controller-log `analyzer-result`'s `demand` field: 51 samples across the
+   whole controller-log window, already on the real epoch clock. Raw
+   correlation is *higher* (0.96 vs 0.92) but it locks onto an offset 45s away
+   from the `run+wait` optimum, one that fails the physical check far worse
+   (6/13 violations, 100% worst-case excess, vs 1/13 at 54.5%). `demand` is a
+   peak/no-preemption planning quantity (§6) with real timing lag and
+   smoothing baked in by design — more samples on a biased, smoothed signal is
+   not more precision, and this run shows it actively misleads the fit.
+2. WVA controller's own scraped `wva_kv_cache_tokens_used` gauge: 29 samples,
+   a scrape phase different from the pod scrapes (the same multi-source
+   interleaving idea that makes `decode_heavy` work, tried here with one
+   extra source). Degenerate for this run — correlation ≈ 0. `quick_smoke`'s
+   load never pushed KV usage far enough off its floor for the gauge to carry
+   a usable signal.
+3. EPP's `inference_objective_running_requests`: would have been scraped at
+   the *same* 13 timestamps as the decode pod (no density win), but is a
+   signal one hop closer to the client, so potentially cleaner. Unavailable
+   for this run — every EPP scrape in
+   `metrics/raw/optimized-baseline-epp-*_metrics.log` returned `Unauthorized`
+   instead of metrics text. A real collection gap (auth against the EPP
+   metrics endpoint failed for the whole run), not something the extractor
+   can work around after the fact — flag for whoever owns
+   `scrape_wva_metrics.sh`'s EPP scrape path, separately from this finding.
+
+**What changed**: nothing about the actual anchor numbers — no combination of
+already-captured data for this run beats the existing `run+wait` fit. One
+small diagnostic improvement landed: the "time anchor is weak" warning
+(`build()` in `extract_real_trace.py`) now names `n_scrapes` directly, so a
+reader is pointed at sparse scrape density immediately rather than having to
+reconstruct it from raw `corr`/`over_l` numbers.
+
+**The actual fix, if wanted, is upstream of this port's extraction step**:
+scrape the engine pod more frequently during collection
+(`scrape_wva_metrics.sh`), or run more than one replica even for a smoke
+test, so multi-pod phase interleaving kicks in the way it does for
+`decode_heavy`. Both are cluster/collection-side changes — out of scope for
+this offline, already-captured-bundle analysis task (see this doc's scope
+note at the top).

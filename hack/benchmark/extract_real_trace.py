@@ -1872,13 +1872,17 @@ def build(run_dir, want_per_request=True, head=None, controller_log=None):
                     r['t_dep'] += off
         if not anchor.get('trustworthy', True):
             # Name the criterion that actually failed: a high correlation with a
-            # failing physical check is a different diagnosis from a low one.
+            # failing physical check is a different diagnosis from a low one. A
+            # handful of scrapes leaves the over-L tolerance almost no slack (its
+            # budget is over_l_frac * n_scrapes, so a single skewed sample already
+            # exceeds it below ~20 scrapes) -- naming n_scrapes here points a
+            # reader straight at sparse scrape density rather than a bad fit.
             why = (f"corr={anchor.get('corr')}" if (anchor.get('corr') or 1.0) < 0.6
                    else f"engine occupancy exceeds request-derived in-system count "
                         f"on {anchor.get('over_l_frac', 0):.0%} of scrapes despite "
                         f"corr={anchor.get('corr')}")
-            warn(f'time anchor is weak ({why}); arrival-time panels are '
-                 'unreliable for this run')
+            warn(f'time anchor is weak ({why}, n_scrapes={anchor.get("n_scrapes")}); '
+                 'arrival-time panels are unreliable for this run')
 
     shape = {}
     oks = [r for r in requests if r['outcome'] == 'ok']
