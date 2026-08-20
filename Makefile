@@ -1503,6 +1503,14 @@ benchmark-run: benchmark-guard ## Run a single benchmark workload (set BENCHMARK
 	@# is not known until after the run) and filed alongside the replica samples below.
 	@rm -rf /tmp/wva_metrics_scrape
 	@bash hack/benchmark/scrape_wva_metrics.sh start $(BENCHMARK_NAMESPACE) /tmp/wva_metrics_scrape || true
+	@# analyzer-result/scaling-decision/k1-k2 lines live only in the controller's
+	@# own log, never in a metric -- without this, a run can complete cleanly and
+	@# report zero decisions with no way to tell "WVA decided nothing" apart from
+	@# "nobody captured it". Client-side oc logs -f, not an in-cluster follower:
+	@# fine for a run this short, the wrong tool for anything long/unattended --
+	@# see docs/plans/benchmark/observability-gaps.md #2.
+	@rm -f /tmp/wva_controller_log.txt /tmp/wva_controller_log.txt.pid /tmp/wva_controller_log.txt.stderr
+	@bash hack/benchmark/capture_wva_controller_log.sh start $(BENCHMARK_NAMESPACE) /tmp/wva_controller_log.txt || true
 	-$(LLMDBENCHMARK) $(BENCHMARK_CLI_FLAGS) run \
 		-p $(BENCHMARK_NAMESPACE) \
 		-l $(BENCHMARK_HARNESS) \
@@ -1516,11 +1524,16 @@ benchmark-run: benchmark-guard ## Run a single benchmark workload (set BENCHMARK
 	@# FMA run so far has ended that way.
 	@bash hack/benchmark/sample_replicas.sh stop /tmp/wva_replica_samples.json || true
 	@bash hack/benchmark/scrape_wva_metrics.sh stop /tmp/wva_metrics_scrape || true
+	@bash hack/benchmark/capture_wva_controller_log.sh stop /tmp/wva_controller_log.txt || true
 	@LATEST=$$(ls -td $(BENCHMARK_WORKSPACE)/$${USER}-*/results/$(BENCHMARK_HARNESS)-*_* 2>/dev/null | head -1); \
 	if [ -n "$$LATEST" ] && [ -s /tmp/wva_replica_samples.json ]; then \
 		mkdir -p "$$LATEST/metrics/processed"; \
 		cp /tmp/wva_replica_samples.json "$$LATEST/metrics/processed/wva_replica_samples.json"; \
 		echo "Replica samples filed in $$LATEST/metrics/processed/wva_replica_samples.json"; \
+	fi; \
+	if [ -n "$$LATEST" ] && [ -s /tmp/wva_controller_log.txt ]; then \
+		cp /tmp/wva_controller_log.txt "$$LATEST/controller.log"; \
+		echo "Controller log filed in $$LATEST/controller.log ($$(wc -l < /tmp/wva_controller_log.txt) line(s))"; \
 	fi; \
 	if [ -n "$$LATEST" ] && ls /tmp/wva_metrics_scrape/wva-controller_*_metrics.log >/dev/null 2>&1; then \
 		mkdir -p "$$LATEST/metrics/raw"; \
