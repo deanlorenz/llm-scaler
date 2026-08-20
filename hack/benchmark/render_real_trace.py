@@ -52,7 +52,7 @@ try:
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    from matplotlib.ticker import MaxNLocator, FuncFormatter, FixedLocator
+    from matplotlib.ticker import MaxNLocator, FuncFormatter, FixedLocator, AutoMinorLocator
     from matplotlib.colors import LinearSegmentedColormap, to_rgba
     import numpy as np
 except ImportError:
@@ -647,11 +647,20 @@ def render(bundle, path, title=None, coverage=None):
         xs = [rel(r['t'], t0) for r in reps]
         dz = [r.get('desired') for r in reps]
         rz = [r.get('ready') for r in reps]
-        # tiny opposite y-offsets and equal weights, exactly as the synthetic
-        # figure: once ready catches up the two coincide, and neither may hide.
-        c.step(xs, [v + 0.05 if v is not None else None for v in dz], where='post',
+        # Tiny opposite y-offsets, exactly as the synthetic figure: once ready
+        # catches up the two coincide, and neither may hide. A fixed 0.05 was
+        # a sensible fraction of the axis on a run that never leaves 0..1,
+        # but reads as noise-thin on a run spanning 0..10 -- scaled to 3% of
+        # the actual desired/ready range instead. On a run where the two
+        # never differ at all (range 0), fall back to 3% of the value itself
+        # so the offset still means something relative to what's plotted.
+        dr_vals = [v for v in dz + rz if v is not None]
+        dr_range = (max(dr_vals) - min(dr_vals)) if dr_vals else 0
+        dr_scale = dr_range if dr_range > 0 else (max(dr_vals) if dr_vals else 1)
+        offset = max(0.02, 0.03 * dr_scale)
+        c.step(xs, [v + offset if v is not None else None for v in dz], where='post',
                color=C_DES, lw=2.2, alpha=0.9, label='desired (WVA)')
-        c.step(xs, [v - 0.05 if v is not None else None for v in rz], where='post',
+        c.step(xs, [v - offset if v is not None else None for v in rz], where='post',
                color=C_ACT, lw=2.2, alpha=0.9, label='ready (alive)')
         # A replica that is alive but no longer wanted is draining: still finishing
         # in-flight work, not accepting new work, so NOT usable capacity. Kept even
@@ -1010,11 +1019,22 @@ def render(bundle, path, title=None, coverage=None):
                 d.bar(xs, epp, width=width, bottom=bottom, color=C_Q, alpha=0.75,
                       label='EPP queue (in system − Σrunning − Σdraining − Σwaiting)',
                       zorder=1)
-        yn = []
-        if sys_by_t:
-            # thick overlay, NOT part of the stack
-            xn, yn = step_series(system, 'in_system', t0)
-            d.plot(xn, yn, color=C_WAIT, lw=2.4, alpha=0.9, zorder=2.8,
+        if insys_p:
+            # Plotting insys_p (already computed above for the EPP-queue
+            # band, held onto pgrid) rather than the raw per-request-event
+            # series: the two live on completely different clocks -- this
+            # panel's bars sit on pod-scrape instants (~17s apart), while a
+            # per-request reconstruction ticks at ~1s, on whichever second
+            # some request happened to arrive or depart. Plotted directly
+            # (Dean: "the red line does not hit the mid top of each bar"),
+            # the two were never going to land on the same x, no matter how
+            # closely either was sampled. insys_p already shares xs exactly
+            # -- the line now passes through the SAME value each bar's own
+            # residual math used, at the bar's own centre. It also holds the
+            # last real value across the rest of pgrid rather than vanishing
+            # the moment the last request departs, matching the pod-metric
+            # bars' own continued (idle) presence past that point.
+            d.plot(xs, insys_p, color=C_WAIT, lw=2.4, alpha=0.9, zorder=2.8,
                    label='total requests in system (overlay)')
         if cap.get('max_conc_pred') and reps:
             xr, yr = step_series(reps, 'ready', t0)
@@ -1023,7 +1043,7 @@ def render(bundle, path, title=None, coverage=None):
             # stack the same way panel 1b's uncapped ceiling did -- except
             # here the fix is a secondary axis (not a cap), since the ceiling
             # is a step line, not a fill the stack needs to stay clear of.
-            insys_max = max((yn or [0]), default=0)
+            insys_max = max((insys_p or [0]), default=0)
             ceil_max = max(ceil_y, default=0)
             close = insys_max == 0 or abs(ceil_max - insys_max) <= 0.10 * insys_max
             if close:
@@ -1280,14 +1300,6 @@ def render(bundle, path, title=None, coverage=None):
                 if s.get('in_system') is not None}
     if sys_by_t:
         nsys_g = hold(sys_by_t, grid)
-    # For the L(t) line on panel 5 we also keep the direct (un-resampled)
-    # sample-point times so it can be plotted at the actual scrape instants --
-    # hold() onto `grid` places the step at the first grid tick >= the sample
-    # time (up to GRID=2s late), while panel 3's bars are centered on the
-    # scrape time itself; using the direct times closes that half-step visual
-    # offset.  (panel-review-20260817 item 6)
-    nsys_direct = [(rel(s['t'], t0), s['in_system'])
-                   for s in system if s.get('in_system') is not None]
     served_by_t = {}
     for p in pods.values():
         for s in p['series'] or []:
@@ -1307,15 +1319,20 @@ def render(bundle, path, title=None, coverage=None):
     if served_g and nsys_g:
         f.fill_between(grid, served_g, nsys_g, color=C_WAIT, alpha=0.16,
                        label='queued (L − served)')
-    if nsys_direct:
-        # Plot at direct sample times (drawstyle='steps-post' holds each value
-        # forward until the next sample) so the L(t) line aligns with panel 3's
-        # bar centers, which are also at actual scrape times.
-        # (panel-review-20260817 item 6)
-        nsys_xs = [x for x, _ in nsys_direct]
-        nsys_ys = [y for _, y in nsys_direct]
-        f.plot(nsys_xs, nsys_ys, color=C_WAIT, lw=1.6, alpha=0.9,
-               drawstyle='steps-post',
+    if nsys_g:
+        # Previously plotted at nsys_direct's raw per-request-event times
+        # instead (panel-review-20260817 item 6), to avoid hold()'s up-to-
+        # GRID=2s-late placement -- a fine tradeoff on this panel's own
+        # uniform `grid`. But once the last request departs, nsys_direct has
+        # no more points at all: the line simply stopped being drawn there,
+        # which reads as "in system" silently dropping BELOW "being served"
+        # (Dean: "in-sys signal look cut at ~240s + falls under being
+        # served") rather than correctly holding at its last real value the
+        # way the pod-metric-derived served_g continues to. nsys_g (already
+        # computed above for the queued-area fill, held onto this same
+        # `grid`) does not have that gap -- a few seconds of late placement
+        # is a smaller, less misleading cost than the line vanishing.
+        f.plot(grid, nsys_g, color=C_WAIT, lw=1.6, alpha=0.9,
                label='in system  L(t)' + (' — SAMPLE' if sampled else ''))
     if served_g:
         f.plot(grid, served_g, color=C_SERVED, lw=1.4, alpha=0.95,
@@ -1323,7 +1340,7 @@ def render(bundle, path, title=None, coverage=None):
     if slots_g:
         f.plot(grid, slots_g, color=C_CEIL, ls='--', lw=1.6,
                label=f"usable slot capacity (ready × {cap['max_conc_pred']:.0f})")
-    if nsys_direct or nsys_g or served_g:
+    if nsys_g or served_g:
         fit = der.get('itl_fit') or {}
         if fit.get('A_ms_per_req'):
             f.set_title(f"ITL = {fit['A_ms_per_req']:.3f}·k + {fit['B_ms']:.1f} ms "
@@ -1386,6 +1403,21 @@ def render(bundle, path, title=None, coverage=None):
     lanes = sorted(by_analyzer)
     if lanes:
         reason_markers = {}
+        # A reason code's TRUE first occurrence can predate the plotted
+        # window entirely -- the controller logs analyzer ticks continuously,
+        # including a long idle stretch before the harness generates any
+        # load (confirmed real: -296s relative to this panel's own t0). The
+        # marker for that off-screen tick never appears at all, so if "first
+        # occurrence" for LABELLING purposes stays tied to that same global
+        # first-seen check, every marker actually visible in the panel is
+        # (correctly, by that check) a repeat, and none of them get a label
+        # -- reading as "no label on the first visible mark" even though the
+        # code did label something, just off-screen. Tracked separately from
+        # reason_markers (which still assigns shapes in true chronological
+        # order, keeping that assignment stable regardless of view window):
+        # a reason is label-worthy the first time it appears at x >= 0,
+        # independent of whether that is its first appearance ever.
+        labeled_reasons = set()
         MARKER_SHAPES = ['o', 's', '^', 'D', 'v', 'P', 'X']
         absent_t = slog.get('saturation_absent_at')
         # First-occurrence label placements are collected, not drawn inline,
@@ -1471,14 +1503,14 @@ def render(bundle, path, title=None, coverage=None):
                           edgecolor=INK, linewidth=0.3,
                           label='_nolegend_', zorder=2.6)
                 # Label the reason code directly on the plot the first time
-                # it's plotted anywhere in the panel (global across analyzer
-                # lines, tracked by reason_markers' own insertion -- reuses
-                # the same dedup the shape assignment already does above,
-                # rather than a second tracking structure). The text key
-                # still documents the full shape-to-reason mapping; this
-                # makes the first occurrence of each one easy to find
-                # without cross-referencing the key every time.
-                if first_occurrence:
+                # it's plotted ON SCREEN (x >= 0), not the first time
+                # anywhere in the analyzer's full history -- see
+                # labeled_reasons' own comment above for why those differ.
+                # The text key still documents the full shape-to-reason
+                # mapping; this makes the first VISIBLE occurrence of each
+                # one easy to find without cross-referencing the key.
+                if reason not in labeled_reasons and x >= 0:
+                    labeled_reasons.add(reason)
                     pending_labels.append((x, y, reason, color))
         # Stagger labels whose x-positions are close together (within 3% of
         # the panel's own span) onto alternating vertical offsets, so close-
@@ -1541,6 +1573,16 @@ def render(bundle, path, title=None, coverage=None):
         g.yaxis.set_major_locator(
             FixedLocator([signed_log2(y) for y in (-8, -4, -2, -1, 0, 1, 2, 4, 8)]))
         g.yaxis.set_major_formatter(FuncFormatter(inv_signed_log2))
+        # Minor ticks between the (unevenly log2-spaced) major ones, as a
+        # reading aid for where a point sits between two labelled values --
+        # unlabelled, so they cannot repeat the major ticks' own rounding
+        # collision. AutoMinorLocator subdivides each major interval by
+        # count rather than by requiring even spacing, so this is safe on a
+        # log-space axis despite the majors themselves not being evenly
+        # spaced.
+        g.yaxis.set_minor_locator(AutoMinorLocator())
+        g.grid(which='minor', axis='y', alpha=0.15, lw=0.5)
+        g.grid(which='major', axis='y', alpha=0.3, lw=0.6)
         # The old shipped version placed this text differently depending on
         # whether saturation had its own horizontal lane -- panel 6 no longer
         # has per-analyzer lanes (every analyzer's line now spans the full
