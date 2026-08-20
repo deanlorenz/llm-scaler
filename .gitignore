@@ -54,6 +54,9 @@ hack/tls-certs/
 # AI
 .claude/worktrees/
 
+# Local kubeconfig copy (this worktree's cluster credentials — never commit)
+.kube/
+
 # ScaledObject plan written by `make benchmark-deploy-wva`
 benchmark-scaledobject-plan.yaml
 wva-plan.yaml

@@ -93,6 +93,14 @@ def _strip_managed(obj):
         meta.pop(field, None)
     ann = meta.get("annotations", {})
     ann.pop("kubectl.kubernetes.io/last-applied-configuration", None)
+    # Third-party controllers stamp object-specific history here (e.g. the
+    # cluster's GPU-reaper sweep agent records when/why *this* Deployment was
+    # last scaled down). Cloned onto a brand-new object, that history is
+    # simply false -- strip it rather than let the clone claim an idle
+    # timeline it never had.
+    for key in list(ann):
+        if key.startswith("gpu-reaper.io/"):
+            ann.pop(key, None)
     if not ann:
         meta.pop("annotations", None)
     obj.pop("status", None)
@@ -156,12 +164,18 @@ def find_primary_deployment(namespace):
 
     def _is_primary(d):
         sel = d.get("spec", {}).get("selector", {}).get("matchLabels", {})
-        if sel.get("llm-d.ai/inference-serving") != "true":
-            return False
         if sel.get("llm-d.ai/role") != "decode":
             return False
         # Exclude secondary variants created by this script
         if "wva.llmd.ai/variant" in sel:
+            return False
+        # The modelservice chart's primary additionally sets this kebab-case
+        # marker to distinguish itself from a secondary clone. Guides
+        # installed outside that chart (e.g. llm-d's own "optimized-baseline",
+        # whose InferencePool selects only on llm-d.ai/guide) never set it at
+        # all, so its absence must not disqualify a real primary -- only an
+        # explicit "false" would (nothing sets that today).
+        if sel.get("llm-d.ai/inference-serving") == "false":
             return False
         return True
 
