@@ -262,3 +262,22 @@ after-the-fact patch from the analysis side. This doc records the finding for
 whoever owns that code path (see item 5 above); this port's job stays
 analysis of what's actually emitted, which correctly reported an empty
 decision table rather than fabricating one.
+
+**Status: resolved on dhl-la-1708, 2026-08-20.** Fixed through the code that
+owns this config, not by hand-patching: `make scaledobjects-plan` (read-only,
+re-derives `modelID` from the live container) confirmed the discovered
+`Qwen/Qwen3-0.6B` still showed `apply: no` against the existing ScaledObject,
+then `make scaledobjects-apply` with that entry's `apply:` set to `adopt`
+repointed `optimized-baseline-nvidia-gpu-vllm-decode-wva`'s `modelID` trigger
+to match — `ScaledObjects: 0 created, 1 adopted, 0 not applied`. Verified with
+the new gate below: `hack/benchmark/verify_wva_scaledobjects.sh dhl-la-1708`
+now reports `1 ok, 0 drift, 0 unregistered, 0 unresolved`.
+
+Also added `hack/benchmark/verify_wva_scaledobjects.sh`, wired as a hard gate
+into `benchmark-run` (and standalone as `make benchmark-verify-scaledobjects`)
+so this class of drift is caught and blocks *before* a run wastes GPU time on
+a WVA that cannot produce a decision, rather than being found afterward by
+manual log archaeology. It reuses `deploy/lib/scaledobject.sh`'s own discovery
+(`install_default_scaledobjects` in `plan` mode, `so_plan_rows`) rather than
+reimplementing model detection, and never mutates anything — same read-only
+boundary this doc's scope note describes above.
