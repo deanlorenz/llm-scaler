@@ -21,7 +21,7 @@
   "extractor_version": "0.1.0",
   "extractor_git_sha": "d6c4415bddb9722286ddd4b60efbde26c35c65b5",
   "extracted_at": "2026-08-20T15:38:15+0300",
-  "published_at": "2026-08-20T18:48:47+0300",
+  "published_at": "2026-08-20T19:09:16+0300",
   "bundle_sha256": "7189a39d50bbfeedd726c9de0e024e0180adf698b2ced2e6895beb2524a30a65",
   "bundle_bytes": 247889,
   "coverage": {

@@ -665,7 +665,7 @@ def render(bundle, path, title=None, coverage=None):
         dr_vals = [v for v in dz + rz if v is not None]
         dr_range = (max(dr_vals) - min(dr_vals)) if dr_vals else 0
         dr_scale = dr_range if dr_range > 0 else (max(dr_vals) if dr_vals else 1)
-        offset = max(0.02, 0.03 * dr_scale)
+        offset = min(0.1, max(0.02, 0.03 * dr_scale))
         c.step(xs, [v + offset if v is not None else None for v in dz], where='post',
                color=C_DES, lw=2.2, alpha=0.9, label='desired (WVA)')
         c.step(xs, [v - offset if v is not None else None for v in rz], where='post',
@@ -1018,7 +1018,13 @@ def render(bundle, path, title=None, coverage=None):
             # numbers belonged to which.
             d3.tick_params(axis='y', labelsize=7, colors='#eab308')
             d3.spines['right'].set_color('#eab308')
-            d3.legend(loc='upper right', fontsize=6.5, framealpha=0.85)
+            # loc='upper right' alone hugs the axes' own right edge, which is
+            # exactly where the per-pod colour-key strip (fig.colorbar, just
+            # outside the axes) sits -- the legend box's edge and the
+            # strip's "10" label were landing on top of each other. Pulled
+            # in from the edge with bbox_to_anchor so the box clears it.
+            d3.legend(loc='upper right', bbox_to_anchor=(0.91, 1.0),
+                      fontsize=6.5, framealpha=0.85)
         # router-side residual, on the pod grid (nearest system sample)
         sys_by_t = {round(s['t']): s.get('in_system') for s in system
                     if s.get('in_system') is not None}
@@ -1209,8 +1215,17 @@ def render(bundle, path, title=None, coverage=None):
         # rare, scaling-relevant case) -- so crossing k_sat visibly changes
         # color character, not just shade.
         k_sat = sat.get('threshold') or SAT
+        # green->red alone spans only [k_sat, 1.0] -- for a typical k_sat of
+        # 0.85 that is 15% of the colormap's own domain, so a small real
+        # excess (0.86, 0.87...) already reads as strongly red: everything
+        # "above threshold" looked equally alarming, with no way to tell a
+        # mild overshoot from a severe one (Dean: "there is bad and there is
+        # really bad"). An amber stop halfway between k_sat and 1.0 splits
+        # that range into two: green->amber for a mild overshoot, amber->red
+        # reserved for one that's actually severe.
         kv_cmap = LinearSegmentedColormap.from_list(
             'kv_heat', [(0.0, '#ffffff'), (k_sat, '#16a34a'),
+                        (k_sat + (1.0 - k_sat) * 0.5, '#f59e0b'),
                         (1.0, '#dc2626')])
         dead_color = to_rgba('#d1d5db')  # distinct light gray -- never claimed by a real 0.0
         rgba = np.array(
