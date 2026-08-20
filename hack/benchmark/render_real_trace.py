@@ -1371,6 +1371,46 @@ def render(bundle, path, title=None, coverage=None):
     if slots_g:
         f.plot(grid, slots_g, color=C_CEIL, ls='--', lw=1.6,
                label=f"usable slot capacity (ready × {cap['max_conc_pred']:.0f})")
+    # WVA's own total supply/demand, converted from KV-cache-token units
+    # into this panel's own request units. supply/demand pair with prc
+    # (per-replica capacity) in the analyzer-result records -- all three
+    # come from the same tick, in the same KV-token scale
+    # (saturation_v2/analyzer.go: kvUsageDemand = KvCacheUsage * EffectiveCapacity),
+    # not tokens/sec and not a request count on their own. There is no fixed
+    # tokens-per-request constant to divide by -- it depends on each
+    # request's own prompt+generation length -- so the divisor is this run's
+    # own mean KV-tokens actually held per running request, measured
+    # directly: (kv_fraction × prc) / running_count at every real pod
+    # sample where a request was running. An approximation labelled as one,
+    # not a fixed assumption.
+    slog_p5 = der.get('scaling_log') or {}
+    by_analyzer_p5 = slog_p5.get('by_analyzer') or {}
+    sd_lane = sorted(by_analyzer_p5)[0] if by_analyzer_p5 else None
+    sd_recs = ([r for r in by_analyzer_p5[sd_lane]
+               if r.get('supply') is not None and r.get('demand') is not None]
+              if sd_lane else [])
+    if sd_recs:
+        prc_vals = [r['prc'] for r in sd_recs if r.get('prc')]
+        prc_ref = mean(prc_vals) if prc_vals else None
+        tok_per_req_samples = []
+        if prc_ref:
+            for p in pods.values():
+                for s in p['series']:
+                    kv, run_n = s.get('kv'), s.get('run')
+                    if kv is not None and run_n and run_n > 0:
+                        tok_per_req_samples.append((kv * prc_ref) / run_n)
+        kv_tok_per_req = (mean(tok_per_req_samples)
+                          if tok_per_req_samples else None)
+        if kv_tok_per_req:
+            xs_sd = [rel(r['t'], t0) for r in sd_recs]
+            supply_req = [r['supply'] / kv_tok_per_req for r in sd_recs]
+            demand_req = [r['demand'] / kv_tok_per_req for r in sd_recs]
+            f.step(xs_sd, supply_req, where='post', color='#7c3aed', ls=':',
+                   lw=1.5, alpha=0.85, zorder=2.6,
+                   label=f'WVA supply (≈{kv_tok_per_req:.0f} kv-tok/req, approx)')
+            f.step(xs_sd, demand_req, where='post', color='#f97316', ls=':',
+                   lw=1.5, alpha=0.85, zorder=2.6,
+                   label='WVA demand (requests, approx)')
     if nsys_g or served_g:
         fit = der.get('itl_fit') or {}
         if fit.get('A_ms_per_req'):
