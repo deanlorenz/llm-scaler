@@ -46,7 +46,7 @@ follows.
 
 Five sub-tasks (as directed):
 
-1. **Add another variant to the llm-d deployment.**
+1. **[DONE] Add another variant to the llm-d deployment.**
    `dhl-la-1708`'s stack was installed via llm-d's own **optimized-baseline**
    guide, not the `modelservice` Helm chart `benchmark-standup` uses — its
    `InferencePool` selects pods purely on `llm-d.ai/guide: optimized-baseline`,
@@ -112,3 +112,22 @@ Plus, from the original plan:
   run's reliability and post-processing; not cherry-picked yet, pending call.
 - **2026-08-21** — Sub-task 1 in progress: fixed `add_variant.py` (see Plan
   §1 above) and confirmed a clean dry-run. Not yet applied for real.
+- **2026-08-21** — Cherry-picked 3 of Ofer's 4 `benchmark-tooling-fixes`
+  commits onto this branch: staged burst scenarios
+  (`test/benchmark/scenarios/burst_4k{250,1000}.yaml.in`), two-variant plot
+  title/stage-marker/live-KEDA-policy metadata (`plot_two_variant_pipeline.py`),
+  and the Thanos fallback for rotated controller logs
+  (`dump_wva_target_timeseries.py`). Skipped the 4th (`.yaml.in` recognition
+  for `inference-perf`, `96b7a71c`) — that exact bug was already
+  independently fixed in this tree's `Makefile` (and our fix also covers a
+  bare `.yaml` suffix theirs didn't), so the cherry-pick was a no-op;
+  resolved the conflict by keeping ours and skipped the commit rather than
+  create an empty one.
+- **2026-08-21** — Sub-task 1 done for real: applied `add_variant.py`
+  against `dhl-la-1708`. Both ScaledObjects present
+  (`optimized-baseline-nvidia-gpu-vllm-decode-wva` primary,
+  `...-wva-v2` secondary), secondary `Ready=True`/`Active=True`/`Paused=False`,
+  KEDA created `keda-hpa-...-wva-v2` and scaled the secondary Deployment to
+  its `minReplicaCount=1` immediately (pod `...-v2-778bd44d7-2jwl8`, holding
+  1 GPU, still starting up as of this entry). Primary remains parked
+  (paused, 0/0) — untouched by this step, as expected.
