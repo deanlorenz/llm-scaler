@@ -63,6 +63,10 @@ wva-plan.yaml
 # be able to perturb which context this one uses)
 /.kube/
 
+# benchmark-run-only scratch output (rendered configs + raw run results) --
+# hack/benchmark/results/ is for curated, deliberately-committed examples only
+hack/benchmark/run-only-scratch/
+
 # Python bytecode from the hack/benchmark scripts
 __pycache__/
 *.pyc

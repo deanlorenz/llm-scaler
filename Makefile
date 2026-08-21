@@ -118,6 +118,24 @@ BENCHMARK_SCENARIOS_DIR ?= $(CURDIR)/test/benchmark/scenarios
 # "command line" there and they keep the dummy.
 BENCHMARK_MODEL_ID   ?= $(if $(filter command line environment,$(origin MODEL_ID)),$(MODEL_ID),Qwen/Qwen3-0.6B)
 
+# benchmark-run-only: hack/benchmark/run_only.sh against an already-standing
+# stack, no standup/CLI clone -- see docs/plans/benchmark/run-only-metrics-gap.md.
+#
+# Worktree-local, single-context kubeconfig if one exists (set up per-worktree
+# to avoid a concurrent session on this shared machine flipping which
+# cluster/namespace ambient KUBECONFIG's current-context points at); falls
+# back to whatever KUBECONFIG already is otherwise, so this stays usable
+# without that file present.
+RUN_ONLY_KUBECONFIG  ?= $(if $(wildcard $(CURDIR)/.kube/config),$(CURDIR)/.kube/config,$(KUBECONFIG))
+# Same tag convention benchmark-run already uses for the harness image
+# (BENCHMARK_IMAGE_TAG, defaulting to BENCHMARK_REPO_REF) -- kept independent
+# here since benchmark-run-only never clones/installs the CLI at all.
+BENCHMARK_RUN_ONLY_IMAGE ?= ghcr.io/llm-d/llm-d-benchmark:$(BENCHMARK_REPO_REF)
+# Gitignored scratch dir, not hack/benchmark/results/ (that directory holds
+# curated, committed example outputs -- bundle.json/coverage.json/panels.png
+# copied in deliberately after the fact, not raw run output).
+BENCHMARK_RUN_ONLY_OUTPUT_DIR ?= $(CURDIR)/hack/benchmark/run-only-scratch/$(BENCHMARK_NAMESPACE)-$(shell date +%Y%m%d-%H%M%S)
+
 # The fraction of each GPU vLLM may use, substituted into the scenario.
 #
 # 0.90, not the scenarios' 0.95 and not a small-model special case.
@@ -1737,6 +1755,45 @@ benchmark-run-all: ## Run all scenarios: teardown → standup → run per scenar
 	@echo "=========================================="
 	@echo "All scenarios completed successfully"
 	@echo "=========================================="
+
+.PHONY: benchmark-run-only-check
+benchmark-run-only-check: ## Read-only prereq check for benchmark-run-only (set BENCHMARK_NAMESPACE=<namespace>, BENCHMARK_WORKLOAD=<scenario>)
+	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
+		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-run-only-check BENCHMARK_NAMESPACE=<namespace>"; \
+		exit 1; \
+	fi
+	@echo "Checking run_only.sh prerequisites against $(BENCHMARK_NAMESPACE)..."
+	@command -v yq >/dev/null 2>&1 || { echo "ERROR: yq not found on PATH"; exit 1; }
+	@test -f test/benchmark/scenarios/$(BENCHMARK_WORKLOAD).yaml.in || { \
+		echo "ERROR: test/benchmark/scenarios/$(BENCHMARK_WORKLOAD).yaml.in not found"; exit 1; }
+	@KUBECONFIG=$(RUN_ONLY_KUBECONFIG) kubectl get secret llm-d-hf-token -n $(BENCHMARK_NAMESPACE) >/dev/null 2>&1 || { \
+		echo "ERROR: secret llm-d-hf-token not found in $(BENCHMARK_NAMESPACE)"; exit 1; }
+	@KUBECONFIG=$(RUN_ONLY_KUBECONFIG) bash hack/benchmark/resolve_router_endpoint.sh $(BENCHMARK_NAMESPACE) >/dev/null || { \
+		echo "ERROR: could not resolve a router/EPP endpoint in $(BENCHMARK_NAMESPACE)"; exit 1; }
+	@echo "OK: yq present, scenario file present, HF secret present, router/EPP endpoint resolvable."
+
+.PHONY: benchmark-run-only
+benchmark-run-only: benchmark-guard benchmark-run-only-check ## Run one workload against an already-standing stack via run_only.sh, no standup/CLI clone (set BENCHMARK_NAMESPACE=<namespace>; BENCHMARK_WORKLOAD/BENCHMARK_HARNESS/BENCHMARK_MODEL_ID override the .env default)
+	@mkdir -p $(BENCHMARK_RUN_ONLY_OUTPUT_DIR)
+	@_endpoint_url=$$(KUBECONFIG=$(RUN_ONLY_KUBECONFIG) bash hack/benchmark/resolve_router_endpoint.sh $(BENCHMARK_NAMESPACE)); \
+	echo "Resolved endpoint: $$_endpoint_url"; \
+	bash hack/benchmark/render_run_only_config.sh \
+		test/benchmark/scenarios/$(BENCHMARK_WORKLOAD).yaml.in \
+		$(BENCHMARK_WORKLOAD) \
+		$(BENCHMARK_NAMESPACE) \
+		$(BENCHMARK_MODEL_ID) \
+		"$$_endpoint_url" \
+		$(BENCHMARK_HARNESS) \
+		$(BENCHMARK_RUN_ONLY_IMAGE) \
+		llm-d-hf-token \
+		$(REQUEST_RATE) \
+		$(MAX_DURATION) \
+		> $(BENCHMARK_RUN_ONLY_OUTPUT_DIR)/config.yaml
+	@echo "Rendered config: $(BENCHMARK_RUN_ONLY_OUTPUT_DIR)/config.yaml"
+	KUBECONFIG=$(RUN_ONLY_KUBECONFIG) bash hack/benchmark/run_only.sh \
+		--config $(BENCHMARK_RUN_ONLY_OUTPUT_DIR)/config.yaml \
+		--output $(BENCHMARK_RUN_ONLY_OUTPUT_DIR)/results
+	@echo "Results: $(BENCHMARK_RUN_ONLY_OUTPUT_DIR)/results"
 
 .PHONY: benchmark-teardown
 benchmark-teardown: benchmark-guard ## Tear down the benchmark environment (set BENCHMARK_NAMESPACE=<namespace>)
