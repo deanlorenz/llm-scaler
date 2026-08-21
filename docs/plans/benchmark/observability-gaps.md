@@ -345,3 +345,95 @@ entry from "WVA demand (requests, approx)" to "WVA demand (peak capacity
 plan, not concurrent — approx)" so the gap against `in_system`/`being served`
 reads as expected/by-design rather than as the panel's lines disagreeing
 with each other.
+
+## 7. Run finding: the first real multi-variant run (`burst_4k1000`, dhl-la-1708, 2026-08-21)
+
+§3 was written against zero multi-variant runs. Now there are two, both
+published under `hack/benchmark/results/`:
+`20260821-burst_4k1000-secondary-only` and
+`20260821-burst_4k1000-both-variants-live`. `dhl-la-1708`'s existing decode
+stack (installed via llm-d's own `optimized-baseline` guide, not
+`benchmark-standup`'s `modelservice` chart) got a second variant via
+`add_variant.py` — which needed two portability fixes first, since its
+primary-detection and annotation-cloning both silently assumed the
+`modelservice` chart's conventions (see the commit fixing it; not repeated
+here since it's a code-level fix, not an observability gap).
+
+**A paused ScaledObject is excluded from WVA's per-model variant grouping
+entirely — not "correctly not scaled," structurally absent from the
+comparison.** The first run (`secondary-only`) left the primary paused,
+intending it as an inert baseline. Instead: every single `analyzer-result`
+cycle for the whole run listed only the secondary in its `variants` array —
+confirmed directly from the raw `controller.log` JSON payloads, not
+inferred. WVA's cost-aware optimizer never had two candidates to compare;
+it had exactly one, every cycle. This is *not* the bug from item 1 above
+(the stale-gauge one) — this is the live `analyzer-result` payload itself,
+freshly computed each cycle, correctly reporting a one-variant world because
+pausing a ScaledObject apparently means WVA stops even considering the
+variant, not just stops scaling it. Worth its own issue: if the intent of
+"pause" is "hold this variant's replica count, but keep it in the model's
+capacity accounting," that's not what happens today. (The *stale-gauge* bug
+from item 1 *did* reproduce again on this same primary ScaledObject in this
+same run, confirmed a second time on live data — `wva_current_replicas`
+read `1` while `kubectl get pods` showed zero primary pods the entire run.)
+
+The second run (`both-variants-live`) unpaused the primary
+(`make so-resume`) and re-ran the identical workload. This time
+`analyzer-result` correctly listed both variants every cycle, and the
+decision-table join (`make benchmark-decision-table`) produced 518 rows
+(259 dual-variant cycles) with per-variant `analyzer_prc`/`decision_action`/
+`applied_target` fields.
+
+**This is real validating data for §3's sketched design — and it holds.**
+Checked programmatically, not just by eye: across all 259 dual-variant
+cycles, zero cycles show the pattern §3's design flags as a candidate
+cost-inefficiency (a more-expensive variant scaling while a cheaper one
+sits idle with spare capacity below its max). What the data shows instead,
+repeatedly: the cheaper secondary (`variantCost=5.0`) gets pushed toward
+its `maxReplicaCount` first, and the primary (`variantCost=10.0`) only
+starts climbing once the secondary is at or near its own max. Caveat this
+run doesn't resolve: both variants are TP=1 here (this stack's primary
+isn't TP=2 like `two-variant-wva-benchmark.md`'s reference scenario), so
+cost and capacity-per-replica never diverge — "prefer the efficient one"
+and "prefer the cheap one" give the same answer in this specific setup.
+The check held; whether it holds when capacity-per-cost genuinely diverges
+from price (the actual point of the V2 saturation engine's cost-awareness)
+is still untested and would need a TP-asymmetric secondary to check.
+
+**Decision, given the above**: §3's design holds up against real data with
+no counterexample found, so it's implemented —
+`hack/benchmark/analyze_wva_decisions.py`, wired as `make benchmark-analyze-decisions`.
+Takes `--run <dir>` (needs `wva_decision_table.json`, from
+`make benchmark-decision-table`, or a published bundle's flat copy of it),
+groups rows by cycle timestamp, and flags any cycle where a less-efficient
+variant's `decision_action` is a scale-up while a strictly more-efficient
+variant in the same cycle sits at `decision_action == "no-change"` with
+room to grow. Efficiency is `analyzer_prc` (already in the table) divided
+by cost; cost isn't in the table (WVA logs `variantCost` once, at
+ScaledObject registration, not per cycle), so it's supplied via repeatable
+`--variant-cost NAME=VALUE` (`VARIANT_COSTS="name=cost ..."` from the
+`make` target) — without it, the tool falls back to a degraded,
+capacity-only comparison and says so rather than silently guessing costs.
+`--max-replicas`/`MAX_REPLICAS` optionally excludes a cycle where the idle
+variant is already at its own ceiling (real replica caps aren't in the
+table either). PASS/WARN output in the `preflight_shared_cluster.py`
+`Report` style, not a hard gate. Verified three ways: 0 flags on
+`both-variants-live` with the real costs (matching the manual check
+above), a clean "only one variant present" note on `secondary-only` rather
+than a false flag, and — as a check that the flagging logic actually
+discriminates rather than trivially always passing — 4 real flags when
+given the costs *swapped* (proving it does fire on a genuine violation).
+
+**Also carried over from this run, not yet fixed**: `dump_wva_full_timeseries.py`
+never matched this run's actual scrape filenames (`wva-controller_<ts>_metrics.log`)
+— its pod-pattern required a `-controller-manager` suffix that literal
+filename never had, so it silently wrote an empty timeseries on every run
+until now. Fixed directly (code bug, not a scaler-side gap). Separately,
+`dump_epp_throughput.py` got 0 snapshots both runs because llm-d-benchmark's
+own `collect_metrics.sh` reads a hardcoded secret name
+(`inference-gateway-sa-metrics-reader-secret`) for the EPP bearer token,
+which only exists on a `benchmark-standup`-installed stack; `dhl-la-1708`
+has a differently-named one (`wva-epp-metrics-token`). Override with
+`LLMDBENCH_EPP_METRICS_SECRET=wva-epp-metrics-token` for any future run on
+this stack — not fixed retroactively, the scrapes already happened and
+failed.

@@ -1626,6 +1626,26 @@ benchmark-decision-table: ## Join analyzer-result with scaling-decision from the
 	fi; \
 	python3 $(CURDIR)/hack/benchmark/dump_wva_decision_table.py --run "$$RUN_DIR"
 
+.PHONY: benchmark-analyze-decisions
+## Flag candidate cost-inefficiency (a less-efficient variant scaling while a
+## more-efficient one sits idle with room to grow) in a multi-variant run's
+## decision table -- see docs/plans/benchmark/observability-gaps.md §3/§7 for
+## the design and the real-run validation this was built against.
+## RUN_DIR=<dir> (needs metrics/processed/wva_decision_table.json, from
+## 'make benchmark-decision-table', or a published bundle's flat copy).
+## VARIANT_COSTS="name=cost name2=cost2" and MAX_REPLICAS="name=n name2=n2"
+## are both space-separated NAME=VALUE lists; without VARIANT_COSTS the tool
+## falls back to a degraded, capacity-only comparison and says so.
+benchmark-analyze-decisions:
+	@RUN_DIR="$(RUN_DIR)"; \
+	if [ -z "$$RUN_DIR" ]; then \
+		echo "ERROR: RUN_DIR is required. Usage: make benchmark-analyze-decisions RUN_DIR=<dir> [VARIANT_COSTS=\"name=cost ...\"] [MAX_REPLICAS=\"name=n ...\"]"; \
+		exit 1; \
+	fi; \
+	COST_FLAGS=""; for kv in $(VARIANT_COSTS); do COST_FLAGS="$$COST_FLAGS --variant-cost $$kv"; done; \
+	MAX_FLAGS=""; for kv in $(MAX_REPLICAS); do MAX_FLAGS="$$MAX_FLAGS --max-replicas $$kv"; done; \
+	python3 $(CURDIR)/hack/benchmark/analyze_wva_decisions.py --run "$$RUN_DIR" $$COST_FLAGS $$MAX_FLAGS
+
 .PHONY: benchmark-viz
 benchmark-viz: benchmark-extract-trace benchmark-render-trace benchmark-decision-table ## Extract + render + decision-table for the latest run in one step
 

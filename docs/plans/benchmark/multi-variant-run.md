@@ -119,10 +119,22 @@ Five sub-tasks (as directed):
 
 Plus, from the original plan:
 
-- [ ] Park the namespace and verify the decode pod terminated when done
-- [ ] Revisit `analyze_wva_decisions.py`'s §3 design in `observability-gaps.md`
+- [x] Park the namespace and verify the decode pod terminated when done —
+      both variants parked (`make so-park SO=all`), pod termination
+      confirmed via `kubectl get pods`, not just trusted from ScaledObject
+      state. Namespace back to its original baseline.
+- [x] Revisit `analyze_wva_decisions.py`'s §3 design in `observability-gaps.md`
       against the real multi-variant data; build it if the design holds up
-- [ ] Update `observability-gaps.md` with what the run did or didn't reveal
+      — it held (0 counterexamples across 259 dual-variant cycles from the
+      real `both-variants-live` run); built as
+      `hack/benchmark/analyze_wva_decisions.py` /
+      `make benchmark-analyze-decisions`, verified against both published
+      runs plus a swapped-cost sanity check that confirms it actually
+      discriminates.
+- [x] Update `observability-gaps.md` with what the run did or didn't reveal
+      — §7 added: the paused-variant-exclusion finding, the two dump-script
+      bugs/gaps found and one fixed, and the `analyze_wva_decisions.py`
+      build decision.
 
 ## Log
 
