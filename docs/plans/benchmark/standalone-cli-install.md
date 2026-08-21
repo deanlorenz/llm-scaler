@@ -197,3 +197,48 @@ Two ways to close it, neither evaluated yet:
    rest of this port's collection scripts.
 (2) fits this port's own established pattern more closely and avoids putting
 a kubeconfig inside a pod; not yet attempted or verified.
+
+## Update 2026-08-21: gap closed with a third option, better than either (1) or (2); implemented, live verification found one real bug fixed and one still open
+
+Full detail in `docs/plans/benchmark/run-only-metrics-gap.md` — this is the
+summary for this doc's own record, per its own "what to open issues for"
+convention.
+
+**The gap is closed with neither (1) nor (2) as originally scoped, but a
+better third option Dean steered toward**: run the vLLM/EPP scraper *inside*
+the harness pod (like (1)), but authenticate via the pod's own
+ServiceAccount token (in-cluster kubectl config, automatic once a
+ServiceAccount is attached) instead of injecting a kubeconfig at all. This
+works because `run_only.sh` already creates its own tightly-scoped
+ServiceAccount + namespaced Role/RoleBinding (`pods`/`pods/log` get/list) —
+extended here with one more `secrets` rule, scoped by `resourceNames` to
+exactly the EPP metrics-reader token, auto-detected by name pattern rather
+than hardcoded (this repo's own WVA deploy names it differently than
+`llm-d-benchmark`'s own default assumes). Net: real in-pod collection with a
+*smaller* credential footprint than the full CLI's own approach, not a
+tradeoff.
+
+**Shipped** (all in `hack/benchmark/`, none a verbatim import — Dean: "you
+can write your own version of run_only. It all stays here"):
+`run_only.sh` (our fork), `run_only_collect_metrics.sh` (trimmed
+vLLM/EPP-only fork of `collect_metrics.sh`), `render_run_only_config.sh`
+(scenario → run_only config, including `REPLACE_ENV_LLMDBENCH_*` token
+substitution the full CLI normally does client-side and `run_only.sh` never
+does at all), `resolve_router_endpoint.sh` (reuses `wait_serving.sh`'s own
+service-detection logic), plus `benchmark-run-only`/`benchmark-run-only-check`
+Makefile targets and a `dhl-e2e-231.env` for `benchmark-guard`.
+
+**Live verification against `dhl-e2e-231`, `quick_smoke`**: RBAC, both
+ConfigMaps, pod creation, and model verification all passed. Found and fixed
+one real bug — `run_only.sh` (the pinned upstream script too) references
+`harness_results_pvc` unconditionally in a status message regardless of
+storage mode, which crashed under our local-output rendering (fixed by
+always populating the field). The workload run itself then hit a second,
+**not yet root-caused** failure — `inference-perf`'s own multiprocess
+metrics collector threw `RuntimeError: can't start new thread` with ~222
+stray `inference-perf` processes observed in the pod's process table. Not
+confirmed whether this is caused by our collector's background processes or
+a pre-existing harness-image issue independent of this work — aborted per
+standing risk tolerance, namespace confirmed back at baseline (decode pod
+terminated, ScaledObject re-parked). See the plan doc's own status section
+for exact next steps.

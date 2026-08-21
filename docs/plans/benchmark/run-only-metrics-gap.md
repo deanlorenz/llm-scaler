@@ -1,11 +1,17 @@
 # Closing `run_only.sh`'s metrics-collection gap
 
-Status: **design revised after Dean's steer, not yet implemented**. Working
-doc for the task in `TASK.md` (repo root) — see `standalone-cli-install.md`'s
-"Update 2026-08-20" section for the fuller history of how this port arrived
-at `run_only.sh` in the first place. This file is the incremental work log;
-the final outcome gets folded back into that doc's own "Update" section when
-this is done.
+Status: **implemented and committed (`04b70602`, branch `worktree-run-only-gap`,
+pushed to origin); live verification against `dhl-e2e-231` found and fixed one
+real bug, then hit a second, unresolved one — see "Live verification" and
+"Handoff / next steps" below before continuing this in a new session.**
+Working doc for the task in `TASK.md` (repo root) — see
+`standalone-cli-install.md`'s "Update 2026-08-20" section for the fuller
+history of how this port arrived at `run_only.sh` in the first place
+(disproving the standalone-pip-install premise, discovering `run_only.sh`,
+and the original gap analysis: `run_only.sh`'s bare pod spec has neither the
+kubeconfig nor the `collect_metrics.sh` script the full CLI's own pod spec
+uses to scrape vLLM/EPP metrics) and that doc's own "Update 2026-08-21" for
+the short version of everything below.
 
 ## Decision, revised: in-pod scraping via the pod's OWN ServiceAccount — not option (b), not upstream's option (a) either
 
@@ -182,6 +188,19 @@ invocation today. A future multi-harness session needs two separate
    read-only) and `benchmark-run-only` (the real invocation), house `##`
    doc-comment conventions.
 
+**All of the above is implemented** (commit `04b70602`): `hack/benchmark/run_only.sh`,
+`hack/benchmark/run_only_collect_metrics.sh`, `hack/benchmark/render_run_only_config.sh`,
+`hack/benchmark/resolve_router_endpoint.sh`, the two Makefile targets, and
+`hack/benchmark/dhl-e2e-231.env`. Offline-validated before touching the
+cluster: `bash -n` on every script, the RBAC YAML server-dry-run applied
+cleanly, `render_run_only_config.sh` produced a correct, fully-substituted
+config for `quick_smoke` by hand inspection, `resolve_router_endpoint.sh`
+correctly resolved `http://optimized-baseline-epp.dhl-e2e-231.svc.cluster.local:80`,
+and `detect_epp_metrics_secret` correctly found `wva-epp-metrics-token` (this
+repo's own WVA deploy names it differently than `llm-d-benchmark`'s own
+default `inference-gateway-sa-metrics-reader-secret` assumes — confirmed live,
+not assumed).
+
 ## Cluster access hygiene (new, from Dean's steer)
 
 - Worktree-local kubeconfig: `.kube/config` (gitignored, `/.kube/` entry
@@ -202,23 +221,143 @@ invocation today. A future multi-harness session needs two separate
 
 ## Verification target
 
-`dhl-e2e-231`, `quick_smoke` scenario. Current state there (read-only checks,
-2026-08-21): HF secret `llm-d-hf-token` present; EPP pod
-(`optimized-baseline-epp`) and WVA controller running; **no `workload-pvc`**
-(confirms local-output-by-default above is the right call, not just a
-nicety); vLLM decode Deployment (`optimized-baseline-nvidia-gpu-vllm-decode`)
-currently **scaled to 0/0**, parked from a prior session — already serving
-`Qwen/Qwen3-0.6B` (confirmed via its pod spec args), the same small-model
-default `BENCHMARK_MODEL_ID` already uses, so no `MODEL_ID` override will be
-needed once it's un-parked. A real verification run needs it un-parked first
-via the sanctioned ScaledObject path (never hand-patched), and re-parked
-after (with pod termination confirmed via `kubectl get pods`, not just
-ScaledObject status) — both require coordinating with Dean first, per
-`TASK.md`'s cluster-safety section, applying even if a step fails or is
-abandoned partway.
+`dhl-e2e-231`, `quick_smoke` scenario (switched from `dhl-la-1708`, per Dean).
+Pre-run state (read-only checks, 2026-08-21): HF secret `llm-d-hf-token`
+present; EPP pod (`optimized-baseline-epp`) and WVA controller running; **no
+`workload-pvc`** (confirms local-output-by-default is the right call, not
+just a nicety); vLLM decode Deployment
+(`optimized-baseline-nvidia-gpu-vllm-decode`) parked at 0/0, already serving
+`Qwen/Qwen3-0.6B` (confirmed via its pod spec args) — the small-model
+default, so no `MODEL_ID` override needed. Un-parked via the sanctioned
+`make so-resume SO=optimized-baseline-nvidia-gpu-vllm-decode-wva
+NAMESPACE=dhl-e2e-231` (never hand-patched), per explicit authorization to
+run the full live verification, including this step, autonomously.
 
-## Status
+## Live verification, attempt 1: `harness_results_pvc: unbound variable`
 
-Design above is proposed, not yet implemented or approved. Next: get
-sign-off, then implement per the numbered list above, one commit per
-sub-task.
+`make benchmark-run-only-check` passed (yq present, scenario file present, HF
+secret present, endpoint resolvable). `make benchmark-run-only` got through
+config rendering, RBAC creation (ServiceAccount + Role scoped to `pods`/
+`pods/log` get/list + `secrets` get on exactly `wva-epp-metrics-token`,
+auto-detected), both ConfigMaps, and the harness pod — then crashed at
+`run_only.sh:570`-ish with `harness_results_pvc: unbound variable`.
+
+**Root cause**: `run_only.sh` — the pinned upstream `v0.7.8` script too, not
+something this fork introduced — references `${harness_results_pvc}`
+unconditionally in one status announce, regardless of `_storage_type`. Our
+renderer omitted `harness.results_pvc` entirely for local-output mode (since
+`run_only.sh`'s own storage-type branching never reads it there), which is
+correct reasoning about the CONTROL FLOW but missed this one unconditional
+reference outside any storage-type branch. Confirmed by grepping
+`run_only.sh` for every `harness_results_pvc` reference (4 total: one gated
+by PVC-mode, one gated by PVC-mode, two NOT gated).
+
+**Fix**: `render_run_only_config.sh` now always emits `harness.results_pvc`
+(a placeholder string, `"unused-local-output-mode"`, when not using PVC
+storage) — matches upstream's own `config_template.yaml`, which always
+populates this field as a matter of course. Comment in the renderer records
+why. Re-ran; this specific crash did not recur.
+
+## Live verification, attempt 2: `inference-perf` thread exhaustion — UNRESOLVED
+
+RBAC, ConfigMaps, pod creation, and model verification (`HTTP/1.1 200 OK`
+against `/v1/completions`) all passed again. The workload itself started
+(`Stage 0 - run started`, confirmed in the pod's own log via
+`kubectl exec ... logs`-equivalent capture through `run_only.sh`'s own
+`tee`), then ~15s in:
+
+```
+RuntimeError: can't start new thread
+  File ".../inference_perf/metrics/request_collector/multiprocess.py", line 37, in record_metric
+    self.queue.put(metric)
+  File ".../multiprocessing/queues.py", line 190, in _start_thread
+    self._thread.start()
+RuntimeError: can't start new thread
+... - ERROR - A worker process died unexpectedly!
+```
+
+Diagnosed live before aborting (`kubectl exec` into the still-running pod):
+
+```
+pids.max: max
+pids.current: 3876
+ps -eo comm | sort | uniq -c | sort -rn:
+    222 inference-perf
+      4 tee
+      4 bash
+      ...
+```
+
+**222 separate `inference-perf` processes** is wildly disproportionate to a
+single load-generator run — looks like `inference-perf`'s own multiprocess
+metrics-collector is respawning worker processes after each death without
+reaping the dead ones, snowballing until *something* (not this container's
+own leaf cgroup, which reports `pids.max: max` — likely a higher-level
+kubelet/node `podPidsLimit`, commonly defaulted around 4096 on OpenShift, not
+confirmed) refuses a new thread.
+
+**Not root-caused. Specifically NOT yet determined**:
+- Whether this is caused, even partially, by our collector's own background
+  processes (bounded — a `curl` per discovered vLLM/EPP pod, once per 15s
+  interval, `wait`ed before the next interval starts) competing for the same
+  process/thread budget as `inference-perf`'s multiprocessing, or whether
+  `inference-perf` alone (with NO collector running at all) hits this same
+  wall in this specific pod/image/cluster combination regardless. **No clean
+  baseline was run** (a `run_only.sh` invocation with the collector
+  disabled, or the full CLI's own path, on this same cluster/image) to
+  isolate this.
+- Whether `hack/benchmark/patch_harness.sh` — which already documents two
+  other known, upstream-confirmed bugs in this exact harness image (EPP log
+  timestamp parsing; a non-fatal guidellm-report conversion bug) — has a
+  third, undocumented one covering this, or whether this is genuinely new.
+  Was mid-check (`grep -n "thread\|multiprocess" patch_harness.sh` — no
+  match, but only checked for exact keyword hits, not the full context of
+  each of its 3 documented fixes) when this session was closed out; **pick
+  up here first**.
+- Whether this is specific to `inference-perf` (this scenario's harness) or
+  would also reproduce with `guidellm` — not tried, since `quick_smoke.yaml.in`
+  is inference-perf-shaped and switching harness means a different profile
+  entirely.
+
+**Aborted per standing risk tolerance** ("abort and re-park immediately on
+any ambiguity rather than push through a failure"): killed the backgrounded
+`make benchmark-run-only` process, deleted the harness pod, ran
+`make so-park SO=optimized-baseline-nvidia-gpu-vllm-decode-wva
+NAMESPACE=dhl-e2e-231`, and confirmed via `kubectl get pods -n dhl-e2e-231`
+(not just ScaledObject status) that the decode pod actually terminated.
+Namespace back to baseline (EPP, WVA controller, Grafana only) — same as
+before this session touched it. No cleanup done on the RBAC/ConfigMap
+objects (`llmdbench-harness-sa`, its Role/RoleBinding, `inference-perf-profiles`,
+`run-only-collector`) — harmless, namespace-scoped, no-GPU, and
+idempotently recreated by the next `run_only.sh` invocation regardless.
+
+## Handoff / next steps (read this first in a new session)
+
+1. **Root-cause the thread exhaustion** before trying another live run.
+   Cheapest isolating experiment: re-run `benchmark-run-only` with the
+   collector's `start`/`stop` calls in `run_only.sh`'s per-workload heredoc
+   commented out (or gated behind an env var) — if `inference-perf` still
+   dies the same way with zero collector processes running, that clears our
+   own code and points squarely at `inference-perf`/the harness image/this
+   cluster's pod PID limits. If it does NOT reproduce, our collector is
+   implicated and needs a fix (candidates: lower `METRICS_COLLECTION_INTERVAL`'s
+   concurrency, or scrape pods sequentially instead of backgrounding every
+   `_scrape_pod` call with `&`).
+2. Check `hack/benchmark/patch_harness.sh` fully (all three fix blocks, not
+   just a keyword grep) for anything related, and check upstream
+   `llm-d-benchmark` issues for `"can't start new thread"` or
+   `multiprocess.py` — this may already be a known, reported bug.
+3. Once a fix (or a confirmed "not us") is in hand, redo the live
+   verification end to end, including the part never reached: does
+   `extract_real_trace.py` read the resulting `metrics/raw/*_metrics.log`
+   files cleanly (this is the actual point of the whole task — confirming
+   panels 3/4/5 populate from a `run_only.sh`-driven run).
+4. Only after a clean end-to-end run: update `TASK.md`'s "when done" items
+   (this doc's outcome is already folded into `standalone-cli-install.md`'s
+   own "Update 2026-08-21", but that entry currently says "one still open" —
+   revise it once resolved) and consider whether `TASK.md` itself should be
+   removed or archived.
+5. Cluster is at baseline as of this handoff — no un-parking needed to pick
+   this up unless resuming the live-run investigation, at which point repeat
+   the un-park → verify → re-park + confirm-termination cycle this doc
+   already documents.
