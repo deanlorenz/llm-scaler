@@ -43,10 +43,32 @@ axis the original doc raised.
 
 RBAC needs to grow beyond what `run_only.sh` grants today, though: our
 collector also needs `get` on the EPP metrics secret
-(`inference-gateway-sa-metrics-reader-secret` by default) and `get`/`list` on
-`deployments`/`statefulsets` (for replica-status snapshots, if we carry that
-part of `collect_metrics.sh` too — TBD scope, see below). All additions stay
+(`inference-gateway-sa-metrics-reader-secret` by default). All additions stay
 namespace-scoped, same Role, no cluster-scoped verbs.
+
+**Scope decision (Dean): minimum required to use `run_only.sh`, not full
+`collect_metrics.sh` parity.** `collect_metrics.sh` bundles two independent
+collectors — vLLM/EPP Prometheus scrape (Collector A, direct pod-IP curl) and
+replica-status/pod-startup-time via `kubectl get deployments,statefulsets`/
+pod conditions (Collector B, a completely different source — the k8s API,
+not `/metrics` at all). `TASK.md`'s flagged gap is specifically panels 3
+(running/waiting), 4 (KV% heatmap), and 5 — all fed by Collector A alone.
+Collector B feeds only `postprocess.py`'s "Avg pod startup" report stat and
+`replica_status_timeseries.json` — the latter already has two working
+client-side fallbacks with zero in-pod component (`sample_replicas.sh` →
+`wva_replica_samples.json`; the WVA controller's own gauges via
+`scrape_wva_metrics.sh`, which `extract_real_trace.py` already synthesizes
+replicas from when the harness file has no matching controller). It also
+carries a known, already-diagnosed bug (the `LLMDBENCH_HARNESS_STACK_NAME` vs
+`llm-d.ai/model` label mismatch that's the exact reason those two fallbacks
+exist). **Decision: build Collector A only.** Pod-startup-time has no
+substitute anywhere in this port and will read `?` for `run_only.sh`-driven
+runs — same graceful degradation every other currently-missing stat already
+gets, not a new failure mode, and not required to close the flagged gap. A
+fuller causal timeline (WVA decision → KEDA/HPA actuation → pod
+scheduling/ready → metrics-first-seen → WVA sees the live pod) came up while
+discussing this and is real future value, but is out of scope here — written
+up as a new gap in `observability-gaps.md` §7 instead of built now.
 
 Lifecycle: per Dean, `run_only.sh` creates **one** harness pod and keeps it
 alive across every workload in the run (only recreated once, at the top, via
@@ -106,20 +128,38 @@ block. Answers open question #2 from the original (superseded)
 standalone-install plan: yes, our own substitution step is required,
 unconditionally.
 
+## Awareness item: one harness per config/invocation, not per workload
+
+Checked whether workloads for different harnesses (`guidellm`, `inference-perf`)
+could be combined in a single `run_only.sh` config file — **no.** `harness.name`
+is a single top-level scalar, flattened once via `yq -o shell` into
+`$harness_name`, used identically for every workload in the loop
+(`${HARNESS_EXECUTABLE} --harness="${harness_name}" --workload="${workload}"`,
+`run_only.sh:554`) and for the one ConfigMap/mount path
+(`${harness_name}-profiles` → `/workspace/profiles/${harness_name}`). Mixing
+harnesses in one file's `workload:` block would mount both under one
+harness's path and invoke both with the same `--harness=` — wrong for
+whichever doesn't match, not a degraded case. Not a new constraint this
+design introduces: `benchmark-run` already takes one `BENCHMARK_HARNESS` per
+invocation today. A future multi-harness session needs two separate
+`benchmark-run-only` invocations (two rendered configs, two pods).
+
 ## Design
 
 1. **`hack/benchmark/run_only.sh`** — **our own version**, based on upstream
    but not a verbatim import (revised from the original plan). Starting
    point is still the upstream script (credit/provenance comment naming the
    source path + pinned ref it was adapted from), modified to:
-   - keep `llmdbench-harness-sa`'s Role but extend its rules for the metrics
-     collector's needs (secrets get for the EPP token; deployments/
-     statefulsets get/list if replica-status snapshots are carried over) —
-     namespace-scoped only, matching the existing Role/RoleBinding shape.
-   - mount a ConfigMap of our own collector script(s) into the harness pod
-     (parallel to `${harness_name}-profiles`, not replacing it) — reusing or
-     adapting `collect_metrics.sh` itself where practical rather than
-     reinventing its pod-discovery/scrape logic from scratch.
+   - keep `llmdbench-harness-sa`'s Role but extend its rules with `secrets`
+     get (EPP bearer token only) — namespace-scoped, matching the existing
+     Role/RoleBinding shape. No `deployments`/`statefulsets` RBAC: that's
+     Collector B, out of scope per the decision above.
+   - mount a ConfigMap of our own collector script into the harness pod
+     (parallel to `${harness_name}-profiles`, not replacing it) — a trimmed
+     script carrying only `collect_metrics.sh`'s vLLM/EPP scrape functions
+     (`get_pod_info`, `get_epp_pod_info`, `_scrape_pod`,
+     `_get_epp_auth_header`, `collect_metrics_snapshot`), not
+     `collect_replica_status`/`collect_pod_startup_times`.
    - after `start_harness_pod` succeeds and before the first workload runs,
      `kubectl exec -d` (or a backgrounded exec) to start the collector loop
      once; stop it once after the last workload, before results are copied

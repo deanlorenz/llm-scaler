@@ -345,3 +345,61 @@ entry from "WVA demand (requests, approx)" to "WVA demand (peak capacity
 plan, not concurrent — approx)" so the gap against `in_system`/`being served`
 reads as expected/by-design rather than as the panel's lines disagreeing
 with each other.
+
+## 7. Deferred: a full scale-event causal waterfall (WVA decision → KEDA/HPA → pod → metrics → WVA sees it)
+
+Came up while scoping the `run_only.sh` metrics-collection gap
+(`run-only-metrics-gap.md`) and discussing why pod-startup-time has no
+substitute anywhere in this port (see that doc's Collector A/B scope
+decision). Dean's framing: for a scale-up event we should be able to build a
+full timestamp waterfall —
+
+    WVA decision  →  KEDA/HPA actuation  →  kube schedules pod  →
+    pod log start  →  pod log ready  →  metrics first detected  →  WVA sees the live pod
+
+— and most of the stages are things this port already touches, or nearly:
+
+- **WVA decision**: already captured — `capture_wva_controller_log.sh`
+  (`analyzer-result`/`scaling-decision` lines) and `scrape_wva_metrics.sh`
+  (`wva_desired_replicas`/`wva_current_replicas` gauges).
+- **KEDA/HPA actuation**: **not collected anywhere yet**. KEDA implements
+  `ScaledObject` via a real `HorizontalPodAutoscaler` underneath —
+  `kubectl get hpa -o yaml` carries `.status.lastScaleTime` plus conditions
+  with `lastTransitionTime`. A namespace-scoped, client-side poll (same
+  shape as `sample_replicas.sh`) would get this for free; nothing currently
+  reads it.
+- **kube scheduling/ready**: **partially collected, narrower than it could
+  be**. `collect_metrics.sh`'s `collect_pod_startup_times` (the in-pod
+  collector, not carried into `run_only.sh` — see the scope decision above)
+  only extracts the `Ready` condition's `lastTransitionTime` from
+  `kubectl get pods -o json`. The same API response also carries
+  `PodScheduled`, `Initialized`, and `ContainersReady`, each with its own
+  `lastTransitionTime` — a finer breakdown (scheduling delay vs. image
+  pull/init vs. readiness-probe delay) is sitting in data already fetched,
+  just not extracted.
+- **pod log start/ready timestamps**: **unverified, not investigated**.
+  vLLM's own stdout likely logs distinguishable startup phases (model load,
+  "Started server process", "Application startup complete", Uvicorn
+  binding) with timestamps independent of Kubernetes' own probe timing —
+  could corroborate or add sub-phase detail vs. the `Ready` condition, which
+  is the more robust source (stable K8s-level signal, not tied to a specific
+  vLLM version's log wording). Not checked against a real pod's logs yet —
+  the decode Deployment on the namespace used to scope this was parked
+  (0/0) at the time.
+- **metrics first detected**: **free once Collector A exists** — literally
+  the earliest timestamp in whichever `metrics/raw/<pod>_*.log` file a given
+  pod has. No new collection needed, just a derived stat nothing currently
+  computes.
+- **"WVA sees the live pod"**: **not investigated**. Would need to check
+  whether the controller's own log emits a line when it picks up a new pod
+  as ready/eligible — not checked against `internal/actuator`'s actual log
+  call sites yet.
+
+**Why this is a gap, not a task**: real value (an actual root-cause waterfall
+for "why did it take N seconds to add capacity," broken into scaler-decision
+vs. actuation vs. kube vs. app-readiness vs. detection latency), but larger
+than any single collection task so far — spans a new client-side HPA poller,
+extending an existing pod-condition extraction, and an unverified log-parsing
+question. Build later, piecemeal, starting with whichever stage a real
+investigation actually needs first — not upfront as a bundle nothing has
+asked for yet.
