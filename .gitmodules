@@ -1,3 +1,0 @@
-[submodule "sample-data"]
-	path = sample-data
-	url = https://github.com/llm-inferno/sample-data

@@ -1,1 +1,0 @@
-../test/e2e/fixtures/burst_load_generator.sh
