@@ -177,6 +177,35 @@ Plus, from the original plan:
   1→2 replicas under peak load, cheapest-first as expected (see Plan §1
   caveat) — primary never left 0 the whole run, confirmed by direct pod
   list, not by the (stale) gauge.
+- **2026-08-21** — Full extract+render+decision-table run on `burst_4k1000`:
+  13 PASS / 4 FAIL coverage (`Calibrate A` and `Router imbalance measurable`
+  now PASS — both were structurally blocked on prior single-variant runs).
+  New FAILs: `Trust B`, `Queue (a) material` (no demand trace — the EPP
+  auth gap above), `rho model valid at top` (real signal: preempt/s=0.96 at
+  peak). `Exercise the 0.85 ceiling` still fails even at 14 RPS peak
+  (n_0.80_0.90=2) — still not enough load in that exact band.
+  Self-check flagged: engine occupancy exceeded request-derived in-system
+  count on 6.5% of scrapes (worst +37.5%) — read the aggregation code
+  (`anchor_offset`), it sums pod occupancy variant-agnostically by design;
+  no evidence found that this is two-variant-specific rather than an
+  artifact of this run's much higher/burstier rate than prior calibration.
+  Recorded as an open question, not root-caused.
+  **Critical finding**: all 241 decision-table rows are the secondary
+  (`...-v2`) — the primary never appears in a single `analyzer-result`
+  cycle. Confirmed directly from `controller.log`'s `analyzer-result`
+  payloads: `variants` lists only the secondary, every cycle, the whole
+  run. **A paused ScaledObject is excluded from WVA's per-model variant
+  grouping entirely** — not "correctly not scaled," structurally absent
+  from the comparison. So this run validated the deployment/registration
+  path for real, but never actually exercised WVA's cross-variant
+  cost-aware comparison (`analyze_wva_decisions.py`'s whole reason for
+  being) — there was only ever one candidate per cycle.
+  **Decision (user, mid-run)**: unpause the primary via `make so-resume`
+  and re-run, to get real two-live-variant decision data. Primary now
+  holds a GPU continuously until re-parked. User then went to sleep;
+  proceeding with the re-run and full pipeline autonomously. Cleanup
+  (`so-park` both variants, verified pod termination) is the
+  highest-priority remaining step regardless of how the rest goes.
 - **2026-08-21** — Sub-task 4: `post_run_analyze.sh` ran; fixed a real bug in
   `dump_wva_full_timeseries.py` and found (but could not recover) an
   EPP-scrape auth gap — see Plan §4 above for both. Kicked off
