@@ -1,0 +1,40 @@
+{
+  "run": "inference-perf-1787280639-kjxx2t_1",
+  "harness": "inference-perf",
+  "harness_version": "a40897e6500e4524adf563a91f7c880eb5296e12",
+  "model": "Qwen/Qwen3-0.6B",
+  "engine": {
+    "num_gpu_blocks": "12912",
+    "block_size": "16",
+    "gpu_memory_utilization": "0.3",
+    "enable_prefix_caching": "True",
+    "cache_dtype": "auto",
+    "sliding_window": "None"
+  },
+  "namespace": "dhl-la-1708",
+  "cluster": "dhl-la-1708",
+  "workload": "burst_4k1000.yaml",
+  "shape": {
+    "in_tok": 4000,
+    "out_tok": 1000
+  },
+  "extractor_version": "0.1.0",
+  "extractor_git_sha": "d6c4415bddb9722286ddd4b60efbde26c35c65b5",
+  "extracted_at": "2026-08-21T07:04:25+0300",
+  "published_at": "2026-08-21T07:06:27+0300",
+  "bundle_sha256": "fa68887695d144964d3acffb5542cfc36350c56513754441aecf08c0a02e9b89",
+  "bundle_bytes": 2859649,
+  "coverage": {
+    "pass": 12,
+    "fail": 5,
+    "not_exercised": [
+      "Trust B",
+      "Exercise the 0.85 ceiling",
+      "Queue (a) material",
+      "rho model valid at top",
+      "Boot lag measured"
+    ]
+  },
+  "time_anchor_trustworthy": true,
+  "source_dir": "dean-20260821-055002-068/results/inference-perf-1787280639-kjxx2t_1"
+}

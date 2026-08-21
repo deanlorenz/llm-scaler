@@ -1,0 +1,522 @@
+t          variant                 n_replicas  bound_by  k2_priority  analyzer_rc  analyzer_sc  analyzer_prc  analyzer_util  decision_curr  decision_tgt  decision_action  applied_target  analyzer_reason     applied_reason                    
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+0          optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+0          optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+15         optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+15         optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+30         optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+30         optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+45         optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+45         optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+60         optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+60         optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+75         optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+75         optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+90         optimized-baseline-nvi  0    -    -            0.00     234036.  165273.  0.20    1     1     no-change   1      P2-hist             V2                                
+90         optimized-baseline-nvi  0    -    -            0.00     234036.  165273.  0.20    1     1     no-change   1      P2-hist             V2                                
+105        optimized-baseline-nvi  0    -    -            0.00     234036.  165273.  0.20    1     1     no-change   1      P2-hist             V2                                
+105        optimized-baseline-nvi  0    -    -            0.00     234036.  165273.  0.20    1     1     no-change   1      P2-hist             V2                                
+120        optimized-baseline-nvi  0    -    -            0.00     214926.  165273.  0.24    1     1     no-change   1      P2-hist             V2                                
+120        optimized-baseline-nvi  0    -    -            0.00     214926.  165273.  0.24    1     1     no-change   1      P2-hist             V2                                
+135        optimized-baseline-nvi  0    -    -            0.00     214926.  165273.  0.24    1     1     no-change   1      P2-hist             V2                                
+135        optimized-baseline-nvi  0    -    -            0.00     214926.  165273.  0.24    1     1     no-change   1      P2-hist             V2                                
+150        optimized-baseline-nvi  0    -    -            0.00     231131.  165273.  0.21    1     1     no-change   1      P2-hist             V2                                
+150        optimized-baseline-nvi  0    -    -            0.00     231131.  165273.  0.21    1     1     no-change   1      P2-hist             V2                                
+165        optimized-baseline-nvi  0    -    -            0.00     231131.  165273.  0.21    1     1     no-change   1      P2-hist             V2                                
+165        optimized-baseline-nvi  0    -    -            0.00     231131.  165273.  0.21    1     1     no-change   1      P2-hist             V2                                
+180        optimized-baseline-nvi  0    -    -            0.00     244573.  165273.  0.18    1     1     no-change   1      P2-hist             V2                                
+180        optimized-baseline-nvi  0    -    -            0.00     244573.  165273.  0.18    1     1     no-change   1      P2-hist             V2                                
+195        optimized-baseline-nvi  0    -    -            0.00     244573.  165273.  0.18    1     1     no-change   1      P2-hist             V2                                
+195        optimized-baseline-nvi  0    -    -            0.00     244573.  165273.  0.18    1     1     no-change   1      P2-hist             V2                                
+210        optimized-baseline-nvi  0    -    -            0.00     249443.  165273.  0.17    1     1     no-change   1      P2-hist             V2                                
+210        optimized-baseline-nvi  0    -    -            0.00     249443.  165273.  0.17    1     1     no-change   1      P2-hist             V2                                
+225        optimized-baseline-nvi  0    -    -            0.00     249443.  165273.  0.17    1     1     no-change   1      P2-hist             V2                                
+225        optimized-baseline-nvi  0    -    -            0.00     249443.  165273.  0.17    1     1     no-change   1      P2-hist             V2                                
+240        optimized-baseline-nvi  0    -    -            0.00     208777.  165273.  0.26    1     1     no-change   1      P2-hist             V2                                
+240        optimized-baseline-nvi  0    -    -            0.00     208777.  165273.  0.26    1     1     no-change   1      P2-hist             V2                                
+255        optimized-baseline-nvi  0    -    -            0.00     208777.  165273.  0.26    1     1     no-change   1      P2-hist             V2                                
+255        optimized-baseline-nvi  0    -    -            0.00     208777.  165273.  0.26    1     1     no-change   1      P2-hist             V2                                
+270        optimized-baseline-nvi  0    -    -            0.00     208663.  165273.  0.26    1     1     no-change   1      P2-hist             V2                                
+270        optimized-baseline-nvi  0    -    -            0.00     208663.  165273.  0.26    1     1     no-change   1      P2-hist             V2                                
+285        optimized-baseline-nvi  0    -    -            0.00     208663.  165273.  0.26    1     1     no-change   1      P2-hist             V2                                
+285        optimized-baseline-nvi  0    -    -            0.00     208663.  165273.  0.26    1     1     no-change   1      P2-hist             V2                                
+300        optimized-baseline-nvi  0    -    -            0.00     230333.  165273.  0.21    1     1     no-change   1      P2-hist             V2                                
+300        optimized-baseline-nvi  0    -    -            0.00     230333.  165273.  0.21    1     1     no-change   1      P2-hist             V2                                
+315        optimized-baseline-nvi  0    -    -            0.00     230333.  165273.  0.21    1     1     no-change   1      P2-hist             V2                                
+315        optimized-baseline-nvi  0    -    -            0.00     230333.  165273.  0.21    1     1     no-change   1      P2-hist             V2                                
+330        optimized-baseline-nvi  0    -    -            0.00     247386.  165273.  0.18    1     1     no-change   1      P2-hist             V2                                
+330        optimized-baseline-nvi  0    -    -            0.00     247386.  165273.  0.18    1     1     no-change   1      P2-hist             V2                                
+345        optimized-baseline-nvi  0    -    -            0.00     247386.  165273.  0.18    1     1     no-change   1      P2-hist             V2                                
+345        optimized-baseline-nvi  0    -    -            0.00     247386.  165273.  0.18    1     1     no-change   1      P2-hist             V2                                
+360        optimized-baseline-nvi  0    -    -            0.00     241510.  165273.  0.19    1     1     no-change   1      P2-hist             V2                                
+360        optimized-baseline-nvi  0    -    -            0.00     241510.  165273.  0.19    1     1     no-change   1      P2-hist             V2                                
+375        optimized-baseline-nvi  0    -    -            0.00     241510.  165273.  0.19    1     1     no-change   1      P2-hist             V2                                
+375        optimized-baseline-nvi  0    -    -            0.00     241510.  165273.  0.19    1     1     no-change   1      P2-hist             V2                                
+390        optimized-baseline-nvi  0    -    -            846262.  0.00     165273.  3.03    1     1     no-change   1      P1-obs              V2                                
+390        optimized-baseline-nvi  0    -    -            846262.  0.00     165273.  3.03    1     7     scale-up    7      P1-obs              V2 (optimizer: cost-aware)        
+405        optimized-baseline-nvi  0    -    -            846262.  0.00     165273.  3.03    1     1     no-change   1      P1-obs              V2                                
+405        optimized-baseline-nvi  0    -    -            846262.  0.00     165273.  3.03    1     7     scale-up    7      P1-obs              V2 (optimizer: cost-aware)        
+420        optimized-baseline-nvi  0    -    -            1947806  0.00     165273.  5.86    1     4     scale-up    4      P1-obs              V2 (optimizer: cost-aware)        
+420        optimized-baseline-nvi  0    -    -            1947806  0.00     165273.  5.86    1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+435        optimized-baseline-nvi  0    -    -            1947806  0.00     165273.  5.86    1     4     scale-up    4      P1-obs              V2 (optimizer: cost-aware)        
+435        optimized-baseline-nvi  0    -    -            1947806  0.00     165273.  5.86    1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+450        optimized-baseline-nvi  0    -    -            2975524  0.00     165273.  8.50    1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+450        optimized-baseline-nvi  0    -    -            2975524  0.00     165273.  8.50    1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+465        optimized-baseline-nvi  0    -    -            2975524  0.00     165273.  8.50    1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+465        optimized-baseline-nvi  0    -    -            2975524  0.00     165273.  8.50    1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+480        optimized-baseline-nvi  0    -    -            3832955  0.00     165273.  10.71   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+480        optimized-baseline-nvi  0    -    -            3832955  0.00     165273.  10.71   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+495        optimized-baseline-nvi  0    -    -            3832955  0.00     165273.  10.71   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+495        optimized-baseline-nvi  0    -    -            3832955  0.00     165273.  10.71   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+510        optimized-baseline-nvi  0    -    -            4880748  0.00     165273.  13.40   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+510        optimized-baseline-nvi  0    -    -            4880748  0.00     165273.  13.40   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+525        optimized-baseline-nvi  0    -    -            4880748  0.00     165273.  13.40   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+525        optimized-baseline-nvi  0    -    -            4880748  0.00     165273.  13.40   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+540        optimized-baseline-nvi  0    -    -            5850602  0.00     165273.  15.89   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+540        optimized-baseline-nvi  0    -    -            5850602  0.00     165273.  15.89   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+555        optimized-baseline-nvi  0    -    -            5850602  0.00     165273.  15.89   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+555        optimized-baseline-nvi  0    -    -            5850602  0.00     165273.  15.89   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+570        optimized-baseline-nvi  0    -    -            6734197  0.00     165273.  18.17   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+570        optimized-baseline-nvi  0    -    -            6734197  0.00     165273.  18.17   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+585        optimized-baseline-nvi  0    -    -            6734197  0.00     165273.  18.17   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+585        optimized-baseline-nvi  0    -    -            6734197  0.00     165273.  18.17   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+601        optimized-baseline-nvi  0    -    -            7545001  0.00     165273.  20.25   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+601        optimized-baseline-nvi  0    -    -            7545001  0.00     165273.  20.25   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+616        optimized-baseline-nvi  0    -    -            7545001  0.00     165273.  20.25   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+616        optimized-baseline-nvi  0    -    -            7545001  0.00     165273.  20.25   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+631        optimized-baseline-nvi  0    -    -            8252672  0.00     165273.  22.07   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+631        optimized-baseline-nvi  0    -    -            8252672  0.00     165273.  22.07   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+646        optimized-baseline-nvi  0    -    -            8252672  0.00     165273.  22.07   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+646        optimized-baseline-nvi  0    -    -            8252672  0.00     165273.  22.07   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+661        optimized-baseline-nvi  0    -    -            9216324  0.00     165273.  24.55   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+661        optimized-baseline-nvi  0    -    -            9216324  0.00     165273.  24.55   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+676        optimized-baseline-nvi  0    -    -            9216324  0.00     165273.  24.55   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+676        optimized-baseline-nvi  0    -    -            9216324  0.00     165273.  24.55   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+691        optimized-baseline-nvi  0    -    -            1018208  0.00     165273.  27.03   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+691        optimized-baseline-nvi  0    -    -            1018208  0.00     165273.  27.03   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+706        optimized-baseline-nvi  0    -    -            1018208  0.00     165273.  27.03   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+706        optimized-baseline-nvi  0    -    -            1018208  0.00     165273.  27.03   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+721        optimized-baseline-nvi  0    -    -            1090359  0.00     165273.  28.89   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+721        optimized-baseline-nvi  0    -    -            1090359  0.00     165273.  28.89   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+736        optimized-baseline-nvi  0    -    -            1090359  0.00     165273.  28.89   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+736        optimized-baseline-nvi  0    -    -            1090359  0.00     165273.  28.89   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+751        optimized-baseline-nvi  0    -    -            1168608  0.00     165273.  30.90   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+751        optimized-baseline-nvi  0    -    -            1168608  0.00     165273.  30.90   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+766        optimized-baseline-nvi  0    -    -            1168608  0.00     165273.  30.90   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+766        optimized-baseline-nvi  0    -    -            1168608  0.00     165273.  30.90   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+781        optimized-baseline-nvi  0    -    -            1247638  0.00     165273.  32.93   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+781        optimized-baseline-nvi  0    -    -            1247638  0.00     165273.  32.93   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+796        optimized-baseline-nvi  0    -    -            1247638  0.00     165273.  32.93   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+796        optimized-baseline-nvi  0    -    -            1247638  0.00     165273.  32.93   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+811        optimized-baseline-nvi  0    -    -            1314216  0.00     165273.  34.65   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+811        optimized-baseline-nvi  0    -    -            1314216  0.00     165273.  34.65   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+826        optimized-baseline-nvi  0    -    -            1314216  0.00     165273.  34.65   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+826        optimized-baseline-nvi  0    -    -            1314216  0.00     165273.  34.65   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+841        optimized-baseline-nvi  0    -    -            1394665  0.00     165273.  36.71   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+841        optimized-baseline-nvi  0    -    -            1394665  0.00     165273.  36.71   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+856        optimized-baseline-nvi  0    -    -            1394665  0.00     165273.  36.71   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+856        optimized-baseline-nvi  0    -    -            1394665  0.00     165273.  36.71   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+871        optimized-baseline-nvi  0    -    -            1473321  0.00     165273.  38.74   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+871        optimized-baseline-nvi  0    -    -            1473321  0.00     165273.  38.74   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+886        optimized-baseline-nvi  0    -    -            1473321  0.00     165273.  38.74   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+886        optimized-baseline-nvi  0    -    -            1473321  0.00     165273.  38.74   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+901        optimized-baseline-nvi  0    -    -            1570325  0.00     165273.  41.23   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+901        optimized-baseline-nvi  0    -    -            1570325  0.00     165273.  41.23   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+916        optimized-baseline-nvi  0    -    -            1570325  0.00     165273.  41.23   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+916        optimized-baseline-nvi  0    -    -            1570325  0.00     165273.  41.23   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+931        optimized-baseline-nvi  0    -    -            1651796  0.00     165273.  43.33   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+931        optimized-baseline-nvi  0    -    -            1651796  0.00     165273.  43.33   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+946        optimized-baseline-nvi  0    -    -            1651796  0.00     165273.  43.33   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+946        optimized-baseline-nvi  0    -    -            1651796  0.00     165273.  43.33   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+961        optimized-baseline-nvi  0    -    -            1734737  0.00     165273.  45.46   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+961        optimized-baseline-nvi  0    -    -            1734737  0.00     165273.  45.46   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+976        optimized-baseline-nvi  0    -    -            1734737  0.00     165273.  45.46   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+976        optimized-baseline-nvi  0    -    -            1734737  0.00     165273.  45.46   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+991        optimized-baseline-nvi  0    -    -            1765124  0.00     165273.  46.24   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+991        optimized-baseline-nvi  0    -    -            1765124  0.00     165273.  46.24   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1006       optimized-baseline-nvi  0    -    -            1765124  0.00     165273.  46.24   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1006       optimized-baseline-nvi  0    -    -            1765124  0.00     165273.  46.24   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1021       optimized-baseline-nvi  0    -    -            1631121  0.00     165273.  42.79   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1021       optimized-baseline-nvi  0    -    -            1631121  0.00     165273.  42.79   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1036       optimized-baseline-nvi  0    -    -            1631121  0.00     165273.  42.79   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1036       optimized-baseline-nvi  0    -    -            1631121  0.00     165273.  42.79   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1051       optimized-baseline-nvi  0    -    -            1471313  0.00     165273.  38.68   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1051       optimized-baseline-nvi  0    -    -            1471313  0.00     165273.  38.68   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1066       optimized-baseline-nvi  0    -    -            1471313  0.00     165273.  38.68   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1066       optimized-baseline-nvi  0    -    -            1471313  0.00     165273.  38.68   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1081       optimized-baseline-nvi  0    -    -            1311241  0.00     165273.  34.57   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1081       optimized-baseline-nvi  0    -    -            1311241  0.00     165273.  34.57   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1096       optimized-baseline-nvi  0    -    -            1311241  0.00     165273.  34.57   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1096       optimized-baseline-nvi  0    -    -            1311241  0.00     165273.  34.57   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1111       optimized-baseline-nvi  0    -    -            1152215  0.00     165273.  30.48   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1111       optimized-baseline-nvi  0    -    -            1152215  0.00     165273.  30.48   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1126       optimized-baseline-nvi  0    -    -            1152215  0.00     165273.  30.48   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1126       optimized-baseline-nvi  0    -    -            1152215  0.00     165273.  30.48   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1141       optimized-baseline-nvi  0    -    -            9908049  0.00     165273.  26.33   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1141       optimized-baseline-nvi  0    -    -            9908049  0.00     165273.  26.33   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1156       optimized-baseline-nvi  0    -    -            9908049  0.00     165273.  26.33   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1156       optimized-baseline-nvi  0    -    -            9908049  0.00     165273.  26.33   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1171       optimized-baseline-nvi  0    -    -            8313330  0.00     165273.  22.23   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1171       optimized-baseline-nvi  0    -    -            8313330  0.00     165273.  22.23   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1186       optimized-baseline-nvi  0    -    -            8313330  0.00     165273.  22.23   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1186       optimized-baseline-nvi  0    -    -            8313330  0.00     165273.  22.23   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1201       optimized-baseline-nvi  0    -    -            6771128  0.00     165273.  18.26   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1201       optimized-baseline-nvi  0    -    -            6771128  0.00     165273.  18.26   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1216       optimized-baseline-nvi  0    -    -            6771128  0.00     165273.  18.26   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1216       optimized-baseline-nvi  0    -    -            6771128  0.00     165273.  18.26   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1231       optimized-baseline-nvi  0    -    -            4864531  0.00     165273.  13.36   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1231       optimized-baseline-nvi  0    -    -            4864531  0.00     165273.  13.36   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1246       optimized-baseline-nvi  0    -    -            4864531  0.00     165273.  13.36   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1246       optimized-baseline-nvi  0    -    -            4864531  0.00     165273.  13.36   1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1261       optimized-baseline-nvi  0    -    -            2575712  0.00     165273.  7.47    1     8     scale-up    8      P1-obs              V2 (optimizer: cost-aware)        
+1261       optimized-baseline-nvi  0    -    -            2575712  0.00     165273.  7.47    1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1276       optimized-baseline-nvi  0    -    -            2575712  0.00     165273.  7.47    1     8     scale-up    8      P1-obs              V2 (optimizer: cost-aware)        
+1276       optimized-baseline-nvi  0    -    -            2575712  0.00     165273.  7.47    1     10    scale-up    10     P1-obs              V2 (optimizer: cost-aware)        
+1291       optimized-baseline-nvi  0    -    -            146637.  0.00     165273.  1.23    1     1     no-change   1      P2-hist             V2                                
+1291       optimized-baseline-nvi  0    -    -            146637.  0.00     165273.  1.23    1     2     scale-up    2      P1-obs              V2 (optimizer: cost-aware)        
+1306       optimized-baseline-nvi  0    -    -            146637.  0.00     165273.  1.23    1     1     no-change   1      P2-hist             V2                                
+1306       optimized-baseline-nvi  0    -    -            146637.  0.00     165273.  1.23    1     2     scale-up    2      P1-obs              V2 (optimizer: cost-aware)        
+1321       optimized-baseline-nvi  0    -    -            0.00     163013.  165273.  0.35    1     1     no-change   1      P2-hist             V2                                
+1321       optimized-baseline-nvi  0    -    -            0.00     163013.  165273.  0.35    1     1     no-change   1      P2-hist             V2                                
+1336       optimized-baseline-nvi  0    -    -            0.00     163013.  165273.  0.35    1     1     no-change   1      P2-hist             V2                                
+1336       optimized-baseline-nvi  0    -    -            0.00     163013.  165273.  0.35    1     1     no-change   1      P2-hist             V2                                
+1351       optimized-baseline-nvi  0    -    -            0.00     163013.  165273.  0.35    1     1     no-change   1      P2-hist             V2                                
+1351       optimized-baseline-nvi  0    -    -            0.00     163013.  165273.  0.35    1     1     no-change   1      P2-hist             V2                                
+1366       optimized-baseline-nvi  0    -    -            0.00     163013.  165273.  0.35    1     1     no-change   1      P2-hist             V2                                
+1366       optimized-baseline-nvi  0    -    -            0.00     163013.  165273.  0.35    1     1     no-change   1      P2-hist             V2                                
+1381       optimized-baseline-nvi  0    -    -            0.00     222606.  165273.  0.23    1     1     no-change   1      P2-hist             V2                                
+1381       optimized-baseline-nvi  0    -    -            0.00     222606.  165273.  0.23    1     1     no-change   1      P2-hist             V2                                
+1396       optimized-baseline-nvi  0    -    -            0.00     222606.  165273.  0.23    1     1     no-change   1      P2-hist             V2                                
+1396       optimized-baseline-nvi  0    -    -            0.00     222606.  165273.  0.23    1     1     no-change   1      P2-hist             V2                                
+1411       optimized-baseline-nvi  0    -    -            0.00     259271.  165273.  0.15    1     1     no-change   1      P2-hist             V2                                
+1411       optimized-baseline-nvi  0    -    -            0.00     259271.  165273.  0.15    1     1     no-change   1      P2-hist             V2                                
+1426       optimized-baseline-nvi  0    -    -            0.00     259271.  165273.  0.15    1     1     no-change   1      P2-hist             V2                                
+1426       optimized-baseline-nvi  0    -    -            0.00     259271.  165273.  0.15    1     1     no-change   1      P2-hist             V2                                
+1441       optimized-baseline-nvi  0    -    -            0.00     167197.  165273.  0.35    1     1     no-change   1      P2-hist             V2                                
+1441       optimized-baseline-nvi  0    -    -            0.00     167197.  165273.  0.35    1     1     no-change   1      P2-hist             V2                                
+1456       optimized-baseline-nvi  0    -    -            0.00     167197.  165273.  0.35    1     1     no-change   1      P2-hist             V2                                
+1456       optimized-baseline-nvi  0    -    -            0.00     167197.  165273.  0.35    1     1     no-change   1      P2-hist             V2                                
+1471       optimized-baseline-nvi  0    -    -            0.00     138097.  165273.  0.41    1     1     no-change   1      P2-hist             V2                                
+1471       optimized-baseline-nvi  0    -    -            0.00     138097.  165273.  0.41    1     1     no-change   1      P2-hist             V2                                
+1486       optimized-baseline-nvi  0    -    -            0.00     138097.  165273.  0.41    1     1     no-change   1      P2-hist             V2                                
+1486       optimized-baseline-nvi  0    -    -            0.00     138097.  165273.  0.41    1     1     no-change   1      P2-hist             V2                                
+1501       optimized-baseline-nvi  0    -    -            0.00     205301.  165273.  0.27    1     1     no-change   1      P2-hist             V2                                
+1501       optimized-baseline-nvi  0    -    -            0.00     205301.  165273.  0.27    1     1     no-change   1      P2-hist             V2                                
+1516       optimized-baseline-nvi  0    -    -            0.00     205301.  165273.  0.27    1     1     no-change   1      P2-hist             V2                                
+1516       optimized-baseline-nvi  0    -    -            0.00     205301.  165273.  0.27    1     1     no-change   1      P2-hist             V2                                
+1531       optimized-baseline-nvi  0    -    -            0.00     205301.  165273.  0.27    1     1     no-change   1      P2-hist             V2                                
+1531       optimized-baseline-nvi  0    -    -            0.00     205301.  165273.  0.27    1     1     no-change   1      P2-hist             V2                                
+1546       optimized-baseline-nvi  0    -    -            0.00     205301.  165273.  0.27    1     1     no-change   1      P2-hist             V2                                
+1546       optimized-baseline-nvi  0    -    -            0.00     205301.  165273.  0.27    1     1     no-change   1      P2-hist             V2                                
+1561       optimized-baseline-nvi  0    -    -            0.00     176887.  165273.  0.33    1     1     no-change   1      P2-hist             V2                                
+1561       optimized-baseline-nvi  0    -    -            0.00     176887.  165273.  0.33    1     1     no-change   1      P2-hist             V2                                
+1576       optimized-baseline-nvi  0    -    -            0.00     176887.  165273.  0.33    1     1     no-change   1      P2-hist             V2                                
+1576       optimized-baseline-nvi  0    -    -            0.00     176887.  165273.  0.33    1     1     no-change   1      P2-hist             V2                                
+1591       optimized-baseline-nvi  0    -    -            0.00     176887.  165273.  0.33    1     1     no-change   1      P2-hist             V2                                
+1591       optimized-baseline-nvi  0    -    -            0.00     176887.  165273.  0.33    1     1     no-change   1      P2-hist             V2                                
+1606       optimized-baseline-nvi  0    -    -            0.00     176887.  165273.  0.33    1     1     no-change   1      P2-hist             V2                                
+1606       optimized-baseline-nvi  0    -    -            0.00     176887.  165273.  0.33    1     1     no-change   1      P2-hist             V2                                
+1621       optimized-baseline-nvi  0    -    -            0.00     224617.  165273.  0.22    1     1     no-change   1      P2-hist             V2                                
+1621       optimized-baseline-nvi  0    -    -            0.00     224617.  165273.  0.22    1     1     no-change   1      P2-hist             V2                                
+1637       optimized-baseline-nvi  0    -    -            0.00     224617.  165273.  0.22    1     1     no-change   1      P2-hist             V2                                
+1637       optimized-baseline-nvi  0    -    -            0.00     224617.  165273.  0.22    1     1     no-change   1      P2-hist             V2                                
+1652       optimized-baseline-nvi  0    -    -            0.00     208821.  165273.  0.26    1     1     no-change   1      P2-hist             V2                                
+1652       optimized-baseline-nvi  0    -    -            0.00     208821.  165273.  0.26    1     1     no-change   1      P2-hist             V2                                
+1667       optimized-baseline-nvi  0    -    -            0.00     208821.  165273.  0.26    1     1     no-change   1      P2-hist             V2                                
+1667       optimized-baseline-nvi  0    -    -            0.00     208821.  165273.  0.26    1     1     no-change   1      P2-hist             V2                                
+1682       optimized-baseline-nvi  0    -    -            0.00     220617.  165273.  0.23    1     1     no-change   1      P2-hist             V2                                
+1682       optimized-baseline-nvi  0    -    -            0.00     220617.  165273.  0.23    1     1     no-change   1      P2-hist             V2                                
+1697       optimized-baseline-nvi  0    -    -            0.00     220617.  165273.  0.23    1     1     no-change   1      P2-hist             V2                                
+1697       optimized-baseline-nvi  0    -    -            0.00     220617.  165273.  0.23    1     1     no-change   1      P2-hist             V2                                
+1712       optimized-baseline-nvi  0    -    -            0.00     221760.  165273.  0.23    1     1     no-change   1      P2-hist             V2                                
+1712       optimized-baseline-nvi  0    -    -            0.00     221760.  165273.  0.23    1     1     no-change   1      P2-hist             V2                                
+1727       optimized-baseline-nvi  0    -    -            0.00     221760.  165273.  0.23    1     1     no-change   1      P2-hist             V2                                
+1727       optimized-baseline-nvi  0    -    -            0.00     221760.  165273.  0.23    1     1     no-change   1      P2-hist             V2                                
+1742       optimized-baseline-nvi  0    -    -            0.00     220846.  165273.  0.23    1     1     no-change   1      P2-hist             V2                                
+1742       optimized-baseline-nvi  0    -    -            0.00     220846.  165273.  0.23    1     1     no-change   1      P2-hist             V2                                
+1757       optimized-baseline-nvi  0    -    -            0.00     220846.  165273.  0.23    1     1     no-change   1      P2-hist             V2                                
+1757       optimized-baseline-nvi  0    -    -            0.00     220846.  165273.  0.23    1     1     no-change   1      P2-hist             V2                                
+1772       optimized-baseline-nvi  0    -    -            0.00     227933.  165273.  0.22    1     1     no-change   1      P2-hist             V2                                
+1772       optimized-baseline-nvi  0    -    -            0.00     227933.  165273.  0.22    1     1     no-change   1      P2-hist             V2                                
+1787       optimized-baseline-nvi  0    -    -            0.00     227933.  165273.  0.22    1     1     no-change   1      P2-hist             V2                                
+1787       optimized-baseline-nvi  0    -    -            0.00     227933.  165273.  0.22    1     1     no-change   1      P2-hist             V2                                
+1802       optimized-baseline-nvi  0    -    -            0.00     227978.  165273.  0.22    1     1     no-change   1      P2-hist             V2                                
+1802       optimized-baseline-nvi  0    -    -            0.00     227978.  165273.  0.22    1     1     no-change   1      P2-hist             V2                                
+1817       optimized-baseline-nvi  0    -    -            0.00     228207.  165273.  0.22    1     1     no-change   1      P2-hist             V2                                
+1817       optimized-baseline-nvi  0    -    -            0.00     228207.  165273.  0.22    1     1     no-change   1      P2-hist             V2                                
+1832       optimized-baseline-nvi  0    -    -            0.00     252871.  165273.  0.16    1     1     no-change   1      P2-hist             V2                                
+1832       optimized-baseline-nvi  0    -    -            0.00     252871.  165273.  0.16    1     1     no-change   1      P2-hist             V2                                
+1847       optimized-baseline-nvi  0    -    -            0.00     252871.  165273.  0.16    1     1     no-change   1      P2-hist             V2                                
+1847       optimized-baseline-nvi  0    -    -            0.00     252871.  165273.  0.16    1     1     no-change   1      P2-hist             V2                                
+1862       optimized-baseline-nvi  0    -    -            0.00     246814.  165273.  0.18    1     1     no-change   1      P2-hist             V2                                
+1862       optimized-baseline-nvi  0    -    -            0.00     246814.  165273.  0.18    1     1     no-change   1      P2-hist             V2                                
+1877       optimized-baseline-nvi  0    -    -            0.00     266381.  165273.  0.14    1     1     no-change   1      P2-hist             V2                                
+1877       optimized-baseline-nvi  0    -    -            0.00     266381.  165273.  0.14    1     1     no-change   1      P2-hist             V2                                
+1892       optimized-baseline-nvi  0    -    -            0.00     259523.  165273.  0.15    1     1     no-change   1      P2-hist             V2                                
+1892       optimized-baseline-nvi  0    -    -            0.00     259523.  165273.  0.15    1     1     no-change   1      P2-hist             V2                                
+1907       optimized-baseline-nvi  0    -    -            0.00     259523.  165273.  0.15    1     1     no-change   1      P2-hist             V2                                
+1907       optimized-baseline-nvi  0    -    -            0.00     259523.  165273.  0.15    1     1     no-change   1      P2-hist             V2                                
+1922       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+1922       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+1937       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+1937       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+1952       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+1952       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+1967       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+1967       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+1982       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+1982       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+1997       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+1997       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2012       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2012       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2027       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2027       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2042       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2042       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2057       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2057       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2072       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2072       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2087       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2087       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2102       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2102       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2117       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2117       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2132       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2132       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2147       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2147       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2162       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2162       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2177       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2177       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2192       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2192       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2207       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2207       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2222       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2222       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2237       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2237       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2252       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2252       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2267       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2267       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2282       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2282       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2297       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2297       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2312       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2312       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2327       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2327       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2342       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2342       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2357       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2357       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2372       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2372       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2387       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2387       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2402       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2402       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2417       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2417       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2432       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2432       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2447       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2447       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2462       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2462       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2477       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2477       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2492       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2492       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2507       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2507       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2522       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2522       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2537       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2537       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2552       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2552       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2567       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2567       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2582       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2582       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2597       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2597       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2612       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2612       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2627       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2627       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2642       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2642       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2658       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2658       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2673       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2673       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2688       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2688       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2703       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2703       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2718       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2718       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2733       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2733       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2748       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2748       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2763       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2763       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2778       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2778       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2793       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2793       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2808       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2808       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2823       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2823       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2838       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2838       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2853       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2853       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2868       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2868       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2883       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2883       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2898       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2898       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2913       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2913       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2928       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2928       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2943       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2943       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2958       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2958       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2973       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2973       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2988       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+2988       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3003       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3003       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3018       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3018       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3033       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3033       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3048       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3048       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3063       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3063       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3078       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3078       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3093       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3093       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3108       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3108       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3123       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3123       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3138       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3138       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3153       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3153       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3168       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3168       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3183       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3183       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3198       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3198       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3213       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3213       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3228       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3228       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3243       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3243       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3258       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3258       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3273       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3273       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3288       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3288       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3303       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3303       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3318       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3318       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3333       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3333       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3348       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3348       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3363       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3363       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3378       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3378       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3393       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3393       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3408       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3408       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3423       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3423       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3438       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3438       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3453       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3453       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3468       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3468       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3483       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3483       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3498       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3498       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3513       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3513       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3528       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3528       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3543       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3543       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3558       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3558       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3573       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3573       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3588       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3588       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3603       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3603       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3618       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3618       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3633       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3633       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3648       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3648       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3663       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3663       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3679       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3679       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3694       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3694       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3709       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3709       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3724       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3724       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3739       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3739       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3754       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3754       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3769       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3769       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3784       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3784       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3799       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3799       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3814       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3814       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3829       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3829       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3844       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3844       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3859       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3859       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3874       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+3874       optimized-baseline-nvi  0    -    -            0.00     330546.  165273.  0.00    1     1     no-change   1      P2-hist             V2                                
+
+518 row(s). t is seconds since the first row (t0 epoch=1787280605). bound_by: k1=memory-bound won, k2=compute-bound won. decision_curr/tgt/action are the optimizer's PRE-enforcement decision; applied_target is what actually landed after scale-to-zero/min-replica enforcement (from "Applied saturation decision via shared cache") -- the two can legitimately differ. Two DIFFERENT reason fields: analyzer_reason is the analyzer's own capacity-tier/data-source label (e.g. P4-k1, no-data); applied_reason is the engine/enforcer's explanation for the ACTION, and reads '<category> <action> (optimizer: <name>, enforced)' specifically when enforcement overrode the raw decision -- the human-readable why behind a decision_tgt vs applied_target mismatch. A row with n_replicas/bound_by/k2_priority all '-' has an analyzer-result/scaling-decision match but no saturation_v2 k1/k2 line for this cycle (older bundle, or this cycle's code path never emitted one -- not evidence it doesn't matter, just that this cycle didn't hit it).

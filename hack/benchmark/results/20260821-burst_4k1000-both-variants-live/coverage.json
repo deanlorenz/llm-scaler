@@ -1,0 +1,97 @@
+{
+  "rows": [
+    {
+      "capability": "Calibrate A",
+      "verdict": "PASS",
+      "detail": "n=25 bands=6 kv_span=1.00"
+    },
+    {
+      "capability": "Trust B",
+      "verdict": "FAIL",
+      "detail": "y_lo=0.2 B_fit=0.7957362879062546 B_meas=2.786961970892816 n_low=69"
+    },
+    {
+      "capability": "Characterize saturation",
+      "verdict": "PASS",
+      "detail": "n=97"
+    },
+    {
+      "capability": "Exercise the 0.85 ceiling",
+      "verdict": "FAIL",
+      "detail": "n_0.80_0.90=2"
+    },
+    {
+      "capability": "Locate the throughput knee",
+      "verdict": "PASS",
+      "detail": "n=208 left=163 right=37"
+    },
+    {
+      "capability": "Scale-down present",
+      "verdict": "PASS",
+      "detail": "drain_events=0"
+    },
+    {
+      "capability": "Drain-vs-kill measurable",
+      "verdict": "PASS",
+      "detail": "needs a scale-down and a per-request trace"
+    },
+    {
+      "capability": "Queue (a) material",
+      "verdict": "FAIL",
+      "detail": "no demand trace"
+    },
+    {
+      "capability": "Queue (c) material",
+      "verdict": "PASS",
+      "detail": "max=2936.0"
+    },
+    {
+      "capability": "Router imbalance measurable",
+      "verdict": "PASS",
+      "detail": "pods=2 disp_p95=0.5 flips=41 n=105 (boot samples excluded: 2)"
+    },
+    {
+      "capability": "rho model valid at top",
+      "verdict": "FAIL",
+      "detail": "preempt/s=0.9844822220803676"
+    },
+    {
+      "capability": "Capacity model checkable",
+      "verdict": "PASS",
+      "detail": "pred=45.909333333333336 obs=50.0"
+    },
+    {
+      "capability": "Boot lag measured",
+      "verdict": "FAIL",
+      "detail": "n=0 mean=None"
+    },
+    {
+      "capability": "Signal completeness",
+      "verdict": "PASS",
+      "detail": "w5gv8=138; 9j5tc=138"
+    },
+    {
+      "capability": "Per-request trace present",
+      "verdict": "PASS",
+      "detail": "n=12000"
+    },
+    {
+      "capability": "Scaling-decision log present",
+      "verdict": "PASS",
+      "detail": "analyzers=['saturation'] n_results=518 n_decisions=518 source=dean-20260821-055002-068/results/inference-perf-1787280639-kjxx2t_1/controller.log"
+    },
+    {
+      "capability": "Knee matches shape prediction",
+      "verdict": "PASS",
+      "detail": "in=4000 out=1000 out/in=0.25 (prefill-heavy -> expect y>0); fitted y_lo=0.2"
+    }
+  ],
+  "n_pass": 12,
+  "n_fail": 5,
+  "saturation_threshold": 0.85,
+  "warnings": [
+    "replica_status_timeseries.json had no matching controller; replicas synthesized from the WVA controller's own wva_desired_replicas/wva_current_replicas metrics instead (\"ready\" is status.replicas, not readyReplicas)"
+  ],
+  "extractor_sha": "d362472f",
+  "extracted_at": "2026-08-21T04:04:25.700874+00:00"
+}
