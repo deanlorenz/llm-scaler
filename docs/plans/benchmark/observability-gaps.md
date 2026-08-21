@@ -394,13 +394,21 @@ sparse pod scrapes, all rejected** (this directly answers "are the unparsed
    a usable signal.
 3. EPP's `inference_objective_running_requests`: would have been scraped at
    the *same* 13 timestamps as the decode pod (no density win), but is a
-   signal one hop closer to the client, so potentially cleaner. Unavailable
-   for this run — every EPP scrape in
-   `metrics/raw/optimized-baseline-epp-*_metrics.log` returned `Unauthorized`
-   instead of metrics text. A real collection gap (auth against the EPP
-   metrics endpoint failed for the whole run), not something the extractor
-   can work around after the fact — flag for whoever owns
-   `scrape_wva_metrics.sh`'s EPP scrape path, separately from this finding.
+   signal one hop closer to the client, so potentially cleaner. Unavailable —
+   every EPP scrape in `metrics/raw/optimized-baseline-epp-*_metrics.log`
+   returned `Unauthorized` instead of metrics text (13/13 for `quick_smoke`,
+   confirmed 55/55 for `decode_heavy` too — **this is not specific to the
+   weak-anchor run**, it's a standing gap on every run collected this
+   session). Not something the extractor can work around after the fact.
+   Not `scrape_wva_metrics.sh` either — that script only scrapes the WVA
+   controller's own authenticated `/metrics`; the EPP/vLLM pod scrapes come
+   from the harness's own in-pod metrics collector (visible via each run's
+   `metrics_collection.log`: "Found vLLM pods" / "Found EPP pods"), which
+   lives outside this repo entirely — a `grep` across `hack/benchmark/` for
+   the strings that collector prints turns up nothing here. Flag for whoever
+   owns that harness-side collector; likely the EPP pod's metrics port is
+   behind its own auth (e.g. a `kube-rbac-proxy` sidecar) that the collector
+   isn't presenting a token for.
 
 **What changed**: nothing about the actual anchor numbers — no combination of
 already-captured data for this run beats the existing `run+wait` fit. One
