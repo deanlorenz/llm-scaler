@@ -73,9 +73,45 @@ Five sub-tasks (as directed):
    needs any adjustment after `add_variant.py` creates it.
 3. **Run a regular benchmark workload** against the shared endpoint
    (`make benchmark-run ... BENCHMARK_TWO_VARIANT_SECONDARY_SUFFIX=v2`).
+   Chose the newly-cherry-picked `burst_4k1000` scenario (RPS 4→14→4 over
+   300/600/600s) over `quick_smoke`/`prefill_heavy` specifically because it's
+   built to force the scale-up/down cycling that never happened on this
+   session's earlier single-variant runs (the Calibrate-A / 0.85-ceiling
+   coverage gaps). This worktree had no `llm-d-benchmark` CLI checkout yet
+   (`make benchmark-install`), which needed two local fixes to get through
+   non-interactively (no sudo available in this environment):
+   - the CLI's own `install.sh` runs `sudo apt-get update` unconditionally
+     on Ubuntu even when every tool it would install is already present;
+     commented that one line out in the gitignored, untracked vendor clone
+     (`llm-d-benchmark/install.sh`) — not a repo change.
+   - the default `python3` on PATH here is a uv-managed build missing
+     `ensurepip`, which broke the venv-creation path; used
+     `BENCHMARK_UV=true` (uv-based venv) instead, as the Makefile's own
+     error message already suggests.
 4. **Collect and extract info for all variants** (`post_run_analyze.sh`,
    `extract_real_trace.py`, the `dump_*` scripts — confirm each buckets
    correctly by variant/ScaledObject name, not just the primary).
+   `post_run_analyze.sh` ran clean except two real gaps:
+   - `dump_wva_full_timeseries.py` reported 0 WVA snapshots despite 222 raw
+     scrapes existing with real per-variant data (both variants' `wva_*`
+     series present, 96 series/scrape). Root cause: its `WVA_POD_PATTERN`
+     required `...-controller-manager` in the filename, but
+     `scrape_wva_metrics.sh` writes the fixed literal `wva-controller`
+     (matching `extract_real_trace.py`'s own `scan_raw()`, which already
+     used the correct literal match) — a real bug, not an environment
+     issue. Fixed the pattern to accept both; re-ran, now 222/222 parsed.
+   - `dump_epp_throughput.py` got 0 snapshots because every EPP scrape
+     during the run returned `Unauthorized`. Cause: llm-d-benchmark's
+     upstream `collect_metrics.sh` reads a bearer token from a hardcoded
+     secret name (`inference-gateway-sa-metrics-reader-secret`, overridable
+     via `LLMDBENCH_EPP_METRICS_SECRET`), which only exists on a
+     `benchmark-standup`-installed stack. `dhl-la-1708` was installed via
+     llm-d's own guide instead, and has a differently-named token secret
+     (`wva-epp-metrics-token`, created by this repo's own monitoring setup).
+     **Not recoverable for this run** — the scrapes already happened and
+     failed; EPP-derived request-rate is permanently missing from this
+     run's data. For a future run on this same stack, pass
+     `LLMDBENCH_EPP_METRICS_SECRET=wva-epp-metrics-token` to fix it live.
 5. **Integrate into the visualization** (`plot_two_variant_pipeline.py` /
    `render_real_trace.py`, then `publish_viz_result.sh` the same way the two
    single-variant runs already under `hack/benchmark/results/` were
@@ -123,6 +159,29 @@ Plus, from the original plan:
   bare `.yaml` suffix theirs didn't), so the cherry-pick was a no-op;
   resolved the conflict by keeping ours and skipped the commit rather than
   create an empty one.
+- **2026-08-21** — `burst_4k1000` run completed (exit 0): 634 files, 8.3GB
+  `per_request_lifecycle_metrics.json`, `controller.log` (4143 lines, live
+  in-run capture), `wva_replica_samples.json` (266 snapshots/532 controller
+  samples), 222 WVA `/metrics` scrapes (0 scrape errors). Cluster-state
+  Thanos queries (`vllm-cache-*`, `epp-pool-*`) failed with a generic
+  BadRequest during post-run capture — not investigated further, doesn't
+  block the run's own live-scraped data.
+  **Real finding, re-confirming an already-documented gap**: `wva-controller`'s
+  own `wva_current_replicas` gauge for the *primary* read `1` mid-run, while
+  direct `kubectl get pods` at the same wall-clock time showed zero primary
+  pods the entire run (it stayed parked, `paused-replicas: "0"`, throughout —
+  untouched, as intended). This is `observability-gaps.md`'s already-logged
+  gap #1 (`wva_desired_replicas`/`wva_current_replicas` not cleared when a
+  variant goes inactive) recurring on the same ScaledObject as before, now
+  with a second live occurrence to cite. Secondary variant did scale
+  1→2 replicas under peak load, cheapest-first as expected (see Plan §1
+  caveat) — primary never left 0 the whole run, confirmed by direct pod
+  list, not by the (stale) gauge.
+- **2026-08-21** — Sub-task 4: `post_run_analyze.sh` ran; fixed a real bug in
+  `dump_wva_full_timeseries.py` and found (but could not recover) an
+  EPP-scrape auth gap — see Plan §4 above for both. Kicked off
+  `make benchmark-extract-trace` for the full `bundle.json`/`coverage.json`
+  (8.3GB per-request file makes this slow — running in background).
 - **2026-08-21** — Sub-task 1 done for real: applied `add_variant.py`
   against `dhl-la-1708`. Both ScaledObjects present
   (`optimized-baseline-nvidia-gpu-vllm-decode-wva` primary,

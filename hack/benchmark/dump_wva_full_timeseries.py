@@ -35,10 +35,12 @@ from pathlib import Path
 
 # Filenames from the patched harness: <wva-pod>_<unixts>_metrics.log
 FILE_RE = re.compile(r"^(?P<pod>.+?)_(?P<ts>\d{10})_metrics\.log$")
-# The deploy/ install names the Deployment wva-controller-manager (the overlays
-# apply namePrefix: wva-). The first alternative is the name the deleted Helm
-# chart used — kept so results captured before the chart went still parse.
-WVA_POD_PATTERN = re.compile(r"(workload-variant-autoscaler|wva)-controller-manager")
+# scrape_wva_metrics.sh writes the fixed literal "wva-controller" (not the
+# live pod name) so this and extract_real_trace.py's scan_raw() agree on one
+# naming convention; match that exactly, or the deleted Helm chart's real
+# pod-name style (workload-variant-autoscaler-controller-manager-<hash>) for
+# results captured before either convention existed.
+WVA_POD_PATTERN = re.compile(r"(workload-variant-autoscaler|wva)-controller(-manager\b|$)")
 
 # Capture: name, label-set, value
 LINE_RE = re.compile(
