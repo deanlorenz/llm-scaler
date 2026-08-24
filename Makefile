@@ -169,6 +169,38 @@ BENCHMARK_RUN_ONLY_IMAGE ?= ghcr.io/llm-d/llm-d-benchmark:$(BENCHMARK_REPO_REF)
 # copied in deliberately after the fact, not raw run output).
 BENCHMARK_RUN_ONLY_OUTPUT_DIR ?= $(CURDIR)/hack/benchmark/run-only-scratch/$(BENCHMARK_NAMESPACE)-$(shell date +%Y%m%d-%H%M%S)
 
+# ---------------------------------------------------------------------------
+# bench-* variables — run benchmarks against an already-running stack.
+# No llmdbenchmark CLI or Python install required; only kubectl + bash.
+# These are completely separate from the BENCHMARK_* variables above.
+# ---------------------------------------------------------------------------
+
+# Namespace where the harness pod runs and where vLLM/EPP pods live.
+BENCH_NAMESPACE    ?= $(BENCHMARK_NAMESPACE)
+
+# Harness type: guidellm or inference-perf.
+BENCH_HARNESS      ?= guidellm
+
+# Scenario file (test/benchmark/scenarios/*.yaml.in).
+BENCH_WORKLOAD     ?= prefill_heavy
+
+# Model ID forwarded into the scenario profile.
+BENCH_MODEL_ID     ?= $(BENCHMARK_MODEL_ID)
+
+# Inference endpoint URL. Empty = auto-detect via wait_serving.sh.
+BENCH_ENDPOINT_URL ?=
+
+# Session output directory (all scenarios for this session land here).
+BENCH_SESSION_DIR  ?= $(CURDIR)/hack/benchmark/bench-scratch/$(BENCH_NAMESPACE)-$(shell date +%Y%m%d-%H%M%S)
+
+# Harness image tag.
+BENCH_IMAGE_TAG    ?= $(BENCHMARK_REPO_REF)
+
+# Optional client-side script run between scenarios in bench-run-all.
+BENCH_INTER_SCENARIO_HOOK ?=
+
+# ---------------------------------------------------------------------------
+
 # The fraction of each GPU vLLM may use, substituted into the scenario.
 #
 # 0.90, not the scenarios' 0.95 and not a small-model special case.
@@ -1819,6 +1851,88 @@ benchmark-teardown: ## Tear down the benchmark environment (set BENCHMARK_NAMESP
 
 .PHONY: benchmark-full
 benchmark-full: benchmark-standup benchmark-run-all benchmark-teardown ## Full lifecycle: standup -> run all scenarios -> teardown
+
+# ---------------------------------------------------------------------------
+# bench-* targets — run benchmarks against an already-running stack.
+# Uses only kubectl + bash; no llmdbenchmark CLI or Python install required.
+# Completely separate from the benchmark-* targets above (left untouched).
+# ---------------------------------------------------------------------------
+
+.PHONY: bench-run-check
+bench-run-check: ## Read-only preflight for bench-run (set BENCH_NAMESPACE=<namespace>)
+	@if [ -z "$(BENCH_NAMESPACE)" ]; then \
+		echo "ERROR: BENCH_NAMESPACE is required. Usage: make bench-run-check BENCH_NAMESPACE=<namespace>"; \
+		exit 1; \
+	fi
+	@if [ -z "$(BENCH_MODEL_ID)" ]; then \
+		echo "ERROR: BENCH_MODEL_ID (or MODEL_ID) is required."; \
+		exit 1; \
+	fi
+	@_sf="$(BENCHMARK_SCENARIOS_DIR)/$(BENCH_WORKLOAD).yaml.in"; \
+	if [ ! -f "$$_sf" ]; then \
+		echo "ERROR: scenario file not found: $$_sf"; \
+		echo "  Available: $$(ls $(BENCHMARK_SCENARIOS_DIR)/*.yaml.in 2>/dev/null | xargs -n1 basename | sed 's/\.yaml\.in//' | tr '\n' ' ')"; \
+		exit 1; \
+	fi
+	@echo "bench-run-check: namespace=$(BENCH_NAMESPACE) harness=$(BENCH_HARNESS) workload=$(BENCH_WORKLOAD) model=$(BENCH_MODEL_ID)"
+	@kubectl get namespace "$(BENCH_NAMESPACE)" >/dev/null 2>&1 || { \
+		echo "ERROR: namespace $(BENCH_NAMESPACE) not found"; exit 1; }
+	@echo "bench-run-check: OK"
+
+.PHONY: bench-run
+bench-run: bench-run-check ## Run one scenario against an already-running stack (set BENCH_NAMESPACE, BENCH_WORKLOAD, BENCH_MODEL_ID)
+	@mkdir -p "$(BENCH_SESSION_DIR)"
+	BENCH_IMAGE_TAG="$(BENCH_IMAGE_TAG)" \
+	BENCH_HARNESS_POD_NAME="$${BENCH_HARNESS_POD_NAME:-llmdbench-harness}" \
+	bash "$(CURDIR)/hack/benchmark/run_session.sh" ensure "$(BENCH_NAMESPACE)"
+	MODEL_ID="$(BENCH_MODEL_ID)" \
+	BENCH_HARNESS="$(BENCH_HARNESS)" \
+	BENCH_WORKLOAD="$(BENCH_WORKLOAD)" \
+	BENCH_ENDPOINT_URL="$(BENCH_ENDPOINT_URL)" \
+	BENCHMARK_PROMETHEUS_URL="$(BENCHMARK_PROMETHEUS_URL)" \
+	bash "$(CURDIR)/hack/benchmark/run_scenario.sh" \
+		"$(BENCHMARK_SCENARIOS_DIR)/$(BENCH_WORKLOAD).yaml.in" \
+		"$(BENCH_NAMESPACE)" \
+		"$(BENCH_SESSION_DIR)"
+	@echo "bench-run: results in $(BENCH_SESSION_DIR)/$(BENCH_WORKLOAD)"
+
+.PHONY: bench-run-all
+bench-run-all: bench-run-check ## Run all scenarios sequentially, reusing the same harness pod (set BENCH_NAMESPACE, BENCH_MODEL_ID)
+	@mkdir -p "$(BENCH_SESSION_DIR)"
+	BENCH_IMAGE_TAG="$(BENCH_IMAGE_TAG)" \
+	BENCH_HARNESS_POD_NAME="$${BENCH_HARNESS_POD_NAME:-llmdbench-harness}" \
+	bash "$(CURDIR)/hack/benchmark/run_session.sh" ensure "$(BENCH_NAMESPACE)"
+	@for scenario_file in $(BENCHMARK_SCENARIOS_DIR)/*.yaml.in; do \
+		workload="$$(basename "$$scenario_file" .yaml.in)"; \
+		echo "bench-run-all: running scenario: $$workload"; \
+		MODEL_ID="$(BENCH_MODEL_ID)" \
+		BENCH_HARNESS="$(BENCH_HARNESS)" \
+		BENCH_WORKLOAD="$$workload" \
+		BENCH_ENDPOINT_URL="$(BENCH_ENDPOINT_URL)" \
+		BENCHMARK_PROMETHEUS_URL="$(BENCHMARK_PROMETHEUS_URL)" \
+		bash "$(CURDIR)/hack/benchmark/run_scenario.sh" \
+			"$$scenario_file" \
+			"$(BENCH_NAMESPACE)" \
+			"$(BENCH_SESSION_DIR)" || \
+		{ echo "bench-run-all: scenario $$workload failed (rc=$$?); continuing..."; }; \
+		if [ -n "$(BENCH_INTER_SCENARIO_HOOK)" ]; then \
+			echo "bench-run-all: running inter-scenario hook: $(BENCH_INTER_SCENARIO_HOOK)"; \
+			bash "$(BENCH_INTER_SCENARIO_HOOK)" "$$workload" "$(BENCH_NAMESPACE)" || true; \
+		fi; \
+	done
+	@echo "bench-run-all: session complete. Results in: $(BENCH_SESSION_DIR)"
+
+.PHONY: bench-full
+bench-full: bench-run-all ## Run all scenarios (no automatic teardown; call bench-teardown separately when done)
+
+.PHONY: bench-teardown
+bench-teardown: ## Tear down the bench harness pod and its RBAC (explicit; never automatic)
+	@if [ -z "$(BENCH_NAMESPACE)" ]; then \
+		echo "ERROR: BENCH_NAMESPACE is required. Usage: make bench-teardown BENCH_NAMESPACE=<namespace>"; \
+		exit 1; \
+	fi
+	BENCH_HARNESS_POD_NAME="$${BENCH_HARNESS_POD_NAME:-llmdbench-harness}" \
+	bash "$(CURDIR)/hack/benchmark/run_session.sh" stop "$(BENCH_NAMESPACE)"
 
 # Stub for llm-d nightly reusable workflows (test_target=nightly-test-llm-d)
 # No-op; temporarily satisfies nightly CI make invocation
