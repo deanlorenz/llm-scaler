@@ -35,7 +35,11 @@ INFERENCE_PORT="${LLMDBENCH_VLLM_COMMON_INFERENCE_PORT:-8000}"
 METRICS_PATH="${LLMDBENCH_VLLM_MONITORING_METRICS_PATH:-/metrics}"
 METRICS_CURL_TIMEOUT="${METRICS_CURL_TIMEOUT:-30}"
 EPP_METRICS_PORT="${LLMDBENCH_EPP_METRICS_PORT:-9090}"
-EPP_METRICS_SECRET="${LLMDBENCH_EPP_METRICS_SECRET:-inference-gateway-sa-metrics-reader-secret}"  # pragma: allowlist secret
+# EPP metrics secret: prefer explicit env var, then auto-detect from the namespace,
+# then fall back to the upstream default name. WVA installs as wva-epp-metrics-token
+# (namePrefix-qualified); the upstream llm-d-benchmark default is
+# inference-gateway-sa-metrics-reader-secret. Auto-detection resolves both.
+EPP_METRICS_SECRET="${LLMDBENCH_EPP_METRICS_SECRET:-}"  # pragma: allowlist secret
 _EPP_AUTH_HEADER=""
 
 init_metrics_dir() {
@@ -107,6 +111,51 @@ get_epp_pod_info() {
     echo "$pod_info"
 }
 
+# Discover the EPP metrics token secret name in the namespace.
+# Tries, in order:
+#   1. LLMDBENCH_EPP_METRICS_SECRET env var (explicit override)
+#   2. Any secret with label app.kubernetes.io/name=workload-variant-autoscaler
+#      that has a .data.token field (WVA namePrefix convention)
+#   3. epp-metrics-token (canonical name from config/base/rbac/)
+#   4. inference-gateway-sa-metrics-reader-secret (upstream llm-d-benchmark default)
+_detect_epp_secret() {
+    local namespace="${LLMDBENCH_VLLM_COMMON_NAMESPACE:-default}"
+    local kubectl_cmd="${KUBECTL_CMD:-kubectl}"
+
+    # 1. Explicit override
+    if [[ -n "${LLMDBENCH_EPP_METRICS_SECRET:-}" ]]; then
+        echo "${LLMDBENCH_EPP_METRICS_SECRET}"
+        return
+    fi
+
+    # 2. WVA-labelled token secret with a .data.token field
+    local wva_secret
+    wva_secret=$($kubectl_cmd get secret -n "$namespace" \
+        -l "app.kubernetes.io/name=workload-variant-autoscaler" \
+        -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | \
+        while read -r name; do
+            if [[ -n "$name" ]] && $kubectl_cmd get secret "$name" -n "$namespace" \
+               -o jsonpath='{.data.token}' 2>/dev/null | grep -q .; then
+                echo "$name"
+                break
+            fi
+        done) || true
+    if [[ -n "$wva_secret" ]]; then
+        echo "$wva_secret"
+        return
+    fi
+
+    # 3. Canonical name from this repo's own deploy
+    if $kubectl_cmd get secret epp-metrics-token -n "$namespace" \
+       -o jsonpath='{.data.token}' >/dev/null 2>&1; then
+        echo "epp-metrics-token"
+        return
+    fi
+
+    # 4. Upstream llm-d-benchmark default
+    echo "inference-gateway-sa-metrics-reader-secret"
+}
+
 # Bearer token for EPP's authenticated /metrics, cached after first call.
 _get_epp_auth_header() {
     if [[ -n "$_EPP_AUTH_HEADER" ]]; then
@@ -115,12 +164,23 @@ _get_epp_auth_header() {
     fi
     local namespace="${LLMDBENCH_VLLM_COMMON_NAMESPACE:-default}"
     local kubectl_cmd="${KUBECTL_CMD:-kubectl}"
+
+    # Resolve secret name once and cache it
+    if [[ -z "$EPP_METRICS_SECRET" ]]; then
+        EPP_METRICS_SECRET=$(_detect_epp_secret)
+        echo "  [epp-auth] using secret: $EPP_METRICS_SECRET" \
+            >> "${METRICS_DIR}/raw/collection_debug.log" 2>/dev/null || true
+    fi
+
     local token
     token=$($kubectl_cmd get secret "$EPP_METRICS_SECRET" \
         --namespace "$namespace" \
         -o jsonpath='{.data.token}' 2>/dev/null | base64 -d 2>/dev/null) || true
     if [[ -n "$token" ]]; then
         _EPP_AUTH_HEADER="Authorization: Bearer $token"
+    else
+        echo "  [epp-auth] failed to get token from secret $EPP_METRICS_SECRET in $namespace" \
+            >> "${METRICS_DIR}/raw/collection_debug.log" 2>/dev/null || true
     fi
     echo "$_EPP_AUTH_HEADER"
 }

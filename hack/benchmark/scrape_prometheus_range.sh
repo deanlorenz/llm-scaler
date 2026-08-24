@@ -139,6 +139,7 @@ _curl_args+=(-k)
 # Extensible: add rows here; benchmark-extract reads the "metrics" key.
 # ---------------------------------------------------------------------------
 METRIC_QUERIES=(
+    # WVA controller metrics
     "wva_desired_replicas{namespace=\"${NS}\"}"
     "wva_current_replicas{namespace=\"${NS}\"}"
     "wva_saturation_utilization{namespace=\"${NS}\"}"
@@ -147,11 +148,20 @@ METRIC_QUERIES=(
     "wva_spare_capacity{namespace=\"${NS}\"}"
     "wva_required_capacity{namespace=\"${NS}\"}"
     "wva_errors_total{namespace=\"${NS}\"}"
+    # vLLM metrics
     "vllm:num_requests_running{namespace=\"${NS}\"}"
     "vllm:gpu_cache_usage_perc{namespace=\"${NS}\"}"
     "vllm:prompt_tokens_total{namespace=\"${NS}\"}"
     "vllm:generation_tokens_total{namespace=\"${NS}\"}"
     "vllm:request_success_total{namespace=\"${NS}\"}"
+    # EPP / inference-extension metrics (belt-and-suspenders for in-pod scrape auth failures)
+    "inference_extension_flow_control_queue_size{namespace=\"${NS}\"}"
+    "inference_pool_average_queue_size{namespace=\"${NS}\"}"
+    "inference_pool_ready_pods{namespace=\"${NS}\"}"
+    "inference_pool_average_kv_cache_utilization{namespace=\"${NS}\"}"
+    "inference_objective_request_total{namespace=\"${NS}\"}"
+    "inference_pool_per_pod_queue_size{namespace=\"${NS}\"}"
+    "inference_pool_pending_requests{namespace=\"${NS}\"}"
 )
 
 # ---------------------------------------------------------------------------

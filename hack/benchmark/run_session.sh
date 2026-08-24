@@ -64,8 +64,36 @@ _error() { echo "run_session: ERROR: $*" >&2; exit 1; }
 # ---------------------------------------------------------------------------
 # RBAC
 # ---------------------------------------------------------------------------
+# Discover the actual EPP metrics token secret name in the namespace.
+# Mirrors the detection logic in run_only_collect_metrics.sh.
+_detect_epp_secret() {
+    # 1. Explicit override via env
+    if [ -n "$EPP_METRICS_SECRET" ]; then
+        echo "$EPP_METRICS_SECRET"; return
+    fi
+    # 2. WVA-labelled SA token secret
+    local s
+    s=$($KUBECTL get secret -n "$NS" \
+        -l "app.kubernetes.io/name=workload-variant-autoscaler" \
+        -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | \
+        head -1)
+    [ -n "$s" ] && { echo "$s"; return; }
+    # 3. Canonical name from this repo's deploy
+    $KUBECTL get secret epp-metrics-token -n "$NS" >/dev/null 2>&1 && \
+        { echo "epp-metrics-token"; return; }
+    # 4. Upstream default
+    echo "inference-gateway-sa-metrics-reader-secret"
+}
+
 _apply_rbac() {
     _info "Applying RBAC in namespace $NS..."
+
+    # Detect the actual EPP secret name at RBAC-creation time so the Role
+    # grants get on the name that actually exists in this cluster.
+    local detected_secret
+    detected_secret=$(_detect_epp_secret)
+    _info "EPP metrics secret for RBAC: $detected_secret"
+
     $KUBECTL apply -f - <<RBAC
 apiVersion: v1
 kind: ServiceAccount
@@ -84,7 +112,7 @@ rules:
   verbs: ["get", "list"]
 - apiGroups: [""]
   resources: ["secrets"]
-  resourceNames: ["${EPP_METRICS_SECRET}"]
+  resourceNames: ["${detected_secret}"]
   verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
