@@ -20,20 +20,24 @@ see [`benchmark-guide.md`](benchmark-guide.md).
 
 ## Quick Start
 
+Each namespace has a `hack/benchmark/<ns>.env` file that captures its full config.
+The recommended workflow mirrors the `benchmark-run-only` convention:
+
 ```bash
-# Run one scenario
-make bench-run \
-    BENCH_NAMESPACE=my-namespace \
-    BENCH_MODEL_ID=Qwen/Qwen3-0.6B \
-    BENCH_WORKLOAD=prefill_heavy
+# Option A — source the env file in your shell first (recommended):
+set -a && source hack/benchmark/dhl-la-1708.env && set +a
+make bench-run                              # uses defaults from the env file
+make bench-run BENCH_WORKLOAD=symmetrical  # override a single variable
+
+# Option B — single-line convenience with BENCH_ENV_FILE:
+make bench-run BENCH_ENV_FILE=hack/benchmark/dhl-la-1708.env
+make bench-run BENCH_ENV_FILE=hack/benchmark/dhl-la-1708.env BENCH_WORKLOAD=symmetrical
 
 # Run all scenarios sequentially
-make bench-run-all \
-    BENCH_NAMESPACE=my-namespace \
-    BENCH_MODEL_ID=Qwen/Qwen3-0.6B
+make bench-run-all BENCH_ENV_FILE=hack/benchmark/dhl-la-1708.env
 
 # Tear down the harness pod when done
-make bench-teardown BENCH_NAMESPACE=my-namespace
+make bench-teardown BENCH_ENV_FILE=hack/benchmark/dhl-la-1708.env
 ```
 
 ---
@@ -47,16 +51,19 @@ make bench-teardown BENCH_NAMESPACE=my-namespace
 | `bench-run-all` | Run all `test/benchmark/scenarios/*.yaml.in` sequentially |
 | `bench-full` | Alias for `bench-run-all` (no automatic teardown) |
 | `bench-teardown` | Explicitly tear down the harness pod and its RBAC |
+| `bench-guard` | Internal prereq marker (parallel to `benchmark-guard`) |
 
 ### Key Variables
 
 | Variable | Default | Description |
 |---|---|---|
+| `BENCH_ENV_FILE` | _(none)_ | Path to a per-NS env file; sourced at recipe start |
 | `BENCH_NAMESPACE` | `$(BENCHMARK_NAMESPACE)` | Kubernetes namespace |
 | `BENCH_HARNESS` | `guidellm` | Harness type: `guidellm` or `inference-perf` |
 | `BENCH_WORKLOAD` | `prefill_heavy` | Scenario name (without `.yaml.in`) |
 | `BENCH_MODEL_ID` | `$(BENCHMARK_MODEL_ID)` | Model ID forwarded into the scenario profile |
 | `BENCH_ENDPOINT_URL` | _(auto-detect)_ | Override inference endpoint URL |
+| `BENCH_EPP_METRICS_SECRET` | `epp-metrics-token` | EPP metrics secret name (override for non-standard installs) |
 | `BENCH_SESSION_DIR` | `hack/benchmark/bench-scratch/<ns>-<ts>/` | Local results directory |
 | `BENCH_IMAGE_TAG` | `$(BENCHMARK_REPO_REF)` | Harness image tag |
 | `BENCH_INTER_SCENARIO_HOOK` | _(none)_ | Client-side script run between scenarios |
@@ -177,6 +184,28 @@ make bench-run-all \
 The hook receives `<workload_name> <namespace>` as positional arguments and is run
 between each scenario pair. Use it to park GPUs, reset queue state, or sleep.
 Hook failures are non-fatal (the session continues).
+
+---
+
+## Per-Namespace Env Files
+
+Each namespace that has been used for benchmarking has a `hack/benchmark/<ns>.env` file:
+
+| File | Cluster | Notes |
+|---|---|---|
+| `dhl-la-1708.env` | pokprod | Two-variant setup; v1 only (v2 node has broken GPU); EPP secret `wva-epp-metrics-token` |
+| `dhl-e2e-231.env` | pokprod | Single-variant; used by `benchmark-run-only` |
+
+The env files follow the same `VAR=value` (no `export`) convention as `dhl-e2e-231.env`,
+making them valid for both `set -a && source` in a shell and `BENCH_ENV_FILE=` in Make.
+
+### Creating a new env file
+
+```bash
+cp hack/benchmark/dhl-la-1708.env hack/benchmark/<new-ns>.env
+# Edit: BENCH_NAMESPACE, BENCH_MODEL_ID, BENCH_ENDPOINT_URL, BENCH_EPP_METRICS_SECRET
+# Verify live values with kubectl before committing
+```
 
 ---
 

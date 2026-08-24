@@ -173,7 +173,24 @@ BENCHMARK_RUN_ONLY_OUTPUT_DIR ?= $(CURDIR)/hack/benchmark/run-only-scratch/$(BEN
 # bench-* variables — run benchmarks against an already-running stack.
 # No llmdbenchmark CLI or Python install required; only kubectl + bash.
 # These are completely separate from the BENCHMARK_* variables above.
+#
+# Loading config from a per-namespace env file (recommended):
+#
+#   # Option A — shell-level source (same convention as benchmark-run-only):
+#   set -a && source hack/benchmark/dhl-la-1708.env && set +a
+#   make bench-run
+#
+#   # Option B — single-line with BENCH_ENV_FILE (sources the file in-recipe):
+#   make bench-run BENCH_ENV_FILE=hack/benchmark/dhl-la-1708.env
+#
+# Variables from BENCH_ENV_FILE are lower precedence than command-line overrides,
+# so you can still do:
+#   make bench-run BENCH_ENV_FILE=hack/benchmark/dhl-la-1708.env BENCH_WORKLOAD=symmetrical
 # ---------------------------------------------------------------------------
+
+# Optional env file. When set, every bench-* recipe sources it before running.
+# Variables in the file set defaults; command-line assignments still win.
+BENCH_ENV_FILE     ?=
 
 # Namespace where the harness pod runs and where vLLM/EPP pods live.
 BENCH_NAMESPACE    ?= $(BENCHMARK_NAMESPACE)
@@ -195,6 +212,10 @@ BENCH_SESSION_DIR  ?= $(CURDIR)/hack/benchmark/bench-scratch/$(BENCH_NAMESPACE)-
 
 # Harness image tag.
 BENCH_IMAGE_TAG    ?= $(BENCHMARK_REPO_REF)
+
+# EPP metrics secret name — override for clusters using namePrefix convention
+# (e.g. dhl-la-1708 installs the secret as wva-epp-metrics-token).
+BENCH_EPP_METRICS_SECRET ?= epp-metrics-token
 
 # Optional client-side script run between scenarios in bench-run-all.
 BENCH_INTER_SCENARIO_HOOK ?=
@@ -1858,81 +1879,124 @@ benchmark-full: benchmark-standup benchmark-run-all benchmark-teardown ## Full l
 # Completely separate from the benchmark-* targets above (left untouched).
 # ---------------------------------------------------------------------------
 
+# Internal helper: shell fragment that sources BENCH_ENV_FILE when set.
+# Used at the top of every bench-* recipe so BENCH_ENV_FILE=<file> works as a
+# one-liner. Variables in the file are lower precedence than Make's own
+# command-line assignments because the recipe runs *after* Make has already
+# expanded $(BENCH_NAMESPACE) etc. in the recipe text — only env vars that the
+# recipe reads at runtime (passed explicitly) pick up the sourced values.
+# The canonical pattern (Option A) remains: source the file in your shell first.
+_BENCH_ENV_LOAD = $(if $(BENCH_ENV_FILE),set -a && source "$(BENCH_ENV_FILE)" && set +a &&,)
+
+.PHONY: bench-guard
+bench-guard: ## Internal marker: load hack/benchmark/<ns>.env before calling bench-* targets
+
 .PHONY: bench-run-check
-bench-run-check: ## Read-only preflight for bench-run (set BENCH_NAMESPACE=<namespace>)
-	@if [ -z "$(BENCH_NAMESPACE)" ]; then \
+bench-run-check: ## Read-only preflight for bench-run (set BENCH_NAMESPACE=<namespace>, or BENCH_ENV_FILE=<file>)
+	@$(if $(BENCH_ENV_FILE),set -a && source "$(BENCH_ENV_FILE)" && set +a;,) \
+	if [ -z "$${BENCH_NAMESPACE:-$(BENCH_NAMESPACE)}" ]; then \
 		echo "ERROR: BENCH_NAMESPACE is required. Usage: make bench-run-check BENCH_NAMESPACE=<namespace>"; \
 		exit 1; \
-	fi
-	@if [ -z "$(BENCH_MODEL_ID)" ]; then \
+	fi; \
+	if [ -z "$${BENCH_MODEL_ID:-$(BENCH_MODEL_ID)}" ]; then \
 		echo "ERROR: BENCH_MODEL_ID (or MODEL_ID) is required."; \
 		exit 1; \
-	fi
-	@_sf="$(BENCHMARK_SCENARIOS_DIR)/$(BENCH_WORKLOAD).yaml.in"; \
+	fi; \
+	_ns="$${BENCH_NAMESPACE:-$(BENCH_NAMESPACE)}"; \
+	_model="$${BENCH_MODEL_ID:-$(BENCH_MODEL_ID)}"; \
+	_harness="$${BENCH_HARNESS:-$(BENCH_HARNESS)}"; \
+	_workload="$${BENCH_WORKLOAD:-$(BENCH_WORKLOAD)}"; \
+	_sf="$(BENCHMARK_SCENARIOS_DIR)/$$_workload.yaml.in"; \
 	if [ ! -f "$$_sf" ]; then \
 		echo "ERROR: scenario file not found: $$_sf"; \
 		echo "  Available: $$(ls $(BENCHMARK_SCENARIOS_DIR)/*.yaml.in 2>/dev/null | xargs -n1 basename | sed 's/\.yaml\.in//' | tr '\n' ' ')"; \
 		exit 1; \
-	fi
-	@echo "bench-run-check: namespace=$(BENCH_NAMESPACE) harness=$(BENCH_HARNESS) workload=$(BENCH_WORKLOAD) model=$(BENCH_MODEL_ID)"
-	@kubectl get namespace "$(BENCH_NAMESPACE)" >/dev/null 2>&1 || { \
-		echo "ERROR: namespace $(BENCH_NAMESPACE) not found"; exit 1; }
-	@echo "bench-run-check: OK"
+	fi; \
+	echo "bench-run-check: namespace=$$_ns harness=$$_harness workload=$$_workload model=$$_model"; \
+	kubectl get namespace "$$_ns" >/dev/null 2>&1 || { \
+		echo "ERROR: namespace $$_ns not found"; exit 1; }; \
+	echo "bench-run-check: OK"
 
 .PHONY: bench-run
-bench-run: bench-run-check ## Run one scenario against an already-running stack (set BENCH_NAMESPACE, BENCH_WORKLOAD, BENCH_MODEL_ID)
-	@mkdir -p "$(BENCH_SESSION_DIR)"
-	BENCH_IMAGE_TAG="$(BENCH_IMAGE_TAG)" \
+bench-run: bench-guard ## Run one scenario against an already-running stack (set BENCH_NAMESPACE, BENCH_WORKLOAD, BENCH_MODEL_ID, or BENCH_ENV_FILE=<file>)
+	@$(if $(BENCH_ENV_FILE),set -a && source "$(BENCH_ENV_FILE)" && set +a;,) \
+	: bench-run-check inlined to pick up env-file values at runtime; \
+	_ns="$${BENCH_NAMESPACE:-$(BENCH_NAMESPACE)}"; \
+	_model="$${BENCH_MODEL_ID:-$(BENCH_MODEL_ID)}"; \
+	_harness="$${BENCH_HARNESS:-$(BENCH_HARNESS)}"; \
+	_workload="$${BENCH_WORKLOAD:-$(BENCH_WORKLOAD)}"; \
+	_endpoint="$${BENCH_ENDPOINT_URL:-$(BENCH_ENDPOINT_URL)}"; \
+	_epp_secret="$${BENCH_EPP_METRICS_SECRET:-$(BENCH_EPP_METRICS_SECRET)}"; \
+	_prom_url="$${BENCHMARK_PROMETHEUS_URL:-$(BENCHMARK_PROMETHEUS_URL)}"; \
+	_image_tag="$${BENCH_IMAGE_TAG:-$(BENCH_IMAGE_TAG)}"; \
+	_session_dir="$${BENCH_SESSION_DIR:-$(BENCH_SESSION_DIR)}"; \
+	[ -n "$$_ns" ]    || { echo "ERROR: BENCH_NAMESPACE is required"; exit 1; }; \
+	[ -n "$$_model" ] || { echo "ERROR: BENCH_MODEL_ID is required"; exit 1; }; \
+	mkdir -p "$$_session_dir"; \
+	BENCH_IMAGE_TAG="$$_image_tag" \
 	BENCH_HARNESS_POD_NAME="$${BENCH_HARNESS_POD_NAME:-llmdbench-harness}" \
-	bash "$(CURDIR)/hack/benchmark/run_session.sh" ensure "$(BENCH_NAMESPACE)"
-	MODEL_ID="$(BENCH_MODEL_ID)" \
-	BENCH_HARNESS="$(BENCH_HARNESS)" \
-	BENCH_WORKLOAD="$(BENCH_WORKLOAD)" \
-	BENCH_ENDPOINT_URL="$(BENCH_ENDPOINT_URL)" \
-	BENCHMARK_PROMETHEUS_URL="$(BENCHMARK_PROMETHEUS_URL)" \
+	BENCH_EPP_METRICS_SECRET="$$_epp_secret" \
+	bash "$(CURDIR)/hack/benchmark/run_session.sh" ensure "$$_ns"; \
+	MODEL_ID="$$_model" \
+	BENCH_HARNESS="$$_harness" \
+	BENCH_WORKLOAD="$$_workload" \
+	BENCH_ENDPOINT_URL="$$_endpoint" \
+	BENCHMARK_PROMETHEUS_URL="$$_prom_url" \
 	bash "$(CURDIR)/hack/benchmark/run_scenario.sh" \
-		"$(BENCHMARK_SCENARIOS_DIR)/$(BENCH_WORKLOAD).yaml.in" \
-		"$(BENCH_NAMESPACE)" \
-		"$(BENCH_SESSION_DIR)"
-	@echo "bench-run: results in $(BENCH_SESSION_DIR)/$(BENCH_WORKLOAD)"
+		"$(BENCHMARK_SCENARIOS_DIR)/$$_workload.yaml.in" \
+		"$$_ns" \
+		"$$_session_dir"; \
+	echo "bench-run: results in $$_session_dir/$$_workload"
 
 .PHONY: bench-run-all
-bench-run-all: bench-run-check ## Run all scenarios sequentially, reusing the same harness pod (set BENCH_NAMESPACE, BENCH_MODEL_ID)
-	@mkdir -p "$(BENCH_SESSION_DIR)"
-	BENCH_IMAGE_TAG="$(BENCH_IMAGE_TAG)" \
+bench-run-all: bench-guard ## Run all scenarios sequentially, reusing the same harness pod (set BENCH_NAMESPACE, BENCH_MODEL_ID, or BENCH_ENV_FILE=<file>)
+	@$(if $(BENCH_ENV_FILE),set -a && source "$(BENCH_ENV_FILE)" && set +a;,) \
+	_ns="$${BENCH_NAMESPACE:-$(BENCH_NAMESPACE)}"; \
+	_model="$${BENCH_MODEL_ID:-$(BENCH_MODEL_ID)}"; \
+	_harness="$${BENCH_HARNESS:-$(BENCH_HARNESS)}"; \
+	_endpoint="$${BENCH_ENDPOINT_URL:-$(BENCH_ENDPOINT_URL)}"; \
+	_epp_secret="$${BENCH_EPP_METRICS_SECRET:-$(BENCH_EPP_METRICS_SECRET)}"; \
+	_prom_url="$${BENCHMARK_PROMETHEUS_URL:-$(BENCHMARK_PROMETHEUS_URL)}"; \
+	_image_tag="$${BENCH_IMAGE_TAG:-$(BENCH_IMAGE_TAG)}"; \
+	_session_dir="$${BENCH_SESSION_DIR:-$(BENCH_SESSION_DIR)}"; \
+	_hook="$${BENCH_INTER_SCENARIO_HOOK:-$(BENCH_INTER_SCENARIO_HOOK)}"; \
+	[ -n "$$_ns" ]    || { echo "ERROR: BENCH_NAMESPACE is required"; exit 1; }; \
+	[ -n "$$_model" ] || { echo "ERROR: BENCH_MODEL_ID is required"; exit 1; }; \
+	mkdir -p "$$_session_dir"; \
+	BENCH_IMAGE_TAG="$$_image_tag" \
 	BENCH_HARNESS_POD_NAME="$${BENCH_HARNESS_POD_NAME:-llmdbench-harness}" \
-	bash "$(CURDIR)/hack/benchmark/run_session.sh" ensure "$(BENCH_NAMESPACE)"
-	@for scenario_file in $(BENCHMARK_SCENARIOS_DIR)/*.yaml.in; do \
+	BENCH_EPP_METRICS_SECRET="$$_epp_secret" \
+	bash "$(CURDIR)/hack/benchmark/run_session.sh" ensure "$$_ns"; \
+	for scenario_file in $(BENCHMARK_SCENARIOS_DIR)/*.yaml.in; do \
 		workload="$$(basename "$$scenario_file" .yaml.in)"; \
 		echo "bench-run-all: running scenario: $$workload"; \
-		MODEL_ID="$(BENCH_MODEL_ID)" \
-		BENCH_HARNESS="$(BENCH_HARNESS)" \
+		MODEL_ID="$$_model" \
+		BENCH_HARNESS="$$_harness" \
 		BENCH_WORKLOAD="$$workload" \
-		BENCH_ENDPOINT_URL="$(BENCH_ENDPOINT_URL)" \
-		BENCHMARK_PROMETHEUS_URL="$(BENCHMARK_PROMETHEUS_URL)" \
+		BENCH_ENDPOINT_URL="$$_endpoint" \
+		BENCHMARK_PROMETHEUS_URL="$$_prom_url" \
 		bash "$(CURDIR)/hack/benchmark/run_scenario.sh" \
 			"$$scenario_file" \
-			"$(BENCH_NAMESPACE)" \
-			"$(BENCH_SESSION_DIR)" || \
+			"$$_ns" \
+			"$$_session_dir" || \
 		{ echo "bench-run-all: scenario $$workload failed (rc=$$?); continuing..."; }; \
-		if [ -n "$(BENCH_INTER_SCENARIO_HOOK)" ]; then \
-			echo "bench-run-all: running inter-scenario hook: $(BENCH_INTER_SCENARIO_HOOK)"; \
-			bash "$(BENCH_INTER_SCENARIO_HOOK)" "$$workload" "$(BENCH_NAMESPACE)" || true; \
+		if [ -n "$$_hook" ]; then \
+			echo "bench-run-all: running inter-scenario hook: $$_hook"; \
+			bash "$$_hook" "$$workload" "$$_ns" || true; \
 		fi; \
-	done
-	@echo "bench-run-all: session complete. Results in: $(BENCH_SESSION_DIR)"
+	done; \
+	echo "bench-run-all: session complete. Results in: $$_session_dir"
 
 .PHONY: bench-full
 bench-full: bench-run-all ## Run all scenarios (no automatic teardown; call bench-teardown separately when done)
 
 .PHONY: bench-teardown
-bench-teardown: ## Tear down the bench harness pod and its RBAC (explicit; never automatic)
-	@if [ -z "$(BENCH_NAMESPACE)" ]; then \
-		echo "ERROR: BENCH_NAMESPACE is required. Usage: make bench-teardown BENCH_NAMESPACE=<namespace>"; \
-		exit 1; \
-	fi
+bench-teardown: bench-guard ## Tear down the bench harness pod and its RBAC (explicit; never automatic)
+	@$(if $(BENCH_ENV_FILE),set -a && source "$(BENCH_ENV_FILE)" && set +a;,) \
+	_ns="$${BENCH_NAMESPACE:-$(BENCH_NAMESPACE)}"; \
+	[ -n "$$_ns" ] || { echo "ERROR: BENCH_NAMESPACE is required"; exit 1; }; \
 	BENCH_HARNESS_POD_NAME="$${BENCH_HARNESS_POD_NAME:-llmdbench-harness}" \
-	bash "$(CURDIR)/hack/benchmark/run_session.sh" stop "$(BENCH_NAMESPACE)"
+	bash "$(CURDIR)/hack/benchmark/run_session.sh" stop "$$_ns"
 
 # Stub for llm-d nightly reusable workflows (test_target=nightly-test-llm-d)
 # No-op; temporarily satisfies nightly CI make invocation
