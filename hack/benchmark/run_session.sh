@@ -14,6 +14,9 @@
 # Environment:
 #   BENCH_HARNESS_POD_NAME   Pod name (default: llmdbench-harness)
 #   BENCH_IMAGE_TAG          Image tag (default: v0.7.8)
+#   BENCH_EPP_METRICS_SECRET EPP metrics secret name (default: epp-metrics-token)
+#                            Override when cluster uses a different name, e.g.
+#                            wva-epp-metrics-token (dhl-la-1708 naming convention).
 #   KUBECTL_CMD              kubectl binary (default: kubectl)
 #   KUBECTL_TIMEOUT          Seconds to wait for pod Ready (default: 180)
 #
@@ -50,9 +53,10 @@ IMAGE_TAG="${BENCH_IMAGE_TAG:-v0.7.8}"
 IMAGE="ghcr.io/llm-d/llm-d-benchmark:${IMAGE_TAG}"
 TIMEOUT="${KUBECTL_TIMEOUT:-180}"
 
-# EPP metrics secret name — canonical name created by WVA's own deploy.
-# See config/base/rbac/epp-metrics-token-secret.yaml.
-EPP_METRICS_SECRET="epp-metrics-token"
+# EPP metrics secret name — default from config/base/rbac/epp-metrics-token-secret.yaml.
+# Some clusters (e.g. dhl-la-1708) use the namePrefix-qualified name wva-epp-metrics-token.
+# Override with BENCH_EPP_METRICS_SECRET.
+EPP_METRICS_SECRET="${BENCH_EPP_METRICS_SECRET:-epp-metrics-token}"
 
 _info()  { echo "run_session: $*"; }
 _error() { echo "run_session: ERROR: $*" >&2; exit 1; }
