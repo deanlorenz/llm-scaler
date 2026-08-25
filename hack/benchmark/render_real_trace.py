@@ -866,9 +866,9 @@ def render(bundle: BundleData, out_path: Path, title: str | None = None) -> Path
                 off_axis_events.append(f't={x_ev:.0f}s {label_str}')
             else:
                 c.annotate(label_str, xy=(x_ev, 0), xycoords=('data', 'axes fraction'),
-                           xytext=(2, -9), textcoords='offset points',
+                           xytext=(0, -9), textcoords='offset points',
                            fontsize=6.5, color=C_UP if delta > 0 else C_DOWN,
-                           ha='left', va='top', zorder=4,
+                           ha='center', va='top', zorder=4,
                            annotation_clip=False)
         if off_axis_events:
             c.text(0.99, 0.04, 'off-axis: ' + '  '.join(off_axis_events),
