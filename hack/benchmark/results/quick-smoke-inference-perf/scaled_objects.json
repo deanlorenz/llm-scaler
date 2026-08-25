@@ -1,0 +1,52 @@
+[
+  {
+    "so_id": "optimized-baseline-nvidia-gpu-vllm-decode-wva",
+    "config": {
+      "endpoint_id": "http://llm-d-inference-gateway-istio.dhl-la-1708.svc.cluster.local:80",
+      "model": "Qwen/Qwen3-32B",
+      "gpu_count": null,
+      "role": null,
+      "cost": null,
+      "min_replicas": null,
+      "max_replicas": null,
+      "engine_config": {
+        "num_gpu_blocks": 12912,
+        "block_size": 16,
+        "gpu_memory_utilization": "0.3",
+        "enable_prefix_caching": "True",
+        "kv_tokens": 206592
+      }
+    },
+    "replicas": [
+      {
+        "t": -52.0,
+        "source": "harness",
+        "desired": 1,
+        "ready": 1,
+        "available": 1
+      },
+      {
+        "t": -47.0,
+        "source": "wva",
+        "current_replicas": 1.0,
+        "kv_capacity_tokens": 330768.0,
+        "capacity_per_replica": 165273.0
+      },
+      {
+        "t": 387.0,
+        "source": "harness",
+        "desired": 1,
+        "ready": 1,
+        "available": 1
+      },
+      {
+        "t": 389.0,
+        "source": "wva",
+        "current_replicas": 1.0,
+        "kv_capacity_tokens": 330768.0,
+        "capacity_per_replica": 165273.0
+      }
+    ],
+    "scaler": []
+  }
+]

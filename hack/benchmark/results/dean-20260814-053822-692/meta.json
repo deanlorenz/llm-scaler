@@ -1,0 +1,20 @@
+{
+  "run_id": "inference-perf-1786675142-rjyck5_1",
+  "harness": "inference-perf",
+  "harness_version": "e250731ce8944f8ab76ece860e0960c6fa39b606",
+  "wva_confirmed_model": "unsloth/Meta-Llama-3.1-8B-Instruct",
+  "namespace": "dhl-wva-209",
+  "workload": "m-satta-calibration-probe",
+  "harness_start": "2026-08-14T02:39:05+00:00",
+  "harness_start_epoch": 1786675145.0,
+  "load_duration_s": 1128.087814538,
+  "warmup_offset_s": 0.0,
+  "prewarm_s": 0.0,
+  "per_request_estimated": true,
+  "extractor_version": "0.1.0",
+  "time_anchor": {
+    "offset": 0.0,
+    "corr": null,
+    "method": "not-needed"
+  }
+}
