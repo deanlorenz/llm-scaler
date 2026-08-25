@@ -1651,7 +1651,7 @@ def render(bundle: BundleData, out_path: Path, title: str | None = None) -> Path
         cost_txt = f'replica-seconds={repl_s:.0f}'
         if util is not None:
             cost_txt += f'  utilization={util:.0%}'
-        f.text(0.995, 1.14, cost_txt, transform=f.transAxes, fontsize=8,
+        f.text(0.995, 1.05, cost_txt, transform=f.transAxes, fontsize=8,
                color='#6b7280', ha='right', va='bottom')
     else:
         empty(f, 'no concurrency signal')
