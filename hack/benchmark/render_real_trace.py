@@ -846,8 +846,33 @@ def render(bundle: BundleData, out_path: Path, title: str | None = None) -> Path
             note += (f' · drain {mean(durs):.0f}s mean/{len(durs)}' if durs
                       else ' · drain: n/a')
         c.set_title(note, fontsize=8, loc='right', color='#6b7280')
+        # Annotate each desired-change event with its signed delta on the p2 x-axis.
+        # Events beyond the x-axis end (e.g. last scale-down after load ends) are
+        # listed as a text summary in the bottom-right corner instead.
+        xlim_end = span - warmup_offset_s
+        off_axis_events: list[str] = []
+        for p_r, q_r in zip(reps, reps[1:]):
+            if q_r.get('desired') is None or p_r.get('desired') is None:
+                continue
+            delta = (q_r['desired'] or 0) - (p_r['desired'] or 0)
+            if delta == 0:
+                continue
+            x_ev = rel(q_r['t'], t0)
+            label_str = f'{delta:+d}'
+            if x_ev > xlim_end:
+                off_axis_events.append(f't={x_ev:.0f}s {label_str}')
+            else:
+                c.annotate(label_str, xy=(x_ev, 0), xycoords=('data', 'axes fraction'),
+                           xytext=(2, -9), textcoords='offset points',
+                           fontsize=6.5, color=C_UP if delta > 0 else C_DOWN,
+                           ha='left', va='top', zorder=4,
+                           annotation_clip=False)
+        if off_axis_events:
+            c.text(0.99, 0.04, 'off-axis: ' + '  '.join(off_axis_events),
+                   transform=c.transAxes, fontsize=6, color='#6b7280',
+                   ha='right', va='bottom')
     else:
-        empty(c, 'no replica_status_timeseries.json')
+        empty(c, 'no replica timeseries')
     c.set_ylabel('replicas')
     # MaxNLocator(integer=True) does not guarantee integer TICK VALUES, only
     # integer STEP sizes -- on a near-flat series (desired==ready==1 the whole
