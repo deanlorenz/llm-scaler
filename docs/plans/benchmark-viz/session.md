@@ -601,20 +601,41 @@ These require the extractor to produce new data:
   visible-window first label + silent-stretch tail annotation.
   Fixed tight_layout right edge (0.97→1). All 8 sample bundles smoke-tested. Committed `df51c50b`.
 
+### Known open bugs (approved to fix, next session)
+
+1. **p2 empty** — step lines not showing despite reps data being present.
+   Delta labels and decision vlines render fine. The `+/-0.05` offset approach
+   is in place but something is still suppressing the step plot.
+
+2. **p6 y-axis / tick lines broken** — `FixedLocator` + `FuncFormatter` not
+   rendering correctly. Gridlines not visible at expected replica-delta values.
+
 ### Next steps (in order)
 
-1. **Get bundles with pod series** — once extractor produces pod series
-   (`run`/`wait`/`kv` fields) panels 3 and 4 will populate.
+1. **Fix p2 step plot** — debug why step lines are absent.
 
-2. **Get bundles with scaler events** — once extractor produces
+2. **Fix p6 y-axis** — verify `FixedLocator` + `inv_signed_log2` formatter
+   is wired correctly; check for matplotlib version incompatibility.
+
+3. **Ingest v0.4.0 bundles from extractor** — new bundles ready at
+   `worktrees/benchmark-extract/hack/benchmark/results/`. Schema changes to handle:
+   - `requests.json` is now bucketed timeseries (has `arr_rate` key) — renderer
+     already has `req_buckets` branch for p1a, but p1b/p5 need review
+   - `pods[].series[]` has 4 new histogram fields (`ttft_hist`, `out_tok_hist`,
+     `in_tok_hist`, `qwait_hist`) — ignore for now, don't break on them
+   - `replicas[]` now deduplicated by extractor — renderer dedup in `_assemble`
+     can be simplified (keep for safety)
+   - `meta.json` has 4 new sentinel fields: `load_end_t`, `last_departure_t`,
+     `last_scale_event_t`, `replica_scrape_end_t` — use for x-axis clip:
+     `x_max = max(last_departure_t, last_scale_event_t)` floored at `load_end_t`
+
+4. **Get bundles with scaler events** — once extractor produces
    `analyzer_result` / `scaling_decision` records in `scaler[]`, panel 6
    will populate.
 
-3. **1a fallback when ttft absent** — show uncoloured bars with annotation, or
-   use `e2e_ms` as pessimistic proxy (decision pending).
+5. **1a fallback when ttft absent** — decision pending.
 
-4. **Publishing and Makefile integration** — add `benchmark-render` and
-   `benchmark-publish` make targets; adapt `publish_result.sh` to the new
-   directory layout.
+6. **Publishing and Makefile integration** — `benchmark-render` /
+   `benchmark-publish` make targets; adapt `publish_result.sh`.
 
-5. **Cumulative/comparison reports** — deferred.
+7. **Cumulative/comparison reports** — deferred.
