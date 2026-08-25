@@ -199,13 +199,18 @@ _info "Starting scenario at epoch $SCENARIO_START_EPOCH"
 # Run the harness inside the pod
 # ---------------------------------------------------------------------------
 _info "Executing harness: $HARNESS, workload: $WORKLOAD"
-$KUBECTL exec "$POD" -n "$NS" \
-    --env="LLMDBENCH_HARNESS_EXPERIMENT_ID=${EXPERIMENT_ID}" \
-    --env="LLMDBENCH_RUN_EXPERIMENT_RESULTS_DIR_PREFIX=/requests" \
-    --env="LLMDBENCH_VLLM_COMMON_NAMESPACE=${NS}" \
-    --env="LLMDBENCH_VLLM_COMMON_METRICS_SCRAPE_ENABLED=true" \
-    --env="LLMDBENCH_HARNESS_STACK_NAME=${_STACK_NAME}" \
-    -- llm-d-benchmark.sh --harness="${HARNESS}" --workload="${WORKLOAD}.yaml"
+# Note: kubectl exec --env is not available in older kubectl versions.
+# Pass env vars via a bash -c wrapper instead.
+$KUBECTL exec "$POD" -n "$NS" -- bash -c "
+  export LLMDBENCH_HARNESS_EXPERIMENT_ID='${EXPERIMENT_ID}'
+  export LLMDBENCH_RUN_EXPERIMENT_RESULTS_DIR_PREFIX=/requests
+  export LLMDBENCH_VLLM_COMMON_NAMESPACE='${NS}'
+  export LLMDBENCH_VLLM_COMMON_METRICS_SCRAPE_ENABLED=true
+  export LLMDBENCH_HARNESS_STACK_NAME='${_STACK_NAME}'
+  export LLMDBENCH_HARNESS_STACK_ENDPOINT_URL='${ENDPOINT_URL}'
+  export LLMDBENCH_DEPLOY_CURRENT_MODEL='${MODEL_ID}'
+  exec llm-d-benchmark.sh --harness='${HARNESS}' --workload='${WORKLOAD}.yaml'
+"
 HARNESS_RC=$?
 
 # ---------------------------------------------------------------------------
@@ -275,6 +280,19 @@ if [ "${BENCH_SKIP_PROMETHEUS:-false}" != "true" ]; then
         "${BENCHMARK_PROMETHEUS_URL:-}" \
         "$SCENARIO_OUT_DIR/prometheus_range.json" || \
         _warn "Prometheus range query failed or was skipped."
+fi
+
+# ---------------------------------------------------------------------------
+# Post-scenario IGW access log collection
+# ---------------------------------------------------------------------------
+if [ "${BENCH_SKIP_IGW_LOGS:-false}" != "true" ]; then
+    _info "Collecting IGW access logs for run window..."
+    bash "$_SCRIPT_DIR/collect_igw_logs.sh" \
+        "$NS" \
+        "$SCENARIO_START_EPOCH" \
+        "$SCENARIO_END_EPOCH" \
+        "$SCENARIO_OUT_DIR/logs/igw_pods.log" || \
+        _warn "IGW log collection failed or was skipped."
 fi
 
 # ---------------------------------------------------------------------------
