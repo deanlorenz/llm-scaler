@@ -199,25 +199,43 @@ BENCH_NAMESPACE    ?= $(BENCHMARK_NAMESPACE)
 BENCH_HARNESS      ?= guidellm
 
 # Scenario file (test/benchmark/scenarios/*.yaml.in).
+# Default comes from BENCH_WORKLOADS first entry when bench-meta.json is present;
+# falls back to this value for backward-compat direct invocations.
 BENCH_WORKLOAD     ?= prefill_heavy
 
+# Space-separated ordered list of workloads for bench-run-all.
+# Each name must match test/benchmark/scenarios/<name>.yaml.in.
+# Set in the .env file (BENCH_WORKLOADS="prefill_heavy symmetrical burst_4k250").
+# bench-run uses the first entry as its default when BENCH_WORKLOAD is unset.
+BENCH_WORKLOADS    ?=
+
 # Model ID forwarded into the scenario profile.
+# When bench-meta.json exists (run bench-init first), this is read from the
+# metadata and does not need to be set manually.
 BENCH_MODEL_ID     ?= $(BENCHMARK_MODEL_ID)
 
-# Inference endpoint URL. Empty = auto-detect via wait_serving.sh.
+# Inference endpoint URL. Empty = read from bench-meta.json, then auto-detect.
 BENCH_ENDPOINT_URL ?=
 
 # Session output directory (all scenarios for this session land here).
 BENCH_SESSION_DIR  ?= $(CURDIR)/hack/benchmark/bench-scratch/$(BENCH_NAMESPACE)-$(shell date +%Y%m%d-%H%M%S)
 
-# Harness image tag.
+# Harness image tag. Pinned to the tested version; set in the .env file.
+# bench-init warns if the running harness pod's tag differs from this value.
 BENCH_IMAGE_TAG    ?= $(BENCHMARK_REPO_REF)
 
-# EPP metrics secret name — override for clusters using namePrefix convention
-# (e.g. dhl-la-1708 installs the secret as wva-epp-metrics-token).
+# Path to bench-meta.json written by bench-init.
+# Default resolves to bench-scratch/<namespace>/bench-meta.json at runtime.
+BENCH_META_FILE    ?=
+
+# EPP metrics secret name — read from bench-meta.json when available.
+# Override only when not using bench-init (backward compat).
 BENCH_EPP_METRICS_SECRET ?= epp-metrics-token
 
 # Optional client-side script run between scenarios in bench-run-all.
+# Called as: bash $BENCH_INTER_SCENARIO_HOOK <workload> <namespace> <session-dir>
+# Exit code is ignored. Canonical examples: hack/benchmark/hooks/wait_scale_down.sh
+#                                           hack/benchmark/hooks/snapshot_replicas.sh
 BENCH_INTER_SCENARIO_HOOK ?=
 
 # ---------------------------------------------------------------------------

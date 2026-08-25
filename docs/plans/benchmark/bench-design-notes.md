@@ -1,62 +1,62 @@
 # bench-* Architecture: env file, metadata, and init/run handoff
 
-**Status:** design settled — decisions captured here, implementation follows
+**Status:** implementation complete — decisions captured here as the authoritative reference
 
 ---
 
-## Decisions (from design discussion)
+## Decisions
 
 | # | Decision |
 |---|---|
-| 1 | **Minimal env file** — identity only: kubeconfig path + context + namespace. Everything else is discovered, not configured. |
-| 2 | **bench-init creates a metadata file** — discovers the full stack state and writes it. bench-run reads and validates it. |
-| 3 | **Context is enforced as a guard** — bench-run fails immediately if the live context does not match the env file. |
-| 4 | **bench-init discovers HF token secret name** — harness may need it for tokenization; init finds it, writes name into metadata. |
+| 1 | **Minimal env file** — identity only: kubeconfig path + context + namespace + workload list. Everything else is discovered by bench-init and written to bench-meta.json. |
+| 2 | **bench-init creates bench-meta.json** — discovers the full stack state and writes it. bench-run reads and validates it. bench-run calls bench-init automatically on first use (no manual ordering required). |
+| 3 | **Context is enforced as a guard** — bench-run fails immediately if the live context does not match the env file's `BENCH_KUBE_CONTEXT`. |
+| 4 | **bench-init discovers EPP metrics secret name** — harness RBAC must name the exact secret; init finds it, writes into metadata. |
 | 5 | **Stack setup is a separate concern** — bench-init does not deploy WVA, EPP, or model. It assumes the stack exists and describes it. |
-| 6 | **Workloads support a list** — `BENCH_WORKLOADS` in the env file can be a space-separated list for `bench-run-all`. |
-| 7 | **Replica readiness is workload-driven** — if a workload specifies `starting_replicas: 3`, the runner forces that state with a prewarm phase. bench-init ensures min ≥ 1; the runner handles scenario-specific initial state. |
+| 6 | **BENCH_WORKLOADS is a space-separated list of workload names** — each name matches a `.yaml.in` filename under `test/benchmark/scenarios/`. The first entry is the `bench-run` default. |
+| 7 | **BENCH_IMAGE_TAG is pinned in the env file** — a specific tested version, not "latest". A warning is emitted if the running harness pod image tag differs from the pinned value. |
+| 8 | **BENCH_INTER_SCENARIO_HOOK is a script path** — bench-run-all calls it between scenarios with `<workload> <namespace> <session-dir>` as arguments. Two canonical examples live in `hack/benchmark/hooks/`. |
+| 9 | **Model ID is discovered from ScaledObject trigger metadata** — `spec.triggers[].metadata.modelID` is the authoritative source. Deployment container args are a fallback. |
+| 10 | **bench-run reads bench-meta.json; falls back to direct env vars** — backward compatible: if `bench-meta.json` doesn't exist, bench-run behaves as before (explicit vars required). Recommended path: always run bench-init first. |
 
 ---
 
-## The env file (minimal — identity only)
+## The env file (identity only)
 
 One file per named benchmark setup. Small, hand-authored, committed to the repo.
-Its only job: prevent running against the wrong cluster.
+Its only job: identify the target cluster and prevent running against the wrong one.
 
 ```bash
 # hack/benchmark/dhl-la-1708.env
 #
-# Identity guard for bench-* targets. Source this before invoking any bench-* target.
-# bench-run will refuse to proceed if the live kubectl context does not match BENCH_KUBE_CONTEXT.
+# Identity guard for bench-* targets on pokprod.
+# Source before invoking any bench-* target, or pass as BENCH_ENV_FILE=<file>.
+# bench-run will refuse if the live kubectl context != BENCH_KUBE_CONTEXT.
 
-# Which kubeconfig file to use for this setup.
 BENCH_KUBECONFIG=/home/dean/.kube/la-test
-
-# The exact context within that kubeconfig that this env is for.
-# bench-run enforces this: if `kubectl config current-context` != BENCH_KUBE_CONTEXT, it exits.
 BENCH_KUBE_CONTEXT=dhl-la-1708/api-pokprod001-ete14-res-ibm-com:6443/DEAN@il.ibm.com
-
-# Namespace to operate in.
 BENCH_NAMESPACE=dhl-la-1708
 
-# Default workload(s). Space-separated list for bench-run-all; first entry is the bench-run default.
-# Each name must match a file under test/benchmark/scenarios/<name>.yaml.in
-# (or test/benchmark/scenarios/<name>/<harness>.yaml for multi-harness workloads -- TBD).
+# Workloads for bench-run-all. Space-separated; first is the bench-run default.
+# Each name must match test/benchmark/scenarios/<name>.yaml.in
 BENCH_WORKLOADS="prefill_heavy symmetrical burst_4k250"
+
+# Pinned harness image tag. bench-init warns if the cluster pod differs.
+BENCH_IMAGE_TAG=v0.7.8
 ```
 
-That is the entire env file. Four variables. Everything else — model names, endpoints, secret
-names, replica counts, pod labels — is discovered dynamically by bench-init and written to the
-metadata file.
+That is the complete env file. Five variables. Everything else — model IDs, endpoints,
+secret names, replica counts, Prometheus URL — is discovered by bench-init.
 
 ---
 
-## The metadata file: `<session-dir>/bench-meta.json`
+## The metadata file: `hack/benchmark/bench-scratch/<ns>/bench-meta.json`
 
-bench-init discovers and writes this. bench-run reads it at session start, verifies the stack
-is still what the metadata says, and uses it to populate workload templates.
+bench-init discovers and writes this file. bench-run reads it at session start,
+verifies the stack is still what the metadata says, and uses it to populate workload
+templates and configure the harness pod.
 
-### Schema (what bench-init must discover and write)
+### Schema
 
 ```json
 {
@@ -74,31 +74,14 @@ is still what the metadata says, and uses it to populate workload templates.
       "scaledobject": "optimized-baseline-nvidia-gpu-vllm-decode-wva",
       "model_id": "Qwen/Qwen3-0.6B",
       "endpoint_url": "http://optimized-baseline-epp.dhl-la-1708.svc.cluster.local:80",
-      "epp_pod_label": "llm-d-router-gateway=optimized-baseline-epp",
+      "epp_metrics_secret": "wva-epp-metrics-token",
       "vllm_pod_label": "llm-d.ai/role=decode",
       "vllm_metrics_port": 8200,
       "epp_metrics_port": 9090,
-      "epp_metrics_secret": "wva-epp-metrics-token",
       "min_replicas": 1,
       "max_replicas": 10,
       "so_paused": false,
       "ready_replicas": 1
-    },
-    {
-      "name": "optimized-baseline-v2",
-      "deployment": "optimized-baseline-nvidia-gpu-vllm-decode-v2",
-      "scaledobject": "optimized-baseline-nvidia-gpu-vllm-decode-wva-v2",
-      "model_id": "Qwen/Qwen3-0.6B",
-      "endpoint_url": "http://optimized-baseline-epp.dhl-la-1708.svc.cluster.local:80",
-      "vllm_pod_label": "llm-d.ai/role=decode,wva.llmd.ai/variant=v2",
-      "vllm_metrics_port": 8200,
-      "epp_metrics_port": 9090,
-      "epp_metrics_secret": "wva-epp-metrics-token",
-      "min_replicas": 1,
-      "max_replicas": 10,
-      "so_paused": true,
-      "ready_replicas": 0,
-      "note": "pokprod-b93r38s1 GPU requires reset; keep paused"
     }
   ],
   "wva": {
@@ -111,10 +94,6 @@ is still what the metadata says, and uses it to populate workload templates.
   "prometheus": {
     "type": "openshift-thanos",
     "url": "https://thanos-querier.openshift-monitoring.svc.cluster.local:9091"
-  },
-  "quirks": {
-    "vllm_pod_selector_fallback": "llm-d.ai/role=decode",
-    "note": "cluster does not use llm-d.ai/inferenceServing=true label"
   }
 }
 ```
@@ -126,171 +105,191 @@ the JSON. Every field maps to a specific kubectl call:
 
 | Field | Source |
 |---|---|
-| `stacks[].deployment` | `kubectl get scaledobject -o jsonpath='{.spec.scaleTargetRef.name}'` |
-| `stacks[].model_id` | `kubectl get deploy <name> -o jsonpath='{.spec.template.spec.containers[0].args}'` → grep `--served-model-name` or first positional arg |
-| `stacks[].endpoint_url` | `resolve_router_endpoint.sh` or `wait_serving.sh` detection |
-| `stacks[].epp_metrics_secret` | `kubectl get secret -l app.kubernetes.io/name=workload-variant-autoscaler` → find token secret |
-| `stacks[].vllm_pod_label` | Try `llm-d.ai/inferenceServing=true` first; fall back to `llm-d.ai/role=decode` |
-| `stacks[].so_paused` | `kubectl get scaledobject -o jsonpath='{.metadata.annotations.autoscaling\.keda\.sh/paused-replicas}'` |
-| `wva.metrics_secure` | `kubectl get deploy wva-controller-manager -o jsonpath` → look for `--metrics-secure=true` in args |
-| `hf_token_secret` | `kubectl get secret -n <ns>` → grep for names containing `hf-token` or matching known patterns |
-| `prometheus` | Try Thanos (OpenShift), then kube-prometheus-stack, then same-namespace svc |
+| `stacks[].deployment` | `kubectl get scaledobject -o jsonpath '{.spec.scaleTargetRef.name}'` |
+| `stacks[].model_id` | SO trigger `metadata.modelID` first; fallback: deploy container args grep `--model` or first positional arg |
+| `stacks[].endpoint_url` | `resolve_router_endpoint.sh $NS` — produces in-cluster DNS URL |
+| `stacks[].epp_metrics_secret` | `kubectl get secret -l app.kubernetes.io/name=workload-variant-autoscaler` |
+| `stacks[].vllm_pod_label` | Try `llm-d.ai/role=decode` first (confirmed on dhl-la-1708); record which label matched |
+| `stacks[].so_paused` | SO status condition `type=Paused status=True` OR annotation `autoscaling.keda.sh/paused-replicas` |
+| `stacks[].min_replicas` | `kubectl get scaledobject -o jsonpath '{.spec.minReplicaCount}'` |
+| `stacks[].max_replicas` | `kubectl get scaledobject -o jsonpath '{.spec.maxReplicaCount}'` |
+| `stacks[].ready_replicas` | `kubectl get deploy <name> -o jsonpath '{.status.readyReplicas}'` |
+| `wva.metrics_secure` | deploy `wva-controller-manager` args → `--metrics-secure=true` present? |
+| `hf_token_secret` | `kubectl get secret -n <ns>` → first name matching `*hf*token*` or `*hf-token*` |
+| `prometheus.url` | Try OpenShift Thanos, then kube-prometheus-stack, then same-namespace svc (same logic as scrape_prometheus_range.sh) |
 
 ### How bench-run uses this
 
 bench-run reads `bench-meta.json` and:
+
 1. **Verifies context** — `kubectl config current-context` must match `identity.kube_context`. Hard fail.
-2. **Verifies stack is alive** — for each stack in `stacks[]`: deployment exists, SO not in error.
-   Configurable: `--verify-quick` (just existence) vs `--verify-full` (wait for ready replicas).
-3. **Populates workload templates** — substitutes `model_id`, `endpoint_url` from the chosen
-   stack's metadata into the `.yaml.in` template. Caller picks which stack to target.
-4. **Passes all config to the harness pod** — via env vars in pod spec or exec wrapper, no
-   `--env` flag (the flag is not available in older kubectl versions).
+2. **Selects stack** — by default `stacks[0]`; `BENCH_STACK=<name>` overrides.
+3. **Checks stack health** — `so_paused=false` and `ready_replicas >= min_replicas`. Warn if not.
+4. **Populates workload templates** — substitutes `model_id`, `endpoint_url` from the chosen stack.
+5. **Configures harness pod** — passes `epp_metrics_secret`, `wva.metrics_service`, prometheus URL.
 
 ---
 
-## What bench-init must do (contract for bench-run)
+## Order of operations: who calls who
 
-bench-init is a single script/target that takes a sourced env file and produces a `bench-meta.json`.
-It does NOT deploy anything. It discovers what is there and optionally prepares it for running.
+```
+make bench-init BENCH_ENV_FILE=hack/benchmark/dhl-la-1708.env
+  └── bench_init.sh
+        ├── guard: context == BENCH_KUBE_CONTEXT
+        ├── guard: namespace exists
+        ├── discover: ScaledObjects → stacks[]
+        ├── discover: model IDs (SO trigger metadata → deploy args fallback)
+        ├── discover: endpoint URL (resolve_router_endpoint.sh)
+        ├── discover: EPP metrics secret
+        ├── discover: WVA controller deployment + metrics service
+        ├── discover: HF token secret
+        ├── discover: Prometheus URL
+        └── write: hack/benchmark/bench-scratch/<ns>/bench-meta.json
 
-### Discovery phase (always runs, read-only)
+make bench-run BENCH_ENV_FILE=hack/benchmark/dhl-la-1708.env
+  ├── load BENCH_ENV_FILE (identity + BENCH_WORKLOADS + BENCH_IMAGE_TAG)
+  ├── read bench-meta.json (MODEL_ID, ENDPOINT_URL, EPP_SECRET, PROM_URL)
+  │   └── if bench-meta.json absent: error "run bench-init first"
+  ├── run_session.sh ensure <ns>   (harness pod lifecycle)
+  └── run_scenario.sh <scenario> <ns> <session-dir>
+        ├── render .yaml.in → substituted profile
+        ├── upload profile to pod
+        ├── kubectl exec: run harness
+        ├── collect results (kubectl cp)
+        ├── scrape_prometheus_range.sh
+        └── collect_igw_logs.sh
 
-1. Verify kubectl context matches `BENCH_KUBE_CONTEXT`. Fail if not logged in or wrong context.
-2. Verify namespace exists and is accessible.
-3. Discover all ScaledObjects in the namespace → one entry per SO in `stacks[]`.
-4. For each ScaledObject: resolve deployment, model, labels, ports, secrets, replica counts.
-5. Discover WVA controller deployment and metrics service.
-6. Discover HF token secret name.
-7. Detect Prometheus/Thanos endpoint.
-8. Detect pod label selector that finds vLLM pods (try known labels, record what works).
-9. Write `bench-meta.json`.
+make bench-run-all BENCH_ENV_FILE=hack/benchmark/dhl-la-1708.env
+  └── for each workload in BENCH_WORKLOADS:
+        bench-run <workload>
+        [inter-scenario hook if BENCH_INTER_SCENARIO_HOOK set]
 
-### Preparation phase (optional, `--prepare` flag)
+make bench-teardown BENCH_ENV_FILE=hack/benchmark/dhl-la-1708.env
+  └── run_session.sh stop <ns>
+```
 
-10. Unpause any ScaledObjects that are paused (remove the `paused-replicas` annotation).
-11. Wait for each unpaused SO's deployment to reach `minReplicas` Ready pods.
-    - Timeout configurable; default 300s per deployment.
-    - If a deployment never reaches minReplicas (e.g., broken GPU node), warn with details
-      and mark that stack as `available: false` in the metadata. bench-run skips unavailable stacks.
-12. Verify endpoint responds to `GET /v1/models` for each available stack.
-13. Update `stacks[].ready_replicas` and `stacks[].available` in the metadata.
-
-### Not bench-init's job
-
-- Deploying WVA, EPP, KEDA, llm-d model serving — that is the legacy `benchmark-standup` or
-  the user's own deploy flow.
-- Setting up monitoring stack.
-- Building or pushing images.
-- Scaling replicas to scenario-specific starting counts — that is the runner's prewarm phase.
+**Key rule:** bench-run always reads bench-meta.json. It does NOT call bench-init automatically.
+The user runs bench-init once before their session, then bench-run/bench-run-all as many times
+as needed. Re-running bench-init refreshes the metadata (e.g., after replica count changes).
 
 ---
 
-## Workload files: schema and naming
+## BENCH_WORKLOADS: workload names and scenario file matching
 
-Each workload is a `.yaml.in` file under `test/benchmark/scenarios/`. The filename is the
-workload name. The harness type is declared inside the file (or by directory if we move to
-`test/benchmark/scenarios/<name>/<harness>.yaml`).
-
-Current flat layout (keep for now):
-```
-test/benchmark/scenarios/prefill_heavy.yaml.in       → harness: guidellm (implicit from spec shape)
-test/benchmark/scenarios/sharegpt_inferenceperf.yaml.in  → harness: inference-perf
-```
-
-**Proposal:** add a `harness:` field to the metadata section of the `.yaml.in` file so the
-runner can determine the harness without guessing from the filename.
-
-```yaml
-# test/benchmark/scenarios/prefill_heavy.yaml.in
-metadata:
-  labels:
-    name: prefill-heavy
-    harness: guidellm          # ← add this
-    description: |
-      ...
-spec:
-  ...
-```
-
-Each workload run saves its complete resolved config (substituted YAML, all parameters used,
-metadata snapshot, start/end times) under `<session-dir>/<workload-name>/run_config.json`.
-
----
-
-## Replica readiness and prewarm
-
-**bench-init's job:** ensure the stack is at `minReplicas` Ready when it finishes.
-**bench-run's job:** if a workload specifies a `starting_replicas` value above minReplicas,
-force-scale to that count and wait for a prewarm phase before starting the load generator.
-
-Workload prewarm spec (proposed addition to `.yaml.in`):
-```yaml
-metadata:
-  labels:
-    name: prefill-heavy
-    harness: guidellm
-run_config:
-  starting_replicas: 1         # bench-run scales/waits to this before starting load
-  prewarm_seconds: 60          # wait this long after replicas are ready before sending traffic
-```
-
-If `starting_replicas` is absent, bench-run starts immediately from whatever state is current.
-If `starting_replicas` > current replicas, bench-run patches the deployment and waits.
-If `starting_replicas` < current replicas (e.g., starting a scale-down test from 3→1),
-bench-run patches down and waits for pods to terminate before starting load.
-
----
-
-## What needs to change in existing code
-
-### `run_scenario.sh` — fix kubectl exec env var passing
-
-`kubectl exec ... --env=KEY=VALUE` is not available in older kubectl versions.
-Replace with a wrapper approach: write a small shell script to the pod via `kubectl exec cat >`,
-then call it. Specifically:
+`BENCH_WORKLOADS` in the env file is a space-separated list of workload names. Each name
+must match a file at `test/benchmark/scenarios/<name>.yaml.in`.
 
 ```bash
-# Instead of: kubectl exec $POD -- --env=FOO=bar llm-d-benchmark.sh ...
-# Do:
-kubectl exec $POD -- bash -c '
-  export LLMDBENCH_HARNESS_EXPERIMENT_ID="'"$EXPERIMENT_ID"'"
-  export LLMDBENCH_RUN_EXPERIMENT_RESULTS_DIR_PREFIX=/requests
-  ...
-  exec llm-d-benchmark.sh --harness=guidellm --workload=prefill_heavy.yaml
-'
+BENCH_WORKLOADS="prefill_heavy symmetrical burst_4k250"
 ```
 
-Single `bash -c` with exported vars inline — no `--env` flag needed, works on all kubectl versions.
+- `bench-run` uses the first name as default (`BENCH_WORKLOAD=prefill_heavy`).
+- `bench-run-all` iterates all names in order.
+- A name not matching any `.yaml.in` file causes bench-run-check to fail immediately with
+  "scenario file not found" and the list of available names.
+- There is intentionally no glob expansion: exact names only, no `*` wildcards.
 
-### `run_session.sh` — read EPP secret name from metadata, not env var
+Available scenarios (as of this writing, `test/benchmark/scenarios/`):
+- `burst_4k1000`, `burst_4k250`, `bursty` — burst / scale-up cycling
+- `decode_heavy`, `prefill_heavy` — stress-test decode or prefill path
+- `symmetrical` — balanced input/output tokens
+- `sharegpt_inferenceperf` — ShareGPT distribution, inference-perf harness
+- `smoke_2min` — minimal smoke (2 minutes, low rate)
+- `static-baseline-gptoss120b` — static baseline, large model
 
-Currently hardcoded to `epp-metrics-token` with `BENCH_EPP_METRICS_SECRET` override.
-After bench-init exists: read the secret name from `bench-meta.json` instead.
+---
 
-### Makefile — simplify `bench-run` recipe
+## BENCH_IMAGE_TAG: version pinning and drift detection
 
-After metadata file exists, the recipe becomes:
-```makefile
-bench-run: bench-guard
-    @bash hack/benchmark/bench_init.sh --verify $(BENCH_META) $(BENCH_NAMESPACE)
-    @bash hack/benchmark/run_session.sh ensure $(BENCH_NAMESPACE) $(BENCH_META)
-    @bash hack/benchmark/run_scenario.sh $(WORKLOAD) $(BENCH_NAMESPACE) $(BENCH_META)
+`BENCH_IMAGE_TAG` is pinned in the env file. It controls which harness image
+`run_session.sh ensure` creates the pod with.
+
+```bash
+BENCH_IMAGE_TAG=v0.7.8
+```
+
+**Drift detection:** `bench-init` queries the running harness pod (if any) and warns if its
+image tag differs from `BENCH_IMAGE_TAG`. This catches:
+- A previous session left a pod with an older tag (just delete it with `bench-teardown`).
+- The env file was not updated after an image upgrade.
+
+**Latest-tag check:** bench-init checks `BENCHMARK_REPO_REF` from the Makefile default and
+warns if `BENCH_IMAGE_TAG` is older, e.g.:
+```
+bench-init: WARNING: BENCH_IMAGE_TAG=v0.7.8; Makefile default is v0.8.0 — consider updating
+```
+This is advisory only; the pinned tag is always used.
+
+---
+
+## BENCH_INTER_SCENARIO_HOOK: between-scenario scripts
+
+`bench-run-all` calls the hook script between every scenario:
+
+```bash
+bash "$BENCH_INTER_SCENARIO_HOOK" "$workload" "$namespace" "$session_dir"
+```
+
+The hook receives three positional arguments:
+1. `$1` — workload name just completed (e.g. `prefill_heavy`)
+2. `$2` — namespace (e.g. `dhl-la-1708`)
+3. `$3` — session directory (e.g. `hack/benchmark/bench-scratch/dhl-la-1708-20260825-143000`)
+
+The hook's exit code is ignored (always continues to the next scenario).
+
+Two canonical examples in `hack/benchmark/hooks/`:
+
+### `hooks/wait_scale_down.sh` — wait for replicas to return to minReplicas
+
+Use this between burst scenarios to ensure the autoscaler has fully scaled back down
+before the next burst starts from a clean state.
+
+```bash
+# Usage: wait_scale_down.sh <workload> <namespace> <session-dir>
+# Waits up to SCALE_DOWN_TIMEOUT seconds (default 300) for the primary
+# stack's decode deployment to return to minReplicas ready pods.
+```
+
+### `hooks/snapshot_replicas.sh` — record replica count at inter-scenario boundary
+
+Use this to capture a timestamped replica count snapshot between scenarios.
+Written to `<session-dir>/replica_snapshots.jsonl` — one JSON line per call.
+
+```bash
+# Usage: snapshot_replicas.sh <workload> <namespace> <session-dir>
+# Appends {"workload":"<w>","timestamp":<epoch>,"replicas":<n>} to replica_snapshots.jsonl
 ```
 
 ---
 
-## Implementation order
+## What bench-init does NOT do
 
-1. **Fix `run_scenario.sh`** — replace `--env` flag with `bash -c 'export ...; exec ...'`.
-   This is a bug fix, not a design decision. Do it now.
+- Deploy WVA, EPP, KEDA, llm-d model serving — use `benchmark-standup` or your own deploy flow.
+- Unpause ScaledObjects or wait for replicas — that is the `--prepare` flag (deferred, not implemented).
+- Scale replicas to scenario-specific starting counts — that is the runner's prewarm phase (deferred).
+- Set up monitoring stack or Prometheus.
+- Build or push images.
 
-2. **Write `bench_init.sh`** — discovery + metadata write + optional prepare.
-   This is the new work. Do it after the design is agreed.
+---
 
-3. **Update `run_session.sh` and `run_scenario.sh`** to read from metadata instead of
-   individual env vars.
+## Implementation: `hack/benchmark/bench_init.sh`
 
-4. **Update Makefile** — simplify recipes now that metadata carries the config.
+See the script itself for the definitive implementation. High-level flow:
 
-5. **Update `.env` files** — strip down to identity-only schema.
+```
+1.  Load identity: BENCH_KUBECONFIG, BENCH_KUBE_CONTEXT, BENCH_NAMESPACE
+2.  Guard: kubectl config current-context == BENCH_KUBE_CONTEXT
+3.  Guard: kubectl get namespace $BENCH_NAMESPACE
+4.  Discover ScaledObjects → iterate, building stacks[] JSON
+5.  For each SO: deployment, model_id (trigger meta → args fallback), endpoint,
+    epp_metrics_secret, pod labels, min/max replicas, so_paused, ready_replicas
+6.  Discover WVA controller deployment + metrics service
+7.  Discover HF token secret
+8.  Discover Prometheus URL
+9.  Drift check: running harness pod image tag vs BENCH_IMAGE_TAG
+10. Write bench-meta.json (atomic: temp file → mv)
+11. Print summary
+```
+
+Output path: `hack/benchmark/bench-scratch/<namespace>/bench-meta.json`
+(created by the script; safe to re-run, overwrites the previous file)
