@@ -211,11 +211,14 @@ def _assemble(bundle: BundleData) -> dict[str, Any]:
             # normalise outcome: 'ok' → keep as-is (reference only tests == 'error' / == 'truncated')
             reqs.append(rec)
 
-    # replicas — aggregate across all SOs (for single-SO runs, just the first)
-    # reference renderer uses a single flat reps[] list
+    # replicas — aggregate across all SOs, keeping only harness-sourced records
+    # (desired/ready). WVA-sourced records carry current_replicas/kv_capacity but
+    # no desired/ready and must not enter the step-plot or dedup comparison.
     reps_all = []
     for so in bundle.scaled_objects:
-        reps_all.extend(so.get("replicas") or [])
+        for r in (so.get("replicas") or []):
+            if r.get("desired") is not None or r.get("ready") is not None:
+                reps_all.append(r)
     reps_all.sort(key=lambda r: r.get("t", 0))
     # dedup: keep only records where desired or ready actually changes, plus first and last
     reps: list[dict[str, Any]] = []
