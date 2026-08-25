@@ -1,0 +1,37 @@
+load:
+  type: constant
+  stages:
+  - rate: __REQUEST_RATE__
+    duration: __MAX_DURATION__
+  request_timeout: 60
+api:
+  type: completion
+  streaming: true
+server:
+  type: vllm
+  model_name: REPLACE_ENV_LLMDBENCH_DEPLOY_CURRENT_MODEL
+  base_url: REPLACE_ENV_LLMDBENCH_HARNESS_STACK_ENDPOINT_URL
+  ignore_eos: true
+tokenizer:
+  pretrained_model_name_or_path: REPLACE_ENV_LLMDBENCH_DEPLOY_CURRENT_MODEL
+data:
+  type: random
+  input_distribution:
+    min: 512
+    max: 512
+    mean: 512
+    std_dev: 0
+    total_count: 1000
+  output_distribution:
+    min: 128
+    max: 128
+    mean: 128
+    std_dev: 0
+    total_count: 1000
+metadata:
+  labels:
+    name: smoke-2min
+    harness: inference-perf
+    description: |
+      2-minute smoke run at low rate. Used to validate EPP metrics
+      collection, IGW access log, and vLLM histogram extraction.
