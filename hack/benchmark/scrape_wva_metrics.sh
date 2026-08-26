@@ -42,7 +42,8 @@ case "$CMD" in
   start)
     NS="${2:?namespace required}"; OUT_DIR="${3:?out-dir required}"
     SVC="${4:-wva-controller-manager-metrics-service}"
-    LOCAL_PORT="${5:-18443}"
+    # Caller may pass a preferred port as arg 5; if not set, find a free one.
+    LOCAL_PORT="${5:-}"
     mkdir -p "$OUT_DIR"
 
     # Fail fast, not 15s into a silent empty-output loop, if the service does not
@@ -52,6 +53,19 @@ case "$CMD" in
         exit 1
     fi
 
+    # Pick a free local port when the caller has not specified one.
+    # python3 binds to :0 and immediately closes — the OS returns a free port.
+    if [ -z "$LOCAL_PORT" ]; then
+        LOCAL_PORT=$(python3 -c "
+import socket
+s = socket.socket()
+s.bind(('127.0.0.1', 0))
+print(s.getsockname()[1])
+s.close()
+")
+    fi
+
+    echo "$LOCAL_PORT" > "$OUT_DIR/.wva_scrape_portforward.port"
     $KUBECTL --namespace "$NS" port-forward "svc/$SVC" "$LOCAL_PORT:8443" \
         >"$OUT_DIR/.wva_scrape_portforward.log" 2>&1 &
     pf_pid=$!

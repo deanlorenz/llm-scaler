@@ -9,8 +9,10 @@
 #
 # Arguments:
 #   <namespace>    Kubernetes namespace to inspect (also BENCH_NAMESPACE env)
-#   [output-dir]   Directory to write bench-meta.json (default:
-#                  hack/benchmark/bench-scratch/<namespace>/)
+#   [output-dir]   Directory to write bench-meta.json. When called from
+#                  bench_run.sh this is the run dir (bench-scratch/<name>-<ts>/)
+#                  so all artifacts are colocated. Default (standalone):
+#                  hack/benchmark/bench-sessions/<namespace>/
 #
 # Environment:
 #   BENCH_NAMESPACE      Namespace (overridden by $1 when both are set)
@@ -48,7 +50,7 @@ if [ -z "$NS" ]; then
     exit 1
 fi
 
-OUT_DIR="${2:-${_SCRIPT_DIR}/bench-scratch/${NS}}"
+OUT_DIR="${2:-${_SCRIPT_DIR}/bench-sessions/${NS}}"
 KUBECTL="${KUBECTL_CMD:-kubectl}"
 
 # ---------------------------------------------------------------------------

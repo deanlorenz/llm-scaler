@@ -174,10 +174,12 @@ if [ "${BENCH_SKIP_WVA_SCRAPE:-false}" != "true" ]; then
     fi
     if [ -n "$_WVA_SVC" ]; then
         _info "Starting WVA metrics scraper (svc/$_WVA_SVC)..."
-        WVA_METRICS_SERVICE="$_WVA_SVC" \
-            bash "$_SCRIPT_DIR/scrape_wva_metrics.sh" start "$NS" "$WVA_OUT_DIR" "$_WVA_SVC" || \
+        if WVA_METRICS_SERVICE="$_WVA_SVC" \
+            bash "$_SCRIPT_DIR/scrape_wva_metrics.sh" start "$NS" "$WVA_OUT_DIR" "$_WVA_SVC"; then
+            _wva_scrape_started=true
+        else
             _warn "WVA metrics scraper failed to start; continuing without it."
-        _wva_scrape_started=true
+        fi
     else
         _warn "No WVA metrics service found in $NS; skipping WVA scrape."
     fi
@@ -233,18 +235,21 @@ fi
 RESULTS_OUT="$SCENARIO_OUT_DIR/results"
 mkdir -p "$RESULTS_OUT"
 
-# Results are in /requests/<harness>_<experiment_id>_<stack_name>/
-IN_POD_RESULTS_PATH="/requests/${HARNESS}_${EXPERIMENT_ID}_${_STACK_NAME}"
-
-_info "Collecting results from pod: ${IN_POD_RESULTS_PATH}"
-# Attempt to discover actual results directory if exact path doesn't match.
-actual_path=$($KUBECTL exec "$POD" -n "$NS" -- bash -c \
-    "ls -d /requests/${HARNESS}_${EXPERIMENT_ID}* 2>/dev/null | head -1" || true)
-if [ -n "$actual_path" ]; then
-    $KUBECTL cp "${NS}/${POD}:${actual_path}" "$RESULTS_OUT/" || \
-        _warn "kubectl cp failed; results may be incomplete."
+_info "Collecting results from pod: /requests/"
+# List everything under /requests/ and copy each entry individually.
+# The harness directory name format varies by harness type and version, so we
+# do not rely on a prefix guess — we copy whatever the harness actually wrote.
+_pod_entries=$($KUBECTL exec "$POD" -n "$NS" -- bash -c \
+    "ls /requests/ 2>/dev/null" || true)
+if [ -n "$_pod_entries" ]; then
+    while IFS= read -r _entry; do
+        [ -z "$_entry" ] && continue
+        _info "  copying /requests/$_entry → $RESULTS_OUT/"
+        $KUBECTL cp "${NS}/${POD}:/requests/${_entry}" "$RESULTS_OUT/${_entry}" || \
+            _warn "kubectl cp failed for /requests/$_entry; results may be incomplete."
+    done <<< "$_pod_entries"
 else
-    _warn "No results directory found at ${IN_POD_RESULTS_PATH}; checking /requests..."
+    _warn "No results found under /requests/ in pod $POD; listing for diagnostics:"
     $KUBECTL exec "$POD" -n "$NS" -- ls -la /requests/ 2>/dev/null || true
 fi
 
