@@ -1,0 +1,199 @@
+[
+  {
+    "config": {
+      "endpoint_id": "http://llm-d-inference-gateway-istio.dhl-la-1708.svc.cluster.local:80",
+      "model_id": "Qwen/Qwen3-0.6B",
+      "epp_name": "optimized-baseline-epp",
+      "scaled_object_ids": [
+        "optimized-baseline-nvidia-gpu-vllm-decode-wva"
+      ]
+    },
+    "load": [
+      {
+        "t_start": 0.0,
+        "t_end": 90.0,
+        "rate_rps": 3.0,
+        "in_tok": null,
+        "out_tok": null
+      },
+      {
+        "t_start": 90.0,
+        "t_end": 180.0,
+        "rate_rps": 8.0,
+        "in_tok": null,
+        "out_tok": null
+      }
+    ],
+    "demand": [
+      {
+        "t": 57159.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 57176.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 57190.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      }
+    ],
+    "epp": [
+      {
+        "t": 1.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 17.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 34.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 53.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 72.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 90.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 109.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 126.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 142.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 161.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 180.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 196.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 213.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      }
+    ]
+  }
+]

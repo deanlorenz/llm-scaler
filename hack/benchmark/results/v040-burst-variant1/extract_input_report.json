@@ -1,0 +1,85 @@
+{
+  "generated_at": "2026-08-25T13:27:02Z",
+  "run_dirs": [
+    "/home/dean/code/llm-d/dean-llmd-scaler-sandbox/worktrees/benchmark-run/runs/dean-20260821-032557-057/results/inference-perf-1787271994-tf4shc_1"
+  ],
+  "checks": [
+    {
+      "source": "run_metadata.yaml",
+      "status": "found",
+      "path": "/home/dean/code/llm-d/dean-llmd-scaler-sandbox/worktrees/benchmark-run/runs/dean-20260821-032557-057/results/inference-perf-1787271994-tf4shc_1/run_metadata.yaml",
+      "fallback_path": null,
+      "note": ""
+    },
+    {
+      "source": "workload scenario YAML",
+      "status": "found",
+      "path": "/home/dean/code/llm-d/dean-llmd-scaler-sandbox/worktrees/benchmark-run/runs/dean-20260821-032557-057/results/inference-perf-1787271994-tf4shc_1/burst_4k1000.yaml",
+      "fallback_path": null,
+      "note": ""
+    },
+    {
+      "source": "pod Prometheus scrapes",
+      "status": "found",
+      "path": "/home/dean/code/llm-d/dean-llmd-scaler-sandbox/worktrees/benchmark-run/runs/dean-20260821-032557-057/results/inference-perf-1787271994-tf4shc_1/metrics/raw",
+      "fallback_path": null,
+      "note": "11 pods"
+    },
+    {
+      "source": "wva_pod_timings.json",
+      "status": "missing",
+      "path": "/home/dean/code/llm-d/dean-llmd-scaler-sandbox/worktrees/benchmark-run/runs/dean-20260821-032557-057/results/inference-perf-1787271994-tf4shc_1/metrics/processed/wva_pod_timings.json",
+      "fallback_path": null,
+      "note": "created_t/ready_t will be null on all pods"
+    },
+    {
+      "source": "WVA controller Prometheus scrapes",
+      "status": "found",
+      "path": "/home/dean/code/llm-d/dean-llmd-scaler-sandbox/worktrees/benchmark-run/runs/dean-20260821-032557-057/results/inference-perf-1787271994-tf4shc_1/metrics/raw",
+      "fallback_path": null,
+      "note": "2 SOs, 222 demand points"
+    },
+    {
+      "source": "replica timeseries",
+      "status": "found",
+      "path": "/home/dean/code/llm-d/dean-llmd-scaler-sandbox/worktrees/benchmark-run/runs/dean-20260821-032557-057/results/inference-perf-1787271994-tf4shc_1/metrics/processed/replica_status_timeseries.json",
+      "fallback_path": "/home/dean/code/llm-d/dean-llmd-scaler-sandbox/worktrees/benchmark-run/runs/dean-20260821-032557-057/results/inference-perf-1787271994-tf4shc_1/metrics/processed/wva_replica_samples.json",
+      "note": "532 rows"
+    },
+    {
+      "source": "scaledobject-config.json",
+      "status": "missing",
+      "path": "/home/dean/code/llm-d/dean-llmd-scaler-sandbox/worktrees/benchmark-run/runs/dean-20260821-032557-057/results/inference-perf-1787271994-tf4shc_1/scaledobject-config.json",
+      "fallback_path": null,
+      "note": "gpu_count, role, cost, min/max_replicas will be null (runtools gap)"
+    },
+    {
+      "source": "WVA controller text log",
+      "status": "found",
+      "path": "/home/dean/code/llm-d/dean-llmd-scaler-sandbox/worktrees/benchmark-run/runs/dean-20260821-032557-057/results/inference-perf-1787271994-tf4shc_1/controller.log",
+      "fallback_path": null,
+      "note": ""
+    },
+    {
+      "source": "SO identity resolution",
+      "status": "found",
+      "path": null,
+      "fallback_path": null,
+      "note": "optimized-baseline-nvidia-gpu-vllm-decode-wva -> optimized-baseline-nvidia-gpu-vllm-decode-v2 (prefix-ambiguous); optimized-baseline-nvidia-gpu-vllm-decode-wva-v2 -> optimized-baseline-nvidia-gpu-vllm-decode-v2 (inferred)"
+    },
+    {
+      "source": "per-request lifecycle data",
+      "status": "found",
+      "path": "/home/dean/code/llm-d/dean-llmd-scaler-sandbox/worktrees/benchmark-run/runs/dean-20260821-032557-057/results/inference-perf-1787271994-tf4shc_1/per_request_lifecycle_metrics.json",
+      "fallback_path": null,
+      "note": "source=inference-perf-combined"
+    },
+    {
+      "source": "EPP Prometheus scrapes",
+      "status": "partial",
+      "path": "/home/dean/code/llm-d/dean-llmd-scaler-sandbox/worktrees/benchmark-run/runs/dean-20260821-032557-057/results/inference-perf-1787271994-tf4shc_1/metrics/raw",
+      "fallback_path": null,
+      "note": "123 files; all Unauthorized"
+    }
+  ]
+}

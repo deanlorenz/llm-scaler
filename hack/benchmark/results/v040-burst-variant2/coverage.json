@@ -1,0 +1,53 @@
+{
+  "rows": [
+    {
+      "scope": "endpoint:http://llm-d-inference-gateway-istio.dhl-la-1708.svc.cluster.local:80",
+      "capability": "Per-request trace present",
+      "result": "PASS",
+      "detail": "1756 buckets (1.0s) from inference-perf-combined"
+    },
+    {
+      "scope": "global",
+      "capability": "Pod metrics present",
+      "result": "PASS",
+      "detail": "2 pods"
+    },
+    {
+      "scope": "global",
+      "capability": "Replica timeseries present",
+      "result": "PASS",
+      "detail": "550 rows"
+    },
+    {
+      "scope": "global",
+      "capability": "Scaling-decision log present",
+      "result": "PASS",
+      "detail": "164 events"
+    },
+    {
+      "scope": "global",
+      "capability": "Scale-down present",
+      "result": "WARN",
+      "detail": "No ScaleDown action observed in log"
+    },
+    {
+      "scope": "global",
+      "capability": "Multi-variant run",
+      "result": "PASS",
+      "detail": "2 SOs: optimized-baseline-nvidia-gpu-vllm-decode-wva, optimized-baseline-nvidia-gpu-vllm-decode-wva-v2"
+    },
+    {
+      "scope": "endpoint:http://llm-d-inference-gateway-istio.dhl-la-1708.svc.cluster.local:80",
+      "capability": "EPP metrics present",
+      "result": "FAIL",
+      "detail": "All 138 EPP scrapes returned Unauthorized"
+    }
+  ],
+  "n_pass": 5,
+  "n_fail": 1,
+  "n_warn": 1,
+  "warnings": [
+    "No ScaleDown action observed in log",
+    "All 138 EPP scrapes returned Unauthorized"
+  ]
+}

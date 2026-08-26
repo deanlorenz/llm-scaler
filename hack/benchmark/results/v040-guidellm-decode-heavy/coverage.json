@@ -1,0 +1,47 @@
+{
+  "rows": [
+    {
+      "scope": "endpoint:http://llm-d-inference-gateway-istio.dhl-la-1708.svc.cluster.local:80",
+      "capability": "Per-request trace present",
+      "result": "PASS",
+      "detail": "601 buckets (1.0s) from guidellm"
+    },
+    {
+      "scope": "global",
+      "capability": "Pod metrics present",
+      "result": "PASS",
+      "detail": "10 pods"
+    },
+    {
+      "scope": "global",
+      "capability": "Replica timeseries present",
+      "result": "PASS",
+      "detail": "114 rows"
+    },
+    {
+      "scope": "global",
+      "capability": "Scaling-decision log present",
+      "result": "PASS",
+      "detail": "72 events"
+    },
+    {
+      "scope": "global",
+      "capability": "Scale-down present",
+      "result": "WARN",
+      "detail": "No ScaleDown action observed in log"
+    },
+    {
+      "scope": "endpoint:http://llm-d-inference-gateway-istio.dhl-la-1708.svc.cluster.local:80",
+      "capability": "EPP metrics present",
+      "result": "FAIL",
+      "detail": "All 55 EPP scrapes returned Unauthorized"
+    }
+  ],
+  "n_pass": 4,
+  "n_fail": 1,
+  "n_warn": 1,
+  "warnings": [
+    "No ScaleDown action observed in log",
+    "All 55 EPP scrapes returned Unauthorized"
+  ]
+}

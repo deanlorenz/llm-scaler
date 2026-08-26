@@ -1,0 +1,55 @@
+{
+  "rows": [
+    {
+      "scope": "endpoint:http://llm-d-inference-gateway-istio.dhl-la-1708.svc.cluster.local:80",
+      "capability": "Per-request trace present",
+      "result": "PASS",
+      "detail": "183 buckets (1.0s) from inference-perf-combined"
+    },
+    {
+      "scope": "global",
+      "capability": "Time anchor trustworthy",
+      "result": "WARN",
+      "detail": "method=cross-correlation, corr=0.771"
+    },
+    {
+      "scope": "global",
+      "capability": "Pod metrics present",
+      "result": "PASS",
+      "detail": "1 pods"
+    },
+    {
+      "scope": "global",
+      "capability": "Replica timeseries present",
+      "result": "PASS",
+      "detail": "3 rows"
+    },
+    {
+      "scope": "global",
+      "capability": "Scaling-decision log present",
+      "result": "FAIL",
+      "detail": "No scaling-decision events in controller log"
+    },
+    {
+      "scope": "global",
+      "capability": "Scale-down present",
+      "result": "WARN",
+      "detail": "No ScaleDown action observed in log"
+    },
+    {
+      "scope": "endpoint:http://llm-d-inference-gateway-istio.dhl-la-1708.svc.cluster.local:80",
+      "capability": "EPP metrics present",
+      "result": "FAIL",
+      "detail": "All 13 EPP scrapes returned Unauthorized"
+    }
+  ],
+  "n_pass": 3,
+  "n_fail": 2,
+  "n_warn": 2,
+  "warnings": [
+    "method=cross-correlation, corr=0.771",
+    "No scaling-decision events in controller log",
+    "No ScaleDown action observed in log",
+    "All 13 EPP scrapes returned Unauthorized"
+  ]
+}

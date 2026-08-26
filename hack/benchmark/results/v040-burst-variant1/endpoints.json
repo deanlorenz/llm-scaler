@@ -1,0 +1,3170 @@
+[
+  {
+    "config": {
+      "endpoint_id": "http://llm-d-inference-gateway-istio.dhl-la-1708.svc.cluster.local:80",
+      "model_id": "Qwen/Qwen3-0.6B",
+      "epp_name": "optimized-baseline-epp",
+      "scaled_object_ids": [
+        "optimized-baseline-nvidia-gpu-vllm-decode",
+        "optimized-baseline-nvidia-gpu-vllm-decode-wva",
+        "optimized-baseline-nvidia-gpu-vllm-decode-wva-v2"
+      ]
+    },
+    "load": [
+      {
+        "t_start": 0.0,
+        "t_end": 300.0,
+        "rate_rps": 4.0,
+        "in_tok": null,
+        "out_tok": null
+      },
+      {
+        "t_start": 300.0,
+        "t_end": 900.0,
+        "rate_rps": 14.0,
+        "in_tok": null,
+        "out_tok": null
+      },
+      {
+        "t_start": 900.0,
+        "t_end": 1500.0,
+        "rate_rps": 4.0,
+        "in_tok": null,
+        "out_tok": null
+      }
+    ],
+    "demand": [
+      {
+        "t": -43.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": -27.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": -11.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 6.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 22.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 38.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 173053.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 54.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 173053.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 70.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 188959.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 86.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 188959.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 102.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 188959.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 119.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 188959.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 135.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 139403.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 151.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 139403.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 167.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 139403.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 183.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 139403.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 199.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 150748.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 215.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 87655.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 231.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 87655.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 248.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 67606.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 264.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 67606.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 281.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 91015.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 298.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 91015.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 314.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 81206.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 331.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 81206.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 347.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 551256.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 363.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 551255.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 379.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 1482096.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 396.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 2371328.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 412.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 2371327.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 428.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 3070896.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 444.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 3070896.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 460.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 3851264.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 477.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 3851263.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 493.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 4164976.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 509.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 4595368.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 525.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 5140756.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 541.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 5407524.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 557.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 4147654.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 573.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 3627261.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 589.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 1644495.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 606.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 327066.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 622.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 228384.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 638.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 209470.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 654.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 233681.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 670.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 188173.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 686.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 220096.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 702.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 217552.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 719.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 202910.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 735.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 203198.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 751.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 203070.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 767.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 210223.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 783.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 220353.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 799.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 218609.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 815.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 259330.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 831.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 260531.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 848.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 274468.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 864.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 235329.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 880.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 239954.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 896.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 243826.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 912.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 223601.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 928.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 302965.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 944.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 182417.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 961.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 232560.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 977.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 166189.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 993.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 44708.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1009.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 62709.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1025.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 75670.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1041.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 72277.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1058.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 59492.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1074.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 36979.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1090.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 76326.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1106.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 81270.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1122.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 76326.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1138.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 81270.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1154.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 50371.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1170.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 55892.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1187.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 52932.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1203.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 54292.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1219.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 58629.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1235.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 52794.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1251.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 75459.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1268.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 61957.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1284.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 61957.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1300.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 107688.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1316.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 107688.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1332.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 173773.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1348.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 173773.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1364.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 174606.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1381.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 174606.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1397.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 183614.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1413.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 183614.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1429.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 183614.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1445.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 183614.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1461.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 121497.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1477.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 148379.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1493.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 148379.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1510.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 101176.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1526.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 101176.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1542.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 96008.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1558.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 96008.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1574.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 39667.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1590.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 39667.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1607.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1623.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1639.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1655.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1671.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1687.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1703.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1720.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1736.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1752.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1768.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1784.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1800.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1816.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1833.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1849.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1867.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1884.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1901.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1920.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1937.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1954.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1971.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 1988.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2005.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2021.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2037.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2054.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2070.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2086.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2103.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2120.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2137.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2153.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2170.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2187.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2204.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2220.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2236.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2253.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2269.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2286.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2302.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2319.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2335.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2352.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2368.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2385.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2402.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2418.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2435.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2452.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2468.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2484.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2500.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2517.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2533.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2549.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2566.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2582.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2600.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2616.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2633.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2649.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2666.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2682.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2699.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2715.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2732.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2748.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2765.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2781.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2797.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2814.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2830.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2846.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2862.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2879.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2895.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2911.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2927.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2943.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2960.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2976.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 2992.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 3009.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 3025.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 3041.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 3057.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 3074.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 3090.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 3106.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 3122.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 3139.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 3156.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 3172.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 3189.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 3205.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 3221.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 3238.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 3254.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 3270.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 3287.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 3303.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 3319.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 3336.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 3352.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 3369.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 3385.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 3402.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 3418.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 3434.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 3450.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 3466.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 3482.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 3499.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 3515.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 3531.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 3547.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      },
+      {
+        "t": 3563.0,
+        "source": "wva",
+        "analyzer": "saturation",
+        "role": "decode",
+        "value": 0.0,
+        "unit": "tokens"
+      }
+    ],
+    "epp": [
+      {
+        "t": 1.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 18.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 34.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 51.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 68.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 84.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 101.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 118.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 135.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 152.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 168.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 185.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 202.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 219.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 235.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 252.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 269.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 285.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 302.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 334.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 379.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 400.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 418.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 436.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 454.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 471.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 490.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 509.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 527.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 544.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 562.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 580.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 597.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 615.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 633.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 651.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 669.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 686.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 704.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 722.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 739.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 757.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 775.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 793.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 810.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 828.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 848.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 865.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 883.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 901.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 918.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 935.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 952.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 969.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 986.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1003.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1020.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1037.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1053.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1070.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1087.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1104.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1120.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1137.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1155.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1172.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1189.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1206.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1223.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1240.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1256.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1273.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1290.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1306.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1323.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1339.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1356.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1374.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1391.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1407.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1424.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1441.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1457.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1474.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1491.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1508.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1525.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1541.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1558.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1575.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1592.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1608.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1625.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1642.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1659.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1675.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1693.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1711.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1729.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1746.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1762.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1779.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1796.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1812.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1829.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1846.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1862.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1879.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1895.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1912.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1928.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1945.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1962.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1980.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 1998.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 2015.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 2031.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 2048.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 2064.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 2081.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 2098.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 2114.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      },
+      {
+        "t": 2131.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      }
+    ]
+  }
+]

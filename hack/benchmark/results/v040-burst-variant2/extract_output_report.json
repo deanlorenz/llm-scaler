@@ -1,0 +1,66 @@
+{
+  "generated_at": "2026-08-25T13:26:59Z",
+  "outputs": [
+    {
+      "file": "meta.json",
+      "status": "written",
+      "record_count": 1,
+      "null_fields": [],
+      "note": ""
+    },
+    {
+      "file": "pods.json",
+      "status": "written",
+      "record_count": 2,
+      "null_fields": [
+        "itl_ms"
+      ],
+      "note": "274 series entries"
+    },
+    {
+      "file": "scaled_objects.json",
+      "status": "written",
+      "record_count": 2,
+      "null_fields": [
+        "rc",
+        "sc",
+        "prc"
+      ],
+      "note": ""
+    },
+    {
+      "file": "endpoints.json",
+      "status": "written",
+      "record_count": 1,
+      "null_fields": [
+        "q_dispatch",
+        "q_engine_sum",
+        "ready_pods",
+        "kv_mean",
+        "in_system"
+      ],
+      "note": ""
+    },
+    {
+      "file": "requests.json",
+      "status": "written",
+      "record_count": 1756,
+      "null_fields": [],
+      "note": "aggregated 1.0s buckets"
+    },
+    {
+      "file": "coverage.json",
+      "status": "written",
+      "record_count": null,
+      "null_fields": [],
+      "note": ""
+    },
+    {
+      "file": "extract_input_report.json",
+      "status": "written",
+      "record_count": 11,
+      "null_fields": [],
+      "note": ""
+    }
+  ]
+}
