@@ -1,4 +1,4 @@
-# bench-init — Session State (sleep save)
+# bench-init — Session State
 
 ## Context
 
@@ -21,7 +21,6 @@ Key constraint: the pipeline does NOT use `llmdbench.py` and does NOT require cl
 **bench-init is a read-only stack discovery script** that writes `bench-meta.json`.
 
 It does NOT touch cluster topology, deployments, or variants.
-It does NOT add variants (commit 5 is out of scope — `add_variant.py` already present).
 
 Primary deliverable: `hack/benchmark/bench_init.sh`
 
@@ -30,71 +29,47 @@ bench-init writes `bench-meta.json` → bench-runtools reads it and runs the wor
 
 ---
 
-## Commit Mapping
+## Status: COMPLETE
 
-| # | Hash | Message | Status |
-|---|------|---------|--------|
-| 1 | `6f4cbf1d` | port shared-cluster safety scaffolding (env_guard, env_wizard, preflight, reset_run) | ❌ pending |
-| 2 | `ffa87255` | port GPU reservation/coupler tooling | ❌ pending |
-| 3 | `52851b63` | fix gitignore llmdbenchmark workspace-dir pattern | ❌ pending |
-| 4 | `ebbcdd50` | rescan/verify ScaledObject modelID before every benchmark run | ❌ pending |
-| 5 | `88a9d75b` | add_variant.py support for optimized-baseline topology | ✅ already present, out of scope |
-
-Cherry-pick order: 3 → 1 → 2 → 4 (gitignore first, no conflicts)
+All work is committed. Branch is ready for PR / cherry-pick into bench-runtools.
 
 ---
 
-## What's Done
+## Commit log (de917424..HEAD)
 
-All committed in `241f6185`:
-
-- `hack/benchmark/bench_init.sh` — **COMPLETE, syntax-validated**
-  - Guards: kubeconfig export, context match, namespace exists
-  - Discovers: ScaledObjects → stacks[], WVA controller, HF token secret, Prometheus
-  - Calls `resolve_router_endpoint.sh` (owned by bench-runtools)
-  - Writes bench-meta.json atomically
-  - `bash -n` passes, `--help` works
-
-- `docs/plans/benchmark/bench-design-notes.md` — authoritative schema spec ✅
-- `docs/plans/benchmark/bench-init-decisions.md` — decisions/findings log ✅
-- `docs/plans/benchmark/bench-init-plan.md` — implementation plan ✅
+| Hash | Message |
+|------|---------|
+| `86b7f4a5` | fix(gitignore): correct llmdbenchmark workspace-dir pattern; add live smoke-test sample |
+| `554ce453` | feat(benchmark): port shared-cluster safety scaffolding (env_guard, env_wizard, preflight, reset_run, Makefile targets, quick_smoke.yaml.in) |
+| `596257a7` | feat(benchmark): port GPU reservation/coupler tooling |
+| `f34f9947` | feat(benchmark): verify_wva_scaledobjects.sh + benchmark-verify-scaledobjects wired into benchmark-run |
+| `2b1d8175` | fix(benchmark): remove dead wva_args first-attempt from bench_init.sh |
+| `c5005359` | fix(benchmark): rewrite verify_wva_scaledobjects.sh — self-contained, no deploy/lib deps |
+| `3a340fe9` | feat(benchmark): add --model targeted mode to verify_wva_scaledobjects.sh; wire into benchmark-run |
+| `8346429e` | feat(benchmark): port resolve_router_endpoint.sh; bench_init.sh fully self-contained |
 
 ---
 
-## Key Background Docs Read
+## Key design decisions made this session
 
-- `worktrees/benchmark-runtools/docs/plans/benchmark/bench-design-notes.md` — canonical schema (runtools authored)
-- `worktrees/benchmark-runtools/docs/plans/benchmark/benchmark-runtools-plan.md` — full runtools plan
-- `worktrees/benchmark-runtools/hack/benchmark/dhl-la-1708.env` — live env file
-- `worktrees/benchmark-runtools/hack/benchmark/resolve_router_endpoint.sh` — confirmed exists, signature known
-- `worktrees/benchmark-runtools/hack/benchmark/run_session.sh` — header style reference
-- `worktrees/benchmark-runtools/hack/benchmark/run_scenario.sh` — header style reference
+- **verify_wva_scaledobjects.sh is self-contained**: 2 kubectl calls + stdlib Python. No deploy/lib sourcing, no env files, no install-tooling. Works against any llm-d+WVA install regardless of how it was created.
+- **verify_wva_scaledobjects.sh has two modes**: `--model <id>` (targeted, for benchmark-run) and no-arg scan (for standalone benchmark-verify-scaledobjects). benchmark-run passes `--model $(BENCHMARK_MODEL_ID)`.
+- **BENCHMARK_NAMESPACE vs BENCH_NAMESPACE**: scripts use `BENCHMARK_NAMESPACE` (Makefile-level); `bench_init.sh` uses `BENCH_NAMESPACE` (direct invocation). Different entry points — no adaptation needed.
+- **fix/scaledobjects-cold-start**: scaledobjects-plan writes wrong scalerAddress when run cold (no WVA_NS/NAMESPACE set). Spec committed to `worktrees/fix-scaledobjects-cold-start/docs/plans/deploy/fix-scaledobjects-cold-start.md`. Out of scope here — dedicated agent.
 
 ---
 
-## Next Steps at Resume
+## Cherry-pick message for bench-runtools agent
 
-1. **Cherry-pick the 4 commits** in order: `52851b63` → `6f4cbf1d` → `ffa87255` → `ebbcdd50`
-   - These add env_guard, env_wizard, preflight, reset_run, GPU reservation, modelID verify
-   - All straight picks, no splits
+```
+git cherry-pick 86b7f4a5 554ce453 596257a7 f34f9947 2b1d8175 c5005359 3a340fe9 8346429e
+```
 
-2. **Review cherry-picked scripts** — they were written for the legacy `benchmark-*` path.
-   Check if they reference `BENCHMARK_NAMESPACE` (legacy) vs `BENCH_NAMESPACE` (new pipeline).
-   May need minor adaptation to use the new env var names.
-
-3. **Add Makefile target `bench-init`** — wires `bench_init.sh` as a make target:
-   ```
-   bench-init: ## Discover stack state and write bench-meta.json (BENCH_ENV_FILE=<file>)
-   ```
-   Following the `bench-*` naming convention (not `benchmark-*`).
-
-4. **Validate end-to-end** against dhl-la-1708 once cluster is reachable.
+Watch for conflicts on Makefile and verify_wva_scaledobjects.sh — take benchmark-init's version of the latter.
 
 ---
 
-## Known Issues / Notes
+## Open items / follow-on
 
-- The shebang line had a stray `i` prefix (user revision artifact) — fixed before commit.
-- `bench-design-notes.md` has a stray `e` prefix on line 1 (user revision artifact) — cosmetic only, does not affect function.
-- `bench-init-plan.md` has a stray `n` prefix on the first paragraph — cosmetic only.
-- `bench_init.sh` has a redundant/broken intermediate attempt at parsing `wva_args` (lines ~103-109) — the correct path follows immediately after using `kubectl get ... -o json | python3`. Should be cleaned up.
+- End-to-end validation against dhl-la-1708 (once cluster reachable)
+- fix/scaledobjects-cold-start: wva_bootstrap_env cold-start discovery (separate agent, separate branch)
