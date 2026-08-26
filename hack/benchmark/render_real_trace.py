@@ -806,27 +806,10 @@ def render(bundle: BundleData, out_path: Path, title: str | None = None) -> Path
         xs = [rel(r['t'], t0) for r in reps]
         dz = [r.get('desired') for r in reps]
         rz = [r.get('ready') for r in reps]
-        # Tiny opposite y-offsets, exactly as the synthetic figure: once ready
-        # catches up the two coincide, and neither may hide. A data-space
-        # offset (tried first: a fixed 0.05, then a %-of-range formula) never
-        # gives a consistent VISUAL gap -- the same number of data units is a
-        # sliver on a 0..10 run and a canyon on a 0..1 one, because the axis
-        # scales differently each time (Dean: "I want the physical gap to be
-        # about the width of the line... not sure about the calculation to
-        # get there for other runs"). offset_copy sidesteps the calculation
-        # entirely: it shifts by a fixed distance in POINTS, after the data
-        # transform, so the two lines sit lw points apart on the page no
-        # matter what the y-axis range is or how it's scaled.
-        LW2 = 2.2
-        c_lw2 = LW2
-        trans_up = offset_copy(c.transData, fig=fig, y=c_lw2 / 2, units='points')
-        trans_down = offset_copy(c.transData, fig=fig, y=-c_lw2 / 2, units='points')
-        dz_plot = [v if v is not None else float('nan') for v in dz]
-        rz_plot = [v if v is not None else float('nan') for v in rz]
-        c.step(xs, dz_plot, where='post', transform=trans_up,
-               color=C_DES, lw=c_lw2, alpha=0.9, label='desired (WVA)')
-        c.step(xs, rz_plot, where='post', transform=trans_down,
-               color=C_ACT, lw=c_lw2, alpha=0.9, label='ready (alive)')
+        c.step(xs, [v + 0.05 if v is not None else None for v in dz], where='post',
+               color=C_DES, lw=2.2, alpha=0.9, label='desired (WVA)')
+        c.step(xs, [v - 0.05 if v is not None else None for v in rz], where='post',
+               color=C_ACT, lw=2.2, alpha=0.9, label='ready (alive)')
         # A replica that is alive but no longer wanted is draining: still finishing
         # in-flight work, not accepting new work, so NOT usable capacity. Kept even
         # though this run has none -- if a future run drains, the band appears
