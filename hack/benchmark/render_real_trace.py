@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import subprocess
 import sys
@@ -27,8 +26,7 @@ try:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from matplotlib.ticker import MaxNLocator, FuncFormatter, AutoMinorLocator, FixedLocator
-    from matplotlib.transforms import offset_copy
+    from matplotlib.ticker import MaxNLocator
     from matplotlib.colors import LinearSegmentedColormap, to_rgba
     import numpy as np
 except ImportError:
@@ -1694,17 +1692,9 @@ def render(bundle: BundleData, out_path: Path, title: str | None = None) -> Path
     # (curr=1,tgt=2) read rc/prc=+0.110; a saturation tick at a confirmed
     # scale-down (curr=3,tgt=1) read sc/prc so the delta was negative.
     #
-    # Mild signed log2 (Dean: "log 2? + negatives as -log(|x|)") compresses
-    # large excursions (a +11 throughput spike would otherwise dwarf the -1..1
-    # steady-state noise) without collapsing small values near zero. Tick
-    # labels are re-inverted back to real replica-delta units below -- a
-    # reader should never see the transformed numbers.
-    def signed_log2(y):
-        return math.log2(1 + y) if y >= 0 else -math.log2(1 + abs(y))
-
-    def inv_signed_log2(v, _pos=None):
-        real = (2 ** v - 1) if v >= 0 else -(2 ** abs(v) - 1)
-        return f'{real:.0f}'
+    # symlog scale (linthresh=1) is used on the y-axis below: linear between
+    # -1 and +1, log2-like spacing outside. Replica deltas are integers so
+    # there are no awkward fractional values in the linear zone.
 
     g = ax[6]
     slog = der.get('scaling_log') or {}
@@ -1743,7 +1733,7 @@ def render(bundle: BundleData, out_path: Path, title: str | None = None) -> Path
             if not recs:
                 continue
             xs = [rel(r['t'], t0) for r in recs]
-            ys = [signed_log2((r['rc'] - r['sc']) / r['prc']) for r in recs]
+            ys = [(r['rc'] - r['sc']) / r['prc'] for r in recs]
             color = ANALYZER_COLORS[i % len(ANALYZER_COLORS)]
             # An analyzer that's absent from the configured list still
             # computes and logs a real rc/sc/prc every tick (confirmed,
@@ -1864,33 +1854,7 @@ def render(bundle: BundleData, out_path: Path, title: str | None = None) -> Path
                        textcoords='offset points', fontsize=6,
                        color=color, ha='left', va=va)
         g.axhline(0, color=INK, lw=0.8, alpha=0.5, zorder=2.0)
-        # Ticks must read as real replica-delta values ("±2, ±4, ±8..."), not
-        # the log-space numbers the line/scatter data is actually plotted at.
-        #
-        # The default locator picks positions evenly spaced in LOG-SPACE
-        # (where the axis actually lives), then the formatter below inverts
-        # each one back to a real value -- but inv_signed_log2 rounds to the
-        # nearest integer, and several nearby log-space positions invert to
-        # the SAME rounded real value (e.g. signed_log2(0.5)=~0.41 rounds to
-        # "0", same as signed_log2(0)=0 itself) or to "-0"/"0" pairs that read
-        # as duplicates. A FixedLocator placed at the exact signed_log2(y)
-        # position of each of these real values is losslessly invertible --
-        # every tick maps to one distinct, real replica-delta, no rounding
-        # collision possible. Matplotlib clips whichever of these fall
-        # outside the current view, so listing all of them is safe on any
-        # run regardless of how wide its actual range is.
-        g.yaxis.set_major_locator(
-            FixedLocator([signed_log2(y) for y in (-8, -4, -2, -1, 0, 1, 2, 4, 8)]))
-        g.yaxis.set_major_formatter(FuncFormatter(inv_signed_log2))
-        # Minor ticks between the (unevenly log2-spaced) major ones, as a
-        # reading aid for where a point sits between two labelled values --
-        # unlabelled, so they cannot repeat the major ticks' own rounding
-        # collision. AutoMinorLocator subdivides each major interval by
-        # count rather than by requiring even spacing, so this is safe on a
-        # log-space axis despite the majors themselves not being evenly
-        # spaced.
-        g.yaxis.set_minor_locator(AutoMinorLocator())
-        g.grid(which='minor', axis='y', alpha=0.15, lw=0.5)
+        g.set_yscale('symlog', linthresh=1)
         g.grid(which='major', axis='y', alpha=0.3, lw=0.6)
         # The old shipped version placed this text differently depending on
         # whether saturation had its own horizontal lane -- panel 6 no longer
