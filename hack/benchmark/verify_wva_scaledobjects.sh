@@ -12,18 +12,35 @@
 # and applied zero scaling decisions for an entire benchmark run silently.
 #
 # Usage:
-#   verify_wva_scaledobjects.sh <namespace> [--report-only]
+#   verify_wva_scaledobjects.sh <namespace> [--model <model-id>] [--report-only]
 #
-# Exit status: 0 if every ScaledObject's modelID matches what its target
-# Deployment actually serves, 1 if any drift or unreadable target. --report-only
-# always exits 0.
+# Modes:
+#   --model <model-id>   Targeted: verify this specific model is registered and
+#                        its ScaledObject's modelID matches what its Deployment
+#                        actually serves. Exit 1 on drift, unregistered, or not
+#                        found. Use this from benchmark-run to gate a specific run.
+#   (no --model)         Full scan: report OK/DRIFT/UNREGISTERED for every
+#                        ScaledObject in the namespace. Use this for the standalone
+#                        benchmark-verify-scaledobjects target.
+#
+# Exit status: 0 if every checked ScaledObject is OK, 1 otherwise.
+# --report-only always exits 0.
 #
 # Prereqs: kubectl, python3 (stdlib only).
 set -euo pipefail
 
-NS="${1:?usage: $0 <namespace> [--report-only]}"
+NS="${1:?usage: $0 <namespace> [--model <model-id>] [--report-only]}"
 REPORT_ONLY=0
-[ "${2:-}" = "--report-only" ] && REPORT_ONLY=1
+MODEL_ID=""
+
+shift
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --model)    MODEL_ID="${2:?--model requires a value}"; shift 2 ;;
+        --report-only) REPORT_ONLY=1; shift ;;
+        *) echo "verify-wva-scaledobjects: unknown argument: $1" >&2; exit 1 ;;
+    esac
+done
 
 KUBECTL="${KUBECTL_CMD:-kubectl}"
 
@@ -38,11 +55,12 @@ so_json=$($KUBECTL get scaledobject -n "$NS" -o json 2>/dev/null || echo '{"item
 deploy_json=$($KUBECTL get deploy -n "$NS" -o json 2>/dev/null || echo '{"items":[]}')
 
 # Feed both JSON blobs via environment variables into a single Python process.
-result=$(SO_JSON="$so_json" DEPLOY_JSON="$deploy_json" NS="$NS" \
+result=$(SO_JSON="$so_json" DEPLOY_JSON="$deploy_json" NS="$NS" MODEL_ID="$MODEL_ID" \
     python3 -c '
 import json, os, re, sys
 
 ns          = os.environ["NS"]
+model_id    = os.environ.get("MODEL_ID", "")   # empty = full scan
 so_data     = json.loads(os.environ["SO_JSON"])
 deploy_data = json.loads(os.environ["DEPLOY_JSON"])
 
@@ -74,10 +92,34 @@ def model_from_args(args):
             return a
     return ""
 
+def so_declares_model(so, expected):
+    for t in (so.get("spec",{}).get("triggers") or []):
+        if (t.get("metadata") or {}).get("modelID","") == expected:
+            return True
+    return False
+
 drift = ok = unregistered = unresolved = 0
 rows = []
 
-for so in so_data.get("items", []):
+# In targeted mode, filter to only SOs that declare this modelID or whose
+# scale target actually serves it. SOs for other models are irrelevant to this run.
+# In scan mode, iterate everything.
+all_sos = so_data.get("items", [])
+if model_id:
+    filtered = []
+    for so in all_sos:
+        tgt = (so.get("spec",{}).get("scaleTargetRef",{}) or {}).get("name","")
+        live = model_from_args(deploy_args.get(tgt, [])) if tgt else ""
+        if so_declares_model(so, model_id) or live == model_id:
+            filtered.append(so)
+    if not filtered:
+        print(f"verify-wva-scaledobjects: model {model_id!r} not found in namespace {ns!r}")
+        print("  No ScaledObject declares this modelID and no Deployment serves it.")
+        print(f"  Register it:  make scaledobjects-plan WVA_DEFAULT_SO_NS={ns}")
+        sys.exit(1)
+    all_sos = filtered
+
+for so in all_sos:
     so_name  = so["metadata"]["name"]
     target   = (so.get("spec",{}).get("scaleTargetRef",{}) or {}).get("name","")
 
