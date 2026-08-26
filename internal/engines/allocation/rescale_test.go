@@ -1,6 +1,8 @@
 package allocation
 
 import (
+	"context"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -128,6 +130,31 @@ var _ = Describe("distributeGPUsByWeight", func() {
 			map[string]int{"prefill": 1, "decode": 1})
 		Expect(out["prefill"]).To(Equal(4))
 		Expect(out["decode"]).To(Equal(2))
+	})
+})
+
+var _ = Describe("rescaleModelDecisions", func() {
+	// Nil-guard: no upstream invariant actually guarantees AnalyzerResults carries a
+	// saturation entry (rescaleInputsForGroup, the sibling that builds this function's
+	// caller's groups, already guards this exact case). Without the guard,
+	// buildVariantRecords(req, satNamed.Result) would nil-deref on satNamed.
+	It("returns nil instead of panicking when AnalyzerResults has no saturation entry", func() {
+		o := NewGreedyByScoreOptimizer()
+		req := ModelScalingRequest{
+			ModelID:   "A",
+			Namespace: "default",
+			Priority:  1,
+			// AnalyzerResults deliberately has no domain.SaturationAnalyzerName entry.
+			VariantStates: []domain.VariantReplicaState{
+				{VariantName: "A-v", CurrentReplicas: 1, GPUsPerReplica: 1},
+			},
+		}
+		freeThisCycle := 0
+		var got []domain.VariantDecision
+		Expect(func() {
+			got = o.rescaleModelDecisions(context.Background(), req, nil, "A100", 1, &freeThisCycle)
+		}).NotTo(Panic())
+		Expect(got).To(BeEmpty())
 	})
 })
 

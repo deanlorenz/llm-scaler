@@ -342,6 +342,9 @@ func (o *GreedyByScoreOptimizer) rescaleModelDecisions(
 	freeThisCycle *int,
 ) []domain.VariantDecision {
 	satNamed := saturationNamedEntry(req.AnalyzerResults)
+	if satNamed == nil || satNamed.Result == nil {
+		return nil
+	}
 	records := buildVariantRecords(req, satNamed.Result)
 	stateMap := buildStateMap(req.VariantStates)
 	vcMap := buildCapacityMap(records)
