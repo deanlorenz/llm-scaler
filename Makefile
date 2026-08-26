@@ -1595,7 +1595,8 @@ benchmark-run: benchmark-guard ## Run a single benchmark workload (set BENCHMARK
 	@# Rescan and check every ScaledObject's modelID still matches what its
 	@# container actually serves, before spending any load on a run WVA cannot
 	@# act on. See benchmark-verify-scaledobjects above for why this exists.
-	@bash hack/benchmark/verify_wva_scaledobjects.sh $(BENCHMARK_NAMESPACE)
+	@bash hack/benchmark/verify_wva_scaledobjects.sh $(BENCHMARK_NAMESPACE) \
+		$(if $(BENCHMARK_MODEL_ID),--model $(BENCHMARK_MODEL_ID),)
 	@rm -f /tmp/wva_replica_samples.json /tmp/wva_replica_samples.json.pid
 	@bash hack/benchmark/sample_replicas.sh start $(BENCHMARK_NAMESPACE) /tmp/wva_replica_samples.json || true
 	-$(LLMDBENCHMARK) $(BENCHMARK_CLI_FLAGS) run \
