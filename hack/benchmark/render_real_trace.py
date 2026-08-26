@@ -514,12 +514,17 @@ def render(bundle: BundleData, out_path: Path, title: str | None = None) -> Path
         return out_path
 
     t0 = min(origins)
-    # x-axis end: last departure (best signal) with graceful fallbacks.
+    # x-axis end: use meta sentinel fields when available (v0.4+).
+    # x_max = max(last_departure_t, last_scale_event_t), floored at load_end_t.
     # System/pod scrape tails run past load end and must NOT drive the axis.
     last_dep_meta = meta.get("last_departure_t")
-    if last_dep_meta:
-        # v0.3 bundles: extractor recorded exact last departure
-        t1 = float(last_dep_meta)
+    last_scale_meta = meta.get("last_scale_event_t")
+    load_end_meta = meta.get("load_end_t")
+    if last_dep_meta or last_scale_meta:
+        candidates = [float(v) for v in (last_dep_meta, last_scale_meta) if v]
+        t1 = max(candidates)
+        if load_end_meta:
+            t1 = max(t1, float(load_end_meta))
     elif reqs:
         # per-request bundles: use actual last departure timestamp
         t1 = max(r.get("t_dep") or r["t_arr"] for r in reqs)
@@ -614,6 +619,30 @@ def render(bundle: BundleData, out_path: Path, title: str | None = None) -> Path
             a.text(0.995, 0.94, 'ttft/tokens ESTIMATED, not measured',
                    transform=a.transAxes, fontsize=7.5, color='#b45309',
                    ha='right', va='top', style='italic')
+    elif req_buckets:
+        bkt_t = [b['t'] - t0 for b in req_buckets]
+        bkt_arr = [b.get('arr_rate') or 0.0 for b in req_buckets]
+        bkt_dep = [b.get('dep_rate') or 0.0 for b in req_buckets]
+        bkt_ff  = [b.get('frac_fast') for b in req_buckets]
+        has_ff = any(v is not None for v in bkt_ff)
+        if has_ff:
+            fast_ys = [d * (f if f is not None else 0.0) for d, f in zip(bkt_dep, bkt_ff)]
+            slow_ys = [d - f for d, f in zip(bkt_dep, fast_ys)]
+            a.bar(bkt_t, fast_ys, width=BIN * 0.95,
+                  color=GP_COLORS[0], label=f'fast (<{WAIT_EDGES[0]}s TTFT)', zorder=1)
+            a.bar(bkt_t, slow_ys, width=BIN * 0.95, bottom=fast_ys,
+                  color=GP_COLORS[2], label=f'slow (≥{WAIT_EDGES[0]}s TTFT)', zorder=1)
+        else:
+            a.bar(bkt_t, bkt_dep, width=BIN * 0.95,
+                  color=GP_COLORS[0], label='departure rate (binned)', zorder=1)
+        a.plot(bkt_t, bkt_dep, color=INK, lw=2.2, alpha=0.85, zorder=2.6,
+               label='departure rate (pre-bucketed)')
+        a.plot(bkt_t, bkt_arr, color=C_ARR, lw=2.4, zorder=2.7,
+               label='arrival rate (pre-bucketed)')
+        pct_fast = 100.0 * sum(f or 0.0 for f in bkt_ff) / max(len(bkt_ff), 1) if has_ff else None
+        title_r = (f'{pct_fast:.0f}% fast (<{WAIT_EDGES[0]}s TTFT)' if pct_fast is not None
+                   else 'bucketed timeseries — no per-request TTFT')
+        a.set_title(title_r, fontsize=8, loc='right', color='#6b7280')
     else:
         empty(a, 'no per-request trace in this bundle — '
                  'fetch results.json / per_request_lifecycle_metrics.json')
@@ -1520,6 +1549,11 @@ def render(bundle: BundleData, out_path: Path, title: str | None = None) -> Path
     nsys_g = None
     sys_by_t = {rel(s['t'], t0): s.get('in_system') for s in system
                 if s.get('in_system') is not None}
+    # v0.4+ bucketed requests carry in_system per bucket — use as fallback
+    # when epp[] doesn't have it (EPP metrics were Unauthorized in current runs)
+    if not sys_by_t and req_buckets:
+        sys_by_t = {b['t'] - t0: b['in_system'] for b in req_buckets
+                    if b.get('in_system') is not None}
     if sys_by_t:
         nsys_g = hold(sys_by_t, grid)
     served_by_t = {}

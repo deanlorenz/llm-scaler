@@ -1,0 +1,6 @@
+{
+  "extractor_version": "0.4.0",
+  "run_dir": "/home/dean/code/llm-d/dean-llmd-scaler-sandbox/worktrees/benchmark-run/runs/dean-20260820-143619-338/results/inference-perf-1787225821-3dl4q4_1",
+  "harness": "inference-perf",
+  "warnings": []
+}

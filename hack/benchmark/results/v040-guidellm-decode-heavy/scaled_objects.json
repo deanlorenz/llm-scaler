@@ -1,0 +1,220 @@
+[
+  {
+    "so_id": "optimized-baseline-nvidia-gpu-vllm-decode-wva",
+    "config": {
+      "endpoint_id": "http://llm-d-inference-gateway-istio.dhl-la-1708.svc.cluster.local:80",
+      "model": "Qwen/Qwen3-32B",
+      "gpu_count": null,
+      "role": null,
+      "cost": null,
+      "min_replicas": null,
+      "max_replicas": null,
+      "engine_config": {
+        "num_gpu_blocks": 12912,
+        "block_size": 16,
+        "gpu_memory_utilization": "0.3",
+        "enable_prefix_caching": "True",
+        "kv_tokens": 206592
+      }
+    },
+    "replicas": [
+      {
+        "t": -77.0,
+        "source": "harness",
+        "desired": 1,
+        "ready": 1,
+        "available": 1
+      },
+      {
+        "t": -74.0,
+        "source": "wva",
+        "current_replicas": 1.0,
+        "kv_capacity_tokens": 330768.0,
+        "capacity_per_replica": 165273.0
+      },
+      {
+        "t": 41.0,
+        "source": "harness",
+        "desired": 2,
+        "ready": 1,
+        "available": 1
+      },
+      {
+        "t": 51.0,
+        "source": "wva",
+        "current_replicas": 2.0,
+        "kv_capacity_tokens": 330768.0,
+        "capacity_per_replica": 165273.0
+      },
+      {
+        "t": 67.0,
+        "source": "harness",
+        "desired": 4,
+        "ready": 1,
+        "available": 1
+      },
+      {
+        "t": 82.0,
+        "source": "wva",
+        "current_replicas": 4.0,
+        "kv_capacity_tokens": 330768.0,
+        "capacity_per_replica": 165273.0
+      },
+      {
+        "t": 93.0,
+        "source": "harness",
+        "desired": 8,
+        "ready": 1,
+        "available": 1
+      },
+      {
+        "t": 98.0,
+        "source": "wva",
+        "current_replicas": 8.0,
+        "kv_capacity_tokens": 330768.0,
+        "capacity_per_replica": 165273.0
+      },
+      {
+        "t": 104.0,
+        "source": "harness",
+        "desired": 10,
+        "ready": 1,
+        "available": 1
+      },
+      {
+        "t": 113.0,
+        "source": "wva",
+        "current_replicas": 10.0,
+        "kv_capacity_tokens": 330768.0,
+        "capacity_per_replica": 165273.0
+      },
+      {
+        "t": 168.0,
+        "source": "harness",
+        "desired": 10,
+        "ready": 2,
+        "available": 2
+      },
+      {
+        "t": 194.0,
+        "source": "harness",
+        "desired": 10,
+        "ready": 4,
+        "available": 4
+      },
+      {
+        "t": 205.0,
+        "source": "harness",
+        "desired": 10,
+        "ready": 8,
+        "available": 8
+      },
+      {
+        "t": 219.0,
+        "source": "harness",
+        "desired": 10,
+        "ready": 10,
+        "available": 10
+      },
+      {
+        "t": 795.0,
+        "source": "harness",
+        "desired": 8,
+        "ready": 8,
+        "available": 8
+      },
+      {
+        "t": 811.0,
+        "source": "wva",
+        "current_replicas": 8.0,
+        "kv_capacity_tokens": 330768.0,
+        "capacity_per_replica": 165273.0
+      },
+      {
+        "t": 884.0,
+        "source": "harness",
+        "desired": 7,
+        "ready": 7,
+        "available": 7
+      },
+      {
+        "t": 898.0,
+        "source": "harness",
+        "desired": 5,
+        "ready": 5,
+        "available": 5
+      },
+      {
+        "t": 904.0,
+        "source": "wva",
+        "current_replicas": 7.0,
+        "kv_capacity_tokens": 330768.0,
+        "capacity_per_replica": 165273.0
+      },
+      {
+        "t": 919.0,
+        "source": "wva",
+        "current_replicas": 5.0,
+        "kv_capacity_tokens": 330768.0,
+        "capacity_per_replica": 165273.0
+      },
+      {
+        "t": 924.0,
+        "source": "harness",
+        "desired": 4,
+        "ready": 4,
+        "available": 4
+      },
+      {
+        "t": 935.0,
+        "source": "wva",
+        "current_replicas": 4.0,
+        "kv_capacity_tokens": 330768.0,
+        "capacity_per_replica": 165273.0
+      },
+      {
+        "t": 949.0,
+        "source": "harness",
+        "desired": 3,
+        "ready": 3,
+        "available": 3
+      },
+      {
+        "t": 950.0,
+        "source": "wva",
+        "current_replicas": 3.0,
+        "kv_capacity_tokens": 330768.0,
+        "capacity_per_replica": 165273.0
+      },
+      {
+        "t": 963.0,
+        "source": "harness",
+        "desired": 1,
+        "ready": 1,
+        "available": 1
+      },
+      {
+        "t": 966.0,
+        "source": "wva",
+        "current_replicas": 1.0,
+        "kv_capacity_tokens": 330768.0,
+        "capacity_per_replica": 165273.0
+      },
+      {
+        "t": 1354.0,
+        "source": "wva",
+        "current_replicas": 1.0,
+        "kv_capacity_tokens": 330768.0,
+        "capacity_per_replica": 165273.0
+      },
+      {
+        "t": 1360.0,
+        "source": "harness",
+        "desired": 1,
+        "ready": 1,
+        "available": 1
+      }
+    ],
+    "scaler": []
+  }
+]

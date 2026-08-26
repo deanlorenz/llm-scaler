@@ -1,0 +1,24 @@
+{
+  "run_id": "guidellm-1787228725-a32uh3",
+  "harness": "guidellm",
+  "namespace": "dhl-la-1708",
+  "extracted_at": "2026-08-25T13:26:15Z",
+  "extractor_version": "0.4.0",
+  "harness_start_epoch": 1787228731.0,
+  "load_start_epoch": 1787228731.0,
+  "prewarm_s": 0.0,
+  "load_duration_s": 0,
+  "wva_confirmed_model": "Qwen/Qwen3-0.6B",
+  "time_anchor": {
+    "method": "not-needed",
+    "offset_s": 0.0,
+    "corr": null,
+    "trustworthy": true,
+    "n_scrapes": 0,
+    "shift_from_guess_s": 0.0
+  },
+  "load_end_t": 0,
+  "last_departure_t": 607.5,
+  "last_scale_event_t": 1009.0,
+  "replica_scrape_end_t": 1360.0
+}

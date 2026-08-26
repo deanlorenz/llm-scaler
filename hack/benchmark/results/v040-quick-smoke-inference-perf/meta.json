@@ -1,0 +1,24 @@
+{
+  "run_id": "inference-perf-1787225821-3dl4q4",
+  "harness": "inference-perf",
+  "namespace": "dhl-la-1708",
+  "extracted_at": "2026-08-25T13:26:15Z",
+  "extractor_version": "0.4.0",
+  "harness_start_epoch": 1787225824.0,
+  "load_start_epoch": 1787225824.0,
+  "prewarm_s": 0.0,
+  "load_duration_s": 180.0,
+  "wva_confirmed_model": "Qwen/Qwen3-0.6B",
+  "time_anchor": {
+    "method": "cross-correlation",
+    "offset_s": 1782838114.3524227,
+    "corr": 0.9117,
+    "trustworthy": false,
+    "n_scrapes": 13,
+    "shift_from_guess_s": 8.32
+  },
+  "load_end_t": 180.0,
+  "last_departure_t": 193.5,
+  "last_scale_event_t": null,
+  "replica_scrape_end_t": 389.0
+}
