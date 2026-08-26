@@ -26,7 +26,7 @@ try:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from matplotlib.ticker import MaxNLocator
+    from matplotlib.ticker import MaxNLocator, FuncFormatter
     from matplotlib.colors import LinearSegmentedColormap, to_rgba
     import numpy as np
 except ImportError:
@@ -1854,7 +1854,9 @@ def render(bundle: BundleData, out_path: Path, title: str | None = None) -> Path
                        textcoords='offset points', fontsize=6,
                        color=color, ha='left', va=va)
         g.axhline(0, color=INK, lw=0.8, alpha=0.5, zorder=2.0)
-        g.set_yscale('symlog', linthresh=1)
+        g.set_yscale('symlog', linthresh=1, base=2)
+        g.yaxis.set_major_formatter(
+            FuncFormatter(lambda v, _: f'{int(v):+d}' if v != 0 else '0'))
         g.grid(which='major', axis='y', alpha=0.3, lw=0.6)
         # The old shipped version placed this text differently depending on
         # whether saturation had its own horizontal lane -- panel 6 no longer
