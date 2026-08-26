@@ -26,7 +26,6 @@
 # previous file safely. The output path is printed as the final stdout line.
 #
 # Prereqs: kubectl, bash, python3. No jq. No llmdbenchmark CLI. No repo clone.
-# resolve_router_endpoint.sh must exist at hack/benchmark/ (owned by bench-runtools).
 set -euo pipefail
 
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -83,7 +82,6 @@ echo "bench_init: discovering stack in namespace '$NS'..."
 resolve_ep="$_SCRIPT_DIR/resolve_router_endpoint.sh"
 if [ ! -x "$resolve_ep" ] && [ ! -f "$resolve_ep" ]; then
     echo "bench_init: resolve_router_endpoint.sh not found at $resolve_ep" >&2
-    echo "  This script is owned by bench-runtools. Ensure both worktrees are merged." >&2
     exit 1
 fi
 endpoint_url=$(bash "$resolve_ep" "$NS" 2>/dev/null || true)
