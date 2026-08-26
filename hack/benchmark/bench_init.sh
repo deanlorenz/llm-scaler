@@ -112,16 +112,6 @@ wva_metrics_svc=$($KUBECTL get svc -n "$NS" \
 wva_metrics_svc="${wva_metrics_svc:-wva-controller-manager-metrics-service}"
 
 # Parse --metrics-bind-address and --metrics-secure from WVA deploy container args
-wva_args=$($KUBECTL get deploy "$wva_deploy" -n "$NS" \
-    -o jsonpath='{.spec.template.spec.containers[0].args}' 2>/dev/null || true)
-
-wva_metrics_port=$(echo "$wva_args" | python3 -c '
-import json, sys, re
-args = json.load(sys.stdin) if sys.stdin.read(1) == "[" else []
-import sys; sys.stdin = open("/dev/stdin")
-' 2>/dev/null || true)
-
-# Use python3 to parse the args JSON blob properly
 wva_metrics_port=$($KUBECTL get deploy "$wva_deploy" -n "$NS" \
     -o json 2>/dev/null | python3 -c '
 import json, sys, re
