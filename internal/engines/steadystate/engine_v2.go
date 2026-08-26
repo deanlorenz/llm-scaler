@@ -88,16 +88,18 @@ func (e *Engine) runV2AnalysisOnly(
 // TODO: make configurable if needed.
 const analyzerLivenessStaleCycles = 3
 
-// runAnalyzersAndScore runs the V2 saturation analyzer, applies the universal
-// threshold post-step to every analyzer's result (using per-analyzer config
-// overrides where set), and computes the weighted composite score from
-// saturation's signal and the model's priority.
+// runAnalyzersAndScore runs the V2 saturation analyzer plus every other
+// registered, enabled analyzer, reduces their raw results to a single
+// composite metric (composeAnalyzerResults), and builds the one
+// optimizer-facing entry from that composed result.
 //
-// The engine applies applyUniversalThreshold to every analyzer (saturation and
-// all registered non-saturation analyzers) and collects the calibrated results
-// into a per-analyzer slice returned to the optimizer. Saturation is always the
-// first entry; it is the keeper of per-variant metadata (Cost, AcceleratorName,
-// Role) until a future pre-analysis-extraction PR separates that concern.
+// Saturation always runs; every other registered analyzer runs only if
+// config.AnalyzerEnabled. The capacity-build step (buildNamedResult) —
+// including applyUniversalThreshold — runs once, after composition, not once
+// per analyzer: the optimizer never sees per-analyzer capacity aggregates,
+// only the composed one. Saturation is the keeper of per-variant metadata
+// (Cost, AcceleratorName, Role) until a future pre-analysis-extraction PR
+// separates that concern.
 func (e *Engine) runAnalyzersAndScore(
 	ctx context.Context,
 	modelID, namespace string,
@@ -143,14 +145,11 @@ func (e *Engine) runAnalyzersAndScore(
 		ArrivalRate:    arrivalRate,
 	}
 
-	// Collect per-analyzer results. Saturation is first; each non-saturation
-	// analyzer is run, calibrated with its resolved thresholds, and appended.
-	//
-	// The capacity-build step writes the engine-owned aggregates onto the named
-	// entry, so each entry is constructed *before* the build and its mutable
-	// Remaining/Spare counters are seeded from the built RC/SC afterwards.
-	namedResults := []allocation.NamedAnalyzerResult{
-		buildNamedResult(ctx, domain.SaturationAnalyzerName, baseResult, config, metaByVariant, satUp, satDown),
+	// Run every analyzer and collect its raw (D, P) result. Saturation is
+	// first and always runs; each non-saturation analyzer is run only if
+	// registered and enabled.
+	baseResults := []rawAnalyzerResult{
+		{name: domain.SaturationAnalyzerName, result: baseResult, scaleUp: satUp, scaleDown: satDown},
 	}
 	for _, entry := range e.analyzerRunEntries() {
 		if entry.name == domain.SaturationAnalyzerName {
@@ -164,9 +163,19 @@ func (e *Engine) runAnalyzersAndScore(
 			continue
 		}
 		up, down := config.AnalyzerThresholds(entry.name)
-		namedResults = append(namedResults,
-			buildNamedResult(ctx, entry.name, result, config, metaByVariant, up, down))
+		baseResults = append(baseResults, rawAnalyzerResult{name: entry.name, result: result, scaleUp: up, scaleDown: down})
 	}
+
+	// Reduce the raw per-analyzer results to the single composite metric, then
+	// build the optimizer-facing entry once, from that composed result — not
+	// once per analyzer. The capacity-build step (buildNamedResult) writes the
+	// engine-owned aggregates onto the named entry, so it can only run after
+	// composition has settled on one (D, P) signal.
+	composed := composeAnalyzerResults(baseResults)
+	namedResults := []allocation.NamedAnalyzerResult{
+		buildNamedResult(ctx, composed.name, composed.result, config, metaByVariant, composed.scaleUp, composed.scaleDown),
+	}
+
 	e.updateLivenessAndSetLive(ctx, namespace, modelID, namedResults)
 	e.recordAnalyzerMetrics(namespace, modelID, namedResults)
 
@@ -174,6 +183,34 @@ func (e *Engine) runAnalyzersAndScore(
 		logAnalyzerResult(ctx, modelID, namespace, nr)
 	}
 	return namedResults, nil
+}
+
+// rawAnalyzerResult is one analyzer's un-enriched (D, P) output, paired with
+// its resolved name and thresholds, before the capacity-build step
+// (buildNamedResult) runs. composeAnalyzerResults reduces a slice of these to
+// the single composite metric the optimizer consumes.
+type rawAnalyzerResult struct {
+	name               string
+	result             *domain.AnalyzerResult
+	scaleUp, scaleDown float64
+}
+
+// composeAnalyzerResults reduces the raw per-analyzer results collected by
+// runAnalyzersAndScore into the single composite metric fed to the
+// capacity-build step (buildNamedResult) and, from there, to the optimizer.
+//
+// Today it takes saturation's result as-is: when saturation is the only
+// entry — the default, and currently the only case exercised in production —
+// it is returned unchanged. Saturation is also the fallback for entries
+// beyond the first, until the real reduction/backfill semantics (including
+// saturation's scale-from-zero fallback role) are designed in a later task.
+func composeAnalyzerResults(baseResults []rawAnalyzerResult) rawAnalyzerResult {
+	for _, r := range baseResults {
+		if r.name == domain.SaturationAnalyzerName {
+			return r
+		}
+	}
+	return baseResults[0]
 }
 
 // analyzerDemandSeries identifies one wva_analyzer_demand series within a model
