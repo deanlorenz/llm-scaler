@@ -125,6 +125,9 @@ func (e *Engine) runAnalyzersAndScore(
 	if err != nil {
 		return nil, err
 	}
+	if baseResult == nil {
+		return nil, fmt.Errorf("saturation analyzer produced no result for model %s", modelID)
+	}
 
 	satUp, satDown := config.AnalyzerThresholds(domain.SaturationAnalyzerName)
 

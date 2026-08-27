@@ -409,6 +409,42 @@ var _ = Describe("runAnalyzersAndScore call ordering", func() {
 	})
 })
 
+var _ = Describe("runAnalyzersAndScore saturation-nil guard", func() {
+
+	It("returns an error and no results when the saturation analyzer produces (nil, nil)", func() {
+		// fakeAnalyzerWithResult.Analyze returns (f.result, nil); leaving result
+		// nil deliberately violates SaturationAnalyzer's real contract (which
+		// always pairs a nil result with a non-nil error) so this exercises the
+		// engine-side guard directly.
+		nilSat := &fakeAnalyzerWithResult{
+			analyzerName: domain.SaturationAnalyzerName,
+			result:       nil,
+		}
+		spy := &spyAnalyzer{name: "spy"}
+		e := &Engine{
+			saturationV2Analyzer: nilSat,
+			analyzersSnapshot: []analyzerEntry{
+				{name: domain.SaturationAnalyzerName, analyzer: nilSat},
+				{name: "spy", analyzer: spy},
+			},
+			started: true,
+		}
+		cfg := config.ScalingPolicy{
+			ScaleUpThreshold:  0.85,
+			ScaleDownBoundary: 0.70,
+			Analyzers: []config.AnalyzerScoreConfig{
+				{Name: "spy"},
+			},
+		}
+
+		results, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("saturation analyzer produced no result for model m"))
+		Expect(results).To(BeNil())
+		Expect(spy.callCount).To(Equal(0), "the guard must return before any non-saturation analyzer runs")
+	})
+})
+
 var _ = Describe("runAnalyzersAndScore disabled-analyzer gate", func() {
 
 	It("disabled analyzer is not appended and its Analyze is never called", func() {
