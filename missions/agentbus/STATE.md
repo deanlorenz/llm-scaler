@@ -42,4 +42,9 @@ for detail — not otherwise actioned by this mission.
 ## Session log
 
 - 2026-08-27T20:16 session=2026-08-27-agentbus-design status=active ledger=ledgers/2026-08-27-agentbus-design.md
-- 2026-08-27T21:40 session=2026-08-27-agentbus-design status=retired ledger=ledgers/2026-08-27-agentbus-design.md
+
+Note: an entry marking this session `retired` was mistakenly added and then removed — this
+session paused mid-work at the user's request to verify everything was captured, which is not
+the same as winding down. `/wind-down` was never actually run (attempting to invoke it via the
+Skill tool was correctly refused: it is `disable-model-invocation: true`, reserved for the user
+to run directly). This session remains `active` above.
