@@ -79,3 +79,78 @@ repo (every mission's STATE.md already points at whichever feature worktree hold
   session. Whoever picks this mission up next should either continue in the same session or
   have the plan's content copied into this spec doc (it already summarizes the key decisions,
   but the plan file has more verification detail than what's been copied here so far).
+
+## Implementation phase (same session, continued)
+
+T1 scaffolding completed and pushed: per-skill symlinks (`resume-mission`, `wind-down`) created
+in `worktrees/agentbus/.claude/skills/` and verified to actually resolve; no new
+`.git/info/exclude` lines were needed since a concurrent session's `8ffa77e0` commit had
+already added global patterns covering `.claude/skills/{resume-mission,wind-down}` for every
+worktree. First commit on `agentbus` (a short README) and the mission-registration commit on
+`session-tracking` were both made and pushed to `origin` after explicit user confirmation.
+
+T2/T3 implemented in one pass, further than T2's "empty-but-compiling" minimum — `agentbusd`
+ended up fully functional, not just skeletal:
+- `internal/schema/message.go` — `Message`/`Presence`/`From`, no separate id field (JetStream
+  sequence number is the identity), `from.agent` and `kind` both free strings by design.
+- `internal/bus/{stream,publish,fetch,missions}.go` — idempotent stream setup, publish,
+  sequence-offset fetch via an ordered consumer, and a bounded `ListMissions` (one `StreamInfo`
+  call with a subject filter + one `GetLastMsgForSubject` per distinct mission subject, never a
+  live subscription).
+- `cmd/agentbusd/{main.go,tools.go}` — all 4 tools wired via the MCP Go SDK's generic `AddTool`.
+- `cmd/agentbus-relay/main.go` — connects to NATS only; the real subscribe-and-relay loop is
+  still T4, not implemented.
+
+**Every NATS/MCP SDK call was checked against the actual vendored source in
+`~/go/pkg/mod/...` before use, not assumed from memory or from the plan's earlier
+(unverified) sketch** — per CLAUDE.md's API-verification rule. This caught two wrong initial
+guesses before they shipped: (1) `stream.CreateOrderedConsumer(...)` doesn't exist —
+`OrderedConsumer` is a method on `jetstream.JetStream` itself
+(`js.OrderedConsumer(ctx, streamName, cfg)`), not on `jetstream.Stream`; (2) ordered consumers
+use `AckPolicy: AckNonePolicy`, so the initial `m.Ack()` call in the fetch loop was both
+unneeded and removed — consistent with the design's caller-held-cursor approach anyway, since
+there's no server-side consumer state to acknowledge against.
+
+`go build ./...`, `go vet ./...`, and `gofmt -l .` all clean as of the commit. Committed and
+pushed to `origin/agentbus`.
+
+Known simplification, not a bug: `agentbus_list_missions` returns only the most recent
+presence announcement's session per mission, not a merged list of every session currently
+active on that mission. Fine for a first pass; flagged in the spec's T3 completion note and
+T7 as where to revisit if it matters once there are real multi-session missions to list.
+
+**T6 resolved directly, not deferred:** asked Bob in-session ("which file(s) do you read your
+MCP server configuration from at startup... not just what's on disk, but what you actually
+parsed") — Bob self-reported three candidate locations with precedence: project-level
+`<workspace>/.bob/mcp.json` (does not exist for this workspace, would win if created) over
+global primary `~/.bob/settings/mcp.json` over global legacy `~/.bob/settings/mcp_settings.json`.
+Spec's T6 updated to reflect this as confirmed; only the actual `agentbus` entry (pending
+`agentbusd` existing, which it now does) and the manual round-trip test remain open there.
+
+**Incident, not part of the design work:** in the same turn as Bob's config self-report, a
+message appeared in this conversation containing two GitHub PATs in plaintext
+(`ghp_gIME…`, `ghp_7fRh…` truncated) — apparently surfaced as a side effect of asking about MCP
+server config elsewhere (a `gh-public`/`gh-ibm` MCP server pair). Neither token was written to
+any file by this session. User was told directly and advised to rotate both; not otherwise
+acted on here. Worth remembering for next time: ask for MCP config *structure* (server names,
+endpoints) without letting a tool echo secret values back into chat.
+
+## Stopping point (this session)
+
+Stopped deliberately before the live end-to-end test (starting a real local `nats-server`,
+driving `agentbusd` with a raw MCP stdio client, exercising all 4 tools) — user chose to pause
+here rather than continue, after both branches were committed and pushed clean. T4 (relay +
+hook), T5 (resume-mission wiring), T6's remaining config-entry-and-test step, and T7
+(install/reusability polish) are all still fully open. See `STATE.md`'s "Immediate next step"
+for exactly where to pick this back up.
+
+**Closed out before stopping, on the user's explicit request to make sure everything is
+captured:** re-read `STATE.md` and `spec-agentbus.md` fresh against what had actually happened
+(not just against my own memory of writing them) and found three things stale — T1's checklist
+still showed the push as unchecked/in-progress after it was actually done; `STATE.md` still said
+`worktrees/agentbus` was "not yet pushed"; and the spec's "Open items" duplicated/contradicted
+T6's already-resolved Bob-config finding. All three fixed. Also closed the plan-file gap this
+ledger flagged earlier: the full verification plan and design rationale are now copied into
+`spec-agentbus.md` itself, so `~/.claude/plans/i-am-looking-mellow-pizza.md` (local, uncommitted,
+tied to one session) is no longer a dependency for anyone continuing this mission — the spec doc
+is self-sufficient.

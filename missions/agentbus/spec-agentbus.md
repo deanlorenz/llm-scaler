@@ -11,13 +11,13 @@ are explicitly out of scope as the transport) so that Bob, or any other MCP-capa
 participate on equal footing.
 
 Full design rationale, the alternatives considered and rejected (MCP Agent Mail, ZeroMQ/nng,
-vendoring `daanrongen/nats-mcp`), and the reasoning behind each settled decision are recorded
-in the approved plan this mission implements:
-`/home/dean/.claude/plans/i-am-looking-mellow-pizza.md` (local to the session that ran the
-design conversation — copy its content into this spec doc verbatim at the next natural
-checkpoint, since a plan file under `~/.claude/plans/` is not visible to other sessions or
-committed anywhere; treat that as this spec doc's own outstanding gap, not a reason to skip
-starting implementation).
+vendoring `daanrongen/nats-mcp`), and the reasoning behind each settled decision were worked out
+in a plan-mode conversation and originally recorded only in a local, uncommitted plan file
+(`~/.claude/plans/i-am-looking-mellow-pizza.md`, on the session that ran that conversation — not
+visible to any other session). That gap has been closed: the settled-design summary below, the
+full task list, and the Verification plan section near the end of this doc are the durable,
+shared copy — this spec doc, not that plan file, is the source of truth for anyone continuing
+this mission.
 
 ## Settled design (do not re-litigate without a new decision from the user)
 
@@ -65,9 +65,10 @@ mission.
 - [x] Create `missions/agentbus/` (this spec, `STATE.md`, `ledgers/`)
 - [x] Set up per-skill symlinks (`resume-mission`, `wind-down`) inside `worktrees/agentbus/.claude/skills/` — verified both resolve
 - [x] `.git/info/exclude` already covers `.claude/skills/{resume-mission,wind-down}` globally (added by a concurrent session); nothing new needed
-- [ ] First commit + push to `origin` on the `agentbus` branch (ask user before push)
+- [x] First commit + push to `origin` on the `agentbus` branch (user confirmed before push)
 **Refs.** *Writes:* `worktrees/agentbus/**`, `missions/agentbus/**`.
-**Status.** IN PROGRESS, 2026-08-27 — everything but the first commit/push is done.
+**Status.** DONE 2026-08-27. Both branches pushed (`origin/agentbus` @ `2cbf771b` initially,
+`origin/session-tracking` @ `acc7df88` for the mission registration commit).
 
 ### T2 — Go module layout + message schema
 **Intent.** Establish the code skeleton before writing real logic.
@@ -158,10 +159,41 @@ not per-project).
 **Refs.** *Writes:* `worktrees/agentbus/scripts/install.sh`, `~/.claude/settings.json`.
 **Status.** NOT STARTED
 
-## Open items (see plan for full detail)
+## Verification plan (copied from the approved plan, closing that doc-reference gap)
 
-- Which Bob config file is actually live at runtime — resolve by asking Bob directly (T6).
-- Confirm the live `PostToolBatch` hook JSON contract against current docs before T4 finalizes.
+1. **Substrate:** start `nats-server -js -sd ~/.agentbus/nats`; confirm it listens on 4222.
+2. **MCP server standalone:** drive `agentbusd` with a raw MCP stdio test client; publish then
+   fetch-since a test mission; confirm round-trip. *(T3's remaining item — this session's
+   deferred stopping point.)*
+3. **Durability/replay:** publish 3 messages, open a *second, independent* client connection
+   (proving state lives in `nats-server`, not tied to any one `agentbusd` process lifetime),
+   `fetch_since(since_seq=1)`, confirm exactly messages 2 and 3 come back.
+4. **Relay isolated:** start `agentbus-relay` against a scratch test worktree with a fake
+   presence file already in place; publish a message; confirm the marker file updates within
+   the relay's poll interval.
+5. **Hook script isolated:** invoke `agentbus-hook.py` directly with synthetic stdin twice in a
+   row — first call surfaces `additionalContext` and updates the cursor; second call (nothing
+   new) prints nothing at all.
+6. **Two live Claude Code sessions, end to end:** with the global hook registered, run two real
+   sessions against the same test mission. Publish from session A. Confirm session B's ordinary
+   turns show no visible chatter before the message lands, and that its response naturally
+   reacts to the injected context on the turn after the relay updates the marker — without B
+   ever making an explicit "check messages" tool call.
+7. **Bob stub:** point Bob's actual MCP config (`~/.bob/settings/mcp.json`, confirmed by Bob
+   itself — see T6) at `agentbusd`, manually invoke `agentbus_fetch_since` from a Bob session,
+   confirm it returns the same history — proving real cross-tool interoperability, not just
+   cross-Claude-session.
+
+## Open items
+
+- Confirm the live `PostToolBatch` hook JSON contract against current docs before T4 finalizes
+  (still open — see T4).
 - The pre-existing `.git/info/exclude` entries `**/.claude/mailbox/` /
   `**/.claude/agent-registry.json` are NOT this mission's to use — origin unconfirmed, likely
-  another concurrent session's; agentbus uses its own distinct path names instead.
+  another concurrent session's; agentbus uses its own distinct path names instead (resolved by
+  not colliding, not by removing those entries).
+
+This spec doc now carries the design rationale, task list, and verification plan in full — the
+plan file at `/home/dean/.claude/plans/i-am-looking-mellow-pizza.md` (local to one Claude
+session's plan-mode storage, never committed) can be treated as superseded by this doc rather
+than a dependency for anyone continuing this mission.
