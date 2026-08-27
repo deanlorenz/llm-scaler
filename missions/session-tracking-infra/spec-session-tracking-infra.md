@@ -11,6 +11,17 @@ need to read, and a mechanism (`ledger-capture`) that ensures anything load-bear
 session's ledger actually lands in the durable docs before that session's context is
 gone — run automatically on handoff/takeover, not left to manual diligence.
 
+**Founding rationale, stated directly by the user** (before any of this existed — the
+prior state was one large, undifferentiated per-mission ledger mixing everything
+together): (1) a new session should use a small per-session ledger, not load an entire
+prior session's history into context to resume; (2) each mission should have exactly
+one plan/roadmap doc and one current-state/summary doc — the full ledger is reference
+only, not something a resuming session needs to read; (3) general instructions and
+behavioral patterns that had been getting mixed into the ledger belong in a separate
+conventions file instead. These three points are the direct ancestor of the
+`STATE.md`/spec/`CONVENTIONS.md`/`ledgers/` split below — every structural decision in
+this spec traces back to satisfying one of these three.
+
 ## Settled design (do not re-litigate without a new decision from the user)
 
 - **Location:** an orphan git branch, `session-tracking`, pushed to `origin` only —

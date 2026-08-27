@@ -42,6 +42,17 @@ already happened.
 None design-wise — the plan is fully specified. The only blocker is the user's explicit
 pause: execution needs a new go-ahead, not implied by anything already said.
 
+## Incident (2026-08-27, during this mission's investigation)
+
+While inspecting the container's uncommitted content to check whether it was safe to
+touch, part of `mmy.env`'s actual contents (including live `BOB_API_KEY` and
+`BOB_SHELL_API_KEY` values) was printed to chat before the sensitivity of the file was
+recognized. The user was told immediately and directed that the file be left completely
+untouched going forward (reflected in the spec's hard constraints). Flagging this
+explicitly, the same way the `agentbus` mission flagged its own unrelated secrets
+exposure, since the user should know this happened and may want to rotate those keys —
+not otherwise actioned by this mission.
+
 ## Session log
 
 - 2026-08-27 session=2026-08-27-repo-restructure-plan status=retired ledger=ledgers/2026-08-27-repo-restructure-plan.md
