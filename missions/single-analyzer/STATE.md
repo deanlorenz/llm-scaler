@@ -1,4 +1,4 @@
-# Mission state — analyzer/optimizer refactor
+# Mission state — single-analyzer
 
 **Last updated:** 2026-08-27. This doc is overwritten on each update, not append-only — it
 reflects current status only. For global process rules see `../../CONVENTIONS.md`. For the
