@@ -57,4 +57,4 @@ upstream). See this mission's `ledgers/` for the session that did the move.
 
 ## Session log
 
-- 2026-08-27 session=2026-08-27-session-tracking-setup status=active ledger=ledgers/2026-08-27-session-tracking-setup.md
+- 2026-08-27 session=2026-08-27-ct1b-review status=retired ledger=ledgers/2026-08-27-ct1b-review.md
