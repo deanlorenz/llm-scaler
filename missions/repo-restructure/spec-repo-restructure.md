@@ -19,7 +19,7 @@ user wants to move to a cleaner, more standard layout: a **bare repo** and a sin
 This is being done because the current container-as-checkout layout is confusing (one
 worktree, the container itself, is indistinguishable from "the repo"; other worktrees
 live in unrelated directories like `wva-integration`, `wva-prs/`) and because the
-`session-tracking-infra` mission's own work already hit one surprise from this same
+`policy-writer` mission's own work already hit one surprise from this same
 structure (`.git/info/exclude` turned out to be shared across every worktree of a repo,
 not per-worktree). A bare repo with all worktrees in one place is the standard git
 pattern and avoids this class of surprise going forward.
@@ -69,7 +69,7 @@ mission is picked up much later, since worktree state changes over time:**
   `wva-integration` 11MB, `wva-prs/` 119MB. Destination had 611GB free.
 - `.git/info/exclude` is shared across every worktree of a repo — needs to carry over
   to the new bare repo's shared exclude, including the two lines added by
-  `session-tracking-infra` (symlinks to `session-tracking`'s `.claude/skills/`).
+  `policy-writer` (symlinks to `session-tracking`'s `.claude/skills/`).
 - No worktree is `git worktree prune`-broken.
 
 **Naming/location decisions — confirmed with the user:**

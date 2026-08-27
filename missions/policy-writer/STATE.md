@@ -1,9 +1,9 @@
-# Mission state — session-tracking infrastructure
+# Mission state — policy-writer
 
 **Last updated:** 2026-08-27. Overwritten on each update, not append-only. For global
 process rules see `../../CONVENTIONS.md` — most of this mission's actual output lives
 there, not in mission-specific docs, since it IS the global process rules. For the plan
-see `spec-session-tracking-infra.md`. Per-session ledgers are in `ledgers/`.
+see `spec-policy-writer.md`. Per-session ledgers are in `ledgers/`.
 
 ## Worktrees used for this mission
 
@@ -61,3 +61,4 @@ system as-is.
 
 - 2026-08-27 session=2026-08-27-session-tracking-setup status=retired ledger=ledgers/2026-08-27-session-tracking-setup.md
 - 2026-08-27 session=2026-08-27-conventions-audit-fixes status=active ledger=ledgers/2026-08-27-conventions-audit-fixes.md
+- 2026-08-28 session=2026-08-28-worktree-model-and-side-notes status=active ledger=ledgers/2026-08-28-worktree-model-and-side-notes.md
