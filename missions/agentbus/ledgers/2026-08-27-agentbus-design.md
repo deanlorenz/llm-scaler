@@ -203,9 +203,12 @@ is self-sufficient.
 ## Correction: ledger vs. STATE.md role, and a second STATE.md rewrite
 
 User drew a sharper distinction than this ledger had been operating under:
-- **Ledger** = continuous, fine-grained, append-after-every-tool-batch-or-finding. An audit
-  trail nobody reads to resume work — read only to recover a lost detail or audit an incident.
-  Rule of thumb given: if it's worth naming in a chat summary, it's worth a ledger line.
+- **Ledger** = continuous, but not a raw batch-by-batch log — after a batch, write a short
+  summary only if something meaningful happened (a finding, a decision, a correction, a gap
+  discovered), skipping routine noise (tool failures/retries, reads that turned up nothing,
+  mechanical steps). Not copied as-is; summarized. An audit trail nobody reads to resume work
+  — read only to recover a lost detail or audit an incident. Rule of thumb given: if it's worth
+  naming in a chat summary, it's worth a ledger line.
 - **STATE.md** = the resume-mission interface. Self-contained pointer into specific plan
   sections/steps (not just "see the plan"), plus anything genuinely confusing framed as a
   mission-scoped CLAUDE.md addendum. For an incident, STATE.md carries only the actionable
