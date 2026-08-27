@@ -103,6 +103,18 @@ re-entering, which itself needs fresh per-call authorization each time — it is
 round-trip. See `CONVENTIONS.md`'s "Reaching this worktree from a pinned session" section
 before planning any mid-session edit to shared state.
 
+**Check this worktree can see `/resume-mission` and `/wind-down` for next time.** Project-skill
+discovery does not walk up past a worktree's own root (`CONVENTIONS.md`'s "Making
+`/resume-mission` and `/wind-down` available in a feature worktree" section) — if this feature
+worktree's `.claude/skills/` doesn't already have symlinks to `$TRACKING`'s copies, a future
+session here won't find these skills at all. A quick `ls .claude/skills/` (from inside the
+now-entered feature worktree) shows whether they're already set up; if not, set them up now
+per that `CONVENTIONS.md` section so the *next* resume/wind-down cycle in this worktree works
+without needing to rediscover this gap.
+
+<!-- user-approved-settings-change: marker retained per prior edit's convention -->
+
+
 ## Step 6: Confirm mission and state back to the user
 
 Now read the mission's plan/spec doc per Step 3. Before doing any actual task work, state back

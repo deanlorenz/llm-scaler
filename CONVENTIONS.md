@@ -44,6 +44,42 @@ A mission can span or outlive a specific feature-worktree, and can have more tha
 feature-worktree active in parallel (usually meaning parallel sub-task work) — `STATE.md`
 lists which worktree(s) are currently in use for the mission.
 
+This branch also has its own `.claude/skills/` — currently `resume-mission` and `wind-down`
+(see the "Session log" section below for what they do). This is their canonical, tracked home.
+
+## Making `/resume-mission` and `/wind-down` available in a feature worktree
+
+**Confirmed by direct testing:** Claude Code's project-skill discovery does **not** walk up
+past a git worktree's own root — not to a plain filesystem parent directory, not to the main
+repo a worktree belongs to. Each worktree only sees its own local `.claude/skills/`. So a
+feature worktree (e.g. `worktrees/single-analyzer`) needs its own local entry pointing at
+these two skills before `/resume-mission` or `/wind-down` will show up there at all.
+
+**One-time setup per feature worktree** (do this once per worktree, not per session — check
+first, it may already be done):
+
+```bash
+cd worktrees/<feature-worktree>/.claude/skills
+ln -s ../../../session-tracking/.claude/skills/resume-mission resume-mission
+ln -s ../../../session-tracking/.claude/skills/wind-down wind-down
+```
+
+These are **local convenience symlinks, never committed** to the feature branch — add the two
+paths to `.git/info/exclude` (the shared one at the main repo's `.git/`, not a per-worktree
+file — see the correction in the `.wip` protocol section below) so they never show up in
+`git status`/get picked up by a broad `git add`:
+
+```
+.claude/skills/resume-mission
+.claude/skills/wind-down
+```
+
+**If a session finds these skills missing** (typed `/resume-mission` and got nothing, or
+`ls .claude/skills/` in the current feature worktree doesn't show them): this is exactly that
+one-time setup not having been done yet for this worktree. Run the two commands above, verify
+with `cat .claude/skills/resume-mission/SKILL.md | head -3` that the symlink actually resolves
+(don't just trust `ln -s` succeeded silently), then proceed.
+
 ## Editing shared files safely — the `.wip` protocol
 
 `STATE.md` and `CONVENTIONS.md` are the only files here more than one session might want to
@@ -70,9 +106,15 @@ substitute for that convention.
 5. **To finish:** copy the edited local copy back over `FILE.md.wip` here, then rename
    `FILE.md.wip` back to `FILE.md` (atomic — only meaningful/safe because this session is the
    one that holds the claim), `git add`, commit.
-6. `*.md.wip` and any `.session/` scratch dir are excluded via each worktree's own local
-   `.git/info/exclude` (not a tracked `.gitignore` — this is local-only bookkeeping, not a repo
-   convention to publish) so an accidental broad `git add` never picks up a mid-edit file.
+6. `*.md.wip` and any `.session/` scratch dir are excluded via `.git/info/exclude` (not a
+   tracked `.gitignore` — this is local-only bookkeeping, not a repo convention to publish) so
+   an accidental broad `git add` never picks up a mid-edit file. **Correction, confirmed by
+   testing:** `.git/info/exclude` is **not** per-worktree — `git rev-parse --git-common-dir`
+   resolves to the *main* repo's `.git`, and `info/exclude` lives there, shared across every
+   worktree of that repo. There is no mechanism for a genuinely worktree-local exclude file.
+   This turns out fine for `*.md.wip`/`.session/` (every worktree should exclude the same
+   patterns anyway) — just don't design around the wrong mental model of "each worktree has
+   its own."
 
 ## Who writes what
 
@@ -93,9 +135,10 @@ A session's ledger is written continuously (findings, decisions, false starts, c
 so making every append a cross-worktree operation is unnecessary friction for a file nothing
 else ever touches. Keep the **live, growing copy** as a local scratch file inside whatever
 feature worktree the session is actually working in (e.g.
-`worktrees/<feature-worktree>/.session/<unique-session-name>.md`), excluded from that
-worktree's git history via its own local `.git/info/exclude` (never committed to the feature
-branch, never pushed anywhere from there).
+`worktrees/<feature-worktree>/.session/<unique-session-name>.md`), excluded from the feature
+branch's git history via `.git/info/exclude` (see the correction above — this is shared
+across every worktree of the repo, not per-worktree; never committed to the feature branch,
+never pushed anywhere from there).
 
 At session end (or at any natural checkpoint), copy the ledger file verbatim into
 `missions/<mission>/ledgers/<same-unique-name>.md` in this (`session-tracking`) worktree and
