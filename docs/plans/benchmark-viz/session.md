@@ -601,41 +601,29 @@ These require the extractor to produce new data:
   visible-window first label + silent-stretch tail annotation.
   Fixed tight_layout right edge (0.97→1). All 8 sample bundles smoke-tested. Committed `df51c50b`.
 
-### Known open bugs (approved to fix, next session)
+### Resolved bugs
 
-1. **p2 empty** — step lines not showing despite reps data being present.
-   Delta labels and decision vlines render fine. The `+/-0.05` offset approach
-   is in place but something is still suppressing the step plot.
+1. ✅ **p2 empty** — fixed: duplicate `offset_copy` block removed; `source=wva`
+   replica records filtered before dedup so only `source=harness` records feed
+   the step plot. (`fd1110f0`)
 
-2. **p6 y-axis / tick lines broken** — `FixedLocator` + `FuncFormatter` not
-   rendering correctly. Gridlines not visible at expected replica-delta values.
+2. ✅ **p6 y-axis** — fixed: replaced `FixedLocator`+`FuncFormatter`+manual
+   `signed_log2` transform with `symlog(linthresh=1, base=2)` + plain integer
+   formatter. (`c8dbe44c`, `fad51c0b`)
 
-### Next steps (in order)
+3. ✅ **v0.4.0 bundles** — ingested; `req_buckets` p1a branch restored; p5
+   `in_system` fallback from bucketed requests; x-axis clip uses
+   `max(last_departure_t, last_scale_event_t)`. (`13d8ff81`)
 
-1. **Fix p2 step plot** — debug why step lines are absent.
+### Open / next steps
 
-2. **Fix p6 y-axis** — verify `FixedLocator` + `inv_signed_log2` formatter
-   is wired correctly; check for matplotlib version incompatibility.
+1. **Get bundles with scaler events** — need a run that captures
+   `analyzer_result` / `scaling_decision` in `derived.json`'s `scaling_log`
+   to exercise p6 with real data.
 
-3. **Ingest v0.4.0 bundles from extractor** — new bundles ready at
-   `worktrees/benchmark-extract/hack/benchmark/results/`. Schema changes to handle:
-   - `requests.json` is now bucketed timeseries (has `arr_rate` key) — renderer
-     already has `req_buckets` branch for p1a, but p1b/p5 need review
-   - `pods[].series[]` has 4 new histogram fields (`ttft_hist`, `out_tok_hist`,
-     `in_tok_hist`, `qwait_hist`) — ignore for now, don't break on them
-   - `replicas[]` now deduplicated by extractor — renderer dedup in `_assemble`
-     can be simplified (keep for safety)
-   - `meta.json` has 4 new sentinel fields: `load_end_t`, `last_departure_t`,
-     `last_scale_event_t`, `replica_scrape_end_t` — use for x-axis clip:
-     `x_max = max(last_departure_t, last_scale_event_t)` floored at `load_end_t`
+2. **1a fallback when ttft absent** — decision pending.
 
-4. **Get bundles with scaler events** — once extractor produces
-   `analyzer_result` / `scaling_decision` records in `scaler[]`, panel 6
-   will populate.
-
-5. **1a fallback when ttft absent** — decision pending.
-
-6. **Publishing and Makefile integration** — `benchmark-render` /
+3. **Publishing and Makefile integration** — `benchmark-render` /
    `benchmark-publish` make targets; adapt `publish_result.sh`.
 
-7. **Cumulative/comparison reports** — deferred.
+4. **Cumulative/comparison reports** — deferred.
