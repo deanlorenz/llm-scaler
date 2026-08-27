@@ -644,3 +644,18 @@ Current live state as of this checkpoint:
 
 ---
 
+## Verified 2026-08-27
+
+- folded in:
+  - Two global behavioral rules from §14/§20/§21 (don't kill a background task on a "stop
+    cluttering my chat" complaint; ledger/state appends happen silently, no matching chat
+    narration) were stated as session-specific corrections here but not yet generalized into
+    `CONVENTIONS.md`'s Ground rules — added there.
+  - §36's confirmed `fairShareValue` bug/naming-mismatch finding (equalizes absolute remaining
+    demand across models, not coverage ratio; git-archaeology-traced to PR #771/#1246; blocked on
+    the user's fix-now-vs-defer decision) was recorded in the ledger and in
+    `fairshare-value-correctness-investigation-2026-08-25.md`, but the spec doc's CT4 section and
+    `STATE.md`'s task table only cited "ledger §36" without stating the finding itself or citing
+    the investigation report directly — added the finding and the report reference to both
+    `spec-composite-metric-and-optimizer-t2.md` (CT4 section + Refs) and `STATE.md` (task table).
+

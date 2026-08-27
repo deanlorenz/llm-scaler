@@ -332,6 +332,30 @@ just written.
 
 ### CT4 — Simplify the two Score-weighted aggregation sites; Score/Priority disambiguated
 
+**BLOCKED — confirmed real design/naming bug in `fairShareValue`, not just a simplification
+target** (`docs/plans/analyzers/fairshare-value-correctness-investigation-2026-08-25.md`, full
+investigation, ledger §36). `fairShareValue` does **not** compute "equal coverage across
+models" — it computes "equal absolute remaining demand (`RequiredCapacity`) across models,"
+never normalized by supply or demand. Worked example in that report: two models at identical 80%
+coverage but 10x different absolute scale receive wildly unequal GPU shares (the larger model
+draws ~10x the budget) despite being equally well-served — the opposite of what "fair share"
+conventionally means and what the name/docs imply. Git archaeology traced the formula to its
+literal origin (commit `a16e2f09`, PR #771, "most starved model gets GPUs first") — `remaining`
+was always raw `RequiredCapacity` from the first version, before `Score`/`Priority` existed; both
+were bolted on later (`09e1c386`, PR #1246) as knobs on that same absolute quantity, never as
+part of a deliberate fairness-definition decision. No design doc anywhere argues for either
+coverage-ratio equalization or absolute-demand equalization — the latter was simply the only
+thing ever built. The real coverage ratio already exists in this codebase (`utilByRole`, inside
+`allocateForModelPaired`) but is scoped within one model's per-iteration pass, never surfaced into
+the cross-model `fairShareValue`. **No existing test validates the coverage-equal-treatment
+property** — some existing "fair share" tests would have to knowingly change if this were fixed
+to a coverage-based definition. **User asked directly: fix now vs. document-and-defer vs.
+discuss more — user needs to think about it more, not decided yet.** CT4 stays blocked in this
+spec until the user brings a decision; do not resolve unilaterally. This is in addition to, and
+independent of, the Score-vs-Priority disambiguation below (that work is not blocked and can
+proceed once CT2 lands — it just doesn't include touching `fairShareValue`'s actual fairness
+semantics, only the un-summing simplification, until this decision is made).
+
 **What "Score" and "Priority" actually mean — established this pass, not previously known
 precisely** (`docs/plans/analyzers/score-and-priority-semantics-2026-08-25.md`):
 - **`Score`** = a per-**analyzer** weight (trust), config field `AnalyzerScoreConfig.Score`
@@ -386,7 +410,8 @@ resolution. Verified by: full test suite passes with identical numeric results.
 **Refs.**
 *Reads:* `docs/plans/analyzers/optimizer-call-map-2026-08-25.md` (Sec3 items 8-9, Sec4),
 `docs/plans/analyzers/ct4-score-verification-2026-08-25.md`,
-`docs/plans/analyzers/score-and-priority-semantics-2026-08-25.md`
+`docs/plans/analyzers/score-and-priority-semantics-2026-08-25.md`,
+`docs/plans/analyzers/fairshare-value-correctness-investigation-2026-08-25.md`
 *Writes:* `internal/engines/allocation/greedy_score_optimizer.go`,
 `internal/engines/allocation/cost_aware_optimizer.go`
 

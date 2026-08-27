@@ -227,3 +227,11 @@ before it's gone, not only as a fallback for unclean endings.
   short: pointers to where the detail lives, not the detail itself.
 - Don't ignore instructions — ask if a user instruction seems ambiguous or in tension with
   something else, rather than silently picking an interpretation.
+- **Never stop/kill a running background task unless explicitly told to stop *that task*.** A
+  complaint about chat noise (e.g. "stop cluttering my chat") is about narration, not execution —
+  it means suppress the running commentary, not terminate the work. Don't infer "kill it" from
+  "it's noisy"; ask if unsure which is meant.
+- **Ledger/state appends happen silently.** Writing a finding to a ledger, `STATE.md`, or a spec
+  doc does not itself need a matching chat reply narrating "I just logged X." Chat replies carry
+  new substance (answers, questions, content for the user to react to) — not a turn-by-turn
+  description of bookkeeping that already happened in the file.

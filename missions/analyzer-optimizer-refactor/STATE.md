@@ -35,7 +35,7 @@ when saturation is the only enabled analyzer (today's default).
 | CT1b — engine-side guard on nil saturation result | **DONE** | Commit `122d1699` on `single-analyzer` (cherry-picked from coder's `75b57b2c`). Report: `ct1b-implementation-report-2026-08-26.md` (note: that report's recorded hash `71c401c2` is stale/cosmetic — self-referential amend artifact; true hash is `122d1699`). |
 | CT2 — collapse `AnalyzerResults []NamedAnalyzerResult` to single `CompositeSignal` field | NOT STARTED | Depends on CT1 (touches same functions). Spec in `spec-composite-metric-and-optimizer-t2.md`. |
 | CT3a/CT3b — design + apply engine-side reduce, simplify 7 single-entry helpers | NOT STARTED | CT3a depends on CT2; CT3b depends on CT3a being reviewed. |
-| CT4 — Score-weighted aggregation simplification | **BLOCKED on user** | Real fairness-definition design decision (ledger §36), not code-verifiable. Explicitly out of scope for the current implementation pass. |
+| CT4 — Score-weighted aggregation simplification | **BLOCKED on user** | Confirmed real bug/naming mismatch: `fairShareValue` equalizes absolute remaining demand across models, not coverage ratio (two 80%-covered models at 10x different scale get ~10x different GPU shares). See `fairshare-value-correctness-investigation-2026-08-25.md` and spec CT4 section. Fix-now vs. document-and-defer decision is the user's to make; not code-verifiable. Explicitly out of scope for the current implementation pass. |
 | CT5 — document `RoleCapacities` role-visibility contract | NOT STARTED | Independent of CT1–CT4, can land any time. |
 
 ## Immediate next step
