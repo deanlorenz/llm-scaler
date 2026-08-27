@@ -41,9 +41,10 @@ this mission.
 - **Wake mechanism, Bob side:** explicitly stubbed. Bob's own trigger mechanics were not
   verified. Bob integration is MCP config wiring only — Bob calls the same 4 tools whenever it
   naturally runs a turn.
-- **Message schema:** plain JSON, tool-agnostic, no Claude-specific fields. See the plan for the
-  exact shape (`mission`, `from.agent`/`from.session`, `ts`, `kind`, `reply_to`, `body`, `refs`).
-  No separate `id` field — the JetStream sequence number is the identity.
+- **Message schema:** plain JSON, tool-agnostic, no Claude-specific fields —
+  `mission`, `from.agent`/`from.session`, `ts`, `kind`, `reply_to`, `body`, `refs`. No separate
+  `id` field — the JetStream sequence number is the identity. Implemented in
+  `worktrees/agentbus/internal/schema/message.go`.
 
 ## Composition with session-tracking conventions
 

@@ -199,3 +199,25 @@ ledger flagged earlier: the full verification plan and design rationale are now 
 `spec-agentbus.md` itself, so `~/.claude/plans/i-am-looking-mellow-pizza.md` (local, uncommitted,
 tied to one session) is no longer a dependency for anyone continuing this mission — the spec doc
 is self-sufficient.
+
+## Correction: ledger vs. STATE.md role, and a second STATE.md rewrite
+
+User drew a sharper distinction than this ledger had been operating under:
+- **Ledger** = continuous, fine-grained, append-after-every-tool-batch-or-finding. An audit
+  trail nobody reads to resume work — read only to recover a lost detail or audit an incident.
+  Rule of thumb given: if it's worth naming in a chat summary, it's worth a ledger line.
+- **STATE.md** = the resume-mission interface. Self-contained pointer into specific plan
+  sections/steps (not just "see the plan"), plus anything genuinely confusing framed as a
+  mission-scoped CLAUDE.md addendum. For an incident, STATE.md carries only the actionable
+  bottom line (e.g. "rotate the keys") — the story belongs in the ledger, not there.
+- **Plan/spec** = the anchor. Top-level orientation (scope/goals/done/next) readable without
+  drilling in; per-task detail available on demand, not required reading. Decisions,
+  alternatives-rejected, and research findings belong here durably.
+
+Rewrote `STATE.md` accordingly: trimmed the task-status narrative that duplicated what the
+spec's per-task sections already say, replaced it with direct pointers (`Spec §T3`, `Spec §T4`,
+etc.), added the ownership-boundary rules as an explicit "mission-specific addendum" section
+(the CLAUDE.md-addendum framing the user described), and cut the PAT incident down to a
+one-line bottom line pointing back here for detail. This is the second rewrite of `STATE.md`
+this session — the first (opening this "Corrections from the user" line of work, above) fixed
+staleness; this one fixes the underlying model of what belongs in which document.

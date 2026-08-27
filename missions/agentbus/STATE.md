@@ -4,47 +4,43 @@
 pub/sub and durable message log for coordinating AI agent sessions on a shared mission, using
 NATS JetStream as the transport and a minimal custom Go MCP server as the client-facing layer.
 
-**Spec.** `missions/agentbus/spec-agentbus.md` — task list, settled design decisions, refs.
+**Plan.** `missions/agentbus/spec-agentbus.md`. Read its "Settled design" section for
+orientation, then go to the specific task section named below for what's actually next — the
+per-task detail (intent/expected-outcome/todo/status) lives there, not here.
 
 **Worktrees used.**
-- `worktrees/agentbus` — dedicated orphan branch, holds all Go source/binaries/scripts/hook
-  script. Not based on `feat/wva-external-scaler` or upstream; tracked on `origin` only,
-  pushed (`origin/agentbus` at commit `3f9aa44b` as of this session's end).
+- `worktrees/agentbus` — this mission's own dedicated orphan-branch worktree, holds all Go
+  source/binaries/scripts/hook script. Not based on `feat/wva-external-scaler` or upstream.
+  This session may check/commit it freely; push only on the user's explicit per-operation ask.
 
-**Immediate next step.** T3's remaining piece: start a local `nats-server`, drive `agentbusd`
-with a raw MCP stdio client, exercise all 4 tools live (this is Verification step 2 in the
-spec) — deferred at the user's request to pause here, not yet attempted. After that: T4 (relay
-+ `PostToolBatch` hook), T5 (`/resume-mission` wiring — needs a proposal to the user before
-editing that shared skill file), T6's remaining piece (add the `agentbus` entry to
-`~/.bob/settings/mcp.json`, confirmed as the right file by asking Bob directly; then the manual
-round-trip test), T7 (install script, global hook registration, reusability docs).
+**Mission-specific addendum (read this before doing anything else in this mission):**
+- **This session's own tracking files live in `session-tracking`, but this session does not
+  own that worktree.** Only ever touch `missions/agentbus/**` here. Never run `git status`/
+  `fetch` against `session-tracking`'s `origin` as if checking its health, and never push
+  `session-tracking` — that worktree belongs to the whole repo's session-tracking convention,
+  not to this mission.
+- `worktrees/agentbus` is different: it's this mission's own code worktree, safe to check and
+  commit locally without asking; only pushing it needs a per-operation ask.
+- The `.git/info/exclude` entries `**/.claude/mailbox/` and `**/.claude/agent-registry.json`
+  are **not** this mission's to reuse — origin unconfirmed, likely a different concurrent
+  session's. agentbus uses its own distinct directory names instead (see spec's T4/Open items).
 
-**Open questions blocking full completion.**
-- The live `PostToolBatch` hook JSON contract must be re-confirmed against current Claude Code
-  docs before T4's hook script is finalized (explicitly flagged as unverified in the plan this
-  mission implements) — still open.
-- ~~Which MCP config file Bob actually loads at runtime~~ — **resolved**: Bob self-reported
-  `~/.bob/settings/mcp.json` (global, primary) with `~/.bob/settings/mcp_settings.json` as a
-  legacy fallback and `<workspace>/.bob/mcp.json` (doesn't exist yet) taking precedence over
-  both if created.
+**Immediate next step.** Plan's Verification step 2 (Spec §"Verification plan"): start a local
+`nats-server`, drive `agentbusd` with a raw MCP stdio client, exercise all 4 tools live. This is
+also T3's one remaining unchecked item (Spec §T3). Paused here at the user's request before
+attempting it — not yet started.
 
-**Progress snapshot (2026-08-27, end of this session).** T1 done and pushed. T2 done. T3 done
-except the live NATS test. T6's config-location question resolved; the actual config entry and
-round-trip test still pending. T4/T5/T7 not started. Both `worktrees/agentbus` and
-`session-tracking` are committed and pushed clean — no uncommitted work on either branch as of
-this session's end.
+**After that, in order:** T4 (Spec §T4 — relay + `PostToolBatch` hook; note its open
+verification item: re-confirm the live hook JSON contract against current docs first), T5
+(Spec §T5 — needs a proposal to the user before editing `resume-mission`'s `SKILL.md`, a file
+outside this mission's own worktrees), T6's remaining items (Spec §T6 — add the `agentbus`
+entry to `~/.bob/settings/mcp.json`, then the manual round-trip test), T7 (Spec §T7).
 
-**Unrelated incident flagged during this session, not part of this mission's work:** two GitHub
-PATs appeared in plaintext in the conversation (surfaced as a side effect of an unrelated
-MCP-config query). User was told directly and advised to rotate both. See this session's ledger
-for detail — not otherwise actioned by this mission.
+**Security note (bottom line only — full detail in this session's ledger if ever needed):** two
+GitHub PATs were exposed in plaintext in conversation during this session, unrelated to this
+mission's own work. User was told and advised to rotate both. No action pending on this
+mission because of it.
 
 ## Session log
 
 - 2026-08-27T20:16 session=2026-08-27-agentbus-design status=active ledger=ledgers/2026-08-27-agentbus-design.md
-
-Note: an entry marking this session `retired` was mistakenly added and then removed — this
-session paused mid-work at the user's request to verify everything was captured, which is not
-the same as winding down. `/wind-down` was never actually run (attempting to invoke it via the
-Skill tool was correctly refused: it is `disable-model-invocation: true`, reserved for the user
-to run directly). This session remains `active` above.
