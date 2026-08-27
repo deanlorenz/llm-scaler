@@ -74,22 +74,35 @@ mission.
 **Expected outcome(s).** `go.mod`, `internal/schema/message.go`, empty-but-compiling
 `cmd/agentbusd`, `cmd/agentbus-relay`.
 **Todo.**
-- [ ] `go.mod` in `worktrees/agentbus`
-- [ ] `internal/schema/message.go` — the `Message` struct
-- [ ] `cmd/agentbusd/main.go`, `cmd/agentbus-relay/main.go` skeletons
+- [x] `go.mod` in `worktrees/agentbus` (module `github.com/deanlorenz/agentbus`)
+- [x] `internal/schema/message.go` — `Message`, `Presence`, `From`
+- [x] `cmd/agentbusd`, `cmd/agentbus-relay` skeletons (agentbusd ended up fully implemented —
+      see T3)
 **Refs.** *Writes:* `worktrees/agentbus/{go.mod,internal/schema/message.go,cmd/**}`.
-**Status.** NOT STARTED
+**Status.** DONE 2026-08-27. All API calls (MCP Go SDK, `nats.go`/`jetstream`) verified against
+the actual vendored source in the module cache before use — caught and fixed two wrong initial
+guesses (see T3's completion note). `go build ./...`, `go vet ./...`, `gofmt -l .` all clean.
 
 ### T3 — `agentbusd` MCP server: 4 tools over JetStream
 **Intent.** The actual pub/sub substrate, reachable via MCP.
 **Expected outcome(s).** All 4 tools implemented and independently testable via a raw MCP stdio
 client against a local `nats-server`.
 **Todo.**
-- [ ] `internal/bus/stream.go` — idempotent stream ensure (`AGENTBUS`, `AGENTBUS_PRESENCE`)
-- [ ] `internal/bus/publish.go`, `internal/bus/fetch.go`
-- [ ] Tool handlers + registration in `cmd/agentbusd/main.go`
+- [x] `internal/bus/stream.go` — idempotent stream ensure (`AGENTBUS`, `AGENTBUS_PRESENCE`)
+- [x] `internal/bus/publish.go`, `internal/bus/fetch.go`, `internal/bus/missions.go`
+- [x] Tool handlers + registration in `cmd/agentbusd/{main.go,tools.go}`
+- [ ] Independent testing via a raw MCP stdio client against a real local `nats-server` — not
+      yet done, only `go build`/`go vet`/`gofmt` verified so far (see Verification step 2)
 **Refs.** *Writes:* `worktrees/agentbus/{internal/bus/**,cmd/agentbusd/**}`.
-**Status.** NOT STARTED
+**Status.** IN PROGRESS, 2026-08-27 — all 4 tools implemented and compiling; live end-to-end
+test against a running `nats-server` still to do. Completion notes: `agentbus_list_missions`
+currently returns only the most recent presence announcement's session per mission, not a
+merged list of every currently-active session for that mission — a known simplification, fine
+for a first pass, revisit in T7 if it matters in practice. Two wrong API guesses caught by
+checking vendored source directly rather than trusting memory: (1) `OrderedConsumer` is a
+method on `jetstream.JetStream` itself, not on `jetstream.Stream` — there is no
+`Stream.CreateOrderedConsumer`; (2) ordered consumers use `AckNonePolicy`, so no per-message
+`Ack()` call is needed or wanted, matching the design's caller-held-cursor approach anyway.
 
 ### T4 — Relay daemon + `PostToolBatch` hook
 **Intent.** The silent-wake mechanism.
@@ -121,12 +134,17 @@ the mission/session slug it already has.
 **Expected outcome(s).** Bob's live MCP config confirmed and pointed at `agentbusd`; a manual
 Bob-side `agentbus_fetch_since` call returns the same history a Claude-side session produced.
 **Todo.**
-- [ ] Ask Bob directly (next time it's launched) which MCP config file it actually loads at
-      runtime and what its current `mcpServers` config is
-- [ ] Add the `agentbus` entry to that confirmed file
+- [x] Ask Bob directly which MCP config file it actually loads at runtime — Bob self-reported:
+      global primary key `~/.bob/settings/mcp.json`, global legacy key
+      `~/.bob/settings/mcp_settings.json`, project-level `<workspace>/.bob/mcp.json` (does not
+      exist for this workspace, would take precedence if created). Project-level takes
+      precedence over global when both exist.
+- [ ] Add the `agentbus` entry to `~/.bob/settings/mcp.json` (the primary global key, per Bob's
+      own report) once `agentbusd` exists (T3)
 - [ ] Manual round-trip test
-**Refs.** *Writes:* Bob's confirmed MCP config file (path TBD).
-**Status.** NOT STARTED
+**Refs.** *Writes:* `~/.bob/settings/mcp.json`.
+**Status.** IN PROGRESS, 2026-08-27 — config file location confirmed directly by Bob; entry
+itself still pending `agentbusd` existing.
 
 ### T7 — Reusability polish
 **Intent.** Make agentbus trivially addable to any other project, not just this repo.
