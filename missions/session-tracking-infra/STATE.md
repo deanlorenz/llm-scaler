@@ -38,6 +38,7 @@ history, and the `/resume-mission` + `/wind-down` skills that drive it.
 | `pr-review` skill disabled | **DONE** | Added `"pr-review": "off"` to `~/.claude/settings.json`'s `skillOverrides` (global, not committed anywhere — a personal setting, not mission content) — the skill itself is untouched on all 30+ branches that carry it (per user: stays in upstream history, just suppressed locally). |
 | Correction: `.git/info/exclude` is shared across all worktrees of a repo, not per-worktree | **DONE** | Wrongly assumed per-worktree at first (two places in `CONVENTIONS.md` said so); corrected after direct testing (`git rev-parse --git-common-dir`). |
 | Own mission tracking (this doc) | **DONE 2026-08-27** | This mission ran for its entire duration without its own `STATE.md`/spec — its ledger entry was misfiled under `analyzer-optimizer-refactor/ledgers/` instead. This is the retroactive fix, done at the user's explicit request ("clean up your own session... you had 3 different missions and did not separate the work"). |
+| Audit pass over session history vs. mission docs | **DONE 2026-08-27** | Found 3 gaps that were this mission's own policy content (folded into `CONVENTIONS.md`: rejected symlink-locking alternative, settings-guard marker friction, promoted the remote-push convention to global) — see `ledgers/2026-08-27-conventions-audit-fixes.md`. 2 more gaps were plain tracking content for other missions, committed separately (`e18d8733`). |
 
 ## Immediate next step
 
@@ -58,3 +59,4 @@ system as-is.
 ## Session log
 
 - 2026-08-27 session=2026-08-27-session-tracking-setup status=retired ledger=ledgers/2026-08-27-session-tracking-setup.md
+- 2026-08-27 session=2026-08-27-conventions-audit-fixes status=retired ledger=ledgers/2026-08-27-conventions-audit-fixes.md
