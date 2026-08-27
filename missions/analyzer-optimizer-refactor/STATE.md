@@ -54,3 +54,7 @@ This mission's docs previously lived at `worktrees/single-analyzer/docs/plans/an
 the `single-analyzer` branch itself. Moved here so mission plan/state/ledger content is
 tracked on `session-tracking` (origin-only) instead of the feature branch (which may go
 upstream). See this mission's `ledgers/` for the session that did the move.
+
+## Session log
+
+- 2026-08-27 session=2026-08-27-session-tracking-setup status=active ledger=ledgers/2026-08-27-session-tracking-setup.md

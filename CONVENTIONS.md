@@ -11,11 +11,19 @@ never pushed to `upstream`, only to `origin`. It is checked out in its own dedic
 orphan branch with unrelated history and git worktrees are 1:1 with branches.
 
 **Reaching this worktree from a pinned session.** A session that entered a feature worktree
-via `EnterWorktree` is structurally blocked from writing to any other worktree's path — this
-is enforced by the tool, not just a convention, and it applies here too. To edit anything on
-this branch, `ExitWorktree` (action: "keep") back to the repo root first, make the edit, then
-`EnterWorktree` back into the feature worktree to resume. Reads of this worktree's files are
-not blocked while pinned — only writes are.
+via `EnterWorktree` is structurally blocked from writing to any other worktree's path (reads
+are still allowed while pinned — only writes are blocked). `ExitWorktree` gets a pinned
+session back to the repo root, but re-entering the feature worktree afterward
+(`EnterWorktree` with `path`) requires interactive user authorization each time — it is **not**
+a free, automated round-trip a session can rely on mid-task. Treat a pinned session as staying
+pinned for its whole run; don't plan work that assumes it can hop out to edit here and hop
+back unattended. If cross-worktree edits are actually needed mid-session, ask the user first
+rather than attempting the round-trip and assuming it will succeed.
+
+**A fresh session started inside a worktree does not automatically read this file.** It must
+be explicitly told to read `CONVENTIONS.md` (and the relevant mission's `STATE.md`) by full
+path — there is no auto-discovery. Say so plainly when handing off to a new session or
+subagent: give it the full path and tell it to read this file first.
 
 ---
 
@@ -46,16 +54,25 @@ substitute for that convention.
 1. **Only the orchestrating session for a mission edits that mission's `STATE.md`.** Only a
    session explicitly asked to update global conventions edits `CONVENTIONS.md`. Every other
    session/agent only *reads* these files.
-2. To edit: rename `FILE.md` → `FILE.md.wip` (in place, in this worktree), edit `FILE.md.wip`
-   freely across as many tool calls as needed.
-3. While `FILE.md.wip` exists and `FILE.md` is absent, that is the visible signal "this file
+2. **Claim ownership, atomically, in this worktree:** rename `FILE.md` → `FILE.md.wip`. The
+   rename itself is the atomic claim — whoever successfully renames it owns the edit.
+3. **Edit via a local copy, not repeated cross-worktree edits.** A session pinned to a
+   different worktree (via `EnterWorktree`) cannot reliably write here directly, and even an
+   unpinned session shouldn't make every single line-edit a cross-worktree operation. Instead:
+   copy `FILE.md.wip` to a scratch path inside the worktree the session is actually working in
+   (e.g. `worktrees/<feature-worktree>/.session/FILE.md.local`), make all edits there with
+   ordinary same-worktree `Edit`/`Write` calls, and only copy the finished result back over
+   `FILE.md.wip` here when done.
+4. While `FILE.md.wip` exists and `FILE.md` is absent, that is the visible signal "this file
    is being edited right now." Other sessions must not start their own edit of it — they can
    still read the last-committed version (`git show HEAD:missions/<m>/STATE.md`) or peek at
    the in-progress `FILE.md.wip` directly; reads are never blocked.
-4. To finish: rename `FILE.md.wip` back to `FILE.md`, `git add`, commit.
-5. `*.md.wip` is excluded via this worktree's local `.git/info/exclude` (not a tracked
-   `.gitignore` — this is local-only bookkeeping, not a repo convention to publish) so an
-   accidental broad `git add` never picks up a mid-edit file.
+5. **To finish:** copy the edited local copy back over `FILE.md.wip` here, then rename
+   `FILE.md.wip` back to `FILE.md` (atomic — only meaningful/safe because this session is the
+   one that holds the claim), `git add`, commit.
+6. `*.md.wip` and any `.session/` scratch dir are excluded via each worktree's own local
+   `.git/info/exclude` (not a tracked `.gitignore` — this is local-only bookkeeping, not a repo
+   convention to publish) so an accidental broad `git add` never picks up a mid-edit file.
 
 ## Who writes what
 
@@ -151,6 +168,56 @@ Rules for applying it:
   down to their sections.
 - Status is updated in place (current-state field); completion notes accumulate, they are not
   overwritten.
+
+## Session log — resuming and handing off a mission
+
+Every mission's `STATE.md` ends with a **Session log** section: one line per session that
+worked the mission, appended under the `.wip` protocol like any other `STATE.md` edit.
+
+```
+## Session log
+
+- 2026-08-27T14:30 session=<id-or-slug> status=active ledger=ledgers/<name>.md
+- 2026-08-27T18:05 session=<id-or-slug> status=retired ledger=ledgers/<name>.md
+```
+
+`status` is `active` (currently working the mission right now) or `retired` (done working,
+whether via a clean wind-down or a takeover by another session). A retired entry is only
+**fully resolved** once its named ledger file itself carries a `## Verified <date>` marker
+(see "The verifier" below) — an entry can be `retired` but not yet verified, e.g. if the
+laptop closed before wind-down's verification step ran.
+
+**On taking over a mission (via `/resume-mission` or otherwise):**
+1. Scan every existing Session log entry. Any entry that is `active`, or `retired` without a
+   `## Verified` marker in its ledger file, is **pending** — normal in a clean handoff (its
+   ledger may not be verified yet) or a sign of an unclean exit (crash, sleep, force-quit).
+   Either way, treat it the same: mark it `retired` in `STATE.md` if it was still `active`,
+   then run the verifier (see below) against its ledger, in the foreground, before proceeding.
+   This is the safety net — verification always eventually happens for every session's ledger,
+   regardless of how that session ended.
+2. Only after every pending entry is cleared, append this session's own `active` entry and
+   proceed to confirm mission/state to the user.
+
+**The verifier.** A background agent, launched by the session doing the takeover-scan or by a
+session winding down its own work (see the `resume-mission`/`wind-down` skills), given exactly
+one ledger file to check. Its job is to **capture**, not just check: read every point in that
+ledger entry and confirm each one is reflected somewhere durable — the mission's `STATE.md`,
+its plan/spec doc, or (for a genuinely global process point) `CONVENTIONS.md`. Where something
+is missing, the verifier fixes it directly (via the `.wip` protocol, same as any other shared
+edit) rather than just reporting the gap. When done, it appends a marker to the end of that
+ledger file:
+
+```
+## Verified 2026-08-27 — all points already captured
+```
+or
+```
+## Verified 2026-08-27 — folded in: <short list of what was missing and where it was added>
+```
+
+This makes the verifier useful beyond crash recovery — running it whenever a session is about
+to lose working context (compaction, handoff, planned exit) captures that context durably
+before it's gone, not only as a fallback for unclean endings.
 
 ## Ground rules
 
