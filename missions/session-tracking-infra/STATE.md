@@ -39,6 +39,7 @@ history, and the `/resume-mission` + `/wind-down` skills that drive it.
 | Correction: `.git/info/exclude` is shared across all worktrees of a repo, not per-worktree | **DONE** | Wrongly assumed per-worktree at first (two places in `CONVENTIONS.md` said so); corrected after direct testing (`git rev-parse --git-common-dir`). |
 | Own mission tracking (this doc) | **DONE 2026-08-27** | This mission ran for its entire duration without its own `STATE.md`/spec — its ledger entry was misfiled under `analyzer-optimizer-refactor/ledgers/` instead. This is the retroactive fix, done at the user's explicit request ("clean up your own session... you had 3 different missions and did not separate the work"). |
 | Audit pass over session history vs. mission docs | **DONE 2026-08-27** | Found 3 gaps that were this mission's own policy content (folded into `CONVENTIONS.md`: rejected symlink-locking alternative, settings-guard marker friction, promoted the remote-push convention to global) — see `ledgers/2026-08-27-conventions-audit-fixes.md`. 2 more gaps were plain tracking content for other missions, committed separately (`e18d8733`). |
+| Processed feedback from a parallel session (`agentbus`) that actually used `CONVENTIONS.md` and got confused by it | **DONE 2026-08-27** | 6 real ambiguities reported, all verified against the actual doc text and fixed: `STATE.md`-vs-ledger purpose/audience never stated; the live-ledger section read as license to batch local scratch writes, not just the copy-to-`session-tracking` step; no scope boundary between "owns my mission" and "citizen of the shared worktree" (led to an unprompted `fetch`/push); `session-tracking` push authorization not distinguished from a feature worktree's; no procedure for handling something unexplained found on disk; `retired` not sharply distinguished from "pausing." See `ledgers/2026-08-27-conventions-audit-fixes.md`'s "Second round" section for full detail on each. This is higher-signal than the self-audit above — an independent session's actual confusion, not a self-review. |
 
 ## Immediate next step
 
@@ -59,4 +60,4 @@ system as-is.
 ## Session log
 
 - 2026-08-27 session=2026-08-27-session-tracking-setup status=retired ledger=ledgers/2026-08-27-session-tracking-setup.md
-- 2026-08-27 session=2026-08-27-conventions-audit-fixes status=retired ledger=ledgers/2026-08-27-conventions-audit-fixes.md
+- 2026-08-27 session=2026-08-27-conventions-audit-fixes status=active ledger=ledgers/2026-08-27-conventions-audit-fixes.md
