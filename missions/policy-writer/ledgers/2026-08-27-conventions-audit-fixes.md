@@ -113,3 +113,11 @@ much sharper signal than a self-audit — this mission couldn't have found any o
 by re-reading its own intent into its own doc. Where feasible, treat "another session got
 confused by this doc" reports as high-priority, verify-then-fix, rather than a self-review
 exercise.
+
+## Verified 2026-08-28
+
+Ledger-capture pass (one-off, per the corrected contract that never touches
+`CONVENTIONS.md` — see this mission's own spec, T7). All points already captured — the
+`CONVENTIONS.md` edits described in this ledger were made directly at the time (before
+today's contract correction), and `STATE.md`'s task table already reflects both rounds.
+No new gaps found. No suggestion-box entries from this specific file.

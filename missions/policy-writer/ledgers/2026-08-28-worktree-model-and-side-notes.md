@@ -140,6 +140,24 @@ and indexed in `MEMORY.md`.
 - Everything else already listed as not-yet-done above (side-note rules not yet turned
   into rule files; the `CONVENTIONS.md` → `conventions/` refactor itself not started)
   still applies.
-- The full session-history recall pass this entry is part of is still in progress —
-  `repo-restructure`'s existing single ledger has not yet been checked against actual
-  conversation history as of this writing.
+- The full session-history recall pass this entry was part of is now complete — all
+  three missions' ledgers checked, gaps folded in, `## Verified` markers appended.
+
+## Verified 2026-08-28
+
+Ledger-capture pass (one-off, per the corrected contract that never touches
+`CONVENTIONS.md` — see this mission's own spec, T7) — this ledger processed as part of
+the same pass it documents. Folded in:
+- `STATE.md`: corrected the Session log from 3 entries (one wrongly `retired`, since no
+  takeover ever happened — same mistake as `repo-restructure`'s, caught in that pass and
+  applied here too) down to 1 correct `active` entry; added task-table rows for the
+  worktree-model correction, the plan-deviation standing rule, and the ledger-capture
+  contract correction; updated "Immediate next step" and "Open questions" (both were
+  stale, predating everything in this ledger).
+- `spec-policy-writer.md`: added the worktree/mission model and the plan-deviation
+  standing rule to "Settled design" (both are genuinely this mission's own design
+  content, not previously recorded there).
+- **4 suggestion-box entries written** (`2026-08-28-0400` through `0403`, this mission),
+  one per side-note rule listed above — since under the corrected contract, ledger-capture
+  cannot draft these into `CONVENTIONS.md` directly, and this mission's own future work
+  (not this pass) is where they get evaluated and possibly turned into real rules.

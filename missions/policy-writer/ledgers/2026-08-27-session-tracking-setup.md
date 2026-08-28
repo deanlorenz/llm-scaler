@@ -150,3 +150,10 @@ at start; this session picked up mid-mission).
 - The settings-guard's literal-marker requirement applies to *every* edit of
   `~/.claude/settings.json`, including a pure removal — plan for that friction rather than
   trying to "clean up" a placeholder in a follow-up edit.
+
+## Verified 2026-08-28
+
+Ledger-capture pass (one-off, per the corrected contract that never touches
+`CONVENTIONS.md` — see this mission's own spec, T7). All points already captured in
+`STATE.md`/`CONVENTIONS.md` from prior work on this ledger — no new gaps found in this
+pass. No suggestion-box entries from this specific file.

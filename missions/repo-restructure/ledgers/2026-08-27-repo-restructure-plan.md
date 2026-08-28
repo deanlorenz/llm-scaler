@@ -159,3 +159,25 @@ user one at a time (per the user's own explicit request to slow down and go step
 step), the spec doc updated to reflect the resolution of each, and point 8's ambiguous
 target re-confirmed. None of this happened yet — this ledger entry exists so the raw
 corrections are not lost between now and whenever that review actually happens.
+
+## Verified 2026-08-28
+
+Ledger-capture pass (one-off, per the corrected contract that never touches
+`CONVENTIONS.md` — see `policy-writer`'s spec T7). Folded in:
+- `STATE.md`'s task table: added a row for the 10 unapplied corrections, updated Phase 1/3
+  notes to reflect them.
+- `STATE.md`'s "Open questions": corrected from "none design-wise" to reflect that the
+  plan is no longer fully specified, including flagging point 8's ambiguity and point
+  10's apparent conflict with an earlier instruction.
+- **Correction to `STATE.md`'s own Session log**, caught by the user during this pass:
+  the original `2026-08-27` entry had been marked `status=retired` by me, incorrectly —
+  no session ever actually ended this mission or took it over; it was paused pending a
+  go-ahead, and the same continuing thread picked it back up later that same day (the 10
+  corrections). Fixed the entry to `status=active`, which is what it should have said
+  from the start — this was the exact `retired`-vs-pausing mistake the `agentbus`-feedback
+  fix (see `CONVENTIONS.md`'s Session-log section) was meant to prevent, made by me in
+  this same file despite that fix already being documented.
+
+No suggestion-box entry written for this pass — the retired/active correction is a
+mistake in applying an existing rule, not a new rule or ambiguity worth flagging to
+`policy-writer`.

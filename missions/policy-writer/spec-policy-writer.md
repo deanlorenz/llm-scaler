@@ -92,6 +92,33 @@ this spec traces back to satisfying one of these three.
   setting, zero git changes anywhere, no per-branch/per-worktree duplication needed
   (unlike the skill files themselves, which are per-worktree-discoverable and needed the
   symlink treatment above).
+- **Worktree/mission model, corrected 2026-08-28:** every mission lives in its own
+  branch, typically its own dedicated worktree. `session-tracking` is **production
+  space** — where every mission's `STATE.md`, spec, and ledger are saved (the explicit,
+  stated exception to "writes never cross worktree boundaries"). It is not a place to
+  draft or iterate. A mission whose deliverable is content that lives in
+  `session-tracking` itself (this one — `CONVENTIONS.md`/the skills) does not edit
+  `session-tracking` in place to change that content; it drafts the change in its own
+  separate worktree (`worktrees/policy-writer`), then copies the finished result into
+  `session-tracking`. A mission is referred to by its worktree/branch name, not a
+  separate label (`session-tracking-infra` → `policy-writer`,
+  `analyzer-optimizer-refactor` → `single-analyzer`).
+- **Standing rule: never deviate from an approved plan.** Once a plan is approved
+  (a numbered list, an `ExitPlanMode`-approved file, or an explicit "go ahead on X, Y,
+  Z"), its exact listed steps are the complete boundary of authorized action — no
+  adjacent, small, or obviously-related extra work, ever, even something that looks like
+  natural cleanup following from an approved step. If executing the plan surfaces
+  something that seems to need fixing, stop and ask before doing it. This was violated 3
+  times in immediate succession on 2026-08-27/28 before being corrected; saved as a
+  durable memory
+  (`/home/dean/.claude/projects/-home-dean-code-llm-d-dean-llmd-scaler-sandbox/memory/feedback_never_deviate_from_approved_plan.md`),
+  not just recorded here, per the user's explicit request for something that persists
+  across sessions.
+- **Ledger-capture never touches `CONVENTIONS.md`, for any mission — including
+  `policy-writer` running it on its own ledgers.** Only `policy-writer` may change
+  `CONVENTIONS.md`, and not while it is itself running ledger-capture. See T7 below —
+  this is currently a decision record only, not yet drafted into `CONVENTIONS.md`'s own
+  text.
 
 ## Todo
 

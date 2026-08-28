@@ -25,9 +25,10 @@ left completely untouched throughout — this is a fresh clone, not a move.
 |---|---|---|
 | Investigate current state | **DONE** | Full inventory of 31 worktrees, remotes, disk usage, uncommitted content — see spec doc. |
 | Confirm naming/location decisions | **DONE** | 5 decisions confirmed with user. |
-| Execute Phase 1 (bare repo + remotes) | **NOT STARTED** | Blocked — see below. |
+| Apply 10 plan corrections received 2026-08-28 | **NOT STARTED** | 10 real corrections to the plan (see ledger `2026-08-27-repo-restructure-plan.md`'s "Second entry" section) received but never reviewed one-by-one with the user or applied to `spec-repo-restructure.md`. This must happen before Phase 1 can start — the plan is no longer fully specified until these are resolved. |
+| Execute Phase 1 (bare repo + remotes) | **NOT STARTED** | Blocked — see below, and blocked additionally on the corrections above (several affect Phase 1's own steps). |
 | Execute Phase 2 (migrate branches/worktrees with real content) | **NOT STARTED** | Depends on Phase 1. |
-| Execute Phase 3 (`main` worktree tracking `upstream/main`) | **NOT STARTED** | Depends on Phase 2. |
+| Execute Phase 3 (`main` worktree tracking `upstream/main`) | **NOT STARTED** | Depends on Phase 2. Note: corrections include a capitalization fix (`Main`, not `main`) not yet applied here or in the spec. |
 | Execute Phase 4 (verification) | **NOT STARTED** | Depends on Phase 3. |
 
 ## Immediate next step
@@ -39,8 +40,14 @@ already happened.
 
 ## Open questions blocking full completion
 
-None design-wise — the plan is fully specified. The only blocker is the user's explicit
-pause: execution needs a new go-ahead, not implied by anything already said.
+- **The plan is no longer fully specified** as of 2026-08-28 — 10 real corrections were
+  given (see ledger) but never reviewed one-by-one or applied. Point 8 specifically is
+  unresolved-ambiguous (unclear which plan item the user's "there is [a real branch tip]"
+  comment targets — needs re-confirmation, not a guess) and point 10 appears to conflict
+  with an earlier instruction (leave the container's uncommitted items alone vs. check
+  them one by one) — flag this conflict to the user rather than picking silently.
+- Separately, execution still needs a fresh, explicit go-ahead — not implied by plan
+  approval alone (confirmed earlier this session as its own distinct gate).
 
 ## Incident (2026-08-27, during this mission's investigation)
 
@@ -55,4 +62,4 @@ not otherwise actioned by this mission.
 
 ## Session log
 
-- 2026-08-27 session=2026-08-27-repo-restructure-plan status=retired ledger=ledgers/2026-08-27-repo-restructure-plan.md
+- 2026-08-27 session=2026-08-27-repo-restructure-plan status=active ledger=ledgers/2026-08-27-repo-restructure-plan.md
