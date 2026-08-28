@@ -1,0 +1,25 @@
+# bench-session sample — copy this file and fill in target_id.
+#
+# Usage:
+#   cp hack/benchmark/bench-sessions/sample.yaml hack/benchmark/bench-sessions/<name>.yaml
+#   make bench-run BENCH_SESSION=hack/benchmark/bench-sessions/<name>.yaml
+#
+# Fields set to __default__ are filled automatically from the live environment
+# on first run and written back into this file. Re-running after that is safe —
+# real values are never overwritten.
+#
+# namespace    is derived from the current kube context (OpenShift encodes it
+#              in the context name) or from the NAMESPACE env var.
+# kube_context is taken from the current active context.
+# kubeconfig   is taken from $KUBECONFIG or ~/.kube/config.
+#
+# For automation: set all three explicitly so the run is fully self-describing
+# and cannot accidentally target the wrong cluster.
+
+target_id:
+  namespace:    __default__
+  kube_context: __default__
+  kubeconfig:   __default__
+
+workloads:
+  - smoke_2min
