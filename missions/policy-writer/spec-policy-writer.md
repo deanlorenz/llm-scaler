@@ -149,3 +149,39 @@ explicit instruction that upstream content stays as-is.
   to a future ledger-capture run (see `CONVENTIONS.md`'s doc-reference path convention
   section), not tracked as a task here since it's not this mission's code to fix, it's
   content ledger-capture will fix incidentally.
+
+### T7 — Correct ledger-capture's contract: never touch `CONVENTIONS.md`, use a suggestion box instead
+
+**Status.** PENDING DESIGN — a rule change, not yet drafted into `CONVENTIONS.md` itself
+(that requires its own `policy-writer` drafting cycle; this is only the decision record).
+
+**Decision, stated directly by the user (2026-08-28):** ledger-capture (running for any
+mission, including `policy-writer` on its own ledgers) must **never** write to
+`CONVENTIONS.md`. Only `policy-writer` may change `CONVENTIONS.md`, and not while it is
+itself running ledger-capture on its own ledgers. Ledger-capture's only two legitimate
+destinations become `STATE.md` and the mission's own plan/spec doc.
+
+**Mechanism to replace the removed capability:** a `session-tracking/suggestion-box/`
+folder. When ledger-capture finds something in a ledger that looks like it should become
+a rule, incident report, or behavioral directive (previously it would have written this
+straight into `CONVENTIONS.md`), it instead writes **one atomic markdown file per
+individual finding** into `suggestion-box/`, named `YYYY-MM-DD-HHMM-<mission-name>.md`.
+Only `policy-writer` reads `suggestion-box/` and decides whether/how to turn a suggestion
+into an actual `CONVENTIONS.md` rule.
+
+**Lifecycle of a processed suggestion-box file** (what happens to it once `policy-writer`
+acts on it — delete, archive, mark processed, etc.) — **explicitly deferred**, to be
+addressed in a future `policy-writer` planning session, not decided now.
+
+**One-off exception, in force starting 2026-08-28:** this corrected contract (never touch
+`CONVENTIONS.md`; write to `suggestion-box/` instead) is being used immediately for a
+one-time ledger-capture pass across all three currently-active missions
+(`single-analyzer`, `policy-writer`, `repo-restructure`), **without** first updating
+`CONVENTIONS.md`'s own documented ledger-capture section to match — that section still
+describes the old (soon-to-be-wrong) contract until a proper drafting cycle updates it.
+Do not treat `CONVENTIONS.md`'s current text as authoritative over this decision in the
+meantime.
+
+**Refs.** *Writes (once actually drafted into `CONVENTIONS.md`):*
+`../../CONVENTIONS.md`'s "Session log — resuming and handing off a mission" section
+(the `ledger-capture` paragraph specifically). *Creates:* `../../suggestion-box/`.
