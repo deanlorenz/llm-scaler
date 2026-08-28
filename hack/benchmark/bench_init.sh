@@ -203,11 +203,15 @@ fi
 echo "bench_init: querying ScaledObjects..."
 
 so_json=$($KUBECTL get scaledobject -n "$NS" -o json 2>/dev/null || echo '{"items":[]}')
+# Ensure so_json is never empty (kubectl may succeed but print nothing on some clusters)
+[ -n "$so_json" ] || so_json='{"items":[]}'
 
 stacks_json=$(echo "$so_json" | ENDPOINT_URL="$endpoint_url" \
     EPP_METRICS_SECRET="$epp_metrics_secret" \
     KUBECTL="$KUBECTL" NS="$NS" \
     python3 -c '
+# Note: this subshell must not exit non-zero — callers use set -e.
+# All errors are handled internally; worst case we return [].
 import json, os, subprocess, sys
 
 so_data = json.load(sys.stdin)
@@ -337,7 +341,8 @@ for so in items:
     })
 
 print(json.dumps(stacks))
-')
+' 2>/dev/null || true)
+[ -n "$stacks_json" ] || stacks_json='[]'
 
 # ---------------------------------------------------------------------------
 # Assemble and write bench-meta.json
@@ -349,8 +354,10 @@ kube_context=$($KUBECTL config current-context 2>/dev/null || echo "")
 mkdir -p "$OUT_DIR"
 tmp="${OUT_DIR}/bench-meta.json.tmp"
 
-python3 - <<PYEOF
+python3 - "$stacks_json" <<PYEOF
 import json, sys
+
+stacks = json.loads(sys.argv[1])
 
 meta = {
     "schema_version": "1",
@@ -360,7 +367,7 @@ meta = {
         "kube_context": "${kube_context}",
         "namespace":    "${NS}",
     },
-    "stacks": ${stacks_json},
+    "stacks": stacks,
     "wva": {
         "controller_deployment": "${wva_deploy}",
         "metrics_service":       "${wva_metrics_svc}",
