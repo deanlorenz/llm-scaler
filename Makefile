@@ -1991,38 +1991,23 @@ benchmark-full: benchmark-standup benchmark-run-all benchmark-teardown ## Full l
 _BENCH_ENV_LOAD = $(if $(BENCH_ENV_FILE),set -a && source "$(BENCH_ENV_FILE)" && set +a &&,)
 
 .PHONY: bench-guard
-bench-guard: ## Internal marker: load hack/benchmark/<ns>.env before calling bench-* targets
-
-.PHONY: bench-run-check
-bench-run-check: ## Read-only preflight for bench-run (set BENCH_NAMESPACE=<namespace>, or BENCH_ENV_FILE=<file>)
-	@$(if $(BENCH_ENV_FILE),set -a && source "$(BENCH_ENV_FILE)" && set +a;,) \
-	if [ -z "$${BENCH_NAMESPACE:-$(BENCH_NAMESPACE)}" ]; then \
-		echo "ERROR: BENCH_NAMESPACE is required. Usage: make bench-run-check BENCH_NAMESPACE=<namespace>"; \
-		exit 1; \
-	fi; \
-	if [ -z "$${BENCH_MODEL_ID:-$(BENCH_MODEL_ID)}" ]; then \
-		echo "ERROR: BENCH_MODEL_ID (or MODEL_ID) is required."; \
-		exit 1; \
-	fi; \
-	_ns="$${BENCH_NAMESPACE:-$(BENCH_NAMESPACE)}"; \
-	_model="$${BENCH_MODEL_ID:-$(BENCH_MODEL_ID)}"; \
-	_harness="$${BENCH_HARNESS:-$(BENCH_HARNESS)}"; \
-	_workload="$${BENCH_WORKLOAD:-$(BENCH_WORKLOAD)}"; \
-	_sf="$(BENCHMARK_SCENARIOS_DIR)/$$_workload.yaml.in"; \
-	if [ ! -f "$$_sf" ]; then \
-		echo "ERROR: scenario file not found: $$_sf"; \
-		echo "  Available: $$(ls $(BENCHMARK_SCENARIOS_DIR)/*.yaml.in 2>/dev/null | xargs -n1 basename | sed 's/\.yaml\.in//' | tr '\n' ' ')"; \
-		exit 1; \
-	fi; \
-	echo "bench-run-check: namespace=$$_ns harness=$$_harness workload=$$_workload model=$$_model"; \
-	kubectl get namespace "$$_ns" >/dev/null 2>&1 || { \
-		echo "ERROR: namespace $$_ns not found"; exit 1; }; \
-	echo "bench-run-check: OK"
+bench-guard: ## (legacy) Internal marker: load hack/benchmark/<ns>.env before calling bench-* targets
 
 .PHONY: bench-run
-bench-run: bench-guard ## Run one scenario against an already-running stack (set BENCH_NAMESPACE, BENCH_WORKLOAD, BENCH_MODEL_ID, or BENCH_ENV_FILE=<file>)
+bench-run: ## Run benchmark workloads from a session file (BENCH_SESSION=<path> [BENCH_WORKLOAD=<name>] [DRY_RUN=true])
+	@[ -n "$(BENCH_SESSION)" ] || { \
+		echo "ERROR: BENCH_SESSION is required."; \
+		echo "  Usage: make bench-run BENCH_SESSION=hack/benchmark/bench-sessions/<name>.yaml"; \
+		echo "  Start:  cp hack/benchmark/bench-sessions/sample.yaml hack/benchmark/bench-sessions/<name>.yaml"; \
+		exit 1; \
+	}
+	@DRY_RUN="$(DRY_RUN)" \
+	BENCH_WORKLOAD="$(BENCH_WORKLOAD)" \
+	bash "$(CURDIR)/hack/benchmark/bench_run.sh" "$(BENCH_SESSION)"
+
+.PHONY: bench-run-legacy
+bench-run-legacy: bench-guard ## (legacy) Run one scenario — old env-file flow (set BENCH_NAMESPACE, BENCH_WORKLOAD, BENCH_MODEL_ID, or BENCH_ENV_FILE=<file>)
 	@$(if $(BENCH_ENV_FILE),set -a && source "$(BENCH_ENV_FILE)" && set +a;,) \
-	: bench-run-check inlined to pick up env-file values at runtime; \
 	_ns="$${BENCH_NAMESPACE:-$(BENCH_NAMESPACE)}"; \
 	_model="$${BENCH_MODEL_ID:-$(BENCH_MODEL_ID)}"; \
 	_harness="$${BENCH_HARNESS:-$(BENCH_HARNESS)}"; \
@@ -2048,10 +2033,10 @@ bench-run: bench-guard ## Run one scenario against an already-running stack (set
 		"$(BENCHMARK_SCENARIOS_DIR)/$$_workload.yaml.in" \
 		"$$_ns" \
 		"$$_session_dir"; \
-	echo "bench-run: results in $$_session_dir/$$_workload"
+	echo "bench-run-legacy: results in $$_session_dir/$$_workload"
 
-.PHONY: bench-run-all
-bench-run-all: bench-guard ## Run all scenarios sequentially, reusing the same harness pod (set BENCH_NAMESPACE, BENCH_MODEL_ID, or BENCH_ENV_FILE=<file>)
+.PHONY: bench-run-all-legacy
+bench-run-all-legacy: bench-guard ## (legacy) Run all scenarios sequentially — old env-file flow
 	@$(if $(BENCH_ENV_FILE),set -a && source "$(BENCH_ENV_FILE)" && set +a;,) \
 	_ns="$${BENCH_NAMESPACE:-$(BENCH_NAMESPACE)}"; \
 	_model="$${BENCH_MODEL_ID:-$(BENCH_MODEL_ID)}"; \
@@ -2071,7 +2056,7 @@ bench-run-all: bench-guard ## Run all scenarios sequentially, reusing the same h
 	bash "$(CURDIR)/hack/benchmark/run_session.sh" ensure "$$_ns"; \
 	for scenario_file in $(BENCHMARK_SCENARIOS_DIR)/*.yaml.in; do \
 		workload="$$(basename "$$scenario_file" .yaml.in)"; \
-		echo "bench-run-all: running scenario: $$workload"; \
+		echo "bench-run-all-legacy: running scenario: $$workload"; \
 		MODEL_ID="$$_model" \
 		BENCH_HARNESS="$$_harness" \
 		BENCH_WORKLOAD="$$workload" \
@@ -2081,16 +2066,16 @@ bench-run-all: bench-guard ## Run all scenarios sequentially, reusing the same h
 			"$$scenario_file" \
 			"$$_ns" \
 			"$$_session_dir" || \
-		{ echo "bench-run-all: scenario $$workload failed (rc=$$?); continuing..."; }; \
+		{ echo "bench-run-all-legacy: scenario $$workload failed (rc=$$?); continuing..."; }; \
 		if [ -n "$$_hook" ]; then \
-			echo "bench-run-all: running inter-scenario hook: $$_hook"; \
+			echo "bench-run-all-legacy: running inter-scenario hook: $$_hook"; \
 			bash "$$_hook" "$$workload" "$$_ns" || true; \
 		fi; \
 	done; \
-	echo "bench-run-all: session complete. Results in: $$_session_dir"
+	echo "bench-run-all-legacy: session complete. Results in: $$_session_dir"
 
 .PHONY: bench-full
-bench-full: bench-run-all ## Run all scenarios (no automatic teardown; call bench-teardown separately when done)
+bench-full: bench-run-all-legacy ## (legacy) Run all scenarios — old env-file flow
 
 .PHONY: bench-teardown
 bench-teardown: bench-guard ## Tear down the bench harness pod and its RBAC (explicit; never automatic)
