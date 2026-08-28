@@ -102,3 +102,60 @@
   Treat them as two separate gates even when they arrive close together in the
   conversation — don't start Phase 1 step 1 immediately after exiting plan mode without
   checking whether the user actually wants execution to begin now.
+
+## Second entry, later same day — 10 unreviewed plan corrections received, NOT yet applied
+
+While drafting an unrelated plan (the `CONVENTIONS.md` → `conventions/` refactor, a
+different mission's work), calling `ExitPlanMode` surfaced 10 inline review comments from
+the user that actually belong to **this** mission's plan — apparently held from an
+earlier point and only delivered at that moment, causing real confusion about which of
+two simultaneous planning threads they applied to. Confirmed with the user they belong
+here, not to the `CONVENTIONS.md` plan. **These corrections have not yet been applied to
+`spec-repo-restructure.md` or acted on in any way** — recording them here verbatim so
+they aren't lost, pending a proper review-and-apply pass:
+
+1. **`benchmark-run`'s `runs/` directory** should become its own **separate orphan
+   worktree in `origin`**, named **`benchmark-data`** — not migrated as part of
+   `benchmark-run`'s working-tree content as the current plan assumes.
+2. **The "double-checked twice" verification claim for the PR-worktree identical/
+   differing split is not sufficient.** The user's stated view: the only real way to
+   check is to clone `origin` fresh, then check out each branch one at a time and do a
+   filesystem diff — not `git rev-parse HEAD` vs. `origin/<branch>` comparisons as the
+   current plan does.
+3. **The 7 "already-merged, don't need migration" PR worktrees need verification that
+   they're actually merged**, and — even if so — the user wants to **identify what
+   changed** in them, not just skip them outright. Current plan's "leave them where they
+   are for now, not migrated" stance is only partially right — leaving them is fine, but
+   skipping the diff/change-identification step is not.
+4. **Keep `upstream`/`ofer` push-disabled for the new structure too** — already the
+   plan's stated intent, user just confirming/re-stating it, not a change.
+5. **Do not push any file larger than 500MB.** New constraint, not previously in the
+   plan. Directly relevant to the 17GB `runs/`→`benchmark-data` worktree (point 1) —
+   likely means large files within it need individual review before any push, not a
+   blanket push of the whole thing.
+6. **The user wants to review each large file individually** before anything is pushed
+   — not just a size cap, an actual manual review step.
+7. **Worktree name is `Main` (capital M), not `main`** — the user asked for `Main`
+   specifically; the current plan's step 10 uses lowercase `main`, that's wrong.
+8. **There is a real branch tip to check out for something the current plan assumed
+   there wasn't** — the user's comment: *"there is"*, in response to the plan's
+   `agentbus`-worktree-style "no real branch tip, use `-b` from the bare repo's default
+   branch" handling. Unclear exactly which item this refers to without re-reading the
+   plan text the comment was anchored to — **needs re-confirmation with the user before
+   acting on it**, don't guess which worktree/step this correction applies to.
+9. **`rsync --dry-run` at the end, to list every file/change between old and new, for
+   the user to review and confirm the changes make sense** — an explicit verification
+   step to add, on top of (not instead of) the plan's existing `rsync -a` copy approach.
+10. **The "leave the other pre-existing uncommitted items in the container root alone"
+    stance needs revisiting — check them one by one**, rather than blanket-ignoring per
+    the earlier instruction. (Note: this may be in tension with the earlier, explicit
+    "leave all of it in place, do not inspect or move it further" instruction recorded
+    above in this same ledger — **flag this apparent conflict to the user rather than
+    silently picking one interpretation** when this is actually acted on.)
+
+**Not yet done, updated:** all 10 of the above are unreviewed, unapplied corrections.
+Before any execution of this mission's plan, these need to be worked through with the
+user one at a time (per the user's own explicit request to slow down and go step by
+step), the spec doc updated to reflect the resolution of each, and point 8's ambiguous
+target re-confirmed. None of this happened yet — this ledger entry exists so the raw
+corrections are not lost between now and whenever that review actually happens.
