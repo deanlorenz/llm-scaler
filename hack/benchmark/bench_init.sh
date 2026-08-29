@@ -295,6 +295,21 @@ def strip_wva_suffix(name):
         return base + variant
     return name
 
+def so_keda_active(so):
+    """True if KEDA Active condition is True on this SO."""
+    for cond in (so.get("status") or {}).get("conditions") or []:
+        if cond.get("type") == "Active" and cond.get("status") == "True":
+            return True
+    return False
+
+def wva_trigger_address(so):
+    """Extract scalerAddress from the first external-push trigger."""
+    for t in (so.get("spec",{}).get("triggers") or []):
+        addr = (t.get("metadata") or {}).get("scalerAddress", "")
+        if addr:
+            return addr
+    return ""
+
 stacks = []
 for so in items:
     name_raw = so["metadata"]["name"]
@@ -325,19 +340,21 @@ for so in items:
     vllm_label = probe_vllm_label(deploy_name) if deploy_name else "llm-d.ai/role=decode"
 
     stacks.append({
-        "name":               stack_name,
-        "deployment":         deploy_name,
-        "scaledobject":       name_raw,
-        "model_id":           model_id,
-        "endpoint_url":       endpoint_url,
-        "epp_metrics_secret": epp_secret,
-        "vllm_pod_label":     vllm_label,
-        "vllm_metrics_port":  8200,
-        "epp_metrics_port":   9090,
-        "min_replicas":       min_rep,
-        "max_replicas":       max_rep,
-        "so_paused":          so_paused(so),
-        "ready_replicas":     ready,
+        "name":                stack_name,
+        "deployment":          deploy_name,
+        "scaledobject":        name_raw,
+        "model_id":            model_id,
+        "endpoint_url":        endpoint_url,
+        "epp_metrics_secret":  epp_secret,
+        "vllm_pod_label":      vllm_label,
+        "vllm_metrics_port":   8200,
+        "epp_metrics_port":    9090,
+        "min_replicas":        min_rep,
+        "max_replicas":        max_rep,
+        "so_paused":           so_paused(so),
+        "so_keda_active":      so_keda_active(so),
+        "wva_trigger_address": wva_trigger_address(so),
+        "ready_replicas":      ready,
     })
 
 print(json.dumps(stacks))

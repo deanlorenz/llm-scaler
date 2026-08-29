@@ -272,6 +272,12 @@ META_FILE="$RUN_DIR/bench-meta.json"
 [ -f "$META_FILE" ] || _error "bench_init did not produce $META_FILE"
 
 # ---------------------------------------------------------------------------
+# Pre-run preflight — reads bench-meta.json, reports stack state
+# ---------------------------------------------------------------------------
+_info "Running preflight checks..."
+KUBECTL_CMD="$KUBECTL" bash "$_SCRIPT_DIR/bench_preflight.sh" "$META_FILE" || true
+
+# ---------------------------------------------------------------------------
 # Guided stop: if session file still had unresolved fields after write-back,
 # print discovery output and ask user to validate.
 # (In practice only reaches here if namespace was derived rather than explicit.)
