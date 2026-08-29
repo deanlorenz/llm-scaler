@@ -71,4 +71,4 @@ but not blockers to using the system as-is.
 
 ## Session log
 
-- 2026-08-27 session=2026-08-27-session-tracking-setup status=active ledger=ledgers/2026-08-28-worktree-model-and-side-notes.md
+- 2026-08-27 session=2026-08-27-session-tracking-setup status=active ledger=ledgers/2026-08-29-retired-semantics-and-skill-symlinks.md
