@@ -13,6 +13,10 @@
 #   [workload]        Comma-separated workload names to run. Default: all
 #                     workloads listed in the session file's workloads: block.
 #
+# Flags:
+#   --foreground      Run in the foreground (default: background)
+#   --run-dir=<path>  Resume into an existing run dir (internal use)
+#
 # Environment:
 #   DRY_RUN                Set to "true" to validate + print without touching
 #                          the cluster. Reads and checks proceed; no pod
@@ -27,14 +31,14 @@
 #   BENCH_INTER_SCENARIO_HOOK  Script called between workloads:
 #                              bash <hook> <workload> <namespace> <run-dir>
 #
-# First-run / guided-stop behaviour:
-#   Fields set to __default__ are resolved from the live environment and
-#   written back into the session file. If namespace cannot be resolved the
-#   script stops, prints the session file and cluster discovery output, and
-#   asks the user to edit the file and re-run. Exit code 1.
+# Background mode (default):
+#   Creates the run dir, forks itself with --foreground, and returns
+#   immediately. Prints the log path and pod log command for tracking.
 #
 # Outputs (all under one run directory):
 #   hack/benchmark/bench-scratch/<session-name>-<timestamp>/
+#     bench-run.log             full output of the background run
+#     bench-run.pid             pid of the background process
 #     bench-meta.json           stack discovery snapshot (from bench_init.sh)
 #     bench-session.yaml        materialized session file (reproducibility record)
 #     <workload>/               per-workload results (from run_scenario.sh)
@@ -45,20 +49,29 @@
 #       prometheus_range.json
 #
 # Exit codes:
-#   0  all workloads completed successfully
+#   0  all workloads completed successfully (foreground) or launched (background)
 #   1  session-level failure or guided stop (missing/unresolvable fields)
 set -euo pipefail
 
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _DRY_RUN="${DRY_RUN:-false}"
+_FOREGROUND=false
+_RUN_DIR_ARG=""
 
-# --help
-case "${1:-}" in
-    -h|--help)
-        sed -n '2,/^[^#]/p' "$0" | sed 's/^# \{0,1\}//; $d'
-        exit 0
-        ;;
-esac
+# Parse flags
+_pos_args=()
+for _arg in "$@"; do
+    case "$_arg" in
+        --foreground)       _FOREGROUND=true ;;
+        --run-dir=*)        _RUN_DIR_ARG="${_arg#*=}" ;;
+        -h|--help)
+            sed -n '2,/^[^#]/p' "$0" | sed 's/^# \{0,1\}//; $d'
+            exit 0
+            ;;
+        *)                  _pos_args+=("$_arg") ;;
+    esac
+done
+set -- "${_pos_args[@]+"${_pos_args[@]}"}"
 
 SESSION_FILE="${1:?usage: $0 <session-file> [workload[,workload,...]]}"
 WORKLOAD_ARG="${2:-${BENCH_WORKLOAD:-}}"
@@ -74,23 +87,12 @@ SESSION_FILE="$(realpath "$SESSION_FILE")"
 
 # ---------------------------------------------------------------------------
 # Parse + resolve session file
-#
-# Fields may be:
-#   __default__  — resolve from live environment, write back into the file
-#   <value>      — use as-is
-#   (missing)    — hard error
-#
-# Resolution order:
-#   kubeconfig   : $KUBECONFIG → ~/.kube/config
-#   kube_context : live active context from resolved kubeconfig
-#   namespace    : NAMESPACE env var → parse from OpenShift context name
-#                  (<ns>/api-<cluster>/<user>) → error/guided-stop
 # ---------------------------------------------------------------------------
 _resolve_session=$(python3 - "$SESSION_FILE" "${NAMESPACE:-}" <<'PYEOF'
 import sys, re, os
 
 session_path = sys.argv[1]
-ns_hint      = sys.argv[2]   # NAMESPACE env var, may be empty
+ns_hint      = sys.argv[2]
 
 SENTINEL = "__default__"
 
@@ -98,20 +100,17 @@ with open(session_path) as f:
     raw = f.read()
 
 def extract_scalar(text, key):
-    # Prefer indented (nested under target_id:)
     m = re.search(r'^\s+' + re.escape(key) + r'\s*:\s*(.*)$', text, re.MULTILINE)
     if not m:
         m = re.search(r'^' + re.escape(key) + r'\s*:\s*(.*)$', text, re.MULTILINE)
     if not m:
-        return None   # field absent entirely
+        return None
     v = m.group(1).strip().strip('"').strip("'")
     return v if v else SENTINEL
 
 def write_back(path, key, value):
-    """Replace the first occurrence of `key: <anything>` with `key: <value>`."""
     with open(path) as f:
         content = f.read()
-    # Match indented or top-level
     new_content = re.sub(
         r'^(\s*)(' + re.escape(key) + r')(\s*:\s*).*$',
         lambda m: f'{m.group(1)}{m.group(2)}{m.group(3)}{value}',
@@ -120,7 +119,6 @@ def write_back(path, key, value):
     with open(path, 'w') as f:
         f.write(new_content)
 
-# ── kubeconfig ────────────────────────────────────────────────────────────
 kubeconfig = extract_scalar(raw, 'kubeconfig')
 if kubeconfig is None:
     print('ERROR:missing kubeconfig field in session file'); sys.exit(1)
@@ -129,7 +127,6 @@ if kubeconfig == SENTINEL:
     write_back(session_path, 'kubeconfig', kubeconfig)
     print(f'WROTE_BACK:kubeconfig={kubeconfig}', file=sys.stderr)
 
-# ── kube_context ──────────────────────────────────────────────────────────
 kube_ctx = extract_scalar(raw, 'kube_context')
 if kube_ctx is None:
     print('ERROR:missing kube_context field in session file'); sys.exit(1)
@@ -144,28 +141,21 @@ if kube_ctx == SENTINEL:
     write_back(session_path, 'kube_context', kube_ctx)
     print(f'WROTE_BACK:kube_context={kube_ctx}', file=sys.stderr)
 
-# ── namespace ─────────────────────────────────────────────────────────────
 ns = extract_scalar(raw, 'namespace')
 if ns is None:
     print('ERROR:missing namespace field in session file'); sys.exit(1)
 if ns == SENTINEL:
-    # 1. Explicit env var hint
     if ns_hint:
         ns = ns_hint
     else:
-        # 2. Parse OpenShift context name: <ns>/api-<cluster>/<user>
         m = re.match(r'^([^/]+)/[^/]+/[^/]+$', kube_ctx)
-        if m:
-            ns = m.group(1)
-        else:
-            ns = ''
+        ns = m.group(1) if m else ''
     if ns:
         write_back(session_path, 'namespace', ns)
         print(f'WROTE_BACK:namespace={ns}', file=sys.stderr)
     else:
         print('ERROR:namespace is __default__ and could not be resolved'); sys.exit(1)
 
-# ── workloads ─────────────────────────────────────────────────────────────
 workloads = []
 in_workloads = False
 for line in raw.splitlines():
@@ -186,7 +176,6 @@ for line in raw.splitlines():
         if m2:
             workloads.append(m2.group(1).strip('"').strip("'"))
 
-# ── cluster (optional) ────────────────────────────────────────────────────
 cluster = extract_scalar(raw, 'cluster') or ''
 
 print(f'NS={ns}')
@@ -197,16 +186,12 @@ print(f'WORKLOADS={",".join(workloads)}')
 PYEOF
 )
 
-# Hard errors from the parser
 if echo "$_resolve_session" | grep -q '^ERROR:'; then
     _msg=$(echo "$_resolve_session" | grep '^ERROR:' | sed 's/^ERROR://')
     _error "session file error: $_msg"
 fi
 
-# Export parsed values
 eval "$(echo "$_resolve_session" | grep -E '^(NS|KUBE_CTX|KUBECONFIG|CLUSTER|WORKLOADS)=')"
-
-# Apply kubeconfig
 [ -n "${KUBECONFIG:-}" ] && export KUBECONFIG
 
 # ---------------------------------------------------------------------------
@@ -224,7 +209,7 @@ _info "target: namespace=$NS cluster=${CLUSTER:-?} context=$KUBE_CTX"
 [ "$_DRY_RUN" = "true" ] && _dry "DRY_RUN=true — cluster writes will be skipped."
 
 # ---------------------------------------------------------------------------
-# Namespace exists guard (read-only — safe in DRY_RUN too)
+# Namespace exists guard
 # ---------------------------------------------------------------------------
 if ! $KUBECTL get namespace "$NS" >/dev/null 2>&1; then
     _error "namespace '$NS' not found on cluster. Check namespace in $SESSION_FILE."
@@ -251,16 +236,59 @@ for _wl in "${_requested[@]}"; do
 done
 
 # ---------------------------------------------------------------------------
-# Create timestamped run directory — ALL artifacts go here
+# Create run directory (or reuse if --run-dir= passed by background fork)
 # ---------------------------------------------------------------------------
-SESSION_NAME="$(basename "$SESSION_FILE" .yaml)"
-RUN_TS="$(date +%Y%m%d-%H%M%S)"
-RUN_DIR="$_SCRIPT_DIR/bench-scratch/${SESSION_NAME}-${RUN_TS}"
-mkdir -p "$RUN_DIR"
+if [ -n "$_RUN_DIR_ARG" ]; then
+    RUN_DIR="$_RUN_DIR_ARG"
+else
+    SESSION_NAME="$(basename "$SESSION_FILE" .yaml)"
+    RUN_TS="$(date +%Y%m%d-%H%M%S)"
+    RUN_DIR="$_SCRIPT_DIR/bench-scratch/${SESSION_NAME}-${RUN_TS}"
+    mkdir -p "$RUN_DIR"
+fi
+
+# ---------------------------------------------------------------------------
+# Background mode: fork self with --foreground and return immediately
+# ---------------------------------------------------------------------------
+if [ "$_FOREGROUND" = "false" ] && [ "$_DRY_RUN" != "true" ]; then
+    LOG="$RUN_DIR/bench-run.log"
+    POD="${BENCH_HARNESS_POD_NAME:-llmdbench-harness}"
+
+    # Re-assemble workload arg for the child
+    _wl_arg="${WORKLOAD_ARG:-$(IFS=','; echo "${_requested[*]}")}"
+
+    nohup bash "$0" --foreground --run-dir="$RUN_DIR" \
+        "$SESSION_FILE" "$_wl_arg" \
+        > "$LOG" 2>&1 &
+    _bg_pid=$!
+    echo "$_bg_pid" > "$RUN_DIR/bench-run.pid"
+
+    echo ""
+    _info "==========================================="
+    _info "Run started in background  (pid=$_bg_pid)"
+    _info "Run dir:  $RUN_DIR"
+    _info "Log:      $LOG"
+    _info ""
+    _info "Track progress:"
+    _info "  tail -f $LOG"
+    _info ""
+    _info "Pod logs (harness stdout):"
+    _info "  $KUBECTL logs -f -n $NS $POD"
+    _info ""
+    _info "Pod status:"
+    _info "  $KUBECTL get pod $POD -n $NS"
+    _info "==========================================="
+    echo ""
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# FOREGROUND execution from here
+# ---------------------------------------------------------------------------
 _info "Run dir: $RUN_DIR"
 
 # ---------------------------------------------------------------------------
-# Run bench_init — writes bench-meta.json into the run dir
+# Run bench_init
 # ---------------------------------------------------------------------------
 _info "Running bench_init for namespace '$NS'..."
 BENCH_NAMESPACE="$NS" \
@@ -272,27 +300,20 @@ META_FILE="$RUN_DIR/bench-meta.json"
 [ -f "$META_FILE" ] || _error "bench_init did not produce $META_FILE"
 
 # ---------------------------------------------------------------------------
-# Pre-run preflight — reads bench-meta.json, reports stack state
+# Pre-run preflight
 # ---------------------------------------------------------------------------
 _info "Running preflight checks..."
 KUBECTL_CMD="$KUBECTL" bash "$_SCRIPT_DIR/bench_preflight.sh" "$META_FILE" || true
 
 # ---------------------------------------------------------------------------
-# Guided stop: if session file still had unresolved fields after write-back,
-# print discovery output and ask user to validate.
-# (In practice only reaches here if namespace was derived rather than explicit.)
+# Guided stop: sentinels remaining after write-back
 # ---------------------------------------------------------------------------
 _needs_review=false
-if python3 -c "
-import sys, re
+python3 -c "
+import sys
 raw = open('$SESSION_FILE').read()
-if '__default__' in raw:
-    sys.exit(1)
-" 2>/dev/null; then
-    : # no sentinels remain
-else
-    _needs_review=true
-fi
+sys.exit(1 if '__default__' in raw else 0)
+" 2>/dev/null || _needs_review=true
 
 if [ "$_needs_review" = "true" ]; then
     echo ""
@@ -370,7 +391,7 @@ for line in lines:
 
 content = ''.join(out_lines)
 if 'target_env:' not in content:
-    now = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+    now = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     content += f"""
 target_env:  # written by bench_run.sh — do not edit by hand
   model_id: {stack.get('model_id', '')}
@@ -407,12 +428,24 @@ print(m.group(1) if m else 'guidellm')
 fi
 
 # ---------------------------------------------------------------------------
-# Ensure harness pod
+# Ensure harness pod — and kill any stale processes from a previous run
 # ---------------------------------------------------------------------------
 _info "Ensuring harness pod..."
 BENCH_EPP_METRICS_SECRET="$META_EPP_SECRET" \
 WVA_METRICS_SERVICE="$META_WVA_SVC" \
 bash "$_SCRIPT_DIR/run_session.sh" ensure "$NS"
+
+_info "Clearing any stale harness processes from previous runs..."
+POD="${BENCH_HARNESS_POD_NAME:-llmdbench-harness}"
+$KUBECTL exec "$POD" -n "$NS" -- bash -c "
+    nohup bash -c '
+        pkill -9 -f llm-d-benchmark.sh 2>/dev/null || true
+        pkill -9 -f inference-perf 2>/dev/null || true
+        pkill -9 -f guidellm 2>/dev/null || true
+    ' >/dev/null 2>&1 &
+    sleep 2
+    echo cleared
+" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # Run workloads
@@ -421,7 +454,9 @@ _HOOK="${BENCH_INTER_SCENARIO_HOOK:-}"
 _FAILED=""
 
 for _wl in "${_requested[@]}"; do
-    _info "Running workload: $_wl"
+    _info "-------------------------------------------"
+    _info "Workload: $_wl  ($(date '+%H:%M:%S'))"
+    _info "-------------------------------------------"
     _wf="$BENCH_WORKLOADS_DIR/${_wl}.yaml"
 
     _rendered_profile=$(mktemp --suffix=".yaml")
@@ -498,10 +533,14 @@ done
 # Final report
 # ---------------------------------------------------------------------------
 echo ""
-_info "Session complete. Results: $RUN_DIR"
-_info "Reproducibility record: $RUN_DIR/bench-session.yaml"
+_info "==========================================="
+_info "Session complete  ($(date '+%H:%M:%S'))"
+_info "Results: $RUN_DIR"
+_info "Record:  $RUN_DIR/bench-session.yaml"
 if [ -n "$_FAILED" ]; then
     _warn "Failed workloads:$_FAILED"
+    _info "==========================================="
     exit 1
 fi
+_info "==========================================="
 exit 0

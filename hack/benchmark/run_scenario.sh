@@ -201,8 +201,20 @@ _info "Starting scenario at epoch $SCENARIO_START_EPOCH"
 # Run the harness inside the pod
 # ---------------------------------------------------------------------------
 _info "Executing harness: $HARNESS, workload: $WORKLOAD"
-# Note: kubectl exec --env is not available in older kubectl versions.
-# Pass env vars via a bash -c wrapper instead.
+
+# Start a progress ticker: prints elapsed time every 30s while the harness runs.
+_ticker_start=$(date +%s)
+(
+    while true; do
+        sleep 30
+        _elapsed=$(( $(date +%s) - _ticker_start ))
+        _pod_phase=$($KUBECTL get pod "$POD" -n "$NS" \
+            -o jsonpath='{.status.phase}' 2>/dev/null || echo "?")
+        echo "run_scenario[$WORKLOAD]: still running... ${_elapsed}s elapsed (pod=${_pod_phase})"
+    done
+) &
+_ticker_pid=$!
+
 $KUBECTL exec "$POD" -n "$NS" -- bash -c "
   export LLMDBENCH_HARNESS_EXPERIMENT_ID='${EXPERIMENT_ID}'
   export LLMDBENCH_RUN_EXPERIMENT_RESULTS_DIR_PREFIX=/requests
@@ -214,6 +226,10 @@ $KUBECTL exec "$POD" -n "$NS" -- bash -c "
   exec llm-d-benchmark.sh --harness='${HARNESS}' --workload='${WORKLOAD}.yaml'
 "
 HARNESS_RC=$?
+
+# Stop the ticker
+kill "$_ticker_pid" 2>/dev/null || true
+wait "$_ticker_pid" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # Record scenario end
