@@ -1,6 +1,6 @@
 # Mission state — single-analyzer
 
-**Last updated:** 2026-08-27. This doc is overwritten on each update, not append-only — it
+**Last updated:** 2026-08-29. This doc is overwritten on each update, not append-only — it
 reflects current status only. For global process rules see `../../CONVENTIONS.md`. For the
 full task plan see `spec-composite-metric-and-optimizer-t2.md`. For the chronological
 reasoning trail (why decisions were made) see `ledger-analyzer-optimizer-refactor.md` —
@@ -33,20 +33,24 @@ when saturation is the only enabled analyzer (today's default).
 | T1 — compose analyzer results (engine-side) | **DONE** | Commit `f5283e2a` on `single-analyzer`. `composeAnalyzerResults` added to `engine_v2.go`; passthrough for the sat-only case. Six pre-existing tests asserting old multi-analyzer forwarding are `t.Skip()`-ed, each with a reason citing this change — pending a redesign, not a bug. |
 | CT1a — nil-guard `rescaleModelDecisions` | **DONE** | Commit `8906ef7b` on `single-analyzer`. Report: `ct1a-implementation-report-2026-08-26.md`. |
 | CT1b — engine-side guard on nil saturation result | **DONE** | Commit `122d1699` on `single-analyzer` (cherry-picked from coder's `75b57b2c`). Report: `ct1b-implementation-report-2026-08-26.md` (note: that report's recorded hash `71c401c2` is stale/cosmetic — self-referential amend artifact; true hash is `122d1699`). |
-| CT2 — collapse `AnalyzerResults []NamedAnalyzerResult` to single `CompositeSignal` field | NOT STARTED | Depends on CT1 (touches same functions). Spec in `spec-composite-metric-and-optimizer-t2.md`. |
+| CT2 — collapse `AnalyzerResults []NamedAnalyzerResult` to single `CompositeSignal` field | IN PROGRESS | Task spec written: `task-ct2-2026-08-29.md`. Two coder-agent dispatch attempts both failed at verification — each isolated worktree branched from stale, unrelated history instead of `single-analyzer`'s tip, missing T1/CT1a/CT1b. Root cause not yet identified; being investigated before retry. No code changes made. See `ledgers/2026-08-29-ct2-resume.md`. |
 | CT3a/CT3b — design + apply engine-side reduce, simplify 7 single-entry helpers | NOT STARTED | CT3a depends on CT2; CT3b depends on CT3a being reviewed. |
 | CT4 — Score-weighted aggregation simplification | **BLOCKED on user** | Confirmed real bug/naming mismatch: `fairShareValue` equalizes absolute remaining demand across models, not coverage ratio (two 80%-covered models at 10x different scale get ~10x different GPU shares). See `fairshare-value-correctness-investigation-2026-08-25.md` and spec CT4 section. Fix-now vs. document-and-defer decision is the user's to make; not code-verifiable. Explicitly out of scope for the current implementation pass. |
 | CT5 — document `RoleCapacities` role-visibility contract | NOT STARTED | Independent of CT1–CT4, can land any time. |
 
 ## Immediate next step
 
-CT1a and CT1b are both landed on `single-analyzer`. Next is CT2 — its spec is already
-implementation-ready in `spec-composite-metric-and-optimizer-t2.md`.
+Root-cause why `isolation: "worktree"` coder dispatches are branching from stale/unrelated
+commit history instead of `single-analyzer`'s tip (`a8a1285c`), before re-dispatching CT2's
+implementation. Task spec is ready at `task-ct2-2026-08-29.md` — the blocker is the coder
+dispatch mechanism, not the spec.
 
 ## Open questions blocking full completion
 
 - CT4's fairness-definition decision — needs the user, not code investigation (see
   `spec-composite-metric-and-optimizer-t2.md` CT4 section and ledger §36).
+- Why coder-agent `isolation: "worktree"` dispatches aren't branching from `single-analyzer`'s
+  tip (see Session log's `2026-08-29-ct2-resume` entry) — being investigated.
 
 ## Provenance note (2026-08-27 migration)
 
