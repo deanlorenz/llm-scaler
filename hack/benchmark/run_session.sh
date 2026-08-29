@@ -204,7 +204,7 @@ spec:
     - name: METRICS_COLLECTION_INTERVAL
       value: "15"
     - name: RAYON_NUM_THREADS
-      value: "4"
+      value: "16"
     volumeMounts:
     - name: results
       mountPath: /requests

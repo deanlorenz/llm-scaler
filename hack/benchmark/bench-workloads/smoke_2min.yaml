@@ -10,7 +10,7 @@ load:
     - rate: 2
       duration: 120
   request_timeout: 60
-  num_workers: 1
+  num_workers: 16
 
 api:
   type: completion
