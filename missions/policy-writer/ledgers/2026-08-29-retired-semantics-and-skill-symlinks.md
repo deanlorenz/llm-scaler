@@ -64,3 +64,5 @@ followed.
   existed as real files will inherit real copies unless explicitly fixed to symlink —
   this could recur for any future worktree branched the same way; worth a general check
   whenever setting up a new mission worktree from `session-tracking`.
+
+## Verified 2026-08-29 — all points already captured
