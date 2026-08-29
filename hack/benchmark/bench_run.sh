@@ -435,18 +435,6 @@ BENCH_EPP_METRICS_SECRET="$META_EPP_SECRET" \
 WVA_METRICS_SERVICE="$META_WVA_SVC" \
 bash "$_SCRIPT_DIR/run_session.sh" ensure "$NS"
 
-_info "Clearing any stale harness processes from previous runs..."
-POD="${BENCH_HARNESS_POD_NAME:-llmdbench-harness}"
-$KUBECTL exec "$POD" -n "$NS" -- bash -c "
-    nohup bash -c '
-        pkill -9 -f llm-d-benchmark.sh 2>/dev/null || true
-        pkill -9 -f inference-perf 2>/dev/null || true
-        pkill -9 -f guidellm 2>/dev/null || true
-    ' >/dev/null 2>&1 &
-    sleep 2
-    echo cleared
-" 2>/dev/null || true
-
 # ---------------------------------------------------------------------------
 # Run workloads
 # ---------------------------------------------------------------------------

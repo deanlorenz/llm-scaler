@@ -310,10 +310,9 @@ case "$CMD" in
   ensure)
     phase=$(_pod_phase)
     if [ "$phase" = "Running" ] && _pod_ready; then
-        _info "Pod $POD already running and Ready in $NS — no-op."
-        exit 0
-    fi
-    if [ -n "$phase" ] && [ "$phase" != "Running" ]; then
+        _info "Pod $POD already running and Ready in $NS — recreating for clean state."
+        _delete_pod
+    elif [ -n "$phase" ]; then
         _info "Pod $POD exists but phase=$phase — deleting and recreating."
         _delete_pod
     fi
