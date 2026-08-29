@@ -203,6 +203,8 @@ spec:
       value: "9090"
     - name: METRICS_COLLECTION_INTERVAL
       value: "15"
+    - name: RAYON_NUM_THREADS
+      value: "4"
     volumeMounts:
     - name: results
       mountPath: /requests
