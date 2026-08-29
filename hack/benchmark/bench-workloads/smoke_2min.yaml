@@ -1,0 +1,41 @@
+# smoke_2min — 2-minute smoke run at low rate (inference-perf)
+# Fields marked "# auto" are overwritten by bench-init from target_env.
+# All other fields are user-controlled and never modified automatically.
+
+harness: inference-perf
+
+load:
+  type: constant
+  stages:
+    - rate: 2
+      duration: 120
+  request_timeout: 60
+  num_workers: 1
+
+api:
+  type: completion
+  streaming: true
+
+server:
+  type: vllm
+  model_name:  # auto
+  base_url:    # auto
+  ignore_eos: true
+
+tokenizer:
+  pretrained_model_name_or_path:  # auto
+
+data:
+  type: random
+  input_distribution:
+    min: 512
+    max: 512
+    mean: 512
+    std_dev: 0
+    total_count: 1000
+  output_distribution:
+    min: 128
+    max: 128
+    mean: 128
+    std_dev: 0
+    total_count: 1000
