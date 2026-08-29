@@ -1,0 +1,21 @@
+# bench-session: dhl-la-1708 (pokprod)
+#
+# Minimal user-authored session file. Fill in target_id and workloads.
+# Everything under target_env is written by bench-init — do not edit by hand.
+#
+# Usage:
+#   make bench-init  BENCH_SESSION=hack/benchmark/bench-sessions/dhl-la-1708.yaml
+#   make bench-run   BENCH_SESSION=hack/benchmark/bench-sessions/dhl-la-1708.yaml
+#   make bench-run   BENCH_SESSION=hack/benchmark/bench-sessions/dhl-la-1708.yaml BENCH_WORKLOAD=smoke_2min
+
+target_id:
+  cluster: pokprod
+  namespace: dhl-la-1708
+  kube_context: "dhl-la-1708/api-pokprod001-ete14-res-ibm-com:6443/DEAN@il.ibm.com"
+  kubeconfig: /home/dean/.kube/la-test
+
+workloads:
+  - smoke_2min
+  - decode_heavy
+  - prefill_heavy
+  - symmetrical
