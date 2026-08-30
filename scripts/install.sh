@@ -22,13 +22,8 @@ HOOK_DIR="$BIN_DIR"
 echo "==> Building binaries from $REPO_DIR"
 (cd "$REPO_DIR" && go build -o "$BIN_DIR/agentbusd" ./cmd/agentbusd)
 (cd "$REPO_DIR" && go build -o "$BIN_DIR/agentbus-relay" ./cmd/agentbus-relay)
-(cd "$REPO_DIR" && go build -o "$BIN_DIR/agentbus-fetch" ./cmd/agentbus-fetch)
-echo "    agentbusd, agentbus-relay, agentbus-fetch -> $BIN_DIR/"
-
-echo "==> Installing hook script"
-cp "$REPO_DIR/hooks/agentbus-hook.py" "$HOOK_DIR/agentbus-hook.py"
-chmod +x "$HOOK_DIR/agentbus-hook.py"
-echo "    agentbus-hook.py -> $HOOK_DIR/"
+(cd "$REPO_DIR" && go build -o "$BIN_DIR/agentbus-hook" ./cmd/agentbus-hook)
+echo "    agentbusd, agentbus-relay, agentbus-hook -> $BIN_DIR/"
 
 echo "==> Registering PostToolBatch hook in ~/.claude/settings.json"
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
@@ -40,8 +35,8 @@ if [ ! -f "$CLAUDE_SETTINGS" ]; then
 fi
 
 # Add the PostToolBatch hook if not already present
-HOOK_CMD="$HOOK_DIR/agentbus-hook.py"
-EXISTING=$(jq -r '.hooks.PostToolBatch // [] | map(.hooks // []) | flatten | map(.command // "") | .[]' "$CLAUDE_SETTINGS" 2>/dev/null || true)
+HOOK_CMD="$HOOK_DIR/agentbus-hook"
+EXISTING=$(jq -r '(.hooks.PostToolBatch // []) | map(.hooks // []) | flatten | map(.command // "") | .[]' "$CLAUDE_SETTINGS" 2>/dev/null || true)
 if echo "$EXISTING" | grep -qF "$HOOK_CMD"; then
     echo "    PostToolBatch hook already registered, skipping"
 else

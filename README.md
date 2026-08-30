@@ -25,14 +25,12 @@ two-session verification still pending.
 cmd/
   agentbusd/          # MCP server: publish, fetch-since, publish-presence, list-missions
   agentbus-relay/     # background daemon: watches NATS, writes per-worktree marker files
-  agentbus-fetch/     # one-shot CLI used by the hook to fetch new messages
+  agentbus-hook/      # PostToolBatch hook binary: cheap marker check, surfaces new messages
 internal/
   bus/                # shared JetStream helpers (stream ensure, publish, fetch, worktree reg)
   schema/             # message schema (Message, Presence, From)
 scripts/
-  install.sh          # builds binaries, installs hook, registers in Claude/Bob config
-hooks/
-  agentbus-hook.py    # PostToolBatch hook: cheap marker check, surfaces new messages
+  install.sh          # builds binaries, registers in Claude/Bob config
 ```
 
 ## Quick start
