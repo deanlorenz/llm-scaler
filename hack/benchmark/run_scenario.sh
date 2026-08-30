@@ -381,8 +381,10 @@ _pod_entries=$($KUBECTL exec "$POD" -n "$NS" -- bash -c \
 if [ -n "$_pod_entries" ]; then
     while IFS= read -r _entry; do
         [ -z "$_entry" ] && continue
-        _info "  copying /requests/$_entry → $RESULTS_OUT/"
-        $KUBECTL cp "${NS}/${POD}:/requests/${_entry}" "$RESULTS_OUT/${_entry}" || \
+        _info "  copying /requests/$_entry → $RESULTS_OUT/$_entry/"
+        mkdir -p "$RESULTS_OUT/$_entry"
+        # Use /path/. to recursively copy directory contents via kubectl cp.
+        $KUBECTL cp "${NS}/${POD}:/requests/${_entry}/." "$RESULTS_OUT/${_entry}/" || \
             _warn "kubectl cp failed for /requests/$_entry; results may be incomplete."
     done <<< "$_pod_entries"
 else
