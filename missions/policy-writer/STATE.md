@@ -81,4 +81,4 @@ pause for user review, not an incomplete/broken state.
 ## Session log
 
 - 2026-08-27 session=2026-08-27-session-tracking-setup status=retired ledger=ledgers/2026-08-29-retired-semantics-and-skill-symlinks.md
-- 2026-08-30 session=2026-08-30-conventions-split-and-trim status=active ledger=ledgers/2026-08-30-conventions-split-and-trim.md
+- 2026-08-30 session=2026-08-30-conventions-split-and-trim status=retired ledger=ledgers/2026-08-30-conventions-split-and-trim.md
