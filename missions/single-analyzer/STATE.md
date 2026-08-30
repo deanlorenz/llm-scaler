@@ -100,4 +100,4 @@ out of it on 2026-08-30.
 
 - 2026-08-27 session=2026-08-27-ct1b-review status=retired ledger=ledgers/2026-08-27-ct1b-review.md
 - 2026-08-29T22:32 session=2026-08-29-ct2-resume status=retired ledger=ledgers/2026-08-29-ct2-resume.md
-- 2026-08-30T08:00 session=2026-08-30-ct3-resume status=active ledger=ledgers/2026-08-30-ct3-resume.md
+- 2026-08-30T08:00 session=2026-08-30-ct3-resume status=retired ledger=ledgers/2026-08-30-ct3-resume.md
