@@ -69,4 +69,4 @@ already-broken namespaces).
 
 ## Session log
 
-- 2026-08-30T00:00 session=epp-scrape-secret-initial status=active ledger=ledgers/2026-08-30-epp-scrape-secret-initial.md
+- 2026-08-30T00:00 session=epp-scrape-secret-initial status=retired ledger=ledgers/2026-08-30-epp-scrape-secret-initial.md
