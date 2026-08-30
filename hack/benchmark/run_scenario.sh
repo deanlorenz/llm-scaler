@@ -372,21 +372,29 @@ fi
 RESULTS_OUT="$SCENARIO_OUT_DIR/results"
 mkdir -p "$RESULTS_OUT"
 
-_info "Collecting results from pod: /requests/"
-# List everything under /requests/ and copy each entry individually.
-# The harness directory name format varies by harness type and version, so we
-# do not rely on a prefix guess — we copy whatever the harness actually wrote.
-_pod_entries=$($KUBECTL exec "$POD" -n "$NS" -- bash -c \
-    "ls /requests/ 2>/dev/null" || true)
-if [ -n "$_pod_entries" ]; then
-    while IFS= read -r _entry; do
-        [ -z "$_entry" ] && continue
-        _info "  copying /requests/$_entry → $RESULTS_OUT/"
-        $KUBECTL cp "${NS}/${POD}:/requests/${_entry}" "$RESULTS_OUT/${_entry}" || \
-            _warn "kubectl cp failed for /requests/$_entry; results may be incomplete."
-    done <<< "$_pod_entries"
+# The harness writes exactly one results directory under /requests/, named
+# <harness>__<stack-name>. We know the expected name before the run starts,
+# so we check for it explicitly rather than copying whatever happens to be there.
+_EXPECTED_RESULTS_DIR="${HARNESS}__${_STACK_NAME}"
+_info "Collecting results from pod: /requests/${_EXPECTED_RESULTS_DIR}"
+
+if $KUBECTL exec "$POD" -n "$NS" -- \
+    test -d "/requests/${_EXPECTED_RESULTS_DIR}" 2>/dev/null; then
+    # kubectl cp may emit tar warnings on stderr and exit non-zero even when the
+    # copy succeeds. Verify success by checking the destination exists and is
+    # non-empty rather than relying solely on the exit code.
+    $KUBECTL cp \
+        "${NS}/${POD}:/requests/${_EXPECTED_RESULTS_DIR}" \
+        "$RESULTS_OUT/${_EXPECTED_RESULTS_DIR}" 2>/dev/null || true
+    if [ -d "$RESULTS_OUT/${_EXPECTED_RESULTS_DIR}" ] && \
+       [ -n "$(ls -A "$RESULTS_OUT/${_EXPECTED_RESULTS_DIR}" 2>/dev/null)" ]; then
+        _info "Results copied to $RESULTS_OUT/${_EXPECTED_RESULTS_DIR}"
+    else
+        _warn "kubectl cp for /requests/${_EXPECTED_RESULTS_DIR} produced no output; results missing."
+    fi
 else
-    _warn "No results found under /requests/ in pod $POD; listing for diagnostics:"
+    _warn "Expected results directory /requests/${_EXPECTED_RESULTS_DIR} not found in pod."
+    _info "Contents of /requests/ for diagnostics:"
     $KUBECTL exec "$POD" -n "$NS" -- ls -la /requests/ 2>/dev/null || true
 fi
 
