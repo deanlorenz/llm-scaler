@@ -306,6 +306,123 @@ PYEOF
 }
 
 # ---------------------------------------------------------------------------
+# EPP metrics preflight (runs inside the harness pod after ensure)
+# ---------------------------------------------------------------------------
+# Verifies the EPP bearer token can be read by the pod's SA and that the EPP
+# metrics endpoint responds with actual metrics (not Unauthorized or a timeout).
+# Prints a clear WARNING but does not abort — EPP metrics are optional; a run
+# with missing EPP data is still valid. The point is to surface the failure
+# before the run starts, not after 25 minutes of silent Unauthorized scrapes.
+_preflight_epp() {
+    local secret="$EPP_METRICS_SECRET"
+    _info "EPP metrics preflight: secret=$secret namespace=$NS"
+
+    # Step 1: verify the SA can read the secret and it has a token field.
+    #
+    # The most common cause of an empty token is a kustomize namePrefix bug:
+    # the overlay renames the SA (e.g. epp-metrics-reader → wva-epp-metrics-reader)
+    # but the kubernetes.io/service-account.name annotation inside the Secret still
+    # names the original SA. The API server finds no matching SA and never populates
+    # .data.token. Fix: patch the annotation to the prefixed name and replace the
+    # secret so the token controller re-evaluates it:
+    #
+    #   kubectl annotate secret <secret> -n <ns> \
+    #     kubernetes.io/service-account.name=<prefixed-sa-name> --overwrite
+    #   kubectl replace -f - <<EOF
+    #   apiVersion: v1
+    #   kind: Secret
+    #   metadata:
+    #     name: <secret>
+    #     namespace: <ns>
+    #     annotations:
+    #       kubernetes.io/service-account.name: <prefixed-sa-name>
+    #   type: kubernetes.io/service-account-token
+    #   EOF
+    #
+    # Or redeploy WVA from a fixed kustomize base (the fix is in
+    # config/base/rbac/kustomization.yaml replacements[]).
+    local token
+    token=$($KUBECTL exec "$POD" -n "$NS" -- \
+        kubectl get secret "$secret" -n "$NS" \
+        -o jsonpath='{.data.token}' 2>/dev/null | base64 -d 2>/dev/null) || true
+    if [ -z "$token" ]; then
+        # Probe what SA the secret's annotation currently names — that tells the
+        # user whether this is the namePrefix mismatch or something else entirely.
+        local annotated_sa
+        annotated_sa=$($KUBECTL get secret "$secret" -n "$NS" \
+            -o jsonpath='{.metadata.annotations.kubernetes\.io/service-account\.name}' \
+            2>/dev/null) || true
+        local actual_sa
+        actual_sa=$($KUBECTL get sa -n "$NS" \
+            -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | \
+            tr ' ' '\n' | grep -i 'epp.*metrics\|metrics.*epp' | head -1) || true
+        echo "run_session: WARNING: EPP preflight FAIL — secret '$secret' in $NS has no token." >&2
+        if [ -n "$annotated_sa" ] && [ -n "$actual_sa" ] && [ "$annotated_sa" != "$actual_sa" ]; then
+            echo "run_session:   Cause: the secret's annotation names SA '$annotated_sa'" \
+                 "but the actual SA in this namespace is '$actual_sa'." \
+                 "This is the kustomize namePrefix bug — the overlay renamed the SA" \
+                 "but not the annotation inside the secret, so the API server never" \
+                 "populated .data.token." >&2
+            echo "run_session:   Fix (without redeploying WVA):" >&2
+            echo "run_session:     kubectl annotate secret $secret -n $NS \\" >&2
+            echo "run_session:       kubernetes.io/service-account.name=$actual_sa --overwrite" >&2
+            echo "run_session:     kubectl get secret $secret -n $NS -o yaml \\" >&2
+            echo "run_session:       | kubectl replace -f -" >&2
+            echo "run_session:   Fix (permanent — redeploy from updated kustomize base):" >&2
+            echo "run_session:     make deploy-wva-on-openshift NAMESPACE=$NS" >&2
+        else
+            echo "run_session:   The pod SA may lack 'get' on secret '$secret'," \
+                 "or the secret does not exist. Check the Role in $NS:" >&2
+            echo "run_session:     kubectl get role llmdbench-harness-role -n $NS -o yaml" >&2
+        fi
+        echo "run_session:   All EPP scrapes will return Unauthorized for this run." >&2
+        return
+    fi
+    _info "EPP preflight: token obtained from secret $secret."
+
+    # Step 2: find an EPP pod IP and verify the metrics endpoint accepts the token.
+    local epp_ip
+    epp_ip=$($KUBECTL get pods -n "$NS" \
+        -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.podIP}{"\n"}{end}' \
+        2>/dev/null | grep -i epp | head -1 | awk '{print $2}') || true
+    if [ -z "$epp_ip" ]; then
+        _info "EPP preflight: no EPP pod found in $NS — skipping connectivity check."
+        return
+    fi
+
+    local result
+    result=$($KUBECTL exec "$POD" -n "$NS" -- \
+        curl -sS --connect-timeout 5 --max-time 10 \
+        -H "Authorization: Bearer $token" \
+        "http://${epp_ip}:9090/metrics" 2>/dev/null | head -1) || true
+
+    if [ "$result" = "Unauthorized" ]; then
+        echo "run_session: WARNING: EPP preflight FAIL — token from secret '$secret'" \
+             "is rejected by the EPP pod ($epp_ip:9090)." >&2
+        echo "run_session:   The token was obtained but the EPP rejected it." \
+             "Check that the ClusterRoleBinding 'epp-metrics-reader-role-binding'" \
+             "includes SA '$(_detect_epp_secret_sa)' and that the EPP's" \
+             "authentication webhook is configured correctly." >&2
+        echo "run_session:   All EPP scrapes will return Unauthorized for this run." >&2
+    elif [ -z "$result" ]; then
+        echo "run_session: WARNING: EPP preflight FAIL — no response from EPP pod" \
+             "($epp_ip:9090). Connection timed out — EPP metrics port may be wrong" \
+             "or a NetworkPolicy is blocking in-pod access." >&2
+        echo "run_session:   Set BENCH_EPP_METRICS_PORT=<port> if the EPP listens" \
+             "on a non-standard port." >&2
+    else
+        _info "EPP preflight OK: EPP pod $epp_ip:9090 returned metrics."
+    fi
+}
+
+# Return the EPP metrics SA name as it actually exists in $NS (post-namePrefix).
+_detect_epp_secret_sa() {
+    $KUBECTL get sa -n "$NS" \
+        -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | \
+        tr ' ' '\n' | grep -i 'epp.*metrics\|metrics.*epp' | head -1
+}
+
+# ---------------------------------------------------------------------------
 # Subcommands
 # ---------------------------------------------------------------------------
 case "$CMD" in
@@ -321,6 +438,7 @@ case "$CMD" in
     _apply_rbac
     _create_pod
     _patch_pod
+    _preflight_epp
     _info "Session ready: pod $POD in $NS."
     ;;
 

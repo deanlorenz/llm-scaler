@@ -741,20 +741,54 @@ def scan_pod_scrapes(run_dir):
 
 
 def read_pod_timings(run_dir):
-    """Read wva_pod_timings.json → {pod_name: {created_t, ready_t}}."""
+    """Read pod created/ready timestamps from the best available source.
+
+    Primary: metrics/processed/wva_pod_timings.json (explicit per-pod records).
+    Fallback: metrics/processed/replica_status_timeseries.json — derives
+      created_t as the first snapshot where a pod name appears in any
+      controller's pods[] list, and ready_t as the first snapshot where
+      that pod appears in readyPods[] (or similar ready field).
+
+    Returns {pod_name: {created_t, ready_t}}.
+    """
     path = os.path.join(run_dir, "metrics", "processed", "wva_pod_timings.json")
     data = read_json(path)
-    if not data:
+    if data:
+        result = {}
+        for p in data.get("pods", []):
+            name = p.get("name") or p.get("pod_name")
+            if not name:
+                continue
+            result[name] = {
+                "created_t": iso_epoch(p.get("created")),
+                "ready_t": iso_epoch(p.get("ready_at") or p.get("ready")),
+            }
+        if result:
+            return result
+
+    # Fallback: derive from replica_status_timeseries.json snapshots.
+    # Each snapshot.controllers[].pods[] (or readyPods[]) may list pod names.
+    ts_path = os.path.join(run_dir, "metrics", "processed", "replica_status_timeseries.json")
+    ts_data = read_json(ts_path)
+    if not ts_data:
         return {}
     result = {}
-    for p in data.get("pods", []):
-        name = p.get("name") or p.get("pod_name")
-        if not name:
+    for snap in ts_data.get("snapshots", []):
+        ts = iso_epoch(snap.get("timestamp")) if isinstance(snap.get("timestamp"), str) else snap.get("timestamp")
+        if ts is None:
             continue
-        result[name] = {
-            "created_t": iso_epoch(p.get("created")),
-            "ready_t": iso_epoch(p.get("ready_at") or p.get("ready")),
-        }
+        for ctrl in snap.get("controllers", []):
+            # pods[] or allPods[] → creation observed here
+            for pod_name in (ctrl.get("pods") or ctrl.get("allPods") or []):
+                if pod_name and pod_name not in result:
+                    result[pod_name] = {"created_t": ts, "ready_t": None}
+            # readyPods[] → ready observed here
+            for pod_name in (ctrl.get("readyPods") or ctrl.get("ready_pods") or []):
+                if pod_name:
+                    if pod_name not in result:
+                        result[pod_name] = {"created_t": None, "ready_t": ts}
+                    elif result[pod_name].get("ready_t") is None:
+                        result[pod_name]["ready_t"] = ts
     return result
 
 
@@ -985,21 +1019,52 @@ def read_replica_timeseries(run_dir):
 def read_so_config(run_dir):
     """Read scaledobject-config.json → {so_name: config_dict}. Returns {} when absent.
 
+    Falls back to wva/bench-meta.json when scaledobject-config.json is missing.
+    The bench-meta stacks[] schema provides: scaledobject (SO name), deployment
+    (deploy name), min_replicas, max_replicas, so_paused, so_keda_active.
+    gpu_count, role, and cost are never present in bench-meta and stay null.
+
     Expected fields per entry: so_name, deploy_name, gpu_count, role, cost,
     min_replicas, max_replicas.
     """
     path = os.path.join(run_dir, "scaledobject-config.json")
     data = read_json(path)
-    if not data:
+    if data:
+        if isinstance(data, list):
+            result = {}
+            for item in data:
+                key = item.get("so_name") or item.get("so_id")
+                if key:
+                    result[key] = item
+            return result
+        return data
+
+    # Fallback: wva/bench-meta.json stacks[]
+    meta_path = os.path.join(run_dir, "wva", "bench-meta.json")
+    meta = read_json(meta_path)
+    if not meta:
         return {}
-    if isinstance(data, list):
-        result = {}
-        for item in data:
-            key = item.get("so_name") or item.get("so_id")
-            if key:
-                result[key] = item
-        return result
-    return data
+    stacks = meta.get("stacks", [])
+    if not stacks:
+        return {}
+    result = {}
+    for stack in stacks:
+        so_name = stack.get("scaledobject") or stack.get("name")
+        deploy_name = stack.get("deployment")
+        if not so_name:
+            continue
+        result[so_name] = {
+            "so_name": so_name,
+            "deploy_name": deploy_name,
+            "gpu_count": None,
+            "role": None,
+            "cost": None,
+            "min_replicas": stack.get("min_replicas"),
+            "max_replicas": stack.get("max_replicas"),
+            "so_paused": stack.get("so_paused"),
+            "so_keda_active": stack.get("so_keda_active"),
+        }
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1111,11 +1176,22 @@ def build_identity_map(so_names, deploy_names, so_config, ctrl_log_path, input_r
 
 
 def find_controller_log(run_dir):
-    """Return path to the WVA controller text log, or None."""
-    for candidate in ("controller.log", "wva-controller.log", "wva_controller.log"):
-        path = os.path.join(run_dir, candidate)
-        if os.path.isfile(path):
-            return path
+    """Return path to the WVA controller text log, or None.
+
+    Probes in priority order:
+      1. logs/wva-controller.log  — written by capture_wva_controller_log.sh
+         called from run_scenario.sh (canonical new location)
+      2. wva-controller.log / controller.log / wva_controller.log
+         at run_dir root (legacy / manual copies)
+    """
+    for candidate in (
+        os.path.join(run_dir, "logs", "wva-controller.log"),
+        os.path.join(run_dir, "wva-controller.log"),
+        os.path.join(run_dir, "controller.log"),
+        os.path.join(run_dir, "wva_controller.log"),
+    ):
+        if os.path.isfile(candidate):
+            return candidate
     return None
 
 
@@ -2209,7 +2285,6 @@ def main():
     # --- Pod scrapes ---
     log("Scanning pod scrapes...")
     pod_scrapes = scan_pod_scrapes(run_dir)
-    pod_timings_path = os.path.join(run_dir, "metrics", "processed", "wva_pod_timings.json")
     pod_timings = read_pod_timings(run_dir)
     if pod_scrapes:
         input_report.add("pod Prometheus scrapes", "found",
@@ -2219,10 +2294,16 @@ def main():
         input_report.add("pod Prometheus scrapes", "missing",
                          path=os.path.join(run_dir, "metrics", "raw"),
                          note="No vLLM pod scrape files found")
-    if os.path.isfile(pod_timings_path):
-        input_report.add("wva_pod_timings.json", "found", path=pod_timings_path)
+    _pod_timings_primary = os.path.join(run_dir, "metrics", "processed", "wva_pod_timings.json")
+    _pod_timings_fallback = os.path.join(run_dir, "metrics", "processed", "replica_status_timeseries.json")
+    if os.path.isfile(_pod_timings_primary):
+        input_report.add("pod timings", "found", path=_pod_timings_primary,
+                         note=f"{len(pod_timings)} pods with timing data")
+    elif pod_timings:
+        input_report.add("pod timings", "fallback", path=_pod_timings_fallback,
+                         note=f"derived from replica_status_timeseries.json; {len(pod_timings)} pods")
     else:
-        input_report.add("wva_pod_timings.json", "missing", path=pod_timings_path,
+        input_report.add("pod timings", "missing", path=_pod_timings_primary,
                          note="created_t/ready_t will be null on all pods")
 
     # --- WVA Prometheus scrapes ---
@@ -2258,12 +2339,18 @@ def main():
             input_report.add("replica timeseries", "missing", path=p1,
                              note="Neither replica_status_timeseries.json nor wva_replica_samples.json found")
     so_config = read_so_config(run_dir)
-    so_cfg_path = os.path.join(run_dir, "scaledobject-config.json")
-    if os.path.isfile(so_cfg_path):
-        input_report.add("scaledobject-config.json", "found", path=so_cfg_path)
+    _so_cfg_path = os.path.join(run_dir, "scaledobject-config.json")
+    _bench_meta_path = os.path.join(run_dir, "wva", "bench-meta.json")
+    if os.path.isfile(_so_cfg_path):
+        input_report.add("SO config", "found", path=_so_cfg_path,
+                         note=f"{len(so_config)} SOs")
+    elif so_config:
+        input_report.add("SO config", "fallback", path=_bench_meta_path,
+                         note=f"derived from wva/bench-meta.json stacks[]; {len(so_config)} SOs; "
+                              "gpu_count/role/cost null (not in bench-meta)")
     else:
-        input_report.add("scaledobject-config.json", "missing", path=so_cfg_path,
-                         note="gpu_count, role, cost, min/max_replicas will be null (runtools gap)")
+        input_report.add("SO config", "missing", path=_so_cfg_path,
+                         note="gpu_count, role, cost, min/max_replicas will be null")
 
     # --- Controller log ---
     log("Parsing controller log...")

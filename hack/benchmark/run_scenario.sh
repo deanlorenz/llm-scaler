@@ -158,6 +158,39 @@ _UID=$(date +%s)
 EXPERIMENT_ID="${_UID}_${WORKLOAD}"
 
 # ---------------------------------------------------------------------------
+# Prepare logs/ directory
+# ---------------------------------------------------------------------------
+mkdir -p "$SCENARIO_OUT_DIR/logs"
+
+# ---------------------------------------------------------------------------
+# Start WVA controller log capture
+# ---------------------------------------------------------------------------
+_WVA_CTRL_LOG="$SCENARIO_OUT_DIR/logs/wva-controller.log"
+_WVA_CTRL_DEPLOY="${WVA_CONTROLLER_DEPLOYMENT:-wva-controller-manager}"
+_wva_ctrl_log_started=false
+if [ "${BENCH_SKIP_WVA_CTRL_LOG:-false}" != "true" ]; then
+    if bash "$_SCRIPT_DIR/capture_wva_controller_log.sh" start "$NS" "$_WVA_CTRL_LOG" "$_WVA_CTRL_DEPLOY"; then
+        _wva_ctrl_log_started=true
+    else
+        _warn "WVA controller log capture failed to start; continuing without it."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Start replica sampler (client-side fix for upstream harness label-match bug)
+# ---------------------------------------------------------------------------
+_REPLICA_TS="$SCENARIO_OUT_DIR/metrics/processed/replica_status_timeseries.json"
+mkdir -p "$(dirname "$_REPLICA_TS")"
+_replica_sampler_started=false
+if [ "${BENCH_SKIP_REPLICA_SAMPLE:-false}" != "true" ]; then
+    if bash "$_SCRIPT_DIR/sample_replicas.sh" start "$NS" "$_REPLICA_TS"; then
+        _replica_sampler_started=true
+    else
+        _warn "Replica sampler failed to start; replica_status_timeseries.json will be empty."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 # Start client-side WVA metrics scraper
 # ---------------------------------------------------------------------------
 WVA_OUT_DIR="$SCENARIO_OUT_DIR/wva-metrics"
@@ -238,6 +271,20 @@ SCENARIO_END_EPOCH=$(date +%s)
 _info "Harness exited (rc=$HARNESS_RC) at epoch $SCENARIO_END_EPOCH"
 
 # ---------------------------------------------------------------------------
+# Stop WVA controller log capture
+# ---------------------------------------------------------------------------
+if [ "$_wva_ctrl_log_started" = "true" ]; then
+    bash "$_SCRIPT_DIR/capture_wva_controller_log.sh" stop "$_WVA_CTRL_LOG" || true
+fi
+
+# ---------------------------------------------------------------------------
+# Stop replica sampler
+# ---------------------------------------------------------------------------
+if [ "$_replica_sampler_started" = "true" ]; then
+    bash "$_SCRIPT_DIR/sample_replicas.sh" stop "$_REPLICA_TS" || true
+fi
+
+# ---------------------------------------------------------------------------
 # Stop WVA metrics scraper
 # ---------------------------------------------------------------------------
 if [ "$_wva_scrape_started" = "true" ]; then
@@ -314,6 +361,37 @@ if [ "${BENCH_SKIP_IGW_LOGS:-false}" != "true" ]; then
         "$SCENARIO_END_EPOCH" \
         "$SCENARIO_OUT_DIR/logs/igw_pods.log" || \
         _warn "IGW log collection failed or was skipped."
+fi
+
+# ---------------------------------------------------------------------------
+# Post-scenario EPP pod log collection
+# ---------------------------------------------------------------------------
+if [ "${BENCH_SKIP_EPP_LOGS:-false}" != "true" ]; then
+    _info "Collecting EPP pod logs for run window..."
+    _EPP_LOG="$SCENARIO_OUT_DIR/logs/epp_pods.log"
+    # Collect from all pods matching the epp label; since= covers the run window.
+    _SINCE_S=$(( SCENARIO_END_EPOCH - SCENARIO_START_EPOCH + 30 ))
+    _epp_pods=$($KUBECTL get pods -n "$NS" -l 'app=inference-gateway' \
+        -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
+    if [ -z "$_epp_pods" ]; then
+        # Fallback: look for pods whose name contains 'epp'
+        _epp_pods=$($KUBECTL get pods -n "$NS" \
+            -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | \
+            tr ' ' '\n' | grep -i 'epp' || true)
+    fi
+    if [ -n "$_epp_pods" ]; then
+        {
+            echo "# EPP pod logs collected at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "# run window: ${SCENARIO_START_EPOCH}–${SCENARIO_END_EPOCH}"
+            for _p in $_epp_pods; do
+                echo "# === pod: $_p ==="
+                $KUBECTL logs "$_p" -n "$NS" --since="${_SINCE_S}s" 2>/dev/null || true
+            done
+        } > "$_EPP_LOG"
+        _info "EPP pod logs written to: $_EPP_LOG"
+    else
+        _warn "No EPP pods found in $NS; skipping epp_pods.log."
+    fi
 fi
 
 # ---------------------------------------------------------------------------
