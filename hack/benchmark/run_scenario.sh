@@ -316,7 +316,7 @@ $KUBECTL exec "$POD" -n "$NS" -- bash -c "
   export LLMDBENCH_HARNESS_STACK_ENDPOINT_URL='${ENDPOINT_URL}'
   export LLMDBENCH_DEPLOY_CURRENT_MODEL='${MODEL_ID}'
   exec llm-d-benchmark.sh --harness='${HARNESS}' --workload='${WORKLOAD}.yaml'
-"
+" || true
 HARNESS_RC=$?
 
 # Stop the ticker

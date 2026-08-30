@@ -228,79 +228,41 @@ _delete_pod() {
 # ---------------------------------------------------------------------------
 # In-pod patches (idempotent)
 # ---------------------------------------------------------------------------
+# Each patch is a standalone Python file in hack/benchmark/patches/.
+# _apply_patch copies it into the pod and runs it against the target file.
+# The patch script receives the target path as sys.argv[1] and exits non-zero
+# on failure (anchor missing, write error), zero on success or already-applied.
+_apply_patch() {
+    local label="$1"
+    local local_script="$2"
+    local remote_target="$3"
+    local remote_script="/tmp/$(basename "$local_script")"
+
+    $KUBECTL cp "$local_script" "${NS}/${POD}:${remote_script}" \
+        || { _error "Patch '$label': failed to copy script to pod"; return 1; }
+
+    $KUBECTL exec "$POD" -n "$NS" -- \
+        python3 "$remote_script" "$remote_target" \
+        || { _error "Patch '$label': script exited non-zero"; return 1; }
+
+    $KUBECTL exec "$POD" -n "$NS" -- rm -f "$remote_script" || true
+}
+
 _patch_pod() {
     _pod_ready || _error "Pod $POD is not Ready — run 'ensure' first."
 
+    local patches_dir
+    patches_dir="$(dirname "${BASH_SOURCE[0]}")/patches"
+
     _info "Applying in-pod patch 1: process_epp_logs.py (EPP float timestamp)..."
-    $KUBECTL exec "$POD" -n "$NS" -- python3 - /usr/local/bin/process_epp_logs.py <<'PYEOF'
-import io, sys
-
-path = sys.argv[1]
-src = io.open(path, encoding="utf-8").read()
-
-MARK = "# wva-patch: numeric ts"
-if MARK in src:
-    print("  fix 1 (EPP float ts): already applied")
-    sys.exit(0)
-
-IMPORT_OLD = "from datetime import datetime\n"
-IMPORT_NEW = "from datetime import datetime, timezone\n"
-ANCHOR = '    # Handle nanosecond timestamps by truncating to 6 decimal places\n'
-BRANCH = (
-    MARK + ": EPP logs carry epoch seconds as a JSON number, not an ISO\n"
-    "    # string. re.sub() then raises TypeError on the first entry and the whole\n"
-    "    # log is dropped.\n"
-    "    if isinstance(ts_str, (int, float)) and not isinstance(ts_str, bool):\n"
-    "        return datetime.fromtimestamp(ts_str, timezone.utc).replace(tzinfo=None)\n"
-)
-
-if IMPORT_OLD not in src:
-    sys.exit("anchor missing: %r" % IMPORT_OLD)
-if ANCHOR not in src:
-    sys.exit("anchor missing: %r" % ANCHOR)
-
-src = src.replace(IMPORT_OLD, IMPORT_NEW, 1)
-src = src.replace(ANCHOR, "    " + BRANCH + ANCHOR, 1)
-io.open(path, "w", encoding="utf-8", newline="\n").write(src)
-print("  fix 1 (EPP float ts): applied")
-PYEOF
+    _apply_patch "fix1-epp-float-ts" \
+        "${patches_dir}/fix1_epp_float_ts.py" \
+        "/usr/local/bin/process_epp_logs.py"
 
     _info "Applying in-pod patch 2: guidellm-analyze_results.sh (non-fatal conversion)..."
-    $KUBECTL exec "$POD" -n "$NS" -- python3 - \
-        /usr/local/bin/guidellm-analyze_results.sh <<'PYEOF'
-import io, sys
-
-path = sys.argv[1]
-src = io.open(path, encoding="utf-8").read()
-
-MARK = "# wva-patch: conversion is not fatal"
-if MARK in src:
-    print("  fix 2 (report conversion non-fatal): already applied")
-    sys.exit(0)
-
-ANCHOR = (
-    'if [[ $LLMDBENCH_RUN_EXPERIMENT_CONVERT_RC -ne 0 ]]; then\n'
-    '  echo "Results data conversion completed with errors."\n'
-    '  exit $LLMDBENCH_RUN_EXPERIMENT_CONVERT_RC\n'
-    'fi\n'
-)
-if ANCHOR not in src:
-    sys.exit("anchor missing (upstream shape changed): %r" % ANCHOR)
-
-REPLACEMENT = (
-    'if [[ $LLMDBENCH_RUN_EXPERIMENT_CONVERT_RC -ne 0 ]]; then\n'
-    '  echo "Results data conversion completed with errors."\n'
-    '  ' + MARK + '\n'
-    '  echo "NOTE: benchmark_report v0.1/v0.2 were NOT produced (upstream bug)."\n'
-    '  echo "NOTE: results.json is complete; treat this run as valid."\n'
-    '  LLMDBENCH_RUN_EXPERIMENT_CONVERT_RC=0\n'
-    'fi\n'
-)
-
-src = src.replace(ANCHOR, REPLACEMENT, 1)
-io.open(path, "w", encoding="utf-8", newline="\n").write(src)
-print("  fix 2 (report conversion non-fatal): applied")
-PYEOF
+    _apply_patch "fix2-conversion-non-fatal" \
+        "${patches_dir}/fix2_conversion_non_fatal.py" \
+        "/usr/local/bin/guidellm-analyze_results.sh"
 
     _info "In-pod patches complete."
 }
