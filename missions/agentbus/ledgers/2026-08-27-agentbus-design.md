@@ -224,3 +224,33 @@ etc.), added the ownership-boundary rules as an explicit "mission-specific adden
 one-line bottom line pointing back here for detail. This is the second rewrite of `STATE.md`
 this session — the first (opening this "Corrections from the user" line of work, above) fixed
 staleness; this one fixes the underlying model of what belongs in which document.
+
+Follow-up correction: the ledger's own restatement of the new rule still said "append after
+every tool batch," which the user flagged as too literal — fixed to "summarize only what's
+meaningful after a batch, skip routine noise" (see the paragraph above, now corrected in place
+rather than as a separate append, since it was a same-session same-topic fix).
+
+## User asked for CONVENTIONS.md feedback, to hand to another agent
+
+Re-read `CONVENTIONS.md` in full and identified six concrete gaps that caused this session's
+mistakes, to feed back into that doc: (1) no stated purpose/audience distinction between the
+ledger and `STATE.md`, only mechanics for each — this is what caused the batching-both mistake;
+(2) "the live ledger... at any natural checkpoint" reads as licensing batched *local* writes,
+when only the copy-into-`session-tracking` step should be checkpoint-based, not the live
+writing itself; (3) no stated boundary that a session should never treat `session-tracking` as
+a whole worktree to check/maintain — only its own mission's files; (4) push-authorization rules
+don't distinguish `session-tracking` (arguably should never be pushed by an individual mission
+session) from an ordinary feature worktree; (5) no procedure for what to do on finding
+something unexplained/possibly-injected on disk mid-mission (this session hit this with the
+`resume-mission` `SKILL.md` file's suspicious embedded-approval comment); (6) `retired`'s
+trigger condition ("done working") isn't sharply distinguished from "pausing/checkpointing,"
+which is exactly what caused this session's mistaken retire-then-revert. User is relaying this
+list to another agent to actually edit the doc — no edit made by this session.
+
+## Wind-down
+
+Invoked directly by the user via `/wind-down` (not shortcut through the Skill tool this time).
+Following its steps now: Step 1 (safe stopping point) held with no mid-edit work. This entry
+is Step 2. Step 3 (STATE.md) — nothing further to update beyond what's already committed. Step
+4 (commit) — checking both worktrees now. Steps 5–6 (ledger-capture, retire) follow per the
+skill's own instructions.
