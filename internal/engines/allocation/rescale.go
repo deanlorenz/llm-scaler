@@ -369,7 +369,7 @@ func (o *GreedyByScoreOptimizer) rescaleModelDecisions(
 		rt, rc := tgtByRole[role], curByRole[role]
 		switch {
 		case rt < rc:
-			reclaimRole(ctx, []NamedAnalyzerResult{req.CompositeSignal}, records, role, stateMap, targets, rc-rt)
+			reclaimRole(ctx, req.CompositeSignal, records, role, stateMap, targets, rc-rt)
 		case rt > rc:
 			want := rt - rc
 			// The role's rescale target needs more GPUs than this cycle can
@@ -401,7 +401,7 @@ func (o *GreedyByScoreOptimizer) rescaleModelDecisions(
 // respecting minReplicas and the cheapest-at-1 protection, via scaleDownVariantSet.
 func reclaimRole(
 	ctx context.Context,
-	s []NamedAnalyzerResult,
+	e NamedAnalyzerResult,
 	variants []variantRecord,
 	role string,
 	stateMap map[string]domain.VariantReplicaState,
@@ -409,7 +409,7 @@ func reclaimRole(
 	deltaGPUs int,
 ) {
 	remaining := deltaGPUs
-	sorted := sortVariantsForScaleDown(s, variantsForRole(variants, role))
+	sorted := sortVariantsForScaleDown(e, variantsForRole(variants, role))
 	scaleDownVariantSet(ctx, sorted, targets, stateMap,
 		func(vc variantRecord) int {
 			g := gpusPerReplicaFromState(stateMap, vc.VariantName)
