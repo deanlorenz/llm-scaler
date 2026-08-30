@@ -28,6 +28,18 @@ pinned for its whole run; don't plan work that assumes it can hop out to edit he
 back unattended. If cross-worktree edits are actually needed mid-session, ask the user first
 rather than attempting the round-trip and assuming it will succeed.
 
+**This write block is a harness-level structural veto, not a permissions check — confirmed by
+direct testing.** A global `settings.json` `permissions.allow` entry explicitly granting
+Edit/Write on a path outside the pinned worktree (e.g. `worktrees/session-tracking/**`) does
+**not** override the block: the tool call is rejected by the isolation guard itself ("session is
+isolated in the worktree...") before the allowlist is ever consulted. Don't treat an allowlist
+entry as a way to get cross-worktree `Edit`/`Write` from a pinned session — it structurally
+cannot work. **Also confirmed: plain `Bash` shell redirection (e.g. `echo >>` targeting a path
+outside the pinned worktree) is *not* covered by this same veto** and can succeed where
+`Edit`/`Write` are blocked — a real inconsistency in what the guard covers. This is not a
+sanctioned workaround to reach for; if cross-worktree writes are needed, ask the user first (per
+the paragraph above) rather than routing around the guard via Bash.
+
 **A fresh session started inside a worktree does not automatically read this file.** It must
 be explicitly told to read `CONVENTIONS.md` (and the relevant mission's `STATE.md`) by full
 path — there is no auto-discovery. Say so plainly when handing off to a new session or
