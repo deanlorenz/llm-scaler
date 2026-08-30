@@ -1,0 +1,4 @@
+vllm:num_requests_running{model_name="Qwen/Qwen3-32B"} 5
+vllm:num_requests_waiting{model_name="Qwen/Qwen3-32B"} 2
+vllm:kv_cache_usage_perc{model_name="Qwen/Qwen3-32B"} 0.42
+vllm:cache_config_info{num_gpu_blocks="2048",block_size="16",gpu_memory_utilization="0.9",enable_prefix_caching="False"} 1

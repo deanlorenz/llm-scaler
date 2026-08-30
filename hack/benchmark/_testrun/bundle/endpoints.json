@@ -1,0 +1,42 @@
+[
+  {
+    "config": {
+      "endpoint_id": "default",
+      "model": "Qwen/Qwen3-32B",
+      "epp_name": "my-epp"
+    },
+    "load": [
+      {
+        "duration_s": 30.0,
+        "rate_rps": 0.0,
+        "in_tok_mean": null,
+        "out_tok_mean": null
+      },
+      {
+        "duration_s": 120.0,
+        "rate_rps": 10.0,
+        "in_tok_mean": 512.0,
+        "out_tok_mean": 128.0
+      },
+      {
+        "duration_s": 180.0,
+        "rate_rps": 20.0,
+        "in_tok_mean": 512.0,
+        "out_tok_mean": 128.0
+      }
+    ],
+    "epp": [
+      {
+        "t": -30.0,
+        "q_dispatch": null,
+        "q_engine_sum": null,
+        "q_engine_avg": null,
+        "pool_avg": null,
+        "ready_pods": null,
+        "kv_mean": null,
+        "throughput_rps": null,
+        "in_system": null
+      }
+    ]
+  }
+]

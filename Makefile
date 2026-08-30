@@ -1566,6 +1566,37 @@ benchmark-report: ## Generate a markdown table from the latest benchmark results
 		python3 $(CURDIR)/hack/benchmark/postprocess.py $$LATEST_DIR; \
 	fi
 
+.PHONY: benchmark-extract
+benchmark-extract: ## Extract a benchmark run into a visualization bundle (set RUN_DIR=<path> or uses latest)
+	@if [ -n "$(RUN_DIR)" ]; then \
+		python3 $(CURDIR)/hack/benchmark/extract.py --run $(RUN_DIR); \
+	else \
+		LATEST_DIR=$$(ls -td $(BENCHMARK_WORKSPACE)/$${USER}-*/results/$(BENCHMARK_HARNESS)-*_* 2>/dev/null | head -1); \
+		if [ -z "$$LATEST_DIR" ]; then \
+			echo "ERROR: No benchmark results found. Set RUN_DIR=<path> or run a benchmark first."; \
+			exit 1; \
+		fi; \
+		python3 $(CURDIR)/hack/benchmark/extract.py --run $$LATEST_DIR; \
+	fi
+
+.PHONY: benchmark-extract-check
+benchmark-extract-check: ## Verify the latest bundle has provenance.json (non-zero exit if absent)
+	@if [ -n "$(RUN_DIR)" ]; then \
+		BUNDLE=$$(dirname $$(dirname $(RUN_DIR)))/extract; \
+	else \
+		LATEST_DIR=$$(ls -td $(BENCHMARK_WORKSPACE)/$${USER}-*/results/$(BENCHMARK_HARNESS)-*_* 2>/dev/null | head -1); \
+		if [ -z "$$LATEST_DIR" ]; then \
+			echo "ERROR: No benchmark results found. Set RUN_DIR=<path>."; \
+			exit 1; \
+		fi; \
+		BUNDLE=$$(dirname $$(dirname $$LATEST_DIR))/extract; \
+	fi; \
+	if [ ! -f "$$BUNDLE/provenance.json" ]; then \
+		echo "ERROR: $$BUNDLE/provenance.json not found — run make benchmark-extract first."; \
+		exit 1; \
+	fi; \
+	echo "OK: $$BUNDLE/provenance.json exists."
+
 BENCHMARK_TWO_VARIANT_SECONDARY_SUFFIX ?= v2
 
 .PHONY: benchmark-plot-two-variant

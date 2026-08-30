@@ -1,0 +1,8 @@
+harness_name: guidellm
+model: Qwen/Qwen3-32B
+namespace: wva-bench
+endpoint_url: http://my-epp:8080
+harness_start: 2024-05-01T12:00:00Z
+harness_stop: 2024-05-01T12:10:00Z
+experiment_id: test-run-001
+harness_workload: decode-heavy

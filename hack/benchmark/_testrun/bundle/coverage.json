@@ -1,0 +1,38 @@
+[
+  {
+    "scope": "global",
+    "capability": "Pod metrics present",
+    "result": "PASS",
+    "detail": "1 pods"
+  },
+  {
+    "scope": "global",
+    "capability": "Engine config available",
+    "result": "PASS",
+    "detail": "num_gpu_blocks found"
+  },
+  {
+    "scope": "global",
+    "capability": "Replica timeseries present",
+    "result": "PASS",
+    "detail": "2 rows"
+  },
+  {
+    "scope": "global",
+    "capability": "Scaling-decision log present",
+    "result": "FAIL",
+    "detail": "No scaling-decision events in controller log"
+  },
+  {
+    "scope": "global",
+    "capability": "Scale-down present",
+    "result": "WARN",
+    "detail": "No ScaleDown action observed in log"
+  },
+  {
+    "scope": "endpoint:default",
+    "capability": "EPP metrics present",
+    "result": "FAIL",
+    "detail": "All 1 EPP scrapes returned Unauthorized"
+  }
+]
