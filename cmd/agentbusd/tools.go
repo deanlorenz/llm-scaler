@@ -112,6 +112,12 @@ func publishPresenceHandler(js jetstream.JetStream) mcp.ToolHandlerFor[publishPr
 		if err != nil {
 			return nil, publishPresenceResult{}, err
 		}
+		// Register the worktree locally so the relay daemon knows to watch it.
+		// Best-effort: if the worktree path is empty or the write fails, the
+		// NATS presence publish above already succeeded — don't fail the tool.
+		if args.Worktree != "" {
+			_ = bus.RegisterWorktree(args.Worktree, args.Mission)
+		}
 		return nil, publishPresenceResult{}, nil
 	}
 }
