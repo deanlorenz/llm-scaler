@@ -14,6 +14,11 @@
 # Environment:
 #   BENCH_HARNESS_POD_NAME   Pod name (default: llmdbench-harness)
 #   BENCH_IMAGE_TAG          Image tag (default: v0.7.8)
+#   BENCH_IMAGE_DIGEST       Image digest (default: pinned sha256 below).
+#                            Override to use a different digest or clear to use tag only.
+#                            Update when a new image version is available:
+#                              docker inspect ghcr.io/llm-d/llm-d-benchmark:<tag> \
+#                                --format '{{index .RepoDigests 0}}'
 #   BENCH_EPP_METRICS_SECRET EPP metrics secret name (default: epp-metrics-token)
 #                            Override when cluster uses a different name, e.g.
 #                            wva-epp-metrics-token (dhl-la-1708 naming convention).
@@ -50,7 +55,19 @@ NS="${2:?namespace required}"
 KUBECTL="${KUBECTL_CMD:-kubectl}"
 POD="${BENCH_HARNESS_POD_NAME:-llmdbench-harness}"
 IMAGE_TAG="${BENCH_IMAGE_TAG:-v0.7.8}"
-IMAGE="ghcr.io/llm-d/llm-d-benchmark:${IMAGE_TAG}"
+# Pinned digest for ghcr.io/llm-d/llm-d-benchmark:v0.7.8 — pinned 2026-08-30.
+# Update when moving to a new image version. To get the digest of a new tag:
+#   docker inspect ghcr.io/llm-d/llm-d-benchmark:<tag> --format '{{index .RepoDigests 0}}'
+# or from a running pod:
+#   kubectl get pod <pod> -o jsonpath='{.status.containerStatuses[0].imageID}'
+_DEFAULT_IMAGE_DIGEST="sha256:6c8be427777df57fc6ef8da18ba4a7e6311a0c4ad26daee2fd306ae591fccc63"
+IMAGE_DIGEST="${BENCH_IMAGE_DIGEST:-${_DEFAULT_IMAGE_DIGEST}}"
+# Reference by digest when available, tag only otherwise.
+if [ -n "$IMAGE_DIGEST" ]; then
+    IMAGE="ghcr.io/llm-d/llm-d-benchmark@${IMAGE_DIGEST}"
+else
+    IMAGE="ghcr.io/llm-d/llm-d-benchmark:${IMAGE_TAG}"
+fi
 TIMEOUT="${KUBECTL_TIMEOUT:-180}"
 
 # EPP metrics secret name — default from config/base/rbac/epp-metrics-token-secret.yaml.
@@ -171,7 +188,7 @@ spec:
   containers:
   - name: harness
     image: ${IMAGE}
-    imagePullPolicy: Always
+    imagePullPolicy: IfNotPresent
     command: ["sh", "-c", "sleep 1000000"]
     securityContext:
       runAsUser: 0
