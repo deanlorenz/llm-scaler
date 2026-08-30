@@ -85,10 +85,10 @@ func TestDetectDemandLiveness_HealthyNoWarn(t *testing.T) {
 	ctx, logs := zapObserverCtx(t)
 	e := demandLivenessEngine(informativeSat(), throughputAnalyzer(1000))
 
-	results, err := e.runAnalyzersAndScore(ctx, "m", "ns", nil, enabledThroughputCfg, nil, nil, nil, nil, nil, 0)
+	result, err := e.runAnalyzersAndScore(ctx, "m", "ns", nil, enabledThroughputCfg, nil, nil, nil, nil, nil, 0)
 	require.NoError(t, err)
 
-	assert.True(t, namedByName(results)[throughput.AnalyzerName].Live, "fresh throughput supply must be live")
+	assert.True(t, namedByName([]allocation.NamedAnalyzerResult{result})[throughput.AnalyzerName].Live, "fresh throughput supply must be live")
 	assert.Empty(t, demandWarnings(logs), "demand keeping pace must not warn")
 }
 
@@ -109,14 +109,14 @@ func TestDetectDemandLiveness_SupplyLiveDemandStaleWarns(t *testing.T) {
 		modelKey: {demandKey: time.Now().Add(-95 * time.Second)},
 	}
 
-	results, err := e.runAnalyzersAndScore(ctx, "m", "ns", nil, enabledThroughputCfg, nil, nil, nil, nil, nil, 0)
+	result, err := e.runAnalyzersAndScore(ctx, "m", "ns", nil, enabledThroughputCfg, nil, nil, nil, nil, nil, 0)
 	require.NoError(t, err)
 
 	warns := demandWarnings(logs)
 	require.Len(t, warns, 1, "live supply with stale demand must warn exactly once")
 	assert.Equal(t, throughput.AnalyzerName, warns[0].ContextMap()["analyzer"])
 
-	assert.True(t, namedByName(results)[throughput.AnalyzerName].Live,
+	assert.True(t, namedByName([]allocation.NamedAnalyzerResult{result})[throughput.AnalyzerName].Live,
 		"demand warning must not flip throughput Live — it is telemetry only")
 }
 
@@ -128,11 +128,11 @@ func TestDetectDemandLiveness_ColdStartNoWarn(t *testing.T) {
 	ctx, logs := zapObserverCtx(t)
 	e := demandLivenessEngine(informativeSat(), throughputAnalyzer(0)) // fresh engine, no pre-seed
 
-	results, err := e.runAnalyzersAndScore(ctx, "m", "ns", nil, enabledThroughputCfg, nil, nil, nil, nil, nil, 0)
+	result, err := e.runAnalyzersAndScore(ctx, "m", "ns", nil, enabledThroughputCfg, nil, nil, nil, nil, nil, 0)
 	require.NoError(t, err)
 
 	assert.Empty(t, demandWarnings(logs), "cold start (demand absent one cycle) must not warn")
-	assert.True(t, namedByName(results)[throughput.AnalyzerName].Live)
+	assert.True(t, namedByName([]allocation.NamedAnalyzerResult{result})[throughput.AnalyzerName].Live)
 }
 
 // The synthetic demand key must never make an analyzer live: the Live/veto path

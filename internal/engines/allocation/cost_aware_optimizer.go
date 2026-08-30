@@ -56,7 +56,7 @@ func (o *CostAwareOptimizer) Optimize(
 
 		// Unified dispatch: one path for all models via (model, role) math.
 		// Non-disaggregated uses synthetic "both" role; disaggregated uses actual roles.
-		s := req.AnalyzerResults
+		s := []NamedAnalyzerResult{req.CompositeSignal}
 		roles, ps := initRoleState(s)
 		if anyRoleNeedsScaleUp(ps, roles) {
 			allocateForModelPaired(ctx, s, records, stateMap, nil, targets,
@@ -251,7 +251,7 @@ func buildDecisionsWithOptimizer(
 	// satNamed carries the model-level RequiredCapacity/SpareCapacity computed by
 	// applyUniversalThreshold; per-variant Utilization is on each VariantCapacity.
 	// These feed the saturation gauges (utilization/required/spare).
-	satNamed := saturationNamedEntry(req.AnalyzerResults)
+	satNamed := req.CompositeSignal
 	for name, target := range targets {
 		state := stateMap[name]
 		vc := vcMap[name]
@@ -309,18 +309,16 @@ func buildDecisionsWithOptimizer(
 		// For P/D-disaggregated models use the variant's per-role capacity; otherwise
 		// fall back to the model-level totals.
 		decision.Utilization = vc.Utilization
-		if satNamed != nil {
-			reqCap, spareCap := satNamed.RequiredCapacity, satNamed.SpareCapacity
-			role := state.Role
-			if role == "" {
-				role = domain.RoleBoth
-			}
-			if rc, ok := satNamed.RoleCapacities[role]; ok {
-				reqCap, spareCap = rc.RequiredCapacity, rc.SpareCapacity
-			}
-			decision.RequiredCapacity = reqCap
-			decision.SpareCapacity = spareCap
+		reqCap, spareCap := satNamed.RequiredCapacity, satNamed.SpareCapacity
+		role := state.Role
+		if role == "" {
+			role = domain.RoleBoth
 		}
+		if rc, ok := satNamed.RoleCapacities[role]; ok {
+			reqCap, spareCap = rc.RequiredCapacity, rc.SpareCapacity
+		}
+		decision.RequiredCapacity = reqCap
+		decision.SpareCapacity = spareCap
 
 		decisions = append(decisions, decision)
 	}

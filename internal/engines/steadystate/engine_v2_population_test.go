@@ -143,11 +143,10 @@ var _ = Describe("Engine config-population helpers", func() {
 				},
 			}
 
-			results, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
+			result, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(results).To(HaveLen(2))
 
-			byName := namedByName(results)
+			byName := namedByName([]allocation.NamedAnalyzerResult{result})
 			Expect(byName[domain.SaturationAnalyzerName].Score).To(Equal(2.0))
 			Expect(byName["spy"].Score).To(Equal(0.5))
 		})
@@ -168,11 +167,10 @@ var _ = Describe("Engine config-population helpers", func() {
 				},
 			}
 
-			results, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
+			result, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(results).To(HaveLen(2))
 
-			byName := namedByName(results)
+			byName := namedByName([]allocation.NamedAnalyzerResult{result})
 			Expect(byName[domain.SaturationAnalyzerName].Score).To(Equal(1.0))
 			Expect(byName["spy"].Score).To(Equal(1.0))
 		})
@@ -194,7 +192,7 @@ var _ = Describe("Engine config-population helpers", func() {
 					{Name: "spy"},
 				},
 			}
-			resultsGlobal, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfgGlobal, nil, nil, nil, nil, nil, 0)
+			resultGlobal, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfgGlobal, nil, nil, nil, nil, nil, 0)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Per-analyzer ScaleUpThreshold=1.10 → RC = 100/1.10 ≈ 90.9
@@ -206,11 +204,11 @@ var _ = Describe("Engine config-population helpers", func() {
 					{Name: "spy", ScaleUpThreshold: &overrideThreshold},
 				},
 			}
-			resultsOverride, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfgOverride, nil, nil, nil, nil, nil, 0)
+			resultOverride, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfgOverride, nil, nil, nil, nil, nil, 0)
 			Expect(err).NotTo(HaveOccurred())
 
-			rcGlobal := namedByName(resultsGlobal)["spy"].Remaining
-			rcOverride := namedByName(resultsOverride)["spy"].Remaining
+			rcGlobal := namedByName([]allocation.NamedAnalyzerResult{resultGlobal})["spy"].Remaining
+			rcOverride := namedByName([]allocation.NamedAnalyzerResult{resultOverride})["spy"].Remaining
 			Expect(rcGlobal).To(BeNumerically(">", rcOverride),
 				"global threshold (0.85) should yield higher RC than override (1.10)")
 		})

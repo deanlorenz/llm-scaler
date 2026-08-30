@@ -128,7 +128,7 @@ func (o *GreedyByScoreOptimizer) Optimize(
 			continue
 		}
 
-		s := req.AnalyzerResults
+		s := []NamedAnalyzerResult{req.CompositeSignal}
 		roles, ps := initRoleState(s)
 		fsv := fairShareValue(req.Priority, s, ps, roles)
 		if anyRoleNeedsScaleUp(ps, roles) || fsv > 0 {
@@ -167,7 +167,7 @@ func (o *GreedyByScoreOptimizer) Optimize(
 		targets := initTargets(req.VariantStates)
 
 		// Unified scale-down path via scaleDownRoleIterated.
-		s := req.AnalyzerResults
+		s := []NamedAnalyzerResult{req.CompositeSignal}
 		_, _ = initRoleState(s) // populates RoleSpare for all roles
 		scaleDownRoleIterated(ctx, s, records, targets, stateMap)
 

@@ -42,13 +42,13 @@ func v2Variants(vs []v2Variant) ([]domain.VariantMetadata, []domain.VariantCapac
 	return meta, caps
 }
 
-// withSatEntryV2 attaches a single-saturation AnalyzerResults to req, along with
+// withSatEntryV2 sets req's single-saturation CompositeSignal, along with
 // the discovery metadata the optimizer reads variant identity from.
 // Mirrors the helper in cost_aware_optimizer_test.go for use in this package.
 func withSatEntryV2(rc, sc float64, vs []v2Variant, req allocation.ModelScalingRequest) allocation.ModelScalingRequest {
 	meta, caps := v2Variants(vs)
 	req.Variants = meta
-	req.AnalyzerResults = []allocation.NamedAnalyzerResult{{
+	req.CompositeSignal = allocation.NamedAnalyzerResult{
 		Name: domain.SaturationAnalyzerName,
 		Result: &domain.AnalyzerResult{
 			ModelID:           req.ModelID,
@@ -60,7 +60,7 @@ func withSatEntryV2(rc, sc float64, vs []v2Variant, req allocation.ModelScalingR
 		Remaining:        rc,
 		Spare:            sc,
 		Live:             true,
-	}}
+	}
 	return req
 }
 
@@ -397,10 +397,10 @@ var _ = Describe("runAnalyzersAndScore call ordering", func() {
 			},
 		}
 
-		results, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
+		result, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
 		Expect(err).NotTo(HaveOccurred())
-		// saturation + throughput + slo all appended
-		Expect(results).To(HaveLen(3))
+		// composeAnalyzerResults reduces saturation + throughput + slo to one entry
+		Expect(result.Name).NotTo(BeEmpty())
 		Expect(ta.callCount).To(Equal(1))
 		Expect(slo.callCount).To(Equal(1))
 		// saturationV2Analyzer is called via runV2AnalysisOnly, not the loop;
@@ -437,10 +437,10 @@ var _ = Describe("runAnalyzersAndScore saturation-nil guard", func() {
 			},
 		}
 
-		results, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
+		result, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("saturation analyzer produced no result for model m"))
-		Expect(results).To(BeNil())
+		Expect(result).To(Equal(allocation.NamedAnalyzerResult{}))
 		Expect(spy.callCount).To(Equal(0), "the guard must return before any non-saturation analyzer runs")
 	})
 })
@@ -470,10 +470,9 @@ var _ = Describe("runAnalyzersAndScore disabled-analyzer gate", func() {
 			},
 		}
 
-		results, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
+		result, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(results).To(HaveLen(1), "only saturation entry — disabled spy must not be appended")
-		Expect(results[0].Name).To(Equal(domain.SaturationAnalyzerName))
+		Expect(result.Name).To(Equal(domain.SaturationAnalyzerName), "only saturation entry — disabled spy must not be composed in")
 		Expect(spy.callCount).To(Equal(0), "Analyze must not be called for a disabled analyzer")
 	})
 })

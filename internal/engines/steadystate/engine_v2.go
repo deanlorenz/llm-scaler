@@ -111,7 +111,7 @@ func (e *Engine) runAnalyzersAndScore(
 	variantAutoscalings map[string]*llmdVariantAutoscalingV1alpha1.VariantAutoscaling,
 	schedulerQueue *domain.SchedulerQueueMetrics,
 	arrivalRate float64,
-) ([]allocation.NamedAnalyzerResult, error) {
+) (allocation.NamedAnalyzerResult, error) {
 	logger := ctrl.LoggerFrom(ctx)
 
 	// metaByVariant is the authoritative discovery metadata the capacity builder
@@ -123,10 +123,10 @@ func (e *Engine) runAnalyzersAndScore(
 	baseResult, err := e.runV2AnalysisOnly(ctx, modelID, namespace, replicaMetrics, config,
 		variantStates, scaleTargets, variantAutoscalings, schedulerQueue, arrivalRate)
 	if err != nil {
-		return nil, err
+		return allocation.NamedAnalyzerResult{}, err
 	}
 	if baseResult == nil {
-		return nil, fmt.Errorf("saturation analyzer produced no result for model %s", modelID)
+		return allocation.NamedAnalyzerResult{}, fmt.Errorf("saturation analyzer produced no result for model %s", modelID)
 	}
 
 	satUp, satDown := config.AnalyzerThresholds(domain.SaturationAnalyzerName)
@@ -175,17 +175,15 @@ func (e *Engine) runAnalyzersAndScore(
 	// engine-owned aggregates onto the named entry, so it can only run after
 	// composition has settled on one (D, P) signal.
 	composed := composeAnalyzerResults(baseResults)
-	namedResults := []allocation.NamedAnalyzerResult{
-		buildNamedResult(ctx, composed.name, composed.result, config, metaByVariant, composed.scaleUp, composed.scaleDown),
-	}
+	namedResult := buildNamedResult(ctx, composed.name, composed.result, config, metaByVariant, composed.scaleUp, composed.scaleDown)
 
+	namedResults := []allocation.NamedAnalyzerResult{namedResult}
 	e.updateLivenessAndSetLive(ctx, namespace, modelID, namedResults)
-	e.recordAnalyzerMetrics(namespace, modelID, namedResults)
+	namedResult = namedResults[0]
+	e.recordAnalyzerMetrics(namespace, modelID, []allocation.NamedAnalyzerResult{namedResult})
 
-	for _, nr := range namedResults {
-		logAnalyzerResult(ctx, modelID, namespace, nr)
-	}
-	return namedResults, nil
+	logAnalyzerResult(ctx, modelID, namespace, namedResult)
+	return namedResult, nil
 }
 
 // rawAnalyzerResult is one analyzer's un-enriched (D, P) output, paired with
@@ -746,12 +744,7 @@ func computeCurrentGPUUsageByNamespace(requests []allocation.ModelScalingRequest
 // result. A request without one was not measured this cycle, so its replica
 // counts are not evidence of anything and must not be charged to a quota.
 func hasSaturationResult(req allocation.ModelScalingRequest) bool {
-	for _, e := range req.AnalyzerResults {
-		if e.Name == domain.SaturationAnalyzerName {
-			return e.Result != nil
-		}
-	}
-	return false
+	return req.CompositeSignal.Name == domain.SaturationAnalyzerName && req.CompositeSignal.Result != nil
 }
 
 // reportUnattributedGPUs surfaces usage that could not be charged to any
@@ -805,7 +798,7 @@ func (e *Engine) collectV2ModelRequest(
 	schedulerQueue *domain.SchedulerQueueMetrics,
 	arrivalRate float64,
 ) (*allocation.ModelScalingRequest, error) {
-	namedResults, err := e.runAnalyzersAndScore(ctx, modelID, namespace, replicaMetrics, config,
+	namedResult, err := e.runAnalyzersAndScore(ctx, modelID, namespace, replicaMetrics, config,
 		variantStates, variantMetadata, scaleTargets, variantAutoscalings, schedulerQueue, arrivalRate)
 	if err != nil {
 		return nil, fmt.Errorf("collecting V2 model request for %s/%s: %w", namespace, modelID, err)
@@ -823,7 +816,7 @@ func (e *Engine) collectV2ModelRequest(
 	return &allocation.ModelScalingRequest{
 		ModelID:         modelID,
 		Namespace:       namespace,
-		AnalyzerResults: namedResults,
+		CompositeSignal: namedResult,
 		VariantStates:   variantStates,
 		Variants:        variantMetadata,
 		Priority:        config.Priority,

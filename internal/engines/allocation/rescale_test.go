@@ -134,17 +134,17 @@ var _ = Describe("distributeGPUsByWeight", func() {
 })
 
 var _ = Describe("rescaleModelDecisions", func() {
-	// Nil-guard: no upstream invariant actually guarantees AnalyzerResults carries a
-	// saturation entry (rescaleInputsForGroup, the sibling that builds this function's
+	// Nil-guard: no upstream invariant actually guarantees CompositeSignal carries a
+	// saturation result (rescaleInputsForGroup, the sibling that builds this function's
 	// caller's groups, already guards this exact case). Without the guard,
 	// buildVariantRecords(req, satNamed.Result) would nil-deref on satNamed.
-	It("returns nil instead of panicking when AnalyzerResults has no saturation entry", func() {
+	It("returns nil instead of panicking when CompositeSignal has no result", func() {
 		o := NewGreedyByScoreOptimizer()
 		req := ModelScalingRequest{
 			ModelID:   "A",
 			Namespace: "default",
 			Priority:  1,
-			// AnalyzerResults deliberately has no domain.SaturationAnalyzerName entry.
+			// CompositeSignal deliberately left zero-valued (Result == nil).
 			VariantStates: []domain.VariantReplicaState{
 				{VariantName: "A-v", CurrentReplicas: 1, GPUsPerReplica: 1},
 			},
@@ -162,7 +162,7 @@ var _ = Describe("roleDemandGPUs", func() {
 	It("rounds token demand up to whole replicas (ceil)", func() {
 		// 8500 tokens / 1000 per-replica capacity = 8.5 -> ceil = 9 replicas (9 GPUs).
 		// Guards against a regression to floor (which would under-count demand at 8).
-		sat := &NamedAnalyzerResult{
+		sat := NamedAnalyzerResult{
 			Name: domain.SaturationAnalyzerName,
 			Result: &domain.AnalyzerResult{
 				ModelID:     "A",

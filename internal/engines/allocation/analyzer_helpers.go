@@ -84,22 +84,6 @@ func applyAllocation(s []NamedAnalyzerResult, v string, n int) {
 	}
 }
 
-// saturationNamedEntry returns the saturation analyzer's entry from s, or nil if
-// not present.
-//
-// Saturation is no longer the keeper of per-variant metadata — the optimizer gets
-// identity from discovery via buildVariantRecords. What is still special about
-// this entry is that its P is the one that sizes replicas, which is the
-// coordination math and deliberately unchanged here.
-func saturationNamedEntry(s []NamedAnalyzerResult) *NamedAnalyzerResult {
-	for i := range s {
-		if s[i].Name == domain.SaturationAnalyzerName {
-			return &s[i]
-		}
-	}
-	return nil
-}
-
 // prcForVariant returns the PerReplicaCapacity for variant v in result r.
 // Returns 0 if the variant is not present.
 func prcForVariant(r *domain.AnalyzerResult, v string) float64 {

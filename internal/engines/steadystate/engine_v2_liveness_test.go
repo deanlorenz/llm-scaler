@@ -37,9 +37,9 @@ var _ = Describe("analyzer liveness gate (engine level)", func() {
 		}
 		e := liveEngine(noData)
 
-		results, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
+		result, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(namedByName(results)[domain.SaturationAnalyzerName].Live).To(BeFalse())
+		Expect(result.Live).To(BeFalse())
 
 		informative := &fakeAnalyzerWithResult{
 			analyzerName: domain.SaturationAnalyzerName,
@@ -51,9 +51,9 @@ var _ = Describe("analyzer liveness gate (engine level)", func() {
 		e.saturationV2Analyzer = informative
 		e.analyzersSnapshot = []analyzerEntry{{name: domain.SaturationAnalyzerName, analyzer: informative}}
 
-		results, err = e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
+		result, err = e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(namedByName(results)[domain.SaturationAnalyzerName].Live).To(BeTrue())
+		Expect(result.Live).To(BeTrue())
 	})
 
 	It("staleness boundary: just inside the threshold is live, just past it is not", func() {
@@ -69,9 +69,9 @@ var _ = Describe("analyzer liveness gate (engine level)", func() {
 			},
 		}
 		e := liveEngine(atThreshold)
-		results, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
+		result, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(namedByName(results)[domain.SaturationAnalyzerName].Live).To(BeTrue())
+		Expect(result.Live).To(BeTrue())
 
 		pastThreshold := &fakeAnalyzerWithResult{
 			analyzerName: domain.SaturationAnalyzerName,
@@ -81,9 +81,9 @@ var _ = Describe("analyzer liveness gate (engine level)", func() {
 			},
 		}
 		e2 := liveEngine(pastThreshold)
-		results, err = e2.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
+		result, err = e2.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(namedByName(results)[domain.SaturationAnalyzerName].Live).To(BeFalse())
+		Expect(result.Live).To(BeFalse())
 	})
 
 	It("scopes liveness per model: one model's fresh result does not make another model's never-analyzed entry live", func() {
@@ -121,9 +121,9 @@ var _ = Describe("analyzer liveness gate (engine level)", func() {
 		// contaminated by model-b's freshness.
 		e.saturationV2Analyzer = neverAnalyzed
 		e.analyzersSnapshot = []analyzerEntry{{name: domain.SaturationAnalyzerName, analyzer: neverAnalyzed}}
-		results, err := e.runAnalyzersAndScore(context.Background(), "model-a", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
+		result, err := e.runAnalyzersAndScore(context.Background(), "model-a", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(namedByName(results)[domain.SaturationAnalyzerName].Live).To(BeFalse())
+		Expect(result.Live).To(BeFalse())
 	})
 
 	It("falls back to the 30s default interval when a present Config reports a non-positive one", func() {
@@ -143,9 +143,9 @@ var _ = Describe("analyzer liveness gate (engine level)", func() {
 		e.Config = config.NewTestConfig()
 		config.SetOptimizationIntervalForTest(e.Config, 0)
 
-		results, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
+		result, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(namedByName(results)[domain.SaturationAnalyzerName].Live).To(BeTrue())
+		Expect(result.Live).To(BeTrue())
 	})
 
 	It("treats a zero-valued AnalyzedAt on an informative result as current, not instantly-stale", func() {
@@ -157,9 +157,9 @@ var _ = Describe("analyzer liveness gate (engine level)", func() {
 			},
 		}
 		e := liveEngine(zeroTimestamp)
-		results, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
+		result, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(namedByName(results)[domain.SaturationAnalyzerName].Live).To(BeTrue())
+		Expect(result.Live).To(BeTrue())
 	})
 
 	It("leaves a non-informative result with a zero-valued AnalyzedAt excluded from liveness", func() {
@@ -171,8 +171,8 @@ var _ = Describe("analyzer liveness gate (engine level)", func() {
 			},
 		}
 		e := liveEngine(zeroTimestampNoData)
-		results, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
+		result, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(namedByName(results)[domain.SaturationAnalyzerName].Live).To(BeFalse())
+		Expect(result.Live).To(BeFalse())
 	})
 })

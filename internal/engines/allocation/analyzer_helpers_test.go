@@ -64,22 +64,6 @@ var _ = Describe("analyzer helpers", func() {
 		})
 	})
 
-	Describe("saturationNamedEntry", func() {
-		It("returns the saturation entry from the slice", func() {
-			satResult := &domain.AnalyzerResult{TotalDemand: 42}
-			s := []NamedAnalyzerResult{
-				{Name: domain.SaturationAnalyzerName, Result: satResult},
-				makeNamed("ta", 10, 0),
-			}
-			Expect(saturationNamedEntry(s).Result).To(BeIdenticalTo(satResult))
-		})
-
-		It("returns nil when saturation is absent", func() {
-			s := []NamedAnalyzerResult{makeNamed("ta", 10, 0)}
-			Expect(saturationNamedEntry(s)).To(BeNil())
-		})
-	})
-
 	Describe("ResultIsInformative", func() {
 		It("returns false for a nil Result", func() {
 			Expect(ResultIsInformative(NamedAnalyzerResult{Result: nil})).To(BeFalse())
