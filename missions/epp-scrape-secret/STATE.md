@@ -40,6 +40,15 @@ suffix determinism cross-checked against the real live cluster's own
 `wva-epp-metrics-reader-role-binding-af9fd8b3` for `dhl-la-1708`. Nothing committed yet — no
 push, no GitHub activity, per explicit user instruction (in effect for this whole phase).
 
+**Commit-state split — check `git status` in the fix worktree, don't assume either extreme.**
+This mission's own tracking files (this `STATE.md`, the spec, the source-issue copy, the
+initial ledger) are already committed here in `session-tracking`. The code diff in
+`worktrees/epp-scrape-secret` (`deploy/lib/infra_epp.sh`, `deploy/lib/epp-tokenreview-rbac.yaml`)
+is deliberately **not** committed there — only "no push/no GitHub activity" was said, not
+"commit freely," so it was left staged-in-working-tree pending the confirmation noted below. A
+resuming session should run `git -C worktrees/epp-scrape-secret status` to see this directly
+rather than assuming the whole mission is either fully committed or fully uncommitted.
+
 **Next, once the user is back:** confirm whether to commit this diff locally in the fix
 worktree (small, self-contained — no standing "commit freely" instruction was given, only
 "no push/no GH"), then move to T4 (verification — two-namespace install/uninstall

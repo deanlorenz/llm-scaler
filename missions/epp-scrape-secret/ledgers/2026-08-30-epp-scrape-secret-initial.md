@@ -231,3 +231,19 @@
   session. Diff in worktrees/epp-scrape-secret is uncommitted (deliberately, pending explicit
   confirmation from the user per the note above) -- next session/resume should check
   `git status` there before assuming a clean worktree.
+
+## Verified 2026-08-30 — folded in: STATE.md's "Immediate next step" section was missing an
+explicit commit-state contrast between the two trees (session-tracking mission files already
+committed at 37f03f22 vs. the fix-worktree code diff deliberately left uncommitted) -- added a
+"Commit-state split" paragraph there directing a resuming session to check `git status` in
+`worktrees/epp-scrape-secret` rather than assuming either extreme. Everything else checked
+against this ledger was already durably captured accurately: the full pivot story matches
+spec-epp-scrape-secret.md's "History" section point-for-point; the actual code fix in
+worktrees/epp-scrape-secret/deploy/lib/infra_epp.sh and epp-tokenreview-rbac.yaml (read
+directly, and diffed against upstream/main) matches STATE.md's description exactly; the
+out-of-scope items are explicitly listed in the spec's "Out of scope" section; the phase's user
+constraints (worktree via `cd` only, no push, no GitHub activity, no code changes outside the
+fix worktree) are in STATE.md's "Current status"; and the local-scratch-file deviation is
+already noted in this ledger and needs no structural fix per the ledger's own note. No doc
+references in STATE.md or the spec were bare filenames or filesystem-absolute paths -- all were
+already repo-root-relative, so no path-convention repairs were needed.
