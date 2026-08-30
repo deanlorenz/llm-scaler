@@ -44,4 +44,4 @@ Bundles are directories with these files (all optional except meta.json):
 
 ## Session log
 
-- 2026-08-31 session=bench-viz5 status=active ledger=missions/benchmark-viz/ledgers/bench-viz5.md
+- 2026-08-31 session=bench-viz5 status=retired ledger=missions/benchmark-viz/ledgers/bench-viz5.md
