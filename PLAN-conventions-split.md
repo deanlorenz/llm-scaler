@@ -142,6 +142,151 @@ Since this is a pure content move with no code and no tooling:
    work — the diff stays entirely inside `worktrees/policy-writer`. Copying into
    `session-tracking` is a separate, later, explicitly-approved step.
 
+## Phase 2 — trim production files to what/how only (2026-08-30)
+
+**New correction from the user:** `CONVENTIONS.md` and every `conventions/*.md` file are
+**production-only** — rules to follow, stated as what/how, short. Not why, not background, not
+incident narration, not design rationale. That material belongs in this mission's own spec doc
+(`session-tracking/missions/policy-writer/spec-policy-writer.md`), not shipped to every session
+that reads a production rule file.
+
+**Ordering, per explicit instruction:** capture every rule's rationale here in this plan FIRST.
+Only after that capture is complete does any production file get trimmed. Nothing is deleted
+in place — the current committed files (`eb5f5027`) stay as the pre-trim source of truth until
+the trimmed versions are written and reviewed.
+
+**Line to draw, per the user's decision:** keep "why" that is *mechanism-explaining* — needed to
+correctly apply the rule's own steps (e.g. why a naive add-then-remove marker sequence fails,
+which is what makes "place it somewhere inert" make sense as an instruction). Cut "why" that is
+*incident/rationale background* — explains why the rule was created, what motivated it, what
+went wrong before, alternatives considered and rejected. That class moves here.
+
+### Rationale extracted, by destination file — to fold into `spec-policy-writer.md`
+
+**`CONVENTIONS.md` (core)**
+- Orphan branch, origin-only: keeps mission tracking off feature branches so it never
+  accidentally goes upstream.
+- `DISABLED-no-push` on `upstream`/`ofer`: so a push attempt fails structurally rather than
+  relying on remembering not to.
+- Scope-boundary rule exists because of an observed failure: a session fetched against `origin`
+  and pushed the whole `session-tracking` branch on its own initiative, reasoning (not
+  incorrectly, but without being asked) that this was part of being a good citizen of the
+  worktree it happened to be using.
+- Per-session uniquely-named ledgers: this is what actually prevents write conflicts, not which
+  worktree the edit happens from — the `.wip` mechanism is a backstop, not the primary safeguard.
+- Push-authorization-for-`session-tracking`-itself needs a higher bar than a feature worktree:
+  a single mission session getting a same-turn "yes" to one push should not be read as standing
+  authority to push again later, and should not be treated as equivalent to feature-worktree
+  push authorization.
+- "Never stop/kill a background task" rule's motivation: observed confusion where a complaint
+  about chat noise ("stop cluttering my chat") was misread as "kill the task," when it was about
+  narration, not execution.
+
+**`conventions/wip-editing.md`**
+- The `.wip` rename-claim mechanism exists because the primary safeguard (only the orchestrating
+  session edits shared files) makes concurrent writes *rare*, not impossible — `.wip` is the
+  mechanical backstop for the rare case, not a substitute for that discipline.
+- Edit-via-local-copy exists because a session pinned to a different worktree (via
+  `EnterWorktree`) cannot reliably write cross-worktree directly, and even an unpinned session
+  making every line-edit a cross-worktree operation is needless friction.
+- The `.git/info/exclude`-is-shared note is a **correction**: originally believed to be
+  per-worktree (stated that way twice in the doc), corrected after direct testing
+  (`git rev-parse --git-common-dir` resolves to the main repo's `.git` for every worktree).
+- **Symlink-based locking was proposed and rejected** (full rationale, currently inline, to
+  move here in full): it reinvents a lock without providing real exclusion (nothing stops a
+  second session from also swapping in its own symlink, or writing the real file directly while
+  a symlink points elsewhere), and risks committing a broken/dangling symlink into
+  `session-tracking`'s own history by accident. The rename-based claim gives the same atomicity
+  without either problem. **Kept in the production file only as a one-line pointer** ("symlink-
+  based locking was considered and rejected — see spec doc") so a future session doesn't
+  re-propose it, without carrying the full argument inline.
+
+**`conventions/state-vs-ledger.md`**
+- The `STATE.md`-vs-ledger distinction needed stating explicitly because it's easy to miss from
+  the mechanics sections alone — both have a documented edit protocol, which invites inferring
+  they're "the same kind of record" when they're not. Observed directly in a session that made
+  exactly that inference and wrote both at the same length, after the fact, in a single batch.
+- The two-cadence rule (append-to-local-scratch continuously vs. copy-to-`session-tracking` only
+  at checkpoints) needed stating explicitly because a session read "at session end or at any
+  natural checkpoint" as license to batch *both* operations, when only the checkpoint-copy step
+  is legitimately checkpoint-based — justified specifically because a pinned session must
+  `ExitWorktree` to reach the `session-tracking` worktree, and that real friction is what
+  justifies batching that one step, and only that one.
+- The "append live, not retroactively" emphasis exists because of an observed failure: a session
+  that built this very ledger mechanism largely skipped using it live, then had to re-derive
+  several real decisions (a rejected design alternative, an operational gotcha, a founding
+  rationale) by re-reading its own conversation from the start, at the user's explicit prompting,
+  because nothing had captured them as they happened.
+
+**`conventions/resume-and-handoff.md`**
+- `retired` ≠ pausing is called out explicitly because marking a paused-but-continuing session as
+  `retired` was an observed real mistake, not a hypothetical edge case.
+- Ledger-capture treats `active`-and-`retired`-unverified the same because either case might be a
+  clean handoff (ledger not yet verified) or an unclean exit (crash/sleep/force-quit) — the
+  safety net doesn't need to distinguish which, it just always fires.
+- Ledger-capture fixes gaps directly rather than only reporting them because its job is defined
+  as *capture*, not just *check* — this was a deliberate rename from an earlier name ("the
+  verifier") after the first real run showed the job was broader than checking.
+- Ledger-capture's scope is bounded (fixes doc-reference issues *in scope of what it's already
+  touching*, doesn't hunt for unrelated broken links) — a deliberate boundary, not an oversight,
+  so a capture pass stays proportional to the one ledger it's given.
+- Ledger-capture is framed as useful beyond crash recovery specifically because running it before
+  any context-loss event (compaction, handoff, planned exit) captures context durably before it's
+  gone — not only as a fallback for unclean endings.
+- The repo-root-relative doc-reference-path rule exists because a bare filename broke once files
+  moved between a flat layout and a nested one, concretely during this mission's own
+  `session-tracking` migration — a real incident, not a hypothetical.
+- "State which worktree/branch a path resolves in" exists because the same repo-root-relative
+  path can point to different content (or nothing) depending on which branch's tree it's read
+  against — stated as a general property, not a specific incident.
+
+**`conventions/feature-worktree-setup.md`**
+- The per-worktree symlink setup is needed because of a confirmed, tested fact: Claude Code's
+  project-skill discovery does not walk up past a git worktree's own root, not to a plain
+  filesystem parent directory, not to the worktree's main repo.
+- Symlinks are excluded via `.git/info/exclude` (not committed) specifically so they never show
+  up in `git status` or get swept into a broad `git add`.
+- Verifying the symlink resolves (rather than trusting `ln -s` succeeded silently) is a
+  double-check discipline, not narrated as tied to a specific past failure.
+
+**`conventions/coder-orchestration.md`**
+- Coder isolation (`isolation: "worktree"`) exists so editing has zero visible effect on the
+  user's actually-open worktree/IDE.
+- Review isolation (same worktree as the coder, not a third) exists for consistency — the review
+  target must match exactly what the coder actually produced.
+- Otherwise this file is already mostly what/how — little separable "why" beyond the two points
+  above.
+
+**`conventions/settings-and-skill-edits.md`**
+- **Kept inline, not moved** (per the user's decision this pass): the explanation of *why* a
+  naive add-marker-then-remove-it sequence never finishes (the removal edit's own new content
+  still needs the marker present, recreating the same leftover) — this is mechanism-explaining,
+  not incident background; without it, "place the marker somewhere inert and don't chase full
+  removal" would read as an arbitrary instruction rather than a necessary consequence.
+- Moved to spec doc: the observation that this in practice tends to leave more than one inert
+  marker copy scattered through a file over several edits (two in one `SKILL.md`, one in
+  `settings.json`, observed) — this is a "here's what actually happened" note, not needed to
+  apply the rule.
+
+**`conventions/unexplained-files.md`**
+- The framing sentence ("expected background noise of a multi-session system, not necessarily a
+  problem") is scene-setting, not a rule step — moves to spec doc.
+- Also moved: the factual background that sessions from multiple missions, and multiple tools
+  (not just Claude Code), can be working concurrently against this repo's shared worktrees — this
+  is *why* unexplained files occur at all, not an instruction for what to do about one. Folded
+  into the trimmed file's opening as a compressed clause ("you didn't put there and can't
+  explain") rather than dropped outright, since a reader needs *some* minimal frame for what kind
+  of thing this file is about — full elaboration (multi-mission, multi-tool, concurrent) moves to
+  spec doc. The 5 numbered steps themselves are already what/how and stay.
+
+### Explicitly out of scope for Phase 2 (same boundaries as Phase 1)
+
+- Still not copying anything into `session-tracking` — the rationale capture above lands in this
+  plan doc first; whether/when it also gets copied into `spec-policy-writer.md` is a
+  `session-tracking` write needing its own separate go-ahead, same as the conventions split
+  itself.
+- Still not touching T7 or the 4 pending `suggestion-box/` entries.
+
 ## Explicitly out of scope for this task
 
 - The T7 ledger-capture contract correction (never touch `CONVENTIONS.md`; use

@@ -3,9 +3,11 @@
 Read this when setting up a new feature worktree for a mission, or when `/resume-mission` or
 `/wind-down` is found missing in one.
 
-Claude Code's project-skill discovery does not walk up past a git worktree's own root. Each
-worktree needs its own local symlink to these two skills before `/resume-mission` or
-`/wind-down` will show up there.
+**Confirmed by direct testing:** Claude Code's project-skill discovery does **not** walk up
+past a git worktree's own root — not to a plain filesystem parent directory, not to the main
+repo a worktree belongs to. Each worktree only sees its own local `.claude/skills/`. So a
+feature worktree (e.g. `worktrees/single-analyzer`) needs its own local entry pointing at
+these two skills before `/resume-mission` or `/wind-down` will show up there at all.
 
 **One-time setup per feature worktree** (do this once per worktree, not per session — check
 first, it may already be done):

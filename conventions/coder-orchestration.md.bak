@@ -11,7 +11,8 @@ Read this before dispatching or running a coder subagent.
    self-sequence unsupervised.
 4. Each task gets a written spec before the coder starts (see the task template below).
 5. Each task lands as its own commit — not batched, not squashed across tasks.
-6. **Coder isolation:** launch coders with `isolation: "worktree"`. These land under
+6. **Coder isolation:** launch coders with `isolation: "worktree"` — a separate git worktree so
+   editing has zero visible effect on the user's actually-open worktree/IDE. These land under
    `.claude/worktrees/agent-<id>` (tool-managed, disposable) — record that path in the
    mission's `STATE.md` under "worktrees used"; they don't need to follow the
    `session-tracking` layout themselves.

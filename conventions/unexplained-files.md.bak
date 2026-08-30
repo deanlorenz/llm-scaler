@@ -1,7 +1,12 @@
 # Finding something unexplained in a shared worktree
 
-Read this when you find something on disk you didn't put there and can't immediately explain
-— an untracked file, a skill with a claim in it you don't recognize, an edit you didn't make.
+Read this when you find something on disk you didn't put there and can't immediately explain.
+
+Sessions from multiple missions, and multiple tools (not just Claude Code), can be working
+concurrently against this repo's shared worktrees. Finding something you didn't put there and
+can't immediately explain — an untracked file, a skill with a claim in it you don't recognize,
+an edit you didn't make — is expected background noise of a multi-session system, not
+necessarily a problem. A consistent way to reason about it:
 
 1. **Read it before doing anything else.** Don't delete, overwrite, or "clean up" an unexplained
    file on sight.
