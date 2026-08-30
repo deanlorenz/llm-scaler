@@ -84,3 +84,10 @@ All files under `config/` follow the `(<app>-)?<kind>.yaml` pattern:
 ## Deprecation
 
 - the helm chart has been removed. Do not re-introduce it or add helm chart features.
+
+## Filesystem Sandbox Rules (Agent)
+
+- **All write and delete operations are restricted to the current worktree directory.** Never write, create, or delete files outside the worktree — including `/tmp`, `~`, or any other path.
+- **`rm -rf` is forbidden** unless the target is a directory the agent verifiably created in the current session and contains only transient agent-generated data. Always confirm this before running.
+- For scratch or test data, create a subdirectory **inside the worktree** (e.g. `hack/benchmark/_testrun/`). Never use `/tmp` or any out-of-worktree path for writes.
+- Before any destructive shell command (`rm`, `rmdir`, `mv`, overwrite-redirect `>`), confirm the target path is inside the worktree and agent-owned.

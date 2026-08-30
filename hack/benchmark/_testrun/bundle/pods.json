@@ -1,0 +1,32 @@
+[
+  {
+    "pod_id": "my-deploy-abc12-xyz56",
+    "so_id": "my-deploy",
+    "created_t": null,
+    "ready_t": null,
+    "setup_s": null,
+    "engine_config": {
+      "num_gpu_blocks": 2048,
+      "block_size": 16,
+      "gpu_memory_utilization": "0.9",
+      "enable_prefix_caching": "False",
+      "kv_tokens": 32768
+    },
+    "series": [
+      {
+        "t": 0.0,
+        "run": 8.0,
+        "wait": 3.0,
+        "kv": 0.55,
+        "gen_rate": null,
+        "prompt_rate": null,
+        "itl_ms": null,
+        "prefill_ms": null,
+        "qwait_s": null,
+        "preempt_rate": null,
+        "pfx_hit": null,
+        "stable": true
+      }
+    ]
+  }
+]

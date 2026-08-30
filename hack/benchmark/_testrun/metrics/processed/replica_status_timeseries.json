@@ -1,0 +1,1 @@
+{"snapshots":[{"timestamp":1714564800,"controllers":[{"name":"my-deploy","desired_replicas":2,"ready_replicas":2,"available_replicas":2}]},{"timestamp":1714564860,"controllers":[{"name":"my-deploy","desired_replicas":3,"ready_replicas":2}]}]}

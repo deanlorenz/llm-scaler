@@ -1,0 +1,6 @@
+{
+  "extractor_version": "0.1.0",
+  "run_dir": "/home/dean/code/llm-d/dean-llmd-scaler-sandbox/worktrees/benchmark-extract/hack/benchmark/_testrun",
+  "harness": "guidellm",
+  "warnings": []
+}

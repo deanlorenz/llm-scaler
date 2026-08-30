@@ -151,95 +151,6 @@ BENCHMARK_SCENARIOS_DIR ?= $(CURDIR)/test/benchmark/scenarios
 # "command line" there and they keep the dummy.
 BENCHMARK_MODEL_ID   ?= $(if $(filter command line environment,$(origin MODEL_ID)),$(MODEL_ID),Qwen/Qwen3-0.6B)
 
-# benchmark-run-only: hack/benchmark/run_only.sh against an already-standing
-# stack, no standup/CLI clone -- see docs/plans/benchmark/run-only-metrics-gap.md.
-#
-# Worktree-local, single-context kubeconfig if one exists (set up per-worktree
-# to avoid a concurrent session on this shared machine flipping which
-# cluster/namespace ambient KUBECONFIG's current-context points at); falls
-# back to whatever KUBECONFIG already is otherwise, so this stays usable
-# without that file present.
-RUN_ONLY_KUBECONFIG  ?= $(if $(wildcard $(CURDIR)/.kube/config),$(CURDIR)/.kube/config,$(KUBECONFIG))
-# Same tag convention benchmark-run already uses for the harness image
-# (BENCHMARK_IMAGE_TAG, defaulting to BENCHMARK_REPO_REF) -- kept independent
-# here since benchmark-run-only never clones/installs the CLI at all.
-BENCHMARK_RUN_ONLY_IMAGE ?= ghcr.io/llm-d/llm-d-benchmark:$(BENCHMARK_REPO_REF)
-# Gitignored scratch dir, not hack/benchmark/results/ (that directory holds
-# curated, committed example outputs -- bundle.json/coverage.json/panels.png
-# copied in deliberately after the fact, not raw run output).
-BENCHMARK_RUN_ONLY_OUTPUT_DIR ?= $(CURDIR)/hack/benchmark/run-only-scratch/$(BENCHMARK_NAMESPACE)-$(shell date +%Y%m%d-%H%M%S)
-
-# ---------------------------------------------------------------------------
-# bench-* variables — run benchmarks against an already-running stack.
-# No llmdbenchmark CLI or Python install required; only kubectl + bash.
-# These are completely separate from the BENCHMARK_* variables above.
-#
-# Loading config from a per-namespace env file (recommended):
-#
-#   # Option A — shell-level source (same convention as benchmark-run-only):
-#   set -a && source hack/benchmark/dhl-la-1708.env && set +a
-#   make bench-run
-#
-#   # Option B — single-line with BENCH_ENV_FILE (sources the file in-recipe):
-#   make bench-run BENCH_ENV_FILE=hack/benchmark/dhl-la-1708.env
-#
-# Variables from BENCH_ENV_FILE are lower precedence than command-line overrides,
-# so you can still do:
-#   make bench-run BENCH_ENV_FILE=hack/benchmark/dhl-la-1708.env BENCH_WORKLOAD=symmetrical
-# ---------------------------------------------------------------------------
-
-# Optional env file. When set, every bench-* recipe sources it before running.
-# Variables in the file set defaults; command-line assignments still win.
-BENCH_ENV_FILE     ?=
-
-# Namespace where the harness pod runs and where vLLM/EPP pods live.
-BENCH_NAMESPACE    ?= $(BENCHMARK_NAMESPACE)
-
-# Harness type: guidellm or inference-perf.
-BENCH_HARNESS      ?= guidellm
-
-# Scenario file (test/benchmark/scenarios/*.yaml.in).
-# Default comes from BENCH_WORKLOADS first entry when bench-meta.json is present;
-# falls back to this value for backward-compat direct invocations.
-BENCH_WORKLOAD     ?= prefill_heavy
-
-# Space-separated ordered list of workloads for bench-run-all.
-# Each name must match test/benchmark/scenarios/<name>.yaml.in.
-# Set in the .env file (BENCH_WORKLOADS="prefill_heavy symmetrical burst_4k250").
-# bench-run uses the first entry as its default when BENCH_WORKLOAD is unset.
-BENCH_WORKLOADS    ?=
-
-# Model ID forwarded into the scenario profile.
-# When bench-meta.json exists (run bench-init first), this is read from the
-# metadata and does not need to be set manually.
-BENCH_MODEL_ID     ?= $(BENCHMARK_MODEL_ID)
-
-# Inference endpoint URL. Empty = read from bench-meta.json, then auto-detect.
-BENCH_ENDPOINT_URL ?=
-
-# Session output directory (all scenarios for this session land here).
-BENCH_SESSION_DIR  ?= $(CURDIR)/hack/benchmark/bench-scratch/$(BENCH_NAMESPACE)-$(shell date +%Y%m%d-%H%M%S)
-
-# Harness image tag. Pinned to the tested version; set in the .env file.
-# bench-init warns if the running harness pod's tag differs from this value.
-BENCH_IMAGE_TAG    ?= $(BENCHMARK_REPO_REF)
-
-# Path to bench-meta.json written by bench-init.
-# Default resolves to bench-scratch/<namespace>/bench-meta.json at runtime.
-BENCH_META_FILE    ?=
-
-# EPP metrics secret name — read from bench-meta.json when available.
-# Override only when not using bench-init (backward compat).
-BENCH_EPP_METRICS_SECRET ?= epp-metrics-token
-
-# Optional client-side script run between scenarios in bench-run-all.
-# Called as: bash $BENCH_INTER_SCENARIO_HOOK <workload> <namespace> <session-dir>
-# Exit code is ignored. Canonical examples: hack/benchmark/hooks/wait_scale_down.sh
-#                                           hack/benchmark/hooks/snapshot_replicas.sh
-BENCH_INTER_SCENARIO_HOOK ?=
-
-# ---------------------------------------------------------------------------
-
 # The fraction of each GPU vLLM may use, substituted into the scenario.
 #
 # 0.90, not the scenarios' 0.95 and not a small-model special case.
@@ -336,28 +247,6 @@ BENCHMARK_WVA_UNDEPLOY_TARGET = $(if $(filter openshift,$(ENVIRONMENT)),undeploy
 # Where the installed WVA reads metrics. Empty lets deploy/install.sh detect the
 # cluster's existing Prometheus, which is the usual case for a benchmark cluster.
 BENCHMARK_PROMETHEUS_URL ?= $(PROMETHEUS_URL)
-
-# Environment-specific benchmark settings, selected by name:
-#
-#   make <target> BENCHMARK_ENV=dhl-la-1708   -> hack/benchmark/dhl-la-1708.env
-#
-# The named file is the reproducible record of a run: it declares the cluster
-# it is for (KUBE_CONTEXT, verified against the live context before any
-# destructive target) and every value the run depends on. Prefer editing a
-# named file, or creating one with `make benchmark-init`, over passing values
-# on the command line -- an override still works, but benchmark-guard reports
-# it loudly, and the file stops describing what actually ran.
-#
-# Included here (plain KEY=VALUE assignment, so it overrides the `?=` defaults
-# both above and below regardless of read order) -- but a `make VAR=value`
-# command-line override still wins over this, which is exactly what
-# benchmark-guard is watching for. hack/benchmark/.env (unnamed) is also
-# honoured as a legacy/default path; a named BENCHMARK_ENV wins over it.
-BENCHMARK_ENV ?=
--include hack/benchmark/.env
-ifneq ($(BENCHMARK_ENV),)
--include hack/benchmark/$(BENCHMARK_ENV).env
-endif
 
 # Flags for deploy/install.sh (e2e / CI-style cluster infra; no chart VA/HPA).
 CREATE_CLUSTER    ?= false
@@ -921,49 +810,6 @@ LLMDBENCHMARK        = $(shell command -v llmdbenchmark 2>/dev/null || echo $(BE
 # Common llmdbenchmark flags (spec + workspace + base dir for config resolution)
 BENCHMARK_CLI_FLAGS = --spec $(BENCHMARK_SPEC) --workspace $(BENCHMARK_WORKSPACE) --base-dir $(BENCHMARK_REPO_DIR)
 
-# What make will actually use, for env_guard.py to diff against the named env
-# file and report (not block) any override.
-BENCHMARK_GUARD_EFFECTIVE = BENCHMARK_NAMESPACE=$(BENCHMARK_NAMESPACE),IMG=$(IMG),BENCHMARK_MODEL_ID=$(BENCHMARK_MODEL_ID),BENCHMARK_WORKLOAD=$(BENCHMARK_WORKLOAD),BENCHMARK_HARNESS=$(BENCHMARK_HARNESS),PROMETHEUS_URL=$(PROMETHEUS_URL)
-
-.PHONY: benchmark-guard
-benchmark-guard: ## Internal: assert the run is described by a named env file (called by every destructive target)
-	@# GATE for destructive operations only -- starting a run, standup, teardown,
-	@# controller restart, per-run reset (all consume real GPUs or mutate a
-	@# shared-cluster stack). Read-only/local-only targets do not call this.
-	@#
-	@# Refuses on a missing env file, missing required keys, or a kube-context
-	@# mismatch; complains but proceeds on anything else.
-	@# UNSAFE=confirm|once|silent bypasses, at the level you choose.
-	@# See hack/benchmark/env_guard.py.
-	@python3 $(CURDIR)/hack/benchmark/env_guard.py \
-		--env-name "$(BENCHMARK_ENV)" \
-		--env-dir $(CURDIR)/hack/benchmark \
-		--unsafe "$(UNSAFE)" \
-		--effective "$(strip $(BENCHMARK_GUARD_EFFECTIVE))"
-
-.PHONY: benchmark-init
-benchmark-init: ## Create a named benchmark env file interactively (set BENCHMARK_ENV=<name>)
-	@python3 $(CURDIR)/hack/benchmark/env_wizard.py \
-		--name "$(BENCHMARK_ENV)" \
-		--env-dir $(CURDIR)/hack/benchmark
-
-.PHONY: benchmark-preflight
-benchmark-preflight: ## Read-only shared-cluster pre-flight: assert cluster invariants hold (set BENCHMARK_NAMESPACE=<namespace>)
-	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
-		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-preflight BENCHMARK_NAMESPACE=<namespace>"; \
-		exit 1; \
-	fi
-	python3 $(CURDIR)/hack/benchmark/preflight_shared_cluster.py -n $(BENCHMARK_NAMESPACE)
-
-.PHONY: benchmark-reset-run
-benchmark-reset-run: benchmark-guard ## Reset per-run state between runs: leftover harness objects, controller + decode restart (set BENCHMARK_NAMESPACE=<namespace>, BENCHMARK_RESET_APPLY=true to act)
-	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
-		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-reset-run BENCHMARK_NAMESPACE=<namespace>"; \
-		exit 1; \
-	fi
-	python3 $(CURDIR)/hack/benchmark/reset_run.py -n $(BENCHMARK_NAMESPACE) \
-		$(if $(filter true,$(BENCHMARK_RESET_APPLY)),--apply,)
-
 .PHONY: benchmark-install
 benchmark-install: ## Clone llm-d-benchmark at BENCHMARK_REPO_REF (default v0.7.0) and install the llmdbenchmark CLI
 	@if [ ! -d "$(BENCHMARK_REPO_DIR)" ]; then \
@@ -1169,20 +1015,6 @@ benchmark-fma-verify: ## Report where FMA launchers and requesters actually land
 	@bash hack/benchmark/fma_placement.sh verify $(BENCHMARK_NAMESPACE) \
 		"$(CURDIR)/hack/benchmark/scenarios/$(BENCHMARK_SPEC).yaml"
 
-.PHONY: benchmark-verify-scaledobjects
-benchmark-verify-scaledobjects: ## Rescan llm-d model servers and check every ScaledObject's modelID still matches what its container serves (set BENCHMARK_NAMESPACE)
-	@# A hand-changed serving model does not propagate to the ScaledObject that
-	@# already scales it -- nothing re-syncs that automatically. WVA then
-	@# evaluates decisions for a model no metric reports and applies zero of
-	@# them, silently, for the whole run. Found live on dhl-la-1708; see
-	@# docs/plans/benchmark/observability-gaps.md #5. benchmark-run does the
-	@# same check automatically before generating load.
-	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
-		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-verify-scaledobjects BENCHMARK_NAMESPACE=<namespace>"; \
-		exit 1; \
-	fi
-	@bash hack/benchmark/verify_wva_scaledobjects.sh $(BENCHMARK_NAMESPACE) $(if $(filter true,$(BENCHMARK_REPORT_ONLY)),--report-only,)
-
 .PHONY: benchmark-actuation
 benchmark-actuation: ## Measure how fast capacity arrives after a scale-up (set ACTUATION_TARGET=<deployment>; BENCHMARK_NAMESPACE required)
 	@# The claim FMA makes is that capacity arrives sooner -- not that tokens are
@@ -1231,7 +1063,7 @@ benchmark-scenarios: ## Copy our scenario specs into the llm-d-benchmark clone (
 	fi
 
 .PHONY: benchmark-standup
-benchmark-standup: benchmark-guard ## Stand up the benchmark environment, then install WVA from this repo (set BENCHMARK_NAMESPACE=<namespace>, MODEL_ID=<model>, IMG=<your build>; BENCHMARK_DIRECT_KEDA=true for controller-free EPP+KEDA autoscaling instead of WVA)
+benchmark-standup: ## Stand up the benchmark environment, then install WVA from this repo (set BENCHMARK_NAMESPACE=<namespace>, MODEL_ID=<model>, IMG=<your build>; BENCHMARK_DIRECT_KEDA=true for controller-free EPP+KEDA autoscaling instead of WVA)
 	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-standup BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
@@ -1470,7 +1302,7 @@ benchmark-standup: benchmark-guard ## Stand up the benchmark environment, then i
 ## binary is what this target exists to stop happening silently, so it says which
 ## image it is installing.
 .PHONY: benchmark-deploy-wva
-benchmark-deploy-wva: benchmark-guard ## Install WVA from deploy/ into BENCHMARK_NAMESPACE (namespace scope) and create its ScaledObjects. Set IMG=<your build>.
+benchmark-deploy-wva: ## Install WVA from deploy/ into BENCHMARK_NAMESPACE (namespace scope) and create its ScaledObjects. Set IMG=<your build>.
 	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-deploy-wva BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
@@ -1557,7 +1389,7 @@ benchmark-deploy-wva: benchmark-guard ## Install WVA from deploy/ into BENCHMARK
 		WVA_DEFAULT_SO_PLAN=$(BENCHMARK_SO_PLAN)
 
 .PHONY: benchmark-run
-benchmark-run: benchmark-guard ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<namespace>, MODEL_ID=<model>, BENCHMARK_HARNESS=guidellm|inference-perf, BENCHMARK_ENDPOINT_URL=<url> to skip endpoint auto-detection against a stack this repo's benchmark-standup did not create)
+benchmark-run: ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<namespace>, MODEL_ID=<model>, BENCHMARK_HARNESS=guidellm|inference-perf)
 	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-run BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
@@ -1576,17 +1408,8 @@ benchmark-run: benchmark-guard ## Run a single benchmark workload (set BENCHMARK
 			"$(BENCHMARK_SCENARIOS_DIR)/$(BENCHMARK_WORKLOAD)"; \
 		rm -f "$(BENCHMARK_SCENARIOS_DIR)/$(BENCHMARK_WORKLOAD).bak"; \
 	fi
-	@# Fetch workload from inference-perf catalog only if no local file matches under any
-	@# of the suffixes a workload name can carry (none, .yaml, .yaml.in -- every local
-	@# inference-perf workload in test/benchmark/scenarios uses .yaml.in). A single
-	@# hardcoded suffix here previously fell through to the catalog fetch for any local
-	@# workload using a suffix it didn't check, and failed loudly even though the file
-	@# existed. Found running quick_smoke.yaml.in.
-	@found=""; \
-	for suf in "" ".yaml" ".yaml.in"; do \
-		[ -f "$(BENCHMARK_SCENARIOS_DIR)/$(BENCHMARK_WORKLOAD)$$suf" ] && found=1; \
-	done; \
-	if [ "$(BENCHMARK_HARNESS)" = "inference-perf" ] && [ -z "$$found" ]; then \
+	@# Fetch workload from inference-perf catalog if not found locally and harness is inference-perf
+	@if [ "$(BENCHMARK_HARNESS)" = "inference-perf" ] && [ ! -f "$(BENCHMARK_SCENARIOS_DIR)/$(BENCHMARK_WORKLOAD)" ] && [ ! -f "$(BENCHMARK_SCENARIOS_DIR)/$(BENCHMARK_WORKLOAD).in" ]; then \
 		echo "Fetching $(BENCHMARK_WORKLOAD) from inference-perf workload-catalog..."; \
 		if curl -sfL "https://raw.githubusercontent.com/kubernetes-sigs/inference-perf/main/workload-catalog/$(BENCHMARK_WORKLOAD)/inference-perf.yaml" \
 			-o "$(BENCHMARK_SCENARIOS_DIR)/$(BENCHMARK_WORKLOAD)"; then \
@@ -1690,57 +1513,24 @@ benchmark-run: benchmark-guard ## Run a single benchmark workload (set BENCHMARK
 	@# namespace runs no launchers.
 	@bash hack/benchmark/fma_placement.sh verify $(BENCHMARK_NAMESPACE) \
 		"$(CURDIR)/hack/benchmark/scenarios/$(BENCHMARK_SPEC).yaml"
-	@# Rescan and check every ScaledObject's modelID still matches what its
-	@# container actually serves, before spending any load on a run WVA cannot
-	@# act on. See benchmark-verify-scaledobjects above for why this exists.
-	@bash hack/benchmark/verify_wva_scaledobjects.sh $(BENCHMARK_NAMESPACE) \
-		$(if $(BENCHMARK_MODEL_ID),--model $(BENCHMARK_MODEL_ID),)
 	@rm -f /tmp/wva_replica_samples.json /tmp/wva_replica_samples.json.pid
 	@bash hack/benchmark/sample_replicas.sh start $(BENCHMARK_NAMESPACE) /tmp/wva_replica_samples.json || true
-	@# The controller's own /metrics (wva_desired_replicas, wva_current_replicas,
-	@# wva_saturation_utilization, kv_cache tokens, ...) was never collected at all --
-	@# the harness's scraper only reaches vLLM/EPP pods, and the controller's metrics
-	@# port is authenticated HTTPS. Written to a scratch dir here (the real run dir
-	@# is not known until after the run) and filed alongside the replica samples below.
-	@rm -rf /tmp/wva_metrics_scrape
-	@bash hack/benchmark/scrape_wva_metrics.sh start $(BENCHMARK_NAMESPACE) /tmp/wva_metrics_scrape || true
-	@# analyzer-result/scaling-decision/k1-k2 lines live only in the controller's
-	@# own log, never in a metric -- without this, a run can complete cleanly and
-	@# report zero decisions with no way to tell "WVA decided nothing" apart from
-	@# "nobody captured it". Client-side oc logs -f, not an in-cluster follower:
-	@# fine for a run this short, the wrong tool for anything long/unattended --
-	@# see docs/plans/benchmark/observability-gaps.md #2.
-	@rm -f /tmp/wva_controller_log.txt /tmp/wva_controller_log.txt.pid /tmp/wva_controller_log.txt.stderr
-	@bash hack/benchmark/capture_wva_controller_log.sh start $(BENCHMARK_NAMESPACE) /tmp/wva_controller_log.txt || true
 	-$(LLMDBENCHMARK) $(BENCHMARK_CLI_FLAGS) run \
 		-p $(BENCHMARK_NAMESPACE) \
 		-l $(BENCHMARK_HARNESS) \
 		-w $(BENCHMARK_WORKLOAD).yaml \
 		$(if $(BENCHMARK_MODEL_ID),-m $(BENCHMARK_MODEL_ID),) \
 		$(if $(filter true,$(BENCHMARK_MONITORING)),--monitoring,) \
-		$(if $(BENCHMARK_ENDPOINT_URL),-U $(BENCHMARK_ENDPOINT_URL),) \
 		--wait-timeout $(BENCHMARK_WAIT_TIMEOUT)
 	@# Stopped and filed even when the run above failed -- a run that errored in a
 	@# post-processing step still produced measurements worth reading, and every
 	@# FMA run so far has ended that way.
 	@bash hack/benchmark/sample_replicas.sh stop /tmp/wva_replica_samples.json || true
-	@bash hack/benchmark/scrape_wva_metrics.sh stop /tmp/wva_metrics_scrape || true
-	@bash hack/benchmark/capture_wva_controller_log.sh stop /tmp/wva_controller_log.txt || true
 	@LATEST=$$(ls -td $(BENCHMARK_WORKSPACE)/$${USER}-*/results/$(BENCHMARK_HARNESS)-*_* 2>/dev/null | head -1); \
 	if [ -n "$$LATEST" ] && [ -s /tmp/wva_replica_samples.json ]; then \
 		mkdir -p "$$LATEST/metrics/processed"; \
 		cp /tmp/wva_replica_samples.json "$$LATEST/metrics/processed/wva_replica_samples.json"; \
 		echo "Replica samples filed in $$LATEST/metrics/processed/wva_replica_samples.json"; \
-	fi; \
-	if [ -n "$$LATEST" ] && [ -s /tmp/wva_controller_log.txt ]; then \
-		cp /tmp/wva_controller_log.txt "$$LATEST/controller.log"; \
-		echo "Controller log filed in $$LATEST/controller.log ($$(wc -l < /tmp/wva_controller_log.txt) line(s))"; \
-	fi; \
-	if [ -n "$$LATEST" ] && ls /tmp/wva_metrics_scrape/wva-controller_*_metrics.log >/dev/null 2>&1; then \
-		mkdir -p "$$LATEST/metrics/raw"; \
-		cp /tmp/wva_metrics_scrape/wva-controller_*_metrics.log "$$LATEST/metrics/raw/"; \
-		n=$$(ls /tmp/wva_metrics_scrape/wva-controller_*_metrics.log | wc -l | tr -d ' '); \
-		echo "WVA controller metrics filed in $$LATEST/metrics/raw/ ($$n scrape(s))"; \
 	fi
 	@echo ""
 	@echo "========================================="
@@ -1776,6 +1566,37 @@ benchmark-report: ## Generate a markdown table from the latest benchmark results
 		python3 $(CURDIR)/hack/benchmark/postprocess.py $$LATEST_DIR; \
 	fi
 
+.PHONY: benchmark-extract
+benchmark-extract: ## Extract a benchmark run into a visualization bundle (set RUN_DIR=<path> or uses latest)
+	@if [ -n "$(RUN_DIR)" ]; then \
+		python3 $(CURDIR)/hack/benchmark/extract.py --run $(RUN_DIR); \
+	else \
+		LATEST_DIR=$$(ls -td $(BENCHMARK_WORKSPACE)/$${USER}-*/results/$(BENCHMARK_HARNESS)-*_* 2>/dev/null | head -1); \
+		if [ -z "$$LATEST_DIR" ]; then \
+			echo "ERROR: No benchmark results found. Set RUN_DIR=<path> or run a benchmark first."; \
+			exit 1; \
+		fi; \
+		python3 $(CURDIR)/hack/benchmark/extract.py --run $$LATEST_DIR; \
+	fi
+
+.PHONY: benchmark-extract-check
+benchmark-extract-check: ## Verify the latest bundle has provenance.json (non-zero exit if absent)
+	@if [ -n "$(RUN_DIR)" ]; then \
+		BUNDLE=$$(dirname $$(dirname $(RUN_DIR)))/extract; \
+	else \
+		LATEST_DIR=$$(ls -td $(BENCHMARK_WORKSPACE)/$${USER}-*/results/$(BENCHMARK_HARNESS)-*_* 2>/dev/null | head -1); \
+		if [ -z "$$LATEST_DIR" ]; then \
+			echo "ERROR: No benchmark results found. Set RUN_DIR=<path>."; \
+			exit 1; \
+		fi; \
+		BUNDLE=$$(dirname $$(dirname $$LATEST_DIR))/extract; \
+	fi; \
+	if [ ! -f "$$BUNDLE/provenance.json" ]; then \
+		echo "ERROR: $$BUNDLE/provenance.json not found — run make benchmark-extract first."; \
+		exit 1; \
+	fi; \
+	echo "OK: $$BUNDLE/provenance.json exists."
+
 BENCHMARK_TWO_VARIANT_SECONDARY_SUFFIX ?= v2
 
 .PHONY: benchmark-plot-two-variant
@@ -1799,7 +1620,7 @@ WVA_ROLLOUT_TIMEOUT ?= 120s
 WVA_MONITORING_NAMESPACE ?= workload-variant-autoscaler-monitoring
 
 .PHONY: benchmark-add-variant
-benchmark-add-variant: benchmark-guard ## Add a secondary WVA variant to the running benchmark (set BENCHMARK_NAMESPACE=<namespace>, optional VARIANT_CONFIG=<path>)
+benchmark-add-variant: ## Add a secondary WVA variant to the running benchmark (set BENCHMARK_NAMESPACE=<namespace>, optional VARIANT_CONFIG=<path>)
 	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-add-variant BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
@@ -1809,7 +1630,7 @@ benchmark-add-variant: benchmark-guard ## Add a secondary WVA variant to the run
 		--config $(VARIANT_CONFIG)
 
 .PHONY: benchmark-enable-v2-saturation
-benchmark-enable-v2-saturation: benchmark-guard ## Enable WVA saturation V2 analyzer (apply configmap + restart controller)
+benchmark-enable-v2-saturation: ## Enable WVA saturation V2 analyzer (apply configmap + restart controller)
 	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-enable-v2-saturation BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
@@ -1818,7 +1639,7 @@ benchmark-enable-v2-saturation: benchmark-guard ## Enable WVA saturation V2 anal
 	$(MAKE) benchmark-restart-controller BENCHMARK_NAMESPACE=$(BENCHMARK_NAMESPACE)
 
 .PHONY: benchmark-restart-controller
-benchmark-restart-controller: benchmark-guard ## Restart WVA controller to flush in-memory state (e.g., k2 history between runs)
+benchmark-restart-controller: ## Restart WVA controller to flush in-memory state (e.g., k2 history between runs)
 	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-restart-controller BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
@@ -1831,7 +1652,7 @@ BENCHMARK_WAIT_TIMEOUT ?= 7200
 BENCHMARK_HARNESS_MEMORY ?= 40Gi
 
 .PHONY: benchmark-run-bursty
-benchmark-run-bursty: benchmark-guard ## Run bursty traffic benchmark using inference-perf multi-stage rates (set BENCHMARK_NAMESPACE=<namespace>, MODEL_ID=<model>)
+benchmark-run-bursty: ## Run bursty traffic benchmark using inference-perf multi-stage rates (set BENCHMARK_NAMESPACE=<namespace>, MODEL_ID=<model>)
 	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-run-bursty BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
@@ -1898,47 +1719,8 @@ benchmark-run-all: ## Run all scenarios: teardown → standup → run per scenar
 	@echo "All scenarios completed successfully"
 	@echo "=========================================="
 
-.PHONY: benchmark-run-only-check
-benchmark-run-only-check: ## Read-only prereq check for benchmark-run-only (set BENCHMARK_NAMESPACE=<namespace>, BENCHMARK_WORKLOAD=<scenario>)
-	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
-		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-run-only-check BENCHMARK_NAMESPACE=<namespace>"; \
-		exit 1; \
-	fi
-	@echo "Checking run_only.sh prerequisites against $(BENCHMARK_NAMESPACE)..."
-	@command -v yq >/dev/null 2>&1 || { echo "ERROR: yq not found on PATH"; exit 1; }
-	@test -f test/benchmark/scenarios/$(BENCHMARK_WORKLOAD).yaml.in || { \
-		echo "ERROR: test/benchmark/scenarios/$(BENCHMARK_WORKLOAD).yaml.in not found"; exit 1; }
-	@KUBECONFIG=$(RUN_ONLY_KUBECONFIG) kubectl get secret llm-d-hf-token -n $(BENCHMARK_NAMESPACE) >/dev/null 2>&1 || { \
-		echo "ERROR: secret llm-d-hf-token not found in $(BENCHMARK_NAMESPACE)"; exit 1; }
-	@KUBECONFIG=$(RUN_ONLY_KUBECONFIG) bash hack/benchmark/resolve_router_endpoint.sh $(BENCHMARK_NAMESPACE) >/dev/null || { \
-		echo "ERROR: could not resolve a router/EPP endpoint in $(BENCHMARK_NAMESPACE)"; exit 1; }
-	@echo "OK: yq present, scenario file present, HF secret present, router/EPP endpoint resolvable."
-
-.PHONY: benchmark-run-only
-benchmark-run-only: benchmark-guard benchmark-run-only-check ## Run one workload against an already-standing stack via run_only.sh, no standup/CLI clone (set BENCHMARK_NAMESPACE=<namespace>; BENCHMARK_WORKLOAD/BENCHMARK_HARNESS/BENCHMARK_MODEL_ID override the .env default)
-	@mkdir -p $(BENCHMARK_RUN_ONLY_OUTPUT_DIR)
-	@_endpoint_url=$$(KUBECONFIG=$(RUN_ONLY_KUBECONFIG) bash hack/benchmark/resolve_router_endpoint.sh $(BENCHMARK_NAMESPACE)); \
-	echo "Resolved endpoint: $$_endpoint_url"; \
-	bash hack/benchmark/render_run_only_config.sh \
-		test/benchmark/scenarios/$(BENCHMARK_WORKLOAD).yaml.in \
-		$(BENCHMARK_WORKLOAD) \
-		$(BENCHMARK_NAMESPACE) \
-		$(BENCHMARK_MODEL_ID) \
-		"$$_endpoint_url" \
-		$(BENCHMARK_HARNESS) \
-		$(BENCHMARK_RUN_ONLY_IMAGE) \
-		llm-d-hf-token \
-		$(REQUEST_RATE) \
-		$(MAX_DURATION) \
-		> $(BENCHMARK_RUN_ONLY_OUTPUT_DIR)/config.yaml
-	@echo "Rendered config: $(BENCHMARK_RUN_ONLY_OUTPUT_DIR)/config.yaml"
-	KUBECONFIG=$(RUN_ONLY_KUBECONFIG) bash hack/benchmark/run_only.sh \
-		--config $(BENCHMARK_RUN_ONLY_OUTPUT_DIR)/config.yaml \
-		--output $(BENCHMARK_RUN_ONLY_OUTPUT_DIR)/results
-	@echo "Results: $(BENCHMARK_RUN_ONLY_OUTPUT_DIR)/results"
-
 .PHONY: benchmark-teardown
-benchmark-teardown: benchmark-guard ## Tear down the benchmark environment (set BENCHMARK_NAMESPACE=<namespace>)
+benchmark-teardown: ## Tear down the benchmark environment (set BENCHMARK_NAMESPACE=<namespace>)
 	@if [ -z "$(BENCHMARK_NAMESPACE)" ]; then \
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-teardown BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
@@ -1974,116 +1756,6 @@ benchmark-teardown: benchmark-guard ## Tear down the benchmark environment (set 
 
 .PHONY: benchmark-full
 benchmark-full: benchmark-standup benchmark-run-all benchmark-teardown ## Full lifecycle: standup -> run all scenarios -> teardown
-
-# ---------------------------------------------------------------------------
-# bench-* targets — run benchmarks against an already-running stack.
-# Uses only kubectl + bash; no llmdbenchmark CLI or Python install required.
-# Completely separate from the benchmark-* targets above (left untouched).
-# ---------------------------------------------------------------------------
-
-# Internal helper: shell fragment that sources BENCH_ENV_FILE when set.
-# Used at the top of every bench-* recipe so BENCH_ENV_FILE=<file> works as a
-# one-liner. Variables in the file are lower precedence than Make's own
-# command-line assignments because the recipe runs *after* Make has already
-# expanded $(BENCH_NAMESPACE) etc. in the recipe text — only env vars that the
-# recipe reads at runtime (passed explicitly) pick up the sourced values.
-# The canonical pattern (Option A) remains: source the file in your shell first.
-_BENCH_ENV_LOAD = $(if $(BENCH_ENV_FILE),set -a && source "$(BENCH_ENV_FILE)" && set +a &&,)
-
-.PHONY: bench-guard
-bench-guard: ## (legacy) Internal marker: load hack/benchmark/<ns>.env before calling bench-* targets
-
-.PHONY: bench-run
-bench-run: ## Run benchmark workloads from a session file (BENCH_SESSION=<path> [BENCH_WORKLOAD=<name>] [DRY_RUN=true])
-	@[ -n "$(BENCH_SESSION)" ] || { \
-		echo "ERROR: BENCH_SESSION is required."; \
-		echo "  Usage: make bench-run BENCH_SESSION=hack/benchmark/bench-sessions/<name>.yaml"; \
-		echo "  Start:  cp hack/benchmark/bench-sessions/sample.yaml hack/benchmark/bench-sessions/<name>.yaml"; \
-		exit 1; \
-	}
-	@DRY_RUN="$(DRY_RUN)" \
-	BENCH_WORKLOAD="$(BENCH_WORKLOAD)" \
-	bash "$(CURDIR)/hack/benchmark/bench_run.sh" "$(BENCH_SESSION)"
-
-.PHONY: bench-run-legacy
-bench-run-legacy: bench-guard ## (legacy) Run one scenario — old env-file flow (set BENCH_NAMESPACE, BENCH_WORKLOAD, BENCH_MODEL_ID, or BENCH_ENV_FILE=<file>)
-	@$(if $(BENCH_ENV_FILE),set -a && source "$(BENCH_ENV_FILE)" && set +a;,) \
-	_ns="$${BENCH_NAMESPACE:-$(BENCH_NAMESPACE)}"; \
-	_model="$${BENCH_MODEL_ID:-$(BENCH_MODEL_ID)}"; \
-	_harness="$${BENCH_HARNESS:-$(BENCH_HARNESS)}"; \
-	_workload="$${BENCH_WORKLOAD:-$(BENCH_WORKLOAD)}"; \
-	_endpoint="$${BENCH_ENDPOINT_URL:-$(BENCH_ENDPOINT_URL)}"; \
-	_epp_secret="$${BENCH_EPP_METRICS_SECRET:-$(BENCH_EPP_METRICS_SECRET)}"; \
-	_prom_url="$${BENCHMARK_PROMETHEUS_URL:-$(BENCHMARK_PROMETHEUS_URL)}"; \
-	_image_tag="$${BENCH_IMAGE_TAG:-$(BENCH_IMAGE_TAG)}"; \
-	_session_dir="$${BENCH_SESSION_DIR:-$(BENCH_SESSION_DIR)}"; \
-	[ -n "$$_ns" ]    || { echo "ERROR: BENCH_NAMESPACE is required"; exit 1; }; \
-	[ -n "$$_model" ] || { echo "ERROR: BENCH_MODEL_ID is required"; exit 1; }; \
-	mkdir -p "$$_session_dir"; \
-	BENCH_IMAGE_TAG="$$_image_tag" \
-	BENCH_HARNESS_POD_NAME="$${BENCH_HARNESS_POD_NAME:-llmdbench-harness}" \
-	BENCH_EPP_METRICS_SECRET="$$_epp_secret" \
-	bash "$(CURDIR)/hack/benchmark/run_session.sh" ensure "$$_ns"; \
-	MODEL_ID="$$_model" \
-	BENCH_HARNESS="$$_harness" \
-	BENCH_WORKLOAD="$$_workload" \
-	BENCH_ENDPOINT_URL="$$_endpoint" \
-	BENCHMARK_PROMETHEUS_URL="$$_prom_url" \
-	bash "$(CURDIR)/hack/benchmark/run_scenario.sh" \
-		"$(BENCHMARK_SCENARIOS_DIR)/$$_workload.yaml.in" \
-		"$$_ns" \
-		"$$_session_dir"; \
-	echo "bench-run-legacy: results in $$_session_dir/$$_workload"
-
-.PHONY: bench-run-all-legacy
-bench-run-all-legacy: bench-guard ## (legacy) Run all scenarios sequentially — old env-file flow
-	@$(if $(BENCH_ENV_FILE),set -a && source "$(BENCH_ENV_FILE)" && set +a;,) \
-	_ns="$${BENCH_NAMESPACE:-$(BENCH_NAMESPACE)}"; \
-	_model="$${BENCH_MODEL_ID:-$(BENCH_MODEL_ID)}"; \
-	_harness="$${BENCH_HARNESS:-$(BENCH_HARNESS)}"; \
-	_endpoint="$${BENCH_ENDPOINT_URL:-$(BENCH_ENDPOINT_URL)}"; \
-	_epp_secret="$${BENCH_EPP_METRICS_SECRET:-$(BENCH_EPP_METRICS_SECRET)}"; \
-	_prom_url="$${BENCHMARK_PROMETHEUS_URL:-$(BENCHMARK_PROMETHEUS_URL)}"; \
-	_image_tag="$${BENCH_IMAGE_TAG:-$(BENCH_IMAGE_TAG)}"; \
-	_session_dir="$${BENCH_SESSION_DIR:-$(BENCH_SESSION_DIR)}"; \
-	_hook="$${BENCH_INTER_SCENARIO_HOOK:-$(BENCH_INTER_SCENARIO_HOOK)}"; \
-	[ -n "$$_ns" ]    || { echo "ERROR: BENCH_NAMESPACE is required"; exit 1; }; \
-	[ -n "$$_model" ] || { echo "ERROR: BENCH_MODEL_ID is required"; exit 1; }; \
-	mkdir -p "$$_session_dir"; \
-	BENCH_IMAGE_TAG="$$_image_tag" \
-	BENCH_HARNESS_POD_NAME="$${BENCH_HARNESS_POD_NAME:-llmdbench-harness}" \
-	BENCH_EPP_METRICS_SECRET="$$_epp_secret" \
-	bash "$(CURDIR)/hack/benchmark/run_session.sh" ensure "$$_ns"; \
-	for scenario_file in $(BENCHMARK_SCENARIOS_DIR)/*.yaml.in; do \
-		workload="$$(basename "$$scenario_file" .yaml.in)"; \
-		echo "bench-run-all-legacy: running scenario: $$workload"; \
-		MODEL_ID="$$_model" \
-		BENCH_HARNESS="$$_harness" \
-		BENCH_WORKLOAD="$$workload" \
-		BENCH_ENDPOINT_URL="$$_endpoint" \
-		BENCHMARK_PROMETHEUS_URL="$$_prom_url" \
-		bash "$(CURDIR)/hack/benchmark/run_scenario.sh" \
-			"$$scenario_file" \
-			"$$_ns" \
-			"$$_session_dir" || \
-		{ echo "bench-run-all-legacy: scenario $$workload failed (rc=$$?); continuing..."; }; \
-		if [ -n "$$_hook" ]; then \
-			echo "bench-run-all-legacy: running inter-scenario hook: $$_hook"; \
-			bash "$$_hook" "$$workload" "$$_ns" || true; \
-		fi; \
-	done; \
-	echo "bench-run-all-legacy: session complete. Results in: $$_session_dir"
-
-.PHONY: bench-full
-bench-full: bench-run-all-legacy ## (legacy) Run all scenarios — old env-file flow
-
-.PHONY: bench-teardown
-bench-teardown: bench-guard ## Tear down the bench harness pod and its RBAC (explicit; never automatic)
-	@$(if $(BENCH_ENV_FILE),set -a && source "$(BENCH_ENV_FILE)" && set +a;,) \
-	_ns="$${BENCH_NAMESPACE:-$(BENCH_NAMESPACE)}"; \
-	[ -n "$$_ns" ] || { echo "ERROR: BENCH_NAMESPACE is required"; exit 1; }; \
-	BENCH_HARNESS_POD_NAME="$${BENCH_HARNESS_POD_NAME:-llmdbench-harness}" \
-	bash "$(CURDIR)/hack/benchmark/run_session.sh" stop "$$_ns"
 
 # Stub for llm-d nightly reusable workflows (test_target=nightly-test-llm-d)
 # No-op; temporarily satisfies nightly CI make invocation

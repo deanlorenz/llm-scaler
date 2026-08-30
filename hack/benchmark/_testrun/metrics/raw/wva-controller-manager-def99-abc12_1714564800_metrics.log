@@ -1,0 +1,2 @@
+wva_current_replicas{variant_name="my-deploy",namespace="wva-bench",model_name="Qwen/Qwen3-32B"} 2
+wva_kv_cache_tokens_capacity{variant_name="my-deploy",namespace="wva-bench",model_name="Qwen/Qwen3-32B"} 32768

@@ -1,0 +1,12 @@
+load:
+  stages:
+    - rate: 0
+      duration: 30
+    - rate: 10
+      duration: 120
+      mean_input_tokens: 512
+      mean_output_tokens: 128
+    - rate: 20
+      duration: 180
+      mean_input_tokens: 512
+      mean_output_tokens: 128

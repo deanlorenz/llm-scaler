@@ -1,0 +1,41 @@
+{
+  "run_id": "test-run-001",
+  "harness": "guidellm",
+  "model_id": "Qwen/Qwen3-32B",
+  "namespace": "wva-bench",
+  "endpoint_url": "http://my-epp:8080",
+  "harness_start_epoch": 1714564800.0,
+  "harness_stop_epoch": 1714565400.0,
+  "load_start_epoch": 1714564830.0,
+  "prewarm_s": 30.0,
+  "load_duration_s": 300.0,
+  "wva_confirmed_model": "Qwen/Qwen3-32B",
+  "load_stages": [
+    {
+      "duration_s": 30.0,
+      "rate_rps": 0.0,
+      "in_tok_mean": null,
+      "out_tok_mean": null
+    },
+    {
+      "duration_s": 120.0,
+      "rate_rps": 10.0,
+      "in_tok_mean": 512.0,
+      "out_tok_mean": 128.0
+    },
+    {
+      "duration_s": 180.0,
+      "rate_rps": 20.0,
+      "in_tok_mean": 512.0,
+      "out_tok_mean": 128.0
+    }
+  ],
+  "time_anchor": {
+    "method": "not-needed",
+    "offset_s": 0.0,
+    "corr": null,
+    "trustworthy": true,
+    "n_scrapes": 0,
+    "shift_from_guess_s": 0.0
+  }
+}

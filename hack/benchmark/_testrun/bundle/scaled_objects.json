@@ -1,0 +1,42 @@
+[
+  {
+    "so_id": "my-deploy",
+    "config": {
+      "gpu_count": null,
+      "role": null,
+      "cost": null,
+      "min_replicas": null,
+      "max_replicas": null,
+      "engine_config": {
+        "num_gpu_blocks": 2048,
+        "block_size": 16,
+        "gpu_memory_utilization": "0.9",
+        "enable_prefix_caching": "False",
+        "kv_tokens": 32768
+      }
+    },
+    "replicas": [
+      {
+        "t": -30.0,
+        "desired": 2,
+        "ready": 2,
+        "available": 2
+      },
+      {
+        "t": 30.0,
+        "desired": 3,
+        "ready": 2,
+        "available": null
+      }
+    ],
+    "wva_scrapes": [
+      {
+        "t": -30.0,
+        "current_replicas": 2.0,
+        "kv_capacity": 32768.0,
+        "model_name": "Qwen/Qwen3-32B"
+      }
+    ],
+    "scaler": []
+  }
+]
