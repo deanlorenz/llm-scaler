@@ -43,4 +43,4 @@ mission because of it.
 
 ## Session log
 
-- 2026-08-27T20:16 session=2026-08-27-agentbus-design status=active ledger=ledgers/2026-08-27-agentbus-design.md
+- 2026-08-27T20:16 session=2026-08-27-agentbus-design status=retired ledger=ledgers/2026-08-27-agentbus-design.md
