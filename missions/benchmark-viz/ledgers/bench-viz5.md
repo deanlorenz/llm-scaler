@@ -54,3 +54,5 @@ updated open items list.
 3. Publishing / Makefile bench-* targets (deferred pending runtools merge)
 4. Cumulative/comparison reports (deferred)
 5. Merge production code into benchmark-runtools (cherry-pick list above)
+
+## Verified 2026-08-31 — all points already captured
