@@ -199,6 +199,22 @@ if [ -n "$_so_name" ]; then
         $KUBECTL annotate scaledobject "$_so_name" -n "$NS" \
             autoscaling.keda.sh/paused-replicas- --overwrite || \
             _warn "Failed to unpause ScaledObject/$_so_name."
+        # Wait for KEDA to recreate the HPA after unpause. Without this the HPA
+        # does not exist when the run starts and KEDA cannot scale during the run.
+        _info "Pre-run: waiting for KEDA to create HPA for $_so_name (timeout: 60s)..."
+        _hpa_deadline=$(( $(date +%s) + 60 ))
+        until $KUBECTL get hpa -n "$NS" \
+                -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | \
+                grep -q "$_so_name" || [ "$(date +%s)" -ge "$_hpa_deadline" ]; do
+            sleep 3
+        done
+        if $KUBECTL get hpa -n "$NS" \
+                -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | \
+                grep -q "$_so_name"; then
+            _info "Pre-run: HPA for $_so_name is ready."
+        else
+            _warn "Pre-run: HPA for $_so_name not found after 60s — KEDA may not scale during run."
+        fi
     else
         _info "Pre-run: SO is not paused."
     fi

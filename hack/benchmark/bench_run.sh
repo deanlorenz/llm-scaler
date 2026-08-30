@@ -518,6 +518,13 @@ PYEOF
 done
 
 # ---------------------------------------------------------------------------
+# Teardown: stop harness pod to free cluster resources
+# ---------------------------------------------------------------------------
+_info "Stopping harness pod..."
+bash "$_SCRIPT_DIR/run_session.sh" stop "$NS" || \
+    _warn "Failed to stop harness pod — it may still be running in $NS."
+
+# ---------------------------------------------------------------------------
 # Final report
 # ---------------------------------------------------------------------------
 echo ""
