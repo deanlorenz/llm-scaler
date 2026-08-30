@@ -254,3 +254,40 @@ Following its steps now: Step 1 (safe stopping point) held with no mid-edit work
 is Step 2. Step 3 (STATE.md) — nothing further to update beyond what's already committed. Step
 4 (commit) — checking both worktrees now. Steps 5–6 (ledger-capture, retire) follow per the
 skill's own instructions.
+
+## Verified 2026-08-30 — all points already captured
+
+Read this ledger in full against the current `missions/agentbus/STATE.md` and
+`missions/agentbus/spec-agentbus.md`. Every design decision, T1–T3/T6 implementation detail,
+and rejected alternative from the design phase is already in `spec-agentbus.md`'s "Settled
+design," per-task sections, and "Composition with session-tracking conventions." The
+plan-file gap the ledger flags (`~/.claude/plans/i-am-looking-mellow-pizza.md`, local/
+uncommitted) is closed — the spec doc is self-sufficient, as the ledger's own later entries
+already confirm.
+
+The corrections narrated in this ledger were already fully folded into the current docs by
+the time this ledger was written, not just described as intended: `STATE.md`'s Session log
+shows only `status=active` (the mistaken `retired` entry recorded earlier in this ledger's
+own narrative was reverted, not left in place); `STATE.md` carries no incident narrative —
+the PAT exposure is a one-line bottom-line pointing back to this ledger, exactly per the
+ledger-vs-STATE.md role split the ledger itself settles on; the spec's "Open items" no longer
+duplicates T6's resolved Bob-config finding.
+
+The resume-mission `SKILL.md` untracked-file discovery (suspicious embedded-approval comment,
+concluded likely legitimate concurrent work) has its durable home in this ledger itself, per
+`CONVENTIONS.md`'s "Finding something unexplained in a shared worktree" section — a ledger
+note is the prescribed record for this case, not a STATE.md/spec entry; correctly not
+duplicated elsewhere.
+
+The six-point CONVENTIONS.md feedback list (final section before Wind-down) is informational
+content for the user to relay to another agent, not a mission finding — correctly not folded
+into `STATE.md` or the spec.
+
+Checked doc-reference paths touched by this ledger's own content: all repo-root-relative
+(`worktrees/agentbus`, `missions/agentbus/spec-agentbus.md`, etc.), none filesystem-absolute
+or bare, and `spec-agentbus.md` T5's one context-dependent reference to
+`resume-mission/SKILL.md` is disambiguated by the fully-qualified path one line above it. No
+fix needed.
+
+`missions/single-analyzer/**` was left untouched throughout (a concurrent session's live
+`.wip` claim was present there — out of scope for this run regardless).
