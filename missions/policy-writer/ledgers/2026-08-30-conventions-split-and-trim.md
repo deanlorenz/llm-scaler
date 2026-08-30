@@ -136,3 +136,18 @@
   (`unexplained-files.md`'s multi-mission/multi-tool sentence) that a "did I capture everything"
   self-check from memory would likely have missed, since it wasn't dramatic or rule-like — just
   ordinary scene-setting prose that still counted as content needing a home.
+
+## Verified 2026-08-30 — folded in: spec doc lacked the Phase 1 conventions/-split structure,
+the Phase 2 mechanism-vs-incident why-split rule, and the never-delete/backup-first + diff-verify
+discipline — all added to `spec-policy-writer.md`'s "Settled design" section (previously only in
+`PLAN-conventions-split.md`, a different worktree/branch). `STATE.md` had no record at all of the
+lost-plan incident or the destructive-editing near-miss — added a new task-table row noting both,
+with the lost-plan incident generalized into a new `suggestion-box/2026-08-30-1400-policy-writer.md`
+entry (genuinely global: persist an approved plan durably and immediately, not just at a
+checkpoint). The destructive-editing incident needed no new memory — confirmed it's the existing
+`feedback_git_destructive_confirm.md` rule being momentarily missed, not a gap in the rule. The
+WVA-research decision, the split itself, the Phase 2 trim, and the verification gap were already
+adequately captured in `STATE.md`'s task table. Doc-reference paths touched in this pass follow the
+existing bare-filename-within-mission-dir style already used throughout `STATE.md`; no stale or
+ambiguous paths found in scope. `CONVENTIONS.md` itself was not touched, per the corrected
+ledger-capture contract.

@@ -119,6 +119,65 @@ this spec traces back to satisfying one of these three.
   `CONVENTIONS.md`, and not while it is itself running ledger-capture. See T7 below —
   this is currently a decision record only, not yet drafted into `CONVENTIONS.md`'s own
   text.
+- **`CONVENTIONS.md` split into a slim core + situational `conventions/*.md` files,
+  2026-08-30 (Phase 1).** Drafted entirely in `worktrees/policy-writer`, committed
+  `eb5f5027` there — not yet copied into `session-tracking`. Core `CONVENTIONS.md` keeps
+  only standing rules (apply regardless of task, read by every session up front) plus a
+  new index section listing each situational file and its one-line trigger. Each
+  `conventions/*.md` file is grouped by the real-world **moment** a rule applies (e.g.
+  "about to edit `STATE.md` or `CONVENTIONS.md`", "running `/resume-mission` or
+  `/wind-down`"), not by today's `CONVENTIONS.md` heading boundaries — headings that fire
+  at the same moment merge into one file even if they're separate sections today. The 7
+  files: `wip-editing.md`, `state-vs-ledger.md`, `resume-and-handoff.md`,
+  `feature-worktree-setup.md`, `coder-orchestration.md`, `settings-and-skill-edits.md`,
+  `unexplained-files.md`. Full file-by-file content mapping and the index-section design
+  are in `PLAN-conventions-split.md` (in `worktrees/policy-writer`, not
+  `session-tracking` — see note below on that plan doc's location). Content moved
+  verbatim (not paraphrased), verified via phrase/word-count diffing that nothing was
+  dropped.
+- **Production conventions files are what/how only; why/rationale lives in this spec
+  doc, 2026-08-30 (Phase 2).** `CONVENTIONS.md` and every `conventions/*.md` file carry
+  only the rule itself — stated as what to do and how, short — never incident narration,
+  design rationale, or background on why a rule was created; that material belongs here
+  in `spec-policy-writer.md` instead, so every session reading a production rule file
+  doesn't pay the cost of its backstory. The line to draw: keep **mechanism-explaining**
+  why inline in the production file when it's needed to correctly apply the rule's own
+  steps (e.g. why the naive add-marker-then-remove-it sequence for
+  `settings.json`/`SKILL.md` edits never finishes, which is what makes "place the marker
+  somewhere inert" a necessary instruction rather than an arbitrary one). Cut
+  **incident/rationale** why — what motivated the rule, what went wrong before,
+  alternatives considered and rejected — out of the production file entirely; that class
+  moves here. The full rationale extraction, organized by destination file, is in
+  `PLAN-conventions-split.md`'s "Phase 2" section (in `worktrees/policy-writer`).
+- **Never delete or overwrite a production doc in place; capture rationale before
+  cutting it, verify by diffing, not by trusting extraction from memory.** For the Phase
+  2 trim specifically: every one of the 8 files (`CONVENTIONS.md` + 7
+  `conventions/*.md`) got a `.bak` sibling of its pre-trim version before any edit: the
+  trim was only performed after every cut passage was first captured verbatim in
+  `PLAN-conventions-split.md`, and only finalized after diffing each trimmed file against
+  its own `.bak` and cross-checking every removed passage against the plan doc's
+  rationale section, one file at a time — not by spot-checking or trusting the initial
+  extraction. This caught one real gap (a factual scene-setting sentence in
+  `unexplained-files.md` that had been cut but not yet captured anywhere) that a
+  from-memory self-check would likely have missed. This discipline was adopted only
+  after a real incident (see "Corrections/incidents" below) where a destructive edit's
+  ordering was presupposed without the user's actual confirmation, in tension with rules
+  already known to this session (re-confirm each destructive step; keep a backup when
+  unsure — `feedback_git_destructive_confirm.md`-adjacent territory).
+- **Persist an approved plan to a durable, committed file immediately, not left
+  contingent on the transient plan-mode file surviving until execution.** Discovered
+  2026-08-30 after a previously-approved plan for this same mission (splitting
+  `CONVENTIONS.md`) could not be recovered — only pointers to its prior existence
+  survived in old ledger entries, not the plan itself. Once repeated for the Phase 1
+  split: the approved plan was written to `PLAN-conventions-split.md` inside
+  `worktrees/policy-writer` and committed alongside the actual work, specifically so it
+  cannot vanish independently of the work it describes. **Note on that file's own
+  location:** `PLAN-conventions-split.md` lives in `worktrees/policy-writer` (branch
+  `policy-writer`), not in this (`session-tracking`) worktree/branch — it is not yet
+  durable from `session-tracking`'s perspective. This section captures its substance so
+  that content survives even if that worktree is discarded before the plan doc is
+  copied over; the plan doc itself still needs its own explicit copy-into-
+  `session-tracking` step, same as the conventions split it describes.
 
 ## Todo
 
