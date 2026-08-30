@@ -26,6 +26,8 @@
 #   BENCH_SKIP_PROMETHEUS    Set to "true" to skip post-scenario Prometheus range query
 #   BENCHMARK_PROMETHEUS_URL Prometheus/Thanos URL for range query
 #   WVA_METRICS_SERVICE      WVA controller metrics service name (default: auto)
+#   BENCH_META_JSON          Path to bench-meta.json (default: <session-dir>/bench-meta.json)
+#   BENCH_WARMUP_TIMEOUT     Seconds to wait for deployment ready after pre-scale (default: 300)
 #
 # Outputs written to <session-dir>/<workload_name>/:
 #   results/           kubectl cp'd from pod's /requests/<harness>_<exp_id>_<stack>/
@@ -156,6 +158,62 @@ $KUBECTL cp "$_TMP_PROFILE" "${NS}/${POD}:${IN_POD_PROFILE}"
 # ---------------------------------------------------------------------------
 _UID=$(date +%s)
 EXPERIMENT_ID="${_UID}_${WORKLOAD}"
+
+# ---------------------------------------------------------------------------
+# Pre-run: ensure SO is unpaused and deployment is at min_replicas
+# ---------------------------------------------------------------------------
+# Read stack config from bench-meta.json (written by bench_init.sh).
+# stacks[0] is the run target.
+_BENCH_META="${BENCH_META_JSON:-$SESSION_DIR/bench-meta.json}"
+_WARMUP_TIMEOUT="${BENCH_WARMUP_TIMEOUT:-300}"
+_so_name=""
+_deploy_name=""
+_min_replicas=1
+
+if [ -f "$_BENCH_META" ]; then
+    _so_name=$(python3 -c "
+import json; d=json.load(open('$_BENCH_META'))
+print(d.get('stacks',[{}])[0].get('scaledobject',''))
+" 2>/dev/null || true)
+    _deploy_name=$(python3 -c "
+import json; d=json.load(open('$_BENCH_META'))
+print(d.get('stacks',[{}])[0].get('deployment',''))
+" 2>/dev/null || true)
+    _min_replicas=$(python3 -c "
+import json; d=json.load(open('$_BENCH_META'))
+print(d.get('stacks',[{}])[0].get('min_replicas',1))
+" 2>/dev/null || true)
+    _min_replicas="${_min_replicas:-1}"
+else
+    _warn "bench-meta.json not found at $_BENCH_META — skipping pre-run stack setup."
+fi
+
+if [ -n "$_so_name" ]; then
+    _info "Pre-run: checking ScaledObject/$_so_name for paused state..."
+    _paused=$($KUBECTL get scaledobject "$_so_name" -n "$NS" \
+        -o jsonpath='{.metadata.annotations.autoscaling\.keda\.sh/paused-replicas}' \
+        2>/dev/null || true)
+    if [ -n "$_paused" ]; then
+        _info "Pre-run: SO is paused (paused-replicas=$_paused) — unpausing..."
+        $KUBECTL annotate scaledobject "$_so_name" -n "$NS" \
+            autoscaling.keda.sh/paused-replicas- --overwrite || \
+            _warn "Failed to unpause ScaledObject/$_so_name."
+    else
+        _info "Pre-run: SO is not paused."
+    fi
+fi
+
+if [ -n "$_deploy_name" ]; then
+    _info "Pre-run: scaling deployment/$_deploy_name to min_replicas=$_min_replicas..."
+    $KUBECTL scale deployment "$_deploy_name" -n "$NS" \
+        --replicas="$_min_replicas" || \
+        _warn "kubectl scale failed for $_deploy_name — proceeding anyway."
+    _info "Pre-run: waiting for deployment/$_deploy_name to be ready (timeout: ${_WARMUP_TIMEOUT}s)..."
+    $KUBECTL rollout status deployment/"$_deploy_name" -n "$NS" \
+        --timeout="${_WARMUP_TIMEOUT}s" || \
+        _warn "Deployment $_deploy_name not ready within ${_WARMUP_TIMEOUT}s — proceeding anyway."
+    _info "Pre-run: deployment/$_deploy_name is ready."
+fi
 
 # ---------------------------------------------------------------------------
 # Prepare logs/ directory
@@ -290,6 +348,21 @@ fi
 if [ "$_wva_scrape_started" = "true" ]; then
     _info "Stopping WVA metrics scraper..."
     bash "$_SCRIPT_DIR/scrape_wva_metrics.sh" stop "$WVA_OUT_DIR" || true
+fi
+
+# ---------------------------------------------------------------------------
+# Post-run: pause SO and scale deployment to 0 (free GPUs on shared cluster)
+# ---------------------------------------------------------------------------
+if [ -n "$_so_name" ]; then
+    _info "Post-run: pausing ScaledObject/$_so_name (autoscaling.keda.sh/paused-replicas=0)..."
+    $KUBECTL annotate scaledobject "$_so_name" -n "$NS" \
+        autoscaling.keda.sh/paused-replicas=0 --overwrite || \
+        _warn "Failed to pause ScaledObject/$_so_name."
+fi
+if [ -n "$_deploy_name" ]; then
+    _info "Post-run: scaling deployment/$_deploy_name to 0 to free GPUs..."
+    $KUBECTL scale deployment "$_deploy_name" -n "$NS" --replicas=0 || \
+        _warn "Failed to scale deployment/$_deploy_name to 0."
 fi
 
 # ---------------------------------------------------------------------------
