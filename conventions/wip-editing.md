@@ -26,7 +26,8 @@ The rule for both:
    copy), then rename `FILE.md.wip` back to `FILE.md`, `git add`, commit.
 6. `*.md.wip` files are excluded via `.git/info/exclude`. `.git/info/exclude` is **not**
    per-worktree — `git rev-parse --git-common-dir` resolves to the *main* repo's `.git`,
-   shared across every worktree of that repo.
+   shared across every worktree of that repo. Note: `.session/` is **not** in
+   `.git/info/exclude` — it is tracked on mission branches and must not be globally excluded.
 
 **Symlink-based locking was considered and rejected — do not re-propose it.** See the spec doc
 for why.
