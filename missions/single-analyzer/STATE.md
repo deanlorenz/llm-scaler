@@ -42,7 +42,7 @@ when saturation is the only enabled analyzer (today's default).
 
 ## Immediate next step
 
-PR #1 created (https://github.com/deanlorenz/llm-scaler/pull/1, draft, reviewer: evgenyshabalin). Awaiting review. CT4 still blocked on user's fairness-definition decision. Next PR: engine-side reduce (wire non-saturation analyzer results into CompositeSignal).
+PR #34 created at upstream (https://github.com/ev-shindin/llm-scaler/pull/34, draft). Awaiting review. Prior fork-only PR (deanlorenz/llm-scaler #1) closed, pointing to upstream PR. CT4 still blocked on user's fairness-definition decision. Next PR: engine-side reduce (wire non-saturation analyzer results into CompositeSignal).
 
 ## Open questions blocking full completion
 
