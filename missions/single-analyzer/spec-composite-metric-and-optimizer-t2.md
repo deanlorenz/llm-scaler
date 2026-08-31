@@ -595,13 +595,12 @@ Two distinct paths exist; only the second is in scope for CT6:
    `PerReplicaCapacity` by `RoleDemand[role]` — **the division is only safe if PRC and
    `RoleDemand[role]` are in the same units.**
 
-   **Verification required before implementation:** confirm that `PerReplicaCapacity` from
-   the capacity store (used when `ReplicaCount == 0`) and `RoleDemand[role]` from
-   `estimateSchedulerQueueDemand` are both expressed in the same token units as the rest
-   of the saturation result, so `PRC / RoleDemand[role]` is a dimensionless fraction in
-   (0, 1] as claimed. Trace `estimateSchedulerQueueDemand` in
-   `internal/engines/analyzers/saturation_v2/analyzer.go` and the capacity-store path
-   to verify units agree. This is a pre-implementation check, not a code change.
+   **RESOLVED (2026-08-31):** `estimateSchedulerQueueDemand` is internal to the saturation
+   analyzer — its output is already folded into `TotalDemand`/`RoleDemand` before the
+   result leaves `Analyze()`. Both PRC (from `estimateStoredCapacity`, in KV-tokens per
+   replica) and `RoleDemand[role]` (occupancy + queue demand, in KV-tokens) are in the
+   same token unit. `PRC / RoleDemand[role]` is a valid dimensionless fraction. No formula
+   adjustment needed.
 
 **Strong typing.**
 `PerReplicaCapacity` in the composite `NamedAnalyzerResult` must be annotated (via doc
@@ -673,18 +672,35 @@ All of these must continue to produce correct results after the conversion:
 | `cost_aware_optimizer.go:sortVariantsForScaleDown` | `e.Score × PRC` | `e.Score × coverage_per_replica` |
 
 **Open decision — `rescaleInput.Demand` (rescale.go line 564).**
-`rescaleInputsForGroup` sets `Demand: satNamed.Result.TotalDemand` on each model's
-`rescaleInput`. This value is used only in the weight ratio `priority × demand` inside
-`computeRescaleTargets` — its comment explicitly notes "unit cancels." After CT6,
-`TotalDemand = 1.0` for every model, so `weight = priority × 1.0 = priority`. This
-**changes the rescale weighting from demand-proportional to priority-only**. Today a
-model with 10× the demand gets 10× the weight at equal priority; after CT6 it gets equal
-weight. This may be the right behavior (priorities are meant to encode relative urgency)
-or may not — it is a semantic change, not a neutral one. **Decision required from user
-before implementation:** keep `Demand = TotalDemand` in `rescaleInput` as a pre-normalization
-raw value (preserve today's demand-weighted rescale), or accept priority-only weighting
-(let the normalization flow through). The two options require different implementation
-approaches (the first needs the raw demand saved before `normalizeToCompositeUnits` runs).
+`rescaleInputsForGroup` sets `Demand: satNamed.Result.TotalDemand`. This is used only in
+the weight ratio `priority × demand` inside `computeRescaleTargets`. After CT6,
+`TotalDemand = 1.0` for all models, collapsing to priority-only weighting.
+
+Background: the water-fill weight determines each model's *proportional share of the pool*
+before `CapGPUs` (= demand-in-GPUs) clamps it. The "last 1% of a huge model forces out a
+small model" concern does **not apply** — `CapGPUs` already limits each model to its actual
+GPU need. The weight only governs who gets the uncapped share first when all models are
+genuinely hungry.
+
+Three options (all require decision before CT6 implementation):
+
+1. **Raw TotalDemand (preserve today):** save pre-normalization `TotalDemand` before
+   calling `normalizeToCompositeUnits`, use it as `Demand`. Implicit assumption: models
+   have comparable PRC (same GPU cost per token). Breaks for heterogeneous deployments.
+   Numerically identical to today, but requires extra field to carry the raw value.
+
+2. **Priority-only (CT6 passthrough):** `Demand = 1.0` flows through; weight = priority.
+   Equal-priority models get equal shares regardless of relative size. Simplest.
+
+3. **`modelDemandGPUs` (leaning this way, not decided):** `Demand = modelDemandGPUs(...)`,
+   already computed at rescale.go:552 for `capGPUs`/`sumDemandGPUs`. Weight = GPU footprint
+   of the model's unmet demand (replicas-needed × GPUsPerReplica). Numerically identical to
+   today pre-CT6 (`ceil(rawDemand/rawPRC) × GPUs = ceil(1.0/coverage) × GPUs` after CT6).
+   Most principled: distributing GPUs, weight by GPUs-needed, no token-unit assumption.
+   `rescaleInput.Demand` becomes a GPU count, not a token count — unit is no longer
+   "cancels in ratio" but genuinely GPU-commensurate.
+
+**User: thinking. Do not implement CT6 until this is resolved.**
 
 The last column above confirms no formula changes to the optimizer helpers — only the
 numeric values of `demand` and `PRC` change (1.0 and coverage fraction respectively),
@@ -704,11 +720,11 @@ and every formula yields the same replica count it did before.
   normalized fields are exactly correct (including `demand=0` and `PRC=0` edge cases).
 
 **Todo.**
-- [ ] **Pre-implementation:** trace `estimateSchedulerQueueDemand` and the capacity-store
+- [x] **Pre-implementation:** trace `estimateSchedulerQueueDemand` and the capacity-store
   path to verify PRC and `RoleDemand[role]` are in the same units for the partial-SFZ case.
-  If units don't agree, the normalization formula must be adjusted before any code lands.
-- [ ] **Pre-implementation:** resolve the `rescaleInput.Demand` open decision above — demand-
-  weighted or priority-only rescale weighting after CT6? Document decision here before coding.
+  **RESOLVED 2026-08-31** — same token units throughout; division is safe.
+- [ ] **Pre-implementation:** resolve the `rescaleInput.Demand` open decision above (options
+  1/2/3). Document decision here before coding. **BLOCKED on user.**
 - [ ] Write `normalizeToCompositeUnits(nr *NamedAnalyzerResult)` in
   `internal/engines/steadystate/engine_v2.go` (or a new file `composite.go` in the same
   package if it feels cleaner): applies the coverage normalization described above.
