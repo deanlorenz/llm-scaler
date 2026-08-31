@@ -37,13 +37,12 @@ when saturation is the only enabled analyzer (today's default).
 | CT3a — write engine-side reduce contract | **SKIPPED** | CT3b landed cleanly without a separate contract doc — the simplification was mechanical (loops → direct reads on a single entry); no design ambiguity required upfront documentation. Contract is implicit in the new single-entry signatures and their doc comments. |
 | CT3b — simplify 7 single-entry optimizer helpers | **DONE** | Commit `b980f682` on `single-analyzer`. `RolePairedState` collapsed from `[]map[string]float64` to `map[string]float64`; all 7 helpers + `sortVariantsForScaleDown`, `fairShareValue`, `reclaimRole`, `scaleDownRoleIterated`, `allocateForModelPaired`, `RolePickFn` updated to single-entry signatures. Multi-entry (N>1) originals preserved under `internal/engines/allocation/multi_backup/` (`//go:build ignore`) for the planned engine-side reduce step. Pre/post: 252→249 specs, 3 multi-entry test cases moved to backup file (not deleted). |
 | CT4 — Score-weighted aggregation simplification | **BLOCKED on user** | Confirmed real bug/naming mismatch: `fairShareValue` equalizes absolute remaining demand across models, not coverage ratio (two 80%-covered models at 10x different scale get ~10x different GPU shares). See `fairshare-value-correctness-investigation-2026-08-25.md` and spec CT4 section. Fix-now vs. document-and-defer decision is the user's to make; not code-verifiable. Explicitly out of scope for the current implementation pass. |
-| CT5 — document `RoleCapacities` role-visibility contract | NOT STARTED | Independent of CT1–CT4, can land any time. |
+| CT5 — document `RoleCapacities` role-visibility contract | **DONE** | Commit `fcf9c905` on `single-analyzer`. Corrected contract comment added to `initRoleState`. Errata note added to `scale-from-zero-and-fallback-trace-2026-08-25.md` (session-tracking, commit `997c3220`). |
 
 ## Immediate next step
 
-CT3a/CT3b are landed (`b980f682`). Remaining open work: CT5 (document `RoleCapacities`
-role-visibility contract — independent, can land any time) and CT4 (blocked on user's
-fairness-definition decision). No other unblocked tasks remain.
+All unblocked tasks complete. Only CT4 remains, blocked on the user's fairness-definition
+decision. No further implementation work until that decision is made.
 
 ## Open questions blocking full completion
 
