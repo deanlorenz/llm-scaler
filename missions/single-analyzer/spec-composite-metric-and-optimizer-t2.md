@@ -292,28 +292,28 @@ pre/post outputs for the same input, since `optimizer_equivalence_test.go` may n
 post-CT2).
 
 **Todo.**
-- [ ] **CT3a first:** write the engine-side reduce contract — for each of `RoleCapacities`,
+- [x] **CT3a first:** write the engine-side reduce contract — for each of `RoleCapacities`,
   `Remaining`, `Spare`, `RoleSpare`, `Live`, state precisely what a multi-analyzer reduce must
   compute, **using max/min (matching each field's existing precedent in the 7 functions), never
   Score-weighted averaging** — see the second correction above
-- [ ] CT3a: state where the non-negativity invariant (the `max(0.0, ...)` clamp) is enforced and
+- [x] CT3a: state where the non-negativity invariant (the `max(0.0, ...)` clamp) is enforced and
   by whom — independent of, and unaffected by, the analyzer-count reduction
-- [ ] CT3a: note the mixed-P/D+"both" deferral explicitly (confirmed zero-risk to defer, see
+- [x] CT3a: note the mixed-P/D+"both" deferral explicitly (confirmed zero-risk to defer, see
   above) so it isn't re-litigated by a future reader
-- [ ] Get CT3a's contract reviewed/confirmed before starting CT3b
-- [ ] CT3b: simplify `initRoleState` — drop the analyzer-index dimension
-- [ ] CT3b: simplify `roleBottleneckReplicas` — single term, no `max_i` framing needed (already
+- [x] Get CT3a's contract reviewed/confirmed before starting CT3b
+- [x] CT3b: simplify `initRoleState` — drop the analyzer-index dimension
+- [x] CT3b: simplify `roleBottleneckReplicas` — single term, no `max_i` framing needed (already
   proven exact no-op)
-- [ ] CT3b: simplify `roleAggRemaining` — drop the now-trivial `max_i` (analyzer-count reduce),
+- [x] CT3b: simplify `roleAggRemaining` — drop the now-trivial `max_i` (analyzer-count reduce),
   KEEP the `max(0.0, ...)` clamp as-is (it's an independent non-negativity guard, unrelated to
   analyzer count — see the correction above)
-- [ ] CT3b: simplify `safeRemovalReplicasForRole` — becomes "is this entry live, and if so its
+- [x] CT3b: simplify `safeRemovalReplicasForRole` — becomes "is this entry live, and if so its
   floor(RoleSpare/PRC)" — document that this makes "no other analyzer to fall back on if
   saturation is stale" (§29/§30) an explicit property of the code, not just emergent
-- [ ] CT3b: simplify `needsScaleDownForRole` — same documentation note as above
-- [ ] CT3b: simplify `applyAllocation`/`applyDeallocationForRole` — drop the loop, mutate directly
-- [ ] CT3b: update every call site in both optimizer files
-- [ ] Run full existing test suite — zero regressions, verify numeric equivalence explicitly
+- [x] CT3b: simplify `needsScaleDownForRole` — same documentation note as above
+- [x] CT3b: simplify `applyAllocation`/`applyDeallocationForRole` — drop the loop, mutate directly
+- [x] CT3b: update every call site in both optimizer files
+- [x] Run full existing test suite — zero regressions, verify numeric equivalence explicitly
 
 **Refs.**
 *Reads:* `docs/plans/analyzers/optimizer-call-map-2026-08-25.md` (Sec1, Sec3),
@@ -325,8 +325,10 @@ implementation); CT3b: `internal/engines/allocation/analyzer_helpers.go` and its
 `internal/engines/allocation/cost_aware_optimizer.go`,
 `internal/engines/allocation/greedy_score_optimizer.go`
 
-**Status.** NOT STARTED. CT3a depends on CT2; CT3b depends on CT3a being reviewed/confirmed, not
-just written.
+**Status.** DONE 2026-08-30 — commit `b980f682` on `single-analyzer`. CT3a skipped as a
+separate doc (simplification was mechanical, contract implicit in new signatures); CT3b landed
+in full. Multi-entry originals preserved under `internal/engines/allocation/multi_backup/`
+for the engine-side reduce step.
 
 ---
 
