@@ -67,11 +67,24 @@ grep -q '\.session/' .gitignore 2>/dev/null || echo '.session/' >> .gitignore
 git add .gitignore && git commit -m "chore: exclude .session/ from PR branches"
 ```
 
-**2. Verify what's in `.session/` before doing anything else.** The directory may already
-contain some files from earlier work in the new layout (ledgers, a partial `STATE.md`). Do
-not overwrite a newer file with an older one. If both the `.session/` copy and the
-`session-tracking` copy exist and differ, keep whichever is more recent (check timestamps or
-git log) and note the other in your live ledger.
+**2. Check `.session/` contents BEFORE copying anything.** List what is already there:
+
+```bash
+ls -la "$MISSION_WT/.session/"
+```
+
+**Stop and compare each file that already exists before copying over it.** The directory may
+already contain ledgers or a `STATE.md` from earlier work in the new layout — these could be
+*newer* than the session-tracking copies. Overwriting them would silently lose work.
+
+For each file that exists in both places, check which is more recent:
+
+```bash
+diff "$TRACKING/missions/$MISSION_NAME/STATE.md" "$MISSION_WT/.session/STATE.md"
+```
+
+Keep whichever is newer/more complete. Note any conflict in your live ledger. Only copy
+files that do **not** already exist in `.session/`.
 
 **3. Commit `.session/` content to the mission branch:**
 
