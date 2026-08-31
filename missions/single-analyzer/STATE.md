@@ -99,3 +99,4 @@ out of it on 2026-08-30.
 - 2026-08-29T22:32 session=2026-08-29-ct2-resume status=retired ledger=ledgers/2026-08-29-ct2-resume.md
 - 2026-08-30T08:00 session=2026-08-30-ct3-resume status=retired ledger=ledgers/2026-08-30-ct3-resume.md
 - 2026-08-30T17:58 session=2026-08-30-ct3-s6 status=retired ledger=ledgers/2026-08-30-ct3-s6.md
+- 2026-08-31T00:00 session=2026-08-31-s7 status=active ledger=ledgers/2026-08-31-s7.md
