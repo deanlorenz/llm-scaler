@@ -12,18 +12,26 @@ The rule for both:
 1. **Only the owner session for a mission edits that mission's `STATE.md`.** Only a session
    explicitly asked to update global conventions edits `CONVENTIONS.md`. Every other
    session/agent only *reads* these files.
-2. **Claim ownership, atomically:** rename `FILE.md` → `FILE.md.wip`.
-3. **Edit via a local copy.** For `CONVENTIONS.md` (cross-worktree): copy `FILE.md.wip` to a
-   scratch path inside the worktree the session is actually working in (e.g.
-   `worktrees/<mission>/.session/CONVENTIONS.md.local`), make all edits there with ordinary
-   same-worktree tools, and copy the finished result back over `FILE.md.wip` when done. For
-   `STATE.md` (already local in the mission worktree): edit directly, no copy needed.
+2. **Claim ownership by renaming — not copying:**
+   ```bash
+   mv FILE.md FILE.md.wip
+   ```
+   The rename is the lock. `FILE.md` must be absent while editing is in progress — that
+   absence is the signal other sessions check. **Never use `cp` to create the `.wip` file;
+   copying leaves `FILE.md` in place and allows concurrent edits.**
+3. **Edit `FILE.md.wip` directly** (for `STATE.md`, which is local in the mission worktree).
+   For `CONVENTIONS.md` (cross-worktree): copy `FILE.md.wip` to a scratch path inside the
+   worktree the session is actually working in (e.g.
+   `worktrees/<mission>/.session/CONVENTIONS.md.local`), make all edits there, then copy the
+   finished result back over `FILE.md.wip`.
 4. While `FILE.md.wip` exists and `FILE.md` is absent, that is the signal "this file is being
    edited right now." Other sessions must not start their own edit — they can still read the
-   last-committed version (`git show HEAD:.session/STATE.md`) or peek at the in-progress
-   `FILE.md.wip` directly; reads are never blocked.
-5. **To finish:** copy the edited local copy back over `FILE.md.wip` (if you used a local
-   copy), then rename `FILE.md.wip` back to `FILE.md`, `git add`, commit.
+   last-committed version (`git show HEAD:.session/STATE.md`) or peek at `FILE.md.wip`
+   directly; reads are never blocked.
+5. **To finish:** rename `FILE.md.wip` back to `FILE.md`, `git add`, commit.
+   ```bash
+   mv FILE.md.wip FILE.md
+   ```
 6. `*.md.wip` files are excluded via `.git/info/exclude`. `.git/info/exclude` is **not**
    per-worktree — `git rev-parse --git-common-dir` resolves to the *main* repo's `.git`,
    shared across every worktree of that repo. Note: `.session/` is **not** in
