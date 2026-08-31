@@ -59,37 +59,50 @@ they resolve, then proceed.
 ## Migrating an existing worktree to the new layout
 
 If the mission previously tracked its files in `session-tracking/missions/<name>/` (the old
-layout), migrate as follows. You should already have the files copied into `.session/` by
-`/resume-mission`'s Step 3 — this section covers the one-time setup that must follow.
+layout), migrate in this order — the check steps come first, before any file is touched:
 
-**1. Check `.session/` contents BEFORE copying anything.** List what is already there:
+**1. List what is already in `.session/`:**
 
 ```bash
+mkdir -p "$MISSION_WT/.session"
 ls -la "$MISSION_WT/.session/"
 ```
 
-**Stop and compare each file that already exists before copying over it.** The directory may
-already contain ledgers or a `STATE.md` from earlier work in the new layout — these could be
-*newer* than the session-tracking copies. Overwriting them would silently lose work.
+**2. List what session-tracking has:**
 
-For each file that exists in both places, check which is more recent:
+```bash
+ls "$TRACKING/missions/$MISSION_NAME/"
+ls "$TRACKING/missions/$MISSION_NAME/ledgers/"
+```
+
+**3. For each file that already exists in both places, diff before copying:**
 
 ```bash
 diff "$TRACKING/missions/$MISSION_NAME/STATE.md" "$MISSION_WT/.session/STATE.md"
 ```
 
-Keep whichever is newer/more complete. Note any conflict in your live ledger. Only copy
-files that do **not** already exist in `.session/`.
+Keep whichever is newer/more complete. Note any conflict in your live ledger.
 
-**2. Commit `.session/` content to the mission branch:**
+**4. Copy only files that do NOT already exist in `.session/`:**
+
+```bash
+[ ! -f "$MISSION_WT/.session/STATE.md" ] && \
+  cp "$TRACKING/missions/$MISSION_NAME/STATE.md" "$MISSION_WT/.session/STATE.md"
+for f in "$TRACKING/missions/$MISSION_NAME/ledgers/"*.md; do
+  [ ! -f "$MISSION_WT/.session/$(basename $f)" ] && cp "$f" "$MISSION_WT/.session/"
+done
+# Copy spec/plan docs that are internal; leave shareable docs in the code tree
+```
+
+**5. Commit `.session/` content to the mission branch:**
 
 ```bash
 git add .session/ && git commit -m "chore: migrate tracking files into .session/"
 ```
 
-**3. Set up skill symlinks** (if not already present — see "One-time setup" above).
+**6. Set up skill symlinks** (if not already present — see "One-time setup" above).
 
-**4. Update `session-tracking` symlinks** (notify `policy-writer`):
+**7. Update `session-tracking` symlinks** (notify `policy-writer`):
 The old `session-tracking/missions/<name>/STATE.md` and `ledgers/` are now stale real files.
 `policy-writer` will replace them with symlinks pointing into `<mission-worktree>/.session/`.
 You do not need to do this yourself — raise it with the user so `policy-writer` can handle it
