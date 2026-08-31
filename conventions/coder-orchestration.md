@@ -19,8 +19,11 @@ Read this before dispatching or running a coder subagent.
    worktree (not a third worktree, not the user's open one).
 8. The orchestrating session reviews each task's diff itself before starting the next task —
    not delegated to the coder, not skipped.
-9. Once a task's coding + review are both satisfied, the orchestrating session
-   merges/cherry-picks the approved commit into the real target branch itself.
+9. **The mission owner cherry-picks approved commits from coder worktrees into the mission
+   branch.** The mission branch is the single source of truth for that mission's code — coders
+   work in their own isolated worktrees, and the mission owner integrates by cherry-picking
+   (or equivalent) once a task is reviewed and approved. Never merge a coder worktree directly
+   into the mission branch without review.
 10. Coder and reviewer must never create or modify `.claude/settings.json` or
     `.claude/settings.local.json`.
 11. All subagents output to files, never dump long content into chat — coder reports,

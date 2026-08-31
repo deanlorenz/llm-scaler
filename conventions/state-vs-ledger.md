@@ -18,18 +18,37 @@ belongs in.
   also changes what a resuming session needs to know or do next, its **conclusion** additionally
   goes into `STATE.md` (short) while the **full story** stays only in the ledger (long).
 
+## Where these files live
+
+Both `STATE.md` and the ledger files for a mission live in the mission's own branch/worktree,
+under `.session/`:
+
+```
+worktrees/<mission-name>/
+  .session/
+    STATE.md               ← current mission state
+    <session-slug>.md      ← one ledger file per session, append-only
+    <internal-plan>.md     ← internal plans not destined for any PR
+```
+
+`.session/` is excluded from the mission branch's git history via `.gitignore` — it is **never**
+included in a PR branch. It is pushed to `origin` as part of the mission branch (tracking only,
+not upstream). Spawned agents that need to read mission docs access them through the filesystem
+path directly.
+
+`session-tracking/missions/<mission-name>/` holds **symlinks only** pointing into
+`<mission-worktree>/.session/` — a read-only convenience for other sessions. If the mission
+worktree is not checked out locally, the symlink path encodes the branch name
+(`worktrees/<mission-name>`) so the files can be retrieved via git from that branch.
+
 ## The live ledger during a session
 
-**Two distinct cadences — do not conflate them.**
+**One cadence only — no more copy step.**
 
-1. **Append to the local scratch copy after every meaningful finding, decision, correction, or
-   false start — as it happens, not in a batch later.** Keep this **live, growing copy** as a
-   local scratch file inside whatever feature worktree the session is actually working in
-   (e.g. `worktrees/<feature-worktree>/.session/<unique-session-name>.md`), excluded from the
-   feature branch's git history via `.git/info/exclude`.
-2. **At session end (or at any natural checkpoint), copy** the ledger file verbatim into
-   `missions/<mission>/ledgers/<same-unique-name>.md` in this (`session-tracking`) worktree and
-   commit it there. Only this step is checkpoint-based — step 1 is never batched.
+Append to your live ledger file at `<mission-worktree>/.session/<session-slug>.md` after every
+meaningful finding, decision, correction, or false start — as it happens, not batched. When
+the mission branch is pushed to `origin` (at any checkpoint or wind-down), the ledger is
+included automatically. There is no separate "copy to session-tracking" step.
 
 **Persist findings and decisions through failures and restarts.** Append to the ledger even
 when nothing landed — a false start recorded is as valuable as a task completed. This means
