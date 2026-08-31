@@ -1,60 +1,50 @@
 // Package bus wraps the NATS JetStream calls agentbus needs: idempotent stream
-// setup, publish, and sequence-offset fetch. Both the MCP server (cmd/agentbusd)
-// and the wake hook's fetch path import this directly rather than duplicating the
-// JetStream calls.
+// setup, publish, and sequence-offset fetch.
 package bus
 
 import (
 	"context"
 	"fmt"
-	"time"
+	"strings"
 
 	"github.com/nats-io/nats.go/jetstream"
 )
 
 const (
-	MsgStreamName          = "AGENTBUS"
-	MsgSubjectPattern      = "agentbus.mission.*.msg"
-	PresenceStreamName     = "AGENTBUS_PRESENCE"
-	PresenceSubjectPattern = "agentbus.mission.*.presence"
+	// StreamName is the single JetStream stream that captures all agentbus
+	// traffic across all bus IDs and topics.
+	StreamName = "AGENTBUS"
 
-	// presenceMaxAge bounds AGENTBUS_PRESENCE to "recently active" rather than
-	// permanent history — presence is a liveness signal, not an audit log.
-	presenceMaxAge = 24 * time.Hour
+	// SubjectPrefix is prepended to every NATS subject.
+	SubjectPrefix = "agentbus"
+
+	// SubjectPattern matches all agentbus subjects (all bus IDs, all topics).
+	SubjectPattern = "agentbus.>"
 )
 
-// EnsureStreams creates the AGENTBUS and AGENTBUS_PRESENCE streams if they don't
-// already exist, or returns the existing ones. Safe to call on every startup.
+// Subject returns the NATS subject for a given bus ID and topic.
+// topic may contain dots; slashes are not valid in NATS subjects.
+func Subject(busID, topic string) string {
+	return fmt.Sprintf("%s.%s.%s", SubjectPrefix, busID, topic)
+}
+
+// TopicFromSubject extracts the topic portion from a full NATS subject.
+// e.g. "agentbus.llmd-scaler.M1.C1" → "M1.C1"
+func TopicFromSubject(busID, subject string) string {
+	prefix := SubjectPrefix + "." + busID + "."
+	return strings.TrimPrefix(subject, prefix)
+}
+
+// EnsureStreams creates the AGENTBUS stream if it doesn't already exist.
+// Safe to call on every startup.
 func EnsureStreams(ctx context.Context, js jetstream.JetStream) error {
 	_, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name:     MsgStreamName,
-		Subjects: []string{MsgSubjectPattern},
+		Name:     StreamName,
+		Subjects: []string{SubjectPattern},
 		Storage:  jetstream.FileStorage,
 	})
 	if err != nil {
-		return fmt.Errorf("ensure %s stream: %w", MsgStreamName, err)
+		return fmt.Errorf("ensure %s stream: %w", StreamName, err)
 	}
-
-	_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name:     PresenceStreamName,
-		Subjects: []string{PresenceSubjectPattern},
-		Storage:  jetstream.FileStorage,
-		MaxAge:   presenceMaxAge,
-	})
-	if err != nil {
-		return fmt.Errorf("ensure %s stream: %w", PresenceStreamName, err)
-	}
-
 	return nil
-}
-
-// MsgSubject returns the NATS subject a mission's messages are published to.
-func MsgSubject(mission string) string {
-	return fmt.Sprintf("agentbus.mission.%s.msg", mission)
-}
-
-// PresenceSubject returns the NATS subject a mission's presence announcements are
-// published to.
-func PresenceSubject(mission string) string {
-	return fmt.Sprintf("agentbus.mission.%s.presence", mission)
 }

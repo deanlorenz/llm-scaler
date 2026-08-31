@@ -1,24 +1,13 @@
-// agentbus-relay is the long-running background daemon for the silent-wake
-// mechanism. It subscribes to every mission's message subject on NATS JetStream
-// and, for each watched worktree that has declared presence for that mission,
-// writes a small marker file the PostToolBatch hook can check with a single
-// cheap local read — no network call needed from the hook itself.
+// agentbus-relay subscribes to all agentbus traffic on NATS and writes
+// marker files to ~/.agentbus/markers/ so the PostToolBatch hook can detect
+// new messages with a cheap local file read on every turn.
 //
-// Watched worktrees are recorded in ~/.agentbus/watched-worktrees.list, one
-// absolute path per line. Sessions append to this file via agentbus_publish_presence
-// (the MCP tool already writes a presence JSON under <worktree>/.claude/agentbus/
-// presence/<mission>.json — the relay reads those to know which missions each
-// worktree cares about).
+// For each incoming message the relay reads ~/.agentbus/subs/<bus_id>/ to
+// find every session subscribed to that topic, then writes/overwrites:
 //
-// Marker file written on new message:
+//	~/.agentbus/markers/<bus_id>/<session_id>/<topic>.marker
 //
-//	<worktree>/.claude/agentbus/inbox/<mission>.marker
-//
-// Contents: {"last_seq":<n>,"updated_at":"<RFC3339>"}
-//
-// The relay never deletes marker files. The hook clears its own cursor; the
-// marker just records "highest seq seen." A worktree that no longer exists is
-// silently skipped.
+// The relay never deletes marker files. The hook manages its own cursors.
 package main
 
 import (
@@ -47,13 +36,9 @@ func natsURL() string {
 	return nats.DefaultURL
 }
 
-// watchedWorktreesPath is the file that records every worktree the relay watches.
-func watchedWorktreesPath() string {
-	if p := os.Getenv("AGENTBUS_WORKTREES_LIST"); p != "" {
-		return p
-	}
+func agentbusHome() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".agentbus", "watched-worktrees.list")
+	return filepath.Join(home, ".agentbus")
 }
 
 func main() {
@@ -75,12 +60,10 @@ func main() {
 		log.Fatalf("ensure streams: %v", err)
 	}
 
-	log.Printf("agentbus-relay: connected to %s, watching %s", natsURL(), watchedWorktreesPath())
+	log.Printf("agentbus-relay: connected to %s", natsURL())
 
-	// Use an ordered push consumer on the wildcard subject so we get every new
-	// message for every mission as it arrives.
-	cons, err := js.OrderedConsumer(ctx, bus.MsgStreamName, jetstream.OrderedConsumerConfig{
-		FilterSubjects: []string{bus.MsgSubjectPattern},
+	cons, err := js.OrderedConsumer(ctx, bus.StreamName, jetstream.OrderedConsumerConfig{
+		FilterSubjects: []string{bus.SubjectPattern},
 		DeliverPolicy:  jetstream.DeliverNewPolicy,
 	})
 	if err != nil {
@@ -91,7 +74,6 @@ func main() {
 		if err := handleMsg(m); err != nil {
 			log.Printf("relay: error handling message: %v", err)
 		}
-		// No m.Ack() — ordered consumers use AckNonePolicy.
 	})
 	if err != nil {
 		log.Fatalf("start consume: %v", err)
@@ -103,9 +85,8 @@ func main() {
 	log.Printf("agentbus-relay: shutting down")
 }
 
-// handleMsg is called for each new NATS message. It extracts the mission name,
-// finds every watched worktree that has presence for that mission, and writes
-// a marker file in each.
+// handleMsg processes one incoming NATS message: finds subscribed sessions
+// for its topic and writes marker files for each.
 func handleMsg(m jetstream.Msg) error {
 	var msg schema.Message
 	if err := json.Unmarshal(m.Data(), &msg); err != nil {
@@ -118,65 +99,59 @@ func handleMsg(m jetstream.Msg) error {
 	}
 	seq := meta.Sequence.Stream
 
-	worktrees, err := readWorktrees()
-	if err != nil {
-		// File not found just means no worktrees registered yet.
+	// Extract bus_id from the NATS subject: "agentbus.<bus_id>.<topic...>"
+	parts := strings.SplitN(m.Subject(), ".", 3)
+	if len(parts) < 3 {
 		return nil
+	}
+	busID := parts[1]
+
+	// Find all sessions subscribed to this topic.
+	subsDir := filepath.Join(agentbusHome(), "subs", busID)
+	entries, err := os.ReadDir(subsDir)
+	if err != nil {
+		return nil // no subscriptions yet
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339)
-	for _, wt := range worktrees {
-		presencePath := filepath.Join(wt, ".claude", "agentbus", "presence", msg.Mission+".json")
-		if _, err := os.Stat(presencePath); err != nil {
-			// This worktree hasn't declared presence for this mission.
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
-		if err := writeMarker(wt, msg.Mission, seq, now); err != nil {
-			log.Printf("relay: write marker for %s/%s: %v", wt, msg.Mission, err)
+		sessionID := strings.TrimSuffix(entry.Name(), ".json")
+
+		topics, err := bus.ReadSubs(busID, sessionID)
+		if err != nil {
+			continue
+		}
+		for _, t := range topics {
+			if t == msg.Topic {
+				if err := writeMarker(busID, sessionID, msg.Topic, seq, now); err != nil {
+					log.Printf("relay: write marker %s/%s/%s: %v", busID, sessionID, msg.Topic, err)
+				}
+			}
 		}
 	}
 	return nil
 }
 
-// markerPayload is what the relay writes into each inbox marker file.
 type markerPayload struct {
 	LastSeq   uint64 `json:"last_seq"`
 	UpdatedAt string `json:"updated_at"`
 }
 
-func writeMarker(worktree, mission string, seq uint64, updatedAt string) error {
-	dir := filepath.Join(worktree, ".claude", "agentbus", "inbox")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("mkdir %s: %w", dir, err)
+func writeMarker(busID, sessionID, topic string, seq uint64, updatedAt string) error {
+	path := bus.MarkerPath(busID, sessionID, topic)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
 	}
-
 	payload, err := json.Marshal(markerPayload{LastSeq: seq, UpdatedAt: updatedAt})
 	if err != nil {
 		return err
 	}
-
-	path := filepath.Join(dir, mission+".marker")
-	// Write to a temp file then rename for atomicity — avoids the hook reading
-	// a partially-written marker on a concurrent write.
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, payload, 0o644); err != nil {
-		return fmt.Errorf("write tmp marker: %w", err)
+		return err
 	}
 	return os.Rename(tmp, path)
-}
-
-// readWorktrees reads the watched-worktrees list file and returns non-blank lines.
-func readWorktrees() ([]string, error) {
-	data, err := os.ReadFile(watchedWorktreesPath())
-	if err != nil {
-		return nil, err
-	}
-	var out []string
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			out = append(out, line)
-		}
-	}
-	return out, nil
 }

@@ -18,32 +18,28 @@ type FetchResult struct {
 	LastSeq  uint64
 }
 
-// FetchSince returns messages for mission with a stream sequence number greater
-// than sinceSeq, up to limit messages. The caller owns its own read cursor (a
-// plain integer it persists itself) — this call never creates server-side durable
-// consumer state, keeping agentbusd free of consumer lifecycle management.
-//
-// Returns immediately with whatever is available; an empty result means nothing
-// new, not an error.
-func FetchSince(ctx context.Context, js jetstream.JetStream, mission string, sinceSeq uint64, limit int) (FetchResult, error) {
+// FetchSince returns messages for busID/topic with stream sequence > sinceSeq,
+// up to limit messages. Optionally filters by kind (empty = no filter).
+// Returns immediately with whatever is available.
+func FetchSince(ctx context.Context, js jetstream.JetStream, busID, topic string, sinceSeq uint64, limit int, kind string) (FetchResult, error) {
 	if limit <= 0 {
-		limit = 100
+		limit = 50
 	}
 
-	consumer, err := js.OrderedConsumer(ctx, MsgStreamName, jetstream.OrderedConsumerConfig{
-		FilterSubjects: []string{MsgSubject(mission)},
+	consumer, err := js.OrderedConsumer(ctx, StreamName, jetstream.OrderedConsumerConfig{
+		FilterSubjects: []string{Subject(busID, topic)},
 		DeliverPolicy:  jetstream.DeliverByStartSequencePolicy,
 		OptStartSeq:    sinceSeq + 1,
 	})
 	if err != nil {
-		return FetchResult{}, fmt.Errorf("create consumer for mission %s: %w", mission, err)
+		return FetchResult{}, fmt.Errorf("create consumer for %s/%s: %w", busID, topic, err)
 	}
 
 	result := FetchResult{LastSeq: sinceSeq}
 
 	batch, err := consumer.Fetch(limit, jetstream.FetchMaxWait(fetchWait))
 	if err != nil {
-		return FetchResult{}, fmt.Errorf("fetch batch for mission %s: %w", mission, err)
+		return FetchResult{}, fmt.Errorf("fetch batch for %s/%s: %w", busID, topic, err)
 	}
 
 	for m := range batch.Messages() {
@@ -51,28 +47,34 @@ func FetchSince(ctx context.Context, js jetstream.JetStream, mission string, sin
 		if err := json.Unmarshal(m.Data(), &msg); err != nil {
 			return FetchResult{}, fmt.Errorf("unmarshal message: %w", err)
 		}
-		result.Messages = append(result.Messages, msg)
 
 		meta, err := m.Metadata()
 		if err != nil {
 			return FetchResult{}, fmt.Errorf("read message metadata: %w", err)
 		}
+		msg.Seq = meta.Sequence.Stream
+
+		if kind != "" && msg.Kind != kind {
+			// Kind filter: skip but still advance LastSeq to avoid re-fetching.
+			if meta.Sequence.Stream > result.LastSeq {
+				result.LastSeq = meta.Sequence.Stream
+			}
+			continue
+		}
+
+		result.Messages = append(result.Messages, msg)
 		if meta.Sequence.Stream > result.LastSeq {
 			result.LastSeq = meta.Sequence.Stream
 		}
-		// No m.Ack(): ordered consumers use AckNonePolicy, and the read cursor
-		// here is caller-held (sinceSeq), not server-managed.
 	}
 
 	if err := batch.Error(); err != nil && !errors.Is(err, context.DeadlineExceeded) {
-		return FetchResult{}, fmt.Errorf("batch error for mission %s: %w", mission, err)
+		return FetchResult{}, fmt.Errorf("batch error for %s/%s: %w", busID, topic, err)
 	}
 
 	return result, nil
 }
 
-// fetchWait bounds how long a FetchSince call blocks waiting for a pull-consumer
-// batch when nothing new is immediately available. Short, since FetchSince is
-// meant to return promptly ("nothing new" is a valid, fast answer), not to act as
-// a long-poll.
+// fetchWait bounds how long FetchSince blocks when nothing is immediately
+// available. Short, since "nothing new" is a valid fast answer.
 const fetchWait = 500 * time.Millisecond

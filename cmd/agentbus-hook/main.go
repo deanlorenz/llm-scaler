@@ -1,19 +1,10 @@
-// agentbus-hook is the PostToolBatch hook binary. Claude Code runs it after
-// every batch of tool calls, passing event data as JSON on stdin. The hook:
+// agentbus-hook is the PostToolBatch hook binary. Registered once globally in
+// ~/.claude/settings.json; fires after every batch of tool calls.
 //
-//  1. Reads cwd and session_id from stdin.
-//  2. Checks whether this worktree has declared presence for any mission
-//     (<cwd>/.claude/agentbus/presence/*.json). If not, exits 0 silently.
-//  3. For each mission, compares the relay-written marker file
-//     (<cwd>/.claude/agentbus/inbox/<mission>.marker) against this session's
-//     own cursor (<cwd>/.claude/agentbus/consumer/<session>.<mission>.cursor).
-//  4. If the marker shows a higher sequence: connects to NATS, fetches new
-//     messages, writes additionalContext JSON to stdout, updates the cursor.
-//  5. If nothing is new, exits 0 with no output — the common case.
+// Fast path (common): reads subscription list and markers from ~/.agentbus/,
+// exits 0 silently if nothing new (~1ms, no network).
 //
-// Register once globally in ~/.claude/settings.json:
-//
-//	{"hooks":{"PostToolBatch":[{"hooks":[{"type":"command","command":"agentbus-hook","timeout":10}]}]}}
+// Slow path (new messages): connects to NATS, fetches, emits additionalContext.
 package main
 
 import (
@@ -40,74 +31,68 @@ func natsURL() string {
 	return nats.DefaultURL
 }
 
-const (
-	presenceDir = ".claude/agentbus/presence"
-	inboxDir    = ".claude/agentbus/inbox"
-	consumerDir = ".claude/agentbus/consumer"
-)
-
 func main() {
-	// Read hook input from stdin.
 	var input struct {
 		SessionID string `json:"session_id"`
 		CWD       string `json:"cwd"`
 	}
 	if err := json.NewDecoder(os.Stdin).Decode(&input); err != nil {
-		os.Exit(0) // malformed input — exit silently, never disrupt the agent
+		os.Exit(0)
 	}
-	if input.CWD == "" {
+	if input.SessionID == "" || input.CWD == "" {
 		os.Exit(0)
 	}
 
-	// Check for declared missions in this worktree.
-	missions := declaredMissions(input.CWD)
-	if len(missions) == 0 {
-		os.Exit(0) // common case: this worktree has no mission — done in ~1ms
+	// Resolve bus ID from the session's working directory.
+	busID, err := bus.ResolveBusID(input.CWD)
+	if err != nil {
+		os.Exit(0) // not a registered project — exit silently
 	}
 
-	// For each mission, check marker vs cursor.
-	type newMsg struct {
-		mission string
+	// Read this session's subscribed topics.
+	topics, err := bus.ReadSubs(busID, input.SessionID)
+	if err != nil || len(topics) == 0 {
+		os.Exit(0) // no subscriptions — common case
+	}
+
+	type pending struct {
+		topic   string
 		msgs    []schema.Message
 		lastSeq uint64
 	}
-	var pending []newMsg
+	var found []pending
 
-	for _, mission := range missions {
-		markerSeq := readMarkerSeq(input.CWD, mission)
+	for _, topic := range topics {
+		markerSeq := readMarkerSeq(busID, input.SessionID, topic)
 		if markerSeq == 0 {
-			continue // relay hasn't written a marker yet
-		}
-		cursorSeq := readCursor(input.CWD, input.SessionID, mission)
-		if markerSeq <= cursorSeq {
-			continue // nothing new
-		}
-
-		// Fetch from NATS — only reached when relay says something arrived.
-		msgs, lastSeq, err := fetchNew(mission, cursorSeq)
-		if err != nil || len(msgs) == 0 {
-			// Advance cursor to marker to avoid retrying a transient failure
-			// forever. If fetch truly failed, the message is still in NATS.
-			writeCursor(input.CWD, input.SessionID, mission, markerSeq)
 			continue
 		}
-		pending = append(pending, newMsg{mission, msgs, lastSeq})
+		cursorSeq := readCursor(busID, input.SessionID, topic)
+		if markerSeq <= cursorSeq {
+			continue
+		}
+
+		msgs, lastSeq, err := fetchNew(busID, topic, cursorSeq)
+		if err != nil || len(msgs) == 0 {
+			writeCursor(busID, input.SessionID, topic, markerSeq)
+			continue
+		}
+		found = append(found, pending{topic, msgs, lastSeq})
 	}
 
-	if len(pending) == 0 {
+	if len(found) == 0 {
 		os.Exit(0)
 	}
 
-	// Update cursors.
-	for _, p := range pending {
-		writeCursor(input.CWD, input.SessionID, p.mission, p.lastSeq)
+	for _, p := range found {
+		writeCursor(busID, input.SessionID, p.topic, p.lastSeq)
 	}
 
-	// Emit additionalContext.
 	var all []schema.Message
-	for _, p := range pending {
+	for _, p := range found {
 		all = append(all, p.msgs...)
 	}
+
 	out := map[string]any{
 		"hookSpecificOutput": map[string]any{
 			"hookEventName":     "PostToolBatch",
@@ -117,26 +102,8 @@ func main() {
 	json.NewEncoder(os.Stdout).Encode(out)
 }
 
-// declaredMissions returns the mission slugs this worktree has presence for.
-func declaredMissions(cwd string) []string {
-	dir := filepath.Join(cwd, presenceDir)
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil
-	}
-	var missions []string
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") {
-			missions = append(missions, strings.TrimSuffix(e.Name(), ".json"))
-		}
-	}
-	return missions
-}
-
-// readMarkerSeq reads last_seq from the relay-written marker file.
-func readMarkerSeq(cwd, mission string) uint64 {
-	path := filepath.Join(cwd, inboxDir, mission+".marker")
-	data, err := os.ReadFile(path)
+func readMarkerSeq(busID, sessionID, topic string) uint64 {
+	data, err := os.ReadFile(bus.MarkerPath(busID, sessionID, topic))
 	if err != nil {
 		return 0
 	}
@@ -149,10 +116,8 @@ func readMarkerSeq(cwd, mission string) uint64 {
 	return m.LastSeq
 }
 
-// readCursor returns this session's last-seen sequence for mission.
-func readCursor(cwd, sessionID, mission string) uint64 {
-	path := filepath.Join(cwd, consumerDir, sessionID+"."+mission+".cursor")
-	data, err := os.ReadFile(path)
+func readCursor(busID, sessionID, topic string) uint64 {
+	data, err := os.ReadFile(bus.CursorPath(busID, sessionID, topic))
 	if err != nil {
 		return 0
 	}
@@ -163,18 +128,15 @@ func readCursor(cwd, sessionID, mission string) uint64 {
 	return n
 }
 
-// writeCursor atomically updates the cursor file.
-func writeCursor(cwd, sessionID, mission string, seq uint64) {
-	dir := filepath.Join(cwd, consumerDir)
-	os.MkdirAll(dir, 0o755)
-	path := filepath.Join(dir, sessionID+"."+mission+".cursor")
+func writeCursor(busID, sessionID, topic string, seq uint64) {
+	path := bus.CursorPath(busID, sessionID, topic)
+	os.MkdirAll(filepath.Dir(path), 0o755)
 	tmp := path + ".tmp"
 	os.WriteFile(tmp, []byte(strconv.FormatUint(seq, 10)), 0o644)
 	os.Rename(tmp, path)
 }
 
-// fetchNew connects to NATS and returns messages newer than sinceSeq.
-func fetchNew(mission string, sinceSeq uint64) ([]schema.Message, uint64, error) {
+func fetchNew(busID, topic string, sinceSeq uint64) ([]schema.Message, uint64, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 
@@ -189,17 +151,16 @@ func fetchNew(mission string, sinceSeq uint64) ([]schema.Message, uint64, error)
 		return nil, 0, err
 	}
 
-	res, err := bus.FetchSince(ctx, js, mission, sinceSeq, 50)
+	res, err := bus.FetchSince(ctx, js, busID, topic, sinceSeq, 50, "")
 	if err != nil {
 		return nil, 0, err
 	}
 	return res.Messages, res.LastSeq, nil
 }
 
-// formatContext formats messages into the additionalContext string.
 func formatContext(messages []schema.Message) string {
 	var b strings.Builder
-	b.WriteString("[agentbus] New messages on your mission:\n")
+	b.WriteString("[agentbus] New messages:\n")
 	for _, m := range messages {
 		kind := ""
 		if m.Kind != "" {
@@ -209,8 +170,8 @@ func formatContext(messages []schema.Message) string {
 		if len(m.Refs) > 0 {
 			refs = "\n  refs: " + strings.Join(m.Refs, ", ")
 		}
-		fmt.Fprintf(&b, "  [%s]%s %s/%s on mission=%s:\n  %s%s\n",
-			m.TS, kind, m.From.Agent, m.From.Session, m.Mission, m.Body, refs)
+		fmt.Fprintf(&b, "  [%s]%s %s/%s on topic=%s:\n  %s%s\n",
+			m.TS, kind, m.From.Agent, m.From.Session, m.Topic, m.Body, refs)
 	}
 	return b.String()
 }
