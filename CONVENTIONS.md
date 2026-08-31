@@ -40,8 +40,9 @@ file below when that situation actually comes up — not upfront, not speculativ
 - `conventions/coder-orchestration.md` — about to dispatch or run a coder subagent
 - `conventions/settings-and-skill-edits.md` — about to edit `~/.claude/settings.json` or a
   `SKILL.md`
-- `conventions/unexplained-files.md` — found something on disk you didn't put there and can't
-  explain
+- `conventions/unexplained-files.md` — found something on disk you didn't put there and
+  can't explain
+- `conventions/pr-workflow.md` — about to open a PR or prepare a branch for one
 
 ## Repo layout on this branch
 
