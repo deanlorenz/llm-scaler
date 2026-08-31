@@ -1,6 +1,6 @@
 # Mission state — single-analyzer
 
-**Last updated:** 2026-08-30. This doc is overwritten on each update, not append-only — it
+**Last updated:** 2026-08-31. This doc is overwritten on each update, not append-only — it
 reflects current status only. For global process rules see `../../CONVENTIONS.md`. For the
 full task plan see `spec-composite-metric-and-optimizer-t2.md`. For the chronological
 reasoning trail (why decisions were made) see `ledger-analyzer-optimizer-refactor.md` —
@@ -42,7 +42,7 @@ when saturation is the only enabled analyzer (today's default).
 
 ## Immediate next step
 
-PR #34 created at upstream (https://github.com/ev-shindin/llm-scaler/pull/34, draft). Awaiting review. Prior fork-only PR (deanlorenz/llm-scaler #1) closed, pointing to upstream PR. CT4 still blocked on user's fairness-definition decision. Next PR: engine-side reduce (wire non-saturation analyzer results into CompositeSignal).
+PR #34 at upstream (https://github.com/ev-shindin/llm-scaler/pull/34, draft) — CI clean (lint-and-test, DCO, signed-commits all ✅). e2e checks pending at last check. Awaiting review. CT6 implementation blocked on rescaleInput.Demand decision (user to choose option 1/2/3 from spec). CT4 still blocked on user's fairness-definition decision. Next PR: engine-side reduce (wire non-saturation analyzer results into CompositeSignal).
 
 ## Open questions blocking full completion
 
@@ -99,4 +99,4 @@ out of it on 2026-08-30.
 - 2026-08-29T22:32 session=2026-08-29-ct2-resume status=retired ledger=ledgers/2026-08-29-ct2-resume.md
 - 2026-08-30T08:00 session=2026-08-30-ct3-resume status=retired ledger=ledgers/2026-08-30-ct3-resume.md
 - 2026-08-30T17:58 session=2026-08-30-ct3-s6 status=retired ledger=ledgers/2026-08-30-ct3-s6.md
-- 2026-08-31T00:00 session=2026-08-31-s7 status=active ledger=ledgers/2026-08-31-s7.md
+- 2026-08-31T00:00 session=2026-08-31-s7 status=retired ledger=ledgers/2026-08-31-s7.md
