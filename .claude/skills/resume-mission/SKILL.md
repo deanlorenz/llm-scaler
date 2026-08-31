@@ -62,9 +62,15 @@ cp "$TRACKING/missions/$MISSION_NAME/ledgers/"*.md "$MISSION_WT/.session/" 2>/de
 # — leave shareable docs in the code tree, only move tracking files
 ```
 
-Some worktrees may already have a partial `.session/` with some ledgers or a `STATE.md`
-already in it (from earlier work in the new layout). In that case: check what's already
-there, keep the newer/more complete version of each file, and don't overwrite blindly.
+**Before copying, check what is already in `.session/`:**
+
+```bash
+ls -la "$MISSION_WT/.session/"
+```
+
+If any file already exists there, diff it against the session-tracking copy before
+overwriting — it may be newer. Only copy files that are not already present. Note any
+conflict in your live ledger.
 
 After copying, do the one-time `.gitignore` and symlink setup per
 `conventions/feature-worktree-setup.md`'s "Migrating an existing worktree" section, then
