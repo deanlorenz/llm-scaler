@@ -6,31 +6,36 @@
 - agentbus binaries built and installed: `bash scripts/install.sh` from this worktree
 - Project registered: `agentbus-setup llmd-scaler` run once from the repo root (already done for this repo)
 
-## Starting the substrate (manual, run when needed)
+## Startup (systemd user services — already installed)
+
+Both `nats-server` and `agentbus-relay` run as systemd user services, started automatically
+at login. No manual steps after reboot.
 
 ```bash
-# 1. Start NATS with JetStream
-nats-server -js -sd ~/.agentbus/nats -p 4222 &
+# Check status
+systemctl --user status nats-server agentbus-relay
 
-# 2. Start the relay daemon (watches NATS, writes marker files for the hook)
-agentbus-relay &
+# Restart if needed
+systemctl --user restart nats-server agentbus-relay
+
+# Start manually (after reboot before first login triggers it)
+systemctl --user start nats-server agentbus-relay
 ```
 
-Both run in the background. Stop them with `kill $(pgrep nats-server)` and `kill $(pgrep agentbus-relay)`.
+Service files: `~/.config/systemd/user/nats-server.service` and `agentbus-relay.service`.
 
 **agentbus is disabled when not started.** If `nats-server` is not running:
 - `agentbusd` fails at MCP connection time with: `connect to NATS: nats: no servers available`
 - The MCP tool call returns an error immediately — no silent failure
-- `agentbus-hook` fails to connect in `fetchNew` and exits 0 silently (no disruption to normal turns)
+- `agentbus-hook` exits 0 silently (no disruption to normal turns)
 
-So the hook is always safe to have registered — it just does nothing if NATS is down.
+The hook is always safe to have registered — it does nothing if NATS is down.
 
 ## Checking status
 
 ```bash
-pgrep -a nats-server    # is NATS running?
-pgrep -a agentbus-relay # is the relay running?
-cat ~/.agentbus/repos.json  # which projects are registered?
+systemctl --user status nats-server agentbus-relay   # service health
+cat ~/.agentbus/repos.json                            # registered projects
 ```
 
 ## One-time setup per session (agent protocol)
@@ -49,20 +54,6 @@ agentbus_publish(topic="<announce-topic>", from_session="<my-session-id>", kind=
 <mission>.<role>            — a session's outbox  (e.g. agentbus.planner)
 <mission>.<parent>.<child>  — parent's inbox for a specific child (e.g. agentbus.planner.coder-1)
 <bus_id>.broadcast          — optional machine-wide signals
-```
-
-## Startup at login (optional)
-
-Add to `~/.bashrc` or `~/.profile`:
-
-```bash
-# agentbus substrate — start if not running
-if ! pgrep -x nats-server > /dev/null; then
-  nats-server -js -sd ~/.agentbus/nats -p 4222 > ~/.agentbus/nats-server.log 2>&1 &
-fi
-if ! pgrep -x agentbus-relay > /dev/null; then
-  agentbus-relay > ~/.agentbus/relay.log 2>&1 &
-fi
 ```
 
 ## PostToolBatch hook registration (once, global)
