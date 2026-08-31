@@ -12,6 +12,7 @@ reference only, not needed to resume. Per-session ledgers are in `ledgers/`.
   code changes for this mission actually land.
 - `worktrees/session-tracking` (branch `session-tracking`, this worktree) — mission plan/state
   and session ledgers, never pushed to `upstream`, only `origin`.
+- `/home/dean/code/llm-d/worktrees/pr-single-analyzer` (branch `pr/single-analyzer`) — clean PR branch off `origin/main`; two commits ready for upstream review. Created 2026-08-31.
 - Coder-agent worktrees are ephemeral (`.claude/worktrees/agent-<id>`), created and torn down
   per task — not listed individually here; each task's completion note below cites the commit
   hash that was cherry-picked out of one, not the ephemeral worktree path itself.
@@ -30,9 +31,9 @@ when saturation is the only enabled analyzer (today's default).
 
 | Task | Status | Notes |
 |---|---|---|
-| T1 — compose analyzer results (engine-side) | **DONE** | Commit `f5283e2a` on `single-analyzer`. `composeAnalyzerResults` added to `engine_v2.go`; passthrough for the sat-only case. Six pre-existing tests asserting old multi-analyzer forwarding are `t.Skip()`-ed, each with a reason citing this change — pending a redesign, not a bug. |
+| T1 — compose analyzer results (engine-side) | **SUPERSEDED** | The `composeAnalyzerResults` stub approach was reverted in session `2026-08-30-ct3-s6`. Clean approach: engine passes `namedResults[0]` (sat) directly as `CompositeSignal`; no intermediate compose step needed for this PR. Engine-side reduce deferred to next PR. |
 | CT1a — nil-guard `rescaleModelDecisions` | **DONE** | Commit `8906ef7b` on `single-analyzer`. Report: `ct1a-implementation-report-2026-08-26.md`. |
-| CT1b — engine-side guard on nil saturation result | **DONE** | Commit `122d1699` on `single-analyzer` (cherry-picked from coder's `75b57b2c`). Report: `ct1b-implementation-report-2026-08-26.md` (note: that report's recorded hash `71c401c2` is stale/cosmetic — self-referential amend artifact; true hash is `122d1699`). |
+| CT1b — engine-side guard on nil saturation result | **DEFERRED** | Excluded from PR #1 by user request (not structural — separate bugfix). Will land in a future PR. Commit exists on `single-analyzer` branch (`122d1699`) but not in `pr/single-analyzer`. |
 | CT2 — collapse `AnalyzerResults []NamedAnalyzerResult` to single `CompositeSignal` field | **DONE** | Commit `e4106109` on `single-analyzer` (cherry-picked from coder's `40df4066`, dispatched with `git checkout c6e408c4` as its first step per the earlier worktree-base fix). Field renamed across 8 production files + 10 test files; `saturationNamedEntry` deleted. One test (`greedy_score_optimizer_test.go` T1.4) had a genuinely multi-analyzer premise, structurally impossible now — `Skip()`-ed using T1's existing precedent/message, not a new resolution. Reviewed in full by the orchestrating session before merge; independently re-verified post-cherry-pick: `go build ./...` clean, `go test ./internal/engines/allocation/... ./internal/engines/steadystate/...` pass, verification grep (`saturationNamedEntry`/`.AnalyzerResults`) zero hits. Full detail in `ledgers/2026-08-29-ct2-resume.md`. |
 | CT3a — write engine-side reduce contract | **SKIPPED** | CT3b landed cleanly without a separate contract doc — the simplification was mechanical (loops → direct reads on a single entry); no design ambiguity required upfront documentation. Contract is implicit in the new single-entry signatures and their doc comments. |
 | CT3b — simplify 7 single-entry optimizer helpers | **DONE** | Commit `b980f682` on `single-analyzer`. `RolePairedState` collapsed from `[]map[string]float64` to `map[string]float64`; all 7 helpers + `sortVariantsForScaleDown`, `fairShareValue`, `reclaimRole`, `scaleDownRoleIterated`, `allocateForModelPaired`, `RolePickFn` updated to single-entry signatures. Multi-entry (N>1) originals preserved under `internal/engines/allocation/multi_backup/` (`//go:build ignore`) for the planned engine-side reduce step. Pre/post: 252→249 specs, 3 multi-entry test cases moved to backup file (not deleted). |
@@ -41,8 +42,7 @@ when saturation is the only enabled analyzer (today's default).
 
 ## Immediate next step
 
-All unblocked tasks complete. Only CT4 remains, blocked on the user's fairness-definition
-decision. No further implementation work until that decision is made.
+PR #1 created (https://github.com/deanlorenz/llm-scaler/pull/1, draft, reviewer: evgenyshabalin). Awaiting review. CT4 still blocked on user's fairness-definition decision. Next PR: engine-side reduce (wire non-saturation analyzer results into CompositeSignal).
 
 ## Open questions blocking full completion
 
@@ -98,4 +98,4 @@ out of it on 2026-08-30.
 - 2026-08-27 session=2026-08-27-ct1b-review status=retired ledger=ledgers/2026-08-27-ct1b-review.md
 - 2026-08-29T22:32 session=2026-08-29-ct2-resume status=retired ledger=ledgers/2026-08-29-ct2-resume.md
 - 2026-08-30T08:00 session=2026-08-30-ct3-resume status=retired ledger=ledgers/2026-08-30-ct3-resume.md
-- 2026-08-30T17:58 session=2026-08-30-ct3-s6 status=active ledger=ledgers/2026-08-30-ct3-s6.md
+- 2026-08-30T17:58 session=2026-08-30-ct3-s6 status=retired ledger=ledgers/2026-08-30-ct3-s6.md
