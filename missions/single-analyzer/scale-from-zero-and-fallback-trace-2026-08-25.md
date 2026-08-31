@@ -1,5 +1,14 @@
 # Scale-from-zero and unseen/zero-replica fallback trace (2026-08-25)
 
+> **Errata (2026-08-30):** The headline conclusion in Section 3 ("no fallback mechanism exists
+> for zero-replica roles") was incorrect. A purpose-built demand estimator,
+> `estimateSchedulerQueueDemand` (`internal/engines/analyzers/saturation_v2/analyzer.go`),
+> already covers the ordinary cold-start case by producing a real nonzero `RequiredCapacity`
+> from EPP queue-depth signals. The remaining gap is narrower: (a) no EPP queue signal
+> available, and (b) discovery-side role omission. See
+> `spec-composite-metric-and-optimizer-t2.md` §CT5 for the corrected, full analysis.
+> The body of this report is preserved unchanged as a primary-source record.
+
 Scope and method: every claim below was verified by reading the cited file directly on the
 current worktree HEAD, in the same pass as this document's authoring, not copied from the prior
 document (docs/plans/analyzers/composite-entry-spec-2026-08-25.md, Section C), which was read
