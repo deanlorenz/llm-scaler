@@ -14,6 +14,22 @@ This skill works the same way whether you're a freshly-started session with zero
 a resumed session whose conversation history might be stale — always re-verify against the
 files below rather than trusting memory of a prior turn.
 
+## Step 0: If this is the `policy-writer` mission — check for pending session-tracking commits
+
+Before doing anything else, if `$ARGUMENTS` resolves to `policy-writer` (or this session is
+already known to be the `policy-writer` session):
+
+```
+agentbus_fetch_since(topic="session-tracking.pending-commits", since_seq=0)
+```
+
+For each unprocessed note found: check `git status` in `$TRACKING` for the changes described,
+commit them if present (`git add missions/<name>/ && git commit -m "chore: commit symlinks for <name>"`),
+then acknowledge the note is handled (note it in your live ledger — there is no explicit
+"mark done" on the bus, so record the seq you processed up to).
+
+If no pending notes, or this is not `policy-writer`, skip this step entirely.
+
 ## Step 1: Locate the tracking worktree and mission worktree
 
 ```bash
