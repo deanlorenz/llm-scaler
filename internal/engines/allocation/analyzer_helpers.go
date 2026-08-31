@@ -110,6 +110,30 @@ func prcForVariant(r *domain.AnalyzerResult, v string) float64 {
 // Returns the list of active roles and the picker-local RolePairedState.
 // Remaining/Spare scalars on NamedAnalyzerResult are read-only after this call;
 // all dynamic bookkeeping moves to pickerState (scale-up) and RoleSpare (scale-down).
+//
+// # Role-visibility contract (corrected; see spec-composite-metric-and-optimizer-t2.md §CT5)
+//
+// Roles are derived exclusively from the composite result's own RoleCapacities map keys.
+// A role that exists in discovery but has no analyzer-attributed capacity entry is
+// permanently invisible to scale-up until the analyzer starts emitting demand for it.
+//
+// This is NOT a complete gap: for disaggregated models, saturation's
+// estimateSchedulerQueueDemand (internal/engines/analyzers/saturation_v2/analyzer.go)
+// provides a purpose-built demand estimate for zero-replica roles from EPP queue-depth
+// signals, producing a real nonzero RequiredCapacity that does trigger scale-up for that
+// role before any replica of it exists — covering the ordinary cold-start case.
+//
+// The remaining, narrower gap has two cases:
+//   (a) No EPP queue signal (SchedulerQueue == nil or empty): the estimator returns
+//       all-zeros, and scale-up for the missing role cannot be triggered.
+//   (b) The role is absent from VariantStates/VariantCapacities entirely (discovery-side
+//       omission): neither the capacity store nor the queue estimator can help, since both
+//       are iterated from the same variant list that is already missing the entry.
+//
+// Mixed-P/D+"both" models (disaggregated roles AND a "both" role simultaneously) are not
+// supported today: initRoleState assigns a model to exactly one of the two branches above.
+// This is a shallow implementation choice — no deep type constraint prevents lifting it —
+// and is explicitly deferred as a future requirement. Zero risk to CT1-CT5 work.
 func initRoleState(e *NamedAnalyzerResult) (roles []string, pickerState RolePairedState) {
 	pickerState = make(RolePairedState)
 	roleSet := make(map[string]struct{})
