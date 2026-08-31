@@ -1,6 +1,6 @@
 # Spec: composite metric contract + optimizer single-analyzer simplification (T2)
 
-Status: v5 — CT1a, CT1b, CT2, CT3a, CT3b, CT5 are implementation-ready. **CT4 remains BLOCKED**
+Status: v6 — CT1a, CT1b, CT2, CT3a, CT3b, CT5 are DONE. **CT4 remains BLOCKED**
 on the user's fairness-definition decision (ledger §36) and is explicitly out of scope for the
 current implementation pass. Supersedes `spec-compose-analyzer-results.md` (T1's
 originally-rejected insertion point; kept for history).
@@ -174,7 +174,16 @@ test suite passes; no remaining reference to `saturationNamedEntry` or `Analyzer
 `internal/engines/allocation/variant_records.go`,
 `internal/engines/steadystate/engine_v2.go`, and every test file referencing the old shape
 
-**Status.** NOT STARTED. Depends on CT1 landing first (touches the same functions).
+**Status.** DONE 2026-08-29/2026-08-31 — commit `e4106109` on `single-analyzer` (cherry-picked
+from coder worktree `40df4066`). Field renamed across 8 production files + 10 test files;
+`saturationNamedEntry` deleted. One test (greedy_score_optimizer_test.go T1.4) `Skip()`-ed per
+T1's existing multi-analyzer precedent. Engine revert (2026-08-31): `runAnalyzersAndScore`
+returns `[]NamedAnalyzerResult` as on main; `collectV2ModelRequest` sets
+`CompositeSignal: namedResults[0]` directly (sat always first by construction);
+`engine_v2_compose_test.go` preserved in `internal/engines/allocation/multi_backup/`
+(`//go:build ignore`). Full detail:
+`worktrees/session-tracking/missions/single-analyzer/ledgers/2026-08-29-ct2-resume.md` and
+`worktrees/session-tracking/missions/single-analyzer/ledgers/2026-08-30-ct3-s6.md`.
 
 ---
 
