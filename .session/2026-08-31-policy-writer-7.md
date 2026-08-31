@@ -95,3 +95,17 @@ in `worktrees/policy-writer`. `session-tracking` commits are current.
 - `session-tracking` not yet pushed to `origin` (50+ commits ahead).
 - `.bak` files in `worktrees/policy-writer` from Phase 2 trim — not yet decided whether to
   keep or delete.
+
+## Post-wind-down correction (same session)
+
+**`.wip` protocol used incorrectly during wind-down.** Used `cp STATE.md STATE.md.wip`
+instead of `mv STATE.md STATE.md.wip`. The copy leaves `STATE.md` in place throughout,
+so another session sees no lock signal and can start a concurrent edit — defeats the
+entire purpose. The rename is the lock; the absence of `FILE.md` is the signal.
+
+Fixed in `conventions/wip-editing.md` (`cf5f0929`): step 2 now says explicitly "rename —
+not copy," with `mv` command shown and a bold warning against `cp`. Steps 3 and 5
+reworded to match.
+
+This session's `STATE.md` edits ended up in the correct final state despite the protocol
+violation (no concurrent session was active), but the protocol itself was wrong.
