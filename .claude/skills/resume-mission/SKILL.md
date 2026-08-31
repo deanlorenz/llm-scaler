@@ -51,28 +51,42 @@ ls "$MISSION_WT/.session/" 2>/dev/null || echo "MISSING"
 **If `.session/` exists and contains `STATE.md`:** already on the new layout — skip this step.
 
 **If `.session/` is missing or `STATE.md` is not in it:** the worktree is on the old layout
-(files in `session-tracking/missions/$MISSION_NAME/`). Migrate now before proceeding:
+(files in `session-tracking/missions/$MISSION_NAME/`). Migrate in this order:
+
+**a. List what is already in `.session/` before touching anything:**
 
 ```bash
 mkdir -p "$MISSION_WT/.session"
-# Copy STATE.md and any ledger files from session-tracking into .session/
-cp "$TRACKING/missions/$MISSION_NAME/STATE.md" "$MISSION_WT/.session/STATE.md"
-cp "$TRACKING/missions/$MISSION_NAME/ledgers/"*.md "$MISSION_WT/.session/" 2>/dev/null || true
-# Copy any spec/plan docs that are internal (not destined for a PR)
-# — leave shareable docs in the code tree, only move tracking files
-```
-
-**Before copying, check what is already in `.session/`:**
-
-```bash
 ls -la "$MISSION_WT/.session/"
 ```
 
-If any file already exists there, diff it against the session-tracking copy before
-overwriting — it may be newer. Only copy files that are not already present. Note any
-conflict in your live ledger.
+**b. List what session-tracking has:**
 
-After copying, do the one-time `.gitignore` and symlink setup per
+```bash
+ls "$TRACKING/missions/$MISSION_NAME/"
+ls "$TRACKING/missions/$MISSION_NAME/ledgers/"
+```
+
+**c. For each file that already exists in both places, diff before copying:**
+
+```bash
+diff "$TRACKING/missions/$MISSION_NAME/STATE.md" "$MISSION_WT/.session/STATE.md"
+```
+
+Keep whichever is newer/more complete. Note any conflict in your live ledger.
+
+**d. Copy only files that do NOT already exist in `.session/`:**
+
+```bash
+[ ! -f "$MISSION_WT/.session/STATE.md" ] && \
+  cp "$TRACKING/missions/$MISSION_NAME/STATE.md" "$MISSION_WT/.session/STATE.md"
+for f in "$TRACKING/missions/$MISSION_NAME/ledgers/"*.md; do
+  [ ! -f "$MISSION_WT/.session/$(basename $f)" ] && cp "$f" "$MISSION_WT/.session/"
+done
+# Copy spec/plan docs that are internal (not destined for a PR); leave shareable docs in code tree
+```
+
+After copying, do the one-time symlink setup per
 `conventions/feature-worktree-setup.md`'s "Migrating an existing worktree" section, then
 continue with Step 4 using `$MISSION_WT/.session/STATE.md` as the authoritative source.
 
