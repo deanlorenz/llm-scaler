@@ -40,12 +40,42 @@ Call the chosen mission `$MISSION_NAME`. The mission's worktree path is
 `worktrees/$MISSION_NAME` (branch name = worktree name). Call it `$MISSION_WT`.
 The mission's tracking files live at `$MISSION_WT/.session/`.
 
-## Step 3: Read conventions and current state
+## Step 3: Migrate to the new layout if needed
+
+Check whether the mission worktree is on the new layout or the old one:
+
+```bash
+ls "$MISSION_WT/.session/" 2>/dev/null || echo "MISSING"
+```
+
+**If `.session/` exists and contains `STATE.md`:** already on the new layout — skip this step.
+
+**If `.session/` is missing or `STATE.md` is not in it:** the worktree is on the old layout
+(files in `session-tracking/missions/$MISSION_NAME/`). Migrate now before proceeding:
+
+```bash
+mkdir -p "$MISSION_WT/.session"
+# Copy STATE.md and any ledger files from session-tracking into .session/
+cp "$TRACKING/missions/$MISSION_NAME/STATE.md" "$MISSION_WT/.session/STATE.md"
+cp "$TRACKING/missions/$MISSION_NAME/ledgers/"*.md "$MISSION_WT/.session/" 2>/dev/null || true
+# Copy any spec/plan docs that are internal (not destined for a PR)
+# — leave shareable docs in the code tree, only move tracking files
+```
+
+Some worktrees may already have a partial `.session/` with some ledgers or a `STATE.md`
+already in it (from earlier work in the new layout). In that case: check what's already
+there, keep the newer/more complete version of each file, and don't overwrite blindly.
+
+After copying, do the one-time `.gitignore` and symlink setup per
+`conventions/feature-worktree-setup.md`'s "Migrating an existing worktree" section, then
+continue with Step 4 using `$MISSION_WT/.session/STATE.md` as the authoritative source.
+
+## Step 4: Read conventions and current state
 
 Read, in this order:
 1. `$TRACKING/CONVENTIONS.md` — global process rules.
 2. `$MISSION_WT/.session/STATE.md` — current status, task table, worktrees in use, immediate
-   next step, open questions, and the Session log (see Step 4).
+   next step, open questions, and the Session log (see Step 5).
    If the worktree is not checked out locally, read via:
    ```bash
    git -C <repo-root> show $MISSION_NAME:.session/STATE.md
@@ -53,11 +83,11 @@ Read, in this order:
    The symlink at `$TRACKING/missions/$MISSION_NAME/STATE.md` points to the same file if the
    worktree is present — either path works.
 
-Do **not** read the full ledger file(s) yet — Step 4 may need to run ledger-capture first.
-Once Step 4 clears, skim the plan/spec doc named in `STATE.md` for the task list and current
+Do **not** read the full ledger file(s) yet — Step 5 may need to run ledger-capture first.
+Once Step 5 clears, skim the plan/spec doc named in `STATE.md` for the task list and current
 status lines.
 
-## Step 4: Clear pending sessions before proceeding
+## Step 5: Clear pending sessions before proceeding
 
 Scan `STATE.md`'s Session log section (create it, at the end of the file, if it doesn't exist
 yet). A log entry is **pending** if:
@@ -79,7 +109,7 @@ For every pending entry, in order:
 
 If there are no pending entries, this step is a no-op.
 
-## Step 5: Enter the mission worktree
+## Step 6: Enter the mission worktree
 
 ```
 EnterWorktree(path: "<full path to $MISSION_WT>")
@@ -95,7 +125,7 @@ ls .claude/skills/
 If `resume-mission` and `wind-down` symlinks are missing, set them up now per
 `conventions/feature-worktree-setup.md` so the next resume/wind-down cycle works.
 
-## Step 6: Declare ownership on agentbus
+## Step 7: Declare ownership on agentbus
 
 ```
 agentbus_publish(topic="mission.$MISSION_NAME", kind="handoff",
@@ -105,7 +135,7 @@ agentbus_publish(topic="mission.$MISSION_NAME", kind="handoff",
 This makes ownership visible to any other session watching the bus. Do this before recording
 the `active` Session-log entry — the bus declaration comes first.
 
-## Step 7: Confirm mission and state back to the user
+## Step 8: Confirm mission and state back to the user
 
 State back concisely (a few sentences plus a short status table if useful):
 - Which mission, and its one-line goal (from `STATE.md`).
@@ -117,7 +147,7 @@ State back concisely (a few sentences plus a short status table if useful):
 If anything in `STATE.md` looks stale (e.g. it claims a task is "in progress" but `git log`
 shows it's committed), verify against the actual git state before proceeding.
 
-## Step 8: Record this session's start in STATE.md
+## Step 9: Record this session's start in STATE.md
 
 `STATE.md` is already local in the mission worktree — no cross-worktree exit/re-enter needed.
 Using the `.wip` protocol (`conventions/wip-editing.md`):
@@ -133,7 +163,7 @@ Using the `.wip` protocol (`conventions/wip-editing.md`):
 If the `.wip` file already exists, someone else is mid-edit — wait, or tell the user it's
 locked and ask how to proceed.
 
-## Step 9: Proceed
+## Step 10: Proceed
 
 Continue with whatever the user actually asked for next. Keep appending to your live ledger
 at `$MISSION_WT/.session/<slug>.md` as you go. Push the mission branch to `origin` at any
