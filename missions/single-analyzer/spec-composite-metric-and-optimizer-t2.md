@@ -578,6 +578,31 @@ This preserves the optimizer's `ceil(demand / PRC)` replica-count math exactly:
   already handles this correctly — the composite must preserve `PRC = 0` for ineligible
   variants so those gates still fire.
 
+**Scale-from-zero and partial-SFZ.**
+Two distinct paths exist; only the second is in scope for CT6:
+
+1. **Whole-model-at-zero / never-seen-before variant** — handled by the separate
+   scale-from-zero engine (`internal/engines/scalefromzero`), which runs independently
+   of the optimizer, reads the EPP flow-control queue, and publishes activation decisions
+   to wake KEDA. This path never touches `collectV2ModelRequest` or `CompositeSignal` and
+   is **not affected by CT6**.
+
+2. **Partial SFZ (some replicas exist, but not for all roles)** — handled by saturation's
+   `estimateSchedulerQueueDemand`, which produces a non-zero `RoleDemand[role]` for a
+   zero-replica role from EPP queue-depth signals. This flows into `buildRoleCapacities` →
+   `applyUniversalThreshold` → `RoleCapacities[role].RequiredCapacity` and reaches the
+   optimizer via `CompositeSignal`. The CT6 normalization divides each variant's
+   `PerReplicaCapacity` by `RoleDemand[role]` — **the division is only safe if PRC and
+   `RoleDemand[role]` are in the same units.**
+
+   **Verification required before implementation:** confirm that `PerReplicaCapacity` from
+   the capacity store (used when `ReplicaCount == 0`) and `RoleDemand[role]` from
+   `estimateSchedulerQueueDemand` are both expressed in the same token units as the rest
+   of the saturation result, so `PRC / RoleDemand[role]` is a dimensionless fraction in
+   (0, 1] as claimed. Trace `estimateSchedulerQueueDemand` in
+   `internal/engines/analyzers/saturation_v2/analyzer.go` and the capacity-store path
+   to verify units agree. This is a pre-implementation check, not a code change.
+
 **Strong typing.**
 `PerReplicaCapacity` in the composite `NamedAnalyzerResult` must be annotated (via doc
 comment at minimum, a named type if feasible without excessive churn) to make clear it is
@@ -614,6 +639,20 @@ the composite entry. The `RoleCapacities` map (engine-owned, built by `buildRole
 holds `TotalDemand` per role too; those must also be normalized to `1.0` after conversion
 so `applyUniversalThreshold`'s per-role RC/SC remain consistent with the composite units.
 
+**RC/SC threshold preservation.** `applyUniversalThreshold` uses `scaleUp` and
+`scaleDown` as divisors on demand before comparing to supply:
+```
+RC = max(0, TotalDemand / scaleUp   − TotalAnticipatedSupply)
+SC = max(0, TotalSupply             − TotalDemand / scaleDown)
+```
+Because `buildCapacities` runs **before** `normalizeToCompositeUnits`, RC/SC are computed
+from the raw sat demand — the thresholds apply to the original signal, exactly as today.
+After normalization `TotalDemand = 1.0`, so the optimizer's `Remaining` (= RC) and
+`RoleSpare` (= SC) are already in coverage units with the threshold baked in:
+`RC = 1.0/scaleUp − supply_coverage`, `SC = supply_coverage − 1.0/scaleDown`. The
+RC/SC gap (the deliberate dead-band between scale-up and scale-down thresholds) is fully
+preserved — no change to the threshold logic or its outcome is needed.
+
 **Optimizer-side arithmetic audit — sites that read demand or PRC directly.**
 All of these must continue to produce correct results after the conversion:
 
@@ -633,9 +672,23 @@ All of these must continue to produce correct results after the conversion:
 | `rescale.go:modelDemandGPUs` | same path as `roleDemandGPUs` | same |
 | `cost_aware_optimizer.go:sortVariantsForScaleDown` | `e.Score × PRC` | `e.Score × coverage_per_replica` |
 
-The last column confirms no formula changes — only the numeric values of `demand` and
-`PRC` change (1.0 and coverage fraction respectively), and every formula yields the same
-replica count it did before.
+**Open decision — `rescaleInput.Demand` (rescale.go line 564).**
+`rescaleInputsForGroup` sets `Demand: satNamed.Result.TotalDemand` on each model's
+`rescaleInput`. This value is used only in the weight ratio `priority × demand` inside
+`computeRescaleTargets` — its comment explicitly notes "unit cancels." After CT6,
+`TotalDemand = 1.0` for every model, so `weight = priority × 1.0 = priority`. This
+**changes the rescale weighting from demand-proportional to priority-only**. Today a
+model with 10× the demand gets 10× the weight at equal priority; after CT6 it gets equal
+weight. This may be the right behavior (priorities are meant to encode relative urgency)
+or may not — it is a semantic change, not a neutral one. **Decision required from user
+before implementation:** keep `Demand = TotalDemand` in `rescaleInput` as a pre-normalization
+raw value (preserve today's demand-weighted rescale), or accept priority-only weighting
+(let the normalization flow through). The two options require different implementation
+approaches (the first needs the raw demand saved before `normalizeToCompositeUnits` runs).
+
+The last column above confirms no formula changes to the optimizer helpers — only the
+numeric values of `demand` and `PRC` change (1.0 and coverage fraction respectively),
+and every formula yields the same replica count it did before.
 
 **Expected outcomes.**
 - `collectV2ModelRequest` applies the sat→composite normalization before returning
@@ -651,6 +704,11 @@ replica count it did before.
   normalized fields are exactly correct (including `demand=0` and `PRC=0` edge cases).
 
 **Todo.**
+- [ ] **Pre-implementation:** trace `estimateSchedulerQueueDemand` and the capacity-store
+  path to verify PRC and `RoleDemand[role]` are in the same units for the partial-SFZ case.
+  If units don't agree, the normalization formula must be adjusted before any code lands.
+- [ ] **Pre-implementation:** resolve the `rescaleInput.Demand` open decision above — demand-
+  weighted or priority-only rescale weighting after CT6? Document decision here before coding.
 - [ ] Write `normalizeToCompositeUnits(nr *NamedAnalyzerResult)` in
   `internal/engines/steadystate/engine_v2.go` (or a new file `composite.go` in the same
   package if it feels cleaner): applies the coverage normalization described above.
