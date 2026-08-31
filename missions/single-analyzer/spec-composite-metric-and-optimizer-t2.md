@@ -1,6 +1,6 @@
 # Spec: composite metric contract + optimizer single-analyzer simplification (T2)
 
-Status: v6 — CT1a, CT1b, CT2, CT3a, CT3b, CT5 are DONE. **CT4 remains BLOCKED**
+Status: v7 — CT1a, CT1b, CT2, CT3a, CT3b, CT5 are DONE. CT6 NOT STARTED. **CT4 remains BLOCKED**
 on the user's fairness-definition decision (ledger §36) and is explicitly out of scope for the
 current implementation pass. Supersedes `spec-compose-analyzer-results.md` (T1's
 originally-rejected insertion point; kept for history).
@@ -533,6 +533,158 @@ possibly an errata addition to `scale-from-zero-and-fallback-trace-2026-08-25.md
 **Status.** DONE 2026-08-30 — commits `fcf9c905` (single-analyzer) and `997c3220`
 (session-tracking). Doc comment on `initRoleState` covers the corrected contract, the remaining
 narrower gap, and the mixed-P/D+both deferral. Errata note added to the fallback trace report.
+
+---
+
+### CT6 — Normalize sat→composite conversion: unit-less coverage signal at engine→optimizer boundary
+
+**Intent.** `collectV2ModelRequest` currently passes `namedResults[0]` — the raw saturation
+`NamedAnalyzerResult` — directly as `CompositeSignal`. The optimizer then receives a signal
+in saturation's own units (tokens for KV-cache saturation). This is correct today but
+is not the contract the composite layer is supposed to expose: the optimizer should reason
+in unit-less coverage, not analyzer-specific units. This task converts the sat entry into
+a properly normalized composite signal before it leaves the engine, so the optimizer's math
+is already in coverage units by the time it runs. When only saturation is enabled (today's
+default), optimizer decisions must be numerically identical to before the change.
+
+**Coverage-per-replica definition.**
+For each `(variant, role)`:
+
+```
+coverage_per_replica[variant, role] = PRC[variant, role] / demand[role]
+```
+
+where `demand[role]` is `RoleDemand[role]` for disaggregated models and `TotalDemand`
+for the synthetic "both" role; `PRC[variant, role]` is `VariantCapacity.PerReplicaCapacity`
+for the variant under that role. This answers: "what fraction of total demand does one
+replica of this variant cover for this role?"
+
+The composite signal then expresses everything in unit-less coverage terms:
+- `TotalDemand = 1.0` (all demand = 100%)
+- `RoleDemand[role] = 1.0` for every role (per-role demand = 100%)
+- `VariantCapacity.PerReplicaCapacity = coverage_per_replica[variant, role]` (a dimensionless
+  fraction in (0, 1])
+
+This preserves the optimizer's `ceil(demand / PRC)` replica-count math exactly:
+`ceil(1.0 / coverage_per_replica)` = replicas needed if this variant alone serves all demand.
+
+**Special cases.**
+- `demand = 0` (for a role): `ceil(0 / anything) = 0` — no replicas needed. Per-role
+  coverage is not meaningful when demand is zero; `demand=0` must flow through to the
+  composite unchanged (the optimizer already handles it correctly via the `demand <= 0 →
+  util = 1.0` path in `allocateForModelPaired`).
+- `PRC = 0` (variant ineligible): `coverage_per_replica = 0`. The existing `PRC <= 0`
+  eligibility gate in every optimizer helper (`continue`/skip or early `return 0`)
+  already handles this correctly — the composite must preserve `PRC = 0` for ineligible
+  variants so those gates still fire.
+
+**Strong typing.**
+`PerReplicaCapacity` in the composite `NamedAnalyzerResult` must be annotated (via doc
+comment at minimum, a named type if feasible without excessive churn) to make clear it is
+now a dimensionless coverage fraction in [0, 1], not a token count. The `RoleDemand` /
+`TotalDemand = 1.0` invariant must be stated in a doc comment on the composite `Result`.
+The optimizer-side helpers that currently read `e.Result.TotalDemand` or
+`rc.TotalDemand` from `RoleCapacities` must not need to change their arithmetic — the
+numbers will be 1.0 now, but the formula `ceil(demand / PRC)` stays the same expression.
+
+**Where the conversion lives.**
+In `collectV2ModelRequest` (`internal/engines/steadystate/engine_v2.go`, line 765),
+after `buildNamedResult` / `buildCapacities` has already run (so `RequiredCapacity`,
+`SpareCapacity`, `RoleCapacities`, `TotalSupply`, `TotalAnticipatedSupply` are all built
+from the raw sat signal). The conversion rewrites only the `Result` inside the
+`NamedAnalyzerResult` before handing it to the optimizer — it does **not** change the
+entries used for liveness, metrics, or logging (which remain engine-internal and in raw
+sat units).
+
+Concretely, `buildNamedResult` produces the raw `NamedAnalyzerResult` (call it `satNR`).
+After `buildCapacities` has run:
+1. For each `VariantCapacity` in `satNR.Result.VariantCapacities`:
+   - Determine the variant's role (from `Role` field, defaulting to `domain.RoleBoth`).
+   - Look up `demand[role]`: `satNR.Result.RoleDemand[role]` if disaggregated and present,
+     else `satNR.Result.TotalDemand`.
+   - If `demand[role] > 0` and `vc.PerReplicaCapacity > 0`:
+     `vc.PerReplicaCapacity = vc.PerReplicaCapacity / demand[role]`
+   - If `demand[role] <= 0`: `vc.PerReplicaCapacity` unchanged (PRC=0 gate fires naturally).
+2. Set `satNR.Result.TotalDemand = 1.0`.
+3. For each role in `satNR.Result.RoleDemand`: set `satNR.Result.RoleDemand[role] = 1.0`.
+
+Note: `buildCapacities` has already consumed the raw sat values to compute RC/SC/Supply
+before this conversion runs — the conversion rewrites only the `Result` copy held inside
+the composite entry. The `RoleCapacities` map (engine-owned, built by `buildRoleCapacities`)
+holds `TotalDemand` per role too; those must also be normalized to `1.0` after conversion
+so `applyUniversalThreshold`'s per-role RC/SC remain consistent with the composite units.
+
+**Optimizer-side arithmetic audit — sites that read demand or PRC directly.**
+All of these must continue to produce correct results after the conversion:
+
+| Site | Current | After conversion |
+|---|---|---|
+| `applyUniversalThreshold` — model-level RC/SC | `demand/scaleUp − supply` | `1.0/scaleUp − supply`: RC/SC now in coverage-replica units |
+| `applyUniversalThreshold` — per-role RC/SC | `rc.TotalDemand/scaleUp − supply` | `1.0/scaleUp − supply` |
+| `roleBottleneckReplicas` | `ceil(state[role] / PRC)` | unchanged formula; `state[role]` seeded from RC (now coverage units), PRC now coverage fraction |
+| `safeRemovalReplicasForRole` | `floor(RoleSpare[role] / PRC)` | unchanged formula |
+| `applyAllocation` | `Remaining -= n × PRC` | unchanged formula |
+| `applyDeallocationForRole` | `RoleSpare[role] -= n × PRC` | unchanged formula |
+| `allocateForModelPaired` — `utilByRole` | `n × PRC / demand` | `n × PRC / 1.0 = n × PRC` |
+| `allocateForModelPaired` — `k` commit | `deltaUtil × demand / PRC` | `deltaUtil × 1.0 / PRC = deltaUtil / PRC` |
+| `fairShareValue` | `priority × roleSum × Score` where `roleSum = Σ_role ps[role]` | `ps[role]` seeded from RC (coverage units); formula unchanged |
+| `rescale.go:roleDemandGPUs` | `ceil(demand / bestPRC) × GPUsPerReplica` | `ceil(1.0 / coverage_per_replica) × GPUsPerReplica` — correct: replicas needed |
+| `rescale.go:rescaleInputs` (line 564) | `Demand: satNamed.Result.TotalDemand` | `Demand: 1.0` — rescale weight now coverage-proportional |
+| `rescale.go:modelDemandGPUs` | same path as `roleDemandGPUs` | same |
+| `cost_aware_optimizer.go:sortVariantsForScaleDown` | `e.Score × PRC` | `e.Score × coverage_per_replica` |
+
+The last column confirms no formula changes — only the numeric values of `demand` and
+`PRC` change (1.0 and coverage fraction respectively), and every formula yields the same
+replica count it did before.
+
+**Expected outcomes.**
+- `collectV2ModelRequest` applies the sat→composite normalization before returning
+  `ModelScalingRequest`.
+- `CompositeSignal.Result.TotalDemand == 1.0` always (when `Result != nil`).
+- `CompositeSignal.Result.RoleDemand[role] == 1.0` for every role (when disaggregated).
+- `CompositeSignal.Result.VariantCapacity[v].PerReplicaCapacity == PRC[v]/demand` for
+  each variant's role-keyed demand (when `demand > 0`; unchanged otherwise).
+- `CompositeSignal.RoleCapacities[role].TotalDemand == 1.0` for every role.
+- All existing optimizer tests pass with no numeric change to decisions or replica counts.
+- A new unit test for the conversion function directly: given a `NamedAnalyzerResult` with
+  known sat-unit `TotalDemand`, `RoleDemand`, and `PerReplicaCapacity` values, assert the
+  normalized fields are exactly correct (including `demand=0` and `PRC=0` edge cases).
+
+**Todo.**
+- [ ] Write `normalizeToCompositeUnits(nr *NamedAnalyzerResult)` in
+  `internal/engines/steadystate/engine_v2.go` (or a new file `composite.go` in the same
+  package if it feels cleaner): applies the coverage normalization described above.
+- [ ] Call it in `collectV2ModelRequest` immediately after `buildNamedResult` returns, on
+  the entry that will become `CompositeSignal` (not on the entries kept for liveness/metrics).
+- [ ] Add doc comments: on the composite `Result` fields (`TotalDemand = 1.0` invariant),
+  on `NamedAnalyzerResult.CompositeSignal` doc block stating the coverage-unit contract.
+- [ ] Unit test for `normalizeToCompositeUnits`:
+  - Non-disaggregated case: one variant, `TotalDemand=8000`, `PRC=2000` → normalized
+    `TotalDemand=1.0`, `PRC=0.25` (= 2000/8000).
+  - Disaggregated case: prefill variant `RoleDemand=4000`, `PRC=1000` → `PRC=0.25`;
+    decode variant `RoleDemand=8000`, `PRC=2000` → `PRC=0.25`. `TotalDemand=1.0`,
+    `RoleDemand[prefill]=1.0`, `RoleDemand[decode]=1.0`.
+  - `demand=0` case: `PRC` unchanged, no divide.
+  - `PRC=0` case: `PRC` stays 0 after normalization (not a div-by-zero; the guard is on
+    `demand`, not `PRC`).
+- [ ] Run `go test ./internal/engines/...` — all pass, zero regressions, 3 pre-existing
+  skips unchanged.
+
+**Refs.**
+*Reads:* `internal/engines/steadystate/engine_v2.go` (`collectV2ModelRequest`,
+`buildNamedResult`, `buildCapacities`, `buildRoleCapacities`, `applyUniversalThreshold`),
+`internal/engines/allocation/analyzer_helpers.go` (`initRoleState`, `roleBottleneckReplicas`,
+`applyAllocation`, `safeRemovalReplicasForRole`, `applyDeallocationForRole`,
+`allocateForModelPaired`), `internal/engines/allocation/greedy_score_optimizer.go`
+(`fairShareValue`), `internal/engines/allocation/rescale.go` (`roleDemandGPUs`,
+`rescaleInputs`), `internal/engines/allocation/optimizer_interfaces.go`
+(`NamedAnalyzerResult`, `ModelScalingRequest`), `internal/domain/analyzer.go`
+(`AnalyzerResult`, `RoleCapacity`)
+*Writes:* `internal/engines/steadystate/engine_v2.go` (new function +
+`collectV2ModelRequest` call site), `internal/engines/allocation/optimizer_interfaces.go`
+(doc comment update), new test in `internal/engines/steadystate/`
+
+**Status.** NOT STARTED.
 
 ---
 
