@@ -12,12 +12,14 @@ live for this mission:
 mkdir -p worktrees/<mission-name>/.session
 ```
 
-Add `.session/` to the repo's shared `.gitignore` (or the mission branch's own `.gitignore`)
-so it is never accidentally committed to a PR branch:
+`.session/` is **tracked on the mission branch** — commit it and push to `origin`. This is
+what makes the files recoverable via `git show <mission-name>:.session/STATE.md` even after
+the local worktree is deleted. Do **not** add `.session/` to `.gitignore` on the mission
+branch.
 
-```
-.session/
-```
+`.session/` must never reach a PR branch — this is enforced by the owner only cherry-picking
+code commits (not `.session/` commits) when creating a PR branch. See `conventions/pr-branch.md`
+for the pre-push check.
 
 **Skill symlinks.** Claude Code's project-skill discovery does not walk up past a git
 worktree's own root. Each worktree needs its own local symlink to these two skills before
@@ -60,14 +62,7 @@ If the mission previously tracked its files in `session-tracking/missions/<name>
 layout), migrate as follows. You should already have the files copied into `.session/` by
 `/resume-mission`'s Step 3 — this section covers the one-time setup that must follow.
 
-**1. Add `.gitignore` entry** (if not already present on the mission branch):
-
-```bash
-grep -q '\.session/' .gitignore 2>/dev/null || echo '.session/' >> .gitignore
-git add .gitignore && git commit -m "chore: exclude .session/ from PR branches"
-```
-
-**2. Check `.session/` contents BEFORE copying anything.** List what is already there:
+**1. Check `.session/` contents BEFORE copying anything.** List what is already there:
 
 ```bash
 ls -la "$MISSION_WT/.session/"
@@ -86,15 +81,15 @@ diff "$TRACKING/missions/$MISSION_NAME/STATE.md" "$MISSION_WT/.session/STATE.md"
 Keep whichever is newer/more complete. Note any conflict in your live ledger. Only copy
 files that do **not** already exist in `.session/`.
 
-**3. Commit `.session/` content to the mission branch:**
+**2. Commit `.session/` content to the mission branch:**
 
 ```bash
 git add .session/ && git commit -m "chore: migrate tracking files into .session/"
 ```
 
-**4. Set up skill symlinks** (if not already present — see "One-time setup" above).
+**3. Set up skill symlinks** (if not already present — see "One-time setup" above).
 
-**5. Update `session-tracking` symlinks** (notify `policy-writer`):
+**4. Update `session-tracking` symlinks** (notify `policy-writer`):
 The old `session-tracking/missions/<name>/STATE.md` and `ledgers/` are now stale real files.
 `policy-writer` will replace them with symlinks pointing into `<mission-worktree>/.session/`.
 You do not need to do this yourself — raise it with the user so `policy-writer` can handle it

@@ -31,10 +31,14 @@ worktrees/<mission-name>/
     <internal-plan>.md     ← internal plans not destined for any PR
 ```
 
-`.session/` is excluded from the mission branch's git history via `.gitignore` — it is **never**
-included in a PR branch. It is pushed to `origin` as part of the mission branch (tracking only,
-not upstream). Spawned agents that need to read mission docs access them through the filesystem
-path directly.
+`.session/` is **committed and pushed on the mission branch** (`origin` only, not upstream) —
+this is how the files survive a local worktree deletion and are recoverable via
+`git show <mission-name>:.session/STATE.md`. Spawned agents that need to read mission docs
+access them through the filesystem path directly.
+
+`.session/` is **never included in a PR branch.** The mission owner enforces this by only
+cherry-picking commits that belong in the PR — never cherry-picking `.session/` changes. The
+`pr-branch.md` pre-push check (`git ls-files .session`) is the safety net.
 
 `session-tracking/missions/<mission-name>/` holds **symlinks only** pointing into
 `<mission-worktree>/.session/` — a read-only convenience for other sessions. If the mission
