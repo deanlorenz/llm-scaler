@@ -54,6 +54,39 @@ Typed `/resume-mission` and got nothing, or `ls .claude/skills/` doesn't show th
 one-time setup above hasn't been done yet for this worktree. Run the symlink commands, verify
 they resolve, then proceed.
 
+## Migrating an existing worktree to the new layout
+
+If the mission previously tracked its files in `session-tracking/missions/<name>/` (the old
+layout), migrate as follows. You should already have the files copied into `.session/` by
+`/resume-mission`'s Step 3 — this section covers the one-time setup that must follow.
+
+**1. Add `.gitignore` entry** (if not already present on the mission branch):
+
+```bash
+grep -q '\.session/' .gitignore 2>/dev/null || echo '.session/' >> .gitignore
+git add .gitignore && git commit -m "chore: exclude .session/ from PR branches"
+```
+
+**2. Verify what's in `.session/` before doing anything else.** The directory may already
+contain some files from earlier work in the new layout (ledgers, a partial `STATE.md`). Do
+not overwrite a newer file with an older one. If both the `.session/` copy and the
+`session-tracking` copy exist and differ, keep whichever is more recent (check timestamps or
+git log) and note the other in your live ledger.
+
+**3. Commit `.session/` content to the mission branch:**
+
+```bash
+git add .session/ && git commit -m "chore: migrate tracking files into .session/"
+```
+
+**4. Set up skill symlinks** (if not already present — see "One-time setup" above).
+
+**5. Update `session-tracking` symlinks** (notify `policy-writer`):
+The old `session-tracking/missions/<name>/STATE.md` and `ledgers/` are now stale real files.
+`policy-writer` will replace them with symlinks pointing into `<mission-worktree>/.session/`.
+You do not need to do this yourself — raise it with the user so `policy-writer` can handle it
+at its next `session-tracking` commit.
+
 ## Setting up the session-tracking symlinks (policy-writer's job)
 
 Once a mission worktree is set up, `policy-writer` creates the corresponding entry in
