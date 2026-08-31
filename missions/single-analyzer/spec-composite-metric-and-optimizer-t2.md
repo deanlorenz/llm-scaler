@@ -501,14 +501,14 @@ disaggregated; (c) the remaining gap is specifically no-queue-signal and discove
 not "no demand fallback exists at all." Cross-reference to this spec doc for the full trace.
 
 **Todo.**
-- [ ] Add the corrected doc comment described above to `initRoleState` (post-CT3b, or pre-CT3b if
+- [x] Add the corrected doc comment described above to `initRoleState` (post-CT3b, or pre-CT3b if
   this lands first — don't lose the comment across the CT3 rewrite)
-- [ ] Note the mixed-P/D+"both" deferral in the same comment (confirmed zero-risk to defer per
+- [x] Note the mixed-P/D+"both" deferral in the same comment (confirmed zero-risk to defer per
   the follow-up investigation) so both gaps are documented together, not separately
-- [ ] Cross-link this spec section from that comment (reference by file path / section title, not
+- [x] Cross-link this spec section from that comment (reference by file path / section title, not
   ledger section numbers, since the ledger is append-only and numbers are stable but a code
   comment shouldn't assume the reader has the ledger open)
-- [ ] Correct `scale-from-zero-and-fallback-trace-2026-08-25.md`'s own headline conclusion (or add
+- [x] Correct `scale-from-zero-and-fallback-trace-2026-08-25.md`'s own headline conclusion (or add
   a visible errata note at its top) so a future reader of that report alone doesn't inherit its
   original wrong synthesis — it is currently linked from multiple places in this spec and the
   ledger with a "read the correction alongside it" caveat, which is a workable but imperfect fix
@@ -521,7 +521,9 @@ not "no demand fallback exists at all." Cross-reference to this spec doc for the
 *Writes:* `internal/engines/allocation/analyzer_helpers.go` (doc comment only),
 possibly an errata addition to `scale-from-zero-and-fallback-trace-2026-08-25.md`
 
-**Status.** NOT STARTED. Independent of CT1-CT4 — can land any time.
+**Status.** DONE 2026-08-30 — commits `fcf9c905` (single-analyzer) and `997c3220`
+(session-tracking). Doc comment on `initRoleState` covers the corrected contract, the remaining
+narrower gap, and the mixed-P/D+both deferral. Errata note added to the fallback trace report.
 
 ---
 
