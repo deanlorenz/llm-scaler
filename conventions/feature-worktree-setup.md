@@ -102,29 +102,37 @@ git add .session/ && git commit -m "chore: migrate tracking files into .session/
 
 **6. Set up skill symlinks** (if not already present — see "One-time setup" above).
 
-**7. Update `session-tracking` symlinks** (notify `policy-writer`):
-The old `session-tracking/missions/<name>/STATE.md` and `ledgers/` are now stale real files.
-`policy-writer` will replace them with symlinks pointing into `<mission-worktree>/.session/`.
-You do not need to do this yourself — raise it with the user so `policy-writer` can handle it
-at its next `session-tracking` commit.
-
-## Setting up the session-tracking symlinks (policy-writer's job)
-
-Once a mission worktree is set up, `policy-writer` creates the corresponding entry in
-`session-tracking/missions/<mission-name>/` — a folder of relative symlinks pointing into the
-mission worktree's `.session/`:
+**7. Create (or update) the `session-tracking` symlinks yourself:**
 
 ```bash
 cd worktrees/session-tracking/missions
-mkdir <mission-name>
+mkdir -p <mission-name>
 cd <mission-name>
+# Remove any old real files first
+rm -f STATE.md spec-policy-writer.md
+rm -rf ledgers
+# Create symlinks (relative path encodes mission name for recovery)
 ln -s ../../../../worktrees/<mission-name>/.session/STATE.md STATE.md
-# add further symlinks for each internal plan as they are created
+ln -s ../../../../worktrees/<mission-name>/.session/<spec-doc>.md <spec-doc>.md
+ln -s ../../../../worktrees/<mission-name>/.session ledgers
 ```
 
-These symlinks are committed to `session-tracking` by `policy-writer` — the mission owner
-does not need to commit `session-tracking` themselves. If the symlinks don't exist yet,
-other sessions can still access the mission's files directly via the mission branch:
+You do not need `policy-writer` to create the symlinks — any session can do this. What only
+`policy-writer` does is **commit** the result to `session-tracking`. Once the symlinks are in
+place, publish a note on agentbus so `policy-writer` knows to commit them on its next resume:
+
+```
+agentbus_publish(topic="session-tracking.pending-commits", kind="note",
+  body="mission=<mission-name> symlinks created in missions/<mission-name>/, ready to commit")
+```
+
+`policy-writer` checks `session-tracking.pending-commits` on every resume and commits any
+pending symlink changes it finds.
+
+## If symlinks don't exist yet
+
+Any session can access the mission's files directly via the mission branch, without needing
+the `session-tracking` symlinks to be present:
 
 ```bash
 git -C <repo-root> show <mission-name>:.session/STATE.md
