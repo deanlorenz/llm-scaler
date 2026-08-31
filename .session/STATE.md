@@ -54,4 +54,4 @@ skills, and layout that let any mission resume cleanly without reloading full hi
 
 - 2026-08-27 session=2026-08-27-session-tracking-setup status=retired ledger=.session/2026-08-27-session-tracking-setup.md
 - 2026-08-30 session=2026-08-30-conventions-split-and-trim status=retired ledger=.session/2026-08-30-conventions-split-and-trim.md
-- 2026-08-31 session=2026-08-31-policy-writer-7 status=active ledger=.session/2026-08-31-policy-writer-7.md owner=policy-writer-7
+- 2026-08-31 session=2026-08-31-policy-writer-7 status=retired ledger=.session/2026-08-31-policy-writer-7.md
