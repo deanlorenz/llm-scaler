@@ -42,11 +42,10 @@ when saturation is the only enabled analyzer (today's default).
 
 ## Immediate next step
 
-PR #34 open at upstream (https://github.com/ev-shindin/llm-scaler/pull/34, draft). Awaiting review.
-Branch `single-analyzer` ahead of `pr-single-analyzer` by one commit (`b067642a`) — fix for 8 stale
-test helper call sites left by s7 lint fix (named/withScore/makeNamed args). All tests passing.
-CT4 still blocked on user's fairness-definition decision. Next PR: engine-side reduce (wire
-non-saturation analyzer results into CompositeSignal).
+PR #34 open at upstream (https://github.com/ev-shindin/llm-scaler/pull/34), marked ready for review
+2026-09-01. CI fully green (lint-and-test, e2e-smoke, e2e-full, DCO, signed-commits all SUCCESS).
+Awaiting upstream review. CT4 still blocked on user's fairness-definition decision. Next PR:
+engine-side reduce (wire non-saturation analyzer results into CompositeSignal).
 
 ## Open questions blocking full completion
 
