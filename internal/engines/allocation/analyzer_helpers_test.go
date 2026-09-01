@@ -11,7 +11,7 @@ import (
 // (variantName, perReplicaCapacity) pairs. Live defaults to true — tests
 // exercising the liveness gate (needsScaleDownForRole, safeRemovalReplicasForRole)
 // override it explicitly on the entries they want treated as non-live.
-func makeNamed(name string, rc, sc float64, vcs ...any) NamedAnalyzerResult {
+func makeNamed(rc, sc float64, vcs ...any) NamedAnalyzerResult {
 	var caps []domain.VariantCapacity
 	for i := 0; i+1 < len(vcs); i += 2 {
 		vName := vcs[i].(string)
@@ -22,7 +22,7 @@ func makeNamed(name string, rc, sc float64, vcs ...any) NamedAnalyzerResult {
 		})
 	}
 	return NamedAnalyzerResult{
-		Name: name,
+		Name: domain.SaturationAnalyzerName,
 		Result: &domain.AnalyzerResult{
 			VariantCapacities: caps,
 		},
@@ -38,7 +38,7 @@ var _ = Describe("analyzer helpers", func() {
 
 	Describe("applyAllocation", func() {
 		It("subtracts n×PRC from Remaining", func() {
-			e := makeNamed("sat", 500, 0, "v", 100.0)
+			e := makeNamed(500, 0, "v", 100.0)
 			applyAllocation(&e, "v", 2)
 			Expect(e.Remaining).To(BeNumerically("~", 300.0, 1e-9))
 			// RequiredCapacity is the engine-built copy and must not be mutated.
@@ -46,13 +46,13 @@ var _ = Describe("analyzer helpers", func() {
 		})
 
 		It("clamps Remaining to 0", func() {
-			e := makeNamed("sat", 50, 0, "v", 100.0)
+			e := makeNamed(50, 0, "v", 100.0)
 			applyAllocation(&e, "v", 2) // would subtract 200 from 50
 			Expect(e.Remaining).To(Equal(0.0))
 		})
 
 		It("is a no-op for variants not in the result", func() {
-			e := makeNamed("sat", 200, 0, "other", 100.0)
+			e := makeNamed(200, 0, "other", 100.0)
 			applyAllocation(&e, "v", 3)
 			Expect(e.Remaining).To(Equal(200.0))
 		})
@@ -93,9 +93,9 @@ var _ = Describe("analyzer helpers", func() {
 // makeNamedPD builds a NamedAnalyzerResult with RoleCapacities for P/D tests.
 // RoleSpare is initialized from pSC/dSC (as initDisaggregatedRemaining would do).
 // Live defaults to true; override explicitly for non-live-analyzer scenarios.
-func makeNamedPD(name string, pRC, dRC, pSC, dSC float64, pDemand, dDemand float64, vPPRC float64, vDPRC float64) NamedAnalyzerResult {
+func makeNamedPD(pRC, dRC, pSC, dSC float64, pDemand, dDemand float64, vPPRC float64, vDPRC float64) NamedAnalyzerResult {
 	return NamedAnalyzerResult{
-		Name: name,
+		Name: domain.SaturationAnalyzerName,
 		Result: &domain.AnalyzerResult{
 			VariantCapacities: []domain.VariantCapacity{
 				{VariantName: "pf", Role: "prefill", PerReplicaCapacity: vPPRC},
@@ -116,7 +116,7 @@ var _ = Describe("paired helpers", func() {
 
 	Describe("initRoleState", func() {
 		It("disaggregated: roles from RoleCapacities; picker-state from RC; RoleSpare from SC", func() {
-			e := makeNamedPD("sat", 15000, 5000, 20000, 10000, 15000, 5000, 10000, 10000)
+			e := makeNamedPD(15000, 5000, 20000, 10000, 15000, 5000, 10000, 10000)
 			roles, ps := initRoleState(&e)
 			Expect(roles).To(ConsistOf("prefill", "decode"))
 			Expect(ps["prefill"]).To(BeNumerically("~", 15000.0, 1e-9))
@@ -126,7 +126,7 @@ var _ = Describe("paired helpers", func() {
 		})
 
 		It("non-disaggregated: synthetic 'both' role using model-level Remaining/Spare", func() {
-			e := makeNamed("sat", 20000, 5000, "v", 10.0)
+			e := makeNamed(20000, 5000, "v", 10.0)
 			roles, ps := initRoleState(&e)
 			Expect(roles).To(ConsistOf(domain.RoleBoth))
 			Expect(ps[domain.RoleBoth]).To(BeNumerically("~", 20000.0, 1e-9))
@@ -137,7 +137,7 @@ var _ = Describe("paired helpers", func() {
 	Describe("roleBottleneckReplicas", func() {
 		It("computes ceil(roleRemaining/PRC)", func() {
 			// prefill remaining=10000, PRC=5000 → ceil(10000/5000)=2
-			e := makeNamedPD("sat", 10000, 20000, 0, 0, 10000, 20000, 5000, 8000)
+			e := makeNamedPD(10000, 20000, 0, 0, 10000, 20000, 5000, 8000)
 			_, ps := initRoleState(&e)
 			Expect(roleBottleneckReplicas(e, ps, "prefill", "pf")).To(Equal(2))
 			// decode: ceil(20000/8000)=3
@@ -145,7 +145,7 @@ var _ = Describe("paired helpers", func() {
 		})
 
 		It("returns 0 when PRC=0 (cold-start guard)", func() {
-			e := makeNamedPD("sat", 10000, 20000, 0, 0, 10000, 20000, 0, 0)
+			e := makeNamedPD(10000, 20000, 0, 0, 10000, 20000, 0, 0)
 			_, ps := initRoleState(&e)
 			Expect(roleBottleneckReplicas(e, ps, "prefill", "pf")).To(Equal(0))
 		})
@@ -154,25 +154,25 @@ var _ = Describe("paired helpers", func() {
 	Describe("safeRemovalReplicasForRole", func() {
 		It("computes removable replicas from RoleSpare for a given role", func() {
 			// RoleSpare["prefill"]=20000, PRC_P=10000 → floor(20000/10000)=2
-			e := makeNamedPD("sat", 0, 0, 20000, 30000, 10000, 30000, 10000, 10000)
+			e := makeNamedPD(0, 0, 20000, 30000, 10000, 30000, 10000, 10000)
 			Expect(safeRemovalReplicasForRole(e, "pf", "prefill")).To(Equal(2))
 			// RoleSpare["decode"]=30000, PRC_D=10000 → floor(30000/10000)=3
 			Expect(safeRemovalReplicasForRole(e, "dc", "decode")).To(Equal(3))
 		})
 
 		It("returns 0 when RoleSpare for role is 0", func() {
-			e := makeNamedPD("sat", 0, 0, 0, 30000, 10000, 30000, 10000, 10000)
+			e := makeNamedPD(0, 0, 0, 30000, 10000, 30000, 10000, 10000)
 			Expect(safeRemovalReplicasForRole(e, "pf", "prefill")).To(Equal(0))
 		})
 
 		It("returns 0 when RoleSpare is nil", func() {
-			e := makeNamed("sat", 0, 100, "v", 10.0)
+			e := makeNamed(0, 100, "v", 10.0)
 			e.RoleSpare = nil
 			Expect(safeRemovalReplicasForRole(e, "v", "prefill")).To(Equal(0))
 		})
 
 		It("returns 0 for a non-live entry", func() {
-			e := makeNamedPD("sat", 0, 0, 20000, 30000, 10000, 30000, 10000, 10000)
+			e := makeNamedPD(0, 0, 20000, 30000, 10000, 30000, 10000, 10000)
 			e.Live = false
 			Expect(safeRemovalReplicasForRole(e, "pf", "prefill")).To(Equal(0))
 		})
@@ -181,7 +181,7 @@ var _ = Describe("paired helpers", func() {
 	Describe("applyDeallocationForRole", func() {
 		It("decrements RoleSpare[role] by n×PRC", func() {
 			// RoleSpare["prefill"]=20000, PRC=10000, n=2 → 20000-20000=0
-			e := makeNamedPD("sat", 0, 0, 20000, 30000, 10000, 30000, 10000, 10000)
+			e := makeNamedPD(0, 0, 20000, 30000, 10000, 30000, 10000, 10000)
 			applyDeallocationForRole(&e, "pf", "prefill", 2)
 			Expect(e.RoleSpare["prefill"]).To(Equal(0.0))
 			// decode spare unchanged
@@ -189,7 +189,7 @@ var _ = Describe("paired helpers", func() {
 		})
 
 		It("clamps RoleSpare to 0", func() {
-			e := makeNamedPD("sat", 0, 0, 5000, 0, 10000, 0, 10000, 10000)
+			e := makeNamedPD(0, 0, 5000, 0, 10000, 0, 10000, 10000)
 			applyDeallocationForRole(&e, "pf", "prefill", 5) // would subtract 50000
 			Expect(e.RoleSpare["prefill"]).To(Equal(0.0))
 		})
@@ -197,32 +197,32 @@ var _ = Describe("paired helpers", func() {
 
 	Describe("needsScaleDownForRole", func() {
 		It("returns true when the live entry has RoleSpare[role] > 0", func() {
-			e := makeNamedPD("sat", 0, 0, 20000, 30000, 10000, 30000, 10000, 10000)
+			e := makeNamedPD(0, 0, 20000, 30000, 10000, 30000, 10000, 10000)
 			Expect(needsScaleDownForRole(e, "prefill")).To(BeTrue())
 			Expect(needsScaleDownForRole(e, "decode")).To(BeTrue())
 		})
 
 		It("returns false when RoleSpare[role] = 0", func() {
-			e := makeNamedPD("sat", 0, 0, 0, 30000, 10000, 30000, 10000, 10000)
+			e := makeNamedPD(0, 0, 0, 30000, 10000, 30000, 10000, 10000)
 			Expect(needsScaleDownForRole(e, "prefill")).To(BeFalse())
 			Expect(needsScaleDownForRole(e, "decode")).To(BeTrue())
 		})
 
 		It("returns false for nil RoleSpare", func() {
-			e := makeNamed("sat", 0, 100, "v", 10.0)
+			e := makeNamed(0, 100, "v", 10.0)
 			e.RoleSpare = nil
 			Expect(needsScaleDownForRole(e, "prefill")).To(BeFalse())
 		})
 
 		It("returns false for a non-live entry (safety floor)", func() {
-			e := makeNamedPD("sat", 0, 0, 20000, 30000, 10000, 30000, 10000, 10000)
+			e := makeNamedPD(0, 0, 20000, 30000, 10000, 30000, 10000, 10000)
 			e.Live = false
 			Expect(needsScaleDownForRole(e, "prefill")).To(BeFalse())
 			Expect(needsScaleDownForRole(e, "decode")).To(BeFalse())
 		})
 
 		It("returns false when the live entry has no spare (real veto preserved)", func() {
-			e := makeNamedPD("sat", 0, 0, 0, 30000, 10000, 30000, 10000, 10000)
+			e := makeNamedPD(0, 0, 0, 30000, 10000, 30000, 10000, 10000)
 			Expect(e.Live).To(BeTrue())
 			Expect(needsScaleDownForRole(e, "prefill")).To(BeFalse())
 		})

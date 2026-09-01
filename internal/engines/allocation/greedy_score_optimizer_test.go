@@ -831,7 +831,7 @@ var _ = Describe("GreedyByScoreOptimizer", func() {
 					ModelID:         "model-A",
 					Namespace:       "default",
 					Priority:        1.0,
-					CompositeSignal: rA.named("").withScore(1.0), // explicit: mirrors engine-populated value
+					CompositeSignal: rA.named().withScore(), // explicit: mirrors engine-populated value
 					Variants:        deriveVariants(rA),
 					VariantStates: []domain.VariantReplicaState{
 						{VariantName: "a-v1", CurrentReplicas: 1, GPUsPerReplica: 2},
@@ -841,7 +841,7 @@ var _ = Describe("GreedyByScoreOptimizer", func() {
 					ModelID:         "model-B",
 					Namespace:       "default",
 					Priority:        5.0,
-					CompositeSignal: rB.named("").withScore(1.0), // explicit: mirrors engine-populated value
+					CompositeSignal: rB.named().withScore(), // explicit: mirrors engine-populated value
 					Variants:        deriveVariants(rB),
 					VariantStates: []domain.VariantReplicaState{
 						{VariantName: "b-v1", CurrentReplicas: 1, GPUsPerReplica: 2},
@@ -895,7 +895,7 @@ var _ = Describe("GreedyByScoreOptimizer", func() {
 					// throughput previously contributed a second AnalyzerResults entry
 					// (Score=2.0) to this model's fair-share weight; CompositeSignal is
 					// now a single value, so only saturation's entry can be carried.
-					CompositeSignal: rA.named("saturation").withScore(1.0),
+					CompositeSignal: rA.named().withScore(),
 					Variants:        deriveVariants(rA),
 					VariantStates: []domain.VariantReplicaState{
 						{VariantName: "a-v1", CurrentReplicas: 1, GPUsPerReplica: 2},
@@ -905,7 +905,7 @@ var _ = Describe("GreedyByScoreOptimizer", func() {
 					ModelID:         "model-B",
 					Namespace:       "default",
 					Priority:        1.0,
-					CompositeSignal: rB.named("").withScore(1.0),
+					CompositeSignal: rB.named().withScore(),
 					Variants:        deriveVariants(rB),
 					VariantStates: []domain.VariantReplicaState{
 						{VariantName: "b-v1", CurrentReplicas: 1, GPUsPerReplica: 2},
@@ -1291,7 +1291,7 @@ var _ = Describe("GreedyByScoreOptimizer", func() {
 					Namespace:       "default",
 					Disaggregated:   true,
 					Priority:        1.0,
-					CompositeSignal: r.named("").withScore(1.0),
+					CompositeSignal: r.named().withScore(),
 					Variants:        deriveVariants(r),
 					VariantStates: []domain.VariantReplicaState{
 						{VariantName: "pf", CurrentReplicas: 2, GPUsPerReplica: 2},
@@ -1336,7 +1336,7 @@ var _ = Describe("GreedyByScoreOptimizer", func() {
 					Namespace:       "default",
 					Disaggregated:   true,
 					Priority:        1.0,
-					CompositeSignal: r.named("").withScore(1.0),
+					CompositeSignal: r.named().withScore(),
 					Variants:        deriveVariants(r),
 					VariantStates: []domain.VariantReplicaState{
 						{VariantName: "pf", CurrentReplicas: 1, GPUsPerReplica: 2},
