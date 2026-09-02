@@ -43,9 +43,10 @@ when saturation is the only enabled analyzer (today's default).
 ## Immediate next step
 
 PR #34 open at upstream (https://github.com/ev-shindin/llm-scaler/pull/34), marked ready for review
-2026-09-01. CI fully green (lint-and-test, e2e-smoke, e2e-full, DCO, signed-commits all SUCCESS).
-Awaiting upstream review. CT4 still blocked on user's fairness-definition decision. Next PR:
-engine-side reduce (wire non-saturation analyzer results into CompositeSignal).
+2026-09-01. CI fully green. Awaiting upstream review.
+CT6 unblocked: rescaleInput.Demand decision resolved — add `SatDemand` field, preserve pre-normalization
+token demand for rescale weight. Semantic framework written into spec. CT6 implementation ready to start.
+CT4 still blocked on user's fairness-definition decision.
 
 ## Open questions blocking full completion
 
