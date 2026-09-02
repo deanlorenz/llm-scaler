@@ -561,7 +561,7 @@ func rescaleInputsForGroup(reqs []ModelScalingRequest, accType string, budget in
 		inputs = append(inputs, rescaleInput{
 			ID:        modelKey(req),
 			Priority:  req.Priority,
-			Demand:    satNamed.Result.TotalDemand,
+			Demand:    satNamed.SatDemand,
 			FloorGPUs: floorGPUs,
 			CapGPUs:   capGPUs,
 		})

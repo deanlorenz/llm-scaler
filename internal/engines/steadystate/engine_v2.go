@@ -111,7 +111,7 @@ func (e *Engine) runAnalyzersAndScore(
 	variantAutoscalings map[string]*llmdVariantAutoscalingV1alpha1.VariantAutoscaling,
 	schedulerQueue *domain.SchedulerQueueMetrics,
 	arrivalRate float64,
-) (allocation.NamedAnalyzerResult, error) {
+) ([]allocation.NamedAnalyzerResult, error) {
 	logger := ctrl.LoggerFrom(ctx)
 
 	// metaByVariant is the authoritative discovery metadata the capacity builder
@@ -123,10 +123,10 @@ func (e *Engine) runAnalyzersAndScore(
 	baseResult, err := e.runV2AnalysisOnly(ctx, modelID, namespace, replicaMetrics, config,
 		variantStates, scaleTargets, variantAutoscalings, schedulerQueue, arrivalRate)
 	if err != nil {
-		return allocation.NamedAnalyzerResult{}, err
+		return nil, err
 	}
 	if baseResult == nil {
-		return allocation.NamedAnalyzerResult{}, fmt.Errorf("saturation analyzer produced no result for model %s", modelID)
+		return nil, fmt.Errorf("saturation analyzer produced no result for model %s", modelID)
 	}
 
 	satUp, satDown := config.AnalyzerThresholds(domain.SaturationAnalyzerName)
@@ -148,11 +148,11 @@ func (e *Engine) runAnalyzersAndScore(
 		ArrivalRate:    arrivalRate,
 	}
 
-	// Run every analyzer and collect its raw (D, P) result. Saturation is
+	// Run every analyzer and build its NamedAnalyzerResult. Saturation is
 	// first and always runs; each non-saturation analyzer is run only if
 	// registered and enabled.
-	baseResults := []rawAnalyzerResult{
-		{name: domain.SaturationAnalyzerName, result: baseResult, scaleUp: satUp, scaleDown: satDown},
+	namedResults := []allocation.NamedAnalyzerResult{
+		buildNamedResult(ctx, domain.SaturationAnalyzerName, baseResult, config, metaByVariant, satUp, satDown),
 	}
 	for _, entry := range e.analyzerRunEntries() {
 		if entry.name == domain.SaturationAnalyzerName {
@@ -166,52 +166,16 @@ func (e *Engine) runAnalyzersAndScore(
 			continue
 		}
 		up, down := config.AnalyzerThresholds(entry.name)
-		baseResults = append(baseResults, rawAnalyzerResult{name: entry.name, result: result, scaleUp: up, scaleDown: down})
+		namedResults = append(namedResults, buildNamedResult(ctx, entry.name, result, config, metaByVariant, up, down))
 	}
 
-	// Reduce the raw per-analyzer results to the single composite metric, then
-	// build the optimizer-facing entry once, from that composed result — not
-	// once per analyzer. The capacity-build step (buildNamedResult) writes the
-	// engine-owned aggregates onto the named entry, so it can only run after
-	// composition has settled on one (D, P) signal.
-	composed := composeAnalyzerResults(baseResults)
-	namedResult := buildNamedResult(ctx, composed.name, composed.result, config, metaByVariant, composed.scaleUp, composed.scaleDown)
-
-	namedResults := []allocation.NamedAnalyzerResult{namedResult}
 	e.updateLivenessAndSetLive(ctx, namespace, modelID, namedResults)
-	namedResult = namedResults[0]
-	e.recordAnalyzerMetrics(namespace, modelID, []allocation.NamedAnalyzerResult{namedResult})
+	e.recordAnalyzerMetrics(namespace, modelID, namedResults)
 
-	logAnalyzerResult(ctx, modelID, namespace, namedResult)
-	return namedResult, nil
-}
-
-// rawAnalyzerResult is one analyzer's un-enriched (D, P) output, paired with
-// its resolved name and thresholds, before the capacity-build step
-// (buildNamedResult) runs. composeAnalyzerResults reduces a slice of these to
-// the single composite metric the optimizer consumes.
-type rawAnalyzerResult struct {
-	name               string
-	result             *domain.AnalyzerResult
-	scaleUp, scaleDown float64
-}
-
-// composeAnalyzerResults reduces the raw per-analyzer results collected by
-// runAnalyzersAndScore into the single composite metric fed to the
-// capacity-build step (buildNamedResult) and, from there, to the optimizer.
-//
-// Today it takes saturation's result as-is: when saturation is the only
-// entry — the default, and currently the only case exercised in production —
-// it is returned unchanged. Saturation is also the fallback for entries
-// beyond the first, until the real reduction/backfill semantics (including
-// saturation's scale-from-zero fallback role) are designed in a later task.
-func composeAnalyzerResults(baseResults []rawAnalyzerResult) rawAnalyzerResult {
-	for _, r := range baseResults {
-		if r.name == domain.SaturationAnalyzerName {
-			return r
-		}
+	for _, nr := range namedResults {
+		logAnalyzerResult(ctx, modelID, namespace, nr)
 	}
-	return baseResults[0]
+	return namedResults, nil
 }
 
 // analyzerDemandSeries identifies one wva_analyzer_demand series within a model
@@ -798,7 +762,7 @@ func (e *Engine) collectV2ModelRequest(
 	schedulerQueue *domain.SchedulerQueueMetrics,
 	arrivalRate float64,
 ) (*allocation.ModelScalingRequest, error) {
-	namedResult, err := e.runAnalyzersAndScore(ctx, modelID, namespace, replicaMetrics, config,
+	namedResults, err := e.runAnalyzersAndScore(ctx, modelID, namespace, replicaMetrics, config,
 		variantStates, variantMetadata, scaleTargets, variantAutoscalings, schedulerQueue, arrivalRate)
 	if err != nil {
 		return nil, fmt.Errorf("collecting V2 model request for %s/%s: %w", namespace, modelID, err)
@@ -813,10 +777,16 @@ func (e *Engine) collectV2ModelRequest(
 		}
 	}
 
+	// namedResults[0] is always the saturation entry — it is built first and
+	// unconditionally. The optimizer only needs sat's signal; all other entries
+	// are engine-internal (liveness, metrics) and not forwarded.
+	composite := namedResults[0]
+	normalizeToCompositeUnits(&composite)
+
 	return &allocation.ModelScalingRequest{
 		ModelID:         modelID,
 		Namespace:       namespace,
-		CompositeSignal: namedResult,
+		CompositeSignal: composite,
 		VariantStates:   variantStates,
 		Variants:        variantMetadata,
 		Priority:        config.Priority,
@@ -1038,6 +1008,74 @@ func buildRoleCapacities(ctx context.Context, result *domain.AnalyzerResult) map
 		}
 	}
 	return out
+}
+
+// normalizeToCompositeUnits converts the analyzer-unit (D, P) values inside nr
+// to unit-less coverage fractions so the optimizer reasons in coverage space:
+//
+//	TotalDemand        = 1.0  (all demand = 100%)
+//	RoleDemand[role]   = 1.0  for every role
+//	PerReplicaCapacity = PRC / D(role)   ∈ (0, 1]  for each variant
+//
+// After this conversion ceil(1.0 / PerReplicaCapacity) == N_full(SO), the
+// replica count for full coverage — numerically identical to ceil(D/PRC)
+// before the conversion.
+//
+// SatDemand is set to Result.TotalDemand before normalization so the rescale
+// weight (rescaleInputsForGroup) can use the original token-proportional demand
+// even after TotalDemand becomes 1.0.
+//
+// Special cases:
+//
+//	demand == 0 for a role: PerReplicaCapacity is left unchanged (the optimizer's
+//	  demand<=0 → util=1.0 path handles this correctly already).
+//	PRC == 0 for a variant: left as 0 (existing PRC<=0 eligibility gates fire).
+//
+// normalizeToCompositeUnits must be called after buildCapacities — RC, SC, and
+// RoleCapacities are computed from the raw sat values and must not be recomputed
+// after normalization. It mutates nr in place.
+func normalizeToCompositeUnits(nr *allocation.NamedAnalyzerResult) {
+	if nr.Result == nil {
+		return
+	}
+
+	// Capture raw demand for the rescale weight before overwriting TotalDemand.
+	nr.SatDemand = nr.Result.TotalDemand
+
+	// Normalize each variant's PRC by its role's demand.
+	for i := range nr.Result.VariantCapacities {
+		vc := &nr.Result.VariantCapacities[i]
+		role := vc.Role
+		if role == "" {
+			role = domain.RoleBoth
+		}
+		var demand float64
+		if role == domain.RoleBoth {
+			demand = nr.Result.TotalDemand
+		} else if d, ok := nr.Result.RoleDemand[role]; ok {
+			demand = d
+		} else {
+			demand = nr.Result.TotalDemand
+		}
+		if demand > 0 && vc.PerReplicaCapacity > 0 {
+			vc.PerReplicaCapacity = vc.PerReplicaCapacity / demand
+		}
+		// demand <= 0: leave PRC unchanged (optimizer demand<=0 path handles it).
+		// PRC == 0: leave as 0 (eligibility gate fires naturally).
+	}
+
+	// Normalize demands to 1.0 after all PRC divisions are done.
+	nr.Result.TotalDemand = 1.0
+	for role := range nr.Result.RoleDemand {
+		nr.Result.RoleDemand[role] = 1.0
+	}
+
+	// RoleCapacities.TotalDemand must also be normalized so applyUniversalThreshold's
+	// per-role RC/SC remain consistent with the composite units.
+	for role, rc := range nr.RoleCapacities {
+		rc.TotalDemand = 1.0
+		nr.RoleCapacities[role] = rc
+	}
 }
 
 // rolesOf returns the roles present in a per-role aggregation, sorted so the
