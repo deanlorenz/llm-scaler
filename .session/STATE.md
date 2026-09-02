@@ -31,7 +31,7 @@ skills, and layout that let any mission resume cleanly without reloading full hi
 | Audit pass + agentbus feedback fixes | **DONE 2026-08-27** | 6 real ambiguities fixed. See `2026-08-27-conventions-audit-fixes.md`. |
 | Corrected worktree/mission model | **DONE 2026-08-28** | Every mission gets its own branch/worktree. Commits `63ab0d36`, `b918acf0`. |
 | Standing rule: never deviate from an approved plan | **DONE 2026-08-28** | Saved as durable memory. |
-| Ledger-capture contract correction: never touch `CONVENTIONS.md` | **DECISION RECORDED, NOT YET DRAFTED** | See spec T7. `suggestion-box/` folder created (`a02a474f`). |
+| Ledger-capture contract correction: never touch `CONVENTIONS.md` | **DONE 2026-08-31** | Drafted into `conventions/resume-and-handoff.md` (ledger-capture section). Commit `policy-writer-8`. |
 | Split `CONVENTIONS.md` into core + `conventions/*.md` | **DONE 2026-08-30 (Phase 1)** | Commit `eb5f5027`. 7 new files. Content moved verbatim. |
 | Trim conventions files to what/how only | **DONE 2026-08-30 (Phase 2)** | Commit `6e99db7f`. `.bak` files retained for comparison. Phase 2 approved (checkpointed); `.bak` files not yet removed — ask on next resume. |
 | PR rules | **DONE 2026-08-31** | `conventions/pr-workflow.md` (3 rules) + `conventions/pr-branch.md` (PR branch lifecycle). Commits `c52c22d1`, `078648d4`. |
@@ -40,8 +40,7 @@ skills, and layout that let any mission resume cleanly without reloading full hi
 ## Immediate next step
 
 - Remove `.bak` files from `worktrees/policy-writer` (Phase 2 trim already committed at `6e99db7f` — `.bak` files were for review; that review is done) — or keep them, user's call.
-- Draft T7 (ledger-capture contract correction — never touch `CONVENTIONS.md`) into the actual conventions text.
-- Process 4 pending `suggestion-box/` entries (deferred until after rewrite split — that split is now done).
+- Process suggestion-box lifecycle convention (what happens to processed entries — rename? archive? delete?) — currently using `processed-` prefix as interim.
 - Set up skill symlinks in other existing mission worktrees (`benchmark-*`, etc.).
 - Copy finished `policy-writer` branch content into `session-tracking` (still needs explicit go-ahead).
 - Push `session-tracking` to `origin` (50+ commits ahead).

@@ -72,10 +72,21 @@ A background agent, launched by the session doing the takeover-scan or by a sess
 down its own work (see the `resume-mission`/`wind-down` skills), given exactly one ledger file
 to process.
 
-1. Read every point in that ledger entry and confirm each one is reflected somewhere durable —
-   the mission's `STATE.md`, its plan/spec doc, or (for a genuinely global process point)
-   `CONVENTIONS.md`. Where something is missing, fix it directly (via the `.wip` protocol),
-   rather than just reporting the gap.
+**ledger-capture must never write to `CONVENTIONS.md`.** Its only two legitimate write
+destinations are the mission's own `STATE.md` and its plan/spec doc. Only `policy-writer` may
+change `CONVENTIONS.md`, and not while it is itself running ledger-capture on its own ledgers.
+
+When ledger-capture finds something that looks like it should become a global rule or
+behavioral directive (previously the kind of thing it might have written into
+`CONVENTIONS.md`), it writes one atomic markdown file per individual finding into
+`session-tracking/suggestion-box/`, named `YYYY-MM-DD-HHMM-<mission-name>.md`. Only
+`policy-writer` reads the suggestion-box and decides whether and how to turn a suggestion into
+an actual `CONVENTIONS.md` rule.
+
+1. Read every point in that ledger file and confirm each one is reflected somewhere durable —
+   the mission's `STATE.md` or its plan/spec doc. Where something is missing, fix it directly
+   (via the `.wip` protocol), rather than just reporting the gap. For anything that looks like
+   a global rule or process correction, write to `suggestion-box/` instead (see above).
 2. Also fix any doc-reference path in scope of what you're already touching that violates the
    path convention below (a bare filename, a filesystem-absolute path, a path stale after a doc
    move) — but don't go looking for unrelated broken links outside this ledger's own scope.
