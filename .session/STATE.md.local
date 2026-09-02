@@ -39,13 +39,14 @@ when saturation is the only enabled analyzer (today's default).
 | CT3b — simplify 7 single-entry optimizer helpers | **DONE** | Commit `b980f682` on `single-analyzer`. `RolePairedState` collapsed from `[]map[string]float64` to `map[string]float64`; all 7 helpers + `sortVariantsForScaleDown`, `fairShareValue`, `reclaimRole`, `scaleDownRoleIterated`, `allocateForModelPaired`, `RolePickFn` updated to single-entry signatures. Multi-entry (N>1) originals preserved under `internal/engines/allocation/multi_backup/` (`//go:build ignore`) for the planned engine-side reduce step. Pre/post: 252→249 specs, 3 multi-entry test cases moved to backup file (not deleted). |
 | CT4 — Score-weighted aggregation simplification | **BLOCKED on user** | Confirmed real bug/naming mismatch: `fairShareValue` equalizes absolute remaining demand across models, not coverage ratio (two 80%-covered models at 10x different scale get ~10x different GPU shares). See `fairshare-value-correctness-investigation-2026-08-25.md` and spec CT4 section. Fix-now vs. document-and-defer decision is the user's to make; not code-verifiable. Explicitly out of scope for the current implementation pass. |
 | CT5 — document `RoleCapacities` role-visibility contract | **DONE** | Commit `fcf9c905` on `single-analyzer`. Corrected contract comment added to `initRoleState`. Errata note added to `scale-from-zero-and-fallback-trace-2026-08-25.md` (session-tracking, commit `997c3220`). |
+| CT6 — Normalize sat→composite to coverage units | **DONE** | Commit `f20e06f9` on `single-analyzer`. `SatDemand` field added, `normalizeToCompositeUnits` written + called, rescale weight fixed, 7 unit tests. All tests pass. |
 
 ## Immediate next step
 
 PR #34 open at upstream (https://github.com/ev-shindin/llm-scaler/pull/34), marked ready for review
 2026-09-01. CI fully green. Awaiting upstream review.
-CT6 unblocked: rescaleInput.Demand decision resolved — add `SatDemand` field, preserve pre-normalization
-token demand for rescale weight. Semantic framework written into spec. CT6 implementation ready to start.
+CT6 done (f20e06f9). Next: decide whether CT4 fairness fix is in scope, then build PR #2
+(engine-side reduce to wire non-saturation analyzers into CompositeSignal).
 CT4 still blocked on user's fairness-definition decision.
 
 ## Open questions blocking full completion
