@@ -39,3 +39,17 @@ The rule for both:
 
 **Symlink-based locking was considered and rejected — do not re-propose it.** See the spec doc
 for why.
+
+## When a plan is approved
+
+The moment a plan is approved — `ExitPlanMode`, or an explicit "go ahead on X, Y, Z" — persist
+it to a **durable, committed file immediately**. Do not leave it contingent on the transient
+plan-mode file (`~/.claude/plans/*.md`) surviving until execution.
+
+- If the plan belongs in a feature worktree (e.g. a plan for drafting `CONVENTIONS.md`
+  changes), commit it there, alongside the first commit of the work it describes — not later
+  at a checkpoint.
+- If the plan belongs in `session-tracking` (a mission's spec doc), commit it there.
+
+A transient plan-mode file is not a durable record. If the session ends or is compacted before
+the plan executes, the plan is gone — this has happened and caused real rework.

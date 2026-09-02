@@ -13,11 +13,23 @@ mission worktree.
 `ofer` have push disabled. Confirm with `git remote -v` before assuming push behavior in a new
 worktree.
 
-**Worktree pinning.** A session pinned to a worktree via `EnterWorktree` can read any other
-worktree's path but cannot write to it. `ExitWorktree` returns to the repo root; re-entering
-a worktree afterward requires interactive user authorization each time — do not rely on it as
-a free round-trip mid-task. If a cross-worktree write is needed mid-session, ask the user
-first.
+**Worktree pinning and write boundaries.** Reads may cross worktree boundaries freely (full
+paths, `git -C`, `cat`, etc.). Writes may not — every write must target the session's own
+mission branch/worktree (the single stated exception: `policy-writer` writing into
+`session-tracking` as its own mission output). Never use `cd`, subshells, process
+substitution, or any other shell trick to route writes across that boundary — if a
+cross-worktree write is needed, ask the user first.
+
+A session pinned via `EnterWorktree` cannot write to any path outside the pinned worktree,
+even if a `permissions.allow` entry explicitly grants `Edit`/`Write` there — the isolation
+guard is a harness-level structural veto that fires before the allowlist is consulted, so the
+allowlist has no effect. Plain `Bash` shell redirection (e.g. `echo >>`) is not covered by
+the same veto and may succeed where `Edit`/`Write` are blocked — this is an inconsistency in
+what the guard covers, not a sanctioned workaround. If you find this gap, ask the user before
+routing around it via Bash.
+
+`ExitWorktree` returns to the repo root; re-entering a worktree afterward requires interactive
+user authorization each time — do not rely on it as a free round-trip mid-task.
 
 **This file is not auto-loaded.** A fresh session must be explicitly told to read
 `CONVENTIONS.md` (and the relevant mission's `STATE.md`) by full path. Say so when handing off
@@ -30,7 +42,8 @@ to a new session or subagent.
 Most of what used to live in this file only applies in a specific situation. Read the matching
 file below when that situation actually comes up — not upfront, not speculatively.
 
-- `conventions/wip-editing.md` — about to edit `STATE.md` or `CONVENTIONS.md`
+- `conventions/wip-editing.md` — about to edit `STATE.md` or `CONVENTIONS.md`; or a plan was
+  just approved and needs to be persisted
 - `conventions/state-vs-ledger.md` — about to write to `STATE.md` or a ledger, or unsure which
   one something belongs in
 - `conventions/resume-and-handoff.md` — running `/resume-mission` or `/wind-down`; taking over
@@ -116,3 +129,10 @@ indicates maintains that branch.
 - **Agentbus ownership.** When taking over a mission, declare ownership on agentbus on the
   `mission.<mission-name>` topic before starting work. Release it when winding down. See
   `conventions/resume-and-handoff.md` for the exact calls.
+- **No in-place editing except your own files.** For any file you don't fully own in this
+  session's context (i.e. not your own code file, your own ledger append, your own plan):
+  write new, then remove/replace old — never edit in place.
+- **Destructive actions need explicit per-step approval.** `git reset --hard`, `rm -rf`,
+  `git stash drop`, and equivalent operations are rare and need an explicit yes for each one —
+  not inferred from an earlier approval for a different step. If unsure, keep a backup copy
+  rather than proceeding.
