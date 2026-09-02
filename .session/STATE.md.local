@@ -1,10 +1,10 @@
 # Mission state — single-analyzer
 
-**Last updated:** 2026-08-30. This doc is overwritten on each update, not append-only — it
+**Last updated:** 2026-09-01. This doc is overwritten on each update, not append-only — it
 reflects current status only. For global process rules see `../../CONVENTIONS.md`. For the
-full task plan see `spec-composite-metric-and-optimizer-t2.md`. For the chronological
-reasoning trail (why decisions were made) see `ledger-analyzer-optimizer-refactor.md` —
-reference only, not needed to resume. Per-session ledgers are in `ledgers/`.
+full task plan see `.session/spec.md.wip`. For the chronological reasoning trail (why decisions
+were made) see `ledger-analyzer-optimizer-refactor.md` — reference only, not needed to resume.
+Per-session ledgers are in `.session/`.
 
 ## Worktrees used for this mission
 
@@ -43,16 +43,66 @@ when saturation is the only enabled analyzer (today's default).
 
 ## Immediate next step
 
-PR #34 open at upstream (https://github.com/ev-shindin/llm-scaler/pull/34), marked ready for review
-2026-09-01. CI fully green. Awaiting upstream review.
-CT6 done (f20e06f9). Next: decide whether CT4 fairness fix is in scope, then build PR #2
+PR #34 open at upstream (https://github.com/ev-shindin/llm-scaler/pull/34), marked ready for
+review 2026-09-01. CI fully green (lint-and-test, e2e-smoke, e2e-full, DCO, signed-commits).
+Awaiting upstream review.
+CT6 done (`f20e06f9`). Next: decide whether CT4 fairness fix is in scope, then build PR #2
 (engine-side reduce to wire non-saturation analyzers into CompositeSignal).
-CT4 still blocked on user's fairness-definition decision.
+
+## Key decisions (for resuming context)
+
+**Engine→optimizer boundary:**
+- `CompositeSignal NamedAnalyzerResult` (single value, not slice); `saturationNamedEntry`
+  deleted; all consumers read `req.CompositeSignal` directly.
+- `normalizeToCompositeUnits` runs after `buildCapacities` (RC/SC computed from raw tokens
+  first, then PRC/demand normalized to coverage units). Must not move before `buildCapacities`.
+- After normalization: `TotalDemand=1.0`, `RoleDemand[role]=1.0`, `PRC=PRC/D(role)`.
+- `SatDemand float64` on `NamedAnalyzerResult` preserves raw token demand for rescale weight.
+
+**Rescale weight:**
+- `rescaleInputsForGroup` uses `SatDemand` (not `Result.TotalDemand`) — survives CT6 normalization.
+- Intended semantic: `weight ∝ N_full(M)` (replicas for full coverage, not tokens, not GPUs).
+- Token weight is proportional to N_full only for homogeneous PRC; longer-term fix (separate CT):
+  replace with `modelDemandGPUs / G̅` (GPU-independent). Tracked in spec rescale-fairness section.
+
+**Semantic framework (established 2026-09-01, in spec CT6 section):**
+- `C(SO) = PRC/D` — per-replica coverage fraction ∈ (0,1]
+- `N_full(SO) = ceil(1.0/C(SO))` — replicas for full coverage
+- Multi-analyzer reduce: `N_full = max_i`, `C = min_i`
+- Same-role SOs add: `C(M,R) = Σ C(SO)`; cross-role: `min(C(M,prefill), C(M,decode)) + C(M,both)`
+- `NG(SO) = N_full × G(SO)` — GPU demand
+
+**Multi-entry originals:**
+- `internal/engines/allocation/multi_backup/` (`//go:build ignore`) holds pre-CT3b
+  slice-based optimizer helpers for the planned engine-side reduce (PR #2).
+
+**PR isolation:**
+- `pr/single-analyzer` is ephemeral staging for upstream PRs; it does not need to stay in
+  sync with `single-analyzer`. PR work done via coder agent on
+  `/home/dean/code/llm-d/worktrees/pr-single-analyzer`, not by the orchestrating session.
+
+## Files touched (production)
+
+| File | What changed |
+|---|---|
+| `internal/engines/allocation/optimizer_interfaces.go` | `AnalyzerResults` → `CompositeSignal`; `SatDemand` field |
+| `internal/engines/allocation/analyzer_helpers.go` | `saturationNamedEntry` deleted; 7 helpers simplified; CT5 doc comment |
+| `internal/engines/allocation/rescale.go` | nil-guard on `rescaleModelDecisions`; `Demand: satNamed.SatDemand` |
+| `internal/engines/allocation/cost_aware_optimizer.go` | `saturationNamedEntry` → `req.CompositeSignal` |
+| `internal/engines/allocation/greedy_score_optimizer.go` | same; `fairShareValue`/`sortVariantsForScaleDown` simplified |
+| `internal/engines/allocation/variant_records.go` | `saturationNamedEntry` → `req.CompositeSignal` |
+| `internal/engines/steadystate/engine_v2.go` | `runAnalyzersAndScore` returns `[]NamedAnalyzerResult`; `normalizeToCompositeUnits` added + called; `rawAnalyzerResult`/`composeAnalyzerResults` deleted; CT1b nil-guard |
+| `internal/engines/steadystate/engine_v2_normalize_test.go` | **new** — 7 unit tests for `normalizeToCompositeUnits` |
+| `internal/engines/allocation/multi_backup/engine_v2_compose_test.go` | **new** — multi-entry tests preserved (`//go:build ignore`) |
+| `docs/plans/analyzers/analyzer-architecture-refactor.md` | Restored (mis-swept into session-tracking) |
+| `docs/plans/analyzers/k2-capacity-model.md` | Restored |
+| `docs/plans/analyzers/kvcachethreshold-retirement.md` | Restored |
 
 ## Open questions blocking full completion
 
-- CT4's fairness-definition decision — needs the user, not code investigation (see
-  `spec-composite-metric-and-optimizer-t2.md` CT4 section and ledger §36).
+- **CT4 fairness decision** — `fairShareValue` equalizes absolute remaining demand, not
+  coverage ratio. Fix-now vs. document-and-defer is the user's call. See spec CT4 section
+  and `fairshare-value-correctness-investigation-2026-08-25.md` (on session-tracking).
 
 ## Main refresh + rebase (2026-08-30)
 
