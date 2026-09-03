@@ -228,54 +228,47 @@ explicit instruction that upstream content stays as-is.
 
 ## Open items
 
-- End-to-end test of `/resume-mission` and `/wind-down` — genuinely not done yet (see
-  T4).
+- End-to-end test of `/resume-mission` and `/wind-down` — genuinely not done yet (see T4).
 - Symlink setup for feature worktrees other than `single-analyzer` (see T5).
-- The 59 stale doc-reference paths from the original migration — deliberately deferred
-  to a future ledger-capture run (see `CONVENTIONS.md`'s doc-reference path convention
-  section), not tracked as a task here since it's not this mission's code to fix, it's
-  content ledger-capture will fix incidentally.
+- The 59 stale doc-reference paths from the original migration — deliberately deferred to a
+  future ledger-capture run, not tracked as a task here.
+- Suggestion-box lifecycle convention (processed entries — delete/archive/mark?) — deferred.
+- Copy finished `policy-writer` branch content into `session-tracking` — needs explicit
+  go-ahead from user.
+- Push `session-tracking` to `origin` — blocked on copy step above.
+- `feature-worktree-setup.md` is a good candidate for delegation to a custom-agent (very
+  specific scope, runs at a specific point in time, should not pollute parent context) —
+  noted by user 2026-09-03, not yet acted on.
+- `settings-and-skill-edits.md` marker behavior — origin traced to 2026-08-27 observed
+  harness behavior; user does not recognize it; verify still applies before relying on it.
+- `session-start.md` per-session STATE file redesign: naming convention (`<slug>.STATE.md`),
+  template alignment with `tasks.md`, STATE template in `state-vs-ledger.md` — partially
+  done (session-start.md rewritten 2026-09-03, commit `cfdf0295`); full unification of
+  STATE/ledger/task templates deferred to future pass.
 
 ### T7 — Correct ledger-capture's contract: never touch `CONVENTIONS.md`, use a suggestion box instead
 
-**Status.** PENDING DESIGN — a rule change, not yet drafted into `CONVENTIONS.md` itself
-(that requires its own `policy-writer` drafting cycle; this is only the decision record).
+**Status.** DONE 2026-08-31 (policy-writer-8). Drafted into
+`worktrees/policy-writer/conventions/resume-and-handoff.md` (ledger-capture section):
+explicit prohibition added, suggestion-box mechanism documented, step 1 corrected to list
+only `STATE.md` + plan/spec doc as legitimate write destinations. Commit `f7508d08`
+(policy-writer branch). Not yet copied to `session-tracking`.
 
-**Decision, stated directly by the user (2026-08-28):** ledger-capture (running for any
-mission, including `policy-writer` on its own ledgers) must **never** write to
-`CONVENTIONS.md`. Only `policy-writer` may change `CONVENTIONS.md`, and not while it is
-itself running ledger-capture on its own ledgers. Ledger-capture's only two legitimate
-destinations become `STATE.md` and the mission's own plan/spec doc.
-
-**Mechanism to replace the removed capability:** a `session-tracking/suggestion-box/`
-folder. When ledger-capture finds something in a ledger that looks like it should become
-a rule, incident report, or behavioral directive (previously it would have written this
-straight into `CONVENTIONS.md`), it instead writes **one atomic markdown file per
-individual finding** into `suggestion-box/`, named `YYYY-MM-DD-HHMM-<mission-name>.md`.
-Only `policy-writer` reads `suggestion-box/` and decides whether/how to turn a suggestion
-into an actual `CONVENTIONS.md` rule.
-
-**Lifecycle of a processed suggestion-box file** (what happens to it once `policy-writer`
-acts on it — delete, archive, mark processed, etc.) — **explicitly deferred**, to be
-addressed in a future `policy-writer` planning session, not decided now.
-
-**One-off exception, in force starting 2026-08-28:** this corrected contract (never touch
-`CONVENTIONS.md`; write to `suggestion-box/` instead) is being used immediately for a
-one-time ledger-capture pass across all three currently-active missions
-(`single-analyzer`, `policy-writer`, `repo-restructure`), **without** first updating
-`CONVENTIONS.md`'s own documented ledger-capture section to match — that section still
-describes the old (soon-to-be-wrong) contract until a proper drafting cycle updates it.
-Do not treat `CONVENTIONS.md`'s current text as authoritative over this decision in the
-meantime.
-
-**Refs.** *Writes (once actually drafted into `CONVENTIONS.md`):*
-`../../CONVENTIONS.md`'s "Session log — resuming and handing off a mission" section
-(the `ledger-capture` paragraph specifically). *Creates:* `../../suggestion-box/`.
+Design record (unchanged): ledger-capture must never write to `CONVENTIONS.md`. Only
+`policy-writer` may change `CONVENTIONS.md`. Suggestion-box (`session-tracking/suggestion-box/`)
+is the replacement path for global findings. Lifecycle of processed suggestion-box files
+remains explicitly deferred.
 
 ### T8 — Coder orchestration: worker types and Bob CLI mechanics
 
-**Status.** IN PROGRESS 2026-09-03. `conventions/coder-orchestration.md` rewritten with
-Claude/Bob model (commit `0f64564b`). Further refinements in progress (policy-writer-9).
+**Status.** DONE 2026-09-03 (policy-writer-9). Commits on `policy-writer` branch:
+- `0f64564b` — initial rewrite with Claude FW/BG + Bob CLI model
+- `c9288a40` — refined: worker types → compact table, WVA ref → invocation snippet, rules
+  8/9 rewritten, task template extracted to `conventions/tasks.md`
+
+`conventions/tasks.md` created (new). `spec-policy-writer.md` T8 section added with full
+worker-type rationale and Bob CLI mechanics sourced from WVA legacy repo. Not yet copied to
+`session-tracking`.
 
 #### Worker types — design rationale
 
@@ -380,3 +373,28 @@ Parent prepares the task file and places it in the coder's worktree before launc
 Bob with a short prompt pointing at the task file. Bob reads the task file itself — parent
 does not restate spec content in the prompt. This is why the task file must be complete and
 self-contained before invocation.
+
+### T9 — Reader-focused conventions review pass
+
+**Status.** DONE 2026-09-03 (policy-writer-9). All `conventions/*.md` files reviewed by
+user and processed. Commits on `policy-writer` branch:
+- `e407102b` — wip-editing, state-vs-ledger, push, settings-and-skill-edits,
+  unexplained-files, writing-outside-worktree
+- `bef2d39b` — feature-worktree-setup (LGTM, annotation stripped)
+- `cfdf0295` — session-start.md rewritten with per-session STATE model
+- `5eb61b84` — CONVENTIONS.md index trigger fixes
+
+Key changes:
+- `wip-editing.md` — generalized to any shared file; protocol reduced to 4 steps; plan
+  section simplified to "save to .session/ on exitPlanMode".
+- `state-vs-ledger.md` — trimmed verbose sections; STATE template added.
+- `push.md` — removed named remote, generalized to "non-origin requires extra authorization".
+- `settings-and-skill-edits.md` — origin flagged as observed harness behavior, not a user
+  rule; verify before relying on it.
+- `unexplained-files.md`, `writing-outside-worktree.md` — LGTM, annotations stripped.
+- `feature-worktree-setup.md` — LGTM, annotation stripped; custom-agent candidacy noted.
+- `session-start.md` — rewritten: per-session STATE file model (separate from mission
+  STATE.md), parent prepares before invocation, slug-based discovery for interactive resume,
+  ledger refs STATE + previous ledger.
+
+Not yet copied to `session-tracking`.

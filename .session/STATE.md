@@ -1,8 +1,9 @@
 # Mission state — policy-writer
 
-**Last updated:** 2026-08-31 (policy-writer-8 wind-down). Overwritten on each update, not append-only. Mission tracking
-files live at `worktrees/policy-writer/.session/` (mission branch). For global process rules
-see `worktrees/session-tracking/CONVENTIONS.md`. For the plan see `.session/spec-policy-writer.md`.
+**Last updated:** 2026-09-03 (policy-writer-9). Overwritten on each update, not append-only.
+Mission tracking files live at `worktrees/policy-writer/.session/` (mission branch). For
+global process rules see `worktrees/session-tracking/CONVENTIONS.md`. For the plan see
+`.session/spec-policy-writer.md`.
 
 ## Worktrees used for this mission
 
@@ -19,37 +20,41 @@ skills, and layout that let any mission resume cleanly without reloading full hi
 
 | Task | Status | Notes |
 |---|---|---|
-| Branch/worktree setup — orphan `session-tracking` branch, origin-only, `missions/<name>/` layout | **DONE** | Commit `e65f67ed`. |
-| `.wip` concurrent-edit protocol for `STATE.md`/`CONVENTIONS.md` | **DONE** | Documented. Not yet exercised under real concurrent access. |
-| Session-log format + ledger-capture mechanism | **DONE, validated once** | First real run found and fixed 2 genuine gaps (`2b4927ba`). Renamed from "verifier" to "ledger-capture" (`14ce29d3`). |
-| `/resume-mission` skill | **DONE** | Exercised end-to-end 2026-08-29. Runs cleanly. |
+| Branch/worktree setup | **DONE** | Commit `e65f67ed`. |
+| `.wip` concurrent-edit protocol | **DONE** | Documented. |
+| Session log format + ledger-capture | **DONE, validated once** | Commits `2b4927ba`, `14ce29d3`. |
+| `/resume-mission` skill | **DONE** | Exercised end-to-end 2026-08-29. |
 | `/wind-down` skill | **DONE** | Not yet exercised end-to-end. |
-| Skill discoverability across worktrees (symlink mechanism) | **DONE for `single-analyzer` only** | Other worktrees still need one-time setup. |
-| `pr-review` skill disabled | **DONE** | `skillOverrides: {"pr-review": "off"}` in `~/.claude/settings.json`. |
-| Correction: `.git/info/exclude` is shared across all worktrees | **DONE** | Corrected after direct testing. Also removed the old `**/.session/` blanket exclude (2026-08-31) — `.session/` is now tracked on mission branches. |
-| Own mission tracking | **DONE 2026-08-27** | Retroactive fix per user request. |
-| Audit pass + agentbus feedback fixes | **DONE 2026-08-27** | 6 real ambiguities fixed. See `2026-08-27-conventions-audit-fixes.md`. |
-| Corrected worktree/mission model | **DONE 2026-08-28** | Every mission gets its own branch/worktree. Commits `63ab0d36`, `b918acf0`. |
-| Standing rule: never deviate from an approved plan | **DONE 2026-08-28** | Saved as durable memory. |
-| Ledger-capture contract correction: never touch `CONVENTIONS.md` | **DONE 2026-08-31** | Drafted into `conventions/resume-and-handoff.md` (ledger-capture section). Commit `policy-writer-8`. |
-| Split `CONVENTIONS.md` into core + `conventions/*.md` | **DONE 2026-08-30 (Phase 1)** | Commit `eb5f5027`. 7 new files. Content moved verbatim. |
-| Trim conventions files to what/how only | **DONE 2026-08-30 (Phase 2)** | Commit `6e99db7f`. `.bak` files retained for comparison. Phase 2 approved (checkpointed); `.bak` files not yet removed — ask on next resume. |
-| PR rules | **DONE 2026-08-31** | `conventions/pr-workflow.md` (3 rules) + `conventions/pr-branch.md` (PR branch lifecycle). Commits `c52c22d1`, `078648d4`. |
-| Mission file handling redesign — `.session/` in mission branch | **DONE 2026-08-31** | Full redesign: tracking files move to `.session/` on mission branch; `session-tracking/missions/` becomes symlinks only; agentbus ownership declaration/release; mission owners create symlinks, policy-writer commits. Conventions + skills updated. `policy-writer` itself migrated. Commits `078648d4`–`66d72cf2` (policy-writer), `db11bb23`–`a364a120` + `c50d8b1a` (session-tracking). |
-| Reader-focused conventions refinement | **IN PROGRESS** | User reviewed `CONVENTIONS.md`; core rewrite and four new situational files drafted. `coder-orchestration.md` rewritten 2026-09-03 with Claude/Bob worker model (commit `0f64564b`). Remaining situational files not yet reviewed. |
+| Skill discoverability across worktrees | **DONE for `single-analyzer` only** | Others self-heal on first `/resume-mission` use. |
+| `pr-review` skill disabled | **DONE** | `skillOverrides: {"pr-review": "off"}`. |
+| Own mission tracking | **DONE 2026-08-27** | |
+| Audit pass + agentbus feedback fixes | **DONE 2026-08-27** | 6 ambiguities fixed. |
+| Corrected worktree/mission model | **DONE 2026-08-28** | Commits `63ab0d36`, `b918acf0`. |
+| Standing rule: never deviate from approved plan | **DONE 2026-08-28** | Saved as durable memory. |
+| Ledger-capture contract correction | **DONE 2026-08-31** | Commit `f7508d08`. |
+| Split `CONVENTIONS.md` into core + `conventions/*.md` | **DONE 2026-08-30** | Commits `eb5f5027`, `6e99db7f`. |
+| PR rules | **DONE 2026-08-31** | Commits `c52c22d1`, `078648d4`. |
+| Mission file handling redesign — `.session/` in mission branch | **DONE 2026-08-31** | Multiple commits. |
+| Coder orchestration — Claude/Bob worker model (T8) | **DONE 2026-09-03** | Commits `0f64564b`, `c9288a40`. New: `conventions/tasks.md`, spec T8 section. |
+| Reader-focused conventions review pass (T9) | **DONE 2026-09-03** | Commits `e407102b`–`5eb61b84`. All `conventions/*.md` reviewed and processed. |
 
 ## Immediate next step
 
-- Continue incorporating the user's reviews of each conventions file; do not finalize or copy to `session-tracking` until that review pass is complete.
-- Keep `.bak` files for now (user decision 2026-08-31).
-- Process suggestion-box lifecycle convention (what happens to processed entries — rename? archive? delete?) — currently using `processed-` prefix as interim.
-- Set up skill symlinks in other existing mission worktrees (`benchmark-*`, etc.).
-- Copy finished `policy-writer` branch content into `session-tracking` (still needs explicit go-ahead).
-- Push `session-tracking` to `origin` (50+ commits ahead).
+- Copy finished `policy-writer` branch content into `session-tracking` — needs explicit
+  go-ahead from user.
+- Push `session-tracking` to `origin` — blocked on copy step above.
+- Suggestion-box lifecycle convention — currently using `processed-` prefix, formal
+  lifecycle deferred.
+- Verify `settings-and-skill-edits.md` marker behavior still applies (origin is 2026-08-27
+  observed harness behavior; user does not recognize the rule).
+- Full STATE/ledger/task template unification deferred to future pass.
+- `.bak` files: keep for now (user decision 2026-08-31).
 
 ## Open questions
 
-- Final shape of the remaining situational files after the user's ongoing review.
+- `settings-and-skill-edits.md`: is the `user-approved-settings-change` marker requirement
+  still a real harness constraint?
+- `feature-worktree-setup.md`: candidate for custom-agent delegation — when to act on this?
 
 ## Session log
 
