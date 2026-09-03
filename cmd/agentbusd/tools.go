@@ -218,15 +218,15 @@ func statusHandler(js jetstream.JetStream, busID string) mcp.ToolHandlerFor[stat
 		// Optional session detail.
 		if args.SessionID != "" {
 			subs, _ := bus.ReadSubs(busID, args.SessionID)
-				cursors := make(map[string]uint64)
-				for _, topic := range subs.Topics {
-					cursors[topic] = readCursorUint(busID, args.SessionID, topic)
-				}
-				result.Session = &sessionStatus{
-					SessionID:     args.SessionID,
-					Subscriptions: subs.Topics,
-					Cursors:       cursors,
-				}
+			cursors := make(map[string]uint64)
+			for _, topic := range subs.Topics {
+				cursors[topic] = readCursorUint(busID, args.SessionID, topic)
+			}
+			result.Session = &sessionStatus{
+				SessionID:     args.SessionID,
+				Subscriptions: subs.Topics,
+				Cursors:       cursors,
+			}
 		}
 
 		return nil, result, nil
@@ -360,7 +360,10 @@ func askUserReask(ctx context.Context, js jetstream.JetStream, busID string, arg
 		return nil, askUserResult{}, err
 	}
 
-	return waitForReply(waitCtx, replyChan)
+	result, res, err := waitForReply(waitCtx, replyChan)
+	// Clean up the async filtered subscription now that we have blocked for the reply.
+	_ = bus.RemoveFilter(busID, args.FromSession, "user.out")
+	return result, res, err
 }
 
 // listenForReply creates an ordered consumer on user.out that surfaces only
@@ -413,7 +416,10 @@ func publishQuestion(ctx context.Context, js jetstream.JetStream, busID, fromSes
 func waitForReply(ctx context.Context, replyChan <-chan schema.Message) (*mcp.CallToolResult, askUserResult, error) {
 	select {
 	case <-ctx.Done():
-		return nil, askUserResult{TimedOut: true, Reply: "Timed out waiting for user reply."}, nil
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, askUserResult{TimedOut: true, Reply: "Timed out waiting for user reply."}, nil
+		}
+		return nil, askUserResult{}, ctx.Err()
 	case reply := <-replyChan:
 		return nil, askUserResult{Reply: reply.Body, Seq: reply.Seq, From: &reply.From}, nil
 	}

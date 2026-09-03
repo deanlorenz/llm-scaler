@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -73,10 +74,10 @@ func main() {
 		}
 
 		msgs, lastSeq, err := fetchNew(busID, topic, cursorSeq)
-		// Always advance cursor to markerSeq to avoid infinite re-fetch,
-		// even if no messages passed the filter.
 		if err != nil {
-			writeCursor(busID, input.SessionID, topic, markerSeq)
+			// Don't advance cursor on fetch error — messages may still be
+			// retrievable on the next turn. The marker remains ahead of the
+			// cursor so the hook retries next turn.
 			continue
 		}
 
@@ -145,10 +146,18 @@ func readCursor(busID, sessionID, topic string) uint64 {
 
 func writeCursor(busID, sessionID, topic string, seq uint64) {
 	path := bus.CursorPath(busID, sessionID, topic)
-	os.MkdirAll(filepath.Dir(path), 0o755)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		log.Printf("hook: writeCursor mkdir %s: %v", path, err)
+		return
+	}
 	tmp := path + ".tmp"
-	os.WriteFile(tmp, []byte(strconv.FormatUint(seq, 10)), 0o644)
-	os.Rename(tmp, path)
+	if err := os.WriteFile(tmp, []byte(strconv.FormatUint(seq, 10)), 0o644); err != nil {
+		log.Printf("hook: writeCursor write %s: %v", tmp, err)
+		return
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		log.Printf("hook: writeCursor rename %s: %v", path, err)
+	}
 }
 
 func fetchNew(busID, topic string, sinceSeq uint64) ([]schema.Message, uint64, error) {

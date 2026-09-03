@@ -229,7 +229,9 @@ func main() {
 		log.Fatalf("ensure streams: %v", err)
 	}
 
-	_ = bus.Subscribe(busID, *sessionID, *inTopic)
+	if err := bus.Subscribe(busID, *sessionID, *inTopic); err != nil {
+		log.Fatalf("subscribe to %s: %v", *inTopic, err)
+	}
 
 	idleTitle := fmt.Sprintf("agentbus-dialogue [%s]", busID)
 	setTerminalTitle(idleTitle)
