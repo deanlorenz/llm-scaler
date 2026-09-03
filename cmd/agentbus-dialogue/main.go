@@ -169,13 +169,26 @@ func mustOpen(path string) *os.File {
 	return f
 }
 
-// readUserReply reads one line using readline (arrow keys, backspace work).
+// readUserReply reads input using readline (arrow keys, backspace work).
+// Trailing \ continues to the next line; plain Enter submits.
 func readUserReply(rl *readline.Instance) string {
-	line, err := rl.Readline()
-	if err != nil {
-		return "(no response)"
+	rl.SetPrompt("\033[1;32mYour reply > \033[0m")
+	var lines []string
+	for {
+		line, err := rl.Readline()
+		if err != nil {
+			break
+		}
+		if strings.HasSuffix(line, "\\") {
+			lines = append(lines, strings.TrimSuffix(line, "\\"))
+			rl.SetPrompt("\033[90m... > \033[0m")
+			continue
+		}
+		lines = append(lines, line)
+		break
 	}
-	reply := strings.TrimSpace(line)
+	rl.SetPrompt("\033[1;32mYour reply > \033[0m")
+	reply := strings.TrimSpace(strings.Join(lines, "\n"))
 	if reply == "" {
 		return "(no response)"
 	}
