@@ -13,8 +13,11 @@ import (
 )
 
 func main() {
-	if len(os.Args) != 2 {
-		fmt.Fprintf(os.Stderr, "usage: agentbus-setup <bus_id>\n")
+	if len(os.Args) != 2 || os.Args[1] == "--help" || os.Args[1] == "-h" {
+		fmt.Fprintf(os.Stderr, "usage: agentbus-setup <bus_id>\n\nRegisters the current directory as a project root in ~/.agentbus/repos.json.\nRun once per project from the repo root.\n")
+		if len(os.Args) == 2 && (os.Args[1] == "--help" || os.Args[1] == "-h") {
+			os.Exit(0)
+		}
 		os.Exit(1)
 	}
 	busID := os.Args[1]
