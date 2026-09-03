@@ -235,6 +235,8 @@ arrived yet.
    the user sees it again; gets new seq M.
 3. Blocks on `user.out` for `receiver == from_session` until a reply arrives
    or timeout elapses.
+4. On completion (reply or timeout), removes the `user.out` receiver filter
+   from the session's subscription file — the async subscription is cleaned up.
 Returns: `{reply: string, seq: uint64, from: {...}, timed_out: bool}`
 
 If `previous_seq` is provided together with `async=true`, that is an error.
@@ -275,10 +277,11 @@ Registered once in `~/.claude/settings.json`. Fires on every model turn.
    - `~/.agentbus/markers/<bus_id>/<session_id>/<topic>.marker` (relay wrote)
    - `~/.agentbus/cursors/<bus_id>/<session_id>/<topic>.cursor` (hook wrote)
 5. If marker seq > cursor seq: connects to NATS, calls `bus.FetchSince`,
-   collects new messages
+   collects new messages. On fetch error, cursor is **not** advanced —
+   the hook retries on the next turn.
 6. Applies per-topic filter if present: for `user.out`, only surface messages
-   where `receiver == filters["user.out"].receiver`. Cursor is **always
-   advanced** past filtered-out messages (prevents infinite re-fetch).
+   where `receiver == filters["user.out"].receiver`. Cursor is advanced past
+   filtered-out messages (they will never be relevant to this session).
 7. If any messages pass filters: emits `hookSpecificOutput.additionalContext`
    to stdout, updates cursor files
 8. If nothing new or all filtered out: exits 0 with no output (~1ms)
