@@ -34,8 +34,8 @@ Read the matching file when its situation occurs, not speculatively:
 
 - `conventions/session-start.md` — **every session reads this first, before any work**
 - `conventions/mission-owner.md` — assuming or acting in the mission-owner role
-- `conventions/state-vs-ledger.md` — maintaining mission state or a session ledger, or deciding
-  where information belongs
+- `conventions/state-vs-ledger.md` — creating initial state or ledger files, or unsure which
+  one a piece of information belongs in
 - `conventions/resume-and-handoff.md` — resuming, taking over, handing off, or explicitly
   winding down a mission
 - `conventions/writing-outside-worktree.md` — a write outside the mission worktree is required
