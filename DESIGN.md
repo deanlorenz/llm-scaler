@@ -197,10 +197,47 @@ prompt          string   — question / prompt text for the user
 from_session    string   — caller's session slug/id
 timeout_seconds int?     — max seconds to wait for user reply (default 300)
 refs            []string? — repo-root-relative doc paths
+async           bool?    — if true, return immediately after publishing (default false)
+previous_seq    uint64?  — re-ask / wait: seq of a previous async question
 ```
-Publishes message with `kind: "question"` to `user.in`, obtains assigned `seq`,
-and synchronously waits for a reply message on `user.out` where `reply_to == seq`.
+
+#### Sync mode (default, `async=false`, no `previous_seq`)
+Publishes `kind="question"` to `user.in`, blocks on `user.out` until a reply
+with `reply_to == questionSeq` arrives or timeout elapses.
 Returns: `{reply: string, seq: uint64, from: {...}, timed_out: bool}`
+
+#### Async mode (`async=true`)
+Publishes `kind="question"` to `user.in`, registers a **filtered subscription**
+on `user.out` for this session (filter: `receiver == from_session`), and returns
+immediately.
+Returns: `{seq: uint64}`
+
+The PostToolBatch hook will surface the reply automatically when it arrives —
+just like any normal subscription, but pre-filtered so only replies addressed
+to this session's ID are shown.
+
+**Multiple async asks are allowed** — all replies carry `receiver == from_session`
+so the filter resolves them all correctly.
+
+`agentbus-dialogue` sets `receiver = msg.From.Session` on every reply it posts
+to `user.out`, so the addressing is automatic.
+
+**Note on session identity:** `from_session` is caller-chosen. If two sessions
+share the same ID (e.g. a restarted session resuming a role), both receive
+replies addressed to that ID. This is intentional — it supports role-based
+addressing and session hand-off.
+
+#### Re-ask / wait mode (`previous_seq=N`)
+Used to block on a previously async question, or re-ask it if no reply has
+arrived yet.
+1. Fetches the original question body from the stream by seq N.
+2. Re-publishes the original body to `user.in` with a `[reminder]` prefix so
+   the user sees it again; gets new seq M.
+3. Blocks on `user.out` for `receiver == from_session` until a reply arrives
+   or timeout elapses.
+Returns: `{reply: string, seq: uint64, from: {...}, timed_out: bool}`
+
+If `previous_seq` is provided together with `async=true`, that is an error.
 
 ---
 
@@ -233,15 +270,18 @@ Registered once in `~/.claude/settings.json`. Fires on every model turn.
 
 1. Reads `session_id` and `cwd` from stdin JSON
 2. Resolves bus_id from `cwd` via `~/.agentbus/repos.json`
-3. Reads `~/.agentbus/subs/<bus_id>/<session_id>.json` — list of topics
+3. Reads `~/.agentbus/subs/<bus_id>/<session_id>.json` — topics list + filters
 4. For each topic, compares:
    - `~/.agentbus/markers/<bus_id>/<session_id>/<topic>.marker` (relay wrote)
    - `~/.agentbus/cursors/<bus_id>/<session_id>/<topic>.cursor` (hook wrote)
 5. If marker seq > cursor seq: connects to NATS, calls `bus.FetchSince`,
    collects new messages
-6. If any new messages: emits `hookSpecificOutput.additionalContext` to stdout,
-   updates cursor files
-7. If nothing new: exits 0 with no output (the common case, ~1ms)
+6. Applies per-topic filter if present: for `user.out`, only surface messages
+   where `receiver == filters["user.out"].receiver`. Cursor is **always
+   advanced** past filtered-out messages (prevents infinite re-fetch).
+7. If any messages pass filters: emits `hookSpecificOutput.additionalContext`
+   to stdout, updates cursor files
+8. If nothing new or all filtered out: exits 0 with no output (~1ms)
 
 All files are under `~/.agentbus/` — no worktree dependency, sandbox-safe.
 
@@ -253,10 +293,24 @@ All files are under `~/.agentbus/` — no worktree dependency, sandbox-safe.
 ~/.agentbus/
   repos.json                                         project-root → bus_id map
   nats/                                              JetStream storage (nats-server -sd)
-  subs/<bus_id>/<session_id>.json                   subscribed topics list
+  subs/<bus_id>/<session_id>.json                   subscribed topics + filters
   markers/<bus_id>/<session_id>/<topic>.marker      relay writes on new message
   cursors/<bus_id>/<session_id>/<topic>.cursor      hook writes after fetch
 ```
+
+Subscription file format (v2 — filters added):
+```json
+{
+  "topics": ["user.in", "user.out"],
+  "filters": {
+    "user.out": { "receiver": "llmd-scaler.planner" }
+  }
+}
+```
+`filters` is optional. A topic in `topics` with no entry in `filters` has no
+filter applied (all messages surfaced). The `receiver` filter is set once on
+first `async=true` call and stays for the session lifetime (or until the session
+unsubscribes from `user.out`).
 
 Topic names in filenames have `/` replaced with `_` to avoid path issues.
 
@@ -272,6 +326,7 @@ Topic names in filenames have `/` replaced with `_` to avoid path issues.
 | `agentbus-hook` | PostToolBatch hook | subprocess per turn |
 | `agentbus-setup` | one-time project init | CLI, run once |
 | `agentbus-dialogue` | human CLI dialogue | interactive terminal pane |
+| `agentbus-pub` | one-shot publish CLI | manual testing / shell scripts |
 
 ---
 
