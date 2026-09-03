@@ -2,6 +2,10 @@
 
 Read this before editing `~/.claude/settings.json` or any `SKILL.md`.
 
+**Origin:** observed Claude Code harness behavior, first encountered 2026-08-27 while editing
+`~/.claude/settings.json`. Not a user-defined rule. Verify it still applies before relying on
+it — harness behavior may have changed.
+
 Every single edit (not just the first) requires the literal marker text
 `user-approved-settings-change` to be physically present somewhere in the *new* content of that
 specific edit, or the edit is blocked outright — even a pure-removal edit. A naive "add the

@@ -1,5 +1,6 @@
 # Finding something unexplained in a shared worktree
 
+
 Read this when you find something on disk you didn't put there and can't immediately explain
 — an untracked file, a skill with a claim in it you don't recognize, an edit you didn't make.
 

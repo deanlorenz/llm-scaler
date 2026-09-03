@@ -1,5 +1,6 @@
 # Writing outside the mission worktree
 
+
 Read this only when a write outside the session's mission worktree is required or a pinned
 session encounters the worktree isolation guard.
 

@@ -16,8 +16,10 @@ any differs from what the user authorized, stop and ask again.
 1. Confirm you are operating in your own mission worktree. Never push a different worktree
    without warning the user and receiving explicit authorization naming that worktree.
 2. Run `git status --short --branch` and inspect the commits that would be sent.
-3. Run `git remote -v`. Push only to `origin`; `upstream`, `ofer`, and other remotes are not
-   authorized destinations unless the user explicitly names one for this operation.
+3. Run `git remote -v`. Push only to `origin`. Any other remote requires explicit
+   authorization naming that remote — not inferred from general mission ownership or a prior
+   push. PR branch pushes require extra care regardless of remote: show what commits will be
+   added or changed and receive explicit approval before pushing.
 4. Confirm the destination branch is exactly the authorized branch.
 5. Run applicable tests, lint, DCO, and project pre-push checks.
 6. If this is a PR branch, verify `.session/` is absent and follow

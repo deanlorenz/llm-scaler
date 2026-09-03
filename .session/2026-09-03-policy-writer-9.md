@@ -180,3 +180,73 @@ D. Create conventions/tasks.md with task spec field set + continuation sub-case.
 E. Commit.
 
 Deferred: session-start.md rework; remaining situational file reviews.
+
+## Completed this session — commit c9288a40
+
+- spec-policy-writer.md: T8 section added (worker types rationale + Bob CLI mechanics from WVA)
+- conventions/coder-orchestration.md: worker types → compact table; WVA ref → invocation
+  snippet; rules 8 and 9 rewritten; task template removed, replaced with ref to tasks.md
+- conventions/tasks.md: new file — task spec template, field rules, continuation block
+- CONVENTIONS.md: tasks.md added to index
+
+## User reviews of remaining conventions files (2026-09-03)
+
+### wip-editing.md
+User: "no longer applies as written. No session edits CONVENTIONS except policy-writer who owns
+it and does not use this protocol. Mission owners edit STATE and LEDGER locally — no conflict
+expected. The protocol applies whenever editing a shared file, not scoped to CONVENTIONS or
+STATE. All the specific mentions of roles and files are not relevant. The rules apply for ANY
+shared file editing. Not sure we have a specific list of shared files. The protocol must be
+much much shorter — just the steps: a) rename b) edit c) rename d) commit."
+"When a plan is approved" section: "seems out of place and a bit stale. Rule is simple — any
+session in plan mode must save the plan on exitPlanMode, after review. These are session plans
+(Claude or Bob plans), not necessarily private .session/plan or public doc/plan. Still, we
+should persist these in .session and track. Can later consolidate decisions into the right
+longer-term document."
+Decision: rewrite wip-editing.md — generalize to "shared file editing" (no specific mentions
+of CONVENTIONS/STATE/roles); reduce the protocol to a-b-c-d steps only; rewrite the plan
+section to "on exitPlanMode, save the plan to .session/ immediately".
+
+### state-vs-ledger.md
+User: "seems a bit stale. Already stated in several other docs. Most of the text is too verbose
+and belongs in the design doc. The important text is at the start — several sessions failed to
+understand what to write in state and what to write in ledger. Should keep the explanation —
+maybe move a shorter version into CONVENTIONS, since every session needs to keep a ledger and
+a state doc. Most sessions still don't keep a ledger now. Could help to read this when creating
+the initial ledger and state files. Should define a template for STATE (look at existing STATE
+files for common patterns). Bob/Claude may read files named STATE on session start, so basic
+orientation info belongs in STATE (mission, read CONVENTIONS, worktree)."
+Decision: trim the verbose "Where these files live" and "The live ledger" sections — that
+content is already in resume-and-handoff.md and state-vs-ledger.md itself repeats it. Keep the
+opening three bullet points (the actual state-vs-ledger rule). Add a minimal STATE template
+(mission, role, worktree, read CONVENTIONS). Note STATE template alignment with tasks.md is
+deferred.
+
+### feature-worktree-setup.md
+User: "good enough for now. Good candidate for a custom-agent — very specific scope, runs at a
+very specific point in time. Should not pollute the parent's context."
+Decision: no content changes. Record the custom-agent candidacy note in spec. Add CONVENTIONS
+index trigger note that this is a candidate for delegation to a setup agent.
+
+### settings-and-skill-edits.md
+User: "I never made this rule. Where did it come from?"
+Decision: this rule describes a real harness-level behavior (the marker requirement) observed
+in practice — it was documented in policy-writer-7 or earlier after real incidents. Source
+needs to be traced before any change. Do not delete. Flag as "origin unknown — needs tracing"
+and record in ledger. Ask user how to proceed.
+
+### unexplained-files.md
+User: "LGTM. Written following real incidents. Good rule."
+Decision: no changes needed.
+
+### writing-outside-worktree.md
+User: "LGTM for now. Need to understand where this is actually needed."
+Decision: no content changes. The "where is this actually needed" question is a usage
+inventory — deferred, not a content change.
+
+### push.md
+User: rule 3 review: "no need to mention Ofer specifically. EVERYTHING needs authorization.
+ANYTHING that is not origin requires extra care and extra validation. Push to PR branches
+requires extra care and extra validation."
+Decision: rewrite rule 3 to remove "ofer" and state the general principle: non-origin remotes
+require extra explicit authorization; PR branch pushes require extra care regardless of remote.
