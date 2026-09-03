@@ -143,7 +143,18 @@ func renderSimpleMarkdown(body string) string {
 	return strings.Join(out, "\n")
 }
 
-// readUserReply reads user input using standard scanner.
+// openTTY opens /dev/tty for reading, which gives a persistent interactive
+// stream regardless of how the process's stdin was connected. Falls back to
+// os.Stdin if /dev/tty is unavailable (e.g. non-Unix environments).
+func openTTY() *os.File {
+	f, err := os.Open("/dev/tty")
+	if err != nil {
+		return os.Stdin
+	}
+	return f
+}
+
+// readUserReply reads user input from the given scanner.
 // Single-line submissions: Enter immediately.
 // Multi-line submissions: Trailing backslash '\' continues onto next line.
 func readUserReply(scanner *bufio.Scanner) string {
@@ -247,7 +258,11 @@ func main() {
 	}
 	defer cc.Stop()
 
-	scanner := bufio.NewScanner(os.Stdin)
+	tty := openTTY()
+	if tty != os.Stdin {
+		defer tty.Close()
+	}
+	scanner := bufio.NewScanner(tty)
 
 	for {
 		select {
