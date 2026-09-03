@@ -45,7 +45,9 @@ Read the matching file when its situation occurs, not speculatively:
   directs you there because required local setup is missing
 - `conventions/wip-editing.md` — editing `STATE.md` or `CONVENTIONS.md`, or persisting a newly
   approved plan
-- `conventions/coder-orchestration.md` — dispatching or running a coder subagent
+- `conventions/tasks.md` — defining a task for any worker, or receiving a task and verifying
+  it is complete enough to start
+- `conventions/coder-orchestration.md` — dispatching or running a coder agent
 - `conventions/settings-and-skill-edits.md` — editing `~/.claude/settings.json` or a `SKILL.md`
 - `conventions/unexplained-files.md` — finding an unexplained file or edit
 - `conventions/push.md` — considering any git push, after receiving explicit authorization for

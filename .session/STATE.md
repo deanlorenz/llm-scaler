@@ -36,7 +36,7 @@ skills, and layout that let any mission resume cleanly without reloading full hi
 | Trim conventions files to what/how only | **DONE 2026-08-30 (Phase 2)** | Commit `6e99db7f`. `.bak` files retained for comparison. Phase 2 approved (checkpointed); `.bak` files not yet removed — ask on next resume. |
 | PR rules | **DONE 2026-08-31** | `conventions/pr-workflow.md` (3 rules) + `conventions/pr-branch.md` (PR branch lifecycle). Commits `c52c22d1`, `078648d4`. |
 | Mission file handling redesign — `.session/` in mission branch | **DONE 2026-08-31** | Full redesign: tracking files move to `.session/` on mission branch; `session-tracking/missions/` becomes symlinks only; agentbus ownership declaration/release; mission owners create symlinks, policy-writer commits. Conventions + skills updated. `policy-writer` itself migrated. Commits `078648d4`–`66d72cf2` (policy-writer), `db11bb23`–`a364a120` + `c50d8b1a` (session-tracking). |
-| Reader-focused conventions refinement | **IN PROGRESS 2026-08-31** | User reviewed `CONVENTIONS.md`; core rewrite and four new situational files drafted. Review paused at `conventions/coder-orchestration.md`; its runtime/subtask model remains unresolved and must not be encoded yet. |
+| Reader-focused conventions refinement | **IN PROGRESS** | User reviewed `CONVENTIONS.md`; core rewrite and four new situational files drafted. `coder-orchestration.md` rewritten 2026-09-03 with Claude/Bob worker model (commit `0f64564b`). Remaining situational files not yet reviewed. |
 
 ## Immediate next step
 
@@ -57,3 +57,4 @@ skills, and layout that let any mission resume cleanly without reloading full hi
 - 2026-08-30 session=2026-08-30-conventions-split-and-trim status=retired ledger=.session/2026-08-30-conventions-split-and-trim.md
 - 2026-08-31 session=2026-08-31-policy-writer-7 status=retired ledger=.session/2026-08-31-policy-writer-7.md
 - 2026-08-31 session=2026-08-31-policy-writer-8 status=retired ledger=.session/2026-08-31-policy-writer-8.md
+- 2026-09-03 session=2026-09-03-policy-writer-9 status=active ledger=.session/2026-09-03-policy-writer-9.md

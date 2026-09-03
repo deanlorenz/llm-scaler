@@ -4,29 +4,27 @@ Read this before dispatching or running a coder agent.
 
 ## Worker types
 
-Three worker types are available. Choose based on the task's scope and interaction needs.
+| Type | When to use |
+|---|---|
+| **Claude FW** (foreground subtask) | Task needs real-time steering or direct user visibility. Interactive; own context window. |
+| **Claude BG** (background subagent) | Self-contained task; only the result matters. Silent; attach to interact mid-task if needed. |
+| **Bob CLI coder** | Persistent context across multiple invocations needed, or Bob-specific mode required. Launched as a background OS process; communicates via agentbus. |
 
-**Claude custom-agent (FW — foreground/subtask).** A visible, interactive subtask with its own
-conversation and breadcrumb. Use when the task benefits from real-time review or the user may
-want to interact with it directly. Has its own context window; does not share the parent's.
+For design rationale and when each type is the right choice, see
+`worktrees/policy-writer/.session/spec-policy-writer.md` § T8.
 
-**Claude custom-agent (BG — background subagent).** Silent; returns a summary to the parent
-when done. Its chat cannot be opened directly, but Claude supports attaching to a BG agent to
-work interactively — note this option when a BG agent needs mid-task guidance. Use when the
-task is clearly self-contained and results can be summarized back.
+**To launch a Bob CLI coder,** prepare the coder's worktree and task file, then:
 
-**Bob CLI coder.** A Bob CLI session launched as a background OS process (`nohup bob run ...
-&`). Stays alive across turns. Communicates with the parent via agentbus while running —
-this is the primary interaction channel (works reliably, unlike `SendMessage` which has
-timing constraints). Use for coding tasks that benefit from a persistent session context or
-when a Bob-specific mode is needed.
+```bash
+nohup bob run --accept-license --workspace <worktree-path> --mode <mode> \
+  --resume <task-id> -f stream-json "$PROMPT" \
+  > <logfile> 2>&1 &
+```
 
-> Bob CLI launch mechanics: see the old WVA repo under `plans-tooling/conventions/bob-delegation.md`
-> and `plans-tooling/planning/atomic-step-protocol-design-v2.md`. Record the `--resume <task-id>`
-> in the task file immediately — losing it means the next task starts cold.
+Record `--resume <task-id>` in the task file before launch. Losing it means the next
+invocation starts cold with no prior context.
 
-Bob support is added later for other worker roles (reviewer, researcher). For now, Bob is
-used as a background coder only.
+Bob is used as a background coder only for now; reviewer and researcher roles are deferred.
 
 ## Rules
 
@@ -55,12 +53,16 @@ used as a background coder only.
    - A BG agent can be attached to for interactive work when mid-task guidance is needed.
    - Bob CLI coders communicate via agentbus. The mission owner monitors the agentbus channel
      for that coder's task; the coder posts status, findings, and questions there.
-8. **Reviewer isolation:** the reviewer for a task runs against the same coder worktree — not a
-   third worktree, not the mission owner's open one. A narrowly scoped PR-preparation agent
-   (rebase, lint, DCO, test) needs no reviewer, no state file, no ledger — it reports directly
-   to the parent.
-9. The mission owner reviews each task's diff itself before starting the next task — not
-   delegated to the coder, not skipped.
+8. **Code reviewer:** the reviewer reads commits from the coder's branch as they land — it
+   does not wait for all coding to finish. If the coder diverges from the task the reviewer
+   notifies the mission owner immediately. Review output goes to a file in the mission owner's
+   `.session/`, not the coder's worktree. The reviewer reads from the coder's worktree and
+   branch but is not isolated to it — the mission owner decides where it runs. A narrowly
+   scoped PR-preparation agent (rebase, lint, DCO, test) needs no reviewer, no state file, no
+   ledger — it reports directly to the parent.
+9. Before starting the next task, the mission owner verifies the current task's completion
+   state: was it reviewed, does it meet the done criteria, are there gaps, is it committed.
+   The mission owner does not re-run tests or re-diff code — that is the reviewer's job.
 10. The mission owner integrates approved work into the mission branch (cherry-pick or
     equivalent). The mission branch is the single source of truth. Never merge a coder worktree
     directly without review.
@@ -73,43 +75,11 @@ used as a background coder only.
     per-operation authorization from the user — not a standing permission, not inferred from an
     earlier approval.
 
-## Task file template
+## Task file
 
 Every task gets a written task file before the worker starts. For Claude workers this is the
-input to the agent invocation. For Bob CLI workers it lives in the prepared worktree (e.g.
-`.session/task-<id>.md`) and is named in the launch command.
+input to the agent invocation. For Bob CLI workers it lives in the prepared worktree
+(e.g. `.session/task-<id>.md`) and is named in the launch command.
 
-```markdown
-### <Task ID> — <short name>
-
-**What / goal.** One or two sentences: what the task produces and why it exists.
-
-**Where / context.**
-- Worktree: `worktrees/<name>` (branch `<branch>`)
-- Plan doc: `<path>`
-- Key files in scope: `<file>`, `<file>`, ...
-
-**Done / completion criteria.** Checkable claims — not "do the work" but "X exists, verified
-by Y." List the tests, lint checks, or other validations that must pass.
-
-**Limits / do not change.**
-- List files, directories, or behaviors that are out of scope.
-- List any standing rules the coder must not override.
-
-**Subtasks.**
-- [ ] Sub-item, smallest unit worth its own status
-- [ ] Sub-item
-
-**Refs.**
-- *Reads:* `<doc>`, `<doc>`
-- *Writes:* `<file>`, `<ledger>`
-
-**Status.** `NOT STARTED` | `IN PROGRESS — <what's left>` | `DONE <date>` | `BLOCKED on <thing>`
-```
-
-Rules for applying it:
-- Every field is required. If a field is missing when a task arrives from the user, ask before
-  starting.
-- Status is updated in place; completion notes accumulate and are not overwritten.
-- A task with sub-tasks: one outer section in this shape, each sub-task nested in the same
-  shape; the outer Subtasks list links down to the nested sections.
+The task file format and field rules are defined in `conventions/tasks.md`. The mission owner
+is responsible for preparing a complete task file before invoking any worker.

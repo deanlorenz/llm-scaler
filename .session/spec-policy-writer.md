@@ -271,3 +271,112 @@ meantime.
 **Refs.** *Writes (once actually drafted into `CONVENTIONS.md`):*
 `../../CONVENTIONS.md`'s "Session log — resuming and handing off a mission" section
 (the `ledger-capture` paragraph specifically). *Creates:* `../../suggestion-box/`.
+
+### T8 — Coder orchestration: worker types and Bob CLI mechanics
+
+**Status.** IN PROGRESS 2026-09-03. `conventions/coder-orchestration.md` rewritten with
+Claude/Bob model (commit `0f64564b`). Further refinements in progress (policy-writer-9).
+
+#### Worker types — design rationale
+
+Three worker types are available. The rule file (`conventions/coder-orchestration.md`) carries
+only the compact reference (what each type is, when to use it). The rationale is here.
+
+**Why three types, not one:**
+- Claude FW (foreground/subtask) and BG (background subagent) differ in interactivity and
+  context visibility — not in capability. FW is the right choice when the user or mission
+  owner needs to observe or redirect mid-task. BG is the right choice when the task is
+  genuinely self-contained and only the result matters.
+- Bob CLI is a third category entirely: a separate OS process, not a Claude subagent at all.
+  It is the right choice when persistent session context across multiple invocations is
+  needed, or when a Bob-specific custom mode is wanted. A Bob session accumulates context
+  incrementally across resumed invocations; a Claude BG subagent starts fresh each time.
+- The agentbus interaction channel is what makes Bob CLI viable as a background worker
+  alongside Claude sessions: it removes the dependency on `SendMessage` timing constraints
+  and gives a reliable, persistent channel for status, questions, and findings.
+
+**Claude FW (foreground/subtask):**
+- Implemented as Claude's native subtask mechanism (`start_subtask`).
+- Visible in the UI; has its own conversation breadcrumb; user can interact with it directly.
+- Own context window; does not share the parent's context.
+- Use when: real-time review is needed, task may need mid-course steering, or user wants
+  direct visibility.
+
+**Claude BG (background subagent):**
+- Implemented as Claude's native background subagent (`spawn_subagent`).
+- Silent during execution; returns a summary to the parent when done.
+- Claude supports attaching to a BG agent to work interactively — this is an option when a
+  running BG agent needs mid-task guidance without restarting as a subtask.
+- Use when: task is clearly self-contained, only the result matters, no mid-course steering
+  expected.
+
+**Bob CLI coder:**
+- IBM's Bob Shell, invoked as its own OS process — not a Claude subagent, not spawned via the
+  Agent tool.
+- Runs headless via `bob run`; interactive via `bob chat`.
+- Persistent context via `--resume <task-id>`: `bob run` is one-shot per invocation (process
+  exits after each task), but `--resume <task-id>` reopens the same conversation with full
+  prior context. "Persistent" means persistent context across resumed invocations, not a
+  continuously-running OS process.
+- Primary interaction channel while running: agentbus (reliable; `SendMessage` has timing
+  constraints that make it unsuitable as the sole channel).
+- Use when: persistent session context is valuable (e.g. a multi-task coding sequence where
+  re-reading conventions cold each time is wasteful), or a Bob-specific custom mode is needed.
+
+**Scope for now:** Bob is used as a background coder only. Reviewer and researcher roles for
+Bob are deferred.
+
+#### Bob CLI launch mechanics — sourced from WVA legacy repo
+
+Source docs (as of 2026-09-03, at
+`/home/dean/code/llm-d/llm-d-workload-variant-autoscaler/plans-tooling/`):
+- `conventions/bob-delegation.md` — conventions for delegating to Bob, including write scope
+  and task handoff flow. Proven in production on the WVA project (2026-08-17).
+- `planning/atomic-step-protocol-design-v2.md` — the step-execution protocol Bob was designed
+  to follow; background on why the micro-rule / on-demand-fetch approach was adopted.
+
+**Launch invocation pattern** (from `bob-delegation.md`, proven in production):
+```bash
+nohup bob run --accept-license --workspace <worktree-path> --mode <mode> \
+  --resume <task-id> -f stream-json "$PROMPT" \
+  > <logfile> 2>&1 &
+```
+- `--workspace <worktree-path>`: the prepared coder worktree.
+- `--mode <mode>`: the Bob custom mode for this coder (e.g. `coder-auto`).
+- `--resume <task-id>`: **critical** — see below.
+- `-f stream-json`: output format for log monitoring.
+- `$PROMPT`: a short prompt pointing at the task file; do not restate the task spec content
+  in the prompt — Bob reads the task file itself.
+- `> <logfile> 2>&1 &`: background process; monitor via `tail -f <logfile>` or a `Monitor`
+  on the jsonl output.
+
+**The `--resume <task-id>` criticality (from `bob-delegation.md`, direct quote):**
+> The `--resume <task-id>` value is the whole "persistent" part of this setup and has no other
+> durable home. `bob run` is one-shot per invocation (the process exits after each task), but
+> `--resume <task-id>` reopens the same conversation with full prior context — so "persistent"
+> here means persistent context across resumed invocations, not a continuously-running OS
+> process. Losing the task-id means the next task starts cold (re-reads conventions, no memory
+> of prior work). At the time the setup doc was written, the id lived only in that doc and the
+> launching planner's own conversation history — if reusing this pattern for a new scope, write
+> the resumed task-id into that scope's own status file or plan doc immediately, not only into a
+> chat transcript.
+
+**Rule derived from the above:** record `--resume <task-id>` in the task file in the coder's
+worktree before launch. It must survive independently of the parent session's chat history.
+
+**Bob's write scope (from WVA `coder-auto` mode, established by direct incident):**
+Bob keeps a local state file inside its own worktree (gitignored; never leaks into a PR).
+Anything it needs done outside its worktree goes to the mission owner via a report/finding in
+its ledger — Bob does not reach across worktree boundaries directly. A blocked write is the
+boundary working as intended, not something to route around. This was learned via a real
+incident: Bob's sandbox blocked a `write_file` call across the boundary; Bob then used
+`execute_command` + `git commit` to write into the plans worktree anyway. That commit was
+reverted (via `git revert`, not `git reset` — no history rewritten) and the mode text was
+corrected. The lesson: the one legitimate crossing is a plain file write to a known handoff
+location; everything else is out of scope regardless of mechanism.
+
+**Task delivery pattern (from `bob-delegation.md`):**
+Parent prepares the task file and places it in the coder's worktree before launch. Resumes
+Bob with a short prompt pointing at the task file. Bob reads the task file itself — parent
+does not restate spec content in the prompt. This is why the task file must be complete and
+self-contained before invocation.
