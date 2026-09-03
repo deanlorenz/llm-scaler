@@ -42,6 +42,11 @@ func registerTools(server *mcp.Server, js jetstream.JetStream, busID string) {
 		Name:        "agentbus_status",
 		Description: "List all topics with recent activity on this bus. If session_id is provided, also return that session's subscriptions and per-topic cursor values.",
 	}, statusHandler(js, busID))
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "agentbus_ask_user",
+		Description: "Ask the user an interactive question via agentbus dialogue (user.in / user.out) and wait for reply.",
+	}, askUserHandler(js, busID))
 }
 
 // --- agentbus_publish ---
@@ -244,4 +249,92 @@ func readCursorUint(busID, sessionID, topic string) uint64 {
 
 func parseJSON(data []byte, v any) error {
 	return json.Unmarshal(data, v)
+}
+
+// --- agentbus_ask_user ---
+
+type askUserArgs struct {
+	Prompt         string   `json:"prompt" jsonschema:"question / prompt text for the user"`
+	FromSession    string   `json:"from_session" jsonschema:"this session's slug/id"`
+	TimeoutSeconds int      `json:"timeout_seconds,omitempty" jsonschema:"max seconds to wait for user reply (default 300)"`
+	Refs           []string `json:"refs,omitempty" jsonschema:"repo-root-relative doc paths"`
+}
+
+type askUserResult struct {
+	Reply    string       `json:"reply"`
+	Seq      uint64       `json:"seq,omitempty"`
+	From     *schema.From `json:"from,omitempty"`
+	TimedOut bool         `json:"timed_out,omitempty"`
+}
+
+func askUserHandler(js jetstream.JetStream, busID string) mcp.ToolHandlerFor[askUserArgs, askUserResult] {
+	return func(ctx context.Context, _ *mcp.CallToolRequest, args askUserArgs) (*mcp.CallToolResult, askUserResult, error) {
+		timeout := 300 * time.Second
+		if args.TimeoutSeconds > 0 {
+			timeout = time.Duration(args.TimeoutSeconds) * time.Second
+		}
+
+		waitCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+
+		// 1. Create OrderedConsumer on user.out to catch the reply
+		outSubj := bus.Subject(busID, "user.out")
+		cons, err := js.OrderedConsumer(waitCtx, bus.StreamName, jetstream.OrderedConsumerConfig{
+			FilterSubjects: []string{outSubj},
+			DeliverPolicy:  jetstream.DeliverNewPolicy,
+		})
+		if err != nil {
+			return nil, askUserResult{}, fmt.Errorf("create reply consumer: %w", err)
+		}
+
+		replyChan := make(chan schema.Message, 10)
+		cc, err := cons.Consume(func(m jetstream.Msg) {
+			var msg schema.Message
+			if err := json.Unmarshal(m.Data(), &msg); err != nil {
+				return
+			}
+			meta, err := m.Metadata()
+			if err != nil {
+				return
+			}
+			msg.Seq = meta.Sequence.Stream
+			replyChan <- msg
+		})
+		if err != nil {
+			return nil, askUserResult{}, fmt.Errorf("start reply consumer: %w", err)
+		}
+		defer cc.Stop()
+
+		// 2. Publish the question to user.in
+		questionSeq, err := bus.Publish(ctx, js, busID, schema.Message{
+			Topic:   "user.in",
+			From:    schema.From{Agent: agentName(), Session: args.FromSession},
+			TS:      time.Now().UTC().Format(time.RFC3339),
+			Kind:    "question",
+			Body:    args.Prompt,
+			Refs:    args.Refs,
+		})
+		if err != nil {
+			return nil, askUserResult{}, fmt.Errorf("publish question to user.in: %w", err)
+		}
+
+		// 3. Wait for reply with reply_to == questionSeq
+		for {
+			select {
+			case <-waitCtx.Done():
+				return nil, askUserResult{
+					TimedOut: true,
+					Reply:    "Timed out waiting for user reply.",
+				}, nil
+			case reply := <-replyChan:
+				if reply.ReplyTo != nil && *reply.ReplyTo == questionSeq {
+					return nil, askUserResult{
+						Reply: reply.Body,
+						Seq:   reply.Seq,
+						From:  &reply.From,
+					}, nil
+				}
+			}
+		}
+	}
 }

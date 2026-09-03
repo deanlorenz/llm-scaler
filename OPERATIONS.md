@@ -52,9 +52,33 @@ agentbus_publish(topic="<announce-topic>", from_session="<my-session-id>", kind=
 
 ```
 <mission>.<role>            — a session's outbox  (e.g. agentbus.planner)
-<mission>.<parent>.<child>  — parent's inbox for a specific child (e.g. agentbus.planner.coder-1)
+<mission>.<parent>.<child>  — parent's dedicated inbox for child (e.g. agentbus.planner.coder-1)
 <bus_id>.broadcast          — optional machine-wide signals
+user.in                     — human dialogue inbox (incoming questions to user)
+user.out                    — human dialogue outbox (replies from user)
 ```
+
+## Running the Interactive Dialogue (`agentbus-dialogue`)
+
+Open a terminal pane inside VS Code or tmux:
+
+```bash
+agentbus-dialogue
+# or specify a custom user session ID / bus ID:
+agentbus-dialogue -session dean
+```
+
+When an agent calls `agentbus_ask_user` or publishes a question to `user.in`:
+1. The dialogue prints the question and rings the terminal bell (`\a`).
+2. Type your response at the `> ` prompt and press Enter.
+3. Your answer is published to `user.out` with `reply_to` pointing to the question sequence number.
+
+
+
+
+
+
+
 
 ## PostToolBatch hook registration (once, global)
 

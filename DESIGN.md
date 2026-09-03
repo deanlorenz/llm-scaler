@@ -80,6 +80,8 @@ Callers never see the prefix — they use short topic names only.
 <mission>.<role>            a session's outbox  (e.g. M1.C1)
 <mission>.<parent>.<child>  parent's dedicated inbox for child (e.g. M1.P1.C1)
 <bus_id>.broadcast          optional machine-wide broadcast channel
+user.in                     human dialogue inbox (incoming questions to user)
+user.out                    human dialogue outbox (replies from user)
 ```
 
 ---
@@ -189,6 +191,29 @@ Returns all topics with recent activity under this bus: last seq, last
 message timestamp, last sender. If `session_id` given, adds that session's
 current subscription list and per-topic cursor values.
 
+### `agentbus_ask_user`
+```
+prompt          string   — question / prompt text for the user
+from_session    string   — caller's session slug/id
+timeout_seconds int?     — max seconds to wait for user reply (default 300)
+refs            []string? — repo-root-relative doc paths
+```
+Publishes message with `kind: "question"` to `user.in`, obtains assigned `seq`,
+and synchronously waits for a reply message on `user.out` where `reply_to == seq`.
+Returns: `{reply: string, seq: uint64, from: {...}, timed_out: bool}`
+
+---
+
+## Human Dialogue Protocol (`agentbus-dialogue`)
+
+An interactive terminal CLI (`agentbus-dialogue`) allows the developer to interact with agents in real time via a dedicated VS Code terminal pane:
+
+1. Subscribes to `user.in` for the current project (`bus_id`).
+2. When a message arrives (e.g. `kind: "question"`), displays sender, timestamp, and message body with terminal bell (`\a`).
+3. Prompts the user (`> `) for input.
+4. On Enter, publishes an answer message to `user.out` with `reply_to: <question_seq>` and `kind: "answer"`.
+5. The calling agent either receives this via `agentbus_ask_user` (synchronously) or via `agentbus_fetch_since` on `user.out` (asynchronously).
+
 ---
 
 ## Silent-wake mechanism
@@ -243,9 +268,10 @@ Topic names in filenames have `/` replaced with `_` to avoid path issues.
 |---|---|---|
 | `nats-server` | message broker | always running, per machine |
 | `agentbus-relay` | marker writer | always running, per machine |
-| `agentbusd` | MCP server (5 tools) | ephemeral, one per session |
+| `agentbusd` | MCP server (6 tools) | ephemeral, one per session |
 | `agentbus-hook` | PostToolBatch hook | subprocess per turn |
 | `agentbus-setup` | one-time project init | CLI, run once |
+| `agentbus-dialogue` | human CLI dialogue | interactive terminal pane |
 
 ---
 
