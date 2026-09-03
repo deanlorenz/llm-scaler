@@ -3,6 +3,7 @@
 Read this when setting up a new mission worktree, or when `/resume-mission` or `/wind-down`
 is found missing in one.
 
+
 ## One-time setup per mission worktree
 
 **Create the `.session/` directory** — this is where `STATE.md`, ledgers, and internal plans
