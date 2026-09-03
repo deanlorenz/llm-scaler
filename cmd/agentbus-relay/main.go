@@ -120,11 +120,11 @@ func handleMsg(m jetstream.Msg) error {
 		}
 		sessionID := strings.TrimSuffix(entry.Name(), ".json")
 
-		topics, err := bus.ReadSubs(busID, sessionID)
+		subs, err := bus.ReadSubs(busID, sessionID)
 		if err != nil {
 			continue
 		}
-		for _, t := range topics {
+		for _, t := range subs.Topics {
 			if t == msg.Topic {
 				if err := writeMarker(busID, sessionID, msg.Topic, seq, now); err != nil {
 					log.Printf("relay: write marker %s/%s/%s: %v", busID, sessionID, msg.Topic, err)

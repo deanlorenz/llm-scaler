@@ -314,12 +314,13 @@ func main() {
 
 			replySeq := msg.Seq
 			replyMsg := schema.Message{
-				Topic:   *outTopic,
-				From:    schema.From{Agent: "human", Session: *sessionID},
-				TS:      time.Now().UTC().Format(time.RFC3339),
-				Kind:    "answer",
-				ReplyTo: &replySeq,
-				Body:    replyText,
+				Topic:    *outTopic,
+				From:     schema.From{Agent: "human", Session: *sessionID},
+				TS:       time.Now().UTC().Format(time.RFC3339),
+				Kind:     "answer",
+				ReplyTo:  &replySeq,
+				Receiver: msg.From.Session, // direct reply to the asking agent's session ID
+				Body:     replyText,
 			}
 
 			pubSeq, err := bus.Publish(ctx, js, busID, replyMsg)

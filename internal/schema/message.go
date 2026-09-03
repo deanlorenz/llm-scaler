@@ -14,12 +14,13 @@ type From struct {
 // Seq is the JetStream stream sequence number — assigned on publish, returned
 // to the caller, and used as the message's identity for cursor/replay.
 type Message struct {
-	Topic   string   `json:"topic"`
-	From    From     `json:"from"`
-	TS      string   `json:"ts"`             // RFC 3339
-	Kind    string   `json:"kind,omitempty"` // open vocabulary: note, question, handoff, announce, presence, heartbeat, …
-	Seq     uint64   `json:"seq,omitempty"`  // filled in by FetchSince, not by the publisher
-	ReplyTo *uint64  `json:"reply_to,omitempty"`
-	Body    string   `json:"body"`
-	Refs    []string `json:"refs,omitempty"` // repo-root-relative doc paths
+	Topic    string   `json:"topic"`
+	From     From     `json:"from"`
+	TS       string   `json:"ts"`               // RFC 3339
+	Kind     string   `json:"kind,omitempty"`   // open vocabulary: note, question, handoff, announce, presence, heartbeat, …
+	Seq      uint64   `json:"seq,omitempty"`    // filled in by FetchSince, not by the publisher
+	ReplyTo  *uint64  `json:"reply_to,omitempty"`
+	Receiver string   `json:"receiver,omitempty"` // target session ID for directed replies (user.out)
+	Body     string   `json:"body"`
+	Refs     []string `json:"refs,omitempty"`   // repo-root-relative doc paths
 }

@@ -78,22 +78,50 @@ When a question arrives the terminal bell rings, the tab title changes to
 
 ## Asking the user a question (agent protocol — `agentbus_ask_user`)
 
-Use this tool when an agent needs a blocking human answer before continuing.
-It publishes a question to `user.in`, waits for a reply on `user.out`, and
-returns the answer text to the caller. **`agentbus-dialogue` must be running.**
+**`agentbus-dialogue` must be running in a terminal for any of these modes.**
+
+### Sync (default) — block until answered
 
 ```
 agentbus_ask_user(
   prompt          = "Your question here",
   from_session    = "<this session's id>",
-  timeout_seconds = 300          # optional, default 300
+  timeout_seconds = 300,          # optional, default 300
   refs            = ["path/to/relevant/file"]  # optional
 )
 ```
 
 Returns: `{ "reply": "...", "seq": <n>, "from": { "agent": "human", "session": "dean" } }`
+On timeout: `{ "timed_out": true, "reply": "Timed out waiting for user reply." }`
 
-On timeout returns: `{ "timed_out": true, "reply": "Timed out waiting for user reply." }`
+### Async — publish and continue; hook delivers reply later
+
+```
+agentbus_ask_user(
+  prompt       = "Your question here",
+  from_session = "<this session's id>",
+  async        = true
+)
+```
+
+Returns immediately: `{ "seq": <questionSeq> }`.
+The PostToolBatch hook surfaces the reply when it arrives — only messages
+addressed to `from_session` are shown (other agents' replies are filtered out).
+Multiple async asks from the same session are allowed.
+
+### Re-ask / wait — block on a previously async question
+
+```
+agentbus_ask_user(
+  from_session    = "<this session's id>",
+  previous_seq    = <questionSeq>,   # seq returned by async call
+  timeout_seconds = 300
+)
+```
+
+Fetches the original question body, re-publishes it with a `[reminder]` prefix
+so the user sees it again, then blocks until a reply arrives.
+Returns the same shape as sync mode.
 
 **Do not** use `agentbus_ask_user` for non-blocking notifications — use `agentbus_publish`
 to `user.in` with `kind="note"` instead, and let the user reply in their own time.

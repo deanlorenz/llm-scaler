@@ -49,9 +49,9 @@ func main() {
 		os.Exit(0) // not a registered project — exit silently
 	}
 
-	// Read this session's subscribed topics.
-	topics, err := bus.ReadSubs(busID, input.SessionID)
-	if err != nil || len(topics) == 0 {
+	// Read this session's subscribed topics + filters.
+	subs, err := bus.ReadSubs(busID, input.SessionID)
+	if err != nil || len(subs.Topics) == 0 {
 		os.Exit(0) // no subscriptions — common case
 	}
 
@@ -62,7 +62,7 @@ func main() {
 	}
 	var found []pending
 
-	for _, topic := range topics {
+	for _, topic := range subs.Topics {
 		markerSeq := readMarkerSeq(busID, input.SessionID, topic)
 		if markerSeq == 0 {
 			continue
@@ -73,8 +73,26 @@ func main() {
 		}
 
 		msgs, lastSeq, err := fetchNew(busID, topic, cursorSeq)
-		if err != nil || len(msgs) == 0 {
+		// Always advance cursor to markerSeq to avoid infinite re-fetch,
+		// even if no messages passed the filter.
+		if err != nil {
 			writeCursor(busID, input.SessionID, topic, markerSeq)
+			continue
+		}
+
+		// Apply per-topic receiver filter if present.
+		if f, ok := subs.Filters[topic]; ok && f.Receiver != "" {
+			var filtered []schema.Message
+			for _, m := range msgs {
+				if m.Receiver == f.Receiver {
+					filtered = append(filtered, m)
+				}
+			}
+			msgs = filtered
+		}
+
+		writeCursor(busID, input.SessionID, topic, lastSeq)
+		if len(msgs) == 0 {
 			continue
 		}
 		found = append(found, pending{topic, msgs, lastSeq})
@@ -84,9 +102,6 @@ func main() {
 		os.Exit(0)
 	}
 
-	for _, p := range found {
-		writeCursor(busID, input.SessionID, p.topic, p.lastSeq)
-	}
 
 	var all []schema.Message
 	for _, p := range found {

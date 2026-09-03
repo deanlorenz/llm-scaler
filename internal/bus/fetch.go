@@ -75,6 +75,24 @@ func FetchSince(ctx context.Context, js jetstream.JetStream, busID, topic string
 	return result, nil
 }
 
+// FetchBySeq fetches a single message from the stream by its sequence number.
+func FetchBySeq(ctx context.Context, js jetstream.JetStream, seq uint64) (schema.Message, error) {
+	stream, err := js.Stream(ctx, StreamName)
+	if err != nil {
+		return schema.Message{}, fmt.Errorf("get stream: %w", err)
+	}
+	raw, err := stream.GetMsg(ctx, seq)
+	if err != nil {
+		return schema.Message{}, fmt.Errorf("get message seq=%d: %w", seq, err)
+	}
+	var msg schema.Message
+	if err := json.Unmarshal(raw.Data, &msg); err != nil {
+		return schema.Message{}, fmt.Errorf("unmarshal message seq=%d: %w", seq, err)
+	}
+	msg.Seq = seq
+	return msg, nil
+}
+
 // fetchWait bounds how long FetchSince blocks when nothing is immediately
 // available. Short, since "nothing new" is a valid fast answer.
 const fetchWait = 500 * time.Millisecond

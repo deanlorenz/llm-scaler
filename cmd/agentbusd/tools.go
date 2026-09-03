@@ -218,15 +218,15 @@ func statusHandler(js jetstream.JetStream, busID string) mcp.ToolHandlerFor[stat
 		// Optional session detail.
 		if args.SessionID != "" {
 			subs, _ := bus.ReadSubs(busID, args.SessionID)
-			cursors := make(map[string]uint64)
-			for _, topic := range subs {
-				cursors[topic] = readCursorUint(busID, args.SessionID, topic)
-			}
-			result.Session = &sessionStatus{
-				SessionID:     args.SessionID,
-				Subscriptions: subs,
-				Cursors:       cursors,
-			}
+				cursors := make(map[string]uint64)
+				for _, topic := range subs.Topics {
+					cursors[topic] = readCursorUint(busID, args.SessionID, topic)
+				}
+				result.Session = &sessionStatus{
+					SessionID:     args.SessionID,
+					Subscriptions: subs.Topics,
+					Cursors:       cursors,
+				}
 		}
 
 		return nil, result, nil
@@ -254,14 +254,16 @@ func parseJSON(data []byte, v any) error {
 // --- agentbus_ask_user ---
 
 type askUserArgs struct {
-	Prompt         string   `json:"prompt" jsonschema:"question / prompt text for the user"`
+	Prompt         string   `json:"prompt,omitempty" jsonschema:"question / prompt text for the user (required unless previous_seq is set)"`
 	FromSession    string   `json:"from_session" jsonschema:"this session's slug/id"`
-	TimeoutSeconds int      `json:"timeout_seconds,omitempty" jsonschema:"max seconds to wait for user reply (default 300)"`
+	TimeoutSeconds int      `json:"timeout_seconds,omitempty" jsonschema:"max seconds to wait for user reply (default 300; ignored in async mode)"`
 	Refs           []string `json:"refs,omitempty" jsonschema:"repo-root-relative doc paths"`
+	Async          bool     `json:"async,omitempty" jsonschema:"if true, publish and return immediately; hook surfaces reply when it arrives"`
+	PreviousSeq    *uint64  `json:"previous_seq,omitempty" jsonschema:"re-ask: seq of a previous async question; fetches original body and blocks for reply"`
 }
 
 type askUserResult struct {
-	Reply    string       `json:"reply"`
+	Reply    string       `json:"reply,omitempty"`
 	Seq      uint64       `json:"seq,omitempty"`
 	From     *schema.From `json:"from,omitempty"`
 	TimedOut bool         `json:"timed_out,omitempty"`
@@ -269,72 +271,150 @@ type askUserResult struct {
 
 func askUserHandler(js jetstream.JetStream, busID string) mcp.ToolHandlerFor[askUserArgs, askUserResult] {
 	return func(ctx context.Context, _ *mcp.CallToolRequest, args askUserArgs) (*mcp.CallToolResult, askUserResult, error) {
-		timeout := 300 * time.Second
-		if args.TimeoutSeconds > 0 {
-			timeout = time.Duration(args.TimeoutSeconds) * time.Second
+		if args.Async && args.PreviousSeq != nil {
+			return nil, askUserResult{}, fmt.Errorf("async and previous_seq are mutually exclusive")
+		}
+		if args.Prompt == "" && args.PreviousSeq == nil {
+			return nil, askUserResult{}, fmt.Errorf("prompt is required unless previous_seq is set")
 		}
 
-		waitCtx, cancel := context.WithTimeout(ctx, timeout)
-		defer cancel()
+		// --- Re-ask / wait mode ---
+		if args.PreviousSeq != nil {
+			return askUserReask(ctx, js, busID, args)
+		}
 
-		// 1. Create OrderedConsumer on user.out to catch the reply
-		outSubj := bus.Subject(busID, "user.out")
-		cons, err := js.OrderedConsumer(waitCtx, bus.StreamName, jetstream.OrderedConsumerConfig{
-			FilterSubjects: []string{outSubj},
-			DeliverPolicy:  jetstream.DeliverNewPolicy,
-		})
+		// --- Async mode ---
+		if args.Async {
+			return askUserAsync(ctx, js, busID, args)
+		}
+
+		// --- Sync mode (default) ---
+		return askUserSync(ctx, js, busID, args)
+	}
+}
+
+// askUserSync publishes a question and blocks until a reply addressed to
+// from_session arrives on user.out, or timeout elapses.
+func askUserSync(ctx context.Context, js jetstream.JetStream, busID string, args askUserArgs) (*mcp.CallToolResult, askUserResult, error) {
+	timeout := 300 * time.Second
+	if args.TimeoutSeconds > 0 {
+		timeout = time.Duration(args.TimeoutSeconds) * time.Second
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	replyChan, cc, err := listenForReply(waitCtx, js, busID, args.FromSession)
+	if err != nil {
+		return nil, askUserResult{}, err
+	}
+	defer cc.Stop()
+
+	questionSeq, err := publishQuestion(ctx, js, busID, args.FromSession, args.Prompt, args.Refs)
+	if err != nil {
+		return nil, askUserResult{}, err
+	}
+	_ = questionSeq
+
+	return waitForReply(waitCtx, replyChan)
+}
+
+// askUserAsync publishes a question, registers a filtered subscription on
+// user.out, and returns immediately with the question seq.
+func askUserAsync(ctx context.Context, js jetstream.JetStream, busID string, args askUserArgs) (*mcp.CallToolResult, askUserResult, error) {
+	questionSeq, err := publishQuestion(ctx, js, busID, args.FromSession, args.Prompt, args.Refs)
+	if err != nil {
+		return nil, askUserResult{}, err
+	}
+
+	if err := bus.SubscribeFiltered(busID, args.FromSession, "user.out",
+		bus.TopicFilter{Receiver: args.FromSession}); err != nil {
+		return nil, askUserResult{}, fmt.Errorf("register async subscription: %w", err)
+	}
+
+	return nil, askUserResult{Seq: questionSeq}, nil
+}
+
+// askUserReask fetches the original question by seq, re-publishes it with a
+// [reminder] prefix, and blocks for a reply addressed to from_session.
+func askUserReask(ctx context.Context, js jetstream.JetStream, busID string, args askUserArgs) (*mcp.CallToolResult, askUserResult, error) {
+	original, err := bus.FetchBySeq(ctx, js, *args.PreviousSeq)
+	if err != nil {
+		return nil, askUserResult{}, fmt.Errorf("fetch original question (seq=%d): %w", *args.PreviousSeq, err)
+	}
+
+	timeout := 300 * time.Second
+	if args.TimeoutSeconds > 0 {
+		timeout = time.Duration(args.TimeoutSeconds) * time.Second
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	replyChan, cc, err := listenForReply(waitCtx, js, busID, args.FromSession)
+	if err != nil {
+		return nil, askUserResult{}, err
+	}
+	defer cc.Stop()
+
+	reminderBody := "[reminder] " + original.Body
+	if _, err := publishQuestion(ctx, js, busID, args.FromSession, reminderBody, original.Refs); err != nil {
+		return nil, askUserResult{}, err
+	}
+
+	return waitForReply(waitCtx, replyChan)
+}
+
+// listenForReply creates an ordered consumer on user.out that surfaces only
+// messages addressed to fromSession.
+func listenForReply(ctx context.Context, js jetstream.JetStream, busID, fromSession string) (<-chan schema.Message, jetstream.ConsumeContext, error) {
+	outSubj := bus.Subject(busID, "user.out")
+	cons, err := js.OrderedConsumer(ctx, bus.StreamName, jetstream.OrderedConsumerConfig{
+		FilterSubjects: []string{outSubj},
+		DeliverPolicy:  jetstream.DeliverNewPolicy,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("create reply consumer: %w", err)
+	}
+
+	replyChan := make(chan schema.Message, 10)
+	cc, err := cons.Consume(func(m jetstream.Msg) {
+		var msg schema.Message
+		if err := json.Unmarshal(m.Data(), &msg); err != nil {
+			return
+		}
+		if msg.Receiver != "" && msg.Receiver != fromSession {
+			return // not for us
+		}
+		meta, err := m.Metadata()
 		if err != nil {
-			return nil, askUserResult{}, fmt.Errorf("create reply consumer: %w", err)
+			return
 		}
+		msg.Seq = meta.Sequence.Stream
+		replyChan <- msg
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("start reply consumer: %w", err)
+	}
+	return replyChan, cc, nil
+}
 
-		replyChan := make(chan schema.Message, 10)
-		cc, err := cons.Consume(func(m jetstream.Msg) {
-			var msg schema.Message
-			if err := json.Unmarshal(m.Data(), &msg); err != nil {
-				return
-			}
-			meta, err := m.Metadata()
-			if err != nil {
-				return
-			}
-			msg.Seq = meta.Sequence.Stream
-			replyChan <- msg
-		})
-		if err != nil {
-			return nil, askUserResult{}, fmt.Errorf("start reply consumer: %w", err)
-		}
-		defer cc.Stop()
+// publishQuestion publishes kind=question to user.in and returns its seq.
+func publishQuestion(ctx context.Context, js jetstream.JetStream, busID, fromSession, prompt string, refs []string) (uint64, error) {
+	return bus.Publish(ctx, js, busID, schema.Message{
+		Topic: "user.in",
+		From:  schema.From{Agent: agentName(), Session: fromSession},
+		TS:    time.Now().UTC().Format(time.RFC3339),
+		Kind:  "question",
+		Body:  prompt,
+		Refs:  refs,
+	})
+}
 
-		// 2. Publish the question to user.in
-		questionSeq, err := bus.Publish(ctx, js, busID, schema.Message{
-			Topic:   "user.in",
-			From:    schema.From{Agent: agentName(), Session: args.FromSession},
-			TS:      time.Now().UTC().Format(time.RFC3339),
-			Kind:    "question",
-			Body:    args.Prompt,
-			Refs:    args.Refs,
-		})
-		if err != nil {
-			return nil, askUserResult{}, fmt.Errorf("publish question to user.in: %w", err)
-		}
-
-		// 3. Wait for reply with reply_to == questionSeq
-		for {
-			select {
-			case <-waitCtx.Done():
-				return nil, askUserResult{
-					TimedOut: true,
-					Reply:    "Timed out waiting for user reply.",
-				}, nil
-			case reply := <-replyChan:
-				if reply.ReplyTo != nil && *reply.ReplyTo == questionSeq {
-					return nil, askUserResult{
-						Reply: reply.Body,
-						Seq:   reply.Seq,
-						From:  &reply.From,
-					}, nil
-				}
-			}
-		}
+// waitForReply blocks on replyChan until a message arrives or ctx is done.
+func waitForReply(ctx context.Context, replyChan <-chan schema.Message) (*mcp.CallToolResult, askUserResult, error) {
+	select {
+	case <-ctx.Done():
+		return nil, askUserResult{TimedOut: true, Reply: "Timed out waiting for user reply."}, nil
+	case reply := <-replyChan:
+		return nil, askUserResult{Reply: reply.Body, Seq: reply.Seq, From: &reply.From}, nil
 	}
 }

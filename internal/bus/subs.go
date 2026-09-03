@@ -38,9 +38,17 @@ func topicToFilename(topic string) string {
 	return strings.ReplaceAll(topic, "/", "_")
 }
 
-// Subscriptions is the set of topics a session is watching.
+// TopicFilter constrains which messages on a subscribed topic are surfaced.
+// Only one field needs to match — currently only Receiver is supported.
+type TopicFilter struct {
+	Receiver string `json:"receiver,omitempty"` // only surface messages where msg.Receiver == this value
+}
+
+// Subscriptions is the set of topics a session is watching, plus optional
+// per-topic filters used by the hook to suppress irrelevant messages.
 type Subscriptions struct {
-	Topics []string `json:"topics"`
+	Topics  []string               `json:"topics"`
+	Filters map[string]TopicFilter `json:"filters,omitempty"`
 }
 
 // Subscribe adds topic to the session's subscription file (idempotent).
@@ -52,6 +60,37 @@ func Subscribe(busID, sessionID, topic string) error {
 		}
 	}
 	subs.Topics = append(subs.Topics, topic)
+	return writeSubs(busID, sessionID, subs)
+}
+
+// SubscribeFiltered adds topic with a receiver filter (idempotent on topic;
+// always overwrites the filter). Used by async agentbus_ask_user.
+func SubscribeFiltered(busID, sessionID, topic string, filter TopicFilter) error {
+	subs, _ := readSubs(busID, sessionID)
+	found := false
+	for _, t := range subs.Topics {
+		if t == topic {
+			found = true
+			break
+		}
+	}
+	if !found {
+		subs.Topics = append(subs.Topics, topic)
+	}
+	if subs.Filters == nil {
+		subs.Filters = make(map[string]TopicFilter)
+	}
+	subs.Filters[topic] = filter
+	return writeSubs(busID, sessionID, subs)
+}
+
+// RemoveFilter removes a per-topic filter without unsubscribing.
+func RemoveFilter(busID, sessionID, topic string) error {
+	subs, err := readSubs(busID, sessionID)
+	if err != nil {
+		return nil
+	}
+	delete(subs.Filters, topic)
 	return writeSubs(busID, sessionID, subs)
 }
 
@@ -68,16 +107,13 @@ func Unsubscribe(busID, sessionID, topic string) error {
 		}
 	}
 	subs.Topics = filtered
+	delete(subs.Filters, topic)
 	return writeSubs(busID, sessionID, subs)
 }
 
-// ReadSubs returns the subscription list for a session.
-func ReadSubs(busID, sessionID string) ([]string, error) {
-	subs, err := readSubs(busID, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	return subs.Topics, nil
+// ReadSubs returns the full subscription state for a session.
+func ReadSubs(busID, sessionID string) (Subscriptions, error) {
+	return readSubs(busID, sessionID)
 }
 
 func readSubs(busID, sessionID string) (Subscriptions, error) {
