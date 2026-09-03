@@ -9,6 +9,7 @@ require (
 )
 
 require (
+	github.com/chzyer/readline v1.5.1 // indirect
 	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/klauspost/compress v1.18.5 // indirect
 	github.com/mattn/go-runewidth v0.0.3 // indirect

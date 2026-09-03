@@ -4,7 +4,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"flag"
@@ -17,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/chzyer/readline"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
@@ -143,40 +143,41 @@ func renderSimpleMarkdown(body string) string {
 	return strings.Join(out, "\n")
 }
 
-// openTTY opens /dev/tty for reading, which gives a persistent interactive
-// stream regardless of how the process's stdin was connected. Falls back to
-// os.Stdin if /dev/tty is unavailable (e.g. non-Unix environments).
-func openTTY() *os.File {
-	f, err := os.Open("/dev/tty")
+// newReadline creates a readline instance reading from /dev/tty, giving
+// proper line-editing (arrows, backspace, history). Falls back to stdin.
+func newReadline() (*readline.Instance, error) {
+	ttyPath := "/dev/tty"
+	if _, err := os.Stat(ttyPath); err != nil {
+		ttyPath = ""
+	}
+	cfg := &readline.Config{
+		Prompt:          "\033[1;32mYour reply > \033[0m",
+		InterruptPrompt: "^C",
+		EOFPrompt:       "exit",
+	}
+	if ttyPath != "" {
+		cfg.Stdin = readline.NewCancelableStdin(mustOpen(ttyPath))
+	}
+	return readline.NewEx(cfg)
+}
+
+func mustOpen(path string) *os.File {
+	f, err := os.Open(path)
 	if err != nil {
 		return os.Stdin
 	}
 	return f
 }
 
-// readUserReply reads user input from the given scanner.
-// Single-line submissions: Enter immediately.
-// Multi-line submissions: Trailing backslash '\' continues onto next line.
-func readUserReply(scanner *bufio.Scanner) string {
-	fmt.Print("\033[1;32mYour reply > \033[0m")
-	var lines []string
-
-	for scanner.Scan() {
-		line := scanner.Text()
-
-		if strings.HasSuffix(line, "\\") {
-			lines = append(lines, strings.TrimSuffix(line, "\\"))
-			fmt.Print("\033[90m... > \033[0m")
-			continue
-		}
-
-		lines = append(lines, line)
-		break
+// readUserReply reads one line using readline (arrow keys, backspace work).
+func readUserReply(rl *readline.Instance) string {
+	line, err := rl.Readline()
+	if err != nil {
+		return "(no response)"
 	}
-
-	reply := strings.TrimSpace(strings.Join(lines, "\n"))
+	reply := strings.TrimSpace(line)
 	if reply == "" {
-		reply = "(no response)"
+		return "(no response)"
 	}
 	return reply
 }
@@ -258,11 +259,11 @@ func main() {
 	}
 	defer cc.Stop()
 
-	tty := openTTY()
-	if tty != os.Stdin {
-		defer tty.Close()
+	rl, err := newReadline()
+	if err != nil {
+		log.Fatalf("readline init: %v", err)
 	}
-	scanner := bufio.NewScanner(tty)
+	defer rl.Close()
 
 	for {
 		select {
@@ -296,7 +297,7 @@ func main() {
 			fmt.Printf("%s\n", renderedBody)
 			fmt.Printf("\033[33m%s\033[0m\n\n", strings.Repeat("━", 64))
 
-			replyText := readUserReply(scanner)
+			replyText := readUserReply(rl)
 
 			replySeq := msg.Seq
 			replyMsg := schema.Message{
