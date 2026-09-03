@@ -32,8 +32,7 @@ Reads may cross worktree boundaries when needed (`git -C`, `cat`, full paths, et
 
 Read the matching file when its situation occurs, not speculatively:
 
-- `conventions/session-start.md` — starting any session; identify mission, role, state, and
-  ledger before working
+- `conventions/session-start.md` — **every session reads this first, before any work**
 - `conventions/mission-owner.md` — assuming or acting in the mission-owner role
 - `conventions/state-vs-ledger.md` — maintaining mission state or a session ledger, or deciding
   where information belongs

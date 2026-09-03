@@ -1,65 +1,65 @@
 # Starting a session
 
-Read this at the start of every session, before doing mission work.
+Read this at the start of every session, before doing any work.
 
-## 1. Identify the mission
+## 1. Identify the mission and role
 
-Record the mission name and its branch/worktree. If the mission is unknown or the named
-worktree does not match it, ask the user before proceeding.
+Every session is tied to exactly one mission and one role. Confirm both before proceeding:
 
-## 2. Identify the role
+- **Mission name** and its branch/worktree.
+- **Role** and its authority boundary:
+  - **Mission owner** — owns the mission's state, plan, branch, and integration decisions.
+    Also read `conventions/mission-owner.md`.
+  - **Coder** — implements an assigned task within the stated file and worktree scope.
+  - **Reviewer** — reviews specified work and reports findings; does not silently modify it.
+  - **Researcher** — investigates the assigned question and records findings without expanding
+    scope.
 
-Record the session's role and its authority boundary. Common roles include:
+If either is unknown, ask before proceeding. Do not infer mission-owner authority from being
+the only active session.
 
-- **Mission owner:** owns the mission's state, plan, branch, and integration decisions. Also
-  read `conventions/mission-owner.md`.
-- **Coder:** implements an assigned task within the stated file and worktree scope.
-- **Reviewer:** reviews specified work and reports findings; does not silently modify it.
-- **Researcher:** investigates the assigned question and records findings without expanding the
-  mission scope.
+## 2. Locate or create the session STATE file
 
-If the role is not explicit, ask the user. Do not infer mission-owner authority from being the
-only active session.
+Every session has its own STATE file — the durable orientation record for this session. It
+is separate from the mission-level `STATE.md` (which the mission owner maintains).
 
-## 3. Locate mission state
+**If invoked by a parent (coder, reviewer, researcher):** the parent prepared the STATE file
+before invocation and passed its name. Locate it at the path given.
 
-Mission tracking files live under `<mission-worktree>/.session/`. Read the mission's current
-state and applicable plan before working. If a convenience symlink under
+**If resuming interactively:** find the STATE file by session slug in
+`<mission-worktree>/.session/<slug>.STATE.md`. If the session slug is all you have, that
+is enough.
+
+**If starting fresh as a mission owner:** create `.session/STATE.md` using the template in
+`conventions/state-vs-ledger.md`.
+
+The STATE file contains: mission, role, worktree, scope, current task, and a pointer to the
+active ledger. Read it in full before working.
+
+## 3. Create or continue the session ledger
+
+The ledger is the append-only log for this session. One file per session, named
+`YYYY-MM-DD-<session-slug>.md` in `<mission-worktree>/.session/`.
+
+Start every ledger entry with:
+```
+State: <path to this session's STATE file>
+Continues: <path to previous ledger, if any — omit if first session>
+```
+
+Append findings, decisions, corrections, and false starts continuously as they occur — not
+batched at the end. Never reuse another session's ledger file.
+
+Register the ledger in the session STATE file as the active ledger.
+
+## 4. Read mission state and plan
+
+Read the mission-level `STATE.md` (at `<mission-worktree>/.session/STATE.md`) and the
+applicable plan/spec doc before working. If a convenience symlink under
 `session-tracking/missions/<mission-name>/` is broken, follow
 `conventions/feature-worktree-setup.md`.
 
-## 4. Create the session record and ledger
-
-Every session creates a uniquely named markdown file under `<mission-worktree>/.session/` and
-uses that file as its continuously updated ledger. Use a sortable name such as
-`YYYY-MM-DD-<session-slug>.md`; never reuse another session's file.
-
-Start it with:
-
-```markdown
-# Session — <session-slug>
-
-- **Mission:** <mission-name>
-- **Role:** <mission-owner | coder | reviewer | researcher | other>
-- **Worktree:** `worktrees/<mission-name>`
-- **Ledger:** `.session/<this-file>.md`
-- **Scope:** <the work this session is authorized to do>
-- **Status:** active
-
-## Goal
-
-<current requested outcome>
-
-## Findings and decisions
-
-<append continuously while working>
-```
-
-A mission owner also registers the session in `.session/STATE.md` as required by
-`conventions/resume-and-handoff.md`. Other roles do not edit `STATE.md`; they report needed
-state changes to the mission owner.
-
 ## 5. Read situational rules
 
-Return to the index in `CONVENTIONS.md` and read the files triggered by the role and requested
-work before acting.
+Return to the index in `CONVENTIONS.md` and read the files triggered by your role and the
+requested work before acting.

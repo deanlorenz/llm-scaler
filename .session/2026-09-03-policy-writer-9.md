@@ -250,3 +250,45 @@ ANYTHING that is not origin requires extra care and extra validation. Push to PR
 requires extra care and extra validation."
 Decision: rewrite rule 3 to remove "ofer" and state the general principle: non-origin remotes
 require extra explicit authorization; PR branch pushes require extra care regardless of remote.
+
+## session-start.md redesign (2026-09-03)
+
+### Review annotations from user:
+1. "This is extremely important for every new session — what triggers reading this?"
+   → Trigger in CONVENTIONS.md index was "starting any session" but vague. Needs to be
+   the very first thing every session does — should be implicit, not situational.
+
+2. "The ledger header template feels like it belongs in STATE, not the ledger."
+   "This is basic orientation. Ledger is just an ongoing log that gets rotated. This keeps
+   steady."
+   → Every session has its own STATE file (orientation: mission, role, worktree, scope,
+   status). Ledger is a separate append-only log that refs the STATE file.
+
+3. "Ledger should start with a ref to the STATE file. Ledger should start with a ref to a
+   previous ledger it replaces. STATE should list the active ledger file."
+
+4. "There may be an issue with ensuring a unique name — STATE is the state file of the mission
+   owner (probably lists on-going related other sessions) — if this is a new session that is
+   not a mission owner then we must make sure it owns exactly one STATE file (role.STATE?
+   slug.role.STATE?)"
+   → Decision: per-session STATE file named `<slug>.STATE.md` in the session's worktree.
+   Mission owner's STATE.md is the mission-level file; each delegated session owns a separate
+   slug-named STATE file.
+
+5. "Most sessions should get their STATE file name as an invocation parameter (already prepared
+   by the parent). Mission owner may resume fresh without a STATE file name but they know the
+   name. Other interactive sessions may resume without a file name too — session slug as first
+   prompt is usually enough."
+
+### Rewrite decisions:
+- Remove the ledger header template from step 4 — it belongs in state-vs-ledger.md (already
+  has a STATE template now) or tasks.md.
+- Step 4 becomes: locate or create your session STATE file. If invoked by a parent, the STATE
+  file was prepared for you — its name was passed as an invocation parameter. If resuming
+  interactively, find it by slug. If starting fresh as a mission owner, create it.
+- Add: ledger file refs the STATE file at the top; ledger also refs the previous ledger it
+  replaces (if any).
+- Trigger question: session-start.md should be in the CONVENTIONS.md "core" section as a
+  mandatory first read, not just in the situational index. Update CONVENTIONS.md trigger line.
+- Keep the role list (step 2) — it's important orientation.
+- Keep "read situational rules" (step 5).
