@@ -25,7 +25,8 @@ echo "==> Building binaries from $REPO_DIR"
 (cd "$REPO_DIR" && go build -o "$BIN_DIR/agentbus-hook" ./cmd/agentbus-hook)
 (cd "$REPO_DIR" && go build -o "$BIN_DIR/agentbus-setup" ./cmd/agentbus-setup)
 (cd "$REPO_DIR" && go build -o "$BIN_DIR/agentbus-dialogue" ./cmd/agentbus-dialogue)
-echo "    agentbusd, agentbus-relay, agentbus-hook, agentbus-setup, agentbus-dialogue -> $BIN_DIR/"
+(cd "$REPO_DIR" && go build -o "$BIN_DIR/agentbus-pub" ./cmd/agentbus-pub)
+echo "    agentbusd, agentbus-relay, agentbus-hook, agentbus-setup, agentbus-dialogue, agentbus-pub -> $BIN_DIR/"
 
 echo "==> Registering PostToolBatch hook in ~/.claude/settings.json"
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
