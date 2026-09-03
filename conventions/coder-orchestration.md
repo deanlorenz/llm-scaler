@@ -1,84 +1,115 @@
 # Coding-task orchestration (when running/orchestrating a coder)
 
-Read this before dispatching or running a coder subagent.
+Read this before dispatching or running a coder agent.
 
-1. Every session and every subagent has a role and a mission — never overstep it, and never
-   assign the wrong one to a subagent. Before delegating, ask "what is this agent's actual
-   mission" and only hand it work that fits — if unsure, ask the user rather than guessing.
-2. Never push to git, never publish to GitHub (PRs, etc.) without an explicit per-operation ask
-   — not a standing permission, not inferred from an earlier approval.
-3. One task at a time — do not batch multiple tasks into one agent invocation expecting it to
+## Worker types
+
+Three worker types are available. Choose based on the task's scope and interaction needs.
+
+**Claude custom-agent (FW — foreground/subtask).** A visible, interactive subtask with its own
+conversation and breadcrumb. Use when the task benefits from real-time review or the user may
+want to interact with it directly. Has its own context window; does not share the parent's.
+
+**Claude custom-agent (BG — background subagent).** Silent; returns a summary to the parent
+when done. Its chat cannot be opened directly, but Claude supports attaching to a BG agent to
+work interactively — note this option when a BG agent needs mid-task guidance. Use when the
+task is clearly self-contained and results can be summarized back.
+
+**Bob CLI coder.** A Bob CLI session launched as a background OS process (`nohup bob run ...
+&`). Stays alive across turns. Communicates with the parent via agentbus while running —
+this is the primary interaction channel (works reliably, unlike `SendMessage` which has
+timing constraints). Use for coding tasks that benefit from a persistent session context or
+when a Bob-specific mode is needed.
+
+> Bob CLI launch mechanics: see the old WVA repo under `plans-tooling/conventions/bob-delegation.md`
+> and `plans-tooling/planning/atomic-step-protocol-design-v2.md`. Record the `--resume <task-id>`
+> in the task file immediately — losing it means the next task starts cold.
+
+Bob support is added later for other worker roles (reviewer, researcher). For now, Bob is
+used as a background coder only.
+
+## Rules
+
+1. Every worker has a role and a mission — never overstep it. Before delegating, confirm the
+   worker's role and that the task fits it. If unsure, ask the user.
+2. One task at a time — do not batch multiple tasks into one agent invocation expecting it to
    self-sequence unsupervised.
-4. Each task gets a written spec before the coder starts (see the task template below).
-5. Each task lands as its own commit — not batched, not squashed across tasks.
-6. **Coder isolation:** launch coders with `isolation: "worktree"`. These land under
-   `.claude/worktrees/agent-<id>` (tool-managed, disposable) — record that path in the
-   mission's `STATE.md` under "worktrees used"; they don't need to follow the
-   `session-tracking` layout themselves.
-   > REVIEW: They do need to maintain a ledger and state (See review in CONVENTIONS). If it is an emphemeral worktree that gets deleted at termination of coder session then these tracking files should still be accessible via their branch. Note that these are not the PR branches -- PR branches must be rebased on main and clean. The mission owner should track all mission branches and worktrees.
-   > I exepct the coder's ledger to be very focused (decisions it made, findings, alternatives) -- most of these belong in the STATE and can be returned to parent when coder is done.
-
-   > REVIEW: I typically don't want interactive coders. I prefer to interact via the mission owner.
-   > Need to setup the agentbus channels so interacting with a session would be possible.
-   > Need an option to open a coder in "interactive mode" -- mostly for more detailed code review and guidance --
-   > this should be rare. I think the simplest option would be for the mission owner to setup a visible worktree + .session in that worktree
-7. **Review isolation:** the review agent for a coder's task runs against that *same* coder
-   worktree (not a third worktree, not the user's open one).
-   > REVIEW: we need to anlyze the overhead of those emphemeral worktrees. I think they are a must-have when multiple coders are launched under the same mission. IF the mission is more focused, it may be possible for the (single) coder and the (single) reviewer to work directly on the mission worktree. The isolation would be by folder boundaries (owner works on docs, coder on code) and by file name boundaries (for .session files). My concern is that the branches get out of hand. In any case, the mission owner should update the main mission worktree code as soon as possible and commit it. Coders that work on a PR branch -- prepare the PR for final push, rebase, test, lint, DCO, etc. -- may be even more focused -- not interactive, no reviewer, no ledger, no state file, just report back to parent.
-8. The orchestrating session reviews each task's diff itself before starting the next task —
-   not delegated to the coder, not skipped.
-   > REVIEW: yes. We need to try to run the tasks as a list of subtasks. Each with a clear step.
-9. **The mission owner cherry-picks approved commits from coder worktrees into the mission
-   branch.** The mission branch is the single source of truth for that mission's code — coders
-   work in their own isolated worktrees, and the mission owner integrates by cherry-picking
-   (or equivalent) once a task is reviewed and approved. Never merge a coder worktree directly
-   into the mission branch without review.
-10. Coder and reviewer must never create or modify `.claude/settings.json` or
+3. Each task gets a written task file before the worker starts (see the task file template below).
+4. Each task lands as its own commit — not batched, not squashed across tasks.
+5. **Coder isolation:** coders work in their own worktree.
+   - Claude FW/BG: launch with `isolation: "worktree"`. Tool-managed worktrees land under
+     `.claude/worktrees/agent-<id>` and are disposable. Record the path and the branch in the
+     mission `STATE.md` under "worktrees used" before the worker starts.
+   - Bob CLI: parent prepares a dedicated worktree/branch before launch. Pass the path in the
+     task file.
+   - When multiple coders run concurrently, isolated worktrees are mandatory. A single
+     coder + reviewer may share the mission worktree if file/folder ownership boundaries are
+     stated explicitly in the task file.
+6. **Coder state and ledger:** every coder maintains a focused ledger (decisions made, findings,
+   alternatives considered) and a state file inside its worktree. These must remain recoverable
+   via the branch even if the worktree is later deleted. They are not PR branches — keep
+   `.session/` out of any PR.
+7. **Interaction:** coders are non-interactive by default. The user interacts through the mission
+   owner. Exceptions:
+   - Claude FW subtasks are inherently interactive; use them when that is wanted.
+   - A BG agent can be attached to for interactive work when mid-task guidance is needed.
+   - Bob CLI coders communicate via agentbus. The mission owner monitors the agentbus channel
+     for that coder's task; the coder posts status, findings, and questions there.
+8. **Reviewer isolation:** the reviewer for a task runs against the same coder worktree — not a
+   third worktree, not the mission owner's open one. A narrowly scoped PR-preparation agent
+   (rebase, lint, DCO, test) needs no reviewer, no state file, no ledger — it reports directly
+   to the parent.
+9. The mission owner reviews each task's diff itself before starting the next task — not
+   delegated to the coder, not skipped.
+10. The mission owner integrates approved work into the mission branch (cherry-pick or
+    equivalent). The mission branch is the single source of truth. Never merge a coder worktree
+    directly without review.
+11. Coder and reviewer must never create or modify `.claude/settings.json` or
     `.claude/settings.local.json`.
-11. All subagents output to files, never dump long content into chat — coder reports,
-    review reports, research findings all go to a file (their own worktree, or their ledger
-    entry); the chat-visible return is a short pointer plus one-line status.
+12. All workers output to files, never dump long content into chat. Reports, findings, and
+    review output go to their own worktree or ledger. The chat-visible return is a short pointer
+    plus one-line status.
+13. Never push to git or publish to GitHub (PRs, issues, etc.) without an explicit
+    per-operation authorization from the user — not a standing permission, not inferred from an
+    earlier approval.
 
-## Task template
+## Task file template
 
-Each roadmap task must follow this shape:
+Every task gets a written task file before the worker starts. For Claude workers this is the
+input to the agent invocation. For Bob CLI workers it lives in the prepared worktree (e.g.
+`.session/task-<id>.md`) and is named in the launch command.
 
-```
+```markdown
 ### <Task ID> — <short name>
 
-**Intent.** One or two sentences: why this task exists, what problem it closes.
+**What / goal.** One or two sentences: what the task produces and why it exists.
 
-**Expected outcome(s).** The concrete artifact(s)/state this task produces, stated as a checkable
-claim — not "do the work" but "X exists, verified by Y."
+**Where / context.**
+- Worktree: `worktrees/<name>` (branch `<branch>`)
+- Plan doc: `<path>`
+- Key files in scope: `<file>`, `<file>`, ...
 
-**Todo.**
+**Done / completion criteria.** Checkable claims — not "do the work" but "X exists, verified
+by Y." List the tests, lint checks, or other validations that must pass.
+
+**Limits / do not change.**
+- List files, directories, or behaviors that are out of scope.
+- List any standing rules the coder must not override.
+
+**Subtasks.**
 - [ ] Sub-item, smallest unit worth its own status
-- [x] Sub-item already done — keep it checked, don't delete it once done
+- [ ] Sub-item
 
-**Refs.** Every doc/file this task reads from or writes to. Group by role if the list is long:
-*Reads:* / *Writes:*.
+**Refs.**
+- *Reads:* `<doc>`, `<doc>`
+- *Writes:* `<file>`, `<ledger>`
 
-**Status.** One line, dated: `DONE <date>` | `IN PROGRESS, <what's left>` | `NOT STARTED` |
-`BLOCKED on <thing>`. Followed by completion notes if DONE — what actually landed, which
-commit(s), any real finding worth a reader knowing without re-deriving it.
+**Status.** `NOT STARTED` | `IN PROGRESS — <what's left>` | `DONE <date>` | `BLOCKED on <thing>`
 ```
 
 Rules for applying it:
-- Not every field needs prose — a one-line task gets a one-line Todo/Refs.
-- A task with sub-tasks: one outer section in this shape, each sub-task gets its own nested
-  section in the same shape; the outer Todo list becomes a checklist of sub-task names linking
-  down to their sections.
-- Status is updated in place (current-state field); completion notes accumulate, they are not
-  overwritten.
-
-> REVIEW: when invoking a task or a background task or receiving a task from me:
-> make sure all these are defined and the appropriated granularity --
-> what -- goal: ...
-> where -- file: ..., line: ... , function: ..., plan doc: ...  (relevant context, as specific as possible)
-> done -- complition criteria: ... (eg which tests must pass)
-> limits -- dont not change: ...
->
-> The above should be defined in the task "mission file" when you invoke a new background task.
-> When I give you a task and you are not sure about any of these -- ask.
->
-> On second thought, maybe these fields can just be part of the task template.
+- Every field is required. If a field is missing when a task arrives from the user, ask before
+  starting.
+- Status is updated in place; completion notes accumulate and are not overwritten.
+- A task with sub-tasks: one outer section in this shape, each sub-task nested in the same
+  shape; the outer Subtasks list links down to the nested sections.
