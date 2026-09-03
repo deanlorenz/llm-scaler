@@ -15,10 +15,19 @@ Read this before dispatching or running a coder subagent.
    `.claude/worktrees/agent-<id>` (tool-managed, disposable) — record that path in the
    mission's `STATE.md` under "worktrees used"; they don't need to follow the
    `session-tracking` layout themselves.
+   > REVIEW: They do need to maintain a ledger and state (See review in CONVENTIONS). If it is an emphemeral worktree that gets deleted at termination of coder session then these tracking files should still be accessible via their branch. Note that these are not the PR branches -- PR branches must be rebased on main and clean. The mission owner should track all mission branches and worktrees.
+   > I exepct the coder's ledger to be very focused (decisions it made, findings, alternatives) -- most of these belong in the STATE and can be returned to parent when coder is done.
+
+   > REVIEW: I typically don't want interactive coders. I prefer to interact via the mission owner.
+   > Need to setup the agentbus channels so interacting with a session would be possible.
+   > Need an option to open a coder in "interactive mode" -- mostly for more detailed code review and guidance --
+   > this should be rare. I think the simplest option would be for the mission owner to setup a visible worktree + .session in that worktree
 7. **Review isolation:** the review agent for a coder's task runs against that *same* coder
    worktree (not a third worktree, not the user's open one).
+   > REVIEW: we need to anlyze the overhead of those emphemeral worktrees. I think they are a must-have when multiple coders are launched under the same mission. IF the mission is more focused, it may be possible for the (single) coder and the (single) reviewer to work directly on the mission worktree. The isolation would be by folder boundaries (owner works on docs, coder on code) and by file name boundaries (for .session files). My concern is that the branches get out of hand. In any case, the mission owner should update the main mission worktree code as soon as possible and commit it. Coders that work on a PR branch -- prepare the PR for final push, rebase, test, lint, DCO, etc. -- may be even more focused -- not interactive, no reviewer, no ledger, no state file, just report back to parent.
 8. The orchestrating session reviews each task's diff itself before starting the next task —
    not delegated to the coder, not skipped.
+   > REVIEW: yes. We need to try to run the tasks as a list of subtasks. Each with a clear step.
 9. **The mission owner cherry-picks approved commits from coder worktrees into the mission
    branch.** The mission branch is the single source of truth for that mission's code — coders
    work in their own isolated worktrees, and the mission owner integrates by cherry-picking
@@ -61,3 +70,15 @@ Rules for applying it:
   down to their sections.
 - Status is updated in place (current-state field); completion notes accumulate, they are not
   overwritten.
+
+> REVIEW: when invoking a task or a background task or receiving a task from me:
+> make sure all these are defined and the appropriated granularity --
+> what -- goal: ...
+> where -- file: ..., line: ... , function: ..., plan doc: ...  (relevant context, as specific as possible)
+> done -- complition criteria: ... (eg which tests must pass)
+> limits -- dont not change: ...
+>
+> The above should be defined in the task "mission file" when you invoke a new background task.
+> When I give you a task and you are not sure about any of these -- ask.
+>
+> On second thought, maybe these fields can just be part of the task template.

@@ -1,138 +1,94 @@
 # Conventions — cross-mission, cross-worktree
 
-Global process/behavioral rules for every mission tracked on this branch. Update only when a
-rule itself changes, not when any mission's state changes. This file and the skills here are
-maintained by the `policy-writer` mission. See `conventions/wip-editing.md` before editing
-this file.
+Every session must read this file before starting work. These are the standing rules that apply
+to every mission and role.
 
-This branch (`session-tracking`) holds global conventions, skills, and a suggestion box.
-Checked out in its own dedicated worktree (`worktrees/session-tracking/`), separate from every
-mission worktree.
+## Identify your mission and role first
 
-**Remote convention, repo-wide (not just this branch).** Push only to `origin`. `upstream` and
-`ofer` have push disabled. Confirm with `git remote -v` before assuming push behavior in a new
-worktree.
+Every session is tied to exactly one mission. Before doing any work, identify:
 
-**Worktree pinning and write boundaries.** Reads may cross worktree boundaries freely (full
-paths, `git -C`, `cat`, etc.). Writes may not — every write must target the session's own
-mission branch/worktree (the single stated exception: `policy-writer` writing into
-`session-tracking` as its own mission output). Never use `cd`, subshells, process
-substitution, or any other shell trick to route writes across that boundary — if a
-cross-worktree write is needed, ask the user first.
+- the mission name and its branch/worktree;
+- your role in that mission;
+- the session ledger you will maintain.
 
-A session pinned via `EnterWorktree` cannot write to any path outside the pinned worktree,
-even if a `permissions.allow` entry explicitly grants `Edit`/`Write` there — the isolation
-guard is a harness-level structural veto that fires before the allowlist is consulted, so the
-allowlist has no effect. Plain `Bash` shell redirection (e.g. `echo >>`) is not covered by
-the same veto and may succeed where `Edit`/`Write` are blocked — this is an inconsistency in
-what the guard covers, not a sanctioned workaround. If you find this gap, ask the user before
-routing around it via Bash.
+If any of these are unknown, ask the user before proceeding. Follow
+`conventions/session-start.md` to initialize the session. A session assuming the mission-owner
+role must also read `conventions/mission-owner.md`.
 
-`ExitWorktree` returns to the repo root; re-entering a worktree afterward requires interactive
-user authorization each time — do not rely on it as a free round-trip mid-task.
+## Work only within your mission worktree
 
-**This file is not auto-loaded.** A fresh session must be explicitly told to read
-`CONVENTIONS.md` (and the relevant mission's `STATE.md`) by full path. Say so when handing off
-to a new session or subagent.
+Every edit or write must target the session's own mission branch/worktree unless the user grants
+a specific exception. Other worktrees are outside the session's scope: do not edit, inspect
+their overall health, groom their files, or act as their maintainer.
 
----
+Never use `cd`, subshells, process substitution, shell redirection, or any other mechanism to
+route a write around the worktree boundary. When a cross-worktree write is required, ensure you
+have a specific exception or ask the user, then follow
+`conventions/writing-outside-worktree.md`.
 
-## Situational rules — read on demand
+Reads may cross worktree boundaries when needed (`git -C`, `cat`, full paths, etc.).
 
-Most of what used to live in this file only applies in a specific situation. Read the matching
-file below when that situation actually comes up — not upfront, not speculatively.
+## Situational rules — read when triggered
 
-- `conventions/wip-editing.md` — about to edit `STATE.md` or `CONVENTIONS.md`; or a plan was
-  just approved and needs to be persisted
-- `conventions/state-vs-ledger.md` — about to write to `STATE.md` or a ledger, or unsure which
-  one something belongs in
-- `conventions/resume-and-handoff.md` — running `/resume-mission` or `/wind-down`; taking over
-  or ending work on a mission
-- `conventions/feature-worktree-setup.md` — setting up a new mission worktree, or
-  `/resume-mission`/`/wind-down` found skills missing in one
-- `conventions/coder-orchestration.md` — about to dispatch or run a coder subagent
-- `conventions/settings-and-skill-edits.md` — about to edit `~/.claude/settings.json` or a
-  `SKILL.md`
-- `conventions/unexplained-files.md` — found something on disk you didn't put there and
-  can't explain
-- `conventions/pr-branch.md` — about to create a PR branch or open a PR
-- `conventions/pr-workflow.md` — about to open a PR or prepare a branch for one
+Read the matching file when its situation occurs, not speculatively:
+
+- `conventions/session-start.md` — starting any session; identify mission, role, state, and
+  ledger before working
+- `conventions/mission-owner.md` — assuming or acting in the mission-owner role
+- `conventions/state-vs-ledger.md` — maintaining mission state or a session ledger, or deciding
+  where information belongs
+- `conventions/resume-and-handoff.md` — resuming, taking over, handing off, or explicitly
+  winding down a mission
+- `conventions/writing-outside-worktree.md` — a write outside the mission worktree is required
+  or a pinned session encounters the worktree isolation guard
+- `conventions/feature-worktree-setup.md` — creating or migrating a mission worktree, or a skill
+  directs you there because required local setup is missing
+- `conventions/wip-editing.md` — editing `STATE.md` or `CONVENTIONS.md`, or persisting a newly
+  approved plan
+- `conventions/coder-orchestration.md` — dispatching or running a coder subagent
+- `conventions/settings-and-skill-edits.md` — editing `~/.claude/settings.json` or a `SKILL.md`
+- `conventions/unexplained-files.md` — finding an unexplained file or edit
+- `conventions/push.md` — considering any git push, after receiving explicit authorization for
+  that one push
+- `conventions/pr-branch.md` — creating and curating the ephemeral branch that will back a PR
+- `conventions/pr-workflow.md` — preparing to open the PR itself: checks, target, and GitHub API
 
 ## Repo layout
 
-```
-session-tracking/                  ← this branch
-  CONVENTIONS.md                   ← this file — global, edit with care (policy-writer only)
-  conventions/                     ← situational rules, read on demand — see above
-  suggestion-box/                  ← shared, any mission can post here
-  missions/
+```text
+session-tracking/                  ← global policy worktree; read-only unless specifically authorized
+  CONVENTIONS.md                   ← this file
+  conventions/                     ← situational rules
+  suggestion-box/                  ← atomic proposals for policy-writer
+  missions/                        ← read-only convenience symlinks
     <mission-name>/
-      STATE.md -> worktrees/<mission-name>/.session/STATE.md   ← symlink (read-only, convenience)
-      <plan>.md -> worktrees/<mission-name>/.session/<plan>.md  ← symlink per internal plan
-      ledgers/ -> worktrees/<mission-name>/.session/            ← symlink to ledger dir
+      STATE.md -> worktrees/<mission-name>/.session/STATE.md
+      <plan>.md -> worktrees/<mission-name>/.session/<plan>.md
+      ledgers/ -> worktrees/<mission-name>/.session/
 
-worktrees/<mission-name>/          ← mission branch (branch name = worktree name)
-  .session/                        ← mission tracking files; NEVER in a PR branch
-    STATE.md                       ← current state — mission owner reads/writes locally
-    <session-slug>.md              ← per-session ledger, append-only
-    <internal-plan>.md             ← internal plans not destined for any PR
-  <normal code tree>               ← shareable content: proposals, dev guides, external plans
+worktrees/<mission-name>/          ← mission branch/worktree
+  .session/                        ← mission state, ledgers, and internal plans; never in a PR branch
+  <normal code tree>               ← mission output
 ```
 
-Mission tracking files (`STATE.md`, ledgers, internal plans) live in the **mission's own
-branch/worktree** under `.session/` — not in `session-tracking`. The symlinks in
-`session-tracking/missions/<name>/` are a read-only convenience; if the worktree is not
-checked out locally, the symlink path encodes the branch name so the files can be retrieved
-via `git show <mission-name>:.session/STATE.md`.
-
-`policy-writer` creates and commits the symlinks in `session-tracking` — mission owners do not
-need to commit `session-tracking` themselves.
-
-## Who writes what
-
-- **Mission owner session:** owns that mission's `.session/STATE.md` and its internal plans.
-  Writes its own ledger. Cherry-picks approved code from coder worktrees into the mission
-  branch. Commits directly to the mission branch and pushes to `origin`. Declares/releases
-  ownership on agentbus (see `conventions/resume-and-handoff.md`).
-- **Sub-task / coder / reviewer sessions and agents:** read the mission's `STATE.md` and spec
-  docs for context (via the filesystem path or the `session-tracking` symlink). Never edit
-  them. Report status by appending to their own uniquely-named ledger file. If `STATE.md`
-  needs to change, say so back to the mission owner rather than editing directly.
-- **Ledgers are per-session and uniquely named** (e.g. `<date>-<short-slug>.md`), stored in
-  `.session/` on the mission branch.
-
-**Scope boundary.** A mission session's writes are confined to its own mission branch and
-`.session/` dir (plus `CONVENTIONS.md`, only when the work is genuinely `policy-writer`'s own
-mission output). Not the maintainer of `session-tracking` as a whole — that's `policy-writer`.
-Don't run `git fetch`/`git status` against `session-tracking` to check its overall health,
-don't push it, don't treat anything outside your own mission's `.session/` as yours to groom.
-If something about `session-tracking` needs attention, raise it with the user rather than
-acting on it unprompted.
-
-**Pushing `session-tracking` itself needs its own explicit ask each time** — a same-turn "yes"
-to one push is not standing authority for a later push, and is not equivalent to authorization
-for a mission-branch push. If in doubt, ask again, or route the question to whoever the user
-indicates maintains that branch.
+If a convenience symlink under `session-tracking/missions/` is broken, follow
+`conventions/feature-worktree-setup.md` rather than modifying another mission's files.
 
 ## Ground rules
 
-- Never assume — ask clarifying questions when unsure.
-- Long text stays out of chat. Any long tool output, subagent report, or file dump goes into a
-  document under the mission's `.session/` or code tree — never pasted inline in chat. Chat
-  replies stay short: pointers to where the detail lives, not the detail itself.
-- Don't ignore instructions — ask if a user instruction seems ambiguous or in tension with
-  something else, rather than silently picking an interpretation.
-- **Never stop/kill a running background task unless explicitly told to stop *that task*.** A
-  complaint about chat noise means suppress the commentary, not terminate the work.
-- **Ledger/state appends happen silently.** No chat reply is needed just to narrate that a
-  ledger/`STATE.md`/spec-doc write happened.
-- **Agentbus ownership.** When taking over a mission, declare ownership on agentbus on the
-  `mission.<mission-name>` topic before starting work. Release it when winding down. See
-  `conventions/resume-and-handoff.md` for the exact calls.
-- **No in-place editing except your own files.** For any file you don't fully own in this
-  session's context (i.e. not your own code file, your own ledger append, your own plan):
-  write new, then remove/replace old — never edit in place.
-- **Destructive actions need explicit per-step approval.** `git reset --hard`, `rm -rf`,
-  `git stash drop`, and equivalent operations are rare and need an explicit yes for each one —
-  not inferred from an earlier approval for a different step. If unsure, keep a backup copy
-  rather than proceeding.
+- Never assume. Ask when the mission, role, scope, authorization, or instruction is unclear.
+- Do not silently choose between ambiguous or conflicting instructions; ask.
+- Never push without explicit authorization for that specific push. Authorization is
+  single-use. After receiving it, read `conventions/push.md` before pushing.
+- Never stop or kill a running background task unless explicitly told to stop that task. A
+  request to reduce chat noise is not permission to terminate work.
+- Keep long content out of chat. Put long tool output, reports, and file dumps in the mission's
+  `.session/` directory or code tree; reply with a short pointer and status.
+- Maintain the session ledger continuously as findings, decisions, corrections, and false
+  starts occur. Ledger and state updates do not need chat narration.
+- Never edit files outside the mission and role you own.
+- Do not use in-place command-line rewriting (`sed -i`, `gawk -i`, Python `fileinput`, or
+  equivalents). Normal `Edit`/`Write` operations on owned, git-tracked files are allowed when
+  their pre-session state is already checkpointed.
+- Destructive actions (`git reset --hard`, `rm -rf`, `git stash drop`, and equivalents) require
+  explicit approval for each individual step. If unsure, preserve a backup instead.

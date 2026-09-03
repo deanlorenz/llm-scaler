@@ -1,6 +1,6 @@
 # Mission state — policy-writer
 
-**Last updated:** 2026-08-31. Overwritten on each update, not append-only. Mission tracking
+**Last updated:** 2026-08-31 (policy-writer-8 wind-down). Overwritten on each update, not append-only. Mission tracking
 files live at `worktrees/policy-writer/.session/` (mission branch). For global process rules
 see `worktrees/session-tracking/CONVENTIONS.md`. For the plan see `.session/spec-policy-writer.md`.
 
@@ -36,10 +36,12 @@ skills, and layout that let any mission resume cleanly without reloading full hi
 | Trim conventions files to what/how only | **DONE 2026-08-30 (Phase 2)** | Commit `6e99db7f`. `.bak` files retained for comparison. Phase 2 approved (checkpointed); `.bak` files not yet removed — ask on next resume. |
 | PR rules | **DONE 2026-08-31** | `conventions/pr-workflow.md` (3 rules) + `conventions/pr-branch.md` (PR branch lifecycle). Commits `c52c22d1`, `078648d4`. |
 | Mission file handling redesign — `.session/` in mission branch | **DONE 2026-08-31** | Full redesign: tracking files move to `.session/` on mission branch; `session-tracking/missions/` becomes symlinks only; agentbus ownership declaration/release; mission owners create symlinks, policy-writer commits. Conventions + skills updated. `policy-writer` itself migrated. Commits `078648d4`–`66d72cf2` (policy-writer), `db11bb23`–`a364a120` + `c50d8b1a` (session-tracking). |
+| Reader-focused conventions refinement | **IN PROGRESS 2026-08-31** | User reviewed `CONVENTIONS.md`; core rewrite and four new situational files drafted. Review paused at `conventions/coder-orchestration.md`; its runtime/subtask model remains unresolved and must not be encoded yet. |
 
 ## Immediate next step
 
-- Remove `.bak` files from `worktrees/policy-writer` (Phase 2 trim already committed at `6e99db7f` — `.bak` files were for review; that review is done) — or keep them, user's call.
+- Continue incorporating the user's reviews of each conventions file; do not finalize or copy to `session-tracking` until that review pass is complete.
+- Keep `.bak` files for now (user decision 2026-08-31).
 - Process suggestion-box lifecycle convention (what happens to processed entries — rename? archive? delete?) — currently using `processed-` prefix as interim.
 - Set up skill symlinks in other existing mission worktrees (`benchmark-*`, etc.).
 - Copy finished `policy-writer` branch content into `session-tracking` (still needs explicit go-ahead).
@@ -47,11 +49,11 @@ skills, and layout that let any mission resume cleanly without reloading full hi
 
 ## Open questions
 
-- `.bak` files from Phase 2 trim: keep committed for history, or delete now that review is done?
+- Final shape of the remaining situational files after the user's ongoing review.
 
 ## Session log
 
 - 2026-08-27 session=2026-08-27-session-tracking-setup status=retired ledger=.session/2026-08-27-session-tracking-setup.md
 - 2026-08-30 session=2026-08-30-conventions-split-and-trim status=retired ledger=.session/2026-08-30-conventions-split-and-trim.md
 - 2026-08-31 session=2026-08-31-policy-writer-7 status=retired ledger=.session/2026-08-31-policy-writer-7.md
-- 2026-08-31 session=2026-08-31-policy-writer-8 status=active ledger=.session/2026-08-31-policy-writer-8.md
+- 2026-08-31 session=2026-08-31-policy-writer-8 status=retired ledger=.session/2026-08-31-policy-writer-8.md
