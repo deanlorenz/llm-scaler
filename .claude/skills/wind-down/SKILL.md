@@ -9,9 +9,9 @@ disable-model-invocation: true
 # Wind down
 
 This skill's job is to leave the mission in a state a fresh (or resuming) session can safely
-pick up from — not to finish the mission. Skipping steps under time pressure is fine (noted
-per-step below); skipping the report at the end is not — always tell the user the actual
-outcome, including if something couldn't be done.
+pick up from — not to finish the mission. Steps 1 and 3 are never skippable. Other steps note
+their own skip rules. Skipping the report at the end is never acceptable — always tell the
+user the actual outcome, including if something couldn't be done.
 
 ## Step 1: Reach a safe stopping point
 
@@ -35,15 +35,24 @@ what did — a false start recorded is as valuable as a task completed.
 Skippable if genuinely short on time, but skipping this is the biggest loss — it's the one
 thing ledger-capture (Step 5) needs to have something to work from.
 
-## Step 3: Update STATE.md if warranted
+## Step 3: Update STATE.md
 
-If anything you did changes the mission's actual state — a task's status, the immediate next
-step, a new open question — update `<mission-worktree>/.session/STATE.md` now, via the `.wip`
-protocol (`conventions/wip-editing.md`). `STATE.md` is local in the mission worktree — no
-cross-worktree exit/re-enter needed. Don't touch it if nothing changed.
+This step is **not skippable**. Update `<mission-worktree>/.session/STATE.md` now, via the
+`.wip` protocol (`conventions/wip-editing.md`). `STATE.md` is local in the mission worktree —
+no cross-worktree exit/re-enter needed.
 
-Skippable if short on time — an out-of-date `STATE.md` will surface as a discrepancy the next
-`/resume-mission` catches, or ledger-capture (Step 5) may catch it directly.
+Required every wind-down, regardless of time pressure:
+- Mark completed steps `[x]` in the checklist
+- Set **Last completed** to the last finished step
+- Set **Next step / resume point** to exactly where the next session should pick up
+- Update **Status**
+- If you changed the STATE template (`conventions/state-vs-ledger.md`) or any field annotation
+  this session: apply the same change to this living STATE.md in this same step — template and
+  living file must stay in sync
+
+The only part ledger-capture (Step 5) may still update afterward is findings it surfaces from
+the ledger text — that is what "skippable if out of time" applies to, not the continuation
+fields above.
 
 ## Step 4: Commit uncommitted work and push
 

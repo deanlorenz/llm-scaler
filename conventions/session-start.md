@@ -70,7 +70,8 @@ You are starting a new mission. You do not have a task yet.
 
 - Maintain the ledger continuously — append findings, decisions, corrections, false starts
   as they happen.
-- Update the Status field in STATE when it changes.
+- Update STATE after each major step — mark completed items `[x]`, update Last completed,
+  Next step, and Status. Do not wait for wind-down.
 - Never push to git or publish without explicit per-operation authorization.
 - Skills (`/resume-mission`, `/wind-down`, `ledger-capture`) may be invoked as a subtask or
   subagent — they get their own context window either way, which is the point.
