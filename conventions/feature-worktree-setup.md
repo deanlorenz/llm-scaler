@@ -26,6 +26,11 @@ for the pre-push check.
 worktree's own root. Each worktree needs its own local symlink to these two skills before
 `/resume-mission` or `/wind-down` will show up there.
 
+The skill source files live at `worktrees/session-tracking/.claude/skills/` — this is
+tracked source storage for the canonical SKILL.md files, not an active skill directory.
+No session runs out of `session-tracking` as its own worktree. Each feature worktree
+symlinks to this source to get its own discoverable copy.
+
 ```bash
 cd worktrees/<mission-name>/.claude/skills
 ln -s ../../../session-tracking/.claude/skills/resume-mission resume-mission
