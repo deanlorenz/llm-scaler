@@ -398,3 +398,24 @@ Key changes:
   ledger refs STATE + previous ledger.
 
 Not yet copied to `session-tracking`.
+
+### T10 — Session-setup custom-agent (FG)
+
+**Status.** DESIGN CAPTURED 2026-09-03 (policy-writer-9). Not yet implemented.
+
+**What it is:** a foreground (FG) custom-agent that prepares the environment for a new
+session before that session starts. Mechanical tasks, simple model, runs out of the main
+session's context.
+
+**Steps it handles:**
+- Create the worktree (if needed)
+- Create missing symlinks (skill symlinks per `feature-worktree-setup.md`)
+- Create the initial STATE file from the unified template (`state-vs-ledger.md`)
+- Populate STATE: name, conventions path, mission, role, worktree, ledger path, task fields
+- Find and link relevant context files
+- Commit the STATE file to the mission branch
+
+**Why FG:** the setup result (STATE file path) needs to be confirmed before the main session
+starts. FG allows the user to verify before handoff.
+
+**Not yet:** no spec written, no implementation. Record only.

@@ -1,6 +1,6 @@
 # Mission state — policy-writer
 
-**Last updated:** 2026-09-03 (policy-writer-9). Overwritten on each update, not append-only.
+**Last updated:** 2026-09-03 (policy-writer-9, continued). Overwritten on each update, not append-only.
 Mission tracking files live at `worktrees/policy-writer/.session/` (mission branch). For
 global process rules see `worktrees/session-tracking/CONVENTIONS.md`. For the plan see
 `.session/spec-policy-writer.md`.
@@ -37,6 +37,7 @@ skills, and layout that let any mission resume cleanly without reloading full hi
 | Mission file handling redesign — `.session/` in mission branch | **DONE 2026-08-31** | Multiple commits. |
 | Coder orchestration — Claude/Bob worker model (T8) | **DONE 2026-09-03** | Commits `0f64564b`, `c9288a40`. New: `conventions/tasks.md`, spec T8 section. |
 | Reader-focused conventions review pass (T9) | **DONE 2026-09-03** | Commits `e407102b`–`5eb61b84`. All `conventions/*.md` reviewed and processed. |
+| Unified STATE template + session-start redesign (T9 continued) | **DONE 2026-09-03** | Commit `743a5443`. Unified STATE/task template; session-start simplified; tasks.md as writer guide. T10 (session-setup agent) captured in spec. |
 
 ## Immediate next step
 
@@ -47,14 +48,13 @@ skills, and layout that let any mission resume cleanly without reloading full hi
   lifecycle deferred.
 - Verify `settings-and-skill-edits.md` marker behavior still applies (origin is 2026-08-27
   observed harness behavior; user does not recognize the rule).
-- Full STATE/ledger/task template unification deferred to future pass.
 - `.bak` files: keep for now (user decision 2026-08-31).
+- T10 (session-setup agent): spec not yet written; design captured in spec-policy-writer.md.
 
 ## Open questions
 
 - `settings-and-skill-edits.md`: is the `user-approved-settings-change` marker requirement
   still a real harness constraint?
-- `feature-worktree-setup.md`: candidate for custom-agent delegation — when to act on this?
 
 ## Session log
 
