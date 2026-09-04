@@ -82,3 +82,36 @@ Sessions read sections 1–2 upfront. Sections 3+ are on-demand only.
 6. Install all changes into session-tracking and push.
 
 ## Work log
+
+## Wind-down (2026-09-04)
+
+All work this session is committed on both branches. Not yet pushed (awaiting test + authorization).
+
+### Commits this session
+
+**policy-writer branch:**
+- `94388bea` — feat(conventions): upfront-read rules, Context/Refs split, canonical spec structure (T9b/T9c/T9d)
+- `eb248678` — docs(conventions): clarify session-tracking .claude/skills/ is source storage, not active skill dir
+
+**session-tracking branch:**
+- `4e7ecf10` — feat(skills): resume-mission — custom-agent direction, new orientation format, no upfront plan/ledger reads
+- `ca005f9f` — feat(conventions): upfront-read rules, Context/Refs split, canonical spec structure, tasks.md spec template
+- `6ab92330` — docs(conventions): clarify session-tracking .claude/skills/ is source storage, not active skill dir
+
+### Files changed this session
+
+- `conventions/session-start.md` — reading rules upfront section; opening orientation format; new-ledger-at-start; session-log append; skills-own-context note
+- `conventions/state-vs-ledger.md` — split Context/Refs → Context + Refs; Plan/spec (do not read upfront) note
+- `CONVENTIONS.md` — standing rule added: never read plan/spec or ledger files at session start; .claude/skills/ source storage note in layout
+- `conventions/tasks.md` — Context/Refs field split; Plan/spec upfront note; canonical mission spec structure added
+- `conventions/feature-worktree-setup.md` — source storage clarification for .claude/skills/
+- `.session/spec-policy-writer.md` — refactored into 8-section canonical structure
+- `.session/STATE.md` — updated ledger, steps, next step, session log
+- `.session/2026-09-04-policy-writer-10.md` — this ledger (new)
+- `session-tracking/.claude/skills/resume-mission/SKILL.md` — custom-agent direction note; Step 4 no upfront plan/ledger reads; Step 8 fixed orientation format; Step 9 new ledger creation
+
+### Next step after push
+
+Update STATE with push commits, then proceed to T10 (resume-mission custom-agent spec).
+
+## Verified 2026-09-04 — all points captured in STATE and commits above

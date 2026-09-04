@@ -74,4 +74,4 @@ IN PROGRESS — three tasks remaining: skills update, ledger-capture custom-agen
 - 2026-08-31 session=2026-08-31-policy-writer-7 status=retired ledger=.session/2026-08-31-policy-writer-7.md
 - 2026-08-31 session=2026-08-31-policy-writer-8 status=retired ledger=.session/2026-08-31-policy-writer-8.md
 - 2026-09-03 session=2026-09-03-policy-writer-9 status=retired ledger=.session/2026-09-03-policy-writer-9.md
-- 2026-09-04 session=2026-09-04-policy-writer-10 status=active ledger=.session/2026-09-04-policy-writer-10.md
+- 2026-09-04 session=2026-09-04-policy-writer-10 status=retired ledger=.session/2026-09-04-policy-writer-10.md
