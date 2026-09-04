@@ -32,10 +32,12 @@ else first:
 
 **Task fields** — fill these so the session knows exactly what to do and what to leave alone:
 
-- **Plan / spec:** the plan doc or spec the session follows. Pass the exact path.
-- **Context / refs:** any additional files the session should read before starting — related
-  docs, prior ledgers, reference material. One path per line. Keep this short; only files
-  the session genuinely needs.
+- **Plan / spec:** the plan doc or spec the session follows. Pass the exact path. Workers do
+  not read this upfront — they pull it on demand as needed.
+- **Context:** files the session must read to do the work — active reference material, not
+  plan docs. One path per line. Keep this short; only files genuinely needed.
+- **Refs:** cited related files — do not read unless explicitly needed. Prior ledgers,
+  background docs, output files from this mission. One path per line.
 - **Expected output:** what the session produces — a file, a set of commits, a review report,
   a finding. Be specific enough that completion is unambiguous.
 - **Done / completion criteria:** checkable claims. Not "do the work" but "X exists, verified
@@ -80,3 +82,45 @@ worktree. Pass the path in the launch prompt.
 
 The STATE file must be complete and committed before invocation. A session that starts with
 an incomplete STATE must ask the user before proceeding.
+
+## Mission spec / roadmap structure
+
+For missions with extended history and multiple tasks (i.e. a plan/spec doc like
+`spec-policy-writer.md`), use this canonical structure. Sessions read sections 1–2 upfront
+and stop; everything below is on-demand.
+
+```
+## 1. Quick summary / orientation
+   One paragraph: what this mission builds and why.
+
+## 2. Principles / approach           ← READ UP TO HERE UPFRONT. STOP.
+   Compact bullet list: settled design decisions, standing rules, key constraints.
+   What/how only — no incident narration. Rationale lives in section 7.
+
+## 3. At-a-glance
+   Short table: branch/worktree, installs-into, status, last pushed, active work, blocking.
+   Human-readable; for the user to scan at a glance.
+
+## 4. Needs me
+   Decision points and open questions blocked on user ruling.
+   Pull this section when you need a decision, not at session start.
+
+## 5. Roadmap / checklist
+   Flat checklist of all tasks with status. One line per task.
+
+## 6. Outline
+   Table: task/discussion name | one-line summary | status.
+   Navigational index into section 7. Pull to find a specific detail.
+
+## 7. Details
+   Full content for each task and discussion: what was done, commits, rationale, incidents.
+   Pull individual subsections on demand; do not read the whole section upfront.
+
+## 8. Other / Refs
+   Mission-specific sections (findings, captured discussions, etc.).
+   Related files (do not read unless explicitly needed).
+```
+
+**Reading rule for mission specs:** a session reads sections 1–2 at session start as part
+of its context pull. It does not read sections 3+ unless it needs a specific item — look it
+up by section or outline entry, read only that subsection.

@@ -9,7 +9,7 @@
 - **Worktree:** `worktrees/policy-writer` (branch `policy-writer`)
 - **Role / scope:** Mission owner. Drafts all changes to `CONVENTIONS.md`, `conventions/`,
   and the skills here; copies finished content into `session-tracking`.
-- **Ledger / log:** `.session/2026-09-03-policy-writer-9.md` (active)
+- **Ledger / log:** `.session/2026-09-04-policy-writer-10.md` (active)
 
 ## Task
 
@@ -42,17 +42,19 @@
 - [x] Unified STATE/task template; `session-start.md` simplified; `tasks.md` as writer guide
 - [x] Verify old CONVENTIONS content captured; fix gap (commit-cadence rule)
 - [x] Install `CONVENTIONS.md` + `conventions/` onto `session-tracking`; push to `origin`
-- [ ] Update `resume-mission` and `wind-down` skills — align with new STATE model
+- [ ] Fix session-start.md, state-vs-ledger.md — upfront reading rules, Context/Refs split
+- [ ] Refactor spec-policy-writer.md into canonical spec structure
+- [ ] Document canonical spec structure in tasks.md
+- [ ] Update resume-mission skill — note custom-agent direction
 - [ ] Rewrite ledger-capture as a custom-agent (spec + mode)
 - [ ] Write T10 session-setup agent spec
 
 **Last completed:** Install + push to `origin` (commit `1427f964` on `session-tracking`,
 `d52e4f86` on `policy-writer`)
 
-**Next step / resume point:** Update `resume-mission` skill first — read current
-`.claude/skills/resume-mission/SKILL.md`, then draft changes against the new conventions
-(unified STATE model, per-session STATE file, session-setup agent). Confirm with user before
-editing.
+**Next step / resume point:** Fix `session-start.md` — add upfront reading rules (no plan
+docs, no ledger files, new ledger at start, session log append). Then fix
+`state-vs-ledger.md` Context/Refs split. Confirm each file with user before installing.
 
 ### Status
 IN PROGRESS — three tasks remaining: skills update, ledger-capture custom-agent, T10 spec.
@@ -72,3 +74,4 @@ IN PROGRESS — three tasks remaining: skills update, ledger-capture custom-agen
 - 2026-08-31 session=2026-08-31-policy-writer-7 status=retired ledger=.session/2026-08-31-policy-writer-7.md
 - 2026-08-31 session=2026-08-31-policy-writer-8 status=retired ledger=.session/2026-08-31-policy-writer-8.md
 - 2026-09-03 session=2026-09-03-policy-writer-9 status=retired ledger=.session/2026-09-03-policy-writer-9.md
+- 2026-09-04 session=2026-09-04-policy-writer-10 status=active ledger=.session/2026-09-04-policy-writer-10.md
