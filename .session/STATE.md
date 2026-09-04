@@ -42,7 +42,7 @@ skills, and layout that let any mission resume cleanly without reloading full hi
 
 ## Immediate next step
 
-- Push `session-tracking` to `origin` — 54+ commits ahead, needs explicit authorization.
+- Push `session-tracking` to `origin` — **DONE 2026-09-03** (54 commits, `1427f964`).
 - Suggestion-box lifecycle convention — currently using `processed-` prefix, formal
   lifecycle deferred.
 - Verify `settings-and-skill-edits.md` marker behavior still applies (origin is 2026-08-27

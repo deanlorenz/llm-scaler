@@ -477,3 +477,8 @@ Copied CONVENTIONS.md + all conventions/*.md (14 files) from policy-writer branc
 session-tracking worktree. Commit 1427f964 on session-tracking branch.
 .bak files NOT copied (stayed on policy-writer branch only).
 agentbus changes in session-tracking left unstaged (not this mission's files).
+
+## Push to origin (2026-09-03)
+
+Pushed session-tracking branch to origin/session-tracking.
+54 commits, abd63166..1427f964. Remote: deanlorenz/llm-scaler.
