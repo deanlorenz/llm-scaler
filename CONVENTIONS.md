@@ -60,6 +60,9 @@ session-tracking/                  ← global policy worktree; read-only unless 
   CONVENTIONS.md                   ← this file
   conventions/                     ← situational rules
   suggestion-box/                  ← atomic proposals for policy-writer
+  .claude/skills/                  ← source storage for skill files; NOT an active skill directory
+    resume-mission/SKILL.md        ← canonical source; feature worktrees symlink to this
+    wind-down/SKILL.md             ← canonical source; feature worktrees symlink to this
   missions/                        ← read-only convenience symlinks
     <mission-name>/
       STATE.md -> worktrees/<mission-name>/.session/STATE.md
