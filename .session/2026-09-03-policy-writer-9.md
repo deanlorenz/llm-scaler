@@ -482,3 +482,10 @@ agentbus changes in session-tracking left unstaged (not this mission's files).
 
 Pushed session-tracking branch to origin/session-tracking.
 54 commits, abd63166..1427f964. Remote: deanlorenz/llm-scaler.
+
+## Additional todos from user (2026-09-03)
+
+- Update skills: wind-down and resume-mission need to reflect new conventions (STATE model,
+  per-session STATE file, session-setup agent concept, unified template).
+- Rewrite ledger-capture as a custom-agent (currently described as a background agent in
+  resume-and-handoff.md but not implemented as a proper custom-agent with its own spec/mode).

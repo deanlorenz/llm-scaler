@@ -42,13 +42,13 @@ skills, and layout that let any mission resume cleanly without reloading full hi
 
 ## Immediate next step
 
-- Push `session-tracking` to `origin` — **DONE 2026-09-03** (54 commits, `1427f964`).
-- Suggestion-box lifecycle convention — currently using `processed-` prefix, formal
-  lifecycle deferred.
-- Verify `settings-and-skill-edits.md` marker behavior still applies (origin is 2026-08-27
-  observed harness behavior; user does not recognize the rule).
-- `.bak` files: keep for now (user decision 2026-08-31).
-- T10 (session-setup agent): spec not yet written; design captured in spec-policy-writer.md.
+- Update skills: `wind-down` and `resume-mission` — reflect new conventions (unified STATE
+  model, per-session STATE file, session-setup agent concept).
+- Rewrite ledger-capture as a proper custom-agent (spec + mode).
+- T10 (session-setup agent): spec not yet written.
+- Suggestion-box lifecycle convention — deferred.
+- Verify `settings-and-skill-edits.md` marker behavior still applies.
+- `.bak` files: keep for now.
 
 ## Open questions
 
