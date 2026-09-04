@@ -1,59 +1,69 @@
-# Mission state — policy-writer
+# policy-writer
 
-**Last updated:** 2026-09-03 (policy-writer-9, continued). Overwritten on each update, not append-only.
-Mission tracking files live at `worktrees/policy-writer/.session/` (mission branch). For
-global process rules see `worktrees/session-tracking/CONVENTIONS.md`. For the plan see
-`.session/spec-policy-writer.md`.
+## Orientation
 
-## Worktrees used for this mission
+- **Conventions:** `worktrees/session-tracking/CONVENTIONS.md`
+- **What / goal / mission:** Build and maintain the cross-mission, cross-worktree
+  session-tracking system — the conventions, skills, and layout that let any mission resume
+  cleanly without reloading full history.
+- **Worktree:** `worktrees/policy-writer` (branch `policy-writer`)
+- **Role / scope:** Mission owner. Drafts all changes to `CONVENTIONS.md`, `conventions/`,
+  and the skills here; copies finished content into `session-tracking`.
+- **Ledger / log:** `.session/2026-09-03-policy-writer-9.md` (active)
 
-- `worktrees/policy-writer` (branch `policy-writer`) — mission branch. All drafting of
-  changes to `CONVENTIONS.md`/the skills/conventions files happens here. Tracking files
-  (`STATE.md`, ledgers, spec) live in `.session/` on this branch per the new layout.
+## Task
 
-## Mission, one line
+- **Plan / spec:** `.session/spec-policy-writer.md`
+- **Context / refs:**
+  - `worktrees/session-tracking/CONVENTIONS.md` (installed copy — production)
+  - `worktrees/session-tracking/conventions/` (installed copies)
+  - `.claude/skills/resume-mission/SKILL.md`
+  - `.claude/skills/wind-down/SKILL.md`
+- **Expected output:** Updated skills (`resume-mission`, `wind-down`); ledger-capture
+  custom-agent spec + mode; session-setup agent spec (T10).
+- **Done / completion criteria:**
+  - `resume-mission` and `wind-down` skills reflect unified STATE model and new conventions
+  - ledger-capture rewritten as a custom-agent with its own spec and mode definition
+  - T10 session-setup agent has a written spec
+  - All changes installed into `session-tracking` and pushed to `origin`
+- **Limits:**
+  - `.bak` files: keep, do not delete (user decision 2026-08-31)
+  - `settings-and-skill-edits.md`: do not change until marker behavior verified
+  - `session-tracking` agentbus files: not this mission's — do not touch
+- **Extra rules / rule refs:** `conventions/settings-and-skill-edits.md` before editing any
+  `SKILL.md`
 
-Build and maintain the cross-mission, cross-worktree session-tracking system: the conventions,
-skills, and layout that let any mission resume cleanly without reloading full history.
+## Execution
 
-## Task status
+### Steps / subtasks
+- [x] Rewrite `conventions/coder-orchestration.md` with Claude/Bob worker model (T8)
+- [x] Create `conventions/tasks.md` — task spec / writer guide
+- [x] Full review pass of all `conventions/*.md` files (T9)
+- [x] Unified STATE/task template; `session-start.md` simplified; `tasks.md` as writer guide
+- [x] Verify old CONVENTIONS content captured; fix gap (commit-cadence rule)
+- [x] Install `CONVENTIONS.md` + `conventions/` onto `session-tracking`; push to `origin`
+- [ ] Update `resume-mission` and `wind-down` skills — align with new STATE model
+- [ ] Rewrite ledger-capture as a custom-agent (spec + mode)
+- [ ] Write T10 session-setup agent spec
 
-| Task | Status | Notes |
-|---|---|---|
-| Branch/worktree setup | **DONE** | Commit `e65f67ed`. |
-| `.wip` concurrent-edit protocol | **DONE** | Documented. |
-| Session log format + ledger-capture | **DONE, validated once** | Commits `2b4927ba`, `14ce29d3`. |
-| `/resume-mission` skill | **DONE** | Exercised end-to-end 2026-08-29. |
-| `/wind-down` skill | **DONE** | Not yet exercised end-to-end. |
-| Skill discoverability across worktrees | **DONE for `single-analyzer` only** | Others self-heal on first `/resume-mission` use. |
-| `pr-review` skill disabled | **DONE** | `skillOverrides: {"pr-review": "off"}`. |
-| Own mission tracking | **DONE 2026-08-27** | |
-| Audit pass + agentbus feedback fixes | **DONE 2026-08-27** | 6 ambiguities fixed. |
-| Corrected worktree/mission model | **DONE 2026-08-28** | Commits `63ab0d36`, `b918acf0`. |
-| Standing rule: never deviate from approved plan | **DONE 2026-08-28** | Saved as durable memory. |
-| Ledger-capture contract correction | **DONE 2026-08-31** | Commit `f7508d08`. |
-| Split `CONVENTIONS.md` into core + `conventions/*.md` | **DONE 2026-08-30** | Commits `eb5f5027`, `6e99db7f`. |
-| PR rules | **DONE 2026-08-31** | Commits `c52c22d1`, `078648d4`. |
-| Mission file handling redesign — `.session/` in mission branch | **DONE 2026-08-31** | Multiple commits. |
-| Coder orchestration — Claude/Bob worker model (T8) | **DONE 2026-09-03** | Commits `0f64564b`, `c9288a40`. New: `conventions/tasks.md`, spec T8 section. |
-| Reader-focused conventions review pass (T9) | **DONE 2026-09-03** | Commits `e407102b`–`5eb61b84`. All `conventions/*.md` reviewed and processed. |
-| Unified STATE template + session-start redesign (T9 continued) | **DONE 2026-09-03** | Commit `743a5443`. Unified STATE/task template; session-start simplified; tasks.md as writer guide. T10 (session-setup agent) captured in spec. |
-| Verification + install onto session-tracking | **DONE 2026-09-03** | Gap found and fixed (commit-cadence rule, `4492b8cf`). Installed: `1427f964` on session-tracking. |
+**Last completed:** Install + push to `origin` (commit `1427f964` on `session-tracking`,
+`d52e4f86` on `policy-writer`)
 
-## Immediate next step
+**Next step / resume point:** Update `resume-mission` skill first — read current
+`.claude/skills/resume-mission/SKILL.md`, then draft changes against the new conventions
+(unified STATE model, per-session STATE file, session-setup agent). Confirm with user before
+editing.
 
-- Update skills: `wind-down` and `resume-mission` — reflect new conventions (unified STATE
-  model, per-session STATE file, session-setup agent concept).
-- Rewrite ledger-capture as a proper custom-agent (spec + mode).
-- T10 (session-setup agent): spec not yet written.
-- Suggestion-box lifecycle convention — deferred.
-- Verify `settings-and-skill-edits.md` marker behavior still applies.
-- `.bak` files: keep for now.
+### Status
+IN PROGRESS — three tasks remaining: skills update, ledger-capture custom-agent, T10 spec.
 
-## Open questions
-
-- `settings-and-skill-edits.md`: is the `user-approved-settings-change` marker requirement
-  still a real harness constraint?
+### Known issues
+- `settings-and-skill-edits.md` describes a `user-approved-settings-change` marker
+  requirement. Origin is 2026-08-27 observed harness behavior; user does not recognize the
+  rule. Verify before editing any `SKILL.md` — the marker requirement may or may not still
+  apply.
+- Suggestion-box lifecycle (what happens to `processed-*` entries) formally undefined —
+  using `processed-` prefix as interim.
 
 ## Session log
 
@@ -61,4 +71,4 @@ skills, and layout that let any mission resume cleanly without reloading full hi
 - 2026-08-30 session=2026-08-30-conventions-split-and-trim status=retired ledger=.session/2026-08-30-conventions-split-and-trim.md
 - 2026-08-31 session=2026-08-31-policy-writer-7 status=retired ledger=.session/2026-08-31-policy-writer-7.md
 - 2026-08-31 session=2026-08-31-policy-writer-8 status=retired ledger=.session/2026-08-31-policy-writer-8.md
-- 2026-09-03 session=2026-09-03-policy-writer-9 status=active ledger=.session/2026-09-03-policy-writer-9.md
+- 2026-09-03 session=2026-09-03-policy-writer-9 status=retired ledger=.session/2026-09-03-policy-writer-9.md

@@ -489,3 +489,12 @@ Pushed session-tracking branch to origin/session-tracking.
   per-session STATE file, session-setup agent concept, unified template).
 - Rewrite ledger-capture as a custom-agent (currently described as a background agent in
   resume-and-handoff.md but not implemented as a proper custom-agent with its own spec/mode).
+
+## Wind-down summary (2026-09-03)
+
+All work this session is committed and pushed. STATE rewritten to unified template with
+continuation fields populated per tasks.md. Session marked retired in session log.
+
+All key decisions, user feedback, and design rationale captured in ledger sections above.
+
+## Verified 2026-09-03 — all points captured in STATE and spec
