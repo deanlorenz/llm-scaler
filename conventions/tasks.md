@@ -1,80 +1,82 @@
-# Task specs (when defining or receiving a task)
+# Writing and assigning tasks
 
-Read this when defining a task for any worker (coder, reviewer, researcher, or any delegated
-session), or when receiving a task and verifying it is complete enough to start.
+Read this when writing a task spec for any worker (coder, reviewer, researcher, or any
+delegated session), or when you receive a task directly from the user and need to create a
+STATE file from it.
 
-## Who writes and who reads
+Receivers (sessions that already have a STATE file prepared for them) do not need to read
+this file — their STATE file is the task.
 
-The mission owner writes task specs. Task owners (coder, reviewer, researcher) read them.
-A mission's plan doc contains the full list of task specs. When delegating a task the mission
-owner copies the relevant task spec(s) from the plan, refines them with the specific context
-needed for that worker (exact file paths, line numbers, function names), and places the result
-in the worker's worktree as `.session/task-<id>.md` before invocation.
+## Who writes, who reads
 
-A resuming worker session uses its task file to understand what it should do and where it left
-off — the task file must be self-contained enough to orient a fresh session without re-reading
-the full mission plan.
+The mission owner (or user) writes task specs. Workers read their STATE file. The mission
+owner copies and refines task specs from the plan into a STATE file placed in the worker's
+worktree before invocation.
 
-## Task spec template
+## Field guide
 
-```markdown
-### <Task ID> — <short name>
+Use the unified STATE template from `conventions/state-vs-ledger.md`. Every field below maps
+to a field in that template.
 
-**What / goal.** One or two sentences: what the task produces and why it exists.
+**Orientation fields** — fill these so the session can orient itself without reading anything
+else first:
 
-**Where / context.**
-- Worktree: `worktrees/<name>` (branch `<branch>`)
-- Plan doc: `<path>`
-- Key files in scope: `<file>`, `<file>`, ...
+- **Name:** session slug (e.g. `2026-09-03-coder-ct1`). Unique; sortable.
+- **Conventions:** always `worktrees/session-tracking/CONVENTIONS.md`. Do not change.
+- **What / goal / mission:** one or two sentences — what this session produces and why.
+- **Worktree:** the exact path the session works in. Prepare it before invocation.
+- **Role / scope:** the session's role and what it is and is not authorized to do. Be
+  explicit — do not leave scope to inference.
+- **Ledger / log:** the file the session will append to. Name it before invocation;
+  the session creates it on first write.
 
-**Done / completion criteria.** Checkable claims — not "do the work" but "X exists, verified
-by Y." List the tests, lint checks, or other validations that must pass.
+**Task fields** — fill these so the session knows exactly what to do and what to leave alone:
 
-**Limits / do not change.**
-- Files, directories, or behaviors that are out of scope.
-- Standing rules the worker must not override.
+- **Plan / spec:** the plan doc or spec the session follows. Pass the exact path.
+- **Context / refs:** any additional files the session should read before starting — related
+  docs, prior ledgers, reference material. One path per line. Keep this short; only files
+  the session genuinely needs.
+- **Expected output:** what the session produces — a file, a set of commits, a review report,
+  a finding. Be specific enough that completion is unambiguous.
+- **Done / completion criteria:** checkable claims. Not "do the work" but "X exists, verified
+  by Y." For coders: which tests must pass, which lint checks must clear.
+- **Limits:** what the session must not change, what it must preserve, what is out of scope.
+  For coders resuming a prior session: what state to keep, where to resume from.
+- **Extra rules / rule refs:** optional. Paths to additional `conventions/*.md` files the
+  session must read for this task specifically.
 
-**Subtasks.**
-- [ ] Sub-item, smallest unit worth its own status
-- [ ] Sub-item
+**Execution fields** — fill these with the initial plan; the session updates them as work
+proceeds:
 
-**Refs.**
-- *Reads:* `<doc>`, `<doc>`
-- *Writes:* `<file>`, `<ledger>`
+- **Steps / subtasks:** a checklist. Each item is the smallest unit worth its own status.
+  The session checks items off as it completes them and records the last completed step.
+- **Next step / resume point:** leave blank initially; the session fills this as it works.
+  On interactive sessions it confirms the next step with the user before running it.
+- **Status:** set to `NOT STARTED` before invocation. The session updates this as it works.
+  Valid values for workers: `NOT STARTED` | `IN PROGRESS — <what's left>` |
+  `DONE <date>` | `BLOCKED on <thing>`.
+- **Known issues:** optional. Fill in any known constraints or risks before invocation.
 
-**Status.** One of:
-- `NOT STARTED`
-- `IN PROGRESS — <what's left>` (see continuation below)
-- `DONE <date> — <brief completion note>`
-- `BLOCKED on <thing>`
-```
+## Continuation (handing off a partially done task)
 
-## Field rules
+When a task is `IN PROGRESS` and a new session is taking over, update the STATE file before
+the new session starts:
 
-- Every field is required. If any field is missing when a task is received from the user, ask
-  before starting.
-- Status is updated in place; completion notes accumulate and are not overwritten.
-- A task with sub-tasks: one outer section in this shape, each sub-task nested in the same
-  shape; the outer Subtasks list links down to the nested sections.
+- Set **Last completed** to the last finished step.
+- Set **Next step / resume point** to exactly where the new session should pick up.
+- Update **Limits** with any state that must be preserved.
+- Add a **Known issues** entry for anything the new session must know.
 
-## Continuation (resuming a previously started task)
+The new session reads the updated STATE and starts from the resume point — it does not
+re-derive context from scratch.
 
-When `Status` is `IN PROGRESS` and a new worker session is taking over (due to failure,
-restart, or handoff), the mission owner adds a continuation block before the worker resumes:
+## Delivery
 
-```markdown
-**Continue from.**
-- Last completed subtask: `<id>`
-- State to preserve: <what must not be changed or discarded>
-- Resume point: <file, function, line, or subtask to start from>
-- Known issues: <anything the resuming session must know>
-```
+For Claude FW/BG workers: pass the STATE file path in the invocation message. The session
+reads it as its first action.
 
-The mission owner fills this block — the resuming worker does not infer it.
+For Bob CLI workers: place the STATE file at `.session/<slug>.STATE.md` in the prepared
+worktree. Pass the path in the launch prompt.
 
-## Alignment note
-
-The fields in this template (what/where/done/limits) are intentionally named to align with
-the session ledger header (`conventions/session-start.md`) and the mission `STATE.md` — the
-same information at different levels of detail. Full field unification across these three
-templates is deferred to a future pass.
+The STATE file must be complete and committed before invocation. A session that starts with
+an incomplete STATE must ask the user before proceeding.

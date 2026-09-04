@@ -1,44 +1,65 @@
 # `STATE.md` vs. a session ledger
 
-Read this when creating the initial state or ledger files for a session, or when unsure which
-one something belongs in.
+Read this when creating initial state or ledger files for a session, or when unsure which one
+a piece of information belongs in.
 
-- **`STATE.md` is what a resuming session reads.** Keep it self-contained and current: current
-  task status, blockers, the immediate next step, pointers into the plan/spec doc. Write only
-  the **actionable bottom line** — not the story of how a finding was reached. Overwrite it in
-  place (except the Session log subsection, which is append-only, short lines, no narrative).
+- **`STATE.md` / session STATE file** is what a session reads to orient itself and what it
+  updates as work progresses. Self-contained: mission, role, task, current status, next step.
+  Written before the session starts (by the parent or mission owner); updated in place as
+  status changes. The session log section is append-only.
 
-- **A ledger is a continuous, append-as-you-go audit trail that a resuming session normally
-  never reads.** One file per session, append-only, consulted later on demand — to recover a
-  lost detail, investigate an incident, or confirm via ledger-capture that nothing load-bearing
-  was dropped. Can be long and narrative.
+- **The ledger** is the append-only log for one session — findings, decisions, corrections,
+  false starts, as they happen. One file per session. A resuming session normally never reads
+  it; it is consulted later on demand (to recover a detail, investigate an incident, or run
+  ledger-capture).
 
-- **Rule of thumb:** a ledger entry is a real finding, decision, correction, or false start in
-  your own words — not raw tool output, not routine narration. If that finding also changes
-  what a resuming session needs to know or do next, its **conclusion** additionally goes into
-  `STATE.md` (short) while the **full story** stays only in the ledger (long).
+- **Rule of thumb:** if a finding changes what a resuming session needs to know or do, its
+  conclusion goes into STATE (short). The full story stays only in the ledger (long).
+  Update the ledger continuously during the session, not only at the end.
 
-## Minimal STATE.md template
+## Unified STATE / task file template
 
-Every `STATE.md` should orient a fresh session at the top:
+One template for all session types (mission owner, coder, reviewer, researcher). Level of
+detail differs per role; fields do not. For field authoring guidance see `conventions/tasks.md`.
 
 ```markdown
-# Mission state — <mission-name>
+# <Name: session slug or mission name>
 
-- **Worktree:** `worktrees/<mission-name>` (branch `<branch>`)
-- **Role:** <mission-owner | ...>
+## Orientation
+
 - **Conventions:** `worktrees/session-tracking/CONVENTIONS.md`
-- **Plan:** `.session/<spec-or-plan-doc>.md`
+- **What / goal / mission:** <what this session or mission is for>
+- **Worktree:** `worktrees/<name>` (branch `<branch>`)
+- **Role / scope:** <role and authority boundary>
+- **Ledger / log:** `.session/<slug>.md`
 
-## Current status
+## Task
 
-<one paragraph: what is done, what is in progress, what is blocked>
+- **Plan / spec:** `<path to plan doc, spec, or task file>`
+- **Context / refs:** <extra orientation reads, related docs — one per line>
+- **Expected output:** <file, code, review, report, …>
+- **Done / completion criteria:** <checkable claims — "X exists, verified by Y">
+- **Limits:** <what not to change / keep as-is / state to preserve>
+- **Extra rules / rule refs:** <optional — additional conventions files to read>
 
-## Immediate next step
+## Execution
 
-<one or two sentences: exactly what to do next>
+### Steps / subtasks
+- [ ] <step>
+- [ ] <step>
+
+**Last completed:** <step id or description, or "none">
+
+**Next step / resume point:** <exact next action — on interactive sessions, confirm with
+user before executing; do not auto-run>
+
+### Status
+<Coders use: NOT STARTED | IN PROGRESS — <what's left> | DONE <date> | BLOCKED on <thing>>
+<Mission owners use: free-form list of items with current state>
+
+### Known issues
+<optional>
 
 ## Session log
-
-- <date> session=<slug> status=<active|retired> ledger=.session/<slug>.md
+- <date> ledger=.session/<slug>.md status=<active|retired>
 ```

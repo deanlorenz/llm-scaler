@@ -292,3 +292,174 @@ require extra explicit authorization; PR branch pushes require extra care regard
   mandatory first read, not just in the situational index. Update CONVENTIONS.md trigger line.
 - Keep the role list (step 2) — it's important orientation.
 - Keep "read situational rules" (step 5).
+
+## User decision: session startup model (2026-09-03)
+
+Key points stated by user:
+
+1. Every new session reads its own STATE file by default — it should be pre-loaded or passed
+   at invocation, not discovered by the session itself.
+
+2. The STATE file should tell the session:
+   - Where CONVENTIONS.md is (full path)
+   - Role
+   - Mission
+   - Ledger location (where to write)
+   - Any other orientation needed to start work
+
+3. Preparing the environment for a new session — including setting up the initial STATE file —
+   is NOT the session's own responsibility. That preparation is done BEFORE the session starts.
+
+4. The setup work (creating the STATE file, populating it, pointing it at CONVENTIONS, setting
+   role/mission/ledger) is a good candidate for a foreground (FG) custom-agent — specific
+   scope, runs before the main session starts, should not be part of the main session's context.
+
+Implications for session-start.md:
+- Step 2 ("Locate or create the session STATE file") is wrong for non-mission-owner sessions:
+  they should never need to find or create it — it was handed to them.
+- The discovery logic (find by slug, create if absent) only applies to mission owners resuming
+  interactively. For all other sessions, STATE is a precondition, not something the session
+  sets up.
+- session-start.md should be simplified: "read your STATE file, then read CONVENTIONS (path
+  in STATE), then proceed." The STATE file IS the orientation.
+- A new "session-setup" custom-agent spec belongs in the plan — it prepares STATE, ledger
+  location, CONVENTIONS path, role/mission, and hands off to the new session.
+
+Implication for CONVENTIONS.md:
+- "Read CONVENTIONS.md before starting work" may become "your STATE file tells you where
+  CONVENTIONS.md is — read it from there." CONVENTIONS location is not assumed, it's passed.
+
+Decision: rewrite session-start.md again to reflect this model. New shape:
+  1. Read your STATE file (passed at invocation or known by slug for mission owners).
+  2. From STATE: read CONVENTIONS.md at the path stated there.
+  3. From STATE: confirm mission, role, ledger path.
+  4. Open/continue the ledger. Read situational rules.
+
+Add to spec: T10 — session-setup custom-agent (FG) that prepares STATE before a new session
+starts.
+
+## Design discussion: STATE template, tasks.md scope, session startup (2026-09-03)
+
+### User's challenges (verbatim intent):
+
+**On STATE template:** "You did not discuss the design of the STATE template with me. I have
+no idea what it is now." — the STATE template I added to state-vs-ledger.md was drafted
+without review. Needs to be shown to user and confirmed.
+
+**On tasks.md scope:** "I don't understand your tasks.md — why would every session that
+receives a task read this file? I understand that a task writer or assigner needs this. New
+sessions who get their task from me (like a new mission) need to verify these fields to create
+their own initial STATE. But a regular session that already has a prepared task file should not
+read this — such a session wants only a list of fields to expect + meaning. Short. Like the
+folder structure."
+
+**On STATE file passing — all cases (user's enumeration):**
+1. Claude starting Claude (FG/BG): parent sets child worktree + env + initial STATE file.
+   Where does it pass the path? In prompt? Is there a std. way to pass a file into context?
+2. Claude starting Bob: parent sets child worktree + env + initial STATE file.
+   Pass STATE path in prompt. Is there a std. way to add a file into context?
+3. New mission session: no mission yet. Must interact with user until it can create its own
+   mission statement.
+4. Session resume: if a mission owner, find STATE. Otherwise user can pass the relevant file
+   in context. If not, find by slug/session name/ask.
+
+**On CONVENTIONS hardcoding:** "Unless we instrument some hooks, new sessions (especially
+ones spawned by Claude) don't have a clear entry point to our rule system. Since they all read
+an initial STATE it makes sense to add CONVENTIONS hardcoded into the template."
+
+**On session-setup custom-agent:** "I was thinking of the setup of the environment for a new
+session — multiple steps: create the worktree, create missing symlinks, set up initial STATE,
+find relevant context files, etc. — these are all mechanical tasks for a simple-model,
+out-of-main-context custom-agent (FG)."
+
+### Open questions not yet answered:
+A. Claude FW/BG: is there a standard way to pass a file into child context beyond the prompt?
+   (Need to check Claude's start_subtask / spawn_subagent APIs.)
+B. What fields does the STATE template actually contain? (Need to show user and confirm.)
+C. tasks.md — should it be split into two parts: (a) a writer/assigner guide (full template),
+   and (b) a short receiver reference (fields + meaning only)?
+   Or should the receiver not read tasks.md at all — just read their own STATE file?
+D. CONVENTIONS path in STATE: hardcode the repo-relative path in the template?
+
+### Not yet decided — do not act on any of this until design is settled.
+
+## Unified STATE field design (user decision, 2026-09-03)
+
+The mission-level STATE.md and per-session STATE file use the same field set.
+Level of detail differs; fields do not.
+
+### Field set (canonical):
+
+| Field | Notes |
+|---|---|
+| **Name** | Session slug or mission name |
+| **What / goal / mission** | What this session/mission is for |
+| **Worktree** | Path to the working directory |
+| **Role / scope** | Role + authority boundary |
+| **Plan / spec** | File to follow — plan doc, spec, task file |
+| **Context / refs** | Orientation reads, extra context files, related docs |
+| **Expected output** | File, code, review, report, ... |
+| **Ledger / log** | Where to write the session log |
+| **Done / completion criteria** | Checkable; more specific for coders |
+| **Limits** | What not to change, what to keep as-is, state to preserve |
+| **Extra rules / rule refs** | Optional; pointers to additional conventions to follow |
+| **Steps / todo / subtasks** | Checklist; done marks + last completed step |
+| **Next step / resume point** | Optional. NEVER auto-execute — always wait for user approval on interactive chats |
+| **Status** | Coders: predefined values (NOT STARTED / IN PROGRESS / DONE / BLOCKED). Mission owners: free-form list of items |
+| **Known issues** | Optional; both |
+
+CONVENTIONS.md path is hardcoded in the template:
+`worktrees/session-tracking/CONVENTIONS.md`
+
+### Implications:
+- tasks.md template and STATE template are the SAME template. tasks.md becomes the authoring
+  guide (writer/assigner perspective). The receiver just reads their own STATE file — they do
+  not need to read tasks.md.
+- CONVENTIONS.md index trigger for tasks.md: "writing or assigning a task (not for receivers)".
+- session-start.md simplifies to: read your STATE file; CONVENTIONS path is in it; proceed.
+- Per-session STATE file naming: `<slug>.STATE.md` in the session's worktree `.session/`.
+  Mission owner's file is `STATE.md` (no slug prefix, always known).
+
+### Still open:
+- Exact markdown shape of the unified template (to be drafted and shown to user before use).
+- session-setup custom-agent spec (T10) — mechanical env prep before a session starts.
+- tasks.md: refactor to be writer/assigner guide only; remove receiver-facing language.
+- session-start.md: simplify to "read STATE, CONVENTIONS path is in it, proceed".
+- state-vs-ledger.md: replace current unreviewed STATE template with unified one (once confirmed).
+
+### Not yet drafted — wait for user confirmation of this field set before touching any files.
+
+## Final design decisions for unified STATE template (2026-09-03)
+
+### Field grouping (approved):
+1. Orientation: Name, Conventions (hardcoded), What/goal/mission, Worktree, Role/scope
+2. Task: Plan/spec, Context/refs, Expected output, Done/criteria, Limits, Extra rules
+3. Execution: Steps/todo/subtasks, Next step/resume point, Status, Known issues
+Ledger/log goes in orientation (session needs it immediately).
+
+### "Wait for approval" rule:
+- Default for ALL sessions: confirm role and state, then wait for approval before executing.
+- Non-interactive sessions (BG subagent, Bob CLI): override allowed — parent specifies
+  "execute autonomously" in the task/prompt. Default is still wait; override is explicit.
+
+### Audience-specific guidance (same template, different reading emphasis):
+- **Task writer / assigner (mission owner, user):** needs to know what to put in each field.
+  → reads tasks.md (authoring guide). tasks.md trigger: "writing or assigning a task".
+- **New mission session:** no STATE yet. Must interact with user to define mission, then
+  create STATE. Needs to know what fields to ask for.
+  → session-start.md covers this case. Reads conventions to understand roles.
+- **Resuming session:** reads STATE, confirms role, reads conventions for that role, waits.
+  → session-start.md covers this. Role list + what to read per role.
+- **All sessions:** maintain ledger continuously; update status in STATE when it changes.
+  → session-start.md + state-vs-ledger.md.
+- **Coder emphasis:** expected output / scope / limits / status values they report.
+  → STATE file itself carries this. session-start.md notes coder reads their STATE + limits.
+
+### What changes in the files:
+- state-vs-ledger.md: replace unreviewed STATE template with unified one.
+- tasks.md: reframe as writer/assigner guide; remove receiver-facing language; add field
+  descriptions (what to put in each field); receiver reads their STATE, not this file.
+- session-start.md: simplify to — read STATE, CONVENTIONS path is in it, confirm role,
+  wait for approval. Cover the "no STATE yet" case (new mission owner only).
+- CONVENTIONS.md index: tasks.md trigger = "writing or assigning a task"; session-start.md
+  trigger = "every session reads this first".
