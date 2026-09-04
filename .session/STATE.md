@@ -3,18 +3,21 @@
 ## Orientation
 
 - **Conventions:** `worktrees/session-tracking/CONVENTIONS.md`
+  *(read this first, before any other file)*
 - **What / goal / mission:** Build and maintain the cross-mission, cross-worktree
   session-tracking system — the conventions, skills, and layout that let any mission resume
   cleanly without reloading full history.
 - **Worktree:** `worktrees/policy-writer` (branch `policy-writer`)
 - **Role / scope:** Mission owner. Drafts all changes to `CONVENTIONS.md`, `conventions/`,
   and the skills here; copies finished content into `session-tracking`.
-- **Ledger / log:** `.session/2026-09-04-policy-writer-10.md` (active)
+- **Ledger / log:** `.session/2026-09-04-policy-writer-11.md` (active)
 
 ## Task
 
 - **Plan / spec:** `.session/spec-policy-writer.md`
-- **Context / refs:**
+  *(do not read upfront — pull on demand only)*
+- **Context:** *(files to read to do the work — none required upfront beyond STATE + CONVENTIONS)*
+- **Refs:** *(do not read unless explicitly needed)*
   - `worktrees/session-tracking/CONVENTIONS.md` (installed copy — production)
   - `worktrees/session-tracking/conventions/` (installed copies)
   - `.claude/skills/resume-mission/SKILL.md`
@@ -42,22 +45,21 @@
 - [x] Unified STATE/task template; `session-start.md` simplified; `tasks.md` as writer guide
 - [x] Verify old CONVENTIONS content captured; fix gap (commit-cadence rule)
 - [x] Install `CONVENTIONS.md` + `conventions/` onto `session-tracking`; push to `origin`
-- [ ] Fix session-start.md, state-vs-ledger.md — upfront reading rules, Context/Refs split
-- [ ] Refactor spec-policy-writer.md into canonical spec structure
-- [ ] Document canonical spec structure in tasks.md
+- [x] Fix session-start.md, state-vs-ledger.md — upfront reading rules, Context/Refs split (T9b, session-10)
+- [x] Refactor spec-policy-writer.md into canonical spec structure (T9c, session-10)
+- [x] Document canonical spec structure in tasks.md (T9d, session-10)
 - [ ] Update resume-mission skill — note custom-agent direction
 - [ ] Rewrite ledger-capture as a custom-agent (spec + mode)
 - [ ] Write T10 session-setup agent spec
 
-**Last completed:** Install + push to `origin` (commit `1427f964` on `session-tracking`,
-`d52e4f86` on `policy-writer`)
+**Last completed:** T9b/T9c/T9d + session-tracking install + push (session-10, commits
+`94388bea`/`eb248678` on policy-writer; `4e7ecf10`/`ca005f9f`/`6ab92330` on session-tracking)
 
-**Next step / resume point:** Fix `session-start.md` — add upfront reading rules (no plan
-docs, no ledger files, new ledger at start, session log append). Then fix
-`state-vs-ledger.md` Context/Refs split. Confirm each file with user before installing.
+**Next step / resume point:** Update resume-mission skill — add custom-agent direction note
+(structural note only, not full implementation). Confirm with user before proceeding.
 
 ### Status
-IN PROGRESS — three tasks remaining: skills update, ledger-capture custom-agent, T10 spec.
+IN PROGRESS — remaining: resume-mission skill note (T10-adjacent), T10/T11/T12/T13 custom-agent specs.
 
 ### Known issues
 - `settings-and-skill-edits.md` describes a `user-approved-settings-change` marker
@@ -75,3 +77,4 @@ IN PROGRESS — three tasks remaining: skills update, ledger-capture custom-agen
 - 2026-08-31 session=2026-08-31-policy-writer-8 status=retired ledger=.session/2026-08-31-policy-writer-8.md
 - 2026-09-03 session=2026-09-03-policy-writer-9 status=retired ledger=.session/2026-09-03-policy-writer-9.md
 - 2026-09-04 session=2026-09-04-policy-writer-10 status=retired ledger=.session/2026-09-04-policy-writer-10.md
+- 2026-09-04 session=2026-09-04-policy-writer-11 status=retired ledger=.session/2026-09-04-policy-writer-11.md

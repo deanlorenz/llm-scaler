@@ -90,7 +90,10 @@ If a convenience symlink under `session-tracking/missions/` is broken, follow
 - Never read plan/spec docs or ledger files at session start. Pull plan docs on demand; consult
   ledger files only when debugging or digging into history. See `conventions/session-start.md`.
 - Maintain the session ledger continuously as findings, decisions, corrections, and false
-  starts occur. Ledger and state updates do not need chat narration.
+  starts occur.
+- Update STATE after each major step — mark completed items `[x]`, update Last completed,
+  Next step, and Status. Do not wait for wind-down. Ledger and STATE updates do not need
+  chat narration.
 - Never edit files outside the mission and role you own.
 - Do not use in-place command-line rewriting (`sed -i`, `gawk -i`, Python `fileinput`, or
   equivalents). Normal `Edit`/`Write` operations on owned, git-tracked files are allowed when
