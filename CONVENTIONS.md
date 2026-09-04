@@ -84,6 +84,8 @@ If a convenience symlink under `session-tracking/missions/` is broken, follow
   request to reduce chat noise is not permission to terminate work.
 - Keep long content out of chat. Put long tool output, reports, and file dumps in the mission's
   `.session/` directory or code tree; reply with a short pointer and status.
+- Never read plan/spec docs or ledger files at session start. Pull plan docs on demand; consult
+  ledger files only when debugging or digging into history. See `conventions/session-start.md`.
 - Maintain the session ledger continuously as findings, decisions, corrections, and false
   starts occur. Ledger and state updates do not need chat narration.
 - Never edit files outside the mission and role you own.

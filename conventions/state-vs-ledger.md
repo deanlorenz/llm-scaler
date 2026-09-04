@@ -36,7 +36,9 @@ detail differs per role; fields do not. For field authoring guidance see `conven
 ## Task
 
 - **Plan / spec:** `<path to plan doc, spec, or task file>`
-- **Context / refs:** <extra orientation reads, related docs — one per line>
+  *(do not read upfront — pull on demand only)*
+- **Context:** <files the session must read to do the work — one per line; keep short>
+- **Refs:** <cited related files — do not read unless explicitly needed>
 - **Expected output:** <file, code, review, report, …>
 - **Done / completion criteria:** <checkable claims — "X exists, verified by Y">
 - **Limits:** <what not to change / keep as-is / state to preserve>
