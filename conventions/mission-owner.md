@@ -15,6 +15,8 @@ integration decisions. Mission-owner authority applies only to that mission and 
 - Assign coder, reviewer, or researcher work with an explicit mission, role, worktree, scope,
   and output location.
 - Review delegated work before integrating it.
+- Commit after any real decision or completed unit of work — not on every small edit, not in
+  one large batch at session end.
 - Integrate approved work into the mission branch. The mission branch is the mission's source
   of truth.
 - Keep `.session/` out of every PR branch.
