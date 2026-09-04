@@ -8,6 +8,10 @@ disable-model-invocation: true
 
 # Resume mission
 
+> **Direction:** this skill is a candidate for replacement by a custom-agent (own context,
+> simple model). The steps below remain the authoritative procedure until that migration is
+> done. When invoked as a Bob subtask or subagent, it already runs in its own context window.
+
 **Arguments:** $ARGUMENTS (a mission name, topic words to match against mission names, or empty)
 
 This skill works the same way whether you're a freshly-started session with zero context, or
@@ -119,9 +123,9 @@ Read, in this order:
    The symlink at `$TRACKING/missions/$MISSION_NAME/STATE.md` points to the same file if the
    worktree is present — either path works.
 
-Do **not** read the full ledger file(s) yet — Step 5 may need to run ledger-capture first.
-Once Step 5 clears, skim the plan/spec doc named in `STATE.md` for the task list and current
-status lines.
+Do **not** read the full ledger file(s) — consult ledger files only when debugging or digging
+into history. Do **not** read the plan/spec doc upfront — pull it on demand only if needed
+for a specific step.
 
 ## Step 5: Clear pending sessions before proceeding
 
@@ -173,28 +177,35 @@ the `active` Session-log entry — the bus declaration comes first.
 
 ## Step 8: Confirm mission and state back to the user
 
-State back concisely (a few sentences plus a short status table if useful):
-- Which mission, and its one-line goal (from `STATE.md`).
-- Current task status (done / in progress / blocked / not started) — cite the actual table.
-- The immediate next step `STATE.md` names.
-- Any open question blocking full completion.
-- If Step 4 found and cleared any pending sessions, say so briefly (one line).
+Present the opening orientation in this fixed format, then wait for confirmation:
+
+```
+Mission:   <mission name — one-line goal>
+Role:      <role>
+Worktree:  <worktree path>
+Status:    <current status>
+Last:      <last completed step>
+Next:      <next step>
+```
+
+Add one line if Step 5 cleared any pending sessions.
 
 If anything in `STATE.md` looks stale (e.g. it claims a task is "in progress" but `git log`
 shows it's committed), verify against the actual git state before proceeding.
 
-## Step 9: Record this session's start in STATE.md
+## Step 9: Record this session's start in STATE.md and open new ledger
 
 `STATE.md` is already local in the mission worktree — no cross-worktree exit/re-enter needed.
 Using the `.wip` protocol (`conventions/wip-editing.md`):
 
 1. Rename `$MISSION_WT/.session/STATE.md` → `STATE.md.wip`.
 2. Append one line to it:
-   `- <date/time> session=<slug> status=active ledger=.session/<slug>.md owner=<this-session-id>`
+   `- <date> session=<slug> status=active ledger=.session/<slug>.md`
 3. Rename `STATE.md.wip` back to `STATE.md`, `git add`, commit on the mission branch with a
    short message like `docs(state): record session start — $MISSION_NAME`.
-4. Start (or note the existing) live ledger scratch file at `$MISSION_WT/.session/<slug>.md` —
-   append to it as you work throughout this session.
+4. Create a new ledger file at `$MISSION_WT/.session/<slug>.md`. Open it with:
+   `Continues: <path to previous ledger, if any>`
+   Append to it as you work throughout this session.
 
 If the `.wip` file already exists, someone else is mid-edit — wait, or tell the user it's
 locked and ask how to proceed.
