@@ -463,3 +463,17 @@ Ledger/log goes in orientation (session needs it immediately).
   wait for approval. Cover the "no STATE yet" case (new mission owner only).
 - CONVENTIONS.md index: tasks.md trigger = "writing or assigning a task"; session-start.md
   trigger = "every session reads this first".
+
+## Verification and install (2026-09-03)
+
+### Gap verification result:
+Ran subagent comparison of all .bak files vs. new conventions files.
+One gap found: commit-cadence rule ("commit after any real decision, not on every small edit")
+from old CONVENTIONS.md was missing. Added to conventions/mission-owner.md. Commit 4492b8cf.
+All other old content: captured or deliberately removed (per prior review decisions).
+
+### Install onto session-tracking:
+Copied CONVENTIONS.md + all conventions/*.md (14 files) from policy-writer branch to
+session-tracking worktree. Commit 1427f964 on session-tracking branch.
+.bak files NOT copied (stayed on policy-writer branch only).
+agentbus changes in session-tracking left unstaged (not this mission's files).

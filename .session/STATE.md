@@ -38,12 +38,11 @@ skills, and layout that let any mission resume cleanly without reloading full hi
 | Coder orchestration — Claude/Bob worker model (T8) | **DONE 2026-09-03** | Commits `0f64564b`, `c9288a40`. New: `conventions/tasks.md`, spec T8 section. |
 | Reader-focused conventions review pass (T9) | **DONE 2026-09-03** | Commits `e407102b`–`5eb61b84`. All `conventions/*.md` reviewed and processed. |
 | Unified STATE template + session-start redesign (T9 continued) | **DONE 2026-09-03** | Commit `743a5443`. Unified STATE/task template; session-start simplified; tasks.md as writer guide. T10 (session-setup agent) captured in spec. |
+| Verification + install onto session-tracking | **DONE 2026-09-03** | Gap found and fixed (commit-cadence rule, `4492b8cf`). Installed: `1427f964` on session-tracking. |
 
 ## Immediate next step
 
-- Copy finished `policy-writer` branch content into `session-tracking` — needs explicit
-  go-ahead from user.
-- Push `session-tracking` to `origin` — blocked on copy step above.
+- Push `session-tracking` to `origin` — 54+ commits ahead, needs explicit authorization.
 - Suggestion-box lifecycle convention — currently using `processed-` prefix, formal
   lifecycle deferred.
 - Verify `settings-and-skill-edits.md` marker behavior still applies (origin is 2026-08-27
