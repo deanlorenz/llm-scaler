@@ -83,7 +83,7 @@ Items currently open that require a decision or ruling before they can proceed:
 - [ ] T11 — Wind-down as custom-agent (spec + mode)
 - [ ] T12 — Ledger-capture as custom-agent (spec + mode)
 - [ ] T13 — Session-setup custom-agent (spec + mode)
-- [ ] T14 — Resume, handoff, and wind-down lifecycle design & rationale (2026-09-04)
+- [x] T14 — Resume, handoff, and wind-down lifecycle design & rationale (2026-09-04)
 - [ ] Install + push all T9b–T9d changes to session-tracking
 
 ---

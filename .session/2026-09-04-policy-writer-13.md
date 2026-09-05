@@ -39,3 +39,5 @@ Continues: .session/2026-09-04-policy-writer-11.md
 - [ ] Item 6: Conventions for coders and coder-reviewers (`coder.md`, `reviewer.md`).
 - [ ] Item 7: Conventions naming review (`<action>.md`, `<role>.md`, `<context>.md` — remove redundant `-rules` suffix).
 - [ ] Item 8: Workflow breakdown across the 4 session cases.
+
+## Verified 2026-09-04 — folded in: T14 roadmap checkbox marked [x] in spec-policy-writer.md §5
