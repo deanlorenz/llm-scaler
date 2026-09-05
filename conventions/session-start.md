@@ -2,14 +2,12 @@
 
 Read this at the start of every session (interactive, delegated worker, or resuming), before any work.
 
-## Prerequisite & Worktree Isolation Check
+## Worktree check
 
-Before reading files or taking any task action:
-1. **Verify Worktree Isolation:** Confirm current working directory is inside the designated mission worktree (`worktrees/<mission>`). Coders and workers must be strictly isolated to their assigned worktree.
-2. **Verify STATE File:** Confirm local `.session/STATE.md` (or the task file provided by parent) exists and is readable.
-3. **If any check fails:**
-   - **Interactive session:** Stop immediately. Do not guess or perform speculative searches. Ask the user: *"Prerequisites not met. Would you like me to run `/resume-mission` to set up and enter the worktree?"*
-   - **Delegated worker session:** Stop immediately and return an error block to the parent session.
+Before reading any files:
+- Confirm the current working directory is inside the mission worktree (`worktrees/<mission>`).
+- If not: do not search speculatively. Ask the user which mission and worktree to use. Do not attempt to read STATE across worktrees — ask first.
+- Delegated workers: if worktree check fails, stop and return an error block to the parent.
 
 ## Reading rules — upfront
 
@@ -30,18 +28,15 @@ Before reading files or taking any task action:
 
 **Safety net — if a prior ledger must be referenced:** Read only from the last `## Verified <date>` marker to end of file. That section should be empty (or near-empty) if the prior session ran a proper wind-down or if `ledger-capture` already ran. If it is not empty, that indicates a missed wind-down — record the gap in your ledger and proceed; do not read the full ledger body.
 
-## Session cases at a glance
+## Session cases — identify and gate
 
-Every session is one of four cases. Identify yours before following the startup flow.
+Determine your case. Follow the gate before any work.
 
-| Case | Condition | Who reads this file | Gate before work |
-|---|---|---|---|
-| **New mission** | No `STATE.md` exists | Mission owner (or session-setup agent) | Discuss scope with user: name, goal, role, inputs, outputs, boundaries. No plan yet — create one together. User approves scope before STATE is created. |
-| **Resume own session** | `STATE.md` exists; last active log entry is your own slug | The resuming session | Verify agentbus ownership (prior session may have disconnected without releasing). Re-declare if stale. User confirms `Next`. |
-| **Takeover** | `STATE.md` exists; last active entry belongs to a different slug | The new session | Check agentbus for live presence from prior slug. If stale/silent: run takeover protocol (`resume-and-handoff.md`). If still alive: stop, ask user. |
-| **Delegated worker** | Task file provided by parent; no independent STATE | The worker session | Return orientation block to parent. Parent reads returned STATE to confirm mission context before authorizing work. |
-
-Additional steps unique to each case are called out in the startup flow below and in `conventions/resume-and-handoff.md`.
+| Case | Condition | Gate |
+|---|---|---|
+| **New mission** | No `STATE.md` in worktree | Stop. Ask user to confirm mission name and scope before creating anything. Discuss: name, goal, role, inputs, outputs, boundaries. Create STATE only after explicit approval. |
+| **Resume / takeover** | `STATE.md` exists with an active entry | Ask user: "Continuing `<slug>`?" Run agentbus ownership check and ledger check. Declare ownership after confirmation. See `resume-and-handoff.md`. |
+| **Delegated worker** | Entry point is a task file passed by parent | Return orientation block to parent before any work. Parent must confirm. |
 
 ## Standard Session Startup Flow
 
@@ -89,19 +84,14 @@ Notes:     <pending sessions cleared, migration, or setup actions taken, if any>
 - **Interactive session:** Output this block in chat and halt. Do not continue — no analysis, no draft, no preliminary findings — until the user explicitly confirms `Next`.
 - **Delegated worker / Subagent:** Return this block to the calling parent session. The parent must read the returned `STATE` file to establish full mission context.
 
-## If starting a brand new mission (No STATE file exists)
+## If starting a brand new mission (no STATE file exists)
 
-If starting a new mission from scratch:
 1. Follow `/resume-mission` (or `conventions/feature-worktree-setup.md`) to create the worktree, `.session/` directory, and skill symlinks.
 2. Read `worktrees/session-tracking/CONVENTIONS.md`.
-3. **Discuss scope with the user before creating anything.** There is no plan yet. Establish:
-   - Mission name and goal
-   - Your role and the roles of any workers
-   - Inputs, outputs, and success criteria
-   - Boundaries: what is explicitly out of scope
-4. Get explicit user approval of the scope summary before proceeding.
-5. Create `.session/STATE.md` using the template in `conventions/state-vs-ledger.md`, populated with the agreed scope.
-6. Ask the user for explicit approval of the initial plan/task list before executing any mission tasks.
+3. Ask the user before creating anything. There is no plan yet. Establish: mission name, goal, your role, inputs, outputs, success criteria, and what is explicitly out of scope.
+4. Get explicit user approval of the scope before proceeding.
+5. Create `.session/STATE.md` from the template in `conventions/state-vs-ledger.md`, populated with the agreed scope.
+6. Get explicit user approval of the initial task list before executing any mission tasks.
 
 ## Roles and what to read per role
 

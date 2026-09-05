@@ -18,24 +18,17 @@ Every mission's `.session/STATE.md` maintains an append-only **Session log** sec
 - **`retired`**: The session is genuinely ending its engagement on this mission (transferred ownership, finished work, or closed out).
 - **Resolution**: An entry is **fully resolved** only when its status is `retired` AND its named ledger file carries a `## Verified <date>` marker.
 
-## Resume Own Session Protocol
+## Resume / Takeover Protocol (Executed during `/resume-mission`)
 
-When the last active Session log entry in STATE.md belongs to your own slug:
+Used when `STATE.md` exists with an active session log entry — whether resuming your own prior work or taking over from another session. Always ask the user for confirmation before declaring ownership.
 
-1. **Verify Agentbus Ownership:** Check whether your prior session's ownership signal is still live. A prior session may have disconnected without publishing a release. If stale or silent, re-declare ownership before proceeding.
-2. **Check Ledger State:** Check whether your own prior ledger carries a `## Verified <date>` marker. If not, run `ledger-capture` on it before starting new work.
-3. **Proceed:** Continue from the `Next step` in STATE.md. No takeover protocol needed.
-
-## Takeover Protocol (Executed during `/resume-mission`)
-
-When the last active Session log entry belongs to a *different* slug:
-
-1. **Live Presence Check:** Check agentbus for a recent presence/heartbeat from the prior session's slug. If still alive: stop, do not take over, ask the user.
-2. **Pending Scan:** Scan all Session log entries in `.session/STATE.md`. Any entry that is `active`, or `retired` without a `## Verified` marker in its ledger, is **pending**.
-3. **Lock & Retire:** Under `.wip` protocol, update any unretired pending session to `status=retired`.
-4. **Run `ledger-capture`:** Execute `ledger-capture` in the foreground against that pending ledger to fold uncaptured findings into durable docs (`STATE.md` or internal plan).
-5. **Append Verification:** Confirm `## Verified <date>` is appended to the processed ledger.
-6. **Agentbus Ownership:** Declare mission ownership on agentbus before recording the new active session.
+1. **Ask user:** "Continuing `<slug>`?" — confirm which mission and session before proceeding.
+2. **Live Presence Check:** Check agentbus for a recent presence/heartbeat from the active slug. If still alive: stop, do not take over, ask the user.
+3. **Pending Scan:** Scan all Session log entries in `.session/STATE.md`. Any entry that is `active`, or `retired` without a `## Verified` marker in its ledger, is **pending**.
+4. **Lock & Retire:** Under `.wip` protocol, update any unretired pending session to `status=retired`.
+5. **Run `ledger-capture`:** Execute `ledger-capture` in the foreground against that pending ledger to fold uncaptured findings into durable docs (`STATE.md` or internal plan).
+6. **Append Verification:** Confirm `## Verified <date>` is appended to the processed ledger.
+7. **Declare Ownership:** Publish ownership on agentbus before recording the new active session.
 
 ## Checkpoint & Wind-Down Protocol (Executed during `/wind-down`)
 
