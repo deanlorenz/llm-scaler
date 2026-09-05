@@ -52,15 +52,16 @@ Continues: .session/2026-09-04-policy-writer-11.md
 - [ ] Item 8: Workflow breakdown across the 4 session cases.
 - [ ] Review & install finished conventions onto `session-tracking`.
 
-## Verified 2026-09-04 — folded in: T14 roadmap checkbox marked [x] in spec-policy-writer.md §5
+## Verified 2026-09-04 (ledger-capture pass 2)
 
-| Ledger 13 point | Found in durable docs? | Action taken |
-|---|---|---|
-| Items 1–4 completed | ✅ STATE.md steps `[x]` + `Last completed` line | None needed |
-| Item 5 (agentbus) open | ✅ STATE.md line 54 `[ ]` | None needed |
-| Item 6 (coder/reviewer conventions) open | ✅ STATE.md line 55 `[ ]` | None needed |
-| Item 7 (naming review) open | ✅ STATE.md line 56 `[ ]` | None needed |
-| Item 8 (workflow breakdown) open | ✅ STATE.md line 57 `[ ]` | None needed |
-| FG/BG review deferred | ✅ STATE.md line 58 `[ ]` | None needed |
-| Boundary division deferred | ✅ STATE.md line 59 `[ ]` | None needed |
-| T14 detail written | ✅ spec-policy-writer.md §7 T14 | Folded in: Marked T14 `[x]` in spec §5 roadmap |
+| Ledger 13 point | Found in STATE.md? | File artefact exists? | Action taken |
+|---|---|---|---|
+| resume-mission SKILL.md rewritten (Items 1–2) | ✅ step `[x]` line 51 | `.claude/skills/resume-mission/SKILL.md` — not verified this pass | None needed |
+| resume-and-handoff.md + wind-down aligned; rationale in spec §T14 (Item 3) | ✅ step `[x]` line 52 | `conventions/resume-and-handoff.md` present | None needed |
+| CONVENTIONS.md situational rules regrouped (Item 4) | ✅ step `[x]` line 53 | `CONVENTIONS.md` present | None needed |
+| Agentbus conventions created (Item 5) | ✅ step `[x]` line 54 | `conventions/agentbus.md` ✅, `conventions/agentbus-user-interaction.md` ✅ | None needed |
+| Coder/reviewer conventions + tasks.md updated (Item 6) | ✅ step `[x]` line 55 | `conventions/coder.md` ✅, `conventions/reviewer.md` ✅, `conventions/tasks.md` ✅ | None needed |
+| chat-preferences.md created & indexed (standing interaction rules) | ✅ step `[x]` line 56; `Last completed` line 66 | `conventions/chat-preferences.md` ✅; indexed in `CONVENTIONS.md` line 48 and `conventions/session-start.md` line 20 | None needed |
+| Items 7–8 and deferred FG/BG, boundary, agentbus-roles, install deferred | ✅ STATE.md lines 57–62 `[ ]` | n/a — open items | None needed |
+| Session-13 retirement | ✅ Session log line 90 `status=retired`; Status line 71 `WOUND DOWN / RETIRED` | n/a | Fixed stale `in ` prefix + `(active)` on STATE.md Ledger line → now reads `(retired — session 14 is next)` |
+| Next resume point | ✅ STATE.md line 68: `policy-writer14`, Item 7 & 8 | n/a | None needed |

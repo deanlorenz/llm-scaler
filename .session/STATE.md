@@ -10,7 +10,7 @@
 - **Worktree:** `worktrees/policy-writer` (branch `policy-writer`)
 - **Role / scope:** Mission owner. Drafts all changes to `CONVENTIONS.md`, `conventions/`,
   and the skills here; copies finished content into `session-tracking`.
-in - **Ledger / log:** `.session/2026-09-04-policy-writer-13.md` (active)
+- **Ledger / log:** `.session/2026-09-04-policy-writer-13.md` (retired — session 14 is next)
 
 ## Task
 
