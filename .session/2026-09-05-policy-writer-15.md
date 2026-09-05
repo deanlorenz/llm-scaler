@@ -14,4 +14,4 @@ Continues: .session/2026-09-05-policy-writer-14.md
 - [2026-09-05] Fix applied: `state-vs-ledger.md` template Ledger field now carries ⚠ DO NOT READ inline. `session-start.md` never-read list now names the STATE Ledger/log field explicitly and repeats prohibition twice. Live STATE.md ledger field updated to same annotation. Committed to session-tracking (d32a5912) and policy-writer (3b1c4001).
 - [2026-09-05] Wind-down requested immediately after fix.
 
-
+## Verified 2026-09-05 — folded in: rule-violation root cause → conventions fix committed (d32a5912, 3b1c4001); Last completed updated in STATE.md
