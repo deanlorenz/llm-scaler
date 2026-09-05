@@ -51,6 +51,7 @@ Read the matching file when its situation occurs, not speculatively. **Do not re
 - `conventions/writing-outside-worktree.md` — before performing a permitted cross-worktree write
 - `conventions/tasks.md` — before writing or assigning a task specification to any worker
 - `conventions/coder-orchestration.md` — before dispatching or orchestrating a coder agent
+- `conventions/install-to-session-tracking.md` — before installing any file from policy-writer onto session-tracking
 - `conventions/push.md` — before executing git push (after receiving explicit single-use approval)
 - `conventions/pr-branch.md` — before creating or curating an ephemeral PR branch
 - `conventions/pr-workflow.md` — before opening a PR via the GitHub API
