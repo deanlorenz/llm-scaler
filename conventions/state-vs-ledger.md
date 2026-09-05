@@ -28,12 +28,14 @@ detail differs per role; fields do not. For field authoring guidance see `conven
 ## Orientation
 
 - **Conventions:** `worktrees/session-tracking/CONVENTIONS.md`
-  *(read this first, before any other file)*
+  ⚠ **STOP. Read CONVENTIONS.md before any other file. Do not assume you know the rules.
+  Do not speculatively read other files you see referenced here. Check the instructions first.**
 - **What / goal / mission:** <what this session or mission is for>
 - **Worktree:** `worktrees/<name>` (branch `<branch>`)
 - **Role / scope:** <role and authority boundary>
 - **Agentbus:** in=`<mission>.<role-or-slug>.in` out=`<mission>.<role-or-slug>` announce=`mission.<mission-name>`
 - **Ledger / log:** `.session/<slug>.md`
+  *(do not read upfront — the new session creates its own ledger; this field will be updated to that path)*
 
 ## Task
 

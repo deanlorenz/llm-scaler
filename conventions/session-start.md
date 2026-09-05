@@ -24,9 +24,11 @@ Before reading files or taking any task action:
 
 **Never read at session start:**
 - Plan/spec docs (listed in STATE under `Plan/spec`) — pull on demand only when executing that specific step
-- Ledger files — consulted only when debugging or digging into history; never at session start even if you are "curious" about what the previous session did
+- Ledger files — never at session start, even if you are "curious" about what the previous session did. The new session creates its own ledger; the old one is not yours to read.
 - Any file listed under `Refs` in your STATE file
 - Any situational rules file whose trigger has not occurred
+
+**Safety net — if a prior ledger must be referenced:** Read only from the last `## Verified <date>` marker to end of file. That section should be empty (or near-empty) if the prior session ran a proper wind-down or if `ledger-capture` already ran. If it is not empty, that indicates a missed wind-down — record the gap in your ledger and proceed; do not read the full ledger body.
 
 ## Standard Session Startup Flow
 

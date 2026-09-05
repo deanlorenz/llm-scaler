@@ -3,14 +3,15 @@
 ## Orientation
 
 - **Conventions:** `worktrees/session-tracking/CONVENTIONS.md`
-  *(read this first, before any other file)*
+  ⚠ **STOP. Read CONVENTIONS.md before any other file. Do not assume you know the rules.
+  Do not speculatively read other files you see referenced here. Check the instructions first.**
 - **What / goal / mission:** Build and maintain the cross-mission, cross-worktree
   session-tracking system — the conventions, skills, and layout that let any mission resume
   cleanly without reloading full history.
 - **Worktree:** `worktrees/policy-writer` (branch `policy-writer`)
 - **Role / scope:** Mission owner. Drafts all changes to `CONVENTIONS.md`, `conventions/`,
   and the skills here; copies finished content into `session-tracking`.
-- **Ledger / log:** `.session/2026-09-05-policy-writer-14.md` (active)
+- **Ledger / log:** `.session/2026-09-05-policy-writer-14.md` (active — do not read upfront)
 
 ## Task
 
