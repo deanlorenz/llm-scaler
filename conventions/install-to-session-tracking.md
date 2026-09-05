@@ -11,6 +11,15 @@ Before starting:
 1. Your working tree on `policy-writer` must be clean and committed.
 2. You must have explicit user authorization to write to `session-tracking`.
 
+## What gets installed
+
+Everything on the `policy-writer` branch **except**:
+- `.session/` — mission-internal; never leaves the mission branch
+- `.claude/` — policy-writer's local symlinks and config; not for production
+- `.git*` files
+
+The install is **not** file-by-file selection. It is a full sync of all non-excluded paths.
+
 ## Procedure
 
 ### Step 1: Verify both worktrees are clean
@@ -23,9 +32,9 @@ git -C worktrees/session-tracking status --short
 Both must show no uncommitted changes. If either has uncommitted changes, stop and
 commit or stash before proceeding. Do not install over a dirty `session-tracking`.
 
-### Step 2: Identify the exact files to install
+### Step 2: Identify what will change
 
-List the files that differ between the two worktrees:
+Preview what the install will touch:
 
 ```bash
 diff -r --exclude="*.bak" \
@@ -34,34 +43,36 @@ diff -r --exclude="*.bak" \
 diff worktrees/policy-writer/CONVENTIONS.md \
      worktrees/session-tracking/CONVENTIONS.md
 diff -r \
-  worktrees/policy-writer/.claude/skills \
-  worktrees/session-tracking/.claude/skills
+  worktrees/policy-writer/claude-skills \
+  worktrees/session-tracking/claude-skills
 ```
 
-For each differing file, decide: is policy-writer's version newer (install it), or is
-session-tracking's version newer (update policy-writer first, then come back)?
-**Never install a file from policy-writer that is behind session-tracking.**
+Review every difference. For any file where session-tracking looks **ahead** of
+policy-writer, stop — update policy-writer first, commit it, then resume here.
 
-### Step 3: Checkout files from the policy-writer branch
-
-Use `git checkout` to pull exact file contents from the `policy-writer` branch into the
-`session-tracking` worktree — no copying, no writing from memory:
+### Step 3: Checkout from the policy-writer branch
 
 ```bash
-# For each file to install, e.g.:
-git -C worktrees/session-tracking checkout policy-writer -- conventions/<file>.md
-git -C worktrees/session-tracking checkout policy-writer -- CONVENTIONS.md
-git -C worktrees/session-tracking checkout policy-writer -- .claude/skills/resume-mission/SKILL.md
-git -C worktrees/session-tracking checkout policy-writer -- .claude/skills/wind-down/SKILL.md
+cd worktrees/session-tracking
+
+# Install conventions and CONVENTIONS.md
+git checkout policy-writer -- CONVENTIONS.md conventions/
+
+# Install skills
+git checkout policy-writer -- claude-skills/
 ```
 
 `git checkout <branch> -- <path>` writes the exact committed content from the named
 branch into the working tree. It does not merge, interpolate, or summarize.
 
+If new top-level directories were added to policy-writer that belong in session-tracking,
+add them to the checkout command above.
+
 ### Step 4: Verify git agrees
 
-After the checkout, confirm `git diff` between the two worktrees shows only the changes
-you intended — no surprises, no accidental reversions:
+After the checkout, re-run the diff from Step 2. Output must be empty (or limited to
+known intentional divergences that were reviewed in Step 2). If anything unexpected
+appears, stop and investigate before committing.
 
 ```bash
 diff -r --exclude="*.bak" \
@@ -69,24 +80,23 @@ diff -r --exclude="*.bak" \
   worktrees/session-tracking/conventions
 diff worktrees/policy-writer/CONVENTIONS.md \
      worktrees/session-tracking/CONVENTIONS.md
+diff -r \
+  worktrees/policy-writer/claude-skills \
+  worktrees/session-tracking/claude-skills
 ```
-
-The output must be empty (or limited to known, intentional divergences). If anything
-unexpected appears, stop and investigate before committing.
 
 ### Step 5: Commit session-tracking
 
 ```bash
-git -C worktrees/session-tracking add conventions/ CONVENTIONS.md .claude/skills/
-git -C worktrees/session-tracking status --short
-git -C worktrees/session-tracking commit -m "chore: install conventions and skills from policy-writer"
+cd worktrees/session-tracking
+git add CONVENTIONS.md conventions/ claude-skills/
+git status --short   # review staged files before committing
+git commit -m "install: CONVENTIONS.md + conventions/ + claude-skills/ from policy-writer (<session-slug>)"
 ```
-
-Review `git status` before committing to confirm exactly which files are staged.
 
 ## Fixing a bad install
 
-If a file was installed incorrectly (wrong content, wrong direction):
+If a file was installed incorrectly:
 
 1. Run `git -C worktrees/session-tracking log --oneline -5` to identify the bad commit.
 2. Do **not** hand-edit to fix — use `git checkout` from the correct branch again
