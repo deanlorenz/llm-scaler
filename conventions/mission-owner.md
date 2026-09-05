@@ -9,6 +9,7 @@ integration decisions. Mission-owner authority applies only to that mission and 
 
 - Own and maintain `<mission-worktree>/.session/STATE.md` and the mission's internal plan.
 - Maintain the owner's own session ledger continuously.
+- Subscribe to the mission announcement channel (`mission.<mission-name>`) on startup per `conventions/agentbus.md` to monitor worker presence, status, and lifecycle events.
 - Register ownership and session status according to `conventions/resume-and-handoff.md`.
 - Keep `STATE.md` current with the actionable status, blockers, and immediate next step; keep
   narrative detail in ledgers.
