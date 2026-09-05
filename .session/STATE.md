@@ -10,7 +10,7 @@
 - **Worktree:** `worktrees/policy-writer` (branch `policy-writer`)
 - **Role / scope:** Mission owner. Drafts all changes to `CONVENTIONS.md`, `conventions/`,
   and the skills here; copies finished content into `session-tracking`.
-- **Ledger / log:** `.session/2026-09-04-policy-writer-11.md` (active)
+in - **Ledger / log:** `.session/2026-09-04-policy-writer-13.md` (active)
 
 ## Task
 
@@ -78,3 +78,4 @@ IN PROGRESS — remaining: resume-mission skill note (T10-adjacent), T10/T11/T12
 - 2026-09-03 session=2026-09-03-policy-writer-9 status=retired ledger=.session/2026-09-03-policy-writer-9.md
 - 2026-09-04 session=2026-09-04-policy-writer-10 status=retired ledger=.session/2026-09-04-policy-writer-10.md
 - 2026-09-04 session=2026-09-04-policy-writer-11 status=retired ledger=.session/2026-09-04-policy-writer-11.md
+- 2026-09-04 session=2026-09-04-policy-writer-13 status=active ledger=.session/2026-09-04-policy-writer-13.md

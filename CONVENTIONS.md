@@ -52,6 +52,7 @@ Read the matching file when its situation occurs, not speculatively:
   that one push
 - `conventions/pr-branch.md` — creating and curating the ephemeral branch that will back a PR
 - `conventions/pr-workflow.md` — preparing to open the PR itself: checks, target, and GitHub API
+- `conventions/policy-writer.md` — working in any role on the `policy-writer` mission
 
 ## Repo layout
 
