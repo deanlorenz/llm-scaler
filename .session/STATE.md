@@ -48,21 +48,24 @@ in - **Ledger / log:** `.session/2026-09-04-policy-writer-13.md` (active)
 - [x] Fix session-start.md, state-vs-ledger.md — upfront reading rules, Context/Refs split (T9b, session-10)
 - [x] Refactor spec-policy-writer.md into canonical spec structure (T9c, session-10)
 - [x] Document canonical spec structure in tasks.md (T9d, session-10)
-- [ ] Update resume-mission skill — note custom-agent direction
+- [x] Update resume-mission skill — note custom-agent direction, unify orientation contract, and integrate prerequisites (Items 1 & 2)
+- [x] Align conventions/resume-and-handoff.md and skills (resume-mission, wind-down); save rationale to spec before purging (Item 3)
+- [x] Group CONVENTIONS.md situational rules by role/mission, lifecycle, and action triggers (Item 4)
+- [ ] Item 5: Agentbus conventions (`conventions/agentbus.md`)
+- [ ] Item 6: Conventions for coders and coder-reviewers (`coder.md`, `reviewer.md`)
+- [ ] Item 7: Conventions naming review (`<action>.md`, `<role>.md`, `<context>.md`)
+- [ ] Item 8: Workflow breakdown across 4 session cases
 - [ ] Revisit FG/BG analysis and workflow nuances across all 4 cases
 - [ ] Revisit overlap and division of labor between CONVENTIONS.md, session-start.md, and resume-mission
-- [ ] Align conventions/resume-and-handoff.md and skills (resume-mission, wind-down); save rationale to spec before purging
 - [ ] Rewrite ledger-capture as a custom-agent (spec + mode)
 - [ ] Write T10 session-setup agent spec
 
-**Last completed:** T9b/T9c/T9d + session-tracking install + push (session-10, commits
-`94388bea`/`eb248678` on policy-writer; `4e7ecf10`/`ca005f9f`/`6ab92330` on session-tracking)
+**Last completed:** Items 1, 2, 3, 4 completed (unified orientation return contract, session-start split, resume-and-handoff alignment, CONVENTIONS index grouping)
 
-**Next step / resume point:** Update resume-mission skill — add custom-agent direction note
-(structural note only, not full implementation). Confirm with user before proceeding.
+**Next step / resume point:** Implement Item 5 (`conventions/agentbus.md`). Confirm with user before proceeding.
 
 ### Status
-IN PROGRESS — remaining: resume-mission skill note (T10-adjacent), T10/T11/T12/T13 custom-agent specs.
+IN PROGRESS — Items 1-4 completed; remaining items 5-8, FG/BG review, and custom-agent specs.
 
 ### Known issues
 - `settings-and-skill-edits.md` describes a `user-approved-settings-change` marker
