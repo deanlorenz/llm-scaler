@@ -79,6 +79,8 @@ IN PROGRESS — session 15 active. Safe checkpoint saved.
   apply.
 - Suggestion-box lifecycle (what happens to `processed-*` entries) formally undefined —
   using `processed-` prefix as interim.
+- Deferred: whether `wind-down` should invoke itself as a background agent — defer to
+  ledger-capture custom-agent design (that design will also settle wind-down invocation model).
 
 ## Session log
 
