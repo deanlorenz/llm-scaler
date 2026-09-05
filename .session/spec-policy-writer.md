@@ -83,6 +83,7 @@ Items currently open that require a decision or ruling before they can proceed:
 - [ ] T11 — Wind-down as custom-agent (spec + mode)
 - [ ] T12 — Ledger-capture as custom-agent (spec + mode)
 - [ ] T13 — Session-setup custom-agent (spec + mode)
+- [ ] T14 — Resume, handoff, and wind-down lifecycle design & rationale (2026-09-04)
 - [ ] Install + push all T9b–T9d changes to session-tracking
 
 ---
@@ -107,6 +108,7 @@ Items currently open that require a decision or ruling before they can proceed:
 | T11 — wind-down custom-agent | Wind-down as custom-agent | TODO |
 | T12 — ledger-capture custom-agent | Ledger-capture as custom-agent | TODO |
 | T13 — session-setup custom-agent | Pre-session setup as FG custom-agent | TODO |
+| T14 — Lifecycle design & rationale | Rationale for .wip during takeover, foreground capture, wind-down checkpointing vs retirement, doc-ref path history | DONE |
 | Worktree/mission model correction | session-tracking is production; policy-writer drafts only | DONE — see T1 detail |
 | `.git/info/exclude` shared | Shared across all worktrees of a repo, not per-worktree | DONE — see T5 detail |
 | pr-review upstream content | Upstream content untouched; suppressed via settings only | DONE — see T6 detail |
@@ -321,6 +323,24 @@ before main session tokens are charged.
 in `resume-and-handoff.md` but not implemented as a proper custom-agent with its own
 spec/mode.
 
+### T13 — Session-setup custom-agent (FG)
+
+**Status.** DESIGN CAPTURED 2026-09-03 (policy-writer-9). Not yet implemented.
+
+A foreground (FG) custom-agent that prepares the environment for a new session before
+that session starts. Mechanical tasks, simple model, runs out of the main session's context.
+
+Steps it handles:
+- Create the worktree (if needed)
+- Create missing symlinks (skill symlinks per `feature-worktree-setup.md`)
+- Create the initial STATE file from the unified template (`state-vs-ledger.md`)
+- Populate STATE: name, conventions path, mission, role, worktree, ledger path, task fields
+- Find and link relevant context files
+- Commit the STATE file to the mission branch
+
+Why FG: the setup result (STATE file path) needs to be confirmed before the main session
+starts. FG allows the user to verify before handoff.
+
 ### T14 — Resume, handoff, and wind-down lifecycle design & rationale
 
 **Status.** DESIGN CAPTURED 2026-09-04 (policy-writer-13).
@@ -339,24 +359,13 @@ spec/mode.
   `retired` when genuinely finished with the mission or explicitly handing off ownership.
 - **Agentbus visibility:** Handoff/takeover events (`kind="handoff"`) on `mission.<name>` make
   ownership changes immediately visible to all agents monitoring the bus without polling git.
+- **Doc-reference path convention rationale & migration incident:** Every reference across
+  tracked docs must be a repo-root-relative path (e.g. `worktrees/policy-writer/.session/STATE.md`).
+  Bare filenames (e.g. `STATE.md`) broke during the flat-to-nested `session-tracking`
+  reorganization where files moved into `.session/` subdirectories. Repo-root-relative paths
+  remain robust when content is cherry-picked or referenced across worktrees.
 
-### T13 — Session-setup custom-agent (FG)
-
-**Status.** DESIGN CAPTURED 2026-09-03 (policy-writer-9). Not yet implemented.
-
-A foreground (FG) custom-agent that prepares the environment for a new session before
-that session starts. Mechanical tasks, simple model, runs out of the main session's context.
-
-Steps it handles:
-- Create the worktree (if needed)
-- Create missing symlinks (skill symlinks per `feature-worktree-setup.md`)
-- Create the initial STATE file from the unified template (`state-vs-ledger.md`)
-- Populate STATE: name, conventions path, mission, role, worktree, ledger path, task fields
-- Find and link relevant context files
-- Commit the STATE file to the mission branch
-
-Why FG: the setup result (STATE file path) needs to be confirmed before the main session
-starts. FG allows the user to verify before handoff.
+*(T13 detail documented above).*
 
 ---
 

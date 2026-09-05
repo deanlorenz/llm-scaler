@@ -75,8 +75,12 @@ worktrees/<mission-name>/          ← mission branch/worktree
   <normal code tree>               ← mission output
 ```
 
-If a convenience symlink under `session-tracking/missions/` is broken, follow
-`conventions/feature-worktree-setup.md` rather than modifying another mission's files.
+- Access other missions' tracking files via `session-tracking/missions/<mission-name>/`.
+- If a symlink is broken or worktree not present, read directly from the branch:
+  ```bash
+  git -C <repo-root> show <mission-name>:.session/STATE.md
+  ```
+- Do not edit another mission's symlinks — report broken links via `session-tracking/suggestion-box/`.
 
 ## Ground rules
 

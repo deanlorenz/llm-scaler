@@ -28,7 +28,7 @@ Continues: .session/2026-09-04-policy-writer-11.md
   13. Step 8-9 initializes ledger under .wip protocol and handles interactive orientation vs subagent structured context return.
 - [2026-09-04] Item 1 completed: Unified Part 2 and Step 9 in `resume-mission/SKILL.md` into a single canonical orientation and context contract with STATE and Ledger paths, and mandatory parent read of STATE.
 - [2026-09-04] Item 2 completed: Split `session-start.md` and `resume-mission/SKILL.md`. Added prerequisite worktree isolation and STATE checks to `session-start.md`. Streamlined `resume-mission` to focus on discovery, setup, recovery/migration, clearing pending sessions, and agentbus handoff before handing off to standard `session-start.md`.
-- [2026-09-04] Item 3 completed: Saved rationale/design background for resume/handoff/wind-down to `spec-policy-writer.md` (§ T14). Streamlined `conventions/resume-and-handoff.md` to pure rules/protocols (Takeover, Checkpoint & Wind-Down, Agentbus ownership, ledger-capture contract, doc paths). Clarified that wind-down does not imply "retired" by default.
+- [2026-09-04] Item 3 completed: Saved rationale/design background for resume/handoff/wind-down to `spec-policy-writer.md` (§ T14) in correct chronological order after T13 with exact line refs and doc-reference migration incident history. Added broken-symlink reconstruction command and self-healing responsibility clarification in `CONVENTIONS.md`. Explicitly added session-tracking convenience symlink checks to `resume-mission/SKILL.md` Step 4. Aligned `.claude/skills/wind-down/SKILL.md` to support safe checkpointing vs full retirement and reference `resume-and-handoff.md`.
 
 ## Open Items & Deferred Discussions
 
