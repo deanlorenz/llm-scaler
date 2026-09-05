@@ -13,17 +13,20 @@ Before reading files or taking any task action:
 
 ## Reading rules — upfront
 
-Read at session start:
+**Read at session start — this list exactly, nothing else:**
 - Your local `STATE.md` (or task file provided by parent)
 - `CONVENTIONS.md` at the path stated in your STATE file
 - `conventions/agentbus.md` — verify and initialize agentbus channels & subscriptions
 - `conventions/chat-preferences.md` — if running as an interactive foreground session
-- Any situational rules triggered by your role/mission (listed in `CONVENTIONS.md` index)
+- Situational rules whose trigger has **already occurred** at the moment you read them (listed in `CONVENTIONS.md` index). Read only the files whose trigger applies right now; do not read others speculatively.
+
+**STATE.md is sufficient to know where you are.** The `Steps / subtasks`, `Last completed`, and `Next step` fields tell you what has been done and what comes next. You do not need any other file to orient yourself. Reading the plan/spec or a prior ledger to "get more context" is not permitted and is the most common violation — do not do it.
 
 **Never read at session start:**
 - Plan/spec docs (listed in STATE under `Plan/spec`) — pull on demand only when executing that specific step
-- Ledger files — consulted only when debugging or digging into history
+- Ledger files — consulted only when debugging or digging into history; never at session start even if you are "curious" about what the previous session did
 - Any file listed under `Refs` in your STATE file
+- Any situational rules file whose trigger has not occurred
 
 ## Standard Session Startup Flow
 
@@ -46,11 +49,12 @@ Once prerequisite checks pass:
    ```markdown
    Continues: <path to previous ledger, if any>
    ```
-7. Present the canonical orientation block and wait for confirmation before executing.
+7. **Present the canonical orientation block. Stop. Do not proceed until the user confirms.**
+   This is a hard gate — no analysis, no task output, no tool calls beyond setup steps 1–6 may appear before the user has seen and confirmed this block.
 
 ## Canonical Orientation & Context Block
 
-Every session produces this exact canonical block:
+**This block is mandatory and must appear before any work output.** Every session produces this exact canonical block:
 
 ```text
 Mission:   <mission name — one-line goal>
@@ -65,7 +69,7 @@ Next:      <immediate next action requiring confirmation>
 Notes:     <pending sessions cleared, migration, or setup actions taken, if any>
 ```
 
-- **Interactive session:** Output this block in chat and halt for user confirmation on `Next`.
+- **Interactive session:** Output this block in chat and halt. Do not continue — no analysis, no draft, no preliminary findings — until the user explicitly confirms `Next`.
 - **Delegated worker / Subagent:** Return this block to the calling parent session. The parent must read the returned `STATE` file to establish full mission context.
 
 ## If starting a brand new mission (No STATE file exists)

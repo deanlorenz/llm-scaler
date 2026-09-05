@@ -30,7 +30,7 @@ Reads may cross worktree boundaries when needed (`git -C`, `cat`, full paths, et
 
 ## Situational rules — read when triggered
 
-Read the matching file when its situation occurs, not speculatively:
+Read the matching file when its situation occurs, not speculatively. **Do not read a situational rules file whose trigger has not occurred.** Having seen the file in a previous session, or believing it might be "useful context," is not a trigger.
 
 ### Role & Mission Setup (Read when establishing mission/role at session start)
 - `conventions/session-start.md` — **every session reads this first, before any work**

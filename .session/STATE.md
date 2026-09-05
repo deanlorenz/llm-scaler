@@ -10,7 +10,7 @@
 - **Worktree:** `worktrees/policy-writer` (branch `policy-writer`)
 - **Role / scope:** Mission owner. Drafts all changes to `CONVENTIONS.md`, `conventions/`,
   and the skills here; copies finished content into `session-tracking`.
-- **Ledger / log:** `.session/2026-09-04-policy-writer-13.md` (retired — session 14 is next)
+- **Ledger / log:** `.session/2026-09-05-policy-writer-14.md` (active)
 
 ## Task
 
@@ -65,10 +65,10 @@
 
 **Last completed:** Items 1-6 completed + chat-preferences convention created; ready for clean handover.
 
-**Next step / resume point:** Resume with `policy-writer14`: proceed with Item 7 (Conventions naming review) and Item 8.
+**Next step / resume point:** Item 7 (Conventions naming review) — analysis presented, awaiting approval.
 
 ### Status
-WOUND DOWN / RETIRED — Ready for session 14.
+IN PROGRESS — Session 14 active.
 
 ### Known issues
 - `settings-and-skill-edits.md` describes a `user-approved-settings-change` marker
@@ -88,3 +88,4 @@ WOUND DOWN / RETIRED — Ready for session 14.
 - 2026-09-04 session=2026-09-04-policy-writer-10 status=retired ledger=.session/2026-09-04-policy-writer-10.md
 - 2026-09-04 session=2026-09-04-policy-writer-11 status=retired ledger=.session/2026-09-04-policy-writer-11.md
 - 2026-09-04 session=2026-09-04-policy-writer-13 status=retired ledger=.session/2026-09-04-policy-writer-13.md
+- 2026-09-05 session=2026-09-05-policy-writer-14 status=active ledger=.session/2026-09-05-policy-writer-14.md
