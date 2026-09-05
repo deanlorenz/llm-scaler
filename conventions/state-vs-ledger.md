@@ -33,6 +33,7 @@ detail differs per role; fields do not. For field authoring guidance see `conven
 - **Worktree:** `worktrees/<name>` (branch `<branch>`)
 - **Role / scope:** <role and authority boundary>
 - **Ledger / log:** `.session/<slug>.md`
+  ⚠ DO NOT READ — not yours; new session creates its own ledger
 
 ## Task
 

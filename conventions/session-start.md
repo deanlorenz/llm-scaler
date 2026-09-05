@@ -11,7 +11,9 @@ Read at session start:
 
 **Never read at session start:**
 - Plan/spec docs (listed in STATE under `Plan/spec`) — pull on demand only
-- Ledger files — consulted only when debugging or digging into history
+- The ledger file listed in STATE's `Ledger / log` field — that is the previous session's
+  ledger, not yours. Do not read it. Do not read it "just to catch up." STATE contains
+  everything you need. Create your own ledger; do not open the old one.
 - Any file listed under `Refs` in your STATE file
 
 ## Opening orientation
