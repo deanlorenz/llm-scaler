@@ -20,3 +20,6 @@ Continues: .session/2026-09-04-policy-writer-13.md
   - `conventions/state-vs-ledger.md` template: Conventions field changed from soft "read this first" to ⚠ STOP hard-stop signal with explicit no-speculative-reads warning; Ledger field annotated "(do not read upfront — new session creates its own ledger; this field updated to that path)".
   - `conventions/session-start.md`: ledger "never read" clause strengthened ("the old one is not yours to read"); safety-net rule added — if prior ledger must be referenced, read only from last `## Verified` marker to end of file; should be empty after proper wind-down or ledger-capture.
   - `STATE.md` (live): Conventions field updated to ⚠ STOP signal; Ledger field annotated "(active — do not read upfront)".
+- [2026-09-05] Round 3 fix — interactive sessions never auto-proceed:
+  - `conventions/state-vs-ledger.md` template: Next step field now carries ⚠ "NEVER proceed — state it and wait, user decides when to go."
+  - `conventions/session-start.md`: Next field in orientation block relabeled "stated here, NOT executed"; ⚠ warning added immediately after the block — "NEVER execute Next on your own."

@@ -67,9 +67,11 @@ STATE:     <path to .session/STATE.md>
 Ledger:    <path to active .session/<slug>.md>
 Status:    <current status string>
 Last:      <last completed step>
-Next:      <immediate next action requiring confirmation>
+Next:      <immediate next action — stated here, NOT executed>
 Notes:     <pending sessions cleared, migration, or setup actions taken, if any>
 ```
+
+⚠ **Interactive sessions: NEVER execute `Next` on your own. State it here and stop. The user decides when to proceed and what to do.**
 
 - **Interactive session:** Output this block in chat and halt. Do not continue — no analysis, no draft, no preliminary findings — until the user explicitly confirms `Next`.
 - **Delegated worker / Subagent:** Return this block to the calling parent session. The parent must read the returned `STATE` file to establish full mission context.

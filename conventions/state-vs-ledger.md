@@ -56,8 +56,8 @@ detail differs per role; fields do not. For field authoring guidance see `conven
 
 **Last completed:** <step id or description, or "none">
 
-**Next step / resume point:** <exact next action — on interactive sessions, confirm with
-user before executing; do not auto-run>
+**Next step / resume point:** <exact next action>
+⚠ **Interactive sessions: NEVER proceed to the next step. State it in the orientation block and wait. The user decides when to go.**
 
 ### Status
 <Coders use: NOT STARTED | IN PROGRESS — <what's left> | DONE <date> | BLOCKED on <thing>>
