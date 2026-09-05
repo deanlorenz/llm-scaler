@@ -1,60 +1,74 @@
 # Starting a session
 
-Read this at the start of every session, before any work.
+Read this at the start of every session (interactive, delegated worker, or resuming), before any work.
+
+## Prerequisite & Worktree Isolation Check
+
+Before reading files or taking any task action:
+1. **Verify Worktree Isolation:** Confirm current working directory is inside the designated mission worktree (`worktrees/<mission>`). Coders and workers must be strictly isolated to their assigned worktree.
+2. **Verify STATE File:** Confirm local `.session/STATE.md` (or the task file provided by parent) exists and is readable.
+3. **If any check fails:**
+   - **Interactive session:** Stop immediately. Do not guess or perform speculative searches. Ask the user: *"Prerequisites not met. Would you like me to run `/resume-mission` to set up and enter the worktree?"*
+   - **Delegated worker session:** Stop immediately and return an error block to the parent session.
 
 ## Reading rules — upfront
 
 Read at session start:
-- Your STATE file (or session STATE file if provided)
-- `CONVENTIONS.md` at the path in your STATE file
-- Any situational rules triggered by your role (listed in `CONVENTIONS.md` index)
+- Your local `STATE.md` (or task file provided by parent)
+- `CONVENTIONS.md` at the path stated in your STATE file
+- Any situational rules triggered by your role/mission (listed in `CONVENTIONS.md` index)
 
 **Never read at session start:**
-- Plan/spec docs (listed in STATE under `Plan/spec`) — pull on demand only
+- Plan/spec docs (listed in STATE under `Plan/spec`) — pull on demand only when executing that specific step
 - Ledger files — consulted only when debugging or digging into history
 - Any file listed under `Refs` in your STATE file
 
-## Opening orientation
+## Standard Session Startup Flow
 
-Before any work, present this to the user:
-
-```
-Mission:   <mission name>
-Role:      <role>
-Worktree:  <worktree path>
-Status:    <current status>
-Last:      <last completed step>
-Next:      <next step>
-```
-
-Then wait for the user to confirm before executing anything.
-
-## If you have a STATE file
-
-1. Read it. It contains your conventions path, mission, role, worktree, task, and next step.
-2. Read `CONVENTIONS.md` at the path stated in your STATE file.
-3. Create a new ledger file for this session (slug: `YYYY-MM-DD-<mission>-<N>.md`).
-   Open it with:
-   ```
+Once prerequisite checks pass:
+1. Read `.session/STATE.md` (identifies mission, role, worktree, task, conventions path, next step).
+2. Read `CONVENTIONS.md` (at path stated in STATE).
+3. Read situational rules triggered by role/mission:
+   - Mission owner: `conventions/mission-owner.md`
+   - Coder / Worker: `conventions/coder-orchestration.md`
+   - `policy-writer` mission: `conventions/policy-writer.md`
+4. Apply the `.wip` protocol (`conventions/wip-editing.md`) to record session start in `STATE.md`:
+   - Rename `STATE.md` → `STATE.md.wip`
+   - Append to Session log: `- <date> session=<slug> status=active ledger=.session/<slug>.md`
+   - Rename `STATE.md.wip` → `STATE.md`, stage, and commit.
+5. Open active session ledger at `.session/<slug>.md` starting with:
+   ```markdown
    Continues: <path to previous ledger, if any>
    ```
-4. Append a new line to the session log in STATE:
-   ```
-   - <date> session=<slug> status=active ledger=.session/<slug>.md
-   ```
-5. Read any situational rules triggered by your role (listed in `CONVENTIONS.md` index).
-6. Present the opening orientation above and wait for the user to confirm.
+6. Present the canonical orientation block and wait for confirmation before executing.
 
-## If you have no STATE file
+## Canonical Orientation & Context Block
 
-You are starting a new mission. You do not have a task yet.
+Every session produces this exact canonical block:
 
-1. Read `worktrees/session-tracking/CONVENTIONS.md`.
-2. Interact with the user to define the mission: name, worktree, goal, and your role.
-3. Once the mission is defined, create `.session/STATE.md` using the template in
-   `conventions/state-vs-ledger.md`. Fill in what is known; leave execution fields empty
-   until the user approves the plan.
-4. Ask the user for approval before doing any mission work.
+```text
+Mission:   <mission name — one-line goal>
+Role:      <role: mission-owner | coder | reviewer | researcher>
+Worktree:  <worktree path>
+STATE:     <path to .session/STATE.md>
+Ledger:    <path to active .session/<slug>.md>
+Status:    <current status string>
+Last:      <last completed step>
+Next:      <immediate next action requiring confirmation>
+Notes:     <pending sessions cleared, migration, or setup notes, if any>
+```
+
+- **Interactive session:** Output this block in chat and halt for user confirmation on `Next`.
+- **Delegated worker / Subagent:** Return this block to the calling parent session. The parent must read the returned `STATE` file to establish full mission context.
+
+## If starting a brand new mission (No STATE file exists)
+
+If starting a new mission from scratch:
+1. Follow `/resume-mission` (or `conventions/feature-worktree-setup.md`) to create the worktree, `.session/` directory, and skill symlinks.
+2. Read `worktrees/session-tracking/CONVENTIONS.md`.
+3. Interact with the user to define mission name, worktree, goal, role, and initial plan.
+4. Create `.session/STATE.md` using the template in `conventions/state-vs-ledger.md`.
+5. Ask the user for explicit plan approval before executing mission tasks.
 
 ## Roles and what to read per role
 

@@ -27,3 +27,4 @@ Continues: .session/2026-09-04-policy-writer-11.md
   12. Step 7 publishes agentbus handoff for mission-owner/role takeovers.
   13. Step 8-9 initializes ledger under .wip protocol and handles interactive orientation vs subagent structured context return.
 - [2026-09-04] Item 1 completed: Unified Part 2 and Step 9 in `resume-mission/SKILL.md` into a single canonical orientation and context contract with STATE and Ledger paths, and mandatory parent read of STATE.
+- [2026-09-04] Item 2 completed: Split `session-start.md` and `resume-mission/SKILL.md`. Added prerequisite worktree isolation and STATE checks to `session-start.md`. Streamlined `resume-mission` to focus on discovery, setup, recovery/migration, clearing pending sessions, and agentbus handoff before handing off to standard `session-start.md`.
