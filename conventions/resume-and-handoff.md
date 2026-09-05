@@ -59,14 +59,17 @@ A focused agent assigned to process exactly one ledger file:
 1. **Allowed Write Destinations:** The mission's own `.session/STATE.md` and its internal plan/spec doc only.
 2. **Prohibition:** `ledger-capture` must **never** write directly to `CONVENTIONS.md` or `conventions/`.
 3. **Global Findings (Suggestion Box):** Any finding that warrants a global rule must be written as an atomic file into `session-tracking/suggestion-box/` named `YYYY-MM-DD-HHMM-<mission-name>.md`. Only `policy-writer` processes suggestion-box entries.
-4. **Completion Marker:** Append one of the following to the processed ledger:
+4. **Completion Marker & Summary Table:**
+   Append a verification marker to the end of the processed ledger, including a summary table of findings and actions taken:
    ```markdown
-   ## Verified YYYY-MM-DD — all points already captured
+   ## Verified YYYY-MM-DD — <all points already captured | folded in: summary>
+
+   | Ledger point | Durable destination | Action taken |
+   |---|---|---|
+   | <point / finding> | <doc path & section> | <None needed | Added to X | Folded into Y> |
    ```
-   or
-   ```markdown
-   ## Verified YYYY-MM-DD — folded in: <summary of items added and destination docs>
-   ```
+5. **Interactive Summary Return:**
+   When invoked interactively or by a parent session, `ledger-capture` must return this concise findings summary table directly in its task result so the user/parent sees exactly what was verified or folded in.
 
 ## Doc-Reference Path Rule
 

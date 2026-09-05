@@ -41,3 +41,14 @@ Continues: .session/2026-09-04-policy-writer-11.md
 - [ ] Item 8: Workflow breakdown across the 4 session cases.
 
 ## Verified 2026-09-04 — folded in: T14 roadmap checkbox marked [x] in spec-policy-writer.md §5
+
+| Ledger 13 point | Found in durable docs? | Action taken |
+|---|---|---|
+| Items 1–4 completed | ✅ STATE.md steps `[x]` + `Last completed` line | None needed |
+| Item 5 (agentbus) open | ✅ STATE.md line 54 `[ ]` | None needed |
+| Item 6 (coder/reviewer conventions) open | ✅ STATE.md line 55 `[ ]` | None needed |
+| Item 7 (naming review) open | ✅ STATE.md line 56 `[ ]` | None needed |
+| Item 8 (workflow breakdown) open | ✅ STATE.md line 57 `[ ]` | None needed |
+| FG/BG review deferred | ✅ STATE.md line 58 `[ ]` | None needed |
+| Boundary division deferred | ✅ STATE.md line 59 `[ ]` | None needed |
+| T14 detail written | ✅ spec-policy-writer.md §7 T14 | Folded in: Marked T14 `[x]` in spec §5 roadmap |
