@@ -28,14 +28,12 @@ detail differs per role; fields do not. For field authoring guidance see `conven
 ## Orientation
 
 - **Conventions:** `worktrees/session-tracking/CONVENTIONS.md`
-  ⚠ **STOP. Read CONVENTIONS.md before any other file. Do not assume you know the rules.
-  Do not speculatively read other files you see referenced here. Check the instructions first.**
+  *(read this first, before any other file)*
 - **What / goal / mission:** <what this session or mission is for>
 - **Worktree:** `worktrees/<name>` (branch `<branch>`)
 - **Role / scope:** <role and authority boundary>
-- **Agentbus:** in=`<mission>.<role-or-slug>.in` out=`<mission>.<role-or-slug>` announce=`mission.<mission-name>`
 - **Ledger / log:** `.session/<slug>.md`
-  *(do not read upfront — the new session creates its own ledger; this field will be updated to that path)*
+  ⚠ DO NOT READ — not yours; new session creates its own ledger
 
 ## Task
 
@@ -56,8 +54,8 @@ detail differs per role; fields do not. For field authoring guidance see `conven
 
 **Last completed:** <step id or description, or "none">
 
-**Next step / resume point:** <exact next action>
-⚠ **Interactive sessions: NEVER proceed to the next step. State it in the orientation block and wait. The user decides when to go.**
+**Next step / resume point:** <exact next action — on interactive sessions, confirm with
+user before executing; do not auto-run>
 
 ### Status
 <Coders use: NOT STARTED | IN PROGRESS — <what's left> | DONE <date> | BLOCKED on <thing>>

@@ -1,97 +1,62 @@
 # Starting a session
 
-Read this at the start of every session (interactive, delegated worker, or resuming), before any work.
-
-## Worktree check
-
-Before reading any files:
-- Confirm the current working directory is inside the mission worktree (`worktrees/<mission>`).
-- If not: do not search speculatively. Ask the user which mission and worktree to use. Do not attempt to read STATE across worktrees — ask first.
-- Delegated workers: if worktree check fails, stop and return an error block to the parent.
+Read this at the start of every session, before any work.
 
 ## Reading rules — upfront
 
-**Read at session start — this list exactly, nothing else:**
-- Your local `STATE.md` (or task file provided by parent)
-- `CONVENTIONS.md` at the path stated in your STATE file
-- `conventions/agentbus.md` — verify and initialize agentbus channels & subscriptions
-- `conventions/chat-preferences.md` — if running as an interactive foreground session
-- Situational rules whose trigger has **already occurred** at the moment you read them (listed in `CONVENTIONS.md` index). Read only the files whose trigger applies right now; do not read others speculatively.
-
-**STATE.md is sufficient to know where you are.** The `Steps / subtasks`, `Last completed`, and `Next step` fields tell you what has been done and what comes next. You do not need any other file to orient yourself. Reading the plan/spec or a prior ledger to "get more context" is not permitted and is the most common violation — do not do it.
+Read at session start:
+- Your STATE file (or session STATE file if provided)
+- `CONVENTIONS.md` at the path in your STATE file
+- Any situational rules triggered by your role (listed in `CONVENTIONS.md` index)
 
 **Never read at session start:**
-- Plan/spec docs (listed in STATE under `Plan/spec`) — pull on demand only when executing that specific step
-- Ledger files — never at session start, even if you are "curious" about what the previous session did. The new session creates its own ledger; the old one is not yours to read.
+- Plan/spec docs (listed in STATE under `Plan/spec`) — pull on demand only
+- The ledger file listed in STATE's `Ledger / log` field — that is the previous session's
+  ledger, not yours. Do not read it. Do not read it "just to catch up." STATE contains
+  everything you need. Create your own ledger; do not open the old one.
 - Any file listed under `Refs` in your STATE file
-- Any situational rules file whose trigger has not occurred
 
-**Safety net — if a prior ledger must be referenced:** Read only from the last `## Verified <date>` marker to end of file. That section should be empty (or near-empty) if the prior session ran a proper wind-down or if `ledger-capture` already ran. If it is not empty, that indicates a missed wind-down — record the gap in your ledger and proceed; do not read the full ledger body.
+## Opening orientation
 
-## Session cases — identify and gate
+Before any work, present this to the user:
 
-Determine your case. Follow the gate before any work.
-
-| Case | Condition | Gate |
-|---|---|---|
-| **New mission** | No `STATE.md` in worktree | Stop. Ask user to confirm mission name and scope before creating anything. Discuss: name, goal, role, inputs, outputs, boundaries. Create STATE only after explicit approval. |
-| **Resume / takeover** | `STATE.md` exists with an active entry | Ask user: "Continuing `<slug>`?" Run agentbus ownership check and ledger check. Declare ownership after confirmation. See `resume-and-handoff.md`. |
-| **Delegated worker** | Entry point is a task file passed by parent | Return orientation block to parent before any work. Parent must confirm. |
-
-## Standard Session Startup Flow
-
-Once prerequisite checks pass:
-1. Read `.session/STATE.md` (identifies mission, role, worktree, task, conventions path, agentbus channels, next step).
-2. Read `CONVENTIONS.md` (at path stated in STATE).
-3. Read `conventions/agentbus.md` and initialize/verify agentbus channels:
-   - Subscribe to own inbox channel (`In:`)
-   - If mission owner: subscribe to `Announce:` (`mission.<name>`)
-   - Publish presence announcement to `Announce:` channel
-4. Read situational rules triggered by role/mission:
-   - Mission owner: `conventions/mission-owner.md`
-   - Coder / Worker: `conventions/coder-orchestration.md`
-   - `policy-writer` mission: `conventions/policy-writer.md`
-5. Apply the `.wip` protocol (`conventions/wip-editing.md`) to record session start in `STATE.md`:
-   - Rename `STATE.md` → `STATE.md.wip`
-   - Append to Session log: `- <date> session=<slug> status=active ledger=.session/<slug>.md`
-   - Rename `STATE.md.wip` → `STATE.md`, stage, and commit.
-6. Open active session ledger at `.session/<slug>.md` starting with:
-   ```markdown
-   Continues: <path to previous ledger, if any>
-   ```
-7. **Present the canonical orientation block. Stop. Do not proceed until the user confirms.**
-   This is a hard gate — no analysis, no task output, no tool calls beyond setup steps 1–6 may appear before the user has seen and confirmed this block.
-
-## Canonical Orientation & Context Block
-
-**This block is mandatory and must appear before any work output.** Every session produces this exact canonical block:
-
-```text
-Mission:   <mission name — one-line goal>
-Role:      <role: mission-owner | coder | reviewer | researcher>
+```
+Mission:   <mission name>
+Role:      <role>
 Worktree:  <worktree path>
-Agentbus:  in=<in-channel> out=<out-channel> announce=<announce-channel>
-STATE:     <path to .session/STATE.md>
-Ledger:    <path to active .session/<slug>.md>
-Status:    <current status string>
+Status:    <current status>
 Last:      <last completed step>
-Next:      <immediate next action — stated here, NOT executed>
-Notes:     <pending sessions cleared, migration, or setup actions taken, if any>
+Next:      <next step>
 ```
 
-⚠ **Interactive sessions: NEVER execute `Next` on your own. State it here and stop. The user decides when to proceed and what to do.**
+Then wait for the user to confirm before executing anything.
 
-- **Interactive session:** Output this block in chat and halt. Do not continue — no analysis, no draft, no preliminary findings — until the user explicitly confirms `Next`.
-- **Delegated worker / Subagent:** Return this block to the calling parent session. The parent must read the returned `STATE` file to establish full mission context.
+## If you have a STATE file
 
-## If starting a brand new mission (no STATE file exists)
+1. Read it. It contains your conventions path, mission, role, worktree, task, and next step.
+2. Read `CONVENTIONS.md` at the path stated in your STATE file.
+3. Create a new ledger file for this session (slug: `YYYY-MM-DD-<mission>-<N>.md`).
+   Open it with:
+   ```
+   Continues: <path to previous ledger, if any>
+   ```
+4. Append a new line to the session log in STATE:
+   ```
+   - <date> session=<slug> status=active ledger=.session/<slug>.md
+   ```
+5. Read any situational rules triggered by your role (listed in `CONVENTIONS.md` index).
+6. Present the opening orientation above and wait for the user to confirm.
 
-1. Follow `/resume-mission` (or `conventions/feature-worktree-setup.md`) to create the worktree, `.session/` directory, and skill symlinks.
-2. Read `worktrees/session-tracking/CONVENTIONS.md`.
-3. Ask the user before creating anything. There is no plan yet. Establish: mission name, goal, your role, inputs, outputs, success criteria, and what is explicitly out of scope.
-4. Get explicit user approval of the scope before proceeding.
-5. Create `.session/STATE.md` from the template in `conventions/state-vs-ledger.md`, populated with the agreed scope.
-6. Get explicit user approval of the initial task list before executing any mission tasks.
+## If you have no STATE file
+
+You are starting a new mission. You do not have a task yet.
+
+1. Read `worktrees/session-tracking/CONVENTIONS.md`.
+2. Interact with the user to define the mission: name, worktree, goal, and your role.
+3. Once the mission is defined, create `.session/STATE.md` using the template in
+   `conventions/state-vs-ledger.md`. Fill in what is known; leave execution fields empty
+   until the user approves the plan.
+4. Ask the user for approval before doing any mission work.
 
 ## Roles and what to read per role
 

@@ -11,7 +11,8 @@
 - **Worktree:** `worktrees/policy-writer` (branch `policy-writer`)
 - **Role / scope:** Mission owner. Drafts all changes to `CONVENTIONS.md`, `conventions/`,
   and the skills here; copies finished content into `session-tracking`.
-- **Ledger / log:** `.session/2026-09-05-policy-writer-14.md` (active — do not read upfront)
+- **Ledger / log:** `.session/2026-09-05-policy-writer-15.md`
+  ⚠ DO NOT READ — not yours; new session creates its own ledger
 
 ## Task
 
@@ -69,7 +70,7 @@
 **Next step / resume point:** Revisit FG/BG analysis and workflow nuances; or install + push finished conventions to session-tracking.
 
 ### Status
-IN PROGRESS — checkpointed for handover. Session 14 winding down.
+IN PROGRESS — session 15 active.
 
 ### Known issues
 - `settings-and-skill-edits.md` describes a `user-approved-settings-change` marker
@@ -90,3 +91,4 @@ IN PROGRESS — checkpointed for handover. Session 14 winding down.
 - 2026-09-04 session=2026-09-04-policy-writer-11 status=retired ledger=.session/2026-09-04-policy-writer-11.md
 - 2026-09-04 session=2026-09-04-policy-writer-13 status=retired ledger=.session/2026-09-04-policy-writer-13.md
 - 2026-09-05 session=2026-09-05-policy-writer-14 status=retired ledger=.session/2026-09-05-policy-writer-14.md
+- 2026-09-05 session=2026-09-05-policy-writer-15 status=active ledger=.session/2026-09-05-policy-writer-15.md
