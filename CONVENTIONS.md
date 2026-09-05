@@ -43,6 +43,7 @@ Read the matching file when its situation occurs, not speculatively:
 - `conventions/state-vs-ledger.md` — creating initial state or ledger files, or unsure which file information belongs in
 
 ### Action Triggers (Read immediately before performing the action)
+- `conventions/agentbus-user-interaction.md` — when running as a background agent/subtask needing to ask user questions via agentbus
 - `conventions/wip-editing.md` — before editing a shared file (`STATE.md`, `CONVENTIONS.md`)
 - `conventions/writing-outside-worktree.md` — before performing a permitted cross-worktree write
 - `conventions/tasks.md` — before writing or assigning a task specification to any worker

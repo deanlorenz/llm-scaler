@@ -35,7 +35,7 @@ Continues: .session/2026-09-04-policy-writer-11.md
 
 - [ ] Revisit FG/BG analysis and workflow nuances across all 4 cases.
 - [ ] Revisit overlap and division of labor between `CONVENTIONS.md`, `conventions/session-start.md`, and `resume-mission/SKILL.md`.
-- [ ] Item 5: Agentbus conventions (`conventions/agentbus.md`) drafted and pending implementation.
+- [x] Item 5: Agentbus conventions (`conventions/agentbus.md` and `conventions/agentbus-user-interaction.md`) created, indexed, and integrated into session-start / STATE template. Mission owner updated to subscribe to `Announce:`; policy-writer updated to subscribe to `session-tracking.suggestions`.
 - [ ] Item 6: Conventions for coders and coder-reviewers (`coder.md`, `reviewer.md`).
 - [ ] Item 7: Conventions naming review (`<action>.md`, `<role>.md`, `<context>.md` — remove redundant `-rules` suffix).
 - [ ] Item 8: Workflow breakdown across the 4 session cases.

@@ -16,6 +16,7 @@ Before reading files or taking any task action:
 Read at session start:
 - Your local `STATE.md` (or task file provided by parent)
 - `CONVENTIONS.md` at the path stated in your STATE file
+- `conventions/agentbus.md` — verify and initialize agentbus channels & subscriptions
 - Any situational rules triggered by your role/mission (listed in `CONVENTIONS.md` index)
 
 **Never read at session start:**
@@ -26,21 +27,25 @@ Read at session start:
 ## Standard Session Startup Flow
 
 Once prerequisite checks pass:
-1. Read `.session/STATE.md` (identifies mission, role, worktree, task, conventions path, next step).
+1. Read `.session/STATE.md` (identifies mission, role, worktree, task, conventions path, agentbus channels, next step).
 2. Read `CONVENTIONS.md` (at path stated in STATE).
-3. Read situational rules triggered by role/mission:
+3. Read `conventions/agentbus.md` and initialize/verify agentbus channels:
+   - Subscribe to own inbox channel (`In:`)
+   - If mission owner: subscribe to `Announce:` (`mission.<name>`)
+   - Publish presence announcement to `Announce:` channel
+4. Read situational rules triggered by role/mission:
    - Mission owner: `conventions/mission-owner.md`
    - Coder / Worker: `conventions/coder-orchestration.md`
    - `policy-writer` mission: `conventions/policy-writer.md`
-4. Apply the `.wip` protocol (`conventions/wip-editing.md`) to record session start in `STATE.md`:
+5. Apply the `.wip` protocol (`conventions/wip-editing.md`) to record session start in `STATE.md`:
    - Rename `STATE.md` → `STATE.md.wip`
    - Append to Session log: `- <date> session=<slug> status=active ledger=.session/<slug>.md`
    - Rename `STATE.md.wip` → `STATE.md`, stage, and commit.
-5. Open active session ledger at `.session/<slug>.md` starting with:
+6. Open active session ledger at `.session/<slug>.md` starting with:
    ```markdown
    Continues: <path to previous ledger, if any>
    ```
-6. Present the canonical orientation block and wait for confirmation before executing.
+7. Present the canonical orientation block and wait for confirmation before executing.
 
 ## Canonical Orientation & Context Block
 
@@ -50,12 +55,13 @@ Every session produces this exact canonical block:
 Mission:   <mission name — one-line goal>
 Role:      <role: mission-owner | coder | reviewer | researcher>
 Worktree:  <worktree path>
+Agentbus:  in=<in-channel> out=<out-channel> announce=<announce-channel>
 STATE:     <path to .session/STATE.md>
 Ledger:    <path to active .session/<slug>.md>
 Status:    <current status string>
 Last:      <last completed step>
 Next:      <immediate next action requiring confirmation>
-Notes:     <pending sessions cleared, migration, or setup notes, if any>
+Notes:     <pending sessions cleared, migration, or setup actions taken, if any>
 ```
 
 - **Interactive session:** Output this block in chat and halt for user confirmation on `Next`.

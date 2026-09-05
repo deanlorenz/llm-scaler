@@ -51,7 +51,7 @@ in - **Ledger / log:** `.session/2026-09-04-policy-writer-13.md` (active)
 - [x] Update resume-mission skill — note custom-agent direction, unify orientation contract, and integrate prerequisites (Items 1 & 2)
 - [x] Align conventions/resume-and-handoff.md and skills (resume-mission, wind-down); save rationale to spec before purging (Item 3)
 - [x] Group CONVENTIONS.md situational rules by role/mission, lifecycle, and action triggers (Item 4)
-- [ ] Item 5: Agentbus conventions (`conventions/agentbus.md`)
+- [x] Item 5: Agentbus conventions (`conventions/agentbus.md` and `conventions/agentbus-user-interaction.md`)
 - [ ] Item 6: Conventions for coders and coder-reviewers (`coder.md`, `reviewer.md`)
 - [ ] Item 7: Conventions naming review (`<action>.md`, `<role>.md`, `<context>.md`)
 - [ ] Item 8: Workflow breakdown across 4 session cases
@@ -60,9 +60,9 @@ in - **Ledger / log:** `.session/2026-09-04-policy-writer-13.md` (active)
 - [ ] Rewrite ledger-capture as a custom-agent (spec + mode)
 - [ ] Write T10 session-setup agent spec
 
-**Last completed:** Items 1, 2, 3, 4 completed (unified orientation return contract, session-start split, resume-and-handoff alignment, CONVENTIONS index grouping)
+**Last completed:** Item 5 completed (agentbus.md for mandatory session channel setup & subscriptions; agentbus-user-interaction.md for BG agent dialogue)
 
-**Next step / resume point:** Implement Item 5 (`conventions/agentbus.md`). Confirm with user before proceeding.
+**Next step / resume point:** Implement Item 6 (Conventions for coders and coder-reviewers: `coder.md`, `reviewer.md`). Confirm with user before proceeding.
 
 ### Status
 IN PROGRESS — Items 1-4 completed; remaining items 5-8, FG/BG review, and custom-agent specs.

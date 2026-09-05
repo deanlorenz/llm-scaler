@@ -30,9 +30,10 @@ For each unprocessed note found:
 
 If no pending notes exist, proceed with standard mission tasks.
 
-## Suggestion-Box Processing
+## Suggestion-Box Monitoring & Processing
 
-When reviewing `session-tracking/suggestion-box/`:
+1. **Agentbus Channel Subscription:** On startup, `policy-writer` subscribes to `session-tracking.suggestions` (and/or `session-tracking.pending-commits`) per `conventions/agentbus.md` to receive notifications when new suggestion files land in `session-tracking/suggestion-box/`.
+2. **Reviewing Suggestions:**
 1. Read unprocessed suggestion files (`YYYY-MM-DD-HHMM-<mission>.md`).
 2. Decide whether the finding warrants a global rule in `CONVENTIONS.md`, a situational file in `conventions/`, or belongs only in that mission's local spec.
 3. Draft modifications in `worktrees/policy-writer`.

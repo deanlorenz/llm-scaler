@@ -32,6 +32,7 @@ detail differs per role; fields do not. For field authoring guidance see `conven
 - **What / goal / mission:** <what this session or mission is for>
 - **Worktree:** `worktrees/<name>` (branch `<branch>`)
 - **Role / scope:** <role and authority boundary>
+- **Agentbus:** in=`<mission>.<role-or-slug>.in` out=`<mission>.<role-or-slug>` announce=`mission.<mission-name>`
 - **Ledger / log:** `.session/<slug>.md`
 
 ## Task

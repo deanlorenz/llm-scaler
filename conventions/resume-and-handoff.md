@@ -68,9 +68,6 @@ A focused agent assigned to process exactly one ledger file:
    |---|---|---|
    | <point / finding> | <doc path & section> | <None needed | Added to X | Folded into Y> |
    ```
-5. **Interactive Summary Return:**
-   When invoked interactively or by a parent session, `ledger-capture` must return this concise findings summary table directly in its task result so the user/parent sees exactly what was verified or folded in.
-
 ## Doc-Reference Path Rule
 
 Every reference across tracked docs must be a **repo-root-relative path** (e.g. `worktrees/policy-writer/.session/STATE.md`) — never filesystem-absolute, never a bare filename. Always state the worktree/branch if not obvious from context.
