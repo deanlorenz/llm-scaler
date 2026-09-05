@@ -32,27 +32,26 @@ Reads may cross worktree boundaries when needed (`git -C`, `cat`, full paths, et
 
 Read the matching file when its situation occurs, not speculatively:
 
+### Role & Mission Setup (Read when establishing mission/role at session start)
 - `conventions/session-start.md` — **every session reads this first, before any work**
 - `conventions/mission-owner.md` — assuming or acting in the mission-owner role
-- `conventions/state-vs-ledger.md` — creating initial state or ledger files, or unsure which
-  one a piece of information belongs in
-- `conventions/resume-and-handoff.md` — resuming, taking over, handing off, or explicitly
-  winding down a mission
-- `conventions/writing-outside-worktree.md` — a write outside the mission worktree is required
-  or a pinned session encounters the worktree isolation guard
-- `conventions/feature-worktree-setup.md` — creating or migrating a mission worktree, or a skill
-  directs you there because required local setup is missing
-- `conventions/wip-editing.md` — editing `STATE.md` or `CONVENTIONS.md`, or persisting a newly
-  approved plan
-- `conventions/tasks.md` — writing or assigning a task to any worker (not for receivers)
-- `conventions/coder-orchestration.md` — dispatching or running a coder agent
-- `conventions/settings-and-skill-edits.md` — editing `~/.claude/settings.json` or a `SKILL.md`
-- `conventions/unexplained-files.md` — finding an unexplained file or edit
-- `conventions/push.md` — considering any git push, after receiving explicit authorization for
-  that one push
-- `conventions/pr-branch.md` — creating and curating the ephemeral branch that will back a PR
-- `conventions/pr-workflow.md` — preparing to open the PR itself: checks, target, and GitHub API
 - `conventions/policy-writer.md` — working in any role on the `policy-writer` mission
+
+### Lifecycle & Session Boundaries
+- `conventions/resume-and-handoff.md` — running `/resume-mission` or `/wind-down`, taking over, or ending work
+- `conventions/feature-worktree-setup.md` — creating/migrating a mission worktree or setting up missing skill symlinks
+- `conventions/state-vs-ledger.md` — creating initial state or ledger files, or unsure which file information belongs in
+
+### Action Triggers (Read immediately before performing the action)
+- `conventions/wip-editing.md` — before editing a shared file (`STATE.md`, `CONVENTIONS.md`)
+- `conventions/writing-outside-worktree.md` — before performing a permitted cross-worktree write
+- `conventions/tasks.md` — before writing or assigning a task specification to any worker
+- `conventions/coder-orchestration.md` — before dispatching or orchestrating a coder agent
+- `conventions/push.md` — before executing git push (after receiving explicit single-use approval)
+- `conventions/pr-branch.md` — before creating or curating an ephemeral PR branch
+- `conventions/pr-workflow.md` — before opening a PR via the GitHub API
+- `conventions/settings-and-skill-edits.md` — before editing `~/.claude/settings.json` or a `SKILL.md`
+- `conventions/unexplained-files.md` — upon finding an unexplained file or uncommitted edit
 
 ## Repo layout
 
