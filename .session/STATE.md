@@ -53,20 +53,22 @@ in - **Ledger / log:** `.session/2026-09-04-policy-writer-13.md` (active)
 - [x] Group CONVENTIONS.md situational rules by role/mission, lifecycle, and action triggers (Item 4)
 - [x] Item 5: Agentbus conventions (`conventions/agentbus.md` and `conventions/agentbus-user-interaction.md`)
 - [x] Item 6: Conventions for coders and coder-reviewers (`coder.md`, `reviewer.md`, and updated `tasks.md`)
+- [x] Created `conventions/chat-preferences.md` for interactive session rules
 - [ ] Item 7: Conventions naming review (`<action>.md`, `<role>.md`, `<context>.md`)
 - [ ] Item 8: Workflow breakdown across 4 session cases
 - [ ] Revisit FG/BG analysis and workflow nuances across all 4 cases
 - [ ] Revisit overlap and division of labor between CONVENTIONS.md, session-start.md, and resume-mission
 - [ ] Revisit role-specific subscription details in conventions/agentbus.md
+- [ ] Review & install finished conventions onto session-tracking
 - [ ] Rewrite ledger-capture as a custom-agent (spec + mode)
 - [ ] Write T10 session-setup agent spec
 
-**Last completed:** Item 6 approved and completed; standing rules added to `CONVENTIONS.md` and `spec-policy-writer.md`.
+**Last completed:** Items 1-6 completed + chat-preferences convention created; ready for clean handover.
 
-**Next step / resume point:** Item 7 — Conventions naming review (`<action>.md`, `<role>.md`, `<context>.md`).
+**Next step / resume point:** Resume with `policy-writer14`: proceed with Item 7 (Conventions naming review) and Item 8.
 
 ### Status
-IN PROGRESS — Items 1-4 completed; remaining items 5-8, FG/BG review, and custom-agent specs.
+WOUND DOWN / RETIRED — Ready for session 14.
 
 ### Known issues
 - `settings-and-skill-edits.md` describes a `user-approved-settings-change` marker
@@ -85,4 +87,4 @@ IN PROGRESS — Items 1-4 completed; remaining items 5-8, FG/BG review, and cust
 - 2026-09-03 session=2026-09-03-policy-writer-9 status=retired ledger=.session/2026-09-03-policy-writer-9.md
 - 2026-09-04 session=2026-09-04-policy-writer-10 status=retired ledger=.session/2026-09-04-policy-writer-10.md
 - 2026-09-04 session=2026-09-04-policy-writer-11 status=retired ledger=.session/2026-09-04-policy-writer-11.md
-- 2026-09-04 session=2026-09-04-policy-writer-13 status=active ledger=.session/2026-09-04-policy-writer-13.md
+- 2026-09-04 session=2026-09-04-policy-writer-13 status=retired ledger=.session/2026-09-04-policy-writer-13.md

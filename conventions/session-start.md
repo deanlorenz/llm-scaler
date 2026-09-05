@@ -17,6 +17,7 @@ Read at session start:
 - Your local `STATE.md` (or task file provided by parent)
 - `CONVENTIONS.md` at the path stated in your STATE file
 - `conventions/agentbus.md` — verify and initialize agentbus channels & subscriptions
+- `conventions/chat-preferences.md` — if running as an interactive foreground session
 - Any situational rules triggered by your role/mission (listed in `CONVENTIONS.md` index)
 
 **Never read at session start:**

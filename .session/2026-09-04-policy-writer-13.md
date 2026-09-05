@@ -37,9 +37,10 @@ Continues: .session/2026-09-04-policy-writer-11.md
   - Updated `conventions/tasks.md` (lines 35-38, 55-60): task writer must extract/reference relevant plan sections for coder focus; for multi-file/rebase changes task writer must prepare locations list, step-by-step sequence, and post-change verification checklist.
   - Indexed `conventions/coder.md` and `conventions/reviewer.md` in `CONVENTIONS.md` (lines 38-39).
 - [2026-09-04] Standing interaction rules persisted:
-  - Added to `CONVENTIONS.md` Ground rules (lines 90-91) & `spec-policy-writer.md` Principles (lines 29-32):
-    1. Never jump ahead to subsequent items in a list without explicit user approval.
-    2. Always provide file paths with exact line numbers / diffs on edits.
+  - Created `conventions/chat-preferences.md` (lines 1-14) containing interactive approval gates (do not jump ahead, line numbers/diffs, no speculative actions, concise output).
+  - Indexed in `CONVENTIONS.md` (line 47) and added to interactive startup flow in `conventions/session-start.md` (line 19).
+  - Purged chat-specific UI rules from `CONVENTIONS.md` Ground rules.
+- [2026-09-04] Session wind-down: retiring session-13 for clean handover to session-14.
 
 ## Open Items & Deferred Discussions
 
@@ -49,6 +50,7 @@ Continues: .session/2026-09-04-policy-writer-11.md
 - [x] Item 6: Conventions for coders and coder-reviewers (`conventions/coder.md`, `conventions/reviewer.md`, and updated `conventions/tasks.md`).
 - [ ] Item 7: Conventions naming review (`<action>.md`, `<role>.md`, `<context>.md` — remove redundant `-rules` suffix).
 - [ ] Item 8: Workflow breakdown across the 4 session cases.
+- [ ] Review & install finished conventions onto `session-tracking`.
 
 ## Verified 2026-09-04 — folded in: T14 roadmap checkbox marked [x] in spec-policy-writer.md §5
 

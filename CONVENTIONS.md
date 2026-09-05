@@ -45,6 +45,7 @@ Read the matching file when its situation occurs, not speculatively:
 - `conventions/state-vs-ledger.md` — creating initial state or ledger files, or unsure which file information belongs in
 
 ### Action Triggers (Read immediately before performing the action)
+- `conventions/chat-preferences.md` — interactive foreground sessions communicating with the user
 - `conventions/agentbus-user-interaction.md` — when running as a background agent/subtask needing to ask user questions via agentbus
 - `conventions/wip-editing.md` — before editing a shared file (`STATE.md`, `CONVENTIONS.md`)
 - `conventions/writing-outside-worktree.md` — before performing a permitted cross-worktree write
@@ -88,8 +89,6 @@ worktrees/<mission-name>/          ← mission branch/worktree
 
 - Never assume. Ask when the mission, role, scope, authorization, or instruction is unclear.
 - Do not silently choose between ambiguous or conflicting instructions; ask.
-- Never jump ahead to subsequent numbered items before the current item is explicitly reviewed and approved.
-- When presenting changes or edits, always provide exact file paths and line numbers (or diff pointers) so modifications can be reviewed without searching.
 - Never push without explicit authorization for that specific push. Authorization is
   single-use. After receiving it, read `conventions/push.md` before pushing.
 - Never stop or kill a running background task unless explicitly told to stop that task. A
