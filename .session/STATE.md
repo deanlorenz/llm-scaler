@@ -49,6 +49,9 @@ in - **Ledger / log:** `.session/2026-09-04-policy-writer-13.md` (active)
 - [x] Refactor spec-policy-writer.md into canonical spec structure (T9c, session-10)
 - [x] Document canonical spec structure in tasks.md (T9d, session-10)
 - [ ] Update resume-mission skill — note custom-agent direction
+- [ ] Revisit FG/BG analysis and workflow nuances across all 4 cases
+- [ ] Revisit overlap and division of labor between CONVENTIONS.md, session-start.md, and resume-mission
+- [ ] Align conventions/resume-and-handoff.md and skills (resume-mission, wind-down); save rationale to spec before purging
 - [ ] Rewrite ledger-capture as a custom-agent (spec + mode)
 - [ ] Write T10 session-setup agent spec
 

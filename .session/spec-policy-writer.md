@@ -321,6 +321,25 @@ before main session tokens are charged.
 in `resume-and-handoff.md` but not implemented as a proper custom-agent with its own
 spec/mode.
 
+### T14 — Resume, handoff, and wind-down lifecycle design & rationale
+
+**Status.** DESIGN CAPTURED 2026-09-04 (policy-writer-13).
+
+**Rationale & Design Principles:**
+- **Why `.wip` protocol during takeover:** An unverified or abandoned session marked `active`
+  in `STATE.md` might have crashed, suffered network disconnect, or still be half-alive in
+  another process. Locking via `.wip` ensures atomic transitions and avoids split-brain writes.
+- **Why foreground ledger-capture:** `ledger-capture` folds uncaptured learnings, corrections,
+  and decisions from prior ledgers into durable docs (`STATE.md` or internal specs) before any
+  new work starts. It runs in the foreground during takeover so the resuming session builds on
+  a verified baseline.
+- **Why wind-down does NOT imply "retired" by default:** Wind-down persists working state into
+  a stable, durable checkpoint (`STATE.md`, ledger entries, committed state) so context is not
+  lost across turn boundaries, compactions, clears, or reloads. The session only becomes
+  `retired` when genuinely finished with the mission or explicitly handing off ownership.
+- **Agentbus visibility:** Handoff/takeover events (`kind="handoff"`) on `mission.<name>` make
+  ownership changes immediately visible to all agents monitoring the bus without polling git.
+
 ### T13 — Session-setup custom-agent (FG)
 
 **Status.** DESIGN CAPTURED 2026-09-03 (policy-writer-9). Not yet implemented.
