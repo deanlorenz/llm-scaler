@@ -70,7 +70,7 @@
 **Next step / resume point:** Revisit FG/BG analysis and workflow nuances across the 3-case model; revisit overlap between CONVENTIONS.md / session-start.md / resume-mission; revisit agentbus role-specific subscriptions; then review & install finished conventions onto session-tracking.
 
 ### Status
-IN PROGRESS — session 15 winding down. Substantive work items unchanged.
+IN PROGRESS — session 15 active. Safe checkpoint saved.
 
 ### Known issues
 - `settings-and-skill-edits.md` describes a `user-approved-settings-change` marker
@@ -91,4 +91,4 @@ IN PROGRESS — session 15 winding down. Substantive work items unchanged.
 - 2026-09-04 session=2026-09-04-policy-writer-11 status=retired ledger=.session/2026-09-04-policy-writer-11.md
 - 2026-09-04 session=2026-09-04-policy-writer-13 status=retired ledger=.session/2026-09-04-policy-writer-13.md
 - 2026-09-05 session=2026-09-05-policy-writer-14 status=retired ledger=.session/2026-09-05-policy-writer-14.md
-- 2026-09-05 session=2026-09-05-policy-writer-15 status=retired ledger=.session/2026-09-05-policy-writer-15.md
+- 2026-09-05 session=2026-09-05-policy-writer-15 status=active ledger=.session/2026-09-05-policy-writer-15.md
