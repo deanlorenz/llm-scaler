@@ -32,8 +32,10 @@ else first:
 
 **Task fields** — fill these so the session knows exactly what to do and what to leave alone:
 
-- **Plan / spec:** the plan doc or spec the session follows. Pass the exact path. Workers do
-  not read this upfront — they pull it on demand as needed.
+- **Plan / spec:** the plan doc or spec the session follows. Pass the exact path. The task writer
+  must extract or reference the relevant plan sections so the coder/reviewer can focus on the
+  specific assignment without wading through unrelated spec history. Workers do not read this
+  upfront — they pull on demand as needed.
 - **Context:** files the session must read to do the work — active reference material, not
   plan docs. One path per line. Keep this short; only files genuinely needed.
 - **Refs:** cited related files — do not read unless explicitly needed. Prior ledgers,
@@ -51,7 +53,11 @@ else first:
 proceeds:
 
 - **Steps / subtasks:** a checklist. Each item is the smallest unit worth its own status.
-  The session checks items off as it completes them and records the last completed step.
+  For rebases or multi-file refactors, the task writer must prepare:
+  1. An explicit list of all file/code locations requiring modification.
+  2. A step-by-step change sequence.
+  3. A post-change verification checklist (exact tests, lint, and behavioral sanity checks).
+  The worker follows this plan sequentially.
 - **Next step / resume point:** leave blank initially; the session fills this as it works.
   On interactive sessions it confirms the next step with the user before running it.
 - **Status:** set to `NOT STARTED` before invocation. The session updates this as it works.

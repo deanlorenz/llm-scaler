@@ -30,13 +30,23 @@ Continues: .session/2026-09-04-policy-writer-11.md
 - [2026-09-04] Item 2 completed: Split `session-start.md` and `resume-mission/SKILL.md`. Added prerequisite worktree isolation and STATE checks to `session-start.md`. Streamlined `resume-mission` to focus on discovery, setup, recovery/migration, clearing pending sessions, and agentbus handoff before handing off to standard `session-start.md`.
 - [2026-09-04] Item 3 completed: Saved rationale/design background for resume/handoff/wind-down to `spec-policy-writer.md` (§ T14) in correct chronological order after T13 with exact line refs and doc-reference migration incident history. Added broken-symlink reconstruction command and self-healing responsibility clarification in `CONVENTIONS.md`. Explicitly added session-tracking convenience symlink checks to `resume-mission/SKILL.md` Step 4. Aligned `.claude/skills/wind-down/SKILL.md` to support safe checkpointing vs full retirement and reference `resume-and-handoff.md`.
 - [2026-09-04] Item 4 completed: Reorganized `CONVENTIONS.md` Situational rules into Role & Mission Setup, Lifecycle & Session Boundaries, and Action Triggers with explicit preconditions.
+- [2026-09-04] Item 5 completed: Agentbus conventions created (`conventions/agentbus.md` and `conventions/agentbus-user-interaction.md`), indexed in `CONVENTIONS.md`, and integrated into session startup flow and STATE template.
+- [2026-09-04] Item 6 completed:
+  - Created `conventions/coder.md` (lines 1-26): worktree isolation, no git push / GH interaction, no settings edits, task contract from plan/spec, ledger tracking, multi-file rebase/refactor plan execution, frequent commits, agentbus status reporting.
+  - Created `conventions/reviewer.md` (lines 1-27): read-only, review report only write target, no GH interaction, continuous review of commits as they land, phase 1 independent review, phase 2 spec verification with checklist, built-in/project review skills usage with isolation, structural/lint/DCO checks (trusting coder tests), sanitization check for internal jargon/plan artifacts, early persistence to report file, agentbus status notification.
+  - Updated `conventions/tasks.md` (lines 35-38, 55-60): task writer must extract/reference relevant plan sections for coder focus; for multi-file/rebase changes task writer must prepare locations list, step-by-step sequence, and post-change verification checklist.
+  - Indexed `conventions/coder.md` and `conventions/reviewer.md` in `CONVENTIONS.md` (lines 38-39).
+- [2026-09-04] Standing interaction rules persisted:
+  - Added to `CONVENTIONS.md` Ground rules (lines 90-91) & `spec-policy-writer.md` Principles (lines 29-32):
+    1. Never jump ahead to subsequent items in a list without explicit user approval.
+    2. Always provide file paths with exact line numbers / diffs on edits.
 
 ## Open Items & Deferred Discussions
 
 - [ ] Revisit FG/BG analysis and workflow nuances across all 4 cases.
 - [ ] Revisit overlap and division of labor between `CONVENTIONS.md`, `conventions/session-start.md`, and `resume-mission/SKILL.md`.
-- [x] Item 5: Agentbus conventions (`conventions/agentbus.md` and `conventions/agentbus-user-interaction.md`) created, indexed, and integrated into session-start / STATE template. Mission owner updated to subscribe to `Announce:`; policy-writer updated to subscribe to `session-tracking.suggestions`.
-- [ ] Item 6: Conventions for coders and coder-reviewers (`coder.md`, `reviewer.md`).
+- [ ] Revisit role-specific subscription details in `conventions/agentbus.md` (separate mission-owner / policy-writer specific subscriptions so generic sessions don't load extraneous rules).
+- [x] Item 6: Conventions for coders and coder-reviewers (`conventions/coder.md`, `conventions/reviewer.md`, and updated `conventions/tasks.md`).
 - [ ] Item 7: Conventions naming review (`<action>.md`, `<role>.md`, `<context>.md` — remove redundant `-rules` suffix).
 - [ ] Item 8: Workflow breakdown across the 4 session cases.
 

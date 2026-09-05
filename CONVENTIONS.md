@@ -36,6 +36,8 @@ Read the matching file when its situation occurs, not speculatively:
 - `conventions/session-start.md` — **every session reads this first, before any work**
 - `conventions/mission-owner.md` — assuming or acting in the mission-owner role
 - `conventions/policy-writer.md` — working in any role on the `policy-writer` mission
+- `conventions/coder.md` — executing in the coder role
+- `conventions/reviewer.md` — executing in the code-reviewer role
 
 ### Lifecycle & Session Boundaries
 - `conventions/resume-and-handoff.md` — running `/resume-mission` or `/wind-down`, taking over, or ending work
@@ -86,6 +88,8 @@ worktrees/<mission-name>/          ← mission branch/worktree
 
 - Never assume. Ask when the mission, role, scope, authorization, or instruction is unclear.
 - Do not silently choose between ambiguous or conflicting instructions; ask.
+- Never jump ahead to subsequent numbered items before the current item is explicitly reviewed and approved.
+- When presenting changes or edits, always provide exact file paths and line numbers (or diff pointers) so modifications can be reviewed without searching.
 - Never push without explicit authorization for that specific push. Authorization is
   single-use. After receiving it, read `conventions/push.md` before pushing.
 - Never stop or kill a running background task unless explicitly told to stop that task. A

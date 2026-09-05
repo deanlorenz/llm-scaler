@@ -27,6 +27,10 @@ into `session-tracking` and pushed.
 - **What/how only in production files.** `CONVENTIONS.md` and `conventions/*.md` carry only
   the rule — stated as what to do and how. Rationale, incident history, and design background
   live in this spec (section 7).
+- **Step-by-step review gate.** Stop after each item in a multi-item list; wait for explicit user
+  approval before starting the next item. Never jump ahead.
+- **Provide line numbers on edits.** Always cite file paths and exact line numbers (or diffs)
+  so edits are easy to locate in place without searching.
 - **No deviation from approved plan.** Once a plan is approved, its listed steps are the
   complete boundary of authorized action. Stop and ask if something adjacent surfaces.
 - **Ledger-capture never touches `CONVENTIONS.md`.** Only `policy-writer` may change
