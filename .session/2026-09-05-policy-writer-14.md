@@ -23,3 +23,26 @@ Continues: .session/2026-09-04-policy-writer-13.md
 - [2026-09-05] Round 3 fix — interactive sessions never auto-proceed:
   - `conventions/state-vs-ledger.md` template: Next step field now carries ⚠ "NEVER proceed — state it and wait, user decides when to go."
   - `conventions/session-start.md`: Next field in orientation block relabeled "stated here, NOT executed"; ⚠ warning added immediately after the block — "NEVER execute Next on your own."
+
+- [2026-09-05] Item 7 (naming review): analysis confirmed no renames needed. All 20 files follow coherent <action>, <role>, <context>, or compound patterns. Only borderline case: `settings-and-skill-edits.md` (context-and-action order) — churn not justified. Marked complete.
+- [2026-09-05] Item 8 (workflow breakdown): initial 4-case table drafted and committed (01834f31), then revised through discussion.
+- [2026-09-05] Key design decisions from Item 8 discussion:
+  - `session-start.md` is not read "before STATE" — it is reached via STATE → CONVENTIONS → session-start.md. Every session takes the same path.
+  - "Resume own" vs "takeover" are indistinguishable without user confirmation when context is gone. Collapsed to one case.
+  - `bob --resume` (platform) ≠ `/resume-mission` (our skill). Platform resume = continuous session, no re-init needed. Our skill = cold start, always re-initializes.
+  - Worktree discovery: if not in correct worktree, ask user first — never cross-read STATE speculatively.
+  - New mission gate: no plan exists yet; must discuss scope with user and get explicit approval before creating STATE or task list.
+- [2026-09-05] Item 8 revised to 3-case model (new mission / resume+takeover / delegated worker), committed baf37300:
+  - `conventions/session-start.md`: 3-case table, imperative-only gates, worktree check simplified, new-mission steps tightened.
+  - `conventions/resume-and-handoff.md`: merged "Resume Own" and "Takeover" protocols into single unified "Resume / Takeover Protocol"; step 1 = always ask user for confirmation.
+
+## Verified 2026-09-05 — all points captured
+
+| Ledger point | Durable destination | Action taken |
+|---|---|---|
+| Rule violations + root cause (rounds 1-3) | `conventions/session-start.md`, `conventions/state-vs-ledger.md`, `CONVENTIONS.md`, `STATE.md` | Already folded in prior sessions; this session continued from that baseline |
+| Item 7: no renames needed | STATE.md Steps checklist | Marked [x] |
+| Item 8: 3-case model design decisions | `conventions/session-start.md`, `conventions/resume-and-handoff.md` | Committed `01834f31` + `baf37300` |
+| bob --resume vs /resume-mission distinction | `conventions/session-start.md` (worktree check + cases table) | Captured in 3-case model |
+| New mission gate: scope discussion before STATE creation | `conventions/session-start.md` §new-mission | Committed `baf37300` |
+| Resume/takeover unification | `conventions/resume-and-handoff.md` | Committed `baf37300` |
