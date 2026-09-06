@@ -212,12 +212,60 @@ Actions taken:
   pre-existing) + `18f4d4ff` (compile fix) + `c5af5696`/`290ca75f`/`896879d5` (correctness fix +
   tests) + `e4b1e77d` (nit cleanup).
 
+## Push authorized and completed (2026-09-06/07)
+- User asked to push the CT6 fix. Read `conventions/push.md`, confirmed `origin` is the only
+  remote with push enabled (`ofer`/`upstream` both `DISABLED-no-push`), confirmed
+  `origin/single-analyzer` was 17 commits behind (`233f74a1`, much further back than expected —
+  flagged the larger-than-expected scope to the user before pushing, got explicit confirmation
+  to push all 17 as a fast-forward). Ran build/vet/test clean, pushed
+  `233f74a1..c2a0774e`. Recorded in STATE.md.
+
+## PR diff walkthrough (2026-09-07)
+- User asked to review the full PR diff and how it maps to spec. Walked the diff
+  `f20e06f9^..c2a0774e` (excluding the unrelated `b067642a` s7-lint commit) file by file:
+  core fix in `engine_v2.go` (`normalizeToCompositeUnits` extension, `logCompositeSignal`),
+  the new `SatRoleDemand` field, the `rescale.go` one-liner, all the mechanical test-file
+  call-site fixes, the `multi_backup` move. Mapped each piece back to the specific spec.md CT6
+  subsection it implements. Confirmed via grep: no CT4/CT7 leakage anywhere in the diff.
+
+## User review caught two real gaps (2026-09-07)
+1. **Asked why `logCompositeSignal` is a separate function from `logAnalyzerResult`** — my
+   first answer was wrong (I explained *when* it's called, not *why it's a different function*
+   at all). On the actual question: no good reason — same struct (`composite.Name` is still
+   literally `"saturation"`, never renamed), same "one function per data shape" principle
+   applies. Compared field-by-field: `logAnalyzerResult` had `supply`/`util`/thresholds that
+   `logCompositeSignal` lacked; `logCompositeSignal` had `satDemand`/`remaining`/`spare`/
+   `roleCapacities` that `logAnalyzerResult` lacked. Verified via grep that `"composite-signal"`
+   (the log key) had zero references anywhere outside the two files just touched — a genuinely
+   new, undocumented key with no consumer. Confirmed with user (AskUserQuestion), then merged
+   directly: folded `logCompositeSignal`'s fields into `logAnalyzerResult`, called from both
+   sites, updated `docs/developer-guide/cycle-log.md` (new fields, "appears twice per cycle"
+   note). Verified every field is already populated by `buildNamedResult` before *either* call
+   site runs (checked `buildNamedResult`'s own source), so nothing needed to be conditional —
+   confirmed via build/vet/test (all clean) rather than assumed. Committed `65c344af`,
+   **not yet pushed** (2026-09-06's push authorization is single-use, already consumed).
+2. **Asked why the coder was "given a choice"** (spec said "log line (and/or metric)", only
+   the log line got built) **and why that wasn't tracked as a decision.** Root cause, stated
+   honestly: I copied the spec's own ambiguous phrasing into the coder's task prompt instead of
+   resolving it to one precise instruction before dispatch — I never actually made a decision,
+   so there was nothing to record as one. The coder silently resolved the ambiguity by building
+   the easier half. Fixed going forward: added an explicit TODO to STATE.md's Known Issues for
+   the still-undone metrics half (design already confirmed acceptable in spec.md, only
+   implementation missing), and saved a durable memory
+   (`feedback_resolve_ambiguity_before_coder_dispatch`) — scan every task prompt for "and/or"/
+   "or"/"as needed" phrasing before dispatch, resolve each to one concrete instruction, and if
+   a deferred half is intentional, track it explicitly rather than letting it disappear.
+- Sent feedback drafts (queued locally, not sent) for both: `SendFeedback` — instruction_following
+  (ambiguous instruction passed to coder) and the earlier session's cross-worktree-relocation
+  repeat.
+
 ## Open / next
-- Push `single-analyzer` to origin — not yet authorized (needs explicit per-op approval);
-  `origin/single-analyzer` still doesn't build until this happens.
+- Push `65c344af` (the log-merge fix) to origin — needs its own fresh per-op authorization.
 - Decide with user whether CT4's fairness fix belongs in the next PR.
-- Finalize next PR's exact boundary (now unblocked — CT6-only scope, all commits landed) and
-  open it via `conventions/pr-branch.md`/`conventions/pr-workflow.md`.
+- Implement CT6 composite metrics (separate future PR, explicitly not blocking this one).
+- Finalize next PR's exact boundary (now unblocked — CT6-only scope, all commits landed
+  including the log-merge fix once pushed) and open it via
+  `conventions/pr-branch.md`/`conventions/pr-workflow.md`.
 - Cleanup candidates (not yet done, low urgency): leftover worktrees from the two failed coder
   dispatch attempts (`agent-a223357ad56398278`, `agent-a64b37115d72e7617` if either still
   exists) and the now-integrated `coder-ct6-fix-v3` worktree (`agent-acc4742a2f2a1aceb`).
