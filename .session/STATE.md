@@ -54,6 +54,10 @@
 - [x] CT6 correctness fix — RC/SC/Remaining/Spare/supply normalization + `SatRoleDemand` +
   composite logging + tests (commits `c5af5696`/`290ca75f`/`896879d5`/`e4b1e77d`, 2026-09-06;
   reviewed Pass by independent reviewer, cherry-picked from coder branch `coder-ct6-fix-v3`)
+- [x] CT6 log-function merge — folded `logCompositeSignal` into `logAnalyzerResult` (one
+  function, one log key, union of fields) + doc update (commit `65c344af`, 2026-09-07;
+  user-caught design flaw in the cherry-picked fix, fixed directly, not yet pushed)
+- [ ] CT6 composite metrics — TODO, separate future PR, see Known issues
 - [ ] CT7 (a.k.a. "PR #2") — engine-side reduce to wire non-saturation analyzers into
   CompositeSignal — design + Q1-Q4 open questions now in `spec.md`'s CT7 section
 
@@ -69,15 +73,29 @@ verified clean by the reviewer at the coder's tip; re-verified locally after the
 
 **Pushed to origin 2026-09-06:** `single-analyzer` fast-forwarded on `origin`
 (`git@github.com:deanlorenz/llm-scaler.git`) `233f74a1` → `c2a0774e` (17 commits, user-authorized
-per-op). `origin/single-analyzer` now builds clean and carries the full CT6 fix.
+per-op). `origin/single-analyzer` at that point built clean and carried the full CT6 correctness
+fix.
+
+**2026-09-07 — user PR review caught a design flaw in the already-pushed fix:** the coder's
+CT6 fix added a second, separate logging function (`logCompositeSignal`) instead of extending
+the existing `logAnalyzerResult` that already logs every analyzer's `NamedAnalyzerResult` —
+same struct, same "one function per data shape" reasoning applies, they should never have been
+two functions. Fixed directly (not re-dispatched to a coder): merged into one `logAnalyzerResult`
+call from both sites, updated `docs/developer-guide/cycle-log.md` (commit `65c344af`). **Not
+yet pushed** — commit `65c344af` is local-only on `single-analyzer`, one commit ahead of
+`origin/single-analyzer` (still at `c2a0774e`).
 
 **Remaining before this can be considered fully wrapped:**
-1. Decide with the user whether CT4's fairness fix (`fairShareValue`, still blocked on a
+1. Push `65c344af` to origin — needs its own per-op authorization (the 2026-09-06 push
+   authorization is consumed, per `conventions/push.md`).
+2. Decide with the user whether CT4's fairness fix (`fairShareValue`, still blocked on a
    fix-now-vs-defer decision) belongs in the next PR.
-2. Finalize the next PR's exact scope/boundary (see PR history below) and open it via the
+3. Finalize the next PR's exact scope/boundary (see PR history below) and open it via the
    PR-branch workflow (`conventions/pr-branch.md`/`conventions/pr-workflow.md`) — likely CT6
    only, matching the "Next PR" entry below, now unblocked.
-3. Clean up: the two failed coder-dispatch worktrees/branches from earlier today
+4. Implement CT6 composite metrics (separate future PR — see Known issues; explicitly not
+   blocking the current PR).
+5. Clean up: the two failed coder-dispatch worktrees/branches from 2026-09-06
    (`.claude/worktrees/agent-a223357ad56398278`, `.claude/worktrees/agent-a64b37115d72e7617` if
    still present) and the completed `coder-ct6-fix-v3` worktree/branch
    (`.claude/worktrees/agent-acc4742a2f2a1aceb`) can be removed once the user confirms nothing
@@ -95,11 +113,12 @@ and `.session/pr-spec-next-coverage-units.md`.
   the mission branch (`e4106109`/`b980f682`/`fcf9c905`). Does NOT contain CT1b or CT6.
 - **Next PR — not yet opened, no branch cut yet.** Scope is **CT6 only**: `f20e06f9` (original
   normalization) + `18f4d4ff` (compile fix) + `c5af5696`/`290ca75f`/`896879d5`/`e4b1e77d`
-  (correctness fix + tests) — CT3b and CT5 are already merged in PR #34, so they are not part
-  of this PR's diff. No longer blocked — all CT6 commits are landed and clean on
-  `single-analyzer`. Still needs: user decision on CT4 inclusion, then PR-branch cut. The s7
-  stale-args bug (`b067642a`) is NOT relevant to this PR — it only ever existed on the mission
-  branch, never on any PR-prep branch, so there's nothing to carry forward for it.
+  (correctness fix + tests) + `65c344af` (log-function merge, not yet pushed) — CT3b and CT5
+  are already merged in PR #34, so they are not part of this PR's diff. No longer blocked — all
+  CT6 commits are landed and clean on `single-analyzer` (pending push of `65c344af`). Still
+  needs: push `65c344af`, user decision on CT4 inclusion, then PR-branch cut. The s7 stale-args
+  bug (`b067642a`) is NOT relevant to this PR — it only ever existed on the mission branch,
+  never on any PR-prep branch, so there's nothing to carry forward for it.
 - **CT7** (engine-side reduce) is not scoped into either PR above; it needs its own PR once its
   4 open design questions (spec CT7 section) are resolved, and depends on the next PR's test-fix
   landing first (CT7 builds on `runAnalyzersAndScore`'s current slice-returning shape).
@@ -108,6 +127,20 @@ and `.session/pr-spec-next-coverage-units.md`.
 
 ### Known issues
 
+- **FIXED 2026-09-07 (commit `65c344af`, not yet pushed): `logCompositeSignal` was an
+  unnecessary duplicate function.** The coder's CT6 fix added a brand-new `logCompositeSignal`
+  function instead of extending the existing `logAnalyzerResult` — both logged the exact same
+  `NamedAnalyzerResult` struct (the composite entry is still `Name == "saturation"`, never
+  renamed to a distinct identity), just at two different pipeline stages (pre- and
+  post-normalization). The split meant `analyzer-result` lines were missing `supply`/`util`/
+  thresholds for the composite entry, and `composite-signal` was a newly-invented, undocumented
+  log key with no other consumer anywhere in the codebase (verified by grep before merging).
+  Caught by the user during PR review, not by the coder or reviewer — neither was asked to
+  check for this kind of redundancy. Fixed by folding `logCompositeSignal`'s fields into
+  `logAnalyzerResult` and calling it from both sites; every field is already populated by
+  `buildNamedResult` before either call site runs, so nothing needed to be conditional. Also
+  updated `docs/developer-guide/cycle-log.md` to document the new fields and the fact that
+  `analyzer-result` now appears twice per cycle for the composite analyzer.
 - **TODO (separate future PR): composite metrics.** Spec's confirmed fix design said "add a
   log line (and/or metric)" for the post-normalization composite; only the log line
   (`logCompositeSignal`) shipped in the CT6 fix. The metrics half is still open: emit
