@@ -67,15 +67,17 @@ review's one non-blocking nit: dropped an internal `(CT6)` tag from a test's `De
 string). `go build`/`go vet`/`go test ./internal/engines/...`/`gofmt` all independently
 verified clean by the reviewer at the coder's tip; re-verified locally after the nit fix.
 
+**Pushed to origin 2026-09-06:** `single-analyzer` fast-forwarded on `origin`
+(`git@github.com:deanlorenz/llm-scaler.git`) `233f74a1` → `c2a0774e` (17 commits, user-authorized
+per-op). `origin/single-analyzer` now builds clean and carries the full CT6 fix.
+
 **Remaining before this can be considered fully wrapped:**
-1. Push `single-analyzer` (`18f4d4ff` through `e4b1e77d`) to origin — needs explicit per-op
-   push authorization, not yet given. `origin/single-analyzer` currently still doesn't build.
-2. Decide with the user whether CT4's fairness fix (`fairShareValue`, still blocked on a
+1. Decide with the user whether CT4's fairness fix (`fairShareValue`, still blocked on a
    fix-now-vs-defer decision) belongs in the next PR.
-3. Finalize the next PR's exact scope/boundary (see PR history below) and open it via the
+2. Finalize the next PR's exact scope/boundary (see PR history below) and open it via the
    PR-branch workflow (`conventions/pr-branch.md`/`conventions/pr-workflow.md`) — likely CT6
    only, matching the "Next PR" entry below, now unblocked.
-4. Clean up: the two failed coder-dispatch worktrees/branches from earlier today
+3. Clean up: the two failed coder-dispatch worktrees/branches from earlier today
    (`.claude/worktrees/agent-a223357ad56398278`, `.claude/worktrees/agent-a64b37115d72e7617` if
    still present) and the completed `coder-ct6-fix-v3` worktree/branch
    (`.claude/worktrees/agent-acc4742a2f2a1aceb`) can be removed once the user confirms nothing
@@ -145,9 +147,6 @@ and `.session/pr-spec-next-coverage-units.md`.
   `worktrees/session-tracking/missions/single-analyzer/fairshare-value-correctness-investigation-2026-08-25.md`.
 - **Rescale weight long-term fix:** token weight is proportional to N_full only for homogeneous
   PRC; longer-term fix tracked in spec rescale-fairness section (separate CT).
-- **`origin/single-analyzer` still does not build** — the compile fix (commit `18f4d4ff`) is
-  local-only so far (not pushed); origin's tip (`d90bd565`, carrying `f20e06f9` without the fix)
-  still fails `go build ./...`. Needs a push (with explicit per-op authorization) at some point.
 - **Coder dispatch mechanics — two confirmed-broken patterns (2026-09-06), for future dispatches:**
   (1) `Agent` with `isolation:"worktree"` always creates a brand-new ad-hoc worktree for the
   subagent; it cannot be pointed at a worktree you already prepared — a pre-created worktree
