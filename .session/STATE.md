@@ -57,27 +57,25 @@
 **Last completed:** CT6 — Normalize sat→composite to coverage units (commit `f20e06f9`, 2026-09-01)
 
 **Next step / resume point:** CT6 compile fix landed directly on `single-analyzer` (commit
-`18f4d4ff`) — `go build`/`go vet`/`go test ./internal/engines/...` all clean at that commit.
-The CT6 *correctness* fix (extend `normalizeToCompositeUnits`, add `SatRoleDemand`, fix/extend
-tests, add e2e coverage — full spec in `spec.md` CT6 section, confirmed fix table) is still to
-be implemented; two coder-dispatch attempts on 2026-09-06 failed on worktree/Bash sandbox
-mismatches before writing any code (see ledger `.session/2026-09-06-single-analyzer-3.md` for
-the full postmortem) — both attempts and the `coder-ct6-fix` worktree/branch were abandoned and
-cleaned up (branch deleted, worktree removed; nothing of value was lost since neither attempt
-edited any file).
-
-**Revised coder-dispatch approach (per user 2026-09-06):** prepare a fresh branch containing
-exactly the starting state the coder should work from (forked from `single-analyzer` at
-`18f4d4ff`, so the coder starts from a commit that already builds clean), tell the coder the
-exact commit SHA to `git reset --hard` to on startup inside its own `isolation: "worktree"`
-sandbox (a fresh ad-hoc worktree with a genuinely working Bash — confirmed working in the first
-dispatch attempt, just pointed at the wrong content), and have it work from there — committing
-either back onto the branch I gave it if possible, or a new branch if not. Mission owner
-cherry-picks from the coder's resulting branch afterward. Do not reattempt `isolation:"worktree"`
-+ a separately-pre-created worktree (confirmed broken: creates an unrelated worktree, ignores
-the pre-created one) or omitting `isolation` while this session stays worktree-pinned (confirmed
-broken: subagent's Bash inherits the parent's own pin, not the target). Not yet re-dispatched —
-next action is preparing that fresh branch/commit and relaunching.
+`18f4d4ff`). CT6 *correctness* fix implemented by coder v3 (agentId `acc4742a2f2a1aceb`,
+`isolation:"worktree"`, reset to `18f4d4ff` per the revised dispatch approach — see prior
+session log / ledger for the two earlier failed dispatch attempts and their postmortem) on
+branch `coder-ct6-fix-v3` (worktree `.claude/worktrees/agent-acc4742a2f2a1aceb`): 3 commits —
+`7663d180` (core fix: normalize RC/SC/Remaining/Spare/supply alongside PRC, add `SatRoleDemand`,
+add `logCompositeSignal`), `a8e9c511` (extend the 7 existing CT6 unit tests to cover the
+newly-normalized fields), `0a5c0f52` (new e2e test through the real
+`collectV2ModelRequest`→optimizer pipeline with nonzero demand — coder reports verifying it
+fails pre-fix, passes post-fix). Coder reports `go build`/`go vet`/`gofmt`/
+`go test ./internal/engines/...` all clean (158 specs), plus a broader `./internal/...` pass
+clean (only `test/e2e`, which needs a live cluster, not run). **Not yet independently verified
+by the mission owner or a reviewer — reviewer v2 (agentId `ad557beac4e2c53a5`) dispatched
+2026-09-06 to independently re-run build/vet/test/gofmt and verify the field-by-field table**;
+do not treat this as done until that review reports back. After review passes: mission owner
+cherry-picks `7663d180`/`a8e9c511`/`0a5c0f52` onto `single-analyzer` (per
+coder-orchestration.md rule 10 — never merge coder worktree directly). Then: decide whether
+CT4's fairness fix is in scope for the next PR, finalize the next PR's exact boundary (see PR
+history below), and push `18f4d4ff` (+ the cherry-picked CT6 fix) to origin — needs explicit
+per-op push authorization, not yet given.
 
 ### PR history
 
@@ -102,8 +100,11 @@ and `.session/pr-spec-next-coverage-units.md`.
 
 ### Known issues
 
-- **CT6 has a correctness bug — `RequiredCapacity`/`Remaining`/etc. never get normalized,
-  only `PerReplicaCapacity`/`TotalDemand`/`RoleDemand` do (found 2026-09-06).**
+- **CT6 correctness bug — believed fixed 2026-09-06 by coder v3, pending independent review.**
+  `RequiredCapacity`/`Remaining`/etc. never get normalized, only `PerReplicaCapacity`/
+  `TotalDemand`/`RoleDemand` do. Fix on branch `coder-ct6-fix-v3` (commits `7663d180`/
+  `a8e9c511`/`0a5c0f52`), not yet cherry-picked onto `single-analyzer` — see "Next step" above.
+  Original bug description retained below for reference until the fix is verified and merged.
   `normalizeToCompositeUnits` converts `PerReplicaCapacity` to a unit-less coverage fraction
   but never touches `RequiredCapacity`, `SpareCapacity`, `Remaining`, `Spare`, or
   `RoleCapacities[role].RequiredCapacity`/`.SpareCapacity` — those are computed by
