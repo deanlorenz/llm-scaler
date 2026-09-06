@@ -145,13 +145,49 @@ Actions taken:
 - Did not relaunch the reviewer yet — nothing to review until the coder produces commits;
   will launch once the coder reports progress or completion.
 
+## Coder v3 — completed successfully (2026-09-06)
+- Reset cleanly to `18f4d4ff` as instructed, worked on branch `coder-ct6-fix-v3`
+  (worktree `.claude/worktrees/agent-acc4742a2f2a1aceb`), 3 commits:
+  - `7663d180` — core fix: `normalizeToCompositeUnits` now divides RC/SC/Remaining/Spare/
+    TotalSupply/TotalAnticipatedSupply (model + per-role) by the same raw demand PRC is divided
+    by, via a `demandForRole` helper reusing the existing "both"/per-role lookup; `Utilization`
+    recomputed rather than re-divided; `SatDemand`/new `SatRoleDemand` captured before overwrite;
+    zero-demand/zero-PRC guards preserved; added `logCompositeSignal` (previously nothing logged
+    the post-normalization signal).
+  - `a8e9c511` — extended the 7 existing `normalizeToCompositeUnits` specs to set/assert the
+    newly-normalized fields; added 2 new specs for `SatRoleDemand`.
+  - `0a5c0f52` — new e2e spec through the real `collectV2ModelRequest` → `CostAwareOptimizer`
+    pipeline, nonzero demand (TotalDemand=8000, PRC=2000, scaleUp=0.85); coder reports verifying
+    it fails pre-fix (raw RequiredCapacity 7411.76 → target of thousands of replicas) and passes
+    post-fix (target 5) by temporarily stashing the fix commit and restoring it.
+- Coder's self-reported verification: `go build ./...`, `go vet ./...`, `gofmt -l` all clean;
+  `go test ./internal/engines/...` passes (158 Ginkgo specs); broader `./internal/...`,
+  `./test/testutil/...`, `./test/utils/...`, `./cmd/...` also clean; only `test/e2e` (needs a
+  live Kind cluster) not run — environmental, expected. Two pre-existing gofmt issues in
+  unrelated files (`analyzer_helpers.go`/`greedy_score_optimizer.go`) confirmed via stash to
+  predate this work, not introduced by it.
+- No design ambiguities hit — coder reports the field-by-field table mapped directly onto the
+  code with no gaps.
+- Commit messages read clean — no internal jargon, task-ID leakage, or planning artifacts
+  visible in a spot-check of all 3 (`git show --stat` from this worktree, since the branch is
+  visible via the shared object store even though I can't `git -C` into the coder's worktree
+  path directly).
+
+## Reviewer v2 dispatched (2026-09-06)
+- Independent reviewer launched (agentId `ad557beac4e2c53a5`, not isolated — reads the coder's
+  worktree directly, per reviewer.md) against the 3 completed commits. Given the full
+  field-by-field table, ordering/special-case requirements, out-of-scope list, and done
+  criteria to build its own verification checklist, and explicitly asked to independently
+  re-run `go build`/`go vet`/`go test`/`gofmt` in the coder's worktree rather than trust the
+  coder's self-report. Report file: `.session/review-coder-ct6-fix-v3.md` (mission worktree,
+  not the coder's).
+- **Not yet independently verified — do not treat the fix as done until the reviewer reports.**
+
 ## Open / next
-- Waiting on coder v3 (agentId `acc4742a2f2a1aceb`) background completion/progress.
-- Launch reviewer once coder v3 has commits to review.
-- After coder reports done and review passes: mission owner cherry-picks the relevant commits
-  from the coder's resulting branch onto `single-analyzer` (per coder-orchestration.md rule 10
-  — never merge coder worktree directly).
+- Waiting on reviewer v2 (agentId `ad557beac4e2c53a5`) background completion.
+- After review passes: mission owner cherry-picks `7663d180`/`a8e9c511`/`0a5c0f52` onto
+  `single-analyzer` (per coder-orchestration.md rule 10 — never merge coder worktree directly).
 - Outstanding, unrelated to the coder dispatch: `origin/single-analyzer` still doesn't build
-  (compile fix is local-only, commit `18f4d4ff` not pushed) — needs a push at some point, with
-  per-op authorization.
+  (compile fix `18f4d4ff` is local-only, not pushed) — needs a push at some point, with
+  per-op authorization; the CT6 fix, once cherry-picked, would go in the same future push.
 - After CT6 correctness fix lands: revisit CT4 scoping and next-PR boundary with user.
