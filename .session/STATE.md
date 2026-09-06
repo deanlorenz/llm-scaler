@@ -61,4 +61,4 @@
 - Scaler log missing: quick-smoke, early-inference-perf have no `controller.log`
 
 ## Session log
-- 2026-09-06 session=2026-09-06-benchmark-extract-1 status=active ledger=.session/2026-09-06-benchmark-extract-1.md
+- 2026-09-06 session=2026-09-06-benchmark-extract-1 status=retired ledger=.session/2026-09-06-benchmark-extract-1.md
