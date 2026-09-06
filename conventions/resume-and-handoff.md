@@ -63,10 +63,14 @@ A focused agent assigned to process exactly one ledger file:
 1. **Agentbus:** Subscribe to the assigned `In:` channel before work and remain subscribed until exit.
    Answer parent progress, clarification, and interim-result requests on `Out:` before continuing.
    Publish status, findings, questions, and completion on `Out:`.
-2. **Allowed Write Destinations:** The mission's own `.session/STATE.md` and its internal plan/spec doc only.
-3. **Prohibition:** `ledger-capture` must **never** write directly to `CONVENTIONS.md` or `conventions/`.
-4. **Global Findings (Suggestion Box):** Any finding that warrants a global rule must be written as an atomic file into `session-tracking/suggestion-box/` named `YYYY-MM-DD-HHMM-<mission-name>.md`. Only `policy-writer` processes suggestion-box entries.
-5. **Completion Marker & Summary Table:**
+2. **Capture all durable findings:** Read the entire assigned ledger and identify every correction,
+   decision, rule, safety requirement, and unresolved issue that must survive the session. Do not
+   limit capture to items already referenced by current policy files. In particular, check for
+   ownership, creation, removal, destructive-action, authorization, and data-preservation rules.
+3. **Allowed Write Destinations:** The mission's own `.session/STATE.md` and its internal plan/spec doc only.
+4. **Prohibition:** `ledger-capture` must **never** write directly to `CONVENTIONS.md` or `conventions/`.
+5. **Global Findings (Suggestion Box):** Any finding that warrants a global rule must be written as an atomic file into `session-tracking/suggestion-box/` named `YYYY-MM-DD-HHMM-<mission-name>.md`. Only `policy-writer` processes suggestion-box entries.
+6. **Completion Marker & Summary Table:**
    Append a verification marker to the end of the processed ledger, including a summary table of findings and actions taken:
    ```markdown
    ## Verified YYYY-MM-DD — <all points already captured | folded in: summary>
