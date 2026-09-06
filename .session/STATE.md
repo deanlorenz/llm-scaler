@@ -68,14 +68,37 @@
 - [x] Move policy backups from `conventions/` to `backup_rules/`; keep them out of production
 - [ ] Rewrite ledger-capture as a custom-agent (spec + mode)
 - [ ] Write T10 session-setup agent spec
+- [x] Process suggestion-box entry (worktree delegation for coders): drafted patterns A/B/C
+  in `conventions/worktree-delegation.md`; updated `coder-orchestration.md` (gates,
+  concurrency, ledger fix, wait-for-instructions), `coder.md` (`.session/` boundary),
+  `reviewer.md` (where-you-run per pattern). Committed on policy-writer only
+  (`6cb822af`, `a933d773`).
+- [ ] Resolve A/B/C naming (user objected: "item names, will lose track easily" — need a
+  different scheme before this can be considered final)
+- [ ] Rewrite `tasks.md`'s task-file field guidance to be pattern-specific: exact
+  worktree/path/branch + explicit instruction (verify-if-in / cd / checkout) per pattern
+- [ ] Resolve duplication between `state-vs-ledger.md`'s STATE template and `tasks.md`'s
+  field guide (user: "2 identical templates... confusing... 2 different places")
+- [ ] Decide fate of `worktrees/policy-writer/CONVENTIONS.md.bak` (stray tracked file at
+  worktree root, found during session-7 ledger-capture; not covered by the `.bak`
+  completion criterion since it's not under `conventions/`)
+- [ ] Fix `session-tracking` protocol violation: drafted the worktree-delegation changes
+  directly on `session-tracking` instead of `policy-writer` before catching the mistake.
+  `session-tracking` currently sits dirty/uncommitted with those (now-superseded) drafts —
+  deliberately left as-is per user instruction ("we fix session-tracking later"). Do not
+  install anything until this is cleaned up and the items above are resolved.
 
-**Last completed:** Session 17 retired — ledger verified; ownership/data-safety rules installed;
-policy backups moved to `backup_rules/`; both worktrees verified clean.
+**Last completed:** Drafted and committed worktree-delegation patterns A/B/C on `policy-writer`
+(`6cb822af`, `a933d773`) from the suggestion-box entry. Naming, `tasks.md` field-guide rewrite,
+and the state-vs-ledger/tasks.md template duplication remain open per user direction.
 
-**Next step / resume point:** Revisit FG/BG analysis and workflow nuances; revisit overlap between CONVENTIONS.md / session-start.md / resume-mission; revisit role-specific agentbus subscriptions; then rewrite ledger-capture as custom-agent.
+**Next step / resume point:** Resolve A/B/C naming with the user; rewrite `tasks.md` field
+guidance to be pattern-specific; resolve the STATE/tasks.md template duplication; then clean up
+the `session-tracking` protocol violation (dirty superseded drafts) before any install.
 
 ### Status
-IN PROGRESS — session 17 retired; remaining custom-agent and workflow work is open for the next session.
+IN PROGRESS — worktree-delegation drafting done on policy-writer but not final (naming/tasks.md
+open); session-tracking still dirty from a caught protocol violation, fix deferred by user.
 
 ### Known issues
 - `settings-and-skill-edits.md` describes a `user-approved-settings-change` marker
@@ -86,6 +109,13 @@ IN PROGRESS — session 17 retired; remaining custom-agent and workflow work is 
   using `processed-` prefix as interim.
 - Deferred: whether `wind-down` should invoke itself as a background agent — defer to
   ledger-capture custom-agent design (that design will also settle wind-down invocation model).
+- Session 18 drafted the worktree-delegation changes directly on `session-tracking` instead of
+  `policy-writer`, in violation of `conventions/policy-writer.md` ("Drafts all changes to
+  conventions and skills in `worktrees/policy-writer`"). Caught by the user mid-session. Root
+  cause: `CONVENTIONS.md`'s trigger to read `policy-writer.md` at mission-owner session start
+  was read but not acted on. Content was ported to `policy-writer` and committed correctly;
+  `session-tracking`'s dirty, now-superseded working tree was deliberately left untouched per
+  user instruction, to be cleaned up later.
 
 ## Session log
 
