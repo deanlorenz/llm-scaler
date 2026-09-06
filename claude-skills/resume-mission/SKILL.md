@@ -1,6 +1,6 @@
 ---
 name: resume-mission
-description: Resume work on a mission tracked in the session-tracking branch — whether this is a freshly-started session with no prior context, or a resumed session that should re-verify its mission/state rather than trust stale context. Scans for any pending (unfinished handoff) session and runs ledger-capture on it first, enters the correct mission worktree, reads the mission's plan and current state, declares ownership on agentbus, confirms understanding back to the user, and records this session's start in STATE.md. Use when the user asks to continue/resume/pick up work on a topic or mission, or names a mission directly. Invoke with /resume-mission [mission-name-or-topic-words] or /resume-mission with no argument to list missions and ask.
+description: Set up, recover, or onboard into a mission worktree. Resolves target mission, enters worktree (EnterWorktree), verifies prerequisites (.session/, skill symlinks, layout migration), clears pending sessions via ledger-capture with .wip locking, declares agentbus ownership, and executes standard session-start. Supports explicit invocation (/resume-mission <mission>), inferred missions requiring user approval, and subagent execution returning canonical context to parent.
 disable-model-invocation: true
 ---
 
@@ -14,170 +14,182 @@ disable-model-invocation: true
 
 **Arguments:** $ARGUMENTS (a mission name, topic words to match against mission names, or empty)
 
-This skill works the same way whether you're a freshly-started session with zero context, or
-a resumed session whose conversation history might be stale — always re-verify against the
-files below rather than trusting memory of a prior turn.
+---
 
-## Step 0: If this is the `policy-writer` mission — check for pending session-tracking commits
+## Part 1: Session Entry Cases
 
-Before doing anything else, if `$ARGUMENTS` resolves to `policy-writer` (or this session is
-already known to be the `policy-writer` session):
+Before touching files or running discovery, determine which case applies and follow its
+instructions. Do not proceed to Part 2 unless Case 1 applies.
 
-```
-agentbus_fetch_since(topic="session-tracking.pending-commits", since_seq=0)
-```
+### Case 1: Explicit invocation (`/resume-mission [mission]`)
+The user or caller explicitly ran `/resume-mission`. Proceed through Part 2 (Steps 1–9).
 
-For each unprocessed note found: check `git status` in `$TRACKING` for the changes described,
-commit them if present (`git add missions/<name>/ && git commit -m "chore: commit symlinks for <name>"`),
-then acknowledge the note is handled (note it in your live ledger — there is no explicit
-"mark done" on the bus, so record the seq you processed up to).
+### Case 2: New session with inferred mission (approval gate)
+A new session started with no active ledger but the prompt or environment suggests a
+candidate mission (e.g. prompt keywords, active worktree folder). Do **not** speculatively
+scan directories or read files. Infer the candidate mission name, then:
 
-If no pending notes, or this is not `policy-writer`, skip this step entirely.
+> *"It looks like you want to work on mission **`<mission-name>`**. Would you like me to run
+> `/resume-mission <mission-name>`?"*
 
-## Step 1: Locate the tracking worktree and mission worktree
+Wait for explicit user confirmation before executing anything further.
+
+### Case 3: Ongoing session / post-compaction / post-clear (clean resume)
+The session is already inside a mission worktree and resuming after a context reset,
+compaction, or clear. Do **not** run `/resume-mission`. Instead:
+- Verify CWD is still the mission worktree.
+- Read local `.session/STATE.md` and `CONVENTIONS.md`.
+- Continue the active session ledger (do not open a new one).
+- Present the opening orientation (see Step 8) and wait for user confirmation.
+
+### Case 4: Delegated worker session (coder / reviewer / researcher)
+When spawned with a dedicated task file (`.session/task-<id>.md` or `STATE.coder`)
+specifying mission, role, worktree, and exact task: **skip `/resume-mission` entirely**.
+Follow `conventions/session-start.md` directly: verify worktree isolation (`EnterWorktree`),
+read the assigned task file, and report completion back to the parent session.
+
+---
+
+## Part 2: Execution Procedure (Case 1 only)
+
+### Step 1: Locate `session-tracking` (conventions access only)
 
 ```bash
 git worktree list | grep session-tracking
-git worktree list
 ```
 
-If `session-tracking` isn't listed, tell the user it doesn't exist locally and stop — this
-skill cannot create it. Note its path as `$TRACKING`.
+If `session-tracking` isn't listed, tell the user and stop — this skill cannot create it.
+Record its path as `$TRACKING`. This path is used only to access `CONVENTIONS.md` and
+conventions rules. Do not read anything else from `$TRACKING` at this stage.
 
-## Step 2: Find the mission
+### Step 2: Find the mission
 
 ```bash
 ls "$TRACKING/missions/"
 ```
 
-- If `$ARGUMENTS` exactly matches a directory name under `missions/`, use it.
-- If `$ARGUMENTS` is non-empty but doesn't match exactly, fuzzy-match against the directory
-  names. If exactly one is a clear match, use it. If multiple are plausible or none match,
-  list candidates and use `AskUserQuestion` to have the user pick — don't guess silently.
-- If `$ARGUMENTS` is empty, list all mission directories and ask the user which one.
+- **Exact match:** if `$ARGUMENTS` matches a directory name under `missions/`, use it.
+- **Fuzzy match / ambiguity:**
+  - Interactive session: list candidates, use `AskUserQuestion` to have the user pick.
+    Do not guess silently.
+  - Background / subagent: report ambiguity to the parent session via agentbus.
+- **Empty arguments:** list all mission directories and ask the user which one.
 
-Call the chosen mission `$MISSION_NAME`. The mission's worktree path is
-`worktrees/$MISSION_NAME` (branch name = worktree name). Call it `$MISSION_WT`.
-The mission's tracking files live at `$MISSION_WT/.session/`.
+Call the chosen mission `$MISSION_NAME`. The worktree path is `worktrees/$MISSION_NAME`.
+Call it `$MISSION_WT`. Tracking files live at `$MISSION_WT/.session/`.
 
-## Step 3: Migrate to the new layout if needed
-
-Check whether the mission worktree is on the new layout or the old one:
-
-```bash
-ls "$MISSION_WT/.session/" 2>/dev/null || echo "MISSING"
-```
-
-**If `.session/` exists and contains `STATE.md`:** already on the new layout — skip this step.
-
-**If `.session/` is missing or `STATE.md` is not in it:** the worktree is on the old layout
-(files in `session-tracking/missions/$MISSION_NAME/`). Migrate in this order:
-
-**a. List what is already in `.session/` before touching anything:**
-
-```bash
-mkdir -p "$MISSION_WT/.session"
-ls -la "$MISSION_WT/.session/"
-```
-
-**b. List what session-tracking has:**
-
-```bash
-ls "$TRACKING/missions/$MISSION_NAME/"
-ls "$TRACKING/missions/$MISSION_NAME/ledgers/"
-```
-
-**c. For each file that already exists in both places, diff before copying:**
-
-```bash
-diff "$TRACKING/missions/$MISSION_NAME/STATE.md" "$MISSION_WT/.session/STATE.md"
-```
-
-Keep whichever is newer/more complete. Note any conflict in your live ledger.
-
-**d. Copy only files that do NOT already exist in `.session/`:**
-
-```bash
-[ ! -f "$MISSION_WT/.session/STATE.md" ] && \
-  cp "$TRACKING/missions/$MISSION_NAME/STATE.md" "$MISSION_WT/.session/STATE.md"
-for f in "$TRACKING/missions/$MISSION_NAME/ledgers/"*.md; do
-  [ ! -f "$MISSION_WT/.session/$(basename $f)" ] && cp "$f" "$MISSION_WT/.session/"
-done
-# Copy spec/plan docs that are internal (not destined for a PR); leave shareable docs in code tree
-```
-
-After copying, do the one-time symlink setup per
-`conventions/feature-worktree-setup.md`'s "Migrating an existing worktree" section, then
-continue with Step 4 using `$MISSION_WT/.session/STATE.md` as the authoritative source.
-
-## Step 4: Read conventions and current state
-
-Read, in this order:
-1. `$TRACKING/CONVENTIONS.md` — global process rules.
-2. `$MISSION_WT/.session/STATE.md` — current status, task table, worktrees in use, immediate
-   next step, open questions, and the Session log (see Step 5).
-   If the worktree is not checked out locally, read via:
-   ```bash
-   git -C <repo-root> show $MISSION_NAME:.session/STATE.md
-   ```
-   The symlink at `$TRACKING/missions/$MISSION_NAME/STATE.md` points to the same file if the
-   worktree is present — either path works.
-
-Do **not** read the full ledger file(s) — consult ledger files only when debugging or digging
-into history. Do **not** read the plan/spec doc upfront — pull it on demand only if needed
-for a specific step.
-
-## Step 5: Clear pending sessions before proceeding
-
-Scan `STATE.md`'s Session log section (create it, at the end of the file, if it doesn't exist
-yet). A log entry is **pending** if:
-- its `status` is `active` (a prior session didn't retire cleanly), or
-- its `status` is `retired` but its named ledger file does **not** yet carry a `## Verified`
-  marker.
-
-For every pending entry, in order:
-1. If still `active`, mark it `retired` in `STATE.md` now (via the `.wip` protocol — see
-   `conventions/wip-editing.md`; since `STATE.md` is local in the mission worktree, no
-   cross-worktree dance is needed).
-2. Launch ledger-capture against that entry's ledger file (at `$MISSION_WT/.session/<slug>.md`),
-   as a background agent, and **wait for it in the foreground** before moving on. Brief:
-   read the one ledger file named, confirm every point lands in `STATE.md`, the mission's
-   plan/spec doc, or (if genuinely global) `CONVENTIONS.md`; fix gaps directly via `.wip`;
-   also fix any doc-reference paths in scope that violate the path convention; append
-   `## Verified <date> — ...` to the ledger when done.
-3. If ledger-capture reports something genuinely ambiguous, surface it to the user now.
-
-If there are no pending entries, this step is a no-op.
-
-## Step 6: Enter the mission worktree
+### Step 3: Enter the mission worktree
 
 ```
 EnterWorktree(path: "<full path to $MISSION_WT>")
 ```
 
-This requires the user's interactive approval — expected, not an error. If the user declines
-or the path doesn't exist, stop and ask what to do.
+This requires the user's interactive approval — expected, not an error. If the user
+declines or the path doesn't exist, stop and ask what to do.
 
-**Check skills are present.** From inside the now-entered worktree:
+**Coders must be isolated:** coders execute inside their own dedicated worktree. Entering
+any other worktree is a violation — stop and report to the parent session.
+
+All subsequent file reads and edits happen from inside this worktree. Do not read
+cross-worktree files except via explicit paths or `git -C`.
+
+### Step 4: Verify prerequisites and migrate layout if needed
+
+**a. Verify `.session/` exists:**
+
 ```bash
-ls .claude/skills/
+ls "$MISSION_WT/.session/" 2>/dev/null || echo "MISSING"
 ```
-If `resume-mission` and `wind-down` symlinks are missing, set them up now per
-`conventions/feature-worktree-setup.md` so the next resume/wind-down cycle works.
 
-## Step 7: Declare ownership on agentbus
+If missing: `mkdir -p "$MISSION_WT/.session"`.
+
+**b. Verify skill symlinks:**
+
+```bash
+ls .claude/skills/resume-mission .claude/skills/wind-down
+```
+
+If missing, set up per `conventions/feature-worktree-setup.md`.
+
+**c. Verify session-tracking convenience symlinks:**
+
+```bash
+ls "$TRACKING/missions/$MISSION_NAME/"
+```
+
+If missing or broken, create per `conventions/feature-worktree-setup.md` and publish a
+note to `session-tracking.pending-commits`.
+
+**d. Migrate old layout if needed:**
+
+If `$MISSION_WT/.session/STATE.md` is missing but files exist in
+`$TRACKING/missions/$MISSION_NAME/`:
+
+1. List both sides before touching anything:
+   ```bash
+   ls -la "$MISSION_WT/.session/"
+   ls "$TRACKING/missions/$MISSION_NAME/"
+   ls "$TRACKING/missions/$MISSION_NAME/ledgers/"
+   ```
+2. For each file present in both places, diff before copying:
+   ```bash
+   diff "$TRACKING/missions/$MISSION_NAME/STATE.md" "$MISSION_WT/.session/STATE.md"
+   ```
+   Keep whichever is newer/more complete. Note any conflict in your live ledger.
+3. Copy only files that do NOT already exist in `.session/`:
+   ```bash
+   [ ! -f "$MISSION_WT/.session/STATE.md" ] && \
+     cp "$TRACKING/missions/$MISSION_NAME/STATE.md" "$MISSION_WT/.session/STATE.md"
+   for f in "$TRACKING/missions/$MISSION_NAME/ledgers/"*.md; do
+     [ ! -f "$MISSION_WT/.session/$(basename $f)" ] && cp "$f" "$MISSION_WT/.session/"
+   done
+   ```
+4. Commit `.session/` to the mission branch, then continue with Step 5.
+
+### Step 5: Read conventions and current state
+
+Read, in this order — from inside the entered worktree:
+1. `$TRACKING/CONVENTIONS.md` — global process rules.
+2. Any role/mission-specific situational rules triggered by your role (per
+   `CONVENTIONS.md` index).
+3. `.session/STATE.md` — current status, task checklist, last completed, next step,
+   open questions, and the Session log (see Step 6).
+
+Do **not** read ledger files — consult them only when debugging history.
+Do **not** read the plan/spec doc upfront — pull it on demand only when needed.
+
+### Step 6: Clear pending sessions
+
+Read `conventions/resume-and-handoff.md` for the full takeover protocol. Summary:
+
+Scan `STATE.md`'s Session log. A log entry is **pending** if its `status` is `active`,
+or `retired` without a `## Verified` marker in its ledger.
+
+For every pending entry, using the `.wip` protocol (`conventions/wip-editing.md`):
+1. Mark it `retired` in `STATE.md` if still `active`.
+2. Launch ledger-capture against its ledger file as a background agent. Wait for it in
+   the foreground before proceeding.
+3. Confirm `## Verified <date>` is appended to the ledger when done.
+4. If ledger-capture surfaces anything genuinely ambiguous, ask the user now.
+
+If there are no pending entries, this step is a no-op.
+
+### Step 7: Declare ownership on agentbus
+
+For mission-owner and role-takeover sessions:
 
 ```
 agentbus_publish(topic="mission.$MISSION_NAME", kind="handoff",
   body="session=<this-session-slug> taking ownership of $MISSION_NAME")
 ```
 
-This makes ownership visible to any other session watching the bus. Do this before recording
-the `active` Session-log entry — the bus declaration comes first.
+Do this before recording the `active` Session-log entry. Delegated worker sessions
+(coder, reviewer, researcher) skip this step.
 
-## Step 8: Confirm mission and state back to the user
+### Step 8: Confirm mission and state back to the user
 
-Present the opening orientation in this fixed format, then wait for confirmation:
+Present the opening orientation in this fixed format, then **wait for user confirmation
+before executing anything further**:
 
 ```
 Mission:   <mission name — one-line goal>
@@ -188,32 +200,26 @@ Last:      <last completed step>
 Next:      <next step>
 ```
 
-Add one line if Step 5 cleared any pending sessions.
+Add one line if Step 6 cleared any pending sessions.
 
-If anything in `STATE.md` looks stale (e.g. it claims a task is "in progress" but `git log`
-shows it's committed), verify against the actual git state before proceeding.
+**Subagent / subtask return contract:** when running as a subagent or subtask, return
+this block to the parent session. The parent reads the returned STATE file for immediate
+grounded context. Do not auto-proceed — the parent decides the next action.
 
-## Step 9: Record this session's start in STATE.md and open new ledger
+### Step 9: Record this session's start in STATE.md and open new ledger
 
-`STATE.md` is already local in the mission worktree — no cross-worktree exit/re-enter needed.
 Using the `.wip` protocol (`conventions/wip-editing.md`):
 
-1. Rename `$MISSION_WT/.session/STATE.md` → `STATE.md.wip`.
-2. Append one line to it:
+1. Rename `.session/STATE.md` → `STATE.md.wip`.
+2. Append one line to the Session log:
    `- <date> session=<slug> status=active ledger=.session/<slug>.md`
-3. Rename `STATE.md.wip` back to `STATE.md`, `git add`, commit on the mission branch with a
-   short message like `docs(state): record session start — $MISSION_NAME`.
-4. Create a new ledger file at `$MISSION_WT/.session/<slug>.md`. Open it with:
+3. Rename `STATE.md.wip` back to `STATE.md`, `git add`, commit on the mission branch:
+   `docs(state): record session start — $MISSION_NAME`
+4. Create a new ledger file at `.session/<slug>.md`. Open it with:
    `Continues: <path to previous ledger, if any>`
    Append to it as you work throughout this session.
 
-If the `.wip` file already exists, someone else is mid-edit — wait, or tell the user it's
+If `STATE.md.wip` already exists, someone else is mid-edit — wait, or tell the user it's
 locked and ask how to proceed.
-
-## Step 10: Proceed
-
-Continue with whatever the user actually asked for next. Keep appending to your live ledger
-at `$MISSION_WT/.session/<slug>.md` as you go. Push the mission branch to `origin` at any
-natural checkpoint to durably persist ledger + state updates.
 
 <!-- user-approved-settings-change: marker retained per prior edit's convention -->
