@@ -183,11 +183,41 @@ Actions taken:
   not the coder's).
 - **Not yet independently verified — do not treat the fix as done until the reviewer reports.**
 
+## Reviewer v2 — Pass (2026-09-06)
+- Verdict: **Pass**, one non-blocking nit. Full report: `.session/review-coder-ct6-fix-v3.md`.
+- Reviewer noted a naming collision worth remembering: there's a separate, still-blocked,
+  zero-commit agentbus thread (`mission.single-analyzer.coder-ct6-fix.*`, no `-v3` suffix) left
+  over from the abandoned launch #1/#2 attempts — reviewer correctly identified this as unrelated
+  and reviewed only the real `-v3` work. Nothing to clean up there beyond what was already done
+  (worktree/branch already removed earlier this session).
+- Independent verification highlights (not just trusting the coder): re-ran build/vet/test/gofmt
+  at the coder's tip in a disposable scratch worktree; reverse-applied just the fix commit and
+  reran the new e2e test, confirmed it fails pre-fix with the exact predicted values
+  (`RequiredCapacity` 7411.76 raw vs ~0.9265 expected-normalized); grepped for CT4/CT7/
+  `fairShareValue` occurrences to confirm out-of-scope items genuinely untouched; diffed the two
+  `gofmt -l` hits against the base commit to confirm they're pre-existing drift, not introduced
+  by this diff.
+- The one nit: new e2e test's `Describe` string included an internal `(CT6)` task-ID tag that
+  would ship into the codebase (visible in `go test -v` output). Non-blocking per reviewer.
+
+## Integration onto single-analyzer (2026-09-06)
+- Cherry-picked `7663d180`→`c5af5696`, `a8e9c511`→`290ca75f`, `0a5c0f52`→`896879d5` cleanly (no
+  conflicts) onto `single-analyzer`.
+- Fixed the nit directly (per user's choice: amend during cherry-pick, not send back to the
+  coder) — dropped `(CT6)` from the `Describe` string in
+  `engine_v2_normalize_e2e_test.go`, own commit `e4b1e77d`.
+- Re-verified `go build ./...`, `go vet ./...`, `go test ./internal/engines/...` clean after the
+  nit fix (not just trusting the pre-nit-fix verification).
+- CT6 is now **fully landed on `single-analyzer`**: `f20e06f9` (original normalization,
+  pre-existing) + `18f4d4ff` (compile fix) + `c5af5696`/`290ca75f`/`896879d5` (correctness fix +
+  tests) + `e4b1e77d` (nit cleanup).
+
 ## Open / next
-- Waiting on reviewer v2 (agentId `ad557beac4e2c53a5`) background completion.
-- After review passes: mission owner cherry-picks `7663d180`/`a8e9c511`/`0a5c0f52` onto
-  `single-analyzer` (per coder-orchestration.md rule 10 — never merge coder worktree directly).
-- Outstanding, unrelated to the coder dispatch: `origin/single-analyzer` still doesn't build
-  (compile fix `18f4d4ff` is local-only, not pushed) — needs a push at some point, with
-  per-op authorization; the CT6 fix, once cherry-picked, would go in the same future push.
-- After CT6 correctness fix lands: revisit CT4 scoping and next-PR boundary with user.
+- Push `single-analyzer` to origin — not yet authorized (needs explicit per-op approval);
+  `origin/single-analyzer` still doesn't build until this happens.
+- Decide with user whether CT4's fairness fix belongs in the next PR.
+- Finalize next PR's exact boundary (now unblocked — CT6-only scope, all commits landed) and
+  open it via `conventions/pr-branch.md`/`conventions/pr-workflow.md`.
+- Cleanup candidates (not yet done, low urgency): leftover worktrees from the two failed coder
+  dispatch attempts (`agent-a223357ad56398278`, `agent-a64b37115d72e7617` if either still
+  exists) and the now-integrated `coder-ct6-fix-v3` worktree (`agent-acc4742a2f2a1aceb`).
