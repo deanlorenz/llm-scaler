@@ -11,7 +11,7 @@
 - **Worktree:** `worktrees/policy-writer` (branch `policy-writer`)
 - **Role / scope:** Mission owner. Drafts all changes to `CONVENTIONS.md`, `conventions/`,
   and the skills here; copies finished content into `session-tracking`.
-- **Ledger / log:** *(none — session 16 retired; new session creates its own ledger)*
+- **Ledger / log:** `.session/2026-09-06-policy-writer-18.md` (active)
 
 ## Task
 
@@ -102,4 +102,5 @@ IN PROGRESS — session 17 retired; remaining custom-agent and workflow work is 
 - 2026-09-05 session=2026-09-05-policy-writer-16 status=retired ledger=.session/ledger/2026-09-05-policy-writer-16.md
 
 - 2026-09-06 session=2026-09-06-policy-writer-17 status=retired ledger=.session/ledger/2026-09-06-policy-writer-17.md
+- 2026-09-06 session=2026-09-06-policy-writer-18 status=active ledger=.session/2026-09-06-policy-writer-18.md
 
