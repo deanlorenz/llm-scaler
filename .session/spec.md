@@ -84,21 +84,21 @@ outcome by construction (not just by re-running the suite, though that remains t
 step).
 
 **Todo.**
-- [ ] CT1a (optimizer-side, defensive): add `if satNamed == nil || satNamed.Result == nil {
+- [x] CT1a (optimizer-side, defensive): add `if satNamed == nil || satNamed.Result == nil {
   return nil }` (or the function's appropriate empty-result equivalent) at the top of
   `rescaleModelDecisions`, immediately after the `saturationNamedEntry` call
-- [ ] CT1a: add a regression test exercising the previously-unguarded path
-- [ ] CT1b (engine-side): in `runAnalyzersAndScore` (`engine_v2.go`, right after the
+- [x] CT1a: add a regression test exercising the previously-unguarded path
+- [x] CT1b (engine-side): in `runAnalyzersAndScore` (`engine_v2.go`, right after the
   `runV2AnalysisOnly` call at line ~123), add `if baseResult == nil { return nil,
   fmt.Errorf("saturation analyzer produced no result for model %s", modelID) }`. No new
   event/metric/log call needed — this error return already flows through
   `collectV2ModelRequest` into the existing abstain pattern (`engine.go:980-1003`: log + Event +
   safety-net metrics + `continue`), unchanged.
-- [ ] CT1b: add a unit test on `runAnalyzersAndScore` (or the smallest testable seam around it)
+- [x] CT1b: add a unit test on `runAnalyzersAndScore` (or the smallest testable seam around it)
   that forces `baseResult == nil` with `err == nil` and asserts the sentinel error is returned —
   since this path is not reachable via the real analyzer, the test needs a fake/stub that
   violates the `Analyze` contract deliberately, to prove the guard itself works in isolation
-- [ ] Run full existing test suite — zero regressions expected (verified by construction in
+- [x] Run full existing test suite — zero regressions expected (verified by construction in
   `resolved-open-items-2026-08-26.md` §1: no current input can produce `baseResult == nil` with
   `err == nil`, so no existing test's outcome changes)
 
@@ -145,28 +145,38 @@ test suite passes; no remaining reference to `saturationNamedEntry` or `Analyzer
 `internal/engines/allocation/` or `internal/engines/steadystate/`.
 
 **Todo.**
-- [ ] Change the field on `ModelScalingRequest` from `AnalyzerResults []NamedAnalyzerResult` to
+- [x] Change the field on `ModelScalingRequest` from `AnalyzerResults []NamedAnalyzerResult` to
   `CompositeSignal NamedAnalyzerResult`
-- [ ] Update `internal/engines/steadystate/engine_v2.go` — `runAnalyzersAndScore` currently
+- [x] Update `internal/engines/steadystate/engine_v2.go` — `runAnalyzersAndScore` currently
   returns `[]allocation.NamedAnalyzerResult` (a length-1 slice); change its return type to a bare
   `allocation.NamedAnalyzerResult`, dropping the slice-literal wrapper at line 175. Update
   `collectV2ModelRequest` to assign `CompositeSignal: namedResult` directly (no `[0]` indexing)
-- [ ] Update `variant_records.go:recordsForRequest` per Task B.3 row 1
-- [ ] Update `cost_aware_optimizer.go:buildDecisionsWithOptimizer` per Task B.3 row 2
-- [ ] Update `rescale.go:rescaleModelDecisions`, `rescaleInputsForGroup` per Task B.3 rows 3-4
-- [ ] Update `rescale.go:modelDemandGPUs`, `roleDemandGPUs` signatures (`*NamedAnalyzerResult` →
+- [x] Update `variant_records.go:recordsForRequest` per Task B.3 row 1
+- [x] Update `cost_aware_optimizer.go:buildDecisionsWithOptimizer` per Task B.3 row 2
+- [x] Update `rescale.go:rescaleModelDecisions`, `rescaleInputsForGroup` per Task B.3 rows 3-4
+- [x] Update `rescale.go:modelDemandGPUs`, `roleDemandGPUs` signatures (`*NamedAnalyzerResult` →
   `NamedAnalyzerResult`) per Task B.3 rows 5-6
-- [ ] Delete `saturationNamedEntry` (`analyzer_helpers.go:87-101`)
-- [ ] Update the stale doc comment at `optimizer_interfaces.go:75` ("saturation entry is always
+- [x] Delete `saturationNamedEntry` (`analyzer_helpers.go:87-101`)
+- [x] Update the stale doc comment at `optimizer_interfaces.go:75` ("saturation entry is always
   first" → state the real, current guarantee)
-- [ ] Update `hasSaturationResult` (`engine_v2.go:745-752`, the steadystate-side duplicate lookup
+- [x] Update `hasSaturationResult` (`engine_v2.go:745-752`, the steadystate-side duplicate lookup
   used by GPU-quota accounting) to read `req.CompositeSignal.Name ==
   domain.SaturationAnalyzerName` directly instead of searching
-- [ ] Update `updateLivenessAndSetLive`, `recordAnalyzerMetrics`, `logAnalyzerResult`
+- [x] Update `updateLivenessAndSetLive`, `recordAnalyzerMetrics`, `logAnalyzerResult`
   (`engine_v2.go`) — currently take `[]allocation.NamedAnalyzerResult`; decide whether to keep
   the slice signature (call with a length-1 literal at the call site) or change to take a single
   value — either works, pick whichever is less churn during implementation
-- [ ] Run full existing test suite — zero regressions expected
+- [x] Run full existing test suite — zero regressions expected
+
+**Engine revert note (2026-08-31, already recorded in this task's Status below):** after this
+Todo was first written, `runAnalyzersAndScore`'s return type was reverted back to
+`[]NamedAnalyzerResult` (matching main) — `collectV2ModelRequest` now takes `namedResults[0]`
+rather than the function itself returning a bare value. The Todo item above ("change its
+return type to a bare `allocation.NamedAnalyzerResult`") describes the *first* implementation
+attempt, not the shape that actually shipped. This is why CT6 later found the return type back
+at `[]allocation.NamedAnalyzerResult` and changed it *again* — the two changes are unrelated,
+not a contradiction, but a reader diffing this Todo against current code will see a mismatch
+that has this history behind it.
 
 **Refs.**
 *Reads:* `docs/plans/analyzers/composite-entry-spec-2026-08-25.md` (Task B, full call-site table),
@@ -826,22 +836,22 @@ and every formula yields the same replica count it did before.
   set it to `Result.TotalDemand` before normalization, use it in `rescaleInputsForGroup`
   instead of `Result.TotalDemand`. Longer-term replacement with replica-demand weight
   tracked as a separate follow-on task (see rescale fairness section above).
-- [ ] Add `SatDemand float64` field to `NamedAnalyzerResult` in
+- [x] Add `SatDemand float64` field to `NamedAnalyzerResult` in
   `internal/engines/allocation/optimizer_interfaces.go`, with doc comment stating it holds
   the pre-normalization total demand from the saturation analyzer (token units) and is used
   only by the rescale weight; zero outside the rescale path.
-- [ ] In `normalizeToCompositeUnits`, set `nr.SatDemand = nr.Result.TotalDemand` before
+- [x] In `normalizeToCompositeUnits`, set `nr.SatDemand = nr.Result.TotalDemand` before
   rewriting `TotalDemand` to `1.0`.
-- [ ] In `rescaleInputsForGroup` (rescale.go:564), change `Demand: satNamed.Result.TotalDemand`
+- [x] In `rescaleInputsForGroup` (rescale.go:564), change `Demand: satNamed.Result.TotalDemand`
   to `Demand: satNamed.SatDemand`.
-- [ ] Write `normalizeToCompositeUnits(nr *NamedAnalyzerResult)` in
+- [x] Write `normalizeToCompositeUnits(nr *NamedAnalyzerResult)` in
   `internal/engines/steadystate/engine_v2.go` (or a new file `composite.go` in the same
   package if it feels cleaner): applies the coverage normalization described above.
-- [ ] Call it in `collectV2ModelRequest` immediately after `buildNamedResult` returns, on
+- [x] Call it in `collectV2ModelRequest` immediately after `buildNamedResult` returns, on
   the entry that will become `CompositeSignal` (not on the entries kept for liveness/metrics).
-- [ ] Add doc comments: on the composite `Result` fields (`TotalDemand = 1.0` invariant),
+- [x] Add doc comments: on the composite `Result` fields (`TotalDemand = 1.0` invariant),
   on `NamedAnalyzerResult.CompositeSignal` doc block stating the coverage-unit contract.
-- [ ] Unit test for `normalizeToCompositeUnits`:
+- [x] Unit test for `normalizeToCompositeUnits`:
   - Non-disaggregated case: one variant, `TotalDemand=8000`, `PRC=2000` → normalized
     `TotalDemand=1.0`, `PRC=0.25` (= 2000/8000).
   - Disaggregated case: prefill variant `RoleDemand=4000`, `PRC=1000` → `PRC=0.25`;

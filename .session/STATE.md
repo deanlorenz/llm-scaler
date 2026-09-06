@@ -19,6 +19,9 @@
 - **Ledgers index:** `.session/ledgers/README.md` — one-line-per-file index of archived
   session captures and superseded snapshots (call-maps, the pre-CT6 spec snapshot, the
   original PR #2 design notes). Read the index before opening any individual ledger file.
+- **PR specs:** `.session/pr-spec-34-composite-signal.md` (merged, verified scope + the two
+  gists that described it) and `.session/pr-spec-next-coverage-units.md` (not yet opened,
+  CT6-only scope, blocked on the test-fix). See "PR history" below.
 - **Context:**
   - `internal/engines/allocation/optimizer_interfaces.go`
   - `internal/engines/allocation/analyzer_helpers.go`
@@ -59,14 +62,22 @@ below) — confirm with user before executing.
 
 ### PR history
 
+Full detail and verification method for each PR: `.session/pr-spec-34-composite-signal.md`
+and `.session/pr-spec-next-coverage-units.md`.
+
 - **PR #34 — MERGED 2026-09-02** (https://github.com/ev-shindin/llm-scaler/pull/34, merge
-  commit `347de1a9`). Scope: **exactly** CT1a (`1a0c23be`) + CT2 (`113fec1d`) — nothing else.
-- **Next PR — not yet opened, no branch cut yet.** Payload already on `origin/single-analyzer`
-  (deanlorenz/llm-scaler fork, tip `d90bd565`): CT3b (`b980f682`), CT5 (`fcf9c905`), the s7
-  stale-args fix (`b067642a`), CT6 (`f20e06f9`) — **minus** the CT6 test-fix (see Known
-  issues), which must be committed before this can go out as-is. Whether CT7 (engine-side
-  reduce) bundles into this PR or ships separately is not decided — CT7 has 4 open design
-  questions (spec CT7 section) and depends on the test-fix landing first regardless.
+  commit `347de1a9`). **Corrected 2026-09-06** (verified against `gh pr diff 34`'s actual
+  content, not commit messages): scope is CT1a + CT2 + **CT3b + CT5** — the PR-prep branch
+  squashed CT2/CT3b/CT5 into one commit (`113fec1d`) even though they're 3 separate commits on
+  the mission branch (`e4106109`/`b980f682`/`fcf9c905`). Does NOT contain CT1b or CT6.
+- **Next PR — not yet opened, no branch cut yet.** Scope is **CT6 only** (`f20e06f9`) — CT3b
+  and CT5 are already merged in PR #34, so they are not part of this PR's diff. Blocked on the
+  CT6 test-fix (see Known issues) being committed first; the s7 stale-args bug
+  (`b067642a`) is NOT relevant to this PR — it only ever existed on the mission branch, never
+  on any PR-prep branch, so there's nothing to carry forward for it.
+- **CT7** (engine-side reduce) is not scoped into either PR above; it needs its own PR once its
+  4 open design questions (spec CT7 section) are resolved, and depends on the next PR's test-fix
+  landing first (CT7 builds on `runAnalyzersAndScore`'s current slice-returning shape).
 - CT4 blocked on user decision; CT1b deferred to a future PR (excluded from PR #34 by user
   request).
 
