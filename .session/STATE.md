@@ -186,3 +186,4 @@ and `.session/pr-spec-next-coverage-units.md`.
 - 2026-09-01 session=2026-09-01-s8 status=retired ledger=.session/2026-09-01-s8.md
 - 2026-09-06 session=2026-09-06-single-analyzer-1 status=retired ledger=.session/2026-09-06-single-analyzer-1.md
 - 2026-09-06T12:00 session=2026-09-06-single-analyzer-2 status=retired ledger=.session/2026-09-06-single-analyzer-2.md
+- 2026-09-06T18:00 session=2026-09-06-single-analyzer-3 status=active ledger=.session/2026-09-06-single-analyzer-3.md
