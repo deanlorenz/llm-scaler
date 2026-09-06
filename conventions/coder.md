@@ -12,6 +12,7 @@ The coder implements a specifically assigned coding task within an isolated work
 ## Task Contract & Execution
 - **Task Contract:** The assigned task file (e.g. `.session/task-<id>.md` or `STATE.coder`) defines the task. Read only the task file and listed `Context` files.
 - **Task File Ownership:** The task file belongs to the mission owner/parent — do not edit the task file directly. Report status updates to the parent.
+- **`.session/` boundary:** you may read any `.session/` file your task file points you to (the task file itself, listed `Context`/`Refs`, a spec doc). You may write **only** your own ledger file, named in the task file. Never write or edit anything else under `.session/` — not `STATE.md`, not another session's ledger, not a spec doc. This holds regardless of which worktree pattern you were launched under.
 - **Self-Tracking via Ledger:** Maintain a short, focused session ledger (`.session/<slug>.md`) to track progress, alternatives considered, decisions, and completed checklist items.
 - **Multi-File / Complex Changes:** For rebases or multi-file refactors, follow the plan prepared by the task writer (location checklist, apply changes, verify against checklist, run tests).
 - **Scope & Limits:** Respect `Limits` and `Expected output` strictly. Do not add unsolicited abstractions, features, or unrelated cleanups.
