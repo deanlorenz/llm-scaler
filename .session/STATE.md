@@ -61,16 +61,19 @@
 - [ ] Revisit FG/BG analysis and workflow nuances across all 4 cases
 - [ ] Revisit overlap and division of labor between CONVENTIONS.md, session-start.md, and resume-mission
 - [ ] Revisit role-specific subscription details in conventions/agentbus.md
-- [ ] Review & install finished conventions onto session-tracking
+- [x] Review & install finished conventions onto session-tracking
+- [x] Fix install procedure (git checkout from branch, not hand-copy); add install-to-session-tracking.md convention
+- [x] Redesign skills layout: policy-writer/claude-skills/ source of truth; session-tracking/claude-skills/ installed copy; symlinks retargeted
+- [x] Reconstruct resume-mission + wind-down skills from session-13/14 ledger; install to session-tracking; push both branches
 - [ ] Rewrite ledger-capture as a custom-agent (spec + mode)
 - [ ] Write T10 session-setup agent spec
 
-**Last completed:** Session 15: conventions fix — explicit DO NOT READ on ledger field in state-vs-ledger.md template and session-start.md; committed d32a5912 (session-tracking) + 3b1c4001 (policy-writer).
+**Last completed:** Session 16: full install of conventions + skills onto session-tracking; skills layout redesign (claude-skills/); resume-mission + wind-down reconstructed and installed; both branches pushed to origin.
 
-**Next step / resume point:** Revisit FG/BG analysis and workflow nuances across the 3-case model; revisit overlap between CONVENTIONS.md / session-start.md / resume-mission; revisit agentbus role-specific subscriptions; then review & install finished conventions onto session-tracking.
+**Next step / resume point:** Revisit FG/BG analysis and workflow nuances; revisit overlap between CONVENTIONS.md / session-start.md / resume-mission; revisit role-specific agentbus subscriptions; then rewrite ledger-capture as custom-agent.
 
 ### Status
-IN PROGRESS — session 15 active. Safe checkpoint saved.
+IN PROGRESS — session 16 active.
 
 ### Known issues
 - `settings-and-skill-edits.md` describes a `user-approved-settings-change` marker
