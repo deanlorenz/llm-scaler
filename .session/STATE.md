@@ -88,3 +88,4 @@ After that:
 - 2026-09-01 session=bench-runtools2 status=retired ledger=missions/benchmark-runtools/ledgers/bench-runtools2.md
 - 2026-09-01 session=bench-runtools3 status=retired ledger=missions/benchmark-runtools/ledgers/bench-runtools3.md
 - 2026-09-01 session=bench-runtools4 status=retired ledger=missions/benchmark-runtools/ledgers/bench-runtools4.md
+- 2026-09-06 session=bench-runtools5 status=active ledger=.session/bench-runtools5.md
