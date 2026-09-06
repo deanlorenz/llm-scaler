@@ -19,30 +19,32 @@ disable-model-invocation: true
 ## Part 1: Session Entry Cases
 
 Before touching files or running discovery, determine which case applies and follow its
-instructions. Do not proceed to Part 2 unless Case 1 applies.
+instructions. Do not proceed to Part 2 unless Case 2 applies.
 
-### Case 1: Explicit invocation (`/resume-mission [mission]`)
-The user or caller explicitly ran `/resume-mission`. Proceed through Part 2 (Steps 1–9).
+### Case 1: New mission (no STATE file)
+No STATE file exists for this mission yet. Do **not** speculatively scan directories or
+read files. Ask the user to define the mission before doing anything:
 
-### Case 2: New session with inferred mission (approval gate)
-A new session started with no active ledger but the prompt or environment suggests a
-candidate mission (e.g. prompt keywords, active worktree folder). Do **not** speculatively
-scan directories or read files. Infer the candidate mission name, then:
+> *"No existing STATE found for `<mission-name>`. Shall I set up a new mission worktree?"*
 
-> *"It looks like you want to work on mission **`<mission-name>`**. Would you like me to run
-> `/resume-mission <mission-name>`?"*
+Wait for explicit user confirmation, then follow `conventions/feature-worktree-setup.md`
+to establish the worktree and create the initial STATE file.
 
-Wait for explicit user confirmation before executing anything further.
+### Case 2: Resume or takeover (STATE file exists)
+The user ran `/resume-mission`, or the session started cold and a candidate mission is
+evident from the prompt or active worktree. This covers:
+- Resuming your own prior session after context reset, compaction, or clear.
+- Taking over from a different prior session.
 
-### Case 3: Ongoing session / post-compaction / post-clear (clean resume)
-The session is already inside a mission worktree and resuming after a context reset,
-compaction, or clear. Do **not** run `/resume-mission`. Instead:
-- Verify CWD is still the mission worktree.
-- Read local `.session/STATE.md` and `CONVENTIONS.md`.
-- Continue the active session ledger (do not open a new one).
-- Present the opening orientation (see Step 8) and wait for user confirmation.
+"Resume own" and "takeover" are indistinguishable without user confirmation when context
+is gone — always ask first:
 
-### Case 4: Delegated worker session (coder / reviewer / researcher)
+> *"Continuing `<mission-name>`? (last: `<last completed step from STATE>`)"*
+
+Wait for explicit user confirmation before executing anything. Then proceed through
+Part 2 (Steps 1–9).
+
+### Case 3: Delegated worker session (coder / reviewer / researcher)
 When spawned with a dedicated task file (`.session/task-<id>.md` or `STATE.coder`)
 specifying mission, role, worktree, and exact task: **skip `/resume-mission` entirely**.
 Follow `conventions/session-start.md` directly: verify worktree isolation (`EnterWorktree`),
