@@ -782,7 +782,7 @@ func (e *Engine) collectV2ModelRequest(
 	// are engine-internal (liveness, metrics) and not forwarded.
 	composite := namedResults[0]
 	normalizeToCompositeUnits(&composite)
-	logCompositeSignal(ctx, modelID, namespace, composite)
+	logAnalyzerResult(ctx, modelID, namespace, composite)
 
 	return &allocation.ModelScalingRequest{
 		ModelID:         modelID,
@@ -1150,9 +1150,17 @@ func rolesOf(totals map[string]aggregation.ScopeTotals) []string {
 	return roles
 }
 
-// logAnalyzerResult emits one INFO "analyzer-result" line for a single named
-// analyzer result. Called for every analyzer that ran in a model's reconcile
-// cycle, after the universal threshold post-step has been applied.
+// logAnalyzerResult emits one INFO "analyzer-result" line for a NamedAnalyzerResult.
+// Called for every analyzer that ran in a model's reconcile cycle (in that
+// analyzer's own units), and again for the composite entry handed to the
+// optimizer, right after normalizeToCompositeUnits has converted it to
+// coverage-fraction units — nothing else logs the actual post-normalization
+// signal the optimizer receives, which is exactly what let a prior
+// normalization bug (RequiredCapacity/SpareCapacity/Remaining/Spare left in
+// raw units while PerReplicaCapacity was already a coverage fraction) go
+// unnoticed. Every field below is populated by buildNamedResult regardless of
+// whether normalization has run yet — SatDemand/SatRoleDemand simply read as
+// zero/nil until normalizeToCompositeUnits captures them.
 func logAnalyzerResult(ctx context.Context, modelID, namespace string, nr allocation.NamedAnalyzerResult) {
 	if nr.Result == nil {
 		return
@@ -1186,50 +1194,6 @@ func logAnalyzerResult(ctx context.Context, modelID, namespace string, nr alloca
 		})
 	}
 
-	logger.Info("analyzer-result",
-		"modelID", modelID,
-		"namespace", namespace,
-		"analyzer", nr.Name,
-		"supply", nr.TotalSupply,
-		"demand", nr.Result.TotalDemand,
-		"util", nr.Utilization,
-		"rc", nr.RequiredCapacity,
-		"sc", nr.SpareCapacity,
-		"scaleUpThreshold", nr.ScaleUpThreshold,
-		"scaleDownBoundary", nr.ScaleDownBoundary,
-		"variants", variants,
-	)
-}
-
-// logCompositeSignal emits one INFO "composite-signal" line for the coverage-unit
-// composite collectV2ModelRequest hands to the optimizer, right after
-// normalizeToCompositeUnits runs. logAnalyzerResult (above) logs every analyzer's
-// result in its own raw units before normalization; nothing previously logged the
-// actual post-normalization signal the optimizer receives, which is exactly what
-// let the normalization bug (RequiredCapacity/SpareCapacity/Remaining/Spare left
-// in raw units while PerReplicaCapacity was already a coverage fraction) go
-// unnoticed. rc/sc/remaining/spare/prc below are all coverage fractions once this
-// function's caller has normalized nr, not token counts.
-func logCompositeSignal(ctx context.Context, modelID, namespace string, nr allocation.NamedAnalyzerResult) {
-	if nr.Result == nil {
-		return
-	}
-	logger := ctrl.LoggerFrom(ctx)
-
-	type variantEntry struct {
-		Name string  `json:"name"`
-		PRC  float64 `json:"prc"`
-		Role string  `json:"role"`
-	}
-	variants := make([]variantEntry, 0, len(nr.Result.VariantCapacities))
-	for _, vc := range nr.Result.VariantCapacities {
-		role := vc.Role
-		if role == "" {
-			role = domain.RoleBoth
-		}
-		variants = append(variants, variantEntry{Name: vc.VariantName, PRC: vc.PerReplicaCapacity, Role: role})
-	}
-
 	type roleEntry struct {
 		Role      string  `json:"role"`
 		RC        float64 `json:"rc"`
@@ -1242,16 +1206,20 @@ func logCompositeSignal(ctx context.Context, modelID, namespace string, nr alloc
 	}
 	sort.Slice(roles, func(i, j int) bool { return roles[i].Role < roles[j].Role })
 
-	logger.Info("composite-signal",
+	logger.Info("analyzer-result",
 		"modelID", modelID,
 		"namespace", namespace,
 		"analyzer", nr.Name,
+		"supply", nr.TotalSupply,
 		"demand", nr.Result.TotalDemand,
 		"satDemand", nr.SatDemand,
+		"util", nr.Utilization,
 		"rc", nr.RequiredCapacity,
 		"sc", nr.SpareCapacity,
 		"remaining", nr.Remaining,
 		"spare", nr.Spare,
+		"scaleUpThreshold", nr.ScaleUpThreshold,
+		"scaleDownBoundary", nr.ScaleDownBoundary,
 		"variants", variants,
 		"roleCapacities", roles,
 	)
