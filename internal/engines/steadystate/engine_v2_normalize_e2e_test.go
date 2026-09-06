@@ -31,7 +31,7 @@ import (
 //	normalized PRC       = 2000/8000 = 0.25
 //	normalized RC (fix)  = 7411.76 / 8000 = 0.9264...  -> ceil(0.9264/0.25) = 4 additional replicas
 //	un-normalized RC (bug) = 7411.76           -> ceil(7411.76/0.25) = 29648 additional replicas
-var _ = Describe("normalizeToCompositeUnits: real-pipeline regression with nonzero demand (CT6)", func() {
+var _ = Describe("normalizeToCompositeUnits: real-pipeline regression with nonzero demand", func() {
 	It("sizes a scale-up correctly through collectV2ModelRequest -> CostAwareOptimizer.Optimize", func() {
 		fakeSat := &fakeAnalyzerWithResult{
 			analyzerName: domain.SaturationAnalyzerName,
