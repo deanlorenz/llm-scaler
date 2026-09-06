@@ -270,3 +270,40 @@ concurrent editor.
   spec.md, the two PR-spec docs, the ledgers move+index). The actual CT6 test-fix commit and
   the correctness-bug code fix are both still pending, explicitly deferred to a future session
   per user instruction ("Do not implement yet").
+
+## Verified 2026-09-06
+
+Ledger-capture pass. Confirmed all 6 referenced commits (`af55afb3`, `e88e48dc`, `ed502057`,
+`18ea1f43`, `250f2e8e`, `13de7abf`) are present on `single-analyzer` and each touches the
+durable files their commit messages claim (`git show --stat`). Cross-checked every
+substantive ledger point against the actual content of `.session/STATE.md`, `.session/spec.md`
+(CT6 and CT7 sections), `.session/pr-spec-34-composite-signal.md`, and
+`.session/pr-spec-next-coverage-units.md` at `HEAD` — not just that a commit touched the file.
+
+| Ledger point | Durable destination |
+|---|---|
+| Session start / ownership on agentbus / CONVENTIONS.md read | Process bookkeeping only; own Session log line in `STATE.md` is the durable record — no separate destination needed |
+| Finding #1 — uncommitted test-fix, CT6 compile gap traced to `f20e06f9`, verified via `go build`/`go vet`, `engine_v2_compose_test.go` moved to `multi_backup/` | `STATE.md` "Known issues" ("CT6 does not compile as pushed") + `spec.md` CT6 section ("Outstanding gap") |
+| Finding #2 — PR #34 already merged, STATE.md's "open/awaiting review" was stale | `STATE.md` PR history (corrected `af55afb3`, refined `ed502057`) + `pr-spec-34-composite-signal.md` |
+| Finding #3 — `pr-single-analyzer` worktree is (merged) PR #34; `origin/single-analyzer` tip `d90bd565` confirmed ancestor of local HEAD; no PR branch cut yet for the next payload | `STATE.md` ("Next PR — not yet opened, no branch cut yet"; "PR isolation" key decision) + `pr-spec-next-coverage-units.md` ("Status: NOT YET OPENED... tip `d90bd565`") |
+| Finding #4 — PR #2 design doc content, Q1-Q4 open questions | Ported verbatim into `spec.md` CT7 section (Q1-Q4 present); original archived at `.session/ledgers/compose-reduce-design-2026-08-30.md`, indexed in `.session/ledgers/README.md` |
+| Finding #5 — untracked docs/plans + `.session/` inventory, stale `spec.md.wip` lock | `.session/ledgers/README.md` indexes all 6 archived files; `spec.md.wip` → `spec.md` rename (lock resolved) per `e88e48dc` |
+| Open items 1-5 handed to user | All resolved in subsequent sections, each already checked above (CT6 test-fix status tracked in `STATE.md` Known issues/Next step; PR specs written; leftover-test-changes clarified as required, not optional, in Known issues; docs archived; `.wip` lock resolved) |
+| Docs cleanup pass (archival, spec.md rename/fixes, STATE.md Ledgers pointer + PR history) | `e88e48dc` + `.session/ledgers/README.md` |
+| p3-planner protocol-violation note (stale path reference to the moved design doc) | Not a single-analyzer durable-doc concern — flagged to the user in the moment, explicitly not this session's file to edit; no destination applicable |
+| PR-34 rescope from source + two focused PR specs | `ed502057`; `pr-spec-34-composite-signal.md`; `pr-spec-next-coverage-units.md`; `STATE.md` PR history corrected |
+| `runAnalyzersAndScore` loop diff Q&A (old reduce-then-build vs. new build-per-analyzer-then-pick-`[0]`; `buildNamedResult` generic, not sat-specific) | Underlying facts already stated in `spec.md` CT6 ("Outstanding gap") and CT7 ("Intent") sections; this was explanatory Q&A over already-committed code, not a new decision requiring its own entry |
+| CT6 correctness bug — found, traced, fix design confirmed (RC/SC/Remaining/Spare/TotalSupply/TotalAnticipatedSupply/Utilization normalization, new `SatRoleDemand` field, aliasing note, deferred "role=both" TODO) | `18ea1f43` + `250f2e8e` into `STATE.md` "Known issues" and `spec.md` CT6 section ("Correctness bug found" / "Fix design — CONFIRMED"); `pr-spec-next-coverage-units.md` |
+| Wind-down: no code written, test-fix and bug-fix deferred to next session | `13de7abf` updated `STATE.md`'s "Next step / resume point" accordingly |
+
+**Gap found (flagged, not silently passed):** `13de7abf` (the wind-down commit) updated
+`STATE.md`'s "Next step / resume point" but did **not** flip this session's own Session log
+entry from `status=active` to `status=retired` — `STATE.md`'s Session log still reads
+`2026-09-06T12:00 session=2026-09-06-single-analyzer-2 status=active
+ledger=.session/2026-09-06-single-analyzer-2.md` as of current `HEAD`, even though this ledger
+records the session as wound down and retired (per `conventions/resume-and-handoff.md`, an
+entry is only "fully resolved" once `status=retired` **and** the ledger carries this
+`## Verified` marker). This `## Verified` marker is being added now, but the `status=active`
+line in `STATE.md` was left unfixed by this verification pass — per the ledger-capture
+contract, this session's mandate is to verify and flag, not to edit `STATE.md`'s Session log
+on another session's behalf. Someone still needs to flip that line to `status=retired`.
