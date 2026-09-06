@@ -99,8 +99,59 @@ Continues: .session/2026-09-06-single-analyzer-2.md
   reading anything else, then proceed exactly as originally scoped. Told it to disregard the
   first coder's blocker message on `Out:` once it confirms proper pinning.
 
+## Coder launch #2 — also failed (different mode)
+- Relaunch #2 (agentId `a64b37115d72e7617`, no `isolation`, instructed to
+  `EnterWorktree(path=coder-ct6-fix)` as first action) also failed: `EnterWorktree` reported
+  success and Read confirmed the right files were visible, but Bash was hard-bound to a THIRD
+  location — this session's own pinned worktree (`worktrees/single-analyzer`) — and refused
+  every command there. Zero edits made; held for guidance correctly, same as launch #1.
+- **Root cause, confirmed:** a non-isolated background `Agent` spawned from a session that is
+  itself pinned via `EnterWorktree` inherits the *parent's* worktree pin at the Bash level.
+  `EnterWorktree(path=...)` called from inside such a subagent can only relocate file-tool
+  (Read/Write/Edit) views, never the Bash sandbox — confirmed by both launch #1 (Bash pinned to
+  an unrelated ad-hoc isolation worktree) and launch #2 (Bash pinned to the parent's own
+  worktree). There is currently no way to hand a pre-existing worktree to a subagent (isolated
+  or not) and have its Bash actually operate there.
+
+## User-directed pivot (2026-09-06)
+User instructions: stop all background agents; clean up the failed worktree; defer "spawn a
+subagent inside an already-prepared worktree" to later; going forward — mission owner prepares
+a fresh branch with the desired starting state, coder runs in its own fresh `isolation:"worktree"`
+sandbox and resets (`git reset --hard <sha>`) to that specific commit on startup, works from
+there (same branch if possible, else a new one), mission owner cherry-picks when done.
+
+Actions taken:
+- Stopped all 3 background agents (both coder attempts had already self-terminated after
+  reporting their blockers; explicitly stopped the reviewer, agentId `afbdfce86906f236f`).
+- Removed the failed `coder-ct6-fix` worktree (`git worktree remove`, no real work existed
+  there — only the task-file bootstrap commit `206da91e`) and deleted the branch (`git branch
+  -D`, confirmed with user first since it's a force-delete of an unmerged branch).
+- Discovered the outstanding CT6 *compile* fix was still present, uncommitted, in THIS worktree
+  (`worktrees/single-analyzer`) the whole time — confirmed `go build ./...` / `go vet ./...`
+  clean, committed it directly here as `18f4d4ff` (normal git write on my own branch, not a
+  cross-worktree operation). This fully resolves the "CT6 does not compile" Known Issue
+  independently of any coder dispatch — the coder no longer needs to touch this part at all.
+- Removed the now-redundant `.session/coder-ct-fix/` scratch diff artifacts (superseded by the
+  committed fix; untracked files I created this session, safe to clean up).
+- Created branch `coder2-ct6-fix` at `18f4d4ff` (unused in the end — see below, went with
+  inlining the task in the launch prompt instead of writing a task file onto a branch).
+- **Launched coder v3** (agentId `acc4742a2f2a1aceb`, `isolation:"worktree"` — real Bash in a
+  fresh ad-hoc worktree, exactly as confirmed working in launch #1's diagnostic) with the full
+  task spec (field-by-field table, limits, done criteria) inlined directly in the launch prompt
+  instead of as a task file it would need to read from a worktree it can't reach. First
+  instructed action: `git reset --hard 18f4d4ff`, then `git checkout -b coder-ct6-fix-v3`, then
+  proceed. This sidesteps the write-boundary problem entirely — nothing needs to be written into
+  any coder worktree by the mission owner at all.
+- Did not relaunch the reviewer yet — nothing to review until the coder produces commits;
+  will launch once the coder reports progress or completion.
+
 ## Open / next
-- Waiting on coder (relaunch) + reviewer background completion notifications.
-- After coder reports DONE and reviewer posts Pass: mission owner integrates via cherry-pick
-  onto `single-analyzer` (per coder-orchestration.md rule 10 — never merge coder worktree
-  directly). Then revisit CT4 scoping and next-PR boundary with user.
+- Waiting on coder v3 (agentId `acc4742a2f2a1aceb`) background completion/progress.
+- Launch reviewer once coder v3 has commits to review.
+- After coder reports done and review passes: mission owner cherry-picks the relevant commits
+  from the coder's resulting branch onto `single-analyzer` (per coder-orchestration.md rule 10
+  — never merge coder worktree directly).
+- Outstanding, unrelated to the coder dispatch: `origin/single-analyzer` still doesn't build
+  (compile fix is local-only, commit `18f4d4ff` not pushed) — needs a push at some point, with
+  per-op authorization.
+- After CT6 correctness fix lands: revisit CT4 scoping and next-PR boundary with user.
