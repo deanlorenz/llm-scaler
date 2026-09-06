@@ -56,18 +56,21 @@
 
 **Last completed:** CT6 — Normalize sat→composite to coverage units (commit `f20e06f9`, 2026-09-01)
 
-**Next step / resume point:** Implement the CT6 correctness-bug fix — design is CONFIRMED (see
-Known issues + `.session/spec.md` CT6 section, "Fix design — CONFIRMED 2026-09-06"), not yet
-implemented. User explicitly said not to implement in the 2026-09-06-single-analyzer-2 session
-that confirmed it — implementation is the next session's work. Order: (1) implement the
-extended `normalizeToCompositeUnits` (all fields in the confirmed table) + new `SatRoleDemand`
-field + the normalized-composite log line, (2) fix/extend the existing CT6 unit tests, (3) add
-a new end-to-end test exercising the real `buildNamedResult` → `normalizeToCompositeUnits` →
-`initRoleState`/optimizer path with nonzero demand (closes the coverage gap that let the bug
-through), (4) separately, commit the still-outstanding CT6 *compile* fix (6 test-file call
-sites + the `multi_backup` move) — needed regardless, blocks the next PR. Then decide whether
-CT4's fairness fix is in scope for the next PR, and finalize the next PR's exact boundary (see
-PR history below) — confirm with user before executing.
+**Next step / resume point:** CT6 correctness-bug fix dispatched to a coder (2026-09-06). Coder
+worktree: `.claude/worktrees/coder-ct6-fix` (branch `coder-ct6-fix`, forked from `single-analyzer`
+at `f5a5d687`). Task file: `.claude/worktrees/coder-ct6-fix/.session/STATE.md` (committed
+`206da91e`). Channels: In=`mission.single-analyzer.coder-ct6-fix.in`,
+Out=`mission.single-analyzer.coder-ct6-fix.out` (mission owner subscribed to Out). Task covers
+all 4 parts in one branch: (1) the outstanding CT6 *compile* fix (diff + new file staged in the
+coder's own `.session/`, applied as its own first commit), (2) extended
+`normalizeToCompositeUnits` (all fields in the confirmed table) + new `SatRoleDemand` field +
+normalized-composite log line, (3) fix/extend the existing CT6 unit tests, (4) new end-to-end
+test exercising the real `buildNamedResult` → `normalizeToCompositeUnits` →
+`initRoleState`/optimizer path with nonzero demand. A reviewer will read commits from
+`coder-ct6-fix` as they land. Mission owner integrates the reviewed result onto `single-analyzer`
+via cherry-pick once approved — do not merge the coder worktree directly. After that: decide
+whether CT4's fairness fix is in scope for the next PR, and finalize the next PR's exact
+boundary (see PR history below) — confirm with user before executing.
 
 ### PR history
 
