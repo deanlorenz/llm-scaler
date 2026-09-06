@@ -53,13 +53,34 @@ PR #2 (engine-side reduce). Confirm with user before executing.
 
 ### Status
 
-- PR #34 open at upstream (https://github.com/ev-shindin/llm-scaler/pull/34), marked ready for
-  review 2026-09-01. CI fully green. Awaiting upstream review.
+- **PR #34 MERGED 2026-09-02** (https://github.com/ev-shindin/llm-scaler/pull/34, merge commit
+  `347de1a9`). Contains only CT1a (`1a0c23be`) + CT2 (`113fec1d`) — corrects prior stale note
+  that said "open, awaiting review."
+- CT3b, CT5, the s7 stale-args fix (`b067642a`), and CT6 are pushed to `origin/single-analyzer`
+  (deanlorenz/llm-scaler fork, tip `d90bd565`) but not yet cut into a PR branch or opened as a
+  PR. This is the next PR's payload — see Known issues for a blocker before it can go out.
 - CT4 blocked on user decision.
 - CT1b deferred to future PR.
 
 ### Known issues
 
+- **CT6 does not compile as pushed.** Commit `f20e06f9` changed
+  `runAnalyzersAndScore`'s return type from `allocation.NamedAnalyzerResult` to
+  `[]allocation.NamedAnalyzerResult` and removed `composeAnalyzerResults`/`rawAnalyzerResult`,
+  but never updated 6 test-file call sites that still treat the return value as a single
+  struct (e.g. `result.Name` on a slice — a Go compile error). The fix has existed only as
+  uncommitted working-tree changes in `worktrees/single-analyzer` since 2026-08-31 — verified
+  via `go build ./...` / `go vet` passing only with the fix applied. `origin/single-analyzer`
+  (tip `d90bd565`) carries `f20e06f9` without this fix, so **origin's HEAD does not build
+  either.** Needs a commit before any further PR work. The uncommitted fix also moved
+  `engine_v2_compose_test.go` → `internal/engines/allocation/multi_backup/` (`//go:build
+  ignore`) since it tested the now-deleted `composeAnalyzerResults` — matches the existing
+  multi_backup pattern for pre-CT3b originals kept for PR #2 reference.
+- **PR #2 design doc exists but has 4 open questions.** Untracked
+  `docs/plans/analyzers/compose-reduce-design-2026-08-30.md` designs the engine-side reduce
+  (implied-replica-count max, sat-only fast path, floor invariant). Q1 (per-variant TotalDemand
+  consistency), Q2 (RoleDemand when a non-sat analyzer doesn't emit one), Q3 (composite name vs
+  `isSaturationResult` check), Q4 (composite Score) are unresolved — block writing PR #2 code.
 - **CT4 fairness:** `fairShareValue` equalizes absolute remaining demand, not coverage ratio.
   Fix-now vs. document-and-defer is the user's call. See spec CT4 section and
   `worktrees/session-tracking/missions/single-analyzer/fairshare-value-correctness-investigation-2026-08-25.md`.
@@ -67,6 +88,10 @@ PR #2 (engine-side reduce). Confirm with user before executing.
   PRC; longer-term fix tracked in spec rescale-fairness section (separate CT).
 - **`spec.md.wip`** has a stale `.wip` suffix — it is the active spec; rename to `spec.md`
   when next editing it.
+- **Untracked docs/plans/analyzers files** (2026-08-30): `compose-reduce-design-2026-08-30.md`
+  plus 5 call-map/call-stack research docs (`engine-call-map`, `engine-call-stack`,
+  `optimizer-call-map`, `optimizer-call-stack`, `single-analyzer-call-map`) — never committed.
+  Correctly placed per AGENTS.md's `docs/plans/<area>/` convention; just uncommitted.
 
 ## Key decisions (for resuming context)
 
@@ -107,3 +132,4 @@ PR #2 (engine-side reduce). Confirm with user before executing.
 - 2026-08-31T00:00 session=2026-08-31-s7 status=retired ledger=.session/2026-08-31-s7.md
 - 2026-09-01 session=2026-09-01-s8 status=retired ledger=.session/2026-09-01-s8.md
 - 2026-09-06 session=2026-09-06-single-analyzer-1 status=retired ledger=.session/2026-09-06-single-analyzer-1.md
+- 2026-09-06T12:00 session=2026-09-06-single-analyzer-2 status=active ledger=.session/2026-09-06-single-analyzer-2.md
