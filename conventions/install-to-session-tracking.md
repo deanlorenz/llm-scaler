@@ -17,6 +17,7 @@ Everything on the `policy-writer` branch **except**:
 - `.session/` — mission-internal; never leaves the mission branch
 - `.claude/` — policy-writer's local symlinks and config; not for production
 - `.git*` files
+- `conventions/*.bak` — policy-writer working copies; not for production
 
 The install is **not** file-by-file selection. It is a full sync of all non-excluded paths.
 
@@ -57,6 +58,9 @@ cd worktrees/session-tracking
 
 # Install conventions and CONVENTIONS.md
 git checkout policy-writer -- CONVENTIONS.md conventions/
+# Remove .bak files that came across from policy-writer working copies
+git rm --cached conventions/*.bak 2>/dev/null || true
+rm -f conventions/*.bak
 
 # Install skills
 git checkout policy-writer -- claude-skills/
