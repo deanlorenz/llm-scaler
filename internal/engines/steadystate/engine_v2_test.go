@@ -397,10 +397,9 @@ var _ = Describe("runAnalyzersAndScore call ordering", func() {
 			},
 		}
 
-		result, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
+		results, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
 		Expect(err).NotTo(HaveOccurred())
-		// composeAnalyzerResults reduces saturation + throughput + slo to one entry
-		Expect(result.Name).NotTo(BeEmpty())
+		Expect(results).NotTo(BeEmpty())
 		Expect(ta.callCount).To(Equal(1))
 		Expect(slo.callCount).To(Equal(1))
 		// saturationV2Analyzer is called via runV2AnalysisOnly, not the loop;
@@ -437,10 +436,10 @@ var _ = Describe("runAnalyzersAndScore saturation-nil guard", func() {
 			},
 		}
 
-		result, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
+		results, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("saturation analyzer produced no result for model m"))
-		Expect(result).To(Equal(allocation.NamedAnalyzerResult{}))
+		Expect(results).To(BeNil())
 		Expect(spy.callCount).To(Equal(0), "the guard must return before any non-saturation analyzer runs")
 	})
 })
@@ -470,9 +469,9 @@ var _ = Describe("runAnalyzersAndScore disabled-analyzer gate", func() {
 			},
 		}
 
-		result, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
+		results, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(result.Name).To(Equal(domain.SaturationAnalyzerName), "only saturation entry — disabled spy must not be composed in")
+		Expect(namedByName(results)).To(HaveKey(domain.SaturationAnalyzerName), "only saturation entry — disabled spy must not appear")
 		Expect(spy.callCount).To(Equal(0), "Analyze must not be called for a disabled analyzer")
 	})
 })

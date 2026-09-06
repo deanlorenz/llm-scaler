@@ -81,14 +81,14 @@ func demandWarnings(logs *observer.ObservedLogs) []observer.LoggedEntry {
 // Case 1: supply informative + demand > 0 every cycle → demand latch keeps
 // pace, no warning.
 func TestDetectDemandLiveness_HealthyNoWarn(t *testing.T) {
-	t.Skip("composeAnalyzerResults now silently drops non-saturation analyzers (WIP single-analyzer refactor); rewrite once the multi-analyzer story is redesigned")
+	t.Skip("WIP single-analyzer refactor: throughput analyzer results not yet forwarded to optimizer; rewrite once the multi-analyzer story is redesigned")
 	ctx, logs := zapObserverCtx(t)
 	e := demandLivenessEngine(informativeSat(), throughputAnalyzer(1000))
 
-	result, err := e.runAnalyzersAndScore(ctx, "m", "ns", nil, enabledThroughputCfg, nil, nil, nil, nil, nil, 0)
+	results, err := e.runAnalyzersAndScore(ctx, "m", "ns", nil, enabledThroughputCfg, nil, nil, nil, nil, nil, 0)
 	require.NoError(t, err)
 
-	assert.True(t, namedByName([]allocation.NamedAnalyzerResult{result})[throughput.AnalyzerName].Live, "fresh throughput supply must be live")
+	assert.True(t, namedByName(results)[throughput.AnalyzerName].Live, "fresh throughput supply must be live")
 	assert.Empty(t, demandWarnings(logs), "demand keeping pace must not warn")
 }
 
@@ -97,7 +97,7 @@ func TestDetectDemandLiveness_HealthyNoWarn(t *testing.T) {
 // throughput stays live (its supply is fresh), proving the warning is pure
 // telemetry and did not veto anything.
 func TestDetectDemandLiveness_SupplyLiveDemandStaleWarns(t *testing.T) {
-	t.Skip("composeAnalyzerResults now silently drops non-saturation analyzers (WIP single-analyzer refactor); rewrite once the multi-analyzer story is redesigned")
+	t.Skip("WIP single-analyzer refactor: throughput analyzer results not yet forwarded to optimizer; rewrite once the multi-analyzer story is redesigned")
 	ctx, logs := zapObserverCtx(t)
 	e := demandLivenessEngine(informativeSat(), throughputAnalyzer(0))
 
@@ -109,14 +109,14 @@ func TestDetectDemandLiveness_SupplyLiveDemandStaleWarns(t *testing.T) {
 		modelKey: {demandKey: time.Now().Add(-95 * time.Second)},
 	}
 
-	result, err := e.runAnalyzersAndScore(ctx, "m", "ns", nil, enabledThroughputCfg, nil, nil, nil, nil, nil, 0)
+	results, err := e.runAnalyzersAndScore(ctx, "m", "ns", nil, enabledThroughputCfg, nil, nil, nil, nil, nil, 0)
 	require.NoError(t, err)
 
 	warns := demandWarnings(logs)
 	require.Len(t, warns, 1, "live supply with stale demand must warn exactly once")
 	assert.Equal(t, throughput.AnalyzerName, warns[0].ContextMap()["analyzer"])
 
-	assert.True(t, namedByName([]allocation.NamedAnalyzerResult{result})[throughput.AnalyzerName].Live,
+	assert.True(t, namedByName(results)[throughput.AnalyzerName].Live,
 		"demand warning must not flip throughput Live — it is telemetry only")
 }
 
@@ -124,15 +124,15 @@ func TestDetectDemandLiveness_SupplyLiveDemandStaleWarns(t *testing.T) {
 // only → no warn, because the demand latch is seeded to the current supply
 // timestamp so the gap is still 0 (< threshold).
 func TestDetectDemandLiveness_ColdStartNoWarn(t *testing.T) {
-	t.Skip("composeAnalyzerResults now silently drops non-saturation analyzers (WIP single-analyzer refactor); rewrite once the multi-analyzer story is redesigned")
+	t.Skip("WIP single-analyzer refactor: throughput analyzer results not yet forwarded to optimizer; rewrite once the multi-analyzer story is redesigned")
 	ctx, logs := zapObserverCtx(t)
 	e := demandLivenessEngine(informativeSat(), throughputAnalyzer(0)) // fresh engine, no pre-seed
 
-	result, err := e.runAnalyzersAndScore(ctx, "m", "ns", nil, enabledThroughputCfg, nil, nil, nil, nil, nil, 0)
+	results, err := e.runAnalyzersAndScore(ctx, "m", "ns", nil, enabledThroughputCfg, nil, nil, nil, nil, nil, 0)
 	require.NoError(t, err)
 
 	assert.Empty(t, demandWarnings(logs), "cold start (demand absent one cycle) must not warn")
-	assert.True(t, namedByName([]allocation.NamedAnalyzerResult{result})[throughput.AnalyzerName].Live)
+	assert.True(t, namedByName(results)[throughput.AnalyzerName].Live)
 }
 
 // The synthetic demand key must never make an analyzer live: the Live/veto path
