@@ -14,7 +14,8 @@ Fix and complete the benchmark run pipeline so that:
 
 Core run pipeline is working (harness, SO management, results copy, patches all fixed and
 committed). The remaining gap is Prometheus scraping — both known bugs are still unpatched
-on disk despite being documented as "externally fixed" in the bench-runtools3 handoff.
+on disk. `.session/` layout migrated to worktree root (bench-runtools5). Branch pushed to
+origin (deanlorenz/llm-scaler).
 
 ### Committed and working (branch: benchmark-runtools)
 - `run_scenario.sh`: SO unpause/pause, HPA wait, results copy, harness field strip, `|| true`
@@ -88,4 +89,4 @@ After that:
 - 2026-09-01 session=bench-runtools2 status=retired ledger=missions/benchmark-runtools/ledgers/bench-runtools2.md
 - 2026-09-01 session=bench-runtools3 status=retired ledger=missions/benchmark-runtools/ledgers/bench-runtools3.md
 - 2026-09-01 session=bench-runtools4 status=retired ledger=missions/benchmark-runtools/ledgers/bench-runtools4.md
-- 2026-09-06 session=bench-runtools5 status=active ledger=.session/bench-runtools5.md
+- 2026-09-06 session=bench-runtools5 status=retired ledger=.session/bench-runtools5.md
