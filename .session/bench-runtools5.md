@@ -33,3 +33,14 @@ skill procedure:
 
 - Bug 1: hack/benchmark/bench_init.sh:153 — hardcoded SVC URL
 - Bug 2: hack/benchmark/scrape_prometheus_range.sh:127 — kubectl whoami -t
+
+## Verified 2026-09-06 — all points already captured
+
+| Ledger point | Durable destination | Action taken |
+|---|---|---|
+| `.session/` directory created at worktree root | `.session/STATE.md` § Current status | None needed |
+| `STATE.md` migrated from session-tracking | `.session/STATE.md` § Current status | None needed |
+| `bench-runtools4.md` migrated from session-tracking | `.session/STATE.md` § Session log | None needed |
+| `STATE.md` updated: bench-runtools5 session log entry added | `.session/STATE.md` § Session log (line 92) | None needed |
+| Bug 1: `bench_init.sh:153` hardcoded SVC URL | `.session/STATE.md` § Open: Prometheus scraping — Bug 1 | None needed |
+| Bug 2: `scrape_prometheus_range.sh:127` kubectl whoami -t | `.session/STATE.md` § Open: Prometheus scraping — Bug 2 | None needed |
