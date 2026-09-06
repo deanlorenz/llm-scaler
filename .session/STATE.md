@@ -11,7 +11,7 @@
 - **Worktree:** `worktrees/agentbus` (branch `agentbus`)
 - **Role / scope:** Mission owner. Owns STATE, plan, branch, and integration decisions.
   Commit freely; push only on explicit per-operation user approval.
-- **Ledger / log:** `.session/2026-09-03-agentbus3.md`
+- **Ledger / log:** `.session/2026-09-06-agentbus4.md`
   ⚠ DO NOT READ — not yours; new session creates its own ledger
 
 ## Task
