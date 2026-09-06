@@ -108,42 +108,42 @@ wrong by roughly `1/PRC_fraction` for any model with real, nonzero demand. Full 
 including why no existing test catches it, is in `.session/spec.md`'s CT6 section
 ("Correctness bug found 2026-09-06").
 
-### Candidate fixes — a real tradeoff, not yet decided
+### Fix design — CONFIRMED 2026-09-06, not yet implemented
 
-**Option A — divide `RequiredCapacity`/`SpareCapacity`/`Remaining`/`Spare`/per-role
-equivalents by the same `demand` already used for the `PerReplicaCapacity` division, inside
-`normalizeToCompositeUnits`.** Mathematically sound (verified: `ceil((RC_raw/D) /
-(PRC_raw/D)) == ceil(RC_raw/PRC_raw)`) and minimal — same function, same place, extends the
-existing pattern. **But:** `cost_aware_optimizer.go:303-311` reads these exact fields
-(`satNamed.RequiredCapacity`/`.SpareCapacity`/`.RoleCapacities[role]`) directly into
-`decision.RequiredCapacity`/`.SpareCapacity` — the source of the `wva_required_capacity`/
-`wva_spare_capacity` observability gauges. This fix would turn those gauges from meaningful
-token/capacity counts into unit-less coverage fractions (e.g. `0.43` instead of `3411.76`) —
-correct internally, but a real behavior change to what operators see on dashboards.
+Went with Option A (divide the existing fields by demand, in `normalizeToCompositeUnits`
+itself), extended to *every* field the struct's own documented invariants imply should move
+together — not just the ones with a currently-visible bug. Confirmed acceptable: the
+`wva_required_capacity`/`wva_spare_capacity` gauges becoming coverage fractions for the
+*composite* is correct — that's the right representation for a normalized signal. Each
+analyzer's own metric (`wva_analyzer_demand`/`wva_analyzer_target`, from the raw
+pre-normalization `namedResults`) stays in that analyzer's own units, untouched — the two
+metric families are distinct, so no information is lost.
 
-**Option B — add coverage-space fields alongside the existing raw ones** (e.g.
-`RequiredCapacityCoverage`/`SpareCapacityCoverage` on `NamedAnalyzerResult`, and a per-role
-equivalent), leaving `RequiredCapacity`/`SpareCapacity`/`Remaining`/`Spare` untouched for
-metrics compatibility. Update `initRoleState` (the *only* place that reads these fields
-directly into `pickerState`/`Remaining` — everything downstream operates on `pickerState`/
-`RoleSpare`, not the struct fields again) to read the new coverage fields instead. Touches
-`optimizer_interfaces.go` (new field), `internal/domain/analyzer.go` (new field on
-`RoleCapacity`), `engine_v2.go` (`normalizeToCompositeUnits` populates the new fields), and
-`analyzer_helpers.go` (`initRoleState`'s read). Keeps metrics semantics unchanged; more
-surgical about scope but touches 4 files instead of 1.
+Full field-by-field disposition (verified via exhaustive grep of every read site across
+`internal/engines`, not just where a bug happened to be visible) is in `.session/spec.md`'s
+CT6 section, "Fix design — CONFIRMED 2026-09-06" table. Summary: `PerReplicaCapacity`,
+`TotalDemand`, `RoleDemand`, `RequiredCapacity`, `SpareCapacity`, `Remaining`, `Spare`,
+`RoleCapacities[role].{RequiredCapacity,SpareCapacity,TotalDemand}`, `TotalSupply`,
+`TotalAnticipatedSupply` (model + per-role), and `Utilization` (recomputed) all get
+normalized; `Name`/`Score`/thresholds/`Live`/`RoleSpare` don't. New field: `SatRoleDemand
+map[string]float64` on `NamedAnalyzerResult`, mirroring `SatDemand` for the per-role case.
 
-**Option C — reorder the pipeline**: run the coverage conversion on the raw `Result` (before
-`buildNamedResult`/`buildCapacities` ever runs on the composite candidate), so
-`TotalSupply`/`TotalAnticipatedSupply`/`RequiredCapacity`/`SpareCapacity` all get computed
-*once*, already consistent, from normalized inputs. Cleanest conceptually — no duplicate
-computation — but changes `wva_required_capacity`/`wva_spare_capacity`/
-`wva_saturation_utilization` the same way Option A does (they'd end up in coverage-fraction
-units too), and is a bigger structural change to `runAnalyzersAndScore`'s already-fragile loop
-(the same loop the compile-fix gap above is patching).
+**Note:** `Utilization` is probably just "coverage" under a different name — not changing its
+semantics now, just recomputing it consistently; revisit if/when CT7 applies the semantic
+framework more broadly.
 
-**Not yet decided which to take.** Needs the user's call on whether the observability-metrics
-behavior change (Option A/C) is acceptable, or whether the extra-field approach (Option B) is
-worth the wider file touch to preserve it.
+**(5) confirmed as part of this fix:** add a log line (and/or metric) in
+`collectV2ModelRequest`, right after `normalizeToCompositeUnits` runs, covering the full
+normalized composite — currently nothing observes the actual signal the optimizer receives.
+
+**TODO for later, explicitly not in this fix or in CT7:** revisit whether "model-level,
+non-role" fields should exist at all as a parallel representation to the per-role ones —
+every real consumer already treats the non-disaggregated case as `role="both"`. Intuition:
+require `role="both"` explicitly and make every SO-level computation go through
+`RoleCapacities`/per-role access uniformly, eliminating the separate model-level fields. The
+one exception that stays role-aware regardless: combining coverage *across* SOs of the same
+model differs between `"both"` and other roles (same-role adds, cross-role is
+`min(prefill,decode) + both`). Noted in `.session/spec.md`'s CT6 section so it isn't lost.
 
 ## Explicitly not in this PR
 

@@ -930,15 +930,56 @@ and `namedResults[0].RoleCapacities[role].TotalDemand` all get mutated too, not 
 executes), but it's a fragile pattern worth a comment or an explicit deep-copy if this code
 is touched again.
 
-**Fix has a real design tradeoff, not yet decided.** `RequiredCapacity`/`SpareCapacity` (via
-`satNamed.RequiredCapacity`/`.SpareCapacity`/`.RoleCapacities[role]`) are also read directly by
-`cost_aware_optimizer.go:303-311` into `decision.RequiredCapacity`/`.SpareCapacity` — the
-source for the `wva_required_capacity`/`wva_spare_capacity` observability gauges. Naively
-extending `normalizeToCompositeUnits` to divide these same fields by demand (mirroring the
-`PerReplicaCapacity` fix) would correctly fix `initRoleState`'s replica math, but would *also*
-turn those two gauges from meaningful token/capacity counts into unit-less coverage fractions
-— a real behavior change to observability output, not just an internal fix. See
-`.session/pr-spec-next-coverage-units.md` for the candidate fix approaches and the tradeoff.
+**Fix design — CONFIRMED 2026-09-06, not yet implemented.** Resolution of the observability
+tradeoff: `wva_required_capacity`/`wva_spare_capacity` are allowed to become coverage
+fractions/percentages for the *composite* — that's the correct representation for a
+normalized signal. Each individual analyzer's own metric (`wva_analyzer_demand`/
+`wva_analyzer_target`, emitted by `recordAnalyzerMetrics` on the raw, pre-normalization
+`namedResults`) already reports in that analyzer's own units and is untouched by this change
+— the two metric families are distinct, so no information is lost. Decided against Options
+B/C (see prior revision of this section, or `.session/pr-spec-next-coverage-units.md`'s
+history) in favor of extending Option A to *every* field the struct's own documented
+invariants imply should move together, not just the ones with a currently-visible bug.
+
+Verified exhaustively (grep across the whole `internal/engines` tree, every read site, not
+just where a bug happened to be visible) which fields are live post-normalization consumers
+vs. dead by that point:
+
+| Field | Action | Why |
+|---|---|---|
+| `Result.VariantCapacities[].PerReplicaCapacity` | ÷ `demandForRole(role)` | existing |
+| `Result.TotalDemand`, `Result.RoleDemand[role]` | → `1.0` | existing |
+| `SatDemand` | capture raw `TotalDemand` | existing |
+| `SatRoleDemand map[string]float64` (**new field** on `NamedAnalyzerResult`) | capture raw `RoleDemand` map before overwrite | so raw per-role demand can be reconstructed from the normalized composite if ever needed, matching `SatDemand`'s existing role for the model-level scalar |
+| `RequiredCapacity`, `SpareCapacity`, `Remaining`, `Spare` | ÷ model demand | live consumers: `initRoleState`'s non-disaggregated branch, `cost_aware_optimizer.go`'s decision-building default. Verified these are read **only** in the non-disaggregated case — every consumer branches to the per-role values instead whenever `RoleCapacities` is populated, so model demand is unambiguous here (it equals the single role's own demand when there's only one role) |
+| `RoleCapacities[role].RequiredCapacity`, `.SpareCapacity` | ÷ `demandForRole(role)` | live consumers: `initRoleState`'s disaggregated branch, `cost_aware_optimizer.go`'s decision-building preferred branch |
+| `RoleCapacities[role].TotalDemand` | → `1.0` | existing |
+| `TotalSupply`, `TotalAnticipatedSupply` (model-level and per-role) | ÷ demand (model or role) | **no live consumer found after this point** (every read is inside `buildCapacities`/`applyUniversalThreshold`/`buildRoleCapacities`/`logAnalyzerResult`, all of which complete before normalization runs) — normalized anyway, not because a bug is visible, but to keep the struct's own documented invariant (`TotalSupply = Σ replicas × PerReplicaCapacity`) true for whoever reads it next |
+| `Utilization` (model-level) | recompute from normalized `TotalDemand`/`TotalSupply` | algebraically identical to the pre-normalization value (dividing both operands of a ratio by the same constant doesn't change it) — recomputed rather than left as a stale copy, for the same "don't leave a landmine" reasoning as `TotalSupply` above. **Note (2026-09-06): `Utilization` is probably just "coverage" under a different name — not changing anything now, revisit when CT7's semantic framework gets applied more broadly.** |
+| `Name`, `Score`, `ScaleUpThreshold`, `ScaleDownBoundary`, `Live`, `RoleSpare` | untouched | dimensionless, or (`RoleSpare`) not yet populated at this point — set later by `initRoleState` |
+
+**(5) Logging the normalized composite itself — confirmed, part of this fix.** Per-analyzer
+raw logging/metrics (`recordAnalyzerMetrics`/`logAnalyzerResult`, inside `runAnalyzersAndScore`,
+before normalization) already work correctly today and are unaffected. But nothing anywhere
+logs or emits a metric for the actual *post-normalization* composite — the signal the
+optimizer receives is currently invisible. Add a log line (and/or metric) in
+`collectV2ModelRequest` right after `normalizeToCompositeUnits` runs, covering the full
+normalized composite (every field in the table above) — exactly the visibility that would
+have surfaced this bug sooner.
+
+**TODO for later (not this fix, not CT7 either — a separate future task):** the existence of
+"model-level, non-role" fields (`TotalDemand`, `RequiredCapacity`, `SpareCapacity`,
+`Remaining`, `Spare`, `TotalSupply`, `TotalAnticipatedSupply` outside `RoleCapacities`) as a
+*parallel* representation to the per-role ones is itself a design smell — every real consumer
+already branches on disaggregation and effectively treats the non-disaggregated case as
+`role="both"`. Intuition to revisit: require `role="both"` explicitly in the non-disaggregated
+case and make every SO-level computation always go through `RoleCapacities`/per-role access,
+eliminating the separate model-level fields as a distinct code path. The one genuine
+exception: combining coverage *across* SOs of the same model is **not** uniform between
+`"both"` and other roles — same-role SOs add (`C(M,R) = Σ C(SO)`), but cross-role combination
+is `min(C(M,prefill), C(M,decode)) + C(M,both)` (per the semantic framework above) — so that
+one step keeps a role-aware special case regardless. Not scoped into this fix or into CT7;
+noted here so it isn't lost.
 
 **Outstanding gap (found 2026-09-06, not yet fixed):** the same commit changed
 `runAnalyzersAndScore`'s return type from `allocation.NamedAnalyzerResult` to

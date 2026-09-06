@@ -104,9 +104,16 @@ and `.session/pr-spec-next-coverage-units.md`.
   model-scoped (set once from `Result.TotalDemand` before normalization) and its only consumer
   (`rescaleInputsForGroup`) uses it as a per-model scalar, never per-role; `roleDemandGPUs` is
   also fine (it reads `TotalDemand`/`rc.TotalDemand`, which normalization *does* correctly reset
-  to `1.0` in lockstep with `PerReplicaCapacity`). Fix has a real design tradeoff — see
-  `.session/pr-spec-next-coverage-units.md` "Correctness bug" section — not yet implemented,
-  awaiting a decision on the observability-metrics tradeoff.
+  to `1.0` in lockstep with `PerReplicaCapacity`). **Fix design CONFIRMED 2026-09-06** — full
+  field-by-field disposition (verified via exhaustive grep of every read site, not just the
+  ones with a visible bug) in `.session/spec.md`'s CT6 section and
+  `.session/pr-spec-next-coverage-units.md`. Not yet implemented. New field:
+  `SatRoleDemand map[string]float64`. Confirmed acceptable: `wva_required_capacity`/
+  `wva_spare_capacity` become coverage fractions for the composite (correct); per-analyzer
+  metrics stay in their own units (unaffected, different code path). Also confirmed: add
+  logging/metrics for the normalized composite itself (currently invisible). TODO noted for
+  later (not this fix): revisit whether model-level "non-role" fields should exist at all,
+  vs. requiring `role="both"` and always going through `RoleCapacities`.
 - **CT6 does not compile as pushed — blocks the next PR.** Commit `f20e06f9` changed
   `runAnalyzersAndScore`'s return type from `allocation.NamedAnalyzerResult` to
   `[]allocation.NamedAnalyzerResult` and removed `composeAnalyzerResults`/`rawAnalyzerResult`,
