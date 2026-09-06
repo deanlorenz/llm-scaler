@@ -6,6 +6,10 @@ The reviewer conducts internal code reviews of coder commits as they land, evalu
 
 ## Boundaries & Permissions
 - **Read-Only Code Access:** Reviewer is strictly read-only. Never modify code in the coder's worktree or mission worktree.
+- **Where you run** (depends on the coder's isolation pattern — see `conventions/worktree-delegation.md`):
+  - **Pattern A** (durable, visible worktree): run wherever the mission owner places you; read the coder's worktree/branch directly, and verify (`git status`/`diff`) it stayed in scope — this is the compensating check for A's missing sandbox.
+  - **Pattern B** (ephemeral worktree, durable branch): you must run inside the coder's *same* ephemeral worktree, not a separate one, while the branch remains checked out there. You cannot check out that branch anywhere else — git will refuse.
+  - **Pattern C** (shared worktree with parent, no isolation): read only already-committed history in the shared worktree — never the coder's uncommitted working-tree state while it is still active.
 - **Single Write Target:** The only file written is the designated review report file in the mission owner's `.session/` (e.g. `.session/review-<task-id>.md`).
 - **No Git / GitHub Writes:** Never push to git. Never interact with GitHub API (PRs, issues, comments).
 - **No Long Chat Output:** Never dump full review diffs or long text into chat. Write findings to the report file; return only a concise summary and pointer.
