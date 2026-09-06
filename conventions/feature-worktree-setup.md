@@ -6,8 +6,8 @@ is found missing in one.
 
 ## One-time setup per mission worktree
 
-**Create the `.session/` directory** — this is where `STATE.md`, ledgers, and internal plans
-live for this mission:
+**Create the `.session/` directory** — this is where `STATE.md` and active ledgers live. Captured
+retired ledgers live in `.session/ledger/`; internal plans may remain directly under `.session/`:
 
 ```bash
 mkdir -p worktrees/<mission-name>/.session
@@ -22,9 +22,11 @@ branch.
 code commits (not `.session/` commits) when creating a PR branch. See `conventions/pr-branch.md`
 for the pre-push check.
 
-**Skill symlinks.** Claude Code's project-skill discovery does not walk up past a git
-worktree's own root. Each worktree needs its own local symlink to these two skills before
-`/resume-mission` or `/wind-down` will show up there.
+**Skill links:**
+- Project-skill discovery does not walk above the worktree root.
+- Each worktree needs `.claude/skills/<name>/SKILL.md`.
+- Repository-root links are insufficient.
+- Links resolving outside `session-tracking/claude-skills/` are invalid.
 
 The skill source files live at `worktrees/session-tracking/claude-skills/` — this is
 tracked source storage for the canonical SKILL.md files, not an active skill directory.
@@ -49,12 +51,21 @@ so they never show up in `git status`:
 Note: `.git/info/exclude` is **not** per-worktree — it resolves to the main repo's `.git`,
 shared across every worktree of that repo.
 
-**Verify both** before proceeding:
+**Verify both:** run from the mission worktree root, not the repository root.
 
 ```bash
-cat .claude/skills/resume-mission/SKILL.md | head -3
+for skill in resume-mission wind-down; do
+  test -r ".claude/skills/$skill/SKILL.md" || { echo "BROKEN: $skill"; exit 1; }
+  printf '%s -> %s\n' "$skill" "$(readlink -f ".claude/skills/$skill/SKILL.md")"
+  head -3 ".claude/skills/$skill/SKILL.md"
+done
 ls .session/
 ```
+
+Rules:
+- Recreate links resolving to the repository root or another worktree.
+- Do not copy skills into mission worktrees.
+- Keep one canonical source in `session-tracking/claude-skills/`.
 
 ## If a session finds skills missing
 

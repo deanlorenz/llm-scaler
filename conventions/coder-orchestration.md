@@ -6,14 +6,17 @@ Read this before dispatching or running a coder agent.
 
 | Type | When to use |
 |---|---|
-| **Claude FW** (foreground subtask) | Task needs real-time steering or direct user visibility. Interactive; own context window. |
-| **Claude BG** (background subagent) | Self-contained task; only the result matters. Silent; attach to interact mid-task if needed. |
-| **Bob CLI coder** | Persistent context across multiple invocations needed, or Bob-specific mode required. Launched as a background OS process; communicates via agentbus. |
+| **Foreground worker** | Task needs real-time steering or direct user visibility. Interactive; own context; uses agentbus channels. |
+| **Background worker** | Self-contained task; only the result matters. Uses agentbus channels; may be silent in chat. |
+| **Persistent CLI worker** | Persistent context across multiple invocations is needed. Uses agentbus channels. |
 
 For design rationale and when each type is the right choice, see
 `worktrees/policy-writer/.session/spec-policy-writer.md` § T8.
 
-**To launch a Bob CLI coder,** prepare the coder's worktree and task file, then:
+**Before any launch:** assign `In:` and `Out:` agentbus channels. Put both channels and the
+subscription command in the task file and launch prompt.
+
+**To launch a Bob CLI coder from Claude,** prepare the coder's worktree and task file, then:
 
 ```bash
 nohup bob run --accept-license --workspace <worktree-path> --mode <mode> \
@@ -24,7 +27,7 @@ nohup bob run --accept-license --workspace <worktree-path> --mode <mode> \
 Record `--resume <task-id>` in the task file before launch. Losing it means the next
 invocation starts cold with no prior context.
 
-Bob is used as a background coder only for now; reviewer and researcher roles are deferred.
+The Bob CLI launch is an explicit exception to the otherwise tool-agnostic rules above.
 
 ## Rules
 
@@ -35,10 +38,9 @@ Bob is used as a background coder only for now; reviewer and researcher roles ar
 3. Each task gets a written task file before the worker starts (see the task file template below).
 4. Each task lands as its own commit — not batched, not squashed across tasks.
 5. **Coder isolation:** coders work in their own worktree.
-   - Claude FW/BG: launch with `isolation: "worktree"`. Tool-managed worktrees land under
-     `.claude/worktrees/agent-<id>` and are disposable. Record the path and the branch in the
-     mission `STATE.md` under "worktrees used" before the worker starts.
-   - Bob CLI: parent prepares a dedicated worktree/branch before launch. Pass the path in the
+   - Foreground/background workers: launch with worktree isolation. Record the path and branch in
+     mission STATE under "worktrees used" before the worker starts.
+   - Persistent CLI workers: parent prepares a dedicated worktree/branch. Pass the path in the
      task file.
    - When multiple coders run concurrently, isolated worktrees are mandatory. A single
      coder + reviewer may share the mission worktree if file/folder ownership boundaries are
@@ -47,12 +49,12 @@ Bob is used as a background coder only for now; reviewer and researcher roles ar
    alternatives considered) and a state file inside its worktree. These must remain recoverable
    via the branch even if the worktree is later deleted. They are not PR branches — keep
    `.session/` out of any PR.
-7. **Interaction:** coders are non-interactive by default. The user interacts through the mission
-   owner. Exceptions:
-   - Claude FW subtasks are inherently interactive; use them when that is wanted.
-   - A BG agent can be attached to for interactive work when mid-task guidance is needed.
-   - Bob CLI coders communicate via agentbus. The mission owner monitors the agentbus channel
-     for that coder's task; the coder posts status, findings, and questions there.
+7. **Agentbus interaction:** every worker uses agentbus. The parent provides `In:` and `Out:`
+channels in the task file and launch prompt. The worker subscribes to `In:` before starting and
+publishes status, findings, questions, and completion to `Out:`. Workers are non-interactive by
+ default. The user interacts through the mission owner. A foreground worker may be used when
+real-time steering is required. A background worker may be attached when mid-task guidance is
+needed.
 8. **Code reviewer:** the reviewer reads commits from the coder's branch as they land — it
    does not wait for all coding to finish. If the coder diverges from the task the reviewer
    notifies the mission owner immediately. Review output goes to a file in the mission owner's
@@ -77,9 +79,9 @@ Bob is used as a background coder only for now; reviewer and researcher roles ar
 
 ## Task file
 
-Every task gets a written task file before the worker starts. For Claude workers this is the
-input to the agent invocation. For Bob CLI workers it lives in the prepared worktree
-(e.g. `.session/task-<id>.md`) and is named in the launch command.
+Every task gets a written task file before the worker starts. The task file must include `In:` and
+`Out:` agentbus channels and the subscription command. Pass the task file to the worker. For a Bob
+CLI coder invoked from Claude, place it in the prepared worktree and name it in the launch command.
 
 The task file format and field rules are defined in `conventions/tasks.md`. The mission owner
 is responsible for preparing a complete task file before invoking any worker.

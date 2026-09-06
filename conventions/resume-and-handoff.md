@@ -4,13 +4,13 @@ Read this when executing `/resume-mission` or `/wind-down`, or when taking over 
 
 ## Session Log Lifecycle & Status Rules
 
-Every mission's `.session/STATE.md` maintains an append-only **Session log** section under `.wip` protocol (`conventions/wip-editing.md`):
+Every mission's `.session/STATE.md` maintains an append-only **Session log** section under `.wip` protocol (`conventions/wip-editing.md`). Active session ledgers live directly under `.session/`; after capture and retirement, move them to `.session/ledger/` and update the log path:
 
 ```markdown
 ## Session log
 
 - 2026-08-27 session=<slug> status=active ledger=.session/<slug>.md
-- 2026-08-27 session=<slug> status=retired ledger=.session/<slug>.md
+- 2026-08-27 session=<slug> status=retired ledger=.session/ledger/<slug>.md
 ```
 
 ### Status Values:
@@ -24,7 +24,7 @@ Used when `STATE.md` exists with an active session log entry — whether resumin
 
 1. **Ask user:** "Continuing `<slug>`?" — confirm which mission and session before proceeding.
 2. **Live Presence Check:** Check agentbus for a recent presence/heartbeat from the active slug. If still alive: stop, do not take over, ask the user.
-3. **Pending Scan:** Scan all Session log entries in `.session/STATE.md`. Any entry that is `active`, or `retired` without a `## Verified` marker in its ledger, is **pending**.
+3. **Pending Scan:** Scan all Session log entries in `.session/STATE.md`. Any entry that is `active`, or `retired` without a `## Verified` marker in its ledger, is **pending**. Captured retired ledgers must be under `.session/ledger/`.
 4. **Lock & Retire:** Under `.wip` protocol, update any unretired pending session to `status=retired`.
 5. **Run `ledger-capture`:** Execute `ledger-capture` in the foreground against that pending ledger to fold uncaptured findings into durable docs (`STATE.md` or internal plan).
 6. **Append Verification:** Confirm `## Verified <date>` is appended to the processed ledger.
@@ -60,10 +60,13 @@ Wind-down establishes a durable, recoverable checkpoint so work is preserved acr
 ## `ledger-capture` Contract
 
 A focused agent assigned to process exactly one ledger file:
-1. **Allowed Write Destinations:** The mission's own `.session/STATE.md` and its internal plan/spec doc only.
-2. **Prohibition:** `ledger-capture` must **never** write directly to `CONVENTIONS.md` or `conventions/`.
-3. **Global Findings (Suggestion Box):** Any finding that warrants a global rule must be written as an atomic file into `session-tracking/suggestion-box/` named `YYYY-MM-DD-HHMM-<mission-name>.md`. Only `policy-writer` processes suggestion-box entries.
-4. **Completion Marker & Summary Table:**
+1. **Agentbus:** Subscribe to the assigned `In:` channel before work and remain subscribed until exit.
+   Answer parent progress, clarification, and interim-result requests on `Out:` before continuing.
+   Publish status, findings, questions, and completion on `Out:`.
+2. **Allowed Write Destinations:** The mission's own `.session/STATE.md` and its internal plan/spec doc only.
+3. **Prohibition:** `ledger-capture` must **never** write directly to `CONVENTIONS.md` or `conventions/`.
+4. **Global Findings (Suggestion Box):** Any finding that warrants a global rule must be written as an atomic file into `session-tracking/suggestion-box/` named `YYYY-MM-DD-HHMM-<mission-name>.md`. Only `policy-writer` processes suggestion-box entries.
+5. **Completion Marker & Summary Table:**
    Append a verification marker to the end of the processed ledger, including a summary table of findings and actions taken:
    ```markdown
    ## Verified YYYY-MM-DD — <all points already captured | folded in: summary>

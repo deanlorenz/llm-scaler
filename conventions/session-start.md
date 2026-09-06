@@ -1,13 +1,18 @@
-# Starting a session
+ # Starting a session
 
 Read this at the start of every session, before any work.
 
 ## Reading rules — upfront
 
-Read at session start:
-- Your STATE file (or session STATE file if provided)
-- `CONVENTIONS.md` at the path in your STATE file
-- Any situational rules triggered by your role (listed in `CONVENTIONS.md` index)
+Read at session start, in this order:
+1. `CONVENTIONS.md` from the session-tracking worktree (the path recorded in the STATE file, or
+   the canonical tracking worktree when STATE cannot yet be read)
+2. This file, `conventions/session-start.md`
+3. Your STATE file (or session STATE file if provided)
+4. Any situational rules triggered by your role (listed in `CONVENTIONS.md` index)
+
+If the STATE path is missing or cannot be resolved, stop and report the missing prerequisite.
+Do not substitute the main repository's conventions or assume the mission from the current folder.
 
 **Never read at session start:**
 - Plan/spec docs (listed in STATE under `Plan/spec`) — pull on demand only
@@ -44,6 +49,7 @@ Then wait for the user to confirm before executing anything.
    ```
    - <date> session=<slug> status=active ledger=.session/<slug>.md
    ```
+   Move the ledger to `.session/ledger/<slug>.md` when it is captured and retired.
 5. Read any situational rules triggered by your role (listed in `CONVENTIONS.md` index).
 6. Present the opening orientation above and wait for the user to confirm.
 
