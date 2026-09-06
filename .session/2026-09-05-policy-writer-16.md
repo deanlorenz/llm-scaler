@@ -23,3 +23,10 @@ Next step: Revisit FG/BG analysis and workflow nuances across the 4-case model; 
 - [2026-09-05] wind-down safe-checkpoint/retirement split also lost and reconstructed. Step 2 reframed as safety-net pass; Step 5 runs as background agent in both modes.
 - [2026-09-05] Both skills installed to session-tracking via git checkout. Pushed policy-writer (36 commits) and session-tracking (6 commits) to origin.
 - [2026-09-05] Added resume-mission + wind-down symlinks to all worktrees missing them: Main, benchmark-extract, benchmark-init, benchmark-run, benchmark-runtools, benchmark-viz, benchmark-plan, fix-scaledobjects-cold-start. All symlinks verified resolving.
+
+## Verified 2026-09-06 — all points already captured
+
+| Ledger point | Durable destination | Action taken |
+|---|---|---|
+| Session 16 conventions and skill installation | `.session/STATE.md` and committed branch history | Already reflected in STATE and commits; no further action |
+| Session 16 pending next steps | `.session/STATE.md` task checklist and resume point | Already reflected; carried forward to session 17 |
