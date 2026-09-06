@@ -32,7 +32,7 @@ detail differs per role; fields do not. For field authoring guidance see `conven
 - **What / goal / mission:** <what this session or mission is for>
 - **Worktree:** `worktrees/<name>` (branch `<branch>`)
 - **Role / scope:** <role and authority boundary>
-- **Ledger / log:** `.session/<slug>.md`
+- **Ledger / log:** active `.session/<slug>.md`; captured retired `.session/ledger/<slug>.md`
   ⚠ DO NOT READ — not yours; new session creates its own ledger
 
 ## Task
@@ -65,5 +65,6 @@ user before executing; do not auto-run>
 <optional>
 
 ## Session log
-- <date> ledger=.session/<slug>.md status=<active|retired>
+- <date> ledger=.session/<slug>.md status=active
+- <date> ledger=.session/ledger/<slug>.md status=retired
 ```

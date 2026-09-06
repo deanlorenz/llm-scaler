@@ -21,6 +21,9 @@ to a field in that template.
 **Orientation fields** — fill these so the session can orient itself without reading anything
 else first:
 
+- **In:** child agentbus input channel. Required for every subagent.
+- **Out:** child agentbus output channel. Required for every subagent.
+
 - **Name:** session slug (e.g. `2026-09-03-coder-ct1`). Unique; sortable.
 - **Conventions:** always `worktrees/session-tracking/CONVENTIONS.md`. Do not change.
 - **What / goal / mission:** one or two sentences — what this session produces and why.
@@ -80,11 +83,15 @@ re-derive context from scratch.
 
 ## Delivery
 
-For Claude FW/BG workers: pass the STATE file path in the invocation message. The session
-reads it as its first action.
+Rules:
+- Include `In:` and `Out:` in every background invocation.
+- Include the input subscription command in the task file or launch prompt.
+- Do not launch a subagent without both channels.
 
-For Bob CLI workers: place the STATE file at `.session/<slug>.STATE.md` in the prepared
-worktree. Pass the path in the launch prompt.
+Pass the STATE file path in the invocation message. The session reads it as its first action.
+
+For a persistent CLI coder invoked from Claude, place the STATE file at
+`.session/<slug>.STATE.md` in the prepared worktree and pass the path in the launch prompt.
 
 The STATE file must be complete and committed before invocation. A session that starts with
 an incomplete STATE must ask the user before proceeding.

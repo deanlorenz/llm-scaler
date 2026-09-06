@@ -8,7 +8,10 @@ canonical `.claude/skills/` stored on the `session-tracking` branch.
 ## Responsibilities & Scope
 
 - Drafts all changes to conventions and skills in `worktrees/policy-writer`.
-- After verification and user approval, installs approved conventions and skills to `worktrees/session-tracking`.
+- After verification, tells the user which rule or skill files changed and asks whether to install them
+  in `worktrees/session-tracking`.
+- Installs only after the user explicitly authorizes that installation.
+- Approval to draft, review, commit, or push does not authorize installation.
 - Processes suggestions from `session-tracking/suggestion-box/`.
 - Commits convenience symlinks created by other missions under `session-tracking/missions/`.
 

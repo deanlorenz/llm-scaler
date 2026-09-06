@@ -1,25 +1,22 @@
 ---
 name: wind-down
-description: Wind down work on a mission — either a safe checkpoint (pause, stay active, no retirement) or a full retirement (end session, mark retired, release agentbus ownership). Steps 1–4 apply to both. Steps 5–7 apply only to full retirement. Always reports actual outcome. Follows conventions/resume-and-handoff.md. Invoke with /wind-down.
-disable-model-invocation: true
+description: Wind down work on a mission — safe checkpoint or full retirement. Supports explicit user invocation and agent invocation. Can run entirely in the background. Follows conventions/resume-and-handoff.md.
 ---
 
 <!-- user-approved-settings-change -->
 
 # Wind down
 
-This skill covers two modes. Determine which applies before starting:
-
-- **Safe checkpoint** — pausing mid-session (pre-compaction, break, handoff to next context
-  window). Session stays `active`. No retirement, no agentbus release.
-  Run Steps 1–5. Safe to run as a background subagent when possible.
-- **Full retirement** — genuinely ending this session's engagement on the mission (closing,
-  handing ownership to another session). Run all Steps 1–7.
-
-If the user's intent is unclear, ask before proceeding.
-
-Steps 1 and 3 are never skippable in either mode. Skipping the report at the end is never
-acceptable — always tell the user the actual outcome, including if something couldn't be done.
+Rules:
+- Accept `checkpoint` or `retire` as the mode.
+- If no mode is supplied, ask the user when running interactively.
+- If an agent invokes the skill without a user, use `checkpoint` unless the task explicitly says
+  to retire.
+- Safe checkpoint: keep the session `active`; do not release ownership; run Steps 1–5.
+- Full retirement: run Steps 1–7; retire the session and release ownership.
+- Steps 1 and 3 are mandatory in both modes.
+- Agent invocations may run all steps in the background without user interaction.
+- Record the outcome in the ledger and STATE; report to the parent agent when one exists.
 
 See `conventions/resume-and-handoff.md` for the ownership and ledger-capture contracts.
 
@@ -35,7 +32,7 @@ This step cannot be skipped — winding down mid-edit defeats the purpose.
 
 ## Step 2: Final pass over the session ledger
 
-The ledger at `<mission-worktree>/.session/<this-session-slug>.md` should have been
+The active ledger at `<mission-worktree>/.session/<this-session-slug>.md` should have been
 maintained throughout the session. This step is a safety-net pass — go back over this
 session's work and confirm everything is captured: findings, decisions, corrections, false
 starts. Append anything missing now.
@@ -62,28 +59,42 @@ The only part ledger-capture (Step 5) may still update afterward is findings it 
 the ledger text — that is what "skippable if out of time" applies to, not the continuation
 fields above.
 
-## Step 4: Commit uncommitted work and push
+## Step 4: Review and commit local work; never force a push
 
-Check `git status` in the mission worktree. Commit anything real (code, docs, ledger updates)
-that isn't already committed. Then push the mission branch to `origin`:
-
-```bash
-git push origin <mission-name>
-```
-
-This push durably persists the ledger, `STATE.md`, and any code — the `.session/` dir is
-tracked on the mission branch (excluded from PR branches, not from the mission branch itself).
-
-This step can simply fail to complete — the machine sleeps, the terminal closes, whatever —
-and that's not a problem: uncommitted work is still there next time or recoverable via git.
-Don't treat a failure here as blocking the rest of wind-down.
+Rules:
+- Run `git status --short` and inspect the diff.
+- Classify every changed and untracked path.
+- Commit real mission work, documentation, STATE, and this ledger.
+- Do not track credentials, generated output, scratch files, or excluded local artifacts.
+- List every untracked/excluded file in the ledger.
+- Do not discard unexplained changes; stop if ownership is unclear.
+- Identify mission versus PR/feature branch before committing.
+- Do not commit `.session/` on PR branches unless explicitly allowed.
+- Review the exact staged file list before committing.
+- Do not push automatically.
+- Push only after single-use user authorization and reading `conventions/push.md`.
+- Before an authorized push, inspect outgoing commits and the remote destination.
 
 ## Step 5: Run ledger-capture on this session's own ledger
 
-Launch ledger-capture as a **background agent** against this session's ledger file at
-`<mission-worktree>/.session/<slug>.md`. Ledger-capture confirms every point in the ledger
-is reflected somewhere durable and appends `## Verified <date>` when done. Only after it
-completes may STATE.md be updated with its findings or references to them.
+Launch ledger-capture as a **background agent** against this session's active ledger file at
+`<mission-worktree>/.session/<slug>.md`. After capture appends the verification summary and the
+session is retired, move the ledger to `<mission-worktree>/.session/ledger/<slug>.md` and update
+its STATE log path.
+
+Rules:
+- Assign ledger-capture an `In:` channel and an `Out:` channel before launch.
+- Include both channels and the subscription command in its task file or prompt.
+- Require ledger-capture to subscribe to `In:` before work and remain subscribed while running.
+- Send progress, clarification, or interim-result requests to its `In:` channel.
+- Require ledger-capture to answer those requests on `Out:` before continuing.
+- Require ledger-capture to publish status, findings, questions, and completion to `Out:`.
+- Wait for completion when running interactively.
+- An agent-invoked wind-down may continue entirely in the background; record whether capture
+  finished.
+- Ledger-capture confirms every point in the ledger is reflected somewhere durable and appends
+  `## Verified <date>` when done.
+- Only after it completes may STATE.md be updated with its findings or references to them.
 
 This step runs in both modes (checkpoint and retirement).
 
@@ -98,9 +109,10 @@ ledger-capture at that point.
 
 ## Step 6: Mark this session's Session-log entry retired
 
-Once ledger-capture (Step 5) has finished and appended its `## Verified` marker: update your
-own entry in `STATE.md`'s Session log from `status=active` to `status=retired`, via the `.wip`
-protocol. This can be combined with Step 3's `STATE.md` update — no need for two round-trips.
+Once ledger-capture (Step 5) has finished and appended its `## Verified` marker: move the active
+ledger to `.session/ledger/<slug>.md`, then update its entry in `STATE.md`'s Session log from
+`status=active` to `status=retired` with the new ledger path, via the `.wip` protocol. This can be
+combined with Step 3's `STATE.md` update — no need for two round-trips.
 
 ## Step 7: Release ownership on agentbus
 
@@ -114,12 +126,14 @@ genuinely ended, not just paused.
 
 ## Step 8: Report
 
-Tell the user plainly what happened — which steps completed, which were skipped and why, and
-whether it's actually safe to close:
-- **Safe checkpoint:** "Checkpoint saved — state committed, session remains active."
-- **Full retirement, all steps completed:** "Safe to close — ledger captured and verified,
-  state committed, pushed to origin, ownership released."
+Tell the user or parent agent plainly what happened — which steps completed, which were skipped and
+why, and whether it is safe to close. Distinguish clearly between committed and pushed:
+- **Safe checkpoint:** "Checkpoint saved — state committed; session remains active."
+- **Full retirement, local only:** "Retirement saved locally — ledger captured and verified,
+  state and work committed, ownership released; no push was authorized."
+- **Full retirement, pushed:** "Safe to close — ledger captured and verified, state committed,
+  push authorized and completed, ownership released."
 - **Full retirement, some steps skipped:** say exactly what was skipped and that the next
   `/resume-mission` will pick up the rest.
 - **Ledger-capture didn't finish:** say so explicitly — entry is still `active`, not `retired`;
-  don't claim "safe to close" when it isn't verified yet.
+  don't claim safe to close when it isn't verified yet.
