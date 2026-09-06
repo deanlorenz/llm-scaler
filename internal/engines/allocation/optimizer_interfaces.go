@@ -73,6 +73,13 @@ type NamedAnalyzerResult struct {
 	// after TotalDemand is normalized to 1.0. Zero for non-composite entries
 	// (liveness, metrics) that never pass through normalizeToCompositeUnits.
 	SatDemand float64
+
+	// SatRoleDemand mirrors SatDemand at per-role granularity: the raw,
+	// pre-normalization RoleDemand map captured before normalizeToCompositeUnits
+	// overwrites every entry to 1.0. Parallels SatDemand for a future per-role
+	// reconstruction; nothing reads it yet. Nil for non-composite entries and for
+	// non-disaggregated results (no RoleDemand to capture).
+	SatRoleDemand map[string]float64
 }
 
 // ModelScalingRequest bundles the analyzer result with variant state for one model.
