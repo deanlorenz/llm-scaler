@@ -56,9 +56,18 @@
 
 **Last completed:** CT6 — Normalize sat→composite to coverage units (commit `f20e06f9`, 2026-09-01)
 
-**Next step / resume point:** Commit the CT6 test-fix (Known issues). Decide whether CT4
-fairness fix is in scope for the next PR. Decide the next PR's exact boundary (see PR history
-below) — confirm with user before executing.
+**Next step / resume point:** Implement the CT6 correctness-bug fix — design is CONFIRMED (see
+Known issues + `.session/spec.md` CT6 section, "Fix design — CONFIRMED 2026-09-06"), not yet
+implemented. User explicitly said not to implement in the 2026-09-06-single-analyzer-2 session
+that confirmed it — implementation is the next session's work. Order: (1) implement the
+extended `normalizeToCompositeUnits` (all fields in the confirmed table) + new `SatRoleDemand`
+field + the normalized-composite log line, (2) fix/extend the existing CT6 unit tests, (3) add
+a new end-to-end test exercising the real `buildNamedResult` → `normalizeToCompositeUnits` →
+`initRoleState`/optimizer path with nonzero demand (closes the coverage gap that let the bug
+through), (4) separately, commit the still-outstanding CT6 *compile* fix (6 test-file call
+sites + the `multi_backup` move) — needed regardless, blocks the next PR. Then decide whether
+CT4's fairness fix is in scope for the next PR, and finalize the next PR's exact boundary (see
+PR history below) — confirm with user before executing.
 
 ### PR history
 

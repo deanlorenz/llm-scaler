@@ -99,7 +99,7 @@ separate, unrelated scale-from-zero investigation doc). `spec.md.wip` itself has
 `conventions/wip-editing.md`; this is a stale abandoned lock from a prior session, not a live
 concurrent editor.
 
-## Open items handed to user (not yet decided)
+## Open items handed to user (not yet decided) — as of first findings pass
 
 1. Commit the CT6 test-fix (finding #1) — needed regardless of PR #2 scope, since CT6 as
    pushed doesn't build.
@@ -112,3 +112,161 @@ concurrent editor.
    required compile fix, not optional/experimental.
 4. Untracked docs/plans/analyzers files and .session files — commit as-is, or clean up first?
 5. Stale `spec.md.wip` lock — release/rename, or leave as active spec?
+
+(Resolved below — items 1-2 got their own PR specs, 3-5 got resolved during the cleanup pass.)
+
+## Docs cleanup pass (user directive: move all docs/plans artifacts to .session/ledgers)
+
+- Confirmed via `ls .claude/worktrees/` that all 8 entries match `git worktree list` exactly —
+  no orphaned/unregistered worktree directories. User asked "did you check .claude/worktrees
+  too?" — yes, both `agent-*` dirs and all 6 named ones, none held CT6's coder work.
+- Read `AGENTS.md`'s "Agents plans" definition verbatim for the user (it's genuinely terse:
+  "For AI agent plans... in docs/plans/<area>/").
+- Read `spec.md.wip` in full (922 lines). Found CT6's own header line and Status/Todo
+  checkboxes still said "NOT STARTED" despite `f20e06f9` being committed and documented as
+  done elsewhere (STATE.md, ct6-implementation-report.md) — this was the concrete evidence
+  for "the spec is a mess."
+- Created `.session/ledgers/` and moved all 6 untracked `docs/plans/analyzers/*-2026-08-30.md`
+  files there (5 stale call-map/call-stack snapshots + `compose-reduce-design-2026-08-30.md`),
+  plus `spec.md.local` (superseded pre-CT6 snapshot). Wrote `.session/ledgers/README.md` as
+  a one-line-per-file index. The 4 pre-existing tracked files in `docs/plans/analyzers/`
+  (README.md, analyzer-architecture-refactor.md, k2-capacity-model.md,
+  kvcachethreshold-retirement.md) were left untouched — not part of this mission's untracked
+  additions.
+- Before archiving `compose-reduce-design-2026-08-30.md`: ported its design (floor invariant,
+  implied-replica-count reduce, Q1-Q4) into a new CT7 section in `spec.md.wip`, per user
+  correction that it was "a ledger file... design and open questions do not belong in a
+  ledger."
+- Fixed CT6's stale header/Status/Todo to DONE with commit `f20e06f9`, documented the
+  test-fix gap explicitly in that section. Renamed `spec.md.wip` → `spec.md` (stale `.wip`
+  suffix, no live editor). Added revision-history entries v6-v8 explaining the CT6/CT7 gap.
+- Updated STATE.md: added Ledgers pointer, PR history section (initially still said "PR #34 =
+  CT1a+CT2 only" — corrected later, see below), corrected spec pointer to `.session/spec.md`.
+- Committed as `e88e48dc`.
+- **Found a genuine protocol violation, not mine to fix retroactively:** `.session/STATE.p3-planner.md`
+  and `.session/2026-09-06-p3-planner-1.md` appeared mid-session — a separate, deliberate
+  spinoff planning sub-mission for "PR #3," explicitly scoped read-only against my STATE.md.
+  User confirmed this is intentional and won't touch my files; I left its files alone. Its
+  task file references `.session/compose-reduce-design-2026-08-30.md`, which no longer exists
+  at that path after the move to `.session/ledgers/` — flagged to the user, not fixed by me
+  (not my file to edit).
+
+## PR-34-scope re-verification and two focused PR specs (user directive)
+
+- Fixed `.session/spec.md`'s stale unchecked Todo boxes for CT1/CT2 (both long DONE) and the
+  remaining CT6 items I'd missed in the first pass (only the last "run go test" checkbox had
+  been fixed; the 7 items above it were still `[ ]` despite being done per
+  `ct6-implementation-report.md`).
+- **Verified PR #34's actual scope from source, not from commit-message bookkeeping:**
+  `gh pr view 34 --json files` and `gh pr diff 34` show `analyzer_helpers.go`,
+  `cost_aware_optimizer.go`, `greedy_score_optimizer.go`, and `multi_backup/*` are all in the
+  PR — confirmed CT5's exact "Role-visibility contract" doc-comment text is present in the
+  diff at `initRoleState`. **PR #34 = CT1a + CT2 + CT3b + CT5, not just CT1a+CT2** as I'd
+  written in STATE.md earlier this session. The PR-prep branch squashed 3 mission-branch
+  commits (`e4106109`/`b980f682`/`fcf9c905`) into one PR commit (`113fec1d`). Confirmed CT1b
+  and CT6 are NOT in the diff (no sentinel-error text, no `SatDemand`/`normalizeToCompositeUnits`).
+- This narrows "the next PR" to **CT6 only** — CT3b/CT5 are already merged.
+- Wrote `.session/pr-spec-34-composite-signal.md` (merged PR, verified scope, with
+  `gist_engine.md`/`gist_optimizer.md`'s content folded in verbatim as the "what changed"
+  body, per explicit user request) and `.session/pr-spec-next-coverage-units.md` (CT6-only
+  scope, the blocking test-fix, explicit exclusions: CT1b/CT4/CT7).
+- Corrected STATE.md's PR history section with the verified facts. Committed as `ed502057`.
+
+## The runAnalyzersAndScore loop diff Q&A
+
+- User asked to see the diff of the engine loop for the next PR (CT6/`f20e06f9`). Showed the
+  actual `git show f20e06f9` diff: return type change AND a structural change — the old code
+  collected raw `(D,P)` pairs into `rawAnalyzerResult`, reduced via `composeAnalyzerResults`,
+  then built once; CT6 removed the reduce step entirely and now calls `buildNamedResult`
+  per-analyzer inside the loop, keeping the full slice, picking `[0]` at the call site instead.
+- Showed `normalizeToCompositeUnits` and its call site in full (clean, non-diff) on request.
+  Flagged unprompted: the `RoleDemand` fallback-to-`TotalDemand` branch inside it isn't
+  documented in `spec.md`'s CT6 section — this observation led directly into the correctness-
+  bug investigation below.
+- User asked whether `buildNamedResult` runs independently per analyzer and whether it's
+  sat-specific. Confirmed via code read: fully generic, no sat-specific logic anywhere in
+  `buildNamedResult`/`buildCapacities`/`applyUniversalThreshold`/`buildRoleCapacities`; sat is
+  just always called first, unconditionally, by the loop structure — `collectV2ModelRequest`
+  picks `namedResults[0]` by construction of that ordering, not because the function knows
+  it's sat.
+
+## CT6 correctness bug — found, traced exhaustively, fix design confirmed
+
+- User asked to verify: (1) `SatDemand` isn't accidentally using per-role demand, (2) every
+  `NamedAnalyzerResult` field is accounted for post-normalization, and whether
+  `buildNamedResult`'s pre-computed values (RC/SC/etc.) still mean the same thing after
+  normalization.
+- Traced `buildNamedResult` → `buildCapacities` → `applyUniversalThreshold` (runs first, on
+  raw demand, inside the loop) against `normalizeToCompositeUnits` (runs later, in
+  `collectV2ModelRequest`, only converts `PerReplicaCapacity`/`TotalDemand`/`RoleDemand`/
+  `RoleCapacities[role].TotalDemand`). Found: `RequiredCapacity`, `SpareCapacity`, `Remaining`,
+  `Spare`, `RoleCapacities[role].RequiredCapacity`/`.SpareCapacity` are computed from RAW
+  demand and never revisited — `initRoleState` seeds `pickerState`/`Remaining` from these
+  still-raw fields, then every downstream helper divides them against the now-fractional
+  `PerReplicaCapacity`. Verified the arithmetic is genuinely wrong (`ceil(rawRC/PRC_fraction)`
+  off by ~`1/PRC_fraction`), not just stale-looking.
+- Verified why no test caught it: read `engine_v2_normalize_test.go` in full — all 7 CT6 unit
+  tests construct `NamedAnalyzerResult` by hand, never touching RC/Remaining. Confirmed the
+  16 pre-existing rescale tests use `satEntryFixture.named()`, which bypasses
+  `buildCapacities`/`normalizeToCompositeUnits` entirely (already known from
+  `ct6-implementation-report.md`). Found the only 2 tests exercising the real
+  `collectV2ModelRequest` path (`engine_v2_test.go:479-532`) use an empty
+  `&domain.AnalyzerResult{}` and check only `Disaggregated`. **No test anywhere exercises the
+  real build-then-normalize pipeline with nonzero demand.**
+- Verified `SatDemand` itself is fine (correctly model-scoped, used only as a per-model
+  water-fill weight in `rescaleInputsForGroup`) and that `roleDemandGPUs`/`modelDemandGPUs`
+  are also fine (they read `TotalDemand`/`rc.TotalDemand`, which *is* correctly normalized in
+  lockstep with `PerReplicaCapacity`).
+- Also found, while tracing: `composite := namedResults[0]` is a value copy, but since
+  `Result` is a pointer and `RoleCapacities` is a map, `normalizeToCompositeUnits`'s mutation
+  reaches `namedResults[0]`'s shared underlying data too. Confirmed not a live bug today
+  (`namedResults` isn't read again after `collectV2ModelRequest` returns — metrics/logging
+  already ran earlier, inside `runAnalyzersAndScore`) but flagged as fragile.
+- Recorded all of this in `spec.md`/STATE.md/`pr-spec-next-coverage-units.md`, with 3
+  candidate fixes (A: extend normalization to RC/SC/etc., changing what
+  `wva_required_capacity`/`wva_spare_capacity` report; B: parallel coverage-space fields,
+  more files touched, metrics untouched; C: reorder the pipeline). Committed as `18ea1f43`.
+- **User pushed back hard on stopping at "no test fails" reasoning** — explicitly said don't
+  leave fields untouched "just because you can't see a bug right now," be logically
+  consistent, and that fixing a comment instead of the actual value is the wrong direction.
+  Re-did the investigation properly: grepped every read site of `TotalDemand`,
+  `RequiredCapacity`/`SpareCapacity` (model-level, not just Remaining/Spare),
+  `TotalSupply`/`TotalAnticipatedSupply`, and both `Utilization` fields (there are two —
+  model-level on `NamedAnalyzerResult`, and a different per-*variant* one on
+  `domain.VariantCapacity` that feeds `decision.Utilization`; found no code that actually sets
+  the per-variant one — a separate loose end, noted but not chased further) across the whole
+  `internal/engines` tree, not just `allocation/`.
+- This exhaustive pass showed: model-level RC/SC/Remaining/Spare/TotalDemand ARE live-read,
+  but only in the non-disaggregated branch (every consumer branches to per-role values
+  otherwise, so there's no real "what does TotalDemand mean with multiple roles" ambiguity for
+  correctness — it's simply unused once `RoleCapacities` exists). `TotalSupply`/
+  `TotalAnticipatedSupply`/model-level `Utilization` have zero consumers after
+  `applyUniversalThreshold`/`logAnalyzerResult` complete (both run before normalization) — not
+  "we can't see a bug," but a positively verified absence of any downstream reader.
+- **User's final decision:** normalize everything anyway (RC/SC/Remaining/Spare + per-role,
+  AND TotalSupply/TotalAnticipatedSupply + per-role, AND recompute Utilization) for structural
+  consistency with the struct's own documented invariants, even though TotalSupply/
+  TotalAnticipatedSupply/Utilization have no live consumer today. `Utilization` noted as
+  "probably just coverage under a different name" — no semantic change, just recompute
+  consistently. New field `SatRoleDemand map[string]float64` (mirrors `SatDemand` per-role).
+  Logging the normalized composite (item 5) confirmed as part of this fix — currently nothing
+  observes the actual post-normalization signal the optimizer receives.
+- **TODO explicitly deferred, not this fix, not CT7:** user's intuition that model-level
+  "non-role" fields shouldn't exist as a parallel representation at all — should require
+  `role="both"` explicitly and always go through `RoleCapacities`/per-role access uniformly.
+  One confirmed exception that stays role-aware regardless: cross-SO-same-model coverage
+  combination differs between `"both"` and other roles (same-role adds, cross-role is
+  `min(prefill,decode) + both`). Persisted as a note in `spec.md`'s CT6 section, not scoped
+  into any current task.
+- Persisted the confirmed design (not implemented — explicitly told not to implement yet) in
+  `spec.md`, STATE.md, and `pr-spec-next-coverage-units.md`. Committed as `250f2e8e`.
+
+## Wind-down
+
+- User asked to wind down and retire. Attempted the `wind-down` skill directly via the Skill
+  tool — blocked (`disable-model-invocation`); told the user to run `/wind-down` themselves,
+  which they did.
+- No code was written this session — every change was documentation/spec/state (STATE.md,
+  spec.md, the two PR-spec docs, the ledgers move+index). The actual CT6 test-fix commit and
+  the correctness-bug code fix are both still pending, explicitly deferred to a future session
+  per user instruction ("Do not implement yet").
