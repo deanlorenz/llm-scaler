@@ -11,8 +11,8 @@ disable-model-invocation: true
 This skill covers two modes. Determine which applies before starting:
 
 - **Safe checkpoint** — pausing mid-session (pre-compaction, break, handoff to next context
-  window). Session stays `active`. No ledger-capture, no retirement, no agentbus release.
-  Run Steps 1–4 only. Safe to run as a background subagent when possible.
+  window). Session stays `active`. No retirement, no agentbus release.
+  Run Steps 1–5. Safe to run as a background subagent when possible.
 - **Full retirement** — genuinely ending this session's engagement on the mission (closing,
   handing ownership to another session). Run all Steps 1–7.
 
@@ -33,17 +33,15 @@ will collect.
 
 This step cannot be skipped — winding down mid-edit defeats the purpose.
 
-## Step 2: Append this session's own ledger entry
+## Step 2: Final pass over the session ledger
 
-Your live ledger file is at `<mission-worktree>/.session/<this-session-slug>.md`. If you
-don't have one yet, create it now.
+The ledger at `<mission-worktree>/.session/<this-session-slug>.md` should have been
+maintained throughout the session. This step is a safety-net pass — go back over this
+session's work and confirm everything is captured: findings, decisions, corrections, false
+starts. Append anything missing now.
 
-Append (don't rewrite) an entry covering this session's work since the last checkpoint:
-findings, decisions, corrections, false starts. Be honest about what didn't land, not just
-what did — a false start recorded is as valuable as a task completed.
-
-Skippable if genuinely short on time, but skipping this is the biggest loss — it's the one
-thing ledger-capture (Step 5) needs to have something to work from.
+If the ledger is missing significant work, that is a protocol violation from earlier in the
+session — record it honestly here and continue. Do not skip this step on that account.
 
 ## Step 3: Update STATE.md
 
@@ -80,20 +78,23 @@ This step can simply fail to complete — the machine sleeps, the terminal close
 and that's not a problem: uncommitted work is still there next time or recoverable via git.
 Don't treat a failure here as blocking the rest of wind-down.
 
-## Steps 5–7: Full retirement only
-
-*Skip these steps entirely for a safe checkpoint. Resume where you left off next session.*
-
 ## Step 5: Run ledger-capture on this session's own ledger
 
-Launch ledger-capture against this session's own ledger file at
-`<mission-worktree>/.session/<slug>.md` — the one named in your Session-log entry (Step 6).
-**Wait for it in the foreground.** This is what makes "safe to close" in Step 7 a real
-guarantee — don't report safety before this has actually finished.
+Launch ledger-capture as a **background agent** against this session's ledger file at
+`<mission-worktree>/.session/<slug>.md`. Ledger-capture confirms every point in the ledger
+is reflected somewhere durable and appends `## Verified <date>` when done. Only after it
+completes may STATE.md be updated with its findings or references to them.
 
-If you're genuinely out of time and cannot wait, do not report "safe to close" — tell the
-user wind-down is incomplete, your Session-log entry will stay `active`, and the next
-`/resume-mission` will pick up the unfinished capture step as part of its pending-session scan.
+This step runs in both modes (checkpoint and retirement).
+
+If the session closes or there is not enough time before ledger-capture finishes, this step
+is effectively skipped — do not wait for it and do not block wind-down on it. The next
+`/resume-mission` pending-session scan will pick up the unverified ledger and run
+ledger-capture at that point.
+
+## Steps 6–7: Full retirement only
+
+*Skip these steps for a safe checkpoint. Session-log entry stays `active`.*
 
 ## Step 6: Mark this session's Session-log entry retired
 
