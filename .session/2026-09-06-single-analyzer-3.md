@@ -66,8 +66,41 @@ Continues: .session/2026-09-06-single-analyzer-2.md
 - Mission owner (this session) subscribed to `mission.single-analyzer.coder-ct6-fix.out` to
   follow coder progress.
 
+## Coder launch #1 — misconfigured, self-corrected, zero edits made
+- First coder (agentId `a223357ad56398278`) was launched with `isolation: "worktree"`, which
+  creates a *fresh ad-hoc* worktree for the subagent rather than pinning it to the
+  already-prepared `coder-ct6-fix` worktree — my mistake, that parameter doesn't accept a
+  target path for an existing worktree.
+- The subagent's sandbox ended up pinned to `.claude/worktrees/agent-a223357ad56398278`
+  (unrelated ad-hoc worktree), NOT `coder-ct6-fix`. It could `Read` files under `coder-ct6-fix`
+  by absolute path (cross-worktree reads are allowed) but `Bash` refused to run there at all;
+  `EnterWorktree(path=coder-ct6-fix)` reported success but did not move the actual Bash sandbox
+  boundary for a pinned subagent; `ExitWorktree` refused outright ("cannot be called from a
+  subagent with a cwd override"); `Write` also refused a same-content file under
+  `coder-ct6-fix/.session/`.
+- Since `go build`/`go vet`/`go test`/`git commit` all require Bash, the coder correctly
+  concluded it could not do or verify any of the task from that pinned location, made **zero
+  edits anywhere** (cleaned up its own scratch dir before reporting), published a full blocker
+  report to `mission.single-analyzer.coder-ct6-fix.out` (seq 86), and held for guidance instead
+  of guessing or bypassing the sandbox. Exactly the right call.
+- Verified after the fact: `coder-ct6-fix` worktree still at `206da91e` (task-file-only commit),
+  untouched — confirmed via `git worktree list` (no `-C`, since a `-C` redirect into another
+  worktree's path is itself blocked for a pinned session) and a direct `Read` of its STATE.md.
+- **Root cause / lesson:** `Agent`'s `isolation: "worktree"` always creates a brand-new worktree
+  for the subagent; it has no way to target a worktree you already prepared. To pin a subagent
+  to a *pre-existing* worktree, launch it **without** `isolation` at all and instruct it, as its
+  first action, to call `EnterWorktree(path: "<absolute path>")` itself — that path-based entry
+  does work correctly for a *non-pinned* agent (only a subagent already pinned via `isolation`
+  is stuck).
+
+## Coder launch #2 — relaunched correctly (2026-09-06)
+- Relaunched (agentId `a64b37115d72e7617`), no `isolation` parameter, instructed to call
+  `EnterWorktree(path: ".../.claude/worktrees/coder-ct6-fix")` as its very first action before
+  reading anything else, then proceed exactly as originally scoped. Told it to disregard the
+  first coder's blocker message on `Out:` once it confirms proper pinning.
+
 ## Open / next
-- Waiting on coder + reviewer background completion notifications.
+- Waiting on coder (relaunch) + reviewer background completion notifications.
 - After coder reports DONE and reviewer posts Pass: mission owner integrates via cherry-pick
   onto `single-analyzer` (per coder-orchestration.md rule 10 — never merge coder worktree
   directly). Then revisit CT4 scoping and next-PR boundary with user.
