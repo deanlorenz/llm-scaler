@@ -51,31 +51,35 @@
 - [x] CT5 — document `RoleCapacities` role-visibility contract (commit `fcf9c905`)
 - [x] CT6 — normalize sat→composite to coverage units (commit `f20e06f9`)
 - [x] CT6 compile fix — 6 test call-sites + `multi_backup` move (commit `18f4d4ff`, 2026-09-06)
+- [x] CT6 correctness fix — RC/SC/Remaining/Spare/supply normalization + `SatRoleDemand` +
+  composite logging + tests (commits `c5af5696`/`290ca75f`/`896879d5`/`e4b1e77d`, 2026-09-06;
+  reviewed Pass by independent reviewer, cherry-picked from coder branch `coder-ct6-fix-v3`)
 - [ ] CT7 (a.k.a. "PR #2") — engine-side reduce to wire non-saturation analyzers into
   CompositeSignal — design + Q1-Q4 open questions now in `spec.md`'s CT7 section
 
 **Last completed:** CT6 — Normalize sat→composite to coverage units (commit `f20e06f9`, 2026-09-01)
 
-**Next step / resume point:** CT6 compile fix landed directly on `single-analyzer` (commit
-`18f4d4ff`). CT6 *correctness* fix implemented by coder v3 (agentId `acc4742a2f2a1aceb`,
-`isolation:"worktree"`, reset to `18f4d4ff` per the revised dispatch approach — see prior
-session log / ledger for the two earlier failed dispatch attempts and their postmortem) on
-branch `coder-ct6-fix-v3` (worktree `.claude/worktrees/agent-acc4742a2f2a1aceb`): 3 commits —
-`7663d180` (core fix: normalize RC/SC/Remaining/Spare/supply alongside PRC, add `SatRoleDemand`,
-add `logCompositeSignal`), `a8e9c511` (extend the 7 existing CT6 unit tests to cover the
-newly-normalized fields), `0a5c0f52` (new e2e test through the real
-`collectV2ModelRequest`→optimizer pipeline with nonzero demand — coder reports verifying it
-fails pre-fix, passes post-fix). Coder reports `go build`/`go vet`/`gofmt`/
-`go test ./internal/engines/...` all clean (158 specs), plus a broader `./internal/...` pass
-clean (only `test/e2e`, which needs a live cluster, not run). **Not yet independently verified
-by the mission owner or a reviewer — reviewer v2 (agentId `ad557beac4e2c53a5`) dispatched
-2026-09-06 to independently re-run build/vet/test/gofmt and verify the field-by-field table**;
-do not treat this as done until that review reports back. After review passes: mission owner
-cherry-picks `7663d180`/`a8e9c511`/`0a5c0f52` onto `single-analyzer` (per
-coder-orchestration.md rule 10 — never merge coder worktree directly). Then: decide whether
-CT4's fairness fix is in scope for the next PR, finalize the next PR's exact boundary (see PR
-history below), and push `18f4d4ff` (+ the cherry-picked CT6 fix) to origin — needs explicit
-per-op push authorization, not yet given.
+**Next step / resume point:** CT6 fully landed on `single-analyzer` — both the compile fix
+(`18f4d4ff`) and the correctness fix (`c5af5696`/`290ca75f`/`896879d5` cherry-picked from
+coder branch `coder-ct6-fix-v3`, which was reviewed **Pass** by an independent reviewer —
+report at `.session/review-coder-ct6-fix-v3.md` — plus `e4b1e77d`, a follow-up cleanup for the
+review's one non-blocking nit: dropped an internal `(CT6)` tag from a test's `Describe`
+string). `go build`/`go vet`/`go test ./internal/engines/...`/`gofmt` all independently
+verified clean by the reviewer at the coder's tip; re-verified locally after the nit fix.
+
+**Remaining before this can be considered fully wrapped:**
+1. Push `single-analyzer` (`18f4d4ff` through `e4b1e77d`) to origin — needs explicit per-op
+   push authorization, not yet given. `origin/single-analyzer` currently still doesn't build.
+2. Decide with the user whether CT4's fairness fix (`fairShareValue`, still blocked on a
+   fix-now-vs-defer decision) belongs in the next PR.
+3. Finalize the next PR's exact scope/boundary (see PR history below) and open it via the
+   PR-branch workflow (`conventions/pr-branch.md`/`conventions/pr-workflow.md`) — likely CT6
+   only, matching the "Next PR" entry below, now unblocked.
+4. Clean up: the two failed coder-dispatch worktrees/branches from earlier today
+   (`.claude/worktrees/agent-a223357ad56398278`, `.claude/worktrees/agent-a64b37115d72e7617` if
+   still present) and the completed `coder-ct6-fix-v3` worktree/branch
+   (`.claude/worktrees/agent-acc4742a2f2a1aceb`) can be removed once the user confirms nothing
+   else is needed from them — not yet done.
 
 ### PR history
 
@@ -87,11 +91,13 @@ and `.session/pr-spec-next-coverage-units.md`.
   content, not commit messages): scope is CT1a + CT2 + **CT3b + CT5** — the PR-prep branch
   squashed CT2/CT3b/CT5 into one commit (`113fec1d`) even though they're 3 separate commits on
   the mission branch (`e4106109`/`b980f682`/`fcf9c905`). Does NOT contain CT1b or CT6.
-- **Next PR — not yet opened, no branch cut yet.** Scope is **CT6 only** (`f20e06f9`) — CT3b
-  and CT5 are already merged in PR #34, so they are not part of this PR's diff. Blocked on the
-  CT6 test-fix (see Known issues) being committed first; the s7 stale-args bug
-  (`b067642a`) is NOT relevant to this PR — it only ever existed on the mission branch, never
-  on any PR-prep branch, so there's nothing to carry forward for it.
+- **Next PR — not yet opened, no branch cut yet.** Scope is **CT6 only**: `f20e06f9` (original
+  normalization) + `18f4d4ff` (compile fix) + `c5af5696`/`290ca75f`/`896879d5`/`e4b1e77d`
+  (correctness fix + tests) — CT3b and CT5 are already merged in PR #34, so they are not part
+  of this PR's diff. No longer blocked — all CT6 commits are landed and clean on
+  `single-analyzer`. Still needs: user decision on CT4 inclusion, then PR-branch cut. The s7
+  stale-args bug (`b067642a`) is NOT relevant to this PR — it only ever existed on the mission
+  branch, never on any PR-prep branch, so there's nothing to carry forward for it.
 - **CT7** (engine-side reduce) is not scoped into either PR above; it needs its own PR once its
   4 open design questions (spec CT7 section) are resolved, and depends on the next PR's test-fix
   landing first (CT7 builds on `runAnalyzersAndScore`'s current slice-returning shape).
@@ -100,11 +106,11 @@ and `.session/pr-spec-next-coverage-units.md`.
 
 ### Known issues
 
-- **CT6 correctness bug — believed fixed 2026-09-06 by coder v3, pending independent review.**
-  `RequiredCapacity`/`Remaining`/etc. never get normalized, only `PerReplicaCapacity`/
-  `TotalDemand`/`RoleDemand` do. Fix on branch `coder-ct6-fix-v3` (commits `7663d180`/
-  `a8e9c511`/`0a5c0f52`), not yet cherry-picked onto `single-analyzer` — see "Next step" above.
-  Original bug description retained below for reference until the fix is verified and merged.
+- **CT6 correctness bug — FIXED and merged 2026-09-06, reviewed Pass.** `RequiredCapacity`/
+  `Remaining`/etc. now normalized alongside `PerReplicaCapacity`/`TotalDemand`/`RoleDemand`.
+  Commits `c5af5696`/`290ca75f`/`896879d5`/`e4b1e77d` on `single-analyzer` (cherry-picked from
+  coder branch `coder-ct6-fix-v3`, independently reviewed — see `.session/review-coder-ct6-fix-v3.md`).
+  Original bug description retained below for historical reference.
   `normalizeToCompositeUnits` converts `PerReplicaCapacity` to a unit-less coverage fraction
   but never touches `RequiredCapacity`, `SpareCapacity`, `Remaining`, `Spare`, or
   `RoleCapacities[role].RequiredCapacity`/`.SpareCapacity` — those are computed by
