@@ -14,8 +14,11 @@
 
 ## Task
 
-- **Plan / spec:** `.session/spec.md.wip`
+- **Plan / spec:** `.session/spec.md`
   *(do not read upfront — pull on demand only)*
+- **Ledgers index:** `.session/ledgers/README.md` — one-line-per-file index of archived
+  session captures and superseded snapshots (call-maps, the pre-CT6 spec snapshot, the
+  original PR #2 design notes). Read the index before opening any individual ledger file.
 - **Context:**
   - `internal/engines/allocation/optimizer_interfaces.go`
   - `internal/engines/allocation/analyzer_helpers.go`
@@ -43,28 +46,33 @@
 - [x] CT3b — simplify 7 single-entry optimizer helpers (commit `b980f682`)
 - [ ] CT4 — score-weighted aggregation / fairness fix — BLOCKED on user decision (fix-now vs defer)
 - [x] CT5 — document `RoleCapacities` role-visibility contract (commit `fcf9c905`)
-- [x] CT6 — normalize sat→composite to coverage units (commit `f20e06f9`)
-- [ ] PR #2 — engine-side reduce to wire non-saturation analyzers into CompositeSignal
+- [x] CT6 — normalize sat→composite to coverage units (commit `f20e06f9`) — **has an
+  outstanding test-fix gap, see Known issues; not yet committed**
+- [ ] CT7 (a.k.a. "PR #2") — engine-side reduce to wire non-saturation analyzers into
+  CompositeSignal — design + Q1-Q4 open questions now in `spec.md`'s CT7 section
 
 **Last completed:** CT6 — Normalize sat→composite to coverage units (commit `f20e06f9`, 2026-09-01)
 
-**Next step / resume point:** Decide whether CT4 fairness fix is in scope for PR #2; then plan
-PR #2 (engine-side reduce). Confirm with user before executing.
+**Next step / resume point:** Commit the CT6 test-fix (Known issues). Decide whether CT4
+fairness fix is in scope for the next PR. Decide the next PR's exact boundary (see PR history
+below) — confirm with user before executing.
 
-### Status
+### PR history
 
-- **PR #34 MERGED 2026-09-02** (https://github.com/ev-shindin/llm-scaler/pull/34, merge commit
-  `347de1a9`). Contains only CT1a (`1a0c23be`) + CT2 (`113fec1d`) — corrects prior stale note
-  that said "open, awaiting review."
-- CT3b, CT5, the s7 stale-args fix (`b067642a`), and CT6 are pushed to `origin/single-analyzer`
-  (deanlorenz/llm-scaler fork, tip `d90bd565`) but not yet cut into a PR branch or opened as a
-  PR. This is the next PR's payload — see Known issues for a blocker before it can go out.
-- CT4 blocked on user decision.
-- CT1b deferred to future PR.
+- **PR #34 — MERGED 2026-09-02** (https://github.com/ev-shindin/llm-scaler/pull/34, merge
+  commit `347de1a9`). Scope: **exactly** CT1a (`1a0c23be`) + CT2 (`113fec1d`) — nothing else.
+- **Next PR — not yet opened, no branch cut yet.** Payload already on `origin/single-analyzer`
+  (deanlorenz/llm-scaler fork, tip `d90bd565`): CT3b (`b980f682`), CT5 (`fcf9c905`), the s7
+  stale-args fix (`b067642a`), CT6 (`f20e06f9`) — **minus** the CT6 test-fix (see Known
+  issues), which must be committed before this can go out as-is. Whether CT7 (engine-side
+  reduce) bundles into this PR or ships separately is not decided — CT7 has 4 open design
+  questions (spec CT7 section) and depends on the test-fix landing first regardless.
+- CT4 blocked on user decision; CT1b deferred to a future PR (excluded from PR #34 by user
+  request).
 
 ### Known issues
 
-- **CT6 does not compile as pushed.** Commit `f20e06f9` changed
+- **CT6 does not compile as pushed — blocks the next PR.** Commit `f20e06f9` changed
   `runAnalyzersAndScore`'s return type from `allocation.NamedAnalyzerResult` to
   `[]allocation.NamedAnalyzerResult` and removed `composeAnalyzerResults`/`rawAnalyzerResult`,
   but never updated 6 test-file call sites that still treat the return value as a single
@@ -75,23 +83,17 @@ PR #2 (engine-side reduce). Confirm with user before executing.
   either.** Needs a commit before any further PR work. The uncommitted fix also moved
   `engine_v2_compose_test.go` → `internal/engines/allocation/multi_backup/` (`//go:build
   ignore`) since it tested the now-deleted `composeAnalyzerResults` — matches the existing
-  multi_backup pattern for pre-CT3b originals kept for PR #2 reference.
-- **PR #2 design doc exists but has 4 open questions.** Untracked
-  `docs/plans/analyzers/compose-reduce-design-2026-08-30.md` designs the engine-side reduce
-  (implied-replica-count max, sat-only fast path, floor invariant). Q1 (per-variant TotalDemand
-  consistency), Q2 (RoleDemand when a non-sat analyzer doesn't emit one), Q3 (composite name vs
-  `isSaturationResult` check), Q4 (composite Score) are unresolved — block writing PR #2 code.
+  multi_backup pattern for pre-CT3b originals kept for CT7 reference. Its coder's original
+  worktree/branch could not be located (checked all `.claude/worktrees/*` entries, all
+  `worktree-*` tracking branches, and 73 dangling/unreachable commits via `git fsck
+  --unreachable` — none matched); `conventions/coder-orchestration.md` rule 5 (record the
+  coder's worktree+branch in STATE.md before it starts) was not followed for this dispatch,
+  so the working-tree copy may be the only surviving trace.
 - **CT4 fairness:** `fairShareValue` equalizes absolute remaining demand, not coverage ratio.
   Fix-now vs. document-and-defer is the user's call. See spec CT4 section and
   `worktrees/session-tracking/missions/single-analyzer/fairshare-value-correctness-investigation-2026-08-25.md`.
 - **Rescale weight long-term fix:** token weight is proportional to N_full only for homogeneous
   PRC; longer-term fix tracked in spec rescale-fairness section (separate CT).
-- **`spec.md.wip`** has a stale `.wip` suffix — it is the active spec; rename to `spec.md`
-  when next editing it.
-- **Untracked docs/plans/analyzers files** (2026-08-30): `compose-reduce-design-2026-08-30.md`
-  plus 5 call-map/call-stack research docs (`engine-call-map`, `engine-call-stack`,
-  `optimizer-call-map`, `optimizer-call-stack`, `single-analyzer-call-map`) — never committed.
-  Correctly placed per AGENTS.md's `docs/plans/<area>/` convention; just uncommitted.
 
 ## Key decisions (for resuming context)
 
@@ -116,7 +118,7 @@ PR #2 (engine-side reduce). Confirm with user before executing.
 
 **Multi-entry originals:**
 - `internal/engines/allocation/multi_backup/` (`//go:build ignore`) holds pre-CT3b slice-based
-  optimizer helpers for the planned engine-side reduce (PR #2).
+  optimizer helpers for the planned engine-side reduce (CT7, spec section).
 
 **PR isolation:**
 - `pr/single-analyzer` is ephemeral staging for upstream PRs; does not need to stay in sync with
