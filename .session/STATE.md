@@ -28,11 +28,12 @@
 
 ### Steps / subtasks
 
+- [x] Initial .session/ scaffolding (bench-plan2, 2026-09-06)
 - [ ] Fully define mission goal and scope (deferred — do in a future session)
 - [ ] Review `plans/commit-mapping.md` status table and update worktree statuses
 - [ ] Coordinate with sibling worktrees as needed
 
-**Last completed:** Initial .session/ scaffolding (bench-plan2, 2026-09-06)
+**Last completed:** Initial .session/ scaffolding committed (45c1df96)
 
 **Next step / resume point:** Fully define mission goal — confirm scope and next
 concrete action with user.
@@ -48,4 +49,4 @@ Scaffolded. Mission goal TBD — not yet fully defined. No active work items.
 
 ## Session log
 
-- 2026-09-06 session=bench-plan2 status=active ledger=.session/bench-plan2.md
+- 2026-09-06 session=bench-plan2 status=retired ledger=.session/bench-plan2.md
