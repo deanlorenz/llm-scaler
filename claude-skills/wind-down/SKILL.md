@@ -1,6 +1,6 @@
 ---
 name: wind-down
-description: Wind down work on a mission before the session ends — reach a safe stopping point, stop any of this session's own background agents, append this session's own ledger entry, update the mission's STATE.md if warranted, commit uncommitted work, run ledger-capture on this session's own ledger (waiting for it), mark this session's Session-log entry retired, release ownership on agentbus, then report "safe to close." Use when the user says they're done for now, wants to close the session safely, or asks to wind down / wrap up / stop for the day. Invoke with /wind-down.
+description: Wind down work on a mission — either a safe checkpoint (pause, stay active, no retirement) or a full retirement (end session, mark retired, release agentbus ownership). Steps 1–4 apply to both. Steps 5–7 apply only to full retirement. Always reports actual outcome. Follows conventions/resume-and-handoff.md. Invoke with /wind-down.
 disable-model-invocation: true
 ---
 
@@ -8,10 +8,20 @@ disable-model-invocation: true
 
 # Wind down
 
-This skill's job is to leave the mission in a state a fresh (or resuming) session can safely
-pick up from — not to finish the mission. Steps 1 and 3 are never skippable. Other steps note
-their own skip rules. Skipping the report at the end is never acceptable — always tell the
-user the actual outcome, including if something couldn't be done.
+This skill covers two modes. Determine which applies before starting:
+
+- **Safe checkpoint** — pausing mid-session (pre-compaction, break, handoff to next context
+  window). Session stays `active`. No retirement, no agentbus release.
+  Run Steps 1–5. Safe to run as a background subagent when possible.
+- **Full retirement** — genuinely ending this session's engagement on the mission (closing,
+  handing ownership to another session). Run all Steps 1–7.
+
+If the user's intent is unclear, ask before proceeding.
+
+Steps 1 and 3 are never skippable in either mode. Skipping the report at the end is never
+acceptable — always tell the user the actual outcome, including if something couldn't be done.
+
+See `conventions/resume-and-handoff.md` for the ownership and ledger-capture contracts.
 
 ## Step 1: Reach a safe stopping point
 
@@ -23,17 +33,15 @@ will collect.
 
 This step cannot be skipped — winding down mid-edit defeats the purpose.
 
-## Step 2: Append this session's own ledger entry
+## Step 2: Final pass over the session ledger
 
-Your live ledger file is at `<mission-worktree>/.session/<this-session-slug>.md`. If you
-don't have one yet, create it now.
+The ledger at `<mission-worktree>/.session/<this-session-slug>.md` should have been
+maintained throughout the session. This step is a safety-net pass — go back over this
+session's work and confirm everything is captured: findings, decisions, corrections, false
+starts. Append anything missing now.
 
-Append (don't rewrite) an entry covering this session's work since the last checkpoint:
-findings, decisions, corrections, false starts. Be honest about what didn't land, not just
-what did — a false start recorded is as valuable as a task completed.
-
-Skippable if genuinely short on time, but skipping this is the biggest loss — it's the one
-thing ledger-capture (Step 5) needs to have something to work from.
+If the ledger is missing significant work, that is a protocol violation from earlier in the
+session — record it honestly here and continue. Do not skip this step on that account.
 
 ## Step 3: Update STATE.md
 
@@ -72,22 +80,27 @@ Don't treat a failure here as blocking the rest of wind-down.
 
 ## Step 5: Run ledger-capture on this session's own ledger
 
-Launch ledger-capture against this session's own ledger file at
-`<mission-worktree>/.session/<slug>.md` — the one named in your Session-log entry (Step 6).
-**Wait for it in the foreground.** This is what makes "safe to close" in Step 7 a real
-guarantee — don't report safety before this has actually finished.
+Launch ledger-capture as a **background agent** against this session's ledger file at
+`<mission-worktree>/.session/<slug>.md`. Ledger-capture confirms every point in the ledger
+is reflected somewhere durable and appends `## Verified <date>` when done. Only after it
+completes may STATE.md be updated with its findings or references to them.
 
-If you're genuinely out of time and cannot wait for this to finish, do not report "safe to
-close" — tell the user directly that wind-down is incomplete, your Session-log entry will stay
-`active`, and the next `/resume-mission` will pick up the unfinished capture step as part of
-its normal pending-session scan.
+This step runs in both modes (checkpoint and retirement).
+
+If the session closes or there is not enough time before ledger-capture finishes, this step
+is effectively skipped — do not wait for it and do not block wind-down on it. The next
+`/resume-mission` pending-session scan will pick up the unverified ledger and run
+ledger-capture at that point.
+
+## Steps 6–7: Full retirement only
+
+*Skip these steps for a safe checkpoint. Session-log entry stays `active`.*
 
 ## Step 6: Mark this session's Session-log entry retired
 
 Once ledger-capture (Step 5) has finished and appended its `## Verified` marker: update your
 own entry in `STATE.md`'s Session log from `status=active` to `status=retired`, via the `.wip`
-protocol. This can be combined with Step 3's `STATE.md` update if that step ran — no need for
-two separate round-trips.
+protocol. This can be combined with Step 3's `STATE.md` update — no need for two round-trips.
 
 ## Step 7: Release ownership on agentbus
 
@@ -103,9 +116,10 @@ genuinely ended, not just paused.
 
 Tell the user plainly what happened — which steps completed, which were skipped and why, and
 whether it's actually safe to close:
-- If Steps 2–7 all completed: "Safe to close — ledger captured and verified, state committed,
-  pushed to origin, ownership released."
-- If some steps were skipped (time pressure) but Step 1 held: say exactly what was skipped
-  and that the next `/resume-mission` will pick up the rest.
-- If Step 5 didn't finish: say so explicitly — this session's entry is still `active`, not
-  `retired`, and that's fine; don't claim "safe to close" when it isn't actually verified yet.
+- **Safe checkpoint:** "Checkpoint saved — state committed, session remains active."
+- **Full retirement, all steps completed:** "Safe to close — ledger captured and verified,
+  state committed, pushed to origin, ownership released."
+- **Full retirement, some steps skipped:** say exactly what was skipped and that the next
+  `/resume-mission` will pick up the rest.
+- **Ledger-capture didn't finish:** say so explicitly — entry is still `active`, not `retired`;
+  don't claim "safe to close" when it isn't verified yet.
