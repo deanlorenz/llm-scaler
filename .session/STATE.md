@@ -83,6 +83,30 @@ and `.session/pr-spec-next-coverage-units.md`.
 
 ### Known issues
 
+- **CT6 has a correctness bug — `RequiredCapacity`/`Remaining`/etc. never get normalized,
+  only `PerReplicaCapacity`/`TotalDemand`/`RoleDemand` do (found 2026-09-06).**
+  `normalizeToCompositeUnits` converts `PerReplicaCapacity` to a unit-less coverage fraction
+  but never touches `RequiredCapacity`, `SpareCapacity`, `Remaining`, `Spare`, or
+  `RoleCapacities[role].RequiredCapacity`/`.SpareCapacity` — those are computed by
+  `applyUniversalThreshold` *before* normalization runs, from raw (token-scale) demand, and
+  never revisited. `initRoleState` (`analyzer_helpers.go:150,156`) seeds `pickerState`/
+  `e.Remaining` directly from these raw-scale fields, and every downstream helper
+  (`roleBottleneckReplicas`, `safeRemovalReplicasForRole`, `applyAllocation`,
+  `applyDeallocationForRole`) divides/subtracts them against the now-normalized (fractional)
+  `PerReplicaCapacity` — producing replica counts wrong by roughly `1/PRC_fraction` (e.g. 4x
+  too many for a 0.25 coverage fraction) for any model that actually has nonzero demand.
+  **Not caught by any test:** all 7 new CT6 unit tests construct `NamedAnalyzerResult` by hand
+  and never touch `RequiredCapacity`/`Remaining`; all pre-existing optimizer/rescale tests use
+  a fixture that bypasses `buildCapacities`/`normalizeToCompositeUnits` entirely; the only 2
+  tests that call the real `collectV2ModelRequest` path use an empty `&domain.AnalyzerResult{}`
+  (zero demand) and check only `Disaggregated`. No test exercises the real build-then-normalize
+  pipeline with nonzero demand. **`SatDemand` itself is not affected** — it's correctly
+  model-scoped (set once from `Result.TotalDemand` before normalization) and its only consumer
+  (`rescaleInputsForGroup`) uses it as a per-model scalar, never per-role; `roleDemandGPUs` is
+  also fine (it reads `TotalDemand`/`rc.TotalDemand`, which normalization *does* correctly reset
+  to `1.0` in lockstep with `PerReplicaCapacity`). Fix has a real design tradeoff — see
+  `.session/pr-spec-next-coverage-units.md` "Correctness bug" section — not yet implemented,
+  awaiting a decision on the observability-metrics tradeoff.
 - **CT6 does not compile as pushed — blocks the next PR.** Commit `f20e06f9` changed
   `runAnalyzersAndScore`'s return type from `allocation.NamedAnalyzerResult` to
   `[]allocation.NamedAnalyzerResult` and removed `composeAnalyzerResults`/`rawAnalyzerResult`,

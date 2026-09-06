@@ -882,6 +882,64 @@ before optimizer"). `SatDemand` field, `normalizeToCompositeUnits`, the `rescale
 change, and 7 new unit tests all landed as described above; see
 `.session/ct6-implementation-report.md`.
 
+**Correctness bug found 2026-09-06, not yet fixed:** `normalizeToCompositeUnits` converts
+`Result.TotalDemand`, `Result.RoleDemand[role]`, `Result.VariantCapacities[].PerReplicaCapacity`,
+and `RoleCapacities[role].TotalDemand` to coverage-fraction units — but never touches
+`RequiredCapacity`, `SpareCapacity`, `Remaining`, `Spare`, or
+`RoleCapacities[role].RequiredCapacity`/`.SpareCapacity`. Those are computed by
+`applyUniversalThreshold` (called from `buildCapacities`, called from `buildNamedResult`)
+*before* `normalizeToCompositeUnits` ever runs — from the raw, pre-normalization demand — and
+never revisited afterward.
+
+`initRoleState` (`analyzer_helpers.go:150,156`) seeds `pickerState[role]` from
+`RoleCapacities[role].RequiredCapacity` (disaggregated) or `pickerState[domain.RoleBoth]` from
+`e.Remaining` (non-disaggregated) — both still raw-scale (e.g. tokens). Every downstream
+consumer of `pickerState`/`RoleSpare` (`roleBottleneckReplicas`, `safeRemovalReplicasForRole`,
+`applyAllocation`, `applyDeallocationForRole`) then divides/subtracts these raw-scale numbers
+against `PerReplicaCapacity`, which *is* now a coverage fraction (e.g. `2000/8000 = 0.25`).
+`ceil(rawRC / PRC_fraction)` is wrong by roughly `1/PRC_fraction` — e.g. `ceil(6000/0.25) =
+24000` replicas instead of the intended `ceil(6000/2000) = 3`. This is a real bug in any model
+that goes through the real `collectV2ModelRequest → normalizeToCompositeUnits` path with
+nonzero demand, not a documentation gap.
+
+**Not caught by any test.** The 7 new CT6 unit tests (`engine_v2_normalize_test.go`) construct
+`NamedAnalyzerResult` directly and never set/check `RequiredCapacity`/`Remaining` — they
+verify `normalizeToCompositeUnits` in isolation only. Every pre-existing optimizer/rescale test
+uses `satEntryFixture.named()`, which bypasses `buildCapacities`/`applyUniversalThreshold`/
+`normalizeToCompositeUnits` entirely and sets `RequiredCapacity`/`PerReplicaCapacity` directly
+to whatever the test wants. The only 2 tests exercising the real `collectV2ModelRequest` path
+(`engine_v2_test.go:479-532`) use an empty `&domain.AnalyzerResult{}` (zero demand) and check
+only `req.Disaggregated`. **No test anywhere exercises the real build-then-normalize pipeline
+with nonzero demand.**
+
+**Verified NOT affected:** `SatDemand` is correctly model-scoped (captured once from
+`Result.TotalDemand` before normalization) and its only consumer, `rescaleInputsForGroup`
+(`rescale.go:564`), uses it as a single per-model water-fill weight — never per-role.
+`roleDemandGPUs`/`modelDemandGPUs` (called from the same function, for `capGPUs`) read
+`TotalDemand`/`rc.TotalDemand` directly — both of which normalization *does* correctly reset
+to `1.0` in lockstep with `PerReplicaCapacity` — so that path is dimensionally consistent.
+
+**Also found while tracing this:** `collectV2ModelRequest` does `composite := namedResults[0]`
+(a value copy) before calling `normalizeToCompositeUnits(&composite)`. Because `Result` is a
+pointer and `RoleCapacities` is a map, the mutation reaches the *shared* underlying data —
+`namedResults[0].Result.TotalDemand`/`.RoleDemand`/`.VariantCapacities[].PerReplicaCapacity`
+and `namedResults[0].RoleCapacities[role].TotalDemand` all get mutated too, not just
+`composite`'s copy. This isn't a live bug today (`namedResults` isn't read again after
+`collectV2ModelRequest` returns — `updateLivenessAndSetLive`/`recordAnalyzerMetrics`/
+`logAnalyzerResult` all run earlier, inside `runAnalyzersAndScore`, before normalization ever
+executes), but it's a fragile pattern worth a comment or an explicit deep-copy if this code
+is touched again.
+
+**Fix has a real design tradeoff, not yet decided.** `RequiredCapacity`/`SpareCapacity` (via
+`satNamed.RequiredCapacity`/`.SpareCapacity`/`.RoleCapacities[role]`) are also read directly by
+`cost_aware_optimizer.go:303-311` into `decision.RequiredCapacity`/`.SpareCapacity` — the
+source for the `wva_required_capacity`/`wva_spare_capacity` observability gauges. Naively
+extending `normalizeToCompositeUnits` to divide these same fields by demand (mirroring the
+`PerReplicaCapacity` fix) would correctly fix `initRoleState`'s replica math, but would *also*
+turn those two gauges from meaningful token/capacity counts into unit-less coverage fractions
+— a real behavior change to observability output, not just an internal fix. See
+`.session/pr-spec-next-coverage-units.md` for the candidate fix approaches and the tradeoff.
+
 **Outstanding gap (found 2026-09-06, not yet fixed):** the same commit changed
 `runAnalyzersAndScore`'s return type from `allocation.NamedAnalyzerResult` to
 `[]allocation.NamedAnalyzerResult` and deleted `composeAnalyzerResults`/`rawAnalyzerResult`

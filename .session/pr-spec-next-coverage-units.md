@@ -96,6 +96,55 @@ copy may be the only surviving trace.
 **Action needed before this PR can be prepared:** commit this fix on the mission branch (its
 own commit, per the one-task-one-commit convention), then push to `origin/single-analyzer`.
 
+## Correctness bug — found 2026-09-06, blocks this PR alongside the compile-fix gap
+
+`normalizeToCompositeUnits` converts `PerReplicaCapacity`/`TotalDemand`/`RoleDemand` to
+coverage-fraction units, but never touches `RequiredCapacity`, `SpareCapacity`, `Remaining`,
+`Spare`, or `RoleCapacities[role].RequiredCapacity`/`.SpareCapacity` — those are computed by
+`applyUniversalThreshold` *before* normalization runs, from raw demand, and never revisited.
+`initRoleState` seeds the optimizer's `pickerState`/`Remaining` from those still-raw fields,
+then divides them against the now-fractional `PerReplicaCapacity` — producing replica counts
+wrong by roughly `1/PRC_fraction` for any model with real, nonzero demand. Full trace,
+including why no existing test catches it, is in `.session/spec.md`'s CT6 section
+("Correctness bug found 2026-09-06").
+
+### Candidate fixes — a real tradeoff, not yet decided
+
+**Option A — divide `RequiredCapacity`/`SpareCapacity`/`Remaining`/`Spare`/per-role
+equivalents by the same `demand` already used for the `PerReplicaCapacity` division, inside
+`normalizeToCompositeUnits`.** Mathematically sound (verified: `ceil((RC_raw/D) /
+(PRC_raw/D)) == ceil(RC_raw/PRC_raw)`) and minimal — same function, same place, extends the
+existing pattern. **But:** `cost_aware_optimizer.go:303-311` reads these exact fields
+(`satNamed.RequiredCapacity`/`.SpareCapacity`/`.RoleCapacities[role]`) directly into
+`decision.RequiredCapacity`/`.SpareCapacity` — the source of the `wva_required_capacity`/
+`wva_spare_capacity` observability gauges. This fix would turn those gauges from meaningful
+token/capacity counts into unit-less coverage fractions (e.g. `0.43` instead of `3411.76`) —
+correct internally, but a real behavior change to what operators see on dashboards.
+
+**Option B — add coverage-space fields alongside the existing raw ones** (e.g.
+`RequiredCapacityCoverage`/`SpareCapacityCoverage` on `NamedAnalyzerResult`, and a per-role
+equivalent), leaving `RequiredCapacity`/`SpareCapacity`/`Remaining`/`Spare` untouched for
+metrics compatibility. Update `initRoleState` (the *only* place that reads these fields
+directly into `pickerState`/`Remaining` — everything downstream operates on `pickerState`/
+`RoleSpare`, not the struct fields again) to read the new coverage fields instead. Touches
+`optimizer_interfaces.go` (new field), `internal/domain/analyzer.go` (new field on
+`RoleCapacity`), `engine_v2.go` (`normalizeToCompositeUnits` populates the new fields), and
+`analyzer_helpers.go` (`initRoleState`'s read). Keeps metrics semantics unchanged; more
+surgical about scope but touches 4 files instead of 1.
+
+**Option C — reorder the pipeline**: run the coverage conversion on the raw `Result` (before
+`buildNamedResult`/`buildCapacities` ever runs on the composite candidate), so
+`TotalSupply`/`TotalAnticipatedSupply`/`RequiredCapacity`/`SpareCapacity` all get computed
+*once*, already consistent, from normalized inputs. Cleanest conceptually — no duplicate
+computation — but changes `wva_required_capacity`/`wva_spare_capacity`/
+`wva_saturation_utilization` the same way Option A does (they'd end up in coverage-fraction
+units too), and is a bigger structural change to `runAnalyzersAndScore`'s already-fragile loop
+(the same loop the compile-fix gap above is patching).
+
+**Not yet decided which to take.** Needs the user's call on whether the observability-metrics
+behavior change (Option A/C) is acceptable, or whether the extra-field approach (Option B) is
+worth the wider file touch to preserve it.
+
 ## Explicitly not in this PR
 
 - **CT1b** — engine-side nil-saturation guard. Deferred by user request since PR #34; still
@@ -110,6 +159,10 @@ own commit, per the one-task-one-commit convention), then push to `origin/single
 
 ## Todo before opening
 
+- [ ] Decide the correctness-bug fix approach (Option A/B/C above) with the user
+- [ ] Implement the chosen fix, with a new test that exercises the real
+  `collectV2ModelRequest` → optimizer path with nonzero demand end-to-end (closing the test
+  gap that let this bug through)
 - [ ] Commit the CT6 test-fix (blocking gap above) on the mission branch
 - [ ] Push to `origin/single-analyzer`
 - [ ] Confirm `go build ./...` and `go test ./internal/engines/...` clean on the pushed tip
