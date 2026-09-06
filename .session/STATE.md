@@ -68,12 +68,12 @@
 - [ ] Rewrite ledger-capture as a custom-agent (spec + mode)
 - [ ] Write T10 session-setup agent spec
 
-**Last completed:** Session 16: full install of conventions + skills onto session-tracking; skills layout redesign (claude-skills/); resume-mission + wind-down reconstructed and installed; both branches pushed to origin.
+**Last completed:** Session 16 complete — conventions + skills installed, all worktree symlinks fixed, pushed to origin.
 
 **Next step / resume point:** Revisit FG/BG analysis and workflow nuances; revisit overlap between CONVENTIONS.md / session-start.md / resume-mission; revisit role-specific agentbus subscriptions; then rewrite ledger-capture as custom-agent.
 
 ### Status
-IN PROGRESS — session 16 active.
+IN PROGRESS — session 16 retired, ready for session 17.
 
 ### Known issues
 - `settings-and-skill-edits.md` describes a `user-approved-settings-change` marker
