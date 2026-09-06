@@ -77,3 +77,4 @@ Confirm with user before executing.
 - 2026-08-27T20:16 session=2026-08-27-agentbus-design status=retired ledger=.session/2026-08-27-agentbus-design.md
 - 2026-09-03 session=2026-09-03-agentbus-dialogue status=retired ledger=.session/2026-09-03-agentbus-dialogue.md
 - 2026-09-03 session=2026-09-03-agentbus3 status=retired ledger=.session/2026-09-03-agentbus3.md
+- 2026-09-06 session=2026-09-06-agentbus4 status=active ledger=.session/2026-09-06-agentbus4.md
