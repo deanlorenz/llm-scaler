@@ -13,7 +13,27 @@ canonical `.claude/skills/` stored on the `session-tracking` branch.
 - Installs only after the user explicitly authorizes that installation.
 - Approval to draft, review, commit, or push does not authorize installation.
 - Processes suggestions from `session-tracking/suggestion-box/`.
-- Commits convenience symlinks created by other missions under `session-tracking/missions/`.
+- Commits convenience symlinks and other explicitly reported mission-tracking artifacts created by
+  other missions under `session-tracking/missions/`.
+
+## Session-tracking maintenance order
+
+At session start, before mission work:
+1. Subscribe to `session-tracking.pending-commits` and `session-tracking.suggestions`.
+2. Fetch pending-commit messages from the last recorded cursor.
+3. Inspect and process each reported artifact in a separate, reviewable step.
+4. Never delete, move, overwrite, or clean up an unowned artifact. If an artifact is unexplained,
+   stop and ask the user or its owner before changing it.
+5. Commit session-tracking maintenance changes before installing policy changes.
+6. Record a short, human-readable summary of what was committed in the policy-writer ledger.
+
+At session end, and before any install:
+1. Check the pending-commit channel again.
+2. Process newly reported artifacts before installing policy changes.
+3. Publish a short, human-readable completion note describing what was committed.
+
+Do not combine mission-tracking maintenance and policy installation into one commit or one
+unreviewed operation.
 
 ## Checking for Pending `session-tracking` Commits
 
@@ -25,11 +45,14 @@ agentbus_fetch_since(topic="session-tracking.pending-commits", since_seq=0)
 
 For each unprocessed note found:
 1. Inspect git status in `worktrees/session-tracking` for the described changes (e.g. `missions/<name>/`).
-2. Commit them if present on the `session-tracking` branch:
+2. Review the exact paths and file types before staging. Do not delete, move, or overwrite an artifact
+   without explicit authorization from its owner or the user.
+3. Commit only the reviewed maintenance artifacts on the `session-tracking` branch:
    ```bash
    git add missions/<name>/ && git commit -m "chore: commit symlinks for <name>"
    ```
-3. Record the processed sequence number in your live ledger.
+4. Record the processed sequence number and a short human-readable description of the committed
+   paths and purpose in your live ledger. Commit identifiers are optional implementation details.
 
 If no pending notes exist, proceed with standard mission tasks.
 

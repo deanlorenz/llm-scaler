@@ -103,9 +103,19 @@ worktrees/<mission-name>/          ← mission branch/worktree
 - Update STATE after each major step — mark completed items `[x]`, update Last completed,
   Next step, and Status. Do not wait for wind-down. Ledger and STATE updates do not need
   chat narration.
+
+### Ownership and data safety — read and follow literally
+
+- **No in-place editing of anything**, except files you **100% own** in your own session's
+  context — your own code file, your own plan, or your own ledger append. Everything else:
+  write new, then remove/replace old.
+- Never remove a file you do not own or did not create without explicit permission.
+- Before removing anything, verify that its content is unnecessary or has been captured in the
+  correct alternative location. Do not lose data.
+- Destructive actions are rare and need step-by-step approval, including `git reset --hard`,
+  `rm -rf`, `git rm`, stash removal/drop, and equivalents. If not 100% sure, preserve a backup
+  copy rather than proceeding.
 - Never edit files outside the mission and role you own.
 - Do not use in-place command-line rewriting (`sed -i`, `gawk -i`, Python `fileinput`, or
   equivalents). Normal `Edit`/`Write` operations on owned, git-tracked files are allowed when
   their pre-session state is already checkpointed.
-- Destructive actions (`git reset --hard`, `rm -rf`, `git stash drop`, and equivalents) require
-  explicit approval for each individual step. If unsure, preserve a backup instead.
