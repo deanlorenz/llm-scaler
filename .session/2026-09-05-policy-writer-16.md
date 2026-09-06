@@ -22,3 +22,4 @@ Next step: Revisit FG/BG analysis and workflow nuances across the 4-case model; 
 - [2026-09-05] CRITICAL: session-13 resume-mission rewrite (lost — never committed, overwritten by git checkout HEAD without prior git status check). Reconstructed from session-13 + session-14 ledger descriptions. Committed to policy-writer/claude-skills/.
 - [2026-09-05] wind-down safe-checkpoint/retirement split also lost and reconstructed. Step 2 reframed as safety-net pass; Step 5 runs as background agent in both modes.
 - [2026-09-05] Both skills installed to session-tracking via git checkout. Pushed policy-writer (36 commits) and session-tracking (6 commits) to origin.
+- [2026-09-05] Added resume-mission + wind-down symlinks to all worktrees missing them: Main, benchmark-extract, benchmark-init, benchmark-run, benchmark-runtools, benchmark-viz, benchmark-plan, fix-scaledobjects-cold-start. All symlinks verified resolving.
