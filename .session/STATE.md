@@ -49,28 +49,35 @@
 - [x] CT3b — simplify 7 single-entry optimizer helpers (commit `b980f682`)
 - [ ] CT4 — score-weighted aggregation / fairness fix — BLOCKED on user decision (fix-now vs defer)
 - [x] CT5 — document `RoleCapacities` role-visibility contract (commit `fcf9c905`)
-- [x] CT6 — normalize sat→composite to coverage units (commit `f20e06f9`) — **has an
-  outstanding test-fix gap, see Known issues; not yet committed**
+- [x] CT6 — normalize sat→composite to coverage units (commit `f20e06f9`)
+- [x] CT6 compile fix — 6 test call-sites + `multi_backup` move (commit `18f4d4ff`, 2026-09-06)
 - [ ] CT7 (a.k.a. "PR #2") — engine-side reduce to wire non-saturation analyzers into
   CompositeSignal — design + Q1-Q4 open questions now in `spec.md`'s CT7 section
 
 **Last completed:** CT6 — Normalize sat→composite to coverage units (commit `f20e06f9`, 2026-09-01)
 
-**Next step / resume point:** CT6 correctness-bug fix dispatched to a coder (2026-09-06). Coder
-worktree: `.claude/worktrees/coder-ct6-fix` (branch `coder-ct6-fix`, forked from `single-analyzer`
-at `f5a5d687`). Task file: `.claude/worktrees/coder-ct6-fix/.session/STATE.md` (committed
-`206da91e`). Channels: In=`mission.single-analyzer.coder-ct6-fix.in`,
-Out=`mission.single-analyzer.coder-ct6-fix.out` (mission owner subscribed to Out). Task covers
-all 4 parts in one branch: (1) the outstanding CT6 *compile* fix (diff + new file staged in the
-coder's own `.session/`, applied as its own first commit), (2) extended
-`normalizeToCompositeUnits` (all fields in the confirmed table) + new `SatRoleDemand` field +
-normalized-composite log line, (3) fix/extend the existing CT6 unit tests, (4) new end-to-end
-test exercising the real `buildNamedResult` → `normalizeToCompositeUnits` →
-`initRoleState`/optimizer path with nonzero demand. A reviewer will read commits from
-`coder-ct6-fix` as they land. Mission owner integrates the reviewed result onto `single-analyzer`
-via cherry-pick once approved — do not merge the coder worktree directly. After that: decide
-whether CT4's fairness fix is in scope for the next PR, and finalize the next PR's exact
-boundary (see PR history below) — confirm with user before executing.
+**Next step / resume point:** CT6 compile fix landed directly on `single-analyzer` (commit
+`18f4d4ff`) — `go build`/`go vet`/`go test ./internal/engines/...` all clean at that commit.
+The CT6 *correctness* fix (extend `normalizeToCompositeUnits`, add `SatRoleDemand`, fix/extend
+tests, add e2e coverage — full spec in `spec.md` CT6 section, confirmed fix table) is still to
+be implemented; two coder-dispatch attempts on 2026-09-06 failed on worktree/Bash sandbox
+mismatches before writing any code (see ledger `.session/2026-09-06-single-analyzer-3.md` for
+the full postmortem) — both attempts and the `coder-ct6-fix` worktree/branch were abandoned and
+cleaned up (branch deleted, worktree removed; nothing of value was lost since neither attempt
+edited any file).
+
+**Revised coder-dispatch approach (per user 2026-09-06):** prepare a fresh branch containing
+exactly the starting state the coder should work from (forked from `single-analyzer` at
+`18f4d4ff`, so the coder starts from a commit that already builds clean), tell the coder the
+exact commit SHA to `git reset --hard` to on startup inside its own `isolation: "worktree"`
+sandbox (a fresh ad-hoc worktree with a genuinely working Bash — confirmed working in the first
+dispatch attempt, just pointed at the wrong content), and have it work from there — committing
+either back onto the branch I gave it if possible, or a new branch if not. Mission owner
+cherry-picks from the coder's resulting branch afterward. Do not reattempt `isolation:"worktree"`
++ a separately-pre-created worktree (confirmed broken: creates an unrelated worktree, ignores
+the pre-created one) or omitting `isolation` while this session stays worktree-pinned (confirmed
+broken: subagent's Bash inherits the parent's own pin, not the target). Not yet re-dispatched —
+next action is preparing that fresh branch/commit and relaunching.
 
 ### PR history
 
@@ -126,28 +133,27 @@ and `.session/pr-spec-next-coverage-units.md`.
   logging/metrics for the normalized composite itself (currently invisible). TODO noted for
   later (not this fix): revisit whether model-level "non-role" fields should exist at all,
   vs. requiring `role="both"` and always going through `RoleCapacities`.
-- **CT6 does not compile as pushed — blocks the next PR.** Commit `f20e06f9` changed
-  `runAnalyzersAndScore`'s return type from `allocation.NamedAnalyzerResult` to
-  `[]allocation.NamedAnalyzerResult` and removed `composeAnalyzerResults`/`rawAnalyzerResult`,
-  but never updated 6 test-file call sites that still treat the return value as a single
-  struct (e.g. `result.Name` on a slice — a Go compile error). The fix has existed only as
-  uncommitted working-tree changes in `worktrees/single-analyzer` since 2026-08-31 — verified
-  via `go build ./...` / `go vet` passing only with the fix applied. `origin/single-analyzer`
-  (tip `d90bd565`) carries `f20e06f9` without this fix, so **origin's HEAD does not build
-  either.** Needs a commit before any further PR work. The uncommitted fix also moved
-  `engine_v2_compose_test.go` → `internal/engines/allocation/multi_backup/` (`//go:build
-  ignore`) since it tested the now-deleted `composeAnalyzerResults` — matches the existing
-  multi_backup pattern for pre-CT3b originals kept for CT7 reference. Its coder's original
-  worktree/branch could not be located (checked all `.claude/worktrees/*` entries, all
-  `worktree-*` tracking branches, and 73 dangling/unreachable commits via `git fsck
-  --unreachable` — none matched); `conventions/coder-orchestration.md` rule 5 (record the
-  coder's worktree+branch in STATE.md before it starts) was not followed for this dispatch,
-  so the working-tree copy may be the only surviving trace.
 - **CT4 fairness:** `fairShareValue` equalizes absolute remaining demand, not coverage ratio.
   Fix-now vs. document-and-defer is the user's call. See spec CT4 section and
   `worktrees/session-tracking/missions/single-analyzer/fairshare-value-correctness-investigation-2026-08-25.md`.
 - **Rescale weight long-term fix:** token weight is proportional to N_full only for homogeneous
   PRC; longer-term fix tracked in spec rescale-fairness section (separate CT).
+- **`origin/single-analyzer` still does not build** — the compile fix (commit `18f4d4ff`) is
+  local-only so far (not pushed); origin's tip (`d90bd565`, carrying `f20e06f9` without the fix)
+  still fails `go build ./...`. Needs a push (with explicit per-op authorization) at some point.
+- **Coder dispatch mechanics — two confirmed-broken patterns (2026-09-06), for future dispatches:**
+  (1) `Agent` with `isolation:"worktree"` always creates a brand-new ad-hoc worktree for the
+  subagent; it cannot be pointed at a worktree you already prepared — a pre-created worktree
+  handed to it that way is simply ignored. (2) Launching a background `Agent` *without*
+  `isolation` from a session that is itself pinned (via `EnterWorktree`) makes the subagent's
+  Bash sandbox inherit the *parent's* pinned worktree, not any path the subagent later passes to
+  its own `EnterWorktree(path=...)` call — `EnterWorktree` inside such a subagent relocates file
+  tools only, never Bash, and `ExitWorktree` refuses outright for a pinned subagent. Net effect:
+  there is currently no way to hand a pre-existing worktree to a subagent and have its Bash
+  actually run there. Working pattern instead: prepare a branch/commit with the exact starting
+  state, launch with `isolation:"worktree"` (real Bash, but a fresh unrelated worktree/branch),
+  and have the coder `git reset --hard <sha>` to that prepared commit as its first action, then
+  work and commit from there; integrate via cherry-pick afterward.
 
 ## Key decisions (for resuming context)
 
