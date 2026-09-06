@@ -108,6 +108,16 @@ and `.session/pr-spec-next-coverage-units.md`.
 
 ### Known issues
 
+- **TODO (separate future PR): composite metrics.** Spec's confirmed fix design said "add a
+  log line (and/or metric)" for the post-normalization composite; only the log line
+  (`logCompositeSignal`) shipped in the CT6 fix. The metrics half is still open: emit
+  `wva_required_capacity`/`wva_spare_capacity` (and any other composite fields worth exposing)
+  for the *normalized* composite, as coverage fractions — already confirmed acceptable in
+  spec.md's CT6 "Resolution of the observability tradeoff" (2026-09-06): per-analyzer metrics
+  (`wva_analyzer_demand`/`wva_analyzer_target`, from `recordAnalyzerMetrics` on raw
+  pre-normalization `namedResults`) are a distinct metric family and stay untouched — no
+  information is lost by adding a second, composite-scoped metric family alongside them. Design
+  question is resolved; only the implementation is outstanding. Not blocking the current PR.
 - **CT6 correctness bug — FIXED and merged 2026-09-06, reviewed Pass.** `RequiredCapacity`/
   `Remaining`/etc. now normalized alongside `PerReplicaCapacity`/`TotalDemand`/`RoleDemand`.
   Commits `c5af5696`/`290ca75f`/`896879d5`/`e4b1e77d` on `single-analyzer` (cherry-picked from
