@@ -24,6 +24,8 @@ into `session-tracking` and pushed.
   upfront.
 - **Draft here, install there.** `policy-writer` drafts all changes. `session-tracking`
   receives finished copies only. Never draft directly in `session-tracking`.
+- **Production excludes backups.** Backup copies may remain tracked under `backup_rules/`, but
+  must not be stored in or installed into production `conventions/`.
 - **What/how only in production files.** `CONVENTIONS.md` and `conventions/*.md` carry only
   the rule — stated as what to do and how. Rationale, incident history, and design background
   live in this spec (section 7).
@@ -48,8 +50,8 @@ into `session-tracking` and pushed.
 | **Branch / worktree** | `policy-writer` / `worktrees/policy-writer` |
 | **Installs into** | `worktrees/session-tracking` (branch `session-tracking`) |
 | **Status** | IN PROGRESS |
-| **Last pushed** | `1427f964` (session-tracking), `d52e4f86` (policy-writer) — 2026-09-03 |
-| **Active work** | Conventions fixes (session-start, state-vs-ledger, CONVENTIONS.md); spec refactor; skill updates |
+| **Last installed** | `4b112e0a` (session-tracking); `2d241726` (policy-writer) — 2026-09-06 |
+| **Active work** | Maintain policy safely; remaining ledger-capture and session-setup agent design |
 | **Blocking** | Nothing currently — see section 4 for open decisions |
 
 ---
@@ -380,8 +382,9 @@ starts. FG allows the user to verify before handoff.
 - `worktrees/policy-writer/PLAN-conventions-split.md` — approved plan for the
   CONVENTIONS.md split (Phase 1 + Phase 2); full file-by-file content mapping. Lives in
   `policy-writer` branch only; not yet copied to `session-tracking`.
-- `worktrees/session-tracking/CONVENTIONS.md` — production copy (installed)
-- `worktrees/session-tracking/conventions/` — production copies (installed)
+- `worktrees/session-tracking/CONVENTIONS.md` — production copy (installed at `4b112e0a`)
+- `worktrees/session-tracking/conventions/` — production copies (installed at `4b112e0a`)
+- `worktrees/policy-writer/backup_rules/` — retained policy backups, excluded from production install
 - `.claude/skills/resume-mission/SKILL.md` — skill file (symlink in this worktree)
 - `.claude/skills/wind-down/SKILL.md` — skill file (symlink in this worktree)
 - `/home/dean/code/llm-d/llm-d-workload-variant-autoscaler/plans-tooling/conventions/bob-delegation.md` — source for Bob CLI mechanics (T8)

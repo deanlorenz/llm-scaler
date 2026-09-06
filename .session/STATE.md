@@ -23,15 +23,15 @@
   - `worktrees/session-tracking/conventions/` (installed copies)
   - `.claude/skills/resume-mission/SKILL.md`
   - `.claude/skills/wind-down/SKILL.md`
-- **Expected output:** Updated skills (`resume-mission`, `wind-down`); ledger-capture
-  custom-agent spec + mode; session-setup agent spec (T10).
+- **Expected output:** Maintain the conventions, skills, and tracking layout; install approved
+  production policy changes into `session-tracking` only after explicit authorization.
 - **Done / completion criteria:**
-  - `resume-mission` and `wind-down` skills reflect unified STATE model and new conventions
-  - ledger-capture rewritten as a custom-agent with its own spec and mode definition
-  - T10 session-setup agent has a written spec
-  - All changes installed into `session-tracking` and pushed to `origin`
+  - Ownership and data-safety rules are present in core `CONVENTIONS.md` and installed.
+  - Backup copies remain tracked under `backup_rules/`, outside production `conventions/`.
+  - `session-tracking` contains no `.bak` files under production `conventions/`.
+  - Installation and clean-state verification are recorded in the active ledger.
 - **Limits:**
-  - `.bak` files: keep, do not delete (user decision 2026-08-31)
+  - Do not put backup copies in production `conventions/` or install them into `session-tracking`.
   - `settings-and-skill-edits.md`: do not change until marker behavior verified
   - `session-tracking` agentbus files: not this mission's — do not touch
 - **Extra rules / rule refs:** `conventions/settings-and-skill-edits.md` before editing any
@@ -64,15 +64,18 @@
 - [x] Fix install procedure (git checkout from branch, not hand-copy); add install-to-session-tracking.md convention
 - [x] Redesign skills layout: policy-writer/claude-skills/ source of truth; session-tracking/claude-skills/ installed copy; symlinks retargeted
 - [x] Reconstruct resume-mission + wind-down skills from session-13/14 ledger; install to session-tracking; push both branches
+- [x] Restore ownership and data-safety rules; install approved policy changes
+- [x] Move policy backups from `conventions/` to `backup_rules/`; keep them out of production
 - [ ] Rewrite ledger-capture as a custom-agent (spec + mode)
 - [ ] Write T10 session-setup agent spec
 
-**Last completed:** Session 16 complete — conventions + skills installed, all worktree symlinks fixed, pushed to origin.
+**Last completed:** Session 17 retired — ledger verified; ownership/data-safety rules installed;
+policy backups moved to `backup_rules/`; both worktrees verified clean.
 
 **Next step / resume point:** Revisit FG/BG analysis and workflow nuances; revisit overlap between CONVENTIONS.md / session-start.md / resume-mission; revisit role-specific agentbus subscriptions; then rewrite ledger-capture as custom-agent.
 
 ### Status
-IN PROGRESS — session 16 retired, ready for session 17.
+IN PROGRESS — session 17 retired; remaining custom-agent and workflow work is open for the next session.
 
 ### Known issues
 - `settings-and-skill-edits.md` describes a `user-approved-settings-change` marker
@@ -98,5 +101,5 @@ IN PROGRESS — session 16 retired, ready for session 17.
 - 2026-09-05 session=2026-09-05-policy-writer-15 status=retired ledger=.session/ledger/2026-09-05-policy-writer-15.md
 - 2026-09-05 session=2026-09-05-policy-writer-16 status=retired ledger=.session/ledger/2026-09-05-policy-writer-16.md
 
-- 2026-09-06 session=2026-09-06-policy-writer-17 status=active ledger=.session/2026-09-06-policy-writer-17.md
+- 2026-09-06 session=2026-09-06-policy-writer-17 status=retired ledger=.session/ledger/2026-09-06-policy-writer-17.md
 

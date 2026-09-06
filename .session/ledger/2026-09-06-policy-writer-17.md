@@ -71,3 +71,27 @@ Date: 2026-09-06
 
 - User explicitly corrected the unsafe deletion of unexplained `.bak` files. Added a hard rule: never delete, move, overwrite, or clean up an unowned artifact; stop and ask first.
 - Reworded policy-writer reporting rules to require short, human-readable descriptions of committed work. Commit IDs are optional implementation details, not the message itself.
+
+## Final completion
+
+- Committed restored ownership and data-safety rules in policy-writer as `f53b4a05`.
+- Installed those three policy files into session-tracking as `4b112e0a`.
+- Moved the seven retained `.bak` backups from `conventions/` to `backup_rules/` in policy-writer as `2d241726`.
+- Confirmed no `.bak` files remain under session-tracking production `conventions/`.
+- Confirmed policy-writer and session-tracking worktrees are clean after the approved commits.
+
+## Wind-down — retirement
+
+- Reached a safe stopping point; no background workers were launched by this session.
+- Final pass confirms the session's findings, decisions, corrections, and commits are recorded here.
+- STATE and spec were updated to reflect the completed policy installation and backup relocation.
+- This ledger is verified for retirement after this summary is appended.
+
+## Verified 2026-09-06 — folded in: final policy installation, backup relocation, and clean-state verification
+
+| Ledger point | Durable destination | Action taken |
+|---|---|---|
+| Ownership and data-safety rules | `CONVENTIONS.md` and installed `session-tracking/CONVENTIONS.md` | Installed in `4b112e0a` |
+| Policy backups must stay out of production conventions | `backup_rules/` and `.session/STATE.md` | Moved in `2d241726`; recorded in STATE |
+| Explicit installation and clean-state results | `.session/STATE.md` and `.session/spec-policy-writer.md` | Updated with commit references and verification |
+| Unsafe broad checkout and backup staging incident | This ledger and existing policy rules | Recorded for future sessions |
