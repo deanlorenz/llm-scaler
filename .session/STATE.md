@@ -120,8 +120,11 @@ committed). Commit `44a7f5e6`. **This commit has NOT yet been through independen
 Three commits now not yet pushed: `65c344af`, `991800ce` (both reviewed Pass), `44a7f5e6`
 (not yet reviewed) — 3 commits ahead of `origin/single-analyzer` (still at `c2a0774e`).
 
+**Reviewer dispatched for `44a7f5e6`** (agentId `afa738031ec0218fc`, background, 2026-09-07) —
+report will land at `.session/review-44a7f5e6.md`. Do not push until this comes back.
+
 **Remaining before this can be considered fully wrapped:**
-1. Get `44a7f5e6` independently reviewed.
+1. Wait for the review of `44a7f5e6` (in progress) and address any findings.
 2. Push the accumulated fix commits to origin — needs its own per-op authorization (the
    2026-09-06 push authorization is consumed, per `conventions/push.md`).
 3. Decide with the user whether CT4's fairness fix (`fairShareValue`, still blocked on a
