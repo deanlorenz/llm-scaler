@@ -793,6 +793,7 @@ func (e *Engine) collectV2ModelRequest(
 	// are engine-internal (liveness, metrics) and not forwarded.
 	composite := namedResults[0]
 	normalizeToCompositeUnits(&composite)
+	logCompositeSignal(ctx, modelID, namespace, composite)
 
 	return &allocation.ModelScalingRequest{
 		ModelID:         modelID,
@@ -1048,14 +1049,29 @@ func buildRoleCapacities(ctx context.Context, result *domain.AnalyzerResult) map
 // replica count for full coverage — numerically identical to ceil(D/PRC)
 // before the conversion.
 //
-// SatDemand is set to Result.TotalDemand before normalization so the rescale
-// weight (rescaleInputsForGroup) can use the original token-proportional demand
-// even after TotalDemand becomes 1.0.
+// Every other capacity aggregate buildCapacities/applyUniversalThreshold derived
+// from the raw (token-scale) demand — RequiredCapacity, SpareCapacity, Remaining,
+// Spare, TotalSupply, TotalAnticipatedSupply, and their per-role RoleCapacities
+// equivalents — is in the same raw units and must be divided by the same
+// per-role demand PerReplicaCapacity was divided by, or every downstream
+// consumer that now divides/subtracts a raw value against a normalized PRC
+// (initRoleState, cost_aware_optimizer's decision-building) produces replica
+// counts wrong by roughly 1/PRC_fraction. Utilization is recomputed from the
+// normalized TotalDemand/TotalSupply rather than carried over, since dividing
+// both halves of an already-computed ratio by the same demand would otherwise
+// require reasoning about which stale copy is still correct.
+//
+// SatDemand/SatRoleDemand are set to the raw Result.TotalDemand/RoleDemand
+// before normalization so the rescale weight (rescaleInputsForGroup) can use
+// the original token-proportional demand even after TotalDemand becomes 1.0.
+// Every raw demand this function needs for a division is captured up front,
+// before any demand field is overwritten to 1.0.
 //
 // Special cases:
 //
-//	demand == 0 for a role: PerReplicaCapacity is left unchanged (the optimizer's
-//	  demand<=0 → util=1.0 path handles this correctly already).
+//	demand == 0 for a role: PerReplicaCapacity (and every other per-role signal
+//	  for that role) is left unchanged — the optimizer's demand<=0 → util=1.0
+//	  path handles this correctly already.
 //	PRC == 0 for a variant: left as 0 (existing PRC<=0 eligibility gates fire).
 //
 // normalizeToCompositeUnits must be called after buildCapacities — RC, SC, and
@@ -1066,24 +1082,35 @@ func normalizeToCompositeUnits(nr *allocation.NamedAnalyzerResult) {
 		return
 	}
 
-	// Capture raw demand for the rescale weight before overwriting TotalDemand.
-	nr.SatDemand = nr.Result.TotalDemand
+	// Capture every raw (pre-overwrite) demand value up front — both for the
+	// rescale weight (SatDemand/SatRoleDemand) and for the divisions below —
+	// before any demand field is overwritten to 1.0.
+	modelDemand := nr.Result.TotalDemand
+	nr.SatDemand = modelDemand
+	if len(nr.Result.RoleDemand) > 0 {
+		nr.SatRoleDemand = make(map[string]float64, len(nr.Result.RoleDemand))
+		maps.Copy(nr.SatRoleDemand, nr.Result.RoleDemand)
+	}
+
+	// demandForRole resolves the raw demand a role's signals were built from,
+	// mirroring the lookup normalizeToCompositeUnits' PRC loop below already
+	// used: "both" (or unset) uses the model-level demand; any other role uses
+	// its own raw RoleDemand entry, falling back to model-level demand when the
+	// analyzer emitted no per-role attribution for it.
+	demandForRole := func(role string) float64 {
+		if role == "" || role == domain.RoleBoth {
+			return modelDemand
+		}
+		if d, ok := nr.SatRoleDemand[role]; ok {
+			return d
+		}
+		return modelDemand
+	}
 
 	// Normalize each variant's PRC by its role's demand.
 	for i := range nr.Result.VariantCapacities {
 		vc := &nr.Result.VariantCapacities[i]
-		role := vc.Role
-		if role == "" {
-			role = domain.RoleBoth
-		}
-		var demand float64
-		if role == domain.RoleBoth {
-			demand = nr.Result.TotalDemand
-		} else if d, ok := nr.Result.RoleDemand[role]; ok {
-			demand = d
-		} else {
-			demand = nr.Result.TotalDemand
-		}
+		demand := demandForRole(vc.Role)
 		if demand > 0 && vc.PerReplicaCapacity > 0 {
 			vc.PerReplicaCapacity = vc.PerReplicaCapacity / demand
 		}
@@ -1091,17 +1118,51 @@ func normalizeToCompositeUnits(nr *allocation.NamedAnalyzerResult) {
 		// PRC == 0: leave as 0 (eligibility gate fires naturally).
 	}
 
-	// Normalize demands to 1.0 after all PRC divisions are done.
+	// Normalize the model-level scaling signals and supply aggregates by the
+	// same raw model demand PerReplicaCapacity was divided by (the non-role, or
+	// "both", case). Left unchanged when modelDemand <= 0, mirroring the PRC
+	// zero-guard above.
+	if modelDemand > 0 {
+		nr.RequiredCapacity /= modelDemand
+		nr.SpareCapacity /= modelDemand
+		nr.Remaining /= modelDemand
+		nr.Spare /= modelDemand
+		nr.TotalSupply /= modelDemand
+		nr.TotalAnticipatedSupply /= modelDemand
+	}
+
+	// Normalize each RoleCapacities entry by that role's own raw demand, then
+	// its TotalDemand to 1.0 — mirroring the model-level treatment above so
+	// applyUniversalThreshold's per-role RC/SC (and initRoleState/
+	// cost_aware_optimizer's per-role reads of them) remain consistent with the
+	// composite units.
+	for role, rc := range nr.RoleCapacities {
+		demand := demandForRole(role)
+		if demand > 0 {
+			rc.RequiredCapacity /= demand
+			rc.SpareCapacity /= demand
+			rc.TotalSupply /= demand
+			rc.TotalAnticipatedSupply /= demand
+		}
+		rc.TotalDemand = 1.0
+		nr.RoleCapacities[role] = rc
+	}
+
+	// Normalize demands to 1.0 last, after every division above has used the
+	// raw values.
 	nr.Result.TotalDemand = 1.0
 	for role := range nr.Result.RoleDemand {
 		nr.Result.RoleDemand[role] = 1.0
 	}
 
-	// RoleCapacities.TotalDemand must also be normalized so applyUniversalThreshold's
-	// per-role RC/SC remain consistent with the composite units.
-	for role, rc := range nr.RoleCapacities {
-		rc.TotalDemand = 1.0
-		nr.RoleCapacities[role] = rc
+	// Utilization is recomputed from the normalized TotalDemand/TotalSupply
+	// rather than divided again: algebraically identical to the pre-normalization
+	// value (both numerator and denominator scale by the same modelDemand), and
+	// recomputing avoids leaving a stale copy for a future reader to trust.
+	if nr.TotalSupply > 0 {
+		nr.Utilization = nr.Result.TotalDemand / nr.TotalSupply
+	} else {
+		nr.Utilization = 0
 	}
 }
 
@@ -1164,6 +1225,62 @@ func logAnalyzerResult(ctx context.Context, modelID, namespace string, nr alloca
 		"scaleUpThreshold", nr.ScaleUpThreshold,
 		"scaleDownBoundary", nr.ScaleDownBoundary,
 		"variants", variants,
+	)
+}
+
+// logCompositeSignal emits one INFO "composite-signal" line for the coverage-unit
+// composite collectV2ModelRequest hands to the optimizer, right after
+// normalizeToCompositeUnits runs. logAnalyzerResult (above) logs every analyzer's
+// result in its own raw units before normalization; nothing previously logged the
+// actual post-normalization signal the optimizer receives, which is exactly what
+// let the normalization bug (RequiredCapacity/SpareCapacity/Remaining/Spare left
+// in raw units while PerReplicaCapacity was already a coverage fraction) go
+// unnoticed. rc/sc/remaining/spare/prc below are all coverage fractions once this
+// function's caller has normalized nr, not token counts.
+func logCompositeSignal(ctx context.Context, modelID, namespace string, nr allocation.NamedAnalyzerResult) {
+	if nr.Result == nil {
+		return
+	}
+	logger := ctrl.LoggerFrom(ctx)
+
+	type variantEntry struct {
+		Name string  `json:"name"`
+		PRC  float64 `json:"prc"`
+		Role string  `json:"role"`
+	}
+	variants := make([]variantEntry, 0, len(nr.Result.VariantCapacities))
+	for _, vc := range nr.Result.VariantCapacities {
+		role := vc.Role
+		if role == "" {
+			role = domain.RoleBoth
+		}
+		variants = append(variants, variantEntry{Name: vc.VariantName, PRC: vc.PerReplicaCapacity, Role: role})
+	}
+
+	type roleEntry struct {
+		Role      string  `json:"role"`
+		RC        float64 `json:"rc"`
+		SC        float64 `json:"sc"`
+		RoleSpare float64 `json:"roleSpare,omitempty"`
+	}
+	roles := make([]roleEntry, 0, len(nr.RoleCapacities))
+	for role, rc := range nr.RoleCapacities {
+		roles = append(roles, roleEntry{Role: role, RC: rc.RequiredCapacity, SC: rc.SpareCapacity, RoleSpare: nr.RoleSpare[role]})
+	}
+	sort.Slice(roles, func(i, j int) bool { return roles[i].Role < roles[j].Role })
+
+	logger.Info("composite-signal",
+		"modelID", modelID,
+		"namespace", namespace,
+		"analyzer", nr.Name,
+		"demand", nr.Result.TotalDemand,
+		"satDemand", nr.SatDemand,
+		"rc", nr.RequiredCapacity,
+		"sc", nr.SpareCapacity,
+		"remaining", nr.Remaining,
+		"spare", nr.Spare,
+		"variants", variants,
+		"roleCapacities", roles,
 	)
 }
 
