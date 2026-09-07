@@ -115,25 +115,32 @@ in normalize, it will become the aggregation logic anyway"): `normalizeToComposi
 takes its source by value and returns an independent deep copy; no longer mutates its argument.
 Updated all 9 call sites (1 production + 8 tests), added a new aliasing-safety test (verified
 sensitive by reproducing the old aliasing behavior standalone, confirmed, discarded — never
-committed). Commit `44a7f5e6`. **This commit has NOT yet been through independent review.**
+committed). Commit `44a7f5e6`.
 
-Three commits now not yet pushed: `65c344af`, `991800ce` (both reviewed Pass), `44a7f5e6`
-(not yet reviewed) — 3 commits ahead of `origin/single-analyzer` (still at `c2a0774e`).
+**`44a7f5e6` reviewed Pass** (agentId `afa738031ec0218fc`) — empirically confirmed (reverted in
+a disposable scratch worktree, watched the new test fail against pre-fix code, cleaned up) that
+every reference-type field on `NamedAnalyzerResult`/`AnalyzerResult` is deep-copied correctly,
+`VariantCapacity`/`RoleCapacity` really are flat (no missed second-level fields), no other
+caller exists, build/vet/test/gofmt all clean. One minor non-blocking nit: an internal `CT7`
+task-ID had leaked into a doc comment and the commit message (this project has precedent,
+`e4b1e77d`, for scrubbing exactly this) — fixed directly (doc-comment-only, no logic change,
+verified build/vet/gofmt clean) as commit `e3ce4abc`; too small to warrant its own review round.
+Report: `.session/review-44a7f5e6.md`.
 
-**Reviewer dispatched for `44a7f5e6`** (agentId `afa738031ec0218fc`, background, 2026-09-07) —
-report will land at `.session/review-44a7f5e6.md`. Do not push until this comes back.
+Four commits now not yet pushed: `65c344af`, `991800ce`, `44a7f5e6` (all reviewed Pass),
+`e3ce4abc` (doc-only nit fix, no review needed) — 4 commits ahead of `origin/single-analyzer`
+(still at `c2a0774e`). **Every commit in this PR has now been through independent review.**
 
 **Remaining before this can be considered fully wrapped:**
-1. Wait for the review of `44a7f5e6` (in progress) and address any findings.
-2. Push the accumulated fix commits to origin — needs its own per-op authorization (the
+1. Push the accumulated fix commits to origin — needs its own per-op authorization (the
    2026-09-06 push authorization is consumed, per `conventions/push.md`).
-3. Decide with the user whether CT4's fairness fix (`fairShareValue`, still blocked on a
+2. Decide with the user whether CT4's fairness fix (`fairShareValue`, still blocked on a
    fix-now-vs-defer decision) belongs in the next PR.
-4. Finalize the next PR's exact scope/boundary (see PR history below) and open it via the
+3. Finalize the next PR's exact scope/boundary (see PR history below) and open it via the
    PR-branch workflow (`conventions/pr-branch.md`/`conventions/pr-workflow.md`).
-5. Implement CT6 composite metrics (separate future PR — see Known issues; explicitly not
+4. Implement CT6 composite metrics (separate future PR — see Known issues; explicitly not
    blocking the current PR).
-6. Clean up: the two failed coder-dispatch worktrees/branches from 2026-09-06
+5. Clean up: the two failed coder-dispatch worktrees/branches from 2026-09-06
    (`.claude/worktrees/agent-a223357ad56398278`, `.claude/worktrees/agent-a64b37115d72e7617` if
    still present) and the completed `coder-ct6-fix-v3` worktree/branch
    (`.claude/worktrees/agent-acc4742a2f2a1aceb`) can be removed once the user confirms nothing
@@ -152,12 +159,12 @@ and `.session/pr-spec-next-coverage-units.md`.
 - **Next PR — not yet opened, no branch cut yet.** Scope is **CT6 only**: `f20e06f9` (original
   normalization) + `18f4d4ff` (compile fix) + `c5af5696`/`290ca75f`/`896879d5`/`e4b1e77d`
   (correctness fix + tests) + `65c344af` (log-function merge) + `991800ce` (composite naming +
-  log completeness) + `44a7f5e6` (deep-copy fix) — CT3b and CT5 are already merged in PR #34,
-  so they are not part of this PR's diff. User's PR review still in progress (2026-09-07) —
-  more commits may be added before this is ready to cut. `65c344af`/`991800ce` reviewed Pass;
-  `44a7f5e6` not yet reviewed; none of the three pushed. The s7 stale-args bug (`b067642a`) is
-  NOT relevant to this PR — it only ever existed on the mission branch, never on any PR-prep
-  branch, so there's nothing to carry forward for it.
+  log completeness) + `44a7f5e6` (deep-copy fix) + `e3ce4abc` (doc nit) — CT3b and CT5 are
+  already merged in PR #34, so they are not part of this PR's diff. **Every commit reviewed
+  Pass (or, for the trivial doc-only `e3ce4abc`, judged not to need its own review round); none
+  pushed yet.** User may still find more during PR review. The s7 stale-args bug (`b067642a`)
+  is NOT relevant to this PR — it only ever existed on the mission branch, never on any
+  PR-prep branch, so there's nothing to carry forward for it.
 - **CT7** (engine-side reduce) is not scoped into either PR above; it needs its own PR once its
   4 open design questions (spec CT7 section) are resolved, and depends on the next PR's test-fix
   landing first (CT7 builds on `runAnalyzersAndScore`'s current slice-returning shape).
@@ -166,7 +173,7 @@ and `.session/pr-spec-next-coverage-units.md`.
 
 ### Known issues
 
-- **FIXED 2026-09-07 (commit `44a7f5e6`, not yet pushed, not yet reviewed): `composite :=
+- **FIXED 2026-09-07 (commit `44a7f5e6`, reviewed Pass, not yet pushed): `composite :=
   namedResults[0]` aliased `Result`/`RoleCapacities`/`RoleSpare` with the source.** This was
   the exact "known aliasing hazard" the original CT6 spec section had flagged and left
   unaddressed as "not a live bug today." User explicitly asked to confirm the copy was a real
