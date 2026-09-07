@@ -11,7 +11,7 @@
 - **Worktree:** `worktrees/policy-writer` (branch `policy-writer`)
 - **Role / scope:** Mission owner. Drafts all changes to `CONVENTIONS.md`, `conventions/`,
   and the skills here; copies finished content into `session-tracking`.
-- **Ledger / log:** `.session/2026-09-06-policy-writer-18.md` (active)
+- **Ledger / log:** *(none — session 18 retired; new session creates its own ledger)*
 
 ## Task
 
@@ -119,9 +119,11 @@ CONVENTIONS/session-start/resume-mission overlap, agentbus subscription details,
 ledger-capture as a custom-agent, write T10 session-setup agent spec.
 
 ### Status
-RETIRING — worktree-delegation suggestion-box item and its root-cause fix are fully done and
-installed on both branches. Only `36375780` (suggestion-box processed-marker commit) remains
-unpushed, pending separate authorization. No other work in progress.
+IN PROGRESS — session 18 retired. Worktree-delegation suggestion-box item and its root-cause
+fix are fully done and installed on both branches. Only `36375780` (suggestion-box
+processed-marker commit) remains unpushed, pending separate authorization. No other work in
+progress; next session picks up the pre-existing backlog (FG/BG analysis, CONVENTIONS overlap,
+agentbus subscriptions, ledger-capture custom-agent, T10 spec).
 
 ### Known issues
 - `settings-and-skill-edits.md` describes a `user-approved-settings-change` marker
@@ -155,5 +157,5 @@ unpushed, pending separate authorization. No other work in progress.
 - 2026-09-05 session=2026-09-05-policy-writer-16 status=retired ledger=.session/ledger/2026-09-05-policy-writer-16.md
 
 - 2026-09-06 session=2026-09-06-policy-writer-17 status=retired ledger=.session/ledger/2026-09-06-policy-writer-17.md
-- 2026-09-06 session=2026-09-06-policy-writer-18 status=active ledger=.session/2026-09-06-policy-writer-18.md
+- 2026-09-06 session=2026-09-06-policy-writer-18 status=retired ledger=.session/ledger/2026-09-06-policy-writer-18.md
 
