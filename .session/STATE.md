@@ -97,21 +97,31 @@
   drafts (`git checkout -- coder-orchestration.md coder.md`, removed untracked
   `worktree-delegation.md`), then installed the current, final `policy-writer` content
   (`CONVENTIONS.md`, `conventions/`, `claude-skills/`) via the normal procedure. Committed on
-  `session-tracking` as `702c35ae`. Not pushed — needs its own separate authorization.
-- [ ] Prefix the processed suggestion-box entry
-  `session-tracking/suggestion-box/2026-09-06-2240-dean-llmd-scaler-sandbox.md` with
-  `processed-` now that the worktree-delegation work is installed.
+  `session-tracking` as `702c35ae`; pushed to `origin` (`56c38b10..702c35ae`).
+- [x] Root-cause fix: `claude-skills/resume-mission/SKILL.md` gets a new mandatory Step 3a —
+  directly checks whether `conventions/<mission-name>.md` exists (no dependency on
+  `CONVENTIONS.md`'s own index) and requires reading it before Step 4, every resume. Removes
+  Step 6's old soft reference that this session read but didn't act on. Committed on
+  `policy-writer`: `5df72c1f`; installed + pushed on `session-tracking` as part of `702c35ae`.
+- [x] Pushed `policy-writer` to `origin` (`32b725ef..5df72c1f`).
+- [x] Prefixed the processed suggestion-box entry
+  `session-tracking/suggestion-box/2026-09-06-2240-dean-llmd-scaler-sandbox.md` →
+  `processed-2026-09-06-2240-dean-llmd-scaler-sandbox.md`. Committed on `session-tracking`:
+  `36375780`. Not yet pushed — no push authorization requested for it yet.
 
-**Last completed:** Pushed `policy-writer` to `origin` (`32b725ef..5df72c1f`). Cleaned up
-`session-tracking`'s stale drafts and installed the finished worktree-delegation work +
-resume-mission Step 3a gate there (`702c35ae`) — not yet pushed.
+**Last completed:** Full suggestion-box item closed end to end: drafted and finalized on
+`policy-writer`, installed and pushed to `session-tracking`, resume-mission root-cause gate
+added and installed, suggestion-box entry marked processed (commit `36375780`, local only).
 
-**Next step / resume point:** Ask user for authorization to push `session-tracking`; once
-pushed, prefix the suggestion-box entry `processed-`.
+**Next step / resume point:** Push `36375780` to `session-tracking`'s `origin` when the user
+authorizes it. Otherwise, next open work is the pre-existing backlog: revisit FG/BG analysis,
+CONVENTIONS/session-start/resume-mission overlap, agentbus subscription details, rewrite
+ledger-capture as a custom-agent, write T10 session-setup agent spec.
 
 ### Status
-IN PROGRESS — worktree-delegation work is installed on both branches. `session-tracking`'s
-install commit (`702c35ae`) is not yet pushed; suggestion-box entry not yet marked processed.
+RETIRING — worktree-delegation suggestion-box item and its root-cause fix are fully done and
+installed on both branches. Only `36375780` (suggestion-box processed-marker commit) remains
+unpushed, pending separate authorization. No other work in progress.
 
 ### Known issues
 - `settings-and-skill-edits.md` describes a `user-approved-settings-change` marker
