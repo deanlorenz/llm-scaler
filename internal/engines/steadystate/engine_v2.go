@@ -791,10 +791,13 @@ func (e *Engine) collectV2ModelRequest(
 	// namedResults[0] is always the saturation entry — it is built first and
 	// unconditionally. The optimizer only needs sat's signal; all other entries
 	// are engine-internal (liveness, metrics) and not forwarded.
+	composite := namedResults[0]
+	normalizeToCompositeUnits(&composite)
+
 	return &allocation.ModelScalingRequest{
 		ModelID:         modelID,
 		Namespace:       namespace,
-		CompositeSignal: namedResults[0],
+		CompositeSignal: composite,
 		VariantStates:   variantStates,
 		Variants:        variantMetadata,
 		Priority:        config.Priority,
@@ -1032,6 +1035,74 @@ func buildRoleCapacities(ctx context.Context, result *domain.AnalyzerResult) map
 		}
 	}
 	return out
+}
+
+// normalizeToCompositeUnits converts the analyzer-unit (D, P) values inside nr
+// to unit-less coverage fractions so the optimizer reasons in coverage space:
+//
+//	TotalDemand        = 1.0  (all demand = 100%)
+//	RoleDemand[role]   = 1.0  for every role
+//	PerReplicaCapacity = PRC / D(role)   ∈ (0, 1]  for each variant
+//
+// After this conversion ceil(1.0 / PerReplicaCapacity) == N_full(SO), the
+// replica count for full coverage — numerically identical to ceil(D/PRC)
+// before the conversion.
+//
+// SatDemand is set to Result.TotalDemand before normalization so the rescale
+// weight (rescaleInputsForGroup) can use the original token-proportional demand
+// even after TotalDemand becomes 1.0.
+//
+// Special cases:
+//
+//	demand == 0 for a role: PerReplicaCapacity is left unchanged (the optimizer's
+//	  demand<=0 → util=1.0 path handles this correctly already).
+//	PRC == 0 for a variant: left as 0 (existing PRC<=0 eligibility gates fire).
+//
+// normalizeToCompositeUnits must be called after buildCapacities — RC, SC, and
+// RoleCapacities are computed from the raw sat values and must not be recomputed
+// after normalization. It mutates nr in place.
+func normalizeToCompositeUnits(nr *allocation.NamedAnalyzerResult) {
+	if nr.Result == nil {
+		return
+	}
+
+	// Capture raw demand for the rescale weight before overwriting TotalDemand.
+	nr.SatDemand = nr.Result.TotalDemand
+
+	// Normalize each variant's PRC by its role's demand.
+	for i := range nr.Result.VariantCapacities {
+		vc := &nr.Result.VariantCapacities[i]
+		role := vc.Role
+		if role == "" {
+			role = domain.RoleBoth
+		}
+		var demand float64
+		if role == domain.RoleBoth {
+			demand = nr.Result.TotalDemand
+		} else if d, ok := nr.Result.RoleDemand[role]; ok {
+			demand = d
+		} else {
+			demand = nr.Result.TotalDemand
+		}
+		if demand > 0 && vc.PerReplicaCapacity > 0 {
+			vc.PerReplicaCapacity = vc.PerReplicaCapacity / demand
+		}
+		// demand <= 0: leave PRC unchanged (optimizer demand<=0 path handles it).
+		// PRC == 0: leave as 0 (eligibility gate fires naturally).
+	}
+
+	// Normalize demands to 1.0 after all PRC divisions are done.
+	nr.Result.TotalDemand = 1.0
+	for role := range nr.Result.RoleDemand {
+		nr.Result.RoleDemand[role] = 1.0
+	}
+
+	// RoleCapacities.TotalDemand must also be normalized so applyUniversalThreshold's
+	// per-role RC/SC remain consistent with the composite units.
+	for role, rc := range nr.RoleCapacities {
+		rc.TotalDemand = 1.0
+		nr.RoleCapacities[role] = rc
+	}
 }
 
 // rolesOf returns the roles present in a per-role aggregation, sorted so the

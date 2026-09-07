@@ -65,6 +65,14 @@ type NamedAnalyzerResult struct {
 	// error state, never analyzed) cannot block scale-down. Recovery is automatic: a
 	// fresh informative result makes it live again on the next cycle.
 	Live bool
+
+	// SatDemand holds the saturation analyzer's raw TotalDemand (in token units)
+	// captured before the coverage normalization in normalizeToCompositeUnits.
+	// It is used by rescaleInputsForGroup as the rescale weight so that the
+	// priority-weighted water-fill remains proportional to replica demand even
+	// after TotalDemand is normalized to 1.0. Zero for non-composite entries
+	// (liveness, metrics) that never pass through normalizeToCompositeUnits.
+	SatDemand float64
 }
 
 // ModelScalingRequest bundles the analyzer result with variant state for one model.

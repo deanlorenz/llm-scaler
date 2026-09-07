@@ -114,8 +114,8 @@ func rec(name, role string, cost, prc float64) variantRecord {
 	}
 }
 
-// withScore sets the fair-share weight the engine would have resolved from
-// AnalyzerScoreConfig. Returns a copy so it chains off named().
+// withScore sets Score to 1.0, the engine-resolved fair-share weight used in
+// all current tests. Returns a copy so it chains off named().
 func (n NamedAnalyzerResult) withScore() NamedAnalyzerResult {
 	n.Score = 1.0
 	return n
@@ -153,5 +153,6 @@ func (f *satEntryFixture) named() NamedAnalyzerResult {
 		Remaining:              f.RequiredCapacity,
 		Spare:                  f.SpareCapacity,
 		Live:                   true,
+		SatDemand:              f.TotalDemand,
 	}
 }
