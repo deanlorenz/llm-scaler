@@ -382,13 +382,33 @@ Actions taken:
   **Not yet reviewed** (came after the `65c344af`/`991800ce` review already ran) — flagged this
   explicitly in STATE.md rather than letting a 4th unreviewed commit slide through quietly.
 
+## `44a7f5e6` reviewed — Pass (2026-09-07)
+- Reviewer (agentId `afa738031ec0218fc`) independently read every relevant struct definition
+  directly from source (didn't trust the commit message's field enumeration), confirmed no
+  reference-type field was missed and `VariantCapacity`/`RoleCapacity` really are flat, traced
+  every nil-handling branch, confirmed the returned `Result` never aliases `src.Result` on any
+  path, and — critically — **empirically** reverted to a scratch worktree at the parent commit,
+  hand-adapted the new test to the old signature, ran it, and watched it fail exactly as
+  predicted (`src.Result.TotalDemand` got mutated to `1` instead of staying `8000`), then
+  cleaned up the scratch worktree. Also grepped the whole tree confirming exactly one production
+  call site and no other caller relying on old in-place-mutation semantics. Build/vet/full
+  `go test ./internal/...`/gofmt independently re-run, all clean.
+- One minor, non-blocking finding: an internal `CT7` task-ID had leaked into a doc comment
+  (`engine_v2.go:1058`) and the commit message — reviewer noted this project has explicit
+  precedent for scrubbing exactly this (`e4b1e77d`, the earlier `(CT6)` test-description fix).
+- Fixed directly (doc-comment wording only, no logic change) as its own commit `e3ce4abc` —
+  judged too small/mechanical to warrant another review round given the direct precedent and
+  zero behavior change; verified build/vet/gofmt clean.
+- **Every commit in this PR (10 total: `f20e06f9` through `e3ce4abc`) has now been through
+  independent review**, either Pass-verdict or (for the one trivial doc-only commit)
+  judged unnecessary to re-review.
+
 ## Open / next
-- Get `44a7f5e6` independently reviewed (next action).
-- Push `65c344af` + `991800ce` + `44a7f5e6` to origin once review settles — needs a fresh
-  per-op authorization.
+- Push all 10 CT6-related commits to origin — needs a fresh per-op authorization (2026-09-06's
+  push already consumed).
 - Decide with user whether CT4's fairness fix belongs in the next PR.
 - Implement CT6 composite metrics (separate future PR, explicitly not blocking this one).
-- Finalize next PR's exact boundary once review is done and open it via
+- Finalize next PR's exact boundary and open it via
   `conventions/pr-branch.md`/`conventions/pr-workflow.md`.
 - Cleanup candidates (not yet done, low urgency): leftover worktrees from the two failed coder
   dispatch attempts (`agent-a223357ad56398278`, `agent-a64b37115d72e7617` if either still
