@@ -160,9 +160,11 @@ small spurious nonzero value for an idle model (`1.0/raw_TotalSupply`) — one o
 staying `0` per the fix above, this recompute naturally yields `0/TotalSupply = 0`, the correct
 value — fixed for free by the same guard, no extra code needed.
 
-**Status:** diagnosis confirmed and settled; exact diff written above and shown to user for
-review before implementation, per user's explicit request ("show me all expected changes +
-update your PR spec" before fixing). NOT YET IMPLEMENTED — awaiting go-ahead to write the code.
+**Status: IMPLEMENTED, tested, committed locally (`77f21355`).** Matches the diff above exactly.
+Also updated the one existing test (`engine_v2_normalize_test.go`) that had locked in the old,
+buggy "still sets TotalDemand to 1.0" behavior for the demand=0 case — it now asserts
+`TotalDemand` stays `0.0`. Full non-E2E suite passes (`go build`, `go vet`, `go test ./...`);
+E2E fails only on missing live-cluster auth, unrelated. Not pushed yet.
 
 ### Point 3 — SatDemand/SatRoleDemand is not designed for the metrics use case
 
@@ -211,9 +213,10 @@ User has not yet answered (a) vs (b) — paused to discuss 1 and 3 together firs
 
 ## Open items / next steps (not yet done)
 
-1. Implement point 2's fix (diff above) once user gives go-ahead — diagnosis and exact diff
-   are both settled; nothing left to decide, only to write and test.
-2. Continue discussing points 1 and 3 (paused mid-discussion for the upstream rebase + push).
+1. Point 2 (zero-demand) is DONE — see Status line above. Committed locally (`77f21355`), not
+   pushed.
+2. Continue discussing points 1 and 3 (paused mid-discussion for the upstream rebase + push;
+   picked back up briefly to land point 2 first).
 3. Decide fix for point 1 (fair-share GPU-unit comparison) — direction agreed, implementation
    not started, scope/PR-boundary not decided.
 4. Decide fix for point 3 (metrics) — mechanism not yet decided (reuse SatDemand vs. new
