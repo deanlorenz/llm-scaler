@@ -780,8 +780,7 @@ func (e *Engine) collectV2ModelRequest(
 	// namedResults[0] is always the saturation entry — it is built first and
 	// unconditionally. The optimizer only needs sat's signal; all other entries
 	// are engine-internal (liveness, metrics) and not forwarded.
-	composite := namedResults[0]
-	normalizeToCompositeUnits(&composite)
+	composite := normalizeToCompositeUnits(namedResults[0])
 	logAnalyzerResult(ctx, modelID, namespace, composite)
 
 	return &allocation.ModelScalingRequest{
@@ -1049,10 +1048,44 @@ func buildRoleCapacities(ctx context.Context, result *domain.AnalyzerResult) map
 //
 // normalizeToCompositeUnits must be called after buildCapacities — RC, SC, and
 // RoleCapacities are computed from the raw sat values and must not be recomputed
-// after normalization. It mutates nr in place.
-func normalizeToCompositeUnits(nr *allocation.NamedAnalyzerResult) {
+// after normalization.
+//
+// src is never mutated: this function builds and returns an independent deep
+// copy (Result, RoleCapacities, and RoleSpare are all reference types — a
+// plain struct assignment would alias them, so a mutation meant only for the
+// composite would silently reach whatever else still holds src, e.g. the
+// per-analyzer namedResults slice collectV2ModelRequest built src from). This
+// will grow into the real multi-analyzer reduce (CT7) — folding the copy in
+// here now means that future aggregation logic inherits copy-safety rather
+// than having to add it later.
+func normalizeToCompositeUnits(src allocation.NamedAnalyzerResult) allocation.NamedAnalyzerResult {
+	nr := src
+	if src.Result != nil {
+		result := *src.Result
+		if src.Result.VariantCapacities != nil {
+			result.VariantCapacities = make([]domain.VariantCapacity, len(src.Result.VariantCapacities))
+			copy(result.VariantCapacities, src.Result.VariantCapacities)
+		}
+		if src.Result.RoleDemand != nil {
+			result.RoleDemand = make(map[string]float64, len(src.Result.RoleDemand))
+			maps.Copy(result.RoleDemand, src.Result.RoleDemand)
+		}
+		nr.Result = &result
+	}
+	if src.RoleCapacities != nil {
+		nr.RoleCapacities = make(map[string]domain.RoleCapacity, len(src.RoleCapacities))
+		maps.Copy(nr.RoleCapacities, src.RoleCapacities)
+	}
+	if src.RoleSpare != nil {
+		nr.RoleSpare = make(map[string]float64, len(src.RoleSpare))
+		maps.Copy(nr.RoleSpare, src.RoleSpare)
+	}
+	// SatRoleDemand is populated fresh below; no need to copy src's (nil at
+	// this point in every real caller, since normalizeToCompositeUnits is the
+	// only writer).
+
 	if nr.Result == nil {
-		return
+		return nr
 	}
 
 	nr.Name = allocation.CompositeSignalName
@@ -1139,6 +1172,8 @@ func normalizeToCompositeUnits(nr *allocation.NamedAnalyzerResult) {
 	} else {
 		nr.Utilization = 0
 	}
+
+	return nr
 }
 
 // rolesOf returns the roles present in a per-role aggregation, sorted so the
