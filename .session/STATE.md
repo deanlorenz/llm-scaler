@@ -101,11 +101,15 @@ fix.
    analyzer's line by its own unit (commit `991800ce`).
 
 Both `65c344af` and `991800ce` are **not yet pushed** — 2 commits ahead of
-`origin/single-analyzer` (still at `c2a0774e`). **User's review is still in progress — more
-findings are likely.**
+`origin/single-analyzer` (still at `c2a0774e`). These two commits were made directly by the
+mission owner (not a coder) in response to the user's PR review, and had NOT been through
+independent review — user asked (2026-09-07) to get them reviewed like everything else.
+**Reviewer dispatched** (agentId `a7a738431d7e541ca`, background) against just these 2 commits;
+report will land at `.session/review-65c344af-991800ce.md`. Do not push or consider this PR
+done until that verdict comes back.
 
 **Remaining before this can be considered fully wrapped:**
-1. Finish the user's PR review (in progress) and address any further findings.
+1. Wait for the review of `65c344af`/`991800ce` (in progress) and address any findings.
 2. Push the accumulated fix commits to origin — needs its own per-op authorization (the
    2026-09-06 push authorization is consumed, per `conventions/push.md`).
 3. Decide with the user whether CT4's fairness fix (`fairShareValue`, still blocked on a
