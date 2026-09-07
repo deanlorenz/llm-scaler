@@ -27,7 +27,8 @@ else first:
 - **Name:** session slug (e.g. `2026-09-03-coder-ct1`). Unique; sortable.
 - **Conventions:** always `worktrees/session-tracking/CONVENTIONS.md`. Do not change.
 - **What / goal / mission:** one or two sentences — what this session produces and why.
-- **Worktree:** the exact path the session works in. Prepare it before invocation.
+- **Worktree / Path / Branch:** where the worker operates. Fill per the setup chosen for this task.
+- **Startup verification instructions:** free text — the worker's required first action and what to do on failure. Never leave blank.
 - **Role / scope:** the session's role and what it is and is not authorized to do. Be
   explicit — do not leave scope to inference.
 - **Ledger / log:** the file the session will append to. Name it before invocation;

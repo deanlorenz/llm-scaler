@@ -5,6 +5,7 @@ disable-model-invocation: true
 ---
 
 <!-- user-approved-settings-change -->
+<!-- user-approved-settings-change: adding Step 3a mission-rule gate, this same edit -->
 
 # Resume mission
 
@@ -101,6 +102,24 @@ Call it `$MISSION_WT`. Tracking files live at `$MISSION_WT/.session/`. Verify th
 read its Orientation fields and perform the Case 2 confirmation. If the selected index entry points
 to a missing STATE, stop and report the mismatch; do not silently create or use a STATE elsewhere.
 
+<!-- user-approved-settings-change: Step 3a gate added this edit -->
+
+### Step 3a: Mission-specific rule gate — MANDATORY, do not skip
+
+This step does not rely on `CONVENTIONS.md`'s own index of situational rules, and does not
+trust that reading that index is the same as having read the actual file — check directly:
+
+```bash
+test -f "$TRACKING/conventions/$MISSION_NAME.md" && echo EXISTS || echo NONE
+```
+
+- If `EXISTS`: **read `$TRACKING/conventions/$MISSION_NAME.md` in full, right now, before
+  Step 4.** This is a hard gate, not an optional cross-reference — do not proceed to enter
+  the worktree, confirm takeover, or do any mission work until this file has actually been
+  read this session. Having read it in a prior session does not satisfy this gate; read it
+  again now, every time.
+- If `NONE`: no mission-specific rule file exists for this mission. Proceed.
+
 ### Step 4: Enter the mission worktree
 
 ```
@@ -187,10 +206,15 @@ already exists, skip copying and perform the template migration in step 4 agains
 
 Read, in this order — from inside the entered worktree:
 1. `$TRACKING/CONVENTIONS.md` — global process rules.
-2. Any role/mission-specific situational rules triggered by your role (per
-   `CONVENTIONS.md` index).
-3. `.session/STATE.md` — current status, task checklist, last completed, next step,
+2. `.session/STATE.md` — current status, task checklist, last completed, next step,
    open questions, and the Session log (see Step 6).
+
+<!-- user-approved-settings-change: removing the soft CONVENTIONS-index rule reference -->
+
+The mission-specific rule gate already happened at Step 3a — do not re-derive it from
+`CONVENTIONS.md`'s index here or anywhere else. Role-specific situational rules other than
+the mission-specific one (e.g. `mission-owner.md`, `coder.md`) are still read when their own
+documented trigger occurs, per their own files — not resolved from this step.
 
 Do **not** read ledger files — consult them only when debugging history.
 Do **not** read the plan/spec doc upfront — pull it on demand only when needed.

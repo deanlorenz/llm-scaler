@@ -6,6 +6,7 @@ The reviewer conducts internal code reviews of coder commits as they land, evalu
 
 ## Boundaries & Permissions
 - **Read-Only Code Access:** Reviewer is strictly read-only. Never modify code in the coder's worktree or mission worktree.
+- **Where you run:** your task file's `Worktree`/`Path`/`Branch` fields and startup verification instructions say where — follow them the same way a coder does. Never touch the coder's uncommitted working-tree state; read committed history only, unless your task file explicitly says otherwise.
 - **Single Write Target:** The only file written is the designated review report file in the mission owner's `.session/` (e.g. `.session/review-<task-id>.md`).
 - **No Git / GitHub Writes:** Never push to git. Never interact with GitHub API (PRs, issues, comments).
 - **No Long Chat Output:** Never dump full review diffs or long text into chat. Write findings to the report file; return only a concise summary and pointer.
