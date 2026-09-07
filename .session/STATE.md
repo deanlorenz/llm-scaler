@@ -100,16 +100,28 @@ fix.
    `satDemand`→`tokenDemand` renamed, `cycle-log.md` rewritten again to describe each
    analyzer's line by its own unit (commit `991800ce`).
 
-Both `65c344af` and `991800ce` are **not yet pushed** — 2 commits ahead of
-`origin/single-analyzer` (still at `c2a0774e`). These two commits were made directly by the
-mission owner (not a coder) in response to the user's PR review, and had NOT been through
-independent review — user asked (2026-09-07) to get them reviewed like everything else.
-**Reviewer dispatched** (agentId `a7a738431d7e541ca`, background) against just these 2 commits;
-report will land at `.session/review-65c344af-991800ce.md`. Do not push or consider this PR
-done until that verdict comes back.
+`65c344af` and `991800ce` were reviewed independently (agentId `a7a738431d7e541ca`) —
+**Pass**, all claims (dead-code check on `hasCompositeResult`, `Name`-rename safety,
+`SatDemand`/`tokenDemand` split correctness, doc accuracy) independently traced and confirmed,
+not just trusted; report at `.session/review-65c344af-991800ce.md`.
+
+**2026-09-07, after that review returned:** user asked to confirm `composite :=
+namedResults[0]` performs a genuine deep copy — it did not. `Result` (a pointer) and
+`RoleCapacities`/`RoleSpare` (maps) were aliased by the plain value-copy, so
+`normalizeToCompositeUnits`'s in-place mutations reached the shared data `namedResults[0]`
+still held (not a live bug today — nothing re-reads `namedResults` after this point — but
+fragile, and explicitly required to be fixed regardless). Fixed per user's direction ("fold it
+in normalize, it will become the aggregation logic anyway"): `normalizeToCompositeUnits` now
+takes its source by value and returns an independent deep copy; no longer mutates its argument.
+Updated all 9 call sites (1 production + 8 tests), added a new aliasing-safety test (verified
+sensitive by reproducing the old aliasing behavior standalone, confirmed, discarded — never
+committed). Commit `44a7f5e6`. **This commit has NOT yet been through independent review.**
+
+Three commits now not yet pushed: `65c344af`, `991800ce` (both reviewed Pass), `44a7f5e6`
+(not yet reviewed) — 3 commits ahead of `origin/single-analyzer` (still at `c2a0774e`).
 
 **Remaining before this can be considered fully wrapped:**
-1. Wait for the review of `65c344af`/`991800ce` (in progress) and address any findings.
+1. Get `44a7f5e6` independently reviewed.
 2. Push the accumulated fix commits to origin — needs its own per-op authorization (the
    2026-09-06 push authorization is consumed, per `conventions/push.md`).
 3. Decide with the user whether CT4's fairness fix (`fairShareValue`, still blocked on a
@@ -137,11 +149,12 @@ and `.session/pr-spec-next-coverage-units.md`.
 - **Next PR — not yet opened, no branch cut yet.** Scope is **CT6 only**: `f20e06f9` (original
   normalization) + `18f4d4ff` (compile fix) + `c5af5696`/`290ca75f`/`896879d5`/`e4b1e77d`
   (correctness fix + tests) + `65c344af` (log-function merge) + `991800ce` (composite naming +
-  log completeness) — CT3b and CT5 are already merged in PR #34, so they are not part of this
-  PR's diff. User's PR review still in progress (2026-09-07) — more commits may be added before
-  this is ready to cut. `65c344af`/`991800ce` not yet pushed. The s7 stale-args bug (`b067642a`)
-  is NOT relevant to this PR — it only ever existed on the mission branch, never on any
-  PR-prep branch, so there's nothing to carry forward for it.
+  log completeness) + `44a7f5e6` (deep-copy fix) — CT3b and CT5 are already merged in PR #34,
+  so they are not part of this PR's diff. User's PR review still in progress (2026-09-07) —
+  more commits may be added before this is ready to cut. `65c344af`/`991800ce` reviewed Pass;
+  `44a7f5e6` not yet reviewed; none of the three pushed. The s7 stale-args bug (`b067642a`) is
+  NOT relevant to this PR — it only ever existed on the mission branch, never on any PR-prep
+  branch, so there's nothing to carry forward for it.
 - **CT7** (engine-side reduce) is not scoped into either PR above; it needs its own PR once its
   4 open design questions (spec CT7 section) are resolved, and depends on the next PR's test-fix
   landing first (CT7 builds on `runAnalyzersAndScore`'s current slice-returning shape).
@@ -150,6 +163,22 @@ and `.session/pr-spec-next-coverage-units.md`.
 
 ### Known issues
 
+- **FIXED 2026-09-07 (commit `44a7f5e6`, not yet pushed, not yet reviewed): `composite :=
+  namedResults[0]` aliased `Result`/`RoleCapacities`/`RoleSpare` with the source.** This was
+  the exact "known aliasing hazard" the original CT6 spec section had flagged and left
+  unaddressed as "not a live bug today." User explicitly asked to confirm the copy was a real
+  deep copy — it was not: `Result` (`*domain.AnalyzerResult`) and the two maps are reference
+  types, so a plain struct value-copy shares them with whatever `namedResults[0]` still is.
+  `normalizeToCompositeUnits`'s in-place mutations therefore reached the shared data too. Not
+  exploitable today (nothing re-reads `namedResults` after `collectV2ModelRequest` calls this),
+  but fragile and explicitly required to be fixed rather than left as a documented hazard.
+  Fixed per user's direction: folded the deep copy into `normalizeToCompositeUnits` itself
+  (changed to take its source by value, return a new independent result, mutate nothing) since
+  this function is the precursor to CT7's real multi-analyzer reduce — copy-safety is now
+  inherited by that future logic rather than needing to be added later. Added a test that
+  mutates the returned result and asserts the source is untouched; verified the test's
+  sensitivity by reproducing the old aliasing behavior in a standalone scratch test (confirmed
+  a shallow copy does alias, then discarded/removed the scratch test — never committed).
 - **FIXED 2026-09-07 (commits `65c344af`, `991800ce`; not yet pushed): three compounding gaps
   in the coder's CT6 fix, all caught by the user during PR review, none by the coder or
   reviewer.**
