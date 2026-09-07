@@ -93,29 +93,25 @@
   needed; confirmed with user.
 - [x] `worktrees/policy-writer/CONVENTIONS.md.bak` moved to `backup_rules/CONVENTIONS.md.bak`
   (`8352bbb5`) — leftover from the Phase-2 trim, found during session-7 ledger-capture.
-- [ ] Fix `session-tracking` protocol violation: drafted the worktree-delegation changes
-  directly on `session-tracking` instead of `policy-writer` before catching the mistake.
-  `session-tracking` still sits dirty/uncommitted with the old, now-superseded
-  A/B/C-named drafts (`coder-orchestration.md`, `coder.md` modified; `worktree-delegation.md`
-  untracked) plus the still-unprocessed suggestion-box file — deliberately left untouched;
-  user has said explicitly not to ask about this again until told. Do not install anything
-  onto `session-tracking` until this cleanup happens and is authorized.
+- [x] Fixed `session-tracking` protocol violation: discarded the stale, superseded A/B/C-named
+  drafts (`git checkout -- coder-orchestration.md coder.md`, removed untracked
+  `worktree-delegation.md`), then installed the current, final `policy-writer` content
+  (`CONVENTIONS.md`, `conventions/`, `claude-skills/`) via the normal procedure. Committed on
+  `session-tracking` as `702c35ae`. Not pushed — needs its own separate authorization.
+- [ ] Prefix the processed suggestion-box entry
+  `session-tracking/suggestion-box/2026-09-06-2240-dean-llmd-scaler-sandbox.md` with
+  `processed-` now that the worktree-delegation work is installed.
 
-**Last completed:** Finished the worktree-delegation suggestion-box item end to end on
-`policy-writer`: named setups (`own-worktree`/`checkout-branch`/`same-worktree`) replacing
-A/B/C, ownership split fixed across `coder-orchestration.md`/`worktree-delegation.md`/
-`tasks.md`/`coder.md`/`reviewer.md`, template-duplication question resolved (no edit needed),
-`CONVENTIONS.md.bak` relocated. Only the `session-tracking` cleanup remains, deliberately
-deferred.
+**Last completed:** Pushed `policy-writer` to `origin` (`32b725ef..5df72c1f`). Cleaned up
+`session-tracking`'s stale drafts and installed the finished worktree-delegation work +
+resume-mission Step 3a gate there (`702c35ae`) — not yet pushed.
 
-**Next step / resume point:** When the user is ready (do not raise it proactively): clean up
-`session-tracking`'s stale A/B/C-named drafts, then install the finished, current
-`policy-writer` conventions there through the normal install procedure, then process the
-suggestion-box file as `processed-`.
+**Next step / resume point:** Ask user for authorization to push `session-tracking`; once
+pushed, prefix the suggestion-box entry `processed-`.
 
 ### Status
-IN PROGRESS — worktree-delegation work is finished and final on `policy-writer`. Only blocker
-left is the deferred `session-tracking` cleanup/install, which the user will raise when ready.
+IN PROGRESS — worktree-delegation work is installed on both branches. `session-tracking`'s
+install commit (`702c35ae`) is not yet pushed; suggestion-box entry not yet marked processed.
 
 ### Known issues
 - `settings-and-skill-edits.md` describes a `user-approved-settings-change` marker
