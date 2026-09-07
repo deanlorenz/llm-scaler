@@ -24,7 +24,7 @@ their overall health, groom their files, or act as their maintainer.
 Never use `cd`, subshells, process substitution, shell redirection, or any other mechanism to
 route a write around the worktree boundary. When a cross-worktree write is required, ensure you
 have a specific exception or ask the user, then follow
-`conventions/writing-outside-worktree.md`.
+`conventions/working-outside-worktree.md`.
 
 Reads may cross worktree boundaries when needed (`git -C`, `cat`, full paths, etc.).
 
@@ -48,7 +48,7 @@ Read the matching file when its situation occurs, not speculatively. **Do not re
 - `conventions/chat-preferences.md` — interactive foreground sessions communicating with the user
 - `conventions/agentbus-user-interaction.md` — when running as a background agent/subtask needing to ask user questions via agentbus
 - `conventions/wip-editing.md` — before editing a shared file (`STATE.md`, `CONVENTIONS.md`)
-- `conventions/writing-outside-worktree.md` — before performing a permitted cross-worktree write
+- `conventions/working-outside-worktree.md` — before performing a permitted cross-worktree write
 - `conventions/tasks.md` — before writing or assigning a task specification to any worker
 - `conventions/coder-orchestration.md` — before dispatching or orchestrating a coder agent
 - `conventions/install-to-session-tracking.md` — before installing any file from policy-writer onto session-tracking
