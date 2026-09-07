@@ -105,7 +105,7 @@ var _ = Describe("normalizeToCompositeUnits", func() {
 		Expect(decode.TotalAnticipatedSupply).To(BeNumerically("~", 0.375, 1e-9)) // 3000/8000
 	})
 
-	It("demand=0: leaves PRC and RC/SC/Remaining/Spare/supply unchanged, still sets TotalDemand to 1.0", func() {
+	It("demand=0: leaves PRC, RC/SC/Remaining/Spare/supply, and TotalDemand all unchanged", func() {
 		origPRC := 500.0
 		src := allocation.NamedAnalyzerResult{
 			Result: &domain.AnalyzerResult{
@@ -124,7 +124,12 @@ var _ = Describe("normalizeToCompositeUnits", func() {
 
 		nr := normalizeToCompositeUnits(src)
 
-		Expect(nr.Result.TotalDemand).To(Equal(1.0))
+		// demand=0 must flow through to the composite unchanged (spec's own
+		// special case): coverage isn't meaningful without demand, and
+		// ceil(0/PRC) still needs to read 0 downstream (e.g. rescale.go's
+		// roleDemandGPUs) — forcing TotalDemand to 1.0 here would make that
+		// read a phantom nonzero demand instead.
+		Expect(nr.Result.TotalDemand).To(Equal(0.0))
 		Expect(nr.Result.VariantCapacities[0].PerReplicaCapacity).To(Equal(origPRC))
 		// Zero demand guards every new division exactly like the existing PRC
 		// guard: nothing to divide by, so every raw-demand-scaled field is left

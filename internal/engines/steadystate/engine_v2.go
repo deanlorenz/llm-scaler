@@ -1170,7 +1170,10 @@ func normalizeToCompositeUnits(src allocation.NamedAnalyzerResult) allocation.Na
 	// its TotalDemand to 1.0 — mirroring the model-level treatment above so
 	// applyUniversalThreshold's per-role RC/SC (and initRoleState/
 	// cost_aware_optimizer's per-role reads of them) remain consistent with the
-	// composite units.
+	// composite units. A role with demand <= 0 is left entirely unchanged,
+	// TotalDemand included: coverage isn't meaningful without demand, and a
+	// zero TotalDemand must flow through to the composite as zero, not 1.0 —
+	// ceil(0/PRC) still needs to read 0 for roleDemandGPUs and friends.
 	for role, rc := range nr.RoleCapacities {
 		demand := demandForRole(role)
 		if demand > 0 {
@@ -1178,16 +1181,20 @@ func normalizeToCompositeUnits(src allocation.NamedAnalyzerResult) allocation.Na
 			rc.SpareCapacity /= demand
 			rc.TotalSupply /= demand
 			rc.TotalAnticipatedSupply /= demand
+			rc.TotalDemand = 1.0
+			nr.RoleCapacities[role] = rc
 		}
-		rc.TotalDemand = 1.0
-		nr.RoleCapacities[role] = rc
 	}
 
 	// Normalize demands to 1.0 last, after every division above has used the
-	// raw values.
-	nr.Result.TotalDemand = 1.0
-	for role := range nr.Result.RoleDemand {
-		nr.Result.RoleDemand[role] = 1.0
+	// raw values. Same demand <= 0 exception as above: leave it as 0.
+	if modelDemand > 0 {
+		nr.Result.TotalDemand = 1.0
+	}
+	for role, d := range nr.Result.RoleDemand {
+		if d > 0 {
+			nr.Result.RoleDemand[role] = 1.0
+		}
 	}
 
 	// Utilization is recomputed from the normalized TotalDemand/TotalSupply
