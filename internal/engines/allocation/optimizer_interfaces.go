@@ -6,6 +6,11 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 )
 
+// CompositeSignalName is the Name normalizeToCompositeUnits gives the entry it
+// converts to coverage units — the composite's own identity, distinct from
+// whichever analyzer's raw result it started from.
+const CompositeSignalName = "CompositeSignal"
+
 // NamedAnalyzerResult pairs an analyzer's name with its result, the engine-owned
 // capacity aggregates derived from that result, and mutable working counters for
 // the optimizer's allocation loop.

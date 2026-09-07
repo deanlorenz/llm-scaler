@@ -12,15 +12,16 @@ verbose debug logging.
 ### `analyzer-result`
 
 Emitted once per analyzer that ran for a model, immediately after the
-universal threshold post-step has been applied — in that analyzer's own units
-(tokens for saturation). **A second `analyzer-result` line is emitted for the
-composite entry** right after it has been converted to unit-less coverage
-fractions for the optimizer (see
-[scaling-policy-config.md](scaling-policy-config.md) for the coverage-unit
-conversion) — this second line, and only this one, reflects what the
-optimizer actually receives. Both lines share the same schema; fields that are
-only meaningful post-conversion (`satDemand`, `remaining`, `spare`,
-`roleCapacities`) simply read as zero/empty on the first line.
+universal threshold post-step has been applied — in that analyzer's own
+units. **One extra line is emitted for `"CompositeSignal"`**, the signal
+actually handed to the optimizer: same schema, its own unit is `%` (coverage
+of demand).
+
+| `analyzer` | Unit |
+|---|---|
+| `saturation` | tokens |
+| `throughput` | tokens/sec |
+| `CompositeSignal` | % (coverage of demand) |
 
 ```json
 {
@@ -29,9 +30,12 @@ only meaningful post-conversion (`satDemand`, `remaining`, `spare`,
   "modelID": "my-model",
   "namespace": "default",
   "analyzer": "saturation",
+  "score": 1.0,
+  "live": true,
   "supply": 658534,
   "demand": 1041047,
-  "satDemand": 0,
+  "tokenDemand": 1041047,
+  "tokenRoleDemand": null,
   "util": 1.58,
   "rc": 0,
   "sc": 50000,
@@ -51,31 +55,32 @@ only meaningful post-conversion (`satDemand`, `remaining`, `spare`,
 |---|---|
 | `modelID` | WVA model ID (unique within a namespace) |
 | `namespace` | Kubernetes namespace |
-| `analyzer` | Analyzer name, e.g. `"saturation"`, `"throughput"` |
-| `supply` | Total token supply across ready replicas (readyCount × perReplicaCapacity). Pre-conversion units; not itself normalized |
-| `demand` | Total token demand on the first (pre-conversion) line. Not purely observed: for saturation V2 it is the sum of three terms — resident KV tokens, a role-aware projection of requests waiting in each replica's local engine queue, and a model-level, prefix-cache-discounted projection of requests still queued upstream in llm-d flow control (`SchedulerQueue`, not attributed to any variant). See [scaling-policy-config.md](scaling-policy-config.md). On the second (composite) line this is always `1.0` — demand is normalized to "100%" so the optimizer reasons in coverage fractions |
-| `satDemand` | The composite line's raw pre-conversion `demand`, captured before normalization overwrites it — the rescale weight (`rescaleInputsForGroup`) uses this so the priority-weighted water-fill stays proportional to real demand. Always `0` on the first (pre-conversion) line |
-| `util` | `demand / supply`; > 1.0 means the model is over capacity. On the composite line this is recomputed from the normalized `demand`/`supply`, algebraically identical to the pre-conversion value |
-| `rc` | Required capacity signal (post-threshold): > 0 triggers scale-up. Token units on the first line, a coverage fraction on the composite line |
-| `sc` | Spare capacity signal (post-threshold): > 0 permits scale-down. Token units on the first line, a coverage fraction on the composite line |
-| `remaining` | The optimizer's working copy of `rc`, seeded from it and mutated as allocation proceeds within a cycle. Same units as `rc` on each line |
-| `spare` | The optimizer's working copy of `sc`. Same units as `sc` on each line |
+| `analyzer` | Which line this is: `"saturation"`, `"throughput"`, or `"CompositeSignal"` |
+| `score` | This analyzer's fair-share weight (from `AnalyzerScoreConfig`) |
+| `live` | Whether this analyzer's result is fresh enough to count against the scale-down veto this cycle |
+| `supply` | Total supply across ready replicas (readyCount × perReplicaCapacity), in this line's unit |
+| `demand` | Total demand, in this line's unit. For saturation it is the sum of three terms — resident KV tokens, a role-aware projection of requests waiting in each replica's local engine queue, and a model-level, prefix-cache-discounted projection of requests still queued upstream in llm-d flow control (`SchedulerQueue`, not attributed to any variant); see [scaling-policy-config.md](scaling-policy-config.md). For `CompositeSignal` this is always `100%` by construction |
+| `tokenDemand` | Saturation's own demand, in tokens, carried onto the `CompositeSignal` line as the weight `rescaleInputsForGroup` uses for its priority water-fill — `CompositeSignal`'s own `demand` is always `100%` and can't serve as a weight. `0` on any line other than `CompositeSignal` |
+| `tokenRoleDemand` | Per-role breakdown of `tokenDemand`. `null` for a non-disaggregated result or on any line other than `CompositeSignal` |
+| `util` | `demand / supply`; > 1.0 means the model is over capacity |
+| `rc` | Required capacity signal (post-threshold): > 0 triggers scale-up, in this line's unit |
+| `sc` | Spare capacity signal (post-threshold): > 0 permits scale-down, in this line's unit |
+| `remaining` | The optimizer's working copy of `rc`, seeded from it and mutated as allocation proceeds within a cycle |
+| `spare` | The optimizer's working copy of `sc` |
 | `scaleUpThreshold` | Scale-up threshold resolved for this analyzer (from config) |
 | `scaleDownBoundary` | Scale-down boundary resolved for this analyzer (from config) |
 | `variants[].name` | Variant name |
-| `variants[].prc` | Per-replica capacity. Analyzer units (tokens for saturation) on the first line; a unit-less coverage fraction in `(0, 1]` on the composite line |
-| `variants[].role` | Resolved P/D role: `prefill`, `decode`, or `both`. Renders as `both` both when the scale target has no `llm-d.ai/role` label and when the analyzer does not populate the role at all. Saturation V2 charges waiting requests by this role, so it is needed to interpret `demand` |
+| `variants[].prc` | Per-replica capacity, in this line's unit |
+| `variants[].role` | Resolved P/D role: `prefill`, `decode`, or `both`. Renders as `both` both when the scale target has no `llm-d.ai/role` label and when the analyzer does not populate the role at all. Saturation charges waiting requests by this role, so it is needed to interpret `demand` |
 | `variants[].reason` | How the variant's capacity was computed (see below) |
 | `roleCapacities[].role` | Role this entry covers (disaggregated models only; empty for non-disaggregated) |
-| `roleCapacities[].rc` / `.sc` | Per-role required/spare capacity — same units as the model-level `rc`/`sc` on each line |
+| `roleCapacities[].rc` / `.sc` | Per-role required/spare capacity, in this line's unit |
 | `roleCapacities[].roleSpare` | The optimizer's per-role working copy of `sc`, once seeded (omitted before it is) |
 
 If an analyzer does not compute per-variant capacity, `variants` is an empty
 array. Multiple `analyzer-result` lines appear per cycle: one per enabled
-analyzer (pre-conversion, in that analyzer's own units), plus one more for the
-composite entry the optimizer actually consumes (post-conversion, coverage
-units) — all share the same `modelID`/`namespace` and their own `analyzer`
-field.
+analyzer, plus one for `CompositeSignal` — all share the same
+`modelID`/`namespace` and their own `analyzer` field.
 
 ### `scaling-decision`
 
@@ -151,6 +156,9 @@ kubectl logs <pod> | grep '"msg":"analyzer-result"' | grep '"modelID":"my-model"
 # Saturation analyzer only
 kubectl logs <pod> | grep '"msg":"analyzer-result"' | grep '"analyzer":"saturation"'
 
+# The composite signal actually sent to the optimizer
+kubectl logs <pod> | grep '"msg":"analyzer-result"' | grep '"analyzer":"CompositeSignal"'
+
 # Scaling decisions only (scale-up events)
 kubectl logs <pod> | grep '"msg":"scaling-decision"' | grep '"action":"ScaleUp"'
 
@@ -166,7 +174,8 @@ Within a single reconcile cycle for one model:
 
 1. One `analyzer-result` line per enabled analyzer (saturation first, then
    any registered non-saturation analyzers in registration order).
-2. One `scaling-decision` line after the optimizer has processed all models
+2. One more `analyzer-result` line for `CompositeSignal`.
+3. One `scaling-decision` line after the optimizer has processed all models
    in the cycle.
 
 The two line types are not atomically adjacent in the log — other models'

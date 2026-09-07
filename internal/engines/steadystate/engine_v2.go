@@ -675,7 +675,7 @@ func gpuUsageByType(req allocation.ModelScalingRequest, perType map[string]int) 
 func computeCurrentGPUUsage(requests []allocation.ModelScalingRequest) map[string]int {
 	usage := make(map[string]int)
 	for _, req := range requests {
-		if !hasSaturationResult(req) {
+		if !hasCompositeResult(req) {
 			continue
 		}
 		gpuUsageByType(req, usage)
@@ -696,7 +696,7 @@ func computeCurrentGPUUsageByNamespace(requests []allocation.ModelScalingRequest
 			perType = make(map[string]int)
 			usage[req.Namespace] = perType
 		}
-		if !hasSaturationResult(req) {
+		if !hasCompositeResult(req) {
 			continue
 		}
 		gpuUsageByType(req, perType)
@@ -704,11 +704,11 @@ func computeCurrentGPUUsageByNamespace(requests []allocation.ModelScalingRequest
 	return usage
 }
 
-// hasSaturationResult reports whether the request carries a saturation analyzer
-// result. A request without one was not measured this cycle, so its replica
-// counts are not evidence of anything and must not be charged to a quota.
-func hasSaturationResult(req allocation.ModelScalingRequest) bool {
-	return req.CompositeSignal.Name == domain.SaturationAnalyzerName && req.CompositeSignal.Result != nil
+// hasCompositeResult reports whether the request carries a composite signal.
+// A request without one was not measured this cycle, so its replica counts
+// are not evidence of anything and must not be charged to a quota.
+func hasCompositeResult(req allocation.ModelScalingRequest) bool {
+	return req.CompositeSignal.Result != nil
 }
 
 // reportUnattributedGPUs surfaces usage that could not be charged to any
@@ -1055,6 +1055,8 @@ func normalizeToCompositeUnits(nr *allocation.NamedAnalyzerResult) {
 		return
 	}
 
+	nr.Name = allocation.CompositeSignalName
+
 	// Capture every raw (pre-overwrite) demand value up front — both for the
 	// rescale weight (SatDemand/SatRoleDemand) and for the divisions below —
 	// before any demand field is overwritten to 1.0.
@@ -1151,16 +1153,9 @@ func rolesOf(totals map[string]aggregation.ScopeTotals) []string {
 }
 
 // logAnalyzerResult emits one INFO "analyzer-result" line for a NamedAnalyzerResult.
-// Called for every analyzer that ran in a model's reconcile cycle (in that
-// analyzer's own units), and again for the composite entry handed to the
-// optimizer, right after normalizeToCompositeUnits has converted it to
-// coverage-fraction units — nothing else logs the actual post-normalization
-// signal the optimizer receives, which is exactly what let a prior
-// normalization bug (RequiredCapacity/SpareCapacity/Remaining/Spare left in
-// raw units while PerReplicaCapacity was already a coverage fraction) go
-// unnoticed. Every field below is populated by buildNamedResult regardless of
-// whether normalization has run yet — SatDemand/SatRoleDemand simply read as
-// zero/nil until normalizeToCompositeUnits captures them.
+// Called for every analyzer that ran in a model's reconcile cycle, in that
+// analyzer's own units, and once more for CompositeSignal — the coverage-unit
+// signal actually passed to the optimizer.
 func logAnalyzerResult(ctx context.Context, modelID, namespace string, nr allocation.NamedAnalyzerResult) {
 	if nr.Result == nil {
 		return
@@ -1210,9 +1205,12 @@ func logAnalyzerResult(ctx context.Context, modelID, namespace string, nr alloca
 		"modelID", modelID,
 		"namespace", namespace,
 		"analyzer", nr.Name,
+		"score", nr.Score,
+		"live", nr.Live,
 		"supply", nr.TotalSupply,
 		"demand", nr.Result.TotalDemand,
-		"satDemand", nr.SatDemand,
+		"tokenDemand", nr.SatDemand,
+		"tokenRoleDemand", nr.SatRoleDemand,
 		"util", nr.Utilization,
 		"rc", nr.RequiredCapacity,
 		"sc", nr.SpareCapacity,
