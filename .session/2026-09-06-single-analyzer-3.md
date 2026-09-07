@@ -326,10 +326,66 @@ Actions taken:
 - **User is still reviewing other files in the PR** (their own words, mid-turn) — more findings
   likely. Do not treat this PR as done or push preemptively.
 
+## User asks: "all committed? all tested? all code-reviewed?" (2026-09-07)
+- Answered precisely rather than assuming: committed=yes; tested=yes (`go build`/`go vet`/
+  `gofmt`/full `go test ./internal/...`, not just `engines/`); code-reviewed=**no** — `65c344af`
+  and `991800ce` were made directly by me (not a coder) after the earlier reviewer had already
+  finished, so they'd never gone through review. Flagged this honestly instead of letting it
+  slide.
+
+## Reviewer dispatched, returns Pass (2026-09-07)
+- Launched independent reviewer (agentId `a7a738431d7e541ca`) against just `65c344af` +
+  `991800ce`, with full context on why each commit exists (so it judges intent, not just diff
+  mechanics) and explicit instructions to independently verify — not just trust — the specific
+  claims made in commit messages (the dead-code claim on `hasCompositeResult`, the `Name`-rename
+  safety across all consumers, the `SatDemand`/`tokenDemand` Go-field-vs-JSON-key split,
+  `cycle-log.md` accuracy against the real `logger.Info` call).
+- **Verdict: Pass.** Independently traced the call chain itself (not just re-reading my claim)
+  and confirmed `hasCompositeResult`'s `Result != nil` really is dead/unreachable today; grepped
+  the whole `internal/engines`/`decision`/`metrics` tree and confirmed no consumer breaks from
+  the `Name` rename (because `composite := namedResults[0]` was a value copy — metrics/liveness
+  run on the original slice before any rename); confirmed the Sat*/token split touched only the
+  two JSON keys, not the Go field names; verified `cycle-log.md` field names/order match the
+  real log call exactly. Independently re-ran build/vet/full `go test ./internal/...`/gofmt,
+  plus a per-commit isolation build check. 3 non-blocking doc nits, no defects. Report:
+  `.session/review-65c344af-991800ce.md`.
+
+## User: "make sure the copy into compositeSignal is a deep copy no refs" (2026-09-07)
+- Checked directly: `composite := namedResults[0]` (a plain struct value-copy) does NOT deep-copy
+  `Result` (`*domain.AnalyzerResult`, a pointer) or the `RoleCapacities`/`RoleSpare` maps —
+  exactly the "known aliasing hazard" spec.md's CT6 section had already flagged and left
+  unaddressed ("not a live bug today"). Traced whether `namedResults` is read again after the
+  mutation point — confirmed no (all reads happen inside `runAnalyzersAndScore`, which returns
+  before `collectV2ModelRequest` calls `normalizeToCompositeUnits`) — so genuinely not exploitable
+  today, but the user wants it fixed regardless, not documented-and-left.
+- Checked `VariantCapacity`/`RoleCapacity`'s own fields for further nesting — both are fully flat
+  (scalar fields only), so no deeper recursion needed beyond one level.
+- Asked user where to put the fix: standalone helper at the call site, vs. folding into
+  `normalizeToCompositeUnits` itself. User: fold it in — "It will become later the aggregation
+  logic anyway" (i.e. CT7's future multi-analyzer reduce will need this same copy-safety, so
+  building it into this function now means CT7 inherits it rather than needing to add it later).
+- Asked a follow-up on exact signature shape (take-and-return by value vs. keep `*NamedAnalyzerResult`
+  param but build+return a copy internally). User chose the latter — pointer param stays, but the
+  function no longer mutates through it, avoiding a signature that implies in-place mutation when
+  it no longer does.
+- Implemented: `normalizeToCompositeUnits` now takes source by value, returns an independent
+  `NamedAnalyzerResult` with `Result` (+ its `VariantCapacities` slice + `RoleDemand` map),
+  `RoleCapacities`, and `RoleSpare` all freshly copied. Updated all 9 call sites (1 production,
+  8 existing tests) since the signature change is mechanical but touches every caller. Added a
+  new test asserting the source is untouched after mutating the returned result.
+- **Verified the new test's sensitivity properly** (not just "it passes") — wrote a standalone
+  scratch test reproducing the OLD shallow-copy pattern (`nr := src; nr.Result.TotalDemand = 1.0`)
+  and confirmed it DOES mutate `src.Result`/`src.RoleCapacities` — proving the aliasing hazard is
+  real and that a regression here would be caught. Removed the scratch test immediately after
+  (never staged, never committed — confirmed via `git status` before and after).
+- Committed as `44a7f5e6`. `go build`/`go vet`/`gofmt`/full `go test ./internal/...` all clean.
+  **Not yet reviewed** (came after the `65c344af`/`991800ce` review already ran) — flagged this
+  explicitly in STATE.md rather than letting a 4th unreviewed commit slide through quietly.
+
 ## Open / next
-- Wait for/address further findings from the user's ongoing PR review.
-- Push `65c344af` + `991800ce` to origin once review settles — needs a fresh per-op
-  authorization (2026-09-06's was already consumed).
+- Get `44a7f5e6` independently reviewed (next action).
+- Push `65c344af` + `991800ce` + `44a7f5e6` to origin once review settles — needs a fresh
+  per-op authorization.
 - Decide with user whether CT4's fairness fix belongs in the next PR.
 - Implement CT6 composite metrics (separate future PR, explicitly not blocking this one).
 - Finalize next PR's exact boundary once review is done and open it via
