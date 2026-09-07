@@ -1055,9 +1055,9 @@ func buildRoleCapacities(ctx context.Context, result *domain.AnalyzerResult) map
 // plain struct assignment would alias them, so a mutation meant only for the
 // composite would silently reach whatever else still holds src, e.g. the
 // per-analyzer namedResults slice collectV2ModelRequest built src from). This
-// will grow into the real multi-analyzer reduce (CT7) — folding the copy in
-// here now means that future aggregation logic inherits copy-safety rather
-// than having to add it later.
+// will grow into the real multi-analyzer reduce — folding the copy in here
+// now means that future aggregation logic inherits copy-safety rather than
+// having to add it later.
 func normalizeToCompositeUnits(src allocation.NamedAnalyzerResult) allocation.NamedAnalyzerResult {
 	nr := src
 	if src.Result != nil {
