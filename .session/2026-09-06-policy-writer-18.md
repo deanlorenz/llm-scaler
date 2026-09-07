@@ -294,3 +294,43 @@ Continues: .session/ledger/2026-09-06-policy-writer-17.md
   git-tracked to begin with (always `??` in status), so `git mv` errors on an untracked source.
   Used plain `mv` + `git add` instead. Committed: `36375780`. Not yet pushed (separate
   authorization needed; not yet requested).
+
+## Verified 2026-09-07 — all points already captured; no folds needed
+
+Cross-checked every distinct point below against current `worktrees/policy-writer/.session/STATE.md`,
+`worktrees/policy-writer/.session/spec-policy-writer.md`, and the current content of
+`conventions/policy-writer.md`, `conventions/coder.md`, `conventions/coder-orchestration.md`,
+`conventions/reviewer.md`, `conventions/tasks.md`, `conventions/worktree-delegation.md`, and
+`conventions/settings-and-skill-edits.md` on both `policy-writer` and `session-tracking` (both
+clean, byte-identical). Two prior wind-down commits (`a1f53579` STATE.md close-out, `6f024396`
+final ledger append) had already synced STATE.md's checklist/known-issues with this ledger's
+full content before this pass started. Found nothing still missing.
+
+| Ledger point | Durable destination | Action taken |
+|---|---|---|
+| Stale session-7/session-11 ledgers relocated + verified | `.session/ledger/2026-08-31-policy-writer-7.md`, `.session/ledger/2026-09-04-policy-writer-11.md` (both carry `## Verified 2026-09-06`) | None needed (already captured) |
+| Ad hoc ledger-capture used (no dedicated skill/agent yet) | STATE.md checklist: "Rewrite ledger-capture as a custom-agent"; spec T12 | None needed (already captured) |
+| `CONVENTIONS.md.bak` stray file found | STATE.md checklist + Known issues (resolved: moved to `backup_rules/`, commit `8352bbb5`) | None needed (already captured) |
+| Suggestion-box worktree-delegation item opened, three setups drafted (`own-worktree`/`checkout-branch`/`same-worktree`) | STATE.md checklist (multiple entries); `conventions/worktree-delegation.md`, `coder-orchestration.md`, `coder.md`, `reviewer.md`, `tasks.md` | None needed (already captured) |
+| Concurrency rule: max one coder per worktree/branch, uniformly across all three setups | `conventions/coder-orchestration.md` gate table | None needed (already captured; confirmed present) |
+| `.session/` write boundary: coder may write only its own ledger, isolation-pattern-agnostic | `conventions/coder.md` line 15 | None needed (already captured; verified exact wording matches ledger's account) |
+| `EnterWorktree(path=...)` structurally cannot reach a repo-root mission worktree from a subagent, in any launch mode (empirically verified) | `conventions/worktree-delegation.md` (own-worktree / same-worktree setup mechanics) | None needed (already captured) |
+| Pattern B (checkout-branch) task-file delivery must use git plumbing, not a scratch worktree checkout | `conventions/worktree-delegation.md` (checkout-branch setup mechanics) | None needed (already captured) |
+| Wait-for-instructions rule (coder may hold open after reporting done) | `conventions/coder-orchestration.md` rule 7 | None needed (already captured) |
+| **PROTOCOL VIOLATION** — drafted conventions changes directly on `session-tracking` instead of `policy-writer` | STATE.md Known issues (dedicated entry, root cause stated); `spec-policy-writer.md` — not separately duplicated, STATE.md's account is sufficient | None needed (already captured) |
+| Root cause of violation: `CONVENTIONS.md`'s trigger to read `policy-writer.md` at mission-owner session start was read but not acted on | STATE.md Known issues; fixed at the mechanism level by the `resume-mission` Step 3a gate (`5df72c1f`) | None needed (already captured) |
+| Recovery: diffed and ported the three drafted files byte-identical from `session-tracking` to `policy-writer` | STATE.md checklist (implicit in the committed-work entries); commits `d325caee`, `6cb822af` | None needed (already captured) |
+| Gap found on audit: `reviewer.md`'s "where you run" addition and STATE.md checklist itself were never actually written despite being agreed in chat | STATE.md checklist (now populated); `conventions/reviewer.md` (now has the setup-agnostic rule, commit `a933d773`) | None needed (already captured) |
+| `ide_selection` false-lead lesson (an incidentally-surfaced file reference is not itself a request to act on it) | Not present verbatim in STATE.md or spec | Open question — see report |
+| Naming redesign: letter-based A/B/C rejected by user ("item names, will lose track"); replaced with `own-worktree`/`checkout-branch`/`same-worktree` | STATE.md checklist (dedicated entry); `conventions/worktree-delegation.md`, `coder-orchestration.md` headings; verified zero leftover "Pattern A/B/C" text repo-wide | None needed (already captured) |
+| Ownership-split correction: `coder-orchestration.md` = decision logic/gates; `worktree-delegation.md` = mechanics + exact task-file field content; `tasks.md` = field syntax only, no situational logic | STATE.md checklist (dedicated entries); verified current file contents match this split exactly | None needed (already captured) |
+| `tasks.md` field guide trimmed to bare syntax per user request (no rationale, no cross-reference) | STATE.md checklist; `conventions/tasks.md` (verified current content is syntax-only) | None needed (already captured) |
+| `state-vs-ledger.md`/`tasks.md` "duplication" resolved as not-a-duplication (baseline template vs. additive per-task fields) | STATE.md checklist | None needed (already captured) |
+| `CONVENTIONS.md.bak` moved to `backup_rules/` per user direction | STATE.md checklist; commit `8352bbb5` | None needed (already captured) |
+| `resume-mission` skill: new mandatory Step 3a gate reading the mission-specific rule file directly (no dependency on `CONVENTIONS.md`'s index) | STATE.md checklist; `claude-skills/resume-mission/SKILL.md` (verified Step 3a present, installed on both branches); commit `5df72c1f` | None needed (already captured) |
+| `settings-and-skill-edits.md` marker requirement re-confirmed empirically: per-edit, not per-file-once; a marker-only edit does not carry forward to a later content edit — must be inline in the same edit | `conventions/settings-and-skill-edits.md` (verified current text already states this precisely: "Every single edit (not just the first) requires the literal marker... present... A naive 'add the marker, then remove it in a follow-up edit' sequence never finishes") | None needed (already captured precisely; no suggestion-box file warranted) |
+| Pushed `policy-writer` to `origin` (`32b725ef..5df72c1f`) | STATE.md checklist / spec §3 "Last installed" | None needed (already captured) |
+| Installed to `session-tracking` (commit `702c35ae`), verified diff-empty, pushed (`56c38b10..702c35ae`) | STATE.md checklist | None needed (already captured) |
+| Suggestion-box entry marked processed (`mv` + `git add`, not `git mv`, since file was untracked); commit `36375780` not yet pushed | STATE.md checklist + "Next step / resume point" (explicitly notes the pending push) | None needed (already captured) |
+| Two post-ledger wind-down commits (`a1f53579`, `6f024396`) already synced STATE.md and this ledger before this capture pass began | N/A — verified during this pass, not a new finding | None needed (self-evidently already done) |
+
