@@ -108,9 +108,61 @@ demand by PRC is fine, always has been, and normalizing PRC before this division
 (both call sites) behind the same `demand > 0` check that already guards the other fields in
 the same loop.
 
-**Status:** diagnosis confirmed and settled. NOT YET FIXED — user said "discuss 1,3" before
-touching code again; implementation should follow once 1 and 3 are resolved together, or the
-user gives explicit go-ahead to fix 2 alone first.
+**Exact planned diff (`internal/engines/steadystate/engine_v2.go`, `normalizeToCompositeUnits`),
+approved by user before implementation — three sites, not two (a third, `RoleDemand[role] =
+1.0` at the model level, was found while pinning down the exact lines; same bug shape,
+previously folded into "the model-level line 1188" without being called out separately):**
+
+1. **Per-role `RoleCapacities[role].TotalDemand`** (currently lines 1174-1184) — move
+   `rc.TotalDemand = 1.0` inside the existing `if demand > 0` guard:
+   ```go
+   for role, rc := range nr.RoleCapacities {
+       demand := demandForRole(role)
+       if demand > 0 {
+           rc.RequiredCapacity /= demand
+           rc.SpareCapacity /= demand
+           rc.TotalSupply /= demand
+           rc.TotalAnticipatedSupply /= demand
+           rc.TotalDemand = 1.0          // moved inside the guard (was unconditional)
+       }
+       nr.RoleCapacities[role] = rc
+   }
+   ```
+2. **Model-level `Result.TotalDemand`** (currently line 1188) — guard with `modelDemand > 0`
+   (the same variable already computed and used by the model-level RC/SC/supply block above
+   it):
+   ```go
+   if modelDemand > 0 {
+       nr.Result.TotalDemand = 1.0
+   }
+   ```
+3. **Model-level per-role `Result.RoleDemand[role]`** (currently lines 1189-1191) — guard each
+   entry by its own value before overwriting:
+   ```go
+   for role, d := range nr.Result.RoleDemand {
+       if d > 0 {
+           nr.Result.RoleDemand[role] = 1.0
+       }
+   }
+   ```
+
+**Verified safe for every downstream reader** (grepped all `.TotalDemand`/`.RoleDemand[`
+consumers in `internal/engines/`): no consumer treats `0` as a missing/sentinel value —
+`roleDemandGPUs` (`rescale.go`), `RecordAnalyzerDemand`, the RC/SC formulas
+(`v := rc.TotalDemand/scaleUp - ...`), and the Utilization recompute (below) all already treat
+`demand<=0` as an ordinary, correct zero. No other file reads `Result.RoleDemand[role]` outside
+this function itself.
+
+**Side effect (a genuine bonus, not scope creep):** the Utilization recompute at line
+1197-1198 (`nr.Utilization = nr.Result.TotalDemand / nr.TotalSupply`) currently produces a
+small spurious nonzero value for an idle model (`1.0/raw_TotalSupply`) — one of the review's
+5 lower-severity findings ("idle-model Utilization miscompute"). With `TotalDemand` correctly
+staying `0` per the fix above, this recompute naturally yields `0/TotalSupply = 0`, the correct
+value — fixed for free by the same guard, no extra code needed.
+
+**Status:** diagnosis confirmed and settled; exact diff written above and shown to user for
+review before implementation, per user's explicit request ("show me all expected changes +
+update your PR spec" before fixing). NOT YET IMPLEMENTED — awaiting go-ahead to write the code.
 
 ### Point 3 — SatDemand/SatRoleDemand is not designed for the metrics use case
 
@@ -140,9 +192,16 @@ User has not yet answered (a) vs (b) — paused to discuss 1 and 3 together firs
 
 - Working tree is clean (the attempted point-3 fix was reverted via
   `git checkout -- internal/engines/allocation/cost_aware_optimizer.go`, user-confirmed).
-- No fixes for findings 1, 2, or 3 have been implemented or committed yet.
-- The 3 original squashed commits (`498c8950`, `f3c51698`, `062331bc`) remain as originally
-  cherry-picked/squashed — untouched by this discussion.
+- **Rebased onto the updated `upstream/main`** (`b848b19c` → `185b3eb8`) — one conflict in
+  `docs/reference/cycle-log.md` (upstream renamed it from `docs/developer-guide/cycle-log.md`
+  during a docs restructure), resolved by merging upstream's corrected link with our commit's
+  composite-signal doc additions. All 4 commits rebuilt clean, full engine test suite passes.
+  New SHAs post-rebase: `6ae2eb47` (feat), `cb723833` (fix RC/SC/etc), `da0e1ee8` (fix naming/
+  logging/deep-copy), `97441e3e` (local `.session` docs commit).
+- **Pushed to `origin`** (`deanlorenz/llm-scaler`, branch `single-analyzer-normalize`,
+  user-confirmed) — new branch, no PR opened yet.
+- No fixes for findings 1, 2, or 3 have been implemented or committed yet. Point 2's exact
+  diff is now written out above, shown to the user, awaiting go-ahead to implement.
 - **This PR can no longer be "100% clean"** per the user's own assessment — the scope has grown
   from "rebase CT6 onto upstream/main" to "rebase CT6 + resolve at least the zero-demand
   regression (point 2) it depends on, and decide how deep to go on points 1 and 3." This file
@@ -152,9 +211,9 @@ User has not yet answered (a) vs (b) — paused to discuss 1 and 3 together firs
 
 ## Open items / next steps (not yet done)
 
-1. Continue discussing points 1 and 3 (in progress when this file was written).
-2. Decide fix for point 2 (zero-demand) — diagnosis is settled, implementation is not yet
-   written.
+1. Implement point 2's fix (diff above) once user gives go-ahead — diagnosis and exact diff
+   are both settled; nothing left to decide, only to write and test.
+2. Continue discussing points 1 and 3 (paused mid-discussion for the upstream rebase + push).
 3. Decide fix for point 1 (fair-share GPU-unit comparison) — direction agreed, implementation
    not started, scope/PR-boundary not decided.
 4. Decide fix for point 3 (metrics) — mechanism not yet decided (reuse SatDemand vs. new
