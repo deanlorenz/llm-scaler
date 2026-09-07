@@ -107,23 +107,41 @@
 - [x] Prefixed the processed suggestion-box entry
   `session-tracking/suggestion-box/2026-09-06-2240-dean-llmd-scaler-sandbox.md` →
   `processed-2026-09-06-2240-dean-llmd-scaler-sandbox.md`. Committed on `session-tracking`:
-  `36375780`. Not yet pushed — no push authorization requested for it yet.
+  `36375780`. Pushed to `origin` this session (see below).
+- [x] Renamed `conventions/writing-outside-worktree.md` → `working-outside-worktree.md`;
+  rewrote as short WHAT/HOW rules per user's exact structure (no prose/WHY). Empirically
+  verified pinned-session git/shell mechanics before drafting rather than guessing (see ledger
+  `2026-09-07-policy-writer-19.md` for full findings). Committed on `policy-writer`: `40079643`.
+- [x] Installed the rename to `session-tracking` via `git cherry-pick 40079643` (not
+  checkout+add — preserves the source commit; a manual `git rm`+add was tried, caught by the
+  user as unauthorized and as losing rename history, reverted before the cherry-pick). Result:
+  `e39f3a22` on `session-tracking`, verified diff-empty against `policy-writer`. Pushed to
+  `origin`: `702c35ae..e39f3a22` (carries both `36375780` and `e39f3a22`).
 
-**Last completed:** Full suggestion-box item closed end to end: drafted and finalized on
-`policy-writer`, installed and pushed to `session-tracking`, resume-mission root-cause gate
-added and installed, suggestion-box entry marked processed (commit `36375780`, local only).
+**Last completed:** `working-outside-worktree.md` rename+rewrite drafted, approved, committed
+on `policy-writer` (`40079643`), installed onto `session-tracking` via cherry-pick (`e39f3a22`),
+pushed to `origin/session-tracking` (`702c35ae..e39f3a22`).
 
-**Next step / resume point:** Push `36375780` to `session-tracking`'s `origin` when the user
-authorizes it. Otherwise, next open work is the pre-existing backlog: revisit FG/BG analysis,
-CONVENTIONS/session-start/resume-mission overlap, agentbus subscription details, rewrite
-ledger-capture as a custom-agent, write T10 session-setup agent spec.
+**Next step / resume point:** No pending push or install work. Two doc-accuracy gaps surfaced
+this session, not yet fixed (see ledger for detail): (1) `CONVENTIONS.md` line 29 and
+`feature-worktree-setup.md`'s `git -C <repo-root> show <mission>:...` fallback are both
+wrong for a pinned session — `-C` outside your own worktree is blocked entirely, no
+repo-root exception; correct form is `git show <branch>:<path>` with no `-C`. (2)
+`install-to-session-tracking.md` itself documents `git -C`/`cd` steps that don't work for a
+pinned session — the actual working procedure is to become the `session-tracking` session via
+`EnterWorktree` and reference `policy-writer` by branch name with no `-C`/`cd`. Otherwise, next
+open work is the pre-existing backlog: revisit FG/BG analysis, CONVENTIONS/session-start/
+resume-mission overlap, agentbus subscription details, rewrite ledger-capture as a
+custom-agent, write T10 session-setup agent spec.
 
 ### Status
-IN PROGRESS — session 18 retired. Worktree-delegation suggestion-box item and its root-cause
-fix are fully done and installed on both branches. Only `36375780` (suggestion-box
-processed-marker commit) remains unpushed, pending separate authorization. No other work in
-progress; next session picks up the pre-existing backlog (FG/BG analysis, CONVENTIONS overlap,
-agentbus subscriptions, ledger-capture custom-agent, T10 spec).
+IN PROGRESS — session 19 active. Suggestion-box processed-marker commit and the
+working-outside-worktree rename are both installed and pushed on both branches; nothing
+pending push/install right now. Two doc-accuracy gaps found this session (stale `-C` guidance
+in `CONVENTIONS.md`/`feature-worktree-setup.md`/`install-to-session-tracking.md`) are flagged
+but not fixed — out of scope of what was asked. `policy-writer` itself has 7 unpushed local
+commits relative to `origin/policy-writer` (predates this session plus this session's
+`40079643`/`8fa30bcd`) — not yet raised with the user for push authorization this session.
 
 ### Known issues
 - `settings-and-skill-edits.md` describes a `user-approved-settings-change` marker
