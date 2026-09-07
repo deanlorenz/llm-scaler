@@ -10,7 +10,7 @@ import (
 
 var _ = Describe("normalizeToCompositeUnits", func() {
 	It("non-disaggregated: normalizes PRC, TotalDemand, RC/SC/Remaining/Spare/supply, captures SatDemand", func() {
-		nr := &allocation.NamedAnalyzerResult{
+		src := allocation.NamedAnalyzerResult{
 			Result: &domain.AnalyzerResult{
 				TotalDemand: 8000,
 				VariantCapacities: []domain.VariantCapacity{
@@ -28,7 +28,7 @@ var _ = Describe("normalizeToCompositeUnits", func() {
 			TotalAnticipatedSupply: 5000,
 		}
 
-		normalizeToCompositeUnits(nr)
+		nr := normalizeToCompositeUnits(src)
 
 		Expect(nr.SatDemand).To(Equal(8000.0))
 		Expect(nr.Result.TotalDemand).To(Equal(1.0))
@@ -50,7 +50,7 @@ var _ = Describe("normalizeToCompositeUnits", func() {
 	})
 
 	It("disaggregated: normalizes per-role PRC, demands, and per-role RC/SC/supply independently", func() {
-		nr := &allocation.NamedAnalyzerResult{
+		src := allocation.NamedAnalyzerResult{
 			Result: &domain.AnalyzerResult{
 				TotalDemand: 12000,
 				RoleDemand: map[string]float64{
@@ -76,7 +76,7 @@ var _ = Describe("normalizeToCompositeUnits", func() {
 			},
 		}
 
-		normalizeToCompositeUnits(nr)
+		nr := normalizeToCompositeUnits(src)
 
 		Expect(nr.SatDemand).To(Equal(12000.0))
 		Expect(nr.SatRoleDemand).To(Equal(map[string]float64{"prefill": 4000, "decode": 8000}))
@@ -107,7 +107,7 @@ var _ = Describe("normalizeToCompositeUnits", func() {
 
 	It("demand=0: leaves PRC and RC/SC/Remaining/Spare/supply unchanged, still sets TotalDemand to 1.0", func() {
 		origPRC := 500.0
-		nr := &allocation.NamedAnalyzerResult{
+		src := allocation.NamedAnalyzerResult{
 			Result: &domain.AnalyzerResult{
 				TotalDemand: 0,
 				VariantCapacities: []domain.VariantCapacity{
@@ -122,7 +122,7 @@ var _ = Describe("normalizeToCompositeUnits", func() {
 			TotalAnticipatedSupply: 500,
 		}
 
-		normalizeToCompositeUnits(nr)
+		nr := normalizeToCompositeUnits(src)
 
 		Expect(nr.Result.TotalDemand).To(Equal(1.0))
 		Expect(nr.Result.VariantCapacities[0].PerReplicaCapacity).To(Equal(origPRC))
@@ -138,7 +138,7 @@ var _ = Describe("normalizeToCompositeUnits", func() {
 	})
 
 	It("PRC=0: leaves PRC as 0 after normalization", func() {
-		nr := &allocation.NamedAnalyzerResult{
+		src := allocation.NamedAnalyzerResult{
 			Result: &domain.AnalyzerResult{
 				TotalDemand: 8000,
 				VariantCapacities: []domain.VariantCapacity{
@@ -147,19 +147,20 @@ var _ = Describe("normalizeToCompositeUnits", func() {
 			},
 		}
 
-		normalizeToCompositeUnits(nr)
+		nr := normalizeToCompositeUnits(src)
 
 		Expect(nr.Result.TotalDemand).To(Equal(1.0))
 		Expect(nr.Result.VariantCapacities[0].PerReplicaCapacity).To(Equal(0.0))
 	})
 
 	It("nil Result: does not panic and is a no-op", func() {
-		nr := &allocation.NamedAnalyzerResult{
+		src := allocation.NamedAnalyzerResult{
 			Result:    nil,
 			SatDemand: 0,
 		}
 
-		Expect(func() { normalizeToCompositeUnits(nr) }).NotTo(Panic())
+		var nr allocation.NamedAnalyzerResult
+		Expect(func() { nr = normalizeToCompositeUnits(src) }).NotTo(Panic())
 		Expect(nr.SatDemand).To(Equal(0.0))
 	})
 
@@ -168,7 +169,7 @@ var _ = Describe("normalizeToCompositeUnits", func() {
 		// as buildRoleCapacities always sets them together in the real pipeline —
 		// demandForRole resolves a role's raw demand from Result.RoleDemand (via
 		// SatRoleDemand), not from the RoleCapacities entry's own TotalDemand field.
-		nr := &allocation.NamedAnalyzerResult{
+		src := allocation.NamedAnalyzerResult{
 			Result: &domain.AnalyzerResult{
 				TotalDemand: 8000,
 				RoleDemand:  map[string]float64{"prefill": 4000},
@@ -181,7 +182,7 @@ var _ = Describe("normalizeToCompositeUnits", func() {
 			},
 		}
 
-		normalizeToCompositeUnits(nr)
+		nr := normalizeToCompositeUnits(src)
 
 		Expect(nr.RoleCapacities["prefill"].TotalDemand).To(Equal(1.0))
 		// TotalSupply keeps the struct's documented invariant
@@ -192,7 +193,7 @@ var _ = Describe("normalizeToCompositeUnits", func() {
 
 	It("SatDemand equals original TotalDemand (not 1.0) after the call", func() {
 		originalDemand := 16000.0
-		nr := &allocation.NamedAnalyzerResult{
+		src := allocation.NamedAnalyzerResult{
 			Result: &domain.AnalyzerResult{
 				TotalDemand: originalDemand,
 				VariantCapacities: []domain.VariantCapacity{
@@ -201,7 +202,7 @@ var _ = Describe("normalizeToCompositeUnits", func() {
 			},
 		}
 
-		normalizeToCompositeUnits(nr)
+		nr := normalizeToCompositeUnits(src)
 
 		Expect(nr.SatDemand).To(Equal(originalDemand))
 		Expect(nr.SatDemand).NotTo(Equal(nr.Result.TotalDemand))
@@ -209,7 +210,7 @@ var _ = Describe("normalizeToCompositeUnits", func() {
 	})
 
 	It("captures SatRoleDemand as a copy independent of the source map", func() {
-		nr := &allocation.NamedAnalyzerResult{
+		src := allocation.NamedAnalyzerResult{
 			Result: &domain.AnalyzerResult{
 				TotalDemand: 12000,
 				RoleDemand: map[string]float64{
@@ -223,7 +224,7 @@ var _ = Describe("normalizeToCompositeUnits", func() {
 			},
 		}
 
-		normalizeToCompositeUnits(nr)
+		nr := normalizeToCompositeUnits(src)
 
 		Expect(nr.SatRoleDemand).To(Equal(map[string]float64{"prefill": 4000, "decode": 8000}))
 		// Result.RoleDemand is now 1.0 for every role; SatRoleDemand must not have
@@ -233,7 +234,7 @@ var _ = Describe("normalizeToCompositeUnits", func() {
 	})
 
 	It("non-disaggregated result has a nil SatRoleDemand (nothing to capture)", func() {
-		nr := &allocation.NamedAnalyzerResult{
+		src := allocation.NamedAnalyzerResult{
 			Result: &domain.AnalyzerResult{
 				TotalDemand: 8000,
 				VariantCapacities: []domain.VariantCapacity{
@@ -242,8 +243,51 @@ var _ = Describe("normalizeToCompositeUnits", func() {
 			},
 		}
 
-		normalizeToCompositeUnits(nr)
+		nr := normalizeToCompositeUnits(src)
 
 		Expect(nr.SatRoleDemand).To(BeNil())
+	})
+
+	It("does not alias src: mutating the returned result leaves src's Result, RoleCapacities, and RoleSpare untouched", func() {
+		src := allocation.NamedAnalyzerResult{
+			Result: &domain.AnalyzerResult{
+				TotalDemand: 8000,
+				RoleDemand:  map[string]float64{"prefill": 8000},
+				VariantCapacities: []domain.VariantCapacity{
+					{VariantName: "v1", Role: "prefill", PerReplicaCapacity: 2000},
+				},
+			},
+			RoleCapacities: map[string]domain.RoleCapacity{
+				"prefill": {Role: "prefill", TotalDemand: 8000, RequiredCapacity: 6000},
+			},
+			RoleSpare: map[string]float64{"prefill": 1234},
+		}
+
+		nr := normalizeToCompositeUnits(src)
+
+		// The returned result is normalized...
+		Expect(nr.Result.TotalDemand).To(Equal(1.0))
+		Expect(nr.Result.VariantCapacities[0].PerReplicaCapacity).To(BeNumerically("~", 0.25, 1e-9))
+		Expect(nr.RoleCapacities["prefill"].TotalDemand).To(Equal(1.0))
+
+		// ...but src, which normalizeToCompositeUnits never mutates, must still
+		// read exactly as constructed. A value-copy alone would NOT catch this,
+		// because Result is a pointer and RoleCapacities/RoleSpare are maps —
+		// this is the aliasing hazard the deep copy exists to close.
+		Expect(src.Result.TotalDemand).To(Equal(8000.0))
+		Expect(src.Result.RoleDemand["prefill"]).To(Equal(8000.0))
+		Expect(src.Result.VariantCapacities[0].PerReplicaCapacity).To(Equal(2000.0))
+		Expect(src.RoleCapacities["prefill"].TotalDemand).To(Equal(8000.0))
+		Expect(src.RoleCapacities["prefill"].RequiredCapacity).To(Equal(6000.0))
+		Expect(src.RoleSpare["prefill"]).To(Equal(1234.0))
+
+		// The returned result's own maps must be independent objects too, not
+		// just independently-valued right now — mutating them must not reach src.
+		nr.RoleCapacities["prefill"] = domain.RoleCapacity{Role: "prefill", TotalDemand: 999}
+		nr.RoleSpare["prefill"] = 999
+		nr.Result.RoleDemand["prefill"] = 999
+		Expect(src.RoleCapacities["prefill"].TotalDemand).To(Equal(8000.0))
+		Expect(src.RoleSpare["prefill"]).To(Equal(1234.0))
+		Expect(src.Result.RoleDemand["prefill"]).To(Equal(8000.0))
 	})
 })

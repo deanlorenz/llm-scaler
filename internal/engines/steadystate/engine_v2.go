@@ -686,7 +686,7 @@ func gpuUsageByType(req allocation.ModelScalingRequest, perType map[string]int) 
 func computeCurrentGPUUsage(requests []allocation.ModelScalingRequest) map[string]int {
 	usage := make(map[string]int)
 	for _, req := range requests {
-		if !hasSaturationResult(req) {
+		if !hasCompositeResult(req) {
 			continue
 		}
 		gpuUsageByType(req, usage)
@@ -707,7 +707,7 @@ func computeCurrentGPUUsageByNamespace(requests []allocation.ModelScalingRequest
 			perType = make(map[string]int)
 			usage[req.Namespace] = perType
 		}
-		if !hasSaturationResult(req) {
+		if !hasCompositeResult(req) {
 			continue
 		}
 		gpuUsageByType(req, perType)
@@ -715,11 +715,11 @@ func computeCurrentGPUUsageByNamespace(requests []allocation.ModelScalingRequest
 	return usage
 }
 
-// hasSaturationResult reports whether the request carries a saturation analyzer
-// result. A request without one was not measured this cycle, so its replica
-// counts are not evidence of anything and must not be charged to a quota.
-func hasSaturationResult(req allocation.ModelScalingRequest) bool {
-	return req.CompositeSignal.Name == domain.SaturationAnalyzerName && req.CompositeSignal.Result != nil
+// hasCompositeResult reports whether the request carries a composite signal.
+// A request without one was not measured this cycle, so its replica counts
+// are not evidence of anything and must not be charged to a quota.
+func hasCompositeResult(req allocation.ModelScalingRequest) bool {
+	return req.CompositeSignal.Result != nil
 }
 
 // reportUnattributedGPUs surfaces usage that could not be charged to any
@@ -791,9 +791,8 @@ func (e *Engine) collectV2ModelRequest(
 	// namedResults[0] is always the saturation entry — it is built first and
 	// unconditionally. The optimizer only needs sat's signal; all other entries
 	// are engine-internal (liveness, metrics) and not forwarded.
-	composite := namedResults[0]
-	normalizeToCompositeUnits(&composite)
-	logCompositeSignal(ctx, modelID, namespace, composite)
+	composite := normalizeToCompositeUnits(namedResults[0])
+	logAnalyzerResult(ctx, modelID, namespace, composite)
 
 	return &allocation.ModelScalingRequest{
 		ModelID:         modelID,
@@ -1076,11 +1075,47 @@ func buildRoleCapacities(ctx context.Context, result *domain.AnalyzerResult) map
 //
 // normalizeToCompositeUnits must be called after buildCapacities — RC, SC, and
 // RoleCapacities are computed from the raw sat values and must not be recomputed
-// after normalization. It mutates nr in place.
-func normalizeToCompositeUnits(nr *allocation.NamedAnalyzerResult) {
-	if nr.Result == nil {
-		return
+// after normalization.
+//
+// src is never mutated: this function builds and returns an independent deep
+// copy (Result, RoleCapacities, and RoleSpare are all reference types — a
+// plain struct assignment would alias them, so a mutation meant only for the
+// composite would silently reach whatever else still holds src, e.g. the
+// per-analyzer namedResults slice collectV2ModelRequest built src from). This
+// will grow into the real multi-analyzer reduce — folding the copy in here
+// now means that future aggregation logic inherits copy-safety rather than
+// having to add it later.
+func normalizeToCompositeUnits(src allocation.NamedAnalyzerResult) allocation.NamedAnalyzerResult {
+	nr := src
+	if src.Result != nil {
+		result := *src.Result
+		if src.Result.VariantCapacities != nil {
+			result.VariantCapacities = make([]domain.VariantCapacity, len(src.Result.VariantCapacities))
+			copy(result.VariantCapacities, src.Result.VariantCapacities)
+		}
+		if src.Result.RoleDemand != nil {
+			result.RoleDemand = make(map[string]float64, len(src.Result.RoleDemand))
+			maps.Copy(result.RoleDemand, src.Result.RoleDemand)
+		}
+		nr.Result = &result
 	}
+	if src.RoleCapacities != nil {
+		nr.RoleCapacities = make(map[string]domain.RoleCapacity, len(src.RoleCapacities))
+		maps.Copy(nr.RoleCapacities, src.RoleCapacities)
+	}
+	if src.RoleSpare != nil {
+		nr.RoleSpare = make(map[string]float64, len(src.RoleSpare))
+		maps.Copy(nr.RoleSpare, src.RoleSpare)
+	}
+	// SatRoleDemand is populated fresh below; no need to copy src's (nil at
+	// this point in every real caller, since normalizeToCompositeUnits is the
+	// only writer).
+
+	if nr.Result == nil {
+		return nr
+	}
+
+	nr.Name = allocation.CompositeSignalName
 
 	// Capture every raw (pre-overwrite) demand value up front — both for the
 	// rescale weight (SatDemand/SatRoleDemand) and for the divisions below —
@@ -1164,6 +1199,8 @@ func normalizeToCompositeUnits(nr *allocation.NamedAnalyzerResult) {
 	} else {
 		nr.Utilization = 0
 	}
+
+	return nr
 }
 
 // rolesOf returns the roles present in a per-role aggregation, sorted so the
@@ -1177,9 +1214,10 @@ func rolesOf(totals map[string]aggregation.ScopeTotals) []string {
 	return roles
 }
 
-// logAnalyzerResult emits one INFO "analyzer-result" line for a single named
-// analyzer result. Called for every analyzer that ran in a model's reconcile
-// cycle, after the universal threshold post-step has been applied.
+// logAnalyzerResult emits one INFO "analyzer-result" line for a NamedAnalyzerResult.
+// Called for every analyzer that ran in a model's reconcile cycle, in that
+// analyzer's own units, and once more for CompositeSignal — the coverage-unit
+// signal actually passed to the optimizer.
 func logAnalyzerResult(ctx context.Context, modelID, namespace string, nr allocation.NamedAnalyzerResult) {
 	if nr.Result == nil {
 		return
@@ -1213,50 +1251,6 @@ func logAnalyzerResult(ctx context.Context, modelID, namespace string, nr alloca
 		})
 	}
 
-	logger.Info("analyzer-result",
-		"modelID", modelID,
-		"namespace", namespace,
-		"analyzer", nr.Name,
-		"supply", nr.TotalSupply,
-		"demand", nr.Result.TotalDemand,
-		"util", nr.Utilization,
-		"rc", nr.RequiredCapacity,
-		"sc", nr.SpareCapacity,
-		"scaleUpThreshold", nr.ScaleUpThreshold,
-		"scaleDownBoundary", nr.ScaleDownBoundary,
-		"variants", variants,
-	)
-}
-
-// logCompositeSignal emits one INFO "composite-signal" line for the coverage-unit
-// composite collectV2ModelRequest hands to the optimizer, right after
-// normalizeToCompositeUnits runs. logAnalyzerResult (above) logs every analyzer's
-// result in its own raw units before normalization; nothing previously logged the
-// actual post-normalization signal the optimizer receives, which is exactly what
-// let the normalization bug (RequiredCapacity/SpareCapacity/Remaining/Spare left
-// in raw units while PerReplicaCapacity was already a coverage fraction) go
-// unnoticed. rc/sc/remaining/spare/prc below are all coverage fractions once this
-// function's caller has normalized nr, not token counts.
-func logCompositeSignal(ctx context.Context, modelID, namespace string, nr allocation.NamedAnalyzerResult) {
-	if nr.Result == nil {
-		return
-	}
-	logger := ctrl.LoggerFrom(ctx)
-
-	type variantEntry struct {
-		Name string  `json:"name"`
-		PRC  float64 `json:"prc"`
-		Role string  `json:"role"`
-	}
-	variants := make([]variantEntry, 0, len(nr.Result.VariantCapacities))
-	for _, vc := range nr.Result.VariantCapacities {
-		role := vc.Role
-		if role == "" {
-			role = domain.RoleBoth
-		}
-		variants = append(variants, variantEntry{Name: vc.VariantName, PRC: vc.PerReplicaCapacity, Role: role})
-	}
-
 	type roleEntry struct {
 		Role      string  `json:"role"`
 		RC        float64 `json:"rc"`
@@ -1269,16 +1263,23 @@ func logCompositeSignal(ctx context.Context, modelID, namespace string, nr alloc
 	}
 	sort.Slice(roles, func(i, j int) bool { return roles[i].Role < roles[j].Role })
 
-	logger.Info("composite-signal",
+	logger.Info("analyzer-result",
 		"modelID", modelID,
 		"namespace", namespace,
 		"analyzer", nr.Name,
+		"score", nr.Score,
+		"live", nr.Live,
+		"supply", nr.TotalSupply,
 		"demand", nr.Result.TotalDemand,
-		"satDemand", nr.SatDemand,
+		"tokenDemand", nr.SatDemand,
+		"tokenRoleDemand", nr.SatRoleDemand,
+		"util", nr.Utilization,
 		"rc", nr.RequiredCapacity,
 		"sc", nr.SpareCapacity,
 		"remaining", nr.Remaining,
 		"spare", nr.Spare,
+		"scaleUpThreshold", nr.ScaleUpThreshold,
+		"scaleDownBoundary", nr.ScaleDownBoundary,
 		"variants", variants,
 		"roleCapacities", roles,
 	)
