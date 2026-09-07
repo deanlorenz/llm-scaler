@@ -259,12 +259,80 @@ Actions taken:
   (ambiguous instruction passed to coder) and the earlier session's cross-worktree-relocation
   repeat.
 
+## User builds and shares a full PR diff viewer (2026-09-06/07)
+- User asked "You still did not show me a diff" after my prose-only walkthrough — correctly
+  read as: show the actual diff, not a description of it.
+- Built an HTML diff-viewer artifact (file list w/ stats, spec-map table, collapsible per-file
+  diffs) covering all 7 commits (`f20e06f9`..`65c344af`). Diff had 42 backticks, breaking a
+  `String.raw` template-literal embed — switched to base64 encoding, injected via Python (not
+  routed through my own context) to keep the raw diff out of the conversation transcript.
+- `Artifact` publish failed: this environment authenticates via `ANTHROPIC_AUTH_TOKEN`, which
+  takes precedence over a claude.ai login — artifacts need the latter. Delivered as a local
+  file (`/tmp/ct6-pr-diff.html`) opened via `wslview` per AGENTS.md's HTML-sharing convention
+  instead.
+
+## User reviews cycle-log.md — first pass wrong, corrected (2026-09-07)
+- User: "cycle.log is completely wrong... Fields describe results per analyzer. Should be in
+  analyzer units all the way. Nothing about tokens. The compositeSignal is nothing special. It
+  has its own units -- %... All the prose on pre vs post normalization should not be here at
+  all." Exactly right — my `65c344af` doc rewrite described the composite line via
+  "pre-conversion"/"post-conversion" implementation-history prose instead of treating each
+  `analyzer` value (saturation/throughput/composite) as just another entry with its own native
+  unit. Confirmed throughput's actual unit via source (`tokens/sec`, matches user's "TA -
+  token/sec"). Rewrote the doc: per-analyzer unit table, no pre/post language anywhere.
+
+## Rewrite surfaces a real code gap: composite was never actually named/renamed
+- While rewriting, caught myself about to claim `analyzer: "composite"` in the doc — checked
+  the actual code and found `nr.Name` on the composite entry was NEVER changed from
+  `"saturation"` (set once in `buildNamedResult`, never touched by `normalizeToCompositeUnits`).
+  Asked user whether to fix the doc to match reality or fix the code. User: "normalize should
+  set the name to CompositeSignal. I already said that before." — I hadn't caught/applied this
+  from earlier in the conversation; should have.
+- Renaming `Name` broke `hasSaturationResult` (`req.CompositeSignal.Name ==
+  domain.SaturationAnalyzerName`, used by GPU-quota accounting to mean "was this request
+  measured this cycle"). User asked to drop the Name check, keep only `Result != nil` — then
+  asked a genuinely good follow-up: "Where is this check running? Why are we not checking
+  before -- how could we have nil?" Traced the full call chain
+  (`computeCurrentGPUUsage`/`ByNamespace` ← `gpuUsageViews` ← `requests` slice built in
+  engine.go's reconcile loop, which only appends `req` when `collectV2ModelRequest` returns
+  `err == nil`, which itself requires `runAnalyzersAndScore` to have succeeded, which requires
+  `baseResult != nil`) and confirmed: `Result` is provably non-nil by construction for every
+  request that reaches `hasSaturationResult` today. Both halves of the original check were
+  dead code, not just the `Name` half. Reported this plainly rather than silently "fixing" it.
+  User: keep `Result != nil` as a defensive guard anyway (belt-and-suspenders against a future
+  change, e.g. CT7, that could violate the invariant). Renamed the function itself too
+  (`hasSaturationResult` → `hasCompositeResult`, user's choice over keeping the now-misleading
+  name) since it no longer checks anything saturation-specific.
+- Added `allocation.CompositeSignalName` constant ("CompositeSignal") in
+  `optimizer_interfaces.go`, set via `nr.Name = allocation.CompositeSignalName` at the top of
+  `normalizeToCompositeUnits`.
+
+## User mid-turn correction: satDemand naming + doc comment trim
+- While the above was in flight, user sent: "satDemand in the log description should be logged
+  as 'TokenDemand' and 'TokenRoleDemand'." + "engine_v2 L:1056 -- comment is too long and refers
+  to a transient bug of this very PR. Not needed. Only state that we also log the
+  CompositeSignal which is what is actually passed to optimizer." Asked scope (log field names
+  only vs. Go struct field names too) — user: log field names only, keep Go fields
+  `SatDemand`/`SatRoleDemand` as-is. Renamed the JSON key `satDemand`→`tokenDemand`; `SatRoleDemand`
+  wasn't logged at all yet, so added `tokenRoleDemand` too. Trimmed `logAnalyzerResult`'s doc
+  comment from an 8-line bug-history narrative down to 3 lines stating only what it does.
+- User asked "any reason that not all fields are logged?" — audited the full
+  `NamedAnalyzerResult` struct field-by-field against the log call. Found `Score` and `Live`
+  genuinely never logged with no apparent reason (not internal-only working state like
+  `RoleSpare` alone would be). Confirmed with user, added both.
+- All changes verified: `go build`/`go vet`/`go test ./internal/engines/...`/`gofmt` clean.
+  Committed as `991800ce`. Neither `65c344af` nor `991800ce` pushed yet — 2 commits ahead of
+  `origin/single-analyzer` (still at `c2a0774e` from the 2026-09-06 push).
+- **User is still reviewing other files in the PR** (their own words, mid-turn) — more findings
+  likely. Do not treat this PR as done or push preemptively.
+
 ## Open / next
-- Push `65c344af` (the log-merge fix) to origin — needs its own fresh per-op authorization.
+- Wait for/address further findings from the user's ongoing PR review.
+- Push `65c344af` + `991800ce` to origin once review settles — needs a fresh per-op
+  authorization (2026-09-06's was already consumed).
 - Decide with user whether CT4's fairness fix belongs in the next PR.
 - Implement CT6 composite metrics (separate future PR, explicitly not blocking this one).
-- Finalize next PR's exact boundary (now unblocked — CT6-only scope, all commits landed
-  including the log-merge fix once pushed) and open it via
+- Finalize next PR's exact boundary once review is done and open it via
   `conventions/pr-branch.md`/`conventions/pr-workflow.md`.
 - Cleanup candidates (not yet done, low urgency): leftover worktrees from the two failed coder
   dispatch attempts (`agent-a223357ad56398278`, `agent-a64b37115d72e7617` if either still
