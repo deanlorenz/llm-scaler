@@ -68,37 +68,54 @@
 - [x] Move policy backups from `conventions/` to `backup_rules/`; keep them out of production
 - [ ] Rewrite ledger-capture as a custom-agent (spec + mode)
 - [ ] Write T10 session-setup agent spec
-- [x] Process suggestion-box entry (worktree delegation for coders): drafted patterns A/B/C
-  in `conventions/worktree-delegation.md`; updated `coder-orchestration.md` (gates,
-  concurrency, ledger fix, wait-for-instructions), `coder.md` (`.session/` boundary),
-  `reviewer.md` (where-you-run per pattern). Committed on policy-writer only
-  (`6cb822af`, `a933d773`).
-- [ ] Resolve A/B/C naming (user objected: "item names, will lose track easily" — need a
-  different scheme before this can be considered final)
-- [ ] Rewrite `tasks.md`'s task-file field guidance to be pattern-specific: exact
-  worktree/path/branch + explicit instruction (verify-if-in / cd / checkout) per pattern
-- [ ] Resolve duplication between `state-vs-ledger.md`'s STATE template and `tasks.md`'s
-  field guide (user: "2 identical templates... confusing... 2 different places")
-- [ ] Decide fate of `worktrees/policy-writer/CONVENTIONS.md.bak` (stray tracked file at
-  worktree root, found during session-7 ledger-capture; not covered by the `.bak`
-  completion criterion since it's not under `conventions/`)
+- [x] Process suggestion-box entry (worktree delegation for coders): drafted three named
+  setups — `own-worktree`, `checkout-branch`, `same-worktree` — in
+  `conventions/worktree-delegation.md`, each with exact task-file fields
+  (`Worktree`/`Path`/`Branch` + `Startup verification instructions`) for the orchestrator
+  to copy. `coder-orchestration.md` states only the gate table + concurrency rule,
+  referencing `worktree-delegation.md` by heading — no mechanics duplicated there.
+  `coder.md`/`reviewer.md` are fully setup-agnostic (follow own task file's fields; no
+  mention of the three setups by name). `tasks.md`'s field guide stays pure syntax
+  (`Worktree`/`Path`/`Branch`, `Startup verification instructions` — what exists, not
+  when/why). Committed on policy-writer only: `6cb822af`, `a933d773`, `3aeb2c2b`,
+  `68a680e8`, `8352bbb5`.
+- [x] Resolve naming: replaced letter-based Pattern A/B/C with `own-worktree` /
+  `checkout-branch` / `same-worktree` throughout (user objected to letters — "item names,
+  will lose track easily").
+- [x] Rewrite `tasks.md`'s task-file field guidance — kept intentionally short per user
+  ("You are explaining something... the orchestrator already knows this"): documents that
+  `Worktree`/`Path`/`Branch` and `Startup verification instructions` fields exist; the
+  decision logic for filling them stays in `coder-orchestration.md`/`worktree-delegation.md`
+  only.
+- [x] Resolved `state-vs-ledger.md`/`tasks.md` "duplication": not actually duplicated once
+  reframed — `state-vs-ledger.md`'s `Worktree:` line is every STATE file's baseline;
+  `tasks.md`'s fields are additive, coder/reviewer-task-specific detail. No template edit
+  needed; confirmed with user.
+- [x] `worktrees/policy-writer/CONVENTIONS.md.bak` moved to `backup_rules/CONVENTIONS.md.bak`
+  (`8352bbb5`) — leftover from the Phase-2 trim, found during session-7 ledger-capture.
 - [ ] Fix `session-tracking` protocol violation: drafted the worktree-delegation changes
   directly on `session-tracking` instead of `policy-writer` before catching the mistake.
-  `session-tracking` currently sits dirty/uncommitted with those (now-superseded) drafts —
-  deliberately left as-is per user instruction ("we fix session-tracking later"). Do not
-  install anything until this is cleaned up and the items above are resolved.
+  `session-tracking` still sits dirty/uncommitted with the old, now-superseded
+  A/B/C-named drafts (`coder-orchestration.md`, `coder.md` modified; `worktree-delegation.md`
+  untracked) plus the still-unprocessed suggestion-box file — deliberately left untouched;
+  user has said explicitly not to ask about this again until told. Do not install anything
+  onto `session-tracking` until this cleanup happens and is authorized.
 
-**Last completed:** Drafted and committed worktree-delegation patterns A/B/C on `policy-writer`
-(`6cb822af`, `a933d773`) from the suggestion-box entry. Naming, `tasks.md` field-guide rewrite,
-and the state-vs-ledger/tasks.md template duplication remain open per user direction.
+**Last completed:** Finished the worktree-delegation suggestion-box item end to end on
+`policy-writer`: named setups (`own-worktree`/`checkout-branch`/`same-worktree`) replacing
+A/B/C, ownership split fixed across `coder-orchestration.md`/`worktree-delegation.md`/
+`tasks.md`/`coder.md`/`reviewer.md`, template-duplication question resolved (no edit needed),
+`CONVENTIONS.md.bak` relocated. Only the `session-tracking` cleanup remains, deliberately
+deferred.
 
-**Next step / resume point:** Resolve A/B/C naming with the user; rewrite `tasks.md` field
-guidance to be pattern-specific; resolve the STATE/tasks.md template duplication; then clean up
-the `session-tracking` protocol violation (dirty superseded drafts) before any install.
+**Next step / resume point:** When the user is ready (do not raise it proactively): clean up
+`session-tracking`'s stale A/B/C-named drafts, then install the finished, current
+`policy-writer` conventions there through the normal install procedure, then process the
+suggestion-box file as `processed-`.
 
 ### Status
-IN PROGRESS — worktree-delegation drafting done on policy-writer but not final (naming/tasks.md
-open); session-tracking still dirty from a caught protocol violation, fix deferred by user.
+IN PROGRESS — worktree-delegation work is finished and final on `policy-writer`. Only blocker
+left is the deferred `session-tracking` cleanup/install, which the user will raise when ready.
 
 ### Known issues
 - `settings-and-skill-edits.md` describes a `user-approved-settings-change` marker
