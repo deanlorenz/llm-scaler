@@ -159,3 +159,138 @@ Continues: .session/ledger/2026-09-06-policy-writer-17.md
   `session-tracking` working tree is exactly as it was when the user said STOP. Awaiting the user's
   explicit direction on what to do next — do not resume drafting, do not touch `session-tracking`,
   do not read anything else, until told to.
+
+### Recovery: port to `policy-writer`, keep `session-tracking` dirty (as instructed)
+
+- User: "do not just discard all the work. diff the files you created with policy-writer and
+  make the same changes in policy-writer. complete all changes in policy-writer. We fix
+  session-tracking later." Confirmed `policy-writer` was otherwise clean (only this ledger file
+  dirty there) before porting.
+- Diffed all three files (`coder-orchestration.md`, `coder.md`, new `worktree-delegation.md`)
+  between the two worktrees, applied the identical edits to `policy-writer`, verified
+  byte-identical via `diff` (all three exit 0) before committing.
+- Committed on `policy-writer`: `d325caee` (ledger update, separately per
+  "do not combine mission-tracking maintenance and policy installation into one commit"),
+  `6cb822af` (the three conventions files). `session-tracking` deliberately left dirty.
+
+### Closing the gap: `reviewer.md`, STATE.md tracking
+
+- User: "Is all the list above now fixed?" — I audited against disk (not memory) and found two
+  agreed items never actually landed anywhere: `reviewer.md`'s "where you run per pattern"
+  addition (drafted in chat, never written to a file on either branch), and STATE.md's task
+  checklist (zero entries for this session's work, violating the "update after each major step"
+  rule).
+- Mid-fix, an `ide_selection` pointed at `guard-exitworktree.sh` in `~/.claude/settings.json`.
+  Asked user twice via AskUserQuestion what needed fixing there (both guesses wrong — neither
+  "the reviewer.md/STATE.md items" nor "the script itself is broken"); user: "STOP! you decided
+  to read this stupid script. It has nothing to do with this session" then "fix the items above.
+  The guard is none of your business." Lesson: an `ide_selection` recurring across turns is not
+  itself a request to act on it — should have asked "is this related?" before reading the file,
+  not after.
+- Applied `reviewer.md`'s where-you-run addition (keyed by Pattern A/B/C at the time) — commit
+  `a933d773`. Updated STATE.md checklist/known-issues to reflect true state — commit `3aeb2c2b`.
+
+### Naming redesign: A/B/C → named setups, ownership-split fix
+
+- User: "Only in policy-writer -- have we made all the changes we agree on?" then, after I
+  offered to apply the drafted `tasks.md`/`state-vs-ledger.md` wording: "I don't want a naming
+  scheme. I want triggers and explicit instructions -- not references." Then, correcting my
+  first restated understanding: "coder-orchestration needs to go from trigger to steps -- steps
+  would be on another file... coder and reviewer do not need to know anything about the 3
+  options. they should behave the same in all 3 cases... The difference between the 3 options is
+  just what is checked at startup... instruction for the *orchestrator* should make it give
+  different task instructions to the sub agent... told right next to the data," with three
+  concrete field examples (`Worktree: WT1` / `Branch: B1; Worktree: <none>` /
+  `worktree: WT2; path: P2`, each paired with its own verify-or-fail instruction).
+- I drafted `tasks.md` field text that re-explained *when* each shape applies — user: "You are
+  again spredding the logic on multiple files. Who makes the decision? Who has the
+  Gates/Triggers? ... tasks.md is only instructions on how to write a task file. Not on how to
+  call an agent." Corrected ownership split, confirmed by user ("correct"): `coder-orchestration.md`
+  = all decision logic (gates, which setup, terminate/hold); `worktree-delegation.md` =
+  mechanical steps *and* the exact task-file field content per setup; `tasks.md` = field syntax
+  only, no situational logic.
+- User: "The mechanical steps should include the exact field content for tasks.md to use...
+  add an explicit 'at start verification instructions' field." Drafted accordingly; user:
+  "much better" but "The rules in tasks.md should be shorter... explaining something that is
+  probably not relevant to anyone except the code-orchestrator... but the orchestrator already
+  knows this." Trimmed `tasks.md`'s two new fields to bare syntax, no rationale, no
+  cross-reference — user: "exactly."
+- Separately asked and got the actual replacement names via AskUserQuestion:
+  `own-worktree` / `checkout-branch` / `same-worktree` (mapping to old A/B/C respectively).
+- Applied everywhere, on `policy-writer` only: rewrote `worktree-delegation.md` in full (renamed
+  headings, added "Task file fields to fill" blocks with `Startup verification instructions` to
+  each of the three setups); `coder-orchestration.md`'s gate table renamed, references
+  `worktree-delegation.md` by heading rather than restating mechanics; `coder.md` — confirmed
+  already setup-agnostic, no change needed; `reviewer.md` — replaced the old Pattern-A/B/C-keyed
+  "where you run" block with one setup-agnostic rule (follow your own task file's fields, same
+  as a coder); `tasks.md` — final two-line version (`Worktree / Path / Branch` +
+  `Startup verification instructions`, syntax only). Verified zero leftover
+  "Pattern A/B/C"/"A/B/C" references anywhere via grep before committing.
+- `state-vs-ledger.md`/`tasks.md` "duplication" (flagged earlier): asked user via
+  AskUserQuestion whether the STATE template's `Worktree:` line should also gain the new fields
+  — user chose "template stays simple; tasks.md's extra fields are additive, not a replacement."
+  Resolved as: not actually duplicated once correctly framed (baseline default vs. per-task
+  setup-specific detail) — no edit needed to `state-vs-ledger.md`.
+- Committed on `policy-writer`: `68a680e8` (rename + ownership-split fix across four files).
+
+### `CONVENTIONS.md.bak` and STATE.md close-out
+
+- Asked user via AskUserQuestion what to do with the stray `CONVENTIONS.md.bak` (flagged back
+  in the session-7 ledger-capture, left open since). User: "Move it to backup_rules/" — matches
+  the existing `<name>.md.bak` convention already used there for other files. Committed:
+  `8352bbb5`.
+- Updated STATE.md checklist to reflect the naming rename and all resolved items as done, with
+  only the deferred `session-tracking` cleanup left open. Committed: `72afec28`.
+
+### `resume-mission` skill fix — the actual root-cause fix
+
+- User: "edit the resume-mission skill so not there will be a concrete GATE after the mission is
+  established. Then MUST read the mission specific rule (ie if policy-writer then must read the
+  policy-writer rules). Do not trust the list in CONVENTIONS." — directly targets this session's
+  own root cause (Step 6.2's old text: "any role/mission-specific situational rules... per
+  CONVENTIONS.md index" — read, not acted on).
+- Read `claude-skills/resume-mission/SKILL.md` in full; identified Step 3 (mission resolution)
+  as the right insertion point for a new Step 3a. Drafted the gate (direct
+  `test -f "$TRACKING/conventions/$MISSION_NAME.md"` check, hard-gate read requirement, no
+  dependency on `CONVENTIONS.md`'s index) and removed Step 6's old soft reference. User: "ok."
+- First edit attempt blocked: `SKILL.md` is a guarded settings-surface file requiring the
+  literal marker `user-approved-settings-change` present in *that specific edit's* new content
+  (per `conventions/settings-and-skill-edits.md`, already known as an open/unverified item in
+  STATE's Known issues — now empirically re-confirmed still active and per-edit, not
+  per-file-once). Second attempt (marker-only edit, no content change) succeeded but did not
+  satisfy the *next* edit — had to include the marker inline within the actual content edit
+  itself for that edit to go through; a separate marker-only edit doesn't carry forward.
+  Third attempt (content + inline marker in the same edit) succeeded. Same pattern needed again
+  for the Step 6 removal edit.
+- Committed on `policy-writer`: `5df72c1f`.
+
+### Pushes and install to `session-tracking`
+
+- User: "push policy-writer to origin." Followed `conventions/push.md`: confirmed worktree,
+  branch, remote (`origin` → `deanlorenz/llm-scaler.git`), and all 11 outgoing commits before
+  pushing. Pushed `32b725ef..5df72c1f`.
+- User: "now install on session tracking." `session-tracking` still had the stale, superseded
+  A/B/C-named drafts from the earlier violation, uncommitted. Per the already-agreed plan
+  (discard stale content once policy-writer has the final version — previously deferred only on
+  "when," not "whether"), discarded via `git checkout -- coder-orchestration.md coder.md` and
+  `rm worktree-delegation.md` (both blocked once by the destructive-op guard until confirmed
+  intentional). Ran the full `install-to-session-tracking.md` procedure: verified both worktrees
+  clean, previewed the diff (confirmed nothing on `session-tracking`'s side was ahead — no stop
+  condition), `git checkout policy-writer -- CONVENTIONS.md conventions/ claude-skills/`
+  (blocked once by the destructive-op guard, confirmed intentional — this *is* the prescribed
+  install mechanism), re-diffed to confirm empty (git agrees), reviewed the exact staged file
+  list, committed: `702c35ae`.
+- Updated `policy-writer`'s STATE.md to record the install and that it's pushed-pending.
+  Committed: `14f391f1`.
+- User: "diff session-tracking and the policy-writer -- verify session tracking is up to date."
+  Re-ran all three diffs (`conventions/`, `CONVENTIONS.md`, `claude-skills/`) — all empty,
+  confirmed both worktrees clean apart from the still-unprocessed suggestion-box file.
+- User: "push session tracking." Confirmed worktree/branch/remote/outgoing commits first — 4
+  commits ahead, only the last (`702c35ae`) from this session, the other 3 pre-existing.
+  Pushed `56c38b10..702c35ae`.
+- User: "what else is in the suggestion box?" — listed directory; only the one unprocessed entry
+  plus already-`processed-` files from 2026-08-28/30 and a `.gitkeep`.
+- User: "so can mark it done." First attempt (`git mv`) failed — the file was never
+  git-tracked to begin with (always `??` in status), so `git mv` errors on an untracked source.
+  Used plain `mv` + `git add` instead. Committed: `36375780`. Not yet pushed (separate
+  authorization needed; not yet requested).
