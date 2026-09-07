@@ -158,4 +158,5 @@ agentbus subscriptions, ledger-capture custom-agent, T10 spec).
 
 - 2026-09-06 session=2026-09-06-policy-writer-17 status=retired ledger=.session/ledger/2026-09-06-policy-writer-17.md
 - 2026-09-06 session=2026-09-06-policy-writer-18 status=retired ledger=.session/ledger/2026-09-06-policy-writer-18.md
+- 2026-09-07 session=2026-09-07-policy-writer-19 status=active ledger=.session/2026-09-07-policy-writer-19.md
 
