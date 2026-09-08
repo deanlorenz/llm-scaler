@@ -21,8 +21,10 @@
 
 ## Task
 
-- **Plan / spec:** `.session/spec.md` — mission spec, DRAFT v1, awaiting user review.
+- **Plan / spec:** `.session/spec.md` — mission spec, DRAFT v7.
   *(do not read upfront — pull on demand only)*
+- **Survey:** `.session/survey-zero-signal.md` — what breaks on a zero/absent composite signal;
+  also inventories the existing `wva_model_scaling_blocked` gates. *(pull on demand)*
 - **Context:** (for implementation, once the spec is approved)
   - `internal/engines/steadystate/engine_v2.go` — `runAnalyzersAndScore` (:102),
     `collectV2ModelRequest` `CompositeSignal:` assignment (:797), `hasSaturationResult` (:722),
@@ -51,7 +53,12 @@
     bug — spec §2.3). Composite stays in saturation's token units.
   - Branch base is `upstream/main` @ `4db060e2` (rebased 2026-09-08 with user approval; the
     original base `778a8893` went stale within hours — upstream is actively moving). Do not
-    rebase again without user approval.
+    rebase again without user approval. The pre-rebase tip `b4549217` is preserved in the reflog at
+    `composite-analyzer@{1}`. When checking "have I changed anything", use
+    `git rev-list --left-right --count upstream/main...composite-analyzer` or compare against the
+    recorded base SHA — a bare `git diff upstream/main..` conflates "I changed things" with
+    "upstream advanced", and a tree-to-tree diff across the rebase looks alarming for the same
+    reason; compare the two commits' specific blobs instead.
   - Preserve the **sat-only fast path** exactly: one analyzer ⇒ composite numerically identical
     to today. Non-negotiable.
   - **Do not invoke the upstream `pr-review` skill.** The user does not want it used on this
@@ -78,18 +85,19 @@
 - [x] User review #2 → six factual corrections, all re-verified against upstream source; **v3**
 - [x] User review #3 → five real errors (see below); **v4**
 - [x] User review #4 → three of my own misreadings corrected (no design change); **v5**
-- [x] User decided **D1** (Score → confidence in [0,1]; max − confidence-weighted RMS) and **D2**
-      (composite decision-path field; no-signal gate; scale-from-zero PRC fallbacks); **v6**
-- [ ] **Decide D3** (query-API migration scope) + veto pass on the 12 confirmations
-- [ ] **Schedule the zero/absent-signal survey** — user's own "need to check which" calculations
-      break; 9 `CompositeSignal` consumer sites; recommended *now*, since it could change the
-      no-signal design rather than just its implementation
+- [x] User decided **D2** (composite decision-path field; no-signal gate; scale-from-zero PRC
+      fallbacks); **v6**
+- [x] User **reversed D1** — Score deferred entirely, `Agg_N` is a pure `max`; and **scoped D3** —
+      the target is repeated PRC/demand/bounds/`ceil()` derivations, not variant selection; **v7**
+- [x] **Zero/absent-signal survey done** → `.session/survey-zero-signal.md`
+- [ ] **Answer the 2 remaining questions in §10** + veto pass on the 12 confirmations
+- [ ] Implement
 - [ ] Implement (post-approval): `Agg_N` + derivation chain in/beside
       `internal/engines/aggregation/`, query API, composite naming + quota-guard repair,
       observability audit, 30-case test plan
 
-**Last completed:** `.session/spec.md` **v4** — rewrote §4.3–4.6, §5 (now `N`-centred), §6
-(observability), §7 (Score as confidence), §9 (30 tests), §10 (12 items).
+**Last completed:** `.session/spec.md` **v7** — D1 reversed (Score deferred, `Agg_N` is a pure
+`max`), D3 scoped to four derivation categories, and the zero/absent-signal survey delivered.
 
 **Errors review #3 caught, for context on how much to trust the current draft:** (1) `N` and
 coverage are the same quantity (`cov = 1/N`) — v3 computed both and called it a cross-check;
@@ -98,15 +106,16 @@ coverage are the same quantity (`cov = 1/N`) — v3 computed both and called it 
 through three drafts; (4) there is no single-model request-shape assumption — safety is structural;
 (5) aggregator names encoded the operation (`max…`) instead of the quantity (`Agg_N`).
 
-**Next step / resume point:** three things, all in spec §10.
-1. **D3** — query-API migration scope. Recommend migrating the known duplicators (`roleDemandGPUs`,
-   `cost_aware_optimizer.go:304`, `greedy_score_optimizer.go:117,156`), since helpers-only would *add*
-   a definition rather than remove duplication.
-2. **Two small D1 follow-ups**, both mine: (a) clamp `N_com` to `[Nmin, Nmax]` — the raw formula can
-   leave the range when confidence concentrates on a low estimate; (b) is "1.0 = 100% confident"
-   **relative** confidence (the ratio form, `conf = 1` ⇔ sole contributor) or **absolute** per-estimate
-   confidence? The latter no analyzer currently produces and it would change the formula.
-3. **Schedule the zero/absent-signal survey** (above).
+**Next step / resume point:** two questions, then a veto pass, then implementation.
+1. **§10/D2** — should a composite `C4-no-signal` also surface on `wva_model_scaling_blocked` as a new
+   policy-owned reason? It genuinely is a "scaling is blocked" condition and the existing dashboard
+   would then answer it, but it adds a reason to a set another engine also writes (the per-owner split
+   exists to stop two producers clearing each other's series). My inclination: yes, policy-owned.
+2. **§10/D3** — are all **four** derivation categories in this mission (rounding/`ceil()`,
+   demand→replicas→GPUs, PRC/demand lookup, bounds), or only the first two? Recommend a two-step
+   delivery, first two first, since that is where a semantic inconsistency actually changes a replica
+   count.
+3. Veto pass on §10/D4's 12 confirmations.
 
 Do not start implementation before approval.
 
@@ -123,8 +132,9 @@ from examples or fill gaps with invented premises — ask.
 - Session is **pinned** into this worktree via `EnterWorktree` — cross-worktree reads must use
   `cat <full-path>` or `git show <branch>:<path>`; `git -C` and `cd` elsewhere are blocked.
 - Mission definition: **done** — see Orientation. Normalization deferred; sat units for now.
-- Spec: **DRAFT v6**, `.session/spec.md` (1207 lines). **D1 and D2 decided by the user.** Remaining:
-  **D3** (query-API migration scope), 12 confirmations to veto, and one **survey** to schedule.
+- Spec: **DRAFT v7**, `.session/spec.md` (1194 lines). **D1, D2, D3 all decided.** Survey delivered:
+  `.session/survey-zero-signal.md`. Remaining: **2 questions** (§10) + a veto pass on the 12
+  confirmations. Then implementation can start.
 - **Design core (settled by the user, not mine to revisit):**
   - **PRC is per SO** (implies model, variant, role). **Demand is per (model, role)** — three
     values (`both`, `prefill`, `decode`) that do **not** depend on which SOs exist. SOs are added
@@ -156,11 +166,11 @@ from examples or fill gaps with invented premises — ask.
   - **`Score` vs `priority` are different axes:** `Score` weights different **analyzers'** opinions
     about one model (this mission); **priority** weights different **models'** demand (fair-share /
     `fairShareValue`). `fairShareValue` using Score is a bug in a known direction, not an ambiguity.
-  - **`Score` is a confidence in `[0,1]`** (raw 3 = 3× as confident as raw 1), and the aggregation is
-    **`max` minus the confidence-weighted RMS distance from the max**:
-    `N_com = Nmax − sqrt( Σ conf_i·(Nmax − N_i)² )`. Full agreement returns the max exactly, so
-    sat-only is unchanged with no special case; disagreement discounts the max in proportion to spread
-    and to the dissenters' confidence; `N_com <= Nmax` always, so direction is preserved.
+  - **`Score` is DEFERRED — `Agg_N` is a pure `max`** (user reversed the v6 confidence design;
+    "leave it out for now"). Score must have **no** effect on the composite, and a test asserts that.
+    The user's future direction is **outlier rejection + small bias** (`5,5,5,10` with a low-scored
+    `10` → maybe `6`), i.e. a robust statistic — **not** a weighted average, which is a standing
+    exclusion. Pure `max` is sound here because the signal is already normalized to replica count.
   - **Fallbacks must still yield a non-zero PRC** for an idle SO (partial scale-from-zero) and a
     never-seen SO — saturation's ladder already does this (own store record → compatible variant's
     `EffectiveCapacity`, both `P0-store`). The composite consumes those and must **not** discount an
@@ -168,7 +178,10 @@ from examples or fill gaps with invented premises — ask.
     removed — whereas a zero PRC blocks the scale-up that would produce the measurement.
   - **The composite carries a decision-path field** mirroring `VariantCapacity.Reason`, per SO.
     **No signal at all ⇒ no autoscaling**, via the existing `hasSaturationResult` gate repaired to
-    test for a usable signal rather than saturation's name.
+    test for a usable signal rather than saturation's name. The survey found this is **seven
+    independent `Result == nil` checks plus that one name check**, so the repair should expose **one
+    shared "is there a usable signal" predicate** rather than fixing that single site — otherwise the
+    rename leaves the system *partially* gated, which is worse than either extreme.
   - **A consistent query API** is part of the deliverable — coverage, missing coverage/capacity,
     replicas-or-GPUs-to-close-the-gap — so **each concept has one definition** shared by every
     optimization step, instead of each function inventing its own. Note: the mutation of
@@ -208,4 +221,4 @@ from examples or fill gaps with invented premises — ask.
 - none
 
 ## Session log
-- 2026-09-08 ledger=.session/2026-09-08-composite-analyzer-1.md status=active
+- 2026-09-08 session=2026-09-08-composite-analyzer-1 status=retired ledger=.session/ledger/2026-09-08-composite-analyzer-1.md

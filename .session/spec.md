@@ -1,6 +1,7 @@
-# composite-analyzer — mission spec (draft v6)
+# composite-analyzer — mission spec (draft v7)
 
-**Status:** DRAFT v6 — D1 and D2 decided by the user; awaiting review #6 (2026-09-08).
+**Status:** DRAFT v7 — D1/D2/D3 decided; zero-signal survey complete
+(`.session/survey-zero-signal.md`). Two questions outstanding (§10). 2026-09-08.
 **Mission:** composite aggregation calculation. Spinoff of `single-analyzer`.
 **Branch/worktree:** `composite-analyzer` @ base `upstream/main` `4db060e2`.
 **Role:** mission owner.
@@ -36,8 +37,8 @@ mission, with three deliberate departures from CT7's recorded design (§3).
   so a partial scale-from-zero is not blocked **[USER]** (§5.1.4).
 - **A composite decision-path field**, mirroring analyzers' `Reason`, so every composite value says
   how it was reached **[USER]** (§5.1.2).
-- **`Score` redefined as a confidence in `[0,1]`**, and the aggregation rule **`max` minus the
-  confidence-weighted RMS distance from the max** **[USER, D1]** (§7).
+- **Consistency of the repeated derivations in the optimizer** — PRC/demand, bounds, and `ceil()`
+  computed one way, not re-invented per function **[USER, D3]** (§5.5).
 - **Full observability**, reusing the *same* log and metric functions as any analyzer result
   **[USER]** (§6).
 - A new composite **name**, and repairing whatever that breaks **[USER]** (§8).
@@ -51,6 +52,9 @@ mission, with three deliberate departures from CT7's recorded design (§3).
   dependency or a plan of record; §2.6 treats it as hazard-awareness only. Until a shared unit
   exists, analyzers meet only in unit-free `N`/coverage space (§4.2).
 - **Reorganizing `NamedAnalyzerResult`** — legacy, kept as-is; a different mission **[USER]**.
+- **`Score` in the aggregation** — **deferred [USER, final]**: "leave it out for now." `Agg_N` is a
+  pure `max`. The user's outlier-rejection intuition is recorded in §7.2 for a future attempt, along
+  with the standing exclusion that weighted average is not the answer.
 - CT6's coverage-fraction normalization (`TotalDemand = 1.0`). Not merely deferred — see §2.6,
   it hit real bumps and this mission does **not** build on it.
 - CT1b (nil-saturation guard), CT4 (fairness definition). Untouched.
@@ -690,94 +694,64 @@ more row.
 
 ---
 
-## 7. Score — confidence, in [0,1] **[USER]**
+## 7. Score — deferred; pure `max` for now **[USER, D1 final]**
 
 ### 7.0 Score vs. priority — two different axes **[USER, settled]**
-
-**[USER]:** "FSV should use the **priority** to give weight to different model demand, not scores.
-**Scores** apply to giving weights to **analyzer opinions**."
 
 | | Weights | Used by |
 |---|---|---|
 | **Priority** | different **models'** demand against each other | `fairShareValue` / fair-share |
-| **Score** | different **analyzers'** opinions about **one** model | the composite aggregation (this mission) |
+| **Score** | different **analyzers'** opinions about **one** model | the composite aggregation |
 
-`Score`'s *meaning* is not in question. `fairShareValue` using `Score` where it should use priority is
-a **bug in a known direction** (CT4-adjacent, out of scope here), not evidence of ambiguity.
+`fairShareValue` using `Score` where it should use priority is a **bug in a known direction**
+(CT4-adjacent, out of scope), not an ambiguity in `Score`'s meaning.
 
-### 7.1 Score is redefined as a confidence in [0,1] **[USER, D1 decision]**
+### 7.1 Decision: leave Score out **[USER, final]**
 
-**[USER]:** "Change the score definition to be between 0 and 1.0 where 1.0 is 100% confident (this can
-be computed from original score ~ 3 means 3 times more confident than 1)."
+**[USER]:** "I changed my mind. I prefer the **pure max as default** when all scores are 1.0. The
+signal is already normalized to replica count. Let's **defer adding the score to later**. I don't have
+a good idea. … **Bottom line: leave it out for now.** Note that weighted average is not the solution."
 
-Raw `Score` from `AnalyzerScoreConfig` is an unbounded relative weight — raw 3 means "three times as
-confident as raw 1". Normalize to a confidence in `[0,1]`:
-
+So this mission implements:
 ```
-conf_i = score_i / Σ_j score_j          over contributing analyzers j
+N_com(SO) = max over contributors of N_i(SO)
 ```
+Nothing else. No confidence normalization, no RMS discount, no magnitude hook — the earlier
+`max − confidence-weighted RMS` design (spec v6 §7.2) is **withdrawn**, not merely unimplemented.
 
-**[ASSUMPTION] A24 — normalize across *contributors*, not across all configured analyzers.** An
-analyzer that did not contribute (ineligible, or no defined `N` for this SO) must not consume
-confidence mass, or the remaining analyzers would be silently under-weighted. Consequence: `conf`
-sums to 1 over contributors, so it is a proper weight, and with `score ≡ 1` and `k` contributors each
-gets `1/k`.
+**Why pure `max` is right as the default, not just simplest [USER]:** the signal is already
+**normalized to replica count** (§5.2), so `max` compares like with like — the unit problem that made
+raw-demand aggregation meaningless (§4.1) does not arise here. `max` is then the honest reading of
+"how many replicas does the most demanding analyzer say this SO needs".
 
-**Note on "100% confident":** the ratio form gives `conf = 1` only when an analyzer is the *sole*
-contributor — i.e. confidence here is **relative** (share of total trust), which is what the raw
-scores express. An *absolute* per-estimate confidence (this analyzer is 100% sure of *this* number)
-would be a different, richer signal that no analyzer currently produces. Flagged in case absolute
-confidence is what was meant — see D1 follow-up in §10.
+`Agg_N` still exists as the named aggregator (§4.5) with `max` as its rule, so a future rule change is
+contained to one place. That is the *only* accommodation for future scoring; no hook, no dead
+parameter.
 
-### 7.2 The aggregation rule **[USER, D1 decision]**
+### 7.2 The user's intuition, recorded for the future **[USER]**
 
-**[USER]:** "The best I can think of is: **max minus the confidence-weighted RMS distance from the
-max**."
+Kept verbatim because it points at a **different mechanism** than weighting, and would otherwise be
+lost:
 
-```
-Nmax        = max over contributors of N_i
-spread      = sqrt( Σ_i conf_i · (Nmax − N_i)² )       confidence-weighted RMS distance from max
-N_com       = Nmax − spread
-```
+> "My intuition is that the scores can only help identifying an **outlier that can be ignored** in the
+> max calculation and still add some **small bias**. (e.g. `5,5,5,10`, where `10` is lower score may
+> turn into a `6`). Not sure."
 
-Why this is a good answer to the three cases — recorded because the properties are the point:
+That is **outlier rejection plus a bias term**, not a weighted average — closer to a robust statistic
+(trimmed max / Winsorizing) than to a mean. Note the example's shape: three agreeing analyzers and one
+low-confidence dissenter, where the answer lands just above the cluster rather than between cluster
+and outlier. A weighted mean of `5,5,5,10` cannot produce `6` while also returning `10` when the
+outlier is *trusted* — so the mechanism has to be selection-then-adjustment, not blending.
 
-- **Full agreement ⇒ exactly the max.** Every `(Nmax − N_i)` is 0, so `spread = 0` and
-  `N_com = Nmax`. In particular **sat-only ⇒ `N_com = N_sat` exactly**, preserving §4.6's identity
-  with no special case.
-- **Direction is preserved.** `spread >= 0`, so `N_com <= Nmax` always; and (with the clamp below)
-  `N_com` never drops below the minimum contributor. The result stays inside the contributors' range,
-  so no score can invert a decision — satisfying **[USER]**'s "regardless of the score we should
-  scale up/down in the right direction".
-- **Disagreement discounts the max**, by an amount growing with both the spread and the confidence of
-  the *dissenting* estimates. A low-confidence outlier barely moves it; a high-confidence one moves it
-  a lot. This is the "max is safe but overly conservative" concern addressed directly.
-- **It degrades where trust degrades.** In the user's case 3 (0 vs 10, equal confidence):
-  `spread = sqrt(0.5·100 + 0.5·0) ≈ 7.07`, so `N_com ≈ 2.93` — pulled far below the max precisely
-  because the analyzers disagree violently. Compare case 1 (3 vs 5): `spread = sqrt(0.5·4) ≈ 1.41`,
-  `N_com ≈ 3.59` — a mild discount for a mild disagreement.
+**[USER]** "Note that weighted average is not the solution." Recorded as a standing exclusion: a future
+attempt should not re-propose weighted mean.
 
-**[ASSUMPTION] A25 — clamp to the contributors' range.** `spread` can exceed `Nmax − Nmin` when
-confidence is concentrated on a low estimate (e.g. 0 vs 10 with `conf(0) = 0.9`:
-`spread = sqrt(0.9·100) ≈ 9.49`, giving `N_com ≈ 0.51`, below the minimum only in edge cases but
-capable of going negative with more contributors). Clamp:
-```
-N_com = max( Nmin, Nmax − spread )
-```
-Rationale: the composite should never demand fewer replicas than *every* analyzer asks for — that
-would be an opinion no analyzer holds. Also guarantees `N_com >= 0`. **Flagged: the clamp is mine,
-not the user's** — the raw formula can otherwise leave the range.
-
-**[ASSUMPTION] A26 — one aggregator, rule inside.** This lives inside `Agg_N` (§4.5), so the rule is
-swappable in one place and callers name only the quantity.
-
-**Today's behavior is unchanged in the only production case.** With saturation the sole contributor,
-`spread = 0` and `N_com = N_sat`. The formula only differs from a plain `max` once a second analyzer
-actually contributes — which is not a production configuration today.
-
-### 7.3 Composite `Score`
-**[ASSUMPTION] A9 — `max` over contributors' raw Scores.** Reduces to saturation's on the sat-only
-path. Secondary to the above.
+### 7.3 Composite `Score` field
+With scoring deferred, the composite still needs *some* value in the legacy `Score` field.
+**[ASSUMPTION] A9''' — `max` over contributors' `Score`s**, which reduces to saturation's on the
+sat-only path. Nothing reads it for aggregation any more; it exists because
+`NamedAnalyzerResult.Score` is part of the legacy struct (§8) and `fairShareValue` currently consumes
+it — see §7.0 on why that consumption is itself a bug.
 
 ---
 
@@ -858,18 +832,10 @@ than infer it, and so logs explain each decision. Required by §6's "explainable
 11. Analyzer with no `RoleDemand` for a role → not a contributor for that role (A4).
 12. **Derivation-chain self-consistency** (§5.3) — `ceil(D_sat[role]/PRC_com(SO))` recovers
     `N_com(SO)`; supply/`RC`/`SC` follow from `PRC_com` and `D_sat`. Asserted, not just logged.
-13. **Score / confidence aggregation** (§7):
-    - **Full agreement ⇒ exact max** — all contributors equal ⇒ `spread = 0` ⇒ `N_com = Nmax`.
-      Sat-only is the degenerate case and must be bit-identical to today.
-    - **Worked cases** — case 1 (3 vs 5, equal conf) ⇒ `≈ 3.59`; case 3 (0 vs 10, equal conf)
-      ⇒ `≈ 2.93`. Pinned as regression values so the formula cannot drift silently.
-    - **Confidence normalization** (A24) — `conf` sums to 1 over *contributors*; a non-contributing
-      analyzer absorbs no weight.
-    - **Asymmetry** — a low-confidence dissenter barely moves the result; a high-confidence one moves
-      it a lot. Both directions asserted.
-    - **Range clamp** (A25) — `N_com` never falls below the minimum contributor, and never below 0,
-      even when confidence is concentrated on a low estimate.
-    - **Raw-score conversion** — raw 3 vs raw 1 yields a 3:1 confidence ratio.
+13. **`Agg_N` is a pure `max`** (§7) — `N_com = max` over contributors, for equal and for differing
+    `Score`s alike. **Score must not affect the result**, asserted explicitly: the same inputs with
+    scores `1,1` and with scores `1,5` produce the *same* composite. That pins the deferral so a
+    future partial implementation cannot leak in unnoticed.
 14. Renamed composite → the quota guard still fires (A11). The guard-not-silently-disabled test.
 15. **End-to-end** `collectV2ModelRequest` → optimizer with nonzero demand, asserting replica
     counts. CT6's bug survived precisely because nothing exercised this path.
@@ -927,91 +893,82 @@ defer**. Nothing here is a request to re-litigate something already settled.
 
 ---
 
-### D1 — Score / confidence — **DECIDED [USER]**
+### D1 — Score — **DECIDED: leave it out [USER, final]**
 
-**Decision.** `Score` becomes a **confidence in [0,1]** (raw 3 = 3× as confident as raw 1), and:
-```
-N_com = Nmax − sqrt( Σ_i conf_i · (Nmax − N_i)² )
-```
-— max minus the confidence-weighted RMS distance from the max. Full detail and worked cases in §7.
+`Agg_N` is a **pure `max`**. Score is deferred entirely; the `max − confidence-weighted RMS` design
+from v6 is withdrawn. Rationale, the user's outlier-rejection intuition, and the standing "weighted
+average is not the solution" exclusion are all in §7. Test 13 asserts Score has *no* effect, so a
+partial future implementation cannot leak in unnoticed.
 
-**Why it answers the three cases:** exact max at full agreement (so sat-only is unchanged); discounts
-the max in proportion to spread *and* dissenters' confidence; never exceeds the max, so direction is
-preserved. Case 3 (0 vs 10) ⇒ `N_com ≈ 2.93`; case 1 (3 vs 5) ⇒ `≈ 3.59`.
-
-**Two open follow-ups, both mine, both small:**
-- **A25 — clamp to `[Nmin, Nmax]`.** With confidence concentrated on a low estimate the raw `spread`
-  can exceed `Nmax − Nmin` and push the result below every contributor's opinion (and, with enough
-  contributors, below zero). I propose clamping at `Nmin`. **Confirm or overrule.**
-- **A24 — normalize confidence across *contributors*, not all configured analyzers**, so a
-  non-contributing analyzer doesn't absorb weight and silently under-weight the rest. Also: the ratio
-  form makes `conf = 1` mean "sole contributor" — i.e. **relative** confidence. If "100% confident"
-  was meant as an **absolute** per-estimate confidence, that is a different signal that no analyzer
-  currently produces, and it changes the formula. **Which did you mean?**
+*(Superseded: v6's A24/A25 — confidence normalization and the range clamp — are moot and removed.)*
 
 ---
 
-### D2 — Fallbacks and the decision path — **DECIDED [USER]**, with one survey outstanding
+### D2 — Fallbacks and the decision path — **DECIDED [USER]**; survey now complete
 
-**Decision.** Mirror the analyzers' existing decision-path field (`VariantCapacity.Reason`) on the
-composite, per SO — closer to option (b). Proposed values `C0-agree` / `C1-single` /
-`C2-sat-fallback` / `C3-default-prc` / `C4-no-signal` (§5.1.2); the mechanism is settled, the value
-set is my proposal.
+Mechanism, gate repair, and the scale-from-zero PRC fallbacks are settled — see §5.1.2–5.1.4.
 
-**Also settled:**
-- **No signal at all ⇒ do not autoscale.** The gate exists (`hasSaturationResult`,
-  `engine_v2.go:722`); §8's rename would silently disable it, so it is repaired to test "is there a
-  usable signal" rather than "is this saturation" (A11').
-- **Fallbacks must still yield a non-zero PRC** for an idle SO (partial scale-from-zero) and a
-  never-seen-before SO. Verified these already exist in saturation's ladder: own store record →
-  `P0-store`; else a compatible variant's `EffectiveCapacity` → also `P0-store`; else `no-data`
-  (`PRC = 0`). The composite **consumes** these, never reimplements them (A27), and must not discount
-  an estimated PRC relative to a measured one — that is what keeps a scale-from-zero moving.
-- **Over-estimation is acceptable** for a never-seen SO **[USER]**: "at worst we create a replica, then
-  learn the true values and take it back down." So no defensive clamping (A28) — a zero PRC would block
-  the scale-up that produces the measurement, while an over-estimate self-corrects next cycle.
+**The survey [USER] asked for is done: `.session/survey-zero-signal.md`.** Six conclusions; the three
+that change this spec:
 
-**Outstanding — your own flag: "need to check which" calculations break on a zero/absent signal.**
-This is a survey, not a judgment call: walk every `CompositeSignal` consumer (§2.1) and record, per
-field, what it does when that field is zero or missing. It also settles whether a `C3-default-prc`
-beyond saturation's ladder is needed for the `no-data` case.
+1. **The absent-signal path is already uniformly safe** — seven consumer sites each guard
+   `Result == nil` and degrade to "do nothing for this model". No new default *signals* are needed to
+   keep calculations from breaking; every zero is either guarded or semantically correct.
+2. **But it is seven independent nil checks plus one name check.** `hasSaturationResult` is the only
+   one that tests saturation's *name*, so §8's rename would leave the system **partially** gated —
+   worse than either extreme. Strengthens A11', and argues for exposing **one shared "is there a usable
+   signal" predicate** rather than repairing that single site in isolation.
+3. **Zero PRC is the real hazard, because it silently *disables* an SO** rather than failing loudly
+   (`if vc.PerReplicaCapacity <= 0 { continue }`, and the parent mission's own survey calls this "a
+   designed eligibility gate, not a division-safety guard"). Nothing downstream would notice a missing
+   SO. That is exactly the partial-scale-from-zero case, so the composite's decision path must make a
+   PRC fallback **visible** (`C3-default-prc` / `C4-no-signal`), not merely correct.
 
-**Question for you:** do that survey **now** (as part of finishing the spec), or as the first
-implementation task? It is bounded — nine known consumer sites — but it is real work and I would
-rather not silently expand the planning phase. My recommendation: **now**, since its result could
-change the design of the no-signal path rather than just its implementation.
+Also confirms **[USER]**'s memory of more gates: `applyScaleToZeroEnforcement`
+(`engine.go:1300+`) publishes `wva_model_scaling_blocked` with typed, per-owner reasons
+(`variant-floor`, `policy-forbids-zero`, `engine-unsupported`, `activation-retention`, plus
+`no-wake-signal` from the wake loop). There is an established convention for "why is scaling not
+happening", including the subtlety that reasons are published **before** the empty-decision return so a
+stale reason is always cleared.
+
+**One question this raises — for you:** should a composite `C4-no-signal` also surface on
+`wva_model_scaling_blocked` as a new policy-owned reason? It genuinely *is* a "scaling is blocked"
+condition, and doing so makes the existing dashboard answer it — but it adds a reason to a set another
+engine also writes, and the ownership split exists precisely to stop two producers clearing each
+other's series. My inclination: yes, as a policy-owned reason, but I have not assumed it.
 
 ---
 
-### D3 — Query API: how many existing call sites move onto it? *(the scope risk)*
+### D3 — Consistency of repeated derivations in the optimizer — **[USER] scope given**
 
-**Question.** §5.5's goal is **one definition per concept** — "spare means spare, coverage means
-coverage, no optimization function invents its own" **[USER]**. Writing the helpers is settled. The
-open question is how many of today's private re-derivations get migrated onto them **in this
-mission**.
+**[USER]:** "Let's document the full scope. I am not sure about your specific example —
+`ceil(demand/best_PRC) × gpusPerReplica` — here `best_PRC` is **not part of analyzer info**. I want the
+**repeating calculations of PRC/Demand or Bounds or even `ceil()`** to be consistent in the optimizer."
 
-Known duplicators: `roleDemandGPUs` (`rescale.go:585`, computes `ceil(demand/best_PRC) ×
-gpusPerReplica` and picks the cost-efficient variant itself), `cost_aware_optimizer.go:304` (RC/SC
-per role plus its own arithmetic), and `greedy_score_optimizer.go:117,156`.
+**My example was wrong, and the correction sharpens the target.** In `roleDemandGPUs`, `best_PRC` comes
+from `sortByCostEfficiencyAsc` over variant records — a **cost-efficiency selection**, which is the
+optimizer's own policy, not a derivation from the analyzer signal. Picking the cheapest variant is not
+duplicated analyzer logic and does not belong in a composite query API.
 
-**Options.**
-| | Scope |
-|---|---|
-| a | Write the helpers; use them on the composite path only. Existing sites keep their own arithmetic. |
-| b | (a) + migrate the known duplicators above, so each concept has exactly one implementation |
-| c | (b) + sweep the optimizer for any remaining private derivations |
+What *is* in scope is the **repeated derivation** underneath it. Four recurring categories:
 
-**What I'd do: (b).** (a) does not actually achieve the stated goal — it *adds* a definition
-alongside the existing ones, making the duplication worse rather than better. The point of the API is
-that these functions stop inventing their own, which means migrating them. (c) risks unbounded
-scope-creep for diminishing return.
+| Category | Examples found | Why it needs one definition |
+|---|---|---|
+| **`ceil()` / replica-count rounding** | `roleDemandGPUs` (`rescale.go:606`), `roleBottleneckReplicas`, `safeRemovalReplicasForRole` (`floor`) | Whether a partial replica rounds up, down, or is clamped at 0 is a **semantic** choice repeated at every site; §5.2/A2 says quantize once, and this is where "once" has to be enforced |
+| **demand → replicas → GPUs** | `roleDemandGPUs`, `modelDemandGPUs` (`rescale.go:573`) | The chain `demand / PRC → replicas × gpusPerReplica` appears more than once; the *chain* is shared even where the variant choice is not |
+| **PRC / demand lookup** | `prcForVariant`, per-role vs model-level demand reads at `rescale.go:587-591`, `cost_aware_optimizer.go:309` | The role-vs-model fallback (§2.3's two layouts) is re-implemented per site — precisely what A13's accessor centralizes |
+| **Bounds** | `floorGPUs`/`maxGPUs`/`CapGPUs` clamping (`rescale.go:536-559`), `initTargets`, `min`/`max` replica clamps | "What are this model's bounds" is answered in several places with slightly different assembly |
 
-**Note this reverses my earlier recommendation of (a)**, which rested on my misreading of
-"consistently" as a mutation problem. Once the goal is one-definition-per-concept, (a) is
-self-defeating.
+**[ASSUMPTION] A21' — the API's job is these four, not variant selection.** Cost-efficiency ordering,
+accelerator filtering, and priority handling stay where they are: they are optimizer *policy*. The API
+supplies the *derived quantities* that policy consumes.
 
-**Cost of deferring:** if you pick (a) now, the duplication stays and migrating later costs more than
-doing it while the helpers are being written.
+**Full scope documented as requested — and it is genuinely larger than v5's framing.** The four
+categories above span `rescale.go`, `cost_aware_optimizer.go`, `greedy_score_optimizer.go`, and
+`analyzer_helpers.go`. **[ASSUMPTION] A20'' — recommend a two-step delivery:** define the helpers and
+migrate the `ceil()`/rounding and PRC/demand-lookup categories first (they are where a semantic
+inconsistency actually changes a replica count), then bounds and the GPU chain. **Confirm whether all
+four are in this mission or only the first two.**
 
 ---
 
@@ -1205,3 +1162,33 @@ and intent, never as authority — and two of their claims have already proved n
   - **Outstanding survey, flagged by the user's own "need to check which":** what breaks on a
     zero/absent signal, across all nine `CompositeSignal` consumer sites. Recommended to run it now,
     since its outcome could change the no-signal design rather than just its implementation.
+- **v7** (2026-09-08): D1 reversed, D3 scoped, survey delivered.
+  - **§7 — Score is deferred entirely [USER, final].** "I changed my mind. I prefer the pure max as
+    default when all scores are 1.0. The signal is already normalized to replica count. Let's defer
+    adding the score to later. … Bottom line: leave it out for now." v6's
+    `max − confidence-weighted RMS` design is **withdrawn**, and A24/A25 (confidence normalization,
+    range clamp) are moot. `Agg_N` is a pure `max`; test 13 asserts Score has **no** effect so a
+    partial future implementation cannot leak in.
+    The user's own intuition is recorded verbatim in §7.2 because it points at a **different
+    mechanism** than weighting — outlier rejection plus a small bias (`5,5,5,10` with a low-scored
+    `10` → maybe `6`), which is a robust statistic, not a mean. Plus the standing exclusion: "weighted
+    average is not the solution."
+  - **§10/D3 — my example was wrong [USER].** `ceil(demand/best_PRC) × gpusPerReplica` was a poor
+    illustration: `best_PRC` comes from `sortByCostEfficiencyAsc`, i.e. it is the optimizer's
+    **cost-efficiency policy**, not a duplicated derivation from analyzer info. The real target is the
+    **repeating calculations of PRC/demand, bounds, and even `ceil()`**. Full scope now documented as
+    four categories (rounding, demand→replicas→GPUs, PRC/demand lookup, bounds) spanning `rescale.go`,
+    `cost_aware_optimizer.go`, `greedy_score_optimizer.go`, `analyzer_helpers.go`, with variant
+    selection explicitly **excluded** (A21'). Larger than v5's framing; a two-step delivery is proposed
+    (A20'').
+  - **Survey delivered** — `.session/survey-zero-signal.md`, answering the user's "need to check
+    which". Three results that change this spec: (1) the absent-signal path is already uniformly safe
+    across seven guarded sites, so **no new default signals are needed**; (2) it is seven independent
+    nil checks *plus* one name check, so §8's rename would leave the system **partially** gated — this
+    argues for one shared "is there a usable signal" predicate, not just repairing
+    `hasSaturationResult`; (3) **zero PRC silently disables an SO** rather than failing, which is
+    exactly the partial-scale-from-zero hazard, so a PRC fallback must be *visible* via the decision
+    path, not merely correct.
+    It also confirmed the user's memory of more gates: `applyScaleToZeroEnforcement` publishes
+    `wva_model_scaling_blocked` with typed, per-owner reasons — an established convention the
+    composite's decision path should follow rather than duplicate.

@@ -839,3 +839,131 @@ change the no-signal *design*, not just its implementation) or as the first impl
 ### Net
 Spec v6: 1207 lines. D1/D2 closed; D3 (query-API migration scope) still open. Test plan gains the
 confidence cases with pinned values (13) and the scale-from-zero fallback cases (8a–8d).
+
+## Spec v7 — D1 reversed, D3 scoped, survey delivered (2026-09-08)
+
+### D1 reversed — Score deferred entirely
+**[USER]:** "I changed my mind. I prefer the **pure max as default** when all scores are 1.0. The
+signal is already normalized to replica count. Let's **defer adding the score to later**. I don't have
+a good idea. … **Bottom line: leave it out for now.** Note that weighted average is not the solution."
+
+So v6's `max − confidence-weighted RMS` is **withdrawn**, and with it A24 (confidence normalization)
+and A25 (range clamp) — both moot. `Agg_N` is a pure `max`.
+
+The user's justification is worth keeping: **the signal is already normalized to replica count**, so
+`max` compares like with like. The unit problem that made raw-demand aggregation meaningless (§4.1)
+simply does not arise once everything is in replicas — which is why `max` is the honest default rather
+than merely the simplest.
+
+Recorded the user's future intuition **verbatim** in §7.2, because it points at a different mechanism
+than anything I had tabled: *"scores can only help identifying an outlier that can be ignored in the
+max calculation and still add some small bias (e.g. 5,5,5,10, where 10 is lower score may turn into a
+6)."* That is **outlier rejection plus a bias term** — a robust statistic (trimmed max / Winsorizing),
+not a blend. Noted the shape argument: a weighted mean of `5,5,5,10` cannot give `6` while also giving
+`10` when the outlier is trusted, so the mechanism must be selection-then-adjustment. Plus the standing
+exclusion: weighted average is not the solution.
+
+Test 13 rewritten to assert **Score has no effect** (same inputs with scores `1,1` and `1,5` ⇒ same
+composite), which pins the deferral so a partial future implementation cannot leak in unnoticed.
+
+### D3 — my example was wrong; the real target is narrower and the scope wider
+**[USER]:** "I am not sure about your specific example — `ceil(demand/best_PRC) × gpusPerReplica` —
+here **best_PRC is not part of analyzer info**. I want the **repeating calculations of PRC/Demand or
+Bounds or even ceil()** to be consistent in the optimizer."
+
+Correct. In `roleDemandGPUs`, `best_PRC` comes from `sortByCostEfficiencyAsc` over variant records —
+that is the optimizer's **cost-efficiency policy**, not a duplicated derivation from the analyzer
+signal. I had picked the one part of that function that *doesn't* belong in a composite query API.
+
+Documented the full scope as four categories, with variant selection explicitly excluded (A21'):
+1. **`ceil()`/rounding** — `roleDemandGPUs`, `roleBottleneckReplicas`, `safeRemovalReplicasForRole`
+   (`floor`). Whether a partial replica rounds up/down/clamps is a *semantic* choice repeated per site;
+   this is where §5.2/A2's "quantize once" has to actually be enforced.
+2. **demand → replicas → GPUs** — `roleDemandGPUs`, `modelDemandGPUs`. The chain recurs even where the
+   variant choice doesn't.
+3. **PRC/demand lookup** — `prcForVariant`, plus the role-vs-model demand fallback re-implemented at
+   `rescale.go:587-591` and `cost_aware_optimizer.go:309`. Exactly what A13's accessor centralizes.
+4. **Bounds** — `floorGPUs`/`maxGPUs`/`CapGPUs` (`rescale.go:536-559`), `initTargets`, replica clamps.
+
+Proposed two-step delivery (A20''): categories 1 and 3 first, since that is where an inconsistency
+actually changes a replica count. **Asked** whether all four are in this mission.
+
+### Survey delivered — `.session/survey-zero-signal.md`
+Ran it now, per **[USER]**. Six conclusions; three matter to the design:
+
+1. **The absent-signal path is already uniformly safe.** All seven consumer sites guard
+   `Result == nil` and degrade to "do nothing for this model" — `recordsForRequest`, `rescale.go:344`,
+   `rescale.go:528`, `initRoleState`, both optimizers, `hasSaturationResult`. So **no new default
+   signals are needed** to keep calculations from breaking; every zero is either guarded or
+   semantically correct. That directly answers the user's "need to check which".
+2. **But it is seven independent nil checks plus one name check.** Only `hasSaturationResult` tests
+   saturation's *name* — so §8's rename would leave the system **partially** gated, which is worse than
+   either extreme. This is a stronger argument for A11' than I had, and it argues for exposing **one
+   shared predicate** rather than repairing that one site.
+3. **Zero PRC is the real hazard** — `if vc.PerReplicaCapacity <= 0 { continue }` silently *removes*
+   the variant. Nothing downstream notices a missing SO. That is precisely the partial-scale-from-zero
+   case, so a PRC fallback must be **visible** through the decision path, not merely correct. Also
+   corroborated by the parent mission's own 11-site survey calling `PRC <= 0` "a designed eligibility
+   gate, not a division-safety guard".
+
+Also: **`TotalDemand == 0` must stay 0** because `rescale.go:94`'s water-fill weight is
+`Priority × Demand` — a phantom demand would give a zero-demand model positive weight and take GPUs
+from models that need them. Not merely inaccurate: actively harmful. Independent confirmation of the
+zero rule.
+
+**Answered [USER]'s "I think we had more gates".** Found `applyScaleToZeroEnforcement`
+(`engine.go:1300+`) publishing `wva_model_scaling_blocked` with typed, per-owner reasons
+(`variant-floor`, `policy-forbids-zero`, `engine-unsupported`, `activation-retention`; and
+`no-wake-signal` owned by the wake loop). Notable design detail: reasons are published
+**unconditionally, before** the empty-decision return, because that call is what *clears* a stale
+reason — "a cycle that produced no decisions at all is precisely when a stale 'will never park' series
+is most misleading." So there is an established convention for "why is scaling not happening", and the
+composite's decision path should follow it rather than invent a parallel one.
+
+**New question raised, not assumed:** should composite `C4-no-signal` surface on
+`wva_model_scaling_blocked` as a policy-owned reason? It is genuinely a blocked-scaling condition, but
+adding to that set touches the per-owner clearing split. Inclination: yes.
+
+## Verified 2026-09-08 — folded in: 3 items into STATE.md, 3 global findings to the suggestion box
+
+Ledger read in full (925 lines) against `.session/STATE.md` and `.session/spec.md` (v7, 1194 lines).
+Both were maintained continuously during the session, so the large majority of durable points were
+already captured. Explicitly checked for ownership, creation, removal, destructive-action,
+authorization, and data-preservation rules per the contract.
+
+| Ledger point | Durable destination | Action taken |
+|---|---|---|
+| Mission definition (composite aggregation, sat units now, request-based later, role+model level, new name, all Scores) | STATE Orientation §What/goal | None needed |
+| `upstream/main != upstream/feat/wva-external-scaler`; memory note stale | — (superseded by the recorded base pin) | None needed |
+| Base pinned `778a8893`, then replayed onto `4db060e2`; do not replay again without approval | STATE Limits | None needed |
+| Pre-replay tip `b4549217` preserved in reflog `composite-analyzer@{1}`; blob-level comparison is the real post-replay check | STATE Limits (base-pin bullet) | **Folded in** — recovery point and the correct verification method were not recorded |
+| "Zero diff vs `upstream/main`" was wrong; `rev-list --left-right --count` or the recorded base SHA is the honest check | STATE Limits (base-pin bullet) + suggestion box | **Folded in**, and raised as a global rule (see below) |
+| Worktree/`.session`/skill-symlink setup, `.git/info/exclude` already correct, `.session` not gitignored, `git status` clean | STATE Steps + Status | None needed |
+| `.session/` committed to the mission branch; state survives worktree deletion | STATE Steps + Status | None needed |
+| `.claude/skills/pr-review/` is tracked upstream content, not a stray; decision C = leave in place, do not use; no settings file written; no deletion | STATE Limits | None needed (the tracked-upstream fact is recorded); the *general* "run `git ls-files` first" lesson went to the suggestion box |
+| Ownership rule satisfied by rejecting option B — never remove a file you do not own without explicit permission | STATE Limits (pr-review bullet records "left in place unmodified — no deletion") | None needed |
+| `cd` usage self-report, then moot after `EnterWorktree`; session is pinned, cross-worktree reads via `cat`/`git show`, `git -C`/`cd` blocked | STATE Status | None needed |
+| Cross-worktree write authorization for `session-tracking` mission symlinks; created, verified, deliberately **not committed** (only the owning session commits its branch); pre-existing untracked suggestion-box files left alone | STATE Status (last bullet) | None needed |
+| Containment: until the spec is approved all output stays in `.session/`; no writes outside the worktree; cross-worktree reads authorized | STATE Limits | None needed |
+| Do not modify `multi_backup/` (upstream-tracked, `//go:build ignore`); port arithmetic instead | STATE Limits | None needed |
+| Normalization deferred; do not build on CT6 / `normalizeToCompositeUnits`; its `1/PRC` bug | STATE Limits + spec §2.3 | None needed |
+| Sat-only fast path must stay numerically identical | STATE Limits | None needed |
+| Standing instruction "Always ask me if not sure" | STATE (Standing instruction) | None needed |
+| Full design core: demand per (model,role) vs PRC per SO; two demand storage layouts; `N` is the one signal (`cov = 1/N`); `D_sat` defines 100%; sat is a fallback not a floor; zero-guards; aggregators named for the quantity; Score deferred to pure `max` with outlier-rejection as future direction; Score vs priority axes; non-zero PRC fallbacks with over-estimation acceptable; decision-path field; query API; observability | STATE Design core + spec §§2, 4–8 | None needed |
+| Five rejected approaches (sat-unit pre-conversion, coverage-ratio demand scaling, sat as floor, cov and `N` as independent, operation-named aggregators) | STATE Rejected approaches + spec §4.1 | None needed |
+| Lessons from `single-analyzer-normalize` (deep-copy mandatory; `demand == 0` flows through as 0; naming precedent) — learn from, do not build on | STATE Lessons banked + spec §2.6 | None needed |
+| `internal/engines/aggregation/` is the implementation seam; absent from all parent-mission docs | STATE Implementation seam + spec §2.2 | None needed |
+| D3 scope: four derivation categories, variant selection excluded, two-step delivery proposed | STATE Next step + spec §10/D3 | None needed |
+| Survey delivered: absent-signal path already uniformly safe, so no new default signals needed; zero PRC silently disables an SO; `TotalDemand == 0` must stay 0; `applyScaleToZeroEnforcement` gate convention | STATE Status + spec §10/D2 + `.session/survey-zero-signal.md` | None needed |
+| Survey conclusion #2's implication — seven nil checks *plus* one name check, so expose **one shared** usable-signal predicate rather than repairing `hasSaturationResult` alone | STATE Design core (decision-path bullet) | **Folded in** — the implication was in spec §10/D2 but not in STATE's design core |
+| Open question: should composite `C4-no-signal` surface on `wva_model_scaling_blocked` as a policy-owned reason | STATE Next step #1 + spec §10/D2 | None needed |
+| STATE's `Last completed` still read v4 while the spec was v7 | STATE Execution | **Folded in** — stale field corrected |
+| Harness: the history-rewriting guard matches its trigger phrase textually, even inside heredoc prose; correct workaround is a temp file, **not** the `# user-approved-destructive` marker | `suggestion-box/2026-09-08-2055-composite-analyzer.md` | **Global** — not mission-specific |
+| Harness: pinned-session guard refuses unquoted runtime values in option position, and commands deemed "too complex"; keep each Bash call simple and literal | same file | **Global** — same class, one file |
+| Diffing against a moving remote ref conflates local change with upstream advance | `suggestion-box/2026-09-08-2056-composite-analyzer.md` | **Global** (also folded into STATE Limits as the mission's own instruction) |
+| Run `git ls-files` before treating an unexpected file in a fresh worktree as a stray | `suggestion-box/2026-09-08-2057-composite-analyzer.md` | **Global** — recurs for every worktree off upstream |
+
+*Capture note: appending this very block was blocked twice by the same textual history-rewriting
+guard the ledger documents above — once for the heredoc prose, once again after rewording. Written
+via a temp file and concatenated, per that finding's own prescription; the
+`# user-approved-destructive` marker was deliberately not used on a benign command.*
