@@ -385,3 +385,83 @@ through) and an **end-to-end** `collectV2ModelRequest`→optimizer assertion on 
 guard (an unquoted value could begin with `-`, so the command could not be proven not to be
 git). Re-ran with the literal path and `--`. Not a permissions problem; just quote or spell out
 paths in this pinned session.
+
+## Spec v2 — user review overturned v1's core conversion (2026-09-08)
+
+### The error I made in v1 (item 4)
+v1's §4 proposed `demand_sat_equivalent(A_i, SO) = D_i(SO)/PRC_i(SO) × PRC_sat(SO)`. User
+rejected it on two grounds, both correct and both independent:
+
+1. **Circular dependence on `PRC_sat`.** It routes every analyzer's contribution through
+   saturation's per-replica capacity estimate — but the inaccuracy of `PRC_sat` is *the very
+   reason the other analyzers exist*. A bad `PRC_sat` therefore corrupts exactly the signals that
+   were supposed to compensate for it.
+2. **A different conversion factor per SO** — `PRC_sat` varies across SOs, so the same analyzer's
+   demand converts by a different ratio for each SO. A "unit" that varies per SO is not a unit;
+   the composite ends up denominated in nothing coherent. User called this a logical error, and
+   it is.
+
+I had verified the *arithmetic* (sat converts by identity, floor holds) without asking whether
+the conversion factor was a legitimate unit. The identity check passed and masked the structural
+defect. Lesson: for a unit conversion, check that the factor is *constant over the domain being
+aggregated*, not merely that the algebra is self-consistent.
+
+### The corrected structure **[USER]**
+- **Demand is per (model, role)** — prefill/decode/both. NOT per SO. Each analyzer emits a
+  model-level demand *per role*, and these are **conceptually independent numbers**, not a split
+  of a model total.
+- **Composition is per SO, in coverage and #replicas** — both unit-free (each divides a demand by
+  a capacity *from the same analyzer*, so units cancel). No conversion factor is involved, which
+  is precisely why they compare across analyzers when raw demand does not.
+- **Back-convert to sat units once, at the end**, using `D_sat`.
+- Genuine cross-analyzer demand conversion needs a **shared demand definition**: a request count,
+  ideally **"per X requests in queue"** (user's stated preference over requests-in-system). Still
+  deferred.
+
+**Verified this against the code before rewriting** — the data model already has exactly this
+shape, which corroborates the user's framing:
+- `domain.AnalyzerResult.RoleDemand map[string]float64` — per-(model, role). Right shape already.
+- `domain.AnalyzerResult.TotalDemand` — model-level, role-agnostic.
+- `domain.VariantCapacity.PerReplicaCapacity` / `.TotalDemand` — per-SO (per-variant).
+
+So no new structure is needed; v1 was fighting the existing model rather than using it.
+
+### Other user rulings folded into v2
+- **Item 5 → §5:** aggregations must be **named helper functions that express what they
+  aggregate**, not inline arithmetic. A constraint on code shape, recorded as such. Derived fields
+  recomputed *and* cross-checked against their own aggregation — a mismatch is treated as a bug in
+  the code or in our understanding (A6': log in prod, assert in tests). This is a much better
+  version of what CT6 got wrong silently.
+- **Item 8 → new §6:** exactly **one full `NamedAnalyzerResult`** reaches the optimizer, and it
+  is **not sat** — it is the new `CompositeSignal`. Promoted from a naming detail to a stated
+  contract (one / full / not-sat), with consequences: composite owns its name, any consumer
+  name-checking sat is wrong by construction, provenance belongs on the composite.
+- **Item 1 → §7:** `Score` is the analyzer's **relative weight** per docs/config, applied
+  **during aggregation, not later**. v1's "gate + tie-break" was too weak — it kept Score out of
+  the arithmetic. User's steer: most natural at composite **#replicas per SO**; possibly on RC or
+  SC; simple weighted average may not be right; `score = 1` for all today. Tabled five
+  combinators (C1–C5) with floor-invariant analysis for each. All reduce to the same thing at
+  `score ≡ 1`, so nothing is blocked today. My recommendation, flagged not decided: keep
+  `max`+floor now and revisit weighting *with* the shared request-based unit, because weighting
+  incommensurable *decisions* (rather than commensurable measurements) is not statistically
+  meaningful — inverse-variance weighting only makes sense once analyzers share a unit.
+- **Item 2 → §5.4:** v1's A5 is **dissolved**, not answered. Per-role demands are independent, and
+  `cov(M) = min(cov(prefill), cov(decode)) + cov(both)` is *the only* relation between role and
+  model level. There was never a model-vs-role figure to reconcile — v1 invented the problem.
+- **Item 6:** confirmed OK — `multi_backup/` reimplemented, not un-ignored.
+
+### Two new tests earned by this review (§9)
+- **Unit independence:** scaling an analyzer's demand *and* PRC by any constant `k` must produce
+  an identical composite. This is the test that would have caught v1's defect, and it directly
+  encodes "the aggregation is unit-free".
+- **`PRC_sat` independence:** perturbing `PRC_sat` must not change any other analyzer's
+  contribution — only the final back-conversion. Guards defect (1) permanently.
+
+### Still open
+Item #1 (Score combinator) is now the mission's main open design question. Item #3 is new: for a
+role with several SOs of differing `PRC_sat`, which representative to use in the back-conversion —
+recommend deriving from sat's own `RoleDemand[r]` × coverage ratio, which avoids picking an SO at
+all. 8 open items in §10.
+
+Spec v2: 522 lines. v1's rejected conversion is kept in §4.1 *as a record of what not to do* —
+deliberately not deleted, so the reasoning is not rediscovered the hard way.

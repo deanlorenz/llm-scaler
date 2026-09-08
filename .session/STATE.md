@@ -74,18 +74,19 @@
 - [x] Define mission goal and scope with the user
 - [x] Read the parent mission's specs (p3 plan, CT7, semantic framework, PR #34, CT6)
 - [x] Draft the mission spec → `.session/spec.md` (v1)
-- [ ] **User review of `.session/spec.md`; decide the 7 open items in §10**
-- [ ] Revise the spec per that review
-- [ ] Implement (post-approval): compose function, name change + quota-guard repair, tests
+- [x] User review #1 → **v1's core conversion rejected**; spec rewritten as v2
+- [ ] **User review #2 of `.session/spec.md` v2; decide the 8 open items in §10**
+- [ ] Implement (post-approval): compose helpers, name change + quota-guard repair, tests
 
-**Last completed:** drafted `.session/spec.md` v1 — mission spec with the aggregation design,
-normalization-into-sat-units currency, placement recommendation, and 12-case test plan.
+**Last completed:** `.session/spec.md` **v2** — rewrote §4 (conversion), §5 (aggregation), §6
+(optimizer contract), §7 (Score) after the user's review.
 
-**Next step / resume point:** walk the user through `.session/spec.md` and get the 7 open items
-in §10 decided. The two least-certain are **§7/A9 (how Score participates — gate+tie-break vs.
-a true weighted average, which would contradict the parent mission's recorded "never
-Score-weighted averaging" rule and break the floor invariant)** and **§5.3/A5 (deriving
-model-level demand from roles)**. Do not start implementation before approval.
+**Next step / resume point:** get spec §10's 8 open items decided. The one real design question
+is **#1 — which `Score` combinator** (§7.2 tables C1–C5 with floor-invariant analysis; user is
+explicitly unsure; `score ≡ 1` today so nothing is blocked, and my recommendation is to keep
+`max`+floor now and revisit weighting alongside the shared request-based demand unit). Also new:
+**#3** — back-conversion representative for a role spanning SOs with differing `PRC_sat`. Do not
+start implementation before approval.
 
 ### Status
 
@@ -97,15 +98,22 @@ model-level demand from roles)**. Do not start implementation before approval.
 - Session is **pinned** into this worktree via `EnterWorktree` — cross-worktree reads must use
   `cat <full-path>` or `git show <branch>:<path>`; `git -C` and `cd` elsewhere are blocked.
 - Mission definition: **done** — see Orientation. Normalization deferred; sat units for now.
-- Spec: **DRAFT v1 written**, `.session/spec.md`. **Awaiting user review** — this is the only
-  thing blocking implementation. 7 open items in spec §10, 12 assumptions (A1–A12) flagged
-  inline for confirm/overturn.
+- Spec: **DRAFT v2**, `.session/spec.md` (522 lines). **Awaiting user review #2** — the only
+  thing blocking implementation. 8 open items in §10.
+- **Design core (settled by the user, not mine to revisit):** demand is per **(model, role)** —
+  prefill/decode/both, independent numbers, not a per-SO split. Composition is **per SO in
+  unit-free coverage and #replicas**. Back-conversion to sat units happens **once, at the end**,
+  via `D_sat`. Cross-role rule `cov(M) = min(cov(prefill), cov(decode)) + cov(both)` is the
+  *only* relation between role and model level. The existing data model already has this shape
+  (`AnalyzerResult.RoleDemand` per-(model,role); `VariantCapacity.PerReplicaCapacity` per-SO).
+- **Rejected approach — do not reintroduce:** converting each analyzer's demand into sat units
+  before aggregating (`D_i/PRC_i × PRC_sat`). It is circular (routes every analyzer through the
+  `PRC_sat` estimate those analyzers exist to correct) and uses a different factor per SO, so the
+  result is denominated in nothing coherent. Kept in spec §4.1 as a record.
 - Key finding: the p3 "initial plan" (`compose-logic-plan.md`) justifies its `max RC` rule with
   post-CT6-normalization reasoning that does **not** hold on this base —
   `normalizeToCompositeUnits` is absent from upstream, and its parent-branch implementation has
-  an unfixed `1/PRC` correctness bug. Aggregating raw RC here would mix incommensurable units.
-  Spec §2.3 records this; it is why the user's "normalize into sat units" instruction is load-
-  bearing rather than cosmetic.
+  an unfixed `1/PRC` correctness bug. Spec §2.3 records this.
 - `session-tracking` symlinks: **created** (`missions/composite-analyzer/{STATE.md,ledgers}`),
   verified resolving. Left **uncommitted** per user instruction — `policy-writer` commits
   `session-tracking`. No agentbus `pending-commits` note published yet (not authorized).
