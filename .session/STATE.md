@@ -24,8 +24,9 @@
 - **Limits:**
   - Do **not** read the `single-analyzer` mission's files — the user explicitly deferred this
     ("do not read that mission yet"). Wait for explicit instruction.
-  - Branch base is pinned to `upstream/main` @ `778a8893`; do not rebase or re-base without
-    user approval.
+  - Branch base is `upstream/main` @ `4db060e2` (rebased 2026-09-08 with user approval; the
+    original base `778a8893` went stale within hours — upstream is actively moving). Do not
+    rebase again without user approval.
   - **Do not invoke the upstream `pr-review` skill.** The user does not want it used on this
     mission (decision 2026-09-08). It ships tracked on `upstream/main` and was left in place
     unmodified — no deletion, no settings override. It already carries
@@ -36,26 +37,38 @@
 ## Execution
 
 ### Steps / subtasks
-- [x] Create mission worktree off `upstream/main` (`778a8893`)
+- [x] Create mission worktree off `upstream/main`
 - [x] Set up `.session/`, skill symlinks, verify clean `git status`
 - [x] Create initial `STATE.md`
+- [x] Create `session-tracking/missions/composite-analyzer/` symlinks (uncommitted, by design)
+- [x] Pin session into the worktree (`EnterWorktree`)
+- [x] Commit `.session/` to the mission branch
+- [x] Rebase onto current `upstream/main` (`4db060e2`)
 - [ ] Define mission goal and scope with the user
 - [ ] Create the mission plan doc; get user approval
 
-**Last completed:** initial environment setup — worktree, `.session/`, skill symlinks, STATE.md
+**Last completed:** rebased onto `upstream/main` @ `4db060e2`; `.session/` committed as
+`d6bbc722`.
 
 **Next step / resume point:** ask the user to define the mission goal/scope (the spinoff's
 actual objective), then write the plan doc and get approval. Do not begin mission work before
-that approval.
+that approval. Note: the user deferred reading the `single-analyzer` mission — that deferral
+likely needs lifting before the goal can be pinned down, since this mission is its spinoff.
 
 ### Status
 
-- Environment: **ready** — worktree on branch `composite-analyzer` off `upstream/main`
-  `778a8893` (fetched and verified current 2026-09-08); `.session/` present and not gitignored;
+- Environment: **ready** — worktree on branch `composite-analyzer`, rebased onto `upstream/main`
+  @ `4db060e2`; 0 commits behind upstream, 1 ahead (the `.session/` commit). Only diff vs
+  `upstream/main` is `.session/`. `.session/` tracked and committed, not gitignored;
   `resume-mission` + `wind-down` symlinks verified resolving into
   `session-tracking/claude-skills/`; `git status` clean.
+- Session is **pinned** into this worktree via `EnterWorktree` — cross-worktree reads must use
+  `cat <full-path>` or `git show <branch>:<path>`; `git -C` and `cd` elsewhere are blocked.
 - Mission definition: **pending** — goal, scope, deliverables not yet defined by the user.
-- `session-tracking` symlinks: **not yet created** for this mission.
+  **This is the only thing blocking mission work.**
+- `session-tracking` symlinks: **created** (`missions/composite-analyzer/{STATE.md,ledgers}`),
+  verified resolving. Left **uncommitted** per user instruction — `policy-writer` commits
+  `session-tracking`. No agentbus `pending-commits` note published yet (not authorized).
 
 ### Known issues
 
