@@ -1,7 +1,8 @@
-# composite-analyzer — mission spec (draft v7)
+# composite-analyzer — mission spec (draft v8)
 
-**Status:** DRAFT v7 — D1/D2/D3 decided; zero-signal survey complete
-(`.session/survey-zero-signal.md`). Two questions outstanding (§10). 2026-09-08.
+**Status:** v8 — D1/D2/D3 decided; zero-signal survey complete
+(`.session/survey-zero-signal.md`); D4 veto pass complete, all 12 confirmed. §10 fully
+resolved — spec pending final user approval to begin implementation. 2026-09-08.
 **Mission:** composite aggregation calculation. Spinoff of `single-analyzer`.
 **Branch/worktree:** `composite-analyzer` @ base `upstream/main` `4db060e2`.
 **Role:** mission owner.
@@ -931,11 +932,10 @@ Also confirms **[USER]**'s memory of more gates: `applyScaleToZeroEnforcement`
 happening", including the subtlety that reasons are published **before** the empty-decision return so a
 stale reason is always cleared.
 
-**One question this raises — for you:** should a composite `C4-no-signal` also surface on
-`wva_model_scaling_blocked` as a new policy-owned reason? It genuinely *is* a "scaling is blocked"
-condition, and doing so makes the existing dashboard answer it — but it adds a reason to a set another
-engine also writes, and the ownership split exists precisely to stop two producers clearing each
-other's series. My inclination: yes, as a policy-owned reason, but I have not assumed it.
+**DECIDED [USER, 2026-09-08]:** yes — `C4-no-signal` publishes a new **policy-owned** reason on
+`wva_model_scaling_blocked`, alongside the existing `variant-floor` / `policy-forbids-zero` /
+`engine-unsupported` / `activation-retention` / `no-wake-signal` reasons, following the existing
+convention (published before the empty-decision return so a stale reason clears).
 
 ---
 
@@ -965,16 +965,19 @@ supplies the *derived quantities* that policy consumes.
 
 **Full scope documented as requested — and it is genuinely larger than v5's framing.** The four
 categories above span `rescale.go`, `cost_aware_optimizer.go`, `greedy_score_optimizer.go`, and
-`analyzer_helpers.go`. **[ASSUMPTION] A20'' — recommend a two-step delivery:** define the helpers and
-migrate the `ceil()`/rounding and PRC/demand-lookup categories first (they are where a semantic
-inconsistency actually changes a replica count), then bounds and the GPU chain. **Confirm whether all
-four are in this mission or only the first two.**
+`analyzer_helpers.go`.
+
+**DECIDED [USER, 2026-09-08]:** this mission scopes to the **first two** categories only —
+`ceil()`/replica-count rounding and PRC/demand lookup — per A20''s two-step delivery
+recommendation, since these are where a semantic inconsistency actually changes a replica count.
+The demand→replicas→GPUs chain and bounds are **deferred** to a follow-up mission.
 
 ---
 
-### D4 — Confirmations *(I have decided these; say if any is wrong)*
+### D4 — Confirmations — **ALL 12 CONFIRMED, no vetoes [USER, 2026-09-08]**
 
-Listed so you can veto, not to make you choose. Each is recorded in the spec with its reasoning.
+Listed so the user could veto, not to make them choose. Each is recorded in the spec with its
+reasoning. Veto pass complete: all 12 stand as specced.
 
 | # | Decision | Where |
 |---|---|---|
@@ -1192,3 +1195,12 @@ and intent, never as authority — and two of their claims have already proved n
     It also confirmed the user's memory of more gates: `applyScaleToZeroEnforcement` publishes
     `wva_model_scaling_blocked` with typed, per-owner reasons — an established convention the
     composite's decision path should follow rather than duplicate.
+- **v8** (2026-09-08): **§10 fully resolved — spec approved pending this final revision.**
+  - **D2 decided [USER]:** `C4-no-signal` publishes a new **policy-owned** reason on
+    `wva_model_scaling_blocked`, alongside the existing typed reasons, following the existing
+    publish-before-empty-return convention.
+  - **D3 decided [USER]:** mission scope is the **first two** derivation categories only —
+    `ceil()`/rounding and PRC/demand lookup — per A20''s two-step delivery recommendation. The
+    demand→replicas→GPUs chain and bounds are **deferred** to a follow-up mission.
+  - **D4 veto pass complete [USER]:** all 12 confirmations stand, no vetoes.
+  - No open items remain in §10.
