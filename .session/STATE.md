@@ -52,10 +52,11 @@
   - **Normalization is deferred.** Do not build on CT6 / `normalizeToCompositeUnits`
     (absent from this base, and its parent-branch implementation has an unfixed correctness
     bug — spec §2.3). Composite stays in saturation's token units.
-  - Branch base is `upstream/main` @ `4db060e2` (rebased 2026-09-08 with user approval; the
-    original base `778a8893` went stale within hours — upstream is actively moving). Do not
-    rebase again without user approval. The pre-rebase tip `b4549217` is preserved in the reflog at
-    `composite-analyzer@{1}`. When checking "have I changed anything", use
+  - Branch base is `upstream/main` @ `c013012e` (rebased again 2026-09-08 with user approval —
+    "rebase first" — after the prior base `4db060e2` went stale within hours; upstream is
+    actively moving). Do not rebase again without user approval. The pre-rebase tip `006486b9`
+    is preserved in the reflog at `composite-analyzer@{1}` (the tip before that, `b4549217`, is
+    further back in the same reflog). When checking "have I changed anything", use
     `git rev-list --left-right --count upstream/main...composite-analyzer` or compare against the
     recorded base SHA — a bare `git diff upstream/main..` conflates "I changed things" with
     "upstream advanced", and a tree-to-tree diff across the rebase looks alarming for the same
@@ -78,7 +79,7 @@
 - [x] Create `session-tracking/missions/composite-analyzer/` symlinks (uncommitted, by design)
 - [x] Pin session into the worktree (`EnterWorktree`)
 - [x] Commit `.session/` to the mission branch
-- [x] Rebase onto current `upstream/main` (`4db060e2`)
+- [x] Rebase onto current `upstream/main` (`4db060e2`, then again onto `c013012e`)
 - [x] Define mission goal and scope with the user
 - [x] Read the parent mission's specs (p3 plan, CT7, semantic framework, PR #34, CT6)
 - [x] Draft the mission spec → `.session/spec.md` (v1)
@@ -121,8 +122,8 @@ from examples or fill gaps with invented premises — ask.
 ### Status
 
 - Environment: **ready** — worktree on branch `composite-analyzer`, rebased onto `upstream/main`
-  @ `4db060e2`; 0 commits behind upstream, 1 ahead (the `.session/` commit). Only diff vs
-  `upstream/main` is `.session/`. `.session/` tracked and committed, not gitignored;
+  @ `c013012e`; 0 commits behind upstream, 12 ahead (all `.session/`-only doc commits). Only diff
+  vs `upstream/main` is `.session/`. `.session/` tracked and committed, not gitignored;
   `resume-mission` + `wind-down` symlinks verified resolving into
   `session-tracking/claude-skills/`; `git status` clean.
 - Session is **pinned** into this worktree via `EnterWorktree` — cross-worktree reads must use
