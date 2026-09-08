@@ -255,3 +255,133 @@ wrong reflex and would defeat the guard's purpose on a future real invocation.
 - Steps list brought up to date; mission-goal definition flagged as the sole blocker, with the note
   that the `single-analyzer` read-deferral probably has to be lifted first, since this mission is
   its spinoff.
+
+## Mission defined by user (2026-09-08, pre-lunch)
+
+Mission: **the composite aggregation calculation** of single-analyzer. Deferring normalization;
+compute a composite without it. Reuse/reimplement aggregations from the old (pre-single-analyzer)
+helper files. Initial plan exists as single-analyzer's p3 work.
+
+### Read before asking
+- `single-analyzer/.session/STATE.p3-planner.md` + `2026-09-06-p3-planner-1.md` — located the
+  "initial plan under single-analyzer p3": it is `.session/compose-logic-plan.md`.
+- `.session/compose-logic-plan.md` (the p3 compose plan) — read in full.
+- Traced my own base branch for what actually exists.
+
+### Finding that reshapes the plan — p3's stated input does not exist on my base
+`compose-logic-plan.md` asserts each `NamedAnalyzerResult` arrives processed by `buildNamedResult`
++ `buildCapacities` + **`normalizeToCompositeUnits`**, and justifies its RC-max rule with "since CT6
+normalization sets TotalDemand = 1.0 ... taking max RC is equivalent to max implied_replicas **in a
+post-normalization world**."
+
+On `composite-analyzer` @ `4db060e2` (= upstream/main): `normalizeToCompositeUnits` has **zero
+hits**. `buildNamedResult` and `buildCapacities` both exist. So p3's RC-max justification rests on a
+normalization pass that is absent here — and the user has now deferred normalization. Raised with
+the user before asking anything else.
+
+Also verified on my base:
+- `composeAnalyzerResults` — does not exist (to be written).
+- `runAnalyzersAndScore` (`engine_v2.go:102`) returns `[]allocation.NamedAnalyzerResult`.
+- `engine_v2.go:797` assigns `CompositeSignal: namedResults[0]` — the single production
+  assignment site.
+- `CompositeSignal` consumers (non-test): `cost_aware_optimizer.go:59,246`,
+  `greedy_score_optimizer.go:117,156`, `rescale.go:344,372,528`, `variant_records.go:79`,
+  `engine_v2.go:722` (`hasSaturationResult`, name-checks `SaturationAnalyzerName`).
+- `multi_backup/` **is present on upstream** — 3 files, 13 funcs in `analyzer_helpers_multi.go`.
+  single-analyzer additionally has `engine_v2_compose_test.go` which upstream lacks.
+
+### User's answers to the 6 clarifying questions
+
+1. **Common currency / normalization target.** Eventually normalize on **"requests"** — each
+   analyzer computes demand for "100 requests waiting in the EPP queue". **For now use token
+   capacity, i.e. sat's units.** → So the composite is expressed in sat units for this mission,
+   with a request-based currency as the future direction. This supersedes p3's
+   "post-normalization RC-max" reasoning and also my (a)/(b)/(c) framing: it is neither raw
+   RC-max nor implied-replicas-as-final — it is *normalize into sat units*.
+2. **Where normalization happens.** "We normalize when we prepare the composite signal." Exact
+   placement is **mine to research and recommend** — must evaluate alternatives and propose.
+3. **Which aggregations.** "Whatever aggregations we need. Both at **role and model level**." Not
+   a fixed file list — scope is driven by need, covering both levels.
+4. **Q1–Q4 resolutions do NOT stand.** Two explicit overrides:
+   - Composite gets a **new name** (not inherited `SaturationAnalyzerName`) → this breaks
+     `hasSaturationResult` at `engine_v2.go:722`, which name-checks sat. Must be handled.
+   - **Scores of all analyzers affect the composition** (p3 had: inherit sat's Score, non-sat
+     affects RC/SC only).
+5. **Deliverable now = plan.** "Right now we plan. But the mission is broader." → mission is not
+   plan-only; implementation follows, but this phase is the spec/plan.
+6. **Containment.** "Until we have a spec all your work is in your .session. Do not write outside
+   your worktree. Feel free to read all other worktrees." → all output goes in `.session/`;
+   cross-worktree **reads** explicitly authorized; no writes outside this worktree. Confirms
+   `multi_backup/` is not to be touched during the planning phase.
+
+User is at lunch; will review on return. Directed to read the specs and draft the mission spec,
+marking my own recommendations as assumptions for confirmation. No code.
+
+## Spec drafted (2026-09-08, while user at lunch)
+
+User: "Do your best. No more questions until I return." → resolved every open decision myself,
+marked each as an assumption (A1–A12) for confirm/overturn, and wrote `.session/spec.md` v1.
+
+### Specs read
+`STATE.p3-planner.md`, `2026-09-06-p3-planner-1.md`, `compose-logic-plan.md`,
+`pr-spec-34-composite-signal.md`, `pr-spec-next-coverage-units.md`, `spec.md` §CT7 (l.998–1160)
+and §"Semantic framework" (l.556–640), `multi_backup/analyzer_helpers_multi.go`.
+Did **not** read the parent's session ledgers or review docs — not needed for the design.
+
+### The load-bearing finding
+p3's `compose-logic-plan.md` justifies `max RC` with "RC is already the implied-replica signal
+**in a post-normalization world**". That world is absent from my base. And
+`pr-spec-next-coverage-units.md` documents CT6's **unfixed correctness bug**: it normalized
+`PerReplicaCapacity`/`TotalDemand`/`RoleDemand` but left `RequiredCapacity`/`SpareCapacity`/
+`Remaining`/`Spare` raw, so `initRoleState` divides raw demand by fractional PRC — replica
+counts wrong by ~`1/PRC_fraction` for any model with real demand.
+
+So `max RC` on this base would aggregate **incommensurable units** (sat tokens vs. throughput
+tokens/sec). The user's "use sat units for now" instruction is therefore load-bearing, not
+cosmetic — it routes around CT6 entirely. Because the composite stays token-denominated with
+sat's PRC intact, `rescaleInputsForGroup`'s water-fill weight keeps working and CT6's whole
+`SatDemand` compensation mechanism becomes unnecessary. Recorded as spec §2.3.
+
+### Design decisions taken (full reasoning in spec.md)
+- **Currency (§4):** convert each analyzer's demand to sat-equivalent via the unit-free implied
+  replica count — `N_full(A_i,SO) = D_i/PRC_i`, then `× PRC_sat`. Sat's own entry converts
+  exactly (identity), so the floor invariant holds by construction.
+- **A2:** recommend the *continuous* ratio, quantizing only where the optimizer already does —
+  CT7's text `max`es over `ceil`ed counts, which double-rounds and inflates when analyzers are
+  close.
+- **A5 (least certain, §5.3):** derive model-level demand from the roles using the parent
+  framework's `min(prefill,decode) + both` cross-role rule, then `max` with the direct
+  model-level figure. Addresses the role/model inconsistency Q1 gestured at.
+- **A6/A7 (§6):** placement — evaluated 4 options. Recommend **O2**: compose at
+  `collectV2ModelRequest:797`, keeping `runAnalyzersAndScore`'s slice return. Rejected p3's O1
+  (return-type change) because that is exactly what broke the parent branch's build across 6
+  test files and left `origin/single-analyzer` non-building. O2 also keeps per-analyzer metrics
+  in each analyzer's own units, which the CT6 spec confirms is correct.
+- **A8/A9 (§7, least confident):** the user said all Scores affect composition, but the parent
+  spec's recorded rule is "max/min per field, **never** Score-weighted averaging" (from CT4's
+  fairness work). Reconciled as: Score **gates** (below-floor ⇒ ineligible) and **tie-breaks**,
+  and composite Score = `max` over contributors. Deliberately did *not* implement true weighting
+  — it would contradict that rule and break the floor invariant (a low-scored sat could be
+  averaged *down*). Flagged as open item #1: if the user wants real weighting, the max/min rule
+  and the floor invariant both need restating.
+- **A10–A12 (§8):** new name `domain.CompositeAnalyzerName = "composite"`. This **breaks**
+  `hasSaturationResult` (`engine_v2.go:722`), silently disabling the GPU-quota guard — CT7's Q3
+  hazard, which the user has now chosen to walk into. Fix by testing *intent* (has a usable
+  capacity signal) rather than analyzer identity, plus explicit provenance on the composite.
+  Noted that PR #34 made the optimizer name-blind, so :722 is *expected* to be the only real
+  name dependency — flagged to verify by grep at implementation time, not assume.
+- **A1:** `multi_backup/` is `//go:build ignore`, `package allocation`, and depends on unexported
+  `variantRecord` — it **cannot** be linked as-is, and un-ignoring it would collide with the
+  single-entry helpers that replaced it. So "reuse" = port the arithmetic + Live/informative
+  gating. Files left untouched (also required by the user's containment instruction).
+
+### Test plan
+12 cases (spec §9), including two the parent mission lacked: an explicit **unit-conversion**
+test (a differently-scaled PRC contributing correctly — the gap that let CT6's `1/PRC` bug
+through) and an **end-to-end** `collectV2ModelRequest`→optimizer assertion on replica counts.
+
+### Harness note
+`sed -n ... $S/spec.md` with an unquoted shell variable was **blocked** by the worktree-isolation
+guard (an unquoted value could begin with `-`, so the command could not be proven not to be
+git). Re-ran with the literal path and `--`. Not a permissions problem; just quote or spell out
+paths in this pinned session.
