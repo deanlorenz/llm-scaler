@@ -21,8 +21,8 @@
 
 ## Task
 
-- **Plan / spec:** `.session/spec.md` — mission spec, v8, §10 fully resolved, pending final
-  approval.
+- **Plan / spec:** `.session/spec.md` — mission spec, **v8, APPROVED [USER, 2026-09-08]**.
+  Implementation explicitly held back pending a separate go-ahead — see Next step.
   *(do not read upfront — pull on demand only)*
 - **Survey:** `.session/survey-zero-signal.md` — what breaks on a zero/absent composite signal;
   also inventories the existing `wva_model_scaling_blocked` gates. *(pull on demand)*
@@ -95,7 +95,9 @@
 - [x] **Answered the 2 remaining §10 questions** — D2: yes, policy-owned reason; D3: first two
       derivation categories only (ceil()/rounding + PRC/demand lookup)
 - [x] **Veto pass on §10/D4's 12 confirmations** — all 12 confirmed, no vetoes
-- [ ] **Get explicit user approval of spec v8 as a whole**, then start implementation
+- [x] **Get explicit user approval of spec v8 as a whole** — approved 2026-09-08
+- [ ] **Get separate explicit go-ahead to begin implementation** (user: "do not begin
+      implementing yet" — approval of the spec is not this go-ahead)
 - [ ] Implement (post-approval): `Agg_N` + derivation chain in/beside
       `internal/engines/aggregation/`, query API, composite naming + quota-guard repair,
       observability audit, 30-case test plan
@@ -111,10 +113,12 @@ coverage are the same quantity (`cov = 1/N`) — v3 computed both and called it 
 through three drafts; (4) there is no single-model request-shape assumption — safety is structural;
 (5) aggregator names encoded the operation (`max…`) instead of the quantity (`Agg_N`).
 
-**Next step / resume point:** §10 is fully resolved (D1–D4 all decided, no open items). Get the
-user's explicit approval of spec v8 as a whole, then start implementation.
+**Next step / resume point:** **Spec v8 is APPROVED [USER, 2026-09-08].** §10 fully resolved
+(D1–D4 all decided, no open items), rebased onto current `upstream/main` @ `c013012e`.
 
-Do not start implementation before that approval.
+**But [USER, 2026-09-08]: "do not begin implementing yet."** Implementation is explicitly held
+back pending a further, separate go-ahead — spec approval alone is not that go-ahead. Do not
+start any code until the user gives that separate signal.
 
 **Standing instruction from review #4:** **[USER]** "Always ask me if not sure." Do not infer intent
 from examples or fill gaps with invented premises — ask.
@@ -129,9 +133,10 @@ from examples or fill gaps with invented premises — ask.
 - Session is **pinned** into this worktree via `EnterWorktree` — cross-worktree reads must use
   `cat <full-path>` or `git show <branch>:<path>`; `git -C` and `cd` elsewhere are blocked.
 - Mission definition: **done** — see Orientation. Normalization deferred; sat units for now.
-- Spec: **v8**, `.session/spec.md` (~1207 lines). **§10 fully resolved** — D1–D4 all decided, D4's
-  12 confirmations all veto-passed. Survey delivered: `.session/survey-zero-signal.md`. Remaining:
-  explicit user approval of v8 as a whole. Then implementation can start.
+- Spec: **v8, APPROVED [USER, 2026-09-08]**, `.session/spec.md` (~1207 lines). §10 fully resolved
+  — D1–D4 all decided, D4's 12 confirmations all veto-passed. Survey delivered:
+  `.session/survey-zero-signal.md`. **Implementation explicitly held back** — user: "do not
+  begin implementing yet" — pending a separate go-ahead.
 - **Design core (settled by the user, not mine to revisit):**
   - **PRC is per SO** (implies model, variant, role). **Demand is per (model, role)** — three
     values (`both`, `prefill`, `decode`) that do **not** depend on which SOs exist. SOs are added
