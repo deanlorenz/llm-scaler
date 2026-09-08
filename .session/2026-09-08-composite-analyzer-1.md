@@ -562,3 +562,132 @@ Spec v3 ≈ 660 lines. §2 nearly doubled (new §§2.2–2.6, all source-verifie
 cases, every new one a zero/independence/isolation case. Open items renumbered to 10; item #1
 (Score combinator) remains the only real design question, and it is unblocked in practice because
 `score ≡ 1` today.
+
+## Spec v4 — user review #3: five real errors found (2026-09-08)
+
+This review caught more actual mistakes than the previous two combined. Recording each with why I
+made it, because the pattern matters.
+
+### Error A (§5.2) — `N` and coverage are the same number
+**[USER]:** "Why both N and coverage? Don't they mean the same? (cov = 1/N)"
+
+They do. I had v3 computing `maxReplicasForFullCoverage` *and* `minCoveragePerReplica` and calling
+their agreement a "consistency check". It is not a check — it is one quantity written twice, and
+`max N` / `min cov` are literally the same operation on reciprocals. Deleted both, replaced with a
+single `Agg_N`.
+
+**Why I made it:** I inherited both formulas from the parent's semantic framework, which lists
+`N_full` and `C` as separate derived quantities (with the identity `N_full × C = 1` right there in
+the text). I copied the pair without noticing the identity meant I only needed one. Lesson: when a
+doc hands you two quantities *and* an identity relating them, the identity is telling you one is
+redundant.
+
+### Error B (§4.4) — I inverted the composite's construction
+**[USER]:** "Why `composite.D(r) = D_sat(r) × cov_sat(r)/cov_composite(r)` — this kills the
+composite signal. `D_com[role] == D_sat[role]`, i.e. `D_sat` is defined as 100%.
+`PRC_com = D_sat/N_com`. `N_com` is derived directly from the coverage numbers."
+
+Correct construction:
+```
+D_com[role] = D_sat[role]                        UNCHANGED — D_sat is the 100% reference
+N_com(SO)   = Agg_N over contributors
+PRC_com(SO) = D_sat[role(SO)] / N_com(SO)
+```
+My v3 scaled *demand* by a coverage ratio, which moves the signal into demand and leaves `N`
+implicit — draining the composite of the information it exists to carry.
+
+The deeper point: making `D_sat` **the definition of 100%** means "sat units" is a *definition*, not
+a conversion — so §4.1's circularity cannot recur by construction. My v3 was still thinking in
+conversions, one level less wrong than v1 but the same category of error. Sat-only now falls out as
+an identity (`N_com = N_sat` ⇒ `PRC_com = PRC_sat`) with no special-casing.
+
+### Error C (§5.1) — saturation is a fallback, not a floor
+**[USER]:** "Sat does not participate unconditionally. Only if no other signal, as fallback. Even
+then, need to see if we mark the type of fallback clearly."
+
+**This retires the "floor invariant"** — which I inherited from CT7's text and carried through
+three drafts, repeatedly citing it as a design constraint and even using it to reject Score
+combinators in v2's §7. It was never questioned.
+
+The composite may legitimately be **lower** than saturation alone, because sat is one estimate among
+several and correcting it is the whole point of other analyzers. Test #3 now asserts exactly that —
+it would have *failed* under v1–v3's assumption.
+
+Also separated two roles I had conflated: `D_sat` remains the **unit** (§4.4) even when saturation
+does not **contribute** to `N`. Easy to merge those, wrong to.
+
+Open: A19's fallback-kind enumeration is my guess at granularity; user explicitly wants this marked
+clearly, so it needs their call.
+
+### Error D (§4.3) — there is no single-model shape assumption
+**[USER]:** "There is no assumption of one model! In the same round you may have different request
+shapes in different models."
+
+v3 claimed a consistent-shape-per-model assumption *licensed* the aggregation. Wrong, and no such
+assumption is needed: safety is **structural** — every aggregation is either per SO (PRC) or per
+model (demand), so nothing crosses a model boundary and there is no shape comparison to make.
+
+Where shape actually matters, all outside this mission: across models **in the optimizer** (cannot
+assume same shape); estimating `PRC` at zero demand (relies on **previous rounds** by definition);
+estimating `PRC(SO1)` when SO1 has no measurements this round (analyzer may use SO2 knowledge, e.g.
+average tokens/req). All analyzer-internal — and `VariantCapacity.Reason` already records which
+estimation path ran (`P0-store`…`P4-k1`).
+
+### Error E (§4.5) — I put the operation in the interface
+**[USER]:** "Aggregation is not max or min — it should be explicit on what it aggregates (e.g.
+`Agg_N(...)`, `AggPRC(...)`) and use a helper. The base computation, for now, can be max/min or
+weighted mean."
+
+v3 named helpers `maxReplicasForFullCoverage` / `minCoveragePerReplica` — baking the *operation*
+into the name, so changing the rule would require renaming every call site. Now `Agg_N`, with
+`max`/`min`/weighted-mean as a swappable rule inside (A18). Subtle but it is exactly what the user
+asked for in review #2 and I half-did.
+
+### New requirement (§5.5) — a consistent query API
+**[USER]:** the signal should answer, given current/anticipated/partial allocations: model coverage,
+missing coverage, missing capacity, replicas of an SO to close the gap, GPUs of a type to close the
+gap — via explicit, consistent helpers.
+
+Verified the need: `roleDemandGPUs` (`rescale.go:585`) recomputes `ceil(demand/best_PRC) ×
+gpusPerReplica` inline, picking the most cost-efficient variant itself;
+`cost_aware_optimizer.go:304` reads RC/SC per role directly. The arithmetic is scattered.
+
+Sharper problem I found while specifying it: `Remaining`, `Spare`, `RoleSpare` are **mutable** fields
+the optimizer *decrements* during allocation, so the signal **cannot answer the same question twice**
+— A20 makes state an explicit parameter, which is what "consistently" requires. But
+`NamedAnalyzerResult` is legacy **[USER]**, so those fields stay and the API goes alongside. Migration
+scope is open item #3 and is the item most able to balloon.
+
+### New requirement (§6) — observability is a deliverable
+**[USER]:** verify all analyzer results are fully observable as logs *and* metrics; the composite must
+use the **same** functions; reuse the normalize work.
+
+`logAnalyzerResult` (`engine_v2.go:1051`) and `recordAnalyzerMetrics` (`:222`, `wva_analyzer_demand`/
+`wva_analyzer_target`) exist. The normalization branch already **merged** a separate
+`logCompositeSignal` back into `logAnalyzerResult` ("one function, one log key, union of fields") —
+adopt that. Its unit was `%`; ours is `D_sat` units. Noted as a *verification task with a possible
+gap-fix* (A22), not mere reuse.
+
+### §7 Score — reframed, still open
+**[USER]** gave three cases with `cur`: (3,5,4), (5,10,2), (0,10,5). Weighted mean is wrong in all —
+case 3 is decisive: `mean(0,10) = 5 = cur`, so violent disagreement produces "do nothing", the one
+answer *neither* analyzer supports. `max` is safe but possibly over-conservative.
+
+**Settled:** direction is always the **scoreless** `max`/`min`; only **magnitude** may be
+score-influenced. So scores can never flip a decision. Dropped v2's C1–C5 table — it was built
+around the now-retired floor invariant.
+
+**Still open:** the magnitude rule; whether case-3 disagreement should scale at all or signal low
+confidence (0-vs-10 arguably means neither estimate is trustworthy — no combination rule fixes that);
+and whether `Score` is per-round *confidence* or static *trust* (the `fairShareValue` conflation
+finding suggests the codebase already muddles it). `score ≡ 1` today ⇒ direction-only is exactly
+current behavior, so nothing is blocked.
+
+### Net
+Spec v4: 871 lines. Test plan 25 → 30. Open items 10 → 12, with three now needing the user's call
+rather than just confirmation (#1 Score, #2 fallback typing, #3 query-API migration scope).
+
+### Harness note
+Two commands were blocked by the worktree-isolation guard for being "too complex to verify" —
+a heredoc-plus-`sed`-plus-`cp` chain. Split into plain single-purpose commands. Same class as the
+earlier unquoted-variable block: in a pinned session, keep each Bash call simple and literal.
