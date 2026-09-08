@@ -764,3 +764,78 @@ plus **twelve confirmations** presented as a veto list, not a quiz.
 ### Net
 Spec v5: 1041 lines. No design changes — only my misunderstandings corrected, and the decision list
 made answerable.
+
+## Spec v6 — D1 and D2 decided by the user (2026-09-08)
+
+### D1 — Score becomes confidence; the aggregation rule is settled
+**[USER]:** "The best I can think of is: **max minus the confidence-weighted RMS distance from the
+max**. Also change the score definition to be between 0 and 1.0 where 1.0 is 100% confident (this can
+be computed from original score ~ 3 means 3 times more confident than 1)."
+
+```
+conf_i = score_i / Σ_j score_j
+N_com  = Nmax − sqrt( Σ_i conf_i · (Nmax − N_i)² )
+```
+
+Worked the properties before writing it up, because they are what make it a good answer:
+- Full agreement ⇒ every `(Nmax − N_i) = 0` ⇒ `spread = 0` ⇒ **exactly the max**. So **sat-only is
+  unchanged with no special-casing** — the identity §4.6 requires falls out of the formula.
+- `spread >= 0` ⇒ `N_com <= Nmax` always ⇒ **direction preserved**, satisfying the user's earlier
+  "regardless of the score we should scale in the right direction".
+- The discount grows with **both** the spread and the **dissenters' confidence** — a low-confidence
+  outlier barely moves it, a high-confidence one moves it a lot. This is exactly the "max is safe but
+  overly conservative" complaint, addressed.
+- Case 1 (3 vs 5, equal conf): `spread = sqrt(0.5·4) ≈ 1.41` ⇒ `≈ 3.59` (mild discount).
+  Case 3 (0 vs 10, equal conf): `spread = sqrt(0.5·100) ≈ 7.07` ⇒ `≈ 2.93` (large discount).
+  It **degrades where trust degrades** — the property no single-point rule had. Pinned both as
+  regression values in test 13 so the formula cannot drift silently.
+
+**Two follow-ups I raised rather than silently resolved:**
+- **A25 clamp.** The raw formula can leave the contributors' range: 0 vs 10 with `conf(0) = 0.9` gives
+  `spread ≈ 9.49` ⇒ `N_com ≈ 0.51`, and with more contributors it can go negative. Proposed clamping to
+  `[Nmin, Nmax]` — the composite should not demand fewer replicas than *every* analyzer asks for, since
+  that is an opinion nobody holds. Flagged as mine.
+- **Relative vs absolute confidence.** The ratio form makes `conf = 1` mean "sole contributor", i.e.
+  **relative** confidence (share of total trust) — which is what raw relative scores express. But "1.0 =
+  100% confident" could mean an **absolute** per-estimate confidence, which no analyzer currently
+  produces and which would change the formula (weights would no longer sum to 1). **Asked** rather than
+  assumed — per the standing "always ask me if not sure".
+- **A24:** normalize across *contributors*, not all configured analyzers, or a non-contributing analyzer
+  absorbs weight and silently under-weights the rest.
+
+### D2 — decision path, the no-signal gate, and scale-from-zero fallbacks
+**[USER]:** analyzers already have a field describing the decision path; the composite needs something
+similar (closer to option b). No signal at all ⇒ probably no autoscaling (gate already exists), but some
+default signals are still needed to avoid breaking calculations ("need to check which"). Partial scale
+from zero and never-seen-before SOs must still get a non-zero PRC; sat already computes these defaults;
+the new-SO estimate may be **over** — worst case we add a replica, learn, and take it back down.
+
+**Verified all of it in source before writing:**
+- The field is `domain.VariantCapacity.Reason` — saturation uses `P0-store`, `P1-obs`, `P2-hist`,
+  `P3-k2`, `P4-k1`, `P1-obs-invalid`, plus shared `no-data`/`error`; throughput uses `T1-ols`,
+  `T2-pinned`, `T2-default`, `T2-failed`. Per `VariantCapacity`, i.e. **per SO** — so the composite's
+  mirror is per SO too. Proposed `C0-agree`/`C1-single`/`C2-sat-fallback`/`C3-default-prc`/`C4-no-signal`.
+- The gate is `hasSaturationResult` (`engine_v2.go:722`), whose comment already states the intent: *"A
+  request without one was not measured this cycle, so its replica counts are not evidence of anything."*
+  It tests **saturation's name**, which §8's rename breaks — so A11' repairs it to read the recorded
+  `C4-no-signal` instead. Good: the user's "we already have this gate" and §8's hazard are the *same*
+  code, and would otherwise have been fixed twice or not at all.
+- Saturation's PRC ladder (`analyzer.go` ≈700–735) confirms both fallbacks already exist:
+  live → **own store record** (`P0-store`, the idle/partial-scale-from-zero case) → **compatible
+  variant's `EffectiveCapacity`** (also `P0-store`, the never-seen-before case, searched cross-namespace
+  on accelerator + GPU count + engine params) → `no-data` with `PRC = 0`.
+
+So the composite **consumes** these (A27) and must **not** treat an estimated PRC as weaker than a
+measured one — that is what keeps a scale-from-zero moving. Recorded A28 explicitly because it inverts
+the usual conservative instinct: **over-estimation is acceptable here**, since a zero PRC blocks the
+very scale-up that would produce the measurement, while an over-estimate self-corrects next cycle. A
+later reader would otherwise be tempted to "fix" it.
+
+**Outstanding:** the user's own "need to check which" — which calculations break on a zero/absent
+signal. That is a **survey** across the nine `CompositeSignal` consumer sites, not a judgment call. I
+did **not** silently start it: asked whether to run it now (my recommendation, since its outcome could
+change the no-signal *design*, not just its implementation) or as the first implementation task.
+
+### Net
+Spec v6: 1207 lines. D1/D2 closed; D3 (query-API migration scope) still open. Test plan gains the
+confidence cases with pinned values (13) and the scale-from-zero fallback cases (8a–8d).

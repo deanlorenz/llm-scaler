@@ -78,7 +78,12 @@
 - [x] User review #2 → six factual corrections, all re-verified against upstream source; **v3**
 - [x] User review #3 → five real errors (see below); **v4**
 - [x] User review #4 → three of my own misreadings corrected (no design change); **v5**
-- [ ] **User review #5 of `.session/spec.md` v5; decide D1–D3 in §10**
+- [x] User decided **D1** (Score → confidence in [0,1]; max − confidence-weighted RMS) and **D2**
+      (composite decision-path field; no-signal gate; scale-from-zero PRC fallbacks); **v6**
+- [ ] **Decide D3** (query-API migration scope) + veto pass on the 12 confirmations
+- [ ] **Schedule the zero/absent-signal survey** — user's own "need to check which" calculations
+      break; 9 `CompositeSignal` consumer sites; recommended *now*, since it could change the
+      no-signal design rather than just its implementation
 - [ ] Implement (post-approval): `Agg_N` + derivation chain in/beside
       `internal/engines/aggregation/`, query API, composite naming + quota-guard repair,
       observability audit, 30-case test plan
@@ -93,15 +98,17 @@ coverage are the same quantity (`cov = 1/N`) — v3 computed both and called it 
 through three drafts; (4) there is no single-model request-shape assumption — safety is structural;
 (5) aggregator names encoded the operation (`max…`) instead of the quantity (`Agg_N`).
 
-**Next step / resume point:** get spec §10's **D1–D3** decided (the 12 confirmations need only a
-veto). **D1** `Score` magnitude rule — direction is settled as scoreless; `score ≡ 1` today so
-nothing is blocked; recommend today's behavior with the hook unused. Its sub-question (what a wild
-disagreement *means* — scale anyway, or flag low confidence?) genuinely needs the user's judgment and
-has no recommendation from me. **D2** fallback-marking granularity — that we mark it is settled; my
-four-way enumeration is a guess. **D3** query-API migration scope — recommend migrating the known
-duplicators (`roleDemandGPUs`, `cost_aware_optimizer.go:304`, `greedy_score_optimizer.go:117,156`),
-since helpers-only would add a definition rather than remove duplication. Do not start implementation
-before approval.
+**Next step / resume point:** three things, all in spec §10.
+1. **D3** — query-API migration scope. Recommend migrating the known duplicators (`roleDemandGPUs`,
+   `cost_aware_optimizer.go:304`, `greedy_score_optimizer.go:117,156`), since helpers-only would *add*
+   a definition rather than remove duplication.
+2. **Two small D1 follow-ups**, both mine: (a) clamp `N_com` to `[Nmin, Nmax]` — the raw formula can
+   leave the range when confidence concentrates on a low estimate; (b) is "1.0 = 100% confident"
+   **relative** confidence (the ratio form, `conf = 1` ⇔ sole contributor) or **absolute** per-estimate
+   confidence? The latter no analyzer currently produces and it would change the formula.
+3. **Schedule the zero/absent-signal survey** (above).
+
+Do not start implementation before approval.
 
 **Standing instruction from review #4:** **[USER]** "Always ask me if not sure." Do not infer intent
 from examples or fill gaps with invented premises — ask.
@@ -116,9 +123,8 @@ from examples or fill gaps with invented premises — ask.
 - Session is **pinned** into this worktree via `EnterWorktree` — cross-worktree reads must use
   `cat <full-path>` or `git show <branch>:<path>`; `git -C` and `cd` elsewhere are blocked.
 - Mission definition: **done** — see Orientation. Normalization deferred; sat units for now.
-- Spec: **DRAFT v5**, `.session/spec.md` (1041 lines). **Awaiting user review #5** — the only
-  thing blocking implementation. §10 now separates **3 real decisions** (D1 Score magnitude,
-  D2 fallback-marking granularity, D3 query-API migration scope) from **12 confirmations** to veto.
+- Spec: **DRAFT v6**, `.session/spec.md` (1207 lines). **D1 and D2 decided by the user.** Remaining:
+  **D3** (query-API migration scope), 12 confirmations to veto, and one **survey** to schedule.
 - **Design core (settled by the user, not mine to revisit):**
   - **PRC is per SO** (implies model, variant, role). **Demand is per (model, role)** — three
     values (`both`, `prefill`, `decode`) that do **not** depend on which SOs exist. SOs are added
@@ -150,8 +156,19 @@ from examples or fill gaps with invented premises — ask.
   - **`Score` vs `priority` are different axes:** `Score` weights different **analyzers'** opinions
     about one model (this mission); **priority** weights different **models'** demand (fair-share /
     `fairShareValue`). `fairShareValue` using Score is a bug in a known direction, not an ambiguity.
-    Direction is always the **scoreless** `max`/`min`; only magnitude may be score-influenced.
-    Weighted mean is rejected. `score ≡ 1` today, so direction-only is exactly current behavior.
+  - **`Score` is a confidence in `[0,1]`** (raw 3 = 3× as confident as raw 1), and the aggregation is
+    **`max` minus the confidence-weighted RMS distance from the max**:
+    `N_com = Nmax − sqrt( Σ conf_i·(Nmax − N_i)² )`. Full agreement returns the max exactly, so
+    sat-only is unchanged with no special case; disagreement discounts the max in proportion to spread
+    and to the dissenters' confidence; `N_com <= Nmax` always, so direction is preserved.
+  - **Fallbacks must still yield a non-zero PRC** for an idle SO (partial scale-from-zero) and a
+    never-seen SO — saturation's ladder already does this (own store record → compatible variant's
+    `EffectiveCapacity`, both `P0-store`). The composite consumes those and must **not** discount an
+    estimated PRC. **Over-estimation is acceptable**: worst case a replica is added, measured, and
+    removed — whereas a zero PRC blocks the scale-up that would produce the measurement.
+  - **The composite carries a decision-path field** mirroring `VariantCapacity.Reason`, per SO.
+    **No signal at all ⇒ no autoscaling**, via the existing `hasSaturationResult` gate repaired to
+    test for a usable signal rather than saturation's name.
   - **A consistent query API** is part of the deliverable — coverage, missing coverage/capacity,
     replicas-or-GPUs-to-close-the-gap — so **each concept has one definition** shared by every
     optimization step, instead of each function inventing its own. Note: the mutation of

@@ -1,6 +1,6 @@
-# composite-analyzer — mission spec (draft v5)
+# composite-analyzer — mission spec (draft v6)
 
-**Status:** DRAFT v5 — revised after user review #4; awaiting review #5 (2026-09-08).
+**Status:** DRAFT v6 — D1 and D2 decided by the user; awaiting review #6 (2026-09-08).
 **Mission:** composite aggregation calculation. Spinoff of `single-analyzer`.
 **Branch/worktree:** `composite-analyzer` @ base `upstream/main` `4db060e2`.
 **Role:** mission owner.
@@ -32,7 +32,12 @@ mission, with three deliberate departures from CT7's recorded design (§3).
   GPUs to close a gap — so each concept has **one definition** shared by every optimization step,
   instead of each function inventing its own **[USER]** (§5.5).
 - **Zero-guards throughout** — coverage/`N` is meaningless when PRC or demand is zero **[USER]**
-  (§2.5).
+  (§2.5) — *and* the fallbacks that must still yield a non-zero PRC for an idle or never-seen SO,
+  so a partial scale-from-zero is not blocked **[USER]** (§5.1.4).
+- **A composite decision-path field**, mirroring analyzers' `Reason`, so every composite value says
+  how it was reached **[USER]** (§5.1.2).
+- **`Score` redefined as a confidence in `[0,1]`**, and the aggregation rule **`max` minus the
+  confidence-weighted RMS distance from the max** **[USER, D1]** (§7).
 - **Full observability**, reusing the *same* log and metric functions as any analyzer result
   **[USER]** (§6).
 - A new composite **name**, and repairing whatever that breaks **[USER]** (§8).
@@ -46,9 +51,6 @@ mission, with three deliberate departures from CT7's recorded design (§3).
   dependency or a plan of record; §2.6 treats it as hazard-awareness only. Until a shared unit
   exists, analyzers meet only in unit-free `N`/coverage space (§4.2).
 - **Reorganizing `NamedAnalyzerResult`** — legacy, kept as-is; a different mission **[USER]**.
-- **`Score` weighting** — needs revisiting **[USER]** (§7). Direction is always the scoreless
-  `max`/`min`; only the magnitude may be score-influenced, and the magnitude rule is unsettled.
-  `score ≡ 1` today, so direction-only is exactly today's behavior and nothing is blocked.
 - CT6's coverage-fraction normalization (`TotalDemand = 1.0`). Not merely deferred — see §2.6,
   it hit real bumps and this mission does **not** build on it.
 - CT1b (nil-saturation guard), CT4 (fairness definition). Untouched.
@@ -380,42 +382,115 @@ rule from one shared, swappable place so `Agg_N` and any sibling cannot drift ap
 **[USER]** Named helpers stating what they aggregate (§4.5), extending
 `internal/engines/aggregation/` (§2.2).
 
-### 5.1 Saturation is a fallback, not a floor **[USER, v4 correction]**
+### 5.1 Contributors, fallbacks, and the decision path **[USER]**
 
-**[USER] correction:** "Sat does not participate unconditionally. Only if no other signal, as
-fallback. Even then, need to see if we mark the type of fallback clearly."
+**[USER]:** "Sat does not participate unconditionally. Only if no other signal, as fallback."
 
 **This retires the "floor invariant"** that CT7 recorded and that v1–v3 carried through unexamined.
 Saturation is not privileged in the aggregation; it is the **fallback when no other analyzer has a
-usable signal**.
+usable signal**. The composite may therefore come out **below** saturation alone — intended, since
+correcting saturation is why other analyzers exist.
 
 ```
-contributors = eligible analyzers with a defined N(SO)          (§5.1.1)
-if contributors is empty:  fall back to saturation, and MARK the fallback
+contributors(SO) = eligible analyzers with a defined N(SO)
+if contributors is empty:  fall back (see §5.1.2)
 else:                      aggregate over contributors — sat included only if itself eligible
 ```
 
-Consequences, stated plainly because they are load-bearing:
-- The composite may be **lower** than saturation alone would demand. That is intended: sat is one
-  estimate among several, and the whole point of other analyzers is to correct it.
-- Sat-only is now a *consequence* of sat being the only contributor, not a special rule.
-- `D_sat` remains the **unit** (§4.4) even when saturation does not contribute to `N`. Unit and
-  contribution are separate roles — worth stating, since conflating them is easy.
-
-**[ASSUMPTION] A19 — fallback is typed and observable.** Record *which* fallback applied, at least:
-`no-eligible-analyzer`, `sat-only`, `sat-fallback-for-this-SO`, `no-signal-at-all`. Carried on the
-composite (small — §8's legacy constraint) and logged (§6). **[USER]** "need to see if we mark the
-type of fallback clearly" — flagged as open item, since the enumeration is mine, not yours.
+`D_sat` remains the **unit** (§4.4) even when saturation does not *contribute* to `N`. Unit and
+contribution are separate roles; conflating them is easy and wrong.
 
 #### 5.1.1 Eligibility
 ```
 eligible(i)  ⟺  Result != nil  ∧  ResultIsInformative(i)  ∧  Live(i)
 ```
-Separately, a **contribution is skipped** when its `N` is undefined (§2.5) — a distinct concept from
+Separately, a **contribution is skipped** when its `N` is undefined (§2.5) — distinct from
 ineligibility, represented explicitly (A14), never as a magic number.
 
-**[ASSUMPTION] A3 — one eligibility rule in both directions.** A stale analyzer neither raises
-demand nor blocks scale-down.
+**[ASSUMPTION] A3 — one eligibility rule in both directions.** A stale analyzer neither raises demand
+nor blocks scale-down.
+
+#### 5.1.2 The composite's decision path **[USER, D2 decision]**
+
+**[USER]:** "Analyzers already have a field to describe the decision path that created the results —
+this will be logged per analyzer. We need something similar for the composite signal (closer to
+option b)."
+
+Verified: `domain.VariantCapacity.Reason` is exactly that field — free text naming the path that
+produced the value. Saturation's ladder: `P0-store`, `P1-obs`, `P2-hist`, `P3-k2`, `P4-k1`,
+`P1-obs-invalid`, plus the shared `no-data` / `error` sentinels; throughput uses `T1-ols`,
+`T2-pinned`, `T2-default`, `T2-failed`.
+
+**[ASSUMPTION] A19' — the composite carries the same kind of field**, at the same granularity as the
+analyzers' (per SO, since `Reason` is per `VariantCapacity`), naming how *this* SO's `N_com` was
+reached. Candidate values:
+
+| Composite reason | Meaning |
+|---|---|
+| `C0-agree` | multiple contributors, aggregated normally |
+| `C1-single` | exactly one contributor (its identity in the log) |
+| `C2-sat-fallback` | no other contributor for this SO; saturation used as fallback |
+| `C3-default-prc` | no contributor at all; a default/last-good PRC was used (§5.1.4) |
+| `C4-no-signal` | no signal and no usable default — see §5.1.3 |
+
+Logged per analyzer *and* for the composite through the same function (§6), so a decision is traceable
+end to end. The exact value set is a proposal; the *mechanism* (mirror `Reason`) is **[USER]**'s.
+
+#### 5.1.3 No signal at all — do not autoscale **[USER]**
+
+**[USER]:** "If no signal at all, or sat is disabled and other analyzers did not provide signal, then
+probably should not do any autoscaling (we already have this gate in the code); still need some default
+signals to avoid breaking some calculations (need to check which)."
+
+The existing gate is `hasSaturationResult` (`engine_v2.go:722`) — *"A request without one was not
+measured this cycle, so its replica counts are not evidence of anything and must not be charged to a
+quota."* Same intent, but it currently tests **saturation's name**, which §8 changes.
+
+**[ASSUMPTION] A11' — the gate is repaired to test "is there a usable signal", not "is this
+saturation".** With `C4-no-signal` recorded on the composite (§5.1.2), the gate reads that explicitly
+rather than inferring it from an analyzer's identity. This makes the *existing* no-autoscaling
+behavior survive the rename — which is the whole hazard §8 introduces.
+
+**Open sub-task, explicitly [USER]-flagged: "need to check which" calculations break on a
+zero/absent signal.** Not answered here. This requires walking every `CompositeSignal` consumer
+(§2.1's list) and recording, per field, what it does when the field is zero or absent — a survey, not
+a guess. Tracked as a spec deliverable, not an assumption; see D2 in §10.
+
+#### 5.1.4 Fallbacks that MUST produce a non-zero PRC **[USER]**
+
+**[USER]:** "One important case that needs a fallback is **partial scale from zero** — we have an idle
+SO; this typically creates a zero or undefined PRC, but we must still have a non-zero estimate (e.g.
+last good value). Also applies to a **never-seen-before new SO** — must have some initial PRC. Sat
+already computes these defaults. The never-seen-before estimate can be **over** — at worst we create a
+replica, then learn the true values and take it back down. Now we have a more reasonable estimate."
+
+Verified in `saturation_v2/analyzer.go` (≈l.700–735), the ladder is already there — in priority order:
+1. **Live replicas** → measured, labelled by `k2SourceLabel` (`P1-obs` / `P2-hist` / `P3-k2` / `P4-k1`).
+2. **No ready replicas, own store record** with `EffectiveCapacity > 0` → `estimateStoredCapacity`,
+   labelled **`P0-store`**. ← the **idle SO / partial-scale-from-zero** case.
+3. **No own record, a compatible variant exists** (same accelerator, GPU count, engine params;
+   searched cross-namespace) → borrow its `EffectiveCapacity`, also **`P0-store`**. ← the
+   **never-seen-before SO** case.
+4. Otherwise → **`no-data`**, `PRC = 0`.
+
+So the defaults **[USER]** refers to are cases 2 and 3, and they are saturation's, not the composite's.
+
+**[ASSUMPTION] A27 — the composite consumes these defaults, it does not reimplement them.** A
+`P0-store` PRC is an ordinary contribution: the composite must **not** treat an estimated PRC as
+weaker than a measured one (§4.3/A16'), because that is precisely what keeps a scale-from-zero moving.
+If estimate quality should influence weight, that is the confidence question (§7), not a separate
+mechanism.
+
+**[ASSUMPTION] A28 — over-estimation is acceptable here, by [USER]'s explicit reasoning:** "at worst
+we create a replica, then learn the true values and take it back down." So for the never-seen-before
+case the composite must not clamp or discount the borrowed estimate defensively — an over-estimate is
+self-correcting on the next cycle, whereas a zero PRC **blocks the scale-up that would produce the
+measurement**. Recorded because it inverts the usual conservative instinct, and a later reader would
+otherwise be tempted to "fix" it.
+
+**Remaining gap:** case 4 (`no-data`, `PRC = 0`) still yields an undefined `N` (§2.5). Whether a
+`C3-default-prc` beyond saturation's ladder is needed there — a last-good value with no store record at
+all — is part of D2's open sub-task.
 
 ### 5.2 `N(SO)` is the single aggregation signal **[USER, v4 correction]**
 
@@ -615,7 +690,7 @@ more row.
 
 ---
 
-## 7. Score — the weight on each analyzer's opinion **[USER]**
+## 7. Score — confidence, in [0,1] **[USER]**
 
 ### 7.0 Score vs. priority — two different axes **[USER, settled]**
 
@@ -627,59 +702,82 @@ more row.
 | **Priority** | different **models'** demand against each other | `fairShareValue` / fair-share |
 | **Score** | different **analyzers'** opinions about **one** model | the composite aggregation (this mission) |
 
-So `Score`'s *meaning* is **not** in question. `fairShareValue` using `Score` where it should use
-priority is a **bug in a known direction** (CT4-adjacent, out of scope here), not evidence of
-ambiguity. Only the **combination rule** is open (§7.2).
+`Score`'s *meaning* is not in question. `fairShareValue` using `Score` where it should use priority is
+a **bug in a known direction** (CT4-adjacent, out of scope here), not evidence of ambiguity.
 
-### 7.1 The user's three cases
+### 7.1 Score is redefined as a confidence in [0,1] **[USER, D1 decision]**
 
-**[USER]** "The weight should mean **confidence**, but we should understand what will be done."
-`cur` = **current replica count** — context, **not** an implied answer:
+**[USER]:** "Change the score definition to be between 0 and 1.0 where 1.0 is 100% confident (this can
+be computed from original score ~ 3 means 3 times more confident than 1)."
 
-| Case | TA says | sat says | `cur` |
-|---|---|---|---|
-| 1 | 3 | 5 | 4 |
-| 2 | 5 | 10 | 2 |
-| 3 | 0 | 10 | 5 |
+Raw `Score` from `AnalyzerScoreConfig` is an unbounded relative weight — raw 3 means "three times as
+confident as raw 1". Normalize to a confidence in `[0,1]`:
 
-**Correction, recorded deliberately:** an earlier draft read case 3's `cur = 5` as "so 5 is the
-answer weighted mean would wrongly give", and built an argument on it. That was an invented
-premise — `cur` is just the current state. **[USER]** "Always ask me if not sure." The cases are
-open questions about what *should* happen, not worked examples with known answers.
-
-**[USER] conclusions — constraints, not options:**
-- **Weighted mean does not seem right in any of these.**
-- **`max` is safe but possibly overly conservative.**
-- **Regardless of score, scale in the direction the scoreless `max`/`min` indicates.** Direction is
-  score-independent; the **amount** may be score-influenced.
-
-### 7.2 Direction vs. magnitude
-
-**[ASSUMPTION] A9'' — separate them.** The structure the constraints imply:
 ```
-direction = from scoreless Agg_N   (max for up; min-with-all-agree for down)
-magnitude = score-influenced, but never crossing the direction boundary
+conf_i = score_i / Σ_j score_j          over contributing analyzers j
 ```
-Scores can temper how far we move; they can never flip whether we move up or down.
 
-**Open — the magnitude rule.** Candidates, none endorsed:
-- Move fully to the scoreless extreme (today's `max`) — safe, possibly wasteful.
-- Score-weighted interpolation between the contributors' values, clamped to the direction.
-- Inverse-variance weighting — only meaningful once analyzers share a demand unit (deferred
-  normalization), since weighting incommensurable estimates is not statistically grounded.
+**[ASSUMPTION] A24 — normalize across *contributors*, not across all configured analyzers.** An
+analyzer that did not contribute (ineligible, or no defined `N` for this SO) must not consume
+confidence mass, or the remaining analyzers would be silently under-weighted. Consequence: `conf`
+sums to 1 over contributors, so it is a proper weight, and with `score ≡ 1` and `k` contributors each
+gets `1/k`.
 
-**Open — what a wide disagreement means.** Case 3 (0 vs 10) is a factor-of-infinity split. A
-combination rule of any kind produces *some* number, but the disagreement itself may be the
-signal — i.e. it may warrant flagging low confidence rather than picking a point. **I am not
-deciding this; it needs your call** (open item #1).
+**Note on "100% confident":** the ratio form gives `conf = 1` only when an analyzer is the *sole*
+contributor — i.e. confidence here is **relative** (share of total trust), which is what the raw
+scores express. An *absolute* per-estimate confidence (this analyzer is 100% sure of *this* number)
+would be a different, richer signal that no analyzer currently produces. Flagged in case absolute
+confidence is what was meant — see D1 follow-up in §10.
 
-`score ≡ 1` for every analyzer today, so **every candidate collapses to the scoreless result** and
-nothing is blocked. **Recommendation:** implement direction-only (scoreless `max`/`min`) — exactly
-today's behavior — with the magnitude hook present, explicit, and unused until decided.
+### 7.2 The aggregation rule **[USER, D1 decision]**
+
+**[USER]:** "The best I can think of is: **max minus the confidence-weighted RMS distance from the
+max**."
+
+```
+Nmax        = max over contributors of N_i
+spread      = sqrt( Σ_i conf_i · (Nmax − N_i)² )       confidence-weighted RMS distance from max
+N_com       = Nmax − spread
+```
+
+Why this is a good answer to the three cases — recorded because the properties are the point:
+
+- **Full agreement ⇒ exactly the max.** Every `(Nmax − N_i)` is 0, so `spread = 0` and
+  `N_com = Nmax`. In particular **sat-only ⇒ `N_com = N_sat` exactly**, preserving §4.6's identity
+  with no special case.
+- **Direction is preserved.** `spread >= 0`, so `N_com <= Nmax` always; and (with the clamp below)
+  `N_com` never drops below the minimum contributor. The result stays inside the contributors' range,
+  so no score can invert a decision — satisfying **[USER]**'s "regardless of the score we should
+  scale up/down in the right direction".
+- **Disagreement discounts the max**, by an amount growing with both the spread and the confidence of
+  the *dissenting* estimates. A low-confidence outlier barely moves it; a high-confidence one moves it
+  a lot. This is the "max is safe but overly conservative" concern addressed directly.
+- **It degrades where trust degrades.** In the user's case 3 (0 vs 10, equal confidence):
+  `spread = sqrt(0.5·100 + 0.5·0) ≈ 7.07`, so `N_com ≈ 2.93` — pulled far below the max precisely
+  because the analyzers disagree violently. Compare case 1 (3 vs 5): `spread = sqrt(0.5·4) ≈ 1.41`,
+  `N_com ≈ 3.59` — a mild discount for a mild disagreement.
+
+**[ASSUMPTION] A25 — clamp to the contributors' range.** `spread` can exceed `Nmax − Nmin` when
+confidence is concentrated on a low estimate (e.g. 0 vs 10 with `conf(0) = 0.9`:
+`spread = sqrt(0.9·100) ≈ 9.49`, giving `N_com ≈ 0.51`, below the minimum only in edge cases but
+capable of going negative with more contributors). Clamp:
+```
+N_com = max( Nmin, Nmax − spread )
+```
+Rationale: the composite should never demand fewer replicas than *every* analyzer asks for — that
+would be an opinion no analyzer holds. Also guarantees `N_com >= 0`. **Flagged: the clamp is mine,
+not the user's** — the raw formula can otherwise leave the range.
+
+**[ASSUMPTION] A26 — one aggregator, rule inside.** This lives inside `Agg_N` (§4.5), so the rule is
+swappable in one place and callers name only the quantity.
+
+**Today's behavior is unchanged in the only production case.** With saturation the sole contributor,
+`spread = 0` and `N_com = N_sat`. The formula only differs from a plain `max` once a second analyzer
+actually contributes — which is not a production configuration today.
 
 ### 7.3 Composite `Score`
-**[ASSUMPTION] A9 — `max` over contributors' Scores.** Reduces to saturation's on the sat-only
-path. Secondary to §7.2 and to be revisited with it.
+**[ASSUMPTION] A9 — `max` over contributors' raw Scores.** Reduces to saturation's on the sat-only
+path. Secondary to the above.
 
 ---
 
@@ -734,8 +832,22 @@ than infer it, and so logs explain each decision. Required by §6's "explainable
    (`cov(both) = 0`) and non-disaggregated (`both` only).
 6. Non-live analyzer → not a contributor.
 7. Non-informative analyzer (`Reason` = `no-data`/`error`) → not a contributor.
-8. **Fallback typing** (A19) — no eligible contributor ⇒ saturation fallback, and the fallback
-   *kind* is recorded and logged. Assert the marker, not just the value.
+8. **Decision path recorded** (A19', §5.1.2) — each of `C0-agree` / `C1-single` / `C2-sat-fallback` /
+   `C3-default-prc` / `C4-no-signal` is reached by a constructed case and asserted. The *marker*, not
+   just the value.
+
+**Fallbacks that must not block scale-from-zero (§5.1.4):**
+
+8a. **Idle SO, own store record** — `PRC` comes from the store (`P0-store`), `N` is defined, and the
+    composite scales up. The partial-scale-from-zero case.
+8b. **Never-seen-before SO** — no own record, a compatible variant exists ⇒ borrowed
+    `EffectiveCapacity` (`P0-store`) contributes normally. Asserted **not** discounted or clamped for
+    being an estimate (A27/A28) — an over-estimate is acceptable and self-corrects; a zero would block
+    the scale-up that produces the measurement.
+8c. **`no-data` (`PRC = 0`)** — `N` undefined, contribution skipped, decision path records it. No
+    division, no panic.
+8d. **No signal at all ⇒ no autoscaling** — the existing gate still fires after §8's rename (A11'),
+    driven by the recorded `C4-no-signal` rather than by an analyzer's name.
 9. **Unit independence** — an analyzer whose demand and PRC are both scaled by an arbitrary
    constant `k` produces an **identical** composite. This is the test that proves the
    aggregation is genuinely unit-free and that v1's per-SO-conversion defect has not returned.
@@ -746,8 +858,18 @@ than infer it, and so logs explain each decision. Required by §6's "explainable
 11. Analyzer with no `RoleDemand` for a role → not a contributor for that role (A4).
 12. **Derivation-chain self-consistency** (§5.3) — `ceil(D_sat[role]/PRC_com(SO))` recovers
     `N_com(SO)`; supply/`RC`/`SC` follow from `PRC_com` and `D_sat`. Asserted, not just logged.
-13. **Direction is score-independent** (§7) — with any scores, the scale up/down *direction* equals
-    the scoreless `max`/`min` decision. Plus: `score ≡ 1` reproduces today's behavior exactly.
+13. **Score / confidence aggregation** (§7):
+    - **Full agreement ⇒ exact max** — all contributors equal ⇒ `spread = 0` ⇒ `N_com = Nmax`.
+      Sat-only is the degenerate case and must be bit-identical to today.
+    - **Worked cases** — case 1 (3 vs 5, equal conf) ⇒ `≈ 3.59`; case 3 (0 vs 10, equal conf)
+      ⇒ `≈ 2.93`. Pinned as regression values so the formula cannot drift silently.
+    - **Confidence normalization** (A24) — `conf` sums to 1 over *contributors*; a non-contributing
+      analyzer absorbs no weight.
+    - **Asymmetry** — a low-confidence dissenter barely moves the result; a high-confidence one moves
+      it a lot. Both directions asserted.
+    - **Range clamp** (A25) — `N_com` never falls below the minimum contributor, and never below 0,
+      even when confidence is concentrated on a low estimate.
+    - **Raw-score conversion** — raw 3 vs raw 1 yields a 3:1 confidence ratio.
 14. Renamed composite → the quota guard still fires (A11). The guard-not-silently-disabled test.
 15. **End-to-end** `collectV2ModelRequest` → optimizer with nonzero demand, asserting replica
     counts. CT6's bug survived precisely because nothing exercised this path.
@@ -805,49 +927,59 @@ defer**. Nothing here is a request to re-litigate something already settled.
 
 ---
 
-### D1 — Score: what does the magnitude rule do? *(the only real design question)*
+### D1 — Score / confidence — **DECIDED [USER]**
 
-**Question.** Direction is settled: always the scoreless `max`/`min`, so scores can never flip
-up-vs-down **[USER]**. What decides *how far* to move?
+**Decision.** `Score` becomes a **confidence in [0,1]** (raw 3 = 3× as confident as raw 1), and:
+```
+N_com = Nmax − sqrt( Σ_i conf_i · (Nmax − N_i)² )
+```
+— max minus the confidence-weighted RMS distance from the max. Full detail and worked cases in §7.
 
-**Options.**
-| | Rule | Effect |
-|---|---|---|
-| a | Go to the scoreless extreme (today's `max`) | Never under-provisions; may waste. This is exactly today's behavior. |
-| b | Score-weighted interpolation between contributors, clamped to the direction | Scores temper the size of the move |
-| c | Inverse-variance weighting | Statistically principled, but only once analyzers share a demand unit — i.e. after the deferred normalization |
+**Why it answers the three cases:** exact max at full agreement (so sat-only is unchanged); discounts
+the max in proportion to spread *and* dissenters' confidence; never exceeds the max, so direction is
+preserved. Case 3 (0 vs 10) ⇒ `N_com ≈ 2.93`; case 1 (3 vs 5) ⇒ `≈ 3.59`.
 
-**What I'd do:** (a) now — it *is* today's behavior, since `score ≡ 1` — with the magnitude hook
-present and explicitly unused. Revisit when normalization lands and (c) becomes available.
-
-**Cost of deferring:** none. Every option collapses to the same result while `score ≡ 1`.
-
-**Sub-question, genuinely unresolved:** when two analyzers disagree wildly (your case 3: 0 vs 10),
-should we scale *at all*, or treat the disagreement itself as a low-confidence signal? Any
-combination rule produces a number; none of them makes that number trustworthy. I have no
-recommendation here — this needs your judgment.
+**Two open follow-ups, both mine, both small:**
+- **A25 — clamp to `[Nmin, Nmax]`.** With confidence concentrated on a low estimate the raw `spread`
+  can exceed `Nmax − Nmin` and push the result below every contributor's opinion (and, with enough
+  contributors, below zero). I propose clamping at `Nmin`. **Confirm or overrule.**
+- **A24 — normalize confidence across *contributors*, not all configured analyzers**, so a
+  non-contributing analyzer doesn't absorb weight and silently under-weight the rest. Also: the ratio
+  form makes `conf = 1` mean "sole contributor" — i.e. **relative** confidence. If "100% confident"
+  was meant as an **absolute** per-estimate confidence, that is a different signal that no analyzer
+  currently produces, and it changes the formula. **Which did you mean?**
 
 ---
 
-### D2 — Fallback marking: how fine-grained? *(you asked for this to be marked clearly)*
+### D2 — Fallbacks and the decision path — **DECIDED [USER]**, with one survey outstanding
 
-**Question.** When saturation is used as fallback (§5.1), what exactly do we record? **[USER]** "need
-to see if we mark the type of fallback clearly" — so *that* we mark it is settled; the granularity is
-not.
+**Decision.** Mirror the analyzers' existing decision-path field (`VariantCapacity.Reason`) on the
+composite, per SO — closer to option (b). Proposed values `C0-agree` / `C1-single` /
+`C2-sat-fallback` / `C3-default-prc` / `C4-no-signal` (§5.1.2); the mechanism is settled, the value
+set is my proposal.
 
-**Options.**
-| | Granularity |
-|---|---|
-| a | One boolean: `usedFallback` |
-| b | A typed reason: `no-eligible-analyzer` / `sat-only` / `sat-fallback-for-this-SO` / `no-signal-at-all` |
-| c | Per-SO/per-role marking, since a fallback may apply to one SO and not another |
+**Also settled:**
+- **No signal at all ⇒ do not autoscale.** The gate exists (`hasSaturationResult`,
+  `engine_v2.go:722`); §8's rename would silently disable it, so it is repaired to test "is there a
+  usable signal" rather than "is this saturation" (A11').
+- **Fallbacks must still yield a non-zero PRC** for an idle SO (partial scale-from-zero) and a
+  never-seen-before SO. Verified these already exist in saturation's ladder: own store record →
+  `P0-store`; else a compatible variant's `EffectiveCapacity` → also `P0-store`; else `no-data`
+  (`PRC = 0`). The composite **consumes** these, never reimplements them (A27), and must not discount
+  an estimated PRC relative to a measured one — that is what keeps a scale-from-zero moving.
+- **Over-estimation is acceptable** for a never-seen SO **[USER]**: "at worst we create a replica, then
+  learn the true values and take it back down." So no defensive clamping (A28) — a zero PRC would block
+  the scale-up that produces the measurement, while an over-estimate self-corrects next cycle.
 
-**What I'd do:** (b) at model level, plus (c) where a fallback is genuinely per-SO — because "sat
-covered SO1 but three analyzers agreed on SO2" is a materially different situation from "sat covered
-everything", and a single boolean cannot distinguish them.
+**Outstanding — your own flag: "need to check which" calculations break on a zero/absent signal.**
+This is a survey, not a judgment call: walk every `CompositeSignal` consumer (§2.1) and record, per
+field, what it does when that field is zero or missing. It also settles whether a `C3-default-prc`
+beyond saturation's ladder is needed for the `no-data` case.
 
-**Cost of deferring:** low, but it shapes the composite's struct, so it is cheaper to settle before
-implementing than after. My enumeration in (b) is a guess at what you'd find useful — correct it.
+**Question for you:** do that survey **now** (as part of finishing the spec), or as the first
+implementation task? It is bounded — nine known consumer sites — but it is real work and I would
+rather not silently expand the planning phase. My recommendation: **now**, since its result could
+change the design of the no-signal path rather than just its implementation.
 
 ---
 
@@ -1039,3 +1171,37 @@ and intent, never as authority — and two of their claims have already proved n
     (D1 Score magnitude, D2 fallback marking granularity, D3 query-API migration scope), each with
     question / options / my recommendation / cost of deferring, plus a flat list of twelve
     confirmations to veto rather than choose.
+- **v6** (2026-09-08, D1 and D2 decided by the user):
+  - **§7 — Score becomes a confidence in `[0,1]`, and the aggregation rule is settled [USER].**
+    `conf_i = score_i / Σ conf`, so raw 3 is 3× as confident as raw 1; then
+    `N_com = Nmax − sqrt( Σ_i conf_i · (Nmax − N_i)² )` — max minus the confidence-weighted RMS
+    distance from the max. Properties recorded because they are the point: exact max at full agreement
+    (so sat-only stays identical), a discount that grows with both spread and the dissenters'
+    confidence, and `N_com <= Nmax` always so direction is preserved. Worked cases pinned as regression
+    values: case 1 (3 vs 5) ⇒ `≈ 3.59`; case 3 (0 vs 10) ⇒ `≈ 2.93`. Replaces v5's "direction only,
+    magnitude hook unused".
+  - **§5.1.2 — the composite gets a decision-path field [USER]**, mirroring the analyzers' existing
+    `VariantCapacity.Reason` (verified: saturation uses `P0-store`/`P1-obs`/`P2-hist`/`P3-k2`/`P4-k1`,
+    throughput `T1-ols`/`T2-*`), at the same per-SO granularity. Proposed values `C0-agree`/`C1-single`/
+    `C2-sat-fallback`/`C3-default-prc`/`C4-no-signal`.
+  - **§5.1.3 — no signal at all ⇒ do not autoscale [USER]**, via the gate that already exists
+    (`hasSaturationResult`, `engine_v2.go:722`). Since §8's rename would silently disable it, it is
+    repaired to test "is there a usable signal" rather than "is this saturation" (A11'), reading the
+    recorded `C4-no-signal`.
+  - **§5.1.4 — fallbacks that must still produce a non-zero PRC [USER].** Verified saturation's ladder
+    already covers both cases the user named: an **idle SO** (partial scale-from-zero) falls to its own
+    store record (`P0-store`), and a **never-seen-before SO** borrows a compatible variant's
+    `EffectiveCapacity` (also `P0-store`); only after both does it emit `no-data` with `PRC = 0`. The
+    composite **consumes** these and must not discount an estimated PRC relative to a measured one
+    (A27). **Over-estimation is explicitly acceptable** for a new SO **[USER]** — "at worst we create a
+    replica, then learn the true values and take it back down" — so no defensive clamping (A28): a zero
+    PRC would block the very scale-up that produces the measurement.
+  - Test plan gains the confidence-formula cases (13, with pinned worked values) and the
+    scale-from-zero fallback cases (8a–8d).
+  - **Open, both small and both mine:** A25's clamp of `N_com` to `[Nmin, Nmax]` (the raw formula can
+    leave the range when confidence concentrates on a low estimate), and whether "100% confident" meant
+    **relative** confidence (the ratio form, `conf = 1` ⇔ sole contributor) or an **absolute**
+    per-estimate confidence, which no analyzer currently produces and which would change the formula.
+  - **Outstanding survey, flagged by the user's own "need to check which":** what breaks on a
+    zero/absent signal, across all nine `CompositeSignal` consumer sites. Recommended to run it now,
+    since its outcome could change the no-signal design rather than just its implementation.
