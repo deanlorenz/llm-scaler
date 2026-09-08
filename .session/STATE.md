@@ -77,7 +77,8 @@
 - [x] User review #1 → **v1's core conversion rejected**; spec rewritten as v2
 - [x] User review #2 → six factual corrections, all re-verified against upstream source; **v3**
 - [x] User review #3 → five real errors (see below); **v4**
-- [ ] **User review #4 of `.session/spec.md` v4; decide the 12 open items in §10**
+- [x] User review #4 → three of my own misreadings corrected (no design change); **v5**
+- [ ] **User review #5 of `.session/spec.md` v5; decide D1–D3 in §10**
 - [ ] Implement (post-approval): `Agg_N` + derivation chain in/beside
       `internal/engines/aggregation/`, query API, composite naming + quota-guard repair,
       observability audit, 30-case test plan
@@ -92,12 +93,18 @@ coverage are the same quantity (`cov = 1/N`) — v3 computed both and called it 
 through three drafts; (4) there is no single-model request-shape assumption — safety is structural;
 (5) aggregator names encoded the operation (`max…`) instead of the quantity (`Agg_N`).
 
-**Next step / resume point:** get spec §10's 12 open items decided. Three now need a real decision
-rather than a confirmation: **#1** `Score`/confidence magnitude rule (direction is settled as
-scoreless; `score ≡ 1` today so nothing is blocked), **#2** fallback-kind enumeration (A19 — the
-user asked for fallbacks to be clearly marked; my enumeration is a guess), **#3** query-API
-migration scope (§5.5/A20 — the item most able to balloon). Do not start implementation before
-approval.
+**Next step / resume point:** get spec §10's **D1–D3** decided (the 12 confirmations need only a
+veto). **D1** `Score` magnitude rule — direction is settled as scoreless; `score ≡ 1` today so
+nothing is blocked; recommend today's behavior with the hook unused. Its sub-question (what a wild
+disagreement *means* — scale anyway, or flag low confidence?) genuinely needs the user's judgment and
+has no recommendation from me. **D2** fallback-marking granularity — that we mark it is settled; my
+four-way enumeration is a guess. **D3** query-API migration scope — recommend migrating the known
+duplicators (`roleDemandGPUs`, `cost_aware_optimizer.go:304`, `greedy_score_optimizer.go:117,156`),
+since helpers-only would add a definition rather than remove duplication. Do not start implementation
+before approval.
+
+**Standing instruction from review #4:** **[USER]** "Always ask me if not sure." Do not infer intent
+from examples or fill gaps with invented premises — ask.
 
 ### Status
 
@@ -109,8 +116,9 @@ approval.
 - Session is **pinned** into this worktree via `EnterWorktree` — cross-worktree reads must use
   `cat <full-path>` or `git show <branch>:<path>`; `git -C` and `cd` elsewhere are blocked.
 - Mission definition: **done** — see Orientation. Normalization deferred; sat units for now.
-- Spec: **DRAFT v4**, `.session/spec.md` (871 lines). **Awaiting user review #4** — the only
-  thing blocking implementation. 12 open items in §10, three needing a real decision.
+- Spec: **DRAFT v5**, `.session/spec.md` (1041 lines). **Awaiting user review #5** — the only
+  thing blocking implementation. §10 now separates **3 real decisions** (D1 Score magnitude,
+  D2 fallback-marking granularity, D3 query-API migration scope) from **12 confirmations** to veto.
 - **Design core (settled by the user, not mine to revisit):**
   - **PRC is per SO** (implies model, variant, role). **Demand is per (model, role)** — three
     values (`both`, `prefill`, `decode`) that do **not** depend on which SOs exist. SOs are added
@@ -139,12 +147,17 @@ approval.
     same round. Safety is *structural*: PRC aggregates per SO, demand per model, so nothing crosses
     a model boundary. Shape matters across models in the *optimizer*, and in the analyzer's own PRC
     estimation — both outside this mission.
-  - **`Score`: direction is always the scoreless `max`/`min`**; only magnitude may be
-    score-influenced. Weighted mean is rejected (mean(0,10)=5=current ⇒ disagreement yields "do
-    nothing"). `score ≡ 1` today, so direction-only is exactly current behavior.
-  - **A consistent query API** is part of the deliverable: coverage, missing coverage/capacity,
-    replicas-or-GPUs-to-close-the-gap, as explicit helpers over an *explicit* allocation state
-    (today's mutable `Remaining`/`RoleSpare` mean the signal can't answer the same question twice).
+  - **`Score` vs `priority` are different axes:** `Score` weights different **analyzers'** opinions
+    about one model (this mission); **priority** weights different **models'** demand (fair-share /
+    `fairShareValue`). `fairShareValue` using Score is a bug in a known direction, not an ambiguity.
+    Direction is always the **scoreless** `max`/`min`; only magnitude may be score-influenced.
+    Weighted mean is rejected. `score ≡ 1` today, so direction-only is exactly current behavior.
+  - **A consistent query API** is part of the deliverable — coverage, missing coverage/capacity,
+    replicas-or-GPUs-to-close-the-gap — so **each concept has one definition** shared by every
+    optimization step, instead of each function inventing its own. Note: the mutation of
+    `Remaining`/`Spare`/`RoleSpare` during allocation is **intentional tracking**, which is why the
+    optimizer gets a deep copy — it is *not* a defect to design around. Answers are expected to
+    change as allocation progresses; only the *meaning* of each question must be fixed.
   - **Full observability** reusing the *same* log/metric functions as any analyzer result.
 - **Implementation seam:** `internal/engines/aggregation/` already exists — pure helpers named for
   what they aggregate (`SumTotalDemand`, `DemandByRole`, `AggregateByRole`, `IsDisaggregated`, …),

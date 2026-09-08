@@ -691,3 +691,76 @@ rather than just confirmation (#1 Score, #2 fallback typing, #3 query-API migrat
 Two commands were blocked by the worktree-isolation guard for being "too complex to verify" —
 a heredoc-plus-`sed`-plus-`cp` chain. Split into plain single-purpose commands. Same class as the
 earlier unquoted-variable block: in a pinned session, keep each Bash call simple and literal.
+
+## Spec v5 — user review #4: three of my errors, no design changes (2026-09-08)
+
+Unlike reviews #2/#3 (which corrected the design), every correction here was to something **I** got
+wrong about the existing code or about what the user said.
+
+### Error 1 — I called an intentional mechanism a defect (§5.5)
+**[USER]:** "It is not a side effect. It is tracking the allocation **by design**. That is why the
+optimizer gets a deep copy. 'Consistently' referred to different optimization steps and calls — spare
+should mean spare, coverage should mean coverage. We should not have every optimization function
+invent its own."
+
+v4 saw `applyAllocation`/`applyDeallocationForRole` decrementing `Remaining`/`Spare`/`RoleSpare` and
+concluded the signal "cannot answer the same question twice" — framing it as an accidental flaw and
+proposing to thread state through to avoid it. Wrong twice over:
+- The mutation **is** the design: the optimizer gets a **deep copy** so it can track allocation
+  progress in place without touching the analyzer's result. The deep copy is the enabling mechanism.
+  (Same discipline as A15's requirement that the composite deep-copy — I had cited that one correctly
+  while missing that it explains this one.)
+- An answer *should* change as allocation progresses. That is what tracking means. I mistook the
+  correct behavior for the bug.
+
+What "consistently" actually requires is **semantic**: one definition per concept, shared across every
+optimization step and call. The real violation is **duplication** — `roleDemandGPUs`
+(`rescale.go:585`), `cost_aware_optimizer.go:304`, `greedy_score_optimizer.go:117,156` each
+re-deriving "what closing the gap means". A20 → A20'.
+
+**Consequence: D3's recommendation reversed** from (a) "helpers only, don't touch existing callers"
+to (b) "helpers **plus** migrate the known duplicators". Under the correct goal, (a) is
+self-defeating — it *adds* a definition alongside the existing ones, making duplication worse. My
+earlier (a) recommendation only made sense under the wrong premise.
+
+### Error 2 — leaning on a deferred branch (§2.6, §6, §8)
+**[USER]:** "We are not on top of normalization. That branch is deferred for now."
+
+v4 had drifted into treating `single-analyzer-normalize` as a plan of record: "adopt that constant",
+"adopt that log pattern". Rewritten so §2.6 is **hazard-awareness only** — each item restated as a bug
+to avoid, independently checkable on this base (the deep-copy aliasing follows from the struct
+definition alone: three reference-typed fields). §8's naming is now decided on its own merits, with
+the branch as mere corroboration. No decision depends on it.
+
+Worth noting the pattern: the user told me in review #2 not to trust prior analysis, and I complied
+for the parent mission's docs — then imported a *different* branch's decisions the same way one review
+later.
+
+### Error 3 — invented a premise, and conflated two axes (§7)
+**[USER]:** "`cur` means current replica count. I did not intend to say that this is the desired
+result. **Always ask me if not sure.**"
+
+v4 read case 3's `cur = 5` as an implied answer ("weighted mean gives 5, which equals current, so
+weighted mean is absurd") and built the argument against weighted mean on it. The user's actual point
+was simply that weighted mean doesn't seem right; `cur` was context. I manufactured the reasoning and
+presented it as theirs. Removed, with the correction recorded in the spec so the argument isn't
+resurrected.
+
+**[USER]** also separated two axes I had blurred:
+- **Priority** weights different **models'** demand → `fairShareValue` / fair-share.
+- **Score** weights different **analyzers'** opinions about one model → the composite (this mission).
+
+So `Score`'s *meaning* is settled; only the combination rule is open. And the `fairShareValue`
+priority/Score conflation is a **bug in a known direction**, not evidence that Score is ambiguous —
+v4 cited it as the latter, which inflated the apparent uncertainty in §7.
+
+### §10 rewritten
+**[USER]:** "Decision items — not clear at all what you want." Correct — it was a mix of genuine
+questions and decisions I'd already made but phrased as questions, so the user couldn't tell which
+needed input. Now: **three real decisions** (D1 Score magnitude, D2 fallback-marking granularity,
+D3 query-API migration scope), each with question / options / my recommendation / cost of deferring;
+plus **twelve confirmations** presented as a veto list, not a quiz.
+
+### Net
+Spec v5: 1041 lines. No design changes — only my misunderstandings corrected, and the decision list
+made answerable.

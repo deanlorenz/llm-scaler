@@ -1,6 +1,6 @@
-# composite-analyzer — mission spec (draft v4)
+# composite-analyzer — mission spec (draft v5)
 
-**Status:** DRAFT v4 — revised after user review #3; awaiting review #4 (2026-09-08).
+**Status:** DRAFT v5 — revised after user review #4; awaiting review #5 (2026-09-08).
 **Mission:** composite aggregation calculation. Spinoff of `single-analyzer`.
 **Branch/worktree:** `composite-analyzer` @ base `upstream/main` `4db060e2`.
 **Role:** mission owner.
@@ -29,7 +29,8 @@ mission, with three deliberate departures from CT7's recorded design (§3).
 - **Demand is unchanged:** `D_com[role] == D_sat[role]`, with `D_sat` *defined* as 100% coverage;
   `PRC_com(SO) = D_sat[role(SO)] / N_com(SO)` **[USER]** (§4.4).
 - **A consistent query API** over the composite — coverage, missing coverage/capacity, replicas or
-  GPUs to close a gap — answered by explicit helpers against an allocation state **[USER]** (§5.5).
+  GPUs to close a gap — so each concept has **one definition** shared by every optimization step,
+  instead of each function inventing its own **[USER]** (§5.5).
 - **Zero-guards throughout** — coverage/`N` is meaningless when PRC or demand is zero **[USER]**
   (§2.5).
 - **Full observability**, reusing the *same* log and metric functions as any analyzer result
@@ -40,9 +41,10 @@ mission, with three deliberate departures from CT7's recorded design (§3).
 
 ### Out of scope (this mission)
 - **Normalization** — a shared cross-analyzer demand unit, ideally "per X requests in queue"
-  **[USER]**. Deferred: *"Do composition first."* A previous attempt exists on
-  `single-analyzer-normalize` and is worth learning from but not building on (§2.6). Until a
-  shared unit exists, analyzers meet only in unit-free coverage/replica space (§4.2).
+  **[USER]**. Deferred: *"Do composition first."* **[USER, review #4]** "We are not on top of
+  normalization. That branch is deferred for now." So `single-analyzer-normalize` is **not** a
+  dependency or a plan of record; §2.6 treats it as hazard-awareness only. Until a shared unit
+  exists, analyzers meet only in unit-free `N`/coverage space (§4.2).
 - **Reorganizing `NamedAnalyzerResult`** — legacy, kept as-is; a different mission **[USER]**.
 - **`Score` weighting** — needs revisiting **[USER]** (§7). Direction is always the scoreless
   `max`/`min`; only the magnitude may be score-influenced, and the magnitude rule is unsettled.
@@ -196,23 +198,30 @@ phantom `1.0` is not.
 some things but hit some bumps, so I decided to defer it for now. Do composition first. But you
 may be able to learn from it."
 
-Read from branch `single-analyzer-normalize` (**not** inherited — that work is deferred and this
-mission does not build on it). Three transferable lessons:
+**[USER, review #4]:** "We are not on top of normalization. That branch is deferred for now."
 
-1. **Deep-copy is mandatory** (`da0e1ee8`). A plain value copy of a `NamedAnalyzerResult` aliases
-   `Result`, `RoleCapacities` and `RoleSpare`, so building the composite from saturation's entry
-   **silently mutated saturation's own result**. The composite must deep-copy every reference-typed
-   field it inherits. **[ASSUMPTION] A15** — with a test asserting the source entry is byte-identical
-   after composition.
-2. **Zero-demand must flow through** (`77f21355`) — see §2.5.
-3. **Naming precedent** (`da0e1ee8`): that branch introduced `allocation.CompositeSignalName` and
-   emitted one extra `analyzer-result` log line for `"CompositeSignal"`, documenting its unit as
-   `%` (coverage) alongside `saturation`=tokens and `throughput`=tokens/sec. Our composite is in
-   **sat units, not `%`**, so the log's unit column differs — but the *pattern* (composite gets its
-   own name and its own log line) is settled and reusable (§8).
+So this section is **hazard-awareness only**. Nothing here is a plan of record, an adopted decision,
+or a dependency. Each item below is a bug that branch *hit*, restated as something our code must
+avoid — every one independently checkable against our own base:
+
+1. **Deep-copy is mandatory.** A plain value copy of a `NamedAnalyzerResult` aliases `Result`,
+   `RoleCapacities` and `RoleSpare` — verifiable from the struct definition alone (three
+   reference-typed fields). Building the composite from saturation's entry by value would therefore
+   **mutate saturation's own result**. That branch hit exactly this (`da0e1ee8`).
+   **[ASSUMPTION] A15** — deep-copy every reference-typed field, with a test asserting the source
+   entry is unchanged after composition.
+2. **Zero-demand must flow through as zero** — never rewritten to a placeholder. That branch had
+   three sites forcing a demand field to `1.0` even at zero demand (`77f21355`), producing phantom
+   demand and an idle-model `Utilization` miscompute. Our §2.5/§4.4 zero rules cover this
+   independently; the branch is corroboration, not the source.
+3. **A composite needs its own identity and its own log line** — see §8 and §6. That branch reached
+   the same conclusion, which is mild corroboration only; its `%` unit does not apply to us (§4.4).
 
 Also noted from that branch's ledger: a `fairShareValue` **priority/Score conflation** finding.
-Relevant to §7 — flagged, not resolved here.
+Per **[USER]** this is a **bug in a known direction**, not an open question (§7.0): FSV should weight
+different *models'* demand by **priority**; `Score` weights different *analyzers'* opinions. Out of
+scope here (it is CT4-adjacent), but recorded so it is not mistaken for evidence that `Score`'s
+meaning is unsettled — it is not.
 
 ---
 
@@ -504,15 +513,41 @@ partial) so the same function serves every phase:
 | GPUs of one accelerator type to close the gap | `GPUsToCloseGap(state, accType, role) (int, ok)` |
 | Is scale-up needed / scale-down allowed | `NeedsScaleUp(state, role) bool` / `MayScaleDown(state, role) bool` |
 
-**[ASSUMPTION] A20 — allocation state is an explicit parameter, not mutable fields on the
-composite.** Today `Remaining`, `Spare` and `RoleSpare` are *mutable* fields the optimizer
-decrements during allocation (`applyAllocation`, `applyDeallocationForRole`), which is why the
-signal cannot answer the same question twice. A pure query API over an explicit state is what makes
-answers *consistent*, as requested. But `NamedAnalyzerResult` is **legacy [USER]** and its
-reorganization is another mission, so those fields stay; the query API is added **alongside**, and
-migrating callers off the mutable fields is scoped explicitly. **Open item — this could balloon;
-recommend the API is defined and used by the composite path, with existing callers migrated only as
-far as needed.**
+#### What "consistently" means here — one definition per concept **[USER, review #4]**
+
+**[USER] correction:** "It is not a side effect. It is **tracking the allocation by design**. That
+is why the optimizer gets a deep copy. 'Consistently' referred to **different optimization steps and
+calls** — spare should mean spare, coverage should mean coverage. **We should not have every
+optimization function invent its own.**"
+
+An earlier draft mistook the mutation of `Remaining` / `Spare` / `RoleSpare` for an accidental defect
+that made the signal "unable to answer the same question twice", and proposed threading state through
+to avoid it. That was wrong on both counts:
+
+- The mutation is **intentional allocation tracking**. The optimizer receives a **deep copy** exactly
+  so it can decrement these as it commits replicas, without touching the analyzer's result. The
+  deep copy is what makes in-place tracking correct — it is the mechanism, not a leak. (Note this is
+  the *same* reason A15 requires the composite to deep-copy: same discipline, two places.)
+- So there is **nothing to fix** about the mutable-field pattern, and no state-threading to invent.
+
+The real requirement is **semantic consistency**: each concept has **exactly one definition**, shared
+by every optimization step and call.
+
+> `spare` means spare. `coverage` means coverage. No optimization function re-derives them.
+
+Today that is violated by duplication, not by mutation. `roleDemandGPUs` (`rescale.go:585`)
+computes `ceil(demand / best_PRC) × gpusPerReplica`, choosing the role's most cost-efficient variant
+itself; `cost_aware_optimizer.go:304` reads RC/SC per role and applies its own arithmetic. Each is
+locally reasonable; together they are several private definitions of "what closing the gap means",
+free to drift.
+
+**[ASSUMPTION] A20' — the query API is the single definition of each concept**, callable at any point
+in the allocation (before, mid-loop, after), reading whatever the current tracked state says. It does
+**not** try to make answers time-invariant — an answer *should* change as allocation progresses, since
+that is what tracking means. What must not change is the *meaning* of the question.
+
+So the helpers read the same fields the optimizer already tracks; the value they add is that
+`MissingCapacityForRole` is computed in one place rather than five (A21).
 
 **[ASSUMPTION] A21 — one shared gap definition.** Every "close the gap" helper derives from the
 same `MissingCapacityForRole`, so replicas-to-close and GPUs-to-close cannot disagree — the
@@ -542,12 +577,16 @@ Two requirements:
    the full `namedResults` slice. **[ASSUMPTION] A22** — audit that every field a reader needs is
    actually emitted, and that no analyzer is silently omitted (e.g. a non-live or uninformative
    one). This is a verification task with a possible gap-fix, not an assumption to hand-wave.
-2. **The composite reuses the same functions** — not parallel ones. This is exactly what the
-   normalization branch did (§2.6, `da0e1ee8`): it *merged* a separate `logCompositeSignal` back
-   into `logAnalyzerResult` ("one function, one log key, union of fields") and added one extra
-   `analyzer-result` line for `"CompositeSignal"`, with `docs/reference/cycle-log.md` gaining a
-   per-analyzer unit column. **Adopt that.** One difference: that branch's composite unit was `%`
-   (it normalized to coverage); ours is **`D_sat` units** (§4.4), so the doc's unit column differs.
+2. **The composite reuses the same functions** — not parallel ones **[USER]**. It is logged by
+   `logAnalyzerResult` and its metrics emitted by `recordAnalyzerMetrics`, exactly as any analyzer
+   result is. `docs/reference/cycle-log.md` gains the composite's row, in **`D_sat` units** (§4.4).
+
+   **[USER, review #4]** "We are not on top of normalization. That branch is deferred for now." So
+   the deferred `single-analyzer-normalize` branch is **not** a plan of record here. It happens to
+   have done something similar (merging a separate `logCompositeSignal` into `logAnalyzerResult`),
+   which is mild corroboration that one shared function is the right shape — but the requirement
+   above stands on the user's instruction and on what exists on **this** base, not on that branch.
+   Nothing is inherited from it.
 
 **[ASSUMPTION] A23** — the composite is emitted as an additional series/line, never replacing any
 analyzer's own. Per-analyzer observability stays in each analyzer's own units; the composite is one
@@ -576,52 +615,71 @@ more row.
 
 ---
 
-## 7. Score — needs revisiting **[USER]**
+## 7. Score — the weight on each analyzer's opinion **[USER]**
 
-**[USER]** "Need to revisit this. The weight should mean **confidence**, but we should understand
-what will be done." The three cases given, with `cur` = current replicas:
+### 7.0 Score vs. priority — two different axes **[USER, settled]**
 
-| Case | TA says | sat says | current | Question |
-|---|---|---|---|---|
-| 1 | 3 | 5 | 4 | Scale down to 3, up to 5, or stay? |
-| 2 | 5 | 10 | 2 | Scale up — but to 5 or 10? |
-| 3 | 0 | 10 | 5 | One says drain entirely, one says double |
+**[USER]:** "FSV should use the **priority** to give weight to different model demand, not scores.
+**Scores** apply to giving weights to **analyzer opinions**."
 
-**[USER] conclusions, which are now constraints, not options:**
-- **Weighted mean does not seem right in any of these.** (Case 3 makes it vivid: mean of 0 and 10
-  is 5 — exactly `cur` — so a violent disagreement produces "do nothing", the one answer neither
-  analyzer supports.)
-- **`max` is safe but possibly overly conservative.** (Case 3 → 10: never under-provisions, may
-  waste. Case 1 → 5: scales up while an analyzer says scale down.)
+| | Weights | Used by |
+|---|---|---|
+| **Priority** | different **models'** demand against each other | `fairShareValue` / fair-share |
+| **Score** | different **analyzers'** opinions about **one** model | the composite aggregation (this mission) |
+
+So `Score`'s *meaning* is **not** in question. `fairShareValue` using `Score` where it should use
+priority is a **bug in a known direction** (CT4-adjacent, out of scope here), not evidence of
+ambiguity. Only the **combination rule** is open (§7.2).
+
+### 7.1 The user's three cases
+
+**[USER]** "The weight should mean **confidence**, but we should understand what will be done."
+`cur` = **current replica count** — context, **not** an implied answer:
+
+| Case | TA says | sat says | `cur` |
+|---|---|---|---|
+| 1 | 3 | 5 | 4 |
+| 2 | 5 | 10 | 2 |
+| 3 | 0 | 10 | 5 |
+
+**Correction, recorded deliberately:** an earlier draft read case 3's `cur = 5` as "so 5 is the
+answer weighted mean would wrongly give", and built an argument on it. That was an invented
+premise — `cur` is just the current state. **[USER]** "Always ask me if not sure." The cases are
+open questions about what *should* happen, not worked examples with known answers.
+
+**[USER] conclusions — constraints, not options:**
+- **Weighted mean does not seem right in any of these.**
+- **`max` is safe but possibly overly conservative.**
 - **Regardless of score, scale in the direction the scoreless `max`/`min` indicates.** Direction is
-  score-independent; **the amount** may be score-influenced.
+  score-independent; the **amount** may be score-influenced.
 
-**[ASSUMPTION] A9'' — split direction from magnitude.** The only structure consistent with all of
-the above:
+### 7.2 Direction vs. magnitude
+
+**[ASSUMPTION] A9'' — separate them.** The structure the constraints imply:
 ```
-direction = sign implied by scoreless Agg_N (max for up, min-with-all-agree for down)
-magnitude = a score-influenced value, clamped to the direction's interval
+direction = from scoreless Agg_N   (max for up; min-with-all-agree for down)
+magnitude = score-influenced, but never crossing the direction boundary
 ```
-So scores never flip a decision, only temper its size. Case 1 → direction up (scoreless max = 5),
-magnitude within `[cur, 5] = [4, 5]`. Case 3 → direction up, magnitude within `[5, 10]`, with
-`score(TA)=0`'s "drain" unable to invert it.
+Scores can temper how far we move; they can never flip whether we move up or down.
 
-**Still genuinely open**, and **[USER]** says revisit — I am not deciding it:
-- Which magnitude rule inside the interval (score-weighted interpolation toward the max? confidence
-  as inverse-variance once a shared unit exists?).
-- Whether **case 3's disagreement** should scale at all, or refuse and signal low confidence — a
-  0-vs-10 split arguably means *neither* estimate is trustworthy, which no combination rule can fix.
-- Whether `Score` is really *confidence* (per-estimate, could vary per round and per SO) or
-  *trust/priority* (per-analyzer, static config). The `fairShareValue` **priority/Score conflation**
-  finding on the normalization branch (§2.6) suggests this is already muddled in the codebase.
+**Open — the magnitude rule.** Candidates, none endorsed:
+- Move fully to the scoreless extreme (today's `max`) — safe, possibly wasteful.
+- Score-weighted interpolation between the contributors' values, clamped to the direction.
+- Inverse-variance weighting — only meaningful once analyzers share a demand unit (deferred
+  normalization), since weighting incommensurable estimates is not statistically grounded.
 
-`score ≡ 1` today, so **nothing is blocked** — direction-only (scoreless `max`/`min`) is the correct
-behavior *now* and matches today's semantics exactly. Recommend implementing direction-only, with
-the magnitude hook left explicit and unused.
+**Open — what a wide disagreement means.** Case 3 (0 vs 10) is a factor-of-infinity split. A
+combination rule of any kind produces *some* number, but the disagreement itself may be the
+signal — i.e. it may warrant flagging low confidence rather than picking a point. **I am not
+deciding this; it needs your call** (open item #1).
 
-### 7.1 Composite `Score`
-**[ASSUMPTION] A9 — `max` over contributors' Scores.** Reduces to sat's on the sat-only path.
-Secondary to the above, and to be revisited with it.
+`score ≡ 1` for every analyzer today, so **every candidate collapses to the scoreless result** and
+nothing is blocked. **Recommendation:** implement direction-only (scoreless `max`/`min`) — exactly
+today's behavior — with the magnitude hook present, explicit, and unused until decided.
+
+### 7.3 Composite `Score`
+**[ASSUMPTION] A9 — `max` over contributors' Scores.** Reduces to saturation's on the sat-only
+path. Secondary to §7.2 and to be revisited with it.
 
 ---
 
@@ -630,13 +688,13 @@ Secondary to the above, and to be revisited with it.
 **[USER]** The optimizer's input is the new `CompositeSignal` — **not** saturation. So the
 composite carries its own name, and every consumer that assumes otherwise is a defect.
 
-**[ASSUMPTION] A10 — reuse the existing naming precedent.** The deferred normalization branch
-(§2.6, `da0e1ee8`) already introduced **`allocation.CompositeSignalName`** and emitted one extra
-`analyzer-result` log line for `"CompositeSignal"` — documented in `docs/reference/cycle-log.md`
-with a per-analyzer unit column. Adopt that constant and that log pattern rather than inventing
-`domain.CompositeAnalyzerName`. **One difference:** that branch documented the composite's unit as
-`%` (coverage), because it normalized to coverage fractions. Ours is in **saturation's units**, so
-the unit column must say so — the doc is not copyable verbatim.
+**[ASSUMPTION] A10 — a new exported constant for the composite's name.** The name itself
+(`"CompositeSignal"` vs `"composite"`) and where the constant lives (`allocation` beside
+`NamedAnalyzerResult`, or `domain` beside `SaturationAnalyzerName`) are both minor; recommend
+`allocation.CompositeSignalName` since the composite is an `allocation` concept and
+`ModelScalingRequest.CompositeSignal` already uses that word. The deferred normalization branch
+happened to pick the same thing (§2.6) — corroboration, not a dependency. Its `%` unit does not
+apply: ours is in `D_sat` units (§4.4).
 
 **[USER] `NamedAnalyzerResult` is legacy.** We keep it for now; a *different* mission reorganizes
 it. So this mission adds no new structure to it beyond what the composite needs, and does not
@@ -737,33 +795,112 @@ than infer it, and so logs explain each decision. Required by §6's "explainable
 
 ---
 
-## 10. Open items for the user
+## 10. Decisions needed
 
-**Resolved by user direction across v2–v4** — recorded so they are not reopened:
-v1's sat-unit conversion (rejected, §4.1); v3's ratio-scaled demand (rejected — `D_com == D_sat`,
-§4.4); **`N(SO)` is the single aggregated quantity** and coverage is just `1/N`, not a second signal
-(§5.2); everything derives from `N` (§5.3); **saturation is a fallback, not a floor** (§5.1 — the
-"floor invariant" is retired); aggregators named for the quantity, not the operation (§4.5);
-**no single-model shape assumption** — safety is structural, PRC per SO and demand per model (§4.3);
-model-vs-role reconciliation dissolved (§5.4); the optimizer's input contract (§6.1); demand's
-storage layout (§2.3); demand/PRC independence (§2.4); zero-guards (§2.5);
-`NamedAnalyzerResult` is legacy and not reorganized here (§8); the shared demand unit is a request
-count, ideally "per X requests in queue" (§4.2).
+**[USER, review #4]:** "Decision items — not clear at all what you want." Rewritten. Previously
+these were a mix of real questions and things I had already decided but phrased as questions.
 
-| # | Item | Status |
+Each item below states: **the question**, **the options**, **what I'd do**, and **what it costs to
+defer**. Nothing here is a request to re-litigate something already settled.
+
+---
+
+### D1 — Score: what does the magnitude rule do? *(the only real design question)*
+
+**Question.** Direction is settled: always the scoreless `max`/`min`, so scores can never flip
+up-vs-down **[USER]**. What decides *how far* to move?
+
+**Options.**
+| | Rule | Effect |
 |---|---|---|
-| 1 | **§7 — Score / confidence.** User: "need to revisit". Settled: direction is always the scoreless `max`/`min`; only magnitude may be score-influenced; weighted mean is wrong (case 3: mean(0,10)=5=`cur` ⇒ violent disagreement yields "do nothing"). Unsettled: the magnitude rule; whether case-3 disagreement should scale *at all* or signal low confidence; whether `Score` is per-round *confidence* or static *trust* (the `fairShareValue` conflation finding, §2.6, suggests the codebase already muddles this). `score ≡ 1` today ⇒ direction-only is exactly today's behavior. **Recommend: implement direction-only, leave the magnitude hook explicit and unused.** | **Open — revisit** |
-| 2 | **§5.1/A19 — fallback typing.** User: "need to see if we mark the type of fallback clearly." My enumeration (`no-eligible-analyzer`, `sat-only`, `sat-fallback-for-this-SO`, `no-signal-at-all`) is a guess at the right granularity. | **Needs your call** |
-| 3 | **§5.5/A20 — query-API scope.** Adding a pure query API alongside the *mutable* `Remaining`/`Spare`/`RoleSpare` fields (which the optimizer decrements during allocation, so the signal can't answer the same question twice). `NamedAnalyzerResult` is legacy, so those fields stay. **How far to migrate existing callers?** This is the item most able to balloon. Recommend: define the API, use it on the composite path, migrate callers only as far as needed. | **Needs your call** |
-| 4 | §5.4 — model-level coverage: nothing in today's optimizer reads a single model-level coverage number. Recommend exposing it via the query API rather than computing it eagerly as a field. | Confirm |
-| 5 | §2.5/A14 — undefined `N`/coverage as `(value, ok)`, never a sentinel: a spurious `0` in a `min` wrongly vetoes scale-down, a spurious `+Inf` in a `max` wrongly demands infinite replicas. | Confirm |
-| 6 | §2.3/A13 — one `demandForRole(result, role) (value, present)` accessor encapsulating the nil-`RoleDemand`/`TotalDemand` split. | Confirm |
-| 7 | §5.2/A2 — `N` stays continuous through aggregation; `ceil` only where a replica count is finally needed. | Confirm |
-| 8 | §6.2/A7 — compose at `collectV2ModelRequest:797`, keeping the slice return (avoids the return-type churn that broke the parent branch's build). | Confirm |
-| 9 | §4.5/A18 — one aggregator per quantity (`Agg_N`, `Agg_Spare`), named for the quantity, with the combination rule in one swappable place; landing in/beside `internal/engines/aggregation/`. | Confirm |
-| 10 | §8/A10 — adopt `allocation.CompositeSignalName` and the extra `analyzer-result` log line from the normalization branch, with the unit column saying **`D_sat` units**, not `%`. | Confirm |
-| 11 | §6/A22 — the observability audit is a *verification task with a possible gap-fix*, not just reuse. Confirm that scope is wanted here rather than split out. | Confirm |
-| 12 | Does this mission also restore multi-analyzer operation in the **optimizer** (`cost_aware_optimizer_multi.go`)? My read of §6.1: no — the optimizer stays single-entry; all aggregation is engine-side. | Confirm |
+| a | Go to the scoreless extreme (today's `max`) | Never under-provisions; may waste. This is exactly today's behavior. |
+| b | Score-weighted interpolation between contributors, clamped to the direction | Scores temper the size of the move |
+| c | Inverse-variance weighting | Statistically principled, but only once analyzers share a demand unit — i.e. after the deferred normalization |
+
+**What I'd do:** (a) now — it *is* today's behavior, since `score ≡ 1` — with the magnitude hook
+present and explicitly unused. Revisit when normalization lands and (c) becomes available.
+
+**Cost of deferring:** none. Every option collapses to the same result while `score ≡ 1`.
+
+**Sub-question, genuinely unresolved:** when two analyzers disagree wildly (your case 3: 0 vs 10),
+should we scale *at all*, or treat the disagreement itself as a low-confidence signal? Any
+combination rule produces a number; none of them makes that number trustworthy. I have no
+recommendation here — this needs your judgment.
+
+---
+
+### D2 — Fallback marking: how fine-grained? *(you asked for this to be marked clearly)*
+
+**Question.** When saturation is used as fallback (§5.1), what exactly do we record? **[USER]** "need
+to see if we mark the type of fallback clearly" — so *that* we mark it is settled; the granularity is
+not.
+
+**Options.**
+| | Granularity |
+|---|---|
+| a | One boolean: `usedFallback` |
+| b | A typed reason: `no-eligible-analyzer` / `sat-only` / `sat-fallback-for-this-SO` / `no-signal-at-all` |
+| c | Per-SO/per-role marking, since a fallback may apply to one SO and not another |
+
+**What I'd do:** (b) at model level, plus (c) where a fallback is genuinely per-SO — because "sat
+covered SO1 but three analyzers agreed on SO2" is a materially different situation from "sat covered
+everything", and a single boolean cannot distinguish them.
+
+**Cost of deferring:** low, but it shapes the composite's struct, so it is cheaper to settle before
+implementing than after. My enumeration in (b) is a guess at what you'd find useful — correct it.
+
+---
+
+### D3 — Query API: how many existing call sites move onto it? *(the scope risk)*
+
+**Question.** §5.5's goal is **one definition per concept** — "spare means spare, coverage means
+coverage, no optimization function invents its own" **[USER]**. Writing the helpers is settled. The
+open question is how many of today's private re-derivations get migrated onto them **in this
+mission**.
+
+Known duplicators: `roleDemandGPUs` (`rescale.go:585`, computes `ceil(demand/best_PRC) ×
+gpusPerReplica` and picks the cost-efficient variant itself), `cost_aware_optimizer.go:304` (RC/SC
+per role plus its own arithmetic), and `greedy_score_optimizer.go:117,156`.
+
+**Options.**
+| | Scope |
+|---|---|
+| a | Write the helpers; use them on the composite path only. Existing sites keep their own arithmetic. |
+| b | (a) + migrate the known duplicators above, so each concept has exactly one implementation |
+| c | (b) + sweep the optimizer for any remaining private derivations |
+
+**What I'd do: (b).** (a) does not actually achieve the stated goal — it *adds* a definition
+alongside the existing ones, making the duplication worse rather than better. The point of the API is
+that these functions stop inventing their own, which means migrating them. (c) risks unbounded
+scope-creep for diminishing return.
+
+**Note this reverses my earlier recommendation of (a)**, which rested on my misreading of
+"consistently" as a mutation problem. Once the goal is one-definition-per-concept, (a) is
+self-defeating.
+
+**Cost of deferring:** if you pick (a) now, the duplication stays and migrating later costs more than
+doing it while the helpers are being written.
+
+---
+
+### D4 — Confirmations *(I have decided these; say if any is wrong)*
+
+Listed so you can veto, not to make you choose. Each is recorded in the spec with its reasoning.
+
+| # | Decision | Where |
+|---|---|---|
+| 1 | Undefined `N`/coverage is `(value, ok)`, never a sentinel number — a stray `0` in a `min` wrongly vetoes scale-down; a stray `+Inf` in a `max` wrongly demands infinite replicas | §2.5/A14 |
+| 2 | One `demandForRole(result, role) (value, present)` accessor, hiding the nil-`RoleDemand`-vs-`TotalDemand` split | §2.3/A13 |
+| 3 | `N` stays continuous through aggregation; `ceil` only where a replica count is finally needed | §5.2/A2 |
+| 4 | Compose at `collectV2ModelRequest:797`, keeping `runAnalyzersAndScore`'s slice return (the return-type change is what broke the parent branch's build) | §6.2/A7 |
+| 5 | One aggregator per quantity (`Agg_N`, `Agg_Spare`), named for the quantity, combination rule swappable in one place; lands in/beside `internal/engines/aggregation/` | §4.5/A18 |
+| 6 | Composite carries a new exported name constant; recommend `allocation.CompositeSignalName` | §8/A10 |
+| 7 | Deep-copy every reference-typed field when building the composite (`Result`, `RoleCapacities`, `RoleSpare` alias under a value copy) | §2.6/A15 |
+| 8 | `hasSaturationResult` is repaired by testing intent, not analyzer identity | §8/A11 |
+| 9 | Model-level coverage is exposed via the query API rather than computed eagerly as a field — nothing in today's optimizer reads such a number | §5.4 |
+| 10 | Composite metrics/logs are **additive**: the composite gets its own row through the *same* functions; no analyzer's own series changes | §6/A23 |
+| 11 | The optimizer stays single-entry; all aggregation is engine-side (`cost_aware_optimizer_multi.go` is not revived) | §6.1 |
+| 12 | The observability item includes an audit that every analyzer result is fully emitted — a verification task that may surface a gap to fix | §6/A22 |
 
 ---
 
@@ -869,3 +1006,36 @@ and intent, never as authority — and two of their claims have already proved n
     scoreless `max`/`min`; only magnitude may be score-influenced. Still open.
   - Test plan 25 → 30 cases; test 3 now asserts the composite **may fall below saturation**, which
     would have failed under the retired floor invariant.
+- **v5** (2026-09-08, after user review #4): three corrections, all to *my* errors rather than to the
+  design.
+  - **§5.5 — the mutable fields are intentional, not a defect.** **[USER]** "It is not a side effect.
+    It is tracking the allocation **by design**. That is why the optimizer gets a deep copy."
+    v4 framed `Remaining`/`Spare`/`RoleSpare` mutation as an accidental flaw that made the signal
+    "unable to answer the same question twice", and proposed threading state through to avoid it.
+    Both wrong: the deep copy is precisely what makes in-place allocation tracking correct.
+    **[USER]** "'Consistently' referred to different optimization steps and calls — spare should mean
+    spare, coverage should mean coverage. We should not have every optimization function invent its
+    own." So the requirement is **semantic**: one definition per concept, shared across steps. The
+    violation today is *duplication* (`roleDemandGPUs`, `cost_aware_optimizer.go:304`,
+    `greedy_score_optimizer.go:117,156` each re-deriving), not mutation. A20 replaced by A20'.
+    **This also reversed D3's recommendation** from "helpers only" to "helpers **plus** migrate the
+    known duplicators" — adding a definition alongside the existing ones would make the duplication
+    worse, defeating the stated goal.
+  - **§2.6/§6/§8 — stop leaning on the deferred normalization branch.** **[USER]** "We are not on top
+    of normalization. That branch is deferred for now." v4 cited it as a naming precedent to adopt and
+    a logging pattern to inherit. Rewritten so it is **hazard-awareness only**: each item is a bug
+    that branch hit, restated as something to avoid and independently checkable on this base (the
+    deep-copy aliasing is verifiable from the struct definition alone). No decision depends on it.
+  - **§7 — `cur` misread, and the Score/priority axes separated.** **[USER]** "`cur` means current
+    replica count. I did not intend to say that this is the desired result. **Always ask me if not
+    sure.**" v4 read case 3's `cur = 5` as an implied answer and built an argument on it — an invented
+    premise. Also **[USER]**: "FSV should use the **priority** to give weight to different model
+    demand, not scores. **Scores** apply to giving weights to **analyzer opinions**." So the two axes
+    are distinct and `Score`'s *meaning* is settled; only the combination rule is open. The
+    `fairShareValue` conflation finding is therefore a **bug in a known direction**, not evidence of
+    ambiguity — v4 had cited it as the latter.
+  - **§10 rewritten.** **[USER]** "Decision items — not clear at all what you want." Previously a mix
+    of genuine questions and already-made decisions phrased as questions. Now three real decisions
+    (D1 Score magnitude, D2 fallback marking granularity, D3 query-API migration scope), each with
+    question / options / my recommendation / cost of deferring, plus a flat list of twelve
+    confirmations to veto rather than choose.
