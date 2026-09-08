@@ -75,18 +75,19 @@
 - [x] Read the parent mission's specs (p3 plan, CT7, semantic framework, PR #34, CT6)
 - [x] Draft the mission spec → `.session/spec.md` (v1)
 - [x] User review #1 → **v1's core conversion rejected**; spec rewritten as v2
-- [ ] **User review #2 of `.session/spec.md` v2; decide the 8 open items in §10**
-- [ ] Implement (post-approval): compose helpers, name change + quota-guard repair, tests
+- [x] User review #2 → six factual corrections, all re-verified against upstream source; **v3**
+- [ ] **User review #3 of `.session/spec.md` v3; decide the 10 open items in §10**
+- [ ] Implement (post-approval): compose helpers in/beside `internal/engines/aggregation/`,
+      name change + quota-guard repair, 25-case test plan
 
-**Last completed:** `.session/spec.md` **v2** — rewrote §4 (conversion), §5 (aggregation), §6
-(optimizer contract), §7 (Score) after the user's review.
+**Last completed:** `.session/spec.md` **v3** — rewrote §2 (ground truth, now source-verified),
+§4 (aggregation space), §5 (helpers), §8 (identity), §9 (25 tests), §10 (open items).
 
-**Next step / resume point:** get spec §10's 8 open items decided. The one real design question
-is **#1 — which `Score` combinator** (§7.2 tables C1–C5 with floor-invariant analysis; user is
-explicitly unsure; `score ≡ 1` today so nothing is blocked, and my recommendation is to keep
-`max`+floor now and revisit weighting alongside the shared request-based demand unit). Also new:
-**#3** — back-conversion representative for a role spanning SOs with differing `PRC_sat`. Do not
-start implementation before approval.
+**Next step / resume point:** get spec §10's 10 open items decided. The only real design question
+is **#1 — which `Score` combinator** (§7.2 tables C1–C5 against the floor invariant; user
+explicitly unsure; `score ≡ 1` today so nothing is blocked in practice; my recommendation is
+`max`+floor now, revisiting weighting *with* the shared request-based demand unit). Do not start
+implementation before approval.
 
 ### Status
 
@@ -100,16 +101,37 @@ start implementation before approval.
 - Mission definition: **done** — see Orientation. Normalization deferred; sat units for now.
 - Spec: **DRAFT v2**, `.session/spec.md` (522 lines). **Awaiting user review #2** — the only
   thing blocking implementation. 8 open items in §10.
-- **Design core (settled by the user, not mine to revisit):** demand is per **(model, role)** —
-  prefill/decode/both, independent numbers, not a per-SO split. Composition is **per SO in
-  unit-free coverage and #replicas**. Back-conversion to sat units happens **once, at the end**,
-  via `D_sat`. Cross-role rule `cov(M) = min(cov(prefill), cov(decode)) + cov(both)` is the
-  *only* relation between role and model level. The existing data model already has this shape
-  (`AnalyzerResult.RoleDemand` per-(model,role); `VariantCapacity.PerReplicaCapacity` per-SO).
+- **Design core (settled by the user, not mine to revisit):**
+  - **PRC is per SO** (implies model, variant, role). **Demand is per (model, role)** — three
+    values (`both`, `prefill`, `decode`) that do **not** depend on which SOs exist. SOs are added
+    and removed; a role's demand does not change because of that. Converse also holds: an SO can
+    have a real PRC while its role's demand is 0. True for every analyzer, saturation included.
+  - **Storage layout has two shapes:** `AnalyzerResult.RoleDemand` is **nil** when not
+    disaggregated, and the `both` demand then lives in **`TotalDemand`** — there is no `both` map
+    key. Read demand only through one accessor that handles both.
+  - **Composition is per SO in unit-free coverage and #replicas.** Back-conversion to sat units
+    happens **once, at the end**, derived from `D_sat` — never by picking a representative SO.
+  - **Coverage (PRC/demand) is meaningless when either is zero.** Every calculation guards it;
+    an undefined contribution must never enter a `min`/`max` as `0` or `+Inf`. `demand == 0`
+    flows through as `0`, never manufactured into `1.0`.
+  - Cross-role rule `cov(M) = min(cov(prefill), cov(decode)) + cov(both)` is the *only* relation
+    between role and model level.
+  - Within a round, a **consistent request shape per model** is assumed — this is what licenses
+    aggregating at all. Aggregate only within one model, within one round.
+- **Implementation seam:** `internal/engines/aggregation/` already exists — pure helpers named for
+  what they aggregate (`SumTotalDemand`, `DemandByRole`, `AggregateByRole`, `IsDisaggregated`, …),
+  already used by both analyzers. **New aggregations extend that package.** It is absent from every
+  parent-mission document, which is why the user's "upstream is the source of truth" rule matters.
 - **Rejected approach — do not reintroduce:** converting each analyzer's demand into sat units
   before aggregating (`D_i/PRC_i × PRC_sat`). It is circular (routes every analyzer through the
   `PRC_sat` estimate those analyzers exist to correct) and uses a different factor per SO, so the
   result is denominated in nothing coherent. Kept in spec §4.1 as a record.
+- **Lessons banked from `single-analyzer-normalize`** (deferred branch; learn from, do not build
+  on): **deep-copy is mandatory** — a plain value copy of `NamedAnalyzerResult` aliases `Result`/
+  `RoleCapacities`/`RoleSpare` and silently mutates saturation's own entry (`da0e1ee8`);
+  **`demand == 0` must flow through as `0`** (`77f21355`); `allocation.CompositeSignalName` and an
+  extra `analyzer-result` log line already exist as precedent, though its `%` unit does not apply
+  to us (ours is sat units).
 - Key finding: the p3 "initial plan" (`compose-logic-plan.md`) justifies its `max RC` rule with
   post-CT6-normalization reasoning that does **not** hold on this base —
   `normalizeToCompositeUnits` is absent from upstream, and its parent-branch implementation has

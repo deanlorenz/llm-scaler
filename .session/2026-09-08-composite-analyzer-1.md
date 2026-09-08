@@ -465,3 +465,100 @@ all. 8 open items in §10.
 
 Spec v2: 522 lines. v1's rejected conversion is kept in §4.1 *as a record of what not to do* —
 deliberately not deleted, so the reasoning is not rediscovered the hard way.
+
+## Spec v3 — user review #2: six corrections, all verified against upstream (2026-09-08)
+
+**[USER] governing instruction:** "Don't rely too much on previous analysis, I don't fully trust
+it. The source of truth is still the pre-single-analyzer upstream." Acted on literally — every
+factual claim in §2 was re-derived from source on this base. Parent docs are now cited for
+history/intent only. Two of their claims have already failed here (CT7's post-normalization
+premise; and see below).
+
+### Discovery that changes the implementation plan: `internal/engines/aggregation/`
+While verifying where demand lives I found an **existing package of pure aggregation helpers
+named for what they aggregate** — `SumTotalDemand`, `SumTotalSupply`,
+`SumTotalAnticipatedSupply`, `DemandByRole`, `AggregateByRole`, `IsDisaggregated`, plus
+`ScopeTotals`. It canonicalizes `"" → RoleBoth` in one place and documents the linearity
+invariant. Both real analyzers already use it (`saturation_v2.aggregateRoleDemand`,
+`throughput.aggregateRoleDemand`).
+
+**It is mentioned nowhere in the parent mission's documents** — a direct vindication of the
+user's distrust. This is exactly the "helper functions that express what they are aggregating"
+shape the user asked for in review #1, and it already exists. So new cross-analyzer aggregations
+extend *this* package rather than being invented elsewhere, and `multi_backup/` drops to
+"gating logic worth porting, structures not worth restoring" (its aggregations work on optimizer
+*picker state*, not analyzer results).
+
+### Correction 3 — where `both` demand is stored
+**[USER]:** "`RoleDemand` map does not always store prefill/decode AND both. It has a different
+place to store both." Verified: `aggregateRoleDemand` returns **nil** when `!IsDisaggregated`, so
+for a non-disaggregated model the `both` demand lives in **`TotalDemand`** and there is no `both`
+map key at all. Three demand values, **two storage layouts**.
+
+My v2 text said "roles prefill/decode/both" as if they were three map entries — wrong. Drives
+**A13**: one `demandForRole(result, role) (value, present)` accessor encapsulating both layouts,
+in the `aggregation` package. Corroboration: the normalization branch independently needed a
+`demandForRole` helper — same seam, found twice.
+
+### Correction 6 — demand and PRC are independent (the structural core)
+**[USER]:** PRC is per SO (implies model, variant, role). Demand has 3 values (both/prefill/decode)
+and **does not depend on which SOs exist** — even if a role has one SO now, it could have several;
+SOs come and go, and the role's demand does not change because of that. Converse also holds: an SO
+can have a real PRC while `demand(role(SO)) == 0`. True for **every** analyzer, sat included.
+
+This is stronger than my v2 framing, which still leaked per-SO thinking into demand. Now §2.4 with
+three explicit consequences and a test (#22: adding/removing an SO leaves the role's demand
+unchanged). Also drives **A17** — the back-conversion must not pick a "representative SO", because
+that would reintroduce an SO-dependent factor; derive from `D_sat(r) × cov_sat(r)/cov_composite(r)`
+instead, which reduces to `D_sat(r)` exactly in the sat-only case.
+
+### Correction 6b — coverage is undefined at zero
+**[USER]:** "The coverage value (PRC/demand) is meaningless when either PRC or demand are zero.
+Every calculation needs to guard against these cases."
+
+Drives **A14**: represent undefined coverage as `(value, ok)`, never as a sentinel number. The
+concrete hazard, spelled out in the spec: a spurious `0` entering a `min` wrongly vetoes
+scale-down; a spurious `+Inf` entering a `max` wrongly demands infinite replicas. Tests #17–21.
+
+### Correction 2 — learn from `single-analyzer-normalize`, don't build on it
+**[USER]:** it "fixed some things but hit some bumps, so I decided to defer it. Do composition
+first. But you may be able to learn from it." Read the branch. Three transferable lessons:
+
+1. **`da0e1ee8` — deep-copy is mandatory.** A plain value copy of `NamedAnalyzerResult` aliases
+   `Result`, `RoleCapacities` and `RoleSpare`, so building the composite from sat's entry
+   **silently mutated saturation's own result**. → A15 + test #24 (source byte-identical after
+   composition). This is a bug I would very likely have written.
+2. **`77f21355` — zero-demand must flow through as zero.** Three sites overwrote a demand field to
+   `1.0` even when real demand was `0`, producing phantom demand and an idle-model `Utilization`
+   miscompute. Downstream consumers already treat `demand <= 0` as an ordinary zero, so a real `0`
+   is safe everywhere and a phantom `1.0` is not. Independent confirmation of correction 6b.
+3. **`da0e1ee8` — naming precedent already exists:** `allocation.CompositeSignalName`, plus one
+   extra `analyzer-result` log line for `"CompositeSignal"` with a per-analyzer unit column in
+   `docs/reference/cycle-log.md`. Adopt the constant and the pattern (A10) — but that branch's
+   unit was `%` (coverage) because it normalized; **ours is sat units**, so the doc is not
+   copyable verbatim.
+
+Also noted from its ledger: a `fairShareValue` **priority/Score conflation** finding — flagged
+against the §7 Score question, not resolved.
+
+### Correction 7 — consistent request shape per round
+**[USER]:** both demand and PRC depend on request shape; within a round we assume a consistent
+shape per model, so aggregation within a model is consistent. This is the assumption that
+*licenses* the whole aggregation. Now §4.3: aggregate only within one model and one round, no
+cross-round smoothing, and record the assumption in the compose function's doc comment (A16) —
+because if per-analyzer shape assumptions ever diverge, the aggregation silently stops being
+meaningful and nothing in the types would catch it.
+
+### Correction 4 — `NamedAnalyzerResult` is legacy
+Kept for now; reorganization is a different mission. So: no new structure beyond what the
+composite needs, and provenance (A12) stays minimal.
+
+### Correction 1
+"The previous design was not great" — acknowledged; v1's approach is retained in §4.1 only as a
+record of what not to do.
+
+### Net effect
+Spec v3 ≈ 660 lines. §2 nearly doubled (new §§2.2–2.6, all source-verified). Test plan 16 → 25
+cases, every new one a zero/independence/isolation case. Open items renumbered to 10; item #1
+(Score combinator) remains the only real design question, and it is unblocked in practice because
+`score ≡ 1` today.

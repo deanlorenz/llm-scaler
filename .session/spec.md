@@ -1,6 +1,6 @@
-# composite-analyzer — mission spec (draft v2)
+# composite-analyzer — mission spec (draft v3)
 
-**Status:** DRAFT v2 — revised after the user's first review; awaiting second review (2026-09-08).
+**Status:** DRAFT v3 — revised after user review #2; awaiting review #3 (2026-09-08).
 **Mission:** composite aggregation calculation. Spinoff of `single-analyzer`.
 **Branch/worktree:** `composite-analyzer` @ base `upstream/main` `4db060e2`.
 **Role:** mission owner.
@@ -23,25 +23,29 @@ mission, with three deliberate departures from CT7's recorded design (§3).
 
 ### In scope
 - The reduce/aggregation itself, as **named helper functions that state what they aggregate**
-  **[USER]**, at both **model level and role level** **[USER]**.
+  **[USER]**, at both **model level and role level** **[USER]** — extending the existing
+  `internal/engines/aggregation/` package (§2.2).
 - Composition **per SO in unit-free coverage and replica count**; demand kept per **(model,
-  role)**; back-conversion to saturation's units once at the end **[USER]** (§4).
-- Whatever aggregations are needed, reusing or reimplementing from the pre-single-analyzer
-  helpers **[USER]**.
-- A new composite **name**, and repairing whatever that breaks **[USER]**.
+  role)** and independent of which SOs exist (§2.4); back-conversion to saturation's units once
+  at the end **[USER]** (§4).
+- **Zero-guards throughout** — coverage is meaningless when PRC or demand is zero **[USER]**
+  (§2.5).
+- A new composite **name**, and repairing whatever that breaks **[USER]** (§8).
 - Analyzer **`Score` applied during aggregation** — it is the analyzer's relative weight
   **[USER]** (§7).
 - **Exactly one full `NamedAnalyzerResult`** into the optimizer — the composite, not saturation
   **[USER]** (§6).
 
 ### Out of scope (this mission)
-- Request-based normalization — a shared demand unit, ideally "per X requests in queue"
-  **[USER]**. The eventual target for genuine cross-analyzer demand conversion; deferred. Until
-  it exists, analyzers meet only in unit-free coverage/replica space (§4.2).
-- CT6's coverage-fraction normalization (`TotalDemand = 1.0`). Not merely deferred — see §2.3,
-  it has a known correctness bug and this mission does **not** build on it.
+- **Normalization** — a shared cross-analyzer demand unit, ideally "per X requests in queue"
+  **[USER]**. Deferred: *"Do composition first."* A previous attempt exists on
+  `single-analyzer-normalize` and is worth learning from but not building on (§2.6). Until a
+  shared unit exists, analyzers meet only in unit-free coverage/replica space (§4.2).
+- **Reorganizing `NamedAnalyzerResult`** — legacy, kept as-is; a different mission **[USER]**.
+- CT6's coverage-fraction normalization (`TotalDemand = 1.0`). Not merely deferred — see §2.6,
+  it hit real bumps and this mission does **not** build on it.
 - CT1b (nil-saturation guard), CT4 (fairness definition). Untouched.
-- Changing PRC ownership: saturation owns PRC.
+- Changing PRC ownership: saturation owns PRC (per SO — §2.4).
 
 ### Phase boundary
 **[USER]** "Right now we plan. But the mission is broader." → this document is the deliverable
@@ -71,53 +75,139 @@ docs. This matters: several parent-mission documents describe a state that is **
 `greedy_score_optimizer.go:117,156`, `rescale.go:344,372,528`, `variant_records.go:79`,
 `engine_v2.go:722`.
 
-### 2.2 Multi-entry originals available for reuse
-`multi_backup/analyzer_helpers_multi.go` — 13 functions. The **aggregations** (what this mission
-needs):
+### 2.2 Existing helpers — the real source of truth **[USER]**
 
-| Helper | Aggregation | Reusable for compose? |
-|---|---|---|
-| `roleBottleneckReplicas` | `max_i ceil(state[i][role] / PRC_i[v])` | **Pattern**, not call — takes picker state, not results |
-| `roleAggRemaining` | `max_i state[i][role]` | Pattern |
-| `safeRemovalReplicasForRole` | `min_i floor(RoleSpare_i[role] / PRC_i[v])`, Live-gated | **Directly relevant** — the min/Live-gate shape |
-| `needsScaleDownForRole` | all-live-agree gate; `liveCount > 0` safety floor | **Directly relevant** |
-| `anyRoleNeedsScaleUp` | `any_i state[i][role] > 0` | Pattern |
-| `ResultIsInformative` | non-nil Result + ≥1 non-sentinel `Reason` | **Directly reusable logic** |
-| `prcForVariant` | PRC lookup for `(result, variant)` | **Directly reusable logic** |
-| `rolesOf`, `variantsForRole` | role enumeration, `"" → RoleBoth` canonicalization | Directly reusable logic |
+**[USER]** "Don't rely too much on previous analysis, I don't fully trust it. The source of truth
+is still the pre-single-analyzer upstream." So this section is built from reading the upstream
+code on this base, not from the parent mission's summaries.
 
-Non-aggregations (mutators/allocator), **not** in this mission's reduce: `applyAllocation`,
-`applyDeallocationForRole`, `initRoleState`, `allocateForModelPaired`.
+#### `internal/engines/aggregation/` — already exists, already the right shape
+A package of **pure aggregation helpers named for what they aggregate** — exactly the style §5
+requires. Read from source; not mentioned anywhere in the parent mission's docs:
 
-**[ASSUMPTION] A1 — reuse by re-implementation, not by un-ignoring `multi_backup/`.**
-Those files are `//go:build ignore`, in `package allocation`, and depend on unexported types
-(`variantRecord`) — they cannot be linked as-is, and un-ignoring them would collide with the
-single-entry helpers that replaced them. So "reuse" = port the arithmetic and the Live/
-informative gating into the new compose code, preserving semantics exactly. The user asked to
-"reuse **or reimplement**", which this satisfies. `multi_backup/` is left untouched.
+| Helper | What it aggregates |
+|---|---|
+| `SumTotalDemand(vcs)` | `Σ_v vc.TotalDemand` |
+| `SumTotalSupply(vcs)` | `Σ_v replicas × PRC` |
+| `SumTotalAnticipatedSupply(vcs)` | `Σ_v (replicas + pending) × PRC` |
+| `DemandByRole(vcs)` | role → summed demand (demand-only projection of `AggregateByRole`) |
+| `AggregateByRole(vcs)` | role → `ScopeTotals{TotalSupply, TotalAnticipatedSupply, TotalDemand}` |
+| `IsDisaggregated(vcs)` | any variant with a role other than `""`/`both` |
 
-### 2.3 Finding: the parent plan's premise is absent here
-`single-analyzer/.session/compose-logic-plan.md` (the "initial plan under p3") justifies its
-`max RC` rule with: *"since CT6 normalization sets `TotalDemand = 1.0` and RC is derived from
-it, RC is already the implied-replica signal ... equivalent to max implied_replicas **in a
-post-normalization world**."*
+It canonicalizes `"" → domain.RoleBoth` in one place, and its doc comment states the linearity
+invariant the optimizer depends on. **This is the package this mission extends** — new
+cross-analyzer aggregations belong here (or beside it), in the same naming style, rather than as
+new inline arithmetic elsewhere.
 
-That world does not exist on my base — `normalizeToCompositeUnits` is not upstream. Worse,
-`single-analyzer/.session/pr-spec-next-coverage-units.md` records that CT6, as implemented on
-the parent branch, **has an unfixed correctness bug**: it normalized `PerReplicaCapacity`/
-`TotalDemand`/`RoleDemand` but left `RequiredCapacity`/`SpareCapacity`/`Remaining`/`Spare`
-raw, so `initRoleState` divides raw demand by fractional PRC — "replica counts wrong by
-roughly `1/PRC_fraction` for any model with real, nonzero demand." That code is not upstream
-and is not this mission's inheritance.
+Both real analyzers already use it: `saturation_v2.aggregateRoleDemand` and
+`throughput.aggregateRoleDemand` both call `IsDisaggregated` + `DemandByRole`.
 
-**Consequence:** taking `max RC` across analyzers on *this* base would be aggregating numbers
-in mutually incommensurable units — saturation's tokens vs. a throughput analyzer's
-tokens/sec. That is the central hazard this spec must avoid.
+#### `multi_backup/` — of limited value
+`analyzer_helpers_multi.go` (`//go:build ignore`) holds the pre-CT3b multi-entry helpers. Its
+genuinely reusable *logic*: `ResultIsInformative` (non-nil `Result` + ≥1 non-sentinel `Reason`),
+`prcForVariant`, and the Live-gating / all-agree / `liveCount > 0` safety-floor patterns in
+`safeRemovalReplicasForRole` / `needsScaleDownForRole`.
 
-The fix is **not** to convert demands into sat units before aggregating — v1 tried that and it
-was a logical error (§4.1). It is to aggregate in a space where units have already cancelled:
-per-SO **coverage** and **replica count** (§4.3). Sat units appear only in the final
-back-conversion, after all composition is done.
+But its aggregations operate on **optimizer picker state**, not on analyzer results, and its
+`RolePairedState []map[string]float64` is indexed `[analyzerIndex][role]` — a shape PR #34
+deliberately collapsed. **[ASSUMPTION] A1** — port the gating logic and the min/max patterns;
+do **not** attempt to restore its structures. It cannot compile as-is (`//go:build ignore`,
+`package allocation`, depends on unexported `variantRecord`), and un-ignoring it would collide
+with the single-entry helpers that replaced it. `multi_backup/` is left untouched.
+
+### 2.3 Where demand actually lives — corrected **[USER]**
+
+**[USER] correction:** "`RoleDemand` map does not always store prefill/decode AND both. It has a
+different place to store both." Verified in `internal/domain/analyzer.go` and both analyzers:
+
+```
+AnalyzerResult.TotalDemand  float64              -- model-level demand
+AnalyzerResult.RoleDemand   map[string]float64   -- per-role; NIL when not disaggregated
+```
+
+- `RoleDemand` is **nil** for a non-disaggregated model (`aggregateRoleDemand` returns nil when
+  `!IsDisaggregated`). The "both" demand then lives in **`TotalDemand`**, not under a `both` key.
+- When disaggregated, `RoleDemand` is keyed by the roles the variants actually serve.
+- `VariantCapacity.Role` is `"prefill"` | `"decode"` | `"both"` | `""` (empty ⇒ `both`).
+
+So there are **three demand values** per analyzer — `both`, `prefill`, `decode` **[USER]** — but
+they are *not* three entries in one map: `both` may live in `TotalDemand` with `RoleDemand` nil.
+Any code reading per-role demand must go through one accessor that handles both layouts.
+
+**[ASSUMPTION] A13 — a single `demandForRole(result, role)` accessor**, in the `aggregation`
+package, that returns `(value, present bool)` and encapsulates: nil `RoleDemand` ⇒ `both` reads
+from `TotalDemand`; empty role canonicalized to `both`; a role absent from a non-nil map is
+**not present** (distinct from present-and-zero). Every aggregation reads demand only through it.
+The normalization attempt already needed such a helper (`demandForRole` exists on that branch) —
+independent corroboration that this is the right seam.
+
+### 2.4 Demand and PRC are independent **[USER]**
+
+**[USER], and this governs the whole design:**
+
+- **PRC is per SO** (implying model, variant, role).
+- **Demand is per (model, role)** — three values: `both`, `prefill`, `decode`. It **does not
+  depend on which SOs exist**. Even if a role has one SO today, it could have several; SOs are
+  added and removed, and demand per role does not change because of that.
+- The converse also holds: **`PRC(SO)` is not tied to demand.** An SO can have a real PRC while
+  `demand(role(SO)) == 0`.
+- **True for every analyzer, including saturation.**
+
+Consequences this spec must honor:
+1. Never derive a role's demand from its SOs, nor treat per-SO demand as authoritative for a
+   role. (`VariantCapacity.TotalDemand` exists and is summed by `SumTotalDemand`, but the
+   **analyzer owns** role attribution; `RoleDemand`/`TotalDemand` is the authority.)
+2. Never assume an SO's existence implies demand for its role, or that demand implies an SO.
+3. Adding or removing an SO must not change any role's demand.
+
+### 2.5 Coverage is undefined at zero — guard everywhere **[USER]**
+
+**[USER]** "The coverage value (PRC/demand) is meaningless when either PRC or demand are zero.
+Every calculation needs to guard against these cases."
+
+```
+coverage(A, SO) = PRC(A, SO) / D(A, role(SO))     undefined if PRC == 0 or D == 0
+N_full(A, SO)   = D / PRC                          undefined if PRC == 0
+```
+
+**[ASSUMPTION] A14 — represent "no coverage signal" explicitly** rather than encoding it as a
+number. Return `(value, ok)` (or a small `coverageResult` type) from every coverage/replica
+helper, so an undefined coverage cannot silently enter a `min`/`max` as `0` or `+Inf`. `min` over
+a set containing a spurious `0` would wrongly veto scale-down; `max` over a spurious `+Inf` would
+wrongly demand infinite replicas. **A skipped contribution must not be a magic number.**
+
+**Corroboration from the deferred normalization attempt (see §2.6):** its commit `77f21355`
+("let demand=0 flow through `normalizeToCompositeUnits` unchanged") fixed exactly this class of
+bug — three sites unconditionally overwrote a demand field to `1.0` even when real demand was
+`0`, producing a phantom demand and an idle-model `Utilization` miscompute. The rule that branch
+settled on, which this spec adopts: **`demand == 0` flows through as `0`; it is never manufactured
+into a `1.0`.** Downstream consumers (the GPU water-fill's `roleDemandGPUs`, per-analyzer metrics,
+RC/SC) already treat `demand <= 0` as an ordinary zero, so a real `0` is safe everywhere — a
+phantom `1.0` is not.
+
+### 2.6 Learn from the deferred normalization attempt **[USER]**
+
+**[USER]** "A previous normalization attempt exists in `single-analyzer-normalize` — it fixed
+some things but hit some bumps, so I decided to defer it for now. Do composition first. But you
+may be able to learn from it."
+
+Read from branch `single-analyzer-normalize` (**not** inherited — that work is deferred and this
+mission does not build on it). Three transferable lessons:
+
+1. **Deep-copy is mandatory** (`da0e1ee8`). A plain value copy of a `NamedAnalyzerResult` aliases
+   `Result`, `RoleCapacities` and `RoleSpare`, so building the composite from saturation's entry
+   **silently mutated saturation's own result**. The composite must deep-copy every reference-typed
+   field it inherits. **[ASSUMPTION] A15** — with a test asserting the source entry is byte-identical
+   after composition.
+2. **Zero-demand must flow through** (`77f21355`) — see §2.5.
+3. **Naming precedent** (`da0e1ee8`): that branch introduced `allocation.CompositeSignalName` and
+   emitted one extra `analyzer-result` log line for `"CompositeSignal"`, documenting its unit as
+   `%` (coverage) alongside `saturation`=tokens and `throughput`=tokens/sec. Our composite is in
+   **sat units, not `%`**, so the log's unit column differs — but the *pattern* (composite gets its
+   own name and its own log line) is settled and reusable (§8).
+
+Also noted from that branch's ledger: a `fairShareValue` **priority/Score conflation** finding.
+Relevant to §7 — flagged, not resolved here.
 
 ---
 
@@ -138,187 +228,192 @@ analyzer) is re-derived in §5.4/A4 on that corrected structure.
 
 ---
 
-## 4. The common currency
 
-**[USER, v2 correction]** The v1 conversion was wrong. Recorded here because the reasoning
-matters and must not be reintroduced.
+## 4. What is aggregated, and in what space
 
-### 4.1 Why v1's conversion was a logical error
+### 4.1 The rejected v1 conversion — kept as a record
+v1 proposed `demand_sat_equivalent(A_i, SO) = D_i(SO)/PRC_i(SO) × PRC_sat(SO)`. **[USER]** rejected
+it, correctly, on two independent grounds:
 
-v1 proposed `demand_sat_equivalent(A_i, SO) = D_i(SO)/PRC_i(SO) × PRC_sat(SO)`. Two independent
-defects:
+1. **Circular.** It routes every analyzer's contribution through saturation's PRC estimate — but
+   the inaccuracy of `PRC_sat` is *the very reason the other analyzers exist*. A bad `PRC_sat`
+   corrupts exactly the signals meant to compensate for it.
+2. **Not a unit.** `PRC_sat` varies per SO, so the same analyzer's demand converts by a different
+   ratio per SO. A factor that varies over the aggregation domain is not a unit; the result is
+   denominated in nothing coherent.
 
-1. **It is hostage to `PRC_sat`'s accuracy.** Every analyzer's contribution gets rescaled by
-   saturation's per-replica capacity estimate. But the inaccuracy of `PRC_sat` is *the very
-   reason other analyzers exist*. Routing their signal through the number they are meant to
-   correct is circular: a bad `PRC_sat` corrupts the contributions that would have compensated
-   for it.
-2. **It uses a different conversion factor per SO.** `PRC_sat` varies across SOs, so the same
-   analyzer's demand is converted by a different ratio for each SO. A "unit" that changes per SO
-   is not a unit — the resulting composite is not denominated in anything coherent, and
-   cross-analyzer comparison of the converted values is meaningless.
+Recorded so it is not reintroduced. The verification lesson: for a conversion, check the factor is
+**constant over the domain being aggregated**, not merely that the algebra is self-consistent.
 
-### 4.2 The correct structure **[USER]**
+### 4.2 No cross-analyzer demand conversion exists yet **[USER]**
 
-Three separate concerns, kept separate:
+Genuine conversion needs a **shared demand definition** — a request count, ideally **"per X
+requests in queue"** (preferred over requests-in-system) **[USER]**. Each analyzer would compute
+its demand for that same reference workload. **Deferred**; not this mission.
 
-- **Demand is per (model, role).** Roles are prefill / decode / both. **Not** per SO. Each
-  analyzer produces a model-level demand *for each role*. Conceptually these are **independent
-  numbers** — not a split of one model total, and not derived from each other.
-- **Composition is per SO, in coverage and replica count.** Both are unit-free, so they compare
-  across analyzers with no conversion factor. This is where aggregation happens.
-- **Conversion back to saturation units happens once, at the end**, using `D_sat`.
-
-Real cross-analyzer *demand* conversion needs a **shared demand definition** — a count of
-requests: requests-in-system, or better, "per X requests in queue". That is the eventual
-normalization and remains **deferred**. Until then no analyzer's demand is converted into
-another's; they meet only in the unit-free coverage/replica space.
-
-### 4.3 The quantities
-
-From the parent semantic framework, per analyzer `A_i` and SO:
+Until then analyzers meet **only** where their units have already cancelled:
 
 ```
-N_full(A_i, SO) = ceil( D(A_i, M, R(SO)) / PRC(A_i, SO) )     replicas for full coverage
-C(A_i, SO)      = PRC(A_i, SO) / D(A_i, M, R(SO))             per-replica coverage ∈ (0,1]
+coverage(A_i, SO) = PRC(A_i, SO) / D(A_i, role(SO))      unit-free, undefined at 0 (§2.5)
+N_full(A_i, SO)   = D(A_i, role(SO)) / PRC(A_i, SO)      unit-free, undefined at PRC=0
 ```
 
-Both unit-free: each divides a demand by a capacity **from the same analyzer**, in that
-analyzer's own units, which cancel. This is why they are comparable across analyzers and raw
-demand is not.
+Each divides a demand by a capacity **from the same analyzer**, in that analyzer's own units, so
+the units cancel. That — not any conversion factor — is what makes them comparable.
 
-Note the demand term is `D(A_i, M, R(SO))` — the **role's** demand, looked up by the SO's role,
-not a per-SO demand. This is what makes the composition per-SO while demand stays per-(model,
-role).
+Note the demand term is `D(A_i, role(SO))`: the **role's** demand (via A13's accessor), looked up
+by the SO's role. Demand stays per (model, role) per §2.4; only the *quotient* is per SO.
 
-**Grounding in the code** (verified on this base):
-- `domain.AnalyzerResult.RoleDemand map[string]float64` — per-(model, role) demand. Exactly the
-  right shape; no new structure needed.
-- `domain.AnalyzerResult.TotalDemand` — model-level, role-agnostic.
-- `domain.VariantCapacity.PerReplicaCapacity` — per-SO (per-variant), analyzer's own units.
+### 4.3 Consistent shape within a round **[USER]**
 
-So the data model already matches the required structure.
+**[USER]** "Both Demand and PRC depend on the shape of the requests. Can only be estimated if the
+shape is not known. In every analysis round we assume a consistent shape per model, so aggregation
+within a model is consistent."
 
-### 4.4 Back-conversion, once, at the end
+This is the assumption that licenses the whole aggregation: within one round and one model, every
+analyzer's `D` and `PRC` refer to the same request shape, so their quotients are commensurable.
 
-After aggregating in coverage/replica space, express the composite in saturation's units so
-downstream consumers (which read tokens) keep working:
+Consequences:
+- **Aggregate only within a model, within a round.** Never across models; never mix rounds.
+- Shape-dependence is a **per-round estimate**, so the composite is a per-round quantity — no
+  smoothing or carry-over across rounds in this mission.
+- **[ASSUMPTION] A16** — record this assumption in the compose function's doc comment. If
+  per-analyzer shape assumptions ever diverge, the aggregation silently stops being meaningful,
+  and nothing in the types would catch it.
+
+### 4.4 Back-conversion to saturation units, once, at the end **[USER]**
+
+Aggregate in coverage/replica space, then express the composite in sat units so downstream
+consumers (which read tokens) keep working:
 
 ```
-composite.RoleDemand[r]  = N_composite(r) × PRC_sat(representative SO of r)     -- see A2'
-composite.TotalDemand    = from the roles, per the cross-role rule (§5.4)
+composite.RoleDemand[r] / TotalDemand  derived from D_sat and the composite/sat coverage ratio
 ```
 
-**[ASSUMPTION] A2' — the back-conversion is a *presentation* step, not part of composition.**
-It happens after all aggregation, exactly once. It reuses `D_sat` / `PRC_sat` because the output
-contract is "saturation units" **[USER]** — but no analyzer's *contribution* passes through
-`PRC_sat` any more, so defect (1) in §4.1 is gone. Open question: for a role with several SOs of
-differing `PRC_sat`, which representative to use. Candidates: recover demand from sat's own
-`RoleDemand[r]` scaled by the coverage ratio (`D_sat[r] × cov_sat(r)/cov_composite(r)`), which
-avoids picking an SO at all. **Recommend that form** — flagged as open item #3.
+**[ASSUMPTION] A2' — back-conversion is presentation, not composition.** It happens once, after
+all aggregation. It uses `D_sat` because the output contract is "sat units" **[USER]** — but no
+analyzer's *contribution* passes through `PRC_sat`, so §4.1's defect (1) is gone.
 
-### 4.5 Invariants preserved
+**[ASSUMPTION] A17 — derive from `D_sat` by coverage ratio, never by picking a representative
+SO.** Per §2.4 demand is per role and independent of which SOs exist, so any SO-selection would
+reintroduce an SO-dependent factor:
+```
+composite.D(r) = D_sat(r) × cov_sat(r) / cov_composite(r)        when both coverages are defined
+composite.D(r) = D_sat(r)                                        otherwise (no usable signal)
+```
+Sat-only: `cov_sat == cov_composite` ⇒ `composite.D(r) == D_sat(r)` exactly. Preserves §4.5's
+fast path by construction, and adding/removing an SO cannot change a role's composite demand
+except through coverage — which is what SOs legitimately affect.
 
-- **Sat-only fast path.** One analyzer ⇒ composite numerically identical to today. Non-negotiable.
-- **Floor.** Saturation always participates, and the aggregation is `max` on replicas / `min` on
-  coverage, so the composite is never less aggressive on scale-up nor more aggressive on
-  scale-down than sat alone.
+Layout: write back through A13's accessor so a non-disaggregated model's `both` demand lands in
+`TotalDemand` (with `RoleDemand` nil), not under a `both` key.
+
+### 4.5 Invariants
+- **Sat-only fast path.** One eligible analyzer ⇒ composite numerically identical to today.
+  Non-negotiable.
+- **Floor.** Saturation always participates; aggregation is `max` on replicas / `min` on coverage,
+  so the composite is never less aggressive on scale-up nor more aggressive on scale-down than sat
+  alone.
+- **Zero-safety.** No coverage/replica value is computed or compared where PRC or demand is zero
+  (§2.5); demand `0` stays `0` (never becomes `1.0`).
+- **SO-independence.** Adding/removing an SO does not change any role's demand (§2.4).
 
 ---
 
 ## 5. The aggregation
 
-**[USER]** "I want helper functions that express what they are aggregating." Each aggregation
-below is a named helper whose name states the aggregation — not inline arithmetic. This is a
-requirement on the code's shape, not only its behavior.
+**[USER]** "I want helper functions that express what they are aggregating." Every aggregation is
+a **named helper stating what it aggregates**, in the style of — and alongside —
+`internal/engines/aggregation/` (§2.2). Not inline arithmetic.
 
 ### 5.1 Gating — who participates
 ```
 eligible(i)  ⟺  Result != nil  ∧  ResultIsInformative(i)  ∧  Live(i)
 ```
 Saturation participates unconditionally (floor). If no other analyzer is eligible, composite =
-sat. Ported from `needsScaleDownForRole` / `safeRemovalReplicasForRole`'s Live-gating and their
-`liveCount > 0` safety floor.
+sat. Ports `multi_backup`'s Live-gating and its `liveCount > 0` safety floor.
 
-**[ASSUMPTION] A3 — one eligibility rule for both directions.** A stale analyzer neither raises
+**[ASSUMPTION] A3 — one eligibility rule in both directions.** A stale analyzer neither raises
 demand nor blocks scale-down.
 
-### 5.2 Per-SO composition — the core
+Separately from eligibility, an individual **contribution is skipped** when its coverage is
+undefined (§2.5) — a distinct concept, represented explicitly, never as a magic number (A14).
 
-For each SO, aggregate across eligible analyzers in the unit-free space:
-
-```
-replicasForFullCoverage(SO)  = max over eligible i of N_full(A_i, SO)
-coveragePerReplica(SO)       = min over eligible i of C(A_i, SO)
-```
-
-`max` on replicas / `min` on coverage: take the most demanding estimate, the least-covering
-estimate. Identity `N_full × C = 1` (up to ceiling) means these are two views of one decision;
-computing both and cross-checking them is the consistency check §5.5 requires.
-
-Helper names express the aggregation, e.g.:
+### 5.2 Per-SO composition
 ```go
-func maxReplicasForFullCoverage(entries []NamedAnalyzerResult, so variantRef) int
-func minCoveragePerReplica(entries []NamedAnalyzerResult, so variantRef) float64
-```
+// maxReplicasForFullCoverage returns the largest N_full across eligible analyzers
+// for one SO, and whether any analyzer produced a defined value.
+func maxReplicasForFullCoverage(entries []Entry, so SORef) (replicas float64, ok bool)
 
-**[ASSUMPTION] A2 — quantization.** Keep the ratio continuous inside the aggregation; quantize
-(`ceil`) once at the end. `max` over already-`ceil`ed counts double-rounds and inflates when
-analyzers are close. Sat-only is unaffected either way.
-
-### 5.3 Per-role coverage — combining SOs of the same role
-
-Per the framework, same-role capacities **add**:
+// minCoveragePerReplica returns the least per-replica coverage across eligible
+// analyzers for one SO, and whether any analyzer produced a defined value.
+func minCoveragePerReplica(entries []Entry, so SORef) (coverage float64, ok bool)
 ```
-coverageForRole(M, r) = Σ over SOs with R(SO) = r of coverage(SO)
+`max` on replicas / `min` on coverage: most demanding, least covering. Both skip undefined
+contributions and report `ok=false` when none is defined.
+
+**[ASSUMPTION] A2 — quantize once.** Keep ratios continuous inside the aggregation; `ceil` only
+where the optimizer already does. `max` over pre-`ceil`ed counts double-rounds and inflates when
+analyzers are close.
+
+Identity `N_full × coverage = 1` (up to ceiling) means these are two views of one decision —
+computing both and cross-checking is §5.5's consistency check.
+
+### 5.3 Per-role coverage — combining SOs of a role
+Same-role capacities **add**:
+```go
+// sumCoverageForRole returns Σ over the role's SOs of replicas × coveragePerReplica.
+func sumCoverageForRole(entries []Entry, role string, sos []SORef) (coverage float64, ok bool)
 ```
-where `coverage(SO) = ReplicaCount(SO) × coveragePerReplica(SO)`.
+Per §2.4 a role may span any number of SOs, and that number can change between rounds — so this
+sums over whatever SOs currently serve the role, while the role's **demand** is read
+independently via A13.
 
 ### 5.4 Model-level coverage — the only cross-role rule **[USER]**
-
+```go
+// modelCoverageFromRoles returns min(cov(prefill), cov(decode)) + cov(both).
+func modelCoverageFromRoles(byRole map[string]float64) float64
 ```
-coverageForModel(M) = min( coverageForRole(M, prefill), coverageForRole(M, decode) )
-                      + coverageForRole(M, both)
 ```
+coverage(M) = min( coverage(M, prefill), coverage(M, decode) ) + coverage(M, both)
+```
+**This dissolves v1's A5.** Per **[USER]**, per-role demands are *independent numbers* and this is
+*the only* relation between role and model level — there is no model-vs-role figure to reconcile;
+v1 invented that problem.
 
-**This supersedes v1's A5.** v1 tried to reconcile a model-level demand figure with per-role
-figures, treating one as derived from the other. That framing was wrong: **[USER]** per-role
-demands are *independent numbers*, and this coverage rule is *the only* relation between roles
-and the model. There is nothing else to reconcile.
+Cases: purely disaggregated ⇒ `cov(both) = 0`; non-disaggregated ⇒ `both` only, with demand read
+from `TotalDemand` (§2.3). A role with no defined coverage must not contribute a spurious `0` to
+the `min` — that would wrongly zero the model's coverage (A14).
 
-A purely disaggregated model has `coverageForRole(both) = 0`; a non-disaggregated model has only
-`both` (`""` canonicalized to `RoleBoth`).
+**[ASSUMPTION] A4 — an analyzer silent about role r does not participate in role r.** Inventing a
+split it never expressed would fabricate signal, and no split is non-arbitrary. Since per-role
+demands are independent (§2.4), an analyzer that speaks only at model level has simply not spoken
+about that role. Distinguishable from present-and-zero via A13's `present` flag.
 
-**[ASSUMPTION] A4 — an analyzer that emits no `RoleDemand` for role r.** It does not participate
-in that role's aggregation. Inventing a per-role split it never expressed would fabricate signal,
-and no split is non-arbitrary. Since demands are per-(model, role) and independent, an analyzer
-that speaks only at model level has simply not spoken about that role. Unchanged from v1, but now
-resting on the correct structure rather than on Q1's reconciliation worry.
-
-### 5.5 Derived fields — recompute, and cross-check **[USER]**
-
+### 5.5 Derived fields — recompute, then cross-check **[USER]**
 `RequiredCapacity`, `SpareCapacity`, `Remaining`, `Spare` and per-role equivalents are
-**recomputed** from the composite's demand/PRC by the existing capacity-building step — not
-aggregated independently. Independent aggregation is exactly CT6's bug (some fields normalized,
-others left raw, `1/PRC` errors).
+**recomputed** from the composite's demand/PRC by the existing capacity-build step — not
+aggregated independently. Independent aggregation is CT6's bug (some fields normalized, others
+left raw).
 
-**[USER]** "if they don't match their own aggregation then we probably have a bug (at least in
-our understanding)". So the recomputed values are also **compared against** the direct
-aggregation of the same field, and a mismatch is treated as a defect — in the code or in the
-model — rather than silently reconciled.
+**[USER]** "if they don't match their own aggregation then we probably have a bug (at least in our
+understanding)". So recomputed values are **compared against** the direct aggregation of the same
+field, and a mismatch is treated as a defect — in the code or in our model — not silently
+reconciled.
 
-**[ASSUMPTION] A6' — mismatch surfaces loudly.** Cross-check in production behind a log (not a
-panic), and **assert equality in tests**. Rationale: a mismatch means our understanding is
-wrong, which is exactly what CT6's silent divergence cost the parent mission. Tolerance for
-float comparison to be specified. Open item #4.
+**[ASSUMPTION] A6' — mismatch surfaces loudly:** log in production (not panic), **assert equality
+in tests**. Float tolerance TBD (open item #4).
 
 ### 5.6 Spare capacity — the conservative direction
+```go
+// minSpareCoverageForRole returns the least spare coverage across eligible analyzers.
+func minSpareCoverageForRole(entries []Entry, role string) (spare float64, ok bool)
+
+// allEligibleAgreeSpare reports whether every eligible analyzer sees spare > 0.
+func allEligibleAgreeSpare(entries []Entry, role string) bool
 ```
-minSpareCoverage(...)   = min over eligible i of spare coverage
-allAnalyzersAgreeSpare  = every eligible analyzer reports spare > 0 for the role
-```
-`min`, mirroring `safeRemovalReplicasForRole`; plus `needsScaleDownForRole`'s all-agree gate — one
-eligible analyzer objecting stops a scale-down.
+`min` mirrors `safeRemovalReplicasForRole`; the all-agree gate mirrors `needsScaleDownForRole` —
+one eligible analyzer objecting stops a scale-down.
 
 ---
 
@@ -416,8 +511,17 @@ sat-only path. Secondary to §7.2.
 **[USER]** The optimizer's input is the new `CompositeSignal` — **not** saturation. So the
 composite carries its own name, and every consumer that assumes otherwise is a defect.
 
-**[ASSUMPTION] A10 — `domain.CompositeAnalyzerName = "composite"`**, a new exported constant
-beside `SaturationAnalyzerName`.
+**[ASSUMPTION] A10 — reuse the existing naming precedent.** The deferred normalization branch
+(§2.6, `da0e1ee8`) already introduced **`allocation.CompositeSignalName`** and emitted one extra
+`analyzer-result` log line for `"CompositeSignal"` — documented in `docs/reference/cycle-log.md`
+with a per-analyzer unit column. Adopt that constant and that log pattern rather than inventing
+`domain.CompositeAnalyzerName`. **One difference:** that branch documented the composite's unit as
+`%` (coverage), because it normalized to coverage fractions. Ours is in **saturation's units**, so
+the unit column must say so — the doc is not copyable verbatim.
+
+**[USER] `NamedAnalyzerResult` is legacy.** We keep it for now; a *different* mission reorganizes
+it. So this mission adds no new structure to it beyond what the composite needs, and does not
+attempt cleanup. Provenance (A12) should be as small as possible for that reason.
 
 **Known breakage.** `hasSaturationResult` (`engine_v2.go:722`) is
 `CompositeSignal.Name == domain.SaturationAnalyzerName && Result != nil`. With a renamed
@@ -468,39 +572,82 @@ than infer it, and so logs explain each decision. Required by §6's "explainable
     counts. CT6's bug survived precisely because nothing exercised this path.
 16. Restore the 3 `Skip()`-ed multi-analyzer tests CT7's todo lists as pending this work.
 
+**Zero and independence cases — from the user's §2.4/§2.5 corrections:**
+
+17. **`demand == 0`, `PRC > 0`** — coverage undefined; the SO contributes nothing, and the
+    composite's demand for that role stays **`0`**, never manufactured into `1.0`. Directly
+    encodes the rule the normalization branch's `77f21355` had to fix.
+18. **`PRC == 0`, `demand > 0`** — coverage and `N_full` both undefined; contribution skipped, and
+    no division by zero anywhere.
+19. **Both zero** — no signal; no panic, no `NaN`, no `±Inf` reaching any `min`/`max`.
+20. **Undefined contribution is not a magic number** (A14) — an analyzer whose coverage is
+    undefined must not act as a `0` in a `min` (which would wrongly veto scale-down) nor as
+    `+Inf` in a `max` (which would wrongly demand infinite replicas). Assert both directions.
+21. **`PRC > 0` with `demand(role(SO)) == 0`** — explicitly legal per **[USER]** §2.4; the SO
+    keeps its PRC and the model does not scale up for it.
+22. **SO-independence of demand** (§2.4) — adding or removing an SO for a role leaves that role's
+    **demand** unchanged. The structural invariant, as a test.
+23. **Role with no SOs** — a role carrying demand but currently served by no SO: no crash, and
+    the model's coverage reflects a genuinely uncovered role rather than a spurious full coverage.
+24. **Deep-copy isolation** (A15) — after composition, the source saturation entry is unchanged,
+    including its `Result`, `RoleCapacities` and `RoleSpare` maps. The normalization branch's
+    `da0e1ee8` proved a plain value copy silently mutates the original.
+25. **Non-disaggregated layout** — `RoleDemand == nil` with demand in `TotalDemand` composes
+    correctly, and the composite writes its result back in the *same* layout (§2.3/A13), not as a
+    `both` map key.
+
 ---
 
 ## 10. Open items for the user
 
-Resolved in v2 by user direction: v1's §4 conversion (rejected — §4.1), model-vs-role demand
-reconciliation (dissolved — §5.4), Score's role (now in the aggregation — §7), the optimizer's
-input contract (§6), helper naming (§5), derived-field cross-checking (§5.5), `multi_backup`
-handling (item 6 confirmed OK).
+**Resolved by user direction across v2/v3** — not open, recorded so they are not reopened:
+v1's sat-unit conversion (rejected, §4.1); model-vs-role demand reconciliation (dissolved, §5.4);
+Score's role (in the aggregation, §7); the optimizer's input contract (§6); helper naming (§5);
+derived-field cross-checking (§5.5); `multi_backup` handling; demand's storage layout (§2.3);
+demand/PRC independence (§2.4); zero-guards (§2.5); consistent-shape-per-round (§4.3);
+`NamedAnalyzerResult` is legacy and not reorganized here (§8); the shared demand unit is a
+request count, ideally "per X requests in queue" (§4.2).
 
 | # | Item | Status |
 |---|---|---|
-| 1 | **§7.2 — which Score combinator?** C1–C5 tabled with floor-invariant analysis. User is explicitly unsure; `score ≡ 1` today so nothing is blocked. My view: keep `max`+floor now, revisit weighting alongside the shared request-based demand unit, since weighting incommensurable decisions is not statistically meaningful. | **Main open design question** |
-| 2 | §4.2 — confirm the eventual shared demand unit is **"per X requests in queue"** (user's stated preference over requests-in-system), so the deferred normalization has a fixed target. | Confirm |
-| 3 | §4.4/A2' — back-conversion for a role with several SOs of differing `PRC_sat`. Recommend deriving from sat's own `RoleDemand[r]` × coverage ratio, avoiding SO selection entirely. | Confirm |
-| 4 | §5.5/A6' — mismatch handling: log in production + assert in tests. Float tolerance TBD. | Confirm |
-| 5 | §5.2/A2 — continuous ratio, quantize once at the end. | Confirm |
-| 6 | §6.1/A7 — compose at `collectV2ModelRequest:797`, keep the slice return. | Confirm |
-| 7 | §8/A10 — name `"composite"`. | Confirm |
-| 8 | Does this mission also restore multi-analyzer operation in the **optimizer** (`cost_aware_optimizer_multi.go`)? My read of §6: no — the optimizer stays single-entry; all reduction is engine-side. | Confirm |
+| 1 | **§7.2 — which Score combinator?** C1–C5 tabled with floor-invariant analysis. User explicitly unsure; `score ≡ 1` today, so nothing is blocked. My view: keep `max`+floor now and revisit weighting *with* the shared request-based unit, since weighting incommensurable *decisions* (rather than commensurable measurements) is not statistically meaningful. Note the `fairShareValue` priority/Score conflation finding on the normalization branch (§2.6) may bear on this. | **Main open design question** |
+| 2 | §4.4/A17 — back-conversion via `D_sat(r) × cov_sat(r)/cov_composite(r)`, avoiding SO selection entirely (an SO-selected factor would violate §2.4's SO-independence). Sat-only reduces to `D_sat(r)` exactly. | Confirm |
+| 3 | §2.5/A14 — represent undefined coverage as `(value, ok)` rather than a sentinel number, so it can never enter a `min`/`max` as `0` or `+Inf`. | Confirm |
+| 4 | §2.3/A13 — one `demandForRole(result, role) (value, present)` accessor in the `aggregation` package, encapsulating the nil-`RoleDemand`/`TotalDemand` layout split. | Confirm |
+| 5 | §5.5/A6' — derived-vs-aggregated mismatch: log in production, assert in tests. Float tolerance TBD. | Confirm |
+| 6 | §5.2/A2 — continuous ratios, quantize (`ceil`) once at the end. | Confirm |
+| 7 | §6.1/A7 — compose at `collectV2ModelRequest:797`, keeping the slice return (avoids the return-type churn that broke the parent branch's build). | Confirm |
+| 8 | §2.2 — new aggregations land in/beside `internal/engines/aggregation/`, matching its existing naming style, rather than as new inline arithmetic. | Confirm |
+| 9 | §8/A10 — adopt `allocation.CompositeSignalName` and the extra `analyzer-result` log line from the normalization branch, but with the unit column saying **sat units**, not `%`. | Confirm |
+| 10 | Does this mission also restore multi-analyzer operation in the **optimizer** (`cost_aware_optimizer_multi.go`)? My read of §6: no — the optimizer stays single-entry; all reduction is engine-side. | Confirm |
 
 ---
 
 ## 11. Sources read
 
-Parent-mission docs (read-only; cross-worktree reads authorized **[USER]**):
-`STATE.p3-planner.md`, `2026-09-06-p3-planner-1.md`, `compose-logic-plan.md`,
-`pr-spec-34-composite-signal.md`, `pr-spec-next-coverage-units.md`, `spec.md` §CT7 and
-§"Semantic framework", `multi_backup/analyzer_helpers_multi.go`.
+**[USER]** "The source of truth is still the pre-single-analyzer upstream." So every factual claim
+in §2 is from upstream source on this base. Parent-mission documents are cited only for history
+and intent, never as authority — and two of their claims have already proved not to hold here
+(§2.6, and CT7's post-normalization premise).
 
-Own base branch: `internal/domain/analyzer.go` (`AnalyzerResult.RoleDemand` — per-(model,role);
-`VariantCapacity.PerReplicaCapacity`/`TotalDemand` — per-SO; confirming the data model already
-has the structure §4.2 requires), `engine_v2.go`, `optimizer_interfaces.go`, and the
-`CompositeSignal` consumer sites in §2.1.
+**Own base branch (authoritative):**
+- `internal/domain/analyzer.go` — `AnalyzerResult.{TotalDemand, RoleDemand}` (nil when not
+  disaggregated), `VariantCapacity.{Role, PerReplicaCapacity, TotalDemand}`,
+  `domain.RoleBoth` (in `saturation_analyzer.go`).
+- `internal/engines/aggregation/aggregation.go` — the existing aggregation helpers (§2.2).
+- `internal/engines/analyzers/saturation_v2/analyzer.go` — `aggregateRoleDemand`,
+  `raiseRoleDemandTo`; `internal/engines/analyzers/throughput/analyzer.go` — its own
+  `aggregateRoleDemand`; `internal/engines/analyzers/external/analyzer.go` (RoleDemand nil).
+- `internal/engines/steadystate/engine_v2.go`, `internal/engines/allocation/optimizer_interfaces.go`,
+  and the `CompositeSignal` consumer sites in §2.1.
+
+**Branch `single-analyzer-normalize`** (deferred work, read for lessons only — §2.6): commits
+`77f21355` (zero-demand), `da0e1ee8` (deep-copy, naming, log), `cb723833`, `6ae2eb47`.
+
+**Parent-mission docs** (history/intent only): `compose-logic-plan.md`,
+`pr-spec-34-composite-signal.md`, `pr-spec-next-coverage-units.md`, `spec.md` §CT7 and
+§"Semantic framework", `STATE.p3-planner.md`, `2026-09-06-p3-planner-1.md`,
+`multi_backup/analyzer_helpers_multi.go`.
 
 **Not read:** the parent mission's session ledgers and review docs.
 
@@ -520,3 +667,29 @@ has the structure §4.2 requires), `engine_v2.go`, `optimizer_interfaces.go`, an
   `NamedAnalyzerResult`, not sat). Aggregations must be **named helper functions**. Derived
   fields cross-checked against their own aggregation, with mismatch treated as a bug. Two new
   tests: unit-independence and `PRC_sat`-independence.
+- **v3** (2026-09-08, after user review #2): six factual corrections, each verified against
+  upstream source rather than taken from the parent mission's docs (**[USER]**: "the source of
+  truth is still the pre-single-analyzer upstream").
+  - **§2.2 — found `internal/engines/aggregation/`**, an existing package of pure aggregation
+    helpers named for what they aggregate, already used by both real analyzers. Not mentioned
+    anywhere in the parent mission's documents. This mission extends *it*; `multi_backup/` is
+    downgraded to "gating logic worth porting, structures not worth restoring".
+  - **§2.3 — demand's storage layout corrected.** `RoleDemand` is **nil** when not disaggregated,
+    and the `both` demand then lives in `TotalDemand` — there is no `both` map key. Three demand
+    values, two storage layouts. Drives A13's single accessor.
+  - **§2.4 — demand and PRC are independent.** PRC is per SO; demand is per (model, role) and
+    does **not** depend on which SOs exist; an SO can have a real PRC with zero demand for its
+    role, and vice versa. True for every analyzer including saturation. Adding/removing an SO
+    must not change a role's demand — now an invariant and a test (#22).
+  - **§2.5 — coverage is undefined when PRC or demand is zero**, and every calculation must guard
+    it. Drives A14 (undefined is `(value, ok)`, never a magic number) and tests #17–21.
+  - **§2.6 — learned from the deferred `single-analyzer-normalize` branch** without building on
+    it: deep-copy is mandatory (a value copy aliases `Result`/`RoleCapacities`/`RoleSpare` and
+    silently mutates saturation's own entry — `da0e1ee8`); `demand == 0` must flow through as `0`
+    and never become a phantom `1.0` (`77f21355`); and `allocation.CompositeSignalName` plus its
+    extra log line already exist as a precedent, though its `%` unit does not apply to us.
+  - **§4.3 — consistent request shape per model per round** is the assumption that licenses
+    aggregating at all; recorded, with aggregation confined to one model and one round.
+  - `NamedAnalyzerResult` noted as **legacy**, kept as-is; its reorganization is a different
+    mission, so provenance is kept minimal.
+  - Test plan grew from 16 to 25 cases, the new ones all zero/independence/isolation cases.
