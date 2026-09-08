@@ -113,12 +113,46 @@ coverage are the same quantity (`cov = 1/N`) — v3 computed both and called it 
 through three drafts; (4) there is no single-model request-shape assumption — safety is structural;
 (5) aggregator names encoded the operation (`max…`) instead of the quantity (`Agg_N`).
 
-**Next step / resume point:** **Spec v8 is APPROVED [USER, 2026-09-08].** §10 fully resolved
-(D1–D4 all decided, no open items), rebased onto current `upstream/main` @ `c013012e`.
+**Next step / resume point — as of 2026-09-08, mid-session context clear (not a wind-down):**
 
-**But [USER, 2026-09-08]: "do not begin implementing yet."** Implementation is explicitly held
-back pending a further, separate go-ahead — spec approval alone is not that go-ahead. Do not
-start any code until the user gives that separate signal.
+- **Still working on:** getting from an approved spec to an actual coder dispatch. Spec v8 is
+  fully approved and §10 has no open items — the only remaining gate is implementation
+  authorization, which the user has explicitly not given yet. In parallel, we were working out
+  the *mechanics* of coder/reviewer dispatch (worker type, isolation setup, task-file shape)
+  ahead of when that authorization lands, so dispatch is ready to go the moment it does.
+- **Must keep:**
+  1. **No code, no implementation, until the user gives a separate, explicit go-ahead.**
+     Approving spec v8 was NOT that go-ahead — user said so explicitly: "I approve V8. do not
+     begin implementing yet." This is the single most load-bearing fact in this file.
+  2. Spec v8 is final and approved — do not reopen §10 (D1–D4) or re-litigate any of the
+     "Design core" bullets below without the user raising it first.
+  3. Two suggestion-box entries are filed, uncommitted, awaiting `policy-writer`:
+     `session-tracking/suggestion-box/2026-09-08-2300-composite-analyzer.md` (`.wip` protocol
+     should not apply to a mission owner's own single-writer STATE.md) and
+     `2026-09-08-2311-composite-analyzer.md` (coder-dispatch conventions need a stated default
+     path instead of three cold options). Do not resubmit or duplicate these.
+  4. Branch is rebased onto `upstream/main` @ `c013012e`, 0 behind / 12 ahead, all `.session/`-
+     only commits. Do not rebase again without asking first.
+  5. When dispatch mechanics actually come up again (not just a "do you know how" question —
+     see the memory `feedback_situational_rule_trigger_is_explaining_not_just_acting`), re-read
+     `conventions/coder-orchestration.md` and `conventions/worktree-delegation.md` in full before
+     acting — both were read once this session (2026-09-08) but that was mid-discussion, not
+     during an actual dispatch; confirm they're still fresh in context before relying on memory
+     of them.
+- **Continue from:** implementation authorization has not been given. Nothing to do right now
+  except wait for the user's go-ahead. When it comes:
+  1. Pick a coder-dispatch isolation setup with the user (own-worktree / checkout-branch /
+     same-worktree — `checkout-branch` is the stated default in `worktree-delegation.md`) —
+     do not assume, confirm.
+  2. Read `conventions/tasks.md` again for the task-file template, and write a task file that
+     decomposes spec v8's scope (the first two derivation categories per D3: `ceil()`/rounding +
+     PRC/demand lookup, plus the core `Agg_N` aggregation) into a checklist of sub-tasks small
+     enough each to land as its own commit (user's explicit instruction: "The coder should break
+     the work to sub-tasks and make several commits").
+  3. Set up the reviewer to read commits from the coder's branch **as they land**, not after the
+     coder finishes (user's explicit instruction, also `coder-orchestration.md` rule 9).
+  4. Confirm worker type (foreground/background/persistent) and `In:`/`Out:` agentbus channels
+     before any launch — required, not optional.
 
 **Standing instruction from review #4:** **[USER]** "Always ask me if not sure." Do not infer intent
 from examples or fill gaps with invented premises — ask.
