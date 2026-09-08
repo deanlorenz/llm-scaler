@@ -21,7 +21,8 @@
 
 ## Task
 
-- **Plan / spec:** `.session/spec.md` — mission spec, DRAFT v7.
+- **Plan / spec:** `.session/spec.md` — mission spec, v8, §10 fully resolved, pending final
+  approval.
   *(do not read upfront — pull on demand only)*
 - **Survey:** `.session/survey-zero-signal.md` — what breaks on a zero/absent composite signal;
   also inventories the existing `wva_model_scaling_blocked` gates. *(pull on demand)*
@@ -90,14 +91,17 @@
 - [x] User **reversed D1** — Score deferred entirely, `Agg_N` is a pure `max`; and **scoped D3** —
       the target is repeated PRC/demand/bounds/`ceil()` derivations, not variant selection; **v7**
 - [x] **Zero/absent-signal survey done** → `.session/survey-zero-signal.md`
-- [ ] **Answer the 2 remaining questions in §10** + veto pass on the 12 confirmations
-- [ ] Implement
+- [x] **Answered the 2 remaining §10 questions** — D2: yes, policy-owned reason; D3: first two
+      derivation categories only (ceil()/rounding + PRC/demand lookup)
+- [x] **Veto pass on §10/D4's 12 confirmations** — all 12 confirmed, no vetoes
+- [ ] **Get explicit user approval of spec v8 as a whole**, then start implementation
 - [ ] Implement (post-approval): `Agg_N` + derivation chain in/beside
       `internal/engines/aggregation/`, query API, composite naming + quota-guard repair,
       observability audit, 30-case test plan
 
-**Last completed:** `.session/spec.md` **v7** — D1 reversed (Score deferred, `Agg_N` is a pure
-`max`), D3 scoped to four derivation categories, and the zero/absent-signal survey delivered.
+**Last completed:** `.session/spec.md` **v8** — §10 fully resolved: D2 decided (yes, policy-owned
+reason on `wva_model_scaling_blocked`), D3 scoped (first two derivation categories only), D4 veto
+pass complete (all 12 confirmed). No open items remain in §10.
 
 **Errors review #3 caught, for context on how much to trust the current draft:** (1) `N` and
 coverage are the same quantity (`cov = 1/N`) — v3 computed both and called it a cross-check;
@@ -106,18 +110,10 @@ coverage are the same quantity (`cov = 1/N`) — v3 computed both and called it 
 through three drafts; (4) there is no single-model request-shape assumption — safety is structural;
 (5) aggregator names encoded the operation (`max…`) instead of the quantity (`Agg_N`).
 
-**Next step / resume point:** two questions, then a veto pass, then implementation.
-1. **§10/D2** — should a composite `C4-no-signal` also surface on `wva_model_scaling_blocked` as a new
-   policy-owned reason? It genuinely is a "scaling is blocked" condition and the existing dashboard
-   would then answer it, but it adds a reason to a set another engine also writes (the per-owner split
-   exists to stop two producers clearing each other's series). My inclination: yes, policy-owned.
-2. **§10/D3** — are all **four** derivation categories in this mission (rounding/`ceil()`,
-   demand→replicas→GPUs, PRC/demand lookup, bounds), or only the first two? Recommend a two-step
-   delivery, first two first, since that is where a semantic inconsistency actually changes a replica
-   count.
-3. Veto pass on §10/D4's 12 confirmations.
+**Next step / resume point:** §10 is fully resolved (D1–D4 all decided, no open items). Get the
+user's explicit approval of spec v8 as a whole, then start implementation.
 
-Do not start implementation before approval.
+Do not start implementation before that approval.
 
 **Standing instruction from review #4:** **[USER]** "Always ask me if not sure." Do not infer intent
 from examples or fill gaps with invented premises — ask.
@@ -132,9 +128,9 @@ from examples or fill gaps with invented premises — ask.
 - Session is **pinned** into this worktree via `EnterWorktree` — cross-worktree reads must use
   `cat <full-path>` or `git show <branch>:<path>`; `git -C` and `cd` elsewhere are blocked.
 - Mission definition: **done** — see Orientation. Normalization deferred; sat units for now.
-- Spec: **DRAFT v7**, `.session/spec.md` (1194 lines). **D1, D2, D3 all decided.** Survey delivered:
-  `.session/survey-zero-signal.md`. Remaining: **2 questions** (§10) + a veto pass on the 12
-  confirmations. Then implementation can start.
+- Spec: **v8**, `.session/spec.md` (~1207 lines). **§10 fully resolved** — D1–D4 all decided, D4's
+  12 confirmations all veto-passed. Survey delivered: `.session/survey-zero-signal.md`. Remaining:
+  explicit user approval of v8 as a whole. Then implementation can start.
 - **Design core (settled by the user, not mine to revisit):**
   - **PRC is per SO** (implies model, variant, role). **Demand is per (model, role)** — three
     values (`both`, `prefill`, `decode`) that do **not** depend on which SOs exist. SOs are added
