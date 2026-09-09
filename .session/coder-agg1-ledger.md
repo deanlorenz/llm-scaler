@@ -44,6 +44,30 @@ Session: coder-agg1. Mission: composite-analyzer. Role: coder. Branch: composite
    package — fixed after first test run failed with "calling RunSpecs more than once").
    `make lint` clean. Commit `4ac16404`.
 
+7. [x] Derivation chain N -> RC/SC — `internal/engines/aggregation/prc_com.go`: `PRCCom(satDemand,
+   role, nCom, nComOK) (prc, ok)` = `D_sat[role]/N_com(SO)`, undefined when `N_com` isn't ok/<=0 or
+   `D_sat` has no defined demand for the role at all (A4), defined-and-zero for a real zero demand
+   (never manufactured). Deliberately does NOT build a full derived `NamedAnalyzerResult` here —
+   that's composite construction (item 9), which will build a synthetic `VariantCapacities` with
+   `PerReplicaCapacity = PRCCom(...)` per SO and run it through the *existing*
+   `aggregation.SumTotalSupply`/`SumTotalAnticipatedSupply`/`buildRoleCapacities`/
+   `applyUniversalThreshold` pipeline (confirmed these are the exact "existing formulas" the spec
+   means — read `applyUniversalThreshold` at `engine_v2.go:532`, verbatim `RC = max(0,
+   TotalDemand/scaleUp − TotalAnticipatedSupply)` / `SC = max(0, TotalSupply − TotalDemand/scaleDown)`,
+   confirming no new RC/SC arithmetic is needed anywhere). No `ceil()` in production code here —
+   the self-consistency assertion (`ceil(D_sat[role]/PRC_com(SO))` recovers `N_com(SO)`) is a test
+   only, per spec §5.3 ("asserted in tests and logged in production" — logging happens in item 11's
+   observability pass, since it needs the composite to exist first). The shared production `ceil()`
+   helper for actual replica-rounding call sites is item 10's scope (query API), not this item's —
+   this item's "ceil() only here" instruction (A2) is about *where in the pipeline* rounding may
+   happen (nowhere upstream of a final replica count), not about building the helper itself.
+
+   Also closed test 4 (disaggregated, per-role — a higher contributor for one role must not affect
+   the other) and the read-half of test 25 (non-disaggregated layout composes correctly through
+   `PRCCom`) here, since both are `AggN`+`PRCCom`-level facts that fit naturally beside test 12's
+   round-trip tests; the write-back-in-the-same-layout half of test 25 is composite construction
+   (item 9). Commit pending.
+
 6. [x] Gate repair — `internal/engines/allocation/composite_signal_gate.go`:
    `HasUsableCompositeSignal(composite) bool` = `composite.Result != nil && ResultIsInformative(composite)`
    (mirrors the exact standard every analyzer is held to via `eligible()`; A11's own wording —
