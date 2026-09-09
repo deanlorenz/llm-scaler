@@ -44,6 +44,16 @@ Session: coder-agg1. Mission: composite-analyzer. Role: coder. Branch: composite
    package — fixed after first test run failed with "calling RunSpecs more than once").
    `make lint` clean. Commit `4ac16404`.
 
+3. [x] Eligibility — `eligible(nr) bool` in `internal/engines/allocation/composite_eligibility.go`
+   (not `aggregation` package: needs `NamedAnalyzerResult`/`ResultIsInformative`/`Live`, all
+   `allocation`-owned; `aggregation` does not currently import `allocation` and I did not want to
+   introduce that edge for one predicate when `allocation` already owns `ResultIsInformative`
+   right next to it in `analyzer_helpers.go`). Confirmed `ResultIsInformative` is already real,
+   exported, compiling code in `allocation/analyzer_helpers.go:53` (not confined to the dead
+   `multi_backup` copy) — so this item is a straight composition, no porting needed. Tests in
+   `composite_eligibility_test.go` using the existing `makeNamed` fixture helper from
+   `analyzer_helpers_test.go`. Commit pending.
+
 2. [x] Undefined-value type — `internal/engines/aggregation/undefined.go`. Decided against a new
    named type: kept the plain `(value float64, ok bool)` pair `demandForRole` already established
    (self-describing at call sites, composes with Go multi-return, no wrapper to unwrap). Added
