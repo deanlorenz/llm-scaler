@@ -75,7 +75,7 @@ var _ = Describe("buildComposite — sat-only regression (test 1)", func() {
 		Expect(composite.Live).To(Equal(baseline.Live))
 	})
 
-	It("holds even for a zero-demand SO with a real, measured PRC (PRC_com undefined at N_com=0, but supply must not vanish)", func() {
+	It("holds even for a zero-demand SO with a real, measured PRC (PRC_com undefined at N_com=0, but supply must not vanish) (test 17)", func() {
 		satResult := &domain.AnalyzerResult{
 			AnalyzerName: domain.SaturationAnalyzerName,
 			ModelID:      "m",
@@ -96,6 +96,12 @@ var _ = Describe("buildComposite — sat-only regression (test 1)", func() {
 			nil, nil, nil, nil, nil, 0)
 		Expect(err).NotTo(HaveOccurred())
 		composite := req.CompositeSignal
+
+		// spec test 17: demand==0 flows through to the composite as a literal
+		// 0, never manufactured into a placeholder (the exact bug the
+		// deferred normalization branch's 77f21355 had to fix).
+		Expect(composite.Result.TotalDemand).To(BeZero(),
+			"zero demand must flow through to the composite as a literal 0, never manufactured")
 
 		// The critical assertion: PRC must NOT be zeroed just because demand
 		// is zero (PRC and demand are independent, spec §2.4) -- the
@@ -310,5 +316,48 @@ var _ = Describe("buildComposite — end-to-end with a higher-demand contributor
 		// replica requirement spy is asking for.
 		Expect(composite.Result.VariantCapacities[0].PerReplicaCapacity).To(Equal(50.0))
 		Expect(composite.RequiredCapacity).To(BeNumerically(">", 0))
+	})
+})
+
+// Test 25 (write-back half; the read half lives in
+// aggregation.PRCCom's own tests): the composite writes its result back in
+// the SAME layout it read demand in (spec §2.3/A13) -- a non-disaggregated
+// model's composite has RoleDemand == nil with demand in TotalDemand, never
+// a synthetic "both" map key, and a disaggregated model's composite has a
+// real RoleDemand map.
+var _ = Describe("buildComposite — write-back layout parity (test 25)", func() {
+	It("writes RoleDemand == nil with demand in TotalDemand for a non-disaggregated source", func() {
+		satResult := &domain.AnalyzerResult{
+			TotalDemand: 500,
+			RoleDemand:  nil, // non-disaggregated layout
+			VariantCapacities: []domain.VariantCapacity{
+				{VariantName: "v1", Role: "", ReplicaCount: 2, PerReplicaCapacity: 100, Reason: "P1-obs"},
+			},
+		}
+		e := satOnlyEngine(satResult)
+		req, err := e.collectV2ModelRequest(context.Background(), "m", "ns", nil, scaleCfg, nil, nil, nil, nil, nil, 0)
+		Expect(err).NotTo(HaveOccurred())
+		composite := req.CompositeSignal
+
+		Expect(composite.Result.RoleDemand).To(BeNil(),
+			"a non-disaggregated composite must not synthesize a RoleDemand map, e.g. a \"both\" key")
+		Expect(composite.Result.TotalDemand).To(Equal(500.0))
+	})
+
+	It("writes a real RoleDemand map for a disaggregated source", func() {
+		satResult := &domain.AnalyzerResult{
+			RoleDemand: map[string]float64{"prefill": 400, "decode": 900},
+			VariantCapacities: []domain.VariantCapacity{
+				{VariantName: "p1", Role: "prefill", ReplicaCount: 1, PerReplicaCapacity: 100, Reason: "P1-obs"},
+				{VariantName: "d1", Role: "decode", ReplicaCount: 1, PerReplicaCapacity: 300, Reason: "P1-obs"},
+			},
+		}
+		e := satOnlyEngine(satResult)
+		req, err := e.collectV2ModelRequest(context.Background(), "m", "ns", nil, scaleCfg, nil, nil, nil, nil, nil, 0)
+		Expect(err).NotTo(HaveOccurred())
+		composite := req.CompositeSignal
+
+		Expect(composite.Result.RoleDemand).To(HaveKeyWithValue("prefill", 400.0))
+		Expect(composite.Result.RoleDemand).To(HaveKeyWithValue("decode", 900.0))
 	})
 })

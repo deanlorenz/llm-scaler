@@ -106,6 +106,14 @@ var _ = Describe("Engine config-population helpers", func() {
 		})
 	})
 
+	// spec test 16: these 3 Its were Skip()-ed pending the composite-analyzer
+	// mission ("WIP single-analyzer refactor... rewrite once the
+	// multi-analyzer story is redesigned"). Unskipped with zero test-body
+	// changes: they exercise runAnalyzersAndScore directly (Score
+	// population/defaulting, per-analyzer threshold override), a layer
+	// beneath composite construction that this mission does not change
+	// (composite construction happens after these values are already set,
+	// and runAnalyzersAndScore's return type is unchanged).
 	Describe("runAnalyzersAndScore config-bridge", func() {
 
 		// minEngine builds a minimal Engine suitable for calling runAnalyzersAndScore.

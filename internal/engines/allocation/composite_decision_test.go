@@ -239,4 +239,28 @@ var _ = Describe("ResolveSO", func() {
 		Expect(d.OK).To(BeFalse())
 		Expect(d.Path).To(Equal(DecisionNoSignal))
 	})
+
+	// spec test 23: a role carrying demand but currently served by no SO at
+	// all -- no crash, and the decision reflects a genuinely uncovered role
+	// (C4-no-signal) rather than a spurious full coverage. Distinct from
+	// test 11: here the role's demand IS attributed (RoleDemand has a real
+	// entry), but nothing in VariantCapacities serves it, so there is no SO
+	// to even ask the question of.
+	It("does not crash and records no-signal for a role with demand but no serving SO (test 23)", func() {
+		sat := NamedAnalyzerResult{
+			Name: domain.SaturationAnalyzerName,
+			Live: true,
+			Result: &domain.AnalyzerResult{
+				RoleDemand: map[string]float64{"decode": 900}, // decode has real demand...
+				VariantCapacities: []domain.VariantCapacity{
+					{VariantName: "p1", Role: "prefill", PerReplicaCapacity: 100, Reason: "measured"},
+					// ...but no variant serves decode at all.
+				},
+			},
+		}
+		d := ResolveSO([]NamedAnalyzerResult{sat}, "decode-variant-that-does-not-exist")
+		Expect(d.OK).To(BeFalse())
+		Expect(d.Path).To(Equal(DecisionNoSignal))
+		Expect(d.Contributors).To(BeEmpty())
+	})
 })

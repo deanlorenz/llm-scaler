@@ -84,4 +84,41 @@ var _ = Describe("DemandForRole", func() {
 			Expect(present).To(BeFalse())
 		})
 	})
+
+	// spec test 22 (§2.4's SO-independence structural invariant): demand is
+	// per (model, role) and does not depend on which SOs exist. Adding or
+	// removing a VariantCapacities entry (an SO) for a role must never
+	// change that role's DemandForRole reading, because the accessor reads
+	// only RoleDemand/TotalDemand -- never VariantCapacities -- by
+	// construction.
+	It("is independent of which SOs (VariantCapacities entries) exist for the role (test 22)", func() {
+		before := &domain.AnalyzerResult{
+			RoleDemand:        map[string]float64{"prefill": 400},
+			VariantCapacities: []domain.VariantCapacity{{VariantName: "p1", Role: "prefill", PerReplicaCapacity: 100}},
+		}
+		demandBefore, presentBefore := DemandForRole(before, "prefill")
+		Expect(presentBefore).To(BeTrue())
+		Expect(demandBefore).To(Equal(400.0))
+
+		// Add a second SO for the same role.
+		added := &domain.AnalyzerResult{
+			RoleDemand: map[string]float64{"prefill": 400}, // unchanged
+			VariantCapacities: []domain.VariantCapacity{
+				{VariantName: "p1", Role: "prefill", PerReplicaCapacity: 100},
+				{VariantName: "p2", Role: "prefill", PerReplicaCapacity: 150}, // new SO
+			},
+		}
+		demandAfterAdd, presentAfterAdd := DemandForRole(added, "prefill")
+		Expect(presentAfterAdd).To(BeTrue())
+		Expect(demandAfterAdd).To(Equal(demandBefore), "adding an SO must not change the role's demand")
+
+		// Remove every SO for the role entirely.
+		removed := &domain.AnalyzerResult{
+			RoleDemand:        map[string]float64{"prefill": 400}, // still unchanged -- demand is analyzer-owned, not derived from SOs
+			VariantCapacities: nil,
+		}
+		demandAfterRemove, presentAfterRemove := DemandForRole(removed, "prefill")
+		Expect(presentAfterRemove).To(BeTrue())
+		Expect(demandAfterRemove).To(Equal(demandBefore), "removing every SO must not change the role's demand")
+	})
 })

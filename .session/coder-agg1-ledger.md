@@ -1,5 +1,15 @@
 # coder-agg1 ledger
 
+## Note on task-file checkbox updates
+
+The launch message asked me to "update the checklist's checkboxes" in `task-coder-agg1.md` as I
+go. `conventions/coder.md` ("Task File Ownership: the task file belongs to the mission
+owner/parent — do not edit the task file directly. Report status updates to the parent.") is more
+authoritative and more specific here, so I did NOT edit `task-coder-agg1.md`'s checkboxes —
+tracked all 12 items as `[x]` in this ledger instead (below), with full detail per item, and
+report completion via `Out:`. Flagging this explicitly since it's a real discrepancy between two
+instructions, not something to silently pick one side of.
+
 Session: coder-agg1. Mission: composite-analyzer. Role: coder. Branch: composite-analyzer
 (same-worktree). Task: `.session/task-coder-agg1.md`. Spec: `.session/spec.md` v8.
 
@@ -37,6 +47,53 @@ Session: coder-agg1. Mission: composite-analyzer. Role: coder. Branch: composite
     out the task means a different trio.
 
 ## Checklist progress
+
+12. [x] Full test-plan sweep — went through spec §9 items 1-30 one by one (plus 8a/8b/8c/8d)
+    against every test file, using `grep -rEi "test $n[^0-9]"` across
+    `internal/engines/{aggregation,allocation,steadystate}/*_test.go` for each number, case- and
+    punctuation-insensitively (an earlier stricter grep missed several items purely on comment
+    formatting, e.g. `Test 28:` vs `test 28)` — re-ran case-insensitively before concluding
+    anything was actually missing). Found and closed 6 genuine gaps, all test-only (no production
+    code changes, as the item requires):
+
+    - **Test 17** (demand==0 flows through to the COMPOSITE as a literal 0): had `PRCCom`-level
+      coverage from item 7 but no assertion at the full `buildComposite` level. Added
+      `composite.Result.TotalDemand` assertion to the existing zero-demand-SO test in
+      `composite_test.go`.
+    - **Test 22** (SO-independence of demand): genuinely missing at any level. Added to
+      `demand_test.go` — adding/removing a `VariantCapacities` entry must not change
+      `DemandForRole`'s reading for that role.
+    - **Test 23** (role with demand but no serving SO — no crash, genuinely-uncovered not
+      spurious-full): had the `modelCoverageFromRoles`-level absent-role case from item 8, but not
+      the `resolveSO`-level "no SO for this role at all" case. Added to `composite_decision_test.go`.
+    - **Test 25 write-back half** (composite writes RoleDemand back in the SAME layout it read —
+      nil for non-disaggregated, real map for disaggregated): the read half was covered in item 7's
+      `prc_com_test.go`; the write-back half needed its own `buildComposite`-level test. Added a
+      new `Describe` block to `composite_test.go`.
+    - **Test 26/27** (query-API consistency and repeatability, scoped to the two D3 categories
+      actually built): had individual unit tests per helper but no test explicitly checking the two
+      categories agree with each other or that repeated calls are idempotent. Added both to
+      `query_api_test.go`.
+    - **Test 16** (restore 3 skipped tests): confirmed done in commit `81ef806d` (item 9) via git
+      log, but had no comment tag anywhere for the sweep to find. Added one to
+      `engine_v2_population_test.go` for traceability — no behavior change.
+
+    Everything else cross-checked as already covered from items 1-11's own work; re-verified each
+    by reading the actual test body, not just the grep hit, to confirm the assertion matches the
+    spec item's actual claim (not just a comment mentioning the number).
+
+    `make test` (the exact Makefile target, run in full — `manifests generate fmt vet
+    setup-envtest helm` prerequisites included, not just the bare `go test` invocation) passes
+    clean, `internal/engines/aggregation` at 100% statement coverage. `make lint` clean (4
+    pre-existing baseline staticcheck findings in unrelated files, unaffected, reconfirmed via
+    `git stash` earlier in this session). Confirmed `make test`'s code-gen prerequisites
+    (manifests/generate/helm) did not modify any tracked file beyond this item's own test edits
+    (`git status` checked after the run).
+
+    All 12 checklist items done. **Test 1 (sat-only ⇒ numerically identical to today) and test 13
+    (Score has no effect) — the two non-negotiable regression guards — both pass**, exercised
+    end-to-end through `collectV2ModelRequest` in `composite_test.go`, not just at a unit level.
+    Commit pending; completion report to follow on `Out:`.
 
 11. [x] Observability — reuse, verify, audit — `internal/engines/steadystate/engine_v2.go`,
     `docs/reference/cycle-log.md`. Confirmed `logAnalyzerResult`/`recordAnalyzerMetrics` DON'T yet
