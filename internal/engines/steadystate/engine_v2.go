@@ -715,11 +715,20 @@ func computeCurrentGPUUsageByNamespace(requests []allocation.ModelScalingRequest
 	return usage
 }
 
-// hasSaturationResult reports whether the request carries a saturation analyzer
-// result. A request without one was not measured this cycle, so its replica
+// hasSaturationResult reports whether the request carries a usable composite
+// signal. A request without one was not measured this cycle, so its replica
 // counts are not evidence of anything and must not be charged to a quota.
+//
+// Delegates to allocation.HasUsableCompositeSignal (spec §5.1.3, A11') rather
+// than checking CompositeSignal.Name: the composite now carries its own name
+// (spec §8), not saturation's, even on the sat-only path, so a name check
+// here would go permanently false the moment the rename lands. The gate's
+// actual requirement was always "is there a usable signal to charge a quota
+// against", never "is this specifically saturation" — the retained name
+// documents the call sites' original intent (a per-cycle measurement gate)
+// without implying the composite is still literally saturation.
 func hasSaturationResult(req allocation.ModelScalingRequest) bool {
-	return req.CompositeSignal.Name == domain.SaturationAnalyzerName && req.CompositeSignal.Result != nil
+	return allocation.HasUsableCompositeSignal(req.CompositeSignal)
 }
 
 // reportUnattributedGPUs surfaces usage that could not be charged to any

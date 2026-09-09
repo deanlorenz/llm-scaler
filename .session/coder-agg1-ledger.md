@@ -44,6 +44,65 @@ Session: coder-agg1. Mission: composite-analyzer. Role: coder. Branch: composite
    package — fixed after first test run failed with "calling RunSpecs more than once").
    `make lint` clean. Commit `4ac16404`.
 
+6. [x] Gate repair — `internal/engines/allocation/composite_signal_gate.go`:
+   `HasUsableCompositeSignal(composite) bool` = `composite.Result != nil && ResultIsInformative(composite)`
+   (mirrors the exact standard every analyzer is held to via `eligible()`; A11's own wording —
+   "test what it actually needs: that the composite carries a real capacity signal" — is precisely
+   this). Wired into `hasSaturationResult` at `engine_v2.go:721` (kept the name — it documents the
+   call sites' original intent as a per-cycle measurement gate; the two callers,
+   `computeCurrentGPUUsage`/`computeCurrentGPUUsageByNamespace`, only ever use it as a boolean
+   short-circuit and touch nothing else on `CompositeSignal`, confirmed by research agent, so this
+   was a safe, fully localized swap).
+
+   **Caught a second real bug while wiring this in**: `HasUsableCompositeSignal` is *stricter*
+   than the old bare `Result != nil` check (it also requires informativeness) — correctly so, per
+   A11 — but this broke 2 pre-existing tests in `engine_v2_quota_test.go` whose shared
+   `managedRequest` fixture built `Result: &domain.AnalyzerResult{}` (empty, zero
+   `VariantCapacities`), which used to slip past the old weak guard. Fixed the fixture (not my
+   predicate) to include one realistic `VariantCapacity` with a real `Reason`, since an empty
+   result genuinely carries no capacity signal — the old guard's looseness was exactly what the
+   survey flagged (finding 2: seven independent, unequally-strict nil checks). Ran the FULL
+   non-e2e repo test suite (`go test $(go list ./... | grep -v /test/e2e)`) after this fix to
+   confirm no other fixture relied on the same gap — all green.
+
+   **Seven-plus-one site survey** (`.session/survey-zero-signal.md`) re-verified against current
+   source via research agent: the other 6 nil-check sites (`variant_records.go:80`,
+   `rescale.go:345`, `rescale.go:529`, `analyzer_helpers.go:142`, `cost_aware_optimizer.go:159`,
+   `greedy_score_optimizer.go:63` — line numbers drifted slightly from the survey's own citations,
+   confirmed via research agent, but all are still plain `Result == nil`/`!= nil` checks with no
+   name comparison) are genuinely already-correct per survey conclusion #1 — **left untouched**,
+   per the task's explicit instruction to say so rather than touch sites that don't need it.
+
+   **`wva_model_scaling_blocked` wiring (D2)**: added `constants.ScalingBlockedNoCompositeSignal`
+   ("no-composite-signal") + new ownership slice `constants.ScalingBlockedReasonsSignal`
+   (`internal/constants/metrics.go`), and one new call site in `engine.go`'s per-model loop
+   (`optimizeV2`, right after `collectV2ModelRequest` succeeds, before appending to `requests`) —
+   publishes unconditionally every cycle the composite is built, mirroring
+   `applyScaleToZeroEnforcement`'s own "publish before any early return, so this call clears a
+   stale reason" convention. This is a **new** call site, not a rename of `applyScaleToZeroEnforcement`
+   itself: that function operates on `decisions []domain.VariantDecision` (post-optimizer,
+   per-model) and its "empty-decision return" is unrelated to composite-signal absence, which is
+   known earlier, at collection time, before the optimizer runs at all.
+
+   **Flagged, not touched**: research turned up two more genuine `domain.SaturationAnalyzerName`
+   identity checks in production code beyond `hasSaturationResult` — `composite_decision.go:81`
+   (my own step 5 code, distinguishing saturation's contribution for the fallback rule) and
+   `engine_v2.go:163` (skip re-running saturation since it's built first, unconditionally). Neither
+   is a `CompositeSignal.Name` check (the thing §8 renames) — both are legitimate uses of
+   saturation's *analyzer* identity, which is not being renamed. PR #34's claim ("zero references
+   to `SaturationAnalyzerName` remain in production optimizer code") is accurate for
+   `CompositeSignal.Name` dependencies specifically, not for "does any code know saturation's
+   name" — noting this so it isn't mistaken for a gap I missed.
+
+   Tests: `composite_signal_gate_test.go` (unit, covers test 8d, test 14, informativeness edges),
+   `engine_v2_quota_test.go` new `Describe` block (covers test 14 and 8d at the
+   `computeCurrentGPUUsage`/`ByNamespace` level — the actual quota-guard call sites), and
+   `engine_signal_blocked_wiring_test.go` (metric-plumbing level, modeled directly on the existing
+   `engine_scaling_blocked_wiring_test.go`'s "leaves the wake reason alone" pattern — deliberately
+   NOT driving the full `optimizeV2` loop end to end, since that belongs with test 15/item 9's
+   end-to-end composite test). `make lint`/`gofmt` clean; full non-e2e `go test` sweep clean.
+   Commit pending.
+
 5. [x] Fallback chain + decision path — `internal/engines/allocation/composite_decision.go`:
    `resolveSO(entries, variant) soDecision` with `DecisionAgree/Single/SatFallback/NoSignal`
    constants (`C0-agree`/`C1-single`/`C2-sat-fallback`/`C4-no-signal`; no `C3-default-prc` per the

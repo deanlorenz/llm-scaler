@@ -1076,6 +1076,24 @@ func (e *Engine) optimizeV2(
 			continue
 		}
 
+		// Reported unconditionally, every cycle the composite is actually built,
+		// mirroring applyScaleToZeroEnforcement's own convention: this call is
+		// what CLEARS the reason once a usable signal returns, so a path that
+		// skips it on the healthy branch would pin a stale "blocked" answer.
+		// spec composite-analyzer §5.1.3/D2 — a composite with no usable signal
+		// (decision path C4-no-signal, once §5.1.2's per-SO field lands) means no
+		// analyzer, saturation included, was informative this cycle: the model
+		// was not usefully measured, so nothing downstream should be treated as
+		// evidence. Surfaced on the same wva_model_scaling_blocked dashboard the
+		// scale-to-zero policy/wake reasons already use, rather than only in a
+		// log line.
+		var signalReasons []string
+		if !allocation.HasUsableCompositeSignal(req.CompositeSignal) {
+			signalReasons = []string{constants.ScalingBlockedNoCompositeSignal}
+		}
+		metrics.SetModelScalingBlockedReasons(namespace, modelID,
+			constants.ScalingBlockedReasonsSignal, signalReasons)
+
 		requests = append(requests, *req)
 		modelReplicaMetrics[modelID] = data.replicaMetrics
 		modelScaleTargets[utils.GetNamespacedKey(namespace, modelID)] = data.scaleTargets

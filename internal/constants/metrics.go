@@ -517,6 +517,21 @@ const (
 	// this failure hid for a week. The usual cause is an EPP pod older than the
 	// ConfigMap that enabled flowControl: EPP reads --config-file once at startup.
 	ScalingBlockedNoWakeSignal = "no-wake-signal"
+
+	// ScalingBlockedNoCompositeSignal indicates the model's composite analyzer
+	// result (spec composite-analyzer §5.1.3, decision path C4-no-signal) carries
+	// no usable capacity signal this cycle: no analyzer — saturation included —
+	// produced an informative result. The model was not usefully measured, so no
+	// decision was made for it; this is that condition surfaced on the existing
+	// dashboard rather than only in a log line.
+	//
+	// Distinct from the policy reasons above: those name a standing
+	// configuration contradiction about scale-to-zero specifically, while this
+	// names an absence of evidence that blocks ANY decision, scale-to-zero
+	// included. Owned separately (ScalingBlockedReasonsSignal) because it is
+	// decided at composite-collection time, once per cycle per model, not by
+	// the steady-state enforcer.
+	ScalingBlockedNoCompositeSignal = "no-composite-signal"
 )
 
 // Reason ownership. Two engines write WVAModelScalingBlocked — the steady-state
@@ -537,6 +552,12 @@ var (
 	// what EPP actually exports.
 	ScalingBlockedReasonsWake = []string{
 		ScalingBlockedNoWakeSignal,
+	}
+
+	// ScalingBlockedReasonsSignal are decided at composite-collection time, from
+	// whether the model's composite analyzer result carries a usable signal.
+	ScalingBlockedReasonsSignal = []string{
+		ScalingBlockedNoCompositeSignal,
 	}
 )
 
