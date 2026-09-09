@@ -121,7 +121,16 @@ first.
 
 ### Known issues
 
-- none
+- **Pending project-direction item, not yet actioned:** during the code review (§7/§9.6 of
+  `.session/review/code-review-notes.md`), the user flagged that `satDemand`/`D_sat` naming
+  encodes a transitional implementation choice (using saturation's result as the demand source)
+  rather than the durable intended concept — a **canonical composite demand**, meant to make
+  PRC/demand comparable **across models**, not just across analyzers within one model. The
+  project plans to move away from anchoring the demand unit on "sat" specifically. This is
+  broader than any one function (`PRCCom`, `HasUsableCompositeSignal`) and should be folded into
+  `spec.md` (§4/§5 design sections, or a new §12 revision entry) once the code review reaches a
+  natural checkpoint for spec updates — not yet done; flagged here so it isn't lost if
+  `code-review-notes.md` is archived before that happens.
 
 ## Session log
 - 2026-09-08 session=2026-09-08-composite-analyzer-1 status=retired ledger=.session/ledger/2026-09-08-composite-analyzer-1.md

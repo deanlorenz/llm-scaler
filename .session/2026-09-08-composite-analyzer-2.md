@@ -413,3 +413,78 @@ review, per explicit user instruction for the whole exercise.
 Review paused (not finished) at the end of the allocation-core section — user said "good point to
 stop," asked to persist and wind down, with explicit intent to continue this same review in a
 future session.
+
+## Verified 2026-09-09
+
+`ledger-capture-3` check of everything in this ledger **after** the `## Verified 2026-09-09`
+marker above (the diff-review-page agent creation, the WSL2 CLAUDE.md addition, and the
+step-by-step code review section) — the pre-marker content was already verified by
+`ledger-capture-2` and was not re-checked here.
+
+**Checked against:**
+- `~/.claude/agents/diff-review-page.md` (read directly)
+- `~/.claude/CLAUDE.md` (read the "Environment: WSL2" section directly)
+- `.session/review/composite-diff-review.html` and `.session/review/code-review-notes.md` (existence
+  and, for the latter, its full section-header structure)
+- `.session/STATE.md` (current Task/Execution/Status/resume-point content)
+- `git log --oneline` and `git show c860807a --stat` on `composite-analyzer`
+
+**Confirmed durable (not just ledger-narrated):**
+- `~/.claude/agents/diff-review-page.md` exists; frontmatter matches the ledger's description
+  exactly: `name: diff-review-page`, `model: haiku`, `tools: Bash, Read, Write, Glob, Grep`, and a
+  description matching "turn a git diff ... into a single self-contained HTML review page." The
+  file also contains the `wslview <absolute-path>` call with exit-code check and manual-fallback
+  instructions the ledger describes.
+- `~/.claude/CLAUDE.md` has the "Environment: WSL2" section verbatim, matching the ledger's
+  description (open with `wslview`, check exit code, fall back to manual instructions on failure).
+- `.session/review/composite-diff-review.html` exists (87KB).
+- `.session/review/code-review-notes.md` exists (36KB, 595 lines per `c860807a`'s diffstat) and its
+  section structure matches the ledger's summary closely: §1-2 general findings, §3 aggregation
+  package with ten sub-points (§3.1-§3.10), §4 the unprompted dead-code finding
+  (`contributedNames`), §5-7 the user's rulings on §3 (including §7's `PRCCom`/canonical-demand
+  point), §8 allocation core with seven sub-points (§8.1-§8.7), §9 the user's corrections to §8
+  (six sub-points, §9.1-§9.6, including §9.6 revisiting `HasUsableCompositeSignal`). Not
+  re-verified line-by-line against the code (per scope — that file already cites real code
+  locations).
+- `.session/STATE.md`'s current state matches what the ledger says resulted from this session: the
+  Execution checklist has "user chose to do their own step-by-step code review" ticked, "Code
+  review in progress: general comments + aggregation package + allocation core done ... steadystate
+  wiring ... not yet reviewed" unticked, and the resume point explicitly names steadystate wiring
+  (`internal/engines/steadystate/composite.go`'s `buildComposite`, `engine_v2.go`/`engine.go`) as
+  the next step, with "no code changes during the review" restated.
+- Commit `c860807a` exists (`git log --oneline -8` confirms) and its file list matches the ledger's
+  description exactly: `git show c860807a --stat` shows exactly three files —
+  `.session/2026-09-08-composite-analyzer-2.md` (this ledger), `.session/STATE.md`, and
+  `.session/review/code-review-notes.md` (803 insertions, 23 deletions total).
+
+**Gap found and fixed:** the "canonical composite demand, moving away from anchoring on sat"
+project-direction point (recorded in this ledger's Allocation-core section, and in
+`code-review-notes.md` §7/§9.6) is durable project intent broader than any single function
+(`PRCCom`, `satDemand` naming, `HasUsableCompositeSignal`) — but before this check it existed only
+inside the review-scratch file, not in `STATE.md` or `spec.md`. Added a note to `STATE.md`'s
+"Known issues" section pointing at it (mission-specific, not a global/process finding, so no
+suggestion-box entry — folding it properly into `spec.md`'s design sections or a new §12 entry is
+left as a to-do for when the code review reaches a natural spec-update checkpoint).
+
+**Noted, not fixed (outside my write scope):** `STATE.md`'s Session log (bottom of file) already
+lists this session's entry as `status=retired` with ledger path
+`.session/ledger/2026-09-08-composite-analyzer-2.md` — but this ledger file has not actually been
+moved to `.session/ledger/` yet; it is still at its active `.session/` path. This looks like the
+wind-down step writing the anticipated post-capture path/status ahead of the actual move (which
+per convention normally happens once `ledger-capture` appends the `## Verified` marker). Flagging
+for the mission owner / next session to complete the move now that this marker exists — moving
+files is not one of my allowed write actions under the `ledger-capture` contract.
+
+**Commit SHAs verified present in `git log --oneline`:** `c860807a` (this session's checkpoint
+commit, containing the ledger, STATE.md, and code-review-notes.md).
+
+| Ledger point | Durable destination | Action taken |
+|---|---|---|
+| `diff-review-page` agent (frontmatter, wslview call) | `~/.claude/agents/diff-review-page.md` | None needed — confirmed matches |
+| WSL2 CLAUDE.md addition | `~/.claude/CLAUDE.md` "Environment: WSL2" | None needed — confirmed matches |
+| HTML diff-review page | `.session/review/composite-diff-review.html` | None needed — confirmed exists |
+| Code review notes (§1-9 structure) | `.session/review/code-review-notes.md` | None needed — confirmed exists, structure matches |
+| STATE.md resume point / checklist | `.session/STATE.md` | None needed — confirmed matches |
+| Commit `c860807a` file list | git history | None needed — confirmed matches (3 files) |
+| Canonical composite demand / move-away-from-sat project direction | `.session/STATE.md` "Known issues" | **Added** — was only in review-scratch file before |
+| Ledger not yet moved to `.session/ledger/` despite STATE's Session log claiming `status=retired` there | (flagged only — not a write destination available to this contract) | **Flagged** — left for mission owner to complete the move |
