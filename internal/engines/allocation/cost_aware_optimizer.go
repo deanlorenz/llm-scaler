@@ -301,16 +301,9 @@ func buildDecisionsWithOptimizer(
 		// For P/D-disaggregated models use the variant's per-role capacity; otherwise
 		// fall back to the model-level totals.
 		decision.Utilization = vc.Utilization
-		reqCap, spareCap := satNamed.RequiredCapacity, satNamed.SpareCapacity
-		role := state.Role
-		if role == "" {
-			role = domain.RoleBoth
-		}
-		if rc, ok := satNamed.RoleCapacities[role]; ok {
-			reqCap, spareCap = rc.RequiredCapacity, rc.SpareCapacity
-		}
-		decision.RequiredCapacity = reqCap
-		decision.SpareCapacity = spareCap
+		// Role-vs-model fallback via the shared requiredSpareForRoleOrModel
+		// (spec §5.5/D3's one role-vs-model definition for RC/SC).
+		decision.RequiredCapacity, decision.SpareCapacity = requiredSpareForRoleOrModel(satNamed, state.Role)
 
 		decisions = append(decisions, decision)
 	}

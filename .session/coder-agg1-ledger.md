@@ -38,6 +38,62 @@ Session: coder-agg1. Mission: composite-analyzer. Role: coder. Branch: composite
 
 ## Checklist progress
 
+10. [x] Query API, D3's two scoped categories — `internal/engines/allocation/query_api.go`.
+    Verified line numbers first (per task's Known-issues flag): `rescale.go:606`
+    (ceil/rounding), `rescale.go:587-591` (demand fallback), `cost_aware_optimizer.go:309`
+    (RC/SC fallback) all matched spec citations exactly, no drift.
+
+    - Rounding (category 1): `replicasForDemand(demand, prc) int` = `ceil(demand/prc)`, guarded
+      to 0 for `prc<=0` or a negative result; `safeReplicasForSpare(spare, prc) int` = the same
+      guard, `floor`. Wired into `roleDemandGPUs` (`rescale.go`), `roleBottleneckReplicas` and
+      `safeRemovalReplicasForRole` (`analyzer_helpers.go`), replacing each site's own inline
+      `math.Ceil`/`math.Floor` + guard.
+    - Demand/PRC lookup (category 2): `demandForRoleOrModel(nr, role) float64` and
+      `requiredSpareForRoleOrModel(nr, role) (rc, sc float64)`, wired into `roleDemandGPUs`'s
+      demand read and `cost_aware_optimizer.go:303-313`'s RC/SC read respectively.
+    - Did **not** implement `ReplicasToCloseGap`/`GPUsToCloseGap`/bounds helpers or touch
+      `sortByCostEfficiencyAsc` — explicitly out of scope per D3/A21'.
+
+    **Two real regressions caught by the full test suite, both from the same root cause — a
+    plausible-looking design I had to correct against the ORIGINAL code's exact behavior rather
+    than my own initial (wrong) generalization:**
+
+    1. `requiredSpareForRoleOrModel`'s first draft special-cased `role == domain.RoleBoth` to
+       skip the `RoleCapacities` lookup entirely and return the model-level scalars directly. The
+       *original* inline code at `cost_aware_optimizer.go:303-313` does no such thing — it always
+       attempts the `RoleCapacities[role]` lookup, RoleBoth included, and only falls back to
+       model-level scalars on a genuine map miss. Caught by
+       `cost_aware_optimizer_test.go`'s "maps an empty-role variant to the both RoleCapacities
+       entry" test (expected 300, got 9999 — the model-level decoy value winning when it should
+       have lost to the real "both" entry). Fixed by removing the special case.
+    2. `demandForRoleOrModel`'s first draft used `aggregation.DemandForRole(nr.Result, role)`
+       directly, per the task's literal instruction to build this helper "on step 1's
+       `demandForRole`". This reads `Result.RoleDemand` (analyzer-owned). The *original*
+       `roleDemandGPUs` code instead reads `NamedAnalyzerResult.RoleCapacities[role].TotalDemand`
+       (engine-built) — equal to `Result.RoleDemand[role]` in real production data (since
+       `buildRoleCapacities` derives one from the other), but NOT equal in 4 existing
+       `rescale_optimize_test.go` fixtures, which hand-construct `RoleCapacities` directly without
+       ever populating `Result.RoleDemand` (a test-fixture gap, not a production one). Caught by 4
+       failing `GreedyByScoreOptimizer rescale` P/D-split tests (e.g. expected split 4/4, got 0
+       replicas reclaimed for prefill — `demandForRoleOrModel` silently returned 0 instead of the
+       fixture's real per-role demand). Fixed by reading `RoleCapacities` instead, matching the
+       original call site's actual source of truth exactly — kept `aggregation.DemandForRole` out
+       of this specific helper (removed the now-unrelated import) since the two data sources are
+       not interchangeable in general, only equal by construction in the real pipeline. Documented
+       the reasoning prominently in both functions' doc comments given a future reader could easily
+       reintroduce the same mistake.
+
+    Both bugs share a lesson: "read demand/RC/SC the same way the code being replaced did" is
+    stricter than "read it from the theoretically-equivalent canonical source" whenever a test
+    fixture bypasses the real derivation step — worth flagging to the mission owner as a possible
+    test-fixture hygiene gap (several `allocation` test fixtures construct `RoleCapacities`
+    without going through `buildRoleCapacities`/populating `Result.RoleDemand`), not something I
+    fixed since it's outside this item's scope.
+
+    Tests: `query_api_test.go` — direct unit coverage of all four helpers including the
+    RoleBoth-handling asymmetry between the two lookup helpers (deliberate, each mirroring its own
+    original call site). Full non-e2e `go test` and `make lint`/`gofmt` clean. Commit pending.
+
 9. [x] Composite construction, deep copy, identity, compose-site wiring — the big item.
    `internal/engines/steadystate/composite.go`: `buildComposite(ctx, namedResults, scaleUp,
    scaleDown) allocation.NamedAnalyzerResult`. Wired in at `collectV2ModelRequest` (old

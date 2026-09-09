@@ -186,16 +186,13 @@ func initRoleState(e *NamedAnalyzerResult) (roles []string, pickerState RolePair
 type RolePairedState map[string]float64
 
 // roleBottleneckReplicas returns ceil(state[role] / PRC[v]) for the single
-// entry. Returns 0 if the entry has no result or PRC ≤ 0.
+// entry, via the shared replicasForDemand (spec §5.5/D3's one rounding
+// definition). Returns 0 if the entry has no result or PRC ≤ 0.
 func roleBottleneckReplicas(e NamedAnalyzerResult, state RolePairedState, role, v string) int {
 	if e.Result == nil {
 		return 0
 	}
-	prc := prcForVariant(e.Result, v)
-	if prc <= 0 {
-		return 0
-	}
-	return int(math.Ceil(state[role] / prc))
+	return replicasForDemand(state[role], prcForVariant(e.Result, v))
 }
 
 // roleAggRemaining returns the remaining demand for role from the picker state.
@@ -232,8 +229,9 @@ func variantsForRole(vcs []variantRecord, role string) []variantRecord {
 
 // safeRemovalReplicasForRole returns the number of replicas of variant v that
 // can safely be removed — floor(RoleSpare[role] / PRC[v]) for the entry if it
-// is live, has a Result and RoleSpare, and PRC > 0. Returns 0 if the entry is
-// not live, has no Result/RoleSpare, PRC ≤ 0, or RoleSpare[role] < 0.
+// is live, has a Result and RoleSpare, and PRC > 0, via the shared
+// safeReplicasForSpare (spec §5.5/D3's one rounding definition). Returns 0
+// if the entry is not live, has no Result/RoleSpare, or PRC ≤ 0.
 func safeRemovalReplicasForRole(e NamedAnalyzerResult, v, role string) int {
 	if !e.Live {
 		return 0 // non-live: no current basis to constrain removal
@@ -241,15 +239,7 @@ func safeRemovalReplicasForRole(e NamedAnalyzerResult, v, role string) int {
 	if e.Result == nil || e.RoleSpare == nil {
 		return 0
 	}
-	prc := prcForVariant(e.Result, v)
-	if prc <= 0 {
-		return 0
-	}
-	n := int(math.Floor(e.RoleSpare[role] / prc))
-	if n < 0 {
-		return 0
-	}
-	return n
+	return safeReplicasForSpare(e.RoleSpare[role], prcForVariant(e.Result, v))
 }
 
 // applyDeallocationForRole decrements the entry's RoleSpare[role] by
