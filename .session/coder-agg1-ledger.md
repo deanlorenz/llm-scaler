@@ -44,6 +44,28 @@ Session: coder-agg1. Mission: composite-analyzer. Role: coder. Branch: composite
    package — fixed after first test run failed with "calling RunSpecs more than once").
    `make lint` clean. Commit `4ac16404`.
 
+5. [x] Fallback chain + decision path — `internal/engines/allocation/composite_decision.go`:
+   `resolveSO(entries, variant) soDecision` with `DecisionAgree/Single/SatFallback/NoSignal`
+   constants (`C0-agree`/`C1-single`/`C2-sat-fallback`/`C4-no-signal`; no `C3-default-prc` per the
+   task's explicit instruction not to invent one). **Caught and fixed a real bug in my own first
+   draft during test-writing**: my first implementation put saturation into the same "eligible
+   analyzers with a defined N(SO)" bucket as everyone else (a literal reading of the spec's
+   3-line pseudocode), which made a sat-only SO report `C1-single` instead of `C2-sat-fallback` —
+   contradicting the spec's actual instruction ("Sat does not participate unconditionally. Only
+   if no other signal, as fallback" and the `C2-sat-fallback` definition itself: "no OTHER
+   contributor for this SO"). Fixed by tracking saturation's contribution separately: it only
+   joins the aggregation (as an ordinary, unprivileged voice, per A3/no-floor) once at least one
+   non-sat analyzer already qualifies as a contributor; otherwise it is either the sole fallback
+   (C2) or, if not itself eligible/defined either, no-signal (C4). 5 tests initially failed on
+   this exact distinction (test 8, 8a, 8b, and the two eligibility-gating tests 6/7, which all
+   rely on sat being the *only* one with a defined N and therefore expect C2, not C1) — this is
+   precisely the kind of case the task file wanted me to get right rather than paper over.
+   Lives in `allocation` (needs `NamedAnalyzerResult`, `Live`, `Name`), imports `aggregation.AggN`
+   — new one-directional edge `allocation` → `aggregation`, no cycle (`aggregation` still imports
+   nothing from `allocation`). Tests cover spec §9 items 3, 6, 7, 8, 8a, 8b, 8c, 9, 10, 11.
+   `make lint`/`gofmt` clean on new files (baseline pre-existing issues elsewhere unaffected).
+   Commit pending.
+
 4. [x] Per-SO N and AggN — `internal/engines/aggregation/replicas_needed.go`:
    `replicasNeeded(result, variant) (n, ok)` is `N_i(SO)`; `AggN(results, variant) (n, ok)` is
    `Agg_N`, a pure max via `maxOfDefined` (no Score param at all — Score cannot leak in through
