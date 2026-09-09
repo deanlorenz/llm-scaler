@@ -196,3 +196,15 @@ belongs in the plan doc, not STATE.
 Filing a suggestion-box entry recommending this STATE-vs-plan-doc distinction be stated more
 sharply in `conventions/state-vs-ledger.md` or `tasks.md`, since the drift happened gradually
 over many small edits without ever feeling like a single wrong move.
+
+STATE.md and spec.md changes committed together as `66aed77f` (ledger itself added in the same
+commit, first time this file was tracked). Suggestion-box entry filed at
+`session-tracking/suggestion-box/2026-09-09-1600-composite-analyzer.md`, uncommitted per the
+established pattern (three prior entries from this mission sit the same way, awaiting
+`policy-writer`).
+
+## Checkpoint (mid-session context clear, not full wind-down)
+
+User: "Let's clear again and restart this session. Create a short handoff (no need for full
+wind-down)." Running `wind-down` in checkpoint mode: Steps 1-5, session stays `active`, ownership
+not released, ledger not moved to `ledger/`.

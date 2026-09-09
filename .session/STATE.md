@@ -55,11 +55,18 @@
       `.session/review-coder-agg1.md`.
 - [ ] User direction on next steps (PR / more work / wind-down)
 
-**Last completed:** reviewer's final PASS verdict on the O2-placement fix commit `0642f472`.
+**Last completed:** post-PASS cleanup — STATE.md and spec.md were conflating design/decisions
+with progress tracking (user correction, 2026-09-09); rewrote STATE to a short pointer-only
+shape, moved an implementation-history entry into spec.md §12, backfilled the ledger, filed
+suggestion-box entry `2026-09-09-1600-composite-analyzer.md`. This is a **checkpoint** (context
+clear, session stays active) per user request — not a full wind-down.
 
-**Next step / resume point:** ask the user what happens next (PR / more work / wind-down).
-`coder-agg1` and `reviewer-agg1` are both idle, holding open on their `In:` channels (not
-terminated) — reuse them for any follow-up rather than launching new agents.
+**Next step / resume point:** the new session should ask the user directly what happens next
+with the finished implementation (PR / more work / wind-down) — do not assume. `coder-agg1` and
+`reviewer-agg1` are both idle, holding open on their `In:` channels (not terminated) — resume
+them via `SendMessage` to their agent IDs/names rather than launching new agents. If their IDs
+are not in the new session's context, use `ListAgents` to find them by name
+(`coder-agg1`/`reviewer-agg1`) first.
 
 ### Status
 
