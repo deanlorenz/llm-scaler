@@ -105,14 +105,28 @@
       decomposing spec v8 §4–§9 in dependency order (accessor → eligibility → per-SO N/Agg_N →
       fallback/decision-path → gate repair → derivation chain → cross-role coverage → composite
       construction/wiring → D3-scoped query API → observability audit → full test-plan sweep)
-- [ ] Launch coder (`coder-agg1`) in this worktree, same-worktree/async
-- [ ] Set up reviewer to read commits as they land
+- [x] Launch coder (`coder-agg1`) in this worktree, same-worktree/async
+- [x] Set up reviewer (`reviewer-agg1`) to read commits as they land
+- [x] **Coder reports all 12 checklist items complete** — commits `4ac16404..f98a566f` on
+      `composite-analyzer`, self-reported `make test`/`make lint` clean (2026-09-09)
+- [x] **Independently verified the coder's completion claim** (mission owner, not taking the
+      report on faith — convention rule 10): `go build ./...` clean; `go test $(go list ./... |
+      grep -v /e2e | grep -v /benchmark)` (exact `make test` scope) all green including
+      `aggregation`/`allocation`/`steadystate`; Ginkgo suite in `steadystate` — 165/167 specs
+      passed, 0 failed, 2 skipped (pre-existing, unrelated). Both non-negotiable regression guards
+      exist and pass: test 1 (`composite_test.go:36-38`, sat-only numerical identity) and test 13
+      (`composite_test.go:213-216`, Score has no effect). IDE diagnostics flagging
+      `undefined: DemandForRole` and unused lowercase `demandForRole` were stale/mid-edit-cache
+      artifacts — not real; `go vet ./...` is clean.
+- [ ] **Reviewer's full Phase 1 + Phase 2 pass** — re-invoked 2026-09-09 now that all 12 commits
+      landed; was previously only standing by on an empty range. In progress.
+- [ ] Mission owner reviews the reviewer's verdict, confirms/pushes back, integrates
 - [ ] Implement: `Agg_N` + derivation chain in/beside `internal/engines/aggregation/`, query API,
-      composite naming + quota-guard repair, observability audit, 30-case test plan
+      composite naming + quota-guard repair, observability audit, 30-case test plan — **DONE per
+      coder + independent build/test verification; pending reviewer's spec-conformance verdict**
 
-**Last completed:** `.session/spec.md` **v8** — §10 fully resolved: D2 decided (yes, policy-owned
-reason on `wva_model_scaling_blocked`), D3 scoped (first two derivation categories only), D4 veto
-pass complete (all 12 confirmed). No open items remain in §10.
+**Last completed:** independent verification of `coder-agg1`'s self-reported completion (build,
+`make test` scope, both regression guards). Reviewer re-engaged for its full pass; not yet landed.
 
 **Errors review #3 caught, for context on how much to trust the current draft:** (1) `N` and
 coverage are the same quantity (`cov = 1/N`) — v3 computed both and called it a cross-check;
@@ -123,31 +137,33 @@ through three drafts; (4) there is no single-model request-shape assumption — 
 
 **Next step / resume point — as of 2026-09-09:**
 
-- **Still working on:** implementation has been authorized ("go ahead. implement and review",
-  2026-09-09). Task file is written; about to launch the coder.
+- **Still working on:** `coder-agg1` reports all 12 checklist items complete
+  (`4ac16404..f98a566f`); mission owner independently verified build/test/regression-guard claims
+  (see checklist). `reviewer-agg1` has been re-invoked for its full Phase 1+2 pass over all 12
+  commits — this was pending as of this STATE update; check `.session/review-coder-agg1.md` and
+  `mission.composite-analyzer.reviewer-agg1.out` for its verdict before treating this mission as
+  done.
 - **Must keep:**
   1. Spec v8 is final and approved — do not reopen §10 (D1–D4) or re-litigate any of the
-     "Design core" bullets below without the user raising it first. The coder's task file
-     encodes the same limits; do not relax them if the coder pushes back.
+     "Design core" bullets below without the user raising it first.
   2. Two suggestion-box entries are filed, uncommitted, awaiting `policy-writer`:
      `session-tracking/suggestion-box/2026-09-08-2300-composite-analyzer.md` (`.wip` protocol
      should not apply to a mission owner's own single-writer STATE.md) and
      `2026-09-08-2311-composite-analyzer.md` (coder-dispatch conventions need a stated default
      path instead of three cold options). Do not resubmit or duplicate these.
   3. Branch was rebased onto `upstream/main` @ `c013012e`; do not rebase again without asking
-     first — the coder's commits will land on top of the current tip.
-  4. **Concurrency (same-worktree setup):** exactly one coder at a time in this worktree. Do
-     not launch a second coder here while `coder-agg1` is active. While it runs, the mission
-     owner (this session) must not edit code in this worktree — reads, planning, and a
-     concurrent reviewer (reading only committed history) are fine.
-  5. Reviewer reads commits from `coder-agg1`'s branch as they land, not after it finishes
-     (user's explicit instruction, also `coder-orchestration.md` rule 9). Review output goes to
-     a file in this session's `.session/`, not the coder's worktree (same worktree here, so:
-     a separate file, not mixed into the coder's own ledger).
-  6. Never push or publish without a fresh per-operation authorization.
-- **Continue from:** launch `coder-agg1` per `.session/task-coder-agg1.md`
-  (`mission.composite-analyzer.coder-agg1.in`/`.out`), same-worktree/async. Then set up a
-  reviewer against the same worktree, reading commits incrementally.
+     first.
+  4. **Concurrency (same-worktree setup):** the coder reported done, but per convention rule 10
+     the task is not closed until reviewed. Do not launch a second coder into this worktree while
+     any follow-up/fix work might still be needed from `coder-agg1` — it was told to hold open
+     after reporting done and wait on its `In:` channel rather than terminate, so re-engage it
+     (SendMessage) for any fix rather than launching a new coder.
+  5. Never push or publish without a fresh per-operation authorization — this includes not
+     opening a PR yet; the user has not asked for that.
+- **Continue from:** await `reviewer-agg1`'s verdict on `.session/review-coder-agg1.md`. If
+  Pass: report to the user, ask about next steps (PR? further missions?). If Request Changes:
+  relay findings to `coder-agg1` via its `In:` channel, do not fix code directly in this
+  worktree while a coder is nominally still assigned to it.
 
 **Standing instruction from review #4:** **[USER]** "Always ask me if not sure." Do not infer intent
 from examples or fill gaps with invented premises — ask.
@@ -166,15 +182,26 @@ from examples or fill gaps with invented premises — ask.
   a specific exception per `conventions/working-outside-worktree.md`; that boundary is enforced by
   convention, not by tooling, so it must be self-enforced.
 - Mission definition: **done** — see Orientation. Normalization deferred; sat units for now.
-- **Implementation: AUTHORIZED [USER, 2026-09-09]** ("go ahead. implement and review"). Coder
-  `coder-agg1` dispatch in progress — **this worktree/branch is claimed by a coder once launched;
-  do not launch a second coder here concurrently.** Setup: same-worktree, async/background. Task
-  file: `.session/task-coder-agg1.md`. Coder ledger (once created):
-  `.session/coder-agg1-ledger.md`.
+- **Implementation: AUTHORIZED [USER, 2026-09-09]** ("go ahead. implement and review").
+  `coder-agg1` **reports all 12 checklist items complete**, commits `4ac16404..f98a566f` on
+  `composite-analyzer`. Coder was told to hold open on its `In:` channel rather than terminate —
+  it has not been released; re-engage it directly (SendMessage) for any fix rather than launching
+  a new coder into this worktree. Task file: `.session/task-coder-agg1.md`. Coder ledger:
+  `.session/coder-agg1-ledger.md` (created by the coder).
+- **Independent verification (mission owner, 2026-09-09):** `go build ./...` clean; `make test`'s
+  exact scope (`go test $(go list ./... | grep -v /e2e | grep -v /benchmark)`) all green; Ginkgo
+  suite in `internal/engines/steadystate` — 165/167 specs passed, 2 skipped (pre-existing,
+  unrelated), 0 failed. Test 1 (sat-only identity, `composite_test.go:36-38`) and test 13 (Score
+  has no effect, `composite_test.go:213-216`) both exist and pass. `go vet ./...` clean. (IDE
+  diagnostics that briefly showed `undefined: DemandForRole` were stale/mid-edit-cache noise, not
+  real — reconfirmed via direct `go build`/`go vet`.)
+- **`reviewer-agg1`: full Phase 1+2 pass re-invoked 2026-09-09**, now that all 12 commits have
+  landed (its first pass, mid-coder-run, correctly found nothing yet to review). Verdict pending
+  — check `.session/review-coder-agg1.md` before treating this mission as done. Do not report
+  this mission complete to the user, open a PR, or push anything until that verdict lands.
 - Spec: **v8, APPROVED [USER, 2026-09-08]**, `.session/spec.md` (~1207 lines). §10 fully resolved
   — D1–D4 all decided, D4's 12 confirmations all veto-passed. Survey delivered:
-  `.session/survey-zero-signal.md`. **Implementation explicitly held back** — user: "do not
-  begin implementing yet" — pending a separate go-ahead.
+  `.session/survey-zero-signal.md`.
 - **Design core (settled by the user, not mine to revisit):**
   - **PRC is per SO** (implies model, variant, role). **Demand is per (model, role)** — three
     values (`both`, `prefill`, `decode`) that do **not** depend on which SOs exist. SOs are added
