@@ -164,8 +164,12 @@ from examples or fill gaps with invented premises — ask.
   vs `upstream/main` is `.session/`. `.session/` tracked and committed, not gitignored;
   `resume-mission` + `wind-down` symlinks verified resolving into
   `session-tracking/claude-skills/`; `git status` clean.
-- Session is **pinned** into this worktree via `EnterWorktree` — cross-worktree reads must use
-  `cat <full-path>` or `git show <branch>:<path>`; `git -C` and `cd` elsewhere are blocked.
+- Session is **not** pinned via `EnterWorktree` — it simply starts with this worktree as its
+  working directory (corrected 2026-09-08; a prior version of this file wrongly claimed
+  `EnterWorktree` pinning). Cross-worktree reads work via plain absolute paths, `cat`, `git -C`,
+  or `git show <branch>:<path>` — whichever is convenient. Cross-worktree **writes** still require
+  a specific exception per `conventions/working-outside-worktree.md`; that boundary is enforced by
+  convention, not by tooling, so it must be self-enforced.
 - Mission definition: **done** — see Orientation. Normalization deferred; sat units for now.
 - Spec: **v8, APPROVED [USER, 2026-09-08]**, `.session/spec.md` (~1207 lines). §10 fully resolved
   — D1–D4 all decided, D4's 12 confirmations all veto-passed. Survey delivered:
