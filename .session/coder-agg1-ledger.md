@@ -38,4 +38,19 @@ Session: coder-agg1. Mission: composite-analyzer. Role: coder. Branch: composite
 
 ## Checklist progress
 
-(Updated per item as commits land.)
+1. [x] Demand accessor — `demandForRole` in `internal/engines/aggregation/demand.go`, tests in
+   `demand_test.go` (same-package, unexported access; merged into the existing `TestAggregation`
+   Ginkgo suite rather than defining a second `RunSpecs` call, which Ginkgo rejects within one
+   package — fixed after first test run failed with "calling RunSpecs more than once").
+   `make lint` clean. Commit `4ac16404`.
+
+2. [x] Undefined-value type — `internal/engines/aggregation/undefined.go`. Decided against a new
+   named type: kept the plain `(value float64, ok bool)` pair `demandForRole` already established
+   (self-describing at call sites, composes with Go multi-return, no wrapper to unwrap). Added
+   `maxOfDefined`/`minOfDefined` — the one shared, swappable combination-rule place per A18 that
+   step 4 (`Agg_N`) and step 6/step 5.6 (`Agg_Spare`/all-agree gate) will call into, so undefined
+   contributors are skipped identically everywhere rather than each aggregator reinventing the
+   skip logic. `make lint` clean on new files (repo has 4 pre-existing staticcheck SA5011 findings
+   in unrelated files — `locator_test.go`, `loader_test.go` — confirmed present on HEAD before my
+   changes via `git stash`; not mine to fix, out of scope).
+
