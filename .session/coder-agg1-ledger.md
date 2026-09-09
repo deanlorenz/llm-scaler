@@ -38,6 +38,61 @@ Session: coder-agg1. Mission: composite-analyzer. Role: coder. Branch: composite
 
 ## Checklist progress
 
+11. [x] Observability — reuse, verify, audit — `internal/engines/steadystate/engine_v2.go`,
+    `docs/reference/cycle-log.md`. Confirmed `logAnalyzerResult`/`recordAnalyzerMetrics` DON'T yet
+    iterate the composite (they run inside `runAnalyzersAndScore`, over the per-analyzer slice,
+    which finishes building before the composite existed under the old item-9 design) — this
+    forced a real restructure, not just a "confirm and move on":
+
+    **Restructured where the composite is built.** Moved `buildComposite`'s call from
+    `collectV2ModelRequest` INTO `runAnalyzersAndScore`, positioned after
+    `updateLivenessAndSetLive` (composite construction needs each entry's real `.Live`, set by
+    that call) but before `recordAnalyzerMetrics`/the `logAnalyzerResult` loop. Append the built
+    composite to `namedResults` before those two calls, so it goes through them exactly like any
+    analyzer entry — same functions, not parallel ones, per spec §6/A22/A23. `runAnalyzersAndScore`
+    still returns `[]allocation.NamedAnalyzerResult` (return TYPE unchanged, per the task's hard
+    constraint) — it now just has one more element. `collectV2ModelRequest` reads the composite
+    back out by name (`findByName`, new helper) rather than rebuilding it, so there's exactly one
+    composite per cycle, not two that could silently drift apart.
+
+    **Deliberately did NOT run the composite through `updateLivenessAndSetLive`** — caught before
+    it became a live bug, by tracing through what that function actually does: it calls
+    `allocation.ResultIsInformative` (analyzer-sentinel vocabulary: `no-data`/`error`) on every
+    entry to decide liveness via a persistent per-model timestamp latch. The composite's `Reason`
+    is the decision-path vocabulary (`C0-agree`/etc.), which never literally equals `no-data`/
+    `error` — the *exact* same class of bug already found and fixed in item 9's
+    `HasUsableCompositeSignal`. Appending the composite before this call would have let the latch
+    silently overwrite `buildComposite`'s own carefully-computed `.Live` with a wrong value.
+    Documented prominently in the code so a future refactor doesn't reorder these two calls without
+    re-reading why.
+
+    **Audit found and fixed a real, pre-existing gap** (not composite-specific — every analyzer's
+    line had it): `logAnalyzerResult` never emitted `.Live` at all. Since `.Live` is exactly the
+    field that says whether an entry currently contributes to the composite/scale-down veto (and
+    the log line has no `.Live` guard — it shows a non-live analyzer's real numbers on purpose),
+    omitting it made "why didn't the composite pick up analyzer X" undiagnosable from the log
+    alone. Added `"live": nr.Live` to every `analyzer-result` line — additive, confirmed safe via
+    the existing test's `assert.Contains`-style (not exact-set) field checks. Also confirmed
+    `recordAnalyzerMetrics` has no such gap (no `.Live`/`ResultIsInformative` guard at all, only
+    `Result == nil`) — nothing to fix there.
+
+    **Docs**: added the composite's row to `docs/reference/cycle-log.md` — example JSON line,
+    field notes on `demand` being in `D_sat` units always, the new decision-path `reason`
+    vocabulary table (distinct from analyzer capacity-provenance reasons — flagged explicitly so a
+    reader doesn't conflate `C2-sat-fallback` with `P0-store`), a grep pattern, and the ordering
+    note (composite's line is always last in a cycle, since it's built from every other line).
+
+    Tests: `composite_observability_test.go` — tests 28 (composite present in both
+    `wva_analyzer_demand`/`wva_analyzer_target`, through `runAnalyzersAndScore`'s real call, not a
+    hand-built slice), 29 (additive — composite's series alongside two analyzers', none replaced),
+    30 (an estimated `P0-store` PRC contributes to the composite exactly like a measured one, no
+    discount). `engine_v2_log_test.go` — new `TestLogAnalyzerResult_EmitsLiveField` (both live=true
+    and live=false, confirming a stale analyzer's real numbers still appear). Full non-e2e `go
+    test`/`make lint`/`gofmt` clean (one full-suite run hit 3 unrelated `Unauthorized`/401 envtest
+    failures in `engine_test.go` — confirmed transient/environmental by re-running twice: passes
+    both alone and as part of the full suite on retry; unrelated to any file this item touches).
+    Commit pending.
+
 10. [x] Query API, D3's two scoped categories — `internal/engines/allocation/query_api.go`.
     Verified line numbers first (per task's Known-issues flag): `rescale.go:606`
     (ceil/rounding), `rescale.go:587-591` (demand fallback), `cost_aware_optimizer.go:309`
