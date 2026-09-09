@@ -44,6 +44,16 @@ Session: coder-agg1. Mission: composite-analyzer. Role: coder. Branch: composite
    package — fixed after first test run failed with "calling RunSpecs more than once").
    `make lint` clean. Commit `4ac16404`.
 
+8. [x] Model-level cross-role coverage — `internal/engines/aggregation/model_coverage.go`:
+   `modelCoverageFromRoles(byRole map[string]float64) (coverage, ok)` = `min(cov(prefill),
+   cov(decode)) + cov(both)`. A role's ABSENCE from the map (not a stored 0) means undefined
+   coverage, using `minOfDefined` from step 2 so an undefined role never enters the `min` as a
+   spurious 0 (test 23/A14). Kept in `aggregation`, not wired as an eager composite field —
+   per D4#9/spec §5.4, it lives only in the query API (step 10), which will build it from
+   whatever `PRCCom`/coverage-per-role values it has in hand at query time. Tests cover test 5
+   (both disaggregated and non-disaggregated cases) and the absent-role part of test 23.
+   Commit pending.
+
 7. [x] Derivation chain N -> RC/SC — `internal/engines/aggregation/prc_com.go`: `PRCCom(satDemand,
    role, nCom, nComOK) (prc, ok)` = `D_sat[role]/N_com(SO)`, undefined when `N_com` isn't ok/<=0 or
    `D_sat` has no defined demand for the role at all (A4), defined-and-zero for a real zero demand
