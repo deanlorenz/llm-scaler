@@ -1,8 +1,8 @@
 # composite-analyzer — mission spec (draft v8)
 
-**Status:** v8 — D1/D2/D3 decided; zero-signal survey complete
-(`.session/survey-zero-signal.md`); D4 veto pass complete, all 12 confirmed. §10 fully
-resolved — spec pending final user approval to begin implementation. 2026-09-08.
+**Status:** v8 approved 2026-09-08. **Implemented and reviewed PASS, 2026-09-09** — see §12's
+implementation entry for the build (commits, coder/reviewer roles) and the one real deviation
+found and fixed (O2 placement, §6.2). Mission is implementation-complete; not yet pushed or PR'd.
 **Mission:** composite aggregation calculation. Spinoff of `single-analyzer`.
 **Branch/worktree:** `composite-analyzer` @ base `upstream/main` `4db060e2`.
 **Role:** mission owner.
@@ -1204,3 +1204,32 @@ and intent, never as authority — and two of their claims have already proved n
     demand→replicas→GPUs chain and bounds are **deferred** to a follow-up mission.
   - **D4 veto pass complete [USER]:** all 12 confirmations stand, no vetoes.
   - No open items remain in §10.
+- **Implementation** (2026-09-09, no spec text changed — v8 stands as the approved design):
+  User approved v8, then separately authorized implementation ("go ahead. implement and
+  review"). Dispatched as `coder-agg1` (implementer) and `reviewer-agg1` (continuous reviewer),
+  same-worktree/async, per a 12-item task-file checklist decomposing §4–§9 in dependency order.
+  Landed as commits `4ac16404..f98a566f` (11 checklist commits) plus `f98a566f`'s test-plan sweep
+  (§9, all 30 items) — see `.session/task-coder-agg1.md` and `.session/review-coder-agg1.md` for
+  the full checklist-to-commit mapping.
+
+  **One real deviation found and fixed — §6.2's O2 decision.** Commit `0ec6c170` moved
+  `buildComposite`'s call from the mandated O2 site (`collectV2ModelRequest`) into
+  `runAnalyzersAndScore`, to reuse `logAnalyzerResult`/`recordAnalyzerMetrics` without a second
+  call. This is architecturally **O1** (§6.2 evaluates and rejects that placement) even though it
+  technically avoided changing `runAnalyzersAndScore`'s return type. `reviewer-agg1` caught it;
+  the coder should have stopped and asked (a genuine spec-adjacent ambiguity) but proceeded
+  instead.
+
+  **User ruling:** the coder's trade was wrong. §6.2's O2 decision stands as specced — composite
+  construction stays at `collectV2ModelRequest` only. Observability parity is achieved by calling
+  `logAnalyzerResult`/`recordAnalyzerMetrics` for the composite as a **second explicit call** from
+  that same O2 site, not by relocating composition. (Whether the engine's analyze/log/metrics
+  pipeline should be restructured more broadly is a separate, later, clean discussion — explicitly
+  not opened here.) Fix landed as commit `0642f472` (not a history rewrite); `reviewer-agg1`
+  independently verified the revert byte-for-byte against `81ef806d~1` and traced
+  `evictStaleAnalyzerSeries`'s actual logic (not the commit message's claim) to confirm the
+  double-call is eviction-safe.
+
+  **Final verdict: PASS, 12/12 checklist items.** Both non-negotiable regression guards (test 1
+  sat-only identity, test 13 Score-has-no-effect) hold throughout, before and after the fix.
+  Mission is implementation-complete; not pushed, no PR opened as of this entry.
