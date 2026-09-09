@@ -118,15 +118,22 @@
       (`composite_test.go:213-216`, Score has no effect). IDE diagnostics flagging
       `undefined: DemandForRole` and unused lowercase `demandForRole` were stale/mid-edit-cache
       artifacts — not real; `go vet ./...` is clean.
-- [ ] **Reviewer's full Phase 1 + Phase 2 pass** — re-invoked 2026-09-09 now that all 12 commits
-      landed; was previously only standing by on an empty range. In progress.
-- [ ] Mission owner reviews the reviewer's verdict, confirms/pushes back, integrates
+- [x] **Reviewer's full Phase 1 + Phase 2 pass** — 11/12 items Pass. 1 flagged: commit `0ec6c170`
+      moved `buildComposite` off the mandated O2 site (`collectV2ModelRequest`) into
+      `runAnalyzersAndScore` for observability reuse — spec §6.2 evaluates that placement as O1
+      and rejects it. Full detail: `.session/review-coder-agg1.md`.
+- [x] **User ruling (2026-09-09): coder was wrong.** Composite build stays at O2 only. For
+      observability, call `logAnalyzerResult`/`recordAnalyzerMetrics` for the composite from
+      `collectV2ModelRequest` itself — do not fold composition into `runAnalyzersAndScore`. No
+      pipeline redesign now (explicitly deferred). Sent to `coder-agg1` as a new commit, not a
+      history rewrite.
+- [ ] Coder lands the fix commit; reviewer re-checks; then mission owner integrates.
 - [ ] Implement: `Agg_N` + derivation chain in/beside `internal/engines/aggregation/`, query API,
-      composite naming + quota-guard repair, observability audit, 30-case test plan — **DONE per
-      coder + independent build/test verification; pending reviewer's spec-conformance verdict**
+      composite naming + quota-guard repair, observability audit, 30-case test plan — **11/12
+      done and reviewed; 1 fix (observability placement) in progress**
 
-**Last completed:** independent verification of `coder-agg1`'s self-reported completion (build,
-`make test` scope, both regression guards). Reviewer re-engaged for its full pass; not yet landed.
+**Last completed:** reviewer flagged commit `0ec6c170`'s placement violation; user ruled composite
+build stays at O2, coder is fixing via a new commit (not history rewrite).
 
 **Errors review #3 caught, for context on how much to trust the current draft:** (1) `N` and
 coverage are the same quantity (`cov = 1/N`) — v3 computed both and called it a cross-check;
@@ -137,33 +144,24 @@ through three drafts; (4) there is no single-model request-shape assumption — 
 
 **Next step / resume point — as of 2026-09-09:**
 
-- **Still working on:** `coder-agg1` reports all 12 checklist items complete
-  (`4ac16404..f98a566f`); mission owner independently verified build/test/regression-guard claims
-  (see checklist). `reviewer-agg1` has been re-invoked for its full Phase 1+2 pass over all 12
-  commits — this was pending as of this STATE update; check `.session/review-coder-agg1.md` and
-  `mission.composite-analyzer.reviewer-agg1.out` for its verdict before treating this mission as
-  done.
+- **Still working on:** one fix commit, in progress at `coder-agg1`. 11/12 checklist items passed
+  review clean; item 11 (observability) had its composite-build call in the wrong place
+  (`0ec6c170` moved it off O2) — user ruled the coder's placement wrong, fix is: keep composite
+  build at `collectV2ModelRequest` (O2), call `logAnalyzerResult`/`recordAnalyzerMetrics` for the
+  composite from there too, as a second explicit call — not by folding composition into
+  `runAnalyzersAndScore`. Sent to `coder-agg1` (SendMessage, not a new agent).
 - **Must keep:**
-  1. Spec v8 is final and approved — do not reopen §10 (D1–D4) or re-litigate any of the
-     "Design core" bullets below without the user raising it first.
-  2. Two suggestion-box entries are filed, uncommitted, awaiting `policy-writer`:
-     `session-tracking/suggestion-box/2026-09-08-2300-composite-analyzer.md` (`.wip` protocol
-     should not apply to a mission owner's own single-writer STATE.md) and
-     `2026-09-08-2311-composite-analyzer.md` (coder-dispatch conventions need a stated default
-     path instead of three cold options). Do not resubmit or duplicate these.
-  3. Branch was rebased onto `upstream/main` @ `c013012e`; do not rebase again without asking
-     first.
-  4. **Concurrency (same-worktree setup):** the coder reported done, but per convention rule 10
-     the task is not closed until reviewed. Do not launch a second coder into this worktree while
-     any follow-up/fix work might still be needed from `coder-agg1` — it was told to hold open
-     after reporting done and wait on its `In:` channel rather than terminate, so re-engage it
-     (SendMessage) for any fix rather than launching a new coder.
-  5. Never push or publish without a fresh per-operation authorization — this includes not
-     opening a PR yet; the user has not asked for that.
-- **Continue from:** await `reviewer-agg1`'s verdict on `.session/review-coder-agg1.md`. If
-  Pass: report to the user, ask about next steps (PR? further missions?). If Request Changes:
-  relay findings to `coder-agg1` via its `In:` channel, do not fix code directly in this
-  worktree while a coder is nominally still assigned to it.
+  1. Spec v8 is final and approved — do not reopen §10 (D1–D4) or the "Design core" bullets
+     without the user raising it first.
+  2. Two suggestion-box entries filed, uncommitted, awaiting `policy-writer` — do not resubmit.
+  3. Branch rebased onto `upstream/main` @ `c013012e`; do not rebase again without asking.
+  4. **No pipeline redesign right now** — user explicit: the bigger question of which pipeline
+     step does what should be revisited later, cleanly, not folded into this fix.
+  5. **AskUserQuestion text must stay short** — user feedback, see memory
+     `feedback_ask_questions_short_and_scannable`. Do not repeat the long-question mistake.
+  6. Never push or publish without a fresh per-operation authorization.
+- **Continue from:** wait for `coder-agg1`'s fix commit; have `reviewer-agg1` re-check just that
+  commit; then integrate/report to user.
 
 **Standing instruction from review #4:** **[USER]** "Always ask me if not sure." Do not infer intent
 from examples or fill gaps with invented premises — ask.
