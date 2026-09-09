@@ -44,6 +44,19 @@ Session: coder-agg1. Mission: composite-analyzer. Role: coder. Branch: composite
    package — fixed after first test run failed with "calling RunSpecs more than once").
    `make lint` clean. Commit `4ac16404`.
 
+4. [x] Per-SO N and AggN — `internal/engines/aggregation/replicas_needed.go`:
+   `replicasNeeded(result, variant) (n, ok)` is `N_i(SO)`; `AggN(results, variant) (n, ok)` is
+   `Agg_N`, a pure max via `maxOfDefined` (no Score param at all — Score cannot leak in through
+   this seam by construction). "SO" = variant name within one model's composition (confirmed by
+   re-reading spec §2.4 "PRC is per SO (implying model, variant, role)" — no other concrete type
+   exists in the codebase for "SO"; `VariantCapacity.VariantName` + its `Role` is the SO). Kept
+   both functions in `aggregation`, not `allocation`: they only need `*domain.AnalyzerResult`, no
+   `NamedAnalyzerResult`/`Live` — eligibility filtering is the caller's job (step 3's `eligible()`,
+   applied before building the `[]*domain.AnalyzerResult` slice passed in), consistent with "AggN
+   aggregates whatever it's given" being pure. Tests cover spec §9 items 2, 3, 9, 13, 17-21 (test
+   17 zero-demand-flows-through, 21 PRC>0/demand==0 legal, both landed here since they're
+   `replicasNeeded`-level facts, not composite-level). Commit pending.
+
 3. [x] Eligibility — `eligible(nr) bool` in `internal/engines/allocation/composite_eligibility.go`
    (not `aggregation` package: needs `NamedAnalyzerResult`/`ResultIsInformative`/`Live`, all
    `allocation`-owned; `aggregation` does not currently import `allocation` and I did not want to
