@@ -50,7 +50,7 @@ func replicasNeeded(result *domain.AnalyzerResult, variant string) (n float64, o
 	if vc.PerReplicaCapacity <= 0 {
 		return 0, false
 	}
-	demand, present := demandForRole(result, roleOf(vc))
+	demand, present := DemandForRole(result, roleOf(vc))
 	if !present {
 		return 0, false
 	}

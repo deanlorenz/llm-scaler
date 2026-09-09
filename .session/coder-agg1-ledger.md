@@ -38,6 +38,101 @@ Session: coder-agg1. Mission: composite-analyzer. Role: coder. Branch: composite
 
 ## Checklist progress
 
+9. [x] Composite construction, deep copy, identity, compose-site wiring — the big item.
+   `internal/engines/steadystate/composite.go`: `buildComposite(ctx, namedResults, scaleUp,
+   scaleDown) allocation.NamedAnalyzerResult`. Wired in at `collectV2ModelRequest` (old
+   line 797, now inside the "compose" comment block), replacing `namedResults[0]`.
+   `allocation.CompositeSignalName = "CompositeSignal"` added (`composite_identity.go`).
+
+   **Exported previously-unexported allocation helpers** so the engine-side builder (which must
+   live in `steadystate` — it needs `buildRoleCapacities`/`applyUniversalThreshold`, both
+   unexported in that package, and `allocation` cannot import `steadystate`, that's the real
+   direction) can consume them: `resolveSO`→`allocation.ResolveSO`, `soDecision`→
+   `allocation.SODecision` (fields `N/OK/Path/Contributors`), `demandForRole`→
+   `aggregation.DemandForRole`. Mechanical rename, same logic, updated all call sites including
+   tests (item 5's `composite_decision_test.go`, item 1/7's `demand_test.go`/`prc_com_test.go`).
+
+   **Two real bugs found and fixed during this item, beyond the design work itself:**
+
+   1. **Zero-demand SO must not lose its real PRC.** `PRC_com(SO)` is formally undefined when
+      `N_com(SO) == 0` (spec §4.4 — "nothing needed"), which happens whenever an SO's role has
+      zero demand — but PRC and demand are independent (§2.4): a zero-demand SO can still hold
+      real replicas contributing real spare capacity that a scale-down decision needs to see.
+      Leaving `PerReplicaCapacity` at the Go zero value there would silently erase that supply and
+      break test 1 (sat-only byte-identical) for any zero-demand SO. Resolved by falling through
+      to the SO's own representative analyzer-measured PRC whenever `PRCCom` returns not-ok — this
+      is what makes the sat-only identity hold unconditionally, not just when demand happens to be
+      positive. Added a dedicated test for this exact case in `composite_test.go`.
+   2. **Composite `Reason` (decision path) is not the same vocabulary as an analyzer's own
+      `Reason` (capacity provenance) — conflating them silently defeats the no-signal gate.**
+      Wrote `HasUsableCompositeSignal` (item 6) to delegate to `ResultIsInformative`, which checks
+      `Reason != "no-data" && Reason != "error"`. Once item 9 started writing the composite's own
+      `Reason` as the decision-path string (`C0-agree`/.../`C4-no-signal`), a probe test proved
+      `HasUsableCompositeSignal` returned **true** for a composite whose only SO was
+      `C4-no-signal`, because `"C4-no-signal"` matches neither analyzer sentinel string — the gate
+      I built in item 6 would have silently never fired on the real composite construction path.
+      Fixed by rewriting `HasUsableCompositeSignal` to check `Reason != allocation.DecisionNoSignal`
+      directly instead of delegating to `ResultIsInformative` (which is correctly calibrated to
+      analyzers' own vocabulary, not the composite's). Had to also fix item 6's own tests
+      (`composite_signal_gate_test.go`) and the `engine_v2_quota_test.go`/quota fixtures, which had
+      used analyzer-style sentinel strings (`"P0-store"`, `ReasonNoData`) standing in for composite
+      `Reason` values — updated them to real decision-path constants. Caught only because I wrote
+      an end-to-end probe test exercising the full `collectV2ModelRequest` path with a genuinely
+      no-signal saturation result, rather than trusting the item-6 unit tests (which tested
+      `HasUsableCompositeSignal` in isolation with hand-picked `Reason` strings that happened not
+      to exercise this exact conflict) — **this is exactly why test 8d needed an end-to-end variant
+      in `composite_test.go`, not just the unit-level one from item 6.**
+
+   **Design decisions made without spec-explicit guidance, reasoned from the spec's stated
+   philosophy (A16'/A27/A28's "never second-guess or discount a real measured value") rather than
+   invented from nothing:**
+   - Composite's `.Live` = true iff at least one SO reached a real (non-`C4-no-signal`) decision
+     across the whole composite. Required because `needsScaleDownForRole`/
+     `safeRemovalReplicasForRole` (in `allocation`) gate on `NamedAnalyzerResult.Live` directly, and
+     since the optimizer's per-model record now comes from the composite (not `namedResults[0]`
+     raw), leaving `.Live` at its Go zero value would silently disable scale-down for every model.
+     Verified via test 1 that this reduces to sat's own `.Live` exactly on the sat-only path.
+   - Composite's per-variant `Score` legacy field = max over ALL entries' Scores (A9'''), computed
+     directly rather than reusing `resolveSO`'s per-SO contributor list (Score is model/analyzer
+     level, not per-SO, so this is simpler and correct independent of per-SO decisions).
+   - Per-SO `VariantCapacity.TotalDemand`/`Utilization` on the composite copy the REPRESENTATIVE
+     source analyzer's own per-variant values (not `D_sat[role]`, which is shared across every SO
+     in a role and would double-count if copied onto each) — `Utilization` is then recomputed with
+     `PRC_com` substituted for the source's own PRC, mirroring the same substitution §5.3 makes for
+     RC/SC, and reducing to the source's own `Utilization` exactly when `PRC_com` falls through to
+     the source's PRC (the zero-demand case above).
+   - `buildCapacities` (existing `steadystate` function) is called with `metaByVariant = nil` on
+     the composite — confirmed via its own doc comment this is a documented no-op join, safe
+     because the composite already carries reconciled Role/ReplicaCount copied from its
+     representative source (which itself already went through the real metadata join).
+   - Saturation's own `Result` is always non-nil by construction on the real path (verified:
+     `runAnalyzersAndScore` returns the error before building any `NamedAnalyzerResult` if
+     saturation's own analysis fails) — `findSaturation`/`emptyComposite`'s nil-guard branch is
+     unreachable in production, kept only so a test slice with no saturation entry degrades safely
+     rather than panicking.
+
+   Tests: `composite_test.go` — test 1 (sat-only regression, including the zero-demand-SO variant
+   and the composite's-own-name variant), test 8d (end-to-end no-signal), test 13 (Score has no
+   effect, both on PRC_com/RC/SC AND confirming the legacy Score field itself DOES differ per
+   A9'''), test 15 (end-to-end higher-demand contributor), test 24 (deep-copy isolation, two
+   variants: direct mutation, and no-aliasing across two composites built from the same inputs).
+   **Also restored the 3 skipped multi-analyzer tests** (`engine_v2_population_test.go` — Score
+   population, Score defaulting, per-analyzer threshold override): removed their `Skip(...)` calls;
+   all 3 passed immediately with zero test-body changes, because they exercise
+   `runAnalyzersAndScore` directly, a layer beneath composite construction that this mission does
+   not change (task explicitly forbids changing its return type) — confirmed this matches the
+   ledger's item-1 hypothesis about which "3" the task meant. **Left the other 5-6 skip sites
+   untouched** (`engine_v2_test.go:375`, `engine_external_registry_test.go:55`,
+   `engine_v2_demand_liveness_test.go` x3, `greedy_score_optimizer_test.go:868`) — task explicitly
+   scoped this to "the 3", and at least one of the others I spot-checked also looks
+   trivially unskippable by the same reasoning, but restoring those is outside this item's stated
+   scope; flagging for the mission owner as a found opportunity rather than acting on it unasked.
+
+   Full non-e2e `go test $(go list ./... | grep -v /test/e2e)` clean, `make lint`/`gofmt` clean on
+   all changed files. Commit pending.
+
+## Checklist progress
+
 1. [x] Demand accessor — `demandForRole` in `internal/engines/aggregation/demand.go`, tests in
    `demand_test.go` (same-package, unexported access; merged into the existing `TestAggregation`
    Ginkgo suite rather than defining a second `RunSpecs` call, which Ginkgo rejects within one

@@ -23,7 +23,7 @@ func PRCCom(satDemand *domain.AnalyzerResult, role string, nCom float64, nComOK 
 	if !nComOK || nCom <= 0 {
 		return 0, false
 	}
-	demand, present := demandForRole(satDemand, role)
+	demand, present := DemandForRole(satDemand, role)
 	if !present {
 		return 0, false
 	}

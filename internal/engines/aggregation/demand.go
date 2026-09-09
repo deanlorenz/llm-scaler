@@ -2,7 +2,7 @@ package aggregation
 
 import "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 
-// demandForRole returns result's demand for role, and whether that demand is
+// DemandForRole returns result's demand for role, and whether that demand is
 // present at all.
 //
 // An AnalyzerResult stores its per-role demand in one of two layouts: when the
@@ -24,7 +24,7 @@ import "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 //   - RoleDemand nil and role does NOT canonicalize to domain.RoleBoth (e.g.
 //     "prefill" asked of a non-disaggregated result): not present — a
 //     non-disaggregated analyzer never had an opinion about that role.
-func demandForRole(result *domain.AnalyzerResult, role string) (value float64, present bool) {
+func DemandForRole(result *domain.AnalyzerResult, role string) (value float64, present bool) {
 	if role == "" {
 		role = domain.RoleBoth
 	}

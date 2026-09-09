@@ -6,7 +6,7 @@ package aggregation
 // meaninglessness must be represented explicitly rather than as a number.
 //
 // The convention is the plain (value float64, ok bool) pair already used by
-// demandForRole — no new named type. A pair keeps every helper's signature
+// DemandForRole — no new named type. A pair keeps every helper's signature
 // self-describing at the call site and composes directly with Go's multiple
 // return values, without forcing callers to unwrap a struct first. Later
 // helpers (Agg_N, Agg_Spare, ...) return this same shape; none of them

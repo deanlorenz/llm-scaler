@@ -797,13 +797,23 @@ func (e *Engine) collectV2ModelRequest(
 		}
 	}
 
-	// namedResults[0] is always the saturation entry — it is built first and
-	// unconditionally. The optimizer only needs sat's signal; all other entries
-	// are engine-internal (liveness, metrics) and not forwarded.
+	// The optimizer's input is the composite (spec composite-analyzer §6.1) —
+	// never literally saturation, even on the sat-only path. buildComposite
+	// reduces the full namedResults slice (every enabled analyzer's demand,
+	// not just saturation's) into the single NamedAnalyzerResult the
+	// optimizer consumes; the per-analyzer slice itself is untouched and
+	// still serves liveness/metrics/logging inside runAnalyzersAndScore.
+	//
+	// Saturation's own thresholds are the composite's too: the composite is
+	// expressed in D_sat units (spec §4.4), so the same scale-up/scale-down
+	// boundaries that would apply to saturation alone apply to it.
+	satUp, satDown := config.AnalyzerThresholds(domain.SaturationAnalyzerName)
+	composite := buildComposite(ctx, namedResults, satUp, satDown)
+
 	return &allocation.ModelScalingRequest{
 		ModelID:         modelID,
 		Namespace:       namespace,
-		CompositeSignal: namedResults[0],
+		CompositeSignal: composite,
 		VariantStates:   variantStates,
 		Variants:        variantMetadata,
 		Priority:        config.Priority,

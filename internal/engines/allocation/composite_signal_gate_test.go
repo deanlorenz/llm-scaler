@@ -13,12 +13,12 @@ var _ = Describe("HasUsableCompositeSignal", func() {
 		Expect(HasUsableCompositeSignal(NamedAnalyzerResult{Result: nil})).To(BeFalse())
 	})
 
-	It("is true for a real, informative composite result, regardless of its Name", func() {
+	It("is true for a composite with at least one SO reaching a real decision path, regardless of its Name", func() {
 		composite := NamedAnalyzerResult{
 			Name: "CompositeSignal", // not "saturation" -- the whole point of the rename (spec §8)
 			Result: &domain.AnalyzerResult{
 				VariantCapacities: []domain.VariantCapacity{
-					{VariantName: "v", PerReplicaCapacity: 100, Reason: "P0-store"},
+					{VariantName: "v", PerReplicaCapacity: 100, Reason: DecisionSingle},
 				},
 			},
 		}
@@ -35,7 +35,7 @@ var _ = Describe("HasUsableCompositeSignal", func() {
 			Name: "CompositeSignal",
 			Result: &domain.AnalyzerResult{
 				TotalDemand:       500,
-				VariantCapacities: []domain.VariantCapacity{{VariantName: "v", PerReplicaCapacity: 100, Reason: "measured"}},
+				VariantCapacities: []domain.VariantCapacity{{VariantName: "v", PerReplicaCapacity: 100, Reason: DecisionSatFallback}},
 			},
 		}
 		Expect(HasUsableCompositeSignal(composite)).To(BeTrue())
@@ -43,16 +43,15 @@ var _ = Describe("HasUsableCompositeSignal", func() {
 			"the test is only meaningful if the composite's name really is not saturation's")
 	})
 
-	// test 8d: no signal at all -> no autoscaling. Every VariantCapacity
-	// carries a no-data/error sentinel (mirrors what a composite with every
-	// SO's decision path bottoming out at C4-no-signal would look like).
-	It("is false when every VariantCapacity is a no-data/error sentinel (test 8d — no signal at all)", func() {
+	// test 8d: no signal at all -> no autoscaling. Every SO's decision path
+	// bottomed out at C4-no-signal.
+	It("is false when every VariantCapacity's decision path is C4-no-signal (test 8d — no signal at all)", func() {
 		composite := NamedAnalyzerResult{
 			Name: "CompositeSignal",
 			Result: &domain.AnalyzerResult{
 				VariantCapacities: []domain.VariantCapacity{
-					{VariantName: "v1", Reason: ReasonNoData},
-					{VariantName: "v2", Reason: ReasonError},
+					{VariantName: "v1", Reason: DecisionNoSignal},
+					{VariantName: "v2", Reason: DecisionNoSignal},
 				},
 			},
 		}
@@ -67,13 +66,32 @@ var _ = Describe("HasUsableCompositeSignal", func() {
 		Expect(HasUsableCompositeSignal(composite)).To(BeFalse())
 	})
 
-	It("is true when at least one VariantCapacity is informative even if others are not", func() {
+	It("is true when at least one SO reached a real decision even if others are C4-no-signal", func() {
 		composite := NamedAnalyzerResult{
 			Name: "CompositeSignal",
 			Result: &domain.AnalyzerResult{
 				VariantCapacities: []domain.VariantCapacity{
-					{VariantName: "v1", Reason: ReasonNoData},
-					{VariantName: "v2", PerReplicaCapacity: 200, Reason: "P0-store"},
+					{VariantName: "v1", Reason: DecisionNoSignal},
+					{VariantName: "v2", PerReplicaCapacity: 200, Reason: DecisionAgree},
+				},
+			},
+		}
+		Expect(HasUsableCompositeSignal(composite)).To(BeTrue())
+	})
+
+	// The regression this fix exists to catch: an analyzer-style no-data
+	// sentinel string is NOT the same thing as the composite's own
+	// DecisionNoSignal marker, and the two must never be conflated -- a
+	// composite Reason of anything other than literally "C4-no-signal" (even
+	// an analyzer sentinel string used by mistake) must count as usable,
+	// because on the real composite construction path Reason is always a
+	// decision-path value, never an analyzer sentinel.
+	It("treats a composite Reason equal to an analyzer sentinel string as usable, since composite Reason means decision path, not analyzer provenance", func() {
+		composite := NamedAnalyzerResult{
+			Name: "CompositeSignal",
+			Result: &domain.AnalyzerResult{
+				VariantCapacities: []domain.VariantCapacity{
+					{VariantName: "v", Reason: ReasonNoData}, // NOT DecisionNoSignal -- a different string
 				},
 			},
 		}

@@ -94,7 +94,7 @@ var _ = Describe("PRCCom", func() {
 		prcCom, ok := PRCCom(sat, "prefill", nCom, true)
 		Expect(ok).To(BeTrue())
 
-		demand, present := demandForRole(sat, "prefill")
+		demand, present := DemandForRole(sat, "prefill")
 		Expect(present).To(BeTrue())
 		recovered := math.Ceil(demand / prcCom)
 		Expect(recovered).To(Equal(math.Ceil(nCom)))

@@ -7,36 +7,36 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 )
 
-var _ = Describe("demandForRole", func() {
+var _ = Describe("DemandForRole", func() {
 
 	Describe("non-disaggregated layout (RoleDemand nil)", func() {
 		It("reads TotalDemand for domain.RoleBoth", func() {
 			result := &domain.AnalyzerResult{TotalDemand: 42.0, RoleDemand: nil}
-			value, present := demandForRole(result, domain.RoleBoth)
+			value, present := DemandForRole(result, domain.RoleBoth)
 			Expect(present).To(BeTrue())
 			Expect(value).To(Equal(42.0))
 		})
 
 		It("canonicalizes an empty role string to domain.RoleBoth", func() {
 			result := &domain.AnalyzerResult{TotalDemand: 42.0, RoleDemand: nil}
-			value, present := demandForRole(result, "")
+			value, present := DemandForRole(result, "")
 			Expect(present).To(BeTrue())
 			Expect(value).To(Equal(42.0))
 		})
 
 		It("reads a real zero TotalDemand as present, not absent", func() {
 			result := &domain.AnalyzerResult{TotalDemand: 0, RoleDemand: nil}
-			value, present := demandForRole(result, domain.RoleBoth)
+			value, present := DemandForRole(result, domain.RoleBoth)
 			Expect(present).To(BeTrue())
 			Expect(value).To(BeZero())
 		})
 
 		It("reports not-present for a specific role when the layout is non-disaggregated", func() {
 			result := &domain.AnalyzerResult{TotalDemand: 42.0, RoleDemand: nil}
-			_, present := demandForRole(result, "prefill")
+			_, present := DemandForRole(result, "prefill")
 			Expect(present).To(BeFalse())
 
-			_, present = demandForRole(result, "decode")
+			_, present = DemandForRole(result, "decode")
 			Expect(present).To(BeFalse())
 		})
 	})
@@ -46,11 +46,11 @@ var _ = Describe("demandForRole", func() {
 			result := &domain.AnalyzerResult{
 				RoleDemand: map[string]float64{"prefill": 10.0, "decode": 20.0},
 			}
-			value, present := demandForRole(result, "prefill")
+			value, present := DemandForRole(result, "prefill")
 			Expect(present).To(BeTrue())
 			Expect(value).To(Equal(10.0))
 
-			value, present = demandForRole(result, "decode")
+			value, present = DemandForRole(result, "decode")
 			Expect(present).To(BeTrue())
 			Expect(value).To(Equal(20.0))
 		})
@@ -59,11 +59,11 @@ var _ = Describe("demandForRole", func() {
 			result := &domain.AnalyzerResult{
 				RoleDemand: map[string]float64{"prefill": 0.0},
 			}
-			value, present := demandForRole(result, "prefill")
+			value, present := DemandForRole(result, "prefill")
 			Expect(present).To(BeTrue())
 			Expect(value).To(BeZero())
 
-			_, present = demandForRole(result, "decode")
+			_, present = DemandForRole(result, "decode")
 			Expect(present).To(BeFalse())
 		})
 
@@ -71,7 +71,7 @@ var _ = Describe("demandForRole", func() {
 			result := &domain.AnalyzerResult{
 				RoleDemand: map[string]float64{domain.RoleBoth: 5.0, "prefill": 10.0},
 			}
-			value, present := demandForRole(result, "")
+			value, present := DemandForRole(result, "")
 			Expect(present).To(BeTrue())
 			Expect(value).To(Equal(5.0))
 		})
@@ -80,7 +80,7 @@ var _ = Describe("demandForRole", func() {
 			result := &domain.AnalyzerResult{
 				RoleDemand: map[string]float64{"prefill": 10.0},
 			}
-			_, present := demandForRole(result, "decode")
+			_, present := DemandForRole(result, "decode")
 			Expect(present).To(BeFalse())
 		})
 	})

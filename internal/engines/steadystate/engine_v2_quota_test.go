@@ -27,11 +27,12 @@ var _ = Describe("gpuUsageViews", func() {
 	AfterEach(func() { decision.DefaultGPUUsage.Reset() })
 
 	// managedRequest is one variant holding replicas GPUs of the given type.
-	// CompositeSignal.Result carries one informative VariantCapacity so the
-	// request passes hasSaturationResult's usable-signal gate
-	// (allocation.HasUsableCompositeSignal) exactly as a real per-cycle
-	// composite would — an empty *domain.AnalyzerResult{} has no capacity
-	// signal at all and is correctly excluded from the quota charge.
+	// CompositeSignal.Result carries one VariantCapacity with a real decision
+	// path (not C4-no-signal) so the request passes hasSaturationResult's
+	// usable-signal gate (allocation.HasUsableCompositeSignal) exactly as a
+	// real per-cycle composite would — an empty *domain.AnalyzerResult{} has
+	// no capacity signal at all and is correctly excluded from the quota
+	// charge.
 	managedRequest := func(namespace, accelerator string, replicas int) allocation.ModelScalingRequest {
 		return allocation.ModelScalingRequest{
 			Namespace: namespace,
@@ -39,7 +40,7 @@ var _ = Describe("gpuUsageViews", func() {
 				Name: domain.SaturationAnalyzerName,
 				Result: &domain.AnalyzerResult{
 					VariantCapacities: []domain.VariantCapacity{
-						{VariantName: "v", PerReplicaCapacity: 100, Reason: "P0-store"},
+						{VariantName: "v", PerReplicaCapacity: 100, Reason: allocation.DecisionSingle},
 					},
 				},
 			},
@@ -155,7 +156,7 @@ var _ = Describe("hasSaturationResult (quota guard, post-rename)", func() {
 			Name: name,
 			Result: &domain.AnalyzerResult{
 				VariantCapacities: []domain.VariantCapacity{
-					{VariantName: "v", PerReplicaCapacity: 100, Reason: "P0-store"},
+					{VariantName: "v", PerReplicaCapacity: 100, Reason: allocation.DecisionSingle},
 				},
 			},
 		}
@@ -175,11 +176,15 @@ var _ = Describe("hasSaturationResult (quota guard, post-rename)", func() {
 
 	// test 8d: no signal at all -> no autoscaling, and specifically here, no
 	// quota charge for a request that was not usefully measured this cycle.
+	// The composite's own Reason vocabulary is the decision path (C0-agree,
+	// C1-single, C2-sat-fallback, C4-no-signal — spec §5.1.2), not an
+	// analyzer's no-data/error/P0-store sentinels: a real composite with no
+	// usable signal for an SO records allocation.DecisionNoSignal there.
 	It("does not charge usage for a request whose composite carries no usable signal (test 8d)", func() {
 		noSignal := allocation.NamedAnalyzerResult{
 			Name: "CompositeSignal",
 			Result: &domain.AnalyzerResult{
-				VariantCapacities: []domain.VariantCapacity{{VariantName: "v", Reason: allocation.ReasonNoData}},
+				VariantCapacities: []domain.VariantCapacity{{VariantName: "v", Reason: allocation.DecisionNoSignal}},
 			},
 		}
 		req := requestWithComposite(noSignal, 3)

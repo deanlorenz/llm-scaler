@@ -32,17 +32,21 @@ const (
 	DecisionNoSignal = "C4-no-signal"
 )
 
-// soDecision is the outcome of resolving one SO's N_com: the aggregated
+// SODecision is the outcome of resolving one SO's N_com: the aggregated
 // value (if any), which decision path produced it, and which analyzer names
-// actually contributed (for provenance, spec A12).
-type soDecision struct {
-	n            float64
-	ok           bool
-	path         string
-	contributors []string
+// actually contributed (for provenance, spec A12). Exported so the engine's
+// composite-construction step (internal/engines/steadystate) can consume it
+// directly — ResolveSO is allocation's public entry point for "how was this
+// SO's aggregate reached", and the engine builds the composite
+// NamedAnalyzerResult from it rather than re-deriving the decision itself.
+type SODecision struct {
+	N            float64
+	OK           bool
+	Path         string
+	Contributors []string
 }
 
-// resolveSO computes one SO's (variant's) N_com and decision path from the
+// ResolveSO computes one SO's (variant's) N_com and decision path from the
 // full analyzer slice, per spec §5.1's fallback chain:
 //
 //	contributors(SO) = eligible NON-SATURATION analyzers with a defined N(SO)
@@ -63,7 +67,7 @@ type soDecision struct {
 // C1-single, never C2-sat-fallback, which contradicts §5.1's "saturation
 // does not participate unconditionally — only as fallback" and defeats the
 // spec's #8/#8a/#8b/#8c fallback tests.
-func resolveSO(entries []NamedAnalyzerResult, variant string) soDecision {
+func ResolveSO(entries []NamedAnalyzerResult, variant string) SODecision {
 	type contribution struct {
 		name string
 		n    float64
@@ -103,15 +107,15 @@ func resolveSO(entries []NamedAnalyzerResult, variant string) soDecision {
 		if len(contributions) == 1 {
 			path = DecisionSingle
 		}
-		return soDecision{n: best, ok: true, path: path, contributors: names}
+		return SODecision{N: best, OK: true, Path: path, Contributors: names}
 	}
 
 	// No non-saturation contributor. Fall back to saturation's own N, if it
 	// is itself eligible and defined — never invent a value it did not
 	// produce.
 	if sat != nil {
-		return soDecision{n: sat.n, ok: true, path: DecisionSatFallback, contributors: []string{sat.name}}
+		return SODecision{N: sat.n, OK: true, Path: DecisionSatFallback, Contributors: []string{sat.name}}
 	}
 
-	return soDecision{ok: false, path: DecisionNoSignal}
+	return SODecision{OK: false, Path: DecisionNoSignal}
 }
