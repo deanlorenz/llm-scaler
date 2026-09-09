@@ -96,11 +96,19 @@
       derivation categories only (ceil()/rounding + PRC/demand lookup)
 - [x] **Veto pass on §10/D4's 12 confirmations** — all 12 confirmed, no vetoes
 - [x] **Get explicit user approval of spec v8 as a whole** — approved 2026-09-08
-- [ ] **Get separate explicit go-ahead to begin implementation** (user: "do not begin
-      implementing yet" — approval of the spec is not this go-ahead)
-- [ ] Implement (post-approval): `Agg_N` + derivation chain in/beside
-      `internal/engines/aggregation/`, query API, composite naming + quota-guard repair,
-      observability audit, 30-case test plan
+- [x] **Get separate explicit go-ahead to begin implementation** — user: "go ahead. implement and
+      review" (2026-09-09)
+- [x] Confirm coder isolation setup with user — **same-worktree**, async/background
+- [x] Re-read `coder-orchestration.md` and `worktree-delegation.md` in full (this session,
+      2026-09-09, immediately before dispatch — not stale)
+- [x] Write task file `.session/task-coder-agg1.md` — 12-item checklist, one commit per item,
+      decomposing spec v8 §4–§9 in dependency order (accessor → eligibility → per-SO N/Agg_N →
+      fallback/decision-path → gate repair → derivation chain → cross-role coverage → composite
+      construction/wiring → D3-scoped query API → observability audit → full test-plan sweep)
+- [ ] Launch coder (`coder-agg1`) in this worktree, same-worktree/async
+- [ ] Set up reviewer to read commits as they land
+- [ ] Implement: `Agg_N` + derivation chain in/beside `internal/engines/aggregation/`, query API,
+      composite naming + quota-guard repair, observability audit, 30-case test plan
 
 **Last completed:** `.session/spec.md` **v8** — §10 fully resolved: D2 decided (yes, policy-owned
 reason on `wva_model_scaling_blocked`), D3 scoped (first two derivation categories only), D4 veto
@@ -113,46 +121,33 @@ coverage are the same quantity (`cov = 1/N`) — v3 computed both and called it 
 through three drafts; (4) there is no single-model request-shape assumption — safety is structural;
 (5) aggregator names encoded the operation (`max…`) instead of the quantity (`Agg_N`).
 
-**Next step / resume point — as of 2026-09-08, mid-session context clear (not a wind-down):**
+**Next step / resume point — as of 2026-09-09:**
 
-- **Still working on:** getting from an approved spec to an actual coder dispatch. Spec v8 is
-  fully approved and §10 has no open items — the only remaining gate is implementation
-  authorization, which the user has explicitly not given yet. In parallel, we were working out
-  the *mechanics* of coder/reviewer dispatch (worker type, isolation setup, task-file shape)
-  ahead of when that authorization lands, so dispatch is ready to go the moment it does.
+- **Still working on:** implementation has been authorized ("go ahead. implement and review",
+  2026-09-09). Task file is written; about to launch the coder.
 - **Must keep:**
-  1. **No code, no implementation, until the user gives a separate, explicit go-ahead.**
-     Approving spec v8 was NOT that go-ahead — user said so explicitly: "I approve V8. do not
-     begin implementing yet." This is the single most load-bearing fact in this file.
-  2. Spec v8 is final and approved — do not reopen §10 (D1–D4) or re-litigate any of the
-     "Design core" bullets below without the user raising it first.
-  3. Two suggestion-box entries are filed, uncommitted, awaiting `policy-writer`:
+  1. Spec v8 is final and approved — do not reopen §10 (D1–D4) or re-litigate any of the
+     "Design core" bullets below without the user raising it first. The coder's task file
+     encodes the same limits; do not relax them if the coder pushes back.
+  2. Two suggestion-box entries are filed, uncommitted, awaiting `policy-writer`:
      `session-tracking/suggestion-box/2026-09-08-2300-composite-analyzer.md` (`.wip` protocol
      should not apply to a mission owner's own single-writer STATE.md) and
      `2026-09-08-2311-composite-analyzer.md` (coder-dispatch conventions need a stated default
      path instead of three cold options). Do not resubmit or duplicate these.
-  4. Branch is rebased onto `upstream/main` @ `c013012e`, 0 behind / 12 ahead, all `.session/`-
-     only commits. Do not rebase again without asking first.
-  5. When dispatch mechanics actually come up again (not just a "do you know how" question —
-     see the memory `feedback_situational_rule_trigger_is_explaining_not_just_acting`), re-read
-     `conventions/coder-orchestration.md` and `conventions/worktree-delegation.md` in full before
-     acting — both were read once this session (2026-09-08) but that was mid-discussion, not
-     during an actual dispatch; confirm they're still fresh in context before relying on memory
-     of them.
-- **Continue from:** implementation authorization has not been given. Nothing to do right now
-  except wait for the user's go-ahead. When it comes:
-  1. Pick a coder-dispatch isolation setup with the user (own-worktree / checkout-branch /
-     same-worktree — `checkout-branch` is the stated default in `worktree-delegation.md`) —
-     do not assume, confirm.
-  2. Read `conventions/tasks.md` again for the task-file template, and write a task file that
-     decomposes spec v8's scope (the first two derivation categories per D3: `ceil()`/rounding +
-     PRC/demand lookup, plus the core `Agg_N` aggregation) into a checklist of sub-tasks small
-     enough each to land as its own commit (user's explicit instruction: "The coder should break
-     the work to sub-tasks and make several commits").
-  3. Set up the reviewer to read commits from the coder's branch **as they land**, not after the
-     coder finishes (user's explicit instruction, also `coder-orchestration.md` rule 9).
-  4. Confirm worker type (foreground/background/persistent) and `In:`/`Out:` agentbus channels
-     before any launch — required, not optional.
+  3. Branch was rebased onto `upstream/main` @ `c013012e`; do not rebase again without asking
+     first — the coder's commits will land on top of the current tip.
+  4. **Concurrency (same-worktree setup):** exactly one coder at a time in this worktree. Do
+     not launch a second coder here while `coder-agg1` is active. While it runs, the mission
+     owner (this session) must not edit code in this worktree — reads, planning, and a
+     concurrent reviewer (reading only committed history) are fine.
+  5. Reviewer reads commits from `coder-agg1`'s branch as they land, not after it finishes
+     (user's explicit instruction, also `coder-orchestration.md` rule 9). Review output goes to
+     a file in this session's `.session/`, not the coder's worktree (same worktree here, so:
+     a separate file, not mixed into the coder's own ledger).
+  6. Never push or publish without a fresh per-operation authorization.
+- **Continue from:** launch `coder-agg1` per `.session/task-coder-agg1.md`
+  (`mission.composite-analyzer.coder-agg1.in`/`.out`), same-worktree/async. Then set up a
+  reviewer against the same worktree, reading commits incrementally.
 
 **Standing instruction from review #4:** **[USER]** "Always ask me if not sure." Do not infer intent
 from examples or fill gaps with invented premises — ask.
@@ -171,6 +166,11 @@ from examples or fill gaps with invented premises — ask.
   a specific exception per `conventions/working-outside-worktree.md`; that boundary is enforced by
   convention, not by tooling, so it must be self-enforced.
 - Mission definition: **done** — see Orientation. Normalization deferred; sat units for now.
+- **Implementation: AUTHORIZED [USER, 2026-09-09]** ("go ahead. implement and review"). Coder
+  `coder-agg1` dispatch in progress — **this worktree/branch is claimed by a coder once launched;
+  do not launch a second coder here concurrently.** Setup: same-worktree, async/background. Task
+  file: `.session/task-coder-agg1.md`. Coder ledger (once created):
+  `.session/coder-agg1-ledger.md`.
 - Spec: **v8, APPROVED [USER, 2026-09-08]**, `.session/spec.md` (~1207 lines). §10 fully resolved
   — D1–D4 all decided, D4's 12 confirmations all veto-passed. Survey delivered:
   `.session/survey-zero-signal.md`. **Implementation explicitly held back** — user: "do not
