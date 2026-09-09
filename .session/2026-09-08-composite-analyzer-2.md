@@ -268,3 +268,148 @@ claim against durable sources (not just this ledger's own prose).
 least one durable copy outside the ledger itself (STATE.md, spec.md §12, review-coder-agg1.md, or
 the git history), and in most cases two or three independent copies agree. No content-level
 change made to this ledger — this is a verification append only.
+
+## New session picks up after the 2026-09-09 checkpoint
+
+Session resumed via `/clear` + reading STATE.md's resume point (checkpoint mode, session stayed
+`active`, ownership was never released). User's first ask: review the diff via an HTML page
+rather than raw terminal output.
+
+## HTML diff-review page — built manually, then packaged as a reusable agent
+
+Built a self-contained HTML review page for the mission's diff (`git diff c013012e..composite-
+analyzer`, excluding `.session/`) — sidebar grouped by module, per-file notes, syntax-styled
+diffs, light/dark theme tokens. Diffed against the merge-base explicitly, not `upstream/main`'s
+current tip, because upstream had moved to `b01a6e17` since this branch's last rebase — diffing
+against the moving tip would have pulled in ~7 unrelated upstream commits (Makefile, benchmark
+scripts, warmpool tests).
+
+Attempted to publish via the `Artifact` tool — failed: this session authenticates via
+`ANTHROPIC_AUTH_TOKEN`, which the tool refuses in favor of requiring a claude.ai login. Saved the
+page as a plain file instead: `.session/review/composite-diff-review.html` (untracked, per
+mission convention — review scratch output, not mission source).
+
+User liked the page's quality and asked for it to become a reusable capability: a custom agent,
+user-level scope (available in every project, not just this one), running on Haiku by default.
+Created `~/.claude/agents/diff-review-page.md` — embeds the exact HTML/CSS/JS template verbatim
+so Haiku only fills in content (module grouping, per-file notes, diff data) rather than making
+open-ended design judgment calls it's weaker at. Explicitly told to diff against the merge-base
+when the base has moved, to summarize test files instead of rendering full test diffs, and to
+never use the `Artifact` tool (always write a real file).
+
+User reported the file:// link didn't open for them (later clarified: they meant the saved file
+path itself, not something inside the page). Also asked whether `wslview` (confirmed present at
+`/usr/bin/wslview`) would be known to *all* future agents — answered no, it's per-agent-instruction,
+not global knowledge. User asked for the `diff-review-page` agent to call `wslview` on its output,
+and separately asked for a standing WSL2 note. Updated the agent file to run `wslview
+<path>` and check its exit code, falling back to manual instructions only on failure. Added a new
+"Environment: WSL2" section to `~/.claude/CLAUDE.md` (user-global, loads into every session) so
+this applies broadly, not just to the one new agent.
+
+Verified `wslview` directly against the already-existing
+`.session/review/composite-diff-review.html` (from before the agent existed) — exit 0, opened
+successfully in the user's Windows browser.
+
+Attempted to test-invoke the new `diff-review-page` agent via the `Agent` tool immediately after
+creating it — failed ("Agent type not found"): custom agent definitions load once at session
+start, so a same-session creation isn't visible to `Agent` until a fresh session. Explained this
+to the user rather than working around it. The agent is untested end-to-end as of this session's
+end — its first real invocation will be in a future session.
+
+## Step-by-step code review of the composite-analyzer implementation
+
+User initiated a structured, code-only review (explicitly NOT a design/spec re-litigation) of the
+merged implementation, one point at a time, no code changes during the review — each point
+discussed, then only the outcome recorded. All findings/rulings persisted live to a new file,
+`.session/review/code-review-notes.md` (untracked — review scratch output).
+
+Investigated every point against the actual code before recording (grep/read the real
+implementation, call sites, pre-existing codebase conventions) rather than taking the user's
+framing on faith or my own first-pass reasoning as final — this surfaced several corrections in
+both directions during the review itself:
+
+**General finding (§1-2):** inline comments throughout the new `aggregation`/`allocation`/
+`steadystate` files are excessively long and spec-coupled (cite `.session/spec.md` section
+numbers, internal-only labels like "A14"/"D3" that mean nothing without that doc). Outcome:
+extend the pre-existing `docs/developer-guide/multi-analyzer-pipeline.md` with the composite
+design, then shrink inline comments to point at that doc — not yet done, review-mode only.
+
+**Aggregation package (§3, then user's rulings in §5-7):** ten sub-points on the new `aggregation`
+package files. Verified: the pre-existing `aggregation.go` (127 lines, 6 functions, one file,
+pre-mission) groups related functions; this mission's 5 new files break that pattern with ~1
+function/file — confirmed needs fixing. Verified the new functions (`DemandForRole`, `AggN`,
+`PRCCom`, etc.) are single-consumer (only the new composite path calls them; analyzers use only
+the pre-existing functions, at a different level — before an `AnalyzerResult` is even built) —
+user ruled these should move to live beside their one caller rather than stay in the shared
+package. Found and confirmed several real defects: `DemandForRole` has no nil-guard on `result`
+while its sibling `replicasNeeded` does (inconsistent — user: be defensive, fix both directions);
+`model_coverage.go` hardcodes `"prefill"`/`"decode"` literals when `domain.RolePrefill`/
+`RoleDecode` already exist and are used everywhere else in the codebase (confirmed real defect,
+fix); `maxOfDefined`/`minOfDefined`'s generator-closure shape is hard to read (user's call,
+independent of my efficiency framing) — fix towards something more direct. Also found, unprompted,
+that `AggN`'s only production call site (`composite_decision.go:81`) wraps a SINGLE analyzer
+result in a 1-element slice — there is nothing to aggregate there; the function's real multi-
+element path is only ever exercised by tests. User's correction on `AggN`: it should combine ALL
+analyzers for one SO symmetrically (no name-based branching in collection), contributor list =
+"all eligible," with sat-fallback layered on as the one special case afterward — not the current
+structural sat/non-sat split. On `PRCCom`: confirmed via code that `N_com` genuinely varies per-SO
+(not per-role, correcting my own initial "often identical" hand-wave); what's actually shared
+per-role is only the demand numerator `D_com[role]` — correct shape per user is loop-per-role for
+the numerator lookup, then per-SO for the division. `satDemand` naming flagged by user as encoding
+a transitional implementation choice (using saturation's result as the demand source) rather than
+the durable intended concept — a CANONICAL composite demand, meant to make PRC/demand comparable
+ACROSS MODELS, not just across analyzers within one model; the project plans to move away from
+anchoring on "sat" specifically. This is a durable piece of project direction, not scoped to this
+one function — worth carrying into memory, not just this review file.
+
+**Allocation core (§8, then user's corrections in §9):** reviewed `composite_eligibility.go`,
+`composite_identity.go`, `composite_decision.go`, `composite_signal_gate.go`. Verified `Live` is
+genuinely a staleness/pipeline-health signal (`updateLivenessAndSetLive`, `engine_v2.go:322-361`
+— true iff informative within `analyzerLivenessStaleCycles` cycles), not a per-result confidence
+judgment — confirming user's description. Verified the "enabled" gate is NOT missing from
+`eligible()` as such — a disabled analyzer's entry is never constructed/appended to `namedResults`
+at all (`engine_v2.go:170-172`), so by the time `eligible()` runs, only enabled (or, for
+saturation, unconditionally-run) entries exist to filter. **However**, user then corrected this:
+saturation itself CAN be disabled via `config.AnalyzerEnabled(domain.SaturationAnalyzerName)` (a
+real, generic config mechanism, verified in `internal/config/saturation_scaling.go:657` — its own
+doc comment says the ENGINE currently skips calling it for saturation specifically, not that sat
+lacks the concept) — a disabled sat should not be an ordinary eligible contributor, only usable as
+the fallback source and the canonical-demand source. This requires new data flow into
+`eligible`/`ResolveSO` (neither currently receives config) — a real gap, not a small tweak.
+Corrected my own initial misreading (I had concluded sat has no enabled state at all — wrong).
+User also corrected the `ResolveSO` decision taxonomy: `single` should be symmetric (exactly one
+contributor, regardless of whether it's sat or not) rather than sat-special-cased; `sat-fallback`
+should be the NARROW case of a disabled sat still contributing as emergency fallback, not simply
+"sat happened to be the last one standing"; `no-signal` should also specifically cover a broken/
+missing sat. Confirmed `HasUsableCompositeSignal` is a per-MODEL boolean (loops all
+VariantCapacities, true if ANY has a signal) when the right granularity is per-SO — but user then
+added an important nuance: the ORIGINAL pre-mission check (`hasSaturationResult`, before this
+mission's rename) was specifically about saturation's own presence/health, categorically worse
+than any other single analyzer being broken (sat defines the canonical demand unit the whole
+composite is expressed in) — confirmed via the pre-mission doc comment (`git show c013012e`).
+Both a per-SO gate AND a model-level sat-health gate are likely needed; the current single
+boolean conflates them. User also flagged: decision paths should be enumerated/typed where
+possible (extending the earlier stronger-typing point specifically to decision-path values, e.g.
+mirroring `domain.DecisionReason`'s pattern rather than untyped string consts); `C0-agree` is a
+misleading name (nothing checks that contributors' values actually agree — just that more than one
+existed; "aggregate" or "composite" is more accurate); "A3" (the spec-decision label cited in
+`eligible()`'s comment) was NOT something the user specified — a code/spec-authoring artifact,
+correcting the record. User also noted an Informative-vs-Live asymmetry as an explicitly
+UNRESOLVED, not-yet-designed question (confidence in a result might reasonably differ by
+direction — safe to scale up on, not safe to scale down on — unlike Live's broken-pipeline
+symmetry, which IS correctly symmetric today) — recorded as an open design question, not a defect
+to fix.
+
+Also found, unprompted while investigating: `internal/engines/steadystate/composite.go`'s
+`contributedNames` map is written into but never read anywhere — dead code. User: needs fixing,
+wants it actually wired up (for error/anomaly detection), not deleted.
+
+All ten aggregation sub-points, all seven allocation sub-points, all rulings and corrections
+(mine and the user's, in both directions) are written out in full in
+`.session/review/code-review-notes.md` — this ledger summarizes; that file has the complete,
+precise record with code citations for each point. No code was changed anywhere during this
+review, per explicit user instruction for the whole exercise.
+
+Review paused (not finished) at the end of the allocation-core section — user said "good point to
+stop," asked to persist and wind down, with explicit intent to continue this same review in a
+future session.
