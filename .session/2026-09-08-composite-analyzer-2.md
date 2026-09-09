@@ -208,3 +208,63 @@ established pattern (three prior entries from this mission sit the same way, awa
 User: "Let's clear again and restart this session. Create a short handoff (no need for full
 wind-down)." Running `wind-down` in checkpoint mode: Steps 1-5, session stays `active`, ownership
 not released, ledger not moved to `ledger/`.
+
+## Verified 2026-09-09
+
+`ledger-capture-2` safety-net check: read this ledger in full and cross-checked every significant
+claim against durable sources (not just this ledger's own prose).
+
+**Checked against:**
+- `.session/STATE.md` (current state, checklist, resume point)
+- `.session/spec.md` §12 (revision/implementation history, v1-v8 plus the "Implementation" entry)
+- `git log --oneline` on `composite-analyzer`
+- `.session/review-coder-agg1.md` (full review detail, both the initial pass and the re-check of
+  the fix commit)
+- `.session/session-tracking` worktree's `suggestion-box/` directory (for the one file reference
+  this ledger makes outside `.session/`)
+- the memory file `feedback_ask_questions_short_and_scannable.md`
+
+**Confirmed durable (not just ledger-narrated):**
+- §10 resolution (D2 policy-owned reason, D3 two-category scope, D4 12/12 no vetoes) — all
+  recorded in `spec.md` v8 (§10 body + §12's v8 entry). Commits `6644081b` (spec) and `006486b9`
+  (STATE) both exist in `git log`.
+- Rebase onto `upstream/main@c013012e`, 0 behind/12 ahead — commit `ef772d7c` exists; STATE
+  records the new base SHA.
+- Spec v8 approval + implementation explicitly held back — commit `aa9c35b7` exists; STATE's
+  checklist has both as separate ticked/unticked lines, matching the ledger's description.
+- Mid-session context-clear checkpoint and the EnterWorktree-pinning correction — commits
+  `a14ab4ae` and `557d883b` both exist and match the ledger's description.
+- Implementation dispatch (task files, coder-agg1/reviewer-agg1 launch) — commit `4ce95b70`
+  exists (task-coder-agg1.md); `87b16a76` exists (task-reviewer-agg1.md).
+- All 12 checklist commits (`4ac16404` through `f98a566f`) exist in `git log` in the exact
+  sequence the ledger and `review-coder-agg1.md`'s commit table both give, each tagged to the
+  same spec section citations.
+- The O1/O2 placement finding on commit `0ec6c170` — independently confirmed in
+  `review-coder-agg1.md`'s dedicated section (not merely asserted by this ledger), and the finding
+  plus its resolution is durably recorded a second time in `spec.md` §12's "Implementation" entry.
+- The fix commit `0642f472` and reviewer's independent re-verification (byte-for-byte diff against
+  `81ef806d~1`, eviction-safety trace against `evictStaleAnalyzerSeries`'s real logic, full-suite
+  + focused regression-guard reruns) — all present in `review-coder-agg1.md`'s dedicated
+  "Commit `0642f472`" section, matching the ledger's summary exactly.
+- Final verdict PASS 12/12 — stated in `review-coder-agg1.md`'s top summary, restated in
+  `spec.md` §12's "Implementation" entry, and reflected in STATE.md's checklist (all items ticked
+  except "user direction on next steps"). Three independent durable copies.
+- STATE-vs-ledger conflation correction — commit `66aed77f` exists, STATE.md's current shape
+  (short pointer-only Status section) matches what the ledger says resulted from it.
+- Suggestion-box entry `2026-09-09-1600-composite-analyzer.md` — confirmed present (uncommitted,
+  as the ledger itself describes) at
+  `worktrees/session-tracking/suggestion-box/2026-09-09-1600-composite-analyzer.md`.
+- `feedback_ask_questions_short_and_scannable` memory — confirmed present and its content matches
+  the ledger's paraphrase of the user's verbatim correction.
+- This checkpoint's own commit `7df5e9a7` exists and touches exactly the ledger + STATE.md, per
+  its commit message.
+
+**Commit SHAs verified present in `git log --oneline`:** `6644081b`, `006486b9`, `ef772d7c`,
+`aa9c35b7`, `a14ab4ae`, `557d883b`, `4ce95b70`, `87b16a76`, `4ac16404`, `fabe406b`, `0bacfd73`,
+`c7bba2df`, `d29f62e2`, `f5441352`, `05c0362b`, `fdd421fc`, `81ef806d`, `d31e1142`, `0ec6c170`,
+`f98a566f`, `0642f472`, `6593530f`, `0c6b0916`, `adb7ceae`, `66aed77f`, `7df5e9a7`.
+
+**Gaps found:** none. Every significant decision, commit, and verdict this ledger narrates has at
+least one durable copy outside the ledger itself (STATE.md, spec.md §12, review-coder-agg1.md, or
+the git history), and in most cases two or three independent copies agree. No content-level
+change made to this ledger — this is a verification append only.
