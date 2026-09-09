@@ -1,5 +1,71 @@
 # coder-agg1 ledger
 
+## Post-completion follow-up: revert commit 0ec6c170's placement (per coordinator ruling)
+
+After the 12-item checklist was reported done, the coordinator relayed the mission owner's ruling
+on a reviewer finding against commit `0ec6c170` (item 11, observability parity): **the placement
+move was wrong — revert it.**
+
+**What `0ec6c170` did that is now reverted:** it moved `buildComposite`'s call site from
+`collectV2ModelRequest` (the O2 site, spec §6.2) INTO `runAnalyzersAndScore` itself — building the
+composite there, appending it to `runAnalyzersAndScore`'s returned slice, and adding `findByName`
+so `collectV2ModelRequest` could read the composite back out of that slice by name instead of
+building it. The stated reason at the time was to get the composite through
+`recordAnalyzerMetrics`/`logAnalyzerResult` "through the same functions" without a second call.
+The ruling: that trade was wrong — hiding composite construction inside `runAnalyzersAndScore`
+means a reader tracing "where does the optimizer's signal get built" no longer finds it at the O2
+compose site the spec names, and "reuse via a second explicit call" is the accepted shape, not
+"reuse via folding construction into the wrong function to avoid a second call."
+
+**What changed in this follow-up commit:**
+- `runAnalyzersAndScore` is back to building nothing composite-related: restored its original doc
+  comment and body (`updateLivenessAndSetLive` → `recordAnalyzerMetrics(namedResults)` → log loop
+  → `return namedResults, nil`), verified against `git show 81ef806d~1` (the commit immediately
+  before composite construction was ever wired anywhere) to make sure I restored the exact original
+  shape rather than reinventing it.
+- `collectV2ModelRequest` now builds the composite itself (`composite := buildComposite(ctx,
+  namedResults, satUp, satDown)`, with its own `satUp, satDown := config.AnalyzerThresholds(...)`
+  call — exactly as it did in commit `81ef806d`, item 9's original wiring, before item 11 moved it),
+  then makes the observability calls explicitly and directly: `e.recordAnalyzerMetrics(namespace,
+  modelID, append(namedResults, composite))` and `logAnalyzerResult(ctx, modelID, namespace,
+  composite)`.
+- Removed `findByName` entirely — no longer needed once the composite isn't hidden in a slice to
+  be found by name.
+
+**A real correctness hazard I had already identified during the ORIGINAL design work (see the
+item-11 entry below) and had to re-verify carefully here**: `recordAnalyzerMetrics` has stateful
+eviction bookkeeping (`evictStaleAnalyzerSeries`) that overwrites `e.lastAnalyzerSeries[modelKey]`
+with whatever set the CURRENT call published, then deletes anything from the PREVIOUS stored set
+that didn't reappear. A second call passing only `[]NamedAnalyzerResult{composite}` (just the one
+entry) would have made the composite's call "current," making every ordinary analyzer's series
+look like it "didn't reappear" and get wrongly deleted — flapping every series on every cycle.
+Fixed by passing `append(namedResults, composite)` (the full set) to the second call, not just the
+composite alone: this re-emits the per-analyzer series a second time (harmless — a
+`Gauge.Set` to the same value is idempotent) and keeps eviction correct, since the second call's
+"current" set is then the true superset, and `e.lastAnalyzerSeries[modelKey]` ends up holding
+exactly the full set (analyzers + composite) for the next cycle's comparison. Verified this
+directly: `TestCompositeObservability_MetricsIncludeTheComposite`/`_CompositeIsAdditiveNotReplacing`
+(rewritten to call `collectV2ModelRequest` instead of `runAnalyzersAndScore`, since the composite's
+series are no longer emitted from inside that function) both pass, confirming no series gets
+wrongly evicted by the double call.
+
+**Kept as independent fixes, unaffected by placement** (per the coordinator's explicit
+instruction): the `"live": nr.Live` field added to `logAnalyzerResult`'s log line — still correct
+and still needed regardless of where the composite is built, since it's a pre-existing gap
+affecting every analyzer's own line, not composite-specific. `docs/reference/cycle-log.md`'s
+composite-row documentation needed no changes — the composite still gets logged, from a different
+call site, but still strictly after every analyzer's own line in a cycle (verified: `collectV2ModelRequest`
+calls `runAnalyzersAndScore`, which logs every analyzer, THEN builds and logs the composite), so
+the doc's "composite's line is always last" claim is still accurate.
+
+Rewrote `composite_observability_test.go`'s tests 28/29 to call `collectV2ModelRequest` instead of
+`runAnalyzersAndScore` (since that's where the composite's metrics are emitted now); test 30 was
+already calling `collectV2ModelRequest` and needed no change.
+
+Verified: `go build`, full non-e2e/non-benchmark `go test`, `gofmt`, `make lint` all clean; test 1
+(sat-only regression, 3 sub-cases) and test 13 (Score has no effect) re-confirmed passing via a
+focused ginkgo run. Committed as a new commit (not a rewrite of `0ec6c170`), per instruction.
+
 ## Note on task-file checkbox updates
 
 The launch message asked me to "update the checklist's checkboxes" in `task-coder-agg1.md` as I

@@ -17,13 +17,15 @@ import (
 
 // Test 28: observability parity. Every analyzer result, and the composite,
 // produce a metric series through the SAME functions (recordAnalyzerMetrics)
-// — no analyzer, including the composite, is silently omitted.
+// — no analyzer, including the composite, is silently omitted. The
+// composite is built and observed at the O2 site (collectV2ModelRequest),
+// via a second explicit call into recordAnalyzerMetrics/logAnalyzerResult —
+// not folded into runAnalyzersAndScore's own pass.
 func TestCompositeObservability_MetricsIncludeTheComposite(t *testing.T) {
 	registry := prometheus.NewRegistry()
 	require.NoError(t, metrics.InitMetrics(registry))
 	e := &Engine{
-		metricsEmitter:     metrics.NewMetricsEmitter(),
-		lastAnalyzerSeries: make(map[string]analyzerSeries),
+		metricsEmitter: metrics.NewMetricsEmitter(),
 	}
 
 	fakeSat := &fakeAnalyzerWithResult{
@@ -37,14 +39,13 @@ func TestCompositeObservability_MetricsIncludeTheComposite(t *testing.T) {
 	e.analyzersSnapshot = []analyzerEntry{{name: domain.SaturationAnalyzerName, analyzer: fakeSat}}
 	e.started = true
 
-	namedResults, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, scaleCfg,
+	req, err := e.collectV2ModelRequest(context.Background(), "m", "ns", nil, scaleCfg,
 		nil, nil, nil, nil, nil, 0)
 	require.NoError(t, err)
 
-	// The composite must be present in the very slice recordAnalyzerMetrics
-	// already ran over inside runAnalyzersAndScore -- confirm it landed in
-	// the wva_analyzer_demand series alongside saturation's own, through
-	// the SAME function call, not a parallel one.
+	// The composite must land in the wva_analyzer_demand series alongside
+	// saturation's own, through the SAME function (recordAnalyzerMetrics),
+	// called a second time from collectV2ModelRequest -- not a parallel one.
 	analyzerLabels := seriesLabels(t, registry, constants.WVAAnalyzerDemand, constants.LabelAnalyzerName)
 	assert.Contains(t, analyzerLabels, domain.SaturationAnalyzerName,
 		"saturation's own demand series must still be present")
@@ -55,13 +56,9 @@ func TestCompositeObservability_MetricsIncludeTheComposite(t *testing.T) {
 	assert.Contains(t, targetLabels, domain.SaturationAnalyzerName)
 	assert.Contains(t, targetLabels, allocation.CompositeSignalName)
 
-	// The composite is a genuinely separate slice entry, not a rename of
+	// The composite is a genuinely separate entry, not a rename of
 	// saturation's -- both series carry independent, comparable values.
-	composite, ok := findByName(namedResults, allocation.CompositeSignalName)
-	require.True(t, ok, "composite must be present in the returned slice")
-	assert.Equal(t, domain.SaturationAnalyzerName, namedResults[0].Name,
-		"saturation must still be first -- the per-analyzer slice is unchanged")
-	assert.NotEqual(t, domain.SaturationAnalyzerName, composite.Name)
+	assert.NotEqual(t, domain.SaturationAnalyzerName, req.CompositeSignal.Name)
 }
 
 // Test 29: composite metrics are additive. The composite's series appears
@@ -72,8 +69,7 @@ func TestCompositeObservability_CompositeIsAdditiveNotReplacing(t *testing.T) {
 	registry := prometheus.NewRegistry()
 	require.NoError(t, metrics.InitMetrics(registry))
 	e := &Engine{
-		metricsEmitter:     metrics.NewMetricsEmitter(),
-		lastAnalyzerSeries: make(map[string]analyzerSeries),
+		metricsEmitter: metrics.NewMetricsEmitter(),
 	}
 
 	fakeSat := &fakeAnalyzerWithResult{
@@ -101,7 +97,7 @@ func TestCompositeObservability_CompositeIsAdditiveNotReplacing(t *testing.T) {
 		Analyzers: []config.AnalyzerScoreConfig{{Name: "spy"}},
 	}
 
-	_, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
+	_, err := e.collectV2ModelRequest(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
 	require.NoError(t, err)
 
 	analyzerLabels := seriesLabels(t, registry, constants.WVAAnalyzerDemand, constants.LabelAnalyzerName)

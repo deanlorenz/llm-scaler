@@ -90,13 +90,13 @@ const analyzerLivenessStaleCycles = 3
 
 // runAnalyzersAndScore runs the V2 saturation analyzer plus every other
 // registered, enabled analyzer, builds a NamedAnalyzerResult for each, runs
-// liveness tracking, builds the composite from the full set (spec
-// composite-analyzer §6.1 — every enabled analyzer's demand, not just
-// saturation's), then records metrics and logs every entry INCLUDING the
-// composite, and returns the full slice with the composite appended as its
-// last entry. collectV2ModelRequest reads the composite back out by name
-// (allocation.CompositeSignalName) as the single CompositeSignal handed to
-// the optimizer — it is not saturation, even on the sat-only path.
+// liveness tracking and metrics for all, then returns the full slice.
+// collectV2ModelRequest builds the composite from this slice (spec
+// composite-analyzer §6.1/§6.2 O2) as the single CompositeSignal handed to
+// the optimizer — it is not saturation, even on the sat-only path. The
+// composite is built at that O2 site, not here: this function's return type
+// and behavior are otherwise unchanged from before the composite-analyzer
+// mission.
 //
 // Saturation always runs; every other registered analyzer runs only if
 // config.AnalyzerEnabled. The capacity-build step (buildNamedResult) runs
@@ -178,33 +178,7 @@ func (e *Engine) runAnalyzersAndScore(
 		namedResults = append(namedResults, buildNamedResult(ctx, entry.name, result, config, metaByVariant, up, down))
 	}
 
-	// Liveness must run BEFORE the composite is built: eligible() (which
-	// resolveSO/buildComposite read through) consults each entry's Live
-	// field, so the composite's own contributor set would be wrong if
-	// computed against stale Live values from a previous cycle.
 	e.updateLivenessAndSetLive(ctx, namespace, modelID, namedResults)
-
-	// The composite is appended here, never run through
-	// updateLivenessAndSetLive itself: that function's liveness latch calls
-	// allocation.ResultIsInformative, which is calibrated to an ANALYZER's
-	// own no-data/error sentinel vocabulary. The composite's own Reason
-	// values are decision-path markers (C0-agree/.../C4-no-signal, spec
-	// §5.1.2) — none of which literally equals "no-data" or "error" — so
-	// ResultIsInformative would incorrectly treat every composite as
-	// informative (the same class of bug HasUsableCompositeSignal was fixed
-	// for) and overwrite buildComposite's own carefully-computed Live with a
-	// latch-based value that does not mean the same thing. The composite
-	// computes its own Live directly from its per-SO decisions (spec
-	// composite-analyzer, buildComposite's anyLive) and that value is final.
-	//
-	// recordAnalyzerMetrics and logAnalyzerResult below, by contrast, do not
-	// call ResultIsInformative — they read Result/RoleCapacities/
-	// VariantCapacities directly — so the composite is safe to run through
-	// them exactly like any analyzer entry (spec §6/A22/A23): one more
-	// row/series, through the SAME functions, never parallel ones.
-	composite := buildComposite(ctx, namedResults, satUp, satDown)
-	namedResults = append(namedResults, composite)
-
 	e.recordAnalyzerMetrics(namespace, modelID, namedResults)
 
 	for _, nr := range namedResults {
@@ -827,20 +801,49 @@ func (e *Engine) collectV2ModelRequest(
 		}
 	}
 
-	// The optimizer's input is the composite (spec composite-analyzer §6.1) —
-	// never literally saturation, even on the sat-only path.
-	// runAnalyzersAndScore builds it internally (reducing every enabled
-	// analyzer's demand, not just saturation's, into one NamedAnalyzerResult)
-	// and appends it to its returned slice — after liveness has run but
-	// before the slice is fed to recordAnalyzerMetrics/logAnalyzerResult, so
-	// it is observed through the same functions any analyzer result is
-	// (spec §6/A22/A23). Read back by name rather than by position, so a
-	// future change to where runAnalyzersAndScore appends it cannot silently
-	// hand the optimizer the wrong entry.
-	composite, ok := findByName(namedResults, allocation.CompositeSignalName)
-	if !ok {
-		return nil, fmt.Errorf("collecting V2 model request for %s/%s: composite signal missing from analysis results", namespace, modelID)
-	}
+	// The optimizer's input is the composite (spec composite-analyzer §6.1,
+	// §6.2 O2) — never literally saturation, even on the sat-only path.
+	// buildComposite reduces the full namedResults slice (every enabled
+	// analyzer's demand, not just saturation's) into the single
+	// NamedAnalyzerResult the optimizer consumes; the per-analyzer slice
+	// itself is untouched and still serves liveness/metrics/logging inside
+	// runAnalyzersAndScore. Built here, at the O2 site, not inside
+	// runAnalyzersAndScore — that function's return type and behavior stay
+	// exactly what they were before this mission.
+	//
+	// Saturation's own thresholds are the composite's too: the composite is
+	// expressed in D_sat units (spec §4.4), so the same scale-up/scale-down
+	// boundaries that would apply to saturation alone apply to it.
+	satUp, satDown := config.AnalyzerThresholds(domain.SaturationAnalyzerName)
+	composite := buildComposite(ctx, namedResults, satUp, satDown)
+
+	// Observability parity (spec §6/A22/A23): the composite is a second,
+	// explicit call into the SAME functions every analyzer's own result
+	// already went through inside runAnalyzersAndScore — not a parallel
+	// logging/metrics path, and not folded into that function's own pass
+	// (composing there would have coupled the composite's construction to
+	// the per-analyzer slice's own liveness/metrics/logging step, which
+	// this mission's user-facing review found to be the wrong trade: it
+	// hid the composite's build inside runAnalyzersAndScore, where a
+	// reader tracing "where does the optimizer's signal come from" would
+	// no longer find it at the O2 compose site).
+	//
+	// recordAnalyzerMetrics is safe to call a second time for one more
+	// entry: its own eviction step (evictStaleAnalyzerSeries) compares the
+	// current call's published series against whatever this model's LAST
+	// call left behind and only deletes what didn't reappear, then
+	// overwrites the stored set with the current call's — so calling it
+	// again here, after runAnalyzersAndScore's own call already ran for the
+	// per-analyzer slice this same cycle, does not delete those series (the
+	// per-analyzer series recorded moments earlier this same cycle are
+	// still "current" as far as THIS call is concerned; only a series that
+	// stops appearing across cycles is ever evicted). It does re-emit the
+	// per-analyzer series a second time (harmless — a Gauge.Set to the same
+	// value is idempotent) so the composite's series can be added in the
+	// same accounting pass, keeping "this call's current set" the
+	// authoritative one stored for next cycle's eviction.
+	e.recordAnalyzerMetrics(namespace, modelID, append(namedResults, composite))
+	logAnalyzerResult(ctx, modelID, namespace, composite)
 
 	return &allocation.ModelScalingRequest{
 		ModelID:         modelID,
@@ -861,18 +864,6 @@ func metadataByVariant(variantMetadata []domain.VariantMetadata) map[string]doma
 		byName[m.VariantName] = m
 	}
 	return byName
-}
-
-// findByName returns the first entry in results named name, and whether one
-// was found. Used to locate the composite by its identity (spec §8) rather
-// than by position in the slice.
-func findByName(results []allocation.NamedAnalyzerResult, name string) (allocation.NamedAnalyzerResult, bool) {
-	for _, nr := range results {
-		if nr.Name == name {
-			return nr, true
-		}
-	}
-	return allocation.NamedAnalyzerResult{}, false
 }
 
 // buildNamedResult wraps one analyzer's raw (D, P) result in the optimizer-facing
