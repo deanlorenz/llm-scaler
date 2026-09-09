@@ -127,13 +127,21 @@
       `collectV2ModelRequest` itself — do not fold composition into `runAnalyzersAndScore`. No
       pipeline redesign now (explicitly deferred). Sent to `coder-agg1` as a new commit, not a
       history rewrite.
-- [ ] Coder lands the fix commit; reviewer re-checks; then mission owner integrates.
-- [ ] Implement: `Agg_N` + derivation chain in/beside `internal/engines/aggregation/`, query API,
-      composite naming + quota-guard repair, observability audit, 30-case test plan — **11/12
-      done and reviewed; 1 fix (observability placement) in progress**
+- [x] Coder landed fix commit `0642f472`; reviewer re-checked it independently (byte-for-byte
+      diff against `81ef806d~1`, traced `evictStaleAnalyzerSeries`'s real logic rather than
+      trusting the commit message, reran test 1/test 13 focused plus full suite).
+- [x] **Reviewer's final verdict: PASS, 12/12 checklist items.** `.session/review-coder-agg1.md`
+      has the full report. One dropped test assertion in the observability-test rewrite checked
+      and confirmed redundant with test 1's own coverage — not a genuine gap.
+- [x] Implement: `Agg_N` + derivation chain in/beside `internal/engines/aggregation/`, query API,
+      composite naming + quota-guard repair, observability audit, 30-case test plan — **DONE,
+      reviewed, PASS**
+- [ ] Mission owner integration/next steps — awaiting user direction (PR? further work? mission
+      wind-down?). Do not push or open a PR without fresh per-operation authorization.
 
-**Last completed:** reviewer flagged commit `0ec6c170`'s placement violation; user ruled composite
-build stays at O2, coder is fixing via a new commit (not history rewrite).
+**Last completed:** `reviewer-agg1`'s final verdict — PASS, 12/12 checklist items, after the O2
+placement fix (`0642f472`) landed and was independently re-verified. Mission implementation is
+functionally complete pending the user's call on next steps (PR, further work, or wind-down).
 
 **Errors review #3 caught, for context on how much to trust the current draft:** (1) `N` and
 coverage are the same quantity (`cov = 1/N`) — v3 computed both and called it a cross-check;
@@ -144,24 +152,27 @@ through three drafts; (4) there is no single-model request-shape assumption — 
 
 **Next step / resume point — as of 2026-09-09:**
 
-- **Still working on:** one fix commit, in progress at `coder-agg1`. 11/12 checklist items passed
-  review clean; item 11 (observability) had its composite-build call in the wrong place
-  (`0ec6c170` moved it off O2) — user ruled the coder's placement wrong, fix is: keep composite
-  build at `collectV2ModelRequest` (O2), call `logAnalyzerResult`/`recordAnalyzerMetrics` for the
-  composite from there too, as a second explicit call — not by folding composition into
-  `runAnalyzersAndScore`. Sent to `coder-agg1` (SendMessage, not a new agent).
+- **Still working on:** implementation is done and reviewed PASS (12/12). `coder-agg1` is still
+  holding open on its `In:` channel (told not to terminate on completion); `reviewer-agg1` is
+  standing by. Nothing further is authorized — waiting on the user for next steps: open a PR?
+  more work? wind down the mission? Do not decide this unilaterally.
 - **Must keep:**
   1. Spec v8 is final and approved — do not reopen §10 (D1–D4) or the "Design core" bullets
      without the user raising it first.
   2. Two suggestion-box entries filed, uncommitted, awaiting `policy-writer` — do not resubmit.
+     One of them (`.wip` exemption for a mission owner's own STATE.md) the user has now also
+     confirmed directly in this session — see memory `feedback_no_wip_on_own_state`. This
+     STATE.md is edited directly from now on, no rename-lock.
   3. Branch rebased onto `upstream/main` @ `c013012e`; do not rebase again without asking.
-  4. **No pipeline redesign right now** — user explicit: the bigger question of which pipeline
-     step does what should be revisited later, cleanly, not folded into this fix.
-  5. **AskUserQuestion text must stay short** — user feedback, see memory
-     `feedback_ask_questions_short_and_scannable`. Do not repeat the long-question mistake.
-  6. Never push or publish without a fresh per-operation authorization.
-- **Continue from:** wait for `coder-agg1`'s fix commit; have `reviewer-agg1` re-check just that
-  commit; then integrate/report to user.
+  4. **No pipeline redesign** — user explicit: the bigger question of which pipeline step does
+     what is a separate, later, clean discussion — not something to fold into this mission.
+  5. **AskUserQuestion text must stay short** — see memory
+     `feedback_ask_questions_short_and_scannable`.
+  6. Never push or publish without a fresh per-operation authorization — this includes not
+     opening a PR without being asked.
+- **Continue from:** ask the user what happens next with this implementation (PR / more work /
+  wind-down). `coder-agg1` and `reviewer-agg1` are both idle, holding on their `In:` channels —
+  reuse them (SendMessage) rather than launching new agents for any follow-up in this mission.
 
 **Standing instruction from review #4:** **[USER]** "Always ask me if not sure." Do not infer intent
 from examples or fill gaps with invented premises — ask.
@@ -180,23 +191,24 @@ from examples or fill gaps with invented premises — ask.
   a specific exception per `conventions/working-outside-worktree.md`; that boundary is enforced by
   convention, not by tooling, so it must be self-enforced.
 - Mission definition: **done** — see Orientation. Normalization deferred; sat units for now.
-- **Implementation: AUTHORIZED [USER, 2026-09-09]** ("go ahead. implement and review").
-  `coder-agg1` **reports all 12 checklist items complete**, commits `4ac16404..f98a566f` on
-  `composite-analyzer`. Coder was told to hold open on its `In:` channel rather than terminate —
-  it has not been released; re-engage it directly (SendMessage) for any fix rather than launching
-  a new coder into this worktree. Task file: `.session/task-coder-agg1.md`. Coder ledger:
-  `.session/coder-agg1-ledger.md` (created by the coder).
+- **Implementation: AUTHORIZED [USER, 2026-09-09]** ("go ahead. implement and review"). **DONE,
+  REVIEWED, PASS (12/12).** Commits `4ac16404..f98a566f` (11 original) plus fix `0642f472`
+  (placement correction) on `composite-analyzer`. Both `coder-agg1` and `reviewer-agg1` are
+  holding open on their `In:` channels, not terminated — reuse them for any follow-up.
+  Task file: `.session/task-coder-agg1.md`. Coder ledger: `.session/coder-agg1-ledger.md`.
 - **Independent verification (mission owner, 2026-09-09):** `go build ./...` clean; `make test`'s
-  exact scope (`go test $(go list ./... | grep -v /e2e | grep -v /benchmark)`) all green; Ginkgo
-  suite in `internal/engines/steadystate` — 165/167 specs passed, 2 skipped (pre-existing,
-  unrelated), 0 failed. Test 1 (sat-only identity, `composite_test.go:36-38`) and test 13 (Score
-  has no effect, `composite_test.go:213-216`) both exist and pass. `go vet ./...` clean. (IDE
-  diagnostics that briefly showed `undefined: DemandForRole` were stale/mid-edit-cache noise, not
-  real — reconfirmed via direct `go build`/`go vet`.)
-- **`reviewer-agg1`: full Phase 1+2 pass re-invoked 2026-09-09**, now that all 12 commits have
-  landed (its first pass, mid-coder-run, correctly found nothing yet to review). Verdict pending
-  — check `.session/review-coder-agg1.md` before treating this mission as done. Do not report
-  this mission complete to the user, open a PR, or push anything until that verdict lands.
+  exact scope all green; Ginkgo suite in `internal/engines/steadystate` — 165/167 specs passed, 2
+  skipped (pre-existing, unrelated), 0 failed, both before and after the fix commit. Test 1
+  (sat-only identity, `composite_test.go:36-38`) and test 13 (Score has no effect,
+  `composite_test.go:213-216`) both pass.
+- **One real finding during review, resolved:** commit `0ec6c170` moved composite construction
+  off the spec-mandated O2 site into `runAnalyzersAndScore` (reviewer caught it; the coder should
+  have asked instead of proceeding — it didn't). **User ruling:** wrong trade; revert. Fix commit
+  `0642f472` restored O2 placement; both the coder's and reviewer's re-verification (byte-for-byte
+  diff against pre-mission shape, traced actual eviction logic rather than trusting the commit
+  message) independently confirmed correct. Full detail: `.session/review-coder-agg1.md`.
+- **Mission is implementation-complete pending user direction on next steps** (PR / more work /
+  wind-down). Not pushed, no PR opened — awaiting a fresh, explicit ask for either.
 - Spec: **v8, APPROVED [USER, 2026-09-08]**, `.session/spec.md` (~1207 lines). §10 fully resolved
   — D1–D4 all decided, D4's 12 confirmations all veto-passed. Survey delivered:
   `.session/survey-zero-signal.md`.
