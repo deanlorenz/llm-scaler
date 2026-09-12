@@ -25,14 +25,28 @@
 - **Survey:** `.session/survey-zero-signal.md` *(pull on demand)*
 - **Task files:** `.session/task-coder-agg1.md`, `.session/task-reviewer-agg1.md` — the
   implementation dispatch. `.session/review-coder-agg1.md` — final review report, verdict PASS.
-- **Code review (in progress):** `.session/review/code-review-notes.md` — user's own step-by-step
-  code review of the implementation, paused mid-way (finished: aggregation package, allocation
-  core; not yet started: steadystate wiring/composite.go, docs, tests). No code changed during
-  this review — findings/rulings only. Resume by continuing from where it left off (see resume
-  point below). Also in that dir: `.session/review/composite-diff-review.html` — an HTML diff
-  viewer built earlier in the same session (superseded as a *process* by the new
-  `diff-review-page` agent — see Extra rules/tools below — but the file itself is still valid to
-  view).
+- **Code review (interrupted, not abandoned):** `.session/review/code-review-notes.md` — user's
+  own step-by-step code review of the implementation (finished: aggregation package, allocation
+  core; steadystate wiring/`composite.go` was started 2026-09-13 but the walkthrough turned into
+  a redesign discussion before any findings were recorded for that file — see below). No code
+  changed during this review — findings/rulings only. File unchanged this session (still ends at
+  §9, dated 2026-09-09). Also in that dir: `.session/review/composite-diff-review.html` — an HTML
+  diff viewer built earlier (superseded as a *process* by the `diff-review-page` agent — see Extra
+  rules/tools below — but the file itself is still valid to view).
+- **Redesign discussion (NEW, active, this is the live thread):**
+  `.session/composite-signal-redesign.md` — 2026-09-13, user called for a **complete redesign** of
+  `composite.go`, not incremental fixes (comments too spec-coupled, duplicate saturation-lookup
+  logic x3, unclear why max-score, unclear provenance when analyzers disagree, duplicated
+  aggregation, hard to follow). This escalated into stepping back to decide, at the design level,
+  what the composite signal actually represents and how per-analyzer values combine — **before**
+  resuming line-by-line code review. This doc is NOT a replacement for `spec.md`; conclusions get
+  folded back into `spec.md` once settled. See its own Revision log for detail. **Current state:
+  §1 (facts about how each analyzer computes ReplicaCount/PRC/Demand/RC/SC today, all verified
+  against code with citations) and §2 (current call stack) are solid. §3 records the user's
+  explanation of how the optimizer uses Demand/PRC/RC/SC and the correct granularity (aggregate
+  across analyzers only, not across SOs or models). §4 is the live open question: what does
+  "combine across analyzers" mean, per quantity (Demand, Supply, AnticipatedSupply, PRC)? Not yet
+  decided.**
 - **Expected output:** mission is implementation-complete (see Status). User has chosen to review
   the code manually before deciding on PR / more work / wind-down.
 - **Done / completion criteria:** implementation matches spec v8, reviewed, tests pass — **met**.
@@ -72,13 +86,17 @@
       `.session/review-coder-agg1.md`.
 - [x] User direction on next steps: **user chose to do their own step-by-step code review of the
       implementation** before deciding PR / more work / wind-down.
-- [ ] Code review in progress: general comments + aggregation package (production files only:
+- [x] Code review: general comments + aggregation package (production files only:
       `demand.go`, `undefined.go`, `model_coverage.go`, `replicas_needed.go`, `prc_com.go`) +
       allocation core (production files only: `composite_eligibility.go`, `composite_identity.go`,
       `composite_decision.go`, `composite_signal_gate.go`) done (see
-      `.session/review/code-review-notes.md`).
-      **Not yet reviewed — verified against `git diff --stat c013012e..composite-analyzer` on
-      2026-09-12, this is the authoritative remaining list:**
+      `.session/review/code-review-notes.md`, §1-§9).
+- [ ] Code review of `composite.go`/steadystate wiring **started 2026-09-13, then diverted into
+      a redesign discussion** (see Task section above) — no findings recorded for this file in
+      `code-review-notes.md`; superseded for now by `.session/composite-signal-redesign.md`.
+      **Remaining-file list below is still accurate but ON HOLD until the redesign discussion
+      concludes** — do not resume file-by-file review until §4 of the redesign doc is resolved,
+      since the outcome may change what "reviewing composite.go" even means.
       - `internal/engines/allocation/analyzer_helpers.go`
       - `internal/engines/allocation/query_api.go` (+ `query_api_test.go`)
       - `internal/engines/allocation/cost_aware_optimizer.go`
@@ -94,41 +112,50 @@
         `undefined_test.go`, `model_coverage_test.go`, `replicas_needed_test.go`,
         `prc_com_test.go`, `composite_decision_test.go`, `composite_eligibility_test.go`,
         `composite_signal_gate_test.go`)
+- [ ] **Redesign discussion (live, this is the current priority):** resolve
+      `.session/composite-signal-redesign.md` §4 — what does "combine across analyzers" mean,
+      per quantity (Demand, Supply, AnticipatedSupply, PRC)? See that doc's own state for detail.
 - [ ] User direction on next steps (PR / more work / wind-down) — deferred until the code review
-      finishes.
+      AND the redesign discussion both conclude.
 
-**Last completed:** a full session doing two things: (1) built an HTML diff-review page for this
-mission's diff, then generalized that into a new user-level custom agent
-(`diff-review-page`, untested end-to-end — see Extra rules above) plus a standing WSL2/`wslview`
-convention in `~/.claude/CLAUDE.md`; (2) ran a structured, code-only walkthrough of the
-implementation with the user (no code changed) covering general comments, the `aggregation`
-package, and `allocation` core (`composite_eligibility.go`/`composite_identity.go`/
-`composite_decision.go`/`composite_signal_gate.go`) — paused, not finished, at the user's request
-("good point to stop... we continue on a new session later"). Full findings/rulings in
-`.session/review/code-review-notes.md`; this session's ledger
-(`.session/ledger/2026-09-08-composite-analyzer-2.md` after this wind-down) has the narrative
-summary. This is a **full retirement** (user's explicit choice when asked checkpoint-vs-retire).
+**Last completed (this session, 2026-09-13):** resumed the code review at `composite.go`; user
+called for a **complete redesign**, not incremental fixes, citing: spec-coupled comments,
+saturation-lookup duplicated 3x, unclear max-score rationale, unclear provenance when analyzers'
+per-field values disagree, duplicated aggregation logic, and general unclarity/inefficiency. This
+escalated to a design-level discussion (not file-by-file review) captured in the new
+`.session/composite-signal-redesign.md`: verified today's actual per-analyzer computation of
+ReplicaCount/PRC/Demand/RC/SC (§1, with a real correction along the way — saturation's
+`ReplicaCount` is k8s-status arithmetic, NOT a count of monitored rows, contrary to an earlier
+wrong claim in that same doc), the current call stack (§2), and the user's explanation of how the
+optimizer actually consumes Demand/PRC/RC/SC with the correct aggregation granularity — across
+analyzers only, never across SOs or models (§3). Also fixed this session: STATE's file-list gap
+(commit `a16f5086`) found via cross-checking the diff against `code-review-notes.md`, after the
+user raised a serious concern about STATE/wind-down/resume-mission reliability — acknowledged
+directly, no further process changes made without the user's separate instruction.
 
-**Next step / resume point:** the new session should read
-`.session/review/code-review-notes.md` in full (it is the precise, citation-backed record — this
-STATE file only summarizes), then resume the same step-by-step code review with the user, covering
-the full **verified remaining-file list in the Execution checklist above** (re-derived
-2026-09-12 from `git diff --stat c013012e..composite-analyzer`, since the previous version of
-this list silently omitted `analyzer_helpers.go`, `query_api.go`, `cost_aware_optimizer.go`, and
-`rescale.go` — do not trust an unverified prose summary of "what's left" again; regenerate the
-diff file list and diff it against what `code-review-notes.md` actually discusses before treating
-any file as reviewed). Suggested order: **steadystate wiring** (`internal/engines/steadystate/
-composite.go` — the `buildComposite` function — plus its callers in `engine_v2.go`/`engine.go`)
-first since that was already in progress, then the two allocation files this list surfaced
-(`analyzer_helpers.go`, `query_api.go` — same package as the already-reviewed allocation-core
-files), then `cost_aware_optimizer.go`/`rescale.go`, then `internal/constants/metrics.go`,
-`docs/reference/cycle-log.md`, and finally the test files — matching the module grouping the HTML
-diff-review page used, adjusted for the corrected scope. Same rules as before: **no code changes
-during the review** — discuss each point, investigate it against the real code before answering,
-record only the outcome. `coder-agg1` and `reviewer-agg1` are both idle, holding open on their
-`In:` channels (not terminated) — resume them via `SendMessage` to their agent IDs/names rather
-than launching new agents, if implementation work resumes later. If their IDs are not in the new
-session's context, use `ListAgents` to find them by name (`coder-agg1`/`reviewer-agg1`) first.
+**Prior session's last-completed (2026-09-08/09, for reference):** built an HTML diff-review page
+for this mission's diff, generalized into the `diff-review-page` custom agent plus a standing
+WSL2/`wslview` convention in `~/.claude/CLAUDE.md`; ran the first part of the step-by-step code
+review (general comments, aggregation package, allocation core) — paused at the user's request.
+
+**Next step / resume point:** the new session's priority is the **redesign discussion**, not the
+file-by-file code review. Read `.session/composite-signal-redesign.md` in full first (it is the
+live, citation-backed record — this STATE file only summarizes), then continue with the user at
+its **§4**: deciding what "combine across analyzers" means, per quantity (Demand(model,role),
+Supply(model,role), AnticipatedSupply(model,role), PRC(SO)) — combination rule when analyzers
+agree/disagree, what to do when one analyzer lacks a value, whether the composite re-derives
+RC/SC via the same `applyUniversalThreshold` helper or combines already-computed RC/SC directly,
+and whether units need reconciling first. That doc's §5.1 lists open items from
+`code-review-notes.md` that bear directly on this (canonical-demand-unit naming, sat-disabled
+eligibility, `HasUsableCompositeSignal` granularity) — fold them into the same discussion rather
+than treating them separately. Do not resume the file-by-file review (§5.2's list, still accurate)
+until §4 is resolved, since the outcome may change what "correct" even means for `composite.go`.
+Same rule as the code review: **no code changes yet** — this is still a decisions-first
+discussion; implementation follows once the design is settled and folded back into `spec.md`.
+`coder-agg1` and `reviewer-agg1` are both idle, holding open on their `In:` channels (not
+terminated) — resume them via `SendMessage` to their agent IDs/names rather than launching new
+agents, if implementation work resumes later. If their IDs are not in the new session's context,
+use `ListAgents` to find them by name (`coder-agg1`/`reviewer-agg1`) first.
 
 ### Status
 
@@ -136,14 +163,15 @@ session's context, use `ListAgents` to find them by name (`coder-agg1`/`reviewer
   `c013012e` (note: `upstream/main` has since moved further, to `b01a6e17` as of this session —
   not re-rebased, per "do not rebase without asking first"). `git status`: only
   `.session/review/` is untracked (this session's review scratch output — see Task section).
-- Mission: **implementation-complete, reviewed PASS.** User is now doing their own code review
-  before deciding next steps (PR / more work / wind-down) — in progress, paused mid-way (see
-  Execution checklist). Nothing pushed, no PR opened.
+- Mission: **implementation-complete, reviewed PASS.** User's own code review is in progress but
+  currently superseded by a **redesign discussion** of `composite.go` (see Task/Execution above) —
+  that discussion is the live priority. Nothing pushed, no PR opened.
 - For the *design* (what was built and why), decision history, rejected approaches, and
   verification detail: **spec.md §1–§9 (design), §10 (decisions), §12 (revision + implementation
-  history)** — not restated here. For the ongoing code review's findings: `.session/review/
-  code-review-notes.md`. For prior session narrative (how each step happened, findings as they
-  occurred): the retired ledgers in `.session/ledger/`.
+  history)** — not restated here. For the completed part of the code review:
+  `.session/review/code-review-notes.md`. For the live redesign discussion:
+  `.session/composite-signal-redesign.md`. For prior session narrative: the retired ledgers in
+  `.session/ledger/`.
 
 ### Known issues
 
