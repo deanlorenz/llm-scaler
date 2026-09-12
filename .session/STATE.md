@@ -72,9 +72,28 @@
       `.session/review-coder-agg1.md`.
 - [x] User direction on next steps: **user chose to do their own step-by-step code review of the
       implementation** before deciding PR / more work / wind-down.
-- [ ] Code review in progress: general comments + aggregation package + allocation core done
-      (see `.session/review/code-review-notes.md`); steadystate wiring (`composite.go`,
-      `engine_v2.go`, `engine.go`), constants/metrics.go, docs, and tests **not yet reviewed**.
+- [ ] Code review in progress: general comments + aggregation package (production files only:
+      `demand.go`, `undefined.go`, `model_coverage.go`, `replicas_needed.go`, `prc_com.go`) +
+      allocation core (production files only: `composite_eligibility.go`, `composite_identity.go`,
+      `composite_decision.go`, `composite_signal_gate.go`) done (see
+      `.session/review/code-review-notes.md`).
+      **Not yet reviewed — verified against `git diff --stat c013012e..composite-analyzer` on
+      2026-09-12, this is the authoritative remaining list:**
+      - `internal/engines/allocation/analyzer_helpers.go`
+      - `internal/engines/allocation/query_api.go` (+ `query_api_test.go`)
+      - `internal/engines/allocation/cost_aware_optimizer.go`
+      - `internal/engines/allocation/rescale.go`
+      - `internal/engines/steadystate/composite.go` (+ `composite_test.go`,
+        `composite_observability_test.go`)
+      - `internal/engines/steadystate/engine.go`, `engine_v2.go` (+
+        `engine_v2_log_test.go`, `engine_v2_population_test.go`, `engine_v2_quota_test.go`,
+        `engine_signal_blocked_wiring_test.go`)
+      - `internal/constants/metrics.go`
+      - `docs/reference/cycle-log.md`
+      - all test files under `aggregation/` and `allocation/composite_*_test.go` (`demand_test.go`,
+        `undefined_test.go`, `model_coverage_test.go`, `replicas_needed_test.go`,
+        `prc_com_test.go`, `composite_decision_test.go`, `composite_eligibility_test.go`,
+        `composite_signal_gate_test.go`)
 - [ ] User direction on next steps (PR / more work / wind-down) — deferred until the code review
       finishes.
 
@@ -92,17 +111,24 @@ summary. This is a **full retirement** (user's explicit choice when asked checkp
 
 **Next step / resume point:** the new session should read
 `.session/review/code-review-notes.md` in full (it is the precise, citation-backed record — this
-STATE file only summarizes), then resume the same step-by-step code review with the user starting
-from **steadystate wiring** (`internal/engines/steadystate/composite.go` — the `buildComposite`
-function — plus its callers in `engine_v2.go`/`engine.go`), continuing through
-`internal/constants/metrics.go`, `docs/reference/cycle-log.md`, and the test files, in that order,
-matching the module grouping the HTML diff-review page used. Same rules as before: **no code
-changes during the review** — discuss each point, investigate it against the real code before
-answering, record only the outcome. `coder-agg1` and `reviewer-agg1` are both idle, holding open
-on their `In:` channels (not terminated) — resume them via `SendMessage` to their agent IDs/names
-rather than launching new agents, if implementation work resumes later. If their IDs are not in
-the new session's context, use `ListAgents` to find them by name (`coder-agg1`/`reviewer-agg1`)
-first.
+STATE file only summarizes), then resume the same step-by-step code review with the user, covering
+the full **verified remaining-file list in the Execution checklist above** (re-derived
+2026-09-12 from `git diff --stat c013012e..composite-analyzer`, since the previous version of
+this list silently omitted `analyzer_helpers.go`, `query_api.go`, `cost_aware_optimizer.go`, and
+`rescale.go` — do not trust an unverified prose summary of "what's left" again; regenerate the
+diff file list and diff it against what `code-review-notes.md` actually discusses before treating
+any file as reviewed). Suggested order: **steadystate wiring** (`internal/engines/steadystate/
+composite.go` — the `buildComposite` function — plus its callers in `engine_v2.go`/`engine.go`)
+first since that was already in progress, then the two allocation files this list surfaced
+(`analyzer_helpers.go`, `query_api.go` — same package as the already-reviewed allocation-core
+files), then `cost_aware_optimizer.go`/`rescale.go`, then `internal/constants/metrics.go`,
+`docs/reference/cycle-log.md`, and finally the test files — matching the module grouping the HTML
+diff-review page used, adjusted for the corrected scope. Same rules as before: **no code changes
+during the review** — discuss each point, investigate it against the real code before answering,
+record only the outcome. `coder-agg1` and `reviewer-agg1` are both idle, holding open on their
+`In:` channels (not terminated) — resume them via `SendMessage` to their agent IDs/names rather
+than launching new agents, if implementation work resumes later. If their IDs are not in the new
+session's context, use `ListAgents` to find them by name (`coder-agg1`/`reviewer-agg1`) first.
 
 ### Status
 
