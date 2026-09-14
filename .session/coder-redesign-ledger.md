@@ -334,3 +334,72 @@ Score should never have weighted cross-model priority" — already flagged pre-e
 something this task introduced or was asked to fix, and outside my file table.
 
 ## Task complete — reported on Out
+
+## Post-completion: mission owner asked for a DecisionSatFallback end-to-end PRC-identity test
+
+Mission owner verified my report independently (good), found one real coverage gap against the
+task file's stated verification requirement ("both DecisionSingle and DecisionSatFallback must
+be tested end-to-end for the sat-sole-contributor PRC identity") — asked me to add a
+DecisionSatFallback case to composite_test.go (sat disabled in config, no other contributor).
+
+## Found: the diagnosis has the two paths swapped — escalated, not silently substituted
+
+Before writing the requested test, checked which path composite_test.go's EXISTING "sat-only
+regression (test 1)" actually exercises, since the mission owner's message implied it already
+covered DecisionSingle.
+
+`scaleCfg = config.ScalingPolicy{ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70}` (used by
+`satOnlyEngine`-based tests, defined composite_test.go:30) has an EMPTY `Analyzers` slice.
+`config.ScalingPolicy.AnalyzerEnabled(name)` (`saturation_scaling.go:657`) returns false when
+name is absent from `Analyzers` ("absent -> opt-in: does not participate"). So
+`AnalyzerEnabled(domain.SaturationAnalyzerName)` is FALSE under `scaleCfg` — meaning
+`engine_v2.go`'s step-1 gate excludes sat from `eligibleAnalyzers`, meaning test 1 (and every
+other `scaleCfg`-based test) already runs the DecisionSatFallback path, not DecisionSingle.
+
+Confirmed experimentally (not just by reading): added a throwaway test file (new file, deleted
+immediately after, never touched a tracked file — one `cp` attempt at copying into a TRACKED
+file for a separate experiment earlier in this session was correctly blocked by the permission
+classifier before anything landed) that ran test 1's exact fixture through
+`collectV2ModelRequest` and printed the resulting `Reason`: got `"C2-sat-fallback"`.
+
+Also checked composite_test.go's other cfg-with-Analyzers cases: test 13's `equalScores`/
+`skewedScores` both list saturation AND "spy" — two contributors, so that's `DecisionAgree`,
+not `DecisionSingle`. Test 15's `cfg` lists only "spy" (sat absent/disabled) with spy
+contributing — also `DecisionAgree`. So NO existing composite_test.go case exercises
+`DecisionSingle` end-to-end at all; `DecisionSatFallback` is already covered (by test 1,
+unlabeled as such — an accident of `scaleCfg`'s shape, not a deliberate choice).
+
+Published a correction to Out (not proceeding with the literal ask) proposing instead: (1) add
+the actually-missing DecisionSingle end-to-end test (sat explicitly enabled via config, sole
+analyzer), and (2) label test 1's existing (already-passing) DecisionSatFallback coverage
+explicitly rather than leaving it an unlabeled accident. Holding for confirmation before writing
+either — per protocol, posted and stopped cleanly, no blocking wait.
+
+## Mission owner confirmed the correction — both changes applied
+
+Mission owner independently re-verified my finding against `saturation_scaling.go:657-667` and
+confirmed I was right; approved proceeding exactly as I proposed.
+
+Applied both, in `composite_test.go`:
+1. Renamed the existing `Describe("buildComposite — sat-only regression (test 1)", ...)` to
+   `"buildComposite — sat-only regression, DecisionSatFallback path (test 1)"`, added a doc
+   comment explaining WHY it's the fallback path (scaleCfg's empty `Analyzers` → `AnalyzerEnabled`
+   false → sat excluded from `eligibleAnalyzers`), and added an explicit
+   `Expect(...Reason).To(Equal(string(allocation.DecisionSatFallback)))` assertion to its first
+   `It` so the label is verified, not just asserted in prose.
+2. Added a new `satEnabledCfg` (lists `domain.SaturationAnalyzerName` in `Analyzers`, so
+   `AnalyzerEnabled(sat)` is true) and a new `Describe("buildComposite — sat-only regression,
+   DecisionSingle path", ...)` block: same baseline-comparison pattern as test 1, sat explicitly
+   enabled and the sole registered analyzer, asserting `Reason == DecisionSingle` and the full
+   PRC/supply/RC/SC/Live identity against `namedResults[0]`.
+
+`go build`/`go vet` clean. Ran the new + updated tests directly (both appear, both pass, 0
+failed in the full steadystate ginkgo run: 166 passed/0 failed/2 skipped — the 2 skips are
+pre-existing and unrelated, not touched). `make test` passes end to end (no gofmt reformatting
+needed this time — wrote the file with correct formatting directly). Both non-negotiable
+regression-guard paths (spec §2.9) are now explicitly, verifiably covered end-to-end through
+`collectV2ModelRequest`/`buildComposite`, closing the task file's stated verification gap for
+real this time.
+
+Committed as its own commit on top of `bff67c6f`/`6eb92892`; only `composite_test.go` and this
+ledger changed.
