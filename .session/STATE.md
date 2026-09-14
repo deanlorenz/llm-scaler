@@ -11,10 +11,9 @@
 - **Worktree:** `worktrees/composite-analyzer` (branch `composite-analyzer`)
 - **Role / scope:** mission owner — owns STATE, the plan, the `composite-analyzer` branch, and
   integration decisions for this mission only.
-- **Ledger / log:** `.session/2026-09-14-composite-analyzer-1.md` — active this session (created
-  mid-session after the user pointed out no ledger was being kept, a direct CONVENTIONS.md
-  violation — see its own header). A NEW session should create its own dated ledger file rather
-  than appending to this one. Captured retired ledgers:
+- **Ledger / log:** `.session/2026-09-14-composite-analyzer-2.md` — active this session
+  (checkpointed, not retired — see Session log). A NEW session should create its own dated
+  ledger file rather than appending to this one. Captured retired ledgers:
   `.session/ledger/2026-09-08-composite-analyzer-1.md`,
   `.session/ledger/2026-09-08-composite-analyzer-2.md`
   ⚠ DO NOT READ retired ledgers — not yours
@@ -23,19 +22,58 @@
 
 - **Plan / spec for the redesign — READ THIS ONE, NOT spec.md:**
   `.session/composite-signal-redesign.md` **§2 is the current, authoritative, coder-ready spec**
-  for the composite-building rewrite. It was restructured 2026-09-14 into §1 (summary), §2 (spec
-  — settled rules only, no reasoning/citations), §3 (open items), §4 (roadmap), §5 (discussion —
-  every fact/citation/history, on-demand only). `spec.md`'s v9 entry (§12) is **STALE** — it
-  reflects an earlier, less precise version of this design (before the sat-visibility-after-
-  compose fix and other corrections below) and has **not been re-synced**. Do not read `spec.md`
-  for the redesign; read `composite-signal-redesign.md` §2 directly. Re-syncing `spec.md` is
-  tracked as an open item in that doc's §3 — not yet done.
-- **v9 implementation task, READY TO DISPATCH:** `.session/task-coder-composite-redesign.md` —
-  fully rewritten 2026-09-14 against §2 above. Every function signature, file destination, and
-  struct/switch shape is spelled out concretely (no naming or placement decisions left to the
-  coder). Includes a `user.in` progress-reporting instruction (publish a note after each step,
-  per `conventions/agentbus.md`). **Not yet dispatched to a coder** — this is the very next
-  action once a new session picks this up, pending final user sign-off on the task file's content.
+  for the composite-building rewrite — **IMPLEMENTED**, see Status below. Restructured
+  2026-09-14 (twice: once into a §1-5 split, then again the same session into an 8-section
+  template — §1 orientation, §2 spec/settled-rules, §3 open items, §4 coder task hierarchy, §5
+  discussion abstracts, §6 summary of decisions, §7 detailed discussion, §8 revision log; commit
+  `37886266`). §2's own subsection numbers (2.1-2.10) were preserved across both restructures —
+  every `§2.x` reference below still resolves. `spec.md`'s v9 entry (§12) is **STALE**, not
+  re-synced, not blocking — tracked in the doc's §3.
+- **v9 implementation task:** `.session/task-coder-composite-redesign.md` — **DONE**, see Status.
+  Not yet updated for the pending §2 wording/naming fixes below — do so before any future
+  dispatch against it.
+- **Pending spec fixes from the user's post-implementation review, NOT YET APPLIED** (full
+  detail + code verification: `.session/drafts/2026-09-14-spec-review-response.md`):
+  - `eligibleAnalyzers` → rename to `enabledAnalyzers` (matches what it actually filters on) —
+    small, mechanical, code + doc, needs a coder task or a direct small edit.
+  - §2.1 call-stack block: trim inline WHY-prose, push reasoning to §7 pointers only.
+  - §2.1.d: `CompositeTotalReplicas` should become an actual function (currently inline in the
+    `switch`) — **real code change**, needs a coder task, not just a doc edit.
+  - §2.1.e: reword — only `D_sat[role]` (the numerator) is fetched once per role; PRC itself is
+    still computed per SO.
+  - §2.3: wording/tense fix only (confirmed still factually correct — "moves into" → "now lives
+    in").
+  - §2.6: add a line that `engine.go`/`engine_v2.go` are the same `Engine`, not two versions;
+    `CompositeHasSignal` is live, called every reconcile cycle. **Real gap found and confirmed,
+    not yet resolved as a design question:** `SOHasSignal` (per-SO check) has zero production
+    callers anywhere; the actual optimizer files never read the decision-path/Reason at all —
+    `CompositeHasSignal` passing at the whole-request level says nothing about which individual
+    SOs within it actually have signal. Verified this does NOT crash/corrupt today (a no-signal
+    SO's PRC falls through to sat's own PRC, and every optimizer PRC consumer guards `<=0`) —
+    but the optimizer cannot currently distinguish a real signal from a no-signal fallback.
+    **Open question for the user:** should the optimizer (or something upstream) consume
+    `SOHasSignal` per-SO, and if so, do what with a no-signal SO?
+  - §2.7: add a TODO comment (both in spec and on `allocation.TotalReplicas`,
+    `composite_decision.go:43`) — future work to adjust `TotalReplicas`/`N_i(SO)` by
+    per-analyzer thresholds; not this task.
+  - §2.8: add the user's exact future-direction correction (true Supply from ready-replica-count;
+    Anticipated from CurrentReplicas, not ReplicaCount+Pending) as the eventual-fix target,
+    keeping "accepted for now" framing for current behavior.
+  - §3: split into explicit Blocking / Non-blocking sub-lists; fix the `query_api.go` item's
+    wording — it's not just "naming/duplication," it's 3 duplicated implementations plus
+    inconsistent naming (`code-review-notes.md` §10 has the full finding).
+  - §7: note that every finding needs re-checking against pre-single-analyzer code specifically,
+    once that comparison (below) is done.
+- **Two investigations requested, not started:**
+  1. Re-verify current implementation against HEAD (quick — was last verified mid-session,
+     before the round-2 review; nothing should have changed since, but not re-confirmed).
+  2. **Pre-single-analyzer aggregation comparison** (potentially substantial): identify the
+     former aggregations as done in the optimizer pre-single-analyzer, confirm they still have
+     "similar meaning" under v9 — for sat-only, NO CHANGE; for multi-analyzer, correct math and
+     units. Required both for general completeness (§2.10) and specifically for testing. STATE
+     previously noted `git log`/`git blame` on `engine_v2.go` as the way to find the
+     pre-single-analyzer code if it isn't otherwise obvious; ask the user directly if that
+     doesn't turn it up quickly.
 - **Survey:** `.session/survey-zero-signal.md` *(pull on demand)*
 - **v8 implementation task files (superseded by v9, kept for history):** `.session/task-coder-agg1.md`,
   `.session/task-reviewer-agg1.md`, `.session/review-coder-agg1.md` (verdict PASS on v8's design,
@@ -141,23 +179,26 @@
       dropped-content recovery after an improper single-`Write` rewrite) — **`spec.md` was never
       re-synced and is now stale.** Do not treat `spec.md` as authoritative for this redesign;
       `composite-signal-redesign.md` §2 is. Re-sync is tracked in that doc's §3, not yet done.
-- [ ] **Implementation — DISPATCHED 2026-09-14 (session 2026-09-14-composite-analyzer-2).** User
-      gave the per-operation authorization ("launch a coder in the background to fix the code per
-      the new design"). Coder `coder-redesign` running **same-worktree/async** per
-      `conventions/worktree-delegation.md` — commits land directly on `composite-analyzer`, no
-      cherry-pick step. Task file: `.session/task-coder-composite-redesign.md` (gained an
-      `In:`/`Out:` agentbus block at dispatch time — it had none, a `coder-orchestration.md` §8
-      violation caught pre-launch; the 10 steps are unchanged).
-      - **⚠ CONCURRENCY LOCK: this worktree/branch has an ACTIVE CODER.** Do not launch a second
-        coder here until it reports done (`coder-orchestration.md` rule 5/6 — nothing enforces
-        this automatically in same-worktree).
-      - **While it runs, the mission owner must not edit code in this worktree** (same-worktree
-        async rule). STATE and the owner's ledger remain editable. Reading/monitoring is fine.
-      - Channels: In `composite-analyzer.coder-redesign.in`, Out `composite-analyzer.coder-redesign`.
-        It also publishes per-step progress notes to `user.in`.
-      - Not yet verified/reviewed — on completion the owner must check the done criteria per
-        `coder-orchestration.md` rule 10 (owner does not re-run tests; that is a reviewer's job).
-        No reviewer dispatched yet — decide with the user whether to attach one.
+- [x] **Implementation — DONE 2026-09-14 (session 2026-09-14-composite-analyzer-2).** User
+      authorized dispatch; coder `coder-redesign` ran **same-worktree/async**, commits landed
+      directly on `composite-analyzer`. 4 invocations total — 3 stopped correctly on real,
+      verified gaps (an import cycle caught by `go build`; a sat-fallback eligibility hole caught
+      by a failing ported test; a `DecisionSingle`/`DecisionSatFallback` test-coverage mislabel
+      caught by the coder's own re-check of the mission owner's request), all resolved via
+      `Out:` escalation, none guessed at. Final commits: `bff67c6f`, `6eb92892`, `4d864175`,
+      `748261de`. **Independently verified by the mission owner** (not just accepted on the
+      coder's report): `go build`/`go vet` clean, `make test` force-reran (not cached) and
+      passing, `HasUsableCompositeSignal`/`ResolveSO`/`SODecision`/`hasSaturationResult`
+      confirmed fully removed, both non-negotiable regression-guard paths confirmed tested
+      end-to-end. **A separate, pre-existing bug found and fixed during implementation, not
+      introduced by this redesign:** the `buildComposite` call site named
+      `domain.SaturationAnalyzerName` to source its thresholds — fixed to use
+      `config.ScaleUpThreshold`/`ScaleDownBoundary` directly.
+      - No reviewer was attached to this task — decide with the user whether to attach one
+        before treating the code as final, separately from the code-review resume item below.
+      - **Not yet reviewed by the user.** A second round of user review (post-restructure) found
+        real gaps in the SPEC's wording/completeness, not in the implemented code itself — see
+        the pending-fixes list in the Task section above and Next step below.
 - [ ] Resume code review of `composite.go`/steadystate wiring — **wait until v9 is implemented**,
       since v8's `composite.go` (what `code-review-notes.md` would otherwise review) will no longer
       exist in its current form. Remaining-file list (unchanged, still accurate):
@@ -180,7 +221,60 @@
 - [ ] User direction on next steps (PR / more work / wind-down) — deferred until v9 is implemented
       AND the resumed code review both conclude.
 
-**Last completed (this session, 2026-09-13/14):** resolved the redesign discussion end to end,
+**Last completed (this session, 2026-09-14, session -2):** v9 implemented, verified, and given a
+second round of user review that found real spec (not code) gaps — recorded plainly, not just
+outcomes, per this STATE's own convention:
+- Dispatched, ran, and completed the v9 coder task across 4 invocations — see checklist item
+  above for the compressed version; full narrative in this session's ledger
+  (`.session/2026-09-14-composite-analyzer-2.md`).
+- Independently verified the coder's "done" report rather than accepting it — found and closed
+  one real coverage gap (the `DecisionSingle` path was never actually tested end-to-end; the
+  existing test silently ran on `DecisionSatFallback` instead, opposite of what both the mission
+  owner and the coder first assumed — the coder caught its own mistake here, correctly, before
+  writing the requested test).
+- **User halted work mid-session**: the spec doc (`composite-signal-redesign.md`) had drifted
+  back into unreadable prose — §2 (meant to be settled-rules-only) had grown to 1,542 words via
+  four inline "Correction (date...)" narrative paragraphs added under time pressure, despite an
+  explicit prior-session restructure into a clean template. Also caught: the mission owner had
+  not read `conventions/chat-preferences.md` at any point this interactive session (a listed
+  trigger), and had written a suggestion-box draft directly into the shared `session-tracking`
+  worktree, which counts as posting even without overwriting anything.
+- Root-caused with the user: two real gaps in the template used, not just an execution lapse —
+  (1) no distinct HOW/pseudo-code layer that scales with a doc's level (resolved: the
+  settled-rules section is recursive, same section, deeper resolution per level, never literal
+  target-language code); (2) the coder-dispatch pipeline was missing a design-validation
+  checkpoint before implementation — **new process rule, applies to all future coder task files
+  on this mission:** the coder proposes its code-level design inside the task file, stops,
+  reports on `Out:`, and only proceeds after the mission owner (sometimes the user) approves it.
+- Rebuilt `composite-signal-redesign.md` into a revised 8-section template (§1 orientation, §2
+  spec, §3 open items, §4 coder task hierarchy, §5 discussion abstracts, §6 summary of decisions,
+  §7 detailed discussion, §8 revision log) — §2's own subsection numbers preserved so every
+  existing `§2.x` reference elsewhere still resolves. Built via scratch-file text-relocation +
+  citation/word-count diff against the original before applying, per this mission's own
+  standing lesson about full-doc restructures (see the 2026-09-13/14 entry below) — not
+  regenerated from memory.
+- A second round of user review on the restructured doc surfaced 6 more findings, all verified
+  against code before answering (not guessed): `eligibleAnalyzers` should rename to
+  `enabledAnalyzers`; §2.3 (file placement) is still fully correct, only its tense/framing needed
+  a fix; §2.6's `CompositeHasSignal` gap is real and confirmed — `SOHasSignal` (the per-SO check)
+  has zero production callers anywhere, so nothing downstream actually knows which individual SOs
+  within a "has signal" request are backed by real signal (verified this doesn't crash/corrupt
+  today — falls through to sat's own PRC safely — but is an open design question, not yet
+  answered); `AggN`/`PRCCom` are fully gone from code, confirming §2.3; `engine.go` is live,
+  active code, not a legacy "v1" (same `Engine` as `engine_v2.go`, split by function grouping);
+  the `query_api.go` open item is non-blocking but understated (3 duplicated implementations,
+  not just "naming"). Full detail: `.session/drafts/2026-09-14-spec-review-response.md`.
+- Posted the suggestion-box item (after moving it out of the shared worktree into a local draft
+  first, per the user's correction) to
+  `session-tracking/suggestion-box/2026-09-14-2200-composite-analyzer.md` — not yet processed by
+  `policy-writer`.
+- User explicitly restated the ledger-cadence complaint (append every summary or two,
+  continuously — not batched) — applying from this point forward.
+- **Checkpointing here at user's explicit request** ("persist for now, wind-down, fresh session
+  later") — this is a safe checkpoint, not a retirement; mission ownership is not released.
+
+**Superseded — prior session's "Last completed" (2026-09-13/14), kept for context:** resolved
+the redesign discussion end to end,
 through multiple rounds of user correction — recorded plainly since a future session should learn
 from these, not just their outcomes:
 - Ruled every composite field comes from saturation alone except PRC and Reason, and saturation
@@ -232,17 +326,32 @@ for this mission's diff, generalized into the `diff-review-page` custom agent pl
 WSL2/`wslview` convention in `~/.claude/CLAUDE.md`; ran the first part of the step-by-step code
 review (general comments, aggregation package, allocation core) — paused at the user's request.
 
-**Next step / resume point (as of 2026-09-14 session -2):** the v9 coder is **dispatched and
-running** (same-worktree/async, `coder-redesign`). Do not edit code in this worktree while it
-runs, and do not launch a second coder here. When it reports done on
-`composite-analyzer.coder-redesign`: verify completion state per `coder-orchestration.md` rule 10
-(reviewed? done criteria met? gaps? committed?) — the owner does not re-run tests itself. Then
-ask the user (a) whether to attach a reviewer for this task, and (b) whether to resume the
-file-by-file code review of `composite.go`/steadystate wiring, which was on hold precisely until
-v9 landed. `spec.md` stays stale-by-design; re-sync only if the user asks.
+**Next step / resume point (as of end of 2026-09-14 session -2, checkpoint):** v9 is implemented
+and independently verified — do NOT re-dispatch a coder against the old task file without first
+applying the pending spec fixes listed in the Task section above (the task file is stale
+relative to the spec's next revision). In order:
+1. Read `.session/drafts/2026-09-14-spec-review-response.md` in full — it has every pending fix,
+   already verified against code, with an edit-plan table.
+2. Get the user's go-ahead on the edit plan (some are pure wording, some are real code changes —
+   §2.1.d's `CompositeTotalReplicas` function extraction and the `eligibleAnalyzers`→
+   `enabledAnalyzers` rename both touch actual source, not just the doc).
+3. Apply the doc edits directly (mission owner owns this file, no `.wip` lock needed — user
+   instruction, 2026-09-14). Dispatch a coder for the code changes only if the user wants them
+   done now rather than batched with the next real implementation task — **per this session's
+   new process rule, any new coder task file must include a design-validation checkpoint before
+   implementation, not just an implementation checklist.**
+4. Resolve the open design question from §2.6 (should `SOHasSignal` be consumed per-SO by the
+   optimizer, and do what with a no-signal SO) — needs the user's ruling, not investigation.
+5. Do the two pending investigations from the Task section (quick re-verify; the larger
+   pre-single-analyzer aggregation comparison) — ask the user which order, per the review
+   comment ("recheck all is implemented... [and] identify the former aggregations").
+6. Only after 1-5: decide with the user whether to attach a reviewer to the implemented code,
+   and whether to resume the file-by-file code review of `composite.go`/steadystate wiring
+   (on hold since 2026-09-13, now genuinely unblocked since v9's code exists).
+7. `spec.md` stays stale-by-design; re-sync only if the user asks.
 
-**Superseded resume point (kept for context — this is what -2 acted on):** the design is fully
-settled and the task file is coder-ready — read
+**Superseded resume point (from before dispatch — kept for context only, already acted on):**
+the design is fully settled and the task file is coder-ready — read
 `.session/composite-signal-redesign.md` §2 plus `.session/task-coder-composite-redesign.md`
 directly (both short, no need to read `spec.md` or the redesign doc's §5). Ask the user for
 final sign-off on the task file, then ask whether to dispatch it. If yes: same dispatch pattern
@@ -258,23 +367,28 @@ not blocking dispatch.
 ### Status
 
 - Environment: **ready** — branch `composite-analyzer`, rebased onto `upstream/main` @
-  `c013012e` (note: `upstream/main` has since moved further, to `b01a6e17` as of this session —
-  not re-rebased, per "do not rebase without asking first"). `git status`: only
-  `.session/review/composite-diff-review.html` is untracked (prior session's review scratch
-  output). Everything else this session touched is committed — see `git log` on this branch,
-  2026-09-14 commits.
-- Mission: **implementation-complete on v8** (still true — this redesign restructures v8's code,
-  not the underlying math). The redesign discussion that paused the user's own code review is now
-  **fully resolved**, corrected through several rounds, and the coder task is ready to dispatch.
-  **Not yet dispatched.** Nothing pushed, no PR opened.
-- For the *current* design (what a coder should build): **`.session/composite-signal-redesign.md`
-  §2**, plus `.session/task-coder-composite-redesign.md` for the concrete implementation
-  checklist. **`spec.md` is stale for this redesign — do not use it as the source of truth**; its
-  §1–§9 still describe v8's shape and its §12 v9 entry predates several corrections. For the
-  completed part of the v8 code review: `.session/review/code-review-notes.md` (now including a
-  new §10 on rounding-function issues, recorded not actioned). For prior session narrative: the
-  retired ledgers in `.session/ledger/`; for this session's own detailed narrative including every
-  correction and the process violation/recovery: `.session/2026-09-14-composite-analyzer-1.md`.
+  `c013012e` (note: `upstream/main` has since moved further, to `b01a6e17` — not re-rebased, per
+  "do not rebase without asking first"). `git status`: only
+  `.session/review/composite-diff-review.html` is untracked (long-standing review scratch
+  output, not this session's). Everything else this session touched is committed — see `git log`
+  on this branch, 2026-09-14 commits (from `57ed16df` through `HEAD` at checkpoint time).
+- Mission: **v9 implemented, verified, not yet user-reviewed.** v8 remains
+  implementation-complete underneath (v9 restructures code, not the underlying math). The
+  redesign discussion is resolved; the coder task (4 invocations) is done; the mission owner
+  independently verified the result. A second round of user review on the spec doc found real
+  spec-wording/completeness gaps (not code bugs) — pending fixes listed in Task section above,
+  none applied yet. **Nothing pushed, no PR opened.**
+- For the *current* design (what a coder built, and what the next spec revision must fix before
+  any further dispatch): **`.session/composite-signal-redesign.md` §2**, plus
+  `.session/task-coder-composite-redesign.md` for the checklist the coder actually followed
+  (stale relative to pending fixes — do not re-dispatch against it as-is).
+  **`spec.md` is stale for this redesign — do not use it as the source of truth.** For the
+  completed part of the v8 code review: `.session/review/code-review-notes.md` (§10 on
+  rounding-function issues, recorded not actioned, referenced from spec §3). For this session's
+  detailed narrative including every correction, the two review rounds, and the checkpoint
+  itself: `.session/2026-09-14-composite-analyzer-2.md` (still active, not yet ledger-captured —
+  see Session log). For the prior session's narrative: `.session/2026-09-14-composite-analyzer-1.md`
+  (retiring, not yet moved to `.session/ledger/`).
 
 ### Known issues
 
@@ -293,4 +407,4 @@ not blocking dispatch.
 - 2026-09-08 session=2026-09-08-composite-analyzer-2 status=retired ledger=.session/ledger/2026-09-08-composite-analyzer-2.md
 - 2026-09-12 session=2026-09-12-composite-analyzer-1 status=retired ledger=.session/2026-09-12-composite-analyzer-1.md
 - 2026-09-14 session=2026-09-14-composite-analyzer-1 status=retiring (user /clear-ing) ledger=.session/2026-09-14-composite-analyzer-1.md
-- 2026-09-14 session=2026-09-14-composite-analyzer-2 status=active ledger=.session/2026-09-14-composite-analyzer-2.md
+- 2026-09-14 session=2026-09-14-composite-analyzer-2 status=active (safe checkpoint — ledger not yet captured) ledger=.session/2026-09-14-composite-analyzer-2.md

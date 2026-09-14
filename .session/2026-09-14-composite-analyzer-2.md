@@ -468,3 +468,15 @@ current implementation against HEAD (quick), and the pre-single-analyzer aggrega
 for testing (the user's item 7, described as potentially substantial — not started).
 
 Ending session here per user instruction ("persist for now, wind-down, fresh session later").
+
+## Wind-down safety-net pass — chat-only corrections not otherwise captured above
+
+Two chat-format corrections this session weren't tied to a file edit, so they aren't visible in
+git log — recording them here per the wind-down skill's own instruction to note gaps honestly:
+(1) mid-session, `chat-preferences.md` was read for the first time despite being a listed
+trigger for "interactive foreground session" — should have been read before the first reply of
+this session, not partway through; applying its format (numbered lines, icon set, half-page cap
+with document overflow, WHAT/WHY-before/bottom-line-after on tool calls) from that point on.
+(2) Two separate corrections on using exactly one `📋 Summary` block per reply, not two (an
+opening reaction-summary plus an unlabeled closing next-steps list) — fixed after the second
+instance was pointed out.
