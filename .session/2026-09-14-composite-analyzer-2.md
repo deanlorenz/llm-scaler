@@ -398,3 +398,20 @@ file/invocation for design vs. implementation).
 
 Not yet done: the actual suggestion-box draft, and the template revision itself. Both pending,
 in that order, per instruction 3 above.
+
+## Correction: draft was posted, not drafted; ledger cadence complaint restated
+
+Wrote the suggestion-box item directly into `session-tracking/suggestion-box/` — user caught
+this immediately: writing into `session-tracking` at all IS posting, since it's shared space,
+regardless of not overwriting any existing file there. Correct process: draft locally in this
+worktree, track it there, only copy/post into `session-tracking` when actually ready to submit.
+Moved the file (never committed in `session-tracking`, confirmed via `git status` before
+moving) to `.session/drafts/suggestion-box-2026-09-14-2100.md` in this worktree; committed here
+(`0644bf42`). Nothing left behind in `session-tracking`.
+
+Also: user restated the ledger-cadence complaint from earlier this session (first raised after
+this session's `contention.go`/`CONVENTIONS.md` read, before any mission work started) — not a
+new issue, a still-standing one. Point: a long session with no realtime ledger risks losing
+everything to an agent error or environment crash. Fix is behavioral, not a one-time catch-up
+write: append every summary or two, continuously, not batched at session boundaries or only
+when the user notices a gap. Applying from this point forward in this session.
