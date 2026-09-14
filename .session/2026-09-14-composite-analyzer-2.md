@@ -134,6 +134,34 @@ cleanly, let the owner read `Out:` asynchronously.
 - Did NOT touch the already-applied, uncommitted step 1 change in `engine_v2.go` — verified
   unaffected by any of the above (it's upstream of and untouched by steps 3/5's fixes).
 
-Next: commit these three files, then relaunch `coder-redesign` (same slug, same channels,
-same worktree/branch — this is a continuation, not a fresh dispatch) from step 2 onward. Step
-1's tree state carries forward as-is.
+Committed as `20ffa9ee`. Resumed `coder-redesign` from step 2 via SendMessage, with both
+rulings and the corrected escalation-routing instructions.
+
+## Second invocation — escalated correctly this time, hit a real import cycle
+
+Coder made real progress: steps 1, 2, 3 (minus the blocked `roleOf` call), 4 (minus the
+blocked placement), 5, 6, 9, 10 all written (uncommitted). This time it escalated exactly as
+corrected: posted the question to `Out:` (`composite-analyzer.coder-redesign`), logged full
+detail in its own ledger, stopped cleanly with no blocking wait. No `agentbus_ask_user`, no
+`user.in` question. The process fix held.
+
+**The bug it found:** §2.3/step 4 said the one shared role-canonicalization function lives in
+`steadystate` as `RoleOfVC`, but step 3's `allocation.TotalReplicas` needs to call it —
+`allocation` importing `steadystate` would be a compile-time cycle, since `steadystate` already
+imports `allocation` in three files. Verified independently before ruling (not taking the
+coder's word for it): `grep` confirmed the one-directional import; `go build` failed at exactly
+`composite_decision.go:50:55: undefined: RoleOfVC` after the coder's own attempt, consistent
+with its report. Coder proposed moving the function to `domain` (both packages already import
+it cleanly, no reverse dependency, already owns `VariantCapacity`) but correctly did not apply
+its own proposal — a placement decision it's not permitted to make. This is a placement
+correction, not a design change, so I ruled on it directly (domain, as proposed) rather than
+escalating further to the user — recorded here for visibility, per "if a finding changes what
+a resuming session needs to know, its conclusion goes into STATE" (this is ledger, but the
+STATE update below carries the short version).
+
+Fixed `composite-signal-redesign.md` §2.3 (dated correction note) and the task file's steps
+3/4/5/6 plus the file table (added `internal/domain/role.go` and the `composite_eligibility.go`
+rename as explicit rows; also fixed a latent off-by-one in the file table where
+`composite_signal_gate.go`/call-site rows were mislabeled step 7 instead of step 8). Committed
+as `0b9e120b`. Resuming coder from where it left off (steps 4's placement, then whatever of
+7/8 remain).
