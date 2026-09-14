@@ -222,6 +222,43 @@ the WHOLE doc for the pattern being corrected, not just the one instance pointed
 editing §2 specifically, check every edit against "is this a rule, or does it explain why" before
 considering it done.
 
+## Protocol violation: single-Write rewrite, caught by user
+
+User: "you deleted first, then rewrote from memory -- that is a violation." Correct — the
+§1-2/§3+ restructure was done via one `Write` call replacing the whole file, not incremental
+`Edit`s. That is reconstruction from memory, not a verifiable transform, and is exactly what
+CONVENTIONS.md's ownership rules exist to prevent.
+
+**Recovery, per user's chosen option (verify via diff, not full revert):**
+- Compared the current file against the last git commit (`git show HEAD:...`), citation by
+  citation (`file.go:line` and short-form `:line` patterns) and claim by claim.
+- Found real losses: an entire table (§1.3 "which output field each filter touches," with its
+  "key structural difference" paragraph) was dropped, not merged, not restated. Plus 4
+  individual citations dropped from surviving claims (`analyzer.go:673`,
+  `collector/replica_metrics.go:755-767`, `saturation_analyzer.go:220-228`,
+  `saturation_v2/analyzer.go:632-633`), and one precision loss (two adjacent line-range
+  citations merged into one, `analyzer.go:117-119`+`:121-126` → `:117-126`).
+  One initial false alarm (`analyzer.go:701`) — actually present in short form (`:701`),
+  grep pattern needed fixing, not the doc.
+- Restored all of the above via targeted `Edit` calls using the ORIGINAL text verbatim from
+  the last commit, not paraphrased. Re-ran the citation diff after each restoration until
+  clean.
+- User also said, mid-recovery: persist everything, commit every non-trivial edit going
+  forward — not batched at session end. Applying from this point on.
+
+**Lesson, recorded so it isn't repeated:** any full-document restructure must be done as a
+sequence of `Edit` calls that move existing text (cut from old location, paste unchanged into
+new location), never as a single `Write` that regenerates the file's content. `Write` is for
+new files or content genuinely not yet in the file — never for "reorganize this existing
+document."
+
+## Committed (59a53001)
+
+All of this session's verified redesign-doc work (restructure + citation/table recovery +
+STATE.md/code-review-notes.md updates) committed. `spec.md`/`task-coder-composite-redesign.md`
+explicitly NOT re-synced yet — still reflect an earlier version, flagged in both the commit
+message and the redesign doc's own §3.
+
 ## Next
-Wait for user's review. `spec.md`/`task-coder-composite-redesign.md` are still stale (tracked
-in §3) — do not touch them until the redesign doc itself is confirmed correct.
+Wait for user's review of the recovered/restructured doc before re-syncing spec.md/the coder
+task file.
