@@ -141,9 +141,23 @@
       dropped-content recovery after an improper single-`Write` rewrite) — **`spec.md` was never
       re-synced and is now stale.** Do not treat `spec.md` as authoritative for this redesign;
       `composite-signal-redesign.md` §2 is. Re-sync is tracked in that doc's §3, not yet done.
-- [ ] **Implementation — NOT YET DISPATCHED.** Task file is ready but no coder has been
-      authorized/started on it. Per-operation authorization still required before dispatch (mission
-      convention) — do not assume the task file's existence is itself authorization to dispatch.
+- [ ] **Implementation — DISPATCHED 2026-09-14 (session 2026-09-14-composite-analyzer-2).** User
+      gave the per-operation authorization ("launch a coder in the background to fix the code per
+      the new design"). Coder `coder-redesign` running **same-worktree/async** per
+      `conventions/worktree-delegation.md` — commits land directly on `composite-analyzer`, no
+      cherry-pick step. Task file: `.session/task-coder-composite-redesign.md` (gained an
+      `In:`/`Out:` agentbus block at dispatch time — it had none, a `coder-orchestration.md` §8
+      violation caught pre-launch; the 10 steps are unchanged).
+      - **⚠ CONCURRENCY LOCK: this worktree/branch has an ACTIVE CODER.** Do not launch a second
+        coder here until it reports done (`coder-orchestration.md` rule 5/6 — nothing enforces
+        this automatically in same-worktree).
+      - **While it runs, the mission owner must not edit code in this worktree** (same-worktree
+        async rule). STATE and the owner's ledger remain editable. Reading/monitoring is fine.
+      - Channels: In `composite-analyzer.coder-redesign.in`, Out `composite-analyzer.coder-redesign`.
+        It also publishes per-step progress notes to `user.in`.
+      - Not yet verified/reviewed — on completion the owner must check the done criteria per
+        `coder-orchestration.md` rule 10 (owner does not re-run tests; that is a reviewer's job).
+        No reviewer dispatched yet — decide with the user whether to attach one.
 - [ ] Resume code review of `composite.go`/steadystate wiring — **wait until v9 is implemented**,
       since v8's `composite.go` (what `code-review-notes.md` would otherwise review) will no longer
       exist in its current form. Remaining-file list (unchanged, still accurate):
@@ -218,7 +232,17 @@ for this mission's diff, generalized into the `diff-review-page` custom agent pl
 WSL2/`wslview` convention in `~/.claude/CLAUDE.md`; ran the first part of the step-by-step code
 review (general comments, aggregation package, allocation core) — paused at the user's request.
 
-**Next step / resume point:** the design is fully settled and the task file is coder-ready — read
+**Next step / resume point (as of 2026-09-14 session -2):** the v9 coder is **dispatched and
+running** (same-worktree/async, `coder-redesign`). Do not edit code in this worktree while it
+runs, and do not launch a second coder here. When it reports done on
+`composite-analyzer.coder-redesign`: verify completion state per `coder-orchestration.md` rule 10
+(reviewed? done criteria met? gaps? committed?) — the owner does not re-run tests itself. Then
+ask the user (a) whether to attach a reviewer for this task, and (b) whether to resume the
+file-by-file code review of `composite.go`/steadystate wiring, which was on hold precisely until
+v9 landed. `spec.md` stays stale-by-design; re-sync only if the user asks.
+
+**Superseded resume point (kept for context — this is what -2 acted on):** the design is fully
+settled and the task file is coder-ready — read
 `.session/composite-signal-redesign.md` §2 plus `.session/task-coder-composite-redesign.md`
 directly (both short, no need to read `spec.md` or the redesign doc's §5). Ask the user for
 final sign-off on the task file, then ask whether to dispatch it. If yes: same dispatch pattern
@@ -269,3 +293,4 @@ not blocking dispatch.
 - 2026-09-08 session=2026-09-08-composite-analyzer-2 status=retired ledger=.session/ledger/2026-09-08-composite-analyzer-2.md
 - 2026-09-12 session=2026-09-12-composite-analyzer-1 status=retired ledger=.session/2026-09-12-composite-analyzer-1.md
 - 2026-09-14 session=2026-09-14-composite-analyzer-1 status=retiring (user /clear-ing) ledger=.session/2026-09-14-composite-analyzer-1.md
+- 2026-09-14 session=2026-09-14-composite-analyzer-2 status=active ledger=.session/2026-09-14-composite-analyzer-2.md
