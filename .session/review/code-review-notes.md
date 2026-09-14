@@ -592,4 +592,24 @@ contradictory:
 
 ---
 
+## 10. `allocation` package shared rounding (`query_api.go`, `rescale.go`) [USER, 2026-09-14]
+
+- **Bad function names — show a misunderstanding of the role.** `replicasForDemand`
+  (`query_api.go:19`) and `safeReplicasForSpare` (`query_api.go:39`) compute the same
+  quantity the composite redesign already named `TotalReplicas`/`ReplicasNeeded`
+  (`demand/prc`, ceil'd or floor'd) — the names here don't reflect that, and were coined
+  independently of that naming decision.
+- **Duplication, not shared where it should be.** The same ceil(demand/prc)/floor(spare/prc)
+  pattern is reimplemented independently in at least three places:
+  `multi_backup/analyzer_helpers_multi.go:182,250`, `greedy_score_optimizer.go:416`, and the
+  `deltaUtil*demand/prc` floor pattern duplicated verbatim between `analyzer_helpers.go:355`
+  and `multi_backup/analyzer_helpers_multi.go:386`.
+- **Review comments from before still apply here too** — inefficient, long, spec-section-
+  citing comments repeating the same explanation instead of stating the rule once.
+- Not yet resolved: whether these functions get renamed/unified now or as part of resuming
+  the file-by-file review of `query_api.go` (already on the not-yet-reviewed list,
+  `STATE.md`) — recorded here, not actioned.
+
+---
+
 <!-- next items appended below as the review continues -->

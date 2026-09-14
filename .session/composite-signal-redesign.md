@@ -1,49 +1,208 @@
 # Composite signal — redesign
 
 Working doc. Not a replacement for `spec.md`. Fold back into `spec.md` once settled.
-Rule: short. Facts cited (file:line). Open questions stay open. `[USER]` = user decided.
+Structure follows `conventions/tasks.md`'s "Mission spec / roadmap structure": **§1-2 are the
+spec** — settled rules only, what a coder implements, no reasoning or citations. **§3+ is
+discussion** — facts, citations, history, open questions. Read §1-2 to implement. Read §3+
+only to understand *why* or to resolve something not yet decided.
 
 ---
 
-## 1. Facts (verified against code)
+## 1. Quick summary
 
-**There are exactly 3 analyzers: `external`, `saturation_v2`, `throughput`.**
+Redesign of `buildComposite` (`steadystate/composite.go`) and its helpers
+(`composite_decision.go`, `aggregation/{replicas_needed,prc_com}.go`). Same underlying math as
+v8 (`PRC(SO) = D_sat[role]/TotalReplicas`) — this changes code structure, naming, and one
+behavior (sat's contributor eligibility), not the formula. Not yet implemented.
 
-### 1.1 Per-analyzer: ReplicaCount, PRC, Demand — corrected, all 3 checked directly
+## 2. Spec — settled rules, what the coder builds
+
+### 2.1 Call stack
+
+Outer placement unchanged (already decided at spec v4/§6.2, reaffirmed v8): `buildComposite`
+is called from `collectV2ModelRequest`, never from inside `runAnalyzersAndScore`.
+
+```
+collectV2ModelRequest                                 [engine_v2.go:777]
+  → runAnalyzersAndScore(...)                         [:789, defined :106]
+      → returns namedResults (sat first, always present; others per-enabled)
+  → eligibleAnalyzers := namedResults, minus sat if !config.AnalyzerEnabled(sat)
+      (resolved ONCE, here, before compose — not inside the per-SO loop)
+  → buildComposite(ctx, namedResults, eligibleAnalyzers, satUp, satDown)   [:818 → composite.go]
+      → iterate sat.Result.VariantCapacities directly  (no union, no fallback)
+      → per SO (sat's own variant, its model+role):
+          a. copy ReplicaCount, PendingReplicas, WarmPoolReplicas,
+             WarmPoolPerReplicaCapacity, TotalDemand from sat — unconditional
+             (this copy is UNCONDITIONAL and happens even if sat was excluded
+             from eligibleAnalyzers above — identity role, never gated)
+          b. contributors := every analyzer in eligibleAnalyzers where, for THIS SO:
+               (i) the SO is present in that analyzer's own VariantCapacities, AND
+               (ii) Reason for it is not ReasonNoData/ReasonError
+             (no analyzer name is ever tested here — sat already got resolved into
+             or out of eligibleAnalyzers upstream; this loop cannot tell sat apart
+             from any other analyzer)
+          c. if contributors is empty AND sat was excluded from eligibleAnalyzers only
+             for being disabled (not for being ineligible per (b)'s own SO/model/role
+             check): sat contributes alone as fallback — this is the ONE place sat is
+             named, and it happens before/outside the symmetric loop, never inside it
+          d. for each contributor: TotalReplicas(SO) = its own Demand(model,role) /
+             its own raw PRC(SO) — both this analyzer's OWN measured values, not the
+             composite's and not sat's
+             CompositeTotalReplicas(SO) = max over contributors' TotalReplicas
+             decision path: "single" (1 contributor) / "agree" (2+) /
+                             "sat-fallback" (only step c fired) / "no-signal" (none)
+          e. PRC(SO) = D_sat[role]/CompositeTotalReplicas(SO)
+             — computed once per (model,role) pair (shared numerator), not once per SO
+          f. log per SO: every contributor's TotalReplicas, ReplicaCount, PendingReplicas
+      → maxScore(namedResults)   [unchanged, legacy field only]
+  → buildCapacities(ctx, &composite, ...)   [:904, unchanged]
+```
+
+`config` needed above is already in scope — `collectV2ModelRequest` already receives
+`config config.ScalingPolicy` as a parameter (`engine_v2.go:781`); today's
+`buildComposite(ctx, namedResults, satUp, satDown)` call (`:818`) just never passes it
+through. No new plumbing into `collectV2ModelRequest` itself — only the `buildComposite` call
+gains an argument (`eligibleAnalyzers`, resolved right above it from `config` already in
+scope).
+
+Deleted, not relocated: `findSaturation`, `unionOfVariants`,
+`representativeVariantCapacity`'s fallback branch, `AggN` called on a 1-element slice, the
+`if e.Name == sat` branch inside collection (replaced by the one-time upstream resolution at
+`eligibleAnalyzers` — sat's name is checked ONCE, before compose, never inside the per-SO
+collection loop).
+
+### 2.2 Naming
+
+| Old | New |
+|---|---|
+| `N(SO)` / `N_i(SO)` (per-analyzer) | `TotalReplicas` |
+| `N_com(SO)` / `AggN`'s result | `CompositeTotalReplicas` |
+| `PRCCom` | retired as a named function — inlined at the assignment site |
+
+### 2.3 File placement
+
+Single-caller rule: a helper with exactly one external caller lives in that caller's file,
+not a shared package.
+
+- `AggN` (was: one caller, `ResolveSO`) → moves into `composite_decision.go`.
+- `PRCCom` (was: one caller, `buildComposite`) → inlined into `composite.go`, not kept as a
+  standalone function.
+- `replicasNeeded`, `variantCapacity`, `roleOf` (aggregation package private helpers) → move
+  with whichever function absorbs their only caller.
+- `DemandForRole` → stays in `aggregation` (3 callers).
+- `roleOf`/`roleOfVC`/`AggregateByRole`'s inline duplicate → unify into one function; place
+  per the same single-caller rule, counted against the call graph AFTER this rewrite lands.
+
+### 2.4 Signatures
+
+Helpers take the already-resolved `VariantCapacity` as a parameter, not
+`(result *domain.AnalyzerResult, variant string)` plus an internal search — the
+composite-building loop already holds the specific `VariantCapacity` once it iterates sat's
+own list directly (§2.1).
+
+### 2.5 Decision-path type
+
+`DecisionAgree`/`DecisionSingle`/`DecisionSatFallback`/`DecisionNoSignal` become a typed
+enum, not untyped `string` constants.
+
+### 2.6 `HasUsableCompositeSignal` → two checks
+
+Split into two functions, both taking only the composite `NamedAnalyzerResult`:
+- (a) per-SO: does this SO's decision path differ from `DecisionNoSignal`.
+- (b) whole-composite: is `Result` non-nil and at least one SO's decision path differs from
+  `DecisionNoSignal`.
+
+Update both call sites (`engine.go:1091`, `engine_v2.go:735`) to whichever check each needs.
+
+### 2.7 Formulas (unchanged — restated only)
+
+```
+PRC(SO)                = D_sat[role(SO)] / CompositeTotalReplicas(SO)
+Supply(SO)              = ReplicaCount(SO) × PRC(SO)
+AnticipatedSupply(SO)   = (ReplicaCount(SO) + PendingReplicas(SO)) × PRC(SO)
+SC = max(0, TotalSupply − Demand/scaleDown)
+RC = max(0, Demand/scaleUp − TotalAnticipatedSupply)
+```
+`buildCapacities` already applies this to the composite exactly as to any analyzer result — no
+change needed there.
+
+### 2.8 Known accepted gap (code comment only, not a fix)
+
+Composite `ReplicaCount` is sat's raw k8s ready count, not a count of replicas verified to be
+usefully serving. Accepted for now; flag with a comment where it feeds Supply.
+
+### 2.9 Non-negotiable regression guards
+
+- **Sat-only identity**: sat as sole contributor ⇒ composite PRC for that SO exactly equals
+  sat's own PRC. Must hold for BOTH `single` (sat enabled) and `sat-fallback` (sat disabled,
+  nothing else contributed) — test both.
+- **Score has no effect**: `maxScore` unchanged, not touched by this task.
+
+### 2.10 Completeness check
+
+Before declaring the rewrite done: compare against the pre-single-analyzer aggregation logic
+at the engine side (what this mission's CT7 originally lifted out of), not only against this
+doc's own step list.
+
+---
+
+## 3. Needs decision / still open
+
+- Whether "sat is the sole source of every identity field except PRC/Reason" (§2.1.a) is
+  durable policy or a narrowing specific to unblocking this redesign.
+- A demand unit canonical **across models**, not just across analyzers within one model —
+  `D_sat` is a stand-in, not the destination (see §5.3).
+- `query_api.go`'s rounding-function naming/duplication — tracked in
+  `code-review-notes.md` §10, not this doc; not yet actioned.
+- `.session/spec.md`, `.session/task-coder-composite-redesign.md` still reflect an earlier,
+  since-corrected version of this doc (stale call stack, over-long §4.3) — need re-sync to
+  §1-2 above before the coder task is usable. Not yet done.
+
+---
+
+## 4. Roadmap
+
+| Item | Status |
+|---|---|
+| Trace each analyzer's current ReplicaCount/PRC/Demand/RC/SC computation | done, §5.1 |
+| Call stack — current vs. planned | done, §5.2 |
+| How the optimizer consumes Demand/PRC/RC/SC | done, §5.3 |
+| Decide what "combine across analyzers" means, per quantity | done, §5.4 |
+| Sat's dual role (identity vs. contributor) reconciled with code-review rulings | done, §5.4 |
+| Fold into `spec.md` v9 + coder task file | **not done — stale, needs re-sync (§3)** |
+| Implement | not started |
+
+---
+
+## 5. Details
+
+### 5.1 Facts about today's per-analyzer computation (verified against code)
+
+There are exactly 3 analyzers: `external`, `saturation_v2`, `throughput`.
+
+**ReplicaCount, PRC, Demand:**
 
 | | ReplicaCount | PRC | Demand |
 |---|---|---|---|
 | **external** | `CurrentReplicas − PendingReplicas` (raw k8s) `analyzer.go:171` | config constant `body.Threshold`, not measured `:180` | 1 PromQL query, total only `:164` |
-| **saturation_v2** | `CurrentReplicas − PendingReplicas` (raw k8s, **same formula as external**) `analyzer.go:661,673` | `median(ownCapacities)` over ALL `ReplicaMetrics` rows for the variant, minus bridges — no Ready filter `:708-727` | `Σ rc.ReplicaDemand` over ALL rows incl. bridges `:715` |
-| **throughput** | `nKV` = count of rows with `TotalKvCapacityTokens > 0` (real signal: KV cache allocated — see §1.3, not a naive gap) `:319,676-691` | `sum/n` over the same set `:691` | `computeDemand`, unfiltered `variantMetrics` (not checked line-precisely yet) |
+| **saturation_v2** | `CurrentReplicas − PendingReplicas` (raw k8s, same formula as external) `analyzer.go:661,673` | `median(ownCapacities)` over ALL `ReplicaMetrics` rows for the variant, minus bridges — no Ready filter `:708-727` | `Σ rc.ReplicaDemand` over ALL rows incl. bridges `:715` |
+| **throughput** | `nKV` = count of rows with `TotalKvCapacityTokens > 0` (real signal, not a naive gap) `:319,676-691` | `sum/n` over the same set `:691` | `computeDemand`, unfiltered `variantMetrics` |
 
-**Correction to an earlier wrong claim in this doc:** saturation's `ReplicaCount` is NOT
-built from counting monitored rows — verified at `analyzer.go:673`,
-`replicaCount := readyCount`, and `readyCount := vs.CurrentReplicas - vs.PendingReplicas`
-(`:661`). It's the same k8s-status arithmetic as `external`. Only throughput's
-`ReplicaCount` (`nKV`) is actually a count of `ReplicaMetrics` rows.
+Saturation's `ReplicaCount` is k8s-status arithmetic, not a count of monitored rows — verified
+at `analyzer.go:673`, `replicaCount := readyCount`, and
+`readyCount := vs.CurrentReplicas - vs.PendingReplicas` (`:661`) (an earlier version of this
+doc claimed otherwise — corrected). None of the 3 analyzers read `ReplicaMetrics.Ready`
+(grepped; the field is set at collection, `collector/replica_metrics.go:1148`, never consumed
+after).
 
-**None of the 3 analyzers read `ReplicaMetrics.Ready` anywhere** (grepped directly —
-zero hits in any analyzer file for that field; the field is set once at collection,
-`collector/replica_metrics.go:1148`, and never consumed after that).
+**Bridge (`FromWarmPool`) filtering** is a separate axis from readiness, implemented twice
+(saturation: inline loop `analyzer.go:711-724`; throughput: named func `:701`):
+- saturation: bridges excluded from PRC's median only; Demand sums every row including
+  bridges (deliberate, `:715` — a bridge's traffic is real); ReplicaCount uses neither.
+- throughput: bridges pre-excluded upstream (`:248`), before `nKV`/PRC are computed — coupled
+  by construction, unlike saturation's disconnected ReplicaCount/PRC.
 
-### 1.2 What `own`/bridge filtering actually is — corrected
-
-`ownReplicas` (saturation, inline loop `analyzer.go:711-724`) and `ownReplicasOnly`
-(throughput, named func `analyzer.go:701`) both filter on **`FromWarmPool`** — own-pod vs.
-borrowed-bridge-pod. This is **not** a readiness filter; it's a separate axis. Same
-condition, implemented twice (one function, one inline loop) — a duplication.
-
-- saturation: `ownReplicas`/`ownCapacities` (bridges excluded) feeds **PRC only**
-  (`median(ownCapacities)`). Demand (`totalDemand`) sums **every** row, bridges included
-  (`:715`, comment states this is deliberate — a bridge's traffic is real).
-  `ReplicaCount` uses neither — it's the k8s formula above, computed independently.
-- throughput: `ownReplicasOnly` filters `input.ReplicaMetrics` once, upstream, before
-  `variantMetrics`/`healthyMetrics` are built (`:248`) — so throughput's PRC/ReplicaCount
-  (`nKV`) already exclude bridges by construction, unlike saturation where the exclusion
-  happens per-field.
-
-### 1.3 Which output field each filter actually touches — traced precisely
+**Which output field each filter actually touches, traced precisely:**
 
 | | readiness (k8s Ready/Pending) | `FromWarmPool` (bridge) |
 |---|---|---|
@@ -59,37 +218,29 @@ disconnected computations (k8s arithmetic vs. a median over monitored rows) — 
 disagree with nothing reconciling it. In throughput, `ReplicaCount` (`nKV`) and PRC are
 computed together, in one loop, over the same filtered set — coupled by construction.
 
-**[USER] correction on `nKV`:** not an oversight that includes booting replicas — it is
-*attempting* to count replicas actually serving, via a real signal (KV cache configured),
-not a proxy. The unresolved gap is narrower than "no guard at all": it's that
-KV-cache-configured and k8s-Ready are two independently-timed signals with no code-level
-guarantee they align.
+**`nKV` correction [USER]:** not an oversight that includes booting replicas — it attempts to
+count replicas actually serving via a real signal (KV cache configured, gated only by
+`TotalKvCapacityTokens>0`, a real not proxy signal that the engine's KV cache is allocated,
+`collector/replica_metrics.go:755-767`), not a proxy. Gap: KV-cache-configured and k8s-Ready
+are two independently-timed signals with no code-level guarantee they align.
 
-### 1.4 SC traced end to end
-
-`SC = max(0, TotalSupply − Demand/scaleDown)` (`engine_v2.go:550-554`).
-`TotalSupply = Σ ReplicaCount(v) × PRC(v)` (`aggregation.go:51-57`) — uses `ReplicaCount`,
-**not** `AnticipatedSupply`'s ready+pending sum.
-
-- **Pending replicas**: never in `TotalSupply` → never in SC (they're in
-  `AnticipatedSupply`, which feeds RC, not SC).
-- **Bridges**: excluded from `ReplicaCount`/PRC on both analyzer paths (§1.3) → never in
-  `TotalSupply` → never in SC's supply side. But bridges ARE in `Demand` (both analyzers
-  sum every row) → bridges raise the number SC subtracts, without raising the number SC
-  starts from.
-- Net: **SC reflects only "ready, non-bridge" capacity, minus demand that includes
-  bridge-served traffic.**
+**SC traced end to end:** `SC = max(0, TotalSupply − Demand/scaleDown)`
+(`engine_v2.go:550-554`); `TotalSupply = Σ ReplicaCount(v)×PRC(v)` (`aggregation.go:51-57`) —
+uses `ReplicaCount`, not `AnticipatedSupply`'s ready+pending sum. Pending replicas never enter
+SC. Bridges excluded from `TotalSupply`'s numerator but included in `Demand` → SC subtracts
+bridge-served demand without crediting bridge-served supply. Net: SC reflects only
+"ready, non-bridge" capacity, minus demand that includes bridge traffic.
 
 **Cross-SO leakage**: both saturation_v2 and throughput group `ReplicaMetrics` by
 `VariantName` (`byVariant` map, `saturation_v2/analyzer.go:632-633`,
-`throughput/analyzer.go:92,282`) before any of the above — so another SO's pods are
-excluded by that grouping key. Whether the `VariantName` tag itself is trustworthy is a
-separate, unchecked discovery/collector-level question.
+`throughput/analyzer.go:92,282`) before any of the above, so another SO's pods are excluded by
+that grouping key (whether the tag itself is trustworthy is a separate, unchecked
+discovery-level question).
 
-### 1.5 CurrentReplicas/PendingReplicas — computed once, upstream, shared by all analyzers
-`variantmeta/discovery.go:79-84`:
+**CurrentReplicas/PendingReplicas** are computed once upstream, shared by every analyzer
+(`variantmeta/discovery.go:79-84`):
 ```
-currentReplicas := scaleTarget.GetStatusReplicas()  (fallback: scaleTarget.GetReplicas())
+currentReplicas := scaleTarget.GetStatusReplicas()  (fallback: GetReplicas())
 readyReplicas   := scaleTarget.GetStatusReadyReplicas()
 pendingReplicas := currentReplicas - readyReplicas   (clamped ≥ 0)
 ```
@@ -97,129 +248,155 @@ Read directly from the k8s scale target's status, once per variant, in `Discover
 per-analyzer. Flows into `domain.VariantMetadata` → `VariantReplicaState`, the same shared
 input every analyzer receives (`saturation_analyzer.go:220-228`).
 
----
-
-## 2. Call stack — current (as built)
+### 5.2 Call stack — prior (v8, pre-redesign, reference only)
 
 ```
-runAnalyzersAndScore                          [engine_v2.go]
-  → per analyzer: build NamedAnalyzerResult    (analyzer-specific ReplicaCount semantics differ)
-  → buildComposite(namedResults)               [steadystate/composite.go:29]
-      → findSaturation(namedResults)           :163  (lookup #1)
-      → unionOfVariants(namedResults)          :193
-      → per variant v:
-          → representativeVariantCapacity(namedResults, v)  :216
-              → inline sat lookup              :217  (lookup #2)
-          → allocation.ResolveSO(namedResults, v)            [allocation/composite_decision.go]
-              → per analyzer e in namedResults:
-                  → if e.Name == sat            :85  (lookup #3, special-cased)
-                  → aggregation.AggN([e.Result], v)          [1-element, dead]
-              → inline others/sat combine       (real aggregation, duplicated)
-          → aggregation.PRCCom(sat.Result, role, N, ok)
-      → maxScore(namedResults)
-  → buildCapacities(composite)                 [engine_v2.go:904]
+collectV2ModelRequest → runAnalyzersAndScore → buildComposite(namedResults)
+  → findSaturation (lookup #1) → unionOfVariants → per variant:
+      representativeVariantCapacity (lookup #2, fallback to non-sat analyzer)
+      → ResolveSO: if e.Name==sat (lookup #3, special-cased) → AggN([e.Result], v) [1-elem, dead]
+      → inline others/sat combine (duplicated aggregation)
+    → PRCCom(sat.Result, role, N, ok)
+  → maxScore → buildCapacities
 ```
+An earlier version of this doc showed `buildComposite` nested inside `runAnalyzersAndScore` —
+wrong; corrected to the outer placement in §2.1 (the O2 decision was already settled at spec
+v4/§6.2, reaffirmed in v8 after a coder mistakenly moved it to O1 and had to revert).
 
 Not yet reviewed for correctness: `analyzer_helpers.go`, `query_api.go`,
 `cost_aware_optimizer.go`, `rescale.go` — see `STATE.md`.
 
----
-
-## 3. How the optimizer uses this [USER]
+### 5.3 How the optimizer uses Demand/PRC/RC/SC [USER]
 
 1. Optimizer decides on Demand and PRC.
 2. Demand that matters: RC/SC, per role (prefill/decode/both).
 3. Decision is in replica/GPU counts → the number that matters is ~always Demand/PRC.
 4. Optimizer also needs cost + other metadata.
-5. CompositeSignal's job: **one Demand, one PRC (+ metadata) per dimension — collapsed
-   across analyzers only.** Not collapsed across SOs. Not collapsed across models.
-
-**Granularity, per [USER] correction, verified against code:**
+5. CompositeSignal's job: one Demand, one PRC (+ metadata) per dimension, collapsed across
+   analyzers only — not across SOs, not across models.
 
 Demand is per model_id, reported per role by the analyzer directly:
 - `AnalyzerResult.TotalDemand` — role "both"/"" (`analyzer.go:117-119`)
 - `AnalyzerResult.RoleDemand[role]` — "prefill"/"decode" (`analyzer.go:121-126`)
 
-RC and SC are 3 values per analyzer (model-level + one per role), **derived**, not
-analyzer-emitted — same formula at every scope, verified `engine_v2.go:536-574`
-(`applyUniversalThreshold`):
+RC/SC are derived, not analyzer-emitted, same formula at every scope
+(`applyUniversalThreshold`, `engine_v2.go:536-574`):
 ```
 RC = max(0, Demand/scaleUp − AnticipatedSupply)
 SC = max(0, Supply − Demand/scaleDown)
 ```
-This computation happens at the Engine via a helper — **not** something the composite
-redoes from scratch. Open question: does the composite call the same helper on its own
-combined (Demand, Supply, AnticipatedSupply), or does it combine RC/SC after each analyzer
-computes them?
+This happens at the Engine via a helper, not something the composite re-derives from scratch.
 
-Supply and AnticipatedSupply, verified `aggregation.go:50-69`:
+Supply/AnticipatedSupply, verified `aggregation.go:50-69`:
 ```
 Supply(analyzer)            = Σ_v ReplicaCount(v) × PRC(v)
 AnticipatedSupply(analyzer) = Σ_v (ReplicaCount(v) + PendingReplicas(v)) × PRC(v)
 ```
-Computed **per analyzer**, over that analyzer's own `VariantCapacities`. `ReplicaCount` is
-analyzer-specific (§1) — confirms "each analyzer may see a different N" [USER]: Supply and
-AnticipatedSupply inherit that difference directly, since they're built from it.
+Computed per analyzer, over that analyzer's own `VariantCapacities` — `ReplicaCount` is
+analyzer-specific, so Supply/AnticipatedSupply inherit that difference directly.
 
-PRC is per SO (= model, role, GPU, variant metadata): `VariantCapacity.PerReplicaCapacity`.
+PRC is per SO (model, role, GPU, variant metadata): `VariantCapacity.PerReplicaCapacity`.
 
-**The 3 real inputs, per [USER]:** Demand, (Total) Supply, Anticipated Capacity — each
+The 3 real inputs, per [USER]: Demand, (Total) Supply, Anticipated Capacity — each
 reported/computed by every analyzer, in its own unit, per role. CompositeSignal's job is to
-combine these **across analyzers**, per role (and PRC per SO) — not to re-derive RC/SC from
-zero.
+combine these across analyzers, per role (and PRC per SO) — not re-derive RC/SC from zero.
 
----
+### 5.4 How §2's rules were reached [USER, verified against code]
 
-## 4. Open decision: what does "combine across analyzers" mean, per quantity?
+**§2.1.a (sat is the sole identity source) and §2.1.b's sat-contributor gating are two
+different questions, not competing answers** — this was corrected once already in this
+session, recorded here so it isn't re-litigated:
+- **Identity role**: which analyzer's raw fields populate the composite's own fields
+  (ReplicaCount, PendingReplicas, TotalDemand, the variant set itself). Sat, unconditionally.
+- **Contributor role**: whether sat counts as an ordinary voice in
+  `CompositeTotalReplicas`'s max, versus only a fallback. Conditional on
+  `config.AnalyzerEnabled(sat)` — this is new, sourced from the user's own earlier code review
+  (`code-review-notes.md` §7/§9.1/§9.2/§8.6), not something this redesign invented.
 
-Not decided. For Demand(model,role), Supply(model,role), AnticipatedSupply(model,role), and
-PRC(SO):
-- combination rule when analyzers agree/disagree,
-- what to do when one analyzer lacks a value,
-- does combined (Demand,Supply,AnticipatedSupply) feed the *same* `applyUniversalThreshold`
-  formula to get composite RC/SC, unchanged?
-- whether analyzers' units differ and need reconciling first (normalization — out-of-scope
-  per original spec; still true?).
+These compose without conflict: sat can supply identity fields unconditionally while also
+being excluded from ordinary contributor status when disabled — different questions about the
+same analyzer.
 
----
+**[USER] correction on mechanism, applied in §2.1:** the config-enabled check must not appear
+as a name-based branch inside the per-SO collection loop — after compose, sat must not be
+visible as a special case there. The check happens exactly once, upstream of the loop
+(`eligibleAnalyzers`), so the loop itself only ever asks SO/model/role-level questions
+(present? Reason ok?), never "is this analyzer sat." Sat's name is checked in exactly one
+place — resolving `eligibleAnalyzers` — not scattered through collection.
 
-## 5. Parked
+**Per-SO participation (§2.1.b.i-ii), verified against all 3 analyzers' actual failure-path
+code:** throughput and external already opt out of a bad SO by never appending a
+`VariantCapacity` for it at all (`throughput/analyzer.go:304-312`'s `continue` on `ok==false`;
+external never emits a no-data/error sentinel at all). Only saturation_v2 additionally has a
+present-but-bad case (`Reason = satReasonNoData`/`ReasonError`,
+`saturation_v2/analyzer.go:759,1209`), because it cannot opt out by omission — it must always
+stay in as the identity source. So the per-SO check (present AND not no-data/error) is exactly
+what `variantCapacity()`'s existing "present" check plus the existing sentinel check already
+give, just applied per-SO instead of `ResultIsInformative`'s current model-wide any-hit check.
 
-- §1.1-1.4 traced HOW each analyzer computes its own values today, and WHERE readiness/
-  bridge filtering does and doesn't reach — not yet decided: does the composite need a
-  disagreement-resolution POLICY (e.g. reconcile ReplicaCount across analyzers), or does
-  §4's per-quantity combination rule make this moot by construction?
-- Disagreement: log/surface it, or not?
-- Duplicated lookups/aggregation (§2's call stack — `findSaturation`/inline sat-lookup x3,
-  `AggN` dead-called on 1 element): fix regardless of §4, or a symptom of the unclear
-  design this whole doc exists to resolve?
+**Sat's config-enabled requirement (§2.1.b, §2.3's `AggN`/`PRCCom` relocation), verified
+against current code, not the review notes' 2026-09-09 snapshot:** `config.AnalyzerEnabled`
+exists (`saturation_scaling.go:657`), called today only for non-sat analyzers
+(`engine_v2.go:170`) — sat is exempted upstream and never checked. Neither `eligible()` nor
+`ResolveSO`/`buildComposite` receives a `ScalingPolicy`/config today — this is a genuine
+signature/data-flow change, not a conditional add. Non-live/broken sat must keep opting out,
+never crashing (existing controller precedent).
 
-### 5.1 From the earlier line-by-line code review (`code-review-notes.md`) — still open,
-directly relevant to this redesign, not yet folded in:
-- §7/§9.6: `D_sat`/`satDemand` naming assumes sat as the demand source; intent was a
-  canonical cross-model unit (this doc's §3/§4 questions bear on this directly).
-- §9.6: `HasUsableCompositeSignal` conflates "sat itself healthy" (model-level) with "this
-  SO has a signal" (per-SO) — two real, distinct checks, not one.
-- §9.1/§9.2: sat CAN be disabled via config but the engine never checks it for sat
-  specifically; `AggN`'s correct shape is ALL analyzers symmetric, sat-fallback layered on
-  top as a narrow special case, not a structural branch during collection.
-- STATE.md's Known Issues: the canonical-composite-demand direction (moving away from
-  anchoring the demand unit on "sat" specifically) — this doc's whole §3/§4 is that
-  discussion, now at the decision level instead of a naming complaint.
+**§2.1.d (PRC loops per role):** demand is shared by every SO of a role — look the numerator
+up once per role, not once per SO, to avoid a repeated lookup.
 
-### 5.2 Not yet reviewed at all this session (still true, per STATE.md)
+**§2.6 (two checks, no sat mention):** neither replacement function takes sat as an input —
+both operate only on the composite's own fields. By the time either runs, sat's identity is
+already folded into the composite (§2.1.a), so "the composite has no usable Result" and "sat
+itself produced nothing" are the same fact, not two separate things to check.
+
+**§2.7 (Supply/AnticipatedSupply/RC/SC unchanged):** `buildCapacities` (`engine_v2.go:904`)
+already runs on the composite exactly as on any analyzer result, confirmed by reading the
+call site (`composite.go:153`) — nothing about this redesign changes that pipeline.
+
+**§2.8's gap** is intentionally deferred, not fixed: Supply should conceptually be based on
+replicas verified to be usefully serving, not merely "ready" — accepted as good enough for now.
+
+**Disagreement between analyzers is not a correctness issue** — SC/RC are computed once, after
+composition, so two analyzers' opposing signals never reach the optimizer directly. The
+composition-level log (§2.1.e) is the whole answer for observability; nothing further to
+decide.
+
+**Not addressed by this redesign:** a demand unit canonical across models (not just across
+analyzers within one model) — `D_sat` is today's stand-in, not the durable destination. This
+traces to the user's original code-review remark that `satDemand`/`D_sat` naming encodes a
+transitional choice.
+
+### 5.5 Not yet reviewed at all (per STATE.md)
+
 `query_api.go`, `analyzer_helpers.go`, `cost_aware_optimizer.go`, `rescale.go`,
-`constants/metrics.go`, `docs/reference/cycle-log.md`, all test files. The line-by-line
-review of `composite.go`/steadystate wiring was INTERRUPTED by this redesign discussion —
-`code-review-notes.md` was not appended to this session; §9 (2026-09-09) is still its last
-entry.
+`constants/metrics.go`, `docs/reference/cycle-log.md`, all test files. The line-by-line review
+of `composite.go`/steadystate wiring was interrupted by this redesign; resume only after the
+redesign is implemented, since `composite.go` will not exist in its reviewed (v8) form after.
 
 ---
 
 ## Revision log
-- 2026-09-12: created; rewritten short; §3 replaced with user's optimizer-usage explanation
-  and granularity correction (aggregate across analyzers only, not SOs or models).
-- 2026-09-13: fixed duplicate "1.3" heading (renumbered to 1.5); §5 updated — disagreement
-  question narrowed to what §1 already answered; added §5.1 (open items from
-  code-review-notes.md that bear directly on this redesign) and §5.2 (files still
-  unreviewed, review interrupted by this redesign discussion, not resumed).
+- 2026-09-12: created; rewritten short; optimizer-usage explanation and granularity
+  correction added (aggregate across analyzers only, not SOs or models).
+- 2026-09-13: call-stack duplicate heading fixed; code-review items pointer-referenced (not
+  yet folded in); §4 (combine-across-analyzers) resolved — sat sole source of every field
+  except PRC/Reason, and of the variant set.
+- 2026-09-14 (first pass): call-stack placement corrected (buildComposite is NOT inside
+  runAnalyzersAndScore); code-review items actually folded in this time (sat's dual role,
+  typed decision paths, two-check signal gate, PRC-per-role shape) — previously only
+  pointer-referenced, not applied.
+- 2026-09-14 (second pass, user review): four fixes — (1) call-stack's inner body still
+  showed old v8 internals under the corrected outer placement; (2) the sat-dual-role section
+  was too long/citation-heavy for a coder to use directly; (3) disagreement-logging text
+  contradicted itself by calling something "open" that was already answered; (4) a new,
+  separate finding (query_api.go rounding-function naming/duplication) was filed to
+  code-review-notes.md instead of this doc.
+- 2026-09-14 (third pass, user review): **full restructure**, not a patch — user identified
+  that this doc was mixing the code specification with the discussion that produced it,
+  against the already-established mission-spec structure in `conventions/tasks.md` (§1-2
+  upfront/settled, §3+ on-demand/discussion). Rewritten as §1 (summary), §2 (spec — rules
+  only, no citations, what the coder implements), §3 (open items), §4 (roadmap), §5 (details —
+  every fact, citation, and piece of reasoning previously mixed into §1-4, preserved, not
+  deleted). No content dropped; only reorganized. `spec.md`/the coder task file are now known
+  stale relative to this version — re-sync is the next step, tracked in §3.

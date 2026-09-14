@@ -1233,3 +1233,138 @@ and intent, never as authority — and two of their claims have already proved n
   **Final verdict: PASS, 12/12 checklist items.** Both non-negotiable regression guards (test 1
   sat-only identity, test 13 Score-has-no-effect) hold throughout, before and after the fix.
   Mission is implementation-complete; not pushed, no PR opened as of this entry.
+- **v9** (2026-09-14): **complete redesign of the composite-building code** [USER], superseding
+  v8's `buildComposite`/`ResolveSO`/`AggN`/`PRCCom` implementation while keeping v8's underlying
+  math (§4.4/§5.2's `N(SO)`, `PRC_com(SO) = D_sat[role]/N(SO)`) — the redesign is about *where the
+  code lives and what it's explicit about*, not a new formula. Reached via
+  `.session/composite-signal-redesign.md` (full citation-backed record; this entry summarizes).
+  User's stated trigger: v8's implementation had spec-coupled comments, saturation-lookup
+  duplicated 3x (`findSaturation`, an inline lookup in `representativeVariantCapacity`, and a
+  special case inside `ResolveSO`), unclear provenance when analyzers disagree, and `AggN` called
+  on a 1-element slice inside `ResolveSO` (dead pattern — aggregating nothing).
+  - **Correction to this entry's own first draft, caught by the user:** the composite is built
+    from `collectV2ModelRequest` (`engine_v2.go:818`), a **separate function** that calls
+    `runAnalyzersAndScore` first and then calls `buildComposite` on its result — not from inside
+    `runAnalyzersAndScore` itself. This is the already-decided "O2" placement (§6.2, reaffirmed in
+    this section's own "Implementation" entry above after a coder mistakenly moved it to O1).
+    Recorded here because an earlier pass at documenting this redesign got it wrong.
+  - **Every composite field is sat's own value, full stop, except PRC and Reason [USER].**
+    `ReplicaCount`, `PendingReplicas`, `WarmPoolReplicas`, `WarmPoolPerReplicaCapacity`,
+    per-variant `TotalDemand`, model-level `TotalDemand`/`RoleDemand` — all copied directly from
+    saturation's own `AnalyzerResult`, never combined. `PerReplicaCapacity` (PRC) and the per-SO
+    `Reason` remain the two fields whose value is genuinely aggregation-derived.
+  - **Saturation is also the sole source of the variant set**, not just of field values. v8's
+    `unionOfVariants` (union across every analyzer's `VariantCapacities`) and
+    `representativeVariantCapacity`'s fallback-to-a-different-analyzer branch are retired — the
+    composite iterates saturation's own `VariantCapacities` directly. A variant saturation does not
+    report is not in the composite at all.
+  - **New per-SO participation rule, replacing `eligible()`'s model-level-only check for this
+    purpose [USER]:** for a given SO, an analyzer does not contribute to that SO's `N_i(SO)` (so
+    cannot move `N(SO)` up *or* down) when either (a) the SO is absent from that analyzer's
+    `VariantCapacities` — throughput and external already opt out this way on a per-SO failure, by
+    construction, so nothing changes for them — or (b) the SO is present but that analyzer's
+    `Reason` for it is `no-data`/`error` — saturation's own case, since saturation cannot opt out
+    by omission (it must always stay in, as the sole field/variant-set source above). Verified: no
+    new per-analyzer signal is needed; this is exactly `variantCapacity()`'s existing "present"
+    check plus the existing `ReasonNoData`/`ReasonError` sentinel, just applied **per-SO** rather
+    than `ResultIsInformative`'s current whole-result any-hit check.
+  - **Naming, internal to the composite-building code only — verified no external caller
+    references any of these names [USER]:**
+    - `N(SO)`/`N_i(SO)` (spec's existing term for "replicas needed to cover this SO's role's
+      demand") is renamed **`TotalReplicas`** — `N` alone was judged too generic.
+    - `N_com(SO)`/`AggN`'s result becomes **`CompositeTotalReplicas`** (or the equivalent compound
+      built on `TotalReplicas` — exact identifier decided at implementation time, principle is
+      what matters: name states the quantity, not the operation).
+    - `PRCCom` is retired as a named, separately-tested function. Its computation
+      (`D_sat[role]/CompositeTotalReplicas`) is inlined directly into the composite-building loop
+      and assigned straight to the composite `VariantCapacity.PerReplicaCapacity` — there is no
+      other consumer and no other reason for it to be a standalone symbol.
+  - **Relocation, per the user's general rule: an aggregation-package helper with exactly one
+    external caller belongs in that caller's file, not a shared package [USER].** Verified against
+    the actual call graph (grep, not assumed) before applying: `AggN` had exactly one external
+    caller (`composite_decision.go`'s `ResolveSO`); `PRCCom` had exactly one (`composite.go`'s
+    `buildComposite`); `replicasNeeded`/`variantCapacity`/`roleOf` (aggregation package's private
+    helpers) were already called only from within `AggN`'s own file. `DemandForRole` has three
+    callers and stays in the shared `aggregation` package. Net: the combined-PRC/TotalReplicas
+    computation moves into `steadystate/composite.go` itself; `ResolveSO`'s replacement (still
+    producing the per-SO decision path) also moves logic out of the `aggregation` package to the
+    extent it was only serving that one call site.
+  - **Helper signatures take the already-resolved `VariantCapacity`, not `(result, variant
+    string)` plus an internal lookup [USER].** The composite-building loop already holds the
+    specific `VariantCapacity` for the SO it is processing (it iterates saturation's own
+    `VariantCapacities` directly, per the ruling above) — re-searching for it by name inside a
+    helper it calls is redundant. Applies to `replicasNeeded`'s/`variantCapacity`'s replacements.
+  - **`roleOf`/`roleOfVC` unified [USER].** Today there are three copies of the same
+    role-canonicalization logic (`aggregation.roleOf`, `steadystate.roleOfVC`, and inline inside
+    `aggregation.AggregateByRole`) — collapsed into one shared function. Exact home not fixed by
+    this entry — apply the same single-caller-relocation rule once the rewrite's real call graph
+    is known (it changes as soon as `AggN`/`PRCCom` move).
+  - **Supply/AnticipatedSupply/RC/SC — confirmed unchanged, restated in terms of the new names
+    [USER]:** `buildCapacities` already runs on the composite exactly as on any analyzer result
+    (verified, not a new decision) — `TotalSupply = ReplicaCount(SO) × PRC(SO)`,
+    `TotalAnticipatedSupply = (ReplicaCount(SO)+PendingReplicas(SO)) × PRC(SO) = TotalSupply +
+    PendingReplicas(SO) × PRC(SO)`, and RC/SC follow via the existing `applyUniversalThreshold`,
+    with no formula change. **Flagged for a code comment, not a design change:** `ReplicaCount` on
+    the composite is saturation's raw k8s ready count, not a count of replicas *usefully serving*
+    — accepted as good enough for now, but the gap should be visible in code where `ReplicaCount`
+    feeds supply.
+  - **New composition-level logging, not previously present anywhere [USER]:** verified today's
+    `logAnalyzerResult` (engine_v2.go:1105) already logs, per analyzer per cycle, `Live`,
+    `TotalSupply`, `TotalDemand`, per-variant PRC/Role/Reason, and model+role RC/SC — but **not**
+    per-variant `ReplicaCount`/`PendingReplicas`, and `TotalReplicas`/`N_i(SO)` is not logged or
+    stored anywhere today (purely transient inside the old `AggN` call). The redesign adds a
+    composition-level log line covering, per SO: each contributing analyzer's `TotalReplicas`,
+    `ReplicaCount` (Ready), and `PendingReplicas` — full visibility into what fed
+    `CompositeTotalReplicas`, not just the winning value.
+  - **Cross-analyzer disagreement (one analyzer implying scale-up, another scale-down) is a
+    non-issue by construction [USER]** — SC/RC are computed exactly once, after the composite's
+    single (Demand, Supply, AnticipatedSupply) triple exists, so there is no path where two
+    analyzers' opposing signals reach the optimizer directly; the new logging above (not a
+    resolution *policy*) is how disagreement stays observable.
+  - **Completeness test for the rewrite's step list [USER]:** compare against the
+    pre-single-analyzer aggregation logic at the engine side (the code this mission's CT7 lifted
+    out of), not just against v8's own step list.
+  - **Sat has two separate roles, not one — folded in from the user's earlier code review
+    (`code-review-notes.md` §7/§9/§8.6/§8.7), which an earlier pass at this entry omitted despite
+    those being real, already-given rulings [USER]:**
+    - **Identity/unit role (the bullet above):** which analyzer's raw fields populate the
+      composite's own stored fields. Sat, unconditionally, always.
+    - **Contributor role (new in this entry):** whether sat counts as an ORDINARY voice in
+      `CompositeTotalReplicas`'s aggregation, on equal footing with every other analyzer, versus
+      only as a fallback. **This is conditional, not unconditional, and is IN SCOPE for this
+      redesign [USER] — not deferred:**
+      - Sat is an ordinary contributor when config-enabled
+        (`config.AnalyzerEnabled(domain.SaturationAnalyzerName)`) — collected symmetrically with
+        every other analyzer, no name-based special case during collection (today's
+        `if e.Name == domain.SaturationAnalyzerName` branch inside `ResolveSO`'s collection loop
+        goes away).
+      - Sat is a fallback only — narrower than today's implementation — when config-disabled: it
+        participates only if no other analyzer contributed a defined value for that SO.
+      - Corrected decision taxonomy: `single` = exactly one analyzer contributed, symmetric,
+        regardless of which one; `sat-fallback` = specifically the disabled-but-nothing-else-
+        contributed case, not "sat happened to be the only one already eligible."
+      - Verified against current code (not the review notes' 2026-09-09 snapshot): neither
+        `eligible()` nor `ResolveSO`/`buildComposite` receives a `ScalingPolicy`/config today —
+        this is a genuine signature/data-flow change (config must reach the composite-building
+        step), not a small conditional add.
+      - Non-live or broken sat must still opt out, not crash — existing controller precedent,
+        needs re-verification once this lands.
+    - These two roles do not conflict: sat can supply the composite's identity fields
+      unconditionally while also being excluded from ordinary contributor status when disabled —
+      different questions about the same analyzer.
+  - **Decision-path values become a typed/enumerated representation [USER],** not the current
+    untyped `string` constants (`DecisionAgree`/`DecisionSingle`/`DecisionSatFallback`/
+    `DecisionNoSignal`), to catch mistakes at compile time.
+  - **`HasUsableCompositeSignal` splits into two checks [USER],** not one boolean serving both: a
+    per-SO check ("does this specific SO have a signal") and a separate model-level check ("is sat
+    itself present/healthy at all") — sat's absence is categorically worse than any one SO lacking
+    a signal, since sat is the identity/unit source for the entire composite.
+  - **PRC computation loops over roles, not independently per SO [USER]:** look up the composite's
+    per-role demand once per role (shared across every SO of that role), then compute each SO's
+    PRC from that shared numerator and the SO's own `TotalReplicas` — a shape/efficiency point for
+    where PRC is computed (§ above, "PRCCom is retired... inlined"), not a formula change.
+  - **Explicitly not addressed by this revision, left for a later pass:** whether "sat-only for
+    every identity field except PRC/Reason" is durable policy or a deliberate narrowing to unblock
+    this redesign, and the eventual goal of a demand unit canonical **across models** (not just
+    across analyzers within one model) — `D_sat` is today's transitional choice, not the durable
+    target (ties to the canonical-composite-demand item in STATE.md's Known Issues).
