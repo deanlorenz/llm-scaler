@@ -33,9 +33,21 @@ var scaleCfg = config.ScalingPolicy{ScaleUpThreshold: 0.85, ScaleDownBoundary: 0
 // be numerically identical to what namedResults[0] (saturation's own entry)
 // would have been -- the PR #34 behavior this mission changes the compose
 // site of, but must not change the VALUE of, on this path.
-var _ = Describe("buildComposite — sat-only regression (test 1)", func() {
+//
+// This whole Describe block runs on the DecisionSatFallback path, not
+// DecisionSingle: scaleCfg (below) has an empty Analyzers slice, so
+// config.AnalyzerEnabled(domain.SaturationAnalyzerName) is false ("absent →
+// opt-in: does not participate", saturation_scaling.go:657-667) — satOnlyEngine
+// never puts saturation in eligibleAnalyzers, so every SO here falls back to
+// sat alone (composite-signal-redesign.md §2.1(c)) rather than reaching it
+// through the ordinary contributor loop. Confirmed by reading the actual
+// decision path composite.Result.VariantCapacities[0].Reason carries in this
+// block's fixtures: "C2-sat-fallback". This is one of the redesign's two
+// non-negotiable regression-guard cases (spec §2.9) — the other,
+// DecisionSingle, is covered separately below.
+var _ = Describe("buildComposite — sat-only regression, DecisionSatFallback path (test 1)", func() {
 
-	It("is numerically identical to saturation's own entry when saturation is the only analyzer", func() {
+	It("is numerically identical to saturation's own entry when saturation is the only analyzer (DecisionSatFallback: sat disabled via config, sole contributor by fallback)", func() {
 		satResult := &domain.AnalyzerResult{
 			AnalyzerName: domain.SaturationAnalyzerName,
 			ModelID:      "m",
@@ -60,11 +72,13 @@ var _ = Describe("buildComposite — sat-only regression (test 1)", func() {
 		Expect(err).NotTo(HaveOccurred())
 		composite := req.CompositeSignal
 
+		Expect(composite.Result.VariantCapacities[0].Reason).To(Equal(string(allocation.DecisionSatFallback)),
+			"scaleCfg's empty Analyzers disables sat, so this SO reaches PRC identity via the fallback path, not the ordinary contributor loop")
 		Expect(composite.Result.TotalDemand).To(Equal(baseline.Result.TotalDemand))
 		Expect(composite.Result.VariantCapacities).To(HaveLen(len(baseline.Result.VariantCapacities)))
 		Expect(composite.Result.VariantCapacities[0].PerReplicaCapacity).
 			To(Equal(baseline.Result.VariantCapacities[0].PerReplicaCapacity),
-				"PRC_com must equal PRC_sat exactly on the sat-only path (spec §4.4 identity)")
+				"PRC_com must equal PRC_sat exactly on the sat-only path (spec §4.4 identity), DecisionSatFallback case")
 		Expect(composite.TotalSupply).To(Equal(baseline.TotalSupply))
 		Expect(composite.TotalAnticipatedSupply).To(Equal(baseline.TotalAnticipatedSupply))
 		Expect(composite.Utilization).To(Equal(baseline.Utilization))
@@ -123,6 +137,64 @@ var _ = Describe("buildComposite — sat-only regression (test 1)", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(req.CompositeSignal.Name).To(Equal(allocation.CompositeSignalName))
 		Expect(req.CompositeSignal.Name).ToNot(Equal(domain.SaturationAnalyzerName))
+	})
+})
+
+// The redesign's other non-negotiable regression-guard case (spec §2.9): the
+// same sat-sole-contributor PRC identity as test 1 above, but reached through
+// the ordinary contributor loop (DecisionSingle) rather than the fallback
+// branch. This requires sat to be explicitly enabled via config — unlike
+// scaleCfg above, satEnabledCfg lists domain.SaturationAnalyzerName in
+// Analyzers, so config.AnalyzerEnabled(sat) is true and eligibleAnalyzers
+// includes sat; with no other analyzer registered, sat is the loop's sole
+// contributor.
+var satEnabledCfg = config.ScalingPolicy{
+	ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70,
+	Analyzers: []config.AnalyzerScoreConfig{{Name: domain.SaturationAnalyzerName}},
+}
+
+var _ = Describe("buildComposite — sat-only regression, DecisionSingle path", func() {
+
+	It("is numerically identical to saturation's own entry when saturation is explicitly enabled and the sole analyzer (DecisionSingle)", func() {
+		satResult := &domain.AnalyzerResult{
+			AnalyzerName: domain.SaturationAnalyzerName,
+			ModelID:      "m",
+			Namespace:    "ns",
+			TotalDemand:  1000,
+			VariantCapacities: []domain.VariantCapacity{
+				{VariantName: "v1", ReplicaCount: 3, PerReplicaCapacity: 200, Reason: "P1-obs"},
+			},
+		}
+		e := satOnlyEngine(satResult)
+
+		// The pre-composite baseline: what runAnalyzersAndScore's own
+		// namedResults[0] looks like, built the same way collectV2ModelRequest
+		// used to hand it straight to the optimizer.
+		namedResults, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, satEnabledCfg,
+			nil, nil, nil, nil, nil, 0)
+		Expect(err).NotTo(HaveOccurred())
+		baseline := namedResults[0]
+
+		req, err := e.collectV2ModelRequest(context.Background(), "m", "ns", nil, satEnabledCfg,
+			nil, nil, nil, nil, nil, 0)
+		Expect(err).NotTo(HaveOccurred())
+		composite := req.CompositeSignal
+
+		Expect(composite.Result.VariantCapacities[0].Reason).To(Equal(string(allocation.DecisionSingle)),
+			"sat is enabled and the sole analyzer, so this SO reaches PRC identity through the ordinary contributor loop with exactly one contributor")
+		Expect(composite.Result.TotalDemand).To(Equal(baseline.Result.TotalDemand))
+		Expect(composite.Result.VariantCapacities).To(HaveLen(len(baseline.Result.VariantCapacities)))
+		Expect(composite.Result.VariantCapacities[0].PerReplicaCapacity).
+			To(Equal(baseline.Result.VariantCapacities[0].PerReplicaCapacity),
+				"PRC_com must equal PRC_sat exactly on the sat-only path (spec §4.4 identity), DecisionSingle case")
+		Expect(composite.TotalSupply).To(Equal(baseline.TotalSupply))
+		Expect(composite.TotalAnticipatedSupply).To(Equal(baseline.TotalAnticipatedSupply))
+		Expect(composite.Utilization).To(Equal(baseline.Utilization))
+		Expect(composite.RequiredCapacity).To(Equal(baseline.RequiredCapacity))
+		Expect(composite.SpareCapacity).To(Equal(baseline.SpareCapacity))
+		Expect(composite.Remaining).To(Equal(baseline.Remaining))
+		Expect(composite.Spare).To(Equal(baseline.Spare))
+		Expect(composite.Live).To(Equal(baseline.Live))
 	})
 })
 
