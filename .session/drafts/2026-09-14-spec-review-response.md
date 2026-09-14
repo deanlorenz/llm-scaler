@@ -1,5 +1,60 @@
 # Response to review comments on `composite-signal-redesign.md`
 
+## Round 2 answers (this round's specific questions, verified against code)
+
+**Q2 — should `eligibleAnalyzers` be named `enabledAnalyzers`?** Yes, more accurate: the only
+thing it filters on is `config.AnalyzerEnabled` (an enabled/disabled question), not general
+eligibility (`Eligible()`, the data-quality question) — the current name invites exactly the
+"isn't this the same as Eligible()?" confusion you raised. Rename `eligibleAnalyzers` →
+`enabledAnalyzers` everywhere: `engine_v2.go:810,812,814`, `composite.go:26,42,86,105,132`
+(comments + parameter + loop var), `engine_v2.go:857`'s doc comment. Code + doc change, small,
+mechanical — needs a coder task (or I can do it directly given its size, your call).
+
+**Q3 — is §2.3 still correct?** Yes, verified line-by-line: `TotalReplicas` (absorbed `AggN`'s
+role) is in `composite_decision.go` ✓; PRC is genuinely inlined in `composite.go`, zero
+standalone PRC-shaped function anywhere (grepped) ✓; `domain.RoleOfVC` exists exactly as
+decided (`domain/role.go:12`) ✓; `AggregateByRole`'s inline duplicate is untouched ✓. My
+earlier flag (below, from round 1) was about tense/framing ("moves into" vs. "now lives in"),
+not a correctness error — I overstated that finding. Fix is a wording pass only, no facts to
+correct.
+
+**Q5 — downstream usage when `CompositeHasSignal` passes; does the optimizer check per-SO?**
+Verified, and this is a real, confirmed gap, not a hypothetical: `SOHasSignal` (the per-SO
+check, `composite_signal_gate.go:15`) has **zero production callers** anywhere — grepped every
+`.go` file. The actual optimizer files (`cost_aware_optimizer.go`, `greedy_score_optimizer.go`,
+`rescale.go`) never read `.Reason`/`DecisionPath`/`ReasonNoData`/`ReasonError` at all; the only
+readers of the decision-path-as-Reason string are `SOHasSignal`/`CompositeHasSignal`
+themselves (uncalled per-SO) and one log line (`engine_v2.go:1155`). So: `CompositeHasSignal`
+passing at the whole-request level tells the optimizer nothing about which individual SOs
+within that request actually have signal — a request with 5 SOs where 4 have real signal and 1
+has `DecisionNoSignal` still passes `CompositeHasSignal` as a whole, and the optimizer treats
+all 5 SOs' PRC/TotalReplicas as equally trustworthy.
+
+**However — verified this does NOT crash or silently corrupt anything today**: a no-signal SO's
+`compositeTotalReplicas` stays `0` (`composite.go`'s switch default), which routes
+`vc.PerReplicaCapacity` into the `else if sourceVC != nil` branch — sat's own PRC is copied
+through, not zero/garbage. Every optimizer consumer of `PerReplicaCapacity` I found
+(`cost_aware_optimizer.go:90,120,227`, `greedy_score_optimizer.go:403,416,479`) guards with
+`if vc.PerReplicaCapacity <= 0` before dividing. So today's actual behavior for a no-signal SO
+is "silently fall back to using sat's PRC as if it were normal," not "crash" or "propagate a
+zero." That's arguably its OWN problem (the optimizer can't distinguish a real signal from a
+no-signal fallback that happens to have a valid-looking PRC number), but it's not the
+crash/divide-by-zero risk your phrasing ("must not fail") suggested might be at stake — flagging
+this distinction so we're solving the right problem. This is a design question for you: should
+the optimizer (or something upstream of it) actually consume `SOHasSignal` per-SO, and if so,
+do what with a no-signal SO (skip it? zero its contribution? something else)? I don't have a
+code answer to "what should happen instead" — only the code-level facts above.
+
+**Q7 — where does the per-analyzer-threshold TODO get captured?** In code: as a comment on
+`allocation.TotalReplicas` (`composite_decision.go:43`), which is the function that would need
+to change if/when per-analyzer thresholds get folded in — it currently computes
+`demand/PerReplicaCapacity` with no threshold adjustment at all. In the spec: §2.7 itself (you
+said "can add comment for future TODO" there), which is what the edit plan below already
+proposed — confirming that's the right place, not asking again.
+
+## Round 1 findings and edit plan (superseded in part by round 2 above — §2.3 downgraded from
+"needs fix" to "wording only," §2.6 gap severity now confirmed rather than open)
+
 For review before I touch the spec file again. Findings first (verified against code), then a
 concrete edit plan per section.
 
