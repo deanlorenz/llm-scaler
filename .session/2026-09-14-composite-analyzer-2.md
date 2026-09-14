@@ -165,3 +165,32 @@ rename as explicit rows; also fixed a latent off-by-one in the file table where
 `composite_signal_gate.go`/call-site rows were mislabeled step 7 instead of step 8). Committed
 as `0b9e120b`. Resuming coder from where it left off (steps 4's placement, then whatever of
 7/8 remain).
+
+## User-caught design gap, mid-third-invocation: sat-specific thresholds outside compose
+
+User flagged, unprompted, while the coder was mid-edit: `engine_v2.go:817-818` calls
+`config.AnalyzerThresholds(domain.SaturationAnalyzerName)` to get `satUp`/`satDown`, then
+passes those into `buildComposite`. This names sat, by name, at a call site OUTSIDE
+`buildComposite` — the exact pattern the user says the whole mission must avoid ("I do not want
+sat specific code outside of compose"). Verified: `AnalyzerThresholds` (`saturation_scaling.go
+:639`) returns the analyzer's own override where one exists, policy default otherwise; the fix
+is to skip the analyzer lookup entirely and use `config.ScaleUpThreshold`/
+`config.ScaleDownBoundary` directly — no analyzer name anywhere in this call.
+
+This is **pre-existing code**, not something introduced by v9 or by the coder — it predates
+step 1's insertion point (step 1's new lines were added directly below it). It slipped through
+because dispatch-time verification (session start of this ledger) checked that the cited line
+numbers/call sites existed, not whether the existing code already matched "no sat-specific code
+outside compose" — a check I should have made before ever dispatching, and clearly should make
+routinely on any composite-signal-redesign work going forward.
+
+**Who applies the fix:** user's call — I fix the two doc files (spec §2.1 diagram + prose, task
+file step 1) since I own those and they're not concurrently touched; the coder applies the
+actual `engine_v2.go` change, since it's already mid-edit on that exact file/function and a
+concurrent edit from me would risk collision. Sent via SendMessage rather than editing myself.
+Committed as `0d698cab`.
+
+**Process note for future task files:** dispatch-time verification of a task file's citations
+should include "does the code being modified already violate a stated mission rule," not just
+"do the cited lines/signatures exist as described." This gap would have been caught before
+dispatch by that broader check.
