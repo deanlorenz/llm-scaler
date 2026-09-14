@@ -194,3 +194,58 @@ Committed as `0d698cab`.
 should include "does the code being modified already violate a stated mission rule," not just
 "do the cited lines/signatures exist as described." This gap would have been caught before
 dispatch by that broader check.
+
+## Third invocation completes 1-10, escalates one real gap; user catches two more independently
+
+Coder finished steps 1-10, applied both prior corrections (`domain.RoleOfVC`, the threshold
+fix), `go build`/`go vet` clean. `make test` had exactly one failure, escalated correctly (no
+`agentbus_ask_user`, no blocking wait — the process fix held for a second invocation running):
+step 5's sat-fallback branch never checked `Eligible(sat)`, so a stale-but-enabled sat with no
+other contributor still produced a fallback value. Verified against spec §2.1(c)'s own wording
+and the actual fallback code before treating it as real — confirmed genuine.
+
+**User's answer reframed the question** — not "should we add a check," but "this was already
+decided; sat with no real result must never participate, period." Also flagged, in the same
+message, that this had been discussed before — a signal that my having reopened it via
+AskUserQuestion as if novel wasted a round; should have first checked whether prior sessions'
+ledgers/STATE already settled it (they likely did, given the phrasing) before asking.
+
+**Independently, while I was mid-fix, two more user-initiated catches, both real, both
+verified before acting:**
+
+1. **`hasSaturationResult`** (`engine_v2.go:738`) — user asked why it exists at all, since sat
+   should be invisible downstream. Traced: its body already only calls
+   `allocation.CompositeHasSignal`; it's a sat-named leftover wrapper from before the
+   composite existed, not a decision to keep sat visible. User approved removing it; folded
+   into step 8 as an explicit instruction rather than a separate dispatch, since the coder was
+   about to touch that exact area anyway.
+
+2. **"You are again mixing metadata from sat with the composite signal"** (re:
+   `composite.go:86`, the contributor loop) — this one I nearly answered wrong: I read it as
+   "the unconditional identity-copy from sat is broken," which would have contradicted an
+   already-approved rule (STATE.md's "every composite field comes from saturation alone except
+   PRC/Reason"). Asked which reading was meant via AskUserQuestion rather than acting on my own
+   guess. User's answer: the identity-copy rule stands exactly as coded (nil/error-gated only);
+   what the user was actually doing was correcting/expanding the MODEL — every analyzer's real
+   contract is just `Demand(model,role)` + `PRC(SO)` per SO (same as the external KEDA scaler);
+   everything else on a `VariantCapacity` is infrastructure data, not really "sat's
+   computation," read from sat today only because that's where it currently lives; "voting"
+   (the contributor loop) only ever touches Demand/PRC and only via eligible analyzers.
+   Recorded the fuller model verbatim in spec §3 (also resolves that section's own open
+   question about whether §2.1(a) is durable policy — it is). Confirmed after the fact that
+   `Eligible()`'s three conditions (`Result!=nil`, `ResultIsInformative`, `Live`) don't test
+   enabled/disabled at all, so "disabled but Eligible" is exactly the case the user described —
+   my in-flight fix was already consistent with the fuller model once explained; no code needed
+   to change again.
+
+**Lesson, recorded plainly:** when the user says "we already discussed this" or corrects with
+visible frustration, the right first move is to check ledger/STATE for the prior decision
+before asking a fresh AskUserQuestion that re-derives it — not to treat every design comment as
+open until proven otherwise. When genuinely unsure which of two readings (a specific bug vs. a
+broader model correction) a terse correction means, asking narrowly (as I did for catch #2) is
+still right — better to ask a precise disambiguating question than to act on the wrong reading
+of a two-line comment.
+
+Committed as `15730796`. Sent to `coder-redesign` as one combined instruction (fallback gate +
+`hasSaturationResult` removal) rather than two separate messages, since both land in the same
+area it's already mid-edit on.
