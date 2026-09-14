@@ -690,7 +690,7 @@ func gpuUsageByType(req allocation.ModelScalingRequest, perType map[string]int) 
 func computeCurrentGPUUsage(requests []allocation.ModelScalingRequest) map[string]int {
 	usage := make(map[string]int)
 	for _, req := range requests {
-		if !hasSaturationResult(req) {
+		if !allocation.CompositeHasSignal(req.CompositeSignal) {
 			continue
 		}
 		gpuUsageByType(req, usage)
@@ -711,28 +711,12 @@ func computeCurrentGPUUsageByNamespace(requests []allocation.ModelScalingRequest
 			perType = make(map[string]int)
 			usage[req.Namespace] = perType
 		}
-		if !hasSaturationResult(req) {
+		if !allocation.CompositeHasSignal(req.CompositeSignal) {
 			continue
 		}
 		gpuUsageByType(req, perType)
 	}
 	return usage
-}
-
-// hasSaturationResult reports whether the request carries a usable composite
-// signal. A request without one was not measured this cycle, so its replica
-// counts are not evidence of anything and must not be charged to a quota.
-//
-// Delegates to allocation.HasUsableCompositeSignal (spec §5.1.3, A11') rather
-// than checking CompositeSignal.Name: the composite now carries its own name
-// (spec §8), not saturation's, even on the sat-only path, so a name check
-// here would go permanently false the moment the rename lands. The gate's
-// actual requirement was always "is there a usable signal to charge a quota
-// against", never "is this specifically saturation" — the retained name
-// documents the call sites' original intent (a per-cycle measurement gate)
-// without implying the composite is still literally saturation.
-func hasSaturationResult(req allocation.ModelScalingRequest) bool {
-	return allocation.HasUsableCompositeSignal(req.CompositeSignal)
 }
 
 // reportUnattributedGPUs surfaces usage that could not be charged to any
@@ -811,11 +795,23 @@ func (e *Engine) collectV2ModelRequest(
 	// runAnalyzersAndScore — that function's return type and behavior stay
 	// exactly what they were before this mission.
 	//
-	// Saturation's own thresholds are the composite's too: the composite is
-	// expressed in D_sat units (spec §4.4), so the same scale-up/scale-down
-	// boundaries that would apply to saturation alone apply to it.
-	satUp, satDown := config.AnalyzerThresholds(domain.SaturationAnalyzerName)
-	composite := buildComposite(ctx, namedResults, satUp, satDown)
+	// The composite uses the policy's own default thresholds, not
+	// saturation's (possibly per-analyzer-overridden) ones — naming
+	// domain.SaturationAnalyzerName here would be exactly the
+	// "sat-specific code outside of compose" pattern this call stack must
+	// not have anywhere.
+	//
+	// Saturation's contributor eligibility is resolved exactly once, here,
+	// before compose (spec §2.1): sat's name is never tested inside
+	// buildComposite's per-SO contributor loop, which cannot tell sat apart
+	// from any other analyzer. Sat keeps its unconditional identity role
+	// (D_sat, ReplicaCount and friends come from namedResults regardless),
+	// but it only *contributes* to CompositeTotalReplicas when it is enabled.
+	eligibleAnalyzers := namedResults
+	if !config.AnalyzerEnabled(domain.SaturationAnalyzerName) {
+		eligibleAnalyzers = excludeByName(namedResults, domain.SaturationAnalyzerName)
+	}
+	composite := buildComposite(ctx, namedResults, eligibleAnalyzers, config.ScaleUpThreshold, config.ScaleDownBoundary)
 
 	// Observability parity (spec §6/A22/A23): the composite is a second,
 	// explicit call into the SAME functions every analyzer's own result
@@ -854,6 +850,31 @@ func (e *Engine) collectV2ModelRequest(
 		Priority:        config.Priority,
 		Disaggregated:   disaggregated,
 	}, nil
+}
+
+// excludeByName returns a copy of results with the entry named name omitted,
+// or results itself when no entry carries that name. Used once per cycle to
+// resolve buildComposite's eligibleAnalyzers, so saturation's enabled/disabled
+// state is decided in exactly one place instead of being re-tested per SO.
+func excludeByName(results []allocation.NamedAnalyzerResult, name string) []allocation.NamedAnalyzerResult {
+	found := false
+	for _, nr := range results {
+		if nr.Name == name {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return results
+	}
+	out := make([]allocation.NamedAnalyzerResult, 0, len(results))
+	for _, nr := range results {
+		if nr.Name == name {
+			continue
+		}
+		out = append(out, nr)
+	}
+	return out
 }
 
 // metadataByVariant indexes discovery metadata by variant name for the capacity

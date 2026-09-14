@@ -28,11 +28,10 @@ var _ = Describe("gpuUsageViews", func() {
 
 	// managedRequest is one variant holding replicas GPUs of the given type.
 	// CompositeSignal.Result carries one VariantCapacity with a real decision
-	// path (not C4-no-signal) so the request passes hasSaturationResult's
-	// usable-signal gate (allocation.HasUsableCompositeSignal) exactly as a
-	// real per-cycle composite would — an empty *domain.AnalyzerResult{} has
-	// no capacity signal at all and is correctly excluded from the quota
-	// charge.
+	// path (not C4-no-signal) so the request passes computeCurrentGPUUsage's
+	// usable-signal gate (allocation.CompositeHasSignal) exactly as a real
+	// per-cycle composite would — an empty *domain.AnalyzerResult{} has no
+	// capacity signal at all and is correctly excluded from the quota charge.
 	managedRequest := func(namespace, accelerator string, replicas int) allocation.ModelScalingRequest {
 		return allocation.ModelScalingRequest{
 			Namespace: namespace,
@@ -40,7 +39,7 @@ var _ = Describe("gpuUsageViews", func() {
 				Name: domain.SaturationAnalyzerName,
 				Result: &domain.AnalyzerResult{
 					VariantCapacities: []domain.VariantCapacity{
-						{VariantName: "v", PerReplicaCapacity: 100, Reason: allocation.DecisionSingle},
+						{VariantName: "v", PerReplicaCapacity: 100, Reason: string(allocation.DecisionSingle)},
 					},
 				},
 			},
@@ -137,11 +136,16 @@ var _ = Describe("gpuUsageViews", func() {
 	})
 })
 
-// hasSaturationResult (spec §5.1.3/A11') delegates to
-// allocation.HasUsableCompositeSignal so the quota guard tests "is there a
-// usable signal", never "is this specifically saturation" — the check the
-// old implementation used, which the composite's rename (spec §8) breaks.
-var _ = Describe("hasSaturationResult (quota guard, post-rename)", func() {
+// computeCurrentGPUUsage/computeCurrentGPUUsageByNamespace gate on
+// allocation.CompositeHasSignal directly (spec §5.1.3/A11') so the quota
+// guard tests "is there a usable signal", never "is this specifically
+// saturation" — the check the old, pre-rename implementation used, which the
+// composite's rename (spec §8) breaks. hasSaturationResult, the thin
+// sat-named wrapper this test block used to exercise, has been deleted (its
+// name violated the mission's "sat invisible downstream" rule even though
+// its body already only called allocation.CompositeHasSignal); these cases
+// now exercise the gate through its real callers directly.
+var _ = Describe("quota usage gate (allocation.CompositeHasSignal, post-rename)", func() {
 	requestWithComposite := func(composite allocation.NamedAnalyzerResult, replicas int) allocation.ModelScalingRequest {
 		return allocation.ModelScalingRequest{
 			Namespace:       "team-a",
@@ -156,7 +160,7 @@ var _ = Describe("hasSaturationResult (quota guard, post-rename)", func() {
 			Name: name,
 			Result: &domain.AnalyzerResult{
 				VariantCapacities: []domain.VariantCapacity{
-					{VariantName: "v", PerReplicaCapacity: 100, Reason: allocation.DecisionSingle},
+					{VariantName: "v", PerReplicaCapacity: 100, Reason: string(allocation.DecisionSingle)},
 				},
 			},
 		}
@@ -184,7 +188,7 @@ var _ = Describe("hasSaturationResult (quota guard, post-rename)", func() {
 		noSignal := allocation.NamedAnalyzerResult{
 			Name: "CompositeSignal",
 			Result: &domain.AnalyzerResult{
-				VariantCapacities: []domain.VariantCapacity{{VariantName: "v", Reason: allocation.DecisionNoSignal}},
+				VariantCapacities: []domain.VariantCapacity{{VariantName: "v", Reason: string(allocation.DecisionNoSignal)}},
 			},
 		}
 		req := requestWithComposite(noSignal, 3)

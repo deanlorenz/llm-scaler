@@ -1,6 +1,30 @@
 package allocation
 
-// HasUsableCompositeSignal reports whether composite carries a real capacity
+// SOHasSignal reports whether variant's own decision path is not
+// DecisionNoSignal (spec §5.1.3, A11'): the per-SO half of the usable-signal
+// check, for a caller with one specific SO in scope. false when composite's
+// Result is nil, or variant is absent from its VariantCapacities, or its
+// decision path is DecisionNoSignal.
+//
+// Reason on the composite carries a decision-path value
+// (C0-agree/C1-single/C2-sat-fallback/C4-no-signal, spec §5.1.2), not an
+// analyzer's own no-data/error/P0-store vocabulary — deliberately NOT
+// ResultIsInformative, whose sentinel check is calibrated to that different,
+// analyzer-level vocabulary (see CompositeHasSignal's doc comment for the
+// full reasoning, which applies here identically).
+func SOHasSignal(composite NamedAnalyzerResult, variant string) bool {
+	if composite.Result == nil {
+		return false
+	}
+	for _, vc := range composite.Result.VariantCapacities {
+		if vc.VariantName == variant {
+			return DecisionPath(vc.Reason) != DecisionNoSignal
+		}
+	}
+	return false
+}
+
+// CompositeHasSignal reports whether composite carries a real capacity
 // signal (spec §5.1.3, A11'): a non-nil Result with at least one
 // VariantCapacity whose decision path (spec §5.1.2 — Reason on the
 // composite carries C0-agree/C1-single/C2-sat-fallback/C4-no-signal, not an
@@ -31,12 +55,12 @@ package allocation
 // exactly as the absent-Result case they already guard (uniformly safe
 // today per the zero-signal survey): skip the model, charge it nothing,
 // decide nothing.
-func HasUsableCompositeSignal(composite NamedAnalyzerResult) bool {
+func CompositeHasSignal(composite NamedAnalyzerResult) bool {
 	if composite.Result == nil {
 		return false
 	}
 	for _, vc := range composite.Result.VariantCapacities {
-		if vc.Reason != DecisionNoSignal {
+		if DecisionPath(vc.Reason) != DecisionNoSignal {
 			return true
 		}
 	}

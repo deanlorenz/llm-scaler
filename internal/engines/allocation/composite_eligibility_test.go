@@ -7,22 +7,22 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 )
 
-var _ = Describe("eligible", func() {
+var _ = Describe("Eligible", func() {
 
 	It("is eligible when live, informative, and Result is non-nil", func() {
 		nr := makeNamed(100, 0, "v", 500.0) // makeNamed defaults Live to true
-		Expect(eligible(nr)).To(BeTrue())
+		Expect(Eligible(nr)).To(BeTrue())
 	})
 
 	It("excludes a non-live analyzer, even with an otherwise informative Result", func() {
 		nr := makeNamed(100, 0, "v", 500.0)
 		nr.Live = false
-		Expect(eligible(nr)).To(BeFalse())
+		Expect(Eligible(nr)).To(BeFalse())
 	})
 
 	It("excludes a nil Result", func() {
 		nr := NamedAnalyzerResult{Result: nil, Live: true}
-		Expect(eligible(nr)).To(BeFalse())
+		Expect(Eligible(nr)).To(BeFalse())
 	})
 
 	It("excludes a Result whose every VariantCapacity carries the no-data sentinel", func() {
@@ -34,7 +34,7 @@ var _ = Describe("eligible", func() {
 				},
 			},
 		}
-		Expect(eligible(nr)).To(BeFalse())
+		Expect(Eligible(nr)).To(BeFalse())
 	})
 
 	It("excludes a Result whose every VariantCapacity carries the error sentinel", func() {
@@ -46,17 +46,17 @@ var _ = Describe("eligible", func() {
 				},
 			},
 		}
-		Expect(eligible(nr)).To(BeFalse())
+		Expect(Eligible(nr)).To(BeFalse())
 	})
 
 	It("applies the same rule regardless of direction: a stale analyzer is excluded whether it would raise or lower demand", func() {
-		// eligible() itself is direction-agnostic; this asserts there is no
+		// Eligible() itself is direction-agnostic; this asserts there is no
 		// separate looser check anywhere by exercising the one function twice
 		// with the same non-live entry, mirroring how a scale-up contribution
 		// check and a scale-down all-agree check would both consult it.
 		nr := makeNamed(100, 50, "v", 500.0)
 		nr.Live = false
-		Expect(eligible(nr)).To(BeFalse(), "must not raise demand")
-		Expect(eligible(nr)).To(BeFalse(), "must not block scale-down")
+		Expect(Eligible(nr)).To(BeFalse(), "must not raise demand")
+		Expect(Eligible(nr)).To(BeFalse(), "must not block scale-down")
 	})
 })

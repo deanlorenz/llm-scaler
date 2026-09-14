@@ -128,15 +128,16 @@ var _ = Describe("buildComposite — sat-only regression (test 1)", func() {
 
 // Test 8d, end-to-end through the real compose path (not a hand-built
 // fixture): a composite whose only SO has no usable signal must correctly
-// report HasUsableCompositeSignal == false, so the quota guard fires. This
-// regression-tests a real bug found while building buildComposite: an
-// analyzer's own no-data/error sentinel strings are NOT the same values as
-// the composite's decision-path markers (DecisionNoSignal ==
-// "C4-no-signal"), so a naive reuse of the analyzer-level informativeness
-// check against the composite's own Reason values would have always
-// reported "usable" -- silently defeating this exact gate.
+// report CompositeHasSignal == false (and SOHasSignal == false for that SO),
+// so the quota guard fires. This regression-tests a real bug found while
+// building buildComposite: an analyzer's own no-data/error sentinel strings
+// are NOT the same values as the composite's decision-path markers
+// (DecisionNoSignal == "C4-no-signal"), so a naive reuse of the
+// analyzer-level informativeness check against the composite's own Reason
+// values would have always reported "usable" -- silently defeating this
+// exact gate.
 var _ = Describe("buildComposite — no-signal end to end (test 8d)", func() {
-	It("reports HasUsableCompositeSignal == false when saturation itself has no-data for the only SO", func() {
+	It("reports CompositeHasSignal == false when saturation itself has no-data for the only SO", func() {
 		satResult := &domain.AnalyzerResult{
 			VariantCapacities: []domain.VariantCapacity{
 				{VariantName: "v1", PerReplicaCapacity: 0, Reason: allocation.ReasonNoData},
@@ -146,8 +147,9 @@ var _ = Describe("buildComposite — no-signal end to end (test 8d)", func() {
 		req, err := e.collectV2ModelRequest(context.Background(), "m", "ns", nil, scaleCfg, nil, nil, nil, nil, nil, 0)
 		Expect(err).NotTo(HaveOccurred())
 
-		Expect(req.CompositeSignal.Result.VariantCapacities[0].Reason).To(Equal(allocation.DecisionNoSignal))
-		Expect(allocation.HasUsableCompositeSignal(req.CompositeSignal)).To(BeFalse())
+		Expect(req.CompositeSignal.Result.VariantCapacities[0].Reason).To(Equal(string(allocation.DecisionNoSignal)))
+		Expect(allocation.CompositeHasSignal(req.CompositeSignal)).To(BeFalse())
+		Expect(allocation.SOHasSignal(req.CompositeSignal, "v1")).To(BeFalse())
 	})
 })
 

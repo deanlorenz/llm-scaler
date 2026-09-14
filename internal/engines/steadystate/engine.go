@@ -1088,7 +1088,7 @@ func (e *Engine) optimizeV2(
 		// scale-to-zero policy/wake reasons already use, rather than only in a
 		// log line.
 		var signalReasons []string
-		if !allocation.HasUsableCompositeSignal(req.CompositeSignal) {
+		if !allocation.CompositeHasSignal(req.CompositeSignal) {
 			signalReasons = []string{constants.ScalingBlockedNoCompositeSignal}
 		}
 		metrics.SetModelScalingBlockedReasons(namespace, modelID,

@@ -2,8 +2,9 @@ package steadystate
 
 import (
 	"context"
-	"sort"
 	"time"
+
+	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/aggregation"
@@ -21,6 +22,16 @@ import (
 // composite value is expressed in (spec §4.4), is always available even when
 // saturation is not itself an eligible contributor.
 //
+// namedResults is used to find sat (the identity/unit source) and for
+// maxScore; eligibleAnalyzers (resolved once by the caller, per
+// composite-signal-redesign.md §2.1 — sat's enabled/disabled state is never
+// re-tested inside this function or its per-SO loop) is used only for the
+// per-SO contributor collection below.
+//
+// The composite iterates sat's own VariantCapacities directly (no union of
+// every analyzer's variants, no fallback source) — sat is always the
+// identity/shape source for every SO in the composite.
+//
 // The composite is built fresh, never aliasing any source entry's reference
 // fields (spec §2.6/A15): every VariantCapacities entry, RoleDemand and
 // RoleCapacities map is a new value, so mutating the composite (e.g. the
@@ -28,7 +39,7 @@ import (
 // own result.
 func buildComposite(
 	ctx context.Context,
-	namedResults []allocation.NamedAnalyzerResult,
+	namedResults, eligibleAnalyzers []allocation.NamedAnalyzerResult,
 	scaleUp, scaleDown float64,
 ) allocation.NamedAnalyzerResult {
 	sat := findSaturation(namedResults)
@@ -37,90 +48,152 @@ func buildComposite(
 	// a slice with no saturation entry at all has no D_sat to express
 	// anything in — there is nothing to compose. Report the same way a
 	// missing signal always has: an empty, non-nil Result whose
-	// informativeness is false, so allocation.HasUsableCompositeSignal
-	// correctly reports "no usable signal" rather than the caller having to
+	// informativeness is false, so allocation.CompositeHasSignal correctly
+	// reports "no usable signal" rather than the caller having to
 	// special-case a nil composite Result it never expected.
 	if sat == nil || sat.Result == nil {
 		return emptyComposite()
 	}
 
-	variants := unionOfVariants(namedResults)
-	sort.Strings(variants) // deterministic iteration for stable provenance/logging
+	// demandByRole is computed once, before the per-SO loop, since it is the
+	// shared numerator every SO in a given role divides into (step 6).
+	demandByRole := make(map[string]float64)
+	for _, role := range rolesPresent(sat.Result.VariantCapacities) {
+		d, _ := aggregation.DemandForRole(sat.Result, role)
+		demandByRole[role] = d
+	}
 
-	compositeVCs := make([]domain.VariantCapacity, 0, len(variants))
+	compositeVCs := make([]domain.VariantCapacity, 0, len(sat.Result.VariantCapacities))
 	roleDemandSeen := make(map[string]struct{})
-	contributedNames := make(map[string]struct{})
 	anyLive := false
 
-	for _, v := range variants {
-		sourceVC, role := representativeVariantCapacity(namedResults, v)
-		decision := allocation.ResolveSO(namedResults, v)
+	for i := range sat.Result.VariantCapacities {
+		sourceVC := &sat.Result.VariantCapacities[i]
 
 		vc := domain.VariantCapacity{
-			VariantName: v,
-			Role:        role,
-			Reason:      decision.Path,
+			VariantName: sourceVC.VariantName,
+			Role:        sourceVC.Role,
 		}
 		if sourceVC != nil {
 			// Metadata the composite does not derive itself: identity,
 			// scale-target-clamped counts already reconciled by the
-			// per-analyzer capacity-build step, and the representative
-			// source's own per-variant demand (see TotalDemand/Utilization
-			// below — this is a per-SO figure, distinct from D_sat[role],
-			// which is shared by every SO in that role and would double-count
-			// if copied onto each of them). Copied by value (all plain
-			// fields), never aliased.
+			// per-analyzer capacity-build step, and sat's own per-variant
+			// demand (see TotalDemand/Utilization below — this is a per-SO
+			// figure, distinct from D_sat[role], which is shared by every SO
+			// in that role and would double-count if copied onto each of
+			// them). Copied by value (all plain fields), never aliased. This
+			// copy is UNCONDITIONAL and happens even if sat was excluded
+			// from eligibleAnalyzers above — identity role, never gated.
 			vc.ReplicaCount = sourceVC.ReplicaCount
 			vc.PendingReplicas = sourceVC.PendingReplicas
 			vc.WarmPoolReplicas = sourceVC.WarmPoolReplicas
 			vc.WarmPoolPerReplicaCapacity = sourceVC.WarmPoolPerReplicaCapacity
+			// ReplicaCount here is sat's raw k8s ready count, not a count of
+			// replicas verified to be usefully serving. Accepted for now;
+			// Supply/AnticipatedSupply (buildCapacities) are built from this
+			// value as-is.
 			vc.TotalDemand = sourceVC.TotalDemand
 		}
 
-		if decision.OK {
-			for _, name := range decision.Contributors {
-				contributedNames[name] = struct{}{}
+		// Contributor collection: every eligible analyzer with a defined
+		// TotalReplicas for this SO (spec §2.1b).
+		type contribution struct {
+			name string
+			n    float64
+		}
+		var contributors []contribution
+		for _, e := range eligibleAnalyzers {
+			if !allocation.Eligible(e) {
+				// Stale, uninformative, or nil-Result analyzers contribute to
+				// nothing — unchanged from today's ResolveSO/eligible()
+				// pairing (redesign §2.1(b)(i)). This is a per-analyzer gate,
+				// checked once per analyzer per SO here; it is NOT the same
+				// thing as the per-SO Reason check below, which is
+				// per-contribution.
+				continue
 			}
+			evc, present := findVariantCapacity(e.Result, vc.VariantName)
+			if !present || evc.Reason == allocation.ReasonNoData || evc.Reason == allocation.ReasonError {
+				continue
+			}
+			n, ok := allocation.TotalReplicas(e.Result, evc)
+			if !ok {
+				continue
+			}
+			contributors = append(contributors, contribution{name: e.Name, n: n})
+		}
+
+		var compositeTotalReplicas float64
+		var decisionPath allocation.DecisionPath
+		var contributorNames []string
+		switch {
+		case len(contributors) == 0:
+			// sat-fallback: only reachable when sat was excluded from
+			// eligibleAnalyzers upstream (step 1) for being disabled, AND no
+			// other analyzer contributed, AND sat itself is Eligible (an
+			// actual, live, informative result). A sat with no real result
+			// (nil, erroring, no-data, or stale) must never produce a
+			// fallback value.
+			satVC, present := findVariantCapacity(sat.Result, vc.VariantName)
+			if satN, ok := allocation.TotalReplicas(sat.Result, satVC); allocation.Eligible(*sat) && present && ok {
+				compositeTotalReplicas, decisionPath, contributorNames = satN, allocation.DecisionSatFallback, []string{sat.Name}
+			} else {
+				decisionPath = allocation.DecisionNoSignal
+			}
+		case len(contributors) == 1:
+			compositeTotalReplicas, decisionPath, contributorNames = contributors[0].n, allocation.DecisionSingle, []string{contributors[0].name}
+		default:
+			decisionPath = allocation.DecisionAgree
+			for _, c := range contributors {
+				contributorNames = append(contributorNames, c.name)
+				if c.n > compositeTotalReplicas {
+					compositeTotalReplicas = c.n
+				}
+			}
+		}
+
+		vc.Reason = string(decisionPath)
+		if decisionPath != allocation.DecisionNoSignal {
 			anyLive = true
 		}
 
-		prcCom, prcOK := aggregation.PRCCom(sat.Result, role, decision.N, decision.OK)
-		switch {
-		case prcOK:
-			vc.PerReplicaCapacity = prcCom
-		case sourceVC != nil:
-			// PRC_com is undefined exactly when N_com is 0 (no demand for
-			// this role — spec §4.4, "nothing needed") or D_sat itself has
-			// no defined demand for the role (A4). Neither means the SO's
-			// real, measured capacity has vanished — PRC and demand are
-			// independent (spec §2.4), and a zero-demand SO can still hold
-			// real supply that a scale-down decision needs to see. Fall
-			// through to the SO's own analyzer-measured PRC rather than
-			// leaving 0, which would silently erase that supply. This is
-			// what makes the sat-only identity (test 1) hold even for a
-			// zero-demand SO: today's namedResults[0] copy never zeroes a
-			// real PRC because demand happens to be 0, so neither may the
-			// composite.
+		// PRC(SO) = D_sat[role]/CompositeTotalReplicas(SO), inlined — the
+		// entire computation, not a separate PRCCom-equivalent function.
+		if compositeTotalReplicas > 0 {
+			vc.PerReplicaCapacity = demandByRole[domain.RoleOfVC(vc)] / compositeTotalReplicas
+		} else if sourceVC != nil {
+			// CompositeTotalReplicas undefined/zero does not mean the SO's
+			// real, measured capacity has vanished (PRC and demand are
+			// independent, spec §2.4) — fall through to sat's own measured
+			// PRC rather than leaving 0, which would silently erase real
+			// supply. This is what makes the sat-only identity hold even for
+			// a zero-demand SO.
 			vc.PerReplicaCapacity = sourceVC.PerReplicaCapacity
-			prcCom = sourceVC.PerReplicaCapacity
-		}
-		// Utilization mirrors the analyzer's own definition
-		// (totalDemand/totalCapacity, saturation_v2/analyzer.go) but with
-		// PRC_com substituted for the source's own PRC — the same
-		// substitution §5.3 makes for RC/SC. Recomputed rather than copied
-		// so it stays consistent with whatever PerReplicaCapacity ends up
-		// being (PRC_com when defined, the source's own PRC otherwise, in
-		// which case this recomputation reduces to the source's own value
-		// exactly — sat-only identity, test 1).
-		if prcCom > 0 && vc.ReplicaCount > 0 {
-			vc.Utilization = vc.TotalDemand / (float64(vc.ReplicaCount) * prcCom)
 		}
 
+		// Utilization mirrors the analyzer's own definition
+		// (totalDemand/totalCapacity, saturation_v2/analyzer.go) but with the
+		// composite's PRC substituted for the source's own — the same
+		// substitution spec §5.3 makes for RC/SC.
+		if vc.PerReplicaCapacity > 0 && vc.ReplicaCount > 0 {
+			vc.Utilization = vc.TotalDemand / (float64(vc.ReplicaCount) * vc.PerReplicaCapacity)
+		}
+
+		role := domain.RoleOfVC(vc)
 		if role != domain.RoleBoth {
 			if _, present := aggregation.DemandForRole(sat.Result, role); present {
 				roleDemandSeen[role] = struct{}{}
 			}
 		}
+
+		// Composition-level logging, per SO — additive; does not replace
+		// engine_v2.go's existing logAnalyzerResult call for the composite.
+		ctrl.LoggerFrom(ctx).Info("composite-contributors",
+			"modelID", sat.Result.ModelID, "namespace", sat.Result.Namespace,
+			"variant", vc.VariantName, "decisionPath", decisionPath,
+			"contributors", contributorNames,
+			"totalReplicas", compositeTotalReplicas,
+		)
 
 		compositeVCs = append(compositeVCs, vc)
 	}
@@ -171,10 +244,10 @@ func findSaturation(namedResults []allocation.NamedAnalyzerResult) *allocation.N
 
 // emptyComposite is the composite for a cycle with no saturation entry to
 // express D_sat in at all (unreachable in production; see buildComposite).
-// A non-nil, non-informative Result so allocation.HasUsableCompositeSignal
-// reports false through its ordinary path rather than the nil-Result path,
-// keeping every consumer's behavior identical regardless of which "no
-// signal" shape produced it.
+// A non-nil, non-informative Result so allocation.CompositeHasSignal reports
+// false through its ordinary path rather than the nil-Result path, keeping
+// every consumer's behavior identical regardless of which "no signal" shape
+// produced it.
 func emptyComposite() allocation.NamedAnalyzerResult {
 	return allocation.NamedAnalyzerResult{
 		Name: allocation.CompositeSignalName,
@@ -184,72 +257,37 @@ func emptyComposite() allocation.NamedAnalyzerResult {
 	}
 }
 
-// unionOfVariants returns the distinct variant names across every analyzer
-// result's VariantCapacities. In the well-formed case every analyzer sees the
-// same discovery-joined variant set (buildCapacities overlays the same
-// metaByVariant onto each), so this is normally just saturation's own set;
-// the union is taken anyway so an analyzer-specific variant is never
-// silently dropped from composition.
-func unionOfVariants(namedResults []allocation.NamedAnalyzerResult) []string {
+// findVariantCapacity returns variant's VariantCapacity from result, and
+// whether it is present at all. This is the one place a by-name search
+// remains: looking up a non-sat analyzer's own view of the SO the outer loop
+// is currently iterating over (sat's own list) — distinct from the by-name
+// search step 3 removed, which searched for an analyzer's own SO redundantly
+// when the caller already had it in hand.
+func findVariantCapacity(result *domain.AnalyzerResult, variantName string) (domain.VariantCapacity, bool) {
+	if result == nil {
+		return domain.VariantCapacity{}, false
+	}
+	for _, vc := range result.VariantCapacities {
+		if vc.VariantName == variantName {
+			return vc, true
+		}
+	}
+	return domain.VariantCapacity{}, false
+}
+
+// rolesPresent returns the distinct roles across vcs, canonicalized and
+// deduplicated via domain.RoleOfVC.
+func rolesPresent(vcs []domain.VariantCapacity) []string {
 	seen := make(map[string]struct{})
 	var out []string
-	for _, nr := range namedResults {
-		if nr.Result == nil {
-			continue
-		}
-		for _, vc := range nr.Result.VariantCapacities {
-			if _, ok := seen[vc.VariantName]; !ok {
-				seen[vc.VariantName] = struct{}{}
-				out = append(out, vc.VariantName)
-			}
+	for _, vc := range vcs {
+		role := domain.RoleOfVC(vc)
+		if _, ok := seen[role]; !ok {
+			seen[role] = struct{}{}
+			out = append(out, role)
 		}
 	}
 	return out
-}
-
-// representativeVariantCapacity returns variant's VariantCapacity from
-// saturation's result when present (saturation is the keeper of per-variant
-// identity metadata -- see runAnalyzersAndScore's doc comment), else from the
-// first other analyzer result that has it, plus its canonicalized role. Nil
-// if no analyzer reports this variant at all (reachable only via a caller
-// bug, since variant always comes from unionOfVariants).
-func representativeVariantCapacity(namedResults []allocation.NamedAnalyzerResult, variant string) (*domain.VariantCapacity, string) {
-	var sat *allocation.NamedAnalyzerResult
-	for i := range namedResults {
-		if namedResults[i].Name == domain.SaturationAnalyzerName {
-			sat = &namedResults[i]
-			break
-		}
-	}
-	if sat != nil && sat.Result != nil {
-		for i := range sat.Result.VariantCapacities {
-			if sat.Result.VariantCapacities[i].VariantName == variant {
-				vc := sat.Result.VariantCapacities[i]
-				return &vc, roleOfVC(vc)
-			}
-		}
-	}
-	for _, nr := range namedResults {
-		if nr.Result == nil {
-			continue
-		}
-		for i := range nr.Result.VariantCapacities {
-			if nr.Result.VariantCapacities[i].VariantName == variant {
-				vc := nr.Result.VariantCapacities[i]
-				return &vc, roleOfVC(vc)
-			}
-		}
-	}
-	return nil, domain.RoleBoth
-}
-
-// roleOfVC canonicalizes a VariantCapacity's role, matching
-// aggregation.AggregateByRole's convention.
-func roleOfVC(vc domain.VariantCapacity) string {
-	if vc.Role == "" {
-		return domain.RoleBoth
-	}
-	return vc.Role
 }
 
 // maxScore is spec A9-triple-prime: the composite's legacy Score field is max over
