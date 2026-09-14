@@ -195,9 +195,14 @@ var contributorNames []string
 switch {
 case len(contributors) == 0:
     // sat-fallback: only reachable when sat was excluded from eligibleAnalyzers
-    // upstream (step 1) for being disabled, AND no other analyzer contributed.
+    // upstream (step 1) for being disabled, AND no other analyzer contributed,
+    // AND sat itself is Eligible (an actual, live, informative result). A sat
+    // with no real result (nil, erroring, no-data, or stale) must never
+    // produce a fallback value — corrected 2026-09-14, this Eligible(sat)
+    // check was missing from the first version of this step and let a stale
+    // sat leak a fallback value, which make test caught.
     satVC, present := findVariantCapacity(sat.Result, vc.VariantName)
-    if satN, ok := allocation.TotalReplicas(sat.Result, satVC); present && ok {
+    if satN, ok := allocation.TotalReplicas(sat.Result, satVC); allocation.Eligible(sat) && present && ok {
         compositeTotalReplicas, decisionPath, contributorNames = satN, allocation.DecisionSatFallback, []string{sat.Name}
     } else {
         decisionPath = allocation.DecisionNoSignal
@@ -282,10 +287,17 @@ func CompositeHasSignal(composite NamedAnalyzerResult) bool
 Update call sites:
 - `engine.go:1091` — currently `HasUsableCompositeSignal(req.CompositeSignal)`. This call has
   no specific SO in scope (it's a whole-request check) → use `CompositeHasSignal`.
-- `engine_v2.go:735` (via `hasSaturationResult`) — read the surrounding code first: if this
-  call site is checking "does this model have ANY usable signal at all" (no specific SO) →
-  `CompositeHasSignal`; if it's checking one particular SO's signal → `SOHasSignal`. Do not
-  guess; read the call site's actual variable scope to tell which.
+- `engine_v2.go:735`, currently reached via `hasSaturationResult` — **delete
+  `hasSaturationResult` entirely** (`engine_v2.go:722-740`, including its doc comment). It is
+  a thin wrapper whose body already only calls `allocation.CompositeHasSignal` — its own doc
+  comment already says both its callers are whole-request checks with no SO in scope. Its name
+  is sat-specific even though its body is not, which the mission's "sat invisible downstream"
+  rule does not allow to remain (user correction, 2026-09-14 — a leftover from before the
+  composite existed, not a decision to keep sat visible here). Update its two call sites
+  (`engine_v2.go:693`, `:714`) to call `allocation.CompositeHasSignal(req.CompositeSignal)`
+  directly. Also update or delete `engine_v2_quota_test.go`'s `hasSaturationResult`-named
+  `Describe` block and its comments referencing the old name — port the test cases to exercise
+  `allocation.CompositeHasSignal` directly, do not drop coverage.
 
 ## Step 9 — composition-level logging
 

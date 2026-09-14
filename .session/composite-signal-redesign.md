@@ -54,8 +54,11 @@ collectV2ModelRequest                                 [engine_v2.go:777]
              from any other analyzer)
           c. if contributors is empty AND sat was excluded from eligibleAnalyzers only
              for being disabled (not for being ineligible per (b)'s own SO/model/role
-             check): sat contributes alone as fallback — this is the ONE place sat is
-             named, and it happens before/outside the symmetric loop, never inside it
+             check) AND `Eligible(sat)` is true (sat has an actual, live, informative
+             result — an error/no-data/stale sat must NEVER produce a fallback value,
+             corrected 2026-09-14, see below): sat contributes alone as fallback — this
+             is the ONE place sat is named, and it happens before/outside the symmetric
+             loop, never inside it
           d. for each contributor: TotalReplicas(SO) = its own Demand(model,role) /
              its own raw PRC(SO) — both this analyzer's OWN measured values, not the
              composite's and not sat's
@@ -97,6 +100,20 @@ User ruling: keep the gate. `eligible()` (`composite_eligibility.go:18`, current
 in `allocation`) must be reachable from `buildComposite` in `steadystate` — export it as
 `Eligible` (capitalize) rather than
 duplicating its three-condition check inline.
+
+**Second correction (2026-09-14, caught during coder's third invocation, `make test`
+failure):** step (c) as originally written gated the fallback only on "sat was excluded for
+being disabled" — it never checked `Eligible(sat)`. That reopens exactly the staleness hole
+the first correction closed, one step outside the main contributor loop: a sat with no actual
+result (error, no data, stale) would still produce a fallback value whenever `contributors`
+was empty, because the code never asked whether sat itself had anything real to fall back on.
+User ruling (already an established, previously-discussed decision — not a new one; this doc
+had simply failed to carry it into (c)): **sat with no real result must never participate in
+scaling decisions, fallback or otherwise.** Sat-fallback exists ONLY for the case where sat is
+disabled (`!config.AnalyzerEnabled`) but still has an actual, live, informative result — "sat
+can be a fallback when it is DISABLED but still has actual results," never when sat's own
+result is missing/erroring/stale. (c) now requires `Eligible(sat)` as a third, separate
+condition alongside "excluded only for being disabled" — see the updated (c) above.
 
 ### 2.2 Naming
 
@@ -180,6 +197,11 @@ usefully serving. Accepted for now; flag with a comment where it feeds Supply.
 - **Stale analyzer never contributes**: an analyzer failing `Eligible()` (not `Live`, or not
   informative, or nil `Result`) must not appear in `contributors` for any SO, regardless of
   what its per-SO `Reason` says — test with an otherwise-qualifying analyzer marked `!Live`.
+- **Ineligible sat never falls back**: sat-fallback (path (c)) must only fire when `Eligible(sat)`
+  is true. A sat with a nil/erroring/no-data/stale result and no other contributor must produce
+  `DecisionNoSignal`, never `DecisionSatFallback` — test with sat disabled AND `!Eligible(sat)`
+  (e.g. stale), confirming the SO gets no signal at all rather than silently falling back on
+  sat's stale data.
 
 ### 2.10 Completeness check
 
@@ -191,8 +213,25 @@ doc's own step list.
 
 ## 3. Needs decision / still open
 
-- Whether "sat is the sole source of every identity field except PRC/Reason" (§2.1.a) is
-  durable policy or a narrowing specific to unblocking this redesign.
+- **RESOLVED (2026-09-14):** "sat is the sole source of every identity field except PRC/Reason"
+  (§2.1.a) is durable policy, not a narrowing. User's fuller explanation, worth keeping verbatim
+  here since it reframes what an analyzer even is: every analyzer's real contract is exactly
+  two numbers per SO — `Demand(model(SO), role(SO))` and `PRC(SO)` — the same contract the
+  external KEDA scaler already has. Everything else on a `VariantCapacity` (ready count,
+  pending, warmpool, cost, GPU count, ...) is not really "sat's computation" at all; in an
+  ideal world it would be a separate, non-per-analyzer computation, and it is read from sat
+  today only because that is where the data currently lives, gated on nil/error only — never
+  on eligibility, enabled/disabled, or anything else. "Voting" (the contributor loop,
+  `TotalReplicas`) only ever touches Demand and PRC, and only eligible analyzers vote there.
+  Sat-fallback is the one exception, and only for the case "sat is disabled but still has a
+  valid (non-nil/non-error) result" — never a generic "nobody else contributed" catch-all (see
+  §2.1(c)'s second correction). Two related, not-yet-addressed gaps the user flagged for later,
+  not for this task: (1) scale-from-zero reuses the PRC field as a fallback value for the case
+  where PRC cannot be measured (no existing replicas); (2) `ReplicaCount(SO)` should ideally be
+  a "goodput" replica count for a more accurate current-supply figure, but only the throughput
+  analyzer provides that today — every other analyzer, including sat, gives the cruder raw
+  ready count (this is the same gap as §2.8's known accepted gap, restated from the analyzer
+  side rather than the composite side).
 - A demand unit canonical **across models**, not just across analyzers within one model —
   `D_sat` is a stand-in, not the destination (see §5.3).
 - `query_api.go`'s rounding-function naming/duplication — tracked in
