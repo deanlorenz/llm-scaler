@@ -259,6 +259,27 @@ STATE.md/code-review-notes.md updates) committed. `spec.md`/`task-coder-composit
 explicitly NOT re-synced yet — still reflect an earlier version, flagged in both the commit
 message and the redesign doc's own §3.
 
+## Coder task file fully rewritten (2026-09-14, later same session)
+
+User: prior task file was too verbose, left too many decisions to the coder (naming,
+caller-counting, "flag it in your ledger" escapes), told the coder to read the whole spec.
+Rewrote completely: every function signature, file destination, struct/switch shape spelled out
+concretely against redesign-doc §2; coder now reads ONLY §2, not spec.md, not the rest of the
+redesign doc. Committed (`0f62b66c`).
+
+Also added, per user request: `user.in` progress-reporting (per `conventions/agentbus.md`'s
+Status & Progress Notifications section) — coder publishes a note after each step, on
+getting stuck, and on completion, in addition to normal `Out:` reporting. Committed (`2a9344e4`).
+
+## Session ending — user /clear-ing, STATE.md brought current
+
+Updated STATE.md's Task/Execution/Status/Orientation sections to reflect the true current
+state: `spec.md` flagged stale (never re-synced after several corrections), redesign doc §2
+is the authoritative spec, task file is coder-ready with no open naming decisions, ledger
+line fixed (was claiming "none active" while one WAS active), session log's 2026-09-12 entry
+corrected from status=active to status=retired, new 2026-09-14 entry added.
+
 ## Next
-Wait for user's review of the recovered/restructured doc before re-syncing spec.md/the coder
-task file.
+None — session ending. A new session should read STATE.md fresh, then
+`composite-signal-redesign.md` §2 and `task-coder-composite-redesign.md` directly (both short).
+The one live decision point: whether to dispatch the coder task now.
