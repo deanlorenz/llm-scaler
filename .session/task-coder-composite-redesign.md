@@ -13,6 +13,12 @@
   choosing between two options, stop and ask; do not pick one yourself.
 - **Do not:** touch `internal/engines/allocation/multi_backup/`; push or open a PR; change any
   formula (§2.7); read `spec.md` or `composite-signal-redesign.md` beyond its §2.
+- **Progress reporting to the user, in addition to your normal `Out:` channel:** after
+  completing each numbered step below, publish a short status note directly to the human user:
+  `agentbus_publish(topic="user.in", from_session="<your slug>", kind="note", body="step N done: <one line>")`.
+  This is non-blocking, additive, and does not replace anything you already report on `Out:` —
+  per `conventions/agentbus.md`'s "Status & Progress Notifications (user.in)". Also publish one
+  on genuinely blocked/stuck, and one final note on completion or on stopping to ask a question.
 
 ## Files this task touches
 
