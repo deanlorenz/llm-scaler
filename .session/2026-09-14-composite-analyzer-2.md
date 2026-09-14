@@ -249,3 +249,52 @@ of a two-line comment.
 Committed as `15730796`. Sent to `coder-redesign` as one combined instruction (fallback gate +
 `hasSaturationResult` removal) rather than two separate messages, since both land in the same
 area it's already mid-edit on.
+
+## Fourth invocation reports "task complete" — verified independently before accepting
+
+Coder reported: all 10 steps done, `bff67c6f` (rewrite, 16 files, +751/-860) + `6eb92892`
+(coder's own ledger), `go build`/`go vet` clean, `make test` 321/321 in `allocation` + full
+`steadystate` green, both non-negotiable regression guards "confirmed by name," `hasSaturationResult`
+deleted, three real blockers surfaced/resolved via escalation (none guessed at) plus a completeness-
+check finding (several `Skip()`-marked tests citing the pre-redesign commit `e743f084`/`f5283e2a`
+that look safe to un-skip but are outside this task's file table — correctly flagged, not touched).
+
+**Did not accept the report at face value — verified independently, per `coder-orchestration.md`
+rule 10** (mission owner verifies completion state; does not re-run tests as a substitute for a
+reviewer, but does check before accepting a coder's own claim):
+- `git status --short`: clean except the pre-existing untracked scratch HTML.
+- `go build ./...`: clean.
+- Force-reran (`-count=1`, not cache) `steadystate`/`allocation`/`domain`/`aggregation`: all `ok`.
+- Confirmed via grep: `HasUsableCompositeSignal`, `ResolveSO`, `type SODecision` — zero references
+  left anywhere. `hasSaturationResult` as a function — zero (only historical comments in two
+  test files referencing the old name, which is fine/expected, not a straggler).
+- Noticed two `go vet`-adjacent linter hints on `composite.go` (`tautological condition: non-nil
+  != nil`, lines 77/164) — checked: `sourceVC := &sat.Result.VariantCapacities[i]` is an address
+  of a slice element, can never be nil, so both `if sourceVC != nil` guards are vestigial (harmless,
+  not a bug, minor cleanup opportunity — not blocking, not raised to the coder).
+
+**Found one real gap between the task file's stated requirement and actual coverage** (not a
+functional bug — checked the math, confirmed the identity holds algebraically): the task file's
+verification section required the sat-only PRC identity to be tested end-to-end under BOTH
+`DecisionSingle` and `DecisionSatFallback`. `composite_test.go`'s existing "sat-only regression"
+test only exercises `DecisionSingle` (via `satOnlyEngine`, sat enabled + sole analyzer) through
+`collectV2ModelRequest` and asserts the real `PerReplicaCapacity` field. The `DecisionSatFallback`
+path is only tested at the lower `resolveSOForTest`/`TotalReplicas` level in
+`composite_decision_test.go` — decision-path correctness and `TotalReplicas`'s value, not
+`buildComposite`'s actual PRC assignment. Traced why the identity still holds mathematically
+(`CompositeTotalReplicas = TotalReplicas(sat) = D_sat[role]/PRC_sat` under fallback, so
+`PRC_com` reduces to `PRC_sat` exactly) before deciding this was a coverage gap, not a live bug —
+did not raise it as if it were a correctness risk when it isn't one.
+
+Sent back to `coder-redesign` rather than accepting completion or fixing it myself: add one
+end-to-end test mirroring the existing sat-only regression test, but with sat disabled and
+fallback firing, asserting the real `PerReplicaCapacity` field against baseline. Small, well-
+scoped, same file, same pattern already established — appropriate to ask the coder for rather
+than treat as a blocking redesign question or patch myself.
+
+**Not yet accepting the mission's v9 implementation as complete.** Holding until this last test
+lands and `make test` passes with it included. The two out-of-scope findings the coder flagged
+(skippable tests citing the old pre-redesign reason; `greedy_score_optimizer_test.go`'s pre-
+existing, already-documented `fairShareValue`/Score gap) are correctly left untouched — noted
+here for STATE, not actioned, since they're outside this task's file table and the coder was
+right not to silently fix or silently ignore them.
