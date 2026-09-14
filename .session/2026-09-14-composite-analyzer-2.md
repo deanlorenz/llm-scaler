@@ -71,3 +71,69 @@ has an active coder. No second coder here until it reports done.
 
 Per same-worktree async: while the coder runs, I must not edit code in this worktree. STATE and
 this ledger are mine and stay editable.
+
+## First `coder-redesign` invocation — stopped at step 1/10, blocked
+
+Task notification arrived: coder stopped after applying step 1 only (uncommitted,
+`engine_v2.go` — `eligibleAnalyzers`/`excludeByName`, matches task file exactly, verified by
+diff). Two real ambiguities found, both genuine, not coder laziness:
+
+- **Q1:** `ResolveSO`/`SODecision`'s only non-test caller (`composite.go:57`) is the exact line
+  step 5's inline switch replaces. Task file's file-table said "rewritten" but no step gives a
+  rewritten shape. Verified: confirmed by grep, only caller.
+- **Q2 (load-bearing):** step 5's contributor loop as written checked only per-SO
+  presence+Reason — never `nr.Live`. Today's `ResolveSO` gates every candidate through
+  `allocation.eligible()` = `Result!=nil && ResultIsInformative && Live`
+  (`composite_eligibility.go:18`). Taken literally, step 5 would let a **stale analyzer
+  contribute** — a real behavior change from v8, contradicting redesign §1's own "same
+  underlying math as v8" claim, and contradicted by existing `composite_eligibility_test.go`
+  coverage. Verified independently against the code before taking this to the user — confirmed
+  genuine, not a misread.
+
+Coder escalated via `Out:` (seq 138), `user.in` note (seq 139), a 30-min blocking
+`agentbus_ask_user`, and a 10-min monitor — none reached me; I was not polling `In:` at the
+time. Left the tree in a safe, uncommitted, documented state. Full detail in its own ledger,
+`.session/coder-redesign-ledger.md` (not mine to edit).
+
+**Process problem, caught by the user, not by me:** the coder used `agentbus_ask_user` /
+`user.in` to put its coding-ambiguity question directly to the human user. The user's original
+instruction was to receive `user.in` **notifications** only — one-way status, never a question
+requiring their decision. Asking the user to arbitrate a coding/design gap goes over the
+mission owner's head; that decision belongs to me (escalate to the user only if I judge it
+needs their input — which, for Q1/Q2, I did). Root cause: the task file's "stop and ask" bullet
+said "ask" without naming the mission owner as the sole recipient, and never said which
+channels were off-limits for this purpose. Fixed in the task file (Orientation bullet + the
+closing "if something is wrong or ambiguous" section): coding/design questions go to the
+mission owner's `Out:` reads only, `agentbus_ask_user`/`user.in`-as-a-question are now
+explicitly disallowed, and the coder is told not to hold a blocking wait open — post, log, stop
+cleanly, let the owner read `Out:` asynchronously.
+
+## User rulings (via AskUserQuestion)
+
+- Q2: **keep the `Eligible`/`Live` gate** — recommended option, matches v8 behavior, matches
+  existing test coverage.
+- Q1: **delete `ResolveSO`/`SODecision`** — recommended option, step 5 fully absorbs their logic.
+
+## Fixes applied before relaunch
+
+- `.session/composite-signal-redesign.md`: §2.1(b) restores the eligibility gate as (i), with a
+  dated correction note explaining what was wrong and why; §2.9 gained a new regression guard
+  ("stale analyzer never contributes"); §2.1's "deleted, not relocated" list now names
+  `ResolveSO`/`SODecision` explicitly.
+- `.session/task-coder-composite-redesign.md`:
+  - File table: `composite_decision.go` row now says `ResolveSO`/`SODecision` deleted, not
+    rewritten.
+  - Step 3: explicit instruction to delete both and port `composite_decision_test.go`'s
+    existing cases to the new inline logic, not drop them.
+  - Step 5: added an explicit sub-step to export `eligible` → `Eligible` (pure rename,
+    `composite_eligibility.go` + its test file) and call it as the contributor loop's first
+    gate, with a comment distinguishing this per-analyzer gate from the per-SO Reason check
+    below it.
+  - Orientation bullet + closing section: escalation routing fixed per the process problem
+    above.
+- Did NOT touch the already-applied, uncommitted step 1 change in `engine_v2.go` — verified
+  unaffected by any of the above (it's upstream of and untouched by steps 3/5's fixes).
+
+Next: commit these three files, then relaunch `coder-redesign` (same slug, same channels,
+same worktree/branch — this is a continuation, not a fresh dispatch) from step 2 onward. Step
+1's tree state carries forward as-is.

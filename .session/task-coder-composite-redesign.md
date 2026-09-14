@@ -10,7 +10,11 @@
   `git branch --show-current` reports `composite-analyzer`. Stop and report if not.
 - **Role / scope:** coder. Implement exactly the checklist below, in order. Every name, every
   signature, every file destination is decided in this task file — if you find yourself
-  choosing between two options, stop and ask; do not pick one yourself.
+  choosing between two options, stop and ask **the mission owner** (see "If something in this
+  task file is wrong or ambiguous" below for exactly how); do not pick one yourself, and do not
+  escalate a coding/design question to the human user directly (no `agentbus_ask_user`, no
+  `user.in` question) — the mission owner is the one who decides whether a question needs the
+  user at all.
 - **Do not:** touch `internal/engines/allocation/multi_backup/`; push or open a PR; change any
   formula (§2.7); read `spec.md` or `composite-signal-redesign.md` beyond its §2.
 - **Agentbus channels** (per `conventions/agentbus.md` — subscribe to `In:` before starting any
@@ -37,7 +41,7 @@
 | File | What happens to it |
 |---|---|
 | `internal/engines/steadystate/composite.go` | `buildComposite` rewritten. Gains the inlined PRC computation, `AggN`'s replacement, the new logging. |
-| `internal/engines/allocation/composite_decision.go` | `ResolveSO` rewritten. Decision-path constants become a typed enum here. |
+| `internal/engines/allocation/composite_decision.go` | `ResolveSO` and `SODecision` **deleted** (step 3) — step 5's inline loop in `composite.go` fully absorbs their logic; there is no rewritten replacement in this file. `TotalReplicas` added (step 3). Decision-path constants become a typed enum (step 7). |
 | `internal/engines/aggregation/replicas_needed.go` | Deleted. Its logic moves into `composite_decision.go` (see step 3). |
 | `internal/engines/aggregation/prc_com.go` | Deleted. Its logic is inlined into `composite.go` (see step 5). |
 | `internal/engines/allocation/composite_signal_gate.go` | `HasUsableCompositeSignal` replaced by two functions (see step 7). |
@@ -73,9 +77,18 @@ func buildComposite(ctx context.Context, namedResults, eligibleAnalyzers []alloc
 ```
 `namedResults` is still used to find sat (identity source, step 4) and for `maxScore` (unchanged). `eligibleAnalyzers` is the new parameter, used only in step 5's contributor collection.
 
-## Step 3 — `TotalReplicas`, in `composite_decision.go`
+## Step 3 — `TotalReplicas`, in `composite_decision.go`; delete `ResolveSO`/`SODecision`
 
 Delete `internal/engines/aggregation/replicas_needed.go` entirely (`AggN`, `replicasNeeded`, `variantCapacity`, `roleOf` — all four functions, no trace kept).
+
+Also delete `ResolveSO` and `SODecision` from `composite_decision.go`. Their only non-test
+caller today (`composite.go:57`) is the exact call site step 5's inline contributor loop
+replaces; step 5's `switch` fully absorbs `ResolveSO`'s decision logic. There is no rewritten
+version of either — do not keep them as a parallel/unused implementation. Port
+`composite_decision_test.go`'s existing `ResolveSO`/`SODecision` cases to exercise the new
+inline logic instead (via `TotalReplicas` plus a small test-only helper that runs step 5's
+`switch` logic if you need to test the switch in isolation from `buildComposite`) — do not
+drop coverage silently.
 
 Add to `composite_decision.go`:
 
@@ -117,6 +130,14 @@ canonicalization (step 3's `TotalReplicas`) calls `steadystate.roleOfVC` — exp
 
 ## Step 5 — `CompositeTotalReplicas` and inlined PRC, in `composite.go`
 
+**First, export `eligible` as `Eligible`** in `internal/engines/allocation/composite_eligibility.go`
+(rename only — capitalize the func name, keep its body and doc comment unchanged) so
+`steadystate.buildComposite` can call it as `allocation.Eligible(e)`. Update
+`composite_eligibility_test.go`'s calls from `eligible(nr)` to `Eligible(nr)` (still same-package,
+still exercises the same logic — this is a pure rename, not a behavior change). This gate is
+NOT new: it is today's existing `ResolveSO`/`eligible()` pairing, carried forward unchanged so a
+stale/uninformative/nil-Result analyzer still cannot contribute — see the contributor loop below.
+
 Inside `buildComposite`'s per-SO loop (iterating `sat.Result.VariantCapacities` — this part is
 unchanged from today's code):
 
@@ -127,6 +148,13 @@ type contribution struct {
 }
 var contributors []contribution
 for _, e := range eligibleAnalyzers {
+    if !allocation.Eligible(e) {
+        // Stale, uninformative, or nil-Result analyzers contribute to nothing —
+        // unchanged from today's ResolveSO/eligible() pairing (redesign §2.1(b)(i)).
+        // This is a per-analyzer gate, checked once per analyzer per SO here; it is
+        // NOT the same thing as the per-SO Reason check below, which is per-contribution.
+        continue
+    }
     evc, present := findVariantCapacity(e.Result, vc.VariantName)  // new tiny helper, see below
     if !present || evc.Reason == allocation.ReasonNoData || evc.Reason == allocation.ReasonError {
         continue
@@ -285,5 +313,18 @@ from sat, unconditional" — today's existing line), add:
 
 ## If something in this task file is wrong or ambiguous
 
-Stop and ask the mission owner. Do not choose a name, a file location, or a function signature
-that isn't already given above.
+Stop and ask the mission owner — **on your `Out:` channel** (`composite-analyzer.coder-redesign`),
+as a normal message, exactly like any other status/finding you report there. Do not use
+`agentbus_ask_user` and do not post the question to `user.in` — those reach the human user
+directly, bypassing the mission owner, who is the one who decides whether a coding/design
+question needs the user's input at all. This applies to every kind of ambiguity: a name, a file
+location, a function signature, or a gap in the spec itself (as opposed to just this task file)
+that isn't already resolved above.
+
+After posting to `Out:`, do not hold the connection open waiting for a synchronous reply (no
+long blocking wait, no repeated polling loop). Post the question, note in your ledger exactly
+what you're blocked on and why, and stop cleanly — leave the tree in the safe, uncommitted state
+you were in when you hit the ambiguity (see per-step guidance above for what "safe" means; when
+in doubt, do not commit a change that depends on the unresolved answer). The mission owner reads
+`Out:` asynchronously and will either answer there or relaunch you with an updated task file —
+either way, you do not need to still be running for that to reach you.

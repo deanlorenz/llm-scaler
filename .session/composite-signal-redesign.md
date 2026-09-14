@@ -35,9 +35,15 @@ collectV2ModelRequest                                 [engine_v2.go:777]
              WarmPoolPerReplicaCapacity, TotalDemand from sat — unconditional
              (this copy is UNCONDITIONAL and happens even if sat was excluded
              from eligibleAnalyzers above — identity role, never gated)
-          b. contributors := every analyzer in eligibleAnalyzers where, for THIS SO:
-               (i) the SO is present in that analyzer's own VariantCapacities, AND
-               (ii) Reason for it is not ReasonNoData/ReasonError
+          b. contributors := every analyzer in eligibleAnalyzers where:
+               (i) the analyzer itself is eligible — `allocation.eligible()`'s existing
+                   gate (Result != nil && ResultIsInformative && Live), UNCHANGED from
+                   today — a stale or uninformative analyzer contributes to nothing,
+                   exactly as it does not today (this is the gate the v8 ResolveSO/
+                   eligible() pairing already enforced; the redesign does not loosen it
+                   — see the correction note below), AND, for THIS SO:
+               (ii) the SO is present in that analyzer's own VariantCapacities, AND
+               (iii) Reason for it is not ReasonNoData/ReasonError
              (no analyzer name is ever tested here — sat already got resolved into
              or out of eligibleAnalyzers upstream; this loop cannot tell sat apart
              from any other analyzer)
@@ -69,7 +75,21 @@ Deleted, not relocated: `findSaturation`, `unionOfVariants`,
 `representativeVariantCapacity`'s fallback branch, `AggN` called on a 1-element slice, the
 `if e.Name == sat` branch inside collection (replaced by the one-time upstream resolution at
 `eligibleAnalyzers` — sat's name is checked ONCE, before compose, never inside the per-SO
-collection loop).
+collection loop), and `ResolveSO`/`SODecision` (`composite_decision.go`) — their only caller was
+the line this section's contributor loop replaces; step (b)(i)-(iii) above fully absorbs their
+logic inline. Not kept as a parallel implementation. Existing `composite_decision_test.go`
+cases port to the new inline logic (via `TotalReplicas`, §2.3), not dropped.
+
+**Correction (2026-09-14, caught during first dispatch attempt):** an earlier pass at this
+section wrote (b) as only (ii)+(iii) above, omitting the `eligible()`/`Live` gate entirely.
+That would have let a stale analyzer contribute to `CompositeTotalReplicas` — a real behavior
+change from v8, contradicting this doc's own §1 claim ("same underlying math as v8") and the
+existing `composite_eligibility_test.go` coverage. The dispatched coder caught this itself,
+correctly refused to guess, and escalated rather than silently keeping or dropping the gate.
+User ruling: keep the gate. `eligible()` (`composite_eligibility.go:18`, currently package-private
+in `allocation`) must be reachable from `buildComposite` in `steadystate` — export it as
+`Eligible` (capitalize; same pattern as `RoleOfVC`'s export in §2.3/§2.4 area) rather than
+duplicating its three-condition check inline.
 
 ### 2.2 Naming
 
@@ -137,6 +157,9 @@ usefully serving. Accepted for now; flag with a comment where it feeds Supply.
   sat's own PRC. Must hold for BOTH `single` (sat enabled) and `sat-fallback` (sat disabled,
   nothing else contributed) — test both.
 - **Score has no effect**: `maxScore` unchanged, not touched by this task.
+- **Stale analyzer never contributes**: an analyzer failing `Eligible()` (not `Live`, or not
+  informative, or nil `Result`) must not appear in `contributors` for any SO, regardless of
+  what its per-SO `Reason` says — test with an otherwise-qualifying analyzer marked `!Live`.
 
 ### 2.10 Completeness check
 
