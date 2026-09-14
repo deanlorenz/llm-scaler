@@ -88,7 +88,7 @@ existing `composite_eligibility_test.go` coverage. The dispatched coder caught t
 correctly refused to guess, and escalated rather than silently keeping or dropping the gate.
 User ruling: keep the gate. `eligible()` (`composite_eligibility.go:18`, currently package-private
 in `allocation`) must be reachable from `buildComposite` in `steadystate` — export it as
-`Eligible` (capitalize; same pattern as `RoleOfVC`'s export in §2.3/§2.4 area) rather than
+`Eligible` (capitalize) rather than
 duplicating its three-condition check inline.
 
 ### 2.2 Naming
@@ -110,8 +110,21 @@ not a shared package.
 - `replicasNeeded`, `variantCapacity`, `roleOf` (aggregation package private helpers) → move
   with whichever function absorbs their only caller.
 - `DemandForRole` → stays in `aggregation` (3 callers).
-- `roleOf`/`roleOfVC`/`AggregateByRole`'s inline duplicate → unify into one function; place
-  per the same single-caller rule, counted against the call graph AFTER this rewrite lands.
+- `roleOf`/`roleOfVC`/`AggregateByRole`'s inline duplicate → unify into one function,
+  `domain.RoleOfVC` (see correction below) — NOT `steadystate.RoleOfVC` as an earlier pass at
+  this section said. `AggregateByRole`'s 2-line inline copy stays as-is (not worth a
+  cross-package call for something that small); everywhere else calls `domain.RoleOfVC`.
+
+**Correction (2026-09-14, caught by the coder during implementation, verified by `go build`):**
+this section originally placed the unified role-canonicalization function in `steadystate`
+(`steadystate.RoleOfVC`), reasoning from the single-caller rule as if `steadystate` were just
+another package. It is not: `steadystate` already imports `allocation` in three files
+(`composite.go`, `engine_v2.go`, `engine.go`), and `allocation.TotalReplicas` (§2.4/step 3)
+needs to call the role function too — `allocation` importing `steadystate` would be a
+compile-time import cycle. `domain` is the correct home: both packages already import it
+cleanly, it already owns `VariantCapacity` (the function's only parameter) and `RoleBoth`, and
+it has no reverse dependency on either package. This is a placement fix only — the function's
+logic (canonicalize empty role to `RoleBoth`) is unchanged.
 
 ### 2.4 Signatures
 

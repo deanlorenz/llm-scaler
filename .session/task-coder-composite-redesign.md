@@ -40,13 +40,15 @@
 
 | File | What happens to it |
 |---|---|
-| `internal/engines/steadystate/composite.go` | `buildComposite` rewritten. Gains the inlined PRC computation, `AggN`'s replacement, the new logging. |
+| `internal/engines/steadystate/composite.go` | `buildComposite` rewritten. Gains the inlined PRC computation, `AggN`'s replacement, the new logging (step 9), the Ready-vs-serving comment (step 10). Loses its private `roleOfVC`/`RoleOfVC` (moved to `domain`, step 4). |
 | `internal/engines/allocation/composite_decision.go` | `ResolveSO` and `SODecision` **deleted** (step 3) — step 5's inline loop in `composite.go` fully absorbs their logic; there is no rewritten replacement in this file. `TotalReplicas` added (step 3). Decision-path constants become a typed enum (step 7). |
+| `internal/engines/allocation/composite_eligibility.go` (+ its test file) | `eligible` exported as `Eligible` — pure rename, no behavior change (step 5). |
+| `internal/domain/role.go` (new file, or an existing small `domain` file — your choice) | `RoleOfVC` added — the one shared role-canonicalization function, moved here (not `steadystate`, to avoid an import cycle — see step 4). |
 | `internal/engines/aggregation/replicas_needed.go` | Deleted. Its logic moves into `composite_decision.go` (see step 3). |
 | `internal/engines/aggregation/prc_com.go` | Deleted. Its logic is inlined into `composite.go` (see step 5). |
-| `internal/engines/allocation/composite_signal_gate.go` | `HasUsableCompositeSignal` replaced by two functions (see step 7). |
-| `internal/engines/steadystate/engine_v2.go` | One new line before the `buildComposite` call (step 1); one new log call (step 6); two call sites updated (step 7). |
-| `internal/engines/allocation/engine.go` | One call site updated (step 7). |
+| `internal/engines/allocation/composite_signal_gate.go` | `HasUsableCompositeSignal` replaced by two functions (see step 8). |
+| `internal/engines/steadystate/engine_v2.go` | One new line before the `buildComposite` call (step 1); one new log call (step 9); one call site updated (step 8). |
+| `internal/engines/allocation/engine.go` | One call site updated (step 8). |
 
 ## Step 1 — resolve `eligibleAnalyzers` before compose
 
@@ -108,25 +110,34 @@ sat's own list; do not make this function search for it again.
 Body: port `replicasNeeded`'s existing logic from the deleted file (division, the
 `PerReplicaCapacity <= 0` guard, the "role's demand not present at all" guard), adapted to take
 `vc` directly instead of looking it up via `variantCapacity(result, variant)`. Use
-`aggregation.DemandForRole(result, roleOf(vc))` for the demand lookup — `DemandForRole` stays
-in the `aggregation` package (still 3 callers after this change: `prc_com.go`'s callers plus
-this one — recount to confirm before assuming, but do not move it without confirming first).
+`aggregation.DemandForRole(result, domain.RoleOfVC(vc))` for the demand lookup (see step 4 for
+where `RoleOfVC` now lives) — `DemandForRole` stays in the `aggregation` package (still 3
+callers after this change: `prc_com.go`'s callers plus this one — recount to confirm before
+assuming, but do not move it without confirming first).
 
-`roleOf` (canonicalizes an empty role to `domain.RoleBoth`) — see step 4 for where this lives
-now; call that shared version here, do not write a second copy.
-
-## Step 4 — one shared `roleOf`
+## Step 4 — one shared role-canonicalization function, in `domain`
 
 Today there are three copies of the same logic: `aggregation.roleOf` (private,
 `replicas_needed.go` — being deleted in step 3), `steadystate.roleOfVC` (private,
 `composite.go:248`), and an inline duplicate inside `aggregation.AggregateByRole`
 (`aggregation.go:117-119`).
 
-Keep exactly one: `steadystate.roleOfVC` in `composite.go`. Delete `aggregation.roleOf` (it
-goes away with step 3's file deletion). Leave `AggregateByRole`'s inline copy as-is — it is a
-2-line loop body, not worth a cross-package call for. Anywhere else that needs role
-canonicalization (step 3's `TotalReplicas`) calls `steadystate.roleOfVC` — export it as
-`RoleOfVC` (capitalize) so `allocation`/`aggregation` packages can call it.
+**Do NOT place the unified function in `steadystate`** — `steadystate` already imports
+`allocation` (three files: `composite.go`, `engine_v2.go`, `engine.go`), and step 3's
+`TotalReplicas` lives in `allocation` and needs to call this function too. `allocation`
+importing `steadystate` would be a compile-time import cycle.
+
+Keep exactly one: add `RoleOfVC(vc domain.VariantCapacity) string` to the `domain` package
+(new file `internal/domain/role.go`, or add to an existing small file in `domain` if one fits
+better — your choice, this is a same-package file-organization detail, not a placement
+decision). Body: canonicalize an empty `vc.Role` to `domain.RoleBoth`, otherwise return
+`vc.Role` unchanged (port the existing `roleOfVC`/`roleOf` logic verbatim — no behavior
+change). Delete `aggregation.roleOf` (goes away with step 3's file deletion) and
+`steadystate.roleOfVC`/`RoleOfVC` from `composite.go` (replaced by `domain.RoleOfVC` — update
+`composite.go`'s call sites, step 5's `roleOfVC(vc)` becomes `domain.RoleOfVC(vc)`). Leave
+`AggregateByRole`'s inline copy as-is — it is a 2-line loop body, not worth a cross-package
+call for. Anywhere else that needs role canonicalization (step 3's `TotalReplicas`, step 5's
+PRC line, step 6's `demandByRole` construction) calls `domain.RoleOfVC`.
 
 ## Step 5 — `CompositeTotalReplicas` and inlined PRC, in `composite.go`
 
@@ -198,7 +209,7 @@ Then, still inside the loop, PRC (do NOT write a separate `PRCCom`-equivalent fu
 
 ```go
 if compositeTotalReplicas > 0 {
-    vc.PerReplicaCapacity = demandByRole[roleOfVC(vc)] / compositeTotalReplicas
+    vc.PerReplicaCapacity = demandByRole[domain.RoleOfVC(vc)] / compositeTotalReplicas
 } else if sourceVC != nil {
     vc.PerReplicaCapacity = sourceVC.PerReplicaCapacity  // existing fallback, unchanged
 }
@@ -217,10 +228,10 @@ for _, role := range rolesPresent(sat.Result.VariantCapacities) {  // existing h
     demandByRole[role] = d
 }
 ```
-Then step 5's PRC line reads `demandByRole[roleOfVC(vc)]` instead of calling
+Then step 5's PRC line reads `demandByRole[domain.RoleOfVC(vc)]` instead of calling
 `aggregation.DemandForRole` fresh for every SO. If no existing helper enumerates the distinct
 roles in a `[]VariantCapacity`, write `rolesPresent` as a small private helper in `composite.go`
-(dedupe by `roleOfVC`).
+(dedupe by `domain.RoleOfVC`).
 
 ## Step 7 — decision-path type
 
