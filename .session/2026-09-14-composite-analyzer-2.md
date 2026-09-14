@@ -480,3 +480,30 @@ with document overflow, WHAT/WHY-before/bottom-line-after on tool calls) from th
 (2) Two separate corrections on using exactly one `📋 Summary` block per reply, not two (an
 opening reaction-summary plus an unlabeled closing next-steps list) — fixed after the second
 instance was pointed out.
+
+## Verified 2026-09-14
+
+Ran the `ledger-capture` contract against this ledger. Read the full ledger, then cross-checked
+every correction/incident/decision against `.session/STATE.md`, `.session/composite-signal-
+redesign.md` (§§2-8), `.session/task-coder-composite-redesign.md`,
+`.session/drafts/2026-09-14-spec-review-response.md`, and
+`session-tracking/suggestion-box/2026-09-14-2200-composite-analyzer.md`. Verified the ledger's
+narrative was captured elsewhere — did not re-verify factual correctness against the codebase
+(out of scope for this contract; already done during the session).
+
+**All points found already captured. No gaps found; nothing written to STATE.md, the spec doc,
+or the task file.**
+
+| Ledger point | Durable destination | Action taken |
+|---|---|---|
+| Incident 1 — eligibility gate omitted, coder caught before writing code | spec §7.2 "Incident 1", §5 abstract, §6 D2 | None needed |
+| Incident 2 — sat-fallback missing `Eligible(sat)` gate, caught by failing ported test | spec §7.2 "Incident 2", §5 abstract, §6 D3; regression guard codified in §2.9 | None needed |
+| Incident 3 — import cycle, `RoleOfVC` almost placed in `steadystate` | spec §7.2 "Incident 3", §5 abstract, §6 D6 | None needed |
+| Incident 4 — pre-existing sat-named-threshold bug at `buildComposite` call site | spec §7.2 "Incident 4", §6 D4; STATE.md "Last completed"/checklist item | None needed |
+| `hasSaturationResult` removal | spec §2.6, §5 abstract, §6 D5; STATE.md checklist item | None needed |
+| `DecisionSingle`/`DecisionSatFallback` coverage mislabel, closed by coder's added test | spec §2.9 (both paths named as required regression guards); STATE.md "Last completed" bullet | None needed |
+| Template-redesign discussion + new coder-design-validation process rule (D7) | STATE.md "Last completed" narrative (root-caused paragraph + new process rule bullet) and Next-step item 3; spec §6 D7 (points back to this ledger, appropriately, since D7 is a process rule tied to this session) | None needed |
+| Pending fixes list (round-2 spec review) | Ledger "Not yet done" closing paragraph; STATE.md Task section pending-fixes bullets; `.session/drafts/2026-09-14-spec-review-response.md` edit-plan table — all three agree, no drift | None needed |
+| Suggestion-box post reference | Ledger (final entry) and STATE.md ("Last completed" bullet) both reference `session-tracking/suggestion-box/2026-09-14-2200-composite-analyzer.md` | None needed |
+| Process-problem fix (coder must not use `agentbus_ask_user`/`user.in` for design questions) | Task file's Orientation bullet + closing "if something is wrong" section (per ledger's own account of the fix being applied there) | None needed |
+| Wind-down safety-net chat-format corrections (chat-preferences.md read late; one-Summary-block rule) | STATE.md "Last completed" bullet ("had not read `conventions/chat-preferences.md`...") captures the substance; full narrative remains in ledger only, which is appropriate for a chat-format process note with no separate durable-doc home needed | None needed — narrative-only item, correctly ledger-scoped |
