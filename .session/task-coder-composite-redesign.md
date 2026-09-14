@@ -13,6 +13,18 @@
   choosing between two options, stop and ask; do not pick one yourself.
 - **Do not:** touch `internal/engines/allocation/multi_backup/`; push or open a PR; change any
   formula (§2.7); read `spec.md` or `composite-signal-redesign.md` beyond its §2.
+- **Agentbus channels** (per `conventions/agentbus.md` — subscribe to `In:` before starting any
+  work, and stay subscribed until you exit):
+  - **In:** `composite-analyzer.coder-redesign.in`
+  - **Out:** `composite-analyzer.coder-redesign`
+  - **Announce:** `mission.composite-analyzer`
+  - Subscribe with:
+    `agentbus_subscribe(topic="composite-analyzer.coder-redesign.in", session_id="coder-redesign")`
+  - Announce presence on startup:
+    `agentbus_publish(topic="mission.composite-analyzer", from_session="coder-redesign", kind="announce", body="session=coder-redesign role=coder online. in=composite-analyzer.coder-redesign.in out=composite-analyzer.coder-redesign")`
+  - Publish status, findings, questions, and your final result to `Out:`. If the mission owner
+    asks anything on `In:`, answer on `Out:` before continuing. Publish the final result to
+    `Out:` before exiting.
 - **Progress reporting to the user, in addition to your normal `Out:` channel:** after
   completing each numbered step below, publish a short status note directly to the human user:
   `agentbus_publish(topic="user.in", from_session="<your slug>", kind="note", body="step N done: <one line>")`.
