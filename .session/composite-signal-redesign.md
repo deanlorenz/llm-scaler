@@ -28,7 +28,12 @@ collectV2ModelRequest                                 [engine_v2.go:777]
       → returns namedResults (sat first, always present; others per-enabled)
   → eligibleAnalyzers := namedResults, minus sat if !config.AnalyzerEnabled(sat)
       (resolved ONCE, here, before compose — not inside the per-SO loop)
-  → buildComposite(ctx, namedResults, eligibleAnalyzers, satUp, satDown)   [:818 → composite.go]
+  → buildComposite(ctx, namedResults, eligibleAnalyzers,
+                    config.ScaleUpThreshold, config.ScaleDownBoundary)   [:818 → composite.go]
+      (the POLICY's own default thresholds — NOT satUp/satDown from
+       config.AnalyzerThresholds(sat); that call named sat outside compose,
+       which is exactly the "sat-specific code outside of compose" this
+       redesign forbids — corrected 2026-09-14, caught by the user)
       → iterate sat.Result.VariantCapacities directly  (no union, no fallback)
       → per SO (sat's own variant, its model+role):
           a. copy ReplicaCount, PendingReplicas, WarmPoolReplicas,
@@ -65,11 +70,13 @@ collectV2ModelRequest                                 [engine_v2.go:777]
 ```
 
 `config` needed above is already in scope — `collectV2ModelRequest` already receives
-`config config.ScalingPolicy` as a parameter (`engine_v2.go:781`); today's
-`buildComposite(ctx, namedResults, satUp, satDown)` call (`:818`) just never passes it
-through. No new plumbing into `collectV2ModelRequest` itself — only the `buildComposite` call
-gains an argument (`eligibleAnalyzers`, resolved right above it from `config` already in
-scope).
+`config config.ScalingPolicy` as a parameter (`engine_v2.go:781`). No new plumbing into
+`collectV2ModelRequest` itself — only the `buildComposite` call gains an argument
+(`eligibleAnalyzers`, resolved right above it from `config` already in scope) and drops its
+existing `satUp`/`satDown` arguments in favor of `config.ScaleUpThreshold`/
+`config.ScaleDownBoundary` directly (see correction above) — the pre-existing
+`config.AnalyzerThresholds(domain.SaturationAnalyzerName)` call and its surrounding comment
+are deleted, not kept as dead code.
 
 Deleted, not relocated: `findSaturation`, `unionOfVariants`,
 `representativeVariantCapacity`'s fallback branch, `AggN` called on a 1-element slice, the

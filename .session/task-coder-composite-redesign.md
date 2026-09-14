@@ -50,16 +50,28 @@
 | `internal/engines/steadystate/engine_v2.go` | One new line before the `buildComposite` call (step 1); one new log call (step 9); one call site updated (step 8). |
 | `internal/engines/allocation/engine.go` | One call site updated (step 8). |
 
-## Step 1 — resolve `eligibleAnalyzers` before compose
+## Step 1 — resolve `eligibleAnalyzers` before compose; use policy default thresholds
 
-In `engine_v2.go`, immediately before the existing `buildComposite(ctx, namedResults, satUp, satDown)` call (currently `:818`):
+In `engine_v2.go`, the existing code (currently `:817-818`) is:
+```go
+satUp, satDown := config.AnalyzerThresholds(domain.SaturationAnalyzerName)
+composite := buildComposite(ctx, namedResults, satUp, satDown)
+```
+This names `domain.SaturationAnalyzerName` at the call site, outside `buildComposite` — the
+composite must use the policy's own default thresholds, never an analyzer-specific override,
+and never name any analyzer at this call site (**correction, 2026-09-14**: an earlier version
+of this task file kept the `satUp`/`satDown` line as-is; that was wrong — no sat-specific code
+belongs outside `buildComposite`). Delete the `AnalyzerThresholds` line and its "Saturation's
+own thresholds are the composite's too" comment above it entirely (check first that `satUp`/
+`satDown` have no other use in this function — if they do, keep the line for that other use but
+still stop passing them into `buildComposite`). Replace with:
 
 ```go
 eligibleAnalyzers := namedResults
 if !config.AnalyzerEnabled(domain.SaturationAnalyzerName) {
     eligibleAnalyzers = excludeByName(namedResults, domain.SaturationAnalyzerName)
 }
-composite := buildComposite(ctx, namedResults, eligibleAnalyzers, satUp, satDown)
+composite := buildComposite(ctx, namedResults, eligibleAnalyzers, config.ScaleUpThreshold, config.ScaleDownBoundary)
 ```
 
 `config` is already a parameter of the enclosing function (`collectV2ModelRequest`,
