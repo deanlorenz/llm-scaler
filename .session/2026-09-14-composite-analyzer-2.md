@@ -415,3 +415,56 @@ new issue, a still-standing one. Point: a long session with no realtime ledger r
 everything to an agent error or environment crash. Fix is behavioral, not a one-time catch-up
 write: append every summary or two, continuously, not batched at session boundaries or only
 when the user notices a gap. Applying from this point forward in this session.
+
+## Spec restructure applied; round-2 review; posted suggestion-box; winding down
+
+Applied the 8-section restructure (approved plan, built via scratch-file text-move + citation
+diff verification, not memory) to `composite-signal-redesign.md` — commit `37886266`. §2 kept
+its original subsection numbering (2.1-2.10) so every existing `§2.x` reference in
+`task-coder-composite-redesign.md`/`STATE.md` still resolves.
+
+User's second review round on the restructured doc, all answered with code-verified findings
+(full detail: `.session/drafts/2026-09-14-spec-review-response.md`):
+- §2.1.c `eligibleAnalyzers`→`enabledAnalyzers` rename agreed — it only filters on
+  `config.AnalyzerEnabled`, name should say so; small mechanical change, not yet applied.
+- §2.3 confirmed still fully correct against code (`AggN`/`PRCCom` verified gone, `TotalReplicas`/
+  `domain.RoleOfVC` verified at their stated locations) — my round-1 flag was about tense/
+  framing only, not a real error; corrected my own overstatement.
+- §2.6/`CompositeHasSignal`: **confirmed a real gap, not hypothetical** — `SOHasSignal` has zero
+  production callers anywhere (grepped); the actual optimizer files never read `.Reason`/
+  `DecisionPath` at all. Also verified this does NOT crash/corrupt today — a no-signal SO's PRC
+  falls through to sat's own PRC via the existing `else if sourceVC != nil` branch, and every
+  optimizer PRC consumer guards `<= 0` before dividing. So: silently-treated-as-normal, not
+  crash-risk. Left as an open design question for the user (should the optimizer consume
+  `SOHasSignal` per-SO, and do what with a no-signal one) — not something I can answer from code.
+- §2.7 TODO location: `composite_decision.go:43`'s `TotalReplicas` doc comment (code) + §2.7
+  itself (spec) — confirmed, not re-asked.
+- `engine.go` confirmed live/active (same `Engine` as `engine_v2.go`, split by function grouping,
+  not competing versions) — resolves the "is this old v1" concern directly.
+
+Updated the suggestion-box draft with the actual applied section order (caught a real mismatch:
+the original draft had §2/§3 swapped relative to what was actually applied) plus two
+tried-in-practice findings: the scratch-file/citation-diff method is safe and should be the
+stated required method for future doc restructures; the "narrate under pressure" failure mode
+recurred in miniature even after this restructure landed (in my own round-1 response text, not
+the doc) — the template fixes the doc's resting state, not an in-the-moment slip while actively
+editing.
+
+**Posted** the suggestion-box item per user instruction: copied
+`.session/drafts/suggestion-box-2026-09-14-2100.md` →
+`session-tracking/suggestion-box/2026-09-14-2200-composite-analyzer.md`. Checked for filename
+collision first (none) and did not touch any of `session-tracking`'s other uncommitted state
+(a modified `chat-preferences.md`, several other untracked suggestion-box files, an untracked
+`missions/composite-analyzer/` dir) — none of that is mine to fix or explain. Followed the
+existing pattern (9 sibling suggestion-box files there are also uncommitted) rather than
+committing on that worktree's behalf.
+
+**Not yet done, carrying into next session**: §2 wording edits (call-stack WHY-trim, §2.1.d's
+`CompositeTotalReplicas()` function-name code change, §2.3 tense fix, §2.6 wiring note, §2.7
+TODO comment, §2.8 future-direction wording, §3 blocking/non-blocking split and the query_api.go
+wording fix) — all drafted as a plan in the review-response doc, none applied to the real spec
+file yet, awaiting the user's next-session go-ahead. Two investigations also pending: re-verify
+current implementation against HEAD (quick), and the pre-single-analyzer aggregation comparison
+for testing (the user's item 7, described as potentially substantial — not started).
+
+Ending session here per user instruction ("persist for now, wind-down, fresh session later").
