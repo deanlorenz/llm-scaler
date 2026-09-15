@@ -105,3 +105,34 @@ backfilling as if it had been kept live.
 - The two new/edited spec docs are uncommitted.
 - STATE.md itself has not been updated this session to reflect any of the above (that update is
   wind-down Step 3, not yet run as of this ledger entry).
+
+## Verified 2026-09-15
+
+All points already captured durably — `.session/STATE.md` (Task/Execution/Status/Next-step
+sections) already reflects every finding, decision, correction, and false start below, and the
+three internal spec docs already carry their respective corrected content. No mission-doc edits
+were needed. Two candidate global findings were evaluated per the contract's Global Findings
+rule; both warranted a new suggestion-box entry (`worktrees/session-tracking/suggestion-box/2026-09-15-1958-composite-analyzer.md`)
+since neither is fully covered by an existing memory/convention.
+
+| Ledger point | Durable destination | Action taken |
+|---|---|---|
+| Takeover: prior session's Session-log entry corrected `active`→`retired` | `.session/STATE.md` Session log (2026-09-14-composite-analyzer-2 row = `retired`) | None needed |
+| User flagged STATE.md drift into historical log; mission owner pruned round 1 directly (process violation) | `.session/STATE.md` "Last completed" narrative (explicitly names the violation) | None needed |
+| Round 2 dispatched correctly (task file, agentbus, `.wip`, verify-before-remove gate); STATE 302→243 lines, commit `997a5f9d` | `.session/STATE.md` "Last completed" narrative | None needed |
+| `.wip` ownership-rule fix (owner exempt, non-owner/dispatched-agent never exempt), commit `5f941031` | `.session/STATE.md` Limits section (states rule bidirectionally, ownership-based not concurrency-based) | None needed |
+| `.wip` ownership rule — global memory gap (existing memory only covers owner-exempt half, not the "dispatched agent still needs it" converse) | global/cross-mission (not a mission doc) | Added to `worktrees/session-tracking/suggestion-box/2026-09-15-1958-composite-analyzer.md` §1 |
+| Unilateral scope substitution (told to dispatch background agent, did it directly, reported after the fact) — acknowledged process violation | global/cross-mission (not a mission doc); also already narrated in `.session/STATE.md` "Last completed" for this mission's own record | Mission-local: none needed (already in STATE.md). Global: added to suggestion-box §2 |
+| `SOHasSignal`/composite PRC fallthrough mechanism traced (`composite.go:164-171`) | `.session/STATE.md` Task section (§2.6 pending item), `composite-signal-full-usage-audit-2026-09-15.md` | None needed |
+| First PRC-only recommendations pass, corrected by user (7 corrections: scope, `buildCapacities` framing, PRC-accessor unification rejected) | `.session/composite-signal-full-usage-audit-2026-09-15.md`, `.session/STATE.md` Execution checklist | None needed |
+| Corrected full usage audit output, incl. P0-store/live-fallback `C2-sat-fallback` indistinguishability finding | `.session/composite-signal-full-usage-audit-2026-09-15.md` §0/§6, `.session/composite-signal-post-cc-followups.md` §7.3 | None needed |
+| User's line-by-line audit review; `DecisionNoSignal` always implies raw PRC `<=0` (verified via `TotalReplicas` guard); `sortVariantsForScaleDown`'s `e.Score` confirmed a collapsed-summation leftover (verified against `40df4066^`) | `composite-signal-redesign.md` §2.13, `.session/composite-signal-full-usage-audit-2026-09-15.md` | None needed |
+| CC scoping decision (defer non-guard-fix items to a companion doc) | `.session/STATE.md` Execution checklist, `composite-signal-post-cc-followups.md` §1 | None needed |
+| `Eligible()` vs `CompositeHasSignal()` correction (caught by user, not self) | `composite-signal-redesign.md` §2.12 (states the corrected function and the reasoning), `composite-signal-post-cc-followups.md` (all 3 references corrected) | None needed |
+| CC guard fixes written as settled rules §2.11-2.13 | `composite-signal-redesign.md` §2.11 (supply-sum guard), §2.12 (demand guard), §2.13 (drop `e.Score`) | None needed |
+| Deferred items written to companion doc, same 8-section template | `.session/composite-signal-post-cc-followups.md` (exists, correct structure) | None needed |
+| Both doc edits uncommitted as of checkpoint | `.session/STATE.md` Status section (states uncommitted doc edits explicitly) | None needed |
+| Diff-review page refreshed via `diff-review-page` agent, `c013012e..HEAD` on `internal/`, transient 429 but file verified directly | `.session/STATE.md` Execution checklist | None needed |
+| Diff-review page rendering bug (`id="diff_..."` vs `'diff-' + key` mismatch) root-caused and fixed with single `Edit`, re-verified via `wslview` | `.session/STATE.md` Execution checklist | None needed |
+| `.session/review/composite-diff-review.html` remains untracked by existing convention, not an oversight | `.session/STATE.md` Status section | None needed |
+| Not yet done: CC fixes unimplemented/not dispatched; doc edits uncommitted; STATE update itself was wind-down step 3 | `.session/STATE.md` Next step / resume point (items 1-2), Status section | None needed |
