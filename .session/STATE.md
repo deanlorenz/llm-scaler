@@ -31,38 +31,11 @@
 - **v9 implementation task:** `.session/task-coder-composite-redesign.md` — **DONE**, see Status.
   Not yet updated for the pending §2 wording/naming fixes below — do so before any future
   dispatch against it.
-- **Pending spec fixes from the user's post-implementation review, NOT YET APPLIED** (full
-  detail + code verification: `.session/drafts/2026-09-14-spec-review-response.md`):
-  - `eligibleAnalyzers` → rename to `enabledAnalyzers` (matches what it actually filters on) —
-    small, mechanical, code + doc, needs a coder task or a direct small edit.
-  - §2.1 call-stack block: trim inline WHY-prose, push reasoning to §7 pointers only.
-  - §2.1.d: `CompositeTotalReplicas` should become an actual function (currently inline in the
-    `switch`) — **real code change**, needs a coder task, not just a doc edit.
-  - §2.1.e: reword — only `D_sat[role]` (the numerator) is fetched once per role; PRC itself is
-    still computed per SO.
-  - §2.3: wording/tense fix only (confirmed still factually correct — "moves into" → "now lives
-    in").
-  - §2.6: add a line that `engine.go`/`engine_v2.go` are the same `Engine`, not two versions;
-    `CompositeHasSignal` is live, called every reconcile cycle. **Real gap found and confirmed,
-    not yet resolved as a design question:** `SOHasSignal` (per-SO check) has zero production
-    callers anywhere; the actual optimizer files never read the decision-path/Reason at all —
-    `CompositeHasSignal` passing at the whole-request level says nothing about which individual
-    SOs within it actually have signal. Verified this does NOT crash/corrupt today (a no-signal
-    SO's PRC falls through to sat's own PRC, and every optimizer PRC consumer guards `<=0`) —
-    but the optimizer cannot currently distinguish a real signal from a no-signal fallback.
-    **Open question for the user:** should the optimizer (or something upstream) consume
-    `SOHasSignal` per-SO, and if so, do what with a no-signal SO?
-  - §2.7: add a TODO comment (both in spec and on `allocation.TotalReplicas`,
-    `composite_decision.go:43`) — future work to adjust `TotalReplicas`/`N_i(SO)` by
-    per-analyzer thresholds; not this task.
-  - §2.8: add the user's exact future-direction correction (true Supply from ready-replica-count;
-    Anticipated from CurrentReplicas, not ReplicaCount+Pending) as the eventual-fix target,
-    keeping "accepted for now" framing for current behavior.
-  - §3: split into explicit Blocking / Non-blocking sub-lists; fix the `query_api.go` item's
-    wording — it's not just "naming/duplication," it's 3 duplicated implementations plus
-    inconsistent naming (`code-review-notes.md` §10 has the full finding).
-  - §7: note that every finding needs re-checking against pre-single-analyzer code specifically,
-    once that comparison (below) is done.
+- **Pending spec fixes from the user's post-implementation review, NOT YET APPLIED:** eight
+  items against `composite-signal-redesign.md` §2.1/§2.1.d/§2.1.e/§2.3/§2.6/§2.7/§2.8/§3/§7 (one
+  is a real code change — §2.1.d's `CompositeTotalReplicas` extraction; one names a confirmed
+  gap needing a user design ruling — §2.6's `SOHasSignal` zero-caller finding). Full detail,
+  code verification, and the per-item edit-plan table: `.session/drafts/2026-09-14-spec-review-response.md`.
 - **Two investigations requested, not started:**
   1. Re-verify current implementation against HEAD (quick — was last verified mid-session,
      before the round-2 review; nothing should have changed since, but not re-confirmed).
@@ -88,17 +61,11 @@
   `.session/review/composite-diff-review.html` — an HTML diff viewer built earlier (superseded as
   a *process* by the `diff-review-page` agent — see Extra rules/tools below — but the file itself
   is still valid to view).
-- **Redesign discussion (RESOLVED — see spec pointer above):**
-  `.session/composite-signal-redesign.md` — 2026-09-13/14, user called for a **complete redesign**
-  of `composite.go`, not incremental fixes. Fully resolved and restructured this session. Key
-  corrections made 2026-09-14 that are easy to miss if skimming: (1) sat's config-enabled/disabled
-  contributor-eligibility check must be resolved ONCE, upstream of the per-SO loop (an
-  `eligibleAnalyzers` slice built before `buildComposite` is called) — sat's name must never be
-  tested inside the per-SO collection loop itself, and must not appear in
-  `HasUsableCompositeSignal`'s replacement checks either (both were fixed after the user caught
-  the same mistake twice); (2) the call stack's outer placement (`buildComposite` called from
-  `collectV2ModelRequest`, never from inside `runAnalyzersAndScore`) was already decided at spec
-  v4/§6.2/v8 — an earlier pass at this doc got it wrong and had to be corrected.
+- **Redesign discussion: RESOLVED** — user called for a complete redesign of `composite.go`
+  (2026-09-13/14), fully settled this session. Two corrections worth knowing before editing §2
+  again: sat's eligibility check must resolve once, upstream of the per-SO loop, never by name
+  inside it; the call stack's outer placement was already decided at spec v4/§6.2/v8. Full
+  narrative: `.session/composite-signal-redesign.md` §5 (abstracts), §6 (D1-D3), §7.2.
 - **Expected output:** mission is implementation-complete (see Status). User has chosen to review
   the code manually before deciding on PR / more work / wind-down.
 - **Done / completion criteria:** implementation matches spec v8, reviewed, tests pass — **met**.
@@ -164,27 +131,18 @@
         `undefined_test.go`, `model_coverage_test.go`, `replicas_needed_test.go`,
         `prc_com_test.go`, `composite_decision_test.go`, `composite_eligibility_test.go`,
         `composite_signal_gate_test.go`)
-- [x] **Redesign discussion resolved (2026-09-14):** all design questions settled with the user,
-      through several rounds of correction. Current authoritative spec:
-      `.session/composite-signal-redesign.md` §2 (restructured this session into a
-      spec/discussion split, per `conventions/tasks.md`'s mission-spec structure — §2 is settled
-      rules only, no citations; §5 holds all the reasoning/history).
-- [x] Coder task file **fully rewritten** (not the original 8-item checklist):
-      `.session/task-coder-composite-redesign.md` — every function signature, file destination,
-      and struct/switch shape spelled out concretely; no open naming/placement decisions left for
-      the coder. Includes `user.in` progress-reporting per step.
-- [x] `spec.md`'s v9 entry (§12) was folded in early, then the redesign doc got corrected several
-      times AFTER that (sat-visibility-after-compose fix, call-stack outer-placement fix, a
-      dropped-content recovery after an improper single-`Write` rewrite) — **`spec.md` was never
-      re-synced and is now stale.** Do not treat `spec.md` as authoritative for this redesign;
-      `composite-signal-redesign.md` §2 is. Re-sync is tracked in that doc's §3, not yet done.
-- [x] **Implementation — DONE 2026-09-14 (session 2026-09-14-composite-analyzer-2).** Coder
-      `coder-redesign` ran same-worktree/async, 4 invocations, final commits `bff67c6f`,
-      `6eb92892`, `4d864175`, `748261de`. Independently verified by the mission owner (build/vet
-      clean, `make test` force-reran and passing, old functions confirmed removed, both
-      regression guards tested end-to-end). Incident and decision detail: spec §6 (D3-D6), §7.2.
-      - No reviewer was attached — decide with the user whether to attach one.
-      - **Not yet reviewed by the user.** Second review round found spec-wording gaps, not code
+- [x] Redesign discussion resolved (2026-09-14). Authoritative spec: `composite-signal-redesign.md`
+      §2 (settled rules); §5 holds the reasoning/history.
+- [x] Coder task file fully rewritten: `.session/task-coder-composite-redesign.md` — every
+      signature/destination/shape spelled out, `user.in` progress-reporting per step.
+- [x] `spec.md` §12 is stale (not re-synced after later corrections to the redesign doc) —
+      `composite-signal-redesign.md` §2 is authoritative; re-sync tracked in that doc's §3.
+- [x] **Implementation — DONE 2026-09-14 (session -2).** Coder `coder-redesign`, 4 invocations,
+      final commits `bff67c6f`, `6eb92892`, `4d864175`, `748261de`. Independently verified
+      (build/vet clean, `make test` passing, old functions removed, both regression guards
+      tested end-to-end). Incident/decision detail: spec §6 (D3-D6), §7.2.
+      - No reviewer attached — decide with the user whether to attach one.
+      - Not yet reviewed by the user. Second review round found spec-wording gaps, not code
         bugs — see Task section above and Next step below.
 - [ ] Resume code review of `composite.go`/steadystate wiring — **wait until v9 is implemented**,
       since v8's `composite.go` (what `code-review-notes.md` would otherwise review) will no longer
@@ -251,35 +209,18 @@ relative to the spec's next revision). In order:
    (on hold since 2026-09-13, now genuinely unblocked since v9's code exists).
 7. `spec.md` stays stale-by-design; re-sync only if the user asks.
 
-**Superseded resume point (pre-dispatch — already acted on, kept for context only):** the v9
-design was settled and the task file coder-ready; dispatch was authorized and completed (see
-"Last completed" above). No longer actionable.
-
 ### Status
 
 - Environment: **ready** — branch `composite-analyzer`, rebased onto `upstream/main` @
-  `c013012e` (note: `upstream/main` has since moved further, to `b01a6e17` — not re-rebased, per
+  `c013012e` (`upstream/main` has since moved further, to `b01a6e17` — not re-rebased, per
   "do not rebase without asking first"). `git status`: only
-  `.session/review/composite-diff-review.html` is untracked (long-standing review scratch
-  output, not this session's). Everything else this session touched is committed — see `git log`
-  on this branch, 2026-09-14 commits (from `57ed16df` through `HEAD` at checkpoint time).
-- Mission: **v9 implemented, verified, not yet user-reviewed.** v8 remains
-  implementation-complete underneath (v9 restructures code, not the underlying math). The
-  redesign discussion is resolved; the coder task (4 invocations) is done; the mission owner
-  independently verified the result. A second round of user review on the spec doc found real
-  spec-wording/completeness gaps (not code bugs) — pending fixes listed in Task section above,
-  none applied yet. **Nothing pushed, no PR opened.**
-- For the *current* design (what a coder built, and what the next spec revision must fix before
-  any further dispatch): **`.session/composite-signal-redesign.md` §2**, plus
-  `.session/task-coder-composite-redesign.md` for the checklist the coder actually followed
-  (stale relative to pending fixes — do not re-dispatch against it as-is).
-  **`spec.md` is stale for this redesign — do not use it as the source of truth.** For the
-  completed part of the v8 code review: `.session/review/code-review-notes.md` (§10 on
-  rounding-function issues, recorded not actioned, referenced from spec §3). For this session's
-  detailed narrative including every correction, the two review rounds, and the checkpoint
-  itself: `.session/2026-09-14-composite-analyzer-2.md` (still active, not yet ledger-captured —
-  see Session log). For the prior session's narrative: `.session/2026-09-14-composite-analyzer-1.md`
-  (retiring, not yet moved to `.session/ledger/`).
+  `.session/review/composite-diff-review.html` untracked (long-standing scratch output, not
+  this session's).
+- Mission: v9 implemented/verified/not yet user-reviewed — see Task and Execution above for the
+  pending-fixes list and pointers; nothing pushed, no PR opened.
+- Ledger pointers not covered by Orientation: `.session/2026-09-14-composite-analyzer-2.md` and
+  `.session/2026-09-14-composite-analyzer-1.md` — both retired and `## Verified`-captured (see
+  Session log), full narrative there.
 
 ### Known issues
 
