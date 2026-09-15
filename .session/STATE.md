@@ -11,11 +11,10 @@
 - **Worktree:** `worktrees/composite-analyzer` (branch `composite-analyzer`)
 - **Role / scope:** mission owner — owns STATE, the plan, the `composite-analyzer` branch, and
   integration decisions for this mission only.
-- **Ledger / log:** `.session/2026-09-14-composite-analyzer-2.md` — active this session
-  (checkpointed, not retired — see Session log). A NEW session should create its own dated
-  ledger file rather than appending to this one. Captured retired ledgers:
-  `.session/ledger/2026-09-08-composite-analyzer-1.md`,
-  `.session/ledger/2026-09-08-composite-analyzer-2.md`
+- **Ledger / log:** `.session/2026-09-15-composite-analyzer-1.md` — active this session.
+  Captured retired ledgers: `.session/ledger/2026-09-08-composite-analyzer-1.md`,
+  `.session/ledger/2026-09-08-composite-analyzer-2.md`. `.session/2026-09-14-composite-analyzer-2.md`
+  is retired and `## Verified 2026-09-14`-captured but not yet moved to `.session/ledger/`.
   ⚠ DO NOT READ retired ledgers — not yours
 
 ## Task
@@ -407,4 +406,5 @@ not blocking dispatch.
 - 2026-09-08 session=2026-09-08-composite-analyzer-2 status=retired ledger=.session/ledger/2026-09-08-composite-analyzer-2.md
 - 2026-09-12 session=2026-09-12-composite-analyzer-1 status=retired ledger=.session/2026-09-12-composite-analyzer-1.md
 - 2026-09-14 session=2026-09-14-composite-analyzer-1 status=retiring (user /clear-ing) ledger=.session/2026-09-14-composite-analyzer-1.md
-- 2026-09-14 session=2026-09-14-composite-analyzer-2 status=active (safe checkpoint — ledger not yet captured) ledger=.session/2026-09-14-composite-analyzer-2.md
+- 2026-09-14 session=2026-09-14-composite-analyzer-2 status=retired ledger=.session/2026-09-14-composite-analyzer-2.md
+- 2026-09-15 session=2026-09-15-composite-analyzer-1 status=active ledger=.session/2026-09-15-composite-analyzer-1.md
