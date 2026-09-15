@@ -172,6 +172,45 @@ Before declaring the rewrite done: compare against the pre-single-analyzer aggre
 at the engine side (what this mission's CT7 originally lifted out of), not only against this
 doc's own step list. **Done** — see §7.
 
+### 2.11 Supply-sum guard (`aggregation.go`)
+
+`SumTotalSupply`, `SumTotalAnticipatedSupply`, `AggregateByRole` (`internal/engines/aggregation/aggregation.go`)
+must skip any `VariantCapacity` whose `PerReplicaCapacity <= 0` — same guard already used at
+every other PRC consumer (`analyzer_helpers.go`, `cost_aware_optimizer.go`, `query_api.go`,
+`greedy_score_optimizer.go`, `rescale.go`). Today these three functions multiply
+`PerReplicaCapacity` unconditionally; a `DecisionNoSignal` SO's PRC is `<=0` by construction
+(§2.1.d/e), so an unguarded negative value would subtract from the sum instead of contributing
+zero. Add the guard directly in these three functions, not at each caller.
+
+### 2.12 Model-level broken-signal guard for demand consumers
+
+Every demand-reading consumer of the composite (`demandForRoleOrModel`,
+`requiredSpareForRoleOrModel`, `fairShareValue`, and anything reading `RoleCapacities`/`TotalDemand`
+off `req.CompositeSignal`) must gate on `allocation.CompositeHasSignal(req.CompositeSignal)` —
+the existing model-level guard purpose-built for the composite's own decision-path vocabulary
+(`composite_signal_gate.go`) — not merely `Result != nil`. `Eligible()` is the wrong function
+here: it is calibrated to an analyzer's own Reason vocabulary (no-data/error/P0-store) and is
+used inside composite construction, on per-analyzer entries — its own doc comment warns against
+reusing it for the composite's different Reason meaning (decision path, not measurement
+quality). `CompositeHasSignal` already checks exactly this: non-nil `Result` with at least one
+`VariantCapacity` whose decision path is not `DecisionNoSignal`. A composite that fails this
+check was not usefully measured this cycle — treat it exactly as the absent-Result case, per
+that function's own doc comment: skip the model, charge it nothing, decide nothing.
+
+### 2.13 `sortVariantsForScaleDown` — drop `Score`
+
+Remove `e.Score` from the scale-down tie-break weight (`cost_aware_optimizer.go`). Verified
+against the pre-single-analyzer version (commit `40df4066^`): the original function summed
+`Score_i·PRC_i[v]` **across multiple analyzers**, with its own comment stating that a single
+analyzer (`Score=1`) degenerates to "Cost-desc then PRC-asc" with no score term at all. The
+codebase now carries exactly one `NamedAnalyzerResult` (the composite) at this call site, so
+`e.Score` is a leftover of that collapsed summation, not a meaningful weight — restore the
+already-intended degenerate behavior (cost descending, then PRC ascending, then name) by
+dropping the `Score` factor entirely. This is unrelated to §2.9's "Score has no effect" guard,
+which is about `maxScore` (a different, model-level scoring field left untouched by this task) —
+that guard still holds; this fix only removes the composite's per-analyzer `Score` field from
+one tie-break formula that no longer makes sense with a single entry.
+
 ---
 
 ## 3. Open items (blocking only)

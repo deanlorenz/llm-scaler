@@ -165,64 +165,98 @@
         `prc_com_test.go`, `composite_decision_test.go`, `composite_eligibility_test.go`,
         `composite_signal_gate_test.go`) — **`replicas_needed_test.go`/`prc_com_test.go` will
         likely move/disappear under v9's relocation**
+- [x] Full `CompositeSignal` usage audit (supply/demand/RC-SC, all consumers, not just
+      PRC-touching ones) — `.session/composite-signal-full-usage-audit-2026-09-15.md`. Corrected
+      a first, narrower PRC-only pass after user review; confirmed `buildCapacities` is composite
+      construction, not downstream; confirmed `DecisionNoSignal` always implies sat's own raw PRC
+      is `<=0` (so existing `<=0` guards already exclude every genuine no-signal SO); found
+      saturation's P0-store estimator produces the same decision-path string as a live sat
+      fallback (open question, deferred, not CC).
+- [x] Scoped a minimal guard-fix change ("CC") out of the investigation above, deferring
+      everything else to a companion doc. CC = 3 guard fixes, written as new settled-rule
+      subsections `composite-signal-redesign.md` §2.11 (missing `<=0` guard in
+      `aggregation.go`'s supply sums), §2.12 (model-level `CompositeHasSignal()` guard for demand
+      consumers — corrected mid-session from a wrongly-named `Eligible()`, per user catch), §2.13
+      (remove `e.Score` from `sortVariantsForScaleDown`, verified against pre-single-analyzer
+      code). Deferred items (PRC-accessor contract unification, guard relocation into shared
+      helpers, P0-store/live-fallback distinguishability, per-role demand-health markers,
+      supply-alternatives write-up) recorded in new companion doc
+      `.session/composite-signal-post-cc-followups.md`, same 8-section template.
+      **§2.11-2.13 are spec-only — NOT YET implemented in code, not yet a coder task, not yet
+      dispatched. Both doc edits are UNCOMMITTED as of this checkpoint.**
+- [x] Refreshed the stale (2026-09-09) HTML diff-review page (`.session/review/composite-diff-review.html`)
+      via the `diff-review-page` custom agent, scoped `c013012e..HEAD` on `internal/` (full v8+v9
+      implementation). Fixed a one-character `id` mismatch bug in the generated page's own script
+      that had left every diff panel empty (root-caused directly, single `Edit`). Untracked
+      scratch output by existing convention — not committed, matching its prior state.
 - [ ] User direction on next steps (PR / more work / wind-down) — deferred until v9 is implemented
-      AND the resumed code review both conclude.
+      AND the resumed code review both conclude. Now also gated on CC landing first (see Next
+      step below) — CC's guard fixes are a real (if small) code change against the same files the
+      resumed code review would cover.
 
-**Last completed (2026-09-14, session -2):** v9 implemented and independently verified; a
-second review round found real spec-doc gaps (not code bugs). Full narrative, incidents, and
-decisions: spec doc §5 (abstracts), §6 (decisions D1-D7), §7.2 (incidents 1-4), §8 (revision
-log); coverage-gap catch and process corrections: ledger `.session/2026-09-14-composite-analyzer-2.md`
-(`## Verified` — chat-hygiene/process notes are correctly ledger-scoped, not duplicated here).
-Pending fixes from the second review round: see Task section above and
-`.session/drafts/2026-09-14-spec-review-response.md`. Checkpointed at the user's request — safe
-checkpoint, not a retirement.
+**Last completed (2026-09-15, session -1):** full `CompositeSignal` usage audit (corrected from
+an initial PRC-only pass per detailed user review), scoped into a minimal "CC" guard-fix change
+specified in `composite-signal-redesign.md` §2.11-2.13, everything else deferred to
+`.session/composite-signal-post-cc-followups.md`. STATE.md itself was pruned twice this session
+(once by the mission owner directly — **a process violation**, the user wanted a background
+agent, not the mission owner acting unilaterally after the first dispatch failed; corrected via a
+properly-dispatched round 2 with a `.wip` lock). Diff-review page refreshed and a real rendering
+bug fixed. Full narrative, every correction, and the exact code citations verified during this
+session: ledger `.session/2026-09-15-composite-analyzer-1.md` (not yet ledger-captured — see
+Session log; note also records this ledger was not maintained continuously during the session,
+only backfilled at checkpoint). Checkpointed at the user's request ("clear the session" → safe
+checkpoint, not a retirement) — mission ownership is not released.
+
+**Superseded — prior session (2026-09-14, session -2):** v9 implemented and independently
+verified; a second review round found real spec-doc gaps (not code bugs). Full narrative,
+incidents, and decisions: spec doc §5 (abstracts), §6 (decisions D1-D7), §7.2 (incidents 1-4), §8
+(revision log); ledger `.session/2026-09-14-composite-analyzer-2.md` (`## Verified`).
 
 **Superseded — prior session (2026-09-13/14):** resolved the redesign discussion end to end.
-Full narrative (eligibility-gate corrections, the structural/process fixes to the spec doc, the
-single-`Write`-restructure incident and its lesson) lives in spec doc §5-§8 and ledger
-`.session/2026-09-14-composite-analyzer-1.md`.
+Full narrative lives in spec doc §5-§8 and ledger `.session/2026-09-14-composite-analyzer-1.md`.
 
 **Prior session (2026-09-08/09):** built an HTML diff-review page for this mission's diff,
 generalized into the `diff-review-page` custom agent plus a standing WSL2/`wslview` convention
 in `~/.claude/CLAUDE.md`; ran the first part of the step-by-step code review (general comments,
 aggregation package, allocation core) — paused at the user's request.
 
-**Next step / resume point (as of end of 2026-09-14 session -2, checkpoint):** v9 is implemented
-and independently verified — do NOT re-dispatch a coder against the old task file without first
-applying the pending spec fixes listed in the Task section above (the task file is stale
-relative to the spec's next revision). In order:
-1. Read `.session/drafts/2026-09-14-spec-review-response.md` in full — it has every pending fix,
-   already verified against code, with an edit-plan table.
-2. Get the user's go-ahead on the edit plan (some are pure wording, some are real code changes —
-   §2.1.d's `CompositeTotalReplicas` function extraction and the `eligibleAnalyzers`→
-   `enabledAnalyzers` rename both touch actual source, not just the doc).
-3. Apply the doc edits directly (mission owner owns this file, no `.wip` lock needed — user
-   instruction, 2026-09-14). Dispatch a coder for the code changes only if the user wants them
-   done now rather than batched with the next real implementation task — **per this session's
-   new process rule, any new coder task file must include a design-validation checkpoint before
-   implementation, not just an implementation checklist.**
-4. Resolve the open design question from §2.6 (should `SOHasSignal` be consumed per-SO by the
-   optimizer, and do what with a no-signal SO) — needs the user's ruling, not investigation.
+**Next step / resume point (as of end of 2026-09-15 session -1, checkpoint):** CC's guard fixes
+are fully specified (`composite-signal-redesign.md` §2.11-2.13) but not implemented. In order:
+1. Commit the two doc edits from this session (`composite-signal-redesign.md` §2.11-2.13,
+   `.session/composite-signal-post-cc-followups.md`) — currently uncommitted.
+2. Get the user's go-ahead to turn §2.11-2.13 into a coder task (or apply directly, if small
+   enough) — three targeted fixes: `aggregation.go`'s missing `<=0` guard,
+   `demandForRoleOrModel`/`requiredSpareForRoleOrModel`/`fairShareValue` gated on
+   `allocation.CompositeHasSignal(req.CompositeSignal)`, and `e.Score` removed from
+   `sortVariantsForScaleDown`. Per the standing process rule (2026-09-14 session), any new coder
+   task file must include a design-validation checkpoint before implementation.
+3. Once CC lands and is verified: the pending spec fixes from the 2026-09-14 round-2 review
+   (`.session/drafts/2026-09-14-spec-review-response.md` — `eligibleAnalyzers`→`enabledAnalyzers`
+   rename, §2.1.d's `CompositeTotalReplicas` extraction, wording fixes) are still open and
+   unapplied — batch with CC or do separately, ask the user.
+4. Resolve the open design question from §2.6/the post-CC-followups doc §7.3 (P0-store vs. live
+   sat-fallback distinguishability) — needs the user's ruling, not more investigation.
 5. Do the two pending investigations from the Task section (quick re-verify; the larger
-   pre-single-analyzer aggregation comparison) — ask the user which order, per the review
-   comment ("recheck all is implemented... [and] identify the former aggregations").
-6. Only after 1-5: decide with the user whether to attach a reviewer to the implemented code,
-   and whether to resume the file-by-file code review of `composite.go`/steadystate wiring
-   (on hold since 2026-09-13, now genuinely unblocked since v9's code exists).
+   pre-single-analyzer aggregation comparison).
+6. Only after 1-5: decide with the user whether to attach a reviewer, and whether to resume the
+   file-by-file code review of `composite.go`/steadystate wiring (now touching CC's changes too).
 7. `spec.md` stays stale-by-design; re-sync only if the user asks.
 
 ### Status
 
 - Environment: **ready** — branch `composite-analyzer`, rebased onto `upstream/main` @
   `c013012e` (`upstream/main` has since moved further, to `b01a6e17` — not re-rebased, per
-  "do not rebase without asking first"). `git status`: only
-  `.session/review/composite-diff-review.html` untracked (long-standing scratch output, not
-  this session's).
-- Mission: v9 implemented/verified/not yet user-reviewed — see Task and Execution above for the
-  pending-fixes list and pointers; nothing pushed, no PR opened.
+  "do not rebase without asking first"). `git status` at checkpoint: 2 uncommitted doc edits
+  (`composite-signal-redesign.md` §2.11-2.13, new file
+  `.session/composite-signal-post-cc-followups.md`) plus the long-standing untracked
+  `.session/review/composite-diff-review.html` (refreshed and bug-fixed this session, still
+  correctly untracked per existing convention).
+- Mission: v9 implemented/verified/not yet user-reviewed; CC (3 guard fixes) specified but not
+  implemented — see Task and Execution above for pointers; nothing pushed, no PR opened.
 - Ledger pointers not covered by Orientation: `.session/2026-09-14-composite-analyzer-2.md` and
   `.session/2026-09-14-composite-analyzer-1.md` — both retired and `## Verified`-captured (see
-  Session log), full narrative there.
+  Session log), full narrative there. This session's own ledger
+  (`.session/2026-09-15-composite-analyzer-1.md`) is active, not yet ledger-captured.
 
 ### Known issues
 
