@@ -78,8 +78,10 @@
   - Do not reopen spec §10 (D1–D4) or amend the approved design without the user raising it.
   - No pipeline redesign under this mission — a separate, later, clean discussion (user, 2026-09-09).
   - Do not invoke the upstream `pr-review` skill on this mission (user decision).
-  - Edit this STATE.md directly — no `.wip` rename-lock (user instruction, 2026-09-09; see memory
-    `feedback_no_wip_on_own_state`).
+  - Ownership rule for `.wip` (user instruction 2026-09-09, memory `feedback_no_wip_on_own_state`):
+    the mission owner OWNS this file — edit it directly, never `.wip`. Any other agent (including
+    one the mission owner dispatches) does NOT own it — it MUST use the `.wip` lock, always,
+    regardless of who dispatched it. `.wip` is an ownership rule, not a concurrency-count rule.
 - **Extra rules / rule refs:** `conventions/mission-owner.md`, `conventions/coder-orchestration.md`,
   `conventions/worktree-delegation.md`
 - **New tooling (session-external, not mission-scoped):** a user-level custom agent
