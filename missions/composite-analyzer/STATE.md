@@ -1,0 +1,1 @@
+../../../../worktrees/composite-analyzer/.session/STATE.md
