@@ -181,4 +181,5 @@ relative to `origin/policy-writer` — not yet raised with user for push authori
 - 2026-09-06 session=2026-09-06-policy-writer-17 status=retired ledger=.session/ledger/2026-09-06-policy-writer-17.md
 - 2026-09-06 session=2026-09-06-policy-writer-18 status=retired ledger=.session/ledger/2026-09-06-policy-writer-18.md
 - 2026-09-07 session=2026-09-07-policy-writer-19 status=retired ledger=.session/2026-09-07-policy-writer-19.md
+- 2026-09-16 session=2026-09-16-policy-writer-20 status=active ledger=.session/2026-09-16-policy-writer-20.md
 
