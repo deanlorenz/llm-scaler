@@ -26,7 +26,8 @@ route a write around the worktree boundary. When a cross-worktree write is requi
 have a specific exception or ask the user, then follow
 `conventions/working-outside-worktree.md`.
 
-Reads may cross worktree boundaries when needed (`git -C`, `cat`, full paths, etc.).
+Reads may cross worktree boundaries when needed (`cat`, full paths, `git show <branch>:<path>`, etc.).
+In a pinned session `git -C <other-path>` is blocked — use `git show <branch>:<path>` instead (no `-C` needed).
 
 ## Situational rules — read when triggered
 
@@ -80,9 +81,10 @@ worktrees/<mission-name>/          ← mission branch/worktree
 ```
 
 - Access other missions' tracking files via `session-tracking/missions/<mission-name>/`.
-- If a symlink is broken or worktree not present, read directly from the branch:
+- If a symlink is broken or worktree not present, read directly from the branch
+  (run from inside your own worktree — no `-C` needed):
   ```bash
-  git -C <repo-root> show <mission-name>:.session/STATE.md
+  git show <mission-name>:.session/STATE.md
   ```
 - Do not edit another mission's symlinks — report broken links via `session-tracking/suggestion-box/`.
 
