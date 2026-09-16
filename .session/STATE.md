@@ -120,21 +120,21 @@
 - [x] Fixed stale `git -C` guidance in `CONVENTIONS.md`, `feature-worktree-setup.md`, and
       `install-to-session-tracking.md` (commit `6ce874fa` on `policy-writer`).
 
-**Last completed:** Session-20: fixed stale `git -C` guidance in `CONVENTIONS.md`,
-`conventions/feature-worktree-setup.md`, and `conventions/install-to-session-tracking.md`
-(commit `6ce874fa` on `policy-writer`). Committed session-tracking maintenance (chat-preferences
-update, composite-analyzer symlinks, new suggestion-box entries — commit `ba24f86a`).
+**Last completed:** Session-20: processed suggestion-box entries 1–5 (1: working-outside-worktree.md
+sandboxed-cp fallback + read correction `4cd13ab2`; 2: tasks.md + CONVENTIONS.md +
+worktree-delegation.md task authoring/delivery restructure `9327476d`; 3: deferred to
+ledger-capture spec; 4: deferred, no git-hygiene file; 5: unexplained-files.md git ls-files
+upstream check `b41f9317`). Mid-session on entry 6 (WIP on own STATE).
 
-**Next step / resume point:** Install the three doc fixes onto `session-tracking` (requires
-user authorization). Then: work the new suggestion (`2026-09-16-1630-policy-writer.md`) —
-CONVENTIONS read unverifiable, situational rules skipped at trigger point. Backlog: revisit
-FG/BG analysis, CONVENTIONS/session-start/resume-mission overlap, agentbus subscription
-details, rewrite ledger-capture as custom-agent, write T10 session-setup agent spec.
+**Next step / resume point:** Entry 6 — fix `.wip` protocol for mission owner's own STATE.md
+in `CONVENTIONS.md` trigger line, `conventions/wip-editing.md`, `resume-mission` Step 10,
+and `wind-down` matching step. Then entries 7–13. Then prefix processed suggestion-box
+entries and install onto `session-tracking` (requires user authorization).
 
 ### Status
-Session 20 active. Doc-accuracy gaps fixed on `policy-writer` (`6ce874fa`); not yet installed
-onto `session-tracking`. `policy-writer` has unpushed local commits — not yet raised with user
-for push authorization.
+Session 20 active. Entries 1–5 processed and committed on `policy-writer`. Entry 6 in
+progress. `policy-writer` has unpushed local commits — not yet raised with user for push
+authorization.
 
 ### Known issues
 - Unprocessed suggestion-box entry `session-tracking/suggestion-box/2026-09-07-1200-single-analyzer.md`
