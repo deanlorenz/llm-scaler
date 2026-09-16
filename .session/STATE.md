@@ -220,10 +220,11 @@ generalized into the `diff-review-page` custom agent plus a standing WSL2/`wslvi
 in `~/.claude/CLAUDE.md`; ran the first part of the step-by-step code review (general comments,
 aggregation package, allocation core) — paused at the user's request.
 
-**Next step / resume point (as of end of 2026-09-15 session -1, checkpoint):** CC's guard fixes
-are fully specified (`composite-signal-redesign.md` §2.11-2.13) but not implemented. In order:
-1. Commit the two doc edits from this session (`composite-signal-redesign.md` §2.11-2.13,
-   `.session/composite-signal-post-cc-followups.md`) — currently uncommitted.
+**Next step / resume point (as of 2026-09-16, session 0, after confirming doc edits already
+landed):** CC's guard fixes are fully specified (`composite-signal-redesign.md` §2.11-2.13) but
+not implemented. In order:
+1. ~~Commit the two doc edits from the 2026-09-15 session~~ — already committed that session in
+   `336a035a`; STATE.md's "uncommitted" note was stale, corrected 2026-09-16.
 2. Get the user's go-ahead to turn §2.11-2.13 into a coder task (or apply directly, if small
    enough) — three targeted fixes: `aggregation.go`'s missing `<=0` guard,
    `demandForRoleOrModel`/`requiredSpareForRoleOrModel`/`fairShareValue` gated on
@@ -246,11 +247,12 @@ are fully specified (`composite-signal-redesign.md` §2.11-2.13) but not impleme
 
 - Environment: **ready** — branch `composite-analyzer`, rebased onto `upstream/main` @
   `c013012e` (`upstream/main` has since moved further, to `b01a6e17` — not re-rebased, per
-  "do not rebase without asking first"). `git status` at checkpoint: 2 uncommitted doc edits
-  (`composite-signal-redesign.md` §2.11-2.13, new file
-  `.session/composite-signal-post-cc-followups.md`) plus the long-standing untracked
-  `.session/review/composite-diff-review.html` (refreshed and bug-fixed this session, still
-  correctly untracked per existing convention).
+  "do not rebase without asking first"). The 2 doc edits noted as uncommitted at the 2026-09-15
+  checkpoint (`composite-signal-redesign.md` §2.11-2.13, new file
+  `.session/composite-signal-post-cc-followups.md`) were in fact already committed that same
+  session in `336a035a` — checked and corrected 2026-09-16, this line was stale. `git status` now
+  shows only the long-standing untracked `.session/review/composite-diff-review.html` (refreshed
+  and bug-fixed 2026-09-15, correctly untracked per existing convention).
 - Mission: v9 implemented/verified/not yet user-reviewed; CC (3 guard fixes) specified but not
   implemented — see Task and Execution above for pointers; nothing pushed, no PR opened.
 - Ledger pointers not covered by Orientation: `.session/2026-09-14-composite-analyzer-2.md` and
@@ -274,6 +276,7 @@ are fully specified (`composite-signal-redesign.md` §2.11-2.13) but not impleme
 - 2026-09-08 session=2026-09-08-composite-analyzer-1 status=retired ledger=.session/ledger/2026-09-08-composite-analyzer-1.md
 - 2026-09-08 session=2026-09-08-composite-analyzer-2 status=retired ledger=.session/ledger/2026-09-08-composite-analyzer-2.md
 - 2026-09-12 session=2026-09-12-composite-analyzer-1 status=retired ledger=.session/2026-09-12-composite-analyzer-1.md
-- 2026-09-14 session=2026-09-14-composite-analyzer-1 status=retiring (user /clear-ing) ledger=.session/2026-09-14-composite-analyzer-1.md
-- 2026-09-14 session=2026-09-14-composite-analyzer-2 status=retired ledger=.session/2026-09-14-composite-analyzer-2.md
-- 2026-09-15 session=2026-09-15-composite-analyzer-1 status=active ledger=.session/2026-09-15-composite-analyzer-1.md
+- 2026-09-14 session=2026-09-14-composite-analyzer-1 status=retired (unverified — content superseded by 2026-09-14-composite-analyzer-2, user accepted skipping ledger-capture 2026-09-16) ledger=.session/ledger/2026-09-14-composite-analyzer-1.md
+- 2026-09-14 session=2026-09-14-composite-analyzer-2 status=retired ledger=.session/ledger/2026-09-14-composite-analyzer-2.md
+- 2026-09-15 session=2026-09-15-composite-analyzer-1 status=retired ledger=.session/ledger/2026-09-15-composite-analyzer-1.md
+- 2026-09-16 session=2026-09-16-composite-analyzer-1 status=active ledger=.session/2026-09-16-composite-analyzer-1.md
