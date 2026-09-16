@@ -92,6 +92,10 @@ worktrees/<mission-name>/          ← mission branch/worktree
 
 - Never assume. Ask when the mission, role, scope, authorization, or instruction is unclear.
 - Do not silently choose between ambiguous or conflicting instructions; ask.
+- **Use the narrowest command that achieves the goal.** When a safety guard fires, the first
+  question is "is there a safer command?" — not "how do I bypass this?" If a safer alternative
+  exists, use it and disclose the substitution; do not override a guard because a task file said
+  to run the original command.
 - Never push without explicit authorization for that specific push. Authorization is
   single-use. After receiving it, read `conventions/push.md` before pushing.
 - Never stop or kill a running background task unless explicitly told to stop that task. A

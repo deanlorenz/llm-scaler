@@ -69,6 +69,60 @@ proceeds:
   `DONE <date>` | `BLOCKED on <thing>`.
 - **Known issues:** optional. Fill in any known constraints or risks before invocation.
 
+## Task authoring rules
+
+### Commands must have predictable effects
+Every command in a task file must have a predictable effect on the specific expected state at
+the time the worker runs it. If the author needs an `if` branch — they don't know the state.
+Fix: either pin the mechanics down first, or state the *goal* ("ensure X is not staged") and
+let the worker choose the mechanics. Never half-specify both: a hedged command plus a hedged
+conditional passes uncertainty downstream to a worker with less context, and a more compliant
+worker may execute the bad command anyway because the task file said to.
+
+### Use the narrowest command (repeat of global rule — applies especially to task files)
+Prefer the minimal, reversible command. A task file's authority can substitute for a worker's
+judgment — which means a wrong command in a task file is worse than a wrong command run
+interactively. When a guard fires on a task-file command, the worker should substitute the
+safer alternative and disclose the substitution, not override the guard.
+
+Reference:
+
+| Intent | Preferred command | Avoid |
+|---|---|---|
+| Remove from index, keep on disk | `git rm --cached -r <path>` | `git restore --staged --worktree` (deletes) |
+| Remove from index and disk | `git rm -r <path>` | |
+| Drop a commit from a branch | branch from the upstream base | `git reset --hard` (loses task file) |
+
+### Don't declare something impossible without checking
+Before telling the user or worker that something cannot be done, verify it against
+`conventions/`. A Known-issues note in one mission's STATE is not proof the whole system
+lacks a solution — the convention may already document the working pattern.
+
+### Progress reporting — what a worker must publish
+A worker running as a background agent must report progress in two ways:
+
+1. **`Out:` channel** — publish status, findings, interim results, and completion to the
+   parent session's monitoring channel. Answer any parent request on `In:` before continuing.
+2. **`user.in` publish** — for non-blocking visibility to the human user (fire-and-forget;
+   the worker does not wait for a reply):
+   ```
+   agentbus_publish(topic="user.in", from_session="<slug>", kind="note",
+     body="<progress update>")
+   ```
+
+Report partial progress at natural checkpoints (e.g. after each major step), not only on
+completion. If blocked or stopped early, publish the blocking reason to both channels before
+exiting.
+
+### Done criteria — report actual results, not pass/fail
+Done criteria in the task file must be checkable claims. The worker reports the actual result
+against each criterion — not just "passed" or "done". Examples:
+- ✅ "Ran 1 of 150 Specs — `TestNilSaturationGuard` — SUCCESS" (not just "tests pass")
+- ✅ "Conflict in `docs/foo.md` lines 12–18 — exact hunk: `<<<< ... >>>>`; stopped" (not "conflict found")
+
+If there is a conflict: do not improvise a resolution. Publish the exact conflicting file and
+hunk to `Out:` and stop. The parent decides the resolution.
+
 ## Continuation (handing off a partially done task)
 
 When a task is `IN PROGRESS` and a new session is taking over, update the STATE file before
