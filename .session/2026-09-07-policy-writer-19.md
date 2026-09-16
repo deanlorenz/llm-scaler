@@ -121,3 +121,13 @@ Continues: .session/ledger/2026-09-06-policy-writer-18.md
   `session-tracking` during this session) documents the same `-C`/direct-write asymmetry
   independently from `single-analyzer`'s side — unprocessed, not this session's to act on, but
   worth reading when suggestion-box work resumes.
+
+## Verified 2026-09-07 — doc-accuracy gaps and suggestion-box entry captured in STATE.md
+
+| Ledger point | Durable destination | Action taken |
+|---|---|---|
+| `CONVENTIONS.md` line 29 and `feature-worktree-setup.md` `git -C <repo-root> show <mission>:...` fallback are wrong for a pinned session; correct form is `git show <branch>:<path>` with no `-C` | `STATE.md` § Next step / resume point | Already present; confirmed captured |
+| `install-to-session-tracking.md` Step 1/3 documents unusable `git -C`/`cd` — actual working procedure is `EnterWorktree` on `session-tracking`, then reference `policy-writer` by branch name | `STATE.md` § Next step / resume point | Already present; confirmed captured |
+| Unprocessed suggestion-box entry `session-tracking/suggestion-box/2026-09-07-1200-single-analyzer.md` (corroborating evidence for `-C` asymmetry from `single-analyzer`'s side) | `STATE.md` § Known issues | Added new bullet — was missing |
+| Status section still said "session 19 active" after parent session retired it | `STATE.md` § Status | Updated to "Session 19 retired" |
+| `git rm` without authorization (caught by user mid-session) and `git push`/`checkout` bypass rules are embedded in completed-step narrative | `STATE.md` § Steps / subtasks (cherry-pick entry) | Already present; no new Known Issues entry needed |

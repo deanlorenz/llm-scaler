@@ -135,15 +135,19 @@ resume-mission overlap, agentbus subscription details, rewrite ledger-capture as
 custom-agent, write T10 session-setup agent spec.
 
 ### Status
-IN PROGRESS — session 19 active. Suggestion-box processed-marker commit and the
-working-outside-worktree rename are both installed and pushed on both branches; nothing
-pending push/install right now. Two doc-accuracy gaps found this session (stale `-C` guidance
-in `CONVENTIONS.md`/`feature-worktree-setup.md`/`install-to-session-tracking.md`) are flagged
-but not fixed — out of scope of what was asked. `policy-writer` itself has 7 unpushed local
-commits relative to `origin/policy-writer` (predates this session plus this session's
-`40079643`/`8fa30bcd`) — not yet raised with the user for push authorization this session.
+Session 19 retired. Working-outside-worktree rename+rewrite committed on `policy-writer`
+(`40079643`) and installed onto `session-tracking` via cherry-pick (`e39f3a22`), pushed to
+`origin/session-tracking`. Two doc-accuracy gaps found this session (stale `-C` guidance in
+`CONVENTIONS.md`/`feature-worktree-setup.md`/`install-to-session-tracking.md`) are captured in
+"Next step" above but not fixed — deferred. `policy-writer` itself has unpushed local commits
+relative to `origin/policy-writer` — not yet raised with user for push authorization.
 
 ### Known issues
+- Unprocessed suggestion-box entry `session-tracking/suggestion-box/2026-09-07-1200-single-analyzer.md`
+  (found untracked during session-19 install): documents the same `-C`/direct-write asymmetry
+  independently from `single-analyzer`'s side. Corroborating evidence for the doc-accuracy gaps
+  in "Next step". Not this session's to act on — needs to be processed when suggestion-box work
+  resumes.
 - `settings-and-skill-edits.md` describes a `user-approved-settings-change` marker
   requirement. Origin is 2026-08-27 observed harness behavior; user does not recognize the
   rule. Verify before editing any `SKILL.md` — the marker requirement may or may not still
@@ -176,5 +180,5 @@ commits relative to `origin/policy-writer` (predates this session plus this sess
 
 - 2026-09-06 session=2026-09-06-policy-writer-17 status=retired ledger=.session/ledger/2026-09-06-policy-writer-17.md
 - 2026-09-06 session=2026-09-06-policy-writer-18 status=retired ledger=.session/ledger/2026-09-06-policy-writer-18.md
-- 2026-09-07 session=2026-09-07-policy-writer-19 status=active ledger=.session/2026-09-07-policy-writer-19.md
+- 2026-09-07 session=2026-09-07-policy-writer-19 status=retired ledger=.session/2026-09-07-policy-writer-19.md
 
