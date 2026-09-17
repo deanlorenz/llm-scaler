@@ -27,4 +27,6 @@
 ## Communication & Completion
 
 - Non-interactive by default. Publish progress and status on agentbus (`Out:` channel).
+- Publish progress notes to `user.in` (kind=note) at natural checkpoints — fire and forget,
+  do not wait for a reply.
 - On completion: notify the mission owner via agentbus with commit SHAs and final status.
