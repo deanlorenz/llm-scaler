@@ -611,6 +611,16 @@ Labels were redundant with the rule text that followed them.
 > This holds regardless of which worktree pattern you were launched under.
 (Explanatory. The rule is stated in the first two sentences.)
 
+### conventions/reviewer.md trim — session 21 (2026-09-17)
+
+**Lines 3–5 — intro + definition (dropped):**
+> Read this when executing in the code-reviewer role.
+> The reviewer conducts internal code reviews of coder commits as they land, evaluating
+> correctness, structure, and adherence to the task spec.
+
+**Bold section labels (Read-Only Code Access:, Single Write Target:, etc.) — dropped:**
+Labels were redundant with the rule text.
+
 ## 8. Refs
 
 *Related files (do not read unless explicitly needed):*
