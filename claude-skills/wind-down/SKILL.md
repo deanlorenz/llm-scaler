@@ -47,6 +47,9 @@ mission owner's own STATE.md is single-writer — edit it directly, no `.wip` re
 (See `conventions/wip-editing.md` §"Who needs this protocol".)
 
 Required every wind-down, regardless of time pressure:
+- **Drift scan first:** before updating progress fields, scan STATE for settled design,
+  reasoning, or decisions that accumulated this session. Move any found to the correct spec
+  section, then remove from STATE. STATE must be thin and current-tense when you're done.
 - Mark completed steps `[x]` in the checklist
 - Set **Last completed** to the last finished step
 - Set **Next step / resume point** to exactly where the next session should pick up
