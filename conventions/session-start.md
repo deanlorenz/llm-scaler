@@ -40,14 +40,8 @@ summary — one concrete, non-generic line that proves the read happened. Exampl
 policy-writer mission rule requires subscribing to two agentbus channels before mission work."
 Generic lines ("I have read CONVENTIONS.md") do not count.
 
-Then wait for the user to confirm before executing anything.
-
-**The orientation block is a hard gate.** Until the user confirms, no tool call may touch
-mission state, code, or the user (including `AskUserQuestion`). The only permitted tool calls
-before orientation are the three upfront reads above (CONVENTIONS.md, this file, STATE). No
-other action — including opening a ledger, committing to git, or asking a substantive question
-— may precede the user's confirmation. Performing a retroactive orientation after work has
-already started does not satisfy this requirement.
+Then wait for the user to confirm before executing anything. No other action — including
+opening a ledger, committing to git, or asking a question — may precede that confirmation.
 
 ## If you have a STATE file
 
