@@ -511,6 +511,38 @@ Two bugs found after subagent testing:
 > Append a verification marker to the end of the processed ledger, including a summary table of findings and actions taken:
 (Compressed into the step label itself.)
 
+### conventions/install-to-session-tracking.md — cherry-pick rewrite (session 21)
+
+Replaced `git checkout <branch> -- <path>` with cherry-pick range.
+Reason: checkout silently overwrites on divergence; cherry-pick conflicts loudly.
+The Step 2 diff was the only safety net under the old approach.
+
+**Original Step 3:**
+```bash
+git checkout policy-writer -- CONVENTIONS.md conventions/
+git rm --cached conventions/*.bak 2>/dev/null || true
+rm -f conventions/*.bak
+git checkout policy-writer -- claude-skills/
+```
+
+**Original Step 1 trailing prose:**
+> Both must show no uncommitted changes. If either has uncommitted changes, stop and
+> commit or stash before proceeding. Do not install over a dirty `session-tracking`.
+
+**Original Step 2 trailing prose:**
+> Review every difference. For any file where session-tracking looks **ahead** of
+> policy-writer, stop — update policy-writer first, commit it, then resume here.
+
+**Original "Fixing a bad install":**
+> 1. Run `git log --oneline -5` to identify the bad commit.
+> 2. Do not hand-edit — use `git checkout` from the correct branch again (Step 3)
+>    and re-verify (Step 4) before committing a correction.
+
+**Dropped prose (lines 3, 6, 22):**
+> "Read this before copying any file..."
+> "Hand-copying silently introduces drift, reverts prior work, and swaps files."
+> "The install is not file-by-file selection. It is a full sync of all non-excluded paths."
+
 ## 8. Refs
 
 *Related files (do not read unless explicitly needed):*
