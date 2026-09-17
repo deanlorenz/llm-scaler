@@ -1,24 +1,19 @@
- # Starting a session
-
-Read this at the start of every session, before any work.
+# Starting a session
 
 ## Reading rules — upfront
 
 Read at session start, in this order:
-1. `CONVENTIONS.md` from the session-tracking worktree (the path recorded in the STATE file, or
-   the canonical tracking worktree when STATE cannot yet be read)
-2. This file, `conventions/session-start.md`
-3. Your STATE file (or session STATE file if provided)
+1. `CONVENTIONS.md` (path in your STATE file, or the canonical session-tracking worktree)
+2. This file
+3. Your STATE file
 4. Any situational rules triggered by your role (listed in `CONVENTIONS.md` index)
 
-If the STATE path is missing or cannot be resolved, stop and report the missing prerequisite.
-Do not substitute the main repository's conventions or assume the mission from the current folder.
+If the STATE path is missing or cannot be resolved, stop and report it.
+Do not assume the mission from the current folder.
 
 **Never read at session start:**
-- Plan/spec docs (listed in STATE under `Plan/spec`) — pull on demand only
-- The ledger file listed in STATE's `Ledger / log` field — that is the previous session's
-  ledger, not yours. Do not read it. Do not read it "just to catch up." STATE contains
-  everything you need. Create your own ledger; do not open the old one.
+- Plan/spec docs — pull on demand only
+- The previous session's ledger — not yours; do not read it. Create your own.
 - Any file listed under `Refs` in your STATE file
 
 ## Opening orientation
@@ -34,11 +29,10 @@ Last:      <last completed step>
 Next:      <next step>
 ```
 
-Immediately after the orientation block, add one sentence echoing the most relevant constraint
-from `CONVENTIONS.md` that applies to the upcoming work. This is a verification artifact, not a
-summary — one concrete, non-generic line that proves the read happened. Example: "I see the
-policy-writer mission rule requires subscribing to two agentbus channels before mission work."
-Generic lines ("I have read CONVENTIONS.md") do not count.
+After the block, add one concrete sentence echoing the most relevant `CONVENTIONS.md`
+constraint for the upcoming work. Example: "I see the policy-writer mission rule requires
+subscribing to two agentbus channels before mission work."
+Generic acknowledgements ("I have read CONVENTIONS.md") do not count.
 
 Then wait for the user to confirm before executing anything. No other action — including
 opening a ledger, committing to git, or asking a question — may precede that confirmation.
@@ -47,8 +41,8 @@ opening a ledger, committing to git, or asking a question — may precede that c
 
 1. Read it. It contains your conventions path, mission, role, worktree, task, and next step.
 2. Read `CONVENTIONS.md` at the path stated in your STATE file.
-3. Create a new ledger file for this session (slug: `YYYY-MM-DD-<mission>-<N>.md`).
-   Open it with:
+3. Create a new ledger at `.session/<slug>.md` (slug: `YYYY-MM-DD-<mission>-<N>.md`,
+   where N is the next session number). Open it with:
    ```
    Continues: <path to previous ledger, if any>
    ```
@@ -56,13 +50,11 @@ opening a ledger, committing to git, or asking a question — may precede that c
    ```
    - <date> session=<slug> status=active ledger=.session/<slug>.md
    ```
-   Move the ledger to `.session/ledger/<slug>.md` when it is captured and retired.
+   Move ledger to `.session/ledger/<slug>.md` when captured and retired.
 5. Read any situational rules triggered by your role (listed in `CONVENTIONS.md` index).
 6. Present the opening orientation above and wait for the user to confirm.
 
 ## If you have no STATE file
-
-You are starting a new mission. You do not have a task yet.
 
 1. Read `worktrees/session-tracking/CONVENTIONS.md`.
 2. Interact with the user to define the mission: name, worktree, goal, and your role.
@@ -73,29 +65,22 @@ You are starting a new mission. You do not have a task yet.
 
 ## Roles and what to read per role
 
-- **Mission owner:** read `conventions/mission-owner.md`. You own STATE, the plan, the
-  branch, and integration decisions for this mission.
-- **Coder:** your STATE file defines your task. Focus on expected output, done criteria,
-  and limits. Do not expand scope beyond what STATE specifies.
-- **Reviewer:** read the work you are assigned; record findings in your ledger; do not
-  silently modify the work.
+- **Mission owner:** read `conventions/mission-owner.md`.
+- **Coder:** your task file defines your work. Read `conventions/coder.md`.
+  Maintain your own ledger; do not edit the task file.
+- **Reviewer:** read `conventions/reviewer.md`.
 - **Researcher:** investigate the assigned question; record findings; do not expand scope.
 
 ## When a plan is approved
 
-On `ExitPlanMode`, or an explicit "go ahead on X, Y, Z", save the plan to a file in
-`.session/` immediately — before any execution begins. Do not leave it contingent on the
-transient plan-mode file surviving.
-
-The saved plan can later be consolidated into the relevant spec or longer-term doc. The point
-is that it must be persisted at the moment of approval, not reconstructed from memory later.
+When a plan is approved (`ExitPlanMode`, or an explicit "go ahead on X, Y, Z"), save it
+to `.session/` immediately — before any execution begins.
 
 ## All sessions
 
-- Maintain the ledger continuously — append findings, decisions, corrections, false starts
-  as they happen.
-- Update STATE after each major step — mark completed items `[x]`, update Last completed,
-  Next step, and Status. Do not wait for wind-down.
+- Maintain the ledger continuously — findings, decisions, corrections, false starts.
+- Update STATE after each major step — mark `[x]`, update Last completed, Next step,
+  Status. Do not wait for wind-down.
 - Never push to git or publish without explicit per-operation authorization.
-- Skills (`/resume-mission`, `/wind-down`, `ledger-capture`) may be invoked as a subtask or
-  subagent — they get their own context window either way, which is the point.
+- Skills (`/resume-mission`, `/wind-down`, `ledger-capture`) may be invoked as a subtask
+  or subagent — they get their own context window.

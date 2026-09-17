@@ -412,7 +412,40 @@ Saved here as background.
 > to run the original command.
 (Split into two bullets: the rule + the task-file case as a separate prohibition.)
 
+### conventions/session-start.md trim — session 21 (2026-09-17)
 
+**"Never read" ledger bullet — original (lines 19–21):**
+> The ledger file listed in STATE's `Ledger / log` field — that is the previous session's
+> ledger, not yours. Do not read it. Do not read it "just to catch up." STATE contains
+> everything you need. Create your own ledger; do not open the old one.
+
+**Orientation explanation — original (lines 37–41):**
+> Immediately after the orientation block, add one sentence echoing the most relevant constraint
+> from `CONVENTIONS.md` that applies to the upcoming work. This is a verification artifact, not a
+> summary — one concrete, non-generic line that proves the read happened. Example: "I see the
+> policy-writer mission rule requires subscribing to two agentbus channels before mission work."
+> Generic lines ("I have read CONVENTIONS.md") do not count.
+
+**"No STATE file" section intro — original (line 65):**
+> You are starting a new mission. You do not have a task yet.
+(Section heading already says this. Dropped.)
+
+**"Roles" section — original second sentences (lines 76–82):**
+> Mission owner: "You own STATE, the plan, the branch, and integration decisions for this mission."
+> Coder: "your STATE file defines your task. Focus on expected output, done criteria, and limits.
+>   Do not expand scope beyond what STATE specifies."
+> Reviewer: "record findings in your ledger; do not silently modify the work."
+> Researcher: "record findings; do not expand scope."
+(Trimmed to one-line pointers. Coder line corrected: task is in task file, not STATE.)
+
+**"When a plan is approved" second paragraph — original (lines 90–91):**
+> The saved plan can later be consolidated into the relevant spec or longer-term doc. The point
+> is that it must be persisted at the moment of approval, not reconstructed from memory later.
+(Reasoning for the rule. The rule itself — save to .session/ immediately — is kept.)
+
+**"All sessions" skills bullet trailing clause — original (line 101):**
+> "they get their own context window either way, which is the point"
+(Dropped "which is the point" — background, not a direction.)
 
 ## 8. Refs
 
