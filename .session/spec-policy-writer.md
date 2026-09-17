@@ -375,6 +375,45 @@ starts. FG allows the user to verify before handoff.
 
 ---
 
+### CONVENTIONS.md trim — session 21 (2026-09-17)
+
+Removed prose from CONVENTIONS.md that restated reasoning rather than stating the rule.
+Saved here as background.
+
+**"Identify your mission" section — original opening:**
+> Every session is tied to exactly one mission. Before doing any work, identify:
+> - the mission name and its branch/worktree;
+> - your role in that mission;
+> - the session ledger you will maintain.
+> If any of these are unknown, ask the user before proceeding. Follow `conventions/session-start.md`
+> to initialize the session. A session assuming the mission-owner role must also read
+> `conventions/mission-owner.md`.
+
+**"Work only within your mission worktree" section — original:**
+> Every edit or write must target the session's own mission branch/worktree unless the user grants
+> a specific exception. Other worktrees are outside the session's scope: do not edit, inspect
+> their overall health, groom their files, or act as their maintainer.
+>
+> Never use `cd`, subshells, process substitution, shell redirection, or any other mechanism to
+> route a write around the worktree boundary. When a cross-worktree write is required, ensure you
+> have a specific exception or ask the user, then follow `conventions/working-outside-worktree.md`.
+>
+> Reads may cross worktree boundaries when needed (`cat`, full paths, `git show <branch>:<path>`, etc.).
+> In a pinned session `git -C <other-path>` is blocked — use `git show <branch>:<path>` instead (no `-C` needed).
+
+**"Situational rules" intro — dropped second clause:**
+> Having seen the file in a previous session, or believing it might be "useful context," is not a trigger.
+(Kept "read when triggered, not speculatively." The dropped clause was elaborating on what "not speculatively" means.)
+
+**"narrowest command" bullet — original:**
+> **Use the narrowest command that achieves the goal.** When a safety guard fires, the first
+> question is "is there a safer command?" — not "how do I bypass this?" If a safer alternative
+> exists, use it and disclose the substitution; do not override a guard because a task file said
+> to run the original command.
+(Split into two bullets: the rule + the task-file case as a separate prohibition.)
+
+
+
 ## 8. Refs
 
 *Related files (do not read unless explicitly needed):*

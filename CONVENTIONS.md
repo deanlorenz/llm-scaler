@@ -1,41 +1,24 @@
 # Conventions — cross-mission, cross-worktree
 
-Every session must read this file before starting work. These are the standing rules that apply
-to every mission and role.
-
 ## Identify your mission and role first
 
-Every session is tied to exactly one mission. Before doing any work, identify:
+Every session has exactly one mission. Identify mission, role, and ledger before doing anything. If any are unknown, ask.
 
-- the mission name and its branch/worktree;
-- your role in that mission;
-- the session ledger you will maintain.
-
-If any of these are unknown, ask the user before proceeding. Follow
-`conventions/session-start.md` to initialize the session. A session assuming the mission-owner
-role must also read `conventions/mission-owner.md`.
+Read `conventions/session-start.md` to initialize. Mission-owner role: also read `conventions/mission-owner.md`.
 
 - **No tool call may precede the opening orientation.** Before orientation: read CONVENTIONS.md, session-start.md, and STATE — nothing else.
 
 ## Work only within your mission worktree
 
-Every edit or write must target the session's own mission branch/worktree unless the user grants
-a specific exception. Other worktrees are outside the session's scope: do not edit, inspect
-their overall health, groom their files, or act as their maintainer.
-
-Never use `cd`, subshells, process substitution, shell redirection, or any other mechanism to
-route a write around the worktree boundary. When a cross-worktree write is required, ensure you
-have a specific exception or ask the user, then follow
-`conventions/working-outside-worktree.md`.
-
-Reads may cross worktree boundaries when needed (`cat`, full paths, `git show <branch>:<path>`, etc.).
-In a pinned session `git -C <other-path>` is blocked — use `git show <branch>:<path>` instead (no `-C` needed).
+- All writes must target your own mission worktree. No exceptions without explicit user authorization. See `conventions/working-outside-worktree.md`.
+- Never use `cd`, subshells, or shell redirection to route writes around the worktree boundary.
+- Reads may cross worktree boundaries: `cat <path>`, `git show <branch>:<path>`. In a pinned session, `git -C` is blocked — use `git show` instead.
 
 ## Situational rules — read when triggered
 
-Read the matching file when its situation occurs, not speculatively. **Do not read a situational rules file whose trigger has not occurred.** Having seen the file in a previous session, or believing it might be "useful context," is not a trigger.
+Read the matching file only when its trigger occurs — not speculatively.
 
-**Action triggers are hard gates, not reminders.** When a trigger below fires, STOP before performing the action. Read the named file now. Do not proceed until it is open and read. After reading, acknowledge the single most relevant constraint in one line before continuing — e.g. "I read `wip-editing.md`; key constraint: claim with mv, never cp." This confirms the read and proves it was not skipped.
+**Triggers are hard gates.** STOP. Read the named file. Then acknowledge the single most relevant constraint in one line before continuing — e.g. "I read `wip-editing.md`; key constraint: claim with mv, never cp."
 
 ### Role & Mission Setup (Read when establishing mission/role at session start)
 - `conventions/session-start.md` — **every session reads this first, before any work**
@@ -96,39 +79,21 @@ worktrees/<mission-name>/          ← mission branch/worktree
 
 - Never assume. Ask when the mission, role, scope, authorization, or instruction is unclear.
 - Do not silently choose between ambiguous or conflicting instructions; ask.
-- **Use the narrowest command that achieves the goal.** When a safety guard fires, the first
-  question is "is there a safer command?" — not "how do I bypass this?" If a safer alternative
-  exists, use it and disclose the substitution; do not override a guard because a task file said
-  to run the original command.
-- Never push without explicit authorization for that specific push. Authorization is
-  single-use. After receiving it, read `conventions/push.md` before pushing.
-- Never stop or kill a running background task unless explicitly told to stop that task. A
-  request to reduce chat noise is not permission to terminate work.
-- Keep long content out of chat. Put long tool output, reports, and file dumps in the mission's
-  `.session/` directory or code tree; reply with a short pointer and status.
-- Never read plan/spec docs or ledger files at session start. Pull plan docs on demand; consult
-  ledger files only when debugging or digging into history. See `conventions/session-start.md`.
-- Maintain the session ledger continuously as findings, decisions, corrections, and false
-  starts occur.
-- Update STATE after each major step — mark completed items `[x]`, update Last completed,
-  Next step, and Status. Do not wait for wind-down. Ledger and STATE updates do not need
-  chat narration.
-- **Before closing a previously-investigated item as resolved:** re-read the prior finding's
-  own text first. If the state is reachable via more than one path, trace every path — not
-  just the most salient one — before declaring the claim closed.
+- **Use the narrowest command that achieves the goal.** When a guard fires, ask "is there a safer command?" first.
+- Do not override a guard because a task file said to run the original command. Disclose any substitution.
+- Never push without explicit authorization for that specific push. Authorization is single-use. After receiving it, read `conventions/push.md`.
+- Never stop or kill a running background task unless explicitly told to. A request to reduce chat noise is not permission to terminate work.
+- Keep long content out of chat. Write tool output, reports, and file dumps to `.session/` or the code tree; reply with a short pointer and status.
+- Never read plan/spec docs or ledger files at session start. Pull plan docs on demand; consult ledger files only when debugging. See `conventions/session-start.md`.
+- Maintain the session ledger continuously — findings, decisions, corrections, false starts.
+- Update STATE after each major step — mark `[x]`, update Last completed, Next step, Status. Do not wait for wind-down.
+- **Before closing a previously-investigated item as resolved:** re-read the prior finding's own text first. If the state is reachable via more than one path, trace every path — not just the most salient one — before declaring the claim closed.
 
 ### Ownership and data safety — read and follow literally
 
-- **No in-place editing of anything**, except files you **100% own** in your own session's
-  context — your own code file, your own plan, or your own ledger append. Everything else:
-  write new, then remove/replace old.
+- **No in-place editing of anything**, except files you **100% own** — your own code file, your own plan, your own ledger append. Everything else: write new, then remove/replace old.
 - Never remove a file you do not own or did not create without explicit permission.
-- Before removing anything, verify that its content is unnecessary or has been captured in the
-  correct alternative location. Do not lose data.
-- Destructive actions are rare and need step-by-step approval, including `git reset --hard`,
-  `rm -rf`, `git rm`, stash removal/drop, and equivalents. If not 100% sure, preserve a backup
-  copy rather than proceeding.
+- Before removing anything, verify its content is captured in the correct location. Do not lose data.
+- Destructive actions need step-by-step approval: `git reset --hard`, `rm -rf`, `git rm`, stash drop, and equivalents. If not 100% sure, preserve a backup first.
 - Never edit files outside the mission and role you own.
-- Do not use in-place command-line rewriting (`sed -i`, `gawk -i`, Python `fileinput`, or
-  equivalents). Normal `Edit`/`Write` operations on owned, git-tracked files are allowed when
-  their pre-session state is already checkpointed.
+- Do not use in-place command-line rewriting (`sed -i`, `gawk -i`, Python `fileinput`, or equivalents). Normal `Edit`/`Write` on owned, git-tracked files are allowed when their pre-session state is checkpointed.
