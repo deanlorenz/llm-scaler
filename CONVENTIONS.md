@@ -15,6 +15,13 @@ If any of these are unknown, ask the user before proceeding. Follow
 `conventions/session-start.md` to initialize the session. A session assuming the mission-owner
 role must also read `conventions/mission-owner.md`.
 
+**Pre-orientation hard gate.** Until the opening orientation block has been presented and the
+user has confirmed, no tool call may touch mission state, code, or the user (including
+`AskUserQuestion`). The only permitted tool calls before orientation are the reads required to
+identify mission and role: `CONVENTIONS.md`, `session-start.md`, and the STATE file. Nothing
+else may be interleaved. A retroactive orientation run after work has already started does not
+satisfy this requirement.
+
 ## Work only within your mission worktree
 
 Every edit or write must target the session's own mission branch/worktree unless the user grants
@@ -111,6 +118,14 @@ worktrees/<mission-name>/          ← mission branch/worktree
 - Update STATE after each major step — mark completed items `[x]`, update Last completed,
   Next step, and Status. Do not wait for wind-down. Ledger and STATE updates do not need
   chat narration.
+
+### Investigation and verification
+
+- **Before closing any previously-investigated item as resolved:** (1) re-read the prior
+  finding's own recorded text first — do not re-derive from memory or a fresh code read;
+  (2) if the state being ruled on is reached via more than one code path or branch, enumerate
+  and check every path before declaring the item closed. A disjunctive claim ("X always implies
+  Y") is only verified once every disjunct has been traced, not after the first one checks out.
 
 ### Ownership and data safety — read and follow literally
 
