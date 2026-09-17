@@ -6,7 +6,10 @@ Read at session start, in this order:
 1. `CONVENTIONS.md` (path in your STATE file, or the canonical session-tracking worktree)
 2. This file
 3. Your STATE file
-4. Any situational rules triggered by your role (listed in `CONVENTIONS.md` index)
+4. `conventions/chat-preferences.md` — if running as an interactive foreground session
+5. Any other situational rules triggered by your role (listed in `CONVENTIONS.md` index)
+
+All reading is silent. The orientation block (below) is the first text the user sees.
 
 If the STATE path is missing or cannot be resolved, stop and report it.
 Do not assume the mission from the current folder.
@@ -52,7 +55,8 @@ opening a ledger, committing to git, or asking a question — may precede that c
    ```
    Move ledger to `.session/ledger/<slug>.md` when captured and retired.
 5. Read any situational rules triggered by your role (listed in `CONVENTIONS.md` index).
-6. Present the opening orientation above and wait for the user to confirm.
+6. Present the opening orientation block — this must be the first text sent to the user.
+   Wait for confirmation before any further action.
 
 ## If you have no STATE file
 

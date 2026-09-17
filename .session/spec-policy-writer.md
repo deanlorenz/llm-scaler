@@ -447,6 +447,30 @@ Saved here as background.
 > "they get their own context window either way, which is the point"
 (Dropped "which is the point" — background, not a direction.)
 
+### CONVENTIONS.md + session-start.md orientation fixes — session 21 (2026-09-17)
+
+**Root cause analysis:**
+Two bugs found after subagent testing:
+
+1. `chat-preferences.md` is listed under "Action Triggers" in CONVENTIONS.md with the
+   condition "interactive foreground sessions communicating with the user." This is a
+   session-type, not an action — agents don't identify it as a trigger at session start.
+   Result: agents skip it entirely or read it too late.
+
+2. `session-start.md` step 6 ("present orientation, wait") is the last of 6 steps.
+   Steps 1–5 involve silent work (reading files, creating ledger, appending STATE).
+   Agents sometimes emit text output during those steps, burying the orientation block
+   or presenting it after other content. The rule says wait for confirmation, but doesn't
+   say the orientation must be the first visible output.
+
+**Original CONVENTIONS.md trigger entry for chat-preferences:**
+> `conventions/chat-preferences.md` — interactive foreground sessions communicating with the user
+(Was under "Action Triggers"; moving to "Role & Mission Setup" so it fires at session start.)
+
+**Original session-start.md step 6:**
+> 6. Present the opening orientation above and wait for the user to confirm.
+(Adding explicit constraint: orientation block is the first text presented to the user.)
+
 ## 8. Refs
 
 *Related files (do not read unless explicitly needed):*

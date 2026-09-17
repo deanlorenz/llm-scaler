@@ -22,6 +22,7 @@ Read the matching file only when its trigger occurs — not speculatively.
 
 ### Role & Mission Setup (Read when establishing mission/role at session start)
 - `conventions/session-start.md` — **every session reads this first, before any work**
+- `conventions/chat-preferences.md` — every interactive foreground session (read before presenting orientation)
 - `conventions/mission-owner.md` — assuming or acting in the mission-owner role
 - `conventions/policy-writer.md` — working in any role on the `policy-writer` mission
 - `conventions/coder.md` — executing in the coder role
@@ -33,7 +34,6 @@ Read the matching file only when its trigger occurs — not speculatively.
 - `conventions/state-vs-ledger.md` — creating initial state or ledger files, or unsure which file information belongs in
 
 ### Action Triggers (Read immediately before performing the action)
-- `conventions/chat-preferences.md` — interactive foreground sessions communicating with the user
 - `conventions/agentbus-user-interaction.md` — when running as a background agent/subtask needing to ask user questions via agentbus
 - `conventions/wip-editing.md` — before editing any file you don't own, or writing a new file into a folder you don't own
 - `conventions/working-outside-worktree.md` — before performing a permitted cross-worktree write
