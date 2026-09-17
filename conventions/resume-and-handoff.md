@@ -1,10 +1,9 @@
 # Resuming, handing off, and winding down a mission
 
-Read this when executing `/resume-mission` or `/wind-down`, or when taking over or ending work on a mission.
+## Session Log
 
-## Session Log Lifecycle & Status Rules
-
-Every mission's `.session/STATE.md` maintains an append-only **Session log** section under `.wip` protocol (`conventions/wip-editing.md`). Active session ledgers live directly under `.session/`; after capture and retirement, move them to `.session/ledger/` and update the log path:
+The session log in `.session/STATE.md` is append-only. Active ledgers live under `.session/`;
+move to `.session/ledger/` on retirement. Example format:
 
 ```markdown
 ## Session log
@@ -13,72 +12,65 @@ Every mission's `.session/STATE.md` maintains an append-only **Session log** sec
 - 2026-08-27 session=<slug> status=retired ledger=.session/ledger/<slug>.md
 ```
 
-### Status Values:
-- **`active`**: Currently working the mission, checkpointing during active work, or safely paused across turn boundaries / compactions.
-- **`retired`**: The session is genuinely ending its engagement on this mission (transferred ownership, finished work, or closed out).
-- **Resolution**: An entry is **fully resolved** only when its status is `retired` AND its named ledger file carries a `## Verified <date>` marker.
+Status values:
+- `active` — session is working, checkpointing, or safely paused.
+- `retired` — session has ended or transferred ownership.
+- Fully resolved: `status=retired` AND ledger carries a `## Verified <date>` marker.
 
-## Resume / Takeover Protocol (Executed during `/resume-mission`)
+## Resume / Takeover Protocol
 
-Used when `STATE.md` exists with an active session log entry — whether resuming your own prior work or taking over from another session. Always ask the user for confirmation before declaring ownership.
+1. **Ask user:** "Continuing `<slug>`?" — confirm mission and session before proceeding.
+2. **Live presence check:** Check agentbus for a recent heartbeat from the active slug.
+   If still alive: stop, do not take over, ask the user.
+3. **Pending scan:** Any session log entry that is `active`, or `retired` without a
+   `## Verified` marker, is pending. Captured retired ledgers must be under `.session/ledger/`.
+4. **Lock & retire:** Update any unretired pending session to `status=retired`.
+5. **Run `ledger-capture`:** Execute against the pending ledger in the foreground.
+6. **Verify:** Confirm `## Verified <date>` is appended to the processed ledger.
+7. **Ground-truth check:** If STATE has any checklist or file list derived from an external
+   source (a diff, file tree, test suite, config), launch a background agent to regenerate
+   and diff it against STATE before starting work.
+8. **Declare ownership:** Publish on agentbus before recording the new active session.
 
-1. **Ask user:** "Continuing `<slug>`?" — confirm which mission and session before proceeding.
-2. **Live Presence Check:** Check agentbus for a recent presence/heartbeat from the active slug. If still alive: stop, do not take over, ask the user.
-3. **Pending Scan:** Scan all Session log entries in `.session/STATE.md`. Any entry that is `active`, or `retired` without a `## Verified` marker in its ledger, is **pending**. Captured retired ledgers must be under `.session/ledger/`.
-4. **Lock & Retire:** Update any unretired pending session to `status=retired`.
-5. **Run `ledger-capture`:** Execute `ledger-capture` in the foreground against that pending ledger to fold uncaptured findings into durable docs (`STATE.md` or internal plan).
-6. **Append Verification:** Confirm `## Verified <date>` is appended to the processed ledger.
-7. **STATE ground-truth check:** If STATE tracks any checklist or file list derived from an
-   external source of truth (a diff, a file tree, a test suite, a config), launch a
-   background verification agent to regenerate that source and diff it against STATE's claim.
-   The agent reports findings to the parent before the new session starts work. Do not rely on
-   a clean `ledger-capture` pass as proof that STATE's task-tracking content is accurate —
-   ledger-capture verifies the ledger's narrative was captured, not that the narrative matches
-   ground truth.
-8. **Declare Ownership:** Publish ownership on agentbus before recording the new active session.
+## Checkpoint & Wind-Down Protocol
 
-## Checkpoint & Wind-Down Protocol (Executed during `/wind-down`)
-
-Wind-down establishes a durable, recoverable checkpoint so work is preserved across turn boundaries, compactions, clears, or reloads.
-
-1. **Stop Active Operations:** Stop any background workers/subagents launched by this session.
-2. **Update Live Ledger:** Append all unrecorded findings, decisions, corrections, and false starts to `.session/<slug>.md`.
-3. **Update STATE.md:** Under `.wip` protocol, update task checklist, `Last completed`, `Next step / resume point`, and `Status`.
-4. **Run `ledger-capture`:** Run `ledger-capture` on own active ledger to ensure durable reflection in `STATE.md` or internal spec, and append `## Verified <date>`.
-5. **Retirement / Status Update (if ending engagement):**
-   - If closing the session or transferring ownership: update Session log entry to `status=retired`.
-   - If checkpointing while intending to continue: keep entry `status=active`.
-6. **Agentbus Release (if retiring):**
-   - If retiring ownership, publish release message on `mission.<mission-name>`.
+1. **Stop active operations:** Stop any background workers/subagents launched by this session.
+2. **Update ledger:** Append all unrecorded findings, decisions, corrections, false starts.
+3. **Update STATE:** Update task checklist, `Last completed`, `Next step`, `Status`.
+4. **Run `ledger-capture`:** Run against own active ledger; confirm `## Verified <date>` appended.
+5. **Retirement:**
+   - Ending or transferring: update session log entry to `status=retired`.
+   - Checkpointing to continue: keep `status=active`.
+6. **Agentbus release (if retiring):** Publish release on `mission.<mission-name>`.
 
 ## Agentbus Ownership Protocol
 
-- **Taking Ownership:**
-  ```
-  agentbus_publish(topic="mission.<mission-name>", kind="handoff",
-    body="session=<slug> taking ownership of <mission-name>")
-  ```
-- **Releasing Ownership:**
-  ```
-  agentbus_publish(topic="mission.<mission-name>", kind="handoff",
-    body="session=<slug> releasing ownership of <mission-name>")
-  ```
+Taking ownership:
+```
+agentbus_publish(topic="mission.<mission-name>", kind="handoff",
+  body="session=<slug> taking ownership of <mission-name>")
+```
+
+Releasing ownership:
+```
+agentbus_publish(topic="mission.<mission-name>", kind="handoff",
+  body="session=<slug> releasing ownership of <mission-name>")
+```
 
 ## `ledger-capture` Contract
 
 A focused agent assigned to process exactly one ledger file:
-1. **Agentbus:** Subscribe to the assigned `In:` channel before work and remain subscribed until exit.
-   Answer parent progress, clarification, and interim-result requests on `Out:` before continuing.
-   Publish status, findings, questions, and completion on `Out:`.
-2. **Capture all durable findings:** Read the entire assigned ledger and identify every correction,
-   decision, rule, safety requirement, and unresolved issue that must survive the session. Do not
-   limit capture to items already referenced by current policy files. In particular, check for
-   ownership, creation, removal, destructive-action, authorization, and data-preservation rules.
-3. **Allowed Write Destinations:** The mission's own `.session/STATE.md` and its internal plan/spec doc only.
-4. **Prohibition:** `ledger-capture` must **never** write directly to `CONVENTIONS.md` or `conventions/`.
-5. **Global Findings (Suggestion Box):** Any finding that warrants a global rule must be written as an atomic file into `session-tracking/suggestion-box/` named `YYYY-MM-DD-HHMM-<mission-name>.md`. Only `policy-writer` processes suggestion-box entries.
-6. **Completion Marker & Summary Table:**
-   Append a verification marker to the end of the processed ledger, including a summary table of findings and actions taken:
+
+1. **Agentbus:** Follow standard agentbus contract (`conventions/agentbus.md`).
+2. **Capture:** Read the entire ledger. Identify every correction, decision, rule, safety
+   requirement, and unresolved issue that must survive the session. Check especially for
+   ownership, authorization, and data-preservation rules.
+3. **Write destinations:** The mission's own `.session/STATE.md` and its internal plan/spec only.
+4. **Prohibition:** Never write to `CONVENTIONS.md` or `conventions/`.
+5. **Global findings:** Any finding warranting a global rule goes to
+   `session-tracking/suggestion-box/YYYY-MM-DD-HHMM-<mission-name>.md`.
+   Only `policy-writer` processes suggestion-box entries.
+6. **Completion — append to the processed ledger:**
    ```markdown
    ## Verified YYYY-MM-DD — <all points already captured | folded in: summary>
 
@@ -86,6 +78,8 @@ A focused agent assigned to process exactly one ledger file:
    |---|---|---|
    | <point / finding> | <doc path & section> | <None needed | Added to X | Folded into Y> |
    ```
+
 ## Doc-Reference Path Rule
 
-Every reference across tracked docs must be a **repo-root-relative path** (e.g. `worktrees/policy-writer/.session/STATE.md`) — never filesystem-absolute, never a bare filename. Always state the worktree/branch if not obvious from context.
+Every reference across tracked docs must be a repo-root-relative path
+(e.g. `worktrees/policy-writer/.session/STATE.md`) — never absolute, never a bare filename.
