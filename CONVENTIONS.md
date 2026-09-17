@@ -43,7 +43,6 @@ Read the matching file only when its trigger occurs — not speculatively.
 - `conventions/push.md` — before executing git push (after receiving explicit single-use approval)
 - `conventions/pr-branch.md` — before creating or curating an ephemeral PR branch
 - `conventions/pr-workflow.md` — before opening a PR via the GitHub API
-- `conventions/settings-and-skill-edits.md` — before editing `~/.claude/settings.json` or a `SKILL.md`
 - `conventions/unexplained-files.md` — upon finding an unexplained file or uncommitted edit
 
 ## Repo layout
