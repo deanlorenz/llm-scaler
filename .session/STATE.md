@@ -120,9 +120,11 @@
 - [x] Fixed stale `git -C` guidance in `CONVENTIONS.md`, `feature-worktree-setup.md`, and
       `install-to-session-tracking.md` (commit `6ce874fa` on `policy-writer`).
 
-**Last completed:** Session-20 complete. Entries 1–13 processed. Both branches pushed (`policy-writer` → `34be8d413`, `session-tracking` → `681f32c1c`).
+**Last completed:** Session-21 in progress. Installed + pushed session-21 conventions trim.
+Last `policy-writer` HEAD installed to `session-tracking`: `a3018c893`.
+Use this SHA as cherry-pick start for the next install.
 
-**Next step / resume point:** New session. Check for new suggestion-box entries. Deferred items: entry 3 (ledger-capture shell guard false-positives — address when ledger-capture custom-agent spec written), entry 4 (git-hygiene / branch-health — address when that conventions file exists).
+**Next step / resume point:** Continue conventions trim pass — next file TBD.
 
 ### Status
 Session 20 complete. All suggestion-box entries 1–13 processed and prefixed. Installed and pushed.
