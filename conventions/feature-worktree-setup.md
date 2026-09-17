@@ -149,8 +149,8 @@ pending symlink changes it finds.
 ## If symlinks don't exist yet
 
 Any session can access the mission's files directly via the mission branch, without needing
-the `session-tracking` symlinks to be present:
+the `session-tracking` symlinks to be present (run from inside your own worktree — no `-C` needed):
 
 ```bash
-git -C <repo-root> show <mission-name>:.session/STATE.md
+git show <mission-name>:.session/STATE.md
 ```

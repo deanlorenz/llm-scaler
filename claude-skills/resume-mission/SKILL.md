@@ -275,19 +275,16 @@ grounded context. Do not auto-proceed — the parent decides the next action.
 
 ### Step 10: Record this session's start in STATE.md and open new ledger
 
-Using the `.wip` protocol (`conventions/wip-editing.md`):
+The mission owner's own `.session/STATE.md` is single-writer — edit it directly, no `.wip`
+rename needed. (See `conventions/wip-editing.md` §"Who needs this protocol".)
 
 1. Create `.session/ledger/` if it does not exist.
-2. Rename `.session/STATE.md` → `STATE.md.wip` (or stop if the lock already exists).
-3. Append one line to the Session log:
+2. Append one line to the Session log in `STATE.md`:
    `- <date> session=<slug> status=active ledger=.session/<slug>.md`
-4. Rename `STATE.md.wip` back to `STATE.md`, `git add`, commit on the mission branch:
+3. `git add .session/STATE.md` and commit on the mission branch:
    `docs(state): record session start — $MISSION_NAME`
-5. Create a new active ledger file at `.session/<slug>.md`. Open it with:
+4. Create a new active ledger file at `.session/<slug>.md`. Open it with:
    `Continues: <path to previous ledger, if any>`
    Append to it as you work throughout this session.
-
-If `STATE.md.wip` already exists, someone else is mid-edit — wait, or tell the user it's
-locked and ask how to proceed.
 
 <!-- user-approved-settings-change: marker retained per prior edit's convention -->

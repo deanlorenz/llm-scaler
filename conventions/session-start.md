@@ -34,6 +34,12 @@ Last:      <last completed step>
 Next:      <next step>
 ```
 
+Immediately after the orientation block, add one sentence echoing the most relevant constraint
+from `CONVENTIONS.md` that applies to the upcoming work. This is a verification artifact, not a
+summary — one concrete, non-generic line that proves the read happened. Example: "I see the
+policy-writer mission rule requires subscribing to two agentbus channels before mission work."
+Generic lines ("I have read CONVENTIONS.md") do not count.
+
 Then wait for the user to confirm before executing anything.
 
 ## If you have a STATE file
@@ -73,6 +79,15 @@ You are starting a new mission. You do not have a task yet.
 - **Reviewer:** read the work you are assigned; record findings in your ledger; do not
   silently modify the work.
 - **Researcher:** investigate the assigned question; record findings; do not expand scope.
+
+## When a plan is approved
+
+On `ExitPlanMode`, or an explicit "go ahead on X, Y, Z", save the plan to a file in
+`.session/` immediately — before any execution begins. Do not leave it contingent on the
+transient plan-mode file surviving.
+
+The saved plan can later be consolidated into the relevant spec or longer-term doc. The point
+is that it must be persisted at the moment of approval, not reconstructed from memory later.
 
 ## All sessions
 

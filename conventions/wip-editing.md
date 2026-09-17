@@ -1,25 +1,67 @@
-# Editing a shared file safely — the `.wip` protocol
+# Editing a file you don't own — the `.wip` protocol
 
-Read this before editing any file that more than one session may need to write.
+Read this before editing any file or writing any new file into a folder that you don't own.
 
-## Steps
+## Who owns a file
 
-1. **Claim:** rename `FILE.md` → `FILE.md.wip`. The absent `FILE.md` is the lock signal.
-   Never use `cp` — copying leaves `FILE.md` in place and allows concurrent edits.
-2. **Edit:** make all changes to `FILE.md.wip` directly (ordinary same-worktree tools).
-3. **Release:** rename `FILE.md.wip` → `FILE.md`.
-4. **Commit:** `git add FILE.md && git commit`.
+You own a file if you created it in this session, or if it lives in your own mission
+worktree and no other active session has been granted write access to it. Everything else —
+files in another worktree, shared convention files, another mission's STATE — you do not own.
 
-Other sessions must not start their own edit while `FILE.md` is absent. Reads are never
-blocked — use `git show HEAD:path/to/FILE.md` or read `FILE.md.wip` directly.
+**The exemption is identity-based, not dispatcher-based.** The mission owner may edit its own
+STATE.md directly without `.wip`. Every other agent — including one the owner just dispatched
+— is not the owner and must use `.wip` on that file, regardless of who gave the instruction.
+Dispatching an agent to edit a file does not transfer the owner's exemption to that agent.
 
-`*.md.wip` files are excluded via `.git/info/exclude` (repo-shared, not per-worktree).
+**When dispatching an agent:** tell the agent explicitly in its task file whether it needs
+`.wip` for the files it will touch. Examples: a coder writing new code files it creates does
+not need `.wip`; an agent updating STATE.md it does not own does need `.wip`.
 
-## When a plan is approved
+## Case 1: Editing an existing file you don't own
 
-On `ExitPlanMode`, or an explicit "go ahead on X, Y, Z", save the plan to a file in
-`.session/` immediately — before any execution begins. Do not leave it contingent on the
-transient plan-mode file surviving.
+1. **Verify the file exists and the current version is tracked:**
+   ```bash
+   git ls-files <path>   # must show the file; if empty, it is untracked — stop and investigate
+   ```
+2. **Verify no existing `.wip` lock:**
+   ```bash
+   test ! -f <path>.wip || echo "LOCKED — stop"
+   ```
+   If locked, stop — someone else is mid-edit. Do not proceed.
+3. **Claim — rename to `.wip`:**
+   ```bash
+   mv <path> <path>.wip
+   ```
+   Never use `cp` — that leaves the original in place and allows concurrent edits.
+4. **Edit `<path>.wip`** using normal tools.
+5. **Release — rename back:**
+   ```bash
+   mv <path>.wip <path>
+   ```
+6. **Commit:** `git add <path> && git commit`.
 
-The saved plan can later be consolidated into the relevant spec or longer-term doc. The point
-is that it must be persisted at the moment of approval, not reconstructed from memory later.
+Reads are never blocked — use `git show HEAD:<path>` or read `<path>.wip` directly while
+the lock is held.
+
+## Case 2: Writing a new file into a shared folder you don't own
+
+1. **Verify the target does not already exist:**
+   ```bash
+   test ! -f <destination-path> || echo "EXISTS — stop and investigate"
+   git show <branch>:<path>   # also check branch history
+   ```
+   If it exists (on disk or in history), stop — this may be a rename, not a new file.
+2. **Claim the name with a `.wip` placeholder:**
+   ```bash
+   touch <destination-path>.wip
+   ```
+3. **Write the file locally** in your own worktree first.
+4. **Place at destination — never bypass `.wip`:**
+   ```bash
+   cp <local-path> <destination-path>.wip   # overwrite placeholder with real content
+   mv <destination-path>.wip <destination-path>
+   ```
+   Only if `mv` at the destination is structurally blocked (sandboxed session) may you `cp`
+   directly to the final path — see `conventions/working-outside-worktree.md` §4f.
+5. **Commit:** `git add <destination-path> && git commit`.
+

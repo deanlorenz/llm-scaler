@@ -26,11 +26,14 @@ route a write around the worktree boundary. When a cross-worktree write is requi
 have a specific exception or ask the user, then follow
 `conventions/working-outside-worktree.md`.
 
-Reads may cross worktree boundaries when needed (`git -C`, `cat`, full paths, etc.).
+Reads may cross worktree boundaries when needed (`cat`, full paths, `git show <branch>:<path>`, etc.).
+In a pinned session `git -C <other-path>` is blocked — use `git show <branch>:<path>` instead (no `-C` needed).
 
 ## Situational rules — read when triggered
 
 Read the matching file when its situation occurs, not speculatively. **Do not read a situational rules file whose trigger has not occurred.** Having seen the file in a previous session, or believing it might be "useful context," is not a trigger.
+
+**Action triggers are hard gates, not reminders.** When a trigger below fires, STOP before performing the action. Read the named file now. Do not proceed until it is open and read. After reading, acknowledge the single most relevant constraint in one line before continuing — e.g. "I read `wip-editing.md`; key constraint: claim with mv, never cp." This confirms the read and proves it was not skipped.
 
 ### Role & Mission Setup (Read when establishing mission/role at session start)
 - `conventions/session-start.md` — **every session reads this first, before any work**
@@ -47,7 +50,7 @@ Read the matching file when its situation occurs, not speculatively. **Do not re
 ### Action Triggers (Read immediately before performing the action)
 - `conventions/chat-preferences.md` — interactive foreground sessions communicating with the user
 - `conventions/agentbus-user-interaction.md` — when running as a background agent/subtask needing to ask user questions via agentbus
-- `conventions/wip-editing.md` — before editing a shared file (`STATE.md`, `CONVENTIONS.md`)
+- `conventions/wip-editing.md` — before editing any file you don't own, or writing a new file into a folder you don't own
 - `conventions/working-outside-worktree.md` — before performing a permitted cross-worktree write
 - `conventions/tasks.md` — before writing or assigning a task specification to any worker
 - `conventions/coder-orchestration.md` — before dispatching or orchestrating a coder agent
@@ -80,9 +83,10 @@ worktrees/<mission-name>/          ← mission branch/worktree
 ```
 
 - Access other missions' tracking files via `session-tracking/missions/<mission-name>/`.
-- If a symlink is broken or worktree not present, read directly from the branch:
+- If a symlink is broken or worktree not present, read directly from the branch
+  (run from inside your own worktree — no `-C` needed):
   ```bash
-  git -C <repo-root> show <mission-name>:.session/STATE.md
+  git show <mission-name>:.session/STATE.md
   ```
 - Do not edit another mission's symlinks — report broken links via `session-tracking/suggestion-box/`.
 
@@ -90,6 +94,10 @@ worktrees/<mission-name>/          ← mission branch/worktree
 
 - Never assume. Ask when the mission, role, scope, authorization, or instruction is unclear.
 - Do not silently choose between ambiguous or conflicting instructions; ask.
+- **Use the narrowest command that achieves the goal.** When a safety guard fires, the first
+  question is "is there a safer command?" — not "how do I bypass this?" If a safer alternative
+  exists, use it and disclose the substitution; do not override a guard because a task file said
+  to run the original command.
 - Never push without explicit authorization for that specific push. Authorization is
   single-use. After receiving it, read `conventions/push.md` before pushing.
 - Never stop or kill a running background task unless explicitly told to stop that task. A
