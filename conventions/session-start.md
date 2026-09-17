@@ -74,6 +74,15 @@ You are starting a new mission. You do not have a task yet.
   silently modify the work.
 - **Researcher:** investigate the assigned question; record findings; do not expand scope.
 
+## When a plan is approved
+
+On `ExitPlanMode`, or an explicit "go ahead on X, Y, Z", save the plan to a file in
+`.session/` immediately — before any execution begins. Do not leave it contingent on the
+transient plan-mode file surviving.
+
+The saved plan can later be consolidated into the relevant spec or longer-term doc. The point
+is that it must be persisted at the moment of approval, not reconstructed from memory later.
+
 ## All sessions
 
 - Maintain the ledger continuously — append findings, decisions, corrections, false starts

@@ -35,37 +35,33 @@ State the exact destination path and the exact change before asking.
 4. If the destination file already exists, read it first — never overwrite unseen content.
 5. Make only the authorized change — nothing adjacent.
 
-### 4d. `.wip` protocol for shared files
-Follow `conventions/wip-editing.md`. Summary: rename `<file>` → `<file>.wip` before editing;
-if `.wip` already exists, stop — someone else is mid-edit; rename back after editing and commit.
+### 4d. Can you `mv` at the destination?
 
-### 4e. Pinned-session writes — two sanctioned methods
-1. **Append via full path, using shell:** `>> /full/path/to/other-worktree/file`. Only the
-   exact authorized file, only append, never truncate/overwrite.
-2. **Write locally, then copy via full path, using shell:** write the file in your own
-   worktree, then `cp /full/path/in/your/worktree/file /full/path/into/other/worktree/file`.
-   For full replace/overwrite. Before copying, `diff` source and destination and confirm the
-   overwrite is expected — never `cp` onto a destination you haven't read.
+**Yes — use `.wip` protocol:** follow `conventions/wip-editing.md` (Case 1 for an existing
+file, Case 2 for a new file in a shared folder). Shell `mv` at the destination path is all
+that is needed — no special pinned-session tooling required.
 
-Neither method commits anything. A destination commit is the destination session's job (§5).
+**Append** is a separate alternative when you only need to add to the end of a file and
+don't need full replace: `>> /full/path/to/other-worktree/file`. Append does not require
+`.wip` — it is non-destructive and atomic enough for single-line appends. For anything
+beyond a single append, use `.wip`.
 
-### 4f. When all write paths are blocked (worktree-isolated / sandboxed session)
+**No — `mv` is structurally blocked (sandboxed session):** `Edit`/`Write` tools and `git`
+operations targeting the other worktree are hard-blocked by the harness. Use `cp` as a
+fallback of last resort:
 
-A worktree-isolated session may find that `Edit`/`Write` tools and `git` operations targeting
-another worktree are hard-blocked by the harness. Raw shell `cp` may be the only path that
-gets through. Rules for that fallback:
-
-1. **Never copy blindly.** Before copying, read what is already at the destination:
-   `cat <full-destination-path>` or `git show <branch>:<path>`.
-2. **If the destination file already exists, verify it is tracked before overwriting:**
-   confirm `git ls-files <path>` (run from inside a session positioned in the target worktree,
-   or via `git show <branch>:<path>`) shows the file is in git history. If it is not tracked,
-   do not overwrite — the existing content has no recovery path.
-3. **Record the copy explicitly in your own ledger**, naming the full destination path and
-   noting it is uncommitted. This is the breadcrumb the next session positioned in the target
-   worktree needs to `git add`/commit promptly rather than discovering an unexplained untracked file.
-4. **The destination commit is the target worktree session's job** (same as §5) — the
-   session that did the `cp` cannot commit it.
+1. **Verify the target does not already exist**, or if it does, that it is tracked:
+   `cat <full-destination-path>` or `git show <branch>:<path>`. Never overwrite untracked
+   content — it has no recovery path.
+2. **Write the file locally** in your own worktree first.
+3. **`cp` to destination:**
+   ```bash
+   cp <local-path> /full/path/into/other/worktree/file
+   ```
+4. **Record the copy explicitly in your own ledger**, naming the full destination path and
+   noting it is uncommitted — the next session in the target worktree needs to `git
+   add`/commit promptly.
+5. **The destination commit is the target worktree session's job** (same as §5).
 
 ## 5. Git commits and pushes on another worktree's branch
 

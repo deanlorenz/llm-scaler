@@ -42,9 +42,9 @@ session — record it honestly here and continue. Do not skip this step on that 
 
 ## Step 3: Update STATE.md
 
-This step is **not skippable**. Update `<mission-worktree>/.session/STATE.md` now, via the
-`.wip` protocol (`conventions/wip-editing.md`). `STATE.md` is local in the mission worktree —
-no cross-worktree exit/re-enter needed.
+This step is **not skippable**. Update `<mission-worktree>/.session/STATE.md` now. The
+mission owner's own STATE.md is single-writer — edit it directly, no `.wip` rename needed.
+(See `conventions/wip-editing.md` §"Who needs this protocol".)
 
 Required every wind-down, regardless of time pressure:
 - Mark completed steps `[x]` in the checklist
@@ -111,8 +111,8 @@ ledger-capture at that point.
 
 Once ledger-capture (Step 5) has finished and appended its `## Verified` marker: move the active
 ledger to `.session/ledger/<slug>.md`, then update its entry in `STATE.md`'s Session log from
-`status=active` to `status=retired` with the new ledger path, via the `.wip` protocol. This can be
-combined with Step 3's `STATE.md` update — no need for two round-trips.
+`status=active` to `status=retired` with the new ledger path. Edit STATE.md directly — you
+own it. This can be combined with Step 3's `STATE.md` update — no need for two round-trips.
 
 ## Step 7: Release ownership on agentbus
 

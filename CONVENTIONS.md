@@ -48,7 +48,7 @@ Read the matching file when its situation occurs, not speculatively. **Do not re
 ### Action Triggers (Read immediately before performing the action)
 - `conventions/chat-preferences.md` — interactive foreground sessions communicating with the user
 - `conventions/agentbus-user-interaction.md` — when running as a background agent/subtask needing to ask user questions via agentbus
-- `conventions/wip-editing.md` — before editing a shared file (`STATE.md`, `CONVENTIONS.md`)
+- `conventions/wip-editing.md` — before editing any file you don't own, or writing a new file into a folder you don't own
 - `conventions/working-outside-worktree.md` — before performing a permitted cross-worktree write
 - `conventions/tasks.md` — before writing or assigning a task specification to any worker
 - `conventions/coder-orchestration.md` — before dispatching or orchestrating a coder agent
