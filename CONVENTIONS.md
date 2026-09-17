@@ -33,6 +33,8 @@ In a pinned session `git -C <other-path>` is blocked — use `git show <branch>:
 
 Read the matching file when its situation occurs, not speculatively. **Do not read a situational rules file whose trigger has not occurred.** Having seen the file in a previous session, or believing it might be "useful context," is not a trigger.
 
+**Action triggers are hard gates, not reminders.** When a trigger below fires, STOP before performing the action. Read the named file now. Do not proceed until it is open and read. After reading, acknowledge the single most relevant constraint in one line before continuing — e.g. "I read `wip-editing.md`; key constraint: claim with mv, never cp." This confirms the read and proves it was not skipped.
+
 ### Role & Mission Setup (Read when establishing mission/role at session start)
 - `conventions/session-start.md` — **every session reads this first, before any work**
 - `conventions/mission-owner.md` — assuming or acting in the mission-owner role

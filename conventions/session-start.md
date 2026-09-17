@@ -34,6 +34,12 @@ Last:      <last completed step>
 Next:      <next step>
 ```
 
+Immediately after the orientation block, add one sentence echoing the most relevant constraint
+from `CONVENTIONS.md` that applies to the upcoming work. This is a verification artifact, not a
+summary — one concrete, non-generic line that proves the read happened. Example: "I see the
+policy-writer mission rule requires subscribing to two agentbus channels before mission work."
+Generic lines ("I have read CONVENTIONS.md") do not count.
+
 Then wait for the user to confirm before executing anything.
 
 ## If you have a STATE file
