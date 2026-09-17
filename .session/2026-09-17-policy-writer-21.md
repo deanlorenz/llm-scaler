@@ -52,3 +52,27 @@ Subagent test (fresh context, CONVENTIONS.md only):
   No change needed to CONVENTIONS.md.
 
 Next file: conventions/session-start.md
+
+## Conventions trim pass (session-21)
+
+Files trimmed (capture → verify → trim → subagent test → commit):
+- CONVENTIONS.md (2855307e, d95d7225) — short bullets; orientation fixes (db2160e4)
+- conventions/session-start.md (bde623eb, db2160e4) — trim + chat-preferences fix + orientation-first
+- conventions/policy-writer.md (78b30dd8) — drafting standard added
+- conventions/resume-and-handoff.md (86997bc6) — trim
+- conventions/install-to-session-tracking.md (a3018c89) — cherry-pick rewrite
+- conventions/settings-and-skill-edits.md (e5ffbe80) — deleted (fabricated harness rule)
+- CONVENTIONS.md index (b3be4fa0) — removed settings-and-skill-edits trigger
+- conventions/unexplained-files.md (ed91b6cb) — trim
+- conventions/mission-owner.md (e492e9f8) — trim
+- conventions/coder.md (51b1fe6e, 4724e624) — trim + user.in progress note rule
+- conventions/reviewer.md (bd415ad5) — trim
+
+Partial install done at a3018c893 (covers up to install-to-session-tracking.md rewrite).
+Remaining commits not yet installed: e5ffbe80 through bd415ad5.
+
+Files not yet trimmed: wip-editing, working-outside-worktree, state-vs-ledger, push,
+pr-branch, pr-workflow, chat-preferences, coder-orchestration, worktree-delegation,
+tasks, feature-worktree-setup, agentbus, agentbus-user-interaction.
+
+Session-21 ends here. Next session: install remaining commits, then continue trim pass.
