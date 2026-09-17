@@ -120,30 +120,17 @@
 - [x] Fixed stale `git -C` guidance in `CONVENTIONS.md`, `feature-worktree-setup.md`, and
       `install-to-session-tracking.md` (commit `6ce874fa` on `policy-writer`).
 
-**Last completed:** Session-20: processed entries 1–9. Entry 10 (`2026-09-14-2200`) is DRAFT/NOT-POSTED — deferred pending user decision. Entries 11–13 not yet processed.
+**Last completed:** Session-20 complete. Entries 1–13 processed. Both branches pushed (`policy-writer` → `34be8d413`, `session-tracking` → `681f32c1c`).
 
-**Next step / resume point:** Entry 10 — decide whether to process now (tasks.md spec template restructure + coder design-validation checkpoint) or defer. Then entries 11–13. Then prefix all processed suggestion-box entries with `processed-` and commit on `session-tracking`. Then install all convention changes onto `session-tracking` (requires user authorization). Then push both branches.
-
-Entries processed this session:
-- 1: working-outside-worktree.md cp-fallback + read correction (`4cd13ab2`)
-- 2: tasks.md + CONVENTIONS.md + worktree-delegation.md (`9327476d`)
-- 3: deferred (ledger-capture specific)
-- 4: deferred (no git-hygiene file)
-- 5: unexplained-files.md git ls-files check (`b41f9317`)
-- 6: wip-editing.md rewrite + session-start.md + working-outside-worktree.md + CONVENTIONS.md + resume-mission + wind-down (`4145b0d5`)
-- 7: coder-orchestration.md default + table reorder (`d8d7be0c`)
-- 8: state-vs-ledger.md three-doc model + wind-down drift scan (`0b0994f2`)
-- 9: resume-and-handoff.md STATE ground-truth check step (`f1cab84e`)
+**Next step / resume point:** New session. Check for new suggestion-box entries. Deferred items: entry 3 (ledger-capture shell guard false-positives — address when ledger-capture custom-agent spec written), entry 4 (git-hygiene / branch-health — address when that conventions file exists).
 
 ### Status
-Session 20 active. Entries 1–9 processed. `policy-writer` has unpushed local commits — not yet raised with user for push authorization. Suggestion-box entries not yet prefixed `processed-`.
+Session 20 complete. All suggestion-box entries 1–13 processed and prefixed. Installed and pushed.
 
 ### Known issues
-- Unprocessed suggestion-box entry `session-tracking/suggestion-box/2026-09-07-1200-single-analyzer.md`
-  (found untracked during session-19 install): documents the same `-C`/direct-write asymmetry
-  independently from `single-analyzer`'s side. Corroborating evidence for the doc-accuracy gaps
-  in "Next step". Not this session's to act on — needs to be processed when suggestion-box work
-  resumes.
+- `session-tracking/suggestion-box/2026-09-07-1200-single-analyzer.md` now
+  `processed-2026-09-07-1200-single-analyzer.md` — prefixed in `c9786061`. Original finding
+  (corroborating `-C`/direct-write asymmetry) was processed as entry 1 (`4cd13ab2`).
 - `settings-and-skill-edits.md` describes a `user-approved-settings-change` marker
   requirement. Origin is 2026-08-27 observed harness behavior; user does not recognize the
   rule. Verify before editing any `SKILL.md` — the marker requirement may or may not still
@@ -177,5 +164,5 @@ Session 20 active. Entries 1–9 processed. `policy-writer` has unpushed local c
 - 2026-09-06 session=2026-09-06-policy-writer-17 status=retired ledger=.session/ledger/2026-09-06-policy-writer-17.md
 - 2026-09-06 session=2026-09-06-policy-writer-18 status=retired ledger=.session/ledger/2026-09-06-policy-writer-18.md
 - 2026-09-07 session=2026-09-07-policy-writer-19 status=retired ledger=.session/2026-09-07-policy-writer-19.md
-- 2026-09-16 session=2026-09-16-policy-writer-20 status=active ledger=.session/2026-09-16-policy-writer-20.md
+- 2026-09-16 session=2026-09-16-policy-writer-20 status=retired ledger=.session/2026-09-16-policy-writer-20.md
 

@@ -87,3 +87,45 @@ Backlog idea noted: periodic bg agent (session health monitor) that flags drift 
 
 ### Entry 9 — `2026-09-13-0133-composite-analyzer` ✅ done (f1cab84e)
 `conventions/resume-and-handoff.md` Resume/Takeover Protocol: added step 7 — if STATE tracks a checklist or file list derived from an external source, launch a bg verification agent to regenerate and diff before the new session starts work. Clean ledger-capture is not proof STATE's substantive claims are accurate. Also dropped stale ".wip protocol" reference from step 4 (mission owner edits STATE directly).
+
+### Entry 10 — `2026-09-14-2200-composite-analyzer` ✅ done (2b0177e0)
+Condition for submission met — composite-analyzer trial run completed (commit `37886266`).
+- `conventions/tasks.md`: replaced Mission spec §1–8 template with revised numbering (§1
+  Orientation, §2 Spec/roadmap — recursive, §2 number stable for doc lifetime, §3 Open items,
+  §4 Coder task hierarchy, §5 Discussion abstracts, §6 Summary of decisions, §7 Detailed
+  discussion, §8 Revision log); added doc-restructure method note (scratch file, diff
+  word-count + citations before applying).
+- `conventions/coder-orchestration.md`: new rule 8 — design-validation checkpoint (coder
+  proposes design in task file, stops, reports to Out:, hard gate before implementation;
+  old rules 8–14 renumbered 9–15).
+No changes to state-vs-ledger.md (user: "we just updated it — do we need this now?" → no).
+Entry 11 (other suggestion from same session) confirmed no overlap.
+
+### Entry 11 — `2026-09-15-1958-composite-analyzer` item 1 ✅ done (7ecad161)
+`conventions/wip-editing.md`: added explicit identity-based exemption paragraph — "The exemption
+is identity-based, not dispatcher-based. The mission owner may edit its own STATE.md directly
+without .wip. Every other agent — including one the owner just dispatched — must use .wip
+regardless of who gave the instruction."
+
+### Entry 12 — `2026-09-15-1958-composite-analyzer` item 2 ✅ done (7ecad161)
+`conventions/coder-orchestration.md`: new rule 16 — executor-binding rule: when the user
+specifies who/what performs a task, that specification is binding; do not substitute the current
+session as executor without asking first; report deviations before acting, not after.
+
+### Entry 13 — `2026-09-16-1630-policy-writer` ✅ done (34be8d41)
+- `CONVENTIONS.md` Situational rules section: added hard-gate paragraph — action triggers are
+  hard gates, not reminders; STOP, read named file, acknowledge one concrete constraint before
+  proceeding.
+- `conventions/session-start.md` Opening orientation: added verification-echo requirement —
+  one concrete non-generic sentence echoing the most relevant CONVENTIONS.md constraint after
+  the orientation block; generic "I have read it" does not count.
+
+### Suggestion-box prefixes (c9786061 on session-tracking)
+Prefixed all 12 remaining unprocessed entries (1–13, entries 3 and 4 deferred) with
+`processed-` via git mv. Committed on session-tracking.
+
+### Install + push (session-20, this turn)
+- Install: `git checkout policy-writer -- CONVENTIONS.md conventions/ claude-skills/` from
+  session-tracking; verified diff CLEAN; committed as `681f32c1`.
+- Push policy-writer: `de15f64ec..34be8d413`
+- Push session-tracking: `e39f3a22e..681f32c1c`
