@@ -40,11 +40,15 @@ The Bob CLI launch is an explicit exception to the otherwise tool-agnostic rules
 5. **Coder isolation — pick a setup, then follow its procedure in
    `conventions/worktree-delegation.md`:**
 
-   | Setup | Gate — use when | 
+   **Default: use `same-worktree`.** Use `checkout-branch` if you need branch isolation
+   (sandboxed coder, durable commits, no visible path needed). Use `own-worktree` only if
+   the branch must stay checked out at a stable visible path after the coder finishes.
+
+   | Setup | Gate — use when |
    |---|---|
-   | **own-worktree** | The branch must stay checked out at a stable path after the coder finishes (a separate reviewer attaches independently later, or a human may `EnterWorktree`/open it in the IDE). |
-   | **checkout-branch** | Default/common case: no durable visible path needed, only durable commits. Zero visible effect on any worktree the user has open. |
-   | **same-worktree** | Parent is already in the correct target worktree (e.g. its own mission worktree) and wants coding done without a separate worktree/branch. |
+   | **same-worktree** | Default. Parent is already in the correct target worktree and wants coding done without a separate worktree/branch. |
+   | **checkout-branch** | Need branch isolation: sandboxed coder, durable commits, zero visible effect on any worktree the user has open. |
+   | **own-worktree** | Branch must stay checked out at a stable visible path after finishing — a separate reviewer attaches independently, or a human opens it in the IDE. |
 
    The mechanical setup, launch, and completion steps — including the exact task-file
    fields to fill — are in `conventions/worktree-delegation.md`, under the matching
