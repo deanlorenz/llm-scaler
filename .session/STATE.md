@@ -120,21 +120,23 @@
 - [x] Fixed stale `git -C` guidance in `CONVENTIONS.md`, `feature-worktree-setup.md`, and
       `install-to-session-tracking.md` (commit `6ce874fa` on `policy-writer`).
 
-**Last completed:** Session-20: processed suggestion-box entries 1–5 (1: working-outside-worktree.md
-sandboxed-cp fallback + read correction `4cd13ab2`; 2: tasks.md + CONVENTIONS.md +
-worktree-delegation.md task authoring/delivery restructure `9327476d`; 3: deferred to
-ledger-capture spec; 4: deferred, no git-hygiene file; 5: unexplained-files.md git ls-files
-upstream check `b41f9317`). Mid-session on entry 6 (WIP on own STATE).
+**Last completed:** Session-20: processed entries 1–9. Entry 10 (`2026-09-14-2200`) is DRAFT/NOT-POSTED — deferred pending user decision. Entries 11–13 not yet processed.
 
-**Next step / resume point:** Entry 6 — fix `.wip` protocol for mission owner's own STATE.md
-in `CONVENTIONS.md` trigger line, `conventions/wip-editing.md`, `resume-mission` Step 10,
-and `wind-down` matching step. Then entries 7–13. Then prefix processed suggestion-box
-entries and install onto `session-tracking` (requires user authorization).
+**Next step / resume point:** Entry 10 — decide whether to process now (tasks.md spec template restructure + coder design-validation checkpoint) or defer. Then entries 11–13. Then prefix all processed suggestion-box entries with `processed-` and commit on `session-tracking`. Then install all convention changes onto `session-tracking` (requires user authorization). Then push both branches.
+
+Entries processed this session:
+- 1: working-outside-worktree.md cp-fallback + read correction (`4cd13ab2`)
+- 2: tasks.md + CONVENTIONS.md + worktree-delegation.md (`9327476d`)
+- 3: deferred (ledger-capture specific)
+- 4: deferred (no git-hygiene file)
+- 5: unexplained-files.md git ls-files check (`b41f9317`)
+- 6: wip-editing.md rewrite + session-start.md + working-outside-worktree.md + CONVENTIONS.md + resume-mission + wind-down (`4145b0d5`)
+- 7: coder-orchestration.md default + table reorder (`d8d7be0c`)
+- 8: state-vs-ledger.md three-doc model + wind-down drift scan (`0b0994f2`)
+- 9: resume-and-handoff.md STATE ground-truth check step (`f1cab84e`)
 
 ### Status
-Session 20 active. Entries 1–5 processed and committed on `policy-writer`. Entry 6 in
-progress. `policy-writer` has unpushed local commits — not yet raised with user for push
-authorization.
+Session 20 active. Entries 1–9 processed. `policy-writer` has unpushed local commits — not yet raised with user for push authorization. Suggestion-box entries not yet prefixed `processed-`.
 
 ### Known issues
 - Unprocessed suggestion-box entry `session-tracking/suggestion-box/2026-09-07-1200-single-analyzer.md`
