@@ -149,6 +149,7 @@ Session 20 complete. All suggestion-box entries 1–13 processed and prefixed. I
 
 ## Session log
 
+- 2026-09-17 session=2026-09-17-policy-writer-21 status=active ledger=.session/2026-09-17-policy-writer-21.md
 - 2026-08-27 session=2026-08-27-session-tracking-setup status=retired ledger=.session/ledger/2026-08-27-session-tracking-setup.md
 - 2026-08-30 session=2026-08-30-conventions-split-and-trim status=retired ledger=.session/ledger/2026-08-30-conventions-split-and-trim.md
 - 2026-08-31 session=2026-08-31-policy-writer-7 status=retired ledger=.session/ledger/2026-08-31-policy-writer-7.md
