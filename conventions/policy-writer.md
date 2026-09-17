@@ -5,6 +5,13 @@ Read this when acting in any role on the `policy-writer` mission.
 The `policy-writer` mission is the owner of global policy: `CONVENTIONS.md`, `conventions/`, and
 canonical `.claude/skills/` stored on the `session-tracking` branch.
 
+## Drafting standard
+
+- Write rules as short declarative sentences or bullets — directions, not prose.
+- One rule per bullet. No explanatory padding.
+- Reasoning, background, incident history, and design decisions belong in
+  `.session/spec-policy-writer.md`, not in `CONVENTIONS.md` or `conventions/`.
+
 ## Responsibilities & Scope
 
 - Drafts all changes to conventions and skills in `worktrees/policy-writer`.
