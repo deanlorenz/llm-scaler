@@ -471,6 +471,46 @@ Two bugs found after subagent testing:
 > 6. Present the opening orientation above and wait for the user to confirm.
 (Adding explicit constraint: orientation block is the first text presented to the user.)
 
+### conventions/resume-and-handoff.md trim — session 21 (2026-09-17)
+
+**Line 3 — "Read this when..." intro:**
+> Read this when executing `/resume-mission` or `/wind-down`, or when taking over or ending work on a mission.
+(Dropped — trigger already in CONVENTIONS.md index.)
+
+**Lines 7–8 — Session Log section opening prose:**
+> Every mission's `.session/STATE.md` maintains an append-only **Session log** section under `.wip` protocol (`conventions/wip-editing.md`). Active session ledgers live directly under `.session/`; after capture and retirement, move them to `.session/ledger/` and update the log path:
+(Compressed to one bullet; the example block is kept.)
+
+**Line 23 — Resume protocol intro:**
+> Used when `STATE.md` exists with an active session log entry — whether resuming your own prior work or taking over from another session. Always ask the user for confirmation before declaring ownership.
+(Compressed — "always ask the user before declaring ownership" folds into step 1.)
+
+**Lines 31–37 — Step 7 prose explanation:**
+> The agent reports findings to the parent before the new session starts work. Do not rely on
+> a clean `ledger-capture` pass as proof that STATE's task-tracking content is accurate —
+> ledger-capture verifies the ledger's narrative was captured, not that the narrative matches
+> ground truth.
+(Reasoning. The rule — "if STATE has external-source checklists, launch bg verification before starting work" — is kept. The "why" moves here.)
+
+**Line 42 — Wind-down intro:**
+> Wind-down establishes a durable, recoverable checkpoint so work is preserved across turn boundaries, compactions, clears, or reloads.
+(Dropped — reasoning, not a direction.)
+
+**Lines 70–72 — ledger-capture step 1 agentbus sub-bullets:**
+> Subscribe to the assigned `In:` channel before work and remain subscribed until exit.
+> Answer parent progress, clarification, and interim-result requests on `Out:` before continuing.
+> Publish status, findings, questions, and completion on `Out:`.
+(Standard agentbus contract; covered by `conventions/agentbus.md`. Compressed to one line.)
+
+**Lines 73–76 — Step 2 "In particular" expansion:**
+> Do not limit capture to items already referenced by current policy files. In particular, check for
+> ownership, creation, removal, destructive-action, authorization, and data-preservation rules.
+(Example list. Kept as a compressed note; the checklist items are examples, not exhaustive.)
+
+**Lines 81–82 — Step 6 prose before code block:**
+> Append a verification marker to the end of the processed ledger, including a summary table of findings and actions taken:
+(Compressed into the step label itself.)
+
 ## 8. Refs
 
 *Related files (do not read unless explicitly needed):*
