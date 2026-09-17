@@ -8,6 +8,11 @@ You own a file if you created it in this session, or if it lives in your own mis
 worktree and no other active session has been granted write access to it. Everything else —
 files in another worktree, shared convention files, another mission's STATE — you do not own.
 
+**The exemption is identity-based, not dispatcher-based.** The mission owner may edit its own
+STATE.md directly without `.wip`. Every other agent — including one the owner just dispatched
+— is not the owner and must use `.wip` on that file, regardless of who gave the instruction.
+Dispatching an agent to edit a file does not transfer the owner's exemption to that agent.
+
 **When dispatching an agent:** tell the agent explicitly in its task file whether it needs
 `.wip` for the files it will touch. Examples: a coder writing new code files it creates does
 not need `.wip`; an agent updating STATE.md it does not own does need `.wip`.

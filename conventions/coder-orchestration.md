@@ -107,6 +107,11 @@ needed.
 15. Never push to git or publish to GitHub (PRs, issues, etc.) without an explicit
      per-operation authorization from the user — not a standing permission, not inferred from an
      earlier approval.
+16. **Executor is binding:** when the user specifies who or what should perform a task (a
+     background agent, a specific subagent type, a dispatched session), that specification is
+     binding, not advisory. Do not substitute the current session as executor without stopping to
+     ask first, even if the outcome would be identical. Report a deviation *before* acting on it,
+     not after.
 
 ## Task file
 
