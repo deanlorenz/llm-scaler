@@ -25,10 +25,17 @@ Used when `STATE.md` exists with an active session log entry — whether resumin
 1. **Ask user:** "Continuing `<slug>`?" — confirm which mission and session before proceeding.
 2. **Live Presence Check:** Check agentbus for a recent presence/heartbeat from the active slug. If still alive: stop, do not take over, ask the user.
 3. **Pending Scan:** Scan all Session log entries in `.session/STATE.md`. Any entry that is `active`, or `retired` without a `## Verified` marker in its ledger, is **pending**. Captured retired ledgers must be under `.session/ledger/`.
-4. **Lock & Retire:** Under `.wip` protocol, update any unretired pending session to `status=retired`.
+4. **Lock & Retire:** Update any unretired pending session to `status=retired`.
 5. **Run `ledger-capture`:** Execute `ledger-capture` in the foreground against that pending ledger to fold uncaptured findings into durable docs (`STATE.md` or internal plan).
 6. **Append Verification:** Confirm `## Verified <date>` is appended to the processed ledger.
-7. **Declare Ownership:** Publish ownership on agentbus before recording the new active session.
+7. **STATE ground-truth check:** If STATE tracks any checklist or file list derived from an
+   external source of truth (a diff, a file tree, a test suite, a config), launch a
+   background verification agent to regenerate that source and diff it against STATE's claim.
+   The agent reports findings to the parent before the new session starts work. Do not rely on
+   a clean `ledger-capture` pass as proof that STATE's task-tracking content is accurate —
+   ledger-capture verifies the ledger's narrative was captured, not that the narrative matches
+   ground truth.
+8. **Declare Ownership:** Publish ownership on agentbus before recording the new active session.
 
 ## Checkpoint & Wind-Down Protocol (Executed during `/wind-down`)
 
