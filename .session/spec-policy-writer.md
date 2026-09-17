@@ -598,6 +598,19 @@ git checkout policy-writer -- claude-skills/
 (First sentence dropped — trigger in CONVENTIONS.md index. Definition sentence compressed
 into a Boundaries bullet: "Authority applies only to this mission and its worktree.")
 
+### conventions/coder.md trim — session 21 (2026-09-17)
+
+**Lines 3–5 — intro sentences (dropped):**
+> Read this when executing in the coder role.
+> The coder implements a specifically assigned coding task within an isolated worktree.
+
+**Bold section labels (Worktree Isolation:, Git Boundaries:, etc.) — dropped:**
+Labels were redundant with the rule text that followed them.
+
+**Line 15 — third sentence of `.session/` boundary:**
+> This holds regardless of which worktree pattern you were launched under.
+(Explanatory. The rule is stated in the first two sentences.)
+
 ## 8. Refs
 
 *Related files (do not read unless explicitly needed):*
