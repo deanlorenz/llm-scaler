@@ -588,6 +588,16 @@ git checkout policy-writer -- claude-skills/
 > and what you concluded, so a later session (or the user) has the trail if the same thing
 > comes up again.
 
+### conventions/mission-owner.md trim — session 21 (2026-09-17)
+
+**Lines 3–6 — intro paragraph:**
+> Read this when assuming or acting in the mission-owner role.
+>
+> The mission owner is the single session responsible for the mission's durable state and
+> integration decisions. Mission-owner authority applies only to that mission and its worktree.
+(First sentence dropped — trigger in CONVENTIONS.md index. Definition sentence compressed
+into a Boundaries bullet: "Authority applies only to this mission and its worktree.")
+
 ## 8. Refs
 
 *Related files (do not read unless explicitly needed):*
