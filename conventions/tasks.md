@@ -51,7 +51,9 @@ else first:
 - **Limits:** what the session must not change, what it must preserve, what is out of scope.
   For coders resuming a prior session: what state to keep, where to resume from.
 - **Extra rules / rule refs:** optional. Paths to additional `conventions/*.md` files the
-  session must read for this task specifically.
+  session must read for this task specifically. When delegating to a subagent that will edit
+  files it doesn't own, cite `conventions/wip-editing.md` here and name the files it applies
+  to — the delegator does not need to read `wip-editing.md` itself unless also editing directly.
 
 **Execution fields** — fill these with the initial plan; the session updates them as work
 proceeds:

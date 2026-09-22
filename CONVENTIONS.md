@@ -87,6 +87,7 @@ worktrees/<mission-name>/          ← mission branch/worktree
 - Maintain the session ledger continuously — findings, decisions, corrections, false starts.
 - Update STATE after each major step — mark `[x]`, update Last completed, Next step, Status. Do not wait for wind-down.
 - **Before closing a previously-investigated item as resolved:** re-read the prior finding's own text first. If the state is reachable via more than one path, trace every path — not just the most salient one — before declaring the claim closed.
+- A durable doc's claim that something "landed" or "is done" is a claim about a past state. Before repeating it to the user or building on it, re-derive from the current code or tests directly.
 
 ### Ownership and data safety — read and follow literally
 

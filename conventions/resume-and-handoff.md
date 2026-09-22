@@ -62,15 +62,20 @@ agentbus_publish(topic="mission.<mission-name>", kind="handoff",
 A focused agent assigned to process exactly one ledger file:
 
 1. **Agentbus:** Follow standard agentbus contract (`conventions/agentbus.md`).
-2. **Capture:** Read the entire ledger. Identify every correction, decision, rule, safety
+2. **Shared-file edits:** Before editing any file you don't own (STATE.md, mission spec),
+   read and follow `conventions/wip-editing.md`.
+3. **Capture scope:** Locate the most recent `## Verified <date>` marker in the ledger.
+   Treat everything before it as already captured — process only content after that marker.
+   If there is no marker, process the entire ledger.
+4. **Capture:** For the unprocessed portion, identify every correction, decision, rule, safety
    requirement, and unresolved issue that must survive the session. Check especially for
    ownership, authorization, and data-preservation rules.
-3. **Write destinations:** The mission's own `.session/STATE.md` and its internal plan/spec only.
-4. **Prohibition:** Never write to `CONVENTIONS.md` or `conventions/`.
-5. **Global findings:** Any finding warranting a global rule goes to
+5. **Write destinations:** The mission's own `.session/STATE.md` and its internal plan/spec only.
+6. **Prohibition:** Never write to `CONVENTIONS.md` or `conventions/`.
+7. **Global findings:** Any finding warranting a global rule goes to
    `session-tracking/suggestion-box/YYYY-MM-DD-HHMM-<mission-name>.md`.
    Only `policy-writer` processes suggestion-box entries.
-6. **Completion — append to the processed ledger:**
+8. **Completion — append to the processed ledger:**
    ```markdown
    ## Verified YYYY-MM-DD — <all points already captured | folded in: summary>
 
@@ -78,6 +83,12 @@ A focused agent assigned to process exactly one ledger file:
    |---|---|---|
    | <point / finding> | <doc path & section> | <None needed | Added to X | Folded into Y> |
    ```
+9. **Report back:**
+   - Nothing new since last marker: `"Verified — no gaps, nothing added"` plus the ledger
+     path. No summary of ledger contents.
+   - Gaps found or content folded in: report (1) a brief list of what gaps existed, and
+     (2) a separately-flagged list of any items the mission owner must act on or decide.
+     Do not narrate the full ledger.
 
 ## Doc-Reference Path Rule
 
