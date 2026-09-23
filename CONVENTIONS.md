@@ -18,7 +18,7 @@ Read `conventions/session-start.md` to initialize. Mission-owner role: also read
 
 Read the matching file only when its trigger occurs — not speculatively.
 
-**Triggers are hard gates.** STOP. Read the named file. Then acknowledge the single most relevant constraint in one line before continuing — e.g. "I read `wip-editing.md`; key constraint: claim with mv, never cp."
+**Triggers are hard gates.** STOP. Invoke the named skill (or read the named file). Then acknowledge the single most relevant constraint in one line before continuing — e.g. "I invoked `conv-wip-editing`; key constraint: claim with mv, never cp."
 
 ### Role & Mission Setup (Read when establishing mission/role at session start)
 - `conventions/session-start.md` — **every session reads this first, before any work**
@@ -30,20 +30,20 @@ Read the matching file only when its trigger occurs — not speculatively.
 
 ### Lifecycle & Session Boundaries
 - `conventions/resume-and-handoff.md` — running `/resume-mission` or `/wind-down`, taking over, or ending work
-- `conventions/feature-worktree-setup.md` — creating/migrating a mission worktree or setting up missing skill symlinks
-- `conventions/state-vs-ledger.md` — creating initial state or ledger files, or unsure which file information belongs in
+- `conv-feature-worktree-setup` — creating/migrating a mission worktree or setting up missing skill symlinks
+- `conv-state-vs-ledger` — creating initial state or ledger files, or unsure which file information belongs in
 
-### Action Triggers (Read immediately before performing the action)
-- `conventions/agentbus-user-interaction.md` — when running as a background agent/subtask needing to ask user questions via agentbus
-- `conventions/wip-editing.md` — before editing any file you don't own, or writing a new file into a folder you don't own
-- `conventions/working-outside-worktree.md` — before performing a permitted cross-worktree write
-- `conventions/tasks.md` — before writing or assigning a task specification to any worker
-- `conventions/coder-orchestration.md` — before dispatching or orchestrating a coder agent
-- `conventions/install-to-session-tracking.md` — before installing any file from policy-writer onto session-tracking
-- `conventions/push.md` — before executing git push (after receiving explicit single-use approval)
-- `conventions/pr-branch.md` — before creating or curating an ephemeral PR branch
-- `conventions/pr-workflow.md` — before opening a PR via the GitHub API
-- `conventions/unexplained-files.md` — upon finding an unexplained file or uncommitted edit
+### Action Triggers (skills auto-invoked on trigger — no manual read needed)
+- `conv-agentbus-user-interaction` — background agent communicating with user (progress notes, questions, confirmations)
+- `conv-wip-editing` — before editing any file you don't own, or writing a new file into a shared folder
+- `conv-working-outside-worktree` — before any cross-worktree read or write operation
+- `conv-tasks` — before writing or assigning a task specification to any worker
+- `conv-coder-orchestration` — before dispatching or orchestrating a coder agent or background worker
+- `conv-install-to-session-tracking` — before installing any file from policy-writer onto session-tracking
+- `conv-push` — before executing git push (after receiving explicit single-use approval)
+- `conv-pr-branch` — before creating or curating a PR branch
+- `conv-pr-workflow` — before opening a PR via the GitHub API
+- `conv-unexplained-files` — upon finding an unexplained file or uncommitted edit
 
 ## Repo layout
 
