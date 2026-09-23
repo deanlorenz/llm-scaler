@@ -59,10 +59,9 @@ mkdir -p MISSION_WT/.claude/skills
 cd MISSION_WT/.claude/skills
 ln -s ../../../session-tracking/claude-skills/resume-mission resume-mission
 ln -s ../../../session-tracking/claude-skills/wind-down wind-down
-# Add conv-* skills
 for skill in worktrees/session-tracking/claude-skills/conv-*/; do
   name=$(basename "$skill")
-  ln -s "../../../../session-tracking/claude-skills/$name" "$name"
+  ln -sf "../../claude-skills/$name" "$name"
 done
 ```
 
@@ -70,11 +69,11 @@ Exclude symlinks from git tracking (repo-shared exclude, not per-worktree):
 
 ```bash
 EXCLUDE=$(git -C MISSION_WT rev-parse --git-common-dir)/info/exclude
-grep -q "resume-mission" "$EXCLUDE" || echo ".claude/skills/resume-mission" >> "$EXCLUDE"
-grep -q "wind-down" "$EXCLUDE" || echo ".claude/skills/wind-down" >> "$EXCLUDE"
+grep -qF ".claude/skills/resume-mission" "$EXCLUDE" || echo ".claude/skills/resume-mission" >> "$EXCLUDE"
+grep -qF ".claude/skills/wind-down" "$EXCLUDE" || echo ".claude/skills/wind-down" >> "$EXCLUDE"
 for skill in worktrees/session-tracking/claude-skills/conv-*/; do
   name=$(basename "$skill")
-  grep -q "$name" "$EXCLUDE" || echo ".claude/skills/$name" >> "$EXCLUDE"
+  grep -qxF ".claude/skills/$name" "$EXCLUDE" || echo ".claude/skills/$name" >> "$EXCLUDE"
 done
 ```
 
