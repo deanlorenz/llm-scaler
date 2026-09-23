@@ -1,6 +1,6 @@
 ---
 name: conv-agentbus-user-interaction
-description: Use when running as a background agent or headless subtask that needs to ask the user a question or get user confirmation directly via agentbus dialogue.
+description: Use when running as a background agent or headless subtask that needs to communicate with the user — including progress notes, async questions, blocking confirmations, and re-ask/wait patterns.
 ---
 
 # conv-agentbus-user-interaction
