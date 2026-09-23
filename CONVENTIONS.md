@@ -53,9 +53,11 @@ session-tracking/                  ← global policy worktree; read-only unless 
   CONVENTIONS.md                   ← this file
   conventions/                     ← situational rules
   suggestion-box/                  ← atomic proposals for policy-writer
-  claude-skills/                   ← source storage for skill files; NOT an active skill directory
-    resume-mission/SKILL.md        ← canonical source; feature worktrees symlink to this
-    wind-down/SKILL.md             ← canonical source; feature worktrees symlink to this
+  claude-skills/                   ← canonical skill source; every worktree's .claude/skills symlinks here
+    resume-mission/SKILL.md
+    wind-down/SKILL.md
+    conv-*/SKILL.md                ← situational-rule skills (auto-invoked)
+    pr-review/SKILL.md
   missions/                        ← read-only convenience symlinks
     <mission-name>/
       STATE.md -> worktrees/<mission-name>/.session/STATE.md
@@ -64,6 +66,7 @@ session-tracking/                  ← global policy worktree; read-only unless 
 
 worktrees/<mission-name>/          ← mission branch/worktree
   .session/                        ← mission state, ledgers, and internal plans; never in a PR branch
+  .claude/skills -> <abs-path>/worktrees/session-tracking/claude-skills  ← dir-symlink
   <normal code tree>               ← mission output
 ```
 
@@ -73,6 +76,9 @@ worktrees/<mission-name>/          ← mission branch/worktree
   ```bash
   git show <mission-name>:.session/STATE.md
   ```
+- **If `.claude/skills` is missing or broken in your worktree:** skills live at
+  `worktrees/session-tracking/claude-skills/` — read any `SKILL.md` directly from there
+  until the symlink is fixed. Invoke `conv-feature-worktree-setup` to repair it.
 - Do not edit another mission's symlinks — report broken links via `session-tracking/suggestion-box/`.
 
 ## Ground rules
