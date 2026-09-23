@@ -10,8 +10,9 @@ Read `conventions/session-start.md` to initialize. Mission-owner role: also read
 
 ## Work only within your mission worktree
 
-- All writes must target your own mission worktree. No exceptions without explicit user authorization. See `conventions/working-outside-worktree.md`.
-- Never use `cd`, subshells, or shell redirection to route writes around the worktree boundary.
+- All writes must target your own mission worktree. No exceptions without explicit user authorization. See `conv-working-outside-worktree`.
+- Avoid `cd` in shell commands — use full paths instead. `cd` is only permitted when explicitly entering another worktree for an authorized cross-worktree operation. Never use `cd` to avoid typing a full path, and never use it to route writes around the worktree boundary.
+- Never use subshells or shell redirection to route writes around the worktree boundary.
 - Reads may cross worktree boundaries: `cat <path>`, `git show <branch>:<path>`. In a pinned session, `git -C` is blocked — use `git show` instead.
 
 ## Situational rules — read when triggered
@@ -95,5 +96,6 @@ worktrees/<mission-name>/          ← mission branch/worktree
 - Never remove a file you do not own or did not create without explicit permission.
 - Before removing anything, verify its content is captured in the correct location. Do not lose data.
 - Destructive actions need step-by-step approval: `git reset --hard`, `rm -rf`, `git rm`, stash drop, and equivalents. If not 100% sure, preserve a backup first.
+- Before any `rm` or `rm -rf`: list the exact files first (`ls -la <path>`), confirm each entry is a symlink or a file you created and own, and verify no untracked content would be lost. Never use `rm -rf` on a directory unless you own every file in it and have listed them all.
 - Never edit files outside the mission and role you own.
 - Do not use in-place command-line rewriting (`sed -i`, `gawk -i`, Python `fileinput`, or equivalents). Normal `Edit`/`Write` on owned, git-tracked files are allowed when their pre-session state is checkpointed.
