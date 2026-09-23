@@ -59,6 +59,15 @@ git cherry-pick <last-policy-writer-sha>..policy-writer
 
 Cherry-pick conflicts loudly on divergence — stop and resolve before continuing.
 
+**`.session/` conflicts:** commits that also touch `.session/` files (e.g. "save originals to spec"
+commits) will conflict because `.session/` is absent on `session-tracking`. For each such conflict:
+```bash
+git rm --cached .session/<file> 2>/dev/null; rm -f .session/<file>
+git cherry-pick --continue --no-edit
+```
+Repeat until the cherry-pick completes. Skip any commit whose only change is `.session/` files
+(`git cherry-pick --skip`).
+
 Remove any `.bak` files that came across:
 ```bash
 git rm --cached conventions/*.bak 2>/dev/null || true
