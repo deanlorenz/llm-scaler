@@ -1,0 +1,54 @@
+# STATE / task file template
+
+One template for all session types: mission owner, coder, reviewer, researcher.
+Level of detail differs per role; fields do not.
+
+For field authoring guidance see `conventions/tasks.md`.
+For which information belongs in STATE vs spec vs ledger see `conventions/state-vs-ledger.md`.
+
+```markdown
+# <Name: session slug or mission name>
+
+## Orientation
+
+- **Conventions:** `worktrees/session-tracking/CONVENTIONS.md`
+  *(read this first, before any other file)*
+- **What / goal / mission:** <what this session or mission is for>
+- **Worktree:** `worktrees/<name>` (branch `<branch>`)
+- **Role / scope:** <role and authority boundary>
+- **Ledger / log:** active `.session/<slug>.md`; captured retired `.session/ledger/<slug>.md`
+  ⚠ DO NOT READ — not yours; new session creates its own ledger
+
+## Task
+
+- **Plan / spec:** `<path to plan doc, spec, or task file>`
+  *(do not read upfront — pull on demand only)*
+- **Context:** <files the session must read to do the work — one per line; keep short>
+- **Refs:** <cited related files — do not read unless explicitly needed>
+- **Expected output:** <file, code, review, report, …>
+- **Done / completion criteria:** <checkable claims — "X exists, verified by Y">
+- **Limits:** <what not to change / keep as-is / state to preserve>
+- **Extra rules / rule refs:** <optional — additional conventions files to read>
+
+## Execution
+
+### Steps / subtasks
+- [ ] <step>
+- [ ] <step>
+
+**Last completed:** <step id or description, or "none">
+
+**Next step / resume point:** <exact next action — on interactive sessions, confirm with
+user before executing; do not auto-run>
+
+### Status
+<Coders use: NOT STARTED | IN PROGRESS — <what's left> | DONE <date> | BLOCKED on <thing>>
+<Mission owners use: free-form list of items with current state>
+
+### Known issues
+<optional>
+
+## Session log
+- <date> session=<slug> status=active ledger=.session/<slug>.md
+- <date> session=<slug> status=retired ledger=.session/ledger/<slug>.md
+```

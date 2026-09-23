@@ -7,36 +7,27 @@ description: Use when writing or assigning a task specification to any worker (c
 
 Runs in your own session (orchestrator context). Apply before writing a task file or STATE for any worker.
 
+**Templates:**
+- `conventions/task_file_template.md` — full task file field set; use this when writing a worker's STATE/task file.
+- `conventions/mission_spec_template.md` — mission spec/roadmap structure; use this when creating a mission-level plan doc.
+- `conventions/state_template.md` — unified STATE template for all session types (mission owner, coder, reviewer, researcher).
+
 ## Who writes, who reads
 
 Mission owner (or user) writes task specs. Workers read their STATE file. Copy and refine task specs from the plan into a STATE file placed in the worker's worktree before invocation.
 
-## Required fields
+## Key field rules
 
-**Orientation fields** — the worker must orient without reading anything else first:
-- `Name:` — session slug, unique and sortable
-- `Conventions:` — always `worktrees/session-tracking/CONVENTIONS.md`
-- `What / goal / mission:` — one or two sentences
-- `Worktree / Path / Branch:` — where the worker operates
-- `Startup verification instructions:` — worker's required first action; never leave blank
-- `Role / scope:` — explicit authority boundary; do not leave to inference
-- `Ledger / log:` — name the file before invocation; worker creates it on first write
-- `In:` / `Out:` — agentbus channels; required for every subagent
+Full field definitions are in `conventions/task_file_template.md`. Critical rules:
 
-**Task fields:**
-- `Plan / spec:` — exact path; workers pull on demand, not upfront
-- `Context:` — files the worker must read; keep short
-- `Refs:` — cited files; do not read unless explicitly needed
-- `Expected output:` — specific deliverable; completion must be unambiguous
-- `Done / completion criteria:` — checkable claims with actual results, not "passed"
-- `Limits:` — what not to change; state to preserve for resuming sessions
-- `Extra rules / rule refs:` — additional `conventions/*.md` to read. When delegating to a subagent that will edit files it doesn't own, cite `conv-wip-editing` here and name the files it applies to. The delegator does not need to read `conv-wip-editing` itself unless also editing directly.
-
-**Execution fields** (initial values; worker updates as it works):
-- `Steps / subtasks:` — checklist; smallest unit worth its own status
-- `Next step / resume point:` — blank initially; worker fills as it works
-- `Status:` — `NOT STARTED` before invocation
-- `Known issues:` — fill in known constraints before invocation
+- `In:` / `Out:` — agentbus channels; required for every background invocation.
+- `Startup verification instructions:` — never leave blank.
+- `Role / scope:` — explicit authority boundary; do not leave to inference.
+- `Plan / spec:` — workers pull on demand, never read upfront.
+- `Context:` — only files genuinely needed; keep short.
+- `Extra rules / rule refs:` — when delegating to a subagent that will edit files it doesn't own, cite `conv-wip-editing` and name the files. The delegator does not need to read `conv-wip-editing` itself unless also editing directly.
+- `Done / completion criteria:` — checkable claims; workers report actual results, not "passed".
+- `Status:` — `NOT STARTED` before invocation.
 
 ## Authoring rules
 
