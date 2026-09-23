@@ -76,3 +76,23 @@ pr-branch, pr-workflow, chat-preferences, coder-orchestration, worktree-delegati
 tasks, feature-worktree-setup, agentbus, agentbus-user-interaction.
 
 Session-21 ends here. Next session: install remaining commits, then continue trim pass.
+
+## Verified 2026-09-22 — all points already captured
+
+| Ledger point | Durable destination | Action taken |
+|---|---|---|
+| Suggestion entry 14 Item 1: orientation-first hard prohibition added to CONVENTIONS.md | STATE.md §Steps (last completed) + CONVENTIONS.md (installed) | None needed |
+| Suggestion entry 14 Item 2: investigation-closure completeness rule added to CONVENTIONS.md Ground rules | STATE.md §Steps (last completed) + CONVENTIONS.md (installed) | None needed |
+| CONVENTIONS.md trimmed + committed (2855307e, d95d7225, db2160e4) | STATE.md §Last completed | None needed |
+| session-start.md trimmed + orientation-first fix (bde623eb, db2160e4) | STATE.md §Last completed | None needed |
+| policy-writer.md trimmed, drafting standard added (78b30dd8) | STATE.md §Last completed | None needed |
+| resume-and-handoff.md trimmed (86997bc6) | STATE.md §Last completed | None needed |
+| install-to-session-tracking.md cherry-pick rewrite (a3018c89) | STATE.md §Last completed | None needed |
+| settings-and-skill-edits.md deleted — fabricated harness rule (e5ffbe80) + index updated (b3be4fa0) | STATE.md §Last completed | None needed |
+| unexplained-files.md trimmed (ed91b6cb) | STATE.md §Last completed | None needed |
+| mission-owner.md trimmed (e492e9f8) | STATE.md §Last completed | None needed |
+| coder.md trimmed + user.in progress note rule (51b1fe6e, 4724e624) | STATE.md §Last completed | None needed |
+| reviewer.md trimmed (bd415ad5) | STATE.md §Last completed | None needed |
+| Partial install at a3018c893; remaining commits e5ffbe80–bd415ad5 not yet installed | STATE.md §Last completed + §Next step | None needed |
+| Files not yet trimmed listed (wip-editing, working-outside-worktree, …) | STATE.md §Next step | None needed |
+| Subagent test of trimmed CONVENTIONS.md: all 7 questions correct; no gaps requiring changes | STATE.md §Last completed (implicit in "DONE") | None needed |

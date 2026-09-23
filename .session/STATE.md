@@ -120,15 +120,15 @@
 - [x] Fixed stale `git -C` guidance in `CONVENTIONS.md`, `feature-worktree-setup.md`, and
       `install-to-session-tracking.md` (commit `6ce874fa` on `policy-writer`).
 
-**Last completed:** Session-21 conventions trim pass. Files done: CONVENTIONS.md,
-session-start.md, policy-writer.md, resume-and-handoff.md, install-to-session-tracking.md
-(cherry-pick rewrite), settings-and-skill-edits.md (deleted — fabricated rule),
-unexplained-files.md, mission-owner.md, coder.md, reviewer.md.
+**Last completed:** Session-22 processed suggestion-box entries 14–16. Entry 14 (2026-09-17-2330)
+already implemented; entries 15 and 16 produced changes to CONVENTIONS.md, conventions/tasks.md,
+and conventions/resume-and-handoff.md (commit 37ff840b on policy-writer). Prefixed all three
+on session-tracking (006a78e5).
 Last `policy-writer` HEAD installed to `session-tracking`: `a3018c893` (partial install;
 files trimmed after that SHA not yet installed).
-Commits since last install: e5ffbe80, b3be4fa0, ed91b6cb, e492e9f8, 51b1fe6e, 4724e624, bd415ad5.
+Commits since last install: e5ffbe80, b3be4fa0, ed91b6cb, e492e9f8, 51b1fe6e, 4724e624, bd415ad5, 37ff840b.
 
-**Next step / resume point:** Install remaining session-21 commits to session-tracking and
+**Next step / resume point:** Install remaining session-21+22 commits to session-tracking and
 push. Then continue trim pass: wip-editing, working-outside-worktree, state-vs-ledger,
 push, pr-branch, pr-workflow, chat-preferences, coder-orchestration, worktree-delegation,
 tasks, feature-worktree-setup, agentbus, agentbus-user-interaction.
@@ -158,7 +158,8 @@ Session 20 complete. All suggestion-box entries 1–13 processed and prefixed. I
 
 ## Session log
 
-- 2026-09-17 session=2026-09-17-policy-writer-21 status=active ledger=.session/2026-09-17-policy-writer-21.md
+- 2026-09-17 session=2026-09-17-policy-writer-21 status=retired ledger=.session/2026-09-17-policy-writer-21.md
+- 2026-09-22 session=2026-09-22-policy-writer-22 status=active ledger=.session/2026-09-22-policy-writer-22.md
 - 2026-08-27 session=2026-08-27-session-tracking-setup status=retired ledger=.session/ledger/2026-08-27-session-tracking-setup.md
 - 2026-08-30 session=2026-08-30-conventions-split-and-trim status=retired ledger=.session/ledger/2026-08-30-conventions-split-and-trim.md
 - 2026-08-31 session=2026-08-31-policy-writer-7 status=retired ledger=.session/ledger/2026-08-31-policy-writer-7.md
