@@ -64,7 +64,8 @@ Otherwise, create the dir-symlink:
 rm -rf MISSION_WT/.claude/skills
 
 # Create a single dir-symlink pointing to the shared skills dir
-SKILLS_ABS=$(realpath worktrees/session-tracking/claude-skills)
+# Use an absolute path — relative paths break when the shell CWD is not the repo root.
+SKILLS_ABS=$(git -C MISSION_WT rev-parse --show-toplevel)/worktrees/session-tracking/claude-skills
 ln -s "$SKILLS_ABS" MISSION_WT/.claude/skills
 ```
 
@@ -90,9 +91,10 @@ All resolved paths must be under `worktrees/session-tracking/claude-skills/`. Re
 ### 5. Create session-tracking convenience symlinks
 
 ```bash
-mkdir -p worktrees/session-tracking/missions/MISSION_NAME
-ln -sf "$(realpath MISSION_WT/.session/STATE.md)" worktrees/session-tracking/missions/MISSION_NAME/STATE.md
-ln -sf "$(realpath MISSION_WT/.session)" worktrees/session-tracking/missions/MISSION_NAME/ledgers
+REPO_ROOT=$(git -C MISSION_WT rev-parse --show-toplevel)
+mkdir -p "$REPO_ROOT/worktrees/session-tracking/missions/MISSION_NAME"
+ln -sf "MISSION_WT/.session/STATE.md" "$REPO_ROOT/worktrees/session-tracking/missions/MISSION_NAME/STATE.md"
+ln -sf "MISSION_WT/.session" "$REPO_ROOT/worktrees/session-tracking/missions/MISSION_NAME/ledgers"
 ```
 
 Then publish on agentbus so policy-writer commits these on its next resume:
