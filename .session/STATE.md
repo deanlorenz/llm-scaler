@@ -120,18 +120,15 @@
 - [x] Fixed stale `git -C` guidance in `CONVENTIONS.md`, `feature-worktree-setup.md`, and
       `install-to-session-tracking.md` (commit `6ce874fa` on `policy-writer`).
 
-**Last completed:** Session-22 processed suggestion-box entries 14–16. Entry 14 (2026-09-17-2330)
-already implemented; entries 15 and 16 produced changes to CONVENTIONS.md, conventions/tasks.md,
-and conventions/resume-and-handoff.md (commit 37ff840b on policy-writer). Prefixed all three
-on session-tracking (006a78e5).
-Last `policy-writer` HEAD installed to `session-tracking`: `a3018c893` (partial install;
-files trimmed after that SHA not yet installed).
-Commits since last install: e5ffbe80, b3be4fa0, ed91b6cb, e492e9f8, 51b1fe6e, 4724e624, bd415ad5, 37ff840b.
+**Last completed:** Session-22 D–H complete (commit 885aeb99). conv-coder-orchestration
+rewritten with inline same-worktree mechanics. 11 convention files archived to
+conventions/archived/. conv-agentbus-user-interaction description broadened. CONVENTIONS.md
+trigger table updated to skill names.
+Last `policy-writer` HEAD installed to `session-tracking`: `c636506d`.
+Commits since last install: 885aeb99.
 
-**Next step / resume point:** Install remaining session-21+22 commits to session-tracking and
-push. Then continue trim pass: wip-editing, working-outside-worktree, state-vs-ledger,
-push, pr-branch, pr-workflow, chat-preferences, coder-orchestration, worktree-delegation,
-tasks, feature-worktree-setup, agentbus, agentbus-user-interaction.
+**Next step / resume point:** Install D–H commit to session-tracking + push. Then continue
+trim pass or authorize wind-down.
 
 ### Status
 Session 20 complete. All suggestion-box entries 1–13 processed and prefixed. Installed and pushed.
