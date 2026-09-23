@@ -33,16 +33,29 @@ git status --short
 
 Stop if either is dirty. Do not install over a dirty `session-tracking`.
 
-### Step 2: Identify what will change
+### Step 2: Check for divergence — content diff first
 
-From inside `session-tracking`:
+From inside `session-tracking`, diff every in-scope file against `policy-writer`:
+
+```bash
+diff -r --exclude="*.bak" conventions ../policy-writer/conventions
+diff CONVENTIONS.md ../policy-writer/CONVENTIONS.md
+diff -r claude-skills ../policy-writer/claude-skills
+```
+
+**If the diff is non-empty:** `session-tracking` has content that `policy-writer` does not.
+STOP. Do not proceed. For every differing file:
+1. Determine whether the `session-tracking` content is intentional (e.g. a direct commit that bypassed `policy-writer`).
+2. Port any missing content to `policy-writer` and commit it there.
+3. Re-run this step. Only proceed to Step 3 when the diff is clean.
+
+**Commit-log check** (after content diff is clean):
 
 ```bash
 git log --oneline HEAD..policy-writer -- CONVENTIONS.md conventions/ claude-skills/
 ```
 
-Review every commit. If `session-tracking` is ahead of `policy-writer` on any file,
-stop — update `policy-writer` first, commit, then resume here.
+Review every commit listed — these are what the cherry-pick will apply.
 
 ### Step 3: Cherry-pick the range
 
