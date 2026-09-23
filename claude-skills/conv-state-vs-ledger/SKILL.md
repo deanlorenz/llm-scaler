@@ -7,6 +7,8 @@ description: Use when creating a new STATE or ledger file, or when unsure whethe
 
 Runs in your own session.
 
+**Template:** `conventions/state_template.md` — use this when creating any STATE or task file.
+
 ## Three documents — where things go
 
 **Spec** (plan/mission document): settled design, decision history with reasoning and rejected alternatives, roadmap and task list. Update the spec immediately when a conclusion is reached — not at wind-down, not "for now in STATE".

@@ -15,61 +15,20 @@ worktree before invocation.
 
 ## Field guide
 
-Use the unified STATE template from `conventions/state-vs-ledger.md`. Every field below maps
-to a field in that template.
+Task file template: `conventions/task_file_template.md` — use this when writing a task file for any worker. The template contains the full field set with all required and optional fields.
 
-**Orientation fields** — fill these so the session can orient itself without reading anything
-else first:
+**Key field rules:**
 
-- **In:** child agentbus input channel. Required for every subagent.
-- **Out:** child agentbus output channel. Required for every subagent.
-
-- **Name:** session slug (e.g. `2026-09-03-coder-ct1`). Unique; sortable.
-- **Conventions:** always `worktrees/session-tracking/CONVENTIONS.md`. Do not change.
-- **What / goal / mission:** one or two sentences — what this session produces and why.
-- **Worktree / Path / Branch:** where the worker operates. Fill per the setup chosen for this task.
-- **Startup verification instructions:** free text — the worker's required first action and what to do on failure. Never leave blank.
-- **Role / scope:** the session's role and what it is and is not authorized to do. Be
-  explicit — do not leave scope to inference.
-- **Ledger / log:** the file the session will append to. Name it before invocation;
-  the session creates it on first write.
-
-**Task fields** — fill these so the session knows exactly what to do and what to leave alone:
-
-- **Plan / spec:** the plan doc or spec the session follows. Pass the exact path. The task writer
-  must extract or reference the relevant plan sections so the coder/reviewer can focus on the
-  specific assignment without wading through unrelated spec history. Workers do not read this
-  upfront — they pull on demand as needed.
-- **Context:** files the session must read to do the work — active reference material, not
-  plan docs. One path per line. Keep this short; only files genuinely needed.
-- **Refs:** cited related files — do not read unless explicitly needed. Prior ledgers,
-  background docs, output files from this mission. One path per line.
-- **Expected output:** what the session produces — a file, a set of commits, a review report,
-  a finding. Be specific enough that completion is unambiguous.
-- **Done / completion criteria:** checkable claims. Not "do the work" but "X exists, verified
-  by Y." For coders: which tests must pass, which lint checks must clear.
-- **Limits:** what the session must not change, what it must preserve, what is out of scope.
-  For coders resuming a prior session: what state to keep, where to resume from.
-- **Extra rules / rule refs:** optional. Paths to additional `conventions/*.md` files the
-  session must read for this task specifically. When delegating to a subagent that will edit
-  files it doesn't own, cite `conventions/wip-editing.md` here and name the files it applies
-  to — the delegator does not need to read `wip-editing.md` itself unless also editing directly.
-
-**Execution fields** — fill these with the initial plan; the session updates them as work
-proceeds:
-
-- **Steps / subtasks:** a checklist. Each item is the smallest unit worth its own status.
-  For rebases or multi-file refactors, the task writer must prepare:
-  1. An explicit list of all file/code locations requiring modification.
-  2. A step-by-step change sequence.
-  3. A post-change verification checklist (exact tests, lint, and behavioral sanity checks).
-  The worker follows this plan sequentially.
-- **Next step / resume point:** leave blank initially; the session fills this as it works.
-  On interactive sessions it confirms the next step with the user before running it.
-- **Status:** set to `NOT STARTED` before invocation. The session updates this as it works.
-  Valid values for workers: `NOT STARTED` | `IN PROGRESS — <what's left>` |
-  `DONE <date>` | `BLOCKED on <thing>`.
-- **Known issues:** optional. Fill in any known constraints or risks before invocation.
+- `In:` / `Out:` agentbus channels are required for every background invocation.
+- `Startup verification instructions:` — never leave blank.
+- `Role / scope:` — be explicit; do not leave scope to inference.
+- `Plan / spec:` — workers pull on demand, never read upfront.
+- `Context:` — only files genuinely needed; keep short.
+- `Extra rules / rule refs:` — when delegating to a subagent that will edit files it doesn't
+  own, cite `conv-wip-editing` here and name the files it applies to. The delegator does not
+  need to read `conv-wip-editing` itself unless also editing directly.
+- `Done / completion criteria:` — checkable claims; workers report actual results, not "passed".
+- `Status:` — set to `NOT STARTED` before invocation.
 
 ## Task authoring rules
 
@@ -155,51 +114,6 @@ an incomplete STATE must ask the user before proceeding.
 
 ## Mission spec / roadmap structure
 
-For missions with extended history and multiple tasks (i.e. a plan/spec doc like
-`spec-policy-writer.md`), use this canonical structure. Sessions read sections 1–2 upfront
-and stop; everything below is on-demand.
-
-```
-## 1. Orientation
-   Fused overview: what this mission builds, why, and the key settled principles/constraints.
-   Human-readable. One paragraph + compact bullet list.
-
-## 2. Spec / roadmap                  ← READ UP TO HERE UPFRONT. STOP.
-   This section is recursive — its depth scales with the doc's level:
-   - Mission-level doc: a roadmap of sub-missions (flat checklist, one line per task).
-   - Sub-mission / code-level doc: the same section at deeper resolution — pseudo-code,
-     call stack, structure, key constraints — but never literal implementation-language code.
-     A few degrees of freedom are left to the coder; design intent is explicit.
-   §2 numbering is stable for the lifetime of a doc. Task files cite §2.x directly, so
-   §2's number must not change when a doc is restructured.
-
-## 3. Open items
-   Blocking decisions and open questions for owner/user only.
-   Closed items are dropped, not archived here.
-   Pull this section when you need a decision, not at session start.
-
-## 4. Coder task hierarchy
-   One task file per §2 item; one step per §2 sub-item.
-   Navigational index into section 5/7. Pull to find a specific task file.
-
-## 5. Discussion abstracts
-   Concise processed bottom-line per item (not a log).
-
-## 6. Summary of decisions
-   Flat list: each decision → ref into §5/§7, impact, rejected alternatives, why rejected.
-   For owner/user tracking.
-
-## 7. Detailed discussion
-   Full paper trail per item. Pull individual subsections on demand; do not read upfront.
-
-## 8. Revision log
-```
-
-**Reading rule for mission specs:** a session reads sections 1–2 at session start as part
-of its context pull. It does not read sections 3+ unless it needs a specific item — look it
-up by section or outline entry, read only that subsection.
-
-**Restructuring an existing doc to this template:** read the whole source fresh, build the new
-structure in a scratch file by relocating exact existing text (no rewriting), then diff
-word-count and every code citation (`file.go:N` pattern) against the original before applying.
-This catches dropped citations.
+Mission spec template: `conventions/mission_spec_template.md` — use this structure for
+missions with extended history and multiple tasks. Includes reading rules and restructuring
+guidance.
