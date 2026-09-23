@@ -1,6 +1,6 @@
 ---
 name: conv-feature-worktree-setup
-description: Use when creating or migrating a mission worktree, setting up .session/ layout, or fixing missing resume-mission/wind-down skill symlinks in a worktree.
+description: Use when creating or migrating a mission worktree, setting up .session/ layout, or fixing missing skill access in a worktree.
 ---
 
 # conv-feature-worktree-setup
@@ -43,41 +43,39 @@ If STATE.md is missing, create a minimal one using the template from `worktrees/
 `.session/` must be tracked on the mission branch so it is recoverable via `git show`:
 
 ```bash
-cd MISSION_WT
-git add .session/
-git commit -m "chore: initialize .session/ layout for MISSION_NAME"
+git -C MISSION_WT add .session/
+git -C MISSION_WT commit -m "chore: initialize .session/ layout for MISSION_NAME"
 ```
 
 If nothing to commit (already tracked), skip.
 
-### 3. Set up skill symlinks
+### 3. Set up `.claude/skills` dir-symlink
 
-Skill discovery does not walk above the worktree root — each worktree needs its own symlinks:
+Skill discovery does not walk above the worktree root — each worktree needs its own `.claude/skills` pointing at the shared skills source.
+
+**Check first:** if `MISSION_WT/.claude/skills` already exists and is a directory symlink resolving to `worktrees/session-tracking/claude-skills`, step 3 is already done — skip to step 4.
+
+**If `pr-review` is a tracked git file in this worktree** (run `git -C MISSION_WT ls-files .claude/skills/pr-review` to check), do not replace the `.claude/skills` directory — skip to step 4 and report this as a blocker.
+
+Otherwise, create the dir-symlink:
 
 ```bash
-mkdir -p MISSION_WT/.claude/skills
-cd MISSION_WT/.claude/skills
-ln -s ../../../session-tracking/claude-skills/resume-mission resume-mission
-ln -s ../../../session-tracking/claude-skills/wind-down wind-down
-for skill in worktrees/session-tracking/claude-skills/conv-*/; do
-  name=$(basename "$skill")
-  ln -sf "../../claude-skills/$name" "$name"
-done
+# Remove any existing per-skill symlinks or empty dir
+rm -rf MISSION_WT/.claude/skills
+
+# Create a single dir-symlink pointing to the shared skills dir
+SKILLS_ABS=$(realpath worktrees/session-tracking/claude-skills)
+ln -s "$SKILLS_ABS" MISSION_WT/.claude/skills
 ```
 
-Exclude symlinks from git tracking (repo-shared exclude, not per-worktree):
+Exclude the symlink from git tracking (repo-shared exclude, not per-worktree):
 
 ```bash
 EXCLUDE=$(git -C MISSION_WT rev-parse --git-common-dir)/info/exclude
-grep -qF ".claude/skills/resume-mission" "$EXCLUDE" || echo ".claude/skills/resume-mission" >> "$EXCLUDE"
-grep -qF ".claude/skills/wind-down" "$EXCLUDE" || echo ".claude/skills/wind-down" >> "$EXCLUDE"
-for skill in worktrees/session-tracking/claude-skills/conv-*/; do
-  name=$(basename "$skill")
-  grep -qxF ".claude/skills/$name" "$EXCLUDE" || echo ".claude/skills/$name" >> "$EXCLUDE"
-done
+grep -qxF ".claude/skills" "$EXCLUDE" || echo ".claude/skills" >> "$EXCLUDE"
 ```
 
-### 4. Verify all symlinks resolve
+### 4. Verify all skills resolve
 
 ```bash
 for skill in MISSION_WT/.claude/skills/*/; do
@@ -92,11 +90,9 @@ All resolved paths must be under `worktrees/session-tracking/claude-skills/`. Re
 ### 5. Create session-tracking convenience symlinks
 
 ```bash
-cd worktrees/session-tracking/missions
-mkdir -p MISSION_NAME
-cd MISSION_NAME
-ln -sf ../../../../worktrees/MISSION_NAME/.session/STATE.md STATE.md
-ln -sf ../../../../worktrees/MISSION_NAME/.session ledgers
+mkdir -p worktrees/session-tracking/missions/MISSION_NAME
+ln -sf "$(realpath MISSION_WT/.session/STATE.md)" worktrees/session-tracking/missions/MISSION_NAME/STATE.md
+ln -sf "$(realpath MISSION_WT/.session)" worktrees/session-tracking/missions/MISSION_NAME/ledgers
 ```
 
 Then publish on agentbus so policy-writer commits these on its next resume:
@@ -110,7 +106,8 @@ agentbus_publish(topic="session-tracking.pending-commits", kind="note",
 
 Return a summary:
 - `.session/` layout: created / already existed
-- Symlinks verified: list of skills, resolved paths
+- `.claude/skills` dir-symlink: created / already existed / blocked (pr-review tracked)
+- Skills verified: list of skills, resolved paths
 - session-tracking symlinks: created / already existed
 - agentbus note: published / skipped (if agentbus unavailable)
 - Any failures encountered
