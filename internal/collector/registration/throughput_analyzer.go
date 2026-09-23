@@ -5,9 +5,10 @@ package registration
 import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
+
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/source"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
-	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 )
 
 // Query name constants for throughput analyzer metrics.
@@ -103,130 +104,14 @@ const (
 	QueryModelArrivalRate = "model_arrival_rate"
 )
 
-// The model arrival rate, assembled so each clause can be read on its own:
-// enqueues × (the model label, borrowed), falling back to placements.
-//
-// The label has to be borrowed because the enqueue counter does not carry one:
-// it is per (job, fairness_id, priority, outcome). The flow-control queue gauge
-// does carry target_model_name and comes from the same EPP, so it is joined on
-// (namespace, job).
-//
-// Each `or` between a pair of metric names aggregates BEFORE the or, never
-// after. `or` compares whole label sets, so a label present on one name and
-// not the other makes the two series look unrelated and the union keeps both —
-// a silent doubling. That is not hypothetical: on the benchmark cluster
-// llm_d_epp_scheduler_attempts_total carries endpoint_name where
-// inference_extension_scheduler_attempts_total carries pod_name, and the naive
-// form reads 9.75 req/s against a true 4.88. Aggregating first drops the
-// offending label before the comparison.
-const (
-	// The two names for each flow-control metric. llm_d_epp_* is current and
-	// inference_extension_* the deprecated alias (constants/metrics.go), read
-	// in that order as the rest of the collector does.
-	arrivalEnqueueRate = `(sum by (namespace, job) (rate(llm_d_epp_flow_control_request_enqueue_duration_seconds_count{namespace="{{.namespace}}"}[1m]))` +
-		` or sum by (namespace, job) (rate(inference_extension_flow_control_request_enqueue_duration_seconds_count{namespace="{{.namespace}}"}[1m])))`
-
-	// target_model_name!="" is load-bearing, not hygiene. An EPP does export a
-	// second queue_size series with the label absent — measured on a
-	// benchmark-cluster namespace — and group_left needs the right-hand
-	// (namespace, job) to be unique.
-	//
-	// What goes wrong depends on what else is present. Without this matcher the
-	// guard below sees two series and drops the join, so the query silently
-	// falls through to the placement arm and the under-read this whole file
-	// exists to fix comes back with no signal that it did. Without the guard
-	// as well, the expression fails outright with "found duplicate series for
-	// the match group" — and a PromQL error is not something `or` can catch,
-	// so the collector reads no series, which it cannot tell from idle
-	// traffic. Both were reproduced.
-	arrivalQueueByModel = `max by (namespace, job, target_model_name) (` +
-		`llm_d_epp_flow_control_queue_size{namespace="{{.namespace}}",target_model_name!=""}` +
-		` or inference_extension_flow_control_queue_size{namespace="{{.namespace}}",target_model_name!=""})`
-
-	// ^ 0 is 1 for every finite value and for NaN, so it copies the label
-	// across and leaves the rate alone. The count == 1 guard drops the join
-	// entirely where one pool serves several models: the enqueue counter has
-	// no model label, so it cannot be split between them, and an arrival rate
-	// attributed to the wrong model is worse than the under-read below. Those
-	// fleets fall through to the placement arm, which attributes correctly.
-	arrivalModelLabel = `((` + arrivalQueueByModel + ` ^ 0) and on (namespace, job) ` +
-		`(count by (namespace, job) (` + arrivalQueueByModel + `) == 1))`
-
-	// Placements. Capacity-bound while the fleet is saturated — the whole
-	// reason for the arm above — but correct once it is not, and the only
-	// thing available on a fleet without flow control. This is the arm that
-	// carries a fleet the flow-control metrics do not describe, so it reads
-	// both names too, and it is the pair whose labels already disagree.
-	arrivalPlacementRate = `(sum by (namespace, target_model_name) (rate(llm_d_epp_scheduler_attempts_total{status="success",namespace="{{.namespace}}"}[1m]))` +
-		` or sum by (namespace, target_model_name) (rate(inference_extension_scheduler_attempts_total{status="success",namespace="{{.namespace}}"}[1m])))`
-
-	// `> 0` so that a present-but-zero enqueue series cannot mask a live
-	// placement rate: `or` keeps a right-hand series only where the left has
-	// no series at all, and a zero is a series. Its shape is a fleet whose
-	// flow controller is deployed but rarely queues.
-	//
-	// It is a presence test, not a plausibility one: an EPP that routed only
-	// part of its traffic through flow control would pass it with a rate well
-	// below the true one. No such fleet has been seen, and `max` of the two
-	// arms would cover that case as well — at the cost of reporting a drain
-	// rate as demand after traffic stops, which this form already does.
-	modelArrivalRateQuery = `sum by (namespace, target_model_name) (` +
-		arrivalEnqueueRate + ` * on (namespace, job) group_left(target_model_name) ` +
-		arrivalModelLabel + `) > 0 or ` + arrivalPlacementRate
-)
-
-// RegisterThroughputAnalyzerQueries registers the four TA-exclusive queries.
-// It must be called once at engine startup alongside other analyzer registrations.
-//
-// Registered queries:
-//   - QueryGenerationTokenRate — μ_dec^obs: observed decode token rate per pod
-//   - QueryKvUsageInstant      — k*: instantaneous KV cache utilization per pod
-//   - QueryRequestRate     — fallback λ_req: completion rate per pod when EPP absent
-//   - QueryModelArrivalRate    — Λ_req: model-level request arrival rate
-//
-// Additional TA inputs are read from domain.ReplicaMetrics fields populated by
-// RegisterSaturationQueries (TotalKvCapacityTokens, AvgOutputTokens, AvgInputTokens,
-// PrefixCacheHitRate) and RegisterQueueingModelQueries (AvgITL, ArrivalRate).
-// See the package-level constant block for the full TA notation → field mapping.
-//
-// μ_dec is computed using a linear ITL model:
-//
-//	ITL(k)   = A·k + B            (calibrated from AvgITL × k* pairs over time)
-//	IL_eff   = IL × (1 - H%)
-//	KV_req   = IL_eff + OL/2
-//	N_dec(k) = k × KV_max / KV_req
-//	μ_dec    = N_dec(k_sat) / ITL(k_sat)
-//
-// Per variant V (summed over that variant's replicas only):
-// λ_dec primary:  Σ_{r∈V}(ArrivalRate_r × AvgOutputTokens_r)     [EPP deployed]
-// λ_dec fallback: Σ_{r∈V}(RequestRate_r × AvgOutputTokens_r) [EPP absent]
-func RegisterThroughputAnalyzerQueries(sourceRegistry *source.SourceRegistry) {
-	metricsSource := sourceRegistry.Get("prometheus")
-	if metricsSource == nil {
-		ctrl.Log.V(logging.DEBUG).Info("Prometheus source not registered, skipping throughput analyzer query registration")
-		return
-	}
-	registry := metricsSource.QueryList()
-
-	// The generation-token rate moved to RegisterArrivalRateQueries, which
-	// runs whether or not this analyzer is enabled: the saturation analyzer's
-	// demand floor prices mu from it. Registering it here as well would panic
-	// on the duplicate the moment this analyzer is turned on.
-
-	// Per-pod instantaneous KV cache utilization (0.0–1.0).
-	// Does NOT use max_over_time: the throughput analyzer needs the current
-	// operating point k*, not the worst-case peak used by the saturation analyzer.
-	// Grouping key and namespace scoping: see the note above RegisterSaturationQueries
-	registry.MustRegister(source.QueryTemplate{
-		Name:        QueryKvUsageInstant,
-		Type:        source.QueryTypePromQL,
-		Template:    `max by (model_name, instance, pod) (vllm:kv_cache_usage_perc{namespace="{{.namespace}}"})`,
-		Params:      []string{source.ParamNamespace},
-		Description: "Instantaneous KV cache utilization per pod (0.0–1.0), used as k* in the ITL model",
-	})
-
-	registerSGLangThroughputAnalyzerQueries(registry)
-}
+// Every query the throughput analyzer needs is registered by
+// RegisterArrivalRateQueries below, unconditionally. There is no
+// RegisterThroughputAnalyzerQueries any more: it registered four queries that
+// only existed when that opt-in analyzer was enabled, and three separate
+// outages came of a figure the always-on demand floor needed being gated that
+// way -- the arrival rate, the generation-token rate, and k* in the ITL model.
+// A query that only one analyzer reads costs nothing to collect; a query the
+// floor reads and cannot get costs a benchmark run to find.
 
 // RegisterArrivalRateQueries registers how fast work is ARRIVING: the
 // model-level rate from the scheduler, and the per-pod completion rate that
@@ -243,7 +128,16 @@ func RegisterThroughputAnalyzerQueries(sourceRegistry *source.SourceRegistry) {
 // The cost of always collecting them is two Prometheus queries per namespace per
 // cycle. The cost of not doing so was a feature that could not work at all.
 func RegisterArrivalRateQueries(sourceRegistry *source.SourceRegistry) {
-	registry := sourceRegistry.Get("prometheus").QueryList()
+	// The guard came with the queries when they moved here. This runs
+	// unconditionally at startup now, so a deployment without a Prometheus
+	// source would take the controller down on boot rather than run without
+	// a demand floor -- which is the wrong trade to make for the operator.
+	metricsSource := sourceRegistry.Get("prometheus")
+	if metricsSource == nil {
+		ctrl.Log.V(logging.DEBUG).Info("Prometheus source not registered, skipping arrival-rate query registration")
+		return
+	}
+	registry := metricsSource.QueryList()
 
 	// Per-pod vLLM request completion rate (req/s).
 	// Derived from the generation tokens histogram _count (increments once per
@@ -309,6 +203,28 @@ func RegisterArrivalRateQueries(sourceRegistry *source.SourceRegistry) {
 	})
 
 	registerSGLangArrivalRateQueries(registry)
+	// k*, the instantaneous KV utilization, for the SAME reason the
+	// generation-token rate is here: the saturation analyzer's demand floor
+	// derives mu from ITL(k), and k is half of every observation that fits
+	// it. Gated behind the throughput analyzer it was collected only when
+	// that analyzer was enabled -- which the shipped config does not do -- so
+	// every replica reported k = 0, every observation was discarded, and the
+	// derivation was silently inert. Measured on 2026-09-24: 1,064 capacity
+	// decisions, not one of them derived. This is the third time a figure the
+	// floor needs has been gated on an opt-in analyzer; the other two are
+	// named above and in cmd/main.go.
+	//
+	// No max_over_time, unlike QueryKvCacheUsage: the model wants the point
+	// the replica is at, not a one-minute high-water mark.
+	registry.MustRegister(source.QueryTemplate{
+		Name:        QueryKvUsageInstant,
+		Type:        source.QueryTypePromQL,
+		Template:    `max by (model_name, instance, pod) (vllm:kv_cache_usage_perc{namespace="{{.namespace}}"})`,
+		Params:      []string{source.ParamNamespace},
+		Description: "Instantaneous KV cache utilization per pod (0.0–1.0), used as k* in the ITL model",
+	})
+	registerSGLangThroughputAnalyzerQueries(registry)
+
 }
 
 // registerSGLangArrivalRateQueries registers the SGLang completion-rate variant.
