@@ -352,12 +352,18 @@ func priceable(x float64) bool {
 }
 
 // nonNegativeSupply floors an anticipated supply at zero for use as a cap,
-// reading a non-finite supply as zero. It exists because the builtin max does
-// not clamp a NaN -- max(NaN, 0) is NaN -- and this value caps a comparison
-// that a NaN would silently disable. Unlike the readings above, the supply is
-// aggregated over variants that priceable never saw, so it is guarded here.
+// reading a non-finite supply -- NaN or +Inf -- as zero.
+//
+// It exists because the builtin max clamps neither: max(NaN, 0) is NaN and
+// max(+Inf, 0) is +Inf, and both DISABLE the comparison this value caps rather
+// than binding it, because `floor > NaN` and `floor > +Inf` are equally false.
+//
+// aggregation.perReplica now keeps the sums finite at their source, so this is
+// the second line of defence rather than the first. It is kept because the cap
+// it feeds is this package's only guarantee, and because a caller may hand us
+// an anticipated supply we did not aggregate ourselves.
 func nonNegativeSupply(x float64) float64 {
-	if math.IsNaN(x) || x < 0 {
+	if math.IsNaN(x) || math.IsInf(x, 1) || x < 0 {
 		return 0
 	}
 	return x

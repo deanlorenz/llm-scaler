@@ -37,7 +37,11 @@ limitations under the License.
 //	r.RoleCapacities[role].* == same sums filtered by vc.Role == role
 package aggregation
 
-import "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+import (
+	"math"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+)
 
 // ScopeTotals holds the three model-level (or per-role) aggregates that the
 // engine's universal threshold post-step reads to compute RC and SC.
@@ -47,11 +51,37 @@ type ScopeTotals struct {
 	TotalDemand            float64
 }
 
+// perReplica is vc.PerReplicaCapacity as a sum may carry it: a non-finite
+// capacity counts as none.
+//
+// Every total here is multiplied by a replica count and then compared with `>`
+// or `<` by its consumers, and a NaN makes every such comparison false -- so one
+// variant with a NaN capacity does not merely corrupt its own term, it disables
+// the guard the consumer applies to the whole sum. The engine's
+// `if rc < 0 { rc = 0 }` and the floor's two caps all failed open that way.
+//
+// Written `!(p > 0)` rather than `p <= 0` because a NaN fails every comparison,
+// so `p <= 0` would admit one; +Inf is excluded separately because it passes
+// `p > 0`. A capacity of zero is already worth zero in the product, so treating
+// a non-finite one the same way changes nothing for any finite input.
+//
+// Only the capacity is sanitized. The replica counts are left alone, so a
+// negative PendingReplicas still yields a negative supply and its consumers'
+// existing clamps still see it: that case is real, guarded downstream, and not
+// this function's to reinterpret.
+func perReplica(vc domain.VariantCapacity) float64 {
+	p := vc.PerReplicaCapacity
+	if !(p > 0) || math.IsInf(p, 1) {
+		return 0
+	}
+	return p
+}
+
 // SumTotalSupply returns Σ_v vc.ReplicaCount × vc.PerReplicaCapacity.
 func SumTotalSupply(vcs []domain.VariantCapacity) float64 {
 	var total float64
 	for _, vc := range vcs {
-		total += float64(vc.ReplicaCount) * vc.PerReplicaCapacity
+		total += float64(vc.ReplicaCount) * perReplica(vc)
 	}
 	return total
 }
@@ -63,7 +93,7 @@ func SumTotalSupply(vcs []domain.VariantCapacity) float64 {
 func SumTotalAnticipatedSupply(vcs []domain.VariantCapacity) float64 {
 	var total float64
 	for _, vc := range vcs {
-		total += float64(vc.ReplicaCount+vc.PendingReplicas) * vc.PerReplicaCapacity
+		total += float64(vc.ReplicaCount+vc.PendingReplicas) * perReplica(vc)
 	}
 	return total
 }
@@ -118,8 +148,8 @@ func AggregateByRole(vcs []domain.VariantCapacity) map[string]ScopeTotals {
 			role = domain.RoleBoth
 		}
 		t := result[role]
-		t.TotalSupply += float64(vc.ReplicaCount) * vc.PerReplicaCapacity
-		t.TotalAnticipatedSupply += float64(vc.ReplicaCount+vc.PendingReplicas) * vc.PerReplicaCapacity
+		t.TotalSupply += float64(vc.ReplicaCount) * perReplica(vc)
+		t.TotalAnticipatedSupply += float64(vc.ReplicaCount+vc.PendingReplicas) * perReplica(vc)
 		t.TotalDemand += vc.TotalDemand
 		result[role] = t
 	}

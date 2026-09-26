@@ -163,16 +163,44 @@ var _ = Describe("Estimate", func() {
 		// slices.Sort puts a NaN wherever it likes, so whether a NaN survived
 		// the median used to depend on how many readings there were. It must
 		// not be a question of parity.
+		// Two DIFFERENT finite readings, so the assertion separates "dropped"
+		// from "clamped to zero and averaged in". Filtered, mu is
+		// median(5.4, 2.7) = 4.05; clamped-and-included it would be
+		// median(0, 2.7, 5.4) = 2.7. With two equal readings both give 5.4 and
+		// the spec could not tell them apart.
+		const slowMu = runMu / 2
 		mixed := []capacity.ReplicaCapacity{
 			{VariantName: "v", SaturatedThroughput: runMu, SaturatedThroughputSamples: 3},
 			{VariantName: "v", SaturatedThroughput: math.NaN(), SaturatedThroughputSamples: 3},
-			{VariantName: "v", SaturatedThroughput: runMu, SaturatedThroughputSamples: 3},
+			{VariantName: "v", SaturatedThroughput: slowMu, SaturatedThroughputSamples: 3},
 		}
 		g := Estimate(runLambda, mixed, v, nil, BacklogDrainSeconds, 0.85, false, 0)
 		Expect(math.IsNaN(g.ByRole[domain.RoleDecode])).To(BeFalse())
-		Expect(g.Terms[domain.RoleDecode].Mu).To(BeNumerically("~", runMu, 1e-9),
-			"the two finite readings decide it between them")
-		Expect(g.ByRole[domain.RoleDecode]).To(BeNumerically("~", runLambda*float64(runK1)/runMu, 1e-6))
+		Expect(g.Terms[domain.RoleDecode].Mu).To(BeNumerically("~", (runMu+slowMu)/2, 1e-9),
+			"the two finite readings decide it between them, and a NaN is not one")
+		wantCost := (float64(runK1)/runMu + float64(runK1)/slowMu) / 2
+		Expect(g.ByRole[domain.RoleDecode]).To(BeNumerically("~", runLambda*wantCost, 1e-6))
+
+		By("an infinite reading among finite ones is dropped the same way")
+		withInf := []capacity.ReplicaCapacity{
+			{VariantName: "v", SaturatedThroughput: runMu, SaturatedThroughputSamples: 3},
+			{VariantName: "v", SaturatedThroughput: math.Inf(1), SaturatedThroughputSamples: 3},
+			{VariantName: "v", SaturatedThroughput: slowMu, SaturatedThroughputSamples: 3},
+		}
+		gi := Estimate(runLambda, withInf, v, nil, BacklogDrainSeconds, 0.85, false, 0)
+		Expect(gi.Terms[domain.RoleDecode].Mu).To(BeNumerically("~", (runMu+slowMu)/2, 1e-9),
+			"+Inf passes `x > 0`, so only the explicit test keeps it out of the median")
+
+		By("a non-finite BORROWED reading is filtered before it is borrowed")
+		// The borrowed branch is reached after the same filter, so a NaN cannot
+		// become a borrowed cost either -- and a role whose only reading was a
+		// non-finite borrowed one is not "borrowed only", it has nothing.
+		borrowedNaN := []capacity.ReplicaCapacity{{VariantName: "v",
+			SaturatedThroughput: math.NaN(), SaturatedThroughputSamples: 10,
+			SaturatedThroughputBorrowed: true}}
+		gb := Estimate(runLambda, borrowedNaN, v, nil, BacklogDrainSeconds, 0.85, false, runLambda*10)
+		_, borrowedPresent := gb.ByRole[domain.RoleDecode]
+		Expect(borrowedPresent).To(BeFalse(), "nothing to borrow from a NaN")
 
 		By("a NaN per-replica capacity is not a capacity")
 		nanP := []capacity.ReplicaCapacity{
@@ -196,31 +224,79 @@ var _ = Describe("Estimate", func() {
 			"and nothing NaN reaches the Term this package logs")
 	})
 
-	It("holds at zero when the anticipated supply is not a number", func() {
-		// The hold cap is scaleUp x the anticipated supply, and the builtin max
-		// does NOT clamp a NaN -- max(NaN, 0) is NaN -- so a NaN supply left
-		// `floor > hold` false and the cap never bound at all. That is the
-		// opposite failure from the negative case above: not a floor capped too
-		// low, but a floor never capped.
+	It("lets one variant's unusable capacity cost the role nothing", func() {
+		// A NaN or +Inf PerReplicaCapacity on ONE variant used to poison the
+		// whole role's anticipated supply, because aggregation summed it
+		// unguarded. The supply then capped nothing -- `floor > NaN` and
+		// `floor > +Inf` are both false -- so the hold silently did not bind.
 		//
-		// The supply is aggregated over every variant of the role, including
-		// ones whose own reading was filtered out, so it needs its own guard:
-		// one variant carries the reading and another poisons the sum.
+		// aggregation.perReplica now counts an unusable capacity as none, so the
+		// role's supply is whatever its usable variants are worth and the cap
+		// binds normally. The variant contributes nothing instead of destroying
+		// the figure.
 		thin := []capacity.ReplicaCapacity{
 			{VariantName: "good", SaturatedThroughput: runMu, SaturatedThroughputSamples: 1}}
-		poisoned := []domain.VariantCapacity{
+
+		for _, tc := range []struct {
+			name string
+			bad  float64
+		}{
+			{"a NaN capacity", math.NaN()},
+			{"an infinite capacity", math.Inf(1)},
+		} {
+			By(tc.name + " on a second variant")
+			vs := []domain.VariantCapacity{
+				{VariantName: "good", Role: domain.RoleDecode,
+					ReplicaCount: 1, PerReplicaCapacity: float64(runK1)},
+				{VariantName: "bad", Role: domain.RoleDecode,
+					ReplicaCount: 1, PerReplicaCapacity: tc.bad},
+			}
+			f := Estimate(runLambda, thin, vs, nil, BacklogDrainSeconds, 0.85, false, 0)
+
+			Expect(math.IsNaN(f.ByRole[domain.RoleDecode])).To(BeFalse(),
+				"never a NaN floor")
+			Expect(f.Terms[domain.RoleDecode].Held).To(BeTrue(),
+				"the cap binds, which is what the unguarded sum prevented")
+			// The good variant alone is the anticipated supply, so the hold is
+			// exactly scaleUp x one replica of it -- not zero, which is what a
+			// clamp at the read site produced, and not uncapped.
+			Expect(f.ByRole[domain.RoleDecode]).To(BeNumerically("~", 0.85*float64(runK1), 1e-6),
+				"held at the usable variant's worth")
+		}
+	})
+
+	It("clamps an anticipated supply it did not aggregate itself", func() {
+		// nonNegativeSupply is unreachable through Estimate now that the sums
+		// are guarded at their source, so it is asserted directly rather than
+		// left as untested defence. It is kept because the cap it feeds is this
+		// package's only guarantee and a caller may supply its own aggregate.
+		Expect(nonNegativeSupply(math.NaN())).To(BeZero(), "max(NaN, 0) is NaN")
+		Expect(nonNegativeSupply(math.Inf(1))).To(BeZero(), "max(+Inf, 0) is +Inf")
+		Expect(nonNegativeSupply(math.Inf(-1))).To(BeZero())
+		Expect(nonNegativeSupply(-1)).To(BeZero())
+		Expect(nonNegativeSupply(0)).To(BeZero())
+		Expect(nonNegativeSupply(float64(runK1))).To(Equal(float64(runK1)),
+			"and a real supply passes through untouched")
+	})
+
+	It("prices only the usable variants of a role", func() {
+		// The reading filter and the capacity sanitizer are different layers:
+		// a variant with an unusable capacity must not contribute a cost even
+		// though its replica DOES have a finite reading.
+		reps := []capacity.ReplicaCapacity{
+			{VariantName: "good", SaturatedThroughput: runMu, SaturatedThroughputSamples: 3},
+			{VariantName: "bad", SaturatedThroughput: runMu, SaturatedThroughputSamples: 3},
+		}
+		vs := []domain.VariantCapacity{
 			{VariantName: "good", Role: domain.RoleDecode,
 				ReplicaCount: 1, PerReplicaCapacity: float64(runK1)},
 			{VariantName: "bad", Role: domain.RoleDecode,
 				ReplicaCount: 1, PerReplicaCapacity: math.NaN()},
 		}
-		f := Estimate(runLambda, thin, poisoned, nil, BacklogDrainSeconds, 0.85, false, 0)
-		Expect(math.IsNaN(f.ByRole[domain.RoleDecode])).To(BeFalse(),
-			"a NaN supply must not pass a NaN through as the floor")
-		Expect(f.Terms[domain.RoleDecode].Held).To(BeTrue(),
-			"the cap binds, as it does for a negative supply")
-		Expect(f.ByRole[domain.RoleDecode]).To(BeZero(),
-			"read as zero anticipated supply, so held at zero")
+		f := Estimate(runLambda, reps, vs, nil, BacklogDrainSeconds, 0.85, false, 0)
+		Expect(math.IsNaN(f.ByRole[domain.RoleDecode])).To(BeFalse())
+		Expect(f.ByRole[domain.RoleDecode]).To(BeNumerically("~", runLambda*float64(runK1)/runMu, 1e-6),
+			"the good variant's cost alone, as though the bad one were not there")
 	})
 
 	It("lets a single reading order while the scheduler holds a queue", func() {
