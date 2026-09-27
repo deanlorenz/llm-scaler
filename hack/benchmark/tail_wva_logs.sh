@@ -67,6 +67,11 @@ case "$CMD" in
     rm -f "$OUT.stop"
     # Old runs' kubectl diagnostics must not be read as this run's.
     : > "$OUT.stderr" 2>/dev/null || true
+    # stderr to the capture's own file, not to /dev/null. Round 6 sent the whole
+    # subshell to /dev/null to stop it holding the caller's stdout, and took the
+    # sampler's last diagnostics channel with it: a sampler recording an empty
+    # controller list because of an auth failure became indistinguishable from a
+    # namespace with no serving deployments.
     # Job control, so the background capture leads its own process group and one
     # signal at stop reaches every descendant. Without it the sampler's kubectl
     # and python -- grandchildren, because they run inside a command substitution
@@ -91,7 +96,7 @@ case "$CMD" in
         fi
         sleep 1
       done
-    ) >/dev/null 2>&1 &
+    ) >/dev/null 2>>"$OUT.stderr" &
     tail_pid=$!
     set +m
     if ! echo "$tail_pid" > "$OUT.pid" || ! capture_adopt "$OUT" "$NS" "$tail_pid"; then
@@ -146,14 +151,14 @@ case "$CMD" in
     # concurrent stops racing on one file: both reported success and one printed
     # `mv: cannot stat`, with a window where one awk reads $OUT while the other mv
     # replaces it.
-    capture_begin_finalise "$OUT"
+    # Taking the ownership record IS the claim, so exactly one stop gets here.
+    capture_claim_finalise "$OUT"
     case "$?" in
       0) : ;;
       2) echo "another stop is finalising $OUT -- leaving it to that one" >&2
          exit 0 ;;
-      *) echo "cannot claim finalisation of $OUT, and no other stop holds it" >&2
-         echo "  refusing to report a stop that leaves the output unterminated" >&2
-         exit 1 ;;
+      *) echo "nothing left to finalise at $OUT" >&2
+         exit 0 ;;
     esac
     if [ -f "$OUT" ]; then
       dedup="$(mktemp "$OUT.dedup.XXXXXX")" \
@@ -163,7 +168,6 @@ case "$CMD" in
     fi
     n=$(wc -l < "$OUT" 2>/dev/null || echo 0)
     capture_finish "$OUT"
-    capture_end_finalise "$OUT"
     echo "WVA log tail stopped: $n line(s) -> $OUT"
     ;;
   *)

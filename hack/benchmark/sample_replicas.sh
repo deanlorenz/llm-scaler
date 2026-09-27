@@ -153,6 +153,11 @@ case "$CMD" in
     # write at stop is best-effort, so a leftover would be picked up as this
     # run's measurement.
     rm -f "$OUT.pod_timings.json"
+    # stderr to the capture's own file, not to /dev/null. Round 6 sent the whole
+    # subshell to /dev/null to stop it holding the caller's stdout, and took the
+    # sampler's last diagnostics channel with it: a sampler recording an empty
+    # controller list because of an auth failure became indistinguishable from a
+    # namespace with no serving deployments.
     # Job control, so the background capture leads its own process group and one
     # signal at stop reaches every descendant. Without it the sampler's kubectl
     # and python -- grandchildren, because they run inside a command substitution
@@ -171,7 +176,7 @@ case "$CMD" in
         _pods_snapshot "$NS" >> "$OUT.pods.jsonl" 2>/dev/null || true
         sleep "$INTERVAL"
       done
-    ) >/dev/null 2>&1 &
+    ) >/dev/null 2>>"$OUT.stderr" &
     sampler_pid=$!
     set +m
     if ! echo "$sampler_pid" > "$OUT.pid" || ! capture_adopt "$OUT" "$NS" "$sampler_pid"; then
@@ -223,14 +228,14 @@ case "$CMD" in
     # it one. Sniffing the last two bytes instead does NOT work either -- a
     # snapshot ends with `]}` too, so a closed array and an open one ending in a
     # snapshot are indistinguishable.
-    capture_begin_finalise "$OUT"
+    # Taking the ownership record IS the claim, so exactly one stop gets here.
+    capture_claim_finalise "$OUT"
     case "$?" in
       0) : ;;
       2) echo "another stop is finalising $OUT -- leaving it to that one" >&2
          exit 0 ;;
-      *) echo "cannot claim finalisation of $OUT, and no other stop holds it" >&2
-         echo "  refusing to report a stop that leaves the output unterminated" >&2
-         exit 1 ;;
+      *) echo "nothing left to finalise at $OUT" >&2
+         exit 0 ;;
     esac
     printf ']}' >> "$OUT"
     # Dedupe the pod observations into one record per pod. Keep the observation
@@ -282,7 +287,6 @@ except Exception as e:
 PYCOUNT
 )
     capture_finish "$OUT"
-    capture_end_finalise "$OUT"
     echo "replica sampler stopped: $n -> $OUT"
     # The count above already parsed the file. Reporting success while holding a
     # verdict of "unreadable" is how an unterminated file reached the results

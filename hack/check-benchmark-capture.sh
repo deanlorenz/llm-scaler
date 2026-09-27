@@ -15,7 +15,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SR="$ROOT/hack/benchmark/sample_replicas.sh"
 TL="$ROOT/hack/benchmark/tail_wva_logs.sh"
 
-EXPECTED_CHECKS=51
+EXPECTED_CHECKS=62
 
 WORK="$(mktemp -d)"
 STARTED_PIDS=""
@@ -410,22 +410,37 @@ python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$O13" 2>/dev/null \
     && ok "and the file is terminated despite it" \
     || bad "the file was left unterminated behind a stale claim"
 
-# ---- a finalise that cannot be claimed FAILS, it does not concede -------
-# Conceding to nobody is how stop exited 0 with the output unterminated.
-O14="$WORK/noclaim.json"
+# ---- a claim held by a LIVE stop is conceded to ------------------------
+# The claim is the ownership record, renamed to `<out>.finalising.<pid>`. A claim
+# whose holder is alive must be conceded to -- that stop will finish the file --
+# and the conceding stop must not write a terminator of its own.
+O14="$WORK/conceded.json"
 bash "$SR" start nc-ns "$O14" >/dev/null 2>&1 && note_pid "$(pid_of "$O14")"
 sleep 1
-# A directory at the claim path cannot be created as a file and is held by nobody.
-mkdir -p "$O14.finalising"
+sleep 300 &
+HOLDER=$!
+note_pid "$HOLDER"
+mv "$O14.owner" "$O14.finalising.$HOLDER" 2>/dev/null || true
+before="$(cat "$O14")"
 if bash "$SR" stop "$O14" nc-ns >/dev/null 2>"$WORK/e"; then
-    bad "stop conceded to a claim nobody holds and reported success"
+    ok "a claim held by a live stop is conceded to, quietly"
 else
-    grep -q "cannot claim finalisation" "$WORK/e" \
-        && ok "an unclaimable finalise fails rather than concedes" \
-        || bad "stop failed for the wrong reason: $(head -1 "$WORK/e")"
+    bad "stop failed rather than conceding: $(head -1 "$WORK/e")"
 fi
-rmdir "$O14.finalising" 2>/dev/null || true
-bash "$SR" stop "$O14" nc-ns >/dev/null 2>&1 || true
+[ "$(cat "$O14")" = "$before" ] \
+    && ok "and the conceding stop writes nothing" \
+    || bad "the conceding stop still modified the file"
+kill "$HOLDER" 2>/dev/null || true
+
+# ---- and one held by a DEAD stop is taken over -------------------------
+mv "$O14.finalising.$HOLDER" "$O14.finalising.999999" 2>/dev/null || true
+if bash "$SR" stop "$O14" nc-ns >/dev/null 2>&1; then
+    python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$O14" 2>/dev/null \
+        && ok "a claim whose holder is gone is taken over and the file finalised" \
+        || bad "the takeover left the file unparseable"
+else
+    bad "a dead holder's claim blocked the stop"
+fi
 
 # ---- a stop that cannot terminate the file does not report success ------
 O15="$WORK/rofile.json"
@@ -490,6 +505,87 @@ else
     bad "the refused two-argument tail stop killed the capture"
 fi
 bash "$TL" stop tt-ns "$LT" >/dev/null 2>&1 || true
+
+
+# ---- concurrent stops with a STALE claim in the way -------------------
+# The claim used to be a second record kept beside the ownership one, with a
+# remove-then-recreate take-over: two stops could both take over the same stale
+# claim and both append, giving `]}]}]}` in 2 of 25 trials. Taking the record by
+# renaming it is atomic, so only one can win.
+for trial in 1 2 3 4 5 6; do
+    OS="$WORK/stalerace$trial.json"
+    bash "$SR" start sr-ns "$OS" >/dev/null 2>&1 && note_pid "$(pid_of "$OS")"
+    sleep 1
+    # a claim whose holder never existed
+    cp "$OS.owner" "$OS.finalising.999999" 2>/dev/null || true
+    bash "$SR" stop "$OS" sr-ns >/dev/null 2>&1 &
+    bash "$SR" stop "$OS" sr-ns >/dev/null 2>&1 &
+    wait
+    python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$OS" 2>/dev/null || break
+done
+python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$OS" 2>/dev/null \
+    && ok "concurrent stops behind a stale claim still leave valid JSON" \
+    || bad "a stale claim let two stops finalise: $(tail -c 12 "$OS")"
+
+# ---- the filing decision ---------------------------------------------
+FC="$ROOT/hack/benchmark/file_capture.sh"
+mkres() { rm -rf "$WORK/res"; mkdir -p "$WORK/res"; }
+
+# a good set: everything is filed
+mkres
+printf '{"snapshots":[{"a":1}]}' > "$WORK/f.json"
+printf '{"pods":[{"name":"p"}]}' > "$WORK/f.json.pod_timings.json"
+printf 'log line\n' > "$WORK/f.log"
+out="$(bash "$FC" "$WORK/res" "$WORK/f.json" "$WORK/f.log" 2>&1)"
+[ -f "$WORK/res/metrics/processed/wva_replica_samples.json" ] \
+    && [ -f "$WORK/res/metrics/processed/wva_pod_timings.json" ] \
+    && [ -f "$WORK/res/wva_controller.log" ] \
+    && ok "a complete capture files all three artefacts" \
+    || bad "a complete capture did not file everything: $out"
+
+# a corrupt samples file must not take the others down with it
+mkres
+printf '{"snapshots":[{"a":1}' > "$WORK/f.json"
+out="$(bash "$FC" "$WORK/res" "$WORK/f.json" "$WORK/f.log" 2>&1)"
+[ ! -f "$WORK/res/metrics/processed/wva_replica_samples.json" ] \
+    && ok "an unparseable samples file is withheld" \
+    || bad "an unparseable samples file was filed"
+[ -f "$WORK/res/metrics/processed/wva_pod_timings.json" ] \
+    && ok "and valid pod timings are still filed beside it" \
+    || bad "valid pod timings died with the samples file: $out"
+[ -f "$WORK/res/wva_controller.log" ] \
+    && ok "and so is the controller log" \
+    || bad "the controller log died with the samples file"
+
+# a capture that never started must not file whatever is at the path
+mkres
+printf '{"snapshots":[{"PREVIOUS":"RUN"}]}' > "$WORK/f.json"
+touch "$WORK/f.json.startfailed"
+out="$(bash "$FC" "$WORK/res" "$WORK/f.json" "$WORK/f.log" 2>&1)"
+[ ! -f "$WORK/res/metrics/processed/wva_replica_samples.json" ] \
+    && ok "a capture that never started files nothing from its path" \
+    || bad "a previous run's file was filed as this run's measurement"
+case "$out" in
+    *"never started"*) ok "and says that is why" ;;
+    *) bad "the reason was not reported: $out" ;;
+esac
+rm -f "$WORK/f.json.startfailed"
+
+# a capture that could not be stopped
+mkres
+printf '{"snapshots":[{"a":1}]}' > "$WORK/f.json"
+touch "$WORK/f.json.stopfailed"
+out="$(bash "$FC" "$WORK/res" "$WORK/f.json" "$WORK/f.log" 2>&1)"
+[ ! -f "$WORK/res/metrics/processed/wva_replica_samples.json" ] \
+    && ok "a capture that could not be stopped is withheld" \
+    || bad "an incomplete capture was filed"
+rm -f "$WORK/f.json.stopfailed"
+
+# no results directory is not an error
+out="$(bash "$FC" "$WORK/nosuchdir" "$WORK/f.json" "$WORK/f.log" 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] \
+    && ok "a run with no results directory files nothing and does not fail" \
+    || bad "a missing results directory was treated as an error"
 
 # ---- the count itself --------------------------------------------
 # Asserted without ok()/bad(), which would change the number being asserted.

@@ -120,14 +120,37 @@ capture_owner_file() {
     printf '%s.owner\n' "$1"
 }
 
+# capture_record_path <outfile> -- where the ownership record currently IS.
+#
+# `<out>.owner` until a stop claims it, `<out>.finalising.<pid>` afterwards. The
+# claim is a rename, so the record moves; hard-coding `.owner` in the readers meant
+# a recovering stop could not identify the capture it was finalising, declined to
+# kill it, and wrote the terminator while the sampler was still appending.
+capture_record_path() {
+    local v
+    [ -n "${1:-}" ] || return 1
+    if [ -s "$(capture_owner_file "$1")" ]; then
+        printf '%s\n' "$(capture_owner_file "$1")"
+        return 0
+    fi
+    for v in "$1".finalising.*; do
+        if [ -s "$v" ]; then
+            printf '%s\n' "$v"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # capture_alive <outfile> -- is the recorded owner still the process we recorded?
 #
 # Returns 0 only when the pid is alive AND its start time matches what was
 # recorded. On a system without /proc the start time is absent and the pid alone
 # is trusted, which is the previous behaviour rather than a new risk.
 capture_alive() {
-    local owner pid recorded now
-    owner="$(cat "$(capture_owner_file "$1")" 2>/dev/null)" || return 1
+    local owner pid recorded now rp
+    rp="$(capture_record_path "$1")" || return 1
+    owner="$(cat "$rp" 2>/dev/null)" || return 1
     pid="$(printf '%s' "$owner" | sed -n 's/.*[^a-z]pid=\([0-9][0-9]*\).*/\1/p')"
     [ -n "$pid" ] || return 1
     kill -0 "$pid" 2>/dev/null || return 1
@@ -249,12 +272,22 @@ capture_verify_writable() {
 # terminator to whatever was at the path -- including a file start had just
 # REFUSED to overwrite, turning a protected run into unparseable output.
 capture_owned() {
+    local v vp
     [ -n "${1:-}" ] || return 1
-    # -s, not -f. An EMPTY record means a claim in progress, and treating that as
-    # a capture to finalise made stop append a terminator to a PREVIOUS run's
-    # file -- through the one refusal path that leaves an empty record behind,
-    # which is the very corruption this guard exists to prevent.
-    [ -s "$(capture_owner_file "$1")" ]
+    if [ -s "$(capture_owner_file "$1")" ]; then
+        return 0
+    fi
+    # No record, but a claim may be in flight. A LIVE holder means another stop is
+    # finishing this file and there is nothing for us to do -- not owned. A holder
+    # that is GONE means a stop died mid-finalise and the file still needs closing;
+    # treating that as nothing-to-stop wedged the path for ever.
+    for v in "$1".finalising.*; do
+        [ -e "$v" ] || continue
+        vp="${v##*.}"
+        case "$vp" in ''|*[!0-9]*) continue ;; esac
+        kill -0 "$vp" 2>/dev/null || return 0
+    done
+    return 1
 }
 
 # capture_check_owner <outfile> <namespace> <context> -- warn on a mismatch.
@@ -263,9 +296,10 @@ capture_owned() {
 # belonging to a different cluster silent. An empty argument is "not stated", not
 # a mismatch: warning when the caller named nothing is a false alarm.
 capture_check_owner() {
-    local owner
+    local owner rp
     [ -n "${1:-}" ] || return 0
-    owner="$(cat "$(capture_owner_file "$1")" 2>/dev/null)" || return 0
+    rp="$(capture_record_path "$1")" || return 0
+    owner="$(cat "$rp" 2>/dev/null)" || return 0
     [ -n "$owner" ] || return 0
     if [ -n "${2:-}" ]; then
         case "$owner" in
@@ -302,15 +336,12 @@ capture_release() {
 
 # capture_finish <outfile> -- drop the record when ENDING a capture.
 #
-# Distinct from capture_release, which only ever removes a record naming the
-# releasing process. That restriction is right for a start that lost the claim --
-# one deleted the winner's record on its way out and left it unstoppable -- but
-# wrong for stop, which runs as a different process, has already established
-# ownership and warned on a mismatch, and whose whole job is to end the capture.
-# Leaving the record behind made a second stop append a second JSON terminator.
+# The record has already been renamed to this stop's own `.finalising.$$` by
+# capture_claim_finalise, so ending the capture means dropping that. Removing a
+# FIXED path here is what let a losing start delete the winner's record and leave
+# a live capture nothing could find.
 capture_finish() {
-    [ -n "${1:-}" ] || return 0
-    rm -f "$(capture_owner_file "$1")" 2>/dev/null || true
+    capture_finalised "$1"
 }
 
 # capture_stop <outfile> <pidfile> -- stop the capture and everything it spawned.
@@ -354,49 +385,57 @@ capture_stop() {
     return 1
 }
 
-# capture_begin_finalise <outfile> -- claim the right to write the terminator.
+# capture_claim_finalise <outfile> -- take the right to finalise, by taking the
+# ownership record itself.
 #
-#   0  the claim is ours, write the terminator
-#   2  a LIVE stop holds it; concede, and let that one finish the file
-#   1  we could not claim it, and nobody holds it: the caller must FAIL rather
-#      than concede, because conceding means nobody writes the terminator
+#   0  ours: the record is now at <outfile>.finalising.$$
+#   2  another stop has it, or has already finished it -- concede
+#   1  the path carries nothing we can take
 #
-# Two concurrent stops both passed capture_owned, both saw the capture already
-# dead, and both appended: 15 of 15 trials gave `...]}]}` while both exited 0.
+# `mv` is the claim. Exactly one caller can rename a file that exists once, so two
+# stops cannot both proceed and there is no test-then-create to make atomic. The
+# winner's pid is in the NAME, so liveness needs no file read and no second
+# starttime field beside the one the record already carries. A stop that died
+# holding it leaves `.finalising.<deadpid>`, and taking that over is another `mv`,
+# so the take-over cannot race either.
 #
-# The first fix hardlinked the ownership record, and treated every `ln` failure as
-# a concession. Three states make that link fail without a competing stop -- a
-# stale claim from a stop that was killed, a capture directory with no hardlink
-# support (BENCHMARK_CAPTURE_DIR lets an operator pick one), and a losing
-# concurrent start that released the record first -- and in each, nobody wrote the
-# terminator while stop reported success.
-#
-# So: an exclusive create that records the STOPPING process. That works without
-# hardlinks, makes a crashed stop detectable by its pid, and separates "conceded"
-# from "failed".
-capture_begin_finalise() {
-    local f sp
-    [ -n "${1:-}" ] || return 1
-    f="$1.finalising"
-    if ( set -C; printf 'stopper=%s\n' "$$" > "$f" ) 2>/dev/null; then
+# Three earlier versions of this were a second record kept beside the first -- a
+# mkdir mutex, a hardlink, an exclusive create -- and each one could disagree with
+# the record it shadowed. Two stops finalised (2 of 25 produced `]}]}]}`), a loser
+# reported "no other stop holds it" while one did (19 of 20), and a reused pid
+# wedged a path for ever. One record, moved, has none of those states.
+capture_claim_finalise() {
+    local out="$1" of mine victim vp
+    of="$(capture_owner_file "$out")"
+    mine="$out.finalising.$$"
+    if mv "$of" "$mine" 2>/dev/null; then
         return 0
     fi
-    [ -e "$f" ] || return 1
-    sp="$(sed -n 's/.*stopper=\([0-9][0-9]*\).*/\1/p' "$f" 2>/dev/null)"
-    if [ -n "$sp" ] && kill -0 "$sp" 2>/dev/null; then
-        return 2
-    fi
-    # The claimant is gone. Take it over rather than wedging the path: a stale
-    # claim used to make every later stop concede for ever, so the file could
-    # never be terminated and was filed unparseable.
-    rm -f "$f" 2>/dev/null || true
-    ( set -C; printf 'stopper=%s\n' "$$" > "$f" ) 2>/dev/null && return 0
+    for victim in "$out".finalising.*; do
+        [ -e "$victim" ] || continue
+        vp="${victim##*.}"
+        case "$vp" in
+            ''|*[!0-9]*) continue ;;
+        esac
+        if kill -0 "$vp" 2>/dev/null; then
+            return 2
+        fi
+        # Its holder is gone. One `mv` decides who inherits it.
+        if mv "$victim" "$mine" 2>/dev/null; then
+            return 0
+        fi
+    done
     return 1
 }
 
-capture_end_finalise() {
+# capture_finalised <outfile> -- release what THIS stop is holding.
+#
+# Keyed to our own pid, so a stop can only ever drop its own claim. A fixed name
+# let a losing start delete the winner's record and leave a capture nothing could
+# find.
+capture_finalised() {
     [ -n "${1:-}" ] || return 0
-    rm -f "$1.finalising" 2>/dev/null || true
+    rm -f "$1.finalising.$$" 2>/dev/null || true
 }
 
 # capture_resolve_outfile <a> <b> -- which of two arguments is the output path.
