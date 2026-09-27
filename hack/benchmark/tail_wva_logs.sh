@@ -151,15 +151,9 @@ case "$CMD" in
     # concurrent stops racing on one file: both reported success and one printed
     # `mv: cannot stat`, with a window where one awk reads $OUT while the other mv
     # replaces it.
-    # Taking the ownership record IS the claim, so exactly one stop gets here.
-    capture_claim_finalise "$OUT"
-    case "$?" in
-      0) : ;;
-      2) echo "another stop is finalising $OUT -- leaving it to that one" >&2
-         exit 0 ;;
-      *) echo "nothing left to finalise at $OUT" >&2
-         exit 0 ;;
-    esac
+    # No claim. A log is append-only text with no last byte to agree on, and the
+    # dedup below writes a temp file and renames it, so two concurrent stops
+    # produce the same result.
     if [ -f "$OUT" ]; then
       dedup="$(mktemp "$OUT.dedup.XXXXXX")" \
         && awk '!seen[$0]++' "$OUT" > "$dedup" \

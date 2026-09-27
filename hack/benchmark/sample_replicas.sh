@@ -147,7 +147,9 @@ case "$CMD" in
     capture_claim "$OUT" "$NS" || exit 1
     capture_guard_data "$OUT" || { capture_release "$OUT"; exit 1; }
     capture_verify_writable "$OUT" || { capture_release "$OUT"; exit 1; }
-    printf '{"snapshots":[' > "$OUT"
+    # Append-only, one JSON object per line. The artefact is assembled from these
+    # at stop, so there is no last byte for two stops to fight over.
+    : > "$OUT.snapshots.jsonl"
     : > "$OUT.pods.jsonl"
     # A run that records no pod timings must not file the PREVIOUS run's: the
     # write at stop is best-effort, so a leftover would be picked up as this
@@ -165,13 +167,10 @@ case "$CMD" in
     # success line.
     set -m
     (
-      first=1
       while :; do
         snap=$(_snapshot "$NS")
         if [ -n "$snap" ]; then
-          [ $first -eq 1 ] || printf ',' >> "$OUT"
-          printf '%s' "$snap" >> "$OUT"
-          first=0
+          printf '%s\n' "$snap" >> "$OUT.snapshots.jsonl"
         fi
         _pods_snapshot "$NS" >> "$OUT.pods.jsonl" 2>/dev/null || true
         sleep "$INTERVAL"
@@ -218,26 +217,51 @@ case "$CMD" in
     # dropping the record would leave a live capture invisible to the tooling,
     # still appending to a file that already looks finished.
     capture_stop "$OUT" "$OUT.pid" || exit 1
-    # Close the array even if no snapshot was written, so the file is always
-    # valid JSON. An empty snapshots list reads as "not measured" downstream,
-    # which is the honest answer -- unlike a zero replica count.
+    # Assemble the artefact from the appended lines. A pure function of an
+    # append-only input, written to a temp file and renamed, so it is idempotent:
+    # two concurrent stops produce identical bytes and neither has to exclude the
+    # other, and a stop killed at any point leaves the lines for the next one.
     #
-    # Exactly one stop writes this. Ownership alone is not enough: two
-    # concurrent stops both passed capture_owned, both found the capture already
-    # dead, and both appended, giving `...]}]}`. The finalise claim is what makes
-    # it one. Sniffing the last two bytes instead does NOT work either -- a
-    # snapshot ends with `]}` too, so a closed array and an open one ending in a
-    # snapshot are indistinguishable.
-    # Taking the ownership record IS the claim, so exactly one stop gets here.
-    capture_claim_finalise "$OUT"
-    case "$?" in
-      0) : ;;
-      2) echo "another stop is finalising $OUT -- leaving it to that one" >&2
-         exit 0 ;;
-      *) echo "nothing left to finalise at $OUT" >&2
-         exit 0 ;;
-    esac
-    printf ']}' >> "$OUT"
+    # This replaces seven rounds of machinery whose only job was "exactly one
+    # process appends the last byte exactly once". Needing a holder identity, a
+    # staleness rule and a crash window is what kept going wrong; an append-only
+    # input needs none of the three.
+    #
+    # An empty snapshots list reads as "not measured" downstream, which is the
+    # honest answer for a capture that recorded nothing -- unlike a zero replica
+    # count.
+    if ! python3 - "$OUT.snapshots.jsonl" "$OUT" <<'PYASM'
+import json, os, sys
+src, dst = sys.argv[1], sys.argv[2]
+snaps = []
+try:
+    with open(src, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                snaps.append(json.loads(line))
+            except ValueError:
+                # A line torn by a kill mid-write is dropped rather than fatal:
+                # the snapshots before it are still a measurement.
+                continue
+except FileNotFoundError:
+    pass
+tmp = dst + ".assembling." + str(os.getpid())
+with open(tmp, "w", encoding="utf-8") as fh:
+    json.dump({"snapshots": snaps}, fh)
+os.replace(tmp, dst)
+PYASM
+    then
+      # Silence here was the old shape: a stop that could not write its artefact
+      # and reported success anyway. The capture is already down, so say what
+      # happened and fail -- the recipe then withholds the file rather than filing
+      # whatever was at the path.
+      echo "could not assemble $OUT from its captured lines" >&2
+      capture_finish "$OUT"
+      exit 1
+    fi
     # Dedupe the pod observations into one record per pod. Keep the observation
     # that has a Ready time: a pod is seen several times, and only later samples
     # carry the transition we want.
@@ -272,7 +296,7 @@ except FileNotFoundError:
 json.dump({"pods": list(best.values())}, open(dst, "w", encoding="utf-8"))
 print("  pod timings: %d pod(s) -> %s" % (len(best), dst))
 PY
-    rm -f "$OUT.pods.jsonl"
+    rm -f "$OUT.pods.jsonl" "$OUT.snapshots.jsonl"
     # The path as an ARGUMENT: interpolated into the source, a quote in it was a
     # syntax error that 2>/dev/null turned into an empty count.
     n=$(python3 - "$OUT" <<'PYCOUNT' 2>/dev/null

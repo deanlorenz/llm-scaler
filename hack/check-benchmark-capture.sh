@@ -15,7 +15,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SR="$ROOT/hack/benchmark/sample_replicas.sh"
 TL="$ROOT/hack/benchmark/tail_wva_logs.sh"
 
-EXPECTED_CHECKS=62
+EXPECTED_CHECKS=56
 
 WORK="$(mktemp -d)"
 STARTED_PIDS=""
@@ -245,27 +245,6 @@ fi
 chmod 700 "$RO"
 
 
-# ---- an empty record is a claim in progress, not a capture to finalise -----
-# start must refuse, and stop must NOT append a terminator to whatever is there.
-# This is the one refusal path that leaves an empty record behind, and it used to
-# corrupt a previous run's file through it.
-O8="$WORK/emptyrec.json"
-printf '{"snapshots":[{"prev":"run"}]}' > "$O8"
-B8="$(cat "$O8")"
-: > "$O8.owner"
-if bash "$SR" start e-ns "$O8" >/dev/null 2>"$WORK/e"; then
-    bad "start proceeded against a record being written by someone else"
-else
-    ok "start refuses while a record is mid-claim"
-fi
-grep -q "remove" "$WORK/e" \
-    && bad "the mid-claim refusal tells the operator to delete the winner's record" \
-    || ok "the mid-claim refusal does not advise deleting a live record"
-bash "$SR" stop "$O8" e-ns >/dev/null 2>&1 || true
-[ "$(cat "$O8")" = "$B8" ] \
-    && ok "stop leaves a file alone when the record says nothing" \
-    || bad "stop corrupted a file behind an empty record: $(tail -c 16 "$O8")"
-rm -f "$O8.owner"
 
 # ---- a lone namespace is not an output path ------------------------------
 # `stop <ns>` used to be accepted as `stop <outfile>`: exit 0, "nothing to stop",
@@ -327,9 +306,6 @@ wait
 python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$O11" 2>/dev/null \
     && ok "two concurrent stops leave valid JSON" \
     || bad "concurrent stops corrupted the file: $(tail -c 12 "$O11")"
-[ ! -e "$O11.finalising" ] \
-    && ok "and neither leaves its finalise claim behind" \
-    || bad "a finalise claim was left at $O11.finalising"
 
 # ---- a namespace pair is not an output path ----------------------------
 # The lone-argument guard was gated on the argument COUNT, so two namespaces
@@ -393,66 +369,27 @@ fi
 bash "$TL" --context other-cluster stop demo-ns "$LOG" >/dev/null 2>&1 || true
 
 
-# ---- a stale finalise claim is taken over, not conceded to for ever ------
-# A stop killed after claiming used to make EVERY later stop concede to a
-# claimant that no longer existed, so the file could never be terminated -- and
-# the Makefile filed it anyway.
-O13="$WORK/stale.json"
-bash "$SR" start st-ns "$O13" >/dev/null 2>&1 && note_pid "$(pid_of "$O13")"
-sleep 1
-printf 'stopper=999999\n' > "$O13.finalising"
-if bash "$SR" stop "$O13" st-ns >/dev/null 2>"$WORK/e"; then
-    ok "a stale finalise claim is taken over"
-else
-    bad "a stale finalise claim blocked the stop: $(head -1 "$WORK/e")"
-fi
-python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$O13" 2>/dev/null \
-    && ok "and the file is terminated despite it" \
-    || bad "the file was left unterminated behind a stale claim"
 
-# ---- a claim held by a LIVE stop is conceded to ------------------------
-# The claim is the ownership record, renamed to `<out>.finalising.<pid>`. A claim
-# whose holder is alive must be conceded to -- that stop will finish the file --
-# and the conceding stop must not write a terminator of its own.
-O14="$WORK/conceded.json"
-bash "$SR" start nc-ns "$O14" >/dev/null 2>&1 && note_pid "$(pid_of "$O14")"
-sleep 1
-sleep 300 &
-HOLDER=$!
-note_pid "$HOLDER"
-mv "$O14.owner" "$O14.finalising.$HOLDER" 2>/dev/null || true
-before="$(cat "$O14")"
-if bash "$SR" stop "$O14" nc-ns >/dev/null 2>"$WORK/e"; then
-    ok "a claim held by a live stop is conceded to, quietly"
-else
-    bad "stop failed rather than conceding: $(head -1 "$WORK/e")"
-fi
-[ "$(cat "$O14")" = "$before" ] \
-    && ok "and the conceding stop writes nothing" \
-    || bad "the conceding stop still modified the file"
-kill "$HOLDER" 2>/dev/null || true
-
-# ---- and one held by a DEAD stop is taken over -------------------------
-mv "$O14.finalising.$HOLDER" "$O14.finalising.999999" 2>/dev/null || true
-if bash "$SR" stop "$O14" nc-ns >/dev/null 2>&1; then
-    python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$O14" 2>/dev/null \
-        && ok "a claim whose holder is gone is taken over and the file finalised" \
-        || bad "the takeover left the file unparseable"
-else
-    bad "a dead holder's claim blocked the stop"
-fi
 
 # ---- a stop that cannot terminate the file does not report success ------
-O15="$WORK/rofile.json"
+# A read-only output FILE no longer defeats a stop: the artefact is assembled to a
+# temp file and renamed, and a rename needs no write permission on its target. A
+# read-only DIRECTORY does still prevent it, and that must be reported rather than
+# reported as success.
+RODIR="$WORK/rodir"
+mkdir -p "$RODIR"
+O15="$RODIR/rofile.json"
 bash "$SR" start ro-ns "$O15" >/dev/null 2>&1 && note_pid "$(pid_of "$O15")"
 sleep 1
-chmod 444 "$O15"
+chmod 500 "$RODIR"
 if bash "$SR" stop "$O15" ro-ns >/dev/null 2>"$WORK/e"; then
-    bad "stop reported success for a file it could not terminate"
+    bad "stop reported success when it could not assemble the artefact"
 else
-    ok "a stop that cannot terminate its file exits non-zero"
+    grep -q "could not assemble" "$WORK/e" \
+        && ok "a stop that cannot assemble its artefact says so and fails" \
+        || bad "the assembly failure was not reported: $(head -1 "$WORK/e")"
 fi
-chmod 644 "$O15" 2>/dev/null || true
+chmod 700 "$RODIR" 2>/dev/null || true
 
 # ---- an output path containing a pipe --------------------------------
 # The resolver used to return "<out>|<ns>" in one string, so such a path was split
@@ -483,9 +420,6 @@ grep -q "cannot stat" "$WORK/e1" "$WORK/e2" 2>/dev/null \
 ls "$LC".dedup* >/dev/null 2>&1 \
     && bad "a dedup temp file was left behind" \
     || ok "no dedup temp file survives a tail stop"
-[ ! -e "$LC.finalising" ] \
-    && ok "and no tail finalise claim is left behind" \
-    || bad "a tail finalise claim was left at $LC.finalising"
 
 # ---- the tail refuses a namespace pair too --------------------------
 # The sampler grew this guard in round 4; the tail never did, which is the
@@ -507,25 +441,6 @@ fi
 bash "$TL" stop tt-ns "$LT" >/dev/null 2>&1 || true
 
 
-# ---- concurrent stops with a STALE claim in the way -------------------
-# The claim used to be a second record kept beside the ownership one, with a
-# remove-then-recreate take-over: two stops could both take over the same stale
-# claim and both append, giving `]}]}]}` in 2 of 25 trials. Taking the record by
-# renaming it is atomic, so only one can win.
-for trial in 1 2 3 4 5 6; do
-    OS="$WORK/stalerace$trial.json"
-    bash "$SR" start sr-ns "$OS" >/dev/null 2>&1 && note_pid "$(pid_of "$OS")"
-    sleep 1
-    # a claim whose holder never existed
-    cp "$OS.owner" "$OS.finalising.999999" 2>/dev/null || true
-    bash "$SR" stop "$OS" sr-ns >/dev/null 2>&1 &
-    bash "$SR" stop "$OS" sr-ns >/dev/null 2>&1 &
-    wait
-    python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$OS" 2>/dev/null || break
-done
-python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$OS" 2>/dev/null \
-    && ok "concurrent stops behind a stale claim still leave valid JSON" \
-    || bad "a stale claim let two stops finalise: $(tail -c 12 "$OS")"
 
 # ---- the filing decision ---------------------------------------------
 FC="$ROOT/hack/benchmark/file_capture.sh"
@@ -586,6 +501,58 @@ out="$(bash "$FC" "$WORK/nosuchdir" "$WORK/f.json" "$WORK/f.log" 2>&1)"; rc=$?
 [ "$rc" -eq 0 ] \
     && ok "a run with no results directory files nothing and does not fail" \
     || bad "a missing results directory was treated as an error"
+
+# ---- assembling the artefact is idempotent ------------------------------
+# This is the property that replaced seven rounds of finalise machinery. The
+# capture appends one JSON object per line and stop assembles the array from those
+# lines, so the answer cannot depend on who ran it, how many times, or whether a
+# previous attempt was killed part-way.
+OI="$WORK/idem.json"
+bash "$SR" start idem-ns "$OI" >/dev/null 2>&1 && note_pid "$(pid_of "$OI")"
+sleep 2
+bash "$SR" stop "$OI" idem-ns >/dev/null 2>&1 || true
+first="$(cat "$OI" 2>/dev/null)"
+python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$OI" 2>/dev/null \
+    && ok "a stop assembles a valid artefact" \
+    || bad "the assembled artefact does not parse: $(tail -c 20 "$OI")"
+
+# ---- two concurrent stops produce identical bytes ----------------------
+OC="$WORK/conc2.json"
+bash "$SR" start c2-ns "$OC" >/dev/null 2>&1 && note_pid "$(pid_of "$OC")"
+sleep 2
+bash "$SR" stop "$OC" c2-ns >/dev/null 2>&1 &
+bash "$SR" stop "$OC" c2-ns >/dev/null 2>&1 &
+wait
+python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$OC" 2>/dev/null \
+    && ok "two concurrent stops leave a valid artefact" \
+    || bad "concurrent stops corrupted the artefact: $(tail -c 20 "$OC")"
+
+# ---- and a stop repeated on the assembled file changes nothing ---------
+# Where the old design appended a second terminator, re-running is now a no-op:
+# the record is gone, so stop declines, and even if it did not the assembly is a
+# function of the lines.
+before="$(cat "$OC" 2>/dev/null)"
+bash "$SR" stop "$OC" c2-ns >/dev/null 2>&1 || true
+[ "$(cat "$OC" 2>/dev/null)" = "$before" ] \
+    && ok "repeating a stop leaves the artefact byte-identical" \
+    || bad "a repeated stop changed the artefact: $(tail -c 20 "$OC")"
+
+# ---- a torn line costs its own snapshot, not the measurement -----------
+# A kill mid-write can leave a partial line. The snapshots before it are still a
+# measurement, so assembly drops the torn line rather than failing.
+OT="$WORK/torn.json"
+bash "$SR" start torn-ns "$OT" >/dev/null 2>&1 && note_pid "$(pid_of "$OT")"
+sleep 2
+printf '{"timestamp": "partial' >> "$OT.snapshots.jsonl"
+bash "$SR" stop "$OT" torn-ns >/dev/null 2>&1 || true
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d["snapshots"] else 1)' "$OT" 2>/dev/null \
+    && ok "a torn line is dropped and the earlier snapshots survive" \
+    || bad "a torn line cost the whole measurement: $(head -c 40 "$OT")"
+
+# ---- no intermediate files survive a stop -----------------------------
+ls "$OT".snapshots.jsonl "$OT".assembling.* >/dev/null 2>&1 \
+    && bad "an intermediate file survived the stop" \
+    || ok "no intermediate files survive a stop"
 
 # ---- the count itself --------------------------------------------
 # Asserted without ok()/bad(), which would change the number being asserted.
