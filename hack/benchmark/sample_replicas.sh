@@ -171,7 +171,7 @@ case "$CMD" in
         _pods_snapshot "$NS" >> "$OUT.pods.jsonl" 2>/dev/null || true
         sleep "$INTERVAL"
       done
-    ) &
+    ) >/dev/null 2>&1 &
     sampler_pid=$!
     set +m
     if ! echo "$sampler_pid" > "$OUT.pid" || ! capture_adopt "$OUT" "$NS" "$sampler_pid"; then
@@ -202,8 +202,8 @@ case "$CMD" in
                exit 2 ;;
         esac
     fi
-    resolved="$(capture_resolve_outfile "$2" "${3:-}")"
-    OUT="${resolved%%|*}"; NS_ARG="${resolved#*|}"
+    capture_resolve_outfile "$2" "${3:-}"
+    OUT="$CAPTURE_OUT"; NS_ARG="$CAPTURE_NS"
     if ! capture_owned "$OUT"; then
       echo "no capture owns $OUT -- nothing to stop, and nothing written" >&2
       exit 0
@@ -223,10 +223,15 @@ case "$CMD" in
     # it one. Sniffing the last two bytes instead does NOT work either -- a
     # snapshot ends with `]}` too, so a closed array and an open one ending in a
     # snapshot are indistinguishable.
-    if ! capture_begin_finalise "$OUT"; then
-      echo "another stop is finalising $OUT -- leaving it to that one" >&2
-      exit 0
-    fi
+    capture_begin_finalise "$OUT"
+    case "$?" in
+      0) : ;;
+      2) echo "another stop is finalising $OUT -- leaving it to that one" >&2
+         exit 0 ;;
+      *) echo "cannot claim finalisation of $OUT, and no other stop holds it" >&2
+         echo "  refusing to report a stop that leaves the output unterminated" >&2
+         exit 1 ;;
+    esac
     printf ']}' >> "$OUT"
     # Dedupe the pod observations into one record per pod. Keep the observation
     # that has a Ready time: a pod is seen several times, and only later samples
@@ -279,6 +284,13 @@ PYCOUNT
     capture_finish "$OUT"
     capture_end_finalise "$OUT"
     echo "replica sampler stopped: $n -> $OUT"
+    # The count above already parsed the file. Reporting success while holding a
+    # verdict of "unreadable" is how an unterminated file reached the results
+    # tree as a run's measurement.
+    case "$n" in
+      unreadable:*) echo "the samples file at $OUT does not parse -- not a usable measurement" >&2
+                    exit 1 ;;
+    esac
     ;;
   *)
     echo "unknown command: $CMD" >&2; exit 2 ;;

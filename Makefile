@@ -2070,8 +2070,8 @@ benchmark-run: ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<name
 	@# first run's sampler before being refused.
 	@echo "  capture: $(BENCHMARK_SAMPLES)"
 	@echo "  capture: $(BENCHMARK_WVA_LOG)"
-	@bash hack/benchmark/sample_replicas.sh $(BENCHMARK_CAPTURE_CTX) start $(BENCHMARK_NAMESPACE) $(BENCHMARK_SAMPLES) || true
-	@bash hack/benchmark/tail_wva_logs.sh $(BENCHMARK_CAPTURE_CTX) start $(BENCHMARK_NAMESPACE) $(BENCHMARK_WVA_LOG) || true
+	@bash hack/benchmark/sample_replicas.sh $(BENCHMARK_CAPTURE_CTX) start $(BENCHMARK_NAMESPACE) "$(BENCHMARK_SAMPLES)" || true
+	@bash hack/benchmark/tail_wva_logs.sh $(BENCHMARK_CAPTURE_CTX) start $(BENCHMARK_NAMESPACE) "$(BENCHMARK_WVA_LOG)" || true
 	@# Collect the results tree as a gzipped tar over exec rather than with
 	@# kubectl cp. The harness ships both paths and defaults to cp, which on a
 	@# large tree either runs for hours or drops: its own source puts cp at
@@ -2097,28 +2097,44 @@ benchmark-run: ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<name
 	@# The status is recorded rather than discarded. A stop that could not end its
 	@# capture leaves the output unterminated, and the copy below would otherwise
 	@# announce it as this run's measurement four lines after saying it failed.
-	@rm -f $(BENCHMARK_SAMPLES).stopfailed $(BENCHMARK_WVA_LOG).stopfailed
-	@bash hack/benchmark/sample_replicas.sh $(BENCHMARK_CAPTURE_CTX) stop $(BENCHMARK_SAMPLES) $(BENCHMARK_NAMESPACE) || touch $(BENCHMARK_SAMPLES).stopfailed
-	@bash hack/benchmark/tail_wva_logs.sh $(BENCHMARK_CAPTURE_CTX) stop $(BENCHMARK_NAMESPACE) $(BENCHMARK_WVA_LOG) || touch $(BENCHMARK_WVA_LOG).stopfailed
-	@LATEST=$$(ls -td $(BENCHMARK_WORKSPACE)/$${USER}-*/results/$(BENCHMARK_HARNESS)-*_* 2>/dev/null | head -1); \
-	if [ -f $(BENCHMARK_SAMPLES).stopfailed ]; then \
-		echo "WARNING: the replica sampler could not be stopped; $(BENCHMARK_SAMPLES) is unterminated and is NOT being filed"; \
+	@rm -f "$(BENCHMARK_SAMPLES).stopfailed" "$(BENCHMARK_WVA_LOG).stopfailed"
+	@bash hack/benchmark/sample_replicas.sh $(BENCHMARK_CAPTURE_CTX) stop "$(BENCHMARK_SAMPLES)" $(BENCHMARK_NAMESPACE) || touch "$(BENCHMARK_SAMPLES).stopfailed"
+	@bash hack/benchmark/tail_wva_logs.sh $(BENCHMARK_CAPTURE_CTX) stop $(BENCHMARK_NAMESPACE) "$(BENCHMARK_WVA_LOG)" || touch "$(BENCHMARK_WVA_LOG).stopfailed"
+	@# Nothing is filed until it PARSES. The previous gate was the stop's exit
+	@# status, and every way this can go wrong exits 0 -- a finalise that was
+	@# conceded to nobody, an append that hit a read-only /tmp, a stop whose own
+	@# count already said "unreadable" -- so the recipe announced "filed" over a
+	@# file that does not parse. The artefact is the question being asked.
+	@#
+	@# Every path is quoted: a BENCHMARK_CAPTURE_DIR containing a space used to
+	@# disable both captures silently and leave the run with none.
+	@LATEST=$$(ls -td "$(BENCHMARK_WORKSPACE)"/$${USER}-*/results/$(BENCHMARK_HARNESS)-*_* 2>/dev/null | head -1); \
+	if [ -f "$(BENCHMARK_SAMPLES).stopfailed" ]; then \
+		echo "WARNING: the replica sampler could not be stopped; $(BENCHMARK_SAMPLES) is NOT being filed"; \
 	fi; \
-	if [ -n "$$LATEST" ] && [ -s $(BENCHMARK_SAMPLES) ] && [ ! -f $(BENCHMARK_SAMPLES).stopfailed ]; then \
-		mkdir -p "$$LATEST/metrics/processed"; \
-		cp $(BENCHMARK_SAMPLES) "$$LATEST/metrics/processed/wva_replica_samples.json"; \
-		echo "Replica samples filed in $$LATEST/metrics/processed/wva_replica_samples.json"; \
+	if [ -n "$$LATEST" ] && [ -s "$(BENCHMARK_SAMPLES)" ] && [ ! -f "$(BENCHMARK_SAMPLES).stopfailed" ]; then \
+		if python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$(BENCHMARK_SAMPLES)" 2>/dev/null; then \
+			mkdir -p "$$LATEST/metrics/processed"; \
+			cp "$(BENCHMARK_SAMPLES)" "$$LATEST/metrics/processed/wva_replica_samples.json"; \
+			echo "Replica samples filed in $$LATEST/metrics/processed/wva_replica_samples.json"; \
+		else \
+			echo "WARNING: $(BENCHMARK_SAMPLES) does not parse as JSON; NOT filing it as this run's measurement"; \
+		fi; \
 	fi; \
-	if [ -n "$$LATEST" ] && [ -s $(BENCHMARK_SAMPLES).pod_timings.json ]; then \
-		mkdir -p "$$LATEST/metrics/processed"; \
-		cp $(BENCHMARK_SAMPLES).pod_timings.json "$$LATEST/metrics/processed/wva_pod_timings.json"; \
-		echo "Pod timings filed in $$LATEST/metrics/processed/wva_pod_timings.json"; \
+	if [ -n "$$LATEST" ] && [ -s "$(BENCHMARK_SAMPLES).pod_timings.json" ] && [ ! -f "$(BENCHMARK_SAMPLES).stopfailed" ]; then \
+		if python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$(BENCHMARK_SAMPLES).pod_timings.json" 2>/dev/null; then \
+			mkdir -p "$$LATEST/metrics/processed"; \
+			cp "$(BENCHMARK_SAMPLES).pod_timings.json" "$$LATEST/metrics/processed/wva_pod_timings.json"; \
+			echo "Pod timings filed in $$LATEST/metrics/processed/wva_pod_timings.json"; \
+		else \
+			echo "WARNING: $(BENCHMARK_SAMPLES).pod_timings.json does not parse; NOT filing it"; \
+		fi; \
 	fi; \
-	if [ -f $(BENCHMARK_WVA_LOG).stopfailed ]; then \
+	if [ -f "$(BENCHMARK_WVA_LOG).stopfailed" ]; then \
 		echo "WARNING: the controller log tail could not be stopped; $(BENCHMARK_WVA_LOG) is NOT being filed"; \
 	fi; \
-	if [ -n "$$LATEST" ] && [ -s $(BENCHMARK_WVA_LOG) ] && [ ! -f $(BENCHMARK_WVA_LOG).stopfailed ]; then \
-		cp $(BENCHMARK_WVA_LOG) "$$LATEST/wva_controller.log"; \
+	if [ -n "$$LATEST" ] && [ -s "$(BENCHMARK_WVA_LOG)" ] && [ ! -f "$(BENCHMARK_WVA_LOG).stopfailed" ]; then \
+		cp "$(BENCHMARK_WVA_LOG)" "$$LATEST/wva_controller.log"; \
 		echo "WVA controller log tail filed in $$LATEST/wva_controller.log"; \
 	fi
 	@echo ""

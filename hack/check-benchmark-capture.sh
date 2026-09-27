@@ -15,7 +15,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SR="$ROOT/hack/benchmark/sample_replicas.sh"
 TL="$ROOT/hack/benchmark/tail_wva_logs.sh"
 
-EXPECTED_CHECKS=41
+EXPECTED_CHECKS=51
 
 WORK="$(mktemp -d)"
 STARTED_PIDS=""
@@ -391,6 +391,105 @@ else
     ok "tail stop requires its outfile"
 fi
 bash "$TL" --context other-cluster stop demo-ns "$LOG" >/dev/null 2>&1 || true
+
+
+# ---- a stale finalise claim is taken over, not conceded to for ever ------
+# A stop killed after claiming used to make EVERY later stop concede to a
+# claimant that no longer existed, so the file could never be terminated -- and
+# the Makefile filed it anyway.
+O13="$WORK/stale.json"
+bash "$SR" start st-ns "$O13" >/dev/null 2>&1 && note_pid "$(pid_of "$O13")"
+sleep 1
+printf 'stopper=999999\n' > "$O13.finalising"
+if bash "$SR" stop "$O13" st-ns >/dev/null 2>"$WORK/e"; then
+    ok "a stale finalise claim is taken over"
+else
+    bad "a stale finalise claim blocked the stop: $(head -1 "$WORK/e")"
+fi
+python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$O13" 2>/dev/null \
+    && ok "and the file is terminated despite it" \
+    || bad "the file was left unterminated behind a stale claim"
+
+# ---- a finalise that cannot be claimed FAILS, it does not concede -------
+# Conceding to nobody is how stop exited 0 with the output unterminated.
+O14="$WORK/noclaim.json"
+bash "$SR" start nc-ns "$O14" >/dev/null 2>&1 && note_pid "$(pid_of "$O14")"
+sleep 1
+# A directory at the claim path cannot be created as a file and is held by nobody.
+mkdir -p "$O14.finalising"
+if bash "$SR" stop "$O14" nc-ns >/dev/null 2>"$WORK/e"; then
+    bad "stop conceded to a claim nobody holds and reported success"
+else
+    grep -q "cannot claim finalisation" "$WORK/e" \
+        && ok "an unclaimable finalise fails rather than concedes" \
+        || bad "stop failed for the wrong reason: $(head -1 "$WORK/e")"
+fi
+rmdir "$O14.finalising" 2>/dev/null || true
+bash "$SR" stop "$O14" nc-ns >/dev/null 2>&1 || true
+
+# ---- a stop that cannot terminate the file does not report success ------
+O15="$WORK/rofile.json"
+bash "$SR" start ro-ns "$O15" >/dev/null 2>&1 && note_pid "$(pid_of "$O15")"
+sleep 1
+chmod 444 "$O15"
+if bash "$SR" stop "$O15" ro-ns >/dev/null 2>"$WORK/e"; then
+    bad "stop reported success for a file it could not terminate"
+else
+    ok "a stop that cannot terminate its file exits non-zero"
+fi
+chmod 644 "$O15" 2>/dev/null || true
+
+# ---- an output path containing a pipe --------------------------------
+# The resolver used to return "<out>|<ns>" in one string, so such a path was split
+# in the middle: stop reported success against a truncated name and the capture
+# kept running.
+O16="$WORK/pipe|name.json"
+bash "$SR" start pp-ns "$O16" >/dev/null 2>&1 && note_pid "$(pid_of "$O16")"
+sleep 1
+P16="$(pid_of "$O16")"
+bash "$SR" stop "$O16" pp-ns >/dev/null 2>&1 || true
+if [ -n "$P16" ] && kill -0 "$P16" 2>/dev/null; then
+    bad "a path containing a pipe left the capture running"
+else
+    ok "an output path containing a pipe is handled whole"
+fi
+
+# ---- the tail: concurrent stops, and the dedup temp name -------------
+LC="$WORK/conc.log"
+bash "$TL" --context tc-ctx start tc-ns "$LC" >/dev/null 2>&1 && note_pid "$(pid_of "$LC")"
+sleep 1
+printf 'dup\ndup\nuniq\n' >> "$LC"
+bash "$TL" stop tc-ns "$LC" >"$WORK/o1" 2>"$WORK/e1" &
+bash "$TL" stop tc-ns "$LC" >"$WORK/o2" 2>"$WORK/e2" &
+wait
+grep -q "cannot stat" "$WORK/e1" "$WORK/e2" 2>/dev/null \
+    && bad "two tail stops raced on one dedup temp name" \
+    || ok "two concurrent tail stops do not race on a temp name"
+ls "$LC".dedup* >/dev/null 2>&1 \
+    && bad "a dedup temp file was left behind" \
+    || ok "no dedup temp file survives a tail stop"
+[ ! -e "$LC.finalising" ] \
+    && ok "and no tail finalise claim is left behind" \
+    || bad "a tail finalise claim was left at $LC.finalising"
+
+# ---- the tail refuses a namespace pair too --------------------------
+# The sampler grew this guard in round 4; the tail never did, which is the
+# asymmetry the shared library exists to prevent.
+LT="$WORK/twoarg.log"
+bash "$TL" start tt-ns "$LT" >/dev/null 2>&1 && note_pid "$(pid_of "$LT")"
+sleep 1
+PT="$(pid_of "$LT")"
+if bash "$TL" stop tt-ns other-ns >/dev/null 2>"$WORK/e"; then
+    bad "the tail accepted two namespaces as a stop target"
+else
+    ok "the tail refuses two arguments that own no record"
+fi
+if [ -n "$PT" ] && kill -0 "$PT" 2>/dev/null; then
+    ok "and leaves that tail running rather than reporting it stopped"
+else
+    bad "the refused two-argument tail stop killed the capture"
+fi
+bash "$TL" stop tt-ns "$LT" >/dev/null 2>&1 || true
 
 # ---- the count itself --------------------------------------------
 # Asserted without ok()/bad(), which would change the number being asserted.

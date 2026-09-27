@@ -33,6 +33,8 @@ CAPTURE_FORCE=0
 CAPTURE_POSITIONAL=()
 CAPTURE_KUBECTL="${KUBECTL_CMD:-kubectl}"
 CAPTURE_ADOPTED_PID=""
+CAPTURE_OUT=""
+CAPTURE_NS=""
 
 # capture_parse_args "$@" -- pull the flags out from ANYWHERE in the argument
 # list, leaving the positionals in CAPTURE_POSITIONAL.
@@ -354,14 +356,42 @@ capture_stop() {
 
 # capture_begin_finalise <outfile> -- claim the right to write the terminator.
 #
-# `ln` fails EEXIST for the second caller, which is the same exclusivity the start
-# side gets from `set -C`. Two concurrent stops both passed capture_owned, both
-# saw the capture already dead, and both appended a JSON terminator: 15 of 15
-# trials produced `...]}]}` and both exited 0 reporting "unreadable". The comment
-# that said this could not happen was reasoning about SEQUENTIAL stops.
+#   0  the claim is ours, write the terminator
+#   2  a LIVE stop holds it; concede, and let that one finish the file
+#   1  we could not claim it, and nobody holds it: the caller must FAIL rather
+#      than concede, because conceding means nobody writes the terminator
+#
+# Two concurrent stops both passed capture_owned, both saw the capture already
+# dead, and both appended: 15 of 15 trials gave `...]}]}` while both exited 0.
+#
+# The first fix hardlinked the ownership record, and treated every `ln` failure as
+# a concession. Three states make that link fail without a competing stop -- a
+# stale claim from a stop that was killed, a capture directory with no hardlink
+# support (BENCHMARK_CAPTURE_DIR lets an operator pick one), and a losing
+# concurrent start that released the record first -- and in each, nobody wrote the
+# terminator while stop reported success.
+#
+# So: an exclusive create that records the STOPPING process. That works without
+# hardlinks, makes a crashed stop detectable by its pid, and separates "conceded"
+# from "failed".
 capture_begin_finalise() {
+    local f sp
     [ -n "${1:-}" ] || return 1
-    ln "$(capture_owner_file "$1")" "$1.finalising" 2>/dev/null
+    f="$1.finalising"
+    if ( set -C; printf 'stopper=%s\n' "$$" > "$f" ) 2>/dev/null; then
+        return 0
+    fi
+    [ -e "$f" ] || return 1
+    sp="$(sed -n 's/.*stopper=\([0-9][0-9]*\).*/\1/p' "$f" 2>/dev/null)"
+    if [ -n "$sp" ] && kill -0 "$sp" 2>/dev/null; then
+        return 2
+    fi
+    # The claimant is gone. Take it over rather than wedging the path: a stale
+    # claim used to make every later stop concede for ever, so the file could
+    # never be terminated and was filed unparseable.
+    rm -f "$f" 2>/dev/null || true
+    ( set -C; printf 'stopper=%s\n' "$$" > "$f" ) 2>/dev/null && return 0
+    return 1
 }
 
 capture_end_finalise() {
@@ -376,12 +406,16 @@ capture_end_finalise() {
 # exited 0, printed "stopped", and left the capture running. Recognise the path
 # rather than trusting the position: it is the argument with an ownership record,
 # or failing that the one that looks like a path.
-# Echoes "<outfile>|<namespace>".
+# Sets CAPTURE_OUT and CAPTURE_NS rather than returning them in one string: the
+# result used to be "<out>|<ns>", so an output path containing a `|` was split in
+# the middle and stop reported success against a truncated path while the capture
+# kept running.
 capture_resolve_outfile() {
     local a="${1:-}" b="${2:-}"
-    if [ -n "$a" ] && capture_owned "$a"; then printf '%s|%s\n' "$a" "$b"; return 0; fi
-    if [ -n "$b" ] && capture_owned "$b"; then printf '%s|%s\n' "$b" "$a"; return 0; fi
-    case "$a" in */*) printf '%s|%s\n' "$a" "$b"; return 0 ;; esac
-    case "$b" in */*) printf '%s|%s\n' "$b" "$a"; return 0 ;; esac
-    printf '%s|%s\n' "$a" "$b"
+    CAPTURE_OUT="$a"; CAPTURE_NS="$b"
+    if [ -n "$a" ] && capture_owned "$a"; then return 0; fi
+    if [ -n "$b" ] && capture_owned "$b"; then CAPTURE_OUT="$b"; CAPTURE_NS="$a"; return 0; fi
+    case "$a" in */*) return 0 ;; esac
+    case "$b" in */*) CAPTURE_OUT="$b"; CAPTURE_NS="$a"; return 0 ;; esac
+    return 0
 }

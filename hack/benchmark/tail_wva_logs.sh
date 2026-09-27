@@ -91,7 +91,7 @@ case "$CMD" in
         fi
         sleep 1
       done
-    ) &
+    ) >/dev/null 2>&1 &
     tail_pid=$!
     set +m
     if ! echo "$tail_pid" > "$OUT.pid" || ! capture_adopt "$OUT" "$NS" "$tail_pid"; then
@@ -112,8 +112,19 @@ case "$CMD" in
     # stop" while the capture kept running.
     : "${2:?namespace required}"
     : "${3:?outfile required}"
-    resolved="$(capture_resolve_outfile "$3" "$2")"
-    OUT="${resolved%%|*}"; NS="${resolved#*|}"
+    capture_resolve_outfile "$3" "$2"
+    OUT="$CAPTURE_OUT"; NS="$CAPTURE_NS"
+    # The guard the sampler grew in round 4, which this script never got -- the
+    # asymmetry the shared library was meant to end. `stop <ns> <other-ns>` exited
+    # 0 with "nothing to stop" and the capture still running.
+    if ! capture_owned "$OUT"; then
+      case "$2$3" in
+        */*) : ;;
+        *) echo "no capture owns \"$3\", and it does not look like an output path" >&2
+           echo "  usage: $0 stop <namespace> <outfile>" >&2
+           exit 2 ;;
+      esac
+    fi
     if ! capture_owned "$OUT"; then
       echo "no capture owns $OUT -- nothing to stop" >&2
       exit 0
@@ -135,10 +146,15 @@ case "$CMD" in
     # concurrent stops racing on one file: both reported success and one printed
     # `mv: cannot stat`, with a window where one awk reads $OUT while the other mv
     # replaces it.
-    if ! capture_begin_finalise "$OUT"; then
-      echo "another stop is finalising $OUT -- leaving it to that one" >&2
-      exit 0
-    fi
+    capture_begin_finalise "$OUT"
+    case "$?" in
+      0) : ;;
+      2) echo "another stop is finalising $OUT -- leaving it to that one" >&2
+         exit 0 ;;
+      *) echo "cannot claim finalisation of $OUT, and no other stop holds it" >&2
+         echo "  refusing to report a stop that leaves the output unterminated" >&2
+         exit 1 ;;
+    esac
     if [ -f "$OUT" ]; then
       dedup="$(mktemp "$OUT.dedup.XXXXXX")" \
         && awk '!seen[$0]++' "$OUT" > "$dedup" \
