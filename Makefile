@@ -2051,10 +2051,13 @@ benchmark-run: ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<name
 	@# namespace runs no launchers.
 	@bash hack/benchmark/fma_placement.sh verify $(BENCHMARK_NAMESPACE) \
 		"$(CURDIR)/hack/benchmark/scenarios/$(BENCHMARK_SPEC).yaml"
-	@rm -f $(BENCHMARK_SAMPLES) $(BENCHMARK_SAMPLES).pid $(BENCHMARK_SAMPLES).owner
-	@# --force because this recipe has just removed the file, so it owns the path.
+	@# --force means "a finished run's data at this path may be replaced", which
+	@# is what this recipe intends. Nothing is pre-removed: deleting the pidfile
+	@# first is how a second run in the same namespace used to orphan the first
+	@# run's sampler before being refused. The CLAIM, which --force does not
+	@# excuse, is what catches a concurrent run, and it catches it before
+	@# anything is deleted.
 	@bash hack/benchmark/sample_replicas.sh $(BENCHMARK_CAPTURE_CTX) --force start $(BENCHMARK_NAMESPACE) $(BENCHMARK_SAMPLES) || true
-	@rm -f $(BENCHMARK_WVA_LOG) $(BENCHMARK_WVA_LOG).pid $(BENCHMARK_WVA_LOG).stderr $(BENCHMARK_WVA_LOG).owner
 	@bash hack/benchmark/tail_wva_logs.sh $(BENCHMARK_CAPTURE_CTX) --force start $(BENCHMARK_NAMESPACE) $(BENCHMARK_WVA_LOG) || true
 	@# Collect the results tree as a gzipped tar over exec rather than with
 	@# kubectl cp. The harness ships both paths and defaults to cp, which on a
@@ -2078,13 +2081,18 @@ benchmark-run: ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<name
 	@# Stopped and filed even when the run above failed -- a run that errored in a
 	@# post-processing step still produced measurements worth reading, and every
 	@# FMA run so far has ended that way.
-	@bash hack/benchmark/sample_replicas.sh stop $(BENCHMARK_SAMPLES) $(BENCHMARK_NAMESPACE) || true
-	@bash hack/benchmark/tail_wva_logs.sh stop $(BENCHMARK_NAMESPACE) $(BENCHMARK_WVA_LOG) || true
+	@bash hack/benchmark/sample_replicas.sh $(BENCHMARK_CAPTURE_CTX) stop $(BENCHMARK_SAMPLES) $(BENCHMARK_NAMESPACE) || true
+	@bash hack/benchmark/tail_wva_logs.sh $(BENCHMARK_CAPTURE_CTX) stop $(BENCHMARK_NAMESPACE) $(BENCHMARK_WVA_LOG) || true
 	@LATEST=$$(ls -td $(BENCHMARK_WORKSPACE)/$${USER}-*/results/$(BENCHMARK_HARNESS)-*_* 2>/dev/null | head -1); \
 	if [ -n "$$LATEST" ] && [ -s $(BENCHMARK_SAMPLES) ]; then \
 		mkdir -p "$$LATEST/metrics/processed"; \
 		cp $(BENCHMARK_SAMPLES) "$$LATEST/metrics/processed/wva_replica_samples.json"; \
 		echo "Replica samples filed in $$LATEST/metrics/processed/wva_replica_samples.json"; \
+	fi; \
+	if [ -n "$$LATEST" ] && [ -s $(BENCHMARK_SAMPLES).pod_timings.json ]; then \
+		mkdir -p "$$LATEST/metrics/processed"; \
+		cp $(BENCHMARK_SAMPLES).pod_timings.json "$$LATEST/metrics/processed/wva_pod_timings.json"; \
+		echo "Pod timings filed in $$LATEST/metrics/processed/wva_pod_timings.json"; \
 	fi; \
 	if [ -n "$$LATEST" ] && [ -s $(BENCHMARK_WVA_LOG) ]; then \
 		cp $(BENCHMARK_WVA_LOG) "$$LATEST/wva_controller.log"; \

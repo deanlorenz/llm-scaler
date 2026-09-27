@@ -36,81 +36,20 @@ case "${1:-}" in
         ;;
 esac
 
+# Ownership, argument parsing and the kubectl wrapper are shared with the other
+# capture helper. They used to be duplicated per script and had begun to drift.
+# shellcheck source=hack/benchmark/capture_lib.sh
+. "$(dirname "$0")/capture_lib.sh"
 
+capture_parse_args "$@" || exit 2
+set -- ${CAPTURE_POSITIONAL[@]+"${CAPTURE_POSITIONAL[@]}"}
 
-# Optional leading flags, before the command:
-#   --context <ctx>   which kube context to watch. Without it the script
-#                     inherits whatever KUBECONFIG the calling shell had, and
-#                     then nothing in `ps` says which cluster a running capture
-#                     is watching -- which is how a live capture gets mistaken
-#                     for a stale one and killed.
-#   --force           permit start to replace a populated output file.
-CTX=""
-FORCE=0
-while :; do
-    case "${1:-}" in
-        --context) CTX="${2:?--context needs a value}"; shift 2 ;;
-        --context=*) CTX="${1#--context=}"; shift ;;
-        --force) FORCE=1; shift ;;
-        *) break ;;
-    esac
-done
-
-CMD="${1:?usage: $0 [--context <ctx>] [--force] start <namespace> <outfile> | stop <outfile>}"
-KUBECTL="${KUBECTL_CMD:-kubectl}"
-# Every kubectl call goes through this, so the context cannot be applied to some
-# calls and not others.
-_kube() {
-    if [ -n "$CTX" ]; then
-        $KUBECTL --context "$CTX" "$@"
-    else
-        $KUBECTL "$@"
-    fi
-}
-
-# Refuse to replace a populated output unless the caller says it owns the path.
-# A capture that silently truncates is worse than one that fails to start: the
-# run that is about to begin can be restarted, the data already on disk cannot.
-_guard_output() {
-    local out="$1"
-    if [ "$FORCE" -eq 1 ] || [ ! -s "$out" ]; then
-        return 0
-    fi
-    echo "refusing to start: $out already holds $(wc -c < "$out") bytes" >&2
-    if [ -f "$out.owner" ]; then
-        echo "  it belongs to: $(cat "$out.owner")" >&2
-    fi
-    echo "  pass --force to replace it, or choose another output path" >&2
-    return 1
-}
-
-# Who owns this capture, in a form a human reading /tmp can act on.
-_write_owner() {
-    printf 'namespace=%s context=%s started=%s pid=%s cmd=%s\n' \
-        "$2" "${CTX:-<inherited KUBECONFIG>}" \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$3" "$(basename "$0")" > "$1.owner"
-}
-
-# Warn rather than fail: a mismatch usually means someone is stopping a capture
-# they did not start, and the honest thing is to say so and still stop it.
-_check_owner() {
-    local out="$1" ns="$2"
-    [ -f "$out.owner" ] || return 0
-    # Nothing to compare against: `stop <outfile>` without a namespace is the
-    # original signature and is not a mismatch. Warning anyway is a false alarm,
-    # and false alarms are why real warnings go unread.
-    [ -n "$ns" ] || return 0
-    case "$(cat "$out.owner")" in
-        *"namespace=$ns "*) : ;;
-        *) echo "warning: $out was started as [$(cat "$out.owner")]," >&2
-           echo "         but stop was called with namespace=$ns" >&2 ;;
-    esac
-}
+CMD="${1:?usage: $0 [--context <ctx>] [--force] start <namespace> <outfile> | stop <outfile> [<namespace>]}"
 INTERVAL="${REPLICA_SAMPLE_INTERVAL:-10}"
 
 _snapshot() {
     local ns="$1"
-    _kube --namespace "$ns" get deployments,statefulsets -o json 2>/dev/null \
+    capture_kube --namespace "$ns" get deployments,statefulsets -o json 2>/dev/null \
       | python3 -c '
 import json, sys
 from datetime import datetime, timezone
@@ -148,7 +87,7 @@ print(json.dumps(snap))
 # a single collection at the end would miss exactly the replicas we care about.
 _pods_snapshot() {
     local ns="$1"
-    _kube --namespace "$ns" get pods -o json 2>/dev/null \
+    capture_kube --namespace "$ns" get pods -o json 2>/dev/null \
       | python3 -c '
 import json, sys
 try:
@@ -196,8 +135,19 @@ for p in data.get("items", []):
 case "$CMD" in
   start)
     NS="${2:?namespace required}"; OUT="${3:?outfile required}"
-    mkdir -p "$(dirname "$OUT")"
-    _guard_output "$OUT" || exit 1
+    shift 3 || true
+    # A stray argument here is almost always a flag in the wrong place, and a
+    # dropped --context means watching the wrong cluster while believing
+    # otherwise. Refuse rather than proceed.
+    [ "$#" -eq 0 ] || { echo "unexpected argument: $1" >&2; exit 2; }
+    # Ownership first: "another process owns this" is both more specific and
+    # more actionable than "there are bytes here", and for the log tail the
+    # output is legitimately empty for the first seconds of every capture, so
+    # byte count cannot be what protects it. A refusal after the claim has to
+    # give the claim back, or refusing would leave a lock nobody holds.
+    capture_claim "$OUT" "$NS" || exit 1
+    capture_guard_data "$OUT" || { capture_release "$OUT"; exit 1; }
+    capture_verify_writable "$OUT" || { capture_release "$OUT"; exit 1; }
     printf '{"snapshots":[' > "$OUT"
     : > "$OUT.pods.jsonl"
     (
@@ -213,27 +163,45 @@ case "$CMD" in
         sleep "$INTERVAL"
       done
     ) &
-    echo $! > "$OUT.pid"
-    _write_owner "$OUT" "$NS" "$(cat "$OUT.pid")"
-    echo "replica sampler started (pid $(cat "$OUT.pid"), every ${INTERVAL}s," \
-         "context ${CTX:-inherited}, namespace $NS) -> $OUT"
+    sampler_pid=$!
+    if ! echo "$sampler_pid" > "$OUT.pid" || ! capture_record_owner "$OUT" "$NS" "$sampler_pid"; then
+        echo "cannot record the capture at $OUT -- stopping it rather than running unowned" >&2
+        kill "$sampler_pid" 2>/dev/null || true
+        capture_release "$OUT"
+        exit 1
+    fi
+    echo "replica sampler started (pid $sampler_pid, every ${INTERVAL}s," \
+         "context ${CAPTURE_CTX:-inherited}, namespace $NS) -> $OUT"
     ;;
   stop)
-    OUT="${2:?outfile required}"
-    _check_owner "$OUT" "${3:-}"
-    rm -f "$OUT.owner"
-    if [ -f "$OUT.pid" ]; then
-      kill "$(cat "$OUT.pid")" 2>/dev/null || true
-      rm -f "$OUT.pid"
+    # The two helpers took their stop arguments in opposite orders, and getting
+    # them backwards used to exit 0 while leaving the capture running. Recognise
+    # the path instead of trusting the position.
+    resolved="$(capture_resolve_outfile "${2:?outfile required}" "${3:-}")"
+    OUT="${resolved%%|*}"; NS_ARG="${resolved#*|}"
+    if ! capture_owned "$OUT"; then
+      echo "no capture owns $OUT -- nothing to stop, and nothing written" >&2
+      exit 0
     fi
+    capture_check_owner "$OUT" "$NS_ARG" "$CAPTURE_CTX"
+    capture_kill_tree "$OUT.pid"
     # Close the array even if no snapshot was written, so the file is always
     # valid JSON. An empty snapshots list reads as "not measured" downstream,
     # which is the honest answer -- unlike a zero replica count.
+    #
+    # Written once, because stop releases the claim below and a second stop
+    # returns before reaching here. Sniffing the last two bytes instead does NOT
+    # work: a snapshot ends with `]}` as well -- {"timestamp":...,
+    # "controllers":[...]} -- so a closed array and an open one ending in a
+    # snapshot are indistinguishable, and the terminator was never written at
+    # all, leaving a file that did not parse.
     printf ']}' >> "$OUT"
     # Dedupe the pod observations into one record per pod. Keep the observation
     # that has a Ready time: a pod is seen several times, and only later samples
     # carry the transition we want.
-    TIMINGS="$(dirname "$OUT")/wva_pod_timings.json"
+    # Keyed to this output, not a shared name: two runs in different
+    # namespaces both wrote /tmp/wva_pod_timings.json and the second won.
+    TIMINGS="$OUT.pod_timings.json"
     python3 - "$OUT.pods.jsonl" "$TIMINGS" <<'PY' 2>/dev/null || true
 import json, sys
 src, dst = sys.argv[1], sys.argv[2]
@@ -273,6 +241,7 @@ try:
 except Exception as e:
     print('unreadable:', e)
 " 2>/dev/null)
+    capture_release "$OUT"
     echo "replica sampler stopped: $n -> $OUT"
     ;;
   *)

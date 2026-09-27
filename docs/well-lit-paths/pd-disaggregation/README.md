@@ -128,14 +128,26 @@ Deployment pod with `Deployment.apps ... not found` -- nothing in this recipe
 causes it, so check `kubectl create deployment` works in your namespace first.
 
 One more, if you run several passes in a row: `make benchmark-run` starts a
-log tail and a replica sampler that write to fixed paths under `/tmp`, and a
-pass that ends badly can leave them running. Two of them writing at once
-produced an empty controller log for one run and a replica-sample file
-holding two concatenated JSON documents for another -- the workload data was
-never affected, but the target path, the ordering times and the dashed line
-in the pipeline graph all come from that log. `pkill -f tail_wva_logs.sh`
-between passes, and check the captured files are non-empty before you trust
-a report built from them.
+log tail and a replica sampler. Their paths are keyed to the namespace
+(`/tmp/wva_replica_samples-<ns>.json`, `/tmp/wva_controller_tail-<ns>.log`, under
+`BENCHMARK_CAPTURE_DIR`), and each one claims its path while it runs, so a second
+pass in the same namespace is refused rather than allowed to interleave. Two
+writing at once used to produce an empty controller log for one run and a
+replica-sample file holding two concatenated JSON documents for another.
+
+A pass that ends badly can still leave a capture running. Stop it with the script
+that started it -- `bash hack/benchmark/sample_replicas.sh stop <outfile>` and
+`bash hack/benchmark/tail_wva_logs.sh stop <namespace> <outfile>` -- which kills
+that capture and nothing else. Do **not** `pkill -f tail_wva_logs.sh`: it matches
+on the command line, so it kills every capture on the box regardless of namespace
+or cluster, including another session's. `cat <outfile>.lock/owner` says which
+namespace and context a running capture belongs to, and
+`BENCHMARK_KUBE_CONTEXT=<ctx>` names the cluster explicitly instead of inheriting
+whatever `KUBECONFIG` happens to say.
+
+Check the captured files are non-empty before you trust a report built from them:
+the workload data is unaffected either way, but the target path, the ordering
+times and the dashed line in the pipeline graph all come from that log.
 
 ## Measured
 

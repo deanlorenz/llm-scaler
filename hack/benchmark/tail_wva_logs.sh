@@ -28,82 +28,42 @@
 # rather than from "now", so a drop loses zero lines (just re-fetches the
 # handful spanning the reconnect, deduplicated by `stop`).
 set -u
+# --help prints this file's header comment -- the documentation the script
+# already carries, so it cannot drift from what the script does. Placed before
+# any argument handling because the commands take a namespace as $1, and without
+# it `--help` would be consumed as one.
+case "${1:-}" in
+    -h|--help)
+        sed -n '2,/^[^#]/p' "$0" | sed 's/^# \{0,1\}//; $d'
+        exit 0
+        ;;
+esac
 
+# Ownership, argument parsing and the kubectl wrapper are shared with the other
+# capture helper. They used to be duplicated per script and had begun to drift.
+# shellcheck source=hack/benchmark/capture_lib.sh
+. "$(dirname "$0")/capture_lib.sh"
 
-# Optional leading flags, before the command:
-#   --context <ctx>   which kube context to watch. Without it the script
-#                     inherits whatever KUBECONFIG the calling shell had, and
-#                     then nothing in `ps` says which cluster a running capture
-#                     is watching -- which is how a live capture gets mistaken
-#                     for a stale one and killed.
-#   --force           permit start to replace a populated output file.
-CTX=""
-FORCE=0
-while :; do
-    case "${1:-}" in
-        --context) CTX="${2:?--context needs a value}"; shift 2 ;;
-        --context=*) CTX="${1#--context=}"; shift ;;
-        --force) FORCE=1; shift ;;
-        *) break ;;
-    esac
-done
+capture_parse_args "$@" || exit 2
+set -- ${CAPTURE_POSITIONAL[@]+"${CAPTURE_POSITIONAL[@]}"}
 
 CMD="${1:?usage: $0 [--context <ctx>] [--force] start <namespace> <outfile> | stop <namespace> <outfile>}"
-KUBECTL="${KUBECTL_CMD:-kubectl}"
-# Every kubectl call goes through this, so the context cannot be applied to some
-# calls and not others.
-_kube() {
-    if [ -n "$CTX" ]; then
-        $KUBECTL --context "$CTX" "$@"
-    else
-        $KUBECTL "$@"
-    fi
-}
-
-# Refuse to replace a populated output unless the caller says it owns the path.
-# A capture that silently truncates is worse than one that fails to start: the
-# run that is about to begin can be restarted, the data already on disk cannot.
-_guard_output() {
-    local out="$1"
-    if [ "$FORCE" -eq 1 ] || [ ! -s "$out" ]; then
-        return 0
-    fi
-    echo "refusing to start: $out already holds $(wc -c < "$out") bytes" >&2
-    if [ -f "$out.owner" ]; then
-        echo "  it belongs to: $(cat "$out.owner")" >&2
-    fi
-    echo "  pass --force to replace it, or choose another output path" >&2
-    return 1
-}
-
-# Who owns this capture, in a form a human reading /tmp can act on.
-_write_owner() {
-    printf 'namespace=%s context=%s started=%s pid=%s cmd=%s\n' \
-        "$2" "${CTX:-<inherited KUBECONFIG>}" \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$3" "$(basename "$0")" > "$1.owner"
-}
-
-# Warn rather than fail: a mismatch usually means someone is stopping a capture
-# they did not start, and the honest thing is to say so and still stop it.
-_check_owner() {
-    local out="$1" ns="$2"
-    [ -f "$out.owner" ] || return 0
-    # Nothing to compare against: `stop <outfile>` without a namespace is the
-    # original signature and is not a mismatch. Warning anyway is a false alarm,
-    # and false alarms are why real warnings go unread.
-    [ -n "$ns" ] || return 0
-    case "$(cat "$out.owner")" in
-        *"namespace=$ns "*) : ;;
-        *) echo "warning: $out was started as [$(cat "$out.owner")]," >&2
-           echo "         but stop was called with namespace=$ns" >&2 ;;
-    esac
-}
 
 case "$CMD" in
   start)
     NS="${2:?namespace required}"; OUT="${3:?outfile required}"
-    mkdir -p "$(dirname "$OUT")"
-    _guard_output "$OUT" || exit 1
+    shift 3 || true
+    # A stray argument is almost always a flag in the wrong place, and a dropped
+    # --context means watching the wrong cluster while believing otherwise.
+    [ "$#" -eq 0 ] || { echo "unexpected argument: $1" >&2; exit 2; }
+    # Ownership first: "another process owns this" is both more specific and
+    # more actionable than "there are bytes here", and for the log tail the
+    # output is legitimately empty for the first seconds of every capture, so
+    # byte count cannot be what protects it. A refusal after the claim has to
+    # give the claim back, or refusing would leave a lock nobody holds.
+    capture_claim "$OUT" "$NS" || exit 1
+    capture_guard_data "$OUT" || { capture_release "$OUT"; exit 1; }
+    capture_verify_writable "$OUT" || { capture_release "$OUT"; exit 1; }
     : > "$OUT"
     rm -f "$OUT.stop"
     # No --prefix: dump_k2_decisions.py's LOG_LINE regex expects the
@@ -114,37 +74,44 @@ case "$CMD" in
       while [ ! -f "$OUT.stop" ]; do
         since_ts="$(tail -n1 "$OUT" 2>/dev/null | cut -f1)"
         if [ -n "$since_ts" ]; then
-          _kube logs -n "$NS" -l app.kubernetes.io/name=workload-variant-autoscaler \
+          capture_kube logs -n "$NS" -l app.kubernetes.io/name=workload-variant-autoscaler \
             -f --since-time="$since_ts" --tail=-1 --max-log-requests=10 \
             >> "$OUT" 2>> "$OUT.stderr"
         else
-          _kube logs -n "$NS" -l app.kubernetes.io/name=workload-variant-autoscaler \
+          capture_kube logs -n "$NS" -l app.kubernetes.io/name=workload-variant-autoscaler \
             -f --since=1s --tail=-1 --max-log-requests=10 \
             >> "$OUT" 2>> "$OUT.stderr"
         fi
         sleep 1
       done
     ) &
-    echo $! > "$OUT.pid"
-    _write_owner "$OUT" "$NS" "$(cat "$OUT.pid")"
-    echo "WVA log tail started (pid $(cat "$OUT.pid"), context ${CTX:-inherited}," \
+    tail_pid=$!
+    if ! echo "$tail_pid" > "$OUT.pid" || ! capture_record_owner "$OUT" "$NS" "$tail_pid"; then
+        echo "cannot record the capture at $OUT -- stopping it rather than running unowned" >&2
+        kill "$tail_pid" 2>/dev/null || true
+        capture_release "$OUT"
+        exit 1
+    fi
+    echo "WVA log tail started (pid $tail_pid, context ${CAPTURE_CTX:-inherited}," \
          "namespace $NS) -> $OUT"
     ;;
   stop)
-    NS="${2:?namespace required}"; OUT="${3:?outfile required}"
-    _check_owner "$OUT" "$NS"
-    rm -f "$OUT.owner"
-    touch "$OUT.stop"
-    if [ -f "$OUT.pid" ]; then
-      pid="$(cat "$OUT.pid")"
-      kill "$pid" 2>/dev/null || true
-      # `kubectl logs -f` occasionally re-execs an internal watch on
-      # reconnect; the pidfile only ever has the original PID, so sweep for
-      # anything matching this exact namespace+label as a backstop.
-      sleep 1
-      pkill -f "logs -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler" 2>/dev/null || true
-      rm -f "$OUT.pid"
+    # The two helpers took their stop arguments in opposite orders, and getting
+    # them backwards used to exit 0 while leaving the capture running. Recognise
+    # the path instead of trusting the position.
+    resolved="$(capture_resolve_outfile "${3:-}" "${2:?namespace required}")"
+    OUT="${resolved%%|*}"; NS="${resolved#*|}"
+    if ! capture_owned "$OUT"; then
+      echo "no capture owns $OUT -- nothing to stop" >&2
+      exit 0
     fi
+    capture_check_owner "$OUT" "$NS" "$CAPTURE_CTX"
+    touch "$OUT.stop"
+    # The reconnect loop re-execs kubectl, so the children matter as much as
+    # the recorded pid -- but they are OUR children, found by parent, never by
+    # matching a command line. The pattern sweep this replaces killed any other
+    # session capturing the same namespace, including one on another cluster.
+    capture_kill_tree "$OUT.pid"
     rm -f "$OUT.stop"
     # --since-time reconnects overlap by design (see start); collapse the
     # handful of re-fetched duplicate lines per reconnect back to one each.
@@ -152,6 +119,7 @@ case "$CMD" in
       awk '!seen[$0]++' "$OUT" > "$OUT.dedup" && mv "$OUT.dedup" "$OUT"
     fi
     n=$(wc -l < "$OUT" 2>/dev/null || echo 0)
+    capture_release "$OUT"
     echo "WVA log tail stopped: $n line(s) -> $OUT"
     ;;
   *)
