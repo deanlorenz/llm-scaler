@@ -36,10 +36,31 @@ const (
 	DefaultMinObservableK = 0.15
 
 	// DefaultMaxObservableK is the upper bound on KV utilization for accepted
-	// observations. Above this threshold the system approaches saturation and
-	// the linear ITL model may no longer hold. It equals DefaultKSat: the
-	// window's ceiling is the point ValidModel evaluates a fit at.
-	DefaultMaxObservableK = 0.85
+	// observations: a replica at 0.80 counts as saturated, and the linear ITL
+	// model holds below that and not above it.
+	//
+	// Measured on the shape-swap benchmark (run P, 869 intervals over 9 decode
+	// replicas), fitting ITL(k) = A·k + B over k in [0.15, hi]:
+	//
+	//	hi     n    A (ms)   B (ms)   mean resid   p95
+	//	0.85   96     40.8    -1.91        11.8%   40.1%
+	//	0.80   94     37.2    -0.48         8.3%   25.2%
+	//	0.75   88     34.4    +0.61         6.4%   16.3%
+	//
+	// B is the hardware floor at zero contention and cannot be negative; the
+	// fit drives it there only because the top of the range is not linear.
+	// Per k-decile the median ITL rises ~3 ms per 0.1 up to 0.8 and then
+	// breaks away -- 24.6 ms at 0.75, 30.5 at 0.85, 45.0 at 0.95 -- and
+	// preemption tracks it: of 7,537 preemptions in that run, 93% happened at
+	// k >= 0.7 and 60% at k >= 0.9. Those points describe an engine thrashing,
+	// not a replica's sustainable rate, and including them steepens A and
+	// pushes B below zero, which makes every mu derived from the line wrong.
+	//
+	// This is the window's ceiling only. DefaultKSat (0.85) stays the point a
+	// fit is EVALUATED at, mirroring DefaultScaleUpThreshold in the saturation
+	// config; evaluating 0.05 above the fitted range costs ~2% against the
+	// measured median at that band.
+	DefaultMaxObservableK = 0.80
 )
 
 // Observation is a single (k, ITL_obs) data point collected from one replica

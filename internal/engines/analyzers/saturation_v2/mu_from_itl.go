@@ -3,6 +3,7 @@ package saturation_v2
 import (
 	"time"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
@@ -71,10 +72,37 @@ type derivedMu struct {
 // C is the engine's whole KV capacity, not k1. k1 is already C times the
 // analyzer's KV threshold, and itl.Sequences applies k itself, so passing k1
 // would apply a threshold twice.
+// pricingK is the KV utilization, as a fraction of PHYSICAL capacity, that a
+// replica is considered full at -- the point mu is priced for.
+//
+// It is the product of the two thresholds because they compound: k1, the
+// memory-bound capacity, is KvCacheThreshold of physical KV, and the analyzer
+// scales out at ScaleUpThreshold of k1. On the defaults (0.80, 0.85) that is
+// 0.68 of physical; with ScaleUpThreshold at 0.95 it is 0.76. Both sit inside
+// the ITL window's [DefaultMinObservableK, DefaultMaxObservableK] range, so
+// the line is evaluated where it was fitted rather than beyond it.
+//
+// A configuration whose product falls outside that range is clamped to it: the
+// model says nothing useful outside the range it was fitted on, and a clamped
+// price is a worse answer than an extrapolated one only in theory.
+func pricingK(cfg *config.ScalingPolicy) float64 {
+	if cfg == nil {
+		return itl.DefaultKSat
+	}
+	k := cfg.KvCacheThreshold * cfg.ScaleUpThreshold
+	if !(k > 0) {
+		return itl.DefaultKSat
+	}
+	return min(max(k, itl.DefaultMinObservableK), itl.DefaultMaxObservableK)
+}
+
 func deriveMu(model itl.Model, params *capacity.EngineParams,
-	totalKvTokens int64, fleet shape.Shape) derivedMu {
+	totalKvTokens int64, fleet shape.Shape, kPrice float64) derivedMu {
 	avgOutput := fleet.AvgOutputTokens
 	if model.IsZero() || !(avgOutput > 0) || !(fleet.KVreq > 0) {
+		return derivedMu{}
+	}
+	if !(kPrice > 0) || kPrice > 1 {
 		return derivedMu{}
 	}
 	capacityTokens := float64(totalKvTokens)
@@ -91,14 +119,14 @@ func deriveMu(model itl.Model, params *capacity.EngineParams,
 	// series at all, so the hit rate was 0 and the two agreed at 4000 -- but
 	// that is the workload being uninteresting, not the arithmetic being
 	// right.)
-	seqs := itl.Sequences(itl.DefaultKSat, capacityTokens, fleet.KVreq)
+	seqs := itl.Sequences(kPrice, capacityTokens, fleet.KVreq)
 	if seqs <= 0 {
 		return derivedMu{}
 	}
 	if params != nil && params.MaxNumSeqs > 0 {
 		seqs = min(seqs, float64(params.MaxNumSeqs))
 	}
-	itlSec := model.ITLAt(itl.DefaultKSat)
+	itlSec := model.ITLAt(kPrice)
 	if !(itlSec > 0) {
 		return derivedMu{}
 	}

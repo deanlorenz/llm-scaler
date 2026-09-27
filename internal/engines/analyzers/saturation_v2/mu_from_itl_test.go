@@ -7,6 +7,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
@@ -20,13 +21,80 @@ var (
 	tracedModel  = itl.Model{A: 0.0307, B: 0.0016}
 	tracedParams = &capacity.EngineParams{MaxNumSeqs: 256}
 	tracedKv     = int64(1_163_136)
+	// The operating point the analyzer targets: k1 is KvCacheThreshold of
+	// physical KV and it scales out at ScaleUpThreshold of k1, so mu is priced
+	// at the product -- 0.68 on the defaults, not 0.85.
+	tracedK = config.DefaultKvCacheThreshold * config.DefaultScaleUpThreshold
 )
+
+// The fit from run P (2026-09-27), the first pass of this trace where the fleet
+// was never short of replicas: ITL(k) = 34.4 ms*k + 0.61 ms over the 88
+// intervals with k in [0.15, 0.75], mean residual 6.4%. Same card as the
+// traced runs above: 1,163,136 KV tokens, max_num_seqs 256.
+var runPModel = itl.Model{A: 0.0344, B: 0.00061}
+
+var _ = Describe("pricingK", func() {
+	It("is the two thresholds multiplied, because they compound", func() {
+		// k1 is KvCacheThreshold of physical KV and the analyzer scales out at
+		// ScaleUpThreshold of k1, so a replica is full at the product.
+		Expect(pricingK(&config.ScalingPolicy{
+			KvCacheThreshold: 0.80, ScaleUpThreshold: 0.85,
+		})).To(BeNumerically("~", 0.68, 1e-9))
+
+		Expect(pricingK(&config.ScalingPolicy{
+			KvCacheThreshold: 0.80, ScaleUpThreshold: 0.95,
+		})).To(BeNumerically("~", 0.76, 1e-9))
+	})
+
+	It("stays inside the range the ITL line was fitted over", func() {
+		// The line says nothing outside the window's bounds, so a configuration
+		// whose product falls outside them is clamped rather than extrapolated.
+		Expect(pricingK(&config.ScalingPolicy{
+			KvCacheThreshold: 1.0, ScaleUpThreshold: 1.0,
+		})).To(Equal(itl.DefaultMaxObservableK))
+
+		Expect(pricingK(&config.ScalingPolicy{
+			KvCacheThreshold: 0.1, ScaleUpThreshold: 0.1,
+		})).To(Equal(itl.DefaultMinObservableK))
+
+		Expect(pricingK(nil)).To(Equal(itl.DefaultKSat))
+	})
+})
+
+var _ = Describe("deriveMu against run P", func() {
+	const kRunP = 0.80 * 0.85
+
+	It("agrees with the mu the fleet measured, where it measured one", func() {
+		// Phase 1 saturated, so the floor had a reading of its own to compare
+		// against: it used 1.27 requests a second for the whole phase.
+		got := deriveMu(runPModel, tracedParams, tracedKv, shape.New(1000, 6000, 0), kRunP)
+		Expect(got.ok).To(BeTrue())
+		Expect(got.rate).To(BeNumerically("~", 1.27, 0.15),
+			"a derived mu that disagrees with a measured one is not describing this card")
+	})
+
+	It("tracks the shape change the measured mu could not", func() {
+		// Phase 2 is 8000/1000: six times shorter generations, so roughly six
+		// times the request rate per replica. The floor went on using 1.31 --
+		// the phase 1 figure -- for all nineteen minutes, and held 6-7 replicas
+		// at 1.2% KV utilisation and an empty queue.
+		got := deriveMu(runPModel, tracedParams, tracedKv, shape.New(8000, 1000, 0), kRunP)
+		Expect(got.ok).To(BeTrue())
+		Expect(got.rate).To(BeNumerically("~", 3.89, 0.2))
+
+		const measuredArrival = 5.86
+		Expect(measuredArrival/got.rate).To(BeNumerically("<", 2.0),
+			"the arrival rate over a shape-correct mu is a small fleet")
+		Expect(measuredArrival/1.31).To(BeNumerically(">", 4.0),
+			"where the stale figure ordered four and a half replicas of capacity")
+	})
+})
 
 var _ = Describe("deriveMu", func() {
 	It("reproduces the mu the fleet measured for itself under the first shape", func() {
 		// 1000-token prompts, 6000-token generations. Saturated, the fleet
 		// recorded 1.4292 and 1.5429 requests a second across the two runs.
-		got := deriveMu(tracedModel, tracedParams, tracedKv, shape.New(1000, 6000, 0))
+		got := deriveMu(tracedModel, tracedParams, tracedKv, shape.New(1000, 6000, 0), tracedK)
 		Expect(got.ok).To(BeTrue())
 		Expect(got.rate).To(BeNumerically("~", 1.49, 0.12),
 			"the model has to land where the hardware did, or it is not describing it")
@@ -37,7 +105,7 @@ var _ = Describe("deriveMu", func() {
 		// over-provisioned for this and never saturated under it, so no reading
 		// was ever taken -- the floor went on using the first shape's figure
 		// for the remaining nineteen minutes of the run.
-		got := deriveMu(tracedModel, tracedParams, tracedKv, shape.New(8000, 1000, 0))
+		got := deriveMu(tracedModel, tracedParams, tracedKv, shape.New(8000, 1000, 0), tracedK)
 		Expect(got.ok).To(BeTrue())
 		Expect(got.rate).To(BeNumerically(">", 3.0))
 		Expect(6.0/got.rate).To(BeNumerically("<", 2.5),
@@ -49,8 +117,8 @@ var _ = Describe("deriveMu", func() {
 		// prefix cache has an effective prompt length of zero and a footprint
 		// of OL/2 alone. That is a real shape, not a missing one, and it holds
 		// more sequences per replica than the same workload uncached.
-		cached := deriveMu(tracedModel, tracedParams, tracedKv, shape.New(1000, 6000, 1.0))
-		plain := deriveMu(tracedModel, tracedParams, tracedKv, shape.New(1000, 6000, 0))
+		cached := deriveMu(tracedModel, tracedParams, tracedKv, shape.New(1000, 6000, 1.0), tracedK)
+		plain := deriveMu(tracedModel, tracedParams, tracedKv, shape.New(1000, 6000, 0), tracedK)
 		Expect(cached.ok).To(BeTrue())
 		Expect(cached.seqs).To(BeNumerically(">", plain.seqs),
 			"a cached prompt leaves room for more resident sequences")
@@ -58,27 +126,33 @@ var _ = Describe("deriveMu", func() {
 	})
 
 	It("is capped by max_num_seqs, which the trace's second phase sat on", func() {
-		// The cache alone would imply over 6,500 resident sequences for a
-		// short shape; the engine admits 256, and phase 2 ran at exactly that.
-		got := deriveMu(tracedModel, tracedParams, tracedKv, shape.New(100, 100, 0))
+		// The cache alone implies thousands of resident sequences for a short
+		// shape; the engine admits 256, and phase 2 ran at exactly that. The
+		// uncapped figure is asserted against the arithmetic rather than a
+		// constant, because it moves with the pricing point: it was ~6,591 when
+		// mu was priced at 0.85 of physical KV and is ~5,273 at the 0.68 the
+		// analyzer actually targets.
+		got := deriveMu(tracedModel, tracedParams, tracedKv, shape.New(100, 100, 0), tracedK)
 		Expect(got.ok).To(BeTrue())
 		Expect(got.seqs).To(Equal(float64(tracedParams.MaxNumSeqs)))
 
-		uncapped := deriveMu(tracedModel, &capacity.EngineParams{}, tracedKv, shape.New(100, 100, 0))
-		Expect(uncapped.seqs).To(BeNumerically(">", 6000),
-			"and without the cap it is the number the engine will not admit")
+		uncapped := deriveMu(tracedModel, &capacity.EngineParams{}, tracedKv, shape.New(100, 100, 0), tracedK)
+		Expect(uncapped.seqs).To(BeNumerically("~", tracedK*float64(tracedKv)/150, 1),
+			"uncapped, it is the cache's own number: kPrice x C / KVreq")
+		Expect(uncapped.seqs).To(BeNumerically(">", 20*float64(tracedParams.MaxNumSeqs)),
+			"and that is a number the engine will not admit")
 	})
 
 	It("declines rather than guessing", func() {
-		Expect(deriveMu(itl.Model{}, tracedParams, tracedKv, shape.New(1000, 6000, 0)).ok).To(BeFalse(),
+		Expect(deriveMu(itl.Model{}, tracedParams, tracedKv, shape.New(1000, 6000, 0), tracedK).ok).To(BeFalse(),
 			"no fitted model")
-		Expect(deriveMu(tracedModel, tracedParams, 0, shape.New(1000, 6000, 0)).ok).To(BeFalse(),
+		Expect(deriveMu(tracedModel, tracedParams, 0, shape.New(1000, 6000, 0), tracedK).ok).To(BeFalse(),
 			"no KV capacity")
-		Expect(deriveMu(tracedModel, tracedParams, tracedKv, shape.New(1000, 0, 0)).ok).To(BeFalse(),
+		Expect(deriveMu(tracedModel, tracedParams, tracedKv, shape.New(1000, 0, 0), tracedK).ok).To(BeFalse(),
 			"no generation length is not a decode shape")
-		Expect(deriveMu(tracedModel, tracedParams, tracedKv, shape.Shape{}).ok).To(BeFalse(),
+		Expect(deriveMu(tracedModel, tracedParams, tracedKv, shape.Shape{}, tracedK).ok).To(BeFalse(),
 			"an empty shape has no footprint to divide the cache by")
-		Expect(deriveMu(itl.Model{A: -1, B: 0.5}, tracedParams, tracedKv, shape.New(1000, 6000, 0)).ok).To(BeFalse(),
+		Expect(deriveMu(itl.Model{A: -1, B: 0.5}, tracedParams, tracedKv, shape.New(1000, 6000, 0), tracedK).ok).To(BeFalse(),
 			"a model whose reading at k_sat is not positive")
 	})
 })

@@ -298,7 +298,8 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 		rc := a.computeReplicaCapacity(rm, satConfig, input.ModelID, input.Namespace, gpuCount,
 			role, accelByVariant[rm.VariantName], stableOutput, fleetOutput,
 			deriveMu(itlModels[rm.VariantName], engineParamsFor(a, input.Namespace, input.ModelID, rm.VariantName),
-				rm.TotalKvCapacityTokens, shape.New(fleetInput, fleetOutput, rm.PrefixCacheHitRate)),
+				rm.TotalKvCapacityTokens, shape.New(fleetInput, fleetOutput, rm.PrefixCacheHitRate),
+				pricingK(satConfig)),
 			downstreamSaturated, logger)
 		if rc != nil {
 			replicaCapacities = append(replicaCapacities, *rc)
