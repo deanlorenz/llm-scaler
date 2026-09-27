@@ -2,6 +2,7 @@ package saturation_v2
 
 import (
 	"maps"
+	"math"
 	"slices"
 	"strings"
 
@@ -95,7 +96,11 @@ import (
 // Same window size and staleness rule as k2 history, and pruned beside it in
 // EvictStaleHistory.
 func (a *SaturationAnalyzer) recordSaturatedThroughput(key string, rate float64) {
-	if !(rate > 0) {
+	// `!(rate > 0)` rejects a NaN, which `rate <= 0` would admit. +Inf is
+	// excluded too, to match floor.priceable: it passes `rate > 0`, and left in
+	// it would take one of the window's ten slots from a real reading and be
+	// logged verbatim as a saturated rate.
+	if !(rate > 0) || math.IsInf(rate, 1) {
 		return
 	}
 	now := a.now()

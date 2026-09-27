@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"math"
 	"sort"
 	"time"
 
@@ -550,37 +551,43 @@ func applyUniversalThreshold(nr *allocation.NamedAnalyzerResult, scaleUp, scaleD
 	demand := nr.Result.TotalDemand
 
 	if scaleUp > 0 {
-		rc := demand/scaleUp - nr.TotalAnticipatedSupply
-		if rc < 0 {
-			rc = 0
-		}
-		nr.RequiredCapacity = rc
+		nr.RequiredCapacity = atLeastZero(demand/scaleUp - nr.TotalAnticipatedSupply)
 	}
 	if scaleDown > 0 {
-		sc := nr.TotalSupply - demand/scaleDown
-		if sc < 0 {
-			sc = 0
-		}
-		nr.SpareCapacity = sc
+		nr.SpareCapacity = atLeastZero(nr.TotalSupply - demand/scaleDown)
 	}
 
 	for role, rc := range nr.RoleCapacities {
 		if scaleUp > 0 {
-			v := rc.TotalDemand/scaleUp - rc.TotalAnticipatedSupply
-			if v < 0 {
-				v = 0
-			}
-			rc.RequiredCapacity = v
+			rc.RequiredCapacity = atLeastZero(rc.TotalDemand/scaleUp - rc.TotalAnticipatedSupply)
 		}
 		if scaleDown > 0 {
-			v := rc.TotalSupply - rc.TotalDemand/scaleDown
-			if v < 0 {
-				v = 0
-			}
-			rc.SpareCapacity = v
+			rc.SpareCapacity = atLeastZero(rc.TotalSupply - rc.TotalDemand/scaleDown)
 		}
 		nr.RoleCapacities[role] = rc
 	}
+}
+
+// atLeastZero floors a computed capacity at zero, and reads a non-finite one as
+// zero too.
+//
+// All four capacities above were clamped with `if v < 0 { v = 0 }`, and a NaN
+// fails every comparison, so a NaN walked straight through into
+// RequiredCapacity -- the figure that sizes a scale-up -- and into
+// SpareCapacity, which sizes a scale-down. `!(v > 0)` catches both the negative
+// and the NaN; +Inf is excluded explicitly because it passes `v > 0`, and an
+// infinite required capacity is not a request the optimizer can honour.
+//
+// The supply side of these differences is finite by construction --
+// aggregation refuses to carry a non-finite per-replica capacity into a sum --
+// but demand is deliberately NOT sanitized on the way in, because silently
+// dropping a role's demand would be worse than declining to act on it. So this
+// is where a non-finite figure has to fail closed.
+func atLeastZero(v float64) float64 {
+	if !(v > 0) || math.IsInf(v, 1) {
+		return 0
+	}
+	return v
 }
 
 // gpuUsageViews assembles both measures of current GPU usage for this cycle, so
