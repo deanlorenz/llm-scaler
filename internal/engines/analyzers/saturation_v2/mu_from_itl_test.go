@@ -12,6 +12,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/floor"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
 )
@@ -356,5 +357,41 @@ var _ = Describe("noteITL", func() {
 		Expect(got.IsZero()).To(BeFalse())
 		Expect(got.A).To(BeNumerically("~", tracedModel.A, 1e-6),
 			"the excluded readings are off the line and would drag the fit")
+	})
+})
+
+var _ = Describe("useDerived", func() {
+	const enough = floor.MinThroughputSamplesToOrder
+
+	It("prices a shape the fleet has never measured", func() {
+		// Nothing recorded under this key at all: the borrowed reading is the
+		// neighbouring bucket's, which is the stale figure the derivation
+		// exists to replace. On run R that figure was six times wrong.
+		Expect(useDerived(true, throughputReading{rate: 1.31, bucket: "xxlong",
+			samples: enough, borrowed: true})).To(BeTrue())
+	})
+
+	It("yields to the fleet's own measurement of this shape", func() {
+		// Letting derived win here is what run R cost: a measured 1.27 req/s
+		// was replaced by a derived 0.67, and the floor asked for 42-56
+		// replicas where main asked for 4.5.
+		Expect(useDerived(true, throughputReading{rate: 1.27, bucket: "xxlong",
+			samples: enough})).To(BeFalse())
+	})
+
+	It("does not yield to a reading too thin to order on", func() {
+		Expect(useDerived(true, throughputReading{rate: 1.27, bucket: "xxlong",
+			samples: enough - 1})).To(BeTrue())
+	})
+
+	It("does not yield to a zero rate", func() {
+		Expect(useDerived(true, throughputReading{rate: 0, bucket: "xxlong",
+			samples: enough})).To(BeTrue())
+	})
+
+	It("stays out of the way when nothing was derived", func() {
+		Expect(useDerived(false, throughputReading{rate: 1.27, bucket: "xxlong",
+			samples: enough})).To(BeFalse())
+		Expect(useDerived(false, throughputReading{borrowed: true})).To(BeFalse())
 	})
 })

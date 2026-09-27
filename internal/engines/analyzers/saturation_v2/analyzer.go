@@ -18,6 +18,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/aggregation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/floor"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
 )
@@ -572,18 +573,25 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	}
 	reading := a.saturatedThroughputReading(throughputKey)
 	saturatedThroughput, throughputBucket := reading.rate, reading.bucket
-	// The derived figure wins when there is one. The measured window can only
-	// speak for the shape it was recorded under, and on the shape swap of
-	// 2026-09-23 it spoke for a shape that had stopped arriving nineteen
-	// minutes earlier -- it is kept as the fallback for a fleet whose ITL
-	// model has not been fitted yet, not as the preferred answer.
-	if derived.ok {
+	// A derived figure prices the shape the fleet has NOT measured -- that is
+	// the whole of its job. Where the fleet HAS measured this shape, under this
+	// key, for itself, the measurement wins.
+	//
+	// Letting derived win unconditionally is what run R cost. In phase 1 the
+	// fleet had its own reading of 1.27 req/s and the derivation replaced it
+	// with 0.67, so the floor asked for 42-56 replicas against phase 1's usual
+	// 4.5 and spent 32% more replica-minutes than main for a decode TTFT p95 of
+	// 55.6 s against 0.215. Phase 2, where no reading for the arriving shape
+	// exists and the borrowed one is six times wrong, is where derived belongs:
+	// there it took the fleet from the 6-7 replicas main holds to 1-2.
+	//
+	// "Measured this shape" is precise: an OWN reading (not borrowed from a
+	// neighbouring output bucket, which is exactly the stale figure the
+	// derivation exists to replace) with enough samples to order on. A borrowed
+	// or thin reading loses to derived, as before.
+	if useDerived(derived.ok, reading) {
 		saturatedThroughput = derived.rate
 		throughputBucket = "derived"
-		// Derived, so it is not one sample of anything: it is as good on the
-		// first cycle of a new shape as on the hundredth, which is the whole
-		// point, and the floor's own gate for trusting a window with an order
-		// is satisfied by construction.
 	}
 
 	effectiveCapacity := k1
@@ -642,7 +650,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		SaturatedThroughput:         saturatedThroughput,
 		SaturatedThroughputSamples:  reading.samples,
 		SaturatedThroughputBorrowed: reading.borrowed,
-		SaturatedThroughputDerived:  derived.ok,
+		SaturatedThroughputDerived:  throughputBucket == "derived",
 	}
 }
 
@@ -734,6 +742,23 @@ func (a *SaturationAnalyzer) computeReplicaCapacityFallback(
 		ReplicaDemand:         replicaDemand,
 		FromWarmPool:          rm.FromWarmPool,
 	}
+}
+
+// useDerived reports whether the derived figure should price this replica.
+//
+// It should where the fleet has no measurement of the shape now arriving --
+// which is the whole of its job -- and not where it has one. "Has one" is
+// precise: an OWN reading, in this key's own output bucket, with enough
+// samples to order on. A BORROWED reading is the stale figure from a
+// neighbouring bucket that the derivation exists to replace, and a thin one is
+// not yet evidence, so both lose to derived.
+func useDerived(derivedOK bool, reading throughputReading) bool {
+	if !derivedOK {
+		return false
+	}
+	ownMeasured := !reading.borrowed && reading.rate > 0 &&
+		reading.samples >= floor.MinThroughputSamplesToOrder
+	return !ownMeasured
 }
 
 // historyKey is the bucket a replica's saturated observations (k2, and the
