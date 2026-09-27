@@ -101,6 +101,9 @@ _capture_starttime() {
     # ownership record, and every fork widens the window in which another caller
     # sees a record that exists but is still empty. With sed, awk, date and
     # basename that window measured 5.66 ms; a losing racer hit it every time.
+    # The default word split, whatever the caller set IFS to. Not reachable from
+     # the shipped scripts, but this file is sourceable.
+    local IFS=$' \t\n'
     read -r line < "/proc/$1/stat" || return 1
     # Drop "pid (comm) ". The comm may contain spaces and parentheses, so strip
     # through the LAST ') ' rather than the first.
@@ -347,6 +350,23 @@ capture_stop() {
     echo "the capture at $out did not stop (pid $pid still matches its record)" >&2
     echo "  leaving its record and pidfile in place rather than losing track of it" >&2
     return 1
+}
+
+# capture_begin_finalise <outfile> -- claim the right to write the terminator.
+#
+# `ln` fails EEXIST for the second caller, which is the same exclusivity the start
+# side gets from `set -C`. Two concurrent stops both passed capture_owned, both
+# saw the capture already dead, and both appended a JSON terminator: 15 of 15
+# trials produced `...]}]}` and both exited 0 reporting "unreadable". The comment
+# that said this could not happen was reasoning about SEQUENTIAL stops.
+capture_begin_finalise() {
+    [ -n "${1:-}" ] || return 1
+    ln "$(capture_owner_file "$1")" "$1.finalising" 2>/dev/null
+}
+
+capture_end_finalise() {
+    [ -n "${1:-}" ] || return 0
+    rm -f "$1.finalising" 2>/dev/null || true
 }
 
 # capture_resolve_outfile <a> <b> -- which of two arguments is the output path.

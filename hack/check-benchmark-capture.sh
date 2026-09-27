@@ -15,7 +15,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SR="$ROOT/hack/benchmark/sample_replicas.sh"
 TL="$ROOT/hack/benchmark/tail_wva_logs.sh"
 
-EXPECTED_CHECKS=37
+EXPECTED_CHECKS=41
 
 WORK="$(mktemp -d)"
 STARTED_PIDS=""
@@ -312,6 +312,43 @@ fi
     && ok "and it keeps the record rather than losing track of the capture" \
     || bad "a failed stop removed the record anyway"
 kill -KILL "$STUBBORN" 2>/dev/null || true
+
+
+# ---- only one of two concurrent stops finalises --------------------------
+# Both used to pass capture_owned, both saw the capture already dead, and both
+# appended a JSON terminator: 15 of 15 trials produced `...]}]}` while both
+# invocations exited 0 reporting "unreadable".
+O11="$WORK/concstop.json"
+bash "$SR" start cs-ns "$O11" >/dev/null 2>&1 && note_pid "$(pid_of "$O11")"
+sleep 1
+bash "$SR" stop "$O11" cs-ns >/dev/null 2>&1 &
+bash "$SR" stop "$O11" cs-ns >/dev/null 2>&1 &
+wait
+python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$O11" 2>/dev/null \
+    && ok "two concurrent stops leave valid JSON" \
+    || bad "concurrent stops corrupted the file: $(tail -c 12 "$O11")"
+[ ! -e "$O11.finalising" ] \
+    && ok "and neither leaves its finalise claim behind" \
+    || bad "a finalise claim was left at $O11.finalising"
+
+# ---- a namespace pair is not an output path ----------------------------
+# The lone-argument guard was gated on the argument COUNT, so two namespaces
+# skipped it: exit 0, "nothing to stop", capture still running.
+O12="$WORK/twoarg.json"
+bash "$SR" start ta-ns "$O12" >/dev/null 2>&1 && note_pid "$(pid_of "$O12")"
+sleep 1
+P12="$(pid_of "$O12")"
+if bash "$SR" stop ta-ns other-ns >/dev/null 2>"$WORK/e"; then
+    bad "two namespaces were accepted as a stop target"
+else
+    ok "two arguments that own no record are refused"
+fi
+if [ -n "$P12" ] && kill -0 "$P12" 2>/dev/null; then
+    ok "and that capture is left running rather than reported stopped"
+else
+    bad "the refused two-argument stop killed the capture"
+fi
+bash "$SR" stop "$O12" ta-ns >/dev/null 2>&1 || true
 
 # ---- the log tail carries the same guards -------------------------
 LOG="$WORK/controller.log"

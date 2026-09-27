@@ -191,8 +191,11 @@ case "$CMD" in
     # A LONE argument that owns no record and looks nothing like a path is almost
     # certainly a namespace given in the other script's order. Accepting it as the
     # outfile exited 0, said "nothing to stop", and left the sampler running.
-    if [ "$#" -lt 3 ] && ! capture_owned "$2"; then
-        case "$2" in
+    # Whatever the argument count. Gating this on a lone argument left
+    # `stop <ns> <other>` exiting 0 with "nothing to stop" and the capture still
+    # running -- the combination this check exists to remove.
+    if ! capture_owned "$2" && ! capture_owned "${3:-}"; then
+        case "$2$3" in
             */*) : ;;
             *) echo "no capture owns \"$2\", and it does not look like an output path" >&2
                echo "  usage: $0 stop <outfile> [<namespace>]" >&2
@@ -214,12 +217,16 @@ case "$CMD" in
     # valid JSON. An empty snapshots list reads as "not measured" downstream,
     # which is the honest answer -- unlike a zero replica count.
     #
-    # Written once, because stop releases the claim below and a second stop
-    # returns before reaching here. Sniffing the last two bytes instead does NOT
-    # work: a snapshot ends with `]}` as well -- {"timestamp":...,
-    # "controllers":[...]} -- so a closed array and an open one ending in a
-    # snapshot are indistinguishable, and the terminator was never written at
-    # all, leaving a file that did not parse.
+    # Exactly one stop writes this. Ownership alone is not enough: two
+    # concurrent stops both passed capture_owned, both found the capture already
+    # dead, and both appended, giving `...]}]}`. The finalise claim is what makes
+    # it one. Sniffing the last two bytes instead does NOT work either -- a
+    # snapshot ends with `]}` too, so a closed array and an open one ending in a
+    # snapshot are indistinguishable.
+    if ! capture_begin_finalise "$OUT"; then
+      echo "another stop is finalising $OUT -- leaving it to that one" >&2
+      exit 0
+    fi
     printf ']}' >> "$OUT"
     # Dedupe the pod observations into one record per pod. Keep the observation
     # that has a Ready time: a pod is seen several times, and only later samples
@@ -256,17 +263,21 @@ json.dump({"pods": list(best.values())}, open(dst, "w", encoding="utf-8"))
 print("  pod timings: %d pod(s) -> %s" % (len(best), dst))
 PY
     rm -f "$OUT.pods.jsonl"
-    n=$(python3 -c "
-import json,sys
+    # The path as an ARGUMENT: interpolated into the source, a quote in it was a
+    # syntax error that 2>/dev/null turned into an empty count.
+    n=$(python3 - "$OUT" <<'PYCOUNT' 2>/dev/null
+import json, sys
 try:
-    d=json.load(open('$OUT'))
-    s=d.get('snapshots',[])
-    c=sum(len(x.get('controllers',[])) for x in s)
-    print(f'{len(s)} snapshot(s), {c} controller sample(s)')
+    d = json.load(open(sys.argv[1], encoding="utf-8"))
+    s = d.get("snapshots", [])
+    c = sum(len(x.get("controllers", [])) for x in s)
+    print("%d snapshot(s), %d controller sample(s)" % (len(s), c))
 except Exception as e:
-    print('unreadable:', e)
-" 2>/dev/null)
+    print("unreadable:", e)
+PYCOUNT
+)
     capture_finish "$OUT"
+    capture_end_finalise "$OUT"
     echo "replica sampler stopped: $n -> $OUT"
     ;;
   *)

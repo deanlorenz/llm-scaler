@@ -131,11 +131,23 @@ case "$CMD" in
     rm -f "$OUT.stop"
     # --since-time reconnects overlap by design (see start); collapse the
     # handful of re-fetched duplicate lines per reconnect back to one each.
+    # One finaliser, and a private temp name. A fixed `$OUT.dedup` had two
+    # concurrent stops racing on one file: both reported success and one printed
+    # `mv: cannot stat`, with a window where one awk reads $OUT while the other mv
+    # replaces it.
+    if ! capture_begin_finalise "$OUT"; then
+      echo "another stop is finalising $OUT -- leaving it to that one" >&2
+      exit 0
+    fi
     if [ -f "$OUT" ]; then
-      awk '!seen[$0]++' "$OUT" > "$OUT.dedup" && mv "$OUT.dedup" "$OUT"
+      dedup="$(mktemp "$OUT.dedup.XXXXXX")" \
+        && awk '!seen[$0]++' "$OUT" > "$dedup" \
+        && mv "$dedup" "$OUT" \
+        || rm -f "$dedup"
     fi
     n=$(wc -l < "$OUT" 2>/dev/null || echo 0)
     capture_finish "$OUT"
+    capture_end_finalise "$OUT"
     echo "WVA log tail stopped: $n line(s) -> $OUT"
     ;;
   *)

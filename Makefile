@@ -2094,10 +2094,17 @@ benchmark-run: ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<name
 	@# Stopped and filed even when the run above failed -- a run that errored in a
 	@# post-processing step still produced measurements worth reading, and every
 	@# FMA run so far has ended that way.
-	@bash hack/benchmark/sample_replicas.sh $(BENCHMARK_CAPTURE_CTX) stop $(BENCHMARK_SAMPLES) $(BENCHMARK_NAMESPACE) || true
-	@bash hack/benchmark/tail_wva_logs.sh $(BENCHMARK_CAPTURE_CTX) stop $(BENCHMARK_NAMESPACE) $(BENCHMARK_WVA_LOG) || true
+	@# The status is recorded rather than discarded. A stop that could not end its
+	@# capture leaves the output unterminated, and the copy below would otherwise
+	@# announce it as this run's measurement four lines after saying it failed.
+	@rm -f $(BENCHMARK_SAMPLES).stopfailed $(BENCHMARK_WVA_LOG).stopfailed
+	@bash hack/benchmark/sample_replicas.sh $(BENCHMARK_CAPTURE_CTX) stop $(BENCHMARK_SAMPLES) $(BENCHMARK_NAMESPACE) || touch $(BENCHMARK_SAMPLES).stopfailed
+	@bash hack/benchmark/tail_wva_logs.sh $(BENCHMARK_CAPTURE_CTX) stop $(BENCHMARK_NAMESPACE) $(BENCHMARK_WVA_LOG) || touch $(BENCHMARK_WVA_LOG).stopfailed
 	@LATEST=$$(ls -td $(BENCHMARK_WORKSPACE)/$${USER}-*/results/$(BENCHMARK_HARNESS)-*_* 2>/dev/null | head -1); \
-	if [ -n "$$LATEST" ] && [ -s $(BENCHMARK_SAMPLES) ]; then \
+	if [ -f $(BENCHMARK_SAMPLES).stopfailed ]; then \
+		echo "WARNING: the replica sampler could not be stopped; $(BENCHMARK_SAMPLES) is unterminated and is NOT being filed"; \
+	fi; \
+	if [ -n "$$LATEST" ] && [ -s $(BENCHMARK_SAMPLES) ] && [ ! -f $(BENCHMARK_SAMPLES).stopfailed ]; then \
 		mkdir -p "$$LATEST/metrics/processed"; \
 		cp $(BENCHMARK_SAMPLES) "$$LATEST/metrics/processed/wva_replica_samples.json"; \
 		echo "Replica samples filed in $$LATEST/metrics/processed/wva_replica_samples.json"; \
@@ -2107,7 +2114,10 @@ benchmark-run: ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<name
 		cp $(BENCHMARK_SAMPLES).pod_timings.json "$$LATEST/metrics/processed/wva_pod_timings.json"; \
 		echo "Pod timings filed in $$LATEST/metrics/processed/wva_pod_timings.json"; \
 	fi; \
-	if [ -n "$$LATEST" ] && [ -s $(BENCHMARK_WVA_LOG) ]; then \
+	if [ -f $(BENCHMARK_WVA_LOG).stopfailed ]; then \
+		echo "WARNING: the controller log tail could not be stopped; $(BENCHMARK_WVA_LOG) is NOT being filed"; \
+	fi; \
+	if [ -n "$$LATEST" ] && [ -s $(BENCHMARK_WVA_LOG) ] && [ ! -f $(BENCHMARK_WVA_LOG).stopfailed ]; then \
 		cp $(BENCHMARK_WVA_LOG) "$$LATEST/wva_controller.log"; \
 		echo "WVA controller log tail filed in $$LATEST/wva_controller.log"; \
 	fi
