@@ -159,8 +159,13 @@ func deriveMu(model itl.Model, params *capacity.EngineParams,
 // the next, and clearing it would reintroduce exactly the wait this replaces.
 func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetrics,
 	variantName string, now time.Time, logger logr.Logger) itl.Model {
+	// The lock is analyzer-wide: recordSaturatedThroughput,
+	// saturatedThroughputReading and EvictStaleHistory all take it, for every
+	// model this instance handles. So it covers the window mutation and
+	// nothing else -- the log lines below are emitted after it is dropped,
+	// rather than serialising every other model's cycle behind this one's
+	// scan, fit and two Info calls.
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	w, ok := a.itlWindows[key]
 	if !ok {
 		w = itl.NewWindow(
@@ -214,14 +219,17 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 	// analyzer gates on it for the same reason, and a derived mu overrides
 	// the measured one, so it has to clear a higher bar than two readings.
 	obs := w.Observations()
+	ready := w.Ready()
+	a.mu.Unlock()
+
 	// Below DefaultMinObservableK the window drops the reading itself, so
 	// `added` counts what was offered and len(obs) what was kept.
 	logger.V(logging.DEFAULT).Info("itl-window",
 		"variant", variantName, "key", key,
 		"replicas", considered, "offered", added, "held", len(obs),
 		"notReady", notReady, "noITL", noITL, "noK", noK, "aboveBand", aboveBand,
-		"ready", w.Ready(), "minSamples", itl.DefaultMinSamples)
-	if w.Ready() {
+		"ready", ready, "minSamples", itl.DefaultMinSamples)
+	if ready {
 		if model, ok := itl.Fit(obs); ok {
 			logger.V(logging.DEFAULT).Info("itl-fit", "variant", variantName, "tier", "ols",
 				"a", model.A, "b", model.B, "held", len(obs))

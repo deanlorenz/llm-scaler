@@ -2145,6 +2145,19 @@ var _ = Describe("computeVariantSupply", func() {
 		return domain.ReplicaMetrics{TotalKvCapacityTokens: capTokens}
 	}
 
+	It("returns nothing when KVreq is non-positive", func() {
+		// itl.Sequences guards this; the arithmetic it replaced divided by zero
+		// and carried +Inf into the variant's supply. That guard is the only
+		// behavioural difference the substitution made, so it is pinned.
+		noKV := shape
+		noKV.KVreq = 0
+		total, perReplica, nKV := computeVariantSupply(
+			[]domain.ReplicaMetrics{replicaWithCap(65536)}, noKV, itlSat)
+		Expect(total).To(BeZero())
+		Expect(perReplica).To(BeZero())
+		Expect(nKV).To(Equal(1), "the replica is counted; it simply supplies nothing")
+	})
+
 	It("aggregates supply across KV-capable replicas", func() {
 		// Differing capacities keep perReplica from being a copy of total, and the third replica
 		// carries no KV capacity so nKV (2) differs from len(metrics) (3) — that is what pins the

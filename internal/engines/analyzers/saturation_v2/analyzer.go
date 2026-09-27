@@ -589,9 +589,13 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// neighbouring output bucket, which is exactly the stale figure the
 	// derivation exists to replace) with enough samples to order on. A borrowed
 	// or thin reading loses to derived, as before.
+	throughputSamples := reading.samples
 	if useDerived(derived.ok, reading) {
 		saturatedThroughput = derived.rate
 		throughputBucket = "derived"
+		// Not the stale measured count, which describes a different figure
+		// entirely and only ever reached a log line as a confusing number.
+		throughputSamples = MinDerivedThroughputSamples
 	}
 
 	effectiveCapacity := k1
@@ -648,7 +652,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		ReplicaDemand:               replicaDemand,
 		FromWarmPool:                rm.FromWarmPool,
 		SaturatedThroughput:         saturatedThroughput,
-		SaturatedThroughputSamples:  reading.samples,
+		SaturatedThroughputSamples:  throughputSamples,
 		SaturatedThroughputBorrowed: reading.borrowed,
 		SaturatedThroughputDerived:  throughputBucket == "derived",
 	}
