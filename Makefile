@@ -2489,6 +2489,10 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@bash -n deploy/enginecache.sh
 	@bash -n hack/benchmark/engine_cache_claim.sh
 	@bash -n hack/benchmark/engine_image.sh
+	@bash -n hack/benchmark/capture_lib.sh
+	@bash -n hack/benchmark/sample_replicas.sh
+	@bash -n hack/benchmark/tail_wva_logs.sh
+	@bash -n hack/benchmark/file_capture.sh
 	@for script in deploy/lib/*.sh; do bash -n "$$script"; done
 	@for script in deploy/*/install.sh; do if [ -f "$$script" ]; then bash -n "$$script"; fi; done
 	@for script in deploy/kind-emulator/*.sh; do if [ -f "$$script" ]; then bash -n "$$script"; fi; done

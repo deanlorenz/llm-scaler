@@ -234,20 +234,20 @@ case "$CMD" in
 import json, os, sys
 src, dst = sys.argv[1], sys.argv[2]
 snaps = []
-try:
-    with open(src, encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                snaps.append(json.loads(line))
-            except ValueError:
-                # A line torn by a kill mid-write is dropped rather than fatal:
-                # the snapshots before it are still a measurement.
-                continue
-except FileNotFoundError:
-    pass
+# An ABSENT input is an error, not an empty measurement. Reading it as empty is
+# how a concurrent stop substituted {"snapshots": []} for a real capture: valid
+# JSON, wrong content, and filed as the run's measurement.
+with open(src, encoding="utf-8") as fh:
+    for line in fh:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            snaps.append(json.loads(line))
+        except ValueError:
+            # A line torn by a kill mid-write is dropped rather than fatal: the
+            # snapshots before it are still a measurement.
+            continue
 tmp = dst + ".assembling." + str(os.getpid())
 with open(tmp, "w", encoding="utf-8") as fh:
     json.dump({"snapshots": snaps}, fh)
@@ -296,7 +296,13 @@ except FileNotFoundError:
 json.dump({"pods": list(best.values())}, open(dst, "w", encoding="utf-8"))
 print("  pod timings: %d pod(s) -> %s" % (len(best), dst))
 PY
-    rm -f "$OUT.pods.jsonl" "$OUT.snapshots.jsonl"
+    # The pod observations are consumed into their own artefact above, so they go.
+    # The SNAPSHOT lines stay: they are what makes assembly re-runnable, which is
+    # the whole reason for appending them, and deleting them created a race that
+    # turned "the data was removed" into "there was no data" -- a second stop
+    # landing in the 40-80 ms window wrote {"snapshots": []} over a good artefact
+    # in 19 of 20 trials. The path carries the run id and `start` truncates it.
+    rm -f "$OUT.pods.jsonl"
     # The path as an ARGUMENT: interpolated into the source, a quote in it was a
     # syntax error that 2>/dev/null turned into an empty count.
     n=$(python3 - "$OUT" <<'PYCOUNT' 2>/dev/null

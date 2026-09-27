@@ -15,7 +15,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SR="$ROOT/hack/benchmark/sample_replicas.sh"
 TL="$ROOT/hack/benchmark/tail_wva_logs.sh"
 
-EXPECTED_CHECKS=57
+EXPECTED_CHECKS=61
 
 WORK="$(mktemp -d)"
 STARTED_PIDS=""
@@ -40,6 +40,21 @@ bad() { checks=$((checks + 1)); fails=$((fails + 1)); echo "  FAIL: $1" >&2; }
 note_pid() { STARTED_PIDS="$STARTED_PIDS $1"; }
 pid_of() { cat "$1.pid" 2>/dev/null || true; }
 owner_of() { cat "$1.owner" 2>/dev/null || true; }
+
+# The snapshot COUNT, not merely "it parses". A stop that lost the whole capture
+# still produced VALID JSON -- {"snapshots": []} -- so every assembly case below
+# is asserted against the lines that were really captured. -1 means "not even
+# readable", which is distinct from 0 and must not compare equal to a line count.
+count_of() {
+    python3 - "$1" <<'PYCOUNT'
+import json, sys
+try:
+    print(len(json.load(open(sys.argv[1], encoding="utf-8"))["snapshots"]))
+except Exception:
+    print(-1)
+PYCOUNT
+}
+lines_of() { grep -c . "$1" 2>/dev/null || echo 0; }
 
 cat > "$WORK/kubectl" <<'STUB'
 #!/usr/bin/env bash
@@ -510,22 +525,27 @@ out="$(bash "$FC" "$WORK/nosuchdir" "$WORK/f.json" "$WORK/f.log" 2>&1)"; rc=$?
 OI="$WORK/idem.json"
 bash "$SR" start idem-ns "$OI" >/dev/null 2>&1 && note_pid "$(pid_of "$OI")"
 sleep 2
+captured="$(lines_of "$OI.snapshots.jsonl")"
 bash "$SR" stop "$OI" idem-ns >/dev/null 2>&1 || true
-first="$(cat "$OI" 2>/dev/null)"
-python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$OI" 2>/dev/null \
-    && ok "a stop assembles a valid artefact" \
-    || bad "the assembled artefact does not parse: $(tail -c 20 "$OI")"
+got="$(count_of "$OI")"
+[ "$got" -gt 0 ] && [ "$got" = "$captured" ] \
+    && ok "a stop assembles every captured line ($got snapshots)" \
+    || bad "the artefact holds $got snapshots, not the $captured captured"
 
 # ---- two concurrent stops produce identical bytes ----------------------
 OC="$WORK/conc2.json"
 bash "$SR" start c2-ns "$OC" >/dev/null 2>&1 && note_pid "$(pid_of "$OC")"
 sleep 2
+captured="$(lines_of "$OC.snapshots.jsonl")"
 bash "$SR" stop "$OC" c2-ns >/dev/null 2>&1 &
 bash "$SR" stop "$OC" c2-ns >/dev/null 2>&1 &
 wait
-python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$OC" 2>/dev/null \
-    && ok "two concurrent stops leave a valid artefact" \
-    || bad "concurrent stops corrupted the artefact: $(tail -c 20 "$OC")"
+# Validity was the whole assertion here for one round, and it passed while the
+# loser of the two stops was writing {"snapshots": []} over the winner's work.
+got="$(count_of "$OC")"
+[ "$got" -gt 0 ] && [ "$got" = "$captured" ] \
+    && ok "two concurrent stops leave every captured snapshot ($got)" \
+    || bad "concurrent stops left $got snapshots, not the $captured captured"
 
 # ---- and a stop repeated on the assembled file changes nothing ---------
 # Where the old design appended a second terminator, re-running is now a no-op:
@@ -549,10 +569,62 @@ python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d["sn
     && ok "a torn line is dropped and the earlier snapshots survive" \
     || bad "a torn line cost the whole measurement: $(head -c 40 "$OT")"
 
-# ---- no intermediate files survive a stop -----------------------------
-ls "$OT".snapshots.jsonl "$OT".assembling.* >/dev/null 2>&1 \
-    && bad "an intermediate file survived the stop" \
-    || ok "no intermediate files survive a stop"
+# ---- the temp file does not survive a stop; the INPUT does -------------
+ls "$OT".assembling.* >/dev/null 2>&1 \
+    && bad "an intermediate .assembling file survived the stop" \
+    || ok "no intermediate file survives a stop"
+
+# Deleting the captured lines is what let a second stop read "absent" as "empty"
+# and overwrite a good artefact. They stay: they are what makes assembly
+# re-runnable, the path already carries the run id, and start truncates it.
+[ -s "$OT.snapshots.jsonl" ] \
+    && ok "the captured lines survive, so assembly stays re-runnable" \
+    || bad "the stop deleted the lines it assembled from"
+
+# ---- an absent input is an error, not an empty measurement -------------
+# Measured: a second stop landing between the first one's assembly and its `rm`
+# read the absent file as zero snapshots and wrote {"snapshots": []} over the good
+# artefact -- valid JSON, wrong content, exit 0, filed as the run's measurement.
+# 19 of 20 trials in a 40-80 ms band.
+OM="$WORK/missing.json"
+bash "$SR" start miss-ns "$OM" >/dev/null 2>&1
+MP="$(pid_of "$OM")"
+note_pid "$MP"
+sleep 2
+kill -9 "-$MP" 2>/dev/null || kill -9 "$MP" 2>/dev/null || true
+sleep 1
+printf '{"snapshots":[{"REAL":"CAPTURE"}]}' > "$OM"
+rm -f "$OM.snapshots.jsonl"
+if bash "$SR" stop "$OM" miss-ns >/dev/null 2>&1; then
+    bad "a stop whose captured lines were gone reported success"
+else
+    ok "a stop whose captured lines were gone fails instead of filing an empty artefact"
+fi
+grep -q REAL "$OM" 2>/dev/null \
+    && ok "and it leaves the artefact already on disk alone" \
+    || bad "an absent input overwrote the artefact: $(head -c 40 "$OM" 2>/dev/null)"
+
+# ---- an unreadable start time means "assume it is still ours" ----------
+# The record ALWAYS carries a starttime= field, so on a host without /proc it is
+# present and empty. Reading that as "not ours" declared a LIVE capture dead: stop
+# killed nothing and reported success, a second start took the path, and two
+# samplers appended to one file -- two namespaces' controllers summed into one
+# valid, wrong fleet curve.
+if (
+    . "$ROOT/hack/benchmark/capture_lib.sh"
+    sleep 300 &
+    live=$!
+    OA="$WORK/alive.json"
+    printf 'namespace=a-ns context=x started=now pid=%s starttime= cmd=x\n' "$live" \
+        > "$OA.owner"
+    capture_alive "$OA" && r=alive || r=dead
+    kill "$live" 2>/dev/null || true
+    [ "$r" = alive ]
+); then
+    ok "a record with an unreadable start time is treated as live"
+else
+    bad "an empty starttime declared a live capture dead"
+fi
 
 # ---- a capture that never started files NEITHER of its artefacts --------
 # Both come from the sampler, so both consult the sampler's flags. Deriving the

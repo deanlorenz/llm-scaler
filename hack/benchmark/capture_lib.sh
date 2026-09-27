@@ -139,15 +139,24 @@ capture_alive() {
     pid="$(printf '%s' "$owner" | sed -n 's/.*[^a-z]pid=\([0-9][0-9]*\).*/\1/p')"
     [ -n "$pid" ] || return 1
     kill -0 "$pid" 2>/dev/null || return 1
-    # An ABSENT starttime field means the record predates this check or the
-    # system has no /proc, and the pid alone is trusted. An EMPTY one means we
-    # tried and failed to read it -- which happens when the process was already
-    # gone -- so the record is not evidence that this pid is ours.
+    # Either way round, an unreadable start time means "assume it is still ours".
+    #
+    # This used to fail OPEN: the record always carries a `starttime=` field, so on
+    # a host without /proc it is present and EMPTY, the case below matched, and an
+    # empty value was read as "not ours" -- declaring a LIVE capture dead. Stop
+    # then killed nothing and reported success, a second start took the path, and
+    # two samplers appended to one file: two namespaces' controllers summed into
+    # one valid, wrong fleet curve. The absent-field branch that was supposed to
+    # trust the pid was unreachable from the code that writes the record.
+    #
+    # Failing closed keeps a capture visible to the tooling instead of orphaning
+    # it and admitting a second writer. The cost is refusing a path whose holder
+    # really is gone, which is recoverable; the other direction is not.
     case "$owner" in
         *starttime=*) recorded="$(printf '%s' "$owner" | sed -n 's/.*starttime=\([0-9]*\).*/\1/p')" ;;
         *) return 0 ;;
     esac
-    [ -n "$recorded" ] || return 1
+    [ -n "$recorded" ] || return 0
     now="$(_capture_starttime "$pid")" || return 0
     [ "$now" = "$recorded" ]
 }

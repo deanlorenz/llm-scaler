@@ -147,9 +147,22 @@ namespace and context a running capture belongs to, and
 `BENCHMARK_KUBE_CONTEXT=<ctx>` names the cluster explicitly instead of inheriting
 whatever `KUBECONFIG` happens to say.
 
-Check the captured files are non-empty before you trust a report built from them:
-the workload data is unaffected either way, but the target path, the ordering
-times and the dashed line in the pipeline graph all come from that log.
+Count what the captures hold before you trust a report built from them. Empty is
+the wrong test: an artefact that lost its whole capture is `{"snapshots": []}`,
+which is non-empty and valid JSON, and that is the shape that has actually cost
+data here. The workload numbers are unaffected either way, but the target path,
+the ordering times and the dashed line in the pipeline graph all come from these.
+
+```bash
+# one object per sample -- a full run is hundreds
+python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["snapshots"]))' \
+    <results>/metrics/processed/wva_replica_samples.json
+wc -l <results>/wva_controller.log
+```
+
+The sampler keeps the lines it assembled that artefact from, next to it as
+`<outfile>.snapshots.jsonl`, so a count that looks short can be checked against
+what was really captured -- and re-assembled from them if it was.
 
 ## Measured
 
