@@ -20,7 +20,10 @@
 #
 # What remains here is not a mutex. It is:
 #   - a record of WHO owns a live capture, so a human finding one in /tmp can see
-#     its namespace and cluster, and so stop can refuse to touch someone else's;
+#     its namespace and cluster, and so stop WARNS when the namespace or context
+#     it was given does not match. It warns and proceeds: naming a path by hand is
+#     taken as meaning it, and refusing would strand a capture whose owner has
+#     gone home. It is not a permission check;
 #   - an exclusive CREATE of that record, so the degenerate case of two captures
 #     aimed by hand at one path still fails safely rather than interleaving;
 #   - identity that survives pid reuse, so stop never kills an unrelated process.
@@ -91,9 +94,20 @@ capture_kube() {
 # stop kill an unrelated process and made start refuse forever. A pid plus its
 # start time is unique for the life of the machine.
 _capture_starttime() {
+    local line rest
+    local -a f
     [ -r "/proc/$1/stat" ] || return 1
-    sed -n 's/^[0-9][0-9]* (.*) //p' "/proc/$1/stat" 2>/dev/null \
-        | awk '{print $20}' 2>/dev/null
+    # Builtins only: this runs inside the exclusive redirect that creates the
+    # ownership record, and every fork widens the window in which another caller
+    # sees a record that exists but is still empty. With sed, awk, date and
+    # basename that window measured 5.66 ms; a losing racer hit it every time.
+    read -r line < "/proc/$1/stat" || return 1
+    # Drop "pid (comm) ". The comm may contain spaces and parentheses, so strip
+    # through the LAST ') ' rather than the first.
+    rest="${line##*') '}"
+    f=($rest)
+    # f[0] is field 3 (state), so field 22 (starttime) is index 19.
+    printf '%s\n' "${f[19]:-}"
 }
 
 # capture_owner_file <outfile>
@@ -112,8 +126,15 @@ capture_alive() {
     pid="$(printf '%s' "$owner" | sed -n 's/.*[^a-z]pid=\([0-9][0-9]*\).*/\1/p')"
     [ -n "$pid" ] || return 1
     kill -0 "$pid" 2>/dev/null || return 1
-    recorded="$(printf '%s' "$owner" | sed -n 's/.*starttime=\([0-9][0-9]*\).*/\1/p')"
-    [ -n "$recorded" ] || return 0
+    # An ABSENT starttime field means the record predates this check or the
+    # system has no /proc, and the pid alone is trusted. An EMPTY one means we
+    # tried and failed to read it -- which happens when the process was already
+    # gone -- so the record is not evidence that this pid is ours.
+    case "$owner" in
+        *starttime=*) recorded="$(printf '%s' "$owner" | sed -n 's/.*starttime=\([0-9]*\).*/\1/p')" ;;
+        *) return 0 ;;
+    esac
+    [ -n "$recorded" ] || return 1
     now="$(_capture_starttime "$pid")" || return 0
     [ "$now" = "$recorded" ]
 }
@@ -145,8 +166,11 @@ capture_claim() {
     # An EMPTY record means another caller is between its create and its write.
     # Treating that as abandoned is what let both callers through.
     if [ ! -s "$of" ]; then
+        # Another caller is between its create and its write. Deliberately no
+        # advice to remove the record: in a race this is the message the LOSER
+        # sees, and the record belongs to the winner.
         echo "refusing to start: $out is being claimed by another process right now" >&2
-        echo "  if no capture is running, remove $of and retry" >&2
+        echo "  retry, or use a different output path" >&2
         return 1
     fi
     if capture_alive "$out"; then
@@ -162,11 +186,15 @@ capture_claim() {
 # _capture_owner_line <namespace> <pid> -- the record, on stdout, so it can be
 # produced inside the exclusive redirect that creates the file.
 _capture_owner_line() {
-    local st
+    local st when
     st="$(_capture_starttime "$2" || true)"
+    # printf's %()T and ${0##*/} instead of date and basename, for the reason in
+    # _capture_starttime: no forks on the path that creates the record. TZ is set
+    # for this one builtin call because %()T formats in local time.
+    when="$(TZ=UTC0 printf '%(%Y-%m-%dT%H:%M:%SZ)T' -1 2>/dev/null)" || when=""
     printf 'namespace=%s context=%s started=%s pid=%s starttime=%s cmd=%s\n' \
         "$1" "${CAPTURE_CTX:-<inherited KUBECONFIG>}" \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$2" "${st:-}" "$(basename "$0")"
+        "${when:-unknown}" "$2" "${st:-}" "${0##*/}"
 }
 
 _capture_write_owner() {
@@ -217,7 +245,11 @@ capture_verify_writable() {
 # REFUSED to overwrite, turning a protected run into unparseable output.
 capture_owned() {
     [ -n "${1:-}" ] || return 1
-    [ -f "$(capture_owner_file "$1")" ]
+    # -s, not -f. An EMPTY record means a claim in progress, and treating that as
+    # a capture to finalise made stop append a terminator to a PREVIOUS run's
+    # file -- through the one refusal path that leaves an empty record behind,
+    # which is the very corruption this guard exists to prevent.
+    [ -s "$(capture_owner_file "$1")" ]
 }
 
 # capture_check_owner <outfile> <namespace> <context> -- warn on a mismatch.
@@ -278,8 +310,8 @@ capture_finish() {
 
 # capture_stop <outfile> <pidfile> -- stop the capture and everything it spawned.
 #
-# The capture is started with setsid, so it leads its own process group and one
-# signal to the negated pgid reaches every descendant. `pkill -P` reached
+# The capture is started under job control (`set -m` at the fork), so it leads its
+# own process group and one signal to the negated pgid reaches every descendant. `pkill -P` reached
 # children only: the sampler forks a subshell which runs kubectl and python in a
 # command substitution, so those are grandchildren, and they survived a stop --
 # which is why a clean stop used to print BrokenPipeError AFTER its success line.
@@ -301,7 +333,20 @@ capture_stop() {
     esac
     # The group first, then the leader, so a child cannot outlive the signal.
     kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
-    rm -f "$pidfile" 2>/dev/null || true
+    # And confirm it. Reporting a stop that did not happen is worse than failing:
+    # the caller then writes the JSON terminator and drops the record, leaving a
+    # live capture invisible to the tooling and still appending to a finished
+    # file. The natural trigger is a kill that cannot be delivered -- a capture
+    # started by another user -- which the `|| true` above swallows.
+    local waited=0
+    while [ "$waited" -lt 50 ]; do
+        capture_alive "$out" || { rm -f "$pidfile" 2>/dev/null || true; return 0; }
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+    echo "the capture at $out did not stop (pid $pid still matches its record)" >&2
+    echo "  leaving its record and pidfile in place rather than losing track of it" >&2
+    return 1
 }
 
 # capture_resolve_outfile <a> <b> -- which of two arguments is the output path.

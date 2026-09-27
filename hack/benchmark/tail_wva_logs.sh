@@ -124,7 +124,10 @@ case "$CMD" in
     # the recorded pid -- but they are OUR children, found by parent, never by
     # matching a command line. The pattern sweep this replaces killed any other
     # session capturing the same namespace, including one on another cluster.
-    capture_stop "$OUT" "$OUT.pid"
+    # If the capture would not die, stop here. Writing the JSON terminator and
+    # dropping the record would leave a live capture invisible to the tooling,
+    # still appending to a file that already looks finished.
+    capture_stop "$OUT" "$OUT.pid" || exit 1
     rm -f "$OUT.stop"
     # --since-time reconnects overlap by design (see start); collapse the
     # handful of re-fetched duplicate lines per reconnect back to one each.

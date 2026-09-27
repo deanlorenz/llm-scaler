@@ -15,7 +15,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SR="$ROOT/hack/benchmark/sample_replicas.sh"
 TL="$ROOT/hack/benchmark/tail_wva_logs.sh"
 
-EXPECTED_CHECKS=30
+EXPECTED_CHECKS=37
 
 WORK="$(mktemp -d)"
 STARTED_PIDS=""
@@ -125,7 +125,11 @@ kill -0 "$FIRST_PID" 2>/dev/null \
 # grandchildren; `pkill -P` reached children only and they outlived the stop,
 # printing BrokenPipeError after the success line.
 bash "$SR" --context my-cluster stop "$OUT" demo-ns >"$WORK/o" 2>"$WORK/e" || true
-sleep 1
+# Polled, not slept: a fixed sleep was the only timing assumption in this file.
+for _ in $(seq 1 50); do
+    kill -0 "$FIRST_PID" 2>/dev/null || break
+    sleep 0.1
+done
 if kill -0 "$FIRST_PID" 2>/dev/null; then
     bad "the capture survived its own stop"
 else
@@ -239,6 +243,75 @@ else
         || bad "unwritable path failed for the wrong reason: $(head -1 "$WORK/e")"
 fi
 chmod 700 "$RO"
+
+
+# ---- an empty record is a claim in progress, not a capture to finalise -----
+# start must refuse, and stop must NOT append a terminator to whatever is there.
+# This is the one refusal path that leaves an empty record behind, and it used to
+# corrupt a previous run's file through it.
+O8="$WORK/emptyrec.json"
+printf '{"snapshots":[{"prev":"run"}]}' > "$O8"
+B8="$(cat "$O8")"
+: > "$O8.owner"
+if bash "$SR" start e-ns "$O8" >/dev/null 2>"$WORK/e"; then
+    bad "start proceeded against a record being written by someone else"
+else
+    ok "start refuses while a record is mid-claim"
+fi
+grep -q "remove" "$WORK/e" \
+    && bad "the mid-claim refusal tells the operator to delete the winner's record" \
+    || ok "the mid-claim refusal does not advise deleting a live record"
+bash "$SR" stop "$O8" e-ns >/dev/null 2>&1 || true
+[ "$(cat "$O8")" = "$B8" ] \
+    && ok "stop leaves a file alone when the record says nothing" \
+    || bad "stop corrupted a file behind an empty record: $(tail -c 16 "$O8")"
+rm -f "$O8.owner"
+
+# ---- a lone namespace is not an output path ------------------------------
+# `stop <ns>` used to be accepted as `stop <outfile>`: exit 0, "nothing to stop",
+# sampler still running. The tail guards this; the sampler did not, and it is the
+# likelier mistake because the tail documents the opposite argument order.
+O9="$WORK/lone.json"
+bash "$SR" start lone-ns "$O9" >/dev/null 2>&1 && note_pid "$(pid_of "$O9")"
+sleep 1
+P9="$(pid_of "$O9")"
+if bash "$SR" stop lone-ns >/dev/null 2>"$WORK/e"; then
+    bad "the sampler accepted a lone namespace as its outfile"
+else
+    ok "a lone namespace on stop is refused"
+fi
+if [ -n "$P9" ] && kill -0 "$P9" 2>/dev/null; then
+    ok "and the capture is left running rather than reported stopped"
+else
+    bad "the refused stop killed the capture anyway"
+fi
+bash "$SR" stop "$O9" lone-ns >/dev/null 2>&1 || true
+
+# ---- a stop that does not stop must fail --------------------------------
+# Reporting success and then dropping the record leaves a live capture invisible
+# to the tooling, still appending to a file that already has its terminator.
+# Simulated with a process that ignores SIGTERM, which is the same shape as a kill
+# that cannot be delivered.
+O10="$WORK/nokill.json"
+bash -c 'trap "" TERM; sleep 300' &
+STUBBORN=$!
+note_pid "$STUBBORN"
+printf '{"snapshots":[' > "$O10"
+echo "$STUBBORN" > "$O10.pid"
+ST10="$(sed -n 's/^[0-9][0-9]* (.*) //p' "/proc/$STUBBORN/stat" 2>/dev/null | awk '{print $20}')"
+printf 'namespace=nk-ns context=nk-ctx started=now pid=%s starttime=%s cmd=x\n' \
+    "$STUBBORN" "$ST10" > "$O10.owner"
+if bash "$SR" stop "$O10" nk-ns >/dev/null 2>"$WORK/e"; then
+    bad "stop reported success for a capture that is still running"
+else
+    grep -q "did not stop" "$WORK/e" \
+        && ok "a stop that cannot end the capture fails and says so" \
+        || bad "stop failed without explaining why: $(head -1 "$WORK/e")"
+fi
+[ -f "$O10.owner" ] \
+    && ok "and it keeps the record rather than losing track of the capture" \
+    || bad "a failed stop removed the record anyway"
+kill -KILL "$STUBBORN" 2>/dev/null || true
 
 # ---- the log tail carries the same guards -------------------------
 LOG="$WORK/controller.log"

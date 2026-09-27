@@ -142,7 +142,7 @@ that started it -- `bash hack/benchmark/sample_replicas.sh stop <outfile>` and
 `bash hack/benchmark/tail_wva_logs.sh stop <namespace> <outfile>` -- which kills
 that capture and nothing else. Do **not** `pkill -f tail_wva_logs.sh`: it matches
 on the command line, so it kills every capture on the box regardless of namespace
-or cluster, including another session's. `cat <outfile>.lock/owner` says which
+or cluster, including another session's. `cat <outfile>.owner` says which
 namespace and context a running capture belongs to, and
 `BENCHMARK_KUBE_CONTEXT=<ctx>` names the cluster explicitly instead of inheriting
 whatever `KUBECONFIG` happens to say.

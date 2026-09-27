@@ -187,14 +187,29 @@ case "$CMD" in
     # The two helpers took their stop arguments in opposite orders, and getting
     # them backwards used to exit 0 while leaving the capture running. Recognise
     # the path instead of trusting the position.
-    resolved="$(capture_resolve_outfile "${2:?outfile required}" "${3:-}")"
+    : "${2:?outfile required}"
+    # A LONE argument that owns no record and looks nothing like a path is almost
+    # certainly a namespace given in the other script's order. Accepting it as the
+    # outfile exited 0, said "nothing to stop", and left the sampler running.
+    if [ "$#" -lt 3 ] && ! capture_owned "$2"; then
+        case "$2" in
+            */*) : ;;
+            *) echo "no capture owns \"$2\", and it does not look like an output path" >&2
+               echo "  usage: $0 stop <outfile> [<namespace>]" >&2
+               exit 2 ;;
+        esac
+    fi
+    resolved="$(capture_resolve_outfile "$2" "${3:-}")"
     OUT="${resolved%%|*}"; NS_ARG="${resolved#*|}"
     if ! capture_owned "$OUT"; then
       echo "no capture owns $OUT -- nothing to stop, and nothing written" >&2
       exit 0
     fi
     capture_check_owner "$OUT" "$NS_ARG" "$CAPTURE_CTX"
-    capture_stop "$OUT" "$OUT.pid"
+    # If the capture would not die, stop here. Writing the JSON terminator and
+    # dropping the record would leave a live capture invisible to the tooling,
+    # still appending to a file that already looks finished.
+    capture_stop "$OUT" "$OUT.pid" || exit 1
     # Close the array even if no snapshot was written, so the file is always
     # valid JSON. An empty snapshots list reads as "not measured" downstream,
     # which is the honest answer -- unlike a zero replica count.
