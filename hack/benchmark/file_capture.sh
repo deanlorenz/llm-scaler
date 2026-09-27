@@ -32,7 +32,13 @@ case "${1:-}" in
         ;;
 esac
 
-RESULTS="${1:?results dir required}"
+# ${1-}, not ${1:?}: the recipe passes an EMPTY results dir whenever its glob
+# matched nothing, and `:?` fires on null as well as unset -- which aborted the
+# whole of benchmark-run (report, plots, the load-generator check) with make
+# Error 2 on the case the recipe itself calls the common one. The header and the
+# guard below both say a missing results dir is not an error; `:?` made that
+# guard unreachable.
+RESULTS="${1-}"
 SAMPLES="${2:?samples path required}"
 WVALOG="${3:?controller log path required}"
 
