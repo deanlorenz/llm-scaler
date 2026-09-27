@@ -15,7 +15,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SR="$ROOT/hack/benchmark/sample_replicas.sh"
 TL="$ROOT/hack/benchmark/tail_wva_logs.sh"
 
-EXPECTED_CHECKS=61
+EXPECTED_CHECKS=68
 
 WORK="$(mktemp -d)"
 STARTED_PIDS=""
@@ -54,7 +54,11 @@ except Exception:
     print(-1)
 PYCOUNT
 }
-lines_of() { grep -c . "$1" 2>/dev/null || echo 0; }
+# Newlines, not non-blank lines. A line torn by a kill has no trailing newline
+# and the assembler drops it, so `wc -l` agrees with the assembler on every input
+# the sampler can produce -- where `grep -c .` counts the torn line and would fail
+# a case spuriously.
+lines_of() { wc -l < "$1" 2>/dev/null | tr -d " " || echo 0; }
 
 cat > "$WORK/kubectl" <<'STUB'
 #!/usr/bin/env bash
@@ -604,7 +608,7 @@ grep -q REAL "$OM" 2>/dev/null \
     && ok "and it leaves the artefact already on disk alone" \
     || bad "an absent input overwrote the artefact: $(head -c 40 "$OM" 2>/dev/null)"
 
-# ---- an unreadable start time means "assume it is still ours" ----------
+# ---- a claim treats an unreadable start time as "still ours" -----------
 # The record ALWAYS carries a starttime= field, so on a host without /proc it is
 # present and empty. Reading that as "not ours" declared a LIVE capture dead: stop
 # killed nothing and reported success, a second start took the path, and two
@@ -639,6 +643,98 @@ out="$(bash "$FC" "$WORK/res" "$WORK/f.json" "$WORK/f.log" 2>&1)"
     && ok "a capture that never started files neither of its artefacts" \
     || bad "a previous run's pod timings were filed: $out"
 rm -f "$WORK/f.json.startfailed" "$WORK/f.json.pod_timings.json"
+
+# ---- but a STOP refuses to signal what it cannot identify ---------------
+# The same record, the opposite decision. "May this path be in use?" fails closed
+# by assuming yes, which is what stops a second capture stealing it. Using that
+# answer to decide what to KILL inverts it: fed this record with a recycled pid,
+# stop sent TERM to an unrelated live process -- and the case above certified the
+# predicate that did it. So a stop that can prove nothing refuses instead.
+if (
+    . "$ROOT/hack/benchmark/capture_lib.sh"
+    sleep 300 &
+    victim=$!
+    OS="$WORK/nosignal.json"
+    printf 'namespace=s-ns context=x started=now pid=%s starttime= cmd=x\n' "$victim" \
+        > "$OS.owner"
+    echo "$victim" > "$OS.pid"
+    capture_stop "$OS" "$OS.pid" >/dev/null 2>&1 && rc=0 || rc=1
+    kill -0 "$victim" 2>/dev/null && survived=yes || survived=no
+    kill "$victim" 2>/dev/null || true
+    [ "$rc" = 1 ] && [ "$survived" = yes ]
+); then
+    ok "a stop that cannot identify its pid refuses instead of signalling it"
+else
+    bad "a stop killed a process it could not prove was its own, or reported success"
+fi
+
+# ---- a start that cannot truncate the captured lines refuses ------------
+# The artefact is a function of this file and nothing else, so a stale one that
+# cannot be truncated becomes THIS run's measurement. Measured: 1 snapshot, exit 0,
+# a previous run's replica counts in the report table -- the only way this capture
+# publishes a wrong NUMBER rather than losing a run.
+OZ="$WORK/stalelines.json"
+: > "$OZ.snapshots.jsonl"
+chmod 444 "$OZ.snapshots.jsonl"
+if bash "$SR" start stale-ns "$OZ" >/dev/null 2>&1; then
+    bad "a start that could not truncate the captured lines reported success"
+    note_pid "$(pid_of "$OZ")"
+else
+    ok "a start that cannot truncate the captured lines refuses"
+fi
+# Empty, not absent: capture_verify_writable proves the path writable by creating
+# it, which is the point of it. What must not exist is a MEASUREMENT.
+[ ! -s "$OZ" ] \
+    && ok "and files no measurement for a run it refused to start" \
+    || bad "a refused start still left a measurement: $(head -c 40 "$OZ" 2>/dev/null)"
+chmod 644 "$OZ.snapshots.jsonl"
+
+# ---- a start whose stderr channel is unwritable refuses -----------------
+# This is how the sampler died at fork: the subshell's own `2>>` redirect failed,
+# $! still yielded its pid, and the record was written for a process that no longer
+# existed. start said "replica sampler started" and the run filed {"snapshots": []}
+# with nothing set to withhold it. That dead-pid record is also the ordinary route
+# to an EMPTY starttime= on a host that has /proc.
+OE="$WORK/nostderr.json"
+: > "$OE.stderr"
+chmod 444 "$OE.stderr"
+if bash "$SR" start noerr-ns "$OE" >/dev/null 2>&1; then
+    bad "a start with an unwritable stderr channel reported success"
+    note_pid "$(pid_of "$OE")"
+else
+    ok "a start that cannot write its diagnostics channel refuses"
+fi
+chmod 644 "$OE.stderr"
+
+# ---- a start truncates the stderr channel -------------------------------
+# Left alone, it carried the PREVIOUS run's reason for anyone reading it to explain
+# this run's bad capture.
+OQ="$WORK/staleerr.json"
+printf 'STALE-FROM-AN-EARLIER-RUN\n' > "$OQ.stderr"
+bash "$SR" start staleerr-ns "$OQ" >/dev/null 2>&1 && note_pid "$(pid_of "$OQ")"
+sleep 1
+grep -q STALE-FROM-AN-EARLIER-RUN "$OQ.stderr" 2>/dev/null \
+    && bad "a start left the previous run's diagnostics in place" \
+    || ok "a start truncates the diagnostics channel"
+bash "$SR" stop "$OQ" staleerr-ns >/dev/null 2>&1 || true
+
+# ---- a crashed capture's lines are a measurement, and are guarded -------
+# The artefact is assembled at stop, so a capture killed before its stop leaves
+# $OUT at zero bytes and every snapshot it took in the lines beside it. Guarding
+# only $OUT meant the next start on that path silently truncated the sole copy --
+# the recovery the guide promises, gone without a word.
+OK2="$WORK/crashed.json"
+: > "$OK2"
+printf '{"timestamp":"FROM-A-CRASHED-RUN","controllers":[]}\n' > "$OK2.snapshots.jsonl"
+if bash "$SR" start crashed-ns "$OK2" >/dev/null 2>&1; then
+    bad "a start discarded a crashed capture's lines without --force"
+    note_pid "$(pid_of "$OK2")"
+else
+    ok "a crashed capture's lines are guarded like any other measurement"
+fi
+grep -q FROM-A-CRASHED-RUN "$OK2.snapshots.jsonl" 2>/dev/null \
+    && ok "and they are still there after the refusal" \
+    || bad "the refused start truncated them anyway"
 
 # ---- the count itself --------------------------------------------
 # Asserted without ok()/bad(), which would change the number being asserted.

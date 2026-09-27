@@ -149,8 +149,21 @@ case "$CMD" in
     capture_verify_writable "$OUT" || { capture_release "$OUT"; exit 1; }
     # Append-only, one JSON object per line. The artefact is assembled from these
     # at stop, so there is no last byte for two stops to fight over.
-    : > "$OUT.snapshots.jsonl"
-    : > "$OUT.pods.jsonl"
+    #
+    # Checked, because the artefact is now a function of this file and nothing
+    # else. A stale one that could not be truncated -- read-only, or owned by
+    # another user at a reused path -- was assembled as this run's measurement and
+    # reached the report table with a previous run's replica counts in it. That is
+    # the only way this capture can publish a WRONG number rather than lose a run,
+    # and `set -u` without `set -e` is why an unchecked redirect carried on.
+    for f in "$OUT.snapshots.jsonl" "$OUT.pods.jsonl" "$OUT.stderr"; do
+        if ! : > "$f"; then
+            echo "cannot truncate $f -- refusing to start a capture that would" >&2
+            echo "  assemble a previous run's data as this one's" >&2
+            capture_release "$OUT"
+            exit 1
+        fi
+    done
     # A run that records no pod timings must not file the PREVIOUS run's: the
     # write at stop is best-effort, so a leftover would be picked up as this
     # run's measurement.
@@ -178,6 +191,18 @@ case "$CMD" in
     ) >/dev/null 2>>"$OUT.stderr" &
     sampler_pid=$!
     set +m
+    # `kill -0` first: the subshell can die on its own redirect before it runs a
+    # line of the loop, and $! yields its pid either way. Without this, start
+    # printed "replica sampler started" for a process that no longer existed, the
+    # record was written for a dead pid -- which is also how `starttime=` comes out
+    # EMPTY on an ordinary host -- and the run was filed as {"snapshots": []} with
+    # no .startfailed to withhold it.
+    if ! kill -0 "$sampler_pid" 2>/dev/null; then
+        echo "the replica sampler died immediately after starting -- not recording it" >&2
+        echo "  its own diagnostics, if any: $(tail -n 2 "$OUT.stderr" 2>/dev/null)" >&2
+        capture_release "$OUT"
+        exit 1
+    fi
     if ! echo "$sampler_pid" > "$OUT.pid" || ! capture_adopt "$OUT" "$NS" "$sampler_pid"; then
         echo "cannot record the capture at $OUT -- stopping it rather than running unowned" >&2
         kill "$sampler_pid" 2>/dev/null || true

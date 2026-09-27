@@ -236,11 +236,23 @@ capture_adopt() {
 # Distinct from ownership: this is about a capture eating a FINISHED run, and only
 # this is excused by --force.
 capture_guard_data() {
-    local out="$1"
-    if [ "$CAPTURE_FORCE" -eq 1 ] || [ ! -s "$out" ]; then
+    local out="$1" held=""
+    if [ "$CAPTURE_FORCE" -eq 1 ]; then
         return 0
     fi
-    echo "refusing to start: $out already holds $(wc -c < "$out" 2>/dev/null || echo "?") bytes of a previous run" >&2
+    # The captured LINES count as a measurement too, and for a crashed capture
+    # they are the only one: the artefact is assembled at stop, so a run killed
+    # before its stop leaves $out at zero bytes and every snapshot it took in the
+    # lines beside it. Guarding only $out meant the next start on that path
+    # silently truncated them -- exactly the recovery the guide promises.
+    if [ -s "$out" ]; then
+        held="$out"
+    elif [ -s "$out.snapshots.jsonl" ]; then
+        held="$out.snapshots.jsonl"
+    else
+        return 0
+    fi
+    echo "refusing to start: $held already holds $(wc -c < "$held" 2>/dev/null || echo "?") bytes of a previous run" >&2
     echo "  pass --force to replace it, or choose another output path" >&2
     return 1
 }
@@ -338,6 +350,29 @@ capture_finish() {
 # Only signals a group whose recorded owner still matches, so a reused pid is
 # never killed. An unrelated `sleep 600` whose pid landed in the file was killed
 # by the previous version.
+# capture_identified <outfile> -- is the recorded pid PROVABLY our capture?
+#
+# capture_alive answers a different question -- "may this path still be in use?"
+# -- and fails closed by assuming yes, which is what stops a second capture
+# stealing a path whose holder it cannot identify. Using that answer to decide
+# what to SIGNAL inverts it: a record with an unreadable start time plus a
+# recycled pid made a stop send TERM to an unrelated live process, which is a
+# defect this file already fixed once (see the note in capture_release).
+#
+# This one fails closed in the other direction. No proof means no signal.
+capture_identified() {
+    local owner pid recorded now
+    owner="$(cat "$(capture_owner_file "$1")" 2>/dev/null)" || return 1
+    pid="$(printf '%s' "$owner" | sed -n 's/.*[^a-z]pid=\([0-9][0-9]*\).*/\1/p')"
+    [ -n "$pid" ] || return 1
+    # One or more digits, so a present-but-empty starttime= yields nothing and is
+    # correctly read as "cannot prove it".
+    recorded="$(printf '%s' "$owner" | sed -n 's/.*starttime=\([0-9][0-9]*\).*/\1/p')"
+    [ -n "$recorded" ] || return 1
+    now="$(_capture_starttime "$pid")" || return 1
+    [ "$now" = "$recorded" ]
+}
+
 capture_stop() {
     local out="$1" pidfile="$2" pid
     if ! capture_alive "$out"; then
@@ -345,6 +380,17 @@ capture_stop() {
         # signal a pid that has since been reused by something else.
         rm -f "$pidfile" 2>/dev/null || true
         return 0
+    fi
+    # Something is there, but we could not prove it is ours. The two ways out of
+    # this used to be the two ways of losing: signal it anyway and maybe kill a
+    # stranger, or call it stopped and leave a live capture appending to a
+    # finished file. Refusing keeps the record and says what is unprovable.
+    if ! capture_identified "$out"; then
+        echo "refusing to stop the capture at $out: its record does not identify a process" >&2
+        echo "  holder: $(cat "$(capture_owner_file "$out")" 2>/dev/null)" >&2
+        echo "  the pid is alive but its start time does not confirm it is this capture," >&2
+        echo "  so signalling it could kill an unrelated process. Check it by hand." >&2
+        return 1
     fi
     pid="$(cat "$pidfile" 2>/dev/null)"
     case "${pid:-}" in
