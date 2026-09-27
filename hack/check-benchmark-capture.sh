@@ -15,7 +15,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SR="$ROOT/hack/benchmark/sample_replicas.sh"
 TL="$ROOT/hack/benchmark/tail_wva_logs.sh"
 
-EXPECTED_CHECKS=56
+EXPECTED_CHECKS=57
 
 WORK="$(mktemp -d)"
 STARTED_PIDS=""
@@ -553,6 +553,20 @@ python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d["sn
 ls "$OT".snapshots.jsonl "$OT".assembling.* >/dev/null 2>&1 \
     && bad "an intermediate file survived the stop" \
     || ok "no intermediate files survive a stop"
+
+# ---- a capture that never started files NEITHER of its artefacts --------
+# Both come from the sampler, so both consult the sampler's flags. Deriving the
+# flag name from the artefact made the timings check a name nothing writes, and a
+# previous run's timings were filed as this run's measurement.
+mkres
+printf '{"snapshots":[{"PREVIOUS":"RUN"}]}' > "$WORK/f.json"
+printf '{"pods":[{"name":"FROM-A-PREVIOUS-RUN"}]}' > "$WORK/f.json.pod_timings.json"
+touch "$WORK/f.json.startfailed"
+out="$(bash "$FC" "$WORK/res" "$WORK/f.json" "$WORK/f.log" 2>&1)"
+[ ! -f "$WORK/res/metrics/processed/wva_pod_timings.json" ] \
+    && ok "a capture that never started files neither of its artefacts" \
+    || bad "a previous run's pod timings were filed: $out"
+rm -f "$WORK/f.json.startfailed" "$WORK/f.json.pod_timings.json"
 
 # ---- the count itself --------------------------------------------
 # Asserted without ok()/bad(), which would change the number being asserted.

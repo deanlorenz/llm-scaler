@@ -49,17 +49,24 @@ _parses() {
     python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$1" 2>/dev/null
 }
 
-# _file <source> <destination> <kind> -- kind is "json" or "text"
+# _file <source> <destination> <kind> <flag-base>
+#
+# kind is "json" or "text". flag-base is the CAPTURE the artefact came from, which
+# is not always the artefact itself: the pod timings are `<samples>.pod_timings.json`
+# while their capture's flags are `<samples>.startfailed`. Deriving the flag names
+# from the artefact meant the timings consulted a name nothing ever writes, so a
+# capture that never started had its samples withheld and a PREVIOUS run's timings
+# filed as this run's measurement.
 _file() {
-    local src="$1" dst="$2" kind="$3" base
+    local src="$1" dst="$2" kind="$3" flags="${4:-$1}" base
     base="$(basename "$src")"
 
-    if [ -f "$src.startfailed" ]; then
+    if [ -f "$flags.startfailed" ]; then
         echo "  not filing $base: its capture never started"
         skipped=$((skipped + 1))
         return 0
     fi
-    if [ -f "$src.stopfailed" ]; then
+    if [ -f "$flags.stopfailed" ]; then
         echo "  not filing $base: its capture could not be stopped, so the file is incomplete"
         skipped=$((skipped + 1))
         return 0
@@ -89,10 +96,11 @@ if [ -z "$RESULTS" ] || [ ! -d "$RESULTS" ]; then
     exit 0
 fi
 
-# Each artefact is judged on itself. Gating the pod timings on the SAMPLES file's
-# flag threw away a valid timings file whenever the samples file was bad.
-_file "$SAMPLES" "$RESULTS/metrics/processed/wva_replica_samples.json" json
-_file "$SAMPLES.pod_timings.json" "$RESULTS/metrics/processed/wva_pod_timings.json" json
-_file "$WVALOG" "$RESULTS/wva_controller.log" text
+# Each artefact is judged on its own CONTENTS -- a valid timings file must not die
+# with a corrupt samples file -- but both consult the flags of the capture they came
+# from, which is the sampler for both of these.
+_file "$SAMPLES" "$RESULTS/metrics/processed/wva_replica_samples.json" json "$SAMPLES"
+_file "$SAMPLES.pod_timings.json" "$RESULTS/metrics/processed/wva_pod_timings.json" json "$SAMPLES"
+_file "$WVALOG" "$RESULTS/wva_controller.log" text "$WVALOG"
 
 echo "  capture artefacts: $filed filed, $skipped withheld"
