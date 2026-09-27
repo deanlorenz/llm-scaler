@@ -281,7 +281,7 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 		// ITL line is meaningless for either product.
 		key := a.itlWindowKey(input.Namespace, input.ModelID, variant,
 			accelByVariant[variant], gpusByVariant[variant])
-		itlModels[variant] = a.noteITL(key, input.ReplicaMetrics, variant, a.now())
+		itlModels[variant] = a.noteITL(key, input.ReplicaMetrics, variant, a.now(), logger)
 	}
 
 	// Phase 1: Per-replica capacity computation

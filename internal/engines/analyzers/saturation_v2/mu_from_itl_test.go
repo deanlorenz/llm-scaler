@@ -7,6 +7,8 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/go-logr/logr"
+
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
@@ -289,7 +291,7 @@ var _ = Describe("noteITL", func() {
 	}
 	fit := func(rms []domain.ReplicaMetrics) itl.Model {
 		a := NewSaturationAnalyzer(capacity.NewStore())
-		return a.noteITL("ns|model|"+variant, rms, variant, a.now())
+		return a.noteITL("ns|model|"+variant, rms, variant, a.now(), logr.Discard())
 	}
 
 	It("fits the line its replicas are reporting", func() {
@@ -333,9 +335,9 @@ var _ = Describe("noteITL", func() {
 		// accumulates and `fit` builds a fresh one each call.
 		a := NewSaturationAnalyzer(capacity.NewStore())
 		key := "ns|model|" + variant
-		Expect(a.noteITL(key, rms, variant, a.now()).IsZero()).To(BeTrue(),
+		Expect(a.noteITL(key, rms, variant, a.now(), logr.Discard()).IsZero()).To(BeTrue(),
 			"six readings is under DefaultMinSamples: nothing is derived yet")
-		got := a.noteITL(key, rms, variant, a.now())
+		got := a.noteITL(key, rms, variant, a.now(), logr.Discard())
 		Expect(got.IsZero()).To(BeFalse(),
 			"a balanced fleet still gets a model, with B pinned")
 		Expect(got.B).To(Equal(itl.DefaultBaselineSec))

@@ -3,8 +3,11 @@ package saturation_v2
 import (
 	"time"
 
+	"github.com/go-logr/logr"
+
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
@@ -155,7 +158,7 @@ func deriveMu(model itl.Model, params *capacity.EngineParams,
 // a shape change -- so a fit made under one shape is still the right fit under
 // the next, and clearing it would reintroduce exactly the wait this replaces.
 func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetrics,
-	variantName string, now time.Time) itl.Model {
+	variantName string, now time.Time, logger logr.Logger) itl.Model {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	w, ok := a.itlWindows[key]
@@ -170,17 +173,38 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 		)
 		a.itlWindows[key] = w
 	}
+	// Logged at DEFAULT, not DEBUG: the deployment passes no -v, so DEBUG (4)
+	// never prints and a diagnostic nobody can read is the problem it was
+	// written to solve. It is one line per variant per cycle, against the
+	// per-REPLICA replica-capacity-decision already logged at this level.
+	//
+	// Counted per reason, because "the window is empty" has four different
+	// causes with four different fixes, and a run that cannot tell them apart
+	// costs a rebuild to find out which one it was.
+	var considered, notReady, noITL, noK, aboveBand, added int
 	for _, rm := range replicas {
-		if rm.VariantName != variantName || !rm.Ready || rm.FromWarmPool {
+		if rm.VariantName != variantName {
 			continue
 		}
-		if !(rm.AvgITL > 0) || !(rm.KvUsageInstant > 0) {
+		considered++
+		if !rm.Ready || rm.FromWarmPool {
+			notReady++
+			continue
+		}
+		if !(rm.AvgITL > 0) {
+			noITL++
+			continue
+		}
+		if !(rm.KvUsageInstant > 0) {
+			noK++
 			continue
 		}
 		if rm.KvUsageInstant > itl.DefaultMaxObservableK {
+			aboveBand++
 			continue
 		}
 		w.Add(rm.KvUsageInstant, rm.AvgITL, now)
+		added++
 	}
 	w.Prune(now)
 	// The window's own confidence gate, not itl.Fit's. Fit will draw a line
@@ -190,8 +214,17 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 	// analyzer gates on it for the same reason, and a derived mu overrides
 	// the measured one, so it has to clear a higher bar than two readings.
 	obs := w.Observations()
+	// Below DefaultMinObservableK the window drops the reading itself, so
+	// `added` counts what was offered and len(obs) what was kept.
+	logger.V(logging.DEFAULT).Info("itl-window",
+		"variant", variantName, "key", key,
+		"replicas", considered, "offered", added, "held", len(obs),
+		"notReady", notReady, "noITL", noITL, "noK", noK, "aboveBand", aboveBand,
+		"ready", w.Ready(), "minSamples", itl.DefaultMinSamples)
 	if w.Ready() {
 		if model, ok := itl.Fit(obs); ok {
+			logger.V(logging.DEFAULT).Info("itl-fit", "variant", variantName, "tier", "ols",
+				"a", model.A, "b", model.B, "held", len(obs))
 			return model
 		}
 	}
@@ -227,7 +260,10 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 	}
 	model, ok := itl.FitPinnedB(obs, itl.DefaultBaselineSec)
 	if !ok {
+		logger.V(logging.DEFAULT).Info("itl-fit-declined", "variant", variantName, "held", len(obs))
 		return itl.Model{}
 	}
+	logger.V(logging.DEFAULT).Info("itl-fit", "variant", variantName, "tier", "pinned-B",
+		"a", model.A, "b", model.B, "held", len(obs))
 	return model
 }
