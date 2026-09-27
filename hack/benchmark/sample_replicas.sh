@@ -48,15 +48,22 @@ CMD="${1:?usage: $0 [--context <ctx>] [--force] start <namespace> <outfile> | st
 INTERVAL="${REPLICA_SAMPLE_INTERVAL:-10}"
 
 _snapshot() {
-    local ns="$1"
-    capture_kube --namespace "$ns" get deployments,statefulsets -o json 2>/dev/null \
-      | python3 -c '
+    local ns="$1" raw
+    # The exit status, taken BEFORE python sees anything. Piping kubectl straight
+    # in meant a rejected call and an empty namespace produced the same snapshot:
+    # one per interval, zero controllers, filed as a measurement. A failed poll is
+    # skipped instead -- the convention the rest of this harness already uses --
+    # and its reason goes to the capture's stderr channel, which the sampler
+    # subshell already points at, so there is no redirect here to discard it.
+    raw="$(capture_kube --namespace "$ns" get deployments,statefulsets -o json)" || return 1
+    printf '%s' "$raw" | python3 -c '
 import json, sys
 from datetime import datetime, timezone
 try:
     data = json.load(sys.stdin)
 except Exception:
-    data = {"items": []}
+    # Unparseable output is a failed poll too, not an empty cluster.
+    sys.exit(1)
 snap = {"timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "controllers": []}
 for item in data.get("items", []):
@@ -87,7 +94,7 @@ print(json.dumps(snap))
 # a single collection at the end would miss exactly the replicas we care about.
 _pods_snapshot() {
     local ns="$1"
-    capture_kube --namespace "$ns" get pods -o json 2>/dev/null \
+    capture_kube --namespace "$ns" get pods -o json \
       | python3 -c '
 import json, sys
 try:
@@ -185,7 +192,10 @@ case "$CMD" in
         if [ -n "$snap" ]; then
           printf '%s\n' "$snap" >> "$OUT.snapshots.jsonl"
         fi
-        _pods_snapshot "$NS" >> "$OUT.pods.jsonl" 2>/dev/null || true
+        # `|| true` because a failed pod poll must not end the capture -- the
+        # replica curve matters more than the timings -- but its reason now lands
+        # in the stderr channel instead of /dev/null.
+        _pods_snapshot "$NS" >> "$OUT.pods.jsonl" || true
         sleep "$INTERVAL"
       done
     ) >/dev/null 2>>"$OUT.stderr" &
@@ -349,6 +359,22 @@ PYCOUNT
     case "$n" in
       unreadable:*) echo "the samples file at $OUT does not parse -- not a usable measurement" >&2
                     exit 1 ;;
+    esac
+    # Zero controllers has two causes and they are not the same answer. A
+    # namespace with nothing serving is real and empty; a capture whose polls were
+    # all rejected measured nothing at all. The discriminator is whether anything
+    # complained, which is only knowable now that the reasons are kept.
+    case "$n" in
+      *" 0 controller sample(s)")
+        if [ -s "$OUT.stderr" ]; then
+            echo "the capture at $OUT recorded no controllers and its polls were failing:" >&2
+            sed -n '$p' "$OUT.stderr" >&2
+            echo "  that is a run with no replica curve, not a namespace with no replicas" >&2
+            exit 1
+        fi
+        echo "  note: no serving controllers were seen in ${NS_ARG:-that namespace} for the whole capture." >&2
+        echo "  Nothing complained, so this is an empty namespace rather than a failure." >&2
+        ;;
     esac
     ;;
   *)

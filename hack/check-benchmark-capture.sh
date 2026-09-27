@@ -15,7 +15,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SR="$ROOT/hack/benchmark/sample_replicas.sh"
 TL="$ROOT/hack/benchmark/tail_wva_logs.sh"
 
-EXPECTED_CHECKS=68
+EXPECTED_CHECKS=74
 
 WORK="$(mktemp -d)"
 STARTED_PIDS=""
@@ -208,9 +208,14 @@ O2="$WORK/quiet.json"
 bash "$SR" --context c1 start quiet-ns "$O2" >/dev/null 2>&1 && note_pid "$(pid_of "$O2")"
 sleep 1
 quiet="$(bash "$SR" stop "$O2" 2>&1 >/dev/null || true)"
-[ -z "$quiet" ] \
-    && ok "stop without a namespace says nothing" \
-    || bad "stop without a namespace warned anyway: $(echo "$quiet" | head -1)"
+# Specifically no MISMATCH complaint. It used to assert stderr was empty, which is
+# a proxy and not the property: a capture of a namespace with nothing serving now
+# says so there, and that message is wanted.
+case "$quiet" in
+    *"namespace="*|*"context="*)
+        bad "stop without a namespace reported a mismatch: $(echo "$quiet" | head -1)" ;;
+    *)  ok "stop without a namespace reports no mismatch" ;;
+esac
 
 # ---- the stop arguments may be given in either order ----------------
 O3="$WORK/order.json"
@@ -735,6 +740,54 @@ fi
 grep -q FROM-A-CRASHED-RUN "$OK2.snapshots.jsonl" 2>/dev/null \
     && ok "and they are still there after the refusal" \
     || bad "the refused start truncated them anyway"
+
+# ---- a capture whose polls all fail is not an empty namespace -----------
+# It produced one snapshot per interval with an empty controller list, which is
+# byte-identical to a namespace with nothing serving, and the reason was discarded
+# by `2>/dev/null` at source -- so the `.stderr` the recipe files was 0 bytes while
+# every call was being rejected. The script's own header says it exists because the
+# harness "came back with snapshots but no controllers"; it then did the same.
+cat > "$WORK/kubectl-broken" <<'BROKEN'
+#!/usr/bin/env bash
+echo "error: You must be logged in to the server (Unauthorized)" >&2
+exit 1
+BROKEN
+chmod +x "$WORK/kubectl-broken"
+OB="$WORK/broken.json"
+( export KUBECTL_CMD="$WORK/kubectl-broken"
+  bash "$SR" start broken-ns "$OB" >/dev/null 2>&1 ) && note_pid "$(pid_of "$OB")"
+sleep 3
+out="$(KUBECTL_CMD="$WORK/kubectl-broken" bash "$SR" stop "$OB" broken-ns 2>&1)" && rc=0 || rc=1
+[ "$rc" = 1 ] \
+    && ok "a capture whose polls all failed fails the stop instead of reporting a measurement" \
+    || bad "a capture that measured nothing reported success: $out"
+case "$out" in
+    *Unauthorized*) ok "and the stop says what the polls were failing with" ;;
+    *) bad "the reason was discarded: $out" ;;
+esac
+[ -s "$OB.stderr" ] \
+    && ok "and the diagnostics channel carries it rather than 0 bytes" \
+    || bad "the stderr channel is empty while every poll was rejected"
+# and nothing is fabricated into the artefact
+got="$(count_of "$OB")"
+[ "$got" = 0 ] \
+    && ok "and no snapshots were fabricated from the failures" \
+    || bad "failed polls were recorded as $got snapshot(s) of nothing"
+
+# ---- but a namespace with nothing serving IS a real, empty answer --------
+# The same zero controllers, the opposite verdict. Failing this one would make a
+# correct capture of an idle namespace look like a broken cluster.
+OY="$WORK/empty.json"
+bash "$SR" start empty-ns "$OY" >/dev/null 2>&1 && note_pid "$(pid_of "$OY")"
+sleep 2
+out="$(bash "$SR" stop "$OY" empty-ns 2>&1)" && rc=0 || rc=1
+[ "$rc" = 0 ] \
+    && ok "a namespace with nothing serving is a successful, empty capture" \
+    || bad "an empty namespace was reported as a failure: $out"
+case "$out" in
+    *"no serving controllers were seen"*) ok "and the stop says so rather than leaving it to be read off a zero" ;;
+    *) bad "a capture with no controllers said nothing about it: $out" ;;
+esac
 
 # ---- the count itself --------------------------------------------
 # Asserted without ok()/bad(), which would change the number being asserted.
