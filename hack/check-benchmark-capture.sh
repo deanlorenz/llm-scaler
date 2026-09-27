@@ -101,6 +101,19 @@ case "$warn" in
         bad "stop did not warn on a mismatch; said: $(echo "$warn" | head -1)" ;;
 esac
 
+# ---- a missing namespace on stop is not a mismatch ----------------------
+# `stop <outfile>` with no namespace is the original signature. Comparing the
+# owner against an empty string warned every time, which is a false alarm.
+: > "$STUB_LOG"
+bash "$SR" --context my-cluster --force start quiet-ns "$OUT" >/dev/null 2>&1
+sleep 1
+quiet="$(bash "$SR" stop "$OUT" 2>&1 >/dev/null || true)"
+if [ -z "$quiet" ]; then
+    ok "stop without a namespace says nothing"
+else
+    bad "stop without a namespace warned anyway: $(echo "$quiet" | head -1)"
+fi
+
 # ---- the log tail carries the same two guards ----------------------------
 LOGOUT="$WORK/controller.log"
 printf 'EARLIER RUN\n' > "$LOGOUT"

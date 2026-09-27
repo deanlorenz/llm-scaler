@@ -20,7 +20,10 @@
 #
 # Usage:
 #   sample_replicas.sh [--context <ctx>] [--force] start <namespace> <outfile>
-#   sample_replicas.sh [--context <ctx>] stop <outfile>
+#   sample_replicas.sh stop <outfile> [<namespace>]
+#
+# The namespace on stop is optional and only used to warn when it does not
+# match the one the capture was started with.
 set -u
 # --help prints this file's header comment -- the documentation the script
 # already carries, so it cannot drift from what the script does. Placed before
@@ -93,6 +96,10 @@ _write_owner() {
 _check_owner() {
     local out="$1" ns="$2"
     [ -f "$out.owner" ] || return 0
+    # Nothing to compare against: `stop <outfile>` without a namespace is the
+    # original signature and is not a mismatch. Warning anyway is a false alarm,
+    # and false alarms are why real warnings go unread.
+    [ -n "$ns" ] || return 0
     case "$(cat "$out.owner")" in
         *"namespace=$ns "*) : ;;
         *) echo "warning: $out was started as [$(cat "$out.owner")]," >&2
