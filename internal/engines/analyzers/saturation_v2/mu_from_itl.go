@@ -86,13 +86,14 @@ type derivedMu struct {
 // model says nothing useful outside the range it was fitted on, and a clamped
 // price is a worse answer than an extrapolated one only in theory.
 func pricingK(cfg *config.ScalingPolicy) float64 {
-	if cfg == nil {
-		return itl.DefaultKSat
+	k := itl.DefaultKSat
+	if cfg != nil && cfg.KvCacheThreshold*cfg.ScaleUpThreshold > 0 {
+		k = cfg.KvCacheThreshold * cfg.ScaleUpThreshold
 	}
-	k := cfg.KvCacheThreshold * cfg.ScaleUpThreshold
-	if !(k > 0) {
-		return itl.DefaultKSat
-	}
+	// Clamped on every path, including the fallback. DefaultKSat is 0.85 and
+	// DefaultMaxObservableK is 0.80, so returning the fallback unclamped
+	// evaluated the line 0.05 outside the range it was fitted over -- the
+	// exact thing this function exists to prevent.
 	return min(max(k, itl.DefaultMinObservableK), itl.DefaultMaxObservableK)
 }
 
@@ -205,6 +206,25 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 	// the throughput analyzer does for the same reason. It is the weaker
 	// answer, and it is still an answer about the shape arriving now, which
 	// the measured window it replaces is not.
+	//
+	// Ready() is two conditions and only one of them is the fleet's fault. The
+	// k-SPREAD is what a balanced router cannot supply; the sample COUNT is
+	// not, and waiving both was wrong. FitPinnedB answers from a SINGLE pair,
+	// and downstream a derived mu both orders replicas (floor.Estimate's
+	// mayOrder) and settles the whole variant's shape-change hold
+	// (fleetHasMeasuredItself) on sight. Neither should rest on one reading
+	// from one replica on one cycle. So the sample floor Ready would have
+	// applied still applies here; only the spread requirement is waived.
+	//
+	// It costs about a cycle: every Ready replica whose k is in range
+	// contributes an observation per cycle, so six replicas clear ten in two.
+	// It costs nothing in the case this derivation exists for -- once the
+	// shape lightens, an over-provisioned fleet sits at a k far below
+	// DefaultMinObservableK, contributes no new observations at all, and is
+	// priced from the ones the window already holds from when it was working.
+	if len(obs) < itl.DefaultMinSamples {
+		return itl.Model{}
+	}
 	model, ok := itl.FitPinnedB(obs, itl.DefaultBaselineSec)
 	if !ok {
 		return itl.Model{}

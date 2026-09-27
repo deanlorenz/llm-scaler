@@ -57,7 +57,10 @@ var _ = Describe("pricingK", func() {
 			KvCacheThreshold: 0.1, ScaleUpThreshold: 0.1,
 		})).To(Equal(itl.DefaultMinObservableK))
 
-		Expect(pricingK(nil)).To(Equal(itl.DefaultKSat))
+		// Including the fallback: DefaultKSat is 0.85 and the window ends at
+		// 0.80, so returning it unclamped would evaluate the line outside the
+		// range it was fitted over -- what this function exists to prevent.
+		Expect(pricingK(nil)).To(Equal(itl.DefaultMaxObservableK))
 	})
 })
 
@@ -150,6 +153,12 @@ var _ = Describe("deriveMu", func() {
 			"no KV capacity")
 		Expect(deriveMu(tracedModel, tracedParams, tracedKv, shape.New(1000, 0, 0), tracedK).ok).To(BeFalse(),
 			"no generation length is not a decode shape")
+		Expect(deriveMu(tracedModel, tracedParams, tracedKv, shape.New(1000, 6000, 0), 0).ok).To(BeFalse(),
+			"a kPrice of zero is not a utilization")
+		Expect(deriveMu(tracedModel, tracedParams, tracedKv, shape.New(1000, 6000, 0), -0.1).ok).To(BeFalse(),
+			"nor is a negative one")
+		Expect(deriveMu(tracedModel, tracedParams, tracedKv, shape.New(1000, 6000, 0), 1.01).ok).To(BeFalse(),
+			"nor is one above full")
 		Expect(deriveMu(tracedModel, tracedParams, tracedKv, shape.Shape{}, tracedK).ok).To(BeFalse(),
 			"an empty shape has no footprint to divide the cache by")
 		Expect(deriveMu(itl.Model{A: -1, B: 0.5}, tracedParams, tracedKv, shape.New(1000, 6000, 0), tracedK).ok).To(BeFalse(),
@@ -318,7 +327,15 @@ var _ = Describe("noteITL", func() {
 		for i := 0; i < 6; i++ {
 			rms = append(rms, reading(fmt.Sprintf("d%d", i), 0.62, 0.0272))
 		}
-		got := fit(rms)
+		// The SPREAD requirement is what a balanced fleet cannot meet and is
+		// waived; the sample floor is not, so one cycle of six is not enough
+		// and two are. Driven through one analyzer, because the window is what
+		// accumulates and `fit` builds a fresh one each call.
+		a := NewSaturationAnalyzer(capacity.NewStore())
+		key := "ns|model|" + variant
+		Expect(a.noteITL(key, rms, variant, a.now()).IsZero()).To(BeTrue(),
+			"six readings is under DefaultMinSamples: nothing is derived yet")
+		got := a.noteITL(key, rms, variant, a.now())
 		Expect(got.IsZero()).To(BeFalse(),
 			"a balanced fleet still gets a model, with B pinned")
 		Expect(got.B).To(Equal(itl.DefaultBaselineSec))

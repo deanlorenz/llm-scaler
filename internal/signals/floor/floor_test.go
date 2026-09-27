@@ -657,3 +657,45 @@ var _ = Describe("Estimate with mixed readings", func() {
 		Expect(f.ByRole[domain.RoleDecode]).To(BeNumerically("~", 6*(fastCost+slowCost)/2, 1e-6))
 	})
 })
+
+var _ = Describe("a derived mu, in the floor", func() {
+	// variants() is a closure in the Describe above, so this block carries its
+	// own single-decode fleet rather than reaching for it.
+	oneDecode := []domain.VariantCapacity{{
+		VariantName: "v", Role: domain.RoleDecode, ReplicaCount: 1, PerReplicaCapacity: float64(runK1),
+	}}
+
+	// Estimate lets a derived reading order with no samples and through a
+	// shape change, because it is priced for the shape arriving NOW rather
+	// than recorded under the one that left. Nothing asserted that, so
+	// reinstating the sample check would have gone unnoticed.
+	It("orders on a derived reading with no samples, even under a stale shape", func() {
+		d := []capacity.ReplicaCapacity{{
+			VariantName: "v", SaturatedThroughput: runMu / 2,
+			SaturatedThroughputSamples: 0, SaturatedThroughputDerived: true,
+		}}
+		f := Estimate(runLambda, d, oneDecode, nil, BacklogDrainSeconds, 0.85, true, 0)
+		Expect(f.Terms[domain.RoleDecode].Held).To(BeFalse(),
+			"a derived figure waits neither for samples nor for the hold")
+		Expect(f.Terms[domain.RoleDecode].HeldWhy).To(BeEmpty())
+	})
+
+	It("wins over the borrowed downgrade", func() {
+		d := []capacity.ReplicaCapacity{{
+			VariantName: "v", SaturatedThroughput: runMu / 2,
+			SaturatedThroughputSamples:  0,
+			SaturatedThroughputBorrowed: true, SaturatedThroughputDerived: true,
+		}}
+		f := Estimate(runLambda, d, oneDecode, nil, BacklogDrainSeconds, 0.85, false, 0)
+		Expect(f.Terms[domain.RoleDecode].Held).To(BeFalse())
+	})
+
+	It("still refuses to order on a single MEASURED reading", func() {
+		one := []capacity.ReplicaCapacity{{
+			VariantName: "v", SaturatedThroughput: runMu / 2, SaturatedThroughputSamples: 1,
+		}}
+		f := Estimate(runLambda, one, oneDecode, nil, BacklogDrainSeconds, 0.85, false, 0)
+		Expect(f.Terms[domain.RoleDecode].HeldWhy).To(Equal("single-sample"),
+			"the derived path must not have loosened the measured one")
+	})
+})
