@@ -15,7 +15,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SR="$ROOT/hack/benchmark/sample_replicas.sh"
 TL="$ROOT/hack/benchmark/tail_wva_logs.sh"
 
-EXPECTED_CHECKS=74
+EXPECTED_CHECKS=80
 
 WORK="$(mktemp -d)"
 STARTED_PIDS=""
@@ -656,7 +656,11 @@ rm -f "$WORK/f.json.startfailed" "$WORK/f.json.pod_timings.json"
 # stop sent TERM to an unrelated live process -- and the case above certified the
 # predicate that did it. So a stop that can prove nothing refuses instead.
 if (
-    . "$ROOT/hack/benchmark/capture_lib.sh"
+    # Asserted, not assumed: against a tree with no capture_lib.sh this block used
+    # to pass because `.` failed, capture_stop was not a command, and
+    # command-not-found supplied the non-zero this case was reading as the refusal.
+    . "$ROOT/hack/benchmark/capture_lib.sh" || exit 9
+    command -v capture_stop >/dev/null || exit 9
     sleep 300 &
     victim=$!
     OS="$WORK/nosignal.json"
@@ -788,6 +792,117 @@ case "$out" in
     *"no serving controllers were seen"*) ok "and the stop says so rather than leaving it to be read off a zero" ;;
     *) bad "a capture with no controllers said nothing about it: $out" ;;
 esac
+
+# ---- a chatty cluster does not turn an empty namespace into a failure ----
+# The verdict used to trigger on "did anything write to stderr", so a kubectl that
+# prints a deprecation line while answering every poll correctly made an honestly
+# empty namespace exit 1 -- with the deprecation quoted as the reason the polls were
+# failing -- and the recipe then withheld BOTH artefacts of a correct capture. The
+# discriminator is the snapshot count; stderr is the reason, never the trigger.
+cat > "$WORK/kubectl-chatty" <<'CHATTY'
+#!/usr/bin/env bash
+echo "W0000 client config: the gcp auth plugin is deprecated" >&2
+echo '{"items":[]}'
+CHATTY
+chmod +x "$WORK/kubectl-chatty"
+OW="$WORK/chatty.json"
+( export KUBECTL_CMD="$WORK/kubectl-chatty"
+  bash "$SR" start chatty-ns "$OW" >/dev/null 2>&1 ) && note_pid "$(pid_of "$OW")"
+sleep 3
+out="$(KUBECTL_CMD="$WORK/kubectl-chatty" bash "$SR" stop "$OW" chatty-ns 2>&1)" && rc=0 || rc=1
+[ "$rc" = 0 ] \
+    && ok "a chatty kubectl does not fail a correct capture of an empty namespace" \
+    || bad "a deprecation warning withheld a correct capture: $out"
+got="$(count_of "$OW")"
+[ "$got" -gt 0 ] \
+    && ok "and its snapshots are kept ($got)" \
+    || bad "the capture was reported empty despite answering every poll: $got"
+
+# ---- nor does one failing poll among answering ones ----------------------
+# Pod polls Forbidden by an RBAC scope, deployment polls answering: the `|| true`
+# keeps the run going, and its stderr used to trip the verdict on 3 good snapshots.
+cat > "$WORK/kubectl-nopods" <<'NOPODS'
+#!/usr/bin/env bash
+for a in "$@"; do
+  case "$a" in
+    pods) echo "Error from server (Forbidden): pods is forbidden" >&2; exit 1 ;;
+  esac
+done
+echo '{"items":[]}'
+NOPODS
+chmod +x "$WORK/kubectl-nopods"
+OP="$WORK/nopods.json"
+( export KUBECTL_CMD="$WORK/kubectl-nopods"
+  bash "$SR" start nopods-ns "$OP" >/dev/null 2>&1 ) && note_pid "$(pid_of "$OP")"
+sleep 3
+out="$(KUBECTL_CMD="$WORK/kubectl-nopods" bash "$SR" stop "$OP" nopods-ns 2>&1)" && rc=0 || rc=1
+[ "$rc" = 0 ] \
+    && ok "a failing pod poll does not withhold a replica curve that was measured" \
+    || bad "one Forbidden poll withheld the whole capture: $out"
+
+# ---- pid 0 and pid 1 are never signalled --------------------------------
+# The signal is sent to the process GROUP, and `kill -TERM -1` does not mean group 1:
+# it means every process this user may signal. `kill -TERM -0` means the caller's own
+# group. Found by running it -- a record naming pid 1 took down this suite mid-run,
+# which is also the only reason the negation was ever examined. Reachable with a
+# stale pidfile as root, so it is guarded at the signal where all paths converge.
+for victimpid in 0 1; do
+    if (
+        . "$ROOT/hack/benchmark/capture_lib.sh" || exit 9
+        command -v capture_stop >/dev/null || exit 9
+        # The library's own parse, so this case cannot drift from the code it covers.
+        st="$(_capture_starttime "$victimpid")" || st=""
+        OU="$WORK/nosignal-$victimpid.json"
+        printf 'namespace=u-ns context=x started=now pid=%s starttime=%s cmd=x\n' \
+            "$victimpid" "$st" > "$OU.owner"
+        echo "$victimpid" > "$OU.pid"
+        capture_stop "$OU" "$OU.pid" >/dev/null 2>&1 && exit 1
+        # and it keeps the record rather than dropping the path on a bad reading
+        [ -s "$OU.owner" ]
+    ); then
+        ok "pid $victimpid is refused rather than signalled as a process group"
+    else
+        bad "capture_stop was willing to signal pid $victimpid, or dropped its record"
+    fi
+done
+
+# ---- a capture we may not signal has not stopped -------------------------
+# The other half of the same predicate pair. capture_alive reads EPERM as "gone", so
+# consulting it first merged "cannot be signalled" with "is not running": a capture
+# capture_identified PROVES is ours and live got its artefact assembled and its
+# record dropped while it went on appending. Another user's capture at a hand-named
+# path is the reachable case.
+if (
+    . "$ROOT/hack/benchmark/capture_lib.sh" || exit 9
+    command -v capture_stop >/dev/null || exit 9
+    # Found, not hardcoded: readable, not signalable, and not 0 or 1 -- those are
+    # refused earlier now, for the process-group reason.
+    other=""
+    for p in $(ls /proc 2>/dev/null); do
+        case "$p" in
+            ''|*[!0-9]*|0|1) continue ;;
+        esac
+        [ -r "/proc/$p/stat" ] || continue
+        kill -0 "$p" 2>/dev/null && continue
+        other="$p"
+        break
+    done
+    # No such process means the premise is absent, not that the property holds.
+    [ -n "$other" ] || exit 9
+    st="$(_capture_starttime "$other")" || exit 9
+    [ -n "$st" ] || exit 9
+    OV="$WORK/unsignalable.json"
+    printf 'namespace=v-ns context=x started=now pid=%s starttime=%s cmd=x\n' \
+        "$other" "$st" > "$OV.owner"
+    echo "$other" > "$OV.pid"
+    # It must NOT report success, and must keep the record.
+    capture_stop "$OV" "$OV.pid" >/dev/null 2>&1 && exit 1
+    [ -s "$OV.owner" ]
+); then
+    ok "a live capture we may not signal is refused, not reported stopped"
+else
+    bad "a capture that could not be signalled was reported stopped, or lost its record"
+fi
 
 # ---- the count itself --------------------------------------------
 # Asserted without ok()/bad(), which would change the number being asserted.

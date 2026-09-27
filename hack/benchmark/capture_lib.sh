@@ -375,26 +375,47 @@ capture_identified() {
 
 capture_stop() {
     local out="$1" pidfile="$2" pid
-    if ! capture_alive "$out"; then
+    # Three cases, and they were two for one commit too long. Asking
+    # capture_alive first put "cannot be signalled" in the same branch as "is not
+    # running", because its `kill -0` reads EPERM as gone -- so a capture this code
+    # can PROVE is ours and live, started by another user, was declared stopped and
+    # had its artefact assembled and its record dropped underneath it. Proof first,
+    # then liveness, then neither.
+    if ! capture_identified "$out"; then
+        if capture_alive "$out"; then
+            # Something is there and we cannot prove it is ours. The two ways out
+            # used to be the two ways of losing: signal it anyway and maybe kill a
+            # stranger, or call it stopped and leave a live capture appending to a
+            # finished file.
+            echo "refusing to stop the capture at $out: its record does not identify a process" >&2
+            echo "  holder: $(cat "$(capture_owner_file "$out")" 2>/dev/null)" >&2
+            echo "  the pid is alive but its start time does not confirm it is this capture," >&2
+            echo "  so signalling it could kill an unrelated process. Check it by hand." >&2
+            echo "  once you have, removing $(capture_owner_file "$out") releases the path;" >&2
+            echo "  --force does not, because the claim is checked before it is read." >&2
+            return 1
+        fi
         # Nothing of ours is running. Clear the pidfile so a later stop does not
         # signal a pid that has since been reused by something else.
         rm -f "$pidfile" 2>/dev/null || true
         return 0
     fi
-    # Something is there, but we could not prove it is ours. The two ways out of
-    # this used to be the two ways of losing: signal it anyway and maybe kill a
-    # stranger, or call it stopped and leave a live capture appending to a
-    # finished file. Refusing keeps the record and says what is unprovable.
-    if ! capture_identified "$out"; then
-        echo "refusing to stop the capture at $out: its record does not identify a process" >&2
-        echo "  holder: $(cat "$(capture_owner_file "$out")" 2>/dev/null)" >&2
-        echo "  the pid is alive but its start time does not confirm it is this capture," >&2
-        echo "  so signalling it could kill an unrelated process. Check it by hand." >&2
-        return 1
-    fi
     pid="$(cat "$pidfile" 2>/dev/null)"
     case "${pid:-}" in
         ''|*[!0-9]*) rm -f "$pidfile" 2>/dev/null || true; return 0 ;;
+    esac
+    # 0 and 1 are never a capture, and both are catastrophic when negated: the
+    # signal below sends to the process GROUP, and `kill -TERM -1` does not mean
+    # group 1 -- it means every process this user may signal. `kill -TERM -0` means
+    # the caller's own group, which includes the caller. Measured: a record naming
+    # pid 1 took down the check suite mid-run.
+    #
+    # Reachable with a stale pidfile as root, which is how CI containers run, so
+    # this is not only a hazard of the record-driven path.
+    case "$pid" in
+        0|1) echo "refusing to signal pid $pid for the capture at $out -- that is not a capture" >&2
+             echo "  its record or pidfile is wrong; check them by hand rather than trusting them" >&2
+             return 1 ;;
     esac
     # The group first, then the leader, so a child cannot outlive the signal.
     kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
@@ -405,7 +426,10 @@ capture_stop() {
     # started by another user -- which the `|| true` above swallows.
     local waited=0
     while [ "$waited" -lt 50 ]; do
-        capture_alive "$out" || { rm -f "$pidfile" 2>/dev/null || true; return 0; }
+        # The strong predicate here too. capture_alive would call a kill that
+        # could not be DELIVERED a kill that worked, which is the same EPERM hole
+        # one branch up.
+        capture_identified "$out" || { rm -f "$pidfile" 2>/dev/null || true; return 0; }
         sleep 0.1
         waited=$((waited + 1))
     done

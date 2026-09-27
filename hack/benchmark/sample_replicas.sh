@@ -360,20 +360,28 @@ PYCOUNT
       unreadable:*) echo "the samples file at $OUT does not parse -- not a usable measurement" >&2
                     exit 1 ;;
     esac
-    # Zero controllers has two causes and they are not the same answer. A
-    # namespace with nothing serving is real and empty; a capture whose polls were
-    # all rejected measured nothing at all. The discriminator is whether anything
-    # complained, which is only knowable now that the reasons are kept.
+    # Zero controllers has two causes and they are not the same answer: a namespace
+    # with nothing serving is real and empty, while a capture whose polls were all
+    # rejected measured nothing at all.
+    #
+    # The discriminator is the SNAPSHOT count, because a failed poll emits nothing
+    # -- that is the exit status, already propagated into the data one step above.
+    # Asking instead whether anything wrote to stderr re-derived it from the wrong
+    # thing and inverted the defect: a cluster that prints a deprecation warning,
+    # or an RBAC scope whose pod polls are Forbidden while its deployment polls all
+    # answer, got exit 1 with that warning quoted as the reason its polls were
+    # "failing" -- and the recipe withheld both artefacts of a correct capture.
+    #
+    # So stderr is the REASON, never the trigger.
     case "$n" in
+      "0 snapshot(s), "*)
+        echo "the capture at $OUT recorded no snapshots, so no poll ever answered:" >&2
+        [ -s "$OUT.stderr" ] && sed -n '$p' "$OUT.stderr" >&2
+        echo "  that is a run with no replica curve, not a namespace with no replicas" >&2
+        exit 1 ;;
       *" 0 controller sample(s)")
-        if [ -s "$OUT.stderr" ]; then
-            echo "the capture at $OUT recorded no controllers and its polls were failing:" >&2
-            sed -n '$p' "$OUT.stderr" >&2
-            echo "  that is a run with no replica curve, not a namespace with no replicas" >&2
-            exit 1
-        fi
         echo "  note: no serving controllers were seen in ${NS_ARG:-that namespace} for the whole capture." >&2
-        echo "  Nothing complained, so this is an empty namespace rather than a failure." >&2
+        echo "  Every poll answered, so this is an empty namespace rather than a failure." >&2
         ;;
     esac
     ;;
