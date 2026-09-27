@@ -654,11 +654,10 @@ func computeLocalDemand(metrics []domain.ReplicaMetrics, shape shape.Shape, mode
 		if m.KvUsageInstant > 1 {
 			continue
 		}
-		itlAtK := model.ITLAt(m.KvUsageInstant)
-		if math.IsNaN(itlAtK) || itlAtK <= 0 {
-			continue
-		}
-		total += m.KvUsageInstant * float64(m.TotalKvCapacityTokens) / shape.KVreq / itlAtK
+		// itl.TokenRate is this arithmetic: Sequences(k, C, KVreq) / ITLAt(k),
+		// returning 0 for a non-positive or NaN ITL, which adds nothing to the
+		// sum exactly as the old `continue` did.
+		total += itl.TokenRate(model, m.KvUsageInstant, float64(m.TotalKvCapacityTokens), shape.KVreq)
 	}
 	return total
 }
@@ -692,7 +691,10 @@ func computeVariantSupply(metrics []domain.ReplicaMetrics, shape shape.Shape, it
 			continue
 		}
 		kvMax := float64(m.TotalKvCapacityTokens)
-		nSat := itl.DefaultKSat * kvMax / shape.KVreq
+		// itl.Sequences, rather than the same product written out again. It
+		// also returns 0 where KVreq is non-positive, where this divided by
+		// zero and carried +Inf into the supply.
+		nSat := itl.Sequences(itl.DefaultKSat, kvMax, shape.KVreq)
 		sum += nSat / itlSat
 		n++
 	}

@@ -37,7 +37,7 @@ var _ = Describe("Window", func() {
 			Expect(window.Len()).To(Equal(0))
 		})
 
-		It("rejects k above maxK (0.85)", func() {
+		It("rejects k above maxK", func() {
 			window.Add(0.90, 0.040, now)
 			Expect(window.Len()).To(Equal(0))
 		})
