@@ -128,12 +128,14 @@ Deployment pod with `Deployment.apps ... not found` -- nothing in this recipe
 causes it, so check `kubectl create deployment` works in your namespace first.
 
 One more, if you run several passes in a row: `make benchmark-run` starts a
-log tail and a replica sampler. Their paths are keyed to the namespace
-(`/tmp/wva_replica_samples-<ns>.json`, `/tmp/wva_controller_tail-<ns>.log`, under
-`BENCHMARK_CAPTURE_DIR`), and each one claims its path while it runs, so a second
-pass in the same namespace is refused rather than allowed to interleave. Two
-writing at once used to produce an empty controller log for one run and a
-replica-sample file holding two concatenated JSON documents for another.
+log tail and a replica sampler. Their paths carry the namespace AND a run id that
+is fixed once per `make` invocation (`/tmp/wva_replica_samples-<ns>-<runid>.json`,
+`/tmp/wva_controller_tail-<ns>-<runid>.log`, under `BENCHMARK_CAPTURE_DIR`), so
+two passes can never write to the same file -- not even two in the same namespace,
+and not two sessions benchmarking one namespace on different clusters. The recipe
+prints both paths when it starts them. Two captures writing at once used to
+produce an empty controller log for one run and a replica-sample file holding two
+concatenated JSON documents for another.
 
 A pass that ends badly can still leave a capture running. Stop it with the script
 that started it -- `bash hack/benchmark/sample_replicas.sh stop <outfile>` and

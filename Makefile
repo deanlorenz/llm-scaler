@@ -156,11 +156,23 @@ BENCHMARK_MONITORING ?= true
 # See the note on the benchmark-run recipe for why this defaults on.
 BENCHMARK_FAST_COLLECT ?= true
 # Where the replica sampler and the controller log tail write while a run is in
-# flight. Keyed by namespace: two runs in different namespaces used to share one
-# path and interleave their snapshots into a file that then failed to parse.
+# flight.
+#
+# Keyed by namespace AND by a per-invocation run id, so two runs can never share
+# a path. Sharing one was the whole original problem: two samplers appended to a
+# single array with no comma between them and the second overwrote the first
+# pidfile, leaving a sampler nothing could stop. Namespace alone was not enough --
+# two runs in the same namespace still collided, as did two sessions benchmarking
+# the same namespace on different clusters.
+#
+# `:=` is load-bearing. The id is expanded once when this file is read, so the
+# start, the stop and the copy step in one recipe all agree; a recursive `=`
+# would re-run `date` per use and the stop would look for a file that was never
+# written.
 BENCHMARK_CAPTURE_DIR ?= /tmp
-BENCHMARK_SAMPLES     ?= $(BENCHMARK_CAPTURE_DIR)/wva_replica_samples-$(BENCHMARK_NAMESPACE).json
-BENCHMARK_WVA_LOG     ?= $(BENCHMARK_CAPTURE_DIR)/wva_controller_tail-$(BENCHMARK_NAMESPACE).log
+BENCHMARK_RUN_ID      := $(shell date -u +%Y%m%dT%H%M%S)-$(shell echo $$PPID)
+BENCHMARK_SAMPLES     ?= $(BENCHMARK_CAPTURE_DIR)/wva_replica_samples-$(BENCHMARK_NAMESPACE)-$(BENCHMARK_RUN_ID).json
+BENCHMARK_WVA_LOG     ?= $(BENCHMARK_CAPTURE_DIR)/wva_controller_tail-$(BENCHMARK_NAMESPACE)-$(BENCHMARK_RUN_ID).log
 # Passed to both captures so the cluster they watch is explicit rather than
 # inherited. Empty means "whatever KUBECONFIG says", which is the old behaviour.
 BENCHMARK_KUBE_CONTEXT ?=
@@ -2051,14 +2063,15 @@ benchmark-run: ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<name
 	@# namespace runs no launchers.
 	@bash hack/benchmark/fma_placement.sh verify $(BENCHMARK_NAMESPACE) \
 		"$(CURDIR)/hack/benchmark/scenarios/$(BENCHMARK_SPEC).yaml"
-	@# --force means "a finished run's data at this path may be replaced", which
-	@# is what this recipe intends. Nothing is pre-removed: deleting the pidfile
-	@# first is how a second run in the same namespace used to orphan the first
-	@# run's sampler before being refused. The CLAIM, which --force does not
-	@# excuse, is what catches a concurrent run, and it catches it before
-	@# anything is deleted.
-	@bash hack/benchmark/sample_replicas.sh $(BENCHMARK_CAPTURE_CTX) --force start $(BENCHMARK_NAMESPACE) $(BENCHMARK_SAMPLES) || true
-	@bash hack/benchmark/tail_wva_logs.sh $(BENCHMARK_CAPTURE_CTX) --force start $(BENCHMARK_NAMESPACE) $(BENCHMARK_WVA_LOG) || true
+	@# No --force and nothing pre-removed. The paths carry a run id, so they are
+	@# new every invocation: a populated output here means something genuinely
+	@# unexpected and refusing is the right answer. Pre-removing was worse than
+	@# useless -- deleting the pidfile first is how a second run orphaned the
+	@# first run's sampler before being refused.
+	@echo "  capture: $(BENCHMARK_SAMPLES)"
+	@echo "  capture: $(BENCHMARK_WVA_LOG)"
+	@bash hack/benchmark/sample_replicas.sh $(BENCHMARK_CAPTURE_CTX) start $(BENCHMARK_NAMESPACE) $(BENCHMARK_SAMPLES) || true
+	@bash hack/benchmark/tail_wva_logs.sh $(BENCHMARK_CAPTURE_CTX) start $(BENCHMARK_NAMESPACE) $(BENCHMARK_WVA_LOG) || true
 	@# Collect the results tree as a gzipped tar over exec rather than with
 	@# kubectl cp. The harness ships both paths and defaults to cp, which on a
 	@# large tree either runs for hours or drops: its own source puts cp at

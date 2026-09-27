@@ -56,16 +56,23 @@ case "$CMD" in
     # A stray argument is almost always a flag in the wrong place, and a dropped
     # --context means watching the wrong cluster while believing otherwise.
     [ "$#" -eq 0 ] || { echo "unexpected argument: $1" >&2; exit 2; }
-    # Ownership first: "another process owns this" is both more specific and
-    # more actionable than "there are bytes here", and for the log tail the
-    # output is legitimately empty for the first seconds of every capture, so
-    # byte count cannot be what protects it. A refusal after the claim has to
-    # give the claim back, or refusing would leave a lock nobody holds.
+    # Ownership first: "another process owns this" is both more specific and more
+    # actionable than "there are bytes here", and the log tail's output is
+    # legitimately empty for the first seconds of every capture, so byte count
+    # cannot be what protects it. A refusal after the claim gives the claim back.
     capture_claim "$OUT" "$NS" || exit 1
     capture_guard_data "$OUT" || { capture_release "$OUT"; exit 1; }
     capture_verify_writable "$OUT" || { capture_release "$OUT"; exit 1; }
     : > "$OUT"
     rm -f "$OUT.stop"
+    # Old runs' kubectl diagnostics must not be read as this run's.
+    : > "$OUT.stderr" 2>/dev/null || true
+    # Job control, so the background capture leads its own process group and one
+    # signal at stop reaches every descendant. Without it the sampler's kubectl
+    # and python -- grandchildren, because they run inside a command substitution
+    # -- outlived the stop and wrote BrokenPipeError into the log after the
+    # success line.
+    set -m
     # No --prefix: dump_k2_decisions.py's LOG_LINE regex expects the
     # timestamp at column 0. A single-replica controller means this is
     # unambiguous without one; the rare exception (a brief moment where two
@@ -86,7 +93,8 @@ case "$CMD" in
       done
     ) &
     tail_pid=$!
-    if ! echo "$tail_pid" > "$OUT.pid" || ! capture_record_owner "$OUT" "$NS" "$tail_pid"; then
+    set +m
+    if ! echo "$tail_pid" > "$OUT.pid" || ! capture_adopt "$OUT" "$NS" "$tail_pid"; then
         echo "cannot record the capture at $OUT -- stopping it rather than running unowned" >&2
         kill "$tail_pid" 2>/dev/null || true
         capture_release "$OUT"
@@ -99,7 +107,12 @@ case "$CMD" in
     # The two helpers took their stop arguments in opposite orders, and getting
     # them backwards used to exit 0 while leaving the capture running. Recognise
     # the path instead of trusting the position.
-    resolved="$(capture_resolve_outfile "${3:-}" "${2:?namespace required}")"
+    # Checked HERE, not inside the command substitution below: a ${3:?} there
+    # kills only the subshell, so the caller saw an empty path and "nothing to
+    # stop" while the capture kept running.
+    : "${2:?namespace required}"
+    : "${3:?outfile required}"
+    resolved="$(capture_resolve_outfile "$3" "$2")"
     OUT="${resolved%%|*}"; NS="${resolved#*|}"
     if ! capture_owned "$OUT"; then
       echo "no capture owns $OUT -- nothing to stop" >&2
@@ -111,7 +124,7 @@ case "$CMD" in
     # the recorded pid -- but they are OUR children, found by parent, never by
     # matching a command line. The pattern sweep this replaces killed any other
     # session capturing the same namespace, including one on another cluster.
-    capture_kill_tree "$OUT.pid"
+    capture_stop "$OUT" "$OUT.pid"
     rm -f "$OUT.stop"
     # --since-time reconnects overlap by design (see start); collapse the
     # handful of re-fetched duplicate lines per reconnect back to one each.
@@ -119,7 +132,7 @@ case "$CMD" in
       awk '!seen[$0]++' "$OUT" > "$OUT.dedup" && mv "$OUT.dedup" "$OUT"
     fi
     n=$(wc -l < "$OUT" 2>/dev/null || echo 0)
-    capture_release "$OUT"
+    capture_finish "$OUT"
     echo "WVA log tail stopped: $n line(s) -> $OUT"
     ;;
   *)

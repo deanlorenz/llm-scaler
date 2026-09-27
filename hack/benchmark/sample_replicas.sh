@@ -140,16 +140,25 @@ case "$CMD" in
     # dropped --context means watching the wrong cluster while believing
     # otherwise. Refuse rather than proceed.
     [ "$#" -eq 0 ] || { echo "unexpected argument: $1" >&2; exit 2; }
-    # Ownership first: "another process owns this" is both more specific and
-    # more actionable than "there are bytes here", and for the log tail the
-    # output is legitimately empty for the first seconds of every capture, so
-    # byte count cannot be what protects it. A refusal after the claim has to
-    # give the claim back, or refusing would leave a lock nobody holds.
+    # Ownership first: "another process owns this" is both more specific and more
+    # actionable than "there are bytes here", and the log tail's output is
+    # legitimately empty for the first seconds of every capture, so byte count
+    # cannot be what protects it. A refusal after the claim gives the claim back.
     capture_claim "$OUT" "$NS" || exit 1
     capture_guard_data "$OUT" || { capture_release "$OUT"; exit 1; }
     capture_verify_writable "$OUT" || { capture_release "$OUT"; exit 1; }
     printf '{"snapshots":[' > "$OUT"
     : > "$OUT.pods.jsonl"
+    # A run that records no pod timings must not file the PREVIOUS run's: the
+    # write at stop is best-effort, so a leftover would be picked up as this
+    # run's measurement.
+    rm -f "$OUT.pod_timings.json"
+    # Job control, so the background capture leads its own process group and one
+    # signal at stop reaches every descendant. Without it the sampler's kubectl
+    # and python -- grandchildren, because they run inside a command substitution
+    # -- outlived the stop and wrote BrokenPipeError into the log after the
+    # success line.
+    set -m
     (
       first=1
       while :; do
@@ -164,7 +173,8 @@ case "$CMD" in
       done
     ) &
     sampler_pid=$!
-    if ! echo "$sampler_pid" > "$OUT.pid" || ! capture_record_owner "$OUT" "$NS" "$sampler_pid"; then
+    set +m
+    if ! echo "$sampler_pid" > "$OUT.pid" || ! capture_adopt "$OUT" "$NS" "$sampler_pid"; then
         echo "cannot record the capture at $OUT -- stopping it rather than running unowned" >&2
         kill "$sampler_pid" 2>/dev/null || true
         capture_release "$OUT"
@@ -184,7 +194,7 @@ case "$CMD" in
       exit 0
     fi
     capture_check_owner "$OUT" "$NS_ARG" "$CAPTURE_CTX"
-    capture_kill_tree "$OUT.pid"
+    capture_stop "$OUT" "$OUT.pid"
     # Close the array even if no snapshot was written, so the file is always
     # valid JSON. An empty snapshots list reads as "not measured" downstream,
     # which is the honest answer -- unlike a zero replica count.
@@ -241,7 +251,7 @@ try:
 except Exception as e:
     print('unreadable:', e)
 " 2>/dev/null)
-    capture_release "$OUT"
+    capture_finish "$OUT"
     echo "replica sampler stopped: $n -> $OUT"
     ;;
   *)
