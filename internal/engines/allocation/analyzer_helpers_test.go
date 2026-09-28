@@ -1,6 +1,8 @@
 package allocation
 
 import (
+	"math"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -256,4 +258,130 @@ var _ = Describe("paired helpers", func() {
 		})
 	})
 
+})
+
+// The figures are run T's (2026-09-28), phase-1 steady state, read off the
+// controller's analyzer-result and throughput-demand-floor-total lines:
+//
+//	demand after the floor      5,383,320 tokens
+//	decode supply at 9 replicas 8,374,572 tokens  (9 x 930,508)
+//	utilisation                 0.643             (below the 0.70 boundary)
+//	one replica                   930,508 tokens
+//
+// The fleet wanted to shrink and could not: RoleSpare, measured against the
+// BOTTOM of the hysteresis band, was 684,115 -- less than one replica -- so
+// floor(684,115/930,508) released nothing, and the run held nine replicas for
+// nineteen minutes at an identical median TTFT to main's seven.
+var _ = Describe("releasing against a target inside the band", func() {
+	const (
+		prc     = 930508.0
+		demand  = 5383320.0
+		scaleUp = 0.85
+		scaleDn = 0.70
+		variant = "decode-v"
+	)
+	supplyFor := func(replicas float64) float64 { return replicas * prc }
+
+	// One decode role, sized as run T's was at the given replica count.
+	atReplicas := func(replicas float64) *NamedAnalyzerResult {
+		supply := supplyFor(replicas)
+		e := &NamedAnalyzerResult{
+			Result: &domain.AnalyzerResult{
+				TotalDemand: demand,
+				VariantCapacities: []domain.VariantCapacity{
+					{VariantName: variant, PerReplicaCapacity: prc, Role: domain.RoleDecode},
+				},
+			},
+			ScaleUpThreshold:  scaleUp,
+			ScaleDownBoundary: scaleDn,
+			TotalSupply:       supply,
+			RoleCapacities: map[string]domain.RoleCapacity{
+				domain.RoleDecode: {
+					Role:        domain.RoleDecode,
+					TotalSupply: supply,
+					TotalDemand: demand,
+					// As the engine computes it: supply - demand/scaleDownBoundary.
+					SpareCapacity: math.Max(0, supply-demand/scaleDn),
+				},
+			},
+			Live: true,
+		}
+		initRoleState(e)
+		return e
+	}
+
+	It("releases the replica the boundary-measured budget refused", func() {
+		e := atReplicas(9)
+
+		By("confirming the old budget could not have released one")
+		Expect(e.RoleSpare[domain.RoleDecode]).To(BeNumerically("~", 684115, 1),
+			"this is the figure run T logged")
+		Expect(e.RoleSpare[domain.RoleDecode]).To(BeNumerically("<", prc),
+			"less than one replica, so dividing by prc floors to zero")
+
+		By("and that the role is nonetheless allowed to consider releasing")
+		Expect(needsScaleDownForRole(*e, domain.RoleDecode)).To(BeTrue(),
+			"utilisation 0.643 is below the 0.70 boundary; the entry hysteresis is unchanged")
+
+		Expect(safeRemovalReplicasForRole(*e, variant, domain.RoleDecode)).To(Equal(1),
+			"one replica, measured against the midpoint of the band")
+	})
+
+	It("stops at eight rather than chasing main's seven", func() {
+		// Eight replicas is utilisation 0.723 -- inside the band. Seven would be
+		// 0.826, which is 0.024 from the scale-up threshold, and releasing to
+		// there is how a fleet flaps. The gain is deliberately 9 -> 8.
+		e := atReplicas(8)
+		Expect(safeRemovalReplicasForRole(*e, variant, domain.RoleDecode)).To(Equal(0),
+			"the release target is reached; nothing further is owed")
+	})
+
+	It("never offers less than the boundary-measured budget did", func() {
+		// The change may only ADD permission. Where RoleSpare was derived from
+		// something other than this supply figure it stays in force, so no
+		// scale-down that works today is withdrawn.
+		e := atReplicas(9)
+		e.RoleSpare[domain.RoleDecode] = 5 * prc // a budget from elsewhere, larger
+		Expect(safeRemovalReplicasForRole(*e, variant, domain.RoleDecode)).To(Equal(5))
+	})
+
+	It("charges a release against both budgets", func() {
+		// A role with two variants must not release the same capacity twice.
+		e := atReplicas(9)
+		before := e.RoleReleasable[domain.RoleDecode]
+		applyDeallocationForRole(e, variant, domain.RoleDecode, 1)
+		Expect(e.RoleReleasable[domain.RoleDecode]).To(BeNumerically("~", before-prc, 1e-6))
+		Expect(e.RoleSpare[domain.RoleDecode]).To(BeZero(),
+			"684,115 charged one replica floors at zero")
+	})
+
+	It("falls back to the boundary budget when no supply figure is known", func() {
+		// A fixture or optimizer path that sets Spare without a supply figure
+		// keeps its old behaviour rather than losing its release entirely.
+		e := &NamedAnalyzerResult{
+			Result: &domain.AnalyzerResult{
+				VariantCapacities: []domain.VariantCapacity{
+					{VariantName: variant, PerReplicaCapacity: prc},
+				},
+			},
+			ScaleUpThreshold:  scaleUp,
+			ScaleDownBoundary: scaleDn,
+			Spare:             3 * prc,
+			Live:              true,
+		}
+		initRoleState(e)
+		Expect(e.RoleReleasable).NotTo(HaveKey(domain.RoleBoth),
+			"nothing was computable, so nothing is recorded")
+		Expect(safeRemovalReplicasForRole(*e, variant, domain.RoleBoth)).To(Equal(3))
+	})
+
+	It("derives the target from the two thresholds, and degrades safely", func() {
+		e := atReplicas(9)
+		Expect(e.releaseTargetUtilization()).To(BeNumerically("~", 0.775, 1e-9))
+
+		By("falling back to the boundary when the thresholds are unusable")
+		bad := *e
+		bad.ScaleUpThreshold = 0.5 // inverted against the 0.70 boundary
+		Expect(bad.releaseTargetUtilization()).To(Equal(scaleDn))
+	})
 })

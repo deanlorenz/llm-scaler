@@ -25,14 +25,26 @@ import (
 // to populate RoleSpare per role and initialize picker-local demand.
 // The original Result values are never mutated.
 type NamedAnalyzerResult struct {
-	Name              string
-	Result            *domain.AnalyzerResult
-	Score             float64            // per-analyzer weight from AnalyzerScoreConfig; used for fair-share priority
-	Remaining         float64            // mutable remaining required capacity; P-scope for disaggregated, model-scope otherwise
-	Spare             float64            // mutable remaining spare capacity; model-scope (non-disaggregated only)
-	RoleSpare         map[string]float64 // per-role mutable spare; set by initRoleState; nil for non-disaggregated
-	ScaleUpThreshold  float64            // resolved scale-up threshold used to compute RC
-	ScaleDownBoundary float64            // resolved scale-down boundary used to compute SC
+	Name      string
+	Result    *domain.AnalyzerResult
+	Score     float64            // per-analyzer weight from AnalyzerScoreConfig; used for fair-share priority
+	Remaining float64            // mutable remaining required capacity; P-scope for disaggregated, model-scope otherwise
+	Spare     float64            // mutable remaining spare capacity; model-scope (non-disaggregated only)
+	RoleSpare map[string]float64 // per-role mutable spare; set by initRoleState; nil for non-disaggregated
+	// RoleReleasable is the per-role capacity that may actually be handed back,
+	// measured against a target utilisation INSIDE the hysteresis band rather
+	// than against its floor. RoleSpare answers "may this role release at all";
+	// this answers "how many replicas", and they are different questions:
+	// dividing RoleSpare by one replica requires the fleet to be a whole
+	// replica below scaleDownBoundary, which at nine replicas means a
+	// utilisation of 0.622 against a boundary of 0.70. Run T sat at 0.643 and
+	// could not shed a replica it did not need.
+	//
+	// Mutable and decremented alongside RoleSpare as replicas are committed, so
+	// a role with several variants cannot release the same capacity twice.
+	RoleReleasable    map[string]float64
+	ScaleUpThreshold  float64 // resolved scale-up threshold used to compute RC
+	ScaleDownBoundary float64 // resolved scale-down boundary used to compute SC
 
 	// Model-level supply aggregates — written by the engine's capacity-build
 	// step. They are derived from Result.VariantCapacities so the linearity

@@ -97,6 +97,41 @@ func prcForVariant(r *domain.AnalyzerResult, v string) float64 {
 // Paired helpers — disaggregated (P/D) models
 // =============================================================================
 
+// releaseTargetUtilization is the utilisation a release aims to leave the fleet
+// at: the midpoint of the hysteresis band. It is derived, not configured --
+// scaleUpThreshold and scaleDownBoundary are already validated against each
+// other (config enforces up > down), and a third knob whose only sane value is
+// between them would be a knob nobody can set correctly.
+//
+// It falls back to scaleDownBoundary -- the previous behaviour exactly -- when
+// either threshold is missing or inverted, so a malformed configuration loses
+// the improvement rather than gaining a release it cannot justify.
+func (e NamedAnalyzerResult) releaseTargetUtilization() float64 {
+	if e.ScaleUpThreshold > 0 && e.ScaleDownBoundary > 0 &&
+		e.ScaleUpThreshold > e.ScaleDownBoundary {
+		return (e.ScaleUpThreshold + e.ScaleDownBoundary) / 2
+	}
+	return e.ScaleDownBoundary
+}
+
+// releasableFor is supply minus the supply the role would need to sit at the
+// release target. Zero when the target is unusable or demand is unknown, which
+// leaves the caller on RoleSpare and therefore on the old behaviour.
+func releasableFor(supply, demand, target float64) float64 {
+	if !(target > 0) || !(supply > 0) {
+		return 0
+	}
+	// Written as !(v > 0) rather than v <= 0 on purpose: every comparison
+	// against NaN is false, so v <= 0 ADMITS a NaN, and a NaN budget divided by
+	// prc yields a NaN that int(math.Floor(NaN)) turns into a huge negative --
+	// or, worse on another platform, a huge positive release.
+	v := supply - demand/target
+	if !(v > 0) {
+		return 0
+	}
+	return v
+}
+
 // initRoleState initialises picker-local role state for one model's allocation pass.
 // It unifies disaggregated and non-disaggregated models into one (model, role) view:
 //
@@ -147,9 +182,20 @@ func initRoleState(e *NamedAnalyzerResult) (roles []string, pickerState RolePair
 		if e.RoleSpare == nil {
 			e.RoleSpare = make(map[string]float64, len(e.RoleCapacities))
 		}
+		if e.RoleReleasable == nil {
+			e.RoleReleasable = make(map[string]float64, len(e.RoleCapacities))
+		}
+		target := e.releaseTargetUtilization()
 		for role, rc := range e.RoleCapacities {
 			pickerState[role] = rc.RequiredCapacity
 			e.RoleSpare[role] = rc.SpareCapacity
+			// Recorded only when the supply figure is real. An absent key means
+			// "no release budget was computed", which safeRemovalReplicasForRole
+			// reads as "use RoleSpare" -- the previous behaviour. A present zero
+			// means "computed, and it is nothing", which it must honour.
+			if rc.TotalSupply > 0 {
+				e.RoleReleasable[role] = releasableFor(rc.TotalSupply, rc.TotalDemand, target)
+			}
 			roleSet[role] = struct{}{}
 		}
 	} else {
@@ -159,6 +205,13 @@ func initRoleState(e *NamedAnalyzerResult) (roles []string, pickerState RolePair
 			e.RoleSpare = make(map[string]float64, 1)
 		}
 		e.RoleSpare[domain.RoleBoth] = e.Spare
+		if e.RoleReleasable == nil {
+			e.RoleReleasable = make(map[string]float64, 1)
+		}
+		if e.Result != nil && e.TotalSupply > 0 {
+			e.RoleReleasable[domain.RoleBoth] = releasableFor(
+				e.TotalSupply, e.Result.TotalDemand, e.releaseTargetUtilization())
+		}
 		roleSet[domain.RoleBoth] = struct{}{}
 	}
 
@@ -245,7 +298,24 @@ func safeRemovalReplicasForRole(e NamedAnalyzerResult, v, role string) int {
 	if prc <= 0 {
 		return 0
 	}
-	n := int(math.Floor(e.RoleSpare[role] / prc))
+	// Measured against the release target, not the boundary. RoleSpare has
+	// already decided that this role MAY release (needsScaleDownForRole); this
+	// decides how many, and asking it against the bottom of the band is what
+	// pinned run T at nine replicas it did not need.
+	//
+	// Falls back to RoleSpare when RoleReleasable was never populated, so an
+	// optimizer path that does not call initRoleState behaves as before rather
+	// than releasing nothing.
+	// The LARGER of the two, never the smaller. This change exists to widen a
+	// release the boundary-measured budget was refusing, so it must only ever
+	// ADD permission -- taking the release target unconditionally would shrink
+	// the budget wherever RoleSpare was derived from something other than this
+	// supply figure, and silently withdraw a scale-down that works today.
+	budget := e.RoleSpare[role]
+	if v, ok := e.RoleReleasable[role]; ok && v > budget {
+		budget = v
+	}
+	n := int(math.Floor(budget / prc))
 	if n < 0 {
 		return 0
 	}
@@ -265,6 +335,15 @@ func applyDeallocationForRole(e *NamedAnalyzerResult, v, role string, n int) {
 	e.RoleSpare[role] -= float64(n) * prc
 	if e.RoleSpare[role] < 0 {
 		e.RoleSpare[role] = 0
+	}
+	// Both budgets move together. RoleReleasable is what bounds the NEXT
+	// variant of this role, so leaving it untouched would let a two-variant
+	// role release the same capacity twice.
+	if e.RoleReleasable != nil {
+		e.RoleReleasable[role] -= float64(n) * prc
+		if e.RoleReleasable[role] < 0 {
+			e.RoleReleasable[role] = 0
+		}
 	}
 }
 
