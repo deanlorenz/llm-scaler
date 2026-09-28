@@ -98,10 +98,33 @@ func prcForVariant(r *domain.AnalyzerResult, v string) float64 {
 // =============================================================================
 
 // releaseTargetUtilization is the utilisation a release aims to leave the fleet
-// at: the midpoint of the hysteresis band. It is derived, not configured --
-// scaleUpThreshold and scaleDownBoundary are already validated against each
-// other (config enforces up > down), and a third knob whose only sane value is
-// between them would be a knob nobody can set correctly.
+// at: one QUARTER of the way up the hysteresis band, not the middle of it.
+//
+// It is derived, not configured -- scaleUpThreshold and scaleDownBoundary are
+// already validated against each other (config enforces up > down), and a third
+// knob whose only sane value is between them would be a knob nobody can set
+// correctly.
+//
+// The quarter rather than the half, because the distance left between a released
+// fleet and the scale-up threshold IS the anti-flap margin, and the midpoint
+// spends too much of it. Worst case -- a release that lands exactly on the
+// target -- leaves demand this much room before the replica is re-ordered:
+//
+//	boundary (old behaviour)  0.7000   +21.4 %
+//	quarter  (this)           0.7375   +15.3 %
+//	midpoint                  0.7750    +9.7 %
+//
+// Two couplings make a narrow margin worse than it looks. sticky.go's
+// HoldPublishedScaleDown releases the hold precisely when demand at that count
+// would reach the scale-up threshold, so the mechanism that protects a descent
+// steps aside exactly at the line this target creates; and KEDA's HPA takes the
+// MAX over a 300 s window on the way down, so one re-ordered replica in twenty
+// cycles pins the fleet for the rest of the window and the release is worth
+// nothing.
+//
+// The quarter costs nothing measurable: on run T's figures it releases the same
+// single replica the midpoint did (budget 1,075,155 against a per-replica
+// 930,508) and stops at the same eight.
 //
 // It falls back to scaleDownBoundary -- the previous behaviour exactly -- when
 // either threshold is missing or inverted, so a malformed configuration loses
@@ -109,7 +132,7 @@ func prcForVariant(r *domain.AnalyzerResult, v string) float64 {
 func (e NamedAnalyzerResult) releaseTargetUtilization() float64 {
 	if e.ScaleUpThreshold > 0 && e.ScaleDownBoundary > 0 &&
 		e.ScaleUpThreshold > e.ScaleDownBoundary {
-		return (e.ScaleUpThreshold + e.ScaleDownBoundary) / 2
+		return e.ScaleDownBoundary + (e.ScaleUpThreshold-e.ScaleDownBoundary)/4
 	}
 	return e.ScaleDownBoundary
 }
@@ -284,9 +307,10 @@ func variantsForRole(vcs []variantRecord, role string) []variantRecord {
 }
 
 // safeRemovalReplicasForRole returns the number of replicas of variant v that
-// can safely be removed — floor(RoleSpare[role] / PRC[v]) for the entry if it
-// is live, has a Result and RoleSpare, and PRC > 0. Returns 0 if the entry is
-// not live, has no Result/RoleSpare, PRC ≤ 0, or RoleSpare[role] < 0.
+// can safely be removed: floor(budget / PRC[v]), where budget is the LARGER of
+// RoleSpare[role] and RoleReleasable[role] -- the boundary-measured budget and
+// the release-target one. Returns 0 if the entry is not live, has no
+// Result/RoleSpare, PRC <= 0, or the budget is not positive.
 func safeRemovalReplicasForRole(e NamedAnalyzerResult, v, role string) int {
 	if !e.Live {
 		return 0 // non-live: no current basis to constrain removal
@@ -306,14 +330,19 @@ func safeRemovalReplicasForRole(e NamedAnalyzerResult, v, role string) int {
 	// Falls back to RoleSpare when RoleReleasable was never populated, so an
 	// optimizer path that does not call initRoleState behaves as before rather
 	// than releasing nothing.
+	//
 	// The LARGER of the two, never the smaller. This change exists to widen a
 	// release the boundary-measured budget was refusing, so it must only ever
 	// ADD permission -- taking the release target unconditionally would shrink
 	// the budget wherever RoleSpare was derived from something other than this
 	// supply figure, and silently withdraw a scale-down that works today.
+	//
+	// Because it is a max, an absent entry and a present zero behave alike here.
+	// The comma-ok is kept so that this reads the same way as the write side,
+	// which does have to tell them apart -- see applyDeallocationForRole.
 	budget := e.RoleSpare[role]
-	if v, ok := e.RoleReleasable[role]; ok && v > budget {
-		budget = v
+	if rel, ok := e.RoleReleasable[role]; ok && rel > budget {
+		budget = rel
 	}
 	n := int(math.Floor(budget / prc))
 	if n < 0 {
@@ -322,8 +351,9 @@ func safeRemovalReplicasForRole(e NamedAnalyzerResult, v, role string) int {
 	return n
 }
 
-// applyDeallocationForRole decrements the entry's RoleSpare[role] by
-// n × PRC[v]. Clamps to 0. Never mutates Result.
+// applyDeallocationForRole charges n replicas of variant v against this role's
+// budgets -- RoleSpare and, when one was computed, RoleReleasable -- by
+// n x PRC[v]. Clamps both to 0. Never mutates Result.
 func applyDeallocationForRole(e *NamedAnalyzerResult, v, role string, n int) {
 	if e.Result == nil || e.RoleSpare == nil {
 		return
@@ -339,11 +369,19 @@ func applyDeallocationForRole(e *NamedAnalyzerResult, v, role string, n int) {
 	// Both budgets move together. RoleReleasable is what bounds the NEXT
 	// variant of this role, so leaving it untouched would let a two-variant
 	// role release the same capacity twice.
-	if e.RoleReleasable != nil {
-		e.RoleReleasable[role] -= float64(n) * prc
-		if e.RoleReleasable[role] < 0 {
-			e.RoleReleasable[role] = 0
+	//
+	// Charged only where a budget EXISTS. `m[k] -= x` on an absent key creates
+	// it at -x, clamped here to 0 -- which converts "no budget was computed for
+	// this role" into "computed, and it is nothing", the one distinction the
+	// read side documents. It is harmless while the read takes a max, and
+	// becomes a role that releases nothing after its first variant the moment
+	// that max is replaced.
+	if cur, ok := e.RoleReleasable[role]; ok {
+		cur -= float64(n) * prc
+		if cur < 0 {
+			cur = 0
 		}
+		e.RoleReleasable[role] = cur
 	}
 }
 

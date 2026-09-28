@@ -22,7 +22,8 @@ import (
 // by the engine (model scope) and decremented in place by applyAllocation as
 // the optimizer allocates replicas.
 // For disaggregated (P/D) models, the optimizer calls initRoleState
-// to populate RoleSpare per role and initialize picker-local demand.
+// to populate RoleSpare and RoleReleasable per role and initialize
+// picker-local demand.
 // The original Result values are never mutated.
 type NamedAnalyzerResult struct {
 	Name      string

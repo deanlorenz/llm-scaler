@@ -143,25 +143,6 @@ func (a *SaturationAnalyzer) noteLineMismatch(model itl.Model, params *capacity.
 		"gates", false)
 }
 
-// deriveMu prices one replica of this variant at saturation under the shape it
-// is serving now.
-//
-// kvPerRequest is the time-averaged footprint IL + OL/2 (shape.Shape.KVreq):
-// sequence ages are spread over [0, OL] in steady state, so the average
-// resident sequence carries half its generation.
-//
-// The cap is the engine's max_num_seqs, and it is not optional: short requests
-// imply more resident sequences than the engine will admit, and the trace's
-// second phase ran at exactly 256, the configured ceiling. itl.TokenRate does
-// not apply it -- it prices a cache, not an engine -- so the sequence count is
-// capped here before the division.
-//
-// C is the engine's whole KV capacity, not k1. k1 is already C times the
-// analyzer's KV threshold, and itl.Sequences applies k itself, so passing k1
-// would apply a threshold twice.
-// (The paragraph above belongs to deriveMu, whose declaration is below
-// pricingK's.)
-
 // pricingK is the KV utilization, as a fraction of PHYSICAL capacity, that a
 // replica is considered full at -- the point mu is priced for.
 //
@@ -187,6 +168,22 @@ func pricingK(cfg *config.ScalingPolicy) float64 {
 	return min(max(k, itl.DefaultMinObservableK), itl.DefaultMaxObservableK)
 }
 
+// deriveMu prices one replica of this variant at saturation under the shape it
+// is serving now.
+//
+// kvPerRequest is the time-averaged footprint IL + OL/2 (shape.Shape.KVreq):
+// sequence ages are spread over [0, OL] in steady state, so the average
+// resident sequence carries half its generation.
+//
+// The cap is the engine's max_num_seqs, and it is not optional: short requests
+// imply more resident sequences than the engine will admit, and the trace's
+// second phase ran at exactly 256, the configured ceiling. itl.TokenRate does
+// not apply it -- it prices a cache, not an engine -- so the sequence count is
+// capped here before the division.
+//
+// C is the engine's whole KV capacity, not k1. k1 is already C times the
+// analyzer's KV threshold, and itl.Sequences applies k itself, so passing k1
+// would apply a threshold twice.
 func deriveMu(model itl.Model, params *capacity.EngineParams,
 	totalKvTokens int64, fleet shape.Shape, kPrice float64) derivedMu {
 	avgOutput := fleet.AvgOutputTokens

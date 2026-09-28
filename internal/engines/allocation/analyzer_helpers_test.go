@@ -377,7 +377,19 @@ var _ = Describe("releasing against a target inside the band", func() {
 
 	It("derives the target from the two thresholds, and degrades safely", func() {
 		e := atReplicas(9)
-		Expect(e.releaseTargetUtilization()).To(BeNumerically("~", 0.775, 1e-9))
+		Expect(e.releaseTargetUtilization()).To(BeNumerically("~", 0.7375, 1e-9),
+			"a quarter of the way up the band, not the middle of it")
+
+		By("leaving most of the band as anti-flap margin")
+		// The distance from the release target to the scale-up threshold IS the
+		// margin, and it is the reason this is a quarter rather than a half.
+		// sticky.go releases its scale-down hold exactly when demand at that
+		// count would reach the scale-up threshold, and KEDA's HPA takes the max
+		// over 300 s on the way down -- so one re-ordered replica in twenty
+		// cycles throws the release away. The midpoint left +9.7%; this leaves
+		// over 15%.
+		headroom := scaleUp/e.releaseTargetUtilization() - 1
+		Expect(headroom).To(BeNumerically(">", 0.15))
 
 		By("falling back to the boundary when the thresholds are unusable")
 		bad := *e

@@ -797,30 +797,6 @@ func useDerived(derivedOK bool, reading throughputReading) bool {
 // produce it, so it cannot be spoofed by a real output bucket.
 const derivedBucket = "derived"
 
-// historyKey is the bucket a replica's saturated observations (k2, and the
-// throughput recorded beside it) are stored and read under.
-//
-// Scoped by role, not just model/accelerator/bucket: prefill's own
-// avgOutputTokens is always ~0-1 (it hands off to decode before
-// generating anything), so it always lands in the "short" bucket -- the
-// same bucket a cold/fresh decode replica lands in before it's served
-// real traffic. Without the role in the key, one role's P1-obs seeds
-// history the other role then reads back via P2-hist, silently reusing
-// an unrelated role's occupancy reading as its own capacity estimate.
-//
-// The queue threshold is in the key because it DEFINES what a P1 observation
-// means: k2 is recorded as the occupancy seen when the queue was considered
-// saturated, so a reading taken at threshold 2 is not a capacity estimate at
-// threshold 100. Nothing else invalidates history -- EvictStaleHistory is
-// age-based and knows nothing about policy -- so without this an operator
-// retuning queueLengthThreshold keeps being sized by observations recorded
-// under the old one. Measured: a k2 of 2 learned under a low threshold kept
-// a variant at utilization 1.0 under a threshold of 100, where P1 could not
-// fire at all.
-//
-// historyKey itself is below; throughputKey comes first because it is the one
-// the demand floor reads.
-
 // throughputKey is historyKey with the fleet's input bucket COMPOSED INTO it --
 // not appended, see the body: a saturated throughput is a property of a replica
 // AND the (I, O) it was measured under, so a reading recorded at one input
@@ -846,6 +822,26 @@ func (a *SaturationAnalyzer) throughputKey(
 		classifyOutputLength(avgOutput), queueThreshold)
 }
 
+// historyKey is the bucket a replica's saturated observations (k2, and the
+// throughput recorded beside it) are stored and read under.
+//
+// Scoped by role, not just model/accelerator/bucket: prefill's own
+// avgOutputTokens is always ~0-1 (it hands off to decode before
+// generating anything), so it always lands in the "short" bucket -- the
+// same bucket a cold/fresh decode replica lands in before it's served
+// real traffic. Without the role in the key, one role's P1-obs seeds
+// history the other role then reads back via P2-hist, silently reusing
+// an unrelated role's occupancy reading as its own capacity estimate.
+//
+// The queue threshold is in the key because it DEFINES what a P1 observation
+// means: k2 is recorded as the occupancy seen when the queue was considered
+// saturated, so a reading taken at threshold 2 is not a capacity estimate at
+// threshold 100. Nothing else invalidates history -- EvictStaleHistory is
+// age-based and knows nothing about policy -- so without this an operator
+// retuning queueLengthThreshold keeps being sized by observations recorded
+// under the old one. Measured: a k2 of 2 learned under a low threshold kept
+// a variant at utilization 1.0 under a threshold of 100, where P1 could not
+// fire at all.
 func (a *SaturationAnalyzer) historyKey(
 	modelID, namespace, variantName, accelerator string,
 	gpuCount int,
