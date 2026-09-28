@@ -25,6 +25,19 @@ type podServingState struct {
 	// can possibly have taken -- see podUptime, and the guard in
 	// attributeInstance that spends it.
 	startedAt time.Time
+	// startSeconds is how long this Pod took to become Ready: the Ready
+	// condition's LastTransitionTime less the Pod's CreationTimestamp. Zero
+	// when the Pod is not ready yet, or when either timestamp is missing.
+	//
+	// From the Pod object rather than from polling. The demand floor projects
+	// the backlog forward over this figure and multiplies it by the arrival
+	// rate, so a whole cycle of rounding error -- which "the first cycle we saw
+	// it Ready" would carry -- lands as tens of requests of phantom backlog.
+	//
+	// It is the time to READY, not to serving. Readiness is what the Service and
+	// the EPP route on, so it is the moment the replica starts draining a queue,
+	// which is what the projection is about.
+	startSeconds float64
 }
 
 // namespacePods is one namespace's listing, plus whether it could be read.
@@ -71,10 +84,45 @@ func podStates(ctx context.Context, reader client.Reader, namespace string) name
 		if p.Status.StartTime != nil {
 			state.startedAt = p.Status.StartTime.Time
 		}
+		state.startSeconds = podStartSeconds(p)
 		out[p.Name] = state
 	}
 	return namespacePods{byName: out, listed: true}
 }
+
+// podStartSeconds is how long the Pod took to become Ready, from its own
+// timestamps. Zero when it is not ready, or when either timestamp is absent.
+//
+// Negative and absurd values are refused rather than clamped. A clock skew
+// between the API server and the kubelet can order the two timestamps wrongly,
+// and a zero here reads as "not measured" -- which the caller already handles --
+// where a negative or a nonsense figure would travel into a backlog projection.
+func podStartSeconds(p *corev1.Pod) float64 {
+	if p.CreationTimestamp.IsZero() {
+		return 0
+	}
+	for _, c := range p.Status.Conditions {
+		if c.Type != corev1.PodReady || c.Status != corev1.ConditionTrue {
+			continue
+		}
+		if c.LastTransitionTime.IsZero() {
+			return 0
+		}
+		d := c.LastTransitionTime.Time.Sub(p.CreationTimestamp.Time).Seconds()
+		if d <= 0 || d > maxCredibleStartSeconds {
+			return 0
+		}
+		return d
+	}
+	return 0
+}
+
+// maxCredibleStartSeconds bounds what is accepted as a start time. An hour is
+// far beyond any real engine start -- the longest measured here is 82 s, and a
+// GLM-5.2 cold start with a cold JIT cache is about 500 s -- so anything past it
+// is a clock problem or a Pod that was created long before it was scheduled,
+// neither of which describes how long the NEXT replica will take.
+const maxCredibleStartSeconds = 3600.0
 
 // podIsReady reports the Pod's Ready condition.
 //
@@ -182,6 +230,25 @@ func (c *ReplicaMetricsCollector) podUptime(
 		return 0, false
 	}
 	return uptime, true
+}
+
+// podStartSeconds reports how long this Pod took to become Ready, and zero when
+// that cannot be established.
+//
+// Zero rather than a fail-open guess, which is the opposite of podReady's
+// contract and deliberately so: readiness has a safe default ("assume it is
+// serving") because the fleet is already sized for it, while a start time has
+// none. A guessed dead time multiplies the arrival rate straight into a backlog
+// projection, so "not measured" has to stay distinguishable from "measured as
+// something" -- the analyzer falls back to the ScaledObject's seed on zero.
+func (c *ReplicaMetricsCollector) podStartSeconds(
+	ctx context.Context, namespace, podName string,
+) float64 {
+	state, found, listed := c.servingState(ctx, namespace, podName)
+	if !listed || !found {
+		return 0
+	}
+	return state.startSeconds
 }
 
 // seriesPodName pulls the Pod identity out of a series' labels.

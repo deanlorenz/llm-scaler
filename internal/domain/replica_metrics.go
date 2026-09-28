@@ -84,6 +84,17 @@ type ReplicaMetrics struct {
 	// real, so the analyzer counts it.
 	Ready bool
 
+	// StartSeconds is how long this replica took to become Ready: the Pod's
+	// Ready condition LastTransitionTime less its CreationTimestamp. Zero when
+	// the Pod is not ready, when either timestamp is missing, or when the
+	// difference is not credible (see collector.podStartSeconds).
+	//
+	// It is the dead time the demand floor projects the backlog over. Measured
+	// per replica and aggregated per VARIANT by the analyzer, because it is an
+	// image, a set of engine flags and a node -- two variants of one model
+	// routinely differ.
+	StartSeconds float64
+
 	// Metadata contains freshness information (optional)
 	Metadata *ReplicaMetricsMetadata `json:"metadata,omitempty"`
 
