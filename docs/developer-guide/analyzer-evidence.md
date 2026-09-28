@@ -255,6 +255,36 @@ wrong by up to 8.28 req/s and went NEGATIVE (-0.20, -2.38 req/s) at the two
 samples where the queue was draining fastest, which is worse than the
 under-read it was meant to repair.
 
+*2026-09-28, run U (`feat/mu-from-itl` at 08ad4f49), P/D fleet, same 6 req/s
+trace.* The same comparison on a fleet whose flow controller queued harder. The
+placement arm does not merely under-read here, it reaches **zero**:
+
+| wall clock | placements (the fallback arm) | enqueues (the arm in use) | EPP queue |
+|---|---|---|---|
+| 13:39:30 | 3.22 | 5.74 | 227 |
+| 13:40:00 | 3.22 | 5.56 | 395 |
+| **13:40:30** | **0.00** | **5.94** | **584** |
+| **13:41:00** | **0.00** | **6.10** | **766** |
+| 13:41:30 | 2.69 | 6.00 | 0 |
+
+Two consecutive samples at 0.00, with 766 requests queued in the scheduler at
+the second of them. Nothing was being placed because every replica that could
+take work was already full, which is exactly the state the arrival rate is
+supposed to describe.
+
+Zero is worse than an under-read, because it is not only a small number. The
+floor hands `backlogAtLanding` its start times only when `input.ArrivalRate > 0`
+(`throughput_floor.go`), so a fleet on the placement arm would lose the arrival
+term **and** the landing projection at the same moment, and keep only the
+backlog term -- at the one point in a ramp where all three are load-bearing.
+This run was on the enqueue arm and read 5.48-6.08 throughout, matching the
+offered rate; it is the control, not the failure.
+
+The fleets still on the placement arm are those the model-label join drops,
+where one pool serves several models (`arrivalModelLabel`). Their queue cannot
+be attributed per model either, so the fix is not a better fallback query --
+it is that those fleets need a per-model enqueue counter from EPP.
+
 ## How to add to this file
 
 One section per decision, with the date, the run identifier and the numbers
