@@ -88,7 +88,7 @@ stack](guides/testing-with-llm-d/) · [benchmark WVA](guides/benchmarking/)
 
 ## What this project is
 
-- **[Project proposal](project-proposal.md)** — what it does, what is measured, what it does not cover, mapped against the llm-d autoscaling problem space
+- **[Project proposal](project-proposal.md)** — the case for an analytical autoscaler: what it does, what is measured, what it does not cover, mapped against the llm-d autoscaling problem space
 - **[blog/](blog/)** — posts written for people outside the repository
 
 ## Design notes

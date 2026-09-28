@@ -1,13 +1,19 @@
 # llm-scaling-manager: project proposal
 
+**Status:** proposal, 2026-09-28. Built and running, not a design note. The
+scaling path, warm pool, scale-to-zero and quota limiting are cluster-verified
+on Kubernetes and on OpenShift, and every measurement below links to the run
+that produced it.
+
 ## Summary
 
-llm-scaling-manager is an autoscaler for llm-d inference. It works out how many
-replicas each model and variant needs, decides for all of them together against
-one GPU budget, and does it from a capacity model rather than a threshold on a
-raw metric. Alongside that it ships a shared warm pool to cover the minutes a
-new replica spends loading, scale-to-zero, and separate handling for prefill and
-decode.
+llm-scaling-manager is an analytical autoscaler for llm-d inference. Analytical
+means the replica count is computed from a capacity model, from what one replica
+can actually serve at the shape of traffic arriving, rather than read off a
+threshold on a raw metric. It works out how many replicas each model and variant
+needs and decides for all of them together against one GPU budget. Alongside
+that it ships a shared warm pool to cover the minutes a new replica spends
+loading, scale-to-zero, and separate handling for prefill and decode.
 
 We built it because the signals a general-purpose autoscaler can act on do not
 tell you what you need to know. We have a benchmark where request rate, queue
@@ -162,10 +168,9 @@ with KEDA owning the HPA. One consequence worth knowing: the HPA takes the
 maximum published inside its scale-down window, so we hold a published
 scale-down across cycles to stop one noisy sample pinning the fleet.
 
-Running on CoreWeave H200s and on OpenShift. The scaling path, warm pool,
-scale-to-zero and quota limiting are built and cluster-verified; replica
-reallocation across priorities is designed but not built; P/D role switching is
-experimental. Apache 2.0, and the module path has not changed.
+Measured on H200 nodes. Replica reallocation across priorities is designed but
+not built, and P/D role switching is experimental. Apache 2.0, and the module
+path has not changed.
 
 Design detail lives in [concepts/](concepts/): what gets measured and how it
 becomes a replica count, the queueing model, and what the GPU budget counts.
