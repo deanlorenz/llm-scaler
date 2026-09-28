@@ -14,7 +14,7 @@ pool may only warm models into what is left over, so:
 At equality there is nothing left over, so the pool warms nothing for its entire
 life while holding every accelerator it has. Nothing about it looks like an
 error, because nothing is wrong — the reserve is doing exactly what it was told.
-WVA reports it rather than letting you find out from the bill.
+The scaling manager reports it rather than letting you find out from the bill.
 
 It is the **ceiling** that matters, not the pool's size right now: a pool
 momentarily at its reserve simply grows on the next pass, but a pool whose
@@ -51,7 +51,7 @@ Two things follow:
 
 - Getting it wrong is the expensive mistake. One model too many does not fail
   its own admission; it OOM-kills the launcher and takes **every model already
-  resident in that Pod** with it. WVA will not admit against a budget larger
+  resident in that Pod** with it. The scaling manager will not admit against a budget larger
   than the limit for exactly this reason.
 - Unlike the trigger metadata, changing it **rolls the pool** — it is a
   pod-template field, so every Pod restarts and every resident model is loaded
@@ -76,7 +76,7 @@ pool costs nothing.
 
 A value that cannot be read refuses the **whole** pool rather than being
 skipped: these decide how many accelerators it holds, so applying some of them
-would leave you reading a number that is in force nowhere. WVA names the pool
+would leave you reading a number that is in force nowhere. The scaling manager names the pool
 and the key.
 
 `max-hold` bounds the case where the ordinary replica never arrives, so a
@@ -93,19 +93,19 @@ much memory it may use. Both are read from the pool Pod's own spec, so they
 cannot disagree with it — but the memory limit is still a decision, and a
 load-bearing one. See [How many models fit in one Pod](#how-many-models-fit-in-one-pod).
 
-**Why the tuning is not on the Deployment.** A warm pool is a WVA concept that
-happens to have Pods, not a workload WVA happens to manage: nothing outside WVA
+**Why the tuning is not on the Deployment.** A warm pool is a scaling-manager concept that
+happens to have Pods, not a workload the scaling manager happens to manage: nothing outside the scaling manager
 reads one or creates one. Declaring it through a trigger keeps one rule with no
-exceptions — WVA manages what it is called about — and puts the reserve beside
+exceptions — the scaling manager manages what it is called about — and puts the reserve beside
 the ceiling it has to fit inside.
 
 ## Letting the pool resize itself
 
-The pool is scaled the same way every other workload here is: **WVA computes a
+The pool is scaled the same way every other workload here is: **the scaling manager computes a
 size, KEDA writes it.** `config/warmpool` ships a ScaledObject for the pool
 alongside its Deployment, and it is not optional: the trigger is what
-**declares** the pool to WVA. Delete it and you do not get a fixed-size pool,
-you get no pool at all — a Deployment holding accelerators that WVA reports as
+**declares** the pool to the scaling manager. Delete it and you do not get a fixed-size pool,
+you get no pool at all — a Deployment holding accelerators that the scaling manager reports as
 undeclared and will never warm anything into. To pin the size, set
 `minReplicaCount` equal to `maxReplicaCount` and leave the ScaledObject in
 place.
@@ -126,13 +126,13 @@ spec:
         warmPoolName: default   # must match the Deployment's llm-d.ai/warm-pool
 ```
 
-WVA publishes `lent + reserve + 1`: enough Pods to keep the reserve free
+the scaling manager publishes `lent + reserve + 1`: enough Pods to keep the reserve free
 alongside whatever is currently bridging, plus the one spare that makes
 admission possible at all.
 
 Three things follow from scaling it this way, and they are the reason for it:
 
-- **WVA needs no permission to resize anything.** Its ClusterRole stays
+- **the scaling manager needs no permission to resize anything.** Its ClusterRole stays
   read-only. A cluster-wide licence to change replica counts is the permission a
   cluster admin is most right to refuse, and the pool no longer asks for one.
 - **The asymmetry lives where you can see it.** Grow promptly, shrink slowly —
@@ -149,7 +149,7 @@ without a product label — holds at its current size under a bounded namespace
 until it can; without a limiter it grows regardless. A pool already above its
 allowance (a quota lowered after the fact) is not shrunk by this; it simply
 does not grow. The pool's GPUs are charged against the same allowance
-as model replicas, and the size WVA publishes is capped at what it holds plus
+as model replicas, and the size the scaling manager publishes is capped at what it holds plus
 what that allowance leaves — the log line is
 `warm pool is not growing: the namespace has no GPU allowance left for it`,
 with the figures. The check is ordered, not merely present: after the pool
@@ -171,11 +171,11 @@ maxReplicaCount: 3
 ```
 
 KEDA accepts it, the HPA is created with min and max both 3, and the pool stays
-there whatever WVA publishes.
+there whatever the scaling manager publishes.
 
 This is the **only** way to pin a pool. Deleting the ScaledObject does not give
 you a fixed pool — it gives you no pool at all, because the trigger is what
-declares it. The Deployment keeps its accelerators and WVA reports it as
+declares it. The Deployment keeps its accelerators and the scaling manager reports it as
 undeclared.
 
 Watch the ceiling when you pin: with `min == max`, `maxReplicaCount` is the only

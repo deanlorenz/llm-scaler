@@ -1,9 +1,9 @@
-# Install WVA in a namespace
+# Install the scaling manager in a namespace
 
 ## Overview
 
 This guide installs the Workload-Variant-Autoscaler into one namespace, where it
-sizes the llm-d model servers running there and nothing else. WVA decides how
+sizes the llm-d model servers running there and nothing else. The scaling manager decides how
 many replicas each variant needs from saturation and cost, and hands the decision
 to KEDA, which owns the HPA and does the scaling.
 
@@ -14,7 +14,7 @@ namespace's owner installs and upgrades the controller themselves.
 
 ## Prerequisites
 
-- **llm-d model servers in the namespace, deployed first.** WVA scales what is
+- **llm-d model servers in the namespace, deployed first.** the scaling manager scales what is
   already serving; it does not deploy models, and the install refuses a namespace
   with none rather than leave a healthy controller with nothing to scale. No
   model yet? [Install a small llm-d model](../install-small-model/) puts one on a
@@ -46,8 +46,8 @@ patch](../../reference/workload-preparation.md#writing-the-patch-make-workload-p
 If you want a model to scale **from zero**, its EPP must run with the
 `flowControl` feature gate: that gate is what publishes the queue depth, and at
 zero replicas there are no model-server metrics, so it is the only evidence that
-anyone is asking for the model. WVA enables it on an EPP it installs itself; an
-EPP that came from an llm-d guide has it off unless you turned it on. WVA reads
+anyone is asking for the model. The scaling manager enables it on an EPP it installs itself; an
+EPP that came from an llm-d guide has it off unless you turned it on. The scaling manager reads
 the queue by scraping the EPP, and falls back to reading the same metric from
 Prometheus when it cannot — so a Prometheus that already scrapes your EPP covers
 it. Without the gate, neither path has anything to read, and scale-from-zero
@@ -157,7 +157,7 @@ missing.
 
 ### 4. Register the workloads
 
-Nothing scales until a ScaledObject exists: WVA is only ever asked about
+Nothing scales until a ScaledObject exists: The scaling manager is only ever asked about
 workloads KEDA calls it about.
 
 <!-- guide:deploy.register start -->
@@ -188,7 +188,7 @@ plan:
 Edit it; `scaledobjects-apply` does exactly what you left in it. Every field is
 explained in the comments the file is written with, so there is nothing to look
 up. `apply: adopt` is for a workload something else already scales: it repoints
-that object at WVA instead of adding a second, because two ScaledObjects on one
+that object at the scaling manager instead of adding a second, because two ScaledObjects on one
 target is two HPAs writing the same replica count. A workload whose model could
 not be read is written as `no` with the reason, and never created without one.
 
@@ -265,16 +265,16 @@ horizontalpodautoscaler.autoscaling/keda-hpa-dev-...  Deployment/dev-model-decod
 
 Three things to read, in this order:
 
-- **`READY True`** — KEDA reached WVA and got a metric spec back. The HPA is
+- **`READY True`** — KEDA reached the scaling manager and got a metric spec back. The HPA is
   KEDA's; it creates one per ScaledObject.
-- **`TARGETS` showing a number** — the decision is flowing. `1/1 (avg)` is WVA
+- **`TARGETS` showing a number** — the decision is flowing. `1/1 (avg)` is the scaling manager
   saying one replica is the right size.
 - **`ACTIVE True`** — there is traffic. `Unknown` on a workload nobody is
   calling is normal, and not a fault.
 
 `TARGETS` reading **`cpu: <unknown>/80%`** means the opposite of it looks: KEDA
-could not fetch the metric spec from WVA and fell back to a CPU metric, so the
-workload is not being scaled by WVA at all. `READY False` accompanies it. The
+could not fetch the metric spec from the scaling manager and fell back to a CPU metric, so the
+workload is not being scaled by the scaling manager at all. `READY False` accompanies it. The
 usual cause is a trigger naming a scaler it cannot reach, which is what a
 ScaledObject written for a different install does — the shipped samples name the
 default namespace, and a namespace-scoped install is not there. Repair it with:
@@ -291,7 +291,7 @@ for the other causes.
 
 ### 2. Read the decisions
 
-**Give it an optimize cycle first.** WVA decides on a timer, so a ScaledObject
+**Give it an optimize cycle first.** the scaling manager decides on a timer, so a ScaledObject
 created seconds ago has not been through one yet and this returns nothing —
 which reads like a broken install and is not. Measured on a fresh namespace: 0
 decision lines immediately after `scaledobjects-apply`, 53 a few minutes later,
@@ -323,7 +323,7 @@ Kubernetes, import `deploy/grafana/operational-dashboard.json` into your own
 Grafana and point it at the Prometheus `make check-prereqs` reports.
 
 Stands up a Grafana private to this namespace — not the shared cluster
-instance, whose dashboards are read-only — with WVA's operational dashboard
+instance, whose dashboards are read-only — with the scaling manager's operational dashboard
 already imported, reading Thanos through a namespaced role rather than any
 cluster-scoped grant. Requires grafana-operator's CRDs; that is a cluster-admin
 install, so this only creates namespaced objects and says plainly if they are
@@ -344,12 +344,12 @@ make benchmark-smoke NAMESPACE=${NAMESPACE}
 Symmetric 1024-in/1024-out at 15 req/s for five minutes, then a snapshot of the
 dashboard over
 exactly that window, and a line telling you where it is. It answers one question
-— is WVA actually scaling this? — and it needs a GPU cluster, because
+— is the scaling manager actually scaling this? — and it needs a GPU cluster, because
 that is what serving a model needs.
 
 It is not a measurement of the model: five minutes of Poisson arrivals is not a
 latency study, and a small model's TTFT says nothing about a large one's. For
-numbers worth comparing, see [Benchmark WVA](../benchmarking/).
+numbers worth comparing, see [Benchmark the scaling manager](../benchmarking/).
 
 ### 5. (Optional) See whether this namespace wants a warm pool
 
@@ -402,7 +402,7 @@ make undeploy-wva
 <!-- guide:cleanup.uninstall end -->
 
 This removes the ScaledObjects it created, and KEDA restores each workload to the
-replica count it had before WVA sized it. Objects you adopted are left alone and
+replica count it had before the scaling manager sized it. Objects you adopted are left alone and
 listed by name — they were not this installer's to delete — so repoint or remove
 them yourself: their trigger now calls a scaler that is gone, KEDA keeps the HPA,
 and a workload parked at zero can never be woken.
@@ -415,13 +415,13 @@ and a workload parked at zero can never be woken.
 InferencePool in the namespace keeps serving
 
 -- which is usually what you want,
-since WVA did not create them and something else may depend on them.
+since the scaling manager did not create them and something else may depend on them.
 
 A drain hook applied with `WVA_WORKLOAD_PATCH_APPLY=true` stays with them for the
-same reason: those fields belong to the model server, not to WVA, so they outlive
+same reason: those fields belong to the model server, not to the scaling manager, so they outlive
 the uninstall. The next `helm upgrade` of that chart reverts them. A model cache
 created by `make model-cache` is likewise left alone -- it holds data. — which is usually what you want,
-since WVA did not create them and something else may depend on them.
+since the scaling manager did not create them and something else may depend on them.
 
 If you stood the model up with
 [Install a small llm-d model](../install-small-model/), that is what removes it:
@@ -460,7 +460,7 @@ Full list: [Configuration reference](../../reference/configuration.md).
 ## Next
 
 - [After the install](../../reference/operations.md)
-- [Bound every WVA by real GPUs](../admin-gpu-bounding/) — otherwise
+- [Bound every install by real GPUs](../admin-gpu-bounding/) — otherwise
   scaling is bounded only by each workload's `maxReplicaCount`
 - [Bridge a scale-up with a warm pool](../warm-pool/) — hold models loaded and
   asleep so a scale-up serves while its replica is still loading

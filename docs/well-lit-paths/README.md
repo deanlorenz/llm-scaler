@@ -20,8 +20,8 @@ Start from the problem you have.
 | One model, two accelerator types, and you want the cost-efficient one first | [Serve one model on two accelerator variants](accelerator-variants/) | Stable |
 | Prefill and decode have different shapes and you want them scaled apart | [Scale a P/D-disaggregated model](pd-disaggregation/) | **Experimental** |
 
-Everything here assumes WVA is installed and a workload is registered. If it is
-not, start at [Install WVA in a namespace](../guides/install-in-namespace/) —
+Everything here assumes the scaling manager is installed and a workload is registered. If it is
+not, start at [Install the scaling manager in a namespace](../guides/install-in-namespace/) —
 the paths pick up after it.
 
 Everything here also assumes a replica starts as fast as it can. Every ramp on

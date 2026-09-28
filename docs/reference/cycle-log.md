@@ -1,6 +1,6 @@
-# WVA Cycle Log
+# llm-scaling-manager Cycle Log
 
-The WVA saturation engine emits two structured INFO log lines per reconcile
+The scaling manager saturation engine emits two structured INFO log lines per reconcile
 cycle per model. These lines are the primary observability instrument for
 understanding what the analyzer and optimizer computed without enabling
 verbose debug logging.
@@ -38,7 +38,7 @@ optimizer actually receives.
 
 | Field | Description |
 |---|---|
-| `modelID` | WVA model ID (unique within a namespace) |
+| `modelID` | the scaling manager model ID (unique within a namespace) |
 | `namespace` | Kubernetes namespace |
 | `analyzer` | Analyzer name, e.g. `"saturation"`, `"throughput"` |
 | `supply` | Total token supply across ready replicas (readyCount × perReplicaCapacity) |
@@ -77,7 +77,7 @@ replica targets.
 
 | Field | Description |
 |---|---|
-| `modelID` | WVA model ID |
+| `modelID` | the scaling manager model ID |
 | `namespace` | Kubernetes namespace |
 | `decisions[].name` | Variant name |
 | `decisions[].curr` | Current replica count at the time of this cycle |

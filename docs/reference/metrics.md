@@ -2,11 +2,11 @@
 
 ## Overview
 
-The Workload Variant Autoscaler (WVA) includes a comprehensive metrics health monitoring system that validates vLLM metrics availability and provides clear status feedback through Kubernetes conditions. This feature helps operators quickly diagnose issues with ServiceMonitor configuration and Prometheus scraping.
+llm-scaling-manager includes a comprehensive metrics health monitoring system that validates vLLM metrics availability and provides clear status feedback through Kubernetes conditions. This feature helps operators quickly diagnose issues with ServiceMonitor configuration and Prometheus scraping.
 
 ## Status Conditions
 
-WVA now exposes two status conditions on each `VariantAutoscaling` resource:
+the scaling manager now exposes two status conditions on each `VariantAutoscaling` resource:
 
 ### 1. MetricsAvailable
 
@@ -83,7 +83,7 @@ Example output:
 
 ## Graceful Degradation
 
-When metrics are unavailable, WVA implements graceful degradation:
+When metrics are unavailable, the scaling manager implements graceful degradation:
 
 1. **Skips optimization** for affected variants (no scaling decisions)
 2. **Maintains current replica count** (doesn't scale to zero or make random changes)
@@ -126,7 +126,7 @@ When metrics are unavailable, WVA implements graceful degradation:
 2. **Set up alerts** for prolonged MetricsAvailable=False conditions
 3. **Review condition messages** for troubleshooting guidance
 4. **Validate ServiceMonitor** configuration during initial deployment
-5. **Test metrics flow** before relying on WVA for production autoscaling
+5. **Test metrics flow** before relying on the scaling manager for production autoscaling
 
 ## Related Documentation
 

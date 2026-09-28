@@ -12,7 +12,7 @@ how long a replica takes to start, never by peak load.
 **It is not free.** Every pool Pod holds its accelerators continuously, whether
 lending or idle, and those accelerators count against your namespace's quota
 like any other workload. A pool of N Pods lowers your maximum fleet by N. That
-is a cost decision, which is why WVA never creates a pool for you.
+is a cost decision, which is why the scaling manager never creates a pool for you.
 
 Two properties are worth knowing before you size one:
 

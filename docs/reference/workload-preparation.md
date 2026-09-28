@@ -3,12 +3,12 @@
 Three things decide whether a scale-up actually helps: whether a new replica can
 get to Ready quickly -- its weights, and everything else on the way -- whether
 an old one can leave without dropping requests, and whether the Deployment says
-enough about itself for WVA to act on. None are WVA settings -- they are
+enough about itself for the scaling manager to act on. None are the scaling manager settings -- they are
 properties of the model server. `make workload-patch` writes the first two;
 the rest of the start path is a checklist, below.
 
-> Part of the [WVA deployment guide](../../deploy/). For what to watch once it is
-> running, see [Watching what WVA decides](monitoring.md).
+> Part of the [the scaling manager deployment guide](../../deploy/). For what to watch once it is
+> running, see [Watching what the scaling manager decides](monitoring.md).
 
 ## Weights and the model cache
 
@@ -114,7 +114,7 @@ its image from the kubelet's garbage collection, a running one does. The
 image has to carry `/bin/sh` for that; one that does not is still pulled
 (the kubelet fetched it to create the container) and `status` says so --
 `pulled`, not `present` -- but nothing holds it. Several images are a
-comma-separated list. Nothing in WVA depends on the holder; it
+comma-separated list. Nothing in the scaling manager depends on the holder; it
 is a start-time measure, and `prepull-status` is how you know it worked --
 the node's own image list is compared against the reference, so an image
 named differently from what the pods pull shows as absent on every node.
@@ -282,7 +282,7 @@ many threads exist and are a further step, unmeasured here.
 
 The benchmark standup has the same measure under
 `BENCHMARK_MODEL_HOSTPATH=<dir>`; what the harness does with it is in
-[Benchmark WVA](../guides/benchmarking/README.md#replica-start-time-in-the-harness).
+[Benchmark the scaling manager](../guides/benchmarking/README.md#replica-start-time-in-the-harness).
 
 ### Engine caches on the node's disk
 
@@ -469,11 +469,11 @@ separation.
 The benchmark standup has the same measure under
 `BENCHMARK_ENGINE_CACHE_HOSTPATH=<dir>`, which defaults to
 `BENCHMARK_MODEL_HOSTPATH`; what the harness does with it is in
-[Benchmark WVA](../guides/benchmarking/README.md#replica-start-time-in-the-harness).
+[Benchmark the scaling manager](../guides/benchmarking/README.md#replica-start-time-in-the-harness).
 
 The benchmark harness this repository uses puts its own steps on the engine's
 start path; what they are and how the benchmark scenarios handle them is in
-[Benchmark WVA](../guides/benchmarking/README.md#replica-start-time-in-the-harness).
+[Benchmark the scaling manager](../guides/benchmarking/README.md#replica-start-time-in-the-harness).
 
 ## Draining before scale-down
 
@@ -482,7 +482,7 @@ client sees a truncated body — `ClientPayloadError` from aiohttp, an incomplet
 stream elsewhere — and the request is lost after it was already paid for in GPU
 time.
 
-This is not something WVA can fix from its side. It decides the count; the pod
+This is not something the scaling manager can fix from its side. It decides the count; the pod
 spec decides what happens to a pod that is going away, and on llm-d that spec
 belongs to the modelservice chart (`managed-by: Helm`, release `<model>-ms`).
 Anything the installer wrote there would be reverted by the next `helm upgrade`.

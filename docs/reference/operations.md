@@ -1,12 +1,12 @@
 # After the install
 
-Verifying WVA works, and the first things to check when it does not.
+Verifying the scaling manager works, and the first things to check when it does not.
 
-> Part of the [WVA deployment guide](../../deploy/).
+> Part of the [the scaling manager deployment guide](../../deploy/).
 
 This page is the operational entry point. Two longer subjects have their own:
 >
-> - **[Watching what WVA decides](monitoring.md)** -- the dashboard, the metrics
+> - **[Watching what the scaling manager decides](monitoring.md)** -- the dashboard, the metrics
 >   that answer specific questions, and reading the logs.
 > - **[Preparing a workload to be scaled](workload-preparation.md)** -- the model
 >   cache, draining before scale-down, `make workload-patch`, and the rest of
@@ -24,8 +24,8 @@ Start by running:
 make verify-deployment
 ```
 
-It reports the namespace it found the controller in ("WVA controller is
-running and ready in `<ns>`"), or — if there is more than one WVA on this
+It reports the namespace it found the controller in ("the scaling manager controller is
+running and ready in `<ns>`"), or — if there is more than one the scaling manager on this
 cluster, or none — lists every candidate and stops rather than guess; choose
 yours from that list.
 
@@ -57,7 +57,7 @@ kubectl get hpa -n "$NAMESPACE"               # KEDA created one per ScaledObjec
 ```
 
 A ScaledObject with a KEDA HPA whose `CurrentMetrics` is populated means the whole
-chain works: WVA was called, decided, and KEDA received the answer. An empty
+chain works: The scaling manager was called, decided, and KEDA received the answer. An empty
 `CurrentMetrics` means KEDA never got one — check the trigger's `scalerAddress`
 and that `modelID` is set.
 
@@ -71,7 +71,7 @@ curl -s http://localhost:8000/metrics | grep vllm:
 # 2. Prometheus scrapes them  (query vllm:num_requests_running)
 kubectl port-forward -n <monitoring-namespace> svc/kube-prometheus-stack-prometheus 9090:9090
 
-# 3. WVA reads them and decides
+# 3. the scaling manager reads them and decides
 kubectl logs -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler   | grep -E "Collected replica metrics|scaling-decision"
 ```
 
@@ -84,30 +84,30 @@ make benchmark-smoke NAMESPACE=<namespace>
 ```
 
 Decode-heavy load at 10 req/s for five minutes, then a snapshot of the dashboard
-over exactly that window. It checks the whole chain first — KEDA, a WVA
+over exactly that window. It checks the whole chain first — KEDA, a scaling-manager
 controller that manages *this* namespace, model servers, an EPP, a ScaledObject
 — and reports every gap at once rather than one per five-minute run. It stands
 nothing up, so it is safe against a live namespace, and it needs no benchmark
 CLI. The snapshot is written only when there is a dashboard to snapshot.
 
 For runs whose numbers you intend to compare, use
-[Benchmark WVA](../guides/benchmarking/). Full procedures, including the
+[Benchmark the scaling manager](../guides/benchmarking/). Full procedures, including the
 simulator and the e2e suites, are in [Testing](../developer-guide/testing.md).
 
 ## First-line troubleshooting
 
 | symptom | most likely cause | check |
 | --- | --- | --- |
-| WVA pod not `Running` | image pull, resources, or Prometheus unreachable | `make verify-deployment`, then `kubectl describe pod -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler` |
+| The scaling manager pod not `Running` | image pull, resources, or Prometheus unreachable | `make verify-deployment`, then `kubectl describe pod -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler` |
 | "Metrics unavailable" in the logs | the ServiceMonitor does not select your model pods, so the series never reach Prometheus | `make verify-deployment`, then `kubectl get servicemonitor -A` and Prometheus `/targets` |
 | HPA exists but `CurrentMetrics` is empty | KEDA never got an answer — usually the trigger's `scalerAddress` or a missing `modelID` | `kubectl describe hpa -n <ns> keda-hpa-<so-name>` |
 | nothing scales, no errors | a limiter is declared and the workload's accelerator does not resolve, so it gets no GPU budget | `kubectl logs -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler \| grep -i accelerator` |
-| a model never wakes from zero | the EPP flow-control queue is not reaching WVA | see [Troubleshooting](troubleshooting.md) |
-| `READY False` on the ScaledObject, and the HPA's `TARGETS` reads `cpu: <unknown>/80%` | KEDA could not fetch the metric spec from WVA, so it fell back to a CPU metric. The trigger names a scaler it cannot reach — most often a `scalerAddress` naming a **different install's namespace** than the controller actually runs in. `make scaledobjects-repoint` fixes exactly this: it rewrites `scalerAddress` on objects that ask for WVA but name a namespace where no scaler runs, and leaves one pointing at a second live install alone | `kubectl get scaledobject -A -o custom-columns=NAME:.metadata.name,ADDR:.spec.triggers[0].metadata.scalerAddress` then `kubectl get svc -A \| grep external-scaler` |
+| a model never wakes from zero | the EPP flow-control queue is not reaching the scaling manager | see [Troubleshooting](troubleshooting.md) |
+| `READY False` on the ScaledObject, and the HPA's `TARGETS` reads `cpu: <unknown>/80%` | KEDA could not fetch the metric spec from the scaling manager, so it fell back to a CPU metric. The trigger names a scaler it cannot reach — most often a `scalerAddress` naming a **different install's namespace** than the controller actually runs in. `make scaledobjects-repoint` fixes exactly this: it rewrites `scalerAddress` on objects that ask for the scaling manager but name a namespace where no scaler runs, and leaves one pointing at a second live install alone | `kubectl get scaledobject -A -o custom-columns=NAME:.metadata.name,ADDR:.spec.triggers[0].metadata.scalerAddress` then `kubectl get svc -A \| grep external-scaler` |
 | demand looks far too low for the load you are driving, and `has N ready pod(s) but none attributed` appears each cycle | FMA is in the namespace and nothing is scraping its launcher pods, so the traffic they serve is invisible | `make verify-fma`, see also [FMA launcher pods](#fma-launcher-pods) |
-| WVA applies no decisions for a workload, silently, though the HPA reads a healthy ratio the whole time | the ScaledObject's `modelID` no longer matches what the container actually serves — a hand-changed model that nothing re-syncs | `make verify-scaledobjects` |
+| The scaling manager applies no decisions for a workload, silently, though the HPA reads a healthy ratio the whole time | the ScaledObject's `modelID` no longer matches what the container actually serves — a hand-changed model that nothing re-syncs | `make verify-scaledobjects` |
 | `check-prereqs`/`deploy-wva` refuses: "No llm-d found in `<ns>`" | the namespace holds no llm-d model servers yet | finish the llm-d install in `<ns>`, or `SKIP_CHECKS=true` |
-| refuses: "Monitoring not enabled for your llm-d servers; please enable Model-server metrics" | nothing scrapes the model servers — WVA would hold every workload at `minReplicas` and say so only in its log | `kubectl apply -n <ns> -k config/modelserver-metrics` (or llm-d's own `guides/recipes/modelserver/components/monitoring`) |
+| refuses: "Monitoring not enabled for your llm-d servers; please enable Model-server metrics" | nothing scrapes the model servers — the scaling manager would hold every workload at `minReplicas` and say so only in its log | `kubectl apply -n <ns> -k config/modelserver-metrics` (or llm-d's own `guides/recipes/modelserver/components/monitoring`) |
 | refuses: "Router monitoring not enabled; please enable EPP metrics" | nothing scrapes the EPP — the throughput analyzer has no arrival-rate signal (both the flow-control enqueue counter and `scheduler_attempts_total` read 0) | `kubectl apply -n <ns> -k $REPO_ROOT/guides/recipes/observability` |
 | refuses: "Router queue not enabled; please turn on flow control for EPP" | the `flowControl` feature gate is off — scale-from-zero and `wva_unmeasured_queue` have no queue-depth signal to read | add `featureGates: [flowControl]` to the EPP's `EndpointPickerConfig`; llm-d ships a ready values file at `guides/workload-autoscaling/keda-epp-queue/<guide>/router.values.yaml` |
 
@@ -115,8 +115,8 @@ simulator and the e2e suites, are in [Testing](../developer-guide/testing.md).
 
 KEDA's gRPC client backs off on a name that did not resolve, and keeps backing
 off for far longer than an uninstall/reinstall takes. So a ScaledObject that
-outlived a WVA uninstall can stay `READY False` against a scaler that is now
-running perfectly — the name was NXDOMAIN while WVA was gone, and KEDA has not
+outlived an uninstall can stay `READY False` against a scaler that is now
+running perfectly — the name was NXDOMAIN while the scaling manager was gone, and KEDA has not
 re-resolved it yet.
 
 ```bash
@@ -130,7 +130,7 @@ created.
 
 ### FMA launcher pods
 
-A namespace running Fast Model Actuation needs two things WVA does not do by
+A namespace running Fast Model Actuation needs two things the scaling manager does not do by
 default, and both fail silently when missing:
 
 - **the launcher pods must be scraped.** They declare no container ports, so a
@@ -160,7 +160,7 @@ Deeper diagnosis — EPP metrics, scale-from-zero, slow scale-up — is in
 ## Command cheatsheet
 
 ```bash
-# === WVA Controller ===
+# === llm-scaling-manager Controller ===
 kubectl get pods -n "$NS"
 kubectl logs -n "$NS" -l app.kubernetes.io/name=workload-variant-autoscaler -f
 kubectl describe deployment wva-controller-manager -n "$NS"

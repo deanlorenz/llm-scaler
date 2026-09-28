@@ -1,6 +1,6 @@
 # Multi-Analyzer Pipeline (developer reference)
 
-The Workload Variant Autoscaler's scaling engine runs multiple **analyzers**
+llm-scaling-manager's scaling engine runs multiple **analyzers**
 in series each cycle. Each analyzer consumes the same per-replica metrics
 and produces an `*interfaces.AnalyzerResult` carrying per-variant capacity,
 model-level totals, and (for P/D disaggregated models) per-role capacity.

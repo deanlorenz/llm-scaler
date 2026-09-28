@@ -1,20 +1,20 @@
-# Install WVA for the whole cluster
+# Install the scaling manager for the whole cluster
 
 ## Overview
 
 This guide installs one Workload-Variant-Autoscaler that sizes the llm-d model
-servers in **every** namespace. WVA decides how many replicas each variant needs
+servers in **every** namespace. The scaling manager decides how many replicas each variant needs
 and hands the decision to KEDA, which owns the HPA and does the scaling.
 
 Use it when one team runs the cluster. Where namespaces belong to different
 teams, prefer one controller per namespace — see
-[Install WVA in a namespace](../install-in-namespace/) — which keeps
+[Install the scaling manager in a namespace](../install-in-namespace/) — which keeps
 failure domains, policy and upgrades separate.
 
 **This scope is WIP**, and the install says so as it runs. It is not disabled and
 is not going away: what it does not get is the preflight's namespace-centric
 checks, which are written for a single namespace where llm-d is already serving.
-In this shape the namespaces WVA manages need not exist yet, need not hold model
+In this shape the namespaces the scaling manager manages need not exist yet, need not hold model
 servers yet, and are discovered rather than named — so those checks would be
 asking the wrong questions. `SKIP_CHECKS=true` installs without them.
 
@@ -52,7 +52,7 @@ make check-prereqs SCOPE=cluster
 
 ## Installation Instructions
 
-### 1. Install WVA
+### 1. Install the scaling manager
 
 <!-- guide:deploy.all start -->
 ```bash
@@ -104,7 +104,7 @@ One entry per model server, applying nothing until you say so. `apply` takes
 owns rather than adding a second. Each entry also carries `minReplicas`,
 `maxReplicas` and `variantCost`; the file explains all of them in its own
 comments. There is an example in
-[Install WVA in a namespace](../install-in-namespace/README.md#4-register-the-workloads).
+[Install the scaling manager in a namespace](../install-in-namespace/README.md#4-register-the-workloads).
 
 ## Verification
 
@@ -115,9 +115,9 @@ kubectl get scaledobject,hpa -A
 <!-- guide:verify.objects end -->
 
 **`READY True` on the ScaledObject** is the signal, together with a number in
-the HPA's `TARGETS` — `1/1 (avg)` is WVA saying one replica is the right size.
+the HPA's `TARGETS` — `1/1 (avg)` is the scaling manager saying one replica is the right size.
 
-Do not read `CurrentMetrics` as the check. On a ScaledObject whose trigger WVA
+Do not read `CurrentMetrics` as the check. On a ScaledObject whose trigger the scaling manager
 never answers, it is still populated — with an empty entry, `[{"type":""}]` —
 while `READY` is `False` and `TARGETS` reads `<unknown>/1 (avg)` and nothing is
 being scaled. Measured on kind: it says "populated" in exactly the case you are
@@ -175,7 +175,7 @@ Full list: [Configuration reference](../../reference/configuration.md).
 
 - `make benchmark-smoke NAMESPACE=<ns>` — drive load at one of the namespaces
   this controller manages and snapshot the dashboard
-- [Bound every WVA by real GPUs](../admin-gpu-bounding/)
+- [Bound every install by real GPUs](../admin-gpu-bounding/)
 - `deploy/warmpool.sh plan -n <ns>` — read-only: whether a namespace this
   controller manages has models that could share a [warm pool](../warm-pool/),
   which holds engines loaded so a scale-up serves while its replica starts

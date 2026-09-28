@@ -3,10 +3,10 @@
 ## Overview
 
 Deploys one small model — `Qwen/Qwen3-0.6B` — with an EPP and an InferencePool,
-on a single GPU, so there is something real for WVA to scale. The model only:
-[Install WVA in a namespace](../install-in-namespace/) is the step after it, and
-the two are separate because WVA's preflight refuses a namespace with no model
-servers — the model has to exist first. Use it to try WVA,
+on a single GPU, so there is something real for the scaling manager to scale. The model only:
+[Install the scaling manager in a namespace](../install-in-namespace/) is the step after it, and
+the two are separate because the scaling manager's preflight refuses a namespace with no model
+servers — the model has to exist first. Use it to try the scaling manager,
 to reproduce a scaling question, or as the target for
 [`make benchmark-smoke`](../benchmarking/).
 
@@ -18,7 +18,7 @@ for what those guides teach. They are the wrong ones for "I have one card and I
 want to see this work".
 
 For correctness work with no GPU at all, use
-[Test WVA against a full llm-d stack](../testing-with-llm-d/) instead — it runs
+[Test the scaling manager against a full llm-d stack](../testing-with-llm-d/) instead — it runs
 simulators on kind.
 
 ## Prerequisites
@@ -50,20 +50,20 @@ kubectl get nodes -o custom-columns=NODE:.metadata.name,GPU:.status.allocatable.
 # engine image on the accelerator nodes (the prepull-* pods; BENCHMARK_PREPULL=false
 # skips that) -- nothing else. BENCHMARK_WVA_DEPLOY=false is what keeps the
 # autoscaler out of it: this guide gets you a model to scale, and installing
-# WVA is the next guide's job.
+# The scaling manager is the next guide's job.
 make benchmark-standup BENCHMARK_NAMESPACE=${NAMESPACE} MODEL_ID=${MODEL_ID}         BENCHMARK_WVA_DEPLOY=false
 ```
 <!-- guide:deploy.standup end -->
 
 This deploys the model server, its EPP and the InferencePool — and stops
 there. `BENCHMARK_WVA_DEPLOY=false` is what keeps the autoscaler out: this guide
-gets you something to scale, and installing WVA is the next guide's job. Doing
-them together hides which half failed, and WVA's own preflight refuses a
+gets you something to scale, and installing the scaling manager is the next guide's job. Doing
+them together hides which half failed, and the scaling manager's own preflight refuses a
 namespace with no model servers in it, so the order is not arbitrary.
 
-### Then install WVA into that namespace
+### Then install the scaling manager into that namespace
 
-Follow [Install WVA in a namespace](../install-in-namespace/) with the same
+Follow [Install the scaling manager in a namespace](../install-in-namespace/) with the same
 `NAMESPACE`. In short:
 
 ```bash
@@ -75,12 +75,12 @@ make scaledobjects-plan WVA_DEFAULT_SO_PLAN=wva-plan.yaml
 make scaledobjects-apply WVA_DEFAULT_SO_PLAN=wva-plan.yaml
 ```
 
-The ScaledObject is the registration: WVA has no watch and no listing, so until
+The ScaledObject is the registration: The scaling manager has no watch and no listing, so until
 one exists it is never called and scales nothing.
 
 ### The EPP setting the next guide will refuse without
 
-**The EPP needs the `flowControl` feature gate.** WVA's install preflight is
+**The EPP needs the `flowControl` feature gate.** the scaling manager's install preflight is
 fatal on its absence — `wva_require_epp_metrics` refuses to continue, and the
 only way past it, `SKIP_CHECKS=true`, switches off *every* preflight check rather
 than that one. So an EPP without the gate does not produce a degraded install; it
@@ -142,7 +142,7 @@ full in the scaling policy.
 The practical consequence on a small model is worth expecting. At 0.90 a 0.6B
 model gets **651,328 tokens** of KV cache, and one replica then absorbs an
 enormous amount of traffic without ever looking full. Measured on this guide's
-own stack: 121 concurrent requests, KV utilisation peaking at **10.5%**, and WVA
+own stack: 121 concurrent requests, KV utilisation peaking at **10.5%**, and the scaling manager
 holding at one replica — correctly, because by the signal it sizes on nothing
 was saturated. If you want a small model to scale on a small load, lower
 `kvCacheThreshold` in the scaling policy. Do not shrink the cache.
@@ -192,7 +192,7 @@ which is not always the path the weights were loaded from.
 ## Benchmarking
 
 Once everything above is deployed — and not before, since it drives real load
-at the model — this is the one command that shows whether WVA is scaling it:
+at the model — this is the one command that shows whether the scaling manager is scaling it:
 
 <!-- guide:verify.smoke start -->
 ```bash
@@ -203,12 +203,12 @@ make benchmark-smoke NAMESPACE=${NAMESPACE}
 
 Symmetric 1024-in/1024-out at 15 req/s for five minutes, then a snapshot of the
 dashboard over
-exactly that window. It checks the whole chain first — KEDA, a WVA controller
+exactly that window. It checks the whole chain first — KEDA, a controller
 managing this namespace, model servers, an EPP, a ScaledObject — and names every
 gap at once rather than failing five minutes in.
 
 For numbers you intend to compare between runs, use
-[Benchmark WVA](../benchmarking/) instead: this one answers "does it scale", not
+[Benchmark the scaling manager](../benchmarking/) instead: this one answers "does it scale", not
 "how fast is it".
 
 ## Cleanup
@@ -219,13 +219,13 @@ make benchmark-teardown BENCHMARK_NAMESPACE=${NAMESPACE}
 ```
 <!-- guide:cleanup.teardown end -->
 
-This removes **both halves** — the autoscaler and the model — in that order. WVA
+This removes **both halves** — the autoscaler and the model — in that order. The scaling manager
 goes first deliberately: a namespace-scoped install still creates cluster-scoped
 RBAC, which deleting the namespace would strand, and a controller outliving its
 workloads keeps calling a scaler for things that are gone.
 
 To remove only the autoscaler and keep the model serving, use `make undeploy-wva`
-instead, as [Install WVA in a namespace](../install-in-namespace/) describes.
+instead, as [Install the scaling manager in a namespace](../install-in-namespace/) describes.
 
 Verify nothing cluster-scoped was stranded:
 
@@ -246,7 +246,7 @@ kubectl get clusterrole,clusterrolebinding -o name | grep -i "${NAMESPACE}"
 ## Weights, once you scale it
 
 This guide deploys one model on one GPU, so the weights are fetched once and
-the cost is invisible. It stops being invisible when WVA starts adding
+the cost is invisible. It stops being invisible when the scaling manager starts adding
 replicas: without a shared cache, each new pod fetches them again.
 
 llm-d's modelservice chart mounts a cache at `/model-cache` by default, so
@@ -277,13 +277,13 @@ deployment) puts a copy on every accelerator node's disk --
 
 In order:
 
-1. [Install WVA in a namespace](../install-in-namespace/) — the model is now there
-   for it to scale. (The standup above already installs WVA; use this when you
-   want the install on its own, or are adding WVA to a model somebody else
+1. [Install the scaling manager in a namespace](../install-in-namespace/) — the model is now there
+   for it to scale. (The standup above already installs the scaling manager; use this when you
+   want the install on its own, or are adding the scaling manager to a model somebody else
    deployed.)
 2. `make benchmark-smoke NAMESPACE=<ns>` — drive load at it and snapshot the
    dashboard. Run it **last**, once everything is deployed.
-3. [Benchmark WVA](../benchmarking/) — when you want numbers to compare
+3. [Benchmark the scaling manager](../benchmarking/) — when you want numbers to compare
 4. [After the install](../../reference/operations.md) — what the metrics mean
 
 [ob]: https://github.com/llm-d/llm-d/tree/main/guides/optimized-baseline

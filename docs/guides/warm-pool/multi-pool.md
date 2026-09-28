@@ -43,7 +43,7 @@ means anything afterwards.
 Then give it its own ScaledObject — **this is what makes it a pool**, not an
 extra. Its `warmPoolName` must match the label above and its `scaleTargetRef`
 must name this Deployment. A copied Deployment with no trigger of its own holds
-accelerators that nothing will ever use, and WVA reports it as undeclared.
+accelerators that nothing will ever use, and the scaling manager reports it as undeclared.
 
 Then each model says which pool it may borrow from, in its ScaledObject trigger
 metadata:
@@ -58,7 +58,7 @@ triggers:
 
 **With one pool you write none of this.** There is nothing to disambiguate, so a
 ScaledObject that says nothing still gets a warm copy. The key is only needed
-once a namespace holds more than one pool — and then it is required: WVA will
+once a namespace holds more than one pool — and then it is required: The scaling manager will
 not guess, because guessing wrong spends a full model load on a copy that can
 never serve. It names the variant and the pools that exist instead.
 
@@ -66,7 +66,7 @@ A pool created without `--accelerator` has no `nodeSelector`, so its Pods may
 land on any GPU node and the pool's accelerator is whatever they happened to get.
 That is the mismatch below, arriving by accident rather than by configuration.
 
-WVA also declines a model whose accelerator does not match the pool's, or that
+The scaling manager also declines a model whose accelerator does not match the pool's, or that
 needs more devices than a Pod holds, and says so:
 
 ```

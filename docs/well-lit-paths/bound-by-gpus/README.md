@@ -9,7 +9,7 @@ discovered on the cluster, or per-accelerator caps an operator declares.
 `maxReplicaCount` was set as a safety limit rather than a real ceiling — which
 is to say, on any shared cluster.
 
-**Do not mistake it for enforcement.** WVA's limiter is advisory: it stops WVA
+**Do not mistake it for enforcement.** the scaling manager's limiter is advisory: it stops the scaling manager
 *asking* for replicas that cannot be placed. The boundary that actually holds is
 a Kubernetes `ResourceQuota`. A limiter without a quota bounds a well-behaved
 autoscaler, not the cluster.
@@ -32,7 +32,7 @@ declares both — each is then fed the measure it is asking about.
 | | `gpu-inventory` (the default) | `quota` |
 | --- | --- | --- |
 | Question | is the hardware there? | is this tenant within its allowance? |
-| Counts | every GPU-holding Pod on the cluster | only what **WVA's own variants** hold |
+| Counts | every GPU-holding Pod on the cluster | only what **the scaling manager's own variants** hold |
 | Declared | nothing to declare — discovered | per accelerator type, at cluster or namespace scope |
 
 Declaring a quota has consequences an operator has to know before promising a
@@ -44,7 +44,7 @@ This page is about the other question: not exceeding the hardware that exists.
 
 ## Setting it up
 
-[Bound every WVA by real GPUs](../../guides/admin-gpu-bounding/) — one command,
+[Bound every install by real GPUs](../../guides/admin-gpu-bounding/) — one command,
 because the ConfigMap is the easy part and the access it then requires is not.
 
 ## Verifying it

@@ -1,6 +1,6 @@
 # Comparisons
 
-How WVA's autoscaling compares with the other systems in this space. Written to
+How the scaling manager's autoscaling compares with the other systems in this space. Written to
 be checkable: each claim is about a named mechanism, not a marketing position,
 and where a competitor's decision logic is closed the comparison says so rather
 than guessing.

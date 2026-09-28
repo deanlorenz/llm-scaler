@@ -387,7 +387,7 @@ make benchmark-two-model-residency   # what each Pod is actually holding
 This is the step that decides whether the run means anything. `warm` pins one
 copy of each model with `warmPoolCopies: "1"` and then **waits** until both are
 resident, by asking each pool Pod's supervisor over loopback — the pool's own
-NetworkPolicy admits that port only from the WVA controller, deliberately, so a
+NetworkPolicy admits that port only from the scaling manager controller, deliberately, so a
 probe Pod could never reach it.
 
 Pinning matters beyond the first burst: in automatic mode a quiet variant loses

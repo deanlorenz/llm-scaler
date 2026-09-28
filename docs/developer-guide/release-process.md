@@ -1,6 +1,6 @@
 # Release Process
 
-This guide describes how to cut a release of the Workload Variant Autoscaler (WVA). It covers changes in this repository (tag, image), required updates in the llm-d repo's workload-autoscaling guide once the release is out.
+This guide describes how to cut a release of the llm-scaling-manager. It covers changes in this repository (tag, image), required updates in the llm-d repo's workload-autoscaling guide once the release is out.
 
 ## Quick reference
 
@@ -17,12 +17,12 @@ This guide describes how to cut a release of the Workload Variant Autoscaler (WV
 
 A full release typically involves:
 
-1. **This repo (WVA)**  
+1. **This repo (the scaling manager)**  
    - A version tag (e.g. `v0.5.2`).  
    - A container image built and pushed to `ghcr.io/ev-shindin/llm-scaling-manager:<tag>`.  
 
 2. **llm-d repo and guides (required)**  
-   - Once the release is out, the [workload-autoscaling](https://github.com/llm-d/llm-d/tree/main/guides/workload-autoscaling) guide in [llm-d/llm-d](https://github.com/llm-d/llm-d) must be updated to the new WVA version so users get consistent instructions and correct CRD/sample URLs.
+   - Once the release is out, the [workload-autoscaling](https://github.com/llm-d/llm-d/tree/main/guides/workload-autoscaling) guide in [llm-d/llm-d](https://github.com/llm-d/llm-d) must be updated to the new the scaling manager version so users get consistent instructions and correct CRD/sample URLs.
 
 3. **Documentation in this repo**  
    - Changelog and, if needed, upstream version pins (`LLM_D_ROUTER_VERSION`, `GAIE_VERSION` in the [Makefile](../../Makefile)).
@@ -77,10 +77,10 @@ git push origin vX.Y.Z
 
 ## llm-d repo and guides (post-release, required)
 
-The [llm-d](https://github.com/llm-d/llm-d) repo hosts a **workload-autoscaling guide** that references WVA. Once a release is out, this guide **must** be updated so install instructions and URLs match the new version. Update the following:
+The [llm-d](https://github.com/llm-d/llm-d) repo hosts a **workload-autoscaling guide** that references the scaling manager. Once a release is out, this guide **must** be updated so install instructions and URLs match the new version. Update the following:
 
 1. **Version compatibility note**  
-   - In `guides/workload-autoscaling/README.md`, update the "Version Compatibility" callout to state the new WVA version (e.g. "tested and validated with **WVA vX.Y.Z**").
+   - In `guides/workload-autoscaling/README.md`, update the "Version Compatibility" callout to state the new the scaling manager version (e.g. "tested and validated with **the scaling manager vX.Y.Z**").
 
 2. **URLs that embed the version tag**  
    - **CRD install:** Any URLs that embed the release tag (e.g. `.../llm-scaling-manager/vX.Y.Z/...`) — replace the version segment with the new release tag.
@@ -90,7 +90,7 @@ The [llm-d](https://github.com/llm-d/llm-d) repo hosts a **workload-autoscaling 
 3. **Breaking changes and upgrading text**  
    - If the new release has breaking changes, add or update the "Breaking Changes" / "Upgrading" content and migration steps in the README.
 
-**Guide location:** [guides/workload-autoscaling](https://github.com/llm-d/llm-d/tree/main/guides/workload-autoscaling) (main branch). After editing, open a PR in the [llm-d/llm-d](https://github.com/llm-d/llm-d) repo so the guide stays in sync with the WVA release.
+**Guide location:** [guides/workload-autoscaling](https://github.com/llm-d/llm-d/tree/main/guides/workload-autoscaling) (main branch). After editing, open a PR in the [llm-d/llm-d](https://github.com/llm-d/llm-d) repo so the guide stays in sync with the scaling manager release.
 
 ---
 
@@ -117,7 +117,7 @@ To allow other team members to perform releases:
 
 | Item | Action |
 |------|--------|
-| **WVA release** | Tag `vX.Y.Z` → push → create and publish GitHub Release. CI builds and pushes the image. |
+| **the scaling manager release** | Tag `vX.Y.Z` → push → create and publish GitHub Release. CI builds and pushes the image. |
 | **Guide / llm-d repo** | **Required:** After release, update the [workload-autoscaling](https://github.com/llm-d/llm-d/tree/main/guides/workload-autoscaling) guide (version callout, CRD/sample URLs) and open a PR in llm-d/llm-d. |
 | **Team** | Use this doc plus repo permissions and GHCR secrets so others can run the same process safely.
 

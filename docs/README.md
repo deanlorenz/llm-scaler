@@ -1,22 +1,22 @@
 # Workload-Variant-Autoscaler documentation
 
-WVA decides how many replicas of each model variant should run, and drives KEDA
+the scaling manager decides how many replicas of each model variant should run, and drives KEDA
 to make it so. It reads what your inference engines are doing, computes a target
 per model each cycle, and answers KEDA's external scaler with it.
 
 Three words, used throughout: a **model** is what a client asks for by name; a
 **variant** is one way of serving it — concretely one KEDA ScaledObject and the
-workload it scales, which is the unit WVA decides for; a **replica** is one Pod
+workload it scales, which is the unit the scaling manager decides for; a **replica** is one Pod
 of a variant. Variants whose triggers name the same `modelID` are variants of
 one model, and are scaled as a group.
 
 | You want to | Start here |
 | --- | --- |
 | Solve a specific problem | **[Well-lit paths](well-lit-paths/)** — one page per scenario |
-| Get it installed | **[Install WVA in a namespace](guides/install-in-namespace/)** |
+| Get it installed | **[Install the scaling manager in a namespace](guides/install-in-namespace/)** |
 | Look something up | **[Reference](#reference--what-you-set-and-read)** |
-| Understand a decision it made | **[Concepts](#concepts--how-wva-decides)** |
-| Change WVA itself | **[Developing WVA](#developing-wva)** |
+| Understand a decision it made | **[Concepts](#concepts--how-the-scaling-manager-decides)** |
+| Change the scaling manager itself | **[Developing the scaling manager](#developing-the-scaling-manager)** |
 
 ## Well-lit paths — start from the problem
 
@@ -48,35 +48,35 @@ case) · [cluster-wide](guides/install-cluster-wide/) · [a small llm-d model
 first](guides/install-small-model/), if nothing is serving yet
 
 **Administering** — [cluster-admin setup for a
-namespace](guides/admin-cluster-setup/) · [bound every WVA by real
+namespace](guides/admin-cluster-setup/) · [bound every install by real
 GPUs](guides/admin-gpu-bounding/)
 
 **Exercising** — [scale to zero](guides/scale-to-zero/) · [warm
 pool](guides/warm-pool/) · [test against a full llm-d
-stack](guides/testing-with-llm-d/) · [benchmark WVA](guides/benchmarking/)
+stack](guides/testing-with-llm-d/) · [benchmark the scaling manager](guides/benchmarking/)
 
 ## Reference — what you set and read
 
 - **[Configuration](reference/configuration.md)** — every variable the installer reads, and which settings need a restart
 - **[After the install](reference/operations.md)** — verifying it worked, and first-line troubleshooting
-- **[Watching what WVA decides](reference/monitoring.md)** — the dashboard, who owns it, and the metrics that answer specific questions
-- **[The cycle log](reference/cycle-log.md)** — the two lines WVA emits per cycle, their fields and reason codes: the page that answers "why did it scale?"
+- **[Watching what the scaling manager decides](reference/monitoring.md)** — the dashboard, who owns it, and the metrics that answer specific questions
+- **[The cycle log](reference/cycle-log.md)** — the two lines the scaling manager emits per cycle, their fields and reason codes: the page that answers "why did it scale?"
 - **[Scaling policy](reference/scaling-policy.md)** — thresholds, tiers, scale-to-zero, limiters
 - **[Preparing a workload](reference/workload-preparation.md)** — the model cache, draining before scale-down, `make workload-patch`
 - **[Install methods](reference/install-methods.md)** — installer, kustomize, and per-platform entry points
-- **[The GPU limiter](reference/gpu-limiter.md)** and **[the quota limiter](reference/quota-limiter.md)** — bounding WVA by real accelerators, and by declared caps
+- **[The GPU limiter](reference/gpu-limiter.md)** and **[the quota limiter](reference/quota-limiter.md)** — bounding the scaling manager by real accelerators, and by declared caps
 - **[Metrics and health](reference/metrics.md)** · **[Prometheus integration](reference/prometheus.md)**
 - **[SGLang backend](reference/sglang-backend.md)** — auto-detected per variant; nothing to configure
 - **[Troubleshooting](reference/troubleshooting.md)**
 
-## Concepts — how WVA decides
+## Concepts — how the scaling manager decides
 
 - **[The steady-state engine](concepts/steady-state-engine.md)** — what it measures, and how a measurement becomes a replica count
 - **[GPU capacity accounting](concepts/gpu-capacity-accounting.md)** — what the GPU budget means, and three ways it over-states free capacity
 - **[Modeling and optimization](concepts/modeling-and-optimization.md)** — what is modelled, what is not, and how per-variant demands become replica counts
 - **[llm-d autoscaling](https://llm-d.ai/docs/architecture/advanced/autoscaling)** — upstream's page, describing the autoscaler this project forked from; kept for context, not as a description of this one
 
-## Developing WVA
+## Developing the scaling manager
 
 - **[Development setup](developer-guide/development.md)** · **[Testing](developer-guide/testing.md)** · **[Debugging](developer-guide/debugging.md)**
 - **[Multi-analyzer pipeline](developer-guide/multi-analyzer-pipeline.md)** — how analyzers are registered, run and scored
@@ -94,7 +94,7 @@ stack](guides/testing-with-llm-d/) · [benchmark WVA](guides/benchmarking/)
 ## Design notes
 
 - **[proposals/](proposals/)** — work not built yet, or built and still moving. The warm pool's argument and implementation design live here, as does the [FMA post-mortem](proposals/fma-post-mortem.md) explaining what the pool inherited.
-- **[comparison/](comparison/)** — how WVA's autoscaling compares with Dynamo, Mooncake, SGLang and the hosted platforms.
+- **[comparison/](comparison/)** — how the scaling manager's autoscaling compares with Dynamo, Mooncake, SGLang and the hosted platforms.
 - **[plans/](plans/)** — agent plans and the specs behind them.
 
 ## Elsewhere in the repo

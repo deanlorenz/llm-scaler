@@ -1,14 +1,14 @@
 # Prometheus Integration
 
-WVA integrates with Prometheus to collect metrics from different sources such as vLLM inference servers, and expose internal as well as custom autoscaling metrics. This guide covers Prometheus configuration, metric collection, and security best practices.
+the scaling manager integrates with Prometheus to collect metrics from different sources such as vLLM inference servers, and expose internal as well as custom autoscaling metrics. This guide covers Prometheus configuration, metric collection, and security best practices.
 
 ## Configuration
 
-WVA supports two methods for configuring Prometheus connectivity:
+the scaling manager supports two methods for configuring Prometheus connectivity:
 
 ### 1. Environment Variables (Recommended)
 
-Set Prometheus configuration via environment variables in the WVA deployment:
+Set Prometheus configuration via environment variables in the scaling manager deployment:
 
 ```yaml
 apiVersion: apps/v1
@@ -91,7 +91,7 @@ The metrics are exposed at the `/metrics` endpoint on port 8080 (HTTP).
 
 ### ServiceMonitor Configuration
 
-WVA metrics are exposed on port 8080 (HTTP):
+the scaling manager metrics are exposed on port 8080 (HTTP):
 ```yaml
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
@@ -138,13 +138,13 @@ spec:
   `http://` `PROMETHEUS_BASE_URL` instead of standing up a TLS-terminating proxy.
   This cannot be combined with `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY`,
   `PROMETHEUS_SERVER_NAME`, any `PROMETHEUS_CA_CERT_PATH`/client cert settings, or
-  bearer token auth — WVA refuses to start if those are set alongside a plain HTTP
+  bearer token auth — the scaling manager refuses to start if those are set alongside a plain HTTP
   URL. Note that credentials and metrics are sent in cleartext, so use this only
   on a trusted network (dev/test or a secured in-cluster path).
 
 ### PromQL Injection Prevention
 
-WVA implements security measures to prevent PromQL injection attacks:
+the scaling manager implements security measures to prevent PromQL injection attacks:
 
 1. **Parameter Escaping**: All query parameters (namespace, model ID, variant name) are automatically escaped:
    - Backslashes are escaped: `\` → `\\`
@@ -157,7 +157,7 @@ WVA implements security measures to prevent PromQL injection attacks:
 // User input (potentially malicious)
 namespace := `prod",malicious="value`
 
-// WVA automatically escapes the value
+// the value is escaped automatically
 escapedNamespace := EscapePromQLValue(namespace)
 // Result: `prod\",malicious=\"value`
 
@@ -174,12 +174,12 @@ query := fmt.Sprintf(`vllm_kv_cache_usage{namespace="%s"}`, escapedNamespace)
 
 
 
-## WVA Metrics
+## llm-scaling-manager Metrics
 
-WVA exposes metrics providing insights into autoscaling behavior and optimization performance. These metrics are exposed via Prometheus at the `/metrics` endpoint.
+the scaling manager exposes metrics providing insights into autoscaling behavior and optimization performance. These metrics are exposed via Prometheus at the `/metrics` endpoint.
 
 ### Notes on **name_space**s in metrics
-With WVA metrics, the value for the label `namespace` is the WVA controller namespace, not the VA's namespace. The VA namespace has the label `exported_namespace`. Here's an example:
+With the scaling manager metrics, the value for the label `namespace` is the scaling manager controller namespace, not the VA's namespace. The VA namespace has the label `exported_namespace`. Here's an example:
 ```text
 {
   "metric": "wva_desired_replicas",
@@ -190,7 +190,7 @@ With WVA metrics, the value for the label `namespace` is the WVA controller name
     "exported_namespace": "llm-d-sim",    <==== VA namespace
     "instance": "10.244.0.73:8443",
     "job": "workload-variant-autoscaler-metrics",
-    "namespace": "workload-variant-autoscaler-system",  <=== WVA controller namespace
+    "namespace": "workload-variant-autoscaler-system",  <=== controller namespace
     "pod": "workload-variant-autoscaler-controller-manager-75b45dd7c-89g5s",
     "service": "workload-variant-autoscaler-metrics",
     "variant_name": "workload-variant-autoscaler-va"
@@ -203,12 +203,12 @@ With WVA metrics, the value for the label `namespace` is the WVA controller name
 
 ### `wva_config_info`
 - **Type**: Gauge
-- **Description**: WVA configuration information (value is always 1)
+- **Description**: The scaling manager configuration information (value is always 1)
 - **Labels**:
   - `analyzer_name`: Name of the saturation analyzer in use
   - `limiter_enabled`: Whether the limiter is enabled (`true`, `false`)
   - `scale_to_zero_enabled`: Whether scale-to-zero is enabled (`true`, `false`)
-- **Use Case**: Info-style metric to expose WVA configuration via labels for monitoring and debugging
+- **Use Case**: Info-style metric to expose the scaling manager configuration via labels for monitoring and debugging
 - **Example**:
   ```json
   {
@@ -622,7 +622,7 @@ With WVA metrics, the value for the label `namespace` is the WVA controller name
 
 ### `wva_gpu_discovery_up`
 - **Type**: Gauge
-- **Description**: Indicates whether GPU discovery is on (1) or off (0). GPU discovery is enabled when a physical (`gpu-inventory`) limiter is declared in `limiters:`. This metric helps operators understand whether WVA is actively discovering GPU resources.
+- **Description**: Indicates whether GPU discovery is on (1) or off (0). GPU discovery is enabled when a physical (`gpu-inventory`) limiter is declared in `limiters:`. This metric helps operators understand whether the scaling manager is actively discovering GPU resources.
 - **Labels**: None (global metric, optional `controller_instance` label when multi-instance deployment is used)
 - **Use Case**: Monitor GPU discovery status to ensure resource discovery is functioning when expected
 - **Example**:
@@ -653,10 +653,10 @@ With WVA metrics, the value for the label `namespace` is the WVA controller name
 
 ### `wva_scale_from_zero_queue_fallback_active`
 - **Type**: Gauge
-- **Description**: `1` while the scale-from-zero engine is reading the EPP flow-control queue from Prometheus because the **direct EPP scrape is failing**, `0` while the direct scrape works. WVA reads the wake signal by scraping the EPP pod directly (pod IP, EPP metrics port, projected bearer token) — the one metric path that does not go through Prometheus — so it fails independently of everything else. The fallback keeps models waking; it does not make the direct path healthy.
+- **Description**: `1` while the scale-from-zero engine is reading the EPP flow-control queue from Prometheus because the **direct EPP scrape is failing**, `0` while the direct scrape works. The scaling manager reads the wake signal by scraping the EPP pod directly (pod IP, EPP metrics port, projected bearer token) — the one metric path that does not go through Prometheus — so it fails independently of everything else. The fallback keeps models waking; it does not make the direct path healthy.
 - **Labels**: `pool` (namespaced InferencePool, e.g. `llm-d-sim/optimized-baseline`), optional `controller_instance`
-- **Absence is meaningful**: the series is published on every healthy scrape, so a pool WVA is watching always has one. No series at all means WVA is not reading that pool — a different problem from the fallback being active.
-- **Use Case**: Alert on a sustained `1`. Wakes still happen but are slower — bounded by the Prometheus scrape interval instead of the engine's 100 ms loop — and the underlying cause (EPP metrics token, EPP tokenreview RBAC, or a NetworkPolicy blocking pod-IP egress from the WVA namespace) will not fix itself. See [troubleshooting](troubleshooting.md#the-epp-scrape-is-failing-but-wva-still-wakes-models-slowly).
+- **Absence is meaningful**: the series is published on every healthy scrape, so a pool the scaling manager is watching always has one. No series at all means the scaling manager is not reading that pool — a different problem from the fallback being active.
+- **Use Case**: Alert on a sustained `1`. Wakes still happen but are slower — bounded by the Prometheus scrape interval instead of the engine's 100 ms loop — and the underlying cause (EPP metrics token, EPP tokenreview RBAC, or a NetworkPolicy blocking pod-IP egress from the scaling manager namespace) will not fix itself. See [troubleshooting](troubleshooting.md#the-epp-scrape-is-failing-but-the-scaling-manager-still-wakes-models-slowly).
 - **Example alert**:
   ```promql
   max_over_time(wva_scale_from_zero_queue_fallback_active[10m]) == 1
@@ -664,12 +664,12 @@ With WVA metrics, the value for the label `namespace` is the WVA controller name
 
 ### `wva_available_gpus`
 - **Type**: Gauge
-- **Description**: Number of currently available GPUs grouped by accelerator type (e.g., "H100", "A100"). When `wva_gpu_discovery_up` is 1, this shows the number of currently available GPUs. When `wva_gpu_discovery_up` is 0, this metric shows the number of GPUs that were available at the last successful discovery. Only available in clusters such as OpenShift where WVA can iterate over node objects. There are no exclusions such as tainted nodes or GPUs operating in different modes such as MIG.
+- **Description**: Number of currently available GPUs grouped by accelerator type (e.g., "H100", "A100"). When `wva_gpu_discovery_up` is 1, this shows the number of currently available GPUs. When `wva_gpu_discovery_up` is 0, this metric shows the number of GPUs that were available at the last successful discovery. Only available in clusters such as OpenShift where the scaling manager can iterate over node objects. There are no exclusions such as tainted nodes or GPUs operating in different modes such as MIG.
 - **Labels**:
   - `accelerator_vendor`: Name of the GPU vendor
   - `accelerator_model`: Full name of the accelerator
   - `accelerator_type`: Type of accelerator (short name of the accelerator)
-- **Use Case**: Track the number of GPUs discovered by WVA and available for allocation
+- **Use Case**: Track the number of GPUs discovered by the scaling manager and available for allocation
 - **Example**:
   ```json
   {
@@ -872,7 +872,7 @@ With WVA metrics, the value for the label `namespace` is the WVA controller name
 
 ### `wva_errors_total`
 - **Type**: Counter
-- **Description**: Total number of errors by component. The components are "collector", "analyzer", "optimizer", "limiter", "enforcer", and "controller". Some of the components currently may not have any `wva_errors_total` metrics. They may be available in future WVA versions.
+- **Description**: Total number of errors by component. The components are "collector", "analyzer", "optimizer", "limiter", "enforcer", and "controller". Some of the components currently may not have any `wva_errors_total` metrics. They may be available in future the scaling manager versions.
 - **Labels**:
   - `component`: Component where the error occurred
   - `error_type`: Type or category of the error
@@ -962,7 +962,7 @@ wva_metrics_freshness_status{status="stale"}
 # Fresh metrics ratio
 sum(wva_metrics_freshness_status{status="fresh"}) / sum(wva_metrics_freshness_status)
 
-# WVA configuration info
+# The scaling manager configuration info
 wva_config_info
 
 # Check if limiter is enabled
@@ -1025,7 +1025,7 @@ wva_optimizer_active == 1
 
 ## Alerting Rules
 
-WVA pre-defined a number of Prometheus alerting rules which can be optionally installed. These rules are defined in `config/components/prometheus-alerts/prometheusrule.yaml`.
+the scaling manager pre-defined a number of Prometheus alerting rules which can be optionally installed. These rules are defined in `config/components/prometheus-alerts/prometheusrule.yaml`.
 ### Alerting Rules Installation
 - To install alerting rules, set environment variable `DEPLOY_ALERTING_RULES` to `true`, and run the installation, for example:
   ```bash
@@ -1084,10 +1084,10 @@ Once installed, you can verify as follows:
   
 ### Alerting Rules E2E Test
 E2E tests for alerting rules are in `test/e2e/prometheus_alerts_test.go`. The tests cover basic install and validation. Here are some scenarios:
-- should create PrometheusRule with WVA alert rules
+- should create PrometheusRule with the scaling manager alert rules
 - should have all expected alert rules defined
 - should have valid alert rule structure 
-- should only reference known WVA metrics in alert expressions
+- should only reference known the scaling manager metrics in alert expressions
 
 How to execute E2e Test:
 ```bash

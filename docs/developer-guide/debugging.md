@@ -1,17 +1,17 @@
-# Run WVA locally for debugging (connects to Cluster & Prometheus)
+# Run the scaling manager locally for debugging (connects to Cluster & Prometheus)
 
-This guide shows how to run the Workload Variant Autoscaler (WVA) locally while letting it communicate with your Kubernetes/OpenShift cluster and Prometheus using an SSH tunnel and a ServiceMonitor.
+This guide shows how to run the llm-scaling-manager locally while letting it communicate with your Kubernetes/OpenShift cluster and Prometheus using an SSH tunnel and a ServiceMonitor.
 
 ### Quick summary
-- Purpose: Run WVA locally (IDE or terminal) and let Prometheus in-cluster scrape the local /metrics endpoint via an SSH tunnel.
-- Outcome: Prometheus scrapes your local WVA instance's metrics and WVA can query Prometheus in the cluster.
+- Purpose: Run the scaling manager locally (IDE or terminal) and let Prometheus in-cluster scrape the local /metrics endpoint via an SSH tunnel.
+- Outcome: Prometheus scrapes your local controller instance's metrics and the scaling manager can query Prometheus in the cluster.
 
 [![debugging-with-remote-clusters.png](debugging-with-remote-clusters.png)](debugging-with-remote-clusters.png)
 
 ### Prerequisites
 - kubectl configured to talk to the target cluster (set KUBECONFIG if needed)
 - A local shell that can run ssh and kubectl
-- WVA is installed but scaled down to zero replicas in the cluster
+- The scaling manager is installed but scaled down to zero replicas in the cluster
 
 ### Steps
 
@@ -37,7 +37,7 @@ kubectl apply -f debugging-ssh-tunnel.yaml
 
 3) Create a token for the `ssh-gateway` ServiceAccount
 
-This token will be used by the ServiceMonitor and by in-cluster curl checks to authenticate to your local WVA metrics endpoint:
+This token will be used by the ServiceMonitor and by in-cluster curl checks to authenticate to your local controller metrics endpoint:
 
 ```shell
 kubectl -n debugging create token ssh-gateway --duration=24h > /tmp/wva.token
@@ -45,7 +45,7 @@ kubectl -n debugging create token ssh-gateway --duration=24h > /tmp/wva.token
 
 4) Port-forward Prometheus (thanos-querier) and the SSH gateway service
 
-We forward the thanos-querier so WVA (running locally) can query Prometheus via localhost, and forward the SSH gateway service so an SSH tunnel can be established.
+We forward the thanos-querier so the scaling manager (running locally) can query Prometheus via localhost, and forward the SSH gateway service so an SSH tunnel can be established.
 
 ```shell
 # forward thanos-querier => local 9091
@@ -57,7 +57,7 @@ kubectl port-forward -n debugging svc/ssh-gateway 2222:22 &
 
 5) Create a reverse SSH tunnel (cluster -> local)
 
-From your local machine, open an SSH connection to the SSH Gateway pod and set up reverse port forwarding so the cluster can reach your WVA metrics endpoint at https://localhost:8443.
+From your local machine, open an SSH connection to the SSH Gateway pod and set up reverse port forwarding so the cluster can reach your the scaling manager metrics endpoint at https://localhost:8443.
 
 ```shell
 ssh -o StrictHostKeyChecking=no \
@@ -68,12 +68,12 @@ ssh -o StrictHostKeyChecking=no \
 ```
 
 Notes:
-- The `-R 0.0.0.0:8443:localhost:8443` exposes port 8443 on the remote (cluster) side so other pods (and Prometheus) can reach your local WVA.
+- The `-R 0.0.0.0:8443:localhost:8443` exposes port 8443 on the remote (cluster) side so other pods (and Prometheus) can reach your local controller.
 - Keep the SSH session open while debugging.
 
 6) Create a ServiceMonitor (example)
 
-Use this ServiceMonitor (or adapt it) so the in-cluster Prometheus scrapes the SSH Gateway service which forwards to your local WVA metrics:
+Use this ServiceMonitor (or adapt it) so the in-cluster Prometheus scrapes the SSH Gateway service which forwards to your local controller metrics:
 
 ```yaml
 apiVersion: monitoring.coreos.com/v1
@@ -104,7 +104,7 @@ Apply it (if you need to):
 kubectl apply -f path/to/your/servicemonitor.yaml
 ```
 
-7) Environment variables — set these before running WVA locally
+7) Environment variables — set these before running the scaling manager locally
 
 Example (adjust paths and values as needed):
 
@@ -118,9 +118,9 @@ export PROMETHEUS_BEARER_TOKEN="$(</tmp/wva.token)"
 export WVA_SCALE_TO_ZERO=false
 ```
 
-8) Run WVA locally
+8) Run the scaling manager locally
 
-Start WVA from your IDE or terminal. With the environment variables above, WVA should query Prometheus via the forwarded thanos-querier and expose metrics on https://localhost:8443, reachable from the cluster via the SSH tunnel at https://ssh-gateway.debugging.svc.cluster.local:8443.
+Start the scaling manager from your IDE or terminal. With the environment variables above, the scaling manager should query Prometheus via the forwarded thanos-querier and expose metrics on https://localhost:8443, reachable from the cluster via the SSH tunnel at https://ssh-gateway.debugging.svc.cluster.local:8443.
 
 ```shell
 /path/to/wva/binary --metrics-bind-address :8443 --metrics-secure=true
@@ -135,7 +135,7 @@ Start WVA from your IDE or terminal. With the environment variables above, WVA s
 curl -k https://localhost:8443/metrics -H "Authorization: Bearer $(</tmp/wva.token)"
 ```
 
-- From inside the SSH Gateway pod (verify it reaches your local WVA):
+- From inside the SSH Gateway pod (verify it reaches your local controller):
 
 ```shell
 kubectl exec -n debugging deploy/ssh-gateway -- \
@@ -152,7 +152,7 @@ https://ssh-gateway.debugging.svc.cluster.local:8443/metrics
 
 - Are port-forward sessions running? Use `ps` or re-run the `kubectl port-forward` commands.
 - Is the SSH tunnel open and active? The SSH client should be connected and not exited.
-- Inspect local WVA logs for errors and TLS/auth issues.
+- Inspect local controller logs for errors and TLS/auth issues.
 - Check Prometheus / Prometheus Operator logs in `openshift-monitoring` and `openshift-user-workload-monitoring`.
 - If the ServiceMonitor returns 401/403, ensure the token at `/tmp/wva.token` matches the ServiceAccount used by the ServiceMonitor.
 
@@ -163,8 +163,8 @@ https://ssh-gateway.debugging.svc.cluster.local:8443/metrics
 
 ### FAQ / tips
 
-- Q: Why forward thanos-querier? A: WVA queries Prometheus via the thanos-querier endpoint in the cluster; forwarding makes that endpoint available at localhost for local debugging.
-- Q: Why use reverse SSH (-R)? A: It lets the cluster reach your local service without exposing your machine directly to the cluster network. The WVA exposes metrics to actuate scaling decisions.
-- Q: I can't create the service account or the related cluster-wide roles and rolebindings as I do not have sufficient permissions in the cluster. A: You can use an existing service account with sufficient permissions instead. Just ensure the SSH Gateway deployment uses that service account and creates a token for that service account for running the WVA.
+- Q: Why forward thanos-querier? A: The scaling manager queries Prometheus via the thanos-querier endpoint in the cluster; forwarding makes that endpoint available at localhost for local debugging.
+- Q: Why use reverse SSH (-R)? A: It lets the cluster reach your local service without exposing your machine directly to the cluster network. The scaling manager exposes metrics to actuate scaling decisions.
+- Q: I can't create the service account or the related cluster-wide roles and rolebindings as I do not have sufficient permissions in the cluster. A: You can use an existing service account with sufficient permissions instead. Just ensure the SSH Gateway deployment uses that service account and creates a token for that service account for running the scaling manager.
 
 ---

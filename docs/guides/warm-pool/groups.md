@@ -73,7 +73,7 @@ cards.
 
 A group's `size` is fixed when the group is created -- it is the engine's shape,
 not a scaling knob. So a group of 2 serves only models declaring `--nnodes 2`,
-and WVA declines anything else **permanently**, saying which:
+and the scaling manager declines anything else **permanently**, saying which:
 
 ```
 spans 4 Pod(s), this warm unit is 2
@@ -86,7 +86,7 @@ you need a pool for each -- exactly as two accelerators need two pools.
 ### What is different once a pool holds groups
 
 - **Only the leader is lent.** It runs the supervisor and serves the API; workers
-  hold devices and join its process group. WVA never labels a worker into an
+  hold devices and join its process group. The scaling manager never labels a worker into an
   InferencePool, because a labelled worker takes traffic nothing answers.
 - **A group is all-or-nothing.** One Pod not Ready and the whole group drops out
   of the observation: ranks that cannot form are not a degraded engine, they are

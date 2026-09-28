@@ -11,12 +11,12 @@ cover: GitOps, a direct Kustomize apply, or reading exactly what the script does
 
 The deployment script provides a complete, automated setup including:
 
-- WVA controller with RBAC configuration
+- The scaling manager controller with RBAC configuration
 - Prometheus stack (or connects to existing)
 - llm-d infrastructure (Gateway, Scheduler, vLLM)
 - KEDA for external metrics (ScaledObject-driven)
 - ServiceMonitors for metric collection
-- ScaledObjects are yours to create — they are how a workload reaches WVA
+- ScaledObjects are yours to create — they are how a workload reaches the scaling manager
 - Automatic GPU detection
 - Environment-specific optimizations
 
@@ -81,7 +81,7 @@ install produces — the last of which is the usual reason an install dies halfw
 
 **ScaledObjects** are not created by `install.sh` — create them with `kubectl apply`, or let your tests/operators manage them. KEDA creates and owns the HPA behind each one; you never create an HPA yourself.
 
-##### Example 1: Base WVA infra + EPP
+##### Example 1: Base the scaling manager infra + EPP
 
 ```bash
 ./deploy/install.sh -e kubernetes
@@ -97,7 +97,7 @@ LLM_D_ROUTER_VERSION=v0.9.0 GAIE_VERSION=v1.5.0 NAMESPACE=llm-d-optimized-baseli
 make deploy-e2e-infra ENVIRONMENT=kind-emulator IMG=localhost/llm-scaling-manager:dev
 ```
 
-##### Example 3: WVA + monitoring only (no llm-d)
+##### Example 3: The scaling manager + monitoring only (no llm-d)
 
 ```bash
 export DEPLOY_WVA=true
@@ -127,10 +127,10 @@ things around them that the raw apply does not, and each one has bitten somebody
 | --- | --- |
 | Writes `PROMETHEUS_URL` into the controller ConfigMap | The controller starts, looks healthy, and reads no metrics — it uses the shipped in-cluster default, which is not your Prometheus |
 | Renames the shared ClusterRoleBindings per install | A second install **takes the bindings from the first**, which silently loses all its permissions |
-| Checks no incompatible WVA is already installed | Two controllers scaling the same workloads |
-| Refuses to delete the namespace and shared ClusterRoles on undeploy | `kubectl delete -k` removes the **Namespace** — taking the model servers in it — and the shared **ClusterRoles**, breaking every other WVA on the cluster |
+| Checks no incompatible the scaling manager is already installed | Two controllers scaling the same workloads |
+| Refuses to delete the namespace and shared ClusterRoles on undeploy | `kubectl delete -k` removes the **Namespace** — taking the model servers in it — and the shared **ClusterRoles**, breaking every other the scaling manager on the cluster |
 
-So use this method when you are installing **one** WVA and wiring Prometheus
+So use this method when you are installing **one** the scaling manager and wiring Prometheus
 yourself, or when a GitOps tool owns the manifests. Otherwise prefer Method 1.
 
 #### Applying the overlays directly
@@ -160,7 +160,7 @@ kubectl -n wva-system edit configmap wva-manager-config
 kubectl -n wva-system rollout restart deployment wva-controller-manager
 ```
 
-If you will run **more than one** WVA on this cluster, rename the shared
+If you will run **more than one** the scaling manager on this cluster, rename the shared
 ClusterRoleBindings in your overlay first — otherwise the second install takes them
 from the first. `deploy/lib/common.sh:wva_append_crb_name_patches` is the patch set
 the script generates; the names are listed in `WVA_SHARED_CLUSTER_ROLE_BINDINGS`.
@@ -169,7 +169,7 @@ the script generates; the names are listed in `WVA_SHARED_CLUSTER_ROLE_BINDINGS`
 
 `kubectl delete -k` is **not** the inverse of the apply: the overlay contains a
 Namespace and the shared ClusterRoles, and deleting those takes the workloads in
-that namespace and the permissions of every other WVA with it. Delete the
+that namespace and the permissions of every other the scaling manager with it. Delete the
 install's own objects and leave the shared ones:
 
 ```bash
@@ -183,7 +183,7 @@ Or just use `./deploy/install.sh --undeploy`, which does exactly this.
 
 ## After the controller: warm pools
 
-Installing WVA does not create a warm pool, and a namespace does not need one to
+Installing the scaling manager does not create a warm pool, and a namespace does not need one to
 autoscale. A pool trades held accelerators for scale-up latency, so it is worth
 it only where a model's load time actually costs something — see [Weights and the
 model cache](workload-preparation.md#weights-and-the-model-cache) for why that load is not
