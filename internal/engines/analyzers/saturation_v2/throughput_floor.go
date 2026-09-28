@@ -310,7 +310,8 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 	// per-analyzer override would leave a gap that orders a replica.
 	scaleUp, _ := cfg.AnalyzerThresholds(domain.SaturationAnalyzerName)
 	tf := floor.Estimate(offeredArrivalRate(input), replicas, variants, backlog,
-		floor.BacklogDrainSeconds, scaleUp, staleShape, eppQueued)
+		floor.BacklogDrainSeconds, scaleUp, staleShape, eppQueued,
+		a.startSecondsByRole(input, roleOf))
 
 	// Prefill with no mu: the scheduler queue's prompts are not resident work
 	// for prefill (file header). Only the disaggregated case has a prefill

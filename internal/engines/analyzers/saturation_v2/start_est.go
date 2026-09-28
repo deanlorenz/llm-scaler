@@ -175,6 +175,52 @@ func (a *SaturationAnalyzer) noteReplicaStart(
 	}
 }
 
+// startSecondsByRole is how long one replica of each role takes to become Ready,
+// from the per-variant estimates.
+//
+// The MINIMUM over a role's variants, not the maximum or the mean: it is the
+// first relief to arrive, and the projection is what gets ordered on. Taking the
+// slowest would project more arrivals and order more replicas on a role whose
+// variants differ -- the wrong direction to err, given the failure this whole
+// file is chasing is a fleet that over-orders and cannot come back down.
+//
+// A role with no measured variant is absent from the result, which leaves the
+// floor on its observed backlog for that role.
+func (a *SaturationAnalyzer) startSecondsByRole(
+	input domain.AnalyzerInput, roleOf map[string]string,
+) map[string]float64 {
+	accel := make(map[string]string, len(input.VariantStates))
+	gpus := make(map[string]int, len(input.VariantStates))
+	for _, vs := range input.VariantStates {
+		accel[vs.VariantName] = vs.AcceleratorName
+		gpus[vs.VariantName] = vs.GPUsPerReplica
+	}
+
+	// Keys FIRST, outside the lock. itlWindowKey reaches stableAccelerator,
+	// which takes a.mu -- and sync.Mutex is not reentrant, so resolving a key
+	// while holding it deadlocks the whole analyzer. noteITL documents the same
+	// hazard where it drops the lock before logging; this is that hazard.
+	keys := make(map[string]string, len(roleOf))
+	for variant := range roleOf {
+		keys[variant] = a.itlWindowKey(input.Namespace, input.ModelID, variant,
+			accel[variant], gpus[variant])
+	}
+
+	out := make(map[string]float64, 2)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for variant, role := range roleOf {
+		est, ok := a.startSeconds[keys[variant]]
+		if !ok || !(est > 0) {
+			continue
+		}
+		if cur, seen := out[role]; !seen || est < cur {
+			out[role] = est
+		}
+	}
+	return out
+}
+
 // startSource labels the estimate for the log and the metric, so a run says
 // whether it sized against a measurement or a guess.
 func startSource(measured bool) string {

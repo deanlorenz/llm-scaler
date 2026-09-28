@@ -42,7 +42,7 @@ var _ = Describe("Estimate", func() {
 		// 6 / 5.4 = 1.11 replicas' worth of demand. Through the engine's
 		// RC = D / 0.85 - supply that is 1.31 replicas, so a two-replica fleet
 		// holds and a one-replica fleet is (correctly) short.
-		f := Estimate(runLambda, replicas(6), variants(domain.RoleDecode, 6), nil, BacklogDrainSeconds, 0.85, false, 0)
+		f := Estimate(runLambda, replicas(6), variants(domain.RoleDecode, 6), nil, BacklogDrainSeconds, 0.85, false, 0, nil)
 		Expect(f.ByRole).To(HaveKey(domain.RoleDecode))
 		Expect(f.ByRole[domain.RoleDecode]).To(BeNumerically("~", runLambda/runMu*float64(runK1), 1e-6))
 		Expect(f.Terms[domain.RoleDecode].Replicas).To(BeNumerically("~", 1.111, 1e-3))
@@ -56,11 +56,11 @@ var _ = Describe("Estimate", func() {
 		// with it the same readings may hold what it has and no
 		// more, because every reading on record was taken under a shape the
 		// fleet has left.
-		ordering := Estimate(runLambda, replicas(1), variants(domain.RoleDecode, 1), nil, BacklogDrainSeconds, 0.85, false, 0)
+		ordering := Estimate(runLambda, replicas(1), variants(domain.RoleDecode, 1), nil, BacklogDrainSeconds, 0.85, false, 0, nil)
 		Expect(ordering.Terms[domain.RoleDecode].Held).To(BeFalse(),
 			"the same readings order when the shape is steady")
 
-		held := Estimate(runLambda, replicas(1), variants(domain.RoleDecode, 1), nil, BacklogDrainSeconds, 0.85, true, 0)
+		held := Estimate(runLambda, replicas(1), variants(domain.RoleDecode, 1), nil, BacklogDrainSeconds, 0.85, true, 0, nil)
 		Expect(held.Terms[domain.RoleDecode].Held).To(BeTrue())
 		Expect(held.Terms[domain.RoleDecode].HeldWhy).To(Equal("shape-change"),
 			"named for the reason, not for the sample count it would otherwise report")
@@ -73,7 +73,7 @@ var _ = Describe("Estimate", func() {
 	It("does not label a term shape-change when nothing was capped", func() {
 		// A fleet whose floor is already under the hold cap is not held at
 		// all, and must not be labelled as though it were.
-		f := Estimate(runLambda, replicas(60), variants(domain.RoleDecode, 60), nil, BacklogDrainSeconds, 0.85, true, 0)
+		f := Estimate(runLambda, replicas(60), variants(domain.RoleDecode, 60), nil, BacklogDrainSeconds, 0.85, true, 0, nil)
 		Expect(f.Terms[domain.RoleDecode].Held).To(BeFalse())
 		Expect(f.Terms[domain.RoleDecode].HeldWhy).To(BeEmpty())
 	})
@@ -82,8 +82,8 @@ var _ = Describe("Estimate", func() {
 		// The property the arrival floor was supposed to have and did not:
 		// mu is a per-replica constant, so the floor is the same at one
 		// replica as at six.
-		one := Estimate(runLambda, replicas(1), variants(domain.RoleDecode, 1), nil, BacklogDrainSeconds, 0.85, false, 0)
-		six := Estimate(runLambda, replicas(6), variants(domain.RoleDecode, 6), nil, BacklogDrainSeconds, 0.85, false, 0)
+		one := Estimate(runLambda, replicas(1), variants(domain.RoleDecode, 1), nil, BacklogDrainSeconds, 0.85, false, 0, nil)
+		six := Estimate(runLambda, replicas(6), variants(domain.RoleDecode, 6), nil, BacklogDrainSeconds, 0.85, false, 0, nil)
 		Expect(six.ByRole[domain.RoleDecode]).To(BeNumerically("~", one.ByRole[domain.RoleDecode], 1e-6))
 	})
 
@@ -93,13 +93,13 @@ var _ = Describe("Estimate", func() {
 		// is measured. The first version capped this at the fleet's size and
 		// the order came 50 s later, from occupancy, after the replica had
 		// tipped into preemption (file header).
-		f := Estimate(runLambda, replicas(1), variants(domain.RoleDecode, 1), nil, BacklogDrainSeconds, 0.85, false, 0)
+		f := Estimate(runLambda, replicas(1), variants(domain.RoleDecode, 1), nil, BacklogDrainSeconds, 0.85, false, 0, nil)
 		Expect(f.ByRole[domain.RoleDecode]).To(BeNumerically("~", runLambda/runMu*float64(runK1), 1e-6))
 		Expect(f.ByRole[domain.RoleDecode]/0.85).To(BeNumerically(">", float64(runK1)),
 			"RC = D / scaleUp - one replica's supply is positive: the second replica is ordered")
 
 		By("and not one more as replicas arrive: the figure is the load's, not the fleet's")
-		g := Estimate(runLambda, replicas(2), variants(domain.RoleDecode, 2), nil, BacklogDrainSeconds, 0.85, false, 0)
+		g := Estimate(runLambda, replicas(2), variants(domain.RoleDecode, 2), nil, BacklogDrainSeconds, 0.85, false, 0, nil)
 		Expect(g.ByRole[domain.RoleDecode]).To(BeNumerically("~", f.ByRole[domain.RoleDecode], 1e-6))
 		Expect(g.ByRole[domain.RoleDecode]/0.85).To(BeNumerically("<", 2*float64(runK1)),
 			"at two replicas RC is negative: nothing more is ordered")
@@ -112,7 +112,7 @@ var _ = Describe("Estimate", func() {
 		// shape reads the 1000-token shape's mu until it has its own. Borrowed
 		// readings hold the fleet at its size and no more.
 		borrowed := capacity.ReplicaCapacity{VariantName: "v", SaturatedThroughput: 2.67, SaturatedThroughputSamples: 10, SaturatedThroughputBorrowed: true}
-		f := Estimate(runLambda, []capacity.ReplicaCapacity{borrowed}, variants(domain.RoleDecode, 1), nil, BacklogDrainSeconds, 0.85, false, 0)
+		f := Estimate(runLambda, []capacity.ReplicaCapacity{borrowed}, variants(domain.RoleDecode, 1), nil, BacklogDrainSeconds, 0.85, false, 0, nil)
 		Expect(f.Terms[domain.RoleDecode].Replicas).To(BeNumerically("~", runLambda/2.67, 1e-6), "the uncapped figure is reported")
 		Expect(f.ByRole[domain.RoleDecode]).To(BeNumerically("~", 0.85*float64(runK1), 1e-6), "capped at scaleUp x one replica")
 		Expect(f.Terms[domain.RoleDecode].Held).To(BeTrue())
@@ -120,7 +120,7 @@ var _ = Describe("Estimate", func() {
 
 		By("ordering once one replica has a reading of its own")
 		own := capacity.ReplicaCapacity{VariantName: "v", SaturatedThroughput: 2.67, SaturatedThroughputSamples: MinThroughputSamplesToOrder}
-		g := Estimate(runLambda, []capacity.ReplicaCapacity{borrowed, own}, variants(domain.RoleDecode, 2), nil, BacklogDrainSeconds, 0.85, false, 0)
+		g := Estimate(runLambda, []capacity.ReplicaCapacity{borrowed, own}, variants(domain.RoleDecode, 2), nil, BacklogDrainSeconds, 0.85, false, 0, nil)
 		Expect(g.Terms[domain.RoleDecode].Held).To(BeFalse())
 		Expect(g.ByRole[domain.RoleDecode]).To(BeNumerically("~", runLambda/2.67*float64(runK1), 1e-6))
 	})
@@ -135,7 +135,7 @@ var _ = Describe("Estimate", func() {
 		one := []capacity.ReplicaCapacity{{VariantName: "v", SaturatedThroughput: runMu, SaturatedThroughputSamples: 1}}
 		bad := []domain.VariantCapacity{{VariantName: "v", Role: domain.RoleDecode,
 			ReplicaCount: 1, PendingReplicas: -3, PerReplicaCapacity: float64(runK1)}}
-		f := Estimate(runLambda, one, bad, nil, BacklogDrainSeconds, 0.85, false, 0)
+		f := Estimate(runLambda, one, bad, nil, BacklogDrainSeconds, 0.85, false, 0, nil)
 		Expect(f.ByRole[domain.RoleDecode]).To(BeNumerically(">=", 0),
 			"a negative anticipated supply must hold the floor at zero, not below it")
 		Expect(f.ByRole[domain.RoleDecode]).To(BeZero(),
@@ -155,7 +155,7 @@ var _ = Describe("Estimate", func() {
 		By("a NaN rate is not a reading, so the role has no floor at all")
 		nanMu := []capacity.ReplicaCapacity{
 			{VariantName: "v", SaturatedThroughput: math.NaN(), SaturatedThroughputSamples: 3}}
-		f := Estimate(runLambda, nanMu, v, nil, BacklogDrainSeconds, 0.85, false, runLambda*10)
+		f := Estimate(runLambda, nanMu, v, nil, BacklogDrainSeconds, 0.85, false, runLambda*10, nil)
 		_, present := f.ByRole[domain.RoleDecode]
 		Expect(present).To(BeFalse(), "the same as no reading, not a NaN floor")
 
@@ -174,7 +174,7 @@ var _ = Describe("Estimate", func() {
 			{VariantName: "v", SaturatedThroughput: math.NaN(), SaturatedThroughputSamples: 3},
 			{VariantName: "v", SaturatedThroughput: slowMu, SaturatedThroughputSamples: 3},
 		}
-		g := Estimate(runLambda, mixed, v, nil, BacklogDrainSeconds, 0.85, false, 0)
+		g := Estimate(runLambda, mixed, v, nil, BacklogDrainSeconds, 0.85, false, 0, nil)
 		Expect(math.IsNaN(g.ByRole[domain.RoleDecode])).To(BeFalse())
 		Expect(g.Terms[domain.RoleDecode].Mu).To(BeNumerically("~", (runMu+slowMu)/2, 1e-9),
 			"the two finite readings decide it between them, and a NaN is not one")
@@ -187,7 +187,7 @@ var _ = Describe("Estimate", func() {
 			{VariantName: "v", SaturatedThroughput: math.Inf(1), SaturatedThroughputSamples: 3},
 			{VariantName: "v", SaturatedThroughput: slowMu, SaturatedThroughputSamples: 3},
 		}
-		gi := Estimate(runLambda, withInf, v, nil, BacklogDrainSeconds, 0.85, false, 0)
+		gi := Estimate(runLambda, withInf, v, nil, BacklogDrainSeconds, 0.85, false, 0, nil)
 		Expect(gi.Terms[domain.RoleDecode].Mu).To(BeNumerically("~", (runMu+slowMu)/2, 1e-9),
 			"+Inf passes `x > 0`, so only the explicit test keeps it out of the median")
 
@@ -198,7 +198,7 @@ var _ = Describe("Estimate", func() {
 		borrowedNaN := []capacity.ReplicaCapacity{{VariantName: "v",
 			SaturatedThroughput: math.NaN(), SaturatedThroughputSamples: 10,
 			SaturatedThroughputBorrowed: true}}
-		gb := Estimate(runLambda, borrowedNaN, v, nil, BacklogDrainSeconds, 0.85, false, runLambda*10)
+		gb := Estimate(runLambda, borrowedNaN, v, nil, BacklogDrainSeconds, 0.85, false, runLambda*10, nil)
 		_, borrowedPresent := gb.ByRole[domain.RoleDecode]
 		Expect(borrowedPresent).To(BeFalse(), "nothing to borrow from a NaN")
 
@@ -207,7 +207,7 @@ var _ = Describe("Estimate", func() {
 			{VariantName: "v", SaturatedThroughput: runMu, SaturatedThroughputSamples: 3}}
 		badP := []domain.VariantCapacity{{VariantName: "v", Role: domain.RoleDecode,
 			ReplicaCount: 1, PerReplicaCapacity: math.NaN()}}
-		h := Estimate(runLambda, nanP, badP, nil, BacklogDrainSeconds, 0.85, false, runLambda*10)
+		h := Estimate(runLambda, nanP, badP, nil, BacklogDrainSeconds, 0.85, false, runLambda*10, nil)
 		_, present = h.ByRole[domain.RoleDecode]
 		Expect(present).To(BeFalse())
 
@@ -217,7 +217,7 @@ var _ = Describe("Estimate", func() {
 		// PerReplica (cost x mu) a NaN through 0 x +Inf.
 		infMu := []capacity.ReplicaCapacity{
 			{VariantName: "v", SaturatedThroughput: math.Inf(1), SaturatedThroughputSamples: 3}}
-		i := Estimate(runLambda, infMu, v, nil, BacklogDrainSeconds, 0.85, false, runLambda*10)
+		i := Estimate(runLambda, infMu, v, nil, BacklogDrainSeconds, 0.85, false, runLambda*10, nil)
 		_, present = i.ByRole[domain.RoleDecode]
 		Expect(present).To(BeFalse(), "no floor, rather than a zero-cost one")
 		Expect(math.IsNaN(i.Terms[domain.RoleDecode].PerReplica)).To(BeFalse(),
@@ -251,7 +251,7 @@ var _ = Describe("Estimate", func() {
 				{VariantName: "bad", Role: domain.RoleDecode,
 					ReplicaCount: 1, PerReplicaCapacity: tc.bad},
 			}
-			f := Estimate(runLambda, thin, vs, nil, BacklogDrainSeconds, 0.85, false, 0)
+			f := Estimate(runLambda, thin, vs, nil, BacklogDrainSeconds, 0.85, false, 0, nil)
 
 			Expect(math.IsNaN(f.ByRole[domain.RoleDecode])).To(BeFalse(),
 				"never a NaN floor")
@@ -293,7 +293,7 @@ var _ = Describe("Estimate", func() {
 			{VariantName: "bad", Role: domain.RoleDecode,
 				ReplicaCount: 1, PerReplicaCapacity: math.NaN()},
 		}
-		f := Estimate(runLambda, reps, vs, nil, BacklogDrainSeconds, 0.85, false, 0)
+		f := Estimate(runLambda, reps, vs, nil, BacklogDrainSeconds, 0.85, false, 0, nil)
 		Expect(math.IsNaN(f.ByRole[domain.RoleDecode])).To(BeFalse())
 		Expect(f.ByRole[domain.RoleDecode]).To(BeNumerically("~", runLambda*float64(runK1)/runMu, 1e-6),
 			"the good variant's cost alone, as though the bad one were not there")
@@ -309,12 +309,12 @@ var _ = Describe("Estimate", func() {
 		v := variants(domain.RoleDecode, 1)
 
 		By("holding when the scheduler queue is only a transient")
-		f := Estimate(runLambda, one, v, nil, BacklogDrainSeconds, 0.85, false, runLambda)
+		f := Estimate(runLambda, one, v, nil, BacklogDrainSeconds, 0.85, false, runLambda, nil)
 		Expect(f.Terms[domain.RoleDecode].Held).To(BeTrue(), "one second of arrivals is not a standing queue")
 		Expect(f.Terms[domain.RoleDecode].OrderedBehindQueue).To(BeFalse())
 
 		By("ordering once it holds more than a second of arrivals")
-		g := Estimate(runLambda, one, v, nil, BacklogDrainSeconds, 0.85, false, runLambda*10)
+		g := Estimate(runLambda, one, v, nil, BacklogDrainSeconds, 0.85, false, runLambda*10, nil)
 		Expect(g.Terms[domain.RoleDecode].OrderedBehindQueue).To(BeTrue())
 		Expect(g.Terms[domain.RoleDecode].Held).To(BeFalse(), "released, so the floor is its own figure")
 		Expect(g.ByRole[domain.RoleDecode]).To(BeNumerically(">", f.ByRole[domain.RoleDecode]),
@@ -340,13 +340,13 @@ var _ = Describe("Estimate", func() {
 		By("and an under-read mu cannot inflate that")
 		// Half the reading: the unbounded floor would double. The bound holds.
 		thinHalf := []capacity.ReplicaCapacity{{VariantName: "v", SaturatedThroughput: runMu / 2, SaturatedThroughputSamples: 1}}
-		half := Estimate(runLambda, thinHalf, v, nil, BacklogDrainSeconds, 0.85, false, runLambda*10)
+		half := Estimate(runLambda, thinHalf, v, nil, BacklogDrainSeconds, 0.85, false, runLambda*10, nil)
 		Expect(half.Terms[domain.RoleDecode].OrderedBehindQueue).To(BeTrue())
 		Expect(half.ByRole[domain.RoleDecode]).To(BeNumerically("~", 0.85*2*float64(runK1), 1e-6),
 			"still one replica, though the reading is half what it should be")
 
 		By("still holding when the fleet's shape has changed under it")
-		st := Estimate(runLambda, one, v, nil, BacklogDrainSeconds, 0.85, true, runLambda*10)
+		st := Estimate(runLambda, one, v, nil, BacklogDrainSeconds, 0.85, true, runLambda*10, nil)
 		Expect(st.Terms[domain.RoleDecode].OrderedBehindQueue).To(BeFalse(),
 			"every reading on record was taken under a shape the fleet has left; a queue does not make it right")
 		Expect(st.Terms[domain.RoleDecode].Held).To(BeTrue())
@@ -354,7 +354,7 @@ var _ = Describe("Estimate", func() {
 		By("still holding when the only reading is borrowed from another bucket")
 		bor := []capacity.ReplicaCapacity{{VariantName: "v", SaturatedThroughput: runMu,
 			SaturatedThroughputSamples: 10, SaturatedThroughputBorrowed: true}}
-		bq := Estimate(runLambda, bor, v, nil, BacklogDrainSeconds, 0.85, false, runLambda*10)
+		bq := Estimate(runLambda, bor, v, nil, BacklogDrainSeconds, 0.85, false, runLambda*10, nil)
 		Expect(bq.Terms[domain.RoleDecode].OrderedBehindQueue).To(BeFalse(),
 			"a borrowed reading is wrong in a known direction, queue or no queue")
 		Expect(bq.Terms[domain.RoleDecode].Held).To(BeTrue())
@@ -364,13 +364,13 @@ var _ = Describe("Estimate", func() {
 		// One stray request is ten seconds of arrivals at 0.1 req/s, so a test
 		// against lambda alone would call it a standing queue. Against mu it
 		// is a fraction of one replica-second of work, which is what it is.
-		light := Estimate(0.1, one, v, nil, BacklogDrainSeconds, 0.85, false, 1)
+		light := Estimate(0.1, one, v, nil, BacklogDrainSeconds, 0.85, false, 1, nil)
 		Expect(light.Terms[domain.RoleDecode].OrderedBehindQueue).To(BeFalse(),
 			"a single queued request on a lightly loaded fleet is jitter, not a queue")
 
 		By("ignoring the engines' own queues, which may be waiting on a KV transfer")
 		busy := Estimate(runLambda, one, v, map[string]float64{domain.RoleDecode: 500},
-			BacklogDrainSeconds, 0.85, false, 0)
+			BacklogDrainSeconds, 0.85, false, 0, nil)
 		Expect(busy.Terms[domain.RoleDecode].OrderedBehindQueue).To(BeFalse(),
 			"a request awaiting a remote KV transfer is not work another replica drains")
 		Expect(busy.Terms[domain.RoleDecode].Held).To(BeTrue())
@@ -390,7 +390,7 @@ var _ = Describe("Estimate", func() {
 		}
 		const queue = 60.0
 		at := func(ready, pending int) Floor {
-			return Estimate(runLambda, thin, fleet(ready, pending), nil, BacklogDrainSeconds, 0.85, false, queue)
+			return Estimate(runLambda, thin, fleet(ready, pending), nil, BacklogDrainSeconds, 0.85, false, queue, nil)
 		}
 
 		first := at(2, 0)
@@ -411,7 +411,7 @@ var _ = Describe("Estimate", func() {
 
 		By("and it stops asking once the queue is no longer a queue")
 		Expect(at(5, 0).Terms[domain.RoleDecode].OrderedBehindQueue).To(BeTrue())
-		quiet := Estimate(runLambda, thin, fleet(5, 0), nil, BacklogDrainSeconds, 0.85, false, runMu)
+		quiet := Estimate(runLambda, thin, fleet(5, 0), nil, BacklogDrainSeconds, 0.85, false, runMu, nil)
 		Expect(quiet.Terms[domain.RoleDecode].OrderedBehindQueue).To(BeFalse())
 	})
 
@@ -433,7 +433,7 @@ var _ = Describe("Estimate", func() {
 			{VariantName: "slow", Role: domain.RoleDecode, PerReplicaCapacity: slowP},
 			{VariantName: "slow2", Role: domain.RoleDecode, PerReplicaCapacity: slowP},
 		}
-		f := Estimate(runLambda, thin, mixed, nil, BacklogDrainSeconds, 0.85, false, runLambda*10)
+		f := Estimate(runLambda, thin, mixed, nil, BacklogDrainSeconds, 0.85, false, runLambda*10, nil)
 		Expect(f.Terms[domain.RoleDecode].OrderedBehindQueue).To(BeTrue())
 		// Exact, not an upper bound. The floor here is 6 x median(P/mu) =
 		// 1,416,666.67 against a step of 1,300,500, so the cap BINDS and the
@@ -470,7 +470,7 @@ var _ = Describe("Estimate", func() {
 			{VariantName: "d", Role: domain.RoleDecode, PerReplicaCapacity: float64(runK1), ReplicaCount: 1},
 			{VariantName: "p", Role: domain.RolePrefill, PerReplicaCapacity: float64(runK1) / 2, ReplicaCount: 1},
 		}
-		f := Estimate(runLambda, thin, pd, nil, BacklogDrainSeconds, 0.85, false, runLambda*10)
+		f := Estimate(runLambda, thin, pd, nil, BacklogDrainSeconds, 0.85, false, runLambda*10, nil)
 
 		Expect(f.Terms[domain.RoleDecode].OrderedBehindQueue).To(BeTrue(), "decode released")
 		Expect(f.Terms[domain.RolePrefill].OrderedBehindQueue).To(BeTrue(), "prefill released by the same queue")
@@ -489,7 +489,7 @@ var _ = Describe("Estimate", func() {
 		// conjunct, which nothing else in this file exercises: the existing
 		// zero-threshold case passes no queue, so it never reaches the branch.
 		one := []capacity.ReplicaCapacity{{VariantName: "v", SaturatedThroughput: runMu, SaturatedThroughputSamples: 1}}
-		z := Estimate(runLambda, one, variants(domain.RoleDecode, 1), nil, BacklogDrainSeconds, 0, false, runLambda*10)
+		z := Estimate(runLambda, one, variants(domain.RoleDecode, 1), nil, BacklogDrainSeconds, 0, false, runLambda*10, nil)
 
 		Expect(z.Terms[domain.RoleDecode].OrderedBehindQueue).To(BeFalse(),
 			"there is nothing to bound the step with, so a queue must not release the hold")
@@ -504,7 +504,7 @@ var _ = Describe("Estimate", func() {
 		// Letting one reading order one replica was tried and dropped: a
 		// ratchet across starts, and one cycle's worth of benefit measured.
 		one := []capacity.ReplicaCapacity{{VariantName: "v", SaturatedThroughput: runMu / 2, SaturatedThroughputSamples: 1}}
-		f := Estimate(runLambda, one, variants(domain.RoleDecode, 1), nil, BacklogDrainSeconds, 0.85, false, 0)
+		f := Estimate(runLambda, one, variants(domain.RoleDecode, 1), nil, BacklogDrainSeconds, 0.85, false, 0, nil)
 		Expect(f.Terms[domain.RoleDecode].Replicas).To(BeNumerically("~", 2.22, 0.01))
 		Expect(f.ByRole[domain.RoleDecode]).To(BeNumerically("~", 0.85*float64(runK1), 1e-6),
 			"capped at scaleUp x the one replica: RC = 0 exactly")
@@ -512,18 +512,18 @@ var _ = Describe("Estimate", func() {
 
 		By("holding at the anticipated size when a replica is already on its way")
 		pending := []domain.VariantCapacity{{VariantName: "v", Role: domain.RoleDecode, ReplicaCount: 2, PendingReplicas: 1, PerReplicaCapacity: 100}}
-		pend := Estimate(100, one, pending, nil, BacklogDrainSeconds, 0.85, false, 0)
+		pend := Estimate(100, one, pending, nil, BacklogDrainSeconds, 0.85, false, 0, nil)
 		Expect(pend.Terms[domain.RoleDecode].Held).To(BeTrue())
 		Expect(pend.ByRole[domain.RoleDecode]).To(BeNumerically("~", 0.85*300, 1e-6))
 
 		By("ordering from the second reading on")
 		two := []capacity.ReplicaCapacity{{VariantName: "v", SaturatedThroughput: runMu / 2, SaturatedThroughputSamples: 2}}
-		g := Estimate(runLambda, two, variants(domain.RoleDecode, 1), nil, BacklogDrainSeconds, 0.85, false, 0)
+		g := Estimate(runLambda, two, variants(domain.RoleDecode, 1), nil, BacklogDrainSeconds, 0.85, false, 0, nil)
 		Expect(g.Terms[domain.RoleDecode].Held).To(BeFalse())
 		Expect(g.ByRole[domain.RoleDecode]).To(BeNumerically("~", 2.22*float64(runK1), 0.01*float64(runK1)))
 
 		By("with no scale-up threshold there is nothing to cap against, and the figure stands")
-		z := Estimate(runLambda, one, variants(domain.RoleDecode, 1), nil, BacklogDrainSeconds, 0, false, 0)
+		z := Estimate(runLambda, one, variants(domain.RoleDecode, 1), nil, BacklogDrainSeconds, 0, false, 0, nil)
 		Expect(z.Terms[domain.RoleDecode].Held).To(BeFalse())
 	})
 
@@ -533,22 +533,22 @@ var _ = Describe("Estimate", func() {
 		// As throughput: 350 / 60 s = 5.8 extra req/s, (6 + 5.8) / 5.4 = 2.19
 		// replicas in all, the load included.
 		backlog := map[string]float64{domain.RoleDecode: 350}
-		f := Estimate(runLambda, replicas(1), variants(domain.RoleDecode, 1), backlog, 60, 0.85, false, 0)
+		f := Estimate(runLambda, replicas(1), variants(domain.RoleDecode, 1), backlog, 60, 0.85, false, 0, nil)
 		Expect(f.Terms[domain.RoleDecode].Backlog).To(Equal(350.0))
 		Expect(f.Terms[domain.RoleDecode].Replicas).To(BeNumerically("~", (runLambda+350.0/60)/runMu, 1e-6))
 		Expect(f.ByRole[domain.RoleDecode]).To(BeNumerically("~", (runLambda+350.0/60)/runMu*float64(runK1), 1e-6))
 
 		By("a longer drain target asks for less")
-		g := Estimate(runLambda, replicas(1), variants(domain.RoleDecode, 1), backlog, 120, 0.85, false, 0)
+		g := Estimate(runLambda, replicas(1), variants(domain.RoleDecode, 1), backlog, 120, 0.85, false, 0, nil)
 		Expect(g.ByRole[domain.RoleDecode]).To(BeNumerically("<", f.ByRole[domain.RoleDecode]))
 
 		By("another role's backlog is not this role's")
 		h := Estimate(runLambda, replicas(1), variants(domain.RoleDecode, 1),
-			map[string]float64{domain.RolePrefill: 350}, 60, 0.85, false, 0)
+			map[string]float64{domain.RolePrefill: 350}, 60, 0.85, false, 0, nil)
 		Expect(h.Terms[domain.RoleDecode].Backlog).To(BeZero())
 
 		By("a non-positive drain target disables the backlog term rather than dividing by it")
-		z := Estimate(runLambda, replicas(1), variants(domain.RoleDecode, 1), backlog, 0, 0.85, false, 0)
+		z := Estimate(runLambda, replicas(1), variants(domain.RoleDecode, 1), backlog, 0, 0.85, false, 0, nil)
 		Expect(z.Terms[domain.RoleDecode].Backlog).To(BeZero())
 		Expect(z.ByRole[domain.RoleDecode]).To(BeNumerically("~", runLambda/runMu*float64(runK1), 1e-6))
 	})
@@ -557,7 +557,7 @@ var _ = Describe("Estimate", func() {
 		rcs := append(replicas(2), capacity.ReplicaCapacity{VariantName: "p", SaturatedThroughput: 0})
 		vcs := append(variants(domain.RoleDecode, 2),
 			domain.VariantCapacity{VariantName: "p", Role: domain.RolePrefill, ReplicaCount: 1, PerReplicaCapacity: 919_449})
-		f := Estimate(runLambda, rcs, vcs, nil, BacklogDrainSeconds, 0.85, false, 0)
+		f := Estimate(runLambda, rcs, vcs, nil, BacklogDrainSeconds, 0.85, false, 0, nil)
 		Expect(f.ByRole).To(HaveKey(domain.RoleDecode))
 		Expect(f.ByRole).NotTo(HaveKey(domain.RolePrefill))
 	})
@@ -567,7 +567,7 @@ var _ = Describe("Estimate", func() {
 		// --gpu-memory-utilization, and it is going home); its rate is not
 		// this variant's.
 		rcs := []capacity.ReplicaCapacity{{VariantName: "v", SaturatedThroughput: 1, FromWarmPool: true}}
-		f := Estimate(runLambda, rcs, variants(domain.RoleBoth, 0), nil, BacklogDrainSeconds, 0.85, false, 0)
+		f := Estimate(runLambda, rcs, variants(domain.RoleBoth, 0), nil, BacklogDrainSeconds, 0.85, false, 0, nil)
 		Expect(f.ByRole).To(BeEmpty())
 	})
 
@@ -579,13 +579,13 @@ var _ = Describe("Estimate", func() {
 		vcs := append(variants(domain.RoleDecode, 1),
 			domain.VariantCapacity{VariantName: "unpriced", Role: domain.RoleDecode, ReplicaCount: 1, PerReplicaCapacity: 0})
 		rcs := append(replicas(1), capacity.ReplicaCapacity{VariantName: "unpriced", SaturatedThroughput: runMu})
-		f := Estimate(runLambda, rcs, vcs, nil, BacklogDrainSeconds, 0.85, false, 0)
+		f := Estimate(runLambda, rcs, vcs, nil, BacklogDrainSeconds, 0.85, false, 0, nil)
 		Expect(f.ByRole[domain.RoleDecode]).To(BeNumerically("~", runLambda/runMu*float64(runK1), 1e-6),
 			"the priced replica alone decides the floor")
 	})
 
 	It("says nothing without an arrival rate", func() {
-		f := Estimate(0, replicas(2), variants(domain.RoleBoth, 2), nil, BacklogDrainSeconds, 0.85, false, 0)
+		f := Estimate(0, replicas(2), variants(domain.RoleBoth, 2), nil, BacklogDrainSeconds, 0.85, false, 0, nil)
 		Expect(f.ByRole).To(BeEmpty())
 	})
 })
@@ -604,7 +604,7 @@ var _ = Describe("Estimate with mixed readings", func() {
 		own := capacity.ReplicaCapacity{VariantName: "v", SaturatedThroughput: 1.74, SaturatedThroughputSamples: MinThroughputSamplesToOrder}
 		fresh := capacity.ReplicaCapacity{VariantName: "v", SaturatedThroughput: 4.38, SaturatedThroughputSamples: 10, SaturatedThroughputBorrowed: true}
 		backlog := map[string]float64{domain.RoleDecode: 441}
-		f := Estimate(1.68, []capacity.ReplicaCapacity{fresh, own, fresh}, variants, backlog, BacklogDrainSeconds, 0.85, false, 0)
+		f := Estimate(1.68, []capacity.ReplicaCapacity{fresh, own, fresh}, variants, backlog, BacklogDrainSeconds, 0.85, false, 0, nil)
 		term := f.Terms[domain.RoleDecode]
 		Expect(term.Mu).To(Equal(1.74), "the own reading, however many replicas borrow")
 		Expect(term.Replicas).To(BeNumerically("~", (1.68+441/BacklogDrainSeconds)/1.74, 1e-6))
@@ -612,7 +612,7 @@ var _ = Describe("Estimate with mixed readings", func() {
 		Expect(f.ByRole[domain.RoleDecode]).To(BeNumerically("~", (1.68+441/BacklogDrainSeconds)/1.74*930_000, 1e-6))
 
 		By("taking the borrowed readings when no replica reads its own")
-		g := Estimate(1.68, []capacity.ReplicaCapacity{fresh, fresh}, variants, backlog, BacklogDrainSeconds, 0.85, false, 0)
+		g := Estimate(1.68, []capacity.ReplicaCapacity{fresh, fresh}, variants, backlog, BacklogDrainSeconds, 0.85, false, 0, nil)
 		Expect(g.Terms[domain.RoleDecode].Mu).To(Equal(4.38))
 		Expect(g.Terms[domain.RoleDecode].Replicas).To(BeNumerically("~", (1.68+441/BacklogDrainSeconds)/4.38, 1e-6))
 		// Not held: two replicas' worth is under the fleet's cap (0.85 x 3 x
@@ -623,7 +623,7 @@ var _ = Describe("Estimate with mixed readings", func() {
 
 		By("keeping the own readings' median when they disagree among themselves")
 		own2 := capacity.ReplicaCapacity{VariantName: "v", SaturatedThroughput: 1.26, SaturatedThroughputSamples: 1}
-		h := Estimate(1.68, []capacity.ReplicaCapacity{fresh, own, own2, fresh, fresh}, variants, backlog, BacklogDrainSeconds, 0.85, false, 0)
+		h := Estimate(1.68, []capacity.ReplicaCapacity{fresh, own, own2, fresh, fresh}, variants, backlog, BacklogDrainSeconds, 0.85, false, 0, nil)
 		Expect(h.Terms[domain.RoleDecode].Mu).To(BeNumerically("~", (1.74+1.26)/2, 1e-9), "the central pair of the two own readings, three borrowed ones ignored")
 		Expect(h.Terms[domain.RoleDecode].Held).To(BeFalse(), "one own window has enough samples")
 	})
@@ -645,14 +645,14 @@ var _ = Describe("Estimate with mixed readings", func() {
 			{VariantName: "slow", SaturatedThroughput: 2.0},
 			{VariantName: "slow", SaturatedThroughput: 2.0},
 		}
-		f := Estimate(6, replicas, variants, nil, BacklogDrainSeconds, 0.85, false, 0)
+		f := Estimate(6, replicas, variants, nil, BacklogDrainSeconds, 0.85, false, 0, nil)
 		fastCost := 930_000 / 5.4
 		Expect(f.ByRole[domain.RoleDecode]).To(BeNumerically("~", 6*fastCost, 1e-6),
 			"five readings, three of them the fast card's: the median is the fast card's cost")
 		Expect(f.Terms[domain.RoleDecode].Mu).To(Equal(5.4))
 
 		By("averaging the central pair on an even count")
-		f = Estimate(6, replicas[1:], variants, nil, BacklogDrainSeconds, 0.85, false, 0)
+		f = Estimate(6, replicas[1:], variants, nil, BacklogDrainSeconds, 0.85, false, 0, nil)
 		slowCost := 600_000 / 2.0
 		Expect(f.ByRole[domain.RoleDecode]).To(BeNumerically("~", 6*(fastCost+slowCost)/2, 1e-6))
 	})
@@ -674,7 +674,7 @@ var _ = Describe("a derived mu, in the floor", func() {
 			VariantName: "v", SaturatedThroughput: runMu / 2,
 			SaturatedThroughputSamples: 0, SaturatedThroughputDerived: true,
 		}}
-		f := Estimate(runLambda, d, oneDecode, nil, BacklogDrainSeconds, 0.85, true, 0)
+		f := Estimate(runLambda, d, oneDecode, nil, BacklogDrainSeconds, 0.85, true, 0, nil)
 		Expect(f.Terms[domain.RoleDecode].Held).To(BeFalse(),
 			"a derived figure waits neither for samples nor for the hold")
 		Expect(f.Terms[domain.RoleDecode].HeldWhy).To(BeEmpty())
@@ -686,7 +686,7 @@ var _ = Describe("a derived mu, in the floor", func() {
 			SaturatedThroughputSamples:  0,
 			SaturatedThroughputBorrowed: true, SaturatedThroughputDerived: true,
 		}}
-		f := Estimate(runLambda, d, oneDecode, nil, BacklogDrainSeconds, 0.85, false, 0)
+		f := Estimate(runLambda, d, oneDecode, nil, BacklogDrainSeconds, 0.85, false, 0, nil)
 		Expect(f.Terms[domain.RoleDecode].Held).To(BeFalse())
 	})
 
@@ -694,7 +694,7 @@ var _ = Describe("a derived mu, in the floor", func() {
 		one := []capacity.ReplicaCapacity{{
 			VariantName: "v", SaturatedThroughput: runMu / 2, SaturatedThroughputSamples: 1,
 		}}
-		f := Estimate(runLambda, one, oneDecode, nil, BacklogDrainSeconds, 0.85, false, 0)
+		f := Estimate(runLambda, one, oneDecode, nil, BacklogDrainSeconds, 0.85, false, 0, nil)
 		Expect(f.Terms[domain.RoleDecode].HeldWhy).To(Equal("single-sample"),
 			"the derived path must not have loosened the measured one")
 	})
@@ -716,7 +716,7 @@ var _ = Describe("the GPS check does not gate the floor", func() {
 			SaturatedThroughputSamples: MinThroughputSamplesToOrder,
 			SaturatedThroughputDerived: true,
 		}}
-		f := Estimate(runLambda, d, oneDecode, nil, BacklogDrainSeconds, 0.85, false, 0)
+		f := Estimate(runLambda, d, oneDecode, nil, BacklogDrainSeconds, 0.85, false, 0, nil)
 		Expect(f.Terms[domain.RoleDecode].Held).To(BeFalse())
 		Expect(f.Terms[domain.RoleDecode].HeldWhy).To(BeEmpty())
 		Expect(f.ByRole[domain.RoleDecode]).To(BeNumerically(">", 0.85*float64(runK1)))
@@ -783,9 +783,9 @@ var _ = Describe("a standing queue orders what it justifies", func() {
 			shallow := runLambda + 1
 
 			deepF := Estimate(runLambda, thin, oneDecode, engineBacklog,
-				BacklogDrainSeconds, 0.85, false, deep)
+				BacklogDrainSeconds, 0.85, false, deep, nil)
 			shallowF := Estimate(runLambda, thin, oneDecode, engineBacklog,
-				BacklogDrainSeconds, 0.85, false, shallow)
+				BacklogDrainSeconds, 0.85, false, shallow, nil)
 
 			Expect(deepF.Terms[domain.RoleDecode].OrderedBehindQueue).To(BeTrue())
 			Expect(deepF.Terms[domain.RoleDecode].Held).To(BeFalse(),
@@ -806,7 +806,7 @@ var _ = Describe("a standing queue orders what it justifies", func() {
 			// the caller's own test is queue > max(lambda, mu) -- but the step
 			// is the single replica it always was.
 			shallow := runLambda + 1
-			f := Estimate(runLambda, thin, oneDecode, nil, BacklogDrainSeconds, 0.85, false, shallow)
+			f := Estimate(runLambda, thin, oneDecode, nil, BacklogDrainSeconds, 0.85, false, shallow, nil)
 			term := f.Terms[domain.RoleDecode]
 			Expect(term.OrderedBehindQueue).To(BeTrue())
 			Expect(term.QueueJustifiedReplicas).To(Equal(1.0))
@@ -819,7 +819,7 @@ var _ = Describe("a standing queue orders what it justifies", func() {
 				VariantName: "v", SaturatedThroughput: runMu,
 				SaturatedThroughputSamples: MinThroughputSamplesToOrder,
 			}}
-			f := Estimate(runLambda, own, oneDecode, nil, BacklogDrainSeconds, 0.85, false, 0)
+			f := Estimate(runLambda, own, oneDecode, nil, BacklogDrainSeconds, 0.85, false, 0, nil)
 			Expect(f.Terms[domain.RoleDecode].OrderedBehindQueue).To(BeFalse())
 			Expect(f.Terms[domain.RoleDecode].QueueJustifiedReplicas).To(BeZero())
 		})

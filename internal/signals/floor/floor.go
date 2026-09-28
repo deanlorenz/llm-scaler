@@ -80,6 +80,11 @@ type Term struct {
 	//
 	// Read it beside Held: the two are exclusive.
 	OrderedBehindQueue bool
+	// ProjectedBacklog is the backlog the role is priced for: the queue that
+	// will exist when ordered capacity becomes Ready, rather than the one
+	// standing at the moment of the decision. Equal to the observed backlog when
+	// no start time is known.
+	ProjectedBacklog float64
 	// QueueJustifiedReplicas is how many replicas the standing queue was worth
 	// when OrderedBehindQueue released the hold: Q/(mu x drainSeconds), floored
 	// at one. Zero when the release did not fire.
@@ -150,6 +155,11 @@ func Estimate(
 	// which no further replica drains, while one in the scheduler's has not
 	// been given to a pod at all. Only the latter releases the hold below.
 	schedulerQueued float64,
+	// startSeconds is how long one replica of each role takes to become Ready,
+	// keyed by role. The projection above prices the queue that will exist after
+	// that long rather than the one standing now. An absent or zero entry leaves
+	// the role on its observed backlog.
+	startSeconds map[string]float64,
 ) Floor {
 	out := Floor{Lambda: lambda, DrainSeconds: drainSeconds}
 	if lambda <= 0 || len(replicas) == 0 || len(variants) == 0 {
@@ -158,9 +168,17 @@ func Estimate(
 
 	perReplica := make(map[string]float64, len(variants))
 	roleOf := make(map[string]string, len(variants))
+	// Replica COUNTS per role, for the landing projection below. The token
+	// aggregates beside them cannot serve: the projection multiplies a service
+	// rate by a number of replicas and a duration, so it needs the count.
+	readyByRole := make(map[string]int, len(variants))
+	pendingByRole := make(map[string]int, len(variants))
 	for _, vc := range variants {
 		perReplica[vc.VariantName] = vc.PerReplicaCapacity
-		roleOf[vc.VariantName] = canonicalRole(vc.Role)
+		role := canonicalRole(vc.Role)
+		roleOf[vc.VariantName] = role
+		readyByRole[role] += vc.ReplicaCount
+		pendingByRole[role] += vc.PendingReplicas
 	}
 	// The per-role anticipated supply the hold cap is measured against, from
 	// the one place that defines it: the engine reads the same figure through
@@ -246,10 +264,16 @@ func Estimate(
 		var b float64
 		if drainSeconds > 0 {
 			b = max(backlog[role], 0)
+			b = backlogAtLanding(b, lambda, mu, startSeconds[role],
+				readyByRole[role], pendingByRole[role])
 			rate += b / drainSeconds
 		}
 		floor := rate * cost
-		term := Term{Mu: mu, PerReplica: cost * mu, Backlog: b, Replicas: rate / mu}
+		// Backlog carries the figure the floor was PRICED with, which is the
+		// projected one wherever a start time is known -- so the two fields
+		// cannot disagree about what produced the number beside them.
+		term := Term{Mu: mu, PerReplica: cost * mu, Backlog: b,
+			ProjectedBacklog: b, Replicas: rate / mu}
 		// A single reading may order while the SCHEDULER holds a real queue.
 		//
 		// Nothing here withholds the figure while a replica is starting, and
@@ -371,6 +395,44 @@ func Estimate(
 		out.Terms[role] = term
 	}
 	return out
+}
+
+// backlogAtLanding projects a role's queue forward to the moment ordered
+// capacity becomes Ready.
+//
+// Arrivals keep coming while a replica starts -- at 6 req/s over the 67-82 s run
+// T measured, about 420 requests -- while only the replicas already serving, plus
+// whatever is part-way through starting, drain them. Pricing the queue as it
+// stands at the moment of the decision sizes the fleet for a backlog it will have
+// outgrown by the time it arrives.
+//
+// The pending term is an APPROXIMATION and the reason is worth stating: a replica
+// ordered at some point in the last T seconds is, in expectation, half way
+// through starting, so it drains for about T/2 of the window. The exact form
+// needs each pending Pod's age, and there are none to be had -- PendingReplicas
+// is a scale-target count, and a pending Pod reports no metrics, so no per-Pod
+// row exists to carry an age.
+//
+// Crediting nothing would be worse, not safer. With no credit the projection
+// re-counts the same arrivals on every cycle while replicas start, the engine
+// subtracts anticipated supply from a demand inflated that way, and the fleet
+// ratchets -- which is how run T reached nine replicas and could not come back.
+//
+// The result may be BELOW the observed backlog, and that is correct: a fleet that
+// will have drained the queue before new capacity lands needs no capacity for it.
+// Returns the observed backlog unchanged when no start time is known or mu is
+// unusable, which is the behaviour before this existed.
+func backlogAtLanding(backlog, lambda, mu, startSeconds float64, ready, pending int) float64 {
+	if !(startSeconds > 0) || !(mu > 0) {
+		return backlog
+	}
+	arrived := lambda * startSeconds
+	served := mu * (float64(ready)*startSeconds + float64(pending)*startSeconds/2)
+	projected := backlog + arrived - served
+	if !(projected > 0) {
+		return 0
+	}
+	return projected
 }
 
 // queueJustifiedReplicas is how many replicas a standing queue of q requests is
