@@ -74,14 +74,14 @@ map onto the same internal parameters as their vLLM counterparts:
   variant's pod is not supported.
 - **Metric availability.** SGLang must be started with metrics enabled so the
   `sglang:*` series are exposed and scraped.
-- **Scale-to-zero is not yet supported for SGLang.** Although the
-  `sglang:num_requests_total` mapping exists, the scale-to-zero enforcer still
-  queries the vLLM request counter, so the scaling manager cannot yet detect idleness for an
-  SGLang model. To avoid erroneously scaling an active SGLang model to zero, the scaling manager
-  **automatically skips scale-to-zero enforcement for any model that runs a
-  non-vLLM engine**, even if scale-to-zero is enabled in config. Engine-aware
-  scale-to-zero is tracked as Phase 2 in the
-  [design proposal](../proposals/sglang-backend.md).
+- **Scale-to-zero reads the SGLang counter.** Idleness is measured from
+  `sglang:num_requests_total` rather than the vLLM counter: the detected engine is
+  passed to the enforcer, which selects the series for it
+  (`CollectModelRequestCountForEngine`). Earlier releases asked for
+  `vllm:request_success_total` whatever the engine, so an SGLang model had no such
+  series, read as permanently idle, and was refused parking outright to keep it
+  safe. That gate is gone; `test/e2e/scale_to_zero_sglang_test.go` covers the
+  round trip.
 
 ## See also
 
