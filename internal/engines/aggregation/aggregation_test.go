@@ -268,3 +268,51 @@ var _ = Describe("aggregation helpers", func() {
 		})
 	})
 })
+
+// Anticipated supply is what the engine subtracts from demand to get RC, so a
+// replica counted there is a replica the optimizer will not order. A Pod stuck
+// on an image pull or unschedulable on GPU quota is not Ready and never will be,
+// and counting it withheld the scale-up that would have cleared the queue -- for
+// as long as the Pod existed.
+var _ = Describe("anticipated supply counts only replicas that are starting", func() {
+	const prc = 1000.0
+	// One ready replica throughout: what varies is what is NOT ready.
+	vc := func(pending int, known bool, ages ...float64) domain.VariantCapacity {
+		return domain.VariantCapacity{
+			VariantName: "v", Role: domain.RoleDecode,
+			ReplicaCount: 1, PendingReplicas: pending,
+			PendingAges: ages, StartingKnown: known,
+			PerReplicaCapacity: prc,
+		}
+	}
+
+	It("excludes the pods that are not actually on their way", func() {
+		// Five not-Ready Pods, two of them genuinely starting.
+		got := aggregation.SumTotalAnticipatedSupply(
+			[]domain.VariantCapacity{vc(5, true, 10, 20)})
+		Expect(got).To(Equal(3 * prc))
+	})
+
+	It("counts none when a successful listing found none starting", func() {
+		// All three not-Ready Pods are stuck. The fleet must be free to order
+		// more, which is the whole point: they are never going to serve.
+		got := aggregation.SumTotalAnticipatedSupply(
+			[]domain.VariantCapacity{vc(3, true)})
+		Expect(got).To(Equal(1 * prc))
+	})
+
+	It("falls back to the pending count when the listing could not be read", func() {
+		// An empty list here means "unknown", not "none". Reading it as none
+		// would double-order a fleet that is already scaling up.
+		got := aggregation.SumTotalAnticipatedSupply(
+			[]domain.VariantCapacity{vc(4, false)})
+		Expect(got).To(Equal(5 * prc))
+	})
+
+	It("applies the same rule per role", func() {
+		byRole := aggregation.AggregateByRole([]domain.VariantCapacity{vc(5, true, 10, 20)})
+		Expect(byRole[domain.RoleDecode].TotalAnticipatedSupply).To(Equal(3 * prc))
+		Expect(byRole[domain.RoleDecode].TotalSupply).To(Equal(1*prc),
+			"ready supply is unchanged by any of this")
+	})
+})

@@ -160,6 +160,16 @@ type VariantCapacity struct {
 	VariantName string
 	Role        string // "prefill", "decode", "both", "" (empty = non-disaggregated)
 
+	// StartingKnown reports that the Pod listing behind PendingAges succeeded,
+	// so len(PendingAges) is the number of replicas actually on their way. False
+	// means unknown -- an unreadable listing, or a scale target whose replicas
+	// are several Pods each -- and every consumer falls back to PendingReplicas.
+	//
+	// The distinction is load-bearing: an empty PendingAges means "none are
+	// starting" only when this is true, and reading it that way when the listing
+	// failed would double-order a fleet that is already scaling up.
+	StartingKnown bool
+
 	// PendingAges is how long each starting replica of this variant has been
 	// alive, in seconds -- one entry per Pod that exists and is not Ready. The
 	// demand floor credits each with the part of its drain window it will be

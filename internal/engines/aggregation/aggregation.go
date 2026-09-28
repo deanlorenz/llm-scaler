@@ -87,15 +87,34 @@ func SumTotalSupply(vcs []domain.VariantCapacity) float64 {
 }
 
 // SumTotalAnticipatedSupply returns
-// Σ_v (vc.ReplicaCount + vc.PendingReplicas) × vc.PerReplicaCapacity.
-// Pending replicas count toward anticipated supply so an in-flight scale-up
-// reduces the computed RC and prevents double-scaling.
+// Σ_v (vc.ReplicaCount + startingReplicas(vc)) × vc.PerReplicaCapacity.
+// Replicas on their way count toward anticipated supply so an in-flight
+// scale-up reduces the computed RC and prevents double-scaling.
 func SumTotalAnticipatedSupply(vcs []domain.VariantCapacity) float64 {
 	var total float64
 	for _, vc := range vcs {
-		total += float64(vc.ReplicaCount+vc.PendingReplicas) * perReplica(vc)
+		total += float64(vc.ReplicaCount+startingReplicas(vc)) * perReplica(vc)
 	}
 	return total
+}
+
+// startingReplicas is how many of a variant's replicas are actually on their way
+// to serving, which is not the same as how many are not serving now.
+//
+// PendingReplicas is CurrentReplicas less the ready ones, so it counts a Pod
+// stuck on an image pull, in a crash loop, or unschedulable on GPU quota. Those
+// are what anticipated supply is subtracted for -- the engine reads them as
+// capacity arriving and withholds the scale-up that would clear the queue, and
+// since they never become Ready they never stop withholding it.
+//
+// Only trusted when the Pod listing behind it SUCCEEDED. An empty list otherwise
+// reads as "nothing is starting", which would double-order a fleet that is
+// already scaling up, so an unknown count falls back to PendingReplicas.
+func startingReplicas(vc domain.VariantCapacity) int {
+	if !vc.StartingKnown {
+		return vc.PendingReplicas
+	}
+	return len(vc.PendingAges)
 }
 
 // DemandByRole groups vcs by role and sums each group's TotalDemand. It is the
@@ -149,7 +168,7 @@ func AggregateByRole(vcs []domain.VariantCapacity) map[string]ScopeTotals {
 		}
 		t := result[role]
 		t.TotalSupply += float64(vc.ReplicaCount) * perReplica(vc)
-		t.TotalAnticipatedSupply += float64(vc.ReplicaCount+vc.PendingReplicas) * perReplica(vc)
+		t.TotalAnticipatedSupply += float64(vc.ReplicaCount+startingReplicas(vc)) * perReplica(vc)
 		t.TotalDemand += vc.TotalDemand
 		result[role] = t
 	}

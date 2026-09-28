@@ -162,7 +162,11 @@ func Estimate(
 	startSeconds map[string]float64,
 ) Floor {
 	out := Floor{Lambda: lambda, DrainSeconds: drainSeconds}
-	if lambda <= 0 || len(replicas) == 0 || len(variants) == 0 {
+	// !(lambda > 0), not lambda <= 0: every comparison against NaN is false, so
+	// the rejected form ADMITS a NaN -- which priceable's own comment in this
+	// file calls the exact inverse of the package's contract. It matters more
+	// now that lambda is multiplied into the landing projection.
+	if !(lambda > 0) || math.IsInf(lambda, 1) || len(replicas) == 0 || len(variants) == 0 {
 		return out
 	}
 
@@ -172,15 +176,21 @@ func Estimate(
 	// aggregates beside them cannot serve: the projection multiplies a service
 	// rate by a number of replicas and a duration, so it needs the count.
 	readyByRole := make(map[string]int, len(variants))
-	pendingByRole := make(map[string]int, len(variants))
-	pendingAgesByRole := make(map[string][]float64, len(variants))
+	// Per VARIANT, not summed into the role. A role whose variants report
+	// differently -- one Pod listing succeeded, another returned nil -- would
+	// otherwise have the successful one's ages suppress the other's count
+	// entirely, because the credit falls back on the count only when it has no
+	// ages at all. That silently credited a six-replica variant with nothing.
+	startingByRole := make(map[string][]startingReplicas, len(variants))
 	for _, vc := range variants {
 		perReplica[vc.VariantName] = vc.PerReplicaCapacity
 		role := canonicalRole(vc.Role)
 		roleOf[vc.VariantName] = role
 		readyByRole[role] += vc.ReplicaCount
-		pendingByRole[role] += vc.PendingReplicas
-		pendingAgesByRole[role] = append(pendingAgesByRole[role], vc.PendingAges...)
+		if vc.PendingReplicas > 0 || len(vc.PendingAges) > 0 {
+			startingByRole[role] = append(startingByRole[role],
+				startingReplicas{count: vc.PendingReplicas, ages: vc.PendingAges})
+		}
 	}
 	// The per-role anticipated supply the hold cap is measured against, from
 	// the one place that defines it: the engine reads the same figure through
@@ -263,18 +273,29 @@ func Estimate(
 		cost := median(c)
 		mu := median(mus[role])
 		rate := lambda
-		var b float64
+		var observed, b float64
 		if drainSeconds > 0 {
-			b = max(backlog[role], 0)
-			b = backlogAtLanding(b, lambda, mu, startSeconds[role],
-				readyByRole[role], pendingByRole[role], pendingAgesByRole[role])
-			rate += b / drainSeconds
+			observed = max(backlog[role], 0)
+			// Nothing to clear before capacity arrives, so the window the
+			// backlog must clear in is at least as long as a replica takes to
+			// start. drainSeconds is 60 s and the measured start is 67-82 s, so
+			// dividing arrivals-over-T by drain alone priced the arrival rate at
+			// 1 + T/drain -- 2.17x lambda at run T's figures, every cycle the
+			// fleet was behind.
+			horizon := drainSeconds
+			if T := startSeconds[role]; T > horizon {
+				horizon = T
+			}
+			b = backlogAtLanding(observed, lambda, mu, startSeconds[role],
+				readyByRole[role], startingByRole[role])
+			rate += b / horizon
 		}
 		floor := rate * cost
-		// Backlog carries the figure the floor was PRICED with, which is the
-		// projected one wherever a start time is known -- so the two fields
-		// cannot disagree about what produced the number beside them.
-		term := Term{Mu: mu, PerReplica: cost * mu, Backlog: b,
+		// The two are kept APART. Backlog is what was measured; ProjectedBacklog
+		// is what the floor priced. Carrying the projection in both left the
+		// observed queue unrecoverable from the log -- and its meaning silently
+		// changed relative to every earlier run the commit messages reason from.
+		term := Term{Mu: mu, PerReplica: cost * mu, Backlog: observed,
 			ProjectedBacklog: b, Replicas: rate / mu}
 		// A single reading may order while the SCHEDULER holds a real queue.
 		//
@@ -346,7 +367,19 @@ func Estimate(
 			// rule below permits THREE on that cycle (191/60 floored), which
 			// reaches the needed fleet in two cycles instead of five.
 			term.QueueJustifiedReplicas = queueJustifiedReplicas(schedulerQueued, mu, drainSeconds)
-			if step := scaleUpThreshold * (nonNegativeSupply(anticipated[role].TotalAnticipatedSupply) +
+			// Against READY supply, not anticipated. Built on anticipated, the
+			// cap became a per-cycle INCREMENT rather than a target: the engine
+			// computes RC = step/scaleUp - anticipated, which cancels to exactly
+			// k replicas however many are already in flight, and schedulerQueued
+			// is not reduced by the ones ordered last cycle because they are not
+			// Ready yet. So the same unserved requests justified k again every
+			// cycle while k itself grew.
+			//
+			// Measured, not argued: run U ordered 1, 1, 1, 2, 1, 2 and reached
+			// its ceiling of nine in 75 seconds against a steady-state need of
+			// six. With ready supply the in-flight orders subtract, and the
+			// grant is what the queue justifies MINUS what is already coming.
+			if step := scaleUpThreshold * (nonNegativeSupply(anticipated[role].TotalSupply) +
 				term.QueueJustifiedReplicas*smallestP[role]); floor > step {
 				floor = step
 			}
@@ -424,13 +457,17 @@ func Estimate(
 // will have drained the queue before new capacity lands needs no capacity for it.
 // Returns the observed backlog unchanged when no start time is known or mu is
 // unusable, which is the behaviour before this existed.
-func backlogAtLanding(backlog, lambda, mu, startSeconds float64, ready, pending int,
-	pendingAges []float64) float64 {
+func backlogAtLanding(backlog, lambda, mu, startSeconds float64, ready int,
+	starting []startingReplicas) float64 {
 	if !(startSeconds > 0) || !(mu > 0) {
 		return backlog
 	}
 	arrived := lambda * startSeconds
-	served := mu * (float64(ready)*startSeconds + startingCredit(startSeconds, pending, pendingAges))
+	var credit float64
+	for _, s := range starting {
+		credit += startingCredit(startSeconds, s.count, s.ages)
+	}
+	served := mu * (float64(ready)*startSeconds + credit)
 	projected := backlog + arrived - served
 	if !(projected > 0) {
 		return 0
@@ -464,14 +501,46 @@ func startingCredit(startSeconds float64, pending int, ages []float64) float64 {
 		return float64(pending) * startSeconds / 2
 	}
 	var credit float64
+	counted := 0
 	for _, age := range ages {
 		if !(age > 0) {
 			continue
 		}
+		// Past twice a start, it is not starting. A Pod stuck on an image pull,
+		// a crash loop or unschedulable on GPU quota is "not Ready" for as long
+		// as it exists, and clamping its age to the window credited it exactly
+		// as much as a fully Ready replica -- permanently, since it never
+		// becomes Ready. The floor then stops asking for the capacity that would
+		// clear the queue because it has been told phantom replicas are about to
+		// serve. Between one and two starts is still plausibly a slow start and
+		// earns the window.
+		if age > staleStartFactor*startSeconds {
+			continue
+		}
 		credit += min(age, startSeconds)
+		counted++
+	}
+	// Never more than the replicas there are. ReplicaCount comes from the
+	// metrics rows and the ages from the Pod informer, two caches with
+	// independent lag, so a replica that is Ready and scraped can still read
+	// Ready=false here and be counted in both terms -- crediting it twice.
+	if pending > 0 && counted > pending {
+		credit *= float64(pending) / float64(counted)
 	}
 	return credit
 }
+
+// startingReplicas is one variant's starting replicas: how many there are, and
+// their ages where those could be read. The two travel together because the
+// credit falls back per VARIANT, not per role.
+type startingReplicas struct {
+	count int
+	ages  []float64
+}
+
+// staleStartFactor is how many starts a Pod may have been starting for before it
+// stops counting as one.
+const staleStartFactor = 2.0
 
 // queueJustifiedReplicas is how many replicas a standing queue of q requests is
 // worth: what it takes to clear it within the drain window at mu requests per

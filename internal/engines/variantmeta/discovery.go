@@ -109,6 +109,7 @@ func Discover(
 			maxReplicas = &v
 		}
 
+		pendingAges, startingKnown := pendingAgeSeconds(ctx, k8sClient, va.Namespace, scaleTarget, time.Now())
 		metas = append(metas, domain.VariantMetadata{
 			VariantName:     va.Name,
 			ModelID:         va.Spec.ModelID,
@@ -122,7 +123,8 @@ func Discover(
 			DesiredReplicas: desiredReplicas,
 			ReadyReplicas:   readyReplicas,
 			PendingReplicas: pendingReplicas,
-			PendingAges:     pendingAgeSeconds(ctx, k8sClient, va.Namespace, scaleTarget, time.Now()),
+			PendingAges:     pendingAges,
+			StartingKnown:   startingKnown,
 			MinReplicas:     minReplicas,
 			MaxReplicas:     maxReplicas,
 		})
@@ -257,17 +259,29 @@ func pendingAgeSeconds(
 	namespace string,
 	scaleTarget scaletarget.ScaleTargetAccessor,
 	now time.Time,
-) []float64 {
+) ([]float64, bool) {
 	// Both are optional on this path in a way observeAcceleratorFromNodes never
 	// had to consider: that one is called behind a config check, this one runs
 	// on every variant of every cycle, so a caller without a client -- which the
 	// discovery suite is -- must get nil rather than a panic.
 	if k8sClient == nil || scaleTarget == nil {
-		return nil
+		return nil, false
+	}
+	// One replica is not one Pod on a LeaderWorkerSet: ReplicaCount and
+	// PendingReplicas are in SCALE-TARGET units (groups), while this lists Pods.
+	// A group of four starting Pods would contribute four ages for one pending
+	// replica and credit the drain four times over -- and when LeaderTemplate is
+	// nil, GetLeaderPodTemplateSpec returns the WORKER template, whose labels
+	// match every Pod in the group. Nothing here identifies which group a Pod
+	// belongs to, so rather than guess, a multi-Pod replica reports no ages and
+	// the floor falls back to its count-based credit, which is already in
+	// replica units.
+	if scaleTarget.GetGroupSize() > 1 {
+		return nil, false
 	}
 	podTemplate := scaleTarget.GetLeaderPodTemplateSpec()
 	if podTemplate == nil || len(podTemplate.Labels) == 0 {
-		return nil
+		return nil, false
 	}
 	var pods corev1.PodList
 	if err := k8sClient.List(ctx, &pods,
@@ -277,12 +291,18 @@ func pendingAgeSeconds(
 		ctrl.LoggerFrom(ctx).V(logging.DEBUG).Info(
 			"Could not list a variant's pods to age its starting replicas",
 			"namespace", namespace, "error", err.Error())
-		return nil
+		return nil, false
 	}
 	var ages []float64
 	for i := range pods.Items {
 		pod := &pods.Items[i]
 		if pod.DeletionTimestamp != nil || podReadyNow(pod) {
+			continue
+		}
+		// "Not Ready" is not "starting". The floor drops an age past twice a
+		// start as a second guard; this refuses the Pod outright, because a
+		// stuck Pod is not late, it is absent.
+		if !podStarting(pod) {
 			continue
 		}
 		if pod.CreationTimestamp.IsZero() {
@@ -297,7 +317,37 @@ func pendingAgeSeconds(
 		}
 		ages = append(ages, age)
 	}
-	return ages
+	// Known, even when empty: an empty list from a SUCCESSFUL read means nothing
+	// is starting, which is a different answer from not having read it.
+	return ages, true
+}
+
+// podStarting reports whether a Pod that is not yet Ready is actually on its way
+// to being Ready, rather than stopped.
+//
+// Pending and Running are the two phases a starting replica passes through;
+// Succeeded and Failed are terminal. Within Running, a container waiting on a
+// backoff -- an image that will not pull, a process that will not stay up -- is
+// not starting either, however long it has existed.
+func podStarting(p *corev1.Pod) bool {
+	switch p.Status.Phase {
+	case corev1.PodSucceeded, corev1.PodFailed:
+		return false
+	case corev1.PodPending, corev1.PodRunning:
+	default:
+		return false
+	}
+	for _, cs := range p.Status.ContainerStatuses {
+		if cs.State.Waiting == nil {
+			continue
+		}
+		switch cs.State.Waiting.Reason {
+		case "ImagePullBackOff", "ErrImagePull", "CrashLoopBackOff",
+			"CreateContainerError", "CreateContainerConfigError", "InvalidImageName":
+			return false
+		}
+	}
+	return true
 }
 
 // podReadyNow reports the Pod's Ready condition, which is what decides whether

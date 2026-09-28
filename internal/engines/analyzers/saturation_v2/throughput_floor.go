@@ -309,9 +309,19 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 	// a cap drawn at the policy-level figure while the engine divides by a
 	// per-analyzer override would leave a gap that orders a replica.
 	scaleUp, _ := cfg.AnalyzerThresholds(domain.SaturationAnalyzerName)
+	// The projection is handed start times ONLY when lambda is a true arrival
+	// rate. offeredArrivalRate falls back to the replicas' COMPLETION rate when
+	// EPP reports nothing, and its own doc says that understates lambda exactly
+	// when demand is highest -- so on that path arrived = lambda*T is computed at
+	// one rate while served = mu*(...) is computed at another, the two cancel,
+	// and the projection becomes a pure subtraction that under-orders. Better no
+	// projection than one built on two different rates.
+	var startSeconds map[string]float64
+	if input.ArrivalRate > 0 {
+		startSeconds = a.startSecondsByRole(input, roleOf)
+	}
 	tf := floor.Estimate(offeredArrivalRate(input), replicas, variants, backlog,
-		floor.BacklogDrainSeconds, scaleUp, staleShape, eppQueued,
-		a.startSecondsByRole(input, roleOf))
+		floor.BacklogDrainSeconds, scaleUp, staleShape, eppQueued, startSeconds)
 
 	// Prefill with no mu: the scheduler queue's prompts are not resident work
 	// for prefill (file header). Only the disaggregated case has a prefill
@@ -373,7 +383,12 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 			// cycles and no way to tell whether the cap granted one replica
 			// because that was all the queue justified or because one was all
 			// it ever granted.
-			"queueJustifiedReplicas", term.QueueJustifiedReplicas)
+			"queueJustifiedReplicas", term.QueueJustifiedReplicas,
+			// Both, because they are different questions. backlogRequests is
+			// what was measured; projectedBacklog is what the floor priced,
+			// and a run that shows only one cannot tell an empty queue from a
+			// queue the fleet is projected to outrun.
+			"projectedBacklog", term.ProjectedBacklog)
 		if roleDemand != nil {
 			roleDemand[role] = want
 		}

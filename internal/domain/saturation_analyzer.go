@@ -247,6 +247,9 @@ type VariantReplicaState struct {
 	// one entry per Pod that exists and is not Ready. Nil when unavailable, which
 	// leaves the demand floor on a count-based estimate of the same credit.
 	PendingAges []float64
+	// StartingKnown reports that the Pod listing behind PendingAges succeeded.
+	// See domain.VariantCapacity.StartingKnown.
+	StartingKnown bool
 	// GPUsPerReplica is the number of GPUs required per replica, extracted from
 	// the deployment's container resource requests (nvidia.com/gpu, amd.com/gpu, etc.).
 	// Defaults to 1 if no GPU requests are found.

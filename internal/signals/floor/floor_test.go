@@ -830,51 +830,123 @@ var _ = Describe("a standing queue orders what it justifies", func() {
 var _ = Describe("the backlog a role is priced for", func() {
 	const T = 70.0 // run T's measured start, near enough
 
+	one := func(count int, ages ...float64) []startingReplicas {
+		return []startingReplicas{{count: count, ages: ages}}
+	}
+
 	It("adds what arrives while a replica starts", func() {
 		// 6 req/s over a 70 s start is 420 requests, against one replica
 		// draining 70. The queue the fleet meets is not the queue it sees.
-		got := backlogAtLanding(191, 6, 1.0, T, 1, 0, nil)
-		Expect(got).To(BeNumerically("~", 191+420-70, 1e-6))
+		Expect(backlogAtLanding(191, 6, 1.0, T, 1, nil)).
+			To(BeNumerically("~", 191+420-70, 1e-6))
 	})
 
 	It("credits a starting replica with the window it will be Ready for", func() {
-		// One replica 60 s into a 70 s start drains for 60 s of the window; one
-		// ordered a second ago drains for 1. The count alone cannot say that.
-		got := backlogAtLanding(191, 6, 1.0, T, 1, 2, []float64{60, 1})
-		Expect(got).To(BeNumerically("~", 191+420-(70+61), 1e-6))
+		// One 60 s into a 70 s start drains for 60 s of the window; one ordered
+		// a second ago drains for 1. The count alone cannot say that.
+		Expect(backlogAtLanding(191, 6, 1.0, T, 1, one(2, 60, 1))).
+			To(BeNumerically("~", 191+420-(70+61), 1e-6))
 	})
 
 	It("falls back to half the window when the ages are unavailable", func() {
-		// Right only if the ages happen to be uniform, which is why it is the
-		// fallback and not the rule -- the step orders in batches.
-		got := backlogAtLanding(191, 6, 1.0, T, 1, 2, nil)
-		Expect(got).To(BeNumerically("~", 191+420-(70+70), 1e-6))
+		Expect(backlogAtLanding(191, 6, 1.0, T, 1, one(2))).
+			To(BeNumerically("~", 191+420-(70+70), 1e-6))
 	})
 
-	It("gives a long-starting replica the window and no more", func() {
-		// Starting longer than a start takes means it is about to be Ready or
-		// is not coming; neither earns more than the window.
-		got := backlogAtLanding(0, 0, 1.0, T, 0, 1, []float64{5000})
-		Expect(got).To(BeZero())
-		Expect(startingCredit(T, 1, []float64{5000})).To(Equal(T))
+	It("falls back PER VARIANT, not per role", func() {
+		// A role whose variants report differently: one Pod listing succeeded,
+		// another returned nil. Summed into the role, the successful one's ages
+		// suppressed the other's count entirely and credited six starting
+		// replicas with nothing.
+		mixed := []startingReplicas{
+			{count: 1, ages: []float64{10}},
+			{count: 6},
+		}
+		Expect(startingCredit(T, 1, []float64{10}) + startingCredit(T, 6, nil)).
+			To(BeNumerically("~", 10+6*35, 1e-6))
+		Expect(backlogAtLanding(400, 6, 1.0, T, 1, mixed)).
+			To(BeNumerically("~", 400+420-(70+10+210), 1e-6))
+	})
+
+	It("refuses a Pod that has been starting far too long", func() {
+		// Stuck on an image pull, a crash loop or GPU quota: not Ready for as
+		// long as it exists. Clamped to the window it earned exactly as much as
+		// a Ready replica, permanently, and the floor stopped asking for the
+		// capacity that would clear its own queue.
+		Expect(startingCredit(T, 1, []float64{5000})).To(BeZero())
+		// Between one and two starts is still plausibly a slow start.
+		Expect(startingCredit(T, 1, []float64{1.5 * T})).To(Equal(T))
+	})
+
+	It("never credits more replicas than are starting", func() {
+		// ReplicaCount comes from the metrics rows and the ages from the Pod
+		// informer -- two caches with independent lag, so a replica that is
+		// Ready and scraped can still read Ready=false here and be counted in
+		// both terms.
+		Expect(startingCredit(T, 1, []float64{70, 70, 70})).To(BeNumerically("~", T, 1e-6))
 	})
 
 	It("can price BELOW the standing queue", func() {
 		// A fleet that will have drained the queue before new capacity lands
 		// needs no capacity for it.
-		Expect(backlogAtLanding(100, 1, 1.0, T, 5, 0, nil)).To(BeZero())
+		Expect(backlogAtLanding(100, 1, 1.0, T, 5, nil)).To(BeZero())
 	})
 
 	It("leaves the observed backlog alone when nothing is known", func() {
-		// No start time, or no service rate: the behaviour before this existed,
-		// which is what every pre-existing spec asserts by passing a nil map.
-		Expect(backlogAtLanding(191, 6, 1.0, 0, 1, 0, nil)).To(Equal(191.0))
-		Expect(backlogAtLanding(191, 6, 0, T, 1, 0, nil)).To(Equal(191.0))
+		Expect(backlogAtLanding(191, 6, 1.0, 0, 1, nil)).To(Equal(191.0))
+		Expect(backlogAtLanding(191, 6, 0, T, 1, nil)).To(Equal(191.0))
 	})
 
 	It("ignores an age that is not a number of seconds", func() {
-		// Clock skew is dropped upstream, but a zero or negative here must not
-		// be read as a replica that contributes nothing AND counted anyway.
 		Expect(startingCredit(T, 2, []float64{-5, 30})).To(Equal(30.0))
+	})
+})
+
+// The release cap, and the ratchet it used to be.
+//
+// Run U measured it: 1 -> 2 -> 3 -> 4 -> 6 -> 7 -> 9 atMax in 75 seconds against
+// a steady-state need of six. The cap was built on ANTICIPATED supply, so the
+// engine's RC = step/scaleUp - anticipated cancelled to exactly k replicas
+// however many were already in flight -- and the scheduler queue is not reduced
+// by replicas ordered last cycle, because they are not Ready yet. The same
+// unserved requests justified k again every cycle while k itself grew.
+var _ = Describe("the release cap and replicas already in flight", func() {
+	// One ready replica throughout: what varies is how many are in flight.
+	oneDecode := func(pending int) []domain.VariantCapacity {
+		return []domain.VariantCapacity{{
+			VariantName: "v", Role: domain.RoleDecode,
+			ReplicaCount: 1, PendingReplicas: pending,
+			PerReplicaCapacity: float64(runK1),
+		}}
+	}
+	thin := []capacity.ReplicaCapacity{{
+		VariantName: "v", SaturatedThroughput: runMu, SaturatedThroughputSamples: 1,
+	}}
+	engineBacklog := map[string]float64{domain.RoleDecode: 100 * runMu * BacklogDrainSeconds}
+	deep := 20 * runMu * BacklogDrainSeconds
+
+	It("does not grant more because more are already coming", func() {
+		none := Estimate(runLambda, thin, oneDecode(0), engineBacklog,
+			BacklogDrainSeconds, 0.85, false, deep, nil)
+		many := Estimate(runLambda, thin, oneDecode(5), engineBacklog,
+			BacklogDrainSeconds, 0.85, false, deep, nil)
+
+		Expect(none.Terms[domain.RoleDecode].OrderedBehindQueue).To(BeTrue())
+		Expect(many.Terms[domain.RoleDecode].OrderedBehindQueue).To(BeTrue())
+		Expect(many.ByRole[domain.RoleDecode]).To(Equal(none.ByRole[domain.RoleDecode]),
+			"five replicas in flight must not raise the cap; measured against "+
+				"anticipated supply they did, and the fleet ratcheted to its ceiling")
+	})
+
+	It("still grows with the queue", func() {
+		// The point of the cap is that a deeper queue justifies a bigger step.
+		// Fixing the ratchet must not take that away.
+		shallow := Estimate(runLambda, thin, oneDecode(0), engineBacklog,
+			BacklogDrainSeconds, 0.85, false, runLambda+1, nil)
+		Expect(shallow.Terms[domain.RoleDecode].QueueJustifiedReplicas).To(Equal(1.0))
+		big := Estimate(runLambda, thin, oneDecode(0), engineBacklog,
+			BacklogDrainSeconds, 0.85, false, deep, nil)
+		Expect(big.Terms[domain.RoleDecode].QueueJustifiedReplicas).To(BeNumerically(">", 1))
+		Expect(big.ByRole[domain.RoleDecode]).To(BeNumerically(">", shallow.ByRole[domain.RoleDecode]))
 	})
 })
