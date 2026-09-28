@@ -412,6 +412,57 @@ full 1.0, fail-closed -- and without it that contribution is unobservable. The
 signature was seen directly on an idle EPP at startup: `saturation: 1,
 usageLimit: 1` logged with zero requests received.
 
+### A run inherits the previous run's shape unless the controller restarts
+
+*2026-09-28, runs U, W and X: the same 1k6000 -> 8k1000 trace, the same image
+digest, three different controller lifetimes.*
+
+The shape tracker keeps its fleet-shape memo in the analyzer, so it survives for
+the lifetime of the controller POD, not the lifetime of a benchmark run. A run
+whose trace opens at 1k-in leaves the memo at the 8k-in of its own phase 2. The
+next run over the same trace therefore opens on a transition the tracker reads
+as a genuine fleet-shape change -- and raises the hold before a single request
+has arrived.
+
+Run W, first shape event, 25 seconds BEFORE its load started:
+
+    {"inputTokensWas": 8000, "inputTokensNow": 1000,
+     "outputTokensWas": 999.99, "outputTokensNow": 999.99}
+
+8000 in is run V's phase 2. The hold that followed ran from 16:51:35 to
+16:54:05 with `heldAtFleet: true, heldWhy: "shape-change"`, the fleet pinned at
+two replicas while `replicasImplied` climbed 4 -> 15.5 and the scheduler queue
+384 -> 1178. Phase-1 TTFT p95 came out at 114.7 s.
+
+What separated the runs was not the code and not the trace:
+
+| run | image | rollout | controller age at start | first shape event |
+|---|---|---|---|---|
+| U | new digest | yes | fresh | 13:56, mid-run, at the real flip |
+| W | same digest | **no** | 3 h | **16:50, before load** |
+| X | same digest, restarted by hand | yes | fresh | 18:24, mid-run, at the real flip |
+
+`kubectl set image` with an unchanged digest is a no-op, so it does not restart
+anything. Run W reused run V's controller and inherited its memo; run X restarted
+it explicitly and behaved like run U -- ramp to nine replicas in 80 s against
+run W's five minutes, `heldAtFleet: false` throughout the ramp, and the hold
+appearing only at the genuine phase transition.
+
+The hold itself is not at fault in any of the three. It did what it is for, on
+the input it was given.
+
+Two consequences:
+
+  - **Restart the controller between runs**, or the first phase of every run
+    after the first is measured through a hold. Changing the image digest does
+    it as a side effect, which is why this went unnoticed for as long as the
+    comparisons happened to be between different builds.
+  - **A comparison whose runs had different controller lifetimes is not a
+    comparison.** Run W's phase-1 figures were read as a regression caused by an
+    EPP scorer change, which they had nothing to do with: run X, same scorer
+    weights and a fresh controller, matched run U's TTFT p95 to within 1.6 s
+    (67.5 against 69.1).
+
 ## How to add to this file
 
 One section per decision, with the date, the run identifier and the numbers
