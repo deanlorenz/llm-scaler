@@ -722,3 +722,106 @@ var _ = Describe("the GPS check does not gate the floor", func() {
 		Expect(f.ByRole[domain.RoleDecode]).To(BeNumerically(">", 0.85*float64(runK1)))
 	})
 })
+
+// The release step, on run T's figures. Its log carried orderedBehindQueue=true
+// for five consecutive cycles with replicasImplied of 4.15, 4.35, 5.41, 5.84 and
+// 8.69, and the old cap granted exactly one replica on each of them while the
+// scheduler queue climbed to 191.
+var _ = Describe("a standing queue orders what it justifies", func() {
+	Describe("queueJustifiedReplicas", func() {
+		It("is what it takes to clear the queue inside the drain window", func() {
+			// 191 requests at 1 req/s per replica over 60 s: 3.18, floored to 3.
+			Expect(queueJustifiedReplicas(191, 1.0, 60)).To(Equal(3.0))
+			// The deeper queue the same ramp reached a cycle later.
+			Expect(queueJustifiedReplicas(267, 1.0, 60)).To(Equal(4.0))
+		})
+
+		It("floors at one, never zero", func() {
+			// The caller has already decided the queue is standing, so "none"
+			// is not an available answer -- and this must never be MORE
+			// conservative than the single replica it replaces.
+			Expect(queueJustifiedReplicas(1, 1.0, 60)).To(Equal(1.0))
+			Expect(queueJustifiedReplicas(59, 1.0, 60)).To(Equal(1.0))
+			Expect(queueJustifiedReplicas(0, 1.0, 60)).To(Equal(1.0))
+		})
+
+		It("does not round up", func() {
+			// A queue worth 1.98 replicas justifies one. The next cycle sees
+			// what the first did and asks again; rounding up every cycle of a
+			// long ramp is how a fleet overshoots.
+			Expect(queueJustifiedReplicas(119, 1.0, 60)).To(Equal(1.0))
+			Expect(queueJustifiedReplicas(120, 1.0, 60)).To(Equal(2.0))
+		})
+
+		It("answers one when the arithmetic is unavailable", func() {
+			// No service rate and no window means no arithmetic; the queue is
+			// still standing, so the previous behaviour stands too.
+			Expect(queueJustifiedReplicas(191, 0, 60)).To(Equal(1.0))
+			Expect(queueJustifiedReplicas(191, 1.0, 0)).To(Equal(1.0))
+			Expect(queueJustifiedReplicas(191, -1, 60)).To(Equal(1.0))
+		})
+	})
+
+	Describe("in Estimate", func() {
+		oneDecode := []domain.VariantCapacity{{
+			VariantName: "v", Role: domain.RoleDecode, ReplicaCount: 1,
+			PerReplicaCapacity: float64(runK1),
+		}}
+		// A window too thin to order on: one sample, so mayOrder is false and
+		// only a standing queue can release it.
+		thin := []capacity.ReplicaCapacity{{
+			VariantName: "v", SaturatedThroughput: runMu, SaturatedThroughputSamples: 1,
+		}}
+
+		It("releases more than one replica behind a deep queue", func() {
+			// The engines' own backlog has to be large enough that the UNCAPPED
+			// floor exceeds the cap, or the cap never binds and the assertion
+			// below measures nothing. schedulerQueued releases the hold; it is
+			// the backlog map that feeds rate.
+			engineBacklog := map[string]float64{domain.RoleDecode: 100 * runMu * BacklogDrainSeconds}
+			deep := 20 * runMu * BacklogDrainSeconds // 20 replicas' worth
+			shallow := runLambda + 1
+
+			deepF := Estimate(runLambda, thin, oneDecode, engineBacklog,
+				BacklogDrainSeconds, 0.85, false, deep)
+			shallowF := Estimate(runLambda, thin, oneDecode, engineBacklog,
+				BacklogDrainSeconds, 0.85, false, shallow)
+
+			Expect(deepF.Terms[domain.RoleDecode].OrderedBehindQueue).To(BeTrue())
+			Expect(deepF.Terms[domain.RoleDecode].Held).To(BeFalse(),
+				"the release fired, so the hold below it never runs")
+			Expect(deepF.Terms[domain.RoleDecode].QueueJustifiedReplicas).To(BeNumerically(">", 1),
+				"the queue is worth twenty replicas; one is not what it justifies")
+
+			// Both are capped, so the only difference is how many replicas the
+			// queue justified -- which is the whole change.
+			Expect(deepF.ByRole[domain.RoleDecode]).To(BeNumerically(">",
+				shallowF.ByRole[domain.RoleDecode]),
+				"a deeper queue must admit a bigger step")
+			Expect(shallowF.Terms[domain.RoleDecode].QueueJustifiedReplicas).To(Equal(1.0))
+		})
+
+		It("still grants one behind a shallow queue", func() {
+			// Worth less than a replica-second of service: the release fires --
+			// the caller's own test is queue > max(lambda, mu) -- but the step
+			// is the single replica it always was.
+			shallow := runLambda + 1
+			f := Estimate(runLambda, thin, oneDecode, nil, BacklogDrainSeconds, 0.85, false, shallow)
+			term := f.Terms[domain.RoleDecode]
+			Expect(term.OrderedBehindQueue).To(BeTrue())
+			Expect(term.QueueJustifiedReplicas).To(Equal(1.0))
+		})
+
+		It("reports nothing when the release never fires", func() {
+			// A window that may order on its own merits does not reach this
+			// path, so the field stays zero and cannot be read as "one".
+			own := []capacity.ReplicaCapacity{{
+				VariantName: "v", SaturatedThroughput: runMu,
+				SaturatedThroughputSamples: MinThroughputSamplesToOrder,
+			}}
+			f := Estimate(runLambda, own, oneDecode, nil, BacklogDrainSeconds, 0.85, false, 0)
+			Expect(f.Terms[domain.RoleDecode].OrderedBehindQueue).To(BeFalse())
+			Expect(f.Terms[domain.RoleDecode].QueueJustifiedReplicas).To(BeZero())
+		})
+	})
+})

@@ -366,7 +366,13 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 			"arrivalRate", tf.Lambda, "backlogRequests", term.Backlog, "drainSeconds", tf.DrainSeconds,
 			"saturatedThroughput", term.Mu, "perReplicaCapacity", term.PerReplica,
 			"replicasImplied", term.Replicas, "heldAtFleet", term.Held, "heldWhy", term.HeldWhy,
-			"orderedBehindQueue", term.OrderedBehindQueue)
+			"orderedBehindQueue", term.OrderedBehindQueue,
+			// How many replicas the standing queue was worth when the release
+			// fired. Run T showed orderedBehindQueue=true on five consecutive
+			// cycles and no way to tell whether the cap granted one replica
+			// because that was all the queue justified or because one was all
+			// it ever granted.
+			"queueJustifiedReplicas", term.QueueJustifiedReplicas)
 		if roleDemand != nil {
 			roleDemand[role] = want
 		}

@@ -80,6 +80,14 @@ type Term struct {
 	//
 	// Read it beside Held: the two are exclusive.
 	OrderedBehindQueue bool
+	// QueueJustifiedReplicas is how many replicas the standing queue was worth
+	// when OrderedBehindQueue released the hold: Q/(mu x drainSeconds), floored
+	// at one. Zero when the release did not fire.
+	//
+	// Logged because it is the number that decides how fast a ramp can climb,
+	// and a run that shows only the resulting fleet cannot tell a cap that
+	// granted one replica from a queue that only justified one.
+	QueueJustifiedReplicas float64
 }
 
 // Estimate computes the per-role floor from lambda, the
@@ -295,7 +303,25 @@ func Estimate(
 			// never exceed one replica of any variant when it has several.
 			mayOrder[role] = true
 			term.OrderedBehindQueue = true
-			if step := scaleUpThreshold * (nonNegativeSupply(anticipated[role].TotalAnticipatedSupply) + smallestP[role]); floor > step {
+			// As many replicas as the QUEUE justifies, not exactly one.
+			//
+			// One was the safe step while nothing said how big a step should
+			// be. The queue does: at mu requests per second per replica, a
+			// queue of Q needs Q/(mu x drainSeconds) replicas to clear inside
+			// the drain window. Measured, degrades to one when the queue is
+			// small, and still bounded below by the floor's own figure because
+			// this stays a min.
+			//
+			// Run T is why. Its log carried orderedBehindQueue=true for five
+			// consecutive cycles with replicasImplied of 4.15, 4.35, 5.41,
+			// 5.84 and 8.69 -- the floor knew it needed four to nine replicas
+			// from the first cycle, and this cap granted one each time while
+			// the queue climbed to 191. At mu about 1.0 and a 60 s drain, the
+			// rule below permits THREE on that cycle (191/60 floored), which
+			// reaches the needed fleet in two cycles instead of five.
+			term.QueueJustifiedReplicas = queueJustifiedReplicas(schedulerQueued, mu, drainSeconds)
+			if step := scaleUpThreshold * (nonNegativeSupply(anticipated[role].TotalAnticipatedSupply) +
+				term.QueueJustifiedReplicas*smallestP[role]); floor > step {
 				floor = step
 			}
 		}
@@ -345,6 +371,34 @@ func Estimate(
 		out.Terms[role] = term
 	}
 	return out
+}
+
+// queueJustifiedReplicas is how many replicas a standing queue of q requests is
+// worth: what it takes to clear it within the drain window at mu requests per
+// second per replica.
+//
+// Floored at ONE, never zero, because the caller has already decided the queue
+// is standing (it is worth more than a second of arrivals and more than a
+// replica-second of service) -- so the answer to "how many does it justify"
+// cannot be none. The floor also keeps this from ever being more conservative
+// than the single replica it replaces.
+//
+// Not rounded up beyond that. A queue worth 1.2 replicas justifies one, not two:
+// the next cycle sees what the first one did and asks again, and rounding up
+// every cycle of a long ramp is how a fleet overshoots.
+//
+// mu <= 0 or drainSeconds <= 0 yields one, the previous behaviour: without a
+// service rate or a window there is no arithmetic to be had, and a queue is
+// still standing.
+func queueJustifiedReplicas(q, mu, drainSeconds float64) float64 {
+	if !(q > 0) || !(mu > 0) || !(drainSeconds > 0) {
+		return 1
+	}
+	n := math.Floor(q / (mu * drainSeconds))
+	if !(n > 1) {
+		return 1
+	}
+	return n
 }
 
 // median is the median of values, averaging the central pair on an even
