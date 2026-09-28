@@ -366,7 +366,29 @@ func Estimate(
 			// the queue climbed to 191. At mu about 1.0 and a 60 s drain, the
 			// rule below permits THREE on that cycle (191/60 floored), which
 			// reaches the needed fleet in two cycles instead of five.
-			term.QueueJustifiedReplicas = queueJustifiedReplicas(schedulerQueued, mu, drainSeconds)
+			// The queue AT LANDING, not the queue right now. The floor is
+			// already proactive -- backlogAtLanding prices arrivals over a
+			// replica's start time -- but this cap was not, so the projection
+			// had no path into the decision that gates ordering. Run Y, first
+			// cycle after load began: projectedBacklog 333 and replicasImplied
+			// 6.4 against a schedulerQueued of 10-59, and this granted ONE.
+			// Five cycles of that, identically on v7 and v8 (qJust 1,1,1,2,3
+			// and 1,1,1,2,4, both 75 s to release), which is most of the time
+			// the fleet spends too small.
+			//
+			// Still the ROUTER queue and nothing else. That is what this cap is
+			// for: work with nowhere to go, as against the engines' own queues,
+			// which are committed to replicas that exist and drain there. The
+			// question is only asked about the moment that matters. Sizing it
+			// on the engine backlog was tried and reverted -- it makes the
+			// router queue irrelevant whenever the engines are busy, which is
+			// most of a ramp.
+			//
+			// Degrades to today exactly: backlogAtLanding returns its input
+			// when the start time is unknown.
+			queuedAtLanding := backlogAtLanding(schedulerQueued, lambda, mu,
+				startSeconds[role], readyByRole[role], startingByRole[role])
+			term.QueueJustifiedReplicas = queueJustifiedReplicas(queuedAtLanding, mu, drainSeconds)
 			// Against READY supply, not anticipated. Built on anticipated, the
 			// cap became a per-cycle INCREMENT rather than a target: the engine
 			// computes RC = step/scaleUp - anticipated, which cancels to exactly

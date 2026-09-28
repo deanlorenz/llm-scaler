@@ -938,6 +938,81 @@ var _ = Describe("the release cap and replicas already in flight", func() {
 				"anticipated supply they did, and the fleet ratcheted to its ceiling")
 	})
 
+	It("counts the queue that will exist when the replica is serving", func() {
+		// The floor is proactive (backlogAtLanding) and this cap was not, so
+		// the projection had no path into the decision that gates ordering.
+		// Measured on run Y: projectedBacklog 333 and replicasImplied 6.4
+		// against a schedulerQueued of 10-59, and the cap granted ONE, five
+		// cycles running. See "A single reading may order behind a standing
+		// queue" in ../../../docs/developer-guide/analyzer-evidence.md.
+		// A replica far short of the arrivals, which is the ramp this is for:
+		// run Y had lambda 6.0 against a mu of 1.86. At the suite's runMu of
+		// 5.4 one replica nearly keeps up, lambda - mu is 0.6 req/s, and the
+		// projection moves the count by 36 requests -- true but too small to
+		// cross an integer, so it would assert nothing.
+		slowMu := runLambda / 4
+		slow := []capacity.ReplicaCapacity{{
+			VariantName: "v", SaturatedThroughput: slowMu,
+			SaturatedThroughputSamples: 1,
+		}}
+		standing := 8 * slowMu * BacklogDrainSeconds
+		start := map[string]float64{domain.RoleDecode: 60}
+
+		now := Estimate(runLambda, slow, oneDecode(0), engineBacklog,
+			BacklogDrainSeconds, 0.85, false, standing, nil)
+		landing := Estimate(runLambda, slow, oneDecode(0), engineBacklog,
+			BacklogDrainSeconds, 0.85, false, standing, start)
+
+		Expect(now.Terms[domain.RoleDecode].OrderedBehindQueue).To(BeTrue())
+		Expect(landing.Terms[domain.RoleDecode].OrderedBehindQueue).To(BeTrue())
+		Expect(landing.Terms[domain.RoleDecode].QueueJustifiedReplicas).
+			To(BeNumerically(">", now.Terms[domain.RoleDecode].QueueJustifiedReplicas),
+				"lambda keeps arriving while the replica boots, so the queue it "+
+					"lands into is larger than the one measured now")
+		Expect(landing.ByRole[domain.RoleDecode]).
+			To(BeNumerically(">", now.ByRole[domain.RoleDecode]),
+				"and the cap it sets is correspondingly higher")
+	})
+
+	It("does not move the cap when no start time is on record", func() {
+		// The degradation path. Without a start-time estimate the projection
+		// returns its own input, so this must be exactly the old behaviour --
+		// a fleet that cannot measure its own start time is not made to guess.
+		standing := 8 * runMu * BacklogDrainSeconds
+		a := Estimate(runLambda, thin, oneDecode(0), engineBacklog,
+			BacklogDrainSeconds, 0.85, false, standing, nil)
+		b := Estimate(runLambda, thin, oneDecode(0), engineBacklog,
+			BacklogDrainSeconds, 0.85, false, standing,
+			map[string]float64{domain.RoleDecode: 0})
+		Expect(b.Terms[domain.RoleDecode].QueueJustifiedReplicas).
+			To(Equal(a.Terms[domain.RoleDecode].QueueJustifiedReplicas))
+		Expect(b.ByRole[domain.RoleDecode]).To(Equal(a.ByRole[domain.RoleDecode]))
+	})
+
+	It("does not inflate the cap for a fleet that already keeps up", func() {
+		// The ratchet this cap was written to stop must stay stopped. With
+		// enough ready replicas to serve the arrivals during a start, the
+		// projected queue is no larger than the measured one, so the cap does
+		// not grow -- the projection adds lambda*T and subtracts mu*ready*T.
+		standing := 8 * runMu * BacklogDrainSeconds
+		start := map[string]float64{domain.RoleDecode: 60}
+		big := []capacity.ReplicaCapacity{}
+		for i := 0; i < 20; i++ {
+			big = append(big, capacity.ReplicaCapacity{
+				VariantName: "v", SaturatedThroughput: runMu,
+				SaturatedThroughputSamples: 1,
+			})
+		}
+		lean := Estimate(runLambda, big, oneDecode(0), engineBacklog,
+			BacklogDrainSeconds, 0.85, false, standing, nil)
+		proj := Estimate(runLambda, big, oneDecode(0), engineBacklog,
+			BacklogDrainSeconds, 0.85, false, standing, start)
+		Expect(proj.Terms[domain.RoleDecode].QueueJustifiedReplicas).
+			To(BeNumerically("<=", lean.Terms[domain.RoleDecode].QueueJustifiedReplicas),
+				"twenty ready replicas out-serve the arrivals, so the queue at "+
+					"landing is not bigger and the cap must not grow")
+	})
+
 	It("still grows with the queue", func() {
 		// The point of the cap is that a deeper queue justifies a bigger step.
 		// Fixing the ratchet must not take that away.
