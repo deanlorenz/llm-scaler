@@ -1683,8 +1683,9 @@ type roleHold struct {
 // leaves it alone. When the band is empty the cap wins -- a hold that
 // cannot avoid both errors must not order -- though with the config
 // refusing a scale-down boundary at or above the scale-up threshold and
-// pending replicas never negative (aggregateByVariant), anticipated supply
-// is never below supply and the band is never empty in practice. The
+// each variant's starting term clamped at zero (aggregation.startingReplicas),
+// anticipated supply is never below supply and the band is never empty in
+// practice. The
 // variants' own demand and utilization are moved with the role figure.
 func holdPrefillDemand(roleDemand map[string]float64, variants []domain.VariantCapacity, scaleUp, scaleDown float64) (roleHold, bool) {
 	const role = domain.RolePrefill
@@ -1721,7 +1722,11 @@ func holdPrefillDemand(roleDemand map[string]float64, variants []domain.VariantC
 		if canonicalRole(vc.Role) != role {
 			continue
 		}
-		anticipated := float64(vc.ReplicaCount+vc.PendingReplicas) * vc.PerReplicaCapacity
+		// Through aggregation, not by hand: rc.TotalAnticipatedSupply is the
+		// sum of exactly this term, and a numerator computed from
+		// PendingReplicas while the denominator subtracted StuckReplicas made
+		// the shares sum to more than 1 and over-distributed the held demand.
+		anticipated := aggregation.AnticipatedSupply(*vc)
 		vc.TotalDemand = h.after * anticipated / rc.TotalAnticipatedSupply
 		vc.Utilization = 0
 		if supply := float64(vc.ReplicaCount) * vc.PerReplicaCapacity; supply > 0 {

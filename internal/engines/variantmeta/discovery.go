@@ -334,9 +334,11 @@ func pendingAgeSeconds(
 // to being Ready, rather than stopped.
 //
 // Pending and Running are the two phases a starting replica passes through;
-// Succeeded and Failed are terminal. Within Running, a container waiting on a
-// backoff -- an image that will not pull, a process that will not stay up -- is
-// not starting either, however long it has existed.
+// Succeeded and Failed are terminal. Within those, a Pod is refused when it is
+// not going to make progress on its own: unschedulable or scheduling-gated on
+// the PodScheduled condition, or any container -- INIT containers included --
+// waiting on a backoff, an image that will not pull or a process that will not
+// stay up, however long it has existed.
 func podStarting(p *corev1.Pod) bool {
 	switch p.Status.Phase {
 	case corev1.PodSucceeded, corev1.PodFailed:
@@ -351,20 +353,39 @@ func podStarting(p *corev1.Pod) bool {
 	// GPU-quota case, and it is the one that matters most here: a fleet blocked
 	// on quota would otherwise report capacity arriving for as long as the quota
 	// stayed spent.
+	//
+	// SchedulingGated is the same shape and the same story told by Kueue: a
+	// gated Pod is Pending with no containers for as long as the gate holds,
+	// which on a quota-managed fleet is exactly as long as the quota is spent.
+	// Every OTHER PodScheduled=False reason (SchedulerError) is transient and
+	// stays "starting".
 	for _, c := range p.Status.Conditions {
-		if c.Type == corev1.PodScheduled && c.Status == corev1.ConditionFalse &&
-			c.Reason == corev1.PodReasonUnschedulable {
+		if c.Type != corev1.PodScheduled || c.Status != corev1.ConditionFalse {
+			continue
+		}
+		if c.Reason == corev1.PodReasonUnschedulable ||
+			c.Reason == corev1.PodReasonSchedulingGated {
 			return false
 		}
 	}
-	for _, cs := range p.Status.ContainerStatuses {
-		if cs.State.Waiting == nil {
-			continue
-		}
-		switch cs.State.Waiting.Reason {
-		case "ImagePullBackOff", "ErrImagePull", "CrashLoopBackOff",
-			"CreateContainerError", "CreateContainerConfigError", "InvalidImageName":
-			return false
+	// Init containers as well as the main ones. An init container in
+	// ImagePullBackOff or CrashLoopBackOff leaves the Pod phase Pending with
+	// ContainerStatuses EMPTY and the failure only in InitContainerStatuses --
+	// the same blind spot Unschedulable had, and reachable on the engine Pods
+	// this repo ships: five benchmark scenarios give prefill and decode
+	// templates an init container that fetches weights.
+	for _, group := range [][]corev1.ContainerStatus{
+		p.Status.InitContainerStatuses, p.Status.ContainerStatuses,
+	} {
+		for _, cs := range group {
+			if cs.State.Waiting == nil {
+				continue
+			}
+			switch cs.State.Waiting.Reason {
+			case "ImagePullBackOff", "ErrImagePull", "CrashLoopBackOff",
+				"CreateContainerError", "CreateContainerConfigError", "InvalidImageName":
+				return false
+			}
 		}
 	}
 	return true

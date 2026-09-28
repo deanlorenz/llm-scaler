@@ -86,6 +86,70 @@ func TestPodStarting(t *testing.T) {
 			pod:  waiting("PodInitializing"),
 			want: true,
 		},
+		{
+			name: "scheduling gated is NOT starting",
+			pod: corev1.Pod{Status: corev1.PodStatus{
+				Phase: corev1.PodPending,
+				Conditions: []corev1.PodCondition{{
+					Type:   corev1.PodScheduled,
+					Status: corev1.ConditionFalse,
+					Reason: corev1.PodReasonSchedulingGated,
+				}},
+			}},
+			want: false,
+			why: "Kueue quota: gated is Pending with no containers for as " +
+				"long as the gate holds, which is the same shape as " +
+				"Unschedulable and the same story",
+		},
+		{
+			name: "a transient scheduler error is still starting",
+			pod: corev1.Pod{Status: corev1.PodStatus{
+				Phase: corev1.PodPending,
+				Conditions: []corev1.PodCondition{{
+					Type:   corev1.PodScheduled,
+					Status: corev1.ConditionFalse,
+					Reason: "SchedulerError",
+				}},
+			}},
+			want: true,
+			why: "only the two reasons that persist are refused; refusing " +
+				"every PodScheduled=False would call a Pod mid-scheduling stuck",
+		},
+		{
+			name: "init container in backoff is NOT starting",
+			pod: corev1.Pod{Status: corev1.PodStatus{
+				// Phase Pending with EMPTY ContainerStatuses: the failure is
+				// only in InitContainerStatuses, which is what made this the
+				// same blind spot Unschedulable had. The engine Pods this
+				// repo ships fetch weights in an init container.
+				Phase: corev1.PodPending,
+				InitContainerStatuses: []corev1.ContainerStatus{{
+					State: corev1.ContainerState{
+						Waiting: &corev1.ContainerStateWaiting{
+							Reason: "ImagePullBackOff",
+						},
+					},
+				}},
+			}},
+			want: false,
+			why: "an init container that cannot pull never becomes Ready, so " +
+				"the Pod withholds the scale-up for as long as it exists",
+		},
+		{
+			name: "init container still pulling is starting",
+			pod: corev1.Pod{Status: corev1.PodStatus{
+				Phase: corev1.PodPending,
+				InitContainerStatuses: []corev1.ContainerStatus{{
+					State: corev1.ContainerState{
+						Waiting: &corev1.ContainerStateWaiting{
+							Reason: "PodInitializing",
+						},
+					},
+				}},
+			}},
+			want: true,
+			why:  "the ordinary way up for a Pod that fetches weights first",
+		},
 	}
 
 	for _, tc := range cases {

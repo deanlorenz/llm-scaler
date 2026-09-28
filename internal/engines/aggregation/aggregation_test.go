@@ -308,12 +308,21 @@ var _ = Describe("anticipated supply and the replicas that are stuck", func() {
 			[]domain.VariantCapacity{vc(4, 0)})).To(Equal(5 * prc))
 	})
 
-	It("passes a negative through for the downstream clamp", func() {
-		// This package does not clamp; nonNegativeSupply does, and putting the
-		// same judgement in two places is how it moves silently. More stuck than
-		// pending is the same case as a negative pending count.
+	It("will not let the stuck count manufacture a negative", func() {
+		// More stuck than pending is NOT the same case as a negative pending
+		// count, which is why this no longer passes through. A negative
+		// PendingReplicas is a raw input with a documented clamp downstream
+		// (nonNegativeSupply); the stuck gap is DERIVED from two caches with
+		// independent lag and goes negative in ordinary operation -- a crashed
+		// replica whose metrics row is still cached clamps pending to 0 while
+		// the Pod listing already counts it stuck.
+		//
+		// nonNegativeSupply clamps the SUMMED role figure, so a negative term
+		// here is consumed inside the sum and cancels a sibling variant's real
+		// supply before any clamp can see it. Held at the ready fleet instead:
+		// the most a stuck Pod can honestly say is "nothing is arriving".
 		Expect(aggregation.SumTotalAnticipatedSupply(
-			[]domain.VariantCapacity{vc(2, 9)})).To(Equal(-6 * prc))
+			[]domain.VariantCapacity{vc(2, 9)})).To(Equal(1 * prc))
 	})
 
 	It("applies the same rule per role", func() {

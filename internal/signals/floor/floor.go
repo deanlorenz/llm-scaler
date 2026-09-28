@@ -501,7 +501,6 @@ func startingCredit(startSeconds float64, pending int, ages []float64) float64 {
 		return float64(pending) * startSeconds / 2
 	}
 	var credit float64
-	counted := 0
 	for _, age := range ages {
 		if !(age > 0) {
 			continue
@@ -518,7 +517,6 @@ func startingCredit(startSeconds float64, pending int, ages []float64) float64 {
 			continue
 		}
 		credit += min(age, startSeconds)
-		counted++
 	}
 	// Never more than the replicas there are. ReplicaCount comes from the
 	// metrics rows and the ages from the Pod informer, two caches with
@@ -532,10 +530,9 @@ func startingCredit(startSeconds float64, pending int, ages []float64) float64 {
 	// during a scale-down, where the ages can still list Pods genuinely
 	// starting -- the old guard let those through uncapped and under-ordered by
 	// two or three replicas on a flap.
-	if cap := float64(pending) * startSeconds; credit > cap {
-		credit = cap
+	if maxCredit := float64(pending) * startSeconds; credit > maxCredit {
+		credit = maxCredit
 	}
-	_ = counted
 	return credit
 }
 

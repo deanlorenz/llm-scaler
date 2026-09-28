@@ -94,7 +94,7 @@ func SumTotalSupply(vcs []domain.VariantCapacity) float64 {
 func SumTotalAnticipatedSupply(vcs []domain.VariantCapacity) float64 {
 	var total float64
 	for _, vc := range vcs {
-		total += float64(vc.ReplicaCount+startingReplicas(vc)) * perReplica(vc)
+		total += AnticipatedSupply(vc)
 	}
 	return total
 }
@@ -111,13 +111,40 @@ func SumTotalAnticipatedSupply(vcs []domain.VariantCapacity) float64 {
 // Only trusted when the Pod listing behind it SUCCEEDED. An empty list otherwise
 // reads as "nothing is starting", which would double-order a fleet that is
 // already scaling up, so an unknown count falls back to PendingReplicas.
-// Not clamped at zero. A negative PendingReplicas is passed through for the
-// downstream clamp to see, which is this package's existing contract
-// (aggregation_nonfinite_test.go: "the negative survives, for the downstream
-// clamp to see") -- nonNegativeSupply is where that judgement belongs, and
-// making it here would put the same clamp in two places and silently move it.
+// A negative PendingReplicas is still passed through: that is this package's
+// existing contract (aggregation_nonfinite_test.go, "the negative survives, for
+// the downstream clamp to see"), and nonNegativeSupply is where that judgement
+// belongs.
+//
+// The SUBTRACTION is clamped, which is a different thing. nonNegativeSupply
+// acts on the already-summed role figure, so a negative term from one variant
+// cancels a sibling's positive one before any clamp can see it -- and that
+// cancellation is unrecoverable, because the sum has already happened. It is
+// also reachable without a negative PendingReplicas at all: PendingReplicas is
+// max(0, CurrentReplicas-ownReplicas) while StuckReplicas counts Pods, so a
+// replica whose metrics row is still cached after it crashed is counted once as
+// supply and once as a negative arrival, putting anticipated supply BELOW
+// supply. Clamping the subtraction leaves each variant's own term at worst
+// zero, which is the most a stuck Pod can honestly say.
 func startingReplicas(vc domain.VariantCapacity) int {
-	return vc.PendingReplicas - vc.StuckReplicas
+	if vc.StuckReplicas <= 0 {
+		return vc.PendingReplicas
+	}
+	if n := vc.PendingReplicas - vc.StuckReplicas; n > 0 {
+		return n
+	}
+	return 0
+}
+
+// AnticipatedSupply is one variant's ready-plus-starting capacity: exactly the
+// term AggregateByRole sums into ScopeTotals.TotalAnticipatedSupply.
+//
+// Exported so that a caller computing a variant's SHARE of that total uses the
+// same rule for the numerator as the aggregate used for the denominator.
+// holdPrefillDemand did not, and its shares summed to more than 1 -- over-
+// distributing the held demand -- the moment any replica was stuck.
+func AnticipatedSupply(vc domain.VariantCapacity) float64 {
+	return float64(vc.ReplicaCount+startingReplicas(vc)) * perReplica(vc)
 }
 
 // DemandByRole groups vcs by role and sums each group's TotalDemand. It is the
@@ -171,7 +198,7 @@ func AggregateByRole(vcs []domain.VariantCapacity) map[string]ScopeTotals {
 		}
 		t := result[role]
 		t.TotalSupply += float64(vc.ReplicaCount) * perReplica(vc)
-		t.TotalAnticipatedSupply += float64(vc.ReplicaCount+startingReplicas(vc)) * perReplica(vc)
+		t.TotalAnticipatedSupply += AnticipatedSupply(vc)
 		t.TotalDemand += vc.TotalDemand
 		result[role] = t
 	}
