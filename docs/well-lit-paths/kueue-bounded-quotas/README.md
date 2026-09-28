@@ -12,7 +12,7 @@
 
 If Kueue is already the place where GPU quotas are decided, a second copy of
 every number in the scaling manager's ConfigMap is a second thing to keep right. This path has
-the scaling manager read Kueue's ClusterQueues and enforce, per namespace and accelerator type,
+The scaling manager read Kueue's ClusterQueues and enforce, per namespace and accelerator type,
 **the smaller of Kueue's grant and the static cap** — so the autoscaler does not
 ask KEDA for a replica that Kueue would then hold pending.
 
@@ -184,5 +184,5 @@ Every field, the full merge table and what is not read:
 — `resources` narrows which extended resources count as GPUs, `refreshInterval`
 how often Kueue is re-read. The installer variables:
 [configuration](../../reference/configuration.md). Why a quota counts only
-the scaling manager's own consumption:
+The scaling manager's own consumption:
 [GPU capacity accounting](../../concepts/gpu-capacity-accounting.md).

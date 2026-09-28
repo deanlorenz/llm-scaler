@@ -199,7 +199,7 @@ which link broke, rather than reporting a wake that some other cause produced:
 It parks the model itself first, asserts the HPA precondition before anything
 else runs, and restores what it changed. A wake caused by a floor, a manual
 scale, or another controller is **not** counted as a pass — the queue depth and
-the scaling manager's own activation are checked alongside the replica count.
+The scaling manager's own activation are checked alongside the replica count.
 
 ## Cleanup
 
@@ -282,7 +282,7 @@ last request ──┬─ retentionPeriod ─┬─ ≤1 optimize interval ─�
                │ (the scaling manager decides)     │ (trigger goes inactive)│ (KEDA acts)      │
 ```
 
-the scaling manager reports the KEDA trigger active *until* it decides the model needs zero, and
+The scaling manager reports the KEDA trigger active *until* it decides the model needs zero, and
 it only decides that once the idle query over `retentionPeriod` reads zero. So
 KEDA's cooldown cannot even begin until the scaling manager is already done waiting. With both
 defaults that is **10m + 300s ≈ 15 minutes** from the last request. Halving one

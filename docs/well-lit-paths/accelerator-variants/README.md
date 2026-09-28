@@ -3,7 +3,7 @@
 One model, deployed twice on different hardware or different tensor-parallel
 widths, behind one InferencePool and one EPP. Each deployment has its own
 ScaledObject, and both carry the same `modelID` in their trigger metadata — so
-the scaling manager groups them and scales the group, not the deployments.
+The scaling manager groups them and scales the group, not the deployments.
 
 It scales the **most efficient** variant first: the best serving capacity per
 unit of cost, which is not the same as the cheapest. With the shipped example

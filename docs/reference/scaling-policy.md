@@ -85,7 +85,7 @@ last request ──┬─ retentionPeriod ─┬─ ≤1 optimize interval ─�
                │                   │  trigger goes inactive)│                  │
 ```
 
-the scaling manager's external scaler reports the trigger active *unless the scaling manager has decided the model
+The scaling manager's external scaler reports the trigger active *unless the scaling manager has decided the model
 needs zero replicas*, so KEDA's cooldown clock cannot start until the scaling manager has already
 decided to park — and the scaling manager decides that only once `increase(...[retentionPeriod])`
 reads zero. With both defaults that is **10m + 300s ≈ 15 minutes**, plus up to one
@@ -710,7 +710,7 @@ kubectl apply -f deploy/configmap-scaling-policy.yaml
 
 **Note:** Changes take effect immediately! The controller watches the ConfigMap and automatically:
 1. Reloads the cache when changes are detected
-2. Triggers reconciliation of all VariantAutoscaling resources
+2. Triggers a reconcile of every discovered variant
 3. Applies the new configuration without requiring pod restart
 
 ### 3. Named Policy Tiers
@@ -1002,8 +1002,8 @@ data:
 
 **Checklist:**
 1. Verify the entry sets `model_id` and `namespace` in its **body** (the key is arbitrary). A key like `"ibm/granite-13b#production"` cannot exist — Kubernetes allows only `[-._a-zA-Z0-9]` in a ConfigMap key, which excludes both `/` and `#`
-2. Verify `modelID` exactly matches `va.Spec.ModelID`
-3. Verify `namespace` exactly matches the VariantAutoscaling resource namespace
+2. Verify `modelID` exactly matches the model the variant serves
+3. Verify `namespace` exactly matches the variant's namespace
 4. Check controller logs for validation errors
 5. Ensure entry passed validation (check for WARN logs)
 
@@ -1027,7 +1027,6 @@ data:
    ```text
    INFO  Updated global scaling policy from ConfigMap  entries=2
    INFO  Effective scaling policy  namespace=... modelID=... scalingPolicy="(default entry)"
-   INFO  Triggering reconciliation for all VariantAutoscaling resources
    ```
 
 3. **If no logs appear, verify watch is working:**

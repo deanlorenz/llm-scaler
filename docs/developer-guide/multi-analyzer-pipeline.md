@@ -486,9 +486,9 @@ anyRoleNeedsScaleUp(ps, roles) → loop gate: any role still has demand?
 `pick` is a `RolePickFn` — the only part that differs between optimizers:
 
 - `costGreedyRolePick`: picks the cheapest cost-efficient variant; no GPU budget
-  cap (unlimited mode).
+  cap (no limiter declared).
 - `fairShareRolePick`: picks the cheapest variant within available GPU budget;
-  caps `capN` to the fair-share target (limited mode).
+  caps `capN` to the fair-share target (a limiter declared).
 
 For non-disaggregated models, `initRoleState` synthesizes a single `"both"` role
 from the model-level scalars, so `allocateForModelPaired` handles both the
@@ -538,11 +538,11 @@ and therefore how many GPUs it attracts in a constrained environment.
 The `[]NamedAnalyzerResult` slice is passed to one of two optimizers depending
 on whether `SaturationScalingConfig` declares any `limiters:` entry:
 
-- **`CostAwareOptimizer`** (unlimited mode, no limiters declared): operates
+- **`CostAwareOptimizer`** (no limiters declared): operates
   on the saturation entry's `VariantCapacities` for cost and role data; scales
   up the cheapest variant that covers the required capacity, scales down the
   most expensive variant with spare capacity.
-- **`GreedyByScoreOptimizer`** (limited mode, a limiter declared): respects
+- **`GreedyByScoreOptimizer`** (a limiter declared): respects
   `ResourceConstraints` (GPU budgets per accelerator type). Models are ordered
   by fair-share priority value:
   `fsv = Priority × Σᵢ Score_i × Σ_role pickerState[i][role]`,

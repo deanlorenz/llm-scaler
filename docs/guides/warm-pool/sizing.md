@@ -126,7 +126,7 @@ spec:
         warmPoolName: default   # must match the Deployment's llm-d.ai/warm-pool
 ```
 
-the scaling manager publishes `lent + reserve + 1`: enough Pods to keep the reserve free
+The scaling manager publishes `lent + reserve + 1`: enough Pods to keep the reserve free
 alongside whatever is currently bridging, plus the one spare that makes
 admission possible at all.
 

@@ -8,7 +8,7 @@ logs. If the scaling manager is installed but you cannot tell what it is doing, 
 
 ## Watching what the scaling manager decides
 
-the scaling manager writes no custom resource. Its decisions are visible in three places, and you
+The scaling manager writes no custom resource. Its decisions are visible in three places, and you
 want them in this order: the **dashboard** for whether things are healthy, the
 **metrics** for a specific question, the **logs** only for why a single decision
 came out the way it did.
@@ -276,6 +276,6 @@ kubectl patch deployment -n $NS wva-controller-manager --type=json \
 kubectl logs -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler -f
 ```
 
-the scaling manager writes no custom resource, so its decisions are visible only in these logs, in
+The scaling manager writes no custom resource, so its decisions are visible only in these logs, in
 the metrics it publishes ([Prometheus metrics](prometheus.md)),
 and in the HPA state KEDA derives from them.

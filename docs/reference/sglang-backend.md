@@ -13,8 +13,8 @@ deployments are unaffected.
 
 ## How detection works
 
-the scaling manager inspects the variant's scale-target pod template (the Deployment/LeaderWorkerSet
-referenced by the `VariantAutoscaling`) and classifies it as SGLang when **either**:
+The scaling manager inspects the variant's scale-target pod template (the Deployment/LeaderWorkerSet
+the ScaledObject points at) and classifies it as SGLang when **either**:
 
 - a container image reference contains `sglang` (e.g. `lmsysorg/sglang:...`), or
 - a container command/args invoke `sglang.launch_server` / `sglang serve`
@@ -22,26 +22,15 @@ referenced by the `VariantAutoscaling`) and classifies it as SGLang when **eithe
 
 Otherwise the variant is treated as **vLLM** (the default).
 
-No `VariantAutoscaling` field changes are required — the same CR works for either
-engine:
-
-```yaml
-apiVersion: autoscaling/v1alpha1
-kind: VariantAutoscaling
-metadata:
-  name: my-sglang-variant
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: my-sglang-decode      # a Deployment running `python -m sglang.launch_server ...`
-  modelID: meta-llama/Llama-3.1-8B-Instruct
-  maxReplicas: 8
-```
+There is nothing engine-specific to declare. A workload is registered by
+creating a KEDA ScaledObject for it, exactly as for vLLM, and the same
+ScaledObject works for either engine: the engine is read off the scale
+target's pod template, not off any field you set. See
+[workload preparation](workload-preparation.md) for the registration itself.
 
 ## Metrics
 
-the scaling manager requires the same autoscaling signals from either engine. SGLang exposes them
+The scaling manager requires the same autoscaling signals from either engine. SGLang exposes them
 under `sglang:*` metric names (labeled with `model_name`, which the scaling manager filters on).
 The mapping:
 

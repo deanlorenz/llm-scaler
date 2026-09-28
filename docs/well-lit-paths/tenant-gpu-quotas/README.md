@@ -78,7 +78,7 @@ that anything unlisted is denied.
 hold, so it can hand out capacity that unmanaged workloads have already taken.
 Charging it the physical figure would be worse: a namespace with a 4-GPU
 allowance beside an unrelated 4-GPU training job would read as fully spent while
-the scaling manager had placed nothing, and every scale-up would be refused against an untouched
+The scaling manager had placed nothing, and every scale-up would be refused against an untouched
 allowance. "The hardware is full" is a different statement, made by the physical
 limiter.
 

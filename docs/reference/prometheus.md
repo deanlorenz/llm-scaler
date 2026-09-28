@@ -1,10 +1,10 @@
 # Prometheus Integration
 
-the scaling manager integrates with Prometheus to collect metrics from different sources such as vLLM inference servers, and expose internal as well as custom autoscaling metrics. This guide covers Prometheus configuration, metric collection, and security best practices.
+The scaling manager integrates with Prometheus to collect metrics from different sources such as vLLM inference servers, and expose internal as well as custom autoscaling metrics. This guide covers Prometheus configuration, metric collection, and security best practices.
 
 ## Configuration
 
-the scaling manager supports two methods for configuring Prometheus connectivity:
+The scaling manager supports two methods for configuring Prometheus connectivity:
 
 ### 1. Environment Variables (Recommended)
 
@@ -91,7 +91,7 @@ The metrics are exposed at the `/metrics` endpoint on port 8080 (HTTP).
 
 ### ServiceMonitor Configuration
 
-the scaling manager metrics are exposed on port 8080 (HTTP):
+The scaling manager metrics are exposed on port 8080 (HTTP):
 ```yaml
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
@@ -144,7 +144,7 @@ spec:
 
 ### PromQL Injection Prevention
 
-the scaling manager implements security measures to prevent PromQL injection attacks:
+The scaling manager implements security measures to prevent PromQL injection attacks:
 
 1. **Parameter Escaping**: All query parameters (namespace, model ID, variant name) are automatically escaped:
    - Backslashes are escaped: `\` → `\\`
@@ -176,7 +176,7 @@ query := fmt.Sprintf(`vllm_kv_cache_usage{namespace="%s"}`, escapedNamespace)
 
 ## llm-scaling-manager Metrics
 
-the scaling manager exposes metrics providing insights into autoscaling behavior and optimization performance. These metrics are exposed via Prometheus at the `/metrics` endpoint.
+The scaling manager exposes metrics providing insights into autoscaling behavior and optimization performance. These metrics are exposed via Prometheus at the `/metrics` endpoint.
 
 ### Notes on **name_space**s in metrics
 With the scaling manager metrics, the value for the label `namespace` is the scaling manager controller namespace, not the VA's namespace. The VA namespace has the label `exported_namespace`. Here's an example:
@@ -1025,7 +1025,7 @@ wva_optimizer_active == 1
 
 ## Alerting Rules
 
-the scaling manager pre-defined a number of Prometheus alerting rules which can be optionally installed. These rules are defined in `config/components/prometheus-alerts/prometheusrule.yaml`.
+The scaling manager pre-defined a number of Prometheus alerting rules which can be optionally installed. These rules are defined in `config/components/prometheus-alerts/prometheusrule.yaml`.
 ### Alerting Rules Installation
 - To install alerting rules, set environment variable `DEPLOY_ALERTING_RULES` to `true`, and run the installation, for example:
   ```bash

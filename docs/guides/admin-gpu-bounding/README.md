@@ -32,7 +32,7 @@ kubectl logs -n <wva-namespace> deploy/wva-controller-manager | grep -i "Acceler
 ```
 <!-- guide:prerequisites.accelerators end -->
 
-the scaling manager resolves a variant's accelerator from a GPU key in its `nodeSelector`, or
+The scaling manager resolves a variant's accelerator from a GPU key in its `nodeSelector`, or
 from the nodes its running pods are on. A workload with neither gets no budget.
 
 ## Installation Instructions

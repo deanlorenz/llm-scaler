@@ -42,7 +42,7 @@ them and applies cost-weighted scaling.
 
 ### The ScaledObject IS the registration
 
-the scaling manager does not watch or list anything to find these workloads. It learns a
+The scaling manager does not watch or list anything to find these workloads. It learns a
 variant exists from the KEDA call the `ScaledObject`'s trigger causes, and
 takes the variant's identity from that trigger's metadata:
 
@@ -316,7 +316,7 @@ When `BENCHMARK_TWO_VARIANT_SECONDARY_SUFFIX=v2` is set, `benchmark-run`
 automatically produces two outputs after the run completes:
 
 **Run `post_run_analyze.sh` promptly** (within a few minutes of run completion —
-the scaling manager controller pod's log buffer rotates and the window for extracting
+The scaling manager controller pod's log buffer rotates and the window for extracting
 controller decisions closes):
 
 ```bash

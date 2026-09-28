@@ -211,7 +211,7 @@ go test -cover ./...
 
 ### E2E Tests
 
-the scaling manager has a single consolidated E2E suite (`test/e2e/`) that runs on Kind (emulated) or OpenShift/kubernetes. Deploy infrastructure in infra-only mode first, then run tests.
+The scaling manager has a single consolidated E2E suite (`test/e2e/`) that runs on Kind (emulated) or OpenShift/kubernetes. Deploy infrastructure in infra-only mode first, then run tests.
 
 **Location**: `test/e2e/`
 

@@ -1,6 +1,6 @@
 # Bounding scaling: the GPU limiter
 
-the scaling manager scales without a GPU budget unless you give it one. This is how, and what has
+The scaling manager scales without a GPU budget unless you give it one. This is how, and what has
 to be true first.
 
 > Part of the [the scaling manager deployment guide](../../deploy/).
@@ -195,7 +195,7 @@ by default would freeze exactly the workloads that are least carefully configure
 
 ## What has to be true first: every accelerator must resolve
 
-the scaling manager resolves a variant's accelerator from, in order:
+The scaling manager resolves a variant's accelerator from, in order:
 
 1. a **GPU product key in the workload's `nodeSelector` or `nodeAffinity`** — the
    only source that works before any pod exists, and therefore the only one that

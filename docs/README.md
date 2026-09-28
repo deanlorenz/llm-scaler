@@ -1,6 +1,6 @@
 # Workload-Variant-Autoscaler documentation
 
-the scaling manager decides how many replicas of each model variant should run, and drives KEDA
+The scaling manager decides how many replicas of each model variant should run, and drives KEDA
 to make it so. It reads what your inference engines are doing, computes a target
 per model each cycle, and answers KEDA's external scaler with it.
 

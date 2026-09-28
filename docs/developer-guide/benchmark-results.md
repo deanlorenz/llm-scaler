@@ -520,10 +520,10 @@ Summary of the scaling manager benchmark runs with configuration details.
 
 ## Two-Variant Efficiency-Aware Scenario
 
-Runs the two-variant the scaling manager scenario (the guide for it is parked while that work is
+Runs the two-variant scenario (the guide for it is parked while that work is
 out of scope):
 two TP variants of the same model share one `InferencePool`/EPP, each with its own
-`VariantAutoscaling` + HPA.  The V2 saturation engine scales the **most
+scaler + HPA.  The V2 saturation engine scales the **most
 efficient** variant first (highest serving-capacity per unit cost) and routes
 spillover to the cheaper TP=1 secondary.
 

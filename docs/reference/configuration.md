@@ -214,7 +214,7 @@ because a wrong `modelID` groups a workload with a model it does not serve and
 mis-scales both.
 
 Generated objects use an `external-push` trigger, so KEDA holds a stream open and
-the scaling manager pushes activation the moment it decides — the difference between waking a
+The scaling manager pushes activation the moment it decides — the difference between waking a
 parked workload in about the detection interval and waiting out a poll.
 
 ### Workload readiness (`make workload-patch`)
