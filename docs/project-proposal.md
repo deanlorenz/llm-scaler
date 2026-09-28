@@ -173,4 +173,5 @@ not built, and P/D role switching is experimental. Apache 2.0, and the module
 path has not changed.
 
 Design detail lives in [concepts/](concepts/): what gets measured and how it
-becomes a replica count, the queueing model, and what the GPU budget counts.
+becomes a replica count, what is modelled and what is not, and what the GPU
+budget counts.
