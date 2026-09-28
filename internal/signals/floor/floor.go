@@ -524,9 +524,18 @@ func startingCredit(startSeconds float64, pending int, ages []float64) float64 {
 	// metrics rows and the ages from the Pod informer, two caches with
 	// independent lag, so a replica that is Ready and scraped can still read
 	// Ready=false here and be counted in both terms -- crediting it twice.
-	if pending > 0 && counted > pending {
-		credit *= float64(pending) / float64(counted)
+	//
+	// A clamp rather than a proportional rescale, and one that does not skip
+	// pending == 0. The rescale smeared: with one pending replica and ages
+	// 70, 70, 1 it credited 47, which is neither of the two answers that could
+	// be true. And pending reaches 0 whenever stale rows outnumber the target
+	// during a scale-down, where the ages can still list Pods genuinely
+	// starting -- the old guard let those through uncapped and under-ordered by
+	// two or three replicas on a flap.
+	if cap := float64(pending) * startSeconds; credit > cap {
+		credit = cap
 	}
+	_ = counted
 	return credit
 }
 

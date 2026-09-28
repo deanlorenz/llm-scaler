@@ -139,7 +139,7 @@ var _ = Describe("Estimate", func() {
 		Expect(f.ByRole[domain.RoleDecode]).To(BeNumerically(">=", 0),
 			"a negative anticipated supply must hold the floor at zero, not below it")
 		Expect(f.ByRole[domain.RoleDecode]).To(BeZero(),
-			"held at zero: the cap is what the engine's RC turns into nothing")
+			"held at zero: the cap is what the engine RC turns into nothing")
 		Expect(f.Terms[domain.RoleDecode].Held).To(BeTrue())
 	})
 

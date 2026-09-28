@@ -51,7 +51,7 @@ type NamedAnalyzerResult struct {
 	// step. They are derived from Result.VariantCapacities so the linearity
 	// invariant (supply = Σ_v replicas × per-replica P) holds by construction:
 	//   TotalSupply            = Σ_v ReplicaCount × PerReplicaCapacity
-	//   TotalAnticipatedSupply = Σ_v (ReplicaCount + PendingReplicas) × PerReplicaCapacity
+	//   TotalAnticipatedSupply = Σ_v (ReplicaCount + PendingReplicas - StuckReplicas) × PerReplicaCapacity
 	//   Utilization            = Result.TotalDemand / TotalSupply (0 when TotalSupply == 0)
 	// TotalAnticipatedSupply counts pending replicas so they offset demand,
 	// preventing double-scaling.

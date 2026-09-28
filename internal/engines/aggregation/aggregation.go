@@ -32,7 +32,8 @@ limitations under the License.
 // by construction:
 //
 //	r.TotalSupply            == Σ_v vc.ReplicaCount × vc.PerReplicaCapacity
-//	r.TotalAnticipatedSupply == Σ_v (vc.ReplicaCount + vc.PendingReplicas) × vc.PerReplicaCapacity
+//	r.TotalAnticipatedSupply == Σ_v (vc.ReplicaCount + startingReplicas(vc)) × vc.PerReplicaCapacity
+//	   where startingReplicas(vc) == vc.PendingReplicas - vc.StuckReplicas
 //	r.TotalDemand            == Σ_v vc.TotalDemand
 //	r.RoleCapacities[role].* == same sums filtered by vc.Role == role
 package aggregation
@@ -110,11 +111,13 @@ func SumTotalAnticipatedSupply(vcs []domain.VariantCapacity) float64 {
 // Only trusted when the Pod listing behind it SUCCEEDED. An empty list otherwise
 // reads as "nothing is starting", which would double-order a fleet that is
 // already scaling up, so an unknown count falls back to PendingReplicas.
+// Not clamped at zero. A negative PendingReplicas is passed through for the
+// downstream clamp to see, which is this package's existing contract
+// (aggregation_nonfinite_test.go: "the negative survives, for the downstream
+// clamp to see") -- nonNegativeSupply is where that judgement belongs, and
+// making it here would put the same clamp in two places and silently move it.
 func startingReplicas(vc domain.VariantCapacity) int {
-	if !vc.StartingKnown {
-		return vc.PendingReplicas
-	}
-	return len(vc.PendingAges)
+	return vc.PendingReplicas - vc.StuckReplicas
 }
 
 // DemandByRole groups vcs by role and sums each group's TotalDemand. It is the

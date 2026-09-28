@@ -160,15 +160,19 @@ type VariantCapacity struct {
 	VariantName string
 	Role        string // "prefill", "decode", "both", "" (empty = non-disaggregated)
 
-	// StartingKnown reports that the Pod listing behind PendingAges succeeded,
-	// so len(PendingAges) is the number of replicas actually on their way. False
-	// means unknown -- an unreadable listing, or a scale target whose replicas
-	// are several Pods each -- and every consumer falls back to PendingReplicas.
+	// StuckReplicas is how many of this variant's Pods are not Ready and are not
+	// starting either: terminal, backing off, or unschedulable on quota. They are
+	// subtracted from PendingReplicas to get the replicas actually on their way,
+	// because anticipated supply is what the engine withholds a scale-up for --
+	// and a Pod that will never be Ready withholds it for ever.
 	//
-	// The distinction is load-bearing: an empty PendingAges means "none are
-	// starting" only when this is true, and reading it that way when the listing
-	// failed would double-order a fleet that is already scaling up.
-	StartingKnown bool
+	// Only ever what the Pod listing could PROVE. An unreadable, stale or skipped
+	// listing reports zero, which leaves anticipated supply exactly as it was.
+	// PendingReplicas is deliberately everything the scale target owns that did
+	// not report -- including replicas that turned Ready between the scrape and
+	// this cycle -- and subtracting a count derived any other way would drop that
+	// term and order a replica that already exists.
+	StuckReplicas int
 
 	// PendingAges is how long each starting replica of this variant has been
 	// alive, in seconds -- one entry per Pod that exists and is not Ready. The

@@ -270,47 +270,54 @@ var _ = Describe("aggregation helpers", func() {
 })
 
 // Anticipated supply is what the engine subtracts from demand to get RC, so a
-// replica counted there is a replica the optimizer will not order. A Pod stuck
-// on an image pull or unschedulable on GPU quota is not Ready and never will be,
-// and counting it withheld the scale-up that would have cleared the queue -- for
-// as long as the Pod existed.
-var _ = Describe("anticipated supply counts only replicas that are starting", func() {
+// replica counted there is one the optimizer will not order. A Pod stuck on an
+// image pull or unschedulable on GPU quota is not Ready and never will be, and
+// counting it withheld the scale-up that would have cleared the queue -- for as
+// long as the Pod existed.
+//
+// SUBTRACTED from PendingReplicas rather than replacing it. PendingReplicas is
+// everything the scale target owns that did not report this cycle, which
+// includes replicas that turned Ready between the scrape and now; counting the
+// starting Pods directly dropped that term and re-ordered a replica that
+// already existed.
+var _ = Describe("anticipated supply and the replicas that are stuck", func() {
 	const prc = 1000.0
-	// One ready replica throughout: what varies is what is NOT ready.
-	vc := func(pending int, known bool, ages ...float64) domain.VariantCapacity {
+	vc := func(pending, stuck int) domain.VariantCapacity {
 		return domain.VariantCapacity{
 			VariantName: "v", Role: domain.RoleDecode,
-			ReplicaCount: 1, PendingReplicas: pending,
-			PendingAges: ages, StartingKnown: known,
+			ReplicaCount: 1, PendingReplicas: pending, StuckReplicas: stuck,
 			PerReplicaCapacity: prc,
 		}
 	}
 
-	It("excludes the pods that are not actually on their way", func() {
-		// Five not-Ready Pods, two of them genuinely starting.
-		got := aggregation.SumTotalAnticipatedSupply(
-			[]domain.VariantCapacity{vc(5, true, 10, 20)})
-		Expect(got).To(Equal(3 * prc))
+	It("excludes the pods that will never serve", func() {
+		Expect(aggregation.SumTotalAnticipatedSupply(
+			[]domain.VariantCapacity{vc(5, 3)})).To(Equal(3 * prc))
 	})
 
-	It("counts none when a successful listing found none starting", func() {
-		// All three not-Ready Pods are stuck. The fleet must be free to order
-		// more, which is the whole point: they are never going to serve.
-		got := aggregation.SumTotalAnticipatedSupply(
-			[]domain.VariantCapacity{vc(3, true)})
-		Expect(got).To(Equal(1 * prc))
+	It("keeps the ready-but-unscraped replicas it cannot see", func() {
+		// The measured incident: 4 replicas, 2 Ready, 1 row scraped. Nothing is
+		// proven stuck, so nothing is subtracted, and the role is not re-ordered
+		// a replica it already has.
+		Expect(aggregation.SumTotalAnticipatedSupply(
+			[]domain.VariantCapacity{vc(3, 0)})).To(Equal(4 * prc))
 	})
 
-	It("falls back to the pending count when the listing could not be read", func() {
-		// An empty list here means "unknown", not "none". Reading it as none
-		// would double-order a fleet that is already scaling up.
-		got := aggregation.SumTotalAnticipatedSupply(
-			[]domain.VariantCapacity{vc(4, false)})
-		Expect(got).To(Equal(5 * prc))
+	It("falls back exactly when the listing proved nothing", func() {
+		Expect(aggregation.SumTotalAnticipatedSupply(
+			[]domain.VariantCapacity{vc(4, 0)})).To(Equal(5 * prc))
+	})
+
+	It("passes a negative through for the downstream clamp", func() {
+		// This package does not clamp; nonNegativeSupply does, and putting the
+		// same judgement in two places is how it moves silently. More stuck than
+		// pending is the same case as a negative pending count.
+		Expect(aggregation.SumTotalAnticipatedSupply(
+			[]domain.VariantCapacity{vc(2, 9)})).To(Equal(-6 * prc))
 	})
 
 	It("applies the same rule per role", func() {
-		byRole := aggregation.AggregateByRole([]domain.VariantCapacity{vc(5, true, 10, 20)})
+		byRole := aggregation.AggregateByRole([]domain.VariantCapacity{vc(5, 3)})
 		Expect(byRole[domain.RoleDecode].TotalAnticipatedSupply).To(Equal(3 * prc))
 		Expect(byRole[domain.RoleDecode].TotalSupply).To(Equal(1*prc),
 			"ready supply is unchanged by any of this")

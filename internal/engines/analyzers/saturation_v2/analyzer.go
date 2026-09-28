@@ -1301,7 +1301,7 @@ func (a *SaturationAnalyzer) aggregateByVariant(
 			ObservedReplicas: observedReplicas,
 			PendingReplicas:  pendingCount,
 			PendingAges:      vs.PendingAges,
-			StartingKnown:    vs.StartingKnown,
+			StuckReplicas:    vs.StuckReplicas,
 			WarmPoolReplicas: warmPoolReplicas,
 			// Both readings are MEASURED, so both are the analyzer's to emit, and
 			// they are kept apart because they are different numbers. What they

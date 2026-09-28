@@ -24,9 +24,9 @@ type VariantMetadata struct {
 	Role string
 	// Cost is the per-replica cost used for cost-aware variant selection.
 	Cost float64
-	// StartingKnown reports that the Pod listing behind PendingAges succeeded.
-	// See domain.VariantCapacity.StartingKnown.
-	StartingKnown bool
+	// StuckReplicas is how many of this variant's Pods are not Ready and not
+	// starting either. See domain.VariantCapacity.StuckReplicas.
+	StuckReplicas int
 	// PendingAges is how long each STARTING replica has been alive, in seconds:
 	// one entry per Pod that exists and is not Ready. The demand floor credits
 	// each with the part of its drain window it will be Ready for, which a count
@@ -68,7 +68,7 @@ func (m VariantMetadata) ToReplicaState() VariantReplicaState {
 		DesiredReplicas: m.DesiredReplicas,
 		PendingReplicas: m.PendingReplicas,
 		PendingAges:     m.PendingAges,
-		StartingKnown:   m.StartingKnown,
+		StuckReplicas:   m.StuckReplicas,
 		GPUsPerReplica:  m.GPUsPerReplica,
 		Role:            m.Role,
 		AcceleratorName: m.AcceleratorName,

@@ -109,7 +109,7 @@ func Discover(
 			maxReplicas = &v
 		}
 
-		pendingAges, startingKnown := pendingAgeSeconds(ctx, k8sClient, va.Namespace, scaleTarget, time.Now())
+		pendingAges, stuckReplicas := pendingAgeSeconds(ctx, k8sClient, va.Namespace, scaleTarget, time.Now())
 		metas = append(metas, domain.VariantMetadata{
 			VariantName:     va.Name,
 			ModelID:         va.Spec.ModelID,
@@ -124,7 +124,7 @@ func Discover(
 			ReadyReplicas:   readyReplicas,
 			PendingReplicas: pendingReplicas,
 			PendingAges:     pendingAges,
-			StartingKnown:   startingKnown,
+			StuckReplicas:   stuckReplicas,
 			MinReplicas:     minReplicas,
 			MaxReplicas:     maxReplicas,
 		})
@@ -250,22 +250,30 @@ func observeAcceleratorFromNodes(
 // be had -- discovery already lists a variant's Pods by the same labels for the
 // accelerator observation beside it.
 //
+// Returns the ages of the Pods that ARE starting, and how many are not Ready and
+// not starting either -- terminal, backing off, or unschedulable. The second is
+// what anticipated supply subtracts, and it is deliberately the thing this
+// listing can PROVE: an unreadable, stale or skipped listing reports zero stuck,
+// which leaves every consumer on the figures it used before.
+//
+// That asymmetry is the whole design. Being wrong about a stuck Pod costs one
+// replica of under-counting; being wrong about a starting Pod told the optimizer
+// a fleet was on its way when it was not, and ordered it twice.
+//
 // Pods being deleted are excluded: their capacity is going away, not arriving.
-// An unreadable listing yields nil, which the floor reads as "no credit
-// available" and falls back to the count-based estimate rather than to zero.
 func pendingAgeSeconds(
 	ctx context.Context,
 	k8sClient client.Client,
 	namespace string,
 	scaleTarget scaletarget.ScaleTargetAccessor,
 	now time.Time,
-) ([]float64, bool) {
+) ([]float64, int) {
 	// Both are optional on this path in a way observeAcceleratorFromNodes never
 	// had to consider: that one is called behind a config check, this one runs
 	// on every variant of every cycle, so a caller without a client -- which the
 	// discovery suite is -- must get nil rather than a panic.
 	if k8sClient == nil || scaleTarget == nil {
-		return nil, false
+		return nil, 0
 	}
 	// One replica is not one Pod on a LeaderWorkerSet: ReplicaCount and
 	// PendingReplicas are in SCALE-TARGET units (groups), while this lists Pods.
@@ -277,11 +285,11 @@ func pendingAgeSeconds(
 	// the floor falls back to its count-based credit, which is already in
 	// replica units.
 	if scaleTarget.GetGroupSize() > 1 {
-		return nil, false
+		return nil, 0
 	}
 	podTemplate := scaleTarget.GetLeaderPodTemplateSpec()
 	if podTemplate == nil || len(podTemplate.Labels) == 0 {
-		return nil, false
+		return nil, 0
 	}
 	var pods corev1.PodList
 	if err := k8sClient.List(ctx, &pods,
@@ -291,18 +299,20 @@ func pendingAgeSeconds(
 		ctrl.LoggerFrom(ctx).V(logging.DEBUG).Info(
 			"Could not list a variant's pods to age its starting replicas",
 			"namespace", namespace, "error", err.Error())
-		return nil, false
+		return nil, 0
 	}
 	var ages []float64
+	var stuck int
 	for i := range pods.Items {
 		pod := &pods.Items[i]
 		if pod.DeletionTimestamp != nil || podReadyNow(pod) {
 			continue
 		}
-		// "Not Ready" is not "starting". The floor drops an age past twice a
-		// start as a second guard; this refuses the Pod outright, because a
-		// stuck Pod is not late, it is absent.
+		// "Not Ready" is not "starting". A Pod that is stopped rather than
+		// late is counted as STUCK and subtracted from the replicas anticipated
+		// to arrive; it contributes no age, because it is not going to serve.
 		if !podStarting(pod) {
+			stuck++
 			continue
 		}
 		if pod.CreationTimestamp.IsZero() {
@@ -317,9 +327,7 @@ func pendingAgeSeconds(
 		}
 		ages = append(ages, age)
 	}
-	// Known, even when empty: an empty list from a SUCCESSFUL read means nothing
-	// is starting, which is a different answer from not having read it.
-	return ages, true
+	return ages, stuck
 }
 
 // podStarting reports whether a Pod that is not yet Ready is actually on its way
@@ -336,6 +344,18 @@ func podStarting(p *corev1.Pod) bool {
 	case corev1.PodPending, corev1.PodRunning:
 	default:
 		return false
+	}
+	// Unschedulable has no container status to inspect -- the Pod has not been
+	// placed, so it has no containers yet. It is phase Pending with an empty
+	// ContainerStatuses, which every check below would wave through. This is the
+	// GPU-quota case, and it is the one that matters most here: a fleet blocked
+	// on quota would otherwise report capacity arriving for as long as the quota
+	// stayed spent.
+	for _, c := range p.Status.Conditions {
+		if c.Type == corev1.PodScheduled && c.Status == corev1.ConditionFalse &&
+			c.Reason == corev1.PodReasonUnschedulable {
+			return false
+		}
 	}
 	for _, cs := range p.Status.ContainerStatuses {
 		if cs.State.Waiting == nil {
