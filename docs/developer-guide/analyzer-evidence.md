@@ -285,6 +285,84 @@ where one pool serves several models (`arrivalModelLabel`). Their queue cannot
 be attributed per model either, so the fix is not a better fallback query --
 it is that those fleets need a per-model enqueue counter from EPP.
 
+### Phase-1 TTFT is the router's admission gate, not the fleet size
+
+*2026-09-28, runs T, U and V on a P/D fleet, the 1k6000 -> 8k1000 trace at
+6 req/s. Run V ran with the EPP at `--v=4`; its timings are distorted by the
+logging and are not used here, only its log fields.*
+
+Three runs were compared on phase-1 TTFT while the demand floor was being
+tuned. Run U ordered a larger first step than run T and reached nine ready
+decode replicas 15 s SOONER (`spec` 9 at +90 s against +105 s, ready 9 at
++150 s against +165 s, pod start 60 s in both). Its phase-1 TTFT p95 was
+nonetheless twice T's, 136 s against 68.5 s.
+
+The replicas were Ready and receiving nothing. Per-pod `vllm:num_requests_running`
+at the worst moment of run U:
+
+| wall clock | ready decode | pods serving | requests held in EPP |
+|---|---|---|---|
+| 13:40:00 | 3 | 1 | 395 |
+| 13:40:30 | 6 | 1 | 584 |
+| **13:41:00** | **9** | **1** | **766** |
+| 13:41:15 | 9 | 9 | 0 |
+
+EPP saw the endpoints immediately -- `llm_d_epp_ready_endpoints` tracked
+kube readiness with no lag -- and held the requests in its own flow-control
+queue anyway. The release is not triggered by capacity arriving: it is
+`saturation >= 1`, which fits every sample of both runs (15/15 in T, 17/17
+in U), and the queue drains to zero in the same 15 s sample the signal crosses.
+
+The signal is the default `utilization-detector`:
+
+    endpointScore  = max(queueDepth/queueDepthThreshold, kvUsage/kvCacheUtilThreshold)
+    poolSaturation = mean(endpointScore)
+
+with `queueDepthThreshold` defaulting to **5**. Measured live during run V,
+with `gpu_cache_usage_perc` at 0.000 on every pod so the KV arm contributes
+nothing:
+
+| pod | `num_requests_waiting` | score = queue/5 |
+|---|---|---|
+| ...cpph2 | 272 | 54.4 |
+| ...hfz2w | 81 | 16.2 |
+| eight others | 0 | 0.0 |
+
+A vLLM engine at `max_num_seqs: 256` queues hundreds of requests as normal
+batching. One pod at 272 waiting scores 54.4, and averaged over ten endpoints
+that single pod puts the pool at 5.4 -- five times the ceiling on its own.
+**Diluting one busy pod below the ceiling would take about 54 idle endpoints.**
+Nine cannot do it.
+
+So ordering replicas faster cannot shorten phase-1 TTFT. The block clears when
+the LOADED pods' own queues fall under about five requests each, which is why
+the release is sudden and total and why it coincides with the queue reaching
+zero rather than with replicas turning Ready. Run T released earlier than run U
+only because its loaded pod's queue was shallower.
+
+What this bounds: the floor's three terms were measured at ~70 s of metric lag
+and ~60 s of pod start, and this adds a third term of the same size that sits
+entirely outside the autoscaler. Tuning the floor against phase-1 TTFT is
+measuring the router.
+
+The fix is EPP configuration -- a `saturationDetector` section, which this
+deployment does not set at all, so it inherits `queueDepthThreshold: 5`:
+
+    - type: utilization-detector
+      name: util
+      parameters:
+        queueDepthThreshold: <matched to the engine's batching, not 5>
+    flowControl:
+      saturationDetector:
+        pluginRef: util
+
+`flow_control_stale_endpoints` is also not scraped on this cluster. It is the
+metric that reports the other half of the same detector -- an endpoint whose
+metrics are older than `metricsStalenessThreshold` (default 200 ms) scores a
+full 1.0, fail-closed -- and without it that contribution is unobservable. The
+signature was seen directly on an idle EPP at startup: `saturation: 1,
+usageLimit: 1` logged with zero requests received.
+
 ## How to add to this file
 
 One section per decision, with the date, the run identifier and the numbers
