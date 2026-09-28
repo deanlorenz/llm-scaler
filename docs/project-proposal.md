@@ -49,12 +49,9 @@ The warm-pool benchmark is four scale-up events per arm, one run of each, with
 no confidence intervals. The direction held across all four rises, but the 12 %
 and 17 % margins come from a single run and should be read as such.
 
-The shape-swap run is Qwen3-0.6B on H200. It is a small model, chosen because
-it makes one replica's saturation point easy to establish, and we have not
-repeated it at 8B or at GLM scale. The mechanism has no size dependence that we
-know of, but batching, KV pressure and MoE routing all behave differently on a
-large model, so treat the result as demonstrated at 0.6B and expected, not
-shown, above it.
+The shape-swap run is Qwen3-0.6B on H200, chosen because a small model makes one
+replica's saturation point easy to pin down. We have not repeated it at 8B or at
+GLM scale, so read that result as demonstrated at 0.6B and expected above it.
 
 ## Motivation
 
@@ -208,8 +205,10 @@ is the opposite of how a per-model reserve behaves.
 
 On cost, the pool comes in 12 % below the floor it replaces, and lands within
 50 ms of the floor's latency on three of the four rises. On the fourth it was
-831 ms against 127 ms, so the two are close but not identical. It is worth being blunt about the other comparison too: autoscaling on
-its own is the cheapest arm of the three. If you hold nothing today and can live
+831 ms against 127 ms, so the two are close but not identical.
+
+It is worth being blunt about the other comparison too: autoscaling on its own
+is the cheapest arm of the three. If you hold nothing today and can live
 with rises of several seconds, keep holding nothing. The pool is for people who
 would otherwise be holding a floor. See
 [GPU capacity accounting](concepts/gpu-capacity-accounting.md) for what the
@@ -222,9 +221,9 @@ triggers name the same model are solved as a group, with each role carrying its
 own target and its own bottleneck, and the cost-aware optimizer picks among
 accelerator variants instead of assuming a single GPU type.
 
-In the P/D run this showed up clearly: decode scaled 1 → 2 → 3 while prefill was
-never ordered at all, because prompts waiting at the scheduler are no longer
-charged to it as resident KV. See
+In the P/D run this showed up clearly: decode scaled 1 → 2 → 3 while prefill
+was never ordered at all, because prompts waiting at the scheduler are no
+longer charged to it as resident KV. See
 [accelerator variants](well-lit-paths/accelerator-variants/).
 
 ### Also shipped
