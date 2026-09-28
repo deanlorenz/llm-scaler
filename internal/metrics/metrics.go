@@ -52,12 +52,14 @@ var (
 	desiredRatio         *prometheus.GaugeVec
 	errorsTotal          *prometheus.CounterVec
 
-	optimizationDuration *prometheus.HistogramVec
-	wakeDuration         *prometheus.HistogramVec
-	warmPoolFreePods     *prometheus.GaugeVec
-	warmPoolBorrows      *prometheus.CounterVec
-	warmPoolBridge       *prometheus.HistogramVec
-	modelsProcessedGauge *prometheus.GaugeVec
+	optimizationDuration        *prometheus.HistogramVec
+	wakeDuration                *prometheus.HistogramVec
+	replicaStartSeconds         *prometheus.HistogramVec
+	replicaStartSecondsEstimate *prometheus.GaugeVec
+	warmPoolFreePods            *prometheus.GaugeVec
+	warmPoolBorrows             *prometheus.CounterVec
+	warmPoolBridge              *prometheus.HistogramVec
+	modelsProcessedGauge        *prometheus.GaugeVec
 
 	// pipeline stage visibility metrics
 	decisionsLimitedTotal               *prometheus.CounterVec
@@ -280,6 +282,34 @@ func InitMetrics(registry prometheus.Registerer) error {
 			Buckets: []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
 		},
 		optimizationDurationLabels,
+	)
+	replicaStartLabels := []string{constants.LabelVariantName, constants.LabelNamespace}
+	// Declared only when it is set, exactly as modelReplicasLabels does it.
+	// variantSeriesLabels ADDS controller_instance when the process has one, and
+	// a With() carrying a label the collector did not declare panics -- so the
+	// declaration and the label set have to agree on this conditionally.
+	if controllerInstance != "" {
+		replicaStartLabels = append(replicaStartLabels, constants.LabelControllerInstance)
+	}
+	replicaStartSeconds = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: constants.WVAReplicaStartSeconds,
+			Help: "Time from a replica Pod being created to its Ready condition",
+			// Spread over both modes a start has, like the wake histogram beside
+			// it: a small model on a warm node lands near 60-80 s (run T measured
+			// 67 and 82), while a large MoE with a cold JIT cache is several
+			// hundred. Buckets bunched at either end would collapse the very
+			// distinction the demand floor projects over.
+			Buckets: []float64{5, 15, 30, 45, 60, 75, 90, 120, 180, 300, 600, 900},
+		},
+		replicaStartLabels,
+	)
+	replicaStartSecondsEstimate = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: constants.WVAReplicaStartSecondsEstimate,
+			Help: "Replica start time the controller is sizing with, per variant",
+		},
+		append(append([]string{}, replicaStartLabels...), constants.LabelStartSource),
 	)
 	wakeDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -589,6 +619,12 @@ func InitMetrics(registry prometheus.Registerer) error {
 	if err := registry.Register(wakeDuration); err != nil {
 		return err
 	}
+	if err := registry.Register(replicaStartSeconds); err != nil {
+		return err
+	}
+	if err := registry.Register(replicaStartSecondsEstimate); err != nil {
+		return err
+	}
 	if err := registry.Register(warmPoolFreePods); err != nil {
 		return err
 	}
@@ -879,6 +915,39 @@ func SetModelReplicas(namespace, modelName string, replicas int) {
 	modelReplicas.With(modelSeriesLabels(namespace, modelName)).Set(float64(replicas))
 }
 
+// ObserveReplicaStartSeconds records one replica's observed time to Ready.
+//
+// Once per replica, not once per cycle: the caller keeps the Pods it has already
+// counted, so a fleet that stays up does not keep contributing the same sample
+// and flatten the distribution onto its longest-lived replica.
+func ObserveReplicaStartSeconds(namespace, variantName string, seconds float64) {
+	if replicaStartSeconds == nil || !(seconds > 0) {
+		return
+	}
+	replicaStartSeconds.With(variantSeriesLabels(namespace, variantName)).Observe(seconds)
+}
+
+// SetReplicaStartSecondsEstimate publishes the start time sizing is using for a
+// variant, and whether it was measured or seeded.
+//
+// Both label values are published for the same variant over its life -- seed
+// until the first replica starts under observation, measured after -- so a query
+// reading the series without the label sees two. That is intentional: the
+// transition is the interesting moment, and collapsing it would hide whether a
+// run sized against a measurement at all.
+func SetReplicaStartSecondsEstimate(namespace, variantName string, seconds float64, measured bool) {
+	if replicaStartSecondsEstimate == nil {
+		return
+	}
+	source := "seed"
+	if measured {
+		source = "measured"
+	}
+	labels := variantSeriesLabels(namespace, variantName)
+	labels[constants.LabelStartSource] = source
+	replicaStartSecondsEstimate.With(labels).Set(seconds)
+}
+
 // ObserveWakeDuration records how long a wake-from-zero took.
 //
 // Called once per completed wake, not once per poll: the caller closes the
@@ -936,6 +1005,18 @@ func ClearModelReplicas(namespace, modelName string) {
 		return
 	}
 	modelReplicas.Delete(modelSeriesLabels(namespace, modelName))
+}
+
+// variantSeriesLabels builds the label set for a variant-keyed series.
+func variantSeriesLabels(namespace, variantName string) prometheus.Labels {
+	labels := prometheus.Labels{
+		constants.LabelNamespace:   namespace,
+		constants.LabelVariantName: variantName,
+	}
+	if controllerInstance != "" {
+		labels[constants.LabelControllerInstance] = controllerInstance
+	}
+	return labels
 }
 
 // modelSeriesLabels builds the label set for a model-keyed series.

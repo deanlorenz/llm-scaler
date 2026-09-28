@@ -98,6 +98,18 @@ type SaturationAnalyzer struct {
 	// what the one-parameter fallback pins, so a fleet that has once been
 	// measured never falls back to a constant guessed for another card.
 	itlBaseline map[string]float64
+	// startSeconds is the running estimate of how long one replica of each
+	// variant takes to become Ready, keyed like the ITL windows and swept with
+	// them. The demand floor projects the backlog forward over it, so it is a
+	// measurement -- see start_est.go for why a constant cannot do.
+	startSeconds map[string]float64
+	// startSeenPods is the Pods whose start has already been folded into that
+	// estimate, with when they were seen.
+	//
+	// Every cycle sees the same Ready Pod reporting the same StartSeconds, so
+	// without this the estimate would converge on whatever the longest-lived
+	// replica measured and the histogram would count cycles rather than starts.
+	startSeenPods map[string]time.Time
 	// now is the clock the memory reads; tests set it.
 	now func() time.Time
 }
@@ -124,6 +136,8 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		fleetShape:             make(map[string]*shapeMemo),
 		itlWindows:             make(map[string]*itl.Window),
 		itlBaseline:            make(map[string]float64),
+		startSeconds:           make(map[string]float64),
+		startSeenPods:          make(map[string]time.Time),
 		now:                    time.Now,
 	}
 }
@@ -177,8 +191,13 @@ func (a *SaturationAnalyzer) EvictStaleHistory(timeout time.Duration) int {
 			// and, worse, pin a hardware floor measured before a redeploy onto
 			// different hardware into every later fit for that key.
 			delete(a.itlBaseline, key)
+			// And the start estimate, for the same reason: a figure measured
+			// before a redeploy onto different hardware would otherwise size
+			// every later projection for that key.
+			delete(a.startSeconds, key)
 		}
 	}
+	a.evictStartSeenPods(now, timeout)
 	for key, ra := range a.saturatedThroughput {
 		if ra.Stale(timeout) {
 			delete(a.saturatedThroughput, key)
@@ -294,6 +313,16 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 		key := a.itlWindowKey(input.Namespace, input.ModelID, variant,
 			accelByVariant[variant], gpusByVariant[variant])
 		itlModels[variant] = a.noteITL(key, input.ReplicaMetrics, variant, a.now(), logger)
+		// How long this variant's replicas take to become Ready, folded in from
+		// whatever finished starting since the last cycle. Same key as the ITL
+		// window, so it is swept with it.
+		//
+		// Seeded from DefaultReplicaStartSeconds. registry's
+		// ReplicaStartSecondsKey is the operator override and is not plumbed
+		// here yet -- until it is, a model whose cold start is nothing like 70 s
+		// is sized on the measurement rather than the seed, which is right after
+		// the first replica starts and wrong before it.
+		a.noteReplicaStart(key, input.Namespace, variant, input.ReplicaMetrics, logger)
 	}
 
 	// Phase 1: Per-replica capacity computation
