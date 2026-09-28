@@ -21,6 +21,30 @@ It began as a fork of llm-d's Workload Variant Autoscaler
 argument, for readers outside the repository:
 [Sub-second scale-ups on llm-d](blog/sub-second-scale-ups-on-llm-d.md).
 
+## What is already measured
+
+Every claim in this document is backed by a run on real hardware, recorded in
+this repository. The detail sits with each part of the proposal below; this is
+the whole evidential basis in one place.
+
+| Claim | Measured | Where |
+| --- | --- | --- |
+| The ordinary signals mislead | At a constant 6 req/s with the shape changed halfway: rate flat, queue never formed, KV 5–15 % — implying one replica when three were needed | [P/D path](well-lit-paths/pd-disaggregation/) |
+| A shape change is detected without a queue | Third replica ordered **+1344 s**, the same cycle the new shape's completion rate came on record; no queue at any point; p95 settled 0.04–0.07 s | [P/D path](well-lit-paths/pd-disaggregation/) |
+| The ordinary signal has a price | Cold controller, sized by occupancy for want of a completion rate: **4.2 s p95** in the same window | [P/D path](well-lit-paths/pd-disaggregation/) |
+| The decision precedes the queue | Second replica ordered **+53 s**, from load, before the first tipped into preemption | [P/D path](well-lit-paths/pd-disaggregation/) |
+| Roles scale on their own bottleneck | Decode 1 → 2 → 3 while prefill was never ordered | [P/D path](well-lit-paths/pd-disaggregation/) |
+| The warm pool bridges the rise | p95 TTFT per rise **5.1–8.8 s → 0.11–0.83 s** | [measured.md](well-lit-paths/warm-pool-bridge/measured.md) |
+| It beats the floor it replaces | **12 % fewer GPU-seconds** at the same latency (14 138 vs 16 080) | [measured.md](well-lit-paths/warm-pool-bridge/measured.md) |
+| …and what it costs | **+17 %** against holding nothing (12 129). Autoscaling alone is the cheapest arm | [measured.md](well-lit-paths/warm-pool-bridge/measured.md) |
+| A warm Pod switches models fast | **437 ms** against a ~41 s cold start, on a Pod serving real gateway traffic | [fast model loading](proposals/fast-model-loading.md) |
+| Cold start is not mostly the weights | 8B ~41 s; GLM-5.2-FP8 192 s of which weights are **40 s**; 463 s on a cold JIT cache | [weight transfer](proposals/warm-pool-weight-transfer.md) |
+| The figures repeat | The P/D pair was run twice, a day apart, landing within a tenth of every figure | [P/D path](well-lit-paths/pd-disaggregation/) |
+
+Caveats are published with the numbers rather than omitted: the warm-pool run is
+four scale-up events per arm, one run each, no confidence intervals — the
+direction is consistent across all four rises, the margins are one run's.
+
 ## Motivation
 
 KEDA and the HPA are good at what they were built for: turn a signal into a
