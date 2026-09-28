@@ -43,9 +43,18 @@ table is here so the evidence is easy to find and easy to check.
 | Cold start is mostly not the weights | An 8B server takes ~41 s. GLM-5.2-FP8 takes 192 s, of which the weights are 40 s, and 463 s if the JIT cache is cold | [weight transfer](proposals/warm-pool-weight-transfer.md) |
 | The figures repeat | The P/D pair was run twice, a day apart, and landed within a tenth of every number | [P/D path](well-lit-paths/pd-disaggregation/) |
 
-The limits are worth stating alongside them. The warm-pool benchmark is four
-scale-up events per arm, one run of each, with no confidence intervals. The
-direction held across all four rises, but the margins come from a single run.
+Two limits are worth stating next to the numbers rather than under them.
+
+The warm-pool benchmark is four scale-up events per arm, one run of each, with
+no confidence intervals. The direction held across all four rises, but the 12 %
+and 17 % margins come from a single run and should be read as such.
+
+The shape-swap run is Qwen3-0.6B on H200. It is a small model, chosen because
+it makes one replica's saturation point easy to establish, and we have not
+repeated it at 8B or at GLM scale. The mechanism has no size dependence that we
+know of, but batching, KV pressure and MoE routing all behave differently on a
+large model, so treat the result as demonstrated at 0.6B and expected, not
+shown, above it.
 
 ## Motivation
 
@@ -146,14 +155,22 @@ actually requires in throughput terms, which is the arrival rate divided by the
 completion rate one replica sustained the last time it was seen saturated.
 
 That ratio depends on the request shape by construction. When the shape changes,
-the price changes with it, and nobody has to re-tune a threshold. There is
-nothing per-model or per-traffic-pattern to configure.
+the price changes with it, and nobody has to re-tune a threshold.
+
+To be precise about what "universal" claims: 0.85 and 0.70 are two constants,
+shipped as defaults in `config/base/manager/scaling-policy-configmap.yaml` and
+overridable per policy tier. So there is configuration. The claim is narrower
+than "no tuning": these two numbers do not have to change when the model, the
+traffic pattern or the request shape changes, because the quantity they compare
+has already been normalised by the throughput measurement. A threshold on queue
+depth or occupancy does have to change, and that is the difference.
 
 In the run described above, the third replica was ordered at +1344 s, in the
 same cycle that the new shape's completion rate first came on record, and no
 queue formed at any point during the second phase. Once each phase settled, p95
-TTFT sat at 0.08 s in the first and 0.04–0.07 s in the second. The cold controller, which had no completion rate on
-record yet and fell back to sizing by occupancy, paid 4.2 s p95 over the same
+TTFT sat at 0.08 s in the first and 0.04–0.07 s in the second. The cold
+controller, which had no completion rate on record yet and fell back to sizing
+by occupancy, paid 4.2 s p95 over the same
 window. That number is what the ordinary signal is worth, measured. The whole
 pair was run twice, a day apart, and landed within a tenth of every figure.
 See [Scale a P/D-disaggregated model](well-lit-paths/pd-disaggregation/).
@@ -219,6 +236,24 @@ a GPU budget and against Kueue quota where that is the real boundary
 [Kueue-bounded quotas](well-lit-paths/kueue-bounded-quotas/)). And workload
 classes, so interactive and batch tiers can share a fleet under named policies
 ([workload classes](well-lit-paths/workload-classes/)).
+
+### Two things this comparison does not settle
+
+The baseline throughout is threshold autoscaling on the signals KEDA can read.
+That is the right comparison for the deployments we see, and it is also a low
+bar. We have not measured against an autoscaler that forecasts. Dynamo Planner
+does, and on the traffic shapes where prediction pays, it should beat a
+closed-form model by arriving earlier than the load. We say in Non-Goals that we
+do not forecast; what we cannot say is what that costs, because we have not run
+the comparison.
+
+The other open question is scope: warm capacity could reasonably live in a
+separate component, and llm-d already has one in fast model actuation. It sits
+here because the lend is a scaling decision. Which model gets the bridge depends
+on which model is scaling and by how much, and the held accelerator has to be
+counted against the same GPU budget as everything else, so splitting the two
+would mean splitting one allocation across two components. That is the argument;
+it is not a measurement.
 
 ## Design details
 
@@ -286,8 +321,12 @@ upstream has solved this either.
 **Maintenance pre-scaling and failure replacement.** Not built.
 
 **A shape the controller has never seen saturated** gets sized from occupancy
-until the first saturated reading arrives. The 4.2 s cold-pass window above is
-exactly that cost, and it is the honest weak point of the approach.
+until the first saturated reading arrives. The 4.2 s cold-pass window is exactly
+that cost. It is worth being clear that this is the same event quoted earlier as
+the price of the occupancy signal: when we have no throughput reading yet we
+fall back to the signal we criticise, and we pay what it costs. The difference
+is that we only do it once per shape, and the saturated reading that ends it is
+the thing a threshold autoscaler never acquires.
 
 ## Status
 
