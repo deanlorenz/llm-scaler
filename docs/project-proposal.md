@@ -1,163 +1,271 @@
 # llm-scaling-manager: project proposal
 
-An analytical autoscaler for llm-d inference: **multi-model** — one GPU budget,
-every model and variant, one joint decision — with **warm capacity**,
-**scale-to-zero** and **P/D-aware** scaling on top.
+## Summary
+
+**llm-scaling-manager is an analytical autoscaler for llm-d inference.** It
+decides replica counts for every model and variant in a fleet at once, from one
+GPU budget, using a capacity model rather than a threshold on a raw signal — and
+it carries the capabilities that decision needs to be worth anything in
+practice: a shared warm pool that bridges the minutes a replica takes to load,
+scale-to-zero, and prefill/decode-aware scaling.
+
+It exists because the signals a general-purpose autoscaler can trigger on —
+request rate, queue depth, cache occupancy — have no stable relationship to how
+loaded a GPU actually is. We have a run where all three said "do nothing" and the
+correct answer was to triple the fleet. This document states that problem and the
+three others like it, what we do about each, and the measurement that backs it.
 
 It began as a fork of llm-d's Workload Variant Autoscaler
 (`llm-d/llm-d-workload-variant-autoscaler`, the path still in this tree's
-`go.mod`) and has diverged substantially since.
+`go.mod`) and has diverged substantially since. A shorter version of this
+argument, for readers outside the repository:
+[Sub-second scale-ups on llm-d](blog/sub-second-scale-ups-on-llm-d.md).
 
-A shorter version of the argument, written for people outside this
-repository: [Sub-second scale-ups on llm-d](blog/sub-second-scale-ups-on-llm-d.md).
+## What is already measured
 
-## 1. The problem
+Every claim in this document is backed by a run on real hardware, recorded in
+this repository. The detail sits with each part of the proposal below; this is
+the whole evidential basis in one place.
 
-Autoscaling an LLM fleet is not autoscaling a web service, for one reason: **a
-new replica is not available when it is scheduled, it is available when the model
-is loaded.** Everything else follows from that.
+| Claim | Measured | Where |
+| --- | --- | --- |
+| The ordinary signals mislead | At a constant 6 req/s with the shape changed halfway: rate flat, queue never formed, KV 5–15 % — implying one replica when three were needed | [P/D path](well-lit-paths/pd-disaggregation/) |
+| A shape change is detected without a queue | Third replica ordered **+1344 s**, the same cycle the new shape's completion rate came on record; no queue at any point; p95 settled 0.04–0.07 s | [P/D path](well-lit-paths/pd-disaggregation/) |
+| The ordinary signal has a price | Cold controller, sized by occupancy for want of a completion rate: **4.2 s p95** in the same window | [P/D path](well-lit-paths/pd-disaggregation/) |
+| The decision precedes the queue | Second replica ordered **+53 s**, from load, before the first tipped into preemption | [P/D path](well-lit-paths/pd-disaggregation/) |
+| Roles scale on their own bottleneck | Decode 1 → 2 → 3 while prefill was never ordered | [P/D path](well-lit-paths/pd-disaggregation/) |
+| The warm pool bridges the rise | p95 TTFT per rise **5.1–8.8 s → 0.11–0.83 s** | [measured.md](well-lit-paths/warm-pool-bridge/measured.md) |
+| It beats the floor it replaces | **12 % fewer GPU-seconds** at the same latency (14 138 vs 16 080) | [measured.md](well-lit-paths/warm-pool-bridge/measured.md) |
+| …and what it costs | **+17 %** against holding nothing (12 129). Autoscaling alone is the cheapest arm | [measured.md](well-lit-paths/warm-pool-bridge/measured.md) |
+| A warm Pod switches models fast | **437 ms** against a ~41 s cold start, on a Pod serving real gateway traffic | [fast model loading](proposals/fast-model-loading.md) |
+| Cold start is not mostly the weights | 8B ~41 s; GLM-5.2-FP8 192 s of which weights are **40 s**; 463 s on a cold JIT cache | [weight transfer](proposals/warm-pool-weight-transfer.md) |
+| The figures repeat | The P/D pair was run twice, a day apart, landing within a tenth of every figure | [P/D path](well-lit-paths/pd-disaggregation/) |
 
-Measured on this fleet, two models behind one gateway on 8×H200:
+Caveats are published with the numbers rather than omitted: the warm-pool run is
+four scale-up events per arm, one run each, no confidence intervals — the
+direction is consistent across all four rises, the margins are one run's.
+
+## Motivation
+
+KEDA and the HPA are good at what they were built for: turn a signal into a
+replica count, quickly and safely. LLM inference breaks that in four ways.
+
+### Problem 1 — the available signals do not mean anything stable
+
+Request rate, queue length and request latency are the levers KEDA gives you. In
+LLM serving none has a fixed relationship to GPU load, because the cost of a
+request depends on its *shape* — tokens in, tokens out — and on the serving
+configuration. Two requests to one model can differ by 1000× in compute. A
+threshold that is right at one traffic shape is wrong at the next, and nothing in
+the signal says it moved.
+
+Measured, not argued. We ran a trace at a **constant 6 req/s** where only the
+request shape changed halfway — 6000 in / 1000 out tokens, then 1000 in /
+4000 out. One decode replica sustains ~5.4 req/s at the first shape and ~2.5 at
+the second, so the correct fleet is **two replicas, then three**. What the
+ordinary signals showed:
+
+| signal | what it showed | what it implies |
+| --- | --- | --- |
+| request rate | constant, 6 req/s throughout | do nothing |
+| gateway queue depth | **flat — no queue ever formed** | do nothing |
+| KV-cache occupancy | 5–15 % in the steady first phase | **scale down to one** |
+
+All three are wrong, and the last is dangerous: read alone it would have cut the
+fleet to one replica immediately before the work per request quadrupled.
+
+### Problem 2 — reacting after saturation is already too late
+
+A reactive autoscaler is fine when a pod starts in a second. An LLM replica is
+not available when it is scheduled; it is available when the model is loaded and
+the kernels are compiled.
 
 | | |
 | --- | ---: |
-| p95 TTFT during a cold rise, 8B model | **5.1 – 8.8 s** |
-| the same rise with a warm replica available | **0.11 – 0.83 s** |
 | 8B model server, not running → first request served | **~41 s** |
-| GLM-5.2-FP8 (744B MoE) start, warm node, weights read | **192 s** |
+| GLM-5.2-FP8 (744B MoE), warm node, weights from local NVMe | **192 s** |
 | ...of which the weights are | **40 s** |
-| ...the same start with a cold JIT cache | **463 s** |
+| ...the same start on a node with a cold JIT cache | **463 s** |
 
-Two consequences the usual answers do not address:
+**The weights are a fifth of a GLM start.** So faster storage cannot fix this —
+the rest is process spawn, imports, memory profiling, kernel warmup and
+CUDA-graph capture.
 
-- **Faster storage does not fix it.** Weights are a fifth of a GLM start. A peer
-  transfer that made the weight term free would take a scale-up from 192 s to
-  ~152 s. The rest is process spawn, import, memory profiling, kernel warmup and
-  CUDA-graph capture.
-- **Threshold autoscaling cannot see saturation coming.** CPU and even
-  request-rate triggers move after the queue has already formed, and the
-  stabilization window then holds the replicas long after the burst.
+### Problem 3 — the unit of waste is a GPU, and models compete for it
 
-## 2. What this project does
+At $2–4/hr per accelerator the cost of being wrong is orders of magnitude higher
+than in a CPU fleet, in both directions. And a general-purpose autoscaler decides
+**one Deployment at a time**: it cannot know that scaling model A up may mean
+scaling model B down, or that both draw on one finite pool.
 
-Three things, in decreasing order of how settled they are.
+### Problem 4 — one model is several workloads that scale differently
 
-**Decides replica counts from a closed-form capacity model.** Request rate and
-per-server performance from Prometheus, an inter-token-latency fit, and a
-fair-share allocation across every variant of every model at once, within
-whatever GPU budget a declared limiter allows. Not a forecaster and not a
-threshold ladder — a model that can be read, argued with, and checked against the
-numbers it produced.
+A production deployment is not one Deployment per model. The same model runs as
+several **variants** — accelerators, tensor-parallel widths, quantizations — and
+under prefill/decode disaggregation the halves are separate workloads with
+opposite bottlenecks: prefill compute-bound, decode memory-bandwidth-bound.
+Scaling one without the other moves the queue rather than clearing it.
 
-**Decides; Kubernetes actuates.** It implements the KEDA external-scaler gRPC
-contract, and KEDA owns the HPA that writes the scale subresource. That split is
-deliberate — an autoscaler for this workload has to reason across models before it
-can pick a replica count, and the actuation is the part Kubernetes already does
-well. It is why the name says *manager*: the name declines to claim the half we
-do not perform.
+### Goals
 
-**Manages capacity, not only replica counts.** A shared warm pool holds
-accelerators with models resident and lends them to bridge a scale-up;
-scale-to-zero parks idle workloads; the limiter constrains every decision against
-a GPU budget.
+1. Scale on a signal that stays meaningful when traffic shape changes, with no
+   per-model or per-workload threshold tuning.
+2. Decide before the queue forms, and cover the load-time gap that remains.
+3. Decide for the whole fleet against one GPU budget, not per Deployment.
+4. Treat variants and P/D roles as first-class scaling units.
+5. Publish the cost of every mechanism, including where it loses.
 
-## 3. What is measured
+### Non-Goals
 
-Two models bursting out of phase, 4020 s and 30 720 requests per arm, one run
-each, CoreWeave H200s, 2026-09-18. Full method and every comparability guard in
-[the benchmark guide](guides/benchmarking/two-model-warm-pool.md); the numbers
-are reproduced from [measured.md](well-lit-paths/warm-pool-bridge/measured.md).
+- Forecasting. The model is closed-form — we trade anticipation for a decision an
+  operator can read and argue with.
+- Node provisioning (cluster autoscaler), quota between models (Kueue), tenant
+  quota (the gateway), routing and scheduling (gateway and EPP), and the scale
+  operation itself (KEDA and the HPA). We decide; Kubernetes actuates.
 
-| arm | GPU-seconds | p95 TTFT per rise |
-| --- | ---: | --- |
-| autoscaling alone | **12 129** | 5.1 – 8.8 s |
-| + one-Pod warm pool | 14 138 (+17 %) | 0.11 – 0.83 s |
-| floor of 2 replicas/model | 16 080 (+33 %) | 0.09 – 0.13 s |
+## Proposal
 
-**Read it honestly.** Autoscaling alone is the cheapest arm and pays for it with
-five-to-nine-second rises. The warm pool buys floor-like latency for **12 % less
-than the floor it replaces** — and costs **17 % more** than no insurance at all.
-The pool's own accelerator is charged for the whole run, and that costs about
-twice what the smaller, shorter scale-ups save.
+### For Problem 1 — a universal threshold on a normalised quantity
 
-So the claim is not "a warm pool is cheaper". It is: *if you were going to hold a
-floor, hold a pool instead; if you were holding nothing and can tolerate multi-
-second rises, keep holding nothing.* The pool's advantage over a floor caps at
-25 % for two models and one Pod, and the lever that grows it is **more models
-sharing the same Pod**, not more quiet.
+Scale on **fleet utilization against a universal threshold** — up above 0.85,
+release below 0.70 — where utilization comes from a capacity model rather than a
+gauge. Demand for each role is floored at what the load requires *in throughput*:
+arrival rate divided by the completion rate one replica sustained when last seen
+saturated. That ratio is shape-dependent by construction, so when the shape moves
+the price moves with it and the threshold never needs re-tuning.
 
-Other measured results: a **437 ms model switch against a ~41 s cold start** for a
-pool Pod serving real gateway traffic; peer weight transfer between replicas
-verified byte-identical and ~9× faster than reloading from storage.
+**How we know it works.** In the run above the third replica was ordered at
+**+1344 s — the same cycle the new shape's completion rate first came on
+record** — and **no queue formed at any point** in the second phase. p95 TTFT
+settled at 0.04–0.07 s. A cold controller with no completion rate yet sized the
+same window by occupancy instead and paid **4.2 s p95**: the price of the
+ordinary signal, measured. Run twice a day apart, landing within a tenth of every
+figure.
+→ [Scale a P/D-disaggregated model](well-lit-paths/pd-disaggregation/)
 
-## 4. What did not work
+### For Problem 2 — order earlier, then bridge the rest
 
-Published because the negative results were expensive and are worth more than
-another feature.
+Because demand is priced from throughput rather than observed from a queue, the
+order is placed before the queue exists. The remaining load time is covered by a
+**shared warm pool**: a Pod holding an accelerator with models resident, lent to
+a model that is scaling up so it serves while its own replica starts.
 
-- **Sparse process snapshots do not work today.** Checkpointing an engine that
-  has already paid its ~150 s of construction, then refilling weights from a
-  peer, would remove the part no transfer can touch. The mechanism works on a
-  single process — GPU to 0 MiB, dump, restore, identical checksum — and **hangs
-  on a real multi-rank engine**: the driver's own thread spins after the copy
-  completes. Fifteen experiments narrowed it to NVIDIA's checkpoint path, not
-  anything vLLM can release.
-- **GPU-less warm launchers cannot wake.** An unbound sleeper often cannot wake
-  at all; holding the accelerator is what makes the wake possible.
-- **A weights PVC is not a latency fix.** 430 MB/s measured. It avoids
-  re-downloads, not cold starts.
+**How we know it works.** The second replica was ordered at **+53 s — from the
+load, not from a queue, and before the first replica tipped into preemption**. On
+a two-model benchmark with the models bursting out of phase:
 
-## 4b. Against the llm-d problem space: what we are resolving now
+| arm | p95 TTFT per rise | GPU-seconds |
+| --- | --- | ---: |
+| autoscaling alone | 5.1 – 8.8 s | **12 129** |
+| + one-Pod warm pool | **0.11 – 0.83 s** | 14 138 (+17 %) |
+| floor of 2 replicas per model | 0.09 – 0.13 s | 16 080 (+33 %) |
 
-Naina Singh's
-[Autoscaling in llm-d: The Production Problem Space](https://docs.google.com/document/d/13oqOGsM1PP9qVg0Rs67BE3vYsvk8xnCnKHAdI7oRfR4/edit?tab=t.0)
-(August 2026) states the problem and orders the user stories by when operators
-hit them. We agree with it, and this is our position against each part — built,
-measured, or open.
+A pool Pod serving real gateway traffic switched models in **437 ms against a
+~41 s cold start**.
+→ [What a warm pool buys, measured](well-lit-paths/warm-pool-bridge/measured.md)
 
-| Problem-space property | Status here | Evidence |
-| --- | --- | --- |
-| 3. Load is not request count | **Built** | Token throughput, KV-cache pressure, ITL fit, prefill/decode ratio |
-| 4. Scale-up takes minutes | **Built + measured** | Rises of 5.1–8.8 s p95 → 0.11–0.83 s; 437 ms model switch vs ~41 s cold |
-| 1. Replicas are deeply stateful | **Built** | Sleep/wake, resident models in a shared pool, scale-to-zero parking |
-| 6. Models compete for the same GPUs | **Built** | One joint decision across every model and variant, inside one GPU budget |
-| 5. Disaggregation splits the scaling unit | **Built** | P/D role is a variant, scaled on its own bottleneck |
-| 7. Self-service changes capacity unprompted | **Built** | Managed workloads learned from the KEDA calls themselves — no watch, listing or annotation |
-| 2. The margin for error is expensive | **Built** | Scale-down holding, which stops a single noisy sample pinning the fleet for the HPA's whole 300 s window |
-| P0: weights from a peer, not storage | **Measured, not shipped** | Byte-identical, ~9× faster than reloading from storage |
-| 8. Placement constraints | **Partial** | GPU-aware wake placement; geography and fabric constraints not modelled |
-| P1: low-priority workloads yield GPUs | **Designed, not built** | Replica reallocation across priorities |
-| 4. *Predicting* load at replica-ready time | **Not built** | Closed-form by choice; see non-goals |
-| P2: SLA-target-driven scaling | **Not built** | Named policy tiers only — nobody upstream has solved this |
-| 9. Maintenance pre-scaling, failure replacement | **Not built** | — |
+### For Problem 3 — one joint decision inside one budget
 
-The three problems that document names, in its order: **N+1 scale-out** is what
-the warm pool and the capacity model address today, with numbers. **0→1 cold
-start** is addressed for small models (park and wake) and bounded for large ones
-by the 152 s construction floor in §1 — the snapshot that would have removed it
-does not work yet (§4). **SLA-target-driven scaling** is open, for us and for
-everyone.
+Every model, every variant, one GPU budget, one allocation, re-solved each cycle.
+A declared limiter constrains every decision against that budget. The warm pool
+is the same idea in hardware: **one** held accelerator insuring **several**
+models, so its economics improve with each model added rather than degrading.
 
-We also agree with its scope boundaries, and they are ours: node provisioning
-belongs to the cluster autoscaler, quota between models to Kueue, tenant quota to
-the gateway, and the actual scale operation to KEDA/HPA.
+**How we know it works.** The pool costs **12 % less than the floor it replaces**
+at the same latency. We also publish the uncomfortable number: **autoscaling
+alone is the cheapest arm** — if you hold nothing today and can live with
+multi-second rises, keep holding nothing. The pool is for people who would
+otherwise hold a floor.
+→ [GPU capacity accounting](concepts/gpu-capacity-accounting.md)
 
-## 5. Scope and non-goals
+### For Problem 4 — the variant is the scaling unit
 
-**In scope:** horizontal replica decisions across models, variants and P/D roles;
-warm capacity; scale-to-zero; GPU-budget constraints; the KEDA external-scaler
-transport.
+A **variant** is one ScaledObject and the workload it scales. Variants whose
+triggers name the same model are solved together, each role carrying its own
+target and its own bottleneck. The cost-aware optimizer chooses among accelerator
+variants rather than assuming one GPU type.
 
-**Not in scope:** vertical scaling and node provisioning (the cluster autoscaler
-owns those); request routing and scheduling (the gateway and EPP own those);
-forecasting — the model is closed-form, which is a deliberate trade of
-anticipation for explainability.
+**How we know it works.** In the P/D run decode scaled 1 → 2 → 3 while **prefill
+was never ordered at all**, because prompts waiting at the scheduler are no
+longer charged to it as resident KV.
+→ [Accelerator variants](well-lit-paths/accelerator-variants/)
 
-## 6. Status
+### Also shipped
+
+- **Scale-to-zero and wake**, through KEDA's push path rather than a poll.
+  → [scale-to-zero](well-lit-paths/scale-to-zero/)
+- **Quota-bounded scaling**, against a GPU budget and against Kueue quota where
+  that is the boundary. → [bound by GPUs](well-lit-paths/bound-by-gpus/) ·
+  [Kueue-bounded quotas](well-lit-paths/kueue-bounded-quotas/)
+- **Workload classes** — interactive and batch tiers sharing a fleet under named
+  policies. → [workload classes](well-lit-paths/workload-classes/)
+
+## Design details
+
+The decision path is documented rather than summarised here: what is measured and
+how a measurement becomes a replica count in
+[the steady-state engine](concepts/steady-state-engine.md); the queueing model
+and the optimization in
+[modeling and optimization](concepts/modeling-and-optimization.md); what the GPU
+budget means, and three ways a naive reading over-states free capacity, in
+[GPU capacity accounting](concepts/gpu-capacity-accounting.md).
+
+Actuation is the KEDA external-scaler gRPC contract; KEDA owns the HPA and writes
+the scale subresource. Workloads are learned from the KEDA calls themselves —
+no watch, no listing, no opt-in annotation — so a newly registered workload is
+managed on its first call, which is what a self-service platform needs.
+
+## Alternatives considered
+
+Each of these was tried or measured, not reasoned away.
+
+**Threshold autoscaling on the signals KEDA already has.** Ruled out by the
+shape-swap run above: at a constant rate, with no queue, KV occupancy said
+"scale to one" when the answer was three.
+
+**Hold a floor of replicas instead.** Works — it is the closest competitor on
+latency, within tens of milliseconds of the pool. Rejected on cost: **+33 %
+GPU-seconds against autoscaling alone**, where the pool is +17 %, so the pool is
+12 % cheaper for the same result. A floor is still the better choice when one
+model is always bursting and the fleet never returns to its floor.
+
+**Faster storage, bigger page cache, or peer-to-peer weight transfer.** Ruled out
+as a *latency* fix by measurement: the weights are 40 s of a 192 s GLM start, so
+a perfect transfer takes it to ~152 s. A weights PVC measured 430 MB/s — it
+avoids re-downloads, not cold starts. Peer transfer is worth having (byte-
+identical, ~9× faster than reloading from storage) but it does not solve this.
+
+**Process snapshots**, which would remove the ~152 s no transfer can touch.
+Built, and it does not work: clean on a single process — GPU released to 0 MiB,
+dumped, restored, identical checksum — and it **hangs on a real multi-rank
+engine**, with the driver's own thread spinning after the data movement
+completes. Fifteen experiments narrowed it to NVIDIA's checkpoint path rather
+than anything the inference server can release.
+
+**A GPU-less warm launcher**, holding no accelerator. Ruled out: an unbound
+sleeper often cannot wake at all. Holding the accelerator is what makes the wake
+possible.
+
+## What is still open
+
+**Prediction.** A replica is ready minutes after the decision, so the right
+question is where load will be *then*. Against a 152 s construction floor on a
+large model, being closed-form is a real gap, not only a stylistic choice.
+
+**SLA-target-driven scaling.** Scaling on *"will this batch tier miss its
+deadline"* rather than *"is utilization above threshold"* is not built; named
+policy tiers are a coarse approximation. Nobody upstream has solved this either.
+
+**Maintenance pre-scaling and failure replacement.** Not built.
+
+**A shape never seen saturated** is sized from occupancy until the first
+saturated reading arrives — the 4.2 s cold-pass window above is exactly that
+cost.
+
+## Status
 
 Running on CoreWeave H200s and on OpenShift. The scaling path, warm pool,
 scale-to-zero and quota limiting are built and cluster-verified; replica
 reallocation across priorities is designed and not built; P/D role switching is
-experimental.
-
-Apache 2.0. The Go module path remains upstream's, so imports are unchanged.
+experimental. Apache 2.0, and the Go module path is unchanged, so imports do not
+move.
