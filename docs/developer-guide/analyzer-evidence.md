@@ -463,6 +463,58 @@ Two consequences:
     weights and a fresh controller, matched run U's TTFT p95 to within 1.6 s
     (67.5 against 69.1).
 
+### The image under test is not the branch, and its tag will not say so
+
+*2026-09-28, runs U, V, W and X, all on `mu-from-itl-v7`.*
+
+Feature-branch images on this repo are hand-built and hand-tagged; CI does not
+build one per commit. So the tag says which BRANCH it came from and nothing
+about which commit. `v7` was pushed at 13:33:40Z, and the branch kept moving:
+
+| committed (+0300) | commit | in v7? |
+|---|---|---|
+| 16:06:05 | `1c03837f` price the backlog that will exist when capacity lands | yes |
+| 16:20:23 | `4e52552c` age the starting replicas | yes |
+| **16:33:40** | **── v7 built ──** | |
+| 16:59:27 | `d03440a0` **the ramp ratcheted**, and seven other ways the sizing model was wrong | **no** |
+| 17:19:55 | `08ad4f49` report the STUCK replicas | **no** |
+
+The consequence was not a missing feature but a HALF-WIRED one. `backlogAtLanding`
+was in the binary; the `startSeconds` plumbing and the
+`horizon = max(drainSeconds, startSeconds)` fix that make it do anything arrived
+in `d03440a0` and did not. The projection therefore returned its own input on
+every cycle, which is invisible in the log because the field that would have
+shown it (`projectedBacklog`) was added by the same missing commit.
+
+It was caught by arithmetic, not by inspection. Run X, 18:06:44Z:
+
+    lambda 5.78, mu 1.8774, replicasImplied 6.6228
+      => rate = 6.6228 x 1.8774 = 12.43
+      => b / horizon = 12.43 - 5.78 = 6.65
+      => b = 399 at horizon 60  ==  backlogRequests 399  ==  observed
+
+A live projection would have added `lambda x T` for the start time and landed
+near 545. `b == observed` to the digit is the signature of a projection that
+never ran.
+
+What this cost: the ramp lag those runs measured (72 s to order nine replicas,
+the cap granting 1, 1, 1, 2, 3, 5 over five cycles) is the behaviour
+`d03440a0` had already fixed. Two separate attempts to fix it again were written
+and reverted, each colliding with a spec -- because the specs describe the fixed
+code, and the fixed code was never in the image.
+
+So, before attributing a benchmark result to anything:
+
+  - **Resolve the image to a COMMIT, not a tag.** Compare the registry's build
+    timestamp against `git log --format="%h %ci"`, remembering the registry
+    stamps UTC and the commits may not.
+  - **Check that a mechanism you are reasoning about is actually running**, by a
+    field it emits or by arithmetic on the fields it does emit. A half-wired
+    mechanism logs nothing and looks exactly like a mechanism that is working
+    and finding nothing to do.
+  - A tag that has been reused or hand-incremented (`v1`..`v7`) carries no
+    ordering guarantee relative to the branch at all.
+
 ## How to add to this file
 
 One section per decision, with the date, the run identifier and the numbers
