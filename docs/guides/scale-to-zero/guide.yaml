@@ -23,12 +23,12 @@ prerequisites:
   engine:
     note: |
       One engine per model. Idleness is read from that engine's request counter —
-      vllm:request_success_total or sglang:num_requests_total — and WVA asks for
+      vllm:request_success_total or sglang:num_requests_total — and the scaling manager asks for
       the one matching the engine it detects. A model running BOTH would need both
       counters summed, so it is refused rather than measured with half its traffic.
 
       A COUNTER THAT DOES NOT EXIST YET IS NOT ZERO. A model that has never served
-      a request has never emitted the counter, so there is nothing to read and WVA
+      a request has never emitted the counter, so there is nothing to read and the scaling manager
       keeps the fleet where it is rather than guessing:
 
         ERROR Failed to get request count, keeping current decisions
@@ -78,7 +78,7 @@ deploy:
 verify:
   blocked:
     note: |
-      Ask WVA whether anything stops this model parking. No output is the healthy
+      Ask the scaling manager whether anything stops this model parking. No output is the healthy
       answer. Each reason names a CONTRADICTION between the two halves above.
     run: |
       kubectl port-forward -n <wva-namespace> svc/wva-controller-manager-metrics-service 8443:8443 &
@@ -98,7 +98,7 @@ verify:
   wake:
     note: |
       The whole chain, end to end, on a real cluster: requests queue at zero
-      endpoints -> WVA publishes an activation -> the workload leaves zero. A
+      endpoints -> the scaling manager publishes an activation -> the workload leaves zero. A
       wake for some other reason is not a pass, so it checks the queue and the
       activation too, and names WHICH link broke. It parks the model itself
       first, and restores what it changed.
@@ -108,6 +108,6 @@ cleanup:
   disable:
     note: |
       Set enabled: false and the model is held at one replica again. Leaving the
-      variants at minReplicaCount: 0 is then a contradiction WVA will report as
+      variants at minReplicaCount: 0 is then a contradiction the scaling manager will report as
       policy-forbids-zero — raise them back if you want the metric quiet.
     run: kubectl edit configmap wva-scaling-policy-config -n <wva-namespace>

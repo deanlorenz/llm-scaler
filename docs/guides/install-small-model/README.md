@@ -50,7 +50,7 @@ kubectl get nodes -o custom-columns=NODE:.metadata.name,GPU:.status.allocatable.
 # engine image on the accelerator nodes (the prepull-* pods; BENCHMARK_PREPULL=false
 # skips that) -- nothing else. BENCHMARK_WVA_DEPLOY=false is what keeps the
 # autoscaler out of it: this guide gets you a model to scale, and installing
-# The scaling manager is the next guide's job.
+# the scaling manager is the next guide's job.
 make benchmark-standup BENCHMARK_NAMESPACE=${NAMESPACE} MODEL_ID=${MODEL_ID}         BENCHMARK_WVA_DEPLOY=false
 ```
 <!-- guide:deploy.standup end -->

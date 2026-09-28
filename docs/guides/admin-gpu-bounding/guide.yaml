@@ -8,7 +8,7 @@ prerequisites:
       The event is the signal to trust: it is re-emitted for as long as the
       condition holds, and the API server folds the repeats into one entry with a
       count. It hangs on the ScaledObject, so it is in the MODEL's namespace, not
-      WVA's -- hence -A. The log line says the same thing but is printed once per
+      the controller's -- hence -A. The log line says the same thing but is printed once per
       CHANGE, so on a controller that has been up a while it may have scrolled
       away: an empty grep is not an all-clear.
     # AcceleratorNotResolved is an event REASON, never log text: it goes through the
@@ -17,7 +17,7 @@ prerequisites:
     # on the ScaledObject rather than on the synthesized VariantAutoscaling, whose
     # kind is deliberately absent from the scheme -- and a synthesized variant takes
     # the ScaledObject's namespace (utils.variant), which is where the model servers
-    # are, NOT where WVA runs. `kubectl describe scaledobject` shows them too.
+    # are, NOT where the scaling manager runs. `kubectl describe scaledobject` shows them too.
     # The prose in the grep is what reportUnresolvedAccelerator actually logs;
     # docs/reference/gpu-limiter.md greps the same form.
     run: |
@@ -30,7 +30,7 @@ deploy:
     note: |
       Publishes cluster policy AND grants every controller the node read it then
       requires — grants first, because declaring the limiter without them takes
-      out every WVA that lacks node access at once.
+      out every install that lacks node access at once.
     run: make enable-physical-limiter
 
 verify:
@@ -60,5 +60,5 @@ verify:
 
 cleanup:
   disable:
-    note: Scaling becomes unbounded again for every WVA that reads this policy.
+    note: Scaling becomes unbounded again for every install that reads this policy.
     run: make disable-physical-limiter
