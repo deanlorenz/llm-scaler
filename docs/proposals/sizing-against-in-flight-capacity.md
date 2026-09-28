@@ -164,11 +164,10 @@ proposal missed:
   with `t` seconds left in the drain window contributes `mu x t`, not `mu x
   drainSeconds`.
 
-So, per role, with `T_next` the effective start time of the next replica this
-role would order (§2.2):
+So, per role, with `T_next` the cold start time for this variant (§2.1):
 
 	inFlight       = replicas ordered, not yet Ready        (PendingReplicas)
-	remaining_i    = max(0, startFor(i) - age_i)
+	remaining_i    = max(0, startSeconds - age_i)
 	servedDuringT  = mu x [ N_ready x T_next
 	                        + sum_i max(0, T_next - remaining_i) ]
 	arrivedDuringT = lambda x T_next
@@ -207,68 +206,59 @@ for a mean to be useful and large enough that a constant would be wrong.
 The measurement belongs per **variant**, not per model: it is an image, a set of
 engine flags and a node, and two variants of one model routinely differ.
 
-#### 2.2 A warm pool makes the first few replicas cheap -- and only the first few
+**And it is published, not only logged.** The start time is an INPUT to a sizing
+decision, so a run that cannot show which value was used cannot be reviewed --
+the same argument that put the fit tiers in the log, one level up. Two series,
+following `wva_scale_from_zero_wake_seconds`, whose buckets already span a warm
+bind near 2 s and a cold load near 50-80 s:
 
-A pool Pod that is `Asleep` for this model is "resident and wakeable"
-(`internal/warmpool/pool.State`), and waking it is sub-second where a cold start
-is 67–82 s. So the effective start time is **per replica ordered, not per
-variant**: if `k` pool Pods can wake for this model, the first `k` replicas of
-an order cost `wakeSeconds` and the rest cost the cold `startSeconds`.
+	wva_replica_start_seconds          histogram, per namespace/variant
+	                                   observed Ready - created, one observation
+	                                   per replica the variant starts
+	wva_replica_start_seconds_estimate gauge, per namespace/variant, with a
+	                                   source label of "seed" or "measured":
+	                                   the figure sizing actually used
 
-	startFor(j) = wakeSeconds   for j < k
-	            = startSeconds  for j >= k
+The gauge is the one that matters for review. The histogram says what the
+cluster did; the gauge says what the controller believed, and a run where those
+two disagree is exactly the run worth looking at.
 
-This changes the size of the order, not only its timing: with `k = 3`, three
-replicas land almost at once, so `servedDuringT` for the fourth is much larger
-and `B_landing` much smaller -- the fleet orders *fewer* cold replicas because
-the warm ones have already absorbed the backlog. The current code cannot express
-that, because it has one start time and no notion of `j`.
+#### 2.2 The warm pool is deliberately NOT in this model
 
-`k` counts only what can actually wake **now**:
+An earlier draft of this proposal made the effective start time per replica
+*ordered*: the first `k` replicas cost a pool wake and the rest a cold start,
+with `k` the pool Pods asleep for this model, apportioned between models
+competing for the same pool. That is wrong, and it is wrong in a way this
+codebase has already paid for once.
 
-- `State == Asleep` -- `Loading` is a cold load in progress and is not a credit,
-  `Serving` and `Draining` are already committed elsewhere.
-- the Pod is not already lent to another variant (`lent` in `autosize.go`).
-- the membership is for **this model**. A Pod asleep with another model's weights
-  resident is a model switch, which is fast but not free, and is deliberately
-  out of scope here: counting it would make `k` a promise this proposal cannot
-  keep.
+**It smuggles pool capacity into supply.** `floor.Estimate` skips every
+`FromWarmPool` replica outright (`floor.go:179`), and anticipated supply counts
+only a variant's own `ReplicaCount + PendingReplicas`
+(`aggregation.SumTotalAnticipatedSupply`). That asymmetry -- a bridge's demand
+counts, a bridge's capacity does not -- is deliberate, because a bridge can be
+reclaimed at any moment; treating it as supply produced a retained deadlock and a
+switch storm. A shorter effective start time reduces `B_landing`, which reduces
+the order. So sizing against a warm grant IS counting the pool as supply, just
+indirectly enough to look like a timing change.
 
-#### 2.3 Several models want the same pool
+**And it is unnecessary, which is the better reason.** If a pool Pod does wake
+and serve this variant, it really does drain the queue -- and the backlog we
+*measure* next cycle is smaller because of it. The benefit arrives as an
+observation rather than an assumption. That is the right coupling and it needs no
+code: no grant, no apportionment between models, no determinism requirement on
+the split, and no claim-versus-reservation problem to reason about. The whole of
+§2.3 in the earlier draft disappears.
 
-`k` is an availability claim on a shared resource, and two models sizing
-themselves in the same cycle will both claim it unless the pool is apportioned.
-The constraint is **Pods**, not memberships: one Pod wakes for one model, so if
-model A has three sleeping memberships and model B two across the same four
-Pods, they cannot both have what they see.
+So **sizing always uses the cold start time.** The pool keeps the job it had --
+a bridge over ramp time, shortening time-to-first-relief -- and the fleet still
+converges on the size that survives the pool being taken back, which is the only
+size worth converging on.
 
-So the pool is split before anyone sizes against it:
-
-	freePods     = Pods in the pool that are wakeable and unlent
-	claim_m      = |{Pods where m is Asleep}|         per requesting model m
-	deficit_m    = the replicas m would order at k=0  (its unaided need)
-	grant_m      = min(claim_m, apportion(freePods, deficit_m))
-
-`apportion` divides `freePods` in proportion to `deficit_m` -- the model that
-needs the capacity most gets the most of it -- floored to whole Pods, with the
-remainder going by descending fractional part and then by model name so the
-split is deterministic and two controllers reach the same answer. `grant_m` is
-then the `k` of §2.2.
-
-Two properties this has to have, both worth a spec:
-
-- **`sum_m grant_m <= freePods`.** The split must never hand the same Pod to two
-  models; that is the whole reason it exists.
-- **A model that asks for nothing is granted nothing**, so it cannot hold pool
-  capacity away from a model that is scaling.
-
-Sizing against a grant is still a *claim*, not a reservation: between sizing and
-waking, another actor may take the Pod. That is acceptable and must be
-acknowledged rather than defended against -- the fallback is the ordinary cold
-start, and the next cycle re-sizes with `k` reduced. What is NOT acceptable is
-treating the claim as certain and therefore ordering too few cold replicas to
-recover; so `grant_m` is used for the *effective start time*, never to reduce
-the replica count below what the cold path would eventually order.
+The one thing to keep from the earlier draft: the start-time measurement in §2.1
+must not be polluted by pool wakes. A bridged Pod reaching Ready in a second is
+not evidence about how long this variant's own replicas take to start, so the
+measurement counts only Pods owned by the variant's own scale target, and a
+`FromWarmPool` replica is excluded exactly as the floor excludes it.
 
 ### 3. What this does NOT fix, and should not pretend to
 
@@ -291,9 +281,9 @@ sufficient. The gate is:
 
 1. Specs on the arithmetic: the release lands at 8 on run T's exact figures and
    stops; B_landing rises with arrivals over the dead time and falls as
-   in-flight replicas approach readiness; a warm grant of k makes the first k
-   replicas cheap and the k+1th cold; the pool split never hands one Pod to two
-   models; a thin window still cannot order beyond `+1`.
+   in-flight replicas approach readiness; lambdaEff rises with a growing queue
+   and is zero when it is flat; the start-time measurement ignores warm-pool
+   bridges.
 2. A negative control against the parent commit for each -- run T's numbers make
    this easy: `RoleSpare = 684,115` releases 0 today and must release 1 after.
 3. A cluster re-run of the same shape swap, judged on phase-2 fleet and latency
