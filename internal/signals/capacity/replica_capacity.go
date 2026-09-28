@@ -54,15 +54,4 @@ type ReplicaCapacity struct {
 	// shape's window -- the two fields above describe the measured window
 	// that was NOT used, and are left alone so they stay honest about it.
 	SaturatedThroughputDerived bool
-	// SaturatedThroughputDerivedRejected is set when SaturatedThroughput is a
-	// derived figure AND the line it was derived from has been contradicted by
-	// this replica's own observed generation-token rate. A rejected figure
-	// still prices the replica -- it is the best available -- but it may not
-	// order the fleet up: see the floor's mayOrder.
-	//
-	// False therefore means one of two things, "the line was verified" and
-	// "there was nothing to verify it against", which are deliberately NOT
-	// distinguished here. Only positive evidence against the line withholds
-	// ordering; see saturation_v2.lineRejected for why.
-	SaturatedThroughputDerivedRejected bool
 }

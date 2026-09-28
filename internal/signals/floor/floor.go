@@ -174,10 +174,6 @@ func Estimate(
 	borrowedCosts := make(map[string][]float64)
 	borrowedMus := make(map[string][]float64)
 	mayOrder := make(map[string]bool)
-	// Why a role is held, for the Term: a role whose derived line was
-	// contradicted is held for a different reason than a thin or borrowed
-	// window, and a run that cannot tell them apart looks for the wrong fix.
-	derivedRejected := make(map[string]bool)
 	borrowedOnly := make(map[string]bool)
 	for _, rc := range replicas {
 		if rc.FromWarmPool || !priceable(rc.SaturatedThroughput) {
@@ -212,24 +208,14 @@ func Estimate(
 		// that changed TO, which is the whole reason the hold exists and
 		// the reason it no longer has to.
 		//
-		// It does wait on the line being credible. A derived figure whose
-		// line this replica's own generation-token rate contradicts may hold
-		// the fleet but not grow it -- the proposal's rule, and the only
-		// check available on a price no saturated window backs.
-		//
-		// Written as an if/else rather than one disjunction because the two
-		// branches are not independent: a replica priced from a derived
-		// figure carries SaturatedThroughputSamples =
-		// MinDerivedThroughputSamples, which equals MinThroughputSamplesToOrder,
-		// so a single condition would let the sample clause re-grant exactly
-		// what the rejection withholds.
-		if rc.SaturatedThroughputDerived {
-			if !rc.SaturatedThroughputDerivedRejected {
-				mayOrder[role] = true
-			} else {
-				derivedRejected[role] = true
-			}
-		} else if rc.SaturatedThroughputSamples >= MinThroughputSamplesToOrder && !staleShape {
+		// Nor does it wait on the GPS check. That check was built as a gate
+		// here and measured as one in run T: it withheld ordering 28 times,
+		// all of them in the phase-1 ramp, because the k it reads carries no
+		// window while the rate it compares against is averaged over a minute.
+		// It is now a diagnostic only -- saturation_v2.noteLineMismatch says
+		// why -- so this file is back to one disjunction.
+		if rc.SaturatedThroughputDerived ||
+			(rc.SaturatedThroughputSamples >= MinThroughputSamplesToOrder && !staleShape) {
 			mayOrder[role] = true
 		}
 	}
@@ -352,12 +338,6 @@ func Estimate(
 				}
 				if staleShape {
 					term.HeldWhy = "shape-change"
-				}
-				// Last, so it wins: it is the most specific of the four and
-				// the only one naming a figure that was measured and found
-				// wrong rather than merely thin.
-				if derivedRejected[role] {
-					term.HeldWhy = "gps-mismatch"
 				}
 			}
 		}

@@ -1,6 +1,7 @@
 package saturation_v2
 
 import (
+	"math"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -57,10 +58,6 @@ type derivedMu struct {
 	seqs     float64
 	tokenSec float64
 	ok       bool
-	// rejected records that this replica's observed generation-token rate
-	// contradicts the line rate was priced from. Set by the caller from
-	// lineRejected, not by deriveMu, which prices and does not judge.
-	rejected bool
 }
 
 // capacityTokensFor is the replica's whole KV capacity in tokens: the LIVE
@@ -80,7 +77,12 @@ type derivedMu struct {
 // fallback for a replica reporting nothing at all (a cold variant, or an
 // engine that emits no cache_config_info); it is not a measurement.
 func capacityTokensFor(params *capacity.EngineParams, liveTokens int64) float64 {
-	if liveTokens > 0 {
+	// math.MaxInt64 is the collector's overflow SENTINEL, not a capacity
+	// (internal/collector/attribute.go). Taken literally it makes the resident
+	// sequence count astronomical, which prices mu at an absurd figure and --
+	// while the check below was a gate -- rejected the replica's line on every
+	// cycle forever.
+	if liveTokens > 0 && liveTokens < math.MaxInt64 {
 		return float64(liveTokens)
 	}
 	if params != nil && params.TotalKvTokensOverride > 0 {
@@ -89,48 +91,56 @@ func capacityTokensFor(params *capacity.EngineParams, liveTokens int64) float64 
 	return 0
 }
 
-// lineRejected reports whether this replica's observed generation-token rate
-// CONTRADICTS the fitted line, at the replica's own utilization and the shape
-// the fleet is serving.
+// noteLineMismatch logs, and only logs, when this replica's observed
+// generation-token rate disagrees with what the fitted line predicts at the
+// replica's own utilization.
 //
-// The proposal requires a derived mu to be verified against the observed rate
-// before it may order, and this is that check. It answers three states, not
-// two, and only one of them withholds ordering:
+// It is a DIAGNOSTIC, not a gate, and that is a decision taken against
+// measurement rather than taste.
 //
-//   - verified: the line predicts the observed rate within
-//     itl.DefaultGPSMismatchThresholdPct. Order.
-//   - contradicted: it does not. Hold -- the price is still the best figure
-//     available and still prices the replica, but a line that cannot predict
-//     what a replica is doing now has not earned the right to grow the fleet.
-//   - no comparison possible: the replica reports no generation-token rate, or
-//     sits below itl.DefaultGPSMinKForVerification. Order.
+// The proposal asks for a derived mu to be verified against the observed rate
+// before it may order. Built as a gate, that verification withheld ordering
+// 28 times in run T (2026-09-28) and every one of them fell inside the first
+// two minutes of the run -- the phase-1 ramp -- with the predicted rate above
+// the observed one nearly every time, and on four cycles every replica of the
+// role rejected at once. The fleet still reached 9 so the run stands, but its
+// phase-1 TTFT p95 was 64 s against main's 42 s.
 //
-// The third is the divergence from a literal reading of the proposal's "until
-// then it holds", and it is deliberate. Failing closed there would disable the
-// derivation on exactly the fleet it was built for: an over-provisioned fleet
-// after the shape lightens sits far below the verification k and cannot be
-// checked at all, and a fleet whose engine exports no generation-token counter
-// could never be checked on any cycle. Withholding on missing evidence would
-// silently restore the stale-window wait this whole path replaces, to protect
-// against an error -- ordering too MANY replicas -- that is not the one being
-// fixed, while the error being fixed is a TTFT tail from ordering too few.
-func lineRejected(model itl.Model, params *capacity.EngineParams,
-	rm domain.ReplicaMetrics, kvReq float64, logger logr.Logger) bool {
+// The cause is not a threshold that needs tuning. The three signals are
+// collected over three different windows -- KvUsageInstant has none,
+// GenerationTokenRate is rate[1m], AvgITL is rate[5m] -- so on a ramp k reaches
+// its new level in seconds while the 1m rate still reports a fraction of the
+// steady state. The disagreement is therefore largest exactly when a scale-up
+// is needed, and it moves every replica together, so neither N-consecutive
+// cycles nor a majority-of-replicas rule suppresses it.
+//
+// What it is still worth: it is the line that let run T be diagnosed, and a
+// persistent mismatch away from a ramp is real evidence that the shape, and so
+// KVreq, does not describe the fleet. When the collector grows a k averaged
+// over the same window as the rate, this can become a gate again.
+//
+// Warm-pool replicas and non-decode roles are skipped rather than logged: a
+// bridge runs on the pool's own engine settings (noteITL excludes it from the
+// fit for that reason and floor.Estimate prices it not at all), and a prefill
+// replica generates about one token per request, so neither disagreement means
+// anything about this variant's line.
+func (a *SaturationAnalyzer) noteLineMismatch(model itl.Model, params *capacity.EngineParams,
+	rm domain.ReplicaMetrics, role string, kvReq float64, logger logr.Logger) {
+	if rm.FromWarmPool || canonicalRole(role) != domain.RoleDecode {
+		return
+	}
 	capacityTokens := capacityTokensFor(params, rm.TotalKvCapacityTokens)
 	errPct, ok := itl.GPSErrorPct(model, rm.KvUsageInstant, capacityTokens,
 		kvReq, rm.GenerationTokenRate)
 	if !ok || errPct <= itl.DefaultGPSMismatchThresholdPct {
-		return false
+		return
 	}
-	// At DEFAULT, like the two fit lines: it says a derived price is about to
-	// be held rather than ordered on, which is the difference between a run
-	// that scaled and one that did not.
 	logger.V(logging.DEFAULT).Info("itl-gps-mismatch",
 		"variant", rm.VariantName, "pod", rm.PodName,
 		"k", rm.KvUsageInstant, "observedGPS", rm.GenerationTokenRate,
 		"predictedGPS", itl.TokenRate(model, rm.KvUsageInstant, capacityTokens, kvReq),
-		"errPct", errPct, "thresholdPct", itl.DefaultGPSMismatchThresholdPct)
-	return true
+		"errPct", errPct, "thresholdPct", itl.DefaultGPSMismatchThresholdPct,
+		"gates", false)
 }
 
 // deriveMu prices one replica of this variant at saturation under the shape it

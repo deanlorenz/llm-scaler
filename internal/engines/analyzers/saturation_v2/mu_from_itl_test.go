@@ -4,14 +4,22 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/go-logr/logr"
+	"github.com/go-logr/zapr"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/floor"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
@@ -571,50 +579,66 @@ var _ = Describe("capacityTokensFor", func() {
 	})
 })
 
-var _ = Describe("lineRejected", func() {
+// The GPS check is a diagnostic now, not a gate, so what matters is that the
+// line is emitted when it should be and suppressed when the comparison would be
+// meaningless. See noteLineMismatch for the run that decided it does not gate.
+func TestLineMismatchIsLoggedNotEnforced(t *testing.T) {
 	const variant = "decode-v"
 	const k = 0.5
 	fleet := shape.New(1000, 6000, 0)
 	predicted := itl.TokenRate(runPModel, k, float64(tracedKv), fleet.KVreq)
 
-	// One replica of run P's fleet, reporting a given generation-token rate at
-	// a given load.
-	at := func(atK, observedGPS float64) domain.ReplicaMetrics {
+	replica := func(observedGPS float64) domain.ReplicaMetrics {
 		rm := makeReplicaMetrics("d0", variant, 400_000, tracedKv, 10, 1000, 6000)
 		rm.Ready = true
-		rm.KvUsageInstant = atK
+		rm.KvUsageInstant = k
 		rm.GenerationTokenRate = observedGPS
 		return rm
 	}
-	rejected := func(m itl.Model, rm domain.ReplicaMetrics) bool {
-		return lineRejected(m, tracedParams, rm, fleet.KVreq, logr.Discard())
+	// noteLineMismatch takes a logger directly rather than a context, so the
+	// observer core is wired straight into one at the shipped verbosity.
+	notice := func(rm domain.ReplicaMetrics, role string) *observer.ObservedLogs {
+		core, logs := observer.New(zapcore.Level(-logging.DEFAULT))
+		a := NewSaturationAnalyzer(capacity.NewStore())
+		a.noteLineMismatch(runPModel, tracedParams, rm, role, fleet.KVreq,
+			zapr.NewLogger(zap.New(core)))
+		return logs
 	}
 
-	It("accepts a line that predicts what the replica is doing", func() {
-		Expect(rejected(runPModel, at(k, predicted))).To(BeFalse())
-		Expect(rejected(runPModel, at(k, predicted*1.10))).To(BeFalse(),
-			"9% out is inside the threshold; the check is not a demand for the exact figure")
+	t.Run("a contradicted line is reported, and says it does not gate", func(t *testing.T) {
+		logs := notice(replica(predicted/2), domain.RoleDecode)
+		entries := logs.FilterMessage("itl-gps-mismatch").All()
+		require.Len(t, entries, 1)
+		fields := entries[0].ContextMap()
+		assert.Equal(t, false, fields["gates"],
+			"the field is what tells an operator this line withheld nothing")
+		assert.Greater(t, fields["errPct"], 15.0)
 	})
 
-	It("rejects one the replica's own rate contradicts", func() {
-		Expect(rejected(runPModel, at(k, predicted/2))).To(BeTrue(),
-			"a line mis-pricing the rate by 100% has not earned the right to order replicas")
+	t.Run("a sound line is silent", func(t *testing.T) {
+		logs := notice(replica(predicted), domain.RoleDecode)
+		assert.Empty(t, logs.FilterMessage("itl-gps-mismatch").All())
 	})
 
-	It("does not reject what it could not check", func() {
-		// The deliberate divergence from a literal reading of the proposal.
-		// Failing closed here would disable the derivation on exactly the
-		// fleet it was built for: an over-provisioned one after the shape
-		// lightens sits below the verification k, and a fleet whose engine
-		// exports no generation-token counter could never be checked at all.
-		Expect(rejected(runPModel, at(k, 0))).To(BeFalse(),
-			"no observed rate is not a contradiction")
-		Expect(rejected(runPModel, at(itl.DefaultGPSMinKForVerification-0.01, predicted/2))).
-			To(BeFalse(), "below the verification k, a percentage on the rate is quantisation")
-		Expect(rejected(itl.Model{}, at(k, predicted))).To(BeFalse(),
-			"no line at all is not a contradicted one")
+	t.Run("an unmeasurable comparison is silent, not a mismatch", func(t *testing.T) {
+		logs := notice(replica(0), domain.RoleDecode)
+		assert.Empty(t, logs.FilterMessage("itl-gps-mismatch").All())
 	})
-})
+
+	t.Run("a warm-pool bridge is skipped", func(t *testing.T) {
+		rm := replica(predicted / 2)
+		rm.FromWarmPool = true
+		logs := notice(rm, domain.RoleDecode)
+		assert.Empty(t, logs.FilterMessage("itl-gps-mismatch").All(),
+			"a bridge runs the pool's engine settings; its rate says nothing about this line")
+	})
+
+	t.Run("a prefill replica is skipped", func(t *testing.T) {
+		logs := notice(replica(predicted/2), domain.RolePrefill)
+		assert.Empty(t, logs.FilterMessage("itl-gps-mismatch").All(),
+			"prefill generates about one token per request")
+	})
+}
 
 var _ = Describe("the one-parameter fallback's own floor", func() {
 	const variant = "decode-v"

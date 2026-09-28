@@ -307,17 +307,15 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 		gpuCount := gpusByVariant[rm.VariantName]
 		role := rolesByVariant[rm.VariantName]
 		downstreamSaturated := decodeSaturated && canonicalRole(role) == domain.RolePrefill
-		// Priced, then checked, in two steps rather than one expression. A
-		// derived mu may only ORDER the fleet up while the line it came from
-		// still predicts the generation-token rate this replica is reporting;
-		// lineRejected is the positive evidence against, and its comment says
-		// why the mere absence of evidence is not.
+		// Priced, then reported on. noteLineMismatch says when the observed
+		// generation-token rate disagrees with the line, and does not act on
+		// it: see its comment for the run that decided that.
 		itlModel := itlModels[rm.VariantName]
 		engineParams := engineParamsFor(a, input.Namespace, input.ModelID, rm.VariantName)
 		fleetShape := shape.New(fleetInput, fleetOutput, rm.PrefixCacheHitRate)
 		derived := deriveMu(itlModel, engineParams, rm.TotalKvCapacityTokens,
 			fleetShape, pricingK(satConfig))
-		derived.rejected = lineRejected(itlModel, engineParams, rm, fleetShape.KVreq, logger)
+		a.noteLineMismatch(itlModel, engineParams, rm, role, fleetShape.KVreq, logger)
 		rc := a.computeReplicaCapacity(rm, satConfig, input.ModelID, input.Namespace, gpuCount,
 			role, accelByVariant[rm.VariantName], stableOutput, fleetOutput, stableInput,
 			derived, downstreamSaturated, logger)
@@ -684,11 +682,6 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		SaturatedThroughputSamples:  throughputSamples,
 		SaturatedThroughputBorrowed: reading.borrowed,
 		SaturatedThroughputDerived:  throughputBucket == derivedBucket,
-		// Scoped to the figure actually published. A rejected line on a
-		// replica priced from its own MEASURED window says nothing about that
-		// window, and reporting it would hold a fleet on the strength of a
-		// derivation it did not use.
-		SaturatedThroughputDerivedRejected: throughputBucket == derivedBucket && derived.rejected,
 	}
 }
 
