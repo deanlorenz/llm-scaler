@@ -220,7 +220,11 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 	// the measured one, so it has to clear a higher bar than two readings.
 	obs := w.Observations()
 	ready := w.Ready()
+	baseline, learned := a.itlBaseline[key]
 	a.mu.Unlock()
+	if !learned || !(baseline > 0) {
+		baseline = itl.DefaultBaselineSec
+	}
 
 	// Below DefaultMinObservableK the window drops the reading itself, so
 	// `added` counts what was offered and len(obs) what was kept.
@@ -231,8 +235,19 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 		"ready", ready, "minSamples", itl.DefaultMinSamples)
 	if ready {
 		if model, ok := itl.Fit(obs); ok {
+			// Remember B, not A. B is the hardware floor and belongs to the
+			// card; A is contention and moves with the workload. Only a
+			// PHYSICAL floor is worth keeping -- ValidModel admits a negative
+			// intercept as long as the line is positive at saturation, and a
+			// negative B pinned into the next fit would be worse than the
+			// constant it replaced.
+			if model.B > 0 {
+				a.mu.Lock()
+				a.itlBaseline[key] = model.B
+				a.mu.Unlock()
+			}
 			logger.V(logging.DEFAULT).Info("itl-fit", "variant", variantName, "tier", "ols",
-				"a", model.A, "b", model.B, "held", len(obs))
+				"a", model.A, "b", model.B, "held", len(obs), "baselineLearned", true)
 			return model
 		}
 	}
@@ -266,12 +281,16 @@ func (a *SaturationAnalyzer) noteITL(key string, replicas []domain.ReplicaMetric
 	if len(obs) < itl.DefaultMinSamples {
 		return itl.Model{}
 	}
-	model, ok := itl.FitPinnedB(obs, itl.DefaultBaselineSec)
+	// Pinned to what THIS key measured, not to a constant. The slope is fitted
+	// against whatever B is pinned, so B decides the line's steepness as much
+	// as its offset -- at a pricing point well above the observed k the slope
+	// dominates, and a B that is 3x too high halves the ITL the model reports.
+	model, ok := itl.FitPinnedB(obs, baseline)
 	if !ok {
 		logger.V(logging.DEFAULT).Info("itl-fit-declined", "variant", variantName, "held", len(obs))
 		return itl.Model{}
 	}
 	logger.V(logging.DEFAULT).Info("itl-fit", "variant", variantName, "tier", "pinned-B",
-		"a", model.A, "b", model.B, "held", len(obs))
+		"a", model.A, "b", model.B, "held", len(obs), "baselineLearned", learned)
 	return model
 }

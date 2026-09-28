@@ -2,6 +2,7 @@ package saturation_v2
 
 import (
 	"math"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -41,7 +42,7 @@ var _ = Describe("recordSaturatedThroughput with a non-finite rate", func() {
 		It(tc.name+" never enters the window", func() {
 			a, _ := newAnalyzer()
 			a.recordSaturatedThroughput(key, tc.rate)
-			_, present := a.saturatedThroughput[key]
+			_, present := a.saturatedThroughput[tkey(a, key)]
 			Expect(present).To(BeFalse(), "no window is even created for it")
 		})
 	}
@@ -54,9 +55,9 @@ var _ = Describe("recordSaturatedThroughput with a non-finite rate", func() {
 		*now = now.Add(ThroughputSampleSpacing)
 		a.recordSaturatedThroughput(key, math.NaN())
 
-		Expect(a.saturatedThroughput[key].Len()).To(Equal(1),
+		Expect(a.saturatedThroughput[tkey(a, key)].Len()).To(Equal(1),
 			"one real reading in, and neither non-finite value took a slot")
-		Expect(a.saturatedThroughput[key].Average()).To(BeNumerically("~", 5.4, 1e-9),
+		Expect(a.saturatedThroughput[tkey(a, key)].Average()).To(BeNumerically("~", 5.4, 1e-9),
 			"and the reading that is there is undisturbed")
 	})
 
@@ -67,6 +68,21 @@ var _ = Describe("recordSaturatedThroughput with a non-finite rate", func() {
 			a.recordSaturatedThroughput(key, r)
 			*now = now.Add(ThroughputSampleSpacing)
 		}
-		Expect(a.saturatedThroughput[key].Len()).To(Equal(3))
+		Expect(a.saturatedThroughput[tkey(a, key)].Len()).To(Equal(3))
 	})
 })
+
+// tkey resolves a throughput-window key written WITHOUT its input-bucket
+// suffix. The throughput key carries the fleet's input bucket so that a
+// reading taken at one prompt length is not an own reading for another; the
+// specs below name the part they care about and let this find the rest.
+func tkey(a *SaturationAnalyzer, prefix string) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for k := range a.saturatedThroughput {
+		if strings.HasPrefix(k, prefix+"|i") {
+			return k
+		}
+	}
+	return prefix
+}

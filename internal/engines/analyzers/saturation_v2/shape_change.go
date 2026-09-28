@@ -219,13 +219,13 @@ func saturatedCompletionRate(rm domain.ReplicaMetrics, role string, fleetOutput 
 // takes about eight -- so expect a short burst per transition rather than the
 // single line the previous wording promised.
 func (a *SaturationAnalyzer) noteFleetShape(namespace, modelID string, in, out float64,
-	arriving float64, arrivingOK bool, holdFor time.Duration, logger logr.Logger) (float64, bool) {
+	arriving float64, arrivingOK bool, holdFor time.Duration, logger logr.Logger) (stableOut, stableIn float64, outstanding bool) {
 	if !(in > 0) && !(out > 0) && !arrivingOK {
 		stable, outstanding := a.fleetShapeState(namespace, modelID)
 		if stable <= 0 {
 			stable = out
 		}
-		return stable, outstanding
+		return stable, 0, outstanding
 	}
 	key := namespace + "|" + modelID
 
@@ -303,7 +303,13 @@ func (a *SaturationAnalyzer) noteFleetShape(namespace, modelID string, in, out f
 	if changed || memo.stable.IsZero() {
 		memo.stable = next
 	}
-	stableOut := memo.stable.AvgOutputTokens
+	stableOut = memo.stable.AvgOutputTokens
+	// The same hysteresis on the input axis: a bucket LABEL wants it, and the
+	// throughput key is built from both.
+	stableIn = memo.stable.AvgInputTokens
+	if stableIn <= 0 {
+		stableIn = in
+	}
 	if stableOut <= 0 {
 		stableOut = out
 	}
@@ -359,7 +365,7 @@ func (a *SaturationAnalyzer) noteFleetShape(namespace, modelID string, in, out f
 		}
 	}
 	if !changed {
-		return stableOut, !memo.changedAt.IsZero()
+		return stableOut, stableIn, !memo.changedAt.IsZero()
 	}
 	logger.Info("fleet-shape-change",
 		"modelID", modelID, "namespace", namespace,
@@ -368,7 +374,7 @@ func (a *SaturationAnalyzer) noteFleetShape(namespace, modelID string, in, out f
 		"arrivingPromptTokens", arriving, "arrivingRead", arrivingOK,
 		"hadShape", hadShape, "tolerance", shape.DefaultChangeTolerance,
 		"reason", "the shape the capacity figures were learned under is no longer the one arriving; the fleet is not released until the new shape has a reading of its own")
-	return stableOut, true
+	return stableOut, stableIn, true
 }
 
 // fleetHasMeasuredItself reports whether every variant with a replica has a

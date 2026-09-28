@@ -395,3 +395,107 @@ var _ = Describe("useDerived", func() {
 		Expect(useDerived(false, throughputReading{borrowed: true})).To(BeFalse())
 	})
 })
+
+var _ = Describe("throughputKey", func() {
+	a := NewSaturationAnalyzer(capacity.NewStore())
+	const (
+		model = "m"
+		ns    = "n"
+		v     = "decode-v"
+		accel = "H200"
+	)
+
+	It("separates two shapes that differ only in prompt length", func() {
+		// historyKey carries the OUTPUT bucket only. Without an input
+		// dimension an input-only shape change -- prompts 1000 -> 8000,
+		// generations unchanged -- left the key byte-identical, so the window
+		// recorded under the old prompts read back as an OWN, non-borrowed
+		// reading and useDerived handed it precedence over a derived figure
+		// that had priced the change correctly through KVreq = ILeff + OL/2.
+		short := a.throughputKey(model, ns, v, accel, 1, domain.RoleDecode, 1000, 6000, 5)
+		long := a.throughputKey(model, ns, v, accel, 1, domain.RoleDecode, 8000, 6000, 5)
+		Expect(short).NotTo(Equal(long))
+	})
+
+	It("keeps one key while only the prompt length wobbles inside a bucket", func() {
+		// The counterpart risk: a key that moved on every jitter would split
+		// one window in two. The caller passes the TRACKED input for this
+		// reason, and the bucket boundaries absorb the rest.
+		Expect(a.throughputKey(model, ns, v, accel, 1, domain.RoleDecode, 6100, 6000, 5)).
+			To(Equal(a.throughputKey(model, ns, v, accel, 1, domain.RoleDecode, 9000, 6000, 5)))
+	})
+
+	It("still separates two shapes that differ only in generation length", func() {
+		Expect(a.throughputKey(model, ns, v, accel, 1, domain.RoleDecode, 1000, 6000, 5)).
+			NotTo(Equal(a.throughputKey(model, ns, v, accel, 1, domain.RoleDecode, 1000, 1000, 5)))
+	})
+})
+
+var _ = Describe("the learned ITL baseline", func() {
+	const variant = "decode-v"
+
+	// A fleet spread across k, each replica reporting the ITL the traced model
+	// predicts for its own load, so an OLS fit recovers that model.
+	spread := func(n int) []domain.ReplicaMetrics {
+		rms := make([]domain.ReplicaMetrics, 0, n)
+		for i := 0; i < n; i++ {
+			k := 0.20 + 0.06*float64(i)
+			rm := makeReplicaMetrics(fmt.Sprintf("d%d", i), variant, 400_000, tracedKv, 10, 1000, 6000)
+			rm.Ready = true
+			rm.KvUsageInstant = k
+			rm.AvgITL = tracedModel.ITLAt(k)
+			rms = append(rms, rm)
+		}
+		return rms
+	}
+
+	// The same fleet balanced at one load: no spread, so the window is never
+	// Ready and only the one-parameter fit can answer.
+	flat := func() []domain.ReplicaMetrics {
+		const n = 6
+		const k = 0.35
+		rms := make([]domain.ReplicaMetrics, 0, n)
+		for i := 0; i < n; i++ {
+			rm := makeReplicaMetrics(fmt.Sprintf("f%d", i), variant, 400_000, tracedKv, 10, 1000, 6000)
+			rm.Ready = true
+			rm.KvUsageInstant = k
+			rm.AvgITL = tracedModel.ITLAt(k)
+			rms = append(rms, rm)
+		}
+		return rms
+	}
+
+	It("pins what this card measured, not a constant meant for another", func() {
+		a := NewSaturationAnalyzer(capacity.NewStore())
+		key := "ns|model|" + variant
+
+		// One spread cycle: OLS fits and its B is remembered.
+		ols := a.noteITL(key, spread(10), variant, a.now(), logr.Discard())
+		Expect(ols.IsZero()).To(BeFalse())
+		Expect(ols.B).To(BeNumerically("~", tracedModel.B, 5e-4),
+			"the fit has to recover the card's floor before it can be reused")
+
+		// The fleet balances. Two flat cycles clear DefaultMinSamples with no
+		// spread at all, so the fallback answers -- pinned to the learned B.
+		for i := 0; i < 2; i++ {
+			a.noteITL(key, flat(), variant, a.now(), logr.Discard())
+		}
+		pinned := a.noteITL(key, flat(), variant, a.now(), logr.Discard())
+		Expect(pinned.IsZero()).To(BeFalse())
+		Expect(pinned.B).To(BeNumerically("~", ols.B, 1e-9),
+			"the fallback pins the measured floor")
+		Expect(pinned.B).NotTo(BeNumerically("~", itl.DefaultBaselineSec, 1e-9),
+			"and not the global constant, which on this card is several times too high")
+	})
+
+	It("falls back to the constant only for a key that never fitted", func() {
+		a := NewSaturationAnalyzer(capacity.NewStore())
+		for i := 0; i < 2; i++ {
+			a.noteITL("fresh|key|"+variant, flat(), variant, a.now(), logr.Discard())
+		}
+		got := a.noteITL("fresh|key|"+variant, flat(), variant, a.now(), logr.Discard())
+		Expect(got.IsZero()).To(BeFalse())
+		Expect(got.B).To(BeNumerically("~", itl.DefaultBaselineSec, 1e-9),
+			"nothing has been measured for this key, so the bootstrap stands")
+	})
+})

@@ -79,7 +79,10 @@ var logContract = map[string][]string{
 	},
 	// Which tier answered, and with what line. A pinned-B fit is the weaker
 	// answer and the report has to be able to tell the two apart.
-	"itl-fit":                         {"variant", "tier", "a", "b", "held"},
+	// baselineLearned says whether B came from this card or from the
+	// bootstrap constant -- the difference between a measured floor and a
+	// guess, and the one that collapsed a fleet on 2026-09-27.
+	"itl-fit":                         {"variant", "tier", "a", "b", "held", "baselineLearned"},
 	"replica-capacity-skipped":        {"modelID", "namespace", "variant", "reason"},
 	"replica-capacity-store-fallback": {"modelID", "namespace", "variant", "reason"},
 	"variant-capacity-source":         {"modelID", "namespace", "variant", "reason"},

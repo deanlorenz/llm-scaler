@@ -93,6 +93,11 @@ type SaturationAnalyzer struct {
 	// fleet is serving NOW rather than waiting for it to saturate under it
 	// (mu_from_itl.go). Keyed like the throughput windows and swept with them.
 	itlWindows map[string]*itl.Window
+	// itlBaseline is the last B an OLS fit produced for each window key: the
+	// zero-contention decode step for THAT model on THAT accelerator. It is
+	// what the one-parameter fallback pins, so a fleet that has once been
+	// measured never falls back to a constant guessed for another card.
+	itlBaseline map[string]float64
 	// now is the clock the memory reads; tests set it.
 	now func() time.Time
 }
@@ -118,6 +123,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		decodeSaturatedAt:      make(map[string]time.Time),
 		fleetShape:             make(map[string]*shapeMemo),
 		itlWindows:             make(map[string]*itl.Window),
+		itlBaseline:            make(map[string]float64),
 		now:                    time.Now,
 	}
 }
@@ -257,7 +263,7 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 	fleetInput := servedPromptLength(input.ReplicaMetrics)
 	arriving, arrivingOK := arrivingPromptLength(input.SchedulerQueue)
 	holdFor, _ := satConfig.ShapeChangeHold(ShapeChangeHoldMax)
-	stableOutput, shapeChanged := a.noteFleetShape(input.Namespace, input.ModelID,
+	stableOutput, stableInput, shapeChanged := a.noteFleetShape(input.Namespace, input.ModelID,
 		fleetInput, fleetOutput, arriving, arrivingOK, holdFor, logger)
 
 	// One ITL(k) fit per variant per cycle, from readings its replicas report
@@ -297,7 +303,7 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 		role := rolesByVariant[rm.VariantName]
 		downstreamSaturated := decodeSaturated && canonicalRole(role) == domain.RolePrefill
 		rc := a.computeReplicaCapacity(rm, satConfig, input.ModelID, input.Namespace, gpuCount,
-			role, accelByVariant[rm.VariantName], stableOutput, fleetOutput,
+			role, accelByVariant[rm.VariantName], stableOutput, fleetOutput, stableInput,
 			deriveMu(itlModels[rm.VariantName], engineParamsFor(a, input.Namespace, input.ModelID, rm.VariantName),
 				rm.TotalKvCapacityTokens, shape.New(fleetInput, fleetOutput, rm.PrefixCacheHitRate),
 				pricingK(satConfig)),
@@ -462,6 +468,10 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// bucket label wants hysteresis; a physical quantity does not, and mu is
 	// divided by this one.
 	fleetOutput float64,
+	// shapeKeyInput is the TRACKED prompt length, hysteretic for the same
+	// reason shapeKeyOutput is: it buckets the throughput key, and a fleet
+	// whose average wobbles across a boundary must not split its window in two.
+	shapeKeyInput float64,
 	// derived is mu priced from this variant's fitted ITL model, which needs
 	// no saturated cycle and no bucket. It is preferred over the measured
 	// window when present (mu_from_itl.go).
@@ -545,8 +555,14 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// One bucket per role per cycle -- the fleet's, weighted by request rate
 	// so a fresh replica barely moves it (fleetOutputLength) -- gives every
 	// replica of the role the same shape, and the median a meaning.
-	throughputKey := a.historyKey(modelID, namespace, rm.VariantName, accelerator, gpuCount, role,
-		shapeKeyOutput, config.QueueLengthThreshold)
+	// The INPUT bucket as well as the output one. historyKey carries output
+	// only, so an input-only shape change left the key identical and the
+	// pre-change window read back as an own, non-borrowed reading -- which
+	// useDerived then preferred over a derived figure that had priced the
+	// change correctly. k2 keeps historyKey unchanged; this is the throughput
+	// key alone, as the shape-shift proposal scopes it.
+	throughputKey := a.throughputKey(modelID, namespace, rm.VariantName, accelerator, gpuCount, role,
+		shapeKeyInput, shapeKeyOutput, config.QueueLengthThreshold)
 	if k2Priority == capacity.K2SrcObserved && rm.Ready && !rm.FromWarmPool {
 		if mu, ok := saturatedCompletionRate(rm, role, fleetOutput); ok {
 			a.recordSaturatedThroughput(throughputKey, mu)
@@ -592,7 +608,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	throughputSamples := reading.samples
 	if useDerived(derived.ok, reading) {
 		saturatedThroughput = derived.rate
-		throughputBucket = "derived"
+		throughputBucket = derivedBucket
 		// Not the stale measured count, which describes a different figure
 		// entirely and only ever reached a log line as a confusing number.
 		throughputSamples = MinDerivedThroughputSamples
@@ -654,7 +670,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		SaturatedThroughput:         saturatedThroughput,
 		SaturatedThroughputSamples:  throughputSamples,
 		SaturatedThroughputBorrowed: reading.borrowed,
-		SaturatedThroughputDerived:  throughputBucket == "derived",
+		SaturatedThroughputDerived:  throughputBucket == derivedBucket,
 	}
 }
 
@@ -756,6 +772,11 @@ func (a *SaturationAnalyzer) computeReplicaCapacityFallback(
 // samples to order on. A BORROWED reading is the stale figure from a
 // neighbouring bucket that the derivation exists to replace, and a thin one is
 // not yet evidence, so both lose to derived.
+// derivedBucket is the sentinel the bucket label carries when mu was derived
+// from the ITL model rather than measured. classifyOutputLength can never
+// produce it, so it cannot be spoofed by a real output bucket.
+const derivedBucket = "derived"
+
 func useDerived(derivedOK bool, reading throughputReading) bool {
 	if !derivedOK {
 		return false
@@ -785,6 +806,21 @@ func useDerived(derivedOK bool, reading throughputReading) bool {
 // under the old one. Measured: a k2 of 2 learned under a low threshold kept
 // a variant at utilization 1.0 under a threshold of 100, where P1 could not
 // fire at all.
+// throughputKey is historyKey with the fleet's input bucket appended: a
+// saturated throughput is a property of a replica AND the (I, O) it was
+// measured under, so a reading recorded at one input length is not an own
+// reading for another.
+func (a *SaturationAnalyzer) throughputKey(
+	modelID, namespace, variantName, accelerator string,
+	gpuCount int,
+	role string,
+	avgInput, avgOutput float64,
+	queueThreshold float64,
+) string {
+	return a.historyKey(modelID, namespace, variantName, accelerator, gpuCount,
+		role, avgOutput, queueThreshold) + "|i" + classifyInputLength(avgInput)
+}
+
 func (a *SaturationAnalyzer) historyKey(
 	modelID, namespace, variantName, accelerator string,
 	gpuCount int,
