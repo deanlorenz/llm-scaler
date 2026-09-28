@@ -32,12 +32,12 @@ table is here so the evidence is easy to find and easy to check.
 | Claim | Measured | Where |
 | --- | --- | --- |
 | The usual signals mislead | At a constant 6 req/s with the request shape changed halfway: rate flat, no queue, KV at 5–15 %. All of it pointed at one replica when three were needed | [P/D path](well-lit-paths/pd-disaggregation/) |
-| A shape change is caught without a queue | Third replica ordered at +1344 s, in the same cycle the new shape's completion rate first came on record. No queue formed at any point; p95 TTFT settled at 0.04–0.07 s | [P/D path](well-lit-paths/pd-disaggregation/) |
+| A shape change is caught without a queue | Third replica ordered at +1344 s, in the same cycle the new shape's completion rate first came on record. No queue formed at any point; p95 TTFT settled at 0.08 s in the first phase and 0.04–0.07 s in the second | [P/D path](well-lit-paths/pd-disaggregation/) |
 | Getting that wrong has a price | A cold controller sized the same window from occupancy, for want of a completion rate, and paid 4.2 s p95 | [P/D path](well-lit-paths/pd-disaggregation/) |
 | The decision comes before the queue | Second replica ordered at +53 s, from the load, before the first tipped into preemption | [P/D path](well-lit-paths/pd-disaggregation/) |
 | Roles scale on their own bottleneck | Decode went 1 → 2 → 3; prefill was never ordered | [P/D path](well-lit-paths/pd-disaggregation/) |
 | The warm pool covers the rise | p95 TTFT per rise falls from 5.1–8.8 s to 0.11–0.83 s | [measured.md](well-lit-paths/warm-pool-bridge/measured.md) |
-| It is cheaper than the floor it replaces | 14 138 GPU-seconds against 16 080, a 12 % saving at the same latency | [measured.md](well-lit-paths/warm-pool-bridge/measured.md) |
+| It is cheaper than the floor it replaces | 14 138 GPU-seconds against 16 080, a 12 % saving, and within 50 ms of the floor's latency on three of the four rises | [measured.md](well-lit-paths/warm-pool-bridge/measured.md) |
 | And here is what it costs | 17 % more than holding nothing at all, which came in at 12 129 | [measured.md](well-lit-paths/warm-pool-bridge/measured.md) |
 | A warm Pod switches models quickly | 437 ms, against roughly 41 s for a cold start, on a Pod serving real gateway traffic | [fast model loading](proposals/fast-model-loading.md) |
 | Cold start is mostly not the weights | An 8B server takes ~41 s. GLM-5.2-FP8 takes 192 s, of which the weights are 40 s, and 463 s if the JIT cache is cold | [weight transfer](proposals/warm-pool-weight-transfer.md) |
@@ -152,7 +152,7 @@ nothing per-model or per-traffic-pattern to configure.
 In the run described above, the third replica was ordered at +1344 s, in the
 same cycle that the new shape's completion rate first came on record, and no
 queue formed at any point during the second phase. Once each phase settled, p95
-TTFT sat at 0.04–0.07 s. The cold controller, which had no completion rate on
+TTFT sat at 0.08 s in the first and 0.04–0.07 s in the second. The cold controller, which had no completion rate on
 record yet and fell back to sizing by occupancy, paid 4.2 s p95 over the same
 window. That number is what the ordinary signal is worth, measured. The whole
 pair was run twice, a day apart, and landed within a tenth of every figure.
@@ -189,8 +189,9 @@ The warm pool is the same idea expressed in hardware. One held accelerator
 insures several models, so the more models share it the better it looks, which
 is the opposite of how a per-model reserve behaves.
 
-On cost, the pool comes in 12 % below the floor it replaces, at the same
-latency. It is worth being blunt about the other comparison too: autoscaling on
+On cost, the pool comes in 12 % below the floor it replaces, and lands within
+50 ms of the floor's latency on three of the four rises. On the fourth it was
+831 ms against 127 ms, so the two are close but not identical. It is worth being blunt about the other comparison too: autoscaling on
 its own is the cheapest arm of the three. If you hold nothing today and can live
 with rises of several seconds, keep holding nothing. The pool is for people who
 would otherwise be holding a floor. See
