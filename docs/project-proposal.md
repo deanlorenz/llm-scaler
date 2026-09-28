@@ -317,6 +317,27 @@ its deadline, rather than on whether utilization is above a threshold, is not
 built. Named policy tiers approximate it coarsely. As far as we know nobody
 upstream has solved this either.
 
+**Scaling only helps if the router will use the new replica.** This is the
+biggest dependency in the whole design and it is not ours to fix. llm-d's
+shipped scheduling profile weights the prefix-cache scorer highest, at 3 against
+2 for queue depth and 2 for KV utilization, and its hashes chain from the first
+token. A replica that has cached a prompt's opening wins every later request
+that shares it regardless of its queue, and a replica that has cached nothing
+never receives a request, so it never caches anything, so it never starts
+winning. Measured on CoreWeave with a shared-prefix dataset: per model the
+busiest engine did 99.0 % and 98.7 % of prompt tokens across a 36-minute arm,
+while every replica the autoscaler added did 0.3–2.0 %.
+
+This matters for reading our own numbers. The warm-pool benchmark uses synthetic
+prompts that share no prefix, where an empty second replica picked up 49.4 % of
+the load in its first minute. That was chosen so a scale-up could be measured at
+all, and it is a favourable condition. On traffic with shared prefixes, which
+covers most system prompts, few-shot templates and chat history, a correct
+scaling decision can still produce almost no benefit until the routing side
+changes. We have written that up as a bug report against the inference
+scheduler; until it moves, an operator should check that added replicas are
+actually receiving traffic before concluding the autoscaler is at fault.
+
 **Maintenance pre-scaling and failure replacement.** Not built.
 
 **A shape the controller has never seen saturated** gets sized from occupancy
