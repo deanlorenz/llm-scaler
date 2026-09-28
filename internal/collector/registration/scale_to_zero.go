@@ -85,14 +85,17 @@ func CollectModelRequestCount(
 	namespace string,
 	retentionPeriod time.Duration,
 ) (float64, error) {
-	// Defaults to vLLM for backward compatibility: this queries
-	// vllm:request_success_total regardless of the model's actual engine. Engine-
-	// aware scale-to-zero is available via CollectModelRequestCountForEngine but is
-	// not yet threaded through the enforcer (see docs/proposals/sglang-backend.md
-	// Phase 2). Until it is, callers MUST NOT invoke scale-to-zero for non-vLLM
-	// models — the saturation engine gates this via scaleToZeroSupportedForEngines,
-	// since for SGLang this function would always return 0 (no vllm:* series) and
-	// the enforcer would incorrectly scale the model to zero.
+	// Assumes vLLM: this queries vllm:request_success_total whatever engine the
+	// model actually runs, so for SGLang it would return 0 and read as idle.
+	//
+	// The enforcer does not go through here. NewEngine (internal/engines/steadystate)
+	// builds its requestCountFunc from CollectModelRequestCountForEngine and passes
+	// the detected engine, so a parked SGLang model is measured on
+	// sglang:num_requests_total. The gate that used to refuse non-vLLM models,
+	// scaleToZeroSupportedForEngines, was removed with it.
+	//
+	// What is left here is the engine-less convenience form, and only the tests in
+	// this package still call it. Prefer CollectModelRequestCountForEngine.
 	return CollectModelRequestCountForEngine(ctx, metricsSource, inferenceengine.EngineVLLM, modelID, namespace, retentionPeriod)
 }
 
