@@ -155,6 +155,28 @@ BENCHMARK_MONITORING ?= true
 # Collect results by streaming a gzipped tar over exec instead of kubectl cp.
 # See the note on the benchmark-run recipe for why this defaults on.
 BENCHMARK_FAST_COLLECT ?= true
+# Where the replica sampler and the controller log tail write while a run is in
+# flight.
+#
+# Keyed by namespace AND by a per-invocation run id, so two runs can never share
+# a path. Sharing one was the whole original problem: two samplers appended to a
+# single array with no comma between them and the second overwrote the first
+# pidfile, leaving a sampler nothing could stop. Namespace alone was not enough --
+# two runs in the same namespace still collided, as did two sessions benchmarking
+# the same namespace on different clusters.
+#
+# `:=` is load-bearing. The id is expanded once when this file is read, so the
+# start, the stop and the copy step in one recipe all agree; a recursive `=`
+# would re-run `date` per use and the stop would look for a file that was never
+# written.
+BENCHMARK_CAPTURE_DIR ?= /tmp
+BENCHMARK_RUN_ID      := $(shell date -u +%Y%m%dT%H%M%S)-$(shell echo $$PPID)
+BENCHMARK_SAMPLES     ?= $(BENCHMARK_CAPTURE_DIR)/wva_replica_samples-$(BENCHMARK_NAMESPACE)-$(BENCHMARK_RUN_ID).json
+BENCHMARK_WVA_LOG     ?= $(BENCHMARK_CAPTURE_DIR)/wva_controller_tail-$(BENCHMARK_NAMESPACE)-$(BENCHMARK_RUN_ID).log
+# Passed to both captures so the cluster they watch is explicit rather than
+# inherited. Empty means "whatever KUBECONFIG says", which is the old behaviour.
+BENCHMARK_KUBE_CONTEXT ?=
+BENCHMARK_CAPTURE_CTX   = $(if $(BENCHMARK_KUBE_CONTEXT),--context "$(BENCHMARK_KUBE_CONTEXT)",)
 # Skip the chained smoketest after standup.
 #
 # For a MULTI-MODEL stack, which routes by PATH PREFIX. The smoketest's
@@ -2041,10 +2063,16 @@ benchmark-run: ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<name
 	@# namespace runs no launchers.
 	@bash hack/benchmark/fma_placement.sh verify $(BENCHMARK_NAMESPACE) \
 		"$(CURDIR)/hack/benchmark/scenarios/$(BENCHMARK_SPEC).yaml"
-	@rm -f /tmp/wva_replica_samples.json /tmp/wva_replica_samples.json.pid
-	@bash hack/benchmark/sample_replicas.sh start $(BENCHMARK_NAMESPACE) /tmp/wva_replica_samples.json || true
-	@rm -f /tmp/wva_controller_tail.log /tmp/wva_controller_tail.log.pid /tmp/wva_controller_tail.log.stderr
-	@bash hack/benchmark/tail_wva_logs.sh start $(BENCHMARK_NAMESPACE) /tmp/wva_controller_tail.log || true
+	@# No --force and nothing pre-removed. The paths carry a run id, so they are
+	@# new every invocation: a populated output here means something genuinely
+	@# unexpected and refusing is the right answer. Pre-removing was worse than
+	@# useless -- deleting the pidfile first is how a second run orphaned the
+	@# first run's sampler before being refused.
+	@echo "  capture: $(BENCHMARK_SAMPLES)"
+	@echo "  capture: $(BENCHMARK_WVA_LOG)"
+	@rm -f "$(BENCHMARK_SAMPLES).startfailed" "$(BENCHMARK_WVA_LOG).startfailed"
+	@bash hack/benchmark/sample_replicas.sh $(BENCHMARK_CAPTURE_CTX) start $(BENCHMARK_NAMESPACE) "$(BENCHMARK_SAMPLES)" || touch "$(BENCHMARK_SAMPLES).startfailed"
+	@bash hack/benchmark/tail_wva_logs.sh $(BENCHMARK_CAPTURE_CTX) start $(BENCHMARK_NAMESPACE) "$(BENCHMARK_WVA_LOG)" || touch "$(BENCHMARK_WVA_LOG).startfailed"
 	@# Collect the results tree as a gzipped tar over exec rather than with
 	@# kubectl cp. The harness ships both paths and defaults to cp, which on a
 	@# large tree either runs for hours or drops: its own source puts cp at
@@ -2067,18 +2095,20 @@ benchmark-run: ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<name
 	@# Stopped and filed even when the run above failed -- a run that errored in a
 	@# post-processing step still produced measurements worth reading, and every
 	@# FMA run so far has ended that way.
-	@bash hack/benchmark/sample_replicas.sh stop /tmp/wva_replica_samples.json || true
-	@bash hack/benchmark/tail_wva_logs.sh stop $(BENCHMARK_NAMESPACE) /tmp/wva_controller_tail.log || true
-	@LATEST=$$(ls -td $(BENCHMARK_WORKSPACE)/$${USER}-*/results/$(BENCHMARK_HARNESS)-*_* 2>/dev/null | head -1); \
-	if [ -n "$$LATEST" ] && [ -s /tmp/wva_replica_samples.json ]; then \
-		mkdir -p "$$LATEST/metrics/processed"; \
-		cp /tmp/wva_replica_samples.json "$$LATEST/metrics/processed/wva_replica_samples.json"; \
-		echo "Replica samples filed in $$LATEST/metrics/processed/wva_replica_samples.json"; \
-	fi; \
-	if [ -n "$$LATEST" ] && [ -s /tmp/wva_controller_tail.log ]; then \
-		cp /tmp/wva_controller_tail.log "$$LATEST/wva_controller.log"; \
-		echo "WVA controller log tail filed in $$LATEST/wva_controller.log"; \
-	fi
+	@# The status is recorded rather than discarded. A stop that could not end its
+	@# capture leaves the output unterminated, and the copy below would otherwise
+	@# announce it as this run's measurement four lines after saying it failed.
+	@rm -f "$(BENCHMARK_SAMPLES).stopfailed" "$(BENCHMARK_WVA_LOG).stopfailed"
+	@bash hack/benchmark/sample_replicas.sh $(BENCHMARK_CAPTURE_CTX) stop "$(BENCHMARK_SAMPLES)" $(BENCHMARK_NAMESPACE) || touch "$(BENCHMARK_SAMPLES).stopfailed"
+	@bash hack/benchmark/tail_wva_logs.sh $(BENCHMARK_CAPTURE_CTX) stop $(BENCHMARK_NAMESPACE) "$(BENCHMARK_WVA_LOG)" || touch "$(BENCHMARK_WVA_LOG).stopfailed"
+	@# The filing DECISION lives in a script, not here, because nothing could
+	@# test it in a recipe -- and two defects landed in this block while the
+	@# capture scripts beside it were covered by an executable check. It judges
+	@# each artefact on itself: present, non-empty, its own capture did not fail,
+	@# and for JSON that it parses. Gating on the stop's exit status does not
+	@# work, because every way this goes wrong exits 0.
+	@LATEST=$$(ls -td "$(BENCHMARK_WORKSPACE)"/$${USER}-*/results/$(BENCHMARK_HARNESS)-*_* 2>/dev/null | head -1); \
+	bash hack/benchmark/file_capture.sh "$$LATEST" "$(BENCHMARK_SAMPLES)" "$(BENCHMARK_WVA_LOG)"
 	@echo ""
 	@echo "========================================="
 	@echo "  Generating benchmark report..."
@@ -2459,6 +2489,10 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@bash -n deploy/enginecache.sh
 	@bash -n hack/benchmark/engine_cache_claim.sh
 	@bash -n hack/benchmark/engine_image.sh
+	@bash -n hack/benchmark/capture_lib.sh
+	@bash -n hack/benchmark/sample_replicas.sh
+	@bash -n hack/benchmark/tail_wva_logs.sh
+	@bash -n hack/benchmark/file_capture.sh
 	@for script in deploy/lib/*.sh; do bash -n "$$script"; done
 	@for script in deploy/*/install.sh; do if [ -f "$$script" ]; then bash -n "$$script"; fi; done
 	@for script in deploy/kind-emulator/*.sh; do if [ -f "$$script" ]; then bash -n "$$script"; fi; done
@@ -2475,6 +2509,11 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# preStop hooks pod-wide, or reporting an unreadable workload as healthy all
 	@# parse perfectly and are all wrong about a running cluster.
 	@bash hack/check-workload-gaps.sh
+	@echo "Checking the benchmark capture helpers..."
+	@# Executes them against a stub kubectl. A capture that replaces the run
+	@# already on disk, or that watches a cluster nobody named, parses perfectly
+	@# -- and both have cost data here.
+	@bash hack/check-benchmark-capture.sh
 	@echo "Checking model identification..."
 	@# Same shape as the check above, on the parsers that name the model every
 	@# ScaledObject is written for. `bash -n` sees none of it: a --served-model-name
