@@ -1,5 +1,7 @@
 package itl
 
+import "math"
+
 // The decode arithmetic the ITL model exists to support, in one place.
 //
 // A replica's KV cache holds k·C tokens at utilization k, and one in-flight
@@ -47,4 +49,49 @@ func TokenRate(m Model, k, kvMaxTokens, kvPerRequest float64) float64 {
 		return 0
 	}
 	return seqs / itlSec
+}
+
+// The GPS check: does the line describe the replica in front of it?
+//
+// A fitted ITL(k) predicts a generation-token rate at a replica's own
+// utilization, and the replica reports that rate directly
+// (vllm:generation_tokens_total). Comparing the two tests the line against a
+// signal never fitted into it, at whatever shape and load the replica is under.
+//
+// It is the ONLY check available on a derived mu. A mu priced for a shape no
+// replica has been saturated under has no measured throughput to be compared
+// with -- that is what "derived" means -- but the line it came from still has
+// to predict what the replica is doing right now, and when it does not, the
+// price is not evidence of anything.
+
+const (
+	// DefaultGPSMismatchThresholdPct is the largest percentage error between
+	// the predicted token rate and the observed one that still counts as the
+	// line describing the replica.
+	DefaultGPSMismatchThresholdPct = 15.0
+
+	// DefaultGPSMinKForVerification is the utilization below which the
+	// comparison is not attempted: at a low k only a handful of sequences are
+	// resident, and a percentage error on their token rate is mostly
+	// quantisation of the sequence count.
+	DefaultGPSMinKForVerification = 0.30
+)
+
+// GPSErrorPct returns the percentage error between the token rate m predicts at
+// k and the observedGPS a replica reports there.
+//
+// ok is false when the comparison cannot be made at all: no observed rate, a k
+// below DefaultGPSMinKForVerification, or a model that prices nothing at k.
+// That is NOT a mismatch. It is the absence of evidence in either direction,
+// and a caller that folds the two together either treats an unmeasured fleet
+// as a wrong one or a wrong line as a right one.
+func GPSErrorPct(m Model, k, kvMaxTokens, kvPerRequest, observedGPS float64) (float64, bool) {
+	if !(observedGPS > 0) || k < DefaultGPSMinKForVerification {
+		return 0, false
+	}
+	predicted := TokenRate(m, k, kvMaxTokens, kvPerRequest)
+	if !(predicted > 0) {
+		return 0, false
+	}
+	return math.Abs(predicted-observedGPS) / observedGPS * 100, true
 }

@@ -57,6 +57,80 @@ type derivedMu struct {
 	seqs     float64
 	tokenSec float64
 	ok       bool
+	// rejected records that this replica's observed generation-token rate
+	// contradicts the line rate was priced from. Set by the caller from
+	// lineRejected, not by deriveMu, which prices and does not judge.
+	rejected bool
+}
+
+// capacityTokensFor is the replica's whole KV capacity in tokens: the LIVE
+// reading first, the deployment flag only where there is no live reading.
+//
+// The precedence used to be the other way round, which inverted the capacity
+// store's own rule -- LoadFromScaleTarget refuses to overwrite a live record,
+// and folds TotalKvTokensOverride in only on the deployment-derived path.
+// SGLang's --max-total-tokens is parsed off the Deployment into EngineParams
+// for every record, live or not, so as an override it displaced the engine's
+// own reported capacity on every cycle of every SGLang variant.
+//
+// The direction of that error is the one that hurts: the engine clamps
+// --max-total-tokens to the memory it actually has, so a flag it could not
+// honour over-states C, which over-states the resident sequence count, which
+// over-states mu -- and an over-stated mu UNDER-orders replicas. A flag is a
+// fallback for a replica reporting nothing at all (a cold variant, or an
+// engine that emits no cache_config_info); it is not a measurement.
+func capacityTokensFor(params *capacity.EngineParams, liveTokens int64) float64 {
+	if liveTokens > 0 {
+		return float64(liveTokens)
+	}
+	if params != nil && params.TotalKvTokensOverride > 0 {
+		return float64(params.TotalKvTokensOverride)
+	}
+	return 0
+}
+
+// lineRejected reports whether this replica's observed generation-token rate
+// CONTRADICTS the fitted line, at the replica's own utilization and the shape
+// the fleet is serving.
+//
+// The proposal requires a derived mu to be verified against the observed rate
+// before it may order, and this is that check. It answers three states, not
+// two, and only one of them withholds ordering:
+//
+//   - verified: the line predicts the observed rate within
+//     itl.DefaultGPSMismatchThresholdPct. Order.
+//   - contradicted: it does not. Hold -- the price is still the best figure
+//     available and still prices the replica, but a line that cannot predict
+//     what a replica is doing now has not earned the right to grow the fleet.
+//   - no comparison possible: the replica reports no generation-token rate, or
+//     sits below itl.DefaultGPSMinKForVerification. Order.
+//
+// The third is the divergence from a literal reading of the proposal's "until
+// then it holds", and it is deliberate. Failing closed there would disable the
+// derivation on exactly the fleet it was built for: an over-provisioned fleet
+// after the shape lightens sits far below the verification k and cannot be
+// checked at all, and a fleet whose engine exports no generation-token counter
+// could never be checked on any cycle. Withholding on missing evidence would
+// silently restore the stale-window wait this whole path replaces, to protect
+// against an error -- ordering too MANY replicas -- that is not the one being
+// fixed, while the error being fixed is a TTFT tail from ordering too few.
+func lineRejected(model itl.Model, params *capacity.EngineParams,
+	rm domain.ReplicaMetrics, kvReq float64, logger logr.Logger) bool {
+	capacityTokens := capacityTokensFor(params, rm.TotalKvCapacityTokens)
+	errPct, ok := itl.GPSErrorPct(model, rm.KvUsageInstant, capacityTokens,
+		kvReq, rm.GenerationTokenRate)
+	if !ok || errPct <= itl.DefaultGPSMismatchThresholdPct {
+		return false
+	}
+	// At DEFAULT, like the two fit lines: it says a derived price is about to
+	// be held rather than ordered on, which is the difference between a run
+	// that scaled and one that did not.
+	logger.V(logging.DEFAULT).Info("itl-gps-mismatch",
+		"variant", rm.VariantName, "pod", rm.PodName,
+		"k", rm.KvUsageInstant, "observedGPS", rm.GenerationTokenRate,
+		"predictedGPS", itl.TokenRate(model, rm.KvUsageInstant, capacityTokens, kvReq),
+		"errPct", errPct, "thresholdPct", itl.DefaultGPSMismatchThresholdPct)
+	return true
 }
 
 // deriveMu prices one replica of this variant at saturation under the shape it
@@ -109,10 +183,7 @@ func deriveMu(model itl.Model, params *capacity.EngineParams,
 	if !(kPrice > 0) || kPrice > 1 {
 		return derivedMu{}
 	}
-	capacityTokens := float64(totalKvTokens)
-	if params != nil && params.TotalKvTokensOverride > 0 {
-		capacityTokens = float64(params.TotalKvTokensOverride)
-	}
+	capacityTokens := capacityTokensFor(params, totalKvTokens)
 	// The SHAPE's KVreq, not one re-derived here. shape.New computes
 	// ILeff = IL*(1 - prefixHitRate) and KVreq = ILeff + OL/2, so a fleet
 	// whose prompts are largely cache hits occupies far less than IL + OL/2

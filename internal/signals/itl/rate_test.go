@@ -77,3 +77,59 @@ var _ = Describe("TokenRate", func() {
 		Expect(TokenRate(nan, 0.85, 1_163_136, 4_000)).To(BeZero())
 	})
 })
+
+var _ = Describe("GPSErrorPct", func() {
+	// Run P's card and fit: ITL(k) = 34.4 ms*k + 0.61 ms, 1,163,136 KV tokens,
+	// prompts of 1000 generating 6000 so KVreq is 4000.
+	var (
+		m         = Model{A: 0.0344, B: 0.00061}
+		c         = 1_163_136.0
+		kv        = 4_000.0
+		k         = 0.5
+		predicted = TokenRate(m, 0.5, 1_163_136.0, 4_000.0)
+	)
+
+	It("reads zero error where the line predicts the observed rate", func() {
+		pct, ok := GPSErrorPct(m, k, c, kv, predicted)
+		Expect(ok).To(BeTrue())
+		Expect(pct).To(BeNumerically("~", 0, 1e-9))
+	})
+
+	It("scales the error against the OBSERVED rate", func() {
+		// The observed rate is the denominator: it is the measurement, and the
+		// prediction is the thing on trial.
+		pct, ok := GPSErrorPct(m, k, c, kv, predicted/2)
+		Expect(ok).To(BeTrue())
+		Expect(pct).To(BeNumerically("~", 100, 1e-6))
+
+		pct, ok = GPSErrorPct(m, k, c, kv, predicted*1.10)
+		Expect(ok).To(BeTrue())
+		Expect(pct).To(BeNumerically("~", 100.0/11.0, 1e-6),
+			"a prediction 10% under the observation is a 9.09% error against it")
+		Expect(pct).To(BeNumerically("<", DefaultGPSMismatchThresholdPct))
+	})
+
+	It("says it cannot compare rather than reporting a zero error", func() {
+		// The distinction the caller gates on. Folding "nothing to compare
+		// against" into "no error" would verify a line against no evidence;
+		// folding it into "mismatch" would condemn one for the same reason.
+		_, ok := GPSErrorPct(m, k, c, kv, 0)
+		Expect(ok).To(BeFalse(), "a fleet exporting no generation-token rate")
+
+		_, ok = GPSErrorPct(m, DefaultGPSMinKForVerification-0.01, c, kv, predicted)
+		Expect(ok).To(BeFalse(), "below the k where a percentage on the rate means anything")
+
+		_, ok = GPSErrorPct(Model{}, k, c, kv, predicted)
+		Expect(ok).To(BeFalse(), "no line to test")
+
+		_, ok = GPSErrorPct(m, k, 0, kv, predicted)
+		Expect(ok).To(BeFalse(), "no capacity, so no resident count and no prediction")
+	})
+
+	It("admits the k the analyzer prices at, and the one it verifies at", func() {
+		// The gate would be inert if its own minimum sat above the band the
+		// window keeps readings over.
+		Expect(DefaultGPSMinKForVerification).To(BeNumerically(">=", DefaultMinObservableK))
+		Expect(DefaultGPSMinKForVerification).To(BeNumerically("<", DefaultMaxObservableK))
+	})
+})

@@ -811,17 +811,15 @@ func checkVariantGPSMismatch(
 		if m.TotalKvCapacityTokens <= 0 {
 			continue
 		}
-		itlAtK := model.ITLAt(m.KvUsageInstant)
-		if itlAtK <= 0 {
-			continue
-		}
-		nDec := m.KvUsageInstant * float64(m.TotalKvCapacityTokens) / shape.KVreq
-		muDecModel := nDec / itlAtK
-		if muDecModel <= 0 {
-			continue
-		}
-		gpsErrPct := math.Abs(muDecModel-m.GenerationTokenRate) / m.GenerationTokenRate * 100
-		if gpsErrPct <= DefaultGPSMismatchThresholdPct {
+		// One arithmetic, in one place. itl.TokenRate is k*C/KVreq over
+		// ITL(k) -- the three lines this block used to spell out -- and
+		// itl.GPSErrorPct is the comparison against it. The saturation
+		// analyzer gates a derived mu on the same call.
+		muDecModel := itl.TokenRate(model, m.KvUsageInstant,
+			float64(m.TotalKvCapacityTokens), shape.KVreq)
+		gpsErrPct, haveGPS := itl.GPSErrorPct(model, m.KvUsageInstant,
+			float64(m.TotalKvCapacityTokens), shape.KVreq, m.GenerationTokenRate)
+		if !haveGPS || gpsErrPct <= DefaultGPSMismatchThresholdPct {
 			continue
 		}
 		mismatch = true
@@ -840,6 +838,12 @@ func checkVariantGPSMismatch(
 		if m.KvUsageInstant < itl.DefaultKSat-DefaultNearKSatMargin || m.AvgITL <= 0 {
 			continue
 		}
+		// Recomputed here, where they are read. Both are positive on this
+		// path: itl.GPSErrorPct only reports a percentage when the predicted
+		// rate is positive, and it is Sequences/ITL(k).
+		itlAtK := model.ITLAt(m.KvUsageInstant)
+		nDec := itl.Sequences(m.KvUsageInstant,
+			float64(m.TotalKvCapacityTokens), shape.KVreq)
 		itlResidual := math.Abs(m.AvgITL-itlAtK) / m.AvgITL
 		if itlResidual > DefaultNearKSatITLResidualThreshold {
 			ctrl.LoggerFrom(ctx).V(logging.DEBUG).Info("throughput analyzer: near-k_sat ITL residual high (model drift or bad data)",

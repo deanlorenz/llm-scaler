@@ -131,6 +131,25 @@ proposal must say which:
   window) and records nothing per shape -- so the per-shape trust flag is
   new state this proposal adds, not the existing check. That keeps the
   existing discipline and states it in the new terms.
+
+  **As built, that flag is three-valued, and only one value holds.** The
+  check (`itl.GPSErrorPct`, shared with the throughput analyzer, gated in
+  `saturation_v2.lineRejected`) answers *verified*, *contradicted*, or
+  *no comparison possible* -- the last where a replica exports no
+  `generation_tokens_total` rate at all, or sits below
+  `itl.DefaultGPSMinKForVerification`. Only a **contradicted** line withholds
+  ordering; the unverifiable case orders, and the floor's `mayOrder` reads it
+  that way (`SaturatedThroughputDerivedRejected`, hold reason
+  `gps-mismatch`).
+
+  Failing closed on the third state would have disabled the derivation on
+  exactly the fleet it is for. An over-provisioned fleet after the shape
+  lightens sits far below the verification `k` -- run S measured 0.163 -- and
+  an engine that exports no generation-token counter could never be checked on
+  any cycle; in both, withholding would silently restore the stale-window wait
+  this proposal exists to remove. It would do so to guard against ordering too
+  MANY replicas, while the failure being fixed is a TTFT tail from ordering too
+  few.
 - **`estimateCapacityFromParams` already carries a different `N(I, O)`**
   (`min(S, B·O/(I+O))`, the batched-tokens bound). It is a derived-capacity
   fallback for k2; it stays, and the two bounds are reconciled by taking

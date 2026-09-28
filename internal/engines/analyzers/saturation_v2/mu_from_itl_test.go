@@ -534,3 +534,142 @@ var _ = Describe("the throughput key and the borrow", func() {
 			"different prompts: not a neighbour, not an own reading")
 	})
 })
+
+var _ = Describe("capacityTokensFor", func() {
+	It("prefers the replica's live reading to the deployment flag", func() {
+		flagged := &capacity.EngineParams{TotalKvTokensOverride: 4 * tracedKv}
+		Expect(capacityTokensFor(flagged, tracedKv)).To(Equal(float64(tracedKv)),
+			"the engine's own reported capacity outranks a flag it may not have honoured")
+	})
+
+	It("falls back to the flag only where there is no live reading", func() {
+		flagged := &capacity.EngineParams{TotalKvTokensOverride: tracedKv}
+		Expect(capacityTokensFor(flagged, 0)).To(Equal(float64(tracedKv)),
+			"a cold variant, or an engine that emits no cache_config_info")
+		Expect(capacityTokensFor(nil, 0)).To(BeZero())
+		Expect(capacityTokensFor(&capacity.EngineParams{}, 0)).To(BeZero())
+	})
+
+	It("leaves a derived mu on the measured capacity", func() {
+		// The precedence was inverted, and SGLang parses --max-total-tokens
+		// into EngineParams on every record, live or not -- so the flag
+		// displaced the measured capacity on every cycle of every SGLang
+		// variant. The engine clamps that flag to the memory it actually has,
+		// so a flag it could not honour over-states C, which over-states the
+		// resident count, which over-states mu, which UNDER-orders replicas.
+		//
+		// 4x the capacity puts the resident count past max_num_seqs, so the
+		// two answers differ by more than rounding.
+		fleet := shape.New(1000, 6000, 0)
+		flagged := &capacity.EngineParams{MaxNumSeqs: 256, TotalKvTokensOverride: 4 * tracedKv}
+		got := deriveMu(runPModel, flagged, tracedKv, fleet, tracedK)
+		want := deriveMu(runPModel, tracedParams, tracedKv, fleet, tracedK)
+		Expect(got.ok).To(BeTrue())
+		Expect(got.rate).To(Equal(want.rate))
+		Expect(got.seqs).To(BeNumerically("<", 256),
+			"the live capacity holds fewer sequences than the cap; the flag would have hit it")
+	})
+})
+
+var _ = Describe("lineRejected", func() {
+	const variant = "decode-v"
+	const k = 0.5
+	fleet := shape.New(1000, 6000, 0)
+	predicted := itl.TokenRate(runPModel, k, float64(tracedKv), fleet.KVreq)
+
+	// One replica of run P's fleet, reporting a given generation-token rate at
+	// a given load.
+	at := func(atK, observedGPS float64) domain.ReplicaMetrics {
+		rm := makeReplicaMetrics("d0", variant, 400_000, tracedKv, 10, 1000, 6000)
+		rm.Ready = true
+		rm.KvUsageInstant = atK
+		rm.GenerationTokenRate = observedGPS
+		return rm
+	}
+	rejected := func(m itl.Model, rm domain.ReplicaMetrics) bool {
+		return lineRejected(m, tracedParams, rm, fleet.KVreq, logr.Discard())
+	}
+
+	It("accepts a line that predicts what the replica is doing", func() {
+		Expect(rejected(runPModel, at(k, predicted))).To(BeFalse())
+		Expect(rejected(runPModel, at(k, predicted*1.10))).To(BeFalse(),
+			"9% out is inside the threshold; the check is not a demand for the exact figure")
+	})
+
+	It("rejects one the replica's own rate contradicts", func() {
+		Expect(rejected(runPModel, at(k, predicted/2))).To(BeTrue(),
+			"a line mis-pricing the rate by 100% has not earned the right to order replicas")
+	})
+
+	It("does not reject what it could not check", func() {
+		// The deliberate divergence from a literal reading of the proposal.
+		// Failing closed here would disable the derivation on exactly the
+		// fleet it was built for: an over-provisioned one after the shape
+		// lightens sits below the verification k, and a fleet whose engine
+		// exports no generation-token counter could never be checked at all.
+		Expect(rejected(runPModel, at(k, 0))).To(BeFalse(),
+			"no observed rate is not a contradiction")
+		Expect(rejected(runPModel, at(itl.DefaultGPSMinKForVerification-0.01, predicted/2))).
+			To(BeFalse(), "below the verification k, a percentage on the rate is quantisation")
+		Expect(rejected(itl.Model{}, at(k, predicted))).To(BeFalse(),
+			"no line at all is not a contradicted one")
+	})
+})
+
+var _ = Describe("the one-parameter fallback's own floor", func() {
+	const variant = "decode-v"
+
+	// n replicas balanced at one load, each reporting the ITL the traced model
+	// predicts there: no spread, so the window is never Ready and only the
+	// one-parameter fit can answer.
+	flatN := func(n int) []domain.ReplicaMetrics {
+		const k = 0.35
+		rms := make([]domain.ReplicaMetrics, 0, n)
+		for i := 0; i < n; i++ {
+			rm := makeReplicaMetrics(fmt.Sprintf("f%d", i), variant, 400_000, tracedKv, 10, 1000, 6000)
+			rm.Ready = true
+			rm.KvUsageInstant = k
+			rm.AvgITL = tracedModel.ITLAt(k)
+			rms = append(rms, rm)
+		}
+		return rms
+	}
+
+	It("declines one reading short of DefaultMinSamples and answers on it", func() {
+		// The exact edge. FitPinnedB answers from a single pair, and a derived
+		// mu both orders replicas and settles a shape-change hold on sight, so
+		// where this floor sits is the whole of what stops one reading from one
+		// replica on one cycle doing both.
+		a := NewSaturationAnalyzer(capacity.NewStore())
+		key := "boundary|" + variant
+		short := a.noteITL(key, flatN(itl.DefaultMinSamples-1), variant, a.now(), logr.Discard())
+		Expect(short.IsZero()).To(BeTrue(), "one short of the floor is not an answer")
+
+		onMore := a.noteITL(key, flatN(1), variant, a.now(), logr.Discard())
+		Expect(onMore.IsZero()).To(BeFalse(), "the tenth reading is the one that makes it a fit")
+	})
+
+	It("catches a Ready window whose OLS line comes out inverted", func() {
+		// Ready() and Fit() can disagree: the window admits a fleet with
+		// enough samples and enough k-spread, and OLS over it still produces a
+		// slope ValidModel rejects -- a noisier replica at a low k, a quieter
+		// one high, and the line runs downhill. The fallthrough to the
+		// one-parameter fit is what keeps that cycle from going unpriced, and
+		// nothing asserted it.
+		a := NewSaturationAnalyzer(capacity.NewStore())
+		rms := make([]domain.ReplicaMetrics, 0, itl.DefaultMinSamples)
+		for i := 0; i < itl.DefaultMinSamples; i++ {
+			k := 0.20 + 0.06*float64(i)
+			rm := makeReplicaMetrics(fmt.Sprintf("i%d", i), variant, 400_000, tracedKv, 10, 1000, 6000)
+			rm.Ready = true
+			rm.KvUsageInstant = k
+			rm.AvgITL = 0.030 - 0.01*k
+			rms = append(rms, rm)
+		}
+		got := a.noteITL("inverted|"+variant, rms, variant, a.now(), logr.Discard())
+		Expect(got.IsZero()).To(BeFalse(), "an inverted OLS line must not leave the cycle unpriced")
+		Expect(got.A).To(BeNumerically(">", 0), "the pinned fit answers with a positive slope")
+		Expect(got.B).To(BeNumerically("~", itl.DefaultBaselineSec, 1e-9),
+			"and pins the bootstrap, because no OLS fit ever succeeded for this key")
+	})
+})

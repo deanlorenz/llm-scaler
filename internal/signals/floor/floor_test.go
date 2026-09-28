@@ -699,3 +699,46 @@ var _ = Describe("a derived mu, in the floor", func() {
 			"the derived path must not have loosened the measured one")
 	})
 })
+
+var _ = Describe("a derived mu whose line was contradicted", func() {
+	oneDecode := []domain.VariantCapacity{{
+		VariantName: "v", Role: domain.RoleDecode, ReplicaCount: 1, PerReplicaCapacity: float64(runK1),
+	}}
+
+	// What the saturation analyzer stamps on a replica priced from a derived
+	// figure: MinDerivedThroughputSamples, which is this package's
+	// MinThroughputSamplesToOrder. That equality is why the two clauses in
+	// Estimate are exclusive -- as one disjunction, the sample clause re-grants
+	// exactly what the rejection withholds.
+	derived := func(rejectedLine bool) []capacity.ReplicaCapacity {
+		return []capacity.ReplicaCapacity{{
+			VariantName: "v", SaturatedThroughput: runMu / 2,
+			SaturatedThroughputSamples:         MinThroughputSamplesToOrder,
+			SaturatedThroughputDerived:         true,
+			SaturatedThroughputDerivedRejected: rejectedLine,
+		}}
+	}
+
+	It("holds the fleet instead of growing it", func() {
+		f := Estimate(runLambda, derived(true), oneDecode, nil, BacklogDrainSeconds, 0.85, false, 0)
+		Expect(f.Terms[domain.RoleDecode].Held).To(BeTrue(),
+			"a line the replica's own token rate contradicts may hold, not order")
+		Expect(f.Terms[domain.RoleDecode].HeldWhy).To(Equal("gps-mismatch"))
+		Expect(f.ByRole[domain.RoleDecode]).To(BeNumerically("~", 0.85*float64(runK1), 1e-6),
+			"capped at the largest demand the engine turns into no order at all")
+	})
+
+	It("still prices the replica while holding it", func() {
+		// Held, not discarded: it is the best figure available for the shape
+		// arriving now, and a role with no reading at all gets no floor.
+		f := Estimate(runLambda, derived(true), oneDecode, nil, BacklogDrainSeconds, 0.85, false, 0)
+		Expect(f.Terms[domain.RoleDecode].Mu).To(Equal(runMu / 2))
+	})
+
+	It("leaves a line nothing contradicted free to order", func() {
+		f := Estimate(runLambda, derived(false), oneDecode, nil, BacklogDrainSeconds, 0.85, false, 0)
+		Expect(f.Terms[domain.RoleDecode].Held).To(BeFalse())
+		Expect(f.ByRole[domain.RoleDecode]).To(BeNumerically(">", 0.85*float64(runK1)),
+			"the gate is the rejection, not the derivation")
+	})
+})
