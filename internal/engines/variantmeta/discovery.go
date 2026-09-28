@@ -13,6 +13,7 @@ package variantmeta
 import (
 	"context"
 	"strconv"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -121,6 +122,7 @@ func Discover(
 			DesiredReplicas: desiredReplicas,
 			ReadyReplicas:   readyReplicas,
 			PendingReplicas: pendingReplicas,
+			PendingAges:     pendingAgeSeconds(ctx, k8sClient, va.Namespace, scaleTarget, time.Now()),
 			MinReplicas:     minReplicas,
 			MaxReplicas:     maxReplicas,
 		})
@@ -234,6 +236,79 @@ func observeAcceleratorFromNodes(
 		}
 	}
 	return found, found != ""
+}
+
+// pendingAgeSeconds is how long each of a variant's STARTING replicas has been
+// alive: the Pods that exist and are not Ready, aged from their own
+// CreationTimestamp.
+//
+// The demand floor credits a starting replica with the part of the drain window
+// it will be Ready for, which needs its age. PendingReplicas is only a count,
+// and a starting Pod reports no metrics, so this is the one place the ages can
+// be had -- discovery already lists a variant's Pods by the same labels for the
+// accelerator observation beside it.
+//
+// Pods being deleted are excluded: their capacity is going away, not arriving.
+// An unreadable listing yields nil, which the floor reads as "no credit
+// available" and falls back to the count-based estimate rather than to zero.
+func pendingAgeSeconds(
+	ctx context.Context,
+	k8sClient client.Client,
+	namespace string,
+	scaleTarget scaletarget.ScaleTargetAccessor,
+	now time.Time,
+) []float64 {
+	// Both are optional on this path in a way observeAcceleratorFromNodes never
+	// had to consider: that one is called behind a config check, this one runs
+	// on every variant of every cycle, so a caller without a client -- which the
+	// discovery suite is -- must get nil rather than a panic.
+	if k8sClient == nil || scaleTarget == nil {
+		return nil
+	}
+	podTemplate := scaleTarget.GetLeaderPodTemplateSpec()
+	if podTemplate == nil || len(podTemplate.Labels) == 0 {
+		return nil
+	}
+	var pods corev1.PodList
+	if err := k8sClient.List(ctx, &pods,
+		client.InNamespace(namespace),
+		client.MatchingLabels(podTemplate.Labels),
+	); err != nil {
+		ctrl.LoggerFrom(ctx).V(logging.DEBUG).Info(
+			"Could not list a variant's pods to age its starting replicas",
+			"namespace", namespace, "error", err.Error())
+		return nil
+	}
+	var ages []float64
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if pod.DeletionTimestamp != nil || podReadyNow(pod) {
+			continue
+		}
+		if pod.CreationTimestamp.IsZero() {
+			continue
+		}
+		age := now.Sub(pod.CreationTimestamp.Time).Seconds()
+		if age < 0 {
+			// Clock skew between the API server and this process. Unknown
+			// rather than zero: zero would claim the replica has just been
+			// ordered and credit it with the whole window.
+			continue
+		}
+		ages = append(ages, age)
+	}
+	return ages
+}
+
+// podReadyNow reports the Pod's Ready condition, which is what decides whether
+// anything routes to it -- the phase alone stays Running while probes fail.
+func podReadyNow(p *corev1.Pod) bool {
+	for _, c := range p.Status.Conditions {
+		if c.Type == corev1.PodReady {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
 }
 
 func resolveScaleTarget(

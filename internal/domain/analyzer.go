@@ -160,6 +160,14 @@ type VariantCapacity struct {
 	VariantName string
 	Role        string // "prefill", "decode", "both", "" (empty = non-disaggregated)
 
+	// PendingAges is how long each starting replica of this variant has been
+	// alive, in seconds -- one entry per Pod that exists and is not Ready. The
+	// demand floor credits each with the part of its drain window it will be
+	// Ready for, which PendingReplicas alone cannot say. Nil when the Pod
+	// listing could not be read, which leaves the floor on a count-based
+	// estimate of the same credit.
+	PendingAges []float64
+
 	// ReplicaCount and PendingReplicas are in SCALE-TARGET units (pods, or LWS
 	// groups) — the same units as VariantMetadata.CurrentReplicas and as the
 	// replica targets the optimizer produces. A pod running data parallelism

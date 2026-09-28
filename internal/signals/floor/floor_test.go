@@ -825,3 +825,56 @@ var _ = Describe("a standing queue orders what it justifies", func() {
 		})
 	})
 })
+
+// The landing projection, and the in-flight credit that keeps it from ratcheting.
+var _ = Describe("the backlog a role is priced for", func() {
+	const T = 70.0 // run T's measured start, near enough
+
+	It("adds what arrives while a replica starts", func() {
+		// 6 req/s over a 70 s start is 420 requests, against one replica
+		// draining 70. The queue the fleet meets is not the queue it sees.
+		got := backlogAtLanding(191, 6, 1.0, T, 1, 0, nil)
+		Expect(got).To(BeNumerically("~", 191+420-70, 1e-6))
+	})
+
+	It("credits a starting replica with the window it will be Ready for", func() {
+		// One replica 60 s into a 70 s start drains for 60 s of the window; one
+		// ordered a second ago drains for 1. The count alone cannot say that.
+		got := backlogAtLanding(191, 6, 1.0, T, 1, 2, []float64{60, 1})
+		Expect(got).To(BeNumerically("~", 191+420-(70+61), 1e-6))
+	})
+
+	It("falls back to half the window when the ages are unavailable", func() {
+		// Right only if the ages happen to be uniform, which is why it is the
+		// fallback and not the rule -- the step orders in batches.
+		got := backlogAtLanding(191, 6, 1.0, T, 1, 2, nil)
+		Expect(got).To(BeNumerically("~", 191+420-(70+70), 1e-6))
+	})
+
+	It("gives a long-starting replica the window and no more", func() {
+		// Starting longer than a start takes means it is about to be Ready or
+		// is not coming; neither earns more than the window.
+		got := backlogAtLanding(0, 0, 1.0, T, 0, 1, []float64{5000})
+		Expect(got).To(BeZero())
+		Expect(startingCredit(T, 1, []float64{5000})).To(Equal(T))
+	})
+
+	It("can price BELOW the standing queue", func() {
+		// A fleet that will have drained the queue before new capacity lands
+		// needs no capacity for it.
+		Expect(backlogAtLanding(100, 1, 1.0, T, 5, 0, nil)).To(BeZero())
+	})
+
+	It("leaves the observed backlog alone when nothing is known", func() {
+		// No start time, or no service rate: the behaviour before this existed,
+		// which is what every pre-existing spec asserts by passing a nil map.
+		Expect(backlogAtLanding(191, 6, 1.0, 0, 1, 0, nil)).To(Equal(191.0))
+		Expect(backlogAtLanding(191, 6, 0, T, 1, 0, nil)).To(Equal(191.0))
+	})
+
+	It("ignores an age that is not a number of seconds", func() {
+		// Clock skew is dropped upstream, but a zero or negative here must not
+		// be read as a replica that contributes nothing AND counted anyway.
+		Expect(startingCredit(T, 2, []float64{-5, 30})).To(Equal(30.0))
+	})
+})

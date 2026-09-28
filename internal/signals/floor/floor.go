@@ -173,12 +173,14 @@ func Estimate(
 	// rate by a number of replicas and a duration, so it needs the count.
 	readyByRole := make(map[string]int, len(variants))
 	pendingByRole := make(map[string]int, len(variants))
+	pendingAgesByRole := make(map[string][]float64, len(variants))
 	for _, vc := range variants {
 		perReplica[vc.VariantName] = vc.PerReplicaCapacity
 		role := canonicalRole(vc.Role)
 		roleOf[vc.VariantName] = role
 		readyByRole[role] += vc.ReplicaCount
 		pendingByRole[role] += vc.PendingReplicas
+		pendingAgesByRole[role] = append(pendingAgesByRole[role], vc.PendingAges...)
 	}
 	// The per-role anticipated supply the hold cap is measured against, from
 	// the one place that defines it: the engine reads the same figure through
@@ -265,7 +267,7 @@ func Estimate(
 		if drainSeconds > 0 {
 			b = max(backlog[role], 0)
 			b = backlogAtLanding(b, lambda, mu, startSeconds[role],
-				readyByRole[role], pendingByRole[role])
+				readyByRole[role], pendingByRole[role], pendingAgesByRole[role])
 			rate += b / drainSeconds
 		}
 		floor := rate * cost
@@ -422,17 +424,53 @@ func Estimate(
 // will have drained the queue before new capacity lands needs no capacity for it.
 // Returns the observed backlog unchanged when no start time is known or mu is
 // unusable, which is the behaviour before this existed.
-func backlogAtLanding(backlog, lambda, mu, startSeconds float64, ready, pending int) float64 {
+func backlogAtLanding(backlog, lambda, mu, startSeconds float64, ready, pending int,
+	pendingAges []float64) float64 {
 	if !(startSeconds > 0) || !(mu > 0) {
 		return backlog
 	}
 	arrived := lambda * startSeconds
-	served := mu * (float64(ready)*startSeconds + float64(pending)*startSeconds/2)
+	served := mu * (float64(ready)*startSeconds + startingCredit(startSeconds, pending, pendingAges))
 	projected := backlog + arrived - served
 	if !(projected > 0) {
 		return 0
 	}
 	return projected
+}
+
+// startingCredit is how many replica-seconds of draining the STARTING replicas
+// contribute within the window, in seconds of one replica's service.
+//
+// With ages, exactly: a replica that is `age` into a start of `startSeconds` has
+// `startSeconds - age` left, and is therefore Ready for the remainder of the
+// window -- so it drains for `startSeconds - (startSeconds - age)` = `age`
+// seconds of it. One ordered a second ago contributes a second; one 60 s into a
+// 70 s start contributes 60.
+//
+// Without them, the count times half the window: a replica ordered at some point
+// in the last `startSeconds` is on average half way through. That is right only
+// when the ages are spread uniformly, and the queue-justified step orders in
+// batches, which is exactly when they are not -- so the ages are used wherever
+// they can be had, and this is the fallback rather than the rule.
+//
+// An age beyond the window contributes the whole window and no more: a replica
+// that has been starting longer than a start takes is either about to be Ready
+// or is not coming, and neither earns extra credit.
+func startingCredit(startSeconds float64, pending int, ages []float64) float64 {
+	if len(ages) == 0 {
+		if pending <= 0 {
+			return 0
+		}
+		return float64(pending) * startSeconds / 2
+	}
+	var credit float64
+	for _, age := range ages {
+		if !(age > 0) {
+			continue
+		}
+		credit += min(age, startSeconds)
+	}
+	return credit
 }
 
 // queueJustifiedReplicas is how many replicas a standing queue of q requests is
