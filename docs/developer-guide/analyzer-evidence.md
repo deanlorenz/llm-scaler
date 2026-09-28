@@ -515,6 +515,61 @@ So, before attributing a benchmark result to anything:
   - A tag that has been reused or hand-incremented (`v1`..`v7`) carries no
     ordering guarantee relative to the branch at all.
 
+### Judge the ramp on the client's TTFT, not the engine's
+
+*2026-09-28, runs U through Z on the 1k6000 -> 8k1000 trace.*
+
+`vllm:time_to_first_token_seconds` starts when a request reaches the engine.
+Requests held in the router's flow-control queue have not reached one, so they
+cost nothing on it. On a fleet where the router withholds a queue for ninety
+seconds -- which is what the sections above are about -- the engine-side metric
+is blind to precisely the interval under investigation.
+
+It is worse than blind, because it inverts. Run Z's engine-side p95 by 30 s
+bucket:
+
+| time | TTFT p95 | ready | router queue |
+|---|---|---|---|
+| 20:06:00 | 0.23 s | 1 | 266 |
+| 20:06:30 | 33.86 s | 2 | 340 |
+| 20:07:00 | 61.74 s | 4 | 513 |
+| 20:07:30 | **70.22 s** | 5 | **705** |
+| 20:08:00 | 13.21 s | 9 | 0 |
+| 20:08:30 | 0.23 s | 9 | 0 |
+
+TTFT is LOWEST when the fleet is smallest and the queue deepest, and peaks as
+replicas turn Ready. It is not measuring the shortage; it is measuring the
+discharge -- the router releasing a queue into however many engines happen to
+be up, where it becomes engine-queue wait and finally becomes visible.
+
+The percentile then compounds it. Over a twenty-minute phase only four samples
+exceed 0.25 s, so a p95 across about forty-four samples lands on the
+third-highest, which is inside the four-sample spike. The figure reports where
+the sampling grid fell relative to the fleet arriving. Read that way, runs X, Y
+and Z scored 44.9 s, 60.5 s and 61.7 s -- differences that were attributed to
+code and are one measurement.
+
+The harness already publishes the right figure. `analysis/summary.txt` carries
+guidellm's own per-request percentiles, measured at the client, which include
+the router wait:
+
+    run Z   request latency  median  19.2 s   p95 194.6 s
+            TTFT             median 103 ms    p95  34.2 s
+            ITL              median 3.7 ms    p95  25.2 ms
+
+So: compare runs on the harness summary, and treat `vllm:time_to_first_token_*`
+as an engine diagnostic rather than a verdict. Two practical conditions follow,
+both of which bit during these runs:
+
+  - **The harness has to finish.** Four of the six runs hung before writing
+    `analysis/` and `metrics/graphs/`, leaving only raw scrapes. A run that
+    hangs produces no client-side data at all.
+  - **Never run a comparison arm with the EPP at `--v=4`.** Run V did, pinning
+    the router at 4.6 cores, and its client TTFT median came out at 244 s
+    against run Z's 0.103 s. That is the logging, not the fleet, and it makes
+    the run unusable for anything but reading the flow controller's own
+    decisions.
+
 ## How to add to this file
 
 One section per decision, with the date, the run identifier and the numbers
