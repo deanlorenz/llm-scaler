@@ -3,6 +3,7 @@ package saturation_v2
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -497,5 +498,39 @@ var _ = Describe("the learned ITL baseline", func() {
 		Expect(got.IsZero()).To(BeFalse())
 		Expect(got.B).To(BeNumerically("~", itl.DefaultBaselineSec, 1e-9),
 			"nothing has been measured for this key, so the bootstrap stands")
+	})
+})
+
+var _ = Describe("the throughput key and the borrow", func() {
+	a := NewSaturationAnalyzer(capacity.NewStore())
+	key := func(in, out float64) string {
+		return a.throughputKey("m", "ns", "decode-v", "H200", 1, domain.RoleDecode, in, out, 5)
+	}
+
+	It("parses to the OUTPUT bucket, so the neighbour borrow still works", func() {
+		// Appending the input bucket to the end of the key broke this:
+		// splitHistoryKey reads the second-to-last field, so it returned the
+		// queue threshold as the bucket, slices.Index found nothing in
+		// outputBuckets, and nearestSaturatedThroughput returned nothing for
+		// every key. The borrow died silently and reading.borrowed could never
+		// be true again.
+		k := key(1000, 6000)
+		_, bucket, suffix, ok := splitHistoryKey(k)
+		Expect(ok).To(BeTrue())
+		Expect(bucket).To(Equal(classifyOutputLength(6000)))
+		Expect(suffix).To(Equal("|q5"))
+		Expect(slices.Index(outputBuckets, bucket)).To(BeNumerically(">=", 0),
+			"the bucket has to be one the neighbour walk can index")
+	})
+
+	It("borrows across output buckets but never across input ones", func() {
+		// A reading recorded for one shape is borrowable for a different
+		// GENERATION length on the same prompts, and is a different key
+		// entirely for different prompts.
+		prefixOf := func(k string) string { p, _, _, _ := splitHistoryKey(k); return p }
+		Expect(prefixOf(key(1000, 6000))).To(Equal(prefixOf(key(1000, 1000))),
+			"same prompts: one borrow neighbourhood")
+		Expect(prefixOf(key(1000, 6000))).NotTo(Equal(prefixOf(key(8000, 6000))),
+			"different prompts: not a neighbour, not an own reading")
 	})
 })

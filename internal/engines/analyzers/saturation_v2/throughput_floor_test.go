@@ -392,7 +392,10 @@ var _ = Describe("the throughput floor, through Analyze", func() {
 		// from run to run.
 		var mu float64
 		for key, window := range analyzer.saturatedThroughput {
-			if strings.Contains(key, "|"+domain.RoleDecode+"|xxlong|") {
+			// Parsed, not substring-matched: the throughput key carries an
+			// input bucket between the role and the output bucket.
+			_, bucket, _, parsed := splitHistoryKey(key)
+			if parsed && bucket == "xxlong" && strings.Contains(key, "|"+domain.RoleDecode+"|") {
 				mu = window.Median()
 			}
 		}

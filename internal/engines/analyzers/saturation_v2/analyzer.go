@@ -172,6 +172,11 @@ func (a *SaturationAnalyzer) EvictStaleHistory(timeout time.Duration) int {
 		w.Prune(now)
 		if w.Len() == 0 {
 			delete(a.itlWindows, key)
+			// The learned baseline dies with the window that produced it.
+			// Kept, it would grow one float per variant/accelerator ever seen
+			// and, worse, pin a hardware floor measured before a redeploy onto
+			// different hardware into every later fit for that key.
+			delete(a.itlBaseline, key)
 		}
 	}
 	for key, ra := range a.saturatedThroughput {
@@ -817,8 +822,18 @@ func (a *SaturationAnalyzer) throughputKey(
 	avgInput, avgOutput float64,
 	queueThreshold float64,
 ) string {
-	return a.historyKey(modelID, namespace, variantName, accelerator, gpuCount,
-		role, avgOutput, queueThreshold) + "|i" + classifyInputLength(avgInput)
+	// Composed, not appended. splitHistoryKey reads the output bucket as the
+	// second-to-last field and the queue threshold as the last; an input
+	// bucket tacked on the end made it read "q5" as the output bucket, which
+	// is in no bucket table, so nearestSaturatedThroughput returned nothing
+	// for every key and the neighbour-bucket borrow silently died. Putting the
+	// input bucket ahead of the output one keeps that parse intact, and makes
+	// a borrow walk output buckets WITHIN an input bucket -- which is what
+	// borrowing should mean anyway.
+	return fmt.Sprintf("%s|%s|%d|%s|i%s|%s|q%g",
+		modelID, a.stableAccelerator(namespace, variantName, accelerator),
+		gpuCount, canonicalRole(role), classifyInputLength(avgInput),
+		classifyOutputLength(avgOutput), queueThreshold)
 }
 
 func (a *SaturationAnalyzer) historyKey(

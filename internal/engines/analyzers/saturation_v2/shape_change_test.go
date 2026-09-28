@@ -87,7 +87,7 @@ var _ = Describe("the fleet-shape change, through Analyze", func() {
 
 	// The hold's state, read the way the production path reads it.
 	outstanding := func() bool {
-		_, held := analyzer.fleetShapeState("test-ns", "test-model")
+		_, _, held := analyzer.fleetShapeState("test-ns", "test-model")
 		return held
 	}
 	states := func(decodeN int) []domain.VariantReplicaState {

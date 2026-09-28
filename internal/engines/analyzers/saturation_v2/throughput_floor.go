@@ -212,6 +212,11 @@ func (a *SaturationAnalyzer) nearestSaturatedThroughput(key string) (float64, st
 // model ID may itself contain "|"-free "/" and other characters but never
 // "|", so counting from the right is safe: the bucket is the second-to-last
 // field.
+// splitHistoryKey locates the OUTPUT bucket as the second-to-last |-field
+// and the queue threshold as the last. A throughput key carries an input
+// bucket too, ahead of the output one, so it lands in prefix and a neighbour
+// key re-formed from prefix+bucket+suffix keeps it -- a borrow crosses output
+// buckets, never input ones.
 func splitHistoryKey(key string) (prefix, bucket, suffix string, ok bool) {
 	last := strings.LastIndexByte(key, '|')
 	if last < 0 {

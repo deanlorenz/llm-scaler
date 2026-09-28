@@ -221,11 +221,19 @@ func saturatedCompletionRate(rm domain.ReplicaMetrics, role string, fleetOutput 
 func (a *SaturationAnalyzer) noteFleetShape(namespace, modelID string, in, out float64,
 	arriving float64, arrivingOK bool, holdFor time.Duration, logger logr.Logger) (stableOut, stableIn float64, outstanding bool) {
 	if !(in > 0) && !(out > 0) && !arrivingOK {
-		stable, outstanding := a.fleetShapeState(namespace, modelID)
+		// Both axes carry forward. Returning 0 for the input made
+		// classifyInputLength read "short" on any cycle with no completions,
+		// so the throughput key flipped input bucket on a scrape gap rather
+		// than on a shape change -- the asymmetry the output axis already
+		// avoids two lines up.
+		stable, stableIn, outstanding := a.fleetShapeState(namespace, modelID)
 		if stable <= 0 {
 			stable = out
 		}
-		return stable, 0, outstanding
+		if stableIn <= 0 {
+			stableIn = in
+		}
+		return stable, stableIn, outstanding
 	}
 	key := namespace + "|" + modelID
 
@@ -455,14 +463,14 @@ func (a *SaturationAnalyzer) settleFleetShape(namespace, modelID string, ownRead
 
 // fleetShapeState reports the stable output length the keys are built from
 // and whether a change is outstanding, without observing anything.
-func (a *SaturationAnalyzer) fleetShapeState(namespace, modelID string) (float64, bool) {
+func (a *SaturationAnalyzer) fleetShapeState(namespace, modelID string) (out, in float64, outstanding bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	memo, ok := a.fleetShape[namespace+"|"+modelID]
 	if !ok {
-		return 0, false
+		return 0, 0, false
 	}
-	return memo.stable.AvgOutputTokens, !memo.changedAt.IsZero()
+	return memo.stable.AvgOutputTokens, memo.stable.AvgInputTokens, !memo.changedAt.IsZero()
 }
 
 // holdFleetFloor raises every role's demand to the bottom of the band where

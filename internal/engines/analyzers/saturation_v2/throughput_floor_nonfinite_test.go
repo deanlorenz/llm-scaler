@@ -72,17 +72,22 @@ var _ = Describe("recordSaturatedThroughput with a non-finite rate", func() {
 	})
 })
 
-// tkey resolves a throughput-window key written WITHOUT its input-bucket
-// suffix. The throughput key carries the fleet's input bucket so that a
-// reading taken at one prompt length is not an own reading for another; the
-// specs below name the part they care about and let this find the rest.
-func tkey(a *SaturationAnalyzer, prefix string) string {
+// tkey resolves a throughput-window key written in the OLD shape
+// (model|accel|gpus|role|outBucket|qN) to the real one, which carries an input
+// bucket between the role and the output bucket. The specs name the parts they
+// care about; the input bucket is a fixture detail they do not.
+func tkey(a *SaturationAnalyzer, written string) string {
+	wPrefix, wBucket, wSuffix, ok := splitHistoryKey(written)
+	if !ok {
+		return written
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for k := range a.saturatedThroughput {
-		if strings.HasPrefix(k, prefix+"|i") {
+		p, b, sfx, ok := splitHistoryKey(k)
+		if ok && b == wBucket && sfx == wSuffix && strings.HasPrefix(p, wPrefix) {
 			return k
 		}
 	}
-	return prefix
+	return written
 }
