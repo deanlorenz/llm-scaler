@@ -100,7 +100,7 @@ const (
 	ScalerAddressKey = "scalerAddress"
 
 	// ReplicaStartSecondsKey seeds how long one replica of this variant takes to
-	// become Ready, for a variant this controller has not yet watched one start.
+	// become Ready. NOT READ YET -- see the note at the end of this comment.
 	//
 	// The demand floor projects the arriving queue forward over that time, so
 	// the figure decides how much backlog a scale-up is sized for. A 0.6B model
@@ -111,6 +111,14 @@ const (
 	// It is a SEED, not a setting: the first replica observed starting replaces
 	// it with a measurement, and wva_replica_start_seconds_estimate carries a
 	// source label saying which is in force.
+	//
+	// Nothing reads it yet, deliberately. The only path from here to the
+	// analyzer runs through the synthetic VariantAutoscaling that
+	// utils.VariantsFromRegistry builds, and that CR is being removed -- adding
+	// a spec field to it would be dead on arrival. The key is declared now
+	// because it is the operator-facing contract the proposal commits to, and it
+	// is wired when the KEDA-driven path replaces that hop. Until then the
+	// analyzer uses its own default, replaced by the first measurement.
 	ReplicaStartSecondsKey = "replicaStartSeconds"
 )
 

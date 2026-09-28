@@ -946,6 +946,19 @@ func SetReplicaStartSecondsEstimate(namespace, variantName string, seconds float
 	labels := variantSeriesLabels(namespace, variantName)
 	labels[constants.LabelStartSource] = source
 	replicaStartSecondsEstimate.With(labels).Set(seconds)
+
+	// The other source child is DELETED, not left behind. Both values appear for
+	// a variant over its life -- seed until the first replica starts, measured
+	// after -- and a child is scraped until it is removed, so keeping the stale
+	// one makes sum by (variant_name) return seed + measured. A panel or alert
+	// written without a source selector would read a variant with a 300 s
+	// measured start as 370.
+	stale := variantSeriesLabels(namespace, variantName)
+	stale[constants.LabelStartSource] = "measured"
+	if measured {
+		stale[constants.LabelStartSource] = "seed"
+	}
+	replicaStartSecondsEstimate.Delete(stale)
 }
 
 // ObserveWakeDuration records how long a wake-from-zero took.

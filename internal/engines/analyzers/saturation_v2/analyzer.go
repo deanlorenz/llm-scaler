@@ -110,6 +110,10 @@ type SaturationAnalyzer struct {
 	// without this the estimate would converge on whatever the longest-lived
 	// replica measured and the histogram would count cycles rather than starts.
 	startSeenPods map[string]time.Time
+	// startOutliers counts consecutive start-time samples rejected as
+	// implausible for a variant, so a genuine change of hardware is eventually
+	// admitted rather than rejected forever against a stale estimate.
+	startOutliers map[string]int
 	// now is the clock the memory reads; tests set it.
 	now func() time.Time
 }
@@ -138,6 +142,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		itlBaseline:            make(map[string]float64),
 		startSeconds:           make(map[string]float64),
 		startSeenPods:          make(map[string]time.Time),
+		startOutliers:          make(map[string]int),
 		now:                    time.Now,
 	}
 }
@@ -195,6 +200,7 @@ func (a *SaturationAnalyzer) EvictStaleHistory(timeout time.Duration) int {
 			// before a redeploy onto different hardware would otherwise size
 			// every later projection for that key.
 			delete(a.startSeconds, key)
+			delete(a.startOutliers, key)
 		}
 	}
 	a.evictStartSeenPods(now, timeout)
@@ -302,6 +308,19 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 		// same arithmetic would read three orders of magnitude low, which is
 		// why saturatedCompletionRate special-cases it on the measured path
 		// too (shape_change.go).
+		// How long this variant's replicas take to become Ready, folded in from
+		// whatever finished starting since the last cycle.
+		//
+		// BEFORE the decode guard, deliberately. That guard is about ITL -- the
+		// latency between generated tokens, which prefill barely has -- while a
+		// start time is an image and a node, which prefill has exactly like
+		// decode. A P/D fleet projects its prefill backlog too, and leaving
+		// prefill out meant it published neither series, so a run could not even
+		// be reviewed for it.
+		a.noteReplicaStart(a.itlWindowKey(input.Namespace, input.ModelID, variant,
+			accelByVariant[variant], gpusByVariant[variant]),
+			input.Namespace, variant, input.ReplicaMetrics, logger)
+
 		if canonicalRole(rolesByVariant[variant]) != domain.RoleDecode {
 			continue
 		}
@@ -316,13 +335,6 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 		// How long this variant's replicas take to become Ready, folded in from
 		// whatever finished starting since the last cycle. Same key as the ITL
 		// window, so it is swept with it.
-		//
-		// Seeded from DefaultReplicaStartSeconds. registry's
-		// ReplicaStartSecondsKey is the operator override and is not plumbed
-		// here yet -- until it is, a model whose cold start is nothing like 70 s
-		// is sized on the measurement rather than the seed, which is right after
-		// the first replica starts and wrong before it.
-		a.noteReplicaStart(key, input.Namespace, variant, input.ReplicaMetrics, logger)
 	}
 
 	// Phase 1: Per-replica capacity computation

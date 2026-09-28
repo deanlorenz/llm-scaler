@@ -1,6 +1,7 @@
 package saturation_v2
 
 import (
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -11,83 +12,147 @@ import (
 )
 
 // How long a replica of this variant takes to become Ready, which the demand
-// floor projects the backlog forward over.
+// floor projects the arriving queue forward over.
 //
 // It has to be a measurement. Run T measured 67 s for four pods and 82 s for
-// five, while the controller ordered one replica per cycle for a minute and the
-// queue reached 191 -- a projection over a guessed dead time would have been
-// wrong by whatever the guess was, multiplied by the arrival rate.
+// five while the controller ordered one replica per cycle for a minute and the
+// queue reached 191 -- a projection over a guessed dead time is wrong by whatever
+// the guess was, multiplied by the arrival rate.
 //
 // Per VARIANT, not per model: it is an image, a set of engine flags and a node,
 // and two variants of one model routinely differ. Keyed exactly like the ITL
-// windows, and swept with them, so a deleted or renamed variant does not leave a
-// float behind for as long as the process lives.
+// windows so the two agree about what a variant is.
 
 const (
-	// DefaultReplicaStartSeconds is the seed for a variant that has never had a
-	// replica start under observation.
+	// DefaultReplicaStartSeconds is the fallback for a variant with no
+	// measurement and no seed on its ScaledObject.
 	//
-	// 70 s, the middle of run T's measured 67-82 s for a small model on an H200.
-	// It is deliberately NOT generous: a seed that is too long over-states the
-	// backlog that will accumulate and over-orders, and the first real
-	// measurement replaces it within one replica start. A GLM-5.2 cold start
-	// with a cold JIT cache is nearer 500 s, which is exactly why an operator
-	// can seed it per ScaledObject rather than living with this number.
+	// 70 s, the middle of run T's measured 67-82 s for a 0.6B model on an H200.
+	// Deliberately not generous: too long over-states the backlog that will
+	// accumulate and over-orders. A GLM-5.2 cold start with a cold JIT cache is
+	// nearer 500 s, which is why registry.ReplicaStartSecondsKey exists rather
+	// than this number being asked to serve both.
 	DefaultReplicaStartSeconds = 70.0
 
 	// startSecondsAlpha weights a new measurement against the running estimate.
 	//
-	// 0.3 -- slow enough that one unlucky start (an image pull on a cold node)
-	// does not move the estimate far, fast enough that a genuine change in image
-	// or node class is absorbed within a handful of starts. Run T's own spread,
-	// 67 to 82 s, moves a 70 s estimate to 73.6 s on one 82 s sample, which is
-	// the right order of response for a figure the projection multiplies by
-	// lambda.
+	// 0.3 -- slow enough that one unlucky start does not move it far, fast
+	// enough that a real change of image or node class is absorbed within a
+	// handful of starts. Run T's own spread, 67 then 82, gives 71.5.
 	startSecondsAlpha = 0.3
+
+	// maxStartOutlierFactor bounds how far one sample may exceed the running
+	// estimate before it is treated as something other than a start.
+	//
+	// The Ready condition's LastTransitionTime is re-stamped on EVERY
+	// False->True transition, not only the first, so a readiness blip 45 minutes
+	// into a pod's life reports 2700 s as its "start". Folded in at alpha 0.3
+	// that moves a 67 s estimate to about 857 s, and the projection then
+	// over-orders by an order of magnitude for the rest of the run. Nothing in
+	// the Pod object distinguishes a first transition from a later one, so the
+	// guard is on the value instead.
+	maxStartOutlierFactor = 3.0
+
+	// maxConsecutiveStartOutliers is how many rejections in a row are taken as
+	// the world having changed rather than the samples being wrong.
+	//
+	// Without it a variant redeployed onto genuinely slower hardware would have
+	// every sample rejected forever against an estimate that no longer describes
+	// it -- the guard above would become the bug it was added to prevent.
+	maxConsecutiveStartOutliers = 3
 )
 
 // noteReplicaStart folds this cycle's observed start times into the per-variant
-// estimate, and publishes both the observation and the estimate.
+// estimate, publishes both the observation and the estimate, and forgets the
+// replicas that have gone.
 //
 // Warm-pool bridges are skipped. A bridged Pod reaching Ready in a second is a
-// wake, not a start, and it says nothing about how long this variant's own
-// replicas take -- the same exclusion noteITL makes for the fit and
-// floor.Estimate makes for the price.
+// wake, not a start, and says nothing about how long this variant's own replicas
+// take -- the same exclusion noteITL makes for the fit and floor.Estimate makes
+// for the price.
 //
-// An observation is counted ONCE per replica. Every cycle sees the same Ready
-// Pod reporting the same StartSeconds, so folding it in on every cycle would
-// drive the estimate to whatever the longest-lived replica measured and make the
-// histogram a count of cycles rather than of starts.
+// An observation is counted ONCE per replica. Every cycle sees the same Ready Pod
+// reporting the same StartSeconds, so folding it in repeatedly would drive the
+// estimate to whatever the longest-lived replica measured and make the histogram
+// a count of cycles rather than of starts.
+//
+// The bookkeeping for that is bounded HERE, by forgetting Pods this variant no
+// longer reports, rather than by the analyzer's EvictStaleHistory -- which has no
+// caller on the reconcile path (analyzer_test.go says so where it tests the
+// throughput window). A set keyed per Pod is the fastest-growing state on this
+// struct, so it cannot be left to a sweep that does not run.
 func (a *SaturationAnalyzer) noteReplicaStart(
 	key, namespace, variantName string,
 	replicas []domain.ReplicaMetrics,
 	logger logr.Logger,
 ) {
-	a.mu.Lock()
+	type outlier struct {
+		pod     string
+		sample  float64
+		against float64
+	}
+	var rejected []outlier
 	observed := 0
+	present := make(map[string]struct{}, len(replicas))
+
+	a.mu.Lock()
 	for _, rm := range replicas {
-		if rm.VariantName != variantName || rm.FromWarmPool {
+		if rm.VariantName != variantName || rm.FromWarmPool || rm.PodName == "" {
 			continue
 		}
-		if !(rm.StartSeconds > 0) || rm.PodName == "" {
+		// Qualified by the variant's window key AND the namespace. A bare Pod
+		// name is not unique: a StatefulSet or LeaderWorkerSet reuses
+		// deterministic names across incarnations, and the same release in two
+		// namespaces gives two Pods the same name -- either of which would have
+		// one variant's measurement suppress another's silently. Including the
+		// window key also means a variant whose key changes (its accelerator
+		// resolving differently, its GPU count changing) re-measures from the
+		// Pods it can already see instead of falling back to the seed for the
+		// life of those Pods.
+		seen := key + "|" + rm.Namespace + "|" + rm.PodName
+		present[seen] = struct{}{}
+
+		if !(rm.StartSeconds > 0) {
 			continue
 		}
-		if _, seen := a.startSeenPods[rm.PodName]; seen {
+		if _, counted := a.startSeenPods[seen]; counted {
 			continue
 		}
-		a.startSeenPods[rm.PodName] = a.now()
+		cur, measured := a.startSeconds[key]
+		if measured && cur > 0 && rm.StartSeconds > maxStartOutlierFactor*cur &&
+			a.startOutliers[key] < maxConsecutiveStartOutliers {
+			a.startOutliers[key]++
+			rejected = append(rejected, outlier{rm.PodName, rm.StartSeconds, cur})
+			// NOT recorded as seen: if the next cycle still reports it, it is
+			// counted toward the consecutive run above rather than forgotten.
+			continue
+		}
+		a.startOutliers[key] = 0
+		a.startSeenPods[seen] = a.now()
 		observed++
 
-		if cur, ok := a.startSeconds[key]; ok && cur > 0 {
+		if measured && cur > 0 {
 			a.startSeconds[key] = (1-startSecondsAlpha)*cur + startSecondsAlpha*rm.StartSeconds
 		} else {
 			// The first measurement REPLACES the seed rather than being averaged
 			// with it. The seed is a guess and the measurement is not, so giving
-			// the guess 70% of the weight of the first real figure would keep a
+			// the guess most of the weight of the first real figure would keep a
 			// wrong number in force for several starts.
 			a.startSeconds[key] = rm.StartSeconds
 		}
 		metrics.ObserveReplicaStartSeconds(namespace, variantName, rm.StartSeconds)
+	}
+
+	// Forget this variant's Pods that no longer report. Scoped by the key
+	// prefix so one variant's cycle cannot drop another's bookkeeping.
+	prefix := key + "|"
+	for k := range a.startSeenPods {
+		if !strings.HasPrefix(k, prefix) {
+			continue
+		}
+		if _, still := present[k]; !still {
+			delete(a.startSeenPods, k)
+		}
 	}
 	est, measured := a.startSeconds[key]
 	a.mu.Unlock()
@@ -96,6 +161,13 @@ func (a *SaturationAnalyzer) noteReplicaStart(
 		est = DefaultReplicaStartSeconds
 	}
 	metrics.SetReplicaStartSecondsEstimate(namespace, variantName, est, measured)
+	for _, o := range rejected {
+		logger.V(logging.DEFAULT).Info("replica-start-outlier-rejected",
+			"variant", variantName, "pod", o.pod,
+			"sampleSeconds", o.sample, "estimateSeconds", o.against,
+			"factor", maxStartOutlierFactor,
+			"reason", "the Ready condition re-transitions, so a probe blip reports the pod's age")
+	}
 	if observed > 0 {
 		logger.V(logging.DEFAULT).Info("replica-start-measured",
 			"variant", variantName, "observations", observed,
@@ -112,12 +184,13 @@ func startSource(measured bool) string {
 	return "seed"
 }
 
-// evictStartSeenPods drops the once-per-replica bookkeeping for Pods nothing has
-// reported for the timeout.
+// evictStartSeenPods drops bookkeeping older than the timeout.
 //
-// Without it the set grows by one entry per Pod the process ever sees, which on
-// a fleet that scales up and down all day is unbounded. Called from
-// EvictStaleHistory, under the same lock and the same timeout as the windows.
+// A backstop only: noteReplicaStart already forgets a Pod the cycle it stops
+// reporting, which is what actually bounds the map, because EvictStaleHistory
+// has no caller on the reconcile path. Kept so that a variant which disappears
+// entirely -- never reported again, so never pruned by its own cycle -- does not
+// leave entries behind if a caller is ever added.
 func (a *SaturationAnalyzer) evictStartSeenPods(now time.Time, timeout time.Duration) int {
 	dropped := 0
 	for pod, seen := range a.startSeenPods {
