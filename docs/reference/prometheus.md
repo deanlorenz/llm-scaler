@@ -1070,8 +1070,8 @@ Once installed, you can verify as follows:
           "severity": "warning"
         },
         "annotations": {
-          "description": "WVA component 'controller' error_type 'Config is nil in ConfigMapReconciler bootstrap' rate is 0.03/sec (>6/min threshold) sustained for 5+ minutes. Check controller logs for error patterns.",
-          "summary": "WVA error rate elevated in controller"
+          "description": "Controller component 'controller' error_type 'Config is nil in ConfigMapReconciler bootstrap' rate is 0.03/sec (>6/min threshold) sustained for 5+ minutes. Check controller logs for error patterns.",
+          "summary": "llm-scaling-manager error rate elevated in controller"
         },
         "state": "pending",
         "activeAt": "2026-07-02T19:35:06.642428048Z",
