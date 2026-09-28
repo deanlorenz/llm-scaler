@@ -41,7 +41,7 @@ var _ = Describe("SGLang query registration", func() {
 		// unconditionally and the throughput-analyzer ones only when it is
 		// enabled. EngineSpecificQueries spans both sets, so a fixture calling
 		// only one of them would report the other's queries missing.
-		RegisterArrivalRateQueries(registry)
+		RegisterAlwaysOnQueries(registry)
 		RegisterScaleToZeroQueries(registry)
 	})
 

@@ -25,8 +25,8 @@ import (
 //	OL      (avg output tokens)       → AvgOutputTokens        (QueryAvgOutputTokens       / RegisterSaturationQueries)
 //	IL      (avg input tokens)        → AvgInputTokens         (QueryAvgInputTokens        / RegisterSaturationQueries)
 //	H%      (prefix cache hit rate)   → PrefixCacheHitRate     (QueryPrefixCacheHitRate    / RegisterSaturationQueries)
-//	λ_dec   (per-pod completion rate) → RequestRate            (QueryRequestRate           / RegisterArrivalRateQueries)
-//	Λ_req   (model-level arrival)     → AnalyzerInput.ArrivalRate (QueryModelArrivalRate   / RegisterArrivalRateQueries, this file)
+//	λ_dec   (per-pod completion rate) → RequestRate            (QueryRequestRate           / RegisterAlwaysOnQueries)
+//	Λ_req   (model-level arrival)     → AnalyzerInput.ArrivalRate (QueryModelArrivalRate   / RegisterAlwaysOnQueries, this file)
 //	         λ_dec = Λ_req × avgOL, combined with the queue-drain term (model level, see Commit 2)
 const (
 	// RequestRateWindow is the range the per-pod completion rate is taken
@@ -105,7 +105,7 @@ const (
 )
 
 // Every query the throughput analyzer needs is registered by
-// RegisterArrivalRateQueries below, unconditionally. There is no
+// RegisterAlwaysOnQueries below, unconditionally. There is no
 // RegisterThroughputAnalyzerQueries any more: it registered four queries that
 // only existed when that opt-in analyzer was enabled, and three separate
 // outages came of a figure the always-on demand floor needed being gated that
@@ -185,7 +185,18 @@ const (
 		arrivalModelLabel + `) > 0 or ` + arrivalPlacementRate
 )
 
-// RegisterArrivalRateQueries registers how fast work is ARRIVING: the
+// RegisterAlwaysOnQueries registers the queries the demand floor needs on every
+// cycle, whether or not the throughput analyzer is enabled: how fast work is
+// ARRIVING, and the instantaneous KV utilization k* the ITL model is fitted
+// against.
+//
+// It was RegisterArrivalRateQueries, and the name stopped being true when k*
+// and the SGLang equivalents moved in here. That matters more than a rename
+// usually does: three separate outages came from a figure the floor needs being
+// gated on an opt-in analyzer, and a function whose name understates what it
+// registers is how the fourth one gets written.
+//
+// The arrival-rate part: the
 // model-level rate from the scheduler, and the per-pod completion rate that
 // stands in for it when the scheduler's is unavailable.
 //
@@ -199,7 +210,7 @@ const (
 //
 // The cost of always collecting them is two Prometheus queries per namespace per
 // cycle. The cost of not doing so was a feature that could not work at all.
-func RegisterArrivalRateQueries(sourceRegistry *source.SourceRegistry) {
+func RegisterAlwaysOnQueries(sourceRegistry *source.SourceRegistry) {
 	// The guard came with the queries when they moved here. This runs
 	// unconditionally at startup now, so a deployment without a Prometheus
 	// source would take the controller down on boot rather than run without

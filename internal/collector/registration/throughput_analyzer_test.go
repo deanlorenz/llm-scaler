@@ -32,13 +32,13 @@ var _ = Describe("the queries the demand floor and the throughput analyzer share
 			err := registry.Register("prometheus", metricsSource)
 			Expect(err).NotTo(HaveOccurred())
 			// One registration, as cmd/main does -- unconditionally.
-			RegisterArrivalRateQueries(registry)
+			RegisterAlwaysOnQueries(registry)
 			queryList = registry.Get("prometheus").QueryList()
 		})
 
 		It("panics if registered twice on the same registry", func() {
 			Expect(func() {
-				RegisterArrivalRateQueries(registry)
+				RegisterAlwaysOnQueries(registry)
 			}).To(Panic())
 		})
 
@@ -138,7 +138,7 @@ var _ = Describe("the queries the demand floor and the throughput analyzer share
 	Context("when prometheus source is not registered", func() {
 		It("should not panic", func() {
 			Expect(func() {
-				RegisterArrivalRateQueries(registry)
+				RegisterAlwaysOnQueries(registry)
 			}).NotTo(Panic())
 		})
 	})
@@ -162,7 +162,7 @@ var _ = Describe("arrival-rate query registration", func() {
 			context.Background(), &mockPrometheusAPI{}, prometheus.DefaultPrometheusSourceConfig()))).To(Succeed())
 
 		// Deliberately NOT calling RegisterThroughputAnalyzerQueries.
-		RegisterArrivalRateQueries(reg)
+		RegisterAlwaysOnQueries(reg)
 
 		ql := reg.Get("prometheus").QueryList()
 		Expect(ql.Get(QueryModelArrivalRate)).NotTo(BeNil(),
@@ -192,7 +192,7 @@ var _ = Describe("arrival-rate query registration", func() {
 		Expect(reg.Register("prometheus", prometheus.NewPrometheusSource(
 			context.Background(), &mockPrometheusAPI{}, prometheus.DefaultPrometheusSourceConfig()))).To(Succeed())
 		Expect(func() {
-			RegisterArrivalRateQueries(reg)
+			RegisterAlwaysOnQueries(reg)
 		}).NotTo(Panic())
 	})
 })

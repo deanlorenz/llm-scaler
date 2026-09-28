@@ -44,7 +44,7 @@ func TestModelArrivalRateQueryStructure(t *testing.T) {
 		prometheus.DefaultPrometheusSourceConfig())); err != nil {
 		t.Fatalf("registering the prometheus source: %v", err)
 	}
-	RegisterArrivalRateQueries(reg)
+	RegisterAlwaysOnQueries(reg)
 
 	built, err := reg.Get("prometheus").QueryList().Build(
 		QueryModelArrivalRate, map[string]string{source.ParamNamespace: ns})

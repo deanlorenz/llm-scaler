@@ -783,11 +783,6 @@ func (a *SaturationAnalyzer) computeReplicaCapacityFallback(
 // samples to order on. A BORROWED reading is the stale figure from a
 // neighbouring bucket that the derivation exists to replace, and a thin one is
 // not yet evidence, so both lose to derived.
-// derivedBucket is the sentinel the bucket label carries when mu was derived
-// from the ITL model rather than measured. classifyOutputLength can never
-// produce it, so it cannot be spoofed by a real output bucket.
-const derivedBucket = "derived"
-
 func useDerived(derivedOK bool, reading throughputReading) bool {
 	if !derivedOK {
 		return false
@@ -796,6 +791,11 @@ func useDerived(derivedOK bool, reading throughputReading) bool {
 		reading.samples >= floor.MinThroughputSamplesToOrder
 	return !ownMeasured
 }
+
+// derivedBucket is the sentinel the bucket label carries when mu was derived
+// from the ITL model rather than measured. classifyOutputLength can never
+// produce it, so it cannot be spoofed by a real output bucket.
+const derivedBucket = "derived"
 
 // historyKey is the bucket a replica's saturated observations (k2, and the
 // throughput recorded beside it) are stored and read under.
@@ -817,10 +817,14 @@ func useDerived(derivedOK bool, reading throughputReading) bool {
 // under the old one. Measured: a k2 of 2 learned under a low threshold kept
 // a variant at utilization 1.0 under a threshold of 100, where P1 could not
 // fire at all.
-// throughputKey is historyKey with the fleet's input bucket appended: a
-// saturated throughput is a property of a replica AND the (I, O) it was
-// measured under, so a reading recorded at one input length is not an own
-// reading for another.
+//
+// historyKey itself is below; throughputKey comes first because it is the one
+// the demand floor reads.
+
+// throughputKey is historyKey with the fleet's input bucket COMPOSED INTO it --
+// not appended, see the body: a saturated throughput is a property of a replica
+// AND the (I, O) it was measured under, so a reading recorded at one input
+// length is not an own reading for another.
 func (a *SaturationAnalyzer) throughputKey(
 	modelID, namespace, variantName, accelerator string,
 	gpuCount int,

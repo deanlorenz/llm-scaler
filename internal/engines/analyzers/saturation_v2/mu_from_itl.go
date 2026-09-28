@@ -159,6 +159,9 @@ func (a *SaturationAnalyzer) noteLineMismatch(model itl.Model, params *capacity.
 // C is the engine's whole KV capacity, not k1. k1 is already C times the
 // analyzer's KV threshold, and itl.Sequences applies k itself, so passing k1
 // would apply a threshold twice.
+// (The paragraph above belongs to deriveMu, whose declaration is below
+// pricingK's.)
+
 // pricingK is the KV utilization, as a fraction of PHYSICAL capacity, that a
 // replica is considered full at -- the point mu is priced for.
 //

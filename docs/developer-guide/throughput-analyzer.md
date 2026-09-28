@@ -277,7 +277,7 @@ ITLModel) for the concepts.
 **Query Registration (`internal/collector/registration/throughput_analyzer.go`)**  
 Registers three PromQL templates exclusive to the throughput analyzer:
 `QueryGenerationTokenRate`, `QueryKvUsageInstant`, `QueryRequestRate`.
-`RegisterThroughputAnalyzerQueries` must be called once at startup alongside
+`RegisterAlwaysOnQueries` must be called once at startup alongside
 `RegisterSaturationQueries` and `RegisterQueueingModelQueries`.
 
 **Metrics Collector (`internal/collector/`)**  

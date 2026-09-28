@@ -1,6 +1,10 @@
 package saturation_v2
 
-import "time"
+import (
+	"time"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/floor"
+)
 
 const (
 	// DecodeSaturationMemory is how long after the last cycle a decode
@@ -86,7 +90,12 @@ const (
 // MinDerivedThroughputSamples is the sample count a mu derived from ITL(k)
 // reports. A derived figure is not a sample of anything -- it is as good on
 // the first cycle of a new shape as on the hundredth -- so it satisfies the
-// floor's gate for trusting a window with an order by construction. It equals
-// floor.MinThroughputSamplesToOrder; stated here rather than imported because
-// signals/floor imports this analyzer's own capacity types.
-const MinDerivedThroughputSamples = 2
+// floor's gate for trusting a window with an order by construction.
+//
+// Aliased rather than restated. The previous comment claimed it could not be
+// imported "because signals/floor imports this analyzer's own capacity types";
+// that is not so -- signals/floor imports internal/signals/capacity, and this
+// package already imports signals/floor and uses
+// floor.MinThroughputSamplesToOrder in useDerived. There was no cycle, and two
+// independent 2s that must stay equal is how they stop being equal.
+const MinDerivedThroughputSamples = floor.MinThroughputSamplesToOrder
