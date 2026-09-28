@@ -74,11 +74,12 @@ and every clamp is recorded against the variant that took it.
 workload it scales; variants of one model are solved as a group, each role
 carrying its own bottleneck.
 
-Also shipped: scale-to-zero and wake over KEDA's push path
-([scale-to-zero](well-lit-paths/scale-to-zero/)), quota-bounded scaling
-([bound by GPUs](well-lit-paths/bound-by-gpus/),
-[Kueue quotas](well-lit-paths/kueue-bounded-quotas/)), and workload classes
-([workload classes](well-lit-paths/workload-classes/)).
+Three more things ship with it, each documented as its own path:
+[scale-to-zero](well-lit-paths/scale-to-zero/), including the wake over KEDA's
+push path; quota-bounded scaling, against either a
+[GPU budget](well-lit-paths/bound-by-gpus/) or
+[Kueue](well-lit-paths/kueue-bounded-quotas/); and
+[workload classes](well-lit-paths/workload-classes/).
 
 ## What is measured
 
@@ -93,14 +94,19 @@ Also shipped: scale-to-zero and wake over KEDA's push path
 | And what it costs | 17 % more than holding nothing, which came in at 12 129 | [measured.md](well-lit-paths/warm-pool-bridge/measured.md) |
 | A warm Pod switches models fast | 437 ms against roughly 41 s cold, serving real gateway traffic | [fast model loading](proposals/fast-model-loading.md) |
 | Cold start is mostly not the weights | 8B ~41 s; GLM 192 s of which 40 s is weights; 463 s on a cold JIT cache | [weight transfer](proposals/warm-pool-weight-transfer.md) |
-| The figures repeat | The P/D pair was run twice a day apart, within a tenth of every number | [P/D path](well-lit-paths/pd-disaggregation/) |
+| The P/D result reproduces | The pair was run twice a day apart, within a tenth of every number | [P/D path](well-lit-paths/pd-disaggregation/) |
 
-How to read them. The warm-pool run is four scale-up events per arm, one run
-each, so the 12 % and 17 % are single-run margins. The shape-swap run is
-Qwen3-0.6B, chosen because saturation is easy to pin down on a small model; the
-result is demonstrated there and expected, not shown, above it.
+Two caveats on reading these. The warm-pool run is four scale-up events per
+arm, one run each, so the 12 % and 17 % are single-run margins. The shape-swap
+run is Qwen3-0.6B, chosen because saturation is easy to pin down on a small
+model; the result is demonstrated there and expected, not shown, above it.
 
-## Limits
+## Non-goals and limits
+
+**Out of scope by design.** Node provisioning belongs to the cluster autoscaler,
+quota between models to Kueue, and tenant quota and routing to the gateway. We
+decide replica counts. We do not place Pods, arbitrate between tenants, or route
+requests.
 
 **Scaling only helps if the router uses the new replica.** llm-d's shipped
 profile weights the prefix-cache scorer above queue depth and KV utilization,
@@ -154,9 +160,7 @@ Holding the accelerator is what makes the wake possible.
 We decide and Kubernetes actuates, through the KEDA external-scaler contract
 with KEDA owning the HPA. One consequence worth knowing: the HPA takes the
 maximum published inside its scale-down window, so we hold a published
-scale-down across cycles to stop one noisy sample pinning the fleet. Node
-provisioning belongs to the cluster autoscaler, quota between models to Kueue,
-tenant quota and routing to the gateway.
+scale-down across cycles to stop one noisy sample pinning the fleet.
 
 Running on CoreWeave H200s and on OpenShift. The scaling path, warm pool,
 scale-to-zero and quota limiting are built and cluster-verified; replica
