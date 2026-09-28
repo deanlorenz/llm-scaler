@@ -345,16 +345,65 @@ and ~60 s of pod start, and this adds a third term of the same size that sits
 entirely outside the autoscaler. Tuning the floor against phase-1 TTFT is
 measuring the router.
 
-The fix is EPP configuration -- a `saturationDetector` section, which this
-deployment does not set at all, so it inherits `queueDepthThreshold: 5`:
+#### Raising `queueDepthThreshold` is NOT the fix
 
-    - type: utilization-detector
-      name: util
+The obvious reading -- the threshold is 5 and the engine queues hundreds, so
+raise the threshold -- is wrong, and worth recording so it is not proposed
+again. Tolerating a deep queue inside the engine is the failure flow control
+exists to prevent. Once a request is dispatched it is committed to that pod:
+it cannot be steered to a replica that becomes Ready a moment later, it cannot
+be reordered behind a higher priority, and it is no longer covered by the
+queue-wait TTL. A threshold of 5 correctly says "an engine should not be
+sitting on a queue".
+
+The defects are in what the score is, not where the line is drawn:
+
+  - `poolSaturation = mean(endpointScore)` lets ONE loaded endpoint outvote
+    every idle one. The pod measured at 272 waiting scores 54.4; averaged over
+    ten endpoints it holds the pool at five times the ceiling by itself, and
+    diluting it would take about 54 idle endpoints.
+  - It measures how busy the engines are, not whether there is anywhere to put
+    the next request -- which is the only question dispatch actually asks.
+
+The shape that matches the goal -- spread arrivals onto fresh replicas, build a
+queue in neither place -- is the `concurrency-detector`, which is not an Alpha
+plugin and needs no `--allow-experimental-plugins`:
+
+    poolSaturation = aggregateInflight / aggregateCapacity
+
+Two properties follow, and they are the two this fleet needs. Capacity is a
+function of the endpoint COUNT, so a replica turning Ready lowers saturation
+immediately, with no scrape to wait for and no mean to dilute. And
+`maxConcurrency` bounds what EPP will dispatch to any single endpoint, so with
+it set below the engine's own running capacity (`max_num_seqs`) a local queue
+never forms: the waiting happens in the EPP, where a request can still be sent
+somewhere else, instead of in the engine, where it cannot.
+
+    - type: in-flight-load-producer
+      name: inflight
+    - type: concurrency-detector
+      name: conc
       parameters:
-        queueDepthThreshold: <matched to the engine's batching, not 5>
+        concurrencyMode: hybrid
+        maxConcurrency: <below the engine's max_num_seqs>
+        inFlightLoadProducerName: inflight
     flowControl:
       saturationDetector:
-        pluginRef: util
+        pluginRef: conc
+
+The trade named in the tutorial is that this loses visibility into real KV
+pressure; `hybrid` mode scores each endpoint as the larger of its request and
+token ratios before averaging, which covers the worst of it. UNVERIFIED on this
+fleet -- the reasoning above is from the tutorial and the measurements in this
+section, not from a run.
+
+Routing is a second, separable defect. The decode profile weights
+`prefix-cache-scorer` at 3 and `active-request-scorer` at 2, so the scorer that
+would spread arrivals across idle replicas is outranked -- by one whose
+measured hit ratio on this workload is **0.000** for the whole run, with
+`llm_d_epp_request_cached_tokens / input_tokens` also 0. Whatever holds the
+queue closed, the scorer order is why the requests that DO get through
+concentrate rather than spread.
 
 `flow_control_stale_endpoints` is also not scraped on this cluster. It is the
 metric that reports the other half of the same detector -- an endpoint whose
