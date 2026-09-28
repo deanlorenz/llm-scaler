@@ -15,7 +15,7 @@ If a test needs **high traffic**, long “wait and see” timing, or performance
 ### Key Principles
 
 1. **Environment-Agnostic**: Same tests run on Kind (emulated GPUs) or real Kubernetes environments with GPUs
-2. **Infrastructure Separation**: Tests require "infra-only" deployment (WVA controller + llm-d infrastructure)
+2. **Infrastructure Separation**: Tests require "infra-only" deployment (the scaling manager controller + llm-d infrastructure)
 3. **Dynamic Resource Management**: Each test creates VA, HPA, and model services as part of the test workflow
 4. **Tiered Testing**: Smoke tests for quick validation, full suite for comprehensive coverage
 5. **Serialize If Needed**: Since the scope is **deterministic correctness**, if there are tests that should be run serially then make them as such, and make sure the environment is clean in each `BeforeAll`. Running tests such as for Deployment, LWS with 1 leader+1 worker, LWS with 1 leader+0 worker in parallel pointing to the same model can have issues with conflicting resources and can be hard to track.
@@ -28,7 +28,7 @@ Cluster object builders and ensure/delete helpers live in [`fixtures/`](./fixtur
 
 ### Infrastructure Setup
 
-Before running tests, deploy **WVA + monitoring + scaler + llm-d EPP/gateway** (no chart VA/HPA; tests create those):
+Before running tests, deploy **the scaling manager + monitoring + scaler + llm-d EPP/gateway** (no chart VA/HPA; tests create those):
 
 ```bash
 # From repository root (recommended)
@@ -37,22 +37,21 @@ make deploy-e2e-infra IMG=localhost/llm-scaling-manager:dev
 ```
 
 This deploys:
-- ✅ WVA controller
+- ✅ the scaling manager controller
 - ✅ llm-d infrastructure (Gateway, CRDs, RBAC, EPP)
 - ✅ Prometheus stack (metrics collection)
 - ✅ KEDA (ScaledObject-driven external metrics API)
-- ❌ **NO** VariantAutoscaling resources (tests create these)
 - ❌ **NO** ScaledObject resources (tests create these)
 - ❌ **NO** default chart ModelService (`make deploy-e2e-infra` skips it; tests create workloads)
 
 ### Verify Infrastructure
 
 ```bash
-# WVA controller should be running
+# The scaling manager controller should be running
 kubectl get pods -n workload-variant-autoscaler-system
 
-# No VA resources should exist
-kubectl get variantautoscaling --all-namespaces  # Should be empty
+# No test ScaledObjects should exist
+kubectl get scaledobject --all-namespaces  # Should be empty
 
 # No test HPA resources should exist
 kubectl get hpa --all-namespaces | grep -v kube-system  # Should be empty
@@ -149,7 +148,7 @@ The scale-from-zero spec submits traffic via a small **curl** Job; see **Trigger
 
 Set `SCALER_BACKEND=keda` and **`ENVIRONMENT=kind-emulator`**; the deploy script will install KEDA. On the kind-emulator environment the deploy script installs upstream KEDA; on OpenShift use the platform Custom Metrics Autoscaler (CMA) operator (same ScaledObject API).
 
-> **Note:** We do not install the OpenShift Custom Metrics Autoscaler (CMA) operator in e2e. We install **upstream KEDA** (e.g. via Helm) to **imitate** CMA behavior—same ScaledObject-driven flow and external metrics API usage. E2E with `SCALER_BACKEND=keda` is a stand-in for validating WVA with an OpenShift CMA–style scaler.
+> **Note:** We do not install the OpenShift Custom Metrics Autoscaler (CMA) operator in e2e. We install **upstream KEDA** (e.g. via Helm) to **imitate** CMA behavior—same ScaledObject-driven flow and external metrics API usage. E2E with `SCALER_BACKEND=keda` is a stand-in for validating the scaling manager with an OpenShift CMA–style scaler.
 
 ```bash
 # Deploy e2e infrastructure with KEDA, then run smoke tests
@@ -189,16 +188,15 @@ make test-e2e-smoke-with-setup 2>&1 | tee test/e2e/e2e-smoke-keda-with-setup.log
 
 **Tests:**
 1. **Infrastructure Readiness** (~2 min)
-   - Verify WVA controller is running
+   - Verify the scaling manager controller is running
    - Verify llm-d infrastructure deployed
    - Verify Prometheus is scraping metrics
    - Verify external metrics API is available
 
-2. **Basic VA Lifecycle** (~3-5 min)
+2. **Basic variant lifecycle** (~3-5 min)
    - Dynamically create InferencePool + model service
-   - Dynamically create VariantAutoscaling resource
-   - Verify controller reconciles successfully
-   - Check VA status conditions (TargetResolved=true)
+   - Dynamically create the ScaledObject that registers the variant
+   - Verify the controller discovers it and reconciles successfully
    - Verify external metrics API returns values
 
 3. **Error handling (smoke)** (~few min)
@@ -318,9 +316,7 @@ test/e2e/
 ├── pod_scraping_test.go   # PodScrapingSource metrics collection tests
 ├── fixtures/              # Resource builders for dynamic creation
 │   ├── infra_builder.go   # InferencePool, ModelService factories
-│   ├── va_builder.go      # VariantAutoscaling factories
 │   ├── model_service_builder.go
-│   ├── hpa_builder.go     # HPA factories
 │   ├── scaled_object_builder.go
 └── README.md              # This file
 ```
@@ -332,8 +328,7 @@ Each test follows this pattern:
 1. **BeforeAll**: Dynamically create test resources
    - InferencePool
    - Model service (vLLM or simulator)
-   - VariantAutoscaling
-   - HPA
+   - ScaledObject
 
 2. **Test Execution**: Verify behavior
    - Wait for resource readiness
@@ -365,7 +360,7 @@ Bounded **minimal traffic** (e.g. scale-from-zero trigger job) is documented per
 
 ## Troubleshooting
 
-### Tests Fail with "WVA controller not found"
+### Tests Fail with "the scaling manager controller not found"
 
 **Solution:** Ensure infra-only deployment was successful:
 ```bash
@@ -390,7 +385,7 @@ Use this when smoke/full tests fail on **VA reconciliation**, **HPA / desired re
 
 **Debug commands** (adjust `-n` to your llm-d namespace, e.g. `LLMD_NAMESPACE`):
 ```bash
-kubectl get variantautoscaling -n llm-d-sim -o yaml
+kubectl get scaledobject -n llm-d-sim -o yaml
 kubectl get hpa -n llm-d-sim -o yaml
 kubectl get --raw "/apis/external.metrics.k8s.io/v1beta1/namespaces/llm-d-sim/wva_desired_replicas"
 ```
@@ -399,8 +394,8 @@ kubectl get --raw "/apis/external.metrics.k8s.io/v1beta1/namespaces/llm-d-sim/wv
 
 **Solution:** Run AfterSuite cleanup manually:
 ```bash
-# Delete test VAs
-kubectl delete variantautoscaling -n llm-d-sim -l test-resource=true
+# Delete test ScaledObjects
+kubectl delete scaledobject -n llm-d-sim -l test-resource=true
 
 # Delete test HPAs
 kubectl delete hpa -n llm-d-sim -l test-resource=true
@@ -440,8 +435,8 @@ var _ = Describe("My New Test", Label("full"), Ordered, func() {
 
     AfterAll(func() {
         // Clean up test resources
-        _ = crClient.Delete(ctx, &v1alpha1.VariantAutoscaling{
-            ObjectMeta: metav1.ObjectMeta{Name: vaName, Namespace: cfg.LLMDNamespace},
+        _ = crClient.Delete(ctx, &kedav1alpha1.ScaledObject{
+            ObjectMeta: metav1.ObjectMeta{Name: soName, Namespace: cfg.LLMDNamespace},
         })
     })
 

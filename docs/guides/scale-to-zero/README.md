@@ -291,7 +291,7 @@ timer halves only its own share.
 Both apply to the **final drop out of service** only. An ordinary scale-down while
 the model is still serving (10 → 3) goes through the HPA and is not held by either
 timer. The scaling manager adds no hold of its own: KEDA already guards that transition per
-ScaledObject, from cluster state, so a second the scaling manager-side timer could only disagree
+ScaledObject, from cluster state, so a second controller-side timer could only disagree
 with it.
 
 `retentionPeriod` does double duty: it is how long a model must be idle before it
