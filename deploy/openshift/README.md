@@ -1,6 +1,6 @@
 # Workload-Variant-Autoscaler OpenShift Deployment Script
 
-Automated deployment script for WVA and llm-d infrastructure on OpenShift clusters.
+Automated deployment script for the scaling manager and llm-d infrastructure on OpenShift clusters.
 
 > **Note**: This guide covers OpenShift-specific deployment details. For a complete overview of deployment methods and the full configuration reference, see the [main deployment guide](../).
 
@@ -68,7 +68,7 @@ export MODEL_ID="unsloth/Meta-Llama-3.1-8B"         # Default
 export WVA_IMAGE="ghcr.io/ev-shindin/llm-scaling-manager:main"  # Default
 ```
 
-### 2. Deploy the Workload Variant Autoscaler and llm-d using Make
+### 2. Deploy llm-scaling-manager and llm-d using Make
 
 ```bash
 make deploy-wva-on-openshift
@@ -80,7 +80,7 @@ That's it! The script will:
 
 2. Detect GPU types on your OpenShift cluster
 
-3. Deploy all components, including WVA, llm-d, and KEDA / CMA for external metrics
+3. Deploy all components, including the scaling manager, llm-d, and KEDA / CMA for external metrics
 
 4. Verify the deployment
 
@@ -105,7 +105,7 @@ export HPA_STABILIZATION_SECONDS=240        # HPA stabilization window
 **Deployment flags** (`deploy/install.sh`) — llm-d is deployed separately via `deploy/install-epp.sh` or the [llm-d guides](https://github.com/llm-d/llm-d/tree/main/guides/optimized-baseline):
 
 ```bash
-export DEPLOY_WVA=true                    # Deploy WVA controller
+export DEPLOY_WVA=true                    # Deploy the scaling manager controller
 export SCALER_BACKEND=keda                # Use the platform Custom Metrics Autoscaler (CMA/KEDA) for external metrics
 ```
 
@@ -128,18 +128,18 @@ export WVA_NS="my-inference"     # where the controller runs
 make deploy-wva-on-openshift
 ```
 
-The model is not chosen here. WVA does not deploy models — it scales the ones
+The model is not chosen here. The scaling manager does not deploy models — it scales the ones
 already running, and it learns which ones from the ScaledObjects that name its
 external scaler.
 
-### Example 3: CI-style stack (WVA + llm-d)
+### Example 3: CI-style stack (the scaling manager + llm-d)
 
 ```bash
 export HF_TOKEN="hf_xxxxx"
-make deploy-wva-on-openshift   # install.sh (WVA + monitoring + scaler + LWS)
+make deploy-wva-on-openshift   # install.sh (the scaling manager + monitoring + scaler + LWS)
 ```
 
-### Example 4: Deploy Only WVA (llm-d already deployed)
+### Example 4: Deploy Only the scaling manager (llm-d already deployed)
 
 ```bash
 export DEPLOY_WVA=true
@@ -188,7 +188,7 @@ make deploy-wva-on-openshift
 
 After deployment, the script verifies:
 
-- WVA controller is running
+- The scaling manager controller is running
 
 - llm-d infrastructure is deployed
 
@@ -245,7 +245,7 @@ Displays:
 
 ### 4. Autoscaling Resources
 
-- **ScaledObject**: the KEDA object whose trigger registers the workload with WVA
+- **ScaledObject**: the KEDA object whose trigger registers the workload with the scaling manager
 - **HPA**: HorizontalPodAutoscaler for deployment scaling
 - **Probes**: Health checks for vLLM pods
 
@@ -305,7 +305,7 @@ export HF_TOKEN="hf_xxxxxxxxxxxxxxxxxxxxx"
 
 ```bash
 kubectl get pods -n keda-system
-# WVA's decision reaches KEDA over gRPC, not through the external-metrics API.
+# The scaling manager's decision reaches KEDA over gRPC, not through the external-metrics API.
 # Read it from Prometheus, or from the HPA KEDA drives:
 kubectl port-forward -n <monitoring-namespace> svc/kube-prometheus-stack-prometheus 9090:9090
 #   then query:  wva_desired_replicas
@@ -342,14 +342,14 @@ kubectl get scaledobject -n llm-d-optimized-baseline
 kubectl get hpa -n llm-d-optimized-baseline
 
 # Check external metrics
-# WVA's decision reaches KEDA over gRPC, not through the external-metrics API.
+# The scaling manager's decision reaches KEDA over gRPC, not through the external-metrics API.
 # Read it from Prometheus, or from the HPA KEDA drives:
 kubectl port-forward -n <monitoring-namespace> svc/kube-prometheus-stack-prometheus 9090:9090
 #   then query:  wva_desired_replicas
 kubectl describe hpa -n <namespace> keda-hpa-<scaledobject-name>
 ```
 
-### Monitor WVA Logs
+### Monitor llm-scaling-manager Logs
 
 ```bash
 kubectl logs -n workload-variant-autoscaler-system \
@@ -405,7 +405,7 @@ kubectl delete -k llm-d/guides/optimized-baseline/modelserver/gpu/vllm/base -n l
 # KEDA / CMA is platform-managed on OpenShift; remove ScaledObjects, not the operator
 kubectl delete scaledobject --all -n llm-d-optimized-baseline
 
-# Delete WVA
+# Delete the scaling manager
 make undeploy-wva
 
 # Delete namespaces

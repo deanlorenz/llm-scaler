@@ -1,4 +1,4 @@
-# Two-Variant WVA Benchmark
+# Two-Variant llm-scaling-manager Benchmark
 
 End-to-end guide for the **two-variant efficiency-aware scaling** benchmark: a
 single model deployed as two variants of differing `variantCost` under one
@@ -36,13 +36,13 @@ them and applies cost-weighted scaling.
      | ScaledObject     |        | ScaledObject    |
      +------------------+        +-----------------+
                    ^                       ^
-                   +--- KEDA ---- WVA -----+
+                   +--- KEDA ---- scaler --+
                               external scaler
 ```
 
 ### The ScaledObject IS the registration
 
-WVA does not watch or list anything to find these workloads. It learns a
+The scaling manager does not watch or list anything to find these workloads. It learns a
 variant exists from the KEDA call the `ScaledObject`'s trigger causes, and
 takes the variant's identity from that trigger's metadata:
 
@@ -54,9 +54,9 @@ takes the variant's identity from that trigger's metadata:
 
 Two consequences worth knowing before debugging a run:
 
-- A variant with no `ScaledObject` is invisible. Not degraded — absent. WVA
+- A variant with no `ScaledObject` is invisible. Not degraded — absent. The scaling manager
   reports nothing about it because it has never been told it exists.
-- A `ScaledObject` scaled by a `prometheus` trigger never contacts WVA at all,
+- A `ScaledObject` scaled by a `prometheus` trigger never contacts the scaling manager at all,
   so it is equally invisible, and the deadlock is silent: nothing errors, the
   workload simply sits at its replica count.
 
@@ -83,7 +83,7 @@ The secondary `Deployment` created by `add_variant.py`:
 
 No `llm-d.ai/variant` pod label is involved. It used to be documented as
 required; no code reads it. The collector keys metrics on the model, and
-per-variant WVA gauges are labelled `variant_name` — whose value is the
+per-variant the scaling manager gauges are labelled `variant_name` — whose value is the
 **ScaledObject's** name, which is why the secondary's `ScaledObject` keeps the
 `-v2` suffix (`dump_wva_full_timeseries.py` buckets on it).
 
@@ -93,9 +93,9 @@ per-variant WVA gauges are labelled `variant_name` — whose value is the
 
 The benchmark only works end-to-end when **all** of these are in place.
 
-### 1. WVA built from this working tree
+### 1. The scaling manager built from this working tree
 
-`make benchmark-standup` installs WVA from this repo's `deploy/` — but with
+`make benchmark-standup` installs the scaling manager from this repo's `deploy/` — but with
 `IMG` pointing at whatever you give it, defaulting to the published
 `ghcr.io/ev-shindin/llm-scaling-manager:main`. **Pass `IMG=<your
 build>` or you are benchmarking a registry image, not your changes.**
@@ -175,7 +175,7 @@ make benchmark-standup BENCHMARK_NAMESPACE=$NS \
 
 `ENVIRONMENT` picks the install path (`openshift` → `deploy-wva-on-openshift`,
 anything else → `deploy-wva-on-k8s`). `IMG` decides what is measured — see
-[Required pieces #1](#1-wva-built-from-this-working-tree).
+[Required pieces #1](#1-the-scaling-manager-built-from-this-working-tree).
 
 > **Model requirement — must be chat-template-bearing.** Use an
 > instruct/chat-tuned model (the scenario default is
@@ -198,7 +198,7 @@ Standup then installs the `llm-d-infra`, `inferencepool-gaie` and
 `BENCHMARK_MODEL_ID` is required — without it the standup defaults to a
 placeholder dummy model.
 
-When that returns, the target installs WVA itself, in two steps you can also
+When that returns, the target installs the scaling manager itself, in two steps you can also
 run separately as `make benchmark-deploy-wva`:
 
 1. `deploy-wva-on-{openshift,k8s}` with `WVA_NS=$NS WVA_SCOPE=namespace` — the
@@ -316,7 +316,7 @@ When `BENCHMARK_TWO_VARIANT_SECONDARY_SUFFIX=v2` is set, `benchmark-run`
 automatically produces two outputs after the run completes:
 
 **Run `post_run_analyze.sh` promptly** (within a few minutes of run completion —
-the WVA controller pod's log buffer rotates and the window for extracting
+The scaling manager controller pod's log buffer rotates and the window for extracting
 controller decisions closes):
 
 ```bash
@@ -325,9 +325,9 @@ bash hack/benchmark/post_run_analyze.sh <results-dir> $NS
 #   biran-20260704-135514-081/results/guidellm-1783162554-04wm0f_1 biran
 ```
 
-This runs five steps: dumps WVA controller decisions + saturation analysis
+This runs five steps: dumps the scaling manager controller decisions + saturation analysis
 numbers from pod logs, computes capacity/demand estimates from raw vLLM/EPP
-scrapes, extracts EPP throughput and WVA Prometheus timeseries, and renders the
+scrapes, extracts EPP throughput and llm-scaling-manager Prometheus timeseries, and renders the
 full-pipeline PNG plot into `<results-dir>/metrics/graphs/`.
 
 **Markdown table** (printed to stdout, copy-paste into `docs/developer-guide/benchmark-results.md`):
@@ -354,7 +354,7 @@ is needed.
 
 **Full-pipeline PNG plot** saved to `<results-dir>/metrics/graphs/two_variant_v2_full_pipeline.png`.
 Panels (up to 7, optional panels appear when data is present):
-1. Replica count — ready (solid) + WVA desired (dashed) per variant
+1. Replica count — ready (solid) + the scaling manager desired (dashed) per variant
 2. Estimated demand (stacked: in-use / vLLM waiting / EPP queue) vs capacity
 3. KV cache utilisation (avg per variant)
 4. Requests running (sum per variant)
@@ -387,7 +387,7 @@ make benchmark-teardown BENCHMARK_NAMESPACE=$NS \
 `guides/workload-autoscaling` scenario, which the CLI can't find for
 two-variant teardown).
 
-Teardown removes WVA **first**, then the Helm releases: a namespace-scoped
+Teardown removes the scaling manager **first**, then the Helm releases: a namespace-scoped
 install still creates cluster-scoped RBAC, which deleting the namespace would
 leave behind. Pass the same `ENVIRONMENT` you installed with.
 
@@ -439,13 +439,13 @@ to the per-step batch budget: check the model server emits
 | `hack/benchmark/scenarios/guides/variants/v2-tp1-cheaper.yaml` | Default secondary-variant config (suffix `v2`, cost 5.0, TP=1) consumed by `make benchmark-add-variant`. Override path with `VARIANT_CONFIG=<path>`. |
 | `hack/benchmark/add_variant.py` | Creates the secondary `Deployment` and clones the primary's `ScaledObject` onto it, with the kebab-label trick. |
 | `deploy/lib/scaledobject.sh` | Discovers llm-d model servers and renders their `ScaledObject`s. Driven by `make scaledobjects-apply`, which `benchmark-deploy-wva` calls. |
-| `hack/benchmark/post_run_analyze.sh` | Wraps the five post-run dump+plot steps. Must run promptly after `benchmark-run` — the WVA controller log buffer rotates. Usage: `bash hack/benchmark/post_run_analyze.sh <results-dir> [namespace]`. |
-| `hack/benchmark/dump_wva_target_timeseries.py` | Extracts WVA controller decisions and saturation analysis numbers (supply, demand, utilization, required/spare capacity) from pod logs into `metrics/processed/wva_target_timeseries.json`. |
+| `hack/benchmark/post_run_analyze.sh` | Wraps the five post-run dump+plot steps. Must run promptly after `benchmark-run` — the scaling manager controller log buffer rotates. Usage: `bash hack/benchmark/post_run_analyze.sh <results-dir> [namespace]`. |
+| `hack/benchmark/dump_wva_target_timeseries.py` | Extracts the scaling manager controller decisions and saturation analysis numbers (supply, demand, utilization, required/spare capacity) from pod logs into `metrics/processed/wva_target_timeseries.json`. |
 | `hack/benchmark/dump_capacity_demand_estimate.py` | Computes per-variant capacity/demand estimate from raw vLLM/EPP scrapes into `metrics/processed/capacity_demand_estimate.json`. |
 | `hack/benchmark/dump_epp_throughput.py` | Derives request rate from EPP counters into `metrics/processed/epp_throughput.json`. |
-| `hack/benchmark/dump_wva_full_timeseries.py` | Extracts WVA Prometheus metrics timeseries into `metrics/processed/wva_metrics_timeseries.json`. |
+| `hack/benchmark/dump_wva_full_timeseries.py` | Extracts llm-scaling-manager Prometheus metrics timeseries into `metrics/processed/wva_metrics_timeseries.json`. |
 | `hack/benchmark/postprocess.py` | Generates a markdown results table (matching `docs/developer-guide/benchmark-results.md`) from a results directory. Called automatically by `make benchmark-report`. Pass `--secondary-suffix v2` for per-variant replica rows and weighted cost. |
-| `hack/benchmark/plot_two_variant_pipeline.py` | Generates the full-pipeline PNG (up to 7 panels: replicas, capacity/demand, KV cache, requests running/waiting, EPP queue, gateway throughput, WVA saturation utilization). Called automatically by `make benchmark-plot-two-variant`. |
+| `hack/benchmark/plot_two_variant_pipeline.py` | Generates the full-pipeline PNG (up to 7 panels: replicas, capacity/demand, KV cache, requests running/waiting, EPP queue, gateway throughput, the scaling manager saturation utilization). Called automatically by `make benchmark-plot-two-variant`. |
 | `hack/benchmark/scenarios/wva_threshold/wva_saturation_v2_config.yaml` | The `wva-scaling-policy-config` ConfigMap for the run: `analyzerName: saturation` plus the thresholds. Applied by `make benchmark-enable-v2-saturation`. |
 | `test/benchmark/scenarios/prefill_heavy.yaml.in` | Default workload for `make benchmark-run`. Edit `rate`/`max_seconds` here — `make benchmark-run` copies this file at run-time, overriding any stale defaults in the benchmark repo. |
 
@@ -470,7 +470,7 @@ to the per-step batch budget: check the model server emits
 
 - **Nothing in the controller log mentions the variant at all**
   → It has no `ScaledObject`, or its `ScaledObject` has no
-  `external`/`external-push` trigger. WVA is never called about it and so has
+  `external`/`external-push` trigger. The scaling manager is never called about it and so has
   nothing to say. `kubectl get scaledobject -n $NS -o yaml` and check the
   trigger type; `make scaledobjects-apply WVA_NS=$NS WVA_DEFAULT_SO_NS=$NS`
   creates the missing ones.
@@ -478,7 +478,7 @@ to the per-step batch budget: check the model server emits
   → The discovery scan looks for `llm-d.ai/inferenceServing=true` on the pod
   template. If the model servers are up and labelled and it still finds
   nothing, check the namespace it scanned: a namespace-scoped install scans
-  only its own, which is why the benchmark installs WVA *into* `$NS`.
+  only its own, which is why the benchmark installs the scaling manager *into* `$NS`.
 - **Both variants scale to `maxReplicas` immediately under modest load**
   → The analyzer read fallback capacity, not real KV. Check the model server
   image emits `vllm:cache_config_info` ([Required pieces #4](#4-newer-vllm-image)).
@@ -501,4 +501,4 @@ to the per-step batch budget: check the model server emits
 - **The results look like a released build, because they are**
   → `IMG` was left at its default. There is no way to tell after the fact from
   the metrics alone; the standup prints the image it installs, so check the
-  standup log ([Required pieces #1](#1-wva-built-from-this-working-tree)).
+  standup log ([Required pieces #1](#1-the-scaling-manager-built-from-this-working-tree)).

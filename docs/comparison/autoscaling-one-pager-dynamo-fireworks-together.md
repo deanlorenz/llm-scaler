@@ -1,12 +1,12 @@
 # LLM Autoscaling Landscape — Dynamo · Fireworks · Together
 
-> One-page summary · verified **2026-08-09** · WVA shown as baseline · full detail: [autoscaling-nvidia-mooncake-sglang-vs-wva.md](./autoscaling-nvidia-mooncake-sglang-vs-wva.md)
+> One-page summary · verified **2026-08-09** · the scaling manager shown as baseline · full detail: [autoscaling-nvidia-mooncake-sglang-vs-wva.md](./autoscaling-nvidia-mooncake-sglang-vs-wva.md)
 
-**Two categories, not three competitors.** NVIDIA **Dynamo** is deployable software and WVA's only true peer. **Fireworks** and **Together** are managed SaaS: they scale *one endpoint you rent*, and the fleet problem WVA solves is the provider's, structurally invisible through their APIs. Compare Dynamo on scope; compare the SaaS pair on control law and signal choice.
+**Two categories, not three competitors.** NVIDIA **Dynamo** is deployable software and the scaling manager's only true peer. **Fireworks** and **Together** are managed SaaS: they scale *one endpoint you rent*, and the fleet problem the scaling manager solves is the provider's, structurally invisible through their APIs. Compare Dynamo on scope; compare the SaaS pair on control law and signal choice.
 
 ## Capability matrix
 
-| | **WVA** (baseline) | **NVIDIA Dynamo Planner** | **Fireworks AI** | **Together AI** |
+| | **the scaling manager** (baseline) | **NVIDIA Dynamo Planner** | **Fireworks AI** | **Together AI** |
 |---|---|---|---|---|
 | **Category** | Deployable OSS (K8s controller) | Deployable OSS | Managed SaaS | Managed SaaS |
 | **Control law** | Saturation optimizer; weighted multi-analyzer ballot | SLA perf-model → replicas | Threshold per target; **max across targets wins** | Proportional `ceil(N × observed/target)` |
@@ -25,11 +25,11 @@
 
 ## Verdicts
 
-**Dynamo — the real peer, and the only one with prediction.** Forecasting plus a quantitative SLA→capacity model, productized independent P/D scaling, self-contained operator. **Scale-down drains gracefully**: prefill workers get a SIGTERM and exit after finishing the current queued request ("no remote prefill request is dropped"); decode workers have their etcd lease revoked, leave the router, and "finish all the current requests in their original stream and exit gracefully." Pays for its strengths with scope: single-model, homogeneous GPUs, cost-blind, and pre-deployment profiling required. Its 2026 roadmap (Global Planner, Grove — #9178) targets exactly WVA's turf, so the edge is real today but contested.
+**Dynamo — the real peer, and the only one with prediction.** Forecasting plus a quantitative SLA→capacity model, productized independent P/D scaling, self-contained operator. **Scale-down drains gracefully**: prefill workers get a SIGTERM and exit after finishing the current queued request ("no remote prefill request is dropped"); decode workers have their etcd lease revoked, leave the router, and "finish all the current requests in their original stream and exit gracefully." Pays for its strengths with scope: single-model, homogeneous GPUs, cost-blind, and pre-deployment profiling required. Its 2026 roadmap (Global Planner, Grove — #9178) targets exactly the scaling manager's turf, so the edge is real today but contested.
 
 **Fireworks — simplest policy, best cost UX.** A clean threshold autoscaler over LLM-native rates whose real product is **scale-to-zero with a tunable idle window**. No latency scaling, no forecasting. Cold requests get an immediate `503 DEPLOYMENT_SCALING_UP`, deliberately not queued.
 
-**Together — richest metric menu, and the most honest engineering.** Proportional control, one metric per deployment, eight to choose from. Notably ships KV-cache utilization (`token_utilization`) — the same signal WVA leans on.
+**Together — richest metric menu, and the most honest engineering.** Proportional control, one metric per deployment, eight to choose from. Notably ships KV-cache utilization (`token_utilization`) — the same signal the scaling manager leans on.
 
 ## The one finding worth acting on
 
@@ -38,17 +38,17 @@ Together ships `ttft` p95, then **published that it doesn't work**. In their own
 - **TTFT** stays low under saturation — continuous batching absorbs queue pressure into *end-to-end* latency, so the metric looks healthy exactly when you need to scale.
 - **GPU utilization** misleads — *"utilization measures arithmetic intensity, not pressure"*; a GPU reads 60% busy while the queue backs up.
 
-A competitor's published negative result validating WVA's signal choice: **scale on saturation/queue, not latency or GPU busy-ness.** Cite it when challenged with "why not just target TTFT?" or "why not DCGM utilization?". It argues against a naive TTFT analyzer in the ballot.
+A competitor's published negative result validating the scaling manager's signal choice: **scale on saturation/queue, not latency or GPU busy-ness.** Cite it when challenged with "why not just target TTFT?" or "why not DCGM utilization?". It argues against a naive TTFT analyzer in the ballot.
 
 **Published cold-start figures** (Together, 1×H100 — rare public data, useful for scale-from-zero calibration): base model → READY **86 s**; fine-tune (18 GB) → READY **145 s**; READY → first token **+26–40 s**; scale-up 1→2 **≈2.5 min**. This ~2-minute floor is why both SaaS vendors set scale-down windows of 5–10 minutes.
 
-## Implications for WVA
+## Implications for the scaling manager
 
 1. **Forecasting is the one real gap.** Dynamo has it; neither SaaS platform does. It stays the clearest borrow — and the seam the Cluster Capacity Planner fills at a higher altitude.
-2. **Don't oversell "no profiling."** Dynamo's default profiling path is a **20–30 s offline calculation with no GPU and no traces** — too cheap to call a burden. The defensible version of the claim is that Dynamo needs that step **per model × per GPU type before the SLA planner runs at all**, which compounds across a heterogeneous multi-model fleet; WVA has no such bootstrap. Argue the compounding, not the one-off cost.
+2. **Don't oversell "no profiling."** Dynamo's default profiling path is a **20–30 s offline calculation with no GPU and no traces** — too cheap to call a burden. The defensible version of the claim is that Dynamo needs that step **per model × per GPU type before the SLA planner runs at all**, which compounds across a heterogeneous multi-model fleet; the scaling manager has no such bootstrap. Argue the compounding, not the one-off cost.
 3. **The structural moat holds.** Multi-model global scope, heterogeneous accelerators, cost-awareness, and GPU fair-share are absent from *all three* — and for the SaaS pair they are unreachable by construction, not merely unshipped.
 4. **Signal choice is now externally validated** — treat Together's negative result as evidence, not opinion.
-5. **Ergonomics are the honest weakness.** Both SaaS platforms expose scaling as a few named knobs with sane defaults; WVA exposes a ConfigMap of analyzers and thresholds. More powerful, much less approachable.
+5. **Ergonomics are the honest weakness.** Both SaaS platforms expose scaling as a few named knobs with sane defaults; the scaling manager exposes a ConfigMap of analyzers and thresholds. More powerful, much less approachable.
 
 ---
 

@@ -83,13 +83,13 @@ make run
 
 #### Option 2: In a Kind cluster
 
-**One-shot — create cluster and deploy WVA + EPP + monitoring:**
+**One-shot — create cluster and deploy the scaling manager + EPP + monitoring:**
 
 ```bash
 CREATE_CLUSTER=true make deploy-e2e-infra
 ```
 
-This creates a Kind cluster with emulated GPUs, then deploys the WVA controller, llm-d EPP (GAIE standalone), Prometheus stack, and KEDA (external metrics). No model service is included.
+This creates a Kind cluster with emulated GPUs, then deploys the scaling manager controller, llm-d EPP (GAIE standalone), Prometheus stack, and KEDA (external metrics). No model service is included.
 
 If you already have a cluster running, omit `CREATE_CLUSTER=true`:
 
@@ -114,7 +114,7 @@ kubectl apply -k config/samples/simulator/nodeSelector/disaggregated/
 
 Each configuration creates a Deployment (using `llm-d-inference-sim:v0.9.0`), a Service, a ServiceMonitor, and a KEDA `ScaledObject` in the `llm-d-sim` namespace.
 
-The `ScaledObject` is what makes the workload WVA's to manage: WVA has no watch and no listing, and learns a variant exists from the KEDA call its trigger causes. Its `modelID` must match what the container serves (`--model test-model` here) — that is the grouping key for every multi-variant decision. KEDA creates the HPA that actuates; nothing here writes one by hand.
+The `ScaledObject` is what makes the workload the scaling manager's to manage: The scaling manager has no watch and no listing, and learns a variant exists from the KEDA call its trigger causes. Its `modelID` must match what the container serves (`--model test-model` here) — that is the grouping key for every multi-variant decision. KEDA creates the HPA that actuates; nothing here writes one by hand.
 
 Confirm the chain is live:
 
@@ -211,7 +211,7 @@ go test -cover ./...
 
 ### E2E Tests
 
-WVA has a single consolidated E2E suite (`test/e2e/`) that runs on Kind (emulated) or OpenShift/kubernetes. Deploy infrastructure in infra-only mode first, then run tests.
+The scaling manager has a single consolidated E2E suite (`test/e2e/`) that runs on Kind (emulated) or OpenShift/kubernetes. Deploy infrastructure in infra-only mode first, then run tests.
 
 **Location**: `test/e2e/`
 
@@ -368,7 +368,7 @@ See the [Release Process](release-process.md) guide for how to cut a release. It
 - Pre-release checklist (changelog, optional version bumps, upstream pins)
 - Creating the tag and GitHub Release (which triggers the image build)
 - What runs automatically: Docker image build and push to GHCR
-- Post-release (required): update the llm-d [workload-autoscaling](https://github.com/llm-d/llm-d/tree/main/guides/workload-autoscaling) guide to the new WVA version
+- Post-release (required): update the llm-d [workload-autoscaling](https://github.com/llm-d/llm-d/tree/main/guides/workload-autoscaling) guide to the new the scaling manager version
 - Enabling other team members to perform releases (permissions, secrets, documentation)
 
 ## Getting Help

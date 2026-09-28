@@ -2,7 +2,7 @@
 
 Every option `deploy/install.sh` reads. Verified against the script: each entry here is read by something, and every `VAR=${VAR:-default}` in `install.sh` and `deploy/lib/*.sh` appears below.
 
-> Part of the [WVA deployment guide](../../deploy/).
+> Part of the [the scaling manager deployment guide](../../deploy/).
 
 ## Required
 
@@ -36,9 +36,9 @@ Every option `deploy/install.sh` reads. Verified against the script: each entry 
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `WVA_NS` | WVA controller namespace | `workload-variant-autoscaler-system` |
+| `WVA_NS` | the scaling manager controller namespace | `workload-variant-autoscaler-system` |
 | `MONITORING_NAMESPACE` | Prometheus namespace | `workload-variant-autoscaler-monitoring` |
-| `NAMESPACE` | Where llm-d runs — **llm-d's own variable**, exported by its guides. `deploy/install-epp.sh` installs EPP there, `DEPLOY_LLMD_NS=true` creates it, and setting it **defaults `WVA_NS` for the `*-namespace-on-*` targets** (an explicit `WVA_NS` wins; cluster-scoped targets are unaffected). It is never passed to the controller — WVA has no watch and no listing, and ScaledObject discovery does not read it — see [Which namespace is which](#which-namespace-is-which). **Required in namespace scope**, which is the default: the install refuses rather than guess which namespace it manages, so the fallback below applies only to cluster scope and `kind-emulator` | `llm-d-optimized-baseline` (cluster scope only) |
+| `NAMESPACE` | Where llm-d runs — **llm-d's own variable**, exported by its guides. `deploy/install-epp.sh` installs EPP there, `DEPLOY_LLMD_NS=true` creates it, and setting it **defaults `WVA_NS` for the `*-namespace-on-*` targets** (an explicit `WVA_NS` wins; cluster-scoped targets are unaffected). It is never passed to the controller — the scaling manager has no watch and no listing, and ScaledObject discovery does not read it — see [Which namespace is which](#which-namespace-is-which). **Required in namespace scope**, which is the default: the install refuses rather than guess which namespace it manages, so the fallback below applies only to cluster scope and `kind-emulator` | `llm-d-optimized-baseline` (cluster scope only) |
 | `LLMD_NS` | **Deprecated** alias for `NAMESPACE`, this repo's own former name for it. Still honoured, with a warning | — |
 
 ## Deployment flags
@@ -46,12 +46,12 @@ Every option `deploy/install.sh` reads. Verified against the script: each entry 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `DEPLOY_PROMETHEUS` | Deploy the Prometheus stack **when the cluster has none of its own**. A Prometheus outside `MONITORING_NAMESPACE` is used as it is, and no monitoring namespace is created. Set `PROMETHEUS_FORCE_INSTALL=true` to deploy alongside one (two operators then contend over the same CRs) | `true` |
-| `DEPLOY_OPERATIONAL_DASHBOARD` | Publish the WVA Grafana dashboard. On Kubernetes also enables Grafana in kube-prometheus-stack. Publishing into a **shared** monitoring namespace is a cluster-admin action; a namespace admin is told so and the install continues ([details](monitoring.md#if-you-cannot-write-to-the-monitoring-namespace)) | `true` |
-| `DEPLOY_WVA` | Deploy WVA controller | `true` |
+| `DEPLOY_OPERATIONAL_DASHBOARD` | Publish the llm-scaling-manager Grafana dashboard. On Kubernetes also enables Grafana in kube-prometheus-stack. Publishing into a **shared** monitoring namespace is a cluster-admin action; a namespace admin is told so and the install continues ([details](monitoring.md#if-you-cannot-write-to-the-monitoring-namespace)) | `true` |
+| `DEPLOY_WVA` | Deploy the scaling manager controller | `true` |
 | `DEPLOY_LWS` | Deploy LeaderWorkerSet (needed only for full e2e suite; skip for smoke, benchmarks, or pre-installed clusters) | `false` |
 | `DEPLOY_ALERTING_RULES` | Install the PrometheusRule alerts | `false` |
 | `WVA_FMA_LAUNCHER_METRICS` | Apply a PodMonitor that scrapes FMA launcher pods, which nothing else does — they declare no container ports, so a port-name endpoint generates no target for them. Applied to the **workload** namespace (`WVA_WATCH_NS`, else `WVA_NS`), and skipped if another PodMonitor already scrapes launchers there. See [FMA launcher pods](operations.md#fma-launcher-pods) | `false` |
-| `DEPLOY_LLMD_NS` | Create an empty llm-d namespace up front. Useful only for a demo that wants it to exist before anything is deployed into it; `deploy/install-epp.sh` creates its own when it deploys EPP. WVA does not watch namespaces, so this creates a namespace nothing is looking at | `false` |
+| `DEPLOY_LLMD_NS` | Create an empty llm-d namespace up front. Useful only for a demo that wants it to exist before anything is deployed into it; `deploy/install-epp.sh` creates its own when it deploys EPP. The scaling manager does not watch namespaces, so this creates a namespace nothing is looking at | `false` |
 | `ENABLE_SCALE_TO_ZERO` | Allow a model to be parked at zero replicas, and enable the EPP `flowControl` gate that makes waking it possible | `true` |
 | `SKIP_CHECKS` | Skip prerequisite checks | `false` |
 | `SCALER_BACKEND` | `keda` or `none` (use a pre-installed backend) | `keda` |
@@ -59,7 +59,7 @@ Every option `deploy/install.sh` reads. Verified against the script: each entry 
 | `KEDA_HELM_INSTALL` | Install KEDA with Helm rather than assuming it is present | `false` |
 | `KEDA_CHART_VERSION` | KEDA Helm chart version | `2.19.0` |
 | `UNDEPLOY` | Remove instead of install (`install.sh` doubles as the uninstaller) | `false` |
-| `DELETE_NAMESPACES` | With `UNDEPLOY=true`, also delete the WVA and monitoring namespaces | `false` |
+| `DELETE_NAMESPACES` | With `UNDEPLOY=true`, also delete the scaling manager and monitoring namespaces | `false` |
 | `DELETE_LLMD_NS` | With `DELETE_NAMESPACES=true`, also delete `LLMD_NS`. Separate because that namespace holds the model servers: deleting it takes the workloads with it | `false` |
 | `CHECK_ONLY` | Run the prerequisite and permission checks, then exit without deploying. Set by `--check` / `make check-prereqs` | `false` |
 | `WVA_REPLICAS` | Controller replicas. The manifest already elects a leader, so extra replicas are **warm standbys, not extra throughput** — only the leader runs the optimization loops. Two turns a node drain from "no decisions until rescheduled" into a lease timeout | `1` |
@@ -76,8 +76,8 @@ ScaledObjects, HPA stabilization (`spec.advanced.horizontalPodAutoscalerConfig.b
 
 ## Default ScaledObjects
 
-**Read this if WVA is installed and nothing is scaling.** A ScaledObject is how a
-workload *registers* with WVA: the controller has no watch and no listing, so it
+**Read this if the scaling manager is installed and nothing is scaling.** A ScaledObject is how a
+workload *registers* with the scaling manager: the controller has no watch and no listing, so it
 only ever learns about workloads KEDA calls it about. An install with no
 ScaledObject anywhere is a controller that is never asked anything — idle, and
 reporting itself healthy.
@@ -106,12 +106,12 @@ explained in the comments it is written with, so editing it needs nothing open
 next to it. Printed as a table on the way past, and written like this:
 
 ```yaml
-# WVA ScaledObject plan. Nothing here has been applied yet.
+# llm-scaling-manager ScaledObject plan. Nothing here has been applied yet.
 #
 # apply          Required. One of:
 #                  yes    create a ScaledObject for this workload
 #                  no     leave the workload alone
-#                  adopt  it already has a ScaledObject — repoint that one at WVA
+#                  adopt  it already has a ScaledObject — repoint that one at the scaling manager
 #                         instead of adding a second.
 # ...
 plan:
@@ -151,10 +151,10 @@ what happens: `# scaledObject:` names the object `adopt` would repoint, and
 | --- | --- |
 | `apply` | `yes` creates, `no` skips, `adopt` repoints a ScaledObject the workload already has. Never both: two ScaledObjects on one target is two HPAs writing the same replica count, so `yes` on a workload that already has one is refused rather than quietly adopted |
 | `modelID` | **Required.** What the container serves, and the grouping key — entries sharing a `modelID` are sized against each other. An entry with none is never applied: an object created without it registers a variant of a model nobody runs |
-| `minReplicas` / `maxReplicas` | What KEDA holds the workload between; WVA decides within them. Default 1 and 10, and for `adopt` they are read from the object being adopted, so applying it unedited changes only who decides the count |
+| `minReplicas` / `maxReplicas` | What KEDA holds the workload between; the scaling manager decides within them. Default 1 and 10, and for `adopt` they are read from the object being adopted, so applying it unedited changes only who decides the count |
 | `variantCost` | The relative price of one replica of this variant. Only the ratio between variants of one model matters, so with one variant it changes nothing |
 | `scalingPolicy` | Optional, and commented out by default. Names a reusable policy tier — `interactive`, `standard`, `batch` — from the scaling-policy ConfigMap. Leaving it out means "whatever the cluster default says", which an admin can then change for every workload at once; naming one opts this workload out of that. A name no tier matches falls back to the default silently |
-| `inferencePool` | Informational, a comment, never applied: the EPP queue that workload sits behind, resolved by matching pod labels against each pool's selector — the same way WVA resolves it. `(none)` means no pool has adopted it |
+| `inferencePool` | Informational, a comment, never applied: the EPP queue that workload sits behind, resolved by matching pod labels against each pool's selector — the same way the scaling manager resolves it. `(none)` means no pool has adopted it |
 
 Entries that cannot be applied are marked `no` **and kept**, with the reason,
 rather than dropped: the file is then the whole truth about what was found, and
@@ -167,7 +167,7 @@ do is also reachable through plan-then-apply, which does not.
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `WVA_DEFAULT_SO` | `false` (do nothing), `plan` (list and stop), `edit` (list, `$EDITOR`, confirm), `true` (apply everything found) | `false` |
-| `WVA_DEFAULT_SO_NS` | Namespace to scan. `wva` for WVA's own, `all` for every namespace holding model servers. The default follows what this install can reach — `all` when cluster-scoped, its own namespace when namespace-scoped — so you rarely need to set it | scope-derived |
+| `WVA_DEFAULT_SO_NS` | Namespace to scan. `wva` for the scaling manager's own, `all` for every namespace holding model servers. The default follows what this install can reach — `all` when cluster-scoped, its own namespace when namespace-scoped — so you rarely need to set it | scope-derived |
 | `WVA_DEFAULT_SO_PLAN` | An existing file is applied as-is, edits included. Otherwise, where the generated plan is written | a temp file |
 | `WVA_DEFAULT_SO_MIN` | `minReplicaCount` on generated objects. Not `0` even with scale-to-zero on: parking a model costs its next request a cold start, which is a decision about that workload's users | `1` |
 | `WVA_DEFAULT_SO_MAX` | `maxReplicaCount` on generated objects | `10` |
@@ -189,7 +189,7 @@ The scaling behaviour is written into every generated ScaledObject rather than
 inherited. Kubernetes' own defaults happen to match the windows above, so on a
 stock cluster only the policy periods differ — but those defaults belong to the
 API server, and a cluster that retunes them would quietly change how every
-workload WVA creates scales, with nothing in the object to show it. The
+workload the scaling manager creates scales, with nothing in the object to show it. The
 asymmetry is deliberate: scale-up acts immediately because the wait is already
 paid in cold start, while scale-down is patient because removing a replica too
 early costs that cold start on the next request and keeping one too long only
@@ -214,7 +214,7 @@ because a wrong `modelID` groups a workload with a model it does not serve and
 mis-scales both.
 
 Generated objects use an `external-push` trigger, so KEDA holds a stream open and
-WVA pushes activation the moment it decides — the difference between waking a
+The scaling manager pushes activation the moment it decides — the difference between waking a
 parked workload in about the detection interval and waiting out a poll.
 
 ### Workload readiness (`make workload-patch`)
@@ -222,7 +222,7 @@ parked workload in about the detection interval and waiting out a poll.
 Two pod-spec settings decide whether autoscaling a model server is safe to turn
 on: a preStop hook, so a removed replica finishes what it is writing, and weights
 that land on a mounted volume, so a new replica does not re-download them.
-Neither belongs to WVA — they belong to the chart that owns the pod spec — so
+Neither belongs to the scaling manager — they belong to the chart that owns the pod spec — so
 `make workload-patch` writes a patch and, on request, applies the half that is
 safe to apply. Full description in
 [After the install](workload-preparation.md#writing-the-patch-make-workload-patch).
@@ -303,7 +303,7 @@ cluster-scoped install scans every namespace holding model servers, because it c
 manage them all; a namespace-scoped install scans its own, because that is the only
 namespace it can read. `WVA_DEFAULT_SO_NS` narrows it if you want less.
 
-`NAMESPACE` not reaching the controller is not an oversight. WVA has no watch and no
+`NAMESPACE` not reaching the controller is not an oversight. The scaling manager has no watch and no
 listing: it learns about a workload when KEDA calls its external scaler about it,
 from any namespace. It never goes looking in a namespace, so it has no use for the
 name of one.
@@ -338,14 +338,14 @@ Whichever combination you have, `./deploy/install.sh --check` answers it for you
 install specifically: it renders the overlay this install would apply and asks
 whether you may create each kind in it, rather than assuming from the scope name.
 
-Either way the grant is read-only: WVA never writes to the cluster, because KEDA
+Either way the grant is read-only: The scaling manager never writes to the cluster, because KEDA
 performs the actuation. The one genuinely cluster-scoped read is **nodes**, used to
 resolve each variant's accelerator, which is why the `gpu-inventory` limiter needs
 the node-reader ClusterRole the prereqs phase creates — see
 [GPU limiter](gpu-limiter.md#permission-nodes).
 
 > **The constraint that follows, and it is easy to get wrong:** a namespace-scoped
-> WVA can only manage model servers **in its own namespace**. Installing one into
+> The scaling manager can only manage model servers **in its own namespace**. Installing one into
 > `wva-system` while your models run in `llm-d-prod` gives you a controller that
 > KEDA will call and that cannot read the workload it is being asked about. For a
 > namespace-scoped install, either put the controller in the namespace with the
@@ -362,14 +362,14 @@ untouched. `KEDA_HELM_INSTALL=true` is the opt-in that would install one; even t
 it skips when a working KEDA (CRD + running operator + metrics APIService) is
 already there. `SCALER_BACKEND=none` skips the check entirely.
 
-**Uninstalling WVA does not uninstall KEDA, Prometheus or EPP.** Removing WVA is the
-job; removing what WVA was pointed at is a separate decision, and an explicit one —
+**Uninstalling the scaling manager does not uninstall KEDA, Prometheus or EPP.** Removing the scaling manager is the
+job; removing what the scaling manager was pointed at is a separate decision, and an explicit one —
 `UNDEPLOY_SHARED=true`.
 
-**A second WVA is refused.** Their workloads would be separate — a workload
+**A second the scaling manager is refused.** Their workloads would be separate — a workload
 registers with the scaler address its trigger names — but their GPU budgets would
 not. See
-[One WVA per cluster](../guides/install-cluster-wide/).
+[One the scaling manager per cluster](../guides/install-cluster-wide/).
 
 ## Adding a model later
 
@@ -411,7 +411,7 @@ make deploy-wva-on-k8s WVA_REPLICAS=2
 ```
 
 What that buys is failover: a node drain or a crash costs you a lease timeout rather
-than the time to reschedule a pod. What it does not buy is throughput — WVA's cycle
+than the time to reschedule a pod. What it does not buy is throughput — the scaling manager's cycle
 is one process reasoning about the whole fleet at once, deliberately, because a GPU
 budget cannot be split across controllers that cannot see each other's decisions —
 which is also why there is no supported way to run two.
@@ -422,7 +422,7 @@ which is also why there is no supported way to run two.
 |----------|-------------|---------|
 | `SKIP_TLS_VERIFY` | Skip Prometheus TLS verification | `false`, forced to `true` on OpenShift and for in-cluster self-signed Prometheus |
 | `WVA_STICKY_SCALE_DOWN` | Hold a published scale-down against demand noise until utilization at the published count would reach the scale-up threshold, so the fleet actually descends. Off, a model idling near the scale-down boundary flips its target N ↔ N−1 cycle to cycle and KEDA's 300 s window keeps the N-th replica for as long as the noise lasts. Turn off only to compare | `true` |
-| `WVA_LOG_LEVEL` | WVA logging level | `info` |
+| `WVA_LOG_LEVEL` | the scaling manager logging level | `info` |
 | `PROMETHEUS_SECRET_NAME` | Secret holding the Prometheus serving cert | `prometheus-web-tls` |
 | `PROMETHEUS_SECRET_NS` | Namespace of that secret | `$MONITORING_NAMESPACE` |
 | `PROM_CA_CERT_PATH` | Where the extracted Prometheus CA is written | `/tmp/prometheus-ca.crt` |

@@ -3,7 +3,7 @@
 **Status:** proposal, 2026-09-21, revised after review. Decisions in this
 document are the repository owner's; each one is marked **Decision** where
 the text asks for it. A prerequisite for the shape-shift proposal
-([PR #86](https://github.com/ev-shindin/llm-scaler/pull/86)), whose items 1
+([PR #86](https://github.com/ev-shindin/llm-scaling-manager/pull/86)), whose items 1
 and 2 land in the packages this document creates. It continues, and must
 stay consistent with, the plan already on `main`:
 [`docs/plans/analyzers/analyzer-architecture-refactor.md`](../plans/analyzers/analyzer-architecture-refactor.md),

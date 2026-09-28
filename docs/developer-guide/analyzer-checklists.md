@@ -1,10 +1,10 @@
 # Analyzer checklists
 
-This document defines the benchmark-based checklists that will enable a analyzer to be graduated. The new analyzer could be expected to work with existing analyzers in turn provide value to WVA by improving latency or cost or both. the **current default analyzer's** results recorded in [`docs/developer-guide/benchmark-results.md`](benchmark-results.md) in general the expectation is that the new analyzer(s) should improve over the reported baselines for specific scenario(s) that the analyzer targets.
+This document defines the benchmark-based checklists that will enable a analyzer to be graduated. The new analyzer could be expected to work with existing analyzers in turn provide value to the scaling manager by improving latency or cost or both. the **current default analyzer's** results recorded in [`docs/developer-guide/benchmark-results.md`](benchmark-results.md) in general the expectation is that the new analyzer(s) should improve over the reported baselines for specific scenario(s) that the analyzer targets.
 
 ## Reference Workloads
 
-Every candidate analyzer in WVA must be periodically benchmarked against scenario(s) which it plan's to improve. Benchmarking should be done using llm-d components by installing Gateway and the llm-d request scheduler plugins with flow controller enabled on GPU cluster. below are few sample current scenarios.
+Every candidate analyzer in the scaling manager must be periodically benchmarked against scenario(s) which it plan's to improve. Benchmarking should be done using llm-d components by installing Gateway and the llm-d request scheduler plugins with flow controller enabled on GPU cluster. below are few sample current scenarios.
 
 | Scenario | Input Tokens | Output Tokens | Request Rate | Duration |
 |---|---|---|---|---|

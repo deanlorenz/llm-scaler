@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Workload Variant Autoscaler supports saturation-based scaling using KV cache utilization and queue length metrics. This feature is enabled by default and configured via a ConfigMap.
+llm-scaling-manager supports saturation-based scaling using KV cache utilization and queue length metrics. This feature is enabled by default and configured via a ConfigMap.
 
 **Key features:**
 - ✅ ConfigMap-based configuration with global defaults and per-model overrides
@@ -81,13 +81,13 @@ overlapping, and neither knob alone predicts the result:
 
 ```text
 last request ──┬─ retentionPeriod ─┬─ ≤1 optimize interval ─┬─ cooldownPeriod ─┬─ 0 replicas
-               │ (WVA's idle query)│ (WVA publishes 0, the  │ (KEDA)           │
+               │ (the scaling manager's idle query)│ (the scaling manager publishes 0, the  │ (KEDA)           │
                │                   │  trigger goes inactive)│                  │
 ```
 
-WVA's external scaler reports the trigger active *unless WVA has decided the model
-needs zero replicas*, so KEDA's cooldown clock cannot start until WVA has already
-decided to park — and WVA decides that only once `increase(...[retentionPeriod])`
+The scaling manager's external scaler reports the trigger active *unless the scaling manager has decided the model
+needs zero replicas*, so KEDA's cooldown clock cannot start until the scaling manager has already
+decided to park — and the scaling manager decides that only once `increase(...[retentionPeriod])`
 reads zero. With both defaults that is **10m + 300s ≈ 15 minutes**, plus up to one
 `GLOBAL_OPT_INTERVAL` (15s). A fleet that "will not park" is often just this sum.
 
@@ -96,8 +96,8 @@ This applies to the **deactivation step only** — the final drop to
 scale-down while the trigger is still active (10 → 3) goes through the HPA and is
 governed by its own stabilization behaviour; neither KEDA cooldown is consulted.
 
-WVA adds no hold of its own here. KEDA already guards that one transition, per
-ScaledObject, from cluster state — the same reason WVA reads `minReplicaCount`
+The scaling manager adds no hold of its own here. KEDA already guards that one transition, per
+ScaledObject, from cluster state — the same reason the scaling manager reads `minReplicaCount`
 off the object rather than duplicating it into trigger metadata.
 
 ### `scaleFromZero`
@@ -165,7 +165,7 @@ when any of these hold:
 > *installed* GPU rather than what is actually available. Both are described,
 > with their fixes and current status, in
 > [GPU Capacity Accounting](../concepts/gpu-capacity-accounting.md). The short version: make
-> the accelerator resolvable with a `nodeSelector`/`nodeAffinity` GPU key — WVA
+> the accelerator resolvable with a `nodeSelector`/`nodeAffinity` GPU key — the scaling manager
 > emits an `AcceleratorNotResolved` event otherwise, and resolves a RUNNING
 > variant by observing the nodes its pods landed on — and declare an explicit
 > quota limiter if you need a hard ceiling.
@@ -226,7 +226,7 @@ default: |
 
 ### ConfigMap Structure
 
-The saturation scaling configuration is stored in a ConfigMap named `wva-scaling-policy-config` in the Workload Variant Autoscaler controller's namespace.
+The saturation scaling configuration is stored in a ConfigMap named `wva-scaling-policy-config` in llm-scaling-manager controller's namespace.
 
 **Location:** `deploy/configmap-scaling-policy.yaml`
 
@@ -517,13 +517,13 @@ This 1-to-1 architecture means that saturation detection and request routing dec
 
 ### Threshold Alignment Recommendation
 
-**For optimal cluster performance, we strongly recommend using the same threshold values for both WVA (Workload Variant Autoscaler) and InferenceScheduler (End Point Picker) for each model deployment.**
+**For optimal cluster performance, we strongly recommend using the same threshold values for both the scaling manager (llm-scaling-manager) and InferenceScheduler (End Point Picker) for each model deployment.**
 
 Using aligned thresholds ensures consistent capacity management across the cluster and prevents request drop situations.
 
 **Why threshold alignment matters:**
 
-1. **Reduced Request Drop Rates**: When WVA and EPP use the same saturation thresholds, the scheduler will avoid routing requests to replicas that WVA already considers saturated. This prevents the scheduler from overloading replicas that are about to trigger scale-up.
+1. **Reduced Request Drop Rates**: When the scaling manager and EPP use the same saturation thresholds, the scheduler will avoid routing requests to replicas that the scaling manager already considers saturated. This prevents the scheduler from overloading replicas that are about to trigger scale-up.
 
 2. **Consistent Capacity Assessment**: Both components evaluate replica capacity using the same criteria (KV cache utilization and queue length), ensuring coordinated behavior across the entire inference stack.
 
@@ -533,10 +533,10 @@ Using aligned thresholds ensures consistent capacity management across the clust
 
 ### Configuration Comparison
 
-#### WVA Saturation Scaling Configuration
+#### llm-scaling-manager Saturation Scaling Configuration
 
 ```yaml
-# WVA Configuration (wva-scaling-policy-config ConfigMap)
+# llm-scaling-manager Configuration (wva-scaling-policy-config ConfigMap)
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -569,12 +569,12 @@ saturationDetector:
 **Configuration Notes**:
 - All parameters are optional; omitting them applies the documented defaults
 - EPP configuration is **read only on startup** - changes require EPP pod restart
-- Unlike WVA, EPP does not currently support live ConfigMap updates
+- Unlike the scaling manager, EPP does not currently support live ConfigMap updates
 - **Each EPP instance** (one per model) can have different threshold values
 
 ### Parameter Mapping and Alignment
 
-| Concept | WVA Field | EPP Field | Aligned Default | Description |
+| Concept | llm-scaling-manager Field | EPP Field | Aligned Default | Description |
 |---------|-----------|-----------|-----------------|-------------|
 | **KV Cache Saturation** | `kvCacheThreshold` | `kvCacheUtilThreshold` | **0.80** (80%) | Replica is saturated when KV cache ≥ threshold |
 | **Queue Saturation** | `queueLengthThreshold` | `queueDepthThreshold` | **5** | Replica is saturated when queue length ≥ threshold |
@@ -591,7 +591,7 @@ Choose thresholds based on your workload characteristics and SLO requirements:
 | **Aggressive** (High GPU utilization) | 0.90 | 15 | Maximize GPU usage, higher latency variance |
 | **Strict** (Low latency SLO) | 0.70 | 3 | Prioritize responsiveness, lower utilization |
 
-#### Step 2: Apply to WVA
+#### Step 2: Apply to the scaling manager
 
 Update `wva-scaling-policy-config` ConfigMap:
 
@@ -599,7 +599,7 @@ Update `wva-scaling-policy-config` ConfigMap:
 kubectl edit cm wva-scaling-policy-config -n <workload-variant-autoscaler-namespace>
 ```
 
-Changes take effect **immediately** (WVA watches ConfigMap and auto-reloads).
+Changes take effect **immediately** (the scaling manager watches ConfigMap and auto-reloads).
 
 #### Step 3: Apply to EPP
 
@@ -632,7 +632,7 @@ kubectl rollout restart deployment/gaie-llama-70b-epp -n lab
 
 #### Step 4: Verify Configuration
 
-**WVA verification:**
+**the scaling manager verification:**
 ```bash
 kubectl get cm wva-scaling-policy-config -n <workload-variant-autoscaler-namespace> -o yaml
 ```
@@ -649,22 +649,22 @@ kubectl logs -n production deployment/gaie-granite-13b-epp --all-containers | gr
 ### Alignment Best Practices
 
 1. **Core Thresholds Must Match Per Model**:
-   - `kvCacheThreshold` (WVA) = `kvCacheUtilThreshold` (EPP)
-   - `queueLengthThreshold` (WVA) = `queueDepthThreshold` (EPP)
+   - `kvCacheThreshold` (the scaling manager) = `kvCacheUtilThreshold` (EPP)
+   - `queueLengthThreshold` (the scaling manager) = `queueDepthThreshold` (EPP)
    - **Important**: Since each model has its own EPP instance, ensure thresholds align for **each model deployment** individually
 
 2. **Per-Model Configuration Strategy**:
-   - Use WVA's per-model override feature to set model-specific thresholds
+   - Use the scaling manager's per-model override feature to set model-specific thresholds
    - Configure the corresponding EPP instance with matching thresholds
    - Document the threshold mapping for each model deployment
-   - Example: If `ibm/granite-13b` uses `kvCacheThreshold: 0.85` in WVA, its dedicated EPP must use `kvCacheUtilThreshold: 0.85`
+   - Example: If `ibm/granite-13b` uses `kvCacheThreshold: 0.85` in the scaling manager, its dedicated EPP must use `kvCacheUtilThreshold: 0.85`
 
 
 4. **Testing Threshold Changes**:
    - Test in development environment first
    - Monitor impact on request drop rate and latency for the specific model
    - Adjust based on observed behavior
-   - Remember to update both WVA and the model's EPP instance
+   - Remember to update both the scaling manager and the model's EPP instance
 
 ## Usage
 
@@ -710,7 +710,7 @@ kubectl apply -f deploy/configmap-scaling-policy.yaml
 
 **Note:** Changes take effect immediately! The controller watches the ConfigMap and automatically:
 1. Reloads the cache when changes are detected
-2. Triggers reconciliation of all VariantAutoscaling resources
+2. Triggers a reconcile of every discovered variant
 3. Applies the new configuration without requiring pod restart
 
 ### 3. Named Policy Tiers
@@ -1002,8 +1002,8 @@ data:
 
 **Checklist:**
 1. Verify the entry sets `model_id` and `namespace` in its **body** (the key is arbitrary). A key like `"ibm/granite-13b#production"` cannot exist — Kubernetes allows only `[-._a-zA-Z0-9]` in a ConfigMap key, which excludes both `/` and `#`
-2. Verify `modelID` exactly matches `va.Spec.ModelID`
-3. Verify `namespace` exactly matches the VariantAutoscaling resource namespace
+2. Verify `modelID` exactly matches the model the variant serves
+3. Verify `namespace` exactly matches the variant's namespace
 4. Check controller logs for validation errors
 5. Ensure entry passed validation (check for WARN logs)
 
@@ -1027,7 +1027,6 @@ data:
    ```text
    INFO  Updated global scaling policy from ConfigMap  entries=2
    INFO  Effective scaling policy  namespace=... modelID=... scalingPolicy="(default entry)"
-   INFO  Triggering reconciliation for all VariantAutoscaling resources
    ```
 
 3. **If no logs appear, verify watch is working:**

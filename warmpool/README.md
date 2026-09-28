@@ -37,7 +37,7 @@ than a fork.
 The second reason is scope: FMA's Kubernetes half (dual-pods controller,
 launcher-populator, `LauncherPopulationPolicy`, the requester/SPI/proxy path)
 exists to pair transient requester Pods with launchers. A pool needs none of it —
-WVA already runs a control loop, knows the InferencePools, and decides what
+The scaling manager already runs a control loop, knows the InferencePools, and decides what
 should be warm.
 
 ## What is copied, and from where
@@ -74,21 +74,21 @@ commit **`65ba31b`** (upstream `2c01cf8`, plus the port-conflict reclaim fix in
 The launcher has **no sleep or wake endpoint**, and that is correct rather than
 missing: in FMA the *controller* calls vLLM's own HTTP API directly
 (`inference-server.go` calls `/wake_up`, `/sleep` and `/is_sleeping` on the
-instance). WVA takes that role.
+instance). The scaling manager takes that role.
 
 | responsibility | where |
 | --- | --- |
 | spawn / list / delete engines in a Pod | supervisor (this directory) |
-| `/sleep`, `/wake_up`, `/is_sleeping` | **WVA**, over HTTP to the engine's port |
-| which models are warm, which wakes, which is evicted | **WVA** — it is an allocation problem, which is what WVA is for |
-| joining a woken model to its InferencePool | **WVA** — label membership; readiness comes from an ordinary probe against the proxy's `/readyz`, not a Pod readiness gate |
+| `/sleep`, `/wake_up`, `/is_sleeping` | **the scaling manager**, over HTTP to the engine's port |
+| which models are warm, which wakes, which is evicted | **the scaling manager** — it is an allocation problem, which is what the scaling manager is for |
+| joining a woken model to its InferencePool | **the scaling manager** — label membership; readiness comes from an ordinary probe against the proxy's `/readyz`, not a Pod readiness gate |
 
 No policy lives in the Pod. That is deliberate: the cache policy is the part most
 likely to change, and it must be changeable without touching the data plane.
 
 ## What had to change, and where it changed
 
-All four are done. Note where: three of them turned out to be decisions WVA
+All four are done. Note where: three of them turned out to be decisions the scaling manager
 makes when CALLING the launcher, not modifications to the launcher itself, which
 is why the copy here runs unmodified.
 
@@ -96,17 +96,17 @@ is why the copy here runs unmodified.
    the supervisor allocates the container's own devices among instances rather
    than being handed a device by a requester.
 2. **Instance identity keyed by model**, not by a hash over GPU UUIDs. Done in
-   WVA (`pool.InstanceID`): the launcher takes the ID from its caller. The hash is
+   the scaling manager (`pool.InstanceID`): the launcher takes the ID from its caller. The hash is
    correct *for FMA* — `CUDA_VISIBLE_DEVICES` is fixed at process start, so a
    sleeper is not portable between GPUs — but our reuse question is "is this model
    resident in this Pod", which the model name answers.
 3. **Ports assigned from a local range**, not derived from an
-   InferenceServerConfig. Done in WVA (`pool.freePort`): the launcher takes the
+   InferenceServerConfig. Done in the scaling manager (`pool.freePort`): the launcher takes the
    port from its caller too.
    FMA's ISC-derived port is what made two instances of one model collide, and the
    port-conflict fix in `aa072ef` is a workaround for it.
 4. **Drop the launcher-notifier sidecar** — never copied, so nothing to do:
    it maintains the `dual-pods.llm-d.ai/sleeping` label for the dual-pods
-   controller. WVA reads instance state from the supervisor instead, which the
+   controller. The scaling manager reads instance state from the supervisor instead, which the
    measurements showed is the reliable source — the Pod label is per-Pod and flips
    for reasons unrelated to whether a given model is asleep.

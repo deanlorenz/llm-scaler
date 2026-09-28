@@ -51,7 +51,7 @@ Prefer placing documentation in the `docs/` directory. It is split by audience,
 and that split is the point: a reader must be able to tell from the path whether
 a page is written for them.
 
-**User-facing** - someone running WVA, not changing it:
+**User-facing** - someone running the scaling manager, not changing it:
 
 1. **Well-lit paths** - one scenario, in `docs/well-lit-paths/<scenario>/`: what
    it buys, what it costs, when not to take it, and which suites and benchmark
@@ -61,7 +61,7 @@ a page is written for them.
    YAML and run `make guides-render`, never the block.
 3. **Reference** - what an operator sets and reads, in `docs/reference/`:
    configuration, scaling policy, metrics, troubleshooting.
-4. **Concepts** - how WVA decides, in an operator's terms, in `docs/concepts/`.
+4. **Concepts** - how the scaling manager decides, in an operator's terms, in `docs/concepts/`.
 
 **Developer-facing** - contributors and maintainers:
 

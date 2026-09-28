@@ -1,7 +1,7 @@
-# Autoscaling Landscape vs. WVA — NVIDIA Dynamo, Mooncake, SGLang, Fireworks AI, Together AI
+# Autoscaling Landscape vs. llm-scaling-manager — NVIDIA Dynamo, Mooncake, SGLang, Fireworks AI, Together AI
 
 > **Status:** Research comparison (untracked working doc) · **Date:** 2026-08-03 · **Managed providers added:** 2026-08-09
-> **Baseline:** llm-d Workload Variant Autoscaler (**WVA**)
+> **Baseline:** llm-d llm-scaling-manager (**the scaling manager**)
 > **Compared — deployable systems:** NVIDIA Dynamo Planner, Mooncake, SGLang · **managed platforms:** Fireworks AI, Together AI
 > All claims are sourced against latest docs/code — see [Sources](#sources).
 
@@ -11,18 +11,18 @@
 
 | System | Is it an autoscaler? | One-line posture |
 |---|---|---|
-| **WVA** (baseline) | **Yes** | Global, SLO/cost-aware, **heterogeneous, multi-model** controller; emits desired replicas → HPA/KEDA. |
+| **the scaling manager** (baseline) | **Yes** | Global, SLO/cost-aware, **heterogeneous, multi-model** controller; emits desired replicas → HPA/KEDA. |
 | **NVIDIA Dynamo Planner** | **Yes** | SLA-driven controller with **traffic forecasting** + **pre-deployment profiling**; scales prefill/decode independently; **single-model, homogeneous, cost-blind**. |
 | **Mooncake** | **No** | KVCache-aware scheduler + **early-rejection admission control** over a *fixed* pool. Sheds load; does not add capacity. Scheduling "brain" is **not open-source**. |
 | **SGLang** | **No (native)** | Engine + **router/gateway** (membership + cache-aware LB). Scaling delegated entirely to **external K8s** (HPA/KEDA, OME/Knative/LWS). |
 | **Fireworks AI** | **Yes, but** | **Managed SaaS.** Per-endpoint threshold autoscaler on LLM-native rates; **scale-to-zero is the headline feature**. No SLO model, no forecasting, not deployable. |
 | **Together AI** | **Yes, but** | **Managed SaaS.** Per-endpoint **proportional** autoscaler, `ceil(N × observed/target)`, **one metric only**; richest metric menu of anyone here (8, incl. TTFT/e2e p-tiles). No scale-to-zero-with-wake. |
 
-**The only true head-to-head is still WVA vs. Dynamo.** Mooncake and SGLang occupy different boxes: Mooncake *rejects* requests when overloaded; SGLang *routes* over whatever an external autoscaler provisions.
+**The only true head-to-head is still the scaling manager vs. Dynamo.** Mooncake and SGLang occupy different boxes: Mooncake *rejects* requests when overloaded; SGLang *routes* over whatever an external autoscaler provisions.
 
-**Fireworks and Together are a different category again — and the distinction matters.** They are *not* alternatives to WVA: you cannot run them on your cluster, and the hard part WVA solves (packing many models × variants onto a heterogeneous, quota-constrained GPU fleet) is the *provider's* internal problem, invisible to and unsolvable by the customer. What they are is the **competitive bar for what a customer experiences** — and, more usefully, a **published record of what a well-resourced team chose to ship** after operating LLM autoscaling at scale.
+**Fireworks and Together are a different category again — and the distinction matters.** They are *not* alternatives to the scaling manager: you cannot run them on your cluster, and the hard part the scaling manager solves (packing many models × variants onto a heterogeneous, quota-constrained GPU fleet) is the *provider's* internal problem, invisible to and unsolvable by the customer. What they are is the **competitive bar for what a customer experiences** — and, more usefully, a **published record of what a well-resourced team chose to ship** after operating LLM autoscaling at scale.
 
-> *When overloaded: WVA and Dynamo **add capacity**; Mooncake **sheds load**; SGLang **defers to Kubernetes**; Fireworks and Together **add replicas to one endpoint** and bill you for them.*
+> *When overloaded: The scaling manager and Dynamo **add capacity**; Mooncake **sheds load**; SGLang **defers to Kubernetes**; Fireworks and Together **add replicas to one endpoint** and bill you for them.*
 
 **2026 currency (verified 2026-08-03).** All three verdicts hold on current-year releases. **Dynamo** is under heavy 2026 development (**GA v1.0 Mar 2026**; latest **v1.3.1, 6 Aug 2026**) — the one shipped change of note is that **AIConfigurator (AIC) latency prediction replaced the hand-tuned cost model**, plus a plugin-pipeline refactor and MTP/observability plumbing; its single-DGD / homogeneous / cost-blind / average-ISL-OSL character is **unchanged** (cost, heterogeneity, multi-DGD, and distribution-aware planning are all roadmap — #9178 Global Planner, Grove — **not yet shipped**). **SGLang** (v0.5.16, Jul 2026; router 0.3.2, Jan 2026) and **Mooncake** (v0.3.12, Jul 2026) added **no** scaling control loop in 2026 — posture unchanged.
 
@@ -30,7 +30,7 @@
 
 ## At-a-glance comparison
 
-| Dimension | **WVA** | **Dynamo Planner** | **Mooncake** | **SGLang** |
+| Dimension | **the scaling manager** | **Dynamo Planner** | **Mooncake** | **SGLang** |
 |---|---|---|---|---|
 | **Type** | Global SLO/cost autoscaler | SLA-driven autoscaler (2 modes) | Scheduler + admission control | Engine + router (no autoscaler) |
 | **What it scales** | Replicas per model×variant | Prefill/decode replicas (independent) | Nothing (P:D ratio **preset**) | Nothing native (external scales replicas) |
@@ -61,21 +61,21 @@ Dynamo offers three ways to scale a `DynamoGraphDeployment`: generic **HPA**, **
 
 **Actuation:** its own controller patches the DGD replica counts (`update_graph_replicas`) via the Kubernetes operator — **not** HPA. A **VirtualConnector** can publish scaling decisions without managing the deployment infrastructure (suggest-only).
 
-**Where WVA leads:** multi-model/global scope (Dynamo is **single-DGD**; even GlobalPlanner requires all pools serve the *same* model), **heterogeneous GPU types** (Dynamo assumes one `system` e.g. `h200_sxm`), **cost-awareness + GPU fair-share/quota** (Dynamo is cost-blind with only a GPU-count cap), and **no mandatory pre-deployment profiling** (WVA learns online from metrics + deployment args).
+**Where the scaling manager leads:** multi-model/global scope (Dynamo is **single-DGD**; even GlobalPlanner requires all pools serve the *same* model), **heterogeneous GPU types** (Dynamo assumes one `system` e.g. `h200_sxm`), **cost-awareness + GPU fair-share/quota** (Dynamo is cost-blind with only a GPU-count cap), and **no mandatory pre-deployment profiling** (the scaling manager learns online from metrics + deployment args).
 
-**Where Dynamo leads:** **traffic forecasting** (WVA is reactive — this is WVA's biggest gap), a **quantitative SLA→capacity perf model** with profiling, **productized independent prefill/decode scaling**, and a **self-contained operator** (vs WVA's dependence on HPA/KEDA plumbing).
+**Where Dynamo leads:** **traffic forecasting** (the scaling manager is reactive — this is the scaling manager's biggest gap), a **quantitative SLA→capacity perf model** with profiling, **productized independent prefill/decode scaling**, and a **self-contained operator** (vs the scaling manager's dependence on HPA/KEDA plumbing).
 
 **Shared limitation:** both assume **average ISL/OSL** — neither is distribution-aware (bimodal interactive+batch).
 
 > **Correction (2026-08-09):** an earlier revision of this doc stated that Dynamo *"terminates in-flight requests on scale-down (no graceful drain)."* **That is wrong.** Dynamo drains gracefully on both roles: to scale down a **prefill** worker the planner sends **SIGTERM**, which the worker stores and acts on only after finishing the request already pulled from the queue, so *"no remote prefill request is dropped"*; to scale down a **decode** worker it **revokes the worker's etcd lease**, which immediately removes it from the router so it receives no new work, after which it *"finishes all the current requests in their original stream and exits gracefully."* Graceful drain is therefore a Dynamo **strength**, not a gap — see [sla_planner.md](https://github.com/ai-dynamo/dynamo/blob/main/docs/planner/sla_planner.md).
 
-**2026 status:** GA in **March 2026**; latest **v1.3.1 (6 Aug 2026)**, actively developed (planner commits through late Jul 2026). The notable 2026 *shipped* change is that **AIConfigurator (AIC) latency prediction replaced the hand-tuned cost model** — the planner now sizes on AIC-modeled serving cost — alongside a plugin-pipeline refactor (OBSERVE→PREDICT→PROPOSE→RECONCILE→CONSTRAIN→EXECUTE), MTP/speculative accept-length correction, and SLA-target Grafana dashboards. Crucially, the areas where **WVA leads — cost-awareness, heterogeneous GPUs, multi-DGD/multi-cluster, distribution-aware planning — remain roadmap, not shipped** (the planned **Global Planner** + **Grove** topology-aware scheduler target exactly this turf; roadmap #9178). So WVA's structural edges are real *today* but are explicitly in Dynamo's crosshairs — a moat to defend, not assume.
+**2026 status:** GA in **March 2026**; latest **v1.3.1 (6 Aug 2026)**, actively developed (planner commits through late Jul 2026). The notable 2026 *shipped* change is that **AIConfigurator (AIC) latency prediction replaced the hand-tuned cost model** — the planner now sizes on AIC-modeled serving cost — alongside a plugin-pipeline refactor (OBSERVE→PREDICT→PROPOSE→RECONCILE→CONSTRAIN→EXECUTE), MTP/speculative accept-length correction, and SLA-target Grafana dashboards. Crucially, the areas where **the scaling manager leads — cost-awareness, heterogeneous GPUs, multi-DGD/multi-cluster, distribution-aware planning — remain roadmap, not shipped** (the planned **Global Planner** + **Grove** topology-aware scheduler target exactly this turf; roadmap #9178). So the scaling manager's structural edges are real *today* but are explicitly in Dynamo's crosshairs — a moat to defend, not assume.
 
 ### Mooncake — not an autoscaler (load-shedding scheduler)
 
 Mooncake explicitly **rules out elastic scaling** ("elastically scaling out the inference cluster is typically unfeasible"), presets the prefill:decode instance ratio, and instead makes **overload-oriented scheduling** its core contribution: a **prediction-based early-rejection** policy that forecasts post-prefill decode load and rejects requests *before* wasting prefill compute if they'd miss SLO. The **Conductor** global scheduler does KVCache-aware routing, cache replication/swap, and P/D assignment — all **request-level**, never fleet-level.
 
-**Contrast with WVA:** opposite response to overload — Mooncake **sheds**, WVA **adds**. Also: Mooncake's scheduler ("brain") and rejection policy are **internal to Kimi, not open-sourced**; only the transfer engine and KV store are public. There is **no operator/HPA/controller** anywhere in the paper or repo. SLO-awareness is strong (goodput under TTFT/TBT); cost/heterogeneity awareness is absent.
+**Contrast with the scaling manager:** opposite response to overload — Mooncake **sheds**, the scaling manager **adds**. Also: Mooncake's scheduler ("brain") and rejection policy are **internal to Kimi, not open-sourced**; only the transfer engine and KV store are public. There is **no operator/HPA/controller** anywhere in the paper or repo. SLO-awareness is strong (goodput under TTFT/TBT); cost/heterogeneity awareness is absent.
 
 **2026:** unchanged — 2026 releases (v0.3.12, Jul 2026) are storage/transfer-engine only; the new `mooncake-ep`/`mooncake-pg` "elastic" refers to *fault-tolerant expert parallelism*, not autoscaling; Conductor remains closed-source. (The "elastic/scalable Mooncake" cloud recipes get elasticity from **RBG**, a separate K8s orchestrator, with Mooncake as just the KV data plane.)
 
@@ -83,7 +83,7 @@ Mooncake explicitly **rules out elastic scaling** ("elastically scaling out the 
 
 SGLang ships an **engine** (mature) and a **router / "Model Gateway"** (cache-aware L7 load balancer with dynamic worker membership). The router **register/deregisters workers** (`/workers` API + K8s service discovery) and load-balances (`cache_aware` default, `power_of_two`, `bucket`) — but **creates/destroys no replicas**. All closed-loop scaling is **external**: HPA/KEDA read SGLang's Prometheus metrics (`num_queue_reqs`, `num_running_reqs`, `token_usage`, TTFT/TPOT), and ecosystem stacks (OME → KEDA/Knative/LWS/Kueue) supply scale-to-zero and PD-aware scaling. PD disaggregation scaling is documented as **manual**.
 
-**Contrast with WVA:** SGLang is a superb *target* for an autoscaler but contributes none of the metric→decision→replica-count control loop. WVA (or Dynamo) is exactly the missing brain; in fact SGLang is a supported Dynamo backend.
+**Contrast with the scaling manager:** SGLang is a superb *target* for an autoscaler but contributes none of the metric→decision→replica-count control loop. The scaling manager (or Dynamo) is exactly the missing brain; in fact SGLang is a supported Dynamo backend.
 
 **2026:** unchanged — releases through **v0.5.16 (Jul 2026)** and the 2026 roadmaps (#12780, #13098, #21703) add *routing* intelligence (semantic/SLO/session/KV-event-aware routing) and explicitly delegate elasticity to **OME/Kubernetes** ("Auto scaling in OME"); the "Autonomous Model Gateway" is routing automation, not replica scaling.
 
@@ -93,7 +93,7 @@ SGLang ships an **engine** (mature) and a **router / "Model Gateway"** (cache-aw
 
 Both sell **dedicated/on-demand endpoints**: you pick a model and a GPU SKU, set replica bounds and a scaling policy, and the platform scales *your endpoint* between those bounds. Neither is deployable software, and neither exposes the multi-model fleet problem — the provider absorbs that. Compare them on **control law and signal choice**, not on scope.
 
-| Dimension | **Fireworks AI** | **Together AI** | **WVA** (for reference) |
+| Dimension | **Fireworks AI** | **Together AI** | **the scaling manager** (for reference) |
 |---|---|---|---|
 | **Control law** | Threshold per load target; with several targets, **max replica count across all** wins | **Proportional**: `ceil(N × observed/target)`, dampened by windows, clamped to bounds | Saturation optimizer; multi-analyzer ballot with per-analyzer scores |
 | **Signals** | `default` (0–1 load fraction), `tokens_generated_per_second`, `prompt_tokens_per_second` (added Feb 2026, prefill-heavy), `requests_per_second`, `concurrent_requests` — all **per replica** | Exactly 8: `inflight_requests` (default), `ttft`, `e2e_latency`, `gpu_utilization`, **`token_utilization` (= KV-cache utilization, 0–100)**, `throughput_per_replica`, `decoding_speed`, `cache_hit_rate` (prompt-cache, 0–100). No custom/Prometheus metric support | Queue depth, KV utilization, request rate; token supply/demand |
@@ -115,13 +115,13 @@ Together ships `ttft` p95 — the most SLO-shaped knob any vendor here offers �
 - **TTFT** stays low under saturation because **continuous batching absorbs queue pressure into end-to-end latency**, not first-token latency. The metric looks healthy precisely when you most need to scale.
 - **GPU utilization** misleads because *"utilization measures arithmetic intensity, not pressure"* — a GPU can read 60% busy while the engine's queue is already backing up.
 
-This is independent, production-sourced confirmation of the choice WVA already made: **scale on saturation/queue depth, not on observed latency or GPU busy-ness.** Worth citing directly whenever WVA is challenged with "why not just target TTFT?" or "why not just use DCGM utilization?" — the answer is no longer theoretical, it is a competitor's own published negative result. It argues *against* adding a naive TTFT-target analyzer to the multi-analyzer ballot, and *for* keeping the saturation signal primary.
+This is independent, production-sourced confirmation of the choice the scaling manager already made: **scale on saturation/queue depth, not on observed latency or GPU busy-ness.** Worth citing directly whenever the scaling manager is challenged with "why not just target TTFT?" or "why not just use DCGM utilization?" — the answer is no longer theoretical, it is a competitor's own published negative result. It argues *against* adding a naive TTFT-target analyzer to the multi-analyzer ballot, and *for* keeping the saturation signal primary.
 
-Note the convergence: Together's default (`inflight_requests`) and its `token_utilization` (KV-cache utilization) are the same two signals WVA leans on. Two teams reached the same conclusion independently.
+Note the convergence: Together's default (`inflight_requests`) and its `token_utilization` (KV-cache utilization) are the same two signals the scaling manager leans on. Two teams reached the same conclusion independently.
 
 ### Published cold-start numbers (useful calibration for scale-from-zero)
 
-Together published measured figures on 1×H100 — rare, and directly relevant to WVA's scale-from-zero and stabilization work:
+Together published measured figures on 1×H100 — rare, and directly relevant to the scaling manager's scale-from-zero and stabilization work:
 
 | Event | Time |
 |---|---|
@@ -131,7 +131,7 @@ Together published measured figures on 1×H100 — rare, and directly relevant t
 | Scale-up 1 → 2 replicas (end to end) | **~2.5 min** |
 | Restart from STOPPED | **1–2 min** |
 
-Two consequences. First, a **~2-minute** provisioning latency is the real-world floor, which is why Together defaults `scale_down_window` to 5 minutes and Fireworks to 10 — both are protecting against paying that cost twice, exactly the concern behind WVA's stabilization work. Second, it explains why **Fireworks answers cold requests with a 503 rather than queueing them**: holding a connection for 2 minutes is worse than failing fast and letting the client retry. WVA's scale-from-zero path should assume the same order of magnitude.
+Two consequences. First, a **~2-minute** provisioning latency is the real-world floor, which is why Together defaults `scale_down_window` to 5 minutes and Fireworks to 10 — both are protecting against paying that cost twice, exactly the concern behind the scaling manager's stabilization work. Second, it explains why **Fireworks answers cold requests with a 503 rather than queueing them**: holding a connection for 2 minutes is worse than failing fast and letting the client retry. The scaling manager's scale-from-zero path should assume the same order of magnitude.
 
 **2026 currency (verified 2026-08-09).** Both surfaces are *new*, so treat them as moving targets.
 
@@ -139,18 +139,18 @@ Two consequences. First, a **~2-minute** provisioning latency is the real-world 
 - **Fireworks has been essentially static since 5 Feb 2026**, the single 2026 changelog entry touching scaling: it added the `prompt_tokens_per_second` load target for prefill-heavy workloads and changed scaled-to-zero deployments to return `503` immediately with retry guidance rather than attempting to initialize.
 - One claim circulating in secondary coverage — that Together can autoscale on **any custom Prometheus metric** from a worker's `/metrics` endpoint — is **not supported by the official scaling docs**, which enumerate exactly eight built-in metrics and no custom-metric parameter. Excluded here pending a primary source.
 
-### What this changes for WVA — and what it doesn't
+### What this changes for the scaling manager — and what it doesn't
 
 - **Doesn't change the moat.** Neither platform does multi-model global allocation, heterogeneous accelerators, cost-aware placement, quota/fair-share, or P/D scaling. Every one of those is *structurally absent* from a per-endpoint API, not merely unshipped — the customer never sees the fleet.
-- **Doesn't close the forecasting gap.** Both are purely reactive. Dynamo remains the only system here with prediction, so that gap in WVA is unchanged.
-- **Does set a UX bar WVA should not ignore.** Scale-to-zero with a tunable idle window is a *headline* commercial feature at Fireworks, and both expose scaling policy as a handful of named knobs with sane defaults. WVA's equivalent surface is a ConfigMap of analyzers and thresholds — more powerful, considerably less approachable.
+- **Doesn't close the forecasting gap.** Both are purely reactive. Dynamo remains the only system here with prediction, so that gap in the scaling manager is unchanged.
+- **Does set a UX bar the scaling manager should not ignore.** Scale-to-zero with a tunable idle window is a *headline* commercial feature at Fireworks, and both expose scaling policy as a handful of named knobs with sane defaults. The scaling manager's equivalent surface is a ConfigMap of analyzers and thresholds — more powerful, considerably less approachable.
 - **Does validate the signal choice** (see TTFT above), which is the single most useful takeaway here.
 
 ---
 
-## WVA vs. Dynamo — the head-to-head that matters
+## The scaling manager vs. Dynamo — the head-to-head that matters
 
-| | **WVA advantage** | **Dynamo advantage** |
+| | **the scaling manager advantage** | **Dynamo advantage** |
 |---|---|---|
 | Scope | Multi-model, multi-tenant, global fair-share | — |
 | Hardware | Heterogeneous accelerators, cost-aware | — |
@@ -161,20 +161,20 @@ Two consequences. First, a **~2-minute** provisioning latency is the real-world 
 | P/D | Role-aware demand | **Productized independent P/D scaling** |
 | Both weak on | — | **Distribution awareness** (avg ISL/OSL); real-$ cost is relative/absent |
 
-**Takeaways for WVA's roadmap:**
-1. **Forecasting is the clearest borrow.** Dynamo's predictor abstraction (Constant/ARIMA/Kalman/Prophet at a fixed look-ahead) is exactly what WVA lacks — WVA is reactive with only EWMA/rate-anchored smoothing. (This is also the seam the proposed **Cluster Capacity Planner** fills at a higher altitude — forecast-driven fleet allocation above the reactive autoscaler.)
-2. **WVA's structural edges are real and defensible:** heterogeneity, cost, multi-model global scope, and GPU fair-share are things *none* of the three do. Dynamo is deliberately single-model/homogeneous.
-3. **Neither is distribution-aware** (bimodal interactive vs. batch) — open ground for both WVA and the planner.
+**Takeaways for the scaling manager's roadmap:**
+1. **Forecasting is the clearest borrow.** Dynamo's predictor abstraction (Constant/ARIMA/Kalman/Prophet at a fixed look-ahead) is exactly what the scaling manager lacks — the scaling manager is reactive with only EWMA/rate-anchored smoothing. (This is also the seam the proposed **Cluster Capacity Planner** fills at a higher altitude — forecast-driven fleet allocation above the reactive autoscaler.)
+2. **the scaling manager's structural edges are real and defensible:** heterogeneity, cost, multi-model global scope, and GPU fair-share are things *none* of the three do. Dynamo is deliberately single-model/homogeneous.
+3. **Neither is distribution-aware** (bimodal interactive vs. batch) — open ground for both the scaling manager and the planner.
 
 ---
 
 ## Sources
 
-**WVA (baseline)**
+**the scaling manager (baseline)**
 - Repo: https://github.com/llm-d/llm-d-workload-variant-autoscaler
 - KEDA integration: [docs/proposals/wva-external-scaler-proposal.md](../proposals/wva-external-scaler-proposal.md)
 - Component doc: https://llm-d.ai/docs/architecture/Components/workload-variant-autoscaler
-- Paper (WVA global optimization control plane): https://arxiv.org/abs/2603.09730
+- Paper (the scaling manager global optimization control plane): https://arxiv.org/abs/2603.09730
 
 **NVIDIA Dynamo Planner**
 - Autoscaling overview (HPA/KEDA/Planner + scaling adapter): https://docs.nvidia.com/dynamo/kubernetes-deployment/operate/autoscaling.md

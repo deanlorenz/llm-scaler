@@ -1,6 +1,6 @@
 # Cap what each tenant may take
 
-Declare how many GPUs of each accelerator type WVA may hold — for the whole
+Declare how many GPUs of each accelerator type the scaling manager may hold — for the whole
 cluster, or per namespace — so one team's autoscaling cannot spend the fleet.
 This is the other half of [bounding a fleet by real GPUs](../bound-by-gpus/):
 that path asks whether the hardware exists, this one asks whether the tenant is
@@ -10,10 +10,10 @@ allowed it.
 promised each of them a number, or when you want a ceiling per GPU type that
 sits *below* what the cluster physically has.
 
-**Do not use it to stop a workload from taking GPUs.** A quota bounds **WVA**,
-and only WVA — it is an allowance granted to the autoscaler, not an admission
+**Do not use it to stop a workload from taking GPUs.** A quota bounds **the scaling manager**,
+and only the scaling manager — it is an allowance granted to the autoscaler, not an admission
 rule. The thing that stops any Pod is a Kubernetes `ResourceQuota`, and on a
-cluster where non-WVA workloads compete for the same accelerators you want both.
+cluster where unmanaged workloads compete for the same accelerators you want both.
 
 ## What it needs
 
@@ -74,11 +74,11 @@ that anything unlisted is denied.
 
 ## Three things that surprise people
 
-**A quota does not bound the cluster.** It counts only what WVA's own variants
-hold, so it can hand out capacity that non-WVA workloads have already taken.
+**A quota does not bound the cluster.** It counts only what the scaling manager's own variants
+hold, so it can hand out capacity that unmanaged workloads have already taken.
 Charging it the physical figure would be worse: a namespace with a 4-GPU
 allowance beside an unrelated 4-GPU training job would read as fully spent while
-WVA had placed nothing, and every scale-up would be refused against an untouched
+The scaling manager had placed nothing, and every scale-up would be refused against an untouched
 allowance. "The hardware is full" is a different statement, made by the physical
 limiter.
 

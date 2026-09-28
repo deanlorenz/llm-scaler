@@ -1,14 +1,15 @@
 # The steady-state engine
 
-The Workload Variant Autoscaler (WVA) is a **global optimizer**: each cycle it builds a
-capacity model for your inference workloads and computes how many replicas each one should
-have. It does not patch replica counts directly — it emits a target that HPA or KEDA actuate.
+llm-scaling-manager is a **global optimizer**: each cycle it builds a capacity model for your
+inference workloads and computes how many replicas each one should have. It does not patch
+replica counts directly: it publishes a target over the KEDA external-scaler contract, and
+KEDA owns the HPA that acts on it.
 This guide explains, at a high level, the **steady-state engine**: the terms it uses, the
 metrics it reads, the thresholds that govern it, and the algorithm that turns those into replica
 targets.
 
-It is aimed at operators tuning and observing WVA. For the full configuration field reference and
-the EPP coordination workflow, see
+It is aimed at operators tuning and observing the scaling manager. For the full configuration
+field reference and the EPP coordination workflow, see
 [Saturation Scaling Configuration](../reference/scaling-policy.md); for the
 complete metrics catalog see
 [Metrics & Health Monitoring](../reference/metrics.md).
@@ -17,17 +18,17 @@ complete metrics catalog see
 
 | Term | Meaning |
 |---|---|
-| **Model** | A served model (a `modelID`, e.g. `Qwen/Qwen3-0.6B`) in a namespace. The unit WVA makes a scaling decision for. |
+| **Model** | A served model (a `modelID`, e.g. `Qwen/Qwen3-0.6B`) in a namespace. The unit a scaling decision is made for. |
 | **Variant** | One deployable configuration of a model — a Deployment/LeaderWorkerSet, typically pinned to an accelerator type (and, for disaggregated serving, a role). A model may have several variants (e.g. A100 vs H100, or prefill vs decode). |
 | **Replica** | One running pod of a variant. |
 | **Role** | For prefill/decode-**disaggregated** serving, a variant serves the `prefill` or `decode` stage; non-disaggregated variants are `both`. |
-| **EPP** | *Endpoint Picker* — the request router in the llm-d inference scheduler ([Gateway API Inference Extension](https://github.com/kubernetes-sigs/gateway-api-inference-extension)). EPP spreads requests across replicas; WVA decides how many replicas exist. |
+| **EPP** | *Endpoint Picker* — the request router in the llm-d inference scheduler ([Gateway API Inference Extension](https://github.com/kubernetes-sigs/gateway-api-inference-extension)). EPP spreads requests across replicas; the scaling manager decides how many replicas exist. |
 | **Capacity / supply** | How much work a replica (or the whole model) can serve, measured in **KV-cache tokens**. |
 | **Demand** | How much work the model currently needs to serve, also in KV-cache tokens. |
 
 ## Overview
 
-WVA has one saturation analyzer: the token-based engine described here. The
+There is one saturation analyzer: the token-based engine described here. The
 earlier percentage-based analyzer has been removed, so there is nothing to select
 between — what follows is simply how saturation analysis works.
 
@@ -98,6 +99,47 @@ demand = tokens_in_use          (live: kv_cache_usage × capacity)
 The upstream scheduler-queue term accounts for load that hasn't landed on a pod yet; its
 input-token portion is discounted by the observed prefix-cache hit rate when available.
 
+#### The throughput floor
+
+The three terms above are all **occupancy**: what the fleet is holding right
+now. Occupancy is a state of the fleet rather than a property of the load, and
+it falls as replicas are added, so a fleet that is keeping up reads as one that
+needs fewer replicas. At a constant request rate with no queue ever forming,
+occupancy can point at one replica when three are needed.
+
+What a replica can do does not move with the fleet. The engine records **mu**,
+the completion rate one replica sustained the last time it was observed
+saturated, per role and per output-length bucket, alongside the capacity
+reading taken at the same moment. A fleet offered `lambda` requests per second
+then needs `lambda / mu` replicas to keep up, which in this engine's
+(demand, per-replica capacity) terms is a demand of `(lambda / mu) x capacity`
+tokens. That figure is a **floor** under the occupancy demand above: it only
+ever raises demand, never lowers it.
+
+Because mu is measured per request shape, a shift in shape re-prices the fleet
+without anyone re-tuning a threshold. This is what catches a shape change
+before a queue forms.
+
+Three rules keep it honest, each of which cost a measured mistake to establish;
+the runs are recorded in
+[analyzer evidence](../developer-guide/analyzer-evidence.md):
+
+- **The floor is not capped at the fleet's own size.** What it can order is
+  fixed by the load and the per-replica rate, and does not move as replicas are
+  added. Capped, it held a fleet but never grew one, and the order arrived
+  after the lone replica had already tipped into preemption.
+- **A reading the fleet has not earned may hold the fleet but not grow it.** A
+  rate borrowed from a neighbouring output-length bucket, or a window holding
+  fewer than two saturated readings, is capped at the role's anticipated
+  supply. The first reading at a saturation under-reads, and an order placed on
+  it over-provisions in a way that removes the saturation which would have
+  corrected it.
+- **A backlog is work to drain, not residency.** `B` queued requests are priced
+  as `B / 60s` extra arrivals on top of `lambda`, not as `B` requests resident
+  at once, which sized fleets to hold queues that were gone before the replicas
+  arrived. Prefill's share of the scheduler queue is dropped entirely: more
+  prefill replicas do not fix a decode that is full.
+
 ### 3. The scaling signal
 
 The engine aggregates to model level:
@@ -120,9 +162,12 @@ SpareCapacity     = max(0, TotalSupply  − TotalDemand / scaleDownBoundary)    
   `RequiredCapacity` — this avoids counting the same scale-up twice.
 - **`SpareCapacity > 0`** → even after inflating demand to the `scaleDownBoundary`, supply is
   left over → **scale-down is safe**.
-- Neither → **no change**. The band between the two thresholds is a stable no-change region;
-  note WVA has no time-based stabilization window yet, so keeping the band wide is what reduces
-  flapping.
+- Neither → **no change**. The band between the two thresholds is a stable no-change
+  region, and keeping it wide is the main thing that reduces flapping. A published scale-down
+  is also held across cycles (`WVA_STICKY_SCALE_DOWN`, on by default), because the HPA takes
+  the maximum published
+  inside its scale-down window and one noisy sample would otherwise pin the fleet; that hold
+  is counted in cycles, not seconds.
 
 > The engine also reports a model `utilization = TotalDemand / TotalSupply` for observability, but the
 > decision is driven by `RequiredCapacity`/`SpareCapacity` above — **not** by comparing that
@@ -173,23 +218,25 @@ per-model/per-namespace overrides).
 ### Aligning thresholds with EPP
 
 `kvCacheThreshold` and `queueLengthThreshold` define **what "a saturated endpoint" means**, and
-they should be **agreed with EPP** (the request router). EPP and WVA read the **same two
+they should be **agreed with EPP** (the request router). EPP and the scaling manager read the **same two
 model-server metrics** — `vllm:kv_cache_usage_perc` and `vllm:num_requests_waiting` — but act at
 different layers: EPP routes and, under load, queues/sheds requests as endpoints approach
-saturation; WVA decides when the pool is saturated and adds replicas. EPP's Saturation Detector
-exposes two thresholds that map one-to-one to WVA's:
+saturation; the scaling manager decides when the pool is saturated and adds replicas. EPP's
+Saturation Detector exposes two thresholds that map one-to-one to this engine's:
 
-| EPP (`saturationDetector` / `utilization-detector`) | Default | WVA | Default |
+| EPP (`saturationDetector` / `utilization-detector`) | Default | This engine | Default |
 |---|---|---|---|
 | `kvCacheUtilThreshold` | `0.8` | `kvCacheThreshold` | `0.80` |
 | `queueDepthThreshold` | `5` | `queueLengthThreshold` | `5` |
 
 If the two disagree, routing and scaling fight each other:
-- **WVA higher than EPP** → EPP queues requests in flow-control (raising latency, and inflating
-  WVA's own `scheduler_queue` demand term) while WVA still sees headroom → scale-up lags.
-- **WVA lower than EPP** → WVA scales up while EPP is still comfortably balancing → over-provisioning.
+- **This engine higher than EPP** → EPP queues requests in flow-control (raising latency,
+  and inflating this engine's own `scheduler_queue` demand term) while the engine still sees
+  headroom → scale-up lags.
+- **This engine lower than EPP** → it scales up while EPP is still comfortably balancing →
+  over-provisioning.
 
-**Guidance:** set WVA's `kvCacheThreshold` = EPP's `kvCacheUtilThreshold` and `queueLengthThreshold`
+**Guidance:** set `kvCacheThreshold` = EPP's `kvCacheUtilThreshold` and `queueLengthThreshold`
 = EPP's `queueDepthThreshold`, and mirror any change on both sides. This repo configures EPP's
 scorers (`queue-scorer`, `kv-cache-utilization-scorer`) in `deploy/lib/epp-flow-control.values.yaml`.
 See the developer guide's
@@ -221,7 +268,7 @@ Deployment engine args (`--max-num-seqs`, `--gpu-memory-utilization`, `--block-s
 `--max-model-len`, `--max-num-batched-tokens`, `--num-gpu-blocks-override`, …) are read from the
 Deployment/LeaderWorkerSet — **not** Prometheus — and feed the derived-capacity path.
 
-### Output — WVA metrics to observe the engine's decisions
+### Output — metrics to observe the engine's decisions
 
 | Metric | Type | Meaning |
 |---|---|---|
@@ -255,12 +302,12 @@ the ConfigMap's `default` entry sets `analyzerName: "saturation"`.
 
 Work down this list:
 
-1. **No inputs.** `wva_metrics_pods_discovered == 0`, or `wva_metrics_freshness_status{status="stale"|"missing"}` — WVA isn't getting fresh metrics. Check pod discovery / scraping.
+1. **No inputs.** `wva_metrics_pods_discovered == 0`, or `wva_metrics_freshness_status{status="stale"|"missing"}` — the controller isn't getting fresh metrics. Check pod discovery / scraping.
 2. **Collection errors.** `wva_metrics_collection_errors_total` climbing — a query is failing (labeled by `query_type`).
 3. **Not saturated.** `wva_saturation_utilization` is below `scaleUpThreshold` and `wva_required_capacity == 0` — expected no-change.
 4. **Scale-up already in flight.** Pending replicas count toward *anticipated* supply, so `wva_required_capacity` stays `0` until they become ready.
 5. **Capped by GPUs.** With a limiter declared, `wva_available_gpus` at/near 0 (or namespace quota exhausted) blocks scale-up even when demand warrants it.
-6. **Actuation.** `wva_desired_ratio > 1` but replicas don't change → the HPA/KEDA object consuming the signal isn't acting; check the actuator, not WVA.
+6. **Actuation.** `wva_desired_ratio > 1` but replicas don't change → the KEDA object consuming the signal isn't acting; check the actuator, not the decision.
 
 ## Example configuration
 
@@ -269,7 +316,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: wva-scaling-policy-config
-  namespace: workload-variant-autoscaler-system   # WVA controller namespace
+  namespace: workload-variant-autoscaler-system   # controller namespace (the name predates the rename)
 data:
   default: |
     analyzerName: "saturation"   # select the saturation analyzer
@@ -294,5 +341,5 @@ data:
 
 - [Saturation Scaling Configuration](../reference/scaling-policy.md) — full field reference, per-model/namespace resolution, and the EPP coordination workflow.
 - [Metrics & Health Monitoring](../reference/metrics.md) — complete metrics catalog and health endpoints.
-- [Monitoring](../reference/monitoring.md) — dashboards and observing WVA.
+- [Monitoring](../reference/monitoring.md) — dashboards and observing the controller.
 - [Quota Limiter](../reference/quota-limiter.md) — per-accelerator GPU caps used by the fair-share step.

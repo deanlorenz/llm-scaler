@@ -1,10 +1,10 @@
 # Testing Guide
 
-Comprehensive guide for testing the Workload-Variant-Autoscaler (WVA).
+Comprehensive guide for testing the Workload-Variant-Autoscaler (the scaling manager).
 
 ## Overview
 
-WVA has a multi-layered testing strategy:
+The scaling manager has a multi-layered testing strategy:
 
 1. **Unit Tests** - Fast, isolated tests for individual packages and functions
 2. **Integration Tests** - Tests for component interactions within the controller
@@ -153,7 +153,7 @@ var _ = AfterSuite(func() {
 
 ## End-to-End Tests
 
-WVA provides a **single consolidated E2E suite** that runs on multiple environments (Kind with emulated GPUs, or OpenShift/kubernetes with real infrastructure). Tests are environment-agnostic and parameterized via environment variables; they create VA, HPA, and model services dynamically as part of the test workflow.
+The scaling manager provides a **single consolidated E2E suite** that runs on multiple environments (Kind with emulated GPUs, or OpenShift/kubernetes with real infrastructure). Tests are environment-agnostic and parameterized via environment variables; they create ScaledObjects, HPAs and model services dynamically as part of the test workflow.
 
 - **Location**: `test/e2e/`
 - **Environments**: Kind (emulated), OpenShift, or generic Kubernetes
@@ -165,7 +165,7 @@ E2E is intended to be a **deterministic correctness signal**: resource wiring, r
 
 ### Controller state between runs
 
-`BeforeSuite` restarts the WVA controller before anything else runs. This is required for determinism, not hygiene.
+`BeforeSuite` restarts the scaling manager controller before anything else runs. This is required for determinism, not hygiene.
 
 The saturation analyzer's capacity knowledge store is **in-memory and lives for the process lifetime**. It is keyed by `(namespace, model, variant)`, and the suites all reuse the same model ID, so a per-replica capacity learned by one suite — or by an earlier run against the same cluster — survives into the next and is preferred over live observation (the `P2-hist` capacity source in the `analyzer-result` log line).
 
@@ -180,7 +180,7 @@ The restart is best-effort: if patching the Deployment is not permitted, the sui
 
 ### E2E shared fixtures
 
-Code lives under `test/e2e/fixtures`. The `fixtures` package holds reusable helpers to create, ensure (idempotent setup), and delete Kubernetes objects used by the e2e suite (VariantAutoscaling, HPA, KEDA ScaledObject, model services, Services, ServiceMonitors, InferenceObjective, etc.). Package-level documentation and naming conventions (`Create*` / `Ensure*` / `Delete*`, `baseName` vs full resource names) live in the package doc:
+Code lives under `test/e2e/fixtures`. The `fixtures` package holds reusable helpers to create, ensure (idempotent setup), and delete Kubernetes objects used by the e2e suite (KEDA ScaledObjects, HPAs, model services, Services, ServiceMonitors, InferenceObjective, etc.). Package-level documentation and naming conventions (`Create*` / `Ensure*` / `Delete*`, `baseName` vs full resource names) live in the package doc:
 
 ```bash
 go doc ./test/e2e/fixtures
@@ -194,13 +194,13 @@ go test ./test/e2e/... -run TestDoesNotExist
 
 ### Infra-Only Setup (Required Before Running Tests)
 
-Tests expect **WVA + monitoring + scaler + llm-d EPP/gateway** to be deployed; they create VariantAutoscaling resources, HPAs, and model workloads themselves. Use **`make deploy-e2e-infra`** (runs `deploy/install.sh` then `deploy/install-epp.sh`) or invoke those scripts with the same environment variables the Makefile sets.
+Tests expect **the scaling manager + monitoring + scaler + llm-d EPP/gateway** to be deployed; they create ScaledObjects, HPAs and model workloads themselves. Use **`make deploy-e2e-infra`** (runs `deploy/install.sh` then `deploy/install-epp.sh`) or invoke those scripts with the same environment variables the Makefile sets.
 
 This deploys:
-- WVA controller (via Kustomize)
+- The scaling manager controller (via Kustomize)
 - llm-d EPP (GAIE standalone chart) via `deploy/install-epp.sh`
 - Prometheus stack and KEDA
-- **No** VariantAutoscaling or HPA (tests create these)
+- **No** ScaledObject or HPA (tests create these)
 
 When `ENABLE_SCALE_TO_ZERO=true` (set by `make deploy-e2e-infra` when `SCALE_TO_ZERO_ENABLED=true`), **`install-epp.sh`** enables the **flowControl feature gate** on the EPP so it exposes `inference_extension_flow_control_queue_size`. The **InferenceObjective** `e2e-default` is created by the scale-from-zero tests (`test/e2e/fixtures`), not by the install scripts.
 
@@ -298,7 +298,7 @@ two controllers on one cluster still allocate from one pool of GPUs (see
 
 ### GitHub Actions Workflows
 
-WVA uses GitHub Actions for automated testing:
+The scaling manager uses GitHub Actions for automated testing:
 
 #### PR Checks Workflow
 
@@ -316,7 +316,7 @@ E2E workflows run the **consolidated suite** (`test/e2e/`):
 - **Smoke** (`make test-e2e-smoke`): Fast validation on Kind (or OpenShift when `ENVIRONMENT=openshift`)
 - **Full** (`make test-e2e-full`): Full suite; typically run with infra deployed via `deploy-e2e-infra` or equivalent
 
-Infrastructure is deployed in **infra-only** mode (WVA + llm-d only); tests create VA, HPA, and model services dynamically.
+Infrastructure is deployed in **infra-only** mode (the scaling manager + llm-d only); tests create VA, HPA, and model services dynamically.
 
 #### OpenShift E2E Tests Workflow
 
@@ -405,16 +405,16 @@ It("should work", func() {
 ```go
 // ✅ Good - waits for condition to become true
 Eventually(func(g Gomega) {
-    va := &v1alpha1.VariantAutoscaling{}
-    err := k8sClient.Get(ctx, key, va)
+    dep := &appsv1.Deployment{}
+    err := k8sClient.Get(ctx, key, dep)
     g.Expect(err).NotTo(HaveOccurred())
-    g.Expect(va.Status.DesiredOptimizedAlloc.NumReplicas).To(BeNumerically(">=", 2))
+    g.Expect(*dep.Spec.Replicas).To(BeNumerically(">=", 2))
 }, timeout, interval).Should(Succeed())
 
 // ❌ Bad - may fail due to timing
-va := &v1alpha1.VariantAutoscaling{}
-k8sClient.Get(ctx, key, va)
-Expect(va.Status.DesiredOptimizedAlloc.NumReplicas).To(BeNumerically(">=", 2))
+dep := &appsv1.Deployment{}
+k8sClient.Get(ctx, key, dep)
+Expect(*dep.Spec.Replicas).To(BeNumerically(">=", 2))
 ```
 
 #### Use Consistently for Stable State

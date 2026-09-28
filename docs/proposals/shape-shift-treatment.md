@@ -3,7 +3,7 @@
 **Status:** proposal, 2026-09-21, revised after review. Evidence from the
 shape-swap benchmark, three passes of one trace on one Kubernetes cluster
 (below). The structure work that has to land first is
-[PR #87](https://github.com/ev-shindin/llm-scaler/pull/87).
+[PR #87](https://github.com/ev-shindin/llm-scaling-manager/pull/87).
 
 ## The problem in one sentence
 

@@ -1,21 +1,21 @@
-# Watching what WVA decides
+# Watching what the scaling manager decides
 
 The dashboard, the metrics that answer specific questions, and how to read the
-logs. If WVA is installed but you cannot tell what it is doing, this is the page.
+logs. If the scaling manager is installed but you cannot tell what it is doing, this is the page.
 
-> Part of the [WVA deployment guide](../../deploy/). For whether the install
+> Part of the [the scaling manager deployment guide](../../deploy/). For whether the install
 > worked at all, see [After the install](operations.md).
 
-## Watching what WVA decides
+## Watching what the scaling manager decides
 
-WVA writes no custom resource. Its decisions are visible in three places, and you
+The scaling manager writes no custom resource. Its decisions are visible in three places, and you
 want them in this order: the **dashboard** for whether things are healthy, the
 **metrics** for a specific question, the **logs** only for why a single decision
 came out the way it did.
 
 ### The operational dashboard
 
-The install publishes a Grafana dashboard, *WVA Operational Dashboard*, covering
+The install publishes a Grafana dashboard, *llm-scaling-manager Operational Dashboard*, covering
 the whole pipeline: GPU discovery, metric collection health and freshness,
 saturation, capacity, scaling decisions and limiter impact.
 
@@ -40,13 +40,13 @@ see [If you cannot write to the monitoring namespace](#if-you-cannot-write-to-th
 
 Skip it entirely with `DEPLOY_OPERATIONAL_DASHBOARD=false`.
 
-Read the panels top-down. The upper row answers "is WVA seeing the cluster at all";
+Read the panels top-down. The upper row answers "is the scaling manager seeing the cluster at all";
 until those are healthy, the scaling panels below them are meaningless.
 
 #### Who owns the dashboard
 
 The dashboard is published as a ConfigMap into a **monitoring** namespace, which
-is normally not the namespace WVA runs in — so publishing the shared one is a
+is normally not the namespace the scaling manager runs in — so publishing the shared one is a
 **cluster-admin** action even though it happens during the tenant install step.
 
 | | can do |
@@ -56,7 +56,7 @@ is normally not the namespace WVA runs in — so publishing the shared one is a
 
 A namespace admin running `make deploy-wva` without rights to the monitoring
 namespace gets a message saying so — the install continues, and only the
-dashboard step is skipped. Nothing about WVA's scaling depends on it.
+dashboard step is skipped. Nothing about the scaling manager's scaling depends on it.
 
 #### If you cannot write to the monitoring namespace
 
@@ -101,7 +101,7 @@ every install on a cluster writes the same object. That is deliberate — the
 dashboard is generic and driven by variables, and one copy per tenant would fill
 the picker with identical dashboards — but it has consequences worth knowing.
 
-**The first row is the admin's view.** *Installs present* counts WVA Deployments
+**The first row is the admin's view.** *Installs present* counts llm-scaling-manager Deployments
 from kube-state-metrics; *Controllers reporting metrics* counts the ones whose
 metrics actually arrive. A gap between them is an install nobody is scraping,
 and it is the difference that matters: a controller that is not scraped looks
@@ -142,7 +142,7 @@ every workload onto the controller's namespace. The dashboard defaults to
 `exported_namespace` for that reason; the benchmark dashboard defaults to
 `namespace`, because vLLM metrics carry only that one.
 
-**Versions.** The ConfigMap records the WVA version that published it, and an
+**Versions.** The ConfigMap records the scaling manager version that published it, and an
 older install will not overwrite a newer dashboard — it says so and leaves it.
 Panels for metrics a given version does not emit stay empty for that install:
 on a cluster running several versions, an empty panel may mean "older
@@ -152,9 +152,9 @@ controller", not "nothing happening". Force a republish with:
 kubectl delete configmap wva-operation-dashboard -n <dashboard-namespace>
 ```
 
-**Who can see what is the datasource's decision, not WVA's.** On OpenShift,
+**Who can see what is the datasource's decision, not the scaling manager's.** On OpenShift,
 `thanos-querier:9091` is cluster-monitoring-view — anything querying through it
-reads every namespace, whatever scope WVA was installed with. For a tenant
+reads every namespace, whatever scope the scaling manager was installed with. For a tenant
 Grafana that must only see its own namespace, point the datasource at
 `thanos-querier:9092`, which enforces per-namespace RBAC.
 
@@ -170,8 +170,8 @@ The panels sit in three rows, and the row says what a panel is scoped to:
 
 | row | scope | what it answers |
 | --- | --- | --- |
-| **Fleet health — all namespaces** | every namespace WVA manages | Is WVA itself working? Installs present, controllers reporting, scrape targets down, collection and optimization timings. |
-| **Selected namespace: `$namespace`** | the **Namespace** variable | What did WVA do here? Replicas, capacity, saturation, scaling decisions, limiters, wake-from-zero. |
+| **Fleet health — all namespaces** | every namespace the scaling manager manages | Is the scaling manager itself working? Installs present, controllers reporting, scrape targets down, collection and optimization timings. |
+| **Selected namespace: `$namespace`** | the **Namespace** variable | What did the scaling manager do here? Replicas, capacity, saturation, scaling decisions, limiters, wake-from-zero. |
 | **Serving** (collapsed) | the **Namespace** variable | What the workload experienced: TTFT, inter-token latency, router and per-replica queues, KV utilization. Mostly from the EPP, so it reads the same for vLLM and SGLang. |
 
 The split exists because the two audiences differ. A panel in the fleet row does
@@ -206,12 +206,12 @@ under.
 All are exposed by the controller and scraped by the ServiceMonitor the install
 creates. Full list: [Prometheus metrics](prometheus.md).
 
-**Is WVA working at all?**
+**Is the scaling manager working at all?**
 
 | metric | healthy | what it means when it is not |
 | --- | --- | --- |
 | `wva_models_processed` | > 0 | no workload has registered — no ScaledObject names this scaler |
-| `wva_metrics_pods_discovered` | > 0 per model | WVA cannot find the pods behind a model |
+| `wva_metrics_pods_discovered` | > 0 per model | the scaling manager cannot find the pods behind a model |
 | `wva_metrics_freshness_status{status="fresh"}` | equals the pod count | pods sitting in `status="stale"` or `"missing"` are being decided on with old data, or none at all |
 | `wva_errors_total` | flat | rising means the optimization cycle is failing |
 
@@ -223,7 +223,7 @@ wva_metrics_freshness_status{status!="fresh"} > 0
 ```
 
 **Why is nothing scaling up?** — the two silent-stall causes, both of which look
-like "WVA is fine" everywhere else:
+like "the scaling manager is fine" everywhere else:
 
 | metric | meaning |
 | --- | --- |
@@ -256,7 +256,7 @@ Useful when a metric tells you *which* model is wrong and you want to know *why*
 
 | grep for | tells you | level |
 | --- | --- | --- |
-| `scaling-decision` | what WVA decided for a model, and the replica counts | Info |
+| `scaling-decision` | what the scaling manager decided for a model, and the replica counts | Info |
 | `Effective scaling policy` | which policy tier a model resolved to | Info |
 | `GPU limiter (re)built from config` | a `limiters:` edit took effect, live | Info |
 | `Collected replica metrics` | metrics are arriving | **`-v=4`** |
@@ -276,6 +276,6 @@ kubectl patch deployment -n $NS wva-controller-manager --type=json \
 kubectl logs -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler -f
 ```
 
-WVA writes no custom resource, so its decisions are visible only in these logs, in
+The scaling manager writes no custom resource, so its decisions are visible only in these logs, in
 the metrics it publishes ([Prometheus metrics](prometheus.md)),
 and in the HPA state KEDA derives from them.

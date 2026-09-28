@@ -21,7 +21,7 @@ they cannot know one — a default there would admit somebody else's namespace a
 read as monitoring that is configured. So `kubectl apply -k config/warmpool`
 gives a pool with no scraping, and the demand caveat below applies to it.
 
-A **lent** pool Pod is serving one model's traffic. WVA sizes a fleet from the
+A **lent** pool Pod is serving one model's traffic. The scaling manager sizes a fleet from the
 load it can measure, so if nothing scrapes that Pod, the load moves onto the
 bridge and the model's measured demand *falls* — at the exact moment the
 shortfall that caused the borrow is worst. It then reappears when the bridge is
@@ -76,7 +76,7 @@ Two details worth knowing:
 > If it is absent, add whatever label your Prometheus selects on to the
 > PodMonitor.
 
-What WVA then does with the measurement is deliberately asymmetric:
+What the scaling manager then does with the measurement is deliberately asymmetric:
 
 | | counted? | why |
 | --- | --- | --- |
@@ -102,7 +102,7 @@ warm pool state {"pool":"default","state":"pods=2 free=2 resident=1 variants=1 l
 - `pods` / `free` — how many exist, and how many are available to lend
 - `resident` — models currently held warm (`0` on a pool that has warmed nothing)
 - `lent` — bridges open right now
-- `accelerator` — what the pool's Pods sit on. `unknown` means WVA cannot read
+- `accelerator` — what the pool's Pods sit on. `unknown` means the scaling manager cannot read
   the nodes, so it cannot match a model's accelerator against the pool's and
   will not try.
 
@@ -125,19 +125,19 @@ scale-ups they cover are failing, and the pool is hiding it.
 ## Troubleshooting
 
 **Nothing is ever warmed, and no errors.** Check `replicas` against
-`sleep-min-size` — see [Sizing](sizing.md#sizing). WVA logs
+`sleep-min-size` — see [Sizing](sizing.md#sizing). The scaling manager logs
 `warm pool cannot admit any model: every Pod is reserve`.
 
-**The pool reports itself empty while Pods are running.** WVA logs
+**The pool reports itself empty while Pods are running.** the scaling manager logs
 `no warm pool Pod could be read … usually the pool NetworkPolicy`. Its ingress
 `namespaceSelector` has to name the namespace the controller runs in — step 3
 above.
 
-**The pool does not start at all.** WVA logs
+**The pool does not start at all.** the scaling manager logs
 `the warm pool is disabled: this controller may not patch Pods`. Grant `patch`
 on pods in the pool namespace and restart.
 
-**A model never gets a warm copy in a multi-pool namespace.** WVA logs
+**A model never gets a warm copy in a multi-pool namespace.** the scaling manager logs
 `variant will get no warm copy` with the reason — either it named no pool, or it
 named one that does not exist. Both are fixed in the ScaledObject trigger
 metadata, and `deploy/warmpool.sh plan -n <namespace>` lists every model in
@@ -153,9 +153,9 @@ to warm your busiest variants without waiting, or `warmPoolCopies: "1"` on the
 one model you cannot afford to miss.
 
 **The pool never resizes, or is never used at all.** Check its ScaledObject
-exists, that `scalerAddress` names the namespace WVA runs in, and that
+exists, that `scalerAddress` names the namespace the scaling manager runs in, and that
 `warmPoolName` matches the Deployment's `llm-d.ai/warm-pool` label. Without a
-trigger there is no pool — WVA logs:
+trigger there is no pool — the scaling manager logs:
 
 ```
 warm pool Deployments are holding accelerators but no ScaledObject declares them

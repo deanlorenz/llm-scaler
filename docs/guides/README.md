@@ -1,4 +1,4 @@
-# WVA guides
+# Guides
 
 Each guide takes one reader from nothing to a working install. Follow one; they
 do not need to be combined.
@@ -15,23 +15,23 @@ source docs/guides/env.sh
 | guide | for |
 | --- | --- |
 | [Install a small llm-d model](install-small-model/) | **first, if nothing is serving yet.** One 0.6B model on ONE GPU — llm-d's own guides start at 16 |
-| [Install WVA in a namespace](install-in-namespace/) | **start here** when llm-d already serves. One team, one namespace |
-| [Install WVA for the whole cluster](install-cluster-wide/) | one controller for every namespace |
+| [Install the scaling manager in a namespace](install-in-namespace/) | **start here** when llm-d already serves. One team, one namespace |
+| [Install the scaling manager for the whole cluster](install-cluster-wide/) | one controller for every namespace |
 
 ## Cluster administration
 
 | guide | for |
 | --- | --- |
-| [Cluster-admin setup for a namespace](admin-cluster-setup/) | let a namespace's owner install WVA themselves |
-| [Bound every WVA by real GPUs](admin-gpu-bounding/) | scaling is otherwise bounded only by `maxReplicaCount` |
+| [Cluster-admin setup for a namespace](admin-cluster-setup/) | let a namespace's owner install the scaling manager themselves |
+| [Bound every install by real GPUs](admin-gpu-bounding/) | scaling is otherwise bounded only by `maxReplicaCount` |
 
 ## Advanced
 
 | guide | for |
 | --- | --- |
 | [Scale a model to zero, and get it back](scale-to-zero/) | release an idle model's accelerators — and check it can wake before it parks |
-| [Test against a full llm-d stack](testing-with-llm-d/) | llm-d + WVA on kind, emulated GPUs, no hardware |
-| [Benchmark WVA](benchmarking/) | drive load through a real stack and compare runs |
+| [Test against a full llm-d stack](testing-with-llm-d/) | llm-d + the scaling manager on kind, emulated GPUs, no hardware |
+| [Benchmark the scaling manager](benchmarking/) | drive load through a real stack and compare runs |
 | [Bridge a scale-up with a warm pool](warm-pool/) | hold models loaded and asleep so a scale-up serves while its replica starts |
 
 ## Reference
@@ -40,7 +40,7 @@ source docs/guides/env.sh
 | --- | --- |
 | [Configuration](../reference/configuration.md) | every variable the installer reads |
 | [After the install](../reference/operations.md) | verifying the install, first-line troubleshooting |
-| [Watching what WVA decides](../reference/monitoring.md) | the dashboard, the metrics, the logs |
+| [Watching what the scaling manager decides](../reference/monitoring.md) | the dashboard, the metrics, the logs |
 | [Preparing a workload](../reference/workload-preparation.md) | the model cache, draining, `make workload-patch`, the start path (`make prepull`, `make weights`) |
 | [Install methods](../reference/install-methods.md) | GitOps, direct Kustomize, what the script does |
 | [The GPU limiter](../reference/gpu-limiter.md) | where policy lives, and the accelerator precondition |
@@ -53,7 +53,7 @@ make benchmark-smoke NAMESPACE=<namespace>
 
 Decode-heavy load at 10 req/s for five minutes against what you already
 installed, then a dashboard snapshot over that window. It stands nothing up and
-needs no benchmark CLI; it checks the whole chain first — KEDA, a WVA
+needs no benchmark CLI; it checks the whole chain first — KEDA, a scaling-manager
 controller managing *this* namespace, model servers, an EPP, a ScaledObject —
 and names every gap at once. Runs on plain Kubernetes and OpenShift.
 

@@ -13,9 +13,9 @@
    kubectl get inferencepool
    ```
    
-   WVA watches a single InferencePool API group (`inference.networking.k8s.io` or `inference.networking.x-k8s.io`). If the cluster's pools use the other group, the datastore stays empty and scale-from-zero never gets a recommendation.
+   the scaling manager watches a single InferencePool API group (`inference.networking.k8s.io` or `inference.networking.x-k8s.io`). If the cluster's pools use the other group, the datastore stays empty and scale-from-zero never gets a recommendation.
    
-   **Solution**: Ensure InferencePool is created and reconciled before creating VariantAutoscaling. When using **`make deploy-e2e-infra`**, `deploy/install-epp.sh` installs the GAIE standalone chart which creates the InferencePool after the EPP starts.
+   **Solution**: Ensure InferencePool is created and reconciled before the workload's ScaledObject. When using **`make deploy-e2e-infra`**, `deploy/install-epp.sh` installs the GAIE standalone chart which creates the InferencePool after the EPP starts.
 
 2. **Labels mismatch**:
    ```bash
@@ -58,10 +58,10 @@
 
    The metric family was renamed: llm-d's EPP exports
    `llm_d_epp_flow_control_queue_size` and upstream gateway-api-inference-extension
-   still exports `inference_extension_flow_control_queue_size`. Grep for both — WVA
+   still exports `inference_extension_flow_control_queue_size`. Grep for both — the scaling manager
    reads whichever exists.
 
-### The EPP scrape is failing but WVA still wakes models (slowly)
+### The EPP scrape is failing but the scaling manager still wakes models (slowly)
 
 **Symptom**: the log carries
 
@@ -73,10 +73,10 @@ interval — fix the direct path.
 
 and `wva_scale_from_zero_queue_fallback_active{pool="..."}` is `1`.
 
-**What it means**: WVA reads the flow-control queue by scraping the EPP pod
+**What it means**: The scaling manager reads the flow-control queue by scraping the EPP pod
 **directly** — pod IP, EPP metrics port, bearer token projected at
 `/var/run/secrets/epp-metrics/token`. Every other metric it consumes comes from
-Prometheus, so this one path can fail on its own. When it does, WVA falls back to
+Prometheus, so this one path can fail on its own. When it does, the scaling manager falls back to
 reading the same metric from Prometheus so models still wake. Nothing looks broken
 from the outside; wakes are just slower — bounded by the Prometheus scrape interval
 rather than the engine's 100 ms loop — and a sample older than 90 s is ignored, so
@@ -85,18 +85,18 @@ a queue that has already drained cannot wake anything.
 This is a degraded state, not a supported one. Check, in order:
 
 1. **The token.** `Failed to read EPP metrics token` in the log means the projected
-   volume is missing; WVA then scrapes unauthenticated and the EPP rejects it.
+   volume is missing; the scaling manager then scrapes unauthenticated and the EPP rejects it.
    ```bash
    kubectl -n workload-variant-autoscaler-system exec deploy/wva-controller-manager --      ls -l /var/run/secrets/epp-metrics/token
    ```
-2. **The EPP's tokenreview RBAC**, which authorizes WVA's token. It is bound per
-   release name, so a renamed or reinstalled EPP release leaves WVA's binding
+2. **The EPP's tokenreview RBAC**, which authorizes the scaling manager's token. It is bound per
+   release name, so a renamed or reinstalled EPP release leaves the scaling manager's binding
    pointing at nothing.
    ```bash
    kubectl get clusterrolebinding | grep epp-tokenreview
    ```
 3. **Network reachability to the EPP pod IP.** Prometheus scrapes the EPP too, so a
-   NetworkPolicy admitting the monitoring namespace but not WVA's breaks exactly
+   NetworkPolicy admitting the monitoring namespace but not the scaling manager's breaks exactly
    this path and no other.
 
 The gauge returns to `0` and the log reports the scrape recovered once the direct
@@ -118,7 +118,7 @@ For e2e-style deploys, **`deploy/install-epp.sh`** enables EPP flow control when
    
    **Solution**: Increase `SCALE_FROM_ZERO_ENGINE_MAX_CONCURRENCY`:
 
-   Add the environment variable to the WVA controller deployment:
+   Add the environment variable to the scaling manager controller deployment:
 
    ```yaml
    apiVersion: apps/v1

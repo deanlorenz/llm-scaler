@@ -35,7 +35,7 @@ CREATE_CLUSTER=true make deploy-e2e-infra
 This deploys:
 
 - Kind cluster with 3 nodes, emulated GPUs (mixed vendors)
-- WVA controller
+- The scaling manager controller
 - llm-d EPP (llm-d-router-standalone chart)
 - Prometheus monitoring + KEDA (external metrics)
 
@@ -52,12 +52,12 @@ kubectl apply -k config/samples/simulator/nodeSelector/decode-lws/
 ```
 
 Each sample includes its own KEDA `ScaledObject`. That object is the
-registration — without it WVA is never called about the workload and scales
+registration — without it the scaling manager is never called about the workload and scales
 nothing, quietly.
 
 **Those ScaledObjects name the controller's namespace**, and they name the
 default one, because that is where `deploy-e2e-infra` above installs it. If you
-installed WVA somewhere else — a namespace-scoped install puts the controller in
+installed the scaling manager somewhere else — a namespace-scoped install puts the controller in
 the workload's own namespace — the trigger resolves to nothing, and the symptom
 is quiet rather than loud: KEDA cannot fetch a metric spec, falls back to a CPU
 metric, and the HPA sits at `cpu: <unknown>/80%` with `READY False` while nothing
@@ -74,11 +74,11 @@ No arguments: it finds the running install itself and scans the cluster. It
 rewrites `scalerAddress` and nothing else — the `modelID`, `variantCost` and
 replica bounds you set are left alone — and it is idempotent, so it is safe to
 run whenever a workload is not scaling and you are not sure why. It only touches
-objects that already ask for WVA by name *and* whose address resolves to no
-running scaler: a ScaledObject pointing at a second, live WVA install is a
+objects that already ask for the scaling manager by name *and* whose address resolves to no
+running scaler: a ScaledObject pointing at a second, live the scaling manager install is a
 deliberate choice, and it is reported and left as it is rather than taken over.
 
-If you run several WVA installs it will not guess between them — pass
+If you run several the scaling manager installs it will not guess between them — pass
 `WVA_NS=<namespace>` to say which one these workloads belong to.
 
 ## Configuration Options
@@ -107,7 +107,7 @@ export KIND_IMAGE_PLATFORM=linux/amd64      # Single platform for kind load (avo
 ```bash
 export DEPLOY_PROMETHEUS=true               # Deploy Prometheus stack
 export DEPLOY_OPERATIONAL_DASHBOARD=true    # Deploy Grafana and operational dashboard
-export DEPLOY_WVA=true                      # Deploy WVA controller
+export DEPLOY_WVA=true                      # Deploy the scaling manager controller
 export SCALER_BACKEND=keda                  # Deploy KEDA for external metrics
 # llm-d: deploy model serving separately via the llm-d guides after install.sh
 ```
@@ -126,7 +126,7 @@ make create-kind-cluster KIND_ARGS="-t mix -n 4 -g 2"
 # -g: GPUs per node
 ```
 
-**2. Deploy WVA + monitoring only (no llm-d):**
+**2. Deploy the scaling manager + monitoring only (no llm-d):**
 
 ```bash
 cd /path/to/repo
@@ -134,7 +134,7 @@ export ENVIRONMENT=kind-emulator
 ./deploy/install.sh
 ```
 
-**3. Full stack (WVA + EPP + monitoring):**
+**3. Full stack (the scaling manager + EPP + monitoring):**
 
 ```bash
 CREATE_CLUSTER=true make deploy-e2e-infra
@@ -196,7 +196,7 @@ GPUs are emulated using extended resources:
 
 ### 1. Access metrics, Services and Pods
 
-**Port-forward WVA metrics:**
+**Port-forward the scaling manager metrics:**
 
 ```bash
 kubectl port-forward -n workload-variant-autoscaler-system \
@@ -219,8 +219,9 @@ kubectl port-forward -n llm-d-sim svc/infra-sim-inference-gateway 8000:80
 ### 2. Create Test Resources
 
 ```bash
-# Apply sample VariantAutoscaling
-kubectl apply -f ../../config/samples/
+# Register a workload. The ScaledObject IS the registration: naming the
+# external scaler in a trigger is what puts a workload under management.
+kubectl kustomize ../../config/samples/keda | kubectl apply -f -
 ```
 
 ### 3. Run E2E test
@@ -260,8 +261,8 @@ Tune load with `TOTAL_REQUESTS`, `BATCH_SIZE`, and optional `BATCH_SLEEP`, `MAX_
 # Watch deployments scale
 watch kubectl get deploy -n llm-d-sim
 
-# Watch VariantAutoscaling status
-watch kubectl get variantautoscalings.llmd.ai -A
+# Watch what the scaler is publishing
+watch kubectl get scaledobject -A
 
 # View controller logs
 kubectl logs -n workload-variant-autoscaler-system \
@@ -285,8 +286,8 @@ make create-kind-cluster
 kubectl logs -n workload-variant-autoscaler-system \
   deployment/controller-manager
 
-# Verify CRDs installed
-kubectl get crd variantautoscalings.llmd.ai
+# Verify KEDA's CRDs are installed (this project installs none of its own)
+kubectl get crd scaledobjects.keda.sh
 
 # Check RBAC
 kubectl get clusterrole,clusterrolebinding -l app.kubernetes.io/name=workload-variant-autoscaler

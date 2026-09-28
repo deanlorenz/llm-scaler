@@ -1,14 +1,14 @@
 # Contributing to Workload-Variant-Autoscaler
 
-Welcome! We're excited that you're interested in contributing to the Workload-Variant-Autoscaler (WVA) project.
+Welcome! We're excited that you're interested in contributing to the Workload-Variant-Autoscaler (the scaling manager) project.
 
 ## General Contributing Guidelines
 
 For general contribution guidelines including code of conduct, commit message format, PR process, and community standards, please see the **llm-d Contributing Guide**.
 
-This document covers **WVA-specific** development setup and workflows.
+This document covers the development setup and workflows **specific to this project**.
 
-## WVA-Specific Development
+## The scaling manager-Specific Development
 
 ### Prerequisites
 
@@ -63,7 +63,7 @@ The repository uses AI-powered workflows to automate repetitive tasks:
 
 Learn more in the [Developer Guide](docs/developer-guide/development.md).
 
-## WVA Project Structure
+## llm-scaling-manager Project Structure
 
 ```text
 llm-scaling-manager/
@@ -98,7 +98,7 @@ llm-scaling-manager/
 ├── hack/                 # Dev scripts (e.g. hack/burst_load_generator.sh for manual load)
 ```
 
-## WVA-Specific Development Tasks
+## The scaling manager-Specific Development Tasks
 
 ### Testing Your Changes
 
@@ -135,20 +135,22 @@ make lint
 make lint-fix
 ```
 
-### Modifying CRDs
+### Modifying generated manifests
 
-If you modify the `VariantAutoscaling` CRD in `api/v1alpha1/`:
+This project installs no CustomResourceDefinition. A workload is registered by
+its KEDA ScaledObject, so there is no API type to version. What is generated is
+the RBAC and deepcopy code:
 
-1. **Generate updated manifests and code:**
+1. **Regenerate after changing kubebuilder markers or API structs:**
 
    ```bash
    make manifests generate
    ```
 
-2. **Verify CRD changes:**
+2. **Check what moved:**
 
    ```bash
-   kubectl explain variantautoscaling.spec
+   git diff config/base/rbac internal/variant/deepcopy.go
    ```
 
 ### Building and Deploying
@@ -200,7 +202,7 @@ User-facing:
 - `docs/guides/<task>/` - a task someone runs, start to finish
 - `docs/reference/` - what an operator sets and reads: configuration, policy,
   metrics, troubleshooting
-- `docs/concepts/` - how WVA decides, in an operator's terms
+- `docs/concepts/` - how the scaling manager decides, in an operator's terms
 - `README.md` - high-level feature changes
 
 Developer-facing:
@@ -220,7 +222,7 @@ Verify all commands and examples work:
 # Verify all code snippets are correct
 ```
 
-## WVA-Specific Code Guidelines
+## The scaling manager-Specific Code Guidelines
 
 ### Controller Development
 
@@ -273,8 +275,8 @@ CREATE_CLUSTER=true make deploy-e2e-infra
 kubectl logs -n workload-variant-autoscaler-system \
   -l control-plane=controller-manager --tail=100 -f
 
-# Check VariantAutoscaling status
-kubectl describe variantautoscaling <name> -n <namespace>
+# Check what KEDA was told, and by whom
+kubectl describe scaledobject <name> -n <namespace>
 
 # Check emitted metrics
 kubectl get --raw "/apis/external.metrics.k8s.io/v1beta1/namespaces/<namespace>/wva_desired_replicas" | jq

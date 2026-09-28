@@ -1,14 +1,14 @@
-# Benchmark WVA
+# Benchmark the scaling manager
 
 ## Overview
 
-Stands up an llm-d stack with WVA on a GPU cluster, drives load through it with
+Stands up an llm-d stack with the scaling manager on a GPU cluster, drives load through it with
 [llm-d-benchmark](https://github.com/llm-d/llm-d-benchmark), and reports latency,
 replica counts and cost per run.
 
 Use it to compare scaling behaviour across configurations — thresholds, limiters,
 one variant against two. It needs real GPUs; for correctness work without them,
-see [Test WVA against a full llm-d stack](../testing-with-llm-d/).
+see [Test the scaling manager against a full llm-d stack](../testing-with-llm-d/).
 
 ## Prerequisites
 
@@ -50,7 +50,7 @@ Both are explained in [the FMA post-mortem](../../proposals/fma-post-mortem.md).
 
 ## Installation Instructions
 
-Already have WVA installed and just want to see it scale? `make benchmark-smoke
+Already have the scaling manager installed and just want to see it scale? `make benchmark-smoke
 NAMESPACE=<ns>` drives symmetric 1024/1024 load at 15 req/s for five minutes
 and snapshots the
 dashboard, with no standup and no scenario. Everything below is for runs whose
@@ -64,10 +64,10 @@ make benchmark-standup BENCHMARK_NAMESPACE=${BENCHMARK_NAMESPACE} IMG=${IMG}
 ```
 <!-- guide:deploy.standup end -->
 
-Stands up the model servers via llm-d-benchmark, then installs WVA from this
+Stands up the model servers via llm-d-benchmark, then installs the scaling manager from this
 repo and registers the workloads.
 
-**The model cache has to be ReadWriteMany.** The two WVA scenarios in this repo
+**The model cache has to be ReadWriteMany.** The two the scaling manager scenarios in this repo
 ask for it explicitly; `guides/epp-keda-saturation` — which
 `BENCHMARK_DIRECT_KEDA=true` selects — comes from llm-d-benchmark and does not,
 so on that path check the `Model cache:` line the standup prints. It matters more here than anywhere else: an RWO cache stands the
@@ -145,7 +145,7 @@ or learned per-replica capacity from the previous run carries into the next.
 `make benchmark-report` renders a markdown table from the newest results in the
 workspace. A run worth keeping has, per scenario: a non-zero request count, an
 error count of **0**, and a replica timeline that moves — a variant flat at one
-replica through a deep queue means WVA never saw the load, not that it decided
+replica through a deep queue means the scaling manager never saw the load, not that it decided
 not to scale. Check the queue-depth column against the replica column before
 trusting any latency number; if the two disagree, see
 [After the install](../../reference/operations.md) before re-running.
@@ -167,7 +167,7 @@ make benchmark-teardown BENCHMARK_NAMESPACE=${BENCHMARK_NAMESPACE}
 ```
 <!-- guide:cleanup.teardown end -->
 
-Removes WVA first, then the llm-d releases: a namespace-scoped install still
+Removes the scaling manager first, then the llm-d releases: a namespace-scoped install still
 creates cluster-scoped RBAC, which deleting the namespace would leave behind.
 
 ## Configuration
@@ -219,7 +219,7 @@ each because it happened.
   offers three ways on: use a clean namespace, benchmark what is already there
   with `make benchmark-run` alone, or re-render deliberately with
   `BENCHMARK_ALLOW_EPP_REUSE=true`.
-- **A WVA controller already running.** The guard used to exclude our own
+- **A controller already running.** The guard used to exclude our own
   deployment name, so a standup silently re-applied over a running controller and
   moved it to `$(IMG)` — including one somebody else was mid-experiment on.
   Standup now prints the running image against the incoming one and points at
@@ -252,7 +252,7 @@ by default). Scale-up therefore acts on the current recommendation (`0`), while
 scale-down waits 300s: removing a replica too eagerly costs a cold start on the
 next request, and keeping one too long only costs money.
 
-**The default model is small on purpose.** These runs measure WVA's scaling
+**The default model is small on purpose.** These runs measure the scaling manager's scaling
 behaviour, and a 0.6B model exercises the same path a 32B one does — discovery,
 the ScaledObject plan, the scale decision, the report — while pulling far less
 and holding one GPU per replica instead of several. Pass
@@ -260,7 +260,7 @@ and holding one GPU per replica instead of several. Pass
 `BENCHMARK_MODEL_ID=` (empty) to defer to whatever the scenario names.
 
 Latency and throughput numbers are model-specific, so a 0.6B run tells you
-nothing about a 32B model's TTFT. It tells you whether WVA scaled correctly,
+nothing about a 32B model's TTFT. It tells you whether the scaling manager scaled correctly,
 which is what this suite is for.
 
 **`IMG` decides what is measured**, and nothing in the results afterwards says
@@ -301,7 +301,7 @@ make prepull-status NAMESPACE=$BENCHMARK_NAMESPACE      # every accelerator node
 The mechanism (one DaemonSet per image, the image itself asleep, no
 accelerator requested) is
 [Holding the image on the nodes](../../reference/workload-preparation.md#holding-the-image-on-the-nodes);
-it applies to any workload WVA scales, not only a benchmark. The scenarios
+it applies to any workload the scaling manager scales, not only a benchmark. The scenarios
 pull the engine `IfNotPresent` for the same reason -- a pinned tag pulled
 `Always` still asks the registry at every start.
 

@@ -8,7 +8,7 @@
 >
 > This fork keeps WVA's core idea -- variant-aware autoscaling for LLM inference --
 > and has diverged substantially from it. The largest additions here are a **KEDA
-> external scaler**, which lets WVA answer KEDA directly over gRPC instead of
+> external scaler**, which lets it answer KEDA directly over gRPC instead of
 > publishing a metric and hoping; a **warm pool** that bridges a slow scale-up
 > by lending a Pod with the model already loaded and asleep, so the variant
 > serves while its own replica starts; the **ScaledObject discovery and install

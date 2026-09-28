@@ -1,9 +1,9 @@
 # Bounding scaling: the GPU limiter
 
-WVA scales without a GPU budget unless you give it one. This is how, and what has
+The scaling manager scales without a GPU budget unless you give it one. This is how, and what has
 to be true first.
 
-> Part of the [WVA deployment guide](../../deploy/).
+> Part of the [the scaling manager deployment guide](../../deploy/).
 
 ## Turning it on
 
@@ -15,7 +15,7 @@ make deploy-wva-on-k8s WVA_LIMITER=quota WVA_QUOTAS='H200=8 A100=4'   # bound by
 `WVA_QUOTAS` is **required** by the quota limiter and has no default: a quota
 entry that names no accelerator is not "unlimited", it is a budget of zero for
 every type, and every managed workload stops scaling up. Use `-1` for no cap on
-a type (`H100=-1`). The type is the name WVA resolves, which it logs per variant
+a type (`H100=-1`). The type is the name the scaling manager resolves, which it logs per variant
 (`"accelerator": "H200"`). `WVA_QUOTA_SCOPE` is `namespace` (the default: each
 managed namespace gets this budget) or `cluster` (one budget across all of them).
 
@@ -46,7 +46,7 @@ INFO  GPU limiter constructed  {"type": "none", "name": "no-limiter"}       # NO
 > That is the dangerous direction — the config says "bounded by real GPUs too"
 > and a scale-from-zero wake can still be placed onto a full accelerator.
 >
-> WVA says so rather than dropping it silently: the ConfigMap parse and the
+> The scaling manager says so rather than dropping it silently: the ConfigMap parse and the
 > startup log both name what is not enforced (`notEnforced`). Bounding by
 > `min(physical, quota)` is [issue #1003](https://github.com/llm-d/llm-d-workload-variant-autoscaler/issues/1003).
 
@@ -63,7 +63,7 @@ controller — its Deployment, its args, its env, its ServiceAccount. Nothing ca
 on the controller can bound the person who can edit the controller. A quota its
 subject can edit is not a quota.
 
-So WVA does not accept its limits from anything that person can write.
+So the scaling manager does not accept its limits from anything that person can write.
 
 ### What an admin sets, and where
 
@@ -76,7 +76,7 @@ RBAC *inside* their namespace and can neither create a `Namespace` nor edit one'
 annotations.
 
 ```bash
-# Once per cluster. Every WVA on the cluster reads this, and none can opt out.
+# Once per cluster. Every install on the cluster reads this, and none can opt out.
 kubectl create namespace wva-policy
 kubectl -n wva-policy create configmap wva-scaling-policy-config \
   --from-file=default=cluster-limiters.yaml
@@ -109,7 +109,7 @@ kubectl get ns -l wva.llmd.ai/policy-namespace=platform-policy
 Policy is resolved once at startup, in order:
 
 1. the `wva.llmd.ai/policy-namespace` **label** on the namespace being managed
-2. the **default policy namespace**, `wva-policy` — a name hardcoded in WVA, which
+2. the **default policy namespace**, `wva-policy` — a name hardcoded in the scaling manager, which
    is why the install scripts never mention it: one definition, in one language,
    so the two cannot drift
 3. the controller's own namespace
@@ -155,12 +155,12 @@ policy.
 ### What this does and does not bound
 
 **A guardrail, not an enforcement boundary.** Whoever owns the controller's
-Deployment owns its args, env and image, so a tenant running WVA inside their own
+Deployment owns its args, env and image, so a tenant running the scaling manager inside their own
 namespace can change what bounds them. What this does guarantee is that the GPU
-budget is authoritative for every controller actually running WVA — which covers
+budget is authoritative for every controller actually running the scaling manager — which covers
 misconfiguration and drift.
 
-WVA's limiter also bounds only what *WVA* asks for. The ScaledObject belongs to
+The scaling manager's limiter also bounds only what *the scaling manager* asks for. The ScaledObject belongs to
 the workload's owner: raising `maxReplicaCount` or adding a second KEDA trigger
 bypasses it entirely, because the HPA takes the maximum across triggers.
 
@@ -195,7 +195,7 @@ by default would freeze exactly the workloads that are least carefully configure
 
 ## What has to be true first: every accelerator must resolve
 
-WVA resolves a variant's accelerator from, in order:
+The scaling manager resolves a variant's accelerator from, in order:
 
 1. a **GPU product key in the workload's `nodeSelector` or `nodeAffinity`** — the
    only source that works before any pod exists, and therefore the only one that
@@ -224,7 +224,7 @@ kubectl logs -n workload-variant-autoscaler-system   -l app.kubernetes.io/name=w
 
 The limiter reads **nodes** to learn what GPUs exist, and nodes are cluster-scoped.
 
-WVA reads nodes on every cycle regardless of the limiter — a variant's accelerator
+The scaling manager reads nodes on every cycle regardless of the limiter — a variant's accelerator
 is resolved from the nodes its pods run on, and that identity is what the capacity
 model keys learned per-replica capacity by. What the limiter changes is whether
 that identity is also used to charge the variant to a GPU **budget**.
@@ -286,7 +286,7 @@ Three consequences:
 pods — does not work: `dual-pods.llm-d.ai/vllm-config`, `/server-port` and
 `/accelerators` are present only *while bound*. An orphaned launcher still running
 an instance carries neither, so the API server holds no record of what it is
-using. Only the launcher's own API knows, and WVA does not call workload APIs.
+using. Only the launcher's own API knows, and the scaling manager does not call workload APIs.
 
 So: when planning capacity in an FMA namespace, subtract the warm pool by hand.
 Its ceiling is `launcherCount × maxInstances` per matching node, from the

@@ -20,7 +20,7 @@ deploy:
       the stack above installs into llm-d-sim, so the two do not meet. The symptom
       is quiet -- KEDA cannot fetch a metric spec, falls back to a CPU metric, and
       the ScaledObject sits READY False with the HPA reading `cpu: <unknown>/80%`
-      while WVA scales nothing. This finds whichever install is running and
+      while the scaling manager scales nothing. This finds whichever install is running and
       repoints the sample at it, editing nothing else.
     run: make scaledobjects-repoint
 

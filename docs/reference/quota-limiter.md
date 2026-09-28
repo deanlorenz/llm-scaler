@@ -150,7 +150,7 @@ The decision above these fields — when to take this, what it costs, the
 evidence — is [the Kueue-bounded quotas path](../well-lit-paths/kueue-bounded-quotas/).
 
 A quota entry can be **bounded by Kueue**. Kueue is the cluster's admission-time
-quota authority; reading its figures makes WVA respect the same caps before it
+quota authority; reading its figures makes the scaling manager respect the same caps before it
 asks KEDA for a replica that Kueue would then hold pending. Set `kueue.enabled`
 on the entry:
 
@@ -162,7 +162,7 @@ limiters:
     kueue:
       enabled: true
       # resources: [nvidia.com/gpu]   # which extended resources count as GPUs;
-      #                               # default: every vendor resource WVA knows
+      #                               # default: every vendor resource the scaling manager knows
       # refreshInterval: 30s          # how often Kueue is re-read (default 30s)
     namespaceQuotas:                  # optional: the static caps below still apply
       team-a:
@@ -350,23 +350,23 @@ Enforcement happens in the optimizer, which is the single decision-maker (see
 per `refreshInterval`) and installs the static entry bounded by the snapshot as
 the effective config — see [Kueue as a quota source](#kueue-as-a-quota-source).
 
-### A quota is charged for WVA's variants only
+### A quota is charged for the scaling manager's variants only
 
 `QuotaInventory` declares `UsageBasis() == allocation.ManagedUsage`, so the usage it
-is fed counts only what WVA's own variants hold — summed from the saturation
+is fed counts only what the scaling manager's own variants hold — summed from the saturation
 engine's population, not from the cluster-wide pod walk that feeds a physical
 inventory. Both figures are assembled per cycle and routed per provider; see
 [GPU capacity accounting](../concepts/gpu-capacity-accounting.md) for the two bases.
 
-This is not a detail. A quota is an allowance granted to WVA and may only be spent
-by WVA. Charged the physical figure, a namespace with a 4-GPU WVA quota sharing
-space with an unrelated 4-GPU training job reads as fully spent while WVA has
+This is not a detail. A quota is an allowance granted to the scaling manager and may only be spent
+by the scaling manager. Charged the physical figure, a namespace with a 4-GPU the scaling manager quota sharing
+space with an unrelated 4-GPU training job reads as fully spent while the scaling manager has
 placed nothing, and every scale-up is refused with the allowance nominally
 untouched. The hardware being full is a separate statement, made by the physical
 limiter.
 
 The corollary is that a quota does **not** bound the cluster: it can hand out
-capacity that non-WVA workloads have already taken. Deployments that need both
+capacity that unmanaged workloads have already taken. Deployments that need both
 guarantees compose a physical limiter and a quota limiter, and each is then fed
 the measure it is asking about.
 

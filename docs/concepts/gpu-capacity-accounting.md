@@ -1,6 +1,6 @@
 # GPU Capacity Accounting
 
-How WVA decides whether GPUs are available, what that number actually means
+How the controller decides whether GPUs are available, what that number actually means
 today, and the ways it can still over-state free capacity.
 
 Two consumers read these budgets:
@@ -45,21 +45,21 @@ scale-from-zero) hands each provider the matching view.
 | basis | counts | produced by | consumed by |
 |---|---|---|---|
 | `PhysicalUsage` | every GPU held on the cluster's GPU nodes, whoever holds it | `internal/gpuusage`, on its own 15s ticker | physical inventory (`TypeInventory`) |
-| `ManagedUsage` | only what WVA's own variants hold | the saturation engine's population sum (`gpuUsageByType`) | quota inventory (`QuotaInventory`) |
+| `ManagedUsage` | only what our own variants hold | the saturation engine's population sum (`gpuUsageByType`) | quota inventory (`QuotaInventory`) |
 
 The split exists because the two answer different questions:
 
 - a **physical inventory** asks *"will the scheduler find a free device?"*. Every
   GPU-requesting pod counts, whoever owns it — a training job in another
-  namespace is as real an obstacle as one of WVA's own replicas. This view is
+  namespace is as real an obstacle as one of our own replicas. This view is
   attributed by the **node** a pod runs on, so nothing is unattributable and it
-  does not depend on WVA having discovered the workload;
-- a **quota** asks *"how much of the operator's declared allowance has WVA
-  consumed?"*. A quota governs WVA-managed variants and nothing else. Charged the
-  physical figure, a namespace with a 4-GPU WVA quota and an unrelated 4-GPU
-  training job reads as fully spent while WVA has placed nothing, and every
+  does not depend on the controller having discovered the workload;
+- a **quota** asks *"how much of the operator's declared allowance have we
+  consumed?"*. A quota governs managed variants and nothing else. Charged the
+  physical figure, a namespace with a 4-GPU quota and an unrelated 4-GPU
+  training job reads as fully spent while we have placed nothing, and every
   scale-up is refused. The managed view sums `CurrentReplicas × GPUsPerReplica`
-  over the variants WVA manages, keyed by each variant's resolved accelerator.
+  over the variants we manage, keyed by each variant's resolved accelerator.
 
 Physical is the default: anything that does not declare a basis gets it. That is
 the safe direction — a physical figure over-states consumption for a quota, which
@@ -84,7 +84,7 @@ a needed view has not been observed. Only the bases some provider actually asks
 for are gathered, so a quota-only deployment is never held up waiting for a
 physical observation it does not consult, and vice versa.
 
-## Key reconciliation: `Used` vs `Limit` (fixed)
+## Reconciling `Used` with `Limit`
 
 The two sides of a pool are written in different vocabularies, and getting this
 wrong made the budgets inert rather than merely inaccurate.
@@ -117,7 +117,7 @@ Pinned by `TestUsageIsReconciledOntoPoolKeys` and `TestPoolKeysAreShortNames`.
 > usage and will allocate less. That is the correction, but it is a behavioural
 > change for any existing deployment that declares a limiter.
 
-## Gap 1: usage on an unresolved accelerator is still unattributable
+## Over-statement 1: usage on an unresolved accelerator is unattributable
 
 A variant that constrains no accelerator and has no running pods to observe
 resolves to
@@ -141,11 +141,11 @@ Pinned by `internal/engines/allocation/unresolved_accelerator_usage_test.go`.
 be charged to a pool, and charging it to every candidate type would deny
 legitimate scale-up on a guess. The durable fix is making the accelerator
 resolvable — set a `nodeSelector`/`nodeAffinity` GPU key on the workload. Once it has
-running pods WVA also resolves it by observation, from the nodes the scheduler
-actually placed them on. WVA emits an
+running pods the controller also resolves it by observation, from the nodes the
+scheduler actually placed them on. It emits an
 `AcceleratorNotResolved` warning event per affected variant.
 
-## Gap 2 (mostly closed): `Limit` is installed GPUs, not available GPUs
+## Over-statement 2: `Limit` counts installed GPUs, not available ones
 
 `Limit` sums each node's **Allocatable** for the GPU resource. Allocatable is the
 node's total; it does not subtract what running pods have requested, and it does
@@ -156,7 +156,7 @@ The `Used` side of that gap is **closed for physical providers**.
 GPU nodes and attributing each to the node it is scheduled to — so a physical
 pool now nets out:
 
-- workloads in other namespaces, or not managed by WVA at all;
+- workloads in other namespaces, or not managed by us at all;
 - system/DaemonSet pods holding GPUs;
 - pods scheduled but not yet running (the scheduler has already committed those
   devices; treating them as free would let two wakes land on the same one).
@@ -175,11 +175,11 @@ Two pieces remain open:
    with an unresolved accelerator is charged to no pool, so a quota reports more
    of its allowance free than it has. `wva_unattributed_gpus` reports the amount.
 
-## Gap 3: an FMA warm pool holds GPUs that no pod requests
+## Over-statement 3: an FMA warm pool holds GPUs that no pod requests
 
-Both gaps above are about GPUs this accounting charges to the wrong place. This
-one is about GPUs it cannot see at all, and unlike the others it cannot be closed
-from inside WVA.
+Both of the above are about GPUs this accounting charges to the wrong place.
+This one is about GPUs it cannot see at all, and unlike the others it cannot be
+closed from inside the controller.
 
 Fast Model Actuation splits a server across a requester pod, which reserves the
 accelerator, and a launcher pod, which runs the engine on it. Launchers request
@@ -235,7 +235,7 @@ simultaneously for a denial to be reachable at all:
    candidate contributes no demand and `FitsGPUBudget` returns true having
    evaluated nothing;
 2. a GPU-usage snapshot exists for the basis the configured provider needs. For
-   the default physical provider this no longer requires an active WVA variant —
+   the default physical provider this no longer requires an active managed variant —
    `internal/gpuusage` observes on its own ticker from process start, which is
    what makes the check meaningful for a fleet parked at zero. A quota provider
    does still need a completed saturation cycle, which publishes the managed view

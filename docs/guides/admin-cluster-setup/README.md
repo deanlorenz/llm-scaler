@@ -5,7 +5,7 @@
 Creates, for one namespace, the things a namespace admin cannot: the namespace
 itself, the cluster-scoped RBAC, and the ServiceMonitor. After this, that
 namespace's owner installs and upgrades the controller with no cluster-scoped
-rights, and you are not in the loop again unless a WVA release changes what it
+rights, and you are not in the loop again unless a release changes what it
 needs cluster-wide.
 
 ## Prerequisites
@@ -111,5 +111,5 @@ The namespace, Prometheus, KEDA and EPP stay.
 ## Next
 
 - [Bounding GPU usage](../admin-gpu-bounding/)
-- [Install WVA in a namespace](../install-in-namespace/) — what you are
+- [Install the scaling manager in a namespace](../install-in-namespace/) — what you are
   enabling someone else to do

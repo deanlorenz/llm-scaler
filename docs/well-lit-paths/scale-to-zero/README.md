@@ -1,7 +1,7 @@
 # Scale to zero, and get back
 
 An idle model releases its accelerators entirely, and comes back when a request
-arrives. Two mechanisms that fail independently: **parking** is WVA's — a model
+arrives. Two mechanisms that fail independently: **parking** is the scaling manager's — a model
 that serves nothing for `retentionPeriod` goes to zero — and **waking** is the
 EPP's flow-control queue plus KEDA, which brings it off zero when a request
 queues for a model with no endpoints.
@@ -30,7 +30,7 @@ prerequisite block does exactly this, and asks the EPP process what it
 - EPP with the `flowControl` feature gate actually parsed by the running pod.
 - Scale-to-zero enabled on the model **and** `minReplicaCount: 0` on every
   variant's ScaledObject. Set one without the other and you get a valid
-  configuration that quietly does not do what it looks like — WVA reports which
+  configuration that quietly does not do what it looks like — the scaling manager reports which
   half is missing.
 - A `retentionPeriod` longer than one optimization cycle. A parking pass faster
   than `retentionPeriod` is stale state, not success.

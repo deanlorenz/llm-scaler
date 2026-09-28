@@ -11,8 +11,8 @@
 > separately, and the largest across vendors rather than the sum).
 
 If Kueue is already the place where GPU quotas are decided, a second copy of
-every number in WVA's ConfigMap is a second thing to keep right. This path has
-WVA read Kueue's ClusterQueues and enforce, per namespace and accelerator type,
+every number in the scaling manager's ConfigMap is a second thing to keep right. This path has
+The scaling manager read Kueue's ClusterQueues and enforce, per namespace and accelerator type,
 **the smaller of Kueue's grant and the static cap** — so the autoscaler does not
 ask KEDA for a replica that Kueue would then hold pending.
 
@@ -21,8 +21,8 @@ everything there about scope, the reserved `default` key and what a quota does
 *not* bound still applies. Read that page first; this one adds one block to its
 entry.
 
-**Use it when** the namespaces WVA scales have LocalQueues, their GPU grants are
-ClusterQueue nominal quotas, and you want WVA to follow those numbers as they
+**Use it when** the namespaces the scaling manager scales have LocalQueues, their GPU grants are
+ClusterQueue nominal quotas, and you want the scaling manager to follow those numbers as they
 change rather than mirror them by hand.
 
 **Do not use it where several namespaces share one ClusterQueue and the shared
@@ -34,7 +34,7 @@ grant (the second surprise below). And read the third surprise before choosing
 
 - Everything [tenant-gpu-quotas](../tenant-gpu-quotas/) needs.
 - Kueue's `ClusterQueue`, `LocalQueue` and `ResourceFlavor` kinds served by the
-  cluster. WVA lists them and never talks to Kueue's controller, so the CRDs
+  cluster. The scaling manager lists them and never talks to Kueue's controller, so the CRDs
   alone are enough for the reader to work — but a real installation is what
   makes the grants mean anything.
 - RBAC to read them. A **cluster-scoped** install has it in the manager
@@ -132,7 +132,7 @@ kubectl logs -n <wva-namespace> deploy/wva-controller-manager \
 
 The `bounded by external caps` line carries four maps: Kueue's grant per
 namespace and for the cluster, and the **effective** namespace and cluster caps
-after the merge — the numbers WVA enforces. `external quota source unreadable`
+after the merge — the numbers the scaling manager enforces. `external quota source unreadable`
 names an RBAC or CRD problem and says whether a stale snapshot or the static
 entry is in force. `grants GPUs of no named accelerator type` is the
 untyped-flavor case above.
@@ -184,5 +184,5 @@ Every field, the full merge table and what is not read:
 — `resources` narrows which extended resources count as GPUs, `refreshInterval`
 how often Kueue is re-read. The installer variables:
 [configuration](../../reference/configuration.md). Why a quota counts only
-WVA's own consumption:
+The scaling manager's own consumption:
 [GPU capacity accounting](../../concepts/gpu-capacity-accounting.md).

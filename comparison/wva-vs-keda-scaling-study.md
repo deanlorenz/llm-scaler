@@ -2,7 +2,7 @@
 
 **A request threshold, or a capacity model — five runs on a live cluster.**
 
-> Workload Variant Autoscaler · **KEDA is the actuator in every run here.**
+> llm-scaling-manager · **KEDA is the actuator in every run here.**
 > Every run is one model, one accelerator, one variant. Figures: [`figures/src/`](./figures/src/).
 
 ---
@@ -14,7 +14,7 @@
 | Arm | What computes the target |
 |---|---|
 | **KEDA alone** | A **threshold on a serving metric**: scale when running requests pass **16 per pod**. |
-| **WVA + KEDA** | A **capacity model**: scale when token demand approaches **measured KV capacity**. |
+| **the scaling manager + KEDA** | A **capacity model**: scale when token demand approaches **measured KV capacity**. |
 
 **Colour code:** in the tables below, the highlighted arm is the one that won that row. Every run is **one model, one accelerator, one variant** — the single-variant case.
 
@@ -34,9 +34,9 @@
 
 ## All five runs on one page
 
-WVA held fewer GPUs every time. Run 3 is the only one where that saving costs something.
+The scaling manager held fewer GPUs every time. Run 3 is the only one where that saving costs something.
 
-| # | What we ran | GPUs held (WVA vs other) | Dropped (WVA vs other) | What it means |
+| # | What we ran | GPUs held (the scaling manager vs other) | Dropped (the scaling manager vs other) | What it means |
 |---|---|---|---|---|
 | 1 | symmetric 300/300, 10 req/s | **1.00 vs 1.88** | 0 vs 30 | Half the GPU, same latency |
 | 2 | prefill-heavy 1000/250, rates 10 → 16 | **1.00 vs 2.46** | 0 vs 21 | 2.5× the GPUs at a third of the utilization |
@@ -44,7 +44,7 @@ WVA held fewer GPUs every time. Run 3 is the only one where that saving costs so
 | 4 | decode-heavy 100/1000, sustained @ 24 | **2.21 vs 5.97** | 6 vs 2 | Cheaper, no tail cost; KEDA pinned at its cap |
 | 5 | prefill / decode split on 6 GPUs | **3:3 vs 5:1** | — | Sized apart, one role starves |
 
-> **The honest shape of it:** WVA holds fewer GPUs in all four single-variant runs. The tail cost appears only on prefill-heavy traffic (Run 3) and is *absent* when the same config runs decode-heavy (Run 4) — so it is a property of the **token shape**, not of consolidating replicas. Both directions are the same lesson: **a fixed request threshold is only valid for the shape it was tuned on.**
+> **The honest shape of it:** the scaling manager holds fewer GPUs in all four single-variant runs. The tail cost appears only on prefill-heavy traffic (Run 3) and is *absent* when the same config runs decode-heavy (Run 4) — so it is a property of the **token shape**, not of consolidating replicas. Both directions are the same lesson: **a fixed request threshold is only valid for the shape it was tuned on.**
 
 ---
 
@@ -68,9 +68,9 @@ scale down:
 - **It moves with the traffic too:** tuned for 300/300 tokens, it over-scales on 1000/250.
 - So it is **re-derived per model × accelerator × configuration — and again when the workload shape changes.**
 
-> In every run here the threshold bought replicas that did no work — **2.46× and 4.01×** the count WVA held, at **3.3% average KV-cache utilization.** Softening its scale-down would not close the gap: a slower drain holds those replicas *longer*.
+> In every run here the threshold bought replicas that did no work — **2.46× and 4.01×** the count the scaling manager held, at **3.3% average KV-cache utilization.** Softening its scale-down would not close the gap: a slower drain holds those replicas *longer*.
 
-**`"Scale at 75% KV"` means the same thing on any model, accelerator, or request shape — WVA measures the per-variant capacity itself. `"16 running requests"` is that capacity, hand-derived.**
+**`"Scale at 75% KV"` means the same thing on any model, accelerator, or request shape — the scaling manager measures the per-variant capacity itself. `"16 running requests"` is that capacity, hand-derived.**
 
 ---
 
@@ -83,8 +83,8 @@ scale down:
 ![Run 1 — measured replica counts over the run](figures/src/exp1_300x300_replicas.png)
 
 - Solid = replicas ready; faint = what each controller asked for.
-- KEDA scales at 16 running requests per pod; WVA scales when demand nears KV capacity.
-- Bursts cross that request line even though the mean fits in one pod, so **KEDA cycles 1↔2↔3** and drops ~30 requests. WVA holds a stable target.
+- KEDA scales at 16 running requests per pod; the scaling manager scales when demand nears KV capacity.
+- Bursts cross that request line even though the mean fits in one pod, so **KEDA cycles 1↔2↔3** and drops ~30 requests. The scaling manager holds a stable target.
 
 ---
 
@@ -94,13 +94,13 @@ scale down:
 
 **Hero:** **1.00 vs 2.46 GPUs held** — −59% GPU-time, **nothing queued on either arm.**
 
-| | WVA + KEDA — flat at 1 replica | KEDA-EPP alone — steps to 4 |
+| | the scaling manager + KEDA — flat at 1 replica | KEDA-EPP alone — steps to 4 |
 |---|---|---|
-| | ![Run 2 WVA](figures/src/exp2_wva.png) | ![Run 2 KEDA](figures/src/exp2_keda.png) |
+| | ![Run 2 the scaling manager](figures/src/exp2_wva.png) | ![Run 2 KEDA](figures/src/exp2_keda.png) |
 
-- WVA's target never moves; KEDA-EPP steps 2 → 3 → 4 as the request count climbs.
-- WVA's demand stays far under the capacity line — that headroom is what it reads.
-- KV panel: WVA holds 5–15%, KEDA-EPP 2–8% — the *same* demand spread across more replicas.
+- The scaling manager's target never moves; KEDA-EPP steps 2 → 3 → 4 as the request count climbs.
+- The scaling manager's demand stays far under the capacity line — that headroom is what it reads.
+- KV panel: The scaling manager holds 5–15%, KEDA-EPP 2–8% — the *same* demand spread across more replicas.
 - **Queues are flat on both arms**, so the extra replicas bought no service — only cost.
 
 ---
@@ -111,14 +111,14 @@ scale down:
 
 **Hero:** **1.56 vs 4.01 GPUs held** — −61% GPU-time — *paid for in the tail.*
 
-| | WVA + KEDA — two cycles, then flat at 1 | KEDA-EPP alone — settles at 5 and holds |
+| | the scaling manager + KEDA — two cycles, then flat at 1 | KEDA-EPP alone — settles at 5 and holds |
 |---|---|---|
-| | ![Run 3 WVA](figures/src/exp3_wva.png) | ![Run 3 KEDA](figures/src/exp3_keda.png) |
+| | ![Run 3 the scaling manager](figures/src/exp3_wva.png) | ![Run 3 KEDA](figures/src/exp3_keda.png) |
 
-- WVA runs two overshoot-and-correct cycles, then holds 1 replica; KEDA-EPP climbs 1 → 2 → 4 → 5 and holds, with vLLM waiting at exactly 0 throughout.
-- **The errors and the tail live in WVA's cycles:** each drain to one replica cuts live streams. Capping the drain rate (Pods 1 / N s) is what got WVA to converge — *not* thresholds.
+- The scaling manager runs two overshoot-and-correct cycles, then holds 1 replica; KEDA-EPP climbs 1 → 2 → 4 → 5 and holds, with vLLM waiting at exactly 0 throughout.
+- **The errors and the tail live in the scaling manager's cycles:** each drain to one replica cuts live streams. Capping the drain rate (Pods 1 / N s) is what got the scaling manager to converge — *not* thresholds.
 
-> **Honest caveat (a WVA bug, not a defense of thresholds):** WVA's compute-capacity estimate recovers toward the memory bound once the queue drains, so it released replicas while arrivals were unchanged. A replacement estimator exists behind a build flag and has **not** yet been measured on this workload — read the tail as *current behaviour*, not settled. This is the one axis where a reactive threshold wins today.
+> **Honest caveat (a scaling-manager bug, not a defense of thresholds):** the scaling manager's compute-capacity estimate recovers toward the memory bound once the queue drains, so it released replicas while arrivals were unchanged. A replacement estimator exists behind a build flag and has **not** yet been measured on this workload — read the tail as *current behaviour*, not settled. This is the one axis where a reactive threshold wins today.
 
 ---
 
@@ -128,11 +128,11 @@ scale down:
 
 **Hero:** **2.21 vs 5.97 GPUs held** — −63% GPU-time, and **no tail cost at all.**
 
-| | WVA + KEDA — one cycle, then low | KEDA-EPP alone — pinned at 10 |
+| | the scaling manager + KEDA — one cycle, then low | KEDA-EPP alone — pinned at 10 |
 |---|---|---|
-| | ![Run 4 WVA](figures/src/exp4dh_wva.png) | ![Run 4 KEDA](figures/src/exp4dh_keda_epp.png) |
+| | ![Run 4 the scaling manager](figures/src/exp4dh_wva.png) | ![Run 4 KEDA](figures/src/exp4dh_keda_epp.png) |
 
-- WVA climbs 1 → 2 → 3 early and drains back to 1: one cycle, against two or three on the prefill-heavy runs at the *same config*.
+- The scaling manager climbs 1 → 2 → 3 early and drains back to 1: one cycle, against two or three on the prefill-heavy runs at the *same config*.
 - **KEDA-EPP reaches its 10-replica cap within three minutes — before the sustained stage even starts — and holds for ~30 minutes.**
 - KV utilization stays low and the EPP queue never builds on either arm: neither was short of capacity. The difference is entirely in *what each one asked for.*
 - **The cap is the tell.** A trigger that pegs immediately and ignores the 16 → 20 → 24 rate ladder is not measuring load — the threshold calibrated for prefill-heavy traffic is *degenerate* on decode-heavy.
@@ -149,13 +149,13 @@ scale down:
 
 - Green is decode, yellow is prefill. Panels: capacity · load per replica · replicas.
 - Sized apart, prefill asked first and the 6-GPU pool was gone before decode could grow — **decode pods left pending, load per replica skewed.**
-- Both windows are **WVA — role-awareness off, then on** — *not* WVA vs KEDA. Sizing each role alone is exactly what a **per-Deployment scaler does**; it has no notion of the role coupling.
+- Both windows are **the scaling manager — role-awareness off, then on** — *not* the scaling manager vs KEDA. Sizing each role alone is exactly what a **per-Deployment scaler does**; it has no notion of the role coupling.
 
 ---
 
 ## What the five runs generalise to
 
-| Reality | KEDA alone | WVA + KEDA | Evidence |
+| Reality | KEDA alone | the scaling manager + KEDA | Evidence |
 |---|---|---|---|
 | Bursty arrivals around a steady mean | Threshold crossings → oscillation and dropped requests | Capacity model → stable target | Run 1 |
 | Cheap requests arriving in bulk | Counts requests, not the work they represent | Scales on GPU pressure, not arrivals | Run 2 |
@@ -165,7 +165,7 @@ scale down:
 | Heterogeneous, scarce GPUs | Every `ScaledObject` competes for any GPU | Cost-aware allocation across the pool | *not measured* |
 | Mixed-priority traffic on one model | One threshold averages all classes together | Sized to the tightest SLO class | *not measured* |
 
-> The first five rows are measured — row 3 is the one that does not go WVA's way. The last two are argued, not tested.
+> The first five rows are measured — row 3 is the one that does not go the scaling manager's way. The last two are argued, not tested.
 
 **A threshold reasons about one Deployment. A capacity model reasons about the cluster.**
 
@@ -174,23 +174,23 @@ scale down:
 ## Recommendation
 
 **Run today**
-- **WVA + KEDA** as the default for steady and moderate load — cheaper at equal service in every run below saturation.
+- **the scaling manager + KEDA** as the default for steady and moderate load — cheaper at equal service in every run below saturation.
 - **Keep KEDA as the actuator.** Nothing in the deployment changes except *what publishes the target.*
 - **Cap the scale-down drain** (`Pods 1 / 120s` was the best cost-and-reliability point of six legs tested).
 - Where **the tail is the SLO** and load sits past the crossover rate, **KEDA-EPP is still the safer default.**
 
 **Build next**
-- **Stabilization inside WVA**, so the drain rate is a WVA decision rather than a per-deployment HPA behavior block.
+- **Stabilization inside the scaling manager**, so the drain rate is a scaling-manager decision rather than a per-deployment HPA behavior block.
 - **Land the capacity-estimator fix** and re-run Run 3 — its tail is the one axis where a reactive threshold wins outright.
 - **Measure the argued claims:** two models contending for one pool, and mixed accelerators.
 
-> **What this evidence does not cover:** one model, one accelerator, one variant per run; single runs per arm. Heterogeneous placement and criticality are argued here, not measured. Run 5 compares WVA role-awareness off vs on, not WVA against KEDA.
+> **What this evidence does not cover:** one model, one accelerator, one variant per run; single runs per arm. Heterogeneous placement and criticality are argued here, not measured. Run 5 compares the scaling manager role-awareness off vs on, not the scaling manager against KEDA.
 
 ---
 
 ## Appendix — headline numbers per run
 
-| Run | Tokens | Load | GPUs held (WVA vs other) | Dropped (WVA vs other) |
+| Run | Tokens | Load | GPUs held (the scaling manager vs other) | Dropped (the scaling manager vs other) |
 |---|---|---|---|---|
 | 1 | 300/300 | Poisson 10 req/s, 7 200 req/arm | 1.00 vs 1.88 | 0 vs 30 |
 | 2 | ≈1000/250 | rates 10 → 16, 15 600 req/arm | 1.00 vs 2.46 | 0 vs 21 |
@@ -198,4 +198,4 @@ scale down:
 | 4 | ≈100/1000 | sustained @ 24, 39 600 req/arm | 2.21 vs 5.97 | 6 vs 2 |
 | 5 | prefill/decode | 6-GPU split | 3:3 vs 5:1 | — |
 
-*Run 3's WVA leg shown is `scaleDown = Pods 1/180s` (cheapest of six legs); `Pods 1/120s` was the most reliable (78 errors, TTFT p99 4.30 s).*
+*Run 3's the scaling manager leg shown is `scaleDown = Pods 1/180s` (cheapest of six legs); `Pods 1/120s` was the most reliable (78 errors, TTFT p99 4.30 s).*

@@ -1,6 +1,6 @@
 # Scale a model on saturation
 
-The default path, and the one every other path builds on. WVA reads what your
+The default path, and the one every other path builds on. The scaling manager reads what your
 inference engines are actually doing — KV-cache occupancy, queues, token rates —
 turns it into a supply-and-demand statement per model, and answers KEDA with a
 replica count. KEDA actuates it.
@@ -9,25 +9,25 @@ replica count. KEDA actuates it.
 wasting accelerators at the trough or missing SLO at the peak, and when the
 thing that saturates first is the engine.
 
-**Do not use it when** the bottleneck is somewhere WVA cannot see — a gateway,
+**Do not use it when** the bottleneck is somewhere the scaling manager cannot see — a gateway,
 a tokenizer service, the network — or when nothing scrapes vLLM/SGLang and EPP
-metrics into Prometheus. WVA has no opinion it did not read from a metric.
+metrics into Prometheus. The scaling manager has no opinion it did not read from a metric.
 
 ## What it needs
 
 - KEDA on the cluster, and Prometheus scraping the model servers and the EPP.
 - A KEDA `ScaledObject` per workload. This is not optional: the controller has
   no watch and no listing, so until a ScaledObject exists it is running and idle.
-- Nothing else. WVA holds no accelerators of its own.
+- Nothing else. The scaling manager holds no accelerators of its own.
 
 ## Setting it up
 
-[Install WVA in a namespace](../../guides/install-in-namespace/) covers the
+[Install the scaling manager in a namespace](../../guides/install-in-namespace/) covers the
 whole sequence. The two steps that matter here are the last two:
 
 ```bash
 make scaledobjects-plan     # lists your model servers; applies nothing
-make scaledobjects-apply    # registers them — this is what makes WVA scale
+make scaledobjects-apply    # registers them — this is what makes it scale
 ```
 
 `scaledobjects-plan` writes an editable plan first, so you see what would be
@@ -38,7 +38,7 @@ autoscaled before anything is.
 Three things, in this order:
 
 ```bash
-# 1. WVA is deciding at all: a target per model, per cycle
+# 1. the scaling manager is deciding at all: a target per model, per cycle
 wva_desired_replicas{exported_namespace="<your-namespace>"}
 
 # 2. It decided for a REASON: supply, demand and the threshold it compared them to
@@ -68,10 +68,10 @@ the Prometheus queries it makes each cycle — one set per namespace, not per po
   `saturation_analyzer_path_test.go`, `saturation_config_test.go`,
   `external_scaler_keda_test.go`, `smoke_keda_test.go`.
 - Benchmark scenario: `hack/benchmark/scenarios/guides/workload-autoscaling.yaml`,
-  driven by [Benchmark WVA](../../guides/benchmarking/); the harness's own start-path settings are in [Replica start time in the harness](../../guides/benchmarking/README.md#replica-start-time-in-the-harness).
+  driven by [Benchmark the scaling manager](../../guides/benchmarking/); the harness's own start-path settings are in [Replica start time in the harness](../../guides/benchmarking/README.md#replica-start-time-in-the-harness).
 - The recorded numbers in
   [benchmark-results.md](../../developer-guide/benchmark-results.md) were
-  measured on WVA v0.6.0's earlier saturation engine. They are a historical
+  measured on llm-scaling-manager v0.6.0's earlier saturation engine. They are a historical
   baseline; they do not describe this engine.
 
 ## Tuning it

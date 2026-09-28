@@ -1,6 +1,6 @@
 # Workload-Variant-Autoscaler Kubernetes Deployment Script
 
-Automated deployment script for WVA, llm-d infrastructure, Prometheus, and HPA on Kubernetes clusters.
+Automated deployment script for the scaling manager, llm-d infrastructure, Prometheus, and HPA on Kubernetes clusters.
 
 > **Note**: This guide covers Kubernetes-specific deployment details. For a complete overview of deployment methods and the full configuration reference, see the [main deployment guide](../).
 
@@ -31,7 +31,7 @@ This script automates the complete deployment process on kubernetes cluster incl
 - All required ConfigMaps and RBAC
 
 > **Note:** the `VariantAutoscaling` CRD is gone and no longer shipped. A workload is
-> managed by creating a **KEDA ScaledObject** whose trigger names WVA's external
+> managed by creating a **KEDA ScaledObject** whose trigger names the scaling manager's external
 > scaler — the call IS the registration. KEDA owns the HPA behind it.
 
 
@@ -82,7 +82,7 @@ That's it! The script will:
 2. Detect GPU types
 3. Create namespaces  (by default)
 4. Deploy Prometheus stack  (by default)
-5. Deploy WVA controller  (by default)
+5. Deploy the scaling manager controller  (by default)
 6. Deploy llm-d infrastructure  (by default)
 7. Deploy KEDA for external metrics (by default)
 8. Create the KEDA ScaledObject for the vLLM deployment (by default) — KEDA
@@ -112,7 +112,7 @@ export ACCELERATOR_TYPE="A100"              # GPU type (auto-detected)
 ```bash
 export DEPLOY_PROMETHEUS=true               # Deploy kube-prometheus-stack
 export DEPLOY_OPERATIONAL_DASHBOARD=true    # Deploy kube-prometheus-stack-grafana
-export DEPLOY_WVA=true                      # Deploy WVA controller
+export DEPLOY_WVA=true                      # Deploy the scaling manager controller
 export SCALER_BACKEND=keda                  # Deploy KEDA for external metrics
 ```
 
@@ -133,19 +133,19 @@ export WVA_NS="my-inference"     # where the controller runs
 make deploy-wva-on-k8s
 ```
 
-The model is not chosen here. WVA does not deploy models — it scales the ones
+The model is not chosen here. The scaling manager does not deploy models — it scales the ones
 already running, and it learns which ones from the ScaledObjects that name its
 external scaler. Deploy models with the llm-d guides, then see
 [Default ScaledObjects](../../docs/reference/configuration.md#default-scaledobjects).
 
-### Example 3: CI-style stack (WVA + llm-d)
+### Example 3: CI-style stack (the scaling manager + llm-d)
 
 ```bash
 export HF_TOKEN="hf_xxxxx"
-make deploy-wva-on-k8s   # install.sh (WVA + monitoring + scaler + LWS)
+make deploy-wva-on-k8s   # install.sh (the scaling manager + monitoring + scaler + LWS)
 ```
 
-### Example 4: Deploy only WVA + Prometheus (llm-d already deployed)
+### Example 4: Deploy only the scaling manager + Prometheus (llm-d already deployed)
 
 ```bash
 export DEPLOY_WVA=true
@@ -171,7 +171,7 @@ export MODEL_ID="unsloth/Meta-Llama-3.1-8B"
 make deploy-wva-on-k8s
 ```
 
-### Example 7: Deploy with Different WVA Image
+### Example 7: Deploy with Different llm-scaling-manager Image
 
 ```bash
 export HF_TOKEN="hf_xxxxx"
@@ -205,7 +205,7 @@ make deploy-wva-on-k8s
 
 After deployment, the script verifies:
 
-- WVA controller is running
+- The scaling manager controller is running
 - Prometheus stack is deployed
 - llm-d infrastructure is deployed
 - the ScaledObject exists and KEDA created its HPA
@@ -239,7 +239,7 @@ Displays:
 - **Components**:
   - Controller manager deployment (2 replicas)
   - Service for metrics (port 8443)
-  - ServiceMonitor for WVA metrics
+  - ServiceMonitor for the scaling manager metrics
   - ConfigMaps (service classes, accelerator costs, config)
   - RBAC (roles, bindings, service account)
 
@@ -264,7 +264,7 @@ Displays:
 
 ### 5. Autoscaling Resources
 
-- **ScaledObject**: the KEDA object whose trigger registers the workload with WVA
+- **ScaledObject**: the KEDA object whose trigger registers the workload with the scaling manager
 - **HPA**: created and owned by KEDA for each ScaledObject — not authored by hand
 - **ServiceMonitors**: Metrics collection configuration
 
@@ -366,7 +366,7 @@ make deploy-wva-on-k8s
 **Check metrics availability**:
 
 ```bash
-# Check WVA logs
+# Check the scaling manager logs
 kubectl logs -n workload-variant-autoscaler-system -l control-plane=controller-manager --tail=50
 
 # Look for metrics validation
@@ -425,7 +425,7 @@ kubectl get pods -n workload-variant-autoscaler-system
 kubectl get pods -n workload-variant-autoscaler-monitoring
 kubectl get pods -n llm-d-optimized-baseline
 
-# Check the managed workloads and what KEDA is doing with WVA's decision
+# Check the managed workloads and what KEDA is doing with the scaling manager's decision
 kubectl get scaledobject -n llm-d-optimized-baseline
 kubectl get hpa -n llm-d-optimized-baseline
 
@@ -433,14 +433,14 @@ kubectl get hpa -n llm-d-optimized-baseline
 kubectl get hpa -n llm-d-optimized-baseline
 
 # Check external metrics
-# WVA's decision reaches KEDA over gRPC, not through the external-metrics API.
+# The scaling manager's decision reaches KEDA over gRPC, not through the external-metrics API.
 # Read it from Prometheus, or from the HPA KEDA drives:
 kubectl port-forward -n <monitoring-namespace> svc/kube-prometheus-stack-prometheus 9090:9090
 #   then query:  wva_desired_replicas
 kubectl describe hpa -n <namespace> keda-hpa-<scaledobject-name>
 ```
 
-### Monitor WVA Logs (See Metrics Validation!)
+### Monitor llm-scaling-manager Logs (See Metrics Validation!)
 
 ```bash
 # Watch live logs
@@ -545,7 +545,7 @@ helm uninstall keda -n keda-system
 # Delete kube-prometheus-stack
 helm uninstall kube-prometheus-stack -n workload-variant-autoscaler-monitoring
 
-# Delete WVA
+# Delete the scaling manager
 cd /path/to/llm-scaling-manager
 kubectl delete -k config/overlays/cluster-scoped/kubernetes
 
@@ -557,14 +557,14 @@ kubectl delete namespace workload-variant-autoscaler-monitoring
 
 ## Metrics Health
 
-WVA validates that vLLM metrics exist before it optimizes a workload, and degrades
+The scaling manager validates that vLLM metrics exist before it optimizes a workload, and degrades
 gracefully rather than guessing when they do not.
 
-There is no custom resource to read this from — WVA writes none. Metrics health is
+There is no custom resource to read this from — the scaling manager writes none. Metrics health is
 observable in two places:
 
 ```bash
-# The metrics WVA publishes about its own collection
+# The metrics the scaling manager publishes about its own collection
 kubectl port-forward -n workload-variant-autoscaler-system svc/wva-metrics 8443:8443
 # then look for wva_metrics_freshness_status and wva_metrics_collection_errors_total
 
@@ -595,7 +595,7 @@ When metrics are unavailable, you'll see structured logs like:
 
 This means:
 
-- WVA is working correctly
+- The scaling manager is working correctly
 - Detecting no metrics available
 - Skipping optimization gracefully
 - Providing troubleshooting steps
@@ -622,18 +622,18 @@ make deploy-wva-on-k8s
 ### Debug Mode
 
 ```bash
-# Enable debug logging in WVA
+# Enable debug logging in the scaling manager
 kubectl set env deployment/controller-manager \
   LOG_LEVEL=debug \
   -n workload-variant-autoscaler-system
 ```
 
-### Update WVA Image
+### Update llm-scaling-manager Image
 
 ```bash
 export IMG="ghcr.io/yourorg/llm-scaling-manager:custom-tag"
 export DEPLOY_PROMETHEUS=false
-make deploy-wva-on-k8s   # WVA + monitoring + scaler + LWS; llm-d is managed separately
+make deploy-wva-on-k8s   # the scaling manager + monitoring + scaler + LWS; llm-d is managed separately
 ```
 
 ## Performance Tuning
@@ -641,13 +641,13 @@ make deploy-wva-on-k8s   # WVA + monitoring + scaler + LWS; llm-d is managed sep
 ### Optimization Interval
 
 ```bash
-# Change how often WVA runs optimization (default: 15s, minimum 1s, unit required)
+# Change how often the scaling manager runs optimization (default: 15s, minimum 1s, unit required)
 kubectl patch configmap wva-manager-config \
   -n workload-variant-autoscaler-system \
   --type merge \
   -p '{"data":{"GLOBAL_OPT_INTERVAL":"30s"}}'
 
-# Restart WVA to apply
+# Restart the scaling manager to apply
 kubectl rollout restart deployment controller-manager \
   -n workload-variant-autoscaler-system
 ```

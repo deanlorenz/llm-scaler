@@ -1,15 +1,15 @@
-# Test WVA against a full llm-d stack
+# Test the scaling manager against a full llm-d stack
 
 ## Overview
 
-This guide brings up llm-d and WVA together on a local kind cluster with
-**emulated GPUs**, so the whole chain — model server, EPP, KEDA, WVA — can be
+This guide brings up llm-d and the scaling manager together on a local kind cluster with
+**emulated GPUs**, so the whole chain — model server, EPP, KEDA, the scaling manager — can be
 exercised on a laptop. The model servers are simulators: they answer requests and
 emit vLLM metrics without a GPU.
 
 For a real cluster, install llm-d from its own
 [guides](https://github.com/llm-d/llm-d/tree/main/guides) and then follow
-[Install WVA in a namespace](../install-in-namespace/). WVA does not
+[Install the scaling manager in a namespace](../install-in-namespace/). The scaling manager does not
 install llm-d: which model, which accelerator and whose HuggingFace token are the
 deployment decision, not an autoscaler's.
 
@@ -27,7 +27,7 @@ make create-kind-cluster
 ```
 <!-- guide:prerequisites.cluster end -->
 
-Nodes are labelled with emulated GPU capacity, which is what lets WVA resolve
+Nodes are labelled with emulated GPU capacity, which is what lets the scaling manager resolve
 accelerators and compute budgets.
 
 ### 2. Deploy the stack
@@ -38,7 +38,7 @@ make deploy-e2e-infra SCALER_BACKEND=keda USE_SIMULATOR=true SCALE_TO_ZERO_ENABL
 ```
 <!-- guide:deploy.stack end -->
 
-Prometheus, KEDA, the EPP and WVA.
+Prometheus, KEDA, the EPP and the scaling manager.
 
 ### 3. Deploy a model server
 
@@ -100,4 +100,4 @@ export CLUSTER_GPU_TYPE=nvidia-mix CLUSTER_NODES=3 CLUSTER_GPUS=4
 ## Next
 
 - [Testing](../../developer-guide/testing.md) — the suites, their labels and flags
-- [Benchmark WVA](../benchmarking/)
+- [Benchmark the scaling manager](../benchmarking/)

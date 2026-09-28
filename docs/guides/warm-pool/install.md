@@ -4,8 +4,8 @@
 
 ## Prerequisites
 
-A model already serving under WVA — follow
-[Install WVA in a namespace](../install-in-namespace/) first.
+A model already serving under the scaling manager — follow
+[Install the scaling manager in a namespace](../install-in-namespace/) first.
 
 The pool needs, in its namespace:
 
@@ -42,8 +42,8 @@ The pool needs, in its namespace:
 
   Run it with neither size nor class and it lists the RWX classes this cluster
   already serves from.
-- RBAC allowing WVA to `patch` Pods. The shipped ClusterRole has this. If yours
-  was scoped by hand, WVA refuses to start the pool and says so — it will not
+- RBAC allowing the scaling manager to `patch` Pods. The shipped ClusterRole has this. If yours
+  was scoped by hand, the scaling manager refuses to start the pool and says so — it will not
   hold accelerators to warm models it could never lend.
 - **Two container images, from two owners.** See below.
 
@@ -67,7 +67,7 @@ both halves of that:
 
 - **vLLM has to be in the Pod.** A warm copy is an engine already loaded on this
   Pod's GPU. There is nothing to warm unless the engine runs here.
-- **The launcher is the API WVA drives.** It serves `/v2/vllm/instances` on
+- **The launcher is the API the scaling manager drives.** It serves `/v2/vllm/instances` on
   :8001, which is how the controller creates a model in a Pod, lists what is
   resident, and removes one. Without it a pool Pod holds accelerators and
   answers nothing — the controller reports the pool EMPTY while its GPUs are
@@ -155,20 +155,20 @@ only one leaves either accelerators nobody can borrow, or a trigger pointing at
 nothing.
 
 `create` also applies the ingress boundary, because the only cluster-specific
-value it needs is the WVA namespace and that is already a flag. It admits
-`:8000` from this namespace and `:8001`, `:8002` and the engine range from WVA
+value it needs is the scaling manager namespace and that is already a flag. It admits
+`:8000` from this namespace and `:8001`, `:8002` and the engine range from the scaling manager
 alone. Pass `--no-network-policy` if your cluster manages policy centrally --
 but not for convenience: without one, `:8001` accepts caller-supplied argv and
 environment from anything that can reach the Pod IP, in a container that mounts
 the shared model cache read-write.
 
 If the pool later reports itself **empty** while holding accelerators, suspect
-this first: a policy naming the wrong WVA namespace denies the supervisor read,
+this first: a policy naming the wrong the scaling manager namespace denies the supervisor read,
 and the result is indistinguishable from a pool that is merely too small. Look
 for `warm pool Pod could not be read` in the controller log.
 
 It deliberately does not guess your accelerator: omit `--accelerator` and the
-Pods may schedule on any GPU node, at which point WVA declines every model whose
+Pods may schedule on any GPU node, at which point the scaling manager declines every model whose
 accelerator it can prove differs.
 
 The rest of this section is the manual path, for when you want to edit the
@@ -188,8 +188,8 @@ cluster-specific, and three fail in a way that looks like something else:
 
 | in | what to set | if you skip it |
 | --- | --- | --- |
-| `warmpool-networkpolicy.yaml` | the `>>> EDIT THIS <<<` `namespaceSelector` — the namespace WVA runs in | every read fails; the pool reports itself **empty** while holding accelerators |
-| `warmpool-scaledobject.yaml` | the `>>> EDIT THIS <<<` in `scalerAddress` | applies cleanly, KEDA creates the HPA, the address never resolves, and WVA never learns the pool exists |
+| `warmpool-networkpolicy.yaml` | the `>>> EDIT THIS <<<` `namespaceSelector` — the namespace the scaling manager runs in | every read fails; the pool reports itself **empty** while holding accelerators |
+| `warmpool-scaledobject.yaml` | the `>>> EDIT THIS <<<` in `scalerAddress` | applies cleanly, KEDA creates the HPA, the address never resolves, and the scaling manager never learns the pool exists |
 | `warmpool-deployment.yaml` | the proxy `image` — build your own with `make docker-build-warmpool-proxy` | `ImagePullBackOff`; the shipped digest is a personal registry namespace |
 | `warmpool-deployment.yaml` | `runtimeClassName`, and the `claimName` of your model cache | admission fails outright; or the second replica sits Pending forever if the claim is not **ReadWriteMany** |
 
@@ -254,16 +254,16 @@ namespace is left alone.
 deploy/warmpool.sh delete -n <namespace> --name <pool>
 ```
 
-That removes all four objects together — ScaledObject first so WVA stops lending
+That removes all four objects together — ScaledObject first so the scaling manager stops lending
 Pods that are about to disappear, then the workload, then the NetworkPolicy and
 PodMonitor. Pass `--dry-run` to see what it would remove.
 
-Remove the `warmPool:` line from any model still naming it, or WVA will report a
+Remove the `warmPool:` line from any model still naming it, or the scaling manager will report a
 variant pointed at a pool that does not exist. The models keep serving either
 way; what they lose is the bridge, so their next scale-up pays a full cold start.
 
 > **Do not delete only the ScaledObject.** It is what *declares* the pool. What
-> is left is a Deployment holding accelerators that WVA reports as undeclared and
+> is left is a Deployment holding accelerators that the scaling manager reports as undeclared and
 > will never use again. To pin a pool's size instead, set `minReplicaCount` equal
 > to `maxReplicaCount` and leave the ScaledObject in place.
 
@@ -289,7 +289,7 @@ its GPUs where nothing would look for it again. Delete the pool first.
 
 ## The pool is its ScaledObject
 
-A warm pool is declared by a KEDA trigger, the same way every other thing WVA
+A warm pool is declared by a KEDA trigger, the same way every other thing the scaling manager
 knows about is. `warmPoolName` is what makes it a pool; the Deployment beside it
 only supplies the Pods.
 
@@ -306,7 +306,7 @@ spec:
 ```
 
 **Deleting this ScaledObject deletes the pool**, not just its elasticity. The
-Deployment goes on holding accelerators and WVA reports it as undeclared rather
+Deployment goes on holding accelerators and the scaling manager reports it as undeclared rather
 than using it. For a fixed-size pool set `minReplicaCount` and `maxReplicaCount`
 to the same number — do not delete the trigger.
 
@@ -316,7 +316,7 @@ To remove a pool, remove both together:
 deploy/warmpool.sh delete -n <namespace> --name <pool>
 ```
 
-It deletes the ScaledObject first, so WVA stops lending Pods that are about to
+It deletes the ScaledObject first, so the scaling manager stops lending Pods that are about to
 disappear, then the workload, then the NetworkPolicy `create` made -- in that
 order, so live Pods are never left unprotected. It is safe to repeat. Models still naming that pool in their
 trigger metadata are then warmed by nothing — `plan` lists them.

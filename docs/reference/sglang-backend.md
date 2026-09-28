@@ -2,8 +2,8 @@
 
 ## Overview
 
-The Workload Variant Autoscaler (WVA) supports both [vLLM](https://github.com/vllm-project/vllm)
-and [SGLang](https://github.com/sgl-project/sglang) inference engines. WVA reads
+llm-scaling-manager supports both [vLLM](https://github.com/vllm-project/vllm)
+and [SGLang](https://github.com/sgl-project/sglang) inference engines. The scaling manager reads
 each engine's Prometheus metrics to estimate load and capacity, then drives the
 scale subresource through HPA/KEDA exactly as it does for vLLM.
 
@@ -13,8 +13,8 @@ deployments are unaffected.
 
 ## How detection works
 
-WVA inspects the variant's scale-target pod template (the Deployment/LeaderWorkerSet
-referenced by the `VariantAutoscaling`) and classifies it as SGLang when **either**:
+The scaling manager inspects the variant's scale-target pod template (the Deployment/LeaderWorkerSet
+the ScaledObject points at) and classifies it as SGLang when **either**:
 
 - a container image reference contains `sglang` (e.g. `lmsysorg/sglang:...`), or
 - a container command/args invoke `sglang.launch_server` / `sglang serve`
@@ -22,27 +22,16 @@ referenced by the `VariantAutoscaling`) and classifies it as SGLang when **eithe
 
 Otherwise the variant is treated as **vLLM** (the default).
 
-No `VariantAutoscaling` field changes are required — the same CR works for either
-engine:
-
-```yaml
-apiVersion: autoscaling/v1alpha1
-kind: VariantAutoscaling
-metadata:
-  name: my-sglang-variant
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: my-sglang-decode      # a Deployment running `python -m sglang.launch_server ...`
-  modelID: meta-llama/Llama-3.1-8B-Instruct
-  maxReplicas: 8
-```
+There is nothing engine-specific to declare. A workload is registered by
+creating a KEDA ScaledObject for it, exactly as for vLLM, and the same
+ScaledObject works for either engine: the engine is read off the scale
+target's pod template, not off any field you set. See
+[workload preparation](workload-preparation.md) for the registration itself.
 
 ## Metrics
 
-WVA requires the same autoscaling signals from either engine. SGLang exposes them
-under `sglang:*` metric names (labeled with `model_name`, which WVA filters on).
+The scaling manager requires the same autoscaling signals from either engine. SGLang exposes them
+under `sglang:*` metric names (labeled with `model_name`, which the scaling manager filters on).
 The mapping:
 
 | Signal | vLLM | SGLang |
@@ -58,13 +47,13 @@ The mapping:
 | Request count (scale-to-zero) | `vllm:request_success_total` | `sglang:num_requests_total` *(not yet enabled — see Caveats)* |
 
 > Make sure your Prometheus (or VictoriaMetrics) scrapes the SGLang pods' `/metrics`
-> endpoint, the same way you scrape vLLM. WVA only consumes metrics that are
+> endpoint, the same way you scrape vLLM. The scaling manager only consumes metrics that are
 > actually present in your monitoring backend.
 
 ## Serving-flag mapping
 
 When a variant has no live metrics yet (e.g. a freshly created or scaled-to-zero
-variant), WVA estimates capacity from the deployment's serving flags. SGLang flags
+variant), the scaling manager estimates capacity from the deployment's serving flags. SGLang flags
 map onto the same internal parameters as their vLLM counterparts:
 
 | Parameter | vLLM flag | SGLang flag |
@@ -85,14 +74,14 @@ map onto the same internal parameters as their vLLM counterparts:
   variant's pod is not supported.
 - **Metric availability.** SGLang must be started with metrics enabled so the
   `sglang:*` series are exposed and scraped.
-- **Scale-to-zero is not yet supported for SGLang.** Although the
-  `sglang:num_requests_total` mapping exists, the scale-to-zero enforcer still
-  queries the vLLM request counter, so WVA cannot yet detect idleness for an
-  SGLang model. To avoid erroneously scaling an active SGLang model to zero, WVA
-  **automatically skips scale-to-zero enforcement for any model that runs a
-  non-vLLM engine**, even if scale-to-zero is enabled in config. Engine-aware
-  scale-to-zero is tracked as Phase 2 in the
-  [design proposal](../proposals/sglang-backend.md).
+- **Scale-to-zero reads the SGLang counter.** Idleness is measured from
+  `sglang:num_requests_total` rather than the vLLM counter: the detected engine is
+  passed to the enforcer, which selects the series for it
+  (`CollectModelRequestCountForEngine`). Earlier releases asked for
+  `vllm:request_success_total` whatever the engine, so an SGLang model had no such
+  series, read as permanently idle, and was refused parking outright to keep it
+  safe. That gate is gone; `test/e2e/scale_to_zero_sglang_test.go` covers the
+  round trip.
 
 ## See also
 

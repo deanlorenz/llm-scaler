@@ -2,11 +2,24 @@
 
 ## Overview
 
-The Workload Variant Autoscaler (WVA) includes a comprehensive metrics health monitoring system that validates vLLM metrics availability and provides clear status feedback through Kubernetes conditions. This feature helps operators quickly diagnose issues with ServiceMonitor configuration and Prometheus scraping.
+llm-scaling-manager validates that the vLLM metrics it needs are actually
+arriving before it decides anything, and degrades predictably when they are
+not. This page covers what that judgement is, where you can see it, and what
+the controller does when a variant's metrics are missing or stale. It is the
+answer to "scaling looks stuck and I do not know whether the problem is the
+decision or the data".
+
+> **Where to look.** The judgement is recorded as two conditions on the
+> variant object the controller builds in memory each cycle. That object is
+> **not** a Kubernetes resource: this project installs no CRD, so there is
+> nothing to `kubectl get`. The conditions reach you through the controller's
+> logs and through the health gauges in
+> [Monitoring](monitoring.md#the-metrics-that-answer-specific-questions) — start there.
 
 ## Status Conditions
 
-WVA now exposes two status conditions on each `VariantAutoscaling` resource:
+Two conditions are set per variant, per cycle
+(`internal/variant/types.go`).
 
 ### 1. MetricsAvailable
 
@@ -35,74 +48,70 @@ Indicates whether the optimization engine can run successfully.
 - `OptimizationFailed`: Optimization engine failed
 - `MetricsUnavailable`: Cannot optimize without valid metrics
 
-## Viewing Status Conditions
+## Seeing the condition an operator can act on
 
-### Using kubectl
+Three gauges carry the same information to a dashboard or an alert, and unlike
+the conditions they are queryable:
 
-```bash
-# View all VariantAutoscaling resources with metrics status
-kubectl get variantautoscaling -A
+```promql
+# Are the pods behind each model being found at all?
+wva_metrics_pods_discovered
 
-# Example output:
-# NAME              MODEL                    ACCELERATOR  CURRENTREPLICAS  OPTIMIZED  METRICSREADY  AGE
-# llama-variant     meta-llama/Llama-3-8b    A100         2                3          True          5m
-# mistral-variant   mistralai/Mistral-7B     A100         1                2          False         3m
+# How many of them were decided on with fresh data this cycle?
+wva_metrics_freshness_status{status="fresh"}
+
+# Anything sitting in stale or missing is a MetricsAvailable=False variant.
+wva_metrics_freshness_status{status!="fresh"} > 0
 ```
 
-### Detailed Condition Information
+`wva_metrics_collection_errors_total` rising alongside them points at
+`PrometheusError` rather than at a ServiceMonitor gap. The full catalogue,
+including what each one should read on a healthy fleet, is in
+[Monitoring](monitoring.md).
+
+The condition's own message text, which names the likely cause, appears in the
+controller log for the cycle that set it:
 
 ```bash
-# Get detailed status for a specific VariantAutoscaling
-kubectl describe variantautoscaling <name> -n <namespace>
-
-# Or use jsonpath to extract conditions
-kubectl get variantautoscaling <name> -n <namespace> -o jsonpath='{.status.conditions}' | jq
+kubectl logs -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler \
+  | grep -iE 'MetricsMissing|MetricsStale|PrometheusError'
 ```
 
-Example output:
-```json
-[
-  {
-    "type": "MetricsAvailable",
-    "status": "False",
-    "reason": "MetricsMissing",
-    "message": "No vLLM metrics found for model 'meta-llama/Llama-3-8b' in namespace 'default'. Ensure:\n1. ServiceMonitor is created in the monitoring namespace\n2. ServiceMonitor selector matches vLLM service labels\n3. vLLM pods are running and exposing /metrics endpoint\n4. Prometheus is scraping the monitoring namespace",
-    "lastTransitionTime": "2025-01-15T10:30:00Z",
-    "observedGeneration": 1
-  },
-  {
-    "type": "OptimizationReady",
-    "status": "False",
-    "reason": "MetricsUnavailable",
-    "message": "Cannot optimize without metrics: No vLLM metrics found...",
-    "lastTransitionTime": "2025-01-15T10:30:00Z",
-    "observedGeneration": 1
-  }
-]
+A typical message:
+
+```text
+No vLLM metrics found for model 'meta-llama/Llama-3-8b' in namespace 'default'. Ensure:
+1. ServiceMonitor is created in the monitoring namespace
+2. ServiceMonitor selector matches vLLM service labels
+3. vLLM pods are running and exposing /metrics endpoint
+4. Prometheus is scraping the monitoring namespace
 ```
 
 ## Graceful Degradation
 
-When metrics are unavailable, WVA implements graceful degradation:
+When metrics are unavailable, the scaling manager implements graceful degradation:
 
 1. **Skips optimization** for affected variants (no scaling decisions)
 2. **Maintains current replica count** (doesn't scale to zero or make random changes)
-3. **Updates status conditions** with actionable error messages
+3. **Records the condition** with an actionable message
 4. **Continues monitoring** and retries on next reconciliation interval
 5. **Other variants continue to optimize** if their metrics are available
+
+The second point is the one to rely on: a variant whose metrics disappear holds
+the replica count it had. It does not fall back to a default, and it does not
+park.
 
 ## Architecture
 
 ### Metrics Validation Flow
 
 ```text
-1. Controller reconciles VariantAutoscaling
+1. Controller reconciles each discovered variant
 2. For each variant:
-   a. Validate metrics availability (ValidateMetricsAvailability)
+   a. Validate metrics availability
    b. Set MetricsAvailable condition
    c. If metrics unavailable:
       - Set OptimizationReady=False
-      - Update status
       - Skip optimization (graceful degradation)
       - Continue to next variant
    d. If metrics available:
@@ -110,26 +119,27 @@ When metrics are unavailable, WVA implements graceful degradation:
       - Continue with optimization
 3. Run optimization for all variants with valid metrics
 4. Set OptimizationReady condition based on optimization result
-5. Update status for all variants
 ```
 
 ### Key Components
 
-- **`collector.ValidateMetricsAvailability()`**: Validates metrics and returns structured result
-- **`api/v1alpha1.SetCondition()`**: Helper to set status conditions
-- **Controller**: Integrates validation and updates conditions
-- **CRD**: Includes conditions field and MetricsReady printcolumn
+- **`internal/collector`**: queries Prometheus and reports per-pod freshness
+- **`variant.SetCondition()`** (`internal/variant/types.go`): sets a condition on
+  the in-memory variant object
+- **`internal/metrics`**: publishes the gauges above, which are the operator-facing
+  form of the same judgement
 
 ## Best Practices
 
-1. **Monitor the MetricsReady column** in your operational dashboards
+1. **Alert on `wva_metrics_freshness_status{status!="fresh"} > 0`** rather than
+   reading conditions
 2. **Set up alerts** for prolonged MetricsAvailable=False conditions
-3. **Review condition messages** for troubleshooting guidance
+3. **Review condition messages** in the controller log for troubleshooting guidance
 4. **Validate ServiceMonitor** configuration during initial deployment
-5. **Test metrics flow** before relying on WVA for production autoscaling
+5. **Test metrics flow** before relying on the scaling manager for production autoscaling
 
 ## Related Documentation
 
+- [Monitoring](monitoring.md) — the full metric catalogue and what each should read
 - [Prometheus Integration (Custom Metrics)](prometheus.md)
 - [ServiceMonitor Configuration](../../config/base/monitoring/servicemonitor.yaml)
-

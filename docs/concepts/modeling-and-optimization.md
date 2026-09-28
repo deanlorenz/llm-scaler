@@ -1,10 +1,17 @@
-# Workload Variant Autoscaler: Under the hood
+# Modeling and optimization
 
-The function of the Workload Variant Autoscaler (WVA) is to decide on the number of replicas for each variant, in response to changes in the workload requests rate and length (number of tokens).
-WVA is a global autoscaler, as opposed to a set of independent, local autoscalers, each performing scale-up or scale-down in units of one replica, in response to a configured threshold-based metric.
-As such, WVA considers all variants in the system, holistically.
-It adjusts the values of the number of replicas based on a number of factors, including, but not limited to, the number of available accelerators, load statistics, model performance profiles, target SLOs, and workload priorities (criticality).
-WVA uses modeling, benchmarking, and optimization to find the best possible solution for all variants in the system.
+llm-scaling-manager decides how many replicas each variant of each model should
+have, in response to changes in the request rate and in the shape of the
+requests (their input and output token counts). It is a *global* autoscaler
+rather than a set of independent per-Deployment ones: every variant in the
+system is solved together, each cycle, against one accelerator budget, using
+the available accelerators, live load statistics, the SLOs declared for each
+model, and workload priority.
+
+This page covers the terms that decision is stated in, what is modelled, and
+how a set of per-variant demands becomes a replica count. For the measurement
+path that produces those demands, read
+[the steady-state engine](steady-state-engine.md) first.
 
 ## Definitions and assumptions
 
@@ -14,74 +21,52 @@ WVA uses modeling, benchmarking, and optimization to find the best possible solu
 
 - A **variant** is a collection of model servers (variant instances or **replicas**) serving a given model, using the same accelerator arrangement. In the running system it is exactly one KEDA ScaledObject and the workload it scales: variant identity is the managed scaler a replica's `ownerReferences` lead to, and the variant's name is that scaler's name.
 
-- A **model-arrangement performance profile** captures performance characteristics when serving a given model on a given accelerator arrangement. The profile includes:
-
-  1. functional description of the token generation time (ITL) as a function of batch size, and
-  2. characterization of conditions under which the server is saturated.
-
-    The performance profile may be generated through offline benchmarking and/or dynamically updated based on online observations. **WVA does the latter only.** There is no profile store and no offline profiling step in this repository: every parameter it uses is learned from live metrics, which is why a variant WVA has never observed under load gets a conservative estimate rather than a looked-up one.
-
 - The **model SLOs** define target values for two metrics:
 
   1. *TTFT*: The TTFT component includes request queueing time as well as waiting and performing prefill processing.
   2. *ITL*: This is simply the decode time to generate an output token. It is subject to elongation due to congestion, resulting from batching requests, injection of prefill processing during a long decode cycle, and factors related to KV caching and potential memory swapping.
 
-- **Workload priority** (aka **criticality**) is an indicator of the importance of requests of a particular application (workload). It may serve different functions depending on the component that is handling the workload. For an admission controller, it may be used to decide on which stream of requests is more likely to be dropped. For a request scheduler, it may influence the position of a request in the queue and/or when dispatching a request. And, for WVA, it is used to decide on the assignment of accelerators to variants serving particular workloads when the total resources are tight, i.e. cannot accommodate the SLOs for all models.
+- **Workload priority** (aka **criticality**) is an indicator of the importance of requests of a particular application (workload). It may serve different functions depending on the component that is handling the workload. For an admission controller, it may be used to decide on which stream of requests is more likely to be dropped. For a request scheduler, it may influence the position of a request in the queue and/or when dispatching a request. Here it decides the assignment of accelerators to variants when resources are tight, i.e. cannot accommodate the SLOs for all models.
 
-## Modeling
+## What is modelled, and what is not
 
-The model analyzer maintains an analytical performance model for each variant in the system. Such a performance model captures the statistical behavior of requests as they pass through a server, including queueing and processing times, as a function load characteristics, such as request rates and sizes (input and output tokens), and server characteristics such as GPU type and configuration (P/D disaggregation, chunked prefill, etc). The performance model may be based on queueing theory, machine learning techniques, or other mechanisms.
+Everything below is learned from live metrics. There is no performance-profile
+store in this repository, no offline benchmarking step, and nothing is looked
+up per model-accelerator pair: a variant that has never been observed under
+load gets a conservative estimate rather than a profiled one. That is a
+deliberate trade, and its cost is stated in the project proposal: a shape has
+to saturate once before it can be priced well.
 
-The purpose of using a performance model is twofold.
+**Per-replica capacity, in KV-cache tokens.** A replica's usable capacity is
+the smaller of a memory ceiling (its physical KV-cache size scaled by
+`kvCacheThreshold`) and a compute ceiling (how many concurrent tokens it can
+process before scheduling rather than memory binds). A variant's capacity is
+the median across its ready replicas. This is what makes a decision divisible:
+a replica count is `ceil(required tokens / per-replica capacity)`, so one cycle
+can order three replicas rather than one.
 
-1. Performance evaluation: Estimate performance metrics such as waiting time, TTFT, and ITL, as a function of a given load and server characteristics.
+**The saturated completion rate, per role.** The quantity the demand floor is
+priced against is mu: the completion rate one replica sustained the last time
+it was observed saturated, recorded per output-length bucket. Occupancy is a
+state of the fleet and falls as replicas are added; mu is a property of the
+hardware and the request shape and does not move when the fleet does. A fleet
+needs `lambda / mu` replicas to keep up. See
+[the throughput floor](steady-state-engine.md#the-throughput-floor).
 
-2. Target sizing: Determine load and/or server characteristics in order to attain target values of performance metrics.
-The former is used to estimate performance given the current and/or predicted/anticipated environment. Whereas, the latter is mainly used by the Optimizer to assess maximum request rate to guarantee given SLOs, as well as the impact of a choice of a particular GPU type.
+**Inter-token latency as a function of KV utilization.** A separate throughput
+analyzer fits `ITL(k) = A*k + B` over observed KV utilization `k` by ordinary
+least squares, evaluates it at the saturation point to derive a per-replica
+decode rate, and compares that against arrival rate
+(`internal/signals/itl`, `internal/engines/analyzers/throughput`). It is not
+enabled in the shipped configuration, which names the saturation analyzer only.
 
-Typically, analytical performance models have their own internal parameters. For example, the base and slope of the linear relationship between ITL and batch size ([explained below in more detail](#deriving-performance-parameters-through-linear-fit)), are parameters of the model. In this case, the determination of such parameters may be achieved through offline benchmarking and/or online through observations and tuning (dynamic adjustment of parameter values to match observations).
-
-The other relevant performance parameter is an upper bound on the batch size, given a particular average number of tokens per request, beyond which performance degrades severely.
-
-## Benchmarking methodology
-
-To understand and characterize the performance of an LLM model on an accelerator, we conducted a series of benchmarking experiments. The goal was to establish a clear relationship between key performance metrics, specifically inter-token latency (ITL) and batch size (number of requests concurrently processed in a forward pass of the model).
-
-### Experimental setup and data collection
-
-Our experiments were run on an on-premise cluster and were executed on a variety of hardware platforms, including NVIDIA L40S, L4, H100, A100, and AMD MI300X, Intel Gaudi3, using vLLM v0 inference engine.
-
-The models under test included a wide range of architectures and sizes, such as llama2-7b, llama3-8b, granite-20b, mixtral-8x7b, and many others. Tests at various numerical precisions, specifically fp16, w4a16, and fp8, were performed to evaluate the performance trade-offs.
-
-For each unique combination of model, accelerator, and precision, the batch size (`bb`) was systematically varied and a rich dataset was collected. For each experiment run, the following data was recorded.
-
-- `mm`: The specific model name.
-- `hw`: The hardware accelerator used for the experiment.
-- `prec`: The numerical precision of the model.
-- `bb`: The batch size, the independent variable in our analysis.
-- `itl`: The measured inter-token latency in milliseconds (ms).
-- `thp`: The resulting throughput in tokens per second.
-- `dp`: data parallel size (# of parallel instances; usually 1)
-- `tp`: tensor parallel size with values including 1, 2, 4, and 8.
-
-### Deriving performance parameters through linear fit
-
-A consistent pattern emerged from our benchmarking data: for a given model and accelerator, the inter-token latency ('itl') exhibited a strong linear relationship with the batch size ('bb').
-This behavior has been observed, experimentally, by many researchers [^Agrawal2024] [^Griggs2024] [^Yang2024] [^Yuan2024] [^Zhu2025].
-To quantify this relationship, we performed a linear regression fit for each unique model-accelerator-precision combination. The relationship can be described by the following linear equation:
-
-$$ITL = \alpha + \beta \times bb,$$
-
-where ITL is the inter-token latency in milliseconds and `bb` is the batch size.
-The linear fit parameter $\alpha$ is the y-intercept, representing the baseline inter-token latency at a batch size close to zero. This can be interpreted as the fixed overhead of a single token generation, independent of the batching process itself.
-Parameter $\beta$ is the slope of the line, representing the increase in ITL for each unit increase in batch size. This parameter captures how the latency scales with the workload.
-
-By fitting our benchmark data to this linear model, we derived specific values for $\alpha$ and $\beta$.
-
-We note that such linear dependency only on the batch size discounts the impact of sequence length. Nevertheless, a first-order approximation of ITL using a simple analytical formula $\alpha + \beta \times bb$ is still helpful in designing a performance-aware system or in making initial deployment decisions.
-
-Finally, we observe that with respect to a physical system, these parameters capture the model dimension, the data/tensor parallelism, and the theoretical peak flops of the accelerator.
-As such, one can estimate these parameters using either a model tuner that uses an Extended Kalman Filter in the backend and learns the model-accelerator characteristics, or by simply substituting the knowledge of the physical system into a FLOPS compute formula [^Casson2023].
+**What is not modelled.** There is no queueing-theoretic model of the server,
+no batch-size-to-latency fit, and no parameter tuner. Earlier versions of this
+page described all three, inherited from the project this one forked from; none
+of that machinery is in this repository, and documenting it here was worse than
+saying so. There is also no forecasting: the decision is taken on what is
+measured now, which buys a decision an operator can read and argue with and
+costs the ability to arrive before the load.
 
 ## Optimization
 
@@ -104,24 +89,8 @@ could not give — which variant was limited, by what, and how many GPUs it did
 get — and that surfaces as `wva_model_scaling_blocked` with a reason rather than
 as silence.
 
-**Constraints, not modes.** An earlier version of this page described an
-"unlimited mode" with capacity-aware allocation as future work. That is now
-backwards. Limiters are ordinary constraints on the optimizer — GPU inventory,
-declared quota, or none — chosen by the `limiters:` list on the scaling policy,
-with no mode switch anywhere: see
+**Constraints, not modes.** Limiters are ordinary constraints on the optimizer —
+GPU inventory, declared quota, or none — chosen by the `limiters:` list on the
+scaling policy, with no mode switch anywhere: see
 [bounding a fleet by real GPUs](../well-lit-paths/bound-by-gpus/) and
 [GPU capacity accounting](gpu-capacity-accounting.md).
-
-## References
-
-[^Agrawal2024]: Agrawal, Amey, et al. "[Taming Throughput-Latency tradeoff in LLM inference with Sarathi-Serve.](https://www.usenix.org/system/files/osdi24-agrawal.pdf)" 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24). 2024.
-
-[^Casson2023]: Adam Casson "[Transformer FLOPs](https://www.adamcasson.com/posts/transformer-flops)"
-
-[^Griggs2024]: Griggs, Tyler, et al. "[M\'elange: Cost efficient large language model serving by exploiting gpu heterogeneity.](https://arxiv.org/pdf/2404.14527)" arXiv preprint arXiv:2404.14527 (2024).
-
-[^Yang2024]: Yang, Yuqing, Lei Jiao, and Yuedong Xu. "[A queueing theoretic perspective on low-latency llm inference with variable token length.](https://ieeexplore.ieee.org/abstract/document/10778367/)" 2024 22nd International Symposium on Modeling and Optimization in Mobile, Ad Hoc, and Wireless Networks (WiOpt). IEEE, 2024.
-
-[^Yuan2024]: Yuan, Zhihang, et al. "[LLM inference unveiled: Survey and roofline model insights.](https://arxiv.org/abs/2402.16363)" arXiv preprint arXiv:2402.16363 (2024).
-
-[^Zhu2025]: Zhu, Kan, et al. "[PolyServe: Efficient Multi-SLO Serving at Scale.](https://arxiv.org/pdf/2507.17769?)" arXiv preprint arXiv:2507.17769 (2025).

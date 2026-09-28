@@ -1,6 +1,6 @@
 # Scale a P/D-disaggregated model
 
-> **Experimental.** The scenario stands up and runs, WVA's role handling is
+> **Experimental.** The scenario stands up and runs, the scaling manager's role handling is
 > covered end to end, and the shape has a published benchmark (below). What is
 > still short: a shape the controller has never seen saturated is sized from
 > occupancy until it has (named under *Measured*), and there is no
@@ -9,7 +9,7 @@
 
 Prefill and decode have different shapes — prefill is compute-bound, decode is
 memory-bandwidth-bound — so llm-d can run them as separate deployments connected
-by a KV transport. WVA treats each role as its own variant of the same model,
+by a KV transport. The scaling manager treats each role as its own variant of the same model,
 which means the two are scaled apart on their own evidence rather than together
 on an average of both.
 
@@ -33,7 +33,7 @@ on short-context traffic it buys little.
 
 The scenario file is
 `hack/benchmark/scenarios/guides/pd-disaggregation.yaml`, adapted from llm-d's
-own P/D guide, and it is run through [Benchmark WVA](../../guides/benchmarking/).
+own P/D guide, and it is run through [Benchmark the scaling manager](../../guides/benchmarking/).
 As written it names Qwen3-32B with one prefill and two decode pods; the
 benchmark targets substitute `MODEL_ID` (Qwen3-0.6B by default) and
 `BENCHMARK_DECODE_REPLICAS` (1), so a standup starts from one pod per role and
@@ -61,7 +61,7 @@ spare capacity per role rather than one number for the pair.
 
 ## What it costs
 
-Two deployments to operate instead of one, plus the transport. WVA itself adds
+Two deployments to operate instead of one, plus the transport. The scaling manager itself adds
 nothing: the roles cost what they would cost anyway.
 
 ## How it is benchmarked
@@ -276,7 +276,7 @@ The queue that builds in that time is charged to the fleet as demand, so two
 runs of the same trace against the same controller can differ by several
 replicas at the first ramp on nothing but the pod start. Two pages cover it:
 
-- what any workload WVA scales should get right on its way to Ready -- no
+- what any workload the scaling manager scales should get right on its way to Ready -- no
   installs at container start, a short probe period, engine caches that
   outlive the pod, the image already on the node -- is the prerequisite
   checklist in [Preparing a workload](../../reference/workload-preparation.md#the-rest-of-the-start-path);

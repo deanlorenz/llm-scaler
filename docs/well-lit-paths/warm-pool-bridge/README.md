@@ -23,7 +23,7 @@ How much it buys, and what it costs against a floor of held replicas, is
 **Do not use it when** load is steady, or when accelerators are the scarce
 thing. The pool is **insurance, not capacity**: every pool Pod holds its
 accelerators continuously, lending or idle, and a pool of N lowers your maximum
-fleet by N. That is a cost decision, which is why WVA never creates a pool for
+fleet by N. That is a cost decision, which is why the scaling manager never creates a pool for
 you.
 
 ## What it needs
@@ -38,8 +38,8 @@ you.
   a configuration error, not something to wait out.
 - A shared model cache the pool can read, so a warm copy loads from local
   storage rather than a download.
-- RBAC letting WVA `patch` Pods. The shipped ClusterRole has it; a hand-scoped
-  one may not, and WVA refuses to start a pool it could never lend from.
+- RBAC letting the scaling manager `patch` Pods. The shipped ClusterRole has it; a hand-scoped
+  one may not, and the scaling manager refuses to start a pool it could never lend from.
 - Two container images. The pool proxy is ours; the launcher depends on the
   pool shape — a pool of Pods runs upstream Fast Model Actuation's launcher,
   and a pool of **groups** runs our fork (`ghcr.io/ev-shindin/fma-launcher`),

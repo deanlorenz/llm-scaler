@@ -1,9 +1,9 @@
-# Running WVA Scaling Benchmarks
+# Running llm-scaling-manager Scaling Benchmarks
 
-Step-by-step guide for deploying and running WVA scaling benchmarks on an OpenShift cluster. This covers both **single-model** and **multi-model** benchmarks, from cluster access to running the tests and interpreting results.
+Step-by-step guide for deploying and running the scaling manager scaling benchmarks on an OpenShift cluster. This covers both **single-model** and **multi-model** benchmarks, from cluster access to running the tests and interpreting results.
 
 > This is the long form, with the cluster-access and troubleshooting detail.
-> [Benchmark WVA](../guides/benchmarking/) is the short one — same targets,
+> [Benchmark the scaling manager](../guides/benchmarking/) is the short one — same targets,
 > same order (`benchmark-install` → `standup` → `run` → `report` → `teardown`),
 > without the OpenShift specifics. Start there if you only need a run.
 
@@ -100,7 +100,7 @@ All other configuration is passed directly to the deploy/test commands in later 
 
 ## Step 4: Clone the Repository
 
-Clone the WVA repository and enter the directory:
+Clone the repository and enter the directory:
 
 ```bash
 git clone https://github.com/ev-shindin/llm-scaling-manager.git
@@ -142,7 +142,7 @@ llm-scaling-manager/
 
 ## Step 5: Run the Single-Model Benchmark
 
-The single-model benchmark tests WVA scaling behavior with one model under different workload patterns. Scenario configurations are defined in `test/benchmark/scenarios/`.
+The single-model benchmark tests the scaling manager scaling behavior with one model under different workload patterns. Scenario configurations are defined in `test/benchmark/scenarios/`.
 
 | Scenario | Prompt Tokens | Output Tokens | Rate | What it tests |
 |----------|--------------|---------------|------|---------------|
