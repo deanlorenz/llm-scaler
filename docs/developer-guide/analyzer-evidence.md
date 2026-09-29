@@ -466,9 +466,20 @@ Two consequences:
     comparisons happened to be between different builds.
   - **A comparison whose runs had different controller lifetimes is not a
     comparison.** Run W's phase-1 figures were read as a regression caused by an
-    EPP scorer change, which they had nothing to do with: run X, same scorer
-    weights and a fresh controller, matched run U's TTFT p95 to within 1.6 s
-    (67.5 against 69.1).
+    EPP scorer change, which they had nothing to do with. What carries the point
+    is the FLEET: run W sat pinned at two replicas for two and a half minutes
+    while the scheduler queue climbed 384 -> 1178, where run X -- same scorer
+    weights, fresh controller -- ordered nine replicas in 75 s and never held at
+    all.
+
+    An earlier version of this section argued it with engine-side TTFT p95
+    instead (67.5 s against 69.1 s, "within 1.6 s"). Both halves of that are
+    wrong, and both are recorded below: the figures came from a truncated window
+    and are 44.9 s and 69.1 s over the full phase, and the metric cannot
+    adjudicate between runs in the first place -- see "Judge the ramp on the
+    client's TTFT" and "The noise floor of this benchmark", which puts 1.6 s
+    roughly twenty times inside the run-to-run variance. The conclusion stands;
+    the evidence for it is the replica timeline, not the percentile.
 
 ### The image under test is not the branch, and its tag will not say so
 
