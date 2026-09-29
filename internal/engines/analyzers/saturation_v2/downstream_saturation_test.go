@@ -45,11 +45,12 @@ var _ = Describe("a prefill saturation under a saturated decode", func() {
 		prefillK1      = 919_449.0 // prefillKv x 0.8, truncated
 		prefillKey     = "test-model|H200|1|prefill|short|q5"
 		decodeKey      = "test-model|H200|1|decode|long|q5"
-		// The throughput window is keyed by the FLEET's output length
-		// (fleetOutputLength: the decode rows' 1000 here, `long`), not the
-		// replica's own -- prefill's own average output is ~1 and says
-		// nothing about the shape. The k2 history stays on the own key.
-		prefillMuKey = "test-model|H200|1|prefill|long|q5"
+		// Prefill's throughput window carries NO output bucket: it completes a
+		// request after one token, so the answer's length is not work it does,
+		// and keying by it split one population of readings across unrelated
+		// buckets (prefillOutputBucket). Decode still uses the fleet's output
+		// length, and the k2 history stays on the own key for both.
+		prefillMuKey = "test-model|H200|1|prefill|" + prefillOutputBucket + "|q5"
 	)
 	decode := func(pod string, tokensInUse int64, queue int) domain.ReplicaMetrics {
 		rm := makeReplicaMetrics(pod, decodeVariant, tokensInUse, runKvCapacity, queue, 6000, 1000)

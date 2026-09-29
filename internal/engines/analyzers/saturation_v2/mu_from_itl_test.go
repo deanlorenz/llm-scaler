@@ -438,6 +438,32 @@ var _ = Describe("throughputKey", func() {
 		Expect(a.throughputKey(model, ns, v, accel, 1, domain.RoleDecode, 1000, 6000, 5)).
 			NotTo(Equal(a.throughputKey(model, ns, v, accel, 1, domain.RoleDecode, 1000, 1000, 5)))
 	})
+
+	// Prefill completes a request after one token and hands the KV to decode,
+	// so the answer's length is not work it does. Keying its throughput by the
+	// fleet's output length split one population of readings across unrelated
+	// buckets: measured on the 1k/6000 -> 30k/250 trace, prefill walked
+	// xlong -> xxlong -> xlong -> medium inside a single phase whose prompt
+	// length never moved, re-learning mu in each and being held to one replica
+	// per cycle while the floor asked for nine.
+	It("keys prefill by prompt length alone, whatever the fleet is generating", func() {
+		const pv = "prefill-v"
+		Expect(a.throughputKey(model, ns, pv, accel, 1, domain.RolePrefill, 30000, 6000, 5)).
+			To(Equal(a.throughputKey(model, ns, pv, accel, 1, domain.RolePrefill, 30000, 250, 5)))
+	})
+
+	It("still separates two prefill shapes that differ in prompt length", func() {
+		const pv = "prefill-v"
+		Expect(a.throughputKey(model, ns, pv, accel, 1, domain.RolePrefill, 1000, 250, 5)).
+			NotTo(Equal(a.throughputKey(model, ns, pv, accel, 1, domain.RolePrefill, 30000, 250, 5)))
+	})
+
+	It("does not collapse decode's output dimension along with prefill's", func() {
+		// The control: the change is scoped to one role. If this ever passes,
+		// decode has lost the bucketing its capacity genuinely depends on.
+		Expect(a.throughputKey(model, ns, v, accel, 1, domain.RoleDecode, 30000, 6000, 5)).
+			NotTo(Equal(a.throughputKey(model, ns, v, accel, 1, domain.RoleDecode, 30000, 250, 5)))
+	})
 })
 
 var _ = Describe("the learned ITL baseline", func() {
