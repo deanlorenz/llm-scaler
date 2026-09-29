@@ -577,6 +577,60 @@ both of which bit during these runs:
     the run unusable for anything but reading the flow controller's own
     decisions.
 
+### The noise floor of this benchmark
+
+*2026-09-28/29, runs U through AA on the 1k6000 -> 8k1000 trace at 6 req/s.*
+
+Four runs were taken whose only intended difference was one line -- the release
+cap measured against ready supply or anticipated supply -- with the same trace,
+the same EPP config and a controller restarted before each:
+
+| run | cap against | spec>=9 | ready>=9 | phase-1 median | phase-1 repl-min |
+|---|---|---|---|---|---|
+| X (v7) | anticipated | +75 s | +135 s | 6 | 121.5 |
+| Y (v8) | ready | +105 s | +180 s | 6 | 120.5 |
+| Z (v9) | ready + projection | +105 s | +165 s | 9 | 151.5 |
+| AA (v10) | anticipated | +90 s | +165 s | 8 | 139.0 |
+
+X and AA carry the SAME cap term and differ by 15 s of ordering, 30 s to Ready,
+two replicas of median and 17.5 replica-minutes. Whatever separates them is not
+the thing under test.
+
+Phase 2 gives a cleaner read, because two runs produced identical behaviour
+there -- both settling at a median of 4 with a peak of 8-9 carried through the
+shape-change hold:
+
+    Z  (v9)   19.0 min   peak 9   median 4   116.0 repl-min
+    AA (v10)  19.0 min   peak 8   median 4    99.0 repl-min
+
+Seventeen replica-minutes apart, about 15%, on behaviour that matches step for
+step.
+
+So, on this trace and this cluster:
+
+  - **ramp timing is good to about +/- 30 s**, no better. A 15-30 s difference
+    between single runs says nothing.
+  - **replica-minutes are good to about +/- 15%.**
+  - **engine-side TTFT percentiles say nothing at all** between runs, for the
+    separate structural reason in "Judge the ramp on the client's TTFT".
+
+Every cap comparison attempted on this branch sat at or below those thresholds,
+and three of them were claimed and then reverted:
+
+  - a 30 s ramp regression attributed to `d03440a0` change 1 (retired: X is the
+    sole outlier of four runs on both ramp metrics)
+  - the release cap sized on the projected queue (reverted in 99b84c6e: 25% more
+    GPU, no latency change)
+  - the cap restored to anticipated supply (reverted in d76930eb: 18
+    replica-minutes more than the run it was meant to beat, and it did not
+    reproduce the median it was argued from)
+
+The shared root cause is not any of the code. It is that one run per arm was
+treated as a measurement. What clears this floor is a repeat per arm, or an
+effect large enough not to need one -- the EPP scorer weights moved the phase-2
+median from 9 replicas to 3 and serving replicas from 1-of-9 to 9-of-9, which no
+amount of this variance explains.
+
 ## How to add to this file
 
 One section per decision, with the date, the run identifier and the numbers
