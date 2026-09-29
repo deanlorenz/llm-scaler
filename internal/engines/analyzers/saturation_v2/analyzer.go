@@ -286,6 +286,10 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 	// replica's throughput key (computeReplicaCapacity says why the key is
 	// the fleet's shape and not the replica's).
 	fleetOutput := fleetOutputLength(input.ReplicaMetrics, rolesByVariant)
+	// The prefill side's hit rate, once for the role, for the same reason:
+	// it discounts the prompt length that buckets prefill's throughput key,
+	// and a per-replica figure would split one window between replicas.
+	fleetHitRate := fleetPrefixHitRate(input.ReplicaMetrics, rolesByVariant)
 	// The other axis, and the event. The prompt length arriving reads the
 	// switch within a scrape of it, where the output half waits for a
 	// completion; a change on either says the learned figures describe a
@@ -354,12 +358,26 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 		itlModel := itlModels[rm.VariantName]
 		engineParams := engineParamsFor(a, input.Namespace, input.ModelID, rm.VariantName)
 		fleetShape := shape.New(fleetInput, fleetOutput, rm.PrefixCacheHitRate)
-		derived := deriveMu(itlModel, engineParams, rm.TotalKvCapacityTokens,
-			fleetShape, pricingK(satConfig))
+		// Only a generating role is priced from the ITL line. ITL is the gap
+		// between two generated tokens, and a prefill replica emits one and
+		// hands the KV to decode, so tokenSec/avgOutput does not describe it.
+		//
+		// This has always held, but only by accident: itlModels above is
+		// populated for RoleDecode alone, so a prefill lookup returned the
+		// zero Model and deriveMu declined on IsZero() 250 lines away, keyed
+		// on the opposite condition. A role-classification slip, or anyone
+		// legitimately extending that population to RoleBoth, would have
+		// started pricing prefill from decode's physics with nothing to say
+		// so. Stated here instead, beside the call it governs.
+		var derived derivedMu
+		if canonicalRole(role) == domain.RoleDecode {
+			derived = deriveMu(itlModel, engineParams, rm.TotalKvCapacityTokens,
+				fleetShape, pricingK(satConfig))
+		}
 		a.noteLineMismatch(itlModel, engineParams, rm, role, fleetShape.KVreq, logger)
 		rc := a.computeReplicaCapacity(rm, satConfig, input.ModelID, input.Namespace, gpuCount,
 			role, accelByVariant[rm.VariantName], stableOutput, fleetOutput, stableInput,
-			derived, downstreamSaturated, logger)
+			fleetHitRate, derived, downstreamSaturated, logger)
 		if rc != nil {
 			replicaCapacities = append(replicaCapacities, *rc)
 		}
@@ -524,6 +542,12 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// reason shapeKeyOutput is: it buckets the throughput key, and a fleet
 	// whose average wobbles across a boundary must not split its window in two.
 	shapeKeyInput float64,
+	// fleetHitRate is the PREFILL ROLE's prefix-cache hit rate, one figure for
+	// the whole role this cycle. It discounts shapeKeyInput into the prompt
+	// length prefill actually computes. The replica's own rate is deliberately
+	// not used: it would put two replicas of one variant in different input
+	// buckets in the same cycle (fleetPrefixHitRate).
+	fleetHitRate float64,
 	// derived is mu priced from this variant's fitted ITL model, which needs
 	// no saturated cycle and no bucket. It is preferred over the measured
 	// window when present (mu_from_itl.go).
@@ -622,7 +646,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// already discounts on its own path.
 	keyInput := shapeKeyInput
 	if canonicalRole(role) == domain.RolePrefill {
-		keyInput = shape.New(shapeKeyInput, shapeKeyOutput, rm.PrefixCacheHitRate).ILeff
+		keyInput = shape.New(shapeKeyInput, shapeKeyOutput, fleetHitRate).ILeff
 	}
 	throughputKey := a.throughputKey(modelID, namespace, rm.VariantName, accelerator, gpuCount, role,
 		keyInput, shapeKeyOutput, config.QueueLengthThreshold)
@@ -1618,6 +1642,50 @@ func fleetOutputLength(replicas []domain.ReplicaMetrics, rolesByVariant map[stri
 	return fleetAverage(replicas,
 		func(rm domain.ReplicaMetrics) float64 { return rm.AvgOutputTokens },
 		func(rm domain.ReplicaMetrics) bool { return generatesOutput(rm, rolesByVariant) })
+}
+
+// fleetPrefixHitRate is the prefill side's prefix-cache hit rate as ONE figure
+// for the whole role, request-rate weighted.
+//
+// It is not fleetAverage: that helper skips a value of zero as absent, and a
+// hit rate of zero is a reading, not a missing one -- a fleet with prefix
+// caching off reports 0 on every replica, and skipping those would leave the
+// mean to whichever replica happened to report something.
+//
+// One figure per role per cycle, for the same reason the output length is one
+// figure: it buckets a key. rm.PrefixCacheHitRate is per REPLICA, so using it
+// directly let two replicas of one variant land in different input buckets in
+// the same cycle and split the window the bucket exists to hold together --
+// the exact fault prefillOutputBucket was added to remove, on a new axis.
+//
+// Still not hysteretic: shape.Tracker tracks IL and OL, not this. A fleet
+// whose hit rate drifts across a bucket boundary can therefore still move
+// prefill's window, just not split it between replicas within a cycle.
+func fleetPrefixHitRate(replicas []domain.ReplicaMetrics, rolesByVariant map[string]string) float64 {
+	var weighted, weights, plain float64
+	var n int
+	for _, rm := range replicas {
+		if canonicalRole(rolesByVariant[rm.VariantName]) != domain.RolePrefill {
+			continue
+		}
+		v := rm.PrefixCacheHitRate
+		if v < 0 || v > 1 || math.IsNaN(v) {
+			continue
+		}
+		plain += v
+		n++
+		if rm.RequestRate > 0 {
+			weighted += v * rm.RequestRate
+			weights += rm.RequestRate
+		}
+	}
+	if weights > 0 {
+		return weighted / weights
+	}
+	if n > 0 {
+		return plain / float64(n)
+	}
+	return 0
 }
 
 // rolesFromStates builds the variant-name -> role lookup the per-role helpers

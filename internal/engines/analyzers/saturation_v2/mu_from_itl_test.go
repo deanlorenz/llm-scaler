@@ -466,6 +466,49 @@ var _ = Describe("throughputKey", func() {
 	})
 })
 
+var _ = Describe("fleetPrefixHitRate", func() {
+	roles := map[string]string{"p": domain.RolePrefill, "d": domain.RoleDecode}
+	pre := func(pod string, hit, rate float64) domain.ReplicaMetrics {
+		return domain.ReplicaMetrics{
+			PodName: pod, VariantName: "p", PrefixCacheHitRate: hit, RequestRate: rate,
+		}
+	}
+
+	// The reason this is not fleetAverage. That helper reads a value of zero
+	// as absent, and a hit rate of zero is a reading: a fleet with prefix
+	// caching off reports 0 everywhere, and skipping those would hand the mean
+	// to whichever replica happened to report something.
+	It("counts a zero hit rate as a reading, not as missing", func() {
+		rms := []domain.ReplicaMetrics{pre("a", 0.0, 1), pre("b", 0.8, 1)}
+		Expect(fleetPrefixHitRate(rms, roles)).To(BeNumerically("~", 0.4, 1e-9))
+	})
+
+	It("is one figure for the role, so two replicas cannot split the bucket", func() {
+		// The fault this exists to prevent: with the replica's own rate, these
+		// two land either side of an input-bucket boundary in the SAME cycle.
+		rms := []domain.ReplicaMetrics{pre("a", 0.70, 1), pre("b", 0.80, 1)}
+		rate := fleetPrefixHitRate(rms, roles)
+		Expect(rate).To(BeNumerically("~", 0.75, 1e-9))
+	})
+
+	It("weights by request rate when there is one", func() {
+		rms := []domain.ReplicaMetrics{pre("a", 0.0, 3), pre("b", 1.0, 1)}
+		Expect(fleetPrefixHitRate(rms, roles)).To(BeNumerically("~", 0.25, 1e-9))
+	})
+
+	It("ignores decode replicas: this keys PREFILL's window", func() {
+		rms := []domain.ReplicaMetrics{
+			pre("a", 0.5, 1),
+			{PodName: "d1", VariantName: "d", PrefixCacheHitRate: 1.0, RequestRate: 99},
+		}
+		Expect(fleetPrefixHitRate(rms, roles)).To(BeNumerically("~", 0.5, 1e-9))
+	})
+
+	It("returns 0 when no prefill replica reports, so ILeff is the raw prompt", func() {
+		Expect(fleetPrefixHitRate(nil, roles)).To(Equal(0.0))
+	})
+})
+
 var _ = Describe("the learned ITL baseline", func() {
 	const variant = "decode-v"
 
