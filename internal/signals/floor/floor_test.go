@@ -925,21 +925,7 @@ var _ = Describe("the release cap and replicas already in flight", func() {
 	engineBacklog := map[string]float64{domain.RoleDecode: 100 * runMu * BacklogDrainSeconds}
 	deep := 20 * runMu * BacklogDrainSeconds
 
-	It("counts the replicas already coming, and lets the queue stop it", func() {
-		// The cap is measured against ANTICIPATED supply, so replicas already
-		// in flight DO raise it. That was read as a ratchet once -- run U went
-		// to its ceiling of nine against a steady-state need of six -- and the
-		// cap was moved to ready supply to stop it. On a cluster the ratchet
-		// turned out to be the router's: run X is the same binary with the same
-		// anticipated-supply cap and only the decode scorer changed, and it
-		// settles at a median of six. Concentrated on one replica the queue
-		// never drains and the floor orders to the ceiling; spread, the queue
-		// drains and the fleet stops asking.
-		//
-		// So the ratchet is bounded by the queue, not by the cap, and the cap
-		// measured against ready supply cost 30 s of ramp for one
-		// replica-minute in 121. What this asserts is the mechanism that
-		// bounds it: the grant tracks the queue, and falls when the queue does.
+	It("does not grant more because more are already coming", func() {
 		none := Estimate(runLambda, thin, oneDecode(0), engineBacklog,
 			BacklogDrainSeconds, 0.85, false, deep, nil)
 		many := Estimate(runLambda, thin, oneDecode(5), engineBacklog,
@@ -947,19 +933,9 @@ var _ = Describe("the release cap and replicas already in flight", func() {
 
 		Expect(none.Terms[domain.RoleDecode].OrderedBehindQueue).To(BeTrue())
 		Expect(many.Terms[domain.RoleDecode].OrderedBehindQueue).To(BeTrue())
-		Expect(many.ByRole[domain.RoleDecode]).
-			To(BeNumerically(">", none.ByRole[domain.RoleDecode]),
-				"in-flight replicas count toward the cap, so the fleet is not "+
-					"made to wait a pod start per step")
-
-		// And the queue is what stops it: the same five in flight against a
-		// queue worth a second of arrivals grants strictly less.
-		shallowMany := Estimate(runLambda, thin, oneDecode(5), engineBacklog,
-			BacklogDrainSeconds, 0.85, false, runLambda+1, nil)
-		Expect(shallowMany.ByRole[domain.RoleDecode]).
-			To(BeNumerically("<", many.ByRole[domain.RoleDecode]),
-				"a drained queue takes the grant back down, which is what "+
-					"bounds the climb")
+		Expect(many.ByRole[domain.RoleDecode]).To(Equal(none.ByRole[domain.RoleDecode]),
+			"five replicas in flight must not raise the cap; measured against "+
+				"anticipated supply they did, and the fleet ratcheted to its ceiling")
 	})
 
 	It("still grows with the queue", func() {

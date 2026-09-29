@@ -367,24 +367,19 @@ func Estimate(
 			// rule below permits THREE on that cycle (191/60 floored), which
 			// reaches the needed fleet in two cycles instead of five.
 			term.QueueJustifiedReplicas = queueJustifiedReplicas(schedulerQueued, mu, drainSeconds)
-			// Against ANTICIPATED supply -- ready plus pending. Measured
-			// against ready supply instead, in-flight orders do not count, so
-			// the cap rises only as pods boot and the ramp costs 30 s: +75 s to
-			// order nine replicas against +105 s, on runs X and Y/Z.
+			// Against READY supply, not anticipated. Built on anticipated, the
+			// cap became a per-cycle INCREMENT rather than a target: the engine
+			// computes RC = step/scaleUp - anticipated, which cancels to exactly
+			// k replicas however many are already in flight, and schedulerQueued
+			// is not reduced by the ones ordered last cycle because they are not
+			// Ready yet. So the same unserved requests justified k again every
+			// cycle while k itself grew.
 			//
-			// That reading was taken to stop a ratchet -- run U reached its
-			// ceiling of nine in 75 s against a steady-state need of six -- but
-			// the ratchet was the router's. Run X is the same binary with the
-			// same anticipated-supply cap and only the decode scorer changed,
-			// and it settles at a median of six: with load spread the queue
-			// drains and the fleet stops asking, while concentrated on one
-			// replica it never drains and the floor orders to the ceiling.
-			//
-			// With the scorer fixed, the two caps are one replica-minute apart
-			// out of 121 over a phase. See "Judge the ramp on the client's
-			// TTFT" and the routing check in
-			// ../../../docs/guides/benchmarking/README.md.
-			if step := scaleUpThreshold * (nonNegativeSupply(anticipated[role].TotalAnticipatedSupply) +
+			// Measured, not argued: run U ordered 1, 1, 1, 2, 1, 2 and reached
+			// its ceiling of nine in 75 seconds against a steady-state need of
+			// six. With ready supply the in-flight orders subtract, and the
+			// grant is what the queue justifies MINUS what is already coming.
+			if step := scaleUpThreshold * (nonNegativeSupply(anticipated[role].TotalSupply) +
 				term.QueueJustifiedReplicas*smallestP[role]); floor > step {
 				floor = step
 			}
