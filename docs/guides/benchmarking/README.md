@@ -141,6 +141,48 @@ make benchmark-report
 
 Restart the controller between runs — `make benchmark-restart-controller` —
 or learned per-replica capacity from the previous run carries into the next.
+The fleet-shape memo lives in the controller pod, so a run that ends on one
+request shape leaves the next run opening on what looks like a shape change,
+and its first minutes are measured through a hold. Changing the image digest
+restarts the controller as a side effect, which is why this only bites when two
+runs share a build.
+
+### Check the router spreads load before trusting a latency number
+
+A fleet can scale correctly and still serve almost everything from one replica.
+The scorer that places a request on the least busy endpoint
+(`active-request-scorer`, or `queue-scorer` on a non-disaggregated profile) is
+weighted **below** `prefix-cache-scorer` in the EPP configs shipped here —
+`deploy/lib/epp-optimized-baseline.values.yaml` gives prefix-cache 3 against 2
+for both — and on a workload with no shared prefix the prefix scorer contributes
+no signal while still outranking the ones that do.
+
+Measured on this benchmark: nine decode replicas Ready, **one** serving, 766
+requests queued in the router, and the engine-side latency metric reporting
+0.04 s because the waiting happened where it cannot see. Raising the spreading
+scorer above the prefix scorer took it to nine of nine serving, engine queues to
+zero, and the phase-2 fleet from a median of nine replicas to three for the same
+load.
+
+Two checks, both cheap, both before the run matters:
+
+```bash
+# 1. Is the prefix scorer earning its weight? 0.000 means it is not.
+#    Both should be > 0 on a workload with shared prefixes.
+curl -sG "$PROM/api/v1/query" --data-urlencode \
+  'query=sum(rate(llm_d_epp_prefix_indexer_hit_ratio_sum[5m]))/sum(rate(llm_d_epp_prefix_indexer_hit_ratio_count[5m]))'
+
+# 2. Under load, how many replicas are actually serving?
+#    serving/ready well below 1 means the router is concentrating.
+curl -sG "$PROM/api/v1/query" --data-urlencode 'query=vllm:num_requests_running'
+```
+
+If the hit ratio is zero and `serving/ready` is low, reweight the profile before
+reading any latency figure from the run — and prefer the harness's own
+`analysis/summary.txt`, whose TTFT is measured at the client and therefore
+includes the router wait that `vllm:time_to_first_token_seconds` omits. See
+"Judge the ramp on the client's TTFT" in
+[analyzer-evidence](../../developer-guide/analyzer-evidence.md).
 
 `make benchmark-report` renders a markdown table from the newest results in the
 workspace. A run worth keeping has, per scenario: a non-zero request count, an

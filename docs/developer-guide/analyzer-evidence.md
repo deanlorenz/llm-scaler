@@ -297,6 +297,13 @@ decode replicas 15 s SOONER (`spec` 9 at +90 s against +105 s, ready 9 at
 +150 s against +165 s, pod start 60 s in both). Its phase-1 TTFT p95 was
 nonetheless twice T's, 136 s against 68.5 s.
 
+> Those two TTFT figures, and every engine-side TTFT comparison in this
+> section, were later shown to be unreliable: the metric cannot see time spent
+> in the router's queue, and the percentile lands inside a four-sample spike.
+> The conclusion below -- that the router withholds work from Ready replicas --
+> rests on the per-pod serving counts and the router's own queue depth, which
+> are unaffected. See "Judge the ramp on the client's TTFT" below.
+
 The replicas were Ready and receiving nothing. Per-pod `vllm:num_requests_running`
 at the worst moment of run U:
 
