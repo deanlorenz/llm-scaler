@@ -212,6 +212,11 @@ func (a *SaturationAnalyzer) nearestSaturatedThroughput(key string) (float64, st
 // model ID may itself contain "|"-free "/" and other characters but never
 // "|", so counting from the right is safe: the bucket is the second-to-last
 // field.
+// splitHistoryKey locates the OUTPUT bucket as the second-to-last |-field
+// and the queue threshold as the last. A throughput key carries an input
+// bucket too, ahead of the output one, so it lands in prefix and a neighbour
+// key re-formed from prefix+bucket+suffix keeps it -- a borrow crosses output
+// buckets, never input ones.
 func splitHistoryKey(key string) (prefix, bucket, suffix string, ok bool) {
 	last := strings.LastIndexByte(key, '|')
 	if last < 0 {
@@ -304,8 +309,19 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 	// a cap drawn at the policy-level figure while the engine divides by a
 	// per-analyzer override would leave a gap that orders a replica.
 	scaleUp, _ := cfg.AnalyzerThresholds(domain.SaturationAnalyzerName)
+	// The projection is handed start times ONLY when lambda is a true arrival
+	// rate. offeredArrivalRate falls back to the replicas' COMPLETION rate when
+	// EPP reports nothing, and its own doc says that understates lambda exactly
+	// when demand is highest -- so on that path arrived = lambda*T is computed at
+	// one rate while served = mu*(...) is computed at another, the two cancel,
+	// and the projection becomes a pure subtraction that under-orders. Better no
+	// projection than one built on two different rates.
+	var startSeconds map[string]float64
+	if input.ArrivalRate > 0 {
+		startSeconds = a.startSecondsByRole(input, roleOf)
+	}
 	tf := floor.Estimate(offeredArrivalRate(input), replicas, variants, backlog,
-		floor.BacklogDrainSeconds, scaleUp, staleShape, eppQueued)
+		floor.BacklogDrainSeconds, scaleUp, staleShape, eppQueued, startSeconds)
 
 	// Prefill with no mu: the scheduler queue's prompts are not resident work
 	// for prefill (file header). Only the disaggregated case has a prefill
@@ -361,7 +377,18 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 			"arrivalRate", tf.Lambda, "backlogRequests", term.Backlog, "drainSeconds", tf.DrainSeconds,
 			"saturatedThroughput", term.Mu, "perReplicaCapacity", term.PerReplica,
 			"replicasImplied", term.Replicas, "heldAtFleet", term.Held, "heldWhy", term.HeldWhy,
-			"orderedBehindQueue", term.OrderedBehindQueue)
+			"orderedBehindQueue", term.OrderedBehindQueue,
+			// How many replicas the standing queue was worth when the release
+			// fired. Run T showed orderedBehindQueue=true on five consecutive
+			// cycles and no way to tell whether the cap granted one replica
+			// because that was all the queue justified or because one was all
+			// it ever granted.
+			"queueJustifiedReplicas", term.QueueJustifiedReplicas,
+			// Both, because they are different questions. backlogRequests is
+			// what was measured; projectedBacklog is what the floor priced,
+			// and a run that shows only one cannot tell an empty queue from a
+			// queue the fleet is projected to outrun.
+			"projectedBacklog", term.ProjectedBacklog)
 		if roleDemand != nil {
 			roleDemand[role] = want
 		}

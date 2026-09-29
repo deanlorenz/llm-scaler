@@ -243,6 +243,13 @@ type VariantReplicaState struct {
 	// WVA uses this to prevent cascade scaling - avoiding new scale-up requests
 	// while pending pods are still becoming ready.
 	PendingReplicas int
+	// PendingAges is how long each starting replica has been alive, in seconds,
+	// one entry per Pod that exists and is not Ready. Nil when unavailable, which
+	// leaves the demand floor on a count-based estimate of the same credit.
+	PendingAges []float64
+	// StuckReplicas is how many of this variant's Pods are not Ready and not
+	// starting either. See domain.VariantCapacity.StuckReplicas.
+	StuckReplicas int
 	// GPUsPerReplica is the number of GPUs required per replica, extracted from
 	// the deployment's container resource requests (nvidia.com/gpu, amd.com/gpu, etc.).
 	// Defaults to 1 if no GPU requests are found.

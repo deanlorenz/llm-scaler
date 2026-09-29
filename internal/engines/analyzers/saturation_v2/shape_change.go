@@ -219,13 +219,21 @@ func saturatedCompletionRate(rm domain.ReplicaMetrics, role string, fleetOutput 
 // takes about eight -- so expect a short burst per transition rather than the
 // single line the previous wording promised.
 func (a *SaturationAnalyzer) noteFleetShape(namespace, modelID string, in, out float64,
-	arriving float64, arrivingOK bool, holdFor time.Duration, logger logr.Logger) (float64, bool) {
+	arriving float64, arrivingOK bool, holdFor time.Duration, logger logr.Logger) (stableOut, stableIn float64, outstanding bool) {
 	if !(in > 0) && !(out > 0) && !arrivingOK {
-		stable, outstanding := a.fleetShapeState(namespace, modelID)
+		// Both axes carry forward. Returning 0 for the input made
+		// classifyInputLength read "short" on any cycle with no completions,
+		// so the throughput key flipped input bucket on a scrape gap rather
+		// than on a shape change -- the asymmetry the output axis already
+		// avoids two lines up.
+		stable, stableIn, outstanding := a.fleetShapeState(namespace, modelID)
 		if stable <= 0 {
 			stable = out
 		}
-		return stable, outstanding
+		if stableIn <= 0 {
+			stableIn = in
+		}
+		return stable, stableIn, outstanding
 	}
 	key := namespace + "|" + modelID
 
@@ -303,7 +311,13 @@ func (a *SaturationAnalyzer) noteFleetShape(namespace, modelID string, in, out f
 	if changed || memo.stable.IsZero() {
 		memo.stable = next
 	}
-	stableOut := memo.stable.AvgOutputTokens
+	stableOut = memo.stable.AvgOutputTokens
+	// The same hysteresis on the input axis: a bucket LABEL wants it, and the
+	// throughput key is built from both.
+	stableIn = memo.stable.AvgInputTokens
+	if stableIn <= 0 {
+		stableIn = in
+	}
 	if stableOut <= 0 {
 		stableOut = out
 	}
@@ -359,7 +373,7 @@ func (a *SaturationAnalyzer) noteFleetShape(namespace, modelID string, in, out f
 		}
 	}
 	if !changed {
-		return stableOut, !memo.changedAt.IsZero()
+		return stableOut, stableIn, !memo.changedAt.IsZero()
 	}
 	logger.Info("fleet-shape-change",
 		"modelID", modelID, "namespace", namespace,
@@ -368,7 +382,7 @@ func (a *SaturationAnalyzer) noteFleetShape(namespace, modelID string, in, out f
 		"arrivingPromptTokens", arriving, "arrivingRead", arrivingOK,
 		"hadShape", hadShape, "tolerance", shape.DefaultChangeTolerance,
 		"reason", "the shape the capacity figures were learned under is no longer the one arriving; the fleet is not released until the new shape has a reading of its own")
-	return stableOut, true
+	return stableOut, stableIn, true
 }
 
 // fleetHasMeasuredItself reports whether every variant with a replica has a
@@ -395,8 +409,16 @@ func fleetHasMeasuredItself(replicas []capacity.ReplicaCapacity) bool {
 	}
 	measured := make(map[string]bool, len(replicas))
 	for _, rc := range replicas {
-		own := rc.SaturatedThroughput > 0 && !rc.SaturatedThroughputBorrowed &&
-			rc.SaturatedThroughputSamples >= floor.MinThroughputSamplesToOrder
+		// A derived figure settles the hold on sight. The hold exists because a
+		// MEASURED reading can only speak for the shape it was recorded under,
+		// so the fleet had to be caught saturating again before anything could
+		// be trusted. A figure derived from ITL(k) is priced for the shape
+		// arriving now, on the cycle it arrives, so there is nothing left to
+		// wait for -- and waiting is what cost the 2026-09-23 run its fleet,
+		// since an over-provisioned fleet never saturates to be caught.
+		own := rc.SaturatedThroughputDerived ||
+			(rc.SaturatedThroughput > 0 && !rc.SaturatedThroughputBorrowed &&
+				rc.SaturatedThroughputSamples >= floor.MinThroughputSamplesToOrder)
 		measured[rc.VariantName] = measured[rc.VariantName] || own
 	}
 	for _, ok := range measured {
@@ -441,14 +463,14 @@ func (a *SaturationAnalyzer) settleFleetShape(namespace, modelID string, ownRead
 
 // fleetShapeState reports the stable output length the keys are built from
 // and whether a change is outstanding, without observing anything.
-func (a *SaturationAnalyzer) fleetShapeState(namespace, modelID string) (float64, bool) {
+func (a *SaturationAnalyzer) fleetShapeState(namespace, modelID string) (out, in float64, outstanding bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	memo, ok := a.fleetShape[namespace+"|"+modelID]
 	if !ok {
-		return 0, false
+		return 0, 0, false
 	}
-	return memo.stable.AvgOutputTokens, !memo.changedAt.IsZero()
+	return memo.stable.AvgOutputTokens, memo.stable.AvgInputTokens, !memo.changedAt.IsZero()
 }
 
 // holdFleetFloor raises every role's demand to the bottom of the band where

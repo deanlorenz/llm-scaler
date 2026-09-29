@@ -87,7 +87,7 @@ var _ = Describe("the fleet-shape change, through Analyze", func() {
 
 	// The hold's state, read the way the production path reads it.
 	outstanding := func() bool {
-		_, held := analyzer.fleetShapeState("test-ns", "test-model")
+		_, _, held := analyzer.fleetShapeState("test-ns", "test-model")
 		return held
 	}
 	states := func(decodeN int) []domain.VariantReplicaState {
@@ -852,5 +852,30 @@ var _ = Describe("fleetHasMeasuredItself", func() {
 	It("is false for a fleet with nothing in it", func() {
 		Expect(fleetHasMeasuredItself(nil)).To(BeFalse())
 		Expect(fleetHasMeasuredItself([]capacity.ReplicaCapacity{})).To(BeFalse())
+	})
+})
+
+var _ = Describe("fleetHasMeasuredItself, on a derived figure", func() {
+	It("settles the hold even when the reading is borrowed and unsampled", func() {
+		// The derived branch is an OR over the measured one, so a replica that
+		// fails every measured test still clears the hold. That is the design,
+		// and it had no test.
+		rc := capacity.ReplicaCapacity{
+			VariantName:                 "v",
+			SaturatedThroughputSamples:  0,
+			SaturatedThroughputBorrowed: true,
+			SaturatedThroughputDerived:  true,
+		}
+		Expect(fleetHasMeasuredItself([]capacity.ReplicaCapacity{rc})).To(BeTrue())
+	})
+
+	It("does not settle it on the same reading without the derived flag", func() {
+		rc := capacity.ReplicaCapacity{
+			VariantName:                 "v",
+			SaturatedThroughput:         4,
+			SaturatedThroughputSamples:  0,
+			SaturatedThroughputBorrowed: true,
+		}
+		Expect(fleetHasMeasuredItself([]capacity.ReplicaCapacity{rc})).To(BeFalse())
 	})
 })

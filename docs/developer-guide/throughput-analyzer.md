@@ -107,8 +107,9 @@ for the full `analyzers:` field reference and combine algorithm.
 
 ## Metrics
 
-`RegisterThroughputAnalyzerQueries` (in `internal/collector/registration/throughput_analyzer.go`)
-registers three queries that are genuinely new and not covered by other analyzer registrations.
+`RegisterAlwaysOnQueries` (in `internal/collector/registration/throughput_analyzer.go`)
+registers the queries the demand floor needs on every cycle, whether or not this
+analyzer is enabled.
 All other TA inputs are read from `interfaces.ReplicaMetrics` fields populated by the other
 registrations in `internal/collector/registration/`.
 
@@ -275,9 +276,13 @@ ITLModel) for the concepts.
 ### Components
 
 **Query Registration (`internal/collector/registration/throughput_analyzer.go`)**  
-Registers three PromQL templates exclusive to the throughput analyzer:
-`QueryGenerationTokenRate`, `QueryKvUsageInstant`, `QueryRequestRate`.
-`RegisterThroughputAnalyzerQueries` must be called once at startup alongside
+Registers three PromQL templates that ORIGINATED with the throughput analyzer
+and are no longer exclusive to it: `QueryGenerationTokenRate`,
+`QueryKvUsageInstant`, `QueryRequestRate`. The demand floor reads them whether or
+not this analyzer is enabled, which is why the registration is unconditional --
+three separate outages came from a figure the floor needs being gated on an
+opt-in analyzer.
+`RegisterAlwaysOnQueries` must be called once at startup alongside
 `RegisterSaturationQueries` and `RegisterQueueingModelQueries`.
 
 **Metrics Collector (`internal/collector/`)**  

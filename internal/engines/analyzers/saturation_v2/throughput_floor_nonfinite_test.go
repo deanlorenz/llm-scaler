@@ -2,6 +2,7 @@ package saturation_v2
 
 import (
 	"math"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -41,7 +42,7 @@ var _ = Describe("recordSaturatedThroughput with a non-finite rate", func() {
 		It(tc.name+" never enters the window", func() {
 			a, _ := newAnalyzer()
 			a.recordSaturatedThroughput(key, tc.rate)
-			_, present := a.saturatedThroughput[key]
+			_, present := a.saturatedThroughput[tkey(a, key)]
 			Expect(present).To(BeFalse(), "no window is even created for it")
 		})
 	}
@@ -54,9 +55,9 @@ var _ = Describe("recordSaturatedThroughput with a non-finite rate", func() {
 		*now = now.Add(ThroughputSampleSpacing)
 		a.recordSaturatedThroughput(key, math.NaN())
 
-		Expect(a.saturatedThroughput[key].Len()).To(Equal(1),
+		Expect(a.saturatedThroughput[tkey(a, key)].Len()).To(Equal(1),
 			"one real reading in, and neither non-finite value took a slot")
-		Expect(a.saturatedThroughput[key].Average()).To(BeNumerically("~", 5.4, 1e-9),
+		Expect(a.saturatedThroughput[tkey(a, key)].Average()).To(BeNumerically("~", 5.4, 1e-9),
 			"and the reading that is there is undisturbed")
 	})
 
@@ -67,6 +68,26 @@ var _ = Describe("recordSaturatedThroughput with a non-finite rate", func() {
 			a.recordSaturatedThroughput(key, r)
 			*now = now.Add(ThroughputSampleSpacing)
 		}
-		Expect(a.saturatedThroughput[key].Len()).To(Equal(3))
+		Expect(a.saturatedThroughput[tkey(a, key)].Len()).To(Equal(3))
 	})
 })
+
+// tkey resolves a throughput-window key written in the OLD shape
+// (model|accel|gpus|role|outBucket|qN) to the real one, which carries an input
+// bucket between the role and the output bucket. The specs name the parts they
+// care about; the input bucket is a fixture detail they do not.
+func tkey(a *SaturationAnalyzer, written string) string {
+	wPrefix, wBucket, wSuffix, ok := splitHistoryKey(written)
+	if !ok {
+		return written
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for k := range a.saturatedThroughput {
+		p, b, sfx, ok := splitHistoryKey(k)
+		if ok && b == wBucket && sfx == wSuffix && strings.HasPrefix(p, wPrefix) {
+			return k
+		}
+	}
+	return written
+}

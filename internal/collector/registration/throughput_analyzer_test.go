@@ -12,7 +12,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
 )
 
-var _ = Describe("RegisterThroughputAnalyzerQueries", func() {
+var _ = Describe("the queries the demand floor and the throughput analyzer share", func() {
 	var (
 		ctx       context.Context
 		registry  *source.SourceRegistry
@@ -31,29 +31,28 @@ var _ = Describe("RegisterThroughputAnalyzerQueries", func() {
 			metricsSource := prometheus.NewPrometheusSource(ctx, mockAPI, prometheus.DefaultPrometheusSourceConfig())
 			err := registry.Register("prometheus", metricsSource)
 			Expect(err).NotTo(HaveOccurred())
-			// Both, as cmd/main does when the throughput analyzer is enabled.
-			// QueryRequestRate now comes from the arrival-rate set, so a fixture
-			// registering only the TA queries could not render it.
-			RegisterArrivalRateQueries(registry)
-			RegisterThroughputAnalyzerQueries(registry)
+			// One registration, as cmd/main does -- unconditionally.
+			RegisterAlwaysOnQueries(registry)
 			queryList = registry.Get("prometheus").QueryList()
 		})
 
-		It("should panic when RegisterThroughputAnalyzerQueries is called twice on the same registry", func() {
-			// MustRegister panics on duplicate names; calling the function a second
-			// time on the same registry (queries already registered by BeforeEach)
-			// must trigger that panic.
+		It("panics if registered twice on the same registry", func() {
 			Expect(func() {
-				RegisterThroughputAnalyzerQueries(registry)
+				RegisterAlwaysOnQueries(registry)
 			}).To(Panic())
 		})
 
-		It("should register exactly the TA-exclusive queries", func() {
-			// QueryRequestRate and QueryModelArrivalRate left this set: they are
-			// lambda's two sources and the saturation demand floor needs them
-			// whether or not this analyzer runs, so they register
-			// unconditionally (RegisterArrivalRateQueries).
+		It("registers every figure the demand floor reads, with no analyzer gate", func() {
+			// All four were once behind RegisterThroughputAnalyzerQueries, which
+			// cmd/main called only when that opt-in analyzer was enabled. The
+			// shipped config does not enable it, so the floor silently had no
+			// arrival rate, then no generation-token rate, then -- measured on
+			// 2026-09-24, 1,064 capacity decisions and not one derived -- no k*
+			// to fit ITL(k) from. Three outages, one cause. This spec is the
+			// guard: every one of them registers unconditionally.
 			expectedQueries := []string{
+				QueryRequestRate,
+				QueryModelArrivalRate,
 				QueryGenerationTokenRate,
 				QueryKvUsageInstant,
 			}
@@ -139,7 +138,7 @@ var _ = Describe("RegisterThroughputAnalyzerQueries", func() {
 	Context("when prometheus source is not registered", func() {
 		It("should not panic", func() {
 			Expect(func() {
-				RegisterThroughputAnalyzerQueries(registry)
+				RegisterAlwaysOnQueries(registry)
 			}).NotTo(Panic())
 		})
 	})
@@ -163,7 +162,7 @@ var _ = Describe("arrival-rate query registration", func() {
 			context.Background(), &mockPrometheusAPI{}, prometheus.DefaultPrometheusSourceConfig()))).To(Succeed())
 
 		// Deliberately NOT calling RegisterThroughputAnalyzerQueries.
-		RegisterArrivalRateQueries(reg)
+		RegisterAlwaysOnQueries(reg)
 
 		ql := reg.Get("prometheus").QueryList()
 		Expect(ql.Get(QueryModelArrivalRate)).NotTo(BeNil(),
@@ -193,8 +192,7 @@ var _ = Describe("arrival-rate query registration", func() {
 		Expect(reg.Register("prometheus", prometheus.NewPrometheusSource(
 			context.Background(), &mockPrometheusAPI{}, prometheus.DefaultPrometheusSourceConfig()))).To(Succeed())
 		Expect(func() {
-			RegisterArrivalRateQueries(reg)
-			RegisterThroughputAnalyzerQueries(reg)
+			RegisterAlwaysOnQueries(reg)
 		}).NotTo(Panic())
 	})
 })

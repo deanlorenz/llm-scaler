@@ -59,3 +59,11 @@ func classifyOutputLength(avgOutputTokens float64) string {
 		return "huge"
 	}
 }
+
+// classifyInputLength buckets a prompt length on the same boundaries as
+// classifyOutputLength. The thresholds are about how much KV a request holds,
+// and a prompt token costs the same as a generated one, so the same table
+// applies to both axes.
+func classifyInputLength(avgInputTokens float64) string {
+	return classifyOutputLength(avgInputTokens)
+}

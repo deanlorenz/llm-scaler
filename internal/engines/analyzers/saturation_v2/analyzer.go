@@ -18,6 +18,9 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/aggregation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/floor"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
 )
 
 // SaturationAnalyzer implements the domain.Analyzer interface using a
@@ -84,6 +87,33 @@ type SaturationAnalyzer struct {
 	// and when a change of either was raised and not yet settled. See
 	// shape_change.go for what the event is for.
 	fleetShape map[string]*shapeMemo
+
+	// itlWindows is one rolling window of (k, ITL) readings per variant, from
+	// which ITL(k) = A*k + B is fitted so mu can be derived for the shape the
+	// fleet is serving NOW rather than waiting for it to saturate under it
+	// (mu_from_itl.go). Keyed like the throughput windows and swept with them.
+	itlWindows map[string]*itl.Window
+	// itlBaseline is the last B an OLS fit produced for each window key: the
+	// zero-contention decode step for THAT model on THAT accelerator. It is
+	// what the one-parameter fallback pins, so a fleet that has once been
+	// measured never falls back to a constant guessed for another card.
+	itlBaseline map[string]float64
+	// startSeconds is the running estimate of how long one replica of each
+	// variant takes to become Ready, keyed like the ITL windows and swept with
+	// them. The demand floor projects the backlog forward over it, so it is a
+	// measurement -- see start_est.go for why a constant cannot do.
+	startSeconds map[string]float64
+	// startSeenPods is the Pods whose start has already been folded into that
+	// estimate, with when they were seen.
+	//
+	// Every cycle sees the same Ready Pod reporting the same StartSeconds, so
+	// without this the estimate would converge on whatever the longest-lived
+	// replica measured and the histogram would count cycles rather than starts.
+	startSeenPods map[string]time.Time
+	// startOutliers counts consecutive start-time samples rejected as
+	// implausible for a variant, so a genuine change of hardware is eventually
+	// admitted rather than rejected forever against a stale estimate.
+	startOutliers map[string]int
 	// now is the clock the memory reads; tests set it.
 	now func() time.Time
 }
@@ -108,6 +138,11 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		capacityStore:          store,
 		decodeSaturatedAt:      make(map[string]time.Time),
 		fleetShape:             make(map[string]*shapeMemo),
+		itlWindows:             make(map[string]*itl.Window),
+		itlBaseline:            make(map[string]float64),
+		startSeconds:           make(map[string]float64),
+		startSeenPods:          make(map[string]time.Time),
+		startOutliers:          make(map[string]int),
 		now:                    time.Now,
 	}
 }
@@ -146,8 +181,29 @@ func (a *SaturationAnalyzer) EvictStaleHistory(timeout time.Duration) int {
 			delete(a.lastAccelerator, key)
 		}
 	}
-	// The saturated-throughput windows live and die with the k2 windows they
-	// were recorded beside: same key, same observation, same timeout.
+	// An ITL window ages by its own observations rather than by a timestamp
+	// of its own: Prune drops readings past DefaultObservationMaxAge, so a
+	// window left empty by that belongs to a variant nothing has reported for
+	// at least that long. Without this the map keeps one window per variant
+	// that has EVER been seen, including deleted and renamed ones.
+	now := a.now()
+	for key, w := range a.itlWindows {
+		w.Prune(now)
+		if w.Len() == 0 {
+			delete(a.itlWindows, key)
+			// The learned baseline dies with the window that produced it.
+			// Kept, it would grow one float per variant/accelerator ever seen
+			// and, worse, pin a hardware floor measured before a redeploy onto
+			// different hardware into every later fit for that key.
+			delete(a.itlBaseline, key)
+			// And the start estimate, for the same reason: a figure measured
+			// before a redeploy onto different hardware would otherwise size
+			// every later projection for that key.
+			delete(a.startSeconds, key)
+			delete(a.startOutliers, key)
+		}
+	}
+	a.evictStartSeenPods(now, timeout)
 	for key, ra := range a.saturatedThroughput {
 		if ra.Stale(timeout) {
 			delete(a.saturatedThroughput, key)
@@ -237,8 +293,49 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 	fleetInput := servedPromptLength(input.ReplicaMetrics)
 	arriving, arrivingOK := arrivingPromptLength(input.SchedulerQueue)
 	holdFor, _ := satConfig.ShapeChangeHold(ShapeChangeHoldMax)
-	stableOutput, shapeChanged := a.noteFleetShape(input.Namespace, input.ModelID,
+	stableOutput, stableInput, shapeChanged := a.noteFleetShape(input.Namespace, input.ModelID,
 		fleetInput, fleetOutput, arriving, arrivingOK, holdFor, logger)
+
+	// One ITL(k) fit per variant per cycle, from readings its replicas report
+	// at whatever load they are at. This is what lets mu be priced for the
+	// shape arriving now instead of the one the fleet last saturated under
+	// (mu_from_itl.go).
+	itlModels := make(map[string]itl.Model, len(gpusByVariant))
+	for variant := range gpusByVariant {
+		// Decode only. ITL is the latency between GENERATED tokens, and
+		// deriveMu divides a token rate by an output length; prefill emits
+		// about one token per request -- its work is the prompt -- so the
+		// same arithmetic would read three orders of magnitude low, which is
+		// why saturatedCompletionRate special-cases it on the measured path
+		// too (shape_change.go).
+		// How long this variant's replicas take to become Ready, folded in from
+		// whatever finished starting since the last cycle.
+		//
+		// BEFORE the decode guard, deliberately. That guard is about ITL -- the
+		// latency between generated tokens, which prefill barely has -- while a
+		// start time is an image and a node, which prefill has exactly like
+		// decode. A P/D fleet projects its prefill backlog too, and leaving
+		// prefill out meant it published neither series, so a run could not even
+		// be reviewed for it.
+		a.noteReplicaStart(a.itlWindowKey(input.Namespace, input.ModelID, variant,
+			accelByVariant[variant], gpusByVariant[variant]),
+			input.Namespace, variant, input.ReplicaMetrics, logger)
+
+		if canonicalRole(rolesByVariant[variant]) != domain.RoleDecode {
+			continue
+		}
+		// Keyed by what ITL(k) is a property of: the accelerator and how many
+		// of them a replica has. Pooling two GPU products under one key is the
+		// bug stableAccelerator exists to prevent for k2 (the k1<->k2
+		// oscillation of PR #40 on a heterogeneous cluster), and a blended
+		// ITL line is meaningless for either product.
+		key := a.itlWindowKey(input.Namespace, input.ModelID, variant,
+			accelByVariant[variant], gpusByVariant[variant])
+		itlModels[variant] = a.noteITL(key, input.ReplicaMetrics, variant, a.now(), logger)
+		// How long this variant's replicas take to become Ready, folded in from
+		// whatever finished starting since the last cycle. Same key as the ITL
+		// window, so it is swept with it.
+	}
 
 	// Phase 1: Per-replica capacity computation
 	replicaCapacities := make([]capacity.ReplicaCapacity, 0, len(input.ReplicaMetrics))
@@ -251,8 +348,18 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 		gpuCount := gpusByVariant[rm.VariantName]
 		role := rolesByVariant[rm.VariantName]
 		downstreamSaturated := decodeSaturated && canonicalRole(role) == domain.RolePrefill
+		// Priced, then reported on. noteLineMismatch says when the observed
+		// generation-token rate disagrees with the line, and does not act on
+		// it: see its comment for the run that decided that.
+		itlModel := itlModels[rm.VariantName]
+		engineParams := engineParamsFor(a, input.Namespace, input.ModelID, rm.VariantName)
+		fleetShape := shape.New(fleetInput, fleetOutput, rm.PrefixCacheHitRate)
+		derived := deriveMu(itlModel, engineParams, rm.TotalKvCapacityTokens,
+			fleetShape, pricingK(satConfig))
+		a.noteLineMismatch(itlModel, engineParams, rm, role, fleetShape.KVreq, logger)
 		rc := a.computeReplicaCapacity(rm, satConfig, input.ModelID, input.Namespace, gpuCount,
-			role, accelByVariant[rm.VariantName], stableOutput, fleetOutput, downstreamSaturated, logger)
+			role, accelByVariant[rm.VariantName], stableOutput, fleetOutput, stableInput,
+			derived, downstreamSaturated, logger)
 		if rc != nil {
 			replicaCapacities = append(replicaCapacities, *rc)
 		}
@@ -413,6 +520,14 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// bucket label wants hysteresis; a physical quantity does not, and mu is
 	// divided by this one.
 	fleetOutput float64,
+	// shapeKeyInput is the TRACKED prompt length, hysteretic for the same
+	// reason shapeKeyOutput is: it buckets the throughput key, and a fleet
+	// whose average wobbles across a boundary must not split its window in two.
+	shapeKeyInput float64,
+	// derived is mu priced from this variant's fitted ITL model, which needs
+	// no saturated cycle and no bucket. It is preferred over the measured
+	// window when present (mu_from_itl.go).
+	derived derivedMu,
 	downstreamSaturated bool,
 	logger logr.Logger,
 ) *capacity.ReplicaCapacity {
@@ -492,8 +607,14 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// One bucket per role per cycle -- the fleet's, weighted by request rate
 	// so a fresh replica barely moves it (fleetOutputLength) -- gives every
 	// replica of the role the same shape, and the median a meaning.
-	throughputKey := a.historyKey(modelID, namespace, rm.VariantName, accelerator, gpuCount, role,
-		shapeKeyOutput, config.QueueLengthThreshold)
+	// The INPUT bucket as well as the output one. historyKey carries output
+	// only, so an input-only shape change left the key identical and the
+	// pre-change window read back as an own, non-borrowed reading -- which
+	// useDerived then preferred over a derived figure that had priced the
+	// change correctly. k2 keeps historyKey unchanged; this is the throughput
+	// key alone, as the shape-shift proposal scopes it.
+	throughputKey := a.throughputKey(modelID, namespace, rm.VariantName, accelerator, gpuCount, role,
+		shapeKeyInput, shapeKeyOutput, config.QueueLengthThreshold)
 	if k2Priority == capacity.K2SrcObserved && rm.Ready && !rm.FromWarmPool {
 		if mu, ok := saturatedCompletionRate(rm, role, fleetOutput); ok {
 			a.recordSaturatedThroughput(throughputKey, mu)
@@ -520,6 +641,30 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	}
 	reading := a.saturatedThroughputReading(throughputKey)
 	saturatedThroughput, throughputBucket := reading.rate, reading.bucket
+	// A derived figure prices the shape the fleet has NOT measured -- that is
+	// the whole of its job. Where the fleet HAS measured this shape, under this
+	// key, for itself, the measurement wins.
+	//
+	// Letting derived win unconditionally is what run R cost. In phase 1 the
+	// fleet had its own reading of 1.27 req/s and the derivation replaced it
+	// with 0.67, so the floor asked for 42-56 replicas against phase 1's usual
+	// 4.5 and spent 32% more replica-minutes than main for a decode TTFT p95 of
+	// 55.6 s against 0.215. Phase 2, where no reading for the arriving shape
+	// exists and the borrowed one is six times wrong, is where derived belongs:
+	// there it took the fleet from the 6-7 replicas main holds to 1-2.
+	//
+	// "Measured this shape" is precise: an OWN reading (not borrowed from a
+	// neighbouring output bucket, which is exactly the stale figure the
+	// derivation exists to replace) with enough samples to order on. A borrowed
+	// or thin reading loses to derived, as before.
+	throughputSamples := reading.samples
+	if useDerived(derived.ok, reading) {
+		saturatedThroughput = derived.rate
+		throughputBucket = derivedBucket
+		// Not the stale measured count, which describes a different figure
+		// entirely and only ever reached a log line as a confusing number.
+		throughputSamples = MinDerivedThroughputSamples
+	}
 
 	effectiveCapacity := k1
 	bound := "k1-memory"
@@ -575,8 +720,9 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		ReplicaDemand:               replicaDemand,
 		FromWarmPool:                rm.FromWarmPool,
 		SaturatedThroughput:         saturatedThroughput,
-		SaturatedThroughputSamples:  reading.samples,
+		SaturatedThroughputSamples:  throughputSamples,
 		SaturatedThroughputBorrowed: reading.borrowed,
+		SaturatedThroughputDerived:  throughputBucket == derivedBucket,
 	}
 }
 
@@ -668,6 +814,53 @@ func (a *SaturationAnalyzer) computeReplicaCapacityFallback(
 		ReplicaDemand:         replicaDemand,
 		FromWarmPool:          rm.FromWarmPool,
 	}
+}
+
+// useDerived reports whether the derived figure should price this replica.
+//
+// It should where the fleet has no measurement of the shape now arriving --
+// which is the whole of its job -- and not where it has one. "Has one" is
+// precise: an OWN reading, in this key's own output bucket, with enough
+// samples to order on. A BORROWED reading is the stale figure from a
+// neighbouring bucket that the derivation exists to replace, and a thin one is
+// not yet evidence, so both lose to derived.
+func useDerived(derivedOK bool, reading throughputReading) bool {
+	if !derivedOK {
+		return false
+	}
+	ownMeasured := !reading.borrowed && reading.rate > 0 &&
+		reading.samples >= floor.MinThroughputSamplesToOrder
+	return !ownMeasured
+}
+
+// derivedBucket is the sentinel the bucket label carries when mu was derived
+// from the ITL model rather than measured. classifyOutputLength can never
+// produce it, so it cannot be spoofed by a real output bucket.
+const derivedBucket = "derived"
+
+// throughputKey is historyKey with the fleet's input bucket COMPOSED INTO it --
+// not appended, see the body: a saturated throughput is a property of a replica
+// AND the (I, O) it was measured under, so a reading recorded at one input
+// length is not an own reading for another.
+func (a *SaturationAnalyzer) throughputKey(
+	modelID, namespace, variantName, accelerator string,
+	gpuCount int,
+	role string,
+	avgInput, avgOutput float64,
+	queueThreshold float64,
+) string {
+	// Composed, not appended. splitHistoryKey reads the output bucket as the
+	// second-to-last field and the queue threshold as the last; an input
+	// bucket tacked on the end made it read "q5" as the output bucket, which
+	// is in no bucket table, so nearestSaturatedThroughput returned nothing
+	// for every key and the neighbour-bucket borrow silently died. Putting the
+	// input bucket ahead of the output one keeps that parse intact, and makes
+	// a borrow walk output buckets WITHIN an input bucket -- which is what
+	// borrowing should mean anyway.
+	return fmt.Sprintf("%s|%s|%d|%s|i%s|%s|q%g",
+		modelID, a.stableAccelerator(namespace, variantName, accelerator),
+		gpuCount, canonicalRole(role), classifyInputLength(avgInput),
+		classifyOutputLength(avgOutput), queueThreshold)
 }
 
 // historyKey is the bucket a replica's saturated observations (k2, and the
@@ -1107,6 +1300,8 @@ func (a *SaturationAnalyzer) aggregateByVariant(
 			ReplicaCount:     replicaCount,
 			ObservedReplicas: observedReplicas,
 			PendingReplicas:  pendingCount,
+			PendingAges:      vs.PendingAges,
+			StuckReplicas:    vs.StuckReplicas,
 			WarmPoolReplicas: warmPoolReplicas,
 			// Both readings are MEASURED, so both are the analyzer's to emit, and
 			// they are kept apart because they are different numbers. What they
@@ -1488,8 +1683,9 @@ type roleHold struct {
 // leaves it alone. When the band is empty the cap wins -- a hold that
 // cannot avoid both errors must not order -- though with the config
 // refusing a scale-down boundary at or above the scale-up threshold and
-// pending replicas never negative (aggregateByVariant), anticipated supply
-// is never below supply and the band is never empty in practice. The
+// each variant's starting term clamped at zero (aggregation.startingReplicas),
+// anticipated supply is never below supply and the band is never empty in
+// practice. The
 // variants' own demand and utilization are moved with the role figure.
 func holdPrefillDemand(roleDemand map[string]float64, variants []domain.VariantCapacity, scaleUp, scaleDown float64) (roleHold, bool) {
 	const role = domain.RolePrefill
@@ -1526,7 +1722,11 @@ func holdPrefillDemand(roleDemand map[string]float64, variants []domain.VariantC
 		if canonicalRole(vc.Role) != role {
 			continue
 		}
-		anticipated := float64(vc.ReplicaCount+vc.PendingReplicas) * vc.PerReplicaCapacity
+		// Through aggregation, not by hand: rc.TotalAnticipatedSupply is the
+		// sum of exactly this term, and a numerator computed from
+		// PendingReplicas while the denominator subtracted StuckReplicas made
+		// the shares sum to more than 1 and over-distributed the held demand.
+		anticipated := aggregation.AnticipatedSupply(*vc)
 		vc.TotalDemand = h.after * anticipated / rc.TotalAnticipatedSupply
 		vc.Utilization = 0
 		if supply := float64(vc.ReplicaCount) * vc.PerReplicaCapacity; supply > 0 {
@@ -1753,4 +1953,22 @@ func median(values []int64) int64 {
 		return (sorted[n/2-1] + sorted[n/2]) / 2
 	}
 	return sorted[n/2]
+}
+
+// engineParamsFor is the engine configuration recorded for one variant, or
+// nil when the capacity store has not seen it yet.
+func engineParamsFor(a *SaturationAnalyzer, namespace, modelID, variantName string) *capacity.EngineParams {
+	if rec := a.capacityStore.Get(namespace, modelID, variantName); rec != nil {
+		return rec.EngineParams
+	}
+	return nil
+}
+
+// itlWindowKey names one ITL(k) window. ITL is a property of the
+// accelerator and the engine, so the key carries both the accelerator
+// (through stableAccelerator, which absorbs the flapping a heterogeneous
+// fleet reports) and the GPU count, and no shape dimension at all.
+func (a *SaturationAnalyzer) itlWindowKey(namespace, modelID, variantName, accelerator string, gpuCount int) string {
+	return fmt.Sprintf("%s|%s|%s|%s|%d", namespace, modelID, variantName,
+		a.stableAccelerator(namespace, variantName, accelerator), gpuCount)
 }

@@ -22,6 +22,15 @@ router:
         - type: kv-cache-utilization-scorer
         - type: prefix-cache-scorer
         - type: no-hit-lru-scorer
+        # prefix-cache-scorer outranks queue-scorer and
+        # kv-cache-utilization-scorer here, which is right for a workload with
+        # shared prefixes and wrong for one without: the scorer that spreads
+        # load is outvoted by one whose hit ratio is 0.000, and the fleet
+        # serves from a single replica while the rest sit idle. Measured on the
+        # shape-swap benchmark at nine replicas Ready and one serving.
+        # Check llm_d_epp_prefix_indexer_hit_ratio before trusting these
+        # weights on a new workload -- see docs/guides/benchmarking/README.md,
+        # "Check the router spreads load before trusting a latency number".
         schedulingProfiles:
         - name: default
           plugins:

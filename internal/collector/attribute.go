@@ -376,6 +376,7 @@ func (c *ReplicaMetricsCollector) attributeInstance(
 		VariantName:           vaName,
 		FromWarmPool:          fromWarmPool,
 		Ready:                 ready,
+		StartSeconds:          c.podStartSeconds(ctx, namespace, podName),
 		KvCacheUsage:          kvUsage,
 		QueueLength:           queueLen,
 		NumGpuBlocks:          data.numGpuBlocks,

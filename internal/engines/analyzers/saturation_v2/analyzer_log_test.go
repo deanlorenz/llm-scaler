@@ -67,7 +67,22 @@ var logContract = map[string][]string{
 	// Prefill's demand is held in the no-order/no-release band while decode
 	// is saturated (analyzer.go, holdPrefillDemand); the line is what explains
 	// a prefill RoleDemand that matches neither its rows nor its floor.
-	"prefill-demand-held":             {"modelID", "namespace", "demandBefore", "demandHeld", "holdFloor", "holdCap"},
+	"prefill-demand-held": {"modelID", "namespace", "demandBefore", "demandHeld", "holdFloor", "holdCap"},
+	// Why the derived mu is or is not available, which a run cannot work out
+	// afterwards: an empty ITL window has four causes and the counts separate
+	// them. Added after a benchmark produced 3,157 lines that said none of it.
+	"itl-window": {
+		"variant", "key", // join keys
+		"replicas", "offered", "held", // what arrived, what was taken, what is kept
+		"notReady", "noITL", "noK", "aboveBand", // and why the rest were not
+		"ready", "minSamples", // and whether that is enough to fit on
+	},
+	// Which tier answered, and with what line. A pinned-B fit is the weaker
+	// answer and the report has to be able to tell the two apart.
+	// baselineLearned says whether B came from this card or from the
+	// bootstrap constant -- the difference between a measured floor and a
+	// guess, and the one that collapsed a fleet on 2026-09-27.
+	"itl-fit":                         {"variant", "tier", "a", "b", "held", "baselineLearned"},
 	"replica-capacity-skipped":        {"modelID", "namespace", "variant", "reason"},
 	"replica-capacity-store-fallback": {"modelID", "namespace", "variant", "reason"},
 	"variant-capacity-source":         {"modelID", "namespace", "variant", "reason"},

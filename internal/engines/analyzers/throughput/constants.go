@@ -1,5 +1,7 @@
 package throughput
 
+import "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
+
 const (
 	// AnalyzerName is the canonical name for the throughput analyzer.
 	AnalyzerName = "throughput"
@@ -33,12 +35,17 @@ const (
 	// the model-predicted decode rate μ_dec(k*) and the directly observed GPS
 	// (GenerationTokenRate). Errors above this threshold at k* ≥ DefaultGPSMinKForVerification
 	// indicate the ITL model may be wrong and trigger SpareCapacity suppression.
-	DefaultGPSMismatchThresholdPct = 15.0
+	//
+	// Defined in internal/signals/itl, because the saturation analyzer gates a
+	// DERIVED mu on the same comparison and an analyzer package must not import
+	// another analyzer package to borrow a threshold. Aliased here so this
+	// package's callers and specs keep naming it where they always have.
+	DefaultGPSMismatchThresholdPct = itl.DefaultGPSMismatchThresholdPct
 
 	// DefaultGPSMinKForVerification is the minimum KV utilization (k*) required before
 	// GPS verification is applied. Below this threshold the in-flight count N_dec is
 	// small and percentage errors on GPS are unreliable.
-	DefaultGPSMinKForVerification = 0.30
+	DefaultGPSMinKForVerification = itl.DefaultGPSMinKForVerification
 
 	// DefaultNearKSatMargin is the margin below DefaultKSat at which a replica is
 	// considered "near saturation" for GPS sanity diagnostics. At k* above

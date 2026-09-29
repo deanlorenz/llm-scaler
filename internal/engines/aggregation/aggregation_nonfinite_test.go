@@ -60,6 +60,39 @@ var _ = Describe("non-finite per-replica capacity", func() {
 		})
 	}
 
+	It("never lets one variant's stuck count cancel a sibling's supply", func() {
+		// nonNegativeSupply clamps the SUMMED role figure, so a negative term
+		// from one variant is consumed inside the sum and is unrecoverable.
+		// v2's row is stale -- its crashed Pod still reported, so pending
+		// clamped to 0 while the Pod listing saw it stuck -- and before the
+		// clamp its term went negative and ate a replica of v1's real supply.
+		vcs := []domain.VariantCapacity{
+			{VariantName: "v1", Role: domain.RoleDecode, ReplicaCount: 6,
+				PendingReplicas: 2, PerReplicaCapacity: good},
+			{VariantName: "v2", Role: domain.RoleDecode, ReplicaCount: 4,
+				PendingReplicas: 0, StuckReplicas: 3, PerReplicaCapacity: good},
+		}
+		Expect(aggregation.SumTotalAnticipatedSupply(vcs)).
+			To(BeNumerically("~", 12*good, 1e-6),
+				"8 from v1 and 4 from v2: a stuck Pod may say at worst "+
+					"'nothing is arriving', never 'supply is negative'")
+		Expect(aggregation.AggregateByRole(vcs)[domain.RoleDecode].TotalAnticipatedSupply).
+			To(BeNumerically("~", 12*good, 1e-6), "same rule per role")
+	})
+
+	It("keeps anticipated supply at or above supply when a Pod is stuck", func() {
+		// The stale-row case on one variant: ReplicaCount still counts the
+		// crashed Pod, so charging it again as a negative arrival put
+		// anticipated BELOW supply and inverted the band holdPrefillDemand
+		// and the engine's RC both read.
+		vcs := []domain.VariantCapacity{
+			{VariantName: "v", Role: domain.RoleDecode, ReplicaCount: 4,
+				PendingReplicas: 0, StuckReplicas: 1, PerReplicaCapacity: good},
+		}
+		Expect(aggregation.SumTotalAnticipatedSupply(vcs)).
+			To(BeNumerically(">=", aggregation.SumTotalSupply(vcs)))
+	})
+
 	It("still reports a negative supply from a negative pending count", func() {
 		// Only the CAPACITY is sanitized. A negative PendingReplicas is a real
 		// case with a real guard downstream -- the floor holds the figure at

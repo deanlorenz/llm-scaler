@@ -117,6 +117,8 @@ MESSAGES = {
     "replica-capacity-store-fallback",
     "variant-capacity-source",
     "zero-replica-capacity-estimate",
+    "itl-window",
+    "itl-fit",
     DECISION_MSG,
 }
 

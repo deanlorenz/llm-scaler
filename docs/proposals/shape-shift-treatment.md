@@ -131,6 +131,37 @@ proposal must say which:
   window) and records nothing per shape -- so the per-shape trust flag is
   new state this proposal adds, not the existing check. That keeps the
   existing discipline and states it in the new terms.
+
+  **As built, the check ships as a DIAGNOSTIC and does not gate ordering.**
+  It was built as a gate first and measured as one. In run T (2026-09-28,
+  image `mu-from-itl-v6`) it withheld ordering 28 times, and every one of them
+  fell inside `07:48:29-07:50:29` -- the first two minutes of the run, the
+  phase-1 ramp -- with the predicted rate above the observed one nearly every
+  time, and on four cycles every replica of the role rejected at once. The
+  fleet still reached 9 so the run stands, but its phase-1 TTFT p95 was 64 s
+  against main's 42 s.
+
+  The cause is not a threshold. The three signals are collected over three
+  different windows -- `KvUsageInstant` has none,
+  `GenerationTokenRate` is `rate[1m]`, `AvgITL` is `rate[5m]` -- so on a ramp
+  `k` reaches its new level in seconds while the 1m rate still reports a
+  fraction of the steady state. The disagreement is therefore largest exactly
+  when a scale-up is needed, and it moves every replica together, so neither an
+  N-consecutive-cycles rule nor a majority-of-replicas rule suppresses it. The
+  15 % threshold itself came from a consumer that required three consecutive
+  firings and then only cleared a fit window
+  (`throughput.checkVariantGPSMismatch`); as a single-cycle gate on the floor it
+  was doing work it was never calibrated for.
+
+  So `saturation_v2.noteLineMismatch` measures and logs (`itl-gps-mismatch`,
+  with `gates=false`), skipping warm-pool bridges and non-decode roles whose
+  rates say nothing about this variant's line, and the floor has no opinion
+  about it. A persistent mismatch away from a ramp remains real evidence that
+  the shape, and so `KVreq`, does not describe the fleet -- it is the line that
+  let run T be diagnosed. When the collector grows a `k` averaged over the same
+  window as the rate, the gate can return; until then a verification that fires
+  hardest on a ramp is worse than none, and the per-shape trust flag this
+  proposal asks for remains unbuilt rather than built wrong.
 - **`estimateCapacityFromParams` already carries a different `N(I, O)`**
   (`min(S, B·O/(I+O))`, the batched-tokens bound). It is a derived-capacity
   fallback for k2; it stays, and the two bounds are reconciled by taking

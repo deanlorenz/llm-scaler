@@ -210,6 +210,29 @@ const (
 	// Labels: status (success, error)
 	WVAOptimizationDurationSeconds = "wva_optimization_duration_seconds"
 
+	// WVAReplicaStartSeconds is a histogram of how long each replica took to
+	// become Ready: the Pod's Ready condition LastTransitionTime less its
+	// CreationTimestamp. One observation per replica started, not per cycle.
+	//
+	// The demand floor projects the queue forward over this, so it is an INPUT
+	// to a sizing decision rather than a report on one.
+	WVAReplicaStartSeconds = "wva_replica_start_seconds"
+
+	// WVAReplicaStartSecondsEstimate is the start time the controller is
+	// actually sizing with, per variant, carrying a source label of "measured"
+	// or "seed".
+	//
+	// Published beside the histogram rather than derived from it, because the
+	// controller holds a running estimate and a quantile over the histogram is
+	// not the same number. The histogram says what the cluster did; this says
+	// what the controller believed, and a run where they disagree is the one
+	// worth opening.
+	WVAReplicaStartSecondsEstimate = "wva_replica_start_seconds_estimate"
+
+	// LabelStartSource distinguishes a measured start time from a seeded one on
+	// WVAReplicaStartSecondsEstimate.
+	LabelStartSource = "source"
+
 	// WVAModelsProcessed is a gauge that tracks the number of models processed in the last optimization cycle.
 	WVAModelsProcessed = "wva_models_processed"
 

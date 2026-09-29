@@ -13,6 +13,7 @@ package variantmeta
 import (
 	"context"
 	"strconv"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -108,6 +109,7 @@ func Discover(
 			maxReplicas = &v
 		}
 
+		pendingAges, stuckReplicas := pendingAgeSeconds(ctx, k8sClient, va.Namespace, scaleTarget, time.Now())
 		metas = append(metas, domain.VariantMetadata{
 			VariantName:     va.Name,
 			ModelID:         va.Spec.ModelID,
@@ -121,6 +123,8 @@ func Discover(
 			DesiredReplicas: desiredReplicas,
 			ReadyReplicas:   readyReplicas,
 			PendingReplicas: pendingReplicas,
+			PendingAges:     pendingAges,
+			StuckReplicas:   stuckReplicas,
 			MinReplicas:     minReplicas,
 			MaxReplicas:     maxReplicas,
 		})
@@ -234,6 +238,168 @@ func observeAcceleratorFromNodes(
 		}
 	}
 	return found, found != ""
+}
+
+// pendingAgeSeconds is how long each of a variant's STARTING replicas has been
+// alive: the Pods that exist and are not Ready, aged from their own
+// CreationTimestamp.
+//
+// The demand floor credits a starting replica with the part of the drain window
+// it will be Ready for, which needs its age. PendingReplicas is only a count,
+// and a starting Pod reports no metrics, so this is the one place the ages can
+// be had -- discovery already lists a variant's Pods by the same labels for the
+// accelerator observation beside it.
+//
+// Returns the ages of the Pods that ARE starting, and how many are not Ready and
+// not starting either -- terminal, backing off, or unschedulable. The second is
+// what anticipated supply subtracts, and it is deliberately the thing this
+// listing can PROVE: an unreadable, stale or skipped listing reports zero stuck,
+// which leaves every consumer on the figures it used before.
+//
+// That asymmetry is the whole design. Being wrong about a stuck Pod costs one
+// replica of under-counting; being wrong about a starting Pod told the optimizer
+// a fleet was on its way when it was not, and ordered it twice.
+//
+// Pods being deleted are excluded: their capacity is going away, not arriving.
+func pendingAgeSeconds(
+	ctx context.Context,
+	k8sClient client.Client,
+	namespace string,
+	scaleTarget scaletarget.ScaleTargetAccessor,
+	now time.Time,
+) ([]float64, int) {
+	// Both are optional on this path in a way observeAcceleratorFromNodes never
+	// had to consider: that one is called behind a config check, this one runs
+	// on every variant of every cycle, so a caller without a client -- which the
+	// discovery suite is -- must get nil rather than a panic.
+	if k8sClient == nil || scaleTarget == nil {
+		return nil, 0
+	}
+	// One replica is not one Pod on a LeaderWorkerSet: ReplicaCount and
+	// PendingReplicas are in SCALE-TARGET units (groups), while this lists Pods.
+	// A group of four starting Pods would contribute four ages for one pending
+	// replica and credit the drain four times over -- and when LeaderTemplate is
+	// nil, GetLeaderPodTemplateSpec returns the WORKER template, whose labels
+	// match every Pod in the group. Nothing here identifies which group a Pod
+	// belongs to, so rather than guess, a multi-Pod replica reports no ages and
+	// the floor falls back to its count-based credit, which is already in
+	// replica units.
+	if scaleTarget.GetGroupSize() > 1 {
+		return nil, 0
+	}
+	podTemplate := scaleTarget.GetLeaderPodTemplateSpec()
+	if podTemplate == nil || len(podTemplate.Labels) == 0 {
+		return nil, 0
+	}
+	var pods corev1.PodList
+	if err := k8sClient.List(ctx, &pods,
+		client.InNamespace(namespace),
+		client.MatchingLabels(podTemplate.Labels),
+	); err != nil {
+		ctrl.LoggerFrom(ctx).V(logging.DEBUG).Info(
+			"Could not list a variant's pods to age its starting replicas",
+			"namespace", namespace, "error", err.Error())
+		return nil, 0
+	}
+	var ages []float64
+	var stuck int
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if pod.DeletionTimestamp != nil || podReadyNow(pod) {
+			continue
+		}
+		// "Not Ready" is not "starting". A Pod that is stopped rather than
+		// late is counted as STUCK and subtracted from the replicas anticipated
+		// to arrive; it contributes no age, because it is not going to serve.
+		if !podStarting(pod) {
+			stuck++
+			continue
+		}
+		if pod.CreationTimestamp.IsZero() {
+			continue
+		}
+		age := now.Sub(pod.CreationTimestamp.Time).Seconds()
+		if age < 0 {
+			// Clock skew between the API server and this process. Unknown
+			// rather than zero: zero would claim the replica has just been
+			// ordered and credit it with the whole window.
+			continue
+		}
+		ages = append(ages, age)
+	}
+	return ages, stuck
+}
+
+// podStarting reports whether a Pod that is not yet Ready is actually on its way
+// to being Ready, rather than stopped.
+//
+// Pending and Running are the two phases a starting replica passes through;
+// Succeeded and Failed are terminal. Within those, a Pod is refused when it is
+// not going to make progress on its own: unschedulable or scheduling-gated on
+// the PodScheduled condition, or any container -- INIT containers included --
+// waiting on a backoff, an image that will not pull or a process that will not
+// stay up, however long it has existed.
+func podStarting(p *corev1.Pod) bool {
+	switch p.Status.Phase {
+	case corev1.PodSucceeded, corev1.PodFailed:
+		return false
+	case corev1.PodPending, corev1.PodRunning:
+	default:
+		return false
+	}
+	// Unschedulable has no container status to inspect -- the Pod has not been
+	// placed, so it has no containers yet. It is phase Pending with an empty
+	// ContainerStatuses, which every check below would wave through. This is the
+	// GPU-quota case, and it is the one that matters most here: a fleet blocked
+	// on quota would otherwise report capacity arriving for as long as the quota
+	// stayed spent.
+	//
+	// SchedulingGated is the same shape and the same story told by Kueue: a
+	// gated Pod is Pending with no containers for as long as the gate holds,
+	// which on a quota-managed fleet is exactly as long as the quota is spent.
+	// Every OTHER PodScheduled=False reason (SchedulerError) is transient and
+	// stays "starting".
+	for _, c := range p.Status.Conditions {
+		if c.Type != corev1.PodScheduled || c.Status != corev1.ConditionFalse {
+			continue
+		}
+		if c.Reason == corev1.PodReasonUnschedulable ||
+			c.Reason == corev1.PodReasonSchedulingGated {
+			return false
+		}
+	}
+	// Init containers as well as the main ones. An init container in
+	// ImagePullBackOff or CrashLoopBackOff leaves the Pod phase Pending with
+	// ContainerStatuses EMPTY and the failure only in InitContainerStatuses --
+	// the same blind spot Unschedulable had, and reachable on the engine Pods
+	// this repo ships: five benchmark scenarios give prefill and decode
+	// templates an init container that fetches weights.
+	for _, group := range [][]corev1.ContainerStatus{
+		p.Status.InitContainerStatuses, p.Status.ContainerStatuses,
+	} {
+		for _, cs := range group {
+			if cs.State.Waiting == nil {
+				continue
+			}
+			switch cs.State.Waiting.Reason {
+			case "ImagePullBackOff", "ErrImagePull", "CrashLoopBackOff",
+				"CreateContainerError", "CreateContainerConfigError", "InvalidImageName":
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// podReadyNow reports the Pod's Ready condition, which is what decides whether
+// anything routes to it -- the phase alone stays Running while probes fail.
+func podReadyNow(p *corev1.Pod) bool {
+	for _, c := range p.Status.Conditions {
+		if c.Type == corev1.PodReady {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
 }
 
 func resolveScaleTarget(

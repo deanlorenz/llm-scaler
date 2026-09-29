@@ -98,6 +98,28 @@ const (
 	// consumed by KEDA, never by WVA; named here only so it is not mistaken for a
 	// WVA key when reading a trigger.
 	ScalerAddressKey = "scalerAddress"
+
+	// ReplicaStartSecondsKey seeds how long one replica of this variant takes to
+	// become Ready. NOT READ YET -- see the note at the end of this comment.
+	//
+	// The demand floor projects the arriving queue forward over that time, so
+	// the figure decides how much backlog a scale-up is sized for. A 0.6B model
+	// and a GLM-5.2 differ by an order of magnitude -- 70 s against about 500 s
+	// with a cold JIT cache -- which is too wide a range for any built-in
+	// default to serve both.
+	//
+	// It is a SEED, not a setting: the first replica observed starting replaces
+	// it with a measurement, and wva_replica_start_seconds_estimate carries a
+	// source label saying which is in force.
+	//
+	// Nothing reads it yet, deliberately. The only path from here to the
+	// analyzer runs through the synthetic VariantAutoscaling that
+	// utils.VariantsFromRegistry builds, and that CR is being removed -- adding
+	// a spec field to it would be dead on arrival. The key is declared now
+	// because it is the operator-facing contract the proposal commits to, and it
+	// is wired when the KEDA-driven path replaces that hop. Until then the
+	// analyzer uses its own default, replaced by the first measurement.
+	ReplicaStartSecondsKey = "replicaStartSeconds"
 )
 
 // DefaultVariantCost matches the default the VariantAutoscaling type carries, so

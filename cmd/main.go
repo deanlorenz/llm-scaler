@@ -668,9 +668,8 @@ func main() {
 		// analyzer's demand floor needs it too, and gating it on the throughput
 		// analyzer made that floor structurally inoperable whenever throughput
 		// was disabled -- which is the default.
-		registration.RegisterArrivalRateQueries(sourceRegistry)
+		registration.RegisterAlwaysOnQueries(sourceRegistry)
 		if taRegistered {
-			registration.RegisterThroughputAnalyzerQueries(sourceRegistry)
 			if err := engine.RegisterAnalyzer(throughput.AnalyzerName, throughput.NewThroughputAnalyzer()); err != nil {
 				return err
 			}
