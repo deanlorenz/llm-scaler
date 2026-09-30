@@ -162,14 +162,18 @@ type ReplicaMetrics struct {
 	//
 	// This is the PREFILL side's latency, as AvgITL is decode's: a prefill
 	// replica computes the prompt, emits one token and hands the KV on, so on a
-	// disaggregated fleet TTFT is most of what it does. It is the regressand of
-	// the prefill capacity model, TTFT(T) = A·T + B over the prompt tokens
-	// resident in the replica, whose asymptote 1/A is the replica's token
-	// velocity (docs/proposals/prefill-ttft-model.md).
+	// disaggregated fleet TTFT is most of what it does.
 	//
-	// It INCLUDES queue wait, so it is not a capacity on its own: a TTFT that
-	// rises at constant work means the fleet is behind. That is why the model
-	// regresses it on resident tokens rather than reading it directly.
+	// IT IS A DIAGNOSTIC. Nothing in the decision path reads it, and that is a
+	// measured conclusion rather than an omission: it INCLUDES queue wait, so a
+	// TTFT that rises at constant work means the fleet is behind, not that a
+	// replica got slower. Fitting TTFT(T) = A·T + B to recover a capacity from
+	// it was built and then removed -- the intercept reached 82 seconds because
+	// queue wait landed in a term meant to be a fixed per-request cost, and the
+	// velocities swung 56,764 to 392,195 tok/s against a measured ~138,000.
+	// docs/proposals/prefill-ttft-model.md records that result. Prefill's
+	// capacity comes from PrefillComputedTokenRate below, which excludes queue
+	// wait by construction and needs no regression at all.
 	// Zero when metrics are unavailable.
 	AvgTTFT float64
 

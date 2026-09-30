@@ -409,7 +409,8 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 	}
 
 	// Add scheduler queue demand (requests queued upstream in llm-d flow control).
-	queueDemand := estimateSchedulerQueueDemand(input.SchedulerQueue, input.ReplicaMetrics, rolesByVariant, activeRoles)
+	queueDemand := estimateSchedulerQueueDemand(input.SchedulerQueue, input.ReplicaMetrics, rolesByVariant, activeRoles,
+		fleetHitRate)
 	totalDemand += queueDemand.total
 	if input.SchedulerQueue != nil {
 		logger.Info("scheduler-queue-demand",
@@ -1995,7 +1996,7 @@ type schedulerQueueDemand struct {
 //	outputTokens = queueSize * avgOutputTokens
 //
 // Role attribution:
-//   - Prefill: inputTokens (prompt KV must be computed and stored)
+//   - Prefill: inputTokens, discounted by PREFILL's own hit rate (see below)
 //   - Decode:  inputTokens + outputTokens (receives KV transfer + generates output)
 //   - Both:    inputTokens + outputTokens (handles full request lifecycle)
 //   - Model-level total: inputTokens + outputTokens (unchanged for backward compat)
@@ -2005,11 +2006,29 @@ type schedulerQueueDemand struct {
 // KV blocks. This does NOT apply to the local engine queue
 // (vllm:num_requests_waiting / sglang:num_queue_reqs) because those requests
 // have not yet had prefix cache lookup performed.
+//
+// prefillHitRate is the PREFILL role's own hit rate (fleetPrefixHitRate), and
+// the prefill role's charge is discounted by it rather than by the model-wide
+// average, BECAUSE THE DIVISOR IS. saturatedCompletionRate prices a prefill
+// replica as PrefillComputedTokenRate / ILeff, where ILeff carries exactly this
+// factor; the quotient is a replica count only if the dividend carries it too.
+// The model-wide average is a different figure over a different set -- every
+// replica with token activity, decode included, unweighted -- so on a P/D fleet
+// the two diverge with the role ratio. At one prefill replica reading 0.8 and
+// nine decode replicas reading 0.0 the average is 0.08: the charge would keep
+// 92% of the prompt while the divisor kept 20% of it, inflating mu fivefold
+// against the demand it is divided into and under-ordering prefill by the same
+// factor -- worse the larger decode grows, which is the fleet this attribution
+// exists for. Passing the one variable to both sides is what makes them cancel;
+// its VALUE does not have to be right for the quotient to be a replica count,
+// and when there is no prefill reading at all both sides fall back to 0
+// together and no discount is taken on either.
 func estimateSchedulerQueueDemand(
 	sq *domain.SchedulerQueueMetrics,
 	replicaMetrics []domain.ReplicaMetrics,
 	rolesByVariant map[string]string,
 	activeRoles map[string]bool,
+	prefillHitRate float64,
 ) schedulerQueueDemand {
 	if sq == nil || (sq.QueueSize == 0 && sq.QueueBytes == 0) {
 		return schedulerQueueDemand{}
@@ -2030,7 +2049,20 @@ func estimateSchedulerQueueDemand(
 	}
 
 	// Apply prefix cache hit rate reduction to input tokens only
+	inputTokensRaw := inputTokens
 	inputTokens *= (1 - avgHitRate)
+
+	// The same reduction at the PREFILL role's own hit rate, for the prefill
+	// charge alone. Clamped the way shape.New clamps the figure the divisor is
+	// built from, so the two cannot disagree about a reading out of range.
+	prefillDiscount := prefillHitRate
+	if math.IsNaN(prefillDiscount) || prefillDiscount < 0 {
+		prefillDiscount = 0
+	}
+	if prefillDiscount > 1 {
+		prefillDiscount = 1
+	}
+	prefillInputTokens := inputTokensRaw * (1 - prefillDiscount)
 
 	// Estimate output tokens (no cache reduction — output must be generated)
 	outputTokens := float64(sq.QueueSize) * avgOutput
@@ -2043,7 +2075,7 @@ func estimateSchedulerQueueDemand(
 		for role := range activeRoles {
 			switch role {
 			case domain.RolePrefill:
-				byRole[domain.RolePrefill] = inputTokens
+				byRole[domain.RolePrefill] = prefillInputTokens
 			case domain.RoleDecode:
 				byRole[domain.RoleDecode] = inputTokens + outputTokens
 			default: // domain.RoleBoth or unknown

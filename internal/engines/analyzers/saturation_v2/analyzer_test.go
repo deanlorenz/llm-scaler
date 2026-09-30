@@ -1146,7 +1146,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 				QueueBytes: 0, // use count-based estimation only
 			}
 
-			result := estimateSchedulerQueueDemand(sq, metrics, nil, activeRoles)
+			result := estimateSchedulerQueueDemand(sq, metrics, nil, activeRoles, 0)
 
 			// Input: max(0/4=0, 10*100=1000) = 1000 (no cache hit)
 			// Output: 10 * 50 = 500
@@ -1170,7 +1170,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 				QueueBytes: 0,
 			}
 
-			result := estimateSchedulerQueueDemand(sq, metrics, nil, activeRoles)
+			result := estimateSchedulerQueueDemand(sq, metrics, nil, activeRoles, 0)
 
 			Expect(result.total).To(Equal(1500.0))
 			Expect(result.byRole["both"]).To(Equal(1500.0))
@@ -1186,7 +1186,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 				QueueBytes: 0,
 			}
 
-			result := estimateSchedulerQueueDemand(sq, metrics, nil, nil)
+			result := estimateSchedulerQueueDemand(sq, metrics, nil, nil, 0)
 
 			Expect(result.total).To(Equal(1500.0))
 			Expect(result.byRole).To(BeEmpty())
@@ -1199,7 +1199,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 			}
 			activeRoles := map[string]bool{"prefill": true, "decode": true}
 
-			result := estimateSchedulerQueueDemand(nil, metrics, nil, activeRoles)
+			result := estimateSchedulerQueueDemand(nil, metrics, nil, activeRoles, 0)
 
 			Expect(result.total).To(Equal(0.0))
 			Expect(result.byRole).To(BeNil())
@@ -1221,7 +1221,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 				QueueBytes: 0,
 			}
 
-			result := estimateSchedulerQueueDemand(sq, metrics, nil, activeRoles)
+			result := estimateSchedulerQueueDemand(sq, metrics, nil, activeRoles, 0.5)
 
 			// Input: 10*100=1000, after cache: 1000*(1-0.5)=500
 			// Output: 10*50=500
@@ -1248,7 +1248,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 			activeRoles := map[string]bool{domain.RolePrefill: true, domain.RoleDecode: true}
 			sq := &domain.SchedulerQueueMetrics{QueueSize: 213}
 
-			result := estimateSchedulerQueueDemand(sq, metrics, roles, activeRoles)
+			result := estimateSchedulerQueueDemand(sq, metrics, roles, activeRoles, 0)
 
 			// Input: 213 × 6000 from either side; output: 213 × 1000, decode's
 			// figure alone. The old mean gave 213 × 500 = 106,500 here.
