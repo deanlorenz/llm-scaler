@@ -2000,7 +2000,11 @@ type schedulerQueueDemand struct {
 //   - Decode:  outputTokens when a prefill role exists, inputTokens +
 //     outputTokens otherwise (see "charging a queue to the role that serves it")
 //   - Both:    inputTokens + outputTokens (handles full request lifecycle)
-//   - Model-level total: inputTokens + outputTokens (unchanged for backward compat)
+//   - Model-level total: inputTokens + outputTokens, EXCEPT where a prefill
+//     role is active, in which case it is prefillInputTokens + outputTokens so
+//     that the per-role charges sum back to it. See the comment above the
+//     `total` assignment; "unchanged for backward compat" is what this used to
+//     say, and it is the premise the split disproved.
 //
 // The prefix cache hit rate reduces expected input token KV demand because
 // a fraction of prompt tokens will hit the prefix cache and reuse existing
@@ -2120,8 +2124,27 @@ func estimateSchedulerQueueDemand(
 	// So the total follows the charge, not the other way round. An aggregated
 	// fleet keeps the model-wide figure: there is one role, it is charged the
 	// whole request, and no split has happened to be consistent with.
+	//
+	// The condition is PREFILL ALONE, not prefill-and-decode. It was the pair
+	// at first, and that left the same divergence behind on a smaller fleet:
+	// with a prefill role active and decode absent from activeRoles -- decode
+	// scaled to zero, or simply carrying no VariantCapacity this cycle --
+	// outputTokens is 0 (generatesOutput excludes prefill replicas, so there is
+	// nothing to average), and the total fell back to the mean-discounted
+	// prompt while prefill was still charged the rate-weighted one. The two
+	// figures are then the SAME replicas averaged two different ways, which is
+	// the fault e3218ce3 exists to remove. Two prefill replicas reading 0.9 at
+	// 10 req/s and 0.1 at 1 req/s give a plain mean of 0.50 against a weighted
+	// 0.83: on a 100-request queue of 10,000-token prompts the total read
+	// 500,000 and prefill was charged 172,727, leaving 327,273 tokens -- 65% of
+	// it -- owned by no role.
+	//
+	// Keyed on prefill alone the identity is exact in every shape: with decode
+	// present the total is both charges, with decode absent outputTokens is 0
+	// and the total IS prefill's charge. Decode-only is untouched, because
+	// prefill not being active is what selects the model-wide figure.
 	total := inputTokens + outputTokens
-	if activeRoles[domain.RolePrefill] && activeRoles[domain.RoleDecode] {
+	if activeRoles[domain.RolePrefill] {
 		total = prefillInputTokens + outputTokens
 	}
 

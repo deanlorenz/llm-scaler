@@ -138,6 +138,54 @@ var _ = Describe("prefill's charge and prefill's divisor use one hit rate", func
 			"prefill's own 0.8 discounts more prompt than the fleet mean's 0.08")
 	})
 
+	It("keeps the identity when decode is absent from activeRoles", func() {
+		// The gap the pair-condition left behind. With decode missing --
+		// scaled to zero, or carrying no VariantCapacity this cycle --
+		// outputTokens is 0, so the total is the prompt alone and it MUST be
+		// prefill's prompt, not the model-wide one. Both are averages over the
+		// same replicas; one is request-rate weighted and the other is not.
+		//
+		// Heterogeneous on purpose: equal replicas make the plain mean and the
+		// weighted mean the same number, and the spec would pass either way.
+		ms := []domain.ReplicaMetrics{
+			{PodName: "p-0", VariantName: "p", Ready: true, TokensInUse: 1,
+				TotalKvCapacityTokens: 100_000, AvgInputTokens: avgInput, AvgOutputTokens: 1,
+				PrefixCacheHitRate: 0.9, RequestRate: 10},
+			{PodName: "p-1", VariantName: "p", Ready: true, TokensInUse: 1,
+				TotalKvCapacityTokens: 100_000, AvgInputTokens: avgInput, AvgOutputTokens: 1,
+				PrefixCacheHitRate: 0.1, RequestRate: 1},
+		}
+		roles := map[string]string{"p": domain.RolePrefill}
+		_, _, mean := computeModelWorkloadAverages(ms, roles)
+		weighted := fleetPrefixHitRate(ms, roles)
+		Expect(mean).To(BeNumerically("~", 0.50, 1e-9))
+		Expect(weighted).To(BeNumerically("~", 0.8273, 1e-4),
+			"the two averages really do diverge in this fixture")
+
+		got := estimateSchedulerQueueDemand(&domain.SchedulerQueueMetrics{QueueSize: queued},
+			ms, roles, map[string]bool{domain.RolePrefill: true}, weighted)
+
+		Expect(got.byRole[domain.RolePrefill]).To(BeNumerically("~", got.total, 1e-6),
+			"with no decode role the total IS prefill's charge")
+		// And it is the weighted figure, not the plain mean: 327,273 tokens of
+		// the 500,000 total were unowned when this read the mean.
+		Expect(got.total).To(BeNumerically("~", queued*avgInput*(1-weighted), 1e-6))
+	})
+
+	It("leaves a decode-only fleet on the model-wide figure", func() {
+		// The control for the condition being keyed on prefill: with no prefill
+		// role the split has not happened, decode carries the whole request,
+		// and the total must stay the model-wide inputTokens + outputTokens.
+		metrics, roles := fleet()
+		got := estimateSchedulerQueueDemand(&domain.SchedulerQueueMetrics{QueueSize: queued},
+			metrics, roles, map[string]bool{domain.RoleDecode: true},
+			fleetPrefixHitRate(metrics, roles))
+		_, _, mean := computeModelWorkloadAverages(metrics, roles)
+		want := queued*avgInput*(1-mean) + queued*avgOutput
+		Expect(got.total).To(BeNumerically("~", want, 1e-6))
+		Expect(got.byRole[domain.RoleDecode]).To(BeNumerically("~", got.total, 1e-6))
+	})
+
 	It("takes no discount on either side when prefill publishes no rate", func() {
 		// A fleet whose prefill replicas report nothing readable: both sides
 		// fall back to 0 together, so the quotient is still a replica count.
