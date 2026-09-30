@@ -483,12 +483,17 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 	// RoleDemand and TotalDemand keep moving together.
 	if decodeSaturated && roleDemand != nil {
 		scaleUp, scaleDown := satConfig.AnalyzerThresholds(domain.SaturationAnalyzerName)
-		if h, held := holdPrefillDemand(roleDemand, variantCapacities, scaleUp, scaleDown); held {
+		// The scheduler queue's share is exempt: those requests have been
+		// given to no pod and have had no first token, so prefill is what
+		// they are waiting for whatever decode is doing.
+		undispatched := queueDemand.byRole[domain.RolePrefill]
+		if h, held := holdPrefillDemand(roleDemand, variantCapacities, scaleUp, scaleDown, undispatched); held {
 			totalDemand += h.after - h.before
 			logger.Info("prefill-demand-held",
 				"modelID", input.ModelID, "namespace", input.Namespace,
 				"demandBefore", h.before, "demandHeld", h.after, "holdFloor", h.lo, "holdCap", h.hi,
-				"reason", "decode saturated: the KV prefill holds and the queue behind it are decode's backlog; prefill is neither ordered nor released on them")
+				"undispatched", undispatched,
+				"reason", "decode saturated: the KV prefill holds and the queue behind it are decode's backlog; prefill is neither ordered nor released on them, but the scheduler queue's share is not held -- no pod has started those")
 		}
 	}
 
@@ -1802,7 +1807,23 @@ type roleHold struct {
 // anticipated supply is never below supply and the band is never empty in
 // practice. The
 // variants' own demand and utilization are moved with the role figure.
-func holdPrefillDemand(roleDemand map[string]float64, variants []domain.VariantCapacity, scaleUp, scaleDown float64) (roleHold, bool) {
+// undispatched is the scheduler queue's share of prefill demand: requests the
+// gateway is holding that have been given to NO pod. It is the one part of
+// prefill's demand the hold must not clamp, and the distinction is physical.
+//
+// A request whose KV sits on a prefill replica awaiting transfer has already
+// been prefilled and has already produced its first token; what it waits for
+// is decode, and ordering prefill for it buys nothing. A request in the
+// scheduler's queue has been prefilled by nobody. Prefill capacity is exactly
+// what it is waiting for, whatever decode is doing, and until it gets some it
+// has no first token at all.
+//
+// Holding both together is what left prefill at one replica through a
+// 600-deep queue while decode sat at its ceiling: the clamp lands on
+// scaleUp x supply, which is the figure RC = D/scaleUp - anticipated turns
+// into exactly zero, so no amount of queued work could order a replica.
+// Measured on run PM: demand 550,077 clamped to 495,529, RC 0, for 19 cycles.
+func holdPrefillDemand(roleDemand map[string]float64, variants []domain.VariantCapacity, scaleUp, scaleDown, undispatched float64) (roleHold, bool) {
 	const role = domain.RolePrefill
 	before, ok := roleDemand[role]
 	if !ok || scaleUp <= 0 || scaleDown <= 0 {
@@ -1816,6 +1837,14 @@ func holdPrefillDemand(roleDemand map[string]float64, variants []domain.VariantC
 	h.after = min(before, h.hi)
 	if h.lo <= h.hi {
 		h.after = max(h.after, h.lo)
+	}
+	// Never below the undispatched share. The band exists to stop prefill
+	// being ordered or released on DECODE's backlog; work no pod has started
+	// is not that, and clamping it away is what made the queue unable to
+	// order anything. Bounded by `before` so this can only decline to hold
+	// demand that was already there -- it never invents any.
+	if undispatched > h.hi {
+		h.after = max(h.after, min(undispatched, before))
 	}
 	if h.after == before {
 		return h, false
