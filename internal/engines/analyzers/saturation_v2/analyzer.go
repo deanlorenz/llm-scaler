@@ -20,6 +20,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/floor"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/prefill"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/shape"
 )
 
@@ -93,6 +94,12 @@ type SaturationAnalyzer struct {
 	// fleet is serving NOW rather than waiting for it to saturate under it
 	// (mu_from_itl.go). Keyed like the throughput windows and swept with them.
 	itlWindows map[string]*itl.Window
+	// prefillWindows is the same idea for the prefill role: a rolling
+	// window of (backlog tokens, TTFT) readings per variant, from which
+	// TTFT(T) = A*T + B is fitted so a prefill replica can be priced
+	// from its token velocity 1/A without first being watched into
+	// saturation (mu_from_ttft.go). Keyed and swept like itlWindows.
+	prefillWindows map[string]*prefill.Window
 	// itlBaseline is the last B an OLS fit produced for each window key: the
 	// zero-contention decode step for THAT model on THAT accelerator. It is
 	// what the one-parameter fallback pins, so a fleet that has once been
@@ -139,6 +146,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		decodeSaturatedAt:      make(map[string]time.Time),
 		fleetShape:             make(map[string]*shapeMemo),
 		itlWindows:             make(map[string]*itl.Window),
+		prefillWindows:         make(map[string]*prefill.Window),
 		itlBaseline:            make(map[string]float64),
 		startSeconds:           make(map[string]float64),
 		startSeenPods:          make(map[string]time.Time),
@@ -187,6 +195,12 @@ func (a *SaturationAnalyzer) EvictStaleHistory(timeout time.Duration) int {
 	// at least that long. Without this the map keeps one window per variant
 	// that has EVER been seen, including deleted and renamed ones.
 	now := a.now()
+	for key, w := range a.prefillWindows {
+		w.Prune(now, prefill.DefaultObservationMaxAge)
+		if w.Len() == 0 {
+			delete(a.prefillWindows, key)
+		}
+	}
 	for key, w := range a.itlWindows {
 		w.Prune(now)
 		if w.Len() == 0 {
@@ -305,6 +319,7 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 	// shape arriving now instead of the one the fleet last saturated under
 	// (mu_from_itl.go).
 	itlModels := make(map[string]itl.Model, len(gpusByVariant))
+	prefillModels := make(map[string]prefill.Model, len(gpusByVariant))
 	for variant := range gpusByVariant {
 		// Decode only. ITL is the latency between GENERATED tokens, and
 		// deriveMu divides a token rate by an output length; prefill emits
@@ -325,6 +340,17 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 			accelByVariant[variant], gpusByVariant[variant]),
 			input.Namespace, variant, input.ReplicaMetrics, logger)
 
+		if canonicalRole(rolesByVariant[variant]) == domain.RolePrefill {
+			// Prefill's own line, over the same key. Its regressor is the
+			// backlog in prompt tokens, so it is fitted from the fleet's
+			// EFFECTIVE prompt length: a cached prefix is not prefill work.
+			prefillModels[variant] = a.notePrefill(
+				a.itlWindowKey(input.Namespace, input.ModelID, variant,
+					accelByVariant[variant], gpusByVariant[variant]),
+				input.ReplicaMetrics, variant,
+				shape.New(stableInput, stableOutput, fleetHitRate).ILeff,
+				a.now(), logger)
+		}
 		if canonicalRole(rolesByVariant[variant]) != domain.RoleDecode {
 			continue
 		}
@@ -370,9 +396,14 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 		// started pricing prefill from decode's physics with nothing to say
 		// so. Stated here instead, beside the call it governs.
 		var derived derivedMu
-		if canonicalRole(role) == domain.RoleDecode {
+		switch canonicalRole(role) {
+		case domain.RoleDecode:
 			derived = deriveMu(itlModel, engineParams, rm.TotalKvCapacityTokens,
 				fleetShape, pricingK(satConfig))
+		case domain.RolePrefill:
+			// The prefill line, converted from tokens/s to the req/s the
+			// floor divides by, at the effective prompt length.
+			derived = derivePrefillMu(prefillModels[rm.VariantName], fleetShape.ILeff)
 		}
 		a.noteLineMismatch(itlModel, engineParams, rm, role, fleetShape.KVreq, logger)
 		rc := a.computeReplicaCapacity(rm, satConfig, input.ModelID, input.Namespace, gpuCount,
