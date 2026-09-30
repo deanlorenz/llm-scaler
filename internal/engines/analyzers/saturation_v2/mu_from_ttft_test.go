@@ -1,9 +1,14 @@
 package saturation_v2
 
 import (
+	"time"
+
+	"github.com/go-logr/logr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/prefill"
 )
 
@@ -42,5 +47,59 @@ var _ = Describe("derivePrefillMu", func() {
 
 	It("declines an inverted fit, which would otherwise be a negative capacity", func() {
 		Expect(derivePrefillMu(prefill.Model{A: -1e-5, B: 0.05}, 30000).ok).To(BeFalse())
+	})
+})
+
+var _ = Describe("notePrefill while decode is saturated", func() {
+	// The lesson computeK2 already paid for, applied to the new window: with
+	// decode full, a prefill replica's resident KV is tokens held for a
+	// transfer decode cannot accept and its queue is requests decode will not
+	// admit. A (T, TTFT) pair taken then measures blocked admission, not the
+	// cost of computing another prompt token, and the window holds only 20
+	// points -- so a sustained episode could replace the whole fit basis.
+	newAnalyzer := func() *SaturationAnalyzer {
+		return NewSaturationAnalyzer(capacity.NewStore())
+	}
+	replica := func() domain.ReplicaMetrics {
+		return domain.ReplicaMetrics{
+			VariantName: "p", PodName: "p-1", Ready: true,
+			TokensInUse: 400000, QueueLength: 20, AvgTTFT: 12.0,
+		}
+	}
+
+	It("records nothing while decode is saturated", func() {
+		a := newAnalyzer()
+		for i := 0; i < 30; i++ {
+			a.notePrefill("k", []domain.ReplicaMetrics{replica()}, "p", 30000, 0,
+				true, time.Now(), logr.Discard())
+		}
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		Expect(a.prefillWindows["k"].Len()).To(Equal(0),
+			"decode-saturated readings must not enter the fit")
+	})
+
+	It("records once decode is no longer saturated", func() {
+		a := newAnalyzer()
+		a.notePrefill("k", []domain.ReplicaMetrics{replica()}, "p", 30000, 0,
+			false, time.Now(), logr.Discard())
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		Expect(a.prefillWindows["k"].Len()).To(Equal(1))
+	})
+
+	It("discounts resident tokens for the prefix cache, as it does the queue", func() {
+		// Half the prompt cached halves both halves of the backlog, so the
+		// regressor must come out at half the undiscounted figure. Asymmetry
+		// here flattens the slope and inflates the velocity, which under-orders.
+		a := newAnalyzer()
+		a.notePrefill("k", []domain.ReplicaMetrics{replica()}, "p", 15000, 0.5,
+			false, time.Now(), logr.Discard())
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		obs := a.prefillWindows["k"].Observations()
+		Expect(obs).To(HaveLen(1))
+		// 400000*(1-0.5) + 20*15000 = 200000 + 300000
+		Expect(obs[0].Tokens).To(BeNumerically("~", 500000, 1e-6))
 	})
 })

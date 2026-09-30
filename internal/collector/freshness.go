@@ -60,6 +60,7 @@ func trackMetricFreshness(
 	trackTimestamp(data.cacheConfigTimestamp)
 	trackTimestamp(data.avgITLTimestamp)
 	trackTimestamp(data.avgServiceTimeTimestamp)
+	trackTimestamp(data.avgTTFTTimestamp)
 }
 
 // worstFreshnessStatus returns the least-fresh status across data's *present*
@@ -86,6 +87,7 @@ func worstFreshnessStatus(data *podMetricData, collectedAt time.Time) (string, t
 		data.cacheConfigTimestamp,
 		data.avgITLTimestamp,
 		data.avgServiceTimeTimestamp,
+		data.avgTTFTTimestamp,
 	}
 
 	worst := "fresh"

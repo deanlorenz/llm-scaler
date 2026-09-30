@@ -349,6 +349,11 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 					accelByVariant[variant], gpusByVariant[variant]),
 				input.ReplicaMetrics, variant,
 				shape.New(stableInput, stableOutput, fleetHitRate).ILeff,
+				fleetHitRate,
+				// While decode is saturated a prefill replica's KV and queue
+				// are decode's backlog, which computeK2 already refuses to
+				// learn a k2 from. Nothing is learned here either.
+				decodeSaturated,
 				a.now(), logger)
 		}
 		if canonicalRole(rolesByVariant[variant]) != domain.RoleDecode {
