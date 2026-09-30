@@ -86,10 +86,36 @@ var _ = Describe("prefill's charge and prefill's divisor use one hit rate", func
 		Expect(atMean / got.byRole[domain.RolePrefill]).To(BeNumerically("~", 4.6, 0.01))
 	})
 
-	It("leaves the model total on the model-wide average", func() {
-		// The control. Prefill's hit rate reaches prefill's charge and nothing
-		// else: the total is the figure every other consumer already reads, and
-		// it stays on the model-wide mean.
+	It("keeps the roles summing to the total when the two hit rates diverge", func() {
+		// The invariant everything downstream rests on, asserted in the ONE
+		// fleet shape that can break it. The queue-charge specs next door all
+		// run at a hit rate of zero, where prefill's discount and the model-wide
+		// mean are the same number by construction and the sum holds for free.
+		//
+		// Here they are 0.8 and 0.08. With the total left on the mean it read
+		// 1,020,000 against roles summing to 300,000: a 720,000-token shortfall
+		// that no role was responsible for serving, which is what deleting
+		// heldInModelTotal() assumed could not happen.
+		metrics, roles := fleet()
+		activeRoles := map[string]bool{domain.RolePrefill: true, domain.RoleDecode: true}
+		got := estimateSchedulerQueueDemand(&domain.SchedulerQueueMetrics{QueueSize: queued},
+			metrics, roles, activeRoles, fleetPrefixHitRate(metrics, roles))
+
+		_, _, mean := computeModelWorkloadAverages(metrics, roles)
+		Expect(mean).To(BeNumerically("~", 0.08, 1e-9))
+		Expect(fleetPrefixHitRate(metrics, roles)).To(BeNumerically("~", prefillHit, 1e-9),
+			"the two discounts really do diverge in this fixture")
+
+		Expect(got.byRole[domain.RolePrefill]+got.byRole[domain.RoleDecode]).
+			To(BeNumerically("~", got.total, 1e-6),
+				"nothing in the model total is unowned by a role")
+	})
+
+	It("takes the model total off the mean once the roles are split", func() {
+		// The total follows the CHARGE on a split fleet, not the model-wide
+		// mean, which is what makes the sum above hold. Stated as the two
+		// figures rather than as their sum, so a change that moved both
+		// consistently in the wrong direction still fails here.
 		//
 		// Decode's charge is the queue's OUTPUT tokens and carries no hit rate
 		// at all -- the discount never applied to output, and the prompt half
@@ -101,10 +127,15 @@ var _ = Describe("prefill's charge and prefill's divisor use one hit rate", func
 		got := estimateSchedulerQueueDemand(sq, metrics, roles, activeRoles,
 			fleetPrefixHitRate(metrics, roles))
 
-		wantIn := queued * avgInput * (1 - mean)
 		wantOut := queued * avgOutput
+		wantIn := queued * avgInput * (1 - prefillHit)
 		Expect(got.total).To(BeNumerically("~", wantIn+wantOut, 1e-6))
 		Expect(got.byRole[domain.RoleDecode]).To(BeNumerically("~", wantOut, 1e-6))
+
+		// And explicitly NOT the mean-discounted figure it used to be.
+		atMean := queued*avgInput*(1-mean) + wantOut
+		Expect(got.total).To(BeNumerically("<", atMean),
+			"prefill's own 0.8 discounts more prompt than the fleet mean's 0.08")
 	})
 
 	It("takes no discount on either side when prefill publishes no rate", func() {

@@ -2102,7 +2102,28 @@ func estimateSchedulerQueueDemand(
 	// Estimate output tokens (no cache reduction — output must be generated)
 	outputTokens := float64(sq.QueueSize) * avgOutput
 
+	// On a DISAGGREGATED fleet the model total is what the two roles are
+	// charged between them, and it has to be, because the roles are charged
+	// disjoint slices of it and everything downstream now relies on their
+	// summing back to it -- see the note in throughput_floor.go where
+	// heldInModelTotal() used to stand.
+	//
+	// The two prompt figures are not the same number. The total's prompt is
+	// discounted at the model-wide mean hit rate and prefill's charge at
+	// PREFILL's own, which the fleet that motivated this diverges sharply on:
+	// one prefill replica reading 0.8 beside nine decode replicas reading 0.0
+	// gives a mean of 0.08. Left on the mean the total would carry 920,000
+	// tokens of prompt where prefill is charged 200,000 -- a 720,000-token
+	// shortfall between the total and the sum of its roles, owned by nothing,
+	// which is the exact fault the split was made to remove.
+	//
+	// So the total follows the charge, not the other way round. An aggregated
+	// fleet keeps the model-wide figure: there is one role, it is charged the
+	// whole request, and no split has happened to be consistent with.
 	total := inputTokens + outputTokens
+	if activeRoles[domain.RolePrefill] && activeRoles[domain.RoleDecode] {
+		total = prefillInputTokens + outputTokens
+	}
 
 	// Build per-role attribution
 	byRole := make(map[string]float64)
