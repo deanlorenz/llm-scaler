@@ -1997,7 +1997,8 @@ type schedulerQueueDemand struct {
 //
 // Role attribution:
 //   - Prefill: inputTokens, discounted by PREFILL's own hit rate (see below)
-//   - Decode:  inputTokens + outputTokens (receives KV transfer + generates output)
+//   - Decode:  outputTokens when a prefill role exists, inputTokens +
+//     outputTokens otherwise (see "charging a queue to the role that serves it")
 //   - Both:    inputTokens + outputTokens (handles full request lifecycle)
 //   - Model-level total: inputTokens + outputTokens (unchanged for backward compat)
 //
@@ -2023,6 +2024,40 @@ type schedulerQueueDemand struct {
 // its VALUE does not have to be right for the quotient to be a replica count,
 // and when there is no prefill reading at all both sides fall back to 0
 // together and no discount is taken on either.
+//
+// # Charging a queue to the role that serves it
+//
+// A queued request is ONE backlog, and it used to be charged in full to both
+// roles: prefill got its input tokens and decode got the same input tokens plus
+// the output. That is right in two cases and wrong in a third.
+//
+// It is right with NO DISAGGREGATION. A RoleBoth pod computes the prompt and
+// generates from it, so the whole request is its work and the charge is the
+// work. This branch is unchanged for that case, and for an unknown role.
+//
+// It is also right AT A STEADY SHAPE, even disaggregated -- not because the
+// figure is accurate but because it is consistently inaccurate. mu is learned
+// at the same shape the demand is charged at, so a fixed over-count divides out
+// of demand/mu and the replica count survives it, exactly as the hit rate above
+// does.
+//
+// It breaks on a DISAGGREGATED fleet when the shape turns input-heavy, because
+// then the over-count stops being fixed. At 1000 in / 6000 out the charge is
+// dominated by output, which is decode's real work. After the trace flips to
+// 30000 in / 250 out the input term is 120x the output and swamps it, so decode
+// is sized by prompts it does not compute and cannot hold until prefill has
+// handed them over. Measured on that trace: decode's demand was 96.65% gateway
+// queue charge against 2.74% resident KV, and at the peak cycle it was charged
+// 1.32e8 tokens while holding 3.63e5 -- a factor of 366. It sat at eight
+// replicas whose KV cache was 2% full, with one request waiting, beside a
+// prefill side queueing 249.
+//
+// So the two roles are separated: prefill is charged the tokens it must
+// compute, decode the tokens it must generate. Decode's share of the prompt is
+// not dropped, it is DEFERRED to where it is real -- the resident KV that
+// aggregateRoleDemand already counts from the engines, which rises as prefill
+// actually delivers. The queue is charged once, to the role the queue is
+// waiting on.
 func estimateSchedulerQueueDemand(
 	sq *domain.SchedulerQueueMetrics,
 	replicaMetrics []domain.ReplicaMetrics,
@@ -2077,7 +2112,14 @@ func estimateSchedulerQueueDemand(
 			case domain.RolePrefill:
 				byRole[domain.RolePrefill] = prefillInputTokens
 			case domain.RoleDecode:
-				byRole[domain.RoleDecode] = inputTokens + outputTokens
+				// Disaggregated only when a prefill role is actually active:
+				// a decode-labelled variant running alone still serves whole
+				// requests, so it keeps the full charge.
+				if activeRoles[domain.RolePrefill] {
+					byRole[domain.RoleDecode] = outputTokens
+				} else {
+					byRole[domain.RoleDecode] = inputTokens + outputTokens
+				}
 			default: // domain.RoleBoth or unknown
 				byRole[role] = total
 			}

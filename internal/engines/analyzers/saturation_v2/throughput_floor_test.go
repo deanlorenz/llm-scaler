@@ -621,10 +621,18 @@ var _ = Describe("the throughput floor, through Analyze", func() {
 			"the total moved with decode, and prefill's dropped share was never in it")
 
 		// Negative control: with no mu on record the queues are still charged
-		// as residency, and the same cycle is priced at more than four
-		// replicas. A saturated replica records its mu in the cycle its queue
-		// appears, so the control is one whose completion rate is not
-		// reported (no rate, no reading) rather than a fresh analyzer.
+		// as residency, and the same cycle is priced at MORE replicas than the
+		// backlog pricing above. A saturated replica records its mu in the
+		// cycle its queue appears, so the control is one whose completion rate
+		// is not reported (no rate, no reading) rather than a fresh analyzer.
+		//
+		// The margin is 2.81 against 2.28, and it used to be 4.1 against 2.28.
+		// It narrowed because decode is no longer charged the scheduler
+		// queue's PROMPT: 200 queued requests x 6000 prompt tokens is 1.2M
+		// tokens, about 1.3 replicas at this capacity, and 4.1 - 1.3 = 2.8.
+		// The control still separates the two pricings, by a smaller and
+		// honestly smaller margin -- residency over-prices by 23% here rather
+		// than by 80%.
 		fresh := NewSaturationAnalyzer(capacity.NewStore())
 		ctl := makeAnalyzerInput(
 			[]domain.ReplicaMetrics{decode("decode-0", 1_158_912, 180, 0), prefill("prefill-0", 66_183)},
@@ -633,7 +641,9 @@ var _ = Describe("the throughput floor, through Analyze", func() {
 		ctl.SchedulerQueue = in.SchedulerQueue
 		bare, err := fresh.Analyze(ctx, ctl)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(bare.RoleDemand[domain.RoleDecode] / decodeP).To(BeNumerically(">", 4))
+		Expect(bare.RoleDemand[domain.RoleDecode] / decodeP).To(BeNumerically("~", 2.81, 0.01))
+		Expect(bare.RoleDemand[domain.RoleDecode]).To(BeNumerically(">", result.RoleDemand[domain.RoleDecode]),
+			"residency still over-prices the same cycle; that is what the floor is for")
 	})
 
 	It("keeps the resident KV when the backlog term is smaller than it", func() {

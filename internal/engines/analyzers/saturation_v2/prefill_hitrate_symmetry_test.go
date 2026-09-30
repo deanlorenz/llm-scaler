@@ -86,10 +86,14 @@ var _ = Describe("prefill's charge and prefill's divisor use one hit rate", func
 		Expect(atMean / got.byRole[domain.RolePrefill]).To(BeNumerically("~", 4.6, 0.01))
 	})
 
-	It("leaves decode and the model total on the model-wide average", func() {
-		// The control. Decode is not priced by prefill's cache: it receives the
-		// KV rather than computing it, and the total is the figure every other
-		// consumer already reads.
+	It("leaves the model total on the model-wide average", func() {
+		// The control. Prefill's hit rate reaches prefill's charge and nothing
+		// else: the total is the figure every other consumer already reads, and
+		// it stays on the model-wide mean.
+		//
+		// Decode's charge is the queue's OUTPUT tokens and carries no hit rate
+		// at all -- the discount never applied to output, and the prompt half
+		// is prefill's charge now (see decode_queue_charge_test.go).
 		metrics, roles := fleet()
 		_, _, mean := computeModelWorkloadAverages(metrics, roles)
 		sq := &domain.SchedulerQueueMetrics{QueueSize: queued}
@@ -99,8 +103,8 @@ var _ = Describe("prefill's charge and prefill's divisor use one hit rate", func
 
 		wantIn := queued * avgInput * (1 - mean)
 		wantOut := queued * avgOutput
-		Expect(got.byRole[domain.RoleDecode]).To(BeNumerically("~", wantIn+wantOut, 1e-6))
 		Expect(got.total).To(BeNumerically("~", wantIn+wantOut, 1e-6))
+		Expect(got.byRole[domain.RoleDecode]).To(BeNumerically("~", wantOut, 1e-6))
 	})
 
 	It("takes no discount on either side when prefill publishes no rate", func() {
