@@ -138,6 +138,13 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 	// instances into one replica.
 	pod.AvgServiceTime = weightedByRequestRate(group, func(m domain.ReplicaMetrics) float64 { return m.AvgServiceTime })
 	pod.AvgTTFT = weightedByRequestRate(group, func(m domain.ReplicaMetrics) float64 { return m.AvgTTFT })
+	// SUMMED, not weighted: the engines of one pod each compute part of
+	// the prefill work and their token rates add. Averaging them would
+	// halve a two-engine replica's capacity.
+	pod.PrefillComputedTokenRate = 0
+	for _, m := range group {
+		pod.PrefillComputedTokenRate += m.PrefillComputedTokenRate
+	}
 	pod.PrefixCacheHitRate = weightedByRequestRate(group, func(m domain.ReplicaMetrics) float64 { return m.PrefixCacheHitRate })
 
 	pod.Metadata = mergeMetadata(group)

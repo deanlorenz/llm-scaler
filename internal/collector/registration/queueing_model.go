@@ -43,6 +43,27 @@ const (
 	// behind, which is the property that makes end-to-end latency unusable for
 	// sizing (see QueryAvgServiceTime above).
 	QueryAvgTTFT = "avg_ttft"
+
+	// QueryPrefillComputedTokenRate is the query name for the rate at which a
+	// replica computes prefill KV tokens (tokens/second).
+	// Source: vllm:request_prefill_kv_computed_tokens_sum.
+	//
+	// This is prefill's capacity in prefill's own unit. shape_change.go's
+	// saturatedCompletionRate already names it as the figure prefill should
+	// be priced by -- "prefill's own counterpart is prompt tokens per second
+	// ... which the collector does not gather today" -- and this gathers it.
+	// The computed-token counter is better than the prompt-token one that
+	// comment names, because it already excludes a cached prefix.
+	//
+	// A SUM across the pod's engines, not a max: the two halves of a
+	// multi-engine replica each compute part of the work, and their rates add.
+	// The latency queries above take a max because a latency does not.
+	//
+	// vLLM only. SGLang publishes no per-stage prefill counter
+	// (sgl-project/sglang issue #14303), so there is deliberately no SGLang
+	// registration below and an SGLang prefill variant keeps the request-rate
+	// reading it has today.
+	QueryPrefillComputedTokenRate = "prefill_computed_token_rate"
 )
 
 // RegisterQueueingModelQueries registers queries used by the queueing model analyzer.
@@ -85,6 +106,17 @@ func RegisterQueueingModelQueries(sourceRegistry *source.SourceRegistry) {
 		Params:   []string{source.ParamNamespace},
 		Description: "Average time to first token per instance (seconds), " +
 			"the prefill capacity model's regressand",
+	})
+
+	// Prefill computed-token rate per instance (tokens/second), 1m window.
+	// Prefill's capacity in the unit it is bounded by; see the constant.
+	registry.MustRegister(source.QueryTemplate{
+		Name:     QueryPrefillComputedTokenRate,
+		Type:     source.QueryTypePromQL,
+		Template: `sum by (model_name, instance, pod) (rate(vllm:request_prefill_kv_computed_tokens_sum{namespace="{{.namespace}}"}[1m]))`,
+		Params:   []string{source.ParamNamespace},
+		Description: "Prefill KV tokens computed per second per instance, " +
+			"excluding cached prefix; prefill's capacity unit",
 	})
 
 	registerSGLangQueueingModelQueries(registry)

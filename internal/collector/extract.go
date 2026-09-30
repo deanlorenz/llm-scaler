@@ -37,12 +37,14 @@ type podMetricData struct {
 	hasCacheConfig              bool
 	cacheConfigTimestamp        time.Time
 	// Queueing model fields
-	avgITL                  float64
-	avgITLTimestamp         time.Time
-	avgTTFT                 float64
-	avgTTFTTimestamp        time.Time
-	avgServiceTime          float64
-	avgServiceTimeTimestamp time.Time
+	avgITL                            float64
+	avgITLTimestamp                   time.Time
+	avgTTFT                           float64
+	avgTTFTTimestamp                  time.Time
+	prefillComputedTokenRate          float64
+	prefillComputedTokenRateTimestamp time.Time
+	avgServiceTime                    float64
+	avgServiceTimeTimestamp           time.Time
 	// Throughput analyzer fields
 	generationTokenRate float64
 	kvUsageInstant      float64
@@ -347,6 +349,30 @@ func (c *ReplicaMetricsCollector) extractPodMetrics(
 						"instanceKey", instanceKey,
 						"pod", podName,
 						"avgTTFTSeconds", value.Value)
+				}
+			}
+		}
+	}
+
+	// Process prefill computed-token rate (tokens/second). Prefill's
+	// capacity unit: a request rate under overload is the rate the fleet
+	// is being served at, and reads the same at one replica and at ten.
+	if result := results[registration.QueryPrefillComputedTokenRate]; result != nil {
+		if !result.HasError() {
+			for _, value := range result.Values {
+				instanceKey, podName, vaName := c.buildInstanceKey(ctx, namespace, value.Labels)
+				if instanceKey == "" {
+					continue
+				}
+				if podData[instanceKey] == nil {
+					podData[instanceKey] = &podMetricData{
+						podName: podName,
+						vaName:  vaName,
+					}
+				}
+				if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) && value.Value > 0 {
+					podData[instanceKey].prefillComputedTokenRate = value.Value
+					podData[instanceKey].prefillComputedTokenRateTimestamp = value.Timestamp
 				}
 			}
 		}

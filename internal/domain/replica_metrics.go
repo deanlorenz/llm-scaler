@@ -173,6 +173,24 @@ type ReplicaMetrics struct {
 	// Zero when metrics are unavailable.
 	AvgTTFT float64
 
+	// PrefillComputedTokenRate is the rate at which this replica computes
+	// prefill KV tokens, in tokens/second, excluding tokens the prefix cache
+	// already held. Derived from
+	// rate(vllm:request_prefill_kv_computed_tokens_sum[1m]).
+	//
+	// This is PREFILL's capacity in the unit prefill is bounded by, and the
+	// figure shape_change.go's saturatedCompletionRate was waiting for. A
+	// request rate cannot serve: under overload it is the rate the fleet is
+	// being SERVED at, which reads the same at one replica and at ten
+	// (measured: 4.75, 4.62 and 4.50 req/s at 1, 2 and 10 replicas while the
+	// token rate went 138,875 to 933,750), and a rate learned at one prompt
+	// length says nothing about another.
+	//
+	// Zero on SGLang, which publishes no per-stage prefill counter
+	// (sgl-project/sglang issue #14303); those variants keep the request-rate
+	// reading.
+	PrefillComputedTokenRate float64
+
 	// --- Fields for Throughput Analyzer ---
 
 	// GenerationTokenRate is the observed decode token generation rate on this replica (tokens/sec).
