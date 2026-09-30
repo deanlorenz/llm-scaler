@@ -137,6 +137,7 @@ func mergePodInstances(group []domain.ReplicaMetrics) domain.ReplicaMetrics {
 	// that served more requests should count for more when merging a pod's
 	// instances into one replica.
 	pod.AvgServiceTime = weightedByRequestRate(group, func(m domain.ReplicaMetrics) float64 { return m.AvgServiceTime })
+	pod.AvgTTFT = weightedByRequestRate(group, func(m domain.ReplicaMetrics) float64 { return m.AvgTTFT })
 	pod.PrefixCacheHitRate = weightedByRequestRate(group, func(m domain.ReplicaMetrics) float64 { return m.PrefixCacheHitRate })
 
 	pod.Metadata = mergeMetadata(group)

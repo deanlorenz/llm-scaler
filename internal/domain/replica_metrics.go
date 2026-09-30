@@ -156,6 +156,23 @@ type ReplicaMetrics struct {
 	// Zero when metrics are unavailable.
 	AvgITL float64
 
+	// AvgTTFT is the average time to first token on this replica in seconds.
+	// Derived from rate(vllm:time_to_first_token_seconds_sum[1m]) / rate(..._count[1m]),
+	// and the SGLang histogram of the same name.
+	//
+	// This is the PREFILL side's latency, as AvgITL is decode's: a prefill
+	// replica computes the prompt, emits one token and hands the KV on, so on a
+	// disaggregated fleet TTFT is most of what it does. It is the regressand of
+	// the prefill capacity model, TTFT(T) = A·T + B over the prompt tokens
+	// resident in the replica, whose asymptote 1/A is the replica's token
+	// velocity (docs/proposals/prefill-ttft-model.md).
+	//
+	// It INCLUDES queue wait, so it is not a capacity on its own: a TTFT that
+	// rises at constant work means the fleet is behind. That is why the model
+	// regresses it on resident tokens rather than reading it directly.
+	// Zero when metrics are unavailable.
+	AvgTTFT float64
+
 	// --- Fields for Throughput Analyzer ---
 
 	// GenerationTokenRate is the observed decode token generation rate on this replica (tokens/sec).

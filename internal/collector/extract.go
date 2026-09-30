@@ -39,6 +39,8 @@ type podMetricData struct {
 	// Queueing model fields
 	avgITL                  float64
 	avgITLTimestamp         time.Time
+	avgTTFT                 float64
+	avgTTFTTimestamp        time.Time
 	avgServiceTime          float64
 	avgServiceTimeTimestamp time.Time
 	// Throughput analyzer fields
@@ -316,6 +318,35 @@ func (c *ReplicaMetricsCollector) extractPodMetrics(
 						"instanceKey", instanceKey,
 						"pod", podName,
 						"avgITLSeconds", value.Value)
+				}
+			}
+		}
+	}
+
+	// Process average TTFT results (seconds). Prefill's latency, and the
+	// prefill capacity model's regressand.
+	if result := results[registration.QueryAvgTTFT]; result != nil {
+		if !result.HasError() {
+			for _, value := range result.Values {
+				instanceKey, podName, vaName := c.buildInstanceKey(ctx, namespace, value.Labels)
+				if instanceKey == "" {
+					continue
+				}
+
+				if podData[instanceKey] == nil {
+					podData[instanceKey] = &podMetricData{
+						podName: podName,
+						vaName:  vaName,
+					}
+				}
+				if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) && value.Value > 0 {
+					podData[instanceKey].avgTTFT = value.Value
+					podData[instanceKey].avgTTFTTimestamp = value.Timestamp
+
+					logger.V(logging.DEBUG).Info("Avg TTFT metric",
+						"instanceKey", instanceKey,
+						"pod", podName,
+						"avgTTFTSeconds", value.Value)
 				}
 			}
 		}
