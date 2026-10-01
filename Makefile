@@ -1451,6 +1451,7 @@ benchmark-scenarios: ## Copy our scenario specs into the llm-d-benchmark clone (
 			if grep -q '__WARM_REPLICAS__' "$$dest"; then \
 				echo "ERROR: unsubstituted token left in $$dest"; exit 1; \
 			fi; \
+			python3 hack/benchmark/render-engine-resources.py "$$dest" --model "$(BENCHMARK_MODEL_ID)" || exit 1; \
 			echo "  installed scenario $$(basename $$f) (WARM_REPLICAS=$(WARM_REPLICAS), gpuMemoryUtilization=$(GPU_MEM_UTIL))"; \
 			n=$$((n+1)); \
 		done; \
