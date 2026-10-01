@@ -55,6 +55,12 @@ Read the review first; the implementation design says what was built.
 - **[Scale-from-zero: the missing signal](scale-from-zero-missing-signal.md)** —
   why a parked model needs a push, and where it comes from.
 - **[Priority scoping](priority-scoping.md)** — parked. Read before redesigning.
+- **[A release the swap can survive](managed-keda-behavior.md)** — measured: a
+  ten-replica release takes 420 s under a 300 s stabilization window, so a role
+  waiting on GPUs another role has been told to free waits that long. Proposes
+  shortening that one field, on the shrinking target only, through the
+  `wvaOwnership` opt-in. Also records what the same run does **not** show, and
+  the plateau that was wrongly blamed on it.
 
 - **[WVA as a KEDA external scaler: the argument](wva-external-scaler-proposal.md)**
   — the shorter framing of the same design: compute the target, let KEDA
