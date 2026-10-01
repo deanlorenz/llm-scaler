@@ -117,25 +117,44 @@ does not**: its resolved configuration carries `DefaultRequestTTL` and no
 empty-pool budget at all. On v0.9.0 one number serves both regimes, and the
 only safe choice is the longer one.
 
+### Which router version you need
+
+The two-budget split is the difference between a scale-to-zero deployment that
+works and one that sheds its own cold starts, so it decides the version. Taken
+from the shipped binaries rather than release notes:
+
+| flow-control feature | v0.9.0 | v0.11.0 |
+|---|---|---|
+| `noEndpointRequestTTL` — the scale-from-zero waiting room | **absent** | present |
+| `enableEviction` — in-flight eviction | absent | present |
+| `priority-holdback-policy`, `soft-reflective-ceiling-policy` | absent | present |
+| `sheddable-eviction-filter` | absent | present |
+| `slo-deadline`, `edf-ordering`, round-robin and program-aware fairness | present | present |
+
+**On v0.9.0 there is no value of `defaultRequestTTL` that serves a
+scale-to-zero deployment.** Short enough for a time-to-first-token objective
+kills cold starts; long enough for a cold start abandons the objective
+whenever the pool is merely busy. Upgrade, or accept one of those.
+
 ### What to set
 
 ```yaml
-# EndpointPickerConfig
+# EndpointPickerConfig  (v0.11.0 or newer)
 flowControl:
-  # v0.9.0: this covers BOTH regimes. It must exceed pod start time
-  # (measured 60-64 s here) or scale-from-zero requests die waiting.
-  defaultRequestTTL: 120s
-
-  # On a router that has it, split them instead:
-  #   defaultRequestTTL:    30s     # saturated: your TTFT objective
-  #   noEndpointRequestTTL: 120s    # empty pool: pod start + margin
-
+  defaultRequestTTL: 30s        # saturated: your TTFT objective
+  noEndpointRequestTTL: 180s    # empty pool: pod start + margin.
+                                # Size this from YOUR measured startup --
+                                # 60-64 s on this stack, so 180 s is ~3x.
   priorityBands:
     - priority: 0
-      maxRequests: 2000     # a COUNT bound, so behaviour stops depending
-                            # on prompt length
+      maxRequests: 2000         # a COUNT bound, so behaviour stops depending
+                                # on prompt length
       maxBytes: 1Gi
 ```
+
+On v0.9.0, with no split available, the only safe single value is one that
+clears pod start — `defaultRequestTTL: 180s` — and the TTFT objective goes
+unserved while the pool is busy.
 
 Two things that are easy to get wrong:
 
@@ -238,6 +257,32 @@ Treat the weights as something to measure on your own workload with repeated
 runs, not as a setting with a known-good value. The defensible statement today
 is narrower: *if* your prefill replicas are unevenly loaded, the scorer weights
 are where to look, and the spread is measurable before you change anything.
+
+## Which plugins to add — usually none
+
+The router ships ordering policies, fairness policies, usage-limit policies and
+a saturation detector, and most of them are driven by something the *client*
+sends. Adding one the traffic cannot drive changes nothing and makes the
+configuration harder to read. Check the input before the plugin:
+
+| plugin | needs | inert without it |
+|---|---|---|
+| `round-robin-fairness-policy`, `program-aware-fairness` | `x-llm-d-inference-fairness-id` per request | every request lands in one `default-flow` and there is nothing to rotate between |
+| `slo-deadline-ordering-policy` | a TTFT SLO header, in milliseconds | all requests get a far-future deadline and sort identically |
+| sheddable-band tuning (`defaultNegativePriorityBand`) | an `InferenceObjective` with `priority < 0` | unclassified traffic defaults to priority 0, which is **non-sheddable**, so the negative band is never used |
+| `priority-holdback-policy` | several priorities *and* `--allow-experimental-plugins` | nothing to hold back |
+
+A benchmark harness sending plain OpenAI completions drives none of these, and
+nor does most single-tenant production traffic. The flow-control block above is
+the configuration that matters; the plugin surface is for when you have
+genuinely distinct classes of traffic to separate, and then the first step is
+creating the `InferenceObjective`s that classify them.
+
+One that is worth knowing about even unconfigured: sheddability is derived
+purely from `InferenceObjective.spec.priority < 0`. There is no `sheddable:
+true` field, and traffic with no matching objective is non-sheddable. So a
+cluster with no `InferenceObjective`s at all cannot shed anything by priority,
+whatever the bands say.
 
 ## Changing router configuration
 
