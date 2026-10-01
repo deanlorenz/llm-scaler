@@ -38,7 +38,8 @@ kubectl -n <ns> logs deploy/<model>-router-epp -c epp \
   | grep -o 'FlowControlConfig:{.*}' | head -1
 ```
 
-A stock llm-d router answers with, in substance:
+An unconfigured `llm-d-router-endpoint-picker:v0.9.0` answers with, in
+substance:
 
 ```
 Controller:{DefaultRequestTTL:0s ExpiryCleanupInterval:1s ...}
@@ -48,11 +49,17 @@ Registry:{MaxBytes:0 MaxRequests:0
 
 Read that as three facts:
 
-| setting | stock value | meaning |
+| setting | value here | meaning |
 |---|---|---|
 | `DefaultRequestTTL` | `0s` | **no expiry.** A queued request waits until the client gives up. |
-| `MaxRequests` (band) | `0` | **unbounded by count.** |
+| `MaxRequests` (band) | `0` | no count bound applied on this version. |
 | `MaxBytes` (band) | `1000000000` | 1 GB — the only bound that actually applies. |
+
+**Check your own version rather than copying this table.** These are the values
+*this* router resolved with no `flowControl` block configured; defaults differ
+between router versions, and a newer one defaults `defaultRequestTTL` to 60s
+and gives each band a count bound. The command above prints what yours
+actually resolved, which is the only answer that is true for your deployment.
 
 The practical consequence is that the queue is bounded by *bytes*, and prompt
 length decides how many requests that is. Measured on a 30,000-token prompt
@@ -84,31 +91,81 @@ Two consequences for the scaling manager:
    been queued for three minutes is already a failure; scaling for it buys
    nothing and costs GPUs.
 
-### What to set
+### A TTL has to cover two different kinds of waiting
 
-Set a TTL that matches your service objective, so the router sheds what it can
-no longer serve in time instead of holding it and reporting it as demand:
+There are two reasons a request cannot dispatch, and they want opposite
+budgets:
+
+| regime | meaning | what waiting buys | right budget |
+|---|---|---|---|
+| **saturated** | endpoints exist, all busy | a slot frees in seconds | short — keep TTFT inside the objective |
+| **empty pool** | no endpoints at all | a pod starts: image pull + weight load | long — minutes |
+
+**This matters more here than on most deployments, because the scaling manager
+scales to zero.** Every scale-from-zero is the empty-pool regime, and the wait
+is a pod start. Measured on this stack, pod startup is **60-64 seconds**. A TTL
+chosen for a time-to-first-token objective — 30 seconds, say — sheds every
+scale-from-zero request about half a minute before the pod it was waiting for
+becomes ready, and the autoscaler looks like it failed to scale when it was
+the router that gave up.
+
+Newer routers split the two (`defaultRequestTTL` for the saturated regime,
+`noEndpointRequestTTL` for the empty pool, each charged from the later of
+enqueue time and the last regime change, so a regime change restarts the
+budget). **The router deployed here, `llm-d-router-endpoint-picker:v0.9.0`,
+does not**: its resolved configuration carries `DefaultRequestTTL` and no
+empty-pool budget at all. On v0.9.0 one number serves both regimes, and the
+only safe choice is the longer one.
+
+### What to set
 
 ```yaml
 # EndpointPickerConfig
 flowControl:
-  controller:
-    defaultRequestTTL: 30s     # your TTFT objective, not longer
-  registry:
-    priorityBands:
-      - priority: 0
-        maxRequests: 2000      # a count bound, so behaviour does not depend
-                               # on prompt length
-        maxBytes: 1000000000
+  # v0.9.0: this covers BOTH regimes. It must exceed pod start time
+  # (measured 60-64 s here) or scale-from-zero requests die waiting.
+  defaultRequestTTL: 120s
+
+  # On a router that has it, split them instead:
+  #   defaultRequestTTL:    30s     # saturated: your TTFT objective
+  #   noEndpointRequestTTL: 120s    # empty pool: pod start + margin
+
+  priorityBands:
+    - priority: 0
+      maxRequests: 2000     # a COUNT bound, so behaviour stops depending
+                            # on prompt length
+      maxBytes: 1Gi
 ```
 
-A count bound matters more than it looks: with only a byte bound, the queue
-depth at which the router starts rejecting moves by an order of magnitude when
-your prompt length does, and nothing in the configuration says so.
+Two things that are easy to get wrong:
 
-Watch `inference_extension_flow_control_pool_saturation` alongside queue size.
-On the run above it peaked at 28.8 while the queue was 4,772 deep — saturation
-is reported, the queue simply was not bounded to act on it.
+**A TTL only acts if the caller waits at least as long.** Pair it with a
+gateway request timeout no shorter than the TTL. Otherwise the client
+disconnects first and the request is evicted as a cancelled context rather than
+shed by policy — which is exactly what the 246 evictions above were, every one
+of them `client disconnected: request context cancelled`. The router never got
+to apply a budget because it had none, and the caller supplied the only bound.
+
+**Set the count bound explicitly.** With only a byte bound, the depth at which
+the router starts rejecting moves by an order of magnitude when prompt length
+does, and nothing in the configuration says so. Note that on some router
+versions a per-band `0` means "unset, take the default" rather than "no limit",
+so leaving it at `0` does not reliably mean unbounded — read the resolved
+configuration from the log rather than assuming either reading.
+
+### The prerequisite that fails closed
+
+Dispatch depends on **fresh** model-server metrics. The default saturation
+detector scores an endpoint whose metrics are older than its staleness
+threshold as *fully saturated* — it fails closed, not open. If the router loses
+its scrape path to every endpoint (a NetworkPolicy, a port change, TLS, a
+starved refresh loop), saturation pins high, dispatch stalls, and queued
+requests leave at their TTL — or, with no TTL, never.
+
+Keep the metrics refresh interval comfortably inside the staleness threshold.
+Watch `inference_extension_flow_control_pool_saturation` alongside queue size:
+on the run above it peaked at 28.8 while the queue was 4,772 deep, so
+saturation was being reported — the queue simply was not bounded to act on it.
 
 ## Scheduling profiles decide whether ordered replicas get used
 
