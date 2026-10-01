@@ -491,24 +491,12 @@ scenario:
 
         # Resource configuration
         resources:
-          # Limits are the burst ceiling; requests are what the scheduler
-          # reserves. They were both "8", which reserves the ceiling forever:
-          # measured steady usage is 1.08 CPU and 4.7Gi, so nineteen pods
-          # reserved 152 CPU to use about twenty and the fleet could not
-          # schedule itself. Dropping the REQUEST to 2/8Gi took usable headroom
-          # from ~14 pods to 68 on four nodes.
-          #
-          # The limit stays at 8/16Gi on purpose. cgroup cpu.stat showed the
-          # engines do occasionally reach the ceiling (nr_throttled 12-13 over
-          # hours of running), so lowering it would trade a scheduling problem
-          # for a throughput one. llm-d-benchmark's own default for this
-          # container is likewise requests 4 / limits 16.
           limits:
             memory: 16Gi
             cpu: "8"
           requests:
-            memory: 8Gi
-            cpu: "2"
+            memory: 16Gi
+            cpu: "8"
 
         # -----------------------------------------------------------------------
         # Extra Environment Variables
