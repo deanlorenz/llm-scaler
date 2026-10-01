@@ -589,17 +589,25 @@ scenario:
             # A scale-down window has to be shorter than the workload's own
             # timescale or the fleet never acts on a fall in demand.
             #
-            # At 300 s this was measured holding decode at ten replicas for
-            # most of a 600 s phase while its demand had already dropped to
-            # 303,206 tokens -- one replica's worth. The demand figure was
-            # right; the HPA takes the MAX recommendation over the window, so
-            # one high reading pins the fleet, and the 50%/120s policy then
-            # halves it in steps. Ten replicas took ~540 s to drain.
+            # Measured on a P/D run at 300 s with a Percent 100 / 120 s
+            # policy -- so the window, not the policy, was the limiter. Once
+            # the controller published a lower target (tgt=3 against curr=10),
+            # the release took 420 s: 5 at +180 s, 2 at +300 s, 1 at +420 s.
+            # The HPA takes the MAX recommendation over the window, so one high
+            # reading pins the fleet for its whole length, and on a 600 s phase
+            # that is a release the phase outlives.
             #
-            # 60 s with 50%/60s drains ten in ~240 s and still requires a dip
-            # to persist a full minute before anything shrinks. Raise it again
-            # for batch workloads where transient idle is normal and a phase
-            # lasts much longer than ten minutes.
+            # NOT what held decode at ten before that. For the preceding 346 s
+            # it sat at curr=10 tgt=10 atMax by the controller's own decision,
+            # with the throughput floor re-pricing a 303,206-token demand as
+            # 1,338,789. That is a demand-floor question and shortening this
+            # window does not touch it -- see
+            # docs/proposals/managed-keda-behavior.md section 2.
+            #
+            # 60 s with 50%/60s still requires a dip to persist a full minute
+            # before anything shrinks. Raise it again for batch workloads where
+            # transient idle is normal and a phase lasts much longer than ten
+            # minutes.
             stabilizationWindowSeconds: 60
             policies:
               - type: Percent
