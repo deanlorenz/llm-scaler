@@ -244,8 +244,10 @@ func bucketOf(key string) string {
 // role the model can price.
 //
 // On a disaggregated fleet each role is floored on its own: the scheduler's
-// arrival rate is every request, and every request passes through both
-// roles, so each must keep up with all of it. The model-level total moves
+// arrival RATE is every request, and every request passes through both roles,
+// so each must keep up with all of it. The queue STANDING at the scheduler is
+// a different quantity and is charged to prefill alone -- see the backlog build
+// below. The model-level total moves
 // with them, by what each role CONTRIBUTES to it -- the role's own figure for
 // every role but prefill, whose scheduler-queue share the total never carried
 // (contributionToTotal). On a non-disaggregated fleet there is no RoleDemand
@@ -254,7 +256,8 @@ func bucketOf(key string) string {
 // eppByRole is the residency charge estimateSchedulerQueueDemand put on the
 // scheduler queue per role, and eppQueued the requests in it. For a role with
 // a mu, both that charge and the engines' own queue charge (LocalQueueDemand)
-// come back out and the queued requests go into the floor as a backlog. For
+// come back out; the engines' own queued requests go into the floor as that
+// role's backlog, and the scheduler's standing queue goes in as prefill's. For
 // prefill without a mu, the scheduler-queue charge is dropped (file header),
 // and that is logged at the per-replica verbosity when it changes the figure:
 // it is the normal state of a P/D fleet, so an INFO line every cycle would be
@@ -299,8 +302,38 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 		backlog[role] += float64(rc.QueueLength)
 		residency[role] += float64(rc.LocalQueueDemand)
 	}
+	// The residency charge is per role -- estimateSchedulerQueueDemand already
+	// splits the queue's tokens by the role that serves them.
+	//
+	// The REQUEST COUNT is not, and must not be. A standing queue is a backlog
+	// for the role that serves it FIRST, which on a disaggregated fleet is
+	// prefill: its prompts reach decode only once prefill has prefilled them,
+	// at prefill's throughput, so decode can neither drain them within
+	// drainSeconds nor be sized as though it could. The ongoing arrival is
+	// already charged to every role -- lambda is model-wide and floor.Estimate
+	// applies it to each -- so adding the standing queue on top of it for a
+	// role that cannot receive it yet is a double count, not a safety margin.
+	//
+	// Measured on a P/D run over all 24 loaded cycles: decode's own engines
+	// held 1-8 queued requests while this line charged it 1294-3476, the gap
+	// identical on both roles. At the worst cycle decode's ask was 15.0
+	// replicas, 37 of whose 46 req/s came from a 2224-request queue it held 6
+	// of; its own queue gives 2.98. Across the run the measured demand implied
+	// a mean of 2.18 replicas against the floored figure's 8.36.
+	//
+	// Nothing is left unowned by this. Prefill's measured demand already
+	// carries the queue's tokens through aggregation -- on that run it implied
+	// 481 replicas before the floor cut it to 2 -- so the queue is if anything
+	// over-visible on prefill, and the floor's job there is the cap.
+	queueOwner := domain.RolePrefill
+	if _, split := eppByRole[domain.RolePrefill]; !split {
+		// No prefill role: one role serves the queue end to end and takes it.
+		queueOwner = ""
+	}
 	for role, tokens := range eppByRole {
-		backlog[role] += eppQueued
+		if queueOwner == "" || role == queueOwner {
+			backlog[role] += eppQueued
+		}
 		residency[role] += tokens
 	}
 
