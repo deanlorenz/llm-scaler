@@ -147,6 +147,23 @@ scenario:
       images:
         benchmark:
           tag: v0.7.8
+        # PIN THE ROUTER, do not inherit it. Without this the endpoint picker
+        # comes from llm-d-benchmark's own anchor, so a benchmark run here
+        # silently changes router version whenever that moves -- and the
+        # router decides both how requests are spread across replicas and how
+        # the queue the scaling manager reads as demand is bounded. A
+        # benchmark whose router version is not recorded cannot be reproduced.
+        #
+        # v0.11.0 is NOT a drop-in: it does not register
+        # `disagg-headers-handler`, which this stack's P/D config declares, and
+        # the EPP exits at startup with "plugin type 'disagg-headers-handler'
+        # is not registered". The upgrade is wanted -- v0.11.0 is the first
+        # version with `noEndpointRequestTTL`, the separate queue-wait budget
+        # for the empty-pool regime that every scale-from-zero needs -- but it
+        # requires migrating the disaggregation plugin names first. See
+        # docs/reference/router-configuration.md.
+        routerEndpointPicker:
+          tag: v0.9.0
     # =========================================================================
     # KUSTOMIZE DEPLOY METHOD   (scope: the ENTIRE stack)
     # -------------------------------------------------------------------------

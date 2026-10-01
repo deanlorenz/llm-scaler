@@ -136,6 +136,40 @@ scale-to-zero deployment.** Short enough for a time-to-first-token objective
 kills cold starts; long enough for a cold start abandons the objective
 whenever the pool is merely busy. Upgrade, or accept one of those.
 
+#### The upgrade is not a drop-in
+
+Attempted on a cluster and rolled back. **v0.11.0 does not register
+`disagg-headers-handler`**, which a P/D `EndpointPickerConfig` declares, and the
+router exits during startup:
+
+```
+Failed to parse configuration
+  error: configuration validation failed:
+         plugin type 'disagg-headers-handler' is not registered
+```
+
+The pod reaches `CrashLoopBackOff` — the Envoy container stays ready, so the
+Pod reads `1/2` rather than failing outright. Comparing the two binaries, that
+one plugin is the whole difference: `always-disagg-pd-decider`,
+`disagg-profile-handler`, `prefill-filter`, `decode-filter` and every scorer
+are present in both; the headers handler was refactored
+(`func(string) *HeadersHandler` became `func(disagg.StageOrder) *Handler`).
+
+Worth noting for anyone attempting it: **the `flowControl` block itself is
+fine**. v0.11.0 parsed it and resolved exactly what was asked for —
+`DefaultRequestTTL: 30s, NoEndpointRequestTTL: 3m0s, PriorityBands: [{Priority:
+0, MaxBytes: 1073741824, MaxRequests: 2000}]`. The blocker is only the
+disaggregation plugin naming, so the migration is: find the v0.11.0 name for
+the headers handler (or confirm it is now injected by the framework), change
+that one line, and verify a request still traverses prefill *and* decode before
+trusting it — a wrong answer here degrades P/D routing silently rather than
+crashing.
+
+Until that is done, **pin the router version** rather than inheriting it. An
+unpinned router changes how requests are spread and how the demand queue is
+bounded, between one benchmark and the next, with nothing in the run output
+saying so.
+
 ### What to set
 
 ```yaml
