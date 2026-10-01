@@ -154,16 +154,17 @@ scenario:
         # the queue the scaling manager reads as demand is bounded. A
         # benchmark whose router version is not recorded cannot be reproduced.
         #
-        # v0.11.0 is NOT a drop-in: it does not register
-        # `disagg-headers-handler`, which this stack's P/D config declares, and
-        # the EPP exits at startup with "plugin type 'disagg-headers-handler'
-        # is not registered". The upgrade is wanted -- v0.11.0 is the first
-        # version with `noEndpointRequestTTL`, the separate queue-wait budget
-        # for the empty-pool regime that every scale-from-zero needs -- but it
-        # requires migrating the disaggregation plugin names first. See
-        # docs/reference/router-configuration.md.
+        # v0.11.0 is the first version carrying `noEndpointRequestTTL`, the
+        # separate empty-pool queue-wait budget that every scale-from-zero
+        # waits in, which matters here because this scenario is what exercises
+        # scale-to-zero.
+        #
+        # This scenario is single-role and declares no P/D EndpointPickerConfig
+        # of its own, so the disaggregation plugin migration v0.11.0 required
+        # does not apply to it -- see pd-disaggregation.yaml for that, and
+        # docs/reference/router-configuration.md for the migration itself.
         routerEndpointPicker:
-          tag: v0.9.0
+          tag: v0.11.0
     # =========================================================================
     # KUSTOMIZE DEPLOY METHOD   (scope: the ENTIRE stack)
     # -------------------------------------------------------------------------

@@ -70,7 +70,7 @@ trace at 12 req/s against a fleet that could not keep up:
 | queue depth, peak | **4,772 requests** |
 | queue bytes, peak | **814 MB — 81% of the 1 GB band cap** |
 | mean time a request spent queued | **181 s** |
-| requests ending in `client disconnected: request evicted from queue` | 246 |
+| requests evicted, all as `client disconnected: request evicted from queue: request context cancelled` | 246 |
 
 At ~170 KB per queued request the byte cap is reached at roughly 6,000
 requests, so on this workload *bytes* bind first and request count never does.
@@ -109,13 +109,13 @@ scale-from-zero request about half a minute before the pod it was waiting for
 becomes ready, and the autoscaler looks like it failed to scale when it was
 the router that gave up.
 
-Newer routers split the two (`defaultRequestTTL` for the saturated regime,
+v0.11.0 and newer split the two (`defaultRequestTTL` for the saturated regime,
 `noEndpointRequestTTL` for the empty pool, each charged from the later of
 enqueue time and the last regime change, so a regime change restarts the
-budget). **The router deployed here, `llm-d-router-endpoint-picker:v0.9.0`,
-does not**: its resolved configuration carries `DefaultRequestTTL` and no
-empty-pool budget at all. On v0.9.0 one number serves both regimes, and the
-only safe choice is the longer one.
+budget). **v0.9.0 does not**: its resolved configuration carries
+`DefaultRequestTTL` and no empty-pool budget at all, so one number serves both
+regimes and the only safe choice is the longer one. That is why the scenarios
+in this repo pin v0.11.0.
 
 ### Which router version you need
 
@@ -136,39 +136,87 @@ scale-to-zero deployment.** Short enough for a time-to-first-token objective
 kills cold starts; long enough for a cold start abandons the objective
 whenever the pool is merely busy. Upgrade, or accept one of those.
 
-#### The upgrade is not a drop-in
+#### Migrating to v0.11.0: three changes
 
-Attempted on a cluster and rolled back. **v0.11.0 does not register
-`disagg-headers-handler`**, which a P/D `EndpointPickerConfig` declares, and the
-router exits during startup:
+A P/D config does not start on v0.11.0 unmodified. Each of these is a startup
+failure, found by deploying and reading the error, and none of them is in a
+release note:
+
+**1. `disagg-headers-handler` is gone.**
 
 ```
-Failed to parse configuration
-  error: configuration validation failed:
-         plugin type 'disagg-headers-handler' is not registered
+configuration validation failed: plugin type 'disagg-headers-handler' is not registered
 ```
 
-The pod reaches `CrashLoopBackOff` — the Envoy container stays ready, so the
-Pod reads `1/2` rather than failing outright. Comparing the two binaries, that
-one plugin is the whole difference: `always-disagg-pd-decider`,
-`disagg-profile-handler`, `prefill-filter`, `decode-filter` and every scorer
-are present in both; the headers handler was refactored
-(`func(string) *HeadersHandler` became `func(disagg.StageOrder) *Handler`).
+Upstream `runner.go` registers only `disagg-profile-handler` — now
+`disagg.HandlerFactory`, via `RegisterWithPluginDependencies` — and the three
+PD deciders. The two v0.9.0 types `disagg.HeadersHandler` and
+`disagg.PdProfileHandler` collapsed into one `disagg.Handler` taking a
+`StageOrder`. So the handler is **absorbed, not renamed**: delete the line,
+do not look for a replacement. (`header-profile-handler` exists in v0.11.0 and
+is *not* it — that is an unrelated Alpha plugin that picks a profile from a
+header.)
 
-Worth noting for anyone attempting it: **the `flowControl` block itself is
-fine**. v0.11.0 parsed it and resolved exactly what was asked for —
-`DefaultRequestTTL: 30s, NoEndpointRequestTTL: 3m0s, PriorityBands: [{Priority:
-0, MaxBytes: 1073741824, MaxRequests: 2000}]`. The blocker is only the
-disaggregation plugin naming, so the migration is: find the v0.11.0 name for
-the headers handler (or confirm it is now injected by the framework), change
-that one line, and verify a request still traverses prefill *and* decode before
-trusting it — a wrong answer here degrades P/D routing silently rather than
-crashing.
+**2. `deciderPluginName` was removed.**
 
-Until that is done, **pin the router version** rather than inheriting it. An
-unpinned router changes how requests are spread and how the demand queue is
-bounded, between one benchmark and the next, with nothing in the run output
-saying so.
+```
+failed to parse parameters of the disagg-profile-handler
+  json: unknown field "deciderPluginName"
+```
+
+Use `deciders.prefill`. v0.9.0 had been warning about this at every startup:
+*"Deprecated parameter 'deciderPluginName', use 'deciders.prefill' instead"* —
+worth grepping your current router's log for deprecation warnings before any
+upgrade, since they are the migration notes.
+
+```yaml
+- type: disagg-profile-handler
+  parameters:
+    deciders:
+      prefill: always-disagg-pd-decider
+```
+
+**3. The metrics data source has to be declared.** This one does not crash, and
+is the dangerous one.
+
+v0.9.0's framework injected a working `metrics-data-source`; v0.11.0's
+auto-created producer does not reach the engines. With no engine metrics every
+endpoint reads stale, and the utilization detector scores a stale endpoint as
+**fully saturated** — it fails closed. The router starts, reports healthy, and
+then a single request against an idle fleet takes 19-30 s or sheds at the TTL
+with a 429. Declare it explicitly:
+
+```yaml
+- type: metrics-data-source
+  parameters:
+    scheme: "http"
+    path: "/metrics"
+    insecureSkipVerify: true
+- type: core-metrics-extractor
+```
+
+After those three, the `flowControl` block parses and resolves as written:
+`DefaultRequestTTL: 30s, NoEndpointRequestTTL: 3m0s, PriorityBands:
+[{Priority: 0, MaxBytes: 1073741824, MaxRequests: 2000}]`.
+
+**Verify the P/D split afterwards, not just that it starts.** A wrong answer in
+the disaggregation plugins does not crash — it quietly routes everything to one
+role, and a benchmark still produces plausible numbers. Drive a dozen
+completions and require *both* roles' `vllm:request_success_total` to move:
+
+```bash
+# before and after driving traffic, per role
+kubectl -n <ns> exec <pod> -c vllm -- \
+  sh -c 'curl -s localhost:$VLLM_INFERENCE_PORT/metrics | grep ^vllm:request_success_total'
+```
+
+Measured here after the migration: completions in 27-120 ms (v0.9.0 was
+44-113 ms), and 12 requests incremented both roles by exactly 12.
+
+And **pin the router version** rather than inheriting it from a benchmark
+harness's anchor. An unpinned router changes how requests are spread and how
+the demand queue is bounded between one run and the next, with nothing in the
+output saying so.
 
 ### What to set
 
@@ -196,7 +244,8 @@ Two things that are easy to get wrong:
 gateway request timeout no shorter than the TTL. Otherwise the client
 disconnects first and the request is evicted as a cancelled context rather than
 shed by policy — which is exactly what the 246 evictions above were, every one
-of them `client disconnected: request context cancelled`. The router never got
+of them the same message as above, ending `request context cancelled`. The
+router never got
 to apply a budget because it had none, and the caller supplied the only bound.
 
 **Set the count bound explicitly.** With only a byte bound, the depth at which

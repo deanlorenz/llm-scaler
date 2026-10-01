@@ -105,17 +105,37 @@ scenario:
         # the router decides how requests are spread across replicas and how
         # the queue the scaling manager reads as demand is bounded.
         #
-        # v0.11.0 is NOT a drop-in for this file: it does not register
-        # `disagg-headers-handler`, which the pd-config below declares, and the
-        # EPP exits at startup with "plugin type 'disagg-headers-handler' is
-        # not registered" (verified on a cluster: CrashLoopBackOff, 5 restarts,
-        # rolled back). The upgrade is still wanted -- v0.11.0 is the first
-        # version carrying `noEndpointRequestTTL`, the separate empty-pool
-        # queue-wait budget that scale-from-zero needs, and the flowControl
-        # block parses correctly there -- but the disaggregation plugin names
-        # have to be migrated first. See docs/reference/router-configuration.md.
+        # v0.11.0 because it is the first version carrying
+        # `noEndpointRequestTTL`, the separate empty-pool queue-wait budget
+        # every scale-from-zero waits in. Before it, one budget served both
+        # regimes and no value worked: short enough for a time-to-first-token
+        # objective killed cold starts, long enough for a cold start abandoned
+        # the objective whenever the pool was merely busy.
+        #
+        # THE PD-CONFIG BELOW WAS MIGRATED FOR IT, in three steps, each one a
+        # startup failure found by deploying and reading the error:
+        #
+        #   1. `disagg-headers-handler` is gone. v0.11.0 registers only
+        #      disagg-profile-handler (now disagg.HandlerFactory) and the three
+        #      deciders, so the handler is absorbed rather than renamed and the
+        #      line is simply removed.
+        #   2. `deciderPluginName` was removed; it is `deciders.prefill` now.
+        #      v0.9.0 had warned about exactly this at every startup.
+        #   3. `metrics-data-source` has to be DECLARED. v0.9.0's framework
+        #      injected a working one; v0.11.0's auto-created producer does not
+        #      reach the engines, every endpoint then reads stale, and a stale
+        #      endpoint is scored FULLY SATURATED -- the detector fails closed.
+        #      The symptom is not a crash: a single request against an idle
+        #      fleet took 19-30 s or shed at the TTL with 429.
+        #
+        # Verified on a cluster after the migration: completions in 27-120 ms
+        # (v0.9.0 was 44-113 ms), and 12 requests incremented BOTH roles'
+        # counters by 12, so disaggregation is intact. Check that last part
+        # after any change here -- a broken P/D split does not crash, it
+        # quietly routes everything to one role and the benchmark still looks
+        # plausible. See docs/reference/router-configuration.md.
         routerEndpointPicker:
-          tag: v0.9.0
+          tag: v0.11.0
 
       vllmCommon:
         # rc enables UCX's RDMA transport (RoCE GPUDirect on this cluster --
@@ -260,17 +280,34 @@ scenario:
               featureGates:
               - flowControl
               plugins:
-              - type: disagg-headers-handler
               - type: always-disagg-pd-decider
               - type: disagg-profile-handler
                 parameters:
-                  deciderPluginName: always-disagg-pd-decider
+                  deciders:
+                    prefill: always-disagg-pd-decider
               - type: prefill-filter
               - type: decode-filter
               - type: prefix-cache-scorer
               - type: queue-scorer
               - type: kv-cache-utilization-scorer
               - type: active-request-scorer
+              - type: metrics-data-source
+                parameters:
+                  scheme: "http"
+                  path: "/metrics"
+                  insecureSkipVerify: true
+              - type: core-metrics-extractor
+              flowControl:
+                # Saturated regime: endpoints exist and are busy.
+                defaultRequestTTL: 30s
+                # Empty-pool regime: every scale-from-zero waits here, and the wait
+                # is a pod start -- measured 60-64 s, so this is ~3x it. The field
+                # does not exist before v0.11.0; that is why the pin moved.
+                noEndpointRequestTTL: 180s
+                priorityBands:
+                  - priority: 0
+                    maxRequests: 2000
+                    maxBytes: 1Gi
               schedulingProfiles:
               - name: prefill
                 plugins:
