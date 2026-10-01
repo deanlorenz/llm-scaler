@@ -1,0 +1,231 @@
+# Router configuration
+
+What an operator sets on the llm-d inference router (the Endpoint Picker, EPP)
+so that the signals the scaling manager reads mean what it assumes they mean.
+
+The scaling manager does not configure the router and does not route anything.
+It *reads* the router, and two of the router's settings decide what it sees:
+
+- **flow control** bounds the gateway queue, and the scaling manager reads that
+  queue as demand;
+- **scheduling profiles** decide which replica each request goes to, and so
+  whether replicas the scaling manager orders are actually used.
+
+Neither is wrong by default. Both have defaults that suit a short-prompt
+workload and behave differently under long prompts, and neither announces that
+it is the thing limiting you.
+
+## Flow control bounds the demand signal
+
+`internal/collector/registration/saturation.go` and `throughput_analyzer.go`
+both read
+
+```
+llm_d_epp_flow_control_queue_size or inference_extension_flow_control_queue_size
+```
+
+as the model's queued demand. Requests sitting in that queue have reached no
+engine yet; they are what `estimateSchedulerQueueDemand` charges to the roles,
+and on a disaggregated fleet they are most of what sizes prefill. **However the
+router is configured to bound that queue is the ceiling on the demand the
+scaling manager can see.**
+
+Ask the router what it resolved, rather than reading the ConfigMap — defaults
+are filled in at load and the ConfigMap does not show them:
+
+```bash
+kubectl -n <ns> logs deploy/<model>-router-epp -c epp \
+  | grep -o 'FlowControlConfig:{.*}' | head -1
+```
+
+A stock llm-d router answers with, in substance:
+
+```
+Controller:{DefaultRequestTTL:0s ExpiryCleanupInterval:1s ...}
+Registry:{MaxBytes:0 MaxRequests:0
+          PriorityBands:[{Priority:0 Queue:ListQueue MaxBytes:1000000000 MaxRequests:0}]}
+```
+
+Read that as three facts:
+
+| setting | stock value | meaning |
+|---|---|---|
+| `DefaultRequestTTL` | `0s` | **no expiry.** A queued request waits until the client gives up. |
+| `MaxRequests` (band) | `0` | **unbounded by count.** |
+| `MaxBytes` (band) | `1000000000` | 1 GB — the only bound that actually applies. |
+
+The practical consequence is that the queue is bounded by *bytes*, and prompt
+length decides how many requests that is. Measured on a 30,000-token prompt
+trace at 12 req/s against a fleet that could not keep up:
+
+| | observed |
+|---|---|
+| queue depth, peak | **4,772 requests** |
+| queue bytes, peak | **814 MB — 81% of the 1 GB band cap** |
+| mean time a request spent queued | **181 s** |
+| requests ending in `client disconnected: request evicted from queue` | 246 |
+
+At ~170 KB per queued request the byte cap is reached at roughly 6,000
+requests, so on this workload *bytes* bind first and request count never does.
+On a 500-token prompt the same cap is tens of thousands of requests, and the
+queue is effectively unbounded. The same configuration therefore behaves
+completely differently depending on prompt length, which is the part worth
+knowing before an incident rather than during one.
+
+Two consequences for the scaling manager:
+
+1. **An unbounded queue is an unbounded demand signal.** The scaling manager
+   will keep ordering replicas for work that is queued, including work whose
+   client has already timed out. The 246 evictions above were all
+   `client disconnected` — not the router shedding by policy, because with
+   `DefaultRequestTTL: 0s` it never does.
+2. **A request queued for 181 seconds is not demand you can serve.** If your
+   service objective is a 30-second time-to-first-token, a request that has
+   been queued for three minutes is already a failure; scaling for it buys
+   nothing and costs GPUs.
+
+### What to set
+
+Set a TTL that matches your service objective, so the router sheds what it can
+no longer serve in time instead of holding it and reporting it as demand:
+
+```yaml
+# EndpointPickerConfig
+flowControl:
+  controller:
+    defaultRequestTTL: 30s     # your TTFT objective, not longer
+  registry:
+    priorityBands:
+      - priority: 0
+        maxRequests: 2000      # a count bound, so behaviour does not depend
+                               # on prompt length
+        maxBytes: 1000000000
+```
+
+A count bound matters more than it looks: with only a byte bound, the queue
+depth at which the router starts rejecting moves by an order of magnitude when
+your prompt length does, and nothing in the configuration says so.
+
+Watch `inference_extension_flow_control_pool_saturation` alongside queue size.
+On the run above it peaked at 28.8 while the queue was 4,772 deep — saturation
+is reported, the queue simply was not bounded to act on it.
+
+## Scheduling profiles decide whether ordered replicas get used
+
+A P/D router carries one profile per role. The stock prefill profile is:
+
+```yaml
+- name: prefill
+  plugins:
+    - pluginRef: prefill-filter
+    - pluginRef: prefix-cache-scorer
+      weight: 3
+    - pluginRef: queue-scorer
+      weight: 2
+    - pluginRef: kv-cache-utilization-scorer
+      weight: 2
+```
+
+Scores are normalised to `[0,1]` and weighted-summed, so **the largest weight
+wins ties it should not**. At `prefix-cache-scorer: 3` against
+`queue-scorer: 2`, a prefix hit contributes up to 3 while the entire spread
+between an idle replica and a saturated one contributes at most 2: a replica
+that has seen the prefix attracts the request regardless of what it is already
+holding.
+
+Measured on the same trace, prefill side, at 8-10 ready replicas:
+
+- the busiest replica held **65-100% of the waiting queue** at the median,
+  where even sharing would be ~15%
+- fewer than 40% of ready replicas had any queued request at all
+- work per replica spread from 34% of the total down to 3%
+
+The scaling manager ordered ten prefill replicas, roughly four times the
+capacity the offered load required, and the queue still ran past 1,300. **When
+a fleet is scaled out and latency does not improve, measure the spread before
+scaling further** — routing can bound latency in a way no replica count
+reaches.
+
+### What to check first
+
+Whether the affinity you are paying for exists at all. If the engines run
+without prefix caching, the prefix scorer is steering toward KV that was never
+retained:
+
+```bash
+# on an engine pod: is prefix caching even on?
+kubectl -n <ns> get deploy <model>-prefill -o json \
+  | jq -r '.spec.template.spec.containers[]|select(.name=="vllm")|.args|join(" ")' \
+  | tr ' ' '\n' | grep -i prefix
+
+# and is it being used?  0.0 everywhere means it is not
+kubectl -n <ns> exec <engine-pod> -- \
+  curl -s localhost:8000/metrics | grep '^vllm:prefix_cache_queries_total'
+```
+
+On a stack started with `--no-enable-prefix-caching`, those counters read `0.0`
+for the life of the run on every replica, and the highest-weighted signal on
+the prefill path is optimising for a cache that does not exist.
+
+### What is NOT established
+
+Swapping the two weights (`queue-scorer: 3`, `prefix-cache-scorer: 2`) was
+measured on this workload and **did not improve prefill latency**: phase-2
+time-to-first-token went from 54 s to 80 s and the busiest replica's queue
+share went from 65% to 100%. That single run is not evidence the swap is
+harmful either — two runs with the weights *unchanged* scored 100% and 65% on
+the same measure, so the run-to-run spread is wider than the effect being
+looked for.
+
+Treat the weights as something to measure on your own workload with repeated
+runs, not as a setting with a known-good value. The defensible statement today
+is narrower: *if* your prefill replicas are unevenly loaded, the scorer weights
+are where to look, and the spread is measurable before you change anything.
+
+## Changing router configuration
+
+**The router reads its configuration once, at startup.** It is passed
+`--config-file /config/<name>.yaml` and there is no reload or watch. The
+`/config` volume is mounted without `subPath`, so an edited ConfigMap *does*
+appear in the pod within about a minute — but nothing re-reads it, so the
+change has no effect until the process restarts.
+
+**Restarting the router is a brief outage, not a rolling update.** On a stock
+deployment:
+
+- `replicas: 1`
+- `strategy: Recreate` — the old pod is terminated *before* the new one starts
+- the pod carries both the Envoy proxy and the EPP, and the model Service
+  points at it, so it is the data plane and not a sidecar
+
+There is no overlap and no PodDisruptionBudget. Every in-flight request is
+dropped and new ones are refused until the readiness probe passes, typically
+10-30 seconds. **Change router configuration while the fleet is idle.** During
+a benchmark or a production window it will corrupt the run or drop traffic.
+
+```bash
+kubectl -n <ns> patch cm <model>-router-epp --type merge --patch-file patch.json
+kubectl -n <ns> rollout restart deploy/<model>-router-epp
+kubectl -n <ns> rollout status  deploy/<model>-router-epp --timeout=180s
+```
+
+Then confirm what the router actually loaded, not what the ConfigMap says —
+defaults and plugin instantiation happen at load, and only the log shows the
+effective result:
+
+```bash
+kubectl -n <ns> logs deploy/<model>-router-epp -c epp \
+  | grep -o 'prefill:{Filters.*Scorers: \[[^]]*\]'
+```
+
+Expect the weights you set, as floats:
+
+```
+prefill:{Filters: [prefill-filter/by-label], Scorers: [prefix-cache-scorer: 3.000000, queue-scorer: 2.000000, ...]
+```
+
+## See also
+
+- [`metrics.md`](metrics.md) — the full metric surface the scaling manager reads
+- [`scaling-policy.md`](scaling-policy.md) — thresholds the queue feeds into
+- [`troubleshooting.md`](troubleshooting.md) — symptoms and where to look
