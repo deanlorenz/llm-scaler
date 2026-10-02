@@ -127,6 +127,29 @@ type ReplicaMetrics struct {
 	// Zero when metrics are unavailable.
 	AvgOutputTokens float64
 
+	// AvgOutputTokensRecent is the same quantity over a SHORT window: the mean
+	// output tokens per request among requests that completed in roughly the
+	// last minute.
+	//
+	// It exists because AvgOutputTokens is count-weighted over [5m], and a
+	// count-weighted mean is the wrong statistic for a bimodal workload: after
+	// a 6000 -> 250 output switch, the rare long stragglers dominate the mean
+	// and a five-minute window keeps them in it for five minutes after they
+	// stop arriving. Measured per decode pod across one such switch, the [5m]
+	// figure decayed 3750 -> 2814 -> 2382 -> 2278 -> 2136 -> 250 while the
+	// arriving work was 250 throughout; the [1m] form converged in about a
+	// minute.
+	//
+	// Read ONLY as the derived mu's divisor (mu = seqs / (ITL * OL)), where the
+	// error passes straight through and cost a 4x over-order. Every other
+	// consumer keeps AvgOutputTokens: KVreq = ILeff + OL/2 is dominated by the
+	// prompt, so the same error moves it by about 1.5%, and a short window
+	// everywhere would only make the shape noisier on a quiet fleet.
+	//
+	// Zero when the engine does not publish it or the pod completed nothing in
+	// the window; the divisor then falls back to AvgOutputTokens.
+	AvgOutputTokensRecent float64
+
 	// AvgInputTokens is the average prompt tokens per request on this replica.
 	// Derived from rate(prompt_tokens_sum) / rate(prompt_tokens_count).
 	// Used by saturation V2 for token-demand estimation (k2 derivation) and by

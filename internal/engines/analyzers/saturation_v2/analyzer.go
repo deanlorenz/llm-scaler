@@ -286,6 +286,13 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 	// replica's throughput key (computeReplicaCapacity says why the key is
 	// the fleet's shape and not the replica's).
 	fleetOutput := fleetOutputLength(input.ReplicaMetrics, rolesByVariant)
+	// The derived mu's divisor, which must not be the [5m] mean: see
+	// fleetOutputLengthRecent. Falls back to the [5m] figure when the short
+	// window is empty, so a quiet fleet keeps a mu.
+	muDivisor := fleetOutputLengthRecent(input.ReplicaMetrics, rolesByVariant)
+	if !(muDivisor > 0) {
+		muDivisor = fleetOutput
+	}
 	// The prefill side's hit rate, once for the role, for the same reason:
 	// it discounts the prompt length that buckets prefill's throughput key,
 	// and a per-replica figure would split one window between replicas.
@@ -373,7 +380,7 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 		if canonicalRole(role) == domain.RoleDecode {
 			kPrice := pricingK(satConfig)
 			derived = deriveMu(itlModel, engineParams, rm.TotalKvCapacityTokens,
-				fleetShape, kPrice)
+				fleetShape, kPrice, muDivisor)
 			// Every term, because the result alone cannot be attributed to one.
 			// A derived mu that is wrong by 8x looks identical in the log
 			// whether the fault is the output length, the sequence count, the
@@ -391,6 +398,7 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 				"kPrice", kPrice, "itlAtKPrice", itlModel.ITLAt(kPrice),
 				"itlA", itlModel.A, "itlB", itlModel.B, "itlZero", itlModel.IsZero(),
 				"avgOutputTokens", fleetShape.AvgOutputTokens,
+				"muDivisor", muDivisor,
 				"kvReqPerSeq", fleetShape.KVreq,
 				"replicaKvTokens", rm.TotalKvCapacityTokens,
 				"maxNumSeqs", maxSeqs)
@@ -1672,6 +1680,20 @@ func fleetAverage(replicas []domain.ReplicaMetrics, value func(domain.ReplicaMet
 func fleetOutputLength(replicas []domain.ReplicaMetrics, rolesByVariant map[string]string) float64 {
 	return fleetAverage(replicas,
 		func(rm domain.ReplicaMetrics) float64 { return rm.AvgOutputTokens },
+		func(rm domain.ReplicaMetrics) bool { return generatesOutput(rm, rolesByVariant) })
+}
+
+// fleetOutputLengthRecent is fleetOutputLength over the SHORT window, and is
+// the derived mu's divisor alone (deriveMu).
+//
+// Zero when no generating replica reports the short-window figure -- an engine
+// that does not publish the counter, or a fleet that completed nothing in the
+// last minute. The caller falls back to fleetOutputLength then, because a
+// replica with no divisor gets no derived mu at all, and the [5m] figure is
+// wrong only for the few minutes after a shape change.
+func fleetOutputLengthRecent(replicas []domain.ReplicaMetrics, rolesByVariant map[string]string) float64 {
+	return fleetAverage(replicas,
+		func(rm domain.ReplicaMetrics) float64 { return rm.AvgOutputTokensRecent },
 		func(rm domain.ReplicaMetrics) bool { return generatesOutput(rm, rolesByVariant) })
 }
 

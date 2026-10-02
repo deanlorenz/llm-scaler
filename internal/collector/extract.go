@@ -29,6 +29,7 @@ type podMetricData struct {
 	numGpuBlocks                int64
 	blockSize                   int64
 	avgOutputTokens             float64
+	avgOutputTokensRecent       float64
 	avgOutputTokensTimestamp    time.Time
 	avgInputTokens              float64
 	avgInputTokensTimestamp     time.Time
@@ -244,6 +245,29 @@ func (c *ReplicaMetricsCollector) extractPodMetrics(
 				if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) {
 					podData[instanceKey].avgOutputTokens = value.Value
 					podData[instanceKey].avgOutputTokensTimestamp = value.Timestamp
+				}
+			}
+		}
+	}
+
+	// Process the SHORT-window output length, the derived mu's divisor only
+	if result := results[registration.QueryAvgOutputTokensRecent]; result != nil {
+		if !result.HasError() {
+			for _, value := range result.Values {
+				instanceKey, podName, vaName := c.buildInstanceKey(ctx, namespace, value.Labels)
+				if instanceKey == "" {
+					continue
+				}
+
+				if podData[instanceKey] == nil {
+					podData[instanceKey] = &podMetricData{
+						podName: podName,
+						vaName:  vaName,
+					}
+				}
+				// NaN check: rate division by zero produces NaN
+				if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) {
+					podData[instanceKey].avgOutputTokensRecent = value.Value
 				}
 			}
 		}

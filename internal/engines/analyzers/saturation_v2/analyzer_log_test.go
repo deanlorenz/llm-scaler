@@ -94,7 +94,8 @@ var logContract = map[string][]string{
 		"variant", "pod", // join keys
 		"ok", "rate", "seqs", "tokenSec", // the result and its two factors
 		"kPrice", "itlAtKPrice", "itlA", "itlB", "itlZero", // the line and where it is read
-		"avgOutputTokens", "kvReqPerSeq", "replicaKvTokens", "maxNumSeqs", // the shape and the budget
+		"avgOutputTokens", "muDivisor", // the shape's [5m] output length beside the short-window one mu is actually divided by
+		"kvReqPerSeq", "replicaKvTokens", "maxNumSeqs", // and the budget
 	},
 	"replica-capacity-skipped":        {"modelID", "namespace", "variant", "reason"},
 	"replica-capacity-store-fallback": {"modelID", "namespace", "variant", "reason"},

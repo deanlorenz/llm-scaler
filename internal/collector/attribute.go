@@ -405,6 +405,7 @@ func (c *ReplicaMetricsCollector) attributeInstance(
 		TotalKvCapacityTokens:    totalKvCapacityTokens,
 		TokensInUse:              tokensInUse,
 		AvgOutputTokens:          data.avgOutputTokens,
+		AvgOutputTokensRecent:    data.avgOutputTokensRecent,
 		AvgInputTokens:           data.avgInputTokens,
 		PrefixCacheHitRate:       data.prefixCacheHitRate,
 		AvgITL:                   avgITL,
