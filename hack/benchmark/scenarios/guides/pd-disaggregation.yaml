@@ -347,13 +347,34 @@ scenario:
                 #
                 # Prefill already had two load-aware scorers (queue 2 +
                 # kv-utilisation 2) against prefix 3, and prefill is the role that
-                # never misbehaved. This gives decode the same shape.
+                # never misbehaved. Decode now has the same shape; until
+                # 2026-10-02 it did not, because it had no queue-scorer at all.
                 #
                 # Prefix affinity is kept, not deleted: a multi-turn conversation
                 # really does hit a decode pod's cache. It just must not outrank
                 # load.
-                - pluginRef: active-request-scorer
+                #
+                # WHY QUEUE OUTRANKS ACTIVE-REQUESTS HERE. active-request-scorer
+                # ranks by vllm:num_requests_running. Preemption moves a request
+                # out of running and back into waiting, so a pod thrashing on KV
+                # reports FEWER running -- it reads as the idlest pod in the fleet
+                # at the exact moment it is in the worst trouble, and the scorer
+                # sends it more. Measured over one run: preemption reached 25.9/s
+                # but on only 1-3 pods of 14, fleet-average KV utilisation never
+                # passed 0.54, and `min(num_requests_running)` was 0 at every
+                # single 2-minute sample -- some pod was always idle. The router
+                # meanwhile held up to 3427 requests with a queue wait p95 of 60s
+                # and scored its own pool saturated at 37.7, because the handful
+                # of pods it was routing to really were jammed.
+                #
+                # num_requests_waiting does not invert that way: a preempted
+                # request lands IN it. It is the only signal that stayed honest
+                # under this load, so it gets the dominant weight and
+                # active-request drops to parity with kv-utilisation.
+                - pluginRef: queue-scorer
                   weight: 4
+                - pluginRef: active-request-scorer
+                  weight: 2
                 - pluginRef: kv-cache-utilization-scorer
                   weight: 2
                 - pluginRef: prefix-cache-scorer
