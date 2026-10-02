@@ -321,10 +321,43 @@ scenario:
               - name: decode
                 plugins:
                 - pluginRef: decode-filter
+                # LOAD DECIDES, prefix affinity only breaks ties.
+                #
+                # This was active-request 2 against prefix-cache 3 -- prefix
+                # affinity out-voting load -- from 2026-08-30 until it was
+                # measured. In the phase-1 steady window of one run, ONE decode
+                # replica held 99.3% of the running requests while 80% of them
+                # sat at zero; the ten-pod fleet delivered 11,362 output tok/s
+                # where an evenly loaded nine-pod fleet delivered 36,828. Phase 1
+                # needs 36,000, so that imbalance is the whole difference between
+                # a fleet that keeps up (TTFT 52 ms) and one whose queue grows for
+                # the entire phase (TTFT 74,661 ms).
+                #
+                # Why prefix affinity runs away on this workload: the trace
+                # replays fixed, repeated prompts, so every request scores
+                # highest on whichever pod last served one; that pod's cache gets
+                # warmer and it keeps winning. Cold caches tie and fall through to
+                # load, which is why the fault is intermittent rather than
+                # constant, and why comparing two runs could not find it.
+                #
+                # The weights are NOT a regression -- they are identical in the
+                # balanced runs and the broken ones. They are the hazard that
+                # lets one pod monopolise once its cache is warm. At 1 against
+                # 4 + 2 it cannot.
+                #
+                # Prefill already had two load-aware scorers (queue 2 +
+                # kv-utilisation 2) against prefix 3, and prefill is the role that
+                # never misbehaved. This gives decode the same shape.
+                #
+                # Prefix affinity is kept, not deleted: a multi-turn conversation
+                # really does hit a decode pod's cache. It just must not outrank
+                # load.
                 - pluginRef: active-request-scorer
+                  weight: 4
+                - pluginRef: kv-cache-utilization-scorer
                   weight: 2
                 - pluginRef: prefix-cache-scorer
-                  weight: 3
+                  weight: 1
           resources:
             requests:
               cpu: "4"
