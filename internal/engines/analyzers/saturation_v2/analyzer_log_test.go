@@ -82,7 +82,20 @@ var logContract = map[string][]string{
 	// baselineLearned says whether B came from this card or from the
 	// bootstrap constant -- the difference between a measured floor and a
 	// guess, and the one that collapsed a fleet on 2026-09-27.
-	"itl-fit":                         {"variant", "tier", "a", "b", "held", "baselineLearned"},
+	"itl-fit": {"variant", "tier", "a", "b", "held", "baselineLearned"},
+	// Every term the derived mu is built from, because the RESULT alone cannot
+	// be attributed to one. A mu wrong by 8x reads identically in the log
+	// whether the fault is the output length it divides by, the sequence count
+	// the KV budget allows, the ITL line, or the pricing point -- and that
+	// ambiguity cost four discarded diagnoses in a single session, each
+	// refuted by the next measurement. seqs and maxNumSeqs are separate so a
+	// binding engine cap is visible rather than inferred.
+	"derived-mu": {
+		"variant", "pod", // join keys
+		"ok", "rate", "seqs", "tokenSec", // the result and its two factors
+		"kPrice", "itlAtKPrice", "itlA", "itlB", "itlZero", // the line and where it is read
+		"avgOutputTokens", "kvReqPerSeq", "replicaKvTokens", "maxNumSeqs", // the shape and the budget
+	},
 	"replica-capacity-skipped":        {"modelID", "namespace", "variant", "reason"},
 	"replica-capacity-store-fallback": {"modelID", "namespace", "variant", "reason"},
 	"variant-capacity-source":         {"modelID", "namespace", "variant", "reason"},
@@ -190,6 +203,35 @@ func TestLogContract_LiveReplicaEmitsCycleFields(t *testing.T) {
 	k2 := requireLogged(t, logs, "k2-decision")
 	assert.Contains(t, k2PriorityLabels, k2["priority"],
 		"priority must be one of the four labels dump_k2_decisions.py legends")
+}
+
+// A decode cycle must report how its derived mu was built. The floor divides
+// lambda by this figure, so a run that cannot see its terms cannot attribute an
+// over-order to one -- the failure this line was added for.
+func TestLogContract_DerivedMuReportsItsTerms(t *testing.T) {
+	ctx, logs := observedCtx(t)
+	analyzer := NewSaturationAnalyzer(capacity.NewStore())
+
+	input := makeAnalyzerInput(
+		[]domain.ReplicaMetrics{
+			makeReplicaMetrics("pod-1", "variant-d", 5000, 16000, 0, 100, 50),
+		},
+		[]domain.VariantReplicaState{
+			{VariantName: "variant-d", Role: domain.RoleDecode, AcceleratorName: "H100",
+				CurrentReplicas: 1, GPUsPerReplica: 1},
+		},
+	)
+
+	_, err := analyzer.Analyze(ctx, input)
+	require.NoError(t, err)
+
+	// Emitted whether or not a model exists yet: "no model" is the answer a
+	// reader most often needs, and gating the line on success would hide it.
+	fields := requireLogged(t, logs, "derived-mu")
+	for _, key := range logContract["derived-mu"] {
+		assert.Contains(t, fields, key,
+			"derived-mu must carry %q: the contract names it and the report reads it by key", key)
+	}
 }
 
 // The observed tier is the one the report cares most about, and the only one

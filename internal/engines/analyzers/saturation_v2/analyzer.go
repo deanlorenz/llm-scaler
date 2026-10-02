@@ -371,8 +371,29 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 		// so. Stated here instead, beside the call it governs.
 		var derived derivedMu
 		if canonicalRole(role) == domain.RoleDecode {
+			kPrice := pricingK(satConfig)
 			derived = deriveMu(itlModel, engineParams, rm.TotalKvCapacityTokens,
-				fleetShape, pricingK(satConfig))
+				fleetShape, kPrice)
+			// Every term, because the result alone cannot be attributed to one.
+			// A derived mu that is wrong by 8x looks identical in the log
+			// whether the fault is the output length, the sequence count, the
+			// ITL line or the pricing point -- and that ambiguity cost four
+			// discarded diagnoses in one session. maxNumSeqs is reported
+			// separately from seqs so the cap is visible when it binds.
+			var maxSeqs int64
+			if engineParams != nil {
+				maxSeqs = engineParams.MaxNumSeqs
+			}
+			logger.V(logging.DEFAULT).Info("derived-mu",
+				"variant", rm.VariantName, "pod", rm.PodName,
+				"ok", derived.ok,
+				"rate", derived.rate, "seqs", derived.seqs, "tokenSec", derived.tokenSec,
+				"kPrice", kPrice, "itlAtKPrice", itlModel.ITLAt(kPrice),
+				"itlA", itlModel.A, "itlB", itlModel.B, "itlZero", itlModel.IsZero(),
+				"avgOutputTokens", fleetShape.AvgOutputTokens,
+				"kvReqPerSeq", fleetShape.KVreq,
+				"replicaKvTokens", rm.TotalKvCapacityTokens,
+				"maxNumSeqs", maxSeqs)
 		}
 		a.noteLineMismatch(itlModel, engineParams, rm, role, fleetShape.KVreq, logger)
 		rc := a.computeReplicaCapacity(rm, satConfig, input.ModelID, input.Namespace, gpuCount,
