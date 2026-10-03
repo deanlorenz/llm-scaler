@@ -108,7 +108,10 @@ func (p *ChangeReporter) ReportPolicyConflict(ctx context.Context, namespace, mo
 // which is silent otherwise, because the larger one simply wins and keeps
 // winning.
 func (p *ChangeReporter) ReportOutputSeedConflict(ctx context.Context, namespace, modelID string, seeds []int, chosen int) {
-	if !p.changed(namespace+"|"+modelID, "outputSeed|"+strconv.Itoa(chosen)+"|"+joinInts(seeds)) {
+	// Its OWN key. ReportPolicyConflict already uses namespace|modelID, and two
+	// reporters sharing one record overwrite each other every cycle, so each
+	// re-fires forever -- which defeats the one thing this type does.
+	if !p.changed("outputSeed|"+namespace+"|"+modelID, strconv.Itoa(chosen)+"|"+joinInts(seeds)) {
 		return
 	}
 	ctrl.LoggerFrom(ctx).Info(

@@ -117,17 +117,19 @@ func TestChangeReporter_AnOutputSeedConflictKeepsItsOwnRecord(t *testing.T) {
 	ctx := context.Background()
 	r := NewChangeReporter()
 	r.ReportOutputSeedConflict(ctx, "ns", "m", []int{250, 6000}, 6000)
-	assert.Equal(t, "outputSeed|6000|250,6000", r.seen["ns|m"])
+	assert.Equal(t, "6000|250,6000", r.seen["outputSeed|ns|m"],
+		"its own key: sharing ReportPolicyConflict's namespace|modelID made the two"+
+			" overwrite each other every cycle, so each re-fired forever")
 
 	// Same set, other order: the seeds are sorted by the caller and joined
 	// deterministically, so map order is not a change.
-	before := r.seen["ns|m"]
+	before := r.seen["outputSeed|ns|m"]
 	r.ReportOutputSeedConflict(ctx, "ns", "m", []int{250, 6000}, 6000)
-	assert.Equal(t, before, r.seen["ns|m"])
+	assert.Equal(t, before, r.seen["outputSeed|ns|m"])
 
 	// A third figure appearing IS a change -- the operator added a variant.
 	r.ReportOutputSeedConflict(ctx, "ns", "m", []int{250, 1000, 6000}, 6000)
-	assert.NotEqual(t, before, r.seen["ns|m"])
+	assert.NotEqual(t, before, r.seen["outputSeed|ns|m"])
 }
 
 func TestChangeReporter_NilReportsNoOutputSeedConflict(t *testing.T) {
@@ -135,4 +137,23 @@ func TestChangeReporter_NilReportsNoOutputSeedConflict(t *testing.T) {
 	assert.NotPanics(t, func() {
 		r.ReportOutputSeedConflict(context.Background(), "ns", "m", []int{250, 6000}, 6000)
 	})
+}
+
+func TestChangeReporter_ATierConflictAndASeedConflictCoexist(t *testing.T) {
+	// The bug this pins: both reporters once used namespace|modelID, so a model
+	// with BOTH disagreements had the two overwrite each other's record every
+	// cycle and each re-fired forever -- the exact opposite of what a throttle
+	// is for.
+	ctx := context.Background()
+	r := NewChangeReporter()
+	r.ReportPolicyConflict(ctx, "ns", "m", []string{"gold", "silver"}, "gold")
+	r.ReportOutputSeedConflict(ctx, "ns", "m", []int{250, 6000}, 6000)
+
+	assert.Len(t, r.seen, 2, "two records, not one overwritten")
+	assert.Equal(t, "conflict|gold|gold,silver", r.seen["ns|m"])
+	assert.Equal(t, "6000|250,6000", r.seen["outputSeed|ns|m"])
+
+	// Neither re-fires now that each owns its record.
+	assert.False(t, r.changed("ns|m", "conflict|gold|gold,silver"))
+	assert.False(t, r.changed("outputSeed|ns|m", "6000|250,6000"))
 }
