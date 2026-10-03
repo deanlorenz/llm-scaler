@@ -331,35 +331,9 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 		queueOwner = ""
 	}
 	for role, tokens := range eppByRole {
-		if queueOwner != "" && role != queueOwner {
-			// A role that is NOT charged the queue as a backlog keeps the
-			// queue's KV in its measured demand, and that is the whole point.
-			//
-			// The subtraction below exists to stop a double count: the queued
-			// requests are in the floor as a backlog, so their residency must
-			// not also sit in the occupancy figure. That premise holds for the
-			// queue's OWNER and for nobody else. Charging decode the residency
-			// and then not giving it the backlog deleted the queue from decode's
-			// demand twice over -- absent from the floor, removed from occupancy
-			// -- so a 455-deep router queue moved decode's target not at all and
-			// it was sized by lambda/mu alone.
-			//
-			// Measured on run QK: decode logged backlogRequests of 1 to 4 while
-			// the router held 455, replicasImplied sat at 3.5 for the whole ramp,
-			// and desired reached 5 where the loaded fleet needed ~10. The first
-			// 75 s had no derived mu at all ("ok": false), so the floor gave
-			// decode no entry and the standing-queue release could not fire
-			// either; keeping the residency is what lets OCCUPANCY size decode
-			// in that window, with no mu required.
-			//
-			// This is NOT the reverted behaviour. That charged decode the queue
-			// as a request COUNT to drain within drainSeconds, which asked for
-			// 15 replicas against a need of 2.18 because decode cannot receive
-			// those requests faster than prefill prefills them. Residency is a
-			// KV footprint that is genuinely resident; the count is not.
-			continue
+		if queueOwner == "" || role == queueOwner {
+			backlog[role] += eppQueued
 		}
-		backlog[role] += eppQueued
 		residency[role] += tokens
 	}
 
