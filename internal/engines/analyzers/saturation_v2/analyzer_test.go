@@ -1134,6 +1134,55 @@ var _ = Describe("SaturationAnalyzer", func() {
 		})
 	})
 
+	Describe("pricing a queue before the fleet has completed anything", func() {
+		// Run QL, measured: a cold decode replica reports no output length, so
+		// estimateSchedulerQueueDemand charged the queue Q x 0 and decode's
+		// share logged {"decode":0} for the first two cycles with 141 requests
+		// already waiting. The first order came four cycles in -- 45 s of a
+		// 58 s replica start spent on arithmetic rather than hardware.
+		roles := map[string]string{"decode-v": domain.RoleDecode, "prefill-v": domain.RolePrefill}
+		cold := func() []domain.ReplicaMetrics {
+			d := makeReplicaMetrics("decode-0", "decode-v", 5000, 16000, 0, 1000, 0)
+			p := makeReplicaMetrics("prefill-0", "prefill-v", 1000, 16000, 0, 1000, 0)
+			return []domain.ReplicaMetrics{d, p}
+		}
+		queued := &domain.SchedulerQueueMetrics{QueueSize: 141}
+		active := map[string]bool{domain.RolePrefill: true, domain.RoleDecode: true}
+
+		It("values the queue at nothing for decode when no replica reports an output length", func() {
+			// The negative control, and the bug as it stood.
+			got := estimateSchedulerQueueDemand(queued, cold(), roles, active, 0)
+			Expect(got.byRole[domain.RoleDecode]).To(BeZero(),
+				"this is the measured failure: 141 queued requests worth nothing to the role that must generate them")
+		})
+
+		It("values it at the expected output length once one is supplied", func() {
+			const expected = 6000.0
+			filled := withExpectedOutputTokens(cold(), roles, expected)
+			got := estimateSchedulerQueueDemand(queued, filled, roles, active, 0)
+			Expect(got.byRole[domain.RoleDecode]).To(BeNumerically("~", 141*expected, 1),
+				"the queue is now worth what the role will have to generate")
+		})
+
+		It("fills only output-generating replicas that report nothing, and never mutates the caller's slice", func() {
+			in := cold()
+			filled := withExpectedOutputTokens(in, roles, 6000)
+			Expect(in[0].AvgOutputTokens).To(BeZero(), "the analyzer's own input must be untouched")
+			Expect(filled[0].AvgOutputTokens).To(Equal(6000.0), "decode generates output, and reported none")
+			Expect(filled[1].AvgOutputTokens).To(BeZero(), "prefill completes about one token per request")
+
+			By("leaving a replica that has a real reading alone")
+			measured := cold()
+			measured[0].AvgOutputTokens = 250
+			Expect(withExpectedOutputTokens(measured, roles, 6000)[0].AvgOutputTokens).To(Equal(250.0))
+
+			By("returning the input unchanged when there is nothing to fill")
+			same := withExpectedOutputTokens(measured[:1], roles, 0)
+			Expect(same).To(HaveLen(1))
+			Expect(same[0].AvgOutputTokens).To(Equal(250.0))
+		})
+	})
+
 	Describe("Scheduler queue demand role attribution", func() {
 		It("should attribute inputTokens to prefill and outputTokens to decode", func() {
 			metrics := []domain.ReplicaMetrics{

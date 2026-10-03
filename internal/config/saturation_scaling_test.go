@@ -1,6 +1,8 @@
 package config
 
 import (
+	"math"
+	"testing"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -490,3 +492,37 @@ var _ = Describe("ScalingPolicy.ShapeChangeHold", func() {
 		Expect(d).To(BeZero())
 	})
 })
+
+func TestExpectedOutputTokensPrecedence(t *testing.T) {
+	// The precedence exists so a working fleet is never dragged off its own
+	// figures by a default, and a cold one is never left pricing a queue at
+	// zero. Each row names which candidate must win and why.
+	configured := ScalingPolicy{DefaultOutputTokens: 6000}
+	none := ScalingPolicy{}
+
+	tests := []struct {
+		name                                    string
+		p                                       ScalingPolicy
+		measured, recalled, globalDefault, want float64
+	}{
+		{"a measurement beats everything", configured, 250, 3000, 512, 250},
+		{"a recalled figure beats configuration", configured, 0, 3000, 512, 3000},
+		{"configuration beats the global net", configured, 0, 0, 512, 6000},
+		{"the global net is the last resort", none, 0, 0, 512, 512},
+		{"nothing at all yields nothing, not a guess", none, 0, 0, 0, 0},
+		// NaN is the case `!= 0` would admit and `> 0` rejects. A NaN output
+		// length makes KVreq, the throughput key and mu's divisor all NaN.
+		{"a NaN measurement is not a measurement", configured, math.NaN(), 0, 512, 6000},
+		{"a NaN recalled figure is not one either", configured, 0, math.NaN(), 512, 6000},
+		{"a negative reading is rejected like a zero", configured, -1, 0, 512, 6000},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.p.ExpectedOutputTokens(tc.measured, tc.recalled, tc.globalDefault)
+			if got != tc.want {
+				t.Fatalf("ExpectedOutputTokens(%v, %v, %v) = %v, want %v",
+					tc.measured, tc.recalled, tc.globalDefault, got, tc.want)
+			}
+		})
+	}
+}

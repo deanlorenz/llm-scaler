@@ -470,7 +470,14 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 	}
 
 	// Add scheduler queue demand (requests queued upstream in llm-d flow control).
-	queueDemand := estimateSchedulerQueueDemand(input.SchedulerQueue, input.ReplicaMetrics, rolesByVariant, activeRoles,
+	// Price the queue at an output length the fleet has, recalls, or was told
+	// -- in that order -- so a cold fleet does not value a growing queue at
+	// zero. fleetOutput is this cycle's measurement and wins whenever it
+	// exists; stableOutput is what this fleet last knew and carries across an
+	// idle period; the rest is configuration.
+	expectedOutput := satConfig.ExpectedOutputTokens(fleetOutput, stableOutput, DefaultExpectedOutputTokens)
+	queueMetrics := withExpectedOutputTokens(input.ReplicaMetrics, rolesByVariant, expectedOutput)
+	queueDemand := estimateSchedulerQueueDemand(input.SchedulerQueue, queueMetrics, rolesByVariant, activeRoles,
 		fleetHitRate)
 	totalDemand += queueDemand.total
 	if input.SchedulerQueue != nil {
@@ -1644,6 +1651,54 @@ func estimateCapacityFromParams(params *capacity.EngineParams, avgInput, avgOutp
 // rolesByVariant maps variant name to its P/D role; a variant absent from it
 // is treated as domain.RoleBoth, so a non-disaggregated fleet averages over
 // every replica exactly as before.
+// withExpectedOutputTokens returns replicaMetrics with expected filled in as
+// the output length of every OUTPUT-GENERATING replica that reports none.
+//
+// It exists so the scheduler queue can be priced on the first cycle of load.
+// estimateSchedulerQueueDemand charges the queue Q x avgOutput, and avgOutput
+// is an average over replicas that have COMPLETED something; on a cold fleet
+// none has, so the queue is worth nothing to the role that will generate it.
+// Measured on run QL: decode's share read {"decode":0} for the first two
+// cycles with 141 requests already queued.
+//
+// A COPY, never a mutation of the caller's slice. The input is the analyzer's
+// own AnalyzerInput, read by several other steps in the same cycle, and a
+// replica whose reported output length was quietly rewritten would change what
+// every one of them measured -- including the throughput keys and the shape
+// tracker, which must follow what the fleet actually served.
+//
+// Only replicas that generate output, and only those reporting zero: a prefill
+// replica completes about one token per request, so filling it in would move a
+// figure that is already correct, and a replica with a real reading is not
+// improved by a default.
+//
+// Returns the input unchanged when expected is not positive or nothing needs
+// filling, so the common case allocates nothing.
+func withExpectedOutputTokens(replicaMetrics []domain.ReplicaMetrics,
+	rolesByVariant map[string]string, expected float64) []domain.ReplicaMetrics {
+	if !(expected > 0) {
+		return replicaMetrics
+	}
+	needed := false
+	for _, rm := range replicaMetrics {
+		if !(rm.AvgOutputTokens > 0) && generatesOutput(rm, rolesByVariant) {
+			needed = true
+			break
+		}
+	}
+	if !needed {
+		return replicaMetrics
+	}
+	out := make([]domain.ReplicaMetrics, len(replicaMetrics))
+	copy(out, replicaMetrics)
+	for i := range out {
+		if !(out[i].AvgOutputTokens > 0) && generatesOutput(out[i], rolesByVariant) {
+			out[i].AvgOutputTokens = expected
+		}
+	}
+	return out
+}
+
 func computeModelWorkloadAverages(replicaMetrics []domain.ReplicaMetrics, rolesByVariant map[string]string) (avgInput, avgOutput, avgHitRate float64) {
 	var count, outputCount int
 	for _, rm := range replicaMetrics {

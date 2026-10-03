@@ -77,6 +77,31 @@ type ScalingPolicy struct {
 	// rather than inherit a figure measured somewhere else.
 	ShapeChangeHoldSeconds int `yaml:"shapeChangeHoldSeconds,omitempty"`
 
+	// DefaultOutputTokens is the generation length to price a request at before
+	// the fleet has measured one, in tokens.
+	//
+	// It exists because every measured per-request figure needs a COMPLETION,
+	// and the moment the analyzer most needs one is the moment none has
+	// happened. On a cold fleet taking load, estimateSchedulerQueueDemand
+	// charges the scheduler queue Q x avgOutput and avgOutput is zero, so the
+	// queue is worth nothing to the role that will generate it. Measured on run
+	// QL: decode's share read {"decode":0} for the first two cycles with 141
+	// requests already queued, and the first order came four cycles in -- 45 s
+	// of a 58 s replica start spent waiting for arithmetic rather than for
+	// hardware.
+	//
+	// Set it to what the deployment actually serves. A measurement always wins
+	// over it, and a recalled figure from this fleet's own history wins over it
+	// too (ExpectedOutputTokens states the precedence), so it is only ever read
+	// on a fleet that has nothing better -- which is exactly the ramp.
+	//
+	// Bias it HIGH rather than low if unsure. Too low under-charges the queue
+	// and under-orders, which costs TTFT; too high over-orders, which costs
+	// GPU-minutes, and the over-pricing is bounded -- the throughput floor's
+	// own spec measures a residency charge at 23% above the backlog pricing in
+	// this regime, not multiples of it.
+	DefaultOutputTokens int `yaml:"defaultOutputTokens,omitempty"`
+
 	// AnalyzerName names the saturation analyzer. "saturation" is the only
 	// built-in value and selects the token-based analyzer, which is also what an
 	// empty value gets — the V1 percentage-based analyzer it used to select was
@@ -705,6 +730,42 @@ func (p ScalingPolicy) ShapeChangeHold(defaultHold time.Duration) (time.Duration
 		return time.Duration(p.ShapeChangeHoldSeconds) * time.Second, true
 	}
 	return defaultHold, true
+}
+
+// ExpectedOutputTokens resolves the generation length a request is priced at,
+// and is the one place the precedence is stated:
+//
+//	measured  -- what the fleet's own replicas report this cycle
+//	recalled  -- what this fleet last knew, carried across an idle period
+//	configured -- the operator's DefaultOutputTokens for this model
+//	global    -- the caller's constant, a weak net and nothing more
+//
+// A measurement always wins, so this cannot drag a working fleet off its own
+// figures; it only answers where there is otherwise a zero.
+//
+// The global default deserves its name and no more confidence than that. A
+// generic figure for chat completion is a few hundred tokens, which is an order
+// of magnitude below a long chain-of-thought workload, and pricing a queue at
+// 12x too little under-orders. What makes this mechanism work is the per-model
+// value and the recall; the global constant only keeps the arithmetic from
+// being zero.
+//
+// Each candidate is tested with `> 0`, which rejects a NaN where `!= 0` would
+// admit one and make every figure downstream a NaN.
+func (p ScalingPolicy) ExpectedOutputTokens(measured, recalled, globalDefault float64) float64 {
+	if measured > 0 {
+		return measured
+	}
+	if recalled > 0 {
+		return recalled
+	}
+	if p.DefaultOutputTokens > 0 {
+		return float64(p.DefaultOutputTokens)
+	}
+	if globalDefault > 0 {
+		return globalDefault
+	}
+	return 0
 }
 
 // ShapeChangeWindow is how long after a shape change the SHORT-window output
