@@ -248,8 +248,37 @@ These parameters apply when `analyzerName: "saturation"` is set or when the `ana
 | `analyzerName` | string | Legacy selector, retained for backward compatibility: `"saturation"` names the token-based analyzer, which also runs when the field is empty. Prefer the `analyzers:` list, which the shipped default uses. | `""` |
 | `priority` | float64 | Multiplier for this model's scaling urgency in fair-share GPU allocation | 1.0 |
 | `analyzers` | list | Multi-analyzer pipeline registration — see [Multi-Analyzer Registration](#multi-analyzer-registration) | `[{name: "saturation", score: 1.0}]` |
+| `defaultOutputTokens` | int | Generation length used to price a queued request while no replica has measured one — see [Expected output length](#expected-output-length) | `0` (unset; the built-in 512 applies) |
 
 > `scaleUpThreshold` and `scaleDownBoundary` are honored only for saturation on this branch; see the `multi-analyzer-threshold` PR for the universal post-step that calibrates RC/SC across all analyzers.
+
+### Expected output length
+
+The analyzer prices each request waiting in the router queue at the generation
+length it expects that request to produce: a queued request owes the decode
+role `O` tokens of work, and that is what makes a growing queue worth ordering
+capacity for.
+
+`O` is the first of these that is a positive number:
+
+| source | what it is |
+| --- | --- |
+| the fleet's own reading | the output length the running replicas are averaging over their recent completions |
+| the fleet's last known shape | the stable shape the throughput keys are built from, which carries the figure across a gap in readings |
+| `defaultOutputTokens` | this field |
+| the built-in default | 512 tokens |
+
+Set `defaultOutputTokens` when the deployment's generations are materially
+longer than a chat completion. Until a replica has completed a generation
+there is no reading to use — the first cycles after a restart, after a scale
+from zero, or after the arriving traffic changes shape — and the built-in 512
+under-states a 6000-token workload by a factor of twelve. A queue priced low is
+a queue that does not order, and that is paid in time-to-first-token.
+
+The field is a hint for that cold window only. It is displaced as soon as the
+fleet measures its own output length, so an inexact figure costs nothing once
+traffic is flowing; a figure of the right order is what matters, not an exact
+one.
 
 ### Default Configuration
 
