@@ -116,14 +116,16 @@ func (p *ChangeReporter) ReportEffectivePolicy(ctx context.Context, namespace, m
 	ctrl.LoggerFrom(ctx).Info("Effective scaling policy",
 		"namespace", namespace, "modelID", modelID, "scalingPolicy", name,
 		"scaleUpThreshold", cfg.ScaleUpThreshold, "scaleDownBoundary", cfg.ScaleDownBoundary,
-		"kvCacheThreshold", cfg.KvCacheThreshold, "priority", cfg.Priority)
+		"kvCacheThreshold", cfg.KvCacheThreshold, "priority", cfg.Priority,
+		"defaultOutputTokens", cfg.DefaultOutputTokens)
 }
 
 // formatBand renders the fields that make two resolutions meaningfully different,
 // so the readout fires on a real change rather than on a re-parse.
 func formatBand(cfg config.ScalingPolicy) string {
-	return fmt.Sprintf("%.3f|%.3f|%.3f|%.3f",
-		cfg.ScaleUpThreshold, cfg.ScaleDownBoundary, cfg.KvCacheThreshold, cfg.Priority)
+	return fmt.Sprintf("%.3f|%.3f|%.3f|%.3f|%d",
+		cfg.ScaleUpThreshold, cfg.ScaleDownBoundary, cfg.KvCacheThreshold, cfg.Priority,
+		cfg.DefaultOutputTokens)
 }
 
 // joinSorted renders a deterministic list, so a set of policies reported in a

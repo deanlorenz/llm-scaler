@@ -526,3 +526,31 @@ func TestExpectedOutputTokensPrecedence(t *testing.T) {
 		})
 	}
 }
+
+var _ = Describe("defaultOutputTokens", func() {
+
+	It("is carried by Merge, because a tier or an override may name its own", func() {
+		base := ScalingPolicy{KvCacheThreshold: 0.80, DefaultOutputTokens: 6000}
+
+		base.Merge(ScalingPolicy{DefaultOutputTokens: 250})
+		Expect(base.DefaultOutputTokens).To(Equal(250), "a set override wins")
+
+		base.Merge(ScalingPolicy{KvCacheThreshold: 0.75})
+		Expect(base.DefaultOutputTokens).To(Equal(250),
+			"an override silent on it must not clear what was inherited")
+	})
+
+	It("is rejected when negative, like the other floors", func() {
+		p := ScalingPolicy{KvCacheThreshold: 0.80, QueueLengthThreshold: 5, DefaultOutputTokens: -1}
+		p.ApplyDefaults()
+		Expect(p.Validate()).To(MatchError(ContainSubstring("defaultOutputTokens must be >= 0")))
+	})
+
+	It("accepts zero, which is how an operator says nothing at all", func() {
+		p := ScalingPolicy{KvCacheThreshold: 0.80, QueueLengthThreshold: 5}
+		p.ApplyDefaults()
+		Expect(p.Validate()).To(Succeed())
+		Expect(p.DefaultOutputTokens).To(BeZero(),
+			"ApplyDefaults must not invent a length here -- the analyzer owns that fallback")
+	})
+})

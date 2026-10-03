@@ -488,6 +488,13 @@ func (c *ScalingPolicy) Merge(override ScalingPolicy) {
 	if override.Priority != 0 {
 		c.Priority = override.Priority
 	}
+	// A tier or a per-model override may name its own expected generation
+	// length: two models behind one default entry rarely generate the same
+	// amount, and this field is what prices their queues before either has
+	// measured itself.
+	if override.DefaultOutputTokens != 0 {
+		c.DefaultOutputTokens = override.DefaultOutputTokens
+	}
 	if len(override.Analyzers) > 0 {
 		c.Analyzers = override.Analyzers
 	}
@@ -534,6 +541,9 @@ func (c *ScalingPolicy) Validate() error {
 	}
 	if c.Priority < 0 {
 		return fmt.Errorf("priority must be >= 0, got %.2f", c.Priority)
+	}
+	if c.DefaultOutputTokens < 0 {
+		return fmt.Errorf("defaultOutputTokens must be >= 0, got %d", c.DefaultOutputTokens)
 	}
 
 	// V2 threshold range/consistency checks apply whenever the fields are set,

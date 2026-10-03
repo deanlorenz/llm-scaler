@@ -51,14 +51,14 @@ func TestChangeReporter_EachMethodKeepsItsOwnKey(t *testing.T) {
 	assert.Len(t, r.seen, 4)
 	assert.Equal(t, "unknown|gold", r.seen["ns/v"])
 	assert.Equal(t, "conflict|gold|gold,silver", r.seen["ns|m"])
-	assert.Equal(t, "gold|0.000|0.000|0.000|0.000", r.seen["effective|ns|m"])
+	assert.Equal(t, "gold|0.000|0.000|0.000|0.000|0", r.seen["effective|ns|m"])
 	assert.Equal(t, "false", r.seen["accel|ns/v"])
 }
 
 func TestChangeReporter_AModelOnNoTierIsReportedAsTheDefaultEntry(t *testing.T) {
 	r := NewChangeReporter()
 	r.ReportEffectivePolicy(context.Background(), "ns", "m", "", config.ScalingPolicy{})
-	assert.Equal(t, "(default entry)|0.000|0.000|0.000|0.000", r.seen["effective|ns|m"],
+	assert.Equal(t, "(default entry)|0.000|0.000|0.000|0.000|0", r.seen["effective|ns|m"],
 		"an empty tier name reads as the default entry, not as an empty string")
 }
 
@@ -69,6 +69,23 @@ func TestChangeReporter_AConflictIsTheSameWhateverOrderTheTiersArriveIn(t *testi
 	before := r.seen["ns|m"]
 	r.ReportPolicyConflict(ctx, "ns", "m", []string{"silver", "gold"}, "gold")
 	assert.Equal(t, before, r.seen["ns|m"], "the tiers are sorted, so map order is not a change")
+}
+
+func TestChangeReporter_TheEffectivePolicyChangesWithTheExpectedOutputLength(t *testing.T) {
+	// defaultOutputTokens is in the band because it is a resolved value an
+	// operator can set in three places, and the readout is the only place the
+	// winner is visible. Left out of the band, a model moved from 512 to 6000
+	// would keep reporting the figure it no longer uses.
+	ctx := context.Background()
+	r := NewChangeReporter()
+	cfg := config.ScalingPolicy{ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70}
+	r.ReportEffectivePolicy(ctx, "ns", "m", "gold", cfg)
+	first := r.seen["effective|ns|m"]
+
+	cfg.DefaultOutputTokens = 6000
+	r.ReportEffectivePolicy(ctx, "ns", "m", "gold", cfg)
+	assert.NotEqual(t, first, r.seen["effective|ns|m"],
+		"a new expected output length is a new resolution and must be reported")
 }
 
 func TestChangeReporter_TheEffectivePolicyChangesWithTheBandItResolvedTo(t *testing.T) {
