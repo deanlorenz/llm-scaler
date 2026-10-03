@@ -235,6 +235,61 @@ func TestLogContract_DerivedMuReportsItsTerms(t *testing.T) {
 	}
 }
 
+// The divisor is the [5m] mean on a steady shape, and the short window only
+// while a shape change is outstanding.
+//
+// Both halves are measured, not reasoned. The short window averages over
+// requests that have COMPLETED, so a fleet ramping into 6000-token generations
+// reads far below 6000 for the first couple of minutes; dividing by that
+// over-states mu, and an over-stated mu under-orders replicas. Bisected over
+// five runs with everything but the build held constant: the unconditional
+// short window took phase 1 from a 305-request router queue at 33,071 output
+// tok/s to 2,503 at 8,763. The analyzer's muDivisor comment carries the table.
+func TestDerivedMuDivisorFollowsTheShapeChange(t *testing.T) {
+	states := []domain.VariantReplicaState{
+		{VariantName: "variant-d", Role: domain.RoleDecode, AcceleratorName: "H100",
+			CurrentReplicas: 1, GPUsPerReplica: 1},
+	}
+	// avg5m is what AvgOutputTokens carries, avg1m what AvgOutputTokensRecent
+	// does; they differ so the logged divisor identifies which one was used.
+	serving := func(avg5m, avg1m float64) []domain.ReplicaMetrics {
+		rm := makeReplicaMetrics("pod-1", "variant-d", 5000, 16000, 0, 1000, avg5m)
+		rm.AvgOutputTokensRecent = avg1m
+		return []domain.ReplicaMetrics{rm}
+	}
+
+	t.Run("a steady shape divides by the 5m mean", func(t *testing.T) {
+		ctx, logs := observedCtx(t)
+		a := NewSaturationAnalyzer(capacity.NewStore())
+
+		// One cycle: the tracker has no prior shape, so nothing is outstanding.
+		_, err := a.Analyze(ctx, makeAnalyzerInput(serving(6000, 400), states))
+		require.NoError(t, err)
+
+		assert.Equal(t, float64(6000), requireLogged(t, logs, "derived-mu")["muDivisor"],
+			"the 400 is requests that finished early in a ramp, not the length being served")
+	})
+
+	t.Run("an outstanding shape change divides by the short window", func(t *testing.T) {
+		a := NewSaturationAnalyzer(capacity.NewStore())
+
+		// Cycle one anchors the shape at 6000 and declares no change.
+		ctx1, _ := observedCtx(t)
+		_, err := a.Analyze(ctx1, makeAnalyzerInput(serving(6000, 6000), states))
+		require.NoError(t, err)
+
+		// Cycle two: the output length collapses past the tracker's tolerance.
+		// A fresh observer because requireLogged reads the FIRST matching entry,
+		// and cycle one logged one too.
+		ctx2, logs2 := observedCtx(t)
+		_, err = a.Analyze(ctx2, makeAnalyzerInput(serving(3750, 250), states))
+		require.NoError(t, err)
+
+		assert.Equal(t, float64(250), requireLogged(t, logs2, "derived-mu")["muDivisor"],
+			"after a switch the [5m] mean still carries the old shape's stragglers, 3750 here")
+	})
+}
+
 // The observed tier is the one the report cares most about, and the only one
 // whose label the analyzer picks from live queue state rather than a fallback.
 func TestLogContract_SaturatedQueueReportsObservedTier(t *testing.T) {

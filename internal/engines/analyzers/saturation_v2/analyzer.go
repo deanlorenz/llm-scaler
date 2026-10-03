@@ -286,13 +286,6 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 	// replica's throughput key (computeReplicaCapacity says why the key is
 	// the fleet's shape and not the replica's).
 	fleetOutput := fleetOutputLength(input.ReplicaMetrics, rolesByVariant)
-	// The derived mu's divisor, which must not be the [5m] mean: see
-	// fleetOutputLengthRecent. Falls back to the [5m] figure when the short
-	// window is empty, so a quiet fleet keeps a mu.
-	muDivisor := fleetOutputLengthRecent(input.ReplicaMetrics, rolesByVariant)
-	if !(muDivisor > 0) {
-		muDivisor = fleetOutput
-	}
 	// The prefill side's hit rate, once for the role, for the same reason:
 	// it discounts the prompt length that buckets prefill's throughput key,
 	// and a per-replica figure would split one window between replicas.
@@ -306,6 +299,38 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 	holdFor, _ := satConfig.ShapeChangeHold(ShapeChangeHoldMax)
 	stableOutput, stableInput, shapeChanged := a.noteFleetShape(input.Namespace, input.ModelID,
 		fleetInput, fleetOutput, arriving, arrivingOK, holdFor, logger)
+
+	// The derived mu's divisor. The SHORT window is right only WHILE A SHAPE
+	// CHANGE IS OUTSTANDING, which is the case it was added for: a [5m]
+	// count-weighted mean carries the previous shape's long stragglers for
+	// minutes after they stop arriving -- measured decaying 3750 -> 250 across
+	// one 6000 -> 250 switch -- and the divisor is where that error reaches mu
+	// undamped.
+	//
+	// On a STEADY shape it is wrong, and expensively so. Phase 1 of the
+	// shape-swap trace holds 6000-token generations in flight for about two
+	// minutes before any of them completes, so a [1m] mean over COMPLETED
+	// requests reads far below 6000 while the fleet ramps. rate =
+	// tokenSec/avgOutput then OVER-states mu, and an over-stated mu
+	// UNDER-orders replicas (mu_from_itl.go says so explicitly).
+	//
+	// Bisected over five runs on 2026-10-03, EPP version, EPP config,
+	// max_num_seqs and cluster held identical with the WVA image the only
+	// variable. The unconditional short window took phase 1 from a 305-request
+	// router queue at 33,071 output tok/s to 2,503 at 8,763 -- eight times the
+	// queue for a quarter of the throughput. Every build before it measured
+	// good.
+	//
+	// max(recent, [5m]) is NOT the fix, and that is worth recording because it
+	// is the obvious one: the recent figure is the LOWER of the two in both
+	// cases -- an artefact while ramping, the truth after a switch -- so no
+	// magnitude test can separate them. Whether the shape changed can.
+	muDivisor := fleetOutput
+	if shapeChanged {
+		if recent := fleetOutputLengthRecent(input.ReplicaMetrics, rolesByVariant); recent > 0 {
+			muDivisor = recent
+		}
+	}
 
 	// One ITL(k) fit per variant per cycle, from readings its replicas report
 	// at whatever load they are at. This is what lets mu be priced for the
@@ -1684,13 +1709,19 @@ func fleetOutputLength(replicas []domain.ReplicaMetrics, rolesByVariant map[stri
 }
 
 // fleetOutputLengthRecent is fleetOutputLength over the SHORT window, and is
-// the derived mu's divisor alone (deriveMu).
+// the derived mu's divisor (deriveMu) WHILE A SHAPE CHANGE IS OUTSTANDING only.
 //
 // Zero when no generating replica reports the short-window figure -- an engine
 // that does not publish the counter, or a fleet that completed nothing in the
-// last minute. The caller falls back to fleetOutputLength then, because a
-// replica with no divisor gets no derived mu at all, and the [5m] figure is
-// wrong only for the few minutes after a shape change.
+// last minute.
+//
+// The caller falls back to fleetOutputLength then, and also whenever the shape
+// is steady. That gate is not a precaution; it is a measured requirement. This
+// window averages over requests that have COMPLETED, so on a fleet ramping into
+// long generations it reads far below the length being served, which over-states
+// mu and under-orders replicas. The caller's comment carries the bisect. The
+// [5m] figure is wrong only for the few minutes after a shape change, which is
+// exactly when this one is used.
 func fleetOutputLengthRecent(replicas []domain.ReplicaMetrics, rolesByVariant map[string]string) float64 {
 	return fleetAverage(replicas,
 		func(rm domain.ReplicaMetrics) float64 { return rm.AvgOutputTokensRecent },
