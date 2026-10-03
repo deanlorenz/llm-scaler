@@ -112,3 +112,27 @@ func TestChangeReporter_AnUnresolvedAcceleratorChangesWithWhatItCosts(t *testing
 	r.ReportUnresolvedAccelerator(ctx, "ns", "v", "gpu-budget")
 	assert.Equal(t, "true", r.seen["accel|ns/v"])
 }
+
+func TestChangeReporter_AnOutputSeedConflictKeepsItsOwnRecord(t *testing.T) {
+	ctx := context.Background()
+	r := NewChangeReporter()
+	r.ReportOutputSeedConflict(ctx, "ns", "m", []int{250, 6000}, 6000)
+	assert.Equal(t, "outputSeed|6000|250,6000", r.seen["ns|m"])
+
+	// Same set, other order: the seeds are sorted by the caller and joined
+	// deterministically, so map order is not a change.
+	before := r.seen["ns|m"]
+	r.ReportOutputSeedConflict(ctx, "ns", "m", []int{250, 6000}, 6000)
+	assert.Equal(t, before, r.seen["ns|m"])
+
+	// A third figure appearing IS a change -- the operator added a variant.
+	r.ReportOutputSeedConflict(ctx, "ns", "m", []int{250, 1000, 6000}, 6000)
+	assert.NotEqual(t, before, r.seen["ns|m"])
+}
+
+func TestChangeReporter_NilReportsNoOutputSeedConflict(t *testing.T) {
+	var r *ChangeReporter
+	assert.NotPanics(t, func() {
+		r.ReportOutputSeedConflict(context.Background(), "ns", "m", []int{250, 6000}, 6000)
+	})
+}

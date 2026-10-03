@@ -100,6 +100,36 @@ func (p *ChangeReporter) ReportPolicyConflict(ctx context.Context, namespace, mo
 		"policies", policies, "using", chosen)
 }
 
+// ReportOutputSeedConflict warns that one model's variants seeded different
+// expected generation lengths.
+//
+// A model has one queue to price, so it has one expected generation length. Two
+// figures means the operator wrote the number twice and the copies drifted --
+// which is silent otherwise, because the larger one simply wins and keeps
+// winning.
+func (p *ChangeReporter) ReportOutputSeedConflict(ctx context.Context, namespace, modelID string, seeds []int, chosen int) {
+	if !p.changed(namespace+"|"+modelID, "outputSeed|"+strconv.Itoa(chosen)+"|"+joinInts(seeds)) {
+		return
+	}
+	ctrl.LoggerFrom(ctx).Info(
+		"A model's variants seed different expected generation lengths; pricing its queue at the largest. "+
+			"The figure is the model's, not a role's -- a request owes the same tokens whichever "+
+			"variant serves it -- so give every variant of this model the same defaultOutputTokens, "+
+			"or set it on one and leave the others out.",
+		"namespace", namespace, "modelID", modelID,
+		"seeded", seeds, "using", chosen)
+}
+
+// joinInts renders a deterministic list, so the same set reported in a different
+// order is not mistaken for a change.
+func joinInts(v []int) string {
+	parts := make([]string, 0, len(v))
+	for _, n := range v {
+		parts = append(parts, strconv.Itoa(n))
+	}
+	return strings.Join(parts, ",")
+}
+
 // ReportEffectivePolicy records which tier a model ended up scaling under, once
 // per change. This is the "which value won" readout: with a default entry, a tier
 // and a per-model override all contributing, the resolved thresholds are not

@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	yaml "gopkg.in/yaml.v3"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
@@ -529,28 +531,33 @@ func TestExpectedOutputTokensPrecedence(t *testing.T) {
 
 var _ = Describe("defaultOutputTokens", func() {
 
-	It("is carried by Merge, because a tier or an override may name its own", func() {
+	// The surface is the ScaledObject trigger, not this ConfigMap. The field
+	// carries `yaml:"-"` so there is exactly one place an operator sets it, and
+	// these specs are what keeps a second one from reappearing: a re-added yaml
+	// tag would make a stale ConfigMap key start winning again, silently.
+	It("is not settable from a policy entry", func() {
+		var p ScalingPolicy
+		Expect(yaml.Unmarshal([]byte("kvCacheThreshold: 0.80\ndefaultOutputTokens: 6000\n"), &p)).To(Succeed())
+		Expect(p.KvCacheThreshold).To(Equal(0.80), "the sibling key still parses")
+		Expect(p.DefaultOutputTokens).To(BeZero(),
+			"a defaultOutputTokens key in the ConfigMap is ignored; it rides trigger metadata")
+	})
+
+	It("is not overlaid by Merge, because no entry can hold one", func() {
 		base := ScalingPolicy{KvCacheThreshold: 0.80, DefaultOutputTokens: 6000}
-
-		base.Merge(ScalingPolicy{DefaultOutputTokens: 250})
-		Expect(base.DefaultOutputTokens).To(Equal(250), "a set override wins")
-
-		base.Merge(ScalingPolicy{KvCacheThreshold: 0.75})
-		Expect(base.DefaultOutputTokens).To(Equal(250),
-			"an override silent on it must not clear what was inherited")
+		base.Merge(ScalingPolicy{DefaultOutputTokens: 250, KvCacheThreshold: 0.75})
+		Expect(base.KvCacheThreshold).To(Equal(0.75))
+		Expect(base.DefaultOutputTokens).To(Equal(6000),
+			"the resolved seed is folded in after Merge, from the trigger; Merge must not "+
+				"touch it, or a tier would be able to overwrite the figure the trigger set")
 	})
 
-	It("is rejected when negative, like the other floors", func() {
-		p := ScalingPolicy{KvCacheThreshold: 0.80, QueueLengthThreshold: 5, DefaultOutputTokens: -1}
-		p.ApplyDefaults()
-		Expect(p.Validate()).To(MatchError(ContainSubstring("defaultOutputTokens must be >= 0")))
-	})
-
-	It("accepts zero, which is how an operator says nothing at all", func() {
-		p := ScalingPolicy{KvCacheThreshold: 0.80, QueueLengthThreshold: 5}
+	It("survives ApplyDefaults and Validate as a resolved value", func() {
+		p := ScalingPolicy{KvCacheThreshold: 0.80, QueueLengthThreshold: 5, DefaultOutputTokens: 6000}
 		p.ApplyDefaults()
 		Expect(p.Validate()).To(Succeed())
-		Expect(p.DefaultOutputTokens).To(BeZero(),
-			"ApplyDefaults must not invent a length here -- the analyzer owns that fallback")
+		Expect(p.DefaultOutputTokens).To(Equal(6000),
+			"ApplyDefaults must neither invent a length nor discard a resolved one")
+		Expect(p.ExpectedOutputTokens(0, 0, 512)).To(Equal(6000.0))
 	})
 })

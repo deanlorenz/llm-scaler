@@ -77,30 +77,15 @@ type ScalingPolicy struct {
 	// rather than inherit a figure measured somewhere else.
 	ShapeChangeHoldSeconds int `yaml:"shapeChangeHoldSeconds,omitempty"`
 
-	// DefaultOutputTokens is the generation length to price a request at before
-	// the fleet has measured one, in tokens.
+	// DefaultOutputTokens is the seeded generation length used to price a queued
+	// request while no replica has measured one. RESOLVED, not configured: it is
+	// folded in from the model's trigger metadata
+	// (registry.DefaultOutputTokensKey), which is why it carries no yaml tag --
+	// a `defaultOutputTokens` key in this ConfigMap is ignored, deliberately, so
+	// there is exactly one place an operator sets it.
 	//
-	// It exists because every measured per-request figure needs a COMPLETION,
-	// and the moment the analyzer most needs one is the moment none has
-	// happened. On a cold fleet taking load, estimateSchedulerQueueDemand
-	// charges the scheduler queue Q x avgOutput and avgOutput is zero, so the
-	// queue is worth nothing to the role that will generate it. Measured on run
-	// QL: decode's share read {"decode":0} for the first two cycles with 141
-	// requests already queued, and the first order came four cycles in -- 45 s
-	// of a 58 s replica start spent waiting for arithmetic rather than for
-	// hardware.
-	//
-	// Set it to what the deployment actually serves. A measurement always wins
-	// over it, and a recalled figure from this fleet's own history wins over it
-	// too (ExpectedOutputTokens states the precedence), so it is only ever read
-	// on a fleet that has nothing better -- which is exactly the ramp.
-	//
-	// Bias it HIGH rather than low if unsure. Too low under-charges the queue
-	// and under-orders, which costs TTFT; too high over-orders, which costs
-	// GPU-minutes, and the over-pricing is bounded -- the throughput floor's
-	// own spec measures a residency charge at 23% above the backlog pricing in
-	// this regime, not multiples of it.
-	DefaultOutputTokens int `yaml:"defaultOutputTokens,omitempty"`
+	// ExpectedOutputTokens states where it sits in the precedence.
+	DefaultOutputTokens int `yaml:"-"`
 
 	// AnalyzerName names the saturation analyzer. "saturation" is the only
 	// built-in value and selects the token-based analyzer, which is also what an
@@ -488,13 +473,6 @@ func (c *ScalingPolicy) Merge(override ScalingPolicy) {
 	if override.Priority != 0 {
 		c.Priority = override.Priority
 	}
-	// A tier or a per-model override may name its own expected generation
-	// length: two models behind one default entry rarely generate the same
-	// amount, and this field is what prices their queues before either has
-	// measured itself.
-	if override.DefaultOutputTokens != 0 {
-		c.DefaultOutputTokens = override.DefaultOutputTokens
-	}
 	if len(override.Analyzers) > 0 {
 		c.Analyzers = override.Analyzers
 	}
@@ -541,9 +519,6 @@ func (c *ScalingPolicy) Validate() error {
 	}
 	if c.Priority < 0 {
 		return fmt.Errorf("priority must be >= 0, got %.2f", c.Priority)
-	}
-	if c.DefaultOutputTokens < 0 {
-		return fmt.Errorf("defaultOutputTokens must be >= 0, got %d", c.DefaultOutputTokens)
 	}
 
 	// V2 threshold range/consistency checks apply whenever the fields are set,
@@ -747,7 +722,7 @@ func (p ScalingPolicy) ShapeChangeHold(defaultHold time.Duration) (time.Duration
 //
 //	measured  -- what the fleet's own replicas report this cycle
 //	recalled  -- what this fleet last knew, carried across an idle period
-//	configured -- the operator's DefaultOutputTokens for this model
+//	seeded    -- defaultOutputTokens on this model's ScaledObject triggers
 //	global    -- the caller's constant, a weak net and nothing more
 //
 // A measurement always wins, so this cannot drag a working fleet off its own

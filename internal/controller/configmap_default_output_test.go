@@ -8,14 +8,15 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 )
 
-// The ConfigMap body is the whole path: yaml.Unmarshal is NOT strict here, so a
-// field the struct does not know is dropped without an error and the entry still
-// parses, logs, and validates. A green deployment therefore says nothing about
-// whether `defaultOutputTokens` arrived -- these specs are what says it.
-var _ = Describe("defaultOutputTokens through the ConfigMap path", func() {
+// defaultOutputTokens rides ScaledObject trigger metadata, not this ConfigMap.
+// The risk worth a test is the one that is silent: yaml.Unmarshal is NOT strict
+// here -- nothing in this repo calls KnownFields -- so an entry carrying the key
+// parses, defaults, validates and logs exactly like one that does not, whichever
+// way the field is tagged. Without these specs, re-adding a yaml tag would make
+// a stale ConfigMap key quietly start overriding the trigger, and removing one
+// would quietly stop a working config working.
+var _ = Describe("defaultOutputTokens is not a ConfigMap key", func() {
 
-	// Trimmed from the entry a run is staged with: the comment block is kept
-	// because comments are where a silently-ignored key usually hides.
 	const body = `analyzers:
   - name: saturation
     score: 1.0
@@ -23,48 +24,42 @@ scaleUpThreshold: 0.85
 scaleDownBoundary: 0.70
 kvCacheThreshold: 0.80
 queueLengthThreshold: 5
-
-# Price a request waiting in the router queue at this generation length while
-# no replica has measured one of its own.
 defaultOutputTokens: 6000
 `
 
-	It("reaches the stored entry and the resolved policy", func() {
+	It("parses the entry and ignores the key", func() {
 		configs, count := parseScalingPolicyConfig(map[string]string{"default": body}, logr.Discard())
-		Expect(count).To(Equal(1))
-		Expect(configs["default"].DefaultOutputTokens).To(Equal(6000),
-			"the yaml key must map to the field; a typo in the tag reads as 0 with no error")
-
-		resolved := config.ResolveScalingPolicyForTier(configs, "Qwen/Qwen3-0.6B", "ns", "")
-		Expect(resolved.DefaultOutputTokens).To(Equal(6000),
-			"resolution starts from the default entry, so the figure must survive it")
-		Expect(resolved.ExpectedOutputTokens(0, 0, 512)).To(Equal(6000.0),
-			"and must then win over the built-in net, which is what the analyzer asks")
-	})
-
-	It("is absent as a zero, not as a guess, when the entry omits it", func() {
-		short := "analyzers:\n  - name: saturation\n    score: 1.0\nkvCacheThreshold: 0.80\n"
-		configs, count := parseScalingPolicyConfig(map[string]string{"default": short}, logr.Discard())
-		Expect(count).To(Equal(1))
+		Expect(count).To(Equal(1), "the unknown key must not cost the entry its parse")
+		Expect(configs["default"].KvCacheThreshold).To(Equal(0.80), "its siblings still land")
+		Expect(configs["default"].DefaultOutputTokens).To(BeZero(),
+			"the ConfigMap is not the surface for this field")
 
 		resolved := config.ResolveScalingPolicyForTier(configs, "Qwen/Qwen3-0.6B", "ns", "")
 		Expect(resolved.DefaultOutputTokens).To(BeZero())
 		Expect(resolved.ExpectedOutputTokens(0, 0, 512)).To(Equal(512.0),
-			"an unset field hands the decision to the built-in net")
+			"with nothing seeded, the built-in net answers")
 	})
 
-	It("lets a per-model override name its own generation length", func() {
+	It("ignores it on a per-model override too", func() {
 		data := map[string]string{
-			"default":    body,
-			"chatty#ns":  "model_id: chatty\nnamespace: ns\ndefaultOutputTokens: 250\n",
-			"silent2#ns": "model_id: silent2\nnamespace: ns\nkvCacheThreshold: 0.75\n",
+			"default":   body,
+			"chatty#ns": "model_id: chatty\nnamespace: ns\ndefaultOutputTokens: 250\n",
 		}
 		configs, count := parseScalingPolicyConfig(data, logr.Discard())
-		Expect(count).To(Equal(3))
-
+		Expect(count).To(Equal(2))
 		Expect(config.ResolveScalingPolicyForTier(configs, "chatty", "ns", "").DefaultOutputTokens).
-			To(Equal(250), "the override wins over the default entry")
-		Expect(config.ResolveScalingPolicyForTier(configs, "silent2", "ns", "").DefaultOutputTokens).
-			To(Equal(6000), "an override that says nothing about it inherits the default entry")
+			To(BeZero(), "an override cannot set it either; there is one surface, the trigger")
+	})
+
+	It("still accepts a figure folded in after resolution", func() {
+		// What the engine does once it has read the model's triggers
+		// (Engine.modelOutputSeed). The field is a resolved value, so it must
+		// survive on a policy that came from a ConfigMap entry.
+		configs, _ := parseScalingPolicyConfig(map[string]string{"default": body}, logr.Discard())
+		resolved := config.ResolveScalingPolicyForTier(configs, "Qwen/Qwen3-0.6B", "ns", "")
+		resolved.DefaultOutputTokens = 6000
+		Expect(resolved.ExpectedOutputTokens(0, 0, 512)).To(Equal(6000.0))
+		Expect(resolved.ExpectedOutputTokens(250, 0, 512)).To(Equal(250.0),
+			"and a reading still beats it")
 	})
 })
