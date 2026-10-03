@@ -706,3 +706,27 @@ func (p ScalingPolicy) ShapeChangeHold(defaultHold time.Duration) (time.Duration
 	}
 	return defaultHold, true
 }
+
+// ShapeChangeWindow is how long after a shape change the SHORT-window output
+// mean is still the right divisor for the derived mu.
+//
+// It honours ShapeChangeHoldSeconds, because that figure is already calibrated
+// as "one generation plus the rate window that would record it" and the
+// straggler contamination this covers lasts exactly that long. It deliberately
+// IGNORES DisableShapeChangeHold.
+//
+// That asymmetry is the point. DisableShapeChangeHold turns off withholding the
+// FLEET -- it is documented as an operator's way to stop the hold misbehaving
+// without a new image. Which output length to divide mu by is a different
+// question, and answering it from the hold's state meant that flag silently
+// reverted the divisor to the [5m] mean for the whole post-switch window: a
+// count-weighted five-minute mean carries the previous shape's long outputs for
+// minutes after they stop arriving, and the divisor is where that error reaches
+// mu undamped and under-orders replicas. Measured at 9x the client-side phase-1
+// TTFT when the divisor was wrong in the other direction.
+func (p ScalingPolicy) ShapeChangeWindow(defaultWindow time.Duration) time.Duration {
+	if p.ShapeChangeHoldSeconds > 0 {
+		return time.Duration(p.ShapeChangeHoldSeconds) * time.Second
+	}
+	return defaultWindow
+}

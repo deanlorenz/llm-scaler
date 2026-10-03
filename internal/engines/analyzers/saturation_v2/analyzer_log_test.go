@@ -16,6 +16,7 @@ import (
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
@@ -287,6 +288,45 @@ func TestDerivedMuDivisorFollowsTheShapeChange(t *testing.T) {
 
 		assert.Equal(t, float64(250), requireLogged(t, logs2, "derived-mu")["muDivisor"],
 			"after a switch the [5m] mean still carries the old shape's stragglers, 3750 here")
+	})
+
+	// DisableShapeChangeHold turns off withholding the FLEET. It must not also
+	// decide which output length mu is divided by.
+	//
+	// Found in review: keying the divisor on the outstanding-hold flag meant
+	// that with the hold off, `changedAt` is never set, so the divisor followed
+	// the short window for exactly the one cycle the tracker declares a change
+	// and reverted to the [5m] mean for the rest of the straggler window --
+	// silently reinstating the over-stated mu, through a flag whose own doc
+	// comment is about the fleet hold. The third cycle below is what
+	// discriminates: no NEW change, hold off, divisor must still be 250.
+	t.Run("the divisor survives the fleet hold being disabled", func(t *testing.T) {
+		holdOff := func(metrics []domain.ReplicaMetrics) domain.AnalyzerInput {
+			in := makeAnalyzerInput(metrics, states)
+			// Asserted, not probed: if Config stops carrying a ScalingPolicy
+			// this test would otherwise run with the hold ENABLED and pass for
+			// the wrong reason, which is the whole failure mode it guards.
+			p, ok := in.Config.(*config.ScalingPolicy)
+			require.True(t, ok, "fixture Config must be a *config.ScalingPolicy, got %T", in.Config)
+			p.DisableShapeChangeHold = true
+			return in
+		}
+		a := NewSaturationAnalyzer(capacity.NewStore())
+
+		ctx0, _ := observedCtx(t)
+		_, err := a.Analyze(ctx0, holdOff(serving(6000, 6000)))
+		require.NoError(t, err)
+
+		ctx1, _ := observedCtx(t)
+		_, err = a.Analyze(ctx1, holdOff(serving(3750, 250)))
+		require.NoError(t, err)
+
+		ctx2, logs2 := observedCtx(t)
+		_, err = a.Analyze(ctx2, holdOff(serving(3750, 250)))
+		require.NoError(t, err)
+
+		assert.Equal(t, float64(250), requireLogged(t, logs2, "derived-mu")["muDivisor"],
+			"a cycle after the change, with the hold off: keyed on the hold this reverted to 3750")
 	})
 }
 

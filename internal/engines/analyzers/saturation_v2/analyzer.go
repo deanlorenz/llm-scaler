@@ -325,8 +325,15 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 	// is the obvious one: the recent figure is the LOWER of the two in both
 	// cases -- an artefact while ramping, the truth after a switch -- so no
 	// magnitude test can separate them. Whether the shape changed can.
+	// Keyed on shapeChangedWithin, NOT on the outstanding hold. The hold's flag
+	// is zero whenever an operator sets DisableShapeChangeHold, which would
+	// leave this reading the short window for the single cycle the tracker
+	// declares a change and the [5m] mean for the rest of the straggler window
+	// -- reinstating the bug above through a flag documented as only turning
+	// off the fleet hold. ShapeChangeWindow says why the two are separate.
 	muDivisor := fleetOutput
-	if shapeChanged {
+	if a.shapeChangedWithin(input.Namespace, input.ModelID,
+		satConfig.ShapeChangeWindow(ShapeChangeHoldMax), time.Now()) {
 		if recent := fleetOutputLengthRecent(input.ReplicaMetrics, rolesByVariant); recent > 0 {
 			muDivisor = recent
 		}
