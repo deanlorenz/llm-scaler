@@ -795,6 +795,44 @@ var _ = Describe("the throughput floor, through Analyze", func() {
 			"resident KV plus the own queue at prefill's input-only footprint; the 200 x 6000 scheduler share is gone")
 	})
 
+	It("keeps the scheduler queue's residency in a role not charged its backlog", func() {
+		// The residency subtraction exists to stop a double count for the role
+		// whose BACKLOG holds the queue, which on a P/D fleet is prefill.
+		// Decode is not charged that backlog, so subtracting decode's share
+		// deleted the queue from decode's demand twice over: absent from the
+		// floor, removed from occupancy.
+		//
+		// Measured on run QK: decode logged backlogRequests of 1 to 4 while the
+		// router held 455, replicasImplied sat at 3.5 for the whole ramp, and
+		// the fleet reached 5 where it needed about 10. For the first 75 s
+		// decode had no derived mu at all, so the floor gave it no entry and the
+		// standing-queue release could not fire either -- keeping the residency
+		// is what lets occupancy size decode in that window, with no mu needed.
+		rcs := []capacity.ReplicaCapacity{{VariantName: decodeVariant, SaturatedThroughput: runMu,
+			SaturatedThroughputSamples: floor.MinThroughputSamplesToOrder}}
+		vcs := []domain.VariantCapacity{{VariantName: decodeVariant, Role: domain.RoleDecode,
+			ReplicaCount: 1, PerReplicaCapacity: float64(runK1)}}
+
+		// Both roles present in eppByRole, so prefill owns the queue and decode
+		// does not. Occupancy is set well above the floor's own lambda/mu x P
+		// figure (about 1.03M here) so that `max(resident, tokens)` resolves to
+		// resident -- which is what this spec is about.
+		const occupancy = 3_000_000.0
+		const decodeQueueShare = 400_000.0
+		epp := map[string]float64{domain.RolePrefill: 500_000, domain.RoleDecode: decodeQueueShare}
+
+		roleDemand := map[string]float64{domain.RoleDecode: occupancy}
+		in := makeAnalyzerInput(nil, states(1, 1))
+		in.ArrivalRate = runLambda
+		analyzer.applyThroughputFloor(in, in.Config.(*config.ScalingPolicy), rcs, vcs,
+			occupancy, roleDemand, epp, 300, false, GinkgoLogr)
+
+		Expect(roleDemand[domain.RoleDecode]).To(BeNumerically("~", occupancy, 1),
+			"decode is not charged the queue as a backlog, so its residency must stay in its demand")
+		Expect(roleDemand[domain.RoleDecode]).To(BeNumerically(">", occupancy-decodeQueueShare+1),
+			"subtracting it would leave %.0f, which is the bug this pins", occupancy-decodeQueueShare)
+	})
+
 	It("floors the resident KV at zero when the residency it takes back exceeds what was measured", func() {
 		// Reachable only if a residency charge outlives the demand it was
 		// folded into; the arithmetic must not hand the engine a negative
