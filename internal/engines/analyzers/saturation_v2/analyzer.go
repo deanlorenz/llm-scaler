@@ -331,7 +331,27 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 	// declares a change and the [5m] mean for the rest of the straggler window
 	// -- reinstating the bug above through a flag documented as only turning
 	// off the fleet hold. ShapeChangeWindow says why the two are separate.
-	muDivisor := fleetOutput
+	// The divisor falls back the same way the queue's price does, and for the
+	// same reason: rate = tokenSec/avgOutput, so a fleet that has completed
+	// nothing divides by ZERO and the derived mu reports not-ok. With no mu the
+	// demand floor emits nothing at all -- and the floor is where the router
+	// queue is projected forward over a replica's start time
+	// (floor.backlogAtLanding). So the one window the projection exists for is
+	// the one window it could not run in.
+	//
+	// Measured on run QM (2026-10-03, shape-swap phase 1): the first queued
+	// cycle was 14:39:44 and the first throughput-demand-floor line 14:41:59 --
+	// 135 s later, by which time the router queue had already peaked at 522 and
+	// begun draining. Of 56 not-ok derived-mu cycles, 38 carried a COMPLETE
+	// ITL fit (itlA 0.0277, itlB 0.0066, itlAtKPrice 0.0254) and failed on
+	// "avgOutputTokens": 0 alone.
+	//
+	// A measurement still wins, so a warm fleet is unaffected; this only answers
+	// where there was otherwise a zero. The error direction is also the safe one
+	// for a seed that is too LARGE: a bigger divisor under-states mu, and an
+	// under-stated mu over-orders during the cold window rather than
+	// under-ordering, which is the failure this is for.
+	muDivisor := satConfig.ExpectedOutputTokens(fleetOutput, stableOutput, DefaultExpectedOutputTokens)
 	if a.shapeChangedWithin(input.Namespace, input.ModelID,
 		satConfig.ShapeChangeWindow(ShapeChangeHoldMax), time.Now()) {
 		if recent := fleetOutputLengthRecent(input.ReplicaMetrics, rolesByVariant); recent > 0 {

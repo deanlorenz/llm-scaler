@@ -621,3 +621,73 @@ func TestLogContract_ThroughputFloorBinds(t *testing.T) {
 	assert.Equal(t, floor.BacklogDrainSeconds, last["drainSeconds"])
 	assert.Equal(t, false, last["heldAtFleet"], "two readings of its own: the floor is the load's, not the cap's")
 }
+
+// A cold fleet has completed nothing, so AvgOutputTokens is 0 -- and
+// rate = tokenSec/avgOutput then divides by zero, the derived mu reports
+// not-ok, the demand floor emits nothing, and floor.backlogAtLanding never
+// runs. The projection exists to size for the queue that will have built by the
+// time capacity lands; without a mu it cannot run during the one window it is
+// for.
+//
+// Measured on run QM (2026-10-03): first queued cycle 14:39:44, first
+// throughput-demand-floor line 14:41:59 -- 135 s later, after the router queue
+// had peaked at 522. 38 of the 56 not-ok cycles carried a complete ITL fit and
+// failed on avgOutputTokens alone.
+func TestDerivedMuDivisorFallsBackWhenTheFleetHasCompletedNothing(t *testing.T) {
+	states := []domain.VariantReplicaState{
+		{VariantName: "variant-d", Role: domain.RoleDecode, AcceleratorName: "H100",
+			CurrentReplicas: 1, GPUsPerReplica: 1},
+	}
+	// A loaded replica that has completed nothing: KV in use, a queue, prompts
+	// being served, and no output length to show for it yet.
+	cold := func() []domain.ReplicaMetrics {
+		return []domain.ReplicaMetrics{
+			makeReplicaMetrics("pod-1", "variant-d", 5000, 16000, 7, 1000, 0),
+		}
+	}
+
+	seeded := func(tokens int) domain.AnalyzerInput {
+		in := makeAnalyzerInput(cold(), states)
+		p, ok := in.Config.(*config.ScalingPolicy)
+		require.True(t, ok, "the harness passes a *config.ScalingPolicy")
+		p.DefaultOutputTokens = tokens
+		return in
+	}
+
+	t.Run("the seeded length answers where the fleet has no reading", func(t *testing.T) {
+		ctx, logs := observedCtx(t)
+		a := NewSaturationAnalyzer(capacity.NewStore())
+		_, err := a.Analyze(ctx, seeded(6000))
+		require.NoError(t, err)
+
+		assert.Equal(t, float64(6000), requireLogged(t, logs, "derived-mu")["muDivisor"],
+			"a zero divisor is what stopped the floor -- and the floor is where the "+
+				"router queue is projected over a replica's start time")
+	})
+
+	t.Run("the built-in net answers when nothing is seeded either", func(t *testing.T) {
+		ctx, logs := observedCtx(t)
+		a := NewSaturationAnalyzer(capacity.NewStore())
+		_, err := a.Analyze(ctx, makeAnalyzerInput(cold(), states))
+		require.NoError(t, err)
+
+		assert.Equal(t, DefaultExpectedOutputTokens, requireLogged(t, logs, "derived-mu")["muDivisor"],
+			"512 is a weak answer and a deliberate one; zero is not an answer at all")
+	})
+
+	t.Run("a real reading still wins over the seed", func(t *testing.T) {
+		ctx, logs := observedCtx(t)
+		a := NewSaturationAnalyzer(capacity.NewStore())
+		in := makeAnalyzerInput(
+			[]domain.ReplicaMetrics{makeReplicaMetrics("pod-1", "variant-d", 5000, 16000, 7, 1000, 250)},
+			states)
+		p, ok := in.Config.(*config.ScalingPolicy)
+		require.True(t, ok)
+		p.DefaultOutputTokens = 6000
+		_, err := a.Analyze(ctx, in)
+		require.NoError(t, err)
+
+		assert.Equal(t, float64(250), requireLogged(t, logs, "derived-mu")["muDivisor"],
+			"the seed is for the cold window only; a warm fleet must be unaffected")
+	})
+}
