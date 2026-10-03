@@ -82,6 +82,25 @@ Read the review first; the implementation design says what was built.
   used as though it meant "Pods taking traffic", and the gap produced three
   symptoms investigated as unrelated bugs.
 
+Traffic shape and the units capacity is priced in — read the per-token economy
+last; it is the unit change that makes the other two land.
+
+- **[Traffic shape shifts](shape-shift-treatment.md)** — what a shape change
+  does physically, what the analyzer sees late, and the four directions with
+  which rows are measured and which are predicted. Derives decode's mu from the
+  ITL line so a shift reprices on the cycle it is observed.
+- **[Prefill capacity from a fitted TTFT model](prefill-ttft-model.md)** —
+  prefill has no throughput ceiling today. Fits `TTFT(T) = A*T + B` so `1/A` is
+  the replica's prefill token ceiling, obtainable without driving it into
+  saturation.
+- **[A per-token economy](per-token-economy.md)** — the reference for every
+  component and formula in the saturation analyzer, and the argument for making
+  tokens the native unit of demand and capacity on both roles. Both documents
+  above convert their result back into requests per second at the boundary;
+  this one deletes that conversion, which is what the stale-shape hold, the
+  output-length bucket keys and prefill's dropped backlog all depend on.
+  Measures the `I`-up direction the shape-shift table lists as unrun.
+
 ## Product and lifecycle
 
 - **[Capacity-planner positioning](capacity-planner-positioning.md)** — where a
