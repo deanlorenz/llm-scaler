@@ -275,6 +275,53 @@ just a demand term moving: `O` down lowers `demand_decode` immediately, `I` up
 raises `demand_prefill` immediately. No hold, no discount, no asymmetry to
 encode.
 
+### Composing the two roles, and three rules to take from the composite work
+
+Per-role token demand is necessary but not sufficient: it says how much each
+role needs, not what the model can serve. The composite-analyzer work on
+`deanscaler/composite-analyzer` already settles that, and this proposal should
+adopt its rules rather than invent parallel ones.
+
+**1. The roles are in series, so the model's capacity is a minimum.**
+`modelCoverageFromRoles` (spec §5.4):
+
+```
+coverage(M) = min(cov(prefill), cov(decode)) + cov(both)
+```
+
+A request must be prefilled *and* decoded, so a fleet serves
+`min(capacity_prefill / ILeff, capacity_decode / O)` requests per second.
+Adding decode replicas while prefill is the bottleneck buys nothing — which is
+exactly what runs QE and QF measured: decode's imbalance and thrash were fixed
+and the fleet still delivered 44–77 s TTFT, because prefill was the binding
+term. A per-token economy that sizes each role against its own demand in
+isolation would not have caught that; the min does.
+
+**2. Absence is undefined, not zero.** `internal/engines/aggregation/undefined.go`
+(spec §2.5, A14) states the rule this proposal most needs:
+
+> a skipped/undefined contribution must never silently enter a min or max as a
+> magic number. Feeding it in as 0 would make a min wrongly veto a scale-down;
+> feeding it in as +Inf would make a max wrongly demand infinite replicas.
+
+That is precisely the defect behind prefill's dropped backlog. Prefill has no
+`mu`, so it gets no `tf.ByRole` entry, so its share of the scheduler queue is
+*subtracted from demand* — an undefined capacity silently became zero demand,
+and 439 queued requests justified nothing. Under this proposal prefill acquires
+a defined capacity (`1/A_p`), which removes the immediate cause; the discipline
+still has to be honoured for the case where the TTFT fit is not yet ready, and
+the `(value float64, ok bool)` pair plus `minOfDefined`/`maxOfDefined` are the
+existing shape for it.
+
+**3. Normalize to dimensionless coverage at the optimizer boundary.**
+`normalizeToCompositeUnits` on `deanscaler/single-analyzer-normalize` converts a
+role's demand and supply so demand reads 1.0 at capacity. Tokens are the right
+unit for *measuring* a role; a ratio is the right unit for *combining* roles and
+analyzers, because input tokens and output tokens cannot be added. So the two
+changes compose in a fixed order: price per role in tokens, then normalize to
+coverage, then take the min across roles. Getting that order wrong is how input
+and output token rates end up summed into a number that means nothing.
+
 ## 5. Evidence
 
 Measured in runs QE and QF. **Both runs are the `I`-up cell the direction table
@@ -327,6 +374,13 @@ not read the meter.
    `single-sample` and `borrowed` holds still apply to the *ITL fit* and the
    *TTFT fit*. Those are fits over hardware behaviour, so the holds get rarer,
    not absent.
+6. **Who owns the normalization boundary.** The composite-analyzer work already
+   normalizes demand and supply so demand reads 1.0 at capacity, and already
+   defines the `min` across roles and the undefined convention. This proposal
+   changes what is measured upstream of that boundary. The two should not both
+   grow their own version of it — so either this lands on top of that work, or
+   the boundary moves here, and that is a coordination decision rather than a
+   technical one.
 
 ## 7. What to build, in order
 
@@ -343,11 +397,17 @@ land. Item 1 of shape-shift-treatment (the ITL-derived `mu`) is already built in
    beside `internal/signals/itl`, publish `1/A_p`, and price
    `demand_prefill = (lambda + Q/drain) * ILeff`. Closes the dropped share.
    Blocked on open decision 2.
-3. **Retire the shape gate.** Keep `shape.Tracker` as a demand input and a
+3. **Compose the roles.** Normalize each role's token demand to coverage, then
+   take `min(prefill, decode)` per `modelCoverageFromRoles`, with undefined
+   contributions skipped rather than read as zero. Without this, items 1 and 2
+   size each role correctly and the model is still sized wrong whenever one
+   role binds. *Depends on:* the composite-analyzer work landing, or on
+   agreeing which branch owns the normalization boundary.
+4. **Retire the shape gate.** Keep `shape.Tracker` as a demand input and a
    refit trigger; remove `staleShape` from the hold and from the queue-release
    exclusion. Delete the idle-fleet false positive by resetting the tracker when
    the fleet has served nothing for longer than the window.
-4. **Benchmark matrix.** The `I`-up cell is now measured; `O`-down and `I`-down
+5. **Benchmark matrix.** The `I`-up cell is now measured; `O`-down and `I`-down
    remain unrun. Same scorecard.
 
 ## 8. Validation
@@ -375,6 +435,13 @@ Every item ships with a negative control, run against the parent commit:
   at 25.9/s.
 - Read from the code at `7a504ead`: every formula in §3, the K2 priority chain,
   the hold labels, the queue-release condition.
+- Read from `deanscaler/composite-analyzer` and
+  `deanscaler/single-analyzer-normalize` (not merged): `modelCoverageFromRoles`
+  and its `min(prefill, decode) + both` rule, the undefined-vs-zero convention
+  in `aggregation/undefined.go`, and `normalizeToCompositeUnits` normalizing
+  demand to 1.0 at capacity. Quoted, not paraphrased, where the wording carries
+  the rule. Those branches are moving; check them before building on this
+  section.
 - **Unresolved:** why `fleet-shape-change` re-fired at 06:33:56Z on
   `1000 -> 1000.0000000000001`, which `Shape.Within` at a 20% tolerance should
   have reported as unchanged. Either the logged `was` is not the anchor, or
