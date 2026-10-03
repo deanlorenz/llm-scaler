@@ -322,6 +322,62 @@ changes compose in a fixed order: price per role in tokens, then normalize to
 coverage, then take the min across roles. Getting that order wrong is how input
 and output token rates end up summed into a number that means nothing.
 
+## 4a. Most of the decode half already exists, in the analyzer that is off
+
+The throughput analyzer (`internal/engines/analyzers/throughput`) already prices
+decode per token, and not merely as a measurement — it is the whole economy:
+
+```
+demand = Σ RequestRate_r * AvgOutputTokens_r              = lambda * O, output tokens/s
+supply = computeVariantSupply(metrics, shape, ITLAt(kSat)) = Sequences/ITL, output tokens/s
+```
+
+with `computeLocalDemand` falling back to `itl.TokenRate` directly when the EPP
+arrival rate and the engine request rate are both missing. So §4's decode half
+is mostly a matter of **not re-deriving** what is already written, rather than
+new arithmetic.
+
+It is off by default, and it was off for every run in §5. `cmd/main.go` registers
+it only when a saturation-config entry enables `throughput`, and the configs on
+both benchmark clusters list `[{name: saturation, score: 1.0}]`. The comment at
+that call site records the consequence of the earlier coupling: gating the
+arrival-rate query on it "made that floor structurally inoperable whenever
+throughput was disabled -- which is the default."
+
+**The duplication, and why it is worse than duplication:**
+
+| | throughput analyzer | `saturation_v2` |
+|---|---|---|
+| decode demand | `lambda * O`, output tokens/s | `tokenSec` then divided by `O` -> requests/s |
+| decode supply | `Sequences / ITLAt(kSat)` | the same `tokenSec`, discarded |
+| shape tracker | owns one | owns another (`shapeMemo`) |
+| ITL window + two-tier fit | owns one | owns another (`noteITL`, `itlWindows`) |
+| ITL window on a shape change | **cleared** | **deliberately not cleared** |
+| GPS check | clears the window after N mismatches | diagnostic only, never gates |
+
+The last two rows are the problem. Two copies of the same state answer the same
+question with opposite policies, each documented as correct in its own file:
+`noteITL` says the window must survive a shape change because `ITL(k)` is a
+property of the hardware — which is the whole premise of a derived mu — while
+the throughput analyzer clears it. Both cannot be right, and today neither is
+wrong in practice only because one of them never runs.
+
+**One analyzer or two?** Two questions with different answers.
+
+*How many signal producers* can stay plural. The multi-analyzer pipeline exists,
+carries per-analyzer scores and thresholds, and Dean's
+`replace AnalyzerResults slice with single CompositeSignal` keeps producers
+plural while giving the optimizer one normalized signal to read. Nothing here
+argues for collapsing that.
+
+*Who owns shape and ITL* must be exactly one. That is the defect, and the fix is
+smaller than merging analyzers: `internal/signals/shape` and
+`internal/signals/itl` are already shared packages, and only the **state** — the
+`Tracker` and the `Window` — was copied into each analyzer. Give that state a
+single owner at the signals level and have both analyzers read it. Then the
+shape-change policy is decided once, in one place, which is the precondition for
+item 4 of the build order meaning anything.
+
 ## 5. Evidence
 
 Measured in runs QE and QF. **Both runs are the `I`-up cell the direction table
@@ -388,11 +444,20 @@ This supersedes neither existing proposal; it is the unit change that makes both
 land. Item 1 of shape-shift-treatment (the ITL-derived `mu`) is already built in
 `mu_from_itl.go`.
 
+0. **One owner for shape and ITL.** Move the `shape.Tracker` and `itl.Window`
+   state out of both analyzers to a single owner at the signals level, and
+   decide the shape-change clearing policy once (§4a: the two copies disagree
+   today, and `noteITL`'s reasoning is the one consistent with a derived mu).
+   This is a refactor with no behaviour change, it is the smallest item, and
+   everything below is unsound without it — two owners means two answers.
 1. **Decode in tokens.** Stop dividing `tokenSec` by `avgOutput`; carry
    `capacity_decode` in output tokens/s and `demand_decode = (lambda + Q/drain)
-   * O`. Settles open decision 1 first. *Touches:* `deriveMu`, `floor.Term`
-   (`Mu`/`PerReplica` become token quantities), `applyThroughputFloor`, the
-   engine's demand comparison.
+   * O`. Reuse the throughput analyzer's existing arithmetic (§4a) rather than
+   writing it again — `computeDemand` and `computeVariantSupply` are already
+   this, and `computeLocalDemand` is a fallback saturation lacks. Settles open
+   decision 1 first. *Touches:* `deriveMu`, `floor.Term` (`Mu`/`PerReplica`
+   become token quantities), `applyThroughputFloor`, the engine's demand
+   comparison.
 2. **Prefill in tokens.** Collect TTFT per replica, fit `TTFT(T) = A_p*T + B_p`
    beside `internal/signals/itl`, publish `1/A_p`, and price
    `demand_prefill = (lambda + Q/drain) * ILeff`. Closes the dropped share.
@@ -435,6 +500,13 @@ Every item ships with a negative control, run against the parent commit:
   at 25.9/s.
 - Read from the code at `7a504ead`: every formula in §3, the K2 priority chain,
   the hold labels, the queue-release condition.
+- Read from the code at `7a504ead` for §4a: the throughput analyzer's
+  `computeDemand`, `computeVariantSupply` and `computeLocalDemand`; its
+  `variantState` holding a second `shape.Tracker` and `itl.Window`; the opposite
+  shape-change clearing policies; and `cmd/main.go`'s conditional registration.
+- Measured on both benchmark clusters: the analyzers list is
+  `[{name: saturation, score: 1.0}]`, so **the throughput analyzer did not run
+  in any of runs QB-QF**. Every number in §5 was produced with it off.
 - Read from `deanscaler/composite-analyzer` and
   `deanscaler/single-analyzer-normalize` (not merged): `modelCoverageFromRoles`
   and its `min(prefill, decode) + both` rule, the undefined-vs-zero convention
