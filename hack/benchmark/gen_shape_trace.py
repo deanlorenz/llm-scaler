@@ -74,6 +74,20 @@ def main() -> int:
     ts_col = out_cfg.get("timestamp_column", "timestamp")
     in_col = out_cfg.get("prompt_tokens_column", "input_length")
     out_col = out_cfg.get("output_tokens_column", "output_length")
+    # Bytes per row, which is a hard constraint and not a style question: the
+    # trace ships inline in the harness's profiles ConfigMap and the apiserver
+    # refuses one over 1048576 bytes (hack/benchmark/workload_traces.sh records
+    # the run that proved it). At the default 6 decimals and spaced separators a
+    # row is 71.8 bytes, so a trace tops out near 14,600 rows -- about 1.6x the
+    # 9,100-row shape-swap scenario. compact separators and 2 decimals bring it
+    # to 61.8, which is about 1.86x.
+    #
+    # Both default to the old behaviour so every committed trace still
+    # regenerates byte-for-byte from its params file.
+    compact = bool(out_cfg.get("compact", False))
+    ts_decimals = int(out_cfg.get("timestamp_decimals", 6))
+    if ts_decimals < 1:
+        raise SystemExit("output.timestamp_decimals must be >= 1")
 
     rows = []
     clock = 0.0  # running global offset -- each phase continues where the last left off
@@ -88,7 +102,7 @@ def main() -> int:
         out_lens = sample_lengths(phase["output_tokens"], length_dist, n, rng)
 
         for off, il, ol in zip(offsets, in_lens, out_lens):
-            rows.append({ts_col: round(clock + off, 6), in_col: int(il), out_col: int(ol)})
+            rows.append({ts_col: round(clock + off, ts_decimals), in_col: int(il), out_col: int(ol)})
 
         actual_rate = n / duration_s if duration_s else 0.0
         print(
@@ -101,11 +115,26 @@ def main() -> int:
 
     out_path = Path(args.out) if args.out else (params_path.parent / out_cfg["path"])
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    separators = (",", ":") if compact else None
     with out_path.open("w") as f:
         for row in rows:
-            f.write(json.dumps(row) + "\n")
+            f.write(json.dumps(row, separators=separators) + "\n")
 
-    print(f"Wrote {len(rows)} rows -> {out_path}", file=sys.stderr)
+    size = out_path.stat().st_size
+    CONFIGMAP_CAP = 1048576
+    print(
+        f"Wrote {len(rows)} rows -> {out_path} "
+        f"({size} bytes, {size / len(rows):.2f}/row, "
+        f"{size / CONFIGMAP_CAP * 100:.0f}% of the {CONFIGMAP_CAP}-byte ConfigMap cap)",
+        file=sys.stderr,
+    )
+    if size > CONFIGMAP_CAP:
+        print(
+            "  OVER THE CAP: the harness will refuse to bundle this and the apiserver "
+            "would refuse the ConfigMap. Shorten the phases, or set "
+            "output.compact: true and output.timestamp_decimals: 2.",
+            file=sys.stderr,
+        )
     return 0
 
 

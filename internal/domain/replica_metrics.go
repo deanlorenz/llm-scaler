@@ -127,6 +127,50 @@ type ReplicaMetrics struct {
 	// Zero when metrics are unavailable.
 	AvgOutputTokens float64
 
+	// AvgOutputTokensRecent is the same quantity over a SHORT window: the mean
+	// output tokens per request among requests that completed in roughly the
+	// last minute.
+	//
+	// It exists because AvgOutputTokens is count-weighted over [5m], and a
+	// count-weighted mean is the wrong statistic for a bimodal workload: after
+	// a 6000 -> 250 output switch, the rare long stragglers dominate the mean
+	// and a five-minute window keeps them in it for five minutes after they
+	// stop arriving. Measured per decode pod across one such switch, the [5m]
+	// figure decayed 3750 -> 2814 -> 2382 -> 2278 -> 2136 -> 250 while the
+	// arriving work was 250 throughout; the [1m] form converged in about a
+	// minute.
+	//
+	// Read as the derived mu's divisor (mu = seqs / (ITL * OL)), where the error
+	// passes straight through and cost a 4x over-order, and -- paired with
+	// AvgInputTokensRecent, never alone -- as the shape mu is priced at while a
+	// shape change is outstanding. Everything else keeps AvgOutputTokens: a
+	// short window everywhere would only make the shape noisier on a quiet
+	// fleet.
+	//
+	// Zero when the engine does not publish it or the pod completed nothing in
+	// the window; the divisor then falls back to AvgOutputTokens.
+	AvgOutputTokensRecent float64
+
+	// AvgInputTokensRecent is AvgInputTokens over the SAME short window as
+	// AvgOutputTokensRecent, and exists only so the two can be read together.
+	//
+	// KVreq = ILeff + OL/2 is dominated by the prompt only while the prompt is
+	// the large half. At 6000 in / 1000 out, OL/2 is 500 of 6500 -- 8%. At
+	// 1000 in / 4000 out it is 2000 of 3000 -- 67%. A shape swap crosses from
+	// the first to the second, which is exactly when a one-sided short window
+	// is worst: taking the [1m] output while the prompt still carries the [5m]
+	// average prices this shape's generation on top of the previous shape's
+	// prompt, and that sum is larger than either real shape.
+	//
+	// Measured across one 6000/1000 -> 1000/4000 switch: the divisor took the
+	// [1m] output and reached 4000 within two cycles while KVreq still read
+	// 5896 against a settled 3000, so the derived mu read 1.57 req/s against a
+	// settled 2.76 and the floor ordered 7 decode replicas where 3 was right.
+	//
+	// Zero when the engine does not publish it or the pod completed nothing in
+	// the window; the caller then falls back to AvgInputTokens.
+	AvgInputTokensRecent float64
+
 	// AvgInputTokens is the average prompt tokens per request on this replica.
 	// Derived from rate(prompt_tokens_sum) / rate(prompt_tokens_count).
 	// Used by saturation V2 for token-demand estimation (k2 derivation) and by
@@ -155,6 +199,45 @@ type ReplicaMetrics struct {
 	// TA notation: ITL_obs — the (k*, ITL_obs) pair drives OLS calibration of ITL(k) = A·k + B.
 	// Zero when metrics are unavailable.
 	AvgITL float64
+
+	// AvgTTFT is the average time to first token on this replica in seconds.
+	// Derived from rate(vllm:time_to_first_token_seconds_sum[1m]) / rate(..._count[1m]),
+	// and the SGLang histogram of the same name.
+	//
+	// This is the PREFILL side's latency, as AvgITL is decode's: a prefill
+	// replica computes the prompt, emits one token and hands the KV on, so on a
+	// disaggregated fleet TTFT is most of what it does.
+	//
+	// IT IS A DIAGNOSTIC. Nothing in the decision path reads it, and that is a
+	// measured conclusion rather than an omission: it INCLUDES queue wait, so a
+	// TTFT that rises at constant work means the fleet is behind, not that a
+	// replica got slower. Fitting TTFT(T) = A·T + B to recover a capacity from
+	// it was built and then removed -- the intercept reached 82 seconds because
+	// queue wait landed in a term meant to be a fixed per-request cost, and the
+	// velocities swung 56,764 to 392,195 tok/s against a measured ~138,000.
+	// docs/proposals/prefill-ttft-model.md records that result. Prefill's
+	// capacity comes from PrefillComputedTokenRate below, which excludes queue
+	// wait by construction and needs no regression at all.
+	// Zero when metrics are unavailable.
+	AvgTTFT float64
+
+	// PrefillComputedTokenRate is the rate at which this replica computes
+	// prefill KV tokens, in tokens/second, excluding tokens the prefix cache
+	// already held. Derived from
+	// rate(vllm:request_prefill_kv_computed_tokens_sum[1m]).
+	//
+	// This is PREFILL's capacity in the unit prefill is bounded by, and the
+	// figure shape_change.go's saturatedCompletionRate was waiting for. A
+	// request rate cannot serve: under overload it is the rate the fleet is
+	// being SERVED at, which reads the same at one replica and at ten
+	// (measured: 4.75, 4.62 and 4.50 req/s at 1, 2 and 10 replicas while the
+	// token rate went 138,875 to 933,750), and a rate learned at one prompt
+	// length says nothing about another.
+	//
+	// Zero on SGLang, which publishes no per-stage prefill counter
+	// (sgl-project/sglang issue #14303); those variants keep the request-rate
+	// reading.
+	PrefillComputedTokenRate float64
 
 	// --- Fields for Throughput Analyzer ---
 

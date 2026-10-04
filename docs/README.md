@@ -66,6 +66,7 @@ stack](guides/testing-with-llm-d/) · [benchmark the scaling manager](guides/ben
 - **[Install methods](reference/install-methods.md)** — installer, kustomize, and per-platform entry points
 - **[The GPU limiter](reference/gpu-limiter.md)** and **[the quota limiter](reference/quota-limiter.md)** — bounding the scaling manager by real accelerators, and by declared caps
 - **[Metrics and health](reference/metrics.md)** · **[Prometheus integration](reference/prometheus.md)**
+- **[Router configuration](reference/router-configuration.md)** — the two router settings that decide what the scaling manager sees: flow control bounds the queue it reads as demand, and the scheduling profiles decide whether the replicas it orders get used
 - **[SGLang backend](reference/sglang-backend.md)** — auto-detected per variant; nothing to configure
 - **[Troubleshooting](reference/troubleshooting.md)**
 
@@ -80,6 +81,7 @@ stack](guides/testing-with-llm-d/) · [benchmark the scaling manager](guides/ben
 
 - **[Development setup](developer-guide/development.md)** · **[Testing](developer-guide/testing.md)** · **[Debugging](developer-guide/debugging.md)**
 - **[Multi-analyzer pipeline](developer-guide/multi-analyzer-pipeline.md)** — how analyzers are registered, run and scored
+- **[Saturation analyzer](developer-guide/saturation-analyzer.md)** — how it decides, with every formula and where each one lives
 - **[Throughput analyzer](developer-guide/throughput-analyzer.md)** · **[saturation demand floor](developer-guide/saturation-demand-floor.md)** · **[pod scraping source](developer-guide/pod-scraping-source.md)**
 - **[Analyzer checklists](developer-guide/analyzer-checklists.md)** — what a new analyzer must show before it graduates
 - **[Analyzer evidence](developer-guide/analyzer-evidence.md)** — what each scaling signal was measured to do, and on which run

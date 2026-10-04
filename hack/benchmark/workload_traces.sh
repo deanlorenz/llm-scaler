@@ -21,6 +21,16 @@
 # names, refuses when it is not there, removes traces of ours the profile
 # does not name (a ConfigMap holds 1 MiB in all, and one trace is 900 KB),
 # and refuses when what would be bundled exceeds that.
+#
+# 1048576 is KUBERNETES' limit, not a conservative choice of ours, and the
+# guard here is the only cheap place to learn that. Raising it to 1.4 MiB to
+# admit an 18,000-row trace (1,305,632 bytes) was tried on 2026-10-04: the
+# apiserver refused the ConfigMap outright --
+#   The ConfigMap "guidellm-profiles" is invalid: []: Too long: may not be
+#   more than 1048576 bytes
+# -- two minutes into a run that had already deployed the fleet. The guard
+# turns that into an instant local refusal. Do not raise it; shorten the
+# trace instead.
 set -euo pipefail
 
 PROFILE="${1:?usage: workload_traces.sh <profile> <scenarios dir> <harness profiles dir> <harness>}"
