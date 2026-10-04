@@ -288,6 +288,15 @@ It is a seed for that window only. The fleet's own measurement displaces it as
 soon as one exists, so a figure of the right order is what matters and an exact
 one buys nothing.
 
+A value the scaling manager cannot read as a whole number of tokens is
+**rejected at the trigger that carried it**, with an error naming the key and
+quoting the value — `"lots"`, `"-1"` and `"6000.5"` are all refused rather than
+read as zero, because the only view an operator gets of a bad value is that
+error. `"0"` is the one exception: it is accepted and means *unset*, exactly as
+leaving the key out does, so the table above falls through to the built-in
+default. Prefer omitting the key to writing `"0"` — the two behave identically
+and the omission says so.
+
 **Why the trigger and not this ConfigMap.** The figure is a fact about one
 workload's traffic, not a threshold a class of workloads shares — a
 fleet-wide generation length is already what the built-in 512 is. It sits beside
