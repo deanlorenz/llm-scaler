@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -1718,18 +1719,13 @@ func withExpectedOutputTokens(replicaMetrics []domain.ReplicaMetrics,
 	if !(expected > 0) {
 		return replicaMetrics
 	}
-	needed := false
-	for _, rm := range replicaMetrics {
-		if !(rm.AvgOutputTokens > 0) && generatesOutput(rm, rolesByVariant) {
-			needed = true
-			break
-		}
-	}
+	needed := slices.ContainsFunc(replicaMetrics, func(rm domain.ReplicaMetrics) bool {
+		return !(rm.AvgOutputTokens > 0) && generatesOutput(rm, rolesByVariant)
+	})
 	if !needed {
 		return replicaMetrics
 	}
-	out := make([]domain.ReplicaMetrics, len(replicaMetrics))
-	copy(out, replicaMetrics)
+	out := slices.Clone(replicaMetrics)
 	for i := range out {
 		if !(out[i].AvgOutputTokens > 0) && generatesOutput(out[i], rolesByVariant) {
 			out[i].AvgOutputTokens = expected
@@ -1801,12 +1797,21 @@ func computeModelWorkloadAverages(replicaMetrics []domain.ReplicaMetrics, rolesB
 // Both axes of the fleet's shape are this computation (fleetOutputLength,
 // servedPromptLength). The throughput analyzer's averageShapeMetrics is a
 // third instance of it in another package, left alone here.
+//
+// NaN is skipped EXPLICITLY, because `v <= 0` does not skip it: every
+// comparison against NaN is false, so a NaN reading passes that guard and then
+// poisons both accumulators -- one bad replica turns the whole fleet's average
+// into NaN, and every figure priced from it follows, with no reading anywhere
+// that looks wrong. The collector drops NaN and Inf before they reach these
+// fields today, so this is insurance rather than a live fix; it belongs here
+// rather than in each caller because this is where the arithmetic happens, and
+// because a caller that forgets is exactly the case it has to survive.
 func fleetAverage(replicas []domain.ReplicaMetrics, value func(domain.ReplicaMetrics) float64, include func(domain.ReplicaMetrics) bool) float64 {
 	var weighted, weights, plain float64
 	var n int
 	for _, rm := range replicas {
 		v := value(rm)
-		if v <= 0 || !include(rm) {
+		if math.IsNaN(v) || v <= 0 || !include(rm) {
 			continue
 		}
 		plain += v
