@@ -192,6 +192,26 @@ var _ = Describe("deriveMu", func() {
 			"and that is a number the engine will not admit")
 	})
 
+	// The same mu, priced on one window or two. A swap that raises the
+	// generation and drops the prompt has the [1m] divisor arrive before the
+	// [5m] shape does, and the mixed pair prices a request larger than either
+	// real shape -- fewer sequences in the cache, a lower mu, more replicas
+	// ordered. The run is in analyzer.go's muInput comment.
+	It("prices a swap above the mixed-window pair", func() {
+		const arrivingOutput = 4000
+		mixed := deriveMu(tracedModel, tracedParams, tracedKv,
+			shape.New(5429, 1800, 0), tracedK, arrivingOutput)
+		paired := deriveMu(tracedModel, tracedParams, tracedKv,
+			shape.New(1000, arrivingOutput, 0), tracedK, arrivingOutput)
+
+		Expect(mixed.ok).To(BeTrue())
+		Expect(paired.ok).To(BeTrue())
+		Expect(paired.rate).To(BeNumerically(">", mixed.rate),
+			"the paired shape fits more sequences, so one replica completes more per second")
+		Expect(paired.tokenSec).To(BeNumerically(">", mixed.tokenSec),
+			"and the gain is in the sequence count, not the divisor -- both divide by 4000")
+	})
+
 	It("declines rather than guessing", func() {
 		Expect(deriveMu(itl.Model{}, tracedParams, tracedKv, shape.New(1000, 6000, 0), tracedK, 6000).ok).To(BeFalse(),
 			"no fitted model")

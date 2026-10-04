@@ -32,6 +32,7 @@ type podMetricData struct {
 	avgOutputTokensRecent       float64
 	avgOutputTokensTimestamp    time.Time
 	avgInputTokens              float64
+	avgInputTokensRecent        float64
 	avgInputTokensTimestamp     time.Time
 	prefixCacheHitRate          float64
 	prefixCacheHitRateTimestamp time.Time
@@ -292,6 +293,30 @@ func (c *ReplicaMetricsCollector) extractPodMetrics(
 				if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) {
 					podData[instanceKey].avgInputTokens = value.Value
 					podData[instanceKey].avgInputTokensTimestamp = value.Timestamp
+				}
+			}
+		}
+	}
+
+	// Process the SHORT-window input length, read only beside the
+	// short-window output length (see AvgInputTokensRecent)
+	if result := results[registration.QueryAvgInputTokensRecent]; result != nil {
+		if !result.HasError() {
+			for _, value := range result.Values {
+				instanceKey, podName, vaName := c.buildInstanceKey(ctx, namespace, value.Labels)
+				if instanceKey == "" {
+					continue
+				}
+
+				if podData[instanceKey] == nil {
+					podData[instanceKey] = &podMetricData{
+						podName: podName,
+						vaName:  vaName,
+					}
+				}
+				// NaN check: rate division by zero produces NaN
+				if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) {
+					podData[instanceKey].avgInputTokensRecent = value.Value
 				}
 			}
 		}

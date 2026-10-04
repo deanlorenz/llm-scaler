@@ -140,15 +140,36 @@ type ReplicaMetrics struct {
 	// arriving work was 250 throughout; the [1m] form converged in about a
 	// minute.
 	//
-	// Read ONLY as the derived mu's divisor (mu = seqs / (ITL * OL)), where the
-	// error passes straight through and cost a 4x over-order. Every other
-	// consumer keeps AvgOutputTokens: KVreq = ILeff + OL/2 is dominated by the
-	// prompt, so the same error moves it by about 1.5%, and a short window
-	// everywhere would only make the shape noisier on a quiet fleet.
+	// Read as the derived mu's divisor (mu = seqs / (ITL * OL)), where the error
+	// passes straight through and cost a 4x over-order, and -- paired with
+	// AvgInputTokensRecent, never alone -- as the shape mu is priced at while a
+	// shape change is outstanding. Everything else keeps AvgOutputTokens: a
+	// short window everywhere would only make the shape noisier on a quiet
+	// fleet.
 	//
 	// Zero when the engine does not publish it or the pod completed nothing in
 	// the window; the divisor then falls back to AvgOutputTokens.
 	AvgOutputTokensRecent float64
+
+	// AvgInputTokensRecent is AvgInputTokens over the SAME short window as
+	// AvgOutputTokensRecent, and exists only so the two can be read together.
+	//
+	// KVreq = ILeff + OL/2 is dominated by the prompt only while the prompt is
+	// the large half. At 6000 in / 1000 out, OL/2 is 500 of 6500 -- 8%. At
+	// 1000 in / 4000 out it is 2000 of 3000 -- 67%. A shape swap crosses from
+	// the first to the second, which is exactly when a one-sided short window
+	// is worst: taking the [1m] output while the prompt still carries the [5m]
+	// average prices this shape's generation on top of the previous shape's
+	// prompt, and that sum is larger than either real shape.
+	//
+	// Measured across one 6000/1000 -> 1000/4000 switch: the divisor took the
+	// [1m] output and reached 4000 within two cycles while KVreq still read
+	// 5896 against a settled 3000, so the derived mu read 1.57 req/s against a
+	// settled 2.76 and the floor ordered 7 decode replicas where 3 was right.
+	//
+	// Zero when the engine does not publish it or the pod completed nothing in
+	// the window; the caller then falls back to AvgInputTokens.
+	AvgInputTokensRecent float64
 
 	// AvgInputTokens is the average prompt tokens per request on this replica.
 	// Derived from rate(prompt_tokens_sum) / rate(prompt_tokens_count).

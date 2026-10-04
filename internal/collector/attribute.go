@@ -407,6 +407,7 @@ func (c *ReplicaMetricsCollector) attributeInstance(
 		AvgOutputTokens:          data.avgOutputTokens,
 		AvgOutputTokensRecent:    data.avgOutputTokensRecent,
 		AvgInputTokens:           data.avgInputTokens,
+		AvgInputTokensRecent:     data.avgInputTokensRecent,
 		PrefixCacheHitRate:       data.prefixCacheHitRate,
 		AvgITL:                   avgITL,
 		AvgTTFT:                  avgTTFT,

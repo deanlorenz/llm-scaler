@@ -160,6 +160,21 @@ func servedPromptLength(replicas []domain.ReplicaMetrics) float64 {
 		func(rm domain.ReplicaMetrics) bool { return !rm.FromWarmPool })
 }
 
+// servedPromptLengthRecent is servedPromptLength over the SHORT window, and
+// is read ONLY together with fleetOutputLengthRecent -- never one without the
+// other. KVreq is ILeff + OL/2, so a short-window generation length against a
+// [5m] prompt length prices the arriving shape's output on top of the
+// departing shape's prompt, and that sum exceeds either real shape. The run
+// that measured it is in domain.ReplicaMetrics.AvgInputTokensRecent.
+//
+// Zero when no replica reports the short-window figure; the caller then keeps
+// the [5m] shape whole rather than moving half of it.
+func servedPromptLengthRecent(replicas []domain.ReplicaMetrics) float64 {
+	return fleetAverage(replicas,
+		func(rm domain.ReplicaMetrics) float64 { return rm.AvgInputTokensRecent },
+		func(rm domain.ReplicaMetrics) bool { return !rm.FromWarmPool })
+}
+
 // saturatedCompletionRate is what one replica completes per second while
 // saturated. For a role that generates, it is priced from the tokens it is
 // GENERATING rather than the requests it is finishing.

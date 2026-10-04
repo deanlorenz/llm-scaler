@@ -691,3 +691,95 @@ func TestDerivedMuDivisorFallsBackWhenTheFleetHasCompletedNothing(t *testing.T) 
 			"the seed is for the cold window only; a warm fleet must be unaffected")
 	})
 }
+
+// Both halves of the shape mu is priced at come from the same window.
+//
+// deriveMu reads the output length twice: as the divisor of
+// rate = tokenSec/avgOutput, and inside the shape, where KVreq = ILeff + OL/2
+// decides how many sequences the cache holds. The divisor follows the short
+// window during a shape change (TestDerivedMuDivisorFollowsTheShapeChange);
+// before this guard the shape did not, so a swap priced the arriving
+// generation on top of the departing prompt.
+//
+// Measured on run QS (2026-10-04, 6000/1000 -> 1000/4000): the divisor reached
+// 4000 while kvReq still read 5896 against a settled 3000, the derived mu
+// collapsed to 1.57 against the 2.76 it settled at, and the floor held 7 decode
+// replicas for about seven minutes on a router queue that was zero throughout.
+func TestDerivedMuPricesOneShapeNotTwo(t *testing.T) {
+	states := []domain.VariantReplicaState{
+		{VariantName: "variant-d", Role: domain.RoleDecode, AcceleratorName: "H100",
+			CurrentReplicas: 1, GPUsPerReplica: 1},
+	}
+	// The four figures a swap has in flight at once: the [5m] pair still
+	// decaying from the old shape, and the [1m] pair already on the new one.
+	serving := func(in5m, out5m, in1m, out1m float64) []domain.ReplicaMetrics {
+		rm := makeReplicaMetrics("pod-1", "variant-d", 5000, 16000, 0, in5m, out5m)
+		rm.AvgOutputTokensRecent = out1m
+		rm.AvgInputTokensRecent = in1m
+		return []domain.ReplicaMetrics{rm}
+	}
+
+	t.Run("a steady shape prices both halves at 5m", func(t *testing.T) {
+		ctx, logs := observedCtx(t)
+		a := NewSaturationAnalyzer(capacity.NewStore())
+
+		_, err := a.Analyze(ctx, makeAnalyzerInput(serving(6000, 1000, 6000, 1000), states))
+		require.NoError(t, err)
+
+		got := requireLogged(t, logs, "derived-mu")
+		assert.Equal(t, false, got["muShortWindow"], "no change outstanding")
+		assert.Equal(t, float64(6000), got["muInputTokens"])
+		assert.Equal(t, float64(6500), got["kvReqPerSeq"], "6000 + 1000/2")
+		assert.Equal(t, got["kvReqFleet"], got["kvReqPerSeq"],
+			"a steady fleet prices at its own reading, so the two agree")
+	})
+
+	t.Run("mid-swap the prompt moves to the short window with the generation", func(t *testing.T) {
+		a := NewSaturationAnalyzer(capacity.NewStore())
+
+		// Cycle one anchors the departing shape, 6000 in / 1000 out.
+		ctx1, _ := observedCtx(t)
+		_, err := a.Analyze(ctx1, makeAnalyzerInput(serving(6000, 1000, 6000, 1000), states))
+		require.NoError(t, err)
+
+		// Cycle two is the switch. The [5m] pair has barely moved -- these are
+		// the figures the QS log actually carried one cycle in -- while the
+		// [1m] pair is already serving 1000 in / 4000 out.
+		ctx2, logs2 := observedCtx(t)
+		_, err = a.Analyze(ctx2, makeAnalyzerInput(serving(5429, 1800, 1000, 4000), states))
+		require.NoError(t, err)
+
+		got := requireLogged(t, logs2, "derived-mu")
+		assert.Equal(t, true, got["muShortWindow"])
+		assert.Equal(t, float64(4000), got["muDivisor"], "the arriving generation")
+		assert.Equal(t, float64(1000), got["muInputTokens"], "and the arriving prompt")
+		assert.Equal(t, float64(3000), got["kvReqPerSeq"],
+			"1000 + 4000/2 -- the shape being served. Priced from the [5m] prompt "+
+				"with the [1m] generation this read 6329, larger than either real shape")
+		assert.Equal(t, float64(6329), got["kvReqFleet"],
+			"the fleet's own lagging reading is still reported, for noteLineMismatch")
+	})
+
+	// The pairing is conditional on the short-window prompt existing. An engine
+	// that publishes one counter and not the other keeps the divisor on the
+	// short window and the shape on [5m]: that IS the mismatch above, but the
+	// alternative is the straggler bug the short window exists for, which is
+	// the larger error by an order of magnitude.
+	t.Run("without a short-window prompt the divisor still moves alone", func(t *testing.T) {
+		a := NewSaturationAnalyzer(capacity.NewStore())
+
+		ctx1, _ := observedCtx(t)
+		_, err := a.Analyze(ctx1, makeAnalyzerInput(serving(6000, 1000, 0, 1000), states))
+		require.NoError(t, err)
+
+		ctx2, logs2 := observedCtx(t)
+		_, err = a.Analyze(ctx2, makeAnalyzerInput(serving(5429, 1800, 0, 4000), states))
+		require.NoError(t, err)
+
+		got := requireLogged(t, logs2, "derived-mu")
+		assert.Equal(t, false, got["muShortWindow"])
+		assert.Equal(t, float64(4000), got["muDivisor"], "the divisor is the half that is published")
+		assert.Equal(t, float64(5429), got["muInputTokens"])
+		assert.Equal(t, got["kvReqFleet"], got["kvReqPerSeq"])
+	})
+}

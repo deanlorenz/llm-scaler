@@ -352,10 +352,41 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 	// under-stated mu over-orders during the cold window rather than
 	// under-ordering, which is the failure this is for.
 	muDivisor := satConfig.ExpectedOutputTokens(fleetOutput, stableOutput, DefaultExpectedOutputTokens)
+	// muInput is the prompt length the same mu is priced at, and it moves to
+	// the short window with the divisor or not at all.
+	//
+	// deriveMu reads the output length twice over: once as the divisor of
+	// rate = tokenSec/avgOutput, and once inside the shape, where KVreq =
+	// ILeff + OL/2 sets how many sequences fit. Moving only the divisor to the
+	// short window leaves the two halves of that division on different
+	// timescales, which is at its worst exactly here: a swap that raises the
+	// generation and drops the prompt has the divisor reach the new output in
+	// about a minute while KVreq still carries the old prompt, so the priced
+	// request is larger than either shape ever was and mu collapses.
+	//
+	// Measured on run QS (2026-10-04, 6000/1000 -> 1000/4000, a scenario whose
+	// documented answer is 2 decode replicas then 3): across the switch the
+	// divisor went 1088 -> 2897 -> 4000 while kvReq lagged 6251 -> 6030 ->
+	// 5896 toward a settled 3000, and the derived mu went 5.47 -> 2.12 -> 1.57
+	// against the 2.76 it settled at. The floor read replicasImplied 5.77 and
+	// the fleet sat at 7 decode replicas for about seven minutes. The router
+	// queue was ZERO on every one of those cycles, so none of it was a backlog
+	// response -- it was the price.
+	//
+	// Both halves or neither. If an engine publishes the short-window output
+	// but not the short-window prompt the divisor still moves alone, which is
+	// this mismatch -- but the alternative is the straggler bug the short
+	// window exists for, and that one is the larger error by an order of
+	// magnitude (3750 against 250). vLLM and SGLang both publish the pair, so
+	// the single-sided path is the engine-has-no-counter case, not a race.
+	muInput, muShortWindow := fleetInput, false
 	if a.shapeChangedWithin(input.Namespace, input.ModelID,
 		satConfig.ShapeChangeWindow(ShapeChangeHoldMax), time.Now()) {
 		if recent := fleetOutputLengthRecent(input.ReplicaMetrics, rolesByVariant); recent > 0 {
 			muDivisor = recent
+			if recentIn := servedPromptLengthRecent(input.ReplicaMetrics); recentIn > 0 {
+				muInput, muShortWindow = recentIn, true
+			}
 		}
 	}
 
@@ -417,6 +448,15 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 		itlModel := itlModels[rm.VariantName]
 		engineParams := engineParamsFor(a, input.Namespace, input.ModelID, rm.VariantName)
 		fleetShape := shape.New(fleetInput, fleetOutput, rm.PrefixCacheHitRate)
+		// muShape is the shape mu is PRICED at: fleetShape on a steady fleet,
+		// and both halves on the short window while a shape change is
+		// outstanding (see muInput above). fleetShape stays the fleet's own
+		// [5m] reading, because that is the figure noteLineMismatch compares
+		// an observed token rate against.
+		muShape := fleetShape
+		if muShortWindow {
+			muShape = shape.New(muInput, muDivisor, rm.PrefixCacheHitRate)
+		}
 		// Only a generating role is priced from the ITL line. ITL is the gap
 		// between two generated tokens, and a prefill replica emits one and
 		// hands the KV to decode, so tokenSec/avgOutput does not describe it.
@@ -432,7 +472,7 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 		if canonicalRole(role) == domain.RoleDecode {
 			kPrice := pricingK(satConfig)
 			derived = deriveMu(itlModel, engineParams, rm.TotalKvCapacityTokens,
-				fleetShape, kPrice, muDivisor)
+				muShape, kPrice, muDivisor)
 			// Every term, because the result alone cannot be attributed to one.
 			// A derived mu that is wrong by 8x looks identical in the log
 			// whether the fault is the output length, the sequence count, the
@@ -451,7 +491,11 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 				"itlA", itlModel.A, "itlB", itlModel.B, "itlZero", itlModel.IsZero(),
 				"avgOutputTokens", fleetShape.AvgOutputTokens,
 				"muDivisor", muDivisor,
-				"kvReqPerSeq", fleetShape.KVreq,
+				"avgInputTokens", fleetShape.AvgInputTokens,
+				"muInputTokens", muInput,
+				"muShortWindow", muShortWindow,
+				"kvReqPerSeq", muShape.KVreq,
+				"kvReqFleet", fleetShape.KVreq,
 				"replicaKvTokens", rm.TotalKvCapacityTokens,
 				"maxNumSeqs", maxSeqs)
 		}

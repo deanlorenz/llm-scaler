@@ -18,7 +18,11 @@ const (
 	// See domain.ReplicaMetrics.AvgOutputTokensRecent for why both exist.
 	QueryAvgOutputTokensRecent = "avg_output_tokens_recent"
 	QueryAvgInputTokens        = "avg_input_tokens"
-	QueryPrefixCacheHitRate    = "prefix_cache_hit_rate"
+	// QueryAvgInputTokensRecent is QueryAvgInputTokens over the same short
+	// window as QueryAvgOutputTokensRecent, and is read only together with it.
+	// See domain.ReplicaMetrics.AvgInputTokensRecent.
+	QueryAvgInputTokensRecent = "avg_input_tokens_recent"
+	QueryPrefixCacheHitRate   = "prefix_cache_hit_rate"
 
 	// Scheduler flow control queries (model-level, from inference scheduler)
 	QuerySchedulerQueueSize  = "scheduler_queue_size"
@@ -125,6 +129,19 @@ func RegisterSaturationQueries(sourceRegistry *source.SourceRegistry) {
 		Template:    `max by (model_name, instance, pod) (rate(vllm:request_prompt_tokens_sum{namespace="{{.namespace}}"}[5m]) / rate(vllm:request_prompt_tokens_count{namespace="{{.namespace}}"}[5m]))`,
 		Params:      []string{source.ParamNamespace},
 		Description: "Average input tokens per completed request (5m rate)",
+	})
+
+	// The same over the SHORT window AvgOutputTokensRecent uses. The two are
+	// read as a PAIR, never one without the other: KVreq is ILeff + OL/2, so a
+	// [1m] output length against a [5m] prompt length prices one shape's
+	// generation on top of the previous shape's prompt. See
+	// domain.ReplicaMetrics.AvgInputTokensRecent for the measurement.
+	registry.MustRegister(source.QueryTemplate{
+		Name:        QueryAvgInputTokensRecent,
+		Type:        source.QueryTypePromQL,
+		Template:    `max by (model_name, instance, pod) (rate(vllm:request_prompt_tokens_sum{namespace="{{.namespace}}"}[1m]) / rate(vllm:request_prompt_tokens_count{namespace="{{.namespace}}"}[1m]))`,
+		Params:      []string{source.ParamNamespace},
+		Description: "Mean input tokens per request per pod over a SHORT window, read only together with AvgOutputTokensRecent",
 	})
 
 	// Prefix cache hit rate per instance (5m rate)
@@ -252,6 +269,16 @@ func registerSGLangSaturationQueries(registry *source.QueryList) {
 		Template:    `max by (model_name, instance, pod) (rate(sglang:prompt_tokens_histogram_sum{namespace="{{.namespace}}"}[5m]) / rate(sglang:prompt_tokens_histogram_count{namespace="{{.namespace}}"}[5m]))`,
 		Params:      []string{source.ParamNamespace},
 		Description: "Average input tokens per completed request (5m rate) (SGLang)",
+	})
+
+	// The same over the SHORT window, read only together with
+	// QueryAvgOutputTokensRecent; see the vLLM registration above.
+	registerForEngine(registry, inferenceengine.EngineSGLang, source.QueryTemplate{
+		Name:        QueryAvgInputTokensRecent,
+		Type:        source.QueryTypePromQL,
+		Template:    `max by (model_name, instance, pod) (rate(sglang:prompt_tokens_histogram_sum{namespace="{{.namespace}}"}[1m]) / rate(sglang:prompt_tokens_histogram_count{namespace="{{.namespace}}"}[1m]))`,
+		Params:      []string{source.ParamNamespace},
+		Description: "Mean input tokens per request per pod over a SHORT window (SGLang)",
 	})
 
 	// Prefix cache hit rate per instance (5m rate).
