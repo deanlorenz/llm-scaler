@@ -476,6 +476,7 @@ func (a *SaturationAnalyzer) applyThroughputFloor(
 // not changed: it comes from aggregateRoleDemand as DemandByRole plus the
 // queue's per-role charge, while the post-floor `want` is an independent
 // (lambda + backlog / drain) x P / mu with no queue term at all.
+
 // offeredArrivalRate is the model-level arrival rate: the scheduler's, or the
 // completion rate of the replicas that generate output when the scheduler
 // reports none.

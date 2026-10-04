@@ -516,8 +516,6 @@ func (a *SaturationAnalyzer) settleFleetShape(namespace, modelID string, ownRead
 	}
 }
 
-// fleetShapeState reports the stable output length the keys are built from
-// and whether a change is outstanding, without observing anything.
 // shapeChangedWithin reports whether this model's fleet shape was last declared
 // changed within the given window, independently of whether a hold was raised.
 //
@@ -543,6 +541,8 @@ func (a *SaturationAnalyzer) shapeChangedWithin(namespace, modelID string,
 	return now.Sub(memo.lastChangedAt) < window
 }
 
+// fleetShapeState reports the stable output length the keys are built from
+// and whether a change is outstanding, without observing anything.
 func (a *SaturationAnalyzer) fleetShapeState(namespace, modelID string) (out, in float64, outstanding bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

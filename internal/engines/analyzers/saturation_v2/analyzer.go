@@ -1690,31 +1690,6 @@ func estimateCapacityFromParams(params *capacity.EngineParams, avgInput, avgOutp
 	return 0
 }
 
-// computeModelWorkloadAverages computes the model-level average input tokens,
-// output tokens, and prefix cache hit rate from replica metrics across all
-// variants. These averages enable capacity estimation for zero-replica variants
-// using the k2 derivation formula, and scheduler queue demand estimation.
-//
-// The output length is averaged over the replicas that GENERATE output, which
-// on a P/D fleet excludes prefill. A prefill replica completes every request
-// after one token (it hands off to decode), so its own
-// vllm:request_generation_tokens averages ~1 -- not a measurement of the
-// workload's output length but a property of the role. Folding it into an
-// unweighted mean halves the model's output length at one prefill per decode
-// replica and quarters it at three, and everything priced per queued request
-// downstream (the scheduler queue's output-token charge, the zero-replica k2
-// derivation) shrinks with it. Measured on a P/D run: 213 requests queued at
-// the scheduler were charged 500 output tokens each against a 1000-token
-// workload, because the one prefill replica's ~1 averaged against the one
-// decode replica's 1000.
-//
-// Input tokens and the prefix-cache hit rate are still averaged over every
-// replica: both roles see the same prompts, and in a P/D deployment the prefix
-// cache that a queued prompt can hit lives on the prefill side.
-//
-// rolesByVariant maps variant name to its P/D role; a variant absent from it
-// is treated as domain.RoleBoth, so a non-disaggregated fleet averages over
-// every replica exactly as before.
 // withExpectedOutputTokens returns replicaMetrics with expected filled in as
 // the output length of every OUTPUT-GENERATING replica that reports none.
 //
@@ -1763,6 +1738,31 @@ func withExpectedOutputTokens(replicaMetrics []domain.ReplicaMetrics,
 	return out
 }
 
+// computeModelWorkloadAverages computes the model-level average input tokens,
+// output tokens, and prefix cache hit rate from replica metrics across all
+// variants. These averages enable capacity estimation for zero-replica variants
+// using the k2 derivation formula, and scheduler queue demand estimation.
+//
+// The output length is averaged over the replicas that GENERATE output, which
+// on a P/D fleet excludes prefill. A prefill replica completes every request
+// after one token (it hands off to decode), so its own
+// vllm:request_generation_tokens averages ~1 -- not a measurement of the
+// workload's output length but a property of the role. Folding it into an
+// unweighted mean halves the model's output length at one prefill per decode
+// replica and quarters it at three, and everything priced per queued request
+// downstream (the scheduler queue's output-token charge, the zero-replica k2
+// derivation) shrinks with it. Measured on a P/D run: 213 requests queued at
+// the scheduler were charged 500 output tokens each against a 1000-token
+// workload, because the one prefill replica's ~1 averaged against the one
+// decode replica's 1000.
+//
+// Input tokens and the prefix-cache hit rate are still averaged over every
+// replica: both roles see the same prompts, and in a P/D deployment the prefix
+// cache that a queued prompt can hit lives on the prefill side.
+//
+// rolesByVariant maps variant name to its P/D role; a variant absent from it
+// is treated as domain.RoleBoth, so a non-disaggregated fleet averages over
+// every replica exactly as before.
 func computeModelWorkloadAverages(replicaMetrics []domain.ReplicaMetrics, rolesByVariant map[string]string) (avgInput, avgOutput, avgHitRate float64) {
 	var count, outputCount int
 	for _, rm := range replicaMetrics {
