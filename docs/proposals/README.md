@@ -58,7 +58,9 @@ Read the review first; the implementation design says what was built.
 - **[Utilization-share optimizer](utilization-share-optimizer.md)** — built:
   shadow mode and actuation (stages 1 and 2); the short window for urgent
   transfers (stage 3) is design. Spend the whole quota: every model gets what it
-  needs, and the spare is shared as headroom by weight. Rebalance by transfer
+  needs, and the spare is shared as headroom by weight; when the quota cannot hold every
+  model's peak at once, capped at one replica per role times its weight by
+  default (`maxHeadroomReplicas`), the rest left unassigned. Rebalance by transfer
   when a model leaves a tolerance band, scaling down first and scaling up only
   into GPUs the donor has actually released. Built for P/D models on multi-GPU
   replicas; what stage 2 does not yet do is listed in its §13.

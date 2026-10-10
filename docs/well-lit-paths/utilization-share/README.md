@@ -3,7 +3,7 @@
 > **Experimental.** The optimizer is built, in shadow mode and acting, with
 > donor sets, P/D roles and node-aware placement. Unit tests cover it, and three
 > end-to-end specs run it on kind with emulated GPUs and the inference
-> simulator. **Three benchmark runs, on two aggregated models with 1 GPU per
+> simulator. **Four benchmark runs, on two aggregated models with 1 GPU per
 > replica,** measured it on H200s ([measured](measured.md)). The first, with
 > bursts of the same shape, showed idle headroom serving the first rise and a
 > delay of about 5.5 minutes at the swap; its effect on latency was
@@ -11,12 +11,18 @@
 > Two runs with different burst shapes found a failure: the second model to
 > burst ran its whole burst on 3 of its 8 replicas, at a 575 s and then a
 > 564 s median time to first token against 1 s without sharing, while the
-> other model, idle, held the GPUs. The fixes for it are built and **not yet
-> measured**. Each arm ran once; whole-node and multi-GPU pods were not
+> other model, idle, held the GPUs. A fourth run, with those fixes, lost the
+> second burst a different way: the spare sat on the idle model as headroom,
+> and each replica the bursting model needed waited about six minutes for that
+> model's long requests to drain (p95 313 s against 139 s). The response -- the
+> headroom capped at one replica times the model's weight by default when the
+> quota cannot hold every model's peak at once, the rest left unassigned, and
+> a burst that persists taking its whole shortfall at once -- is built
+> (`2892aad3`) and **not yet measured** on a cluster. Each arm ran once; whole-node and multi-GPU pods were not
 > measured; and P/D could not be measured: prefill never scaled, so prefill
 > and decode never competed for GPUs. The defaults may also
-> change: the `tolerance` of 0.15, the weight classes and a `reserveGPUs` of 0
-> are starting points, and the
+> change: the `tolerance` of 0.15, the weight classes, a `reserveGPUs` of 0 and
+> a `maxHeadroomReplicas` of 1 are starting points, and the
 > [proposal](../../proposals/utilization-share-optimizer.md#14-open-questions)
 > says they should be tuned from shadow-mode data. The short scale-down window
 > for urgent transfers (stage 3) is still a design.
@@ -32,7 +38,15 @@ quota as a whole has enough for both.
 The utilization-share optimizer shares the quota on purpose. Each model first
 gets its **need**: the GPUs that put it exactly at its `scaleUpThreshold`. The
 rest of the quota is shared as **headroom** above need, in proportion to each
-model's **weight**. When the GPUs a model holds drift too far from that target,
+model's **weight**. When the quota is **contended** -- it cannot hold every
+model at its recent peak (over the `flappingWindow`) at the same time -- that
+headroom is capped at `maxHeadroomReplicas` replicas (one by default) times the
+model's weight, rounded up: 1 for `standard`, 2 for `important`, 4 for
+`critical`. What is left stays unassigned in the quota, where a model whose
+demand rises starts pods into it at once, without waiting for another model's
+pods to drain. While every peak fits, the whole spare stays spread: capping
+there only made the next burst cold-start replicas that the spread had kept
+warm. When the GPUs a model holds drift too far from that target,
 the optimizer moves GPUs with a **transfer**:
 
 1. It marks one of the donor's pods, so the ReplicaSet removes that pod and no
@@ -60,7 +74,9 @@ is pure loss and headroom costs nothing extra.
   plans no cluster group unless you set `physicalGroups: true`. Spending the
   budget there means holding **every GPU of that type** in the cluster.
 - **You want to give unused GPUs back.** This mode deliberately trades cost for
-  headroom: it spends the whole quota. A fleet billed per GPU-hour that can
+  headroom: while every model's peak fits the quota it spends the whole quota;
+  while they contend it holds each model a replica (times its weight) above its
+  need by default, and with a large `maxHeadroomReplicas` the whole quota. A fleet billed per GPU-hour that can
   return idle GPUs should not turn it on.
 - **The donors cannot be steered.** A transfer depends on choosing the pod that
   goes, and some workloads do not allow it. A Deployment that is often
@@ -73,12 +89,21 @@ is pure loss and headroom costs nothing extra.
   that donor's scale-down window. The rising model waits at least one window
   before it grows. In the benchmark it started growing about 5.5 minutes later
   than under today's optimizer, which had already scaled the falling model
-  down.
+  down. When the two peaks do not fit the quota together, the falling model
+  now gives what it holds beyond its need plus its headroom
+  (`maxHeadroomReplicas`, default 1) back to the quota one scale-down window
+  after its load falls, as today's optimizer would scale it
+  down, so less of the rise should wait for a transfer; that has not been
+  measured yet.
 - **Models burst in turn and a burst must not start short.** In two benchmark
   runs with different burst shapes, the second model to burst waited 16 and
   then 18 minutes -- its whole burst -- for GPUs the other, idle, model held.
-  The rule that lifts the hold for such a move is built but not yet measured,
-  and it does not cover every case: a model whose burst of long outputs has
+  The rule that lifts the hold for such a move worked when measured, but the
+  burst still lost: each replica it took waited about six minutes for the idle
+  model's long requests to drain. Its response (the spare left unassigned,
+  and the whole shortfall taken at once when the imbalance holds a second
+  cycle) is built but not yet measured, and
+  neither covers every case: a model whose burst of long outputs has
   just ended still reads its draining backlog as need, so GPUs can even move
   *to* it as the other model's burst begins. If you take the mode anyway, give
   each such model a floor sized for its burst
@@ -242,10 +267,21 @@ When it evaluates but never moves anything, work down
 
 ## What it costs
 
-- **The whole quota.** GPUs that would otherwise sit idle are handed out as
-  headroom, so the fleet holds what the quota allows, not what its load needs.
-  That is the point of the mode, and it is a cost wherever GPUs could be given
-  back.
+- **Headroom held ahead of need.** While every model's peak fits the quota,
+  the fleet holds the whole quota as headroom. While they contend, each model
+  holds up to `maxHeadroomReplicas` replicas (one by default) times its weight
+  above what its load needs, from GPUs that would otherwise sit idle; with a
+  value as large as the models' `maxReplicas` the fleet holds the whole quota. That is the point of the mode, and it is a cost
+  wherever GPUs could be given back. The benchmark runs measured it with the
+  whole spare spread: 24% and 66% more GPU-seconds than today's optimizer.
+- **A model above its need plus its headroom shrinks with no other model
+  growing.** Only while the quota is contended: after one scale-down window
+  above it, it gives all the extra back to the quota in one cycle, while no
+  model that can grow is short of its need and only while
+  its load would stay at or below `stabilization.returnSpareWhenLoadAtMost`
+  ([troubleshooting](../../reference/troubleshooting.md#a-model-shrinks-while-no-other-model-grows)).
+  Each return drains a pod; if its demand comes back after the drain, it
+  starts a pod again.
 - **A donor replica, with its in-flight requests.** A transfer is a donor pod
   going away through an ordinary scale-down. Requests in flight on it survive
   only as well as the model server drains, and the termination grace also
@@ -253,8 +289,8 @@ When it evaluates but never moves anything, work down
 - **The receiver waits for the release.** The receiver is raised only after the
   donor's GPUs are free: after the donor's scale-down window, its drain, and
   then the receiver's own pod start and model load. For that whole time the
-  receiver runs short. A spike beyond a model's headroom waits at least one
-  donor scale-down window; at the benchmark's swap that was about 5.5 minutes
+  receiver runs short. A spike beyond a model's headroom and the quota's
+  unassigned GPUs waits at least one donor scale-down window; at the benchmark's swap that was about 5.5 minutes
   later than under today's optimizer.
 - **The freeze and the hold above.** About one fill timeout of no scaling in a
   group after every restart, and a reversal hold that can keep a short model
@@ -301,8 +337,10 @@ When it evaluates but never moves anything, work down
   - Whole-node or multi-GPU pods under real load: every benchmark run used
     1 GPU per replica, and the P/D scenario does too. The e2e covers 2-GPU
     receivers and LWS groups on emulated GPUs only.
-  - The cancel fix and the hard-imbalance rule, which no cluster run has
-    measured yet.
+  - The headroom cap (`maxHeadroomReplicas`), spare returns, and the unpaced
+    hard-imbalance move, which no cluster run has measured yet (simulated
+    only: [measured](measured.md#what-2892aad3-changes-simulated-not-measured)). The cancel fix
+    and the hard-imbalance rule were measured once, on the run before them.
   - A cluster quota group and the `clusterNamespaces` canary, which are
     unit-tested only. All three e2e specs use a namespace quota.
   - A controller restart that rebuilds transfers from pod marks, a
@@ -311,7 +349,7 @@ When it evaluates but never moves anything, work down
 
 ## How it is benchmarked
 
-**Three runs, on two aggregated models with 1 GPU per replica: [what they
+**Four runs, on two aggregated models with 1 GPU per replica: [what they
 measured](measured.md).**
 
 [Two models, anti-phase bursts, under one quota](../../guides/benchmarking/two-model-utilization-share.md)
@@ -347,8 +385,25 @@ long outputs -- with up to 8 replicas each under a 10-GPU quota:
 - **Idle headroom still helped the first model to burst**: on the second
   run it began on 5 replicas instead of 1.
 - **It cost 66% more GPU-seconds** on the second run (28 111 against 16 976).
-  The cost depends on how much of the quota the load leaves idle: the mode
-  holds all of it.
+  The cost depends on how much of the quota the load leaves idle: with the
+  spare spread whole, as in these runs, the mode holds all of it.
+
+A third run of that scenario, with both fixes, lost the second burst another
+way ([measured](measured.md#rerun-with-the-hard-imbalance-rule-the-spare-was-parked-on-the-other-model)):
+
+- **The first burst gained**: p50 12 s against 35 s under today's optimizer.
+- **The second burst lost**: p95 313 s against 139 s. The spare sat on the
+  model whose burst had ended, 7 replicas at 5% load serving 6000-token
+  outputs, and each replica the bursting model got waited about six minutes
+  for one of them to drain, two at a time: 18 minutes to reach 8 replicas,
+  against 2 under today's optimizer, which found the GPUs idle.
+- The hard-imbalance rule worked: every move to the bursting model skipped
+  its waits from the first cycle. The response -- the headroom capped at
+  `maxHeadroomReplicas` (default 1) times the model's weight while the quota
+  is contended, the rest left unassigned, and a hard imbalance that holds a second cycle taking the whole
+  shortfall up to the receiver's need at once -- is built and not yet measured
+  on a cluster; a simulation is on the [measured](measured.md#what-2892aad3-changes-simulated-not-measured)
+  page.
 
 A P/D version was attempted and not measured. Prefill never left one replica
 under prompt-heavy load, so there was no prefill-versus-decode competition to
@@ -356,8 +411,9 @@ resolve: [why](measured.md#pd-not-measured).
 
 ## Tuning it
 
-Every key (`tolerance`, `reserveGPUs`, `shadow`, `physicalGroups`,
-`weightClasses`, `namespaces`, `clusterNamespaces`), how weights are set per
+Every key (`tolerance`, `reserveGPUs`, `maxHeadroomReplicas`, `shadow`,
+`physicalGroups`, `weightClasses`, `namespaces`, `clusterNamespaces`,
+`stabilization`), how weights are set per
 model, and what the optimizer writes on pods:
 [`optimizer` in the scaling policy](../../reference/scaling-policy.md#optimizer-cluster-default-only-live).
 Every metric, transfer outcome and blocked reason:

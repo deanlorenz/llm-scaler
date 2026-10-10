@@ -13,11 +13,14 @@ limit) and wants all of it used. When it is on:
 1. **Every model first gets what it needs**: the GPUs that put it at its own
    scale-up threshold — the GPU form of the engine's `RequiredCapacity`, before
    the rounding and scale-down hysteresis the cost-aware optimizer adds.
-2. **The rest of the quota is handed out as spare headroom**, so GPUs the quota
-   grants are never idle while a model could use them. A model's **weight**
-   decides its share: weight 2 gets twice the headroom of weight 1, relative to
-   its size. When the quota is too small for everyone, a higher weight is cut
-   less.
+2. **The rest of the quota is handed out as spare headroom.** When the quota
+   cannot hold every model at its recent peak at once, the headroom is capped
+   at `maxHeadroomReplicas` replicas per role for weight 1 (one by default,
+   §5.1) and `⌈w · maxHeadroomReplicas⌉` for weight `w`; what is left stays
+   unassigned, and a model whose demand rises takes it at once, with no other
+   model to drain first. A model's **weight** decides its share: weight 2 gets
+   twice the headroom of weight 1, relative to its size. When the quota is
+   too small for everyone, a higher weight is cut less.
 3. **Each cycle it compares desired against actual utilization**, and acts only
    when a model is outside a tolerance band (`±τ`). A rebalance is a *transfer*:
    one model scales down, another scales up.
@@ -272,6 +275,70 @@ A is cut 13 % below its need while B and C are cut 27 %.
 Note that weights 2 : 1 : 1 do **not** split the 6 spare GPUs 50 / 25 / 25. A
 gets 4 of them, because the split is by `w × N` and A also needs the most. That
 is deliberate: headroom only absorbs a burst if it scales with the model's size.
+
+**When the quota is contended, the headroom one role is given is capped
+(`maxHeadroomReplicas`, default 1), by weight.** The quota is *contended* when
+it cannot hold every role at once at its peak need over the swing window
+(`contended`): each role's claim at its peak need (`ShareLedger.PeakNeed`, the
+highest need recorded over `flappingWindow`, or the current one if higher),
+rounded up to whole replicas, summed over the group, exceeds the budget:
+
+```text
+  contended  ⇔  Σ_r g_r · ⌈ min(max(peak N_r, F_r), C_r) / g_r ⌉  >  B_net
+```
+
+While the peaks fit, the spare is spread by weight as above and nothing is
+returned (§6.2): no burst can then find the GPUs it needs parked on another
+model, and returning headroom would only make the next burst cold-start what
+a spread spare held warm. The verification simulations measured it: capped
+regardless, alternating bursts whose peaks fit together lost 4 to 8% of
+demand against under 1% spread, and whole-node bursts in a slack quota lost 6
+to 43% against none, to return-then-cold-refill cycles the swing rule could
+not see. The cluster scenario below (peaks 8 + 8 under a quota of 10) stays
+contended. Comparing each role's peak with its current spread share instead
+was tried and rejected: the spread follows the current need, so a role in its
+trough always reads as short.
+
+While contended, `ShareCapSpare` lowers each role's ceiling, as the targets see
+it, to its claim rounded up to whole replicas plus `h_r` replicas of headroom,
+where `h_r = ⌈w_m · maxHeadroomReplicas⌉` (`ShareHeadroomReplicas`):
+
+```text
+  C'_r = g_r · (⌈N̄_r / g_r⌉ + ⌈w_m · n⌉)        n = maxHeadroomReplicas
+```
+
+wherever that is below the ceiling it had. With the default classes and
+`n = 1`: `best-effort` 1, `standard` 1, `important` 2, `critical` 4. Scaling by
+weight keeps the weight's meaning for headroom: a flat cap gave weights 1 : 1,
+2 : 1 and 4 : 1 the same targets whenever the spare exceeded it, which a review
+of the first, flat version found. The planner caps its roles after the swing
+rule has set their planning need (§6.7 rule 5) -- capped on this cycle's
+reading, a swinging role in its trough would be held below the mean it is
+planned on. The evaluation `evaluateUtilizationShare` publishes applies the
+cap without the contention test (it keeps no need history), so on a quota
+whose peaks fit, its targets read lower than the ones the actuator acts on. Claims are unchanged (the lowered ceiling is
+never below a claim), and a role with no need gets no spare however its
+ceiling reads. `n` is bounded at 10000; a limit too large to hold, or one of
+zero (which would read as unbounded), leaves the ceiling as it was. A role at its lowered ceiling
+takes no further share, so whatever the cap leaves over is not allocated
+(§5.4: "any leftover stays unallocated"). It stays unassigned in the quota,
+and the idle fill (§6.2, "Free budget first") hands it to the first role whose
+target rises above what it holds -- at once, with no donor to drain. The fill
+runs on the planner's capped targets, so it and the planner agree on what is
+unassigned. `0` gives no headroom at all; a value as large as the models'
+`maxReplicas` restores the uncapped split of this section.
+
+Why the cap exists, measured on a shared H200 cluster (two 1-GPU models under a
+namespace quota of 10, each `maxReplicas` 8, bursting in turn; well-lit path,
+[measured](../well-lit-paths/utilization-share/measured.md)): spread as
+headroom by weight, the spare parked on the model whose burst had ended, 7
+replicas at 5% load, each serving 6000-token outputs. When the other model
+burst, every replica it got had to wait for one of those to drain, about
+5 minutes 45 seconds each, two at a time: it went 3 -> 5 -> 7 -> 8 replicas
+over 18 minutes, where today's optimizer, finding the GPUs idle, took it from
+1 to 8 in 2. Its p95 time to first token was 313 s against 139 s under today's
+optimizer. Headroom on another model is only as fast as that model's drain;
+unassigned GPUs are as fast as a pod start.
 
 ### 5.2 Why weights split headroom, not utilization or GPUs
 
@@ -745,6 +812,44 @@ When the group acts:
   failure the rule is for -- one model held short for its whole burst while
   the other, idle, holds the GPUs -- so it bounds the rule's cost, not its
   benefit.
+
+  **A hard imbalance that persists is not paced either.** On the first cycle a
+  role is a hard-imbalance receiver, its moves skip the waits but keep the
+  pace: two replicas per role per cycle, two transfers in flight per group. If
+  it is one again the next consecutive cycle (`ConfirmHard`,
+  `ShareUnpacedAfterCycles` = 2), neither the pace nor the concurrency limit
+  applies: `fundFrom` asks the same donor again until the receiver reaches its
+  need -- the higher of this cycle's reading and its planning need, which is
+  its mean over the swing window when it swings -- the move no longer qualifies (the receiver's load drops below 0.9, or
+  the donor's after giving rises above 0.6), or the donor reaches its target or
+  its keep; then the next donor is asked. So a receiver takes every replica it
+  is short **of its need** in one cycle, from one donor or several. The replica
+  of headroom above its need is an ordinary, paced move (`unpacedNow`). Donor
+  sets (§6.5, a multi-pod or LeaderWorkerSet receiver) get the same treatment:
+  no confirm cycle when hard, and set after set with no pace and no concurrency
+  limit once the imbalance has held a second cycle. Every other bound still
+  applies: the targets, the keep, the donor's band, the admission test, the
+  pair hold, back-off and a busy donor (`GivingBusy`), and the ratio between
+  the two loads still stops the reverse move.
+
+  The second cycle is the guard against a bad reading. Unpaced on the first,
+  one scrape glitch or forged metric could drain every calm model in a group
+  at once; reviewing the first version, one stale signal moved five replicas
+  that could not be undone. Paced on the first cycle, a single reading moves at
+  most two replicas, which the next cycle cancels while they are free.
+
+  Moves that skipped the waits do not count against the concurrency limit
+  (`InFlight`), so a burst's drains do not hold every ordinary move for a
+  release. Aborts of one donor in one cycle back it off once: transfers started
+  together share a deadline, and five aborting together would otherwise reach
+  the 16x back-off on their first stuck release. A donor whose pod could not be
+  marked starts nothing more that cycle.
+
+  Measured on a shared H200 cluster (§5.1), before this rule: every move to the
+  bursting model skipped its waits and started on the first cycle its load
+  crossed 0.9, yet it held 3 of the 8 replicas it needed for 12 minutes,
+  because two releases at a time, each waiting about six minutes for
+  6000-token requests to drain, were all the pace allowed.
 - **A swinging role** is planned on its mean need (§6.7 rule 5).
 - **Entitled receivers** — an owed floor (§5.5 case 5), a fixed consumer below
   its today's-path target (§5.6), the reserve's refill (below) — are funded
@@ -824,6 +929,38 @@ When the group acts:
   the ledger and producing exactly the Pending pods §6.3 exists to prevent. On a
   namespace quota the fill is additionally bounded by the cluster's physically
   free GPUs (`fillable`), as in `applyRescale`.
+
+  **The fill is unpaced below need.** A fill drains nobody, so it raises a
+  receiver below its need by every replica it is short at once
+  (`ShareFillPace`); a receiver at or above its need is raised two replicas
+  per cycle. GPUs a reserve refill or a spare return still releases are not
+  idle (`ShareLedger.Unreleased`): the donor's pods still run on them and the
+  quota still counts them. Counted idle, the fill would raise a model into a
+  full quota, its pods would be refused at admission, and it would be raised
+  again at every fill timeout.
+
+  **A role still giving is no receiver** (`ShareLedger.Giving`). A role that is
+  the donor of a transfer, a return or a refill still Releasing is not raised,
+  by the planner or by the fill, until that release lands. A target that
+  crossed a replica boundary otherwise filled a role while its own transfer
+  drained; the transfer then never saw the role shrink, aborted, restored it
+  one replica above target, and backed it off. The same rule stops a move that
+  skips the waits from sending GPUs back to a role mid-drain when an
+  alternation is shorter than a release. (A separate reverse-in-flight hold
+  written for that was redundant under mutation testing and was removed.)
+
+  **The planner counts the fill before it asks a donor** (`fromIdle`). Before
+  funding a receiver from donors, it adds to that receiver's planned allocation
+  what the idle fill will give it this cycle -- at the fill's pace, while
+  `idle` covers a replica and the receiver is below its whole-replica target,
+  and, with node information, only replicas whose pods fit free GPUs in the
+  receiver's topology domain, as the fill places them -- so donors fund only
+  the rest and no donor shrinks for GPUs that are free. Without the node check,
+  fragmented free GPUs were credited that the fill could not place. A receiver the last fill left below its target (`FillShort`) is not
+  credited: whatever kept it short, the fill sees and the
+  planner does not. With the spare capped (§5.1), unassigned GPUs are common,
+  and without this a donor would drain a pod for a receiver the fill was about
+  to raise anyway.
 - Fund the rest one **receiver replica** at a time. Each such move is one
   **transfer**: one receiver replica, funded by a **donor set** — one or more
   donor replicas, from one or more models, that open a hole for **each pod** of
@@ -856,7 +993,87 @@ When the group acts:
   planning cycle, and at most two transfers in flight per group (constants,
   §8.4). A large
   rebalance completes over several cycles, each re-checked against fresh
-  demand.
+  demand. A hard imbalance that holds a second cycle is the exception: it is
+  not paced up to the receiver's need (above).
+- **Return the spare** (`returnSpare`, after every receiver is funded). A role
+  holding more than its whole-replica target -- typically one that was raised
+  for a burst that has ended, and now holds more than its need plus its
+  headroom -- gives the excess back to the group's unassigned GPUs. It is
+  today's scale-down, done while nobody waits for the GPUs. A return is a
+  **Returned** transfer: it has a donor and no receiver, and it is entitled (no
+  `z` admission, no holds set). It starts only when all of these hold:
+  - **the quota is contended** (§5.1): only a capped spare is returned. Spread,
+    the targets give the whole spare away by weight, and what moves between
+    roles moves by transfer;
+  - **the role has held more than its target for the donor's scale-down
+    window** (`MarkOver`, measured against `ShareTimings.Window`), the clock
+    today's optimizer shrinks it on. A burst that comes back sooner finds its
+    replicas warm. Without the window, returns churned a pod a minute near
+    replica boundaries: in review simulations, 175 return-then-refill pairs in
+    30 hours, and 96 whole-node cold starts in 8 hours;
+  - **no role short of its claim can grow**: a role below its claim rounded up
+    to whole replicas, that has a variant to grow and is not held from filling,
+    blocks every return (counted `return-role-short`). With such a role short,
+    the GPUs go to it by a transfer, which the holds govern. A role short only
+    of its headroom does not block, nor does one held from filling, nor one the
+    planner found unfundable this cycle (no compatible donor): the first
+    version blocked on the first two, so one tenant could pin everyone's spare;
+  - the role is not held from giving (`GivingHeld`: backing off after an
+    aborted release, all it can give already in flight, or it received within
+    the reversal hold). The band no longer gates a return: the idle-floor rule
+    kept the idlest whole-node donors in band, so they never returned anything;
+  - it never takes the role below its target, its floor or its keep;
+  - **the role stays calm on what it keeps, less its headroom**: its need is at
+    most the return load (`stabilization.returnSpareWhenLoadAtMost`, default
+    0.6) times what it would hold after the return less its headroom,
+    `N_r ≤ ρ × (Ḡ_r − g_r − g_r·h_r)` with `Ḡ_r` before the return and
+    `h_r` its headroom replicas (counted `return-not-calm` when it holds back).
+
+  Once due, everything above the target that passes the calm rule goes in one
+  cycle, as a scale-down would: returns are unpaced and outside the
+  concurrency limit.
+
+  The calm rule is the return's hysteresis. The fill raises a role as soon as
+  its target passes what it holds -- once its need passes what it holds less
+  its headroom. Without a gap, a role whose need sits near a replica boundary
+  would give a replica back and take it again every few cycles, each time
+  draining one pod and cold-starting another. With it, a role that returned a
+  replica is refilled only once its need has grown by `1/ρ` (1.67 times at
+  0.6). The first version used the skip-waits donor load and assumed one spare
+  replica, so at a headroom of 2 a role returned and refilled continuously;
+  the return load is now its own key, and the rule subtracts the role's own
+  headroom.
+
+  A return goes through the ledger like any donor-only transfer: Releasing
+  until its donor's pod is gone, then Filling and Done in the same cycle, since
+  there is no receiver to wait for (`wva_utilization_share_transfers_total`
+  counts it `outcome="done"`; `wva_utilization_share_starts_total` counts it
+  `kind="return"`). Its GPUs are not idle until released (`Unreleased`, above).
+  The `Returned` flag is written on the donor pod's transfer mark, so a
+  controller restart restores a return as a return; a mark that claims a
+  return with a receiver or a set is rejected, since the controller never
+  writes that shape.
+
+  **A return still releasing is handed to a role that turns short**
+  (`fromReturns`, `ShareLedger.AssignReturn`): before donors are asked, a
+  receiver below its target takes returns still Releasing, one receiver
+  replica each, up to its target. The return becomes an ordinary transfer to
+  that receiver -- its GPUs reach it when they come free -- and the receiver
+  gets a `UtilizationShareReceiving` Event and the log line
+  `Utilization share: returned spare handed to a receiver`. Before, the
+  receiver waited on the same release with no transfer of its own and no reason
+  shown. A receiver whose replica spans several pods is left to a donor set,
+  which places each pod.
+
+  **A return is cancelled
+  while it is free** (`cancelReversals`: still Releasing, inside the
+  scale-down window, so no pod has moved) once its role's demand comes back:
+  it is below its target again (or more than twice its tolerance below its
+  continuous target), or busier than the return load on what it keeps less
+  its headroom plus one replica -- one replica above the bar the return
+  started under, for any headroom including 0, so the two do not alternate. In
+  `7ff3004a` they shared a threshold at headroom 0, and returns started and
+  were cancelled in alternate cycles. The cancel is entitled, so it sets no pair hold.
 
 Variant choice reuses the existing helpers: a donor sheds through
 `sortVariantsForScaleDown` / `scaleDownVariantSet` (most expensive first,
@@ -1348,8 +1565,13 @@ replicas. Every figure is a mean of five seeds.
    transfer's start. That is about one release time after it completes. The
    hold blocks only the opposite direction. A move that rebalances a hard
    imbalance -- a receiver at 0.9 or more of what it holds, from a donor that
-   stays at 0.6 or less of what it keeps -- is not held (§6.2); a short role
-   held otherwise shows the blocked reason `reversal-hold` while it waits.
+   stays at 0.6 or less of what it keeps -- is not held; if it holds a second
+   cycle it is not paced either, up to the receiver's need (§6.2). A short role
+   held otherwise shows the blocked reason `reversal-hold` while it waits. A
+   spare return (§6.2, `returnSpare`) has its own hysteresis: it waits a
+   scale-down window, and a role gives back only while its need is at most
+   `returnSpareWhenLoadAtMost` (0.6) of what it keeps less its headroom, so it
+   is refilled only after its need grows by 1/0.6.
 5. **Plan a swinging role on its mean need.** A role whose transfers change
    direction twice within eight decide-to-serve latencies (about 96 minutes) is
    following load it cannot catch. For the next such window it is planned on its
@@ -1430,8 +1652,10 @@ from 12 to 8 minutes. In simulation that wins clearly at 120 minutes (1.0 %
 against 3.9 % standing still) and cuts the loss at 60 minutes from 3.2 points to
 0.7. It also makes 15 minutes worse (8.7 %), so it is no substitute for
 rule 5. The other lever is the
-optimizer's own purpose: spare headroom is exactly what absorbs a swing it
-cannot follow.
+optimizer's own purpose: spare GPUs are exactly what absorb a swing it
+cannot follow -- and they absorb it fastest unassigned (§5.1,
+`maxHeadroomReplicas`), where the rising model takes them without waiting for
+another's pods to drain.
 
 The simulator is design evidence, not a test of code. It models one group,
 single-variant roles, same-size replicas, and no floors above need, wakes,
@@ -1565,6 +1789,7 @@ none of them:
     utilizationShare:
       tolerance: 0.15               # the "±threshold percent": band in GPUs, as a fraction of the target (never under ½ replica)
       reserveGPUs: 0                # held out of the budget so a wake need not wait for a transfer (§7.2)
+      maxHeadroomReplicas: 1        # while the quota cannot hold every peak at once: headroom replicas above need for weight 1; weight w gets ceil(w x this); the rest stays unassigned (§5.1)
       shadow: false                 # true: compute, report and log everything, actuate nothing (stage 1, and the rollback)
       physicalGroups: false         # true: also run on groups bounded only by the physical inventory (§7.3)
       weightClasses:                # what users pick from (§3); these are the defaults
@@ -1584,15 +1809,18 @@ none of them:
           enabled: true
           receiverLoadAtLeast: 0.9      # receiver's load, as a fraction of its scale-up threshold
           donorLoadAtMost: 0.6          # donor's load after giving; must be below receiverLoadAtLeast
+        returnSpareWhenLoadAtMost: 0.6  # a role gives headroom back only while its load on what it keeps, less its headroom, stays at or below this (§6.2)
 ```
 
-Eight keys, each a decision only an operator can make: how far off target is
-worth a move, whether wakes may skip the queue, whether to act at all, whether
+Nine keys, each a decision only an operator can make: how far off target is
+worth a move, whether wakes may skip the queue, how much headroom a model of
+weight 1 may hold ahead of its need rather than leave unassigned, whether to act at all, whether
 WVA may hold every GPU of a type, what the priority classes are worth, which
 namespace quota groups take part, which namespaces a cluster group plans, and
 how fast GPUs move against how often they move back (`stabilization`: its
 waits default to values derived from the cluster, and the operator may fix
-them).
+them; it also holds how calm a model must be to give headroom back).
+`stabilization` counts as one key.
 
 `shadow` stays default `false`: that is a decision, not an oversight. The
 operator who writes `type: utilizationShare` asked for it to act; the reference
@@ -1656,7 +1884,9 @@ it"). An invalid `optimizer:` block must not do that: it is validated on its own
 and on failure the optimizer falls back to today's selection with an ERROR naming
 the field, while the limiters stay in force.
 
-Rules: `0 < tolerance < 1`; `reserveGPUs ≥ 0`; class weights `> 0`, finite, and
+Rules: `0 < tolerance < 1`; `reserveGPUs ≥ 0`; `maxHeadroomReplicas` an
+integer in `[0, 10000]` (absent means 1); `0 < returnSpareWhenLoadAtMost < 1`
+(absent means 0.6); class weights `> 0`, finite, and
 exactly one class of weight 1 (the default class); a model entry setting both
 `weight` and `weightClass` is an error on that entry; non-finite values are
 rejected (`x <= 0` admits NaN); unknown keys and unknown namespace keys are
@@ -1690,7 +1920,7 @@ it takes: one rule changed reproduces each oscillation.
 | value | constant | why it is not a knob |
 | --- | --- | --- |
 | confirmation | 2 cycles | part of the decide-to-serve latency the other values assume |
-| pace | 2 replicas per role per cycle, 2 transfers in flight per group | simulated at these values |
+| pace | 2 replicas per role per cycle, 2 transfers in flight per group; a hard imbalance that holds a second cycle is not paced up to the receiver's need, returns are not paced, and the fill is not paced below need (§6.2) | simulated at these values |
 | idle floor | 0.05 utilization | stops idle models churning; not a preference |
 | floor warning | floors holding half the budget above need | decides only when a line is logged |
 
@@ -1764,18 +1994,33 @@ the role from `_headroom` and `_actionable`.
 Transfers are also recorded as Kubernetes Events on the donor's and the
 receiver's scale targets (`internal/engines/steadystate/utilization_share_events.go`),
 for the model owner who reads `kubectl describe`, not the controller's log:
-`UtilizationShareGiving` and `UtilizationShareReceiving` at start,
+`UtilizationShareGiving` and `UtilizationShareReceiving` at start (and
+`UtilizationShareReceiving` when a role is handed a return still releasing,
+naming the model giving it back),
 `UtilizationShareReceived` when a transfer lands (an idle fill's says it came
-from the quota group's spare GPUs, as headroom by weight), `UtilizationShareCancelled`
-(both sides) on a reversal, `UtilizationShareRedirected` on the receiver when a
+from the quota group's unassigned GPUs, and whether because its demand rose
+past what it held or as headroom that is given back when the model no longer
+needs it), `UtilizationShareCancelled`
+(both sides) on a reversal (a cancelled return says the model's demand came
+back, so it keeps the replica it was giving back), `UtilizationShareRedirected` on the receiver when a
 wake claims its GPUs, and the warnings `UtilizationShareReleaseAborted` (with
 the end of the back-off, or, when its donor set could not complete, saying so
 and setting none), `UtilizationShareWrongPod` (the donor stays one
 replica lower), `UtilizationShareFillTimedOut` and
 `UtilizationShareDonorNotSteerable` (the cause and the end of the back-off).
 `UtilizationShareGiving` names the pods that go and why: the receiver is below
-its need, or headroom by weight; a set contributor names the receiver its set
-funds, and a refill names the scale-from-zero reserve. An Event names the other
+its need, or headroom by weight, or that the move skipped the waits
+(`stabilization.skipWaitsWhen`); a set contributor names the receiver its set
+funds, a refill names the scale-from-zero reserve, and a spare return
+(`returnSpare`, §6.2) names "the quota group's unassigned GPUs", because the
+model holds more headroom than `maxHeadroomReplicas` gives it, its demand has
+stayed low for its scale-down window, and no model is short.
+`wva_utilization_share_starts_total{kind, skipped_waits}` counts what started
+(`transfer`, `fill`, `refill`, `return`), so a return is no longer counted as a
+transfer.
+A return is also logged, `Utilization share: spare returned to the quota`
+when its replica is released, and every `transfer started` line carries
+`returned`. An Event names the other
 party only within its own namespace; across namespaces it says "a model in
 another namespace of its quota group". An aggregated model is named without a
 role.
@@ -2382,7 +2627,19 @@ optimizer every cycle (§6.6).
    (§8.1). The reversal hold applying to urgent receivers too (§6.7 rule 4)
    was a decision here; it is superseded by the hard-imbalance rule (§6.2),
    after a cluster run held a bursting model short for its whole burst. The refill pace guard remains untestable
-   while the concurrency limit (2) equals the pace (2).
+   while the concurrency limit (2) equals the pace (2). Neither bounds a hard
+   imbalance that holds a second cycle (§6.2): after the ceiling-8 rerun
+   (well-lit path, [measured](../well-lit-paths/utilization-share/measured.md))
+   lost the second burst to two-at-a-time releases of about six minutes each,
+   such a move takes every replica its receiver is short of its need in one
+   cycle. The same run added `maxHeadroomReplicas` (§5.1, scaled by weight
+   after review), the fill credited before donors fund (`fromIdle`), and the
+   spare return with its scale-down-window wait, its own calm load
+   (`returnSpareWhenLoadAtMost`) and its cancel (`returnSpare`,
+   `cancelReversals`; §6.2). Verification of that revision (`2892aad3`)
+   limited the cap to a contended quota, made a role still giving no
+   receiver, and handed returns still releasing to short roles. Not yet
+   measured on a cluster; the rerun is pending, on `2892aad3`.
 3. **Short window for urgent transfers**, through `wvaOwnership`, once
    managed-keda-behavior lands (§6.4), gated on a persistent hard imbalance,
    not on the load limits alone (§15).
@@ -2398,8 +2655,14 @@ optimizer every cycle (§6.6).
   with shadow-mode data on how often floors bind.
 - **Idle headroom vs. cost.** Should a model accept GPUs far beyond any plausible
   burst (`x = +500 %`)? That is "use all GPUs" taken literally. A
-  `maxHeadroom` cap would leave the rest unallocated instead. Recommended: no cap
-  in v1; shadow mode reports how much headroom exceeds, say, +200 %.
+  `maxHeadroom` cap would leave the rest unallocated instead. Decided by
+  measurement, not by cost: `maxHeadroomReplicas` (§5.1, default 1, scaled by
+  weight) caps it in replicas, because spare parked on one model is slow to
+  reach another. A cap in headroom terms, or a default other than 1, stays
+  open. The cap binds only while the quota is contended (§5.1). In
+  simulation, small alternating bursts did worse at 40 minutes (0.076 ->
+  0.147 shortfall) though the cap does not bind there; the cause is not yet
+  found.
 - **Reserve default.** `0` keeps "all GPUs" literal; one replica keeps
   scale-from-zero fast. Recommended: `0`, with a WARN when a group contains a
   scale-to-zero model and no reserve.
@@ -2450,6 +2713,28 @@ Decided, not built here:
   swings (whole-node: 1.15x -> 1.31x): a faster release chases swings that
   reverse before a replica starts. So stage 3 needs a persistence gate -- the
   hard imbalance holding for some minutes -- not only the load limits.
+- **Price a donor by how long its pods take to drain.** The planner picks
+  donors by `z` alone, so a donor whose pods serve 6000-token outputs and one
+  whose pods serve 250-token outputs look the same, though the first takes
+  minutes to release a replica and the second seconds. On the ceiling-8 rerun
+  each release from the long-output model waited about 5 minutes 45 seconds
+  (§5.1). Ordering donors (or charging a move) by their expected drain --
+  measured per role from its releases, or estimated from its in-flight
+  requests' remaining output tokens -- would take from the fastest donor
+  first. Considered as option (c) beside the unpaced hard imbalance and the
+  headroom cap, and not built: the cap leaves most spare unassigned, so a burst
+  usually needs no donor at all, and per-role drain times need releases to
+  measure.
+- **Read the ScaledObject's scale-down rate policy into the release
+  timeout.** The release bound counts the stabilization window but not a
+  Pods/Percent `policies` rate (§8.4). An unpaced move lowers a donor by
+  several replicas at once; a rate-limited policy releases them one batch at a
+  time, so the tail of the move can pass the release timeout and abort.
+- **Mark the least busy pod.** The pod a transfer marks to go is chosen without
+  regard to the requests it is serving. An unpaced move drains several pods at
+  once, and cuts whatever long requests they hold. Choosing the pods with the
+  fewest or shortest requests in flight would shorten the drain and lose less
+  work.
 - **A draining backlog reads as need.** After a model's burst of long outputs
   ends, its backlog still reads as need while it drains, so transfers *to* it
   can start just as the other model's burst begins. The hard-imbalance rule

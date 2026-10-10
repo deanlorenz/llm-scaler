@@ -260,6 +260,67 @@ holds, and moves back under the quota only as models scale down.
 If transfers do start but the model still does not grow, read its
 `wva_model_scaling_blocked` reasons.
 
+### A model shrinks while no other model grows
+
+**Symptom**: under the utilization-share optimizer a model loses one or more
+replicas, at least one scale-down window after its load fell, and no other
+model in the quota group grows to take the GPUs.
+
+**What it means**: the model gave headroom back to the quota. This happens
+only while the quota is **contended**: it cannot hold every model at its peak
+need over the last `stabilization.flappingWindow` at the same time. While the
+peaks fit, the whole spare stays spread by weight and nothing is given back.
+While contended, the optimizer gives each model (each role of a P/D model) at most `maxHeadroomReplicas`
+replicas (default `1`) times its weight, rounded up, above what it needs, and
+leaves the rest of the quota unassigned, so that a model whose demand rises can
+start pods into it at once instead of waiting for another model's pods to
+finish their requests. A model that has held more than its need plus its
+headroom for its scale-down window -- typically one that grew for a burst that
+has ended -- gives all of the extra back in one cycle, as today's scale-down
+would. It does so only while no model in the group that can grow is short of
+its need, and
+only while its load would stay at or below
+`stabilization.returnSpareWhenLoadAtMost` (default `0.6`) on what it keeps,
+not counting its headroom. It never goes below its need plus its headroom, its
+`minReplicaCount` or its last replica. If, while the release is still in its
+scale-down window, the model is short of its target again or busier than that
+load on what it keeps, the return is called off and the model keeps the
+replica. If another model turns short while the return is still releasing, the
+returned GPUs go to that model when they come free: its scale target gets a
+`UtilizationShareReceiving` Event naming the model that is giving them back,
+and the log says `Utilization share: returned spare handed to a receiver`.
+
+**How to tell**: the donor's scale target carries a `UtilizationShareGiving`
+Event that names "the quota group's unassigned GPUs" and says "because it holds
+more headroom than maxHeadroomReplicas gives it, its demand has stayed low for
+its scale-down window, and no model is short". A return called off carries a
+`UtilizationShareCancelled` Event: "this model's demand came back, so it keeps
+the replica it was giving back". The controller log has
+`Utilization share: transfer started` with `returned` set to true and no
+`receiver`, then `Utilization share: spare returned to the quota` when the
+replica is released (unless it was handed to a receiver first). `wva_utilization_share_starts_total{kind="return"}`
+counts returns per quota group. A model that holds more than its headroom and
+is not giving it back shows why in `wva_utilization_share_withheld_total`:
+`return-not-calm` (its load is above `returnSpareWhenLoadAtMost`) or
+`return-role-short` (another model is short of its need).
+
+```bash
+kubectl get events -n <model-namespace> --field-selector reason=UtilizationShareGiving | grep unassigned
+kubectl logs -n <controller-namespace> -l app.kubernetes.io/name=workload-variant-autoscaler | grep 'spare returned to the quota'
+```
+
+**What to do**: nothing, if the model still serves within its targets: the
+GPUs are free for whichever model needs them next, and this model takes them
+back the same way when its own demand rises. To keep more spare on each model,
+raise `utilizationShare.maxHeadroomReplicas`; a value as large as the models'
+`maxReplicas` spreads the whole spare by weight even while contended, as before
+the key existed, and leaves little to return, at the price that a model whose demand rises must
+wait for another model's pods to drain before it grows. To make a model keep
+replicas longer after its demand falls, lower
+`stabilization.returnSpareWhenLoadAtMost`. To protect one model only, raise its
+`weightClass` (more headroom) or its `minReplicaCount`. See the
+[scaling policy reference](scaling-policy.md#optimizer-cluster-default-only-live).
+
 ### A model shows `no-compatible-donor`
 
 **Symptom**: `wva_model_scaling_blocked{reason="no-compatible-donor"} == 1` on a

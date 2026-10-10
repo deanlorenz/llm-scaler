@@ -231,7 +231,11 @@ that needs them later waits. With it, the GPUs a quota allows are shared out on
 purpose. Every role (the decode and prefill of a P/D model, or the one role of an
 aggregated model) is first given its *need* — the GPUs that put it exactly at its
 `scaleUpThreshold` — and what is left is shared as headroom above that need, in
-proportion to each model's weight. When the GPUs no longer match those targets,
+proportion to each model's weight. When the quota cannot hold every model at
+its recent peak at the same time, that headroom is capped at
+`maxHeadroomReplicas` replicas per role (one by default) times the model's
+weight, and the rest stays unassigned in the quota, where a model whose demand
+rises takes it at once. When the GPUs no longer match those targets,
 the optimizer *transfers* replicas: it scales a donor down, waits until its GPUs
 are actually released, and only then scales the receiver up.
 
@@ -283,6 +287,7 @@ would move; `wva_utilization_share_replicas_to_move` says how many replicas.
 | --- | --- | --- |
 | `tolerance` | `0.15` | How far a role's GPUs may be from its target, as a fraction of the target, before a move is considered. Must be greater than 0 and less than 1. Wider means fewer, larger moves. The band is never narrower than half a replica -- four GPUs for 8-GPU replicas -- but a role below its need is never in band while its target covers that need. |
 | `reserveGPUs` | `0` | GPUs held out of the shared budget so a scale-from-zero wake can start at once instead of waiting for a transfer. |
+| `maxHeadroomReplicas` | `1` | Applies only while the quota is **contended**: when it cannot hold every model at its peak need over the last `stabilization.flappingWindow` at the same time (each model's peak need, or its `minReplicaCount` if higher, rounded up to whole replicas, summed, is more than the quota). While the peaks fit, the whole spare is spread by weight and nothing is given back: in simulation, capping a quota with room for every peak made whole-node models lose 6 to 43% of their demand to giving replicas back and cold-starting them again, against none with the spare spread. While contended: how many replicas of headroom the quota's spare GPUs give a model of weight 1 above its need (or above its `minReplicaCount`, if that is higher). A model of weight `w` gets `w` times as many, rounded up: with the default classes, `best-effort` 1, `standard` 1, `important` 2, `critical` 4. Each role of a P/D model counts separately. An integer from `0` to `10000`. The rest of the spare stays unassigned, so a model whose demand rises takes it at once instead of waiting for another model's pods to finish their requests and release their GPUs. `0` gives no headroom; a value as large as the models' `maxReplicas` spreads the whole spare by weight (the behaviour before this key existed). While contended, a model that has held more than its need plus its headroom for its scale-down window gives all of the extra back to the quota in one cycle, as a scale-down would, but only while no model that can grow is short of its need and only while it would stay calm (see `stabilization.returnSpareWhenLoadAtMost`). If a model turns short while a return is still releasing, the returned GPUs go to it when they come free. It never goes below its need plus its headroom, its `minReplicaCount` or its last replica. |
 | `shadow` | `false` | Compute, publish and log everything; actuate nothing. |
 | `physicalGroups` | `false` | Also plan groups bounded only by the physical GPU inventory (no quota), where spending the whole budget means holding every GPU of that type. |
 | `weightClasses` | `best-effort: 0.5`, `standard: 1`, `important: 2`, `critical: 4` | Class names and their weights. Replaces the defaults whole when set. Exactly one class must have weight `1`; it is the default class. |
@@ -305,6 +310,7 @@ utilizationShare:
       enabled: true
       receiverLoadAtLeast: 0.9
       donorLoadAtMost: 0.6
+    returnSpareWhenLoadAtMost: 0.6
 ```
 
 | Key (under `stabilization:`) | Default | Meaning |
@@ -312,9 +318,10 @@ utilizationShare:
 | `consecutiveCyclesBeforeMove` | `2` | How many controller cycles in a row a model must look short (or have GPUs to spare) before GPUs move. Raise it to ignore brief spikes; `1` acts on the first reading. |
 | `waitBeforeReverseMove` | `auto` | After a model gives GPUs it cannot receive any for this long, and after it receives it cannot give. A duration (`12m`) or `auto`: twice the time the group's donors take to release a replica (scale-down window, KEDA polling, pod drain, or the measured time once three releases have completed). `0s` turns the wait off. |
 | `flappingWindow` | `auto` | A model whose moves change direction twice within this window is planned on its average demand over the window, not its current one, so a load that swings faster than GPUs can follow stops chasing it. A duration or `auto`: eight times the time a move takes from decision to serving. `0s` turns the rule off. |
-| `skipWaitsWhen.enabled` | `true` | Let a large imbalance skip the two waits above (`consecutiveCyclesBeforeMove` and `waitBeforeReverseMove`). `false`: every move waits, even when one model is at its scale-up threshold and another is nearly idle. |
+| `skipWaitsWhen.enabled` | `true` | Let a large imbalance skip the two waits above (`consecutiveCyclesBeforeMove` and `waitBeforeReverseMove`). On its first cycle such a move goes at the usual pace (two replicas per model per cycle, two transfers in flight per quota group). If the imbalance is still there the next cycle, the receiver takes every replica it is short of its need (for a model planned on its average because its demand swings, the higher of its current and its average need) in that cycle, from one donor or several, and these moves do not count against the two-in-flight limit. The replica of headroom above its need is an ordinary move. A donor is still never taken below its own target, its floor or its last replica, nor past `donorLoadAtMost`. `false`: every move waits, even when one model is at its scale-up threshold and another is nearly idle. |
 | `skipWaitsWhen.receiverLoadAtLeast` | `0.9` | The receiver's load at or above which it may be funded without waiting. **Load** is a model's utilization as a fraction of its scale-up threshold: `1` is where it would scale up, `0.9` is 90% of the way there. |
 | `skipWaitsWhen.donorLoadAtMost` | `0.6` | The donor's load, on the GPUs it keeps after giving, at or below which it may give without waiting. Must be below `receiverLoadAtLeast`: the gap is what stops GPUs going back and forth. Raise it (or lower `receiverLoadAtLeast`) to correct smaller imbalances sooner, at the price of more moves that are later reversed. |
+| `returnSpareWhenLoadAtMost` | `0.6` | When a model may give back headroom above `maxHeadroomReplicas` to the quota: only while its load would stay at or below this value on what it keeps, not counting its headroom. Greater than 0 and less than 1. At `0.6`, a model that gave a replica back is raised again only once its demand has grown by about 1/0.6 (1.67 times), so a demand that hovers near a replica boundary does not drain a pod and start another every few cycles. Lower keeps replicas longer after demand falls. |
 
 Nothing else is configurable. The timings a transfer runs on — how long a release
 may take, how long a receiver may stay Pending, and, unless `stabilization` sets
@@ -330,7 +337,9 @@ came from.
 **Weights.** A model's weight decides how much of the spare headroom its roles
 get and, when the quota is short, whose shortfall counts most: a role of weight 2
 gets twice the headroom of a role of weight 1 relative to its need, and is cut
-last. Set it per model with **one** of:
+last. When the quota is contended and headroom is capped, the cap scales with
+the weight too: `maxHeadroomReplicas` replicas for weight 1, twice as many for
+weight 2, rounded up. Set it per model with **one** of:
 
 ```yaml
   # a per-model override (or the default entry, for every model)
@@ -499,8 +508,9 @@ replica is kept, but it is not reported as a floor: `floor-pinned`,
 `minReplicaCount` you configured.
 
 **How much spike a model absorbs.** Its spike capacity is the headroom it holds
-(`wva_utilization_share_headroom`). A spike larger than that waits for a
-transfer, and a transfer releases the donor first: expect at least one donor
+(`wva_utilization_share_headroom`), plus whatever GPUs of the quota are
+unassigned, which it takes without a transfer. A spike larger than that waits
+for a transfer, and a transfer releases the donor first: expect at least one donor
 scale-down window before the new replica serves. For whole-node models the full
 wait is the donor's scale-down window, its drain and termination grace, up to
 one planning cycle to see the release, the KEDA poll and HPA sync that raise the
@@ -518,8 +528,17 @@ it, and one 1-GPU pod is enough to spoil an 8-GPU hole. The transfer then ends
 their Pending pod first, and see
 [proposal §15](../proposals/utilization-share-optimizer.md#15-deferred-to-later-prs)
 for raising the receiver earlier. An idle model is not
-shrunk to its floor: it stays at its headroom target, its weighted share of the
-spare GPUs, which is what lets it take the next spike at once.
+shrunk to its floor: it stays at its headroom target, its weighted share of
+the spare GPUs. While the quota is contended, that share is at most its need
+rounded up to whole replicas plus `maxHeadroomReplicas` (one by default) times
+its weight, rounded up; a model that has held more than that for its
+scale-down window gives the extra back to the quota while no other model is
+short of its need, so the spare sits unassigned, where the next model to spike
+takes it at once instead of waiting for a donor's pods to drain.
+
+A model that is still giving GPUs -- a transfer, a return or a refill still
+releasing -- is not raised, by a transfer or by the idle fill, until that
+release lands.
 
 **How to protect a model.** Raise its `minReplicaCount` (a floor is never taken,
 but it is paid for by every other model in the group: see `floor-pinned`), or

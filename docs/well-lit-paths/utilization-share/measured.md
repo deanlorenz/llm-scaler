@@ -16,10 +16,10 @@ from `259c52f8` and deployed by digest. The scenario and the guards that keep
 the arms comparable are in the
 [benchmarking runbook](../../guides/benchmarking/two-model-utilization-share.md).
 The tables below are that report's, unedited, except where a row says it came
-from the controller log. Two later runs, on a scenario with different burst
+from the controller log. Three later runs, on a scenario with different burst
 shapes, follow in
 [their own section](#different-burst-shapes-a-cancel-that-stalled-the-rising-model);
-they found a failure the first scenario could not show. Every run used 1 GPU
+they found failures the first scenario could not show. Every run used 1 GPU
 per replica.
 
 ## The setup
@@ -199,7 +199,9 @@ B stayed under a second in every arm, and every request was served.
   ([proposal §6.3](../../proposals/utilization-share-optimizer.md#63-execute-scale-down-first-scale-up-into-released-gpus)).
   The first attempt at this fix, in the image of the rerun below, restored a
   snapshot that confirming the transfer had already deleted, so on a cluster
-  it did nothing. No run has measured the working fix.
+  it did nothing. The working fix was measured in
+  [the rerun on `e55b02b2`](#rerun-with-the-hard-imbalance-rule-the-spare-was-parked-on-the-other-model):
+  a cancel there undid only its own move.
 
 ### Rerun with the cancel fix: the reversal hold did the same
 
@@ -231,11 +233,96 @@ No pod was ever unscheduled in any arm, and every request was served.
   its own (`stabilization.skipWaitsWhen`)
   ([proposal §6.2](../../proposals/utilization-share-optimizer.md#62-plan-transfers)).
   An interim rule, a receiver below three quarters of its need, is gone. This
-  run predates both; a rerun is next.
+  run predates both;
+  [the rerun below](#rerun-with-the-hard-imbalance-rule-the-spare-was-parked-on-the-other-model)
+  measured them.
 - Not fixed: B's draining backlog read as need, which is what started the
   transfers to it. The hard-imbalance rule lifts the hold only when the
   draining model's load after giving is at most 0.6. A model that must not start a burst
   short needs a floor sized for its burst.
+
+### Rerun with the hard-imbalance rule: the spare was parked on the other model
+
+The same scenario -- A (Llama), 20 000-token prompts and 250 tokens out,
+bursting at 4 rps from 1620 s; B (Qwen), 1000-token prompts and 6000 tokens
+out, bursting at 1 rps from 120 s; each model up to 8 replicas under one
+namespace quota of `H200: 10` -- on the image of `e55b02b2`, which carries the
+working cancel fix and the hard-imbalance rule. One run of each arm, on
+2026-10-10. Every arm served all 6810 of its requests, and every teardown
+left nothing behind.
+
+| time to first token, p50 / p95 | `today` | `shadow` | `share` |
+| --- | ---: | ---: | ---: |
+| B (Qwen) burst, first | 35 s / 70 s | 54 s / 92 s | **12 s / 63 s** |
+| A (Llama) burst, second | 105 s / 139 s | 90 s / 118 s | **161 s / 313 s** |
+| GPU-seconds | 15 487 | 17 208 | about 28 103 |
+
+The `share` GPU-seconds are approximate: its GPU sampling had 467 s of holes,
+17% of the window, so the report's strict check refused that figure. The
+latencies come from the load generator and are not affected.
+
+- **The first burst gained.** B, raised into the quota's spare before its
+  burst, started it with replicas already serving: p50 12 s against 35 s.
+- **The second burst lost.** A's p95 was 313 s against 139 s under today's
+  optimizer. The spare had been spread as headroom by weight, and after B's
+  burst it sat on B: 7 replicas at 5% load, each still serving 6000-token
+  outputs. Every replica A got had to come from one of those, and each release
+  waited about 5 minutes 45 seconds for its requests to drain. The pace let two
+  run at a time, so A went 3 -> 5 -> 7 -> 8 replicas over 18 minutes. Under
+  today's optimizer B had already scaled down, A found the GPUs idle, and it
+  went from 1 to 8 in 2 minutes.
+- **What worked.** The hard-imbalance rule fired as designed: all four moves to
+  A were urgent and skipped their waits, the first on the first cycle A's load
+  crossed its threshold (1.08). A cancel undid only its own move, holding
+  neither model.
+- **The response, built and not yet measured** (`a1f595ea`, revised after
+  review in `7ff3004a` and after verification in `2892aad3`, which is what the
+  pending rerun will measure):
+  - a hard imbalance that holds a second consecutive cycle is no longer paced:
+    the receiver takes every replica it is short of its need in one cycle, from
+    one donor or several. The first cycle still moves at the usual pace, so
+    one bad reading cannot drain every calm model at once;
+  - while the quota cannot hold every model at its recent peak at once, as
+    here (8 + 8 under 10), `utilizationShare.maxHeadroomReplicas` (default 1)
+    caps the headroom each model is given above its need, scaled by its
+    weight, and the rest stays unassigned, where a model whose demand rises
+    takes it at once with no other model to drain;
+  - a model that has held more than that for its scale-down window gives the
+    extra back to the quota, all in one cycle, while no model is short of its
+    need and only while its load stays at or below
+    `stabilization.returnSpareWhenLoadAtMost`
+    ([proposal §6.2](../../proposals/utilization-share-optimizer.md#62-plan-transfers)).
+  Pricing a donor by how long its pods take to drain was considered and not
+  built ([proposal §15](../../proposals/utilization-share-optimizer.md#15-deferred-to-later-prs)).
+
+### What 2892aad3 changes: simulated, not measured
+
+No cluster run has measured `2892aad3` yet. These figures are a
+**simulation**: a reviewer's production-order simulator, used to review and
+then verify the response. Each is the shortfall the simulator reports,
+averaged over 5 seeds of 6 hours, `e55b02b2` against `2892aad3` at
+`maxHeadroomReplicas` 1. Lower is better.
+
+| scenario | `e55b02b2` | `2892aad3` |
+| --- | ---: | ---: |
+| the cluster scenario (bursts in turn, ceiling 8, quota 10), 40 min bursts | 0.350 | **0.286** |
+| the same, 60 min bursts | 0.407 | **0.167** |
+| the same, 90 min bursts | 0.245 | **0.111** |
+| the cluster scenario, weight 2, 40 min bursts | 0.387 | **0.275** |
+| the same, 60 min bursts | 0.370 | **0.158** |
+| small alternating bursts, 60 min | 0.042 | 0.041 |
+| small alternating bursts, 40 min | **0.076** | 0.147 |
+| a long-drain model's brief dips, 12 min, with a 1-minute scale-down window | **0.018** | 0.059 |
+
+- The whole-node shape: unchanged.
+- A long-drain model's brief dips: back to `e55b02b2` levels, except the
+  12-minute dip with a 1-minute scale-down window in the table.
+- **The cost**: small alternating bursts are worse at 40 minutes. It is not
+  the headroom cap, which does not bind there (their peaks fit the quota
+  together); the cause is not yet found.
+
+A simulation is not a measurement: only the rerun on a cluster will say
+whether the cluster scenario's second burst recovers.
 
 ## P/D: not measured
 

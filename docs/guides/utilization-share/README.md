@@ -4,7 +4,10 @@
 
 The utilization-share optimizer shares one GPU quota between the models under
 it. Each model first gets the GPUs it needs, and the rest of the quota is shared
-as headroom, by weight. When the shares drift, the optimizer moves GPUs from one
+as headroom, by weight. When the quota cannot hold every model at its recent
+peak at once, that headroom is capped at `maxHeadroomReplicas` replicas (one by
+default) times the model's weight, and what is left stays unassigned, for
+whichever model's demand rises next. When the shares drift, the optimizer moves GPUs from one
 model to another: the donor scales down first, and the receiver is raised only
 once the GPUs are free. Whether it suits your fleet, and what it costs, is on
 the well-lit path:
@@ -199,8 +202,8 @@ kubectl get events -n <llmd-namespace> --field-selector type=Warning | grep Util
 
 | Event reason | type | means |
 | --- | --- | --- |
-| `UtilizationShareGiving` | Normal | a donor gives one replica; names the pod that goes and the receiver |
-| `UtilizationShareReceived` | Normal | the transfer landed: the receiver holds the GPUs. An idle fill says the GPUs came from the quota group's spare, as headroom by weight |
+| `UtilizationShareGiving` | Normal | a donor gives one replica; names the pod that goes and the receiver. A model giving back headroom it does not need names "the quota group's unassigned GPUs" instead: it holds more than `maxHeadroomReplicas` gives it, its demand has stayed low for its scale-down window, and no model is short |
+| `UtilizationShareReceived` | Normal | the transfer landed: the receiver holds the GPUs. An idle fill says the GPUs came from the quota group's unassigned GPUs, either because its demand rose past what it held, or as headroom (`maxHeadroomReplicas`) that is given back when this model no longer needs it |
 | `UtilizationShareReleaseAborted` | Warning | the donor did not release within the release timeout; its count is restored. Or its donor set could not complete; the Event then says so, and the donor is not held back |
 | `UtilizationShareFillTimedOut` | Warning | the receiver's new replica did not take the released GPUs in time |
 | `UtilizationShareWrongPod` | Warning | a pod other than the marked one was removed |
