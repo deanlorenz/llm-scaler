@@ -46,28 +46,37 @@ func (r ShareRole) Claim() float64 {
 	return math.Min(math.Max(r.Need, float64(r.Floor)), r.ceiling())
 }
 
+// ShareHeadroomReplicas is the replicas of headroom a role of weight w is
+// given above its claim when a weight-1 role is given n
+// (utilizationShare.maxHeadroomReplicas): w·n, rounded up.
+func ShareHeadroomReplicas(w float64, n int) int {
+	if n <= 0 || !(w > 0) {
+		return 0
+	}
+	return int(math.Ceil(w*float64(n) - 1e-9))
+}
+
 // ShareCapSpare returns roles with each one's ceiling lowered to its claim,
-// rounded up to whole replicas, plus spareReplicas replicas: the most the
-// targets give it of the spare (utilizationShare.maxSpareReplicas). The rest of
-// the spare stays unassigned in the quota, where a model whose demand rises
-// takes it at once (the idle fill). Spread over the models as headroom, a
-// model that bursts must wait for another's pods to drain first: measured, a
-// model holding seven replicas at 5% load with 6000-token requests released
-// two every six minutes, and the model bursting beside it took 18 minutes to
-// reach the 8 replicas today's optimizer reached in 2. Claims are unchanged:
-// the lowered ceiling is never below a claim. A negative spareReplicas leaves
-// every ceiling as it is. A role whose claim is zero has no need, and the
-// targets give it no spare however its ceiling reads.
-func ShareCapSpare(roles []ShareRole, spareReplicas int) []ShareRole {
+// rounded up to whole replicas, plus ShareHeadroomReplicas(weight, n): the
+// most of the spare the targets give it. The rest stays unassigned in the
+// quota, where the idle fill raises a model whose demand rises without a
+// drain to wait for (proposal §5.1). Claims are unchanged: the lowered ceiling
+// is never below one. A negative n, a claim that is not finite, and a limit
+// too large to hold leave the ceiling as it is, as does a limit of zero, which
+// would read as unbounded -- a role with no claim takes no spare anyway.
+func ShareCapSpare(roles []ShareRole, n int) []ShareRole {
 	out := slices.Clone(roles)
-	if spareReplicas < 0 {
+	if n < 0 {
 		return out
 	}
 	for i, r := range out {
-		g := max(r.ReplicaGPUs, 1)
-		limit := g * (int(math.Ceil(r.Claim()/float64(g)-1e-9)) + spareReplicas)
-		if r.Ceiling <= 0 || limit < r.Ceiling {
-			out[i].Ceiling = limit
+		g := float64(max(r.ReplicaGPUs, 1))
+		limit := g * (math.Ceil(r.Claim()/g-1e-9) + float64(ShareHeadroomReplicas(r.Weight, n)))
+		if math.IsNaN(limit) || limit < 1 || limit > MaxShareBudgetGPUs {
+			continue
+		}
+		if c := int(limit); r.Ceiling <= 0 || c < r.Ceiling {
+			out[i].Ceiling = c
 		}
 	}
 	return out

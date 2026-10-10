@@ -34,6 +34,7 @@ var (
 	utilizationShareRelease        *prometheus.HistogramVec
 	utilizationShareMode           *prometheus.GaugeVec
 	utilizationShareInFlight       *prometheus.GaugeVec
+	utilizationShareStarts         *prometheus.CounterVec
 )
 
 // registerUtilizationShareMetrics creates and registers the utilization-share
@@ -113,6 +114,11 @@ func registerUtilizationShareMetrics(registry prometheus.Registerer) error {
 		Name: constants.WVAUtilizationShareTransfersTotal,
 		Help: "Utilization-share optimizer: transfers that left the ledger, by outcome.",
 	}, append(slices.Clone(groupLabels), constants.LabelOutcome, constants.LabelUrgent))
+	utilizationShareStarts = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: constants.WVAUtilizationShareStartsTotal,
+		Help: "Utilization-share optimizer: what it started, by kind (transfer, fill, refill, return) and whether " +
+			"the move skipped the stabilization waits. A donor set counts as one transfer.",
+	}, append(slices.Clone(groupLabels), constants.LabelKind, constants.LabelSkippedWaits))
 	modeLabels := []string{constants.LabelMode}
 	if controllerInstance != "" {
 		modeLabels = append(modeLabels, constants.LabelControllerInstance)
@@ -143,6 +149,7 @@ func registerUtilizationShareMetrics(registry prometheus.Registerer) error {
 		constants.WVAUtilizationShareDonorsPerTransfer: utilizationShareDonorsPer,
 		constants.WVAUtilizationShareReleaseSeconds:    utilizationShareRelease,
 		constants.WVAUtilizationShareTransfersTotal:    utilizationShareTransfers,
+		constants.WVAUtilizationShareStartsTotal:       utilizationShareStarts,
 	} {
 		if err := registry.Register(c); err != nil {
 			return fmt.Errorf("failed to register utilization-share metric %s: %w", name, err)
@@ -330,6 +337,23 @@ func CountUtilizationShareTransfer(acceleratorType, scope, outcome string, urgen
 	utilizationShareTransfers.With(l).Inc()
 }
 
+// CountUtilizationShareStart counts one thing the optimizer started.
+func CountUtilizationShareStart(acceleratorType, scope, kind string, skippedWaits bool) {
+	if utilizationShareStarts == nil {
+		return
+	}
+	l := prometheus.Labels{
+		constants.LabelAcceleratorType: acceleratorType,
+		constants.LabelScope:           scope,
+		constants.LabelKind:            kind,
+		constants.LabelSkippedWaits:    strconv.FormatBool(skippedWaits),
+	}
+	if controllerInstance != "" {
+		l[constants.LabelControllerInstance] = controllerInstance
+	}
+	utilizationShareStarts.With(l).Inc()
+}
+
 // InitUtilizationShareTransfers creates every outcome's transfer counter of a
 // group at 0. A series that appears at 1 is invisible to increase(), so the
 // first abort or wrong-pod would never alert: the actuator calls it in a
@@ -354,6 +378,17 @@ func initUtilizationShareTransfers(gl prometheus.Labels) {
 			cl[constants.LabelOutcome] = outcome
 			cl[constants.LabelUrgent] = strconv.FormatBool(urgent)
 			utilizationShareTransfers.With(cl).Add(0)
+		}
+	}
+	if utilizationShareStarts == nil {
+		return
+	}
+	for _, kind := range constants.UtilizationShareKinds {
+		for _, skipped := range []bool{false, true} {
+			cl := maps.Clone(gl)
+			cl[constants.LabelKind] = kind
+			cl[constants.LabelSkippedWaits] = strconv.FormatBool(skipped)
+			utilizationShareStarts.With(cl).Add(0)
 		}
 	}
 }

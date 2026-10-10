@@ -298,7 +298,7 @@ func TestUtilizationShareReanchorsAStuckTarget(t *testing.T) {
 			e.utilizationShare.divergedSince = map[string]time.Time{}
 			l := allocation.NewShareLedger()
 			if tc.inFlight {
-				l.StartFill("ns/C/", "C-v", 1, map[string]int{"ns/C/": 1}, t0, tm)
+				l.StartFill("ns/C/", "C-v", 1, false, map[string]int{"ns/C/": 1}, t0, tm)
 			}
 			step := func(at time.Time) int {
 				e.reanchorShareTargets(logr.Discard(), l, g, variantKey, at, tm)

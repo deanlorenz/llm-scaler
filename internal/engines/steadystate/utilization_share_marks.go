@@ -56,6 +56,10 @@ type transferMark struct {
 	Instance string `json:"instance,omitempty"`
 	// Cost is the deletion cost the mark wrote; empty is donorDeletionCost.
 	Cost string `json:"cost,omitempty"`
+	// Returned marks a returned spare (allocation.ShareTransfer.Returned), so a
+	// restart restores it as one: cancellable while free, and reported as a
+	// return. Forged, it only makes a receiver-less release cancellable.
+	Returned bool `json:"returned,omitempty"`
 }
 
 // ownCost is the deletion cost this mark wrote on its pod.
@@ -324,7 +328,7 @@ func (e *Engine) markDonorPods(ctx context.Context, t allocation.ShareTransfer,
 		p := &pods[i]
 		mark := transferMark{ID: t.ID, Donor: t.Donor, Receiver: t.Receiver, DonorVariant: t.DonorVariant,
 			ReceiverVariant: t.ReceiverVariant, GPUs: t.GPUs, DonorGPUs: t.DonorGPUs, Started: t.Started, SetID: t.SetID,
-			Planned: len(t.PlannedPods) > 0, Instance: metrics.GetControllerInstance()}
+			Planned: len(t.PlannedPods) > 0, Returned: t.Returned, Instance: metrics.GetControllerInstance()}
 		if private {
 			// The mark sits on the donor tenant's pod: it must not name
 			// another tenant's model, nor carry a set link that names another
@@ -564,7 +568,7 @@ func (e *Engine) restoreShareTransfers(ctx context.Context, logger logr.Logger, 
 			ID: m.ID, Donor: m.Donor, Receiver: m.Receiver, DonorVariant: m.DonorVariant,
 			ReceiverVariant: m.ReceiverVariant, GPUs: m.GPUs, DonorGPUs: m.DonorGPUs, Started: m.Started,
 			Deadline: m.Started.Add(tm.ReleaseTimeout), DonorPods: f.pods, DonorLowered: f.live, SetID: m.SetID,
-			PlannedPods: plannedPods(m.Planned, f.pods),
+			PlannedPods: plannedPods(m.Planned, f.pods), Returned: m.Returned, Entitled: m.Returned,
 		}, g.Committed[m.Donor])
 		if f.live {
 			e.utilizationShare.desired[variantKey(m.Donor, m.DonorVariant)]--
@@ -639,7 +643,7 @@ func (e *Engine) remarkDonorPods(ctx context.Context, logger logr.Logger, l *all
 		_ = json.Unmarshal([]byte(p.Annotations[utilizationShareTransferAnnotation]), &old)
 		raw, err := json.Marshal(transferMark{ID: t.ID, Donor: t.Donor, DonorVariant: t.DonorVariant,
 			DonorGPUs: t.DonorGPUs, Started: t.Started, Planned: len(t.PlannedPods) > 0, PrevCost: old.PrevCost,
-			Cost: old.Cost, Instance: metrics.GetControllerInstance()})
+			Cost: old.Cost, Returned: t.Returned, Instance: metrics.GetControllerInstance()})
 		if err != nil {
 			continue
 		}

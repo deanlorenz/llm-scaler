@@ -211,16 +211,22 @@ func TestUtilizationShareIdleFillLandingIsAnEvent(t *testing.T) {
 	se.e.Recorder = rec
 	accessor := func(_, variant string) scaletarget.ScaleTargetAccessor { return f.scaleTargets()["ns/"+variant] }
 	g := allocation.ShareGroup{Origins: map[string]allocation.ShareRoleOrigin{roleB: {Namespace: "ns", ModelID: "B", Role: "both"}}}
-	fill := allocation.ShareTransfer{ID: "f", Receiver: roleB, ReceiverVariant: "B-v", GPUs: 1}
-	se.e.shareEndedEvent(g, allocation.ShareTransferEnd{Transfer: fill, Outcome: allocation.ShareOutcomeDone},
-		allocation.ShareTimings{}, time.Time{}, accessor)
-	select {
-	case got := <-rec.Events:
-		if !strings.HasPrefix(got, "Normal "+constants.K8SEventUtilizationShareReceived) || !strings.Contains(got, "spare GPUs") {
-			t.Fatalf("idle fill event %q", got)
+	for _, c := range []struct {
+		urgent bool
+		says   string
+	}{{false, "as headroom"}, {true, "its demand rose"}} {
+		fill := allocation.ShareTransfer{ID: "f", Receiver: roleB, ReceiverVariant: "B-v", GPUs: 1, Urgent: c.urgent}
+		se.e.shareEndedEvent(g, allocation.ShareTransferEnd{Transfer: fill, Outcome: allocation.ShareOutcomeDone},
+			allocation.ShareTimings{}, time.Time{}, accessor)
+		select {
+		case got := <-rec.Events:
+			if !strings.HasPrefix(got, "Normal "+constants.K8SEventUtilizationShareReceived) ||
+				!strings.Contains(got, "unassigned GPUs") || !strings.Contains(got, c.says) {
+				t.Fatalf("idle fill event (urgent %v) %q, want it to say %q", c.urgent, got, c.says)
+			}
+		default:
+			t.Fatal("an idle fill landed with no Event")
 		}
-	default:
-		t.Fatal("an idle fill landed with no Event")
 	}
 }
 

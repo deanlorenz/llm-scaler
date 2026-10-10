@@ -29,9 +29,14 @@ const (
 	DefaultConsecutiveCyclesBeforeMove = 2
 	DefaultSkipWaitsReceiverLoad       = 0.9
 	DefaultSkipWaitsDonorLoad          = 0.6
-	// DefaultMaxSpareReplicas is utilizationShare.maxSpareReplicas: the most
-	// replicas of the spare one model is given above what it needs.
-	DefaultMaxSpareReplicas = 1
+	// DefaultReturnSpareLoad is stabilization.returnSpareWhenLoadAtMost.
+	DefaultReturnSpareLoad = 0.6
+	// DefaultMaxHeadroomReplicas is utilizationShare.maxHeadroomReplicas: the
+	// replicas above its need the quota's spare gives a model of weight 1.
+	DefaultMaxHeadroomReplicas = 1
+	// MaxHeadroomReplicasLimit bounds maxHeadroomReplicas. Far above any
+	// model's maxReplicas: a larger value means "spread all of it".
+	MaxHeadroomReplicasLimit = 10000
 	// StabilizationAuto derives a wait per group from its donors' scale-down
 	// window, KEDA polling and pod drain time.
 	StabilizationAuto = "auto"
@@ -91,7 +96,8 @@ func (o *OptimizerConfig) UnmarshalYAML(node *yaml.Node) error {
 }
 
 // UtilizationShareConfig is the operator-facing configuration of the
-// utilization-share optimizer: nine optional keys, each a decision only an
+// utilization-share optimizer: nine optional keys (the stabilization block
+// counts as one), each a decision only an
 // operator can make. Every other value the optimizer uses is derived from the
 // cluster or is a constant (§8.4 of the proposal).
 type UtilizationShareConfig struct {
@@ -104,14 +110,15 @@ type UtilizationShareConfig struct {
 	// wait for a transfer.
 	ReserveGPUs int `yaml:"reserveGPUs,omitempty"`
 
-	// MaxSpareReplicas is the most replicas above what it needs that the
-	// quota's spare GPUs give one model (each role of a P/D model). The rest
-	// stays unassigned, where a model whose demand rises takes it at once,
-	// instead of waiting for another model's pods to finish their requests
-	// before they release their GPUs. 0 gives no spare; a value as large as
-	// the models' maxReplicas spreads all of it as headroom by weight. Nil
-	// takes DefaultMaxSpareReplicas.
-	MaxSpareReplicas *int `yaml:"maxSpareReplicas,omitempty"`
+	// MaxHeadroomReplicas is how many replicas above its need (or its
+	// minReplicaCount, if higher) the quota's spare GPUs give a model of
+	// weight 1; a model of weight w gets w times as many, rounded up. Each
+	// role of a P/D model counts separately. The rest of the spare stays
+	// unassigned, where a model whose demand rises takes it at once instead
+	// of waiting for another model's pods to finish their requests. 0 gives
+	// no headroom; a value as large as the models' maxReplicas spreads the
+	// whole spare by weight. Nil takes DefaultMaxHeadroomReplicas.
+	MaxHeadroomReplicas *int `yaml:"maxHeadroomReplicas,omitempty"`
 
 	// Shadow computes, reports and logs everything and actuates nothing.
 	Shadow bool `yaml:"shadow,omitempty"`
@@ -158,6 +165,14 @@ type UtilizationShareStabilization struct {
 	FlappingWindow string `yaml:"flappingWindow,omitempty"`
 	// SkipWaitsWhen lets a large imbalance skip the two waits above.
 	SkipWaitsWhen *UtilizationShareSkipWaits `yaml:"skipWaitsWhen,omitempty"`
+	// ReturnSpareWhenLoadAtMost: a model holding more than its need plus its
+	// headroom (maxHeadroomReplicas) gives the extra back to the quota only
+	// while its load -- utilization as a fraction of its scale-up threshold --
+	// would stay at or below this on what it keeps, less its headroom. The
+	// lower it is, the longer a model keeps replicas after its demand falls,
+	// and the further demand must rise before it is raised again. In (0, 1);
+	// zero takes DefaultReturnSpareLoad.
+	ReturnSpareWhenLoadAtMost float64 `yaml:"returnSpareWhenLoadAtMost,omitempty"`
 }
 
 // UtilizationShareSkipWaits says when a move waits for neither
@@ -194,6 +209,8 @@ type ShareStabilization struct {
 	SkipWaitsOff          bool
 	SkipWaitsReceiverLoad float64
 	SkipWaitsDonorLoad    float64
+	// ReturnSpareLoad is returnSpareWhenLoadAtMost in force.
+	ReturnSpareLoad float64
 }
 
 // UtilizationShareNamespace is the per-namespace-quota-group setting.
@@ -208,10 +225,10 @@ type UtilizationShareNamespace struct {
 type UtilizationShare struct {
 	Tolerance   float64
 	ReserveGPUs int
-	// MaxSpareReplicas is utilizationShare.maxSpareReplicas in force.
-	MaxSpareReplicas int
-	Shadow           bool
-	PhysicalGroups   bool
+	// MaxHeadroomReplicas is utilizationShare.maxHeadroomReplicas in force.
+	MaxHeadroomReplicas int
+	Shadow              bool
+	PhysicalGroups      bool
 	// Stabilization is utilizationShare.stabilization in force.
 	Stabilization ShareStabilization
 	// Classes are the weight classes in force.
@@ -249,12 +266,13 @@ func ResolveUtilizationShare(cfg *UtilizationShareConfig) (UtilizationShare, err
 	if us.ReserveGPUs < 0 {
 		return UtilizationShare{}, fmt.Errorf("utilizationShare.reserveGPUs must be >= 0, got %d", us.ReserveGPUs)
 	}
-	us.MaxSpareReplicas = DefaultMaxSpareReplicas
-	if cfg.MaxSpareReplicas != nil {
-		us.MaxSpareReplicas = *cfg.MaxSpareReplicas
+	us.MaxHeadroomReplicas = DefaultMaxHeadroomReplicas
+	if cfg.MaxHeadroomReplicas != nil {
+		us.MaxHeadroomReplicas = *cfg.MaxHeadroomReplicas
 	}
-	if us.MaxSpareReplicas < 0 {
-		return UtilizationShare{}, fmt.Errorf("utilizationShare.maxSpareReplicas must be >= 0, got %d", us.MaxSpareReplicas)
+	if us.MaxHeadroomReplicas < 0 || us.MaxHeadroomReplicas > MaxHeadroomReplicasLimit {
+		return UtilizationShare{}, fmt.Errorf("utilizationShare.maxHeadroomReplicas must be in [0, %d], got %d",
+			MaxHeadroomReplicasLimit, us.MaxHeadroomReplicas)
 	}
 	if err := us.resolveStabilization(cfg.Stabilization); err != nil {
 		return UtilizationShare{}, err
@@ -351,6 +369,14 @@ func (u *UtilizationShare) resolveStabilization(cfg *UtilizationShareStabilizati
 		return fmt.Errorf("utilizationShare.stabilization.skipWaitsWhen.donorLoadAtMost must be > 0 and below "+
 			"receiverLoadAtLeast (%v), or there is no hysteresis and skipped waits oscillate; got %v",
 			st.SkipWaitsReceiverLoad, st.SkipWaitsDonorLoad)
+	}
+	st.ReturnSpareLoad = cfg.ReturnSpareWhenLoadAtMost
+	if st.ReturnSpareLoad == 0 {
+		st.ReturnSpareLoad = DefaultReturnSpareLoad
+	}
+	if !(st.ReturnSpareLoad > 0 && st.ReturnSpareLoad < 1) {
+		return fmt.Errorf("utilizationShare.stabilization.returnSpareWhenLoadAtMost must be in (0, 1), got %v",
+			cfg.ReturnSpareWhenLoadAtMost)
 	}
 	u.Stabilization = st
 	return nil

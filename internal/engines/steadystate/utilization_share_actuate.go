@@ -298,6 +298,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 		SkipWaits: shareSkipWaits(us), ConfirmCycles: us.Stabilization.ConsecutiveCyclesBeforeMove,
 		Give: g.Give, Grow: g.Grow, Nodes: nodes, DonorUnits: units, DomainKey: domains,
 		WakeHeld: l.WakeHeld(now), PhysicalFree: g.PhysicalFree,
+		Headroom: allocation.ShareHeadroom{Capped: true, Replicas: us.MaxHeadroomReplicas, ReturnLoad: us.Stabilization.ReturnSpareLoad},
 	}, now, tm)
 	for _, id := range plan.Cancelled {
 		t := before[id]
@@ -315,7 +316,17 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	taken := map[string]bool{}
 	written := map[string]int64{} // the cost each pod got this cycle
 	ownedMark := shareMarkOwned(l, taken)
+	// A donor whose pod could not be marked starts nothing more this cycle:
+	// an unpaced move can plan several transfers from it, and starting the
+	// rest after reporting it held back or backing off would contradict both.
+	failedDonors := map[string]bool{}
 	for _, set := range shareStartedSets(plan.Started) {
+		if slices.ContainsFunc(set, func(t allocation.ShareTransfer) bool { return failedDonors[t.Donor] }) {
+			for i := len(set) - 1; i >= 0; i-- {
+				l.Forget(set[i].ID, tm)
+			}
+			continue
+		}
 		marked := map[string][]string{}
 		markedPods := map[string][]corev1.Pod{}
 		var failed error
@@ -333,6 +344,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 			}
 		}
 		if failed != nil {
+			failedDonors[failedDonor] = true
 			// In reverse start order, so each unmark runs before the marks of
 			// the members it followed are undone.
 			for i := len(set) - 1; i >= 0; i-- {
@@ -380,6 +392,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 			continue
 		}
 		metrics.ObserveUtilizationShareDonorsPerTransfer(g.AcceleratorType, scope, len(set))
+		metrics.CountUtilizationShareStart(g.AcceleratorType, scope, shareStartKind(set[0]), set[0].SkippedWaits)
 		for _, t := range set {
 			l.ConfirmStarted(t.ID, marked[t.ID])
 			st.desired[variantKey(t.Donor, t.DonorVariant)]--
@@ -391,7 +404,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 		}
 	}
 
-	e.fillIdleShare(logger, l, g, ev, held, shareFit{nodes: plan.Nodes, domains: domains}, variantKey, now, tm)
+	e.fillIdleShare(logger, l, g, plan.Evaluation, held, shareFit{nodes: plan.Nodes, domains: domains}, variantKey, now, tm)
 	out.overrides = e.shareOverrides(g, variantKey, "utilization share")
 	out.promised = l.Promised() + l.WakeHeld(now)
 	out.swinging = plan.Swinging
@@ -401,6 +414,26 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	out.claimable = shareClaimable(l, g, held)
 	out.releasing, out.filling = countInFlight(l)
 	return out
+}
+
+// shareScopeLabel is a group's scope as its metrics carry it.
+func shareScopeLabel(g allocation.ShareGroup) string {
+	if g.Scope == "" {
+		return constants.UtilizationShareClusterScope
+	}
+	return g.Scope
+}
+
+// shareStartKind is what a started set (or single transfer, led by t) counts
+// as on wva_utilization_share_starts_total.
+func shareStartKind(t allocation.ShareTransfer) string {
+	switch {
+	case t.Returned:
+		return constants.UtilizationShareKindReturn
+	case t.Receiver == "" && t.SetID == "":
+		return constants.UtilizationShareKindRefill
+	}
+	return constants.UtilizationShareKindTransfer
 }
 
 // fillIdleShare raises receivers below their whole-replica target into the
@@ -422,7 +455,9 @@ func (e *Engine) fillIdleShare(logger logr.Logger, l *allocation.ShareLedger, g 
 	now time.Time, tm allocation.ShareTimings) {
 	committed := l.Committed(held)
 	// GPUs redirected to a woken model are its, however idle they look.
-	idle := g.Budget - l.WakeHeld(now)
+	// Nor are those a reserve refill or a returned spare still releases: the
+	// quota counts the donor's pod until it is gone.
+	idle := g.Budget - l.WakeHeld(now) - l.Unreleased()
 	for _, c := range committed {
 		idle -= c
 	}
@@ -435,9 +470,19 @@ func (e *Engine) fillIdleShare(logger logr.Logger, l *allocation.ShareLedger, g 
 	for _, r := range g.Roles {
 		roles[r.Key] = r
 	}
+	// A role giving its spare back is not raised before the return lands:
+	// raised while its pod still drains, the return would never see it
+	// shrink, would abort and restore its count -- one replica above where it
+	// was meant to be. The planner cancels the return while it is free.
+	returning := map[string]bool{}
+	for _, t := range l.Transfers() {
+		if t.Returned && t.State == allocation.ShareReleasing {
+			returning[t.Donor] = true
+		}
+	}
 	var receivers []string
 	for _, r := range g.Roles {
-		if _, ok := g.Grow[r.Key]; ok && committed[r.Key] < integer[r.Key] && !l.FillHeld(r.Key, now) {
+		if _, ok := g.Grow[r.Key]; ok && committed[r.Key] < integer[r.Key] && !l.FillHeld(r.Key, now) && !returning[r.Key] {
 			receivers = append(receivers, r.Key)
 		}
 	}
@@ -455,7 +500,11 @@ func (e *Engine) fillIdleShare(logger logr.Logger, l *allocation.ShareLedger, g 
 	}
 	for _, rc := range receivers {
 		grow := g.Grow[rc]
-		for n := 0; n < allocation.ShareMaxReplicasPerCycle && idle >= grow.GPUs && committed[rc] < integer[rc]; n++ {
+		pace := allocation.ShareFillPace(roles[rc].Need, committed[rc])
+		if grow.GPUs <= 0 {
+			pace = min(pace, allocation.ShareMaxReplicasPerCycle) // a replica of no GPUs never closes the gap
+		}
+		for n := 0; n < pace && idle >= grow.GPUs && committed[rc] < integer[rc]; n++ {
 			// A receiver whose pod shape is unknown is filled by count, as
 			// without node information: guessing one large pod would refuse
 			// a multi-pod replica that fits.
@@ -464,7 +513,8 @@ func (e *Engine) fillIdleShare(logger logr.Logger, l *allocation.ShareLedger, g 
 					"receiver", rc, "pods", grow.PodGPUs)
 				break
 			}
-			t := l.StartFill(rc, grow.Name, grow.GPUs, held, now, tm)
+			t := l.StartFill(rc, grow.Name, grow.GPUs, float64(committed[rc]) < roles[rc].Need, held, now, tm)
+			metrics.CountUtilizationShareStart(g.AcceleratorType, shareScopeLabel(g), constants.UtilizationShareKindFill, false)
 			e.utilizationShare.desired[variantKey(rc, grow.Name)]++
 			idle -= grow.GPUs
 			committed[rc] += grow.GPUs

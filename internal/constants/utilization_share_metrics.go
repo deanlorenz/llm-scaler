@@ -74,6 +74,10 @@ const (
 	// that fund one receiver replica (section 6.5).
 	WVAUtilizationShareDonorsPerTransfer = "wva_utilization_share_donors_per_transfer"
 
+	// WVAUtilizationShareStartsTotal is a counter: what the optimizer started,
+	// by kind (transfer, fill, refill, return) and skipped_waits.
+	WVAUtilizationShareStartsTotal = "wva_utilization_share_starts_total"
+
 	// WVAUtilizationShareMode is a gauge: 1 for the mode the optimizer is in
 	// -- off, invalid (the optimizer block did not validate), shadow or active
 	// -- and 0 for the others.
@@ -95,6 +99,12 @@ const (
 
 	// LabelUrgent is "true" on a transfer whose receiver was below its need.
 	LabelUrgent = "urgent"
+
+	// LabelKind is what WVAUtilizationShareStartsTotal counts: one of
+	// UtilizationShareKinds. LabelSkippedWaits is "true" on a move that
+	// skipped the stabilization waits (a hard imbalance).
+	LabelKind         = "kind"
+	LabelSkippedWaits = "skipped_waits"
 
 	// LabelScope is the budget scope of a utilization-share group.
 	LabelScope = "scope"
@@ -159,6 +169,26 @@ const (
 var UtilizationShareOutcomes = []string{
 	UtilizationShareOutcomeDone, UtilizationShareOutcomeFillTimeout, UtilizationShareOutcomeCancelled,
 	UtilizationShareOutcomeAborted, UtilizationShareOutcomeRedirected, UtilizationShareOutcomeWrongPod,
+}
+
+// Values of LabelKind on WVAUtilizationShareStartsTotal.
+const (
+	// UtilizationShareKindTransfer is a donor replica moved to a receiver (a
+	// donor set counts once).
+	UtilizationShareKindTransfer = "transfer"
+	// UtilizationShareKindFill is a receiver raised into unassigned GPUs.
+	UtilizationShareKindFill = "fill"
+	// UtilizationShareKindRefill is a donor lowered to pay back the reserve.
+	UtilizationShareKindRefill = "refill"
+	// UtilizationShareKindReturn is a donor's headroom above its target given
+	// back to the quota.
+	UtilizationShareKindReturn = "return"
+)
+
+// UtilizationShareKinds are every LabelKind value, published at 0 for an
+// acting group.
+var UtilizationShareKinds = []string{
+	UtilizationShareKindTransfer, UtilizationShareKindFill, UtilizationShareKindRefill, UtilizationShareKindReturn,
 }
 
 // Values of LabelParam on WVAUtilizationShareEffectiveSeconds: the derived

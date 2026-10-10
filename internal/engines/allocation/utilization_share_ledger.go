@@ -90,7 +90,7 @@ type ShareTransfer struct {
 	DonorGPUs int
 	// Entitled transfers -- owed floors, fixed consumers, reserve refill, a
 	// returned spare -- bypass the z admission rule and the holds, and set no
-	// hold (§6.2).
+	// hold (§6.2). A Returned transfer is always Entitled.
 	Entitled bool
 	// Returned marks a donor-only transfer that gives a replica above the
 	// donor's target back to the group's unassigned GPUs (ShareCapSpare), while
@@ -244,6 +244,12 @@ type ShareLedger struct {
 	swingUntil map[string]time.Time
 	needs      map[string][]shareNeedSample
 	confirm    map[string]int
+	// hard counts each role's consecutive cycles as a hard-imbalance
+	// receiver (ConfirmHard).
+	hard map[string]int
+	// overSince is when each role came to hold more than its target
+	// (MarkOver).
+	overSince map[string]time.Time
 	// releases are the durations of recent completed releases, newest last,
 	// for the measured release time (§8.4).
 	releases []time.Duration
@@ -282,6 +288,8 @@ func NewShareLedger() *ShareLedger {
 		swingUntil:  map[string]time.Time{},
 		needs:       map[string][]shareNeedSample{},
 		confirm:     map[string]int{},
+		hard:        map[string]int{},
+		overSince:   map[string]time.Time{},
 		seen:        map[string]time.Time{},
 		unsteerable: map[string]bool{},
 		busyUntil:   map[string]time.Time{},
@@ -307,7 +315,10 @@ func (l *ShareLedger) Transfers() []ShareTransfer {
 func (l *ShareLedger) InFlight() int {
 	seen := map[string]bool{}
 	for _, t := range l.transfers {
-		if t.Donor == "" {
+		// Neither a returned spare nor a move that skipped the waits counts:
+		// both are unpaced, and counted, a burst's five drains or a calm
+		// model's returns would hold every ordinary move for a release.
+		if t.Donor == "" || t.Returned || t.SkippedWaits {
 			continue
 		}
 		k := t.ID
@@ -319,15 +330,33 @@ func (l *ShareLedger) InFlight() int {
 	return len(seen)
 }
 
+// Unreleased is the GPUs that donor-only transfers -- reserve refills and
+// returned spare -- took off their donors' commitment and have not released:
+// the donors' pods still run on them and the quota still counts them. They
+// are not idle until released. Counted idle, the fill would raise a model
+// into a full quota, its pods would be refused at admission, and it would be
+// raised again at every fill timeout.
+func (l *ShareLedger) Unreleased() int {
+	n := 0
+	for _, t := range l.transfers {
+		if t.State == ShareReleasing && t.Receiver == "" && t.SetID == "" {
+			n += t.DonorGPUs
+		}
+	}
+	return n
+}
+
 // StartFill records a receiver raised into idle GPUs: no donor, so it starts in
 // Filling and ends when the receiver's pods are scheduled. Tracking it keeps
 // the next cycle, which does not yet see those pods held, from filling the same
-// GPUs again.
-func (l *ShareLedger) StartFill(receiver, variant string, gpus int, held map[string]int, now time.Time, tm ShareTimings) ShareTransfer {
+// GPUs again. urgent marks a receiver raised below its need, as Urgent does a
+// transfer's.
+func (l *ShareLedger) StartFill(receiver, variant string, gpus int, urgent bool, held map[string]int, now time.Time,
+	tm ShareTimings) ShareTransfer {
 	l.nextID++
 	t := &ShareTransfer{
 		ID: fmt.Sprintf("%s-f%d-%s", l.incarnation, l.nextID, randomHex(4)), Receiver: receiver, ReceiverVariant: variant,
-		GPUs: gpus, Entitled: true, State: ShareFilling, Started: now,
+		GPUs: gpus, Entitled: true, Urgent: urgent, State: ShareFilling, Started: now,
 		Deadline: now.Add(tm.FillTimeout), receiverBase: held[receiver], fillingSince: now,
 	}
 	l.transfers = append(l.transfers, t)
@@ -571,6 +600,7 @@ func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTiming
 	got := map[string]int{}
 	rbase := map[string]int{}
 	keep := l.transfers[:0]
+	abortedNow := map[string]bool{}
 	var filled, wrong []*ShareTransfer
 	for _, t := range l.transfers {
 		_, receiverSeen := rheld[t.Receiver]
@@ -594,9 +624,14 @@ func (l *ShareLedger) Observe(held map[string]int, now time.Time, tm ShareTiming
 			continue
 		case t.State == ShareReleasing && !now.Before(t.Deadline):
 			ended = append(ended, ShareTransferEnd{Transfer: *t, Outcome: ShareOutcomeAborted})
-			if t.Donor != "" {
+			if t.Donor != "" && !abortedNow[t.Donor] {
 				// Back off one release timeout, doubling per consecutive
-				// abort up to 16x; a release that lands resets it.
+				// abort up to 16x; a release that lands resets it. One
+				// cycle's aborts of a donor count once: transfers started
+				// together share a deadline, and the five a hard imbalance
+				// starts at once would otherwise reach the 16x back-off on
+				// their first stuck release.
+				abortedNow[t.Donor] = true
 				l.aborts[t.Donor]++
 				backoff := tm.ReleaseTimeout << min(l.aborts[t.Donor]-1, 4)
 				l.giveAfter[t.Donor] = now.Add(backoff)
@@ -873,6 +908,40 @@ func (l *ShareLedger) Confirm(actionable map[string]bool) map[string]int {
 	return out
 }
 
+// ConfirmHard records which roles are hard-imbalance receivers this cycle
+// and returns, per role, how many consecutive cycles it has been one. A
+// role that stops being one starts again from zero.
+func (l *ShareLedger) ConfirmHard(hard map[string]bool) map[string]int {
+	for role := range l.hard {
+		if !hard[role] {
+			delete(l.hard, role)
+		}
+	}
+	for role, h := range hard {
+		if h {
+			l.hard[role]++
+		}
+	}
+	return maps.Clone(l.hard)
+}
+
+// MarkOver records which roles hold more than their target this cycle and
+// returns, per role still over, since when it has been: the clock a return
+// waits on (returnSpare). A role that is not over starts again.
+func (l *ShareLedger) MarkOver(over map[string]bool, now time.Time) map[string]time.Time {
+	for role := range l.overSince {
+		if !over[role] {
+			delete(l.overSince, role)
+		}
+	}
+	for role, o := range over {
+		if _, ok := l.overSince[role]; o && !ok {
+			l.overSince[role] = now
+		}
+	}
+	return maps.Clone(l.overSince)
+}
+
 // MeasuredRelease is the 90th percentile of recent completed releases, and
 // whether at least three have completed: too few say nothing about the tail.
 func (l *ShareLedger) MeasuredRelease() (time.Duration, bool) {
@@ -1097,6 +1166,8 @@ func (l *ShareLedger) Retain(present []string, now time.Time, tm ShareTimings) {
 		delete(l.moves, r)
 		delete(l.swingUntil, r)
 		delete(l.needs, r)
+		delete(l.hard, r)
+		delete(l.overSince, r)
 	}
 }
 

@@ -166,11 +166,11 @@ func TestUtilizationShareShadowReportsAWouldBeRebalance(t *testing.T) {
 // A settled fleet stays quiet at Info, and the evaluation still ran: every role
 // is published, none actionable. Without the positive control an early return
 // would pass this test too. Settled as headroom by weight: the whole spare
-// spread, as a maxSpareReplicas at the quota's size allows.
+// spread, as a maxHeadroomReplicas at the quota's size allows.
 func TestUtilizationShareShadowIsQuietWhenSettled(t *testing.T) {
 	reg := freshMetrics(t)
 	ctx, logs := observe(t)
-	e := &Engine{Config: shadowConfig(t, "optimizer:\n  type: utilizationShare\n  utilizationShare:\n    maxSpareReplicas: 16\n")}
+	e := &Engine{Config: shadowConfig(t, "optimizer:\n  type: utilizationShare\n  utilizationShare:\n    maxHeadroomReplicas: 16\n")}
 	reqs := []allocation.ModelScalingRequest{
 		shadowRequest("A", "important", 4000, 9),
 		shadowRequest("B", "", 3000, 5),
@@ -193,7 +193,7 @@ func TestUtilizationShareShadowIsQuietWhenSettled(t *testing.T) {
 	}
 }
 
-// The same fleet under the default maxSpareReplicas: A holds 9 against a need
+// The same fleet under the default maxHeadroomReplicas: A holds 9 against a need
 // of 5 -- three replicas more than its need and one spare -- so it is
 // actionable: the spare it holds goes back to the quota. C (2 against 1.25)
 // is short of its new target, 3 -- its need rounded up and one spare -- and is

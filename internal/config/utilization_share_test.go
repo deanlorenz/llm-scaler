@@ -30,7 +30,7 @@ var _ = Describe("ResolveUtilizationShare", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(us.Tolerance).To(Equal(DefaultUtilizationShareTolerance))
 		Expect(us.ReserveGPUs).To(BeZero())
-		Expect(us.MaxSpareReplicas).To(Equal(DefaultMaxSpareReplicas))
+		Expect(us.MaxHeadroomReplicas).To(Equal(DefaultMaxHeadroomReplicas))
 		Expect(us.Shadow).To(BeFalse())
 		Expect(us.PhysicalGroups).To(BeFalse())
 		Expect(us.Classes).To(Equal(DefaultWeightClasses))
@@ -44,6 +44,7 @@ var _ = Describe("ResolveUtilizationShare", func() {
 		Expect(st.SkipWaitsOff).To(BeFalse())
 		Expect(st.SkipWaitsReceiverLoad).To(Equal(DefaultSkipWaitsReceiverLoad))
 		Expect(st.SkipWaitsDonorLoad).To(Equal(DefaultSkipWaitsDonorLoad))
+		Expect(st.ReturnSpareLoad).To(Equal(DefaultReturnSpareLoad))
 	})
 
 	It("takes every stabilization setting", func() {
@@ -53,6 +54,7 @@ var _ = Describe("ResolveUtilizationShare", func() {
 			WaitBeforeReverseMove:       "5m",
 			FlappingWindow:              "0s",
 			SkipWaitsWhen:               &UtilizationShareSkipWaits{Enabled: &off, ReceiverLoadAtLeast: 1, DonorLoadAtMost: 0.5},
+			ReturnSpareWhenLoadAtMost:   0.4,
 		}})
 		Expect(err).NotTo(HaveOccurred())
 		st := us.Stabilization
@@ -62,6 +64,7 @@ var _ = Describe("ResolveUtilizationShare", func() {
 		Expect(st.SkipWaitsOff).To(BeTrue())
 		Expect(st.SkipWaitsReceiverLoad).To(Equal(1.0))
 		Expect(st.SkipWaitsDonorLoad).To(Equal(0.5))
+		Expect(st.ReturnSpareLoad).To(Equal(0.4), "its own key, apart from donorLoadAtMost")
 		// "auto" is the default spelled out; one load limit keeps the other's default.
 		us, err = ResolveUtilizationShare(&UtilizationShareConfig{Stabilization: &UtilizationShareStabilization{
 			WaitBeforeReverseMove: "auto",
@@ -74,15 +77,15 @@ var _ = Describe("ResolveUtilizationShare", func() {
 		Expect(us.Stabilization.SkipWaitsDonorLoad).To(Equal(0.7))
 	})
 
-	It("takes maxSpareReplicas, 0 included", func() {
+	It("takes maxHeadroomReplicas, 0 included", func() {
 		for _, n := range []int{0, 3} {
-			us, err := ResolveUtilizationShare(&UtilizationShareConfig{MaxSpareReplicas: &n})
+			us, err := ResolveUtilizationShare(&UtilizationShareConfig{MaxHeadroomReplicas: &n})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(us.MaxSpareReplicas).To(Equal(n), "0 is no spare, not the default")
+			Expect(us.MaxHeadroomReplicas).To(Equal(n), "0 is no spare, not the default")
 		}
-		p := parsePolicy("optimizer:\n  type: utilizationShare\n  utilizationShare:\n    maxSpareReplicas: 0\n")
-		Expect(p.Optimizer.UtilizationShare.MaxSpareReplicas).NotTo(BeNil(), "an explicit 0 must survive the decode")
-		Expect(*p.Optimizer.UtilizationShare.MaxSpareReplicas).To(BeZero())
+		p := parsePolicy("optimizer:\n  type: utilizationShare\n  utilizationShare:\n    maxHeadroomReplicas: 0\n")
+		Expect(p.Optimizer.UtilizationShare.MaxHeadroomReplicas).NotTo(BeNil(), "an explicit 0 must survive the decode")
+		Expect(*p.Optimizer.UtilizationShare.MaxHeadroomReplicas).To(BeZero())
 	})
 
 	It("does not alias the default classes", func() {
@@ -101,7 +104,11 @@ var _ = Describe("ResolveUtilizationShare", func() {
 		Entry("negative tolerance", UtilizationShareConfig{Tolerance: -0.1}, "tolerance"),
 		Entry("NaN tolerance", UtilizationShareConfig{Tolerance: math.NaN()}, "tolerance"),
 		Entry("negative reserve", UtilizationShareConfig{ReserveGPUs: -1}, "reserveGPUs"),
-		Entry("negative spare", UtilizationShareConfig{MaxSpareReplicas: func() *int { n := -1; return &n }()}, "maxSpareReplicas"),
+		Entry("negative headroom", UtilizationShareConfig{MaxHeadroomReplicas: func() *int { n := -1; return &n }()}, "maxHeadroomReplicas"),
+		Entry("headroom past its bound", UtilizationShareConfig{MaxHeadroomReplicas: func() *int { n := MaxHeadroomReplicasLimit + 1; return &n }()}, "maxHeadroomReplicas"),
+		Entry("return load 1", UtilizationShareConfig{Stabilization: &UtilizationShareStabilization{ReturnSpareWhenLoadAtMost: 1}}, "returnSpareWhenLoadAtMost"),
+		Entry("negative return load", UtilizationShareConfig{Stabilization: &UtilizationShareStabilization{ReturnSpareWhenLoadAtMost: -0.1}}, "returnSpareWhenLoadAtMost"),
+		Entry("NaN return load", UtilizationShareConfig{Stabilization: &UtilizationShareStabilization{ReturnSpareWhenLoadAtMost: math.NaN()}}, "returnSpareWhenLoadAtMost"),
 		Entry("zero class weight", UtilizationShareConfig{WeightClasses: map[string]float64{"a": 1, "b": 0}}, `"b"`),
 		Entry("NaN class weight", UtilizationShareConfig{WeightClasses: map[string]float64{"a": 1, "b": math.NaN()}}, `"b"`),
 		Entry("infinite class weight", UtilizationShareConfig{WeightClasses: map[string]float64{"a": 1, "b": math.Inf(1)}}, `"b"`),

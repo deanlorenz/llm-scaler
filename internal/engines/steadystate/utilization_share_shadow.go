@@ -214,15 +214,13 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 		}
 	}
 	st.lastWeightErrs = weightErrs
-	// Every target, the shadow's and the actuator's, gives a role at most
-	// maxSpareReplicas of the spare; the rest stays unassigned.
-	for i := range groups {
-		groups[i].Roles = allocation.ShareCapSpare(groups[i].Roles, us.MaxSpareReplicas)
-	}
-
 	published := make([]metrics.UtilizationShareGroup, 0, len(groups))
 	for _, g := range groups {
-		ev := allocation.EvaluateShare(g.Roles, g.Committed, g.Thresholds, g.Budget, us.Tolerance)
+		// Every target gives a role at most its headroom of the spare
+		// (maxHeadroomReplicas); the rest stays unassigned. The planner caps
+		// its own roles, after the swing rule has set their planning need.
+		ev := allocation.EvaluateShare(allocation.ShareCapSpare(g.Roles, us.MaxHeadroomReplicas),
+			g.Committed, g.Thresholds, g.Budget, us.Tolerance)
 		scope := g.Scope
 		if scope == "" {
 			scope = constants.UtilizationShareClusterScope

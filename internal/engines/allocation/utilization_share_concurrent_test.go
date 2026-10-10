@@ -39,8 +39,8 @@ var _ = Describe("Concurrent transfers on one role (§6.3)", func() {
 	It("keeps the second fill open until its own pod lands", func() {
 		l := NewShareLedger()
 		held := map[string]int{"R": 4}
-		f1 := l.StartFill("R", "r", 2, held, t0, tm)
-		f2 := l.StartFill("R", "r", 2, held, t0, tm)
+		f1 := l.StartFill("R", "r", 2, false, held, t0, tm)
+		f2 := l.StartFill("R", "r", 2, false, held, t0, tm)
 		held["R"] = 6 // one pod landed
 		Expect(ids(l.Observe(held, t0.Add(10*time.Second), tm))).To(ConsistOf(f1.ID))
 		// R stays at 6: the second pod is still Pending.

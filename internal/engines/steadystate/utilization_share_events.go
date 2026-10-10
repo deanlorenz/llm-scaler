@@ -64,17 +64,21 @@ func (e *Engine) shareStartedEvents(g allocation.ShareGroup, t allocation.ShareT
 		}
 	}
 	to := "the quota group's scale-from-zero reserve (reserveGPUs)"
-	why := "the reserve was spent"
+	why := "because the reserve was spent"
 	if t.Returned {
 		to = "the quota group's unassigned GPUs"
-		why = "because it holds more spare than maxSpareReplicas allows and no model is short; " +
-			"a model whose demand rises takes them at once"
+		why = "because it holds more headroom than maxHeadroomReplicas gives it, its demand has stayed low for " +
+			"its scale-down window, and no model is short; a model whose demand rises takes them at once"
 	}
 	if receiver != "" {
 		to = sharePeer(g, t.Donor, receiver)
 		why = "to even out headroom by weight"
 		if urgent {
 			why = "because it is below its need"
+		}
+		if t.SkippedWaits {
+			why = "without the usual waits: it is at its scale-up threshold and this model is nearly idle " +
+				"(stabilization.skipWaitsWhen)"
 		}
 		if len(set) > 1 {
 			to += fmt.Sprintf(", with %d other donor replicas", len(set)-1)
@@ -151,10 +155,13 @@ func (e *Engine) shareEndedEvent(g allocation.ShareGroup, end allocation.ShareTr
 		default:
 			// An idle fill: no donor, so nothing else would tell the owner why
 			// the model grew with no load to grow it.
+			why := "as headroom (maxHeadroomReplicas); given back when this model no longer needs it"
+			if t.Urgent {
+				why = "because its demand rose past what it held"
+			}
 			e.shareEvent(accessor(t.Receiver, t.ReceiverVariant), corev1.EventTypeNormal,
 				constants.K8SEventUtilizationShareReceived,
-				fmt.Sprintf("Utilization share: received %d GPUs from the quota group's spare GPUs, as headroom by weight; "+
-					"they are given back when this model no longer needs them, or to another model that does", t.GPUs))
+				fmt.Sprintf("Utilization share: received %d GPUs from the quota group's unassigned GPUs, %s", t.GPUs, why))
 		}
 	}
 }
@@ -162,8 +169,11 @@ func (e *Engine) shareEndedEvent(g allocation.ShareGroup, end allocation.ShareTr
 // shareCancelledEvents records a transfer called off on a clear reversal, on
 // both sides.
 func (e *Engine) shareCancelledEvents(t allocation.ShareTransfer, accessor func(string, string) scaletarget.ScaleTargetAccessor) {
-	e.shareEvent(accessor(t.Donor, t.DonorVariant), corev1.EventTypeNormal, constants.K8SEventUtilizationShareCancelled,
-		"Utilization share: the transfer was called off because demand reversed; its replica count is restored")
+	msg := "Utilization share: the transfer was called off because demand reversed; its replica count is restored"
+	if t.Returned {
+		msg = "Utilization share: this model's demand came back, so it keeps the replica it was giving back"
+	}
+	e.shareEvent(accessor(t.Donor, t.DonorVariant), corev1.EventTypeNormal, constants.K8SEventUtilizationShareCancelled, msg)
 	if t.ReceiverVariant != "" {
 		e.shareEvent(accessor(t.Receiver, t.ReceiverVariant), corev1.EventTypeNormal, constants.K8SEventUtilizationShareCancelled,
 			"Utilization share: the transfer to this model was called off because demand reversed")
