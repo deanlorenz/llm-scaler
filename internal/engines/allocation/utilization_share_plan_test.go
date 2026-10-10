@@ -541,7 +541,9 @@ var _ = Describe("Reserve refill and rebalance in one cycle", func() {
 			{Key: "B", Weight: 1, Need: 40, Ceiling: 64, ReplicaGPUs: 1},
 		}
 		in := SharePlanInput{Roles: roles, Held: map[string]int{"A": 30, "B": 4},
-			Thresholds: map[string]float64{"A": 0.8, "B": 0.8}, Budget: 34, Tolerance: 0.15}
+			Thresholds: map[string]float64{"A": 0.8, "B": 0.8}, Budget: 34, Tolerance: 0.15,
+			// The pace under test: a hard imbalance is not paced.
+			SkipWaits: ShareSkipWaits{Off: true}}
 		l := NewShareLedger()
 		// Cycle 1 confirms B once; then a wake takes 2 and the group is over.
 		PlanShareTransfers(l, in, time.Unix(0, 0), simTimings())

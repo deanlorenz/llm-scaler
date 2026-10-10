@@ -46,6 +46,33 @@ func (r ShareRole) Claim() float64 {
 	return math.Min(math.Max(r.Need, float64(r.Floor)), r.ceiling())
 }
 
+// ShareCapSpare returns roles with each one's ceiling lowered to its claim,
+// rounded up to whole replicas, plus spareReplicas replicas: the most the
+// targets give it of the spare (utilizationShare.maxSpareReplicas). The rest of
+// the spare stays unassigned in the quota, where a model whose demand rises
+// takes it at once (the idle fill). Spread over the models as headroom, a
+// model that bursts must wait for another's pods to drain first: measured, a
+// model holding seven replicas at 5% load with 6000-token requests released
+// two every six minutes, and the model bursting beside it took 18 minutes to
+// reach the 8 replicas today's optimizer reached in 2. Claims are unchanged:
+// the lowered ceiling is never below a claim. A negative spareReplicas leaves
+// every ceiling as it is. A role whose claim is zero has no need, and the
+// targets give it no spare however its ceiling reads.
+func ShareCapSpare(roles []ShareRole, spareReplicas int) []ShareRole {
+	out := slices.Clone(roles)
+	if spareReplicas < 0 {
+		return out
+	}
+	for i, r := range out {
+		g := max(r.ReplicaGPUs, 1)
+		limit := g * (int(math.Ceil(r.Claim()/float64(g)-1e-9)) + spareReplicas)
+		if r.Ceiling <= 0 || limit < r.Ceiling {
+			out[i].Ceiling = limit
+		}
+	}
+	return out
+}
+
 // ShareScore is z, the one score that orders both regimes (proposal §5.4):
 // headroom divided by weight when the role holds at least its need, shortfall
 // multiplied by weight when it holds less. A heavier role's headroom counts

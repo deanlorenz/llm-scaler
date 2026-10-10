@@ -65,6 +65,11 @@ func (e *Engine) shareStartedEvents(g allocation.ShareGroup, t allocation.ShareT
 	}
 	to := "the quota group's scale-from-zero reserve (reserveGPUs)"
 	why := "the reserve was spent"
+	if t.Returned {
+		to = "the quota group's unassigned GPUs"
+		why = "because it holds more spare than maxSpareReplicas allows and no model is short; " +
+			"a model whose demand rises takes them at once"
+	}
 	if receiver != "" {
 		to = sharePeer(g, t.Donor, receiver)
 		why = "to even out headroom by weight"
@@ -149,7 +154,7 @@ func (e *Engine) shareEndedEvent(g allocation.ShareGroup, end allocation.ShareTr
 			e.shareEvent(accessor(t.Receiver, t.ReceiverVariant), corev1.EventTypeNormal,
 				constants.K8SEventUtilizationShareReceived,
 				fmt.Sprintf("Utilization share: received %d GPUs from the quota group's spare GPUs, as headroom by weight; "+
-					"they are given to another model when it needs them", t.GPUs))
+					"they are given back when this model no longer needs them, or to another model that does", t.GPUs))
 		}
 	}
 }

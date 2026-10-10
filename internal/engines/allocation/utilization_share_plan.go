@@ -120,6 +120,9 @@ type SharePlan struct {
 	// to pay it back.
 	ReserveDebt int
 	Refills     int
+	// Returns is how many transfers started this cycle to give a role's
+	// replicas above its target back to the unassigned GPUs (returnSpare).
+	Returns int
 	// Unfunded names, for each confirmed receiver that got nothing this cycle
 	// because no candidate donor's pods could host its replica, that reason
 	// (ShareUnfundedNoCompatibleDonor). A receiver held back by a hold, the
@@ -211,10 +214,9 @@ func PlanShareTransfers(l *ShareLedger, in SharePlanInput, now time.Time, tm Sha
 
 	p.work = maps.Clone(p.committed)
 	for _, rc := range receivers {
-		if !p.fund(rc, donors) {
-			break // the concurrency cap is reached
-		}
+		p.fund(rc, donors)
 	}
+	p.returnSpare()
 	return p.plan
 }
 
@@ -424,17 +426,26 @@ func (p *sharePlanRun) cancelReversals() {
 		if t.State != ShareReleasing || now.Sub(t.Started) >= tm.Window {
 			continue
 		}
-		// A transfer with no receiver is a reserve refill, entitled and not
-		// subject to hysteresis, or a set's contributor, which goes only with
-		// its primary: cancelling it alone would leave the primary to raise its
-		// receiver into a hole that never fully opens.
+		dn := p.byKey[t.Donor]
+		donorAfter := p.committed[t.Donor] // already net of this transfer
+		donorShort := float64(donorAfter) < p.cont[t.Donor]-2*shareTol(p.cont[t.Donor], dn, in.Tolerance)
+		// A returned spare is called off, while it is free, when its role's
+		// demand came back: the GPUs would otherwise drain from it only for
+		// the fill to raise it again.
+		if t.Returned && donorShort && l.Cancel(t.ID, now, tm) {
+			p.plan.Cancelled = append(p.plan.Cancelled, t.ID)
+			p.committed = l.Committed(in.Held)
+			continue
+		}
+		// Any other transfer with no receiver is a reserve refill, entitled
+		// and not subject to hysteresis, or a set's contributor, which goes
+		// only with its primary: cancelling it alone would leave the primary
+		// to raise its receiver into a hole that never fully opens.
 		if t.Receiver == "" {
 			continue
 		}
-		dn, rc := p.byKey[t.Donor], p.byKey[t.Receiver]
-		donorAfter := p.committed[t.Donor] // already net of this transfer
+		rc := p.byKey[t.Receiver]
 		receiverWithout := p.committed[t.Receiver] - t.GPUs
-		donorShort := float64(donorAfter) < p.cont[t.Donor]-2*shareTol(p.cont[t.Donor], dn, in.Tolerance)
 		receiverFine := float64(receiverWithout) > p.cont[t.Receiver]+shareTol(p.cont[t.Receiver], rc, in.Tolerance)
 		if (donorShort || receiverFine) && l.Cancel(t.ID, now, tm) {
 			p.plan.Cancelled = append(p.plan.Cancelled, t.ID)
@@ -509,43 +520,218 @@ func (p *sharePlanRun) refillReserve() {
 }
 
 // fund funds receiver rc from donors: by single donor replicas first, and by
-// a donor set when no single replica fits. It reports false when the
-// concurrency cap stops the whole plan.
-func (p *sharePlanRun) fund(rc string, donors []string) bool {
-	l, in, now, tm := p.l, p.in, p.now, p.tm
-	work, moved, byKey := p.work, p.moved, p.byKey
+// a donor set when no single replica fits. What the idle fill gives it this
+// cycle is counted first, so no donor shrinks for GPUs that are free.
+func (p *sharePlanRun) fund(rc string, donors []string) {
+	l, in, now := p.l, p.in, p.now
 	candidates, misfits, funded := 0, 0, false
 	if l.FillHeld(rc, now) {
-		return true // its last fill timed out with its pods Pending (HoldFill)
+		return // its last fill timed out with its pods Pending (HoldFill)
 	}
+	p.fromIdle(rc)
 	for _, dn := range donors {
-		if l.InFlight() >= ShareMaxConcurrentTransfers {
-			return false
+		// A hard imbalance takes from one donor every replica it is short
+		// (fundFrom); any other move takes one.
+		step := fundAgain
+		for first := true; step == fundAgain; first = false {
+			var cand, misfit bool
+			step, cand, misfit = p.fundFrom(rc, dn)
+			if first && cand {
+				candidates++
+				if misfit {
+					misfits++
+				}
+			}
+			if step == fundAgain {
+				funded = true
+			}
 		}
-		if moved[rc] >= ShareMaxReplicasPerCycle || moved[dn] >= ShareMaxReplicasPerCycle {
-			continue
+		if step == fundStarted {
+			funded = true
 		}
-		// A receiver funded up to its whole-replica target takes no more,
-		// and a donor down to its own gives no more: past either, the next
-		// plan would only move the replica back. Defence in depth: with
-		// the surplus above the targets equal to the shortfall below them
-		// and two replicas per role per cycle, no fleet reaches it today.
-		if work[rc] >= p.integ[rc] {
+		if step == fundFull {
 			break
 		}
-		if work[dn] <= p.integ[dn] {
+	}
+	if !funded && candidates > 0 && misfits == candidates && in.Grow != nil {
+		var deferred bool
+		funded, deferred = p.fundBySet(rc, donors)
+		if deferred {
+			return
+		}
+	}
+	if !funded && p.isConfirmed(rc) && p.actionable[rc] && candidates > 0 && misfits == candidates {
+		p.plan.Unfunded[rc] = ShareUnfundedNoCompatibleDonor
+	}
+}
+
+// fromIdle counts what the idle fill gives receiver rc this cycle -- up to
+// ShareMaxReplicasPerCycle replicas of the group's unassigned GPUs, which it
+// raises without a transfer or a wait -- into the run's allocation, so donors
+// fund only the rest. Not a receiver the last fill left short (FillShort):
+// whatever kept it short, the fill sees and the planner does not.
+func (p *sharePlanRun) fromIdle(rc string) {
+	if p.l.FillShort(rc) || p.work[rc] >= p.integ[rc] {
+		return
+	}
+	g := max(p.byKey[rc].ReplicaGPUs, 1)
+	if p.in.Grow != nil {
+		v, ok := p.in.Grow[rc]
+		if !ok {
+			return
+		}
+		g = max(v.GPUs, 1)
+	}
+	for n := 0; n < ShareMaxReplicasPerCycle && shareIdle(p.in, p.work) >= g && p.work[rc] < p.integ[rc]; n++ {
+		p.work[rc] += g
+	}
+}
+
+// fundStep is what fundFrom did with one donor.
+type fundStep int
+
+const (
+	// fundNext: nothing started; try the next donor.
+	fundNext fundStep = iota
+	// fundStarted: an ordinary move started; try the next donor.
+	fundStarted
+	// fundAgain: a hard-imbalance move started; the same donor may give again.
+	fundAgain
+	// fundFull: the receiver is at its whole-replica target.
+	fundFull
+)
+
+// fundFrom starts at most one move of a replica from donor dn to receiver
+// rc. candidate reports whether dn has a variant to give and rc one to grow,
+// and misfit whether dn's pods cannot host rc's.
+//
+// A move that rebalances a hard imbalance (shareHardImbalance) is not paced:
+// neither the per-cycle replica limit nor the concurrency limit applies, and
+// the same donor is asked again until the receiver is at its target or below
+// its threshold, or the donor is no longer calm or at its keep. Measured: two
+// moves at a time, each waiting six minutes for the donor's long requests to
+// drain, kept the bursting model at 3 of the 8 replicas it needed for 12
+// minutes. Every other bound -- the targets, the keep, the band, the holds a
+// skip does not skip -- still applies, and the ratio between the two loads
+// still stops the reverse move.
+func (p *sharePlanRun) fundFrom(rc, dn string) (step fundStep, candidate, misfit bool) {
+	l, in, now, tm := p.l, p.in, p.now, p.tm
+	work, moved, byKey := p.work, p.moved, p.byKey
+	// A receiver funded up to its whole-replica target takes no more, and a
+	// donor down to its own gives no more: past either, the next plan would
+	// only move the replica back.
+	if work[rc] >= p.integ[rc] {
+		return fundFull, false, false
+	}
+	if work[dn] <= p.integ[dn] {
+		return fundNext, false, false
+	}
+	rr, dr := byKey[rc], byKey[dn]
+	grow := ShareVariant{GPUs: rr.ReplicaGPUs}
+	give := ShareVariant{GPUs: dr.ReplicaGPUs}
+	if in.Grow != nil {
+		v, ok := in.Grow[rc]
+		if !ok {
+			return fundNext, false, false
+		}
+		grow = v
+	}
+	if in.Give != nil {
+		v, ok := in.Give[dn]
+		if !ok {
+			return fundNext, false, false
+		}
+		give = v
+	}
+	g, gd := max(grow.GPUs, 1), max(give.GPUs, 1)
+	// Rule 4: a role that gave cannot receive, and one that received cannot
+	// give, within the hold -- unless the move rebalances a hard imbalance,
+	// which waits for neither the hold nor the confirm cycles, and is not
+	// paced.
+	exempt := shareHardImbalance(in.SkipWaits, work[rc], rr, work[dn]-gd, dr)
+	if !exempt && (l.InFlight() >= ShareMaxConcurrentTransfers ||
+		moved[rc] >= ShareMaxReplicasPerCycle || moved[dn] >= ShareMaxReplicasPerCycle) {
+		return fundNext, false, false
+	}
+	if !ShareCovers(give, grow) {
+		return fundNext, true, true // the donor's pods cannot host the receiver's (§6.5)
+	}
+	if l.GivingBusy(dn, now) {
+		return fundNext, true, false // it has given all it can until its releases land
+	}
+	if shareMoveHeld(l, dn, rc, exempt, now, tm) {
+		p.plan.Withheld[ShareWithheldReversalHold]++
+		return fundNext, true, false
+	}
+	if !exempt && !p.isConfirmed(rc) && !p.isConfirmed(dn) {
+		return fundNext, true, false // every other transfer must fix a confirmed actionable role
+	}
+	// §6.2 admission: the worst-off role of the pair improves, and the donor
+	// is not pushed out of band.
+	before := math.Min(p.z(dn, work[dn]), p.z(rc, work[rc]))
+	after := math.Min(p.z(dn, work[dn]-gd), p.z(rc, work[rc]+g))
+	donorOK := donorInBand(in, p.limits(), p.cont, byKey, dn, work[dn]-gd)
+	if !(after > before) || !donorOK || work[dn]-gd < p.keep[dn] {
+		return fundNext, true, false
+	}
+	t := l.Start(ShareTransfer{
+		Donor: dn, Receiver: rc, GPUs: g, DonorGPUs: gd,
+		DonorVariant: in.Give[dn].Name, ReceiverVariant: in.Grow[rc].Name,
+		Urgent: float64(work[rc]) < rr.Need, SkippedWaits: exempt,
+	}, in.Held, now, tm)
+	p.plan.Started = append(p.plan.Started, t)
+	work[dn] -= gd
+	work[rc] += g
+	moved[dn]++
+	moved[rc]++
+	if exempt {
+		return fundAgain, true, false
+	}
+	return fundStarted, true, false
+}
+
+// returnSpare gives replicas a role holds above its whole-replica target back
+// to the group's unassigned GPUs, by donor-only transfers (Returned), while no
+// role is short of its own target: GPUs that no model needs are better
+// unassigned, where the idle fill raises a model whose demand rises at once,
+// than parked on a model that must drain its requests before another can
+// have them (ShareCapSpare). It is today's scale-down, done while nobody is
+// waiting for the GPUs: a role returns only when it has been out of band
+// and above its target for the confirm cycles, never below its target, its
+// floor or its keep, at the rebalance pace and within the concurrency
+// limit, and not while held from giving. With a receiver short, the GPUs go
+// to it by a transfer, which the holds govern; returning them instead would
+// let the fill hand them over around the holds.
+//
+// And only while it would stay calm one replica below what it keeps: its
+// need at most the calm donor's load (ShareSkipWaits' DonorLoad, whether or
+// not waits are skipped) of that. The fill raises a role as soon as its
+// target passes what it holds -- with one spare replica, once its need passes
+// what it holds less a replica -- so without that gap a role whose need sits
+// near a replica boundary would give a replica back and take it again every
+// few cycles, each time draining one pod and cold-starting another. With it,
+// a role that returned a replica is filled again only once its need has grown
+// by the inverse of the calm load (1/0.6 by default).
+func (p *sharePlanRun) returnSpare() {
+	l, in, now, tm := p.l, p.in, p.now, p.tm
+	_, calm := in.SkipWaits.band()
+	// A role short but not fundable this cycle -- its last fill left it
+	// Pending (FillHeld), a hold -- still blocks: what is returned would sit
+	// idle until it can take it, and the role that gave it would have shrunk
+	// for nothing.
+	for _, r := range p.roles {
+		if p.work[r.Key] < p.integ[r.Key] {
+			if _, grows := in.Grow[r.Key]; in.Grow == nil || grows {
+				return
+			}
+		}
+	}
+	for _, r := range p.roles {
+		dn := r.Key
+		if !p.actionable[dn] || !p.isConfirmed(dn) || l.GivingHeld(dn, now, tm) {
 			continue
 		}
-		rr, dr := byKey[rc], byKey[dn]
-		grow := ShareVariant{GPUs: rr.ReplicaGPUs}
-		give := ShareVariant{GPUs: dr.ReplicaGPUs}
-		if in.Grow != nil {
-			v, ok := in.Grow[rc]
-			if !ok {
-				continue
-			}
-			grow = v
-		}
+		give := ShareVariant{GPUs: r.ReplicaGPUs}
 		if in.Give != nil {
 			v, ok := in.Give[dn]
 			if !ok {
@@ -553,58 +739,17 @@ func (p *sharePlanRun) fund(rc string, donors []string) bool {
 			}
 			give = v
 		}
-		g, gd := max(grow.GPUs, 1), max(give.GPUs, 1)
-		candidates++
-		if !ShareCovers(give, grow) {
-			misfits++
-			continue // the donor's pods cannot host the receiver's (§6.5)
-		}
-		if l.GivingBusy(dn, now) {
-			continue // it has given all it can until its releases land
-		}
-		// Rule 4: a role that gave cannot receive, and one that received
-		// cannot give, within the hold -- unless the move rebalances a hard
-		// imbalance (shareHardImbalance), which waits for neither the hold
-		// nor the confirm cycles.
-		exempt := shareHardImbalance(in.SkipWaits, work[rc], rr, work[dn]-gd, dr)
-		if shareMoveHeld(l, dn, rc, exempt, now, tm) {
-			p.plan.Withheld[ShareWithheldReversalHold]++
-			continue
-		}
-		if !exempt && !p.isConfirmed(rc) && !p.isConfirmed(dn) {
-			continue // every other transfer must fix a confirmed actionable role
-		}
-		// §6.2 admission: the worst-off role of the pair improves, and the
-		// donor is not pushed out of band.
-		before := math.Min(p.z(dn, work[dn]), p.z(rc, work[rc]))
-		after := math.Min(p.z(dn, work[dn]-gd), p.z(rc, work[rc]+g))
-		donorOK := donorInBand(in, p.limits(), p.cont, byKey, dn, work[dn]-gd)
-		if !(after > before) || !donorOK || work[dn]-gd < p.keep[dn] {
-			continue
-		}
-		t := l.Start(ShareTransfer{
-			Donor: dn, Receiver: rc, GPUs: g, DonorGPUs: gd,
-			DonorVariant: in.Give[dn].Name, ReceiverVariant: in.Grow[rc].Name,
-			Urgent: float64(work[rc]) < rr.Need, SkippedWaits: exempt,
-		}, in.Held, now, tm)
-		p.plan.Started = append(p.plan.Started, t)
-		work[dn] -= gd
-		work[rc] += g
-		moved[dn]++
-		moved[rc]++
-		funded = true
-	}
-	if !funded && candidates > 0 && misfits == candidates && in.Grow != nil {
-		var deferred bool
-		funded, deferred = p.fundBySet(rc, donors)
-		if deferred {
-			return true
+		gd := max(give.GPUs, 1)
+		for p.moved[dn] < ShareMaxReplicasPerCycle && l.InFlight() < ShareMaxConcurrentTransfers &&
+			p.work[dn]-gd >= max(p.integ[dn], r.Floor, p.keep[dn]) && r.Need <= calm*float64(p.work[dn]-2*gd) {
+			t := l.Start(ShareTransfer{Donor: dn, DonorGPUs: gd, DonorVariant: give.Name, Entitled: true, Returned: true},
+				in.Held, now, tm)
+			p.plan.Started = append(p.plan.Started, t)
+			p.plan.Returns++
+			p.moved[dn]++
+			p.work[dn] -= gd
 		}
 	}
-	if !funded && p.isConfirmed(rc) && p.actionable[rc] && candidates > 0 && misfits == candidates {
-		p.plan.Unfunded[rc] = ShareUnfundedNoCompatibleDonor
-	}
-	return true
 }
 
 // fundBySet funds rc from several donors when no single donor replica fits

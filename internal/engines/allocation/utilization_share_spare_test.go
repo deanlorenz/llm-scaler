@@ -1,0 +1,269 @@
+package allocation
+
+import (
+	"math"
+	"testing"
+	"time"
+)
+
+// spareRun is the cluster run that motivated ShareCapSpare and the unpaced
+// hard imbalance: after its burst, Q held 7 of a quota of 10 at 5% load while
+// L, bursting, held 3 against a need of 11. L and Q are one-GPU replicas with
+// a floor of one and a ceiling of eight; the spare is capped at one replica.
+func spareRun(lNeed, qNeed float64, qHeld int) SharePlanInput {
+	roles := []ShareRole{
+		{Key: "L", Weight: 1, Need: lNeed, Floor: 1, Ceiling: 8, ReplicaGPUs: 1},
+		{Key: "Q", Weight: 1, Need: qNeed, Floor: 1, Ceiling: 8, ReplicaGPUs: 1},
+	}
+	return SharePlanInput{Roles: ShareCapSpare(roles, 1), Held: map[string]int{"L": 3, "Q": qHeld},
+		Thresholds: map[string]float64{"L": 0.85, "Q": 0.85}, Budget: 10, Tolerance: 0.15,
+		PhysicalFree: math.MaxInt}
+}
+
+// planEach runs n cycles 15s apart on one ledger and returns each cycle's plan.
+func planEach(l *ShareLedger, in SharePlanInput, n int) []SharePlan {
+	out := make([]SharePlan, 0, n)
+	for i := range n {
+		out = append(out, PlanShareTransfers(l, in, time.Unix(int64(1000+15*i), 0), simTimings()))
+	}
+	return out
+}
+
+func qToL(ts []ShareTransfer) int {
+	n := 0
+	for _, t := range ts {
+		if t.Donor == "Q" && t.Receiver == "L" {
+			n++
+		}
+	}
+	return n
+}
+
+func TestShareCapSpare(t *testing.T) {
+	roles := []ShareRole{
+		{Key: "a", Need: 2.3, Ceiling: 8, ReplicaGPUs: 1},
+		{Key: "b", Need: 2.3, ReplicaGPUs: 1},             // unbounded
+		{Key: "c", Need: 2.3, Ceiling: 3, ReplicaGPUs: 1}, // its own ceiling is lower
+		{Key: "d", Need: 9, Ceiling: 64, ReplicaGPUs: 8},  // whole-node replicas
+		{Key: "e", Need: 0.2, Floor: 2, Ceiling: 8, ReplicaGPUs: 1},
+	}
+	for spare, want := range map[int]map[string]int{
+		1:  {"a": 4, "b": 4, "c": 3, "d": 24, "e": 3},
+		0:  {"a": 3, "b": 3, "c": 3, "d": 16, "e": 2},
+		-1: {"a": 8, "b": 0, "c": 3, "d": 64, "e": 8},
+	} {
+		got := ShareCapSpare(roles, spare)
+		for i, r := range got {
+			if r.Ceiling != want[r.Key] {
+				t.Errorf("spare %d: %s ceiling %d, want %d", spare, r.Key, r.Ceiling, want[r.Key])
+			}
+			if r.Claim() != roles[i].Claim() {
+				t.Errorf("spare %d: %s claim %v changed from %v", spare, r.Key, r.Claim(), roles[i].Claim())
+			}
+		}
+	}
+	if roles[0].Ceiling != 8 {
+		t.Fatal("ShareCapSpare changed its input")
+	}
+}
+
+// Capped, the targets leave the spare unassigned instead of spreading it.
+func TestShareCapSpareLeavesTheSpareUnassigned(t *testing.T) {
+	in := spareRun(2, 0.4, 3)
+	integ := IntegerShareTargets(in.Roles, in.Budget)
+	if integ["L"] != 3 || integ["Q"] != 2 {
+		t.Fatalf("capped targets %v, want L=3 (need 2 + one spare), Q=2 (floor 1 + one spare)", integ)
+	}
+	uncapped := IntegerShareTargets([]ShareRole{
+		{Key: "L", Weight: 1, Need: 2, Floor: 1, Ceiling: 8, ReplicaGPUs: 1},
+		{Key: "Q", Weight: 1, Need: 0.4, Floor: 1, Ceiling: 8, ReplicaGPUs: 1},
+	}, in.Budget)
+	if uncapped["L"]+uncapped["Q"] != in.Budget {
+		t.Fatalf("control: uncapped targets %v should spread the whole budget", uncapped)
+	}
+}
+
+// A hard imbalance takes every replica the receiver is short in one cycle:
+// neither the per-cycle pace nor the concurrency limit holds it to two.
+func TestShareHardImbalanceTakesTheWholeShortfall(t *testing.T) {
+	p := PlanShareTransfers(NewShareLedger(), spareRun(11, 0.4, 7), time.Unix(1000, 0), simTimings())
+	if got := qToL(p.Started); got != 5 {
+		t.Fatalf("Q -> L moved %d replicas in the first cycle, want 5 (L from 3 to its ceiling of 8): %v", got, p.Started)
+	}
+	for _, tr := range p.Started {
+		if !tr.SkippedWaits {
+			t.Errorf("%s did not skip the waits", tr.ID)
+		}
+	}
+	// Two moves already in flight -- the concurrency limit -- do not stop it.
+	l := NewShareLedger()
+	in := spareRun(11, 0.4, 7)
+	for range ShareMaxConcurrentTransfers {
+		tr := l.Start(ShareTransfer{Donor: "Q", Receiver: "L", GPUs: 1, DonorGPUs: 1}, in.Held, time.Unix(900, 0), simTimings())
+		l.ConfirmStarted(tr.ID, nil)
+	}
+	p = PlanShareTransfers(l, in, time.Unix(1000, 0), simTimings())
+	if got := qToL(p.Started); got != 3 {
+		t.Fatalf("with %d in flight, Q -> L moved %d, want the 3 still short", ShareMaxConcurrentTransfers, got)
+	}
+}
+
+// Control: waits not skipped, the same imbalance moves at the pace.
+func TestShareOrdinaryMovesKeepThePace(t *testing.T) {
+	in := spareRun(11, 0.4, 7)
+	in.SkipWaits = ShareSkipWaits{Off: true}
+	total := 0
+	for i, p := range planEach(NewShareLedger(), in, 4) {
+		n := qToL(p.Started)
+		if n > ShareMaxReplicasPerCycle {
+			t.Errorf("cycle %d moved %d, above the pace of %d", i+1, n, ShareMaxReplicasPerCycle)
+		}
+		total += n
+	}
+	if total == 0 || total > ShareMaxConcurrentTransfers {
+		t.Fatalf("moved %d over four cycles, want 1..%d: the concurrency limit holds until releases land",
+			total, ShareMaxConcurrentTransfers)
+	}
+}
+
+// A receiver the idle fill can fund this cycle is not funded from a donor.
+func TestShareLeavesTheIdleToTheFill(t *testing.T) {
+	// L needs 4 holding 3: its target is 5. Two GPUs are unassigned.
+	in := spareRun(4, 0.4, 5)
+	for i, p := range planEach(NewShareLedger(), in, 3) {
+		if n := qToL(p.Started); n > 0 {
+			t.Fatalf("cycle %d: Q gave L %d replicas the idle fill funds", i+1, n)
+		}
+	}
+	// Control: with no GPU physically free there is no idle, and Q gives.
+	in.PhysicalFree = 0
+	moved := 0
+	for _, p := range planEach(NewShareLedger(), in, 3) {
+		moved += qToL(p.Started)
+	}
+	if moved == 0 {
+		t.Fatal("control: Q did not give L anything with nothing free")
+	}
+}
+
+// With nobody short, a role holding more than its target returns it to the
+// quota, at the pace, once confirmed, and not below its target.
+func TestShareReturnsSpareWhenNobodyIsShort(t *testing.T) {
+	l := NewShareLedger()
+	plans := planEach(l, spareRun(2, 0.4, 7), 2)
+	if plans[0].Returns != 0 {
+		t.Fatalf("returned before the confirm cycles: %v", plans[0].Started)
+	}
+	p := plans[1]
+	if p.Returns != ShareMaxReplicasPerCycle {
+		t.Fatalf("returned %d, want %d (the pace): %v", p.Returns, ShareMaxReplicasPerCycle, p.Started)
+	}
+	for _, tr := range p.Started {
+		if tr.Donor != "Q" || tr.Receiver != "" || !tr.Returned || !tr.Entitled {
+			t.Errorf("not a return from Q: %+v", tr)
+		}
+	}
+	// Q's target is 2: across every cycle it returns 5 at most, and L, at
+	// its target, returns nothing.
+	l = NewShareLedger()
+	returned := map[string]int{}
+	held := map[string]int{"L": 3, "Q": 7}
+	in := spareRun(2, 0.4, 7)
+	for i := range 40 {
+		now := time.Unix(int64(1000+15*i), 0)
+		l.Observe(held, now, simTimings())
+		l.TakeReleased()
+		p := PlanShareTransfers(l, in, now, simTimings())
+		for _, tr := range p.Started {
+			if tr.Returned {
+				returned[tr.Donor]++
+				held[tr.Donor]-- // released at once
+			}
+		}
+		in.Held = held
+	}
+	if returned["Q"] != 5 || returned["L"] != 0 {
+		t.Fatalf("returned %v, want Q=5 (7 down to its target of 2) and L=0", returned)
+	}
+}
+
+// The target bounds a return within a cycle where the calm load would not: Q,
+// with a floor of 3 and a need of 1.15, has a target of 4 (its floor and one
+// spare) yet is calm down to 3 (1.15 <= 0.6 x (4 - 2)). Holding 5, out of band
+// at a threshold of 0.95, it returns one replica, though the pace allows two.
+func TestShareReturnsDownToTheTargetOnly(t *testing.T) {
+	in := spareRun(2, 1.15, 5)
+	in.Roles = ShareCapSpare([]ShareRole{
+		{Key: "L", Weight: 1, Need: 2, Floor: 1, Ceiling: 8, ReplicaGPUs: 1},
+		{Key: "Q", Weight: 1, Need: 1.15, Floor: 3, Ceiling: 8, ReplicaGPUs: 1},
+	}, 1)
+	in.Thresholds["Q"] = 0.95
+	if integ := IntegerShareTargets(in.Roles, in.Budget); integ["Q"] != 4 {
+		t.Fatalf("setup: Q's target %d, want 4", integ["Q"])
+	}
+	returned := 0
+	for _, p := range planEach(NewShareLedger(), in, 4) {
+		returned += p.Returns
+	}
+	if returned != 1 {
+		t.Fatalf("Q returned %d, want 1: from 5 down to its target of 4, not below", returned)
+	}
+}
+
+func TestShareDoesNotReturnWhileARoleIsShort(t *testing.T) {
+	// L short (need 5 holding 3), and nothing free: Q's surplus goes to L by
+	// a transfer, and nothing is returned.
+	in := spareRun(5, 0.4, 7)
+	in.SkipWaits = ShareSkipWaits{Off: true}
+	for i, p := range planEach(NewShareLedger(), in, 3) {
+		if p.Returns != 0 {
+			t.Fatalf("cycle %d returned %d while L was short", i+1, p.Returns)
+		}
+	}
+}
+
+// A role returns only while it would stay calm a replica below what it
+// keeps: Q at a need of 3 holds 7 against a target of 4, yet returns one
+// replica only -- at 5, a need of 3 is more than the calm load of the 4
+// below it.
+func TestShareReturnsOnlyWhileCalm(t *testing.T) {
+	in := spareRun(2, 3, 7)
+	if integ := IntegerShareTargets(in.Roles, in.Budget); integ["Q"] != 4 {
+		t.Fatalf("setup: Q's target %d, want 4", integ["Q"])
+	}
+	total := 0
+	for _, p := range planEach(NewShareLedger(), in, 6) {
+		total += p.Returns
+	}
+	if total != 1 {
+		t.Fatalf("Q returned %d replicas, want 1: 3 <= 0.6 x (6 - 1), and 3 > 0.6 x (5 - 1)", total)
+	}
+}
+
+// A return is called off, while it is free, when its role's demand comes
+// back: draining the pod would only make the fill start another.
+func TestShareCancelsAReturnWhenDemandComesBack(t *testing.T) {
+	l := NewShareLedger()
+	in := spareRun(2, 0.4, 7)
+	plans := planEach(l, in, 2)
+	if plans[1].Returns == 0 {
+		t.Fatal("setup: Q did not return")
+	}
+	in = spareRun(2, 8, 7) // Q's demand is back: a need of 8, and 5 left after the returns
+	p := PlanShareTransfers(l, in, time.Unix(1030, 0), simTimings())
+	// One is enough: back at 6, Q is within its band of 8 (2 x 1.2 GPUs), and
+	// the other return goes on.
+	returns := map[string]bool{}
+	for _, tr := range plans[1].Started {
+		returns[tr.ID] = tr.Returned
+	}
+	if len(p.Cancelled) != 1 || !returns[p.Cancelled[0]] {
+		t.Fatalf("cancelled %v, want one of the returns %v", p.Cancelled, plans[1].Started)
+	}
+	// Control: with Q's demand where it was, nothing is cancelled.
+	l = NewShareLedger()
+	planEach(l, spareRun(2, 0.4, 7), 2)
+	if p := PlanShareTransfers(l, spareRun(2, 0.4, 7), time.Unix(1030, 0), simTimings()); len(p.Cancelled) != 0 {
+		t.Fatalf("control: cancelled %v with demand unchanged", p.Cancelled)
+	}
+}

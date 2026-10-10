@@ -30,6 +30,7 @@ var _ = Describe("ResolveUtilizationShare", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(us.Tolerance).To(Equal(DefaultUtilizationShareTolerance))
 		Expect(us.ReserveGPUs).To(BeZero())
+		Expect(us.MaxSpareReplicas).To(Equal(DefaultMaxSpareReplicas))
 		Expect(us.Shadow).To(BeFalse())
 		Expect(us.PhysicalGroups).To(BeFalse())
 		Expect(us.Classes).To(Equal(DefaultWeightClasses))
@@ -73,6 +74,17 @@ var _ = Describe("ResolveUtilizationShare", func() {
 		Expect(us.Stabilization.SkipWaitsDonorLoad).To(Equal(0.7))
 	})
 
+	It("takes maxSpareReplicas, 0 included", func() {
+		for _, n := range []int{0, 3} {
+			us, err := ResolveUtilizationShare(&UtilizationShareConfig{MaxSpareReplicas: &n})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(us.MaxSpareReplicas).To(Equal(n), "0 is no spare, not the default")
+		}
+		p := parsePolicy("optimizer:\n  type: utilizationShare\n  utilizationShare:\n    maxSpareReplicas: 0\n")
+		Expect(p.Optimizer.UtilizationShare.MaxSpareReplicas).NotTo(BeNil(), "an explicit 0 must survive the decode")
+		Expect(*p.Optimizer.UtilizationShare.MaxSpareReplicas).To(BeZero())
+	})
+
 	It("does not alias the default classes", func() {
 		us, err := ResolveUtilizationShare(nil)
 		Expect(err).NotTo(HaveOccurred())
@@ -89,6 +101,7 @@ var _ = Describe("ResolveUtilizationShare", func() {
 		Entry("negative tolerance", UtilizationShareConfig{Tolerance: -0.1}, "tolerance"),
 		Entry("NaN tolerance", UtilizationShareConfig{Tolerance: math.NaN()}, "tolerance"),
 		Entry("negative reserve", UtilizationShareConfig{ReserveGPUs: -1}, "reserveGPUs"),
+		Entry("negative spare", UtilizationShareConfig{MaxSpareReplicas: func() *int { n := -1; return &n }()}, "maxSpareReplicas"),
 		Entry("zero class weight", UtilizationShareConfig{WeightClasses: map[string]float64{"a": 1, "b": 0}}, `"b"`),
 		Entry("NaN class weight", UtilizationShareConfig{WeightClasses: map[string]float64{"a": 1, "b": math.NaN()}}, `"b"`),
 		Entry("infinite class weight", UtilizationShareConfig{WeightClasses: map[string]float64{"a": 1, "b": math.Inf(1)}}, `"b"`),

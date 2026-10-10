@@ -247,7 +247,10 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 			// release timeout restore the transfer and move it a second time.
 			e.unmarkDonorPods(ctx, logger, t)
 		}
-		if t.Donor != "" && t.Receiver == "" && t.SetID == "" {
+		switch {
+		case t.Donor != "" && t.Returned:
+			logger.Info("Utilization share: spare returned to the quota", "id", t.ID, "donor", t.Donor, "gpus", t.DonorGPUs)
+		case t.Donor != "" && t.Receiver == "" && t.SetID == "":
 			logger.Info("Utilization share: reserve refilled", "id", t.ID, "donor", t.Donor, "gpus", t.DonorGPUs)
 		}
 		if t.Donor != "" && t.ReceiverVariant != "" {
@@ -383,7 +386,8 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 			e.shareStartedEvents(g, t, set, marked[t.ID], accessor)
 			logger.Info("Utilization share: transfer started", "id", t.ID, "set", t.SetID, "donor", t.Donor,
 				"receiver", t.Receiver, "donorVariant", t.DonorVariant, "receiverVariant", t.ReceiverVariant,
-				"urgent", t.Urgent, "skippedWaits", t.SkippedWaits, "pods", marked[t.ID], "planned", len(t.PlannedPods) > 0)
+				"urgent", t.Urgent, "skippedWaits", t.SkippedWaits, "returned", t.Returned, "pods", marked[t.ID],
+				"planned", len(t.PlannedPods) > 0)
 		}
 	}
 

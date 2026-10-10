@@ -363,7 +363,8 @@ var _ = Describe("Node-aware donor sets: guards and shapes (§6.5)", func() {
 				in.Give["A"] = ShareVariant{Name: "a", GPUs: 4, PodGPUs: []int{4}}
 				in.Roles[0].ReplicaGPUs = 4
 				delete(in.Give, "C")
-				in.Budget += 8 // 8 idle GPUs: B's replica
+				in.Budget += 8           // 8 idle GPUs: B's replica
+				in.Roles[1].Ceiling = 24 // short by exactly the idle: the fill funds it whole
 			})
 		Expect(p.Started).To(BeEmpty(), "no donor need shrink")
 	})
@@ -384,6 +385,7 @@ var _ = Describe("Node-aware donor sets: guards and shapes (§6.5)", func() {
 			[]ShareUnit{four("ns/a-0")}, []ShareUnit{four("ns/c-0")}, func(in *SharePlanInput) {
 				fourPods(in)
 				in.Budget += 8
+				in.Roles[1].Ceiling = 24 // short by exactly the idle
 			})
 		Expect(p.Started).To(BeEmpty(), "the fill funds B; neither A nor C need shrink")
 		Expect(p.Unfunded).NotTo(HaveKey("B"), "a receiver left to the fill is not unfunded")
@@ -404,6 +406,7 @@ var _ = Describe("Node-aware donor sets: guards and shapes (§6.5)", func() {
 			func(in *SharePlanInput) {
 				fourPods(in)
 				in.Budget += 8
+				in.Roles[1].Ceiling = 24 // short by exactly the idle
 				in.DomainKey = map[string]string{"B": "rack"}
 			})
 		Expect(p.Started).To(BeEmpty(), "r1 holds B in free GPUs; r2's donors need not shrink")

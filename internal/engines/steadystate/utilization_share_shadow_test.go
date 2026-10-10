@@ -165,11 +165,12 @@ func TestUtilizationShareShadowReportsAWouldBeRebalance(t *testing.T) {
 
 // A settled fleet stays quiet at Info, and the evaluation still ran: every role
 // is published, none actionable. Without the positive control an early return
-// would pass this test too.
+// would pass this test too. Settled as headroom by weight: the whole spare
+// spread, as a maxSpareReplicas at the quota's size allows.
 func TestUtilizationShareShadowIsQuietWhenSettled(t *testing.T) {
 	reg := freshMetrics(t)
 	ctx, logs := observe(t)
-	e := &Engine{Config: shadowConfig(t, "optimizer:\n  type: utilizationShare\n")}
+	e := &Engine{Config: shadowConfig(t, "optimizer:\n  type: utilizationShare\n  utilizationShare:\n    maxSpareReplicas: 16\n")}
 	reqs := []allocation.ModelScalingRequest{
 		shadowRequest("A", "important", 4000, 9),
 		shadowRequest("B", "", 3000, 5),
@@ -189,6 +190,32 @@ func TestUtilizationShareShadowIsQuietWhenSettled(t *testing.T) {
 		if m.GetGauge().GetValue() != 0 {
 			t.Errorf("%s is actionable in a settled fleet", label(m, constants.LabelModelName))
 		}
+	}
+}
+
+// The same fleet under the default maxSpareReplicas: A holds 9 against a need
+// of 5 -- three replicas more than its need and one spare -- so it is
+// actionable: the spare it holds goes back to the quota. C (2 against 1.25)
+// is short of its new target, 3 -- its need rounded up and one spare -- and is
+// actionable too, to receive it. B (5 against 3.75) is at its target.
+func TestUtilizationShareShadowCapsTheSpare(t *testing.T) {
+	reg := freshMetrics(t)
+	ctx, _ := observe(t)
+	e := &Engine{Config: shadowConfig(t, "optimizer:\n  type: utilizationShare\n")}
+	reqs := []allocation.ModelScalingRequest{
+		shadowRequest("A", "important", 4000, 9),
+		shadowRequest("B", "", 3000, 5),
+		shadowRequest("C", "", 1000, 2),
+	}
+
+	e.evaluateUtilizationShare(ctx, reqs, fullQuota(), nil)
+
+	actionable := map[string]float64{}
+	for _, m := range family(t, reg, constants.WVAUtilizationShareActionable) {
+		actionable[label(m, constants.LabelModelName)] = m.GetGauge().GetValue()
+	}
+	if len(actionable) != 3 || actionable["A"] != 1 || actionable["B"] != 0 || actionable["C"] != 1 {
+		t.Errorf("actionable series = %v, want A=1, B=0, C=1", actionable)
 	}
 }
 

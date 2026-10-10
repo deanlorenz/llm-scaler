@@ -29,6 +29,9 @@ const (
 	DefaultConsecutiveCyclesBeforeMove = 2
 	DefaultSkipWaitsReceiverLoad       = 0.9
 	DefaultSkipWaitsDonorLoad          = 0.6
+	// DefaultMaxSpareReplicas is utilizationShare.maxSpareReplicas: the most
+	// replicas of the spare one model is given above what it needs.
+	DefaultMaxSpareReplicas = 1
 	// StabilizationAuto derives a wait per group from its donors' scale-down
 	// window, KEDA polling and pod drain time.
 	StabilizationAuto = "auto"
@@ -88,7 +91,7 @@ func (o *OptimizerConfig) UnmarshalYAML(node *yaml.Node) error {
 }
 
 // UtilizationShareConfig is the operator-facing configuration of the
-// utilization-share optimizer: eight optional keys, each a decision only an
+// utilization-share optimizer: nine optional keys, each a decision only an
 // operator can make. Every other value the optimizer uses is derived from the
 // cluster or is a constant (§8.4 of the proposal).
 type UtilizationShareConfig struct {
@@ -100,6 +103,15 @@ type UtilizationShareConfig struct {
 	// ReserveGPUs are held out of the budget so a scale-from-zero wake need not
 	// wait for a transfer.
 	ReserveGPUs int `yaml:"reserveGPUs,omitempty"`
+
+	// MaxSpareReplicas is the most replicas above what it needs that the
+	// quota's spare GPUs give one model (each role of a P/D model). The rest
+	// stays unassigned, where a model whose demand rises takes it at once,
+	// instead of waiting for another model's pods to finish their requests
+	// before they release their GPUs. 0 gives no spare; a value as large as
+	// the models' maxReplicas spreads all of it as headroom by weight. Nil
+	// takes DefaultMaxSpareReplicas.
+	MaxSpareReplicas *int `yaml:"maxSpareReplicas,omitempty"`
 
 	// Shadow computes, reports and logs everything and actuates nothing.
 	Shadow bool `yaml:"shadow,omitempty"`
@@ -194,10 +206,12 @@ type UtilizationShareNamespace struct {
 // UtilizationShare is the resolved, validated configuration the optimizer
 // runs with. Build it with ResolveUtilizationShare.
 type UtilizationShare struct {
-	Tolerance      float64
-	ReserveGPUs    int
-	Shadow         bool
-	PhysicalGroups bool
+	Tolerance   float64
+	ReserveGPUs int
+	// MaxSpareReplicas is utilizationShare.maxSpareReplicas in force.
+	MaxSpareReplicas int
+	Shadow           bool
+	PhysicalGroups   bool
 	// Stabilization is utilizationShare.stabilization in force.
 	Stabilization ShareStabilization
 	// Classes are the weight classes in force.
@@ -234,6 +248,13 @@ func ResolveUtilizationShare(cfg *UtilizationShareConfig) (UtilizationShare, err
 	}
 	if us.ReserveGPUs < 0 {
 		return UtilizationShare{}, fmt.Errorf("utilizationShare.reserveGPUs must be >= 0, got %d", us.ReserveGPUs)
+	}
+	us.MaxSpareReplicas = DefaultMaxSpareReplicas
+	if cfg.MaxSpareReplicas != nil {
+		us.MaxSpareReplicas = *cfg.MaxSpareReplicas
+	}
+	if us.MaxSpareReplicas < 0 {
+		return UtilizationShare{}, fmt.Errorf("utilizationShare.maxSpareReplicas must be >= 0, got %d", us.MaxSpareReplicas)
 	}
 	if err := us.resolveStabilization(cfg.Stabilization); err != nil {
 		return UtilizationShare{}, err

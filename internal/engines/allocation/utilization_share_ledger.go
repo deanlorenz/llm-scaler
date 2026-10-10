@@ -88,9 +88,15 @@ type ShareTransfer struct {
 	// a receiver pod is funded only by one donor pod at least its size (§6.5),
 	// and the surplus returns to the idle budget when it is released.
 	DonorGPUs int
-	// Entitled transfers -- owed floors, fixed consumers, reserve refill --
-	// bypass the z admission rule and the holds, and set no hold (§6.2).
+	// Entitled transfers -- owed floors, fixed consumers, reserve refill, a
+	// returned spare -- bypass the z admission rule and the holds, and set no
+	// hold (§6.2).
 	Entitled bool
+	// Returned marks a donor-only transfer that gives a replica above the
+	// donor's target back to the group's unassigned GPUs (ShareCapSpare), while
+	// no role is short of its own: the idle fill then raises whoever needs it,
+	// with no drain to wait for.
+	Returned bool
 	// Urgent receivers are below their need (§6.4).
 	Urgent bool
 	// SkippedWaits marks a move that rebalances a hard imbalance
