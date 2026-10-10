@@ -119,11 +119,11 @@ func TestShareAbortsOfOneCycleBackOffOnce(t *testing.T) {
 // An unpaced hard imbalance goes on to the next donor when the first reaches
 // its target: L, short of 7, is funded by both Q and C within two cycles.
 func TestShareHardImbalanceUsesEveryCalmDonor(t *testing.T) {
-	roles := ShareCapSpare([]ShareRole{
+	roles := []ShareRole{
 		{Key: "L", Weight: 1, Need: 11, Floor: 1, Ceiling: 8, ReplicaGPUs: 1},
 		{Key: "Q", Weight: 1, Need: 0.4, Floor: 1, Ceiling: 8, ReplicaGPUs: 1},
 		{Key: "C", Weight: 1, Need: 0.4, Floor: 1, Ceiling: 8, ReplicaGPUs: 1},
-	}, 1)
+	}
 	in := SharePlanInput{Roles: roles, Held: map[string]int{"L": 1, "Q": 4, "C": 5},
 		Thresholds: map[string]float64{"L": 0.85, "Q": 0.85, "C": 0.85}, Budget: 10, Tolerance: 0.15,
 		PhysicalFree: math.MaxInt, Headroom: ShareHeadroom{Capped: true, Replicas: 1}}
@@ -143,10 +143,10 @@ func TestShareHardImbalanceUsesEveryCalmDonor(t *testing.T) {
 // A multi-pod receiver funded by donor sets is unpaced too: once its hard
 // imbalance is confirmed, it takes set after set in one cycle.
 func TestShareHardImbalanceUnpacesDonorSets(t *testing.T) {
-	roles := ShareCapSpare([]ShareRole{
+	roles := []ShareRole{
 		{Key: "B", Weight: 1, Need: 10, Floor: 2, Ceiling: 10, ReplicaGPUs: 2},
 		{Key: "A", Weight: 1, Need: 0.4, Floor: 1, Ceiling: 10, ReplicaGPUs: 1},
-	}, 1)
+	}
 	in := SharePlanInput{Roles: roles, Held: map[string]int{"B": 2, "A": 8},
 		Thresholds: map[string]float64{"A": 0.85, "B": 0.85}, Budget: 10, Tolerance: 0.15,
 		Give:         map[string]ShareVariant{"A": {Name: "a", GPUs: 1, PodGPUs: []int{1}}},
@@ -260,6 +260,7 @@ func TestShareOrdinaryMoveIsOnePerDonor(t *testing.T) {
 func TestShareCancelsAReturnOnEitherTrigger(t *testing.T) {
 	cancelled := func(returns int, qNeed float64) int {
 		l := NewShareLedger()
+		burstHistory(l)
 		in := spareRun(2, qNeed, 7)
 		for range returns {
 			l.Start(ShareTransfer{Donor: "Q", DonorGPUs: 1, Entitled: true, Returned: true}, in.Held, time.Unix(1000, 0), spareTimings())
@@ -327,6 +328,180 @@ func TestShareInFlightCountsOrdinaryMovesOnly(t *testing.T) {
 	}
 }
 
+// While the quota covers every role at its recent peak plus its headroom, the
+// spare is not capped and nothing is returned: no burst can find the GPUs it
+// needs parked elsewhere, and a return would only make the next burst cold
+// start. Control: once both have peaked at 8 (16 of 10), the cap binds.
+func TestShareKeepsHeadroomWhileThePeaksFit(t *testing.T) {
+	in := spareRun(2, 0.4, 7)
+	in.Roles = []ShareRole{ // uncapped: the planner decides
+		{Key: "L", Weight: 1, Need: 2, Floor: 1, Ceiling: 8, ReplicaGPUs: 1},
+		{Key: "Q", Weight: 1, Need: 0.4, Floor: 1, Ceiling: 8, ReplicaGPUs: 1},
+	}
+	l := NewShareLedger()
+	for i := range 4 {
+		p := PlanShareTransfers(l, in, time.Unix(int64(1000+15*i), 0), spareTimings())
+		if p.HeadroomCapped || p.Returns != 0 {
+			t.Fatalf("cycle %d: capped %v, returned %d, with every peak fitting the quota", i+1, p.HeadroomCapped, p.Returns)
+		}
+	}
+	returned := 0
+	for _, p := range planEach(NewShareLedger(), in, 4) {
+		returned += p.Returns
+	}
+	if returned == 0 {
+		t.Fatal("control: nothing returned once the peaks contend")
+	}
+}
+
+// A role still giving is not a receiver (ShareLedger.Giving): a move that
+// skips the waits must not send GPUs back to it while its own release to the
+// other way still drains.
+func TestShareNoReverseWhileReleasing(t *testing.T) {
+	moved := func(reverse bool) int {
+		l := NewShareLedger()
+		in := spareRun(11, 0.4, 7)
+		if reverse {
+			tr := l.Start(ShareTransfer{Donor: "L", Receiver: "Q", GPUs: 1, DonorGPUs: 1, SkippedWaits: true},
+				map[string]int{"L": 4, "Q": 6}, time.Unix(900, 0), spareTimings()) // past its window: no longer cancellable
+			l.ConfirmStarted(tr.ID, nil)
+		}
+		n := 0
+		for _, p := range planEach(l, in, 2) {
+			n += qToL(p.Started)
+		}
+		return n
+	}
+	if n := moved(true); n != 0 {
+		t.Fatalf("Q -> L moved %d while L -> Q still releases", n)
+	}
+	if moved(false) == 0 {
+		t.Fatal("control: Q -> L did not move")
+	}
+}
+
+// Returns are not blocked by a short role no donor can fund: no single
+// donor replica fits L's 2-GPU pod, and no set can be formed, so L is
+// unfunded -- and Q's spare, held back for it, would sit parked for good.
+func TestShareUnfundedRoleDoesNotBlockReturns(t *testing.T) {
+	in := spareRun(4, 0.4, 7)
+	in.Held = map[string]int{"L": 2, "Q": 7}
+	in.Roles[0].ReplicaGPUs = 2
+	in.Give = map[string]ShareVariant{"Q": {Name: "q", GPUs: 1}}
+	in.Grow = map[string]ShareVariant{"L": {Name: "l", GPUs: 2}}
+	returned := 0
+	for _, p := range planEach(NewShareLedger(), in, 5) {
+		returned += p.Returns
+	}
+	if returned == 0 {
+		t.Fatal("Q kept its spare parked for a role no donor can fund")
+	}
+}
+
+// A return still releasing goes to a role that turns short, as a transfer's
+// GPUs would, instead of to the quota it would wait on with no reason shown.
+func TestShareHandsAReturnToAShortReceiver(t *testing.T) {
+	l := NewShareLedger()
+	plans := planEach(l, spareRun(2, 0.4, 7), 3)
+	if plans[2].Returns != 5 {
+		t.Fatalf("setup: Q returned %d, want 5", plans[2].Returns)
+	}
+	p := PlanShareTransfers(l, spareRun(5, 0.4, 7), time.Unix(1045, 0), spareTimings())
+	if len(p.Assigned) != 3 {
+		t.Fatalf("assigned %d returns to L, want 3 (3 up to its target of 6)", len(p.Assigned))
+	}
+	for _, id := range p.Assigned {
+		if tr, _ := l.Transfer(id); tr.Receiver != "L" || tr.Returned {
+			t.Fatalf("assigned %+v, want a transfer to L", tr)
+		}
+	}
+	if qToL(p.Started) != 0 {
+		t.Fatal("Q started new transfers to L besides its returns")
+	}
+}
+
+// With no headroom, a return and its cancel are still a replica apart: a
+// return at need 2.9 is not cancelled at 3.05.
+func TestShareCancelKeepsAReplicaGapAtNoHeadroom(t *testing.T) {
+	l := NewShareLedger()
+	burstHistory(l)
+	in := spareRun(2, 2.9, 7)
+	in.Headroom.Replicas = 0
+	in.Roles = []ShareRole{
+		{Key: "L", Weight: 1, Need: 2, Floor: 1, Ceiling: 8, ReplicaGPUs: 1},
+		{Key: "Q", Weight: 1, Need: 2.9, Floor: 1, Ceiling: 8, ReplicaGPUs: 1},
+	}
+	// Q at 7 returns down to 5 (2.9 <= 0.6 x 5); cancelled only past 0.6 x 6.
+	for range 2 {
+		l.Start(ShareTransfer{Donor: "Q", DonorGPUs: 1, Entitled: true, Returned: true}, in.Held, time.Unix(1000, 0), spareTimings())
+	}
+	in.Roles[1].Need = 3.05
+	if p := PlanShareTransfers(l, in, time.Unix(1010, 0), spareTimings()); len(p.Cancelled) != 0 {
+		t.Fatalf("cancelled %v at need 3.05, within a replica of the return", p.Cancelled)
+	}
+	in.Roles[1].Need = 3.7
+	if p := PlanShareTransfers(l, in, time.Unix(1020, 0), spareTimings()); len(p.Cancelled) == 0 {
+		t.Fatal("control: not cancelled at 3.7 (> 0.6 x 6)")
+	}
+}
+
+// A free node the idle credit has given to one replica is not counted again
+// for the next: B's first replica is credited to n1's 8 free GPUs, and its
+// second is funded by a donor set on the nodes A's pods free -- not deferred
+// to a fill that has no GPUs left to place it.
+func TestShareIdleCreditSpendsItsNode(t *testing.T) {
+	four := func(name, node string) ShareUnit {
+		return ShareUnit{Pods: []SharePod{{Name: name, Node: node, GPUs: 4}}}
+	}
+	in := SharePlanInput{
+		Roles: []ShareRole{
+			{Key: "A", Weight: 1, Need: 4, Ceiling: 16, ReplicaGPUs: 4},
+			{Key: "B", Weight: 1, Need: 64, Ceiling: 32, ReplicaGPUs: 8},
+		},
+		Held:       map[string]int{"A": 24, "B": 16},
+		Thresholds: map[string]float64{"A": 0.8, "B": 0.8}, Budget: 56, Tolerance: 0.15,
+		Give:         map[string]ShareVariant{"A": {Name: "a", GPUs: 4, PodGPUs: []int{4}}},
+		Grow:         map[string]ShareVariant{"B": {Name: "b", GPUs: 8, PodGPUs: []int{8}}},
+		Nodes:        map[string]ShareNode{"n1": {Free: 8}, "n2": {Free: 4}, "n3": {Free: 4}},
+		DonorUnits:   map[string][]ShareUnit{"A": {four("ns/a-0", "n2"), four("ns/a-1", "n3"), four("ns/a-2", "n2")}},
+		PhysicalFree: 16,
+	}
+	p := PlanShareTransfers(NewShareLedger(), in, time.Unix(1000, 0), simTimings())
+	toB := 0
+	for _, tr := range p.Started {
+		if tr.Receiver == "B" {
+			toB++
+		}
+	}
+	if toB == 0 {
+		t.Fatalf("B's second replica was deferred to a fill that cannot place it: %+v", p.Started)
+	}
+}
+
+// What keeps a role's headroom, when a return is due, is counted.
+func TestShareReturnWithheldReasons(t *testing.T) {
+	withheld := map[string]int{}
+	for _, p := range planEach(NewShareLedger(), spareRun(2, 3, 7), 6) {
+		for k, v := range p.Withheld {
+			withheld[k] += v
+		}
+	}
+	if withheld[ShareWithheldReturnNotCalm] == 0 {
+		t.Errorf("Q kept spare above its target while not calm, and nothing said so: %v", withheld)
+	}
+	withheld = map[string]int{}
+	in := spareRun(7, 0.4, 7)
+	in.SkipWaits = ShareSkipWaits{Off: true}
+	for _, p := range planEach(NewShareLedger(), in, 4) {
+		for k, v := range p.Withheld {
+			withheld[k] += v
+		}
+	}
+	if withheld[ShareWithheldReturnRoleShort] == 0 {
+		t.Errorf("returns held for a short role, and nothing said so: %v", withheld)
+	}
+}
+
 func TestShareFillPace(t *testing.T) {
 	if got := ShareFillPace(6, 2); got != math.MaxInt {
 		t.Errorf("below its need: pace %d, want unbounded", got)
@@ -343,7 +518,10 @@ func TestShareHeadroomScalesByWeight(t *testing.T) {
 		{Key: "L", Weight: 2, Need: 2, Floor: 1, Ceiling: 8, ReplicaGPUs: 1},
 		{Key: "Q", Weight: 1, Need: 2, Floor: 1, Ceiling: 8, ReplicaGPUs: 1},
 	}
-	p := PlanShareTransfers(NewShareLedger(), SharePlanInput{Roles: roles, Held: map[string]int{"L": 2, "Q": 2},
+	// Both have peaked at 6: the quota is contended, and the cap binds.
+	l := NewShareLedger()
+	l.RecordNeeds(map[string]float64{"L": 6, "Q": 6}, time.Unix(990, 0), spareTimings())
+	p := PlanShareTransfers(l, SharePlanInput{Roles: roles, Held: map[string]int{"L": 2, "Q": 2},
 		Thresholds: map[string]float64{"L": 0.85, "Q": 0.85}, Budget: 10, Tolerance: 0.15,
 		PhysicalFree: math.MaxInt, Headroom: ShareHeadroom{Capped: true, Replicas: 1}}, time.Unix(1000, 0), spareTimings())
 	integ := map[string]int{}

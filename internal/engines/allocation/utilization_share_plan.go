@@ -175,6 +175,12 @@ type SharePlan struct {
 	// Returns is how many transfers started this cycle to give a role's
 	// replicas above its target back to the unassigned GPUs (returnSpare).
 	Returns int
+	// Assigned are the returns still releasing that this cycle handed to a
+	// short receiver (ShareLedger.AssignReturn).
+	Assigned []string
+	// HeadroomCapped is set when the spare was capped this cycle: the quota
+	// could not cover every role at its recent peak plus its headroom.
+	HeadroomCapped bool
 	// Unfunded names, for each confirmed receiver that got nothing this cycle
 	// because no candidate donor's pods could host its replica, that reason
 	// (ShareUnfundedNoCompatibleDonor). A receiver held back by a hold, the
@@ -230,9 +236,10 @@ func PlanShareTransfers(l *ShareLedger, in SharePlanInput, now time.Time, tm Sha
 	p := &sharePlanRun{l: l, in: in, now: now, tm: tm, moved: map[string]int{},
 		plan: SharePlan{Unfunded: map[string]string{}, Withheld: map[string]int{}, Nodes: in.Nodes}}
 	p.planningRoles()
-	if in.Headroom.Capped {
+	if in.Headroom.Capped && p.contended() {
 		// On the planning need: capped on this cycle's reading, a swinging
 		// role in its trough would be held below the mean it is planned on.
+		p.plan.HeadroomCapped = true
 		p.roles = ShareCapSpare(p.roles, in.Headroom.Replicas)
 		for _, r := range p.roles {
 			p.byKey[r.Key] = r
@@ -268,7 +275,12 @@ func PlanShareTransfers(l *ShareLedger, in SharePlanInput, now time.Time, tm Sha
 	var receivers, donors []string
 	for _, r := range p.roles {
 		c := p.committed[r.Key]
-		if c < p.integ[r.Key] {
+		// A role still giving is not a receiver, as the fill does not raise
+		// it (ShareLedger.Giving): a target that crosses a replica boundary
+		// would otherwise fill it while its own release drains, and a move
+		// that skips the waits would send GPUs back to it mid-drain when an
+		// alternation is shorter than a release.
+		if c < p.integ[r.Key] && !p.l.Giving(r.Key) {
 			receivers = append(receivers, r.Key)
 		}
 		if c > p.integ[r.Key] && c > p.keep[r.Key] {
@@ -517,6 +529,28 @@ func (p *sharePlanRun) calmView(r ShareRole) ShareRole {
 	return r
 }
 
+// contended reports whether the group's quota cannot hold every role at once
+// at its peak need over the swing window -- its claim at that need, rounded
+// up to whole replicas. Only then is the spare capped. While it can, no burst
+// can find the GPUs it needs parked on another, and returning headroom only
+// makes the next burst cold-start what a spread spare held warm: in
+// simulation, alternating bursts whose peaks fit together lost 4 to 8% of
+// demand capped against under 1% spread, and whole-node bursts in a slack
+// quota lost 6 to 43% against none. When the peaks do not fit together, a
+// role that bursts must take GPUs from the others as it bursts, and spare
+// parked on them -- whose pods may take minutes to drain -- is what made a
+// bursting model wait 18 minutes for 8 replicas on a cluster.
+func (p *sharePlanRun) contended() bool {
+	sum := 0
+	for _, r := range p.roles {
+		g := max(r.ReplicaGPUs, 1)
+		peak := r
+		peak.Need = p.l.PeakNeed(r.Key, r.Need)
+		sum += g * int(math.Ceil(peak.Claim()/float64(g)-1e-9))
+	}
+	return sum > p.in.Budget
+}
+
 // unpaced reports whether a hard-imbalance move to rc may skip the pace and
 // the concurrency limit: rc has been a hard-imbalance receiver for
 // ShareUnpacedAfterCycles consecutive cycles. The first cycle moves at the
@@ -562,7 +596,9 @@ func (p *sharePlanRun) cancelReversals() {
 		// the fill to raise it again. Back means below its target, or busier
 		// than the calm load on what it keeps -- one replica above the bar
 		// the return was started under, so the two do not alternate.
-		back := donorShort || donorAfter < p.integ[t.Donor] || p.need(t.Donor) > in.Headroom.returnLoad()*float64(donorAfter)
+		g := float64(max(dn.ReplicaGPUs, 1))
+		bar := float64(donorAfter) - float64(in.Headroom.spareReplicas(dn))*g + g
+		back := donorShort || donorAfter < p.integ[t.Donor] || p.need(t.Donor) > in.Headroom.returnLoad()*bar
 		if t.Returned && back && l.Cancel(t.ID, now, tm) {
 			p.plan.Cancelled = append(p.plan.Cancelled, t.ID)
 			p.committed = l.Committed(in.Held)
@@ -656,6 +692,7 @@ func (p *sharePlanRun) fund(rc string, donors []string) {
 		return // its last fill timed out with its pods Pending (HoldFill)
 	}
 	p.fromIdle(rc)
+	p.fromReturns(rc)
 	for _, dn := range donors {
 		started, step, cand, misfit := p.fundFrom(rc, dn)
 		funded = funded || started > 0
@@ -698,7 +735,7 @@ func (p *sharePlanRun) fund(rc string, donors []string) {
 // ShareUnpacedAfterCycles (unpaced), and rc still below its need -- the
 // replica of headroom above it is an ordinary, paced move.
 func (p *sharePlanRun) unpacedNow(rc string) bool {
-	return p.unpaced(rc) && p.work[rc] < p.integ[rc] && float64(p.work[rc]) < p.byKey[rc].Need
+	return p.unpaced(rc) && p.work[rc] < p.integ[rc] && float64(p.work[rc]) < p.need(rc)
 }
 
 // fromIdle counts what the idle fill gives receiver rc this cycle -- the
@@ -722,6 +759,28 @@ func (p *sharePlanRun) fromIdle(rc string) {
 			return
 		}
 		p.work[rc] += g
+	}
+}
+
+// fromReturns hands returned spare still releasing to receiver rc, up to its
+// target: those GPUs reach it when they come free, as a transfer's would.
+// Left unassigned, the receiver would wait on the same release with no
+// transfer of its own and no reason to show for it. A receiver whose replica
+// spans several pods is left to a donor set, which places each pod.
+func (p *sharePlanRun) fromReturns(rc string) {
+	grow, ok := variantOf(p.in.Grow, rc, p.byKey[rc].ReplicaGPUs)
+	if !ok || len(grow.PodGPUs) > 1 {
+		return
+	}
+	g := max(grow.GPUs, 1)
+	for _, t := range p.l.Transfers() {
+		if p.work[rc] >= p.integ[rc] {
+			return
+		}
+		if t.Returned && t.Donor != rc && p.l.AssignReturn(t.ID, rc, grow.Name, g) {
+			p.work[rc] += g
+			p.plan.Assigned = append(p.plan.Assigned, t.ID)
+		}
 	}
 }
 
@@ -830,13 +889,15 @@ func (p *sharePlanRun) returnSpare() {
 	l, in, now, tm := p.l, p.in, p.now, p.tm
 	over := map[string]bool{}
 	for _, r := range p.roles {
-		over[r.Key] = p.work[r.Key] > p.integ[r.Key]
+		// Only a capped spare is returned: spread, the targets give it all
+		// away by weight, and what moves between roles moves by transfer.
+		over[r.Key] = p.plan.HeadroomCapped && p.work[r.Key] > p.integ[r.Key]
 	}
 	since := l.MarkOver(over, now)
 	for _, r := range p.roles {
 		g := max(r.ReplicaGPUs, 1)
 		claim := g * int(math.Ceil(r.Claim()/float64(g)-1e-9))
-		if p.work[r.Key] < claim && !l.FillHeld(r.Key, now) {
+		if p.work[r.Key] < claim && !l.FillHeld(r.Key, now) && p.plan.Unfunded[r.Key] == "" {
 			if _, grows := variantOf(in.Grow, r.Key, g); grows {
 				for k, o := range over {
 					if o && k != r.Key {
@@ -888,10 +949,24 @@ func (p *sharePlanRun) fundBySet(rc string, donors []string) (funded, deferred b
 	rule := shareSetRule{hard: p.hard[rc] > 0, free: p.unpacedNow(rc)}
 	var set []shareDonor
 	if in.Nodes != nil {
+		// Placed on the free GPUs the idle credit has not already spent
+		// (idleNodes): placed on in.Nodes, a set -- or its deferral to the
+		// fill -- would count a node the credit gave away a second time.
+		// What the set takes of a node's free GPUs comes off both pictures;
+		// in.Nodes is the one the fill places into.
+		view := in
+		view.Nodes = p.idleNodes
 		var left map[string]int
-		set, left, deferred = shareNodeSet(l, in, rc, donors, p.work, p.moved, p.byKey, p.limits(), p.cont, p.z, p.isConfirmed, rule, now, tm)
+		set, left, deferred = shareNodeSet(l, view, rc, donors, p.work, p.moved, p.byKey, p.limits(), p.cont, p.z, p.isConfirmed, rule, now, tm)
 		if len(set) > 0 {
-			withdrawNodeSet(in.Nodes, in.DonorUnits, set, left)
+			for n, info := range p.idleNodes {
+				if used := info.Free - min(info.Free, left[n]); used > 0 {
+					fill := in.Nodes[n]
+					fill.Free = max(0, fill.Free-used)
+					in.Nodes[n] = fill
+				}
+			}
+			withdrawNodeSet(p.idleNodes, in.DonorUnits, set, left)
 		}
 	}
 	if deferred {

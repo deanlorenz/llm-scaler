@@ -621,6 +621,8 @@ func TestUtilizationShareRestoreRejectsForgedMarks(t *testing.T) {
 		{"wrong donor variant", transferMark{ID: "x", Donor: roleA, Receiver: roleB, DonorVariant: "C-v", ReceiverVariant: "B-v", GPUs: 1, DonorGPUs: 1}},
 		{"starts in the future", transferMark{ID: "x", Donor: roleA, Receiver: roleB, DonorVariant: "A-v", ReceiverVariant: "B-v", GPUs: 1, DonorGPUs: 1,
 			Started: time.Unix(1<<40, 0)}},
+		{"a return naming a receiver", transferMark{ID: "x", Donor: roleA, Receiver: roleB, DonorVariant: "A-v", ReceiverVariant: "B-v", GPUs: 1, DonorGPUs: 1,
+			Returned: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newShareFleet()

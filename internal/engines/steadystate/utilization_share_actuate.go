@@ -310,6 +310,18 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 		count(allocation.ShareOutcomeCancelled, t.Urgent)
 		logger.Info("Utilization share: transfer cancelled", "id", id, "donor", t.Donor, "receiver", t.Receiver)
 	}
+	for _, id := range plan.Assigned {
+		t, ok := l.Transfer(id)
+		if !ok {
+			continue
+		}
+		if t.ReceiverVariant != "" {
+			e.shareEvent(accessor(t.Receiver, t.ReceiverVariant), corev1.EventTypeNormal, constants.K8SEventUtilizationShareReceiving,
+				fmt.Sprintf("Utilization share: receiving %d GPUs that %s is giving back to the quota; raised once its replica is released",
+					t.GPUs, sharePeer(g, t.Receiver, t.Donor)))
+		}
+		logger.Info("Utilization share: returned spare handed to a receiver", "id", id, "donor", t.Donor, "receiver", t.Receiver)
+	}
 	// A donor set (section 6.5) starts whole or not at all: a primary whose
 	// contributor could not be marked would raise its receiver into a hole
 	// that never fully opens.
@@ -470,19 +482,12 @@ func (e *Engine) fillIdleShare(logger logr.Logger, l *allocation.ShareLedger, g 
 	for _, r := range g.Roles {
 		roles[r.Key] = r
 	}
-	// A role giving its spare back is not raised before the return lands:
-	// raised while its pod still drains, the return would never see it
-	// shrink, would abort and restore its count -- one replica above where it
-	// was meant to be. The planner cancels the return while it is free.
-	returning := map[string]bool{}
-	for _, t := range l.Transfers() {
-		if t.Returned && t.State == allocation.ShareReleasing {
-			returning[t.Donor] = true
-		}
-	}
+	// A role still giving -- a transfer, a return, a refill -- is not raised
+	// before its release lands (ShareLedger.Giving). The planner cancels a
+	// release while it is free.
 	var receivers []string
 	for _, r := range g.Roles {
-		if _, ok := g.Grow[r.Key]; ok && committed[r.Key] < integer[r.Key] && !l.FillHeld(r.Key, now) && !returning[r.Key] {
+		if _, ok := g.Grow[r.Key]; ok && committed[r.Key] < integer[r.Key] && !l.FillHeld(r.Key, now) && !l.Giving(r.Key) {
 			receivers = append(receivers, r.Key)
 		}
 	}
@@ -796,7 +801,10 @@ func shareBlockedReasons(l *allocation.ShareLedger, g allocation.ShareGroup, ev 
 			switch {
 			case l.ReceivingHeld(r.Key, now, tm) && (!urgent || !calmDonor):
 				add(r.Key, constants.ScalingBlockedReversalHold)
-			case l.InFlight() >= allocation.ShareMaxConcurrentTransfers:
+			// Nor the concurrency limit, for one whose hard imbalance is
+			// confirmed: its moves are unpaced.
+			case l.InFlight() >= allocation.ShareMaxConcurrentTransfers &&
+				(!urgent || !calmDonor || l.HardCycles(r.Key) < allocation.ShareUnpacedAfterCycles):
 				add(r.Key, constants.ScalingBlockedTransferLimit)
 			}
 		}

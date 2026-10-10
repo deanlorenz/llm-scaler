@@ -10,6 +10,7 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 )
 
 // A model that keeps more headroom than maxHeadroomReplicas gives it, with
@@ -23,6 +24,7 @@ import (
 // short of its headroom, so A first gives it one by a transfer; then, after
 // its window, A returns 2. B (need 3.75, holding 5) is at its target.
 func TestUtilizationShareReturnsSpare(t *testing.T) {
+	reg := freshMetrics(t)
 	f := newShareFleet()
 	f.demand = map[string]float64{"A": 1600, "B": 3000, "C": 1000}
 	c := sharePods(t, f)
@@ -30,8 +32,17 @@ func TestUtilizationShareReturnsSpare(t *testing.T) {
 	rec := record.NewFakeRecorder(100)
 	se.e.Recorder = rec
 
+	// B has recently burst to a need of 13: at their peaks the models want 17
+	// of the quota's 16, so the spare is capped (and only then returned).
+	burst := func() {
+		for _, l := range se.e.utilizationShare.ledgers {
+			l.RecordNeeds(map[string]float64{"ns/B/" + domain.RoleBoth: 13}, se.clock,
+				allocation.ShareTimings{SwingWindow: time.Hour})
+		}
+	}
 	var o map[string]utilizationShareOverride
 	for range 40 {
+		burst()
 		if o = se.cycle(); targetOf(t, o, "ns/A-v") == 6 {
 			break
 		}
@@ -73,6 +84,13 @@ func TestUtilizationShareReturnsSpare(t *testing.T) {
 	}
 	if giving != 2 {
 		t.Fatalf("%d Giving Events name the unassigned GPUs, want 2", giving)
+	}
+	starts := map[string]float64{}
+	for _, m := range family(t, reg, constants.WVAUtilizationShareStartsTotal) {
+		starts[label(m, constants.LabelKind)+"/"+label(m, constants.LabelSkippedWaits)] = m.GetCounter().GetValue()
+	}
+	if starts["return/false"] != 2 || starts["transfer/false"] != 1 {
+		t.Fatalf("starts_total %v, want return=2 and transfer=1", starts)
 	}
 
 	// A restart reads the marks back as returns.

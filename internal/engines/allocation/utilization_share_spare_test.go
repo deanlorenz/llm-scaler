@@ -15,9 +15,8 @@ func spareRun(lNeed, qNeed float64, qHeld int) SharePlanInput {
 		{Key: "L", Weight: 1, Need: lNeed, Floor: 1, Ceiling: 8, ReplicaGPUs: 1},
 		{Key: "Q", Weight: 1, Need: qNeed, Floor: 1, Ceiling: 8, ReplicaGPUs: 1},
 	}
-	// Capped here, so the setup checks read the targets the planner uses, and
-	// again by the planner, which changes nothing.
-	return SharePlanInput{Roles: ShareCapSpare(roles, 1), Held: map[string]int{"L": 3, "Q": qHeld},
+	// Raw: the planner caps them, and only while the quota is contended.
+	return SharePlanInput{Roles: roles, Held: map[string]int{"L": 3, "Q": qHeld},
 		Thresholds: map[string]float64{"L": 0.85, "Q": 0.85}, Budget: 10, Tolerance: 0.15,
 		PhysicalFree: math.MaxInt, Headroom: ShareHeadroom{Capped: true, Replicas: 1}}
 }
@@ -30,8 +29,17 @@ func spareTimings() ShareTimings {
 	return tm
 }
 
-// planEach runs n cycles 15s apart on one ledger and returns each cycle's plan.
+// burstHistory makes the ledger remember both models bursting to 8, as in
+// the cluster run: at their peaks they would need 16 of the quota's 10, so
+// the quota is contended and the spare is capped.
+func burstHistory(l *ShareLedger) {
+	l.RecordNeeds(map[string]float64{"L": 8, "Q": 8}, time.Unix(990, 0), spareTimings())
+}
+
+// planEach runs n cycles 15s apart on one ledger, which remembers both models'
+// bursts (burstHistory), and returns each cycle's plan.
 func planEach(l *ShareLedger, in SharePlanInput, n int) []SharePlan {
+	burstHistory(l)
 	out := make([]SharePlan, 0, n)
 	for i := range n {
 		out = append(out, PlanShareTransfers(l, in, time.Unix(int64(1000+15*i), 0), spareTimings()))
@@ -84,7 +92,7 @@ func TestShareCapSpare(t *testing.T) {
 // Capped, the targets leave the spare unassigned instead of spreading it.
 func TestShareCapSpareLeavesTheSpareUnassigned(t *testing.T) {
 	in := spareRun(2, 0.4, 3)
-	integ := IntegerShareTargets(in.Roles, in.Budget)
+	integ := IntegerShareTargets(ShareCapSpare(in.Roles, 1), in.Budget)
 	if integ["L"] != 3 || integ["Q"] != 2 {
 		t.Fatalf("capped targets %v, want L=3 (need 2 + one spare), Q=2 (floor 1 + one spare)", integ)
 	}
@@ -141,12 +149,14 @@ func TestShareOneReadingMovesAtThePace(t *testing.T) {
 	if n := qToL(p.Started); n < 1 || n > ShareMaxReplicasPerCycle {
 		t.Fatalf("the spike moved %d, want 1..%d", n, ShareMaxReplicasPerCycle)
 	}
+	// The reading gone, nothing more skips the waits. (With L's need back at
+	// 1 the peaks fit the quota, so the spare is spread by weight again, and
+	// what moves now is an ordinary, confirmed headroom move.)
 	p = PlanShareTransfers(l, spareRun(1, 0.4, 7), time.Unix(1015, 0), simTimings())
-	if n := qToL(p.Started); n != 0 {
-		t.Fatalf("moved %d more after the reading went", n)
-	}
-	if len(p.Cancelled) == 0 {
-		t.Fatal("what the spike moved was not cancelled")
+	for _, tr := range p.Started {
+		if tr.SkippedWaits {
+			t.Fatalf("skipped the waits again after the reading went: %+v", tr)
+		}
 	}
 }
 
@@ -211,6 +221,7 @@ func TestShareReturnsSpareWhenNobodyIsShort(t *testing.T) {
 	// Q's target is 2: across every cycle it returns 5 at most, and L, at
 	// its target, returns nothing.
 	l = NewShareLedger()
+	burstHistory(l)
 	returned := map[string]int{}
 	held := map[string]int{"L": 3, "Q": 7}
 	in := spareRun(2, 0.4, 7)
@@ -238,12 +249,12 @@ func TestShareReturnsSpareWhenNobodyIsShort(t *testing.T) {
 // at a threshold of 0.95, it returns one replica.
 func TestShareReturnsDownToTheTargetOnly(t *testing.T) {
 	in := spareRun(2, 1.15, 5)
-	in.Roles = ShareCapSpare([]ShareRole{
+	in.Roles = []ShareRole{
 		{Key: "L", Weight: 1, Need: 2, Floor: 1, Ceiling: 8, ReplicaGPUs: 1},
 		{Key: "Q", Weight: 1, Need: 1.15, Floor: 3, Ceiling: 8, ReplicaGPUs: 1},
-	}, 1)
+	}
 	in.Thresholds["Q"] = 0.95
-	if integ := IntegerShareTargets(in.Roles, in.Budget); integ["Q"] != 4 {
+	if integ := IntegerShareTargets(ShareCapSpare(in.Roles, 1), in.Budget); integ["Q"] != 4 {
 		t.Fatalf("setup: Q's target %d, want 4", integ["Q"])
 	}
 	returned := 0
@@ -273,7 +284,7 @@ func TestShareDoesNotReturnWhileARoleIsShort(t *testing.T) {
 // below it.
 func TestShareReturnsOnlyWhileCalm(t *testing.T) {
 	in := spareRun(2, 3, 7)
-	if integ := IntegerShareTargets(in.Roles, in.Budget); integ["Q"] != 4 {
+	if integ := IntegerShareTargets(ShareCapSpare(in.Roles, 1), in.Budget); integ["Q"] != 4 {
 		t.Fatalf("setup: Q's target %d, want 4", integ["Q"])
 	}
 	total := 0

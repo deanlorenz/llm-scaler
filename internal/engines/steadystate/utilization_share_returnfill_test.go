@@ -50,6 +50,68 @@ func TestShareFillSkipsUnreleasedGPUs(t *testing.T) {
 
 // A role whose return is still releasing is not raised by the fill: raised, its
 // return would never see it shrink, would abort, and restore it one above.
+// Below its need, a model is filled to its target in one cycle: a fill drains
+// nobody, and pacing it would leave it short beside idle GPUs. At or above
+// its need, the fill keeps the pace.
+func TestShareFillIsUnpacedBelowNeed(t *testing.T) {
+	fill := func(need float64) int {
+		g := allocation.ShareGroup{
+			Budget: 8, PhysicalFree: 1 << 20,
+			Roles: []allocation.ShareRole{{Key: "B", Weight: 1, Need: need, ReplicaGPUs: 1}},
+			Grow:  map[string]allocation.ShareVariant{"B": {Name: "b", GPUs: 1}},
+		}
+		ev := allocation.ShareEvaluation{Roles: []allocation.ShareRoleVerdict{{Key: "B", Integer: 8}}}
+		e := &Engine{}
+		e.utilizationShare.desired = map[string]int{"B/b": 3}
+		key := func(role, variant string) string { return role + "/" + variant }
+		e.fillIdleShare(logr.Discard(), allocation.NewShareLedger(), g, ev, map[string]int{"B": 3}, shareFit{}, key,
+			time.Unix(1000, 0), allocation.ShareTimings{FillTimeout: time.Hour})
+		return e.utilizationShare.desired["B/b"] - 3
+	}
+	if n := fill(9); n != 5 {
+		t.Fatalf("below its need: filled %d, want all 5 idle at once", n)
+	}
+	if n := fill(2); n != allocation.ShareMaxReplicasPerCycle {
+		t.Fatalf("above its need: filled %d, want the pace (%d)", n, allocation.ShareMaxReplicasPerCycle)
+	}
+}
+
+// A donor whose pod cannot be marked starts nothing more that cycle: an
+// unpaced move plans several transfers from it, and starting the rest after
+// backing it off would contradict the back-off.
+func TestShareFailedDonorStartsNothingMore(t *testing.T) {
+	f := newShareFleet()
+	f.demand = map[string]float64{"A": 1600, "B": 12000, "C": 1000}
+	fresh := sharePods(t, f)
+	patches := 0
+	// The first mark (the paced first cycle's) lands; the second -- the first
+	// of the unpaced cycle -- fails, and so does nothing after it.
+	se := newShareEngine(t, f, failing(fresh, nil, func() bool { patches++; return patches == 2 }), time.Unix(0, 0))
+	for range 30 {
+		se.cycle()
+		if patches >= 2 {
+			break
+		}
+	}
+	if patches < 2 {
+		t.Fatalf("setup: only %d mark patches in 30 cycles", patches)
+	}
+	if m := len(markedPods(t, fresh)); m != 1 {
+		t.Fatalf("%d pods marked, want 1: after its mark failed, A started nothing more that cycle", m)
+	}
+	for _, l := range se.e.utilizationShare.ledgers {
+		n := 0
+		for _, tr := range l.Transfers() {
+			if tr.Donor == roleA {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Fatalf("A has %d transfers in the ledger, want the 1 that was marked", n)
+		}
+	}
+}
+
 func TestShareFillSkipsARoleReturning(t *testing.T) {
 	if d := fillCase(t, 12, map[string]int{"A": 6, "B": 3}); d["A"] != 5 {
 		t.Fatalf("A raised to %d while its return releases", d["A"])

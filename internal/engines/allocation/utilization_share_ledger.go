@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"iter"
 	"maps"
+	"math"
 	"slices"
 	"strconv"
 	"time"
@@ -875,6 +876,44 @@ func (l *ShareLedger) RecordNeeds(needs map[string]float64, now time.Time, tm Sh
 	}
 }
 
+// PeakNeed is the highest need recorded for role over the swing window, or
+// current when higher.
+func (l *ShareLedger) PeakNeed(role string, current float64) float64 {
+	peak := current
+	for _, s := range l.needs[role] {
+		peak = math.Max(peak, s.need)
+	}
+	return peak
+}
+
+// Giving reports whether role is the donor of a transfer still releasing --
+// to a receiver, back to the quota, or to the reserve. Such a role is not
+// raised: raised while its pod drains, it would never shrink, and the
+// release would abort and restore its count one above where it was meant to
+// be.
+func (l *ShareLedger) Giving(role string) bool {
+	for _, t := range l.transfers {
+		if t.State == ShareReleasing && t.Donor == role {
+			return true
+		}
+	}
+	return false
+}
+
+// AssignReturn hands a returned spare that is still releasing to receiver:
+// its GPUs go to it when they come free, as a transfer's would, instead of
+// to the unassigned GPUs it would otherwise wait on. gpus is one receiver
+// replica, no more than the returned replica. It reports whether it did.
+func (l *ShareLedger) AssignReturn(id, receiver, variant string, gpus int) bool {
+	for _, t := range l.transfers {
+		if t.ID == id && t.Returned && t.State == ShareReleasing && t.Receiver == "" && gpus <= t.DonorGPUs {
+			t.Receiver, t.ReceiverVariant, t.GPUs, t.Returned = receiver, variant, gpus, false
+			return true
+		}
+	}
+	return false
+}
+
 // PlanningNeed is the need a role is planned on: its mean over the swing
 // window while it is swinging, else its current need.
 func (l *ShareLedger) PlanningNeed(role string, current float64, now time.Time) float64 {
@@ -924,6 +963,10 @@ func (l *ShareLedger) ConfirmHard(hard map[string]bool) map[string]int {
 	}
 	return maps.Clone(l.hard)
 }
+
+// HardCycles is how many consecutive cycles role has been a hard-imbalance
+// receiver (ConfirmHard).
+func (l *ShareLedger) HardCycles(role string) int { return l.hard[role] }
 
 // MarkOver records which roles hold more than their target this cycle and
 // returns, per role still over, since when it has been: the clock a return

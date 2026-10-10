@@ -594,6 +594,9 @@ func validTransferMark(raw string, m *transferMark, role string, give allocation
 		return "no id"
 	case m.Donor != role || m.DonorVariant != give.Name:
 		return "donor is not the variant the mark is on"
+	case m.Returned && (!refill || m.SetID != ""):
+		// The controller writes a return only with no receiver and no set.
+		return "a return that names a receiver or a set"
 	case refill:
 		if m.DonorGPUs != max(give.GPUs, 1) {
 			return "replica sizes do not match the variants"
