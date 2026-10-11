@@ -177,7 +177,9 @@ Leave it in shadow long enough to see each model's peak. Switch to active when
 the roles it would move, and how often, are what you expect. A model it never
 plans appears in the `frozen` field of the `would rebalance (shadow)` log line,
 with the reason. A model whose variants span two accelerator types is never
-planned at all.
+planned at all. Shadow always caps headroom at `maxHeadroomReplicas`: it has no
+test of whether the models' peaks fit the quota, so on a quota where they do,
+active mode targets more headroom than shadow reported.
 
 **Active.** Transfers, the blocked reasons, and the Events on the scale targets:
 
@@ -219,7 +221,11 @@ What each blocked reason means and what to do about it is in
 
 Expect nothing to scale in a group for about three minutes after the switch.
 That is the freeze of one fill timeout described above, not a fault; its models
-show the blocked reason `quiet-period` meanwhile. If it
+show the blocked reason `quiet-period` meanwhile. For about one
+`stabilization.flappingWindow` after the switch, or any controller restart,
+headroom is capped (`wva_utilization_share_headroom_capped 1`) unless the
+models' `maxReplicas` fit the quota together: no model's peak is known yet, so
+each counts at its `maxReplicas`. If it
 still moves nothing after that, work down
 [the troubleshooting list](../../reference/troubleshooting.md#the-optimizer-evaluates-but-never-moves-anything).
 

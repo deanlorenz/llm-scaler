@@ -219,6 +219,10 @@ Work down the list in order.
    the transfer marks on the donors' pods, and the Error line
    `Utilization share: could not read transfer marks; retrying next cycle` says
    why, typically a missing RBAC grant to list pods in one model's namespace.
+   Separately, the headroom cap is on for about one
+   `stabilization.flappingWindow` after a restart, until each model's peak is
+   known again
+   ([a model shrinks while no other model grows](#a-model-shrinks-while-no-other-model-grows)).
 9. **Could it not mark the donor?** `Utilization share: could not mark a donor pod;
    transfer not started` means the donor's pod could not be steered by a fault:
    a sibling's deletion cost leaves no room for the mark (see
@@ -268,7 +272,11 @@ model in the quota group grows to take the GPUs.
 
 **What it means**: the model gave headroom back to the quota. This happens
 only while the quota is **contended**: it cannot hold every model at its peak
-need over the last `stabilization.flappingWindow` at the same time. While the
+need over the last `stabilization.flappingWindow` at the same time. A model
+whose demand has been recorded for less than one `flappingWindow` -- every
+model after a controller restart, a newly added model -- counts at its
+`maxReplicas` (the whole quota without one), so after a restart the cap is on
+until a full window of history shows the peaks fit. While the
 peaks fit, the whole spare stays spread by weight and nothing is given back.
 While contended, the optimizer gives each model (each role of a P/D model) at most `maxHeadroomReplicas`
 replicas (default `1`) times its weight, rounded up, above what it needs, and
@@ -281,8 +289,12 @@ would. It does so only while no model in the group that can grow is short of
 its need, and
 only while its load would stay at or below
 `stabilization.returnSpareWhenLoadAtMost` (default `0.6`) on what it keeps,
-not counting its headroom. It never goes below its need plus its headroom, its
-`minReplicaCount` or its last replica. If, while the release is still in its
+not counting its headroom. It never goes below its need (the higher of its
+current and average need while it swings) plus its headroom, below what the
+other models' recent peaks leave of the quota in whole replicas, its
+`minReplicaCount` or its last replica: a model that bursts alone keeps its
+spare, and GPUs are returned only when another model's recent peak could use
+them. If, while the release is still in its
 scale-down window, the model is short of its target again or busier than that
 load on what it keeps, the return is called off and the model keeps the
 replica. If another model turns short while the return is still releasing, the
@@ -304,9 +316,22 @@ is not giving it back shows why in `wva_utilization_share_withheld_total`:
 `return-not-calm` (its load is above `returnSpareWhenLoadAtMost`) or
 `return-role-short` (another model is short of its need).
 
+Whether the cap is on: `wva_utilization_share_headroom_capped == 1` for the
+group (published only while the optimizer acts, not in shadow mode). The log
+says when it flips, with `peakClaimGPUs` (the models' peaks summed in whole
+replicas) and `budget`: `Utilization share: the models' recent peaks do not fit
+the quota together; each keeps at most maxHeadroomReplicas of headroom, and the
+rest is returned` when it turns on, and `Utilization share: the models' recent
+peaks fit the quota together again; the spare is spread by weight` when it turns
+off. A cap that turns on right after a controller restart, with
+`peakClaimGPUs` above `budget`, is the restart rule above: it turns off after
+one `flappingWindow` (`wva_utilization_share_effective_seconds{param="swing-window"}`)
+if the recorded peaks fit.
+
 ```bash
 kubectl get events -n <model-namespace> --field-selector reason=UtilizationShareGiving | grep unassigned
 kubectl logs -n <controller-namespace> -l app.kubernetes.io/name=workload-variant-autoscaler | grep 'spare returned to the quota'
+kubectl logs -n <controller-namespace> -l app.kubernetes.io/name=workload-variant-autoscaler | grep 'recent peaks'
 ```
 
 **What to do**: nothing, if the model still serves within its targets: the
@@ -318,7 +343,9 @@ the key existed, and leaves little to return, at the price that a model whose de
 wait for another model's pods to drain before it grows. To make a model keep
 replicas longer after its demand falls, lower
 `stabilization.returnSpareWhenLoadAtMost`. To protect one model only, raise its
-`weightClass` (more headroom) or its `minReplicaCount`. See the
+`minReplicaCount`. A higher `weightClass` gives it more headroom replicas
+(weight times `maxHeadroomReplicas`, rounded up) but does not shield that
+headroom from another model's need. See the
 [scaling policy reference](scaling-policy.md#optimizer-cluster-default-only-live).
 
 ### A model shows `no-compatible-donor`
