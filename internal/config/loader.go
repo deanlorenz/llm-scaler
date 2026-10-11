@@ -158,9 +158,15 @@ func loadConfig(cfg *Config, flagSet *flag.FlagSet, configFilePath string) error
 		optimizationInterval: sanitizeOptimizationInterval(
 			v.GetDuration("GLOBAL_OPT_INTERVAL"), v.GetString("GLOBAL_OPT_INTERVAL")),
 		// Left exactly as written, including unusable values: the analyzer
-		// sanitizes them field by field and logs what it replaced, so the
-		// floor lives with the thing that owns the horizons rather than being
-		// enforced twice. Unset reads 0, which it takes as "use the default".
+		// sanitizes them field by field (capacity.Horizons.Sanitized) and the
+		// engine logs which ones it replaced, so the floor lives with the thing
+		// that owns the horizons rather than being enforced twice. Unset reads
+		// 0, which it takes as "use the default".
+		//
+		// Unlike GLOBAL_OPT_INTERVAL above, the raw string is not captured, so
+		// the diagnostic names the PARSED value (a unit-less "24" shows as
+		// 24ns). That is enough to identify the mistake and avoids three more
+		// fields on Config; if it ever is not, pass v.GetString too.
 		learnedEpisodeGap:      v.GetDuration("LEARNED_STATE_EPISODE_GAP"),
 		learnedVariantTimeout:  v.GetDuration("LEARNED_STATE_TIMEOUT"),
 		learnedBucketRetention: v.GetDuration("LEARNED_STATE_RETENTION"),

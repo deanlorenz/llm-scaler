@@ -101,7 +101,12 @@ func DefaultHorizons() Horizons {
 const MinHorizon = time.Minute
 
 // Sanitized returns h with every non-positive or below-floor field replaced by
-// its default, and reports what it changed so the caller can log it.
+// its default, and the names of the fields it changed.
+//
+// The names are the point, not a convenience: after flooring, the surviving
+// value IS the default, so no amount of logging the result can distinguish a
+// horizon an operator set deliberately from one that was rejected. Callers
+// must report this list -- NewEngine does.
 //
 // It does not refuse. An unusable horizon is a misconfiguration, not a reason
 // to decline to start, and the same judgement is already made for

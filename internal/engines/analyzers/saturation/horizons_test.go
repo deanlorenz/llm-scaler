@@ -3,9 +3,12 @@ package saturation
 import (
 	"time"
 
+	"github.com/go-logr/logr"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 )
 
@@ -27,9 +30,11 @@ var _ = Describe("learned-state horizons", func() {
 	})
 
 	It("takes the values it is configured with", func() {
-		h := NewSaturationAnalyzer(capacity.NewStore()).WithHorizons(capacity.Horizons{
+		a, replaced := NewSaturationAnalyzer(capacity.NewStore()).WithHorizons(capacity.Horizons{
 			EpisodeGap: 2 * time.Hour, VariantTimeout: 72 * time.Hour, BucketRetention: 240 * time.Hour,
-		}).Horizons()
+		})
+		Expect(replaced).To(BeEmpty(), "all three are usable, so nothing should be reported replaced")
+		h := a.Horizons()
 		Expect(h.EpisodeGap).To(Equal(2 * time.Hour))
 		Expect(h.VariantTimeout).To(Equal(72*time.Hour),
 			"72h is the value a reviewer asked for, to clear a long weekend")
@@ -71,7 +76,7 @@ var _ = Describe("learned-state horizons", func() {
 	// governs at a value no default would produce.
 	Describe("configuring a horizon changes what the code does", func() {
 		It("VariantTimeout decides when per-variant state is swept", func() {
-			a := NewSaturationAnalyzer(capacity.NewStore()).
+			a, _ := NewSaturationAnalyzer(capacity.NewStore()).
 				WithHorizons(capacity.Horizons{
 					EpisodeGap: time.Hour, VariantTimeout: time.Hour, BucketRetention: 240 * time.Hour,
 				})
@@ -92,7 +97,7 @@ var _ = Describe("learned-state horizons", func() {
 		})
 
 		It("BucketRetention decides when a bucket-keyed window is swept", func() {
-			a := NewSaturationAnalyzer(capacity.NewStore()).
+			a, _ := NewSaturationAnalyzer(capacity.NewStore()).
 				WithHorizons(capacity.Horizons{
 					EpisodeGap: time.Hour, VariantTimeout: 240 * time.Hour, BucketRetention: time.Hour,
 				})
@@ -110,7 +115,7 @@ var _ = Describe("learned-state horizons", func() {
 		})
 
 		It("EpisodeGap decides when a new observation starts a fresh window", func() {
-			a := NewSaturationAnalyzer(capacity.NewStore()).
+			a, _ := NewSaturationAnalyzer(capacity.NewStore()).
 				WithHorizons(capacity.Horizons{
 					EpisodeGap: time.Hour, VariantTimeout: 240 * time.Hour, BucketRetention: 240 * time.Hour,
 				})
@@ -133,6 +138,72 @@ var _ = Describe("learned-state horizons", func() {
 				"a one-hour episode gap must start a new window after two hours; blending "+
 					"would mean the write path is reading the 24h default")
 		})
+	})
+
+	// The replaced-field list is the whole reason Sanitized returns two values.
+	// An earlier revision discarded it inside WithHorizons while five comments
+	// and the operator reference claimed it was logged, and no spec noticed --
+	// because after flooring the surviving value IS the default, so nothing
+	// about the result distinguishes "set deliberately" from "rejected".
+	Describe("reporting what it had to replace", func() {
+		It("names the unusable field and leaves the usable ones alone", func() {
+			a, replaced := NewSaturationAnalyzer(capacity.NewStore()).
+				WithHorizons(capacity.Horizons{
+					// 24 is what viper returns for a unit-less "24": 24ns.
+					EpisodeGap: 24, VariantTimeout: 72 * time.Hour, BucketRetention: 240 * time.Hour,
+				})
+			Expect(replaced).To(ConsistOf("episodeGap"),
+				"the caller cannot report what it is not told")
+			h := a.Horizons()
+			Expect(h.EpisodeGap).To(Equal(capacity.DefaultHorizons().EpisodeGap))
+			Expect(h.VariantTimeout).To(Equal(72 * time.Hour))
+			Expect(h.BucketRetention).To(Equal(240 * time.Hour))
+		})
+
+		It("names all three when nothing is configured", func() {
+			_, replaced := NewSaturationAnalyzer(capacity.NewStore()).
+				WithHorizons(capacity.Horizons{})
+			Expect(replaced).To(ConsistOf("episodeGap", "variantTimeout", "bucketRetention"))
+		})
+	})
+
+	// NOT INERT, second call site. The EpisodeGap spec above drives
+	// recordSaturatedThroughput; computeK2 reads the SAME field independently,
+	// and nothing covered it. Because the default equals the constant the line
+	// used to read, reverting replica_capacity.go to `capacity.EpisodeGap` --
+	// a plausible bad merge -- left every spec in this file green.
+	It("EpisodeGap decides when computeK2 starts a fresh k2 window", func() {
+		const historyKey = "ep-gap-k2"
+		a, _ := NewSaturationAnalyzer(capacity.NewStore()).
+			WithHorizons(capacity.Horizons{
+				EpisodeGap: time.Hour, VariantTimeout: 240 * time.Hour, BucketRetention: 240 * time.Hour,
+			})
+		// A window holding one old measurement, last WRITTEN two hours ago:
+		// past the configured hour, far inside the 24h default.
+		ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
+		ra.Add(50000)
+		ra.ObservedAt(time.Now().Add(-2 * time.Hour))
+		a.computeCapacityHistory[historyKey] = ra
+
+		// A saturated queue, so Priority 1 fires and takes the reset branch.
+		k2, src := a.computeK2(historyKey, "m", "ns", "decode-v",
+			20,      // queueLen, above the threshold below
+			900000,  // tokensInUse: this episode's reading
+			600,     // avgOutput
+			1000,    // avgInput
+			10,      // queueThreshold
+			nil,     // engineParams
+			2000000, // k1
+			2000000, // kvCeiling, at or above tokensInUse or the read is refused
+			domain.RoleDecode, false, logr.Discard())
+
+		Expect(src).To(Equal(capacity.K2SrcObserved))
+		Expect(k2).To(Equal(int64(900000)),
+			"a one-hour episode gap must RESET the window after two hours, so k2 is "+
+				"this episode's reading alone; blending with the retained 50000 would "+
+				"read 475000, and that is what reading the 24h default would produce")
+		Expect(a.computeCapacityHistory[historyKey].Len()).To(Equal(1),
+			"a reset window holds exactly the one new sample")
 	})
 })
 

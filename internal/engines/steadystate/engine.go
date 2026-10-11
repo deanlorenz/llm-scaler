@@ -249,15 +249,34 @@ func NewEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 	// day, so nothing an operator can observe in a single session reveals
 	// which horizons a process is running; this line is the only record.
 	gap, variant, bucket := cfg.LearnedStateHorizons()
-	satV2 = satV2.WithHorizons(capacity.Horizons{
+	requested := capacity.Horizons{
 		EpisodeGap: gap, VariantTimeout: variant, BucketRetention: bucket,
-	})
+	}
+	satV2, replaced := satV2.WithHorizons(requested)
 	h := satV2.Horizons()
 	ctrl.Log.Info("learned-state horizons",
 		"episodeGap", h.EpisodeGap,
 		"variantTimeout", h.VariantTimeout,
 		"bucketRetention", h.BucketRetention,
 		"note", "set LEARNED_STATE_EPISODE_GAP, LEARNED_STATE_TIMEOUT, LEARNED_STATE_RETENTION to change them")
+	// A replaced horizon has to say so, because the line above cannot. After
+	// flooring it prints the default, which is byte-identical to what an
+	// unconfigured controller prints -- so an operator who mistyped reads
+	// their own mistake as confirmation. The requested values are logged
+	// alongside: a unit-less "24" arrives here as 24ns, which names the
+	// mistake precisely. Error rather than Info, matching
+	// sanitizeOptimizationInterval, which makes the same call for
+	// GLOBAL_OPT_INTERVAL.
+	if len(replaced) > 0 {
+		ctrl.Log.Error(
+			fmt.Errorf("learned-state horizons below %v were replaced by their defaults", capacity.MinHorizon),
+			"Unusable learned-state horizon, using default",
+			"replaced", replaced,
+			"requestedEpisodeGap", requested.EpisodeGap,
+			"requestedVariantTimeout", requested.VariantTimeout,
+			"requestedBucketRetention", requested.BucketRetention,
+			"note", "a duration without a unit parses as NANOSECONDS: 24 is 24ns, not 24h")
+	}
 
 	// Initialize with default optimizer. The actual optimizer is selected
 	// per-cycle in optimize() from the ConfigMap's live limiters: list, since

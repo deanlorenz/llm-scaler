@@ -80,9 +80,10 @@ LEARNED_STATE_RETENTION: "240h"
 
 	t.Run("an unusable value is passed through, not corrected here", func(t *testing.T) {
 		// "24" is 24 nanoseconds to viper. Config hands it on exactly as
-		// written; capacity.Horizons.Sanitized is what floors it, and it is
-		// the only thing that logs the replacement. A silent correction here
-		// would make that log line a lie.
+		// written; capacity.Horizons.Sanitized is what floors it and names what
+		// it replaced, and NewEngine is what logs that. Correcting it silently
+		// here would make that log line a lie -- it would report nothing
+		// replaced while the operator's value had already been thrown away.
 		t.Setenv("PROMETHEUS_BASE_URL", "https://prometheus:9090")
 		configFile := writeTestConfigFile(t, `LEARNED_STATE_TIMEOUT: "24"`)
 

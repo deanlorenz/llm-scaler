@@ -227,16 +227,43 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 	}
 }
 
-// WithHorizons overrides how long learned state is kept, and returns a for
-// chaining. Unusable values fall back to the defaults field by field; the
-// caller logs what was replaced (capacity.Horizons.Sanitized).
-func (a *SaturationAnalyzer) WithHorizons(h capacity.Horizons) *SaturationAnalyzer {
-	a.horizons, _ = h.Sanitized()
-	return a
+// WithHorizons overrides how long learned state is kept. It returns the
+// analyzer, and the names of any fields it had to replace because they were
+// unusable -- see capacity.Horizons.Sanitized.
+//
+// The names are RETURNED rather than dropped, and the signature is two
+// values rather than one, because an earlier revision discarded them with
+// `a.horizons, _ =` and five comments went on claiming they were logged.
+// What that cost: an operator who writes 24 meaning 24 hours gets 24
+// NANOSECONDS from viper, is floored back to the 24h default, and reads a
+// startup line identical to the one an unconfigured controller prints. A
+// second return value cannot be ignored without `_` at the call site, where
+// a reviewer can see it; a dropped tuple element inside the function could
+// not. The analyzer has no logger of its own, so the engine does the
+// logging -- see NewEngine.
+func (a *SaturationAnalyzer) WithHorizons(h capacity.Horizons) (*SaturationAnalyzer, []string) {
+	sanitized, replaced := h.Sanitized()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.horizons = sanitized
+	return a, replaced
 }
 
 // Horizons reports the horizons in force, for the caller that logs them.
-func (a *SaturationAnalyzer) Horizons() capacity.Horizons { return a.horizons }
+//
+// Takes a.mu because every other reader of this field does (EvictStaleHistory,
+// computeK2, recordSaturatedThroughput). Production writes it once, inside
+// NewEngine, before the analyzer is reachable from a reconcile goroutine --
+// so today the ordering comes from program order rather than this lock. But
+// WithHorizons returns the receiver and reads like a general-purpose builder,
+// and nothing in the type stops a later hot-reload path from calling it while
+// a cycle is running. Locking here costs nothing and removes the hazard
+// instead of documenting it.
+func (a *SaturationAnalyzer) Horizons() capacity.Horizons {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.horizons
+}
 
 // Name returns the analyzer identifier for logging and result metadata.
 // Note: the config value "saturation" (in analyzerName YAML field) selects this analyzer,
