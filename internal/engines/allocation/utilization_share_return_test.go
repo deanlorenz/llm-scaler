@@ -360,6 +360,7 @@ func TestShareKeepsHeadroomWhileThePeaksFit(t *testing.T) {
 		{Key: "Q", Weight: 1, Need: 0.4, Floor: 1, Ceiling: 8, ReplicaGPUs: 1},
 	}
 	l := NewShareLedger()
+	knownFor(l, time.Unix(1000, 0), "L", "Q")
 	for i := range 4 {
 		p := PlanShareTransfers(l, in, time.Unix(int64(1000+15*i), 0), spareTimings())
 		if p.HeadroomCapped || p.Returns != 0 {

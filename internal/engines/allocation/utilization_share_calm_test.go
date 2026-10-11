@@ -15,6 +15,34 @@ func swingingL(l *ShareLedger, quiet float64) {
 	l.swingUntil["L"] = time.Unix(1_000_000, 0)
 }
 
+// knownFor gives roles a whole swing window of need history before now, so
+// their recorded peaks are taken as known (ShareLedger.PeakKnown).
+func knownFor(l *ShareLedger, now time.Time, roles ...string) {
+	needs := map[string]float64{}
+	for _, r := range roles {
+		needs[r] = 0
+	}
+	l.RecordNeeds(needs, now.Add(-spareTimings().SwingWindow), spareTimings())
+}
+
+// Until a role has a swing window of history, its peak is not known and is
+// taken at its ceiling: after a restart, the cap is on until the history
+// shows the peaks fit. Judged on the history it had, the cap stayed off until
+// a model burst inside the window -- and the first burst found the spare
+// parked on another model.
+func TestShareCapsUntilThePeaksAreKnown(t *testing.T) {
+	in := spareRun(2, 0.4, 7)
+	l := NewShareLedger()
+	t0 := time.Unix(1000, 0)
+	if p := PlanShareTransfers(l, in, t0, spareTimings()); !p.HeadroomCapped || p.PeakClaimGPUs != 16 {
+		t.Fatalf("fresh ledger: capped %v on peak claims %d, want capped on 16 (both ceilings)", p.HeadroomCapped, p.PeakClaimGPUs)
+	}
+	later := t0.Add(spareTimings().SwingWindow + time.Second)
+	if p := PlanShareTransfers(l, in, later, spareTimings()); p.HeadroomCapped {
+		t.Fatalf("a window later: capped on peak claims %d, though the peaks (2 + 1) fit", p.PeakClaimGPUs)
+	}
+}
+
 // A model is not capped below what the others' peaks leave of the quota: Q
 // peaked at 7 and is calm on 6, L peaked at 3.5 and holds 4 of 10. No peak of
 // L's can use what Q would return, so Q keeps it warm for its own next burst.
@@ -22,6 +50,7 @@ func TestShareCapLeavesWhatNoOtherPeakUses(t *testing.T) {
 	in := spareRun(3.5, 1.5, 6)
 	in.Held["L"] = 4
 	l := NewShareLedger()
+	knownFor(l, time.Unix(990, 0), "L", "Q")
 	l.RecordNeeds(map[string]float64{"L": 3.5, "Q": 7}, time.Unix(990, 0), spareTimings())
 	returned := 0
 	for i := range 5 {

@@ -123,8 +123,14 @@ func TestUtilizationSharePublishesThePlannersTargets(t *testing.T) {
 	f := newShareFleet()
 	f.demand = map[string]float64{"A": 1600, "B": 3000, "C": 1000}
 	se := newShareEngine(t, f, sharePods(t, f), time.Unix(0, 0))
-	// Past the restart quiet period, when the planner first plans.
+	// Past the restart quiet period, when the planner first plans, and past
+	// a swing window, before which every model's peak is taken at its
+	// ceiling and the cap is on.
 	for range 10 {
+		se.cycle()
+	}
+	se.clock = se.clock.Add(24 * time.Hour)
+	for range 2 {
 		se.cycle()
 	}
 	sum := 0.0

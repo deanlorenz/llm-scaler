@@ -244,6 +244,10 @@ type ShareLedger struct {
 	moves      map[string][]shareMove
 	swingUntil map[string]time.Time
 	needs      map[string][]shareNeedSample
+	// needsSince is when each role's need was first recorded: until a swing
+	// window has passed since, its peak over the window is not known
+	// (PeakKnown).
+	needsSince map[string]time.Time
 	confirm    map[string]int
 	// hard counts each role's consecutive cycles as a hard-imbalance
 	// receiver (ConfirmHard).
@@ -288,6 +292,7 @@ func NewShareLedger() *ShareLedger {
 		moves:       map[string][]shareMove{},
 		swingUntil:  map[string]time.Time{},
 		needs:       map[string][]shareNeedSample{},
+		needsSince:  map[string]time.Time{},
 		confirm:     map[string]int{},
 		hard:        map[string]int{},
 		overSince:   map[string]time.Time{},
@@ -888,6 +893,9 @@ func (l *ShareLedger) Swinging(role string, now time.Time) bool {
 // RecordNeeds stores this cycle's needs, keeping a swing window of history.
 func (l *ShareLedger) RecordNeeds(needs map[string]float64, now time.Time, tm ShareTimings) {
 	for role, n := range needs {
+		if _, ok := l.needsSince[role]; !ok {
+			l.needsSince[role] = now
+		}
 		l.needs[role] = append(l.needs[role], shareNeedSample{now, n})
 		l.needs[role] = slices.DeleteFunc(l.needs[role], func(x shareNeedSample) bool { return now.Sub(x.at) > tm.SwingWindow })
 	}
@@ -901,6 +909,15 @@ func (l *ShareLedger) PeakNeed(role string, current float64) float64 {
 		peak = math.Max(peak, s.need)
 	}
 	return peak
+}
+
+// PeakKnown reports whether role's need has been recorded for a whole swing
+// window, so PeakNeed is its peak over the window. A role first seen less
+// than a window ago -- every role after a restart, a new model -- may yet
+// peak at anything up to its ceiling.
+func (l *ShareLedger) PeakKnown(role string, now time.Time, tm ShareTimings) bool {
+	since, ok := l.needsSince[role]
+	return ok && now.Sub(since) >= tm.SwingWindow
 }
 
 // Giving reports whether role is the donor of a transfer still releasing --
@@ -1227,6 +1244,7 @@ func (l *ShareLedger) Retain(present []string, now time.Time, tm ShareTimings) {
 		delete(l.moves, r)
 		delete(l.swingUntil, r)
 		delete(l.needs, r)
+		delete(l.needsSince, r)
 		delete(l.hard, r)
 		delete(l.overSince, r)
 	}

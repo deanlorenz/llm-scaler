@@ -575,7 +575,11 @@ func (p *sharePlanRun) contended() bool {
 }
 
 // peakClaims is each role's claim at its peak need over the swing window,
-// rounded up to whole replicas, and their sum.
+// rounded up to whole replicas, and their sum. A role whose peak is not yet
+// known (ShareLedger.PeakKnown) -- after a restart, or a new model -- is
+// taken to peak at its ceiling, or the whole budget when it has none: judged
+// on the history it has, the cap stayed off until a model had burst inside
+// the window, and the first burst found the spare parked on another model.
 func (p *sharePlanRun) peakClaims() (map[string]int, int) {
 	out := make(map[string]int, len(p.roles))
 	sum := 0
@@ -583,6 +587,10 @@ func (p *sharePlanRun) peakClaims() (map[string]int, int) {
 		g := max(r.ReplicaGPUs, 1)
 		peak := r
 		peak.Need = p.l.PeakNeed(r.Key, r.Need)
+		if !p.l.PeakKnown(r.Key, p.now, p.tm) {
+			peak.Need = math.Max(peak.Need, math.Min(r.ceiling(), float64(p.in.Budget)))
+		}
+		peak.Need = math.Min(peak.Need, float64(p.in.Budget))
 		out[r.Key] = g * int(math.Ceil(peak.Claim()/float64(g)-1e-9))
 		sum += out[r.Key]
 	}
