@@ -799,7 +799,7 @@ Published only while the optimizer acts (`shadow: false`):
 | --- | --- | --- | --- |
 | `wva_utilization_share_promised_gpus` | gauge | group | GPUs released for a receiver and not yet held by it. |
 | `wva_utilization_share_reserve_debt_gpus` | gauge | group | `reserveGPUs` spent and not yet refilled. |
-| `wva_utilization_share_headroom_capped` | gauge | group | `1` while the quota is contended -- its roles' peak needs over the swing window, in whole replicas, do not fit the budget together (a peak counts once two readings in a row reach it; while no role's peak is known -- a new group, or after a restart until a swing window of history exists -- each counts at its `maxReplicas`, or the whole budget; a role joining a group whose peaks are known counts at what it holds) -- and each role's headroom is capped at `maxHeadroomReplicas` times its weight; `0` while the spare is spread by weight. Not published in a cycle the planner did not plan, such as the restart quiet period. The log says when it flips, with its `cause` (`peaks-unknown` or `peaks-exceed-budget`). |
+| `wva_utilization_share_headroom_capped` | gauge | group | `1` while the quota is contended -- its roles' peak needs over the swing window, in whole replicas, do not fit the budget together (a peak counts once two readings in a row reach it; while no role's peak is known -- a new group, or after a restart that restored no stored need history, until a swing window of history exists -- each counts at its `maxReplicas`, or the whole budget; a role joining a group whose peaks are known counts at what it holds) -- and each role's headroom is capped at `maxHeadroomReplicas` times its weight; `0` while the spare is spread by weight. Not published in a cycle the planner did not plan, such as the restart quiet period. The log says when it flips, with its `cause` (`peaks-unknown` or `peaks-exceed-budget`). |
 | `wva_utilization_share_swinging` | gauge | role | `1` while the role is planned on its mean need because it reversed direction twice within the swing window. |
 | `wva_utilization_share_in_flight` | gauge | group + `state` | Transfers in flight, by `state`: `releasing` (the donor has not released its GPUs yet) or `filling` (released, or an idle fill, and the receiver has not taken the GPUs yet). Both series exist for every active group, `0` when nothing is in flight. |
 | `wva_utilization_share_effective_seconds` | gauge | group + `param`, `source` | A derived timing in force, for the group as a whole (from its slowest donor). `param`: `window`, `release-timeout`, `fill-timeout`, `reversal-hold`, `swing-window`. `source`: `measured` (the group's own releases), `scaledobject`, `pod` (termination grace), `default` (the cluster's default for an unset value), `policy` (`reversal-hold` and `swing-window` set by `utilizationShare.stabilization`). |
@@ -867,8 +867,8 @@ quota group's unassigned GPUs -- is a transfer with a donor and no receiver
 the quota is contended: it cannot hold every model at its peak need over the
 last `stabilization.flappingWindow` at the same time
 (`wva_utilization_share_headroom_capped`; while no model's peak is known, as
-after a restart until a window of history exists, each counts at its
-`maxReplicas`). A model is never capped below what the other models' peaks
+for a new group or after a restart that finds no stored need history, until a
+window of history exists, each counts at its `maxReplicas`). A model is never capped below what the other models' peaks
 leave of the quota, so a model that bursts alone keeps its spare. A return
 starts once the model has held that extra for
 `stabilization.consecutiveCyclesBeforeMove` cycles in a row, while no model

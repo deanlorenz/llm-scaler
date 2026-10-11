@@ -307,14 +307,65 @@ is known -- a new group, or every role after a restart with no stored history
 -- is each taken to peak at its ceiling, or at the whole budget when it has
 none (the roles so counted are `SharePlan.UnknownPeaks`).
 
-Judged only on the history the ledger has -- in memory, one swing window
-long -- every role's peak read as its current need after a restart, on the
+Judged only on the history the ledger has -- one swing window long --
+every role's peak read as its current need after a restart with no history,
+on the
 first alternation of two models, or with bursts further apart than the
 window: the quota read as uncontended, the cap stayed off, and the first burst
 found the spare parked on the model that had burst last, the cluster failure
-the cap exists for. So the cap is on after a restart until a full window of
-history shows the peaks fit. The cost is a window of capped headroom after
-each restart, which may return spare a spread would have kept warm. The planner
+the cap exists for. So the cap is on until a full window of history shows the
+peaks fit.
+
+That history -- the contention memory -- survives a restart, a leader change,
+the optimizer leaving and re-entering active mode, and a group dropped after
+the absence grace and seen again. The acting controller stores it in one
+ConfigMap in its own namespace, `wva-utilization-share-history`
+(`internal/engines/steadystate/utilization_share_history.go`), one data key
+per group (the controller instance and group key, sanitized, with a hash).
+Each entry is JSON: a format `version`, the `group`, `writtenAt`, the
+`swingWindow` it was kept over, the writing `controllerInstance`, and per role
+its `since` (when its need was first recorded) and its samples as
+`[unix seconds, need]`, downsampled to the highest reading per minute (coarser
+past 180 minutes of window; `ShareLedger.NeedHistory`). It is written on
+change, at most once a minute per group, with the ConfigMap's
+`resourceVersion` as the concurrency check (a conflict re-reads and retries
+once), and only on the acting path: shadow mode keeps no ledger and writes
+nothing. A rebuilt ledger reads it once, through the API reader, before its
+first plan (`ShareLedger.RestoreNeedHistory`): an entry of another version,
+group or controller instance is ignored; a sample that is not a finite,
+non-negative need, older than the window or more than a minute in the future
+is dropped; and a role's `since` is restored -- making its peak known once a
+window has passed since it -- only when its samples run to within
+`ShareHistoryMaxGap` (ten minutes) of now, since a longer gap was not observed.
+Its samples are kept either way. A role not in the group is restored too;
+`Retain` forgets it if it does not return. A NotFound read is no history; any
+other failure, Forbidden included, is logged at Error once per change and
+restores nothing, and the group writes nothing until a read, retried once a
+minute, succeeds, so a history it could not read is never overwritten. A
+vanished group's stored entry is kept (only the controller's memory of what it
+wrote is dropped), so a group dropped after a couple of minutes of failed
+collection gets its peaks back; an entry written longer ago than its window
+plus ten minutes is removed by the next write of any group. Deleting the
+ConfigMap is the flush: the next write finds it gone, and the controller forgets
+its in-memory history as well (`ShareLedger.ForgetNeedHistory`) rather than
+writing it straight back. The ConfigMap is bounded below the API server's
+object limit (128 roles per group, 180 samples per role, 900 KiB in all; a
+truncation is logged). RBAC is a namespaced Role
+(`config/base/rbac/utilization-share-history-role.yaml`) with `get` and
+`update` on that ConfigMap by name and `create` on ConfigMaps (create cannot be
+scoped by name), bound to the controller's service account; it is in the base,
+so every install overlay renders it. Metrics cannot be this store: they carry
+no writer identity and no honest age. One side effect: the restored samples
+are per-minute maxima, so for one window after a restart the peak (two
+readings in a row) and a swinging role's mean need (§6.7 rule 5, `PlanningNeed`)
+are taken over those maxima mixed with the new per-cycle readings, and read
+somewhat high. Swing state itself is not stored, so a role swings again only
+after two new reversals.
+
+So the window of capped headroom is paid only when no usable history exists:
+a new group, the first start, a flush, an unreadable ConfigMap, or a
+controller down for more than ten minutes. That window may return spare a
+spread would have kept warm. The planner
 publishes the flip: `wva_utilization_share_headroom_capped` (1 while capped;
 not published in a cycle the planner did not plan, such as the restart quiet
 period, when the published targets are not the planner's), and an Info line
@@ -1391,7 +1442,9 @@ already patches. Both the cluster role and the tenant role grant
 `patch` on pods (`config/base/rbac/manager-clusterrole.yaml`,
 `config/components/tenant-installable/manager-role.yaml`), so this needs no new
 permission. ConfigMaps would not do: WVA's roles grant only get, list and watch
-on them, and WVA reads no HPAs.
+on them, and WVA reads no HPAs. (The need history of §5.1 is a different
+matter -- one group-wide record, not per-transfer state that must die with its
+pod -- and is stored in one ConfigMap under a Role of its own.)
 
 - **When a transfer enters Releasing**, each chosen donor pod gets, beside its
   low `pod-deletion-cost`, an annotation
@@ -2763,7 +2816,9 @@ optimizer every cycle (§6.6).
    whose pod its hole fits (§6.2); an active group publishes the planner's
    evaluation, with `wva_utilization_share_headroom_capped` and a log line when
    the cap flips; and a role whose peak is not yet known counts at its ceiling,
-   so the cap is on for a swing window after a restart (§5.1). Round 17, the
+   so the cap is on for a swing window after a restart (§5.1); since then the
+   need history is stored in a ConfigMap and read back, so that window is paid
+   only after a restart that finds no usable history. Round 17, the
    review of `053ebfcd` (`6abc491d`): a return starts after the confirm
    cycles, not after the scale-down window, and only its release waits that
    window; a donor's calm is judged on its peak over its scale-down window

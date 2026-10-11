@@ -222,12 +222,16 @@ What each blocked reason means and what to do about it is in
 Expect nothing to scale in a group for about three minutes after the switch.
 That is the freeze of one fill timeout described above, not a fault; its models
 show the blocked reason `quiet-period` meanwhile, and
-`wva_utilization_share_headroom_capped` is not published. After the switch, or
-any controller restart, until a `stabilization.flappingWindow` of history
-exists, headroom is capped (`wva_utilization_share_headroom_capped 1`) unless
+`wva_utilization_share_headroom_capped` is not published. After the first
+switch -- shadow mode stores no history -- until a
+`stabilization.flappingWindow` of history exists, headroom is capped (`wva_utilization_share_headroom_capped 1`) unless
 the models' `maxReplicas` fit the quota together: no model's peak is known yet,
 so each counts at its `maxReplicas`, and the log line that turns the cap on
-says `cause=peaks-unknown`. If it
+says `cause=peaks-unknown`. A later controller restart or leader change reads
+the history back from the ConfigMap `wva-utilization-share-history` in the
+controller's namespace (log line `Utilization share: need history restored`)
+and does not count the models at their `maxReplicas` again, unless that history is missing, unreadable, or ends
+more than ten minutes before the restart. If it
 still moves nothing after that, work down
 [the troubleshooting list](../../reference/troubleshooting.md#the-optimizer-evaluates-but-never-moves-anything).
 

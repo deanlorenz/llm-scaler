@@ -228,11 +228,39 @@ Work down the list in order.
    the transfer marks on the donors' pods, and the Error line
    `Utilization share: could not read transfer marks; retrying next cycle` says
    why, typically a missing RBAC grant to list pods in one model's namespace.
-   Separately, after a restart the headroom cap is on until a
-   `stabilization.flappingWindow` of history exists and the models' peaks are
-   known again (`wva_utilization_share_headroom_capped` is not published
-   during the quiet period, when the planner does not plan)
+   The models' demand history survives the restart in the ConfigMap
+   `wva-utilization-share-history` in the controller's namespace, and the log
+   line `Utilization share: need history restored` says it was read back
+   (`peaksKnownFrom` counts the roles whose peaks are known at once). When it
+   was not -- no stored history, or one ending more than ten minutes before the
+   restart -- the headroom cap is on until a `stabilization.flappingWindow` of
+   history exists and the models' peaks are known again
+   (`wva_utilization_share_headroom_capped` is not published during the quiet
+   period, when the planner does not plan)
    ([a model shrinks while no other model grows](#a-model-shrinks-while-no-other-model-grows)).
+   `Utilization share: stored need history not used` says why a stored entry
+   was ignored (`reason`). The Error line `Utilization share: could not read
+   the stored need history; the models' peaks are unknown for a swing window
+   and their headroom is capped meanwhile. Retrying every minute; nothing is
+   written until a read succeeds` means the read failed with something other
+   than NotFound -- typically Forbidden: the Role
+   `wva-utilization-share-history-role` or its binding is missing. Nothing is
+   restored, and nothing is written until a read succeeds, so the stored
+   history is not overwritten. `Utilization share: could not store the need
+   history; a restart now forgets the models' peaks` is the same for the
+   write. Both are logged once per change of the error, and
+   `Utilization share: the need history store works again` marks the recovery.
+   To flush the history -- after a model's load has changed for good, say, and
+   its old peaks keep the cap on -- delete the ConfigMap:
+   ```bash
+   kubectl delete configmap wva-utilization-share-history -n <controller-namespace>
+   ```
+   The running controller notices on its next write (within a minute or so,
+   once a history has changed) and forgets its in-memory history too, rather
+   than writing it straight back: `Utilization share: the need history
+   ConfigMap was deleted; every model's need history is forgotten`. The cap
+   then judges every model as after a restart with nothing stored, for one
+   window.
 9. **Could it not mark the donor?** `Utilization share: could not mark a donor pod;
    transfer not started` means the donor's pod could not be steered by a fault:
    a sibling's deletion cost leaves no room for the mark (see
@@ -284,10 +312,10 @@ model in the quota group grows to take the GPUs.
 only while the quota is **contended**: it cannot hold every model at its peak
 need over the last `stabilization.flappingWindow` at the same time (a peak
 counts once two readings in a row reach it). While no model's peak is known --
-a new group, or every model after a controller restart, until a
-`flappingWindow` of history exists -- each counts at its `maxReplicas` (the
-whole quota without one), so after a restart the cap is on until a full window
-of history shows the peaks fit. A model that joins a group whose peaks are
+a new group, or every model after a controller restart that found no usable
+stored history (see step 8 above), until a `flappingWindow` of history exists
+-- each counts at its `maxReplicas` (the whole quota without one), so the cap
+is on until a full window of history shows the peaks fit. A model that joins a group whose peaks are
 known counts at what it holds, and does not turn the cap on by itself. While the
 peaks fit, the whole spare stays spread by weight and nothing is given back.
 While contended, the optimizer gives each model (each role of a P/D model) at most `maxHeadroomReplicas`
@@ -338,7 +366,8 @@ replicas), `budget` and a `cause`. It turns on with one of:
 
 - `cause=peaks-unknown`: `Utilization share: the models' peaks are not known
   yet -- ...`, with `unknownPeaks` naming the roles counted at their
-  `maxReplicas`. This is the restart (or new group) rule above: it turns off
+  `maxReplicas`. This is the new-group rule above, or the restart rule when
+  no `need history restored` line preceded it: it turns off
   once a `flappingWindow` of history exists
   (`wva_utilization_share_effective_seconds{param="swing-window"}`), if the
   recorded peaks fit.

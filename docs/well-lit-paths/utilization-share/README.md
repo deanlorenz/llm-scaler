@@ -46,9 +46,10 @@ model's weight, rounded up: 1 for `standard`, 2 for `important`, 4 for
 demand rises starts pods into it at once, without waiting for another model's
 pods to drain. No model is capped below what the other models' peaks leave of
 the quota, so a model that bursts alone keeps its spare. While no model's peak
-is known -- after a controller restart, until a `flappingWindow` of history
-exists -- every model counts at its `maxReplicas`, so the cap is on after a
-restart until the peaks are known; a model added to a group whose peaks are
+is known -- a new group, or after a controller restart that finds no stored
+history, until a `flappingWindow` of history exists -- every model counts at
+its `maxReplicas`, so the cap is on until the peaks are known. The history is
+stored in a ConfigMap and read back after a restart or a leader change. A model added to a group whose peaks are
 known counts at what it holds. While every peak fits, the whole spare stays
 spread: capping there only made the next burst cold-start replicas that the
 spread had kept warm, and a model already at its need takes no headroom that
@@ -322,10 +323,14 @@ When it evaluates but never moves anything, work down
 - **The freeze and the hold above.** About one fill timeout of no scaling in a
   group after every restart, and a reversal hold that can keep a short model
   waiting.
-- **A window of capped headroom after every restart.** After a restart, until
-  a `flappingWindow` of history exists (about 100 minutes by default), each
-  model counts at its `maxReplicas` and headroom is capped, unless those fit
-  the quota together. Spare that a spread would have kept warm may be returned
+- **A window of capped headroom when no history is stored.** The need history
+  is kept in the ConfigMap `wva-utilization-share-history` in the controller's
+  namespace and read back after a restart or a leader change. For a new group,
+  and after a restart that finds no usable history -- the first start, a
+  deleted or unreadable ConfigMap, or a controller down for more than ten
+  minutes -- each model counts at its `maxReplicas` until a `flappingWindow`
+  of history exists (about 100 minutes by default) and headroom is capped,
+  unless those fit the quota together. Spare that a spread would have kept warm may be returned
   meanwhile: in simulation, whole-node quotas whose peaks fit lost 2 to 10% of
   their demand for about two hours. The window is derived from the scale-down
   window, so a long scale-down window makes it hours.
@@ -377,7 +382,8 @@ When it evaluates but never moves anything, work down
     and the hard-imbalance rule were measured once, on the run before them.
   - A cluster quota group and the `clusterNamespaces` canary, which are
     unit-tested only. All three e2e specs use a namespace quota.
-  - A controller restart that rebuilds transfers from pod marks, a
+  - A controller restart that rebuilds transfers from pod marks or reads the
+    need history back from its ConfigMap, a
     scale-from-zero wake claiming released GPUs (`redirected`), and a donor
     refused as `donor-not-steerable`, which are unit-tested only.
 
