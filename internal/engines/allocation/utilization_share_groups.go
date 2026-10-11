@@ -307,6 +307,11 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 			perGPU := best.PerReplicaCapacity / float64(g)
 			need = demand / sig.ScaleUpThreshold / perGPU
 		}
+		if math.IsNaN(need) || math.IsInf(need, 0) {
+			// Every share sum -- the spare, the targets, the peaks that
+			// decide contention -- would take it.
+			return nil, "role " + role + " has a need that is not a finite number"
+		}
 		if !measured && len(vs) > 0 {
 			g = gpusPerReplicaFromState(stateMap, vs[0].VariantName)
 		}

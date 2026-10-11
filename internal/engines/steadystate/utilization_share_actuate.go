@@ -55,6 +55,13 @@ type shareActuation struct {
 	swinging  []string
 	// releasing and filling count the group's transfers in flight.
 	releasing, filling int
+	// evaluation is the planner's judgement of the group, when it planned:
+	// what the published targets, the actionable roles and the blocked
+	// reasons must say. Capped only while the quota is contended, it can
+	// differ from the shadow evaluation, which always caps.
+	evaluation *allocation.ShareEvaluation
+	// headroomCapped is whether the planner capped each role's headroom.
+	headroomCapped bool
 }
 
 // countInFlight counts a ledger's transfers in flight by state.
@@ -248,7 +255,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 			e.unmarkDonorPods(ctx, logger, t)
 		}
 		switch {
-		case t.Donor != "" && t.Returned:
+		case t.Donor != "" && t.Returned && t.Receiver == "":
 			logger.Info("Utilization share: spare returned to the quota", "id", t.ID, "donor", t.Donor, "gpus", t.DonorGPUs)
 		case t.Donor != "" && t.Receiver == "" && t.SetID == "":
 			logger.Info("Utilization share: reserve refilled", "id", t.ID, "donor", t.Donor, "gpus", t.DonorGPUs)
@@ -421,7 +428,25 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	out.promised = l.Promised() + l.WakeHeld(now)
 	out.swinging = plan.Swinging
 	out.reserveDebt = shareDebtNow(l, held, g.Budget)
-	out.blocked = shareBlockedReasons(l, g, ev, plan.Unfunded, shareSkipWaits(us), now, tm)
+	out.blocked = shareBlockedReasons(l, g, plan.Evaluation, plan.Unfunded, shareSkipWaits(us), now, tm)
+	out.evaluation = &plan.Evaluation
+	out.headroomCapped = plan.HeadroomCapped
+	// Said when it changes: what the cap does to every model's headroom
+	// otherwise has no cause anywhere an operator looks.
+	if was, seen := st.headroomCapped[key]; !seen || was != plan.HeadroomCapped {
+		if st.headroomCapped == nil {
+			st.headroomCapped = map[string]bool{}
+		}
+		st.headroomCapped[key] = plan.HeadroomCapped
+		if plan.HeadroomCapped {
+			logger.Info("Utilization share: the models' recent peaks do not fit the quota together; each keeps at most "+
+				"maxHeadroomReplicas of headroom, and the rest is returned",
+				"peakClaimGPUs", plan.PeakClaimGPUs, "budget", g.Budget, "maxHeadroomReplicas", us.MaxHeadroomReplicas)
+		} else if seen {
+			logger.Info("Utilization share: the models' recent peaks fit the quota together again; the spare is spread by weight",
+				"peakClaimGPUs", plan.PeakClaimGPUs, "budget", g.Budget)
+		}
+	}
 	out.withheld = plan.Withheld
 	out.claimable = shareClaimable(l, g, held)
 	out.releasing, out.filling = countInFlight(l)

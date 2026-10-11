@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/client-go/tools/record"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
@@ -32,11 +33,13 @@ func TestUtilizationShareReturnsSpare(t *testing.T) {
 	rec := record.NewFakeRecorder(100)
 	se.e.Recorder = rec
 
-	// B has recently burst to a need of 13: at their peaks the models want 17
-	// of the quota's 16, so the spare is capped (and only then returned).
+	// B and C have recently burst to a need of 13: at their peaks the models
+	// want 28 of the quota's 16, so the spare is capped (and only then
+	// returned). Had only B burst, its room beside A's and C's peaks would
+	// take A's spare by a transfer, and nothing would be returned.
 	burst := func() {
 		for _, l := range se.e.utilizationShare.ledgers {
-			l.RecordNeeds(map[string]float64{"ns/B/" + domain.RoleBoth: 13}, se.clock,
+			l.RecordNeeds(map[string]float64{"ns/B/" + domain.RoleBoth: 13, "ns/C/" + domain.RoleBoth: 13}, se.clock,
 				allocation.ShareTimings{SwingWindow: time.Hour})
 		}
 	}
@@ -49,6 +52,9 @@ func TestUtilizationShareReturnsSpare(t *testing.T) {
 	}
 	if got := targetOf(t, o, "ns/A-v"); got != 6 {
 		t.Fatalf("A's target %d, want 6: the lowest it stays calm at", got)
+	}
+	if got := cappedGauge(t, reg); got != 1 {
+		t.Fatalf("headroom_capped %v while the peaks contend, want 1", got)
 	}
 	if targetOf(t, o, "ns/B-v") != 5 || targetOf(t, o, "ns/C-v") != 2 {
 		t.Fatalf("a model was raised into GPUs that are still releasing: %+v", o)
@@ -107,4 +113,38 @@ func TestUtilizationShareReturnsSpare(t *testing.T) {
 	if restored != 2 {
 		t.Fatalf("restored %d returns, want 2", restored)
 	}
+}
+
+// An active group publishes the targets the planner acts on. On a quota whose
+// peaks fit, it spreads the spare uncapped: the 16 GPUs of a fleet that needs
+// 7 are all some model's target, not the 12 a capped evaluation would show.
+func TestUtilizationSharePublishesThePlannersTargets(t *testing.T) {
+	reg := freshMetrics(t)
+	f := newShareFleet()
+	f.demand = map[string]float64{"A": 1600, "B": 3000, "C": 1000}
+	se := newShareEngine(t, f, sharePods(t, f), time.Unix(0, 0))
+	// Past the restart quiet period, when the planner first plans.
+	for range 10 {
+		se.cycle()
+	}
+	sum := 0.0
+	for _, m := range family(t, reg, constants.WVAUtilizationShareTargetGPUs) {
+		sum += m.GetGauge().GetValue()
+	}
+	if sum < 15.5 {
+		t.Fatalf("published targets sum to %.2f GPUs of 16: the capped evaluation, not the planner's", sum)
+	}
+	if got := cappedGauge(t, reg); got != 0 {
+		t.Fatalf("headroom_capped %v on a quota whose peaks fit, want 0", got)
+	}
+}
+
+// cappedGauge is the one group's wva_utilization_share_headroom_capped.
+func cappedGauge(t *testing.T, reg *prometheus.Registry) float64 {
+	t.Helper()
+	ms := family(t, reg, constants.WVAUtilizationShareHeadroomCapped)
+	if len(ms) != 1 {
+		t.Fatalf("%d headroom_capped series, want 1", len(ms))
+	}
+	return ms[0].GetGauge().GetValue()
 }

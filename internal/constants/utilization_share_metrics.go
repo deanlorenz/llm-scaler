@@ -87,6 +87,11 @@ const (
 	// state (releasing, filling). Published only while the optimizer acts.
 	WVAUtilizationShareInFlight = "wva_utilization_share_in_flight"
 
+	// WVAUtilizationShareHeadroomCapped is a gauge: 1 while a group's quota is
+	// contended and each role's headroom is capped (maxHeadroomReplicas), 0
+	// while the spare is spread. Published only while the optimizer acts.
+	WVAUtilizationShareHeadroomCapped = "wva_utilization_share_headroom_capped"
+
 	// LabelParam names a derived timing; LabelSource is where its inputs came
 	// from.
 	LabelParam  = "param"

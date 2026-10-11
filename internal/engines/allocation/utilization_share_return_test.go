@@ -311,20 +311,41 @@ func TestShareFillShortReceiverIsFundedByADonor(t *testing.T) {
 	}
 }
 
-// Neither a returned spare nor a move that skipped the waits counts against
-// the concurrency limit: both are unpaced.
-func TestShareInFlightCountsOrdinaryMovesOnly(t *testing.T) {
+// A returned spare does not count against the concurrency limit, handed to a
+// receiver or not. A move that skipped the waits does: uncounted, ordinary
+// headroom moves started beside a burst's and drained its donor for nothing.
+func TestShareInFlightCountsEveryMoveButReturns(t *testing.T) {
 	l := NewShareLedger()
 	held := map[string]int{"L": 3, "Q": 7}
 	tm := spareTimings()
-	l.Start(ShareTransfer{Donor: "Q", DonorGPUs: 1, Entitled: true, Returned: true}, held, time.Unix(1000, 0), tm)
-	l.Start(ShareTransfer{Donor: "Q", Receiver: "L", GPUs: 1, DonorGPUs: 1, SkippedWaits: true}, held, time.Unix(1000, 0), tm)
-	if n := l.InFlight(); n != 0 {
-		t.Fatalf("in flight %d, want 0", n)
+	r := l.Start(ShareTransfer{Donor: "Q", DonorGPUs: 1, Entitled: true, Returned: true}, held, time.Unix(1000, 0), tm)
+	if !l.AssignReturn(r.ID, "L", "l", 1) {
+		t.Fatal("setup: the return was not handed to L")
 	}
-	l.Start(ShareTransfer{Donor: "Q", Receiver: "L", GPUs: 1, DonorGPUs: 1}, held, time.Unix(1000, 0), tm)
+	if n := l.InFlight(); n != 0 {
+		t.Fatalf("in flight %d, want 0: a return, handed over or not, is not counted", n)
+	}
+	l.Start(ShareTransfer{Donor: "Q", Receiver: "L", GPUs: 1, DonorGPUs: 1, SkippedWaits: true}, held, time.Unix(1000, 0), tm)
 	if n := l.InFlight(); n != 1 {
-		t.Fatalf("in flight %d, want 1: the ordinary move", n)
+		t.Fatalf("in flight %d, want 1: the move that skipped the waits", n)
+	}
+}
+
+// What a releasing transfer takes beyond its receiver's replica is not idle:
+// an 8-GPU return handed to a 4-GPU receiver still runs on all eight.
+func TestShareUnreleasedCountsWhatNoReceiverGets(t *testing.T) {
+	l := NewShareLedger()
+	held := map[string]int{"L": 4, "Q": 16}
+	tm := spareTimings()
+	r := l.Start(ShareTransfer{Donor: "Q", DonorGPUs: 8, Entitled: true, Returned: true}, held, time.Unix(1000, 0), tm)
+	if n := l.Unreleased(); n != 8 {
+		t.Fatalf("unreleased %d, want 8: the return goes to nobody yet", n)
+	}
+	if !l.AssignReturn(r.ID, "L", "l", 4) {
+		t.Fatal("setup: the return was not handed to L")
+	}
+	if n := l.Unreleased(); n != 4 {
+		t.Fatalf("unreleased %d, want 4: L gets four of the eight", n)
 	}
 }
 
@@ -411,8 +432,8 @@ func TestShareHandsAReturnToAShortReceiver(t *testing.T) {
 		t.Fatalf("assigned %d returns to L, want 3 (3 up to its target of 6)", len(p.Assigned))
 	}
 	for _, id := range p.Assigned {
-		if tr, _ := l.Transfer(id); tr.Receiver != "L" || tr.Returned {
-			t.Fatalf("assigned %+v, want a transfer to L", tr)
+		if tr, _ := l.Transfer(id); tr.Receiver != "L" || !tr.Returned {
+			t.Fatalf("assigned %+v, want a return handed to L", tr)
 		}
 	}
 	if qToL(p.Started) != 0 {
@@ -518,9 +539,10 @@ func TestShareHeadroomScalesByWeight(t *testing.T) {
 		{Key: "L", Weight: 2, Need: 2, Floor: 1, Ceiling: 8, ReplicaGPUs: 1},
 		{Key: "Q", Weight: 1, Need: 2, Floor: 1, Ceiling: 8, ReplicaGPUs: 1},
 	}
-	// Both have peaked at 6: the quota is contended, and the cap binds.
+	// Both have peaked, at 8 and 7: the quota is contended, and the cap binds
+	// -- neither's room beside the other's peak (2 and 3) is above its cap.
 	l := NewShareLedger()
-	l.RecordNeeds(map[string]float64{"L": 6, "Q": 6}, time.Unix(990, 0), spareTimings())
+	l.RecordNeeds(map[string]float64{"L": 7, "Q": 8}, time.Unix(990, 0), spareTimings())
 	p := PlanShareTransfers(l, SharePlanInput{Roles: roles, Held: map[string]int{"L": 2, "Q": 2},
 		Thresholds: map[string]float64{"L": 0.85, "Q": 0.85}, Budget: 10, Tolerance: 0.15,
 		PhysicalFree: math.MaxInt, Headroom: ShareHeadroom{Capped: true, Replicas: 1}}, time.Unix(1000, 0), spareTimings())

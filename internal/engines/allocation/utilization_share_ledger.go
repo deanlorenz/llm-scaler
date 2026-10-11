@@ -316,10 +316,13 @@ func (l *ShareLedger) Transfers() []ShareTransfer {
 func (l *ShareLedger) InFlight() int {
 	seen := map[string]bool{}
 	for _, t := range l.transfers {
-		// Neither a returned spare nor a move that skipped the waits counts:
-		// both are unpaced, and counted, a burst's five drains or a calm
-		// model's returns would hold every ordinary move for a release.
-		if t.Donor == "" || t.Returned || t.SkippedWaits {
+		// A returned spare does not count, handed to a receiver or not:
+		// counted, a calm model's returns would hold every ordinary move for
+		// a release. A move that skipped the waits does: the unpaced moves of
+		// a hard imbalance pass the limit without consulting it, but an
+		// ordinary move started beside them would drain the same donor for
+		// headroom, and land after the burst it was not needed for.
+		if t.Donor == "" || t.Returned {
 			continue
 		}
 		k := t.ID
@@ -331,18 +334,32 @@ func (l *ShareLedger) InFlight() int {
 	return len(seen)
 }
 
-// Unreleased is the GPUs that donor-only transfers -- reserve refills and
-// returned spare -- took off their donors' commitment and have not released:
-// the donors' pods still run on them and the quota still counts them. They
-// are not idle until released. Counted idle, the fill would raise a model
-// into a full quota, its pods would be refused at admission, and it would be
-// raised again at every fill timeout.
+// Unreleased is the GPUs releasing transfers took off their donors'
+// commitment and gave no receiver: all of a reserve refill's or an unassigned
+// return's, and whatever a transfer or a set takes beyond its receiver's
+// replica (an 8-GPU return handed to a 4-GPU receiver). The donors' pods
+// still run on them and the quota still counts them, so they are not idle
+// until released. Counted idle, the fill would raise a model into a full
+// quota, its pods would be refused at admission, and it would be raised again
+// at every fill timeout.
 func (l *ShareLedger) Unreleased() int {
-	n := 0
+	excess := map[string]int{}
 	for _, t := range l.transfers {
-		if t.State == ShareReleasing && t.Receiver == "" && t.SetID == "" {
-			n += t.DonorGPUs
+		if t.State != ShareReleasing {
+			continue
 		}
+		k := t.ID
+		if t.SetID != "" {
+			k = t.SetID
+		}
+		excess[k] += t.DonorGPUs
+		if t.Receiver != "" {
+			excess[k] -= t.GPUs
+		}
+	}
+	n := 0
+	for _, v := range excess {
+		n += max(v, 0)
 	}
 	return n
 }
@@ -903,11 +920,12 @@ func (l *ShareLedger) Giving(role string) bool {
 // AssignReturn hands a returned spare that is still releasing to receiver:
 // its GPUs go to it when they come free, as a transfer's would, instead of
 // to the unassigned GPUs it would otherwise wait on. gpus is one receiver
-// replica, no more than the returned replica. It reports whether it did.
+// replica, no more than the returned replica. It stays Returned, so it still
+// does not count against the concurrency limit. It reports whether it did.
 func (l *ShareLedger) AssignReturn(id, receiver, variant string, gpus int) bool {
 	for _, t := range l.transfers {
 		if t.ID == id && t.Returned && t.State == ShareReleasing && t.Receiver == "" && gpus <= t.DonorGPUs {
-			t.Receiver, t.ReceiverVariant, t.GPUs, t.Returned = receiver, variant, gpus, false
+			t.Receiver, t.ReceiverVariant, t.GPUs = receiver, variant, gpus
 			return true
 		}
 	}

@@ -34,6 +34,7 @@ var (
 	utilizationShareRelease        *prometheus.HistogramVec
 	utilizationShareMode           *prometheus.GaugeVec
 	utilizationShareInFlight       *prometheus.GaugeVec
+	utilizationShareHeadroomCapped *prometheus.GaugeVec
 	utilizationShareStarts         *prometheus.CounterVec
 )
 
@@ -130,8 +131,14 @@ func registerUtilizationShareMetrics(registry prometheus.Registerer) error {
 		"Utilization-share optimizer: a group's transfers in flight, by state (releasing, filling). "+
 			"Published only while the optimizer acts.",
 		append(slices.Clone(groupLabels), constants.LabelState))
+	utilizationShareHeadroomCapped = gauge(constants.WVAUtilizationShareHeadroomCapped,
+		"Utilization-share optimizer: 1 while a group's quota is contended -- its roles' recent peaks "+
+			"do not fit together -- and each role's headroom is capped at maxHeadroomReplicas; 0 while "+
+			"the spare is spread. Published only while the optimizer acts.",
+		groupLabels)
 	for name, c := range map[string]prometheus.Collector{
 		constants.WVAUtilizationShareHeadroom:          utilizationShareHeadroom,
+		constants.WVAUtilizationShareHeadroomCapped:    utilizationShareHeadroomCapped,
 		constants.WVAUtilizationShareTargetGPUs:        utilizationShareTargetGPUs,
 		constants.WVAUtilizationShareActionable:        utilizationShareActionable,
 		constants.WVAUtilizationShareSpareGPUs:         utilizationShareSpareGPUs,
@@ -194,6 +201,8 @@ type UtilizationShareGroup struct {
 	Timings         []UtilizationShareTiming
 	// Releasing and Filling count the group's transfers in flight.
 	Releasing, Filling int
+	// HeadroomCapped is whether the planner capped each role's headroom.
+	HeadroomCapped bool
 }
 
 // SetUtilizationShareMode publishes the optimizer's mode: 1 for mode, 0 for
@@ -274,6 +283,11 @@ func PublishUtilizationShare(groups []UtilizationShareGroup) {
 			initUtilizationShareTransfers(gl)
 			set(utilizationSharePromisedGPUs, gl, grp.PromisedGPUs)
 			set(utilizationShareReserveDebt, gl, grp.ReserveDebtGPUs)
+			capped := 0.0
+			if grp.HeadroomCapped {
+				capped = 1
+			}
+			set(utilizationShareHeadroomCapped, gl, capped)
 			for state, n := range map[string]int{constants.UtilizationShareStateReleasing: grp.Releasing,
 				constants.UtilizationShareStateFilling: grp.Filling} {
 				sl := maps.Clone(gl)

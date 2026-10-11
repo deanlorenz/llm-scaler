@@ -45,6 +45,9 @@ type utilizationShareState struct {
 	floorHeavy map[string]bool
 	// lastActionable is, per group, the actionable roles last logged.
 	lastActionable map[string]string
+	// headroomCapped is, per group, whether its headroom was capped when
+	// last planned: the cap's flips are logged.
+	headroomCapped map[string]bool
 
 	// Actuation state (stage 2), dropped whenever the optimizer is not active.
 	// ledgers are per group (shareGroupKey); desired is each planned variant's
@@ -218,9 +221,17 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 	for _, g := range groups {
 		// Every target gives a role at most its headroom of the spare
 		// (maxHeadroomReplicas); the rest stays unassigned. The planner caps
-		// its own roles, after the swing rule has set their planning need.
+		// its own roles, and only while the quota is contended, so an active
+		// group publishes the planner's evaluation.
 		ev := allocation.EvaluateShare(allocation.ShareCapSpare(g.Roles, us.MaxHeadroomReplicas),
 			g.Committed, g.Thresholds, g.Budget, us.Tolerance)
+		var act shareActuation
+		if !us.Shadow {
+			act = e.actuateUtilizationShare(ctx, logger, us, g, ev, scaleTargets, now)
+			if act.evaluation != nil {
+				ev = *act.evaluation
+			}
+		}
 		scope := g.Scope
 		if scope == "" {
 			scope = constants.UtilizationShareClusterScope
@@ -273,7 +284,6 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 			if overrides == nil {
 				overrides = map[string]utilizationShareOverride{}
 			}
-			act := e.actuateUtilizationShare(ctx, logger, us, g, ev, scaleTargets, now)
 			maps.Copy(overrides, act.overrides)
 			pg.Active = true
 			maps.Copy(blocked, act.blocked)
@@ -286,6 +296,7 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 			pg.PromisedGPUs = float64(act.promised)
 			pg.ReserveDebtGPUs = float64(act.reserveDebt)
 			pg.Releasing, pg.Filling = act.releasing, act.filling
+			pg.HeadroomCapped = act.headroomCapped
 			if act.promised > 0 {
 				if promised[g.Scope] == nil {
 					promised[g.Scope] = map[string]int{}
@@ -357,6 +368,7 @@ func (e *Engine) dropVanishedGroups(ctx context.Context, logger logr.Logger, see
 		delete(st.quietUntil, k)
 		delete(st.goneSince, k)
 		delete(st.uncounted, k)
+		delete(st.headroomCapped, k)
 	}
 }
 

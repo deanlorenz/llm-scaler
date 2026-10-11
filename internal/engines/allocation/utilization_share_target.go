@@ -53,7 +53,9 @@ func ShareHeadroomReplicas(w float64, n int) int {
 	if n <= 0 || !(w > 0) {
 		return 0
 	}
-	return int(math.Ceil(w*float64(n) - 1e-9))
+	// No quota holds more replicas than GPUs; the bound keeps a huge weight
+	// from overflowing the conversion.
+	return int(math.Min(math.Ceil(w*float64(n)-1e-9), MaxShareBudgetGPUs))
 }
 
 // ShareCapSpare returns roles with each one's ceiling lowered to its claim,
