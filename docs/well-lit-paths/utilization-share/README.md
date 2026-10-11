@@ -235,7 +235,9 @@ window, that is on the order of 12 minutes. It shows as the blocked reason
 load is at least 0.9 of its scale-up threshold and another model's, after
 giving, is at most 0.6 of its own (both set by
 `utilizationShare.stabilization.skipWaitsWhen`), the donor's load read on the
-higher of its current demand and its peak over its scale-down window. A model
+higher of its current demand and its peak (two readings in a row) over its
+scale-down window -- or, when the short model's bursts outlast a move, on its
+current demand alone. A model
 whose burst just ended
 usually is not that lightly loaded, so the hold can still last a whole
 burst.
@@ -378,7 +380,7 @@ When it evaluates but never moves anything, work down
     receivers and LWS groups on emulated GPUs only.
   - The headroom cap (`maxHeadroomReplicas`), spare returns, and the unpaced
     hard-imbalance move, which no cluster run has measured yet (simulated
-    only: [measured](measured.md#what-rounds-16-and-17-change-simulated-not-measured)). The cancel fix
+    only: [measured](measured.md#what-rounds-16-to-18-change-simulated-not-measured)). The cancel fix
     and the hard-imbalance rule were measured once, on the run before them.
   - A cluster quota group and the `clusterNamespaces` canary, which are
     unit-tested only. All three e2e specs use a namespace quota.
@@ -442,7 +444,7 @@ way ([measured](measured.md#rerun-with-the-hard-imbalance-rule-the-spare-was-par
   `maxHeadroomReplicas` (default 1) times the model's weight while the quota
   is contended, the rest left unassigned, and a hard imbalance that holds a second cycle taking the whole
   shortfall up to the receiver's need at once -- is built and not yet measured
-  on a cluster; a simulation is on the [measured](measured.md#what-rounds-16-and-17-change-simulated-not-measured)
+  on a cluster; a simulation is on the [measured](measured.md#what-rounds-16-to-18-change-simulated-not-measured)
   page.
 
 A P/D version was attempted and not measured. Prefill never left one replica

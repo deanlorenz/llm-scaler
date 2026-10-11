@@ -837,7 +837,8 @@ outside both limits, so `in_flight{state="releasing"}` can read above `2`:
   other. When a receiver is
   at its scale-up threshold and a donor stays calm
   (`stabilization.skipWaitsWhen`; the donor judged on the higher of its
-  current need and its peak need over its scale-down window), the first cycle
+  current need and its peak need -- two readings in a row -- over its
+  scale-down window, unless the receiver's bursts outlast a move), the first cycle
   moves at the usual pace. If
   the imbalance holds a second consecutive cycle, the receiver takes every
   replica it is short of its need in that cycle, from one donor or several
@@ -925,7 +926,7 @@ see [Events](monitoring.md#events-on-the-models-scale-targets).
 | `quiet-period` | The group is in the quiet period that follows a controller restart, a leader change, or the optimizer starting to act: for one fill timeout (`wva_utilization_share_effective_seconds{param="fill-timeout"}`, about three minutes with default timings) every planned model holds what it runs, or its restored target, and none scales up or down. A fill in flight before the restart has no mark, and its receiver's pods must not lose their GPUs meanwhile. | Nothing: it clears by itself. Expect it on every upgrade and leader change. |
 | `marks-unreadable` | The controller cannot read the transfer marks on the group's donor pods, so it cannot start the group's ledger: every planned model of the group holds what it runs and none scales, up or down, until it can. One namespace it cannot list is enough to freeze the whole group. | Alert on it. The Error log line `could not read transfer marks; retrying next cycle` names the cause, typically a missing RBAC grant to list pods in a model's namespace. |
 | `whole-replica-short` | The role holds less than its need although the group's needs add up to less than the quota: whole replicas cannot give every role its need (each need rounded up to its replica size, floors included, does not fit), so moves go to whichever role is worse off, by weight, and this one serves below its need. Common with 8-GPU replicas. | Raise the quota by a replica, lower a floor, or accept it: the role that gave is the one the optimizer judged better off. |
-| `awaiting-release` | The model receives a transfer whose donor has not released its GPUs yet. | Normally clears within one release. If it persists, check the donor's ScaledObject scale-down window and its pods' termination grace; transfers that time out show as `aborted`. |
+| `awaiting-release` | The model receives a transfer whose donor has not released its GPUs yet, or -- a model whose replica spans several pods -- waits for returns still releasing that will free whole replicas of it (`withheld_total{reason="awaiting-return"}`). | Normally clears within one release. If it persists, check the donor's ScaledObject scale-down window and its pods' termination grace; transfers that time out show as `aborted`. |
 | `quota-short` | The role holds less than its need and the whole group is short: no rebalance can cover it. | Raise the quota for that accelerator type, or lower demand. Weights decide who is cut. |
 | `floor-pinned` | The model's `minReplicaCount` holds at least one replica more than it needs; GPUs the share would otherwise give to others. Only the configured `minReplicaCount` counts, not the last replica the optimizer keeps on any running role. | Lower `minReplicaCount` if the floor is not deliberate. |
 | `floors-exceed-quota` | The configured floors (`minReplicaCount`) of the group's models add up to more than its budget. The last replica the optimizer keeps on a running role is not counted. | Lower floors or raise the quota; until then every model of the group shows this. |

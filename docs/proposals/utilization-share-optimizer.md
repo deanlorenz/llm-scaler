@@ -979,10 +979,16 @@ When the group acts:
   took the unpaced path. It judges the donor on `donorView`, the higher of that
   and the donor's peak need over its scale-down window (`RecentPeak` over
   `ShareTimings.Window`), as a scale-down is: judged on one reading, a calm
-  donor read in a trough of its normal demand was drained in two cycles. Both
-  apply in `hardReceivers`, `fundFrom` and donor sets (`shareSetRule.need`
-  and `shareSetRule.donorNeed`), so a set does not drain a donor that a single
-  move refuses. Aborts of one donor in one cycle back it off once: transfers started
+  donor read in a trough of its normal demand was drained in two cycles. The
+  recent peak, like `PeakNeed`, needs two readings in a row; and for a
+  receiver whose completed bursts outlast a move (`LongBursts` against
+  `ShareTimings.MoveLatency`) the donor is judged on `needView` alone
+  (`donorViewFor`), since such a move lands inside the burst and holding it a
+  window at each handover only made the burst wait (the 40-minute whole-node
+  losses of `6abc491d`). Both views apply in `hardReceivers`, `fundFrom` and
+  donor sets (`shareSetRule.need` and `shareSetRule.donorNeed`), so a set does
+  not drain a donor that a single move refuses; the `donor-peak` guard applies
+  to sets too (`shareSetRule.keepsPeak`). Aborts of one donor in one cycle back it off once: transfers started
   together share a deadline, and five aborting together would otherwise reach
   the 16x back-off on their first stuck release. A donor whose pod could not be
   marked starts nothing more that cycle.
@@ -2853,7 +2859,15 @@ optimizer every cycle (§6.6).
    holds; a need above the ceiling is judged against the ceiling; a return
    carries its pod shape and a wake that claims a handed-over one ends it as a
    return; a multi-pod receiver waits for returns that cover it
-   (`awaiting-return`); and the cap's log names its `cause`. Still open: a
+   (`awaiting-return`); and the cap's log names its `cause`. Round 18, the
+   review of `1820318e` (`d8b11b35`, `6f727fed`): the donor's recent peak
+   needs two readings and applies only for receivers whose bursts are shorter
+   than a move, which recovered the 40-minute whole-node shapes (whole-node
+   total 22.08 -> 21.74, against 22.52 for `e55b02b2`); `donor-peak` covers
+   donor sets; `awaiting-return` credits only returns whose pods fit, in whole
+   replicas, funds the rest, and shows `awaiting-release` on the model; and
+   the need-history store keeps the two-reading rule across a restart, writes
+   once per cycle, and is optional at install. Still open: a
    tight 1x8 quota at 20 and 30 minutes (+0.02; deferred: unpaced moves land
    after a short burst ends), and square2 at 30 minutes (0.320 -> 0.332). The
    cluster rerun is pending, on `6abc491d` or later.

@@ -201,14 +201,18 @@ Work down the list in order.
    any other role. The counter also counts moves withheld by a donor's
    back-off after an aborted release, or by a donor that has given all it can.
    A donor's calm is judged on the higher of its current need and its peak
-   need over its scale-down window, so a model read in a trough of its normal
-   demand is not a "lightly loaded" donor.
+   need -- two readings in a row -- over its scale-down window, so a model
+   read in a trough of its normal demand is not a "lightly loaded" donor.
+   For a receiving model whose bursts outlast a move, the donor is judged on
+   its current need alone: the move lands inside the burst.
    Two more reasons on the same counter are not holds: `donor-peak` (while the
    quota holds every model's peak, a model already at its need takes no
-   headroom that would leave its donor below the donor's own recent peak) and
-   `awaiting-return` (a short model whose replica spans several pods, such as
-   a LeaderWorkerSet, waits for returns still releasing that will free a
-   replica of it, instead of draining other models).
+   headroom that would leave its donor below the donor's own recent peak, by
+   a single move or a donor set) and `awaiting-return` (a short model whose
+   replica spans several pods, such as a LeaderWorkerSet, is credited with
+   returns still releasing whose pods hold its pods, in whole replicas, and
+   only the rest is funded by draining other models; the model itself shows
+   blocked reason `awaiting-release`).
 7. **Is it swinging, or at the transfer limit?** Blocked reason `swinging`
    (`wva_utilization_share_swinging == 1`) means the role reversed direction
    twice within the swing window and is planned on its mean need, not its
