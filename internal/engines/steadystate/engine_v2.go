@@ -277,9 +277,22 @@ type staleHistoryEvictor interface {
 //
 // Here rather than on a timer because this is the one place that runs once per
 // cycle for the whole fleet, which is where this engine's other prunes already
-// live. The timeouts are long -- 24h for history, 7 days for records -- so the
-// scan is cheap and on almost every cycle evicts nothing, which is why it logs
-// only when it does something.
+// live. The horizons are the analyzer's (capacity.Horizons, configurable from
+// LEARNED_STATE_*; a day and a week by default, and floored at a minute), and
+// the records' is still the store's own 7-day EvictionTimeout. At any setting
+// the scan is a walk of a handful of maps, so the cost is in the logging rather
+// than the work -- which is why it logs only when it evicted something, and
+// why that line breaks the count out per map.
+//
+// One consequence of living on the optimize path: a fleet with NO active
+// variants does not reach here at all. optimize returns early on
+// "No active VariantAutoscalings found", so a fleet parked at zero stops
+// sweeping until something wakes. That is survivable rather than a second
+// leak -- a parked fleet learns nothing new, so the state it holds is bounded
+// by what it had when it parked -- but it does mean the horizons describe a
+// fleet that is being reconciled, not wall-clock time. It also means a
+// variant's state ages out only while SOME variant is still live, which is the
+// normal case and the one worth testing.
 func (e *Engine) evictStaleLearnedState(ctx context.Context) {
 	logger := ctrl.LoggerFrom(ctx)
 	var history saturation.Evicted

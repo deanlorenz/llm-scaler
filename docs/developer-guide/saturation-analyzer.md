@@ -515,9 +515,19 @@ over a weekend keeps its engine params and capacity record. The store has no
 trust horizon on reads either; `Store.IsStale` and `StalenessTimeout` (30 min)
 exist but have no caller on the reconcile path.
 
-Net: 24h of quiet costs the *fitted* per-variant figures; seven days costs the
-bucket's measurement and the capacity record. A fleet parked past 24h
-re-measures its ITL baseline and start estimate on wake.
+Net: at the defaults, 24h of quiet costs the *fitted* per-variant figures and
+seven days costs the bucket's measurement and the capacity record. A fleet
+parked past the variant timeout re-measures its ITL baseline and start estimate
+on wake.
+
+**The horizons tick on cycles, not on wall clock.** The sweep is called from
+`optimizeV2`, and `optimize` returns early on "No active VariantAutoscalings
+found" — so a fleet with *every* variant parked stops sweeping until something
+wakes. A variant's state therefore ages out only while some variant is still
+live, which is the normal case. This is not a second leak: a parked fleet
+learns nothing new, so what it holds is bounded by what it had when it parked.
+It does mean that a test which parks the whole fleet and waits measures
+nothing — park one variant and leave another serving.
 
 ## Reading a decision from the logs
 
