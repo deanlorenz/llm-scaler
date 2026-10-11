@@ -79,6 +79,8 @@ type utilizationShareState struct {
 // removes those that are stale.
 func (st *utilizationShareState) resetActuation() {
 	st.ledgers, st.desired, st.quietUntil, st.divergedSince, st.goneSince = nil, nil, nil, nil, nil
+	// A rebuilt ledger logs its cap state afresh.
+	st.headroomCapped = nil
 	// A first cycle's outcomes not yet counted go with their ledger: the group
 	// labels they would be counted under are gone, and a rebuilt ledger counts
 	// its own.

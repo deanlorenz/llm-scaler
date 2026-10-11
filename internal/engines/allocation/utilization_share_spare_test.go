@@ -31,9 +31,13 @@ func spareTimings() ShareTimings {
 
 // burstHistory makes the ledger remember both models bursting to 8, as in
 // the cluster run: at their peaks they would need 16 of the quota's 10, so
-// the quota is contended and the spare is capped.
+// the quota is contended and the spare is capped. Two readings, so the peak
+// counts (PeakNeed), and before the scale-down window, so a donor is judged
+// calm on what it reads now (donorView).
 func burstHistory(l *ShareLedger) {
-	l.RecordNeeds(map[string]float64{"L": 8, "Q": 8}, time.Unix(990, 0), spareTimings())
+	for _, at := range []int64{900, 915} {
+		l.RecordNeeds(map[string]float64{"L": 8, "Q": 8}, time.Unix(at, 0), spareTimings())
+	}
 }
 
 // planEach runs n cycles 15s apart on one ledger, which remembers both models'
@@ -204,12 +208,10 @@ func TestShareLeavesTheIdleToTheFill(t *testing.T) {
 func TestShareReturnsSpareWhenNobodyIsShort(t *testing.T) {
 	l := NewShareLedger()
 	plans := planEach(l, spareRun(2, 0.4, 7), 3)
-	for i := range 2 {
-		if plans[i].Returns != 0 {
-			t.Fatalf("cycle %d returned inside the scale-down window: %v", i+1, plans[i].Started)
-		}
+	if plans[0].Returns != 0 {
+		t.Fatalf("cycle 1 returned before the confirm cycles: %v", plans[0].Started)
 	}
-	p := plans[2]
+	p := plans[1]
 	if p.Returns != 5 {
 		t.Fatalf("returned %d, want 5 at once (7 down to its target of 2): %v", p.Returns, p.Started)
 	}
@@ -301,19 +303,19 @@ func TestShareReturnsOnlyWhileCalm(t *testing.T) {
 func TestShareCancelsAReturnWhenDemandComesBack(t *testing.T) {
 	l := NewShareLedger()
 	in := spareRun(2, 0.4, 7)
-	plans := planEach(l, in, 3)
-	if plans[2].Returns == 0 {
+	plans := planEach(l, in, 2)
+	if plans[1].Returns == 0 {
 		t.Fatal("setup: Q did not return")
 	}
 	returns := map[string]bool{}
-	for _, tr := range plans[2].Started {
+	for _, tr := range plans[1].Started {
 		returns[tr.ID] = tr.Returned
 	}
 	// Q's demand is back in full -- a need of 8 against the 2 the returns
 	// leave it: every return is called off.
-	p := PlanShareTransfers(l, spareRun(2, 8, 7), time.Unix(1045, 0), spareTimings())
-	if len(p.Cancelled) != plans[2].Returns {
-		t.Fatalf("cancelled %v, want all %d returns", p.Cancelled, plans[2].Returns)
+	p := PlanShareTransfers(l, spareRun(2, 8, 7), time.Unix(1030, 0), spareTimings())
+	if len(p.Cancelled) != plans[1].Returns {
+		t.Fatalf("cancelled %v, want all %d returns", p.Cancelled, plans[1].Returns)
 	}
 	for _, id := range p.Cancelled {
 		if !returns[id] {
@@ -323,14 +325,14 @@ func TestShareCancelsAReturnWhenDemandComesBack(t *testing.T) {
 	// Back in part -- a need of 1.5, a target of 3: one return is called off,
 	// and Q, at 3, is calm again (1.5 <= 0.6 x 3), so the others go on.
 	l = NewShareLedger()
-	plans = planEach(l, spareRun(2, 0.4, 7), 3)
-	if p := PlanShareTransfers(l, spareRun(2, 1.5, 7), time.Unix(1045, 0), spareTimings()); len(p.Cancelled) != 1 {
-		t.Fatalf("cancelled %v, want one of the %d returns", p.Cancelled, plans[2].Returns)
+	plans = planEach(l, spareRun(2, 0.4, 7), 2)
+	if p := PlanShareTransfers(l, spareRun(2, 1.5, 7), time.Unix(1030, 0), spareTimings()); len(p.Cancelled) != 1 {
+		t.Fatalf("cancelled %v, want one of the %d returns", p.Cancelled, plans[1].Returns)
 	}
 	// Control: with Q's demand where it was, nothing is cancelled.
 	l = NewShareLedger()
 	planEach(l, spareRun(2, 0.4, 7), 3)
-	if p := PlanShareTransfers(l, spareRun(2, 0.4, 7), time.Unix(1045, 0), spareTimings()); len(p.Cancelled) != 0 {
+	if p := PlanShareTransfers(l, spareRun(2, 0.4, 7), time.Unix(1030, 0), spareTimings()); len(p.Cancelled) != 0 {
 		t.Fatalf("control: cancelled %v with demand unchanged", p.Cancelled)
 	}
 }

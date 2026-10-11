@@ -425,8 +425,8 @@ func TestShareUnfundedRoleDoesNotBlockReturns(t *testing.T) {
 func TestShareHandsAReturnToAShortReceiver(t *testing.T) {
 	l := NewShareLedger()
 	plans := planEach(l, spareRun(2, 0.4, 7), 3)
-	if plans[2].Returns != 5 {
-		t.Fatalf("setup: Q returned %d, want 5", plans[2].Returns)
+	if plans[1].Returns != 5 {
+		t.Fatalf("setup: Q returned %d, want 5", plans[1].Returns)
 	}
 	p := PlanShareTransfers(l, spareRun(5, 0.4, 7), time.Unix(1045, 0), spareTimings())
 	if len(p.Assigned) != 3 {

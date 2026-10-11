@@ -93,11 +93,19 @@ type ShareTransfer struct {
 	// returned spare -- bypass the z admission rule and the holds, and set no
 	// hold (§6.2). A Returned transfer is always Entitled.
 	Entitled bool
-	// Returned marks a donor-only transfer that gives a replica above the
-	// donor's target back to the group's unassigned GPUs (ShareCapSpare), while
-	// no role is short of its own: the idle fill then raises whoever needs it,
-	// with no drain to wait for.
+	// Returned marks a transfer that gives a replica above the donor's target
+	// back to the group (ShareCapSpare), started while no role was short of
+	// its own. It counts against neither the pace nor the concurrency limit.
+	// With no Receiver it goes to the unassigned GPUs, for the idle fill to
+	// raise whoever needs them; AssignReturn may later hand it to a short
+	// receiver, and it stays Returned. A wake that claims it (Redirect) makes
+	// it an ordinary release.
 	Returned bool
+	// DonorPodGPUs is the GPUs of each pod of the returned replica, when its
+	// shape is known: a return is handed only to a receiver whose pod one of
+	// them holds (fromReturns). Empty for any other transfer, and for a
+	// return read back from its marks after a restart.
+	DonorPodGPUs []int
 	// Urgent receivers are below their need (§6.4).
 	Urgent bool
 	// SkippedWaits marks a move that rebalances a hard imbalance
@@ -252,9 +260,9 @@ type ShareLedger struct {
 	// hard counts each role's consecutive cycles as a hard-imbalance
 	// receiver (ConfirmHard).
 	hard map[string]int
-	// overSince is when each role came to hold more than its target
-	// (MarkOver).
-	overSince map[string]time.Time
+	// over counts each role's consecutive cycles holding more than its
+	// target (MarkOver).
+	over map[string]int
 	// releases are the durations of recent completed releases, newest last,
 	// for the measured release time (§8.4).
 	releases []time.Duration
@@ -295,7 +303,7 @@ func NewShareLedger() *ShareLedger {
 		needsSince:  map[string]time.Time{},
 		confirm:     map[string]int{},
 		hard:        map[string]int{},
-		overSince:   map[string]time.Time{},
+		over:        map[string]int{},
 		seen:        map[string]time.Time{},
 		unsteerable: map[string]bool{},
 		busyUntil:   map[string]time.Time{},
@@ -783,7 +791,10 @@ func (l *ShareLedger) Redirect(id string, hold time.Duration) (ShareTransfer, bo
 	for _, t := range l.transfers {
 		if t.ID == id && redirectable(t) {
 			prev := *t
-			t.Receiver, t.ReceiverVariant, t.GPUs, t.Urgent = "", "", 0, false
+			// A return handed to a receiver is no longer a return once a wake
+			// claims it: left Returned with no receiver, it would be handed
+			// to another receiver, or cancelled, while the wake waits on it.
+			t.Receiver, t.ReceiverVariant, t.GPUs, t.Urgent, t.Returned = "", "", 0, false, false
 			l.wakeHolds = append(l.wakeHolds, shareWakeHold{gpus: t.DonorGPUs, id: t.ID, hold: hold})
 			return prev, true
 		}
@@ -893,22 +904,55 @@ func (l *ShareLedger) Swinging(role string, now time.Time) bool {
 // RecordNeeds stores this cycle's needs, keeping a swing window of history.
 func (l *ShareLedger) RecordNeeds(needs map[string]float64, now time.Time, tm ShareTimings) {
 	for role, n := range needs {
-		if _, ok := l.needsSince[role]; !ok {
+		l.needs[role] = slices.DeleteFunc(l.needs[role], func(x shareNeedSample) bool { return now.Sub(x.at) > tm.SwingWindow })
+		// A role whose history has all aged out -- new, or back after a gap
+		// longer than the window -- starts its history again: kept, its
+		// first-seen time would call a peak known from one sample.
+		if len(l.needs[role]) == 0 {
 			l.needsSince[role] = now
 		}
 		l.needs[role] = append(l.needs[role], shareNeedSample{now, n})
-		l.needs[role] = slices.DeleteFunc(l.needs[role], func(x shareNeedSample) bool { return now.Sub(x.at) > tm.SwingWindow })
 	}
 }
 
 // PeakNeed is the highest need recorded for role over the swing window, or
 // current when higher.
 func (l *ShareLedger) PeakNeed(role string, current float64) float64 {
-	peak := current
-	for _, s := range l.needs[role] {
-		peak = math.Max(peak, s.need)
+	s := l.needs[role]
+	if len(s) < 2 {
+		return current
+	}
+	// A peak counts only once two readings in a row reach it: one reading
+	// -- a scrape glitch, or a tenant's forged metric -- would otherwise cap
+	// every other model's headroom for a whole window.
+	peak := 0.0
+	for i := 1; i < len(s); i++ {
+		peak = math.Max(peak, math.Min(s[i-1].need, s[i].need))
 	}
 	return peak
+}
+
+// RecentPeak is role's highest recorded need over the last d.
+func (l *ShareLedger) RecentPeak(role string, now time.Time, d time.Duration) float64 {
+	peak := 0.0
+	for _, s := range l.needs[role] {
+		if now.Sub(s.at) <= d {
+			peak = math.Max(peak, s.need)
+		}
+	}
+	return peak
+}
+
+// AnyPeakKnown reports whether any role's peak is known (PeakKnown): the
+// ledger has a window of history, so a role whose peak is not known joined
+// since, rather than every role being unknown after a restart.
+func (l *ShareLedger) AnyPeakKnown(now time.Time, tm ShareTimings) bool {
+	for role := range l.needsSince {
+		if l.PeakKnown(role, now, tm) {
+			return true
+		}
+	}
+	return false
 }
 
 // PeakKnown reports whether role's need has been recorded for a whole swing
@@ -1004,20 +1048,20 @@ func (l *ShareLedger) ConfirmHard(hard map[string]bool) map[string]int {
 func (l *ShareLedger) HardCycles(role string) int { return l.hard[role] }
 
 // MarkOver records which roles hold more than their target this cycle and
-// returns, per role still over, since when it has been: the clock a return
-// waits on (returnSpare). A role that is not over starts again.
-func (l *ShareLedger) MarkOver(over map[string]bool, now time.Time) map[string]time.Time {
-	for role := range l.overSince {
+// returns, per role still over, for how many consecutive cycles it has been:
+// what a return waits on (returnSpare). A role that is not over starts again.
+func (l *ShareLedger) MarkOver(over map[string]bool) map[string]int {
+	for role := range l.over {
 		if !over[role] {
-			delete(l.overSince, role)
+			delete(l.over, role)
 		}
 	}
 	for role, o := range over {
-		if _, ok := l.overSince[role]; o && !ok {
-			l.overSince[role] = now
+		if o {
+			l.over[role]++
 		}
 	}
-	return maps.Clone(l.overSince)
+	return maps.Clone(l.over)
 }
 
 // MeasuredRelease is the 90th percentile of recent completed releases, and
@@ -1246,7 +1290,7 @@ func (l *ShareLedger) Retain(present []string, now time.Time, tm ShareTimings) {
 		delete(l.needs, r)
 		delete(l.needsSince, r)
 		delete(l.hard, r)
-		delete(l.overSince, r)
+		delete(l.over, r)
 	}
 }
 

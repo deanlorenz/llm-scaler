@@ -129,8 +129,9 @@ func TestUtilizationSharePublishesThePlannersTargets(t *testing.T) {
 	for range 10 {
 		se.cycle()
 	}
-	se.clock = se.clock.Add(24 * time.Hour)
-	for range 2 {
+	// Every 30 s for 5 h, so the history never ages out (a gap longer than
+	// the window starts it again).
+	for range 600 {
 		se.cycle()
 	}
 	sum := 0.0

@@ -37,7 +37,10 @@ func TestShareCapsUntilThePeaksAreKnown(t *testing.T) {
 	if p := PlanShareTransfers(l, in, t0, spareTimings()); !p.HeadroomCapped || p.PeakClaimGPUs != 16 {
 		t.Fatalf("fresh ledger: capped %v on peak claims %d, want capped on 16 (both ceilings)", p.HeadroomCapped, p.PeakClaimGPUs)
 	}
-	later := t0.Add(spareTimings().SwingWindow + time.Second)
+	// Planned every half window, so the history never ages out.
+	half := spareTimings().SwingWindow / 2
+	PlanShareTransfers(l, in, t0.Add(half), spareTimings())
+	later := t0.Add(2*half + time.Second)
 	if p := PlanShareTransfers(l, in, later, spareTimings()); p.HeadroomCapped {
 		t.Fatalf("a window later: capped on peak claims %d, though the peaks (2 + 1) fit", p.PeakClaimGPUs)
 	}
@@ -51,7 +54,9 @@ func TestShareCapLeavesWhatNoOtherPeakUses(t *testing.T) {
 	in.Held["L"] = 4
 	l := NewShareLedger()
 	knownFor(l, time.Unix(990, 0), "L", "Q")
-	l.RecordNeeds(map[string]float64{"L": 3.5, "Q": 7}, time.Unix(990, 0), spareTimings())
+	for _, at := range []int64{960, 975} { // two readings, so the peak counts
+		l.RecordNeeds(map[string]float64{"L": 3.5, "Q": 7}, time.Unix(at, 0), spareTimings())
+	}
 	returned := 0
 	for i := range 5 {
 		p := PlanShareTransfers(l, in, time.Unix(int64(1000+15*i), 0), spareTimings())

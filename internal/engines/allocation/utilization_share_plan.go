@@ -185,6 +185,9 @@ type SharePlan struct {
 	// claim at its peak need over the swing window, in whole replicas. Zero
 	// when the cap is off by configuration.
 	PeakClaimGPUs int
+	// UnknownPeaks are the roles counted at their ceiling in PeakClaimGPUs
+	// because no role's peak is known yet (peakClaims).
+	UnknownPeaks []string
 	// Unfunded names, for each confirmed receiver that got nothing this cycle
 	// because no candidate donor's pods could host its replica, that reason
 	// (ShareUnfundedNoCompatibleDonor). A receiver held back by a hold, the
@@ -213,6 +216,14 @@ const (
 	// ShareWithheldReturnRoleShort counts a role above its target that keeps
 	// its spare because another role is short of its need (returnSpare).
 	ShareWithheldReturnRoleShort = "return-role-short"
+	// ShareWithheldDonorPeak counts a headroom move not made because it
+	// would leave its donor below its own recent peak while the quota holds
+	// every peak (fundFrom).
+	ShareWithheldDonorPeak = "donor-peak"
+	// ShareWithheldAwaitingReturn counts a receiver whose replica spans
+	// several pods left to the idle fill, not a donor set, because returns
+	// still releasing will free at least one replica of it (returnsCover).
+	ShareWithheldAwaitingReturn = "awaiting-return"
 )
 
 // ShareDebt is how far a committed allocation stands above the budget, or 0.
@@ -240,36 +251,12 @@ func PlanShareTransfers(l *ShareLedger, in SharePlanInput, now time.Time, tm Sha
 	p := &sharePlanRun{l: l, in: in, now: now, tm: tm, moved: map[string]int{},
 		plan: SharePlan{Unfunded: map[string]string{}, Withheld: map[string]int{}, Nodes: in.Nodes}}
 	p.planningRoles()
+	var peakSum int
+	p.peaks, peakSum = p.peakClaims()
 	if in.Headroom.Capped {
-		_, p.plan.PeakClaimGPUs = p.peakClaims()
-	}
-	if in.Headroom.Capped && p.contended() {
-		// On the higher of the reading and the planning need (need): capped
-		// on the reading, a swinging role in its trough would be held below
-		// the mean it is planned on; capped on the mean, one at its crest
-		// would be held below its reading, beside GPUs only it could use.
-		p.plan.HeadroomCapped = true
-		//
-		// A role is never capped below what the others' peaks leave of the
-		// budget (in whole replicas): GPUs no other role's recent peak could
-		// use would only sit unassigned until its own next burst cold-started
-		// them again.
-		views := make([]ShareRole, len(p.roles))
-		for i, r := range p.roles {
-			views[i] = p.calmView(r)
-		}
-		peaks, sum := p.peakClaims()
-		for i, c := range ShareCapSpare(views, in.Headroom.Replicas) {
-			g := max(c.ReplicaGPUs, 1)
-			room := (in.Budget - (sum - peaks[c.Key])) / g * g
-			if own := p.roles[i].Ceiling; own > 0 {
-				room = min(room, own)
-			}
-			if c.Ceiling > 0 && room > c.Ceiling {
-				c.Ceiling = room
-			}
-			p.roles[i].Ceiling = c.Ceiling
-			p.byKey[c.Key] = p.roles[i]
+		p.plan.PeakClaimGPUs = peakSum
+		if peakSum > in.Budget {
+			p.capHeadroom(peakSum)
 		}
 	}
 	p.keep = shareKeep(p.roles, in.Budget)
@@ -358,6 +345,17 @@ type sharePlanRun struct {
 	// idleNodes is the node picture the idle fill's credit (fromIdle) has
 	// spent this cycle; nil without node information.
 	idleNodes map[string]ShareNode
+	// peaks is each role's claim at its peak need (peakClaims).
+	peaks map[string]int
+}
+
+// shareReplicaPods is the GPUs of each pod of one replica of v: its pods'
+// when known, else one pod of the whole replica.
+func shareReplicaPods(v ShareVariant) []int {
+	if len(v.PodGPUs) > 0 {
+		return slices.Clone(v.PodGPUs)
+	}
+	return []int{max(v.GPUs, 1)}
 }
 
 // variantOf is the variant role k gives from or grows in m, or, when m is
@@ -517,11 +515,16 @@ func (p *sharePlanRun) rawNeed(k string) float64 {
 
 // isConfirmed reports whether a role has been actionable long enough to move.
 func (p *sharePlanRun) isConfirmed(k string) bool {
-	need := p.in.ConfirmCycles
-	if need <= 0 {
-		need = ShareConfirmCycles
+	return p.confirmed[k] >= p.confirmCycles()
+}
+
+// confirmCycles is how many consecutive cycles a condition must hold before
+// it moves anything (SharePlanInput.ConfirmCycles, else ShareConfirmCycles).
+func (p *sharePlanRun) confirmCycles() int {
+	if p.in.ConfirmCycles > 0 {
+		return p.in.ConfirmCycles
 	}
-	return p.confirmed[k] >= need
+	return ShareConfirmCycles
 }
 
 // hardImbalance reports whether an actionable role and another role could
@@ -541,7 +544,7 @@ func (p *sharePlanRun) hardReceivers() map[string]bool {
 		}
 		for _, dn := range p.roles {
 			left := p.committed[dn.Key] - max(dn.ReplicaGPUs, 1)
-			if dn.Key != rc.Key && left >= 0 && shareHardImbalance(p.in.SkipWaits, p.committed[rc.Key], p.calmView(rc), left, p.calmView(dn)) {
+			if dn.Key != rc.Key && left >= 0 && shareHardImbalance(p.in.SkipWaits, p.committed[rc.Key], p.needView(rc), left, p.donorView(dn)) {
 				out[rc.Key] = true
 				break
 			}
@@ -550,17 +553,28 @@ func (p *sharePlanRun) hardReceivers() map[string]bool {
 	return out
 }
 
-// calmView is role r as its calm is judged: on its need (sharePlanRun.need).
+// donorView is donor role r judged on the higher of its need and its peak
+// over its scale-down window, as a scale-down is: judged on one reading, a
+// calm donor read in a trough of its normal demand is drained in two cycles.
+func (p *sharePlanRun) donorView(r ShareRole) ShareRole {
+	r.Need = math.Max(p.need(r.Key), p.l.RecentPeak(r.Key, p.now, p.tm.Window))
+	return r
+}
+
+// needView is role r judged on its need (sharePlanRun.need): a receiver's
+// urgency and the headroom cap.
 // A receiver's urgency is judged on it too: on its mean, a swinging role at
 // the crest of a burst would never be a hard imbalance.
-func (p *sharePlanRun) calmView(r ShareRole) ShareRole {
+func (p *sharePlanRun) needView(r ShareRole) ShareRole {
 	r.Need = p.need(r.Key)
 	return r
 }
 
-// contended reports whether the group's quota cannot hold every role at once
-// at its peak need over the swing window -- its claim at that need, rounded
-// up to whole replicas. Only then is the spare capped. While it can, no burst
+// capHeadroom caps each role's headroom (ShareCapSpare,
+// maxHeadroomReplicas by weight) because the quota is contended: peakSum,
+// the sum of every role's claim at its peak need over the swing window
+// (peakClaims), is more than the budget. Only then is the spare capped. While
+// it is not, no burst
 // can find the GPUs it needs parked on another, and returning headroom only
 // makes the next burst cold-start what a spread spare held warm: in
 // simulation, alternating bursts whose peaks fit together lost 4 to 8% of
@@ -569,26 +583,69 @@ func (p *sharePlanRun) calmView(r ShareRole) ShareRole {
 // role that bursts must take GPUs from the others as it bursts, and spare
 // parked on them -- whose pods may take minutes to drain -- is what made a
 // bursting model wait 18 minutes for 8 replicas on a cluster.
-func (p *sharePlanRun) contended() bool {
-	_, sum := p.peakClaims()
-	return sum > p.in.Budget
+//
+// A role is capped on the higher of its reading and its planning need
+// (needView): on the reading, a swinging role in its trough would be held
+// below the mean it is planned on; on the mean, one at its crest would be
+// held below its reading, beside GPUs only it could use. It is never capped
+// below what the other roles' peaks leave of the budget
+// (shareRoomForOthers): GPUs no other role's recent peak could use would sit
+// unassigned until its own next burst cold-started them again.
+func (p *sharePlanRun) capHeadroom(peakSum int) {
+	p.plan.HeadroomCapped = true
+	views := make([]ShareRole, len(p.roles))
+	for i, r := range p.roles {
+		views[i] = p.needView(r)
+	}
+	for _, c := range ShareCapSpare(views, p.in.Headroom.Replicas) {
+		r := p.byKey[c.Key]
+		if c.Ceiling > 0 {
+			room := shareRoomForOthers(p.in.Budget, peakSum-p.peaks[c.Key], max(r.ReplicaGPUs, 1), r.Ceiling)
+			r.Ceiling = max(c.Ceiling, room)
+		}
+		p.byKey[c.Key] = r
+	}
+	for i := range p.roles {
+		p.roles[i] = p.byKey[p.roles[i].Key]
+	}
+}
+
+// shareRoomForOthers is what the others' peak claims leave of budget, in
+// whole replicas of g GPUs, and no more than the role's own ceiling (0: none).
+func shareRoomForOthers(budget, others, g, ceiling int) int {
+	room := max(budget-others, 0) / g * g
+	if ceiling > 0 {
+		room = min(room, ceiling)
+	}
+	return room
 }
 
 // peakClaims is each role's claim at its peak need over the swing window,
-// rounded up to whole replicas, and their sum. A role whose peak is not yet
-// known (ShareLedger.PeakKnown) -- after a restart, or a new model -- is
-// taken to peak at its ceiling, or the whole budget when it has none: judged
-// on the history it has, the cap stayed off until a model had burst inside
-// the window, and the first burst found the spare parked on another model.
+// rounded up to whole replicas, and their sum. While no role's peak is known
+// (ShareLedger.PeakKnown) -- a new group, or a restart with no stored history
+// -- each is taken to peak at its ceiling, or the whole budget when it has
+// none: judged on the history it has, the cap stayed off until a model had
+// burst inside the window, and the first burst found the spare parked on
+// another model. A role joining a group whose history is known claims what
+// it holds instead (peakClaims' established case).
 func (p *sharePlanRun) peakClaims() (map[string]int, int) {
 	out := make(map[string]int, len(p.roles))
 	sum := 0
+	established := p.l.AnyPeakKnown(p.now, p.tm)
 	for _, r := range p.roles {
 		g := max(r.ReplicaGPUs, 1)
 		peak := r
 		peak.Need = p.l.PeakNeed(r.Key, r.Need)
-		if !p.l.PeakKnown(r.Key, p.now, p.tm) {
+		switch {
+		case p.l.PeakKnown(r.Key, p.now, p.tm):
+		case established:
+			// A role joining a group whose history is known claims what it
+			// holds: at its ceiling, any new model -- or one renamed to look
+			// new -- would cap every other model's headroom for a window.
+			peak.Need = math.Max(peak.Need, float64(p.in.Held[r.Key]))
+		default:
 			peak.Need = math.Max(peak.Need, math.Min(r.ceiling(), float64(p.in.Budget)))
+			p.plan.UnknownPeaks = append(p.plan.UnknownPeaks, r.Key)
 		}
 		peak.Need = math.Min(peak.Need, float64(p.in.Budget))
 		out[r.Key] = g * int(math.Ceil(peak.Claim()/float64(g)-1e-9))
@@ -753,6 +810,13 @@ func (p *sharePlanRun) fund(rc string, donors []string) {
 			break
 		}
 	}
+	if !funded && candidates > 0 && misfits == candidates && in.Grow != nil && p.returnsCover(rc) {
+		// The returns land in the unassigned GPUs, where the idle fill
+		// places rc's pods; a set now would drain a donor for GPUs that are
+		// already on their way.
+		p.plan.Withheld[ShareWithheldAwaitingReturn]++
+		return
+	}
 	if !funded && candidates > 0 && misfits == candidates && in.Grow != nil {
 		var deferred bool
 		funded, deferred = p.fundBySet(rc, donors)
@@ -828,8 +892,11 @@ func (p *sharePlanRun) fromReturns(rc string) {
 			continue
 		}
 		// The returned pod must free a hole the receiver's pod fits: an
-		// 8-GPU return split as 2x4 does not hold a 1x8 pod.
-		if give, ok := variantOf(p.in.Give, t.Donor, p.byKey[t.Donor].ReplicaGPUs); ok && !ShareCovers(give, grow) {
+		// 8-GPU return split as 2x4 does not hold a 1x8 pod. Its shape is the
+		// one it was returned from -- the donor may give from another variant
+		// by now -- and a return whose shape is not known is not handed over.
+		returned := ShareVariant{GPUs: t.DonorGPUs, PodGPUs: t.DonorPodGPUs}
+		if p.in.Give != nil && (len(t.DonorPodGPUs) == 0 || !ShareCovers(returned, grow)) {
 			continue
 		}
 		if p.l.AssignReturn(t.ID, rc, grow.Name, g) {
@@ -837,6 +904,24 @@ func (p *sharePlanRun) fromReturns(rc string) {
 			p.plan.Assigned = append(p.plan.Assigned, t.ID)
 		}
 	}
+}
+
+// returnsCover reports whether returns still releasing, and handed to no
+// receiver, will free at least one replica of receiver rc, whose replica
+// spans several pods: those are not handed over (fromReturns), so they reach
+// it through the idle fill once released.
+func (p *sharePlanRun) returnsCover(rc string) bool {
+	grow, ok := variantOf(p.in.Grow, rc, p.byKey[rc].ReplicaGPUs)
+	if !ok || len(grow.PodGPUs) <= 1 {
+		return false
+	}
+	n := 0
+	for _, t := range p.l.Transfers() {
+		if t.Returned && t.Receiver == "" && t.State == ShareReleasing && t.Donor != rc {
+			n += t.DonorGPUs
+		}
+	}
+	return n >= max(grow.GPUs, 1)
 }
 
 // fundStep is how fundFrom left a donor.
@@ -879,7 +964,7 @@ func (p *sharePlanRun) fundFrom(rc, dn string) (started int, step fundStep, cand
 		// Rule 4: a role that gave cannot receive, and one that received
 		// cannot give, within the hold -- unless the move rebalances a hard
 		// imbalance, which waits for neither the hold nor the confirm cycles.
-		exempt := shareHardImbalance(in.SkipWaits, work[rc], p.calmView(rr), work[dn]-gd, p.calmView(dr))
+		exempt := shareHardImbalance(in.SkipWaits, work[rc], p.needView(rr), work[dn]-gd, p.donorView(dr))
 		free := exempt && p.unpacedNow(rc)
 		if !free && (started > 0 || l.InFlight() >= ShareMaxConcurrentTransfers ||
 			moved[rc] >= ShareMaxReplicasPerCycle || moved[dn] >= ShareMaxReplicasPerCycle) {
@@ -898,6 +983,14 @@ func (p *sharePlanRun) fundFrom(rc, dn string) (started int, step fundStep, cand
 		}
 		if !exempt && !p.isConfirmed(rc) && !p.isConfirmed(dn) {
 			return started, fundNext, candidate, misfit // every other transfer must fix a confirmed actionable role
+		}
+		// Spread, a receiver already at its need takes no headroom that would
+		// leave its donor below the donor's own recent peak: the split covers
+		// both, and the move -- from a donor that may drain for minutes --
+		// lands after the receiver's burst and just before the donor's own.
+		if !p.plan.HeadroomCapped && float64(work[rc]) >= p.need(rc) && work[dn]-gd < p.peaks[dn] {
+			p.plan.Withheld[ShareWithheldDonorPeak]++
+			return started, fundNext, candidate, misfit
 		}
 		// §6.2 admission: the worst-off role of the pair improves, and the
 		// donor is not pushed out of band.
@@ -948,7 +1041,7 @@ func (p *sharePlanRun) returnSpare() {
 		// away by weight, and what moves between roles moves by transfer.
 		over[r.Key] = p.plan.HeadroomCapped && p.work[r.Key] > p.integ[r.Key]
 	}
-	since := l.MarkOver(over, now)
+	cycles := l.MarkOver(over)
 	for _, r := range p.roles {
 		g := max(r.ReplicaGPUs, 1)
 		claim := g * int(math.Ceil(r.Claim()/float64(g)-1e-9))
@@ -966,7 +1059,13 @@ func (p *sharePlanRun) returnSpare() {
 	load := in.Headroom.returnLoad()
 	for _, r := range p.roles {
 		dn := r.Key
-		if !over[dn] || now.Sub(since[dn]) < tm.Window || l.GivingHeld(dn, now, tm) {
+		// It waits the confirm cycles, as any move does, not its scale-down
+		// window: the release that follows waits that window again, and
+		// is called off while it does if the role's demand comes back
+		// (cancelReversals). Waiting both, a return took two windows where
+		// a scale-down takes one, and a burst on another model found the
+		// spare still parked.
+		if !over[dn] || cycles[dn] < p.confirmCycles() || l.GivingHeld(dn, now, tm) {
 			continue
 		}
 		give, ok := variantOf(in.Give, dn, r.ReplicaGPUs)
@@ -978,8 +1077,8 @@ func (p *sharePlanRun) returnSpare() {
 		floor := max(p.integ[dn], r.Floor, p.keep[dn])
 		returned := 0
 		for p.work[dn]-gd >= floor && p.need(dn) <= load*(float64(p.work[dn]-gd)-spare) {
-			t := l.Start(ShareTransfer{Donor: dn, DonorGPUs: gd, DonorVariant: give.Name, Entitled: true, Returned: true},
-				in.Held, now, tm)
+			t := l.Start(ShareTransfer{Donor: dn, DonorGPUs: gd, DonorVariant: give.Name, Entitled: true, Returned: true,
+				DonorPodGPUs: shareReplicaPods(give)}, in.Held, now, tm)
 			p.plan.Started = append(p.plan.Started, t)
 			p.plan.Returns++
 			p.moved[dn]++
@@ -1001,7 +1100,7 @@ func (p *sharePlanRun) returnSpare() {
 // GPUs and the quota has room: the idle fill funds it, and no donor shrinks.
 func (p *sharePlanRun) fundBySet(rc string, donors []string) (funded, deferred bool) {
 	l, in, now, tm := p.l, p.in, p.now, p.tm
-	rule := shareSetRule{hard: p.hard[rc] > 0, free: p.unpacedNow(rc), calm: p.calmView}
+	rule := shareSetRule{hard: p.hard[rc] > 0, free: p.unpacedNow(rc), need: p.needView, donorNeed: p.donorView}
 	var set []shareDonor
 	if in.Nodes != nil {
 		// Placed on the free GPUs the idle credit has not already spent
@@ -1047,20 +1146,29 @@ func (p *sharePlanRun) fundBySet(rc string, donors []string) (funded, deferred b
 // shareSetRule is how a hard imbalance relaxes a donor set's admission
 // (§6.5, §6.7): hard, a receiver in one this cycle, needs no confirmed role;
 // free, one confirmed for ShareUnpacedAfterCycles, skips the pace and the
-// concurrency limit. calm is how a role is judged (calmView), as a single
-// move judges it: on its mean, a swinging donor whose demand is rising would
-// be drained to its keep by a set a single move from it is refused.
+// concurrency limit. need and donorNeed judge the receiver and each donor as
+// a single move judges them (needView, donorView): on its mean, a swinging
+// donor whose demand is rising would be drained to its keep by a set a single
+// move from it is refused.
 type shareSetRule struct {
-	hard, free bool
-	calm       func(ShareRole) ShareRole
+	hard, free      bool
+	need, donorNeed func(ShareRole) ShareRole
 }
 
-// view is role r as the rule judges it: a donor's calm, a receiver's urgency.
-func (rule shareSetRule) view(r ShareRole) ShareRole {
-	if rule.calm == nil {
+// receiver is receiver role r as the rule judges it.
+func (rule shareSetRule) receiver(r ShareRole) ShareRole {
+	if rule.need == nil {
 		return r
 	}
-	return rule.calm(r)
+	return rule.need(r)
+}
+
+// donor is donor role r as the rule judges it.
+func (rule shareSetRule) donor(r ShareRole) ShareRole {
+	if rule.donorNeed == nil {
+		return r
+	}
+	return rule.donorNeed(r)
 }
 
 // shareTol is a role's band half-width in GPUs at target (proposal §6.1): the
@@ -1130,7 +1238,7 @@ func shareDonorSet(l *ShareLedger, in SharePlanInput, rc string, donors []string
 			}
 			gd := max(give.GPUs, 1)
 			k := taken[dn] + 1
-			exempt := shareHardImbalance(in.SkipWaits, work[rc], rule.view(byKey[rc]), work[dn]-k*gd, rule.view(byKey[dn]))
+			exempt := shareHardImbalance(in.SkipWaits, work[rc], rule.receiver(byKey[rc]), work[dn]-k*gd, rule.donor(byKey[dn]))
 			if (!rule.free && moved[dn]+k > shareSetPace(grow)) || work[dn]-k*gd < lim.keep[dn] || shareMoveHeld(l, dn, rc, exempt, now, tm) {
 				continue
 			}
@@ -1342,7 +1450,7 @@ func (s *shareNodeSearch) canGive(dn string, extra int) bool {
 	}
 	k := s.taken[dn] + extra
 	left := s.work[dn] - k*max(give.GPUs, 1)
-	exempt := shareHardImbalance(s.in.SkipWaits, s.work[s.rc], s.rule.view(s.byKey[s.rc]), left, s.rule.view(s.byKey[dn]))
+	exempt := shareHardImbalance(s.in.SkipWaits, s.work[s.rc], s.rule.receiver(s.byKey[s.rc]), left, s.rule.donor(s.byKey[dn]))
 	return (s.rule.free || s.moved[dn]+k <= shareSetPace(s.in.Grow[s.rc])) && left >= s.keep[dn] &&
 		!shareMoveHeld(s.l, dn, s.rc, exempt, s.now, s.tm) &&
 		(s.rule.free || s.l.InFlight()+1 <= ShareMaxConcurrentTransfers)

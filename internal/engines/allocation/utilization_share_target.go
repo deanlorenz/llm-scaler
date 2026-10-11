@@ -345,8 +345,12 @@ func EvaluateShare(roles []ShareRole, committed map[string]int, thresholds map[s
 		// optimizer would answer with a replica. The band is never narrower
 		// than half a replica, so for whole-node replicas it would otherwise
 		// hide a shortfall of up to four GPUs -- 8 held against 8.5 needed,
-		// target 11.7 -- and the role would never be actionable.
-		belowNeed := float64(c) < r.Need && v.Continuous >= r.Need
+		// target 11.7 -- and the role would never be actionable. A need above
+		// the ceiling is judged against the ceiling, which is all the target
+		// can cover: else a role one replica below its ceiling, needing more
+		// than it, would be in band and never take its last replica.
+		need := math.Min(r.Need, r.ceiling())
+		belowNeed := float64(c) < need && v.Continuous >= need-1e-9
 		v.InBand = !belowNeed && ShareInBand(float64(c), v.Continuous, r, tolerance, thresholds[r.Key])
 		v.Actionable = !v.InBand && c != v.Integer
 		if short := v.Integer - c; short > 0 {

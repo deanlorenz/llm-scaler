@@ -201,8 +201,10 @@ type UtilizationShareGroup struct {
 	Timings         []UtilizationShareTiming
 	// Releasing and Filling count the group's transfers in flight.
 	Releasing, Filling int
-	// HeadroomCapped is whether the planner capped each role's headroom.
-	HeadroomCapped bool
+	// HeadroomCapped is whether the planner capped each role's headroom;
+	// nil, and not published, in a cycle it did not plan (the restart quiet
+	// period), when the published targets are not the planner's.
+	HeadroomCapped *bool
 }
 
 // SetUtilizationShareMode publishes the optimizer's mode: 1 for mode, 0 for
@@ -283,11 +285,13 @@ func PublishUtilizationShare(groups []UtilizationShareGroup) {
 			initUtilizationShareTransfers(gl)
 			set(utilizationSharePromisedGPUs, gl, grp.PromisedGPUs)
 			set(utilizationShareReserveDebt, gl, grp.ReserveDebtGPUs)
-			capped := 0.0
-			if grp.HeadroomCapped {
-				capped = 1
+			if grp.HeadroomCapped != nil {
+				capped := 0.0
+				if *grp.HeadroomCapped {
+					capped = 1
+				}
+				set(utilizationShareHeadroomCapped, gl, capped)
 			}
-			set(utilizationShareHeadroomCapped, gl, capped)
 			for state, n := range map[string]int{constants.UtilizationShareStateReleasing: grp.Releasing,
 				constants.UtilizationShareStateFilling: grp.Filling} {
 				sl := maps.Clone(gl)

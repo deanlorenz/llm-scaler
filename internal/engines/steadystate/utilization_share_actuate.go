@@ -60,8 +60,9 @@ type shareActuation struct {
 	// reasons must say. Capped only while the quota is contended, it can
 	// differ from the shadow evaluation, which always caps.
 	evaluation *allocation.ShareEvaluation
-	// headroomCapped is whether the planner capped each role's headroom.
-	headroomCapped bool
+	// headroomCapped is whether the planner capped each role's headroom;
+	// nil when it did not plan this cycle.
+	headroomCapped *bool
 }
 
 // countInFlight counts a ledger's transfers in flight by state.
@@ -103,11 +104,12 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 		st.divergedSince = map[string]time.Time{}
 	}
 	key := shareGroupKey(g)
-	logger = logger.WithValues("accelerator", g.AcceleratorType, "scope", g.Scope)
 	scope := g.Scope
 	if scope == "" {
 		scope = constants.UtilizationShareClusterScope
 	}
+	// The scope as the metrics label it, so a log line joins its series.
+	logger = logger.WithValues("accelerator", g.AcceleratorType, "scope", scope)
 
 	accessor := func(role, variant string) scaletarget.ScaleTargetAccessor {
 		return scaleTargets[utils.GetNamespacedKey(g.Origins[role].Namespace, variant)]
@@ -430,7 +432,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	out.reserveDebt = shareDebtNow(l, held, g.Budget)
 	out.blocked = shareBlockedReasons(l, g, plan.Evaluation, plan.Unfunded, shareSkipWaits(us), now, tm)
 	out.evaluation = &plan.Evaluation
-	out.headroomCapped = plan.HeadroomCapped
+	out.headroomCapped = &plan.HeadroomCapped
 	// Said when it changes: what the cap does to every model's headroom
 	// otherwise has no cause anywhere an operator looks.
 	if was, seen := st.headroomCapped[key]; !seen || was != plan.HeadroomCapped {
@@ -438,11 +440,19 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 			st.headroomCapped = map[string]bool{}
 		}
 		st.headroomCapped[key] = plan.HeadroomCapped
-		if plan.HeadroomCapped {
+		switch {
+		case plan.HeadroomCapped && len(plan.UnknownPeaks) > 0:
+			logger.Info("Utilization share: the models' peaks are not known yet -- no need history for a "+
+				"flappingWindow, as after a restart with none stored or for a new group -- so each counts at its "+
+				"maxReplicas, keeps at most maxHeadroomReplicas of headroom, and the rest is returned",
+				"cause", "peaks-unknown", "unknownPeaks", plan.UnknownPeaks, "peakClaimGPUs", plan.PeakClaimGPUs,
+				"budget", g.Budget, "maxHeadroomReplicas", us.MaxHeadroomReplicas)
+		case plan.HeadroomCapped:
 			logger.Info("Utilization share: the models' recent peaks do not fit the quota together; each keeps at most "+
 				"maxHeadroomReplicas of headroom, and the rest is returned",
-				"peakClaimGPUs", plan.PeakClaimGPUs, "budget", g.Budget, "maxHeadroomReplicas", us.MaxHeadroomReplicas)
-		} else if seen {
+				"cause", "peaks-exceed-budget", "peakClaimGPUs", plan.PeakClaimGPUs, "budget", g.Budget,
+				"maxHeadroomReplicas", us.MaxHeadroomReplicas)
+		case seen:
 			logger.Info("Utilization share: the models' recent peaks fit the quota together again; the spare is spread by weight",
 				"peakClaimGPUs", plan.PeakClaimGPUs, "budget", g.Budget)
 		}

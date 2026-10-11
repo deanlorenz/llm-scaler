@@ -312,6 +312,9 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 			// decide contention -- would take it.
 			return nil, "role " + role + " has a need that is not a finite number"
 		}
+		// No group holds more GPUs than this; a larger need, summed with
+		// the others', would overflow every share sum to NaN.
+		need = math.Min(need, MaxShareBudgetGPUs)
 		if !measured && len(vs) > 0 {
 			g = gpusPerReplicaFromState(stateMap, vs[0].VariantName)
 		}
