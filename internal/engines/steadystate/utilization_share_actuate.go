@@ -838,9 +838,9 @@ func shareBlockedReasons(l *allocation.ShareLedger, g allocation.ShareGroup, ev 
 			case l.ReceivingHeld(r.Key, now, tm) && (!urgent || !calmDonor):
 				add(r.Key, constants.ScalingBlockedReversalHold)
 			// Nor the concurrency limit, for one whose hard imbalance is
-			// confirmed: its moves are unpaced.
+			// confirmed and whose burst outlasts a move: its moves are unpaced.
 			case l.InFlight() >= allocation.ShareMaxConcurrentTransfers &&
-				(!urgent || !calmDonor || l.HardCycles(r.Key) < allocation.ShareUnpacedAfterCycles):
+				(!urgent || !calmDonor || !l.Unpaced(r.Key, tm)):
 				add(r.Key, constants.ScalingBlockedTransferLimit)
 			}
 		}

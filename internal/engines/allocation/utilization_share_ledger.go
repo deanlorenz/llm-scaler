@@ -193,6 +193,15 @@ func (tm ShareTimings) moveLatency() time.Duration {
 	return tm.SwingWindow / 8
 }
 
+// unpacedHorizon is how much of its burst a receiver must have left for its
+// hard imbalance to move unpaced (ShareLedger.Unpaced): a move's latency, and
+// a quarter of it again to serve in. Measured in the whole-node simulator, a
+// move landing with less of the burst left cost more, at the donor's next
+// burst, than it served.
+func (tm ShareTimings) unpacedHorizon() time.Duration {
+	return tm.moveLatency() * 5 / 4
+}
+
 // shareMove is one role's side of a transfer: id names the transfer, so a
 // transfer that is cancelled or never took effect removes exactly its own.
 type shareMove struct {
@@ -275,6 +284,8 @@ type ShareLedger struct {
 	// over counts each role's consecutive cycles holding more than its
 	// target (MarkOver).
 	over map[string]int
+	// overSince is when each role still over its target first was (MarkOver).
+	overSince map[string]time.Time
 	// releases are the durations of recent completed releases, newest last,
 	// for the measured release time (§8.4).
 	releases []time.Duration
@@ -316,6 +327,7 @@ func NewShareLedger() *ShareLedger {
 		confirm:     map[string]int{},
 		hard:        map[string]int{},
 		over:        map[string]int{},
+		overSince:   map[string]time.Time{},
 		seen:        map[string]time.Time{},
 		unsteerable: map[string]bool{},
 		busyUntil:   map[string]time.Time{},
@@ -964,16 +976,60 @@ func (l *ShareLedger) RecentPeak(role string, now time.Time, d time.Duration) fl
 // LongBursts reports whether role's longest completed burst -- a run of need
 // above the midpoint of its recorded range -- lasted at least d.
 func (l *ShareLedger) LongBursts(role string, d time.Duration) bool {
+	b := l.needBursts(role)
+	return b.completed > 0 && b.longest >= d
+}
+
+// BurstsLong reports whether role bursts (LongBursts) over a range of at
+// least ShareLongBurstSpread of its highest need: a burst, not a steady need
+// drifting across the middle of a narrow range.
+func (l *ShareLedger) BurstsLong(role string, d time.Duration) bool {
+	b := l.needBursts(role)
+	return b.completed > 0 && b.longest >= d && b.spread >= ShareLongBurstSpread
+}
+
+// SwingsFast reports whether role's need swings faster than d: at least two
+// bursts completed, none lasting d, over a range of at least
+// ShareFastSwingSpread of its highest need.
+func (l *ShareLedger) SwingsFast(role string, d time.Duration) bool {
+	b := l.needBursts(role)
+	return b.completed >= 2 && b.longest < d && b.spread >= ShareFastSwingSpread
+}
+
+// BurstEndsWithin reports whether role's burst under way is expected to end
+// within d: what is left of its longest completed burst, after as long as the
+// one under way has lasted, is shorter than d. A role with no completed burst
+// on record has no expected end.
+func (l *ShareLedger) BurstEndsWithin(role string, d time.Duration) bool {
+	b := l.needBursts(role)
+	return b.completed > 0 && b.longest-b.ongoing < d
+}
+
+// shareBursts summarises a role's need history (ShareLedger.needBursts).
+type shareBursts struct {
+	// longest is the longest completed burst; completed counts them.
+	longest   time.Duration
+	completed int
+	// ongoing is how long the burst under way has lasted, zero when none is.
+	ongoing time.Duration
+	// spread is the history's range as a fraction of its highest need (of
+	// one GPU, at least).
+	spread float64
+}
+
+// needBursts reads role's need history as bursts: runs of need above the
+// midpoint of its recorded range. A run still going counts only as ongoing.
+func (l *ShareLedger) needBursts(role string) shareBursts {
 	s := l.needs[role]
 	if len(s) < 3 {
-		return false
+		return shareBursts{}
 	}
 	hi, lo := s[0].need, s[0].need
 	for _, x := range s {
 		hi, lo = math.Max(hi, x.need), math.Min(lo, x.need)
 	}
 	mid := (hi + lo) / 2
-	var longest time.Duration
+	out := shareBursts{spread: (hi - lo) / math.Max(hi, 1)}
 	var start time.Time
 	in := false
 	for _, x := range s {
@@ -982,10 +1038,14 @@ func (l *ShareLedger) LongBursts(role string, d time.Duration) bool {
 			in, start = true, x.at
 		case x.need <= mid && in:
 			in = false
-			longest = max(longest, x.at.Sub(start))
+			out.completed++
+			out.longest = max(out.longest, x.at.Sub(start))
 		}
 	}
-	return longest >= d
+	if in {
+		out.ongoing = s[len(s)-1].at.Sub(start)
+	}
+	return out
 }
 
 // AnyPeakKnown reports whether any role's peak is known (PeakKnown): the
@@ -1041,7 +1101,16 @@ func (l *ShareLedger) AssignReturn(id, receiver, variant string, gpus int) bool 
 // PlanningNeed is the need a role is planned on: its mean over the swing
 // window while it is swinging, else its current need.
 func (l *ShareLedger) PlanningNeed(role string, current float64, now time.Time) float64 {
-	if !l.Swinging(role, now) || len(l.needs[role]) == 0 {
+	if !l.Swinging(role, now) {
+		return current
+	}
+	return l.MeanNeed(role, current)
+}
+
+// MeanNeed is role's mean need over the swing window, or current with no
+// history.
+func (l *ShareLedger) MeanNeed(role string, current float64) float64 {
+	if len(l.needs[role]) == 0 {
 		return current
 	}
 	sum := 0.0
@@ -1092,21 +1161,45 @@ func (l *ShareLedger) ConfirmHard(hard map[string]bool) map[string]int {
 // receiver (ConfirmHard).
 func (l *ShareLedger) HardCycles(role string) int { return l.hard[role] }
 
+// Unpaced reports whether role's hard-imbalance moves skip the pace and the
+// concurrency limit: its hard imbalance has held ShareUnpacedAfterCycles
+// consecutive cycles, and its burst is not expected to end within
+// unpacedHorizon (BurstEndsWithin). Moves taken all at once for a burst that
+// ends first land after it, or serve it for minutes: they drain their donors,
+// often just before the donors' own bursts, so such a role moves at the pace.
+func (l *ShareLedger) Unpaced(role string, tm ShareTimings) bool {
+	return l.hard[role] >= ShareUnpacedAfterCycles && !l.BurstEndsWithin(role, tm.unpacedHorizon())
+}
+
 // MarkOver records which roles hold more than their target this cycle and
 // returns, per role still over, for how many consecutive cycles it has been:
 // what a return waits on (returnSpare). A role that is not over starts again.
-func (l *ShareLedger) MarkOver(over map[string]bool) map[string]int {
+func (l *ShareLedger) MarkOver(over map[string]bool, now time.Time) map[string]int {
 	for role := range l.over {
 		if !over[role] {
 			delete(l.over, role)
+			delete(l.overSince, role)
 		}
 	}
 	for role, o := range over {
 		if o {
 			l.over[role]++
+			if _, ok := l.overSince[role]; !ok {
+				l.overSince[role] = now
+			}
 		}
 	}
 	return maps.Clone(l.over)
+}
+
+// OverFor is how long role has held more than its target (MarkOver), zero
+// when it does not.
+func (l *ShareLedger) OverFor(role string, now time.Time) time.Duration {
+	since, ok := l.overSince[role]
+	if !ok {
+		return 0
+	}
+	return now.Sub(since)
 }
 
 // MeasuredRelease is the 90th percentile of recent completed releases, and
@@ -1336,6 +1429,7 @@ func (l *ShareLedger) Retain(present []string, now time.Time, tm ShareTimings) {
 		delete(l.needsSince, r)
 		delete(l.hard, r)
 		delete(l.over, r)
+		delete(l.overSince, r)
 	}
 }
 
