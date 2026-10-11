@@ -168,8 +168,8 @@ func loadConfig(cfg *Config, flagSet *flag.FlagSet, configFilePath string) error
 		// 24ns). That is enough to identify the mistake and avoids three more
 		// fields on Config; if it ever is not, pass v.GetString too.
 		learnedEpisodeGap:      v.GetDuration("LEARNED_STATE_EPISODE_GAP"),
-		learnedVariantTimeout:  v.GetDuration("LEARNED_STATE_TIMEOUT"),
-		learnedBucketRetention: v.GetDuration("LEARNED_STATE_RETENTION"),
+		learnedVariantTimeout:  v.GetDuration("LEARNED_STATE_VARIANT_TIMEOUT"),
+		learnedBucketRetention: v.GetDuration("LEARNED_STATE_BUCKET_RETENTION"),
 	}
 
 	cfg.tls = tlsConfig{

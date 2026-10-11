@@ -21,8 +21,8 @@ func TestLoad_LearnedStateHorizons(t *testing.T) {
 		t.Setenv("PROMETHEUS_BASE_URL", "https://prometheus:9090")
 		configFile := writeTestConfigFile(t, `
 LEARNED_STATE_EPISODE_GAP: "90m"
-LEARNED_STATE_TIMEOUT: "72h"
-LEARNED_STATE_RETENTION: "240h"
+LEARNED_STATE_VARIANT_TIMEOUT: "72h"
+LEARNED_STATE_BUCKET_RETENTION: "240h"
 `)
 		cfg, err := Load(nil, configFile)
 		if err != nil {
@@ -33,18 +33,18 @@ LEARNED_STATE_RETENTION: "240h"
 			t.Errorf("LEARNED_STATE_EPISODE_GAP: want 90m, got %v", gap)
 		}
 		if variant != 72*time.Hour {
-			t.Errorf("LEARNED_STATE_TIMEOUT: want 72h, got %v", variant)
+			t.Errorf("LEARNED_STATE_VARIANT_TIMEOUT: want 72h, got %v", variant)
 		}
 		if bucket != 240*time.Hour {
-			t.Errorf("LEARNED_STATE_RETENTION: want 240h, got %v", bucket)
+			t.Errorf("LEARNED_STATE_BUCKET_RETENTION: want 240h, got %v", bucket)
 		}
 	})
 
 	t.Run("from the environment", func(t *testing.T) {
 		t.Setenv("PROMETHEUS_BASE_URL", "https://prometheus:9090")
 		t.Setenv("LEARNED_STATE_EPISODE_GAP", "5m")
-		t.Setenv("LEARNED_STATE_TIMEOUT", "10m")
-		t.Setenv("LEARNED_STATE_RETENTION", "30m")
+		t.Setenv("LEARNED_STATE_VARIANT_TIMEOUT", "10m")
+		t.Setenv("LEARNED_STATE_BUCKET_RETENTION", "30m")
 
 		cfg, err := Load(nil, "")
 		if err != nil {
@@ -61,7 +61,7 @@ LEARNED_STATE_RETENTION: "240h"
 		// Not "unset is 24h": Config deliberately does not know the defaults.
 		// Sanitizing in one place -- capacity.Horizons -- is what keeps the
 		// floor from being enforced twice and disagreeing.
-		for _, k := range []string{"LEARNED_STATE_EPISODE_GAP", "LEARNED_STATE_TIMEOUT", "LEARNED_STATE_RETENTION"} {
+		for _, k := range []string{"LEARNED_STATE_EPISODE_GAP", "LEARNED_STATE_VARIANT_TIMEOUT", "LEARNED_STATE_BUCKET_RETENTION"} {
 			if v, ok := os.LookupEnv(k); ok {
 				t.Fatalf("precondition: %s is set to %q in this process", k, v)
 			}
@@ -85,7 +85,7 @@ LEARNED_STATE_RETENTION: "240h"
 		// here would make that log line a lie -- it would report nothing
 		// replaced while the operator's value had already been thrown away.
 		t.Setenv("PROMETHEUS_BASE_URL", "https://prometheus:9090")
-		configFile := writeTestConfigFile(t, `LEARNED_STATE_TIMEOUT: "24"`)
+		configFile := writeTestConfigFile(t, `LEARNED_STATE_VARIANT_TIMEOUT: "24"`)
 
 		cfg, err := Load(nil, configFile)
 		if err != nil {

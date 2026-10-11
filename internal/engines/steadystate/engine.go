@@ -258,7 +258,7 @@ func NewEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 		"episodeGap", h.EpisodeGap,
 		"variantTimeout", h.VariantTimeout,
 		"bucketRetention", h.BucketRetention,
-		"note", "set LEARNED_STATE_EPISODE_GAP, LEARNED_STATE_TIMEOUT, LEARNED_STATE_RETENTION to change them")
+		"note", "set LEARNED_STATE_EPISODE_GAP, LEARNED_STATE_VARIANT_TIMEOUT, LEARNED_STATE_BUCKET_RETENTION to change them")
 	// A replaced horizon has to say so, because the line above cannot. After
 	// flooring it prints the default, which is byte-identical to what an
 	// unconfigured controller prints -- so an operator who mistyped reads

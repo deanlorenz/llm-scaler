@@ -445,7 +445,7 @@ token per request, so its output length is not a property of its work.
 The first three are **defaults, not the values in force**. They are assembled into a
 `capacity.Horizons` and handed to the analyzer by `WithHorizons`, which the engine
 fills from `Config.LearnedStateHorizons()` — `LEARNED_STATE_EPISODE_GAP`,
-`LEARNED_STATE_TIMEOUT`, `LEARNED_STATE_RETENTION`. `Horizons.Sanitized` floors each
+`LEARNED_STATE_VARIANT_TIMEOUT`, `LEARNED_STATE_BUCKET_RETENTION`. `Horizons.Sanitized` floors each
 field at `MinHorizon` (1m) independently and names the ones it replaced, so a single
 unusable value does not discard the other two. Read the pair in force off
 `a.horizons`; `EvictStaleHistory()` takes no arguments, because a horizon passed per
