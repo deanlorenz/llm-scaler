@@ -150,6 +150,18 @@ EOF
     fi
     rm -rf "$tmp_overlay"
 
+    # The utilization-share need history is written by the controller, not
+    # rendered, so the filtered delete above never names it. Left behind, a
+    # reinstall would restore peaks recorded before the uninstall. Deleted
+    # after the Deployment and the Role that let it write, so a pod still
+    # terminating cannot write it back.
+    local history_cm=wva-utilization-share-history history_err
+    history_err="$(kubectl delete configmap "$history_cm" -n "$WVA_NS" --ignore-not-found 2>&1 >/dev/null)" && history_err=""
+    if [ -n "$history_err" ]; then
+        log_warning "The utilization-share need history ConfigMap $history_cm in $WVA_NS was not removed:"
+        printf '%s\n' "$history_err" | sed 's/^/    /'
+    fi
+
     log_info "Left in place: namespace $WVA_NS. Delete it yourself if you want it gone."
 
     # ScaledObjects outlive the controller, and that is a trap rather than a

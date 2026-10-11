@@ -738,27 +738,38 @@ again from zero: reversal holds, swing state and abort back-offs. For one fill
 timeout every planned model of the group holds what it runs (blocked reason
 `quiet-period`); that quiet period is the only protection across the restart.
 The demand history the contention test reads is not lost: the acting
-controller writes it, at most once a minute per quota group and only when it
-changed, to the ConfigMap `wva-utilization-share-history` in its own namespace
-(one key per group: each model's first-seen time and the highest reading of
-each minute over the last `flappingWindow`). When a group's state is rebuilt --
-a restart, a leader change, the optimizer switched from shadow to acting, or a
-group back after it was dropped -- the history is read back before the group
-plans, so the models' peaks are known at once and the cap does not turn on by
-itself. The log line `Utilization share: need history restored` says so.
-Shadow mode writes nothing. A group that disappears keeps its stored history, so
-a group dropped after a few minutes of failed reads gets its peaks back; an
-entry older than its window is removed by a later write. When there is no
-usable stored history -- a new group, a deleted ConfigMap, a read that fails,
-or a history that ends more than ten minutes before now (a controller down that
-long missed whatever peaked meanwhile) -- each model counts at its
-`maxReplicas` in the contention test until a `flappingWindow` of history
-exists, and headroom is capped meanwhile unless the models' `maxReplicas` fit
-the quota together (see `maxHeadroomReplicas`). The controller needs `get` and
-`update` on that ConfigMap and `create` on ConfigMaps in its namespace; the
-shipped Role `wva-utilization-share-history-role` grants exactly that, in every
-install overlay. Deleting the ConfigMap flushes the history, in the running
-controller as well: see
+controller writes it, when it changed and at most once a minute per quota
+group, every changed group in one write, to the ConfigMap
+`wva-utilization-share-history` in its own namespace (one key per group: each
+model's first-seen time and, for each minute over the last `flappingWindow`,
+the highest level two readings in a row reached in it -- the same rule a peak
+is counted by, so a restart neither turns lone spikes into a peak nor loses a
+short real one). When a group's state is rebuilt -- a restart, a leader change,
+the optimizer switched from shadow to acting, or a group back after it was
+dropped -- the history is read back before the group plans, so the models'
+peaks are known at once and the cap does not turn on by itself. The log line
+`Utilization share: need history restored` says so. A history kept over a
+shorter `flappingWindow` than today's makes its peaks known only once today's
+window is covered. Shadow mode writes nothing. A group that disappears keeps
+its stored history, so a group dropped after a few minutes of failed reads gets
+its peaks back; an entry older than its window is removed by a later write.
+When there is no usable stored history -- a new group, a deleted ConfigMap, a
+read that fails, or a history that ends more than ten minutes before now (a
+controller down that long missed whatever peaked meanwhile) -- each model
+counts at its `maxReplicas` in the contention test until a `flappingWindow` of
+history exists, and headroom is capped meanwhile unless the models'
+`maxReplicas` fit the quota together (see `maxHeadroomReplicas`). The
+two-readings rule stops a glitched reading; it does not stop a tenant who
+controls its own model's metrics and holds them high for two cycles, and a
+history restored after a restart carries such a peak like any other. The
+controller needs `get` and `update` on that ConfigMap and `create` on
+ConfigMaps in its namespace; the shipped Role
+`wva-utilization-share-history-role` grants exactly that, in every install
+overlay. An install upgraded from before the store existed runs without it
+until an admin re-runs `make setup-prereqs` for the namespace. Deleting the
+ConfigMap flushes the history, in the running controller as well; editing a
+key by hand does not, since the next write replaces it. Size bounds, the log
+lines and uninstall: see
 [troubleshooting](troubleshooting.md#utilization-share-optimizer). A return rebuilt from its marks no longer
 knows its pod shape, so it is not handed to a short model; it goes to the
 unassigned GPUs.

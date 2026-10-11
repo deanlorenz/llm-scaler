@@ -325,19 +325,30 @@ per group (the controller instance and group key, sanitized, with a hash).
 Each entry is JSON: a format `version`, the `group`, `writtenAt`, the
 `swingWindow` it was kept over, the writing `controllerInstance`, and per role
 its `since` (when its need was first recorded) and its samples as
-`[unix seconds, need]`, downsampled to the highest reading per minute (coarser
-past 180 minutes of window; `ShareLedger.NeedHistory`). It is written on
-change, at most once a minute per group, with the ConfigMap's
-`resourceVersion` as the concurrency check (a conflict re-reads and retries
-once), and only on the acting path: shadow mode keeps no ledger and writes
-nothing. A rebuilt ledger reads it once, through the API reader, before its
-first plan (`ShareLedger.RestoreNeedHistory`): an entry of another version,
-group or controller instance is ignored; a sample that is not a finite,
-non-negative need, older than the window or more than a minute in the future
-is dropped; and a role's `since` is restored -- making its peak known once a
-window has passed since it -- only when its samples run to within
-`ShareHistoryMaxGap` (ten minutes) of now, since a longer gap was not observed.
-Its samples are kept either way. A role not in the group is restored too;
+`[unix seconds, need]`, the need rounded up to four significant digits. A
+sample is a bucket's sustained level: the highest `min` of two consecutive
+readings ending in the minute (coarser past 180 minutes of window;
+`ShareLedger.NeedHistory`), the quantity `PeakNeed` takes its maximum of. A
+bucket's highest reading would make an isolated spike in each of two
+neighbouring minutes a sustained peak after a restart; its lowest would erase
+a real two-reading burst inside one minute. Each stored level is restored as
+two readings at its instant, so `PeakNeed` after a restore is `PeakNeed`
+before it. Each group's history is staged on change, at most once a minute,
+and every staged group is written in one read-modify-write per cycle, with
+the ConfigMap's `resourceVersion` as the concurrency check (a conflict
+re-reads and retries once), and only on the acting path: shadow mode keeps no
+ledger and writes nothing. Every ledger rebuilt in a cycle restores from one
+read, through the API reader, before its first plan
+(`ShareLedger.RestoreNeedHistory`): an entry of another version, group or
+controller instance is ignored; a sample that is not a finite, non-negative
+need, older than the window or more than a minute in the future is dropped;
+and a role's `since` is restored -- making its peak known once a window has
+passed since it -- only when its samples run to within `ShareHistoryMaxGap`
+(ten minutes) of now, since a longer gap was not observed. Its samples are
+kept either way. A restored `since` is never earlier than the start of the
+bucket before the oldest sample kept, and an entry kept over a shorter
+`swingWindow` than today's restores no `since` at all (the oldest sample
+stands in): a peak is known only over what samples cover. A role not in the group is restored too;
 `Retain` forgets it if it does not return. A NotFound read is no history; any
 other failure, Forbidden included, is logged at Error once per change and
 restores nothing, and the group writes nothing until a read, retried once a
@@ -345,22 +356,34 @@ minute, succeeds, so a history it could not read is never overwritten. A
 vanished group's stored entry is kept (only the controller's memory of what it
 wrote is dropped), so a group dropped after a couple of minutes of failed
 collection gets its peaks back; an entry written longer ago than its window
-plus ten minutes is removed by the next write of any group. Deleting the
-ConfigMap is the flush: the next write finds it gone, and the controller forgets
-its in-memory history as well (`ShareLedger.ForgetNeedHistory`) rather than
-writing it straight back. The ConfigMap is bounded below the API server's
-object limit (128 roles per group, 180 samples per role, 900 KiB in all; a
-truncation is logged). RBAC is a namespaced Role
+plus ten minutes is removed by the next write of any group, one that does not
+parse at once, and one of another format version once a week old (a
+controller rolled back may still read it). Errors are logged per operation
+and group, and a recovery only for the group that failed. Deleting the
+ConfigMap is the flush: once the controller has read or written it, a read or
+write that finds it gone makes the controller forget its in-memory history as
+well (`ShareLedger.ForgetNeedHistory`) rather than writing it straight back.
+Editing one key by hand is not a flush: the next write of that group replaces
+it. The ConfigMap is bounded below the API server's object limit (128 roles
+per group, 180 samples per role, and each group written gets an equal share of
+900 KiB so one large group cannot crowd the others out); a group over a bound
+leaves out its smallest stored peaks first, and the truncation is logged with
+the roles it left out. `make undeploy-wva` deletes the ConfigMap; an install
+upgraded from before the store existed reports its Role and RoleBinding as
+optional prerequisites and runs without them until an admin re-runs
+`make setup-prereqs`. RBAC is a namespaced Role
 (`config/base/rbac/utilization-share-history-role.yaml`) with `get` and
 `update` on that ConfigMap by name and `create` on ConfigMaps (create cannot be
 scoped by name), bound to the controller's service account; it is in the base,
 so every install overlay renders it. Metrics cannot be this store: they carry
 no writer identity and no honest age. One side effect: the restored samples
-are per-minute maxima, so for one window after a restart the peak (two
-readings in a row) and a swinging role's mean need (§6.7 rule 5, `PlanningNeed`)
-are taken over those maxima mixed with the new per-cycle readings, and read
-somewhat high. Swing state itself is not stored, so a role swings again only
-after two new reversals.
+are per-minute sustained levels, so for one window after a restart a swinging
+role's mean need (§6.7 rule 5, `PlanningNeed`) is taken over those levels mixed
+with the new per-cycle readings, and reads somewhat differently from the live
+mean; the peak is unchanged. The two-readings rule stops a glitched reading,
+not a tenant who controls its model's metrics: two forged readings in a row
+are a peak, live or restored. Swing state itself is not stored, so a role
+swings again only after two new reversals.
 
 So the window of capped headroom is paid only when no usable history exists:
 a new group, the first start, a flush, an unreadable ConfigMap, or a

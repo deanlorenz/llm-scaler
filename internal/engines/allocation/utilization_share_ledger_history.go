@@ -29,7 +29,9 @@ type ShareNeedSample struct {
 }
 
 // ShareRoleNeedHistory is one role's stored need history: since when its need
-// has been recorded, and its samples over the last swing window, oldest first.
+// has been recorded, and its sustained need per bucket over the last swing
+// window, oldest first. A zero Since says nothing is known before the oldest
+// sample.
 type ShareRoleNeedHistory struct {
 	Since   time.Time
 	Samples []ShareNeedSample
@@ -40,6 +42,18 @@ type ShareRoleNeedHistory struct {
 // and PeakKnown read: without it a restarted ledger knows no role's peak, and
 // the planner takes every peak at its ceiling for a swing window.
 type ShareNeedHistory map[string]ShareRoleNeedHistory
+
+// ShareNeedRestore is what RestoreNeedHistory restored.
+type ShareNeedRestore struct {
+	// Roles is how many roles had samples restored.
+	Roles int
+	// KnownNow is how many of them have a known peak (PeakKnown) at once.
+	KnownNow int
+	// KnownAt is the earliest time a restored role's peak becomes known --
+	// a swing window after its restored Since -- or zero when no role's
+	// Since was restored.
+	KnownAt time.Time
+}
 
 // shareHistoryBucket is the width one stored sample stands for: a minute, or
 // coarser when a swing window holds more minutes than ShareHistoryMaxSamples.
@@ -52,25 +66,35 @@ func shareHistoryBucket(window time.Duration) time.Duration {
 }
 
 // NeedHistory is the ledger's need history over the last swing window, for
-// storage. Each bucket (a minute, or coarser for a long window) keeps only its
-// highest sample, which is all PeakNeed reads, so at most
-// ShareHistoryMaxSamples are kept per role.
+// storage, at most ShareHistoryMaxSamples per role. PeakNeed counts a peak
+// only once two readings in a row reach it, so what a bucket (a minute, or
+// coarser for a long window) stores is its sustained level: the highest
+// min(s[i-1], s[i]) over the pairs of consecutive readings ending in it. A
+// bucket's highest single reading would turn an isolated spike in each of two
+// neighbouring buckets into a sustained peak after a restart; its lowest
+// would erase a real two-reading burst inside it. A pair with a reading older
+// than the window, or not a usable need, stores nothing, so neither does the
+// role's first reading on its own. RestoreNeedHistory reads each stored level
+// back as sustained by itself, so PeakNeed after a restore is PeakNeed before.
 func (l *ShareLedger) NeedHistory(now time.Time, tm ShareTimings) ShareNeedHistory {
 	bucket := shareHistoryBucket(tm.SwingWindow)
 	out := make(ShareNeedHistory, len(l.needsSince))
 	for role, since := range l.needsSince {
+		s := l.needs[role]
 		var samples []ShareNeedSample
-		for _, s := range l.needs[role] {
-			if now.Sub(s.at) > tm.SwingWindow || !shareNeedValid(s.need) {
+		for i := 1; i < len(s); i++ {
+			a, b := s[i-1], s[i]
+			if now.Sub(a.at) > tm.SwingWindow || !shareNeedValid(a.need) || !shareNeedValid(b.need) {
 				continue
 			}
-			if n := len(samples); n > 0 && samples[n-1].At.Truncate(bucket).Equal(s.at.Truncate(bucket)) {
-				if s.need > samples[n-1].Need {
-					samples[n-1] = ShareNeedSample{At: s.at, Need: s.need}
-				}
+			level := math.Min(a.need, b.need)
+			if n := len(samples); n > 0 && samples[n-1].At.Truncate(bucket).Equal(b.at.Truncate(bucket)) {
+				// Stamped with the bucket's last reading: the level ages out
+				// no earlier than the pair that set it.
+				samples[n-1] = ShareNeedSample{At: b.at, Need: math.Max(samples[n-1].Need, level)}
 				continue
 			}
-			samples = append(samples, ShareNeedSample{At: s.at, Need: s.need})
+			samples = append(samples, ShareNeedSample{At: b.at, Need: level})
 		}
 		if len(samples) > ShareHistoryMaxSamples {
 			samples = samples[len(samples)-ShareHistoryMaxSamples:]
@@ -83,15 +107,21 @@ func (l *ShareLedger) NeedHistory(now time.Time, tm ShareTimings) ShareNeedHisto
 // RestoreNeedHistory merges a stored need history into the ledger, as read back
 // after a restart. A sample that is not a finite, non-negative need, that is
 // older than the swing window, or that lies in the future is dropped, and at
-// most ShareHistoryMaxSamples of the newest are taken per role. A role's Since
-// is restored -- making its peak known once a window has passed since it --
-// only when its history runs up to within ShareHistoryMaxGap of now: a longer
-// gap was not observed, and a peak in it would be missed. A role not in the
-// group is restored too; Retain forgets it if it does not return.
+// most ShareHistoryMaxSamples of the newest are taken per role. Each sample is
+// a bucket's sustained level (NeedHistory), so it is restored as two readings
+// at its instant: a level by itself, as PeakNeed counts one.
 //
-// It returns how many roles had their Since restored.
-func (l *ShareLedger) RestoreNeedHistory(h ShareNeedHistory, now time.Time, tm ShareTimings) int {
-	known := 0
+// A role's Since is restored -- making its peak known once a window has passed
+// since it -- only when its history runs up to within ShareHistoryMaxGap of
+// now: a longer gap was not observed, and a peak in it would be missed. It is
+// taken no earlier than the start of the bucket before the oldest sample's: a Since the
+// samples do not cover -- written by hand, or kept over a shorter window than
+// today's -- would call a peak known that nothing recorded. A zero Since is
+// the oldest sample. A role not in the group is restored too; Retain forgets
+// it if it does not return.
+func (l *ShareLedger) RestoreNeedHistory(h ShareNeedHistory, now time.Time, tm ShareTimings) ShareNeedRestore {
+	var res ShareNeedRestore
+	bucket := shareHistoryBucket(tm.SwingWindow)
 	for role, rh := range h {
 		samples := make([]shareNeedSample, 0, len(rh.Samples))
 		for _, s := range rh.Samples {
@@ -103,19 +133,28 @@ func (l *ShareLedger) RestoreNeedHistory(h ShareNeedHistory, now time.Time, tm S
 		if len(samples) == 0 {
 			continue
 		}
+		res.Roles++
 		slices.SortFunc(samples, func(a, b shareNeedSample) int { return a.at.Compare(b.at) })
 		if len(samples) > ShareHistoryMaxSamples {
 			samples = samples[len(samples)-ShareHistoryMaxSamples:]
 		}
-		l.needs[role] = append(l.needs[role], samples...)
+		for _, s := range samples {
+			l.needs[role] = append(l.needs[role], s, s)
+		}
 		slices.SortStableFunc(l.needs[role], func(a, b shareNeedSample) int { return a.at.Compare(b.at) })
 
-		last := samples[len(samples)-1].at
+		oldest, last := samples[0].at, samples[len(samples)-1].at
 		since := rh.Since
-		if since.IsZero() || since.Sub(now) > shareHistorySkew || since.After(samples[0].at) && since.Sub(samples[0].at) > shareHistorySkew {
+		switch {
+		case since.IsZero() || since.After(oldest):
 			// No honest start: the samples say the need was recorded at
 			// least from the first of them.
-			since = samples[0].at
+			since = oldest
+		case since.Before(oldest.Truncate(bucket).Add(-bucket)):
+			// The oldest sample is stamped with its bucket's last reading,
+			// and the bucket before it may have just aged out: a bucket
+			// before the oldest sample's own is what the samples cover.
+			since = oldest.Truncate(bucket).Add(-bucket)
 		}
 		if now.Sub(last) > ShareHistoryMaxGap {
 			continue
@@ -123,9 +162,14 @@ func (l *ShareLedger) RestoreNeedHistory(h ShareNeedHistory, now time.Time, tm S
 		if cur, ok := l.needsSince[role]; !ok || since.Before(cur) {
 			l.needsSince[role] = since
 		}
-		known++
+		if l.PeakKnown(role, now, tm) {
+			res.KnownNow++
+		}
+		if at := l.needsSince[role].Add(tm.SwingWindow); res.KnownAt.IsZero() || at.Before(res.KnownAt) {
+			res.KnownAt = at
+		}
 	}
-	return known
+	return res
 }
 
 // ForgetNeedHistory drops every role's need history, as when the stored

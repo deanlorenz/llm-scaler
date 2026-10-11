@@ -232,7 +232,7 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 		var act shareActuation
 		if !us.Shadow {
 			act = e.actuateUtilizationShare(ctx, logger, us, g, ev, scaleTargets, now)
-			e.saveShareHistory(ctx, logger, shareGroupKey(g), act.timings, now)
+			e.stageShareHistory(ctx, logger, shareGroupKey(g), act.timings, now)
 			if act.evaluation != nil {
 				ev = *act.evaluation
 			}
@@ -334,6 +334,10 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 			}
 		}
 		logger.V(logging.DEBUG).Info("Utilization share: evaluation", append(kv, "roles", table)...)
+	}
+	if !us.Shadow {
+		// Every group staged above, in one write.
+		e.writeShareHistory(ctx, logger, now)
 	}
 	metrics.PublishUtilizationShare(published)
 	e.dropVanishedGroups(ctx, logger, seen, now)

@@ -230,37 +230,55 @@ Work down the list in order.
    why, typically a missing RBAC grant to list pods in one model's namespace.
    The models' demand history survives the restart in the ConfigMap
    `wva-utilization-share-history` in the controller's namespace, and the log
-   line `Utilization share: need history restored` says it was read back
-   (`peaksKnownFrom` counts the roles whose peaks are known at once). When it
-   was not -- no stored history, or one ending more than ten minutes before the
-   restart -- the headroom cap is on until a `stabilization.flappingWindow` of
-   history exists and the models' peaks are known again
-   (`wva_utilization_share_headroom_capped` is not published during the quiet
-   period, when the planner does not plan)
+   line `Utilization share: need history restored` says it was read back:
+   `rolesKnownNow` counts the roles whose peaks are known at once, and
+   `peaksKnownAt` is when the first restored role's peak is known (a time in
+   the past when some are known now). When it was not -- no stored history, or
+   one ending more than ten minutes before the restart -- the headroom cap is
+   on until a `stabilization.flappingWindow` of history exists and the models'
+   peaks are known again (`wva_utilization_share_headroom_capped` is not
+   published during the quiet period, when the planner does not plan)
    ([a model shrinks while no other model grows](#a-model-shrinks-while-no-other-model-grows)).
-   `Utilization share: stored need history not used` says why a stored entry
-   was ignored (`reason`). The Error line `Utilization share: could not read
-   the stored need history; the models' peaks are unknown for a swing window
-   and their headroom is capped meanwhile. Retrying every minute; nothing is
-   written until a read succeeds` means the read failed with something other
-   than NotFound -- typically Forbidden: the Role
-   `wva-utilization-share-history-role` or its binding is missing. Nothing is
-   restored, and nothing is written until a read succeeds, so the stored
-   history is not overwritten. `Utilization share: could not store the need
-   history; a restart now forgets the models' peaks` is the same for the
-   write. Both are logged once per change of the error, and
-   `Utilization share: the need history store works again` marks the recovery.
+   A history that covers less than today's `flappingWindow` -- the window was
+   raised since it was written -- is restored, but its peaks are known only
+   once today's window is covered. `Utilization share: stored need history not
+   used` says why a stored entry was ignored (`reason`; `older than its window`
+   when every sample in it has aged out). The Error line `Utilization share:
+   could not read the stored need history; the models' peaks are unknown for a
+   swing window and their headroom is capped meanwhile. Retrying every minute;
+   nothing is written until a read succeeds` (with the `group`) means the read
+   failed with something other than NotFound -- typically Forbidden: the Role
+   `wva-utilization-share-history-role` or its binding is missing. On an
+   install upgraded from before the store existed, the controller-only
+   `make deploy-wva` reports both as optional prerequisites and installs
+   without them; ask an admin to re-run `NAMESPACE=<controller-namespace> make
+   setup-prereqs` to enable the store. Nothing is restored, and nothing is
+   written until a read succeeds, so the stored history is not overwritten.
+   `Utilization share: could not store the need history; a restart now forgets
+   the models' peaks` is the same for the write. Both are logged per group,
+   once per change of the error, and `Utilization share: the need history
+   store works again` marks that group's recovery.
+   The ConfigMap is bounded below the API server's 1 MiB object limit: at most
+   128 models' roles per group, and each group written gets an equal share of
+   900 KiB. A group over either bound leaves out the roles with the smallest
+   stored peaks, which count at their `maxReplicas` after a restart:
+   `Utilization share: need history truncated; the roles left out count at
+   their ceiling after a restart` names them (`dropped`, the first ten) and is
+   logged once per change.
    To flush the history -- after a model's load has changed for good, say, and
    its old peaks keep the cap on -- delete the ConfigMap:
    ```bash
    kubectl delete configmap wva-utilization-share-history -n <controller-namespace>
    ```
-   The running controller notices on its next write (within a minute or so,
-   once a history has changed) and forgets its in-memory history too, rather
-   than writing it straight back: `Utilization share: the need history
-   ConfigMap was deleted; every model's need history is forgotten`. The cap
-   then judges every model as after a restart with nothing stored, for one
-   window.
+   The running controller notices on its next read or write of it (within a
+   minute or so) and forgets its in-memory history too, rather than writing it
+   straight back: `Utilization share: the need history ConfigMap was deleted;
+   every model's need history is forgotten`. The cap then judges every model
+   as after a restart with nothing stored, for one window. Editing one group's
+   key by hand does not flush it: the controller's next write of that group
+   replaces it from memory. Entries the controller cannot parse are removed by
+   its next write, and entries of another format version once a week old.
+   Uninstalling with `make undeploy-wva` deletes the ConfigMap.
 9. **Could it not mark the donor?** `Utilization share: could not mark a donor pod;
    transfer not started` means the donor's pod could not be steered by a fault:
    a sibling's deletion cost leaves no room for the mark (see
