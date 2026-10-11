@@ -70,9 +70,13 @@ type analyzerEntry struct {
 }
 
 type Engine struct {
-	client   client.Client
-	scheme   *runtime.Scheme
-	executor executor.Executor
+	client client.Client
+	// apiReader reads past the manager's cache: the utilization-share need
+	// history ConfigMap is in no namespace or label set the cache holds. Nil in
+	// tests, which read through client.
+	apiReader client.Reader
+	scheme    *runtime.Scheme
+	executor  executor.Executor
 
 	// Recorder - use wrapper function recordEvent to limit number of events per va in an optimization cycle
 	Recorder record.EventRecorder
@@ -270,6 +274,7 @@ func NewEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 
 	engine = Engine{
 		client:                  client,
+		apiReader:               apiReader,
 		scheme:                  scheme,
 		Recorder:                recorder,
 		Config:                  cfg,

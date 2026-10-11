@@ -152,6 +152,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 			return shareActuation{overrides: e.shareOverrides(g, variantKey, "reading transfer marks"),
 				timings: tm, sources: src, blocked: blocked}
 		}
+		e.restoreShareHistory(ctx, logger, key, l, now, tm)
 		st.ledgers[key] = l
 		// After a restart a transfer in Filling has no mark left, and its
 		// receiver may have no pods yet: plan nothing for one fill timeout.

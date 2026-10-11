@@ -48,6 +48,8 @@ type utilizationShareState struct {
 	// headroomCapped is, per group, whether its headroom was capped when
 	// last planned: the cap's flips are logged.
 	headroomCapped map[string]bool
+	// history is the need history store's memory; it outlives the ledgers.
+	history shareHistoryState
 
 	// Actuation state (stage 2), dropped whenever the optimizer is not active.
 	// ledgers are per group (shareGroupKey); desired is each planned variant's
@@ -230,6 +232,7 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 		var act shareActuation
 		if !us.Shadow {
 			act = e.actuateUtilizationShare(ctx, logger, us, g, ev, scaleTargets, now)
+			e.saveShareHistory(ctx, logger, shareGroupKey(g), act.timings, now)
 			if act.evaluation != nil {
 				ev = *act.evaluation
 			}
@@ -371,6 +374,7 @@ func (e *Engine) dropVanishedGroups(ctx context.Context, logger logr.Logger, see
 		delete(st.goneSince, k)
 		delete(st.uncounted, k)
 		delete(st.headroomCapped, k)
+		e.deleteShareHistory(ctx, logger, k)
 	}
 }
 

@@ -5,6 +5,9 @@ resources:
 # Leader election permissions.
 - leader-election-role.yaml
 - leader-election-rolebinding.yaml
+# Utilization-share need history: one ConfigMap in the controller's namespace.
+- utilization-share-history-role.yaml
+- utilization-share-history-rolebinding.yaml
 # Metrics endpoint authn/authz. Comment out to disable metrics endpoint protection.
 # More info: https://book.kubebuilder.io/reference/metrics.html
 - metrics-auth-clusterrole.yaml
