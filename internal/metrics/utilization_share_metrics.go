@@ -82,8 +82,8 @@ func registerUtilizationShareMetrics(registry prometheus.Registerer) error {
 		roleLabels)
 	utilizationShareWithheld = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: constants.WVAUtilizationShareWithheldTotal,
-		Help: "Utilization-share optimizer: transfers not planned, by reason (reversal-hold, not-actionable). " +
-			"Counted only while the optimizer acts.",
+		Help: "Utilization-share optimizer: transfers not planned, by reason (reversal-hold, not-actionable, " +
+			"return-not-calm, return-role-short, donor-peak, awaiting-return). Counted only while the optimizer acts.",
 	}, append(slices.Clone(groupLabels), constants.LabelReason))
 	utilizationShareClaims = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: constants.WVAUtilizationShareClaimsTotal,
@@ -132,9 +132,10 @@ func registerUtilizationShareMetrics(registry prometheus.Registerer) error {
 			"Published only while the optimizer acts.",
 		append(slices.Clone(groupLabels), constants.LabelState))
 	utilizationShareHeadroomCapped = gauge(constants.WVAUtilizationShareHeadroomCapped,
-		"Utilization-share optimizer: 1 while a group's quota is contended -- its roles' recent peaks "+
-			"do not fit together -- and each role's headroom is capped at maxHeadroomReplicas; 0 while "+
-			"the spare is spread. Published only while the optimizer acts.",
+		"Utilization-share optimizer: 1 while each role's headroom is capped at maxHeadroomReplicas -- its "+
+			"roles' recent peaks do not fit the quota together, or are not known yet (no need history: a new "+
+			"group, or none stored); 0 while the spare is spread. The cause is logged when it changes. "+
+			"Published only while the optimizer plans.",
 		groupLabels)
 	for name, c := range map[string]prometheus.Collector{
 		constants.WVAUtilizationShareHeadroom:          utilizationShareHeadroom,

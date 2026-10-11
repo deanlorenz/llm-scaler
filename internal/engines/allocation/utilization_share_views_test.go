@@ -42,8 +42,9 @@ func TestShareHardImbalanceJudgesTheDonorOnItsRecentPeak(t *testing.T) {
 // reading 2 on 64 in 1x8 replicas, and C, at its floor and calm. No single D
 // replica fits R's pods, so only a donor set can fund it.
 type setRun struct {
-	// dRecent is a need D read 45 s before the first cycle, inside its 300 s
-	// scale-down window; 0 reads none.
+	// dRecent is a need D read twice in a row, 75 and 45 s before the first
+	// cycle, inside its 300 s scale-down window; 0 reads none. Once would be
+	// a glitch (RecentPeak).
 	dRecent float64
 	// dHeld: D received within its reversal hold, so only a hard imbalance
 	// may take from it.
@@ -74,7 +75,9 @@ func (s setRun) drained() int {
 		l.RecordNeeds(map[string]float64{"D": 2, "R": rHistory, "C": 1}, t0.Add(-time.Duration(30*i)*time.Second), tm)
 	}
 	if s.dRecent > 0 {
-		l.RecordNeeds(map[string]float64{"D": s.dRecent}, t0.Add(-45*time.Second), tm)
+		for _, ago := range []time.Duration{75 * time.Second, 45 * time.Second} {
+			l.RecordNeeds(map[string]float64{"D": s.dRecent}, t0.Add(-ago), tm)
+		}
 	}
 	if s.dHeld {
 		l.recordMove("D", true, "x", t0.Add(-10*time.Second), tm)

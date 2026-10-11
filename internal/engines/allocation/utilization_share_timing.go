@@ -79,5 +79,6 @@ func DeriveShareTimings(in ShareTimingInputs, l *ShareLedger) (ShareTimings, Sha
 		FillTimeout:    polling + hpaSyncPeriod + 2*in.Cycle + scheduling,
 		ReversalHold:   2 * release,
 		SwingWindow:    8 * latency,
+		MoveLatency:    latency,
 	}, src
 }

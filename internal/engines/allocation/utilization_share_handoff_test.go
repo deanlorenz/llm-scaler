@@ -119,18 +119,18 @@ func TestShareReturnRecordsItsShape(t *testing.T) {
 // donor replica fits R, so R is funded by a donor set -- unless returns D has
 // started, handed to nobody, are already freeing a replica of R.
 func lwsReceiverPlan(returns int) SharePlan {
-	return lwsReceiverPlanTo(returns, "")
+	return lwsReceiverPlanTo(returns, "", 96)
 }
 
 // lwsReceiverPlanTo is lwsReceiverPlan with the returns handed to receiver
 // to when it is not "": a 1x8 role short of its need of 20 on 8.
-func lwsReceiverPlanTo(returns int, to string) SharePlan {
+func lwsReceiverPlanTo(returns int, to string, rCeiling int) SharePlan {
 	tm := simTimings()
 	t0 := time.Unix(100000, 0)
 	l := NewShareLedger()
 	held := map[string]int{"R": 16, "D": 64}
 	roles := []ShareRole{
-		{Key: "R", Weight: 1, Need: 40, Floor: 16, Ceiling: 96, ReplicaGPUs: 16},
+		{Key: "R", Weight: 1, Need: 40, Floor: 16, Ceiling: rCeiling, ReplicaGPUs: 16},
 		{Key: "D", Weight: 1, Need: 2, Floor: 8, Ceiling: 96, ReplicaGPUs: 8},
 	}
 	th := map[string]float64{"R": 0.8, "D": 0.8}
@@ -167,19 +167,27 @@ func TestShareLWSReceiverWaitsOnReturns(t *testing.T) {
 		}
 		return n
 	}
-	p := lwsReceiverPlan(2)
+	// R's ceiling of 32 leaves it one replica short: two returns of 8 cover
+	// it, and no set drains D.
+	p := lwsReceiverPlanTo(2, "", 32)
 	if n := toR(p); n != 0 {
-		t.Fatalf("a donor set started for R while 16 returned GPUs release: %+v", p.Started)
+		t.Fatalf("a donor set started for R while 16 returned GPUs, all it lacks, release: %+v", p.Started)
 	}
-	if p.Withheld[ShareWithheldAwaitingReturn] == 0 {
-		t.Fatalf("R waits on the returns and nothing said so: %v", p.Withheld)
+	if p.Withheld[ShareWithheldAwaitingReturn] == 0 || p.Unfunded["R"] != ShareUnfundedAwaitingReturn {
+		t.Fatalf("R waits on the returns and nothing said so: withheld %v, unfunded %v", p.Withheld, p.Unfunded)
+	}
+	// Short of more than the returns cover, R is credited with them and a set
+	// funds the rest: waiting its whole shortfall on one replica of returns
+	// held it back a release.
+	if p := lwsReceiverPlan(2); p.Withheld[ShareWithheldAwaitingReturn] == 0 || toR(p) == 0 {
+		t.Fatalf("R, short past the returns, was not funded for the rest: withheld %v, started %+v", p.Withheld, p.Started)
 	}
 	// One return frees half a replica of R: not enough to wait on.
 	if p := lwsReceiverPlan(1); p.Withheld[ShareWithheldAwaitingReturn] != 0 {
 		t.Fatalf("R waited on 8 returned GPUs, half its replica: %v", p.Withheld)
 	}
 	// Returns already handed to another receiver free nothing for R.
-	if p := lwsReceiverPlanTo(2, "X"); p.Withheld[ShareWithheldAwaitingReturn] != 0 || toR(p) == 0 {
+	if p := lwsReceiverPlanTo(2, "X", 96); p.Withheld[ShareWithheldAwaitingReturn] != 0 || toR(p) == 0 {
 		t.Fatalf("R waited on returns handed to X: withheld %v, cancelled %v, started %+v", p.Withheld, p.Cancelled, p.Started)
 	}
 	if n := toR(lwsReceiverPlan(0)); n == 0 {

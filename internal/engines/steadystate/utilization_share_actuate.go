@@ -847,8 +847,13 @@ func shareBlockedReasons(l *allocation.ShareLedger, g allocation.ShareGroup, ev 
 		if reason := l.FillBlockedReason(r.Key, now); reason != "" {
 			add(r.Key, reason)
 		}
-		if unfunded[r.Key] == allocation.ShareUnfundedNoCompatibleDonor {
+		switch unfunded[r.Key] {
+		case allocation.ShareUnfundedNoCompatibleDonor:
 			add(r.Key, constants.ScalingBlockedNoCompatibleDonor)
+		case allocation.ShareUnfundedAwaitingReturn:
+			// Waiting on returns still releasing, as a transfer's receiver
+			// waits on its release.
+			add(r.Key, constants.ScalingBlockedAwaitingRelease)
 		}
 	}
 	for _, t := range l.Transfers() {

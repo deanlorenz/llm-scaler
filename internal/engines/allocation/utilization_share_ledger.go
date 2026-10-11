@@ -179,6 +179,18 @@ type ShareTimings struct {
 	// SwingWindow: a role whose transfers change direction twice within it is
 	// planned on its mean need for the next SwingWindow.
 	SwingWindow time.Duration
+	// MoveLatency is how long a move takes from decision to serving: release,
+	// model load and the cycles in between. Zero takes SwingWindow/8, what
+	// the swing window is derived from when not overridden.
+	MoveLatency time.Duration
+}
+
+// moveLatency is tm.MoveLatency, or SwingWindow/8 when it is not set.
+func (tm ShareTimings) moveLatency() time.Duration {
+	if tm.MoveLatency > 0 {
+		return tm.MoveLatency
+	}
+	return tm.SwingWindow / 8
 }
 
 // shareMove is one role's side of a transfer: id names the transfer, so a
@@ -917,8 +929,8 @@ func (l *ShareLedger) RecordNeeds(needs map[string]float64, now time.Time, tm Sh
 	}
 }
 
-// PeakNeed is the highest need recorded for role over the swing window, or
-// current when higher.
+// PeakNeed is the highest need two readings in a row reached for role over
+// the swing window; current while fewer than two are recorded.
 func (l *ShareLedger) PeakNeed(role string, current float64) float64 {
 	s := l.needs[role]
 	if len(s) < 2 {
@@ -934,15 +946,46 @@ func (l *ShareLedger) PeakNeed(role string, current float64) float64 {
 	return peak
 }
 
-// RecentPeak is role's highest recorded need over the last d.
+// RecentPeak is role's highest need over the last d that two readings in a
+// row reached, as PeakNeed counts a peak: one reading -- a glitch, or one
+// forged by a tenant once a window -- would keep a donor's GPUs from a short
+// neighbour for the whole window.
 func (l *ShareLedger) RecentPeak(role string, now time.Time, d time.Duration) float64 {
+	s := l.needs[role]
 	peak := 0.0
-	for _, s := range l.needs[role] {
-		if now.Sub(s.at) <= d {
-			peak = math.Max(peak, s.need)
+	for i := 1; i < len(s); i++ {
+		if now.Sub(s[i].at) <= d {
+			peak = math.Max(peak, math.Min(s[i-1].need, s[i].need))
 		}
 	}
 	return peak
+}
+
+// LongBursts reports whether role's longest completed burst -- a run of need
+// above the midpoint of its recorded range -- lasted at least d.
+func (l *ShareLedger) LongBursts(role string, d time.Duration) bool {
+	s := l.needs[role]
+	if len(s) < 3 {
+		return false
+	}
+	hi, lo := s[0].need, s[0].need
+	for _, x := range s {
+		hi, lo = math.Max(hi, x.need), math.Min(lo, x.need)
+	}
+	mid := (hi + lo) / 2
+	var longest time.Duration
+	var start time.Time
+	in := false
+	for _, x := range s {
+		switch {
+		case x.need > mid && !in:
+			in, start = true, x.at
+		case x.need <= mid && in:
+			in = false
+			longest = max(longest, x.at.Sub(start))
+		}
+	}
+	return longest >= d
 }
 
 // AnyPeakKnown reports whether any role's peak is known (PeakKnown): the
