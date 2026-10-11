@@ -907,8 +907,10 @@ func (l *ShareLedger) RecordNeeds(needs map[string]float64, now time.Time, tm Sh
 		l.needs[role] = slices.DeleteFunc(l.needs[role], func(x shareNeedSample) bool { return now.Sub(x.at) > tm.SwingWindow })
 		// A role whose history has all aged out -- new, or back after a gap
 		// longer than the window -- starts its history again: kept, its
-		// first-seen time would call a peak known from one sample.
-		if len(l.needs[role]) == 0 {
+		// first-seen time would call a peak known from one sample. So does a
+		// role with samples but no start: a history restored across a gap
+		// (RestoreNeedHistory) keeps its peaks without one.
+		if _, ok := l.needsSince[role]; !ok || len(l.needs[role]) == 0 {
 			l.needsSince[role] = now
 		}
 		l.needs[role] = append(l.needs[role], shareNeedSample{now, n})

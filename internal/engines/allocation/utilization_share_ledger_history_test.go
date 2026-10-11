@@ -103,6 +103,15 @@ func TestShareNeedHistoryWithAGapIsNotKnown(t *testing.T) {
 	if got := l.PeakNeed("L", 0); got != 6 {
 		t.Fatalf("peak of L = %v, want the restored 6 kept", got)
 	}
+	// Recorded from now on, its peak is known a window later: the gap is
+	// covered, not left unknown for good.
+	at := now
+	for ; at.Sub(now) <= tm.SwingWindow; at = at.Add(30 * time.Second) {
+		l.RecordNeeds(map[string]float64{"L": 1}, at, tm)
+	}
+	if !l.PeakKnown("L", at, tm) {
+		t.Fatal("a window after a gap, L's peak is still not known")
+	}
 }
 
 // A stored history keeps one sample, the highest, per minute.
