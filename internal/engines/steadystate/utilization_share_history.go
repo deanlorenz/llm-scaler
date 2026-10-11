@@ -371,26 +371,16 @@ func (e *Engine) saveShareHistory(ctx context.Context, logger logr.Logger, group
 	}
 }
 
-// deleteShareHistory removes a vanished group's history.
-func (e *Engine) deleteShareHistory(ctx context.Context, logger logr.Logger, group string) {
-	st := &e.utilizationShare
-	if e.client == nil {
-		return
-	}
+// forgetShareHistory drops what the controller remembers of a vanished
+// group's stored history. The stored entry stays: a group dropped after a
+// few minutes of failed collection comes back with its peaks (a restore needs
+// samples within ShareHistoryMaxGap of now), and an entry nothing reads any
+// more is pruned once older than its window (shareHistoryExpired).
+func (st *utilizationShareState) forgetShareHistory(group string) {
 	delete(st.history.unread, group)
 	delete(st.history.lastWrite, group)
 	delete(st.history.written, group)
 	delete(st.history.truncated, group)
-	key := shareHistoryKey(group)
-	err := e.updateShareHistory(ctx, func(data map[string]string) bool {
-		if _, ok := data[key]; !ok {
-			return false
-		}
-		delete(data, key)
-		return true
-	})
-	st.reportShareHistoryErr(logger, "delete", err,
-		"Utilization share: could not remove a vanished group's need history", "group", group)
 }
 
 // updateShareHistory applies mutate to the ConfigMap's data and writes it,

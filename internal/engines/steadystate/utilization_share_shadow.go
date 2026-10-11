@@ -374,7 +374,7 @@ func (e *Engine) dropVanishedGroups(ctx context.Context, logger logr.Logger, see
 		delete(st.goneSince, k)
 		delete(st.uncounted, k)
 		delete(st.headroomCapped, k)
-		e.deleteShareHistory(ctx, logger, k)
+		st.forgetShareHistory(k)
 	}
 }
 

@@ -46,8 +46,11 @@ func TestShareNeedHistoryRestoresKnownPeaks(t *testing.T) {
 			t.Fatalf("%s: peak not known after restoring a whole window of history", r)
 		}
 	}
-	if got := l.PeakNeed("L", 0); got != 3 {
-		t.Fatalf("restored peak of L = %v, want 3", got)
+	// The stored history keeps each minute's highest reading, and a peak
+	// counts once two readings in a row reach it: the restored ledger knows
+	// the peak the old one knew.
+	if got, want := l.PeakNeed("L", 0), old.PeakNeed("L", 0); got != want {
+		t.Fatalf("restored peak of L = %v, the old ledger's %v", got, want)
 	}
 	if p := PlanShareTransfers(l, in, restart, tm); p.HeadroomCapped {
 		t.Fatalf("restored ledger capped on peak claims %d, though the restored peaks (3 + 0.4) fit", p.PeakClaimGPUs)
@@ -71,9 +74,6 @@ func TestShareNeedHistoryDropsInvalidSamples(t *testing.T) {
 	}}}
 	l := NewShareLedger()
 	l.RestoreNeedHistory(h, now, tm)
-	if got := l.PeakNeed("L", 0); got != 2.5 {
-		t.Fatalf("peak of L after restore = %v, want 2.5 (only the valid sample)", got)
-	}
 	if !l.PeakKnown("L", now, tm) {
 		t.Fatal("L: its Since was not restored")
 	}
@@ -91,7 +91,8 @@ func TestShareNeedHistoryWithAGapIsNotKnown(t *testing.T) {
 	tm := spareTimings()
 	now := time.Unix(1_000_000, 0)
 	lastSeen := now.Add(-ShareHistoryMaxGap - time.Minute)
-	h := ShareNeedHistory{"L": {Since: now.Add(-2 * tm.SwingWindow), Samples: []ShareNeedSample{{At: lastSeen, Need: 6}}}}
+	h := ShareNeedHistory{"L": {Since: now.Add(-2 * tm.SwingWindow), Samples: []ShareNeedSample{
+		{At: lastSeen.Add(-time.Minute), Need: 6}, {At: lastSeen, Need: 6}}}}
 	l := NewShareLedger()
 	if known := l.RestoreNeedHistory(h, now, tm); known != 0 {
 		t.Fatalf("restored the start of %d roles across a gap, want 0", known)

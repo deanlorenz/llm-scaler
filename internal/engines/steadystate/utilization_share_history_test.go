@@ -220,8 +220,10 @@ func TestUtilizationShareDeletingTheHistoryFlushesIt(t *testing.T) {
 	}
 }
 
-// A group dropped as vanished takes its stored history with it.
-func TestUtilizationShareVanishedGroupDeletesItsHistory(t *testing.T) {
+// A group dropped as vanished keeps its stored history: dropped after two
+// minutes of failed collection, it comes back with its peaks. Deleted, the
+// history would be lost to the outage it exists to survive.
+func TestUtilizationShareVanishedGroupKeepsItsHistory(t *testing.T) {
 	f := newShareFleet()
 	c := sharePods(t, f)
 	se := newShareEngine(t, f, c, time.Unix(0, 0))
@@ -235,7 +237,10 @@ func TestUtilizationShareVanishedGroupDeletesItsHistory(t *testing.T) {
 		se.clock = se.clock.Add(30 * time.Second)
 		se.e.evaluateUtilizationShare(se.ctx, nil, fullQuota(), nil)
 	}
-	if cm := historyMap(t, c); cm == nil || len(cm.Data) != 0 {
-		t.Fatalf("vanished group's history kept: %+v", cm)
+	if cm := historyMap(t, c); cm == nil || len(cm.Data) != 1 {
+		t.Fatalf("vanished group's history deleted: %+v", cm)
+	}
+	if len(se.e.utilizationShare.history.written) != 0 {
+		t.Fatal("the controller still remembers what it wrote for a vanished group")
 	}
 }
