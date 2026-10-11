@@ -200,6 +200,15 @@ Work down the list in order.
    donor -> receiver pair from starting again; each role can still move with
    any other role. The counter also counts moves withheld by a donor's
    back-off after an aborted release, or by a donor that has given all it can.
+   A donor's calm is judged on the higher of its current need and its peak
+   need over its scale-down window, so a model read in a trough of its normal
+   demand is not a "lightly loaded" donor.
+   Two more reasons on the same counter are not holds: `donor-peak` (while the
+   quota holds every model's peak, a model already at its need takes no
+   headroom that would leave its donor below the donor's own recent peak) and
+   `awaiting-return` (a short model whose replica spans several pods, such as
+   a LeaderWorkerSet, waits for returns still releasing that will free a
+   replica of it, instead of draining other models).
 7. **Is it swinging, or at the transfer limit?** Blocked reason `swinging`
    (`wva_utilization_share_swinging == 1`) means the role reversed direction
    twice within the swing window and is planned on its mean need, not its
@@ -219,9 +228,10 @@ Work down the list in order.
    the transfer marks on the donors' pods, and the Error line
    `Utilization share: could not read transfer marks; retrying next cycle` says
    why, typically a missing RBAC grant to list pods in one model's namespace.
-   Separately, the headroom cap is on for about one
-   `stabilization.flappingWindow` after a restart, until each model's peak is
-   known again
+   Separately, after a restart the headroom cap is on until a
+   `stabilization.flappingWindow` of history exists and the models' peaks are
+   known again (`wva_utilization_share_headroom_capped` is not published
+   during the quiet period, when the planner does not plan)
    ([a model shrinks while no other model grows](#a-model-shrinks-while-no-other-model-grows)).
 9. **Could it not mark the donor?** `Utilization share: could not mark a donor pod;
    transfer not started` means the donor's pod could not be steered by a fault:
@@ -267,25 +277,28 @@ If transfers do start but the model still does not grow, read its
 ### A model shrinks while no other model grows
 
 **Symptom**: under the utilization-share optimizer a model loses one or more
-replicas, at least one scale-down window after its load fell, and no other
+replicas, at least a few cycles plus one scale-down window after its load fell, and no other
 model in the quota group grows to take the GPUs.
 
 **What it means**: the model gave headroom back to the quota. This happens
 only while the quota is **contended**: it cannot hold every model at its peak
-need over the last `stabilization.flappingWindow` at the same time. A model
-whose demand has been recorded for less than one `flappingWindow` -- every
-model after a controller restart, a newly added model -- counts at its
-`maxReplicas` (the whole quota without one), so after a restart the cap is on
-until a full window of history shows the peaks fit. While the
+need over the last `stabilization.flappingWindow` at the same time (a peak
+counts once two readings in a row reach it). While no model's peak is known --
+a new group, or every model after a controller restart, until a
+`flappingWindow` of history exists -- each counts at its `maxReplicas` (the
+whole quota without one), so after a restart the cap is on until a full window
+of history shows the peaks fit. A model that joins a group whose peaks are
+known counts at what it holds, and does not turn the cap on by itself. While the
 peaks fit, the whole spare stays spread by weight and nothing is given back.
 While contended, the optimizer gives each model (each role of a P/D model) at most `maxHeadroomReplicas`
 replicas (default `1`) times its weight, rounded up, above what it needs, and
 leaves the rest of the quota unassigned, so that a model whose demand rises can
 start pods into it at once instead of waiting for another model's pods to
 finish their requests. A model that has held more than its need plus its
-headroom for its scale-down window -- typically one that grew for a burst that
-has ended -- gives all of the extra back in one cycle, as today's scale-down
-would. It does so only while no model in the group that can grow is short of
+headroom for `stabilization.consecutiveCyclesBeforeMove` cycles in a row (two
+by default) -- typically one that grew for a burst that has ended -- starts
+giving all of the extra back in one cycle; the release then waits its
+scale-down window, as today's scale-down would. It does so only while no model in the group that can grow is short of
 its need, and
 only while its load would stay at or below
 `stabilization.returnSpareWhenLoadAtMost` (default `0.6`) on what it keeps,
@@ -300,12 +313,13 @@ load on what it keeps, the return is called off and the model keeps the
 replica. If another model turns short while the return is still releasing, the
 returned GPUs go to that model when they come free: its scale target gets a
 `UtilizationShareReceiving` Event naming the model that is giving them back,
-and the log says `Utilization share: returned spare handed to a receiver`.
+and the log says `Utilization share: returned spare handed to a receiver`. A
+return is handed over only when the returned pod holds the short model's pod;
+a return rebuilt from its pod marks after a restart, whose shape is not known,
+is never handed over and goes to the unassigned GPUs.
 
 **How to tell**: the donor's scale target carries a `UtilizationShareGiving`
-Event that names "the quota group's unassigned GPUs" and says "because it holds
-more headroom than maxHeadroomReplicas gives it, its demand has stayed low for
-its scale-down window, and no model is short". A return called off carries a
+Event that names "the quota group's unassigned GPUs" and says "because it holds more headroom than maxHeadroomReplicas gives it while no model is short, and stays calm without it; the replica drains after its scale-down window, and is kept if its demand comes back before then; a model whose demand rises takes the GPUs at once". A return called off carries a
 `UtilizationShareCancelled` Event: "this model's demand came back, so it keeps
 the replica it was giving back". The controller log has
 `Utilization share: transfer started` with `returned` set to true and no
@@ -317,21 +331,30 @@ is not giving it back shows why in `wva_utilization_share_withheld_total`:
 `return-role-short` (another model is short of its need).
 
 Whether the cap is on: `wva_utilization_share_headroom_capped == 1` for the
-group (published only while the optimizer acts, not in shadow mode). The log
-says when it flips, with `peakClaimGPUs` (the models' peaks summed in whole
-replicas) and `budget`: `Utilization share: the models' recent peaks do not fit
-the quota together; each keeps at most maxHeadroomReplicas of headroom, and the
-rest is returned` when it turns on, and `Utilization share: the models' recent
-peaks fit the quota together again; the spare is spread by weight` when it turns
-off. A cap that turns on right after a controller restart, with
-`peakClaimGPUs` above `budget`, is the restart rule above: it turns off after
-one `flappingWindow` (`wva_utilization_share_effective_seconds{param="swing-window"}`)
-if the recorded peaks fit.
+group (published only while the optimizer acts, not in shadow mode, and not
+during the restart quiet period, when the planner does not plan). The log says
+when it flips, with `peakClaimGPUs` (the models' peaks summed in whole
+replicas), `budget` and a `cause`. It turns on with one of:
+
+- `cause=peaks-unknown`: `Utilization share: the models' peaks are not known
+  yet -- ...`, with `unknownPeaks` naming the roles counted at their
+  `maxReplicas`. This is the restart (or new group) rule above: it turns off
+  once a `flappingWindow` of history exists
+  (`wva_utilization_share_effective_seconds{param="swing-window"}`), if the
+  recorded peaks fit.
+- `cause=peaks-exceed-budget`: `Utilization share: the models' recent peaks do
+  not fit the quota together; each keeps at most maxHeadroomReplicas of
+  headroom, and the rest is returned`. The recorded peaks really do not fit.
+
+It turns off with `Utilization share: the models' recent peaks fit the quota
+together again; the spare is spread by weight`. Each line carries `scope` as
+the metrics label it (`cluster` for the cluster group), so it joins the
+group's series.
 
 ```bash
 kubectl get events -n <model-namespace> --field-selector reason=UtilizationShareGiving | grep unassigned
 kubectl logs -n <controller-namespace> -l app.kubernetes.io/name=workload-variant-autoscaler | grep 'spare returned to the quota'
-kubectl logs -n <controller-namespace> -l app.kubernetes.io/name=workload-variant-autoscaler | grep 'recent peaks'
+kubectl logs -n <controller-namespace> -l app.kubernetes.io/name=workload-variant-autoscaler | grep -E 'recent peaks|peaks are not known'
 ```
 
 **What to do**: nothing, if the model still serves within its targets: the

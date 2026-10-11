@@ -799,13 +799,13 @@ Published only while the optimizer acts (`shadow: false`):
 | --- | --- | --- | --- |
 | `wva_utilization_share_promised_gpus` | gauge | group | GPUs released for a receiver and not yet held by it. |
 | `wva_utilization_share_reserve_debt_gpus` | gauge | group | `reserveGPUs` spent and not yet refilled. |
-| `wva_utilization_share_headroom_capped` | gauge | group | `1` while the quota is contended -- its roles' peak needs over the swing window, in whole replicas, do not fit the budget together (a role with less than one swing window of history counts at its `maxReplicas`, or the whole budget) -- and each role's headroom is capped at `maxHeadroomReplicas` times its weight; `0` while the spare is spread by weight. The log says when it flips. |
+| `wva_utilization_share_headroom_capped` | gauge | group | `1` while the quota is contended -- its roles' peak needs over the swing window, in whole replicas, do not fit the budget together (a peak counts once two readings in a row reach it; while no role's peak is known -- a new group, or after a restart until a swing window of history exists -- each counts at its `maxReplicas`, or the whole budget; a role joining a group whose peaks are known counts at what it holds) -- and each role's headroom is capped at `maxHeadroomReplicas` times its weight; `0` while the spare is spread by weight. Not published in a cycle the planner did not plan, such as the restart quiet period. The log says when it flips, with its `cause` (`peaks-unknown` or `peaks-exceed-budget`). |
 | `wva_utilization_share_swinging` | gauge | role | `1` while the role is planned on its mean need because it reversed direction twice within the swing window. |
 | `wva_utilization_share_in_flight` | gauge | group + `state` | Transfers in flight, by `state`: `releasing` (the donor has not released its GPUs yet) or `filling` (released, or an idle fill, and the receiver has not taken the GPUs yet). Both series exist for every active group, `0` when nothing is in flight. |
 | `wva_utilization_share_effective_seconds` | gauge | group + `param`, `source` | A derived timing in force, for the group as a whole (from its slowest donor). `param`: `window`, `release-timeout`, `fill-timeout`, `reversal-hold`, `swing-window`. `source`: `measured` (the group's own releases), `scaledobject`, `pod` (termination grace), `default` (the cluster's default for an unset value), `policy` (`reversal-hold` and `swing-window` set by `utilizationShare.stabilization`). |
 | `wva_utilization_share_transfers_total` | counter | group + `outcome`, `urgent` | Transfers that ended, by `outcome` (below), idle fills included. `urgent="true"` when the receiver was below its need. Every `outcome` × `urgent` series is published at `0` from a group's first acting cycle, so `increase()` sees the first transfer of each outcome. |
 | `wva_utilization_share_starts_total` | counter | group + `kind`, `skipped_waits` | What the optimizer started, by `kind`: `transfer` (a donor's replica moved to a receiver; a donor set counts as one), `fill` (a model raised into the quota's unassigned GPUs), `refill` (a donor lowered to pay back `reserveGPUs`) or `return` (a model's headroom above `maxHeadroomReplicas` given back to the quota). `skipped_waits="true"` on a move that skipped the stabilization waits (`stabilization.skipWaitsWhen`). Every `kind` × `skipped_waits` series is published at `0` from a group's first acting cycle. |
-| `wva_utilization_share_withheld_total` | counter | group + `reason` | Transfers not planned: `reversal-hold` (every move a hold withheld: a role that just gave cannot receive, or one that just received cannot give, until the reversal hold passes; a donor → receiver pair whose transfer was cancelled; a donor backing off after an aborted release; a donor that has given all it can) or `not-actionable` (a role out of band with no whole replica to move). Two reasons concern a model holding more than its need plus its headroom: `return-not-calm` (it keeps it because its load would be above `stabilization.returnSpareWhenLoadAtMost` on what it keeps) and `return-role-short` (it keeps it because another model is short of its need). Each is counted once per cycle it applies. |
+| `wva_utilization_share_withheld_total` | counter | group + `reason` | Transfers not planned: `reversal-hold` (every move a hold withheld: a role that just gave cannot receive, or one that just received cannot give, until the reversal hold passes; a donor → receiver pair whose transfer was cancelled; a donor backing off after an aborted release; a donor that has given all it can) or `not-actionable` (a role out of band with no whole replica to move). Two reasons concern a model holding more than its need plus its headroom: `return-not-calm` (it keeps it because its load would be above `stabilization.returnSpareWhenLoadAtMost` on what it keeps) and `return-role-short` (it keeps it because another model is short of its need). `donor-peak`: while the quota holds every model's peak, a headroom move to a model already at its need that would leave the donor below its own peak over the swing window. `awaiting-return`: a short model whose replica spans several pods (such as a LeaderWorkerSet) left to the idle fill, instead of a donor set, because returns still releasing will free a replica of it. Each is counted once per cycle it applies. |
 | `wva_utilization_share_claims_total` | counter | group + `outcome` | Scale-from-zero wakes claiming a releasing transfer's GPUs: `redirected` (claimed), `refused-score` (the waking model does not outrank the receiver), `refused-fit` (the released pods cannot host its replica), `refused-held` (the model claimed one within the last two minutes), `none-releasing` (nothing to claim). A refusal is counted once per change, not per attempt. |
 | `wva_utilization_share_donors_per_transfer` | histogram | group | Donor replicas that fund one receiver replica. |
 | `wva_utilization_share_release_seconds` | histogram | group | Time from a transfer's start to its donor's GPUs being released. |
@@ -836,7 +836,9 @@ outside both limits, so `in_flight{state="releasing"}` can read above `2`:
   move that skipped the waits on its first cycle is paced and limited as any
   other. When a receiver is
   at its scale-up threshold and a donor stays calm
-  (`stabilization.skipWaitsWhen`), the first cycle moves at the usual pace. If
+  (`stabilization.skipWaitsWhen`; the donor judged on the higher of its
+  current need and its peak need over its scale-down window), the first cycle
+  moves at the usual pace. If
   the imbalance holds a second consecutive cycle, the receiver takes every
   replica it is short of its need in that cycle, from one donor or several
   (`starts_total{skipped_waits="true"}`). Its need here is the higher of its
@@ -864,15 +866,16 @@ quota group's unassigned GPUs -- is a transfer with a donor and no receiver
 (`starts_total{kind="return"}`). Headroom is capped, and so returned, only while
 the quota is contended: it cannot hold every model at its peak need over the
 last `stabilization.flappingWindow` at the same time
-(`wva_utilization_share_headroom_capped`; a model with less than one window of
-history, as every model has after a restart, counts at its `maxReplicas`). A
-model is never capped below what the other models' peaks leave of the quota, so
-a model that bursts alone keeps its spare. A return starts only after
-the model has held that extra for its scale-down window, while no model that
-can grow is short of its need, and only
-while the model's load would stay at or below
-`stabilization.returnSpareWhenLoadAtMost`; then all of the extra goes in one
-cycle. Its GPUs are not unassigned until its pod is gone: no model is raised
+(`wva_utilization_share_headroom_capped`; while no model's peak is known, as
+after a restart until a window of history exists, each counts at its
+`maxReplicas`). A model is never capped below what the other models' peaks
+leave of the quota, so a model that bursts alone keeps its spare. A return
+starts once the model has held that extra for
+`stabilization.consecutiveCyclesBeforeMove` cycles in a row, while no model
+that can grow is short of its need, and only while the model's load would stay
+at or below `stabilization.returnSpareWhenLoadAtMost`; then all of the extra
+goes in one cycle. The release itself waits the model's scale-down window, as
+a scale-down does. Its GPUs are not unassigned until its pod is gone: no model is raised
 into them before that, and the model giving them back is not raised by a fill
 while its return is releasing. It shows in `wva_utilization_share_in_flight{state="releasing"}` until the
 donor's pod is gone, then ends in the cycle that sees the release -- it never
@@ -889,7 +892,11 @@ and the returned pod frees room the short model's pod fits (two 4-GPU pods do
 not make room for one 8-GPU pod), the return is handed to it: that model is
 raised once the replica is released, the return is called off only as a
 transfer would be, and the log says
-`Utilization share: returned spare handed to a receiver`.
+`Utilization share: returned spare handed to a receiver`. The returned pod's
+shape is recorded when the return starts; a return rebuilt from its mark after
+a restart has none, and is never handed over. A scale-from-zero wake that
+claims a handed-over return (`claims_total{outcome="redirected"}`) turns it
+into an ordinary release for the wake.
 The controller logs `Utilization share: spare returned to the quota` (with
 `donor` and `gpus`) when it is released, and its `transfer started` line
 carries `returned` set to true.

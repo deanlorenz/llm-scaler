@@ -45,12 +45,14 @@ model's weight, rounded up: 1 for `standard`, 2 for `important`, 4 for
 `critical`. What is left stays unassigned in the quota, where a model whose
 demand rises starts pods into it at once, without waiting for another model's
 pods to drain. No model is capped below what the other models' peaks leave of
-the quota, so a model that bursts alone keeps its spare. A model with less
-than one `flappingWindow` of history -- every model after a controller
-restart -- counts at its `maxReplicas`, so the cap is on after a restart until
-the peaks are known. While every peak fits, the whole spare stays spread: capping
-there only made the next burst cold-start replicas that the spread had kept
-warm. When the GPUs a model holds drift too far from that target,
+the quota, so a model that bursts alone keeps its spare. While no model's peak
+is known -- after a controller restart, until a `flappingWindow` of history
+exists -- every model counts at its `maxReplicas`, so the cap is on after a
+restart until the peaks are known; a model added to a group whose peaks are
+known counts at what it holds. While every peak fits, the whole spare stays
+spread: capping there only made the next burst cold-start replicas that the
+spread had kept warm, and a model already at its need takes no headroom that
+would leave another model below its own recent peak. When the GPUs a model holds drift too far from that target,
 the optimizer moves GPUs with a **transfer**:
 
 1. It marks one of the donor's pods, so the ReplicaSet removes that pod and no
@@ -94,11 +96,12 @@ is pure loss and headroom costs nothing extra.
   before it grows. In the benchmark it started growing about 5.5 minutes later
   than under today's optimizer, which had already scaled the falling model
   down. When the two peaks do not fit the quota together, the falling model
-  now gives what it holds beyond its need plus its headroom
-  (`maxHeadroomReplicas`, default 1) back to the quota one scale-down window
-  after its load falls, as today's optimizer would scale it
-  down, so less of the rise should wait for a transfer; that has not been
-  measured yet.
+  now starts giving what it holds beyond its need plus its headroom
+  (`maxHeadroomReplicas`, default 1) back to the quota once it has held it for
+  `consecutiveCyclesBeforeMove` cycles (two by default) after its load falls;
+  the replica goes after its scale-down window, as today's optimizer would
+  scale it down, so less of the rise should wait for a transfer; that has not
+  been measured yet.
 - **Models burst in turn and a burst must not start short.** In two benchmark
   runs with different burst shapes, the second model to burst waited 16 and
   then 18 minutes -- its whole burst -- for GPUs the other, idle, model held.
@@ -112,6 +115,16 @@ is pure loss and headroom costs nothing extra.
   *to* it as the other model's burst begins. If you take the mode anyway, give
   each such model a floor sized for its burst
   ([for model owners](../../reference/scaling-policy.md#for-model-owners-what-the-optimizer-may-take-and-how-to-protect-a-model)).
+- **A bursting model shares the quota with a noisy one.** In simulation, a
+  model whose demand bursts beside a model whose demand swings loses 0.10 to
+  0.14 more of its demand than under earlier versions of the optimizer, while
+  the noisy model does much better. If you take the mode anyway, give the
+  bursting model a floor sized for its burst.
+- **Whole-node models burst for 20 to 30 minutes in a tight quota.** In
+  simulation, models of one 8-GPU pod per replica with bursts that short do
+  slightly worse (about 0.02 more of their demand unserved) than before a hard
+  imbalance's moves stopped waiting for the pace: those moves land after a
+  short burst has ended. This is deferred, not fixed.
 - **The real limit is not the scaling manager's quota.** A quota counts only
   what the scaling manager's own variants hold. If a Kubernetes `ResourceQuota`
   or unmanaged workloads on the same accelerators are what actually stops
@@ -220,7 +233,9 @@ window, that is on the order of 12 minutes. It shows as the blocked reason
 `reversal-hold`. It is lifted only for a hard imbalance: the short model's
 load is at least 0.9 of its scale-up threshold and another model's, after
 giving, is at most 0.6 of its own (both set by
-`utilizationShare.stabilization.skipWaitsWhen`). A model whose burst just ended
+`utilizationShare.stabilization.skipWaitsWhen`), the donor's load read on the
+higher of its current demand and its peak over its scale-down window. A model
+whose burst just ended
 usually is not that lightly loaded, so the hold can still last a whole
 burst.
 
@@ -282,10 +297,12 @@ When it evaluates but never moves anything, work down
   wherever GPUs could be given back. The benchmark runs measured it with the
   whole spare spread: 24% and 66% more GPU-seconds than today's optimizer.
 - **A model above its need plus its headroom shrinks with no other model
-  growing.** Only while the quota is contended: after one scale-down window
-  above it, it gives all the extra back to the quota in one cycle, while no
-  model that can grow is short of its need and only while
-  its load would stay at or below `stabilization.returnSpareWhenLoadAtMost`
+  growing.** Only while the quota is contended: after
+  `consecutiveCyclesBeforeMove` cycles above it, it starts giving all the
+  extra back to the quota in one cycle, while no model that can grow is short
+  of its need and only while its load would stay at or below
+  `stabilization.returnSpareWhenLoadAtMost`. The replica goes after the
+  model's scale-down window, and stays if its demand comes back before then
   ([troubleshooting](../../reference/troubleshooting.md#a-model-shrinks-while-no-other-model-grows)).
   Each return drains a pod; if its demand comes back after the drain, it
   starts a pod again, cold. On the proposal's alternating-burst simulator,
@@ -305,11 +322,13 @@ When it evaluates but never moves anything, work down
 - **The freeze and the hold above.** About one fill timeout of no scaling in a
   group after every restart, and a reversal hold that can keep a short model
   waiting.
-- **A window of capped headroom after every restart.** The need history lives
-  in the controller's memory only, so for one `flappingWindow` (about 100
-  minutes by default) each model counts at its `maxReplicas` and headroom is
-  capped, unless those fit the quota together. Spare that a spread would have
-  kept warm may be returned meanwhile.
+- **A window of capped headroom after every restart.** After a restart, until
+  a `flappingWindow` of history exists (about 100 minutes by default), each
+  model counts at its `maxReplicas` and headroom is capped, unless those fit
+  the quota together. Spare that a spread would have kept warm may be returned
+  meanwhile: in simulation, whole-node quotas whose peaks fit lost 2 to 10% of
+  their demand for about two hours. The window is derived from the scale-down
+  window, so a long scale-down window makes it hours.
 - **Pod annotations.** While a transfer releases, each donor pod it chose
   carries a transfer mark and a low `pod-deletion-cost`. The controller removes
   both when the transfer ends or the optimizer is switched to shadow or off.
@@ -354,7 +373,7 @@ When it evaluates but never moves anything, work down
     receivers and LWS groups on emulated GPUs only.
   - The headroom cap (`maxHeadroomReplicas`), spare returns, and the unpaced
     hard-imbalance move, which no cluster run has measured yet (simulated
-    only: [measured](measured.md#what-the-round-16-fixes-change-simulated-not-measured)). The cancel fix
+    only: [measured](measured.md#what-rounds-16-and-17-change-simulated-not-measured)). The cancel fix
     and the hard-imbalance rule were measured once, on the run before them.
   - A cluster quota group and the `clusterNamespaces` canary, which are
     unit-tested only. All three e2e specs use a namespace quota.
@@ -417,7 +436,7 @@ way ([measured](measured.md#rerun-with-the-hard-imbalance-rule-the-spare-was-par
   `maxHeadroomReplicas` (default 1) times the model's weight while the quota
   is contended, the rest left unassigned, and a hard imbalance that holds a second cycle taking the whole
   shortfall up to the receiver's need at once -- is built and not yet measured
-  on a cluster; a simulation is on the [measured](measured.md#what-the-round-16-fixes-change-simulated-not-measured)
+  on a cluster; a simulation is on the [measured](measured.md#what-rounds-16-and-17-change-simulated-not-measured)
   page.
 
 A P/D version was attempted and not measured. Prefill never left one replica

@@ -67,8 +67,9 @@ func (e *Engine) shareStartedEvents(g allocation.ShareGroup, t allocation.ShareT
 	why := "because the reserve was spent"
 	if t.Returned {
 		to = "the quota group's unassigned GPUs"
-		why = "because it holds more headroom than maxHeadroomReplicas gives it, its demand has stayed low for " +
-			"its scale-down window, and no model is short; a model whose demand rises takes them at once"
+		why = "because it holds more headroom than maxHeadroomReplicas gives it while no model is short, and stays " +
+			"calm without it; the replica drains after its scale-down window, and is kept if its demand comes back " +
+			"before then; a model whose demand rises takes the GPUs at once"
 	}
 	if receiver != "" {
 		to = sharePeer(g, t.Donor, receiver)

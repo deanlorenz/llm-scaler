@@ -204,7 +204,7 @@ kubectl get events -n <llmd-namespace> --field-selector type=Warning | grep Util
 
 | Event reason | type | means |
 | --- | --- | --- |
-| `UtilizationShareGiving` | Normal | a donor gives one replica; names the pod that goes and the receiver. A model giving back headroom it does not need names "the quota group's unassigned GPUs" instead: it holds more than `maxHeadroomReplicas` gives it, its demand has stayed low for its scale-down window, and no model is short |
+| `UtilizationShareGiving` | Normal | a donor gives one replica; names the pod that goes and the receiver. A model giving back headroom it does not need names "the quota group's unassigned GPUs" instead: it has held more than `maxHeadroomReplicas` gives it for `consecutiveCyclesBeforeMove` cycles, its demand is low, and no model is short. The replica then goes after its scale-down window |
 | `UtilizationShareReceived` | Normal | the transfer landed: the receiver holds the GPUs. An idle fill says the GPUs came from the quota group's unassigned GPUs, either because its demand rose past what it held, or as headroom (`maxHeadroomReplicas`) that is given back when this model no longer needs it |
 | `UtilizationShareReleaseAborted` | Warning | the donor did not release within the release timeout; its count is restored. Or its donor set could not complete; the Event then says so, and the donor is not held back |
 | `UtilizationShareFillTimedOut` | Warning | the receiver's new replica did not take the released GPUs in time |
@@ -221,11 +221,13 @@ What each blocked reason means and what to do about it is in
 
 Expect nothing to scale in a group for about three minutes after the switch.
 That is the freeze of one fill timeout described above, not a fault; its models
-show the blocked reason `quiet-period` meanwhile. For about one
-`stabilization.flappingWindow` after the switch, or any controller restart,
-headroom is capped (`wva_utilization_share_headroom_capped 1`) unless the
-models' `maxReplicas` fit the quota together: no model's peak is known yet, so
-each counts at its `maxReplicas`. If it
+show the blocked reason `quiet-period` meanwhile, and
+`wva_utilization_share_headroom_capped` is not published. After the switch, or
+any controller restart, until a `stabilization.flappingWindow` of history
+exists, headroom is capped (`wva_utilization_share_headroom_capped 1`) unless
+the models' `maxReplicas` fit the quota together: no model's peak is known yet,
+so each counts at its `maxReplicas`, and the log line that turns the cap on
+says `cause=peaks-unknown`. If it
 still moves nothing after that, work down
 [the troubleshooting list](../../reference/troubleshooting.md#the-optimizer-evaluates-but-never-moves-anything).
 

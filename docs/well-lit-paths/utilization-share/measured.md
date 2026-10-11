@@ -287,7 +287,8 @@ latencies come from the load generator and are not affected.
     caps the headroom each model is given above its need, scaled by its
     weight, and the rest stays unassigned, where a model whose demand rises
     takes it at once with no other model to drain;
-  - a model that has held more than that for its scale-down window gives the
+  - a model that has held more than that for its scale-down window (since
+    `6abc491d`, for `consecutiveCyclesBeforeMove` cycles) gives the
     extra back to the quota, all in one cycle, while no model is short of its
     need and only while its load stays at or below
     `stabilization.returnSpareWhenLoadAtMost`
@@ -295,51 +296,68 @@ latencies come from the load generator and are not affected.
   Pricing a donor by how long its pods take to drain was considered and not
   built ([proposal §15](../../proposals/utilization-share-optimizer.md#15-deferred-to-later-prs)).
 
-### What the round-16 fixes change: simulated, not measured
+### What rounds 16 and 17 change: simulated, not measured
 
-No cluster run has measured `2892aad3` or the round-16 fixes on top of it
-(`19e7be3f`, `5549d924`) yet. These figures are a **simulation**: the
-reviewers' production-order and whole-node simulators, used to review and
-then verify each response. Each is the shortfall the simulator reports --
-the share of demand left unserved -- averaged over 5 seeds of 6 hours (10 of
-8 hours for whole-node), at `maxHeadroomReplicas` 1. Lower is better.
+No cluster run has measured `2892aad3` or the review rounds on top of it
+(round 16: `19e7be3f`, `5549d924`; round 17: `6abc491d`) yet. These figures
+are a **simulation**: the reviewers' production-order and whole-node
+simulators, used to review and then verify each response. Each is the
+shortfall the simulator reports -- the share of demand left unserved --
+averaged over 5 seeds of 6 hours (10 of 8 hours for whole-node), at
+`maxHeadroomReplicas` 1. Lower is better.
 
-| scenario | `e55b02b2` | `2892aad3` | `5549d924` |
-| --- | ---: | ---: | ---: |
-| the cluster scenario (bursts in turn, ceiling 8, quota 10), 40 min bursts | 0.350 | 0.286 | **0.273** |
-| the same, 60 min bursts | 0.407 | 0.167 | **0.153** |
-| the same, 90 min bursts | 0.245 | 0.111 | **0.100** |
-| the cluster scenario, weight 2, 40 min bursts | 0.387 | 0.275 | **0.261** |
-| the same, 60 min bursts | 0.370 | 0.158 | **0.143** |
-| small alternating bursts, 60 min | **0.042** | **0.041** | 0.052 |
-| small alternating bursts, 40 min | **0.076** | 0.147 | 0.123 |
-| a long-drain model's brief dips, 12 min, with a 1-minute scale-down window | **0.018** | 0.059 | 0.025 |
-| whole-node, two 1x8 models, tight quota, 20 min bursts | **0.201** | 0.241 | 0.216 |
-| whole-node, a 1x16 model, 20 min bursts | **0.099** | 0.131 | 0.109 |
-| whole-node, an LWS 2x8 model beside a 1x8 one, 20 min bursts | **0.116** | 0.153 | 0.117 |
-| whole-node, an LWS 3x8 model beside a 1x8 one, 20 min bursts | **0.115** | 0.184 | 0.123 |
-| whole-node, two P/D models of 1x8 roles, 20 min bursts | 0.060 | 0.076 | **0.054** |
-| whole-node, two 1x8 models whose peaks always fit, 20 min bursts | **0.000** | **0.000** | 0.015 |
+| scenario | `e55b02b2` | `2892aad3` | `5549d924` | `6abc491d` |
+| --- | ---: | ---: | ---: | ---: |
+| the cluster scenario (bursts in turn, ceiling 8, quota 10), 40 min bursts | 0.350 | 0.286 | 0.273 | **0.269** |
+| the same, 60 min bursts | 0.407 | 0.167 | **0.153** | **0.153** |
+| the same, 90 min bursts | 0.245 | 0.111 | **0.100** | **0.100** |
+| the cluster scenario, weight 2, 40 min bursts | 0.387 | 0.275 | 0.261 | **0.260** |
+| the same, 60 min bursts | 0.370 | 0.158 | **0.143** | **0.143** |
+| small alternating bursts, 60 min | 0.042 | 0.041 | 0.052 | **0.031** |
+| small alternating bursts, 40 min | 0.076 | 0.147 | 0.123 | **0.045** |
+| a long-drain model's brief dips, 12 min, with a 1-minute scale-down window | **0.018** | 0.059 | 0.025 | 0.019 |
+| a swinging model among three, 45 min | -- | 0.079 | **0.074** | 0.086 |
+| whole-node, two 1x8 models, tight quota, 20 min bursts | 0.201 | 0.241 | 0.216 | **0.193** |
+| whole-node, the same, 40 min bursts | 0.259 | **0.242** | 0.245 | 0.264 |
+| whole-node, a 1x16 model, 20 min bursts | 0.099 | 0.131 | 0.109 | **0.094** |
+| whole-node, an LWS 2x8 model beside a 1x8 one, 20 min bursts | 0.116 | 0.153 | 0.117 | **0.109** |
+| whole-node, an LWS 3x8 model beside a 1x8 one, 20 min bursts | **0.115** | 0.184 | 0.123 | 0.127 |
+| whole-node, two P/D models of 1x8 roles, 20 min bursts | 0.060 | 0.076 | 0.054 | **0.024** |
+| whole-node, two 1x8 models whose peaks always fit, 20 min bursts | **0.000** | **0.000** | 0.015 | 0.019 |
+| whole-node, all 160 cells summed | 22.52 | 23.57 | 22.68 | **22.08** |
 
 What moved them:
 
-- Small alternating bursts at 40 minutes were worse in `2892aad3` because a
-  move that skipped the waits stopped counting against the concurrency
-  limit. Ordinary headroom moves then started beside a burst's moves,
-  drained the same long-drain model, and landed after the burst had ended,
-  just before that model's own burst. They count again. Part of the gap to
-  `e55b02b2` is still unexplained.
-- The whole-node shapes recovered because the cap is now judged on the higher
-  of a model's current and average need, and leaves a model whatever the
-  other models' recent peaks cannot use. Before, a swinging whole-node model
-  at its crest was held below its reading, beside a node only it could use.
+- Small alternating bursts at 40 minutes were worse in `2892aad3` for two
+  reasons, both fixed:
+  - Round 16: a move that skipped the waits stopped counting against the
+    concurrency limit, so ordinary headroom moves started beside a burst's.
+    They count again.
+  - Round 17, the larger part: while the quota holds every model's peak,
+    headroom moves drained a long-drain model below its own recent peak, for
+    a model already at its need. They landed after that model's burst ended
+    and just before the drained model's own burst. Such a move is now
+    withheld (`donor-peak`).
+- The whole-node shapes recovered because:
+  - the cap is judged on the higher of a model's current and average need;
+  - it leaves a model whatever the other models' recent peaks cannot use;
+  - P/D roles are no longer drained below their own peaks for headroom.
+- A model that gives is now judged calm on its peak over its scale-down
+  window, as a scale-down is. That costs a swinging model among three
+  (0.074 to 0.086) and some 40-minute whole-node bursts. A model read in a
+  trough of its normal demand is no longer drained in two cycles.
+- A return now starts after `consecutiveCyclesBeforeMove` cycles over target,
+  not after the model's scale-down window; its replica still drains only
+  after that window. In this simulator it moves the cluster scenario little.
+  A reviewer's comparison with today's optimizer found the second burst
+  ~20% better.
 - **The cost** of `5549d924`: until a model has a swing window of history,
-  its peak is taken to be its ceiling. So after a restart -- and at the start
-  of every simulated run -- the cap is on for one window even where the peaks
-  always fit. That is the 0.015 in the last row, and the small bursts' 0.052
-  at 60 minutes. Judged only on the history it had, the cap stayed off until
-  a model burst inside the window, so the first burst after a restart found
-  the spare parked on the other model: the failure the cap exists for.
+  its peak is taken to be its ceiling. So at the start of every simulated
+  run -- as after a restart with no stored history -- the cap is on for one
+  window even where the peaks always fit. That is the 0.015 and 0.019 in the
+  "peaks always fit" row. Judged only on the history it had, the cap stayed
+  off until a model burst inside the window, so the first burst found the
+  spare parked on the other model: the failure the cap exists for.
 - Returns followed by fills are cold starts. On the cluster scenario at 40
   minutes, pods created plus removed rose from 240 to about 1060 over 30
   simulated hours.

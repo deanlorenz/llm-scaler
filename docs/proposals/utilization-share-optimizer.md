@@ -278,21 +278,34 @@ is deliberate: headroom only absorbs a burst if it scales with the model's size.
 
 **When the quota is contended, the headroom one role is given is capped
 (`maxHeadroomReplicas`, default 1), by weight.** The quota is *contended* when
-it cannot hold every role at once at its peak need over the swing window
-(`contended`): each role's claim at its peak need (`ShareLedger.PeakNeed`, the
-highest need recorded over `flappingWindow`, or the current one if higher),
-rounded up to whole replicas, summed over the group, exceeds the budget. A
-role whose need has been recorded for less than one swing window
-(`ShareLedger.PeakKnown` false: every role after a controller restart, a newly
-added model) is taken to peak at its ceiling, or at the whole budget when it
-has none (`peakClaims`):
+it cannot hold every role at once at its peak need over the swing window: each
+role's claim at its peak need (`ShareLedger.PeakNeed`), rounded up to whole
+replicas, summed over the group, exceeds the budget (`peakClaims`, computed
+once per plan; `capHeadroom` runs when the sum is over). The peak is a
+**sustained** one: the highest need that two consecutive readings over
+`flappingWindow` both reach, `max_i min(N_{i−1}, N_i)`, or the current need
+while fewer than two readings exist. One reading -- a scrape glitch, or a
+tenant's forged metric -- would otherwise cap every other model's headroom for
+a whole window. A role whose history has all aged out (absent for longer than
+the window) starts it again (`RecordNeeds`): kept, its first-seen time would
+call a peak known from one sample. A role whose need has been recorded for
+less than one swing window (`ShareLedger.PeakKnown` false) claims one of two
+things, depending on whether any role's peak is known (`AnyPeakKnown`):
 
 ```text
-  P̂_r  = min(peak N_r, B_net)                       if PeakKnown(r)
-       = min(max(peak N_r, min(C_r, B_net)), B_net)  otherwise
-  P_r  = g_r · ⌈ min(max(P̂_r, F_r), C_r) / g_r ⌉     (the role's peak claim)
+  P̂_r  = min(peak N_r, B_net)                        if PeakKnown(r)
+       = min(max(peak N_r, H_r), B_net)               else, if AnyPeakKnown   (a joiner)
+       = min(max(peak N_r, min(C_r, B_net)), B_net)   otherwise               (no history)
+  P_r  = g_r · ⌈ min(max(P̂_r, F_r), C_r) / g_r ⌉      (the role's peak claim)
   contended  ⇔  Σ_r P_r  >  B_net
 ```
+
+`H_r` is what the role holds. A role joining a group whose history is known
+-- a new model, or one renamed to look new -- claims that: at its ceiling, it
+would cap every other model's headroom for a window. Only while no role's peak
+is known -- a new group, or every role after a restart with no stored history
+-- is each taken to peak at its ceiling, or at the whole budget when it has
+none (the roles so counted are `SharePlan.UnknownPeaks`).
 
 Judged only on the history the ledger has -- in memory, one swing window
 long -- every role's peak read as its current need after a restart, on the
@@ -302,9 +315,13 @@ found the spare parked on the model that had burst last, the cluster failure
 the cap exists for. So the cap is on after a restart until a full window of
 history shows the peaks fit. The cost is a window of capped headroom after
 each restart, which may return spare a spread would have kept warm. The planner
-publishes the flip: `wva_utilization_share_headroom_capped` (1 while capped),
-and an Info line when it turns on or off, with `peakClaimGPUs` (`Σ_r P_r`) and
-`budget`.
+publishes the flip: `wva_utilization_share_headroom_capped` (1 while capped;
+not published in a cycle the planner did not plan, such as the restart quiet
+period, when the published targets are not the planner's), and an Info line
+when it turns on or off, with `peakClaimGPUs` (`Σ_r P_r`), `budget` and a
+`cause`: `peaks-unknown` (with `unknownPeaks`) when no role's peak is known, or
+`peaks-exceed-budget`. `resetActuation` forgets the flip state, so a rebuilt
+ledger logs it afresh.
 
 While the peaks fit, the spare is spread by weight as above and nothing is
 returned (§6.2): no burst can then find the GPUs it needs parked on another
@@ -332,13 +349,13 @@ weight keeps the weight's meaning for headroom: a flat cap gave weights 1 : 1,
 2 : 1 and 4 : 1 the same targets whenever the spare exceeded it, which a review
 of the first, flat version found. The planner caps its roles after the swing
 rule has set their planning need (§6.7 rule 5), on the higher of this cycle's
-reading and the planning need (`calmView`): capped on the reading, a swinging
+reading and the planning need (`needView`): capped on the reading, a swinging
 role in its trough would be held below the mean it is planned on; capped on
 the mean, one at its crest would be held below its reading, beside GPUs only
 it could use.
 
 A role is never capped below what the other roles' peak claims leave of the
-budget, in whole replicas, nor above its own ceiling:
+budget, in whole replicas, nor above its own ceiling (`shareRoomForOthers`):
 
 ```text
   R_r   = g_r · ⌊ (B_net − Σ_{s≠r} P_s) / g_r ⌋
@@ -883,11 +900,15 @@ When the group acts:
   headroom moves started beside a burst's, drained the same long-drain donor,
   and landed after the burst had ended (c16 40m: 0.147 -> 0.119). Only a
   returned spare is not counted, handed to a receiver or not. The hard-imbalance
-  test judges the receiver, like the donor, on `calmView`, the higher of its
-  reading and its planning need (`hardReceivers`, `fundFrom`, and donor sets
-  through `shareSetRule.calm`): on its mean, a swinging role at the crest of a
-  burst never took the unpaced path, and a set drained a swinging donor that a
-  single move refused. Aborts of one donor in one cycle back it off once: transfers started
+  test judges the receiver on `needView`, the higher of its reading and its
+  planning need: on its mean, a swinging role at the crest of a burst never
+  took the unpaced path. It judges the donor on `donorView`, the higher of that
+  and the donor's peak need over its scale-down window (`RecentPeak` over
+  `ShareTimings.Window`), as a scale-down is: judged on one reading, a calm
+  donor read in a trough of its normal demand was drained in two cycles. Both
+  apply in `hardReceivers`, `fundFrom` and donor sets (`shareSetRule.need`
+  and `shareSetRule.donorNeed`), so a set does not drain a donor that a single
+  move refuses. Aborts of one donor in one cycle back it off once: transfers started
   together share a deadline, and five aborting together would otherwise reach
   the 16x back-off on their first stuck release. A donor whose pod could not be
   marked starts nothing more that cycle.
@@ -1038,6 +1059,17 @@ When the group acts:
   the max-min order, a finite set of allocations cannot increase forever, so the
   planner stops. Demand is not fixed, and §6.7 is what keeps noise from
   restarting it every cycle.
+- **While spread, a headroom move does not take a donor below its own peak**
+  (`fundFrom`, counted `donor-peak`). While the quota holds every role's peak
+  (the cap is off, §5.1), a receiver already at its need takes no replica that
+  would leave the donor below its peak claim `P_d` (`sharePlanRun.peaks`): the
+  split covers both, and such a move -- from a donor that may drain for
+  minutes -- lands after the receiver's burst and just before the donor's own.
+  That was the c16 40-minute regression: in the reviewers' simulator, these
+  moves drained a slow donor below its recent peak for a receiver already at
+  its need, and withholding them took c16 at 40 minutes from 0.123 to 0.045
+  (`e55b02b2`: 0.076) with no regression elsewhere. Moves to a receiver below
+  its need are not affected, nor is anything while contended.
 - Bound the pace: at most two replicas given or received by any one role in a
   planning cycle, and at most two transfers in flight per group (constants,
   §8.4). A large
@@ -1054,12 +1086,20 @@ When the group acts:
   - **the quota is contended** (§5.1): only a capped spare is returned. Spread,
     the targets give the whole spare away by weight, and what moves between
     roles moves by transfer;
-  - **the role has held more than its target for the donor's scale-down
-    window** (`MarkOver`, measured against `ShareTimings.Window`), the clock
-    today's optimizer shrinks it on. A burst that comes back sooner finds its
-    replicas warm. Without the window, returns churned a pod a minute near
-    replica boundaries: in review simulations, 175 return-then-refill pairs in
-    30 hours, and 96 whole-node cold starts in 8 hours;
+  - **the role has held more than its target for the confirm cycles**
+    (`MarkOver` counts consecutive cycles; `confirmCycles`,
+    `stabilization.consecutiveCyclesBeforeMove`, default 2), as any move
+    waits. The release that follows waits the donor's scale-down window --
+    the clock today's optimizer shrinks it on -- and is cancelled while it
+    waits if the role's demand comes back (below), so a burst that comes back
+    within the window keeps its replicas warm. Until `6abc491d` the return
+    also waited that window before it started (`MarkOver` against
+    `ShareTimings.Window`), so a return took two windows where a scale-down
+    takes one, and a burst on another model found the spare still parked.
+    Without any wait, returns churned a pod a minute near replica boundaries:
+    in review simulations, 175 return-then-refill pairs in 30 hours, and 96
+    whole-node cold starts in 8 hours; the calm rule and the cancel (below)
+    are the hysteresis now;
   - **no role short of its claim can grow**: a role below its claim rounded up
     to whole replicas, that has a variant to grow and is not held from filling,
     blocks every return (counted `return-role-short`). With such a role short,
@@ -1108,10 +1148,20 @@ When the group acts:
   receiver below its target takes returns still Releasing, one receiver
   replica each, up to its target, but only a return whose pod frees a hole the
   receiver's pod fits (`ShareCovers`: a 2x4 replica does not free a node for a
-  1x8 pod). Its GPUs reach the receiver when they come free. It stays
+  1x8 pod). The shape is the returned replica's own, recorded when the return
+  starts (`ShareTransfer.DonorPodGPUs`, from `shareReplicaPods`): the donor may
+  give from another variant by now, and the check once read the donor's
+  current give variant and was skipped when it had none. A return whose shape
+  is not known -- one rebuilt from its pod marks after a restart, which do not
+  carry it -- is not handed over at all. Its GPUs reach the receiver when they
+  come free. It stays
   **Returned**, so it still does not count in `InFlight` (counted, six assigned
   returns held every paced move in a group for a release); once handed over it
-  is cancelled only as a transfer would be, not as a return. `Unreleased`
+  is cancelled only as a transfer would be, not as a return. A scale-from-zero
+  wake that claims a handed-over return (`Redirect`, §7.2) ends it as a
+  return: it becomes an ordinary release for the wake. Left Returned with no
+  receiver (a regression in `19e7be3f`), it could be handed to a second
+  receiver, or cancelled as a return, while the wake waited on it. `Unreleased`
   counts what any releasing transfer takes beyond its receiver's replica (an
   8-GPU return handed to a 4-GPU receiver), so the fill does not read those
   GPUs as idle. The receiver
@@ -1119,7 +1169,11 @@ When the group acts:
   `Utilization share: returned spare handed to a receiver`. Before, the
   receiver waited on the same release with no transfer of its own and no reason
   shown. A receiver whose replica spans several pods is left to a donor set,
-  which places each pod.
+  which places each pod -- unless returns still Releasing and handed to no
+  receiver will free at least one replica of it (`returnsCover`): those land
+  in the unassigned GPUs, where the idle fill places its pods, so a set would
+  drain a donor for GPUs already on their way. The receiver then waits,
+  counted `awaiting-return`.
 
   **A return is cancelled
   while it is free** (`cancelReversals`: still Releasing, inside the
@@ -1624,8 +1678,9 @@ replicas. Every figure is a mean of five seeds.
    stays at 0.6 or less of what it keeps -- is not held; if it holds a second
    cycle it is not paced either, up to the receiver's need (§6.2). A short role
    held otherwise shows the blocked reason `reversal-hold` while it waits. A
-   spare return (§6.2, `returnSpare`) has its own hysteresis: it waits a
-   scale-down window, and a role gives back only while its need is at most
+   spare return (§6.2, `returnSpare`) has its own hysteresis: it starts after
+   the confirm cycles, its release waits a scale-down window and is cancelled
+   if demand comes back meanwhile, and a role gives back only while its need is at most
    `returnSpareWhenLoadAtMost` (0.6) of what it keeps less its headroom, so it
    is refilled only after its need grows by 1/0.6.
 5. **Plan a swinging role on its mean need.** A role whose transfers change
@@ -2070,8 +2125,9 @@ its need, or headroom by weight, or that the move skipped the waits
 (`stabilization.skipWaitsWhen`); a set contributor names the receiver its set
 funds, a refill names the scale-from-zero reserve, and a spare return
 (`returnSpare`, §6.2) names "the quota group's unassigned GPUs", because the
-model holds more headroom than `maxHeadroomReplicas` gives it, its demand has
-stayed low for its scale-down window, and no model is short.
+model holds more headroom than `maxHeadroomReplicas` gives it while no model is
+short and stays calm without it; its replica drains after the scale-down
+window, and is kept if its demand comes back before then.
 `wva_utilization_share_starts_total{kind, skipped_waits}` counts what started
 (`transfer`, `fill`, `refill`, `return`), so a return is no longer counted as a
 transfer.
@@ -2424,7 +2480,9 @@ optimizer every cycle (§6.6).
        while its continuous target covers that need (`EvaluateShare`): the
        band is never narrower than half a replica, so for whole-node
        replicas it hid shortfalls of up to four GPUs (8 held of 8.5
-       needed).
+       needed). The need is judged against `min(N_r, C_r)`: a role needing
+       more than its ceiling counted in band one replica below it, and never
+       took its last replica (7 of 8 in the cluster scenario).
      - a donor whose workload is changing (`errDonorChanging`) is held one
        release timeout (`ShareLedger.HoldChanging`) with no abort,
        back-off, Warning or reason: a Deployment mid-rollout by its status
@@ -2705,10 +2763,22 @@ optimizer every cycle (§6.6).
    whose pod its hole fits (§6.2); an active group publishes the planner's
    evaluation, with `wva_utilization_share_headroom_capped` and a log line when
    the cap flips; and a role whose peak is not yet known counts at its ceiling,
-   so the cap is on for a swing window after a restart (§5.1). Still open: c16
-   at 40 minutes (0.119 against 0.076 for `e55b02b2`), a tight 1x8 quota at 20
-   and 30 minutes (+0.02), and square2 at 30 minutes (0.320 -> 0.332). The
-   cluster rerun is pending, on `5549d924` or later.
+   so the cap is on for a swing window after a restart (§5.1). Round 17, the
+   review of `053ebfcd` (`6abc491d`): a return starts after the confirm
+   cycles, not after the scale-down window, and only its release waits that
+   window; a donor's calm is judged on its peak over its scale-down window
+   (`donorView`); a headroom move to a receiver at its need no longer takes a
+   donor below its own peak while spread (`donor-peak`), which explained and
+   fixed c16 at 40 minutes (0.123 -> 0.045, against 0.076 for `e55b02b2`); a
+   peak counts only when two readings in a row reach it, a role whose history
+   aged out starts it again, and a role joining a known group claims what it
+   holds; a need above the ceiling is judged against the ceiling; a return
+   carries its pod shape and a wake that claims a handed-over one ends it as a
+   return; a multi-pod receiver waits for returns that cover it
+   (`awaiting-return`); and the cap's log names its `cause`. Still open: a
+   tight 1x8 quota at 20 and 30 minutes (+0.02; deferred: unpaced moves land
+   after a short burst ends), and square2 at 30 minutes (0.320 -> 0.332). The
+   cluster rerun is pending, on `6abc491d` or later.
 3. **Short window for urgent transfers**, through `wvaOwnership`, once
    managed-keda-behavior lands (§6.4), gated on a persistent hard imbalance,
    not on the load limits alone (§15).
@@ -2733,8 +2803,14 @@ optimizer every cycle (§6.6).
   0.147 shortfall), though their peaks fit together and the cap did not bind.
   Counting moves that skipped the waits against the concurrency limit again
   took it to 0.119 (§6.2); taking an unknown peak at the ceiling, which caps
-  every run's first swing window, left it at 0.123. The rest is not yet
-  explained.
+  every run's first swing window, left it at 0.123. The rest is explained:
+  while spread, ordinary headroom moves drained a slow donor below its own
+  recent peak for a receiver already at its need, landing after the
+  receiver's burst and just before the donor's own. Withholding them
+  (`donor-peak`, §6.2) took it to 0.045, below `e55b02b2`'s 0.076. Still
+  open: whole-node 1x8 models in a tight quota with 20-30 minute bursts do
+  about 0.02 worse than before the unpaced hard-imbalance rule, because
+  unpaced moves land after a short burst ends; deferred, not fixed.
 - **Reserve default.** `0` keeps "all GPUs" literal; one replica keeps
   scale-from-zero fast. Recommended: `0`, with a WARN when a group contains a
   scale-to-zero model and no reserve.
