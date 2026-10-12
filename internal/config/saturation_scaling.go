@@ -701,6 +701,15 @@ func (c *ScalingPolicy) Validate() error {
 		return err
 	}
 
+	// Checked here, once per ConfigMap change, so a typo fails the entry where
+	// the operator looks. Left to ResolveScaleToZeroRetention it passed load and
+	// was then reported on every cycle for every model resolving to it.
+	if c.ScaleToZero != nil && c.ScaleToZero.RetentionPeriod != "" {
+		if _, err := ValidateRetentionPeriod(c.ScaleToZero.RetentionPeriod); err != nil {
+			return fmt.Errorf("scaleToZero.retentionPeriod %q: %w", c.ScaleToZero.RetentionPeriod, err)
+		}
+	}
+
 	return nil
 }
 
