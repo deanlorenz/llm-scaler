@@ -311,19 +311,16 @@ func TestShareFillShortReceiverIsFundedByADonor(t *testing.T) {
 	}
 }
 
-// A returned spare does not count against the concurrency limit, handed to a
-// receiver or not. A move that skipped the waits does: uncounted, ordinary
-// headroom moves started beside a burst's and drained its donor for nothing.
+// A returned spare does not count against the concurrency limit. A move that
+// skipped the waits does: uncounted, ordinary headroom moves started beside a
+// burst's and drained its donor for nothing.
 func TestShareInFlightCountsEveryMoveButReturns(t *testing.T) {
 	l := NewShareLedger()
 	held := map[string]int{"L": 3, "Q": 7}
 	tm := spareTimings()
-	r := l.Start(ShareTransfer{Donor: "Q", DonorGPUs: 1, Entitled: true, Returned: true}, held, time.Unix(1000, 0), tm)
-	if !l.AssignReturn(r.ID, "L", "l", 1) {
-		t.Fatal("setup: the return was not handed to L")
-	}
+	l.Start(ShareTransfer{Donor: "Q", DonorGPUs: 1, Entitled: true, Returned: true}, held, time.Unix(1000, 0), tm)
 	if n := l.InFlight(); n != 0 {
-		t.Fatalf("in flight %d, want 0: a return, handed over or not, is not counted", n)
+		t.Fatalf("in flight %d, want 0: a return is not counted", n)
 	}
 	l.Start(ShareTransfer{Donor: "Q", Receiver: "L", GPUs: 1, DonorGPUs: 1, SkippedWaits: true}, held, time.Unix(1000, 0), tm)
 	if n := l.InFlight(); n != 1 {
@@ -331,21 +328,20 @@ func TestShareInFlightCountsEveryMoveButReturns(t *testing.T) {
 	}
 }
 
-// What a releasing transfer takes beyond its receiver's replica is not idle:
-// an 8-GPU return handed to a 4-GPU receiver still runs on all eight.
+// What a releasing transfer gives no receiver is not idle: a return still
+// runs on all of its GPUs, and an 8-GPU replica given to a 4-GPU receiver on
+// the four the receiver does not get.
 func TestShareUnreleasedCountsWhatNoReceiverGets(t *testing.T) {
 	l := NewShareLedger()
-	held := map[string]int{"L": 4, "Q": 16}
+	held := map[string]int{"L": 4, "Q": 24}
 	tm := spareTimings()
-	r := l.Start(ShareTransfer{Donor: "Q", DonorGPUs: 8, Entitled: true, Returned: true}, held, time.Unix(1000, 0), tm)
+	l.Start(ShareTransfer{Donor: "Q", DonorGPUs: 8, Entitled: true, Returned: true}, held, time.Unix(1000, 0), tm)
 	if n := l.Unreleased(); n != 8 {
 		t.Fatalf("unreleased %d, want 8: the return goes to nobody yet", n)
 	}
-	if !l.AssignReturn(r.ID, "L", "l", 4) {
-		t.Fatal("setup: the return was not handed to L")
-	}
-	if n := l.Unreleased(); n != 4 {
-		t.Fatalf("unreleased %d, want 4: L gets four of the eight", n)
+	l.Start(ShareTransfer{Donor: "Q", Receiver: "L", GPUs: 4, DonorGPUs: 8}, held, time.Unix(1000, 0), tm)
+	if n := l.Unreleased(); n != 12 {
+		t.Fatalf("unreleased %d, want 12: the return's 8 and the 4 L does not get", n)
 	}
 }
 
@@ -420,25 +416,30 @@ func TestShareUnfundedRoleDoesNotBlockReturns(t *testing.T) {
 	}
 }
 
-// A return still releasing goes to a role that turns short, as a transfer's
-// GPUs would, instead of to the quota it would wait on with no reason shown.
-func TestShareHandsAReturnToAShortReceiver(t *testing.T) {
+// A return still releasing stays a return when another role turns short: it
+// lands in the unassigned GPUs, where the idle fill places them, and is
+// neither handed to the short role nor cancelled while its own role is calm.
+func TestShareReturnStaysAReturnWhenAReceiverTurnsShort(t *testing.T) {
 	l := NewShareLedger()
 	plans := planEach(l, spareRun(2, 0.4, 7), 3)
 	if plans[1].Returns != 5 {
 		t.Fatalf("setup: Q returned %d, want 5", plans[1].Returns)
 	}
 	p := PlanShareTransfers(l, spareRun(5, 0.4, 7), time.Unix(1045, 0), spareTimings())
-	if len(p.Assigned) != 3 {
-		t.Fatalf("assigned %d returns to L, want 3 (3 up to its target of 6)", len(p.Assigned))
+	if len(p.Cancelled) != 0 {
+		t.Fatalf("returns cancelled while Q is calm: %v", p.Cancelled)
 	}
-	for _, id := range p.Assigned {
-		if tr, _ := l.Transfer(id); tr.Receiver != "L" || !tr.Returned {
-			t.Fatalf("assigned %+v, want a return handed to L", tr)
+	n := 0
+	for _, tr := range l.Transfers() {
+		if tr.Returned {
+			n++
+			if tr.Receiver != "" {
+				t.Fatalf("a return has a receiver: %+v", tr)
+			}
 		}
 	}
-	if qToL(p.Started) != 0 {
-		t.Fatal("Q started new transfers to L besides its returns")
+	if n != 5 {
+		t.Fatalf("%d returns in the ledger, want all 5 still returning", n)
 	}
 }
 

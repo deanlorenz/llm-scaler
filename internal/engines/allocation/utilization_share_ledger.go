@@ -96,14 +96,12 @@ type ShareTransfer struct {
 	// Returned marks a transfer that gives a replica above the donor's target
 	// back to the group (ShareCapSpare), started while no role was short of
 	// its own. It counts against neither the pace nor the concurrency limit.
-	// With no Receiver it goes to the unassigned GPUs, for the idle fill to
-	// raise whoever needs them; AssignReturn may later hand it to a short
-	// receiver, and it stays Returned. A wake that claims it (Redirect) makes
-	// it an ordinary release.
+	// It has no Receiver: it goes to the unassigned GPUs, for the idle fill
+	// to raise whoever needs them.
 	Returned bool
 	// DonorPodGPUs is the GPUs of each pod of the returned replica, when its
-	// shape is known: a return is handed only to a receiver whose pod one of
-	// them holds (fromReturns). Empty for any other transfer, and for a
+	// shape is known: a return is credited only to a receiver whose pod one
+	// of them holds (returnsCover). Empty for any other transfer, and for a
 	// return read back from its marks after a restart.
 	DonorPodGPUs []int
 	// Urgent receivers are below their need (§6.4).
@@ -350,8 +348,7 @@ func (l *ShareLedger) Transfers() []ShareTransfer {
 func (l *ShareLedger) InFlight() int {
 	seen := map[string]bool{}
 	for _, t := range l.transfers {
-		// A returned spare does not count, handed to a receiver or not:
-		// counted, a calm model's returns would hold every ordinary move for
+		// A returned spare does not count: counted, a calm model's returns would hold every ordinary move for
 		// a release. A move that skipped the waits does: the unpaced moves of
 		// a hard imbalance pass the limit without consulting it, but an
 		// ordinary move started beside them would drain the same donor for
@@ -371,7 +368,7 @@ func (l *ShareLedger) InFlight() int {
 // Unreleased is the GPUs releasing transfers took off their donors'
 // commitment and gave no receiver: all of a reserve refill's or an unassigned
 // return's, and whatever a transfer or a set takes beyond its receiver's
-// replica (an 8-GPU return handed to a 4-GPU receiver). The donors' pods
+// replica (an 8-GPU replica given to a 4-GPU receiver). The donors' pods
 // still run on them and the quota still counts them, so they are not idle
 // until released. Counted idle, the fill would raise a model into a full
 // quota, its pods would be refused at admission, and it would be raised again
@@ -812,10 +809,7 @@ func (l *ShareLedger) Redirect(id string, hold time.Duration) (ShareTransfer, bo
 	for _, t := range l.transfers {
 		if t.ID == id && redirectable(t) {
 			prev := *t
-			// A return handed to a receiver is no longer a return once a wake
-			// claims it: left Returned with no receiver, it would be handed
-			// to another receiver, or cancelled, while the wake waits on it.
-			t.Receiver, t.ReceiverVariant, t.GPUs, t.Urgent, t.Returned = "", "", 0, false, false
+			t.Receiver, t.ReceiverVariant, t.GPUs, t.Urgent = "", "", 0, false
 			l.wakeHolds = append(l.wakeHolds, shareWakeHold{gpus: t.DonorGPUs, id: t.ID, hold: hold})
 			return prev, true
 		}
@@ -1156,21 +1150,6 @@ func (l *ShareLedger) PeakKnown(role string, now time.Time, tm ShareTimings) boo
 func (l *ShareLedger) Giving(role string) bool {
 	for _, t := range l.transfers {
 		if t.State == ShareReleasing && t.Donor == role {
-			return true
-		}
-	}
-	return false
-}
-
-// AssignReturn hands a returned spare that is still releasing to receiver:
-// its GPUs go to it when they come free, as a transfer's would, instead of
-// to the unassigned GPUs it would otherwise wait on. gpus is one receiver
-// replica, no more than the returned replica. It stays Returned, so it still
-// does not count against the concurrency limit. It reports whether it did.
-func (l *ShareLedger) AssignReturn(id, receiver, variant string, gpus int) bool {
-	for _, t := range l.transfers {
-		if t.ID == id && t.Returned && t.State == ShareReleasing && t.Receiver == "" && gpus <= t.DonorGPUs {
-			t.Receiver, t.ReceiverVariant, t.GPUs = receiver, variant, gpus
 			return true
 		}
 	}

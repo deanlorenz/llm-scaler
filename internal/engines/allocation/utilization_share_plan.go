@@ -206,9 +206,6 @@ type SharePlan struct {
 	// Returns is how many transfers started this cycle to give a role's
 	// replicas above its target back to the unassigned GPUs (returnSpare).
 	Returns int
-	// Assigned are the returns still releasing that this cycle handed to a
-	// short receiver (ShareLedger.AssignReturn).
-	Assigned []string
 	// HeadroomCapped is set when the spare was capped this cycle: the quota
 	// could not cover every role at its recent peak (contended).
 	HeadroomCapped bool
@@ -839,8 +836,7 @@ func (p *sharePlanRun) cancelReversals() {
 		g := float64(max(dn.ReplicaGPUs, 1))
 		bar := float64(donorAfter) - float64(in.Headroom.spareReplicas(dn))*g + g
 		back := donorShort || donorAfter < p.integ[t.Donor] || p.need(t.Donor) > in.Headroom.returnLoad()*bar
-		// One handed to a receiver is a transfer now, and is judged as one.
-		if t.Returned && t.Receiver == "" && back && l.Cancel(t.ID, now, tm) {
+		if t.Returned && back && l.Cancel(t.ID, now, tm) {
 			p.plan.Cancelled = append(p.plan.Cancelled, t.ID)
 			p.committed = l.Committed(in.Held)
 			continue
@@ -933,7 +929,6 @@ func (p *sharePlanRun) fund(rc string, donors []string) {
 		return // its last fill timed out with its pods Pending (HoldFill)
 	}
 	p.fromIdle(rc)
-	p.fromReturns(rc)
 	// Returns still releasing that will free whole replicas of a receiver
 	// whose replica spans several pods land in the unassigned GPUs, where the
 	// idle fill places its pods: they are credited, and only the rest is
@@ -1012,44 +1007,10 @@ func (p *sharePlanRun) fromIdle(rc string) {
 	}
 }
 
-// fromReturns hands returned spare still releasing to receiver rc, up to its
-// target: those GPUs reach it when they come free, as a transfer's would.
-// Left unassigned, the receiver would wait on the same release with no
-// transfer of its own and no reason to show for it. A receiver whose replica
-// spans several pods is left to a donor set, which places each pod.
-func (p *sharePlanRun) fromReturns(rc string) {
-	grow, ok := variantOf(p.in.Grow, rc, p.byKey[rc].ReplicaGPUs)
-	if !ok || len(grow.PodGPUs) > 1 {
-		return
-	}
-	g := max(grow.GPUs, 1)
-	for _, t := range p.l.Transfers() {
-		if p.work[rc] >= p.integ[rc] {
-			return
-		}
-		if !t.Returned || t.Donor == rc {
-			continue
-		}
-		// The returned pod must free a hole the receiver's pod fits: an
-		// 8-GPU return split as 2x4 does not hold a 1x8 pod. Its shape is the
-		// one it was returned from -- the donor may give from another variant
-		// by now -- and a return whose shape is not known is not handed over.
-		returned := ShareVariant{GPUs: t.DonorGPUs, PodGPUs: t.DonorPodGPUs}
-		if p.in.Give != nil && (len(t.DonorPodGPUs) == 0 || !ShareCovers(returned, grow)) {
-			continue
-		}
-		if p.l.AssignReturn(t.ID, rc, grow.Name, g) {
-			p.work[rc] += g
-			p.plan.Assigned = append(p.plan.Assigned, t.ID)
-		}
-	}
-}
-
 // returnsCover is the GPUs, in whole replicas of receiver rc -- whose
-// replica spans several pods -- that returns still releasing, and handed to
-// no receiver, will free for it, up to its target. Such returns are not
-// handed over (fromReturns); they reach rc through the idle fill once
-// released. Only returned pods at least as large as rc's pods count: two
+// replica spans several pods -- that returns still releasing will free for
+// it, up to its target. A return is never handed to a receiver: it reaches
+// rc through the idle fill once released. Only returned pods at least as large as rc's pods count: two
 // 4-GPU pods do not hold an 8-GPU one, and a return whose shape is not known
 // counts for nothing. Each return is credited to one receiver per cycle.
 func (p *sharePlanRun) returnsCover(rc string) int {
@@ -1063,7 +1024,7 @@ func (p *sharePlanRun) returnsCover(rc string) int {
 	var ids []string
 	gpus := 0
 	for _, t := range p.l.Transfers() {
-		if !t.Returned || t.Receiver != "" || t.State != ShareReleasing || t.Donor == rc || p.creditedReturns[t.ID] {
+		if !t.Returned || t.State != ShareReleasing || t.Donor == rc || p.creditedReturns[t.ID] {
 			continue
 		}
 		fits := 0
