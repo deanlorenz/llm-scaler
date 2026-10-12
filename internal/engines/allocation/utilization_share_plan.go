@@ -356,10 +356,6 @@ type sharePlanRun struct {
 	idleNodes map[string]ShareNode
 	// peaks is each role's claim at its peak need (peakClaims).
 	peaks map[string]int
-	// contentionSeen is set when the peaks recorded so far already exceed the
-	// budget, known or not (peakClaims): contention is then a fact, not an
-	// assumption made while no peak is known.
-	contentionSeen bool
 	// creditedReturns are the returns this cycle already credited to a
 	// receiver whose replica spans several pods (returnsCover).
 	creditedReturns map[string]bool
@@ -690,30 +686,25 @@ func (p *sharePlanRun) peakClaims() (map[string]int, int) {
 	out := make(map[string]int, len(p.roles))
 	sum := 0
 	established := p.l.AnyPeakKnown(p.now, p.tm)
-	seen := 0
 	for _, r := range p.roles {
 		g := max(r.ReplicaGPUs, 1)
 		peak := r
 		peak.Need = p.l.PeakNeed(r.Key, r.Need)
-		known := p.l.PeakKnown(r.Key, p.now, p.tm)
-		if !known && established {
+		switch {
+		case p.l.PeakKnown(r.Key, p.now, p.tm):
+		case established:
 			// A role joining a group whose history is known claims what it
 			// holds: at its ceiling, any new model -- or one renamed to look
 			// new -- would cap every other model's headroom for a window.
 			peak.Need = math.Max(peak.Need, float64(p.in.Held[r.Key]))
-		}
-		peak.Need = math.Min(peak.Need, float64(p.in.Budget))
-		// What has been recorded, before an unknown peak is assumed at the
-		// ceiling: whether the contention is seen (returnWaitsWindow).
-		seen += g * int(math.Ceil(peak.Claim()/float64(g)-1e-9))
-		if !known && !established {
+		default:
 			peak.Need = math.Max(peak.Need, math.Min(r.ceiling(), float64(p.in.Budget)))
 			p.plan.UnknownPeaks = append(p.plan.UnknownPeaks, r.Key)
 		}
+		peak.Need = math.Min(peak.Need, float64(p.in.Budget))
 		out[r.Key] = g * int(math.Ceil(peak.Claim()/float64(g)-1e-9))
 		sum += out[r.Key]
 	}
-	p.contentionSeen = seen > p.in.Budget
 	return out, sum
 }
 
@@ -1115,10 +1106,9 @@ func (p *sharePlanRun) fundFrom(rc, dn string) (started int, step fundStep, cand
 // §6.2), where the idle fill raises whoever needs it next without a drain to
 // wait for. It is today's scale-down, done while nobody waits for the GPUs:
 //   - only after the role has held more than its target for the confirm
-//     cycles (and its scale-down window while the contention is only
-//     assumed, returnWaitsWindow); its replica then drains after the
-//     scale-down window, and a burst that comes back within it calls the
-//     return off (cancelReversals) and finds its replica warm;
+//     cycles; its replica then drains after the scale-down window, and a
+//     burst that comes back within it calls the return off (cancelReversals)
+//     and finds its replica warm;
 //   - only while no role that can grow is short of its claim, rounded up to
 //     whole replicas -- with one short, the GPUs go to it by a transfer,
 //     which the holds govern; a role short only of its headroom, or held
@@ -1139,7 +1129,7 @@ func (p *sharePlanRun) returnSpare() {
 		// away by weight, and what moves between roles moves by transfer.
 		over[r.Key] = p.plan.HeadroomCapped && p.work[r.Key] > p.integ[r.Key]
 	}
-	cycles := l.MarkOver(over, now)
+	cycles := l.MarkOver(over)
 	for _, r := range p.roles {
 		g := max(r.ReplicaGPUs, 1)
 		claim := g * int(math.Ceil(r.Claim()/float64(g)-1e-9))
@@ -1162,12 +1152,8 @@ func (p *sharePlanRun) returnSpare() {
 		// is called off while it does if the role's demand comes back
 		// (cancelReversals). Waiting both, a return took two windows where
 		// a scale-down takes one, and a burst on another model found the
-		// spare still parked. Only while the contention is assumed does it
-		// wait both (returnWaitsWindow).
+		// spare still parked.
 		if !over[dn] || cycles[dn] < p.confirmCycles() || l.GivingHeld(dn, now, tm) {
-			continue
-		}
-		if p.returnWaitsWindow() && l.OverFor(dn, now) < tm.Window {
 			continue
 		}
 		give, ok := variantOf(in.Give, dn, r.ReplicaGPUs)
@@ -1191,21 +1177,6 @@ func (p *sharePlanRun) returnSpare() {
 			p.plan.Withheld[ShareWithheldReturnNotCalm]++
 		}
 	}
-}
-
-// returnWaitsWindow reports whether a return also waits its role's
-// scale-down window, as returns did before they started after the confirm
-// cycles: while the cap is on only because no peak is known yet (peakClaims
-// counts each role at its ceiling) and the needs recorded so far fit the
-// budget together. The contention is then assumed, not seen, and a return
-// is a guess that the role's demand fell for good. A long-drain model's dip
-// that outlasts the confirm cycles and its window, but not the two windows,
-// was returned and then cold-started again as it came back: in simulation a
-// 12-minute dip at a 10-minute window went from 0.001 to 0.038 of its demand
-// unserved. Once the recorded peaks exceed the budget, or the peaks are
-// known, the contention is real, and a return waits the confirm cycles only.
-func (p *sharePlanRun) returnWaitsWindow() bool {
-	return len(p.plan.UnknownPeaks) > 0 && !p.contentionSeen
 }
 
 // fundBySet funds rc from several donors when no single donor replica fits

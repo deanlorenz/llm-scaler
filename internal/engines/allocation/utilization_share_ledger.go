@@ -284,8 +284,6 @@ type ShareLedger struct {
 	// over counts each role's consecutive cycles holding more than its
 	// target (MarkOver).
 	over map[string]int
-	// overSince is when each role still over its target first was (MarkOver).
-	overSince map[string]time.Time
 	// releases are the durations of recent completed releases, newest last,
 	// for the measured release time (§8.4).
 	releases []time.Duration
@@ -327,7 +325,6 @@ func NewShareLedger() *ShareLedger {
 		confirm:     map[string]int{},
 		hard:        map[string]int{},
 		over:        map[string]int{},
-		overSince:   map[string]time.Time{},
 		seen:        map[string]time.Time{},
 		unsteerable: map[string]bool{},
 		busyUntil:   map[string]time.Time{},
@@ -1174,32 +1171,18 @@ func (l *ShareLedger) Unpaced(role string, tm ShareTimings) bool {
 // MarkOver records which roles hold more than their target this cycle and
 // returns, per role still over, for how many consecutive cycles it has been:
 // what a return waits on (returnSpare). A role that is not over starts again.
-func (l *ShareLedger) MarkOver(over map[string]bool, now time.Time) map[string]int {
+func (l *ShareLedger) MarkOver(over map[string]bool) map[string]int {
 	for role := range l.over {
 		if !over[role] {
 			delete(l.over, role)
-			delete(l.overSince, role)
 		}
 	}
 	for role, o := range over {
 		if o {
 			l.over[role]++
-			if _, ok := l.overSince[role]; !ok {
-				l.overSince[role] = now
-			}
 		}
 	}
 	return maps.Clone(l.over)
-}
-
-// OverFor is how long role has held more than its target (MarkOver), zero
-// when it does not.
-func (l *ShareLedger) OverFor(role string, now time.Time) time.Duration {
-	since, ok := l.overSince[role]
-	if !ok {
-		return 0
-	}
-	return now.Sub(since)
 }
 
 // MeasuredRelease is the 90th percentile of recent completed releases, and
@@ -1429,7 +1412,6 @@ func (l *ShareLedger) Retain(present []string, now time.Time, tm ShareTimings) {
 		delete(l.needsSince, r)
 		delete(l.hard, r)
 		delete(l.over, r)
-		delete(l.overSince, r)
 	}
 }
 
