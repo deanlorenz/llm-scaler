@@ -21,7 +21,7 @@
 > once on round 20 (`77b55ba2`): the first burst served from the start (p50
 > 0.07 s against 41 s), the second reached its full fleet sooner than without
 > sharing (p50 87 s against 144 s) with one pod's queue setting its tail (p95
-> 240 s against 178 s), at 34% more GPU-seconds
+> 240 s against 178 s), at 34% more GPU-seconds, most of it a bug since fixed
 > ([measured](measured.md#rerun-on-round-20-the-first-burst-served-from-the-start-the-second-not-held-back)). Each arm ran once; whole-node and multi-GPU pods were not
 > measured; and P/D could not be measured: prefill never scaled, so prefill
 > and decode never competed for GPUs. The defaults may also

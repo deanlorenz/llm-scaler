@@ -308,10 +308,14 @@ and the teardown left no GPU requested.
 | A (Llama) burst, second | 144 s / 178 s | 114 s / 156 s | **87 s / 240 s** |
 | GPU-seconds | 17 875 | 17 582 | 24 007 |
 
-- **The first burst gained, from the headroom.** Before any load, the idle
-  quota went to both models as headroom (A 1 -> 5, B 1 -> 4 replicas), so B
-  started its burst with four replicas serving: half its requests waited 70 ms,
-  against 41 s under today's optimizer. No transfer was involved.
+- **The first burst gained, partly from a bug.** Before any load, the idle
+  quota went to both models (A 1 -> 5, B 1 -> 4 replicas), so B started its
+  burst with four replicas serving: half its requests waited 70 ms, against
+  41 s under today's optimizer. No transfer was involved. With the cap on,
+  each should have held one replica above its need; the planner read the
+  analyzer's shape-change hold -- demand held at the scale-down boundary of
+  whatever the model held -- as need, so every fill raised the next
+  (fixed in `552c3dea`).
 - **The second burst was not held back.** A had its 8 replicas ready 204 s
   after its burst began, against 241 s under today's optimizer and 351 s in
   `shadow`; no replica was leaving A when the burst began, and only A's 7th and
@@ -323,10 +327,11 @@ and the teardown left no GPU requested.
   move in that time. Today's arm had the same shape with 150 requests on one
   pod (p95 178 s), and `shadow` with 86 (156 s), so the tail followed the
   deepest single-pod queue, not the fleet. One run per arm cannot settle it.
-- **The cost is the headroom.** `share` used 34% more GPU-seconds than
-  today's optimizer, nearly all of it the idle quota held as headroom before
-  the bursts -- the cost of the first burst's gain
-  ([What it costs](README.md#what-it-costs)). The previous run, on
+- **The cost was mostly that bug.** `share` used 34% more GPU-seconds than
+  today's optimizer, nearly all of it the replicas the idle fill ratcheted
+  up before the bursts. With the fix, the first burst keeps only the
+  designed headroom ([What it costs](README.md#what-it-costs)); how much of
+  its gain and of the cost remains is for the next run. The previous run, on
   `e55b02b2`, cost about 81% more and lost A's tail by 174 s with A 18 minutes
   short of its fleet.
 

@@ -2999,8 +2999,13 @@ optimizer every cycle (§6.6).
    peaks leave. The cluster rerun on round 20 served the first burst from the
    start (p50 0.07 s against 41 s); the second reached its full fleet sooner
    than without sharing, with its tail set by one pod's queue (235 requests
-   while seven pods sat idle), at 34% more GPU-seconds for the headroom held
-   before the bursts (well-lit path, measured page).
+   while seven pods sat idle), at 34% more GPU-seconds (well-lit path,
+   measured page). Most of that cost was a bug the run found: the planner
+   read the analyzer's shape-change hold -- demand held at the scale-down
+   boundary of the current fleet -- as need, so each idle fill raised the
+   next (A 1 -> 5 replicas with no load, the cap on). A held role is now
+   sized on its demand before the hold (`AnalyzerResult.HeldRoleDemand`)
+   and gives nothing while it lasts.
 3. **Short window for urgent transfers**, through `wvaOwnership`, once
    managed-keda-behavior lands (§6.4), gated on a persistent hard imbalance,
    not on the load limits alone (§15).
