@@ -83,6 +83,20 @@ func TestAnEngineShortAliasIsRecorded(t *testing.T) {
 	if tp.Complete() {
 		t.Errorf("Complete() is true over -tp 2, Unresolved=%v", tp.Unresolved)
 	}
+
+	// BOTH SPELLINGS. The first version of this fix looked the token up whole,
+	// so `-tp=2` read as "tp=2", missed the alias set, and the equals form of
+	// the very same flag still produced a false equality. A re-review probe
+	// found it after the space-separated form was already passing, which is
+	// why both are asserted here rather than one standing in for the other.
+	eq := parseShell("vllm serve m --max-model-len 16384 -tp=2", nil)
+	if eq.Complete() {
+		t.Errorf("Complete() is true over -tp=2 while -tp 2 is caught: the equals "+
+			"form of a short alias escapes. Unresolved=%v", eq.Unresolved)
+	}
+	if eq.Fingerprint() == none.Fingerprint() {
+		t.Error("-tp=2 still hashes the same as no flag at all")
+	}
 }
 
 // THE FALSE POSITIVE the first version of the F2 fix introduced, kept as a
@@ -117,5 +131,50 @@ func TestAnUnknownShortAliasStillPassesUnrecorded(t *testing.T) {
 	}
 	if len(p.Unresolved) != 0 {
 		t.Errorf("expected the unknown short alias to be unrecorded, got %v", p.Unresolved)
+	}
+}
+
+// SGLang's own latency boolean, which the first version of mappedBoolKeys
+// omitted -- it listed the vLLM booleans and stopped there, so F1 stayed open
+// on the other engine. disable_cuda_graph sets the same EnforceEager field
+// enforce_eager does, and that field is hashed.
+//
+// The lesson this encodes: a set that must mirror a switch statement has to be
+// checked against EVERY applier, not the one being edited.
+func TestSGLangsLatencyBooleanIsRecordedToo(t *testing.T) {
+	parse := func(cmd string) EngineParams {
+		d := shellDeployment(cmd, nil)
+		d.Spec.Template.Spec.Containers[0].Name = sglangContainer
+		return ParseEngineArgs(inferenceengine.EngineSGLang,
+			scaletarget.NewDeploymentAccessor(d))
+	}
+	base := "python3 -m " + sglangLauncher + " --model-path m " +
+		"--mem-fraction-static 0.8 --page-size 64 --context-length 16384"
+
+	swallowed := parse(base + " --disable-cuda-graph $EXTRA")
+	if swallowed.Complete() {
+		t.Errorf("Complete() is true over --disable-cuda-graph whose value could not "+
+			"be read, so the digest claims a CUDA-graph setting the parser never saw. "+
+			"Unresolved=%v", swallowed.Unresolved)
+	}
+
+	none := parse(base)
+	if !none.Complete() {
+		t.Fatalf("precondition: the no-flag case must read as complete, Unresolved=%v",
+			none.Unresolved)
+	}
+	if swallowed.Fingerprint() == none.Fingerprint() {
+		t.Error("an unreadable --disable-cuda-graph still hashes the same as no flag, " +
+			"so CUDA graphs on and off would share one latency line")
+	}
+
+	// The honest case still reads and still distinguishes.
+	literal := parse(base + " --disable-cuda-graph")
+	if !literal.Complete() {
+		t.Errorf("a literal --disable-cuda-graph must read as complete, Unresolved=%v",
+			literal.Unresolved)
+	}
+	if literal.Fingerprint() == none.Fingerprint() {
+		t.Error("CUDA graphs disabled and enabled must not hash the same")
 	}
 }

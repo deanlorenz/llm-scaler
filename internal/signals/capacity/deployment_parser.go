@@ -407,6 +407,13 @@ var mappedBoolKeys = map[string]struct{}{
 	"no_enforce_eager":          {},
 	"enable_chunked_prefill":    {},
 	"no_enable_chunked_prefill": {},
+	// SGLang. disable_cuda_graph sets the same EnforceEager field
+	// enforce_eager does, and is hashed for the same reason -- it changes
+	// inter-token latency. Omitting it left F1 open on the SGLang path: the
+	// first version of this set listed only the vLLM booleans, so
+	// `--disable-cuda-graph $VAR` was still dropped and unrecorded. Found by
+	// re-reviewing the fix against both appliers' case labels rather than one.
+	"disable_cuda_graph": {},
 }
 
 // normalizeKey replaces hyphens with underscores and strips the leading
@@ -467,7 +474,16 @@ func parseArgsWith(args []string, params *EngineParams, env map[string]string,
 			// The residue is deliberate and worth stating: a short alias NOT
 			// in this set still passes unrecorded. The set closes the measured
 			// break, not the category.
-			if long, ok := shortFlagAliases[strings.TrimPrefix(arg, "-")]; ok {
+			// The `=value` form has to be stripped before the lookup, or
+			// `-tp=2` reads as the token "tp=2" and misses the set entirely.
+			// A re-review probe caught that: -tp was recorded and -tp=2 was
+			// not, so the equals form of the same flag still produced a false
+			// equality.
+			short := strings.TrimPrefix(arg, "-")
+			if eq := strings.Index(short, "="); eq >= 0 {
+				short = short[:eq]
+			}
+			if long, ok := shortFlagAliases[short]; ok {
 				noteUnaccounted(params, long)
 			}
 			continue
