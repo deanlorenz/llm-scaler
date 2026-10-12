@@ -36,13 +36,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout source
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       # GHCR_TOKEN where it is configured (upstream), otherwise the built-in
       # token, which `permissions: packages: write` above already scopes to this
@@ -53,6 +53,12 @@ jobs:
 
       - name: Resolve image and tag
         id: img
+        # The dispatch inputs arrive through env, never spliced into the script:
+        # `TAG='${{ inputs.tag }}'` let a quote in the input end the string and
+        # run the rest as shell, in a job holding packages: write.
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_PLATFORMS: ${{ inputs.platforms }}
         run: |
           # Owner-derived, so this is unchanged upstream (owner IS llm-d) and a
           # fork pushes to its own namespace instead of being denied by it.
@@ -61,10 +67,17 @@ jobs:
             TAG=main
             PLATFORMS=linux/amd64,linux/arm64
           else
-            TAG='${{ inputs.tag }}'
+            TAG="$INPUT_TAG"
             # A branch name is not a legal tag: refs/heads/feat/x has slashes.
             [ -n "$TAG" ] || TAG=$(echo "${GITHUB_REF_NAME}" | tr '/' '-' | tr -cd '[:alnum:]._-' | cut -c1-100)
-            PLATFORMS='${{ inputs.platforms }}'
+            PLATFORMS="${INPUT_PLATFORMS:-linux/amd64}"
+          fi
+          # The OCI tag grammar, and a comma-separated list of os/arch[/variant].
+          if ! printf '%s' "$TAG" | grep -qE '^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$'; then
+            echo "::error::not a valid image tag: $TAG"; exit 1
+          fi
+          if ! printf '%s' "$PLATFORMS" | grep -qE '^[a-z0-9]+/[a-z0-9_]+(/[a-z0-9]+)?(,[a-z0-9]+/[a-z0-9_]+(/[a-z0-9]+)?)*$'; then
+            echo "::error::not a valid platform list: $PLATFORMS"; exit 1
           fi
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"

@@ -198,8 +198,13 @@ jobs:
               }
 
               // NOTE: This list must stay in sync with concurrency group logic (lines 23-25)
+              // A command may name the commit it approves: `/ok-to-test <sha>`.
               const validCommands = ['/ok-to-test', '/retest'];
-              if (!validCommands.includes(comment)) {
+              const parts = comment.split(/\s+/);
+              const command = parts[0];
+              const approvedSha = (parts[1] || '').toLowerCase();
+              if (!validCommands.includes(command) || parts.length > 2 ||
+                  (approvedSha !== '' && !/^[0-9a-f]{7,40}$/.test(approvedSha))) {
                 console.log(`Comment "${comment}" is not a valid trigger command, skipping`);
                 core.setOutput('should_run', 'false');
                 return;
@@ -226,6 +231,33 @@ jobs:
               const headRepo = pr.head.repo ? pr.head.repo.full_name : baseRepo;
               const isFork = headRepo !== baseRepo;
 
+              // A fork PR runs on a self-hosted runner holding cluster access and
+              // registry credentials, so the approval must name the commit the
+              // maintainer reviewed. Reading the head at run time instead would run
+              // whatever the author pushed between the review and the comment.
+              if (isFork && approvedSha === '') {
+                console.log(`${command} on fork PR #${issue.number} names no commit; refusing`);
+                core.setOutput('should_run', 'false');
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: `This PR is from a fork, so \`${command}\` must name the commit you reviewed: \`${command} ${pr.head.sha}\`.`
+                });
+                return;
+              }
+              if (approvedSha !== '' && !pr.head.sha.startsWith(approvedSha)) {
+                console.log(`${command} approved ${approvedSha}, but the PR head is now ${pr.head.sha}; refusing`);
+                core.setOutput('should_run', 'false');
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: `\`${command}\` approved \`${approvedSha}\`, but the head of this PR is now \`${pr.head.sha}\`. Review the new commits and approve that SHA.`
+                });
+                return;
+              }
+
               console.log(`${comment} approved by ${commenter} for PR #${issue.number}`);
               console.log(`PR head SHA: ${pr.head.sha}`);
               console.log(`Is fork PR: ${isFork} (head: ${headRepo}, base: ${baseRepo})`);
@@ -244,7 +276,7 @@ jobs:
 
               // Post comment with link to the e2e workflow run
               const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-              const cmdDesc = comment === '/ok-to-test' ? 'approve and run' : 're-run';
+              const cmdDesc = command === '/ok-to-test' ? 'approve and run' : 're-run';
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -312,7 +344,7 @@ jobs:
 
                 // Auto-post /ok-to-test to trigger issue_comment workflow
                 if (!botComment) {
-                  const posted = await tryPostComment(`/ok-to-test`);
+                  const posted = await tryPostComment(`/ok-to-test ${prHeadSha}`);
                   if (!posted) {
                     console.log('Note: Maintainer will need to manually comment /ok-to-test');
                   }
@@ -333,7 +365,7 @@ jobs:
             core.setOutput('should_run', 'false');
 
             if (!botComment) {
-              const posted = await tryPostComment(`👋 Thanks for your contribution!\n\nThis PR is from a fork, so **OpenShift E2E** (GPU) tests require approval to run.\n\n**For maintainers/admins:** Comment \`/ok-to-test\` to approve and trigger **OpenShift E2E** on this PR, or \`/retest\` to re-run OpenShift E2E (e.g. after a failure or new commits).\n\n**For contributors:** Please wait for a maintainer or admin to approve running the tests.`);
+              const posted = await tryPostComment(`👋 Thanks for your contribution!\n\nThis PR is from a fork, so **OpenShift E2E** (GPU) tests require approval to run.\n\n**For maintainers/admins:** Review the PR, then comment \`/ok-to-test <head-sha>\` to approve and trigger **OpenShift E2E** on that commit, or \`/retest <head-sha>\` to re-run OpenShift E2E (e.g. after a failure or new commits).\n\n**For contributors:** Please wait for a maintainer or admin to approve running the tests.`);
               if (!posted) {
                 console.log('Note: Could not post instructions comment on fork PR');
               }
@@ -358,7 +390,7 @@ jobs:
               core.summary.addRaw([
                 '⏸️ **E2E tests skipped — fork PR**\n\n',
                 'Fork PRs cannot run E2E on `pull_request` events (no access to secrets/GPU runners).\n\n',
-                'A maintainer must comment \`/ok-to-test\` to trigger the **OpenShift E2E** suite. ',
+                'A maintainer must comment \`/ok-to-test <head-sha>\` to trigger the **OpenShift E2E** suite. ',
                 'Branch protection should require **e2e-openshift** so merge stays blocked until E2E passes.\n',
               ].join('')).write();
             } else {
