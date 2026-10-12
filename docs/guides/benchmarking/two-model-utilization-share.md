@@ -115,10 +115,26 @@ make benchmark-two-model-verify
 Do **not** create a pool. Every share arm refuses to run while one is present.
 
 Keep the machine that runs these commands awake for the whole run. The load
-runs in the cluster, but the GPU sampler runs here: a laptop that went into
-standby for 36 minutes cost one arm its GPU-seconds, and the report refused
-the comparison. The sampler now writes a stall mark for such a gap, and the
-report then says that only the cost needs a rerun.
+runs in the cluster, but the GPU sampler runs on this machine, and the arm's
+GPU-seconds come from it.
+
+- Each arm holds a sleep lock where the machine offers one:
+  `systemd-inhibit` on Linux, `caffeinate` on macOS. Neither reaches a Windows
+  host from WSL. There, keep it on mains power and, for the run, set sleep to
+  never and the lid to do nothing: `powercfg /change standby-timeout-ac 0`,
+  then `powercfg /setacvalueindex SCHEME_CURRENT SUB_BUTTONS LIDACTION 0` and
+  `powercfg /setactive SCHEME_CURRENT`. Put both back afterwards.
+- **Symptom of a machine that slept anyway:** `run` stops the arm with "the GPU
+  sampler did not run for Ns", and the arm's `gpus.jsonl` holds a line with
+  `stalled_since`. The arm's cost cannot be priced, so it is stopped at once and
+  its GPUs given back; rerun it. The report refuses such an arm too, and says
+  its latencies stand.
+- Each of the sampler's API calls is bounded by `GPU_SAMPLE_TIMEOUT_SECONDS`
+  (default `20`, whole seconds). A call that hangs past it is recorded as a
+  failed poll, not a stall.
+
+Running the sampler in the cluster, beside the load, would make the cost
+independent of this machine; it is not built.
 
 **2. First arm: today's optimizer.**
 

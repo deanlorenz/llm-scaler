@@ -193,24 +193,32 @@ def gpu_series(path, t0):
     return out
 
 
-def sampler_stalls(path):
-    """Seconds the sampler itself did not run, from its stall marks.
+def sampler_stalls(path, t0=0, t_end=None):
+    """Seconds the sampler itself did not run, from its stall marks, inside
+    the run's window [t0, t0 + t_end] -- the window accelerator-seconds are
+    integrated over (clip_series): a stall before the load or after it costs
+    the run nothing.
 
-    A failed poll is the cluster's answer; a stall is the sampler's host
-    (measured: 2185s of a laptop in standby). The load runs in the cluster
-    either way, so a stall loses the cost and not the latencies, and the
-    refusal says so rather than reading as a cluster that stopped answering.
+    A failed poll is the cluster's answer; a stall is the machine running the
+    sampler (measured: 2185s in standby). The load runs in the cluster either
+    way, so a stall loses the cost and not the latencies, and the refusal says
+    so rather than reading as a cluster that stopped answering.
     """
     total = 0
     if not os.path.exists(path):
         return total
+    hi = None if t_end is None else t0 + t_end
     for line in open(path):
         try:
             s = json.loads(line)
         except ValueError:
             continue
-        if "stalled_since" in s and s.get("ts") is not None:
-            total += max(0, s["ts"] - s["stalled_since"])
+        if "stalled_since" not in s or s.get("ts") is None:
+            continue
+        lo_s, hi_s = max(s["stalled_since"], t0), s["ts"]
+        if hi is not None:
+            hi_s = min(hi_s, hi)
+        total += max(0, hi_s - lo_s)
     return total
 
 
@@ -876,7 +884,8 @@ def main(argv):
             "rows": load_rows(os.path.join(d, "requests.jsonl")),
             "gpus": clip_series(gpu_series(os.path.join(d, "gpus.jsonl"), (meta or {}).get("t0", 0)),
                                 sched[-1]["end"] if sched else None),
-            "stalled": sampler_stalls(os.path.join(d, "gpus.jsonl")),
+            "stalled": sampler_stalls(os.path.join(d, "gpus.jsonl"), (meta or {}).get("t0", 0),
+                                      sched[-1]["end"] if sched else None),
             "budget": load_budget(d),
             "work": pod_work(d),
             "queue_p95": None,

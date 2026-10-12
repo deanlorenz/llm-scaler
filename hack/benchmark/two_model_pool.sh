@@ -226,8 +226,8 @@ POOL_RESERVE="${POOL_RESERVE:-1}"
 POOL_MIN_HOLD="${POOL_MIN_HOLD:-}"
 POOL_MAX_HOLD="${POOL_MAX_HOLD:-}"
 GPU_SAMPLE_SECONDS="${GPU_SAMPLE_SECONDS:-5}"
-# A kubectl duration (`20s`) for each of the sampler's API calls.
-GPU_SAMPLE_TIMEOUT="${GPU_SAMPLE_TIMEOUT:-20s}"
+# Whole seconds, for each of the sampler's API calls (check_sampler_settings).
+GPU_SAMPLE_TIMEOUT_SECONDS="${GPU_SAMPLE_TIMEOUT_SECONDS:-20}"
 OUT_ROOT="${OUT_ROOT:-$ROOT/two-model-results}"
 LOAD_IMAGE="${LOAD_IMAGE:-}"
 CACHE_CLAIM="${CACHE_CLAIM:-model-pvc}"
@@ -1667,21 +1667,17 @@ sample_gpus() {
     # A pool Pod that has been LENT carries the borrowing model's labels, so
     # lend and return are visible here without any metrics plumbing, which
     # matters on a cluster where Prometheus may not be reachable from this shell.
-    local out="$1" until_ts="$2" want now last=""
+    local out="$1" until_ts="$2" want now last="" pods_json line
     : > "$out"
     while [ "$(sampler_now)" -lt "$until_ts" ]; do
-        # A POLL THAT NEVER RAN must leave a mark too. Measured: the share arm of
-        # a three-arm run has no line at all for 2185s -- not failed polls, the
-        # host running this loop sat in standby (lid closed) for those 36
-        # minutes, while the load Job went on in the cluster. The latencies were
-        # whole; the cost could not be priced, and the file said nothing about
-        # why. A wall-clock jump past what one slow poll can take is written
-        # down, so the report can name the stall instead of a bare hole.
+        # A PASS THAT NEVER RAN must leave a mark too. A wall-clock jump past
+        # what one slow pass can take means this loop did not run: the machine
+        # running it was suspended, or a call blocked past both timeouts. The
+        # load runs in the cluster either way, so its latencies stand and the
+        # cost cannot be priced -- the mark lets the report say which, and the
+        # driver stop the arm (sampler_stalled).
         now="$(sampler_now)"
-        if [ -n "$last" ] && [ $(( now - last )) -gt "$(sampler_stall_seconds)" ]; then
-            printf '{"ts": %s, "stalled_since": %s}\n' "$now" "$last" >> "$out"
-            warn "the GPU sampler did not run for $(( now - last ))s (host suspended, or a poll blocked); those seconds have no samples"
-        fi
+        sampler_mark_stall "$out" "$last" "$now"
         last="$now"
         # What the Deployments ASKED for, beside what is actually Running.
         # Without this the arms cannot be told apart when one of them never got
@@ -1689,7 +1685,7 @@ sample_gpus() {
         # scaled to 3 within four minutes and never had more than ONE replica
         # Available for the whole 36 minutes, because the rest could not be
         # placed. Its numbers described a one-replica fleet and nothing said so.
-        want="$(k get deploy -o json --request-timeout="$GPU_SAMPLE_TIMEOUT" 2>/dev/null | jq -c '
+        want="$(sampler_k get deploy -o json 2>/dev/null | jq -c '
             [.items[] | select(.metadata.name | test("decode|prefill"))
              | {(.metadata.name): (.spec.replicas // 0)}] | add // {}')"
         # Explicit, not ${want:-{}}: the brace inside that expansion terminates
@@ -1701,15 +1697,12 @@ sample_gpus() {
         # and the file simply had no lines for it, which is indistinguishable
         # from a namespace that held no accelerators. The report then priced
         # that arm at a fraction of the other's and printed the ratio.
-        # The timeout keeps a hung API call from freezing the loop the same way:
-        # kubectl's default is to wait forever, and a wait writes nothing.
         #
-        # kubectl's status is read on its own, not through a pipe into jq: with
-        # no pipefail the pipe's status is jq's, jq exits 0 on empty input, and
-        # the mark above was never written for a failed poll -- every one left
-        # a bare hole, exactly what it was added to prevent.
-        local pods_json line
-        if ! pods_json="$(k get pods -o json --request-timeout="$GPU_SAMPLE_TIMEOUT" 2>/dev/null)" || \
+        # The status of the API call is read on its own, not through a pipe:
+        # with no pipefail a pipe returns the status of its last command,
+        # which exits 0 on empty input, so a failed poll wrote no mark at all.
+        # An answer that renders to nothing is a failed poll as well.
+        if ! pods_json="$(sampler_k get pods -o json 2>/dev/null)" || \
            ! line="$(jq -c --argjson now "$(sampler_now)" \
             --argjson want "$want" '
           {ts: $now,
@@ -1730,16 +1723,90 @@ sample_gpus() {
         fi
         sleep "$GPU_SAMPLE_SECONDS"
     done
+    # A stall that runs past the end of the window ends the loop without
+    # another pass through it, so it is looked for once more here.
+    sampler_mark_stall "$out" "$last" "$(sampler_now)"
 }
 
 # The sampler's clock, a function so the check can move it.
 sampler_now() { date +%s; }
 
-# Longer than a sleep plus two polls that each ran to their timeout: past it,
-# the loop did not run at all.
+# Longer than a sleep plus two calls that each ran to their outer timeout
+# (sampler_k): past it, the loop did not run at all.
 sampler_stall_seconds() {
-    local t="${GPU_SAMPLE_TIMEOUT%s}"
-    echo $(( GPU_SAMPLE_SECONDS + 2 * t + 10 ))
+    echo $(( GPU_SAMPLE_SECONDS + 2 * (GPU_SAMPLE_TIMEOUT_SECONDS + 5) + 10 ))
+}
+
+# sampler_mark_stall <out> <last> <now>: a stall mark, and a warning, when
+# more than sampler_stall_seconds passed between two passes of the loop.
+sampler_mark_stall() {
+    local out="$1" last="$2" now="$3"
+    { [ -n "$last" ] && [ $(( now - last )) -gt "$(sampler_stall_seconds)" ]; } || return 0
+    printf '{"ts": %s, "stalled_since": %s}\n' "$now" "$last" >> "$out"
+    warn "the GPU sampler did not run for $(( now - last ))s (the machine running it was suspended, or a call blocked); those seconds have no samples"
+}
+
+# sampler_k <kubectl args...>: one of the sampler's API calls, bounded twice.
+# --request-timeout bounds the request; an outer timeout, where the machine
+# has one, bounds what that does not -- an exec credential plugin, or a
+# connection that never gets as far as sending.
+sampler_k() {
+    local t="$GPU_SAMPLE_TIMEOUT_SECONDS"
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$(( t + 5 ))" kubectl ${KUBE_CONTEXT:+--context "$KUBE_CONTEXT"} -n "$NS" "$@" --request-timeout="${t}s"
+    else
+        k "$@" --request-timeout="${t}s"
+    fi
+}
+
+# sampler_stalled <gpus.jsonl>: print the seconds the sampler's stall marks
+# cover and succeed, or fail when there are none.
+sampler_stalled() {
+    local secs
+    grep -q '"stalled_since"' "$1" 2>/dev/null || return 1
+    secs="$(jq -rs '[.[] | select(.stalled_since != null) | .ts - .stalled_since] | add // 0' "$1" 2>/dev/null)"
+    printf '%s\n' "${secs:-unknown}"
+}
+
+# check_sampler_settings: the sampler does its stall arithmetic in whole
+# seconds. A duration kubectl understands (1m, 500ms) would reach kubectl
+# and silently switch the stall check off, so anything else is refused,
+# before an arm starts. Prints what is wrong and fails.
+check_sampler_settings() {
+    local v
+    for v in GPU_SAMPLE_SECONDS GPU_SAMPLE_TIMEOUT_SECONDS; do
+        if ! [[ "${!v}" =~ ^[0-9]+$ ]] || [ "${!v}" -eq 0 ]; then
+            echo "$v must be a whole number of seconds above zero (got '${!v}')"
+            return 1
+        fi
+    done
+}
+
+RUN_INHIBIT=""
+# hold_awake: keep the machine running this driver from sleeping while an arm
+# runs. The load runs in the cluster but the GPU sampler runs here, and a
+# machine that sleeps stops it, so the arm's cost cannot be priced.
+# systemd-inhibit (Linux with logind) and caffeinate (macOS) hold a sleep lock
+# for as long as this shell lives; run_cleanup releases it sooner. Neither
+# reaches a Windows host from WSL -- the runbook names the Windows settings --
+# and wherever none holds, the stall check stops the arm instead.
+hold_awake() {
+    if command -v systemd-inhibit >/dev/null 2>&1; then
+        systemd-inhibit --what=sleep:idle --who=two-model-benchmark \
+            --why="a benchmark arm is sampling GPUs" --mode=block \
+            tail --pid="$$" -f /dev/null >/dev/null 2>&1 &
+    elif command -v caffeinate >/dev/null 2>&1; then
+        caffeinate -i -s -w "$$" >/dev/null 2>&1 &
+    else
+        warn "no sleep inhibitor on this machine (systemd-inhibit, caffeinate): keep it awake for the whole arm, or the arm is stopped when the GPU sampler stalls"
+        return 0
+    fi
+    RUN_INHIBIT=$!
+    sleep 1
+    if ! kill -0 "$RUN_INHIBIT" 2>/dev/null; then
+        warn "the sleep inhibitor exited at once (no logind session?): keep this machine awake for the whole arm"
+        RUN_INHIBIT=""
+    fi
 }
 
 # WHICH REPLICAS ACTUALLY DID THE WORK.
@@ -1824,6 +1891,7 @@ run_cleanup() {
     # models' ceiling for the rest of the schedule, on a shared cluster, with
     # nobody watching. The sampler is a polling loop against the API server.
     [ -n "$RUN_SAMPLER" ] && kill "$RUN_SAMPLER" 2>/dev/null
+    [ -n "$RUN_INHIBIT" ] && kill "$RUN_INHIBIT" 2>/dev/null
     [ -n "$RUN_WORKER" ] && kill "$RUN_WORKER" 2>/dev/null
     if [ -n "$RUN_JOB" ]; then
         kubectl ${KUBE_CONTEXT:+--context "$KUBE_CONTEXT"} -n "$NS" \
@@ -1843,6 +1911,8 @@ verb_run() {
         pool|nopool|floor|today|shadow|share) ;;
         *) die "run takes an arm: nopool, pool or floor; or today, shadow or share for the utilization-share comparison (got '${arm:-<none>}')" ;;
     esac
+    local bad
+    bad="$(check_sampler_settings)" || die "$bad"
     local have_pool=0
     k get deploy "wva-warm-pool-$POOL_NAME" >/dev/null 2>&1 && have_pool=1
     if [ "$arm" = "pool" ] && [ "$have_pool" -eq 0 ]; then
@@ -1974,6 +2044,7 @@ verb_run() {
     # is holding accelerators from the moment the arm starts, and a window that
     # begins at the barrier would credit it with fewer than it held.
     local until_ts=$(( $(date +%s) + PRELOAD_GRACE + total + 300 ))
+    hold_awake
     sample_gpus "$out_dir/gpus.jsonl" "$until_ts" &
     RUN_SAMPLER=$!
 
@@ -2014,8 +2085,14 @@ verb_run() {
     # the results of every successful run.
     local budget=$(( PRELOAD_GRACE + total + RESULT_GRACE ))
     info "waiting for both loaders to report their results (up to ${budget}s)..."
-    local deadline=$(( $(date +%s) + budget )) pod="" done=0 log=""
+    local deadline=$(( $(date +%s) + budget )) pod="" done=0 log="" stalled=""
     while [ "$(date +%s)" -lt "$deadline" ]; do
+        # The sampler stalled: this arm's cost can no longer be priced and the
+        # report would refuse it, so the GPUs it holds on a shared cluster are
+        # given back now rather than at the end of the schedule.
+        if stalled="$(sampler_stalled "$out_dir/gpus.jsonl")"; then
+            break
+        fi
         pod="$(k get pods -l "job-name=$RUN_JOB" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
         if [ -n "$pod" ]; then
             # Bounded. A log stream that stalls on the API server otherwise
@@ -2055,6 +2132,9 @@ verb_run() {
         sleep 15
     done
     kill "$RUN_SAMPLER" 2>/dev/null; RUN_SAMPLER=""
+    if [ -n "$stalled" ]; then
+        die "arm $arm stopped: the GPU sampler did not run for ${stalled}s (the machine running this driver was suspended, or a call blocked), so the arm's GPU cost cannot be priced and the report would refuse it. Keep this machine awake (docs/guides/benchmarking/two-model-utilization-share.md) and rerun arm $arm."
+    fi
 
     if [ -n "$pod" ]; then
         k logs "$pod" --all-containers --prefix --request-timeout=120s > "$out_dir/loader.log" 2>&1 || true

@@ -432,8 +432,9 @@ WORK_OK = {"pod-1": 5000.0, "pod-2": 4800.0}
 
 def run_report(meta_a, meta_b, rows_a=None, rows_b=None,
                budget_a=None, budget_b=None, work_a=None, work_b=None,
-               gpus_a=None, gpus_b=None):
-    """report.main over two fixture directories; returns its exit code."""
+               gpus_a=None, gpus_b=None, errors=None):
+    """report.main over two fixture directories; returns its exit code.
+    With errors, a list, what it wrote to stderr is appended to it."""
     d = tempfile.mkdtemp()
     works = {"nopool": WORK_OK if work_a is None else work_a,
              "pool": WORK_OK if work_b is None else work_b}
@@ -466,14 +467,19 @@ def run_report(meta_a, meta_b, rows_a=None, rows_b=None,
     # The table goes nowhere: these cases are about the RETURN CODE, and a full
     # report printed into the middle of a check makes its own `ok` lines
     # unfindable.
-    keep = sys.stdout
+    keep, keep_err = sys.stdout, sys.stderr
     sys.stdout = open(os.devnull, "w")
+    if errors is not None:
+        sys.stderr = io.StringIO()
     try:
         return report.main(["--nopool", os.path.join(d, "nopool"),
                             "--pool", os.path.join(d, "pool")])
     finally:
         sys.stdout.close()
         sys.stdout = keep
+        if errors is not None:
+            errors.append(sys.stderr.getvalue())
+            sys.stderr = keep_err
 
 
 case("arms that ran different scenarios are refused")
@@ -1246,6 +1252,29 @@ elif run_report(BASE_META, dict(BASE_META), gpus_a=dense[:100], gpus_b=dense) ==
          % (dense[99]["ts"] - 1000, run_len))
 else:
     ok("a sampled series with holes is not a measurement of accelerators")
+
+case("a hole the sampler's own stall explains is refused, and says so")
+# The same 400s hole, now with the stall mark the sampler writes when it did
+# not run: still refused (the cost cannot be priced), and the refusal says the
+# latencies stand. A stall reaching outside the run counts only inside it.
+stall = holed + [{"ts": 1450, "stalled_since": 1050}]
+stall.sort(key=lambda s: s["ts"])
+errs = []
+if run_report(BASE_META, dict(BASE_META), gpus_a=stall, gpus_b=dense, errors=errs) == 0:
+    fail("an arm with a 400s hole and a stall mark was priced anyway")
+elif "the sampler itself did not run" not in errs[0] or "latencies" not in errs[0]:
+    fail("the refusal of a stalled arm does not say the sampler stalled: %r" % errs[0][:400])
+else:
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "gpus.jsonl")
+        with open(p, "w") as fh:
+            print(json.dumps({"ts": 1100, "stalled_since": 900}), file=fh)
+            print(json.dumps({"ts": 1000 + run_len + 300, "stalled_since": 1000 + run_len - 50}), file=fh)
+        got = report.sampler_stalls(p, 1000, run_len)
+    if got != 150:
+        fail("stalls reaching outside the run counted %s s, want 100 + 50 inside it" % got)
+    else:
+        ok("a stalled arm is refused with the stall named; stalls count only inside the run")
 
 case("a dense series is not flagged")
 if run_report(BASE_META, dict(BASE_META), gpus_a=dense, gpus_b=dense) != 0:
