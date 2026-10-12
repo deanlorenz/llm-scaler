@@ -190,7 +190,9 @@ var _ = Describe("the KEDA handshake is visible in WVA's log", func() {
 			Expect(err).To(HaveOccurred())
 		})
 
-		Expect(logged(lines, "not the leader")).To(BeTrue(),
+		// Named, not just "not the leader": both handlers refuse with that
+		// phrase, so matching it alone does not pin which one spoke.
+		Expect(logged(lines, "external scaler GetMetrics refused", "chat-so")).To(BeTrue(),
 			"a refusal that leaves no trace is how this failure mode stayed invisible")
 	})
 
@@ -252,6 +254,69 @@ var _ = Describe("the KEDA handshake is visible in WVA's log", func() {
 			"a standby replica that refuses in silence looks identical to one that "+
 				"was never asked")
 	})
+
+	It("records IsActive's own failure when the lookup errors", func() {
+		// The gap the commit before this one left: it added this log line and
+		// no spec, so deleting the whole statement left the suite green. Its
+		// own message said "logging one sibling and not the other just moved
+		// the blind spot" -- and then did exactly that with the specs.
+		s := runtime.NewScheme()
+		Expect(kedav1alpha1.AddToScheme(s)).To(Succeed())
+		h := scaler.NewHandler(fake.NewClientBuilder().WithScheme(s).Build(),
+			store, registry.New(0))
+
+		lines := captured(logging.DEFAULT, func(ctx context.Context) {
+			_, err := h.IsActive(ctx, ref("missing-so", nil))
+			Expect(err).To(HaveOccurred())
+		})
+
+		Expect(logged(lines, "external scaler IsActive failed", `"err"`)).To(BeTrue(),
+			"the error reaches KEDA either way; this line is what says WVA is where "+
+				"it came from")
+	})
+
+	// EVERY new line, gated. The previous revision guarded only GetMetricSpec,
+	// so three of the others could be made unconditional Info and stay green --
+	// on a PR that exists because that exact regression shipped once. A table,
+	// so a line added later without a level is a failure rather than an
+	// omission nobody notices.
+	DescribeTable("each handshake line is visible at the shipped verbosity and gated below it",
+		func(drive func(h *scaler.Handler, ctx context.Context), msg string) {
+			h := notLeader("chat-so")
+			if !strings.Contains(msg, "refused") {
+				h = newHandler("chat-so")
+			}
+			atShipped := captured(logging.DEFAULT, func(ctx context.Context) { drive(h, ctx) })
+			Expect(logged(atShipped, msg)).To(BeTrue(),
+				"a diagnostic the shipped deployment does not print is the problem "+
+					"this file exists to solve")
+
+			silent := captured(0, func(ctx context.Context) { drive(h, ctx) })
+			Expect(logged(silent, msg)).To(BeFalse(),
+				"and it must stay V()-gated: every one of these fires per poll, per "+
+					"ScaledObject, so unconditional is spam at a level an operator "+
+					"cannot turn down")
+		},
+		Entry("GetMetricSpec", func(h *scaler.Handler, ctx context.Context) {
+			_, _ = h.GetMetricSpec(ctx, ref("chat-so", nil))
+		}, "external scaler GetMetricSpec"),
+		Entry("GetMetrics' value", func(h *scaler.Handler, ctx context.Context) {
+			_, _ = h.GetMetrics(ctx, &pb.GetMetricsRequest{
+				ScaledObjectRef: ref("chat-so", nil), MetricName: scaler.MetricName,
+			})
+		}, "external scaler GetMetrics"),
+		Entry("GetMetrics' refusal", func(h *scaler.Handler, ctx context.Context) {
+			_, _ = h.GetMetrics(ctx, &pb.GetMetricsRequest{
+				ScaledObjectRef: ref("chat-so", nil), MetricName: scaler.MetricName,
+			})
+		}, "external scaler GetMetrics refused"),
+		Entry("IsActive", func(h *scaler.Handler, ctx context.Context) {
+			_, _ = h.IsActive(ctx, ref("chat-so", nil))
+		}, "external scaler IsActive"),
+		Entry("IsActive's refusal", func(h *scaler.Handler, ctx context.Context) {
+			_, _ = h.IsActive(ctx, ref("chat-so", nil))
+		}, "external scaler IsActive refused"),
+	)
 
 	It("still answers, and does not panic, for a nil ref", func() {
 		h := newHandler("chat-so")

@@ -25,6 +25,15 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/registry"
 )
 
+// metricTargetSize is the target KEDA is told to divide by. One is the
+// whole design: WVA publishes the replica count it wants, so a target of
+// 1 makes KEDA's arithmetic the identity and the HPA carries WVA's figure
+// rather than a ratio. Named because it appears twice -- in the response
+// and in the log line that reports the response -- and two literals for
+// one value is how a status message comes to disagree with the thing it
+// describes.
+const metricTargetSize = 1
+
 // MetricName is the external metric WVA exposes to KEDA/HPA. It is advertised
 // with a target of 1, so HPA computes ceil(metricValue / 1) = metricValue and
 // scales the target to exactly WVA's desired replica count.
@@ -263,23 +272,17 @@ func (h *Handler) GetMetricSpec(ctx context.Context, ref *pb.ScaledObjectRef) (*
 	// KEDA ever ask?", and the answer had to be reconstructed from the KEDA
 	// operator's own log.
 	//
-	// V(1), beside IsActive, and NOT unconditionally. An earlier revision of
-	// this line logged at DEFAULT on two arguments that were both wrong:
-	//
-	//   - "one line per ScaledObject per KEDA reconcile, not per poll". KEDA
-	//     asks on every poll. Measured from the operator log of the failure
-	//     this line exists for: one ScaledObject, asked at 10:54:00, :05, :05,
-	//     :10, :15. Unconditional, that is a line per ScaledObject per poll
-	//     forever, at a level an operator cannot turn down.
-	//   - "the deployment passes no -v, so anything deeper never reaches an
-	//     operator". It passes no -v and therefore runs at logging.DEFAULT,
-	//     which is 2, so V(1) and V(2) both print. IsActive's own V(1) line is
-	//     the proof: 1174 of them in one 40-minute controller log.
+	// V(1), beside IsActive, and NOT unconditionally: KEDA asks on every poll
+	// (GetMetricSpecForScaling is uncached), and the samples here ship
+	// pollingInterval: 5, so an unconditional line is one per ScaledObject per
+	// poll forever at a level an operator cannot turn down. V(1) still reaches
+	// them: the deployment passes no -v, so it runs at logging.DEFAULT, which
+	// is 2.
 	log.FromContext(ctx).V(1).Info("external scaler GetMetricSpec",
 		"namespace", ref.GetNamespace(), "scaledObject", ref.GetName(),
-		"metricName", MetricName, "targetSize", 1)
+		"metricName", MetricName, "targetSize", metricTargetSize)
 	return &pb.GetMetricSpecResponse{
-		MetricSpecs: []*pb.MetricSpec{{MetricName: MetricName, TargetSize: 1}},
+		MetricSpecs: []*pb.MetricSpec{{MetricName: MetricName, TargetSize: metricTargetSize}},
 	}, nil
 }
 
