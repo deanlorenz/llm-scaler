@@ -228,17 +228,26 @@ func TestRunV2AnalysisOnly_PublishesEachVariantsConfig(t *testing.T) {
 	// interface pins the concrete TYPE; this pins the FIELD, which is what the
 	// assertion actually tests -- engine.go builds the analyzer through
 	// WithHorizons, and a wrapper returned from there would satisfy the var and
-	// fail here. This is the only spec that wires the real analyzer.
+	// fail here. It is the only spec that CHECKS the field:
+	// PublishesNothingForAVariantWithNoScaleTarget below also wires the real
+	// analyzer, but its scale-target map is empty so the loop continues before
+	// reaching this path at all.
 	stabiliser, stabilises := e.saturationV2Analyzer.(acceleratorStabiliser)
 	require.True(t, stabilises,
 		"the real analyzer stopped satisfying acceleratorStabiliser, so the "+
 			"metric is publishing the raw accelerator and nothing else noticed")
 
-	// Compared against the stabiliser MEASURED, not a GPU name retyped here.
-	// This fixture names no accelerator, so the stable value is the unresolved
-	// reading itself; a hardcoded name asserts a value this path never
-	// produces. The case where raw and stable actually differ needs a warmed
-	// memo and lives in TestPublishedAcceleratorIsTheOneTheKeyUses.
+	// Compared against the stabiliser MEASURED, not a GPU name retyped here:
+	// this fixture names no accelerator, so a hardcoded name asserts a value
+	// the path cannot produce.
+	//
+	// Be clear about what this does NOT prove. No memo is ever seeded here, so
+	// the stabiliser falls through both branches and returns the reading
+	// unchanged -- stable EQUALS raw -- and this comparison would therefore
+	// still pass if the publish site regressed to the raw reading, which is
+	// the very bug the series exists to fix. What has teeth in this spec is
+	// the field assertion above. The divergence case needs a warmed memo and
+	// is covered by TestPublishedAcceleratorIsTheOneTheKeyUses.
 	raw := accelerator.GetAcceleratorNameFromScaleTarget(va, st)
 	assert.ElementsMatch(t, []string{stabiliser.StableAcceleratorFor("ns", "v1", raw)},
 		seriesLabels(t, registry, constants.WVAEngineConfig, constants.LabelAccelerator),
