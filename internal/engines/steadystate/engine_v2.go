@@ -69,7 +69,17 @@ func (e *Engine) runV2AnalysisOnly(
 		// configuration the parser could not fully read is published WITH its
 		// unresolved label and withheld as a sharing key, so a variant can
 		// appear here and have no learned state filed under it.
-		e.publishEngineConfig(namespace, modelID, va.Name, accelerator, gpuCount)
+		//
+		// Published under the accelerator the learned-state key is built with,
+		// not the raw reading: the two differ on a fleet whose pods disagree,
+		// and that is the fleet an operator is reading this metric to
+		// understand. A missing analyzer leaves the raw value, which is what
+		// a test-built engine gets.
+		publishAccel := accelerator
+		if s, ok := e.saturationV2Analyzer.(acceleratorStabiliser); ok {
+			publishAccel = s.StableAcceleratorFor(namespace, va.Name, accelerator)
+		}
+		e.publishEngineConfig(namespace, modelID, va.Name, publishAccel, gpuCount)
 	}
 
 	// 2. Build AnalyzerInput
@@ -286,6 +296,18 @@ func (e *Engine) publishEngineConfig(namespace, modelID, variantName, accelerato
 		capacity.FingerprintVersion,
 		rec.EngineParams.FingerprintValues(),
 	)
+}
+
+// acceleratorStabiliser is the part of the saturation analyzer the engine-config
+// metric needs: the accelerator a variant's learned state is actually keyed
+// under. Reached through an assertion for the same reason staleHistoryEvictor
+// is -- saturationV2Analyzer is typed domain.Analyzer so tests can inject.
+//
+// Without it the metric published the raw reading while the key used the
+// stabilised one, which on a heterogeneous fleet made the label disagree with
+// the key it exists to explain.
+type acceleratorStabiliser interface {
+	StableAcceleratorFor(namespace, variantName, accelerator string) string
 }
 
 // staleHistoryEvictor is the part of the saturation analyzer this file needs.
