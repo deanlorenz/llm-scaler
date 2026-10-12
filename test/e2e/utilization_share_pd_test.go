@@ -105,11 +105,11 @@ var _ = Describe("Utilization share optimizer on a P/D LeaderWorkerSet model", L
 		Eventually(func(g Gomega) {
 			a, err := k8sClient.AppsV1().Deployments(ns).Get(ctx, depA, metav1.GetOptions{})
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(a.Status.ReadyReplicas).To(Equal(int32(4)))
+			g.Expect(a.Status.ReadyReplicas).To(Equal(int32(4)), unreadyPods(ns))
 			for _, name := range []string{lwsDecode, lwsPrefill} {
 				var l lwsv1.LeaderWorkerSet
 				g.Expect(crClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &l)).To(Succeed())
-				g.Expect(l.Status.ReadyReplicas).To(Equal(int32(1)), name)
+				g.Expect(l.Status.ReadyReplicas).To(Equal(int32(1)), name+"\n"+unreadyPods(ns))
 			}
 		}, time.Duration(cfg.PodReadyTimeout)*time.Second, time.Duration(cfg.PollIntervalSec)*time.Second).Should(Succeed())
 

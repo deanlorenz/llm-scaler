@@ -542,12 +542,21 @@ func resourcePtr(s string) *resource.Quantity {
 // cluster the pin chose the AMD node and every pod asked it for an NVIDIA
 // resource it does not advertise, so nothing scheduled and five suites failed in
 // BeforeAll waiting for pods that could never start.
+//
+// The simulator's REQUESTS are a fraction of a core for the same reason:
+// every workload this package creates is pinned to one node (the discovered
+// accelerator's), and a GitHub runner gives each kind node 4 CPUs and 16 GB.
+// At 1 CPU and 2Gi a request, about two simulator replicas fit beside the
+// node's own pods -- every utilization-share spec, which stands up four to
+// seven replicas, timed out in BeforeAll at "2 of 3" and "2 of 4" Ready on
+// every CI run, while passing on a 22-CPU workstation. The simulator idles
+// far below this request; the limits still bound it.
 func buildModelServiceResources(useSimulator bool) corev1.ResourceRequirements {
 	if useSimulator {
 		return corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("1"),
-				corev1.ResourceMemory: resource.MustParse("2Gi"),
+				corev1.ResourceCPU:    resource.MustParse("100m"),
+				corev1.ResourceMemory: resource.MustParse("256Mi"),
 			},
 			Limits: corev1.ResourceList{
 				corev1.ResourceCPU:    resource.MustParse("2"),

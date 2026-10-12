@@ -110,10 +110,10 @@ var _ = Describe("Utilization share optimizer on full GPU nodes", Label("full", 
 		Eventually(func(g Gomega) {
 			a, err := k8sClient.AppsV1().Deployments(ns).Get(ctx, depA, metav1.GetOptions{})
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(a.Status.ReadyReplicas).To(Equal(int32(4)))
+			g.Expect(a.Status.ReadyReplicas).To(Equal(int32(4)), unreadyPods(ns))
 			b, err := k8sClient.AppsV1().Deployments(ns).Get(ctx, depB, metav1.GetOptions{})
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(b.Status.ReadyReplicas).To(Equal(int32(1)))
+			g.Expect(b.Status.ReadyReplicas).To(Equal(int32(1)), unreadyPods(ns))
 		}, time.Duration(cfg.PodReadyTimeout)*time.Second, time.Duration(cfg.PollIntervalSec)*time.Second).Should(Succeed())
 
 		// The spec needs two of A's pods on one node; they are pinned to one.

@@ -103,10 +103,10 @@ var _ = Describe("Utilization share optimizer", Label("full", "utilization-share
 		Eventually(func(g Gomega) {
 			a, err := k8sClient.AppsV1().Deployments(ns).Get(ctx, depA, metav1.GetOptions{})
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(a.Status.ReadyReplicas).To(Equal(int32(3)))
+			g.Expect(a.Status.ReadyReplicas).To(Equal(int32(3)), unreadyPods(ns))
 			b, err := k8sClient.AppsV1().Deployments(ns).Get(ctx, depB, metav1.GetOptions{})
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(b.Status.ReadyReplicas).To(Equal(int32(1)))
+			g.Expect(b.Status.ReadyReplicas).To(Equal(int32(1)), unreadyPods(ns))
 		}, time.Duration(cfg.PodReadyTimeout)*time.Second, time.Duration(cfg.PollIntervalSec)*time.Second).Should(Succeed())
 
 		By("Registering both with WVA. A's floor is 3 while in shadow, so today's optimizer cannot shrink it meanwhile")
@@ -275,6 +275,34 @@ func markedSharePods(g Gomega, ns string) []corev1.Pod {
 		}
 	}
 	return out
+}
+
+// unreadyPods says why each pod in ns is not Ready, for a readiness wait's
+// failure description: these specs stand up four to seven replicas on the
+// one node the suite pins every workload to, and a node short of room shows
+// as "2 to equal 4" unless the scheduler's own reason is read off the pod.
+func unreadyPods(ns string) string {
+	pods, err := k8sClient.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return "listing pods in " + ns + ": " + err.Error()
+	}
+	var why []string
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		ready := false
+		for _, c := range p.Status.Conditions {
+			if c.Type == corev1.PodReady && c.Status == corev1.ConditionTrue {
+				ready = true
+			}
+		}
+		if !ready {
+			why = append(why, unschedulableReason(p))
+		}
+	}
+	if len(why) == 0 {
+		return "every pod in " + ns + " is Ready"
+	}
+	return strings.Join(why, "\n")
 }
 
 // controllerLogsSince returns the controller pods' logs since t, all pods
