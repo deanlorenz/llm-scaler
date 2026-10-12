@@ -88,6 +88,34 @@ func TestChangeReporter_TheEffectivePolicyChangesWithTheExpectedOutputLength(t *
 		"a new expected output length is a new resolution and must be reported")
 }
 
+func TestChangeReporter_TheEffectivePolicyChangesWithTheReuseSwitch(t *testing.T) {
+	// formatBand's comment says disableLearnedStateReuse is in the key "or
+	// toggling it would log nothing", and until this test nothing checked it:
+	// the field was always false in both existing tests, so the `|false` they
+	// assert would read identically if the field were dropped from the
+	// Sprintf args. The readout fires only when the band string changes, so a
+	// field reported but not keyed is reported once and then never again on
+	// the cycle it actually changes -- which is the cycle an operator is
+	// looking for.
+	ctx := context.Background()
+	r := NewChangeReporter()
+	cfg := config.ScalingPolicy{ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70}
+	r.ReportEffectivePolicy(ctx, "ns", "m", "gold", cfg)
+	first := r.seen["effective|ns|m"]
+
+	cfg.DisableLearnedStateReuse = true
+	r.ReportEffectivePolicy(ctx, "ns", "m", "gold", cfg)
+	assert.NotEqual(t, first, r.seen["effective|ns|m"],
+		"turning the reuse switch on changes what the analyzer may do with another "+
+			"variant's learned state, so it is a new resolution and must be reported")
+
+	// And back, so the key tracks the field rather than merely differing once.
+	cfg.DisableLearnedStateReuse = false
+	r.ReportEffectivePolicy(ctx, "ns", "m", "gold", cfg)
+	assert.Equal(t, first, r.seen["effective|ns|m"],
+		"turning it off again returns to the original resolution")
+}
+
 func TestChangeReporter_TheEffectivePolicyChangesWithTheBandItResolvedTo(t *testing.T) {
 	ctx := context.Background()
 	r := NewChangeReporter()

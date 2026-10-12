@@ -108,7 +108,7 @@ func TestLineBorrowedIsSetOnlyWhenTheDerivedFigureIsUsed(t *testing.T) {
 
 	// What the flag is composed from is a single `&&` in priceReplicas, over
 	// rc.SaturatedThroughputDerived -- which IS whether the derived figure was
-	// used -- and c.itlBorrowed. The true-true case is asserted end to end
+	// used -- and c.itlBorrowedFrom. The true-true case is asserted end to end
 	// through the real cycle by TestBorrowedLineReachesTheRecord; the
 	// assertions above pin the predicate that makes the other cases reachable.
 	// Deliberately not re-computing that `&&` here: a test that restates the

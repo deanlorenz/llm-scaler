@@ -144,7 +144,7 @@ func TestTwoUnreadableVariantsDoNotShareALine(t *testing.T) {
 		// anything. The first draft of this asserted the latter and failed:
 		// with no digest, publishLine still files the lender's line under the
 		// lender's OWN window key, so the map is non-empty and nothing is
-		// shared. The map says a line exists; only itlBorrowed says a variant
+		// shared. The map says a line exists; only itlBorrowedFrom says a variant
 		// priced itself from someone else's.
 		in := makeAnalyzerInput(rows, states)
 		pol, ok := in.Config.(*config.ScalingPolicy)
@@ -153,7 +153,7 @@ func TestTwoUnreadableVariantsDoNotShareALine(t *testing.T) {
 		c.observeFleetShape()
 		c.resolvePricing()
 		c.fitLines()
-		return c.itlBorrowed[starved]
+		return c.itlBorrowedFrom[starved] != ""
 	}
 
 	t.Run("a readable configuration lends its line", func(t *testing.T) {

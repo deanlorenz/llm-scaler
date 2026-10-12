@@ -95,7 +95,7 @@ func TestTheReuseSwitchStopsLineSharing(t *testing.T) {
 		c.observeFleetShape()
 		c.resolvePricing()
 		c.fitLines()
-		return c.itlBorrowed[starved]
+		return c.itlBorrowedFrom[starved] != ""
 	}
 
 	t.Run("by default a readable configuration lends its line", func(t *testing.T) {

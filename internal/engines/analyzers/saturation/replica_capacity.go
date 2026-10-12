@@ -667,10 +667,6 @@ func (a *SaturationAnalyzer) lookupCompatibleCapacity(namespace, modelID, varian
 	if rec == nil || rec.EngineParams == nil {
 		return nil
 	}
-	// Refused outright when reuse is off: this whole function exists to price
-	// a variant from a sibling's measurement, which is the thing the switch
-	// withholds. The caller's remaining branches fall back to the variant's
-	// own figures.
 	// Refused outright when reuse is off: this whole function exists to price a
 	// variant from a SIBLING's measurement, which is what the switch withholds.
 	// The caller's remaining branches fall back to the variant's own figures.

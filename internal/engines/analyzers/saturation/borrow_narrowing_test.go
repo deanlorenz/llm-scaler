@@ -124,7 +124,7 @@ func TestLineBorrowedIsNotStampedOnAnOwnMeasuredFigure(t *testing.T) {
 	// failing makes the assertion below vacuous: with no borrow there is
 	// nothing to suppress, and with no own window the derived figure is in use
 	// and the flag SHOULD be set.
-	require.True(t, c.itlBorrowed[starved],
+	require.True(t, c.itlBorrowedFrom[starved] != "",
 		"the starved variant must have borrowed a line, or this test asserts "+
 			"the absence of a flag that was never a candidate")
 

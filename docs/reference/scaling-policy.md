@@ -320,14 +320,26 @@ default:
 ```
 
 It resolves through the normal per-entry overlay, so it can also be set on a
-named tier or a per-model entry — which is usually what you want, since the
-case it exists for is one variant, not the fleet:
+named tier or a per-model entry. A per-model entry is a ConfigMap data key of
+its own, identified by the `model_id` and `namespace` in its **body** — the key
+itself is arbitrary:
 
 ```yaml
-models:
-  - modelID: meta-llama/Llama-3.1-8B
-    disableLearnedStateReuse: true
+llama-8b-prod:
+  model_id: meta-llama/Llama-3.1-8B
+  namespace: prod
+  disableLearnedStateReuse: true
 ```
+
+Both `model_id` and `namespace` are load-bearing: an entry missing either one
+matches no model. It does not fail loudly — the parse is not strict, so an
+entry whose body names no model is registered as a selectable policy **tier**
+instead, under its own key. See
+[Per-Model Overrides](#4-per-model-overrides) for the full schema.
+
+The granularity is `(model_id, namespace)`, not a single variant. On a P/D model
+decode and prefill are two variants of one model and resolve the same answer,
+so this cannot quarantine one of them.
 
 One direction only: an entry can turn reuse **off** where the default leaves it
 on, but cannot turn it back **on** where the default turned it off. Check the
@@ -361,18 +373,33 @@ state with every other default configuration of that model. If a variant is
 being priced from a sibling that is not really like it, this is the switch that
 stops it.
 
-A variant whose flags the manager could not read is **already** excluded from
-sharing, so this key is not what you need for that case. Read
-`wva_engine_config` to tell them apart:
+A variant whose flags the manager could not read is excluded from **one** of
+the two paths, not both, and the difference decides whether this key helps:
+
+- the **shared ITL line** is refused outright. An incomplete read produces no
+  sharing key at all, so nothing can be borrowed and nothing lent.
+- the **cross-variant capacity figure** is *not* gated on a complete read, and
+  that is deliberate rather than an oversight — gating it was tried and cost a
+  30x capacity over-estimate, because refusing a sibling's measured figure
+  falls back to an estimate that is higher, and a higher capacity orders fewer
+  replicas. So an incomplete variant **is** still being priced from a
+  sibling's capacity figure, and this key is what stops that.
+
+Read `wva_engine_config` to tell the cases apart:
 
 | what you see | what it means |
 | --- | --- |
-| a series with a non-empty `unresolved` label | one or more flags could not be read. The variant is **already** excluded from sharing, and `unresolved` names the flags to fix (usually a value that comes from a ConfigMap or `valueFrom`, which the manager cannot read). This key would change nothing. |
-| **no series at all** | there is no parsed engine configuration for the variant — no capacity record yet, or nothing readable in the pod template. Also already excluded. |
-| a series with `unresolved` empty | the configuration was read in full and the variant **is** sharing, keyed on `fingerprint`. This is the case the key is for. |
+| a series with a non-empty `unresolved` label | one or more flags could not be read, and `unresolved` names them (usually a value coming from a ConfigMap or `valueFrom`, which the manager cannot read). No ITL line is shared either way, but the capacity figure still is — so this key **does** change something here. Fixing the flags is the better remedy; this is the one that works today. |
+| **no series at all** | no parsed engine configuration: no capacity record yet, nothing readable in the pod template, or no scale target resolved. Not a reliable sharing signal on its own — the series is also briefly absent on a cycle where the variant drops out of the analyzer's series. |
+| a series with `unresolved` empty | the configuration was read in full, and the variant shares on **both** paths, keyed on `fingerprint`. This is the case the key is most clearly for. |
 
-So set it when a variant has a complete-looking fingerprint and is still being
-priced from a sibling it is not really like — the wrong-parser case above.
+Joining two variants on the fingerprint takes all four of `model_name`,
+`accelerator`, `gpus` and `fingerprint` — the sharing key is the tuple, not the
+digest alone — and, for the ITL line, `unresolved` empty on both sides.
+
+So set it when a variant is being priced from a sibling it is not really like:
+the wrong-parser case above, or an unreadable configuration you cannot fix at
+source.
 
 **What it costs.** A variant with no readings of its own and no sibling to
 borrow from prices its first decisions from its deployment-derived capacity

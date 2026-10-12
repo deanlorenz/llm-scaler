@@ -16,7 +16,7 @@ import (
 // together: fitLines resolves the line, records which variant borrowed it, and
 // priceReplicas stamps that onto the ReplicaCapacity the floor reads. Each
 // piece has its own spec, and removing the one line that joins them --
-// rc.SaturatedThroughputLineBorrowed = c.itlBorrowed[...] -- was measured to
+// rc.SaturatedThroughputLineBorrowed = c.itlBorrowedFrom[...] != "" -- was measured to
 // leave every one of those specs green.
 //
 // So this drives the real cycle, twice, and reads the flag off the record.

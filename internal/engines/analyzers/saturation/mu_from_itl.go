@@ -124,8 +124,15 @@ func capacityTokensFor(params *capacity.EngineParams, liveTokens int64) float64 
 // fit for that reason and floor.Estimate prices it not at all), and a prefill
 // replica generates about one token per request, so neither disagreement means
 // anything about this variant's line.
+// borrowedFrom is the variant this line was measured on when it is not this
+// variant's own, and empty otherwise. Logged because this is the ONLY line
+// that fires when a line does not match reality, and the two cases have
+// different remedies: a mismatch on a borrowed line says those two
+// configurations are not really alike and names who to look at, while a
+// mismatch on an own line says this variant's own fit has drifted.
 func (a *SaturationAnalyzer) noteLineMismatch(model itl.Model, params *capacity.EngineParams,
-	rm domain.ReplicaMetrics, role string, kvReq float64, logger logr.Logger) {
+	rm domain.ReplicaMetrics, role string, kvReq float64, borrowedFrom string,
+	logger logr.Logger) {
 	if rm.FromWarmPool || canonicalRole(role) != domain.RoleDecode {
 		return
 	}
@@ -140,6 +147,7 @@ func (a *SaturationAnalyzer) noteLineMismatch(model itl.Model, params *capacity.
 		"k", rm.KvUsageInstant, "observedGPS", rm.GenerationTokenRate,
 		"predictedGPS", itl.TokenRate(model, rm.KvUsageInstant, capacityTokens, kvReq),
 		"errPct", errPct, "thresholdPct", itl.DefaultGPSMismatchThresholdPct,
+		"lineBorrowed", borrowedFrom != "", "from", borrowedFrom,
 		"gates", false)
 }
 

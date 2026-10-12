@@ -113,8 +113,13 @@ type cycle struct {
 	// it was BORROWED from a sibling that shares the engine configuration
 	// rather than fitted from this variant's own readings. A borrowed line may
 	// hold the fleet but not grow it -- see priceReplicas.
-	itlModels   map[string]itl.Model
-	itlBorrowed map[string]bool
+	itlModels map[string]itl.Model
+	// itlBorrowedFrom maps a variant to the variant whose fitted line it is
+	// using, and is empty for a variant using its own. The lender rather than
+	// a bool because a mismatch on a borrowed line needs the lender named --
+	// see noteLineMismatch -- and a second map holding the same fact could
+	// drift from the first.
+	itlBorrowedFrom map[string]string
 }
 
 // demandParts is what priceDemand produces and applyFloorAndHolds consumes.
@@ -274,7 +279,7 @@ func (c *cycle) resolvePricing() {
 // saturated under (mu_from_itl.go).
 func (c *cycle) fitLines() {
 	c.itlModels = make(map[string]itl.Model, len(c.gpusByVariant))
-	c.itlBorrowed = make(map[string]bool, len(c.gpusByVariant))
+	c.itlBorrowedFrom = make(map[string]string, len(c.gpusByVariant))
 	variants := make([]string, 0, len(c.gpusByVariant))
 	for variant := range c.gpusByVariant {
 		variants = append(variants, variant)
@@ -353,7 +358,7 @@ func (c *cycle) fitLines() {
 			continue
 		}
 		c.itlModels[variant] = borrowed
-		c.itlBorrowed[variant] = true
+		c.itlBorrowedFrom[variant] = from
 		c.logger.V(logging.DEFAULT).Info("itl-line-borrowed",
 			"variant", variant, "from", from, "physicsKey", physicsKey,
 			"a", borrowed.A, "b", borrowed.B)
@@ -426,7 +431,8 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 				// downstream: a borrowed line may hold a fleet and not grow
 				// one. itl-line-borrowed says it once per cycle; this says it
 				// beside the number it produced.
-				"lineBorrowed", c.itlBorrowed[rm.VariantName],
+				"lineBorrowed", c.itlBorrowedFrom[rm.VariantName] != "",
+				"lineBorrowedFrom", c.itlBorrowedFrom[rm.VariantName],
 				"avgOutputTokens", fleetShape.AvgOutputTokens,
 				"muDivisor", c.muDivisor,
 				"avgInputTokens", fleetShape.AvgInputTokens,
@@ -437,7 +443,8 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 				"replicaKvTokens", rm.TotalKvCapacityTokens,
 				"maxNumSeqs", maxSeqs)
 		}
-		c.a.noteLineMismatch(itlModel, engineParams, rm, role, fleetShape.KVreq, c.logger)
+		c.a.noteLineMismatch(itlModel, engineParams, rm, role, fleetShape.KVreq,
+			c.itlBorrowedFrom[rm.VariantName], c.logger)
 		rc := c.a.computeReplicaCapacity(rm, c.cfg, c.input.ModelID, c.input.Namespace, gpuCount,
 			role, c.accelByVariant[rm.VariantName], c.stableOutput, c.fleetOutput, c.stableInput,
 			c.fleetHitRate, derived, downstreamSaturated, c.logger)
@@ -452,7 +459,7 @@ func (c *cycle) priceReplicas(ctx context.Context) ([]capacity.ReplicaCapacity, 
 			// is not relying on the borrow, and flagging it would deny it an
 			// order it has earned.
 			rc.SaturatedThroughputLineBorrowed =
-				rc.SaturatedThroughputDerived && c.itlBorrowed[rm.VariantName]
+				rc.SaturatedThroughputDerived && c.itlBorrowedFrom[rm.VariantName] != ""
 			replicaCapacities = append(replicaCapacities, *rc)
 		}
 	}
