@@ -22,7 +22,11 @@
 > 0.07 s against 41 s), the second reached its full fleet sooner than without
 > sharing (p50 87 s against 144 s) with one pod's queue setting its tail (p95
 > 240 s against 178 s), at 34% more GPU-seconds, most of it a bug since fixed
-> ([measured](measured.md#rerun-on-round-20-the-first-burst-served-from-the-start-the-second-not-held-back)). Each arm ran once; whole-node and multi-GPU pods were not
+> ([measured](measured.md#rerun-on-round-20-the-first-burst-served-from-the-start-the-second-not-held-back)).
+> A rerun with that fix (`58bdde6d`) kept the first burst's gain (p50 0.07 s
+> against 25.6 s without moves) and matched the second burst's tail (p95 287 s
+> either way), but a sampling gap left its GPU cost unmeasured
+> ([measured](measured.md#rerun-with-the-idle-fill-fix-the-first-burst-still-served-at-once)). Each arm ran once; whole-node and multi-GPU pods were not
 > measured; and P/D could not be measured: prefill never scaled, so prefill
 > and decode never competed for GPUs. The defaults may also
 > change: the `tolerance` of 0.15, the weight classes, a `reserveGPUs` of 0 and

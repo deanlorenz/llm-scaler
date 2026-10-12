@@ -330,14 +330,53 @@ and the teardown left no GPU requested.
 - **The cost was mostly that bug.** `share` used 34% more GPU-seconds than
   today's optimizer, nearly all of it the replicas the idle fill ratcheted
   up before the bursts. With the fix, the first burst keeps only the
-  designed headroom ([What it costs](README.md#what-it-costs)); how much of
-  its gain and of the cost remains is for the next run. The previous run, on
+  designed headroom ([What it costs](README.md#what-it-costs)); the
+  [next run](#rerun-with-the-idle-fill-fix-the-first-burst-still-served-at-once)
+  measures what remains. The previous run, on
   `e55b02b2`, cost about 81% more and lost A's tail by 174 s with A 18 minutes
   short of its fleet.
 
+### Rerun with the idle-fill fix: the first burst still served at once
+
+The same scenario on the image of `58bdde6d` (the idle-fill fix, `552c3dea`,
+and moves paced on each model's measured replica start time instead of a fixed
+5 minutes). One run of each arm, on 2026-10-12. Every arm served all 6810 of
+its requests, `share` finished 13 transfers, cancelled 4 and aborted none, and
+the teardown left no GPU requested.
+
+The `today` arm is not a fair baseline this time: the nodes were busy, and B
+held 1 replica of the 8 it asked for for about 20 minutes, with up to 8 Pending
+(short of its requested fleet in 42% of samples). `shadow` plans without
+moving anything, so its fleet follows today's optimizer; it was short in 4% of
+samples, and `share` in 6%.
+
+| time to first token, p50 / p95 | `today` (starved) | `shadow` | `share` |
+| --- | ---: | ---: | ---: |
+| B (Qwen) burst, first | 95.5 s / 207 s | 25.6 s / 62 s | **0.07 s / 0.12 s** |
+| A (Llama) burst, second | 210 s / 248 s | 215 s / 287 s | **144 s / 287 s** |
+| GPU-seconds | 16 424 | 18 171 | not measured |
+
+- **The fix held.** Before any load, both models stayed at 1 replica, where
+  the round-20 run had raised them to 5 and 4. When the 0.25 rps baseline
+  began, the fill gave A 3 replicas and B 2, then B 4 and 5 as its burst
+  arrived. That is the weight-scaled headroom, not a ratchet.
+- **The first burst kept its gain.** B served all but its first requests at
+  once (p95 122 ms against 62 s in `shadow`), with the headroom filled as its
+  load arrived rather than in advance.
+- **The second burst was no worse.** A's median was 71 s faster than in
+  `shadow`, with the same tail (287 s). Every arm was slower on A than in the
+  round-20 run, so the nodes were busier this time.
+- **Moves were paced on the measured start.** The ledger logged
+  `"start":"measured"`, so the planner paced on the replica start time it had
+  measured, not on the 5-minute default.
+- **The cost is not measured.** The `share` arm's GPU sampler stopped for 36
+  minutes mid-run, so the run's report refused to compare the arms; the table
+  above is its latency rows with that guard relaxed. The 21 274 GPU-seconds
+  the sampler did record are a floor, not a measurement.
+
 ### What rounds 16 to 20 change, simulated
 
-Until the rerun above, no cluster run had measured `2892aad3` or the review rounds on top of it
+Until the round-20 rerun above, no cluster run had measured `2892aad3` or the review rounds on top of it
 (round 16: `19e7be3f`, `5549d924`; round 17: `6abc491d`; round 18:
 `d8b11b35`; round 19: `cff3a02a`; round 20: `780a6daa`) yet. These
 figures are a **simulation**: the reviewers' production-order and
