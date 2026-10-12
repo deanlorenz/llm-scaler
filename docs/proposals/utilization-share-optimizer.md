@@ -2993,8 +2993,14 @@ optimizer every cycle (§6.6).
    `MoveLatency` underestimates whole-node moves -- it allows 5 minutes for
    the receiver's start, where a whole-node replica of a large model can take
    about 10 -- so for such models a burst can look longer than a move, and
-   the pacing and the fast-swinger cap lean toward moving. The cluster rerun
-   is pending, on round 20.
+   the pacing and the fast-swinger cap lean toward moving. A third review
+   kept a role whose own need does not swing out of its partner's pace (its
+   shortfall has no end) and compares the mean cap after the room the others'
+   peaks leave. The cluster rerun on round 20 served the first burst from the
+   start (p50 0.07 s against 41 s); the second reached its full fleet sooner
+   than without sharing, with its tail set by one pod's queue (235 requests
+   while seven pods sat idle), at 34% more GPU-seconds for the headroom held
+   before the bursts (well-lit path, measured page).
 3. **Short window for urgent transfers**, through `wvaOwnership`, once
    managed-keda-behavior lands (§6.4), gated on a persistent hard imbalance,
    not on the load limits alone (§15).

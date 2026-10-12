@@ -17,8 +17,12 @@
 > model's long requests to drain (p95 313 s against 139 s). The response -- the
 > headroom capped at one replica times the model's weight by default when the
 > quota cannot hold every model's peak at once, the rest left unassigned, and
-> a burst that persists taking its whole shortfall at once -- is built
-> (`2892aad3`) and **not yet measured** on a cluster. Each arm ran once; whole-node and multi-GPU pods were not
+> a burst that persists taking its whole shortfall at once -- was measured
+> once on round 20 (`77b55ba2`): the first burst served from the start (p50
+> 0.07 s against 41 s), the second reached its full fleet sooner than without
+> sharing (p50 87 s against 144 s) with one pod's queue setting its tail (p95
+> 240 s against 178 s), at 34% more GPU-seconds
+> ([measured](measured.md#rerun-on-round-20-the-first-burst-served-from-the-start-the-second-not-held-back)). Each arm ran once; whole-node and multi-GPU pods were not
 > measured; and P/D could not be measured: prefill never scaled, so prefill
 > and decode never competed for GPUs. The defaults may also
 > change: the `tolerance` of 0.15, the weight classes, a `reserveGPUs` of 0 and
@@ -110,7 +114,8 @@ is pure loss and headroom costs nothing extra.
   burst still lost: each replica it took waited about six minutes for the idle
   model's long requests to drain. Its response (the spare left unassigned,
   and the whole shortfall taken at once when the imbalance holds a second
-  cycle) is built but not yet measured, and neither covers every case: a
+  cycle) was measured once on round 20 -- the bursting model reached its full
+  fleet sooner than without sharing -- and neither covers every case: a
   model whose burst of long outputs has just ended still reads its draining
   backlog as need, so GPUs can even move *to* it as the other model's burst
   begins. If you take the mode anyway, give each such model a floor sized for
@@ -404,8 +409,9 @@ When it evaluates but never moves anything, work down
     1 GPU per replica, and the P/D scenario does too. The e2e covers 2-GPU
     receivers and LWS groups on emulated GPUs only.
   - The headroom cap (`maxHeadroomReplicas`), spare returns, and the unpaced
-    hard-imbalance move, which no cluster run has measured yet (simulated
-    only: [measured](measured.md#what-rounds-16-to-20-change-simulated-not-measured)). The cancel fix
+    hard-imbalance move, measured once on round 20
+    ([measured](measured.md#rerun-on-round-20-the-first-burst-served-from-the-start-the-second-not-held-back)) and otherwise simulated
+    ([measured](measured.md#what-rounds-16-to-20-change-simulated)). The cancel fix
     and the hard-imbalance rule were measured once, on the run before them.
   - A cluster quota group and the `clusterNamespaces` canary, which are
     unit-tested only. All three e2e specs use a namespace quota.
@@ -468,9 +474,9 @@ way ([measured](measured.md#rerun-with-the-hard-imbalance-rule-the-spare-was-par
   its waits from the first cycle. The response -- the headroom capped at
   `maxHeadroomReplicas` (default 1) times the model's weight while the quota
   is contended, the rest left unassigned, and a hard imbalance that holds a second cycle taking the whole
-  shortfall up to the receiver's need at once -- is built and not yet measured
-  on a cluster; a simulation is on the [measured](measured.md#what-rounds-16-to-20-change-simulated-not-measured)
-  page.
+  shortfall up to the receiver's need at once -- was measured once on round
+  20 ([measured](measured.md#rerun-on-round-20-the-first-burst-served-from-the-start-the-second-not-held-back)); the simulations are on
+  the same page.
 
 A P/D version was attempted and not measured. Prefill never left one replica
 under prompt-heavy load, so there was no prefill-versus-decode competition to

@@ -275,9 +275,8 @@ latencies come from the load generator and are not affected.
   A were urgent and skipped their waits, the first on the first cycle A's load
   crossed its threshold (1.08). A cancel undid only its own move, holding
   neither model.
-- **The response, built and not yet measured** (`a1f595ea`, revised after
-  review in `7ff3004a` and after verification in `2892aad3`, which is what the
-  pending rerun will measure):
+- **The response** (`a1f595ea`, revised after review in `7ff3004a` and after
+  verification in `2892aad3`; measured on round 20, below):
   - a hard imbalance that holds a second consecutive cycle is no longer paced:
     the receiver takes every replica it is short of its need in one cycle, from
     one donor or several. The first cycle still moves at the usual pace, so
@@ -296,9 +295,44 @@ latencies come from the load generator and are not affected.
   Pricing a donor by how long its pods take to drain was considered and not
   built ([proposal §15](../../proposals/utilization-share-optimizer.md#15-deferred-to-later-prs)).
 
-### What rounds 16 to 20 change: simulated, not measured
+### Rerun on round 20: the first burst served from the start, the second not held back
 
-No cluster run has measured `2892aad3` or the review rounds on top of it
+The same scenario on the image of `77b55ba2` (round 20; the controller code
+has not changed since). One run of each arm, on 2026-10-12. Every arm
+served all 6810 of its requests, `share` made 10 transfers and aborted none,
+and the teardown left no GPU requested.
+
+| time to first token, p50 / p95 | `today` | `shadow` | `share` |
+| --- | ---: | ---: | ---: |
+| B (Qwen) burst, first | 41 s / 76 s | 31 s / 67 s | **0.07 s / 34 s** |
+| A (Llama) burst, second | 144 s / 178 s | 114 s / 156 s | **87 s / 240 s** |
+| GPU-seconds | 17 875 | 17 582 | 24 007 |
+
+- **The first burst gained, from the headroom.** Before any load, the idle
+  quota went to both models as headroom (A 1 -> 5, B 1 -> 4 replicas), so B
+  started its burst with four replicas serving: half its requests waited 70 ms,
+  against 41 s under today's optimizer. No transfer was involved.
+- **The second burst was not held back.** A had its 8 replicas ready 204 s
+  after its burst began, against 241 s under today's optimizer and 351 s in
+  `shadow`; no replica was leaving A when the burst began, and only A's 7th and
+  8th waited for B's returned replicas to drain (60 model-seconds of
+  `awaiting-release`). Its p50 fell from 144 s to 87 s.
+- **Its tail is routing, as far as one run shows.** The p95 of 240 s came
+  from one pod: the load balancer left 235 requests queued on it while the
+  other seven sat idle for two and a half minutes, and the planner made no
+  move in that time. Today's arm had the same shape with 150 requests on one
+  pod (p95 178 s), and `shadow` with 86 (156 s), so the tail followed the
+  deepest single-pod queue, not the fleet. One run per arm cannot settle it.
+- **The cost is the headroom.** `share` used 34% more GPU-seconds than
+  today's optimizer, nearly all of it the idle quota held as headroom before
+  the bursts -- the cost of the first burst's gain
+  ([What it costs](README.md#what-it-costs)). The previous run, on
+  `e55b02b2`, cost about 81% more and lost A's tail by 174 s with A 18 minutes
+  short of its fleet.
+
+### What rounds 16 to 20 change, simulated
+
+Until the rerun above, no cluster run had measured `2892aad3` or the review rounds on top of it
 (round 16: `19e7be3f`, `5549d924`; round 17: `6abc491d`; round 18:
 `d8b11b35`; round 19: `cff3a02a`; round 20: `780a6daa`) yet. These
 figures are a **simulation**: the reviewers' production-order and
