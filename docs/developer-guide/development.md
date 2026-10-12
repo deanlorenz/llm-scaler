@@ -367,10 +367,11 @@ conventions that CI enforces:
 
 See the [Release Process](release-process.md) guide for how to cut a release. It covers:
 
-- Pre-release checklist (changelog, optional version bumps, upstream pins)
-- Creating the tag and GitHub Release (which triggers the image build)
-- What runs automatically: Docker image build and push to GHCR
-- Enabling other team members to perform releases (permissions, secrets, documentation)
+- Pre-release checklist (changelog, the kustomize image pin, upstream pins)
+- Creating the tag and GitHub Release (the tag push triggers the release workflow)
+- What runs automatically: lint and unit tests, a blocking scan, one multi-arch build and push to GHCR with SBOM and provenance, and keyless signing
+- Verifying a release's signature, SBOM and provenance
+- Enabling other team members to perform releases
 
 ## Getting Help
 
