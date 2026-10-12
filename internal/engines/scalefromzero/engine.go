@@ -744,7 +744,7 @@ func (e *Engine) selectOrClaim(ctx context.Context, group modelGroup, candidates
 		DecodeCovered:  covered.decode,
 		PrefillCovered: covered.prefill,
 		Constraints:    constraints,
-		RequirePrefill: e.requirePrefill(group.modelID, group.namespace),
+		RequirePrefill: e.requirePrefill(group),
 	})
 	if len(selected) == 0 && outcome == OutcomeNoCapacity {
 		if set, ok := e.claimShareTransfer(ctx, group, candidates, constraints, covered); ok {

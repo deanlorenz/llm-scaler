@@ -46,7 +46,7 @@ func (e *Engine) claimShareTransfer(ctx context.Context, group modelGroup, candi
 	decodes, prefills := splitByRole(candidates)
 	sortByCost(decodes)
 	sortByCost(prefills)
-	needPrefill := e.requirePrefill(group.modelID, group.namespace) && !covered.prefill
+	needPrefill := e.requirePrefill(group) && !covered.prefill
 	last, lastAcc := "", ""
 	for _, set := range shareWakeSets(decodes, prefills, !covered.decode, needPrefill) {
 		if !sameResolvedAccelerator(set) {
