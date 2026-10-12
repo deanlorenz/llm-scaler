@@ -1018,6 +1018,62 @@ func modelPolicy(vas []llmdVariantAutoscalingV1alpha1.VariantAutoscaling) (strin
 	return named[0], named
 }
 
+// variantTiers returns every policy tier a model's variants selected, with ""
+// standing for the variants that named none (they resolve the default entry and
+// its defaultPolicy). Sorted, so the result is the same on every cycle.
+func variantTiers(vas []llmdVariantAutoscalingV1alpha1.VariantAutoscaling) []string {
+	var tiers []string
+	for i := range vas {
+		if p := vas[i].Spec.ScalingPolicy; !slices.Contains(tiers, p) {
+			tiers = append(tiers, p)
+		}
+	}
+	slices.Sort(tiers)
+	return tiers
+}
+
+// scaleToZeroPolicy resolves the scale-to-zero half of a model's policy from
+// the tier each of its variants selected.
+//
+// Parking takes the WHOLE model to zero, so it is resolved more strictly than
+// the thresholds, which take one tier for the model (see modelPolicy): a model
+// may park only if EVERY tier its variants selected allows scale-to-zero, and it
+// is held for the LONGEST retention among them. Parking is the action an
+// operator cannot undo from the outside -- a variant on a tier that forbids it
+// would otherwise be parked by a sibling on a tier that allows it. When every
+// variant names the same tier, as is normal, this is exactly that tier's
+// resolution.
+//
+// The result is the first tier's resolved entry with its scaleToZero envelope
+// replaced by the folded verdict; the enforcer and the blocked-reason readout
+// read only that envelope, so both see the same answer.
+func scaleToZeroPolicy(
+	cfg *config.Config,
+	configMap map[string]config.ScalingPolicy,
+	modelID, namespace string,
+	tiers []string,
+) config.ScalingPolicy {
+	if len(tiers) == 0 {
+		tiers = []string{""}
+	}
+	var out config.ScalingPolicy
+	enabled := true
+	var retention time.Duration
+	for i, tier := range tiers {
+		resolved := config.ResolveScalingPolicyForTier(configMap, modelID, namespace, tier)
+		if i == 0 {
+			out = resolved
+		}
+		enabled = enabled && config.ResolveScaleToZeroEnabled(cfg, &resolved)
+		retention = max(retention, config.ResolveScaleToZeroRetention(&resolved))
+	}
+	out.ScaleToZero = &config.ScaleToZeroEnvelope{
+		Enabled:         &enabled,
+		RetentionPeriod: retention.String(),
+	}
+	return out
+}
+
 // selectV2Optimizer chooses the optimizer and GPU constraints for a V2
 // optimization cycle.
 //
@@ -1225,6 +1281,9 @@ func (e *Engine) optimizeV2(
 	// its Deployment (a KEDA-discovered variant is named after its
 	// ScaledObject).
 	variantScaleTargets := make(map[string]scaletarget.ScaleTargetAccessor)
+	// modelTiers carries the policy tiers each model's variants selected into
+	// stage 3, for the same reason: scale-to-zero is resolved from them there.
+	modelTiers := make(map[string][]string)
 
 	for groupKey, modelVAs := range modelGroups {
 		modelID := modelVAs[0].Spec.ModelID
@@ -1277,6 +1336,7 @@ func (e *Engine) optimizeV2(
 				variantScaleTargets[utils.GetNamespacedKey(va.Namespace, va.Name)] = t
 			}
 		}
+		modelTiers[utils.GetNamespacedKey(namespace, modelID)] = variantTiers(modelVAs)
 	}
 
 	if len(requests) == 0 {
@@ -1356,6 +1416,7 @@ func (e *Engine) optimizeV2(
 	for _, req := range requests {
 		e.applyScaleToZeroEnforcement(
 			ctx, req.ModelID, req.Namespace, optimizer.Name(),
+			modelTiers[utils.GetNamespacedKey(req.Namespace, req.ModelID)],
 			allDecisions,
 			modelScaleTargets[utils.GetNamespacedKey(req.Namespace, req.ModelID)],
 			req.VariantStates,
@@ -1507,6 +1568,10 @@ func soleEngineFor(scaleTargets map[string]scaletarget.ScaleTargetAccessor) (inf
 // reached. The engine is detected here and passed to the enforcer, which asks for
 // the counter that matches.
 //
+// tiers are the policy tiers the model's variants selected (see variantTiers);
+// nil resolves the default entry alone. The scale-to-zero policy is resolved from
+// them by scaleToZeroPolicy, the same tier-aware resolution the thresholds use.
+//
 // Decisions are mutated in place; returns true if the model was scaled to zero.
 //
 // Both optimize paths (saturation, queueing-model) funnel their enforcement through
@@ -1516,6 +1581,7 @@ func soleEngineFor(scaleTargets map[string]scaletarget.ScaleTargetAccessor) (inf
 func (e *Engine) applyScaleToZeroEnforcement(
 	ctx context.Context,
 	modelID, namespace, optimizerName string,
+	tiers []string,
 	decisions []domain.VariantDecision,
 	scaleTargets map[string]scaletarget.ScaleTargetAccessor,
 	variantStates []domain.VariantReplicaState,
@@ -1523,11 +1589,12 @@ func (e *Engine) applyScaleToZeroEnforcement(
 	logger := ctrl.LoggerFrom(ctx)
 
 	// The resolved scaling entry carries the whole scale-to-zero policy: enabled
-	// and retention, tiered namespace-local → global and merged with this model's
-	// override. Resolved before the gates below, not after, because the gates are
-	// half of what decides whether this model can ever park and the policy is the
-	// other half — reporting one without the other cannot say which is binding.
-	satConfig := config.ResolveScalingPolicy(e.Config.ScalingPolicyConfigForNamespace(namespace), modelID, namespace)
+	// and retention, tiered namespace-local → global, layered with the policy tier
+	// the model's variants selected, and merged with this model's override.
+	// Resolved before the gates below, not after, because the gates are half of
+	// what decides whether this model can ever park and the policy is the other
+	// half — reporting one without the other cannot say which is binding.
+	satConfig := scaleToZeroPolicy(e.Config, e.Config.ScalingPolicyConfigForNamespace(namespace), modelID, namespace, tiers)
 	scaleToZeroEnabled := config.ResolveScaleToZeroEnabled(e.Config, &satConfig)
 	modelEngine, engineSupported := soleEngineFor(scaleTargets)
 
