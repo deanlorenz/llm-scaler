@@ -41,25 +41,35 @@ func TestShareDonorKeepsItsTargetWhenAReplicaIsTwoSteps(t *testing.T) {
 	}
 }
 
-// Moves never reverse while demand holds, by the targets alone: every move
-// goes from a role above its target to one below its own and leaves the donor
-// at or above its target, so a receiver is never above its target while its
-// donor is below. Each cycle lands its moves at once and starts a fresh
-// ledger, so no hold, confirm cycle or release in flight can be what stops a
-// reversal. On the mixed-step quota both roles give and grow by 8 GPUs and
-// need little: one replica would swap which of the two is below its target,
-// and, unbounded, the next would swap it back.
-func TestShareMovesDoNotReverseUnderSteadyDemand(t *testing.T) {
+// Control for the test above: a donor whose replica is one step of its target
+// does give, down to that target.
+func TestShareDonorGivesAOneStepReplica(t *testing.T) {
+	l := NewShareLedger()
 	in := mixedStepRun()
-	in.Roles[1].Need = 4 // R below its target of 8, D above it, neither short of its need
-	vs := map[string]ShareVariant{"D": {Name: "d", GPUs: 8, PodGPUs: []int{8}}, "R": {Name: "r", GPUs: 8, PodGPUs: []int{8}}}
-	in.Give, in.Grow = vs, vs
+	in.Give = map[string]ShareVariant{"D": {Name: "d", GPUs: 4, PodGPUs: []int{4}}}
+	in.Grow = map[string]ShareVariant{"R": {Name: "r", GPUs: 4, PodGPUs: []int{4}}}
+	for i := range 6 {
+		for _, tr := range PlanShareTransfers(l, in, time.Unix(int64(1000+15*i), 0), simTimings()).Started {
+			if tr.Donor == "D" && tr.Receiver == "R" {
+				return
+			}
+		}
+	}
+	t.Fatal("D, 12 against a target of 8 in 4-GPU steps, never gave R a replica")
+}
+
+// landEach plans n cycles, each on a fresh ledger with its moves landed at
+// once, so no hold, confirm cycle or release in flight decides anything: only
+// the targets, the keep and the admission do. It returns every move started,
+// in order, and fails the test on the first that gives back to the role that
+// gave to it.
+func landEach(t *testing.T, in SharePlanInput, n int) []ShareTransfer {
+	t.Helper()
 	in.ConfirmCycles = 1
-	in.Headroom = ShareHeadroom{Capped: true, Replicas: 1}
+	var all []ShareTransfer
 	gave := map[string]string{}
-	for i := range 10 {
-		p := PlanShareTransfers(NewShareLedger(), in, time.Unix(int64(1000+15*i), 0), simTimings())
-		for _, tr := range p.Started {
+	for i := range n {
+		for _, tr := range PlanShareTransfers(NewShareLedger(), in, time.Unix(int64(1000+15*i), 0), simTimings()).Started {
 			if tr.Receiver == "" {
 				continue
 			}
@@ -67,7 +77,49 @@ func TestShareMovesDoNotReverseUnderSteadyDemand(t *testing.T) {
 				t.Fatalf("cycle %d: %s gives back to %s, which gave to it (held %v)", i, tr.Donor, tr.Receiver, in.Held)
 			}
 			gave[tr.Donor] = tr.Receiver
-			in.Held = map[string]int{tr.Donor: in.Held[tr.Donor] - tr.DonorGPUs, tr.Receiver: in.Held[tr.Receiver] + tr.GPUs}
+			all = append(all, tr)
+			held := map[string]int{}
+			for k, v := range in.Held {
+				held[k] = v
+			}
+			held[tr.Donor] -= tr.DonorGPUs
+			held[tr.Receiver] += tr.GPUs
+			in.Held = held
 		}
+	}
+	return all
+}
+
+// Moves never reverse while demand holds: every move goes from a role above
+// its target to one below its own and leaves the donor at or above its
+// target, so a receiver is never above its target while its donor is below.
+// D, 16 in 4-GPU steps on a need of 3.5, gives R, short on 4 of 6, until both
+// sit at their targets, and nothing comes back.
+func TestShareMovesDoNotReverseUnderSteadyDemand(t *testing.T) {
+	in := mixedStepRun()
+	in.Budget = 20
+	in.Held = map[string]int{"D": 16, "R": 4}
+	in.Give = map[string]ShareVariant{"D": {Name: "d", GPUs: 4, PodGPUs: []int{4}}, "R": {Name: "r", GPUs: 4, PodGPUs: []int{4}}}
+	in.Grow = in.Give
+	if moves := landEach(t, in, 10); len(moves) == 0 {
+		t.Fatal("setup: nothing moved, so nothing could reverse")
+	}
+}
+
+// A move the targets allow is still refused when it leaves the pair's
+// worst-off role no better (§6.2 admission): D, 12 against a ceiling of 8 on a
+// need of 2, would give R, 4 on a need of 1, a replica of headroom, and
+// both would end where D starts, at a headroom of 3. Moved, the GPUs go to a
+// role that does not need them; the next change of demand moves them again.
+func TestShareMoveImprovesTheWorstOff(t *testing.T) {
+	in := mixedStepRun()
+	in.Roles = []ShareRole{
+		{Key: "D", Weight: 1, Need: 2, Floor: 4, Ceiling: 8, ReplicaGPUs: 4},
+		{Key: "R", Weight: 1, Need: 1, Floor: 4, Ceiling: 64, ReplicaGPUs: 4},
+	}
+	in.Give = map[string]ShareVariant{"D": {Name: "d", GPUs: 4, PodGPUs: []int{4}}}
+	in.Grow = map[string]ShareVariant{"R": {Name: "r", GPUs: 4, PodGPUs: []int{4}}}
+	if moves := landEach(t, in, 4); len(moves) != 0 {
+		t.Fatalf("a move that leaves the worst-off no better started: %+v", moves[0])
 	}
 }
