@@ -224,7 +224,10 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 			for _, vc := range vs {
 				g.Variants[r.Key] = append(g.Variants[r.Key], shareVariantOf(vc, stateMap))
 			}
-			if give, ok := shareGiveVariant(vs, stateMap); ok {
+			// A role whose demand the analyzer holds keeps what it has: it is
+			// sized on its unheld demand (shareRolesForRequest) and gives
+			// nothing until the hold ends.
+			if give, ok := shareGiveVariant(vs, stateMap); ok && !r.held {
 				g.Give[r.Key] = give
 			}
 			if grow, ok := shareGrowVariant(vs, stateMap); ok {
@@ -268,6 +271,9 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 type shareRoleInput struct {
 	ShareRole
 	role string
+	// held is whether the analyzer held this role's demand this cycle
+	// (domain.AnalyzerResult.HeldRoleDemand).
+	held bool
 }
 
 // shareRolesForRequest builds one model's roles on acc, or says why the model
@@ -299,6 +305,18 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 				return nil, "role " + role + " has no demand reading"
 			}
 			demand = rc.TotalDemand
+		}
+		// A hold keeps the fleet where it is by raising its demand to the
+		// bottom of the band (scaleDown x supply), which reads as a need of
+		// 0.70/0.85 of what the role holds: plus a replica of headroom, every
+		// idle fill raised the next, and two idle models filled a quota of 10
+		// from 1 and 1 to 5 and 4 on a cluster. The role is sized on its demand
+		// before the hold, and the hold's keep is kept by giving nothing.
+		before, held := sig.Result.HeldRoleDemand[role]
+		if held {
+			if raised := sig.Result.RoleDemand[role] - before; raised > 0 {
+				demand = max(demand-raised, 0)
+			}
 		}
 		vs := variantsForRole(variantsOnType(records, acc), role)
 		best, g, measured := bestVariantForRole(records, stateMap, acc, role)
@@ -346,6 +364,7 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 				ReplicaGPUs: max(g, 1),
 			},
 			role: role,
+			held: held,
 		})
 	}
 	return out, ""

@@ -154,6 +154,13 @@ var _ = Describe("the fleet-shape change, through Analyze", func() {
 		Expect(drained.RoleDemand[domain.RoleDecode]).To(BeNumerically(">=", 0.70*decodeSupply),
 			"a fleet whose shape has just changed is not released on the old shape's occupancy")
 		Expect(swap).NotTo(BeNil())
+		// The held figure is a keep, not a reading: the demand before the
+		// hold goes with it, for a consumer that sizes on need
+		// (AnalyzerResult.HeldRoleDemand).
+		before, ok := drained.HeldRoleDemand[domain.RoleDecode]
+		Expect(ok).To(BeTrue(), "the hold that raised decode records decode's demand before it")
+		Expect(before).To(BeNumerically("<", drained.RoleDemand[domain.RoleDecode]),
+			"the hold raised it, so what came before is lower")
 	})
 
 	It("releases the fleet once the new shape has a reading of its own", func() {
@@ -695,9 +702,10 @@ var _ = Describe("the fleet-shape change, through Analyze", func() {
 		// The negative control for the whole mechanism: the same load, cycle
 		// after cycle, must never raise an event or hold anything.
 		for i := 0; i < 5; i++ {
-			cycle(10, 17_282, 0, 1000, 6000, nil)
+			out := cycle(10, 17_282, 0, 1000, 6000, nil)
 			Expect(outstanding()).To(BeFalse(),
 				"a fleet serving one shape has nothing to hold for")
+			Expect(out.HeldRoleDemand).To(BeNil(), "and records no held demand")
 			clock = clock.Add(15 * time.Second)
 		}
 	})

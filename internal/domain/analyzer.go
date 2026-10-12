@@ -139,6 +139,15 @@ type AnalyzerResult struct {
 	// throughput charges arrival+queue per role); the capacity builder pairs it
 	// with per-role supply to assemble NamedAnalyzerResult.RoleCapacities.
 	RoleDemand map[string]float64
+
+	// HeldRoleDemand is, for each role whose demand a hold changed this cycle,
+	// its demand before the hold (nil when no hold changed one). A hold is the
+	// analyzer withholding a decision -- a release on figures a shape change
+	// made stale, or prefill sized on decode's backlog -- not a reading of
+	// load: RoleDemand carries the held figure, which keeps the fleet where it
+	// is. A consumer that would treat demand as what a role needs, rather than
+	// as what to keep, reads the lower of the two.
+	HeldRoleDemand map[string]float64
 }
 
 // VariantCapacity is one variant's entry in an analyzer's (D, P) signal, in
