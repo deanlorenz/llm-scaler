@@ -1122,12 +1122,12 @@ func (p *sharePlanRun) fundFrom(rc, dn string) (started int, step fundStep, cand
 			p.plan.Withheld[ShareWithheldDonorPeak]++
 			return started, fundNext, candidate, misfit
 		}
-		// §6.2 admission: the worst-off role of the pair improves, and the
-		// donor is not pushed out of band.
-		before := math.Min(p.z(dn, work[dn]), p.z(rc, work[rc]))
-		after := math.Min(p.z(dn, work[dn]-gd), p.z(rc, work[rc]+g))
-		donorOK := donorInBand(in, p.limits(), p.cont, byKey, dn, work[dn]-gd)
-		if !(after > before) || !donorOK || work[dn]-gd < p.keep[dn] {
+		// §6.2: the donor keeps at least its whole-replica target and its
+		// keep. Moves go only from a role above its target to one below its
+		// own, so the worst off of the pair already improves; the check is on
+		// what the donor keeps after giving, which a donor replica larger than
+		// its target's step can take below the target.
+		if work[dn]-gd < p.integ[dn] || work[dn]-gd < p.keep[dn] {
 			return started, fundNext, candidate, misfit
 		}
 		t := l.Start(ShareTransfer{
