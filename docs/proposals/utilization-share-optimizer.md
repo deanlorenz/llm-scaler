@@ -433,14 +433,18 @@ while another role bursts for longer than one (`fastSwingers`:
 `ShareLedger.SwingsFast` -- at least two completed bursts, none lasting
 `ShareTimings.MoveLatency`, over at least `ShareFastSwingSpread` = 0.25 of its
 highest need -- beside a role that `BurstsLong`, a burst lasting a move over at
-least `ShareLongBurstSpread` = 0.5 of its highest need). It is capped on its
-mean need (`MeanNeed`). Capped on its reading it took the idle GPUs at each
+least `ShareLongBurstSpread` = 0.5 of its highest need, and whose peak needs
+more than its floor holds: a burster its floor covers waits on no release).
+It is capped on its mean need (`MeanNeed`), listed in `SharePlan.MeanCapped`
+when that is below its reading, and shows the blocked reason
+`fast-swing-capped`. Capped on its reading it took the idle GPUs at each
 crest; they started serving as the crest ended, and parked on a donor that is
 never calm, they were what the long burst then waited a release for. In the
 round-17 owner simulator, a model bursting 20 minutes an hour beside one
 swinging every 3 minutes left 0.33 to 0.35 of its demand unserved, against 0.20
 to 0.21 with the swinger capped on its mean, which cost the swinger 0.02 to
-0.06 (still below its `e55b02b2` figure). Without a long burster nothing waits
+0.04 (up to 0.06 across the other noisy shapes simulated; still below its
+`e55b02b2` figure). Without a long burster nothing waits
 on the swinger's GPUs, and a model re-bursting every 12 minutes beside a steady
 one lost up to 0.03 more capped on its mean, so the exception needs one.
 
@@ -986,11 +990,28 @@ When the group acts:
 
   **Nor when the burst ends first.** The second cycle frees a hard imbalance
   from the pace only while its burst is not expected to end before a move
-  lands (`ShareLedger.Unpaced`: `!BurstEndsWithin(role, unpacedHorizon)`). The
+  lands (`ShareLedger.Unpaced`: `!ModelBurstEnds(role, model, tm)`). The
   horizon is 1.25 times the move latency -- the time a move takes to land and
   a quarter of it again to serve in. A burst is expected to end when the
-  role's longest completed burst, less how long the one under way has lasted,
-  is under the horizon; a role with no completed burst keeps the unpaced path.
+  role's last completed burst, less how long the one under way has lasted,
+  is under the horizon (`BurstEndsWithin`). The last, not the longest: one
+  long burst would make every short one after it look long for a window.
+  There is no expected end -- the role keeps the unpaced path -- with no
+  completed burst on record, once the burst under way has outlasted the
+  last, and for a need whose range is under `ShareFastSwingSpread` (0.25) of
+  its peak: a steady need with noise crosses its own midpoint every few
+  readings and would otherwise read as a string of short bursts. The roles of
+  one model (`ShareModelRoles`, from `ShareGroup.Origins`) are judged as
+  one, and get the same answer: every role whose need swings across
+  `ShareFastSwingSpread` and is in a burst must be expected to end it, and
+  while none is in one, every swinging role's last burst must be. A role
+  whose need does not swing is not judged -- counted as a burst with no end,
+  a decode steady at 8 GPUs with noise unpaced its prefill's every short
+  burst. So a prefill and decode do not run their model's burst at a skewed
+  ratio, one taking its whole shortfall while the other moves at the pace. `needBursts` trusts no single reading: the range runs from
+  levels held two readings in a row, a run starts and ends only on two
+  readings in a row, and a run already under way when the history starts is
+  not a completed burst, but counts as a lower bound toward the longest.
   Traced in the whole-node simulator, a 15-minute burst was seen about 30 s
   in, and a move took about 14 minutes to land: taken all at once, the moves
   served the burst a minute or two and left the donor short through its own
@@ -998,7 +1019,9 @@ When the group acts:
   `e55b02b2`; switching the unpaced rule off entirely reached 0.223 but cost
   the 40- and 60-minute rows 0.010 and square2 at 45 minutes 0.019). The
   `transfer-limit` blocked reason reads the same rule, so a short-burst
-  receiver held to the pace reports it.
+  receiver held to the pace reports it; such a receiver also reports
+  `burst-ending` from its second hard cycle, whether or not it is receiving,
+  so a role taking a replica a cycle through a long shortfall shows a reason.
 
   Moves that skipped the waits count against the concurrency limit
   (`InFlight`); the unpaced moves of a hard imbalance from its second cycle
@@ -1013,7 +1036,8 @@ When the group acts:
   `ShareTimings.Window`), as a scale-down is: judged on one reading, a calm
   donor read in a trough of its normal demand was drained in two cycles. The
   recent peak, like `PeakNeed`, needs two readings in a row; and for a
-  receiver whose completed bursts outlast a move (`LongBursts` against
+  receiver whose bursts outlast a move -- a completed one, or one under way
+  when the history starts (`LongBursts` against
   `ShareTimings.MoveLatency`) the donor is judged on `needView` alone
   (`donorViewFor`), since such a move lands inside the burst and holding it a
   window at each handover only made the burst wait (the 40-minute whole-node
@@ -1182,6 +1206,27 @@ When the group acts:
   its need, and withholding them took c16 at 40 minutes from 0.123 to 0.045
   (`e55b02b2`: 0.076) with no regression elsewhere. Moves to a receiver below
   its need are not affected, nor is anything while contended.
+- **A return does not take a role into its scale-down band**
+  (`returnSpare`, `sharePlanRun.bandKeep`, counted `scale-down-band`). A
+  return is today's scale-down done while nobody waits for the GPUs, so it
+  stops where today's optimizer would: at the GPUs on which the role's
+  demand sits at today's release target, a quarter of the way up from its
+  scale-down boundary (`ShareGroup.DownThresholds`, from
+  `CompositeSignal.ScaleDownBoundary`) to its scale-up threshold
+  (`releaseTargetUtilization`), in whole replicas and no more than its
+  ceiling. At the boundary itself, a role of 8-GPU replicas at a need of 20
+  kept 4 replicas where today's scale-down keeps 3. No band without a
+  boundary below the scale-up threshold.
+  Transfers are not banded: holding a receiver's donor in its band blocked
+  the rising P/D model's prefill at each handover -- at its need of 10.1
+  GPUs, needing about 15 within a minute, with a replica 10 minutes away --
+  and took the whole-node simulator's worst P/D cell from 0.038 to 0.093;
+  judging the band in whole replicas did not help (10.1 already rounds up to
+  the 16 the role held). Returns-only is inert in all three simulators (41
+  oscillation rows, 160 whole-node cells, 42 owner rows identical): a
+  guarantee, not a gain. Open: a headroom move to a receiver at its need may
+  still take a donor into its band; doing that safely needs the donor's need
+  trend, not its reading.
 - Bound the pace: at most two replicas given or received by any one role in a
   planning cycle, and at most two transfers in flight per group (constants,
   §8.4). A large
@@ -2184,7 +2229,7 @@ The user-facing outcome is headroom, in the words of §3. New conditions become 
 | `wva_utilization_share_target_gpus` | `model_name`, `role`, `exported_namespace` | `Ĝ_r`, the continuous target the band is judged against, in GPUs |
 | `wva_utilization_share_actionable` | `model_name`, `role`, `exported_namespace` | 1 when the role is out of band and off its integer target — a move could fix it (§6.1) |
 | `wva_utilization_share_replicas_to_move` | `accelerator_type`, `scope` | replicas the integer target would move; in shadow mode, what would be planned |
-| `wva_utilization_share_withheld_total` | `accelerator_type`, `scope`, `reason` | transfers not planned: `reversal-hold` (every move a hold withheld: the reversal hold, §6.7 rule 4; a cancelled pair, §6.3; an aborted donor's back-off; an exhausted donor) / `not-actionable` (§6.1 step 4). The swing rule withholds nothing; it changes the need a role is planned on, reported by `wva_utilization_share_swinging` |
+| `wva_utilization_share_withheld_total` | `accelerator_type`, `scope`, `reason` | transfers not planned: `reversal-hold` (every move a hold withheld: the reversal hold, §6.7 rule 4; a cancelled pair, §6.3; an aborted donor's back-off; an exhausted donor) / `not-actionable` (§6.1 step 4) / `return-not-calm` / `return-role-short` / `donor-peak` / `awaiting-return` / `scale-down-band` (§6.2). The swing rule withholds nothing; it changes the need a role is planned on, reported by `wva_utilization_share_swinging` |
 | `wva_utilization_share_swinging` | `model_name`, `role`, `exported_namespace` | 1 while a role is planned on its mean need (§6.7 rule 5) |
 | `wva_utilization_share_actual` | `model_name`, `role`, `exported_namespace` | `u_r` |
 | `wva_utilization_share_spare_gpus` | `accelerator_type`, `scope` | `S`; negative when the quota is short |
@@ -2212,7 +2257,9 @@ The user-facing outcome is headroom, in the words of §3. New conditions become 
 | `wva_model_scaling_blocked` | `reason="donor-not-steerable"` | the role's pods could not be marked when it was asked to give (a Deployment pod not Ready or not scheduled, a Deployment mid-rollout, no deletion cost left between earlier live marks and the lowest unmarked sibling, an LWS whose next group to go is terminating or unscheduled, or the patch failed); it backs off as after an abort, and the reason lasts only the back-off. A donor whose every pod is already given to live transfers is only held (`HoldGiving`), with no reason |
 | `wva_model_scaling_blocked` | `reason="reversal-hold"` | short and actionable, but it gave within the reversal hold (§6.7 rule 4). Not reported when the role is at its threshold and another role would stay calm after giving it a replica: that move is a hard imbalance and the hold is lifted (§6.2). A cancelled pair sets it on neither role |
 | `wva_model_scaling_blocked` | `reason="swinging"` | planned on its mean need (§6.7 rule 5) |
-| `wva_model_scaling_blocked` | `reason="transfer-limit"` | short and actionable, while the group already has the most donor transfers in flight (2) |
+| `wva_model_scaling_blocked` | `reason="transfer-limit"` | short and actionable, while the group already has the most donor transfers in flight (2). Not for a role whose moves are unpaced: a hard imbalance from its second cycle, from a calm donor, whose model's burst is not expected to end within 1.25 move latencies (none is, with no completed burst on record) |
+| `wva_model_scaling_blocked` | `reason="burst-ending"` | short with its hard imbalance confirmed, but its model's burst is expected to end before a move lands, so it receives at the pace (§6.2) |
+| `wva_model_scaling_blocked` | `reason="fast-swing-capped"` | its headroom is capped on its mean need, below its reading: it swings faster than a move beside a long burster (§5.1) |
 | `wva_utilization_share_mode` | `mode` | 1 for the mode in force — `off` / `invalid` / `shadow` / `active` — 0 for the others; published by the leader at the start of every cycle, from its first, including cycles with no active model, so an alert needs no `absent()` |
 | `wva_utilization_share_in_flight` | `accelerator_type`, `scope`, `state` | transfers in flight by `state` (`releasing`, `filling`), idle fills included; while acting |
 
@@ -2914,15 +2961,40 @@ optimizer every cycle (§6.6).
    known costs of round 18: a hard imbalance stays paced when its burst ends
    before a move lands (the unpaced landing; tight 1x8 at 30 minutes 0.247 ->
    0.232), and a fast swinger beside a long burster is capped on its mean
-   (the burster 0.33-0.35 -> 0.20-0.21, the swinger +0.02 to +0.06). A
+   (the burster 0.33-0.35 -> 0.20-0.21, the swinger +0.02 to +0.04, up to
+   +0.06 in other noisy shapes). A
    startup rule -- returns waiting the scale-down window while contention is
    only assumed -- was tried and dropped: it fixed a long-drain model's dip
    with no history (0.038 -> 0.000) but cost a burster beside a noisy
    long-drain model 0.305 -> 0.348 at a 5-minute window, and the cluster
    scenario's 60-minute bursts 0.190 -> 0.200. Still open: that dip cost,
    tight 1x8 at 30 minutes 0.007 behind `e55b02b2`, and square2 at 30
-   minutes, which barely moved (0.334 -> 0.331). The cluster rerun is
-   pending, on round 19 or later.
+   minutes, which barely moved (0.334 -> 0.331). Round 20, the review of
+   round 19: the burst summary (`needBursts`) takes its range from levels
+   held two readings in a row and starts or ends a run only on two readings
+   (A); a run under way when the history starts is not a completed burst,
+   only a lower bound on the longest (B); `BurstEndsWithin` reads the last
+   completed burst, not the longest, predicts no end once a burst outlasts
+   it, and none for a need swinging less than 0.25 of its peak (C); a P/D
+   model's roles are paced together (`ModelBurstEnds`, D); the fast-swinger
+   cap needs a long burster whose peak exceeds its floor (E); a restored need
+   is clamped to `MaxShareBudgetGPUs` (F); and the two pacing states are
+   blocked reasons, `burst-ending` and `fast-swing-capped`, left out of the
+   dashboard's blocked count (G). A return now stops where today's
+   scale-down would (`scale-down-band`, §6.2). Sims identical to `cff3a02a`
+   (41 osc / 160 whole-node / 42 owner rows, no row > 0.005). A second
+   review of that delta found nothing high; it moved the band from the
+   scale-down boundary to today's release target, judged a model's roles
+   with one predicate that skips a role whose need does not swing, and
+   reports `fast-swing-capped` and `scale-down-band` only where they change
+   the outcome. Still open: a burst still under way does not count as long
+   (`LongBursts` reads completed bursts), so a model in its first long burst
+   does not yet cap a fast swinger. Also open:
+   `MoveLatency` underestimates whole-node moves -- it allows 5 minutes for
+   the receiver's start, where a whole-node replica of a large model can take
+   about 10 -- so for such models a burst can look longer than a move, and
+   the pacing and the fast-swinger cap lean toward moving. The cluster rerun
+   is pending, on round 20.
 3. **Short window for urgent transfers**, through `wvaOwnership`, once
    managed-keda-behavior lands (§6.4), gated on a persistent hard imbalance,
    not on the load limits alone (§15).

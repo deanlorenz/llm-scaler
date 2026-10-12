@@ -296,37 +296,37 @@ latencies come from the load generator and are not affected.
   Pricing a donor by how long its pods take to drain was considered and not
   built ([proposal §15](../../proposals/utilization-share-optimizer.md#15-deferred-to-later-prs)).
 
-### What rounds 16 to 18 change: simulated, not measured
+### What rounds 16 to 20 change: simulated, not measured
 
 No cluster run has measured `2892aad3` or the review rounds on top of it
 (round 16: `19e7be3f`, `5549d924`; round 17: `6abc491d`; round 18:
-`d8b11b35`) yet. These figures are a **simulation**: the reviewers'
-production-order and whole-node simulators, used to review and then verify
-each response. Each is the shortfall the simulator reports -- the share of
+`d8b11b35`; round 19: `cff3a02a`; round 20: `780a6daa`) yet. These
+figures are a **simulation**: the reviewers' production-order and
+whole-node simulators, used to review and then verify each response. Each is the shortfall the simulator reports -- the share of
 demand left unserved -- averaged over 5 seeds of 6 hours (10 of 8 hours for
 whole-node), at `maxHeadroomReplicas` 1 and, but for whole-node, a 1-minute
 scale-down window. Lower is better.
 
-| scenario | `e55b02b2` | `2892aad3` | `5549d924` | `6abc491d` | `d8b11b35` |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| the cluster scenario (bursts in turn, ceiling 8, quota 10), 40 min bursts | 0.350 | 0.286 | 0.273 | **0.269** | **0.269** |
-| the same, 60 min bursts | 0.407 | 0.167 | **0.153** | **0.153** | **0.153** |
-| the same, 90 min bursts | 0.245 | 0.111 | **0.100** | **0.100** | **0.100** |
-| the cluster scenario, weight 2, 40 min bursts | 0.387 | 0.275 | 0.261 | **0.260** | **0.260** |
-| the same, 60 min bursts | 0.370 | 0.158 | **0.143** | **0.143** | **0.143** |
-| small alternating bursts, 60 min | 0.042 | 0.041 | 0.052 | **0.031** | **0.031** |
-| small alternating bursts, 40 min | 0.076 | 0.147 | 0.123 | **0.045** | **0.045** |
-| a long-drain model's brief dips, 12 min | **0.018** | 0.059 | 0.025 | 0.019 | 0.019 |
-| a swinging model among three, 45 min | -- | 0.079 | **0.074** | 0.086 | 0.085 |
-| whole-node, two 1x8 models, tight quota, 20 min bursts | 0.201 | 0.241 | 0.216 | **0.193** | **0.193** |
-| whole-node, the same, 40 min bursts | 0.259 | 0.242 | 0.245 | 0.264 | **0.248** |
-| whole-node, a 1x16 model, 20 min bursts | 0.099 | 0.131 | 0.109 | **0.094** | **0.094** |
-| whole-node, the same, 40 min bursts | **0.133** | **0.132** | **0.132** | 0.146 | **0.133** |
-| whole-node, an LWS 2x8 model beside a 1x8 one, 40 min bursts | 0.149 | 0.149 | 0.123 | 0.131 | **0.124** |
-| whole-node, an LWS 3x8 model beside a 1x8 one, 40 min bursts | **0.136** | 0.195 | 0.141 | 0.154 | 0.141 |
-| whole-node, two P/D models of 1x8 roles, 20 min bursts | 0.060 | 0.076 | 0.054 | **0.024** | **0.024** |
-| whole-node, two 1x8 models whose peaks always fit, 20 min bursts | **0.000** | **0.000** | 0.015 | 0.019 | 0.019 |
-| whole-node, all 160 cells summed | 22.52 | 23.57 | 22.68 | 22.08 | **21.74** |
+| scenario | `e55b02b2` | `2892aad3` | `5549d924` | `6abc491d` | `d8b11b35` | `cff3a02a` | `780a6daa` |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| the cluster scenario (bursts in turn, ceiling 8, quota 10), 40 min bursts | 0.350 | 0.286 | 0.273 | **0.269** | **0.269** | **0.269** | **0.269** |
+| the same, 60 min bursts | 0.407 | 0.167 | **0.153** | **0.153** | **0.153** | **0.153** | **0.153** |
+| the same, 90 min bursts | 0.245 | 0.111 | **0.100** | **0.100** | **0.100** | **0.100** | **0.100** |
+| the cluster scenario, weight 2, 40 min bursts | 0.387 | 0.275 | 0.261 | **0.260** | **0.260** | **0.260** | **0.260** |
+| the same, 60 min bursts | 0.370 | 0.158 | **0.143** | **0.143** | **0.143** | **0.143** | **0.143** |
+| small alternating bursts, 60 min | 0.042 | 0.041 | 0.052 | **0.031** | **0.031** | **0.031** | **0.031** |
+| small alternating bursts, 40 min | 0.076 | 0.147 | 0.123 | **0.045** | **0.045** | **0.045** | **0.045** |
+| a long-drain model's brief dips, 12 min | 0.018 | 0.059 | 0.025 | 0.019 | 0.019 | **0.011** | 0.014 |
+| a swinging model among three, 45 min | -- | 0.079 | **0.074** | 0.086 | 0.085 | 0.085 | 0.085 |
+| whole-node, two 1x8 models, tight quota, 20 min bursts | 0.201 | 0.241 | 0.216 | **0.193** | **0.193** | **0.193** | **0.193** |
+| whole-node, the same, 40 min bursts | 0.259 | 0.242 | 0.245 | 0.264 | **0.248** | **0.248** | **0.248** |
+| whole-node, a 1x16 model, 20 min bursts | 0.099 | 0.131 | 0.109 | **0.094** | **0.094** | **0.094** | **0.094** |
+| whole-node, the same, 40 min bursts | **0.133** | **0.132** | **0.132** | 0.146 | **0.133** | **0.133** | **0.133** |
+| whole-node, an LWS 2x8 model beside a 1x8 one, 40 min bursts | 0.149 | 0.149 | 0.123 | 0.131 | **0.124** | **0.124** | **0.124** |
+| whole-node, an LWS 3x8 model beside a 1x8 one, 40 min bursts | **0.136** | 0.195 | 0.141 | 0.154 | 0.141 | 0.141 | 0.141 |
+| whole-node, two P/D models of 1x8 roles, 20 min bursts | 0.060 | 0.076 | 0.054 | **0.024** | **0.024** | **0.024** | **0.024** |
+| whole-node, two 1x8 models whose peaks always fit, 20 min bursts | **0.000** | **0.000** | 0.015 | 0.019 | 0.019 | 0.019 | 0.019 |
+| whole-node, all 160 cells summed | 22.52 | 23.57 | 22.68 | 22.08 | 21.74 | **21.68** | **21.68** |
 
 What moved them:
 
@@ -372,6 +372,20 @@ What moved them:
 - Returns followed by fills are cold starts. On the cluster scenario at 40
   minutes, pods created plus removed rose from 240 to about 1060 over 30
   simulated hours.
+- Round 19 (`cff3a02a`): a large imbalance's moves keep the usual pace
+  when the model's burst is expected to end before they land, and a model
+  swinging faster than a move is capped on its average need while another
+  bursts longer than one. Of the rows above only the brief dips move (0.019
+  to 0.011); the shapes the rules were aimed at do: whole-node tight 1x8 at 30 minutes 0.247 to 0.232, a bursting
+  model beside a noisy one 0.33-0.35 to 0.20-0.21 (the noisy one 0.02 to
+  0.04 worse, up to 0.06 in other noisy shapes), whole-node total 21.74 to
+  21.68.
+- Round 20, the review of round 19: the burst history no longer trusts a
+  single reading, a P/D model's roles are paced together, a return gives
+  back no more than today's scale-down would, and the two pacing states are
+  blocked reasons (`burst-ending`, `fast-swing-capped`). No row of any of the
+  three simulators moved by more than 0.005 (41 oscillation rows, 160
+  whole-node cells, 42 owner rows); these are correctness fixes, not gains.
 
 A simulation is not a measurement: only the rerun on a cluster will say
 whether the cluster scenario's second burst recovers.

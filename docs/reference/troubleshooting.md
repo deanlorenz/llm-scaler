@@ -212,15 +212,24 @@ Work down the list in order.
    replica spans several pods, such as a LeaderWorkerSet, is credited with
    returns still releasing whose pods hold its pods, in whole replicas, and
    only the rest is funded by draining other models; the model itself shows
-   blocked reason `awaiting-release`).
-7. **Is it swinging, or at the transfer limit?** Blocked reason `swinging`
+   blocked reason `awaiting-release`). A third, `scale-down-band`, counts a
+   return a model did not make because it would take the model lower than
+   today's optimizer scales down to (demand a quarter of the way up from
+   `scaleDownBoundary` to `scaleUpThreshold`): a return is today's
+   scale-down, and goes no lower.
+7. **Is it swinging, paced, or at the transfer limit?** Blocked reason `swinging`
    (`wva_utilization_share_swinging == 1`) means the role reversed direction
    twice within the swing window and is planned on its mean need, not its
    current one, so it may look short and still not receive. `transfer-limit`
    means the group already runs two transfers with a donor; it clears as they
-   land. A model with a large imbalance shows it too when its burst is
-   expected to end before a transfer lands: its moves then keep the usual
-   pace.
+   land. `burst-ending` means the role is short with a hard imbalance, but
+   its model's burst is expected to end -- by the length of its last
+   completed burst -- before a transfer lands, so it receives a replica a
+   cycle at the usual pace instead of its whole shortfall at once.
+   `fast-swing-capped` means the role swings faster than a move while another
+   model bursts for longer than one: its headroom is capped on its mean need,
+   so it serves each crest from what it holds. Both are passing states; give
+   the model a floor if it must not lag.
 8. **Did the controller just restart?** After a restart -- and after the
    optimizer starts acting, or a group first appears -- every planned model of
    the group holds what it runs (or its restored target) for one fill timeout,

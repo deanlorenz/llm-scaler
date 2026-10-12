@@ -534,8 +534,14 @@ rounded up to whole replicas plus `maxHeadroomReplicas` (one by default) times
 its weight, rounded up -- or what the other models' recent peaks leave of the
 quota, if that is more; a model that has held more than that for
 `consecutiveCyclesBeforeMove` cycles starts giving the extra back to the quota
-while no other model is short of its need. The release still waits its
-scale-down window, and is called off if its demand comes back meanwhile. The
+while no other model is short of its need. A return gives back no more than
+today's optimizer would scale down: it stops where the model's demand sits a
+quarter of the way up from `scaleDownBoundary` to `scaleUpThreshold` (0.7375
+at the defaults), in whole replicas, and a return it holds back for that
+counts `wva_utilization_share_withheld_total{reason="scale-down-band"}`. GPUs
+moved to a model that is short are not held to that boundary. The release
+still waits its scale-down window, and is called off if its demand comes
+back meanwhile. The
 spare then sits unassigned, where the next model to spike takes it at once
 instead of waiting for a donor's pods to drain.
 
@@ -568,16 +574,24 @@ a cluster, and none of them is fixed by a setting other than a floor:
   faster than that gets its headroom on its average demand, not its current
   one, so it no longer takes the spare GPUs at each crest. That served the
   bursting model better (0.20 to 0.21 of its demand unserved in simulation,
-  against 0.33 to 0.35 before) and cost the noisy one 0.02 to 0.06 more of its
-  demand, still less than under earlier versions of the optimizer. If yours is
-  the noisy model and that cost matters, a floor is the protection.
+  against 0.33 to 0.35 before) and cost the noisy one 0.02 to 0.04 more of its
+  demand (up to 0.06 in other noisy shapes), still less than under earlier
+  versions of the optimizer. The noisy model shows the blocked reason
+  `fast-swing-capped` while this applies. If yours is the noisy model and
+  that cost matters, a floor is the protection.
 - **Whole-node models with bursts of 20 to 30 minutes.** A model of one 8-GPU
   pod per replica whose bursts last 20 to 30 minutes still does slightly worse
   than before a hard imbalance's moves stopped waiting for the pace (in a tight
   quota at 30 minutes, 0.232 of its demand unserved in simulation, against
-  0.225). Such moves now wait for the pace when the burst under way is
-  expected to end before they land, which recovered most of the cost
-  (0.247 before).
+  0.225). Such moves now wait for the pace when the model's last completed
+  burst says this one ends before they land, which recovered most of the
+  cost (0.247 before); the model shows `burst-ending` meanwhile.
+- **Whole-node moves take longer than the optimizer assumes.** A move's
+  latency is estimated as the donor's release, a fixed 5 minutes for the
+  receiver's start, and three cycles. A whole-node replica of a large model
+  can take about 10 minutes to start, so for such models a burst can look
+  longer than a move when it is not, and its moves skip the pace. Not yet
+  fixed.
 - **A dip in a slow-draining model's demand, right after the group starts.**
   At a group's first start, or after a restart with no usable stored history,
   no model's peak is known for about the first 12 minutes. A model holding
@@ -585,7 +599,7 @@ a cluster, and none of them is fixed by a setting other than a floor:
   about to come back. It gives them back after `consecutiveCyclesBeforeMove`
   cycles, and if its demand returns it cold-starts them again: in simulation a
   12-minute dip at a 10-minute scale-down window left 0.038 of its demand
-  unserved, against 0.001 when returns waited the scale-down window. Waiting
+  unserved, against 0.001 or less when returns waited the scale-down window. Waiting
   the window was tried and dropped: it holds the GPUs from a model about to
   burst (a model bursting beside a noisy, slow-draining one went from 0.305 to
   0.348 at a 5-minute window). Restored history avoids both. If a dip right

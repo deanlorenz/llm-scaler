@@ -110,24 +110,33 @@ is pure loss and headroom costs nothing extra.
   burst still lost: each replica it took waited about six minutes for the idle
   model's long requests to drain. Its response (the spare left unassigned,
   and the whole shortfall taken at once when the imbalance holds a second
-  cycle) is built but not yet measured, and
-  neither covers every case: a model whose burst of long outputs has
-  just ended still reads its draining backlog as need, so GPUs can even move
-  *to* it as the other model's burst begins. If you take the mode anyway, give
-  each such model a floor sized for its burst
+  cycle) is built but not yet measured, and neither covers every case: a
+  model whose burst of long outputs has just ended still reads its draining
+  backlog as need, so GPUs can even move *to* it as the other model's burst
+  begins. If you take the mode anyway, give each such model a floor sized for
+  its burst
   ([for model owners](../../reference/scaling-policy.md#for-model-owners-what-the-optimizer-may-take-and-how-to-protect-a-model)).
 - **A noisy model shares the quota with a bursting one.** While the other
   model bursts for longer than a transfer takes, the noisy model gets its
   headroom on its average demand rather than at each crest. In simulation the
   bursting model left 0.20 to 0.21 of its demand unserved, against 0.33 to
-  0.35 before, and the noisy one 0.02 to 0.06 more than before -- still less
-  than under earlier versions of the optimizer. If the noisy model cannot pay
-  that, give it a floor.
+  0.35 before, and the noisy one 0.02 to 0.04 more than before (up to 0.06 in
+  other noisy shapes) -- still less than under earlier versions of the
+  optimizer. The noisy model shows `fast-swing-capped` while it applies. If it
+  cannot pay that, give it a floor.
 - **Whole-node models burst for 20 to 30 minutes in a tight quota.** A large
-  imbalance's moves now keep the usual pace when the burst under way is
-  expected to end before they land. In simulation that recovered most of the
-  cost at 30 minutes (0.247 to 0.232 of demand unserved), still about 0.007
-  worse than before such moves stopped waiting for the pace.
+  imbalance's moves now keep the usual pace when the model's last completed
+  burst says this one ends before they land (`burst-ending`). In simulation
+  that recovered most of the cost at 30 minutes (0.247 to 0.232 of demand
+  unserved), still about 0.007 worse than before such moves stopped waiting
+  for the pace.
+- **A whole-node move takes longer than the optimizer assumes.** The
+  optimizer estimates a move's latency as the donor's release plus a fixed
+  5-minute allowance for the receiver's start and three cycles; a whole-node
+  replica of a large model can take about 10 minutes to start. Burst-length
+  judgements (`burst-ending`, `fast-swing-capped`) are made against the
+  shorter figure, so for such models a burst can look longer than a move
+  when it is not. This is open.
 - **A dip in a slow-draining model's demand, right after the group starts.**
   At a group's first start, or after a restart with no usable stored history,
   no model's peak is known for about the first 12 minutes. A model holding
@@ -135,11 +144,14 @@ is pure loss and headroom costs nothing extra.
   about to come back. It gives them back after `consecutiveCyclesBeforeMove`
   cycles, and if its demand returns it cold-starts them again: in simulation a
   12-minute dip at a 10-minute scale-down window left 0.038 of its demand
-  unserved, against 0.001 when returns waited the scale-down window. Waiting
-  the window was tried and dropped: it holds the GPUs from a model about to
-  burst (a model bursting beside a noisy, slow-draining one went from 0.305 to
-  0.348 at a 5-minute window). Restored history avoids both. If you take the mode anyway,
-  give such a model a floor sized for its dips.
+  unserved, against 0.001 or less when returns waited the scale-down window.
+  Waiting the window was tried and dropped: it holds the GPUs from a model
+  about to burst (a model bursting beside a noisy, slow-draining one went
+  from 0.305 to 0.348 at a 5-minute window). Restored history avoids both.
+  If you take the mode anyway, give such a model a floor sized for its dips.
+  A return gives back no more than today's optimizer would scale down: it
+  stops where the model's demand sits a quarter of the way up from
+  `scaleDownBoundary` to `scaleUpThreshold`.
 - **The real limit is not the scaling manager's quota.** A quota counts only
   what the scaling manager's own variants hold. If a Kubernetes `ResourceQuota`
   or unmanaged workloads on the same accelerators are what actually stops
@@ -393,7 +405,7 @@ When it evaluates but never moves anything, work down
     receivers and LWS groups on emulated GPUs only.
   - The headroom cap (`maxHeadroomReplicas`), spare returns, and the unpaced
     hard-imbalance move, which no cluster run has measured yet (simulated
-    only: [measured](measured.md#what-rounds-16-to-18-change-simulated-not-measured)). The cancel fix
+    only: [measured](measured.md#what-rounds-16-to-20-change-simulated-not-measured)). The cancel fix
     and the hard-imbalance rule were measured once, on the run before them.
   - A cluster quota group and the `clusterNamespaces` canary, which are
     unit-tested only. All three e2e specs use a namespace quota.
@@ -457,7 +469,7 @@ way ([measured](measured.md#rerun-with-the-hard-imbalance-rule-the-spare-was-par
   `maxHeadroomReplicas` (default 1) times the model's weight while the quota
   is contended, the rest left unassigned, and a hard imbalance that holds a second cycle taking the whole
   shortfall up to the receiver's need at once -- is built and not yet measured
-  on a cluster; a simulation is on the [measured](measured.md#what-rounds-16-to-18-change-simulated-not-measured)
+  on a cluster; a simulation is on the [measured](measured.md#what-rounds-16-to-20-change-simulated-not-measured)
   page.
 
 A P/D version was attempted and not measured. Prefill never left one replica
