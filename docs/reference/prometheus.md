@@ -846,8 +846,7 @@ outside both limits, so `in_flight{state="releasing"}` can read above `2`:
   current need and, for a model planned on its average because its demand
   swings, that average. The replica of headroom above its need is an ordinary,
   paced move.
-- **A spare return** (below). It never counts against the limit, even once
-  handed to a receiver.
+- **A spare return** (below). It never counts against the limit.
 
 A model that is still giving GPUs -- a transfer, a return or a refill still
 releasing -- is not raised, by a transfer or by a fill, until that release
@@ -888,16 +887,9 @@ scale-down window) -- it is short of its target again, or busier than
 `returnSpareWhenLoadAtMost` on what it keeps -- the return is called off and
 counted `outcome="cancelled"`. A return survives a controller restart: the mark
 on its pod records that it is a return, and a mark that claims a return with a
-receiver is rejected. If a model turns short while a return is still releasing,
-and the returned pod frees room the short model's pod fits (two 4-GPU pods do
-not make room for one 8-GPU pod), the return is handed to it: that model is
-raised once the replica is released, the return is called off only as a
-transfer would be, and the log says
-`Utilization share: returned spare handed to a receiver`. The returned pod's
-shape is recorded when the return starts; a return rebuilt from its mark after
-a restart has none, and is never handed over. A scale-from-zero wake that
-claims a handed-over return (`claims_total{outcome="redirected"}`) turns it
-into an ordinary release for the wake.
+receiver is rejected. A return is never handed to another model: if one turns
+short while a return is still releasing, the returned GPUs reach it through
+the idle fill once the replica is released.
 The controller logs `Utilization share: spare returned to the quota` (with
 `donor` and `gpus`) when it is released, and its `transfer started` line
 carries `returned` set to true.

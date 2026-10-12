@@ -930,8 +930,8 @@ When the group acts:
   the reversal hold nor the confirmation cycles: it starts on the first cycle,
   and the transfer is logged with `skippedWaits=true`. Everything else still
   applies: the cancelled pair's hold, an aborted donor's back-off, an
-  exhausted donor (`GivingBusy`), the admission test above, and the donor's
-  band and keep. The two thresholds are the rule's hysteresis: after the move
+  exhausted donor (`GivingBusy`), the admission test above (the donor's
+  target and keep). The two thresholds are the rule's hysteresis: after the move
   the donor is at or below 0.6 and the receiver below 0.9, so the reverse move
   cannot qualify until demand itself changes by their ratio, about 1.5x. Every
   short role is above 0.9, so in practice the donor's load decides. Both
@@ -978,8 +978,7 @@ When the group acts:
   sets (§6.5, a multi-pod or LeaderWorkerSet receiver) get the same treatment:
   no confirm cycle when hard, and set after set with no pace and no concurrency
   limit once the imbalance has held a second cycle. Every other bound still
-  applies: the targets, the keep, the donor's band, the admission test, the
-  pair hold, back-off and a busy donor (`GivingBusy`), and the ratio between
+  applies: the targets, the keep, the admission test, the pair hold, back-off and a busy donor (`GivingBusy`), and the ratio between
   the two loads still stops the reverse move.
 
   The second cycle is the guard against a bad reading. Unpaced on the first,
@@ -1028,7 +1027,7 @@ When the group acts:
   pass it without consulting it. Uncounted (before `19e7be3f`), ordinary
   headroom moves started beside a burst's, drained the same long-drain donor,
   and landed after the burst had ended (c16 40m: 0.147 -> 0.119). Only a
-  returned spare is not counted, handed to a receiver or not. The hard-imbalance
+  returned spare is not counted. The hard-imbalance
   test judges the receiver on `needView`, the higher of its reading and its
   planning need: on its mean, a swinging role at the crest of a burst never
   took the unpaced path. It judges the donor on `donorView`, the higher of that
@@ -1139,8 +1138,8 @@ When the group acts:
   (`ShareFillPace`); a receiver at or above its need is raised two replicas
   per cycle. GPUs a releasing transfer gives no receiver are not idle
   (`ShareLedger.Unreleased`): all of a reserve refill's or an unassigned
-  return's, and whatever a transfer, a set or a handed-over return takes
-  beyond its receiver's replica. The donor's pods still run on them and the
+  return's, and whatever a transfer or a set takes beyond its receiver's
+  replica. The donor's pods still run on them and the
   quota still counts them. Counted idle, the fill would raise a model into a
   full quota, its pods would be refused at admission, and it would be raised
   again at every fill timeout.
@@ -1171,7 +1170,18 @@ When the group acts:
   **transfer**: one receiver replica, funded by a **donor set** — one or more
   donor replicas, from one or more models, that open a hole for **each pod** of
   that replica, on a node that fits it whenever node information exists (§6.5).
-  **A transfer is admitted only if both hold:**
+  **A transfer from one donor is admitted only if** the receiver is below its
+  whole-replica target, and the donor is above its own and stays at or above
+  it after giving (`Ḡ'_d ≥ G*_d`), and at or above its keep.
+
+  This is the anti-oscillation rule: a move goes only from a role above its
+  target to one below its own and never takes the donor below its target, so a
+  receiver is never above its target while its donor is below, and the next
+  plan has no reason to move the replica back. The check is on what the donor
+  keeps: a donor replica larger than its target's step (an 8-GPU replica of a
+  role whose replicas are otherwise 4) would otherwise take it below.
+
+  A **donor set** (§6.5) is admitted only if both hold:
 
   ```text
   min(z over receiver and every donor, after) > min(z over the same roles, before)   the worst-off role improves
@@ -1179,16 +1189,12 @@ When the group acts:
   ```
 
   "In band" is the predicate of §6.1 step 3, with the same half-replica
-  tolerance, so an 8-GPU donor whose target sits between two sizes can still give.
-
-  The first condition is the anti-oscillation rule: every admitted move strictly
-  improves the worst-off role among those it touches, so no sequence of moves
-  returns to an earlier state. The second stops a move that fixes one band
-  violation by creating another, which is the residual churn the first
-  condition allows when one replica is a large fraction of a donor. The first is
-  judged in `z`; the second against the continuous target `Ĝ`, with the band's
-  own predicate. A transfer for an owed floor (§5.5 case 5) bypasses both, and
-  §6.7's holds; it may still never take a donor below its own floor.
+  tolerance. A single-donor move was once admitted on the same two tests; the
+  simplification after round 20 (§13) replaced them with the target check
+  above, since the switch-off study found the band never changed a move and
+  the `z` test near-neutral. A transfer for an owed floor (§5.5 case 5)
+  bypasses the admission, and §6.7's holds; it may still never take a donor
+  below its own floor.
 
   With demand held fixed, the first condition alone guarantees convergence: each
   admitted move makes the group's sorted list of `z` values strictly larger in
@@ -1311,34 +1317,18 @@ When the group acts:
   return with a receiver or a set is rejected, since the controller never
   writes that shape.
 
-  **A return still releasing is handed to a role that turns short**
-  (`fromReturns`, `ShareLedger.AssignReturn`): before donors are asked, a
-  receiver below its target takes returns still Releasing, one receiver
-  replica each, up to its target, but only a return whose pod frees a hole the
-  receiver's pod fits (`ShareCovers`: a 2x4 replica does not free a node for a
-  1x8 pod). The shape is the returned replica's own, recorded when the return
-  starts (`ShareTransfer.DonorPodGPUs`, from `shareReplicaPods`): the donor may
-  give from another variant by now, and the check once read the donor's
-  current give variant and was skipped when it had none. A return whose shape
-  is not known -- one rebuilt from its pod marks after a restart, which do not
-  carry it -- is not handed over at all. Its GPUs reach the receiver when they
-  come free. It stays
-  **Returned**, so it still does not count in `InFlight` (counted, six assigned
-  returns held every paced move in a group for a release); once handed over it
-  is cancelled only as a transfer would be, not as a return. A scale-from-zero
-  wake that claims a handed-over return (`Redirect`, §7.2) ends it as a
-  return: it becomes an ordinary release for the wake. Left Returned with no
-  receiver (a regression in `19e7be3f`), it could be handed to a second
-  receiver, or cancelled as a return, while the wake waited on it. `Unreleased`
-  counts what any releasing transfer takes beyond its receiver's replica (an
-  8-GPU return handed to a 4-GPU receiver), so the fill does not read those
-  GPUs as idle. The receiver
-  gets a `UtilizationShareReceiving` Event and the log line
-  `Utilization share: returned spare handed to a receiver`. Before, the
-  receiver waited on the same release with no transfer of its own and no reason
-  shown. A receiver whose replica spans several pods is left to a donor set,
-  which places each pod -- unless returns still Releasing and handed to no
-  receiver will free at least one replica of it (`returnsCover`): those land
+  **A return is always a return.** It is never handed to a role that turns
+  short while it releases: its GPUs land in the unassigned GPUs, and the idle
+  fill raises whoever needs them. Rounds 15 to 19 handed a return still
+  Releasing to a short receiver (`fromReturns`); the switch-off study after
+  round 20 found the fill places those GPUs anyway (4 rows worse, 2 better,
+  worst +0.015), and the hand-over was removed with the state it added -- a
+  return with a receiver, cancelled as a transfer, redirectable by a wake. The
+  returned replica's pod shape is still recorded when the return starts
+  (`ShareTransfer.DonorPodGPUs`, from `shareReplicaPods`), for
+  `returnsCover` below. A receiver whose replica spans several pods is left to
+  a donor set, which places each pod -- unless returns still Releasing will
+  free at least one replica of it (`returnsCover`): those land
   in the unassigned GPUs, where the idle fill places its pods, so a set would
   drain a donor for GPUs already on their way. The receiver then waits,
   counted `awaiting-return`.
@@ -2278,9 +2268,7 @@ the role from `_headroom` and `_actionable`.
 Transfers are also recorded as Kubernetes Events on the donor's and the
 receiver's scale targets (`internal/engines/steadystate/utilization_share_events.go`),
 for the model owner who reads `kubectl describe`, not the controller's log:
-`UtilizationShareGiving` and `UtilizationShareReceiving` at start (and
-`UtilizationShareReceiving` when a role is handed a return still releasing,
-naming the model giving it back),
+`UtilizationShareGiving` and `UtilizationShareReceiving` at start,
 `UtilizationShareReceived` when a transfer lands (an idle fill's says it came
 from the quota group's unassigned GPUs, and whether because its demand rose
 past what it held or as headroom that is given back when the model no longer
@@ -3006,7 +2994,20 @@ optimizer every cycle (§6.6).
    boundary of the current fleet -- as need, so each idle fill raised the
    next (A 1 -> 5 replicas with no load, the cap on). A held role is now
    sized on its demand before the hold (`AnalyzerResult.HeldRoleDemand`)
-   and gives nothing while it lasts.
+   and gives nothing while it lasts. The simplification after the merge: a
+   switch-off study turned 25 rules off one at a time and reran the three
+   simulators, and three that changed no row, or almost none, were dropped
+   for the base behavior -- a single-donor move's continuous-band check and
+   its `z` test, replaced by the donor's whole-replica target (§6.2; the band
+   check never changed a move, since a donor already stops at its target), and
+   the hand-over of a return still releasing to a short receiver
+   (`fromReturns`), whose GPUs the idle fill places anyway, so a return is
+   always a return. Sims against round 20: 9 rows worse and 13 better by more
+   than 0.005 (41 osc / 160 whole-node / 42 owner rows), the worst +0.034
+   (owner O4, model B), the best -0.038 (owner N3, model B), whole-node total
+   21.682 -> 21.712. Rules the simulators cannot see stay: the return's
+   scale-down band, `awaiting-return`, the keep, and a joining model's claim,
+   whose test now fails without it.
 3. **Short window for urgent transfers**, through `wvaOwnership`, once
    managed-keda-behavior lands (§6.4), gated on a persistent hard imbalance,
    not on the load limits alone (§15).

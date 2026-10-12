@@ -801,9 +801,7 @@ until an admin re-runs `make setup-prereqs` for the namespace. Deleting the
 ConfigMap flushes the history, in the running controller as well; editing a
 key by hand does not, since the next write replaces it. Size bounds, the log
 lines and uninstall: see
-[troubleshooting](troubleshooting.md#utilization-share-optimizer). A return rebuilt from its marks no longer
-knows its pod shape, so it is not handed to a short model; it goes to the
-unassigned GPUs.
+[troubleshooting](troubleshooting.md#utilization-share-optimizer).
 
 **Caveats for operators.**
 
