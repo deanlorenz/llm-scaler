@@ -62,8 +62,11 @@ func parseScalingPolicyConfigRejects(cmData map[string]string, logger logr.Logge
 			rejected[key] = err
 			continue
 		}
-		// Apply defaults before validation (handles omitempty zero-values like scaleUpThreshold)
-		satConfig.ApplyDefaults()
+		// Apply defaults before validation (handles omitempty zero-values like
+		// scaleUpThreshold). Entry defaults only: priority and the capacity
+		// thresholds stay zero ("unset") so tiers and overrides inherit them in
+		// the merge; the resolved policy is fully defaulted after it.
+		satConfig.ApplyEntryDefaults()
 		if err := satConfig.Validate(); err != nil {
 			errorType := "Invalid saturation scaling config entry"
 			logger.Error(err, errorType, "key", key)

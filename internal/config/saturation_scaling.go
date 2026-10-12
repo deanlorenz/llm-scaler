@@ -489,6 +489,20 @@ func (c *ScalingPolicy) ApplyDefaults() {
 	if c.QueueLengthThreshold == 0 {
 		c.QueueLengthThreshold = DefaultQueueLengthThreshold
 	}
+	c.ApplyEntryDefaults()
+}
+
+// ApplyEntryDefaults is ApplyDefaults for one STORED ConfigMap entry, before it
+// is merged with anything: it fills only what an entry needs to validate (the
+// band and analyzer list of a V2-shaped entry) and leaves priority and the
+// capacity thresholds at zero when the entry does not set them.
+//
+// Zero is "unset" to Merge. Defaulting those three on every entry made each one
+// look set, so a tier or a per-model override that never mentioned
+// kvCacheThreshold silently replaced the default entry's tuned value with
+// 0.80. The resolved policy gets them from ApplyDefaults after the merge
+// (ResolveScalingPolicyForTier).
+func (c *ScalingPolicy) ApplyEntryDefaults() {
 	if c.IsV2() {
 		if c.ScaleUpThreshold == 0 {
 			c.ScaleUpThreshold = DefaultScaleUpThreshold
