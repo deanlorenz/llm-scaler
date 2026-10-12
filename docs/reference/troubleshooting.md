@@ -218,7 +218,9 @@ Work down the list in order.
    twice within the swing window and is planned on its mean need, not its
    current one, so it may look short and still not receive. `transfer-limit`
    means the group already runs two transfers with a donor; it clears as they
-   land.
+   land. A model with a large imbalance shows it too when its burst is
+   expected to end before a transfer lands: its moves then keep the usual
+   pace.
 8. **Did the controller just restart?** After a restart -- and after the
    optimizer starts acting, or a group first appears -- every planned model of
    the group holds what it runs (or its restored target) for one fill timeout,

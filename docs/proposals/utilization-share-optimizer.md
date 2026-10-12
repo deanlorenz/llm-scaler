@@ -428,6 +428,22 @@ role in its trough would be held below the mean it is planned on; capped on
 the mean, one at its crest would be held below its reading, beside GPUs only
 it could use.
 
+The exception is a role whose need swings faster than a move can follow
+while another role bursts for longer than one (`fastSwingers`:
+`ShareLedger.SwingsFast` -- at least two completed bursts, none lasting
+`ShareTimings.MoveLatency`, over at least `ShareFastSwingSpread` = 0.25 of its
+highest need -- beside a role that `BurstsLong`, a burst lasting a move over at
+least `ShareLongBurstSpread` = 0.5 of its highest need). It is capped on its
+mean need (`MeanNeed`). Capped on its reading it took the idle GPUs at each
+crest; they started serving as the crest ended, and parked on a donor that is
+never calm, they were what the long burst then waited a release for. In the
+round-17 owner simulator, a model bursting 20 minutes an hour beside one
+swinging every 3 minutes left 0.33 to 0.35 of its demand unserved, against 0.20
+to 0.21 with the swinger capped on its mean, which cost the swinger 0.02 to
+0.06 (still below its `e55b02b2` figure). Without a long burster nothing waits
+on the swinger's GPUs, and a model re-bursting every 12 minutes beside a steady
+one lost up to 0.03 more capped on its mean, so the exception needs one.
+
 A role is never capped below what the other roles' peak claims leave of the
 budget, in whole replicas, nor above its own ceiling (`shareRoomForOthers`):
 
@@ -968,6 +984,22 @@ When the group acts:
   that could not be undone. Paced on the first cycle, a single reading moves at
   most two replicas, which the next cycle cancels while they are free.
 
+  **Nor when the burst ends first.** The second cycle frees a hard imbalance
+  from the pace only while its burst is not expected to end before a move
+  lands (`ShareLedger.Unpaced`: `!BurstEndsWithin(role, unpacedHorizon)`). The
+  horizon is 1.25 times the move latency -- the time a move takes to land and
+  a quarter of it again to serve in. A burst is expected to end when the
+  role's longest completed burst, less how long the one under way has lasted,
+  is under the horizon; a role with no completed burst keeps the unpaced path.
+  Traced in the whole-node simulator, a 15-minute burst was seen about 30 s
+  in, and a move took about 14 minutes to land: taken all at once, the moves
+  served the burst a minute or two and left the donor short through its own
+  next burst. Paced, tight 1x8 at 30 minutes went 0.247 -> 0.232 (0.225 for
+  `e55b02b2`; switching the unpaced rule off entirely reached 0.223 but cost
+  the 40- and 60-minute rows 0.010 and square2 at 45 minutes 0.019). The
+  `transfer-limit` blocked reason reads the same rule, so a short-burst
+  receiver held to the pace reports it.
+
   Moves that skipped the waits count against the concurrency limit
   (`InFlight`); the unpaced moves of a hard imbalance from its second cycle
   pass it without consulting it. Uncounted (before `19e7be3f`), ordinary
@@ -1176,6 +1208,17 @@ When the group acts:
     also waited that window before it started (`MarkOver` against
     `ShareTimings.Window`), so a return took two windows where a scale-down
     takes one, and a burst on another model found the spare still parked.
+    The cost is at a group's first start, or a restart with no usable
+    stored history: for the first swing window (about 12 minutes) every
+    unknown peak counts at its ceiling, and a role holding replicas it does
+    not yet need cannot be told from one whose demand will come back. Holding
+    them helps a role in a dip (a long-drain model's 12-minute dip at a
+    10-minute window: 0.001 -> 0.038 since returns start after the confirm
+    cycles); giving them back helps another role about to burst. Waiting the
+    window while the contention is only assumed was tried in round 19 and
+    dropped: it cost a burster beside a noisy long-drain model 0.305 -> 0.348
+    at a 5-minute window. Restored history avoids both. Simulated, not
+    measured.
     Without any wait, returns churned a pod a minute near replica boundaries:
     in review simulations, 175 return-then-refill pairs in 30 hours, and 96
     whole-node cold starts in 8 hours; the calm rule and the cancel (below)
@@ -2867,10 +2910,19 @@ optimizer every cycle (§6.6).
    donor sets; `awaiting-return` credits only returns whose pods fit, in whole
    replicas, funds the rest, and shows `awaiting-release` on the model; and
    the need-history store keeps the two-reading rule across a restart, writes
-   once per cycle, and is optional at install. Still open: a
-   tight 1x8 quota at 20 and 30 minutes (+0.02; deferred: unpaced moves land
-   after a short burst ends), and square2 at 30 minutes (0.320 -> 0.332). The
-   cluster rerun is pending, on `6abc491d` or later.
+   once per cycle, and is optional at install. Round 19, the
+   known costs of round 18: a hard imbalance stays paced when its burst ends
+   before a move lands (the unpaced landing; tight 1x8 at 30 minutes 0.247 ->
+   0.232), and a fast swinger beside a long burster is capped on its mean
+   (the burster 0.33-0.35 -> 0.20-0.21, the swinger +0.02 to +0.06). A
+   startup rule -- returns waiting the scale-down window while contention is
+   only assumed -- was tried and dropped: it fixed a long-drain model's dip
+   with no history (0.038 -> 0.000) but cost a burster beside a noisy
+   long-drain model 0.305 -> 0.348 at a 5-minute window, and the cluster
+   scenario's 60-minute bursts 0.190 -> 0.200. Still open: that dip cost,
+   tight 1x8 at 30 minutes 0.007 behind `e55b02b2`, and square2 at 30
+   minutes, which barely moved (0.334 -> 0.331). The cluster rerun is
+   pending, on round 19 or later.
 3. **Short window for urgent transfers**, through `wvaOwnership`, once
    managed-keda-behavior lands (§6.4), gated on a persistent hard imbalance,
    not on the load limits alone (§15).
@@ -2899,10 +2951,11 @@ optimizer every cycle (§6.6).
   while spread, ordinary headroom moves drained a slow donor below its own
   recent peak for a receiver already at its need, landing after the
   receiver's burst and just before the donor's own. Withholding them
-  (`donor-peak`, §6.2) took it to 0.045, below `e55b02b2`'s 0.076. Still
-  open: whole-node 1x8 models in a tight quota with 20-30 minute bursts do
-  about 0.02 worse than before the unpaced hard-imbalance rule, because
-  unpaced moves land after a short burst ends; deferred, not fixed.
+  (`donor-peak`, §6.2) took it to 0.045, below `e55b02b2`'s 0.076.
+  Whole-node 1x8 models in a tight quota with 20-30 minute bursts did about
+  0.02 worse than before the unpaced hard-imbalance rule, because unpaced
+  moves landed after a short burst ended; keeping such a burst's moves at the
+  pace (§6.2) recovered most of it, and 0.007 at 30 minutes is still open.
 - **Reserve default.** `0` keeps "all GPUs" literal; one replica keeps
   scale-from-zero fast. Recommended: `0`, with a WARN when a group contains a
   scale-to-zero model and no reserve.

@@ -116,16 +116,30 @@ is pure loss and headroom costs nothing extra.
   *to* it as the other model's burst begins. If you take the mode anyway, give
   each such model a floor sized for its burst
   ([for model owners](../../reference/scaling-policy.md#for-model-owners-what-the-optimizer-may-take-and-how-to-protect-a-model)).
-- **A bursting model shares the quota with a noisy one.** In simulation, a
-  model whose demand bursts beside a model whose demand swings loses 0.10 to
-  0.14 more of its demand than under earlier versions of the optimizer, while
-  the noisy model does much better. If you take the mode anyway, give the
-  bursting model a floor sized for its burst.
-- **Whole-node models burst for 20 to 30 minutes in a tight quota.** In
-  simulation, models of one 8-GPU pod per replica with bursts that short do
-  slightly worse (about 0.02 more of their demand unserved) than before a hard
-  imbalance's moves stopped waiting for the pace: those moves land after a
-  short burst has ended. This is deferred, not fixed.
+- **A noisy model shares the quota with a bursting one.** While the other
+  model bursts for longer than a transfer takes, the noisy model gets its
+  headroom on its average demand rather than at each crest. In simulation the
+  bursting model left 0.20 to 0.21 of its demand unserved, against 0.33 to
+  0.35 before, and the noisy one 0.02 to 0.06 more than before -- still less
+  than under earlier versions of the optimizer. If the noisy model cannot pay
+  that, give it a floor.
+- **Whole-node models burst for 20 to 30 minutes in a tight quota.** A large
+  imbalance's moves now keep the usual pace when the burst under way is
+  expected to end before they land. In simulation that recovered most of the
+  cost at 30 minutes (0.247 to 0.232 of demand unserved), still about 0.007
+  worse than before such moves stopped waiting for the pace.
+- **A dip in a slow-draining model's demand, right after the group starts.**
+  At a group's first start, or after a restart with no usable stored history,
+  no model's peak is known for about the first 12 minutes. A model holding
+  replicas it does not need yet then looks the same as one whose demand is
+  about to come back. It gives them back after `consecutiveCyclesBeforeMove`
+  cycles, and if its demand returns it cold-starts them again: in simulation a
+  12-minute dip at a 10-minute scale-down window left 0.038 of its demand
+  unserved, against 0.001 when returns waited the scale-down window. Waiting
+  the window was tried and dropped: it holds the GPUs from a model about to
+  burst (a model bursting beside a noisy, slow-draining one went from 0.305 to
+  0.348 at a 5-minute window). Restored history avoids both. If you take the mode anyway,
+  give such a model a floor sized for its dips.
 - **The real limit is not the scaling manager's quota.** A quota counts only
   what the scaling manager's own variants hold. If a Kubernetes `ResourceQuota`
   or unmanaged workloads on the same accelerators are what actually stops
@@ -301,8 +315,7 @@ When it evaluates but never moves anything, work down
   whole spare spread: 24% and 66% more GPU-seconds than today's optimizer.
 - **A model above its need plus its headroom shrinks with no other model
   growing.** Only while the quota is contended: after
-  `consecutiveCyclesBeforeMove` cycles above it, it starts giving all the
-  extra back to the quota in one cycle, while no model that can grow is short
+  `consecutiveCyclesBeforeMove` cycles above it, it starts giving all the extra back to the quota in one cycle, while no model that can grow is short
   of its need and only while its load would stay at or below
   `stabilization.returnSpareWhenLoadAtMost`. The replica goes after the
   model's scale-down window, and stays if its demand comes back before then
