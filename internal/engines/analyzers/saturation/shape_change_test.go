@@ -143,17 +143,19 @@ var _ = Describe("the fleet-shape change, through Analyze", func() {
 		Expect(out.RoleStartSeconds).To(HaveKeyWithValue(domain.RolePrefill, BeNumerically("==", 90)))
 	})
 
-	It("reports each role's busiest queue with its result", func() {
-		// A prefill pod with 3 requests waiting: the result carries it, so
-		// the share planner holds a give-back while one pod is queued
-		// (AnalyzerResult.RoleBusiestQueueLoad).
-		d := makeReplicaMetrics("d0", decodeV, 400_000, kvCap, 0, 1000, 6000)
+	It("reports each variant's busiest queue with its result", func() {
+		// A decode pod with its KV full and 3 requests waiting, and a prefill
+		// pod with 4: the result carries decode's 3 of the queue threshold
+		// (5), so the share planner holds a give-back while one pod is
+		// queued, and leaves prefill out (AnalyzerResult.VariantBusiestQueueLoad).
+		d := makeReplicaMetrics("d0", decodeV, kvCap, kvCap, 3, 1000, 6000)
 		d.Ready = true
-		p := makeReplicaMetrics("p0", prefillV, 8_065, 1_149_312, 3, 1000, 1)
+		p := makeReplicaMetrics("p0", prefillV, 8_065, 1_149_312, 4, 1000, 1)
 		p.Ready = true
 		out, err := analyzer.Analyze(ctx, makeAnalyzerInput([]domain.ReplicaMetrics{d, p}, states(1)))
 		Expect(err).NotTo(HaveOccurred())
-		Expect(out.RoleBusiestQueueLoad).To(HaveKeyWithValue(domain.RolePrefill, BeNumerically(">", 0)))
+		Expect(out.VariantBusiestQueueLoad).To(HaveKeyWithValue(decodeV, BeNumerically("==", 3.0/5)))
+		Expect(out.VariantBusiestQueueLoad).NotTo(HaveKey(prefillV))
 	})
 
 	It("does not release the fleet on the shape it has just left", func() {

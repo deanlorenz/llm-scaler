@@ -337,8 +337,10 @@ When it evaluates but never moves anything, work down
   growing.** Only while the quota is contended: after
   `consecutiveCyclesBeforeMove` cycles above it, it starts giving all the extra back to the quota in one cycle, while no model that can grow is short
   of its need and only while its load would stay at or below
-  `stabilization.returnSpareWhenLoadAtMost` and none of its pods is queued
-  above that fraction of `queueLengthThreshold`. The replica goes after the
+  `stabilization.returnSpareWhenLoadAtMost`. While more than 0.6 x
+  `queueLengthThreshold` requests (3 by default) are waiting on one of its
+  pods -- a P/D decode pod only while its KV cache is full, prefill pods not
+  at all -- the return waits for at most its scale-down window. The replica goes after the
   model's scale-down window, and stays if its demand comes back before then
   ([troubleshooting](../../reference/troubleshooting.md#a-model-shrinks-while-no-other-model-grows)).
   Each return drains a pod; if its demand comes back after the drain, it

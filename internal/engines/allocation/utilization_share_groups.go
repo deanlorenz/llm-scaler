@@ -103,9 +103,10 @@ type ShareGroup struct {
 	// replica of its slowest measured variant takes to become Ready
 	// (domain.AnalyzerResult.RoleStartSeconds); a role not measured is absent.
 	StartSeconds map[string]float64
-	// BusiestQueueLoad is, for each role with a replica reading, its deepest
-	// per-pod waiting queue as a fraction of the saturation queue
-	// (domain.AnalyzerResult.RoleBusiestQueueLoad).
+	// BusiestQueueLoad is, for each role with a reading above zero, the
+	// deepest per-pod waiting queue over its variants on this group's
+	// accelerator, as a fraction of the saturation queue
+	// (domain.AnalyzerResult.VariantBusiestQueueLoad).
 	BusiestQueueLoad map[string]float64
 	Origins          map[string]ShareRoleOrigin
 	// Frozen lists the models of this group that were not planned this cycle,
@@ -293,8 +294,9 @@ type shareRoleInput struct {
 	// startSeconds is the role's measured replica start, 0 when not measured
 	// (domain.AnalyzerResult.RoleStartSeconds).
 	startSeconds float64
-	// busiestQueueLoad is the role's deepest per-pod queue as a fraction of
-	// the saturation queue (domain.AnalyzerResult.RoleBusiestQueueLoad).
+	// busiestQueueLoad is the deepest per-pod queue over the role's variants
+	// on the group's accelerator, as a fraction of the saturation queue
+	// (domain.AnalyzerResult.VariantBusiestQueueLoad).
 	busiestQueueLoad float64
 }
 
@@ -341,6 +343,10 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 			}
 		}
 		vs := variantsForRole(variantsOnType(records, acc), role)
+		busy := 0.0
+		for _, v := range vs {
+			busy = max(busy, sig.Result.VariantBusiestQueueLoad[v.VariantName])
+		}
 		best, g, measured := bestVariantForRole(records, stateMap, acc, role)
 		need := 0.0
 		if demand > 0 {
@@ -388,7 +394,7 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 			role:             role,
 			held:             held,
 			startSeconds:     sig.Result.RoleStartSeconds[role],
-			busiestQueueLoad: sig.Result.RoleBusiestQueueLoad[role],
+			busiestQueueLoad: busy,
 		})
 	}
 	return out, ""

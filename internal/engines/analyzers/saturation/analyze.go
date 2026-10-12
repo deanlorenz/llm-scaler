@@ -65,7 +65,7 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 		RoleDemand:        d.roleDemand,
 		HeldRoleDemand:    held,
 		RoleStartSeconds:  a.slowestStartSecondsByRole(input, roleOf),
-		RoleBusiestQueueLoad: busiestQueueLoadByRole(input.ReplicaMetrics, c.rolesByVariant,
+		VariantBusiestQueueLoad: busiestQueueLoadByVariant(input.ReplicaMetrics, c.rolesByVariant,
 			satConfig.QueueLengthThreshold, satConfig.KvCacheThreshold),
 	}, nil
 }

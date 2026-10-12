@@ -1,47 +1,87 @@
 package saturation
 
 import (
+	"math"
 	"testing"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 )
 
-// A role's busiest queue is its deepest per-pod waiting queue against the
+// A variant's busiest queue is its deepest per-pod waiting queue against the
 // saturation queue: one pod queued deep among idle siblings reads busy,
-// however calm the fleet. On a P/D decode a queue counts only while the pod's
-// KV is full, since requests waiting for their remote KV sit in the same
-// count; prefill's counts as it is.
-func TestBusiestQueueLoadByRole(t *testing.T) {
+// however calm the fleet.
+func TestBusiestQueueLoadByVariant(t *testing.T) {
 	agg := map[string]string{"v": ""}
 	rows := []domain.ReplicaMetrics{
-		{PodName: "a", VariantName: "v", QueueLength: 0},
-		{PodName: "b", VariantName: "v", QueueLength: 235},
-		{PodName: "c", VariantName: "v", QueueLength: 1},
+		{PodName: "a", VariantName: "v", QueueLength: 0, Ready: true},
+		{PodName: "b", VariantName: "v", QueueLength: 235, Ready: true},
+		{PodName: "c", VariantName: "v", QueueLength: 1, Ready: true},
+		// Not Ready: not routed to, so its queue is not routing.
+		{PodName: "d", VariantName: "v", QueueLength: 900},
+		// No role known for the variant.
+		{PodName: "e", VariantName: "stray", QueueLength: 900, Ready: true},
 	}
-	if got := busiestQueueLoadByRole(rows, agg, 5, 0.8)[domain.RoleBoth]; got != 47 {
-		t.Errorf("busiest load %v, want 235/5 = 47 from the one deep pod", got)
+	got := busiestQueueLoadByVariant(rows, agg, 5, 0.8)
+	if got["v"] != 47 {
+		t.Errorf("busiest load %v, want 235/5 = 47 from the one deep Ready pod", got["v"])
 	}
-	if got := busiestQueueLoadByRole(rows, agg, 0, 0.8); got != nil {
-		t.Errorf("with no saturation queue it reported %v", got)
+	if _, ok := got["stray"]; ok {
+		t.Errorf("a variant with no known role was reported: %v", got)
 	}
+	for _, q := range []float64{0, -5, math.NaN()} {
+		if got := busiestQueueLoadByVariant(rows, agg, q, 0.8); got != nil {
+			t.Errorf("with a queue threshold of %v it reported %v", q, got)
+		}
+	}
+}
 
+// Prefill is left out: its queue is decode's back-pressure or the router's
+// choice, which a replica kept does not relieve. A P/D decode's queue counts
+// only while its KV is full and within its ceiling, since requests waiting
+// for their remote KV sit in the same count; below that it reads zero.
+func TestBusiestQueueLoadPrefillAndDecode(t *testing.T) {
 	pd := map[string]string{"d": domain.RoleDecode, "p": domain.RolePrefill}
-	rows = []domain.ReplicaMetrics{
-		// Decode, queued while its KV is half full: requests waiting for
-		// their remote KV, not a busy pod.
-		{PodName: "d1", VariantName: "d", QueueLength: 20, TokensInUse: 500, TotalKvCapacityTokens: 1000},
-		{PodName: "p1", VariantName: "p", QueueLength: 4},
+	decode := func(tokens, capacity int64) domain.ReplicaMetrics {
+		return domain.ReplicaMetrics{PodName: "d1", VariantName: "d", QueueLength: 20, Ready: true,
+			TokensInUse: tokens, TotalKvCapacityTokens: capacity}
 	}
-	got := busiestQueueLoadByRole(rows, pd, 5, 0.8)
-	if got[domain.RoleDecode] != 0 {
-		t.Errorf("a P/D decode queued with its KV half full reads %v busy, want 0", got[domain.RoleDecode])
+	prefill := domain.ReplicaMetrics{PodName: "p1", VariantName: "p", QueueLength: 439, Ready: true}
+	for _, c := range []struct {
+		name     string
+		rm       domain.ReplicaMetrics
+		kvThresh float64
+		want     float64
+	}{
+		{"KV half full", decode(500, 1000), 0.8, 0},
+		{"KV full", decode(900, 1000), 0.8, 4},
+		{"no cache size", decode(900, 0), 0.8, 0},
+		{"KV above the physical ceiling (a scrape artifact)", decode(1200, 1000), 0.8, 0},
+		{"kvCacheThreshold 0: any KV in use is full, as roleSaturated has it", decode(1, 1000), 0, 4},
+		{"kvCacheThreshold 0 with no KV in use", decode(0, 1000), 0, 0},
+	} {
+		got := busiestQueueLoadByVariant([]domain.ReplicaMetrics{c.rm, prefill}, pd, 5, c.kvThresh)
+		if got["d"] != c.want {
+			t.Errorf("decode, %s: %v, want %v", c.name, got["d"], c.want)
+		}
+		if _, ok := got["p"]; ok {
+			t.Errorf("decode, %s: prefill was reported (%v); its queue is not one a kept replica relieves", c.name, got["p"])
+		}
 	}
-	if got[domain.RolePrefill] != 0.8 {
-		t.Errorf("prefill reads %v, want 4/5", got[domain.RolePrefill])
+}
+
+// roleSaturated keeps its rule now that the KV half is shared (kvFull).
+func TestRoleSaturatedSharesKvFull(t *testing.T) {
+	roles := map[string]string{"d": domain.RoleDecode}
+	row := domain.ReplicaMetrics{VariantName: "d", QueueLength: 5, TokensInUse: 900, TotalKvCapacityTokens: 1000}
+	if !roleSaturated([]domain.ReplicaMetrics{row}, roles, domain.RoleDecode, 5, 0.8) {
+		t.Error("a decode queued at the threshold with its KV full is not saturated")
 	}
-	// Control: the same decode with its KV full is busy.
-	rows[0].TokensInUse = 900
-	if got := busiestQueueLoadByRole(rows, pd, 5, 0.8)[domain.RoleDecode]; got != 4 {
-		t.Errorf("a P/D decode queued with its KV full reads %v, want 20/5", got)
+	row.QueueLength = 4
+	if roleSaturated([]domain.ReplicaMetrics{row}, roles, domain.RoleDecode, 5, 0.8) {
+		t.Error("a decode queued below the threshold is saturated")
+	}
+	row.QueueLength, row.TokensInUse = 5, 0
+	if roleSaturated([]domain.ReplicaMetrics{row}, roles, domain.RoleDecode, 5, 0) {
+		t.Error("a decode with no KV in use is saturated at a kvCacheThreshold of 0")
 	}
 }
