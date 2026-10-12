@@ -25,7 +25,9 @@ func (a *SaturationAnalyzer) aggregateByVariant(
 	variantStates []domain.VariantReplicaState,
 	modelID, namespace string,
 	kvCacheThreshold float64,
-	// reuseDisabled is config.ScalingPolicy.DisableLearnedStateReuse, passed
+	// reuseDisabled is the NEGATION of config.ScalingPolicy.EnableLearnedStateReuse
+	// -- the parameter keeps the disabled sense because that is the branch it
+	// guards -- passed
 	// as the resolved value the way kvCacheThreshold is rather than as the
 	// policy, so this function keeps taking only what it reads.
 	reuseDisabled bool,

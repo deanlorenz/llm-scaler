@@ -310,13 +310,14 @@ decode's figure down to the built-in fallback, and under-pricing a queue is the
 failure the key exists to fix. Writing it on one variant and leaving it off the
 others is the simplest way to get this right.
 
-### `disableLearnedStateReuse`
+### `enableLearnedStateReuse`
 
-Makes every variant learn from its own readings alone. Off by default.
+Lets a variant be priced from a sibling's measurement instead of only its own.
+**Off by default** — see [Why it is off](#why-it-is-off) before turning it on.
 
 ```yaml
 default:
-  disableLearnedStateReuse: true
+  enableLearnedStateReuse: true
 ```
 
 It resolves through the normal per-entry overlay, so it can also be set on a
@@ -328,7 +329,7 @@ itself is arbitrary:
 llama-8b-prod:
   model_id: meta-llama/Llama-3.1-8B
   namespace: prod
-  disableLearnedStateReuse: true
+  enableLearnedStateReuse: true
 ```
 
 Both `model_id` and `namespace` are load-bearing: an entry missing either one
@@ -339,71 +340,91 @@ instead, under its own key. See
 
 The granularity is `(model_id, namespace)`, not a single variant. On a P/D model
 decode and prefill are two variants of one model and resolve the same answer,
-so this cannot quarantine one of them.
+so this cannot enable reuse for one of them alone.
 
-One direction only: an entry can turn reuse **off** where the default leaves it
-on, but cannot turn it back **on** where the default turned it off. Check the
-`Effective scaling policy` log line for `disableLearnedStateReuse` to confirm
-what a model actually resolved to.
+One direction only: an entry can turn reuse **on** where the default leaves it
+off, but cannot turn it back **off** where a `default:` entry turned it on —
+to do that, change the `default:` entry. Check the `Effective scaling policy`
+log line for `enableLearnedStateReuse` to confirm what a model resolved to; a
+typo in the key name is silently nothing, which now means "still off".
 
-Normally a variant with nothing measured yet is priced from a sibling that
-runs the **same engine configuration** on the same accelerator and GPU count.
-That is what lets a scaled-out variant price its first decision from something
-other than a guess, and it happens two ways:
+#### What it turns on
+
+A variant with nothing measured yet is priced from a sibling that runs the
+**same engine configuration** on the same accelerator and GPU count, so that a
+scaled-out variant can price its first decision from something other than a
+guess. That happens two ways, and this key governs **both**:
 
 | path | what is reused |
 | --- | --- |
 | the shared ITL line | the inter-token-latency model `ITL(k) = A·k + B` another variant fitted, used to derive this one's service rate |
 | the cross-variant capacity figure | another variant's measured per-replica capacity, as the estimate for a variant with no record of its own |
 
-Setting this key stops **both**. The variant keeps learning; it just no longer
-starts from anyone else's measurement. Nothing already stored is cleared.
+It does not control learning. A variant learns from its own readings either
+way, and nothing already stored is cleared when the key changes.
 
-It does **not** remove any capacity *ceiling*. A sibling's figure is also used
-in one place as an upper bound on an estimate, and that stays — a bound only
-ever lowers a capacity, and lowering capacity orders *more* replicas, which is
-the safe direction. The switch withholds a sibling's figure where it would
-*become* this variant's answer, never where it only limits it.
+It also has no effect on any capacity *ceiling*. A sibling's figure is used in
+one further place as an upper bound on an estimate, and that bound applies
+whatever this key says — a bound only ever lowers a capacity, and lowering
+capacity orders *more* replicas, which is the safe direction. The key governs
+where a sibling's figure would *become* this variant's answer, never where it
+only limits it.
 
-**When to set it.** Reuse rests on a fingerprint over the engine flags the
-scaling manager could read from the deployment. A configuration it reads
-*wrong* rather than not at all still produces a confident fingerprint — SGLang
-flags parsed as vLLM read as a complete set of vLLM defaults, and would share
-state with every other default configuration of that model. If a variant is
-being priced from a sibling that is not really like it, this is the switch that
-stops it.
+#### Why it is off
 
-A variant whose flags the manager could not read is excluded from **one** of
-the two paths, not both, and the difference decides whether this key helps:
+Reuse rests on an equality: two variants share only if a digest over the engine
+flags the scaling manager could read from their deployments matches. **That
+equality is not sound.** Five rounds of adversarial review found seven measured
+ways to produce a false match or to destroy a true one, and two attempts to
+close them inside the flag parser were reverted for costing more than they
+bought — one of them denied sharing to ordinary deployments because a shell
+preamble contained `grep -q`, while `-qfp8` still hashed as no flag at all.
 
-- the **shared ITL line** is refused outright. An incomplete read produces no
-  sharing key at all, so nothing can be borrowed and nothing lent.
+The sharpest case is that a configuration the manager reads *wrong* rather than
+not at all still produces a confident digest: SGLang flags parsed as vLLM read
+as a complete set of vLLM defaults, and would match every other default
+configuration of that model.
+
+So everything that merely **describes** a configuration ships on by default —
+the digest, the `wva_engine_config` metric, the drift checks. Only the act of
+letting one variant's reading price another's decision waits for you to ask for
+it. The intended replacement is graded sharing by **similarity** rather than by
+proven identity, where a flag the parser cannot read becomes a distance penalty
+instead of a false equality; see
+[learned-state sharing by similarity](../proposals/learned-state-sharing-by-similarity.md).
+
+#### What it costs to leave off
+
+A variant with no readings of its own prices its first decisions from its
+deployment-derived capacity alone, which is a weaker estimate. Expect a slower
+first ramp on a newly scaled-out variant.
+
+#### Before turning it on
+
+Check what the manager actually read, because the two paths degrade
+differently and the difference decides what you are buying into:
+
+- the **shared ITL line** is refused outright when flags could not be read. An
+  incomplete read produces no sharing key at all, so nothing is borrowed and
+  nothing lent.
 - the **cross-variant capacity figure** is *not* gated on a complete read, and
   that is deliberate rather than an oversight — gating it was tried and cost a
-  30x capacity over-estimate, because refusing a sibling's measured figure
+  30× capacity over-estimate, because refusing a sibling's measured figure
   falls back to an estimate that is higher, and a higher capacity orders fewer
-  replicas. So an incomplete variant **is** still being priced from a
-  sibling's capacity figure, and this key is what stops that.
+  replicas. So with this key on, a variant whose flags were only partly read
+  **is** still priced from a sibling's capacity figure.
 
 Read `wva_engine_config` to tell the cases apart:
 
 | what you see | what it means |
 | --- | --- |
-| a series with a non-empty `unresolved` label | one or more flags could not be read, and `unresolved` names them (usually a value coming from a ConfigMap or `valueFrom`, which the manager cannot read). No ITL line is shared either way, but the capacity figure still is — so this key **does** change something here. Fixing the flags is the better remedy; this is the one that works today. |
-| **no series at all** | no parsed engine configuration: no capacity record yet, nothing readable in the pod template, or no scale target resolved. Not a reliable sharing signal on its own — the series is also briefly absent on a cycle where the variant drops out of the analyzer's series. |
-| a series with `unresolved` empty | the configuration was read in full, and the variant shares on **both** paths, keyed on `fingerprint`. This is the case the key is most clearly for. |
+| a series with a non-empty `unresolved` label | one or more flags could not be read, and `unresolved` names them (usually a value coming from a ConfigMap or `valueFrom`, which the manager cannot read). With the key on, no ITL line is shared, but the capacity figure is — so this is the riskiest case to enable. Fixing the flags is the better remedy. |
+| **no series at all** | no parsed engine configuration: no capacity record yet, nothing readable in the pod template, or no scale target resolved. Not a reliable signal on its own — the series is also briefly absent on a cycle where the variant drops out of the analyzer's series. |
+| a series with `unresolved` empty | the configuration was read in full, and with the key on the variant shares on **both** paths, keyed on `fingerprint`. This is the case the key is for. |
 
 Joining two variants on the fingerprint takes all four of `model_name`,
 `accelerator`, `gpus` and `fingerprint` — the sharing key is the tuple, not the
 digest alone — and, for the ITL line, `unresolved` empty on both sides.
-
-So set it when a variant is being priced from a sibling it is not really like:
-the wrong-parser case above, or an unreadable configuration you cannot fix at
-source.
-
-**What it costs.** A variant with no readings of its own and no sibling to
-borrow from prices its first decisions from its deployment-derived capacity
-alone, which is a weaker estimate. Expect a slower first ramp.
 
 ### Default Configuration
 

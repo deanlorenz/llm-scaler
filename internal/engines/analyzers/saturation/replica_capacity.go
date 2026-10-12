@@ -737,7 +737,7 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 
 			// Bound by compatible variant's live EffectiveCapacity (already min(k1,k2))
 			//
-			// DisableLearnedStateReuse DELIBERATELY DOES NOT REACH HERE, and a
+			// The reuse switch DELIBERATELY DOES NOT REACH HERE, and a
 			// first version of it did, which was a defect.
 			//
 			// This is a MAX clamp: it only ever LOWERS the estimate. Removing

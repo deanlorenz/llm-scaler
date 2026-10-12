@@ -89,7 +89,7 @@ func TestChangeReporter_TheEffectivePolicyChangesWithTheExpectedOutputLength(t *
 }
 
 func TestChangeReporter_TheEffectivePolicyChangesWithTheReuseSwitch(t *testing.T) {
-	// formatBand's comment says disableLearnedStateReuse is in the key "or
+	// formatBand's comment says enableLearnedStateReuse is in the key "or
 	// toggling it would log nothing", and until this test nothing checked it:
 	// the field was always false in both existing tests, so the `|false` they
 	// assert would read identically if the field were dropped from the
@@ -103,14 +103,14 @@ func TestChangeReporter_TheEffectivePolicyChangesWithTheReuseSwitch(t *testing.T
 	r.ReportEffectivePolicy(ctx, "ns", "m", "gold", cfg)
 	first := r.seen["effective|ns|m"]
 
-	cfg.DisableLearnedStateReuse = true
+	cfg.EnableLearnedStateReuse = true
 	r.ReportEffectivePolicy(ctx, "ns", "m", "gold", cfg)
 	assert.NotEqual(t, first, r.seen["effective|ns|m"],
 		"turning the reuse switch on changes what the analyzer may do with another "+
 			"variant's learned state, so it is a new resolution and must be reported")
 
 	// And back, so the key tracks the field rather than merely differing once.
-	cfg.DisableLearnedStateReuse = false
+	cfg.EnableLearnedStateReuse = false
 	r.ReportEffectivePolicy(ctx, "ns", "m", "gold", cfg)
 	assert.Equal(t, first, r.seen["effective|ns|m"],
 		"turning it off again returns to the original resolution")

@@ -104,12 +104,12 @@ func TestLineBorrowedIsNotStampedOnAnOwnMeasuredFigure(t *testing.T) {
 	for i, rate := range []float64{5400, 5450, 5420} {
 		at := base.Add(time.Duration(i) * 2 * time.Minute)
 		a.now = func() time.Time { return at }
-		_, err := a.Analyze(ctx, makeAnalyzerInput(rows(rate), states))
+		_, err := a.Analyze(ctx, makeReusingAnalyzerInput(rows(rate), states))
 		require.NoError(t, err)
 	}
 	require.NotEmpty(t, a.itlLines, "the lender's fit must have been published")
 
-	in := makeAnalyzerInput(rows(5400), states)
+	in := makeReusingAnalyzerInput(rows(5400), states)
 	pol, ok := in.Config.(*config.ScalingPolicy)
 	require.True(t, ok, "the test input must carry a ScalingPolicy")
 

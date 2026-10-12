@@ -151,24 +151,26 @@ func (p *ChangeReporter) ReportEffectivePolicy(ctx context.Context, namespace, m
 		"scaleUpThreshold", cfg.ScaleUpThreshold, "scaleDownBoundary", cfg.ScaleDownBoundary,
 		"kvCacheThreshold", cfg.KvCacheThreshold, "priority", cfg.Priority,
 		"defaultOutputTokens", cfg.DefaultOutputTokens,
-		// Reported because it is an ESCAPE HATCH, and an operator who reaches
-		// for one needs to see that it landed. It is also the setting most
-		// easily written into the wrong entry -- it resolves through Merge, so
-		// a per-model override works, but a typo in the key name is silently
-		// nothing. This line is the only place that confirms it either way.
-		"disableLearnedStateReuse", cfg.DisableLearnedStateReuse)
+		// Reported because it is OPT-IN, and an operator who asks for a
+		// behaviour that is off by default needs to see that the request
+		// landed. It is also the setting most easily written into the wrong
+		// entry -- it resolves through Merge, so a per-model override works,
+		// but a typo in the key name is silently nothing, and silently nothing
+		// now means "still off". This line is the only place that confirms it
+		// either way.
+		"enableLearnedStateReuse", cfg.EnableLearnedStateReuse)
 }
 
 // formatBand renders the fields that make two resolutions meaningfully different,
 // so the readout fires on a real change rather than on a re-parse.
 func formatBand(cfg config.ScalingPolicy) string {
-	// disableLearnedStateReuse is in the key as well as in the line above, or
+	// enableLearnedStateReuse is in the key as well as in the line above, or
 	// toggling it would log nothing: the readout fires only when this string
 	// changes, so a field reported but not keyed is reported once and then
 	// never again when it actually changes.
 	return fmt.Sprintf("%.3f|%.3f|%.3f|%.3f|%d|%t",
 		cfg.ScaleUpThreshold, cfg.ScaleDownBoundary, cfg.KvCacheThreshold, cfg.Priority,
-		cfg.DefaultOutputTokens, cfg.DisableLearnedStateReuse)
+		cfg.DefaultOutputTokens, cfg.EnableLearnedStateReuse)
 }
 
 // joinSorted renders a deterministic list, so a set of policies reported in a

@@ -99,18 +99,18 @@ func TestBorrowedLineReachesTheRecord(t *testing.T) {
 	// sat wrong without failing anything. See fitLines on what the sort order
 	// does and does not decide.
 	rows := append(lenderRows(), starvedRow())
-	_, err := a.Analyze(ctx, makeAnalyzerInput(rows, states))
+	_, err := a.Analyze(ctx, makeReusingAnalyzerInput(rows, states))
 	require.NoError(t, err)
 	require.NotEmpty(t, a.itlLines, "the lender's fit must have been published")
 
 	// Cycle 2: the starved variant borrows.
-	res, err := a.Analyze(ctx, makeAnalyzerInput(rows, states))
+	res, err := a.Analyze(ctx, makeReusingAnalyzerInput(rows, states))
 	require.NoError(t, err)
 	require.NotNil(t, res)
 
 	// Re-run the stages that produce the records, so the flag can be read off
 	// them: Analyze returns demand, not the per-replica capacities.
-	in := makeAnalyzerInput(rows, states)
+	in := makeReusingAnalyzerInput(rows, states)
 	pol, ok := in.Config.(*config.ScalingPolicy)
 	require.True(t, ok, "the test input must carry a ScalingPolicy")
 	caps, err := func() ([]capacity.ReplicaCapacity, error) {

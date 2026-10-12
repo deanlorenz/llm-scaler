@@ -13,7 +13,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 )
 
-// DisableLearnedStateReuse has to stop BOTH paths by which one variant's
+// EnableLearnedStateReuse has to govern BOTH paths by which one variant's
 // measurement prices another's decision, because an operator asking for it
 // wants one thing and either path alone leaves it half-done:
 //
@@ -49,7 +49,10 @@ func TestTheReuseSwitchStopsLineSharing(t *testing.T) {
 	// variants get a real digest and borrowing is what happens by default.
 	// Anything that withholds the digest would make this pass for the reason
 	// TestTwoUnreadableVariantsDoNotShareALine already covers.
-	run := func(t *testing.T, disabled bool) bool {
+	// setup mutates the policy, or is nil to leave it exactly as shipped --
+	// which is the only way to assert the DEFAULT rather than an explicit
+	// false that merely happens to equal it.
+	run := func(t *testing.T, setup func(*config.ScalingPolicy)) bool {
 		t.Helper()
 		store := capacity.NewStore()
 		for _, v := range []string{lender, starved} {
@@ -81,16 +84,29 @@ func TestTheReuseSwitchStopsLineSharing(t *testing.T) {
 		s.AvgITL = 0 // nothing of its own to fit: the borrowing case
 		rows = append(rows, s)
 
+		// Applied to the warm-up cycles too. The earlier version set the flag
+		// on the measured cycle alone, so the fleet was warmed under one policy
+		// and measured under another -- which happened to work, and is not a
+		// property worth resting on.
+		withSetup := func() domain.AnalyzerInput {
+			in := makeAnalyzerInput(rows, states)
+			if setup != nil {
+				pol, ok := in.Config.(*config.ScalingPolicy)
+				require.True(t, ok, "the test input must carry a ScalingPolicy")
+				setup(pol)
+			}
+			return in
+		}
+
 		ctx, _ := observedCtx(t)
 		for i := 0; i < 2; i++ {
-			_, err := a.Analyze(ctx, makeAnalyzerInput(rows, states))
+			_, err := a.Analyze(ctx, withSetup())
 			require.NoError(t, err)
 		}
 
-		in := makeAnalyzerInput(rows, states)
+		in := withSetup()
 		pol, ok := in.Config.(*config.ScalingPolicy)
 		require.True(t, ok, "the test input must carry a ScalingPolicy")
-		pol.DisableLearnedStateReuse = disabled
 		c := a.newCycle(ctx, in, pol)
 		c.observeFleetShape()
 		c.resolvePricing()
@@ -98,17 +114,23 @@ func TestTheReuseSwitchStopsLineSharing(t *testing.T) {
 		return c.itlBorrowedFrom[starved] != ""
 	}
 
-	t.Run("by default a readable configuration lends its line", func(t *testing.T) {
-		require.True(t, run(t, false),
-			"the control must borrow, or the case below proves only that "+
-				"borrowing is broken for an unrelated reason")
+	t.Run("with reuse enabled a readable configuration lends its line", func(t *testing.T) {
+		require.True(t, run(t, func(p *config.ScalingPolicy) {
+			p.EnableLearnedStateReuse = true
+		}), "the control must borrow, or the case below proves only that "+
+			"borrowing is broken for an unrelated reason")
 	})
 
-	t.Run("with the switch on it does not", func(t *testing.T) {
-		require.False(t, run(t, true),
-			"an operator who has turned reuse off must get a variant priced on "+
-				"its own readings, whatever the digest says it has in common "+
-				"with a sibling")
+	// THE SHIPPED DEFAULT, asserted behaviourally rather than as a struct
+	// field. setup is nil, so the policy is untouched: this is what an operator
+	// gets with no configuration at all. Until the default flipped, the only
+	// evidence for this direction was that five specs broke -- an observation
+	// about one afternoon, not a guard against the next change.
+	t.Run("at the shipped default it does not", func(t *testing.T) {
+		require.False(t, run(t, nil),
+			"with no reuse configured a variant must be priced on its own "+
+				"readings, whatever the digest says it has in common with a "+
+				"sibling")
 	})
 }
 
@@ -137,7 +159,7 @@ func TestTheReuseSwitchStopsCrossVariantCapacity(t *testing.T) {
 	})
 	a := NewSaturationAnalyzer(store)
 
-	t.Run("by default a compatible sibling is found", func(t *testing.T) {
+	t.Run("with reuse enabled a compatible sibling is found", func(t *testing.T) {
 		got := a.lookupCompatibleCapacity(ns, model, starved, accel, 1, false)
 		require.NotNil(t, got,
 			"the control must find the sibling, or the case below proves only "+
@@ -145,7 +167,9 @@ func TestTheReuseSwitchStopsCrossVariantCapacity(t *testing.T) {
 		require.EqualValues(t, 400_000, got.EffectiveCapacity)
 	})
 
-	t.Run("with the switch on nothing is", func(t *testing.T) {
+	// reuseDisabled true is the shipped default now: the parameter keeps the
+	// negative sense because it names the branch it guards.
+	t.Run("at the shipped default nothing is", func(t *testing.T) {
 		require.Nil(t, a.lookupCompatibleCapacity(ns, model, starved, accel, 1, true),
 			"a variant must not be priced from a sibling's measurement once "+
 				"reuse is off")
@@ -210,11 +234,16 @@ func TestTheReuseSwitchDoesNotRemoveACapacityCeiling(t *testing.T) {
 	require.Greater(t, got, 0.0, "precondition: the estimate path ran at all")
 }
 
-// Reuse is ON unless an operator turns it off: it is what lets a scaled-out
-// variant price its first decision from something other than a guess. A
-// default of true would silently change every existing deployment.
-func TestReuseIsOnByDefault(t *testing.T) {
+// Reuse is OFF unless an operator asks for it. The equality that decides who
+// may share is not sound -- seven measured ways to produce a false match or
+// destroy a true one -- so the digest and everything that reads it ships, and
+// only the act of pricing one variant from another's reading waits.
+//
+// This spec is the default, stated as a test so a later change of mind has to
+// be deliberate. It is the inverse of what it asserted while the field was
+// spelled as a disable.
+func TestReuseIsOffByDefault(t *testing.T) {
 	var p config.ScalingPolicy
-	require.False(t, p.DisableLearnedStateReuse,
-		"the zero value of the policy must leave reuse enabled")
+	require.False(t, p.EnableLearnedStateReuse,
+		"the zero value of the policy must leave reuse disabled")
 }

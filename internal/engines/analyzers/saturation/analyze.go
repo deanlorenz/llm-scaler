@@ -163,12 +163,15 @@ func (a *SaturationAnalyzer) newCycle(
 		// row. An empty fingerprint is a usable answer: itlPhysicsKey falls
 		// back to the variant key and pools nothing.
 		//
-		// Which is exactly what DisableLearnedStateReuse wants, so it is
+		// Which is exactly what a variant that may not reuse wants, so it is
 		// expressed by withholding the fingerprint rather than by a second
 		// branch inside the key function. The operator switch and an
 		// unreadable engine configuration then reach the same code path, and
 		// there is only one of them to reason about.
-		if cfg.DisableLearnedStateReuse {
+		//
+		// Reuse is OFF unless EnableLearnedStateReuse says otherwise, so this
+		// is the branch taken on a default install.
+		if !cfg.EnableLearnedStateReuse {
 			c.fpByVariant[vs.VariantName] = ""
 		} else {
 			c.fpByVariant[vs.VariantName] = a.engineFingerprint(
@@ -487,7 +490,7 @@ func (c *cycle) settleShape(caps []capacity.ReplicaCapacity) {
 func (c *cycle) priceDemand(caps []capacity.ReplicaCapacity) demandParts {
 	variantCapacities := c.a.aggregateByVariant(caps, c.input.ReplicaMetrics,
 		c.input.VariantStates, c.input.ModelID, c.input.Namespace, c.cfg.KvCacheThreshold,
-		c.cfg.DisableLearnedStateReuse, c.logger)
+		!c.cfg.EnableLearnedStateReuse, c.logger)
 
 	// Model-level demand D (the analyzer owns demand attribution). Supply,
 	// utilization, and RoleCapacities are assembled downstream by the engine's

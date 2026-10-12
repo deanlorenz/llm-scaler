@@ -136,7 +136,7 @@ func TestTwoUnreadableVariantsDoNotShareALine(t *testing.T) {
 
 		ctx, _ := observedCtx(t)
 		for i := 0; i < 2; i++ {
-			_, err := a.Analyze(ctx, makeAnalyzerInput(rows, states))
+			_, err := a.Analyze(ctx, makeReusingAnalyzerInput(rows, states))
 			require.NoError(t, err)
 		}
 
@@ -146,7 +146,7 @@ func TestTwoUnreadableVariantsDoNotShareALine(t *testing.T) {
 		// lender's OWN window key, so the map is non-empty and nothing is
 		// shared. The map says a line exists; only itlBorrowedFrom says a variant
 		// priced itself from someone else's.
-		in := makeAnalyzerInput(rows, states)
+		in := makeReusingAnalyzerInput(rows, states)
 		pol, ok := in.Config.(*config.ScalingPolicy)
 		require.True(t, ok, "the test input must carry a ScalingPolicy")
 		c := a.newCycle(ctx, in, pol)

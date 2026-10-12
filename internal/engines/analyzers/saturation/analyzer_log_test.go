@@ -508,7 +508,7 @@ func TestLogContract_BorrowedCapacityNamesItsDonor(t *testing.T) {
 	})
 	analyzer := NewSaturationAnalyzer(store)
 
-	_, err := analyzer.Analyze(ctx, makeAnalyzerInput(nil, []domain.VariantReplicaState{
+	_, err := analyzer.Analyze(ctx, makeReusingAnalyzerInput(nil, []domain.VariantReplicaState{
 		{VariantName: "variant-borrow", AcceleratorName: "H100", CurrentReplicas: 0, GPUsPerReplica: 1},
 	}))
 	require.NoError(t, err)
@@ -551,7 +551,7 @@ func TestLogContract_BorrowNamesAnIncompleteDonor(t *testing.T) {
 	})
 	analyzer := NewSaturationAnalyzer(store)
 
-	_, err := analyzer.Analyze(ctx, makeAnalyzerInput(nil, []domain.VariantReplicaState{
+	_, err := analyzer.Analyze(ctx, makeReusingAnalyzerInput(nil, []domain.VariantReplicaState{
 		{VariantName: "variant-borrow", AcceleratorName: "H100", CurrentReplicas: 0, GPUsPerReplica: 1},
 	}))
 	require.NoError(t, err)

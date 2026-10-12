@@ -157,7 +157,9 @@ Kept, unchanged, and sound as reviewed:
   `bucketRetention`, and the narrowing.
 - The floor's cap-not-order routing, `mayOrder`/`borrowedOnly`, and the
   `heldWhy` composition.
-- `disableLearnedStateReuse`, which gates tiers 1 and 2 together.
+- `enableLearnedStateReuse`, which gates tiers 1 and 2 together, and which
+  ships **off** -- so what lands is the description of a configuration, not yet
+  the act of sharing on it.
 
 Three of the seven breaks are **not** addressed by this proposal and want their
 own change either way, because they are about the digest describing the wrong
