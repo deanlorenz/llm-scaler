@@ -2,8 +2,12 @@ package scaletarget
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	lwsv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/resources"
 )
 
 // ScaleTargetAccessor provides a uniform interface to extract scaling-relevant
@@ -48,4 +52,72 @@ type ScaleTargetAccessor interface {
 	// For Deployment: always 1.
 	// For LWS: spec.leaderWorkerTemplate.size (1 leader + N-1 workers).
 	GetGroupSize() int32
+}
+
+// PodGPUs returns the GPUs each pod of one replica requests, leader first: one
+// entry for a Deployment, GetGroupSize entries for a LeaderWorkerSet, whose
+// leader runs the worker template when it has none of its own. It returns nil
+// when no pod requests a GPU explicitly: the replica's default of one GPU says
+// nothing about how it is split across pods.
+func PodGPUs(acc ScaleTargetAccessor) []int {
+	if acc == nil {
+		return nil
+	}
+	gpus := func(t *corev1.PodTemplateSpec) int {
+		if t == nil {
+			return 0
+		}
+		return resources.GetContainersGPUs(t.Spec.Containers)
+	}
+	size := max(int(acc.GetGroupSize()), 1)
+	out := make([]int, 0, size)
+	out = append(out, gpus(acc.GetLeaderPodTemplateSpec()))
+	worker := gpus(acc.GetWorkerPodTemplateSpec())
+	for range size - 1 {
+		out = append(out, worker)
+	}
+	for _, g := range out {
+		if g > 0 {
+			return out
+		}
+	}
+	return nil
+}
+
+// IsLeaderWorkerSet reports whether acc is a LeaderWorkerSet. Group size is not
+// the test: an LWS of size 1 is still an LWS, whose pods belong to a
+// StatefulSet and are named by group index, not to a ReplicaSet.
+func IsLeaderWorkerSet(acc ScaleTargetAccessor) bool {
+	_, ok := acc.(*lwsAccessor)
+	return ok
+}
+
+// RollingOut reports whether acc's workload says it is mid-rollout: a
+// Deployment some of whose pods are not of its current template -- including a
+// new ReplicaSet whose pods do not exist yet -- or whose controller has not yet
+// observed its latest spec (a template change not acted on yet; a scale too,
+// briefly), or a LeaderWorkerSet whose UpdateInProgress condition is True.
+func RollingOut(acc ScaleTargetAccessor) bool {
+	switch a := acc.(type) {
+	case *deploymentAccessor:
+		d := a.deployment
+		return d.Status.ObservedGeneration < d.Generation || d.Status.UpdatedReplicas < d.Status.Replicas
+	case *lwsAccessor:
+		return meta.IsStatusConditionTrue(a.lws.Status.Conditions, string(lwsv1.LeaderWorkerSetUpdateInProgress))
+	}
+	return false
+}
+
+// LWSPartition is a LeaderWorkerSet's rolling-update partition: groups below it
+// stay on their revision while those at or above it update. 0 when unset, and
+// for any other target.
+func LWSPartition(acc ScaleTargetAccessor) int {
+	a, ok := acc.(*lwsAccessor)
+	if !ok {
+		return 0
+	}
+	if c := a.lws.Spec.RolloutStrategy.RollingUpdateConfiguration; c != nil && c.Partition != nil {
+		return int(*c.Partition)
+	}
+	return 0
 }

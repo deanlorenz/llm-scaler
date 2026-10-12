@@ -562,7 +562,7 @@ func main() {
 	// need a restart.
 	usageRefresher := &gpuusage.Refresher{
 		Discovery: gpunodes.NewK8sWithGpuOperator(mgr.GetClient()),
-		Periodic:  func() bool { return allocation.PhysicalUsageConfigured(cfg) },
+		Periodic:  func() bool { return allocation.NodeUsageWanted(cfg, watchNS != "") },
 	}
 	if err := mgr.Add(usageRefresher); err != nil {
 		setupLog.Error(err, "unable to add the GPU usage refresher to the manager")
@@ -1135,6 +1135,9 @@ func runWarmPool(
 		Client:    mgr.GetClient(),
 		Namespace: warmPoolNS,
 	}).Find
+	// Read, never written: a pool's shape lets the utilization-share
+	// optimizer keep GPUs free for a pool none of whose Pods runs yet.
+	reconciler.Shape = (&warmpool.PoolShapes{Client: mgr.GetClient()}).Read
 	setupLog.Info("warm pool enabled",
 		"namespace", warmPoolNS,
 		"sleepMinSize", *warmPoolSleepMinSize,

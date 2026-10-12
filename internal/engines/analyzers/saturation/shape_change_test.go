@@ -121,6 +121,28 @@ var _ = Describe("the fleet-shape change, through Analyze", func() {
 		return out2
 	}
 
+	It("reports each role's slowest measured start with its result", func() {
+		// Two decode replicas that took 70 s and 80 s to start, and a prefill
+		// that took 90 s: the result carries what Analyze measured, so the
+		// share planner paces moves on it (AnalyzerResult.RoleStartSeconds).
+		rms := make([]domain.ReplicaMetrics, 0, 3)
+		for i, s := range []float64{70, 80} {
+			rm := makeReplicaMetrics(fmt.Sprintf("d%d", i), decodeV, 400_000, kvCap, 0, 1000, 6000)
+			rm.Ready = true
+			rm.StartSeconds = s
+			rms = append(rms, rm)
+		}
+		p := makeReplicaMetrics("p0", prefillV, 8_065, 1_149_312, 0, 1000, 1)
+		p.Ready = true
+		p.StartSeconds = 90
+		rms = append(rms, p)
+		out, err := analyzer.Analyze(ctx, makeAnalyzerInput(rms, states(2)))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(out.RoleStartSeconds).To(HaveKey(domain.RoleDecode))
+		Expect(out.RoleStartSeconds[domain.RoleDecode]).To(BeNumerically(">=", 70))
+		Expect(out.RoleStartSeconds).To(HaveKeyWithValue(domain.RolePrefill, BeNumerically("==", 90)))
+	})
+
 	It("does not release the fleet on the shape it has just left", func() {
 		// Phase 1 of run biran-20260921-235843-225: 1000-token prompts,
 		// 6000-token generations, ten decode replicas carrying it.
@@ -154,6 +176,13 @@ var _ = Describe("the fleet-shape change, through Analyze", func() {
 		Expect(drained.RoleDemand[domain.RoleDecode]).To(BeNumerically(">=", 0.70*decodeSupply),
 			"a fleet whose shape has just changed is not released on the old shape's occupancy")
 		Expect(swap).NotTo(BeNil())
+		// The held figure is a keep, not a reading: the demand before the
+		// hold goes with it, for a consumer that sizes on need
+		// (AnalyzerResult.HeldRoleDemand).
+		before, ok := drained.HeldRoleDemand[domain.RoleDecode]
+		Expect(ok).To(BeTrue(), "the hold that raised decode records decode's demand before it")
+		Expect(before).To(BeNumerically("<", drained.RoleDemand[domain.RoleDecode]),
+			"the hold raised it, so what came before is lower")
 	})
 
 	It("releases the fleet once the new shape has a reading of its own", func() {
@@ -695,9 +724,10 @@ var _ = Describe("the fleet-shape change, through Analyze", func() {
 		// The negative control for the whole mechanism: the same load, cycle
 		// after cycle, must never raise an event or hold anything.
 		for i := 0; i < 5; i++ {
-			cycle(10, 17_282, 0, 1000, 6000, nil)
+			out := cycle(10, 17_282, 0, 1000, 6000, nil)
 			Expect(outstanding()).To(BeFalse(),
 				"a fleet serving one shape has nothing to hold for")
+			Expect(out.HeldRoleDemand).To(BeNil(), "and records no held demand")
 			clock = clock.Add(15 * time.Second)
 		}
 	})

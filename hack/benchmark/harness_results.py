@@ -211,7 +211,12 @@ def stage_windows(root, n_expected):
 
 
 def planned_arrivals(schedule, key):
-    return sum(ph[key] * (ph["end"] - ph["start"]) for ph in schedule)
+    # Per phase, the whole requests the generator issues: it rounds each
+    # stage's rate x duration down, so a 90 s phase at 0.25 rps is 22, not
+    # 22.5. Summing the fractions planned arrivals no stage could issue, and
+    # every arm read one short -- "the driver was the limit" -- in a run
+    # whose generator kept up.
+    return sum(int(ph[key] * (ph["end"] - ph["start"]) + 1e-9) for ph in schedule)
 
 
 def convert(args):
@@ -255,8 +260,7 @@ def convert(args):
     # as a cluster that answered nothing.
     issued = sum(w["n"] + w["failed"]
                  for role in ("a", "b") for w in sides[role]["stages"])
-    planned = int(round(planned_arrivals(schedule, "rate_a")
-                        + planned_arrivals(schedule, "rate_b")))
+    planned = planned_arrivals(schedule, "rate_a") + planned_arrivals(schedule, "rate_b")
 
     # The WORST of everything the generator reported about its own lateness --
     # whole run and every stage. A driver that kept up on average while falling
@@ -282,6 +286,11 @@ def convert(args):
         "model_b": args.model_b,
         "input_tokens": args.input_tokens,
         "output_tokens": args.output_tokens,
+        # Role b's shape, when it differs: a P/D run gives the two loaders
+        # different shapes, and two arms run with different ones are not the
+        # same experiment.
+        "input_tokens_b": getattr(args, "input_tokens_b", 0) or args.input_tokens,
+        "output_tokens_b": getattr(args, "output_tokens_b", 0) or args.output_tokens,
         "seed": args.seed,
         "data": args.data,
         "prefix_groups": args.prefix_groups,
@@ -322,6 +331,8 @@ def main(argv):
     p.add_argument("--model-b", default="B")
     p.add_argument("--input-tokens", type=int, default=0)
     p.add_argument("--output-tokens", type=int, default=0)
+    p.add_argument("--input-tokens-b", type=int, default=0)
+    p.add_argument("--output-tokens-b", type=int, default=0)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--data", default="synthetic",
                    help="the inference-perf dataset type the arm ran; recorded so "

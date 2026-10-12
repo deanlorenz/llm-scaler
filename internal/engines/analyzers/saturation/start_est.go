@@ -219,6 +219,26 @@ func (a *SaturationAnalyzer) noteReplicaStart(
 func (a *SaturationAnalyzer) startSecondsByRole(
 	input domain.AnalyzerInput, roleOf map[string]string,
 ) map[string]float64 {
+	return a.startSecondsPerRole(input, roleOf, false)
+}
+
+// slowestStartSecondsByRole is the MAXIMUM over each role's measured variants,
+// for a consumer that must not act before a replica serves
+// (domain.AnalyzerResult.RoleStartSeconds): the utilization-share planner
+// paces its moves on how long a moved replica takes to land, and erring short
+// there moves GPUs for a burst that ends before they serve.
+func (a *SaturationAnalyzer) slowestStartSecondsByRole(
+	input domain.AnalyzerInput, roleOf map[string]string,
+) map[string]float64 {
+	return a.startSecondsPerRole(input, roleOf, true)
+}
+
+// startSecondsPerRole folds the per-variant estimates into one per role: the
+// slowest when slowest is set, else the fastest. A role with no measured
+// variant is absent.
+func (a *SaturationAnalyzer) startSecondsPerRole(
+	input domain.AnalyzerInput, roleOf map[string]string, slowest bool,
+) map[string]float64 {
 	accel := make(map[string]string, len(input.VariantStates))
 	gpus := make(map[string]int, len(input.VariantStates))
 	for _, vs := range input.VariantStates {
@@ -244,7 +264,12 @@ func (a *SaturationAnalyzer) startSecondsByRole(
 		if !ok || !(est > 0) {
 			continue
 		}
-		if cur, seen := out[role]; !seen || est < cur {
+		cur, seen := out[role]
+		better := est < cur
+		if slowest {
+			better = est > cur
+		}
+		if !seen || better {
 			out[role] = est
 		}
 	}

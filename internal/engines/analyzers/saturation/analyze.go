@@ -3,6 +3,7 @@ package saturation
 import (
 	"context"
 	"fmt"
+	"maps"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -47,7 +48,12 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 	c.settleShape(caps)
 
 	d := c.priceDemand(caps)
-	total := c.applyFloorAndHolds(caps, d)
+	total, held := c.applyFloorAndHolds(caps, d)
+
+	roleOf := make(map[string]string, len(c.rolesByVariant))
+	for variant, role := range c.rolesByVariant {
+		roleOf[variant] = canonicalRole(role)
+	}
 
 	return &domain.AnalyzerResult{
 		AnalyzerName:      a.Name(),
@@ -57,6 +63,8 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 		VariantCapacities: d.variants,
 		TotalDemand:       total,
 		RoleDemand:        d.roleDemand,
+		HeldRoleDemand:    held,
+		RoleStartSeconds:  a.slowestStartSecondsByRole(input, roleOf),
 	}, nil
 }
 
@@ -427,9 +435,20 @@ func (c *cycle) priceDemand(caps []capacity.ReplicaCapacity) demandParts {
 
 // applyFloorAndHolds raises the demand to what the load requires, and then to
 // what the two holds refuse to release. Every step here only ever increases
-// it; nothing below lowers a demand the stages above computed.
-func (c *cycle) applyFloorAndHolds(caps []capacity.ReplicaCapacity, d demandParts) float64 {
+// it; nothing below lowers a demand the stages above computed. It returns the
+// total, and each held role's demand from before its first hold
+// (AnalyzerResult.HeldRoleDemand).
+func (c *cycle) applyFloorAndHolds(caps []capacity.ReplicaCapacity, d demandParts) (float64, map[string]float64) {
 	total := d.total
+	var held map[string]float64
+	hold := func(role string, before float64) {
+		if held == nil {
+			held = make(map[string]float64)
+		}
+		if _, ok := held[role]; !ok {
+			held[role] = before
+		}
+	}
 
 	// Floor the demand at what the load requires in THROUGHPUT
 	// (signals/floor, applied in throughput_floor.go).
@@ -496,8 +515,9 @@ func (c *cycle) applyFloorAndHolds(caps []capacity.ReplicaCapacity, d demandPart
 		// given to no pod and have had no first token, so prefill is what
 		// they are waiting for whatever decode is doing.
 		undispatched := d.queueByRole[domain.RolePrefill]
-		if h, held := holdPrefillDemand(d.roleDemand, d.variants, scaleUp, scaleDown, undispatched); held {
+		if h, ok := holdPrefillDemand(d.roleDemand, d.variants, scaleUp, scaleDown, undispatched); ok {
 			total += h.after - h.before
+			hold(domain.RolePrefill, h.before)
 			c.logger.Info("prefill-demand-held",
 				"modelID", c.input.ModelID, "namespace", c.input.Namespace,
 				"demandBefore", h.before, "demandHeld", h.after, "holdFloor", h.lo, "holdCap", h.hi,
@@ -511,11 +531,15 @@ func (c *cycle) applyFloorAndHolds(caps []capacity.ReplicaCapacity, d demandPart
 	// occupancy and the throughput floor still order (shape_change.go).
 	if c.shapeChanged && d.roleDemand != nil {
 		_, scaleDown := c.cfg.AnalyzerThresholds(domain.SaturationAnalyzerName)
+		before := maps.Clone(d.roleDemand)
 		if moved, raised := holdFleetFloor(d.roleDemand, d.variants, scaleDown); moved > 0 {
 			total += moved
+			for role := range raised {
+				hold(role, before[role])
+			}
 			logShapeHold(c.logger, c.input.ModelID, c.input.Namespace, moved, raised)
 		}
 	}
 
-	return total
+	return total, held
 }

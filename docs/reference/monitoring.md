@@ -250,6 +250,124 @@ kubectl port-forward -n $NS svc/wva-controller-manager-metrics-service 8443:8443
 curl -sk https://localhost:8443/metrics | grep -E '^wva_'
 ```
 
+**What would the utilization-share optimizer do, and is it doing it?** — only
+when an [`optimizer:` block](scaling-policy.md#optimizer-cluster-default-only-live)
+is set. Full list, with labels:
+[utilization-share metrics](prometheus.md#utilization-share-optimizer-metrics).
+
+| metric | meaning |
+| --- | --- |
+| `wva_utilization_share_mode{mode=...} == 1` | which state it is in: `off`, `invalid` (the block did not validate), `shadow` or `active`. Published by the leader every cycle, from its first, including cycles with no active model |
+| `wva_utilization_share_actionable == 1` | roles a move would fix now. Published in shadow mode too: this is what shadow mode is for |
+| `wva_utilization_share_replicas_to_move` | replicas the target would move, per group |
+| `wva_utilization_share_spare_gpus` | below `0` = the quota cannot cover every role's need; rebalancing cannot fix that |
+| `wva_utilization_share_in_flight{state=...}` | transfers per group still `releasing` or `filling`; while it acts |
+| `wva_utilization_share_headroom_capped == 1` | the models' recent peaks do not fit the quota together, so each keeps at most `maxHeadroomReplicas` (times its weight) of headroom and the rest is returned; `0` while the spare is spread by weight. After a restart that finds no usable stored need history (the ConfigMap `wva-utilization-share-history`) it is on until a `flappingWindow` of history exists unless the models' `maxReplicas` fit the quota together. While it acts, and not during the restart quiet period, when the planner does not plan |
+| `wva_utilization_share_starts_total` | what started, by `kind` (`transfer`, `fill`, `refill`, `return`) and `skipped_waits`. A rising `return` with no rising `fill` or `transfer` is models giving headroom back to the quota |
+| `wva_utilization_share_transfers_total` | by `outcome`: `done` is healthy; rising `aborted`, `fill-timeout` or `wrong-pod` means transfers are not landing. Every outcome is published at `0` while a group acts, so `increase()` counts the first one too |
+| `wva_model_scaling_blocked{reason=...}` | which model the optimizer is holding back, and why ([reasons](prometheus.md#wva_model_scaling_blocked-reasons-set-by-the-utilization-share-optimizer)); set only while it acts. No `role` label: on a P/D model, read `wva_utilization_share_headroom` / `_actionable` by `role` to see which role it is |
+
+Alerts worth having once it is configured (adjust the `for:` to a few of your
+release times; `wva_utilization_share_effective_seconds{param="release-timeout"}`
+is one):
+
+```promql
+# The optimizer block is broken: today's optimizer is running instead. This
+# includes a block whose limiters: list was removed (no budget to share).
+wva_utilization_share_mode{mode="invalid"} == 1
+
+# You configured it, but the controller reports it off: no optimizer: block
+# (it was edited out by mistake) or an empty type.
+wva_utilization_share_mode{mode="off"} == 1
+
+# Transfers are not landing: donors that do not release, receivers that do not
+# fill, or donors losing a pod other than the marked one (wrong-pod is detected
+# only for transfers planned with node information). The threshold (3) is an
+# example; check the donors' scale-down windows and pods, and the blocked reasons.
+# Each outcome's series exists at 0 from the group's first acting cycle, so the
+# first transfer of an outcome is counted by increase(). After a restart the new
+# controller creates them at 0 and counts its first cycle's outcomes on the
+# next. A release that timed out while no controller ran is not counted: its
+# mark is removed, and the log line "removed a transfer mark older than the
+# release timeout" names the pod.
+sum by (accelerator_type, scope) (
+  increase(wva_utilization_share_transfers_total{outcome=~"aborted|fill-timeout|wrong-pod"}[1h])
+) > 3
+
+# Releases are running close to their bound: the p90 release time over the last
+# hour exceeds 80% of the release timeout in force.
+histogram_quantile(0.9, sum by (le, accelerator_type, scope) (
+  rate(wva_utilization_share_release_seconds_bucket[1h])))
+> on (accelerator_type, scope)
+0.8 * max by (accelerator_type, scope) (
+  wva_utilization_share_effective_seconds{param="release-timeout"})
+
+# A model held back by a condition that holds until someone changes something
+# (alert with for: of a few release timeouts). marks-unreadable freezes every
+# model of the group until the controller can read its transfer marks again.
+wva_model_scaling_blocked{reason=~"no-compatible-donor|floors-exceed-quota|marks-unreadable"} == 1
+
+# A role stuck short while the optimizer acts: holding less than three quarters
+# of its need (headroom below -0.25). Alert with for: of about one reversal
+# hold, wva_utilization_share_effective_seconds{param="reversal-hold"} (about
+# 12 minutes with a 300 s scale-down window): a transfer should have reached it
+# by then. Read the model's wva_model_scaling_blocked reason: reversal-hold
+# for the whole hold means no other role was lightly loaded enough to give at once, often a
+# model whose burst just ended. On a short quota (spare_gpus below 0) it fires
+# by design: rebalancing cannot cover every need.
+wva_utilization_share_headroom < -0.25
+  and on() (wva_utilization_share_mode{mode="active"} == 1)
+
+# Reasons that expire by themselves and come back: release-taken and
+# release-shape-mismatch last one release timeout after a fill timed out, and
+# donor-not-steerable lasts only its back-off (quiet-period lasts one fill
+# timeout after a restart and is expected; do not alert on it). A long for: may
+# never fire on them; alert on how long in a window they were present instead.
+# The series exists only while its reason does, so count it at a fixed 1m
+# step (a subquery), which does not depend on the scrape interval: more than
+# 60 minutes in 6h.
+sum by (exported_namespace, model_name, reason) (
+  count_over_time(wva_model_scaling_blocked{reason=~"release-taken|release-shape-mismatch|donor-not-steerable"}[6h:1m])
+) > 60
+```
+
+Do not alert on `wva_utilization_share_in_flight{state="releasing"} > 0` with a
+long `for:`: one release cannot outlive its release timeout (it is aborted
+then), and a busy group keeps the series above zero with transfers that each
+land on time.
+
+#### Events on the models' scale targets
+
+While it acts, the optimizer records each transfer as Kubernetes Events on the
+Deployment or LeaderWorkerSet it moves, so a model's owner can read why it shrank
+or grew without the controller's log:
+
+```bash
+kubectl describe deployment <name> -n <namespace>     # or: leaderworkerset <name>
+kubectl get events -n <namespace> --field-selector reason=UtilizationShareGiving
+```
+
+| reason | type | on | when |
+| --- | --- | --- | --- |
+| `UtilizationShareGiving` | Normal | donor | a transfer started: it gives one replica. Names the pod (or pods) that go, whom it gives to, and why: the receiver is below its need, or to even out headroom by weight. A move that skipped the waits says "without the usual waits: it is at its scale-up threshold and this model is nearly idle (stabilization.skipWaitsWhen)". A donor in a set names the receiver its set funds and how many other donor replicas fund it; a refill names the quota group's scale-from-zero reserve (`reserveGPUs`); a return names "the quota group's unassigned GPUs", "because it holds more headroom than maxHeadroomReplicas gives it while no model is short, and stays calm without it; the replica drains after its scale-down window, and is kept if its demand comes back before then; a model whose demand rises takes the GPUs at once" -- the reason a model shrank while no other model grew. |
+| `UtilizationShareReceiving` | Normal | receiver | a transfer started for it; it is raised once the donor's replica is released. When it is handed GPUs another model is still giving back to the quota, it says "receiving N GPUs that <model> is giving back to the quota; raised once its replica is released" |
+| `UtilizationShareReceived` | Normal | receiver | the transfer landed: it holds the GPUs. An idle fill that lands says it received them "from the quota group's unassigned GPUs", and why: "because its demand rose past what it held", or "as headroom (maxHeadroomReplicas); given back when this model no longer needs it" -- the reason a model grew with no load to grow it |
+| `UtilizationShareCancelled` | Normal | donor and receiver | the transfer was called off because demand reversed; the donor's replica count is restored. A return called off says "this model's demand came back, so it keeps the replica it was giving back" |
+| `UtilizationShareRedirected` | Normal | receiver | the GPUs it was to receive went to a model waking from zero; it is planned again |
+| `UtilizationShareReleaseAborted` | Warning | donor | its replica was not released within the release timeout; its count is restored, and the Event gives the time before which it is not asked to give again (the wait doubles with each abort in a row, up to 16 release timeouts). When the transfer was called off because its donor set could not complete (another member broke, or this donor released while a contributor did not), the Event says so instead, and sets no back-off: it was not this donor's failure |
+| `UtilizationShareWrongPod` | Warning | donor | a pod other than the marked one was removed (a rollout, an eviction, another scale-down); the donor stays one replica lower and the receiver is not raised |
+| `UtilizationShareFillTimedOut` | Warning | receiver | its new replica did not take the released GPUs within the fill timeout; it keeps its target |
+| `UtilizationShareDonorNotSteerable` | Warning | donor | it was asked to give, but the pod that would go could not be chosen; the Event carries the cause (a pod not Ready or not yet scheduled, a rollout, a sibling's deletion cost leaving no room, the patch failing) and the time before which it is not asked again. Not recorded for a donor that has simply given every pod it has to transfers still in flight |
+
+Events expire: the API server keeps them for an hour by default (its
+`--event-ttl`), so they explain what happened recently, not a model's history.
+For history, use the counters above and the controller log.
+
+An Event names the other model only when it is in the same namespace; otherwise
+it says "a model in another namespace of its quota group", so one tenant's Events
+never name another tenant's models. A P/D model is named with its role, for
+example `model llama (decode)`; an aggregated model by its name alone.
+
 ### The logs
 
 Useful when a metric tells you *which* model is wrong and you want to know *why*.
@@ -259,6 +377,24 @@ Useful when a metric tells you *which* model is wrong and you want to know *why*
 | `scaling-decision` | what the scaling manager decided for a model, and the replica counts | Info |
 | `Effective scaling policy` | which policy tier a model resolved to | Info |
 | `GPU limiter (re)built from config` | a `limiters:` edit took effect, live | Info |
+| `Utilization share:` | every line the utilization-share optimizer writes; narrow with the rows below. Group lines carry `accelerator` and `scope` as the metrics label it (`cluster` for the cluster group), so a line joins its group's series | Info / Error |
+| `Utilization share: would rebalance (shadow)` | shadow mode found moves it would make; carries `actionable` and `frozen`. Logged when the set of actionable roles changes, not every cycle | Info |
+| `Utilization share: rebalancing` | the optimizer is acting on a group with actionable roles; same fields, same once-per-change rule | Info |
+| `Utilization share: transfer` | a transfer started, ended (with its `outcome`), was cancelled, or was redirected to a wake. `transfer started` carries `urgent`, `skippedWaits` and `returned` (`true` for a spare given back to the quota, which has no `receiver`) | Info |
+| `Utilization share: returned spare handed to a receiver` | a return still releasing was handed to a model that turned short; its GPUs go to that model when they come free. Carries `id`, `donor` and `receiver` | Info |
+| `Utilization share: the models' recent peaks`, `Utilization share: the models' peaks are not known yet` | the headroom cap turned on or off; carries `peakClaimGPUs` and `budget`. On: `cause=peaks-exceed-budget` (`recent peaks do not fit the quota together`) or `cause=peaks-unknown` (`peaks are not known yet`, with `unknownPeaks`: no model's peak is known, as after a restart with no history or for a new group), each with `maxHeadroomReplicas`. Off: `fit the quota together again`. Logged when it flips, and on a group's first acting cycle if capped | Info |
+| `Utilization share: spare returned to the quota` | a model's replica above its need plus its headroom (`maxHeadroomReplicas`) was released back to the quota group's unassigned GPUs; carries `donor` and `gpus` | Info |
+| `Utilization share: could not mark a donor pod` | a transfer was not started; the donor backs off (`donor-not-steerable`, and a `UtilizationShareDonorNotSteerable` Event on it) | Error |
+| `Utilization share: donor has nothing left to give` | a transfer was not started because every pod the donor could give is already given to a transfer in flight; it is held until one of them lands, or for one release timeout, with no back-off, blocked reason or Event | **`-v=4`** |
+| `Utilization share: donor's workload is changing` | a transfer was not started because the donor is mid-rollout, has a pod not yet created, scheduled or Ready, or an LWS group being replaced; it is held one release timeout, with no back-off, blocked reason or Event | **`-v=4`** |
+| `Utilization share: removed a transfer mark older than the release timeout` | a restarted controller found a mark whose transfer it can no longer judge; the mark is removed and not counted | Info |
+| `Utilization share: need history restored` | a rebuilt group read its stored need history back from the ConfigMap `wva-utilization-share-history`; carries `group`, `roles` (roles restored), `rolesKnownNow` (roles whose peak is known at once), `peaksKnownAt` (when the first restored role's peak is known), `writtenAt` and `writtenBy`. `stored need history not used` says why an entry was ignored (`reason`; `older than its window` when every sample has aged out) | Info |
+| `Utilization share: could not read the stored need history`, `Utilization share: could not store the need history` | the need history store failed for `group` (typically Forbidden: the Role `wva-utilization-share-history-role` is missing, as on an install upgraded before an admin re-ran `make setup-prereqs`). After a failed read nothing is restored or written for that group until a read succeeds; logged once per group and change, `the need history store works again` on that group's recovery | Error |
+| `Utilization share: need history truncated; the roles left out count at their ceiling after a restart` | a group's entry was over its bound (128 roles, or its equal share of 900 KiB): the roles with the smallest stored peaks were left out; carries `group`, `droppedRoles`, `dropped` (the first ten). Logged once per change | Info |
+| `Utilization share: the need history ConfigMap was deleted; every model's need history is forgotten` | the ConfigMap was deleted after the controller had read or written it: the flush. Every model's peak is unknown again for a `flappingWindow` | Info |
+| `Utilization share: the need history ConfigMap was deleted` | the history was flushed; the controller forgot its in-memory history too | Info |
+| `Utilization share: invalid optimizer block` | the block did not validate; today's optimizer runs | Error |
+| `Utilization share: evaluation` | the per-group table, every cycle | **`-v=4`** |
 | `Collected replica metrics` | metrics are arriving | **`-v=4`** |
 
 The controller runs at `-v=2` by default, so `Collected replica metrics` prints

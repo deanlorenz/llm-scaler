@@ -85,6 +85,16 @@ type Target struct {
 	// label — with no labels at all, a controller configured with an instance
 	// name matches nothing and manages an empty fleet.
 	Labels map[string]string
+	// ScaleDownWindowSeconds is the ScaledObject's HPA scale-down stabilization
+	// window (spec.advanced.horizontalPodAutoscalerConfig.behavior.scaleDown.
+	// stabilizationWindowSeconds); nil when unset, and the HPA default of 300 s
+	// applies. The utilization-share optimizer derives how long a release takes
+	// from it (docs/proposals/utilization-share-optimizer.md, section 8.4).
+	ScaleDownWindowSeconds *int32
+	// PollingIntervalSeconds is the ScaledObject's KEDA pollingInterval; nil
+	// means KEDA's default of 30 s. The utilization-share optimizer derives
+	// how long a release and a fill take from it.
+	PollingIntervalSeconds *int32
 }
 
 // Fresh reports whether the entry's target read is recent enough to use.

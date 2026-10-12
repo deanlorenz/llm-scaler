@@ -28,9 +28,10 @@
 # The two arms must differ in ONE thing. Four ways they silently did not, each
 # of which produces a complete and plausible table:
 #
-#   * The pool arm was allowed MORE accelerators. Insurance must LOWER the
-#     ceiling, so the pool arm runs at MAX_REPLICAS - POOL_REPLICAS per model
-#     and the nopool arm at MAX_REPLICAS. `run` sets this; it does not hope.
+#   * The arms were allowed different ceilings. Every arm gets MAX_REPLICAS
+#     per model and the pool sits on top of that; what the pool costs is
+#     measured in accelerator-seconds, not imposed through the cap. `run` sets
+#     the ceiling; it does not hope.
 #   * The fleet was not reset. With scale-down stabilization at 300s and nopool
 #     always first, the second arm starts on an already-scaled fleet and pays no
 #     cold load at all. `reset` pins both models back to MIN_REPLICAS, waits for
@@ -65,9 +66,14 @@
 #                                   arms: nopool (the baseline), pool, and
 #                                   floor -- no pool, every model held at
 #                                   FLOOR_REPLICAS, the over-provisioning a
-#                                   pool competes against
+#                                   pool competes against. Or the
+#                                   utilization-share arms, under one quota:
+#                                   today (no optimizer block), shadow (the
+#                                   optimizer computing) and share (acting)
 #   two_model_pool.sh report        compare every arm that ran against nopool;
 #                                   writes report.md, report.json and SVG plots
+#   two_model_pool.sh report-share  compare shadow and share against today, and
+#                                   what the optimizer recorded in each
 #   two_model_pool.sh status        what exists, and what holds accelerators
 #   two_model_pool.sh teardown      remove everything this created
 #
@@ -124,6 +130,11 @@ HIGH_RPS="${HIGH_RPS:-9}"
 HIGH_RPS_B="${HIGH_RPS_B:-8}"
 INPUT_TOKENS="${INPUT_TOKENS:-1000}"
 OUTPUT_TOKENS="${OUTPUT_TOKENS:-500}"
+# Loader b's shape. Defaults to a's; a single-stack P/D run gives the two
+# loaders different shapes (prompt-heavy, then decode-heavy) so the model's
+# prefill and decode take turns at needing the GPUs.
+INPUT_TOKENS_B="${INPUT_TOKENS_B:-$INPUT_TOKENS}"
+OUTPUT_TOKENS_B="${OUTPUT_TOKENS_B:-$OUTPUT_TOKENS}"
 REQUEST_TIMEOUT="${REQUEST_TIMEOUT:-300}"
 SEED="${SEED:-1729}"
 # The prompts. `synthetic` slices every prompt from a random offset into
@@ -181,6 +192,13 @@ RESULT_GRACE="${RESULT_GRACE:-1200}"
 
 MAX_REPLICAS="${MAX_REPLICAS:-3}"
 MIN_REPLICAS="${MIN_REPLICAS:-1}"
+# Per-role bounds for a P/D model; both default to the shared ones, so an
+# aggregated run is unchanged. A prefill role rarely needs the replicas its
+# decode does, and one ceiling for both would let it hold GPUs it never uses.
+MIN_PREFILL="${MIN_PREFILL:-$MIN_REPLICAS}"
+MIN_DECODE="${MIN_DECODE:-$MIN_REPLICAS}"
+MAX_PREFILL="${MAX_PREFILL:-$MAX_REPLICAS}"
+MAX_DECODE="${MAX_DECODE:-$MAX_REPLICAS}"
 # The THIRD arm. `floor` is what a pool competes against in practice: no pool,
 # but every model kept at FLOOR_REPLICAS at all times -- over-provisioning as
 # insurance. It pays for the extra replicas for the whole run, in the way the
@@ -250,7 +268,35 @@ need_ns() { [ -n "$NS" ] || die "BENCHMARK_NAMESPACE is required."; }
 # run. The cost of an insurance is not imposed through the cap; it is
 # MEASURED, in accelerator-seconds, and that is what every arm is priced on.
 # Set MAX_REPLICAS to as many replicas as the models could ask for.
-peak_gpus() { echo $(( 2 * MAX_REPLICAS * GPUS_PER_REPLICA )); }
+#
+# A P/D model is TWO scaled roles, each with its own ceiling, so it peaks at
+# MAX_PREFILL + MAX_DECODE replicas, not MAX_REPLICAS. Counting it as one role
+# halved the peak of a two-P/D-stack run, and preflight then passed on a
+# cluster with room for half the fleet.
+peak_gpus() {
+    local models=2 per_model="$MAX_REPLICAS"
+    [ "$PD_SINGLE_STACK" != 1 ] || models=1
+    if scenario_is_pd; then
+        per_model=$(( MAX_PREFILL + MAX_DECODE ))
+    fi
+    echo $(( models * per_model * GPUS_PER_REPLICA ))
+}
+
+# Whether the models are P/D: PD_SINGLE_STACK, or a scenario whose prefill is
+# enabled (two-model-shapes-pd). Read from the scenario, because preflight runs
+# before anything is deployed.
+scenario_is_pd() {
+    [ "$PD_SINGLE_STACK" != 1 ] || return 0
+    local file="$ROOT/hack/benchmark/scenarios/$BENCH_SPEC.yaml"
+    [ -f "$file" ] || return 1
+    python3 - "$file" <<'PY' 2>/dev/null
+import re, sys
+text = open(sys.argv[1], encoding="utf-8").read()
+# Comments out first: a header that mentions "prefill: enabled" is not a block.
+text = re.sub(r"(?m)^\s*#.*$", "", text)
+sys.exit(0 if re.search(r"\n\s*prefill:\s*\n(\s*\n)*\s*enabled:\s*true\b", text) else 1)
+PY
+}
 
 pool_gpus() { echo $(( POOL_REPLICAS * GPUS_PER_REPLICA )); }
 
@@ -364,6 +410,12 @@ verb_preflight() {
     info "  nopool arm: 2 models x 1..${MAX_REPLICAS} replicas"
     info "  floor arm:  2 models x ${FLOOR_REPLICAS}..${MAX_REPLICAS} replicas"
     info "  pool arm:   2 models x 1..${MAX_REPLICAS} replicas + a ${POOL_REPLICAS}-Pod pool on top -- the same ceiling in every arm; the insurance is priced in GPU-seconds"
+    if scenario_is_pd; then
+        info "  P/D: every model is two roles -- prefill ${MIN_PREFILL}..${MAX_PREFILL} and decode ${MIN_DECODE}..${MAX_DECODE} replicas -- and the peak counts both"
+    fi
+    if [ "$FLOOR_REPLICAS" -gt "$(floor_ceiling)" ]; then
+        warn "FLOOR_REPLICAS=${FLOOR_REPLICAS} is above a role's ceiling ($(floor_ceiling)): the floor arm will refuse to start"
+    fi
 
     # FREE ACCELERATORS ARE NOT PLACEABLE ACCELERATORS, and the difference cost
     # a whole 90-minute A/B.
@@ -508,6 +560,9 @@ verb_preflight() {
 # would have been one model's stack answering for both.
 # ---------------------------------------------------------------------------
 verb_standup() {
+    [ "$PD_SINGLE_STACK" != 1 ] || die "PD_SINGLE_STACK=1: stand the P/D model up with
+    make benchmark-standup BENCHMARK_SPEC=guides/pd-disaggregation MODEL_ID=<model>
+  then set PD_ENDPOINT to its router Service and run verify."
     need_ns
     [ -f "$ROOT/hack/benchmark/scenarios/$BENCH_SPEC.yaml" ] || \
         die "no scenario at hack/benchmark/scenarios/$BENCH_SPEC.yaml"
@@ -636,6 +691,68 @@ decode_deploy_for() {
     k get deploy "${prefix}-decode" -o name >/dev/null 2>&1 && printf '%s' "${prefix}-decode"
 }
 
+# ---------------------------------------------------------------------------
+# Single-stack P/D: one model, its prefill and decode under one quota
+# ---------------------------------------------------------------------------
+# PD_SINGLE_STACK=1 drives ONE P/D model, stood up by
+#   make benchmark-standup BENCHMARK_SPEC=guides/pd-disaggregation MODEL_ID=<model>
+# and not by `standup`: that scenario is single-stack, its router reached through
+# its own Service, with no shared Gateway or HTTPRoute to find a stack by. Both
+# loaders drive the one model through PD_ENDPOINT -- the router Service's base
+# URL, http://<service>:<port> -- with different shapes (INPUT/OUTPUT_TOKENS and
+# their _B), so prefill and decode take turns at needing the GPUs. MODEL_A and
+# MODEL_B both name that model.
+PD_SINGLE_STACK="${PD_SINGLE_STACK:-0}"
+PD_ENDPOINT="${PD_ENDPOINT:-}"
+
+# Every model Deployment and its role, one "<deployment> <role>" per line.
+# The modelservice chart puts llm-d.ai/role on the POD TEMPLATE, not on the
+# Deployment, so a label selector on Deployments finds nothing; the template is
+# also where the ScaledObject planner reads it (deploy/lib/scaledobject.sh).
+role_deploys() {
+    if [ "$PD_SINGLE_STACK" = 1 ]; then
+        k get deploy -o json 2>/dev/null | jq -r '
+            .items[] | (.spec.template.metadata.labels["llm-d.ai/role"] // "") as $r
+            | select($r == "prefill" or $r == "decode") | .metadata.name + " " + $r'
+        return
+    fi
+    local s d
+    for s in "$STACK_A" "$STACK_B"; do
+        d="$(decode_deploy_for "$s")"
+        [ -n "$d" ] || continue
+        echo "$d decode"
+        k get deploy "${d%-decode}-prefill" -o name >/dev/null 2>&1 && echo "${d%-decode}-prefill prefill"
+    done
+}
+
+role_min() { if [ "$1" = prefill ]; then echo "$MIN_PREFILL"; else echo "$MIN_DECODE"; fi; }
+role_max() { if [ "$1" = prefill ]; then echo "$MAX_PREFILL"; else echo "$MAX_DECODE"; fi; }
+
+# floor_ceiling is the lowest ceiling a fleet floor must fit under:
+# set_fleet_floor raises EVERY model ScaledObject, prefill included, and KEDA
+# refuses a minReplicaCount above its maxReplicaCount. Read from the roles
+# that run, as set_arm_ceiling applies MAX_PREFILL to any prefill it finds.
+floor_ceiling() {
+    if [ "$MAX_PREFILL" -lt "$MAX_DECODE" ] && role_deploys | grep -q ' prefill$'; then
+        echo "$MAX_PREFILL"
+    else
+        echo "$MAX_DECODE"
+    fi
+}
+
+# The role of the Deployment a ScaledObject scales: decode unless it is labelled
+# prefill, which is every aggregated stack.
+so_role() {
+    local target
+    target="$(k get scaledobject "$1" -o jsonpath='{.spec.scaleTargetRef.name}' 2>/dev/null)"
+    if [ -n "$target" ] && [ "$(k get deploy "$target" -o jsonpath='{.spec.template.metadata.labels.llm-d\.ai/role}' 2>/dev/null)" = prefill ]; then
+        echo prefill
+    else
+        echo decode
+    fi
+}
+
+
 gateway_ip() {
     # The gateway Service's ClusterIP. Resolved ONCE, here, so the load never
     # resolves anything.
@@ -674,6 +791,20 @@ endpoint_for_stack() {
     # The full completions URL, for the driver's own probes.
     printf '%s/v1/completions' "$(base_url_for_stack "$@")"
 }
+
+# Single-stack P/D replaces the stack lookups. Defined AFTER the originals: a
+# bash function is whichever definition ran last, and an override placed above
+# base_url_for_stack was silently replaced by it -- the loaders would have
+# driven the gateway, not the P/D router.
+if [ "$PD_SINGLE_STACK" = 1 ]; then
+    gateway_host() {
+        [ -n "$PD_ENDPOINT" ] || return 1
+        local h="${PD_ENDPOINT#*://}"
+        printf '%s' "${h%%/*}"
+    }
+    base_url_for_stack() { printf '%s' "${PD_ENDPOINT%/}"; }
+    decode_deploy_for() { role_deploys | awk '$2 == "decode" { print $1; exit }'; }
+fi
 
 # The EPP Deployment behind each stack: the route's backendRef names the pool
 # (`<shortName>-router`), and the chart names its EPP `<shortName>-router-epp`.
@@ -790,6 +921,224 @@ else:
     ok "the EPP flow-control queue is live for both models"
 }
 
+# ---------------------------------------------------------------------------
+# The utilization-share arms: today, shadow, share
+# ---------------------------------------------------------------------------
+# Three arms on the same traffic under the same quota, differing ONLY in the
+# policy's `optimizer:` block: none (today's optimizer), the utilization-share
+# optimizer in shadow (computes, moves nothing), and the same acting. The quota
+# is set once at standup (WVA_LIMITER=quota WVA_QUOTAS=...), never per arm, and
+# each arm keeps the policy it ran under so the report can refuse two arms whose
+# limiters differ.
+
+is_share_arm() { case "$1" in today|shadow|share) return 0 ;; esac; return 1; }
+
+# The mode the controller must report before an arm's load starts.
+share_arm_mode() {
+    case "$1" in today) echo off ;; shadow) echo shadow ;; share) echo active ;; esac
+}
+
+# Run PromQL queries from inside the cluster, where Prometheus is reachable, and
+# print one JSON object {query: result}. Queries go in through the environment,
+# not spliced into the program text, so no quoting can change what is asked.
+# EVAL_TIME (unix seconds) evaluates every query at that instant; empty is now.
+prom_queries() {
+    local eval_time="$1"; shift
+    local url; url="$(prometheus_base_url)"
+    [ -n "$url" ] || { warn "could not read PROMETHEUS_BASE_URL from wva-manager-config in $WVA_NS"; return 1; }
+    local queries; queries="$(jq -cn '$ARGS.positional' --args "$@")"
+    local pod="pquery-$(date +%s)-$RANDOM"
+    k run "$pod" --restart=Never --quiet --image="$(load_image)" \
+        --env="PROM_URL=$url" --env="QUERIES=$queries" --env="EVAL_TIME=$eval_time" \
+        --command -- python3 -c '
+import json, os, ssl, urllib.parse, urllib.request
+# The in-cluster Prometheus usually serves a self-signed certificate, and the
+# controller reads it the same way. No credential is sent; the worst a spoofed
+# answer can do is mislabel this benchmark.
+ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+out = {}
+for q in json.loads(os.environ["QUERIES"]):
+    params = {"query": q}
+    if os.environ.get("EVAL_TIME"):
+        params["time"] = os.environ["EVAL_TIME"]
+    try:
+        r = json.loads(urllib.request.urlopen(os.environ["PROM_URL"] + "/api/v1/query?" + urllib.parse.urlencode(params), timeout=60, context=ctx).read().decode())
+        out[q] = r["data"]["result"] if r.get("status") == "success" else {"error": r.get("error", "query failed")}
+    except Exception as e:
+        out[q] = {"error": str(e)}
+print("RESULT " + json.dumps(out))
+' >/dev/null 2>&1 || { warn "could not start a query Pod"; return 1; }
+    local waited=0
+    while [ "$waited" -lt 240 ]; do
+        case "$(k get pod "$pod" -o jsonpath='{.status.phase}' 2>/dev/null)" in
+            Succeeded|Failed) break ;;
+        esac
+        sleep 3
+        waited=$(( waited + 3 ))
+    done
+    local out; out="$(k logs "$pod" 2>&1)"
+    k delete pod "$pod" --ignore-not-found --wait=false >/dev/null 2>&1
+    printf '%s\n' "$out" | sed -n 's/^RESULT //p' | grep . || { warn "the query Pod returned nothing: $out"; return 1; }
+}
+
+# The policy this arm rewrites must be the one the controller reads. A
+# namespace-scoped controller that manages its own namespace reads, in order:
+# the namespace named by the wva.llmd.ai/policy-namespace label on that
+# namespace, the wva-policy namespace if it exists, its own namespace. Only the
+# last is the benchmark's to edit. The others are shared with other tenants, so
+# this refuses rather than rewriting them -- and an arm run against the
+# benchmark's own copy while the controller reads another would measure a quota
+# nobody wrote down.
+check_policy_namespace() {
+    # A controller outside the benchmark namespace is cluster-scoped or serves
+    # other namespaces: its policy is what every tenant it manages gets, and an
+    # arm would switch the optimizer on, or sweep every live transfer, for all
+    # of them. The arms rewrite only a policy that is the benchmark's own.
+    [ "$WVA_NS" = "$NS" ] || [ "${SHARE_ALLOW_SHARED_POLICY:-0}" = "1" ] || \
+        die "the controller runs in $WVA_NS, not in $NS: its policy is shared with every namespace it manages, and the share arms would rewrite it for all of them. Install a namespace-scoped controller in $NS (the standup does), or set SHARE_ALLOW_SHARED_POLICY=1 if that policy really is yours alone."
+    # The shared policy namespace itself is never the benchmark's own.
+    [ "$NS" != "wva-policy" ] || [ "${SHARE_ALLOW_SHARED_POLICY:-0}" = "1" ] || \
+        die "$NS is the shared policy namespace; the share arms do not rewrite it. Run in a namespace of your own, or set SHARE_ALLOW_SHARED_POLICY=1 if that policy really is yours alone."
+    # Sitting in $NS is not enough: a cluster-scoped controller installed there
+    # still manages every namespace. Namespace-scoped means --watch-namespace
+    # set to $NS, directly or through WVA_WATCH_NAMESPACE.
+    if [ "${SHARE_ALLOW_SHARED_POLICY:-0}" != "1" ]; then
+        local ctl scope errf
+        # Stderr apart: kubectl's throttling and API warnings would otherwise
+        # land in the JSON, fail the parse, and read as "watches every
+        # namespace" -- sending someone to reinstall a controller that is fine.
+        errf="$(mktemp)"
+        ctl="$(kc get deploy wva-controller-manager -n "$WVA_NS" -o json 2>"$errf")" || {
+            local e; e="$(cat "$errf")"; rm -f "$errf"
+            die "could not read the controller Deployment in $WVA_NS to check its scope: $e
+  Set SHARE_ALLOW_SHARED_POLICY=1 if you know it manages $NS alone."
+        }
+        rm -f "$errf"
+        scope="$(watch_scope <<<"$ctl")" || die "could not parse the controller Deployment in $WVA_NS to check its scope. Set SHARE_ALLOW_SHARED_POLICY=1 if you know it manages $NS alone."
+        case "$scope" in
+            "$NS"|"<own>") : ;;
+            "") die "the controller in $WVA_NS watches every namespace (no --watch-namespace): its policy is shared, and the share arms would rewrite it for all of them. Install a namespace-scoped controller in $NS, or set SHARE_ALLOW_SHARED_POLICY=1." ;;
+            "<multiple>") die "the controller in $WVA_NS sets --watch-namespace more than once; it watches the last, which this check will not guess at. Set SHARE_ALLOW_SHARED_POLICY=1 if it manages $NS alone." ;;
+            "<unknown>") die "the controller in $WVA_NS takes its watch namespace from something this check cannot resolve (not a literal, not the pod namespace). Set SHARE_ALLOW_SHARED_POLICY=1 if it manages $NS alone." ;;
+            *) die "the controller in $WVA_NS watches $scope, not $NS: the share arms would rewrite a policy that is not the benchmark's. Set SHARE_ALLOW_SHARED_POLICY=1 if it is yours alone." ;;
+        esac
+    fi
+    [ "${SKIP_POLICY_NAMESPACE_CHECK:-0}" = "1" ] && {
+        warn "SKIP_POLICY_NAMESPACE_CHECK=1: not checking that the controller reads the policy in $WVA_NS"
+        return 0
+    }
+    local out label
+    # Forbidden is not absent: a namespace this identity cannot read may still
+    # be the one the controller reads.
+    out="$(kc get namespace "$NS" -o json 2>&1)" || \
+        die "could not read namespace $NS to find which policy the controller reads: $out
+  Set SKIP_POLICY_NAMESPACE_CHECK=1 if you know the policy in $WVA_NS is the one in force."
+    label="$(jq -r '.metadata.labels["wva.llmd.ai/policy-namespace"] // ""' <<<"$out")"
+    if [ -n "$label" ] && [ "$label" != "$WVA_NS" ]; then
+        die "namespace $NS is labelled to read its policy from $label, not $WVA_NS. That policy is shared; the share arms do not rewrite it. Run in a namespace without the label."
+    fi
+    [ -n "$label" ] && return 0
+    out="$(kc get namespace wva-policy -o name 2>&1)"
+    case "$out" in
+        namespace/wva-policy)
+            [ "$WVA_NS" = "wva-policy" ] || \
+                die "a wva-policy namespace exists, so a controller managing its own namespace reads its policy from there, not from $WVA_NS. That policy is shared; the share arms do not rewrite it." ;;
+        *NotFound*|*"not found"*) : ;;
+        *) die "could not tell whether a wva-policy namespace exists: $out
+  Set SKIP_POLICY_NAMESPACE_CHECK=1 if you know the policy in $WVA_NS is the one in force." ;;
+    esac
+}
+
+# watch_scope reads a controller Deployment (JSON on stdin) and prints the
+# namespace it watches, from its manager container (or the first): the
+# --watch-namespace value (=VALUE or a separate VALUE, one dash or two) with
+# every $(VAR) in it resolved through the container env as the kubelet does,
+# the last definition of a name winning. It prints <own> when that ends at the
+# pod namespace fieldRef, <unknown> when it ends anywhere else, <multiple> when
+# the flag is given more than once (the controller would take the last; a
+# guard that read the first could be fooled), and nothing when it watches
+# every namespace. The installs chain it: --watch-namespace=$(WVA_WATCH_NAMESPACE),
+# whose value is $(POD_NAMESPACE), which is the fieldRef.
+watch_scope() {
+    jq -r '
+      .spec.template.spec.containers as $cs
+      | (($cs | map(select(.name == "manager")) | first) // $cs[0]) as $c
+      | ($c.env // []) as $env
+      | def resolve($v; $n):
+          if $n > 5 then "<unknown>"
+          elif ($v | test("^\\$\\([A-Za-z_][A-Za-z0-9_]*\\)$")) then
+            ($v | ltrimstr("$(") | rtrimstr(")")) as $name
+            | ($env | map(select(.name == $name)) | last // {}) as $e
+            | if ($e.value // "") != "" then resolve($e.value; $n + 1)
+              elif $e.valueFrom.fieldRef.fieldPath == "metadata.namespace" then "<own>"
+              else "<unknown>" end
+          else $v end;
+      ([($c.command // [])[], ($c.args // [])[]]) as $argv
+      | [range(0; $argv | length) as $i
+         | if ($argv[$i] | test("^--?watch-namespace=")) then ($argv[$i] | sub("^--?watch-namespace="; ""))
+           elif (($argv[$i] == "--watch-namespace") or ($argv[$i] == "-watch-namespace")) and ($i + 1 < ($argv | length))
+             then $argv[$i + 1]
+           else empty end] as $flags
+      | if ($flags | length) == 0 then ""
+        elif ($flags | length) > 1 then "<multiple>"
+        else resolve($flags[0]; 0) end'
+}
+
+# Write the arm's `optimizer:` block into the policy every controller reads,
+# replacing whatever block is there and touching nothing else.
+set_share_policy() {
+    local arm="$1" current updated
+    check_policy_namespace
+    current="$(kc -n "$WVA_NS" get configmap wva-scaling-policy-config -o jsonpath='{.data.default}' 2>&1)" || \
+        die "could not read the scaling policy in $WVA_NS: $current"
+    # The comparison is under a quota, and the optimizer has no budget without
+    # one -- it would report `invalid` and the arm would measure today's
+    # optimizer under the wrong name.
+    printf '%s\n' "$current" | grep -Eq '^[[:space:]-]*type:[[:space:]]*quota[[:space:]]*$' || \
+        die "the scaling policy in $WVA_NS declares no quota limiter. Stand up with WVA_LIMITER=quota WVA_QUOTAS='<accelerator>=<n>' -- the share arms compare the optimizers under one quota."
+    updated="$(python3 "$HERE/two_model_share_report.py" --rewrite-policy "$arm" <<<"$current")" || \
+        die "could not rewrite the policy for arm $arm"
+    kc -n "$WVA_NS" patch configmap wva-scaling-policy-config --type=merge \
+        -p "$(jq -cn --arg d "$updated" '{data:{"default":$d}}')" >/dev/null || \
+        die "could not write the policy for arm $arm"
+}
+
+# The policy is intent; the controller's mode gauge is the fact. Wait until
+# Prometheus shows the mode this arm needs. On a namespace-scoped install whose
+# policy lives in another namespace the policy is read once, at start, and this
+# is where that shows: the wait times out instead of measuring the wrong arm.
+wait_share_mode() {
+    local want="$1" deadline=$(( $(date +%s) + ${SHARE_MODE_TIMEOUT:-300} )) res
+    local q="max by (mode) (wva_utilization_share_mode{namespace=\"$WVA_NS\"})"
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        res="$(prom_queries "" "$q")" && \
+            [ "$(jq -r --arg q "$q" --arg m "$want" '[.[$q][]? | select(.metric.mode==$m) | .value[1]] | first // ""' <<<"$res")" = "1" ] && {
+                ok "the controller reports utilization-share mode '$want'"
+                return 0
+            }
+        sleep "${SHARE_MODE_POLL:-15}"
+    done
+    warn "the controller did not report mode '$want' within ${SHARE_MODE_TIMEOUT:-300}s. Last answer: ${res:-<none>}"
+    return 1
+}
+
+# What the optimizer did over the arm's window, read at the window's end:
+# transfers by outcome, model-seconds held back by reason, seconds a replica
+# move was planned (the shadow arm's evidence) and the mode it held throughout.
+capture_share_metrics() {
+    local out="$1" end="$2" window="$3" step=15
+    local sel="namespace=\"$WVA_NS\""
+    prom_queries "$end" \
+        "sum by (outcome) (increase(wva_utilization_share_transfers_total{$sel}[${window}s]))" \
+        "sum by (reason) (count_over_time((wva_model_scaling_blocked{$sel} == 1)[${window}s:${step}s])) * $step" \
+        "count_over_time((max(wva_utilization_share_replicas_to_move{$sel}) > 0)[${window}s:${step}s]) * $step" \
+        "min by (mode) (min_over_time(wva_utilization_share_mode{$sel}[${window}s]))" \
+        > "$out.tmp" && [ -s "$out.tmp" ] && mv "$out.tmp" "$out" || {
+            rm -f "$out.tmp"
+            warn "could not read the optimizer's metrics for this arm; the report will say so"
+        }
+}
+
 verb_verify() {
     need_ns
     local hostport
@@ -817,9 +1166,19 @@ verb_verify() {
     # both pools would still run, and the run would be measuring something else.
     local epps
     epps="$(k get deploy -o name 2>/dev/null | grep -c -- '-epp' || true)"
-    [ "${epps:-0}" -ge 2 ] || \
-        die "expected an EPP per model and found ${epps:-0}. The standup rendered one stack, not two."
-    ok "$epps EPP deployments, one per model"
+    local want_epps=2
+    [ "$PD_SINGLE_STACK" != 1 ] || want_epps=1
+    [ "${epps:-0}" -ge "$want_epps" ] || \
+        die "expected an EPP per model and found ${epps:-0}. The standup rendered fewer stacks than this run drives."
+    ok "$epps EPP deployment(s), one per model"
+    # Every role serving, prefill included: a P/D model with no ready prefill
+    # serves through decode alone, and the run would measure an aggregated model.
+    local rd role
+    while read -r rd role; do
+        [ -n "$rd" ] || continue
+        ready="$(k get deploy "$rd" -o jsonpath='{.status.readyReplicas}' 2>/dev/null)"
+        [ "${ready:-0}" -ge 1 ] || die "$role Deployment $rd has no ready replica"
+    done < <(role_deploys)
 
     # A real request per model, through its own path, before half an hour of
     # load. A 404 here is a name; a 404 at minute 12 is a wasted run.
@@ -1151,10 +1510,15 @@ verb_reset() {
     sos="$(k get scaledobject -o json 2>/dev/null | jq -r '
         [.items[] | select([.spec.triggers[]?.metadata.warmPoolName] | all(. == null)) | .metadata.name] | .[]')"
     [ -n "$sos" ] || die "no model ScaledObjects in $NS; there is nothing to reset."
-    # A floor arm raised minReplicaCount; every arm starts from MIN_REPLICAS.
-    set_fleet_floor "$MIN_REPLICAS"
+    # A floor arm raised minReplicaCount; every arm starts from each role's
+    # floor (MIN_REPLICAS, unless MIN_PREFILL/MIN_DECODE say otherwise).
+    local role_of
     for so in $sos; do
-        pause_at "$so" "$MIN_REPLICAS" || warn "could not pin $so"
+        role_of="$(so_role "$so")"
+        k patch scaledobject "$so" --type=merge \
+            -p "{\"spec\":{\"minReplicaCount\":$(role_min "$role_of")}}" >/dev/null || \
+            warn "could not set minReplicaCount on $so"
+        pause_at "$so" "$(role_min "$role_of")" || warn "could not pin $so"
     done
     # PAUSE THEN SCALE. Pausing alone does not bring the fleet down: measured
     # here, KEDA reported `Paused=True` and deleted the HPA while leaving the
@@ -1165,32 +1529,54 @@ verb_reset() {
     #
     # The pause still matters, and has to come first: without it the HPA puts
     # the replicas straight back within a cycle.
-    for s in "$STACK_A" "$STACK_B"; do
-        d="$(decode_deploy_for "$s")"
-        [ -n "$d" ] || { warn "no decode Deployment for stack $s"; continue; }
-        k scale deploy "$d" --replicas="$MIN_REPLICAS" >/dev/null || warn "could not scale $d"
-    done
-    info "pinned every model ScaledObject at $MIN_REPLICAS and scaled the fleet down; waiting for it to settle"
+    local deploys
+    deploys="$(role_deploys)"
+    [ -n "$deploys" ] || die "no model Deployment found to reset"
+    while read -r d role_of; do
+        k scale deploy "$d" --replicas="$(role_min "$role_of")" >/dev/null || warn "could not scale $d"
+    done <<<"$deploys"
+    info "pinned every model ScaledObject at its role's floor and scaled the fleet down; waiting for it to settle"
     waited=0
     while [ "$waited" -lt "$RESET_TIMEOUT" ]; do
-        local settled=1
-        for s in "$STACK_A" "$STACK_B"; do
-            d="$(decode_deploy_for "$s")"
-            [ -n "$d" ] || { settled=0; continue; }
+        local settled=1 want ready
+        while read -r d role_of; do
+            want="$(role_min "$role_of")"
             n="$(k get deploy "$d" -o jsonpath='{.status.replicas}' 2>/dev/null)"
-            local ready; ready="$(k get deploy "$d" -o jsonpath='{.status.readyReplicas}' 2>/dev/null)"
-            [ "${n:-0}" = "$MIN_REPLICAS" ] && [ "${ready:-0}" = "$MIN_REPLICAS" ] || settled=0
-        done
+            ready="$(k get deploy "$d" -o jsonpath='{.status.readyReplicas}' 2>/dev/null)"
+            [ "${n:-0}" = "$want" ] && [ "${ready:-0}" = "$want" ] || settled=0
+        done <<<"$deploys"
+        # status.replicas leaves out terminating pods, which still hold their
+        # GPUs through their grace period: the next arm would start short.
+        [ -z "$(terminating_model_pods "$deploys")" ] || settled=0
         if [ "$settled" = 1 ]; then
             for so in $sos; do unpause "$so"; done
-            ok "both models are at $MIN_REPLICAS and ready; autoscaling released"
+            ok "every role is at its floor and ready; autoscaling released"
             return 0
         fi
         sleep 10
         waited=$(( waited + 10 ))
     done
     for so in $sos; do unpause "$so"; done
+    local stuck
+    stuck="$(terminating_model_pods "$deploys" | tr '\n' ' ')"
+    [ -z "$stuck" ] || warn "still terminating (a pod on an unreachable node never finishes until force-deleted): $stuck"
     die "the fleet did not settle at $MIN_REPLICAS within ${RESET_TIMEOUT}s. Starting an arm from a fleet the previous arm left scaled makes the two incomparable."
+}
+
+# terminating_model_pods names the pods of the given model Deployments (one
+# "deployment role" per line) that are being deleted, one per line. A pod is a
+# Deployment's when its ReplicaSet is named <deployment>-<pod-template-hash>,
+# as the Deployment controller names it -- not by prefix, which would count a
+# sibling Deployment whose name extends this one's.
+terminating_model_pods() {
+    local names
+    names="$(awk '{print $1}' <<<"$1" | jq -R . | jq -s .)"
+    k get pods -o json 2>/dev/null | jq -r --argjson names "$names" '
+      .items[] | select(.metadata.deletionTimestamp != null)
+      | (.metadata.labels["pod-template-hash"] // "") as $h
+      | select($h != "" and any(.metadata.ownerReferences[]?; .kind == "ReplicaSet"
+          and (.name as $rs | any($names[]; $rs == . + "-" + $h))))
+      | .metadata.name'
 }
 
 model_scaledobjects() {
@@ -1203,25 +1589,35 @@ model_scaledobjects() {
 # within a cycle, and at the low rate that target is 1.
 set_fleet_floor() {
     local n="$1" so
+    # Refused here, by name: KEDA rejects the patch, and the arm would
+    # otherwise wait RESET_TIMEOUT for a floor no role can reach and report
+    # only that it did not reach it.
+    [ "$n" -le "$(floor_ceiling)" ] || die "floor ${n} is above a role's ceiling ($(floor_ceiling)): lower FLOOR_REPLICAS or raise MAX_PREFILL/MAX_DECODE"
     for so in $(model_scaledobjects); do
         k patch scaledobject "$so" --type=merge \
-            -p "{\"spec\":{\"minReplicaCount\":$n}}" >/dev/null || warn "could not set minReplicaCount on $so"
+            -p "{\"spec\":{\"minReplicaCount\":$n}}" >/dev/null || die "could not set minReplicaCount=$n on $so"
     done
     info "minReplicaCount=$n on every model ScaledObject"
 }
 
+# EVERY role, prefill included: set_fleet_floor raises every model
+# ScaledObject, and waiting on decode alone started a P/D floor arm while its
+# prefill was still coming up.
 wait_fleet_at() {
-    local n="$1" waited=0 s d cur ready
+    local n="$1" waited=0 s d cur ready deploys
     while [ "$waited" -lt "$RESET_TIMEOUT" ]; do
         local settled=1
         for s in "$STACK_A" "$STACK_B"; do
-            d="$(decode_deploy_for "$s")"
-            [ -n "$d" ] || { settled=0; continue; }
+            [ -n "$(decode_deploy_for "$s")" ] || settled=0
+        done
+        deploys="$(role_deploys)"
+        while read -r d _; do
+            [ -n "$d" ] || continue
             cur="$(k get deploy "$d" -o jsonpath='{.status.replicas}' 2>/dev/null)"
             ready="$(k get deploy "$d" -o jsonpath='{.status.readyReplicas}' 2>/dev/null)"
             [ "${cur:-0}" = "$n" ] && [ "${ready:-0}" = "$n" ] || settled=0
-        done
-        [ "$settled" = 1 ] && { ok "both models are at $n and ready"; return 0; }
+        done <<<"$deploys"
+        [ "$settled" = 1 ] && { ok "every role of both models is at $n and ready"; return 0; }
         sleep 10
         waited=$(( waited + 10 ))
     done
@@ -1233,16 +1629,27 @@ set_arm_ceiling() {
     ceiling="$(arm_max_replicas "$arm")"
     sos="$(k get scaledobject -o json 2>/dev/null | jq -r '
         [.items[] | select([.spec.triggers[]?.metadata.warmPoolName] | all(. == null)) | .metadata.name] | .[]')"
+    # Per role: a prefill ScaledObject gets MAX_PREFILL, every other MAX_DECODE.
+    # Both default to the arm's ceiling, so an aggregated run is unchanged.
+    local role_ceiling
     for so in $sos; do
+        role_ceiling="$ceiling"
+        if [ "$MAX_PREFILL" != "$MAX_REPLICAS" ] || [ "$MAX_DECODE" != "$MAX_REPLICAS" ]; then
+            role_ceiling="$(role_max "$(so_role "$so")")"
+        fi
         k patch scaledobject "$so" --type=merge \
-            -p "{\"spec\":{\"maxReplicaCount\":$ceiling}}" >/dev/null || \
+            -p "{\"spec\":{\"maxReplicaCount\":$role_ceiling}}" >/dev/null || \
             warn "could not set maxReplicaCount on $so"
     done
     # The pool's Pods only exist in the pool arm, and saying otherwise here
     # misreports the one number that makes the arms comparable.
     local held=0
     [ "$arm" = "pool" ] && held="$POOL_REPLICAS"
-    info "arm '$arm': each model may reach ${ceiling} replicas; the pool holds ${held} Pod(s) -- ceiling $(( 2 * ceiling * GPUS_PER_REPLICA + held * GPUS_PER_REPLICA )) accelerators"
+    if scenario_is_pd; then
+        info "arm '$arm': each model's prefill may reach ${MAX_PREFILL} replicas and its decode ${MAX_DECODE}; the pool holds ${held} Pod(s) -- ceiling $(( $(peak_gpus) + held * GPUS_PER_REPLICA )) accelerators"
+    else
+        info "arm '$arm': each model may reach ${ceiling} replicas; the pool holds ${held} Pod(s) -- ceiling $(( $(peak_gpus) + held * GPUS_PER_REPLICA )) accelerators"
+    fi
     echo "$ceiling"
 }
 
@@ -1268,7 +1675,7 @@ sample_gpus() {
         # Available for the whole 36 minutes, because the rest could not be
         # placed. Its numbers described a one-replica fleet and nothing said so.
         want="$(k get deploy -o json 2>/dev/null | jq -c '
-            [.items[] | select(.metadata.name | test("decode"))
+            [.items[] | select(.metadata.name | test("decode|prefill"))
              | {(.metadata.name): (.spec.replicas // 0)}] | add // {}')"
         # Explicit, not ${want:-{}}: the brace inside that expansion terminates
         # it early in bash, jq then gets nothing, and every sample comes out
@@ -1316,13 +1723,14 @@ capture_pod_work() {
     : > "$out"
     for pod in $(k get pods -o json 2>/dev/null | jq -r '
         .items[] | select(.status.phase=="Running")
-        | select((.metadata.name|test("decode")) or (.metadata.labels["llm-d.ai/warm-pool"] != null))
+        | select((.metadata.name|test("decode|prefill")) or (.metadata.labels["llm-d.ai/warm-pool"] != null))
         | .metadata.name'); do
         # A decode engine serves on the port the chart gave it; a pool Pod's warm
         # engine listens on the supervisor-assigned port. 8200 covers the former,
-        # 9001 the first of the latter -- both are read, and whichever answers is
-        # the engine.
-        for port in 8200 9001; do
+        # 9001 the first of the latter, and 8000 a P/D prefill engine, which has
+        # no routing sidecar in front of it -- all are read, and whichever
+        # answers first is the engine.
+        for port in 8200 8000 9001; do
             k exec "$pod" -- python3 -c "
 import re,sys,urllib.request
 try:
@@ -1396,8 +1804,8 @@ verb_run() {
     need_ns
     local arm="${1:-}"
     case "$arm" in
-        pool|nopool|floor) ;;
-        *) die "run takes an arm: nopool, pool or floor (got '${arm:-<none>}')" ;;
+        pool|nopool|floor|today|shadow|share) ;;
+        *) die "run takes an arm: nopool, pool or floor; or today, shadow or share for the utilization-share comparison (got '${arm:-<none>}')" ;;
     esac
     local have_pool=0
     k get deploy "wva-warm-pool-$POOL_NAME" >/dev/null 2>&1 && have_pool=1
@@ -1418,6 +1826,14 @@ verb_run() {
         set_fleet_floor "$floor"
         wait_fleet_at "$floor" || die "the fleet did not reach the floor of $floor per model"
     fi
+    # The utilization-share arms differ only in the policy's optimizer block.
+    # Set it, then wait for the controller to SAY it runs that mode: an arm
+    # whose policy was never read measures the previous arm under a new name.
+    if is_share_arm "$arm"; then
+        set_share_policy "$arm"
+        wait_share_mode "$(share_arm_mode "$arm")" || \
+            die "the controller is not running the optimizer mode arm $arm needs, so this arm would measure the wrong thing"
+    fi
     # A pool arm on a COLD pool is the worst result this scenario can produce:
     # it runs to completion, produces a full table, and reports the cost of a
     # pool nobody would operate that way. Re-checked here rather than trusted
@@ -1437,9 +1853,16 @@ verb_run() {
 
     local out_dir="$OUT_ROOT/$arm"
     mkdir -p "$out_dir"
-    printf '{"arm":"%s","max_replicas_per_model":%s,"min_replicas_per_model":%s,"pool_replicas":%s,"gpus_per_replica":%s}\n' \
+    printf '{"arm":"%s","max_replicas_per_model":%s,"min_replicas_per_model":%s,"pool_replicas":%s,"gpus_per_replica":%s,"max_prefill":%s,"max_decode":%s,"min_prefill":%s,"min_decode":%s}\n' \
         "$arm" "$ceiling" "$floor" "$([ "$arm" = pool ] && echo "$POOL_REPLICAS" || echo 0)" "$GPUS_PER_REPLICA" \
+        "$MAX_PREFILL" "$MAX_DECODE" "$MIN_PREFILL" "$MIN_DECODE" \
         > "$out_dir/budget.json"
+    # The policy this arm ran under, kept with its results: the report refuses
+    # two share arms whose limiters differ.
+    if is_share_arm "$arm"; then
+        kc -n "$WVA_NS" get configmap wva-scaling-policy-config -o jsonpath='{.data.default}' \
+            > "$out_dir/policy.yaml" 2>/dev/null || warn "could not keep the policy this arm ran under"
+    fi
 
     # The two inference-perf profiles and the phase table they were built from,
     # rendered here and kept with the results. The report refuses two arms whose
@@ -1452,6 +1875,7 @@ verb_run() {
             --phase-seconds "$PHASE_SECONDS" --cycles "$CYCLES" --lead-in "$LEAD_IN" \
             --low-rps "$LOW_RPS" --high-rps "$HIGH_RPS" --high-rps-b "$HIGH_RPS_B" \
             --input-tokens "$INPUT_TOKENS" --output-tokens "$OUTPUT_TOKENS" \
+            --input-tokens-b "$INPUT_TOKENS_B" --output-tokens-b "$OUTPUT_TOKENS_B" \
             --data "$LOAD_DATA" --prefix-groups "$PREFIX_GROUPS" \
             --request-timeout "$REQUEST_TIMEOUT" \
             --rise-window "$RISE_WINDOW" --overlap "$OVERLAP_SECONDS" \
@@ -1636,10 +2060,24 @@ verb_run() {
         rm -rf "$out_dir/harness"
         k cp "$pod:/results" "$out_dir/harness" -c load-a >/dev/null 2>&1 || \
             warn "could not copy the harness results out of $pod"
+    elif [ -n "$pod" ]; then
+        # A loader that never wrote its results still leaves evidence, and the
+        # cleanup below deletes the Pod that holds it. Kept, not reported: the
+        # arm is still refused below. A decode-heavy loader once went silent
+        # after its load ended and the only copy went with the Pod.
+        warn "a loader never wrote its results; keeping what $pod holds in $out_dir/harness-partial"
+        rm -rf "$out_dir/harness-partial"
+        k cp "$pod:/results" "$out_dir/harness-partial" -c load-a >/dev/null 2>&1 || \
+            warn "could not copy the partial results out of $pod"
+        k get pod "$pod" -o json > "$out_dir/loader-pod.json" 2>/dev/null || true
+        k exec "$pod" -c load-b -- sh -c 'ps aux 2>/dev/null || ls /proc' > "$out_dir/loader-b-ps.txt" 2>&1 || true
     fi
     trap - INT TERM HUP
     run_cleanup
     RUN_JOB=""
+    if is_share_arm "$arm"; then
+        capture_share_metrics "$out_dir/share.json" "$(( start_at + total ))" "$total"
+    fi
     # The timed capture above is the one that matters. This only fills in when
     # it did not run at all -- it never overwrites, because a late capture is
     # precisely the one that has lost the added replicas.
@@ -1656,6 +2094,7 @@ verb_run() {
         --t0 "$start_at" --overlap "$OVERLAP_SECONDS" \
         --arm "$arm" --model-a "$MODEL_A" --model-b "$MODEL_B" \
         --input-tokens "$INPUT_TOKENS" --output-tokens "$OUTPUT_TOKENS" \
+        --input-tokens-b "$INPUT_TOKENS_B" --output-tokens-b "$OUTPUT_TOKENS_B" \
         --seed "$SEED" --data "$LOAD_DATA" --prefix-groups "$PREFIX_GROUPS" \
         || die "could not convert the harness results for arm $arm. See $out_dir/loader.log"
     mv "$out_dir/requests.jsonl.meta.json" "$out_dir/meta.json"
@@ -1813,7 +2252,8 @@ verb_report() {
     local d name
     for d in "$OUT_ROOT"/*/; do
         name="$(basename "$d")"
-        case "$name" in nopool|pool|floor) continue ;; esac
+        # The utilization-share arms have their own report: report-share.
+        case "$name" in nopool|pool|floor|today|shadow|share) continue ;; esac
         [ -s "$d/meta.json" ] && extra+=(--arm "$name=${d%/}")
     done
     [ "${#extra[@]}" -gt 0 ] || die "only the nopool arm has results in $OUT_ROOT; run the pool and/or floor arm first"
@@ -1824,6 +2264,31 @@ verb_report() {
         --model-a "$MODEL_A" --model-b "$MODEL_B" \
         --json "$OUT_ROOT/report.json" \
         | tee "$OUT_ROOT/report.md"
+    [ "${PIPESTATUS[0]}" -eq 0 ] || die "the report failed"
+    python3 "$HERE/two_model_plots.py" --json "$OUT_ROOT/report.json" --out "$OUT_ROOT" \
+        && ok "report.md, report.json and the SVG plots are in $OUT_ROOT" \
+        || warn "the plots failed; the report itself is in $OUT_ROOT/report.md"
+}
+
+# The utilization-share comparison: today is the baseline, shadow and share are
+# judged against it on the same TTFT and accelerator-second tables as the pool
+# arms, and then on what the optimizer itself recorded.
+verb_report_share() {
+    local a="$OUT_ROOT/today"
+    [ -s "$a/meta.json" ] || die "no today results in $a -- the today arm is the baseline the share arms are compared against"
+    local extra=() n
+    for n in shadow share; do
+        [ -s "$OUT_ROOT/$n/meta.json" ] && extra+=(--arm "$n=$OUT_ROOT/$n")
+    done
+    [ "${#extra[@]}" -gt 0 ] || die "only the today arm has results in $OUT_ROOT; run the shadow and/or share arm first"
+    {
+        python3 "$HERE/two_model_report.py" \
+            --nopool "$a" "${extra[@]}" --baseline-name today \
+            --model-a "$MODEL_A" --model-b "$MODEL_B" \
+            --json "$OUT_ROOT/report.json" || exit 1
+        echo
+        python3 "$HERE/two_model_share_report.py" --out-root "$OUT_ROOT" || exit 1
+    } | tee "$OUT_ROOT/report.md"
     [ "${PIPESTATUS[0]}" -eq 0 ] || die "the report failed"
     python3 "$HERE/two_model_plots.py" --json "$OUT_ROOT/report.json" --out "$OUT_ROOT" \
         && ok "report.md, report.json and the SVG plots are in $OUT_ROOT" \
@@ -1869,6 +2334,7 @@ case "${1:-}" in
     reset)       shift; verb_reset "$@" ;;
     run)         shift; verb_run "$@" ;;
     report)      shift; verb_report "$@" ;;
+    report-share) shift; verb_report_share "$@" ;;
     status)      shift; verb_status "$@" ;;
     teardown)    shift; verb_teardown "$@" ;;
     residency)   shift; need_ns; pool_residency ;;

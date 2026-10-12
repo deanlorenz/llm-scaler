@@ -35,6 +35,7 @@ import harness_results as harness    # noqa: E402
 import two_model_load as load        # noqa: E402
 import two_model_profile as profile  # noqa: E402
 import two_model_report as report    # noqa: E402
+import two_model_share_report as share  # noqa: E402
 
 FAIL = 0
 CASES = 0
@@ -1284,6 +1285,170 @@ if run_report(BASE_META, dict(BASE_META), rows_b=lossy) == 0:
          "compared over the survivors")
 else:
     ok("client-side loss voids the arm whichever generator produced it")
+
+# ---------------------------------------------------------------------------
+# the utilization-share arms: the policy each arm runs, and the refusals
+# ---------------------------------------------------------------------------
+SHARE_POLICY = """limiters:
+  - name: q
+    type: quota
+    scope: namespace
+    namespaceQuotas:
+      team-a:
+        H200: 5
+optimizer:
+  type: utilizationShare
+  utilizationShare:
+    shadow: true
+    tolerance: 0.1
+enableRescale: false
+"""
+
+case("each share arm's policy keeps the quota and sets only the optimizer")
+try:
+    today = yaml.safe_load(share.rewrite_policy(SHARE_POLICY, "today"))
+    shadow = yaml.safe_load(share.rewrite_policy(SHARE_POLICY, "shadow"))
+    acting = yaml.safe_load(share.rewrite_policy(SHARE_POLICY, "share"))
+    twice = share.rewrite_policy(share.rewrite_policy(SHARE_POLICY, "share"), "share")
+except Exception as e:  # noqa: BLE001
+    fail("rewriting the policy raised %r" % e)
+else:
+    base = yaml.safe_load(SHARE_POLICY)
+    if "optimizer" in today:
+        fail("the today arm kept an optimizer block: %r" % today["optimizer"])
+    elif shadow.get("optimizer", {}).get("utilizationShare", {}).get("shadow") is not True:
+        fail("the shadow arm's block does not have shadow: true: %r" % shadow.get("optimizer"))
+    elif acting.get("optimizer", {}).get("utilizationShare", {}).get("shadow") is not False:
+        fail("the share arm's block does not act: %r" % acting.get("optimizer"))
+    elif acting["optimizer"].get("type") != "utilizationShare":
+        fail("the share arm's block names no optimizer type: %r" % acting["optimizer"])
+    elif any(d.get("limiters") != base["limiters"] for d in (today, shadow, acting)):
+        fail("an arm's policy changed the quota")
+    elif any(d.get("enableRescale") is not False for d in (today, shadow, acting)):
+        fail("a key after the optimizer block was lost with it")
+    elif twice != share.rewrite_policy(SHARE_POLICY, "share"):
+        fail("rewriting twice differs from once: a second arm would stack blocks")
+    else:
+        ok("today drops the block, shadow and share set it, and nothing else moves")
+
+case("an unknown share arm is refused")
+try:
+    share.rewrite_policy(SHARE_POLICY, "nopool")
+    fail("rewrite_policy accepted arm nopool")
+except ValueError:
+    ok("only today, shadow and share are share arms")
+
+
+def share_arm(name, mode=None, transfers=None, policy=None, snap=True):
+    q_t = "sum by (outcome) (increase(x[1s]))"
+    q_b = "sum by (reason) (count_over_time(y)) * 15"
+    q_p = "count_over_time((max(z) > 0)[1s:15s]) * 15"
+    q_m = "min by (mode) (min_over_time(m[1s]))"
+    data = {
+        q_t: [{"metric": {"outcome": o}, "value": [0, str(v)]} for o, v in (transfers or {}).items()],
+        q_b: [{"metric": {"reason": "quota-exhausted"}, "value": [0, "120"]}],
+        q_p: [{"metric": {}, "value": [0, "45"]}],
+        q_m: [{"metric": {"mode": mode or share.MODE[name]}, "value": [0, "1"]}],
+    }
+    return {
+        "name": name,
+        "policy": SHARE_POLICY if policy is None else policy,
+        "snap": data if snap else None,
+        "transfers": share.series(data, "sum by (outcome)", "outcome") if snap else None,
+        "blocked": share.series(data, "sum by (reason)", "reason") if snap else None,
+        "planned": share.scalar(data, "count_over_time((max(") if snap else None,
+        "modes": share.series(data, "min by (mode)", "mode") if snap else None,
+    }
+
+
+GOOD = [share_arm("today"), share_arm("shadow"), share_arm("share", transfers={"done": 3})]
+
+case("three comparable share arms pass")
+if share.problems(GOOD):
+    fail("comparable arms were refused: %s" % share.problems(GOOD))
+else:
+    ok("same quota, each arm in its mode, transfers only in share")
+
+case("share arms under different quotas are refused")
+other = share_arm("share", transfers={"done": 3}, policy=SHARE_POLICY.replace("H200: 5", "H200: 9"))
+if not any("different policies" in p for p in share.problems(GOOD[:2] + [other])):
+    fail("a share arm under a quota of 9 was compared with today under 5")
+else:
+    ok("a different quota is a different experiment")
+
+case("an arm whose controller did not hold its mode is refused")
+lapsed = share_arm("share", mode="off", transfers={"done": 1})
+if not any("did not hold mode 'active'" in p for p in share.problems(GOOD[:2] + [lapsed])):
+    fail("a share arm whose controller ran mode off was reported as share")
+else:
+    ok("the mode is checked over the whole window")
+
+case("a shadow arm that moved a GPU is refused")
+moved = share_arm("shadow", transfers={"done": 1})
+if not any("may not move a GPU" in p for p in share.problems([GOOD[0], moved, GOOD[2]])):
+    fail("a shadow arm with a transfer was reported as shadow")
+else:
+    ok("shadow and today may not transfer")
+
+case("an arm without the controller's metrics is refused, not reported as zero")
+blind = share_arm("share", snap=False)
+if not any("no controller metrics" in p for p in share.problems(GOOD[:2] + [blind])):
+    fail("an arm with no share.json was reported")
+else:
+    ok("missing metrics are named, not read as nothing happened")
+
+case("the share table prints every arm")
+buf = io.StringIO()
+saved, sys.stdout = sys.stdout, buf
+try:
+    share.report(GOOD)
+finally:
+    sys.stdout = saved
+text = buf.getvalue()
+if not all("| %s |" % n in text for n in ("today", "shadow", "share")) or "quota-exhausted" not in text:
+    fail("the share table is missing an arm or a reason:\n%s" % text)
+else:
+    ok("one row per arm, and the reasons models were held back")
+
+case("the report's baseline can be called today")
+saved_base = report.BASELINE
+try:
+    rc = report.main(["--nopool", "/nonexistent", "--baseline-name", "today", "--arm", "today=/x"])
+except SystemExit as e:
+    rc = e.code
+finally:
+    report.BASELINE = saved_base
+if rc != 2:
+    fail("an --arm named like the today baseline was accepted (rc=%r)" % rc)
+else:
+    ok("the baseline's name is reserved whatever it is called")
+
+case("a P/D run gives each loader its own shape, and the default is unchanged")
+_base = ["--emit", "profile", "--role", "b", "--input-tokens", "1000", "--output-tokens", "500"]
+_same = profile.build_parser().parse_args(_base)
+_pd = profile.build_parser().parse_args(_base + ["--input-tokens-b", "20000", "--output-tokens-b", "250"])
+if profile.shape_for(_same, "b") != (1000, 500):
+    fail("role b without its own shape did not take role a's: %r" % (profile.shape_for(_same, "b"),))
+elif profile.shape_for(_pd, "b") != (20000, 250) or profile.shape_for(_pd, "a") != (1000, 500):
+    fail("per-loader shapes were not kept apart: a=%r b=%r"
+         % (profile.shape_for(_pd, "a"), profile.shape_for(_pd, "b")))
+else:
+    _lines = "\n".join(profile.render_data(_pd, [], "b", 1729))
+    if "min: 20000" not in _lines or "min: 250" not in _lines:
+        fail("role b's rendered data does not carry its shape:\n%s" % _lines)
+    else:
+        ok("role b defaults to role a's shape, and keeps its own when given one")
+
+case("planned arrivals count whole requests per phase, as the generator issues them")
+# Two 90 s phases at 0.25 rps: 22 each, as inference-perf issued them on a
+# cluster run. Fractions summed to 45 there, and every arm read one short.
+_sched = [{"start": 0, "end": 90, "rate_a": 0.25, "rate_b": 4.0},
+          {"start": 90, "end": 180, "rate_a": 0.25, "rate_b": 4.0}]
+_pa, _pb = harness.planned_arrivals(_sched, "rate_a"), harness.planned_arrivals(_sched, "rate_b")
+if (_pa, _pb) != (44, 720):
+    fail("planned arrivals %r / %r, want 44 / 720" % (_pa, _pb))
+else:
+    ok("planned arrivals are 44 and 720, whole requests per phase")
 
 print("")
 if FAIL:

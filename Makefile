@@ -401,7 +401,7 @@ check-doc-comment-owner: ## Fail on a doc comment describing a different declara
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest helm check-import-direction check-doc-comment-owner ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" PATH="$(LOCALBIN):$(PATH)" go test $$(go list ./... | grep -v /e2e | grep -v /benchmark) -coverprofile cover.out
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" PATH="$(LOCALBIN):$(PATH)" go test $$(go list ./... | grep -v /e2e | grep -v /benchmark) ./test/e2e/fixtures/ -coverprofile cover.out
 
 # Creates a multi-node Kind cluster
 # Adds emulated GPU labels and capacities per node
@@ -2467,9 +2467,9 @@ benchmark-two-model-residency: ## Two-model pool run: print what each pool Pod i
 	@$(TWO_MODEL) residency
 
 .PHONY: benchmark-two-model-run
-benchmark-two-model-run: ## Two-model pool run: drive the anti-phase load for one arm (ARM=nopool|pool|floor)
+benchmark-two-model-run: ## Two-model pool run: drive the anti-phase load for one arm (ARM=nopool|pool|floor, or today|shadow|share under one quota)
 	@if [ -z "$(ARM)" ]; then \
-		echo "ERROR: ARM is required. Usage: make benchmark-two-model-run ARM=nopool  (then ARM=pool; ARM=floor for the over-provisioned baseline)"; \
+		echo "ERROR: ARM is required. Usage: make benchmark-two-model-run ARM=nopool  (then ARM=pool; ARM=floor for the over-provisioned baseline; ARM=today|shadow|share for the utilization-share comparison)"; \
 		exit 1; \
 	fi
 	@$(TWO_MODEL) run $(ARM)
@@ -2477,6 +2477,10 @@ benchmark-two-model-run: ## Two-model pool run: drive the anti-phase load for on
 .PHONY: benchmark-two-model-report
 benchmark-two-model-report: ## Two-model pool run: compare every arm that ran against nopool
 	@$(TWO_MODEL) report
+
+.PHONY: benchmark-two-model-report-share
+benchmark-two-model-report-share: ## Two-model run: compare the shadow and share arms against today, and what the optimizer recorded
+	@$(TWO_MODEL) report-share
 
 .PHONY: benchmark-two-model-status
 benchmark-two-model-status: ## Two-model pool run: what exists, and what holds accelerators
@@ -2637,6 +2641,8 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# comparison the scenario exists for cannot happen. A cluster run only ever
 	@# exercises the happy path, so the rules are asserted offline.
 	@python3 hack/check-add-variant.py
+	@echo "Checking the pod spec the warm pool planner reads..."
+	@python3 hack/check-warmpool-plan.py
 	@echo "Checking for mangled line continuations..."
 	@# `bash -n` cannot catch this: `cmd \n | grep ...` is SYNTACTICALLY VALID —
 	@# the \n becomes a literal argument. It shipped once, in the limiter path,
