@@ -256,30 +256,10 @@ type paramApplier func(key, value string, params *EngineParams) applyResult
 // `--model $MODEL_NAME` says nothing about capacity or latency and would
 // otherwise make every deployment's digest incomplete for no gain.
 func noteUnresolved(params *EngineParams, key string) {
-	_, value := mappedValueKeys[key]
-	_, boolean := mappedBoolKeys[key]
-	if !value && !boolean {
+	if _, ok := mappedValueKeys[key]; !ok {
 		return
 	}
 	if slices.Contains(params.Unresolved, key) {
-		return
-	}
-	params.Unresolved = append(params.Unresolved, key)
-	slices.Sort(params.Unresolved)
-}
-
-// noteUnaccounted records a flag the parser could not account for at all,
-// bypassing the mapped-key whitelists on purpose: the whitelists answer "did a
-// flag I understand fail to resolve", and this answers "was there something
-// here I could not read". Only the second is sound for a sharing key, because
-// a flag nobody maps can still change the latency this key is used to share.
-//
-// Deliberately NOT applied to unmapped long flags: a `--served-model-name`
-// would make every deployment incomplete for no gain, which is the judgement
-// mappedValueKeys already encodes. Short flags are different because the
-// parser cannot even see which flag it is looking at.
-func noteUnaccounted(params *EngineParams, key string) {
-	if key == "" || slices.Contains(params.Unresolved, key) {
 		return
 	}
 	params.Unresolved = append(params.Unresolved, key)
@@ -349,18 +329,6 @@ const keyDtype = "dtype"
 // Both are narrower than what this catches, and neither is closable here: the
 // signal is "a flag belonging to the other engine", and in both cases there
 // is no such flag.
-// mappedBoolKeys are the valueless flags the appliers map. They are recorded
-// as unresolved for one reason: parseArgsWith gives a valueless flag the next
-// non-`--` token as its value, so a boolean CAN have a value that fails to
-// resolve -- `--enforce-eager $EXTRA_ARGS`, where EXTRA_ARGS comes from
-// envFrom. When that happens the flag is not applied, and until this set
-// existed it was not recorded either, so the parse reported complete over a
-// configuration whose CUDA-graph setting it had not read. Measured: that
-// hashed identically to no flag at all.
-//
-// An adversarial review found it, and the comment on mappedValueKeys had the
-// premise backwards -- "Boolean flags are absent: they carry no value, so
-// there is nothing to fail to resolve" -- which the swallow falsifies.
 var mappedValueKeys = map[string]struct{}{
 	// vLLM
 	"gpu_memory_utilization":  {},
@@ -384,36 +352,6 @@ var mappedValueKeys = map[string]struct{}{
 	"context_length":       {},
 	"max_prefill_tokens":   {},
 	"chunked_prefill_size": {},
-}
-
-// shortFlagAliases maps an engine's single-dash alias to the long flag it
-// stands for. Recorded, not applied: mapping a value through an alias means
-// trusting that the alias means the same thing in the engine version actually
-// running, and withholding a sharing key is the cheaper mistake.
-//
-// Keyed on the token with its leading dash stripped and NOT normalized, so
-// case is significant -- vLLM's -O is not -o.
-var shortFlagAliases = map[string]string{
-	"tp": "tensor_parallel_size",
-	"q":  "quantization",
-	"pp": "pipeline_parallel_size",
-	"dp": "data_parallel_size",
-	"O":  "compilation_config",
-}
-
-var mappedBoolKeys = map[string]struct{}{
-	// vLLM
-	"enforce_eager":             {},
-	"no_enforce_eager":          {},
-	"enable_chunked_prefill":    {},
-	"no_enable_chunked_prefill": {},
-	// SGLang. disable_cuda_graph sets the same EnforceEager field
-	// enforce_eager does, and is hashed for the same reason -- it changes
-	// inter-token latency. Omitting it left F1 open on the SGLang path: the
-	// first version of this set listed only the vLLM booleans, so
-	// `--disable-cuda-graph $VAR` was still dropped and unrecorded. Found by
-	// re-reviewing the fix against both appliers' case labels rather than one.
-	"disable_cuda_graph": {},
 }
 
 // normalizeKey replaces hyphens with underscores and strips the leading
@@ -457,35 +395,6 @@ func parseArgsWith(args []string, params *EngineParams, env map[string]string,
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if !strings.HasPrefix(arg, "--") {
-			// An engine SHORT ALIAS is recorded rather than ignored. This loop
-			// reads only `--` flags, so before this `-q fp8` was neither
-			// applied nor recorded and an FP8 serving hashed the same as a
-			// BF16 one -- which is exactly what EngineParams' own comment says
-			// must not happen, dtype and quantization being the pair that
-			// dominate inter-token latency.
-			//
-			// A NAMED SET rather than "anything single-dash", because the
-			// command line handed to this parser includes the interpreter's
-			// own flags: recording every short token made
-			// `python3 -m sglang.launch_server` report `-m` unresolved and
-			// would have cost every SGLang deployment its sharing key. The
-			// suite caught that on the first attempt.
-			//
-			// The residue is deliberate and worth stating: a short alias NOT
-			// in this set still passes unrecorded. The set closes the measured
-			// break, not the category.
-			// The `=value` form has to be stripped before the lookup, or
-			// `-tp=2` reads as the token "tp=2" and misses the set entirely.
-			// A re-review probe caught that: -tp was recorded and -tp=2 was
-			// not, so the equals form of the same flag still produced a false
-			// equality.
-			short := strings.TrimPrefix(arg, "-")
-			if eq := strings.Index(short, "="); eq >= 0 {
-				short = short[:eq]
-			}
-			if long, ok := shortFlagAliases[short]; ok {
-				noteUnaccounted(params, long)
-			}
 			continue
 		}
 

@@ -36,15 +36,7 @@ import (
 // 128, and the digest asserted an equality it had never verified. The set is
 // hashed so an incompletely-read configuration can never collide with a
 // fully-read one.
-// Version 3 widens WHAT COUNTS AS UNREAD, which changes the set for the same
-// Deployment and so changes the digest -- the derivation rule above. An
-// adversarial review broke the sharing property with measured collisions:
-// a boolean whose swallowed value could not resolve was dropped and not
-// recorded (`--enforce-eager $EXTRA_ARGS` hashed as no flag at all), and an
-// engine short alias was skipped entirely (`-q fp8` hashed as unquantized).
-// Both are recorded now, so configurations that used to collide no longer
-// do -- which is exactly the invalidation this constant exists to force.
-const FingerprintVersion = 3
+const FingerprintVersion = 2
 
 // fingerprintLength is how much of the digest reaches the label. 16 hex
 // characters is 64 bits: for the few hundred distinct engine configurations a
