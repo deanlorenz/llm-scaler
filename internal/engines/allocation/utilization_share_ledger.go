@@ -1020,11 +1020,16 @@ func (l *ShareLedger) BurstEndsWithin(role string, d time.Duration) bool {
 // role whose need does not swing is not judged -- a steady need with noise
 // crosses its midpoint every few readings, and counted as bursting with no
 // end it would unpace its partner's every short burst. The answer is the
-// same for each role of a model: the roles of one model -- prefill and decode
-// -- burst together but not for equally long; judged apart, one could take
-// its whole shortfall at once while its partner moves at the pace, and the
-// model would run the burst at a skewed ratio.
+// same for each swinging role of a model: the roles of one model -- prefill
+// and decode -- burst together but not for equally long; judged apart, one
+// could take its whole shortfall at once while its partner moves at the
+// pace, and the model would run the burst at a skewed ratio. A role whose own
+// need does not swing has no burst to end: its shortfall lasts, and it is
+// never held at the pace for its partner's.
 func (l *ShareLedger) ModelBurstEnds(role string, model []string, tm ShareTimings) bool {
+	if l.needBursts(role).spread < ShareFastSwingSpread {
+		return false
+	}
 	h := tm.unpacedHorizon()
 	roles := append([]string{role}, model...)
 	var swinging, bursting []string

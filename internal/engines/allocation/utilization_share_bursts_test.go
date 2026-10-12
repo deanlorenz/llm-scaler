@@ -144,18 +144,25 @@ func TestShareModelRolesArePacedTogether(t *testing.T) {
 
 // A steady need with noise is not a burst with no end: a decode role at 8
 // GPUs give or take 0.2, judged as bursting, unpaced its prefill's every
-// short burst whenever the noise sat above its midpoint. And the answer is
-// the model's: a role between bursts is paced with its partner whose burst
-// is ending, as the partner is with it.
+// short burst whenever the noise sat above its midpoint; D itself, with no
+// burst to end, is never paced for P's. And the answer is the model's: a
+// role between bursts is paced with its partner whose burst is ending, as the
+// partner is with it.
 func TestShareModelBurstEndsJudgesTheModelAsOne(t *testing.T) {
 	tm := ShareTimings{MoveLatency: 2 * time.Minute, SwingWindow: time.Hour}
 	l := burstLedger(nil, "P", 1, 1, 9, 9, 9, 1, 1, 9, 9)
-	burstLedger(l, "D", 8, 8.2, 7.8, 8.2, 8.2, 7.8, 8.2, 8.2, 8.2)
+	burstLedger(l, "D", 8, 7.6, 7.6, 8.4, 8.4, 7.6, 7.6, 8.4, 8.4)
 	if !l.ModelBurstEnds("P", nil, tm) {
-		t.Fatal("setup: P alone, 2 minutes into a 3-minute burst, is not expected to end within 2.5")
+		t.Fatal("setup: P alone, in a 3-minute burst, is not expected to end it within 2.5")
+	}
+	if b := l.needBursts("D"); b.ongoing == 0 || b.spread >= ShareFastSwingSpread {
+		t.Fatalf("setup: D must sit above its midpoint with a spread under %v, got %+v", ShareFastSwingSpread, b)
 	}
 	if !l.ModelBurstEnds("P", []string{"P", "D"}, tm) {
 		t.Fatal("D's steady need with noise unpaced P's short burst")
+	}
+	if l.ModelBurstEnds("D", []string{"P", "D"}, tm) {
+		t.Fatal("D, steady and short, is held at the pace for P's burst: its shortfall has no end")
 	}
 	l = burstLedger(nil, "P", 1, 1, 9, 9, 9, 1, 1, 1, 1)
 	burstLedger(l, "D", 1, 9, 9, 9, 1, 1, 1, 9, 9)
@@ -163,7 +170,7 @@ func TestShareModelBurstEndsJudgesTheModelAsOne(t *testing.T) {
 		t.Fatal("setup: P alone, between bursts 3 minutes long, is expected to end within 2.5")
 	}
 	if !l.ModelBurstEnds("D", nil, tm) {
-		t.Fatal("setup: D alone, 2 minutes into a 3-minute burst, is not expected to end within 2.5")
+		t.Fatal("setup: D alone, in a 3-minute burst, is not expected to end it within 2.5")
 	}
 	model := []string{"D", "P"}
 	if p, d := l.ModelBurstEnds("P", model, tm), l.ModelBurstEnds("D", model, tm); !p || !d {
@@ -212,6 +219,26 @@ func TestShareMeanCappedRolesAreListed(t *testing.T) {
 	}
 	if p := fastSwingPlan(false); len(p.MeanCapped) > 0 {
 		t.Fatalf("control: beside short bursts, %v listed as capped on the mean", p.MeanCapped)
+	}
+}
+
+// The mean is compared on the cap a role ends up with: where the others'
+// peaks leave room above both, the mean lowers nothing, and A is not
+// fast-swing-capped. Control: with no room, 5 on the mean is below 7 on the
+// reading.
+func TestShareMeanCapComparedWithTheRoom(t *testing.T) {
+	run := func(bPeak int) (onMean, onReading int) {
+		p := &sharePlanRun{in: SharePlanInput{Budget: 16},
+			byKey: map[string]ShareRole{"A": {Key: "A", Ceiling: 8, ReplicaGPUs: 1}},
+			peaks: map[string]int{"A": 6, "B": bPeak}}
+		peakSum := 6 + bPeak
+		return p.capWithRoom(ShareRole{Key: "A", Ceiling: 5}, peakSum), p.capWithRoom(ShareRole{Key: "A", Ceiling: 7}, peakSum)
+	}
+	if m, r := run(2); m != r {
+		t.Fatalf("room of 14 beside B's peak of 2: capped %d on the mean against %d on the reading, want both 8", m, r)
+	}
+	if m, r := run(14); m >= r {
+		t.Fatalf("control: no room beside B's peak of 14, the mean's %d is not below the reading's %d", m, r)
 	}
 }
 

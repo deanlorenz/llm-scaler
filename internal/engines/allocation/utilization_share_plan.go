@@ -688,9 +688,10 @@ func (p *sharePlanRun) capHeadroom(peakSum int) {
 			mean := p.l.MeanNeed(r.Key, r.Need)
 			onMean := views[i]
 			onMean.Need = mean
-			// Reported only where the mean lowers the cap: in whole replicas
-			// it often does not, an 8-GPU role above all.
-			if c := ShareCapSpare([]ShareRole{views[i], onMean}, p.in.Headroom.Replicas); c[1].Ceiling < c[0].Ceiling {
+			// Reported only where the mean lowers the cap the role ends up
+			// with: in whole replicas it often does not, an 8-GPU role above
+			// all, and the room the others' peaks leave can lift both.
+			if c := ShareCapSpare([]ShareRole{views[i], onMean}, p.in.Headroom.Replicas); p.capWithRoom(c[1], peakSum) < p.capWithRoom(c[0], peakSum) {
 				p.plan.MeanCapped = append(p.plan.MeanCapped, r.Key)
 			}
 			views[i] = onMean
@@ -698,15 +699,23 @@ func (p *sharePlanRun) capHeadroom(peakSum int) {
 	}
 	for _, c := range ShareCapSpare(views, p.in.Headroom.Replicas) {
 		r := p.byKey[c.Key]
-		if c.Ceiling > 0 {
-			room := shareRoomForOthers(p.in.Budget, peakSum-p.peaks[c.Key], max(r.ReplicaGPUs, 1), r.Ceiling)
-			r.Ceiling = max(c.Ceiling, room)
-		}
+		r.Ceiling = p.capWithRoom(c, peakSum)
 		p.byKey[c.Key] = r
 	}
 	for i := range p.roles {
 		p.roles[i] = p.byKey[p.roles[i].Key]
 	}
+}
+
+// capWithRoom is the ceiling capHeadroom gives role c, capped by
+// ShareCapSpare: no lower than what the other roles' peaks leave of the budget
+// (shareRoomForOthers). A role without a ceiling keeps its own.
+func (p *sharePlanRun) capWithRoom(c ShareRole, peakSum int) int {
+	r := p.byKey[c.Key]
+	if c.Ceiling <= 0 {
+		return r.Ceiling
+	}
+	return max(c.Ceiling, shareRoomForOthers(p.in.Budget, peakSum-p.peaks[c.Key], max(r.ReplicaGPUs, 1), r.Ceiling))
 }
 
 // fastSwingers are the roles capped on their mean need (capHeadroom): those
