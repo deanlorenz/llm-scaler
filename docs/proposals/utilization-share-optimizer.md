@@ -930,8 +930,8 @@ When the group acts:
   the reversal hold nor the confirmation cycles: it starts on the first cycle,
   and the transfer is logged with `skippedWaits=true`. Everything else still
   applies: the cancelled pair's hold, an aborted donor's back-off, an
-  exhausted donor (`GivingBusy`), the admission test above (the donor's
-  target and keep). The two thresholds are the rule's hysteresis: after the move
+  exhausted donor (`GivingBusy`), the admission test above (the pair's
+  worst-off improves, the donor keeps its target and keep). The two thresholds are the rule's hysteresis: after the move
   the donor is at or below 0.6 and the receiver below 0.9, so the reverse move
   cannot qualify until demand itself changes by their ratio, about 1.5x. Every
   short role is above 0.9, so in practice the donor's load decides. Both
@@ -1170,31 +1170,33 @@ When the group acts:
   **transfer**: one receiver replica, funded by a **donor set** — one or more
   donor replicas, from one or more models, that open a hole for **each pod** of
   that replica, on a node that fits it whenever node information exists (§6.5).
-  **A transfer from one donor is admitted only if** the receiver is below its
-  whole-replica target, and the donor is above its own and stays at or above
-  it after giving (`Ḡ'_d ≥ G*_d`), and at or above its keep.
-
-  This is the anti-oscillation rule: a move goes only from a role above its
-  target to one below its own and never takes the donor below its target, so a
-  receiver is never above its target while its donor is below, and the next
-  plan has no reason to move the replica back. The check is on what the donor
-  keeps: a donor replica larger than its target's step (an 8-GPU replica of a
-  role whose replicas are otherwise 4) would otherwise take it below.
-
-  A **donor set** (§6.5) is admitted only if both hold:
+  **A transfer is admitted only if both hold:**
 
   ```text
   min(z over receiver and every donor, after) > min(z over the same roles, before)   the worst-off role improves
-  every donor is in band after the move, or still above its target (Ḡ'_d ≥ Ĝ_d)     no donor is pushed out of band
+  every donor keeps its target after the move                                         no donor is pushed below it
   ```
 
-  "In band" is the predicate of §6.1 step 3, with the same half-replica
-  tolerance. A single-donor move was once admitted on the same two tests; the
-  simplification after round 20 (§13) replaced them with the target check
-  above, since the switch-off study found the band never changed a move and
-  the `z` test near-neutral. A transfer for an owed floor (§5.5 case 5)
-  bypasses the admission, and §6.7's holds; it may still never take a donor
-  below its own floor.
+  The first condition is the anti-oscillation rule: every admitted move strictly
+  improves the worst-off role among those it touches, so no sequence of moves
+  returns to an earlier state. A move the targets allow can still fail it: a
+  donor above its ceiling would give a role that does not need it headroom it
+  already has (`TestShareMoveImprovesTheWorstOff`). It is also the rule the
+  whole-node simulator's P/D cells rest on: switched off, two P/D models on
+  1x8 replicas left more of their demand unserved (0.027 -> 0.038 at a
+  20-minute swing, 0.038 -> 0.046 at 30 minutes) and, at 20 minutes, nearly
+  doubled their churn (14 -> 26). The second is judged per donor kind. A single donor
+  keeps at least its whole-replica target and its keep after giving
+  (`Ḡ'_d ≥ G*_d`): a move goes only from a role above its target to one below
+  its own, and the check is on what the donor keeps, which a donor replica
+  larger than its target's step (an 8-GPU replica of a role whose replicas are
+  otherwise 4) would otherwise take below. A **donor set** (§6.5) keeps every
+  donor in band after the move, or still above its target (`Ḡ'_d ≥ Ĝ_d`),
+  "in band" being the predicate of §6.1 step 3, with the same half-replica
+  tolerance (`donorInBand`). A single donor was judged on that band until the
+  simplification after round 20 (§13), which found it never changed a move.
+  A transfer for an owed floor (§5.5 case 5) bypasses the admission, and
+  §6.7's holds; it may still never take a donor below its own floor.
 
   With demand held fixed, the first condition alone guarantees convergence: each
   admitted move makes the group's sorted list of `z` values strictly larger in
@@ -1326,12 +1328,16 @@ When the group acts:
   return with a receiver, cancelled as a transfer, redirectable by a wake. The
   returned replica's pod shape is still recorded when the return starts
   (`ShareTransfer.DonorPodGPUs`, from `shareReplicaPods`), for
-  `returnsCover` below. A receiver whose replica spans several pods is left to
-  a donor set, which places each pod -- unless returns still Releasing will
-  free at least one replica of it (`returnsCover`): those land
-  in the unassigned GPUs, where the idle fill places its pods, so a set would
-  drain a donor for GPUs already on their way. The receiver then waits,
-  counted `awaiting-return`.
+  `returnsCover` below. A receiver short while returns are still Releasing is
+  credited with the whole replicas of it they will free (`returnsCover`):
+  those land in the unassigned GPUs, where the idle fill places its pods, so a
+  transfer or a set would drain a donor for GPUs already on their way. Only
+  returned pods at least as large as the receiver's smallest pod count -- its
+  whole replica for a single-pod receiver -- so a 2x4 return frees nothing for
+  a 1x8 pod, and a return whose shape is not known counts for nothing. The
+  receiver waits for the rest of its shortfall only on donors, counted
+  `awaiting-return`. Until the simplification only a multi-pod receiver was
+  credited, and a single-pod one waited on the hand-over instead.
 
   **A return is cancelled
   while it is free** (`cancelReversals`: still Releasing, inside the
@@ -2633,7 +2639,9 @@ optimizer every cycle (§6.6).
        the role below its need shows `whole-replica-short`. Reserve refills
        keep only the floor: the debt is GPUs the budget does not have.
      - a donor is in band at or above its own whole-replica target
-       (`donorInBand`), whatever its continuous band says: a band wider
+       (`donorInBand`, still the test for a donor set; a single donor is
+       held to its target alone since the simplification), whatever its
+       continuous band says: a band wider
        than a replica's step put that target outside it, and a short
        receiver starved for good (152 of 20 000 random fleets, 59 of them
        all 8-GPU replicas). And a role below its need is never in band
@@ -2996,16 +3004,20 @@ optimizer every cycle (§6.6).
    sized on its demand before the hold (`AnalyzerResult.HeldRoleDemand`)
    and gives nothing while it lasts. The simplification after the merge: a
    switch-off study turned 25 rules off one at a time and reran the three
-   simulators, and three that changed no row, or almost none, were dropped
-   for the base behavior -- a single-donor move's continuous-band check and
-   its `z` test, replaced by the donor's whole-replica target (§6.2; the band
-   check never changed a move, since a donor already stops at its target), and
-   the hand-over of a return still releasing to a short receiver
-   (`fromReturns`), whose GPUs the idle fill places anyway, so a return is
-   always a return. Sims against round 20: 9 rows worse and 13 better by more
-   than 0.005 (41 osc / 160 whole-node / 42 owner rows), the worst +0.034
-   (owner O4, model B), the best -0.038 (owner N3, model B), whole-node total
-   21.682 -> 21.712. Rules the simulators cannot see stay: the return's
+   simulators. Two that changed no row, or almost none, were dropped for the
+   base behavior: a single donor's continuous-band check, replaced by its
+   whole-replica target (§6.2; the band never changed a move, since a donor
+   already stops at its target), and the hand-over of a return still
+   releasing to a short receiver (`fromReturns`), whose GPUs the idle fill
+   places anyway, so a return is always a return. Any short receiver, not
+   only a multi-pod one, is now credited with the returns that will free it
+   and shows `awaiting-return`. The `z` admission was kept: the study's first
+   cut dropped it too, and it alone cost the whole-node P/D cells (0.027 ->
+   0.038 at a 20-minute swing, churn 14 -> 26). Sims against round 20: no
+   osc or whole-node row moves by more than 0.005 (three whole-node rows by
+   0.002, two of them P/D and better; total 21.682 -> 21.680), and 4 owner
+   rows are worse, 3 better, the worst +0.015 (N3, model A), the best -0.033
+   (N3, model B). Rules the simulators cannot see stay: the return's
    scale-down band, `awaiting-return`, the keep, and a joining model's claim,
    whose test now fails without it.
 3. **Short window for urgent transfers**, through `wvaOwnership`, once

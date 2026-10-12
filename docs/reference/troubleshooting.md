@@ -208,9 +208,9 @@ Work down the list in order.
    Two more reasons on the same counter are not holds: `donor-peak` (while the
    quota holds every model's peak, a model already at its need takes no
    headroom that would leave its donor below the donor's own recent peak, by
-   a single move or a donor set) and `awaiting-return` (a short model whose
-   replica spans several pods, such as a LeaderWorkerSet, is credited with
-   returns still releasing whose pods hold its pods, in whole replicas, and
+   a single move or a donor set) and `awaiting-return` (a short model is
+   credited with returns still releasing whose pods hold its pods, in whole
+   replicas, and
    only the rest is funded by draining other models; the model itself shows
    blocked reason `awaiting-release`). A third, `scale-down-band`, counts a
    return a model did not make because it would take the model lower than
