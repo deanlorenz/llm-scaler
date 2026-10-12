@@ -310,10 +310,28 @@ type acceleratorStabiliser interface {
 	StableAcceleratorFor(namespace, variantName, accelerator string) string
 }
 
+// Ensure SaturationAnalyzer implements acceleratorStabiliser.
+//
+// A dynamic assertion that nothing pins is a fallback waiting to become
+// permanent. Measured: renaming the method on the concrete type and updating
+// that package's own tests leaves `go build`, `go vet`, saturation 339/339 and
+// the whole 157-spec steadystate suite green, while runV2AnalysisOnly silently
+// goes back to publishing the raw accelerator for good. This line turns that
+// into a build error that names the missing method.
+var _ acceleratorStabiliser = (*saturation.SaturationAnalyzer)(nil)
+
 // staleHistoryEvictor is the part of the saturation analyzer this file needs.
 // saturationV2Analyzer is typed domain.Analyzer so tests can inject, so the
 // eviction entry point is reached through an assertion rather than a direct
 // call.
+// Ensure SaturationAnalyzer implements staleHistoryEvictor.
+//
+// The same hole as above, and here it is not hypothetical: this entry point
+// was written with no caller anywhere on the reconcile path, so the analyzer
+// kept one entry per variant it had ever seen for the lifetime of the process.
+// An unpinned assertion is how that reaches production looking healthy.
+var _ staleHistoryEvictor = (*saturation.SaturationAnalyzer)(nil)
+
 type staleHistoryEvictor interface {
 	EvictStaleHistory() saturation.Evicted
 }

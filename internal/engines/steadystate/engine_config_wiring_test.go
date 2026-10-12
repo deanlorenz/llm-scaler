@@ -12,6 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
@@ -221,6 +222,28 @@ func TestRunV2AnalysisOnly_PublishesEachVariantsConfig(t *testing.T) {
 		seriesLabels(t, registry, constants.WVAEngineConfig, constants.LabelVariantName),
 		"the analysis path must publish the configuration of every variant it "+
 			"pre-populates the capacity store from")
+
+	// The accelerator label is published under the stabilised reading, reached
+	// through an assertion on this field. The compile-time var beside the
+	// interface pins the concrete TYPE; this pins the FIELD, which is what the
+	// assertion actually tests -- engine.go builds the analyzer through
+	// WithHorizons, and a wrapper returned from there would satisfy the var and
+	// fail here. This is the only spec that wires the real analyzer.
+	stabiliser, stabilises := e.saturationV2Analyzer.(acceleratorStabiliser)
+	require.True(t, stabilises,
+		"the real analyzer stopped satisfying acceleratorStabiliser, so the "+
+			"metric is publishing the raw accelerator and nothing else noticed")
+
+	// Compared against the stabiliser MEASURED, not a GPU name retyped here.
+	// This fixture names no accelerator, so the stable value is the unresolved
+	// reading itself; a hardcoded name asserts a value this path never
+	// produces. The case where raw and stable actually differ needs a warmed
+	// memo and lives in TestPublishedAcceleratorIsTheOneTheKeyUses.
+	raw := accelerator.GetAcceleratorNameFromScaleTarget(va, st)
+	assert.ElementsMatch(t, []string{stabiliser.StableAcceleratorFor("ns", "v1", raw)},
+		seriesLabels(t, registry, constants.WVAEngineConfig, constants.LabelAccelerator),
+		"the accelerator label must be what the stabiliser reports for the "+
+			"reading this path computed")
 	assert.ElementsMatch(t, []string{"128"},
 		seriesLabels(t, registry, constants.WVAEngineConfig, "max_num_seqs"))
 
