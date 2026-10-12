@@ -971,10 +971,10 @@ func (l *ShareLedger) RecentPeak(role string, now time.Time, d time.Duration) fl
 }
 
 // LongBursts reports whether role's longest burst -- a run of need above the
-// midpoint of its recorded range, completed or under way when the history
-// starts (needBursts) -- lasted at least d.
+// midpoint of its recorded range, completed or under way (needBursts,
+// sofar) -- lasted at least d.
 func (l *ShareLedger) LongBursts(role string, d time.Duration) bool {
-	return l.needBursts(role).longest >= max(d, 1)
+	return l.needBursts(role).sofar() >= max(d, 1)
 }
 
 // BurstsLong reports whether role bursts (LongBursts) over a range of at
@@ -982,15 +982,15 @@ func (l *ShareLedger) LongBursts(role string, d time.Duration) bool {
 // drifting across the middle of a narrow range.
 func (l *ShareLedger) BurstsLong(role string, d time.Duration) bool {
 	b := l.needBursts(role)
-	return b.longest >= max(d, 1) && b.spread >= ShareLongBurstSpread
+	return b.sofar() >= max(d, 1) && b.spread >= ShareLongBurstSpread
 }
 
 // SwingsFast reports whether role's need swings faster than d: at least two
-// bursts completed, none lasting d, over a range of at least
-// ShareFastSwingSpread of its highest need.
+// bursts completed, none -- the one under way included -- lasting d, over a
+// range of at least ShareFastSwingSpread of its highest need.
 func (l *ShareLedger) SwingsFast(role string, d time.Duration) bool {
 	b := l.needBursts(role)
-	return b.completed >= 2 && b.longest < d && b.spread >= ShareFastSwingSpread
+	return b.completed >= 2 && b.sofar() < d && b.spread >= ShareFastSwingSpread
 }
 
 // BurstEndsWithin reports whether role's burst is expected to end within d:
@@ -1073,6 +1073,15 @@ type shareBursts struct {
 	// spread is the history's range as a fraction of its highest need (of
 	// one GPU, at least).
 	spread float64
+}
+
+// sofar is the longest burst including the one under way. A model in its
+// first long burst -- already longer than a move, still running -- is a long
+// burster now, not once it ends: read on completed bursts alone, it did not
+// cap a fast swinger beside it on its mean, and its own short bursts before
+// it kept it reading as a fast swinger for as long as the long one lasted.
+func (b shareBursts) sofar() time.Duration {
+	return max(b.longest, b.ongoing)
 }
 
 // needBursts reads role's need history as bursts: runs of need above the

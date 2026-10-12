@@ -3006,7 +3006,12 @@ optimizer every cycle (§6.6).
    boundary of the current fleet -- as need, so each idle fill raised the
    next (A 1 -> 5 replicas with no load, the cap on). A held role is now
    sized on its demand before the hold (`AnalyzerResult.HeldRoleDemand`)
-   and gives nothing while it lasts.
+   and gives nothing while it lasts. After the merge, a deferred item
+   (§15): a burst under way counts toward a role's longest
+   (`shareBursts.sofar`), so a model in its first long burst caps a fast
+   swinger beside it on its mean and stops reading as a fast swinger itself
+   (sims: 0 rows worse, 3 owner rows better, the largest 0.206 -> 0.169;
+   whole-node total unchanged at 21.682). Not measured on a cluster.
 3. **Short window for urgent transfers**, through `wvaOwnership`, once
    managed-keda-behavior lands (§6.4), gated on a persistent hard imbalance,
    not on the load limits alone (§15).
@@ -3158,13 +3163,6 @@ Decided, not built here:
   prefill `minReplicaCount` sized from its peak prompt-token rate (the recipe
   is in the reference, "For model owners"); with short prompts, prefill is
   rightly a donor.
-- **A burst under way counts as long.** `LongBursts`, `BurstsLong` and
-  `SwingsFast` read completed bursts only (`needBursts`: `longest`), so a
-  model in its first long burst -- one already longer than a move, still
-  running -- does not yet cap a fast swinger on its mean (§5.1), and a role
-  whose burst under way is long still reads as swinging fast. Reading
-  `max(longest, ongoing)` in those three is the fix; it changes simulated
-  rows, so it waits for its own simulator pass.
 - **The move latency per receiver.** `ShareTimings.MoveLatency` now takes
   the saturation analyzer's measured replica start, the slowest of the
   group's roles (`ShareReplicaStart`), so a whole-node model's 10 minutes is
