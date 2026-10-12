@@ -3152,3 +3152,31 @@ Decided, not built here:
   prefill `minReplicaCount` sized from its peak prompt-token rate (the recipe
   is in the reference, "For model owners"); with short prompts, prefill is
   rightly a donor.
+- **A burst under way counts as long.** `LongBursts`, `BurstsLong` and
+  `SwingsFast` read completed bursts only (`needBursts`: `longest`), so a
+  model in its first long burst -- one already longer than a move, still
+  running -- does not yet cap a fast swinger on its mean (§5.1), and a role
+  whose burst under way is long still reads as swinging fast. Reading
+  `max(longest, ongoing)` in those three is the fix; it changes simulated
+  rows, so it waits for its own simulator pass.
+- **Learn the move latency per role.** `ShareTimings.MoveLatency` allows a
+  fixed 5 minutes for the receiver's start, where a whole-node replica of a
+  large model can take about 10. For such models a burst can look longer
+  than a move, and the pacing (`unpacedHorizon`) and the fast-swinger cap
+  lean toward moving. Recording each role's observed time from raise to
+  Ready on its fills, and using a high quantile of it, is the fix.
+- **The scale-down band for headroom moves.** A return never takes its role
+  below where today's scale-down would leave it (`bandKeep`, §6.2), and a
+  transfer to a receiver short of its need rightly may. A headroom move, to
+  a receiver already at its need, still can: holding every transfer to the
+  band blocked a rising P/D prefill at each handover and took the whole-node
+  simulator's worst P/D cell from 0.038 to 0.093. Banding those moves safely
+  needs the donor's need trend, so that a donor whose demand is falling gives
+  and one whose demand holds keeps.
+- **Judge a return on the busiest pod.** A return is made while the role's
+  load stays at or below `returnSpareWhenLoadAtMost`, read over the fleet.
+  On the round-20 cluster run a pod held 235 queued requests while its seven
+  siblings sat idle, and the role still read calm; a give-back started
+  (and was cancelled) during it. Gating returns on the deepest per-pod queue
+  too is the fix. The queue itself is the load balancer's routing, not the
+  planner's: today's optimizer showed the same shape at 150 requests.
