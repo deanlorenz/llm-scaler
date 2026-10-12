@@ -9,10 +9,21 @@ import (
 // fastSwingTarget is A's integer target in a contended quota of 10, at the
 // crest of its demand (6, holding 3), beside B in its trough (0.5, holding 2).
 // A's history swings between 2 and 6 every 2 minutes, far faster than a move
-// (12 minutes at simTimings). B's history peaks at 8 for 30 minutes when
-// bLong, else in 4-minute bursts, so either way the peaks (6 + 8) do not fit
-// together.
+// (12 minutes at simTimings). B's history peaks at 8 for 30 minutes, from 10
+// minutes into it, when bLong (a burst under way when the history starts is
+// not counted complete), else in 4-minute bursts, so either way the peaks
+// (6 + 8) do not fit together.
 func fastSwingTarget(bLong bool) int {
+	for _, v := range fastSwingPlan(bLong).Evaluation.Roles {
+		if v.Key == "A" {
+			return v.Integer
+		}
+	}
+	panic("no A")
+}
+
+// fastSwingPlan is the plan fastSwingTarget reads A's target from.
+func fastSwingPlan(bLong bool) SharePlan {
 	tm := simTimings()
 	t0 := time.Unix(100000, 0)
 	l := NewShareLedger()
@@ -23,7 +34,7 @@ func fastSwingTarget(bLong bool) int {
 		}
 		b := 0.5
 		since := at.Sub(t0.Add(-100 * time.Minute))
-		if bLong && since < 30*time.Minute || !bLong && since%(20*time.Minute) < 4*time.Minute {
+		if bLong && since >= 10*time.Minute && since < 40*time.Minute || !bLong && since%(20*time.Minute) < 4*time.Minute {
 			b = 8
 		}
 		l.RecordNeeds(map[string]float64{"A": a, "B": b}, at, tm)
@@ -37,12 +48,7 @@ func fastSwingTarget(bLong bool) int {
 	if !p.HeadroomCapped {
 		panic("setup: the peaks (6 + 8 of 10) do not fit; the cap must be on")
 	}
-	for _, v := range p.Evaluation.Roles {
-		if v.Key == "A" {
-			return v.Integer
-		}
-	}
-	panic("no A")
+	return p
 }
 
 // A model whose demand swings faster than a move is capped on its mean need
@@ -71,7 +77,7 @@ func TestShareSwingsFastAndBurstsLong(t *testing.T) {
 		}
 		return l
 	}
-	fast := record(2, 6, 6, 2, 6, 6, 2, 2)
+	fast := record(2, 2, 6, 6, 2, 2, 6, 6, 2, 2)
 	if !fast.SwingsFast("R", 3*time.Minute) {
 		t.Error("two completed 2-minute bursts do not swing fast at 3 minutes")
 	}
@@ -85,17 +91,17 @@ func TestShareSwingsFastAndBurstsLong(t *testing.T) {
 		t.Error("a need within a tenth of its peak swings fast")
 	}
 
-	long := record(0.5, 8, 8, 8, 8, 0.5)
+	long := record(0.5, 8, 8, 8, 8, 0.5, 0.5)
 	if !long.BurstsLong("R", 4*time.Minute) {
 		t.Error("a completed 4-minute burst from 0.5 to 8 does not burst long at 4 minutes")
 	}
 	if long.BurstsLong("R", 5*time.Minute) {
 		t.Error("a 4-minute burst bursts long at 5 minutes")
 	}
-	if record(6, 8, 8, 8, 8, 6).BurstsLong("R", 4*time.Minute) {
+	if record(6, 8, 8, 8, 8, 6, 6).BurstsLong("R", 4*time.Minute) {
 		t.Error("a need between 6 and 8 bursts long")
 	}
-	if !record(6, 8, 8, 8, 8, 6).LongBursts("R", 4*time.Minute) {
+	if !record(6, 8, 8, 8, 8, 6, 6).LongBursts("R", 4*time.Minute) {
 		t.Error("LongBursts, which takes no spread, changed")
 	}
 

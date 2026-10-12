@@ -635,6 +635,8 @@ var (
 		ScalingBlockedReversalHold,
 		ScalingBlockedSwinging,
 		ScalingBlockedTransferLimit,
+		ScalingBlockedBurstEnding,
+		ScalingBlockedFastSwingCapped,
 		ScalingBlockedDonorNotSteerable,
 		ScalingBlockedQuietPeriod,
 		ScalingBlockedMarksUnreadable,
@@ -701,6 +703,15 @@ const (
 	// ScalingBlockedTransferLimit indicates the role is short while its group
 	// already has the most transfers in flight it may run at once.
 	ScalingBlockedTransferLimit = "transfer-limit"
+	// ScalingBlockedBurstEnding indicates the role is short with a hard
+	// imbalance confirmed, but its model's burst is expected to end before a
+	// move would land and serve, so it receives at the pace instead of its
+	// whole shortfall at once.
+	ScalingBlockedBurstEnding = "burst-ending"
+	// ScalingBlockedFastSwingCapped indicates the role's need swings faster
+	// than a move can follow while another model bursts for longer than one,
+	// so its headroom is capped on its mean need, below its current reading.
+	ScalingBlockedFastSwingCapped = "fast-swing-capped"
 	// ScalingBlockedDonorNotSteerable indicates the role's pods could not be
 	// marked when it was asked to give (one was not Ready or not scheduled, or
 	// the patch failed), and it is backing off before it is asked again.

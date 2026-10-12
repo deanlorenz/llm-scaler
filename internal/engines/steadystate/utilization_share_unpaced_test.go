@@ -33,7 +33,7 @@ func TestUtilizationShareShortBurstReceiverReportsTheTransferLimit(t *testing.T)
 		for range allocation.ShareUnpacedAfterCycles {
 			l.ConfirmHard(map[string]bool{"ns/B/both": true})
 		}
-		return shareBlockedReasons(l, g, ev, nil, allocation.ShareSkipWaits{}, t0, tm)["ns/B"]
+		return shareBlockedReasons(l, g, ev, nil, nil, allocation.ShareSkipWaits{}, t0, tm)["ns/B"]
 	}
 	if got := reasons(true); !slices.Contains(got, constants.ScalingBlockedTransferLimit) {
 		t.Fatalf("B, whose burst ends before a move lands, moves at the pace: want transfer-limit, got %v", got)

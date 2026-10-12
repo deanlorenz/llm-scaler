@@ -64,13 +64,14 @@ func lAfterBurst(burst time.Duration) (moved int, perCycle []int) {
 // once: what it takes all at once lands after the burst, or serves it for
 // minutes, and drains its donors for their own next burst. L's last burst
 // left it 1.1 move latencies -- the move would land, and serve a tenth of a
-// latency -- and then 30 seconds. Control: with twice a latency left, or no
-// completed burst on record, it takes the whole shortfall over two cycles,
-// as TestShareHardImbalanceTakesTheWholeShortfall does.
+// latency. Control: with twice a latency left, with no completed burst on
+// record, or once the burst under way has outlasted the last (30 seconds) --
+// its history no longer predicts it -- it takes the whole shortfall over two
+// cycles, as TestShareHardImbalanceTakesTheWholeShortfall does.
 func TestShareBurstEndingFirstMovesAtThePace(t *testing.T) {
 	lat := spareTimings().moveLatency()
 	const ongoing = 115 * time.Second
-	for _, burst := range []time.Duration{lat*11/10 + ongoing, 30 * time.Second} {
+	for _, burst := range []time.Duration{lat*11/10 + ongoing} {
 		moved, perCycle := lAfterBurst(burst)
 		for i, n := range perCycle {
 			if n > ShareMaxReplicasPerCycle {
@@ -82,7 +83,7 @@ func TestShareBurstEndingFirstMovesAtThePace(t *testing.T) {
 			t.Fatalf("burst %v: L, short and hard-imbalanced, received nothing: %v", burst, perCycle)
 		}
 	}
-	for _, burst := range []time.Duration{2*lat + ongoing, 0} {
+	for _, burst := range []time.Duration{2*lat + ongoing, 0, 30 * time.Second} {
 		if moved, perCycle := lAfterBurst(burst); moved != 5 {
 			t.Fatalf("control, burst %v: Q -> L moved %v over two cycles, want 5", burst, perCycle)
 		}

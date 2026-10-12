@@ -970,11 +970,11 @@ func (l *ShareLedger) RecentPeak(role string, now time.Time, d time.Duration) fl
 	return peak
 }
 
-// LongBursts reports whether role's longest completed burst -- a run of need
-// above the midpoint of its recorded range -- lasted at least d.
+// LongBursts reports whether role's longest burst -- a run of need above the
+// midpoint of its recorded range, completed or under way when the history
+// starts (needBursts) -- lasted at least d.
 func (l *ShareLedger) LongBursts(role string, d time.Duration) bool {
-	b := l.needBursts(role)
-	return b.completed > 0 && b.longest >= d
+	return l.needBursts(role).longest >= max(d, 1)
 }
 
 // BurstsLong reports whether role bursts (LongBursts) over a range of at
@@ -982,7 +982,7 @@ func (l *ShareLedger) LongBursts(role string, d time.Duration) bool {
 // drifting across the middle of a narrow range.
 func (l *ShareLedger) BurstsLong(role string, d time.Duration) bool {
 	b := l.needBursts(role)
-	return b.completed > 0 && b.longest >= d && b.spread >= ShareLongBurstSpread
+	return b.longest >= max(d, 1) && b.spread >= ShareLongBurstSpread
 }
 
 // SwingsFast reports whether role's need swings faster than d: at least two
@@ -993,20 +993,76 @@ func (l *ShareLedger) SwingsFast(role string, d time.Duration) bool {
 	return b.completed >= 2 && b.longest < d && b.spread >= ShareFastSwingSpread
 }
 
-// BurstEndsWithin reports whether role's burst under way is expected to end
-// within d: what is left of its longest completed burst, after as long as the
-// one under way has lasted, is shorter than d. A role with no completed burst
-// on record has no expected end.
+// BurstEndsWithin reports whether role's burst is expected to end within d:
+// what is left of its last completed burst, after as long as the one under
+// way has lasted (none: all of it), is shorter than d. The last, not the
+// longest: one long burst would otherwise make every short one after it look
+// long for a whole window. There is no expected end -- the role's moves are
+// not held at the pace -- for a role with no completed burst on record, for
+// one whose need does not swing across ShareFastSwingSpread of its peak (a
+// steady need with noise crosses its own midpoint every few readings), and
+// for one whose burst under way has already outlasted the last: the history
+// does not predict it.
 func (l *ShareLedger) BurstEndsWithin(role string, d time.Duration) bool {
 	b := l.needBursts(role)
-	return b.completed > 0 && b.longest-b.ongoing < d
+	if b.completed == 0 || b.spread < ShareFastSwingSpread || b.ongoing >= b.last {
+		return false
+	}
+	return b.last-b.ongoing < d
+}
+
+// ModelBurstEnds reports whether the burst of role's model is expected to end
+// within an unpaced move's horizon (unpacedHorizon; BurstEndsWithin). The
+// model is role and the roles in model (role included or not; nil judges role
+// alone), and they are judged as one: every role whose need swings across
+// ShareFastSwingSpread of its peak and is in a burst must be expected to end
+// it, and while none is in one, every swinging role's last burst must be. A
+// role whose need does not swing is not judged -- a steady need with noise
+// crosses its midpoint every few readings, and counted as bursting with no
+// end it would unpace its partner's every short burst. The answer is the
+// same for each role of a model: the roles of one model -- prefill and decode
+// -- burst together but not for equally long; judged apart, one could take
+// its whole shortfall at once while its partner moves at the pace, and the
+// model would run the burst at a skewed ratio.
+func (l *ShareLedger) ModelBurstEnds(role string, model []string, tm ShareTimings) bool {
+	h := tm.unpacedHorizon()
+	roles := append([]string{role}, model...)
+	var swinging, bursting []string
+	for _, r := range roles {
+		if slices.Contains(swinging, r) {
+			continue
+		}
+		b := l.needBursts(r)
+		if b.spread < ShareFastSwingSpread {
+			continue
+		}
+		swinging = append(swinging, r)
+		if b.ongoing > 0 {
+			bursting = append(bursting, r)
+		}
+	}
+	judged := bursting
+	if len(judged) == 0 {
+		judged = swinging
+	}
+	if len(judged) == 0 {
+		return false
+	}
+	for _, r := range judged {
+		if !l.BurstEndsWithin(r, h) {
+			return false
+		}
+	}
+	return true
 }
 
 // shareBursts summarises a role's need history (ShareLedger.needBursts).
 type shareBursts struct {
-	// longest is the longest completed burst; completed counts them.
-	longest   time.Duration
-	completed int
+	// longest is the longest burst: a completed one, or one already under way
+	// when the history starts, whose length is a lower bound. last is the
+	// most recent completed burst; completed counts them.
+	longest, last time.Duration
+	completed     int
 	// ongoing is how long the burst under way has lasted, zero when none is.
 	ongoing time.Duration
 	// spread is the history's range as a fraction of its highest need (of
@@ -1015,28 +1071,49 @@ type shareBursts struct {
 }
 
 // needBursts reads role's need history as bursts: runs of need above the
-// midpoint of its recorded range. A run still going counts only as ongoing.
+// midpoint of its recorded range. Like PeakNeed it trusts no single reading:
+// the range runs from the lowest level two readings in a row stayed at or
+// below to the highest two reached, and a run starts and ends only on two
+// readings in a row on its new side. One reading -- a scrape glitch, or a
+// tenant's forged metric -- would otherwise move the midpoint above every
+// real burst, or end a burst and log a short one in its place. A run still
+// going counts only as ongoing. One already under way when the history
+// starts is not a completed burst -- its start is not known, and taken as
+// the history's it would be counted short, predicting an early end and
+// making a long burster look like a fast swinger -- but its length is a
+// lower bound, so it still counts toward the longest: a burster whose one
+// long burst straddles the window's start is still a long burster.
 func (l *ShareLedger) needBursts(role string) shareBursts {
 	s := l.needs[role]
 	if len(s) < 3 {
 		return shareBursts{}
 	}
-	hi, lo := s[0].need, s[0].need
-	for _, x := range s {
-		hi, lo = math.Max(hi, x.need), math.Min(lo, x.need)
+	hi, lo := math.Inf(-1), math.Inf(1)
+	for i := 1; i < len(s); i++ {
+		hi = math.Max(hi, math.Min(s[i-1].need, s[i].need))
+		lo = math.Min(lo, math.Max(s[i-1].need, s[i].need))
+	}
+	if hi <= lo {
+		// No level held for two readings above another: no bursts.
+		return shareBursts{}
 	}
 	mid := (hi + lo) / 2
 	out := shareBursts{spread: (hi - lo) / math.Max(hi, 1)}
 	var start time.Time
-	in := false
-	for _, x := range s {
+	in, cut := false, false
+	for i := 1; i < len(s); i++ {
+		a, b := s[i-1].need, s[i].need
 		switch {
-		case x.need > mid && !in:
-			in, start = true, x.at
-		case x.need <= mid && in:
+		case !in && a > mid && b > mid:
+			in, cut, start = true, i == 1, s[i-1].at
+		case in && a <= mid && b <= mid:
 			in = false
-			out.completed++
-			out.longest = max(out.longest, x.at.Sub(start))
+			d := s[i-1].at.Sub(start)
+			out.longest = max(out.longest, d)
+			if !cut {
+				out.completed++
+				out.last = d
+			}
 		}
 	}
 	if in {
@@ -1160,12 +1237,13 @@ func (l *ShareLedger) HardCycles(role string) int { return l.hard[role] }
 
 // Unpaced reports whether role's hard-imbalance moves skip the pace and the
 // concurrency limit: its hard imbalance has held ShareUnpacedAfterCycles
-// consecutive cycles, and its burst is not expected to end within
-// unpacedHorizon (BurstEndsWithin). Moves taken all at once for a burst that
-// ends first land after it, or serve it for minutes: they drain their donors,
-// often just before the donors' own bursts, so such a role moves at the pace.
-func (l *ShareLedger) Unpaced(role string, tm ShareTimings) bool {
-	return l.hard[role] >= ShareUnpacedAfterCycles && !l.BurstEndsWithin(role, tm.unpacedHorizon())
+// consecutive cycles, and its model's burst is not expected to end within
+// unpacedHorizon (ModelBurstEnds; model lists the roles of role's model,
+// ShareModelRoles). Moves taken all at once for a burst that ends first land
+// after it, or serve it for minutes: they drain their donors, often just
+// before the donors' own bursts, so such a role moves at the pace.
+func (l *ShareLedger) Unpaced(role string, model []string, tm ShareTimings) bool {
+	return l.hard[role] >= ShareUnpacedAfterCycles && !l.ModelBurstEnds(role, model, tm)
 }
 
 // MarkOver records which roles hold more than their target this cycle and

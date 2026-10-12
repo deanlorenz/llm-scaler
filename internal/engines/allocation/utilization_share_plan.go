@@ -65,8 +65,12 @@ type SharePlanInput struct {
 	Held map[string]int
 	// Thresholds is each role's scale-up threshold.
 	Thresholds map[string]float64
-	Budget     int
-	Tolerance  float64
+	// DownThresholds is each role's scale-down boundary. A role without one,
+	// or with one at or above its scale-up threshold, has no scale-down band
+	// (sharePlanRun.bandKeep).
+	DownThresholds map[string]float64
+	Budget         int
+	Tolerance      float64
 	// SkipWaits is when a hard imbalance skips the waits. The zero value is
 	// the default.
 	SkipWaits ShareSkipWaits
@@ -101,6 +105,27 @@ type SharePlanInput struct {
 	// a role gives back what it holds above them. The zero value spreads the
 	// whole spare.
 	Headroom ShareHeadroom
+	// Origins names each role's model (ShareGroup.Origins), so the roles of
+	// one model are paced together (ShareLedger.Unpaced). Nil judges each
+	// role alone.
+	Origins map[string]ShareRoleOrigin
+}
+
+// ShareModelRoles lists the roles of role's model in origins -- its prefill
+// and decode, or role alone -- sorted; nil when origins does not name role.
+func ShareModelRoles(origins map[string]ShareRoleOrigin, role string) []string {
+	o, ok := origins[role]
+	if !ok {
+		return nil
+	}
+	var out []string
+	for k, x := range origins {
+		if x.Namespace == o.Namespace && x.ModelID == o.ModelID {
+			out = append(out, k)
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 // ShareHeadroom is utilizationShare.maxHeadroomReplicas and
@@ -191,6 +216,10 @@ type SharePlan struct {
 	// claim at its peak need over the swing window, in whole replicas. Zero
 	// when the cap is off by configuration.
 	PeakClaimGPUs int
+	// MeanCapped are the roles whose headroom was capped on their mean need,
+	// below their reading, as fast swingers beside a long burster
+	// (sharePlanRun.fastSwingers).
+	MeanCapped []string
 	// UnknownPeaks are the roles counted at their ceiling in PeakClaimGPUs
 	// because no role's peak is known yet (peakClaims).
 	UnknownPeaks []string
@@ -233,6 +262,9 @@ const (
 	// several pods left to the idle fill, not a donor set, because returns
 	// still releasing will free at least one replica of it (returnsCover).
 	ShareWithheldAwaitingReturn = "awaiting-return"
+	// ShareWithheldScaleDownBand counts a return not made because it would
+	// take its role into its scale-down band (sharePlanRun.bandKeep).
+	ShareWithheldScaleDownBand = "scale-down-band"
 )
 
 // ShareDebt is how far a committed allocation stands above the budget, or 0.
@@ -594,6 +626,37 @@ func (p *sharePlanRun) needView(r ShareRole) ShareRole {
 	return r
 }
 
+// bandKeep is the least role dn, judged as v, keeps when it returns GPUs to
+// the quota: the GPUs at which its demand sits where today's scale-down
+// leaves it, a quarter of the way up from its scale-down boundary to its
+// scale-up threshold, in whole replicas and no more than its own ceiling --
+// not the one the headroom cap sets, which is the spare a return gives back.
+// A return is today's scale-down, done while nobody waits for the GPUs, and
+// goes no lower than it would. Transfers do not keep it: a receiver at its need whose demand is
+// still rising needs the next replica within a move's latency, and a P/D
+// role held back from it lost up to 0.055 more of its demand in the
+// whole-node simulator. Zero, no band, without a boundary below the
+// scale-up threshold.
+func (p *sharePlanRun) bandKeep(dn string, v ShareRole) int {
+	up, down := p.in.Thresholds[dn], p.in.DownThresholds[dn]
+	if !(down > 0) || !(up > down) || !(v.Need > 0) {
+		return 0
+	}
+	// Where today's scale-down leaves a role: a quarter of the way up its
+	// band (releaseTargetUtilization), not at the boundary. Kept at the
+	// boundary, a P/D role of 8-GPU replicas at a need of 20 kept 4 replicas
+	// where today's scale-down keeps 3.
+	target := down + (up-down)/4
+	g := max(v.ReplicaGPUs, 1)
+	keep := g * int(math.Ceil(v.Need*up/target/float64(g)-1e-9))
+	for _, r := range p.in.Roles {
+		if r.Key == dn && r.Ceiling > 0 {
+			keep = min(keep, r.Ceiling)
+		}
+	}
+	return keep
+}
+
 // capHeadroom caps each role's headroom (ShareCapSpare,
 // maxHeadroomReplicas by weight) because the quota is contended: peakSum,
 // the sum of every role's claim at its peak need over the swing window
@@ -622,7 +685,15 @@ func (p *sharePlanRun) capHeadroom(peakSum int) {
 	for i, r := range p.roles {
 		views[i] = p.needView(r)
 		if fast[r.Key] {
-			views[i].Need = p.l.MeanNeed(r.Key, r.Need)
+			mean := p.l.MeanNeed(r.Key, r.Need)
+			onMean := views[i]
+			onMean.Need = mean
+			// Reported only where the mean lowers the cap: in whole replicas
+			// it often does not, an 8-GPU role above all.
+			if c := ShareCapSpare([]ShareRole{views[i], onMean}, p.in.Headroom.Replicas); c[1].Ceiling < c[0].Ceiling {
+				p.plan.MeanCapped = append(p.plan.MeanCapped, r.Key)
+			}
+			views[i] = onMean
 		}
 	}
 	for _, c := range ShareCapSpare(views, p.in.Headroom.Replicas) {
@@ -640,7 +711,9 @@ func (p *sharePlanRun) capHeadroom(peakSum int) {
 
 // fastSwingers are the roles capped on their mean need (capHeadroom): those
 // whose need swings faster than a move can follow (ShareLedger.SwingsFast),
-// while another role bursts for longer than a move (ShareLedger.BurstsLong).
+// while another role bursts for longer than a move (ShareLedger.BurstsLong)
+// and its peak needs more than its floor holds -- a burster its floor covers
+// waits on no release, and capping others for it only costs them.
 // Capped on its reading, a fast swinger takes idle GPUs at each crest; they
 // start serving as the crest ends, and parked on it -- a donor that is never
 // calm, often with long requests to drain -- they are what the long burst
@@ -652,7 +725,7 @@ func (p *sharePlanRun) capHeadroom(peakSum int) {
 // 12 minutes beside a steady one lost up to 0.03 more capped on its mean.
 func (p *sharePlanRun) fastSwingers() map[string]bool {
 	lat := p.tm.moveLatency()
-	if !slices.ContainsFunc(p.roles, func(r ShareRole) bool { return p.l.BurstsLong(r.Key, lat) }) {
+	if !slices.ContainsFunc(p.roles, func(r ShareRole) bool { return p.peaks[r.Key] > r.Floor && p.l.BurstsLong(r.Key, lat) }) {
 		return nil
 	}
 	out := map[string]bool{}
@@ -716,7 +789,7 @@ func (p *sharePlanRun) peakClaims() (map[string]int, int) {
 // at most ShareMaxReplicasPerCycle replicas, which the next cycle cancels
 // while they are free; the cycle after takes the rest of the shortfall.
 func (p *sharePlanRun) unpaced(rc string) bool {
-	return p.l.Unpaced(rc, p.tm)
+	return p.l.Unpaced(rc, ShareModelRoles(p.in.Origins, rc), p.tm)
 }
 
 // planningRoles records this cycle's needs and plans a swinging role on its
@@ -1163,8 +1236,10 @@ func (p *sharePlanRun) returnSpare() {
 		gd := max(give.GPUs, 1)
 		spare := float64(in.Headroom.spareReplicas(r) * max(r.ReplicaGPUs, 1))
 		floor := max(p.integ[dn], r.Floor, p.keep[dn])
+		// A return is today's scale-down, and goes no lower than it would.
+		band := p.bandKeep(dn, p.needView(r))
 		returned := 0
-		for p.work[dn]-gd >= floor && p.need(dn) <= load*(float64(p.work[dn]-gd)-spare) {
+		for p.work[dn]-gd >= max(floor, band) && p.need(dn) <= load*(float64(p.work[dn]-gd)-spare) {
 			t := l.Start(ShareTransfer{Donor: dn, DonorGPUs: gd, DonorVariant: give.Name, Entitled: true, Returned: true,
 				DonorPodGPUs: shareReplicaPods(give)}, in.Held, now, tm)
 			p.plan.Started = append(p.plan.Started, t)
@@ -1173,7 +1248,12 @@ func (p *sharePlanRun) returnSpare() {
 			p.work[dn] -= gd
 			returned++
 		}
-		if returned == 0 && p.work[dn]-gd >= floor {
+		switch {
+		case returned > 0 || p.work[dn]-gd < floor:
+		case p.work[dn]-gd < band && p.need(dn) <= load*(float64(p.work[dn]-gd)-spare):
+			// The band withheld it only if the load would have let it go.
+			p.plan.Withheld[ShareWithheldScaleDownBand]++
+		default:
 			p.plan.Withheld[ShareWithheldReturnNotCalm]++
 		}
 	}

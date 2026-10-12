@@ -27,7 +27,7 @@ func TestUtilizationShareAwaitingReturnIsAModelsReason(t *testing.T) {
 	}
 	ev := allocation.EvaluateShare(g.Roles, g.Committed, g.Thresholds, g.Budget, 0.15)
 	reasons := func(unfunded map[string]string) []string {
-		return shareBlockedReasons(allocation.NewShareLedger(), g, ev, unfunded, allocation.ShareSkipWaits{},
+		return shareBlockedReasons(allocation.NewShareLedger(), g, ev, unfunded, nil, allocation.ShareSkipWaits{},
 			time.Unix(0, 0), allocation.ShareTimings{})["ns/R"]
 	}
 	if got := reasons(map[string]string{"ns/R/both": allocation.ShareUnfundedAwaitingReturn}); !slices.Contains(got,

@@ -282,7 +282,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 		out.overrides = e.shareOverrides(g, variantKey, "restart quiet period")
 		out.promised = l.Promised() + l.WakeHeld(now)
 		out.reserveDebt = shareDebtNow(l, held, g.Budget)
-		out.blocked = shareBlockedReasons(l, g, ev, nil, shareSkipWaits(us), now, tm)
+		out.blocked = shareBlockedReasons(l, g, ev, nil, nil, shareSkipWaits(us), now, tm)
 		// Said, not only logged: a model under load that stops scaling for
 		// three minutes after an upgrade otherwise has no reason anywhere.
 		for _, r := range g.Roles {
@@ -304,11 +304,12 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	nodes, units, domains := e.shareNodeInputs(ctx, logger, g, accessor, l.Promised()+l.WakeHeld(now),
 		shareMarkOwned(l, nil), now)
 	plan := allocation.PlanShareTransfers(l, allocation.SharePlanInput{
-		Roles: g.Roles, Held: held, Thresholds: g.Thresholds, Budget: g.Budget, Tolerance: us.Tolerance,
+		Roles: g.Roles, Held: held, Thresholds: g.Thresholds, DownThresholds: g.DownThresholds, Budget: g.Budget, Tolerance: us.Tolerance,
 		SkipWaits: shareSkipWaits(us), ConfirmCycles: us.Stabilization.ConsecutiveCyclesBeforeMove,
 		Give: g.Give, Grow: g.Grow, Nodes: nodes, DonorUnits: units, DomainKey: domains,
 		WakeHeld: l.WakeHeld(now), PhysicalFree: g.PhysicalFree,
 		Headroom: allocation.ShareHeadroom{Capped: true, Replicas: us.MaxHeadroomReplicas, ReturnLoad: us.Stabilization.ReturnSpareLoad},
+		Origins:  g.Origins,
 	}, now, tm)
 	for _, id := range plan.Cancelled {
 		t := before[id]
@@ -431,7 +432,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	out.promised = l.Promised() + l.WakeHeld(now)
 	out.swinging = plan.Swinging
 	out.reserveDebt = shareDebtNow(l, held, g.Budget)
-	out.blocked = shareBlockedReasons(l, g, plan.Evaluation, plan.Unfunded, shareSkipWaits(us), now, tm)
+	out.blocked = shareBlockedReasons(l, g, plan.Evaluation, plan.Unfunded, plan.MeanCapped, shareSkipWaits(us), now, tm)
 	out.evaluation = &plan.Evaluation
 	out.headroomCapped = &plan.HeadroomCapped
 	// Said when it changes: what the cap does to every model's headroom
@@ -754,9 +755,10 @@ func shareDebtNow(l *allocation.ShareLedger, held map[string]int, budget int) in
 // shareBlockedReasons is each planned model's utilization-share blocked
 // reasons (section 9), keyed by namespace/model. Every planned model has an
 // entry, empty when nothing holds it back, so a reason that stops holding is
-// cleared.
+// cleared. meanCapped are the roles the plan capped on their mean need
+// (allocation.SharePlan.MeanCapped).
 func shareBlockedReasons(l *allocation.ShareLedger, g allocation.ShareGroup, ev allocation.ShareEvaluation,
-	unfunded map[string]string, rb allocation.ShareSkipWaits, now time.Time, tm allocation.ShareTimings) map[string][]string {
+	unfunded map[string]string, meanCapped []string, rb allocation.ShareSkipWaits, now time.Time, tm allocation.ShareTimings) map[string][]string {
 	out := map[string][]string{}
 	model := func(role string) string {
 		o := g.Origins[role]
@@ -823,6 +825,17 @@ func shareBlockedReasons(l *allocation.ShareLedger, g allocation.ShareGroup, ev 
 		if l.Swinging(r.Key, now) {
 			add(r.Key, constants.ScalingBlockedSwinging)
 		}
+		if slices.Contains(meanCapped, r.Key) {
+			add(r.Key, constants.ScalingBlockedFastSwingCapped)
+		}
+		peers := allocation.ShareModelRoles(g.Origins, r.Key)
+		// Short with its hard imbalance confirmed, yet moved at the pace:
+		// its model's burst is expected to end before a move lands. Reported
+		// whether or not it is receiving -- a role taking a replica a cycle
+		// through a long shortfall otherwise shows no reason at all.
+		if v.Headroom < 0 && l.HardCycles(r.Key) >= allocation.ShareUnpacedAfterCycles && l.ModelBurstEnds(r.Key, peers, tm) {
+			add(r.Key, constants.ScalingBlockedBurstEnding)
+		}
 		// What keeps a short role from receiving, when something does. A role
 		// at its scale-up threshold is exempt from the reversal hold for any
 		// donor that stays calm after giving a replica (a hard imbalance under
@@ -840,7 +853,7 @@ func shareBlockedReasons(l *allocation.ShareLedger, g allocation.ShareGroup, ev 
 			// Nor the concurrency limit, for one whose hard imbalance is
 			// confirmed and whose burst outlasts a move: its moves are unpaced.
 			case l.InFlight() >= allocation.ShareMaxConcurrentTransfers &&
-				(!urgent || !calmDonor || !l.Unpaced(r.Key, tm)):
+				(!urgent || !calmDonor || !l.Unpaced(r.Key, peers, tm)):
 				add(r.Key, constants.ScalingBlockedTransferLimit)
 			}
 		}

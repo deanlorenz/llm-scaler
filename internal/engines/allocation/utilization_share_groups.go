@@ -96,7 +96,10 @@ type ShareGroup struct {
 	PoolCarve int
 	// Thresholds is each role's scale-up threshold k_r.
 	Thresholds map[string]float64
-	Origins    map[string]ShareRoleOrigin
+	// DownThresholds is each role's scale-down boundary: the utilization
+	// below which today's optimizer scales it down.
+	DownThresholds map[string]float64
+	Origins        map[string]ShareRoleOrigin
 	// Frozen lists the models of this group that were not planned this cycle,
 	// as "namespace/model: why".
 	Frozen []string
@@ -166,6 +169,7 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 				Grow:            map[string]ShareVariant{},
 				Variants:        map[string][]ShareVariant{},
 				Thresholds:      map[string]float64{},
+				DownThresholds:  map[string]float64{},
 				Origins:         map[string]ShareRoleOrigin{},
 			}
 			groups[k] = g
@@ -214,6 +218,7 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 			g.Filled[r.Key] = roleFilledGPUs(records, stateMap, acc, r.role)
 			g.listed += roleCurrentGPUs(records, stateMap, acc, r.role)
 			g.Thresholds[r.Key] = req.CompositeSignal.ScaleUpThreshold
+			g.DownThresholds[r.Key] = req.CompositeSignal.ScaleDownBoundary
 			g.Origins[r.Key] = o
 			vs := variantsForRole(variantsOnType(records, acc), r.role)
 			for _, vc := range vs {

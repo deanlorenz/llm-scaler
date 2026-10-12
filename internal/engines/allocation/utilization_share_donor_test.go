@@ -8,7 +8,8 @@ import (
 // qAfterReadings is Q's commitment after a hard imbalance (L needs 11 on 3,
 // Q reads 0.5 on 7) when Q read the given needs at 975 and 990 -- inside its
 // 2-minute scale-down window for every cycle -- after 0.5 at 960. L's
-// history, when long, holds a completed burst longer than a move.
+// history, when long, holds a completed burst longer than a move, from a
+// minute into it (one under way when the history starts is not complete).
 func qAfterReadings(readings []float64, lLongBursts bool) int {
 	tm := spareTimings()
 	tm.Window = 2 * time.Minute // every reading stays inside it for every cycle
@@ -19,7 +20,7 @@ func qAfterReadings(readings []float64, lLongBursts bool) int {
 		end := start.Add(tm.moveLatency() * 2)
 		for at := start; at.Before(time.Unix(950, 0)); at = at.Add(30 * time.Second) {
 			need := 1.0
-			if at.Before(end) {
+			if !at.Before(start.Add(time.Minute)) && at.Before(end) {
 				need = 11
 			}
 			l.RecordNeeds(map[string]float64{"L": need}, at, tm)
@@ -71,7 +72,7 @@ func TestShareLongBursts(t *testing.T) {
 		}
 	}
 	l := NewShareLedger()
-	record(l, 1, 9, 9, 9, 9, 1)
+	record(l, 1, 9, 9, 9, 9, 1, 1)
 	if !l.LongBursts("R", 4*time.Minute) {
 		t.Error("a completed burst of 4 minutes is not long at 4 minutes")
 	}

@@ -128,7 +128,9 @@ func (l *ShareLedger) RestoreNeedHistory(h ShareNeedHistory, now time.Time, tm S
 			if !shareNeedValid(s.Need) || s.At.IsZero() || now.Sub(s.At) > tm.SwingWindow || s.At.Sub(now) > shareHistorySkew {
 				continue
 			}
-			samples = append(samples, shareNeedSample{at: s.At, need: s.Need})
+			// Bounded as a live need is (BuildShareGroups): a stored need
+			// out of any budget's range would overflow MeanNeed.
+			samples = append(samples, shareNeedSample{at: s.At, need: math.Min(s.Need, MaxShareBudgetGPUs)})
 		}
 		if len(samples) == 0 {
 			continue
