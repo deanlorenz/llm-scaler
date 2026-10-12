@@ -97,7 +97,7 @@ type ShareTransfer struct {
 	// back to the group (ShareCapSpare), started while no role was short of
 	// its own. It counts against neither the pace nor the concurrency limit.
 	// It has no Receiver: it goes to the unassigned GPUs, for the idle fill
-	// to raise whoever needs them.
+	// to raise whoever needs them, and so it is never redirected to a wake.
 	Returned bool
 	// DonorPodGPUs is the GPUs of each pod of the returned replica, when its
 	// shape is known: a return is credited only to a receiver whose pod one
@@ -348,11 +348,12 @@ func (l *ShareLedger) Transfers() []ShareTransfer {
 func (l *ShareLedger) InFlight() int {
 	seen := map[string]bool{}
 	for _, t := range l.transfers {
-		// A returned spare does not count: counted, a calm model's returns would hold every ordinary move for
-		// a release. A move that skipped the waits does: the unpaced moves of
-		// a hard imbalance pass the limit without consulting it, but an
-		// ordinary move started beside them would drain the same donor for
-		// headroom, and land after the burst it was not needed for.
+		// A returned spare does not count: counted, a calm model's returns
+		// would hold every ordinary move for a release. A move that skipped
+		// the waits does: the unpaced moves of a hard imbalance pass the
+		// limit without consulting it, but an ordinary move started beside
+		// them would drain the same donor for headroom, and land after the
+		// burst it was not needed for.
 		if t.Donor == "" || t.Returned {
 			continue
 		}
@@ -366,13 +367,12 @@ func (l *ShareLedger) InFlight() int {
 }
 
 // Unreleased is the GPUs releasing transfers took off their donors'
-// commitment and gave no receiver: all of a reserve refill's or an unassigned
-// return's, and whatever a transfer or a set takes beyond its receiver's
-// replica (an 8-GPU replica given to a 4-GPU receiver). The donors' pods
-// still run on them and the quota still counts them, so they are not idle
-// until released. Counted idle, the fill would raise a model into a full
-// quota, its pods would be refused at admission, and it would be raised again
-// at every fill timeout.
+// commitment and gave no receiver: all of a reserve refill's or a return's,
+// and whatever a transfer or a set takes beyond its receiver's replica (an
+// 8-GPU replica given to a 4-GPU receiver). The donors' pods still run on them
+// and the quota still counts them, so they are not idle until released.
+// Counted idle, the fill would raise a model into a full quota, its pods would
+// be refused at admission, and it would be raised again at every fill timeout.
 func (l *ShareLedger) Unreleased() int {
 	excess := map[string]int{}
 	for _, t := range l.transfers {
@@ -817,10 +817,10 @@ func (l *ShareLedger) Redirect(id string, hold time.Duration) (ShareTransfer, bo
 	return ShareTransfer{}, false
 }
 
-// redirectable is a transfer still releasing, for a receiver, and not part of
-// a donor set.
+// redirectable is a transfer still releasing, for a receiver, not part of a
+// donor set, and not a return.
 func redirectable(t *ShareTransfer) bool {
-	return t.State == ShareReleasing && t.Receiver != "" && t.SetID == ""
+	return t.State == ShareReleasing && t.Receiver != "" && t.SetID == "" && !t.Returned
 }
 
 // WakeHeld is the GPUs held for woken models now.

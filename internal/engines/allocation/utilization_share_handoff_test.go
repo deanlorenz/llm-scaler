@@ -35,11 +35,12 @@ func TestShareReturnRecordsItsShape(t *testing.T) {
 // donor replica fits R, so R is funded by a donor set -- unless returns D has
 // started are already freeing a replica of R.
 func lwsReceiverPlan(returns int) SharePlan {
-	return lwsReceiverPlanCapped(returns, 96)
+	return lwsReceiverPlanShaped(returns, 96, []int{8})
 }
 
-// lwsReceiverPlanCapped is lwsReceiverPlan with R's ceiling at rCeiling.
-func lwsReceiverPlanCapped(returns, rCeiling int) SharePlan {
+// lwsReceiverPlanShaped is lwsReceiverPlan with R's ceiling at rCeiling and
+// each return's pods shaped as shape.
+func lwsReceiverPlanShaped(returns, rCeiling int, shape []int) SharePlan {
 	tm := simTimings()
 	t0 := time.Unix(100000, 0)
 	l := NewShareLedger()
@@ -50,7 +51,7 @@ func lwsReceiverPlanCapped(returns, rCeiling int) SharePlan {
 	}
 	th := map[string]float64{"R": 0.8, "D": 0.8}
 	for range returns {
-		l.Start(ShareTransfer{Donor: "D", DonorGPUs: 8, DonorVariant: "d", Entitled: true, Returned: true, DonorPodGPUs: []int{8}},
+		l.Start(ShareTransfer{Donor: "D", DonorGPUs: 8, DonorVariant: "d", Entitled: true, Returned: true, DonorPodGPUs: shape},
 			held, t0.Add(-30*time.Second), tm)
 	}
 	in := SharePlanInput{Roles: roles, Held: held, Thresholds: th, Budget: 80,
@@ -76,7 +77,7 @@ func TestShareLWSReceiverWaitsOnReturns(t *testing.T) {
 	}
 	// R's ceiling of 32 leaves it one replica short: two returns of 8 cover
 	// it, and no set drains D.
-	p := lwsReceiverPlanCapped(2, 32)
+	p := lwsReceiverPlanShaped(2, 32, []int{8})
 	if n := toR(p); n != 0 {
 		t.Fatalf("a donor set started for R while 16 returned GPUs, all it lacks, release: %+v", p.Started)
 	}
@@ -93,8 +94,75 @@ func TestShareLWSReceiverWaitsOnReturns(t *testing.T) {
 	if p := lwsReceiverPlan(1); p.Withheld[ShareWithheldAwaitingReturn] != 0 {
 		t.Fatalf("R waited on 8 returned GPUs, half its replica: %v", p.Withheld)
 	}
+	// Returns of two 4-GPU pods free no node for an 8-GPU pod: nothing to
+	// wait on.
+	if p := lwsReceiverPlanShaped(2, 32, []int{4, 4}); p.Withheld[ShareWithheldAwaitingReturn] != 0 ||
+		p.Unfunded["R"] == ShareUnfundedAwaitingReturn {
+		t.Fatalf("R waited on 2x4 returns its 8-GPU pods do not fit: withheld %v, unfunded %v", p.Withheld, p.Unfunded)
+	}
 	if n := toR(lwsReceiverPlan(0)); n == 0 {
 		t.Fatal("control: with nothing returning, no donor set funded R")
+	}
+}
+
+// singlePodWaitPlan plans one cycle for R, a 1x8 role short of its need (14
+// on 8), beside Q, which has one 8-GPU return still releasing, its pods shaped
+// as shape (nil when not known).
+func singlePodWaitPlan(shape []int) SharePlan {
+	tm := simTimings()
+	t0 := time.Unix(1000, 0)
+	l := NewShareLedger()
+	held := map[string]int{"R": 8, "Q": 24}
+	roles := []ShareRole{
+		{Key: "R", Weight: 1, Need: 14, Floor: 8, Ceiling: 16, ReplicaGPUs: 8},
+		{Key: "Q", Weight: 1, Need: 2, Floor: 8, Ceiling: 64, ReplicaGPUs: 8},
+	}
+	tr := l.Start(ShareTransfer{Donor: "Q", DonorGPUs: 8, DonorVariant: "q", Entitled: true, Returned: true, DonorPodGPUs: shape},
+		held, t0.Add(-30*time.Second), tm)
+	l.ConfirmStarted(tr.ID, []string{"p"})
+	vs := map[string]ShareVariant{"Q": {Name: "q", GPUs: 8, PodGPUs: []int{8}}, "R": {Name: "r", GPUs: 8, PodGPUs: []int{8}}}
+	in := SharePlanInput{Roles: roles, Held: held, Thresholds: map[string]float64{"R": 0.8, "Q": 0.8}, Budget: 32,
+		Tolerance: 0.15, Give: vs, Grow: vs, Headroom: ShareHeadroom{Capped: true, Replicas: 1}}
+	return PlanShareTransfers(l, in, t0, tm)
+}
+
+// A single-pod receiver short by a replica waits on a return that will free
+// it, as a multi-pod one does, and says so: it is credited, no donor drains
+// for GPUs already on their way, and it shows awaiting-return. Controls: a 2x4
+// return frees no node for its 1x8 pod, and a return of unknown shape counts
+// for nothing; either way a donor funds it.
+func TestShareSinglePodReceiverWaitsOnReturns(t *testing.T) {
+	p := singlePodWaitPlan([]int{8})
+	if p.Unfunded["R"] != ShareUnfundedAwaitingReturn || p.Withheld[ShareWithheldAwaitingReturn] == 0 {
+		t.Fatalf("R waits on a 1x8 return and nothing said so: unfunded %v, withheld %v", p.Unfunded, p.Withheld)
+	}
+	for _, tr := range p.Started {
+		if tr.Receiver == "R" {
+			t.Fatalf("a donor drained for R while the return that covers it releases: %+v", tr)
+		}
+	}
+	for _, shape := range [][]int{{4, 4}, nil} {
+		p := singlePodWaitPlan(shape)
+		if p.Unfunded["R"] == ShareUnfundedAwaitingReturn || p.Withheld[ShareWithheldAwaitingReturn] != 0 {
+			t.Fatalf("return shaped %v: R waits on GPUs its pod cannot use: unfunded %v, withheld %v", shape, p.Unfunded, p.Withheld)
+		}
+	}
+}
+
+// A return is never redirected to a wake: it has no receiver whose GPUs a wake
+// could take. Pinned on the ledger even for a return restored with a receiver,
+// which the pod-mark validation rejects before it gets this far.
+func TestShareReturnIsNeverRedirected(t *testing.T) {
+	l := NewShareLedger()
+	l.Restore(ShareTransfer{ID: "r1", Donor: "Q", Receiver: "L", GPUs: 1, DonorGPUs: 1, Entitled: true, Returned: true,
+		Started: time.Unix(1000, 0), Deadline: time.Unix(2000, 0)}, 7)
+	if _, ok := l.Redirect("r1", time.Minute); ok {
+		t.Fatal("a return was redirected to a wake")
+	}
+	l.Restore(ShareTransfer{ID: "t1", Donor: "Q", Receiver: "L", GPUs: 1, DonorGPUs: 1,
+		Started: time.Unix(1000, 0), Deadline: time.Unix(2000, 0)}, 7)
+	if _, ok := l.Redirect("t1", time.Minute); !ok {
+		t.Fatal("control: a transfer to L was not redirected")
 	}
 }
 

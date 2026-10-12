@@ -419,6 +419,9 @@ func TestShareUnfundedRoleDoesNotBlockReturns(t *testing.T) {
 // A return still releasing stays a return when another role turns short: it
 // lands in the unassigned GPUs, where the idle fill places them, and is
 // neither handed to the short role nor cancelled while its own role is calm.
+// The short role waits on it (awaiting-return) instead of draining Q a second
+// time for the same GPUs: what the returns free is still Unreleased, so the
+// fill does not count it, and no transfer funds it either.
 func TestShareReturnStaysAReturnWhenAReceiverTurnsShort(t *testing.T) {
 	l := NewShareLedger()
 	plans := planEach(l, spareRun(2, 0.4, 7), 3)
@@ -428,6 +431,15 @@ func TestShareReturnStaysAReturnWhenAReceiverTurnsShort(t *testing.T) {
 	p := PlanShareTransfers(l, spareRun(5, 0.4, 7), time.Unix(1045, 0), spareTimings())
 	if len(p.Cancelled) != 0 {
 		t.Fatalf("returns cancelled while Q is calm: %v", p.Cancelled)
+	}
+	if qToL(p.Started) != 0 {
+		t.Fatalf("Q started transfers to L besides its returns: %+v", p.Started)
+	}
+	if n := l.Unreleased(); n != 5 {
+		t.Fatalf("unreleased %d, want the 5 returned GPUs, not idle until released", n)
+	}
+	if p.Unfunded["L"] != ShareUnfundedAwaitingReturn {
+		t.Fatalf("L waits on the returns and nothing said so: unfunded %v, withheld %v", p.Unfunded, p.Withheld)
 	}
 	n := 0
 	for _, tr := range l.Transfers() {

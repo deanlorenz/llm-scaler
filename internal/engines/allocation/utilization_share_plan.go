@@ -929,10 +929,10 @@ func (p *sharePlanRun) fund(rc string, donors []string) {
 		return // its last fill timed out with its pods Pending (HoldFill)
 	}
 	p.fromIdle(rc)
-	// Returns still releasing that will free whole replicas of a receiver
-	// whose replica spans several pods land in the unassigned GPUs, where the
-	// idle fill places its pods: they are credited, and only the rest is
-	// funded, which would otherwise drain a donor for GPUs already on their way.
+	// Returns still releasing that will free whole replicas of the receiver
+	// land in the unassigned GPUs, where the idle fill places its pods: they
+	// are credited, and only the rest is funded, which would otherwise drain a
+	// donor for GPUs already on their way.
 	if n := p.returnsCover(rc); n > 0 {
 		p.work[rc] += n
 		p.plan.Withheld[ShareWithheldAwaitingReturn]++
@@ -1007,19 +1007,23 @@ func (p *sharePlanRun) fromIdle(rc string) {
 	}
 }
 
-// returnsCover is the GPUs, in whole replicas of receiver rc -- whose
-// replica spans several pods -- that returns still releasing will free for
-// it, up to its target. A return is never handed to a receiver: it reaches
-// rc through the idle fill once released. Only returned pods at least as large as rc's pods count: two
-// 4-GPU pods do not hold an 8-GPU one, and a return whose shape is not known
-// counts for nothing. Each return is credited to one receiver per cycle.
+// returnsCover is the GPUs, in whole replicas of receiver rc, that returns
+// still releasing will free for it, up to its target. A return is never
+// handed to a receiver: it reaches rc through the idle fill once released.
+// Only returned pods at least as large as rc's smallest pod count -- its
+// whole replica, when its pods are not known: two 4-GPU pods do not hold an
+// 8-GPU one, and a return whose shape is not known counts for nothing. Each
+// return is credited to one receiver per cycle.
 func (p *sharePlanRun) returnsCover(rc string) int {
 	grow, ok := variantOf(p.in.Grow, rc, p.byKey[rc].ReplicaGPUs)
-	if !ok || len(grow.PodGPUs) <= 1 {
+	if !ok {
 		return 0
 	}
-	smallest := slices.Min(grow.PodGPUs)
 	g := max(grow.GPUs, 1)
+	smallest := g
+	if len(grow.PodGPUs) > 0 {
+		smallest = slices.Min(grow.PodGPUs)
+	}
 	want := p.integ[rc] - p.work[rc]
 	var ids []string
 	gpus := 0
