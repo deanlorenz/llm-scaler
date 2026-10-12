@@ -121,6 +121,28 @@ var _ = Describe("the fleet-shape change, through Analyze", func() {
 		return out2
 	}
 
+	It("reports each role's slowest measured start with its result", func() {
+		// Two decode replicas that took 70 s and 80 s to start, and a prefill
+		// that took 90 s: the result carries what Analyze measured, so the
+		// share planner paces moves on it (AnalyzerResult.RoleStartSeconds).
+		rms := make([]domain.ReplicaMetrics, 0, 3)
+		for i, s := range []float64{70, 80} {
+			rm := makeReplicaMetrics(fmt.Sprintf("d%d", i), decodeV, 400_000, kvCap, 0, 1000, 6000)
+			rm.Ready = true
+			rm.StartSeconds = s
+			rms = append(rms, rm)
+		}
+		p := makeReplicaMetrics("p0", prefillV, 8_065, 1_149_312, 0, 1000, 1)
+		p.Ready = true
+		p.StartSeconds = 90
+		rms = append(rms, p)
+		out, err := analyzer.Analyze(ctx, makeAnalyzerInput(rms, states(2)))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(out.RoleStartSeconds).To(HaveKey(domain.RoleDecode))
+		Expect(out.RoleStartSeconds[domain.RoleDecode]).To(BeNumerically(">=", 70))
+		Expect(out.RoleStartSeconds).To(HaveKeyWithValue(domain.RolePrefill, BeNumerically("==", 90)))
+	})
+
 	It("does not release the fleet on the shape it has just left", func() {
 		// Phase 1 of run biran-20260921-235843-225: 1000-token prompts,
 		// 6000-token generations, ten decode replicas carrying it.

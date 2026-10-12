@@ -586,12 +586,13 @@ a cluster, and none of them is fixed by a setting other than a floor:
   0.225). Such moves now wait for the pace when the model's last completed
   burst says this one ends before they land, which recovered most of the
   cost (0.247 before); the model shows `burst-ending` meanwhile.
-- **Whole-node moves take longer than the optimizer assumes.** A move's
-  latency is estimated as the donor's release, a fixed 5 minutes for the
-  receiver's start, and three cycles. A whole-node replica of a large model
-  can take about 10 minutes to start, so for such models a burst can look
-  longer than a move when it is not, and its moves skip the pace. Not yet
-  fixed.
+- **A move's latency is the slowest model's start.** A move's latency is
+  estimated as the donor's release, the receiver's start, and three
+  cycles. The start is the one the controller measures for the group's
+  slowest model (`wva_replica_start_seconds_estimate`; 5 minutes until a replica
+  has started), so a whole-node model's 10 minutes counts as 10. Being one
+  figure per group, a small model beside a whole-node one is paced on the
+  whole-node start.
 - **A dip in a slow-draining model's demand, right after the group starts.**
   At a group's first start, or after a restart with no usable stored history,
   no model's peak is known for about the first 12 minutes. A model holding

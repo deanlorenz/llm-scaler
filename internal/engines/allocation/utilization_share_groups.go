@@ -99,7 +99,11 @@ type ShareGroup struct {
 	// DownThresholds is each role's scale-down boundary: the utilization
 	// below which today's optimizer scales it down.
 	DownThresholds map[string]float64
-	Origins        map[string]ShareRoleOrigin
+	// StartSeconds is, for each role with a measured variant, how long a new
+	// replica of its slowest measured variant takes to become Ready
+	// (domain.AnalyzerResult.RoleStartSeconds); a role not measured is absent.
+	StartSeconds map[string]float64
+	Origins      map[string]ShareRoleOrigin
 	// Frozen lists the models of this group that were not planned this cycle,
 	// as "namespace/model: why".
 	Frozen []string
@@ -170,6 +174,7 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 				Variants:        map[string][]ShareVariant{},
 				Thresholds:      map[string]float64{},
 				DownThresholds:  map[string]float64{},
+				StartSeconds:    map[string]float64{},
 				Origins:         map[string]ShareRoleOrigin{},
 			}
 			groups[k] = g
@@ -219,6 +224,9 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 			g.listed += roleCurrentGPUs(records, stateMap, acc, r.role)
 			g.Thresholds[r.Key] = req.CompositeSignal.ScaleUpThreshold
 			g.DownThresholds[r.Key] = req.CompositeSignal.ScaleDownBoundary
+			if r.startSeconds > 0 {
+				g.StartSeconds[r.Key] = r.startSeconds
+			}
 			g.Origins[r.Key] = o
 			vs := variantsForRole(variantsOnType(records, acc), r.role)
 			for _, vc := range vs {
@@ -274,6 +282,9 @@ type shareRoleInput struct {
 	// held is whether the analyzer held this role's demand this cycle
 	// (domain.AnalyzerResult.HeldRoleDemand).
 	held bool
+	// startSeconds is the role's measured replica start, 0 when not measured
+	// (domain.AnalyzerResult.RoleStartSeconds).
+	startSeconds float64
 }
 
 // shareRolesForRequest builds one model's roles on acc, or says why the model
@@ -363,8 +374,9 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 				Ceiling:     ceiling,
 				ReplicaGPUs: max(g, 1),
 			},
-			role: role,
-			held: held,
+			role:         role,
+			held:         held,
+			startSeconds: sig.Result.RoleStartSeconds[role],
 		})
 	}
 	return out, ""

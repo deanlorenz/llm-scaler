@@ -1,6 +1,7 @@
 package allocation
 
 import (
+	"math"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -51,6 +52,37 @@ var _ = Describe("DeriveShareTimings", func() {
 		// uses it must not be aborted.
 		Expect(tm.ReleaseTimeout).To(BeNumerically(">", grace))
 	})
+
+	It("lands a move after the measured replica start, not the 5-minute estimate", func() {
+		bound := 300*time.Second + 15*time.Second + 30*time.Second + 30*time.Second
+		tm, src := DeriveShareTimings(ShareTimingInputs{Cycle: cycle, ReplicaStart: 10 * time.Minute}, nil)
+		Expect(src).To(HaveKeyWithValue("start", "measured"))
+		Expect(tm.MoveLatency).To(Equal(bound + 10*time.Minute + 3*cycle))
+		Expect(tm.SwingWindow).To(Equal(8 * tm.MoveLatency))
+
+		def, src := DeriveShareTimings(ShareTimingInputs{Cycle: cycle}, nil)
+		Expect(src).To(HaveKeyWithValue("start", "default"))
+		Expect(def.MoveLatency).To(Equal(bound + 5*time.Minute + 3*cycle))
+	})
+
+	It("bounds a measured replica start, so one stuck pod cannot freeze the pacing", func() {
+		tm, _ := DeriveShareTimings(ShareTimingInputs{Cycle: cycle, ReplicaStart: 2 * time.Hour}, nil)
+		bound := 300*time.Second + 15*time.Second + 30*time.Second + 30*time.Second
+		Expect(tm.MoveLatency).To(Equal(bound + 30*time.Minute + 3*cycle))
+	})
+
+	DescribeTable("ShareReplicaStart: the slowest measured role, bounded, bad readings ignored",
+		func(seconds map[string]float64, want time.Duration) {
+			Expect(ShareReplicaStart(seconds)).To(Equal(want))
+		},
+		Entry("none measured", map[string]float64(nil), time.Duration(0)),
+		Entry("the slowest of a group's roles", map[string]float64{"a": 120, "b": 600}, 10*time.Minute),
+		Entry("NaN, negative and zero ignored", map[string]float64{"a": math.NaN(), "b": -5, "c": 0}, time.Duration(0)),
+		Entry("NaN beside a real reading", map[string]float64{"a": math.NaN(), "b": 90}, 90*time.Second),
+		Entry("beyond the bound", map[string]float64{"a": 7200}, 30*time.Minute),
+		Entry("too large for a Duration", map[string]float64{"a": 1e300}, 30*time.Minute),
+		Entry("infinite", map[string]float64{"a": math.Inf(1)}, 30*time.Minute),
+	)
 
 	It("gives a gang-scheduled LWS more time to schedule", func() {
 		plain, _ := DeriveShareTimings(ShareTimingInputs{Cycle: cycle}, nil)

@@ -135,13 +135,12 @@ is pure loss and headroom costs nothing extra.
   that recovered most of the cost at 30 minutes (0.247 to 0.232 of demand
   unserved), still about 0.007 worse than before such moves stopped waiting
   for the pace.
-- **A whole-node move takes longer than the optimizer assumes.** The
-  optimizer estimates a move's latency as the donor's release plus a fixed
-  5-minute allowance for the receiver's start and three cycles; a whole-node
-  replica of a large model can take about 10 minutes to start. Burst-length
-  judgements (`burst-ending`, `fast-swing-capped`) are made against the
-  shorter figure, so for such models a burst can look longer than a move
-  when it is not. This is open.
+- **A move is paced on the slowest model's start.** The optimizer
+  estimates a move's latency as the donor's release, the measured start
+  of the group's slowest model (5 minutes until one has started) and three
+  cycles. Burst-length judgements (`burst-ending`, `fast-swing-capped`)
+  are made against it, so a small model sharing a quota with a whole-node
+  one is judged on the whole-node start.
 - **A dip in a slow-draining model's demand, right after the group starts.**
   At a group's first start, or after a restart with no usable stored history,
   no model's peak is known for about the first 12 minutes. A model holding

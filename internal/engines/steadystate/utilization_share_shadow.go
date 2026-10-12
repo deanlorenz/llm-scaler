@@ -464,7 +464,7 @@ func shareTimingSeries(tm allocation.ShareTimings, src allocation.ShareTimingSou
 			Source:  policyOr(constants.UtilizationShareParamReversalHold, "release", "window", "polling", "grace"),
 			Seconds: tm.ReversalHold.Seconds()},
 		{Param: constants.UtilizationShareParamSwingWindow,
-			Source:  policyOr(constants.UtilizationShareParamSwingWindow, "release", "window", "polling", "grace"),
+			Source:  policyOr(constants.UtilizationShareParamSwingWindow, "release", "start", "window", "polling", "grace"),
 			Seconds: tm.SwingWindow.Seconds()},
 	}
 }

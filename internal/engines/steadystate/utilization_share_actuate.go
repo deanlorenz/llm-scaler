@@ -586,10 +586,12 @@ func (e *Engine) shareOverrides(g allocation.ShareGroup, variantKey func(string,
 
 // shareTimingInputs collects the slowest donor configuration of a group: the
 // longest scale-down window, polling interval and termination grace among the
-// variants that can give, from their ScaledObjects and pod templates.
+// variants that can give, from their ScaledObjects and pod templates; and the
+// slowest measured replica start among its roles (ShareReplicaStart).
 func (e *Engine) shareTimingInputs(g allocation.ShareGroup,
 	accessor func(role, variant string) scaletarget.ScaleTargetAccessor) allocation.ShareTimingInputs {
-	in := allocation.ShareTimingInputs{Cycle: e.optimizeInterval()}
+	in := allocation.ShareTimingInputs{Cycle: e.optimizeInterval(),
+		ReplicaStart: allocation.ShareReplicaStart(g.StartSeconds)}
 	maxDur := func(cur **time.Duration, d time.Duration) {
 		if *cur == nil || d > **cur {
 			v := d

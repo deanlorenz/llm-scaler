@@ -9,9 +9,13 @@ const (
 	kedaDefaultPolling         = 30 * time.Second
 	k8sDefaultTerminationGrace = 30 * time.Second
 	hpaSyncPeriod              = 15 * time.Second
-	// shareModelLoadEstimate stands in for pod start and model load until a
-	// group has measured releases of its own.
+	// shareModelLoadEstimate stands in for pod start and model load until the
+	// analyzer has measured a replica start of the group's (ReplicaStart).
 	shareModelLoadEstimate = 5 * time.Minute
+	// shareMaxReplicaStart bounds a measured replica start: one pod stuck
+	// pulling an image for an hour would otherwise stretch every pacing
+	// horizon of its group with it.
+	shareMaxReplicaStart = 30 * time.Minute
 	// shareSchedulingAllowance is how long scheduling a receiver may take
 	// before its fill times out; a gang-scheduled LWS group gets twice this.
 	shareSchedulingAllowance = time.Minute
@@ -28,6 +32,34 @@ type ShareTimingInputs struct {
 	// LWS is true when any role of the group is a LeaderWorkerSet, whose
 	// groups are gang-scheduled.
 	LWS bool
+	// ReplicaStart is the measured time a new replica of the group takes to
+	// become Ready (ShareReplicaStart), zero when none is measured.
+	ReplicaStart time.Duration
+}
+
+// ShareReplicaStart is the slowest measured replica start among a group's
+// roles (ShareGroup.StartSeconds), at most shareMaxReplicaStart, or zero when
+// none is measured. The slowest, because the timings are the group's and a
+// move is not done until the receiver's replica serves: paced on the fastest
+// role, a whole-node model's moves would be judged to land in half the time
+// they take, and moved for bursts that end before they serve. A reading that
+// is not a positive number (NaN included) is ignored, and one beyond the bound
+// is taken at the bound -- compared in seconds, before it becomes a Duration
+// it may not fit.
+func ShareReplicaStart(startSeconds map[string]float64) time.Duration {
+	slowest := 0.0
+	for _, s := range startSeconds {
+		if s > slowest {
+			slowest = s
+		}
+	}
+	switch {
+	case !(slowest > 0):
+		return 0
+	case slowest >= shareMaxReplicaStart.Seconds():
+		return shareMaxReplicaStart
+	}
+	return time.Duration(slowest * float64(time.Second))
 }
 
 // ShareTimingSource says where each derived value came from, for the log line
@@ -44,7 +76,11 @@ type ShareTimingSource map[string]string
 //     timeout built on it does not abort a release that is merely slow;
 //   - the release time is the measured p90 once three releases have
 //     completed, else the bound; the hold and the swing window build on it,
-//     so a long drain grace that is rarely used does not stretch them.
+//     so a long drain grace that is rarely used does not stretch them;
+//   - a move lands after the release and the receiver's start: the measured
+//     replica start once the analyzer has one (ReplicaStart), else
+//     shareModelLoadEstimate; the move latency and the swing window build on
+//     it.
 func DeriveShareTimings(in ShareTimingInputs, l *ShareLedger) (ShareTimings, ShareTimingSource) {
 	src := ShareTimingSource{}
 	pick := func(name string, v *time.Duration, def time.Duration, from string) time.Duration {
@@ -72,7 +108,13 @@ func DeriveShareTimings(in ShareTimingInputs, l *ShareLedger) (ShareTimings, Sha
 	if in.LWS {
 		scheduling *= 2
 	}
-	latency := release + shareModelLoadEstimate + 3*in.Cycle
+	start := shareModelLoadEstimate
+	src["start"] = "default"
+	if in.ReplicaStart > 0 {
+		start = min(in.ReplicaStart, shareMaxReplicaStart)
+		src["start"] = "measured"
+	}
+	latency := release + start + 3*in.Cycle
 	return ShareTimings{
 		Window:         window,
 		ReleaseTimeout: bound*3/2 + 2*in.Cycle,

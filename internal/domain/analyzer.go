@@ -148,6 +148,13 @@ type AnalyzerResult struct {
 	// is. A consumer that would treat demand as what a role needs, rather than
 	// as what to keep, reads the lower of the two.
 	HeldRoleDemand map[string]float64
+
+	// RoleStartSeconds is, for each role with a measured variant, how long a
+	// new replica of its slowest measured variant took to become Ready, in
+	// seconds (nil or absent when none is measured). The slowest, not the
+	// fastest the throughput floor projects on: a consumer pacing work that
+	// is not done until the replica serves must not count on the fastest.
+	RoleStartSeconds map[string]float64
 }
 
 // VariantCapacity is one variant's entry in an analyzer's (D, P) signal, in

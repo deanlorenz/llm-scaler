@@ -50,6 +50,11 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 	d := c.priceDemand(caps)
 	total, held := c.applyFloorAndHolds(caps, d)
 
+	roleOf := make(map[string]string, len(c.rolesByVariant))
+	for variant, role := range c.rolesByVariant {
+		roleOf[variant] = canonicalRole(role)
+	}
+
 	return &domain.AnalyzerResult{
 		AnalyzerName:      a.Name(),
 		ModelID:           input.ModelID,
@@ -59,6 +64,7 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 		TotalDemand:       total,
 		RoleDemand:        d.roleDemand,
 		HeldRoleDemand:    held,
+		RoleStartSeconds:  a.slowestStartSecondsByRole(input, roleOf),
 	}, nil
 }
 

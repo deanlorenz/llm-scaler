@@ -1,6 +1,7 @@
 package allocation
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -82,5 +83,30 @@ func TestShareHeldDemandDoesNotRatchetTheIdleFill(t *testing.T) {
 	}
 	if !raised {
 		t.Fatal("control: on the held figure no role targets more than it holds; the test no longer shows the ratchet")
+	}
+}
+
+// The group carries each role's measured replica start from its analyzer
+// result, and the timings take the slowest: a whole-node model's 10 minutes,
+// not the 2 of the small model beside it. A reading that is not positive is
+// not carried.
+func TestShareGroupCarriesTheMeasuredStart(t *testing.T) {
+	reqs := make([]ModelScalingRequest, 0, 3)
+	for m, s := range map[string]float64{"A": 600, "B": 120, "C": math.NaN()} {
+		r := shareReq(m, "ns", 1000, 1)
+		r.CompositeSignal.Result.RoleStartSeconds = map[string]float64{domain.RoleBoth: s}
+		reqs = append(reqs, r)
+	}
+	groups := BuildShareGroups(reqs, []*ResourceConstraints{{Pools: map[string]ResourcePool{"A100": {Limit: 10, Used: 3}}}},
+		ShareGroupOptions{ClusterIsQuota: true})
+	if len(groups) != 1 || len(groups[0].Roles) != 3 {
+		t.Fatalf("setup: groups %+v, want one group of three roles", groups)
+	}
+	g := groups[0]
+	if len(g.StartSeconds) != 2 {
+		t.Fatalf("StartSeconds %v, want A's and B's only", g.StartSeconds)
+	}
+	if d := ShareReplicaStart(g.StartSeconds); d != 10*time.Minute {
+		t.Fatalf("the group's replica start is %v, want A's 10m", d)
 	}
 }

@@ -2190,7 +2190,7 @@ it takes: one rule changed reproduces each oscillation.
 | configured release bound | the stabilization window of the donors' ScaledObjects (`spec.advanced.horizontalPodAutoscalerConfig.behavior.scaleDown.stabilizationWindowSeconds`, 300 s if unset), plus the HPA's 15 s sync, plus the KEDA `pollingInterval` (30 s if unset), plus the donor pods' `terminationGracePeriodSeconds` from the scale target's pod template (leader and worker templates for an LWS; 30 s if unset). Each input is the **largest among the group's donors**: the timings are per group, set by its slowest donor, not per transfer. The scale-down `policies` are **not** included: a Pods/Percent policy that paces a release past the window (why a ten-replica release measured 420 s, not 300) is covered only by the 1.5× margin of the timeout below, and, once three releases have completed, by the measured release time |
 | release timeout | 1.5 × the configured release bound + 2 cycles — from configured values, an upper bound, so a release that is merely slow is not aborted |
 | reversal hold | 2 × release time, from a transfer's start (the opposite direction), or from a cancellation (that donor → receiver pair only) — the *measured* time, so a long drain grace that is rarely used does not stretch it |
-| decide-to-serve latency | release time + a fixed 5-minute estimate of pod start and model load + 3 cycles. Measuring it (decision to the receiver's pods Ready) from the transfers the ledger has completed is not built (§13) |
+| decide-to-serve latency | release time + the replica start + 3 cycles. The replica start is the saturation analyzer's measured start-to-Ready time of the group's slowest role (`AnalyzerResult.RoleStartSeconds`, `ShareReplicaStart`, at most 30 minutes), and a fixed 5 minutes until one is measured; its source is logged as `start` |
 | swing window | 8 × decide-to-serve latency |
 | fill timeout | the KEDA `pollingInterval` + the HPA's 15 s sync + 2 cycles + 1 minute of scheduling — Filling ends at *scheduled*, so this covers the scale-up's way through KEDA and the HPA and the scheduler, not model load. For an LWS receiver, + 1 minute for gang scheduling |
 | weight clamp | the smallest and largest class weights |
@@ -2905,8 +2905,10 @@ optimizer every cycle (§6.6).
      hole it cannot use, and the transfer ends `fill-timeout`;
    - the scale-down `policies` in the release bound (§8.4): the bound is the
      stabilization window + 15 s + polling + grace only;
-   - a **measured** decide-to-serve latency (§8.4): the code uses release
-     time + a fixed 5-minute load estimate + 3 cycles;
+   - a decide-to-serve latency measured end to end (§8.4): the code adds
+     the release time, the analyzer's measured replica start (5 minutes
+     until one is measured) and 3 cycles, so the queueing between them is
+     not measured;
    - a log line per group whenever a derived timing changes (§8.4): the
      timings' sources are logged once, when a ledger starts.
 
@@ -2989,11 +2991,10 @@ optimizer every cycle (§6.6).
    reports `fast-swing-capped` and `scale-down-band` only where they change
    the outcome. Still open: a burst still under way does not count as long
    (`LongBursts` reads completed bursts), so a model in its first long burst
-   does not yet cap a fast swinger. Also open:
-   `MoveLatency` underestimates whole-node moves -- it allows 5 minutes for
-   the receiver's start, where a whole-node replica of a large model can take
-   about 10 -- so for such models a burst can look longer than a move, and
-   the pacing and the fast-swinger cap lean toward moving. A third review
+   does not yet cap a fast swinger. `MoveLatency` allowed a fixed 5 minutes
+   for the receiver's start, where a whole-node replica of a large model can
+   take about 10; it now takes the analyzer's measured start of the group's
+   slowest role. A third review
    kept a role whose own need does not swing out of its partner's pace (its
    shortfall has no end) and compares the mean cap after the room the others'
    peaks leave. The cluster rerun on round 20 served the first burst from the
@@ -3164,12 +3165,15 @@ Decided, not built here:
   whose burst under way is long still reads as swinging fast. Reading
   `max(longest, ongoing)` in those three is the fix; it changes simulated
   rows, so it waits for its own simulator pass.
-- **Learn the move latency per role.** `ShareTimings.MoveLatency` allows a
-  fixed 5 minutes for the receiver's start, where a whole-node replica of a
-  large model can take about 10. For such models a burst can look longer
-  than a move, and the pacing (`unpacedHorizon`) and the fast-swinger cap
-  lean toward moving. Recording each role's observed time from raise to
-  Ready on its fills, and using a high quantile of it, is the fix.
+- **The move latency per receiver.** `ShareTimings.MoveLatency` now takes
+  the saturation analyzer's measured replica start, the slowest of the
+  group's roles (`ShareReplicaStart`), so a whole-node model's 10 minutes is
+  no longer judged as 5. Still open: it is one figure per group, so a small
+  model beside a whole-node one is paced on the whole-node start; it is 5
+  minutes until a replica of the group has started under the controller;
+  and the queueing between release and start is not measured. Timing each
+  transfer from decision to the receiver's pods Ready, per receiver, is the
+  fix.
 - **The scale-down band for headroom moves.** A return never takes its role
   below where today's scale-down would leave it (`bandKeep`, §6.2), and a
   transfer to a receiver short of its need rightly may. A headroom move, to
