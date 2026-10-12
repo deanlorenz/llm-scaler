@@ -114,6 +114,12 @@ make benchmark-two-model-verify
 
 Do **not** create a pool. Every share arm refuses to run while one is present.
 
+Keep the machine that runs these commands awake for the whole run. The load
+runs in the cluster, but the GPU sampler runs here: a laptop that went into
+standby for 36 minutes cost one arm its GPU-seconds, and the report refused
+the comparison. The sampler now writes a stall mark for such a gap, and the
+report then says that only the cost needs a rerun.
+
 **2. First arm: today's optimizer.**
 
 ```bash

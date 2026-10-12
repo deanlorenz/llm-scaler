@@ -172,7 +172,9 @@ def gpu_series(path, t0):
         except ValueError:
             continue
         ts = s.get("ts")
-        if ts is None or s.get("failed"):
+        # A stall mark is not a sample: it holds no Pods, and pricing it as
+        # zero accelerators would understate exactly the arm that lost time.
+        if ts is None or s.get("failed") or "stalled_since" in s:
             continue
         total = pool = lent = 0
         for p in s.get("pods", []):
@@ -189,6 +191,36 @@ def gpu_series(path, t0):
         out.append((ts - t0, total, pool, lent))
     out.sort(key=lambda r: r[0])
     return out
+
+
+def sampler_stalls(path):
+    """Seconds the sampler itself did not run, from its stall marks.
+
+    A failed poll is the cluster's answer; a stall is the sampler's host
+    (measured: 2185s of a laptop in standby). The load runs in the cluster
+    either way, so a stall loses the cost and not the latencies, and the
+    refusal says so rather than reading as a cluster that stopped answering.
+    """
+    total = 0
+    if not os.path.exists(path):
+        return total
+    for line in open(path):
+        try:
+            s = json.loads(line)
+        except ValueError:
+            continue
+        if "stalled_since" in s and s.get("ts") is not None:
+            total += max(0, s["ts"] - s["stalled_since"])
+    return total
+
+
+def stall_note(stalled):
+    """The refusal's second sentence when the sampler, not the cluster, stopped."""
+    if not stalled:
+        return ""
+    return (" %.0fs of it the sampler itself did not run (its host was suspended or "
+            "a poll blocked); the load ran in the cluster, so this arm's latencies "
+            "stand and only its cost needs a rerun." % stalled)
 
 
 def integrate(series, index, gap_limit=None):
@@ -747,8 +779,9 @@ def admissible(arms, max_queue_delay, max_short=300.0, max_overlap=0.0,
                                 "%.0fs window (%.0f%%). Accelerator-seconds are integrated "
                                 "from those samples, so a hole is priced as whatever the "
                                 "sample before it held -- and the cost half of this "
-                                "comparison is what the pool is being judged on."
-                                % (arm["name"], gapped, span, 100.0 * gapped / span))
+                                "comparison is what the pool is being judged on.%s"
+                                % (arm["name"], gapped, span, 100.0 * gapped / span,
+                                   stall_note(arm.get("stalled", 0))))
         drift = phase_drift(arm)
         arm["drift"] = drift
         overlap = burst_overlap(arm)
@@ -843,6 +876,7 @@ def main(argv):
             "rows": load_rows(os.path.join(d, "requests.jsonl")),
             "gpus": clip_series(gpu_series(os.path.join(d, "gpus.jsonl"), (meta or {}).get("t0", 0)),
                                 sched[-1]["end"] if sched else None),
+            "stalled": sampler_stalls(os.path.join(d, "gpus.jsonl")),
             "budget": load_budget(d),
             "work": pod_work(d),
             "queue_p95": None,

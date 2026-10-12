@@ -339,6 +339,27 @@ if gapped != 120:
 else:
     ok("a sampling hole longer than the limit is reported")
 
+case("a stall mark is neither a sample nor hidden")
+with tempfile.TemporaryDirectory() as d:
+    p = os.path.join(d, "gpus.jsonl")
+    with open(p, "w") as fh:
+        for s in ({"ts": 100, "pods": [{"gpus": 4}]},
+                  {"ts": 2285, "stalled_since": 100},
+                  {"ts": 2290, "pods": [{"gpus": 4}]}):
+            print(json.dumps(s), file=fh)
+    ser = report.gpu_series(p, 100)
+    stalled = report.sampler_stalls(p)
+    note = report.stall_note(stalled)
+    if [r[1] for r in ser] != [4, 4]:
+        fail("the stall mark was read as a sample: %s. It holds no Pods, so it prices the arm "
+             "that lost time at zero accelerators" % (ser,))
+    elif stalled != 2185:
+        fail("the stall was counted as %s seconds, not 2185" % stalled)
+    elif "latencies stand" not in note or report.stall_note(0) != "":
+        fail("the refusal does not say a stall loses only the cost: %r" % note)
+    else:
+        ok("a stall is skipped as a sample, counted, and named in the refusal")
+
 case("pool Pods: idle, lent, and always inside the total")
 with tempfile.TemporaryDirectory() as d:
     p = os.path.join(d, "gpus.jsonl")

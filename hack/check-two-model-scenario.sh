@@ -1017,6 +1017,70 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# The GPU sampler keeps writing. A share arm lost 2185s of samples with no line
+# saying why: the host was suspended. A hung API call freezes it the same way.
+# ---------------------------------------------------------------------------
+# run_bounded <seconds> <cmd...> -- in the background, killed at the limit, so a
+# sampler that hangs (or spins on a clock that never arrives) fails this check
+# instead of stalling it.
+run_bounded() {
+    local limit="$1"; shift
+    ( "$@" ) &
+    local pid=$! waited=0
+    while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt "$limit" ]; do
+        command sleep 1; waited=$((waited + 1))
+    done
+    kill "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    return 0
+}
+
+case_begin
+HANG="$WORK/hangbin"; mkdir -p "$HANG"
+# A kubectl that hangs unless the call carries a request timeout, and then
+# fails the way a timed-out call does.
+cat > "$HANG/kubectl" <<'HANGEOF'
+#!/usr/bin/env bash
+case "$*" in *--request-timeout=*) exit 1 ;; esac
+sleep 60
+HANGEOF
+chmod +x "$HANG/kubectl"
+SAMPLES="$WORK/hang-gpus.jsonl"
+hang_sample() { PATH="$HANG:$PATH" GPU_SAMPLE_SECONDS=1 sample_gpus "$SAMPLES" "$(( $(date +%s) + 3 ))" 2>/dev/null; }
+run_bounded 8 hang_sample
+if ! grep -q '"failed": true' "$SAMPLES" 2>/dev/null; then
+    fail "against an API call that hangs (and fails once timed out) the sampler wrote $(wc -l < "$SAMPLES" 2>/dev/null || echo 0) line(s) and no failure mark: a hung call silences it for as long as it hangs, and a failed one leaves a bare hole"
+else
+    ok "a hung API call times out and is marked as a failed poll"
+fi
+
+case_begin
+SAMPLES="$WORK/stall-gpus.jsonl"
+CLOCK="$WORK/clock"
+stall_sample() {
+    # The sampler's clock and sleep, moved by hand: the second sleep is a 3000s
+    # standby, and every other one is 5s.
+    echo 1000 > "$CLOCK"; echo 0 > "$CLOCK.n"
+    sampler_now() { cat "$CLOCK"; }
+    sleep() {
+        local n; n=$(( $(cat "$CLOCK.n") + 1 )); echo "$n" > "$CLOCK.n"
+        if [ "$n" -eq 2 ]; then echo $(( $(cat "$CLOCK") + 3000 )) > "$CLOCK"
+        else echo $(( $(cat "$CLOCK") + 5 )) > "$CLOCK"; fi
+    }
+    GPU_SAMPLE_SECONDS=5 sample_gpus "$SAMPLES" 4020 2>"$WORK/stall.err"
+}
+run_bounded 10 stall_sample
+if ! grep -q '"stalled_since": 1005' "$SAMPLES" 2>/dev/null; then
+    fail "a 3000s stall of the sampler's host left no stall mark: $(head -c 300 "$SAMPLES" 2>/dev/null). The report then cannot tell a suspended sampler from a cluster that stopped answering"
+elif [ "$(grep -c stalled_since "$SAMPLES")" -ne 1 ]; then
+    fail "the 5s sleeps were also marked as stalls: $(grep -c stalled_since "$SAMPLES") marks"
+elif ! grep -q 'did not run for 3000s' "$WORK/stall.err"; then
+    fail "the stall was marked but not said: $(cat "$WORK/stall.err")"
+else
+    ok "a stall of the sampler is written down and said, and ordinary sleeps are not"
+fi
+
+# ---------------------------------------------------------------------------
 # The schedule and the report, executed.
 # ---------------------------------------------------------------------------
 case_begin
@@ -1027,7 +1091,7 @@ else
 fi
 
 case_begin
-CASES_EXPECTED=59
+CASES_EXPECTED=61
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately rather than letting coverage drift out."
 else

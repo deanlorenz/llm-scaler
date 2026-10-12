@@ -226,6 +226,8 @@ POOL_RESERVE="${POOL_RESERVE:-1}"
 POOL_MIN_HOLD="${POOL_MIN_HOLD:-}"
 POOL_MAX_HOLD="${POOL_MAX_HOLD:-}"
 GPU_SAMPLE_SECONDS="${GPU_SAMPLE_SECONDS:-5}"
+# A kubectl duration (`20s`) for each of the sampler's API calls.
+GPU_SAMPLE_TIMEOUT="${GPU_SAMPLE_TIMEOUT:-20s}"
 OUT_ROOT="${OUT_ROOT:-$ROOT/two-model-results}"
 LOAD_IMAGE="${LOAD_IMAGE:-}"
 CACHE_CLAIM="${CACHE_CLAIM:-model-pvc}"
@@ -1665,16 +1667,29 @@ sample_gpus() {
     # A pool Pod that has been LENT carries the borrowing model's labels, so
     # lend and return are visible here without any metrics plumbing, which
     # matters on a cluster where Prometheus may not be reachable from this shell.
-    local out="$1" until_ts="$2" want
+    local out="$1" until_ts="$2" want now last=""
     : > "$out"
-    while [ "$(date +%s)" -lt "$until_ts" ]; do
+    while [ "$(sampler_now)" -lt "$until_ts" ]; do
+        # A POLL THAT NEVER RAN must leave a mark too. Measured: the share arm of
+        # a three-arm run has no line at all for 2185s -- not failed polls, the
+        # host running this loop sat in standby (lid closed) for those 36
+        # minutes, while the load Job went on in the cluster. The latencies were
+        # whole; the cost could not be priced, and the file said nothing about
+        # why. A wall-clock jump past what one slow poll can take is written
+        # down, so the report can name the stall instead of a bare hole.
+        now="$(sampler_now)"
+        if [ -n "$last" ] && [ $(( now - last )) -gt "$(sampler_stall_seconds)" ]; then
+            printf '{"ts": %s, "stalled_since": %s}\n' "$now" "$last" >> "$out"
+            warn "the GPU sampler did not run for $(( now - last ))s (host suspended, or a poll blocked); those seconds have no samples"
+        fi
+        last="$now"
         # What the Deployments ASKED for, beside what is actually Running.
         # Without this the arms cannot be told apart when one of them never got
         # the replicas it was allowed -- measured: an arm whose Deployments
         # scaled to 3 within four minutes and never had more than ONE replica
         # Available for the whole 36 minutes, because the rest could not be
         # placed. Its numbers described a one-replica fleet and nothing said so.
-        want="$(k get deploy -o json 2>/dev/null | jq -c '
+        want="$(k get deploy -o json --request-timeout="$GPU_SAMPLE_TIMEOUT" 2>/dev/null | jq -c '
             [.items[] | select(.metadata.name | test("decode|prefill"))
              | {(.metadata.name): (.spec.replicas // 0)}] | add // {}')"
         # Explicit, not ${want:-{}}: the brace inside that expansion terminates
@@ -1686,7 +1701,16 @@ sample_gpus() {
         # and the file simply had no lines for it, which is indistinguishable
         # from a namespace that held no accelerators. The report then priced
         # that arm at a fraction of the other's and printed the ratio.
-        if ! k get pods -o json 2>/dev/null | jq -c --argjson now "$(date +%s)" \
+        # The timeout keeps a hung API call from freezing the loop the same way:
+        # kubectl's default is to wait forever, and a wait writes nothing.
+        #
+        # kubectl's status is read on its own, not through a pipe into jq: with
+        # no pipefail the pipe's status is jq's, jq exits 0 on empty input, and
+        # the mark above was never written for a failed poll -- every one left
+        # a bare hole, exactly what it was added to prevent.
+        local pods_json line
+        if ! pods_json="$(k get pods -o json --request-timeout="$GPU_SAMPLE_TIMEOUT" 2>/dev/null)" || \
+           ! line="$(jq -c --argjson now "$(sampler_now)" \
             --argjson want "$want" '
           {ts: $now,
            pods: [ .items[]
@@ -1699,11 +1723,23 @@ sample_gpus() {
                 pool:  (.metadata.labels["llm-d.ai/warm-pool"] // ""),
                 serving: (.metadata.labels["llm-d.ai/inferenceServing"] // "")}
              | select(.gpus > 0) ],
-           desired: $want}' >> "$out" 2>/dev/null; then
-            printf '{"ts": %s, "failed": true}\n' "$(date +%s)" >> "$out"
+           desired: $want}' <<<"$pods_json" 2>/dev/null)" || [ -z "$line" ]; then
+            printf '{"ts": %s, "failed": true}\n' "$(sampler_now)" >> "$out"
+        else
+            printf '%s\n' "$line" >> "$out"
         fi
         sleep "$GPU_SAMPLE_SECONDS"
     done
+}
+
+# The sampler's clock, a function so the check can move it.
+sampler_now() { date +%s; }
+
+# Longer than a sleep plus two polls that each ran to their timeout: past it,
+# the loop did not run at all.
+sampler_stall_seconds() {
+    local t="${GPU_SAMPLE_TIMEOUT%s}"
+    echo $(( GPU_SAMPLE_SECONDS + 2 * t + 10 ))
 }
 
 # WHICH REPLICAS ACTUALLY DID THE WORK.
