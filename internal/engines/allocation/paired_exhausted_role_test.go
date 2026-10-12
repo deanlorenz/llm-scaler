@@ -122,3 +122,71 @@ var _ = Describe("allocateForModelPaired with a role at its ceiling", func() {
 		Expect(targets["prefill"]).To(BeNumerically(">", 1))
 	})
 })
+
+var _ = Describe("allocateForModelPaired with a role that needs nothing", func() {
+	// A role whose required capacity is zero commits nothing in the joint
+	// commit (its k is 0), so its only possible effect on the pass was a veto.
+	// Picking it anyway let an empty GPU pool on ITS accelerator abort the
+	// pass for a partner that needed capacity and had GPUs to take it -- and
+	// blamed the idle role as GPU-limited.
+	It("orders decode on free H200 while prefill needs nothing and its H100 pool is empty", func() {
+		e, variants, stateMap, targets := pairedFleet(1, 10, 1, 10, 0)
+		variants[0].AcceleratorName = "H200"
+		variants[1].AcceleratorName = "H100"
+		available := map[string]int{"H200": 8, "H100": 0}
+		limited := make(gpuLimitTracker)
+
+		roles, ps := initRoleState(&e)
+		pick := fairShareRolePick(1e9, roles, limited)
+		allocateForModelPaired(context.Background(), &e, variants, stateMap,
+			available, targets, pick, ps, roles)
+
+		// decodeRC 400 at 100 per replica: four more replicas.
+		Expect(targets["decode"]).To(Equal(5), "decode needs four replicas and has 8 free H200")
+		Expect(targets["prefill"]).To(Equal(1), "prefill needs nothing and must not grow")
+		Expect(limited).NotTo(HaveKey("prefill"),
+			"a role that asked for nothing was not held back by the GPU budget")
+		Expect(available["H200"]).To(Equal(4))
+	})
+
+	It("orders decode on one accelerator when only prefill's replica is too large to fit", func() {
+		e, variants, stateMap, targets := pairedFleet(1, 10, 1, 10, 0)
+		variants[0].AcceleratorName = "H100"
+		variants[1].AcceleratorName = "H100"
+		decode, prefill := stateMap["decode"], stateMap["prefill"]
+		decode.GPUsPerReplica, prefill.GPUsPerReplica = 2, 8
+		stateMap["decode"], stateMap["prefill"] = decode, prefill
+		available := map[string]int{"H100": 4}
+		limited := make(gpuLimitTracker)
+
+		roles, ps := initRoleState(&e)
+		pick := fairShareRolePick(1e9, roles, limited)
+		allocateForModelPaired(context.Background(), &e, variants, stateMap,
+			available, targets, pick, ps, roles)
+
+		Expect(targets["decode"]).To(Equal(3), "4 free GPUs at 2 per decode replica: two more")
+		Expect(targets["prefill"]).To(Equal(1))
+		Expect(limited).NotTo(HaveKey("prefill"))
+		Expect(limited).To(HaveKey("decode"), "decode wanted four and the budget held it to two")
+	})
+
+	// The control: a role that DOES need capacity and cannot get GPUs still
+	// keeps the pair together, as before. Spending GPUs on one side of a P/D
+	// fleet whose other side cannot follow buys no throughput.
+	It("still holds decode when prefill needs capacity and has no GPUs", func() {
+		e, variants, stateMap, targets := pairedFleet(1, 10, 1, 10, 400)
+		variants[0].AcceleratorName = "H200"
+		variants[1].AcceleratorName = "H100"
+		available := map[string]int{"H200": 8, "H100": 0}
+		limited := make(gpuLimitTracker)
+
+		roles, ps := initRoleState(&e)
+		pick := fairShareRolePick(1e9, roles, limited)
+		allocateForModelPaired(context.Background(), &e, variants, stateMap,
+			available, targets, pick, ps, roles)
+
+		Expect(targets["decode"]).To(Equal(1))
+		Expect(targets["prefill"]).To(Equal(1))
+		Expect(limited).To(HaveKey("prefill"), "prefill needed capacity and the budget had none")
+	})
+})

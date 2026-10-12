@@ -499,9 +499,19 @@ func allocateForModelPaired(
 		// 1119 and its demand floor asked for five replicas, with nine
 		// replicas of prefill headroom unused.
 		// See docs/proposals/prefill-starved-by-exhausted-role.md.
+		//
+		// NO DEMAND -- the role needs nothing this pass. It would commit k = 0
+		// in the joint commit below, so the only thing picking it could do is
+		// veto: an empty GPU pool on its accelerator aborted the pass for a
+		// partner that needed capacity and had GPUs to take it, and the picker
+		// marked the idle role GPU-limited. It is skipped before the pick, so
+		// it neither vetoes nor gets the blame.
 		picked := make([]string, 0, len(roles))
 		allPicked := true
 		for _, role := range roles {
+			if !(roleAggRemaining(pickerState, role) > 0) {
+				continue
+			}
 			v, capN := pick(role, variants, stateMap, available, targets)
 			if v == "" {
 				if roleAtCeiling(role, variants, stateMap, targets) {
