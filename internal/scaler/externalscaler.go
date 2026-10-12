@@ -242,30 +242,40 @@ func (h *Handler) desired(ctx context.Context, ref *pb.ScaledObjectRef) (int32, 
 // answer is static, and the answer KEDA gets when it reconciles a ScaledObject
 // decides what metric the HPA carries -- refusing it there leaves the HPA on
 // the Kubernetes CPU default until the next reconcile, which nothing may ever
-// trigger (see Server.NeedLeaderElection). KEDA asks again on every poll, and
-// those calls register the workload like any other.
+// trigger (see Server.NeedLeaderElection). KEDA asks again on every poll --
+// GetMetricSpecForScaling is a live gRPC call with no caching anywhere above
+// it, driven by a pollingInterval timer and by the external-metrics path
+// independently -- and those calls register the workload like any other.
 func (h *Handler) GetMetricSpec(ctx context.Context, ref *pb.ScaledObjectRef) (*pb.GetMetricSpecResponse, error) {
 	h.observe(ref)
-	// Logged at DEFAULT -- the shipped verbosity -- and that is deliberate for
-	// the one call in this file whose answer is not recoverable afterwards.
-	//
-	// KEDA builds the HPA's spec.metrics from this response when it reconciles
-	// a ScaledObject. If the call never arrives, the HPA is created with an
-	// empty metrics list, Kubernetes defaults it to Resource/cpu, and the
-	// workload scales on a CPU metric a cluster with no metrics-server cannot
-	// even evaluate -- while the ScaledObject reports Ready=True and WVA goes
-	// on publishing the correct replica count every cycle. Nothing in WVA's
-	// output distinguishes that from working.
+	// KEDA builds the HPA's spec.metrics from this response. If the call never
+	// arrives, the HPA is created with an empty metrics list, Kubernetes
+	// defaults it to Resource/cpu, and the workload scales on a CPU metric a
+	// cluster with no metrics-server cannot even evaluate -- while the
+	// ScaledObject reports Ready=True and WVA goes on publishing the correct
+	// replica count every cycle. Nothing in WVA's output distinguishes that
+	// from working.
 	//
 	// Until this line, it was not distinguishable from WVA's side at all:
-	// IsActive logged every 5 s at V(1) and this logged nothing, so the
-	// inconsequential poll was observable and the decisive, once-per-reconcile
-	// handshake was not. Two CI failures were investigated end to end without
-	// being able to answer "did KEDA ever ask?", and the answer had to be
-	// reconstructed from the KEDA operator's own log on a local cluster.
+	// IsActive logged every poll and this logged nothing, so the
+	// inconsequential call was observable and the decisive one was not. Two CI
+	// failures were investigated end to end without being able to answer "did
+	// KEDA ever ask?", and the answer had to be reconstructed from the KEDA
+	// operator's own log.
 	//
-	// Volume is one line per ScaledObject per KEDA reconcile, not per poll.
-	log.FromContext(ctx).Info("external scaler GetMetricSpec",
+	// V(1), beside IsActive, and NOT unconditionally. An earlier revision of
+	// this line logged at DEFAULT on two arguments that were both wrong:
+	//
+	//   - "one line per ScaledObject per KEDA reconcile, not per poll". KEDA
+	//     asks on every poll. Measured from the operator log of the failure
+	//     this line exists for: one ScaledObject, asked at 10:54:00, :05, :05,
+	//     :10, :15. Unconditional, that is a line per ScaledObject per poll
+	//     forever, at a level an operator cannot turn down.
+	//   - "the deployment passes no -v, so anything deeper never reaches an
+	//     operator". It passes no -v and therefore runs at logging.DEFAULT,
+	//     which is 2, so V(1) and V(2) both print. IsActive's own V(1) line is
+	//     the proof: 1174 of them in one 40-minute controller log.
+	log.FromContext(ctx).V(1).Info("external scaler GetMetricSpec",
 		"namespace", ref.GetNamespace(), "scaledObject", ref.GetName(),
 		"metricName", MetricName, "targetSize", 1)
 	return &pb.GetMetricSpecResponse{
@@ -322,14 +332,26 @@ func (h *Handler) GetMetrics(ctx context.Context, req *pb.GetMetricsRequest) (*p
 // predicate without waiting for a poll interval.
 func (h *Handler) IsActive(ctx context.Context, ref *pb.ScaledObjectRef) (*pb.IsActiveResponse, error) {
 	h.observe(ref)
+	logger := log.FromContext(ctx)
 	if !h.leader() {
+		// Logged for the same reason GetMetrics' refusal is, and it was missed
+		// there first: a refusal KEDA records and WVA does not leaves the
+		// component an operator reads first with no trace of its own answer.
+		// Both handlers refuse identically, so logging one and not the other
+		// just moved the blind spot.
+		logger.V(1).Info("external scaler IsActive refused: not the leader",
+			"namespace", ref.GetNamespace(), "scaledObject", ref.GetName())
 		return nil, errNotLeader
 	}
 	active, err := h.isActive(ctx, ref)
 	if err != nil {
+		// The error goes back to KEDA, which logs it; this records that WVA is
+		// where it came from.
+		logger.V(1).Info("external scaler IsActive failed",
+			"namespace", ref.GetNamespace(), "scaledObject", ref.GetName(), "err", err)
 		return nil, err
 	}
-	log.FromContext(ctx).V(1).Info("external scaler IsActive",
+	logger.V(1).Info("external scaler IsActive",
 		"namespace", ref.GetNamespace(), "scaledObject", ref.GetName(), "active", active)
 	return &pb.IsActiveResponse{Result: active}, nil
 }
