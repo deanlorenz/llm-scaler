@@ -2061,12 +2061,11 @@ func (e *Engine) applySaturationDecisions(
 		// Stage the just-computed decision on the in-memory VA so that
 		// act.EmitMetrics below — which reads
 		// Status.DesiredOptimizedAlloc.{NumReplicas,Accelerator}
-		// (see actuator.EmitMetrics) — publishes the fresh target rather than
-		// whatever was last persisted by the controller. This object is local
-		// to the engine; CRD persistence happens later, via the cache write
-		// (DecisionCache.Set) → controller patch path.
-		// Sanitize the sentinel out of the staged value so neither EmitMetrics
-		// nor the cache (which reuses statusAccelerator) ever sees it.
+		// (see actuator.EmitMetrics) — publishes the fresh target. This object
+		// is local to the engine and never persisted: the decision store that
+		// EmitMetrics writes is the only output.
+		// Sanitize the sentinel out of the staged value so EmitMetrics never
+		// sees it.
 		numReplicas := int32(targetReplicas)
 		statusAccelerator := acceleratorName
 		if !constants.IsAcceleratorResolved(statusAccelerator) {
