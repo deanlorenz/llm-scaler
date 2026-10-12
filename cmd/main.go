@@ -78,6 +78,7 @@ import (
 	"github.com/prometheus/client_golang/api"
 	promv1 "github.com/prometheus/client_golang/api/prometheus/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	inferencePoolV1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	inferencePoolV1alpha2 "sigs.k8s.io/gateway-api-inference-extension/apix/v1alpha2"
@@ -1054,22 +1055,43 @@ var (
 	nodeReadProbeOnce bool
 )
 
-// nodeReadProbe reports whether this controller can currently list nodes.
+// nodeReadProbeTimeout bounds the List inside the readiness probe. Shorter than
+// the probe's own timeoutSeconds (3s in config/base), so a slow API server yields
+// an answer here rather than a probe the kubelet abandons.
+const nodeReadProbeTimeout = 2 * time.Second
+
+// nodeReadProbe reports whether this controller may list nodes.
 //
 // It asks the API server rather than trusting a cached verdict from elsewhere in
 // the process, so that granting the RBAC recovers readiness on its own. `Limit: 1`
 // keeps it cheap: the question is whether the request is authorized, not what the
 // nodes contain.
+//
+// Only an authorization answer -- Forbidden or Unauthorized -- changes the
+// verdict. Any other error (a timeout, a 5xx, an API server restarting) says
+// nothing about RBAC, and failing readiness on it would take the pod out of the
+// external-scaler Service: with one replica that is the only endpoint KEDA can
+// reach, so an API-server blip became an actuation outage. Such an error keeps
+// the last verdict, Ready or not, and is retried after the TTL.
 func nodeReadProbe(ctx context.Context, c client.Reader) error {
 	nodeReadProbeMu.Lock()
 	defer nodeReadProbeMu.Unlock()
 	if nodeReadProbeOnce && time.Since(nodeReadProbeAt) < nodeReadProbeTTL {
 		return nodeReadProbeErr
 	}
+	listCtx, cancel := context.WithTimeout(ctx, nodeReadProbeTimeout)
+	defer cancel()
 	nodes := &corev1.NodeList{}
-	err := c.List(ctx, nodes, client.Limit(1))
-	nodeReadProbeAt, nodeReadProbeErr, nodeReadProbeOnce = time.Now(), err, true
-	return err
+	err := c.List(listCtx, nodes, client.Limit(1))
+	nodeReadProbeAt, nodeReadProbeOnce = time.Now(), true
+	switch {
+	case err == nil, apierrors.IsForbidden(err), apierrors.IsUnauthorized(err):
+		nodeReadProbeErr = err
+	default:
+		ctrl.Log.WithName("setup").Info("node-list readiness probe could not get an answer; "+
+			"keeping the previous verdict", "err", err.Error())
+	}
+	return nodeReadProbeErr
 }
 
 // runWarmPool reconciles the warm pools of ONE namespace until ctx ends.
