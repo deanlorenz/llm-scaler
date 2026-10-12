@@ -229,6 +229,13 @@ func main() {
 	setupLog := ctrl.Log.WithName("setup")
 	setupLog.Info("Logger initialized")
 
+	// The process's ONE signal context. ctrl.SetupSignalHandler may be called only
+	// once (a second call panics), so it is taken here and handed to every
+	// startup step as well as to mgr.Start: a SIGTERM during a Prometheus
+	// validation retry or a ConfigMap bootstrap then ends the process at once,
+	// instead of after a backoff of unknown length.
+	signalCtx := ctrl.SetupSignalHandler()
+
 	// Get REST config early (needed for config loading)
 	restConfig := ctrl.GetConfigOrDie()
 
@@ -254,9 +261,7 @@ func main() {
 		setupLog.Error(err, "unable to build a client to resolve the cluster policy namespace")
 		os.Exit(1)
 	}
-	// Not ctrl.SetupSignalHandler(): that may be called only once per process, and
-	// mgr.Start() is its rightful owner. A second call panics.
-	if err := controller.ResolvePolicyNamespace(context.Background(), policyProbe, cfg); err != nil {
+	if err := controller.ResolvePolicyNamespace(signalCtx, policyProbe, cfg); err != nil {
 		setupLog.Error(err, "unable to resolve where cluster policy comes from")
 		os.Exit(1)
 	}
@@ -512,8 +517,7 @@ func main() {
 		Status:    controllerStatus,
 	}
 
-	ctx := context.Background()
-	ctx = ctrl.LoggerInto(ctx, setupLog)
+	ctx := ctrl.LoggerInto(signalCtx, setupLog)
 	if err = configMapReconciler.BootstrapInitialConfigMaps(ctx); err != nil {
 		setupLog.Error(err, "unable to bootstrap initial ConfigMaps")
 		os.Exit(1)
@@ -539,7 +543,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	promURL, _ := url.Parse(cfg.PrometheusBaseURL()) // already validated above
+	promURL, err := url.Parse(cfg.PrometheusBaseURL())
+	if err != nil {
+		// ValidateTLSConfig above parses the same string, so this should be
+		// unreachable; it is checked rather than assumed because promURL is
+		// dereferenced on the next line.
+		setupLog.Error(err, "invalid Prometheus URL")
+		os.Exit(1)
+	}
 	setupLog.Info("Initializing Prometheus client",
 		"address", promURL.Redacted(),
 		"tlsEnabled", prometheusutil.IsHTTPS(cfg.PrometheusBaseURL()),
@@ -562,7 +573,7 @@ func main() {
 	promAPI := promv1.NewAPI(promClient)
 
 	// Validate that the API is working by testing a simple query with retry logic
-	if err := prometheusutil.ValidatePrometheusAPI(context.Background(), promAPI); err != nil {
+	if err := prometheusutil.ValidatePrometheusAPI(ctx, promAPI); err != nil {
 		setupLog.Error(err, "CRITICAL: Failed to connect to Prometheus - WVA requires Prometheus connectivity for autoscaling decisions")
 		os.Exit(1)
 	}
@@ -608,9 +619,13 @@ func main() {
 		promSource := prometheus.NewPrometheusSource(ctx, promAPI, prometheus.DefaultPrometheusSourceConfig())
 
 		// Register in global source registry
+		// Returned, not os.Exit: this runs inside a manager runnable, and exiting
+		// here skipped graceful shutdown and the lease release, so the successor
+		// waited out the full LeaseDuration. The manager stops on a runnable's
+		// error, releases the lease and returns it from mgr.Start.
 		if err := sourceRegistry.Register("prometheus", promSource); err != nil {
 			setupLog.Error(err, "failed to register prometheus source in source registry")
-			os.Exit(1)
+			return fmt.Errorf("registering the prometheus metrics source: %w", err)
 		}
 
 		// Build the initial GPU limiter from the effective limiter mode — the
@@ -1038,7 +1053,7 @@ func main() {
 	// outcome now so a fallback forced by a Forbidden Namespace read is alertable.
 	metrics.SetPolicyNamespaceUnverified(cfg.PolicySource() == config.PolicySourceLocalUnverified)
 
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(signalCtx); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
