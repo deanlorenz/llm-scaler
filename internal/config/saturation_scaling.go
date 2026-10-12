@@ -619,6 +619,22 @@ func (c *ScalingPolicy) Merge(override ScalingPolicy) {
 	if override.ScaleFromZero != nil {
 		c.ScaleFromZero = override.ScaleFromZero
 	}
+	// The shape-change hold is per-workload tuning: a long-context tier is the
+	// natural place to raise the hold, and a single misbehaving model the natural
+	// place to switch it off. The flag is a plain bool, so an entry can turn the
+	// hold off but cannot turn back on a hold the default disabled.
+	if override.DisableShapeChangeHold {
+		c.DisableShapeChangeHold = true
+	}
+	if override.ShapeChangeHoldSeconds != 0 {
+		c.ShapeChangeHoldSeconds = override.ShapeChangeHoldSeconds
+	}
+	// Not merged, each on purpose:
+	//   EnableRescale, AnalyzerDefinitions, DefaultPolicy -- read from the
+	//     "default" entry only (budget scope / fleet-wide fallback), never from a
+	//     resolved policy.
+	//   DefaultOutputTokens -- not a ConfigMap field; folded in from the model's
+	//     trigger metadata after resolution.
 	// Limiters is intentionally NOT merged: it is a cluster-"default"-scope setting
 	// read only from the global default entry (see Config.EffectiveLimiterMode), so
 	// a per-model override's limiters would never be consumed. Optimizer is not
