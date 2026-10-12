@@ -363,7 +363,8 @@ scale-down window, as today's scale-down would. It does so only while no model i
 its need, and
 only while its load would stay at or below
 `stabilization.returnSpareWhenLoadAtMost` (default `0.6`) on what it keeps,
-not counting its headroom. It never goes below its need (the higher of its
+not counting its headroom, and while none of its pods holds a waiting queue
+above that fraction of `queueLengthThreshold`. It never goes below its need (the higher of its
 current and average need while it swings) plus its headroom, below what the
 other models' recent peaks leave of the quota in whole replicas, its
 `minReplicaCount` or its last replica: a model that bursts alone keeps its
@@ -388,8 +389,11 @@ the replica it was giving back". The controller log has
 replica is released (unless it was handed to a receiver first). `wva_utilization_share_starts_total{kind="return"}`
 counts returns per quota group. A model that holds more than its headroom and
 is not giving it back shows why in `wva_utilization_share_withheld_total`:
-`return-not-calm` (its load is above `returnSpareWhenLoadAtMost`) or
-`return-role-short` (another model is short of its need).
+`return-not-calm` (its load is above `returnSpareWhenLoadAtMost`),
+`return-pod-busy` (one of its pods holds a waiting queue above
+`returnSpareWhenLoadAtMost` of `queueLengthThreshold`, however calm the model
+reads as a whole) or `return-role-short` (another model is short of its
+need).
 
 Whether the cap is on: `wva_utilization_share_headroom_capped == 1` for the
 group (published only while the optimizer acts, not in shadow mode, and not

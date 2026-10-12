@@ -103,7 +103,11 @@ type ShareGroup struct {
 	// replica of its slowest measured variant takes to become Ready
 	// (domain.AnalyzerResult.RoleStartSeconds); a role not measured is absent.
 	StartSeconds map[string]float64
-	Origins      map[string]ShareRoleOrigin
+	// BusiestQueueLoad is, for each role with a replica reading, its deepest
+	// per-pod waiting queue as a fraction of the saturation queue
+	// (domain.AnalyzerResult.RoleBusiestQueueLoad).
+	BusiestQueueLoad map[string]float64
+	Origins          map[string]ShareRoleOrigin
 	// Frozen lists the models of this group that were not planned this cycle,
 	// as "namespace/model: why".
 	Frozen []string
@@ -165,17 +169,18 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 		g, ok := groups[k]
 		if !ok {
 			g = &ShareGroup{
-				AcceleratorType: acc,
-				Scope:           scope,
-				Committed:       map[string]int{},
-				Filled:          map[string]int{},
-				Give:            map[string]ShareVariant{},
-				Grow:            map[string]ShareVariant{},
-				Variants:        map[string][]ShareVariant{},
-				Thresholds:      map[string]float64{},
-				DownThresholds:  map[string]float64{},
-				StartSeconds:    map[string]float64{},
-				Origins:         map[string]ShareRoleOrigin{},
+				AcceleratorType:  acc,
+				Scope:            scope,
+				Committed:        map[string]int{},
+				Filled:           map[string]int{},
+				Give:             map[string]ShareVariant{},
+				Grow:             map[string]ShareVariant{},
+				Variants:         map[string][]ShareVariant{},
+				Thresholds:       map[string]float64{},
+				DownThresholds:   map[string]float64{},
+				StartSeconds:     map[string]float64{},
+				BusiestQueueLoad: map[string]float64{},
+				Origins:          map[string]ShareRoleOrigin{},
 			}
 			groups[k] = g
 		}
@@ -226,6 +231,9 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 			g.DownThresholds[r.Key] = req.CompositeSignal.ScaleDownBoundary
 			if r.startSeconds > 0 {
 				g.StartSeconds[r.Key] = r.startSeconds
+			}
+			if r.busiestQueueLoad > 0 {
+				g.BusiestQueueLoad[r.Key] = r.busiestQueueLoad
 			}
 			g.Origins[r.Key] = o
 			vs := variantsForRole(variantsOnType(records, acc), r.role)
@@ -285,6 +293,9 @@ type shareRoleInput struct {
 	// startSeconds is the role's measured replica start, 0 when not measured
 	// (domain.AnalyzerResult.RoleStartSeconds).
 	startSeconds float64
+	// busiestQueueLoad is the role's deepest per-pod queue as a fraction of
+	// the saturation queue (domain.AnalyzerResult.RoleBusiestQueueLoad).
+	busiestQueueLoad float64
 }
 
 // shareRolesForRequest builds one model's roles on acc, or says why the model
@@ -374,9 +385,10 @@ func shareRolesForRequest(req ModelScalingRequest, records []variantRecord, acc 
 				Ceiling:     ceiling,
 				ReplicaGPUs: max(g, 1),
 			},
-			role:         role,
-			held:         held,
-			startSeconds: sig.Result.RoleStartSeconds[role],
+			role:             role,
+			held:             held,
+			startSeconds:     sig.Result.RoleStartSeconds[role],
+			busiestQueueLoad: sig.Result.RoleBusiestQueueLoad[role],
 		})
 	}
 	return out, ""

@@ -3006,12 +3006,18 @@ optimizer every cycle (§6.6).
    boundary of the current fleet -- as need, so each idle fill raised the
    next (A 1 -> 5 replicas with no load, the cap on). A held role is now
    sized on its demand before the hold (`AnalyzerResult.HeldRoleDemand`)
-   and gives nothing while it lasts. After the merge, a deferred item
-   (§15): a burst under way counts toward a role's longest
+   and gives nothing while it lasts. After the merge, two of the deferred
+   items (§15): a burst under way counts toward a role's longest
    (`shareBursts.sofar`), so a model in its first long burst caps a fast
    swinger beside it on its mean and stops reading as a fast swinger itself
    (sims: 0 rows worse, 3 owner rows better, the largest 0.206 -> 0.169;
-   whole-node total unchanged at 21.682). Not measured on a cluster.
+   whole-node total unchanged at 21.682); and a return waits while one of
+   the role's pods holds a waiting queue above `returnSpareWhenLoadAtMost`
+   of `queueLengthThreshold` (`AnalyzerResult.RoleBusiestQueueLoad`,
+   `return-pod-busy`; a P/D decode's queue counts only while its KV is full,
+   since requests waiting for their remote KV sit in the same count). The
+   simulators have no per-pod queues, so the second is invisible to them;
+   neither is measured on a cluster.
 3. **Short window for urgent transfers**, through `wvaOwnership`, once
    managed-keda-behavior lands (§6.4), gated on a persistent hard imbalance,
    not on the load limits alone (§15).
@@ -3180,10 +3186,3 @@ Decided, not built here:
   simulator's worst P/D cell from 0.038 to 0.093. Banding those moves safely
   needs the donor's need trend, so that a donor whose demand is falling gives
   and one whose demand holds keeps.
-- **Judge a return on the busiest pod.** A return is made while the role's
-  load stays at or below `returnSpareWhenLoadAtMost`, read over the fleet.
-  On the round-20 cluster run a pod held 235 queued requests while its seven
-  siblings sat idle, and the role still read calm; a give-back started
-  (and was cancelled) during it. Gating returns on the deepest per-pod queue
-  too is the fix. The queue itself is the load balancer's routing, not the
-  planner's: today's optimizer showed the same shape at 150 requests.

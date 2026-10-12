@@ -69,8 +69,12 @@ type SharePlanInput struct {
 	// or with one at or above its scale-up threshold, has no scale-down band
 	// (sharePlanRun.bandKeep).
 	DownThresholds map[string]float64
-	Budget         int
-	Tolerance      float64
+	// BusiestQueueLoad is each role's deepest per-pod waiting queue as a
+	// fraction of the queue at which a replica counts as saturated. A role
+	// absent has no reading and does not hold its return back (returnSpare).
+	BusiestQueueLoad map[string]float64
+	Budget           int
+	Tolerance        float64
 	// SkipWaits is when a hard imbalance skips the waits. The zero value is
 	// the default.
 	SkipWaits ShareSkipWaits
@@ -265,6 +269,11 @@ const (
 	// ShareWithheldScaleDownBand counts a return not made because it would
 	// take its role into its scale-down band (sharePlanRun.bandKeep).
 	ShareWithheldScaleDownBand = "scale-down-band"
+	// ShareWithheldReturnPodBusy counts a role above its target that keeps
+	// its spare because one of its pods holds a waiting queue above the
+	// return load of the saturation queue, however calm the fleet reads
+	// (returnSpare).
+	ShareWithheldReturnPodBusy = "return-pod-busy"
 )
 
 // ShareDebt is how far a committed allocation stands above the budget, or 0.
@@ -1240,6 +1249,16 @@ func (p *sharePlanRun) returnSpare() {
 		}
 		give, ok := variantOf(in.Give, dn, r.ReplicaGPUs)
 		if !ok {
+			continue
+		}
+		// Calm is judged on the busiest pod as well as the fleet: the fleet
+		// read calm on a cluster run while one pod held 235 queued requests
+		// and its seven siblings sat idle, and a give-back started (and was
+		// cancelled) during it. The queue is the load balancer's routing, not
+		// a lack of replicas, but a replica given back then is one that queue
+		// could have been routed to.
+		if in.BusiestQueueLoad[dn] > load {
+			p.plan.Withheld[ShareWithheldReturnPodBusy]++
 			continue
 		}
 		gd := max(give.GPUs, 1)

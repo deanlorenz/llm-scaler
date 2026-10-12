@@ -98,3 +98,39 @@ func roleSaturated(metrics []domain.ReplicaMetrics, rolesByVariant map[string]st
 	}
 	return false
 }
+
+// busiestQueueLoadByRole is, per role, the deepest waiting queue on any one
+// replica as a fraction of queueThreshold (domain.AnalyzerResult.
+// RoleBusiestQueueLoad). Every row counts, bridges included, as in
+// roleSaturated -- and for the same reason as there, a P/D decode row counts
+// only while its resident KV is at or over its k1: its waiting count includes
+// requests waiting for their remote KV, so a slow transfer keeps a queue on a
+// decode that is admitting fine. Without a threshold there is no saturation
+// point to measure against, and nothing is reported.
+func busiestQueueLoadByRole(metrics []domain.ReplicaMetrics, rolesByVariant map[string]string, queueThreshold, kvCacheThreshold float64) map[string]float64 {
+	if !(queueThreshold > 0) {
+		return nil
+	}
+	disaggregated := false
+	for _, r := range rolesByVariant {
+		if canonicalRole(r) == domain.RolePrefill {
+			disaggregated = true
+		}
+	}
+	out := map[string]float64{}
+	for _, rm := range metrics {
+		role, ok := rolesByVariant[rm.VariantName]
+		if !ok {
+			continue
+		}
+		role = canonicalRole(role)
+		if disaggregated && role == domain.RoleDecode && (rm.TotalKvCapacityTokens <= 0 ||
+			rm.TokensInUse > rm.TotalKvCapacityTokens ||
+			rm.TokensInUse < memoryBound(rm.TotalKvCapacityTokens, kvCacheThreshold)) {
+			out[role] = max(out[role], 0)
+			continue
+		}
+		out[role] = max(out[role], float64(rm.QueueLength)/queueThreshold)
+	}
+	return out
+}

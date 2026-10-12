@@ -155,6 +155,14 @@ type AnalyzerResult struct {
 	// fastest the throughput floor projects on: a consumer pacing work that
 	// is not done until the replica serves must not count on the fastest.
 	RoleStartSeconds map[string]float64
+
+	// RoleBusiestQueueLoad is, for each role with a replica reading, the
+	// deepest waiting queue on any one of its pods as a fraction of the queue
+	// at which a replica counts as saturated (queueLengthThreshold). The
+	// fleet's load can read calm while one pod holds a deep queue -- the load
+	// balancer's routing, not a lack of replicas -- and a consumer about to
+	// give a replica back reads this as well as the fleet.
+	RoleBusiestQueueLoad map[string]float64
 }
 
 // VariantCapacity is one variant's entry in an analyzer's (D, P) signal, in

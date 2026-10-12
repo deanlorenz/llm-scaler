@@ -304,7 +304,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	nodes, units, domains := e.shareNodeInputs(ctx, logger, g, accessor, l.Promised()+l.WakeHeld(now),
 		shareMarkOwned(l, nil), now)
 	plan := allocation.PlanShareTransfers(l, allocation.SharePlanInput{
-		Roles: g.Roles, Held: held, Thresholds: g.Thresholds, DownThresholds: g.DownThresholds, Budget: g.Budget, Tolerance: us.Tolerance,
+		Roles: g.Roles, Held: held, Thresholds: g.Thresholds, DownThresholds: g.DownThresholds, BusiestQueueLoad: g.BusiestQueueLoad, Budget: g.Budget, Tolerance: us.Tolerance,
 		SkipWaits: shareSkipWaits(us), ConfirmCycles: us.Stabilization.ConsecutiveCyclesBeforeMove,
 		Give: g.Give, Grow: g.Grow, Nodes: nodes, DonorUnits: units, DomainKey: domains,
 		WakeHeld: l.WakeHeld(now), PhysicalFree: g.PhysicalFree,
