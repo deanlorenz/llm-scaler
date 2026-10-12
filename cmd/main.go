@@ -102,6 +102,12 @@ func init() {
 	// +kubebuilder:scaffold:scheme
 }
 
+// managerGracefulShutdownTimeout is how long the manager waits for runnables to
+// stop. It must stay below terminationGracePeriodSeconds in
+// config/base/manager/deployment.yaml (40s), which TestGracefulShutdownFitsGracePeriod
+// checks.
+const managerGracefulShutdownTimeout = 25 * time.Second
+
 // defaultLogVerbosity is the -v the shipped deployment runs at: config/base/manager
 // passes no -v, so this value decides which V() levels reach the logs. The
 // saturation analyzer's per-replica capacity lines sit at V(logging.DEFAULT) and
@@ -392,6 +398,7 @@ func main() {
 	// for network latency and API server delays
 
 	leaseDurationVal := cfg.LeaseDuration()
+	gracefulShutdownTimeout := managerGracefulShutdownTimeout
 	renewDeadlineVal := cfg.RenewDeadline()
 	retryPeriodVal := cfg.RetryPeriod()
 	mgrOptions := ctrl.Options{
@@ -412,9 +419,16 @@ func main() {
 		// LeaseDuration time first.
 		//
 		// This is safe to enable because the program ends immediately after the manager stops
-		// (see mgr.Start() call at the end of main()). This enables fast failover during
-		// deployments and upgrades, reducing downtime from ~60s to ~1-2s.
+		// (see mgr.Start() call at the end of main()), and because the engine
+		// runnables block until their loops have returned, so the lease is not
+		// released while a cycle is still publishing. This enables fast failover
+		// during deployments and upgrades, reducing downtime from ~60s to ~1-2s.
 		LeaderElectionReleaseOnCancel: true,
+		// Set explicitly, and below the pod's terminationGracePeriodSeconds
+		// (config/base/manager/deployment.yaml): if runnables outlive the grace
+		// period the kubelet's SIGKILL lands before the lease is released, and
+		// the successor waits the full LeaseDuration with GetMetrics unanswered.
+		GracefulShutdownTimeout: &gracefulShutdownTimeout,
 	}
 
 	watchNS := cfg.WatchNamespace()
@@ -720,7 +734,11 @@ func main() {
 				"enables 'throughput'. Add it to the analyzers config and restart the " +
 				"controller to enable it.")
 		}
-		go engine.StartOptimizeLoop(ctx)
+		// Run the loop IN the runnable, not in a goroutine it spawns: it blocks
+		// until ctx ends, so the manager's graceful shutdown waits for an
+		// in-flight cycle before it releases the lease. Returning at once told
+		// the manager this runnable was finished while the loop was starting.
+		engine.StartOptimizeLoop(ctx)
 		return nil
 	}))
 
@@ -776,7 +794,11 @@ func main() {
 		engine.SetLimiterBuilder(func() (allocation.Limiter, error) {
 			return allocation.NewLimiterFromConfig(cfg, mgr.GetClient())
 		})
-		go engine.StartOptimizeLoop(ctx)
+		// Run the loop IN the runnable, not in a goroutine it spawns: it blocks
+		// until ctx ends, so the manager's graceful shutdown waits for an
+		// in-flight cycle before it releases the lease. Returning at once told
+		// the manager this runnable was finished while the loop was starting.
+		engine.StartOptimizeLoop(ctx)
 		return nil
 	}))
 
