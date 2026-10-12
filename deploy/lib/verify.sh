@@ -437,7 +437,13 @@ print_summary() {
         echo "  Prometheus:   ${PROMETHEUS_URL:-<the shipped default>} (not deployed by this install)"
     fi
     if [ "$SCALER_BACKEND" = "keda" ]; then
-        echo "  KEDA:         installed or already present"
+        # The measured answer from check_keda_prerequisite / deploy_keda. This
+        # line used to print "installed or already present" whatever was true.
+        case "${WVA_KEDA_STATE:-unknown}" in
+            present)           echo "  KEDA:         present on the cluster" ;;
+            absent-installing) echo "  KEDA:         installed by this run" ;;
+            *)                 echo "  KEDA:         not verified by this run (check: kubectl get crd scaledobjects.keda.sh)" ;;
+        esac
     else
         echo "  KEDA:         skipped (SCALER_BACKEND=$SCALER_BACKEND) — WVA needs KEDA to actuate"
     fi

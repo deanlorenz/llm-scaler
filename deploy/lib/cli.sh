@@ -100,9 +100,12 @@ Environment Variables:
                                docs/guides/warm-pool/README.md
 
  Scaler backend and CRDs
-  SCALER_BACKEND               keda (default) or none. WVA needs KEDA to actuate.
-  KEDA_HELM_INSTALL            Install KEDA via Helm on kubernetes (default: false — assumes cluster KEDA)
-  KEDA_NAMESPACE               Namespace for KEDA (default: keda-system). Also the one the
+  SCALER_BACKEND               keda (default) or none. WVA needs KEDA to actuate; the preflight
+                               checks for it before anything is created. KEDA older than 2.17
+                               works, with a warning: its ScaledObjects get no fallback.
+  KEDA_HELM_INSTALL            Install KEDA via Helm on kubernetes (default: false — assumes cluster KEDA).
+                               Never on OpenShift: install the Custom Metrics Autoscaler operator there.
+  KEDA_NAMESPACE              Namespace for KEDA (default: keda-system). Also the one the
                                external-scaler NetworkPolicy admits (written by the admin
                                phase, setup-prereqs); unset, the namespace serving the
                                external-metrics APIService, else the existing policy's. With

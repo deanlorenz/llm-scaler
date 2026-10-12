@@ -2641,6 +2641,7 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@bash -n hack/benchmark/sample_replicas.sh
 	@bash -n hack/benchmark/tail_wva_logs.sh
 	@bash -n hack/benchmark/file_capture.sh
+	@bash -n hack/check-install-flow.sh
 	@for script in deploy/lib/*.sh; do bash -n "$$script"; done
 	@for script in deploy/*/install.sh; do if [ -f "$$script" ]; then bash -n "$$script"; fi; done
 	@for script in deploy/kind-emulator/*.sh; do if [ -f "$$script" ]; then bash -n "$$script"; fi; done
@@ -2771,6 +2772,10 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# controller-only upgrade, bounds the namespace at nothing. The
 	@# preflight must refuse that phase; executed against a stub kubectl.
 	@bash hack/check-kueue-namespace-grant.sh
+	@echo "Checking the installer's decisions against a stubbed cluster..."
+	@# KEDA preflight and install order, image pinning, chart pinning, TLS
+	@# verification, uninstall grants and summaries: each parses and is wrong.
+	@bash hack/check-install-flow.sh
 	@echo "Checking the tenant Role still covers the generated ClusterRole..."
 	@# The ClusterRole is GENERATED from kubebuilder markers; the namespaced Role
 	@# the tenant overlay installs is maintained by hand, so it does not move when
