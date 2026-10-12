@@ -594,12 +594,19 @@ INSTALL_PHASE_ARG = $(if $(filter command line environment,$(origin INSTALL_PHAS
 # which any authenticated user may read) and uses kubernetes otherwise.
 ENVIRONMENT_INSTALL = $(if $(filter command line environment,$(origin ENVIRONMENT)),$(ENVIRONMENT),)
 
+# The install targets apply the COMMITTED manifests. They used to depend on
+# `manifests kustomize`: a go install of controller-gen, a type-check of ./...,
+# and a rewrite of the tracked config/base/rbac/manager-clusterrole.yaml from
+# whatever checkout ran the install -- so an operator with kubectl, helm, yq and
+# jq passed check-prereqs and then failed on `go: command not found`, and the
+# downloaded kustomize was never used (the install runs `kubectl kustomize`).
+# Regenerating is a development step: `make manifests`.
 .PHONY: setup-prereqs
-setup-prereqs: manifests kustomize ## Phase 2 (CLUSTER ADMIN). ENVIRONMENT=kubernetes|openshift, SCOPE=namespace|cluster.
+setup-prereqs: ## Phase 2 (CLUSTER ADMIN). ENVIRONMENT=kubernetes|openshift, SCOPE=namespace|cluster.
 	$(call wva_phase,prereqs,$(ENVIRONMENT_INSTALL))
 
 .PHONY: deploy-wva
-deploy-wva: manifests kustomize ## Install WVA. ENVIRONMENT=kubernetes|openshift, SCOPE=namespace|cluster, INSTALL_PHASE=all|prereqs|wva, IMG=<your build>, WVA_LIMITER=none|gpu-inventory|quota (quota needs WVA_QUOTAS).
+deploy-wva: ## Install WVA. ENVIRONMENT=kubernetes|openshift, SCOPE=namespace|cluster, INSTALL_PHASE=all|prereqs|wva, IMG=<your build>, WVA_LIMITER=none|gpu-inventory|quota (quota needs WVA_QUOTAS).
 	$(call wva_phase,$(INSTALL_PHASE_ARG),$(ENVIRONMENT_INSTALL))
 
 .PHONY: undeploy-wva
@@ -607,11 +614,11 @@ undeploy-wva: ## Remove WVA. Pass the same ENVIRONMENT, SCOPE and namespace you 
 	export KIND=$(KIND) KUBECTL=$(KUBECTL) $(if $(ENVIRONMENT_INSTALL),ENVIRONMENT=$(ENVIRONMENT_INSTALL),) $(if $(filter command line environment,$(origin WVA_NS)),WVA_NS=$(WVA_NS),) WVA_SCOPE=$(SCOPE) && 		deploy/install.sh --undeploy
 
 .PHONY: deploy-wva-on-k8s
-deploy-wva-on-k8s: manifests kustomize ## Install WVA on Kubernetes. SCOPE=namespace|cluster, INSTALL_PHASE=all|prereqs|wva, IMG=<your build>, WVA_LIMITER (quota needs WVA_QUOTAS). Prometheus and the namespace are detected.
+deploy-wva-on-k8s: ## Install WVA on Kubernetes. SCOPE=namespace|cluster, INSTALL_PHASE=all|prereqs|wva, IMG=<your build>, WVA_LIMITER (quota needs WVA_QUOTAS). Prometheus and the namespace are detected.
 	$(call wva_phase,$(INSTALL_PHASE_ARG),kubernetes)
 
 .PHONY: deploy-wva-on-openshift
-deploy-wva-on-openshift: manifests kustomize ## Install WVA on OpenShift. SCOPE=namespace|cluster, INSTALL_PHASE=all|prereqs|wva, IMG=<your build>, WVA_LIMITER=none|gpu-inventory|quota (quota needs WVA_QUOTAS).
+deploy-wva-on-openshift: ## Install WVA on OpenShift. SCOPE=namespace|cluster, INSTALL_PHASE=all|prereqs|wva, IMG=<your build>, WVA_LIMITER=none|gpu-inventory|quota (quota needs WVA_QUOTAS).
 	$(call wva_phase,$(INSTALL_PHASE_ARG),openshift)
 
 ## Removing. Pass the SAME SCOPE and namespace you installed with — an uninstall

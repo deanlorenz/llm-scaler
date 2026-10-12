@@ -233,6 +233,21 @@ else
     fail "print_prereqs_summary must report the measured KEDA state" "$summary"
 fi
 
+# --- GO -----------------------------------------------------------------------
+#
+# The install targets must apply the committed manifests. A prerequisite on
+# `manifests` (controller-gen, a type-check of ./..., a rewrite of a tracked
+# RBAC file) or `kustomize` makes Go an undeclared install prerequisite.
+for target in setup-prereqs deploy-wva deploy-wva-on-k8s deploy-wva-on-openshift; do
+    prereqs="$(tr -d '\r' < "$ROOT/Makefile" | awk -v t="$target" '
+        index($0, t ":") == 1 { line = substr($0, length(t) + 2); sub(/##.*/, "", line); print line; exit }')"
+    if printf '%s' "$prereqs" | grep -qwE 'manifests|generate|controller-gen|kustomize|build'; then
+        fail "make $target depends on a code-generation/build step:$prereqs"
+    else
+        ok "make $target applies the committed manifests (prerequisites:${prereqs:- none})"
+    fi
+done
+
 echo ""
 echo "check-install-flow: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] && [ "$PASS" -gt 0 ]
