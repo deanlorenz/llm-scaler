@@ -33,6 +33,10 @@
 #                               models (key defaults to HF_TOKEN)
 #   --capacity SIZE             the volume's declared capacity (default 1Ti;
 #                               it is a declaration, hostPath has no quota)
+#   --memory SIZE               the downloader's memory limit (default 16Gi;
+#                               the request stays 256Mi, so a node reserves
+#                               nothing for it). 2Gi was OOMKilled on every
+#                               node fetching an 8B model's safetensors
 #   --node-selector KEY=VALUE   which nodes count as accelerator nodes. The
 #                               default is any node carrying a known GPU
 #                               product label (deploy/lib/accelerator_nodes.sh);
@@ -101,6 +105,12 @@ NODE_PATH=""
 IMAGE=""
 HF_SECRET=""
 CAPACITY="1Ti"
+# The downloader's memory LIMIT. huggingface_hub fetches several files at once
+# (max_workers=8) and buffers each, and at 2Gi the download of an 8B model
+# (four or more multi-GB safetensors) was OOMKilled on every node and
+# restarted from its last file, never finishing. A limit, not a request: the
+# scheduler reserves only the 256Mi request.
+MEMORY="16Gi"
 NODE_SELECTOR=""          # empty: every node carrying a known GPU product label
 NODE_SELECTOR_GIVEN=false
 TOLERATIONS=("nvidia.com/gpu")
@@ -339,7 +349,7 @@ $(if [ -n "$HF_SECRET" ]; then printf '            - name: HF_TOKEN\n           
               cpu: 100m
               memory: 256Mi
             limits:
-              memory: 2Gi
+              memory: ${MEMORY}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -609,6 +619,7 @@ while [ $# -gt 0 ]; do
         --image) IMAGE="$2"; shift 2 ;;
         --hf-token-secret) HF_SECRET="$2"; shift 2 ;;
         --capacity) CAPACITY="$2"; shift 2 ;;
+        --memory) MEMORY="$2"; shift 2 ;;
         --node-selector) NODE_SELECTOR="$2"; NODE_SELECTOR_GIVEN=true; shift 2 ;;
         --toleration) accelerator_check_toleration "$2"; TOLERATIONS+=("$2"); shift 2 ;;
         --dry-run) [ "$CMD" != status ] || log_error "--dry-run applies to apply and delete, not status"; DRY_RUN=true; shift ;;
@@ -620,6 +631,9 @@ done
 accelerator_check_selector "$NODE_SELECTOR"
 case "$CAPACITY" in
     ""|*[!0-9A-Za-z.]*) log_error "--capacity must be a Kubernetes quantity such as 1Ti, got '${CAPACITY}'" ;;
+esac
+case "$MEMORY" in
+    ""|*[!0-9A-Za-z.]*|[!0-9]*) log_error "--memory must be a Kubernetes quantity such as 16Gi, got '${MEMORY}'" ;;
 esac
 
 "cmd_${CMD}"

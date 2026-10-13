@@ -709,17 +709,19 @@ WEIGHTS_PATH ?=
 WEIGHTS_IMAGE ?=
 WEIGHTS_HF_TOKEN_SECRET ?=
 WEIGHTS_CAPACITY ?=
+# The memory limit of the downloader; empty keeps the default of deploy/weights.sh (16Gi, enough for an 8B model).
+WEIGHTS_MEMORY ?=
 WEIGHTS_NODE_SELECTOR ?= $(PREPULL_NODE_SELECTOR)
 WEIGHTS_TOLERATIONS ?= $(PREPULL_TOLERATIONS)
 WEIGHTS_ARGS = $(if $(WEIGHTS_NODE_SELECTOR),--node-selector "$(WEIGHTS_NODE_SELECTOR)",) $(foreach t,$(subst $(comma), ,$(WEIGHTS_TOLERATIONS)),--toleration $(t))
 .PHONY: weights weights-status weights-delete
-weights: ## Download WEIGHTS_MODEL=<hf id> under WEIGHTS_PATH=<node dir> on every accelerator node of NAMESPACE=<ns>, with WEIGHTS_IMAGE=<image>. [WEIGHTS_HF_TOKEN_SECRET=<secret>[/<key>]] [WEIGHTS_CAPACITY=<size>]
+weights: ## Download WEIGHTS_MODEL=<hf id> under WEIGHTS_PATH=<node dir> on every accelerator node of NAMESPACE=<ns>, with WEIGHTS_IMAGE=<image>. [WEIGHTS_HF_TOKEN_SECRET=<secret>[/<key>]] [WEIGHTS_CAPACITY=<size>] [WEIGHTS_MEMORY=<size>]
 	@test -n "$(WEIGHTS_MODEL)" || { echo "weights: set WEIGHTS_MODEL=<hugging face id>" >&2; exit 1; }
 	@test -n "$(WEIGHTS_PATH)" || { echo "weights: set WEIGHTS_PATH=<absolute directory on the node>" >&2; exit 1; }
 	@test -n "$(WEIGHTS_IMAGE)" || { echo "weights: set WEIGHTS_IMAGE=<an image with huggingface_hub; the engine image>" >&2; exit 1; }
 	@test -n "$(prepull_namespace_given)" || { echo "weights: set NAMESPACE=<ns> (the Makefile default is not taken here)" >&2; exit 1; }
 	@bash deploy/weights.sh apply -n "$(NAMESPACE)" --model "$(WEIGHTS_MODEL)" --path "$(WEIGHTS_PATH)" --image "$(WEIGHTS_IMAGE)" \
-		$(if $(WEIGHTS_HF_TOKEN_SECRET),--hf-token-secret "$(WEIGHTS_HF_TOKEN_SECRET)",) $(if $(WEIGHTS_CAPACITY),--capacity "$(WEIGHTS_CAPACITY)",) $(WEIGHTS_ARGS)
+		$(if $(WEIGHTS_HF_TOKEN_SECRET),--hf-token-secret "$(WEIGHTS_HF_TOKEN_SECRET)",) $(if $(WEIGHTS_CAPACITY),--capacity "$(WEIGHTS_CAPACITY)",) $(if $(WEIGHTS_MEMORY),--memory "$(WEIGHTS_MEMORY)",) $(WEIGHTS_ARGS)
 
 weights-status: ## Per accelerator node: does it hold the weights, or is the download still running. NAMESPACE=<ns> [WEIGHTS_MODEL=<hf id>]
 	@test -n "$(prepull_namespace_given)" || { echo "weights-status: set NAMESPACE=<ns> (the Makefile default is not taken here)" >&2; exit 1; }

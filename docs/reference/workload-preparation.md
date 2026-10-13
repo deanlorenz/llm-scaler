@@ -190,7 +190,11 @@ node". The model lands under `<dir>/models/<id>`, the layout the benchmark
 harness uses, and a model server mounts it as `pvc://<claim>/models/<id>`,
 the way it mounts any claim: each node then reads its own copy, and nothing
 in the pod spec says hostPath. A gated model takes
-`WEIGHTS_HF_TOKEN_SECRET=<secret>[/<key>]`. Deleting keeps the files; the
+`WEIGHTS_HF_TOKEN_SECRET=<secret>[/<key>]`. `WEIGHTS_MEMORY` sets the
+downloader's memory limit (`16Gi` unless set; `--memory` on
+`deploy/weights.sh`). The request stays 256 MiB, so a node reserves
+nothing for it. At the earlier 2 GiB the download of an 8B model's
+safetensors was OOMKilled on every node and never finished. Deleting keeps the files; the
 next apply finds the marker and downloads nothing.
 
 What it costs, and what it needs:

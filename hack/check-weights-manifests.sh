@@ -152,6 +152,18 @@ if bash deploy/weights.sh apply -n check-ns --model m --path /mnt/local/models -
 if bash deploy/weights.sh apply -n check-ns --model m --path /mnt/local/models --image "$IMG" --capacity '1Ti; rm' --dry-run >/dev/null 2>&1; then fail "a capacity that is not a quantity must be refused"; else ok "a capacity that is not a quantity is refused"; fi
 if bash deploy/weights.sh apply -n check-ns --model m --path /mnt/local/models --dry-run >/dev/null 2>&1; then fail "apply without --image must be refused"; else ok "apply without --image is refused"; fi
 if bash deploy/weights.sh apply -n check-ns --model m --path /mnt/local/models --image "$IMG" --all --dry-run >/dev/null 2>&1; then fail "apply must refuse --all"; else ok "apply: --all is refused"; fi
+# The downloader's memory limit. At 2Gi it was OOMKilled on every node fetching
+# Qwen/Qwen3-8B and Meta-Llama-3.1-8B, and restarted forever: the default must
+# cover an 8B model, and --memory must reach the container.
+mem_limit() { yq -r 'select(.kind == "DaemonSet") | .spec.template.spec.containers[0].resources.limits.memory' "$1"; }
+mem_default="$(mem_limit "$T/render-default.yaml")"
+case "$mem_default" in
+    *Gi) [ "${mem_default%Gi}" -ge 16 ] 2>/dev/null && ok "the downloader's default memory limit is $mem_default, enough for an 8B model" || fail "the downloader's default memory limit is $mem_default; 2Gi was OOMKilled on an 8B model" ;;
+    *) fail "the downloader's default memory limit is '$mem_default', not a Gi quantity of at least 16" ;;
+esac
+bash deploy/weights.sh apply -n check-ns --model Qwen/Qwen3-32B --path /mnt/local/models --image "$IMG" --memory 48Gi --dry-run > "$T/render-mem.yaml"
+[ "$(mem_limit "$T/render-mem.yaml")" = 48Gi ] && ok "--memory sets the downloader's memory limit" || fail "--memory 48Gi rendered a limit of '$(mem_limit "$T/render-mem.yaml")'"
+if bash deploy/weights.sh apply -n check-ns --model m --path /mnt/local/models --image "$IMG" --memory 'lots' --dry-run >/dev/null 2>&1; then fail "apply must refuse --memory that is not a quantity"; else ok "apply: --memory that is not a quantity is refused"; fi
 
 # ---------------------------------------------------------------------------
 # 2. status and delete, offline.
