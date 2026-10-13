@@ -1032,6 +1032,33 @@ else
     ok "the placement refusal names DECODE_CPU, the knob that fixes it"
 fi
 
+# A QUOTA BELOW THE CEILINGS IS THE PEAK. The share runbook stands up under a
+# 4-GPU quota with two models of up to 3; preflight asked for 6 placeable and
+# refused a cluster with 5, though the run can never hold more than 4.
+case_begin
+NODE_CPU=40 NODE_GPUS=8 run_verb preflight
+if [ "$RC" -eq 0 ]; then
+    fail "the control does not refuse: 40 cores place 5 decode Pods of 8 CPU against a peak of 6"
+else
+    ok "without a quota, 5 placeable against a peak of 6 is refused (the control)"
+fi
+case_begin
+WVA_QUOTAS='H200=4' NODE_CPU=40 NODE_GPUS=8 run_verb preflight
+if [ "$RC" -ne 0 ] || ! printf '%s' "$OUT" | grep -q 'holds the models to 4 GPU(s)'; then
+    fail "WVA_QUOTAS='H200=4' did not cap the peak at the quota: $(printf '%s' "$OUT" | grep -E 'peaks at|quota|can actually')"
+else
+    ok "a quota below the ceilings is the peak preflight places for"
+fi
+case_begin
+WVA_QUOTAS='H200=4 A100=8' NODE_CPU=40 NODE_GPUS=8 run_verb preflight
+c1="$RC"
+ACCELERATOR=H200 WVA_QUOTAS='H200=4,A100=8' NODE_CPU=40 NODE_GPUS=8 run_verb preflight
+if [ "$c1" -eq 0 ] || [ "$RC" -ne 0 ]; then
+    fail "with two quota entries, preflight must not guess (rc $c1) and must take ACCELERATOR's entry (rc $RC)"
+else
+    ok "with two quota entries the cap is ACCELERATOR's, and without ACCELERATOR there is none"
+fi
+
 # WHO OWNS ISTIO, without editing a tracked file. Preflight used to tell the
 # reader to add skipInstall to the scenario under hack/; GATEWAY_REUSE=auto
 # now does that on the copy the standup renders.
@@ -1107,7 +1134,7 @@ else
 fi
 
 case_begin
-CASES_EXPECTED=66
+CASES_EXPECTED=69
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately rather than letting coverage drift out."
 else

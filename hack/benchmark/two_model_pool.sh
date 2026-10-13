@@ -298,6 +298,30 @@ peak_gpus() {
     echo $(( models * per_model * GPUS_PER_REPLICA ))
 }
 
+# quota_cap prints the GPUs the standup quota allows the models -- WVA_QUOTAS,
+# the same value the standup line sets ('<accelerator>=<n>', several separated
+# by spaces or commas) -- or nothing when there is no quota to read. With
+# several accelerators it takes ACCELERATOR's entry, and without ACCELERATOR it
+# gives up rather than guess. A run under a quota below the models' combined
+# ceilings never holds more than the quota, so placing the ceilings asked for
+# accelerators the run cannot use: preflight refused a 4-GPU-quota run for a
+# peak of 6.
+quota_cap() {
+    [ -n "${WVA_QUOTAS:-}" ] || return 0
+    local entries=() e key val pick=""
+    read -r -a entries <<< "$(printf '%s' "$WVA_QUOTAS" | tr ',' ' ')"
+    for e in "${entries[@]}"; do
+        key="${e%%=*}"; val="${e#*=}"
+        case "$val" in ""|*[!0-9]*) return 0 ;; esac
+        if [ -n "$ACCELERATOR" ]; then
+            [ "$key" = "$ACCELERATOR" ] && pick="$val"
+        elif [ "${#entries[@]}" -eq 1 ]; then
+            pick="$val"
+        fi
+    done
+    printf '%s' "$pick"
+}
+
 # Whether the models are P/D: PD_SINGLE_STACK, or a scenario whose prefill is
 # enabled (two-model-shapes-pd). Read from the scenario, because preflight runs
 # before anything is deployed.
@@ -490,6 +514,12 @@ verb_preflight() {
          | .spec.containers[].resources.requests["nvidia.com/gpu"] // "0" | tonumber] | add // 0')"
     free=$(( ${total:-0} - ${used:-0} ))
     want="$(peak_gpus)"
+    local cap
+    cap="$(quota_cap)"
+    if [ -n "$cap" ] && [ "$cap" -lt "$want" ]; then
+        info "the quota (WVA_QUOTAS=${WVA_QUOTAS}) holds the models to ${cap} GPU(s), below the ${want} their ceilings allow; placement is checked for ${cap}"
+        want="$cap"
+    fi
     info "accelerators: ${total:-?} schedulable, ${used:-?} requested, ${free} free; this run peaks at ${want}"
     info "  nopool arm: 2 models x 1..${MAX_REPLICAS} replicas"
     info "  floor arm:  2 models x ${FLOOR_REPLICAS}..${MAX_REPLICAS} replicas"
