@@ -1233,3 +1233,112 @@ print("  fix 16 (no false 'WVA was never installed'): applied")
 PYEOF
 fi
 
+# ---------------------------------------------------------------------------
+# Fix 17 -- teardown: a cluster-scoped role or binding another namespace may
+# use is kept.
+#
+# step_04_clean_cluster_roles deleted the well-known ClusterRoles
+# <release>-modelservice-{admin,editor,viewer,...} -- names without a
+# namespace, so shared by every benchmark namespace on the cluster -- and,
+# through _delete_matching, every ClusterRole and ClusterRoleBinding whose
+# name merely contains the release name. One namespace's teardown removed
+# them for all. Now a ClusterRole goes only when no binding anywhere
+# references it, a ClusterRoleBinding only when every subject it binds is in
+# this teardown's namespaces, and either is kept -- and the log says why --
+# when the bindings cannot be read (Forbidden is not absent).
+# ---------------------------------------------------------------------------
+TD4="$REPO_DIR/llmdbenchmark/teardown/steps/step_04_clean_cluster_roles.py"
+if [ ! -f "$TD4" ]; then
+    note "fix 17 (shared cluster roles kept): no step_04, skipped"
+else
+    "$PY" - "$TD4" <<'PYEOF' || fail "fix 17 (shared cluster roles kept) failed"
+import io, sys
+
+path = sys.argv[1]
+src = io.open(path, encoding="utf-8", newline="").read().replace("\r\n", "\n")
+
+PREFIX = '_LEGACY_NOP_SERVICE_VIEWER_PREFIX = "inference-perf-service-viewer-"\n'
+HELPERS = PREFIX + '''
+
+# wva-patch (fix 17): cluster-scoped objects are shared by every namespace.
+import json as _wva_json
+
+
+def _wva_namespaces(context):
+    return {n for n in (getattr(context, a, None) for a in ("namespace", "harness_namespace", "wva_namespace")) if n}
+
+
+def _wva_bindings(cmd):
+    """Every ClusterRoleBinding and RoleBinding on the cluster, or None when they
+    cannot be read."""
+    r = cmd.kube("get", "clusterrolebindings,rolebindings", "-A", "-o", "json", check=False)
+    if not r.success:
+        return None
+    try:
+        return _wva_json.loads(r.stdout or "{}").get("items", [])
+    except ValueError:
+        return None
+
+
+def _wva_role_unused(context, bindings, name):
+    """True when no binding anywhere references ClusterRole name."""
+    if bindings is None:
+        context.logger.log_info(f"  Keeping ClusterRole/{name}: the bindings could not be read, and one this teardown cannot see may use it")
+        return False
+    users = [
+        f"{(b.get('metadata') or {}).get('namespace') or 'cluster'}/{(b.get('metadata') or {}).get('name')}"
+        for b in bindings
+        if (b.get("roleRef") or {}).get("kind") == "ClusterRole" and (b.get("roleRef") or {}).get("name") == name
+    ]
+    if users:
+        context.logger.log_info(f"  Keeping ClusterRole/{name}: still bound by {', '.join(users[:5])} -- cluster-scoped, so shared by every namespace")
+        return False
+    return True
+
+
+def _wva_may_delete(cmd, context, kind, resource_name):
+    """Whether this teardown may delete a cluster-scoped object it matched by name."""
+    name = resource_name.split("/")[-1]
+    bindings = _wva_bindings(cmd)
+    if kind == "ClusterRole":
+        return _wva_role_unused(context, bindings, name)
+    if bindings is None:
+        context.logger.log_info(f"  Keeping {kind}/{name}: the bindings could not be read")
+        return False
+    ours = _wva_namespaces(context)
+    for b in bindings:
+        if b.get("kind") == "ClusterRoleBinding" and (b.get("metadata") or {}).get("name") == name:
+            subjects = b.get("subjects") or []
+            if subjects and all(s.get("namespace") in ours for s in subjects):
+                return True
+            context.logger.log_info(f"  Keeping {kind}/{name}: it binds subjects outside {', '.join(sorted(ours)) or 'this teardown'}")
+            return False
+    return True
+'''
+
+LOOP_OLD = '''        context.logger.log_info("Deleting well-known modelservice ClusterRoles...")
+        for suffix in _MODELSERVICE_ROLE_SUFFIXES:
+            cr_name = f"{release}-{suffix}"
+'''
+LOOP_NEW = '''        context.logger.log_info("Deleting well-known modelservice ClusterRoles...")
+        _wva_bound = _wva_bindings(cmd)  # wva-patch (fix 17)
+        for suffix in _MODELSERVICE_ROLE_SUFFIXES:
+            cr_name = f"{release}-{suffix}"
+            if not _wva_role_unused(context, _wva_bound, cr_name):  # wva-patch (fix 17)
+                continue
+'''
+MATCH_OLD = '''            if release in resource_name:
+'''
+MATCH_NEW = '''            if release in resource_name and _wva_may_delete(cmd, context, kind, resource_name):  # wva-patch (fix 17)
+'''
+if "def _wva_may_delete" in src and LOOP_NEW in src and MATCH_NEW in src:
+    print("  fix 17 (shared cluster roles kept): already applied")
+    sys.exit(0)
+for anchor in (PREFIX, LOOP_OLD, MATCH_OLD):
+    if src.count(anchor) != 1:
+        sys.exit("anchor missing or ambiguous (upstream shape changed): " + anchor.strip().splitlines()[0])
+src = src.replace(PREFIX, HELPERS, 1).replace(LOOP_OLD, LOOP_NEW, 1).replace(MATCH_OLD, MATCH_NEW, 1)
+io.open(path, "w", encoding="utf-8", newline="\n").write(src)
+print("  fix 17 (shared cluster roles kept): applied")
+PYEOF
+fi

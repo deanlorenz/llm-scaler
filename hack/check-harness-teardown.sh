@@ -87,9 +87,44 @@ class UninstallHelmStep:
             )
             return
 EOF
+cat > "$S/step_04_clean_cluster_roles.py" <<'EOF'
+"""Teardown Step 04."""
+
+from llmdbenchmark.executor.command import CommandExecutor
+
+_MODELSERVICE_ROLE_SUFFIXES = [
+    "modelservice-admin",
+    "modelservice-editor",
+    "modelservice-viewer",
+]
+_LEGACY_NOP_SERVICE_VIEWER_PREFIX = "inference-perf-service-viewer-"
+
+
+class CleanClusterRolesStep:
+    def execute(self, context):
+        cmd = context.require_cmd()
+        release = context.release
+        errors = []
+        self._delete_matching(cmd, context, "ClusterRoleBinding", release, errors)
+        self._delete_matching(cmd, context, "ClusterRole", release, errors)
+        context.logger.log_info("Deleting well-known modelservice ClusterRoles...")
+        for suffix in _MODELSERVICE_ROLE_SUFFIXES:
+            cr_name = f"{release}-{suffix}"
+            cmd.kube("delete", "--ignore-not-found=true", "ClusterRole", cr_name)
+
+    def _delete_matching(self, cmd, context, kind, release, errors):
+        result = cmd.kube("get", kind, "--no-headers", "-o", "name")
+        if not result.success or not result.stdout.strip():
+            return
+        for line in result.stdout.strip().splitlines():
+            resource_name = line.strip()
+            if release in resource_name:
+                cmd.kube("delete", "--ignore-not-found=true", resource_name)
+EOF
+
 # --- apply, twice, and a missing anchor ------------------------------------
-for n in 15 16; do extract "$n" || true; done
-for n in 15:step_03_delete_resources 16:step_01_uninstall_helm; do
+for n in 15 16 17; do extract "$n" || true; done
+for n in 15:step_03_delete_resources 16:step_01_uninstall_helm 17:step_04_clean_cluster_roles; do
     num="${n%%:*}"; f="$S/${n#*:}.py"
     [ -s "$T/fix$num.py" ] || continue
     out="$("$PY" "$T/fix$num.py" "$f" 2>&1)"
@@ -108,6 +143,7 @@ cat > "$T/run.py" <<'PY'
 import json, sys
 sys.path.insert(0, sys.argv[1])
 from llmdbenchmark.teardown.steps import step_03_delete_resources as s3
+from llmdbenchmark.teardown.steps import step_04_clean_cluster_roles as s4
 
 class R:
     def __init__(self, ok=True, out="", err=""):
@@ -166,6 +202,28 @@ cmd = Cmd([("get pv", R(True, json.dumps({"items": []})))]); ctx = Ctx(cmd)
 s3._wva_delete_hostpath_volume(cmd, ctx, "ns")
 check(not any(c.startswith("delete") for c in cmd.calls), "fix 15: a namespace with no node-local volume deletes nothing")
 
+# fix 17: a role another namespace binds is kept; an unbound one goes; unreadable bindings keep everything
+binds_other = json.dumps({"items": [{"kind": "RoleBinding", "metadata": {"namespace": "team-b", "name": "rb"}, "roleRef": {"kind": "ClusterRole", "name": "llmdbench-modelservice-admin"}}]})
+cmd = Cmd([("get clusterrolebindings,rolebindings", R(True, binds_other)), ("get ClusterRoleBinding", R(True, "")), ("get ClusterRole", R(True, ""))]); ctx = Ctx(cmd)
+s4.CleanClusterRolesStep().execute(ctx)
+deleted = [c.split()[-1] for c in cmd.calls if c.startswith("delete")]
+check("llmdbench-modelservice-admin" not in deleted, "fix 17: a ClusterRole another namespace binds is kept")
+check("llmdbench-modelservice-editor" in deleted and "llmdbench-modelservice-viewer" in deleted, "fix 17: one no binding references is deleted: %s" % deleted)
+check(any("Keeping ClusterRole/llmdbench-modelservice-admin" in m and "team-b/rb" in m for _, m in ctx.logger.lines), "fix 17: the log says which binding keeps it")
+
+cmd = Cmd([("get clusterrolebindings,rolebindings", R(False, "", "Forbidden")), ("get ClusterRole", R(True, ""))]); ctx = Ctx(cmd)
+s4.CleanClusterRolesStep().execute(ctx)
+check(not any(c.startswith("delete") for c in cmd.calls), "fix 17: bindings it cannot read keep every role (Forbidden is not absent)")
+
+# fix 17: _delete_matching keeps a binding with a subject outside this teardown, deletes one that is all ours
+crbs = json.dumps({"items": [
+    {"kind": "ClusterRoleBinding", "metadata": {"name": "llmdbench-other"}, "roleRef": {"kind": "ClusterRole", "name": "x"}, "subjects": [{"kind": "ServiceAccount", "namespace": "team-b", "name": "sa"}]},
+    {"kind": "ClusterRoleBinding", "metadata": {"name": "llmdbench-ours"}, "roleRef": {"kind": "ClusterRole", "name": "y"}, "subjects": [{"kind": "ServiceAccount", "namespace": "ns", "name": "sa"}]}]})
+names = "clusterrolebinding.rbac.authorization.k8s.io/llmdbench-other\nclusterrolebinding.rbac.authorization.k8s.io/llmdbench-ours"
+cmd = Cmd([("get clusterrolebindings,rolebindings", R(True, crbs)), ("get ClusterRoleBinding", R(True, names))]); ctx = Ctx(cmd)
+s4.CleanClusterRolesStep()._delete_matching(cmd, ctx, "ClusterRoleBinding", "llmdbench", [])
+deleted = [c.split()[-1] for c in cmd.calls if c.startswith("delete")]
+check(deleted == ["clusterrolebinding.rbac.authorization.k8s.io/llmdbench-ours"], "fix 17: a binding matched by name goes only when every subject is ours: %s" % deleted)
 sys.exit(1 if bad else 0)
 PY
 "$PY" "$T/run.py" "$T" || FAILED=1
