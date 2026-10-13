@@ -917,7 +917,10 @@ OLD = '''            "usage=model-cache",
 '''
 NEW = '''            f"usage=model-cache,wva.llmd.ai/model-namespace={context.require_namespace()}",  # wva-patch
 '''
-if NEW in src:
+# Fix 15 rewrites both sites around one namespace-scoped selector, so after
+# it neither OLD nor NEW is there; the scoped label with no unscoped site
+# left is this fix applied, and a second run must say so, not fail.
+if NEW in src or (OLD not in src and "wva.llmd.ai/model-namespace=" in src):
     done += 1
 else:
     if src.count(OLD) != 2:

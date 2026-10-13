@@ -122,7 +122,27 @@ class CleanClusterRolesStep:
                 cmd.kube("delete", "--ignore-not-found=true", resource_name)
 EOF
 
+# fix 12's two templates, at the upstream anchors
+cat > "$T/pv.yaml.j2" <<'EOF'
+metadata:
+  name: {{ storage.modelPvc.name }}-hostpath-pv
+  labels:
+    app: {{ labels.app }}
+    usage: model-cache
+spec:
+EOF
+cat > "$T/pvc.yaml.j2" <<'EOF'
+  volumeName: {{ storage.modelPvc.name }}-hostpath-pv
+EOF
+
 # --- apply, twice, and a missing anchor ------------------------------------
+# The standup runs the whole patcher on every invocation, so fix 12 meets
+# step_03 after fix 15 has rewritten it; that second run must be a no-op.
+extract 12 || true
+if [ -s "$T/fix12.py" ]; then
+    out="$("$PY" "$T/fix12.py" "$T/pv.yaml.j2" "$T/pvc.yaml.j2" "$S/step_03_delete_resources.py" 2>&1)"
+    case "$out" in *"): applied"*) ok "fix 12 applies to the upstream anchors" ;; *) fail "fix 12 on the fixture: $out" ;; esac
+fi
 for n in 15 16 17; do extract "$n" || true; done
 for n in 15:step_03_delete_resources 16:step_01_uninstall_helm 17:step_04_clean_cluster_roles; do
     num="${n%%:*}"; f="$S/${n#*:}.py"
@@ -135,6 +155,10 @@ for n in 15:step_03_delete_resources 16:step_01_uninstall_helm 17:step_04_clean_
     printf 'x = 1\n' > "$T/blank.py"
     if "$PY" "$T/fix$num.py" "$T/blank.py" >/dev/null 2>&1; then fail "fix $num must fail on a file without its anchors"; else ok "fix $num: a missing anchor is a hard error"; fi
 done
+if [ -s "$T/fix12.py" ]; then
+    out="$("$PY" "$T/fix12.py" "$T/pv.yaml.j2" "$T/pvc.yaml.j2" "$S/step_03_delete_resources.py" 2>&1)"
+    case "$out" in *"already applied"*) ok "fix 12 is idempotent after fix 15 rewrote its sites" ;; *) fail "fix 12 after fix 15: $out" ;; esac
+fi
 grep -q "WVA was never installed" "$S/step_01_uninstall_helm.py" && fail "fix 16: the teardown still says WVA was never installed" \
     || ok "fix 16: the teardown no longer says WVA was never installed, and names who removes it"
 
