@@ -219,6 +219,13 @@ for m in "workload-pvc:engine-cache" "workload-pvc:engine-cache@20261013120000" 
 done
 echo "other-claim:x" > "$T/marker"
 grep -qx -e "workload-pvc:engine-cache" -e "workload-pvc:engine-cache@[0-9]*" -e "none:workload-pvc:engine-cache" "$T/marker" && fail "probe accepts another seed's marker" || ok "probe: accepts the seed's three marker forms, refuses another seed's"
+# publish waits on the usable nodes (status), never `rollout status`, which
+# also waits for a cordoned node's pod that never comes up
+pub_body="$(sed -n '/^cmd_publish() {/,/^}/p' deploy/enginecache.sh | grep -v '^[[:space:]]*#')"
+if [ -z "$pub_body" ]; then fail "publish: no cmd_publish found"
+elif printf '%s' "$pub_body" | grep -q 'rollout status'; then fail "publish: waits with rollout status, which counts cordoned nodes"
+elif printf '%s' "$pub_body" | grep -q 'enginecache.sh" status'; then ok "publish: waits for the usable nodes to re-seed, not for every DaemonSet pod"
+else fail "publish: no wait for the preparers to re-seed"; fi
 n="$(grep -c "cat <<'SCRIPT'" deploy/enginecache.sh)"
 [ "$n" = 2 ] && grep -q '^\$(preparer_script | sed' deploy/enginecache.sh && grep -q '^\$(publish_script | sed' deploy/enginecache.sh && ok "render: the preparer's and the publisher's commands come from quoted heredocs, so nothing in them is evaluated at apply time" || fail "render: a preparer or publisher command is not in a quoted heredoc ($n of 2)"
 

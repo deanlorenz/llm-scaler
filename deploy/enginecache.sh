@@ -825,8 +825,14 @@ EOF
         || { kubectl delete pod -n "$NAMESPACE" "$stamp_pod" --ignore-not-found --wait=false >/dev/null 2>&1; log_error "publish: the seed was filled but not stamped; rerun publish"; }
     kubectl delete pod -n "$NAMESPACE" "$stamp_pod" --ignore-not-found --wait=false >/dev/null
     kubectl rollout restart -n "$NAMESPACE" "daemonset/${CLAIM}" >/dev/null || log_error "publish: could not restart the preparers"
-    kubectl rollout status -n "$NAMESPACE" "daemonset/${CLAIM}" --timeout=600s >/dev/null 2>&1 \
-        || log_warning "publish: the preparers did not all restart within 600 s; enginecache.sh status says which"
+    # Wait on the usable nodes, as status counts them: `rollout status` also
+    # waits for a cordoned node's pod, which never comes up.
+    local deadline=$((SECONDS + 600))
+    sleep 5
+    until bash "$HERE/enginecache.sh" status -n "$NAMESPACE" >/dev/null 2>&1; do
+        [ "$SECONDS" -lt "$deadline" ] || { log_warning "publish: not every usable node re-seeded within 600 s; enginecache.sh status says which"; break; }
+        sleep 10
+    done
     log_success "published from ${i} node(s) into ${seed} (stamp ${stamp}); every preparer merges it on restart"
 }
 
