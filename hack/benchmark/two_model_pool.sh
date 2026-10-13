@@ -640,10 +640,23 @@ verb_preflight() {
     # --model path that is not in the Pod, never answers, and the controller
     # waits out its whole admission timeout before reporting only that the port
     # did not respond.
-    if k get pvc "$CACHE_CLAIM" >/dev/null 2>&1; then
+    #
+    # Missing is normal before the first standup, which creates it -- and
+    # node-local weights REQUIRE a fresh namespace, so on that path it is
+    # always missing here. The real guard is an EXISTING claim on another
+    # class when node-local weights are asked for: the harness keeps an
+    # existing claim, so the volume it would create never binds.
+    local cache_class
+    cache_class="$(k get pvc "$CACHE_CLAIM" -o jsonpath='{.spec.storageClassName}' 2>/dev/null || true)"
+    if [ -n "${BENCHMARK_MODEL_HOSTPATH:-}" ] && [ -n "$cache_class" ] && [ "$cache_class" != node-local-weights ]; then
+        warn "BENCHMARK_MODEL_HOSTPATH asks for node-local weights, but $CACHE_CLAIM already exists on storage class '$cache_class':"
+        warn "  the harness keeps an existing claim, so the node-local volume would never bind. Use a fresh namespace,"
+        warn "  or delete the claim (the shared copy of the weights goes with it)."
+        rc=1
+    elif k get pvc "$CACHE_CLAIM" >/dev/null 2>&1; then
         ok "model cache claim $CACHE_CLAIM exists"
     else
-        warn "no PVC named $CACHE_CLAIM in $NS -- it is created by standup; run this again after"
+        info "no PVC named $CACHE_CLAIM in $NS yet: the standup creates it"
     fi
 
     # The phase has to outlast scale-down stabilization or the premise fails --

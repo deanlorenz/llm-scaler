@@ -198,7 +198,10 @@ case "$args" in
       exit 0 ;;
   *"get pod pquery-"*"jsonpath={.status.phase}"*) echo "Succeeded"; exit 0 ;;
   *"logs pquery-"*) echo "${PQUERY_OUT:-}"; exit 0 ;;
-  *"get pvc"*) [ "${HAS_PVC:-1}" = "1" ] && exit 0; exit 1 ;;
+  # PVC_CLASS: the storage class an existing claim reports.
+  *"get pvc"*) [ "${HAS_PVC:-1}" = "1" ] || exit 1
+      case "$args" in *storageClassName*) printf '%s' "${PVC_CLASS:-}" ;; esac
+      exit 0 ;;
   *"get pods -l llm-d.ai/warm-pool"*)
       [ "${POOL_EXISTS:-0}" = "1" ] && echo "wva-warm-pool-twomodel-abc"
       exit 0 ;;
@@ -699,6 +702,28 @@ else
     ok "pool-create refuses an ambiguous accelerator, before anything is created"
 fi
 
+# A missing model claim is normal before the first standup, which creates it,
+# and node-local weights require a fresh namespace. What refuses is a claim
+# that exists on a class the node-local volume could never replace.
+case_begin
+HAS_PVC=0 run_verb preflight
+if [ "$RC" -ne 0 ] || ! printf '%s' "$OUT" | grep -q 'the standup creates it'; then
+    fail "a fresh namespace with no model claim did not pass preflight: $(printf '%s' "$OUT" | grep -iE 'pvc|claim')"
+else
+    ok "a fresh namespace passes: the model claim is the standup's to create"
+fi
+case_begin
+HAS_PVC=1 PVC_CLASS=shared-vast BENCHMARK_MODEL_HOSTPATH=/mnt/local/w run_verb preflight
+c1="$RC"; o1="$OUT"
+HAS_PVC=1 PVC_CLASS=node-local-weights BENCHMARK_MODEL_HOSTPATH=/mnt/local/w run_verb preflight
+if [ "$c1" -eq 0 ] || ! printf '%s' "$o1" | grep -q "already exists on storage class 'shared-vast'"; then
+    fail "node-local weights over an existing shared-class claim passed preflight; the node-local volume would never bind: $(printf '%s' "$o1" | grep -iE 'claim|pvc')"
+elif [ "$RC" -ne 0 ]; then
+    fail "an existing claim already on the node-local class was refused: $(printf '%s' "$OUT" | grep -iE 'claim|pvc')"
+else
+    ok "node-local weights refuse an existing claim on another class, and accept one on their own"
+fi
+
 case_begin
 OUT="$(PATH="$STUB:$PATH" KCALLS=/dev/null BENCHMARK_NAMESPACE=ns PHASE_SECONDS=300 \
     NODE_GPUS=8 bash "$SCRIPT" preflight 2>&1)"; RC=$?
@@ -1148,7 +1173,7 @@ else
 fi
 
 case_begin
-CASES_EXPECTED=70
+CASES_EXPECTED=72
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately rather than letting coverage drift out."
 else
