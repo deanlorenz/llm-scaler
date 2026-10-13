@@ -208,9 +208,9 @@ Work down the list in order.
    Two more reasons on the same counter are not holds: `donor-peak` (while the
    quota holds every model's peak, a model already at its need takes no
    headroom that would leave its donor below the donor's own recent peak, by
-   a single move or a donor set) and `awaiting-return` (a short model whose
-   replica spans several pods, such as a LeaderWorkerSet, is credited with
-   returns still releasing whose pods hold its pods, in whole replicas, and
+   a single move or a donor set) and `awaiting-return` (a short model is
+   credited with returns still releasing whose pods hold its pods, in whole
+   replicas, and
    only the rest is funded by draining other models; the model itself shows
    blocked reason `awaiting-release`). A third, `scale-down-band`, counts a
    return a model did not make because it would take the model lower than
@@ -371,13 +371,9 @@ spare, and GPUs are returned only when another model's recent peak could use
 them. If, while the release is still in its
 scale-down window, the model is short of its target again or busier than that
 load on what it keeps, the return is called off and the model keeps the
-replica. If another model turns short while the return is still releasing, the
-returned GPUs go to that model when they come free: its scale target gets a
-`UtilizationShareReceiving` Event naming the model that is giving them back,
-and the log says `Utilization share: returned spare handed to a receiver`. A
-return is handed over only when the returned pod holds the short model's pod;
-a return rebuilt from its pod marks after a restart, whose shape is not known,
-is never handed over and goes to the unassigned GPUs.
+replica. If another model turns short while the return is still releasing,
+the returned GPUs go to the unassigned GPUs as usual, and the idle fill raises
+that model into them once the replica is released.
 
 **How to tell**: the donor's scale target carries a `UtilizationShareGiving`
 Event that names "the quota group's unassigned GPUs" and says "because it holds more headroom than maxHeadroomReplicas gives it while no model is short, and stays calm without it; the replica drains after its scale-down window, and is kept if its demand comes back before then; a model whose demand rises takes the GPUs at once". A return called off carries a
@@ -385,7 +381,7 @@ Event that names "the quota group's unassigned GPUs" and says "because it holds 
 the replica it was giving back". The controller log has
 `Utilization share: transfer started` with `returned` set to true and no
 `receiver`, then `Utilization share: spare returned to the quota` when the
-replica is released (unless it was handed to a receiver first). `wva_utilization_share_starts_total{kind="return"}`
+replica is released. `wva_utilization_share_starts_total{kind="return"}`
 counts returns per quota group. A model that holds more than its headroom and
 is not giving it back shows why in `wva_utilization_share_withheld_total`:
 `return-not-calm` (its load is above `returnSpareWhenLoadAtMost`) or

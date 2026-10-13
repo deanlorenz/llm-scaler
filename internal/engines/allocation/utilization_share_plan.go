@@ -206,9 +206,6 @@ type SharePlan struct {
 	// Returns is how many transfers started this cycle to give a role's
 	// replicas above its target back to the unassigned GPUs (returnSpare).
 	Returns int
-	// Assigned are the returns still releasing that this cycle handed to a
-	// short receiver (ShareLedger.AssignReturn).
-	Assigned []string
 	// HeadroomCapped is set when the spare was capped this cycle: the quota
 	// could not cover every role at its recent peak (contended).
 	HeadroomCapped bool
@@ -839,8 +836,7 @@ func (p *sharePlanRun) cancelReversals() {
 		g := float64(max(dn.ReplicaGPUs, 1))
 		bar := float64(donorAfter) - float64(in.Headroom.spareReplicas(dn))*g + g
 		back := donorShort || donorAfter < p.integ[t.Donor] || p.need(t.Donor) > in.Headroom.returnLoad()*bar
-		// One handed to a receiver is a transfer now, and is judged as one.
-		if t.Returned && t.Receiver == "" && back && l.Cancel(t.ID, now, tm) {
+		if t.Returned && back && l.Cancel(t.ID, now, tm) {
 			p.plan.Cancelled = append(p.plan.Cancelled, t.ID)
 			p.committed = l.Committed(in.Held)
 			continue
@@ -933,11 +929,10 @@ func (p *sharePlanRun) fund(rc string, donors []string) {
 		return // its last fill timed out with its pods Pending (HoldFill)
 	}
 	p.fromIdle(rc)
-	p.fromReturns(rc)
-	// Returns still releasing that will free whole replicas of a receiver
-	// whose replica spans several pods land in the unassigned GPUs, where the
-	// idle fill places its pods: they are credited, and only the rest is
-	// funded, which would otherwise drain a donor for GPUs already on their way.
+	// Returns still releasing that will free whole replicas of the receiver
+	// land in the unassigned GPUs, where the idle fill places its pods: they
+	// are credited, and only the rest is funded, which would otherwise drain a
+	// donor for GPUs already on their way.
 	if n := p.returnsCover(rc); n > 0 {
 		p.work[rc] += n
 		p.plan.Withheld[ShareWithheldAwaitingReturn]++
@@ -1012,58 +1007,28 @@ func (p *sharePlanRun) fromIdle(rc string) {
 	}
 }
 
-// fromReturns hands returned spare still releasing to receiver rc, up to its
-// target: those GPUs reach it when they come free, as a transfer's would.
-// Left unassigned, the receiver would wait on the same release with no
-// transfer of its own and no reason to show for it. A receiver whose replica
-// spans several pods is left to a donor set, which places each pod.
-func (p *sharePlanRun) fromReturns(rc string) {
-	grow, ok := variantOf(p.in.Grow, rc, p.byKey[rc].ReplicaGPUs)
-	if !ok || len(grow.PodGPUs) > 1 {
-		return
-	}
-	g := max(grow.GPUs, 1)
-	for _, t := range p.l.Transfers() {
-		if p.work[rc] >= p.integ[rc] {
-			return
-		}
-		if !t.Returned || t.Donor == rc {
-			continue
-		}
-		// The returned pod must free a hole the receiver's pod fits: an
-		// 8-GPU return split as 2x4 does not hold a 1x8 pod. Its shape is the
-		// one it was returned from -- the donor may give from another variant
-		// by now -- and a return whose shape is not known is not handed over.
-		returned := ShareVariant{GPUs: t.DonorGPUs, PodGPUs: t.DonorPodGPUs}
-		if p.in.Give != nil && (len(t.DonorPodGPUs) == 0 || !ShareCovers(returned, grow)) {
-			continue
-		}
-		if p.l.AssignReturn(t.ID, rc, grow.Name, g) {
-			p.work[rc] += g
-			p.plan.Assigned = append(p.plan.Assigned, t.ID)
-		}
-	}
-}
-
-// returnsCover is the GPUs, in whole replicas of receiver rc -- whose
-// replica spans several pods -- that returns still releasing, and handed to
-// no receiver, will free for it, up to its target. Such returns are not
-// handed over (fromReturns); they reach rc through the idle fill once
-// released. Only returned pods at least as large as rc's pods count: two
-// 4-GPU pods do not hold an 8-GPU one, and a return whose shape is not known
-// counts for nothing. Each return is credited to one receiver per cycle.
+// returnsCover is the GPUs, in whole replicas of receiver rc, that returns
+// still releasing will free for it, up to its target. A return is never
+// handed to a receiver: it reaches rc through the idle fill once released.
+// Only returned pods at least as large as rc's smallest pod count -- its
+// whole replica, when its pods are not known: two 4-GPU pods do not hold an
+// 8-GPU one, and a return whose shape is not known counts for nothing. Each
+// return is credited to one receiver per cycle.
 func (p *sharePlanRun) returnsCover(rc string) int {
 	grow, ok := variantOf(p.in.Grow, rc, p.byKey[rc].ReplicaGPUs)
-	if !ok || len(grow.PodGPUs) <= 1 {
+	if !ok {
 		return 0
 	}
-	smallest := slices.Min(grow.PodGPUs)
 	g := max(grow.GPUs, 1)
+	smallest := g
+	if len(grow.PodGPUs) > 0 {
+		smallest = slices.Min(grow.PodGPUs)
+	}
 	want := p.integ[rc] - p.work[rc]
 	var ids []string
 	gpus := 0
 	for _, t := range p.l.Transfers() {
-		if !t.Returned || t.Receiver != "" || t.State != ShareReleasing || t.Donor == rc || p.creditedReturns[t.ID] {
+		if !t.Returned || t.State != ShareReleasing || t.Donor == rc || p.creditedReturns[t.ID] {
 			continue
 		}
 		fits := 0
@@ -1162,11 +1127,12 @@ func (p *sharePlanRun) fundFrom(rc, dn string) (started int, step fundStep, cand
 			return started, fundNext, candidate, misfit
 		}
 		// §6.2 admission: the worst-off role of the pair improves, and the
-		// donor is not pushed out of band.
+		// donor keeps at least its whole-replica target and its keep -- what
+		// it keeps after giving, which a donor replica larger than its
+		// target's step can take below the target.
 		before := math.Min(p.z(dn, work[dn]), p.z(rc, work[rc]))
 		after := math.Min(p.z(dn, work[dn]-gd), p.z(rc, work[rc]+g))
-		donorOK := donorInBand(in, p.limits(), p.cont, byKey, dn, work[dn]-gd)
-		if !(after > before) || !donorOK || work[dn]-gd < p.keep[dn] {
+		if !(after > before) || work[dn]-gd < p.integ[dn] || work[dn]-gd < p.keep[dn] {
 			return started, fundNext, candidate, misfit
 		}
 		t := l.Start(ShareTransfer{

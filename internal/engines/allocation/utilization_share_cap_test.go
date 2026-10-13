@@ -144,8 +144,9 @@ func TestSharePeakHistoryRestartsAfterAGap(t *testing.T) {
 
 // A role joining a group whose history is known claims what it holds, not its
 // ceiling: at its ceiling, any new model -- or one renamed to look new --
-// would cap every other model's headroom for a window. Control: in a group
-// with no history at all, every role counts at its ceiling and is named.
+// would cap every other model's headroom for a window. N holds 3 on a need of
+// 0.5, so its claim is the 3, not the 1 its need rounds to. Control: in a
+// group with no history at all, every role counts at its ceiling and is named.
 func TestShareJoinerClaimsWhatItHolds(t *testing.T) {
 	tm := spareTimings()
 	now := time.Unix(10000, 0)
@@ -154,7 +155,7 @@ func TestShareJoinerClaimsWhatItHolds(t *testing.T) {
 		{Key: "Q", Weight: 1, Need: 1, Floor: 1, Ceiling: 8, ReplicaGPUs: 1},
 		{Key: "N", Weight: 1, Need: 0.5, Floor: 1, Ceiling: 8, ReplicaGPUs: 1},
 	}
-	in := SharePlanInput{Roles: roles, Held: map[string]int{"L": 3, "Q": 3, "N": 1},
+	in := SharePlanInput{Roles: roles, Held: map[string]int{"L": 3, "Q": 3, "N": 3},
 		Thresholds: map[string]float64{"L": 0.85, "Q": 0.85, "N": 0.85}, Budget: 10, Tolerance: 0.15,
 		Headroom: ShareHeadroom{Capped: true, Replicas: 1}}
 	l := NewShareLedger()
@@ -163,9 +164,9 @@ func TestShareJoinerClaimsWhatItHolds(t *testing.T) {
 		l.RecordNeeds(map[string]float64{"L": 2, "Q": 1}, now.Add(-ago), tm)
 	}
 	p := PlanShareTransfers(l, in, now, tm)
-	// L at its peak of 2, Q at 1, N at the 1 it holds.
-	if p.HeadroomCapped || p.PeakClaimGPUs != 4 || len(p.UnknownPeaks) != 0 {
-		t.Fatalf("N joining a known group: capped %v on peak claims %d, unknown %v; want uncapped on 4, none unknown",
+	// L at its peak of 2, Q at 1, N at the 3 it holds.
+	if p.HeadroomCapped || p.PeakClaimGPUs != 6 || len(p.UnknownPeaks) != 0 {
+		t.Fatalf("N joining a known group: capped %v on peak claims %d, unknown %v; want uncapped on 6, none unknown",
 			p.HeadroomCapped, p.PeakClaimGPUs, p.UnknownPeaks)
 	}
 	p = PlanShareTransfers(NewShareLedger(), in, now, tm)
