@@ -226,6 +226,22 @@ if [ -z "$pub_body" ]; then fail "publish: no cmd_publish found"
 elif printf '%s' "$pub_body" | grep -q 'rollout status'; then fail "publish: waits with rollout status, which counts cordoned nodes"
 elif printf '%s' "$pub_body" | grep -q 'enginecache.sh" status'; then ok "publish: waits for the usable nodes to re-seed, not for every DaemonSet pod"
 else fail "publish: no wait for the preparers to re-seed"; fi
+# a publish pod that Failed is reported at once, not after the whole timeout
+if printf '%s' "$pub_body" | grep -q 'for=jsonpath=.{.status.phase}.=Succeeded'; then
+    fail "publish: waits on Succeeded alone, so a Failed pod sits out the timeout"
+fi
+ps_body="$(sed -n '/^pod_succeeded() {/,/^}/p' deploy/enginecache.sh)"
+if [ -z "$ps_body" ]; then fail "publish: no pod_succeeded"; else
+    for c in Succeeded:0 Failed:1 Pending:1; do
+        out="$(PHASE="${c%%:*}" bash -c 'kubectl() { printf %s "$PHASE"; }; sleep() { SECONDS=$((SECONDS + $1)); }; NAMESPACE=ns; '"$ps_body"'
+SECONDS=0; pod_succeeded p 900; echo "rc=$? after=$SECONDS"')"
+        want="rc=${c#*:}"
+        case "$c:$out" in
+            Pending*) [ "${out%% *}" = "$want" ] && ok "pod_succeeded: a pod still $(echo "${c%%:*}") at the deadline is a failure" || fail "pod_succeeded on ${c%%:*}: $out" ;;
+            *) [ "$out" = "$want after=0" ] && ok "pod_succeeded: ${c%%:*} answers at once ($want)" || fail "pod_succeeded on ${c%%:*}: $out (want $want at once)" ;;
+        esac
+    done
+fi
 n="$(grep -c "cat <<'SCRIPT'" deploy/enginecache.sh)"
 [ "$n" = 2 ] && grep -q '^\$(preparer_script | sed' deploy/enginecache.sh && grep -q '^\$(publish_script | sed' deploy/enginecache.sh && ok "render: the preparer's and the publisher's commands come from quoted heredocs, so nothing in them is evaluated at apply time" || fail "render: a preparer or publisher command is not in a quoted heredoc ($n of 2)"
 

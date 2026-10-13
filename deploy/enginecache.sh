@@ -721,6 +721,22 @@ echo "engine cache: published from $NODE_NAME: ${#added} entries added to the se
 SCRIPT
 }
 
+# pod_succeeded POD TIMEOUT_S waits for a run-once pod to finish: 0 when it
+# Succeeded, 1 as soon as it Failed or when TIMEOUT_S passes. `kubectl wait`
+# on one phase would sit out the whole timeout on a pod that already failed.
+pod_succeeded() {
+    local pod="$1" deadline=$((SECONDS + $2)) phase
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        phase="$(kubectl get pod -n "$NAMESPACE" "$pod" -o jsonpath='{.status.phase}' --request-timeout=30s 2>/dev/null)"
+        case "$phase" in
+            Succeeded) return 0 ;;
+            Failed) return 1 ;;
+        esac
+        sleep 5
+    done
+    return 1
+}
+
 # cmd_publish fills the seed from the nodes: every node whose preparer is Ready
 # merges its caches into the seed claim, one node at a time, then the seed is
 # stamped and the preparers restart, so each node merges in what any node
@@ -807,7 +823,7 @@ EOF
         if [ "$DRY_RUN" = true ]; then printf '%s\n---\n' "$manifest"; continue; fi
         kubectl delete pod -n "$NAMESPACE" "$pod" --ignore-not-found --wait=true --timeout=60s >/dev/null
         printf '%s\n' "$manifest" | kubectl apply -f - >/dev/null || log_error "publish: could not create ${pod} on ${node}"
-        if ! kubectl wait -n "$NAMESPACE" "pod/${pod}" --for=jsonpath='{.status.phase}'=Succeeded --timeout=900s >/dev/null 2>&1; then
+        if ! pod_succeeded "$pod" 900; then
             kubectl logs -n "$NAMESPACE" "$pod" 2>&1 | tail -5 >&2
             kubectl delete pod -n "$NAMESPACE" "$pod" --ignore-not-found --wait=false >/dev/null 2>&1
             log_error "publish: ${pod} on ${node} did not succeed (its log is above); the seed is not stamped, so no node re-seeds from a partial copy"
@@ -818,10 +834,11 @@ EOF
     [ "$DRY_RUN" = false ] || return 0
     # Stamp the seed only after every node published, from the last node's view.
     local stamp_pod="${CLAIM}-publish-stamp"
+    kubectl delete pod -n "$NAMESPACE" "$stamp_pod" --ignore-not-found --wait=true --timeout=60s >/dev/null
     kubectl run -n "$NAMESPACE" "$stamp_pod" --image="$image" --restart=Never --quiet \
         --overrides="{\"spec\":{\"nodeName\":\"${node}\",\"tolerations\":[{\"operator\":\"Exists\"}],\"serviceAccountName\":\"${SA_NAME}\",\"automountServiceAccountToken\":false,\"volumes\":[{\"name\":\"seed\",\"persistentVolumeClaim\":{\"claimName\":\"${claim}\"}}],\"containers\":[{\"name\":\"stamp\",\"image\":\"${image}\",\"command\":[\"/bin/sh\",\"-c\",\"echo ${stamp} > /seed${sub:+/$sub}/.published\"],\"env\":[{\"name\":\"NVIDIA_VISIBLE_DEVICES\",\"value\":\"void\"}],\"volumeMounts\":[{\"name\":\"seed\",\"mountPath\":\"/seed\"}]}]}}" >/dev/null \
         || log_error "publish: could not create ${stamp_pod}"
-    kubectl wait -n "$NAMESPACE" "pod/${stamp_pod}" --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s >/dev/null 2>&1 \
+    pod_succeeded "$stamp_pod" 300 \
         || { kubectl delete pod -n "$NAMESPACE" "$stamp_pod" --ignore-not-found --wait=false >/dev/null 2>&1; log_error "publish: the seed was filled but not stamped; rerun publish"; }
     kubectl delete pod -n "$NAMESPACE" "$stamp_pod" --ignore-not-found --wait=false >/dev/null
     kubectl rollout restart -n "$NAMESPACE" "daemonset/${CLAIM}" >/dev/null || log_error "publish: could not restart the preparers"
