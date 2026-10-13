@@ -16,7 +16,7 @@ from `259c52f8` and deployed by digest. The scenario and the guards that keep
 the arms comparable are in the
 [benchmarking runbook](../../guides/benchmarking/two-model-utilization-share.md).
 The tables below are that report's, unedited, except where a row says it came
-from the controller log. Three later runs, on a scenario with different burst
+from the controller log. Five later runs, on a scenario with different burst
 shapes, follow in
 [their own section](#different-burst-shapes-a-cancel-that-stalled-the-rising-model);
 they found failures the first scenario could not show. Every run used 1 GPU
