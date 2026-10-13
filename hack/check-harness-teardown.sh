@@ -77,9 +77,19 @@ class DeleteResourcesStep:
         if pv_result.success and pv_result.stdout.strip():
             context.logger.log_info("  Deleted hostPath PV(s)")
 EOF
+cat > "$S/step_01_uninstall_helm.py" <<'EOF'
+class UninstallHelmStep:
+    def _wva(self, context):
+        if not context.is_openshift:
+            context.logger.log_info(
+                f"WVA teardown skipped: platform is {context.platform_type}, "
+                "not OpenShift (matches standup behavior -- WVA was never installed)."
+            )
+            return
+EOF
 # --- apply, twice, and a missing anchor ------------------------------------
-for n in 15; do extract "$n" || true; done
-for n in 15:step_03_delete_resources; do
+for n in 15 16; do extract "$n" || true; done
+for n in 15:step_03_delete_resources 16:step_01_uninstall_helm; do
     num="${n%%:*}"; f="$S/${n#*:}.py"
     [ -s "$T/fix$num.py" ] || continue
     out="$("$PY" "$T/fix$num.py" "$f" 2>&1)"
@@ -90,6 +100,8 @@ for n in 15:step_03_delete_resources; do
     printf 'x = 1\n' > "$T/blank.py"
     if "$PY" "$T/fix$num.py" "$T/blank.py" >/dev/null 2>&1; then fail "fix $num must fail on a file without its anchors"; else ok "fix $num: a missing anchor is a hard error"; fi
 done
+grep -q "WVA was never installed" "$S/step_01_uninstall_helm.py" && fail "fix 16: the teardown still says WVA was never installed" \
+    || ok "fix 16: the teardown no longer says WVA was never installed, and names who removes it"
 
 # --- run the patched code against a recording kubectl -----------------------
 cat > "$T/run.py" <<'PY'

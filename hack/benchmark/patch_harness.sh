@@ -1193,3 +1193,43 @@ print("  fix 15 (hostPath volume torn down in order, bounded): applied")
 PYEOF
 fi
 
+# ---------------------------------------------------------------------------
+# Fix 16 -- teardown: do not say WVA was never installed.
+#
+# On a platform other than OpenShift the harness's own WVA install is skipped,
+# and its teardown logged "WVA was never installed" -- printed on namespaces
+# where the scaling manager's own installer HAD put WVA, and where
+# `make benchmark-teardown` had just removed it with its own uninstall. The line
+# now says what is true: the harness has none of its own to remove, and a WVA
+# another installer put there is that installer's to remove.
+# ---------------------------------------------------------------------------
+TD1="$REPO_DIR/llmdbenchmark/teardown/steps/step_01_uninstall_helm.py"
+if [ ! -f "$TD1" ]; then
+    note "fix 16 (no false 'WVA was never installed'): no step_01, skipped"
+else
+    "$PY" - "$TD1" <<'PYEOF' || fail "fix 16 (no false 'WVA was never installed') failed"
+import io, sys
+
+path = sys.argv[1]
+src = io.open(path, encoding="utf-8", newline="").read().replace("\r\n", "\n")
+FIRST = '                f"WVA teardown skipped: platform is {context.platform_type}, "\n'
+NEW = ('                f"WVA teardown skipped by the harness: on {context.platform_type} (not OpenShift) "  # wva-patch (fix 16)\n'
+       '                "the harness standup does not install WVA, so it has none of its own to remove here. "\n'
+       '                "A WVA another installer put in this namespace is that installer\'s to remove "\n'
+       '                "(make benchmark-teardown runs the scaling manager\'s own uninstall before this)."\n')
+if "wva-patch (fix 16)" in src:
+    print("  fix 16 (no false 'WVA was never installed'): already applied")
+    sys.exit(0)
+if src.count(FIRST) != 1:
+    sys.exit("anchor missing or ambiguous (upstream shape changed): " + FIRST.strip())
+i = src.index(FIRST)
+j = src.index("\n", i + len(FIRST)) + 1
+second = src[i + len(FIRST):j]
+if "WVA was never installed" not in second:
+    sys.exit("anchor missing (upstream shape changed): the line after the WVA skip message does not say 'WVA was never installed'")
+src = src[:i] + NEW + src[j:]
+io.open(path, "w", encoding="utf-8", newline="\n").write(src)
+print("  fix 16 (no false 'WVA was never installed'): applied")
+PYEOF
+fi
+
