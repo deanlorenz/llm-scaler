@@ -754,7 +754,7 @@ ENGINE_CACHE_CAPACITY ?=
 # A claim[:subPath] whose caches are copied onto each node as it is prepared
 # (the shared claim they lived on before), so no node's first start compiles.
 ENGINE_CACHE_SEED_CLAIM ?=
-.PHONY: engine-cache engine-cache-status engine-cache-delete
+.PHONY: engine-cache engine-cache-status engine-cache-delete engine-cache-publish
 engine-cache: ## Prepare ENGINE_CACHE_PATH=<node dir>/engine-cache on every accelerator node of NAMESPACE=<ns>, with ENGINE_CACHE_IMAGE=<image>; claim engine-cache. [ENGINE_CACHE_CAPACITY=<size>] [ENGINE_CACHE_SEED_CLAIM=<pvc>[:<subPath>]]
 	@test -n "$(ENGINE_CACHE_PATH)" || { echo "engine-cache: set ENGINE_CACHE_PATH=<absolute directory on the node> (or WEIGHTS_PATH)" >&2; exit 1; }
 	@test -n "$(ENGINE_CACHE_IMAGE)" || { echo "engine-cache: set ENGINE_CACHE_IMAGE=<an image with /bin/sh; the engine image> (or WEIGHTS_IMAGE)" >&2; exit 1; }
@@ -769,6 +769,10 @@ engine-cache-status: ## Per accelerator node: is the engine cache directory prep
 engine-cache-delete: ## Drop the engine-cache claim, volume and preparer in NAMESPACE=<ns>. The caches on the nodes stay.
 	@test -n "$(prepull_namespace_given)" || { echo "engine-cache-delete: set NAMESPACE=<ns> (the Makefile default is not taken here)" >&2; exit 1; }
 	@bash deploy/enginecache.sh delete -n "$(NAMESPACE)"
+
+engine-cache-publish: ## Fill the seed claim from every prepared node, then re-seed every node, so no node starts an engine configuration cold. Run it once each configuration has started somewhere. NAMESPACE=<ns>
+	@test -n "$(prepull_namespace_given)" || { echo "engine-cache-publish: set NAMESPACE=<ns> (the Makefile default is not taken here)" >&2; exit 1; }
+	@bash deploy/enginecache.sh publish -n "$(NAMESPACE)"
 
 .PHONY: workload-patch
 workload-patch: ## Write a patch for model servers that do not drain on scale-down, download weights outside every volume they mount, or compile their kernels on every start. NAMESPACE=<ns> scopes it; WVA_WORKLOAD_PATCH_APPLY=true applies the drain half live (add WVA_WORKLOAD_PATCH_APPLY_WEIGHTS=true for the weights volume, after `make model-cache`; WVA_WORKLOAD_PATCH_APPLY_ENGINE_CACHE=true for the engine-cache volume, after `make engine-cache`).

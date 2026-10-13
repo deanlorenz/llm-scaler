@@ -142,11 +142,11 @@ check("subPath" not in m2.get("seed", {}), "no subPath when none was given: %s" 
 script = seed["containers"][0]["args"][0]
 check('merge() {' in script and 'local e n t' in script and 'merge "$e" "$t"' in script and 'elif [ ! -e "$t" ]' in script and 'cp -a --no-preserve=ownership "$e" "$2/"' in script, "the seed is merged file by file, descending directories both sides have: what the node has is kept, what it lacks is copied")
 check(script.index("if [ -d /seed ]") < script.index('touch "/engine-cache/$MARKER"'), "the seed is copied before the prepared marker is written")
-check('[ "$seeded_from" != "$SEED_ID" ]' in script and 'echo "$SEED_ID" > "/engine-cache/$SEED_MARKER"' in script, "the seed marker records the seed, and a different seed is merged in")
-i_ok = script.index('if [ "$complete" = 1 ]'); i_mark = script.index('echo "$SEED_ID" > "/engine-cache/$SEED_MARKER"'); i_loop = script.index('if cp -a --no-preserve=ownership')
+check('[ "$seeded_from" != "$want" ]' in script and 'echo "$want" > "/engine-cache/$SEED_MARKER"' in script and 'want="$SEED_ID@$stamp"' in script, "the seed marker records the seed and its publish stamp, and a different seed or a new stamp is merged in")
+i_ok = script.index('if [ "$complete" = 1 ]'); i_mark = script.index('echo "$want" > "/engine-cache/$SEED_MARKER"'); i_loop = script.index('if cp -a --no-preserve=ownership')
 check(i_loop < i_ok < i_mark and 'else complete=0; rm -rf "$t"' in script, "the marker is written only after every copy succeeded; a failed copy is removed and the seed retried next start")
 probe_seed = seed["containers"][0]["readinessProbe"]["exec"]["command"][2]
-check(probe_seed.endswith('&& grep -qx -e "workload-pvc:engine-cache" -e "none:workload-pvc:engine-cache" /engine-cache/.seeded'), "with a seed, Ready also requires the node to carry that seed, or the record that it had nothing to seed: %s" % probe_seed)
+check(probe_seed.endswith('&& grep -qx -e "workload-pvc:engine-cache" -e "workload-pvc:engine-cache@[0-9]*" -e "none:workload-pvc:engine-cache" /engine-cache/.seeded'), "with a seed, Ready also requires the node to carry that seed (as published, or before any publish), or the record that it had nothing to seed: %s" % probe_seed)
 env = {e["name"]: e["value"] for e in seed["containers"][0]["env"]}
 check(env.get("SEED_MARKER") == ".seeded" and env.get("SEED_ID") == "workload-pvc:engine-cache" and env.get("SEED_SUBPATH") == "engine-cache", "the seed marker's name, the seed's identity and its subPath come from the environment: %s" % env)
 check("$(" not in script and "$$" not in script, "still no $( or $$ in the command")
@@ -194,8 +194,33 @@ mkdir -p "$F/seed/engine-cache/vllm/torch_compile_cache/keyS"; echo s > "$F/seed
 SEED_MARKER=.seeded SEED_ID=workload-pvc:engine-cache SEED_SUBPATH=engine-cache MARKER=.prepared HOSTNAME=n1 "$SH" "$F/p.sh" > "$F/run2.out" 2>&1
 [ "$(cat "$F/cache/vllm/torch_compile_cache/keyS/f" 2>/dev/null)" = s ] && [ "$(cat "$F/cache/.seeded")" = workload-pvc:engine-cache ] \
     && ok "seed: a seed that appears later is merged from its subPath, and the marker records it" || fail "seed appears later: $(cat "$F/run2.out"; cat "$F/cache/.seeded")"
+# publish: a node's caches go into the seed (what the seed has is kept), and
+# a stamped seed is merged again by a node already seeded from it
+P="$T/publish"; mkdir -p "$P/node/vllm/torch_compile_cache/keyN" "$P/node/triton/t" "$P/seed/engine-cache/vllm/torch_compile_cache/keyS"
+echo n > "$P/node/vllm/torch_compile_cache/keyN/f"; echo t > "$P/node/triton/t/f"; echo s > "$P/seed/engine-cache/vllm/torch_compile_cache/keyS/f"
+sed -n "/^publish_script() {/,/^SCRIPT$/p" deploy/enginecache.sh | sed '1,2d;$d' | sed "s|/seed|$P/seed|g; s|/engine-cache|$P/node|g" > "$P/pub.sh"
+grep -q 'cp -a' "$P/pub.sh" || fail "publish: no publish_script extracted"
+SEED_SUBPATH=engine-cache NODE_NAME=n1 "$SH" "$P/pub.sh" > "$P/pub.out" 2>&1; rc=$?
+[ "$rc" = 0 ] && [ "$(cat "$P/seed/engine-cache/vllm/torch_compile_cache/keyN/f")" = n ] && [ "$(cat "$P/seed/engine-cache/triton/t/f")" = t ] \
+    && [ "$(cat "$P/seed/engine-cache/vllm/torch_compile_cache/keyS/f")" = s ] && grep -q "published from n1: 2 entries" "$P/pub.out" \
+    && ok "publish: a node's caches are merged into the seed, the seed's own entries kept" || fail "publish run: rc=$rc $(cat "$P/pub.out")"
+# the node seeded before the publish ($F, marker workload-pvc:engine-cache) merges again once the seed is stamped
+echo 20261013120000 > "$F/seed/engine-cache/.published"
+mkdir -p "$F/seed/engine-cache/vllm/torch_compile_cache/keyP"; echo p > "$F/seed/engine-cache/vllm/torch_compile_cache/keyP/f"
+SEED_MARKER=.seeded SEED_ID=workload-pvc:engine-cache SEED_SUBPATH=engine-cache MARKER=.prepared HOSTNAME=n1 "$SH" "$F/p.sh" > "$F/run3.out" 2>&1
+[ "$(cat "$F/cache/vllm/torch_compile_cache/keyP/f" 2>/dev/null)" = p ] && [ "$(cat "$F/cache/.seeded")" = "workload-pvc:engine-cache@20261013120000" ] \
+    && ok "seed: a stamped seed is merged again by a node already seeded, and the marker records the stamp" || fail "stamped seed: $(cat "$F/run3.out"; cat "$F/cache/.seeded")"
+SEED_MARKER=.seeded SEED_ID=workload-pvc:engine-cache SEED_SUBPATH=engine-cache MARKER=.prepared HOSTNAME=n1 "$SH" "$F/p.sh" > "$F/run4.out" 2>&1
+grep -q "seeded on" "$F/run4.out" && fail "stamped seed: merged again with no new stamp" || ok "seed: the same stamp is not merged twice"
+# the readiness probe accepts every marker form the preparer writes
+for m in "workload-pvc:engine-cache" "workload-pvc:engine-cache@20261013120000" "none:workload-pvc:engine-cache"; do
+    echo "$m" > "$T/marker"
+    grep -qx -e "workload-pvc:engine-cache" -e "workload-pvc:engine-cache@[0-9]*" -e "none:workload-pvc:engine-cache" "$T/marker" || fail "probe refuses marker $m"
+done
+echo "other-claim:x" > "$T/marker"
+grep -qx -e "workload-pvc:engine-cache" -e "workload-pvc:engine-cache@[0-9]*" -e "none:workload-pvc:engine-cache" "$T/marker" && fail "probe accepts another seed's marker" || ok "probe: accepts the seed's three marker forms, refuses another seed's"
 n="$(grep -c "cat <<'SCRIPT'" deploy/enginecache.sh)"
-[ "$n" = 1 ] && grep -q '^\$(preparer_script | sed' deploy/enginecache.sh && ok "render: the preparer's command comes from a quoted heredoc, so nothing in it is evaluated at apply time" || fail "render: the preparer's command is not in a quoted heredoc ($n)"
+[ "$n" = 2 ] && grep -q '^\$(preparer_script | sed' deploy/enginecache.sh && grep -q '^\$(publish_script | sed' deploy/enginecache.sh && ok "render: the preparer's and the publisher's commands come from quoted heredocs, so nothing in them is evaluated at apply time" || fail "render: a preparer or publisher command is not in a quoted heredoc ($n of 2)"
 
 # ---------------------------------------------------------------------------
 # 2. What apply refuses, before any kubectl.

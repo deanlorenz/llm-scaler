@@ -25,6 +25,8 @@
 #                                                                     prepare DIR/engine-cache on every accelerator node
 #   enginecache.sh status -n NS [--node-selector KEY=VALUE]           which nodes are prepared, which are not, and why
 #   enginecache.sh delete -n NS [--dry-run]                           drop the claim, volume and preparer (the caches stay)
+#   enginecache.sh publish -n NS [--dry-run]                          fill the seed claim from every prepared node, then re-seed every node
+#                                                                     (run once each engine configuration has started somewhere)
 #
 #   -n, --namespace NS          the namespace the claim and preparer live in
 #
@@ -247,22 +249,29 @@ seeded_from=""
 # to seed -- the marker says so with a "none:" prefix, which the readiness
 # probe accepts, and the next start merges the seed if it has appeared.
 seed_dir="/seed${SEED_SUBPATH:+/$SEED_SUBPATH}"
+# `enginecache.sh publish` stamps the seed each time it adds to it; the marker
+# records the stamp, so a node merges a seed published after it was seeded.
+want="$SEED_ID"
+if [ -f "$seed_dir/.published" ]; then
+  read -r stamp < "$seed_dir/.published" || stamp=""
+  [ -z "$stamp" ] || want="$SEED_ID@$stamp"
+fi
 if [ -d /seed ] && [ ! -d "$seed_dir" ]; then
   if [ "$seeded_from" != "none:$SEED_ID" ] && [ "$seeded_from" != "$SEED_ID" ]; then
     echo "none:$SEED_ID" > "/engine-cache/$SEED_MARKER" || exit 1
   fi
   echo "engine cache: no seed on $HOSTNAME: $SEED_ID has no $seed_dir yet; nothing to seed"
-elif [ -d /seed ] && [ "$seeded_from" != "$SEED_ID" ]; then
+elif [ -d /seed ] && [ "$seeded_from" != "$want" ]; then
   complete=1; added=""
   for d in vllm flashinfer triton; do
     [ -d "$seed_dir/$d" ] || continue
     merge "$seed_dir/$d" "/engine-cache/$d"
   done
   if [ "$complete" = 1 ]; then
-    echo "$SEED_ID" > "/engine-cache/$SEED_MARKER" || exit 1
-    echo "engine cache: seeded on $HOSTNAME from $SEED_ID: ${#added} entries added, what the node already had kept"
+    echo "$want" > "/engine-cache/$SEED_MARKER" || exit 1
+    echo "engine cache: seeded on $HOSTNAME from $want: ${#added} entries added, what the node already had kept"
   else
-    echo "engine cache: seeding on $HOSTNAME from $SEED_ID did not complete (a copy failed and was removed); it is retried when this pod next starts"
+    echo "engine cache: seeding on $HOSTNAME from $want did not complete (a copy failed and was removed); it is retried when this pod next starts"
   fi
 fi
 touch "/engine-cache/$MARKER" || exit 1
@@ -282,7 +291,8 @@ seed_volume_yaml() {
 # so the double quotes in it need no escaping.
 seed_probe() {
     [ -n "$SEED_CLAIM" ] || return 0
-    printf ' && grep -qx -e "%s" -e "none:%s" /engine-cache/%s' "${SEED_CLAIM}${SEED_SUBPATH:+:$SEED_SUBPATH}" "${SEED_CLAIM}${SEED_SUBPATH:+:$SEED_SUBPATH}" "$SEED_MARKER"
+    local id="${SEED_CLAIM}${SEED_SUBPATH:+:$SEED_SUBPATH}"
+    printf ' && grep -qx -e "%s" -e "%s@[0-9]*" -e "none:%s" /engine-cache/%s' "$id" "$id" "$id" "$SEED_MARKER"
 }
 # seed_mount_yaml mounts the whole claim, never a subPath: the kubelet creates
 # a missing subPath, which fails on a fresh claim (the pod never starts). The
@@ -680,13 +690,153 @@ cmd_delete() {
     return 0
 }
 
+# publish_script runs on one node: it merges that node's caches into the seed
+# claim -- an entry the seed already has is kept -- and stamps the seed, so
+# every preparer merges it again on its next start. A quoted heredoc, for the
+# same reasons as preparer_script.
+publish_script() {
+    cat <<'SCRIPT'
+dst="/seed${SEED_SUBPATH:+/$SEED_SUBPATH}"
+mkdir -p "$dst" || exit 1
+merge() {
+  local e n t
+  for e in "$1"/* "$1"/.[!.]*; do
+    [ -e "$e" ] || continue
+    n="${e##*/}"; t="$2/$n"
+    if [ -d "$e" ] && [ ! -L "$e" ] && [ -d "$t" ] && [ ! -L "$t" ]; then
+      merge "$e" "$t"
+    elif [ ! -e "$t" ]; then
+      if cp -a --no-preserve=ownership "$e" "$2/"; then added="$added."; else complete=0; rm -rf "$t"; fi
+    fi
+  done
+}
+complete=1; added=""
+for d in vllm flashinfer triton; do
+  [ -d "/engine-cache/$d" ] || continue
+  mkdir -p "$dst/$d" || exit 1
+  merge "/engine-cache/$d" "$dst/$d"
+done
+[ "$complete" = 1 ] || { echo "engine cache: publishing from $NODE_NAME did not complete (a copy failed and was removed)"; exit 1; }
+echo "engine cache: published from $NODE_NAME: ${#added} entries added to the seed"
+SCRIPT
+}
+
+# cmd_publish fills the seed from the nodes: every node whose preparer is Ready
+# merges its caches into the seed claim, one node at a time, then the seed is
+# stamped and the preparers restart, so each node merges in what any node
+# compiled. Run it once every engine configuration has started somewhere; after
+# it no node starts any of them cold.
+cmd_publish() {
+    command -v jq >/dev/null 2>&1 || log_error "jq is required for publish"
+    [ -n "$NAMESPACE" ] || log_error "publish needs -n NAMESPACE"
+    local seed image claim sub
+    seed="$(kubectl get daemonset -n "$NAMESPACE" "$CLAIM" -o jsonpath='{.metadata.annotations.wva\.llmd\.ai/engine-cache-seed}' 2>/dev/null || true)"
+    [ -n "$seed" ] || log_error "publish needs an engine cache applied with --seed-claim in ${NAMESPACE} (there is nothing to publish into)"
+    claim="${seed%%:*}"; sub=""
+    [ "$claim" = "$seed" ] || sub="${seed#*:}"
+    image="$(kubectl get daemonset -n "$NAMESPACE" "$CLAIM" -o jsonpath='{.spec.template.spec.containers[0].image}')"
+    local nodes
+    nodes="$(kubectl get pods -n "$NAMESPACE" -l "app.kubernetes.io/name=node-local-engine-cache,wva.llmd.ai/engine-cache=${CLAIM}" -o json \
+        | jq -r '.items[] | select(any(.status.conditions[]?; .type=="Ready" and .status=="True")) | .spec.nodeName' | sort -u)"
+    [ -n "$nodes" ] || log_error "no Ready engine-cache preparer in ${NAMESPACE}: nothing to publish from (enginecache.sh status says why)"
+    local stamp i=0 node pod
+    stamp="$(date -u +%Y%m%d%H%M%S)"
+    for node in $nodes; do
+        i=$((i + 1)); pod="${CLAIM}-publish-${i}"
+        local manifest
+        manifest="$(cat <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${pod}
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/name: node-local-engine-cache-publish
+    app.kubernetes.io/managed-by: wva-enginecache
+spec:
+  nodeName: ${node}
+  restartPolicy: Never
+  serviceAccountName: ${SA_NAME}
+  automountServiceAccountToken: false
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  tolerations:
+    - operator: Exists
+  volumes:
+    - name: engine-cache
+      persistentVolumeClaim:
+        claimName: ${CLAIM}
+        readOnly: true
+    - name: seed
+      persistentVolumeClaim:
+        claimName: ${claim}
+  containers:
+    - name: publish
+      image: "${image}"
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+$(publish_script | sed 's/^/          /')
+      env:
+        - name: SEED_SUBPATH
+          value: "${sub}"
+        - name: NODE_NAME
+          value: "${node}"
+        - name: NVIDIA_VISIBLE_DEVICES
+          value: "void"
+      volumeMounts:
+        - name: engine-cache
+          mountPath: /engine-cache
+          readOnly: true
+        - name: seed
+          mountPath: /seed
+      resources:
+        requests:
+          cpu: 50m
+          memory: 32Mi
+        limits:
+          memory: 256Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+EOF
+)"
+        if [ "$DRY_RUN" = true ]; then printf '%s\n---\n' "$manifest"; continue; fi
+        kubectl delete pod -n "$NAMESPACE" "$pod" --ignore-not-found --wait=true --timeout=60s >/dev/null
+        printf '%s\n' "$manifest" | kubectl apply -f - >/dev/null || log_error "publish: could not create ${pod} on ${node}"
+        if ! kubectl wait -n "$NAMESPACE" "pod/${pod}" --for=jsonpath='{.status.phase}'=Succeeded --timeout=900s >/dev/null 2>&1; then
+            kubectl logs -n "$NAMESPACE" "$pod" 2>&1 | tail -5 >&2
+            kubectl delete pod -n "$NAMESPACE" "$pod" --ignore-not-found --wait=false >/dev/null 2>&1
+            log_error "publish: ${pod} on ${node} did not succeed (its log is above); the seed is not stamped, so no node re-seeds from a partial copy"
+        fi
+        kubectl logs -n "$NAMESPACE" "$pod" 2>/dev/null | tail -1
+        kubectl delete pod -n "$NAMESPACE" "$pod" --ignore-not-found --wait=false >/dev/null
+    done
+    [ "$DRY_RUN" = false ] || return 0
+    # Stamp the seed only after every node published, from the last node's view.
+    local stamp_pod="${CLAIM}-publish-stamp"
+    kubectl run -n "$NAMESPACE" "$stamp_pod" --image="$image" --restart=Never --quiet \
+        --overrides="{\"spec\":{\"nodeName\":\"${node}\",\"tolerations\":[{\"operator\":\"Exists\"}],\"serviceAccountName\":\"${SA_NAME}\",\"automountServiceAccountToken\":false,\"volumes\":[{\"name\":\"seed\",\"persistentVolumeClaim\":{\"claimName\":\"${claim}\"}}],\"containers\":[{\"name\":\"stamp\",\"image\":\"${image}\",\"command\":[\"/bin/sh\",\"-c\",\"echo ${stamp} > /seed${sub:+/$sub}/.published\"],\"env\":[{\"name\":\"NVIDIA_VISIBLE_DEVICES\",\"value\":\"void\"}],\"volumeMounts\":[{\"name\":\"seed\",\"mountPath\":\"/seed\"}]}]}}" >/dev/null \
+        || log_error "publish: could not create ${stamp_pod}"
+    kubectl wait -n "$NAMESPACE" "pod/${stamp_pod}" --for=jsonpath='{.status.phase}'=Succeeded --timeout=300s >/dev/null 2>&1 \
+        || { kubectl delete pod -n "$NAMESPACE" "$stamp_pod" --ignore-not-found --wait=false >/dev/null 2>&1; log_error "publish: the seed was filled but not stamped; rerun publish"; }
+    kubectl delete pod -n "$NAMESPACE" "$stamp_pod" --ignore-not-found --wait=false >/dev/null
+    kubectl rollout restart -n "$NAMESPACE" "daemonset/${CLAIM}" >/dev/null || log_error "publish: could not restart the preparers"
+    kubectl rollout status -n "$NAMESPACE" "daemonset/${CLAIM}" --timeout=600s >/dev/null 2>&1 \
+        || log_warning "publish: the preparers did not all restart within 600 s; enginecache.sh status says which"
+    log_success "published from ${i} node(s) into ${seed} (stamp ${stamp}); every preparer merges it on restart"
+}
+
 CMD="${1:-}"
 [ -n "$CMD" ] || usage
 shift
 case "$CMD" in
     -h|--help|help) usage ;;
-    apply|status|delete) ;;
-    *) log_error "unknown command: ${CMD} (apply | status | delete)" ;;
+    apply|status|delete|publish) ;;
+    *) log_error "unknown command: ${CMD} (apply | status | delete | publish)" ;;
 esac
 
 while [ $# -gt 0 ]; do

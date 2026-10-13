@@ -416,7 +416,8 @@ caches into each node's as it prepares it, file by file: an entry the
 node already has is kept, one it lacks is copied (a second engine config's
 key lands beside the node's own), a failed copy is removed and retried at
 the pod's next start, and a marker records which seed the node has, so a
-changed seed is merged in too (the seed's subPath must exist). With a
+changed seed is merged in too (a subPath that does not exist yet is
+nothing to seed, not an error). With a
 seed, a node is Ready only once it carries it, so `engine-cache-status`
 counts a node whose seed did not complete as not prepared; the engines do
 not wait on the preparer either way. What is
@@ -438,6 +439,24 @@ costs a compile, not the replica.
 make engine-cache ENGINE_CACHE_PATH=/mnt/local/weights/<ns> ENGINE_CACHE_IMAGE=<engine image> \
      ENGINE_CACHE_SEED_CLAIM=<shared claim>[:<subPath>] NAMESPACE=<ns>
 ```
+
+**A seed starts empty** in a fresh namespace, and the preparer only copies
+the seed *to* the nodes. Each engine configuration -- every model, and
+prefill and decode of a P/D model, which compile under different keys --
+then compiles once on every node it lands on. Measured on two P/D 8B models:
+a second replica that landed on a node its role had not run on compiled for
+12-17 s, against 2-3 s on a node it had. Fill the seed *from* the nodes once
+every configuration has started somewhere:
+
+```bash
+# every prepared node merges its caches into the seed (what the seed has is
+# kept), the seed is stamped, and every preparer restarts and merges it in
+make engine-cache-publish NAMESPACE=<ns>
+make engine-cache-status NAMESPACE=<ns>     # every usable node prepared again
+```
+
+Run it again after adding a model or changing an engine flag: the new stamp
+makes every node merge the new keys.
 
 What it costs, and what it needs, is the weights section's list with two
 things changed. The size: a few gigabytes per engine config per node rather
