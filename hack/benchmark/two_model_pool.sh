@@ -91,7 +91,12 @@ NS="${BENCHMARK_NAMESPACE:-}"
 # only name this driver can rely on. The objects in a stack are named after a
 # shortName the harness GENERATES and that the scenario cannot override, so
 # every lookup here goes through the route rather than through a name.
+# Whether the caller named the scenario: teardown trusts a recorded standup
+# spec over a default, and refuses rather than guess (see verb_teardown).
+BENCH_SPEC_GIVEN="${BENCH_SPEC:+1}"
 BENCH_SPEC="${BENCH_SPEC:-guides/two-model-warm-pool}"
+# The ConfigMap the standup records its scenario in, for the teardown.
+STANDUP_RECORD="wva-two-model-standup"
 STACK_A="${STACK_A:-llama-31-8b}"
 STACK_B="${STACK_B:-qwen3-8b}"
 MODEL_A="${MODEL_A:-unsloth/Meta-Llama-3.1-8B-Instruct}"
@@ -733,6 +738,11 @@ verb_standup() {
         fi
     fi
 
+    # Recorded BEFORE the standup, so a standup that fails half-way still
+    # leaves the teardown the scenario it has to undo.
+    k create configmap "$STANDUP_RECORD" --from-literal=spec="$BENCH_SPEC" \
+        --dry-run=client -o yaml | k apply -f - >/dev/null \
+        || die "could not record the scenario in ConfigMap $STANDUP_RECORD; the teardown would not know what to undo"
     info "standing up both stacks from $BENCH_SPEC"
     local gw_reuse
     gw_reuse="$(gateway_reuse)"
@@ -2455,12 +2465,32 @@ verb_status() {
 
 verb_teardown() {
     need_ns
-    warn "tearing down everything this scenario created in $NS"
+    # THE STANDUP'S SCENARIO, not a default. The harness tears down what the
+    # spec it is given renders; given its default (guides/workload-autoscaling)
+    # for a two-model-shapes-pd namespace it missed that run's node-local
+    # downloader and hung on the volume behind it. The standup recorded its
+    # spec; a named BENCH_SPEC that disagrees is refused, and with no record
+    # and no BENCH_SPEC there is nothing safe to guess.
+    local recorded spec
+    recorded="$(k get configmap "$STANDUP_RECORD" -o jsonpath='{.data.spec}' 2>/dev/null || true)"
+    if [ -n "$recorded" ]; then
+        if [ -n "$BENCH_SPEC_GIVEN" ] && [ "$BENCH_SPEC" != "$recorded" ]; then
+            die "BENCH_SPEC=$BENCH_SPEC, but $NS was stood up with $recorded (ConfigMap $STANDUP_RECORD). Unset BENCH_SPEC, or set it to $recorded."
+        fi
+        spec="$recorded"
+    elif [ -n "$BENCH_SPEC_GIVEN" ]; then
+        warn "no record of the scenario $NS was stood up with; tearing down with BENCH_SPEC=$BENCH_SPEC as given"
+        spec="$BENCH_SPEC"
+    else
+        die "no record of the scenario $NS was stood up with (no ConfigMap $STANDUP_RECORD), and no BENCH_SPEC. Set BENCH_SPEC to the one the standup used: the harness only removes what that scenario renders."
+    fi
+    warn "tearing down everything $spec created in $NS"
     verb_pool_delete || true
-    k delete job -l app.kubernetes.io/name=wva-two-model-load --ignore-not-found >/dev/null 2>&1
-    k delete configmap wva-two-model-load --ignore-not-found >/dev/null 2>&1
-    ( cd "$ROOT" && BENCHMARK_NAMESPACE="$NS" make --no-print-directory benchmark-teardown ) || \
+    k delete job -l app.kubernetes.io/name=wva-two-model-load --ignore-not-found --timeout=120s >/dev/null 2>&1
+    k delete configmap wva-two-model-load --ignore-not-found --timeout=60s >/dev/null 2>&1
+    ( cd "$ROOT" && BENCHMARK_NAMESPACE="$NS" BENCHMARK_SPEC="$spec" make --no-print-directory benchmark-teardown ) || \
         warn "benchmark-teardown reported a problem; check for leftover GPU pods below"
+    k delete configmap "$STANDUP_RECORD" --ignore-not-found --timeout=60s >/dev/null 2>&1
     verb_status
     ok "teardown done. Anything still holding a GPU above is a leak -- this is a shared cluster."
 }

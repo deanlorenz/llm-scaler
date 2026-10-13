@@ -183,6 +183,8 @@ case "$args" in
   # The scaling policy the share arms rewrite, and the query Pod that reads
   # the controller's mode back. PQUERY_OUT is what that Pod printed.
   *"get configmap wva-scaling-policy-config"*) printf '%s' "${POLICY_TEXT:-}"; exit 0 ;;
+  # STANDUP_SPEC: the scenario the standup recorded; unset, there is no record.
+  *"get configmap wva-two-model-standup"*) printf '%s' "${STANDUP_SPEC:-}"; exit 0 ;;
   # Which policy a self-managed controller reads: a label on its namespace,
   # then a wva-policy namespace, then its own.
   *"get namespace wva-policy"*)
@@ -250,6 +252,15 @@ case "$args" in
 esac
 STUBEOF
 chmod +x "$STUB/kubectl"
+
+# A make that records the target and the scenario it was handed, so the
+# teardown can be checked without running the harness's.
+cat > "$STUB/make" <<'STUBEOF'
+#!/usr/bin/env bash
+printf 'MAKE[%s] SPEC=%s\n' "$*" "${BENCHMARK_SPEC:-}" >> "${KCALLS:-/dev/null}"
+exit 0
+STUBEOF
+chmod +x "$STUB/make"
 
 # run_verb <verb...> -- the script with the stub first on PATH, into $OUT/$RC.
 run_verb() {
@@ -1071,6 +1082,38 @@ else
     ok "the placement refusal names DECODE_CPU, the knob that fixes it"
 fi
 
+# THE TEARDOWN UNDOES THE STANDUP'S SCENARIO. It used to hand the harness its
+# default spec (guides/workload-autoscaling) for a two-model-shapes-pd
+# namespace, which missed that run's node-local downloader and hung for 20
+# minutes on the volume behind it.
+case_begin
+STANDUP_SPEC=guides/two-model-shapes-pd VERB_TIMEOUT=60 run_verb teardown
+if ! grep -q 'MAKE\[--no-print-directory benchmark-teardown\] SPEC=guides/two-model-shapes-pd' "$CALLS"; then
+    fail "teardown did not hand the harness the scenario the standup recorded: $(grep 'MAKE' "$CALLS" || echo 'no make call')"
+else
+    ok "teardown uses the scenario the standup recorded"
+fi
+case_begin
+STANDUP_SPEC=guides/two-model-shapes-pd BENCH_SPEC=guides/two-model-shapes VERB_TIMEOUT=60 run_verb teardown
+c1="$RC"; m1="$(grep -c 'MAKE\[' "$CALLS")"
+VERB_TIMEOUT=60 run_verb teardown
+if [ "$c1" -eq 0 ] || [ "$m1" -ne 0 ]; then
+    fail "teardown with a BENCH_SPEC that disagrees with the recorded scenario was not refused before the harness ran"
+elif [ "$RC" -eq 0 ] || grep -q 'MAKE\[' "$CALLS" || ! printf '%s' "$OUT" | grep -q 'no record of the scenario'; then
+    fail "teardown with no record and no BENCH_SPEC guessed a scenario instead of refusing: $OUT"
+else
+    ok "teardown refuses a BENCH_SPEC that disagrees with the record, and refuses to guess with neither"
+fi
+case_begin
+VERB_TIMEOUT=60 run_verb standup
+if ! grep -q 'create configmap wva-two-model-standup --from-literal=spec=guides/two-model-warm-pool' "$CALLS"; then
+    fail "the standup did not record its scenario for the teardown: $(grep -E 'configmap|MAKE' "$CALLS" | head -3)"
+elif [ "$(grep -n 'wva-two-model-standup' "$CALLS" | head -1 | cut -d: -f1)" -gt "$(grep -n 'MAKE\[' "$CALLS" | head -1 | cut -d: -f1)" ]; then
+    fail "the standup recorded its scenario only after the harness ran; a standup that fails half-way leaves no record"
+else
+    ok "the standup records its scenario before the harness runs"
+fi
+
 # A QUOTA BELOW THE CEILINGS IS THE PEAK. The share runbook stands up under a
 # 4-GPU quota with two models of up to 3; preflight asked for 6 placeable and
 # refused a cluster with 5, though the run can never hold more than 4.
@@ -1173,7 +1216,7 @@ else
 fi
 
 case_begin
-CASES_EXPECTED=72
+CASES_EXPECTED=75
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately rather than letting coverage drift out."
 else
