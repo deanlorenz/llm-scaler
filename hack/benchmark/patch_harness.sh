@@ -1079,3 +1079,117 @@ io.open(path, "w", encoding="utf-8", newline="\n").write(src)
 print("  fix 14 (libcuda from the loader cache): applied")
 PYEOF
 fi
+
+# ---------------------------------------------------------------------------
+# Fix 15 -- teardown: the node-local weights go downloader first, then the
+# claim, then the volume, and no wait is unbounded.
+#
+# step_03_delete_resources deleted the hostPath volume (`kubectl delete pv`,
+# which waits for the object to go) while the harness's downloader DaemonSet
+# still mounted the claim and the claim was still bound. A bound claim keeps
+# its volume in Terminating (pv-protection), a mounted claim stays (pvc-
+# protection), and the teardown deleted neither -- measured on a P/D run, it
+# waited until someone deleted the DaemonSet and the claim by hand, 20 minutes
+# in. Now: the downloader (component=model-download), then the claim the
+# volume names in its claimRef (fix 12 sets it), then the volume, each with a
+# --timeout; on a timeout it says which pods still mount the claim.
+# Applies after fix 12, whose scoped label the anchor carries.
+# ---------------------------------------------------------------------------
+TD3="$REPO_DIR/llmdbenchmark/teardown/steps/step_03_delete_resources.py"
+if [ ! -f "$TD3" ]; then
+    note "fix 15 (hostPath volume torn down in order, bounded): no step_03, skipped"
+else
+    "$PY" - "$TD3" <<'PYEOF' || fail "fix 15 (hostPath volume torn down in order, bounded) failed"
+import io, sys
+
+path = sys.argv[1]
+src = io.open(path, encoding="utf-8", newline="").read().replace("\r\n", "\n")
+
+IMPORT = "from llmdbenchmark.executor.command import CommandExecutor\n"
+HELPER = IMPORT + '''
+
+# wva-patch (fix 15): the node-local weights go downloader, claim, volume; each bounded.
+_WVA_DELETE_TIMEOUT = "120s"
+
+
+def _wva_pods_mounting(cmd, ns, claims):
+    """The pods in ns that mount any of claims, for a timeout message."""
+    r = cmd.kube("get", "pods", "-n", ns, "-o", "json", check=False)
+    if not r.success:
+        return f"unknown: the pods in {ns} could not be read ({r.stderr.strip()})"
+    try:
+        pods = json.loads(r.stdout or "{}").get("items", [])
+    except ValueError:
+        return f"unknown: the pod list of {ns} did not parse"
+    names = [
+        p["metadata"]["name"]
+        for p in pods
+        if any((v.get("persistentVolumeClaim") or {}).get("claimName") in claims
+               for v in (p.get("spec") or {}).get("volumes") or [])
+    ]
+    return ", ".join(names) or "no pod mounts the claim; look at its finalizers"
+
+
+def _wva_delete_hostpath_volume(cmd, context, ns):
+    """Delete this namespace's node-local weights in the order the protections
+    demand: the downloader DaemonSet, the claim, then the volume."""
+    sel = f"usage=model-cache,wva.llmd.ai/model-namespace={ns}"
+    pv = cmd.kube("get", "pv", "-l", sel, "-o", "json", check=False)
+    if not pv.success:
+        context.logger.log_warning(f"  hostPath PV(s) not read, so not deleted: {pv.stderr.strip()}")
+        return
+    try:
+        items = json.loads(pv.stdout or "{}").get("items", [])
+    except ValueError:
+        items = []
+    if not items:
+        return
+    claims = sorted({((i.get("spec") or {}).get("claimRef") or {}).get("name") for i in items} - {None})
+    steps = [("the weights downloader DaemonSet",
+              ("delete", "daemonset", "-n", ns, "-l", "component=model-download",
+               "--ignore-not-found", f"--timeout={_WVA_DELETE_TIMEOUT}"))]
+    for claim in claims:
+        steps.append((f"claim {ns}/{claim}",
+                      ("delete", "pvc", "-n", ns, claim, "--ignore-not-found", f"--timeout={_WVA_DELETE_TIMEOUT}")))
+    steps.append(("the hostPath PV(s)",
+                  ("delete", "pv", "-l", sel, "--ignore-not-found", f"--timeout={_WVA_DELETE_TIMEOUT}")))
+    for what, args in steps:
+        r = cmd.kube(*args, check=False)
+        if not r.success:
+            context.logger.log_warning(f"  {what} not deleted within {_WVA_DELETE_TIMEOUT}: {r.stderr.strip()}")
+            context.logger.log_warning(f"  still mounting {', '.join(claims) or 'the claim'}: {_wva_pods_mounting(cmd, ns, claims)}")
+            return
+    context.logger.log_info("  Deleted hostPath PV(s): the downloader, then the claim, then the volume")
+'''
+
+SITE_OLD = '''        # Clean up cluster-scoped hostPath PVs created by the benchmark.
+        pv_result = cmd.kube(
+            "delete",
+            "pv",
+            "-l",
+            f"usage=model-cache,wva.llmd.ai/model-namespace={context.require_namespace()}",  # wva-patch
+            "--ignore-not-found",
+            check=False,
+        )
+        if pv_result.success and pv_result.stdout.strip():
+            context.logger.log_info("  Deleted hostPath PV(s)")
+'''
+SITE_NEW = '''        # Clean up cluster-scoped hostPath PVs created by the benchmark.
+        # wva-patch (fix 15): downloader, then claim, then volume; each bounded.
+        _wva_delete_hostpath_volume(cmd, context, context.require_namespace())
+'''
+if "_wva_delete_hostpath_volume(cmd, context, context.require_namespace())" in src and "def _wva_delete_hostpath_volume" in src:
+    print("  fix 15 (hostPath volume torn down in order, bounded): already applied")
+    sys.exit(0)
+if "import json\n" not in src:
+    sys.exit("anchor missing (upstream shape changed): import json")
+if src.count(IMPORT) != 1:
+    sys.exit("anchor missing or ambiguous (upstream shape changed): " + IMPORT.strip())
+if src.count(SITE_OLD) != 2:
+    sys.exit("anchor missing or ambiguous (upstream shape changed): the hostPath PV delete, expected 2 sites after fix 12, found %d" % src.count(SITE_OLD))
+src = src.replace(IMPORT, HELPER, 1).replace(SITE_OLD, SITE_NEW)
+io.open(path, "w", encoding="utf-8", newline="\n").write(src)
+print("  fix 15 (hostPath volume torn down in order, bounded): applied")
+PYEOF
+fi
+
