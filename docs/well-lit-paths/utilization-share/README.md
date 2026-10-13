@@ -1,37 +1,27 @@
 # Share one GPU quota between models whose peaks do not coincide
 
 > **Experimental.** Measured on H200s with two aggregated models at 1 GPU per
-> replica, one run per configuration ([what was measured](measured.md)). Not
-> yet measured with this optimizer: whole-node or multi-GPU pods, P/D models
+> replica, one run per configuration ([what was measured](measured.md)). The
+> short legs: no measurement yet of whole-node or multi-GPU pods, P/D models
 > (P/D scaling itself is measured on [its own path](../pd-disaggregation/)), a
-> cluster-wide quota, and the GPU cost of the current build. The defaults are starting points.
+> cluster-wide quota, or the GPU cost of the current build. The defaults are
+> starting points.
 
 Several models share one GPU quota, and their traffic peaks at different times.
 Today's optimizer hands the quota out first come, first served: a model that
 scaled up earlier keeps its GPUs, and a model that needs them later is refused,
-even when the quota as a whole has room for both. The worst case is a swap --
-one model's load falls while the other's rises, and the rising model is refused
-for the falling model's whole scale-down window.
+even when the quota as a whole has room for both. The worst case is a swap — one
+model's load falls while the other's rises, and the rising model is refused for
+the falling model's whole scale-down window. The utilization-share optimizer
+shares the quota on purpose: each model gets what it needs, the rest is spread
+as headroom by weight, and GPUs move from one model to another when the shares
+drift ([how](#how-it-shares-the-quota)).
 
-The utilization-share optimizer shares the quota on purpose:
-
-- Each model first gets its **need**: the GPUs that put it at its
-  `scaleUpThreshold`.
-- The rest is **headroom**, shared in proportion to each model's **weight**
-  (`standard` 1, `important` 2, `critical` 4). While the quota cannot hold
-  every model's recent peak at once, headroom is capped at
-  `maxHeadroomReplicas` (default 1) times the weight, and the rest stays
-  unassigned, so a model whose demand rises starts pods into it at once.
-- When a model holds too far from its share, the optimizer moves GPUs with a
-  **transfer**: it marks one donor pod, lowers the donor, waits until the GPUs
-  are actually free, and only then raises the receiver. The scale-down always
-  comes first.
-
-**What it buys.** On the latest run, the model that burst first was served
-at once -- median time to first token 0.07 s, against 25.6 s with the same
-fleet planned but not moved -- because GPUs were already waiting for it. The
-model that burst second was no worse off: the same p95 (287 s), and a median of
-144 s against 215 s.
+What it buys: on the latest run, the model that burst first was served at once —
+median time to first token 0.07 s, against 25.6 s with the same fleet planned
+but not moved — because GPUs were already waiting for it. The model that burst
+second was no worse off: the same p95 (287 s), and a median of 144 s against
+215 s.
 
 **Use it when** two or more models scale under one quota, their demand moves
 between them over hours rather than minutes, and the GPUs are paid for whether
@@ -57,25 +47,8 @@ headroom costs nothing extra.
 - **The real limit is something else.** If a Kubernetes `ResourceQuota` or
   unmanaged workloads are what stop pods, a donor's freed GPUs can be taken by
   a pod the scaling manager did not place (`release-taken`).
-
-A model whose variants run on more than one accelerator type is never planned;
-it stays on today's optimizer.
-
-**Shapes that still lose something,** in simulation (share of demand left
-unserved). If a model of yours looks like one of these, give it a floor
-([for model owners](../../reference/scaling-policy.md#for-model-owners-what-the-optimizer-may-take-and-how-to-protect-a-model)):
-
-- **A noisy model beside one that bursts for long.** The noisy model gets its
-  headroom on its average demand rather than at each crest (blocked reason
-  `fast-swing-capped`): 0.02 to 0.06 more unserved, while the bursting model
-  goes from 0.33 to 0.21.
-- **Whole-node models bursting for 20 to 30 minutes in a tight quota.** Moves
-  that would land after the burst ends keep the usual pace (`burst-ending`);
-  still about 0.007 worse than without that rule.
-- **A dip right after a group starts.** For about the first 12 minutes no
-  model's peak is known, so a model in a dip gives replicas back and
-  cold-starts them when demand returns (0.038 unserved for a 12-minute dip).
-  Stored history avoids it after a restart.
+- **A model runs on more than one accelerator type.** It is never planned; it
+  stays on today's optimizer.
 
 ## What it needs
 
@@ -92,6 +65,22 @@ unserved). If a model of yours looks like one of these, give it a floor
 - Node information for placement. A namespace-scoped install cannot list
   nodes, so it plans by GPU count alone and never reports `release-taken`,
   `release-shape-mismatch` or `wrong-pod`.
+
+## How it shares the quota
+
+In the order it is applied:
+
+1. **Each model first gets its need:** the GPUs that put it at its
+   `scaleUpThreshold`.
+2. **The rest is headroom,** shared in proportion to each model's weight
+   (`standard` 1, `important` 2, `critical` 4). While the quota cannot hold
+   every model's recent peak at once, headroom is capped at
+   `maxHeadroomReplicas` (default 1) times the weight, and the rest stays
+   unassigned, so a model whose demand rises starts pods into it at once.
+3. **A model too far from its share gets GPUs through a transfer:** the
+   optimizer marks one donor pod, lowers the donor, waits until the GPUs are
+   actually free, and only then raises the receiver. The scale-down always
+   comes first.
 
 ## Declaring it
 
@@ -131,12 +120,20 @@ values in force.
 
 ## Verifying it
 
-The guide's [Verification](../../guides/utilization-share/#verification) has
-the checks for each step: the two ways to read the metrics (Prometheus,
-scoped to your namespace, as a namespace tenant; the controller's endpoint as
-a cluster admin) and what quiet-but-healthy looks like. Rising `aborted`,
-`fill-timeout` or `wrong-pod` transfer outcomes mean transfers are not
-landing; when it evaluates but never moves anything, see
+```promql
+# the mode in force: exactly one series is 1 — off, invalid, shadow or active
+wva_utilization_share_mode{namespace="<namespace>"} == 1
+
+# once active: transfers that ended, by outcome (done is healthy)
+sum by (outcome) (increase(wva_utilization_share_transfers_total{scope="<namespace>"}[1h]))
+```
+
+Rising `aborted`, `fill-timeout` or `wrong-pod` outcomes mean transfers are not
+landing. The guide's [Verification](../../guides/utilization-share/#verification)
+has the check for each rollout step, both ways to read the metrics (Prometheus,
+scoped to your namespace, as a tenant; the controller's endpoint as a cluster
+admin) and what quiet-but-healthy looks like. When it evaluates but never moves
+anything, see
 [troubleshooting](../../reference/troubleshooting.md#the-optimizer-evaluates-but-never-moves-anything).
 
 ## What it costs
@@ -151,10 +148,10 @@ landing; when it evaluates but never moves anything, see
   model above its need plus headroom returns the extra after
   `consecutiveCyclesBeforeMove` cycles, once its load is at or below
   `stabilization.returnSpareWhenLoadAtMost`. While more than 0.6 x
-  `queueLengthThreshold` requests (3 by default) wait on one of its pods --
-  a P/D decode pod only while its KV cache is full, prefill pods not at
-  all -- the return waits, for at most its scale-down window. If its demand comes back after
-  the drain, it starts a pod again, cold
+  `queueLengthThreshold` requests (3 by default) wait on one of its pods — a
+  P/D decode pod only while its KV cache is full, prefill pods not at all — the
+  return waits, for at most its scale-down window. If its demand comes back
+  after the drain, it starts a pod again, cold
   ([troubleshooting](../../reference/troubleshooting.md#a-model-shrinks-while-no-other-model-grows)).
 - **A donor replica, with its in-flight requests.** Requests survive only as
   well as the model server drains.
@@ -170,21 +167,21 @@ landing; when it evaluates but never moves anything, see
   version without the optimizer leaves them behind
   ([how to remove them](../../reference/troubleshooting.md#transfer-marks-left-on-pods-after-a-downgrade)).
 
-## How it is tested
+Some traffic shapes still lose something, in simulation (share of demand left
+unserved). If a model of yours looks like one of these, give it a floor
+([for model owners](../../reference/scaling-policy.md#for-model-owners-what-the-optimizer-may-take-and-how-to-protect-a-model)):
 
-- **Unit:** configuration (`internal/config/utilization_share*_test.go`),
-  planning (`internal/engines/allocation/utilization_share_*_test.go`) and the
-  cycle (`internal/engines/steadystate/utilization_share_*_test.go`).
-- **End-to-end** on kind with emulated GPUs (`make test-e2e-full`, labels
-  `full` and `utilization-share`): shadow then active under a 4-GPU namespace
-  quota (`utilization_share_test.go`), a P/D LeaderWorkerSet funded by a donor
-  set (`utilization_share_pd_test.go`), and a 2-GPU receiver funded on a full
-  node (`utilization_share_nodes_test.go`). They skip when no node carries a
-  GPU product label, and a skip reports as success: run them with `-v`
-  ([testing](../../developer-guide/testing.md)).
-- **Not covered:** real model servers in the e2e; whole-node, multi-GPU or P/D
-  pods under real load; a cluster quota and the `clusterNamespaces` canary
-  (unit only); a restart that rebuilds transfers from pod marks (unit only).
+- **A noisy model beside one that bursts for long.** The noisy model gets its
+  headroom on its average demand rather than at each crest (blocked reason
+  `fast-swing-capped`): 0.02 to 0.06 more unserved, while the bursting model
+  goes from 0.33 to 0.21.
+- **Whole-node models bursting for 20 to 30 minutes in a tight quota.** Moves
+  that would land after the burst ends keep the usual pace (`burst-ending`);
+  still about 0.007 worse than without that rule.
+- **A dip right after a group starts.** For about the first 12 minutes no
+  model's peak is known, so a model in a dip gives replicas back and
+  cold-starts them when demand returns (0.038 unserved for a 12-minute dip).
+  Stored history avoids it after a restart.
 
 ## How it is benchmarked
 
@@ -204,8 +201,24 @@ two 8B models at 1 GPU per replica:
 A P/D version was attempted once and stopped after its `today` arm: prefill
 never left one replica, so prefill and decode never competed for GPUs
 ([why](measured.md#pd-not-measured)). A four-role P/D scenario,
-`two-model-shapes-pd`, is ready and has not been run. Every number, table and timeline is in
-[measured](measured.md).
+`two-model-shapes-pd`, is ready and has not been run. Every number, table and
+timeline is in [measured](measured.md).
+
+## How it is tested
+
+- Unit: configuration (`internal/config/utilization_share*_test.go`),
+  planning (`internal/engines/allocation/utilization_share_*_test.go`) and the
+  cycle (`internal/engines/steadystate/utilization_share_*_test.go`).
+- End-to-end on kind with emulated GPUs (`make test-e2e-full`, labels `full`
+  and `utilization-share`): shadow then active under a 4-GPU namespace quota
+  (`utilization_share_test.go`), a P/D LeaderWorkerSet funded by a donor set
+  (`utilization_share_pd_test.go`), and a 2-GPU receiver funded on a full node
+  (`utilization_share_nodes_test.go`). They skip when no node carries a GPU
+  product label, and a skip reports as success: run them with `-v`
+  ([testing](../../developer-guide/testing.md)).
+- **Not covered:** real model servers in the e2e; whole-node, multi-GPU or P/D
+  pods under real load; a cluster quota and the `clusterNamespaces` canary
+  (unit only); a restart that rebuilds transfers from pod marks (unit only).
 
 ## Tuning it
 
