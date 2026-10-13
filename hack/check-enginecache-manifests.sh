@@ -230,6 +230,20 @@ else fail "publish: no wait for the preparers to re-seed"; fi
 if printf '%s' "$pub_body" | grep -q 'for=jsonpath=.{.status.phase}.=Succeeded'; then
     fail "publish: waits on Succeeded alone, so a Failed pod sits out the timeout"
 fi
+# the re-seed wait counts only preparers of the restarted template: status alone
+# passes on the pods from before the restart
+printf '%s' "$pub_body" | grep -q 'stale_preparers "$gen"' && ok "publish: the re-seed wait needs every live preparer of the restarted template" \
+    || fail "publish: the re-seed wait passes on preparers from before the restart"
+sp_body="$(sed -n '/^stale_preparers() {/,/^}/p' deploy/enginecache.sh)"
+if [ -z "$sp_body" ]; then fail "publish: no stale_preparers"; else
+    pods='{"items":[{"metadata":{"labels":{"pod-template-generation":"13"}},"status":{"phase":"Running"}},{"metadata":{"labels":{"pod-template-generation":"12"}},"status":{"phase":"Running"}},{"metadata":{"labels":{"pod-template-generation":"12"}},"status":{"phase":"Failed"}}]}'
+    for c in "ok:13:1" "ok:14:2" "fail:13:?"; do
+        out="$(MODE="${c%%:*}" PODS="$pods" bash -c 'kubectl() { [ "$MODE" = ok ] && printf %s "$PODS"; [ "$MODE" = ok ]; }; NAMESPACE=ns; '"$sp_body"'
+stale_preparers '"$(echo "$c" | cut -d: -f2)")"
+        want="${c##*:}"
+        [ "$out" != "0" ] && { [ "$want" = "?" ] || [ "$out" = "$want" ]; } && ok "stale_preparers ($c): $out" || fail "stale_preparers ($c): got '$out', want $want"
+    done
+fi
 ps_body="$(sed -n '/^pod_succeeded() {/,/^}/p' deploy/enginecache.sh)"
 if [ -z "$ps_body" ]; then fail "publish: no pod_succeeded"; else
     for c in Succeeded:0 Failed:1 Pending:1; do

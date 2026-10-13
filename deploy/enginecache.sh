@@ -737,6 +737,15 @@ pod_succeeded() {
     return 1
 }
 
+# stale_preparers GEN prints how many live (Pending or Running) preparer pods
+# are of a template older than the DaemonSet's generation GEN, or "?" when
+# the pods cannot be read.
+stale_preparers() {
+    kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=node-local-engine-cache -o json --request-timeout=30s 2>/dev/null \
+        | jq -r --arg g "$1" '[.items[] | select(.status.phase == "Pending" or .status.phase == "Running") | select(.metadata.labels["pod-template-generation"] != $g)] | length' 2>/dev/null \
+        || echo "?"
+}
+
 # cmd_publish fills the seed from the nodes: every node whose preparer is Ready
 # merges its caches into the seed claim, one node at a time, then the seed is
 # stamped and the preparers restart, so each node merges in what any node
@@ -843,10 +852,13 @@ EOF
     kubectl delete pod -n "$NAMESPACE" "$stamp_pod" --ignore-not-found --wait=false >/dev/null
     kubectl rollout restart -n "$NAMESPACE" "daemonset/${CLAIM}" >/dev/null || log_error "publish: could not restart the preparers"
     # Wait on the usable nodes, as status counts them: `rollout status` also
-    # waits for a cordoned node's pod, which never comes up.
-    local deadline=$((SECONDS + 600))
+    # waits for a cordoned node's pod, which never comes up. status alone
+    # passes on the preparers from before the restart (still Ready), so the
+    # wait also needs every live preparer to be of the restarted template.
+    local deadline=$((SECONDS + 600)) gen
+    gen="$(kubectl get daemonset -n "$NAMESPACE" "$CLAIM" -o jsonpath='{.metadata.generation}')"
     sleep 5
-    until bash "$HERE/enginecache.sh" status -n "$NAMESPACE" >/dev/null 2>&1; do
+    until [ -n "$gen" ] && [ "$(stale_preparers "$gen")" = 0 ] && bash "$HERE/enginecache.sh" status -n "$NAMESPACE" >/dev/null 2>&1; do
         [ "$SECONDS" -lt "$deadline" ] || { log_warning "publish: not every usable node re-seeded within 600 s; enginecache.sh status says which"; break; }
         sleep 10
     done
