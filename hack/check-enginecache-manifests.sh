@@ -298,16 +298,25 @@ if PATH="$STUB_PATH" bash hack/benchmark/engine_cache_claim.sh "$T/s5.yaml" chec
 cp "$T/scenario.yaml" "$T/s6.yaml"
 if PATH="$STUB_PATH" bash hack/benchmark/engine_cache_claim.sh "$T/s6.yaml" check-ns 'Bad_Name' >/dev/null 2>&1; then fail "engine_cache_claim accepted a claim name that is not a label"; else ok "engine_cache_claim: a claim name that is not a DNS label is refused"; fi
 # every shipped scenario that carries the volume is repointed (two roles in
-# the P/D one, one in the others), and the one without it is refused
+# the P/D one, one in the others); a vLLM scenario without one gets one per
+# engine role, with the cache directories under it; one with no vLLM role to
+# add it to is refused
+EC_ROLES='.. | select(type == "!!map" and (has("decode") or has("prefill"))) | (.decode, .prefill) | select(type == "!!map" and has("vllm") and .enabled != false)'
 for sc in hack/benchmark/scenarios/guides/*.yaml; do
     cp "$sc" "$T/real.yaml"
     have="$(yq -r '[.. | select(type == "!!map" and has("additionalVolumes")) | .additionalVolumes[] | select(.name == "engine-cache")] | length' "$sc")"
+    roles="$(yq -r "[${EC_ROLES}] | length" "$sc")"
+    want="$have"; [ "$have" -gt 0 ] || want="$roles"
     if PATH="$STUB_PATH" bash hack/benchmark/engine_cache_claim.sh "$T/real.yaml" check-ns > "$T/real.out" 2>&1; then
         n="$(yq -r '[.. | select(type == "!!map" and has("additionalVolumes")) | .additionalVolumes[] | select(.name == "engine-cache") | .persistentVolumeClaim.claimName] | map(select(. == "engine-cache")) | length' "$T/real.yaml")"
         sub="$(yq -r '[.. | select(type == "!!map" and has("additionalVolumeMounts")) | .additionalVolumeMounts[] | select(.name == "engine-cache") | has("subPath")] | map(select(.)) | length' "$T/real.yaml")"
-        [ "$have" -gt 0 ] && [ "$n" = "$have" ] && [ "$sub" = 0 ] && ok "engine_cache_claim: $(basename "$sc") -- $n engine-cache volume(s) repointed, no subPath left" || fail "engine_cache_claim on $(basename "$sc"): had $have, repointed $n, subPaths left $sub"
+        [ "$want" -gt 0 ] && [ "$n" = "$want" ] && [ "$sub" = 0 ] && ok "engine_cache_claim: $(basename "$sc") -- $n engine-cache volume(s) on the claim, no subPath left" || fail "engine_cache_claim on $(basename "$sc"): had $have, wanted $want, on the claim $n, subPaths left $sub"
+        if [ "$have" = 0 ]; then
+            wired="$(yq -r "[${EC_ROLES} | select(.vllm.cacheRoot == \"/engine-cache/vllm\" and ([.extraEnvVars[] | select(.name == \"FLASHINFER_WORKSPACE_DIR\" or .name == \"TRITON_CACHE_DIR\") | .value] | join(\",\")) == \"/engine-cache/flashinfer,/engine-cache/triton\" and ([.additionalVolumeMounts[] | select(.name == \"engine-cache\" and .mountPath == \"/engine-cache\")] | length) == 1)] | length" "$T/real.yaml")"
+            [ "$wired" = "$roles" ] && grep -q 'added an engine cache' "$T/real.out" && ok "engine_cache_claim: $(basename "$sc") -- had no engine cache; all $roles vLLM role(s) now keep VLLM_CACHE_ROOT, FlashInfer and Triton under /engine-cache" || fail "engine_cache_claim on $(basename "$sc"): added wiring on $wired of $roles role(s): $(cat "$T/real.out")"
+        fi
     else
-        [ "$have" = 0 ] && grep -q 'declares no engine cache to move' "$T/real.out" && ok "engine_cache_claim: $(basename "$sc") -- carries no engine-cache volume and is refused" || fail "engine_cache_claim on $(basename "$sc"): $(cat "$T/real.out")"
+        [ "$have" = 0 ] && [ "$roles" = 0 ] && grep -q 'declares no engine cache to move' "$T/real.out" && ok "engine_cache_claim: $(basename "$sc") -- carries no engine-cache volume and no vLLM role, and is refused" || fail "engine_cache_claim on $(basename "$sc"): $(cat "$T/real.out")"
     fi
 done
 
