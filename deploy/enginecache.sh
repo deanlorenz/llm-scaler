@@ -96,7 +96,8 @@
 #                               to it reaches every node at the next
 #                               prepare, not the one node a pod landed on.
 #                               A changed seed is merged in too (the marker
-#                               records the seed); the subPath must exist.
+#                               records the seed). A subPath that does not
+#                               exist yet is nothing to seed, not an error.
 #   --node-selector KEY=VALUE   which nodes count as accelerator nodes. The
 #                               default is any node carrying a known GPU
 #                               product label (deploy/lib/accelerator_nodes.sh);
@@ -240,11 +241,22 @@ merge() {
 }
 seeded_from=""
 [ ! -f "/engine-cache/$SEED_MARKER" ] || read -r seeded_from < "/engine-cache/$SEED_MARKER" || seeded_from=""
-if [ -d /seed ] && [ "$seeded_from" != "$SEED_ID" ]; then
+# The seed claim is mounted whole at /seed and SEED_SUBPATH is looked up here:
+# a subPath on the mount would make the kubelet create it, which fails on a
+# fresh claim and leaves the pod unable to start. An absent seed is nothing
+# to seed -- the marker says so with a "none:" prefix, which the readiness
+# probe accepts, and the next start merges the seed if it has appeared.
+seed_dir="/seed${SEED_SUBPATH:+/$SEED_SUBPATH}"
+if [ -d /seed ] && [ ! -d "$seed_dir" ]; then
+  if [ "$seeded_from" != "none:$SEED_ID" ] && [ "$seeded_from" != "$SEED_ID" ]; then
+    echo "none:$SEED_ID" > "/engine-cache/$SEED_MARKER" || exit 1
+  fi
+  echo "engine cache: no seed on $HOSTNAME: $SEED_ID has no $seed_dir yet; nothing to seed"
+elif [ -d /seed ] && [ "$seeded_from" != "$SEED_ID" ]; then
   complete=1; added=""
   for d in vllm flashinfer triton; do
-    [ -d "/seed/$d" ] || continue
-    merge "/seed/$d" "/engine-cache/$d"
+    [ -d "$seed_dir/$d" ] || continue
+    merge "$seed_dir/$d" "/engine-cache/$d"
   done
   if [ "$complete" = 1 ]; then
     echo "$SEED_ID" > "/engine-cache/$SEED_MARKER" || exit 1
@@ -270,12 +282,14 @@ seed_volume_yaml() {
 # so the double quotes in it need no escaping.
 seed_probe() {
     [ -n "$SEED_CLAIM" ] || return 0
-    printf ' && grep -qx "%s" /engine-cache/%s' "${SEED_CLAIM}${SEED_SUBPATH:+:$SEED_SUBPATH}" "$SEED_MARKER"
+    printf ' && grep -qx -e "%s" -e "none:%s" /engine-cache/%s' "${SEED_CLAIM}${SEED_SUBPATH:+:$SEED_SUBPATH}" "${SEED_CLAIM}${SEED_SUBPATH:+:$SEED_SUBPATH}" "$SEED_MARKER"
 }
+# seed_mount_yaml mounts the whole claim, never a subPath: the kubelet creates
+# a missing subPath, which fails on a fresh claim (the pod never starts). The
+# preparer finds SEED_SUBPATH under /seed itself.
 seed_mount_yaml() {
     [ -n "$SEED_CLAIM" ] || return 0
     printf '            - name: seed\n              mountPath: /seed\n              readOnly: true\n'
-    [ -z "$SEED_SUBPATH" ] || printf '              subPath: %s\n' "$SEED_SUBPATH"
 }
 
 # check_seed refuses a seed that is not a claim name with an optional subPath
@@ -429,6 +443,8 @@ $(preparer_script | sed 's/^/              /')
               value: "${SEED_MARKER}"
             - name: SEED_ID
               value: "${SEED_CLAIM}${SEED_SUBPATH:+:$SEED_SUBPATH}"
+            - name: SEED_SUBPATH
+              value: "${SEED_SUBPATH}"
             # Engine images bake in NVIDIA_VISIBLE_DEVICES=all, and the NVIDIA
             # runtime honours it from a container that requested no GPU.
             - name: NVIDIA_VISIBLE_DEVICES

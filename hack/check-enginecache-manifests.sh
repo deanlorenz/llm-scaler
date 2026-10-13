@@ -136,7 +136,7 @@ plain = [d for d in yaml.safe_load_all(open(sys.argv[3], encoding="utf-8")) if d
 vols = {v["name"]: v for v in seed["volumes"]}
 check(vols.get("seed", {}).get("persistentVolumeClaim") == {"claimName": "workload-pvc", "readOnly": True}, "the seed claim is a read-only volume: %s" % vols.get("seed"))
 mounts = {m["name"]: m for m in seed["containers"][0]["volumeMounts"]}
-check(mounts.get("seed") == {"name": "seed", "mountPath": "/seed", "readOnly": True, "subPath": "engine-cache"}, "the seed is mounted read-only at /seed with its subPath: %s" % mounts.get("seed"))
+check(mounts.get("seed") == {"name": "seed", "mountPath": "/seed", "readOnly": True}, "the seed claim is mounted whole, read-only, with NO subPath (the kubelet would have to create it; on a fresh claim the pod never starts): %s" % mounts.get("seed"))
 m2 = {m["name"]: m for m in seed2["containers"][0]["volumeMounts"]}
 check("subPath" not in m2.get("seed", {}), "no subPath when none was given: %s" % m2.get("seed"))
 script = seed["containers"][0]["args"][0]
@@ -146,9 +146,9 @@ check('[ "$seeded_from" != "$SEED_ID" ]' in script and 'echo "$SEED_ID" > "/engi
 i_ok = script.index('if [ "$complete" = 1 ]'); i_mark = script.index('echo "$SEED_ID" > "/engine-cache/$SEED_MARKER"'); i_loop = script.index('if cp -a --no-preserve=ownership')
 check(i_loop < i_ok < i_mark and 'else complete=0; rm -rf "$t"' in script, "the marker is written only after every copy succeeded; a failed copy is removed and the seed retried next start")
 probe_seed = seed["containers"][0]["readinessProbe"]["exec"]["command"][2]
-check(probe_seed.endswith('&& grep -qx "workload-pvc:engine-cache" /engine-cache/.seeded'), "with a seed, Ready also requires the node to carry that seed: %s" % probe_seed)
+check(probe_seed.endswith('&& grep -qx -e "workload-pvc:engine-cache" -e "none:workload-pvc:engine-cache" /engine-cache/.seeded'), "with a seed, Ready also requires the node to carry that seed, or the record that it had nothing to seed: %s" % probe_seed)
 env = {e["name"]: e["value"] for e in seed["containers"][0]["env"]}
-check(env.get("SEED_MARKER") == ".seeded" and env.get("SEED_ID") == "workload-pvc:engine-cache", "the seed marker's name and the seed's identity come from the environment")
+check(env.get("SEED_MARKER") == ".seeded" and env.get("SEED_ID") == "workload-pvc:engine-cache" and env.get("SEED_SUBPATH") == "engine-cache", "the seed marker's name, the seed's identity and its subPath come from the environment: %s" % env)
 check("$(" not in script and "$$" not in script, "still no $( or $$ in the command")
 plain_ps = plain["spec"]["template"]["spec"]
 check(all(v["name"] != "seed" for v in plain_ps["volumes"]) and all(m["name"] != "seed" for m in plain_ps["containers"][0]["volumeMounts"]), "no --seed-claim: no seed volume or mount")
@@ -182,6 +182,18 @@ mkdir -p "$M/seed/triton/y"; echo y > "$M/seed/triton/y/f"; chmod 000 "$M/seed/t
 SEED_MARKER=.seeded SEED_ID=shared:z MARKER=.prepared HOSTNAME=n1 "$SH" "$M/p.sh" > "$M/run4.out" 2>&1; chmod 755 "$M/seed/triton/y"
 if [ "$(id -u)" = 0 ]; then ok "merge: (the failed-copy case needs a non-root check runner)"; else
 grep -q "did not complete" "$M/run4.out" && [ "$(cat "$M/cache/.seeded")" = shared:y ] && [ ! -e "$M/cache/triton/y" ] && ok "merge: a copy that fails leaves the marker at the previous seed and nothing half-copied" || fail "merge run 4: $(cat "$M/run4.out"; cat "$M/cache/.seeded")"; fi
+# a seed claim whose subPath does not exist yet -- a fresh stand-up's
+# workload claim: nothing to seed, said so, and Ready; the seed is merged
+# once it appears
+F="$T/fresh"; mkdir -p "$F/seed" "$F/cache"
+sed -n "/^preparer_script() {/,/^SCRIPT$/p" deploy/enginecache.sh | sed '1,2d;$d' | sed "s|/seed|$F/seed|g; s|/engine-cache|$F/cache|g; s|^trap .*||" > "$F/p.sh"
+SEED_MARKER=.seeded SEED_ID=workload-pvc:engine-cache SEED_SUBPATH=engine-cache MARKER=.prepared HOSTNAME=n1 "$SH" "$F/p.sh" > "$F/run1.out" 2>&1; rc=$?
+[ "$rc" = 0 ] && [ -f "$F/cache/.prepared" ] && [ "$(cat "$F/cache/.seeded")" = "none:workload-pvc:engine-cache" ] && grep -q "nothing to seed" "$F/run1.out" \
+    && ok "seed: an absent subPath is nothing to seed -- prepared, marked none:, and said so" || fail "seed absent: rc=$rc $(cat "$F/run1.out"; cat "$F/cache/.seeded" 2>&1)"
+mkdir -p "$F/seed/engine-cache/vllm/torch_compile_cache/keyS"; echo s > "$F/seed/engine-cache/vllm/torch_compile_cache/keyS/f"
+SEED_MARKER=.seeded SEED_ID=workload-pvc:engine-cache SEED_SUBPATH=engine-cache MARKER=.prepared HOSTNAME=n1 "$SH" "$F/p.sh" > "$F/run2.out" 2>&1
+[ "$(cat "$F/cache/vllm/torch_compile_cache/keyS/f" 2>/dev/null)" = s ] && [ "$(cat "$F/cache/.seeded")" = workload-pvc:engine-cache ] \
+    && ok "seed: a seed that appears later is merged from its subPath, and the marker records it" || fail "seed appears later: $(cat "$F/run2.out"; cat "$F/cache/.seeded")"
 n="$(grep -c "cat <<'SCRIPT'" deploy/enginecache.sh)"
 [ "$n" = 1 ] && grep -q '^\$(preparer_script | sed' deploy/enginecache.sh && ok "render: the preparer's command comes from a quoted heredoc, so nothing in it is evaluated at apply time" || fail "render: the preparer's command is not in a quoted heredoc ($n)"
 
