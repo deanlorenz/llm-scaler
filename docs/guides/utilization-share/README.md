@@ -6,7 +6,7 @@ The utilization-share optimizer shares one GPU quota between the models under
 it: each model gets the GPUs its load needs, the rest is headroom shared by
 weight, and when one model's demand rises it takes GPUs another model does not
 need. Whether it suits your fleet, and what it costs, is on the well-lit path:
-[Share one GPU quota between models whose peaks do not coincide](../../well-lit-paths/utilization-share/).
+[Share one GPU quota between models](../../well-lit-paths/utilization-share/).
 
 This guide turns it on in two steps -- **shadow**, where it computes and reports
 but moves nothing, then **active** -- and back out. It is one block in the

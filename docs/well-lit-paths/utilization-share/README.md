@@ -1,4 +1,4 @@
-# Share one GPU quota between models whose peaks do not coincide
+# Share one GPU quota between models
 
 > **Experimental.** Measured on H200s with two aggregated models at 1 GPU per
 > replica, one run per configuration ([what was measured](measured.md)). The

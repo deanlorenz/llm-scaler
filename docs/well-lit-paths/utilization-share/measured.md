@@ -1,6 +1,6 @@
 # What sharing one quota did, measured
 
-[← Share one GPU quota between models whose peaks do not coincide](README.md)
+[← Share one GPU quota between models](README.md)
 
 Two models behind one gateway take turns at bursting, under **one** namespace
 quota that is smaller than their two peaks together. The same traffic ran
