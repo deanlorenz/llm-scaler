@@ -235,6 +235,14 @@ case "$args" in
       fi
       exit 0 ;;
   *"get pods -A -o json"*) echo '{"items":[]}' ; exit 0 ;;
+  # GWCLASS=1: the cluster already runs Istio (an istio.io GatewayClass).
+  *"get gatewayclass -o json"*)
+      if [ "${GWCLASS:-0}" = "1" ]; then
+        echo '{"items":[{"metadata":{"name":"istio"},"spec":{"controllerName":"istio.io/gateway-controller"}}]}'
+      else
+        echo '{"items":[]}'
+      fi
+      exit 0 ;;
   *) exit 0 ;;
 esac
 STUBEOF
@@ -992,6 +1000,78 @@ else
     ok "roomy nodes raise no placeability complaint"
 fi
 
+# THE DECODE REQUEST IS THE SCENARIO'S. Preflight read it with a regex anchored
+# on the first `decode:` -- the shared block, which has no requests -- found
+# nothing, and placed 16-CPU Pods for a scenario that asks for 8. On a busy
+# cluster that turned six placeable slots into "only 5 can take a Pod" and a
+# refusal. Measured on a shared H200 cluster, before any standup.
+case_begin
+NODE_CPU=127 NODE_GPUS=8 run_verb preflight
+if ! printf '%s' "$OUT" | grep -q 'Pod(s) of 8 CPU / 64Gi'; then
+    fail "preflight did not place the scenario's own 8-CPU / 64Gi decode Pod: $(printf '%s' "$OUT" | grep placeable)"
+else
+    ok "preflight places the decode Pod the scenario declares (8 CPU / 64Gi), not a 16-CPU default"
+fi
+
+# DECODE_CPU is the knob the refusal names, and preflight counts with it.
+case_begin
+DECODE_CPU=4 NODE_CPU=127 NODE_GPUS=8 run_verb preflight
+if ! printf '%s' "$OUT" | grep -q 'Pod(s) of 4 CPU'; then
+    fail "DECODE_CPU=4 did not reach preflight's placement count: $(printf '%s' "$OUT" | grep placeable)"
+else
+    ok "DECODE_CPU sets the decode request preflight places"
+fi
+
+case_begin
+NODE_CPU=10 NODE_GPUS=8 run_verb preflight
+if [ "$RC" -eq 0 ]; then
+    fail "preflight passed with one 8-CPU decode Pod placeable on a 10-core node and a peak of 6"
+elif ! printf '%s' "$OUT" | grep -q 'DECODE_CPU=<cores>'; then
+    fail "the placement refusal does not name the knob that lowers the request: $(printf '%s' "$OUT" | grep -A3 'can actually take')"
+else
+    ok "the placement refusal names DECODE_CPU, the knob that fixes it"
+fi
+
+# WHO OWNS ISTIO, without editing a tracked file. Preflight used to tell the
+# reader to add skipInstall to the scenario under hack/; GATEWAY_REUSE=auto
+# now does that on the copy the standup renders.
+case_begin
+GWCLASS=1 NODE_CPU=127 run_verb preflight
+if printf '%s' "$OUT" | grep -q 'already provides Istio'; then
+    fail "preflight still refuses a cluster that runs Istio under GATEWAY_REUSE=auto: $(printf '%s' "$OUT" | grep -A4 'already provides')"
+elif ! printf '%s' "$OUT" | grep -q 'the standup reuses it'; then
+    fail "preflight did not say the standup will reuse the cluster's Istio: $OUT"
+else
+    ok "a cluster that runs Istio passes preflight: the standup reuses it, no tracked file edited"
+fi
+
+case_begin
+GWCLASS=1 GATEWAY_REUSE=false NODE_CPU=127 run_verb preflight
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'GATEWAY_REUSE=auto (the default) or true'; then
+    fail "GATEWAY_REUSE=false on a cluster that runs Istio was not refused with the knob named: $OUT"
+else
+    ok "GATEWAY_REUSE=false on a cluster that runs Istio is refused, naming GATEWAY_REUSE"
+fi
+
+case_begin
+GWCLASS=0 GATEWAY_REUSE=true NODE_CPU=127 run_verb preflight
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'no istio.io/gateway-controller GatewayClass exists'; then
+    fail "GATEWAY_REUSE=true on a cluster with no Istio passed preflight; the Gateway would never be Programmed: $OUT"
+else
+    ok "GATEWAY_REUSE=true with no Istio on the cluster is refused"
+fi
+
+case_begin
+missing=""
+for v in BENCHMARK_GATEWAY_SKIP_INSTALL BENCHMARK_GATEWAY_PROVIDER_NAMESPACE BENCHMARK_DECODE_CPU BENCHMARK_DECODE_MEMORY; do
+    sed -n '/^verb_standup() {/,/^}/p' "$SCRIPT" | grep -q "$v=" || missing="$missing $v"
+done
+if [ -n "$missing" ]; then
+    fail "the standup does not hand$missing to make benchmark-standup, so the setting stops at preflight"
+else
+    ok "the standup hands the gateway and decode settings to make benchmark-standup"
+fi
+
 # THE BURSTS MUST NOT OVERLAP. The two models cross a stage boundary at
 # different moments -- a stage ends when its requests drain and the bursting
 # model drains slower -- so the band is what keeps the drift from becoming time
@@ -1027,7 +1107,7 @@ else
 fi
 
 case_begin
-CASES_EXPECTED=59
+CASES_EXPECTED=66
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately rather than letting coverage drift out."
 else

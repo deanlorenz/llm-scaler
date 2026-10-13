@@ -664,6 +664,21 @@ BENCHMARK_ENGINE_CACHE_HOSTPATH ?= $(BENCHMARK_MODEL_HOSTPATH)
 # namespace with history -- so no node's first start compiles; `none` seeds
 # nothing; anything else is a claim[:subPath] in the namespace.
 BENCHMARK_ENGINE_CACHE_SEED ?= auto
+# Settings benchmark-standup applies to its scenario COPY, never to the tracked
+# file (hack/benchmark/scenario_overrides.sh). BENCHMARK_GATEWAY_SKIP_INSTALL=true
+# reuses the gateway control plane the cluster already runs, in
+# BENCHMARK_GATEWAY_PROVIDER_NAMESPACE, instead of installing istio-base over
+# it -- which fails on ownership metadata part-way through. BENCHMARK_DECODE_CPU
+# and BENCHMARK_DECODE_MEMORY set a decode Pod's request (and limit) for nodes
+# with less spare CPU than the scenario asks. BENCHMARK_RENDER_DRAIN renders the
+# drain hook and grace into every engine before it first starts, so the
+# workload patch after the standup finds nothing to roll and no model starts
+# twice; false leaves it to that patch, as before.
+BENCHMARK_GATEWAY_SKIP_INSTALL ?= false
+BENCHMARK_GATEWAY_PROVIDER_NAMESPACE ?= istio-system
+BENCHMARK_DECODE_CPU ?=
+BENCHMARK_DECODE_MEMORY ?=
+BENCHMARK_RENDER_DRAIN ?= true
 .PHONY: prepull prepull-status prepull-delete
 prepull: ## Hold IMAGES=<img>[,<img>] on every accelerator node of NAMESPACE=<ns>. PREPULL_NODE_SELECTOR=<key=value> narrows the nodes, PREPULL_TOLERATIONS=<key>[,<key>] adds taints.
 	@test -n "$(IMAGES)" || { echo "prepull: set IMAGES=<image>[,<image>] to exactly what the model server's pod spec names" >&2; exit 1; }
@@ -1718,6 +1733,14 @@ benchmark-standup: ## Stand up the benchmark environment, then install WVA from 
 	@yq -i '(.scenario[] | select(has("common")) | .common.images.benchmark.tag) = "$(BENCHMARK_IMAGE_TAG)"' \
 		$(BENCHMARK_REPO_DIR)/config/scenarios/$(BENCHMARK_SPEC).yaml && \
 		echo "Harness image tag=$(BENCHMARK_IMAGE_TAG) (defaults.yaml pins v0.7.0 regardless of ref)."
+	@# The standup's own settings on the scenario copy: gateway reuse, decode
+	@# resources and the drain fields, in one script hack/check-scenario-overrides.sh
+	@# executes. Before the engines exist, so they start once, as configured.
+	@BENCHMARK_GATEWAY_SKIP_INSTALL="$(BENCHMARK_GATEWAY_SKIP_INSTALL)" \
+		BENCHMARK_GATEWAY_PROVIDER_NAMESPACE="$(BENCHMARK_GATEWAY_PROVIDER_NAMESPACE)" \
+		BENCHMARK_DECODE_CPU="$(BENCHMARK_DECODE_CPU)" BENCHMARK_DECODE_MEMORY="$(BENCHMARK_DECODE_MEMORY)" \
+		BENCHMARK_RENDER_DRAIN="$(BENCHMARK_RENDER_DRAIN)" \
+		bash hack/benchmark/scenario_overrides.sh "$(BENCHMARK_REPO_DIR)/config/scenarios/$(BENCHMARK_SPEC).yaml"
 	@# Node-local weights, last of the scenario edits: the script refuses a
 	@# namespace whose model-pvc is already on another class (the harness
 	@# keeps an existing claim, and the volume would never bind), and it
@@ -2531,6 +2554,7 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@bash -n hack/benchmark/model_hostpath.sh
 	@bash -n deploy/enginecache.sh
 	@bash -n hack/benchmark/engine_cache_claim.sh
+	@bash -n hack/benchmark/scenario_overrides.sh
 	@bash -n hack/benchmark/engine_image.sh
 	@bash -n hack/benchmark/capture_lib.sh
 	@bash -n hack/benchmark/sample_replicas.sh
@@ -2577,6 +2601,8 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@bash hack/check-weights-manifests.sh
 	@echo "Checking what enginecache.sh and engine_cache_claim.sh actually emit..."
 	@bash hack/check-enginecache-manifests.sh
+	@echo "Checking what scenario_overrides.sh does to every shipped scenario..."
+	@bash hack/check-scenario-overrides.sh
 	@echo "Checking every scrape interval is 10s, the harness default included..."
 	@# 30s on the engine PodMonitor is 0..30s of jitter on every scaling
 	@# decision; the P/D scenario took the harness default and paid it.

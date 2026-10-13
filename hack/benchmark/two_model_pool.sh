@@ -240,6 +240,17 @@ WVA_NS="${WVA_NS:-$NS}"
 MONITORING_NS="${MONITORING_NS:-}"
 ACCELERATOR="${ACCELERATOR:-}"
 RESET_TIMEOUT="${RESET_TIMEOUT:-600}"
+# Whether the standup reuses a gateway control plane the cluster already runs
+# (auto: when an istio.io/gateway-controller GatewayClass exists) instead of
+# installing istio-base over it. Applied to the scenario COPY the standup
+# renders, never to the tracked file.
+GATEWAY_REUSE="${GATEWAY_REUSE:-auto}"
+GATEWAY_PROVIDER_NAMESPACE="${GATEWAY_PROVIDER_NAMESPACE:-istio-system}"
+# A decode Pod's CPU and memory request, for nodes whose spare CPU is smaller
+# than the scenario's. Empty keeps the scenario's own values. Applied to the
+# scenario copy at standup, and used by preflight's placement count.
+DECODE_CPU="${DECODE_CPU:-}"
+DECODE_MEMORY="${DECODE_MEMORY:-}"
 
 BLUE=$'\033[0;34m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'; RED=$'\033[0;31m'; NC=$'\033[0m'
 info()  { echo "${BLUE}[INFO]${NC} $*" >&2; }
@@ -253,6 +264,11 @@ k()  { kubectl ${KUBE_CONTEXT:+--context "$KUBE_CONTEXT"} -n "$NS" "$@"; }
 kc() { kubectl ${KUBE_CONTEXT:+--context "$KUBE_CONTEXT"} "$@"; }
 
 need_ns() { [ -n "$NS" ] || die "BENCHMARK_NAMESPACE is required."; }
+
+case "$GATEWAY_REUSE" in
+    auto|true|false) ;;
+    *) die "GATEWAY_REUSE=$GATEWAY_REUSE: use auto (reuse the cluster's Istio when it runs one), true or false" ;;
+esac
 
 # The accelerators this run peaks at, and it is the SAME in both arms by
 # construction -- that is the point.
@@ -306,44 +322,112 @@ arm_max_replicas() { echo "$MAX_REPLICAS"; }
 # preflight
 # ---------------------------------------------------------------------------
 decode_cpu() {
-    # The decode Pod's CPU request, from the live Deployment when the stacks are
-    # up and from the scenario otherwise -- preflight runs before standup.
+    # The decode Pod's CPU request in whole cores: DECODE_CPU when set (the value
+    # the standup will apply), else the live Deployments when the stacks are up,
+    # else the scenario -- preflight runs before standup. A Pod asks for the SUM
+    # of its containers, and the largest decode Pod is the one that must fit.
     local v
-    v="$(k get deploy -o json 2>/dev/null | jq -r '
-        [.items[] | select(.metadata.name|test("decode"))
-         | .spec.template.spec.containers[]?.resources.requests.cpu // empty] | .[0] // ""' 2>/dev/null)"
+    v="$DECODE_CPU"
+    [ -z "$v" ] && v="$(k get deploy -o json 2>/dev/null | jq -r '
+        def mc: if test("m$") then (.[:-1] | tonumber) else (tonumber * 1000) end;
+        [.items[] | select(.metadata.name | test("decode"))
+         | [.spec.template.spec.containers[]?.resources.requests.cpu // empty | mc] | add // empty]
+        | max // empty | (. / 1000 | ceil)' 2>/dev/null)"
     [ -z "$v" ] && v="$(scenario_value 'cpu')"
     printf '%s' "${v:-16}"
 }
 
 decode_mem_gi() {
     local v
-    v="$(k get deploy -o json 2>/dev/null | jq -r '
-        [.items[] | select(.metadata.name|test("decode"))
-         | .spec.template.spec.containers[]?.resources.requests.memory // empty] | .[0] // ""' 2>/dev/null)"
+    v="$DECODE_MEMORY"
+    [ -z "$v" ] && v="$(k get deploy -o json 2>/dev/null | jq -r '
+        def gi: if test("Gi$") then (.[:-2] | tonumber)
+                elif test("Mi$") then ((.[:-2] | tonumber) / 1024)
+                elif test("Ki$") then ((.[:-2] | tonumber) / 1048576)
+                elif test("G$") then ((.[:-1] | tonumber) * 1000000000 / 1073741824)
+                else (tonumber / 1073741824) end;
+        [.items[] | select(.metadata.name | test("decode"))
+         | [.spec.template.spec.containers[]?.resources.requests.memory // empty | gi] | add // empty]
+        | max // empty | ceil | tostring + "Gi"' 2>/dev/null)"
     [ -z "$v" ] && v="$(scenario_value 'memory')"
     printf '%s' "${v:-64Gi}" | sed 's/Gi$//'
 }
 
 scenario_value() {
     # One decode resources.requests field out of the scenario spec, so preflight
-    # can answer before anything is deployed.
+    # can answer before anything is deployed: the LARGEST across the stacks.
+    #
+    # Read by indentation, not by the first match. The first `decode:` in these
+    # scenarios is the shared block (container ports, no requests), so a regex
+    # anchored there found nothing and preflight fell back to 16 CPU for a
+    # scenario that asks for 8 -- and refused a cluster with room, saying only
+    # five Pods could be placed.
     local key="$1" file="$ROOT/hack/benchmark/scenarios/$BENCH_SPEC.yaml"
     [ -f "$file" ] || return 0
     python3 - "$file" "$key" <<'PY' 2>/dev/null || true
 import re, sys
-text = open(sys.argv[1], encoding="utf-8").read()
+lines = open(sys.argv[1], encoding="utf-8").read().replace("\r\n", "\n").split("\n")
 key = sys.argv[2]
-# The decode block's requests, not the router's or the pool's: anchor on
-# `decode:` and take the first `requests:` under it.
-m = re.search(r"\n\s*decode:\n(.*?)(?=\n\s{0,6}\w+:\n)", text, re.S)
-block = m.group(1) if m else text
-r = re.search(r"requests:\n(.*?)(?=\n\s*\w+:|\Z)", block, re.S)
-if r:
-    v = re.search(r"\b%s:\s*\"?([^\"\n]+)\"?" % key, r.group(1))
-    if v:
-        print(v.group(1).strip().strip('"'))
+
+def depth(line):
+    return len(line) - len(line.lstrip(" "))
+
+def meaningful(line):
+    s = line.strip()
+    return bool(s) and not s.startswith("#")
+
+def size(v):
+    units = {"m": 0.001, "Ki": 1.0 / 1048576, "Mi": 1.0 / 1024, "Gi": 1.0, "G": 1e9 / 1073741824}
+    for u, f in units.items():
+        if v.endswith(u):
+            return float(v[: -len(u)]) * f
+    return float(v)
+
+found = []
+i = 0
+while i < len(lines):
+    m = re.match(r"^(\s*)decode:\s*(#.*)?$", lines[i])
+    if not m:
+        i += 1
+        continue
+    d = len(m.group(1))
+    req = None
+    j = i + 1
+    while j < len(lines):
+        line = lines[j]
+        if meaningful(line) and depth(line) <= d:
+            break
+        r = re.match(r"^(\s*)requests:\s*(#.*)?$", line)
+        if r:
+            req = len(r.group(1))
+        elif req is not None and meaningful(line):
+            if depth(line) <= req:
+                req = None
+            else:
+                v = re.match(r'^\s*%s:\s*"?([^"#\s]+)"?' % re.escape(key), line)
+                if v:
+                    found.append(v.group(1))
+        j += 1
+    i = j
+if found:
+    print(max(found, key=size))
 PY
+}
+
+istio_gatewayclasses() {
+    # How many GatewayClasses an existing Istio control plane serves here.
+    kc get gatewayclass -o json 2>/dev/null | jq -r '
+        [.items[] | select(.spec.controllerName == "istio.io/gateway-controller")] | length' 2>/dev/null
+}
+
+gateway_reuse() {
+    # true when the standup should reuse the gateway control plane the cluster
+    # already runs (skipInstall on the scenario copy) instead of installing
+    # istio-base over it. GATEWAY_REUSE=auto decides from the cluster.
+    case "$GATEWAY_REUSE" in
+        true|false) printf '%s' "$GATEWAY_REUSE" ;;
+        *) if [ "$(istio_gatewayclasses)" -gt 0 ] 2>/dev/null; then printf true; else printf false; fi ;;
+    esac
 }
 
 placeable_slots() {
@@ -443,7 +527,9 @@ verb_preflight() {
         warn "${free} accelerators are free but only ${slots} of them can actually take a Pod: the"
         warn "  run peaks at ${want}. The nodes with spare accelerators do not have $(decode_cpu) spare cores."
         warn "  Replicas would sit Pending and the arm would measure a fleet it never got."
-        warn "  Lower the decode CPU request, lower MAX_REPLICAS, or use a cluster with room."
+        warn "  Lower the decode request (DECODE_CPU=<cores>, DECODE_MEMORY=<n>Gi -- the standup applies"
+        warn "  them to its scenario copy), lower MAX_REPLICAS, or use a cluster with room; then run"
+        warn "  preflight again with the same settings."
         rc=1
     fi
     # The pool arm holds its Pods ON TOP of the models' ceiling. Reported, not
@@ -488,28 +574,30 @@ verb_preflight() {
     # earlier, not Helm-managed. The standup got as far as deploying one stack
     # before dying, and the half-built namespace then tripped the EPP-reuse
     # guard on the next attempt, so the fix was two failures away from the
-    # cause. The scenario can say "reuse what is there" instead.
-    local gw_installed gw_skips
-    gw_installed="$(kc get gatewayclass -o json 2>/dev/null | jq -r '
-        [.items[] | select(.spec.controllerName == "istio.io/gateway-controller")] | length')"
+    # cause. The standup reuses what is there instead: GATEWAY_REUSE=auto (the
+    # default) marks the scenario COPY skipInstall when the cluster runs Istio,
+    # so nobody hand-edits a tracked scenario to get past this.
+    local gw_installed gw_skips gw_reuse
+    gw_installed="$(istio_gatewayclasses)"
     gw_skips="$(grep -c 'skipInstall:[[:space:]]*true' \
         "$ROOT/hack/benchmark/scenarios/$BENCH_SPEC.yaml" 2>/dev/null || true)"
-    if [ "${gw_installed:-0}" -gt 0 ] && [ "${gw_skips:-0}" -eq 0 ]; then
+    gw_reuse="$(gateway_reuse)"
+    [ "${gw_skips:-0}" -gt 0 ] && gw_reuse=true
+    if [ "${gw_installed:-0}" -gt 0 ] && [ "$gw_reuse" != true ]; then
         warn "this cluster already provides Istio (an istio.io/gateway-controller GatewayClass exists),"
-        warn "  and the scenario does not say so. standup would try to install istio-base over it and"
+        warn "  and GATEWAY_REUSE=$GATEWAY_REUSE. standup would try to install istio-base over it and"
         warn "  fail on ownership metadata, part-way through, leaving a namespace that the next attempt"
-        warn "  refuses as someone else's. Add this under the scenario's gateway: block:"
-        warn "      providerNamespace: istio-system   # where the existing control plane lives"
-        warn "      skipInstall: true"
+        warn "  refuses as someone else's. Run with GATEWAY_REUSE=auto (the default) or true, and"
+        warn "  GATEWAY_PROVIDER_NAMESPACE=<namespace of the existing control plane> if it is not istio-system."
         rc=1
-    elif [ "${gw_installed:-0}" -eq 0 ] && [ "${gw_skips:-0}" -gt 0 ]; then
-        warn "the scenario sets gateway.skipInstall, but no istio.io/gateway-controller GatewayClass"
-        warn "  exists here. Nothing would install a control plane and the Gateway would never be"
-        warn "  Programmed -- the load then fails to resolve, in every arm. Drop skipInstall, or"
-        warn "  point it at the cluster that has Istio."
+    elif [ "${gw_installed:-0}" -eq 0 ] && [ "$gw_reuse" = true ]; then
+        warn "the standup would reuse an existing Istio (GATEWAY_REUSE=$GATEWAY_REUSE, or the scenario sets"
+        warn "  gateway.skipInstall), but no istio.io/gateway-controller GatewayClass exists here. Nothing"
+        warn "  would install a control plane and the Gateway would never be Programmed -- the load then"
+        warn "  fails to resolve, in every arm. Use GATEWAY_REUSE=auto, or point it at the cluster that has Istio."
         rc=1
     elif [ "${gw_installed:-0}" -gt 0 ]; then
-        ok "Istio is provided by the cluster and the scenario reuses it"
+        ok "Istio is provided by the cluster; the standup reuses it (control plane in $GATEWAY_PROVIDER_NAMESPACE)"
     fi
 
     # The model cache. A pool Pod loads its warm copies through the SAME claim
@@ -598,7 +686,14 @@ verb_standup() {
     fi
 
     info "standing up both stacks from $BENCH_SPEC"
+    local gw_reuse
+    gw_reuse="$(gateway_reuse)"
+    [ "$gw_reuse" = true ] && info "reusing the cluster's gateway control plane in $GATEWAY_PROVIDER_NAMESPACE (GATEWAY_REUSE=$GATEWAY_REUSE)"
     ( cd "$ROOT" && \
+        BENCHMARK_GATEWAY_SKIP_INSTALL="$gw_reuse" \
+        BENCHMARK_GATEWAY_PROVIDER_NAMESPACE="$GATEWAY_PROVIDER_NAMESPACE" \
+        BENCHMARK_DECODE_CPU="$DECODE_CPU" \
+        BENCHMARK_DECODE_MEMORY="$DECODE_MEMORY" \
         BENCHMARK_ALLOW_EPP_REUSE="$allow_reuse" \
         BENCHMARK_NAMESPACE="$NS" \
         BENCHMARK_SPEC="$BENCH_SPEC" \
