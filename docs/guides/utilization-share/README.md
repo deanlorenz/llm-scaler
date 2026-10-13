@@ -81,9 +81,16 @@ kubectl get events -n $NS --field-selector reason=AcceleratorNotResolved
 <!-- guide:deploy.save start -->
 ```bash
 # Save the policy as it is. Each step below writes this copy plus one
-# block, and the cleanup puts this copy back.
-kubectl get configmap wva-scaling-policy-config -n $POLICY_NS -o jsonpath='{.data.default}' > policy-default.yaml
-grep -q '^optimizer:' policy-default.yaml && echo "STOP: this policy already has an optimizer: block"
+# block, and the cleanup puts this copy back. It prints one line: that
+# the policy was saved, or why it stopped.
+if ! kubectl get configmap wva-scaling-policy-config -n $POLICY_NS -o jsonpath='{.data.default}' > policy-default.yaml; then
+  rm -f policy-default.yaml
+  echo "FAILED: could not read the policy in $POLICY_NS (the kubectl error is above); nothing was saved" >&2; false
+elif grep -q '^optimizer:' policy-default.yaml; then
+  echo "STOP: this policy already has an optimizer: block; change that block instead of adding a second" >&2; false
+else
+  echo "no optimizer block yet; the policy is saved in policy-default.yaml"
+fi
 ```
 <!-- guide:deploy.save end -->
 
