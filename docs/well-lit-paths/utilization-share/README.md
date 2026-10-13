@@ -95,27 +95,11 @@ unserved). If a model of yours looks like one of these, give it a floor
 
 ## Declaring it
 
-One block in the cluster `default` entry, beside `limiters:`:
-
-```yaml
-default: |
-  analyzers:
-    - type: saturation
-  limiters:
-    - type: quota
-      name: cluster-h100
-      scope: cluster
-      quotas: { H100: 32 }
-  optimizer:
-    type: utilizationShare
-    utilizationShare:
-      shadow: true          # compute, publish and log; move nothing
-```
-
-Roll it out in three steps -- **shadow**, then (on a cluster quota) a
-**canary** of a few namespaces with `clusterNamespaces`, then **active** with
-`shadow: false` -- reading what it would do before each. The commands and the
-check after each step are in the guide:
+One `optimizer:` block in the scaling policy's `default` entry, beside the
+quota limiter, rolled out in two steps: **shadow** (it computes and reports,
+and moves nothing), then **active**. Write `shadow: true` explicitly: a block
+without the key acts from the next cycle. The commands, and the check after
+each step, are the guide:
 [Turn on the utilization-share optimizer, safely](../../guides/utilization-share/).
 
 Model owners choose a weight on their own policy entry (`weightClass:
@@ -147,18 +131,12 @@ values in force.
 
 ## Verifying it
 
-```promql
-wva_utilization_share_mode == 1                                    # off, invalid, shadow or active
-wva_utilization_share_headroom                                     # < 0: the role is short
-sum by (outcome) (increase(wva_utilization_share_transfers_total[1h]))  # done is healthy
-wva_model_scaling_blocked == 1                                     # held back, and why (active only)
-```
-
-`invalid` means the block did not validate or there is no `limiters:` list;
-the controller log says which. Rising `aborted`, `fill-timeout` or `wrong-pod`
-outcomes mean transfers are not landing. The full check after each rollout
-step is in the [guide](../../guides/utilization-share/); when it evaluates but
-never moves anything, see
+The guide's [Verification](../../guides/utilization-share/#verification) has
+the checks for each step: the two ways to read the metrics (Prometheus,
+scoped to your namespace, as a namespace tenant; the controller's endpoint as
+a cluster admin) and what quiet-but-healthy looks like. Rising `aborted`,
+`fill-timeout` or `wrong-pod` transfer outcomes mean transfers are not
+landing; when it evaluates but never moves anything, see
 [troubleshooting](../../reference/troubleshooting.md#the-optimizer-evaluates-but-never-moves-anything).
 
 ## What it costs
