@@ -69,8 +69,16 @@ type SharePlanInput struct {
 	// or with one at or above its scale-up threshold, has no scale-down band
 	// (sharePlanRun.bandKeep).
 	DownThresholds map[string]float64
-	Budget         int
-	Tolerance      float64
+	// BusiestQueueLoad is each role's deepest per-pod waiting queue as a
+	// fraction of queueLengthThreshold, the queue at which a replica counts
+	// as saturated. returnSpare compares it with the return load
+	// (returnSpareWhenLoadAtMost): above it, read on the confirm cycles in a
+	// row, a return the fleet's load would let go waits -- at most the
+	// donor's scale-down window. A role absent has no reading and never
+	// waits on it.
+	BusiestQueueLoad map[string]float64
+	Budget           int
+	Tolerance        float64
 	// SkipWaits is when a hard imbalance skips the waits. The zero value is
 	// the default.
 	SkipWaits ShareSkipWaits
@@ -262,6 +270,12 @@ const (
 	// ShareWithheldScaleDownBand counts a return not made because it would
 	// take its role into its scale-down band (sharePlanRun.bandKeep).
 	ShareWithheldScaleDownBand = "scale-down-band"
+	// ShareWithheldReturnPodBusy counts a role above its target whose fleet
+	// load would let a return go, kept because one of its pods has held a
+	// waiting queue above the return load of the saturation queue for the
+	// confirm cycles in a row -- for at most its scale-down window
+	// (returnSpare).
+	ShareWithheldReturnPodBusy = "return-pod-busy"
 )
 
 // ShareDebt is how far a committed allocation stands above the budget, or 0.
@@ -1178,6 +1192,14 @@ func (p *sharePlanRun) returnSpare() {
 		over[r.Key] = p.plan.HeadroomCapped && p.work[r.Key] > p.integ[r.Key]
 	}
 	cycles := l.MarkOver(over)
+	load := in.Headroom.returnLoad()
+	busy := map[string]bool{}
+	for _, r := range p.roles {
+		busy[r.Key] = in.BusiestQueueLoad[r.Key] > load
+	}
+	// Recorded every cycle, before anything below can end it early: a
+	// cycle not read is a cycle the run of busy readings did not break.
+	podBusy := l.NotePodBusy(busy, now)
 	for _, r := range p.roles {
 		g := max(r.ReplicaGPUs, 1)
 		claim := g * int(math.Ceil(r.Claim()/float64(g)-1e-9))
@@ -1192,7 +1214,6 @@ func (p *sharePlanRun) returnSpare() {
 			}
 		}
 	}
-	load := in.Headroom.returnLoad()
 	for _, r := range p.roles {
 		dn := r.Key
 		// It waits the confirm cycles, as any move does, not its scale-down
@@ -1213,6 +1234,21 @@ func (p *sharePlanRun) returnSpare() {
 		floor := max(p.integ[dn], r.Floor, p.keep[dn])
 		// A return is today's scale-down, and goes no lower than it would.
 		band := p.bandKeep(dn, p.needView(r))
+		// Calm is judged on the busiest pod as well as the fleet: the fleet
+		// read calm on a cluster run while one pod held 235 queued requests
+		// and its seven siblings sat idle, and a give-back started (and was
+		// cancelled) during it. A replica given back then is one that queue
+		// could have been routed to. The queue is the load balancer's
+		// routing, though, and a pod queued for good would park the spare
+		// for good, so the hold needs the busy reading on the confirm
+		// cycles in a row and lasts at most the donor's scale-down window,
+		// after which the return goes. Only a return the fleet's load would
+		// let go is held, and counted, here; any other keeps its own reason.
+		fleetCalm := p.work[dn]-gd >= max(floor, band) && p.need(dn) <= load*(float64(p.work[dn]-gd)-spare)
+		if b, ok := podBusy[dn]; ok && fleetCalm && b.cycles >= p.confirmCycles() && now.Sub(b.since) < tm.Window {
+			p.plan.Withheld[ShareWithheldReturnPodBusy]++
+			continue
+		}
 		returned := 0
 		for p.work[dn]-gd >= max(floor, band) && p.need(dn) <= load*(float64(p.work[dn]-gd)-spare) {
 			t := l.Start(ShareTransfer{Donor: dn, DonorGPUs: gd, DonorVariant: give.Name, Entitled: true, Returned: true,

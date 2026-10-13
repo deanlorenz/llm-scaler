@@ -291,6 +291,7 @@ run_verb() {
         MIN_PREFILL="${MIN_PREFILL:-}" MIN_DECODE="${MIN_DECODE:-}" \
         MAX_PREFILL="${MAX_PREFILL:-}" MAX_DECODE="${MAX_DECODE:-}" RESET_TIMEOUT="${RESET_TIMEOUT:-}" \
         SHARE_MODE_TIMEOUT=1 SHARE_MODE_POLL=1 \
+        GPU_SAMPLE_SECONDS="${GPU_SAMPLE_SECONDS:-5}" GPU_SAMPLE_TIMEOUT_SECONDS="${GPU_SAMPLE_TIMEOUT_SECONDS:-20}" \
         WARM_GATE_TIMEOUT=1 OUT_ROOT="$WORK/out" \
         ${VERB_TIMEOUT:+timeout "$VERB_TIMEOUT"} bash "$SCRIPT" "$@" 2>&1)"
     RC=$?
@@ -1240,6 +1241,205 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# The GPU sampler keeps writing. A share arm lost 2185s of samples with no line
+# saying why: the machine running the sampler was suspended. A hung or failed
+# API call silences it the same way.
+# ---------------------------------------------------------------------------
+# run_bounded <seconds> <cmd...> -- in the background, in its own process
+# group, killed whole at the limit: a sampler that hangs (or spins on a clock
+# that never arrives) fails this check instead of stalling it, and the stub
+# processes it started go with it.
+run_bounded() {
+    local limit="$1"; shift
+    set -m
+    ( "$@" ) &
+    local pid=$! waited=0
+    set +m
+    while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt "$limit" ]; do
+        command sleep 1; waited=$((waited + 1))
+    done
+    kill -- "-$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    return 0
+}
+
+# A kubectl per case, each in its own directory: KSTUB_MODE picks it.
+KSTUB="$WORK/kstub"; mkdir -p "$KSTUB"
+cat > "$KSTUB/kubectl" <<'KSTUBEOF'
+#!/usr/bin/env bash
+case "${KSTUB_MODE:-items}" in
+  # Hangs unless the call carries a request timeout, then fails as a
+  # timed-out call does.
+  honours) case "$*" in *--request-timeout=*) exit 1 ;; esac; exec sleep 60 ;;
+  # Hangs whatever the call says: an exec credential plugin that never returns.
+  ignores) exec sleep 60 ;;
+  # Succeeds with nothing on stdout.
+  empty) exit 0 ;;
+  *) echo '{"items":[]}' ;;
+esac
+KSTUBEOF
+chmod +x "$KSTUB/kubectl"
+
+case_begin
+SAMPLES="$WORK/hang-gpus.jsonl"
+hang_sample() { KSTUB_MODE=honours PATH="$KSTUB:$PATH" GPU_SAMPLE_SECONDS=1 sample_gpus "$SAMPLES" "$(( $(date +%s) + 3 ))" 2>/dev/null; }
+run_bounded 8 hang_sample
+if ! grep -q '"failed": true' "$SAMPLES" 2>/dev/null; then
+    fail "against an API call that fails once its request timeout fires the sampler wrote $(wc -l < "$SAMPLES" 2>/dev/null || echo 0) line(s) and no failure mark"
+else
+    ok "a call that times out is marked as a failed poll"
+fi
+
+case_begin
+SAMPLES="$WORK/outer-gpus.jsonl"
+outer_sample() { KSTUB_MODE=ignores PATH="$KSTUB:$PATH" GPU_SAMPLE_SECONDS=1 GPU_SAMPLE_TIMEOUT_SECONDS=1 sample_gpus "$SAMPLES" "$(( $(date +%s) + 3 ))" 2>/dev/null; }
+if ! command -v timeout >/dev/null 2>&1; then
+    fail "this machine has no timeout(1), so the sampler's outer bound cannot be checked here"
+else
+    run_bounded 20 outer_sample
+    if ! grep -q '"failed": true' "$SAMPLES" 2>/dev/null; then
+        fail "against a call that ignores its request timeout the sampler wrote $(wc -l < "$SAMPLES" 2>/dev/null || echo 0) line(s) and no failure mark: the outer timeout did not bound it"
+    else
+        ok "a call that ignores its request timeout is cut off by the outer one and marked"
+    fi
+fi
+
+case_begin
+SAMPLES="$WORK/empty-gpus.jsonl"
+empty_sample() { KSTUB_MODE=empty PATH="$KSTUB:$PATH" GPU_SAMPLE_SECONDS=1 sample_gpus "$SAMPLES" "$(( $(date +%s) + 2 ))" 2>/dev/null; }
+run_bounded 8 empty_sample
+if ! grep -q '"failed": true' "$SAMPLES" 2>/dev/null || grep -q '"pods"' "$SAMPLES" 2>/dev/null; then
+    fail "a call that succeeded with an empty answer was not marked as a failed poll: $(head -c 300 "$SAMPLES" 2>/dev/null)"
+else
+    ok "an empty answer is a failed poll, not a sample"
+fi
+
+# stall_run <jump> <until offset>: the sampler on a clock moved by hand. Every
+# sleep is 5s except the second, which is <jump> seconds; the window ends
+# <until offset> seconds after the start. GPU_SAMPLE_SECONDS=5 and
+# GPU_SAMPLE_TIMEOUT_SECONDS=20 put the stall line at 5 + 2 x 25 + 10 = 65s.
+CLOCK="$WORK/clock"
+stall_run() {
+    local jump="$1" until_off="$2"
+    SAMPLES="$WORK/stall-$jump-gpus.jsonl"
+    stall_body() {
+        echo 1000 > "$CLOCK"; echo 0 > "$CLOCK.n"
+        sampler_now() { cat "$CLOCK"; }
+        sleep() {
+            local n; n=$(( $(cat "$CLOCK.n") + 1 )); echo "$n" > "$CLOCK.n"
+            if [ "$n" -eq 2 ]; then echo $(( $(cat "$CLOCK") + jump )) > "$CLOCK"
+            else echo $(( $(cat "$CLOCK") + 5 )) > "$CLOCK"; fi
+        }
+        KSTUB_MODE=items PATH="$KSTUB:$PATH" GPU_SAMPLE_SECONDS=5 GPU_SAMPLE_TIMEOUT_SECONDS=20 \
+            sample_gpus "$SAMPLES" "$(( 1000 + until_off ))" 2>"$WORK/stall.err"
+    }
+    run_bounded 15 stall_body
+}
+
+case_begin
+stall_run 3000 3020
+marks="$(grep -c stalled_since "$SAMPLES" 2>/dev/null)"
+if ! grep -q '"stalled_since": 1005' "$SAMPLES" 2>/dev/null; then
+    fail "a 3000s stall of the sampler left no stall mark: $(head -c 300 "$SAMPLES" 2>/dev/null)"
+elif [ "$marks" -ne 1 ]; then
+    fail "the 5s sleeps were also marked as stalls: $marks marks"
+elif ! grep -q 'did not run for 3000s' "$WORK/stall.err"; then
+    fail "the stall was marked but not said: $(cat "$WORK/stall.err")"
+elif ! sed -n '/stalled_since/,$p' "$SAMPLES" | grep -q '"pods"'; then
+    fail "the sampler wrote no sample after the stall: it did not resume"
+else
+    ok "a stall is written down and said, sampling resumes after it, and ordinary sleeps are not stalls"
+fi
+
+case_begin
+stall_run 65 200
+legal="$(grep -c stalled_since "$SAMPLES" 2>/dev/null)"
+stall_run 66 200
+if [ "$legal" -ne 0 ]; then
+    fail "a pass 65s after the last -- a sleep and two calls at their outer timeout, the most a live loop takes -- was marked a stall"
+elif ! grep -q '"stalled_since": 1005' "$SAMPLES" 2>/dev/null; then
+    fail "a pass 66s after the last, one past the stall line, was not marked"
+else
+    ok "the stall line sits just past the slowest legal pass"
+fi
+
+case_begin
+stall_run 3000 1500
+if ! grep -q '"stalled_since": 1005' "$SAMPLES" 2>/dev/null; then
+    fail "a stall that ran past the end of the window left no mark: $(cat "$SAMPLES" 2>/dev/null)"
+else
+    ok "a stall that runs past the end of the window is marked too"
+fi
+
+case_begin
+STALLED="$WORK/stalled.jsonl"
+printf '%s\n' '{"ts": 1000, "pods": []}' '{"ts": 1400, "stalled_since": 1000}' '{"ts": 1405, "pods": []}' > "$STALLED"
+got="$(sampler_stalled "$STALLED")"; rc=$?
+if [ "$rc" -ne 0 ] || [ "$got" != "400" ]; then
+    fail "sampler_stalled read a 400s stall as rc $rc, '$got'"
+elif sampler_stalled "$WORK/hang-gpus.jsonl" >/dev/null; then
+    fail "sampler_stalled reported a stall in a file with none"
+elif ! grep -q 'stalled="$(sampler_stalled "$out_dir/gpus.jsonl")"' "$SCRIPT" ||
+     ! grep -q 'die "arm $arm stopped: the GPU sampler did not run' "$SCRIPT"; then
+    fail "the run verb no longer stops an arm whose sampler stalled; its cost cannot be priced and the GPUs it holds on a shared cluster are held for nothing"
+else
+    ok "a stall is found in the samples, and the run verb stops the arm on it"
+fi
+
+case_begin
+GPU_SAMPLE_TIMEOUT_SECONDS=1m run_verb run today
+bad_unit="$RC:$OUT"
+GPU_SAMPLE_SECONDS=0.5 run_verb run today
+if [ "${bad_unit%%:*}" -eq 0 ] || ! printf '%s' "$bad_unit" | grep -q 'GPU_SAMPLE_TIMEOUT_SECONDS must be a whole number of seconds'; then
+    fail "GPU_SAMPLE_TIMEOUT_SECONDS=1m was not refused: it would reach kubectl and switch the stall check off. ${bad_unit:0:300}"
+elif [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'GPU_SAMPLE_SECONDS must be a whole number'; then
+    fail "GPU_SAMPLE_SECONDS=0.5 was not refused: ${OUT:0:300}"
+elif grep -q 'CALL\[.*apply' "$CALLS" 2>/dev/null; then
+    fail "a sampler setting was refused only after something was created: $(cat "$CALLS")"
+else
+    ok "sampler settings in anything but whole seconds are refused before an arm starts"
+fi
+
+case_begin
+INH="$WORK/inhibit"; mkdir -p "$INH"
+cat > "$INH/systemd-inhibit" <<'INHEOF'
+#!/usr/bin/env bash
+echo "$*" > "${INH_LOG:?}"
+exec sleep 30
+INHEOF
+chmod +x "$INH/systemd-inhibit"
+INH_LOG="$WORK/inhibit.log"; export INH_LOG
+RUN_INHIBIT=""
+PATH="$INH:$PATH" hold_awake 2>/dev/null
+held="$RUN_INHIBIT"
+alive=no; [ -n "$held" ] && kill -0 "$held" 2>/dev/null && alive=yes
+run_cleanup
+# Killed is gone: a zombie this shell has not reaped yet holds no lock.
+command sleep 0.3
+gone=yes
+if [ -n "$held" ] && kill -0 "$held" 2>/dev/null; then
+    case "$(ps -o stat= -p "$held" 2>/dev/null)" in Z*) ;; *) gone=no ;; esac
+fi
+if [ "$alive" != yes ] || ! grep -q -- '--what=sleep' "$INH_LOG" 2>/dev/null; then
+    fail "hold_awake took no sleep lock through systemd-inhibit (pid '$held', args '$(cat "$INH_LOG" 2>/dev/null)')"
+elif [ "$gone" != yes ]; then
+    kill "$held" 2>/dev/null
+    fail "run_cleanup left the sleep lock held"
+else
+    ok "an arm holds a sleep lock where the machine offers one, and gives it back on cleanup"
+fi
+
+case_begin
+NOINH="$WORK/noinhibit"; mkdir -p "$NOINH"
+RUN_INHIBIT=""
+said="$(PATH="$NOINH" hold_awake 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ] || [ -n "$RUN_INHIBIT" ] || ! printf '%s' "$said" | grep -q 'keep it awake'; then
+    fail "with no inhibitor hold_awake returned $rc, held '$RUN_INHIBIT', said '$said'"
+else
+    ok "with no inhibitor the arm still runs, and says to keep the machine awake"
+fi
+
+# ---------------------------------------------------------------------------
 # The schedule and the report, executed.
 # ---------------------------------------------------------------------------
 case_begin
@@ -1250,7 +1450,7 @@ else
 fi
 
 case_begin
-CASES_EXPECTED=77
+CASES_EXPECTED=87
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately rather than letting coverage drift out."
 else

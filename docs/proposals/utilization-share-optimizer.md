@@ -3020,6 +3020,23 @@ optimizer every cycle (§6.6).
    (N3, model B). Rules the simulators cannot see stay: the return's
    scale-down band, `awaiting-return`, the keep, and a joining model's claim,
    whose test now fails without it.
+   Two of the deferred items (§15) followed: a burst under way counts toward a role's longest
+   (`shareBursts.sofar`), so a model in its first long burst caps a fast
+   swinger beside it on its mean and stops reading as a fast swinger itself
+   (sims: 0 rows worse, 3 owner rows better, the largest 0.206 -> 0.169;
+   whole-node total unchanged at 21.682); and a return the fleet's load
+   would let go waits while more than `returnSpareWhenLoadAtMost` x
+   `queueLengthThreshold` requests have been waiting on one of the role's
+   pods for the confirm cycles in a row -- for at most the donor's
+   scale-down window, after which it goes, so a pod queued for good by
+   routing cannot park the spare for good (`AnalyzerResult.
+   VariantBusiestQueueLoad`, per variant so a group reads only its own
+   accelerator's; `return-pod-busy`). Prefill is not counted: its queue is
+   decode's back-pressure or the router's (439 on one pod while three sat
+   idle), which a kept replica does not relieve. A P/D decode counts only
+   while its KV is full, since requests waiting for their remote KV sit in
+   the same count. The simulators have no per-pod queues, so the second is
+   invisible to them; neither is measured on a cluster.
 3. **Short window for urgent transfers**, through `wvaOwnership`, once
    managed-keda-behavior lands (§6.4), gated on a persistent hard imbalance,
    not on the load limits alone (§15).
@@ -3124,7 +3141,9 @@ Decided, not built here:
   regard to the requests it is serving. An unpaced move drains several pods at
   once, and cuts whatever long requests they hold. Choosing the pods with the
   fewest or shortest requests in flight would shorten the drain and lose less
-  work.
+  work. It bears on the busiest-pod hold on returns too (`return-pod-busy`):
+  a return goes once that hold's bound passes, and marking the queued pod
+  would cut the very requests the hold waited on.
 - **A draining backlog reads as need.** After a model's burst of long outputs
   ends, its backlog still reads as need while it drains, so transfers *to* it
   can start just as the other model's burst begins. The hard-imbalance rule
@@ -3171,13 +3190,6 @@ Decided, not built here:
   prefill `minReplicaCount` sized from its peak prompt-token rate (the recipe
   is in the reference, "For model owners"); with short prompts, prefill is
   rightly a donor.
-- **A burst under way counts as long.** `LongBursts`, `BurstsLong` and
-  `SwingsFast` read completed bursts only (`needBursts`: `longest`), so a
-  model in its first long burst -- one already longer than a move, still
-  running -- does not yet cap a fast swinger on its mean (§5.1), and a role
-  whose burst under way is long still reads as swinging fast. Reading
-  `max(longest, ongoing)` in those three is the fix; it changes simulated
-  rows, so it waits for its own simulator pass.
 - **The move latency per receiver.** `ShareTimings.MoveLatency` now takes
   the saturation analyzer's measured replica start, the slowest of the
   group's roles (`ShareReplicaStart`), so a whole-node model's 10 minutes is
@@ -3187,6 +3199,13 @@ Decided, not built here:
   and the queueing between release and start is not measured. Timing each
   transfer from decision to the receiver's pods Ready, per receiver, is the
   fix.
+- **A burst needs a spread to count as long.** `LongBursts`, unlike
+  `BurstsLong`, takes no `ShareLongBurstSpread`, and now that a burst under
+  way counts (`sofar`) a steady need drifting across the middle of a narrow
+  range can read as a long burst for as long as it stays above the
+  midpoint. Where `LongBursts` decides (`donorViewFor`) that judges the donor
+  on its plain need. Requiring the spread there too is the fix; it changes
+  simulated rows, so it waits for its own pass.
 - **The scale-down band for headroom moves.** A return never takes its role
   below where today's scale-down would leave it (`bandKeep`, §6.2), and a
   transfer to a receiver short of its need rightly may. A headroom move, to
@@ -3195,10 +3214,3 @@ Decided, not built here:
   simulator's worst P/D cell from 0.038 to 0.093. Banding those moves safely
   needs the donor's need trend, so that a donor whose demand is falling gives
   and one whose demand holds keeps.
-- **Judge a return on the busiest pod.** A return is made while the role's
-  load stays at or below `returnSpareWhenLoadAtMost`, read over the fleet.
-  On the round-20 cluster run a pod held 235 queued requests while its seven
-  siblings sat idle, and the role still read calm; a give-back started
-  (and was cancelled) during it. Gating returns on the deepest per-pod queue
-  too is the fix. The queue itself is the load balancer's routing, not the
-  planner's: today's optimizer showed the same shape at 150 requests.

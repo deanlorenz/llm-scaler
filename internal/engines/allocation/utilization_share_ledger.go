@@ -282,6 +282,9 @@ type ShareLedger struct {
 	// over counts each role's consecutive cycles holding more than its
 	// target (MarkOver).
 	over map[string]int
+	// podBusy is, per role whose busiest pod reads busy, how long the run
+	// of busy readings has lasted (NotePodBusy).
+	podBusy map[string]SharePodBusy
 	// releases are the durations of recent completed releases, newest last,
 	// for the measured release time (§8.4).
 	releases []time.Duration
@@ -323,6 +326,7 @@ func NewShareLedger() *ShareLedger {
 		confirm:     map[string]int{},
 		hard:        map[string]int{},
 		over:        map[string]int{},
+		podBusy:     map[string]SharePodBusy{},
 		seen:        map[string]time.Time{},
 		unsteerable: map[string]bool{},
 		busyUntil:   map[string]time.Time{},
@@ -965,10 +969,10 @@ func (l *ShareLedger) RecentPeak(role string, now time.Time, d time.Duration) fl
 }
 
 // LongBursts reports whether role's longest burst -- a run of need above the
-// midpoint of its recorded range, completed or under way when the history
-// starts (needBursts) -- lasted at least d.
+// midpoint of its recorded range, completed or under way (needBursts,
+// sofar) -- lasted at least d.
 func (l *ShareLedger) LongBursts(role string, d time.Duration) bool {
-	return l.needBursts(role).longest >= max(d, 1)
+	return l.needBursts(role).sofar() >= max(d, 1)
 }
 
 // BurstsLong reports whether role bursts (LongBursts) over a range of at
@@ -976,15 +980,15 @@ func (l *ShareLedger) LongBursts(role string, d time.Duration) bool {
 // drifting across the middle of a narrow range.
 func (l *ShareLedger) BurstsLong(role string, d time.Duration) bool {
 	b := l.needBursts(role)
-	return b.longest >= max(d, 1) && b.spread >= ShareLongBurstSpread
+	return b.sofar() >= max(d, 1) && b.spread >= ShareLongBurstSpread
 }
 
 // SwingsFast reports whether role's need swings faster than d: at least two
-// bursts completed, none lasting d, over a range of at least
-// ShareFastSwingSpread of its highest need.
+// bursts completed, none -- the one under way included -- lasting d, over a
+// range of at least ShareFastSwingSpread of its highest need.
 func (l *ShareLedger) SwingsFast(role string, d time.Duration) bool {
 	b := l.needBursts(role)
-	return b.completed >= 2 && b.longest < d && b.spread >= ShareFastSwingSpread
+	return b.completed >= 2 && b.sofar() < d && b.spread >= ShareFastSwingSpread
 }
 
 // BurstEndsWithin reports whether role's burst is expected to end within d:
@@ -1057,9 +1061,10 @@ func (l *ShareLedger) ModelBurstEnds(role string, model []string, tm ShareTiming
 
 // shareBursts summarises a role's need history (ShareLedger.needBursts).
 type shareBursts struct {
-	// longest is the longest burst: a completed one, or one already under way
-	// when the history starts, whose length is a lower bound. last is the
-	// most recent completed burst; completed counts them.
+	// longest is the longest burst that has ended: a completed one, or one
+	// already under way when the history starts, whose length is a lower
+	// bound. A run still going is in ongoing, and sofar reads the two. last
+	// is the most recent completed burst; completed counts them.
 	longest, last time.Duration
 	completed     int
 	// ongoing is how long the burst under way has lasted, zero when none is.
@@ -1069,6 +1074,15 @@ type shareBursts struct {
 	spread float64
 }
 
+// sofar is the longest burst including the one under way. A model in its
+// first long burst -- already longer than a move, still running -- is a long
+// burster now, not once it ends: read on completed bursts alone, it did not
+// cap a fast swinger beside it on its mean, and its own short bursts before
+// it kept it reading as a fast swinger for as long as the long one lasted.
+func (b shareBursts) sofar() time.Duration {
+	return max(b.longest, b.ongoing)
+}
+
 // needBursts reads role's need history as bursts: runs of need above the
 // midpoint of its recorded range. Like PeakNeed it trusts no single reading:
 // the range runs from the lowest level two readings in a row stayed at or
@@ -1076,7 +1090,8 @@ type shareBursts struct {
 // readings in a row on its new side. One reading -- a scrape glitch, or a
 // tenant's forged metric -- would otherwise move the midpoint above every
 // real burst, or end a burst and log a short one in its place. A run still
-// going counts only as ongoing. One already under way when the history
+// going is recorded as ongoing, not in longest; the predicates that ask how
+// long a role bursts read both (sofar). One already under way when the history
 // starts is not a completed burst -- its start is not known, and taken as
 // the history's it would be counted short, predicting an early end and
 // making a long burster look like a fast swinger -- but its length is a
@@ -1245,6 +1260,36 @@ func (l *ShareLedger) MarkOver(over map[string]bool) map[string]int {
 		}
 	}
 	return maps.Clone(l.over)
+}
+
+// SharePodBusy is a run of consecutive cycles in which a role's busiest pod
+// read busy: since the first of them, and how many.
+type SharePodBusy struct {
+	since  time.Time
+	cycles int
+}
+
+// NotePodBusy records which roles' busiest pod reads busy this cycle, and
+// returns, per role still busy, the run of busy cycles it is in. A role not
+// busy this cycle starts again from nothing.
+func (l *ShareLedger) NotePodBusy(busy map[string]bool, now time.Time) map[string]SharePodBusy {
+	for role := range l.podBusy {
+		if !busy[role] {
+			delete(l.podBusy, role)
+		}
+	}
+	for role, b := range busy {
+		if !b {
+			continue
+		}
+		run, ok := l.podBusy[role]
+		if !ok {
+			run.since = now
+		}
+		run.cycles++
+		l.podBusy[role] = run
+	}
+	return maps.Clone(l.podBusy)
 }
 
 // MeasuredRelease is the 90th percentile of recent completed releases, and
@@ -1474,6 +1519,7 @@ func (l *ShareLedger) Retain(present []string, now time.Time, tm ShareTimings) {
 		delete(l.needsSince, r)
 		delete(l.hard, r)
 		delete(l.over, r)
+		delete(l.podBusy, r)
 	}
 }
 

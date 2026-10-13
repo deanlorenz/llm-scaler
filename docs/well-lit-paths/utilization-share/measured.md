@@ -370,7 +370,8 @@ samples, and `share` in 6%.
   `"start":"measured"`, so the planner paced on the replica start time it had
   measured, not on the 5-minute default.
 - **The cost is not measured.** The `share` arm's GPU sampler stopped for 36
-  minutes mid-run, so the run's report refused to compare the arms; the table
+  minutes mid-run -- the machine driving the run went into standby; the load,
+  in the cluster, did not -- so the run's report refused to compare the arms; the table
   above is its latency rows with that guard relaxed. The 21 274 GPU-seconds
   the sampler did record are a floor, not a measurement.
 

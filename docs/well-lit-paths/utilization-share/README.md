@@ -150,7 +150,10 @@ landing; when it evaluates but never moves anything, see
 - **Spare given back, then started again.** While the quota is contended, a
   model above its need plus headroom returns the extra after
   `consecutiveCyclesBeforeMove` cycles, once its load is at or below
-  `stabilization.returnSpareWhenLoadAtMost`. If its demand comes back after
+  `stabilization.returnSpareWhenLoadAtMost`. While more than 0.6 x
+  `queueLengthThreshold` requests (3 by default) wait on one of its pods --
+  a P/D decode pod only while its KV cache is full, prefill pods not at
+  all -- the return waits, for at most its scale-down window. If its demand comes back after
   the drain, it starts a pod again, cold
   ([troubleshooting](../../reference/troubleshooting.md#a-model-shrinks-while-no-other-model-grows)).
 - **A donor replica, with its in-flight requests.** Requests survive only as
