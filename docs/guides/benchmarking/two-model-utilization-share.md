@@ -107,7 +107,7 @@ run's steps 1 to 3
 standup:
 
 ```bash
-make benchmark-two-model-preflight
+WVA_QUOTAS='<accelerator>=4' make benchmark-two-model-preflight   # places for the quota, not the ceilings
 WVA_LIMITER=quota WVA_QUOTAS='<accelerator>=4' make benchmark-two-model-standup
 make benchmark-two-model-verify
 ```
@@ -289,6 +289,24 @@ optimizer is built for, raise `PHASE_SECONDS` until a full swing is well past
 100 minutes. An arm then runs for hours; `CYCLES=1` halves that, at the cost of
 one swap per arm instead of two. Every arm of one comparison must use the same
 shape, or the report refuses them.
+
+## Load of your own: vary the prompts
+
+The arms' loader sends varied prompts, and the report refuses a run in which
+one engine did nearly all the work. A load you write yourself to watch a swap
+should vary its prompts too. With one identical prompt, the EPP's
+prefix-cache routing sends every request to the replica that already holds
+it, so added replicas serve nothing and time to first token measures the
+queue at one engine.
+
+That is what a cluster walk of the guide saw: streamed time to first token
+held at about 91 s and 83 s while each model went from 1 to 3 replicas. The
+first chunk was not held back on the gateway path: after it, the rest of
+every response took about 10 s, in all 8,144 requests. The fleet's
+throughput stayed at about 3.2 requests a second whatever the concurrency
+and replica count, which is one replica's 32 sequences. That cause is
+inferred from throughput, not yet confirmed per pod on a cluster; the
+engines' own prompt-token counters, which every arm records, would show it.
 
 ## When the standup stalls on one node
 
