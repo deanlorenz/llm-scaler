@@ -114,6 +114,32 @@ make benchmark-two-model-verify
 
 Do **not** create a pool. Every share arm refuses to run while one is present.
 
+**Keep the machine that runs these commands awake for the whole run.** The
+driver runs there, not in the cluster: while that machine sleeps, nothing
+samples the GPUs and nothing ends the arm, and the GPUs stay held.
+
+Settings the standup applies to its own copy of the scenario, so nothing under
+`hack/` is edited by hand. Set them on the `preflight` line too, and run
+`preflight` again after changing one: it counts with the same values.
+
+| setting | default | what it does |
+| --- | --- | --- |
+| `GATEWAY_REUSE` | `auto` | `auto` reuses the Istio the cluster already runs (an `istio.io/gateway-controller` GatewayClass exists) instead of installing `istio-base` over it, which fails part-way through. `true` and `false` force it. |
+| `GATEWAY_PROVIDER_NAMESPACE` | `istio-system` | where that control plane runs |
+| `DECODE_CPU`, `DECODE_MEMORY` | the scenario's (8, `64Gi`) | a decode Pod's request and limit. Lower them when `preflight` reports fewer placeable Pods than the run's peak because the nodes with free accelerators lack spare CPU. |
+| `BENCHMARK_RENDER_DRAIN` | `true` | the drain hook and grace go into the engines before they first start, so the drain patch after the standup finds nothing to change and no model starts twice |
+| `BENCHMARK_ENGINE_CACHE_HOSTPATH` | empty | a directory on the nodes for the engines' compile caches. Opt-in, so earlier runs stay comparable. |
+
+**Engine caches on the nodes.** The scenarios' engines keep their compile
+caches inside the container, so every start compiles from nothing: on an 8B
+model on H200, torch.compile took 14.4 s cold against 2.9 s from a cache,
+and starts took 75-81 s against 51-56 s. `BENCHMARK_ENGINE_CACHE_HOSTPATH=<node
+directory>` gives every engine role a cache on that node directory, prepared
+on every accelerator node before the engines start
+([Engine caches on the node's disk](../../reference/workload-preparation.md#engine-caches-on-the-nodes-disk)).
+Each node then compiles once. It needs leave to create PersistentVolumes. It
+changes start times, so compare a run with it only against runs with it.
+
 **2. First arm: today's optimizer.**
 
 ```bash
@@ -263,6 +289,32 @@ optimizer is built for, raise `PHASE_SECONDS` until a full swing is well past
 100 minutes. An arm then runs for hours; `CYCLES=1` halves that, at the cost of
 one swap per arm instead of two. Every arm of one comparison must use the same
 shape, or the report refuses them.
+
+## When the standup stalls on one node
+
+An engine Pod that sits in `Init` or `ContainerCreating` while its siblings
+start is usually a node fault, not the run. Look at its events:
+
+```bash
+kubectl get events -n $BENCHMARK_NAMESPACE --field-selector reason=FailedCreatePodSandBox
+```
+
+`no space left on device` there means the node cannot create the Pod's
+sandbox. That is for the cluster admin: cordon the node, or taint it so new
+Pods avoid it. Without node rights, keep this run's own engines off that node
+(it changes only the run's decode and prefill Deployments, and the next
+standup renders them without it):
+
+```bash
+BAD=<node name>
+for d in $(kubectl get deploy -n $BENCHMARK_NAMESPACE -o name | grep -E 'decode|prefill'); do
+  kubectl patch -n $BENCHMARK_NAMESPACE $d --type=merge -p "{\"spec\":{\"template\":{\"spec\":{\"affinity\":{\"nodeAffinity\":{\"requiredDuringSchedulingIgnoredDuringExecution\":{\"nodeSelectorTerms\":[{\"matchExpressions\":[{\"key\":\"kubernetes.io/hostname\",\"operator\":\"NotIn\",\"values\":[\"$BAD\"]}]}]}}}}}}}"
+done
+```
+
+Each patch rolls that Deployment once. Run `preflight` again afterwards: the
+node's accelerators still count as free, so the placeable count is one node
+too high until the node is fixed.
 
 ## What it does not measure
 

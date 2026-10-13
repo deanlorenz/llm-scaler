@@ -395,7 +395,14 @@ with a disk mounted there). None of this has been run on OpenShift yet. `make we
 (the general form,
 [Weights on the node's disk](../../reference/workload-preparation.md#weights-on-the-nodes-disk))
 mounts the claim, carries no token, runs the engine image's own library,
-and needs only `baseline`. Fix 12 gives the harness's volume a name that
+and needs only `baseline`. It reuses a copy already in the same node
+directory when the copy carries its completion marker,
+`<dir>/models/<id>/.download-complete`: an earlier `make weights` with the
+same `WEIGHTS_PATH` writes it, and so does the harness's downloader, at the
+same place. The downloader then fetches nothing on that node. A copy
+without the marker -- one interrupted, or put there by hand -- is passed to
+huggingface_hub's `snapshot_download` again, and the library decides which
+of its files to fetch. Fix 12 gives the harness's volume a name that
 carries the namespace and a `claimRef` into it -- unpatched, the volume is
 named `model-pvc-hostpath-pv` cluster-wide with no `claimRef`, so any
 namespace's claim asking for the class takes it and a second benchmark
