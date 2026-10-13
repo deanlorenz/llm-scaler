@@ -239,7 +239,20 @@ case "$args" in
            "metadata":{"name":"n1","labels":{"gpu.nvidia.com/model":"H200"}}}]}'
       fi
       exit 0 ;;
-  *"get pods -A -o json"*) echo '{"items":[]}' ; exit 0 ;;
+  # FOREIGN_PENDING=1: another team's two whole-node pods, Pending and bound to
+  # no node. BOUND_GPUS=<n>: a Running pod on n1 holding n accelerators.
+  *"get pods -A -o json"*)
+      items=""
+      if [ "${FOREIGN_PENDING:-0}" = "1" ]; then
+        for i in 1 2; do
+          items="${items:+$items,}{\"metadata\":{\"name\":\"other-$i\",\"namespace\":\"other-team\"},\"spec\":{\"containers\":[{\"resources\":{\"requests\":{\"nvidia.com/gpu\":\"8\",\"cpu\":\"8\"}}}]},\"status\":{\"phase\":\"Pending\"}}"
+        done
+      fi
+      if [ -n "${BOUND_GPUS:-}" ]; then
+        items="${items:+$items,}{\"metadata\":{\"name\":\"bound\",\"namespace\":\"other-team\"},\"spec\":{\"nodeName\":\"n1\",\"containers\":[{\"resources\":{\"requests\":{\"nvidia.com/gpu\":\"${BOUND_GPUS}\",\"cpu\":\"1\"}}}]},\"status\":{\"phase\":\"Running\"}}"
+      fi
+      echo "{\"items\":[${items}]}"
+      exit 0 ;;
   # GWCLASS=1: the cluster already runs Istio (an istio.io GatewayClass).
   *"get gatewayclass -o json"*)
       if [ "${GWCLASS:-0}" = "1" ]; then
@@ -1082,6 +1095,27 @@ else
     ok "the placement refusal names DECODE_CPU, the knob that fixes it"
 fi
 
+# A PENDING POD HOLDS NO ACCELERATOR. Preflight subtracted another team's two
+# unschedulable 8-GPU pods from the free count and refused with "only 2 free",
+# beside its own count of 18 placeable. Bound pods count; unbound ones are a
+# warning.
+case_begin
+FOREIGN_PENDING=1 NODE_GPUS=8 run_verb preflight
+if [ "$RC" -ne 0 ] || ! printf '%s' "$OUT" | grep -q '8 free'; then
+    fail "two unbound Pending pods were counted as holding accelerators: $(printf '%s' "$OUT" | grep -E 'free|accelerators')"
+elif ! printf '%s' "$OUT" | grep -q '2 Pending pod(s) wait for 16 accelerator(s)'; then
+    fail "unbound Pending pods were not named as a risk: $OUT"
+else
+    ok "unbound Pending pods hold no accelerators: counted out, named as a risk, preflight passes"
+fi
+case_begin
+BOUND_GPUS=4 NODE_GPUS=8 run_verb preflight
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q '4 held by pods on those nodes, 4 free'; then
+    fail "a Running pod bound to the node was not counted: $(printf '%s' "$OUT" | grep -E 'free|accelerators')"
+else
+    ok "a pod bound to a node holds its accelerators, and a peak of 6 against 4 free is refused"
+fi
+
 # THE TEARDOWN UNDOES THE STANDUP'S SCENARIO. It used to hand the harness its
 # default spec (guides/workload-autoscaling) for a two-model-shapes-pd
 # namespace, which missed that run's node-local downloader and hung for 20
@@ -1216,7 +1250,7 @@ else
 fi
 
 case_begin
-CASES_EXPECTED=75
+CASES_EXPECTED=77
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately rather than letting coverage drift out."
 else

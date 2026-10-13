@@ -508,15 +508,34 @@ verb_preflight() {
     # cordoned or NotReady nodes overstates it, and the run then spends its
     # bursts Pending -- which measures the scheduler, identically in both arms,
     # and hides whatever the pool did.
-    local total used free want
-    total="$(kc get nodes -o json 2>/dev/null | jq '
+    #
+    # Counted the way the placement below counts: a pod holds accelerators only
+    # once it is BOUND to a node (spec.nodeName). A Pending pod the scheduler
+    # cannot place holds none -- counting two such 8-GPU pods of another team
+    # made preflight report "only 2 free" beside "18 placeable" and fail. They
+    # are a risk instead (they may take accelerators first), and said so.
+    local total used free want nodes_f pods_f unbound
+    nodes_f="$(mktemp)"; pods_f="$(mktemp)"
+    kc get nodes -o json > "$nodes_f" 2>/dev/null || echo '{"items":[]}' > "$nodes_f"
+    kc get pods -A -o json > "$pods_f" 2>/dev/null || echo '{"items":[]}' > "$pods_f"
+    total="$(jq '
         [.items[]
          | select(.spec.unschedulable != true)
          | select([.status.conditions[]? | select(.type=="Ready" and .status=="True")] | length > 0)
-         | .status.allocatable["nvidia.com/gpu"] // "0" | tonumber] | add // 0')"
-    used="$(kc get pods -A -o json 2>/dev/null | jq '
-        [.items[] | select(.status.phase=="Running" or .status.phase=="Pending")
-         | .spec.containers[].resources.requests["nvidia.com/gpu"] // "0" | tonumber] | add // 0')"
+         | .status.allocatable["nvidia.com/gpu"] // "0" | tonumber] | add // 0' "$nodes_f")"
+    used="$(jq --slurpfile n "$nodes_f" '
+        [$n[0].items[]
+         | select(.spec.unschedulable != true)
+         | select([.status.conditions[]? | select(.type=="Ready" and .status=="True")] | length > 0)
+         | .metadata.name] as $usable
+        | [.items[] | select(.status.phase=="Running" or .status.phase=="Pending")
+           | select(.spec.nodeName != null and (.spec.nodeName as $x | $usable | index($x)) != null)
+           | .spec.containers[].resources.requests["nvidia.com/gpu"] // "0" | tonumber] | add // 0' "$pods_f")"
+    unbound="$(jq -r '
+        [.items[] | select(.status.phase=="Pending" and .spec.nodeName == null)
+         | {g: ([.spec.containers[].resources.requests["nvidia.com/gpu"] // "0" | tonumber] | add)}
+         | select(.g > 0) | .g] | "\(length) \(add // 0)"' "$pods_f")"
+    rm -f "$nodes_f" "$pods_f"
     free=$(( ${total:-0} - ${used:-0} ))
     want="$(peak_gpus)"
     local cap
@@ -525,7 +544,11 @@ verb_preflight() {
         info "the quota (WVA_QUOTAS=${WVA_QUOTAS}) holds the models to ${cap} GPU(s), below the ${want} their ceilings allow; placement is checked for ${cap}"
         want="$cap"
     fi
-    info "accelerators: ${total:-?} schedulable, ${used:-?} requested, ${free} free; this run peaks at ${want}"
+    info "accelerators: ${total:-?} schedulable, ${used:-?} held by pods on those nodes, ${free} free; this run peaks at ${want}"
+    if [ "${unbound%% *}" -gt 0 ] 2>/dev/null; then
+        warn "${unbound%% *} Pending pod(s) wait for ${unbound#* } accelerator(s) and hold none yet; they are not"
+        warn "  counted, but whatever frees up first may go to them rather than to this run."
+    fi
     info "  nopool arm: 2 models x 1..${MAX_REPLICAS} replicas"
     info "  floor arm:  2 models x ${FLOOR_REPLICAS}..${MAX_REPLICAS} replicas"
     info "  pool arm:   2 models x 1..${MAX_REPLICAS} replicas + a ${POOL_REPLICAS}-Pod pool on top -- the same ceiling in every arm; the insurance is priced in GPU-seconds"
