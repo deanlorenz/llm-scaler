@@ -616,5 +616,7 @@ printf '%s\n' "$rec" | grep -q 'seed="auto";' && printf '%s\n' "$rec" | grep -qE
 printf '%s\n' "$rec" | grep -A12 'if \[ -n "/mnt/local/c" \]; then' | grep -q 'enginecache.sh apply -n "ns" --path "/mnt/local/c" .*${seed:+--seed-claim "$seed"}' && ok "benchmark-standup: the seed rides on the guarded apply, as a shell conditional on its value" || fail "benchmark-standup: --seed-claim is not on the guarded apply line"
 rec="$(make -n benchmark-standup BENCHMARK_NAMESPACE=ns BENCHMARK_ENGINE_CACHE_HOSTPATH=/mnt/local/c BENCHMARK_ENGINE_CACHE_SEED=none BENCHMARK_SPEC=guides/pd-disaggregation 2>/dev/null)"
 printf '%s\n' "$rec" | grep -q 'seed="none";' && ok "benchmark-standup: BENCHMARK_ENGINE_CACHE_SEED=none reaches the step" || fail "benchmark-standup: seed=none did not reach the recipe"
+# the preparer compiles for the engine the scenario pins, not the harness default
+printf '%s\n' "$rec" | grep -A2 'if \[ -n "/mnt/local/c" \]; then' | grep -q 'engine_image.sh "[^"]*" "[^"]*/config/scenarios/guides/pd-disaggregation.yaml"' && ok "benchmark-standup: the preparer's image is read with the run's scenario" || fail "benchmark-standup: the preparer's image ignores the scenario's engine pin"
 
 exit $FAILED

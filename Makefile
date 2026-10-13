@@ -1630,7 +1630,7 @@ benchmark-standup: ## Stand up the benchmark environment, then install WVA from 
 	@# is a NotFound the WARNING below would have swallowed.
 	@if [ "$(BENCHMARK_PREPULL)" != "false" ]; then \
 		imgs="$(BENCHMARK_PREPULL_IMAGES)"; \
-		[ -n "$$imgs" ] || imgs=$$(bash hack/benchmark/engine_image.sh "$(BENCHMARK_REPO_DIR)" || true); \
+		[ -n "$$imgs" ] || imgs=$$(bash hack/benchmark/engine_image.sh "$(BENCHMARK_REPO_DIR)" "$(BENCHMARK_REPO_DIR)/config/scenarios/$(BENCHMARK_SPEC).yaml" || true); \
 		if [ -z "$$imgs" ]; then \
 			echo "WARNING: could not read the engine image from $(BENCHMARK_REPO_DIR)/config/templates/values/defaults.yaml; not pre-pulling (set BENCHMARK_PREPULL_IMAGES=<image>)"; \
 		else \
@@ -1767,7 +1767,7 @@ benchmark-standup: ## Stand up the benchmark environment, then install WVA from 
 	@# whose cache volume never mounts sit in ContainerCreating for good.
 	@if [ -n "$(BENCHMARK_ENGINE_CACHE_HOSTPATH)" ]; then \
 		img="$(BENCHMARK_PREPULL_IMAGES)"; \
-		[ -n "$$img" ] || img=$$(bash hack/benchmark/engine_image.sh "$(BENCHMARK_REPO_DIR)" || true); \
+		[ -n "$$img" ] || img=$$(bash hack/benchmark/engine_image.sh "$(BENCHMARK_REPO_DIR)" "$(BENCHMARK_REPO_DIR)/config/scenarios/$(BENCHMARK_SPEC).yaml" || true); \
 		img=$${img%%,*}; \
 		[ -n "$$img" ] || { echo "benchmark-standup: cannot read the engine image from the clone for the engine-cache preparer; set BENCHMARK_PREPULL_IMAGES=<image>" >&2; exit 1; }; \
 		kubectl --request-timeout=$(BENCHMARK_KUBECTL_TIMEOUT) create namespace "$(BENCHMARK_NAMESPACE)" --dry-run=client -o yaml | kubectl --request-timeout=$(BENCHMARK_KUBECTL_TIMEOUT) apply -f - >/dev/null; \

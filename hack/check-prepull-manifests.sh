@@ -172,6 +172,43 @@ if out="$(bash hack/benchmark/engine_image.sh "$T/nonexistent" 2>/dev/null)"; th
 mkdir -p "$T/clone2/config/templates/values"
 printf 'images:\n  vllm:\n    repository: docker.io/vllm/vllm-openai\n' > "$T/clone2/config/templates/values/defaults.yaml"
 if bash hack/benchmark/engine_image.sh "$T/clone2" >/dev/null 2>&1; then fail "engine_image.sh must fail without a tag"; else ok "engine_image.sh fails without a tag rather than guessing"; fi
+# A scenario's images.vllm overrides the default field by field: the prepull
+# and the engine-cache preparer must hold the image the engines will run, not
+# the harness default the scenario moved away from.
+cat > "$T/sc-shared.yaml" <<'EOF'
+shared:
+  images:
+    vllm:
+      tag: v0.31.0
+scenario:
+  - name: a
+  - name: b
+EOF
+got="$(bash hack/benchmark/engine_image.sh "$T/clone" "$T/sc-shared.yaml" || true)"
+if [ "$got" = "docker.io/vllm/vllm-openai:v0.31.0" ]; then ok "a shared images.vllm.tag overrides the default tag, repository kept"; else fail "shared override: engine_image.sh printed '$got'"; fi
+printf 'shared:\n  monitoring: {}\nscenario:\n  - name: a\n' > "$T/sc-none.yaml"
+got="$(bash hack/benchmark/engine_image.sh "$T/clone" "$T/sc-none.yaml" || true)"
+if [ "$got" = "docker.io/vllm/vllm-openai:v0.26.0" ]; then ok "a scenario without images.vllm keeps the default"; else fail "no override: engine_image.sh printed '$got'"; fi
+cat > "$T/sc-stack.yaml" <<'EOF'
+shared:
+  images:
+    vllm:
+      tag: v0.31.0
+scenario:
+  - name: a
+  - name: b
+    images:
+      vllm:
+        repository: quay.io/other/vllm
+EOF
+got="$(bash hack/benchmark/engine_image.sh "$T/clone" "$T/sc-stack.yaml" || true)"
+if [ "$got" = "docker.io/vllm/vllm-openai:v0.31.0,quay.io/other/vllm:v0.31.0" ]; then ok "a stack's own override layers on the shared one; distinct images print comma-separated"; else fail "stack override: engine_image.sh printed '$got'"; fi
+if out="$(bash hack/benchmark/engine_image.sh "$T/clone" "$T/no-such-scenario.yaml" 2>/dev/null)"; then fail "engine_image.sh must fail on a named scenario that is missing"; else
+    [ -z "$out" ] && ok "engine_image.sh prints nothing and fails on a missing scenario" || fail "engine_image.sh printed on a missing scenario: '$out'"; fi
+# The P/D share scenario moved off the harness default (NIXL on v0.26.0 drops
+# the KV link); what it pins is what the standup must hold on the nodes.
+got="$(bash hack/benchmark/engine_image.sh "$T/clone" hack/benchmark/scenarios/guides/two-model-shapes-pd.yaml || true)"
+if [ "$got" = "docker.io/vllm/vllm-openai:v0.31.0" ]; then ok "two-model-shapes-pd resolves to the engine it pins"; else fail "two-model-shapes-pd: engine_image.sh printed '$got'"; fi
 
 # ---------------------------------------------------------------------------
 # 3. status, delete and apply, offline, against what a cluster answered.
@@ -426,7 +463,7 @@ grep -q '^  node-running ' "$T/make-env.out" && ok "make prepull-status takes an
 # the apply, BENCHMARK_PREPULL=false skips, BENCHMARK_PREPULL_IMAGES overrides
 # tr -d: a CRLF checkout (Windows) turns each recipe continuation into a
 # backslash-CR, which bash does not read as a continuation.
-block="$(tr -d '\r' < Makefile | sed -n '/The engine image on every accelerator node BEFORE/,/Lives in a script, not inline here/p' | sed '1d;$d' | grep -v '^	@#' | sed 's/^	@//; s/\$\$/$/g; s/\$(BENCHMARK_PREPULL)/${BENCHMARK_PREPULL}/g; s/\$(BENCHMARK_PREPULL_IMAGES)/${BENCHMARK_PREPULL_IMAGES}/g; s/\$(BENCHMARK_REPO_DIR)/${BENCHMARK_REPO_DIR}/g; s/\$(BENCHMARK_NAMESPACE)/${BENCHMARK_NAMESPACE}/g; s/\$(BENCHMARK_KUBECTL_TIMEOUT)/${BENCHMARK_KUBECTL_TIMEOUT}/g; s/\$(PREPULL_ARGS)//g')"
+block="$(tr -d '\r' < Makefile | sed -n '/The engine image on every accelerator node BEFORE/,/Lives in a script, not inline here/p' | sed '1d;$d' | grep -v '^	@#' | sed 's/^	@//; s/\$\$/$/g; s/\$(BENCHMARK_PREPULL)/${BENCHMARK_PREPULL}/g; s/\$(BENCHMARK_PREPULL_IMAGES)/${BENCHMARK_PREPULL_IMAGES}/g; s/\$(BENCHMARK_REPO_DIR)/${BENCHMARK_REPO_DIR}/g; s/\$(BENCHMARK_SPEC)/${BENCHMARK_SPEC}/g; s/\$(BENCHMARK_NAMESPACE)/${BENCHMARK_NAMESPACE}/g; s/\$(BENCHMARK_KUBECTL_TIMEOUT)/${BENCHMARK_KUBECTL_TIMEOUT}/g; s/\$(PREPULL_ARGS)//g')"
 [ -n "$block" ] || fail "could not extract the benchmark-standup pre-pull block from the Makefile"
 # A make variable the substitution list above does not know would reach
 # bash as a command substitution -- `$(CURDIR)` runs a command named CURDIR,
@@ -438,7 +475,11 @@ if printf '%s' "$block" | grep -Eq '[$][(][A-Z_]+[)]'; then
 else
     ok "standup: the extracted block holds no untranslated make reference (a shell substitution is lowercase)"
 fi
-run_block() { env BENCHMARK_NAMESPACE=check-ns BENCHMARK_REPO_DIR="$T/clone" BENCHMARK_KUBECTL_TIMEOUT=30s PATH="$STUB_PATH" "$@" bash -c "$block"; }
+# The standup copies the scenario into the clone before this block runs; the
+# check's clone holds one with no engine override, so the default is read.
+mkdir -p "$T/clone/config/scenarios/check"
+cp "$T/sc-none.yaml" "$T/clone/config/scenarios/check/spec.yaml"
+run_block() { env BENCHMARK_NAMESPACE=check-ns BENCHMARK_REPO_DIR="$T/clone" BENCHMARK_SPEC=check/spec BENCHMARK_KUBECTL_TIMEOUT=30s PATH="$STUB_PATH" "$@" bash -c "$block"; }
 : > "$T/calls"; : > "$T/timeouts"
 run_block BENCHMARK_PREPULL=true BENCHMARK_PREPULL_IMAGES= > "$T/standup.out" 2>&1 || fail "standup block failed: $(cat "$T/standup.out")"
 [ "$(sort -u "$T/timeouts")" = "--request-timeout=30s" ] && ok "standup: the pre-pull step's kubectl requests carry the request timeout" || fail "standup: request timeouts seen: '$(sort -u "$T/timeouts" | tr '\n' ' ')'"
@@ -455,6 +496,11 @@ run_block BENCHMARK_PREPULL=false BENCHMARK_PREPULL_IMAGES= > "$T/standup-skip.o
 : > "$T/calls"
 run_block BENCHMARK_PREPULL=true BENCHMARK_PREPULL_IMAGES=override/engine:9 > "$T/standup-override.out" 2>&1 || true
 grep -q 'Holding the engine image.*override/engine:9' "$T/standup-override.out" && ok "standup: BENCHMARK_PREPULL_IMAGES overrides the clone's pin" || fail "standup override: $(head -2 "$T/standup-override.out")"
+: > "$T/calls"
+mkdir -p "$T/clone/config/scenarios/check-pin"
+cp "$T/sc-shared.yaml" "$T/clone/config/scenarios/check-pin/spec.yaml"
+run_block BENCHMARK_PREPULL=true BENCHMARK_PREPULL_IMAGES= BENCHMARK_SPEC=check-pin/spec > "$T/standup-pin.out" 2>&1 || true
+grep -qF 'Holding the engine image on the accelerator nodes: docker.io/vllm/vllm-openai:v0.31.0 (' "$T/standup-pin.out" && ok "standup: a scenario's engine pin is the image held on the nodes" || fail "standup with a scenario pin: $(head -2 "$T/standup-pin.out")"
 : > "$T/calls"
 run_block BENCHMARK_PREPULL=true BENCHMARK_PREPULL_IMAGES= BENCHMARK_REPO_DIR="$T/nonexistent" > "$T/standup-noclone.out" 2>&1 || true
 grep -q 'WARNING: could not read the engine image' "$T/standup-noclone.out" && [ ! -s "$T/calls" ] && ok "standup: no clone means a warning and no apply" || fail "standup without a clone: $(head -2 "$T/standup-noclone.out")"
