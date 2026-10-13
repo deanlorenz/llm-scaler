@@ -585,14 +585,19 @@ verb_preflight() {
         info "accelerator: $ACCELERATOR (from ACCELERATOR)"
     elif [ "${count:-0}" -eq 1 ]; then
         info "accelerator: $products"
+    # A POOL-ONLY question, so a warning and not a refusal: the models are placed
+    # by their accelerator request, not by this label, and the share arms refuse
+    # a pool outright. Refusing here failed preflight for runs that never create
+    # one -- on a cluster whose nodes carry the same GPU under two label keys.
+    # pool-create refuses without exactly one product, which is where it binds.
     elif [ "${count:-0}" -eq 0 ]; then
-        warn "no node advertises an accelerator product label this knows; set ACCELERATOR=<product> or the pool lands anywhere"
-        rc=1
+        warn "no node advertises an accelerator product label this knows. Only a pool arm needs one:"
+        warn "  set ACCELERATOR=<product> before pool-create, which refuses without it. Arms with no pool are unaffected."
     else
         warn "this cluster advertises ${count} accelerator products:"
         printf '%s\n' "$products" | sed 's/^/      /' >&2
-        warn "  A pool serves ONE of them. Set ACCELERATOR=<product> so the pool and the models agree."
-        rc=1
+        warn "  Only a pool arm needs one: a pool serves ONE product, so set ACCELERATOR=<product> before"
+        warn "  pool-create, which refuses without it. Arms with no pool (the share arms refuse one) are unaffected."
     fi
 
     # WHO OWNS ISTIO. The standup installs istio-base + istiod by helmfile, and

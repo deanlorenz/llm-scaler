@@ -676,13 +676,27 @@ else
 fi
 
 case_begin
+# Two accelerator names are a POOL question: preflight warns and passes (the
+# models are placed by their accelerator request, and the share arms refuse a
+# pool), and pool-create is where it refuses. Refusing in preflight failed runs
+# that never create a pool, on nodes that carry one GPU under two label keys.
 MIXED_ACCEL=1 run_verb preflight
-if [ "$RC" -eq 0 ]; then
-    fail "preflight passed on a cluster advertising TWO accelerator products; a warm copy is only reusable on the one it was loaded on, so the pool would never be eligible to lend and the run would complete reporting that it did nothing"
-elif ! printf '%s' "$OUT" | grep -q 'ACCELERATOR'; then
-    fail "preflight refused without naming the variable that resolves it: $OUT"
+if [ "$RC" -ne 0 ]; then
+    fail "preflight refused a cluster advertising two accelerator names, though only a pool arm needs one: $(printf '%s' "$OUT" | grep -A2 'accelerator products')"
+elif ! printf '%s' "$OUT" | grep -q 'set ACCELERATOR=<product> before'; then
+    fail "preflight did not say a pool arm needs ACCELERATOR, and why the others do not: $OUT"
 else
-    ok "an ambiguous accelerator is refused, naming ACCELERATOR"
+    ok "two accelerator names warn in preflight, naming ACCELERATOR for a pool arm, and do not fail it"
+fi
+
+case_begin
+MIXED_ACCEL=1 run_verb pool-create
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'set ACCELERATOR=<product'; then
+    fail "pool-create did not refuse an ambiguous accelerator; a pool on the wrong product is never eligible to lend: $OUT"
+elif grep -q 'CALL\[apply' "$CALLS" 2>/dev/null; then
+    fail "pool-create created something before refusing: $(cat "$CALLS")"
+else
+    ok "pool-create refuses an ambiguous accelerator, before anything is created"
 fi
 
 case_begin
@@ -1134,7 +1148,7 @@ else
 fi
 
 case_begin
-CASES_EXPECTED=69
+CASES_EXPECTED=70
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately rather than letting coverage drift out."
 else
