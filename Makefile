@@ -2566,6 +2566,7 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@bash -n hack/benchmark/engine_cache_claim.sh
 	@bash -n hack/benchmark/scenario_overrides.sh
 	@bash -n hack/check-harness-teardown.sh
+	@bash -n hack/check-harness-standup.sh
 	@bash -n hack/benchmark/engine_image.sh
 	@bash -n hack/benchmark/capture_lib.sh
 	@bash -n hack/benchmark/sample_replicas.sh
@@ -2614,6 +2615,8 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@bash hack/check-enginecache-manifests.sh
 	@echo "Checking the harness teardown patches (patch_harness.sh fixes 15-17)..."
 	@bash hack/check-harness-teardown.sh
+	@echo "Checking the harness standup patch (patch_harness.sh fix 18)..."
+	@bash hack/check-harness-standup.sh
 	@echo "Checking every benchmark recipe's kubectl requests time out..."
 	@bash hack/check-make-kubectl-timeouts.sh
 	@echo "Checking what scenario_overrides.sh does to every shipped scenario..."

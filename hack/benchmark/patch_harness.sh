@@ -1365,3 +1365,46 @@ io.open(path, "w", encoding="utf-8", newline="\n").write(src)
 print("  fix 17 (shared cluster roles kept): applied")
 PYEOF
 fi
+
+# ---------------------------------------------------------------------------
+# Fix 18 -- standup: a reused Istio does not need Istio's Helm repository.
+#
+# step_02_admin_prerequisites adds every configured Helm repository, and
+# skips Istio's only when Istio is not the gateway class. With
+# gateway.skipInstall -- the standup reusing the control plane the cluster
+# already runs (BENCHMARK_GATEWAY_SKIP_INSTALL, GATEWAY_REUSE=auto) -- no
+# Istio chart is installed, yet the standup still ran `helm repo add istio
+# https://istio-release.storage.googleapis.com/charts`. When that bucket
+# started answering 403 to anonymous callers, every standup on a cluster that
+# already runs Istio failed at step 02 over a repository it would never read.
+# Now the repository is skipped when skipInstall is set, as it is for any
+# other gateway class. Not yet reported upstream.
+# ---------------------------------------------------------------------------
+ADMIN="$REPO_DIR/llmdbenchmark/standup/steps/step_02_admin_prerequisites.py"
+if [ ! -f "$ADMIN" ]; then
+    note "fix 18 (reused Istio needs no Istio repo): no step_02, skipped"
+else
+    "$PY" - "$ADMIN" <<'PYEOF' || fail "fix 18 (reused Istio needs no Istio repo) failed"
+import io, sys
+
+path = sys.argv[1]
+src = io.open(path, encoding="utf-8", newline="").read().replace("\r\n", "\n")
+
+OLD = '''        for repo_key, repo_info in helm_repos.items():
+'''
+NEW = '''        for repo_key, repo_info in helm_repos.items():
+            # wva-patch (fix 18): a reused Istio (gateway.skipInstall) installs
+            # no Istio chart, so its repository is never read.
+            if repo_key == "istio" and gateway_class == "istio" and (plan_config.get("gateway") or {}).get("skipInstall"):
+                cmd.logger.log_info("Skipping Istio Helm repo: gateway.skipInstall reuses the Istio the cluster runs")
+                continue
+'''
+if NEW in src:
+    print("  fix 18 (reused Istio needs no Istio repo): already applied")
+    sys.exit(0)
+if src.count(OLD) != 1:
+    sys.exit("anchor missing or ambiguous (upstream shape changed): the helm repository loop in _add_helm_repos")
+io.open(path, "w", encoding="utf-8", newline="\n").write(src.replace(OLD, NEW, 1))
+print("  fix 18 (reused Istio needs no Istio repo): applied")
+PYEOF
+fi
