@@ -370,11 +370,13 @@ keeps an existing claim, and only its own mode skips the download Job and
 holds the engine deploy until every node is Ready; `make weights` beside it
 would leave the harness's Job writing a single node's copy. Three things to know: the harness waits for EVERY node the
 DaemonSet counts, and a DaemonSet counts a cordoned node and a node under
-`DiskPressure` too (its controller tolerates both taints), so a node that
-keeps evicting the downloader holds the standup until `daemonSetTimeout`
-(3600 s) and then fails it -- a `NoSchedule` taint of your own on that node
-takes it out of the count (seen once on a 17-node cluster: one cordoned node
-under DiskPressure since the day before, 16/17 for 22 minutes); the standup refuses a namespace whose
+`DiskPressure` too (its controller tolerates both taints) -- a node that
+kept evicting the downloader held the standup until `daemonSetTimeout`
+(3600 s) and then failed it. The standup now keeps the downloader off every
+node an engine cannot use (cordoned, or carrying a `NoSchedule` or
+`NoExecute` taint the run does not tolerate) with a `kubernetes.io/hostname
+NotIn` affinity on the scenario copy, and names those nodes; nothing is done
+to the nodes themselves, which on a shared cluster are not yours to taint; the standup refuses a namespace whose
 `model-pvc` already sits on another storage class -- the harness keeps an
 existing claim, and a run that looks like it measured a local read while
 reading the shared volume is the wrong measurement -- so use a fresh

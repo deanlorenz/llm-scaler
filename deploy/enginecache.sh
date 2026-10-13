@@ -557,8 +557,13 @@ cmd_status() {
         return 1
     fi
     rm -f "$err_file"
-    local node_count
+    local node_count excluded
+    # Usable nodes only: a cordoned or foreign-tainted node can never hold a
+    # copy an engine starts on, and counting it failed finished preparations.
+    excluded="$(printf '%s' "$nodes_json" | accelerator_excluded_json "$(accelerator_ds_toleration_keys "$NAMESPACE" "$CLAIM" "${TOLERATIONS[@]}")")"
+    nodes_json="$(printf '%s' "$nodes_json" | accelerator_usable_nodes_json "$excluded")"
     node_count="$(printf '%s' "$nodes_json" | jq '.items | length')"
+    [ "$node_count" -gt 0 ] || accelerator_print_excluded "$excluded" >&2
     if [ "$node_count" -eq 0 ]; then
         [ "$mode" = report ] || log_error "no node matches $(accelerator_selector_text "$selector") (--node-selector picks the nodes)"
         log_warning "no node matches $(accelerator_selector_text "$selector"); the cache is prepared nowhere (--node-selector picks the nodes)"
@@ -576,6 +581,7 @@ cmd_status() {
         [ -z "$bound" ] || echo "  the claim is not bound: its volume is cluster-scoped and was not created -- apply needs leave to create PersistentVolumes (ask the cluster admin to run apply)"
     fi
     printf '  %-28s %-12s %s\n' NODE CACHE PREPARER
+    accelerator_print_excluded "$excluded"
     local eacces=0
     # The unit separator keeps empty fields; a tab in IFS would swallow them.
     while IFS=$'\x1f' read -r node phase reason podname message; do
@@ -617,7 +623,7 @@ cmd_status() {
     if [ "$eacces" -gt 0 ]; then
         echo "  ${eacces} node(s): the node directory is not writable by the preparer. On Kubernetes the preparer is root and the kubelet creates the directory root-owned, so this is a mount that is read-only or not there, or a directory that already existed with another owner (ls -ld on the node); on OpenShift it runs as the project UID (GID 0) under restricted-v2 and the directory is not relabelled -- on each node: mkdir -p DIR && chgrp 0 DIR && chmod 2775 DIR && chcon -t container_file_t DIR, or a MachineConfig mount with context=...:container_file_t:s0 (enginecache.sh --help)"
     fi
-    echo "  ${ready}/${node_count} nodes prepared; $((node_count - ready)) not"
+    echo "  ${ready}/${node_count} usable nodes prepared; $((node_count - ready)) not"
     [ -n "$selector" ] || printf '%s' "$nodes_json" | accelerator_vendor_warning
     if [ "$holders" -eq 0 ]; then
         local why

@@ -334,7 +334,9 @@ cat > "$T/nodes.json" <<EOF
  {"metadata":{"name":"node-failing", "labels":{"nvidia.com/gpu.product":"H200"}}},
  {"metadata":{"name":"node-nopod",   "labels":{"nvidia.com/gpu.product":"H200"}}},
  {"metadata":{"name":"node-cpu",     "labels":{"gpu.nvidia.com/model":""}}},
- {"metadata":{"name":"node-evicted", "labels":{"nvidia.com/gpu.product":"H200"}}}
+ {"metadata":{"name":"node-evicted", "labels":{"nvidia.com/gpu.product":"H200"}}},
+ {"metadata":{"name":"node-cordoned","labels":{"nvidia.com/gpu.product":"H200"}},"spec":{"unschedulable":true,"taints":[{"key":"node.kubernetes.io/unschedulable","effect":"NoSchedule"}]}},
+ {"metadata":{"name":"node-foreign", "labels":{"nvidia.com/gpu.product":"H200"}},"spec":{"taints":[{"key":"example.com/team-x","effect":"NoExecute"}]}}
 ]}
 EOF
 cat > "$T/pods.json" <<EOF
@@ -346,6 +348,8 @@ cat > "$T/pods.json" <<EOF
  {"metadata":{"name":"ec-evicted","labels":{"wva.llmd.ai/engine-cache":"engine-cache"}},"spec":{"nodeName":"node-evicted"},"status":{"phase":"Failed","reason":"Evicted","message":"The node had condition: [DiskPressure]."}}
 ]}
 EOF
+# the DaemonSet as apply wrote it: it tolerates nvidia.com/gpu, nothing else
+printf '%s' '{"spec":{"template":{"spec":{"tolerations":[{"key":"nvidia.com/gpu","operator":"Exists"}]}}}}' > "$T/ds.json"
 # the volumes carrying our labels: ours, the same claim in another namespace,
 # and one whose claimRef is a weights claim that somehow carries our labels
 cat > "$T/pvs.json" <<EOF
@@ -371,6 +375,7 @@ case "\$1 \$2" in
       case "\$ARGV" in *" engine-cache "*) ;; *) echo "stub kubectl: get daemonset for a name that is not the DaemonSet:\$ARGV" >&2; exit 2 ;; esac
       case "\$ARGV" in
         *"engine-cache-path}"*) printf '%s' "\${STUB_DS_PATH-/mnt/local/weights/check-ns/engine-cache}" ;;
+        *" -o json "*) cat "$T/ds.json" ;;
         *"jsonpath={.spec.template.spec.nodeSelector}"*)
            if [ -n "\${STUB_DS_SELECTOR:-}" ]; then jq -cn --arg k "\${STUB_DS_SELECTOR%%=*}" --arg v "\${STUB_DS_SELECTOR#*=}" '{(\$k): \$v}'; else printf '{}'; fi ;;
         *) echo "stub kubectl: unexpected daemonset read:\$ARGV" >&2; exit 2 ;;
@@ -420,7 +425,12 @@ expect_line node-evicted  absent
 grep -q 'node-evicted .*Evicted' "$T/status.out" && ok "status: an evicted preparer shows its reason" || fail "status: Evicted reason missing"
 grep -q '^  node-cpu ' "$T/status.out" && fail "status: a node with an empty product label was counted" || ok "status: the default placement leaves the empty-label node out"
 grep -q 'Permission denied\|Read-only' "$T/status.out" && fail "status: a permission diagnosis with no such error in the log" || ok "status: no permission diagnosis when the log shows none"
-grep -q '1/5 nodes prepared; 4 not' "$T/status.out" && ok "status: the tally counts only Ready as prepared" || fail "status: tally: $(grep 'nodes prepared' "$T/status.out")"
+grep -q '1/5 usable nodes prepared; 4 not' "$T/status.out" && ok "status: the tally counts only Ready as prepared, on usable nodes" || fail "status: tally: $(grep 'nodes prepared' "$T/status.out")"
+grep -qE '^  node-cordoned +excluded +cordoned' "$T/status.out" && grep -qE '^  node-foreign +excluded +tainted example.com/team-x:NoExecute' "$T/status.out" && ok "status: a cordoned node and a node tainted against the preparer are listed as excluded, with why" || fail "status: excluded rows: $(grep -E 'node-cordoned|node-foreign' "$T/status.out" | tr '\n' ';')"
+cp "$T/nodes.json" "$T/nodes-full.json"
+jq '.items |= map(select(.metadata.name == "node-ready" or .metadata.name == "node-cordoned" or .metadata.name == "node-foreign"))' "$T/nodes-full.json" > "$T/nodes.json"
+if PATH="$STUB_PATH" bash deploy/enginecache.sh status -n check-ns > "$T/done.out" 2>&1; then grep -q '1/1 usable nodes prepared' "$T/done.out" && ok "status: every usable node prepared is a pass, unusable nodes aside" || fail "status complete: $(grep 'nodes prepared' "$T/done.out")"; else fail "status: a complete preparation failed on nodes no engine can use: $(grep -E 'nodes prepared|excluded' "$T/done.out" | tr '\n' ';')"; fi
+cp "$T/nodes-full.json" "$T/nodes.json"
 grep -q "claim engine-cache: Bound" "$T/status.out" && grep -q '^/mnt/local/weights/check-ns/engine-cache  (claim' "$T/status.out" && ok "status: reports the directory (off the DaemonSet's annotation) and the claim Bound" || fail "status: header: $(head -1 "$T/status.out")"
 [ "$rc" -ne 0 ] && ok "status: exits non-zero while a node is not prepared" || fail "status: exit 0 with nodes not prepared"
 grep -q 'stub kubectl:' "$T/status.out" && fail "status: a kubectl call lacked its scope: $(grep 'stub kubectl:' "$T/status.out" | head -1)" || ok "status: every kubectl call carried -n / -l"

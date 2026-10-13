@@ -471,8 +471,13 @@ cmd_status() {
             log_error "cannot list nodes: ${why}"
         fi
         rm -f "$err_file"
-        local node_count
+        local node_count excluded
+        # Usable nodes only: a cordoned or foreign-tainted node can never hold a
+        # copy an engine starts on, and counting it failed finished preparations.
+        excluded="$(printf '%s' "$nodes_json" | accelerator_excluded_json "$(accelerator_ds_toleration_keys "$NAMESPACE" "$name" "${TOLERATIONS[@]}")")"
+        nodes_json="$(printf '%s' "$nodes_json" | accelerator_usable_nodes_json "$excluded")"
         node_count="$(printf '%s' "$nodes_json" | jq '.items | length')"
+        [ "$node_count" -gt 0 ] || accelerator_print_excluded "$excluded" >&2
         if [ "$node_count" -eq 0 ]; then
             if [ "$mode" = report ]; then
                 log_warning "no node matches $(accelerator_selector_text "$selector"); ${model} will be downloaded nowhere (--node-selector picks the nodes)"
@@ -489,6 +494,7 @@ cmd_status() {
             [ -z "$bound" ] || echo "  the claim is not bound: its volume is cluster-scoped and was not created -- apply needs leave to create PersistentVolumes (ask the cluster admin to run apply)"
         fi
         printf '  %-28s %-12s %s\n' NODE WEIGHTS DOWNLOADER
+        accelerator_print_excluded "$excluded"
         local eacces=0
         # Not a tab: bash treats a tab in IFS as whitespace, and an empty
         # field between two tabs (the reason, on every healthy row) is
@@ -538,7 +544,7 @@ cmd_status() {
         if [ "$eacces" -gt 0 ]; then
             echo "  ${eacces} node(s): the node directory is not writable by the downloader. On Kubernetes the downloader is root and the kubelet creates the directory root-owned, so this is a mount that is read-only or not there; on OpenShift it runs as the project UID (GID 0) under restricted-v2 and the directory is not relabelled -- on each node: mkdir -p DIR && chgrp 0 DIR && chmod 2775 DIR && chcon -t container_file_t DIR, or a MachineConfig mount with context=...:container_file_t:s0 (weights.sh --help)"
         fi
-        echo "  ${ready}/${node_count} nodes hold it; $((node_count - ready)) do not"
+        echo "  ${ready}/${node_count} usable nodes hold it; $((node_count - ready)) do not"
         [ -n "$selector" ] || printf '%s' "$nodes_json" | accelerator_vendor_warning
         if [ "$holders" -eq 0 ]; then
             local why

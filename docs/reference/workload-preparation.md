@@ -108,7 +108,11 @@ to what the model servers select on.
 which is always tolerated: a holder `Pending` on every node with no reason
 is a taint it does not tolerate. `prepull-status` lists the nodes each
 DaemonSet was applied for (the selector is recorded on it), so it needs no
-selector of its own. The holder runs the image itself, asleep, with a
+selector of its own. It, `weights-status` and `engine-cache-status` count
+only the nodes a model server can use: a cordoned node, or one with a
+`NoSchedule` or `NoExecute` taint the DaemonSet does not tolerate, is listed
+as `excluded` with the reason and not counted, and the command exits 0 when
+every usable node is ready. The holder runs the image itself, asleep, with a
 memory limit and no accelerator: a container that exited would not protect
 its image from the kubelet's garbage collection, a running one does. The
 image has to carry `/bin/sh` for that; one that does not is still pulled
@@ -275,9 +279,9 @@ says so when the cluster has SecurityContextConstraints:
   replica scheduled there meanwhile reads from a directory that is being
   written. `weights-status` says which nodes are there yet. A cordoned node
   or one under `DiskPressure` still counts for the DaemonSet (its controller
-  tolerates both), keeps evicting the downloader, and shows as `absent
-  Failed (not ready) Evicted` for as long as it is in that state; nothing in
-  the namespace fixes that node.
+  tolerates both) and keeps evicting the downloader; `weights-status` lists
+  it as `excluded` and leaves it out of the count, since no engine can start
+  there either. Nothing in the namespace fixes that node.
 
 On node-local NVMe the engine's default loader (memory-mapped safetensors)
 is the right one; `--safetensors-load-strategy prefetch` exists for network

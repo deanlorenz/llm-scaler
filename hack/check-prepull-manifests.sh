@@ -203,9 +203,13 @@ cat > "$T/nodes.json" <<EOF
  {"metadata":{"name":"node-noimages", "labels":{"nvidia.com/gpu.product":"H200"}}},
  {"metadata":{"name":"node-cpu",      "labels":{"kubernetes.io/os":"linux"}},       "status":{"images":[{"names":["${IMG}"]}]}},
  {"metadata":{"name":"node-cpu-cw",   "labels":{"gpu.nvidia.com/model":"","gpu.nvidia.com/class":""}}, "status":{"images":[]}},
- {"metadata":{"name":"node-amd",      "labels":{"amd.com/gpu.product-name":"MI300X"}}, "status":{"images":[]}}
+ {"metadata":{"name":"node-amd",      "labels":{"amd.com/gpu.product-name":"MI300X"}}, "status":{"images":[]}},
+ {"metadata":{"name":"node-cordoned", "labels":{"nvidia.com/gpu.product":"H200"}}, "spec":{"unschedulable":true,"taints":[{"key":"node.kubernetes.io/unschedulable","effect":"NoSchedule"},{"key":"node.kubernetes.io/disk-pressure","effect":"NoSchedule"}]}, "status":{"images":[]}},
+ {"metadata":{"name":"node-foreign",  "labels":{"nvidia.com/gpu.product":"H200"}}, "spec":{"taints":[{"key":"example.com/team-x","value":"only","effect":"NoSchedule"}]}, "status":{"images":[]}}
 ]}
 EOF
+# the DaemonSet as apply wrote it: it tolerates nvidia.com/gpu, nothing else
+printf '%s' '{"spec":{"template":{"spec":{"tolerations":[{"key":"nvidia.com/gpu","operator":"Exists"}]}}}}' > "$T/ds.json"
 cat > "$T/pods.json" <<EOF
 {"items":[
  {"metadata":{"labels":{"wva.llmd.ai/prepull":"${DS}"}},"spec":{"nodeName":"node-running"},"status":{"phase":"Running","containerStatuses":[{"ready":true,"state":{"running":{}}}]}},
@@ -241,6 +245,7 @@ case "\$1 \$2" in
       want -n check-ns
       case " \$* " in
         *" -l "*) want -l "$LBL"; printf '%s\n' "\${STUB_DAEMONSETS-${IMG}}" ;;
+        *" -o json "*) cat "$T/ds.json" ;;
         *) want -o "jsonpath={.spec.template.spec.nodeSelector}"
            case "\$ARGV" in *" ${DS} "*|*" \${STUB_DS_NAME:-${DS}} "*) ;; *) echo "stub kubectl: get daemonset for a name that is not the DaemonSet:\$ARGV" >&2; exit 2 ;; esac
            if [ -n "\${STUB_DS_SELECTOR:-}" ]; then jq -cn --arg k "\${STUB_DS_SELECTOR%%=*}" --arg v "\${STUB_DS_SELECTOR#*=}" '{(\$k): \$v}'; else printf '{}'; fi ;;
@@ -275,7 +280,14 @@ grep -q '^  node-cpu ' "$T/status.out" && fail "status: a node with no product l
 grep -q '^  node-cpu-cw ' "$T/status.out" && fail "status: a node whose product labels are EMPTY (a CoreWeave CPU node) was counted" || ok "status: the default placement leaves a node with empty product labels out"
 grep -q 'node-evicted .*Evicted' "$T/status.out" && ok "status: the evicted holder shows its reason" || fail "status: Evicted reason missing"
 grep -q 'node-pulled .*not held' "$T/status.out" && ok "status: a pulled-but-unheld image says so" || fail "status: pulled/not-held note missing"
-grep -q '5/9 nodes have it (2 held, 3 pulled but not held); 4 do not' "$T/status.out" && ok "status: the tally separates held from pulled-not-held" || fail "status: tally wrong: $(grep 'nodes have' "$T/status.out")"
+grep -q '5/9 usable nodes have it (2 held, 3 pulled but not held); 4 do not' "$T/status.out" && ok "status: the tally separates held from pulled-not-held, on usable nodes" || fail "status: tally wrong: $(grep 'nodes have' "$T/status.out")"
+grep -qE '^  node-cordoned +excluded +cordoned' "$T/status.out" && grep -qE '^  node-foreign +excluded +tainted example.com/team-x:NoSchedule' "$T/status.out" && ok "status: a cordoned node and a node tainted against the holder are listed as excluded, with why" || fail "status: excluded rows: $(grep -E 'node-cordoned|node-foreign' "$T/status.out" | tr '\n' ';')"
+# A complete hold exits 0 beside a cordoned node and a foreign-tainted one:
+# counted, they reported 8/17 on a finished preparation and failed it.
+cp "$T/nodes.json" "$T/nodes-full.json"
+jq '.items |= map(select(.metadata.name == "node-running" or .metadata.name == "node-cordoned" or .metadata.name == "node-foreign"))' "$T/nodes-full.json" > "$T/nodes.json"
+if PATH="$STUB_PATH" bash deploy/prepull.sh status -n check-ns > "$T/done.out" 2>&1; then grep -q '1/1 usable nodes have it' "$T/done.out" && ok "status: every usable node holding the image is a pass, unusable nodes aside" || fail "status complete: $(grep 'nodes have' "$T/done.out")"; else fail "status: a complete hold failed on nodes no engine can use: $(grep -E 'nodes have|excluded' "$T/done.out" | tr '\n' ';')"; fi
+cp "$T/nodes-full.json" "$T/nodes.json"
 grep -q '1 node(s) carry an AMD, Intel or Gaudi accelerator label' "$T/status.out" && ok "status: under the default placement a non-NVIDIA node is named as held for nothing" || fail "status: vendor warning missing"
 grep -q 'carry an AMD' "$T/sel.out" 2>/dev/null && fail "status: the vendor warning must not print under an explicit selector" || true
 [ "$rc" -ne 0 ] && ok "status: exits non-zero while a node lacks the image" || fail "status: exit 0 with nodes lacking the image"
