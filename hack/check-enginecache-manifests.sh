@@ -236,13 +236,27 @@ printf '%s' "$pub_body" | grep -q 'stale_preparers "$gen"' && ok "publish: the r
     || fail "publish: the re-seed wait passes on preparers from before the restart"
 sp_body="$(sed -n '/^stale_preparers() {/,/^}/p' deploy/enginecache.sh)"
 if [ -z "$sp_body" ]; then fail "publish: no stale_preparers"; else
-    pods='{"items":[{"metadata":{"labels":{"pod-template-generation":"13"}},"status":{"phase":"Running"}},{"metadata":{"labels":{"pod-template-generation":"12"}},"status":{"phase":"Running"}},{"metadata":{"labels":{"pod-template-generation":"12"}},"status":{"phase":"Failed"}}]}'
-    for c in "ok:13:1" "ok:14:2" "fail:13:?"; do
-        out="$(MODE="${c%%:*}" PODS="$pods" bash -c 'kubectl() { [ "$MODE" = ok ] && printf %s "$PODS"; [ "$MODE" = ok ]; }; NAMESPACE=ns; '"$sp_body"'
+    # n1 Ready, n2 not. The last pod is being deleted on n2, where no kubelet can confirm it.
+    pods='{"items":[
+      {"metadata":{"labels":{"pod-template-generation":"13"}},"spec":{"nodeName":"n1"},"status":{"phase":"Running"}},
+      {"metadata":{"labels":{"pod-template-generation":"12"}},"spec":{"nodeName":"n1"},"status":{"phase":"Running"}},
+      {"metadata":{"labels":{"pod-template-generation":"12"}},"spec":{"nodeName":"n1"},"status":{"phase":"Failed"}},
+      {"metadata":{"labels":{"pod-template-generation":"12"},"deletionTimestamp":"2026-10-13T00:00:00Z"},"spec":{"nodeName":"n2"},"status":{"phase":"Running"}}]}'
+    nodes='{"items":[
+      {"metadata":{"name":"n1"},"status":{"conditions":[{"type":"Ready","status":"True"}]}},
+      {"metadata":{"name":"n2"},"status":{"conditions":[{"type":"Ready","status":"Unknown"}]}}]}'
+    # MODE:GEN:WANT -- ok reads both; nodesfail cannot list nodes; podsfail cannot read the pods
+    for c in "ok:13:1" "ok:14:2" "nodesfail:13:2" "podsfail:13:?"; do
+        out="$(MODE="${c%%:*}" PODS="$pods" NODES="$nodes" bash -c 'kubectl() {
+              case "$MODE:$2" in podsfail:pods|nodesfail:nodes) return 1 ;; *:pods) printf %s "$PODS" ;; *:nodes) printf %s "$NODES" ;; esac; }
+            NAMESPACE=ns; '"$sp_body"'
 stale_preparers '"$(echo "$c" | cut -d: -f2)")"
         want="${c##*:}"
-        [ "$out" != "0" ] && { [ "$want" = "?" ] || [ "$out" = "$want" ]; } && ok "stale_preparers ($c): $out" || fail "stale_preparers ($c): got '$out', want $want"
+        [ "$out" = "$want" ] && ok "stale_preparers ($c): $out" || fail "stale_preparers ($c): got '$out', want $want"
     done
+    printf '%s' "$pub_body" | grep -q 'deprecated\\.daemonset\\.template\\.generation' \
+        && ok "publish: compares against the DaemonSet's template generation, which the pod label follows" \
+        || fail "publish: compares against .metadata.generation, which also moves on edits outside the template"
 fi
 ps_body="$(sed -n '/^pod_succeeded() {/,/^}/p' deploy/enginecache.sh)"
 if [ -z "$ps_body" ]; then fail "publish: no pod_succeeded"; else

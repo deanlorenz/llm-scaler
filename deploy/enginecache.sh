@@ -738,12 +738,25 @@ pod_succeeded() {
 }
 
 # stale_preparers GEN prints how many live (Pending or Running) preparer pods
-# are of a template older than the DaemonSet's generation GEN, or "?" when
-# the pods cannot be read.
+# carry a pod-template-generation other than GEN, the DaemonSet's TEMPLATE
+# generation (its deprecated.daemonset.template.generation annotation, which
+# that label follows; .metadata.generation also moves on non-template edits).
+# A pod being deleted on a node that is not Ready is not counted: its kubelet
+# cannot confirm the deletion, so it would hold the wait to its timeout.
+# Prints "?" when the pods cannot be read.
 stale_preparers() {
-    kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=node-local-engine-cache -o json --request-timeout=30s 2>/dev/null \
-        | jq -r --arg g "$1" '[.items[] | select(.status.phase == "Pending" or .status.phase == "Running") | select(.metadata.labels["pod-template-generation"] != $g)] | length' 2>/dev/null \
-        || echo "?"
+    local pods ready
+    pods="$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=node-local-engine-cache -o json --request-timeout=30s 2>/dev/null)" || pods=""
+    [ -n "$pods" ] || { echo "?"; return; }
+    # Unreadable nodes (a namespace-scoped identity): count every live pod.
+    ready="$(kubectl get nodes -o json --request-timeout=30s 2>/dev/null \
+        | jq -c '[.items[] | select(any(.status.conditions[]?; .type == "Ready" and .status == "True")) | .metadata.name]' 2>/dev/null)" || ready=""
+    [ -n "$ready" ] || ready=null
+    printf '%s' "$pods" | jq -r --arg g "$1" --argjson ready "$ready" '[.items[]
+        | select(.status.phase == "Pending" or .status.phase == "Running")
+        | .spec.nodeName as $n
+        | select(.metadata.deletionTimestamp == null or $ready == null or ($ready | any(.[]; . == $n)))
+        | select(.metadata.labels["pod-template-generation"] != $g)] | length' 2>/dev/null || echo "?"
 }
 
 # cmd_publish fills the seed from the nodes: every node whose preparer is Ready
@@ -856,7 +869,7 @@ EOF
     # passes on the preparers from before the restart (still Ready), so the
     # wait also needs every live preparer to be of the restarted template.
     local deadline=$((SECONDS + 600)) gen
-    gen="$(kubectl get daemonset -n "$NAMESPACE" "$CLAIM" -o jsonpath='{.metadata.generation}')"
+    gen="$(kubectl get daemonset -n "$NAMESPACE" "$CLAIM" -o jsonpath='{.metadata.annotations.deprecated\.daemonset\.template\.generation}')"
     sleep 5
     until [ -n "$gen" ] && [ "$(stale_preparers "$gen")" = 0 ] && bash "$HERE/enginecache.sh" status -n "$NAMESPACE" >/dev/null 2>&1; do
         [ "$SECONDS" -lt "$deadline" ] || { log_warning "publish: not every usable node re-seeded within 600 s; enginecache.sh status says which"; break; }
