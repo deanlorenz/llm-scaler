@@ -227,12 +227,15 @@ s3._wva_delete_hostpath_volume(cmd, ctx, "ns")
 check(not any(c.startswith("delete") for c in cmd.calls), "fix 15: a namespace with no node-local volume deletes nothing")
 
 # fix 17: a role another namespace binds is kept; an unbound one goes; unreadable bindings keep everything
-binds_other = json.dumps({"items": [{"kind": "RoleBinding", "metadata": {"namespace": "team-b", "name": "rb"}, "roleRef": {"kind": "ClusterRole", "name": "llmdbench-modelservice-admin"}}]})
+binds_other = json.dumps({"items": [
+    {"kind": "RoleBinding", "metadata": {"namespace": "team-b", "name": "rb"}, "roleRef": {"kind": "ClusterRole", "name": "llmdbench-modelservice-admin"}},
+    # this teardown's own namespace: it goes with the namespace and keeps nothing
+    {"kind": "RoleBinding", "metadata": {"namespace": "ns", "name": "own"}, "roleRef": {"kind": "ClusterRole", "name": "llmdbench-modelservice-editor"}}]})
 cmd = Cmd([("get clusterrolebindings,rolebindings", R(True, binds_other)), ("get ClusterRoleBinding", R(True, "")), ("get ClusterRole", R(True, ""))]); ctx = Ctx(cmd)
 s4.CleanClusterRolesStep().execute(ctx)
 deleted = [c.split()[-1] for c in cmd.calls if c.startswith("delete")]
 check("llmdbench-modelservice-admin" not in deleted, "fix 17: a ClusterRole another namespace binds is kept")
-check("llmdbench-modelservice-editor" in deleted and "llmdbench-modelservice-viewer" in deleted, "fix 17: one no binding references is deleted: %s" % deleted)
+check("llmdbench-modelservice-editor" in deleted and "llmdbench-modelservice-viewer" in deleted, "fix 17: one only this teardown's namespace binds, or none does, is deleted: %s" % deleted)
 check(any("Keeping ClusterRole/llmdbench-modelservice-admin" in m and "team-b/rb" in m for _, m in ctx.logger.lines), "fix 17: the log says which binding keeps it")
 
 cmd = Cmd([("get clusterrolebindings,rolebindings", R(False, "", "Forbidden")), ("get ClusterRole", R(True, ""))]); ctx = Ctx(cmd)

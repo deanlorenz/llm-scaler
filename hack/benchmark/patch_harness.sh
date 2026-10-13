@@ -1283,8 +1283,18 @@ def _wva_bindings(cmd):
         return None
 
 
+def _wva_ours(context, b):
+    """Whether binding b goes with this teardown: a RoleBinding in one of its
+    namespaces, or a ClusterRoleBinding whose every subject is in one."""
+    ours = _wva_namespaces(context)
+    if b.get("kind") == "RoleBinding":
+        return (b.get("metadata") or {}).get("namespace") in ours
+    subjects = b.get("subjects") or []
+    return bool(subjects) and all(s.get("namespace") in ours for s in subjects)
+
+
 def _wva_role_unused(context, bindings, name):
-    """True when no binding anywhere references ClusterRole name."""
+    """True when no binding outside this teardown references ClusterRole name."""
     if bindings is None:
         context.logger.log_info(f"  Keeping ClusterRole/{name}: the bindings could not be read, and one this teardown cannot see may use it")
         return False
@@ -1292,6 +1302,7 @@ def _wva_role_unused(context, bindings, name):
         f"{(b.get('metadata') or {}).get('namespace') or 'cluster'}/{(b.get('metadata') or {}).get('name')}"
         for b in bindings
         if (b.get("roleRef") or {}).get("kind") == "ClusterRole" and (b.get("roleRef") or {}).get("name") == name
+        and not _wva_ours(context, b)
     ]
     if users:
         context.logger.log_info(f"  Keeping ClusterRole/{name}: still bound by {', '.join(users[:5])} -- cluster-scoped, so shared by every namespace")
@@ -1311,8 +1322,7 @@ def _wva_may_delete(cmd, context, kind, resource_name):
     ours = _wva_namespaces(context)
     for b in bindings:
         if b.get("kind") == "ClusterRoleBinding" and (b.get("metadata") or {}).get("name") == name:
-            subjects = b.get("subjects") or []
-            if subjects and all(s.get("namespace") in ours for s in subjects):
+            if _wva_ours(context, b):
                 return True
             context.logger.log_info(f"  Keeping {kind}/{name}: it binds subjects outside {', '.join(sorted(ours)) or 'this teardown'}")
             return False
@@ -1335,7 +1345,17 @@ MATCH_OLD = '''            if release in resource_name:
 MATCH_NEW = '''            if release in resource_name and _wva_may_delete(cmd, context, kind, resource_name):  # wva-patch (fix 17)
 '''
 if "def _wva_may_delete" in src and LOOP_NEW in src and MATCH_NEW in src:
-    print("  fix 17 (shared cluster roles kept): already applied")
+    if HELPERS in src:
+        print("  fix 17 (shared cluster roles kept): already applied")
+        sys.exit(0)
+    # An earlier version of this fix: swap its helpers for the current ones.
+    start = src.find("# wva-patch (fix 17): cluster-scoped objects are shared by every namespace.")
+    end = src.find("\n\n\nclass ", start)
+    if start < 0 or end < 0 or src.count(PREFIX) != 1:
+        sys.exit("anchor missing (an earlier fix 17 is applied but its helpers are not where it puts them)")
+    src = src[:src.find(PREFIX)] + HELPERS + src[end + 1:]
+    io.open(path, "w", encoding="utf-8", newline="\n").write(src)
+    print("  fix 17 (shared cluster roles kept): upgraded")
     sys.exit(0)
 for anchor in (PREFIX, LOOP_OLD, MATCH_OLD):
     if src.count(anchor) != 1:
