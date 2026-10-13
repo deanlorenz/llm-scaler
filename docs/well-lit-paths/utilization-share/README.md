@@ -2,8 +2,9 @@
 
 > **Experimental.** Measured on H200s with two aggregated models at 1 GPU per
 > replica, one run per configuration ([what was measured](measured.md)). Not
-> yet measured: whole-node or multi-GPU pods, P/D models, a cluster-wide quota,
-> and the GPU cost of the current build. The defaults are starting points.
+> yet measured with this optimizer: whole-node or multi-GPU pods, P/D models
+> (P/D scaling itself is measured on [its own path](../pd-disaggregation/)), a
+> cluster-wide quota, and the GPU cost of the current build. The defaults are starting points.
 
 Several models share one GPU quota, and their traffic peaks at different times.
 Today's optimizer hands the quota out first come, first served: a model that
@@ -219,8 +220,10 @@ two 8B models at 1 GPU per replica:
 | With the headroom cap | First burst 0.07 s against 41 s; second reached its fleet sooner; +34% GPU-seconds, mostly an idle-fill bug. |
 | With the idle-fill fix | First burst 0.07 s against 25.6 s; second no worse; GPU cost lost to a sampling gap. |
 
-A P/D version was attempted and not measured: prefill never scaled
-([why](measured.md#pd-not-measured)). Every number, table and timeline is in
+A P/D version was attempted once and stopped after its `today` arm: prefill
+never left one replica, so prefill and decode never competed for GPUs
+([why](measured.md#pd-not-measured)). A four-role P/D scenario,
+`two-model-shapes-pd`, is ready and has not been run. Every number, table and timeline is in
 [measured](measured.md).
 
 ## Tuning it
