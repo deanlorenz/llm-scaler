@@ -153,9 +153,13 @@ healthy answer:
 ```bash
 # Ask the scaling manager whether anything stops this model parking. No output is the healthy
 # answer. Each reason names a CONTRADICTION between the two halves above.
-# The endpoint is authenticated. Without the token it answers 401 and
-# the grep prints nothing -- which here reads as the healthy answer.
-# curl -f turns a refused read into an error instead.
+# The endpoint is authenticated, against a cluster-wide grant: this is
+# the cluster admin's route, and the install's metrics-reader token
+# passes where the admin's install step created its binding. Without
+# it the endpoint answers 401 and the grep prints nothing -- which here
+# reads as the healthy answer; curl -f turns that into an error.
+# A namespace tenant asks Prometheus instead:
+#   wva_model_scaling_blocked{exported_namespace="<llmd-namespace>"} == 1
 TOKEN=$(kubectl get secret wva-epp-metrics-token -n <wva-namespace> -o jsonpath='{.data.token}' | base64 -d)
 kubectl port-forward -n <wva-namespace> svc/wva-controller-manager-metrics-service 8443:8443 &
 curl -sSfk -H "Authorization: Bearer $TOKEN" https://localhost:8443/metrics | grep wva_model_scaling_blocked

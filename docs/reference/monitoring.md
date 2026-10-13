@@ -245,8 +245,12 @@ correct for what was seen); above it means something the scale target does not
 own is serving the model.
 
 ```bash
-# read them straight off the controller. The endpoint is authenticated:
-# without a token it answers 401, and the grep prints nothing.
+# read them straight off the controller -- the cluster admin's route. The
+# endpoint checks the caller against a cluster-wide grant: the install's
+# metrics-reader token passes where the admin's install step created its
+# binding, and a namespace tenant has none. Without a token it answers 401
+# and the grep prints nothing. A tenant queries Prometheus, scoped to the
+# namespace: {exported_namespace="$NS"} on model series.
 TOKEN=$(kubectl get secret wva-epp-metrics-token -n $NS -o jsonpath='{.data.token}' | base64 -d)
 kubectl port-forward -n $NS svc/wva-controller-manager-metrics-service 8443:8443 &
 curl -sSfk -H "Authorization: Bearer $TOKEN" https://localhost:8443/metrics | grep -E '^wva_'
