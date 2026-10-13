@@ -679,6 +679,10 @@ BENCHMARK_GATEWAY_PROVIDER_NAMESPACE ?= istio-system
 BENCHMARK_DECODE_CPU ?=
 BENCHMARK_DECODE_MEMORY ?=
 BENCHMARK_RENDER_DRAIN ?= true
+# How long one kubectl request in a benchmark recipe may take before it fails
+# with a reason. kubectl has none by default, and a get of model-pvc hung for
+# 7.5 minutes on a stalled API server with nothing printed.
+BENCHMARK_KUBECTL_TIMEOUT ?= 30s
 .PHONY: prepull prepull-status prepull-delete
 prepull: ## Hold IMAGES=<img>[,<img>] on every accelerator node of NAMESPACE=<ns>. PREPULL_NODE_SELECTOR=<key=value> narrows the nodes, PREPULL_TOLERATIONS=<key>[,<key>] adds taints.
 	@test -n "$(IMAGES)" || { echo "prepull: set IMAGES=<image>[,<image>] to exactly what the model server's pod spec names" >&2; exit 1; }
@@ -1527,7 +1531,7 @@ benchmark-standup: ## Stand up the benchmark environment, then install WVA from 
 	@# exactly what happened on pokprod001 -- an FMA guide at 09:25Z, another guide
 	@# over the top at 09:26Z -- and it is why a benchmark once showed a variant
 	@# flat at one replica through a 155-deep queue.
-	@launchers=$$(kubectl get pods -n "$(BENCHMARK_NAMESPACE)" -l app.kubernetes.io/component=launcher --no-headers 2>/dev/null | wc -l | tr -d ' '); \
+	@launchers=$$(kubectl --request-timeout=$(BENCHMARK_KUBECTL_TIMEOUT) get pods -n "$(BENCHMARK_NAMESPACE)" -l app.kubernetes.io/component=launcher --no-headers 2>/dev/null | wc -l | tr -d ' '); \
 	if [ "$${launchers:-0}" -gt 0 ]; then \
 		echo ""; \
 		echo "WARNING: $(BENCHMARK_NAMESPACE) already runs Fast Model Actuation ($$launchers launcher pod(s))."; \
@@ -1548,7 +1552,7 @@ benchmark-standup: ## Stand up the benchmark environment, then install WVA from 
 	@# which cost a benchmark that read a variant flat at one replica through a
 	@# 155-deep queue. prometheus-adapter already declines to overwrite someone
 	@# else's object; the EPP did not.
-	@epps=$$(kubectl get deploy -n "$(BENCHMARK_NAMESPACE)" --no-headers 2>/dev/null | grep -c -- '-epp' || true); \
+	@epps=$$(kubectl --request-timeout=$(BENCHMARK_KUBECTL_TIMEOUT) get deploy -n "$(BENCHMARK_NAMESPACE)" --no-headers 2>/dev/null | grep -c -- '-epp' || true); \
 	if [ "$${epps:-0}" -gt 0 ] && [ "$(BENCHMARK_ALLOW_EPP_REUSE)" != "true" ]; then \
 		echo ""; \
 		echo "ERROR: $(BENCHMARK_NAMESPACE) already runs an EPP ($$epps deployment(s))."; \
@@ -1562,7 +1566,7 @@ benchmark-standup: ## Stand up the benchmark environment, then install WVA from 
 		echo "         - benchmark what is already there:  make benchmark-run BENCHMARK_NAMESPACE=$(BENCHMARK_NAMESPACE)"; \
 		echo "         - re-render deliberately:           BENCHMARK_ALLOW_EPP_REUSE=true"; \
 		echo ""; \
-		kubectl get deploy -n "$(BENCHMARK_NAMESPACE)" --no-headers 2>/dev/null | grep -- '-epp' | sed 's/^/         /'; \
+		kubectl --request-timeout=$(BENCHMARK_KUBECTL_TIMEOUT) get deploy -n "$(BENCHMARK_NAMESPACE)" --no-headers 2>/dev/null | grep -- '-epp' | sed 's/^/         /'; \
 		echo ""; \
 		exit 1; \
 	fi
@@ -1580,7 +1584,7 @@ benchmark-standup: ## Stand up the benchmark environment, then install WVA from 
 		"$(CURDIR)/hack/benchmark/scenarios/$(BENCHMARK_SPEC).yaml"
 	@if [ "$(BENCHMARK_DIRECT_KEDA)" = "true" ]; then \
 		echo "Direct-KEDA mode: this feature isn't in a released llm-d-benchmark tag yet — upgrading the llm-d-benchmark checkout to '$(BENCHMARK_REPO_REF)' (unreleased)..."; \
-		if ! kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1; then \
+		if ! kubectl --request-timeout=$(BENCHMARK_KUBECTL_TIMEOUT) get crd scaledobjects.keda.sh >/dev/null 2>&1; then \
 			echo "ERROR: KEDA is not installed on this cluster (scaledobjects.keda.sh CRD not found)."; \
 			echo "Install KEDA first (e.g. 'make deploy-e2e-infra SCALER_BACKEND=keda ENVIRONMENT=$(ENVIRONMENT)', or your platform's KEDA operator) and re-run."; \
 			exit 1; \
@@ -1627,7 +1631,7 @@ benchmark-standup: ## Stand up the benchmark environment, then install WVA from 
 			echo "WARNING: could not read the engine image from $(BENCHMARK_REPO_DIR)/config/templates/values/defaults.yaml; not pre-pulling (set BENCHMARK_PREPULL_IMAGES=<image>)"; \
 		else \
 			echo "Holding the engine image on the accelerator nodes: $$imgs (BENCHMARK_PREPULL=false skips; make prepull-status NAMESPACE=$(BENCHMARK_NAMESPACE) checks)"; \
-			kubectl create namespace "$(BENCHMARK_NAMESPACE)" --dry-run=client -o yaml | kubectl apply -f - >/dev/null \
+			kubectl --request-timeout=$(BENCHMARK_KUBECTL_TIMEOUT) create namespace "$(BENCHMARK_NAMESPACE)" --dry-run=client -o yaml | kubectl --request-timeout=$(BENCHMARK_KUBECTL_TIMEOUT) apply -f - >/dev/null \
 				&& bash deploy/prepull.sh apply -n "$(BENCHMARK_NAMESPACE)" $(PREPULL_ARGS) \
 				$$(printf '%s' "$$imgs" | tr ',' '\n' | sed 's/^/--image /' | tr '\n' ' ') \
 				|| echo "WARNING: pre-pull did not apply; the standup continues without it"; \
@@ -1762,10 +1766,10 @@ benchmark-standup: ## Stand up the benchmark environment, then install WVA from 
 		[ -n "$$img" ] || img=$$(bash hack/benchmark/engine_image.sh "$(BENCHMARK_REPO_DIR)" || true); \
 		img=$${img%%,*}; \
 		[ -n "$$img" ] || { echo "benchmark-standup: cannot read the engine image from the clone for the engine-cache preparer; set BENCHMARK_PREPULL_IMAGES=<image>" >&2; exit 1; }; \
-		kubectl create namespace "$(BENCHMARK_NAMESPACE)" --dry-run=client -o yaml | kubectl apply -f - >/dev/null; \
+		kubectl --request-timeout=$(BENCHMARK_KUBECTL_TIMEOUT) create namespace "$(BENCHMARK_NAMESPACE)" --dry-run=client -o yaml | kubectl --request-timeout=$(BENCHMARK_KUBECTL_TIMEOUT) apply -f - >/dev/null; \
 		seed="$(BENCHMARK_ENGINE_CACHE_SEED)"; \
 		if [ "$$seed" = auto ]; then \
-			if kubectl get pvc -n "$(BENCHMARK_NAMESPACE)" workload-pvc >/dev/null 2>&1; then seed=workload-pvc:engine-cache; else seed=""; fi; \
+			if kubectl --request-timeout=$(BENCHMARK_KUBECTL_TIMEOUT) get pvc -n "$(BENCHMARK_NAMESPACE)" workload-pvc >/dev/null 2>&1; then seed=workload-pvc:engine-cache; else seed=""; fi; \
 		fi; \
 		[ "$$seed" != none ] || seed=""; \
 		[ -z "$$seed" ] || echo "Seeding the node-local engine cache from $$seed (BENCHMARK_ENGINE_CACHE_SEED=none skips)"; \
@@ -1799,7 +1803,7 @@ benchmark-standup: ## Stand up the benchmark environment, then install WVA from 
 	@# clear the resulting stale binding. Re-apply them here so standing the
 	@# environment up does not quietly restore a configuration in which FMA
 	@# benchmarking yields no data. Skipped when FMA is not present.
-	@if kubectl get deploy -n $(BENCHMARK_NAMESPACE) -o name 2>/dev/null | grep -q dual-pods-controller; then \
+	@if kubectl --request-timeout=$(BENCHMARK_KUBECTL_TIMEOUT) get deploy -n $(BENCHMARK_NAMESPACE) -o name 2>/dev/null | grep -q dual-pods-controller; then \
 		$(MAKE) --no-print-directory benchmark-fma-fixups BENCHMARK_NAMESPACE=$(BENCHMARK_NAMESPACE); \
 	fi
 
@@ -1831,7 +1835,7 @@ benchmark-standup: ## Stand up the benchmark environment, then install WVA from 
 		WVA_WORKLOAD_PATCH_APPLY=true \
 		WVA_WORKLOAD_PATCH_FILE=$(BENCHMARK_WORKSPACE)/wva-workload-patch.yaml || \
 		echo "  WARNING: could not patch the model servers; scale-downs in this run will truncate in-flight requests."
-	@for d in $$(kubectl get deploy -n $(BENCHMARK_NAMESPACE) -o name 2>/dev/null | grep -E 'decode|prefill'); do \
+	@for d in $$(kubectl --request-timeout=$(BENCHMARK_KUBECTL_TIMEOUT) get deploy -n $(BENCHMARK_NAMESPACE) -o name 2>/dev/null | grep -E 'decode|prefill'); do \
 		kubectl rollout status $$d -n $(BENCHMARK_NAMESPACE) --timeout=$(BENCHMARK_DRAIN_ROLLOUT_TIMEOUT)s || \
 			echo "  WARNING: $$d did not settle; the run may start against restarting pods."; \
 	done
@@ -1854,7 +1858,7 @@ benchmark-standup: ## Stand up the benchmark environment, then install WVA from 
 	@# and sit Pending forever on a cluster with no RWX class, and the accessModes
 	@# field still reads ReadWriteMany because it is the request.
 	@echo "Model cache:"
-	@found=0; listed=$$(kubectl get pvc -n $(BENCHMARK_NAMESPACE) \
+	@found=0; listed=$$(kubectl --request-timeout=$(BENCHMARK_KUBECTL_TIMEOUT) get pvc -n $(BENCHMARK_NAMESPACE) \
 		-o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>&1) || listed="__ERR__$$listed"; \
 	case "$$listed" in \
 		__ERR__*) \
@@ -1866,10 +1870,10 @@ benchmark-standup: ## Stand up the benchmark environment, then install WVA from 
 	if [ "$$found" = 0 ]; then \
 		for pvc in $$(printf '%s\n' "$$listed" | grep -iE 'model|weight|cache' || true); do \
 			found=1; \
-			modes=$$(kubectl get pvc $$pvc -n $(BENCHMARK_NAMESPACE) -o jsonpath='{.spec.accessModes[*]}' 2>/dev/null || true); \
-			phase=$$(kubectl get pvc $$pvc -n $(BENCHMARK_NAMESPACE) -o jsonpath='{.status.phase}' 2>/dev/null || true); \
-			size=$$(kubectl get pvc $$pvc -n $(BENCHMARK_NAMESPACE) -o jsonpath='{.status.capacity.storage}' 2>/dev/null || true); \
-			sc=$$(kubectl get pvc $$pvc -n $(BENCHMARK_NAMESPACE) -o jsonpath='{.spec.storageClassName}' 2>/dev/null || true); \
+			modes=$$(kubectl --request-timeout=$(BENCHMARK_KUBECTL_TIMEOUT) get pvc $$pvc -n $(BENCHMARK_NAMESPACE) -o jsonpath='{.spec.accessModes[*]}' 2>/dev/null || true); \
+			phase=$$(kubectl --request-timeout=$(BENCHMARK_KUBECTL_TIMEOUT) get pvc $$pvc -n $(BENCHMARK_NAMESPACE) -o jsonpath='{.status.phase}' 2>/dev/null || true); \
+			size=$$(kubectl --request-timeout=$(BENCHMARK_KUBECTL_TIMEOUT) get pvc $$pvc -n $(BENCHMARK_NAMESPACE) -o jsonpath='{.status.capacity.storage}' 2>/dev/null || true); \
+			sc=$$(kubectl --request-timeout=$(BENCHMARK_KUBECTL_TIMEOUT) get pvc $$pvc -n $(BENCHMARK_NAMESPACE) -o jsonpath='{.spec.storageClassName}' 2>/dev/null || true); \
 			echo "  $$pvc  $${size:-<unbound>}  [$${modes:-?}]  $${phase:-?}  class=$${sc:-<cluster default>}"; \
 			if [ "$$phase" != Bound ]; then \
 				echo "  WARNING: $$pvc is $${phase:-unreadable}, not Bound. Nothing can mount it, so the"; \
@@ -1911,7 +1915,7 @@ benchmark-deploy-wva: ## Install WVA from deploy/ into BENCHMARK_NAMESPACE (name
 	@# A scenario that still installs WVA itself (the upstream ones do) would leave
 	@# two controllers optimizing the same namespace and writing the same replica
 	@# counts. Refuse rather than produce a benchmark of the two of them fighting.
-	@existing=$$(kubectl get deploy -n $(BENCHMARK_NAMESPACE) \
+	@existing=$$(kubectl --request-timeout=$(BENCHMARK_KUBECTL_TIMEOUT) get deploy -n $(BENCHMARK_NAMESPACE) \
 		-l app.kubernetes.io/name=workload-variant-autoscaler \
 		-o name 2>/dev/null | grep -v '/wva-controller-manager$$' || true); \
 	if [ -n "$$existing" ]; then \
@@ -1927,7 +1931,7 @@ benchmark-deploy-wva: ## Install WVA from deploy/ into BENCHMARK_NAMESPACE (name
 	@# you are iterating on your own build and wrong when the namespace belongs to a
 	@# run somebody else is watching -- the image changes underneath them with no
 	@# warning. Say what is about to happen, and name the way out.
-	@ours=$$(kubectl get deploy -n $(BENCHMARK_NAMESPACE) wva-controller-manager \
+	@ours=$$(kubectl --request-timeout=$(BENCHMARK_KUBECTL_TIMEOUT) get deploy -n $(BENCHMARK_NAMESPACE) wva-controller-manager \
 		-o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true); \
 	if [ -n "$$ours" ]; then \
 		echo ""; \
@@ -1955,8 +1959,8 @@ benchmark-deploy-wva: ## Install WVA from deploy/ into BENCHMARK_NAMESPACE (name
 	@# the controller beside it.
 	@target=$(BENCHMARK_WVA_TARGET); \
 	if [ "$(ENVIRONMENT)" != "openshift" ] && \
-	   kubectl api-resources --api-group=route.openshift.io -o name >/dev/null 2>&1 && \
-	   [ -n "$$(kubectl api-resources --api-group=route.openshift.io -o name 2>/dev/null)" ]; then \
+	   kubectl --request-timeout=$(BENCHMARK_KUBECTL_TIMEOUT) api-resources --api-group=route.openshift.io -o name >/dev/null 2>&1 && \
+	   [ -n "$$(kubectl --request-timeout=$(BENCHMARK_KUBECTL_TIMEOUT) api-resources --api-group=route.openshift.io -o name 2>/dev/null)" ]; then \
 		echo "OpenShift detected; installing with the OpenShift overlay (cluster-monitoring-view)."; \
 		target=deploy-wva-on-openshift; \
 	fi; \
@@ -2301,7 +2305,7 @@ benchmark-add-variant: ## Add a secondary WVA variant to the running benchmark (
 	@# template, so everything it touched is rolling when it returns. Adding a
 	@# variant to a RUNNING benchmark and returning mid-restart puts the restart
 	@# inside the measurement window.
-	@for d in $$(kubectl get deploy -n $(BENCHMARK_NAMESPACE) -o name 2>/dev/null | grep -E 'decode|prefill'); do \
+	@for d in $$(kubectl --request-timeout=$(BENCHMARK_KUBECTL_TIMEOUT) get deploy -n $(BENCHMARK_NAMESPACE) -o name 2>/dev/null | grep -E 'decode|prefill'); do \
 		kubectl rollout status $$d -n $(BENCHMARK_NAMESPACE) --timeout=$(BENCHMARK_DRAIN_ROLLOUT_TIMEOUT)s || \
 			echo "  WARNING: $$d did not settle."; \
 	done
@@ -2312,7 +2316,7 @@ benchmark-enable-v2-saturation: ## Enable WVA saturation V2 analyzer (apply conf
 		echo "ERROR: BENCHMARK_NAMESPACE is required. Usage: make benchmark-enable-v2-saturation BENCHMARK_NAMESPACE=<namespace>"; \
 		exit 1; \
 	fi
-	kubectl apply -n $(BENCHMARK_NAMESPACE) -f $(WVA_V2_SATURATION_CONFIGMAP)
+	kubectl --request-timeout=$(BENCHMARK_KUBECTL_TIMEOUT) apply -n $(BENCHMARK_NAMESPACE) -f $(WVA_V2_SATURATION_CONFIGMAP)
 	$(MAKE) benchmark-restart-controller BENCHMARK_NAMESPACE=$(BENCHMARK_NAMESPACE)
 
 .PHONY: benchmark-restart-controller
@@ -2416,7 +2420,7 @@ benchmark-teardown: ## Tear down the benchmark environment (set BENCHMARK_NAMESP
 	@if [ "$(BENCHMARK_DIRECT_KEDA)" != "true" ] && [ "$(BENCHMARK_WVA_DEPLOY)" = "true" ]; then \
 		$(MAKE) $(BENCHMARK_WVA_UNDEPLOY_TARGET) \
 			WVA_NS=$(BENCHMARK_NAMESPACE) WVA_SCOPE=namespace || \
-		echo "WARNING: WVA undeploy reported a failure; check for leftovers with 'kubectl get clusterrole,clusterrolebinding | grep wva'"; \
+		echo "WARNING: WVA undeploy reported a failure; check for leftovers with 'kubectl --request-timeout=$(BENCHMARK_KUBECTL_TIMEOUT) get clusterrole,clusterrolebinding | grep wva'"; \
 	fi
 	@# The controller is removed by the step ABOVE, and that step is authoritative.
 	@#
@@ -2603,6 +2607,8 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@bash hack/check-weights-manifests.sh
 	@echo "Checking what enginecache.sh and engine_cache_claim.sh actually emit..."
 	@bash hack/check-enginecache-manifests.sh
+	@echo "Checking every benchmark recipe's kubectl requests time out..."
+	@bash hack/check-make-kubectl-timeouts.sh
 	@echo "Checking what scenario_overrides.sh does to every shipped scenario..."
 	@bash hack/check-scenario-overrides.sh
 	@echo "Checking every scrape interval is 10s, the harness default included..."

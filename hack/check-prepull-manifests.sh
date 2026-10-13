@@ -226,6 +226,9 @@ cat > "$T/bin/kubectl" <<EOF
 #!/usr/bin/env bash
 # stub: the reads and writes prepull.sh and the standup step make, answered
 # from fixtures; every call is recorded and its scope arguments checked.
+# The benchmark recipes put --request-timeout first; it is recorded apart and
+# dropped, so the dispatch below reads the verb.
+case "\$1" in --request-timeout=*) printf '%s\n' "\$1" >> "$T/timeouts"; shift ;; esac
 printf '%s\n' "\$*" >> "$T/calls"
 ARGV=" \$* "   # the call's own argv; inside want/refuse \$* would be THEIR arguments
 want() {  # the argv must contain this exact argument pair
@@ -423,7 +426,7 @@ grep -q '^  node-running ' "$T/make-env.out" && ok "make prepull-status takes an
 # the apply, BENCHMARK_PREPULL=false skips, BENCHMARK_PREPULL_IMAGES overrides
 # tr -d: a CRLF checkout (Windows) turns each recipe continuation into a
 # backslash-CR, which bash does not read as a continuation.
-block="$(tr -d '\r' < Makefile | sed -n '/The engine image on every accelerator node BEFORE/,/Lives in a script, not inline here/p' | sed '1d;$d' | grep -v '^	@#' | sed 's/^	@//; s/\$\$/$/g; s/\$(BENCHMARK_PREPULL)/${BENCHMARK_PREPULL}/g; s/\$(BENCHMARK_PREPULL_IMAGES)/${BENCHMARK_PREPULL_IMAGES}/g; s/\$(BENCHMARK_REPO_DIR)/${BENCHMARK_REPO_DIR}/g; s/\$(BENCHMARK_NAMESPACE)/${BENCHMARK_NAMESPACE}/g; s/\$(PREPULL_ARGS)//g')"
+block="$(tr -d '\r' < Makefile | sed -n '/The engine image on every accelerator node BEFORE/,/Lives in a script, not inline here/p' | sed '1d;$d' | grep -v '^	@#' | sed 's/^	@//; s/\$\$/$/g; s/\$(BENCHMARK_PREPULL)/${BENCHMARK_PREPULL}/g; s/\$(BENCHMARK_PREPULL_IMAGES)/${BENCHMARK_PREPULL_IMAGES}/g; s/\$(BENCHMARK_REPO_DIR)/${BENCHMARK_REPO_DIR}/g; s/\$(BENCHMARK_NAMESPACE)/${BENCHMARK_NAMESPACE}/g; s/\$(BENCHMARK_KUBECTL_TIMEOUT)/${BENCHMARK_KUBECTL_TIMEOUT}/g; s/\$(PREPULL_ARGS)//g')"
 [ -n "$block" ] || fail "could not extract the benchmark-standup pre-pull block from the Makefile"
 # A make variable the substitution list above does not know would reach
 # bash as a command substitution -- `$(CURDIR)` runs a command named CURDIR,
@@ -435,9 +438,10 @@ if printf '%s' "$block" | grep -Eq '[$][(][A-Z_]+[)]'; then
 else
     ok "standup: the extracted block holds no untranslated make reference (a shell substitution is lowercase)"
 fi
-run_block() { env BENCHMARK_NAMESPACE=check-ns BENCHMARK_REPO_DIR="$T/clone" PATH="$STUB_PATH" "$@" bash -c "$block"; }
-: > "$T/calls"
+run_block() { env BENCHMARK_NAMESPACE=check-ns BENCHMARK_REPO_DIR="$T/clone" BENCHMARK_KUBECTL_TIMEOUT=30s PATH="$STUB_PATH" "$@" bash -c "$block"; }
+: > "$T/calls"; : > "$T/timeouts"
 run_block BENCHMARK_PREPULL=true BENCHMARK_PREPULL_IMAGES= > "$T/standup.out" 2>&1 || fail "standup block failed: $(cat "$T/standup.out")"
+[ "$(sort -u "$T/timeouts")" = "--request-timeout=30s" ] && ok "standup: the pre-pull step's kubectl requests carry the request timeout" || fail "standup: request timeouts seen: '$(sort -u "$T/timeouts" | tr '\n' ' ')'"
 if grep -q "^create namespace check-ns" "$T/calls" && grep -q "^apply -n check-ns" "$T/calls" \
    && [ "$(grep -n '^create namespace' "$T/calls" | head -1 | cut -d: -f1)" -lt "$(grep -n '^apply -n' "$T/calls" | head -1 | cut -d: -f1)" ]; then
     ok "standup: the namespace is created before the pre-pull apply"
