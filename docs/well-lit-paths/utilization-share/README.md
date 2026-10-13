@@ -1,10 +1,10 @@
 # Share one GPU quota between models
 
 > **Experimental.** Measured on H200s with two aggregated models at 1 GPU per
-> replica, one run per configuration ([what was measured](measured.md)). The
-> short legs: no measurement yet of whole-node or multi-GPU pods, P/D models
+> replica, one run per configuration ([what was measured](measured.md)). Not
+> yet measured with this optimizer: whole-node or multi-GPU pods, P/D models
 > (P/D scaling itself is measured on [its own path](../pd-disaggregation/)), a
-> cluster-wide quota, or the GPU cost of the current build. The defaults are
+> cluster-wide quota, and the GPU cost of the current build. The defaults are
 > starting points.
 
 Several models share one GPU quota, and their traffic peaks at different times.
@@ -122,13 +122,14 @@ values in force.
 
 ```promql
 # the mode in force: exactly one series is 1 — off, invalid, shadow or active
-wva_utilization_share_mode{namespace="<namespace>"} == 1
+wva_utilization_share_mode{namespace="<controller-namespace>"} == 1
 
 # once active: transfers that ended, by outcome (done is healthy)
-sum by (outcome) (increase(wva_utilization_share_transfers_total{scope="<namespace>"}[1h]))
+sum by (outcome) (increase(wva_utilization_share_transfers_total{scope="<quota-namespace>"}[1h]))
 ```
 
-Rising `aborted`, `fill-timeout` or `wrong-pod` outcomes mean transfers are not
+`namespace` on the mode is the controller's namespace and `scope` is the
+quota's; on a namespace-scoped install both are yours. Rising `aborted`, `fill-timeout` or `wrong-pod` outcomes mean transfers are not
 landing. The guide's [Verification](../../guides/utilization-share/#verification)
 has the check for each rollout step, both ways to read the metrics (Prometheus,
 scoped to your namespace, as a tenant; the controller's endpoint as a cluster
