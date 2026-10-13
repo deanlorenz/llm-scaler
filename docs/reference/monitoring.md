@@ -245,9 +245,11 @@ correct for what was seen); above it means something the scale target does not
 own is serving the model.
 
 ```bash
-# read them straight off the controller
-kubectl port-forward -n $NS svc/wva-controller-manager-metrics-service 8443:8443
-curl -sk https://localhost:8443/metrics | grep -E '^wva_'
+# read them straight off the controller. The endpoint is authenticated:
+# without a token it answers 401, and the grep prints nothing.
+TOKEN=$(kubectl get secret wva-epp-metrics-token -n $NS -o jsonpath='{.data.token}' | base64 -d)
+kubectl port-forward -n $NS svc/wva-controller-manager-metrics-service 8443:8443 &
+curl -sSfk -H "Authorization: Bearer $TOKEN" https://localhost:8443/metrics | grep -E '^wva_'
 ```
 
 **What would the utilization-share optimizer do, and is it doing it?** — only

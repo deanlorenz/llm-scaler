@@ -153,8 +153,14 @@ kubectl edit configmap wva-scaling-policy-config -n <policy-namespace>
 # cannot cover every need, and no rebalance fixes that.
 # The leader publishes the mode; with more than one controller replica,
 # port-forward to the leader pod, or query Prometheus.
+# The endpoint is authenticated: without a token it answers 401, and a
+# grep over the reply prints nothing, which reads like "no series". The
+# install's metrics-reader token is in a Secret of the controller's
+# namespace, readable by that namespace's admin; the PromQL below needs
+# no token at all. curl -f makes a refused read an error, not silence.
+TOKEN=$(kubectl get secret wva-epp-metrics-token -n <wva-namespace> -o jsonpath='{.data.token}' | base64 -d)
 kubectl port-forward -n <wva-namespace> svc/wva-controller-manager-metrics-service 8443:8443 &
-curl -sk https://localhost:8443/metrics | grep -E '^wva_utilization_share_(mode|actionable|replicas_to_move|headroom|spare_gpus)'
+curl -sSfk -H "Authorization: Bearer $TOKEN" https://localhost:8443/metrics | grep -E '^wva_utilization_share_(mode|actionable|replicas_to_move|headroom|spare_gpus)'
 kubectl logs -n <wva-namespace> deploy/wva-controller-manager \
   | grep -E 'Utilization share: (would rebalance|invalid optimizer block)'
 # The same in PromQL:
@@ -192,8 +198,9 @@ active mode targets more headroom than shadow reported.
 # reports it. A model held back shows a reason on wva_model_scaling_blocked.
 # Every transfer is also an Event on the Deployment or LeaderWorkerSet it
 # moved, in the model's namespace. Warnings are the ones to read.
-curl -sk https://localhost:8443/metrics | grep -E '^wva_utilization_share_(mode|transfers_total|in_flight)'
-curl -sk https://localhost:8443/metrics | grep '^wva_model_scaling_blocked'
+# TOKEN and the port-forward are the ones from the shadow check.
+curl -sSfk -H "Authorization: Bearer $TOKEN" https://localhost:8443/metrics | grep -E '^wva_utilization_share_(mode|transfers_total|in_flight)'
+curl -sSfk -H "Authorization: Bearer $TOKEN" https://localhost:8443/metrics | grep '^wva_model_scaling_blocked'
 kubectl get events -n <llmd-namespace> --field-selector reason=UtilizationShareGiving
 kubectl get events -n <llmd-namespace> --field-selector reason=UtilizationShareReceived
 kubectl get events -n <llmd-namespace> --field-selector type=Warning | grep UtilizationShare
