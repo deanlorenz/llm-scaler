@@ -27,7 +27,7 @@ command -v yq >/dev/null 2>&1 || {
 # every function being missing.
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
-for lib in common.sh cli.sh infra_wva.sh; do
+for lib in common.sh cli.sh infra_wva.sh scaledobject.sh; do
     tr -d '\r' < "$ROOT/deploy/lib/$lib" > "$WORK/$lib"
 done
 BLUE='' GREEN='' YELLOW='' RED='' NC=''
@@ -37,16 +37,18 @@ source "$WORK/common.sh"
 source "$WORK/cli.sh"
 # shellcheck source=/dev/null
 source "$WORK/infra_wva.sh"
+# shellcheck source=/dev/null
+source "$WORK/scaledobject.sh"
 
 for fn in wva_split_image_ref wva_image_pull_policy wva_warn_floating_image \
-          wva_warn_prometheus_tls wva_prometheus_scraper_sa; do
+          wva_warn_prometheus_tls wva_prometheus_scraper_sa render_default_scaledobject; do
     declare -F "$fn" >/dev/null || {
         printf 'FATAL: %s is not defined after sourcing the library.\n' "$fn" >&2
         exit 1
     }
 done
 
-EXPECT_CASES=27
+EXPECT_CASES=29
 RAN=0
 FAILED=0
 
@@ -183,6 +185,28 @@ check 'scraper: no CR, DEPLOY_PROMETHEUS -> ours, in MONITORING_NAMESPACE' \
 check 'scraper: no CR and none deployed -> nobody' '' \
     "$(scraper '' 'https://prom.example:9090' false)"
 unset -f kubectl
+
+# ----------------------------------------------------------------------------
+# The shipped sample ScaledObject scales like the ones the installer writes
+# ----------------------------------------------------------------------------
+# The sample is what people copy. It had a 0s scale-down window at 100%/30s,
+# while the scaler answers 0 until WVA's first decision -- so a copied sample
+# could drop a serving workload to its floor before WVA had looked at it.
+gen_behavior="$(
+    unset WVA_SO_SCALE_UP_STABILIZATION WVA_SO_SCALE_UP_PERIOD \
+          WVA_SO_SCALE_DOWN_STABILIZATION WVA_SO_SCALE_DOWN_PERIOD
+    render_default_scaledobject ns Deployment t m addr:9090 1 10 '' '' \
+        | yq -o=json -I=0 '.spec.advanced.horizontalPodAutoscalerConfig.behavior | sort_keys(..)'
+)"
+sample_behavior="$(tr -d '\r' < "$ROOT/config/samples/keda/external-scaler/scaledobject.yaml" \
+    | yq -o=json -I=0 '.spec.advanced.horizontalPodAutoscalerConfig.behavior | sort_keys(..)')"
+[ -n "$gen_behavior" ] && [ "$gen_behavior" != null ] || {
+    printf 'FATAL: the generator rendered no behavior block.\n' >&2; exit 1; }
+check 'sample ScaledObject: behavior equals the generator default' "$gen_behavior" "$sample_behavior"
+# Named outright as well, so a generator that changed its own default to 0
+# does not pass by agreement.
+check 'sample ScaledObject: scale-down waits 300s' '300' \
+    "$(printf '%s' "$sample_behavior" | yq -p=json '.scaleDown.stabilizationWindowSeconds')"
 
 # ----------------------------------------------------------------------------
 
