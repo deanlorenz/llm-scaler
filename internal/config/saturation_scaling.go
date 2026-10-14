@@ -468,16 +468,15 @@ func (c *ScalingPolicy) Normalize() error {
 	return nil
 }
 
-// ApplyDefaults fills in zero-valued fields with their defaults.
-// The capacity thresholds (KvCacheThreshold, QueueLengthThreshold) are always
-// defaulted when zero — the analyzer needs them to size per-replica capacity.
-// The scaling band (ScaleUpThreshold, ScaleDownBoundary) and the Analyzers list
-// are defaulted only for V2-shaped configs, so that an entry which does not set
-// them keeps them zero — this is deliberate: entries are ApplyDefaults()'d
-// individually at parse time, and defaulting the band on a partial override
-// would clobber a tuned global value during Merge(). The final resolved config
-// is instead calibrated post-merge via ApplyV2ThresholdDefaults(). Must be
-// called before Validate() to handle omitempty zero-values correctly.
+// ApplyDefaults fills in zero-valued fields of a RESOLVED policy with their
+// defaults. Priority and the capacity thresholds (KvCacheThreshold,
+// QueueLengthThreshold) are always defaulted when zero — the analyzer needs them
+// to size per-replica capacity. The scaling band (ScaleUpThreshold,
+// ScaleDownBoundary) and the Analyzers list are defaulted only for V2-shaped
+// configs (see ApplyEntryDefaults). A stored ConfigMap entry gets
+// ApplyEntryDefaults at parse time instead, so the fields it leaves out stay
+// zero and Merge() inherits them; the final resolved config is defaulted here
+// and calibrated post-merge via ApplyV2ThresholdDefaults().
 func (c *ScalingPolicy) ApplyDefaults() {
 	if c.Priority == 0 {
 		c.Priority = DefaultPriority
