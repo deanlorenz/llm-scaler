@@ -177,6 +177,8 @@ without one.
 | `WVA_SO_SCALE_UP_STABILIZATION` | `stabilizationWindowSeconds` for scale-up. This is the knob that delays a scale-up: HPA takes its most conservative recommendation across the window. `0` means act on the current one | `0` |
 | `WVA_SO_SCALE_DOWN_PERIOD` | `periodSeconds` on the scale-down policy | `120` |
 | `WVA_SO_SCALE_DOWN_STABILIZATION` | `stabilizationWindowSeconds` for scale-down — how long demand must stay low before a replica is removed | `300` |
+| `WVA_SO_FALLBACK` | `true` writes a KEDA `fallback` (`replicas` = the object's `minReplicaCount`, `behavior: currentReplicasIfHigher`) into every generated ScaledObject with a `minReplicaCount` of 1 or more, and into such an adopted one that has none. It covers a controller that is down or unreachable. A floor of `0` never gets one: KEDA would park a serving model on any trigger error. Nor does a cluster whose KEDA lacks `fallback.behavior` (before 2.17), checked at plan and apply time with `kubectl explain` (the OpenAPI any authenticated user may read) and then the CRD; a check that cannot answer writes none either, shown as `(no fallback: KEDA version unknown)`. A tenant install normally gets its answer from the OpenAPI. `false` leaves it out everywhere. See [the fallback](scaledobject-trigger.md#before-the-first-decision-and-the-fallback) | `true` |
+| `WVA_SO_FALLBACK_FAILURES` | `failureThreshold` of that fallback. KEDA applies the fallback once more than this many reads of the metric by the HPA (about one every 15 s) have failed in a row. A whole number from `1` to `2147483647`, no leading zero | `3` |
 
 `WVA_DEFAULT_SO_MIN` and `_MAX` are only the values the plan is *written* with.
 What gets applied is what the file says when you apply it, per entry.
@@ -194,7 +196,14 @@ cold start, and keeping one too long only costs money.
 
 **Adopting an existing ScaledObject leaves its behaviour alone.** `apply: adopt`
 repoints the triggers and bounds; polling interval, cooldown, fallback and
-`behavior` stay as whoever tuned them left them.
+`behavior` stay as whoever tuned them left them. The one addition: an object
+with no `fallback` at all gets the default one, unless `WVA_SO_FALLBACK=false`,
+its floor is `0`, or KEDA is older than 2.17. One that has a fallback keeps it
+unchanged, with a warning if it is `replicas: 0` on a floor of `0` or if its
+`replicas` is above the new floor. The adopted trigger is written with
+`metricType: AverageValue`, and keeps every key set on it by hand
+(`defaultOutputTokens`, `warmPool`, ...). An object the installer cannot read
+is not patched at all, with a warning.
 
 Set them on a deploy to do this during install:
 
@@ -248,7 +257,7 @@ node, so a scale-up never starts with a pull. Full description in
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `IMAGES` | Comma-separated image references, exactly as the model server's pod spec names them | *(required for `prepull`)* |
-| `PREPULL_NODE_SELECTOR` | `key=value` narrowing the nodes to what the model servers select on. Empty: every node carrying a known GPU product label (`deploy/lib/accelerator_nodes.sh`) | *(empty)* |
+| `PREPULL_NODE_SELECTOR` | One or more `key=value` pairs, comma-separated (`k1=v1,k2=v2`), set to what the model servers select on; a node must carry every pair. An explicit selector replaces the default (nodes carrying a known GPU product label, `deploy/lib/accelerator_nodes.sh`); include the product label among the pairs to stay on GPU nodes. A value may be empty, and then selects the nodes whose label is empty (`gpu.nvidia.com/model=` is CoreWeave's CPU nodes, not its GPU nodes). Empty: the default | *(empty)* |
 | `PREPULL_TOLERATIONS` | Comma-separated taint keys the holder tolerates beyond `nvidia.com/gpu` | *(empty)* |
 | `BENCHMARK_PREPULL` | `false` makes `benchmark-standup` skip the pre-pull | `true` |
 | `BENCHMARK_PREPULL_IMAGES` | What `benchmark-standup` holds instead of the image the harness pins | *(the harness's pin)* |
@@ -267,7 +276,7 @@ own disk. Full description in
 | `WEIGHTS_PATH` | Absolute directory on the node, one per namespace (under `/var` on RHCOS, e.g. `/var/mnt/weights/<ns>`; system paths refused); the model lands under `<path>/models/<id>` | *(required for `weights`)* |
 | `WEIGHTS_IMAGE` | Image to download with -- any image carrying `huggingface_hub`, i.e. the engine image | *(required for `weights`)* |
 | `WEIGHTS_HF_TOKEN_SECRET` | `<secret>[/<key>]` holding a Hugging Face token, for gated models (key defaults to `HF_TOKEN`) | *(none)* |
-| `WEIGHTS_CAPACITY` | The claim's declared capacity -- no disk limit (hostPath has none), but a `requests.storage` quota charges it; set it near the model's size in a quota'd project | `1Ti` |
+| `WEIGHTS_CAPACITY` | The claim's declared capacity -- no disk limit (hostPath has none), but a `requests.storage` quota charges it; set it near the model's size in a quota'd project. Unset on a re-run, an existing claim keeps its size; set to another size, the re-run is refused (a node-local claim cannot be resized -- scale the model servers using the claim to 0, then `make weights-delete WEIGHTS_MODEL=<id> NAMESPACE=<ns>` first; without `WEIGHTS_MODEL` it deletes every model's claim in the namespace) | `1Ti` |
 | `WEIGHTS_NODE_SELECTOR` | As `PREPULL_NODE_SELECTOR` | `$(PREPULL_NODE_SELECTOR)` |
 | `WEIGHTS_TOLERATIONS` | As `PREPULL_TOLERATIONS` | `$(PREPULL_TOLERATIONS)` |
 | `BENCHMARK_MODEL_HOSTPATH` | A directory on the node: `benchmark-standup` then binds the harness's model claim to it and has the harness download the model on every accelerator node (the placement `make prepull` uses, `PREPULL_TOLERATIONS` included) before the engines start. Empty: the shared volume | *(empty)* |
@@ -419,7 +428,10 @@ Anything that needs a decision it refuses with `Unavailable`, which KEDA reports
 as a trigger error and does not act on. It also drops the connection every few
 seconds, so KEDA re-dials and reaches the leader. A single replica behaves the
 same during a rollout, between the new pod being Ready and the old pod releasing
-the lease.
+the lease. Until its first cycle has decided a model, the new leader answers
+`GetMetrics` with the target's current replica count, so the HPA holds through
+the hand-off ([before the first
+decision](scaledobject-trigger.md#before-the-first-decision-and-the-fallback)).
 
 ```bash
 make deploy-wva-on-k8s WVA_REPLICAS=2
@@ -439,8 +451,9 @@ namespace-scoped installs side by side each have their own budget.
 | `WVA_STICKY_SCALE_DOWN` | Hold a published scale-down against demand noise until utilization at the published count would reach the scale-up threshold, so the fleet actually descends. Off, a model idling near the scale-down boundary flips its target N ↔ N−1 cycle to cycle and KEDA's 300 s window keeps the N-th replica for as long as the noise lasts. Turn off only to compare | `true` |
 | `WVA_LOG_LEVEL` | **Inert.** The installer sets it but nothing reads it, and the controller's `LOG_LEVEL` env var is not read either. Verbosity is the controller's `--v=N` argument (default `2`; `4` is debug) — edit the Deployment's args to change it | `info` |
 | `LEARNED_STATE_EPISODE_GAP` | How long a gap in saturated observations before the next one starts a **new window** instead of blending into the old one. A variant that goes quiet over a weekend should not average Monday's capacity with Friday's | `24h` |
-| `LEARNED_STATE_VARIANT_TIMEOUT` | How long **per-variant** learned state — the fitted ITL window and its baseline, the replica start estimate — is kept after the variant stops being reported. Shorten it and a fleet that parks re-measures sooner on wake | `24h` |
-| `LEARNED_STATE_BUCKET_RETENTION` | How long a **bucket-keyed** window — the k2 history and the mu windows the demand floor prices from — is kept from when it was last read. Longer than the timeout on purpose: a retained measurement is the lowest capacity figure available for its bucket, and dropping it falls through to an estimate that orders *fewer* replicas | `168h` (7 days) |
+| `LEARNED_STATE_VARIANT_TIMEOUT` | How long **per-variant** learned state — the fitted ITL window and its baseline, the replica start estimate — is kept after the variant stops being discovered, i.e. once its scale target or ScaledObject is gone. A variant parked at zero replicas is still discovered and keeps it for as long as it is parked | `24h` |
+| `LEARNED_STATE_SNAPSHOT` | `true` carries what the saturation analyzer learned across a controller restart or a leader change, in the ConfigMap `wva-learned-state` in the controller's namespace. **Off by default** — see [Learned state across a restart](#learned-state-across-a-restart) | `false` |
+| `LEARNED_STATE_BUCKET_RETENTION` | How long a **bucket-keyed** window — the k2 history and the mu windows the demand floor prices from, one per variant and traffic-shape bucket — is kept from when it was last read. Longer than the timeout on purpose: a retained measurement is the lowest capacity figure available for its bucket, and dropping it falls through to an estimate that orders *fewer* replicas | `168h` (7 days) |
 | `PROMETHEUS_SECRET_NAME` | Secret holding the Prometheus serving cert | `prometheus-web-tls` |
 | `PROMETHEUS_SECRET_NS` | Namespace of that secret | `$MONITORING_NAMESPACE` |
 | `PROM_CA_CERT_PATH` | Local file where the installer saves the Prometheus CA to check it. The controller never sees this file; to verify Prometheus, mount the CA as in [TLS configuration](prometheus.md#tls-configuration) | `/tmp/prometheus-ca.crt` |
@@ -454,6 +467,11 @@ below one minute, or has no unit (`24` parses as 24 **nanoseconds**) goes back
 to its default, and the controller logs which it replaced. The horizons in force
 are logged once at startup as `learned-state horizons`. Shorten them to exercise
 this inside a test run instead of over a week.
+
+None of the `LEARNED_STATE_*` variables is set by the installer: they are read from
+the controller's own environment, so set them on its Deployment
+(`kubectl set env deployment/<controller> -n <controller-namespace> LEARNED_STATE_SNAPSHOT=true`),
+which restarts it.
 
 The external scaler serves **plaintext** gRPC by default and relies on the
 NetworkPolicy above. Three controller flags add TLS, all off by default and not
@@ -510,6 +528,35 @@ What the NetworkPolicy does not cover:
   `hostNetwork` traffic through.
 - The client CA must be dedicated to KEDA: any certificate it signed is accepted.
   Pass `--external-scaler-client-san` to pin KEDA's identity.
+
+### Learned state across a restart
+
+Without `LEARNED_STATE_SNAPSHOT`, a restarted controller has forgotten every
+measured capacity, and until a model saturates again it prices replicas from
+the deployment-derived figure, which is higher. That orders **fewer** replicas,
+so TTFT suffers after every upgrade or leader change until the fleet has
+saturated once more. With it on, the acting controller writes what it learned
+to the ConfigMap `wva-learned-state` at most once a minute, and the next
+controller reads it on its first cycle.
+
+What is restored, and what is not:
+
+- a variant's measured capacity, saturated throughput, ITL baseline and
+  replica start estimate are restored **only if it runs the same engine
+  configuration** as when they were learned, read completely: a deployment
+  whose flags come from a variable the controller cannot resolve restores
+  nothing, because a changed value would look identical;
+- the ages travel with the figures, so a restore never makes a figure younger,
+  and one past its horizon above is not restored;
+- a figure the new controller has already measured is never replaced.
+
+The log line `Learned state: snapshot restored` says how many variants are
+pending their first cycle; `learned state restored` or `learned state not
+restored` follows for each on its first cycle. It needs the Role `wva-learned-state-role`, which
+`make setup-prereqs` installs; an install upgraded from before the store existed
+reports it as an optional prerequisite. See
+[troubleshooting](troubleshooting.md#capacity-priced-high-after-a-restart) for
+what the log lines mean when it does not work, and how to flush the store.
 
 ## Optional: scaling band after `make deploy-e2e-infra`
 

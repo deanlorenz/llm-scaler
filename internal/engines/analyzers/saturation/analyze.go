@@ -37,6 +37,23 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 		return nil, fmt.Errorf("expected *ScalingPolicy, got %T", input.Config)
 	}
 
+	// Learned state restored after a controller restart waits for this: the
+	// engine has just loaded each variant's configuration from its scale
+	// target, so a variant's restored entries can be checked against the
+	// configuration they were learned under, and installed or rejected, before
+	// anything below reads them (learned_snapshot.go). Once per variant.
+	for _, vs := range input.VariantStates {
+		r, done := a.installRestored(input.Namespace, input.ModelID, vs.VariantName)
+		if !done {
+			continue
+		}
+		msg := "learned state restored"
+		if !r.Installed {
+			msg = "learned state not restored: the variant's engine configuration differs from the one it was learned under, or could not be read completely"
+		}
+		ctrl.LoggerFrom(ctx).Info(msg, "namespace", r.Namespace, "variant", r.Variant, "entries", r.Entries)
+	}
+
 	c := a.newCycle(ctx, input, satConfig)
 	c.observeFleetShape()
 	c.resolvePricing()

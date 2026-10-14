@@ -94,13 +94,15 @@ intervals.
 - **Adopting it** takes a one-time cluster-admin setup per namespace, the EPP's
   `flowControl` gate, Prometheus scraping the model servers, and per workload a
   ScaledObject (generated for you), a drain hook and fast starts.
-- **It answers 0 until it has decided.** After a restart or leader change, KEDA
-  reads 0 for a model until the first decision for it; the 300 s scale-down
-  window on generated ScaledObjects holds the count through that gap
-  ([scaling behavior](reference/scaledobject-trigger.md#scaling-behavior);
-  fix in review: [PR #140](https://github.com/ev-shindin/llm-scaling-manager/pull/140)).
-- **What it learned is held in memory**, so a restart or leader change learns
-  it again ([#137](https://github.com/ev-shindin/llm-scaling-manager/issues/137)).
+- **A restart is a short scaler outage.** While no replica holds the leader
+  lease, KEDA's reads fail; the KEDA `fallback` on generated ScaledObjects
+  holds the count then. After that, until its first decision for a model, the
+  scaler answers the current replica count, so the HPA holds
+  ([before the first decision](reference/scaledobject-trigger.md#before-the-first-decision-and-the-fallback)).
+- **What it learned is held in memory** by default, so a restart or leader
+  change learns it again. `LEARNED_STATE_SNAPSHOT=true` carries it across
+  ([learned state across a restart](reference/configuration.md#learned-state-across-a-restart);
+  [#137](https://github.com/ev-shindin/llm-scaling-manager/issues/137)).
 - **One more port.** The scaler port is plaintext and unauthenticated by
   default. `make setup-prereqs` writes a NetworkPolicy admitting only KEDA's
   namespace when it knows that namespace, and warns when it does not; mutual
@@ -161,10 +163,12 @@ P/D result above is the second exposure, and the cold pass before it ordered a
 spare replica and reached a 3.9 s p99. The warm pool and P/D numbers are single
 runs per arm on one cluster type (the P/D pair repeated once).
 
-- After a restart or leader change, the scaler answers 0 for a model until its
-  first decision; only a scale-down window holds the count through that gap
-  ([PR #140](https://github.com/ev-shindin/llm-scaling-manager/pull/140)).
-- Learned capacity is held in memory and re-learned after a restart
+- While no replica holds the leader lease, as during a restart, KEDA cannot
+  read the scaler. Only a KEDA `fallback` holds the count then, and a
+  ScaledObject with a floor of 0 gets none
+  ([before the first decision](reference/scaledobject-trigger.md#before-the-first-decision-and-the-fallback)).
+- Learned capacity is re-learned after a restart unless the opt-in
+  `LEARNED_STATE_SNAPSHOT` is on
   ([#137](https://github.com/ev-shindin/llm-scaling-manager/issues/137)).
 - The scaler port is plaintext by default; a NetworkPolicy is shipped and
   mutual TLS is opt-in and manual

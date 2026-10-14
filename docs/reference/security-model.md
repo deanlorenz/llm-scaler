@@ -116,7 +116,8 @@ Role and its binding in the managed namespace).
 | create, patch | events | own namespace (`leader-election-role`) | |
 | get, update | configmaps named `wva-utilization-share-history` | own namespace (`utilization-share-history-role`) | the utilization-share optimizer's need history |
 | get, update | configmaps named `wva-controller-status` | own namespace (`controller-status-role`) | publishing the policy version, limiter and optimizer mode the controller runs with ([status ConfigMap](operations.md#what-the-controller-is-running-with)) |
-| create | configmaps (any name — `create` cannot be narrowed by name) | own namespace (`utilization-share-history-role`, `controller-status-role`) | creating the history and status ConfigMaps the first time |
+| get, update | configmaps named `wva-learned-state` | own namespace (`learned-state-role`) | learned state across a restart, when `LEARNED_STATE_SNAPSHOT` is on |
+| create | configmaps (any name — `create` cannot be narrowed by name) | own namespace (`utilization-share-history-role`, `controller-status-role`, `learned-state-role`) | creating the history, status and learned-state ConfigMaps the first time |
 | get, list, watch | nodes, nodes/status | **cluster** (`node-reader-role`) | resolving a variant's accelerator; required by the `gpu-inventory` limiter |
 | get, list | clusterqueues, resourceflavors | **cluster** (`kueue-reader-role`) | the Kueue quota source. Inert on a cluster without Kueue |
 | get | namespaces, by name: the managed one only | **cluster** (`kueue-reader-role`) | its labels, to evaluate a ClusterQueue `namespaceSelector` |
@@ -208,6 +209,7 @@ ScaledObjects or HPAs**. KEDA does the scaling. What it does write:
 | Leases | leader election | own namespace |
 | ConfigMap `wva-utilization-share-history` | the optimizer's need history | own namespace, utilization-share only |
 | ConfigMap `wva-controller-status` | the policy version, limiter and optimizer mode the controller runs with | own namespace, on every policy load |
+| ConfigMap `wva-learned-state` | the saturation analyzer's learned state | own namespace, `LEARNED_STATE_SNAPSHOT` only |
 | Warm-pool supervisor (HTTP, not the API) | start, sleep, wake and stop engine instances | warm pool only |
 
 A cluster-scoped grant to patch pods is therefore a grant to change which pods

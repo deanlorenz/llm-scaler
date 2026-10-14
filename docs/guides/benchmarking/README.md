@@ -289,14 +289,19 @@ more belong to the cluster: the image and, for large models, the weights.
 10-20 GB first. The standup holds the image the harness pins on every
 accelerator node before deploying (one sleeping DaemonSet per image, no
 accelerator requested). `BENCHMARK_PREPULL=false` skips it,
-`BENCHMARK_PREPULL_IMAGES` overrides it, `PREPULL_NODE_SELECTOR` and
-`PREPULL_TOLERATIONS` choose nodes. The scenarios pull the engine
+`BENCHMARK_PREPULL_IMAGES` overrides it, and `PREPULL_TOLERATIONS` adds taints.
+`PREPULL_NODE_SELECTOR` picks the nodes: one or more `key=value` pairs,
+comma-separated, all of which a node must carry. It replaces the default (nodes
+with a known GPU product label), so include the product label to stay on GPU
+nodes. The scenarios pull the engine
 `IfNotPresent`. See [Holding the image on the
 nodes](../../reference/workload-preparation.md#holding-the-image-on-the-nodes).
 
 **The weights on every node's disk.** `BENCHMARK_MODEL_HOSTPATH=<dir>` turns on
 the harness's node-local mode: `model-pvc` binds to a hostPath volume, a
-DaemonSet downloads the model to every accelerator node, and the engines deploy
+DaemonSet downloads the model to every accelerator node (the placement
+`make prepull` uses; `PREPULL_NODE_SELECTOR` replaces it, `PREPULL_TOLERATIONS`
+included), and the engines deploy
 once every node holds it. For a 0.6B model this changes nothing measurable; it
 is for models where reading over the shared volume dominates start time.
 

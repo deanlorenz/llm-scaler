@@ -170,6 +170,7 @@ func loadConfig(cfg *Config, flagSet *flag.FlagSet, configFilePath string) error
 		learnedEpisodeGap:      v.GetDuration("LEARNED_STATE_EPISODE_GAP"),
 		learnedVariantTimeout:  v.GetDuration("LEARNED_STATE_VARIANT_TIMEOUT"),
 		learnedBucketRetention: v.GetDuration("LEARNED_STATE_BUCKET_RETENTION"),
+		learnedStateSnapshot:   v.GetBool("LEARNED_STATE_SNAPSHOT"),
 	}
 
 	cfg.tls = tlsConfig{

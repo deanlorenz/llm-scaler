@@ -64,6 +64,9 @@ wva_missing_prereqs() {
         #                       published cluster policy. Without it the
         #                       controller runs on its own ConfigMap and reports
         #                       wva_policy_namespace_unverified=1.
+        #   wva-learned-state-*  the learned-state snapshot
+        #                       (LEARNED_STATE_SNAPSHOT); without it a restart
+        #                       starts every model's learned capacity cold.
         case "$name" in
             wva-kueue-reader-*)
                 echo "OPTIONAL $kind/$name|the Kueue quota source (a quota limiter entry with kueue.enabled)"
@@ -73,6 +76,9 @@ wva_missing_prereqs() {
                 continue ;;
             wva-utilization-share-history-role|wva-utilization-share-history-rolebinding)
                 echo "OPTIONAL $kind/$name|the utilization-share need history, kept across controller restarts"
+                continue ;;
+            wva-learned-state-role|wva-learned-state-rolebinding)
+                echo "OPTIONAL $kind/$name|the learned-state snapshot (LEARNED_STATE_SNAPSHOT), kept across controller restarts"
                 continue ;;
             wva-controller-status-role|wva-controller-status-rolebinding)
                 echo "OPTIONAL $kind/$name|the controller-status ConfigMap (the policy version and modes the controller is running with)"

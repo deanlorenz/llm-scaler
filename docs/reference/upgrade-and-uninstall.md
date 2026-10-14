@@ -210,18 +210,25 @@ it):
 A new controller pod starts with no decision in memory. Until it has one:
 
 - **Until its first cycle completes** (one `GLOBAL_OPT_INTERVAL`, 15 s by
-  default, plus leader election), the scaler answers KEDA with `0`, meaning "no
-  decision yet". The HPA reads that as `minReplicaCount`. Its scale-down
-  stabilization window (300 s by default) stops it acting on that before the
-  first real decision. A shorter window gives less protection.
+  default, plus leader election), the scaler answers KEDA's `GetMetrics` with
+  each target's current replica count. The HPA holds, and KEDA sees no error.
+  `wva_scaler_undecided_answers_total{reason="no-decision"}` grows meanwhile
+  and stops once the first cycle publishes.
+- **While no controller pod is serving**, KEDA cannot reach the scaler. The
+  generated `fallback` covers that: after more than `failureThreshold` failed
+  reads in a row (3, at about one read every 15 s) KEDA holds the current
+  count. A short rollout may log a `KEDAScalerFailed` Event or two and never
+  reach the fallback. See [before the first
+  decision](scaledobject-trigger.md#before-the-first-decision-and-the-fallback).
 - **Under the utilization-share optimizer**, every planned model holds what it
   runs for one fill timeout, about three minutes with default timings, and
   shows the blocked reason `quiet-period`. Expect it on every upgrade and leader
   change.
-- **What it learned is held in memory.** Learned capacity and throughput are
-  re-learned after every restart or leader change, so a request shape it had
-  already priced is sized from occupancy again until it saturates once more
-  ([#137](https://github.com/ev-shindin/llm-scaling-manager/issues/137)).
+- **What it learned is held in memory by default.** Learned capacity and
+  throughput are re-learned after every restart or leader change, so a request
+  shape it had already priced is sized from occupancy again until it saturates
+  once more. `LEARNED_STATE_SNAPSHOT=true` carries it across instead
+  ([learned state across a restart](configuration.md#learned-state-across-a-restart)).
 
 Do not judge an upgrade by the first few minutes of decisions.
 

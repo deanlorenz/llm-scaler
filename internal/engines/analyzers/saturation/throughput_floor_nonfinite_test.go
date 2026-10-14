@@ -72,8 +72,8 @@ var _ = Describe("recordSaturatedThroughput with a non-finite rate", func() {
 	})
 })
 
-// tkey resolves a throughput-window key written in the OLD shape
-// (model|accel|gpus|role|outBucket|qN) to the real one, which carries an input
+// tkey resolves a throughput-window key written in the history-key shape
+// (namespace|variant|model|accel|gpus|role|outBucket|qN) to the real one, which carries an input
 // bucket between the role and the output bucket. The specs name the parts they
 // care about; the input bucket is a fixture detail they do not.
 func tkey(a *SaturationAnalyzer, written string) string {

@@ -33,16 +33,13 @@ gaps themselves are summarized in [known gaps](why.md#known-gaps).
 
 ## Resilience
 
-- **No 0 before the first decision.** After a restart or leader change, the
-  scaler answers 0 for a model until its first decision, and only a scale-down
-  window holds the count through that gap. In review: hold the replica count
-  until the first decision.
-  [PR #140](https://github.com/ev-shindin/llm-scaling-manager/pull/140)
-- **Learned capacity survives a restart.** What the controller learns about a
-  model's capacity lives in memory, so a restart or a leader hand-off re-learns
-  it, and a request shape it had already priced is sized from occupancy again.
-  Planned: the leader writes its fitted state to a ConfigMap keyed on the engine's
-  configuration, and a new leader recalls only entries that match and are fresh.
+- **Learned capacity survives a restart.** By default what the controller
+  learns about a model's capacity lives in memory, so a restart or a leader
+  hand-off re-learns it, and a request shape it had already priced is sized from
+  occupancy again. `LEARNED_STATE_SNAPSHOT=true` keeps it in the ConfigMap
+  `wva-learned-state` and restores only figures learned under the same engine
+  configuration; it is off by default
+  ([learned state across a restart](reference/configuration.md#learned-state-across-a-restart)).
   [#137](https://github.com/ev-shindin/llm-scaling-manager/issues/137)
 
 ## Security

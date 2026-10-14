@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Turn on node-local weights in a benchmark scenario copy.
 #
-#   model_hostpath.sh <scenario.yaml> <node dir> <namespace> [KEY=VALUE] [TAINTKEY,...]
+#   model_hostpath.sh <scenario.yaml> <node dir> <namespace> [KEY=VALUE[,KEY=VALUE...]] [TAINTKEY,...]
 #
 # The harness (llm-d-benchmark) has the mechanism -- storage.hostPath in a
 # scenario makes it create a static hostPath PersistentVolume, bind model-pvc
@@ -11,7 +11,8 @@
 # and because the node directory is the cluster's, not the harness's. This
 # turns it on in the COPY the standup made, with the directory the caller
 # named and the placement the rest of the repo uses for accelerator nodes:
-# a KEY=VALUE nodeSelector when given, otherwise the affinity over the
+# a nodeSelector of the KEY=VALUE pairs when given (comma separated, every
+# one must match), otherwise the affinity over the
 # known GPU product labels (deploy/lib/accelerator_nodes.sh), which the
 # harness's template renders once hack/benchmark/patch_harness.sh fix 11 is
 # applied -- the same fix that makes the harness's "DaemonSet ready" wait
@@ -36,9 +37,9 @@ source "$HERE/../../deploy/lib/nodedir.sh"
 # the lib's checks call log_error; here that is a plain failure
 log_error() { printf 'model_hostpath: %s\n' "$1" >&2; exit 1; }
 
-SCENARIO="${1:?usage: model_hostpath.sh <scenario.yaml> <node dir> <namespace> [KEY=VALUE] [TAINTKEY,...]}"
-NODE_DIR="${2:?usage: model_hostpath.sh <scenario.yaml> <node dir> <namespace> [KEY=VALUE] [TAINTKEY,...]}"
-NAMESPACE="${3:?usage: model_hostpath.sh <scenario.yaml> <node dir> <namespace> [KEY=VALUE] [TAINTKEY,...]}"
+SCENARIO="${1:?usage: model_hostpath.sh <scenario.yaml> <node dir> <namespace> [KEY=VALUE[,KEY=VALUE...]] [TAINTKEY,...]}"
+NODE_DIR="${2:?usage: model_hostpath.sh <scenario.yaml> <node dir> <namespace> [KEY=VALUE[,KEY=VALUE...]] [TAINTKEY,...]}"
+NAMESPACE="${3:?usage: model_hostpath.sh <scenario.yaml> <node dir> <namespace> [KEY=VALUE[,KEY=VALUE...]] [TAINTKEY,...]}"
 SELECTOR="${4:-}"
 TOLERATIONS="${5:-}"   # comma list of taint keys beyond nvidia.com/gpu, as PREPULL_TOLERATIONS
 STORAGE_CLASS="node-local-weights"
@@ -69,7 +70,8 @@ size="$(yq -r '[.. | select(type == "!!map" and has("modelPvc")) | .modelPvc.siz
 
 placement_json='{}'
 if [ -n "$SELECTOR" ]; then
-    placement_json="{\"nodeSelector\":{\"${SELECTOR%%=*}\":\"${SELECTOR#*=}\"}}"
+    placement_json="$(accelerator_selector_pairs "$SELECTOR" \
+        | jq -Rn '{nodeSelector: ([inputs | {key: split("=")[0], value: (split("=")[1:] | join("="))}] | from_entries)}')"
 else
     # the one renderer of the default placement, read as JSON
     placement_json="$(accelerator_placement_yaml "" | sed 's/^      //' | yq -o json '.')"
@@ -81,11 +83,16 @@ fi
 # standup waited out its whole daemonSetTimeout and failed. A hostname NotIn
 # term takes such a node out of desired; nothing is done to the node itself.
 excluded='[]'
-if nodes_json="$(accelerator_nodes_json "$SELECTOR" 2>/dev/null)"; then
+# kubectl's stderr goes to its own file: it is the reason a listing failed
+# (a selector the API server refuses, a Forbidden), never part of the list.
+nodes_err="$(mktemp)"
+if nodes_json="$(accelerator_nodes_json "$SELECTOR" 2>"$nodes_err")"; then
     excluded="$(printf '%s' "$nodes_json" | accelerator_excluded_json "$(printf '%s' "$tolerations_json" | jq -c 'map(.key)')")"
 else
-    echo "model_hostpath: cannot list nodes, so the downloader is not kept off cordoned or tainted ones; a standup can then wait out daemonSetTimeout on such a node" >&2
+    reason="$(tr '\n' ' ' < "$nodes_err" | sed 's/ *$//')"
+    echo "model_hostpath: cannot list nodes${SELECTOR:+ with selector ${SELECTOR}} (kubectl: ${reason:-no error text}), so the downloader is not kept off cordoned or tainted ones; a standup can then wait out daemonSetTimeout on such a node" >&2
 fi
+rm -f "$nodes_err"
 if [ "$(printf '%s' "$excluded" | jq 'length')" -gt 0 ]; then
     notin="$(printf '%s' "$excluded" | jq -c '{key: "kubernetes.io/hostname", operator: "NotIn", values: map(.name)}')"
     if [ -n "$SELECTOR" ]; then
@@ -109,5 +116,5 @@ HP_FILE="$hp" yq -i '(.. | select(type == "!!map" and has("modelPvc"))).hostPath
 
 n="$(yq -r '[.. | select(type == "!!map" and has("hostPath")) | .hostPath.enabled] | map(select(. == true)) | length' "$SCENARIO")"
 [ "$n" -gt 0 ] || log_error "the hostPath block did not take in ${SCENARIO}"
-if [ -n "$SELECTOR" ]; then where="nodes with ${SELECTOR}"; else where="every node carrying a known GPU product label"; fi
+if [ -n "$SELECTOR" ]; then where="nodes with $(accelerator_selector_text "$SELECTOR")"; else where="every node carrying a known GPU product label"; fi
 echo "node-local weights: model-pvc binds to ${NODE_DIR} on ${where}; the harness downloads the model there on each node before the engines start (${n} storage block(s))"

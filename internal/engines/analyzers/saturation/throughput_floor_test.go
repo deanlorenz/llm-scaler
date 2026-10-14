@@ -431,7 +431,7 @@ var _ = Describe("the throughput floor, through Analyze", func() {
 			Expect(err).NotTo(HaveOccurred())
 			clock = clock.Add(15 * time.Second)
 		}
-		Expect(analyzer.saturatedThroughputReading(tkey(analyzer, "test-model|H200|1|decode|long|q5")).samples).To(Equal(1))
+		Expect(analyzer.saturatedThroughputReading(tkey(analyzer, "test-ns|"+decodeVariant+"|test-model|H200|1|decode|long|q5")).samples).To(Equal(1))
 
 		// The one replica, occupancy a fraction of it, lambda / mu = 1.75:
 		// held at what it has.
@@ -481,7 +481,7 @@ var _ = Describe("the throughput floor, through Analyze", func() {
 		in.ArrivalRate = runLambda
 		_, err := analyzer.Analyze(ctx, in)
 		Expect(err).NotTo(HaveOccurred())
-		r := analyzer.saturatedThroughputReading(tkey(analyzer, "test-model|H200|1|decode|long|q5"))
+		r := analyzer.saturatedThroughputReading(tkey(analyzer, "test-ns|"+decodeVariant+"|test-model|H200|1|decode|long|q5"))
 		Expect(r.samples).To(Equal(1), "one moment, one sample")
 		Expect(r.rate).To(Equal(3.6), "at the higher of the two, whichever row came first")
 
@@ -504,7 +504,7 @@ var _ = Describe("the throughput floor, through Analyze", func() {
 		clock = clock.Add(ThroughputSampleSpacing)
 		_, err = analyzer.Analyze(ctx, in)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(analyzer.saturatedThroughputReading(tkey(analyzer, "test-model|H200|1|decode|long|q5")).samples).To(Equal(2))
+		Expect(analyzer.saturatedThroughputReading(tkey(analyzer, "test-ns|"+decodeVariant+"|test-model|H200|1|decode|long|q5")).samples).To(Equal(2))
 	})
 
 	It("holds a fleet with a replica on its way at that replica, on one reading", func() {
@@ -539,7 +539,7 @@ var _ = Describe("the throughput floor, through Analyze", func() {
 			}
 		}
 		Expect(pending).To(Equal(1), "the third is on its way")
-		Expect(analyzer.saturatedThroughputReading(tkey(analyzer, "test-model|H200|1|decode|xxlong|q5")).samples).To(Equal(1))
+		Expect(analyzer.saturatedThroughputReading(tkey(analyzer, "test-ns|"+decodeVariant+"|test-model|H200|1|decode|xxlong|q5")).samples).To(Equal(1))
 		Expect(result.RoleDemand[domain.RoleDecode]).To(BeNumerically("~", 0.85*3*decodeP, 1),
 			"held at the anticipated three: RC = 0, no fourth on one reading")
 	})

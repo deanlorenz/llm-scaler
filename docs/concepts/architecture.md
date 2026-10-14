@@ -110,8 +110,10 @@ optimization](modeling-and-optimization.md).
   one, and only it runs the engines. The external scaler runs on every
   replica, but answers KEDA only once its replica is the leader.
 - **The decision lives in memory**, in the decision store, and is rebuilt
-  within one cycle after a restart. Until then KEDA is answered 0, which holds
-  each variant at its `minReplicaCount`.
+  within one cycle after a restart. Until then KEDA is answered each target's
+  current replica count, read from its `scale` subresource, so the HPA holds
+  every variant where it is: see
+  [before the first decision](../reference/scaledobject-trigger.md#before-the-first-decision-and-the-fallback).
 - **Package by package**, for contributors: [which component owns which
   number](../developer-guide/signal-dataflow.md).
 

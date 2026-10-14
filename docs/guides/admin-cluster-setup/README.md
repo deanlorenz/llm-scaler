@@ -72,7 +72,7 @@ them and an uninstall removes only its own.
 | Secret `wva-epp-metrics-token` | a **non-expiring** token the controller uses to scrape the EPP. On OpenShift also `wva-controller-manager-token`, for the ServiceMonitor |
 | ConfigMap `wva-metrics-server-ca` | **OpenShift only**: the CA the ServiceMonitor checks the controller's certificate with |
 | The ServiceMonitor | the stock `admin` ClusterRole does not grant `monitoring.coreos.com` |
-| Roles `wva-manager-role`, `wva-leader-election-role`, `wva-utilization-share-history-role`, `wva-controller-status-role` + RoleBindings | RBAC forbids granting what you do not hold |
+| Roles `wva-manager-role`, `wva-leader-election-role`, `wva-utilization-share-history-role`, `wva-controller-status-role`, `wva-learned-state-role` + RoleBindings | RBAC forbids granting what you do not hold |
 | RoleBinding `wva-policy-reader-<hash>` in `wva-policy` | only when `wva-policy` exists; lets the controller read the cluster policy |
 | NetworkPolicy `wva-external-scaler` | admits the scaler port `:9090` from KEDA's namespace only ([when it is written](#the-scaler-networkpolicy)) |
 | Prometheus | Kubernetes only, and only if the cluster has none |

@@ -977,8 +977,11 @@ it on one variant only is the simplest way to get this right.
 
 ### `enableLearnedStateReuse`
 
-Lets a variant be priced from a sibling's measurement, not only its own.
-**Off by default**; read [Why it is off](#why-it-is-off) before turning it on.
+Lets a sibling's measurement become a variant's answer, where it could price the
+variant higher than its own data would. **Off by default** — see
+[Why it is off](#why-it-is-off) before turning it on. A sibling's figure that can
+only price a variant *lower* is used either way; see
+[What it does not govern](#what-it-does-not-govern).
 
 ```yaml
 default:
@@ -1025,11 +1028,27 @@ governs **both**:
 It does not control learning: a variant learns from its own readings either
 way, and changing the key clears nothing stored.
 
-Nor does it affect any capacity *ceiling*. A sibling's figure is also used as an
-upper bound on an estimate, whatever this key says. A bound only lowers capacity,
-which orders *more* replicas, the safe direction. The key governs where a
-sibling's figure would *become* this variant's answer, never where it only limits
-it.
+#### What it does not govern
+
+A sibling's figure that can only *lower* a variant's capacity is used whatever
+this key says. Lowering capacity orders *more* replicas, which is the safe
+direction for latency. The key governs where a sibling's figure would *become*
+this variant's answer, never where it only limits it. There are two such places:
+
+- **A ceiling on a stored estimate.** A variant with no ready replica is priced
+  from its stored record, bounded above by a compatible sibling's.
+- **The k2 borrow** (`P2-borrow` in the [cycle log](cycle-log.md)). A variant
+  that has not yet measured its own k2 for the traffic it is serving uses a
+  compatible sibling's measured k2 in the same namespace, but only where it is
+  lower than the variant's own capacity. After 30 minutes it relaxes back to the
+  variant's own figure over 6 hours, because a k2 that is too low never corrects
+  itself: lightly loaded replicas never saturate, and saturation is the only time
+  k2 is measured.
+
+Neither can be turned off. What they cost is in the other direction: a sibling
+that only *looks* compatible — two configurations whose unread flags both fell
+back to the defaults, for example — can hold extra replicas, for up to the
+6.5 hours of a borrow.
 
 #### Why it is off
 
@@ -1053,9 +1072,11 @@ distance penalty instead of a false equality; see
 
 #### What it costs to leave off
 
-A variant with no readings prices its first decisions from its
-deployment-derived capacity alone, a weaker estimate. Expect a slower first ramp
-on a newly scaled-out variant.
+A variant with no readings of its own prices its first decisions from its
+deployment-derived capacity, lowered by a compatible sibling's measured k2 where
+that is lower (see [What it does not govern](#what-it-does-not-govern)). It does
+not take a sibling's ITL line, or a sibling's capacity figure as its whole
+estimate. Expect a slower first ramp on a newly scaled-out variant.
 
 #### Before turning it on
 

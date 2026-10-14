@@ -74,8 +74,9 @@ type VariantMetadata struct {
 
 // ToReplicaState projects the metadata onto the VariantReplicaState the analyzers
 // consume today. Identity/economics fields that VariantReplicaState has no home
-// for (ModelID, Namespace, Cost, AcceleratorName, ReadyReplicas) are dropped
-// here; consumers that need them read the VariantMetadata directly.
+// for (ModelID, Namespace, Cost, ReadyReplicas) are dropped here; consumers that
+// need them read the VariantMetadata directly. AcceleratorName is carried: the
+// saturation analyzer keys learned state by it.
 //
 // This projection keeps BuildVariantStates behavior-identical while discovery
 // becomes the single producer — the transitional step before analyzers and the

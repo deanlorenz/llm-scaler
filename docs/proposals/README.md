@@ -127,16 +127,16 @@ last; it is the unit change that makes the other two land.
   the target no.
 
 - **[Learned-state sharing by similarity](learned-state-sharing-by-similarity.md)**
-  — a variant with no fitted latency line can start from another's, and the
-  current design makes that an identity claim: same digest or nothing. Five
-  adversarial rounds found seven measured ways to produce a false equality or
-  destroy a true one, and two attempts to close them denied sharing to
-  ordinary deployments while the collisions survived. Reframes a borrowed
-  line as a PRIOR rather than an assertion, so an unreadable flag is a
-  distance penalty instead of a veto and the failure mode becomes imperfect
-  ranking instead of false equality. Says what it keeps on #126, and names
-  the risk it does not remove: a cold variant may never graduate to its own
-  fit, so cap-never-order stays absolute.
+  — each variant stores only its own k2, throughput and ITL readings, and a
+  variant with none reads the most compatible other variant's: same flags,
+  then compatible on what matters, then the formula. Today k2 and saturated
+  throughput are pooled across namespaces and engine configurations, and the
+  pooled k2 becomes a variant's own, so a donor with a higher one makes it
+  order fewer replicas. A borrowed reading may only make a variant more
+  conservative, and it expires, because a k2 that is too low never corrects
+  itself: nothing saturates, so nothing is measured. Replaces the identity
+  digest as the gate for sharing on #126, after seven measured ways to make
+  that digest wrong.
 - **[Engine structure](engine-structure.md)** — scope and layering of the
   engine packages: what to split, and which way imports may point.
 - **[A role at its ceiling starves every other role](prefill-starved-by-exhausted-role.md)**
@@ -145,6 +145,13 @@ last; it is the unit change that makes the other two land.
 - **[Sizing against in-flight capacity](sizing-against-in-flight-capacity.md)**
   — count replicas already starting, and when they will serve, before ordering
   more or releasing one.
+- **[Learned state across a restart: a snapshot](learned-state-snapshot.md)**
+  — a restart forgets every k2, throughput window, ITL baseline and start
+  estimate, and a forgotten k2 falls back to a higher capacity, so fewer
+  replicas. Stores them in one ConfigMap, each entry with its own clocks so a
+  restore never makes a figure younger; leader-only writes, deletion flushes,
+  off by default. Supersedes the Prometheus refit in #116, which cannot
+  attribute old readings to a variant now that learned state is per variant.
 
 ## Product and lifecycle
 

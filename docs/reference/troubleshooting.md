@@ -28,6 +28,7 @@ LOGS="kubectl logs -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler 
 | controller not Ready or crash-looping | pod `0/1` or `CrashLoopBackOff`; log `refusing to start unbounded`; readiness check `gpu-policy` failing | cluster policy unreadable, a `gpu-inventory` limiter with no node read, a Prometheus setting it refuses, an image older than the manifests | [controller not Ready](#the-controller-is-not-ready-or-crash-looping) |
 | cluster policy not applied | `WVAPolicyNamespaceUnverified`; `wva_policy_namespace_unverified == 1` | the controller may not read Namespaces, so it runs on its own ConfigMap | [policy namespace unverified](#cluster-policy-is-not-applied-policy-namespace-unverified) |
 | ScaledObject `READY False` or `TARGETS <unknown>` | `kubectl get scaledobject,hpa -n <ns>` | `scalerAddress` names a namespace with no scaler, `modelID` missing, the controller not Ready, KEDA backing off after a reinstall | [ScaledObject](#scaledobject-ready-false-or-targets-unknown) |
+| capacity priced high after a restart | TTFT worse after an upgrade or leader change; `P3-k2`/`P4-k1` in `k2-decision` where `P1-obs` was before | `LEARNED_STATE_SNAPSHOT` off, the Role missing, an engine configuration that changed or could not be read | [after a restart](#capacity-priced-high-after-a-restart) |
 | utilization-share optimizer does nothing | `wva_utilization_share_mode`, `wva_utilization_share_actionable` | shadow mode, not planned, held, swinging | [optimizer](#the-optimizer-evaluates-but-never-moves-anything) |
 
 Alerts that point here are listed in [Prometheus: the shipped alerts](prometheus.md#the-shipped-alerts).
@@ -379,6 +380,47 @@ on the ScaledObject; `WVAMetricsCollectionFailing` firing.
 While a variant's metrics are unavailable it keeps its current replica count.
 Details: [Metrics health](metrics.md).
 
+## Capacity priced high after a restart
+
+A controller that restarts forgets what it measured, and prices each replica
+from the deployment-derived capacity until the model saturates again; that is
+higher than the measured figure, so the fleet is smaller and TTFT worse for a
+while after every upgrade or leader change. `LEARNED_STATE_SNAPSHOT=true`
+carries the measured state across ([configuration](configuration.md#learned-state-across-a-restart)).
+With it on, the log says what happened (logger `learned-state`):
+
+- `Learned state: no snapshot to restore` -- the first start with the store,
+  or after a flush. Expected once.
+- `Learned state: snapshot restored` -- read back; `pendingVariants` wait for
+  their first cycle, and `aged`, `unusable` and `unattributable` count entries
+  not restored. Then, per variant on its first cycle, `learned state restored`,
+  or `learned state not restored: the variant's engine configuration differs
+  from the one it was learned under, or could not be read completely` -- a
+  flag such as `--max-num-seqs $VLLM_MAX_NUM_SEQS` whose value comes from an
+  `envFrom`. Nothing is restored for that variant, by design.
+- `Learned state: could not read the snapshot; nothing restored, and nothing
+  will be written until a read succeeds` -- typically Forbidden: the Role
+  `wva-learned-state-role` or its binding is missing. Ask an admin to re-run
+  `NAMESPACE=<controller-namespace> make setup-prereqs`. Retried every minute;
+  the stored state is not overwritten meanwhile.
+- `Learned state: snapshot not restored` -- the document names no writer, or
+  a controller in another namespace wrote it (a ConfigMap copied by hand).
+- `Learned state: the snapshot was over its size bound` -- the least recently
+  used entries were left out; they are relearned after a restart.
+
+To flush it -- after a model's engine or hardware changed in a way the
+configuration check cannot see, say -- delete the ConfigMap:
+
+```bash
+kubectl delete configmap wva-learned-state -n <controller-namespace>
+```
+
+The running controller notices within a minute or two and forgets everything
+it learned too, rather than writing it straight back (`Learned state: the
+snapshot was deleted; everything learned is forgotten`). Every model then
+prices from the derived capacity until it saturates again, as after a restart
+with no store.
+
 ## The controller is not Ready or crash-looping
 
 ```bash
@@ -448,6 +490,8 @@ kubectl get endpoints -n "$NS" wva-external-scaler
 | `wva-external-scaler` has no endpoints | the controller is not Ready | [controller not Ready](#the-controller-is-not-ready-or-crash-looping) |
 | `make verify-deployment` warns that the external scaler NetworkPolicy admits `:9090` ONLY from a namespace KEDA does not run in | the NetworkPolicy admits the wrong namespace, so KEDA's calls are dropped while the controller reads healthy | (cluster admin) `KEDA_NAMESPACE=<namespace KEDA runs in> make setup-prereqs` with the install's other variables ([details](upgrade-and-uninstall.md#the-external-scaler-networkpolicy)) |
 | `TARGETS` reads `cpu: <unknown>/80%` | KEDA never got a metric spec and fell back to CPU | one of the above |
+| the replica count never moves, and `wva_scaler_undecided_targets` stays above 0 for the namespace | the scaler answers the current count because the model has no usable decision. For a cycle or two after a controller restart or leader change that is normal. `wva_scaler_undecided_answers_total` says why: `reason="not-managed"`, or `no-decision` that never stops, means the model is never planned, usually a trigger value that does not parse; `stale` means its decision stopped being republished, so read that model's `scaling-decision` lines | [a bad value freezes the model](scaledobject-trigger.md#model-keys); `external scaler has no decision for this target` names the ScaledObject, and the controller log at `--v=4` names the key |
+| the `Fallback` condition `True`, or `KEDAScalerFailed` that persists | KEDA cannot reach the scaler: the controller is down or not Ready, or the Service has no endpoints | [controller not Ready](#the-controller-is-not-ready-or-crash-looping) |
 | `no children to pick from` in KEDA's log, after an uninstall and reinstall | KEDA's gRPC client is still backing off on a name that did not resolve | (cluster admin) restart the KEDA operator ([details](operations.md#no-children-to-pick-from-after-a-reinstall)) |
 
 More rows: [First-line troubleshooting](operations.md#first-line-troubleshooting).
