@@ -55,6 +55,10 @@ Read the review first; the implementation design says what was built.
 - **[Scale-from-zero: the missing signal](scale-from-zero-missing-signal.md)** —
   why a parked model needs a push, and where it comes from.
 - **[Priority scoping](priority-scoping.md)** — parked. Read before redesigning.
+- **[Kueue borrowing, and limiters that compose](kueue-borrowing-and-limiter-composition.md)**
+  — proposed (#136, #1003). Counts borrowable cohort capacity opt-in, after
+  first making `gpu-inventory` and `quota` bound together and fixing the
+  measured union leak, where two quota entries allow a type each one denies.
 - **[Utilization-share optimizer](utilization-share-optimizer.md)** — built:
   shadow mode and actuation (stages 1 and 2); the short window for urgent
   transfers (stage 3) is design. Spend the whole quota: every model gets what it
