@@ -231,7 +231,8 @@ make weights WEIGHTS_MODEL=Qwen/Qwen3-32B WEIGHTS_PATH=/mnt/local/models \
      WEIGHTS_IMAGE=docker.io/vllm/vllm-openai:v0.26.0 NAMESPACE=<ns>
 # on RHCOS (OpenShift) the directory is under /var, one per project: WEIGHTS_PATH=/var/mnt/weights/<ns>
 make weights-status NAMESPACE=<ns>          # per accelerator node: present / downloading, and why not
-make weights-delete NAMESPACE=<ns>          # drop the claim, volume and downloader; the files stay
+make weights-delete WEIGHTS_MODEL=<id> NAMESPACE=<ns>  # drop that model's claim, volume and downloader; the files stay
+                                            # (without WEIGHTS_MODEL: every model's in the namespace)
 ```
 
 One static `hostPath` PersistentVolume, one claim bound to it (and to no
@@ -278,11 +279,17 @@ What it costs, and what it needs:
   dynamically provisioned claims ("only dynamically provisioned pvc can
   be resized"), so a re-run keeps an existing claim's size when
   `WEIGHTS_CAPACITY` is not set, and refuses a `WEIGHTS_CAPACITY` that
-  differs from it before anything is applied. To change the size, run
-  `make weights-delete` for the model (the files on the nodes stay) and
-  apply again; `--dry-run` reads nothing from the cluster, so it shows the
-  set or default size, not the kept one. The same holds for
-  `ENGINE_CACHE_CAPACITY` and the `engine-cache` claim. And a
+  differs from it before anything is applied. To change the size, scale
+  the model servers that mount the claim to 0 (pvc-protection leaves a
+  mounted claim Terminating), run
+  `make weights-delete WEIGHTS_MODEL=<id> NAMESPACE=<ns>` (the files on
+  the nodes stay; without `WEIGHTS_MODEL` it deletes every model's claim
+  in the namespace) and apply again; `--dry-run` reads nothing from the
+  cluster, so it shows the set or default size, not the kept one. The
+  same holds for `ENGINE_CACHE_CAPACITY` and the `engine-cache` claim,
+  freed with `make engine-cache-delete NAMESPACE=<ns>` (one claim per
+  namespace). A claim of the model's name on another storage class is not
+  the script's: apply refuses it and leaves it alone. And a
   cluster that reaches Hugging Face through a proxy does not inject its
   proxy into arbitrary pods: the downloader would need `HTTPS_PROXY`.
 - Pod Security `baseline` admits the downloader (it mounts the claim, not a
