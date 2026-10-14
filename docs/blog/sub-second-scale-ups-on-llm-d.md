@@ -1,6 +1,6 @@
-# Sub-second scale-ups on llm-d: a multi-model autoscaler with a shared warm pool
+# Sub-second time to first token during scale-ups on llm-d: a multi-model autoscaler with a shared warm pool
 
-*Measurements on CoreWeave H200s, September 2026.*
+*Measurements on H200 nodes, September 2026. One run per arm; caveats below the table.*
 
 Traffic triples. The autoscaler notices, asks for a second replica, and
 Kubernetes schedules it in about a second. Then the pod spends the next forty
@@ -60,6 +60,9 @@ Two models bursting out of phase — the shape a pool exists for — 4020 second
 | + one-Pod warm pool | **0.11 – 0.83 s** | 14 138 (+17 %) |
 | floor of 2 replicas per model | 0.09 – 0.13 s | 16 080 (+33 %) |
 
+*Four scale-up events per arm, one run each, no confidence intervals: the
+direction holds on all four rises; the margins are one run's.*
+
 Read that honestly, because the uncomfortable column is the useful one.
 **Autoscaling alone is the cheapest arm** — it just pays for it with
 five-to-nine-second rises. The pool buys floor-like latency and costs 17 % more
@@ -89,8 +92,9 @@ Naina Singh) sets out nine structural reasons why. Three shape this design most:
 **Load is not request count.** Two requests to one model can differ by 1000× in
 compute — a 100-token chat completion against a 100K-token summarization. We
 scale on token throughput, KV-cache pressure and the prefill/decode ratio,
-through a closed-form model: an inter-token-latency fit plus a fair-share
-allocation. Closed-form is deliberate. At $2–4/hr per GPU, an operator asked to
+through a closed-form capacity model: utilization against a fixed threshold
+(scale up above 0.85, release below 0.70), with each role's demand floored on the
+throughput one replica sustained when last saturated. Closed-form is deliberate. At $2–4/hr per GPU, an operator asked to
 trust a scaling decision needs to be able to *read* it.
 
 **Models compete for the same GPUs.** This is the part most autoscalers do not

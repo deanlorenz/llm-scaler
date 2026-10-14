@@ -3,7 +3,7 @@
 **Status:** analysis of one run, three fixes landed on `fix/shape-swap-overprovision`
 (the third of them a new floor), one open design question with a proposed
 direction -- and a re-run of the same trace with the fixes, in
-[Re-run with the fixes](#re-run-with-the-fixes-2026-09-16-kermit) at the end.
+[Re-run with the fixes](#re-run-with-the-fixes-2026-09-16) at the end.
 Every "would have" in the analysis sections is arithmetic on the values the
 controller logged, and says so; the re-run is measured.
 
@@ -241,7 +241,7 @@ completions on its variant's bucket rather than its own would close it.
   count x avgInput estimate was closer and lost to the max. 43% high, on a
   term that is itself the open question above.
 
-## Re-run with the fixes, 2026-09-16, kermit
+## Re-run with the fixes, 2026-09-16
 
 The same trace (`shape_6k1000_1k4000_rps6_20m.jsonl`, seed 42: 6693 + 6595 =
 13288 requests, exactly the counts Ofer's summary implies), the same
@@ -250,15 +250,15 @@ the same scaling policy (0.8 / 5 / 0.85 / 0.7, 15s) and the same HPA
 behaviour as the original run (scale-up 100%/5s, window 0; scale-down
 50%/120s, window 180s -- Ofer's `fix/scaledown-defaults`, applied by patching
 the two ScaledObjects), against the image built from this branch at
-`367bd76b`. CoreWeave **kermit** rather than waldorf, which was in use; both
+`367bd76b`. Kubernetes H200 cluster B rather than Kubernetes H200 cluster A, which was in use; both
 are 8 x H200 nodes, and k1 came out identical (929,894 / 919,449).
-Results: `evgensh-20260916-kermit-shapeswap/results/guidellm-1789563884-wm9k0y_1`
+Results: `results/guidellm-1789563884-wm9k0y_1`
 (not committed; 500MB of raw scrapes).
 
 What differs from the original and is NOT the code: the controller started
 with no k2 history (Ofer's carried `historyWindowLen: 8` from earlier runs);
 a decode pod took 90s to Ready here against 145-160s there, so the first
-replica was alone for less time; kermit had 44 free GPUs, so nothing the
+replica was alone for less time; Kubernetes H200 cluster B had 44 free GPUs, so nothing the
 controller asked for was refused; and the routing sidecar is pinned to
 v0.9.0 (see the scenario file -- `latest` had moved past the chart pin and
 every decode pod crash-looped on the first standup).
@@ -266,7 +266,7 @@ every decode pod crash-looped on the first standup).
 ### Decode replicas over the run
 
 ```
-                  original (waldorf, 09-15)      this branch (kermit, 09-16)
+                  original (H200 cluster A, 09-15)    this branch (H200 cluster B, 09-16)
 load starts       1                              1
 first saturation  3 -> 7  (one replica alone)    2 -> 3  (46 queued for one cycle)
 phase 1 steady    7 -> 1  (collapse, 07:35-38)   3 -> 2, HELD at 2 for 11 min
@@ -298,7 +298,7 @@ is what the log says about it.
 
 ### What the load saw
 
-| | original (waldorf) | this branch (kermit) |
+| | original (Kubernetes H200 cluster A) | this branch (Kubernetes H200 cluster B) |
 |---|---|---|
 | requests / errors | 13288 / 0 | 13288 / 0 |
 | TTFT p50 / p95 / p99 | 103 ms / **45.4 s** / -- | 112 ms / **218 ms** / 3.1 s |
@@ -395,7 +395,7 @@ What was done (branch `fix/phase2-oscillation`):
   holds too many, which the cap bounds) and lasts until the first reading
   of the bucket's own, which then takes over unmasked.
 
-### Measured, 2026-09-16, kermit
+### Measured, 2026-09-16, Kubernetes H200 cluster B
 
 Three runs of the same trace on the same day, same stack and HPA policy,
 same cluster; the second decode replica's start time against the load

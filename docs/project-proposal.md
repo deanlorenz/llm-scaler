@@ -1,6 +1,6 @@
 # llm-scaling-manager: project proposal
 
-**Status:** proposal, 2026-09-28. Built and running, not a design note. The
+**Status:** built and running, 2026-09-28; this page argues for adopting it. The
 scaling path, warm pool, scale-to-zero and quota limiting are cluster-verified
 on Kubernetes and on OpenShift, and every measurement below links to the run
 that produced it.
@@ -17,8 +17,8 @@ loading, scale-to-zero, and separate handling for prefill and decode.
 
 We built it because the signals a general-purpose autoscaler can act on do not
 tell you what you need to know. We have a benchmark where request rate, queue
-depth and cache occupancy all said the fleet was fine and the right answer was
-to triple it.
+depth and cache occupancy all said the fleet was fine and it needed a third
+replica.
 
 It started as a fork of llm-d's Workload Variant Autoscaler
 (`llm-d/llm-d-workload-variant-autoscaler`, still the module path in `go.mod`)
@@ -92,7 +92,7 @@ push path; quota-bounded scaling, against either a
 | Claim | Measured | Where |
 | --- | --- | --- |
 | A shape change is caught without a queue | Third replica ordered at +1344 s, the same cycle the new shape's completion rate came on record. No queue at any point; p95 TTFT 0.08 s in the first phase, 0.04–0.07 s in the second | [P/D path](well-lit-paths/pd-disaggregation/) |
-| Missing it has a price | A cold controller sized the same window from occupancy and paid 4.2 s p95 | [P/D path](well-lit-paths/pd-disaggregation/) |
+| Missing it has a price | A cold controller sized the same window from occupancy: 4.2 s p95 in that five-minute window (204 ms over the whole run) | [P/D path](well-lit-paths/pd-disaggregation/) |
 | The decision precedes the queue | Second replica ordered at +53 s, before the first tipped into preemption | [P/D path](well-lit-paths/pd-disaggregation/) |
 | Roles scale on their own bottleneck | Decode 1 → 2 → 3, prefill never ordered | [P/D path](well-lit-paths/pd-disaggregation/) |
 | The warm pool covers the rise | p95 TTFT per rise falls from 5.1–8.8 s to 0.11–0.83 s | [measured.md](well-lit-paths/warm-pool-bridge/measured.md) |
@@ -110,7 +110,7 @@ model; the result is demonstrated there and expected, not shown, above it.
 ## Non-goals and limits
 
 **Out of scope by design.** Node provisioning belongs to the cluster autoscaler,
-quota between models to Kueue, and tenant quota and routing to the gateway. We
+tenant arbitration to Kueue, and routing to the gateway. We
 decide replica counts. We do not place Pods, arbitrate between tenants, or route
 requests.
 
@@ -168,7 +168,7 @@ with KEDA owning the HPA. One consequence worth knowing: the HPA takes the
 maximum published inside its scale-down window, so we hold a published
 scale-down across cycles to stop one noisy sample pinning the fleet.
 
-Measured on H200 nodes. Replica reallocation across priorities is designed but
+Measured on H200 nodes; the warm-pool model switch on H100. Replica reallocation across priorities is designed but
 not built, and P/D role switching is experimental. Apache 2.0, and the module
 path has not changed.
 

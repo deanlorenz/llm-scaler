@@ -37,7 +37,7 @@ Also: on OpenShift set `USER` and `HOME`, or torch's `cache_dir` calls
 
 ## TP=2 to TP=2, across nodes
 
-Measured 2026-08-27 on pokprod: Qwen3-8B (bf16, ~16.4 GB) donated by a serving
+Measured 2026-08-27 on an H100 OpenShift test cluster: Qwen3-8B (bf16, ~16.4 GB) donated by a serving
 TP=2 replica to a TP=2 receiver whose weights a level-2 sleep had discarded.
 Output identical on three prompts, including generative ones, not just
 "capital of France".

@@ -1,7 +1,7 @@
 # Autoscaling Landscape vs. llm-scaling-manager — NVIDIA Dynamo, Mooncake, SGLang, Fireworks AI, Together AI
 
-> **Status:** Research comparison (untracked working doc) · **Date:** 2026-08-03 · **Managed providers added:** 2026-08-09
-> **Baseline:** llm-d llm-scaling-manager (**the scaling manager**)
+> **Status:** research comparison · **Date:** 2026-08-03, managed providers added 2026-08-09, the scaling manager's column updated 2026-10-14
+> **Baseline:** llm-scaling-manager (**the scaling manager**), an independently developed fork of llm-d's workload-variant-autoscaler
 > **Compared — deployable systems:** NVIDIA Dynamo Planner, Mooncake, SGLang · **managed platforms:** Fireworks AI, Together AI
 > All claims are sourced against latest docs/code — see [Sources](#sources).
 
@@ -11,7 +11,7 @@
 
 | System | Is it an autoscaler? | One-line posture |
 |---|---|---|
-| **the scaling manager** (baseline) | **Yes** | Global, SLO/cost-aware, **heterogeneous, multi-model** controller; emits desired replicas → HPA/KEDA. |
+| **the scaling manager** (baseline) | **Yes** | Global, cost-aware, **heterogeneous, multi-model** controller; SLOs only through named threshold tiers (no SLA-target scaling); answers KEDA's external scaler with desired replicas. |
 | **NVIDIA Dynamo Planner** | **Yes** | SLA-driven controller with **traffic forecasting** + **pre-deployment profiling**; scales prefill/decode independently; **single-model, homogeneous, cost-blind**. |
 | **Mooncake** | **No** | KVCache-aware scheduler + **early-rejection admission control** over a *fixed* pool. Sheds load; does not add capacity. Scheduling "brain" is **not open-source**. |
 | **SGLang** | **No (native)** | Engine + **router/gateway** (membership + cache-aware LB). Scaling delegated entirely to **external K8s** (HPA/KEDA, OME/Knative/LWS). |
@@ -38,11 +38,11 @@
 | **Signals** | Prometheus: queue depth, KV util, request rate, token supply/demand | Prometheus (rate, ISL/OSL, KV-hit) **+** event-plane ForwardPassMetrics | KV reuse, P/D load, TTFT/TBT, predicted decode load | Engine Prometheus (`num_queue_reqs`, `token_usage`, TTFT/TPOT) → external |
 | **Forecasting** | **None** (reactive; EWMA/rate-anchored smoothing only) | **Yes** — Constant/ARIMA(default)/Kalman/Prophet, 1-interval look-ahead | For **admission** only (predict decode load to reject early), not capacity | None |
 | **SLA→capacity** | Saturation optimizer; greedy-by-saturation; learns online, **no profiling needed** | Interpolated perf model from **pre-deployment profiling** (AIC rapid / AIPerf thorough) | No (SLA → which requests to admit/reject) | None (thresholds live in external KEDA rules) |
-| **Cost / heterogeneity** | **Yes** — heterogeneous accelerators first-class; cost-aware optimizer (relative `variant-cost`); **GPU quota/fair-share limiter** | **No** — homogeneous single GPU type, cost-blind; only a GPU-count cap (`max_gpu_budget=8`) | No (reuses idle CPU/DRAM/SSD on fixed HW) | No (only heterogeneous-TP KV transfer, a data-plane opt) |
-| **Actuation** | **Metrics-first** → Prometheus Adapter → **HPA/KEDA** → `scale` (opt-in `llm-d.ai/managed`); optional direct scale for scale-from-zero | **Own controller** patches DGD CRD via operator (`DynamoGraphDeploymentScalingAdapter`); **VirtualConnector** publishes decisions without managing infra (suggest-only) | Actuates on **requests** (route/reject/replicate KV); no fleet actuation | Dynamic worker register/deregister + K8s service discovery (membership, not scaling) |
+| **Cost / heterogeneity** | **Yes** — heterogeneous accelerators first-class; cost-aware optimizer (relative `variantCost` in the ScaledObject trigger); **GPU quota/fair-share limiter** | **No** — homogeneous single GPU type, cost-blind; only a GPU-count cap (`max_gpu_budget=8`) | No (reuses idle CPU/DRAM/SSD on fixed HW) | No (only heterogeneous-TP KV transfer, a data-plane opt) |
+| **Actuation** | **KEDA external scaler (gRPC)**: KEDA's HPA reads the desired replicas; registration is the ScaledObject; it never writes replica counts itself, scale-from-zero included | **Own controller** patches DGD CRD via operator (`DynamoGraphDeploymentScalingAdapter`); **VirtualConnector** publishes decisions without managing infra (suggest-only) | Actuates on **requests** (route/reject/replicate KV); no fleet actuation | Dynamic worker register/deregister + K8s service discovery (membership, not scaling) |
 | **P/D disaggregation** | Roles first-class (`llm-d.ai/role`), role-aware demand | **Independent prefill/decode scaling** (core feature) | Separate P/D pools, **preset ratio** | Separate pools, **manual** scaling |
-| **Maturity** | Incubation/active (VA-CR → annotation migration); paper published | GA v1.0 (Mar 2026, unverified), v1.3.1 (6 Aug 2026); both modes production-ready | Production at Kimi; **Conductor + rejection policy NOT open-sourced** | Engine mature; router shipped but mid-rewrite; PD scaling manual |
-| **Openness** | Open (Apache-2, llm-d) | Open (ai-dynamo) | **Partial** — transport/store open; scheduler internal | Open (sgl-project) |
+| **Maturity** | Active; Stable and Experimental paths marked per scenario ([well-lit paths](../well-lit-paths/)); upstream WVA paper published | GA v1.0 (Mar 2026, unverified), v1.3.1 (6 Aug 2026); both modes production-ready | Production at Kimi; **Conductor + rejection policy NOT open-sourced** | Engine mature; router shipped but mid-rewrite; PD scaling manual |
+| **Openness** | Open (Apache-2.0); independent of the llm-d project | Open (ai-dynamo) | **Partial** — transport/store open; scheduler internal | Open (sgl-project) |
 
 ---
 

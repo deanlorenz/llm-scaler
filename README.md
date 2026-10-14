@@ -4,23 +4,41 @@
 [![CI](https://github.com/ev-shindin/llm-scaling-manager/actions/workflows/ci-pr-checks.yaml/badge.svg?branch=main)](https://github.com/ev-shindin/llm-scaling-manager/actions/workflows/ci-pr-checks.yaml)
 [![Go](https://img.shields.io/github/go-mod/go-version/ev-shindin/llm-scaling-manager)](go.mod)
 
-**An analytical scaling manager for llm-d inference: multi-model, variant- and
-P/D-aware. Scaling, warm capacity and placement under one GPU budget.**
+**Right-size every LLM model on your GPUs, before the queue forms, inside one GPU budget.**
 
-llm-scaling-manager decides how many replicas of each LLM model server should
-run on Kubernetes. It reads how loaded the servers are (KV cache, queues,
-token rates), sizes every model for its load across all the ways it is served,
-keeps the total inside a GPU budget if you set one, and hands the number to
-KEDA. KEDA and the HPA do the scaling; the scaling manager never writes a
-replica count itself.
+llm-scaling-manager is an autoscaler for [llm-d](https://llm-d.ai) on
+Kubernetes. It prices load from what each replica can actually serve (KV cache,
+queues, token throughput) rather than from request counts, sizes every model and
+variant together against one GPU budget, and hands the answer to KEDA. A warm
+pool of sleeping models covers the minutes a new replica takes to load.
+
+**Measured on GPU clusters** (single runs unless noted; method and caveats linked):
+
+- **Scale-ups without the latency spike.** p95 time to first token per rise
+  falls from **5.1–8.8 s to 0.11–0.83 s** with a one-Pod warm pool, using
+  **12 % fewer GPU-seconds** than a floor of two replicas
+  ([warm pool, measured](docs/well-lit-paths/warm-pool-bridge/measured.md)).
+- **It sees the shape, not just the queue.** At a constant 6 req/s, with no
+  queue and 5–15 % of the KV cache in use, it ordered the replica the new
+  request shape needed: p95 TTFT **155 ms, 0 errors in 13 288 requests**, run
+  twice a day apart ([P/D path](docs/well-lit-paths/pd-disaggregation/)).
+- **A warm Pod switches models in 437 ms**, against about 41 s cold
+  ([fast model loading](docs/proposals/fast-model-loading.md)).
+- **Scale to zero**, and wake on the first queued request
+  ([scale to zero](docs/well-lit-paths/scale-to-zero/)).
+
+![Warm pool: near-floor latency for 12 % fewer GPU-seconds](docs/figures/warm-pool-latency-vs-cost.svg)
+
+**[Why llm-scaling-manager](docs/why.md)** (the one-page case, costs and
+maturity) · **[Get started](docs/README.md#getting-started-in-three-steps)** ·
+**[Pick your scenario](docs/well-lit-paths/)**
 
 ![How it fits together](docs/concepts/figures/how-it-fits.svg)
 
-> An independently developed, advanced fork of
-> [llm-d/llm-d-workload-variant-autoscaler](https://github.com/llm-d/llm-d-workload-variant-autoscaler)
-> (WVA), not affiliated with or endorsed by the llm-d project. Kubernetes
-> objects, make targets and metrics keep their `wva-` / `wva_` names, so
-> dashboards, alerts and existing installs are unaffected.
+> An independently developed, advanced fork of llm-d's
+> [workload-variant-autoscaler](https://github.com/llm-d/llm-d-workload-variant-autoscaler)
+> (WVA); not affiliated with or endorsed by the llm-d project. Kubernetes
+> objects, make targets and metrics keep their `wva-` / `wva_` names.
 > [What is different from upstream](#what-is-different-from-upstream).
 
 ### Models and variants
@@ -36,8 +54,8 @@ is the whole registration.
 
 - **Scaling from real load**: replica counts follow KV-cache use, queues and
   token throughput, per model and across its variants.
-- **Cost-aware placement**: when a model has several variants, the cheaper one
-  is filled first.
+- **Cost-aware variant choice**: when a model has several variants, it grows
+  the one with the lowest cost per unit of capacity (`variantCost`).
 - **A GPU budget**: optionally bound every decision by the GPUs that are free,
   a per-namespace quota, or Kueue's quotas.
 - **Scale to zero and back**: an idle model releases its GPUs; a queued request
@@ -120,7 +138,7 @@ spec:
     kind: Deployment
     name: llama-8b
   pollingInterval: 5
-  minReplicaCount: 1        # 0 to allow scale-to-zero (alpha)
+  minReplicaCount: 1        # 0 to allow scale to zero
   maxReplicaCount: 10
   triggers:
   - type: external-push     # push: wakes a parked workload immediately
@@ -128,7 +146,7 @@ spec:
     metadata:
       scalerAddress: wva-external-scaler.<controller-namespace>.svc.cluster.local:9090  # your NAMESPACE on a namespace install
       modelID: meta/llama-3-8b   # required — the only field you must supply
-      scalingPolicy: interactive # optional — a named policy tier
+      scalingPolicy: interactive # optional — a tier you add to the scaling policy; none ship enabled
       variantCost: "10.0"        # optional — defaults to "10.0"
 ```
 
@@ -142,7 +160,7 @@ can check for you — a `modelID` that does not match what the container serves
 groups the workload with a model it does not run, and mis-scales both. See
 [the guides](docs/guides/).
 
-More examples in [config/samples/keda/](config/samples/keda/).
+Every trigger key, its default and who reads it: [the trigger reference](docs/reference/scaledobject-trigger.md). More examples in [config/samples/keda/](config/samples/keda/).
 
 ## What is different from upstream
 
@@ -157,14 +175,12 @@ and has diverged substantially from it. The largest additions:
   writes an editable plan of what would be autoscaled before anything is applied;
 - **GPU budgets** shared across models: physical inventory, quotas, Kueue, and
   the experimental utilization-share optimizer;
-- **fixture-executing check suites** that run the deploy shell against recorded
-  pod specs in CI.
 
 ## Contributing
 
 We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
-Join the [llm-d autoscaling community meetings](https://llm-d.ai/slack) to get involved.
+Questions, bugs and ideas: [GitHub issues](https://github.com/ev-shindin/llm-scaling-manager/issues).
 
 ## License
 

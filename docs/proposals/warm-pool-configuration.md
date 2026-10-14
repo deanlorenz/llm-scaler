@@ -363,7 +363,7 @@ pool](../guides/warm-pool/).
 
 ### Verified on the cluster, 2026-08-25
 
-Steps 1, 2, 3 and 3a were run on pokprod. One log line covers three of them:
+Steps 1, 2, 3 and 3a were run on an H100 OpenShift test cluster. One log line covers three of them:
 
 ```
 warm pool enabled  {"namespace":"evgensh-wva-test","sleepMinSize":1,"maxHold":"2m0s",
@@ -393,7 +393,7 @@ eviction answers pressure, not a variant that stopped asking.
 
 The step 4 preflight is verified in BOTH directions, on two clusters.
 
-Allowing, on pokprod: the pool starts silently. Denying, on kind, where nothing
+Allowing, on the OpenShift test cluster: the pool starts silently. Denying, on kind, where nothing
 else uses the cluster -- `patch` was removed from the ClusterRole the
 controller's ServiceAccount draws it from, the API server then answered `no`,
 and the controller refused to start the pool:
@@ -405,13 +405,13 @@ Running without it would hold GPUs, warm models, and fail every borrow.
 ```
 
 RBAC was restored afterwards and the pool started again. This deliberately was
-NOT done on pokprod: there the ServiceAccount draws `patch` from a ClusterRole
+NOT done on the OpenShift test cluster: there the ServiceAccount draws `patch` from a ClusterRole
 shared with other namespaces' installs, so revoking it to observe one log line
 would have broken other tenants.
 
 ### Cluster testing, 2026-08-26
 
-Also verified on pokprod: the pool's own ScaledObject end to end -- raising the
+Also verified on the OpenShift test cluster: the pool's own ScaledObject end to end -- raising the
 reserve changed the published size, the HPA followed, and KEDA moved the
 Deployment, with WVA writing nothing; the shrink direction likewise;
 `warmPoolCopies: "2"` warming the model in both Pods; and eviction releasing
@@ -445,7 +445,7 @@ chooses, and named pools. Those specs are proven able to fail — a controller
 built with the accelerator check stubbed out fails the decline spec while the
 read-only spec still passes.
 
-pokprod is all-H100, so the mismatch cannot be manufactured there without
+That cluster is all-H100, so the mismatch cannot be manufactured there without
 repinning a tenant's live workload; kind is where it is tested.
 
 A user-facing guide is now worth writing, which it was not before: the surface no

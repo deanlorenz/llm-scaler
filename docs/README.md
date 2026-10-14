@@ -118,12 +118,15 @@ stack](guides/testing-with-llm-d/) · [benchmark the scaling manager](guides/ben
 - **[The cycle log](reference/cycle-log.md)** — the two lines the scaling manager emits per cycle, their fields and reason codes: the page that answers "why did it scale?"
 - **[Scaling policy](reference/scaling-policy.md)** — thresholds, tiers, scale-to-zero, limiters, the utilization-share optimizer
 - **[Preparing a workload](reference/workload-preparation.md)** — the model cache, draining before scale-down, `make workload-patch`
+- **[ScaledObject trigger metadata](reference/scaledobject-trigger.md)** — every key the trigger carries (`modelID`, `variantCost`, `scalingPolicy`, `defaultOutputTokens`, warm-pool keys), its default and validation, and the recommended HPA behavior
 - **[Install methods](reference/install-methods.md)** — installer, kustomize, and per-platform entry points
 - **[The GPU limiter](reference/gpu-limiter.md)** and **[the quota limiter](reference/quota-limiter.md)** — bounding the scaling manager by real accelerators, and by declared caps
+- **[Security model](reference/security-model.md)** — identities, every permission by install scope, what it writes, the ports it opens, and what fails open
 - **[Metrics and health](reference/metrics.md)** · **[Prometheus integration](reference/prometheus.md)**
 - **[Router configuration](reference/router-configuration.md)** — the two router settings that decide what the scaling manager sees: flow control bounds the queue it reads as demand, and the scheduling profiles decide whether the replicas it orders get used
 - **[SGLang backend](reference/sglang-backend.md)** — auto-detected per variant; nothing to configure
 - **[Troubleshooting](reference/troubleshooting.md)**
+- **[Upgrade and uninstall](reference/upgrade-and-uninstall.md)** — pinning a version, what a restart costs, and what an uninstall leaves behind
 
 ## Concepts — how the scaling manager decides
 

@@ -122,8 +122,11 @@ optimization](modeling-and-optimization.md).
 | Roles and ClusterRoles | read pods, workloads, ScaledObjects, InferencePools, nodes and (optionally) Kueue queues; patch pods |
 
 It has **no write access** to Deployments, ScaledObjects or HPAs. It patches
-pods only to set annotations: the deletion cost that tells Kubernetes which
-pod to remove first, and the marks of the utilization-share optimizer.
+pods: annotations (the deletion cost that tells Kubernetes which pod to remove
+first, and the marks of the utilization-share optimizer) and, with a warm pool,
+the labels that put a pool pod into a model's InferencePool. It also writes
+Events, a leader-election Lease and its own ConfigMaps.
+Every identity, permission and port, by install scope: [security model](../reference/security-model.md).
 
 The common install is **namespace-scoped**: one scaling manager per namespace,
 managing only the model servers there. A cluster admin runs a one-time setup
