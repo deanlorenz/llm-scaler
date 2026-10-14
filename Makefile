@@ -450,17 +450,23 @@ WVA_LIMITER_TYPE    ?= gpu-inventory
 # Namespaces whose controllers to grant. Empty = every controller on the cluster,
 # which is what you want: the hazard is the install you forgot.
 WVA_LIMITER_TARGETS ?=
+# What a labelled Deployment must run as, and from, to be granted. The label
+# alone is not identity: anyone who can create a Deployment can set it.
+WVA_CONTROLLER_SA          ?= wva-controller-manager
+WVA_CONTROLLER_IMAGE_REPOS ?= $(IMAGE_TAG_BASE)/llm-scaling-manager
 
 .PHONY: enable-physical-limiter
 enable-physical-limiter: ## CLUSTER ADMIN: bound every WVA by real GPUs. Publishes cluster policy and grants each controller the node read it then requires. WVA_LIMITER_TYPE=gpu-inventory|quota (quota also needs WVA_QUOTAS), WVA_POLICY_NS, WVA_LIMITER_TARGETS.
 	@WVA_POLICY_NS=$(WVA_POLICY_NS) WVA_LIMITER_TYPE=$(WVA_LIMITER_TYPE) \
 		WVA_LIMITER_TARGETS="$(WVA_LIMITER_TARGETS)" \
+		WVA_CONTROLLER_SA='$(WVA_CONTROLLER_SA)' WVA_CONTROLLER_IMAGE_REPOS='$(WVA_CONTROLLER_IMAGE_REPOS)' \
 		WVA_QUOTAS='$(WVA_QUOTAS)' WVA_QUOTA_SCOPE=$(WVA_QUOTA_SCOPE) WVA_QUOTA_KUEUE=$(WVA_QUOTA_KUEUE) \
 		bash -c 'source deploy/lib/common.sh; source deploy/lib/limiter_policy.sh; source deploy/lib/physical_limiter.sh; enable_physical_limiter'
 
 .PHONY: disable-physical-limiter
 disable-physical-limiter: ## CLUSTER ADMIN: remove the limiter from cluster policy. Scaling becomes unbounded for every WVA that reads it.
 	@WVA_POLICY_NS=$(WVA_POLICY_NS) \
+		WVA_CONTROLLER_SA='$(WVA_CONTROLLER_SA)' WVA_CONTROLLER_IMAGE_REPOS='$(WVA_CONTROLLER_IMAGE_REPOS)' \
 		bash -c 'source deploy/lib/common.sh; source deploy/lib/limiter_policy.sh; source deploy/lib/physical_limiter.sh; disable_physical_limiter'
 
 ##@ Utilization share
@@ -2724,6 +2730,11 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# and one installed after the policy was published had no RoleBinding
 	@# to read it and refused to start. Executed against a stub kubectl.
 	@bash hack/check-policy-namespace-grants.sh
+	@echo "Checking who enable-physical-limiter grants node read to..."
+	@# The label it finds controllers by is one anyone can set, and the grant went
+	@# to whatever ServiceAccount the labelled Deployment named. Executed against a
+	@# stub kubectl, on an impostor beside a genuine controller.
+	@bash hack/check-physical-limiter-targets.sh
 	@echo "Checking the tenant Role still covers the generated ClusterRole..."
 	@# The ClusterRole is GENERATED from kubebuilder markers; the namespaced Role
 	@# the tenant overlay installs is maintained by hand, so it does not move when

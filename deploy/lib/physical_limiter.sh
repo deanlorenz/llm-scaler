@@ -4,6 +4,7 @@
 # for every WVA on the cluster.
 #
 # Requires vars: WVA_POLICY_NS, WVA_LIMITER_TYPE, WVA_LIMITER_TARGETS.
+# Optional vars: WVA_CONTROLLER_SA, WVA_CONTROLLER_IMAGE_REPOS (pl_controller_targets).
 # Requires funcs: log_info/log_success/log_warning/log_error, wva_ns_suffix.
 #
 # Why this is one command rather than a documented sequence of four:
@@ -76,6 +77,114 @@ pl_controller_namespaces() {
     printf '%s' "$out" | sort -u
 }
 
+# pl_expected_sa echoes the ServiceAccount this project's controller runs as:
+# config/base/rbac names it controller-manager and every overlay adds the wva-
+# namePrefix. WVA_CONTROLLER_SA overrides it for an install built another way.
+pl_expected_sa() {
+    echo "${WVA_CONTROLLER_SA:-wva-controller-manager}"
+}
+
+# pl_image_repos echoes the image repositories a controller may run from,
+# space-separated: WVA_CONTROLLER_IMAGE_REPOS, else the installer WVA_IMAGE_REPO,
+# else the published one. A mirror is named here, not inferred.
+pl_image_repos() {
+    echo "${WVA_CONTROLLER_IMAGE_REPOS:-${WVA_IMAGE_REPO:-ghcr.io/ev-shindin/llm-scaling-manager}}"
+}
+
+# pl_image_repo echoes an image reference without its tag and digest. A colon
+# in the last path segment is a tag; one earlier is a registry port.
+pl_image_repo() {
+    local img="${1%%@*}"
+    case "${img##*/}" in *:*) img="${img%:*}" ;; esac
+    echo "$img"
+}
+
+# pl_controller_targets reads namespaces on stdin, one per line, and echoes
+# `<namespace> <deployment> <serviceaccount>` for each Deployment there that is
+# this project's controller -- the only ones this command may grant to.
+#
+# The label alone is not identity. Anyone who can create a Deployment can put
+# app.kubernetes.io/name=workload-variant-autoscaler on it and name any
+# ServiceAccount in their namespace -- `default`, say, which every pod there
+# runs as -- and this cluster-admin command then granted that account
+# cluster-wide node read. So a labelled Deployment is granted only when it is
+# also shaped like an install of this project:
+#
+#   * its pod runs as the controller ServiceAccount (pl_expected_sa) -- this is
+#     the signal that bounds the grant: whatever else a tenant forges, the
+#     binding names only that one account, never one they chose;
+#   * it has a container named `manager` (config/base/manager/deployment.yaml)
+#     whose image comes from a controller repository (pl_image_repos). Args are
+#     not used: installs patch them, and a flag is as easy to copy as an image.
+#
+# These are signals, not proof -- a tenant owns everything in their Deployment.
+# WVA_LIMITER_TARGETS is the allowlist for a cluster that needs one.
+#
+# A namespace in WVA_LIMITER_TARGETS with no labelled Deployment yet is echoed
+# with deployment `-` and the expected ServiceAccount: the admin named it, and
+# the controller about to be installed there runs as that account.
+#
+# Skipped Deployments are named on stderr. RETURNS non-zero when a namespace
+# cannot be read, for the reason pl_controller_namespaces gives.
+pl_controller_targets() {
+    local ns json rows name sa image repo r allowed expected repos
+    expected="$(pl_expected_sa)"
+    repos="$(pl_image_repos)"
+    while IFS= read -r ns; do
+        [ -n "$ns" ] || continue
+        if ! json="$(kubectl get deploy -n "$ns" -l app.kubernetes.io/name=workload-variant-autoscaler \
+            -o json 2>/dev/null)" || [ -z "$json" ]; then
+            return 1   # kubectl answers a List even when nothing matches
+        fi
+        # One row per Deployment: name, ServiceAccount (absent is the namespace
+        # default account), and the manager container image or a dash.
+        if ! rows="$(printf '%s' "$json" | jq -r '.items[] | [
+                .metadata.name,
+                (.spec.template.spec.serviceAccountName // .spec.template.spec.serviceAccount // "default"),
+                ([.spec.template.spec.containers[]? | select(.name == "manager") | .image][0] // "-")
+            ] | @tsv' 2>/dev/null)"; then
+            return 1
+        fi
+        if [ -z "$rows" ]; then
+            if [ -n "${WVA_LIMITER_TARGETS:-}" ]; then
+                log_info "  $ns: no controller Deployment yet; granting the controller ServiceAccount $expected"
+                echo "$ns - $expected"
+            fi
+            continue
+        fi
+        while IFS=$'\t' read -r name sa image; do
+            if [ "$sa" != "$expected" ]; then
+                log_warning "  SKIPPED $ns/$name: it runs as ServiceAccount '$sa', not the controller's '$expected'. Not granted. (WVA_CONTROLLER_SA names a different controller account.)"
+                continue
+            fi
+            if [ "$image" = "-" ]; then
+                log_warning "  SKIPPED $ns/$name: it has no container named 'manager', so it is not a controller install. Not granted."
+                continue
+            fi
+            repo="$(pl_image_repo "$image")"
+            allowed=0
+            for r in $repos; do [ "$repo" = "$r" ] && allowed=1; done
+            if [ "$allowed" -eq 0 ]; then
+                log_warning "  SKIPPED $ns/$name: its manager container runs '$image', which is not from a controller repository ($repos). Not granted. (WVA_CONTROLLER_IMAGE_REPOS names a mirror.)"
+                continue
+            fi
+            echo "$ns $name $sa"
+        done <<< "$rows"
+    done
+}
+
+# pl_deploy_field echoes a jsonpath field of the controller Deployment <name> in
+# <ns>, or of the first labelled Deployment there when <name> is `-`.
+pl_deploy_field() {
+    local ns="$1" name="$2" path="$3"
+    if [ -n "$name" ] && [ "$name" != "-" ]; then
+        kubectl get deploy "$name" -n "$ns" -o jsonpath="{${path}}" 2>/dev/null || true
+    else
+        kubectl get deploy -n "$ns" -l app.kubernetes.io/name=workload-variant-autoscaler \
+            -o jsonpath="{.items[0]${path}}" 2>/dev/null || true
+    fi
+}
+
 # pl_policy_cm_ns echoes the namespace whose ConfigMap the controller in $1
 # actually reads policy from — which is NOT always the well-known one.
 #
@@ -90,16 +199,14 @@ pl_controller_namespaces() {
 # So writing policy to wva-policy and walking away would be a no-op for exactly
 # the installs an admin is most likely to have. This asks each controller.
 pl_policy_cm_ns() {
-    local ns="$1" args watch
-    args="$(kubectl get deploy -n "$ns" -l app.kubernetes.io/name=workload-variant-autoscaler \
-        -o jsonpath='{.items[0].spec.template.spec.containers[0].args}' 2>/dev/null || true)"
+    local ns="$1" deploy="${2:--}" args watch
+    args="$(pl_deploy_field "$ns" "$deploy" '.spec.template.spec.containers[0].args')"
     case "$args" in
         *--watch-namespace*) : ;;
         # No --watch-namespace: cluster-scoped. Its own ConfigMap is authoritative.
         *) echo "$ns"; return ;;
     esac
-    watch="$(kubectl get deploy -n "$ns" -l app.kubernetes.io/name=workload-variant-autoscaler \
-        -o jsonpath='{.items[0].spec.template.spec.containers[0].env[?(@.name=="WVA_WATCH_NAMESPACE")].value}' 2>/dev/null || true)"
+    watch="$(pl_deploy_field "$ns" "$deploy" '.spec.template.spec.containers[0].env[?(@.name=="WVA_WATCH_NAMESPACE")].value')"
     # The base leaves it as the literal $(POD_NAMESPACE), which resolves to the
     # controller's own namespace; an install with WVA_WATCH_NS patches in a name.
     case "$watch" in
@@ -121,23 +228,13 @@ pl_policy_cm_ns() {
 # success. Compared against the namespace's creation time rather than assumed,
 # because restarting controllers that do not need it is its own small outage.
 pl_needs_restart() {
-    local ns="$1" policy_ns started created
-    [ "$(pl_policy_cm_ns "$ns")" = "$policy_ns_global" ] || return 1
+    local ns="$1" deploy="${2:--}" started created
+    [ "$(pl_policy_cm_ns "$ns" "$deploy")" = "$policy_ns_global" ] || return 1
     created="$(kubectl get namespace "$policy_ns_global" -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null || true)"
     started="$(kubectl get pods -n "$ns" -l app.kubernetes.io/name=workload-variant-autoscaler \
         -o jsonpath='{.items[0].status.startTime}' 2>/dev/null || true)"
     [ -n "$created" ] && [ -n "$started" ] || return 1
     [[ "$started" < "$created" ]]   # RFC3339 sorts lexically
-}
-
-# pl_controller_sa echoes the ServiceAccount a controller in $1 runs as.
-pl_controller_sa() {
-    local ns="$1" sa
-    sa="$(kubectl get deploy -n "$ns" -l app.kubernetes.io/name=workload-variant-autoscaler \
-        -o jsonpath='{.items[0].spec.template.spec.serviceAccountName}' 2>/dev/null || true)"
-    # An install that predates the phase split, or one being prepared before the
-    # controller exists, still has a predictable SA name.
-    echo "${sa:-wva-controller-manager}"
 }
 
 # pl_grant_node_read grants one controller the cluster-scoped node read.
@@ -177,8 +274,9 @@ EOF
 }
 
 # pl_grant_kueue_read grants one controller the cluster-scoped Kueue read a quota
-# entry with kueue.enabled needs: ClusterQueues and ResourceFlavors. LocalQueues
-# are namespaced and come with the controller's own Role.
+# entry with kueue.enabled needs: ClusterQueues and ResourceFlavors, and get on
+# Namespaces to evaluate a ClusterQueue namespaceSelector. LocalQueues are
+# namespaced and come with the controller's own Role.
 #
 # Same object names as components/kueue-reader, for the same reason as
 # pl_grant_node_read. Without this, a cluster policy carrying the kueue block
@@ -200,6 +298,9 @@ rules:
 - apiGroups: ["kueue.x-k8s.io"]
   resources: ["clusterqueues", "resourceflavors"]
   verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -524,6 +625,21 @@ enable_physical_limiter() {
     if [ -z "$namespaces" ]; then
         log_warning "No WVA controller found on this cluster. Publishing the policy anyway — any WVA installed later reads it at startup."
     fi
+    # Only Deployments that are this project's controller are granted; the rest
+    # are named as skipped. The status, checked, for the same subshell reason.
+    local controllers deploy
+    if ! controllers="$(printf '%s\n' "$namespaces" | pl_controller_targets)"; then
+        log_error "could not read the WVA controller Deployments, so this command cannot tell which ones are genuine. Refusing to grant to what it cannot verify."
+    fi
+    if [ -n "$namespaces" ] && [ -z "$controllers" ]; then
+        log_warning "No labelled Deployment passed verification, so no controller is granted anything."
+    fi
+    if [ -n "$controllers" ]; then
+        log_info "Controllers to be granted (namespace, Deployment, ServiceAccount):"
+        printf '%s\n' "$controllers" | while read -r ns deploy sa; do
+            log_info "  $ns/$deploy as ServiceAccount $sa"
+        done
+    fi
 
     log_info "Publishing cluster policy in $policy_ns (limiter: $limiter)"
     kubectl create namespace "$policy_ns" --dry-run=client -o yaml \
@@ -535,15 +651,16 @@ enable_physical_limiter() {
     # the cluster, arriving as NotReady pods rather than as an error from this
     # command.
     local targets="" restart_list="" cm_ns ns_read
-    for ns in $namespaces; do
-        sa="$(pl_controller_sa "$ns")"
+    # fd 3, so nothing in the body can read the list off stdin.
+    while read -r ns deploy sa <&3; do
+        [ -n "$ns" ] || continue
         if [ "$limiter" = "gpu-inventory" ]; then
             pl_grant_node_read "$ns" "$sa"
         fi
         if [ "$limiter" = "quota" ] && [ "${WVA_QUOTA_KUEUE:-false}" = "true" ]; then
             pl_grant_kueue_read "$ns" "$sa"
         fi
-        cm_ns="$(pl_policy_cm_ns "$ns")"
+        cm_ns="$(pl_policy_cm_ns "$ns" "$deploy")"
         if [ "$cm_ns" = "$policy_ns" ]; then
             # Asked before the grant: a controller that could not SEE the policy
             # namespace resolved to its own ConfigMap at startup, and a grant
@@ -551,8 +668,8 @@ enable_physical_limiter() {
             ns_read="$(pl_can_read_namespace "$ns" "$sa" "$policy_ns")"
             pl_grant_namespace_read "$ns" "$sa"
             pl_grant_policy_read "$ns" "$sa" "$policy_ns"
-            if pl_needs_restart "$ns" || [ "$ns_read" = no ]; then
-                restart_list="$restart_list $ns"
+            if pl_needs_restart "$ns" "$deploy" || [ "$ns_read" = no ]; then
+                restart_list="$restart_list $ns/$deploy"
             elif [ "$ns_read" = unknown ]; then
                 log_warning "  Could not tell whether $ns/$sa could already read namespace $policy_ns (impersonation was not allowed). If its controller logs 'Cannot tell whether a cluster admin published policy', restart it."
             fi
@@ -560,7 +677,7 @@ enable_physical_limiter() {
         case " $targets " in *" $cm_ns "*) : ;; *) targets="$targets $cm_ns" ;; esac
         log_success "  $ns/$sa — reads policy from ${cm_ns}$([ "$limiter" = "gpu-inventory" ] && echo ', and may list nodes')$([ "$limiter" = "quota" ] && [ "${WVA_QUOTA_KUEUE:-false}" = "true" ] && echo ', and may read Kueue')"
         granted=$((granted + 1))
-    done
+    done 3<<< "$controllers"
 
     # The well-known namespace too, matching what disable already clears — and it
     # is the ONLY target when the cluster has no controller yet. Without it, this
@@ -578,10 +695,14 @@ enable_physical_limiter() {
     # A controller that started before the well-known namespace existed resolved
     # its policy source to its OWN namespace and will never look again. Without
     # this the command reports success and changes nothing for it.
-    for ns in $restart_list; do
-        log_info "  Restarting $ns: it resolved its policy source before it could see $policy_ns, and that resolution runs once at startup"
-        kubectl rollout restart deploy -n "$ns" \
-            -l app.kubernetes.io/name=workload-variant-autoscaler >/dev/null 2>&1 || \
+    # The named Deployment, not the label: the label also selects the impostors
+    # skipped above.
+    local entry
+    for entry in $restart_list; do
+        ns="${entry%%/*}"; deploy="${entry#*/}"
+        [ "$deploy" != "-" ] || continue   # nothing is running there to restart
+        log_info "  Restarting $ns/$deploy: it resolved its policy source before it could see $policy_ns, and that resolution runs once at startup"
+        kubectl rollout restart deploy "$deploy" -n "$ns" >/dev/null 2>&1 || \
             log_warning "    could not restart the controller in $ns — restart it yourself, or it keeps reading its own ConfigMap"
     done
 
@@ -611,10 +732,17 @@ disable_physical_limiter() {
         log_error "could not list WVA controllers, so this command cannot know whose policy to clear. Refusing to report a limiter removed from controllers it never reached.
     Grant the listing, or name the targets explicitly: WVA_LIMITER_TARGETS='ns-a ns-b'"
     fi
-    for ns in $disable_namespaces; do
-        cm_ns="$(pl_policy_cm_ns "$ns")"
+    # The same verification enable uses: an impostor Deployment must not decide
+    # where this command writes either.
+    local disable_controllers deploy sa
+    if ! disable_controllers="$(printf '%s\n' "$disable_namespaces" | pl_controller_targets)"; then
+        log_error "could not read the WVA controller Deployments, so this command cannot tell whose policy to clear. Refusing to report a limiter removed from controllers it never reached."
+    fi
+    while read -r ns deploy sa <&3; do
+        [ -n "$ns" ] || continue
+        cm_ns="$(pl_policy_cm_ns "$ns" "$deploy")"
         case " $targets " in *" $cm_ns "*) : ;; *) targets="$targets $cm_ns" ;; esac
-    done
+    done 3<<< "$disable_controllers"
     # The well-known namespace too, even with no controller reading it today: a
     # WVA installed tomorrow would read whatever was left there.
     case " $targets " in *" $policy_ns "*) : ;; *) targets="$targets $policy_ns" ;; esac

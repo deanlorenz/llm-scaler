@@ -181,9 +181,10 @@ map — denies every type (see *Merge rules*, row 3).
 |---|---|---|
 | `ResourceFlavor` | cluster | `spec.nodeLabels` names the accelerator behind a flavor — the vendor product label (`nvidia.com/gpu.product`, `amd.com/gpu.product-name`, …, or the GKE alias), kept **as written**: a flavor exists to tell one product from another (a 40GB PCIe A100 from an 80GB SXM one), so the grant is keyed by the full product and meets a static key at bound time (see below). A flavor **without** a product label is an **untyped grant** — see the list below the table. |
 | `ClusterQueue` | cluster | `spec.resourceGroups[].flavors[].resources[].nominalQuota` for each GPU resource, per flavor, summed per product (typed flavors) or into the untyped grant (unlabelled flavors). Two grants of the **same** product add up; two products of one family (SXM and PCIe H100) stay apart until the static key says they are one. **`borrowingLimit`, `lendingLimit` and cohorts are not counted** — the bound wants the guaranteed figure. |
-| `LocalQueue` | namespaced | `spec.clusterQueue` links a namespace to a ClusterQueue. A namespace is granted the caps of every ClusterQueue one of its LocalQueues points at; two LocalQueues on one ClusterQueue count it once. |
+| `LocalQueue` | namespaced | `spec.clusterQueue` links a namespace to a ClusterQueue. A namespace is granted the caps of every ClusterQueue one of its LocalQueues points at **and whose `spec.namespaceSelector` admits it**; two LocalQueues on one ClusterQueue count it once. |
+| `Namespace` | cluster | Labels, read (`get`, one per namespace) only when a ClusterQueue has a non-empty `namespaceSelector`. |
 
-The cluster-scope figure is the sum over **all** ClusterQueues. Five rules of
+The cluster-scope figure is the sum over **all** ClusterQueues. Six rules of
 the attribution that a first reading of the table would not give:
 
 - **A flavor without a product label is an untyped grant.** Kueue's quickstart
@@ -194,8 +195,14 @@ the attribution that a first reading of the table would not give:
   flavor **not present** on the cluster, or whose `stopPolicy` is `Hold` or
   `HoldAndDrain`, admits nothing in Kueue; here it becomes an untyped grant of
   0, so its namespaces are denied rather than left to the static entry.
-  `namespaceSelector` is not evaluated (it would need namespace labels a tenant
-  install cannot read).
+- **A ClusterQueue grants only the namespaces its `namespaceSelector` admits.**
+  Kueue semantics: absent (null) admits **no** namespace, `{}` admits every
+  namespace, anything else is matched against the namespace labels. A
+  LocalQueue on a queue that does not admit its namespace is ignored, like a
+  dangling one — a tenant cannot borrow another team's grant by pointing a
+  LocalQueue at it. If the labels cannot be read (no `get` on namespaces),
+  that queue's grant is withheld and the namespace, with no other grant, is
+  bounded at nothing; the error is logged once with the remedy.
 - **A shared ClusterQueue is a per-namespace ceiling, not a partition.** Every
   namespace with a LocalQueue on it is bounded at the queue's full nominal
   quota, so several such namespaces may in sum still ask for more than the
@@ -290,7 +297,7 @@ answerable from the controller log.
 The manager ClusterRole carries `get`/`list` on `clusterqueues`, `localqueues`
 and `resourceflavors` in `kueue.x-k8s.io`. A namespace-scoped install lists
 LocalQueues only in the namespace it manages (the tenant Role grants that) and gets the
-two cluster-scoped kinds from `components/kueue-reader`, applied by the prereqs
+two cluster-scoped kinds, and `get` on namespaces, from `components/kueue-reader`, applied by the prereqs
 phase like `node-reader`. A rule naming an API group the cluster does not serve
 is inert, so the grant is harmless without Kueue.
 

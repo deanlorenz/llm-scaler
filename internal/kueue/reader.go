@@ -11,7 +11,9 @@
 //   - ClusterQueue (cluster-scoped): spec.resourceGroups[].flavors[].resources[]
 //     carries nominalQuota per flavor per extended resource.
 //   - LocalQueue (namespaced): spec.clusterQueue links a namespace to a
-//     ClusterQueue.
+//     ClusterQueue. The link counts only when the ClusterQueue's
+//     spec.namespaceSelector admits that namespace, which may need a get of
+//     the Namespace for its labels.
 //
 // Nothing here is watched. Reads happen on demand, at most once per refresh
 // interval, and the last snapshot is kept so a failed read leaves the previous
@@ -27,8 +29,12 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
@@ -79,6 +85,9 @@ type Reader struct {
 	last    config.ExternalQuotas // ObservedAt zero until the first successful read
 	lastTry time.Time
 	lastErr error
+	// warnedLabels is set once an unreadable Namespace has been logged, so a
+	// missing grant is reported once rather than every refresh.
+	warnedLabels bool
 }
 
 // NewReader constructs a Reader over the given client. Reads of unstructured
@@ -149,6 +158,7 @@ func (r *Reader) read(ctx context.Context) (config.ExternalQuotas, error) {
 		return config.ExternalQuotas{}, err
 	}
 	perQueue := make(map[string]config.ExternalCaps, len(queues))
+	admits := make(map[string]namespaceAdmission, len(queues))
 	var cluster config.ExternalCaps
 	for i := range queues {
 		caps, err := r.clusterQueueCaps(&queues[i], flavorType)
@@ -159,6 +169,7 @@ func (r *Reader) read(ctx context.Context) (config.ExternalQuotas, error) {
 			continue // declares no GPU resource: this queue governs no accelerator
 		}
 		perQueue[queues[i].GetName()] = caps
+		admits[queues[i].GetName()] = clusterQueueAdmission(&queues[i])
 		cluster = addCaps(cluster, caps)
 	}
 
@@ -174,6 +185,10 @@ func (r *Reader) read(ctx context.Context) (config.ExternalQuotas, error) {
 	// budget once, not twice: the budget belongs to the ClusterQueue.
 	seen := make(map[string]map[string]bool)
 	byNamespace := make(map[string]config.ExternalCaps)
+	// Namespaces whose labels could not be read, so a selector-bearing queue's
+	// grant to them could be neither confirmed nor ruled out.
+	withheld := make(map[string]bool)
+	nsLabels := make(map[string]labels.Set)
 	for i := range localQueues {
 		lq := &localQueues[i]
 		ns := lq.GetNamespace()
@@ -199,9 +214,94 @@ func (r *Reader) read(ctx context.Context) (config.ExternalQuotas, error) {
 			// nothing and is kept.
 			continue
 		}
+		// A LocalQueue is something a tenant creates in their own namespace,
+		// pointing at any ClusterQueue they like. It carries that queue's grant
+		// only where Kueue would admit through it: where the ClusterQueue's
+		// namespaceSelector selects the namespace. A queue that does not admit
+		// the namespace says nothing about it, like a dangling reference.
+		admitted, err := r.admitsNamespace(ctx, admits[cqName], ns, nsLabels)
+		if err != nil {
+			// Neither confirmed nor ruled out, so not granted. Nor left to the
+			// static entry: with the recommended `default: {H100: -1}` that is
+			// no bound at all, more than the queue could ever have granted.
+			withheld[ns] = true
+			if !r.warnedLabels {
+				r.warnedLabels = true
+				ctrl.LoggerFrom(ctx).WithName("kueue").Error(err,
+					"Cannot read a Namespace to evaluate a ClusterQueue namespaceSelector; withholding that queue's grant from the namespace, which is bounded at nothing until the read succeeds. Logged once.",
+					"namespace", ns, "clusterQueue", cqName,
+					"remedy", "grant get on namespaces to the controller ServiceAccount (config/components/kueue-reader, or make enable-physical-limiter WVA_LIMITER_TYPE=quota WVA_QUOTA_KUEUE=true)")
+			}
+			continue
+		}
+		if !admitted {
+			continue
+		}
 		byNamespace[ns] = addCaps(byNamespace[ns], caps)
 	}
+	for ns := range withheld {
+		if _, ok := byNamespace[ns]; !ok {
+			byNamespace[ns] = config.ExternalCaps{HasUntyped: true} // governed, granted nothing
+		}
+	}
 	return config.ExternalQuotas{Namespace: byNamespace, Cluster: cluster}, nil
+}
+
+// namespaceAdmission is which namespaces a ClusterQueue admits workloads from.
+type namespaceAdmission struct {
+	// all: an empty selector, which in Kueue matches every namespace.
+	all bool
+	// selector is non-nil only when the answer depends on namespace labels.
+	selector labels.Selector
+}
+
+// clusterQueueAdmission reads spec.namespaceSelector with Kueue semantics: an
+// absent (nil) selector admits NO namespace, an empty one ({}) admits every
+// namespace, anything else admits the namespaces whose labels it matches. This
+// is metav1.LabelSelectorAsSelector, the conversion Kueue itself applies (nil
+// gives labels.Nothing, empty gives labels.Everything). A selector that does not
+// parse admits nothing; Kueue's webhook rejects one.
+func clusterQueueAdmission(cq *unstructured.Unstructured) namespaceAdmission {
+	raw, found, err := unstructured.NestedMap(cq.Object, "spec", "namespaceSelector")
+	if err != nil || !found || raw == nil {
+		return namespaceAdmission{}
+	}
+	var ls metav1.LabelSelector
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(raw, &ls); err != nil {
+		return namespaceAdmission{}
+	}
+	sel, err := metav1.LabelSelectorAsSelector(&ls)
+	if err != nil {
+		return namespaceAdmission{}
+	}
+	if sel.Empty() {
+		return namespaceAdmission{all: true}
+	}
+	return namespaceAdmission{selector: sel}
+}
+
+// admitsNamespace reports whether a ClusterQueue admits ns. Namespace labels
+// are read only when the selector needs them, once per namespace per read.
+// The read is unstructured, so it goes to the API server rather than starting
+// a cluster-wide Namespace informer; it needs get on namespaces.
+func (r *Reader) admitsNamespace(ctx context.Context, a namespaceAdmission, ns string, cache map[string]labels.Set) (bool, error) {
+	switch {
+	case a.all:
+		return true, nil
+	case a.selector == nil:
+		return false, nil
+	}
+	set, ok := cache[ns]
+	if !ok {
+		u := &unstructured.Unstructured{}
+		u.SetGroupVersionKind(schema.GroupVersionKind{Version: "v1", Kind: "Namespace"})
+		if err := r.client.Get(ctx, client.ObjectKey{Name: ns}, u); err != nil {
+			return false, fmt.Errorf("kueue: reading labels of namespace %q: %w", ns, err)
+		}
+		set = labels.Set(u.GetLabels())
+		cache[ns] = set
+	}
+	return a.selector.Matches(set), nil
 }
 
 // addCaps sums two grants. Typed caps are merged by accelerator identity: two
