@@ -396,6 +396,7 @@ func (a *SaturationAnalyzer) NoteVariantsPresent(namespace, modelID string, vari
 			a.lastAccelerator[namespace+"/"+v] = memo
 		}
 	}
+	a.notePendingPresent(namespace, prefixes, variantNames, now)
 }
 
 // EvictStaleHistory removes learned state that is past its horizon, which

@@ -197,7 +197,7 @@ func (e *Engine) restoreLearnedState(ctx context.Context, now time.Time) {
 	rep := analyzer.RestoreLearnedState(doc.State)
 	logger.Info("Learned state: snapshot restored",
 		"writtenAt", doc.WrittenAt, "writer", doc.Writer.Identity,
-		"pendingVariants", rep.PendingVariants, "accelerators", rep.Accelerators, "itlLines", rep.ITLLines,
+		"pendingVariants", rep.PendingVariants, "itlLines", rep.ITLLines,
 		"aged", rep.Aged, "unusable", rep.Unusable, "unattributable", rep.Unattributable)
 }
 

@@ -25,6 +25,25 @@ import (
 // time Analyze sees their variant (installRestored). An entry whose variant
 // cannot be named from its key, or whose variant had no configuration when it
 // was written, cannot be checked and is not restored.
+//
+// "The configuration" means one this controller read COMPLETELY. A flag it
+// could not resolve -- `--max-num-seqs $VLLM_MAX_NUM_SEQS` from an envFrom --
+// hashes as its default, so two processes that both failed to read it agree
+// whatever its value: equality there proves nothing, and a k2 learned at 256
+// sequences installed on a 64-sequence engine prices it too high. Such a
+// variant's state is neither recorded nor installed (engineFingerprint makes
+// the same call for sharing).
+//
+// Pending entries are exported until they are installed or rejected. The first
+// write after a restart happens a minute in, and a variant that has not been
+// analysed by then -- a model parked at zero, one whose policy has not loaded
+// -- would otherwise be missing from it, and lost at the next restart.
+//
+// No clock is restored in the future. A document is not trusted: a clock
+// ahead of now would make a figure younger than it is, a window that never
+// goes stale or a borrow held at full strength for as long as the clock is
+// ahead. A clock within maxClockSkew of now is taken as now, for two nodes
+// whose clocks disagree slightly; one further ahead drops its entry.
 
 // LearnedState is the analyzer's learned state in a form that survives a
 // process: plain values and their clocks, keyed by the analyzer's own keys.
@@ -34,7 +53,9 @@ type LearnedState struct {
 	ITLBaseline     map[string]float64                         `json:"itlBaseline,omitempty"`
 	StartSeconds    map[string]float64                         `json:"startSeconds,omitempty"`
 	VariantSeenAt   map[string]time.Time                       `json:"variantSeenAt,omitempty"`
-	Accelerators    map[string]AcceleratorSnapshot             `json:"accelerators,omitempty"`
+	// Accelerators is keyed namespace/variant: a per-variant entry like the
+	// rest, checked against the variant's configuration before it is used.
+	Accelerators map[string]AcceleratorSnapshot `json:"accelerators,omitempty"`
 	ITLLines        map[string]LineSnapshot                    `json:"itlLines,omitempty"`
 	K2BorrowedSince map[string]time.Time                       `json:"k2BorrowedSince,omitempty"`
 	// Config is the engine-configuration fingerprint each variant ran when
@@ -67,13 +88,39 @@ type LineSnapshot struct {
 // RestoreReport counts what a restore did with each kind of entry, for the
 // log line an operator reads after a restart.
 type RestoreReport struct {
-	// Installed now: entries that need no configuration check.
-	Accelerators, ITLLines int
+	// Installed now: the shared ITL lines, whose key is the configuration.
+	ITLLines int
 	// Pending: per-variant entries waiting for their variant's first cycle.
 	PendingVariants int
-	// Not restored: past their horizon, unusable values, or a variant that
-	// cannot be named or had no configuration recorded.
+	// Not restored: past their horizon, unusable values -- a clock in the
+	// future included -- or a variant that cannot be named or had no complete
+	// configuration recorded.
 	Aged, Unusable, Unattributable int
+}
+
+// maxClockSkew is how far ahead of now a restored clock may be and still be
+// taken, as now: two nodes' clocks disagreeing slightly is not a reason to
+// lose a figure.
+const maxClockSkew = time.Minute
+
+// notFuture returns t, or now when t is less than maxClockSkew ahead of it;
+// ok is false for a clock further ahead.
+func notFuture(t, now time.Time) (time.Time, bool) {
+	switch {
+	case t.After(now.Add(maxClockSkew)):
+		return t, false
+	case t.After(now):
+		return now, true
+	}
+	return t, true
+}
+
+// windowClocks applies notFuture to both clocks of a restored window.
+func windowClocks(w capacity.RollingAverageSnapshot, now time.Time) (capacity.RollingAverageSnapshot, bool) {
+	used, ok1 := notFuture(w.LastUsed, now)
+	written, ok2 := notFuture(w.LastWritten, now)
+	w.LastUsed, w.LastWritten = used, written
+	return w, ok1 && ok2
 }
 
 // RestoredVariant is what installRestored did with one variant's entries.
@@ -94,15 +141,15 @@ type pendingVariant struct {
 
 func (p *pendingVariant) size() int {
 	s := p.state
-	return len(s.K2) + len(s.Throughput) + len(s.ITLBaseline) + len(s.StartSeconds) + len(s.K2BorrowedSince)
+	return len(s.K2) + len(s.Throughput) + len(s.VariantSeenAt) + len(s.K2BorrowedSince) + len(s.Accelerators)
 }
 
 // variantOfKey names the variant (namespace/variant) and model a learned-state
 // key belongs to, for every per-variant key shape the analyzer files:
 //
-//	namespace|variant|model|...                  k2 and throughput (historyKey, throughputKey)
+//	namespace|variant|model|...                  k2, throughput and a borrowed k2's clock
 //	namespace|model|variant|accelerator|gpus     ITL baseline, start estimate, liveness (itlWindowKey)
-//	namespace|variant                            a borrowed k2's clock
+//	namespace|variant                            a borrowed k2's clock, as #132 first keyed it
 //
 // The shape is told apart by field count, which no field can fake: no
 // Kubernetes name and no model ID contains "|".
@@ -187,49 +234,65 @@ func (a *SaturationAnalyzer) ExportLearnedState() LearnedState {
 	}
 	for v, m := range models {
 		ns, name, _ := strings.Cut(v, "/")
-		if rec := a.capacityStore.Get(ns, m, name); rec != nil && rec.EngineParams != nil {
+		if rec := a.capacityStore.Get(ns, m, name); rec != nil && rec.EngineParams.Complete() {
 			s.Config[v] = rec.EngineParams.Fingerprint()
 		}
+	}
+
+	// Entries still pending go out as they came in, under the configuration
+	// they were learned under -- unless this process has learned the variant
+	// under another one since, when its own record is the truth. Live entries
+	// win a key both have.
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for v, p := range a.pendingRestore {
+		if cfg, ok := s.Config[v]; ok && cfg != p.expect {
+			continue
+		}
+		s.Config[v] = p.expect
+		mergeAbsent(s.K2, p.state.K2)
+		mergeAbsent(s.Throughput, p.state.Throughput)
+		mergeAbsent(s.VariantSeenAt, p.state.VariantSeenAt)
+		mergeAbsent(s.ITLBaseline, p.state.ITLBaseline)
+		mergeAbsent(s.StartSeconds, p.state.StartSeconds)
+		mergeAbsent(s.K2BorrowedSince, p.state.K2BorrowedSince)
+		mergeAbsent(s.Accelerators, p.state.Accelerators)
 	}
 	return s
 }
 
-// RestoreLearnedState takes a stored state in. Entries that need no
-// configuration check -- the accelerator memo and the shared ITL lines, whose
-// key IS the configuration -- are installed now; per-variant entries are held
-// until installRestored checks their variant's configuration. Nothing already
-// learned in this process is overwritten.
+// mergeAbsent copies into dst the keys of src it does not have.
+func mergeAbsent[V any](dst, src map[string]V) {
+	for k, v := range src {
+		if _, have := dst[k]; !have {
+			dst[k] = v
+		}
+	}
+}
+
+// RestoreLearnedState takes a stored state in. The shared ITL lines, whose key
+// IS the configuration, are installed now; per-variant entries -- the
+// accelerator memo among them -- are held until installRestored checks their
+// variant's configuration. Nothing already learned in this process is
+// overwritten.
 func (a *SaturationAnalyzer) RestoreLearnedState(s LearnedState) RestoreReport {
 	var rep RestoreReport
 	now := a.now()
-	wall := time.Now()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	bucketRetention := a.horizons.BucketRetention
 
-	for k, m := range s.Accelerators {
-		_, live := a.lastAccelerator[k]
-		switch {
-		case live:
-		case m.Name == "" || m.LastUsed.IsZero():
-			rep.Unusable++
-		case wall.Sub(m.LastUsed) > bucketRetention:
-			rep.Aged++
-		default:
-			a.lastAccelerator[k] = acceleratorMemo{name: m.Name, lastUsed: m.LastUsed}
-			rep.Accelerators++
-		}
-	}
 	for k, l := range s.ITLLines {
 		_, live := a.itlLines[k]
+		learnedAt, inTime := notFuture(l.LearnedAt, now)
 		switch {
 		case live:
-		case l.LearnedAt.IsZero() || !itl.ValidModel(l.A, l.B):
+		case l.LearnedAt.IsZero() || !inTime || !itl.ValidModel(l.A, l.B):
 			rep.Unusable++
-		case now.Sub(l.LearnedAt) > bucketRetention:
+		case now.Sub(learnedAt) > bucketRetention:
 			rep.Aged++
 		default:
-			a.itlLines[k] = learnedLine{model: itl.Model{A: l.A, B: l.B}, fromVariant: l.FromVariant, learnedAt: l.LearnedAt}
+			a.itlLines[k] = learnedLine{model: itl.Model{A: l.A, B: l.B}, fromVariant: l.FromVariant, learnedAt: learnedAt}
 			rep.ITLLines++
 		}
 	}
@@ -237,12 +300,7 @@ func (a *SaturationAnalyzer) RestoreLearnedState(s LearnedState) RestoreReport {
 	if a.pendingRestore == nil {
 		a.pendingRestore = map[string]*pendingVariant{}
 	}
-	pending := func(key string) *pendingVariant {
-		v, _, ok := variantOfKey(key)
-		if !ok {
-			rep.Unattributable++
-			return nil
-		}
+	pendingFor := func(v string) *pendingVariant {
 		expect := s.Config[v]
 		if expect == "" {
 			rep.Unattributable++
@@ -254,6 +312,22 @@ func (a *SaturationAnalyzer) RestoreLearnedState(s LearnedState) RestoreReport {
 			a.pendingRestore[v] = p
 		}
 		return p
+	}
+	pending := func(key string) *pendingVariant {
+		v, _, ok := variantOfKey(key)
+		if !ok {
+			rep.Unattributable++
+			return nil
+		}
+		return pendingFor(v)
+	}
+	for k, m := range s.Accelerators {
+		if p := pendingFor(k); p != nil {
+			if p.state.Accelerators == nil {
+				p.state.Accelerators = map[string]AcceleratorSnapshot{}
+			}
+			p.state.Accelerators[k] = m
+		}
 	}
 	for k, w := range s.K2 {
 		if p := pending(k); p != nil {
@@ -318,53 +392,74 @@ func (a *SaturationAnalyzer) installRestored(namespace, modelID, variant string)
 	if rec == nil || rec.EngineParams == nil {
 		return RestoredVariant{}, false
 	}
-	current := rec.EngineParams.Fingerprint()
+	// A configuration not read completely does not match, even an equal
+	// fingerprint: see the package comment.
+	match := rec.EngineParams.Complete() && rec.EngineParams.Fingerprint() == p.expect
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	delete(a.pendingRestore, key)
 	out := RestoredVariant{Namespace: namespace, Variant: variant, Entries: p.size()}
-	if current != p.expect {
+	if !match {
 		return out, true
 	}
 	out.Installed = true
-	a.installLocked(p.state)
+	out.Entries = a.installLocked(p.state)
 	return out, true
 }
 
-// installLocked applies the horizons to a checked variant's entries and keeps
-// what is still within them. Callers hold a.mu.
-func (a *SaturationAnalyzer) installLocked(s LearnedState) {
+// installLocked applies the horizons to a checked variant's entries, keeps
+// what is still within them and returns how many it kept. Callers hold a.mu.
+// The windows and the memo age on the wall clock, as they do live; the rest on
+// the analyzer's.
+func (a *SaturationAnalyzer) installLocked(s LearnedState) int {
 	now := a.now()
 	wall := time.Now()
 	h := a.horizons
+	kept := 0
 	for k, w := range s.K2 {
-		if _, live := a.computeCapacityHistory[k]; live || wall.Sub(w.LastUsed) > h.BucketRetention {
+		w, inTime := windowClocks(w, wall)
+		if _, live := a.computeCapacityHistory[k]; live || !inTime || wall.Sub(w.LastUsed) > h.BucketRetention {
 			continue
 		}
 		if ra, ok := capacity.RestoreRollingAverage(w, capacity.RollingAverageWindowSize); ok {
 			a.computeCapacityHistory[k] = ra
+			kept++
 		}
 	}
 	for k, w := range s.Throughput {
-		if _, live := a.saturatedThroughput[k]; live || wall.Sub(w.LastUsed) > h.BucketRetention {
+		snap, inTime := windowClocks(w.RollingAverageSnapshot, wall)
+		sampledAt, sampledInTime := notFuture(w.SampledAt, wall)
+		if _, live := a.saturatedThroughput[k]; live || !inTime || !sampledInTime || wall.Sub(snap.LastUsed) > h.BucketRetention {
 			continue
 		}
-		if ra, ok := capacity.RestoreRollingAverage(w.RollingAverageSnapshot, capacity.RollingAverageWindowSize); ok {
+		if ra, ok := capacity.RestoreRollingAverage(snap, capacity.RollingAverageWindowSize); ok {
 			a.saturatedThroughput[k] = ra
-			if !w.SampledAt.IsZero() {
-				a.throughputSampledAt[k] = w.SampledAt
+			kept++
+			if !sampledAt.IsZero() {
+				a.throughputSampledAt[k] = sampledAt
 			}
 			if finitePositive(w.LastRead) {
 				a.throughputLastRead[k] = w.LastRead
 			}
 		}
 	}
+	for k, m := range s.Accelerators {
+		lastUsed, inTime := notFuture(m.LastUsed, wall)
+		if _, live := a.lastAccelerator[k]; live || m.Name == "" || m.LastUsed.IsZero() || !inTime ||
+			wall.Sub(lastUsed) > h.BucketRetention {
+			continue
+		}
+		a.lastAccelerator[k] = acceleratorMemo{name: m.Name, lastUsed: lastUsed}
+		kept++
+	}
 	for k, seen := range s.VariantSeenAt {
-		if _, live := a.variantSeenAt[k]; live || seen.IsZero() || now.Sub(seen) > h.VariantTimeout {
+		seen, inTime := notFuture(seen, now)
+		if _, live := a.variantSeenAt[k]; live || seen.IsZero() || !inTime || now.Sub(seen) > h.VariantTimeout {
 			continue
 		}
 		a.variantSeenAt[k] = seen
+		kept++
 		if b, ok := s.ITLBaseline[k]; ok && finitePositive(b) {
 			if _, have := a.itlBaseline[k]; !have {
 				a.itlBaseline[k] = b
@@ -378,10 +473,38 @@ func (a *SaturationAnalyzer) installLocked(s LearnedState) {
 	}
 	borrowLife := BorrowedK2Hold + BorrowedK2Relax + h.BucketRetention
 	for k, since := range s.K2BorrowedSince {
-		if _, live := a.k2BorrowedSince[k]; live || since.IsZero() || now.Sub(since) > borrowLife {
+		since, inTime := notFuture(since, now)
+		if _, live := a.k2BorrowedSince[k]; live || since.IsZero() || !inTime || now.Sub(since) > borrowLife {
 			continue
 		}
 		a.k2BorrowedSince[k] = since
+		kept++
+	}
+	return kept
+}
+
+// notePendingPresent keeps a parked variant's pending liveness and memo as
+// fresh as NoteVariantsPresent keeps the live ones: a model that stays at zero
+// past VariantTimeout after a restart must not lose its ITL baseline and start
+// estimate at install for having been parked. Callers hold a.mu.
+func (a *SaturationAnalyzer) notePendingPresent(namespace string, prefixes, variantNames []string, now time.Time) {
+	for _, v := range variantNames {
+		p := a.pendingRestore[namespace+"/"+v]
+		if p == nil {
+			continue
+		}
+		for key := range p.state.VariantSeenAt {
+			for _, pre := range prefixes {
+				if strings.HasPrefix(key, pre) {
+					p.state.VariantSeenAt[key] = now
+					break
+				}
+			}
+		}
+		if m, ok := p.state.Accelerators[namespace+"/"+v]; ok {
+			m.LastUsed = time.Now()
+			p.state.Accelerators[namespace+"/"+v] = m
+		}
 	}
 }
 

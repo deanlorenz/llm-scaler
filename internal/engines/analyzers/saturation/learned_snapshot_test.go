@@ -160,4 +160,109 @@ var _ = Describe("learned state across a restart", func() {
 		defer first.mu.Unlock()
 		Expect(first.pendingRestore).To(BeEmpty())
 	})
+
+	It("writes back what is still pending, so a second restart does not lose it", func() {
+		// The first write after a restart is a minute in; a model parked at
+		// zero has not been analysed by then.
+		saved := carry(learn(newProcess(params(256))))
+		second := newProcess(params(256))
+		second.RestoreLearnedState(saved)
+		again := carry(second.ExportLearnedState())
+		Expect(again.Config).To(HaveKeyWithValue("test-ns/variant-a", saved.Config["test-ns/variant-a"]))
+
+		third := newProcess(params(256))
+		third.RestoreLearnedState(again)
+		Expect(capacityOf(third)).To(Equal(float64(4000)),
+			"the second restart lost k2 that was still pending at the first write")
+	})
+
+	It("does not take a configuration it could not read completely as a match", func() {
+		// --max-num-seqs $VLLM_MAX_NUM_SEQS from an envFrom: both processes
+		// hash the default, whatever the value is.
+		unread := func() *capacity.EngineParams {
+			p := params(256)
+			p.Unresolved = []string{"--max-num-seqs"}
+			return p
+		}
+		first := newProcess(params(256))
+		saved := carry(learn(first))
+		second := newProcess(unread())
+		second.RestoreLearnedState(saved)
+		Expect(capacityOf(second)).To(Equal(float64(12800)),
+			"k2 installed under a configuration this process could not read")
+
+		incomplete := newProcess(unread())
+		_, err := incomplete.Analyze(context.Background(), makeAnalyzerInput(
+			[]domain.ReplicaMetrics{makeReplicaMetrics("pod-a", "variant-a", 4000, 16000, 6, 100, 50)}, states))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(incomplete.ExportLearnedState().Config).NotTo(HaveKey("test-ns/variant-a"),
+			"an incompletely read configuration recorded as the one k2 was learned under")
+
+		// A document that does carry such a fingerprint -- hand-edited, or
+		// written by a build without the check above -- equal on both sides.
+		forged := carry(learn(newProcess(params(256))))
+		forged.Config["test-ns/variant-a"] = unread().Fingerprint()
+		both := newProcess(unread())
+		both.RestoreLearnedState(forged)
+		Expect(capacityOf(both)).To(Equal(float64(12800)),
+			"two unread configurations with equal fingerprints were taken as the same")
+	})
+
+	It("does not restore a clock from the future, and takes a slightly early one as now", func() {
+		saved := carry(learn(newProcess(params(256))))
+		for k, w := range saved.K2 {
+			w.LastUsed = time.Now().Add(100 * 365 * 24 * time.Hour)
+			saved.K2[k] = w
+		}
+		far := newProcess(params(256))
+		far.RestoreLearnedState(saved)
+		Expect(capacityOf(far)).To(Equal(float64(12800)),
+			"a window whose clock is a century ahead was restored: it would never go stale")
+
+		saved = carry(learn(newProcess(params(256))))
+		for k, w := range saved.K2 {
+			w.LastUsed = time.Now().Add(maxClockSkew / 2)
+			saved.K2[k] = w
+		}
+		near := newProcess(params(256))
+		near.RestoreLearnedState(saved)
+		Expect(capacityOf(near)).To(Equal(float64(4000)), "slight clock skew between nodes lost a figure")
+	})
+
+	It("checks the accelerator memo against the configuration like any per-variant entry", func() {
+		saved := carry(learn(newProcess(params(256))))
+		Expect(saved.Accelerators).To(HaveKey("test-ns/variant-a"), "precondition: the memo was exported")
+
+		changed := newProcess(params(64))
+		changed.RestoreLearnedState(saved)
+		changed.mu.Lock()
+		_, installed := changed.lastAccelerator["test-ns/variant-a"]
+		changed.mu.Unlock()
+		Expect(installed).To(BeFalse(), "a memo installed before its variant's configuration was checked")
+		_, done := changed.installRestored("test-ns", "test-model", "variant-a")
+		Expect(done).To(BeTrue())
+		changed.mu.Lock()
+		_, installed = changed.lastAccelerator["test-ns/variant-a"]
+		changed.mu.Unlock()
+		Expect(installed).To(BeFalse(), "a memo installed under a changed configuration")
+	})
+
+	It("keeps a parked variant's pending liveness fresh while it stays parked", func() {
+		saved := carry(learn(newProcess(params(256))))
+		second := newProcess(params(256))
+		clock := time.Now()
+		second.now = func() time.Time { return clock }
+		second.RestoreLearnedState(saved)
+
+		clock = clock.Add(second.horizons.VariantTimeout + time.Hour)
+		second.NoteVariantsPresent("test-ns", "test-model", []string{"variant-a"})
+		second.mu.Lock()
+		p := second.pendingRestore["test-ns/variant-a"]
+		second.mu.Unlock()
+		Expect(p).NotTo(BeNil())
+		Expect(p.state.VariantSeenAt).NotTo(BeEmpty())
+		for _, seen := range p.state.VariantSeenAt {
+			Expect(seen).To(Equal(clock), "a parked variant's liveness aged while it was parked")
+		}
+	})
 })
