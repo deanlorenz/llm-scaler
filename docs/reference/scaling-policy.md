@@ -881,7 +881,7 @@ So anything you changed in `default` by hand is gone after a re-run:
 
 | you set, in `default` | after a re-run |
 | --- | --- |
-| `scaleToZero` | repeat it, or put it on a named tier, which is kept |
+| `scaleToZero` | repeat it, or put it on a per-model entry (an entry whose body names the model), which is kept; a named tier is not read for parking |
 | `defaultPolicy` | re-apply it; the tiers it names are kept |
 | `optimizer:` (utilization share) | removed: run `make utilization-share-shadow`, then `make utilization-share-activate` again |
 | `limiters:` | kept only if `WVA_LIMITER`/`WVA_QUOTAS` are passed again; a hand-written entry has to be re-added |
@@ -1489,6 +1489,10 @@ triggers:
 
 `defaultPolicy` is read from the `default` entry only: a fallback chosen by a tier
 or by a per-model entry would be that entry choosing for everyone but itself.
+
+Parking is the exception: `scaleToZero` is resolved without the variant's tier
+(`ResolveScalingPolicy`, called from the steady-state engine), so only `default`,
+the tier `default.defaultPolicy` names, and the per-model override decide it.
 
 Two failure modes are resolved deterministically rather than silently, and both
 are reported:

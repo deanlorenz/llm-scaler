@@ -106,7 +106,7 @@ push path; quota-bounded scaling, against either a
 
 | Claim | Measured | Where |
 | --- | --- | --- |
-| A shape change is caught without a queue | Third replica ordered at +1344 s, about four minutes after the shape change, once that shape's throughput was measured and before any queue formed, on a controller that had seen both shapes. No queue at any point; p95 TTFT 0.23 s in the first five minutes of each phase, then 0.08 s for the rest of the first and 0.04–0.07 s for the rest of the second | [P/D path](well-lit-paths/pd-disaggregation/#measured) |
+| A shape change is caught without a queue | Third replica ordered at +1344 s, about four minutes after the shape change, once that shape's throughput was measured, on a controller that had seen both shapes. No queue formed in the second phase; p95 TTFT 0.23 s in the first five minutes of each phase, then 0.08 s for the rest of the first and 0.04–0.07 s for the rest of the second | [P/D path](well-lit-paths/pd-disaggregation/#measured) |
 | Missing it has a price | A cold controller sized the same window from occupancy: 4.2 s p95 in that five-minute window (204 ms over the whole run) | [P/D path](well-lit-paths/pd-disaggregation/) |
 | The decision precedes the queue | Second replica ordered at +53 s, before the first tipped into preemption | [P/D path](well-lit-paths/pd-disaggregation/) |
 | Roles scale on their own bottleneck | Decode 1 → 2 → 3, prefill never ordered | [P/D path](well-lit-paths/pd-disaggregation/) |

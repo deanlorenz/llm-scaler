@@ -49,7 +49,9 @@ deploy:
       WVA_SCALE_TO_ZERO deployment flag.
     run: |
       kubectl edit configmap wva-scaling-policy-config -n <wva-namespace>
-      # under the entry this model resolves to (its scalingPolicy tier, or default):
+      # under `default`, or under a per-model entry (one whose body names the
+      # model's model_id and namespace); a variant's scalingPolicy tier is not
+      # read for parking:
       #   scaleToZero:
       #     enabled: true
       #     retentionPeriod: 10m   # idle time before parking
@@ -59,7 +61,8 @@ deploy:
       #
       # Re-running `make deploy-wva` re-applies the shipped `default` entry, which
       # has no scaleToZero: repeat this edit after every re-run, or put it on a
-      # named tier, which the installer keeps.
+      # per-model entry (an entry whose body names the model), which the
+      # installer keeps.
   bounds:
     note: |
       Half two: let every variant reach zero. A model is at zero only when

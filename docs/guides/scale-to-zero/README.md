@@ -89,7 +89,9 @@ kubectl get deploy -n <llmd-namespace> -o jsonpath='{range .items[*]}{.metadata.
 # Half one: allow the model to park. Absent, this inherits from the
 # WVA_SCALE_TO_ZERO deployment flag.
 kubectl edit configmap wva-scaling-policy-config -n <wva-namespace>
-# under the entry this model resolves to (its scalingPolicy tier, or default):
+# under `default`, or under a per-model entry (one whose body names the
+# model's model_id and namespace); a variant's scalingPolicy tier is not
+# read for parking:
 #   scaleToZero:
 #     enabled: true
 #     retentionPeriod: 10m   # idle time before parking
@@ -99,12 +101,16 @@ kubectl edit configmap wva-scaling-policy-config -n <wva-namespace>
 #
 # Re-running `make deploy-wva` re-applies the shipped `default` entry, which
 # has no scaleToZero: repeat this edit after every re-run, or put it on a
-# named tier, which the installer keeps.
+# per-model entry (an entry whose body names the model), which the
+# installer keeps.
 ```
 <!-- guide:deploy.policy end -->
 
-The entry is the one this model resolves to: its `scalingPolicy` tier from the
-ScaledObject's trigger metadata, or `default`. Policy is a **model** property, not
+The entry is `default` (with the tier `default.defaultPolicy` names, if set),
+overridden by a per-model entry whose body names the model's `model_id` and
+`namespace`. A variant's `scalingPolicy` tier from the ScaledObject's trigger
+metadata is **not** read for parking (`ResolveScalingPolicy` in
+`internal/config/scaling_policy.go`). Policy is a **model** property, not
 a variant one — a model is at zero only when nothing serves it, so there is
 nothing meaningful a single variant could decide here.
 

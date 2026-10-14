@@ -84,7 +84,13 @@ the default entry. The shipped examples, against the default entry:
 | `scaleUpThreshold` | 0.85 | 0.60 | 0.95 |
 | `scaleDownBoundary` | 0.70 | 0.45 | inherits 0.70 |
 | `priority` | 1.0 | 2.0 | 0.5 |
-| `scaleToZero` | as the entry sets it | `enabled: false` | `enabled: true, retentionPeriod: 2m` |
+
+The commented examples in the shipped ConfigMap also carry a `scaleToZero`, but a
+tier's `scaleToZero` is not read: parking resolves the `default` entry (with the
+tier `default.defaultPolicy` names) and the model's per-model entry, never the
+variant's `scalingPolicy` (`ResolveScalingPolicy` in
+`internal/config/scaling_policy.go`). Put it on a per-model entry instead
+([scale to zero](../scale-to-zero/#start-here)).
 
 What the scale-up threshold buys:
 

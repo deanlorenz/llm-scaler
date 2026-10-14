@@ -48,7 +48,7 @@ KEDA on the cluster.
 | What an operator running LLMs on Kubernetes needs | What llm-scaling-manager does |
 | --- | --- |
 | **New replicas that serve fast when traffic rises.** A replica can take minutes to load, and the spike does not wait. | A [warm pool](well-lit-paths/warm-pool-bridge/) of sleeping models serves during those minutes: measured p95 TTFT per scale-up of 0.11–0.83 s instead of 5.2–8.8 s, within 50 ms of a two-replica floor on 3 of 4 rises (831 ms against 127 ms on the fourth). `make prepull`, `make weights` and `make engine-cache` take image pulls, weight downloads and kernel compilation off the [start path](reference/workload-preparation.md). |
-| **Scaling early enough**, because by the time a queue forms the new replica is minutes late. | Demand is priced from the throughput one replica sustains, so a change in request shape can order capacity before a queue exists. Measured once on the experimental P/D path, and repeated a day later: the third replica was ordered about four minutes after the shape change, once that shape's throughput was measured and before any queue formed; KV-cache use peaked at 62 %, and no queue formed at any point. That was the second exposure; a controller that has never seen a shape saturated sizes it from occupancy first ([known gaps](#known-gaps)). |
+| **Scaling early enough**, because by the time a queue forms the new replica is minutes late. | Demand is priced from the throughput one replica sustains, so a change in request shape can order capacity before a queue exists. Measured once on the experimental P/D path, and repeated a day later: the third replica was ordered about four minutes after the shape change, once that shape's throughput was measured; KV-cache use peaked at 62 %, and no queue formed in the second phase. That was the second exposure; a controller that has never seen a shape saturated sizes it from occupancy first ([known gaps](#known-gaps)). |
 | **Load measured as work, not as requests.** One request can cost a thousand times another. | Sized from KV-cache use, queues and token throughput per replica, never from request counts. Measured on the P/D path: it held 2 replicas at 5–15 % KV-cache use, where a KV threshold would drop to 1, because the load needed 2 in throughput. |
 | **Idle models off the GPUs, back when needed.** Most models in a large catalogue are idle most of the time. | [Scale to zero](well-lit-paths/scale-to-zero/) is KEDA's own mechanism; the controller reads the router's queue every 100 ms and pushes activation to KEDA for the first queued request, instead of waiting for KEDA's next poll. A wake from zero is a cold start (about 41 s, measured on an H100 test cluster); a model already resident in a [warm-pool](well-lit-paths/warm-pool-bridge/) Pod switches in about 437 ms instead. |
 | **Prefill and decode sized for their own bottlenecks.** | [P/D roles](well-lit-paths/pd-disaggregation/) are sized separately from their own demand and committed together, so one role cannot outrun the other. The joint commit is unit-tested only, and the P/D benchmark never ordered a second prefill replica. |
@@ -58,7 +58,8 @@ KEDA on the cluster.
 | **Different urgency for interactive and batch work.** | [Workload classes](well-lit-paths/workload-classes/): named threshold tiers, set per ScaledObject. |
 | **Decisions an operator can trust and explain**, when every replica costs dollars an hour. | A closed-form capacity model, two log lines per model per cycle that say why ([cycle log](reference/cycle-log.md)), Events and metrics for every decision. It decides; KEDA acts, so nothing new runs your pods. |
 
-**Not covered yet:** forecasting load ahead of time, scaling to an SLA target,
+**Not covered yet:** forecasting load ahead of time, scaling to an SLA target
+([#141](https://github.com/ev-shindin/llm-scaling-manager/issues/141)),
 pre-scaling before planned maintenance, and telling a failed node from a
 replica that is still starting.
 
@@ -71,7 +72,7 @@ says otherwise; the linked page has the method and every caveat.
 | --- | --- | --- | --- |
 | The warm pool covers scale-ups | p95 time to first token per rise: 5.2–8.8 s without it, 0.11–0.83 s with a one-Pod pool; within 50 ms of a floor of 2 replicas on 3 of 4 rises, 831 ms against 127 ms on the fourth | two 8B models bursting out of phase, 1 GPU per replica, 4 rises per arm | [warm pool, measured](well-lit-paths/warm-pool-bridge/measured.md) |
 | ... and costs less than a floor | 14 138 GPU-seconds against 16 080 for a floor of 2 replicas (12 % less); 17 % more than no pool (12 129) | same run | [warm pool, measured](well-lit-paths/warm-pool-bridge/measured.md) |
-| It sizes for a request shape, not only for a queue | at a constant 6 req/s: through the first phase it held 2 decode replicas while 5–15 % KV use alone said 1; about four minutes after the shape change, once that shape's throughput was measured, it ordered a 3rd (KV peaked at 62 %); no queue formed at any point. p95 TTFT 155 ms, 0 errors in 13 288 requests, on the second exposure (both shapes already seen). A cold controller: p95 204 ms, p99 3.9 s, and its first five-minute window ranged from 0.25 s to 5.6 s across the two runs | Qwen3-0.6B, P/D path (experimental); **run twice, a day apart**, within a tenth except that cold window | [P/D path, measured](well-lit-paths/pd-disaggregation/#measured) |
+| It sizes for a request shape, not only for a queue | at a constant 6 req/s: through the first phase it held 2 decode replicas while 5–15 % KV use alone said 1; about four minutes after the shape change, once that shape's throughput was measured, it ordered a 3rd (KV peaked at 62 %); no queue formed in the second phase. p95 TTFT 155 ms, 0 errors in 13 288 requests, on the second exposure (both shapes already seen). A cold controller: p95 204 ms, p99 3.9 s, and its first five-minute window ranged from 0.25 s to 5.6 s across the two runs | Qwen3-0.6B, P/D path (experimental); **run twice, a day apart**, within a tenth except that cold window | [P/D path, measured](well-lit-paths/pd-disaggregation/#measured) |
 | A warm Pod switches models fast | about 437 ms (four switches: 435, 439, 440, 435 ms) against about 41 s cold | H100 test cluster, two models resident in one pool Pod | [warm pool](well-lit-paths/warm-pool-bridge/); measurement in [fast model loading](proposals/fast-model-loading.md#27-the-pool-was-built-and-measured-2026-08-21) |
 | Sharing one quota serves the first burst at once | p95 TTFT of the model whose burst comes first: 95 ms with sharing, 42 s without. The other model's burst was overloaded in every arm: 177–257 of its 960 requests shed by the router, so its p95 (59 s with sharing, 73 s without) is a floor, censored by the router's 30 s queue TTL. An earlier, aggregated run lost the second burst (p95 313 s against 139 s) | two P/D 8B models, four roles under one 10-GPU quota; costs 36 % more GPU-seconds | [utilization share, measured](well-lit-paths/utilization-share/measured.md) |
 
@@ -148,7 +149,8 @@ cover.
 
 ## Known gaps
 
-No load forecasting; no scaling to an SLA target, only threshold tiers. A model
+No load forecasting; no scaling to an SLA target, only threshold tiers
+([#141](https://github.com/ev-shindin/llm-scaling-manager/issues/141)). A model
 has to saturate once before its capacity is priced for a new request shape: the
 P/D result above is the second exposure, and the cold pass before it ordered a
 spare replica and reached a 3.9 s p99. The warm pool and P/D numbers are single

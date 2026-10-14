@@ -11,13 +11,13 @@
 - **Do this** ([Install the scaling manager in a namespace](../../guides/install-in-namespace/)):
   0. (namespace owner) [Prerequisites](../../guides/install-in-namespace/README.md#prerequisites): `export NAMESPACE=<your-namespace>`, then `make check-prereqs` (read-only).
   1. (cluster admin) [Prepare the namespace](../../guides/install-in-namespace/README.md#1-cluster-admin-prepare-the-namespace) (`make setup-prereqs`).
-  2. (namespace owner) [Install the controller](../../guides/install-in-namespace/README.md#2-install-the-controller) (`make deploy-wva`).
+  2. (namespace owner; the cluster admin when the controller runs in `wva-<ns>`) [Install the controller](../../guides/install-in-namespace/README.md#2-install-the-controller) (`make deploy-wva`).
   3. (namespace owner) [Make the workloads safe to scale](../../guides/install-in-namespace/README.md#3-make-the-workloads-safe-to-scale): `make workload-patch` writes a patch for you to apply through your modelservice chart; it changes nothing on its own ([writing the patch](../../reference/workload-preparation.md#writing-the-patch-make-workload-patch)).
   4. (namespace owner) [Register the workloads](../../guides/install-in-namespace/README.md#4-register-the-workloads) (`make scaledobjects-plan`, edit the plan, `make scaledobjects-apply`).
   5. (namespace owner, or the cluster admin where the controller runs in an admin namespace) Make sure only KEDA can reach the scaler's port `:9090`, which has no authentication: if no NetworkPolicy in the controller's namespace already restricts it, apply the one in [network exposure](../../reference/security-model.md#network-exposure).
   One controller for every namespace instead (cluster admin): [install cluster-wide](../../guides/install-cluster-wide/).
 - **Check it works:** `kubectl get scaledobject,hpa -n $NAMESPACE` shows `READY True` and a number under `TARGETS`; a few minutes later the controller log has `scaling-decision` lines ([Verification](../../guides/install-in-namespace/README.md#verification)). The controller runs in `$NAMESPACE`, or in `wva-$NAMESPACE` when the admin keeps it out of your reach.
-- **Undo:** (namespace owner) `make undeploy-wva` ([Cleanup](../../guides/install-in-namespace/README.md#cleanup)); the model servers keep running. ScaledObjects you adopted are left in place and listed for you to repoint or remove. Cluster-scoped objects the admin created stay until the admin removes them ([what an uninstall run by you leaves behind](../../guides/install-in-namespace/README.md#what-an-uninstall-run-by-you-leaves-behind)).
+- **Undo:** (namespace owner; the cluster admin when the controller runs in `wva-<ns>`) `make undeploy-wva` ([Cleanup](../../guides/install-in-namespace/README.md#cleanup)); the model servers keep running. ScaledObjects you adopted are left in place and listed for you to repoint or remove. Cluster-scoped objects the admin created stay until the admin removes them ([what an uninstall run by you leaves behind](../../guides/install-in-namespace/README.md#what-an-uninstall-run-by-you-leaves-behind)).
 
 ## What it is
 

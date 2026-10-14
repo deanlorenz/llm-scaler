@@ -9,10 +9,10 @@ final release, and existing users are told to migrate to KEDA + EPP. llm-d also
 says KEDA + EPP covers WVA's capabilities except cost-aware placement across
 variants, some of them through a different layer (Kueue, kube-state-metrics),
 and that deployments depending on cost-aware placement or on fair sharing of a
-scarce accelerator pool should *"stay on WVA for now"*. This project is that
-path, maintained: an independently developed, advanced fork of WVA, not
-affiliated with or endorsed by llm-d, and not upstream WVA (its actuation is a
-KEDA external scaler) ([KEDA alone, compared](docs/comparison/keda-alone.md)).
+scarce accelerator pool should *"stay on WVA for now"*. This project is one
+way to stay on that path: an independently developed, advanced fork of WVA,
+still maintained, not affiliated with or endorsed by llm-d, and not upstream
+WVA (its actuation is a KEDA external scaler) ([KEDA alone, compared](docs/comparison/keda-alone.md)).
 
 **Sub-second time to first token while it scales up, for 12 % less GPU than a floor of spare replicas.**
 (One run per arm: two 8B models on H200 with a one-Pod warm pool;
@@ -35,8 +35,8 @@ minutes a new replica takes to load.
   constant 6 req/s, on the experimental P/D path: through the first phase it
   held two decode replicas while KV-cache use of 5–15 % alone said one; about
   four minutes after the request shape changed, once that shape's throughput
-  was measured, it ordered a third (KV peaked at 62 %), and no queue formed at
-  any point. On a second exposure, with both shapes already
+  was measured, it ordered a third (KV peaked at 62 %), and no queue formed in
+  the second phase. On a second exposure, with both shapes already
   seen, p95 TTFT was **155 ms with 0 errors in 13 288 requests**; a cold
   controller reached a 3.9 s p99
   ([P/D path, measured](docs/well-lit-paths/pd-disaggregation/#measured);
@@ -95,9 +95,9 @@ export NAMESPACE=<the namespace running llm-d>
 make check-prereqs                    # read-only: tools, namespace, Prometheus
 make setup-prereqs                    # ONCE per namespace, by a cluster admin
 make deploy-wva                       # the controller — no cluster-scoped rights
+make workload-patch                   # writes a patch (drain hook, weights, engine cache); apply it through your model-server chart
 make scaledobjects-plan               # list your model servers; nothing is applied
 make scaledobjects-apply              # register them — this is what makes it scale
-make workload-patch                   # writes a patch (drain hook, weights, engine cache); apply it through your model-server chart
 ```
 
 The router (EPP) must run with `featureGates: [flowControl]` in its

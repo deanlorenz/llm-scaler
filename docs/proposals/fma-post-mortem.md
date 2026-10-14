@@ -38,6 +38,9 @@ A fork was started (`ev-shindin/llm-d-fast-model-actuation`, branch
 `feat/reuse-by-model`); its first commit fixed a port-conflict reclaim and was
 validated on an H100 OpenShift test cluster (0 destroy events, first `warmAffinity` wake at 2 s). It was
 not carried further.
+Group warm pools now run the fork's image, `ghcr.io/ev-shindin/fma-launcher:v0.6.4-headless`,
+which carries the follower-rank fix
+([what is copied, and from where](../../warmpool/README.md#what-is-copied-and-from-where)).
 
 `fma-upstream-requests.md` gathered change requests against FMA
 `v0.6.0-alpha.13`. **None were tracked** — the document itself recorded that

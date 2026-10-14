@@ -137,12 +137,12 @@ spec:
           # cannot. The proxy beside it has always been pinned this way, and the
           # third-party image is the one that needed it more.
           #
-          # v0.6.4, the latest STABLE release. This ran on an alpha
+          # v0.6.4, a STABLE release. This ran on an alpha
           # (v0.6.0-alpha.13) for as long as that was the newest thing measured
           # here; FMA has since shipped v0.6.1 through v0.6.4, and running a
           # release rather than a prerelease is the better default for the image
-          # that supervises every warm engine. v0.6.5-alpha.1 exists and is
-          # deliberately not taken.
+          # that supervises every warm engine. 0.6.5 stable exists (2026-08-31);
+          # not yet tested here.
           image: ghcr.io/llm-d-incubation/llm-d-fast-model-actuation/launcher:v0.6.4@sha256:9df3f3bee8c321c14d5c0265d94ab8ae533cff1899c65eeb2623a5dcd753647e
           imagePullPolicy: IfNotPresent
           command: ["/bin/bash", "-c"]
