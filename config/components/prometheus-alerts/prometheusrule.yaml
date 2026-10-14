@@ -106,3 +106,12 @@ spec:
       annotations:
         summary: "Model {{ $labels.exported_namespace }}/{{ $labels.model_name }} is at zero replicas while requests are being refused"
         description: "Grouped by exported_namespace, not namespace: Prometheus renames a scraped `namespace` label to `exported_namespace` because the scrape job already carries one, so plain `namespace` here is the CONTROLLER's namespace and would name the wrong place. Nothing is serving this model and EPP is returning ServiceUnavailable for it, so traffic is being dropped and the autoscaler has not brought it back. This alerts on the SYMPTOM, so it fires whatever the cause: no wake signal (see WVAModelHasNoWakeSignal, which names that specific cause), an EPP that cannot be scraped, KEDA not delivering the activation, an admission or quota refusal on the scale-up, or a bug. Start with wva_model_scaling_blocked for this model — if a reason is present it is the likely cause. Note the join is on model_name alone because EPP's metrics carry no namespace, so two namespaces serving the same modelID cannot be told apart here; the namespace shown comes from the controller's side."
+
+    - alert: WVAScalerTargetsUndecided
+      expr: max by (exported_namespace) (wva_scaler_undecided_targets) > 0
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: "{{ $value }} ScaledObject(s) in {{ $labels.exported_namespace }} have had no usable scaling decision for 10 minutes"
+        description: "Grouped by exported_namespace, not namespace: the gauge carries the ScaledObject's namespace, which Prometheus renames to exported_namespace because the scrape job already has a namespace label (the controller's). The KEDA external scaler is answering these ScaledObjects with the target's current replica count because no engine has a usable decision for them, so their replica counts are frozen: they neither scale up under load nor down when idle. For a cycle or two after a controller restart or leader change this is expected; ten minutes is not. wva_scaler_undecided_answers_total says why: reason not-managed, or no-decision that never stops, means the model is never planned, usually a trigger metadata value that does not parse; stale means its decision stopped being republished, so read that model's scaling-decision lines. The controller log line 'external scaler has no decision for this target' names each ScaledObject."
