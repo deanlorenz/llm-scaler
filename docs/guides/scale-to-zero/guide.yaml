@@ -56,20 +56,34 @@ deploy:
       #
       # Time to zero is retentionPeriod + KEDA's cooldownPeriod, in sequence, and
       # applies to the final drop out of service only.
+      #
+      # Re-running `make deploy-wva` re-applies the shipped `default` entry, which
+      # has no scaleToZero: repeat this edit after every re-run, or put it on a
+      # named tier, which the installer keeps.
   bounds:
     note: |
       Half two: let every variant reach zero. A model is at zero only when
       NOTHING serves it, so one variant left at 1 keeps the whole model up and
       the policy above does nothing.
-    run: kubectl get scaledobject -n <llmd-namespace> -o custom-columns=NAME:.metadata.name,MIN:.spec.minReplicaCount,MAX:.spec.maxReplicaCount
+    run: |
+      kubectl get scaledobject -n <llmd-namespace> -o custom-columns=NAME:.metadata.name,MIN:.spec.minReplicaCount,MAX:.spec.maxReplicaCount
+      # Any MIN above 0: set it through the plan -- re-run it, set minReplicas: 0
+      # on each of the model's entries (they read apply: adopt), apply it:
+      make scaledobjects-plan
+      make scaledobjects-apply
+      # or patch one ScaledObject directly:
+      #   kubectl patch scaledobject <name> -n <llmd-namespace> --type=merge -p '{"spec":{"minReplicaCount":0}}'
   hpa:
     note: |
       Read the SCALEDOBJECT, not the HPA. KEDA always gives the derived HPA
       minReplicas: 1 — the HPA API cannot express 0 — and drives 1->0 itself, so a
       perfectly healthy parked workload sits behind an HPA reading 1. Only
       spec.minReplicaCount on the ScaledObject decides whether zero is permitted.
-      If you changed it after KEDA built the HPA and nothing parks, delete the
-      ScaledObject and let KEDA rebuild rather than editing in place.
+      If you changed it after KEDA built the HPA and nothing parks, re-apply the
+      ScaledObject rather than editing the HPA: `make scaledobjects-plan`, set
+      `minReplicas: 0` on the model's entries (they read `apply: adopt`), then
+      `make scaledobjects-apply`. KEDA rebuilds the HPA from the ScaledObject;
+      nothing rebuilds a deleted ScaledObject for you.
     run: |
       kubectl get scaledobject -n <llmd-namespace>         -o custom-columns=NAME:.metadata.name,MIN:.spec.minReplicaCount
       # minReplicas: 1 on the derived HPA below is EXPECTED, not a fault:

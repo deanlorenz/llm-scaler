@@ -5,9 +5,9 @@
 - **Status:** Experimental (below).
 - **You need:** an llm-d P/D deployment, `llm-d.ai/role: prefill` or `decode` on each pod template, and a KV transport between the roles; the prerequisites of [the saturation path](../scale-on-saturation/#start-here).
 - **Do this:**
-  1. Deploy the P/D model. No guide in this repository covers it: use llm-d's own P/D guide, or the benchmark scenario under [Setting it up](#setting-it-up).
-  2. [Install the scaling manager](../../guides/install-in-namespace/) and [register](../../guides/install-in-namespace/README.md#4-register-the-workloads) both roles under one `modelID`: `make scaledobjects-plan` lists the prefill and decode workloads.
-  3. For long generations, set `defaultOutputTokens` on the decode trigger ([Tuning it](#tuning-it)).
+  1. (namespace owner) Deploy the P/D model. No guide in this repository covers it: use [llm-d's own P/D guide](https://github.com/llm-d/llm-d/tree/main/guides/pd-disaggregation), adding `featureGates: [flowControl]` to its EPP's `EndpointPickerConfig` (that guide leaves the gate off, and the install refuses without it), or the benchmark scenario under [Setting it up](#setting-it-up).
+  2. (namespace owner, after the cluster admin's `make setup-prereqs`) [Install the scaling manager](../../guides/install-in-namespace/) and [register](../../guides/install-in-namespace/README.md#4-register-the-workloads) both roles under one `modelID`: `make scaledobjects-plan` lists the prefill and decode workloads.
+  3. (namespace owner) For long generations, set `defaultOutputTokens` on the decode trigger ([Tuning it](#tuning-it)).
 - **Check it works:** `wva_desired_replicas` shows one series per role ([Verifying it](#verifying-it)).
 - **Undo:** nothing specific to this path; [uninstalling](../../guides/install-in-namespace/README.md#cleanup) removes the ScaledObjects, and the model servers keep serving.
 

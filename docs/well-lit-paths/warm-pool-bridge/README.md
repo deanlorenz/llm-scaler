@@ -3,13 +3,13 @@
 ## Start here
 
 - **Status:** Stable.
-- **You need:** [the saturation path](../scale-on-saturation/#start-here) in place; accelerators free for the pool, of the same shape as the models it warms; the RWX model-cache claim the model servers already mount; the pool's two images.
+- **You need:** [the saturation path](../scale-on-saturation/#start-here) in place; accelerators free for the pool, of the same shape as the models it warms; the RWX model-cache claim the model servers already mount; the pool's two images, pullable from the pool's nodes: the launcher `ghcr.io/llm-d-incubation/llm-d-fast-model-actuation/launcher` (external, from Fast Model Actuation, not built here) and the proxy `ghcr.io/ev-shindin/llm-scaler/warmpool-proxy` (or your `--proxy-image`). On a mirrored or air-gapped registry, mirror both first ([the images](../../guides/warm-pool/install.md#the-images-a-pool-pod-runs)).
 - **Do this** ([Bridge a scale-up with a warm pool](../../guides/warm-pool/)):
-  1. [Check the model can be warmed here](../../guides/warm-pool/README.md#should-this-model-be-warmed-here-at-all) (`deploy/warmpool.sh sizing`) and [which pools you need](../../guides/warm-pool/README.md#which-pools-do-you-need) (`deploy/warmpool.sh plan`).
-  2. Meet the [pool's prerequisites](../../guides/warm-pool/install.md#prerequisites): the cache claim and [the images](../../guides/warm-pool/install.md#the-images-a-pool-pod-runs).
-  3. [Create the pool and point the models at it](../../guides/warm-pool/install.md#adding-and-removing-a-pool-later) (`deploy/warmpool.sh create`, then `warmPool:` in each model's trigger), or [at install time](../../guides/warm-pool/install.md#turning-it-on-during-installation).
+  1. (namespace owner) [Check the model can be warmed here](../../guides/warm-pool/README.md#should-this-model-be-warmed-here-at-all) (`deploy/warmpool.sh sizing`) and [which pools you need](../../guides/warm-pool/README.md#which-pools-do-you-need) (`deploy/warmpool.sh plan`).
+  2. (namespace owner) Meet the [pool's prerequisites](../../guides/warm-pool/install.md#prerequisites): the cache claim and [the images](../../guides/warm-pool/install.md#the-images-a-pool-pod-runs).
+  3. (namespace owner) [Create the pool and point the models at it](../../guides/warm-pool/install.md#adding-and-removing-a-pool-later) (`deploy/warmpool.sh create`, then `warmPool:` in each model's trigger), or [at install time](../../guides/warm-pool/install.md#turning-it-on-during-installation).
 - **Check it works:** a `warm pool state` line in the controller log, then `wva_warmpool_borrow_total{outcome="hit"}` rising on a scale-up ([Checking it works](../../guides/warm-pool/operating.md#checking-it-works)).
-- **Undo:** `deploy/warmpool.sh delete`, and remove `warmPool:` from the models ([Remove one](../../guides/warm-pool/install.md#adding-and-removing-a-pool-later)).
+- **Undo:** (namespace owner) `deploy/warmpool.sh delete`, and remove `warmPool:` from the models ([Remove one](../../guides/warm-pool/install.md#adding-and-removing-a-pool-later)).
 
 ## What it is
 

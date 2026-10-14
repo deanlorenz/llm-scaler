@@ -3,13 +3,16 @@
 ## Start here
 
 - **Status:** Stable.
-- **You need:** cluster-admin rights; controllers installed by [the saturation path](../scale-on-saturation/#start-here), each able to list nodes; accelerators that resolve.
+- **You need:**
+  - a cluster admin, for the cluster-wide command; controllers installed by [the saturation path](../scale-on-saturation/#start-here); accelerators that resolve.
+  - on **Kubernetes**, for a namespace-scoped controller that runs in the namespace it manages: `get` on its Namespace, or it never sees `wva-policy` and keeps reading its own ConfigMap ([grant](../../guides/admin-cluster-setup/README.md#grant-the-namespace-read-by-hand)). Confirm with `Cluster policy comes from` in its log: `... the well-known namespace` means it reads `wva-policy`.
+  - **Not enforcement:** the limiter is advisory; back each tenant namespace with a GPU `ResourceQuota` ([bound at admission](../../guides/admin-cluster-setup/README.md#bound-the-namespaces-gpus-at-admission)).
 - **Do this** ([Bound every install by real GPUs](../../guides/admin-gpu-bounding/)):
-  1. [Check accelerators resolve](../../guides/admin-gpu-bounding/README.md#prerequisites): the failure with no symptom.
-  2. Read the [blast radius](../../guides/admin-gpu-bounding/README.md#blast-radius--read-before-running-it), then run [`make enable-physical-limiter`](../../guides/admin-gpu-bounding/README.md#installation-instructions).
-  One install only: `WVA_LIMITER=gpu-inventory` on its `make deploy-wva` ([configuration](../../reference/configuration.md#core-configuration)).
-- **Check it works:** each controller's log has `GPU limiter constructed` and no `Invalid saturation scaling` ([Verification](../../guides/admin-gpu-bounding/README.md#verification)).
-- **Undo:** `make disable-physical-limiter` ([Cleanup](../../guides/admin-gpu-bounding/README.md#cleanup)).
+  1. (cluster admin) [Check accelerators resolve](../../guides/admin-gpu-bounding/README.md#prerequisites): the failure with no symptom.
+  2. (cluster admin) Read the [blast radius](../../guides/admin-gpu-bounding/README.md#blast-radius--read-before-running-it), then run [`make enable-physical-limiter`](../../guides/admin-gpu-bounding/README.md#installation-instructions). It may restart every Deployment labelled `app.kubernetes.io/name=workload-variant-autoscaler` in a controller's namespace, and warm-pool Deployments carry that label: until the Namespace read above is granted, leave namespaces that hold a pool out of `WVA_LIMITER_TARGETS`.
+  One install instead (namespace owner): `WVA_LIMITER=gpu-inventory` on its `make deploy-wva` ([configuration](../../reference/configuration.md#core-configuration)). Advisory: the same owner can edit it away.
+- **Check it works:** each controller logs `GPU limiter (re)built from config` with `type` `inventory` (after a restart: `GPU limiter constructed` with the same `type`), and no `Invalid saturation scaling` ([Verification](../../guides/admin-gpu-bounding/README.md#verification)). Every controller prints `GPU limiter constructed` at start, `type` `none` included, so the line alone proves nothing.
+- **Undo:** (cluster admin) `make disable-physical-limiter` ([Cleanup](../../guides/admin-gpu-bounding/README.md#cleanup)); it leaves the node-read RBAC in place. One install (namespace owner): re-run `make deploy-wva` without `WVA_LIMITER`, which resets the policy's `default` entry ([why](../../reference/scaling-policy.md#re-running-the-installer-resets-the-default-entry)).
 
 ## What it is
 
@@ -76,18 +79,21 @@ kubectl logs -n <wva-namespace> deploy/wva-controller-manager | grep -E 'Cluster
 # the cluster policy, for the controllers that read wva-policy
 kubectl get configmap wva-scaling-policy-config -n wva-policy -o jsonpath='{.data.default}'
 
-# the limiter the controller actually built
-kubectl logs -n <wva-namespace> deploy/wva-controller-manager | grep 'GPU limiter constructed'
+# the limiter the controller actually built: type=inventory for gpu-inventory.
+# "constructed" is printed at every start, type=none included; a live change
+# logs "(re)built from config".
+kubectl logs -n <wva-namespace> deploy/wva-controller-manager | grep -E 'GPU limiter (constructed|\(re\)built from config)'
 
 # what the optimizer decided, and the reason code behind each entry
 kubectl logs -n <wva-namespace> deploy/wva-controller-manager | grep scaling-decision
 ```
 
-On Kubernetes, a namespace-scoped controller cannot read Namespace objects, so it
+On Kubernetes, a namespace-scoped controller without `get` on its Namespace
 does not see `wva-policy` and reads its own ConfigMap instead — the first command
-shows it (`Could not read the managed Namespace`). Admin-owned controllers read their
-own ConfigMap by design. The Kubernetes gap is being fixed; see
-[the GPU limiter](../../reference/gpu-limiter.md#what-an-admin-sets-and-where).
+shows it (`Could not read the managed Namespace`).
+[Grant the read](../../guides/admin-cluster-setup/README.md#grant-the-namespace-read-by-hand)
+where it is missing. Admin-owned controllers read their own ConfigMap by
+design; see [the GPU limiter](../../reference/gpu-limiter.md#what-an-admin-sets-and-where).
 
 `wva_model_scaling_blocked` carries the reason as a label. A model that wanted
 more and did not get it is a normal, visible outcome here — not an error.

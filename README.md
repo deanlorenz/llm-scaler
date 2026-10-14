@@ -4,19 +4,24 @@
 [![CI](https://github.com/ev-shindin/llm-scaling-manager/actions/workflows/ci-pr-checks.yaml/badge.svg?branch=main)](https://github.com/ev-shindin/llm-scaling-manager/actions/workflows/ci-pr-checks.yaml)
 [![Go](https://img.shields.io/github/go-mod/go-version/ev-shindin/llm-scaling-manager)](go.mod)
 
+llm-d has deprecated its workload-variant-autoscaler (WVA): `v0.9.0` is the
+final release, and existing users are told to migrate to KEDA + EPP. llm-d also
+says KEDA + EPP covers WVA's capabilities except cost-aware placement across
+variants, some of them through a different layer (Kueue, kube-state-metrics),
+and that deployments depending on cost-aware placement or on fair sharing of a
+scarce accelerator pool should *"stay on WVA for now"*. This project is that
+path, maintained: an independently developed, advanced fork of WVA, not
+affiliated with or endorsed by llm-d, and not upstream WVA (its actuation is a
+KEDA external scaler) ([KEDA alone, compared](docs/comparison/keda-alone.md)).
+
 **Sub-second time to first token while it scales up, for 12 % less GPU than a floor of spare replicas.**
 (One run per arm: two 8B models on H200 with a one-Pod warm pool;
 [measured](docs/well-lit-paths/warm-pool-bridge/measured.md).)
 
-llm-d has deprecated its workload-variant-autoscaler, and says deployments
-that depend on cost-aware placement across variants or on fair sharing of a
-scarce accelerator pool should *"stay on WVA for now"*; this fork is that path,
-maintained ([KEDA alone, compared](docs/comparison/keda-alone.md)).
-
-An advanced fork of [llm-d](https://llm-d.ai)'s workload-variant-autoscaler. It
-sizes every model by the work its replicas can actually serve, keeps the fleet
-inside a GPU budget when you declare one (`limiters:`; none ships), and lets KEDA do the scaling. An optional warm pool of
-sleeping models covers the minutes a new replica takes to load.
+It sizes every model by the work its replicas can actually serve, keeps the
+fleet inside a GPU budget when you declare one (opt-in; off by default), and
+lets KEDA do the scaling. An optional warm pool of sleeping models covers the
+minutes a new replica takes to load.
 
 **Measured on GPU clusters** (single runs unless noted; method and caveats linked):
 
@@ -28,9 +33,10 @@ sleeping models covers the minutes a new replica takes to load.
   ([warm pool, measured](docs/well-lit-paths/warm-pool-bridge/measured.md)).
 - **It prices the request shape, not just the queue.** Qwen3-0.6B at a
   constant 6 req/s, on the experimental P/D path: through the first phase it
-  held two decode replicas while KV-cache use of 5–15 % alone said one; when
-  the request shape changed it ordered a third (KV peaked at 62 %), and no
-  queue formed at any point. On a second exposure, with both shapes already
+  held two decode replicas while KV-cache use of 5–15 % alone said one; about
+  four minutes after the request shape changed, once that shape's throughput
+  was measured, it ordered a third (KV peaked at 62 %), and no queue formed at
+  any point. On a second exposure, with both shapes already
   seen, p95 TTFT was **155 ms with 0 errors in 13 288 requests**; a cold
   controller reached a 3.9 s p99
   ([P/D path, measured](docs/well-lit-paths/pd-disaggregation/#measured);
@@ -91,7 +97,12 @@ make setup-prereqs                    # ONCE per namespace, by a cluster admin
 make deploy-wva                       # the controller — no cluster-scoped rights
 make scaledobjects-plan               # list your model servers; nothing is applied
 make scaledobjects-apply              # register them — this is what makes it scale
+make workload-patch                   # writes a patch (drain hook, weights, engine cache); apply it through your model-server chart
 ```
+
+The router (EPP) must run with `featureGates: [flowControl]` in its
+EndpointPickerConfig; `make check-prereqs` refuses the install when it can see
+the gate is off.
 
 The install is split across two people, because it is split across two levels of
 permission: a cluster admin runs `setup-prereqs` once for the namespace, and the
@@ -109,7 +120,7 @@ so until a ScaledObject exists it runs and scales nothing.
 | Then | |
 | --- | --- |
 | Full install guide | [deploy/](deploy/) |
-| Installing it | [docs/guides/](docs/guides/) — pick a path |
+| Installing it | [well-lit paths](docs/well-lit-paths/) — pick your scenario; it links the guide |
 | Running it day to day | [operations.md](docs/reference/operations.md) |
 | Watching what it decides | [monitoring.md](docs/reference/monitoring.md) |
 | Making a workload scalable | [workload-preparation.md](docs/reference/workload-preparation.md) |
@@ -198,7 +209,7 @@ and has diverged substantially from it. The largest additions:
   optimizer**, on top of the GPU and quota limiters upstream already had;
 - **capacity model changes**: demand priced from the throughput one replica
   sustains, and holds through a request-shape change. Scale-from-zero itself
-  came from upstream;
+  came from upstream.
 
 ## Contributing
 
@@ -213,7 +224,7 @@ Apache 2.0 - see [LICENSE](LICENSE) for details.
 
 ## Related Projects
 
-- [llm-d workload-variant-autoscaler](https://github.com/llm-d/llm-d-workload-variant-autoscaler) - the upstream project this fork derives from
+- [llm-d-autoscaling](https://github.com/llm-d/llm-d-autoscaling) - the upstream project this fork derives from, renamed from llm-d-workload-variant-autoscaler; WVA is deprecated there in favour of KEDA recipes
 - [llm-d infrastructure](https://github.com/llm-d/llm-d-infra)
 - [llm-d main repository](https://github.com/llm-d/llm-d)
 

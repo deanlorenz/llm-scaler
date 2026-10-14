@@ -5,10 +5,12 @@
 - **Status:** Stable.
 - **You need:** [the saturation path](../scale-on-saturation/#start-here) in place; the EPP's `flowControl` gate parsed by the running EPP pod (it is the wake signal); a model that has served at least one request.
 - **Do this** ([Scale a model to zero, and get it back](../../guides/scale-to-zero/)):
-  1. [Check the wake signal](../../guides/scale-to-zero/README.md#prerequisites) before anything parks.
-  2. [Allow parking in the policy, and let every variant reach zero](../../guides/scale-to-zero/README.md#installation-instructions): `scaleToZero.enabled` **and** `minReplicaCount: 0`, both halves.
+  1. (namespace owner) [Check the wake signal](../../guides/scale-to-zero/README.md#prerequisites) before anything parks.
+  2. (whoever owns the controller's policy ConfigMap: the namespace owner in the default install, the cluster admin when the controller runs in an admin namespace) [Allow parking in the policy](../../guides/scale-to-zero/README.md#installation-instructions): `scaleToZero.enabled: true` on the entry the model resolves to.
+  3. (namespace owner) Let every variant reach zero: `minReplicaCount: 0` on each of the model's ScaledObjects. Either re-run `make scaledobjects-plan`, set `minReplicas: 0` on each of the model's entries (they read `apply: adopt`), and `make scaledobjects-apply`; or patch each one: `kubectl patch scaledobject <name> -n <ns> --type=merge -p '{"spec":{"minReplicaCount":0}}'`.
+  Re-running `make deploy-wva` resets the policy's `default` entry: repeat step 2 after it, or put `scaleToZero` on a named tier, which the installer keeps ([why](../../reference/scaling-policy.md#re-running-the-installer-resets-the-default-entry)).
 - **Check it works:** no `wva_model_scaling_blocked` reason, the model parks after `retentionPeriod`, and `hack/verify_scale_from_zero.sh` wakes it end to end ([Verification](../../guides/scale-to-zero/README.md#verification)).
-- **Undo:** set `scaleToZero.enabled: false` and raise the variants' `minReplicaCount` back ([Cleanup](../../guides/scale-to-zero/README.md#cleanup)).
+- **Undo:** set `scaleToZero.enabled: false`, and raise the variants' `minReplicaCount` back the same way as step 3 ([Cleanup](../../guides/scale-to-zero/README.md#cleanup)).
 
 ## What it is
 

@@ -56,7 +56,12 @@ index, then follow the guide that path links to. Nothing installed yet? The
    ```bash
    make scaledobjects-plan     # lists your model servers, writes an editable plan
    make scaledobjects-apply    # creates the ScaledObjects
+   make workload-patch         # writes a patch (drain hook, weights, engine cache); apply it through your model-server chart
    ```
+
+   The router (EPP) must run with `featureGates: [flowControl]` in its
+   EndpointPickerConfig; `make check-prereqs` refuses the install when it can
+   see the gate is off.
 
 The full walk-through, with what each step checks:
 [install the scaling manager in a namespace](guides/install-in-namespace/).

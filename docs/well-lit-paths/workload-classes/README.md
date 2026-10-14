@@ -3,10 +3,11 @@
 ## Start here
 
 - **Status:** Stable.
-- **You need:** [the saturation path](../scale-on-saturation/#start-here) in place, and edit rights on the scaling-policy ConfigMap the controller reads (`wva-scaling-policy-config`).
+- **You need:** [the saturation path](../scale-on-saturation/#start-here) in place, and edit rights on a scaling-policy ConfigMap (`wva-scaling-policy-config`) the controller reads. That is the one in the controller's namespace — the namespace owner's in the default install. When a cluster admin keeps the controller out of your reach, you cannot edit that one: create a [namespace-local `wva-scaling-policy-config`](../../reference/scaling-policy.md#namespace-local-scaling-policy-map) in your own namespace (it replaces the global map whole for your models), or ask the admin.
 - **Do this** (no guide covers this path; the steps are on this page):
-  1. Add the tier entries, and a `defaultPolicy` naming one that exists ([What it needs](#what-it-needs); the shipped numbers in [Choosing a tier](#choosing-a-tier)).
-  2. Name a tier on each variant: `scalingPolicy: <tier>` in its trigger metadata, or in its entry in [the ScaledObject plan](../../reference/configuration.md#default-scaledobjects) before `make scaledobjects-apply`.
+  1. (owner of that ConfigMap) Add the tier entries, and a `defaultPolicy` naming one that exists ([What it needs](#what-it-needs); the shipped numbers in [Choosing a tier](#choosing-a-tier)).
+  2. (namespace owner) Name a tier on each variant: `scalingPolicy: <tier>` in its trigger metadata, or in its entry in [the ScaledObject plan](../../reference/configuration.md#default-scaledobjects) before `make scaledobjects-apply`.
+  Re-running `make deploy-wva` resets the `default` entry of the controller's own ConfigMap, and `defaultPolicy` with it: re-apply `defaultPolicy` afterwards. The tier entries are other keys, and the installer keeps them ([why](../../reference/scaling-policy.md#re-running-the-installer-resets-the-default-entry)).
 - **Check it works:** `Effective scaling policy` in the controller log names the tier, and there is no `Scaling policy not found` ([Verifying it](#verifying-it)).
 - **Undo:** remove `scalingPolicy` from the trigger; the variant scales under the `default` entry again. The policy is read live, with no restart.
 

@@ -1,7 +1,10 @@
 # What should decide how many replicas an LLM serves on?
 
 > **History:** July 2026, older controller and recipe; see
-> [KEDA alone](../docs/comparison/keda-alone.md).
+> [KEDA alone](../docs/comparison/keda-alone.md). Where this page says a KV
+> fraction means the same on any shape, that is the July build's reasoning: the
+> current controller prices demand by throughput, because a KV fraction alone
+> lags a shape change.
 
 **A request threshold, or a capacity model — five runs on a live cluster.**
 
@@ -26,7 +29,7 @@
 
 | Arm | What computes the target |
 |---|---|
-| **KEDA alone** | A **threshold on a serving metric**: scale when running requests pass **16 per pod**. |
+| **KEDA alone** | A **threshold on a serving metric**: scale on **1 queued or 16 running per pod** (larger wins). |
 | **The scaling manager + KEDA** | A **capacity model**: scale when token demand approaches **measured KV capacity**. |
 
 **Colour code:** in the tables below, the highlighted arm is the one that won that row. Every run is **one model, one accelerator, one variant** — the single-variant case.
@@ -51,7 +54,7 @@ In these single runs the scaling manager held fewer GPUs every time. Run 3 is th
 
 | # | What we ran | GPUs held (the scaling manager vs other) | Dropped (the scaling manager vs other) | What it means |
 |---|---|---|---|---|
-| 1 | symmetric 300/300, 10 req/s | **1.00 vs 1.88** | 0 vs 30 | Half the GPU, same latency |
+| 1 | symmetric 300/300, 10 req/s | **1.00 vs 1.88** | 0 vs 30 (under our 120 s scale-down window; upstream ships 300 s) | Half the GPU, same latency |
 | 2 | prefill-heavy 1000/250, rates 10 → 16 | **1.00 vs 2.46** | 0 vs 21 | 2.5× the GPUs at a third of the utilization |
 | 3 | prefill-heavy 1000/250, sustained @ 24 | **1.56 vs 4.01** | 101 vs 14 | Cheaper — and pays for it in the tail |
 | 4 | decode-heavy 100/1000, sustained @ 24 | **2.21 vs 5.97** | 6 vs 2 | Cheaper, no tail cost; KEDA pinned at its cap |
@@ -98,6 +101,10 @@ max replicas: 10
 
 **`"Scale at 75% KV"` was that build's rule** (today's default is `kvCacheThreshold` × `scaleUpThreshold` = 0.80 × 0.85 = 0.68 of physical KV). **Either way, a KV fraction means the same thing on any model, accelerator, or request shape — the scaling manager measures the per-variant capacity itself. `"16 running requests"` is that capacity, hand-derived.**
 
+> **That was the July build's reasoning.** The current controller does not
+> treat a KV fraction as meaning the same on every shape: it prices demand by
+> measured throughput, because a KV fraction alone lags a shape change.
+
 ---
 
 ## Run 1 — symmetric traffic: same latency on half the GPU
@@ -110,7 +117,7 @@ max replicas: 10
 
 - Solid = replicas ready; faint = what each controller asked for.
 - KEDA scales at 16 running requests per pod; the scaling manager scales when demand nears KV capacity.
-- Bursts cross that request line even though the mean fits in one pod, so **KEDA cycles 1↔2↔3** and drops ~30 requests. The scaling manager holds a stable target.
+- Bursts cross that request line even though the mean fits in one pod, so **KEDA cycles 1↔2↔3** and drops ~30 requests (under our 120 s scale-down window; upstream ships 300 s). The scaling manager holds a stable target.
 
 ---
 
@@ -161,7 +168,7 @@ max replicas: 10
 - The scaling manager climbs 1 → 2 → 3 early and drains back to 1: one cycle, against two or three on the prefill-heavy runs at the *same config*.
 - **KEDA-EPP reaches its 10-replica cap within three minutes — before the sustained stage even starts — and holds for ~30 minutes.**
 - KV utilization stays low and the EPP queue never builds on either arm: neither was short of capacity. The difference is entirely in *what each one asked for.*
-- **The cap is the tell.** A trigger that pegs immediately and ignores the 16 → 20 → 24 rate ladder is not measuring load — the threshold calibrated for prefill-heavy traffic is *degenerate* on decode-heavy.
+- **The cap is the tell.** A fixed 16-per-pod running threshold, untuned for this shape, hit our max of 10 immediately and ignored the 16 → 20 → 24 rate ladder.
 
 ---
 
@@ -183,10 +190,10 @@ max replicas: 10
 
 | Reality | KEDA alone | The scaling manager + KEDA | Evidence |
 |---|---|---|---|
-| Bursty arrivals around a steady mean | Threshold crossings → oscillation and dropped requests | Capacity model → stable target | Run 1 |
+| Bursty arrivals around a steady mean | Threshold crossings → oscillation and dropped requests (under our 120 s scale-down window; upstream ships 300 s) | Capacity model → stable target | Run 1 |
 | Cheap requests arriving in bulk | Counts requests, not the work they represent | Scales on GPU pressure, not arrivals | Run 2 |
 | Sustained load past the crossover rate | Converges fast and holds — at 4.01 replicas | Converges cheaper, but cycles on the way | Run 3 |
-| The token shape changes which resource binds | A threshold tuned on one shape is **degenerate** on another — pinned at the replica cap on decode-heavy | Utilization thresholds mean the same on any shape | Runs 3 + 4 |
+| The token shape changes which resource binds | A threshold tuned on one shape is **degenerate** on another — pinned at the replica cap on decode-heavy | Utilization thresholds mean the same on any shape (the July build's reasoning; today demand is priced by throughput) | Runs 3 + 4 |
 | Prefill / decode pools | No notion of role; each Deployment scales alone | Roles sized together | Run 5 |
 | Heterogeneous, scarce GPUs | Every `ScaledObject` competes for any GPU | Cost-aware allocation across the pool | *not measured* |
 | Mixed-priority traffic on one model | One threshold averages all classes together | Sized to the tightest SLO class | *not measured* |

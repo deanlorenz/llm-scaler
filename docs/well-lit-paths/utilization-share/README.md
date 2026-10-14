@@ -3,13 +3,17 @@
 ## Start here
 
 - **Status:** Experimental: one run per configuration, 1 GPU per Pod (below).
-- **You need:** two or more models scaled by the scaling manager under one limiter: a quota, or the physical GPU inventory ([What it needs](#what-it-needs)); model servers that drain on termination; `kubectl`, `jq`, `yq` and `make` in a checkout of this repository.
-- **Do this** ([Turn on the utilization-share optimizer, safely](../../guides/utilization-share/)):
-  1. Install with a quota: [install in a namespace](../../guides/install-in-namespace/) with `WVA_LIMITER=quota WVA_QUOTAS='<accelerator>=<n>'` ([configuration](../../reference/configuration.md#core-configuration)), or stand up the guide's [two-model trial](../../guides/utilization-share/README.md#prerequisites).
+- **You need:**
+  - two or more models scaled by the scaling manager under one limiter ([What it needs](#what-it-needs)): a quota on the controller's own install (namespace owner; tenant-editable), or the physical GPU inventory published as cluster policy (cluster admin).
+  - model servers that drain on termination; `kubectl`, `jq`, `yq` and `make` in a checkout of this repository.
+  - **Not enforcement:** the limiter is advisory; back each tenant namespace with a GPU `ResourceQuota` ([bound at admission](../../guides/admin-cluster-setup/README.md#bound-the-namespaces-gpus-at-admission)).
+- **Do this** ([Turn on the utilization-share optimizer, safely](../../guides/utilization-share/)). Steps 2 and 3 are run by whoever owns the policy: the namespace owner for an own-install quota, the cluster admin for a policy in `wva-policy`.
+  1. (namespace owner) Install with a quota: [install in a namespace](../../guides/install-in-namespace/) with `WVA_LIMITER=quota WVA_QUOTAS='<accelerator>=<n>'` ([configuration](../../reference/configuration.md#core-configuration)), or stand up the guide's [two-model trial](../../guides/utilization-share/README.md#prerequisites).
   2. `make utilization-share-check`: is there a budget to share ([Prerequisites](../../guides/utilization-share/README.md#prerequisites)).
   3. `make utilization-share-shadow`, read what it would move, then `make utilization-share-activate` ([Installation](../../guides/utilization-share/README.md#installation-instructions)).
+  The `optimizer:` block lives in the policy's `default` entry, and re-running `make deploy-wva` resets that entry in the controller's own ConfigMap to the shipped one, without the block and without the limiter unless `WVA_LIMITER`/`WVA_QUOTAS` are passed again. After an upgrade, repeat steps 2 and 3; shadow also clears transfer marks the active optimizer left ([why](../../reference/scaling-policy.md#re-running-the-installer-resets-the-default-entry)).
 - **Check it works:** `make utilization-share-status`; `wva_utilization_share_mode` reads `active`, and transfers end `done` ([Verification](../../guides/utilization-share/README.md#verification)).
-- **Undo:** `make utilization-share-off`: back through shadow, marks cleared, block removed ([Cleanup](../../guides/utilization-share/README.md#cleanup)).
+- **Undo:** `make utilization-share-off`: back through shadow, marks cleared, block removed ([Cleanup](../../guides/utilization-share/README.md#cleanup)). If you stood up the guide's two-model trial, also `make benchmark-two-model-teardown`: it holds GPUs until you do.
 
 ## What it is
 

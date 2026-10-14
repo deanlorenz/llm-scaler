@@ -5,8 +5,8 @@
 - **Status:** Stable; no end-to-end spec asserts which variant grows ([How it is tested](#how-it-is-tested)).
 - **You need:** [the saturation path](../scale-on-saturation/#start-here) in place; two deployments of the same model behind one InferencePool and one EPP.
 - **Do this:**
-  1. [`make scaledobjects-plan`](../../guides/install-in-namespace/README.md#4-register-the-workloads): both deployments appear as entries; give them the same `modelID`.
-  2. Set each entry's `variantCost` to the price of one replica ([What it needs](#what-it-needs)), then `make scaledobjects-apply`.
+  1. (namespace owner) [`make scaledobjects-plan`](../../guides/install-in-namespace/README.md#4-register-the-workloads): both deployments appear as entries; give them the same `modelID`.
+  2. (namespace owner) Set each entry's `variantCost` to the price of one replica ([What it needs](#what-it-needs)), then `make scaledobjects-apply`.
   No guide stands up the second deployment; [the two-variant benchmark](../../developer-guide/two-variant-wva-benchmark.md) does, for a benchmark.
 - **Check it works:** `wva_desired_replicas` has one series per variant, and `analyzer-result` shows which one grew ([Verifying it](#verifying-it)).
 - **Undo:** nothing specific to this path; [uninstalling](../../guides/install-in-namespace/README.md#cleanup) removes the ScaledObjects.

@@ -5,11 +5,11 @@
 - **Status:** Experimental: the rule that picks which model is awake is covered by unit tests only (below).
 - **You need:** [the saturation path](../scale-on-saturation/#start-here) in place; accelerators for a pool Pod sized for the largest model, with a memory limit that holds the whole warm set; the model-cache claim and images [every pool needs](../../guides/warm-pool/install.md#prerequisites).
 - **Do this** ([the warm pool guide](../../guides/warm-pool/)):
-  1. [Check the models can be warmed here](../../guides/warm-pool/README.md#should-this-model-be-warmed-here-at-all) (`deploy/warmpool.sh sizing`) and [how many fit in one Pod](../../guides/warm-pool/sizing.md#how-many-models-fit-in-one-pod).
-  2. [Create the pool as retained](../../guides/warm-pool/multi-pool.md#retained-pools-which-model-holds-the-gpus) (`deploy/warmpool.sh create --type retained`) and point the models at it with `warmPool:` ([how](../../guides/warm-pool/install.md#adding-and-removing-a-pool-later)).
-  3. Set the two switch knobs on the pool's trigger ([What it needs](#what-it-needs)).
+  1. (namespace owner) [Check the models can be warmed here](../../guides/warm-pool/README.md#should-this-model-be-warmed-here-at-all) (`deploy/warmpool.sh sizing`) and [how many fit in one Pod](../../guides/warm-pool/sizing.md#how-many-models-fit-in-one-pod).
+  2. (namespace owner) [Create the pool as retained](../../guides/warm-pool/multi-pool.md#retained-pools-which-model-holds-the-gpus) (`deploy/warmpool.sh create --type retained`) and point the models at it with `warmPool:` ([how](../../guides/warm-pool/install.md#adding-and-removing-a-pool-later)).
+  3. (namespace owner) Set the two switch knobs in the trigger metadata of the pool's ScaledObject: `kubectl edit scaledobject wva-warm-pool-<pool> -n <ns>`. `warmPoolSwitchSpareThreshold` (a percent) is optional — unset, the pool switches only when a model needs to scale up; `warmPoolMinSwitchInterval` defaults to `10m` ([What it needs](#what-it-needs)).
 - **Check it works:** `retained pool is switching` in the controller log when demand moves ([Verifying it](#verifying-it)); the pool's own state in [Checking it works](../../guides/warm-pool/operating.md#checking-it-works).
-- **Undo:** `deploy/warmpool.sh delete` ([Remove one](../../guides/warm-pool/install.md#adding-and-removing-a-pool-later)). Pass `--type retained` on every re-run of `create`, or the pool turns back into a bridge.
+- **Undo:** (namespace owner) `deploy/warmpool.sh delete` ([Remove one](../../guides/warm-pool/install.md#adding-and-removing-a-pool-later)). Pass `--type retained` on every re-run of `create`, or the pool turns back into a bridge.
 
 ## What it is
 

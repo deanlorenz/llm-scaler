@@ -27,9 +27,9 @@ Gaps that are documented but not yet planned are listed in
 
 ## Security
 
-- **Mutual TLS on the scaler port by default.** The KEDA scaler port is
-  plaintext unless an operator sets up certificates and a `TriggerAuthentication`
-  for every ScaledObject. Planned: the installer provisions the certificates
+- **Mutual TLS on the scaler port by default.** On this release the scaler port
+  has no TLS and no authentication by default; restrict it with a NetworkPolicy
+  ([network exposure](reference/security-model.md#network-exposure)). Planned: the installer provisions the certificates
   (cert-manager when present, otherwise its own CA), wires every ScaledObject it
   generates or adopts, and pins KEDA's client identity.
   [#138](https://github.com/ev-shindin/llm-scaling-manager/issues/138)
