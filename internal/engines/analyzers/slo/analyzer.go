@@ -62,6 +62,9 @@ type Analyzer struct {
 	// pinned fit holds B to once the fleet stops spanning k.
 	baseline map[string]float64
 	seen     map[string]time.Time
+	// transients is each model's recent fleet history, keyed namespace/model,
+	// for the transient exclusion (transient.go).
+	transients map[string]*transientMemo
 }
 
 // New returns an SLO analyzer. router may be nil, in which case the SLO is
@@ -75,11 +78,18 @@ func New(router RouterLatencySource, store *capacity.Store) *Analyzer {
 		windows:  make(map[string]*itl.Window),
 		baseline: make(map[string]float64),
 		seen:     make(map[string]time.Time),
+
+		transients: make(map[string]*transientMemo),
 	}
 }
 
 // Name implements domain.Analyzer.
 func (a *Analyzer) Name() string { return domain.SLOAnalyzerName }
+
+// Judging reports whether the analyzer can judge an SLO at all: whether it
+// was given a source for the router's latency. Without one it still prices
+// variants, and every objective stays unjudged.
+func (a *Analyzer) Judging() bool { return a.router != nil }
 
 // Analyze implements domain.Analyzer.
 func (a *Analyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*domain.AnalyzerResult, error) {
@@ -140,11 +150,22 @@ func (a *Analyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 	a.sweep(now)
 
 	snap.Objectives = a.judge(ctx, input, cfg.SLO)
+	// A window that covered a wake, a start or a rise is not judged: the
+	// requests in it waited out capacity no steady-state sizing could have had
+	// ready. The request count is still published, and the reason is.
+	snap.Excluded = a.noteTransient(input.Namespace+"/"+input.ModelID, input.VariantStates,
+		time.Duration(routerWindowSeconds(snap.Objectives))*time.Second, now)
+	if snap.Excluded != "" {
+		for i := range snap.Objectives {
+			snap.Objectives[i].Observed, snap.Objectives[i].Attainment = math.NaN(), math.NaN()
+		}
+	}
 	for _, o := range snap.Objectives {
 		logger.V(logging.VERBOSE).Info("slo-model",
 			"modelID", input.ModelID, "namespace", input.Namespace,
 			"objective", o.Objective, "statistic", o.Statistic,
 			"target", o.TargetSeconds, "observed", o.Observed, "attainment", o.Attainment,
+			"requests", o.Requests, "excluded", snap.Excluded,
 			"demandTokensPerSec", demand, "outputTokens", fleet.shape.AvgOutputTokens)
 	}
 	metrics.PublishSLO(snap, now)
@@ -269,6 +290,23 @@ func (a *Analyzer) fitLine(key string, rows []domain.ReplicaMetrics, variant str
 	return itl.Model{}, constants.SLOSourceNoLine
 }
 
+// routerWindowSeconds is the rate window the router figures were taken over:
+// the collector's, carried on the reading, and the collector's default when no
+// figure came back.
+func routerWindowSeconds(readings []metrics.SLOObjectiveReading) float64 {
+	for _, r := range readings {
+		if r.WindowSeconds > 0 {
+			return r.WindowSeconds
+		}
+	}
+	return defaultRouterWindowSeconds
+}
+
+// defaultRouterWindowSeconds matches registration.SLORouterWindowSeconds, the
+// window the router queries use. Spelled here so the analyzer does not import
+// the collector's registration package for one number.
+const defaultRouterWindowSeconds = 300.0
+
 // judge reads the router's latency for the model and reports each objective:
 // the TPOT mean, and the TTFT percentile with its attainment. A figure from too
 // few requests is NaN, which is not published.
@@ -288,6 +326,7 @@ func (a *Analyzer) judge(ctx context.Context, input domain.AnalyzerInput, slo *c
 			Requests: math.NaN(),
 		}
 		if rl != nil {
+			r.WindowSeconds = rl.WindowSeconds
 			r.Requests = rl.TPOTCountRate * rl.WindowSeconds
 			if r.Requests >= minSamples(0) {
 				r.Observed = rl.TPOTSumRate / rl.TPOTCountRate
@@ -303,6 +342,7 @@ func (a *Analyzer) judge(ctx context.Context, input domain.AnalyzerInput, slo *c
 			Requests: math.NaN(),
 		}
 		if rl != nil {
+			r.WindowSeconds = rl.WindowSeconds
 			if h, ok := newHistogram(rl.TTFTBuckets); ok {
 				r.Requests = h.total * rl.WindowSeconds
 				if r.Requests >= minSamples(p) {
@@ -335,6 +375,11 @@ func (a *Analyzer) sweep(now time.Time) {
 			delete(a.seen, key)
 			delete(a.windows, key)
 			delete(a.baseline, key)
+		}
+	}
+	for key, m := range a.transients {
+		if now.Sub(m.seenAt) > windowTimeout {
+			delete(a.transients, key)
 		}
 	}
 }

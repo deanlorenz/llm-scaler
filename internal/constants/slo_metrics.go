@@ -36,6 +36,14 @@ const (
 	// Labels: namespace, model_name, objective, statistic.
 	WVASLOWindowRequests = "wva_slo_window_requests"
 
+	// WVASLOExcluded is 1 for the reason a model's router window is not being
+	// judged this cycle and 0 for the others; all 0 while it is judged. A
+	// window is excluded while it covers a wake from zero, a replica starting
+	// or a rise, and for a grace period after, because those requests waited
+	// out capacity no steady-state sizing could have had ready.
+	// Labels: namespace, model_name, reason.
+	WVASLOExcluded = "wva_slo_excluded"
+
 	// LabelObjective names an SLO objective: "ttft" or "tpot".
 	LabelObjective = "objective"
 	// LabelStatistic names the statistic an objective is judged on: "mean", or
@@ -73,6 +81,16 @@ const (
 	// SLOSourceInputInvalid: an input was missing, non-finite or non-positive.
 	SLOSourceInputInvalid = "input-invalid"
 )
+
+// Reasons a model's router window is excluded from judgement.
+const (
+	SLOExcludedZeroReplicas = "zero-replicas"
+	SLOExcludedStarting     = "starting"
+	SLOExcludedRise         = "rise"
+)
+
+// SLOExcludedReasons is every exclusion reason, in the order they are published.
+var SLOExcludedReasons = []string{SLOExcludedZeroReplicas, SLOExcludedStarting, SLOExcludedRise}
 
 // SLOSources is every SLO source value, in the order they are published.
 var SLOSources = []string{

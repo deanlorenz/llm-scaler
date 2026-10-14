@@ -8,11 +8,14 @@ import (
 	"testing"
 	"time"
 
+	promclient "github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/registration"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/source"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 )
 
 // TestCollectRouterLatency_PicksItsModelAndMergesBuckets pins the router
@@ -130,4 +133,43 @@ func TestCollectRouterLatency_SkipsUnreadableBoundsAndKeepsTPOTAlone(t *testing.
 	assert.Empty(t, got.TTFTBuckets)
 	assert.Equal(t, 0.08, got.TPOTSumRate)
 	assert.Equal(t, 1.0, got.TPOTCountRate)
+}
+
+// TestCollectRouterLatency_CountsAFailedQuery pins that a failed query is
+// counted, so a Prometheus outage is not read as a router that is not scraped.
+// The failure is carried the way the real Prometheus source carries it: on
+// each query's result, with Refresh itself returning no error. A version that
+// counted only a Refresh error passed a mock that failed Refresh, and counted
+// nothing in production.
+func TestCollectRouterLatency_CountsAFailedQuery(t *testing.T) {
+	registry := promclient.NewRegistry()
+	require.NoError(t, metrics.InitMetrics(registry))
+	failing := &mockMetricsSource{
+		refreshFunc: func(_ context.Context, spec source.RefreshSpec) (map[string]*source.MetricResult, error) {
+			out := map[string]*source.MetricResult{}
+			for _, q := range spec.Queries {
+				out[q] = &source.MetricResult{QueryName: q, Error: errors.New("prometheus unreachable")}
+			}
+			return out, nil
+		},
+	}
+	assert.Nil(t, NewReplicaMetricsCollector(failing, nil, nil, nil, nil).
+		CollectRouterLatency(context.Background(), "model-a", "ns"))
+
+	mfs, err := registry.Gather()
+	require.NoError(t, err)
+	var counted float64
+	for _, mf := range mfs {
+		if mf.GetName() != constants.WVAMetricsCollectionErrorsTotal {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() == constants.LabelQueryType && l.GetValue() == constants.QueryTypeRouterLatency {
+					counted += m.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	assert.Equal(t, 3.0, counted, "one per failed query")
 }

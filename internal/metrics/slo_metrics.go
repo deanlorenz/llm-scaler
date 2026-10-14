@@ -18,6 +18,7 @@ var (
 	sloPredictedITL *prometheus.GaugeVec
 	sloSource       *prometheus.GaugeVec
 	sloRequests     *prometheus.GaugeVec
+	sloExcluded     *prometheus.GaugeVec
 )
 
 // registerSLOMetrics creates and registers the SLO analyzer's gauges. Called
@@ -66,8 +67,12 @@ func registerSLOMetrics(registry prometheus.Registerer) error {
 	sloPublishedMu.Lock()
 	sloPublished = map[string]*sloModelSeries{}
 	sloPublishedMu.Unlock()
+	sloExcluded = gauge(constants.WVASLOExcluded,
+		"SLO analyzer: 1 for the reason a model's router window is not judged this cycle (a wake from "+
+			"zero, a replica starting, a rise), 0 for the others; all 0 while it is judged.",
+		withInstance(constants.LabelNamespace, constants.LabelModelName, constants.LabelReason))
 	for _, g := range []*prometheus.GaugeVec{sloTarget, sloObserved, sloAttainment, sloFill, sloPredictedITL,
-		sloSource, sloRequests} {
+		sloSource, sloRequests, sloExcluded} {
 		if err := registry.Register(g); err != nil {
 			return err
 		}
@@ -87,6 +92,9 @@ type SLOObjectiveReading struct {
 	Observed      float64
 	Attainment    float64
 	Requests      float64
+	// WindowSeconds is the router window the figures were taken over; zero
+	// when the router reported nothing.
+	WindowSeconds float64
 }
 
 // SLOVariantReading is one variant of one model, as PublishSLO takes it. A NaN
@@ -105,6 +113,10 @@ type SLOModelSnapshot struct {
 	ModelName  string
 	Objectives []SLOObjectiveReading
 	Variants   []SLOVariantReading
+	// Excluded is why the router window is not judged this cycle, one of
+	// constants.SLOExcludedReasons, or "" when it is. Published only for a
+	// model with objectives.
+	Excluded string
 }
 
 // sloStaleAfter is how long a model's SLO series outlive the last cycle that
@@ -164,6 +176,15 @@ func PublishSLO(snap SLOModelSnapshot, now time.Time) {
 		set(sloObserved, ol, o.Observed)
 		set(sloAttainment, ol, o.Attainment)
 		set(sloRequests, ol, o.Requests)
+	}
+	if len(snap.Objectives) > 0 {
+		for _, reason := range constants.SLOExcludedReasons {
+			on := 0.0
+			if reason == snap.Excluded {
+				on = 1
+			}
+			set(sloExcluded, labels(constants.LabelReason, reason), on)
+		}
 	}
 	for _, v := range snap.Variants {
 		set(sloFill, labels(constants.LabelVariantName, v.Variant,

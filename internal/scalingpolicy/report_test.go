@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
@@ -211,4 +213,17 @@ func TestChangeReporter_TheEffectivePolicyChangesWithItsSLO(t *testing.T) {
 	r.ReportEffectivePolicy(ctx, "ns", "m", "gold", cfg)
 	assert.NotEqual(t, first, r.seen["effective|ns|m"],
 		"listing the slo analyzer is a new resolution and must be reported")
+}
+
+func TestChangeReporter_AFixedSLOLogsNothing(t *testing.T) {
+	var lines []string
+	ctx := logr.NewContext(context.Background(),
+		funcr.New(func(_, args string) { lines = append(lines, args) }, funcr.Options{}))
+	r := NewChangeReporter()
+	r.ReportSLOMisconfiguration(ctx, "ns", "m", "targets without the analyzer")
+	assert.Len(t, lines, 1, "the problem is reported")
+	r.ReportSLOMisconfiguration(ctx, "ns", "m", "")
+	assert.Len(t, lines, 1, "its fix is recorded, not reported as a problem with no text")
+	r.ReportSLOMisconfiguration(ctx, "ns", "m", "")
+	assert.Len(t, lines, 1)
 }

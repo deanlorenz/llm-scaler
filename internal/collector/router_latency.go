@@ -43,6 +43,18 @@ func (c *ReplicaMetricsCollector) CollectRouterLatency(
 		return nil
 	}
 
+	// The Prometheus source reports a failed query on its result, not as an
+	// error from the refresh, so each result is checked as the arrival-rate
+	// path checks its own.
+	for _, q := range queries {
+		if r := results[q]; r != nil && r.HasError() {
+			reason := prometheus.CategorizePrometheusError(r.Error)
+			metrics.IncMetricsCollectionErrors(constants.QueryTypeRouterLatency, reason)
+			logger.V(logging.DEBUG).Info("Router latency query failed",
+				"modelID", modelID, "namespace", namespace, "query", q, "reason", reason)
+		}
+	}
+
 	out := &domain.RouterLatency{WindowSeconds: registration.SLORouterWindowSeconds}
 	byBound := make(map[float64]float64)
 	for _, v := range modelValues(results[registration.QuerySLORouterTTFTBuckets], modelID) {

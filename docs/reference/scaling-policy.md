@@ -1195,7 +1195,15 @@ interactive: |
   filled in when it is parsed, and those then override a band tuned on the
   `default` entry. The list also replaces the inherited one whole, so
   saturation's per-analyzer `parameters:` or `score` from the default are lost
-  too. Copy the band, and saturation's whole entry, into the tier.
+  too. Copy the band, and saturation's whole entry, into the tier; read them
+  from the `default` key of the ConfigMap (`kubectl get configmap
+  wva-scaling-policy-config -o yaml`). This is
+  [#149](https://github.com/ev-shindin/llm-scaling-manager/issues/149).
+- **A model gets the tier through its variants.** Each variant names a tier in
+  its ScaledObject trigger metadata (see [Named Policy Tiers](#3-named-policy-tiers)).
+  The SLO is judged per model, so a model has one SLO: if its variants name
+  different tiers, the alphabetically first name wins for the whole model, and
+  the conflict is logged.
 - **Both halves are needed.** Without `slo` under `analyzers:`, the targets
   are read by nothing. Without targets, the analyzer has nothing to aim at.
   Either half alone is logged as `SLO policy is half-configured`, once
@@ -1203,7 +1211,8 @@ interactive: |
   error. The `Effective scaling policy` line shows what a model resolved to
   in its `slo` field, for example `tpot mean<=100ms, ttft p90<=3s (observe)`.
 - **TPOT is a mean** and takes no percentile; setting one is a validation
-  error. **TTFT is a percentile**, 50 to 99, defaulting to 90.
+  error. **TTFT is a percentile**, a whole number from 50 to 99, defaulting to
+  90 (`99.9` is refused).
 - **Targets are Go durations** (`100ms`, `3s`). A bare number is refused
   rather than read as nanoseconds. Like every validation error, a malformed
   `slo` block drops the whole entry it is on.
@@ -1230,11 +1239,11 @@ interactive: |
     count from the response's `usage`, which a streaming client gets only with
     `stream_options.include_usage` (or vLLM run with
     `--enable-force-include-usage`). Without it TTFT is judged and TPOT is not.
-  - **A wake from zero, and the minutes after it, read as a miss.** The
-    5-minute window includes requests that waited out a cold start (about
-    3 minutes for a large model), and nothing excludes them on this release.
-    Suppress an alert while replicas changed recently (see
-    [SLO Analyzer Metrics](prometheus.md#slo-analyzer-metrics)).
+  - **A wake, a start or a rise is not judged.** The 5-minute window would
+    include requests that waited out a cold start (about 3 minutes for a large
+    model) or a replica still loading. While the window covers one, and for
+    120 s after, the observed figure and attainment are withheld, and
+    `wva_slo_excluded` says why.
 - **What it publishes** is listed under
   [SLO Analyzer Metrics](prometheus.md#slo-analyzer-metrics), plus its demand
   and per-replica capacity as `wva_analyzer_demand` / `wva_analyzer_target`
