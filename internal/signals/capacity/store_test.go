@@ -120,6 +120,49 @@ var _ = Describe("Store", func() {
 			Expect(got.TotalKvCapacityTokens).To(Equal(int64(16000)))
 		})
 
+		Describe("a live record and a rollout that changes the engine's arguments", func() {
+			// The live write carries the deployment-parsed EngineParams
+			// forward, as the analyzer does after pricing a replica.
+			goLive := func() {
+				loaded := store.Get("ns-1", "model-a", "variant-h100")
+				Expect(loaded).NotTo(BeNil())
+				store.Update("ns-1", "model-a", "variant-h100", Record{
+					AcceleratorName:       "H100",
+					GpuCount:              1,
+					TotalKvCapacityTokens: 16000,
+					EffectiveCapacity:     12800,
+					EngineParams:          loaded.EngineParams,
+					LearnedFrom:           LearnedFromLive,
+				})
+			}
+			load := func(args ...string) {
+				store.LoadFromScaleTarget("ns-1", "model-a", "variant-h100", "H100", 1,
+					scaletarget.NewDeploymentAccessor(makeTestDeployment(args...)))
+			}
+
+			It("keeps the live record while the arguments are the ones it was learned under", func() {
+				load("--max-num-seqs=256")
+				goLive()
+				load("--max-num-seqs=256")
+
+				got := store.Get("ns-1", "model-a", "variant-h100")
+				Expect(got.LearnedFrom).To(Equal(LearnedFromLive))
+				Expect(got.EffectiveCapacity).To(Equal(int64(12800)))
+			})
+
+			It("replaces it once they change, so neither the parameters nor the capacity describe the old engine", func() {
+				load("--max-num-seqs=256")
+				goLive()
+				load("--max-num-seqs=64")
+
+				got := store.Get("ns-1", "model-a", "variant-h100")
+				Expect(got.EngineParams.MaxNumSeqs).To(Equal(int64(64)),
+					"the parameters stayed frozen on the configuration that was replaced")
+				Expect(got.LearnedFrom).NotTo(Equal(LearnedFromLive),
+					"a capacity measured under --max-num-seqs=256 kept pricing an engine running 64")
+			})
+		})
+
 		It("should handle nil scale target gracefully", func() {
 			store.LoadFromScaleTarget("ns-1", "model-a", "variant-h100", "H100", 1, nil)
 			Expect(store.Get("ns-1", "model-a", "variant-h100")).To(BeNil())

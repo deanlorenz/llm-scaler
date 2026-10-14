@@ -2,6 +2,7 @@ package capacity
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -162,13 +163,22 @@ func (s *Store) LoadFromScaleTarget(namespace, modelID, variantName, accelerator
 	defer s.mu.Unlock()
 
 	key := storeKey(namespace, modelID, variantName)
-
-	// Don't overwrite live data
-	if existing, ok := s.records[key]; ok && existing.LearnedFrom == LearnedFromLive {
-		return
-	}
-
 	params := ParseEngineArgs(inferenceengine.Detect(scaleTarget), scaleTarget)
+
+	// Live data is not overwritten -- while it describes the engine that is
+	// running. The live write carries the existing EngineParams forward, so
+	// without this check the parameters were frozen on the first live record:
+	// a rollout that changed the engine's arguments left the record, its
+	// fingerprint and every compatibility match describing the old
+	// configuration for as long as the variant kept serving. The live
+	// capacity figures go too, not just the parameters: they were measured
+	// under the old arguments, and a parked variant is priced from them.
+	// The next live cycle measures the new configuration.
+	if existing, ok := s.records[key]; ok && existing.LearnedFrom == LearnedFromLive {
+		if existing.EngineParams == nil || reflect.DeepEqual(*existing.EngineParams, params) {
+			return
+		}
+	}
 	record := &Record{
 		AcceleratorName: accelerator,
 		GpuCount:        gpuCount,
