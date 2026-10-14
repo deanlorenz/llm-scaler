@@ -207,8 +207,8 @@ func TestUndecidedCostsOneReadPerAnswer(t *testing.T) {
 }
 
 // deploymentHandler is a handler over ScaledObject "so" scaling a Deployment at
-// replicas, with a controllable clock.
-func deploymentHandler(t *testing.T, store *decision.Store, replicas int32, now *time.Time) *Handler {
+// 3 replicas, with a controllable clock.
+func deploymentHandler(t *testing.T, store *decision.Store, now *time.Time) *Handler {
 	t.Helper()
 	s := runtime.NewScheme()
 	if err := kedav1alpha1.AddToScheme(s); err != nil {
@@ -224,7 +224,7 @@ func deploymentHandler(t *testing.T, store *decision.Store, replicas int32, now 
 		},
 		&appsv1.Deployment{
 			ObjectMeta: metav1.ObjectMeta{Namespace: undecidedNS, Name: "chat-deploy"},
-			Spec:       appsv1.DeploymentSpec{Replicas: ptr.To(replicas)},
+			Spec:       appsv1.DeploymentSpec{Replicas: ptr.To(int32(3))},
 		},
 	).Build()
 	h := NewHandler(c, store, registry.New(0))
@@ -239,7 +239,7 @@ func deploymentHandler(t *testing.T, store *decision.Store, replicas int32, now 
 func TestUndecidedTargetsFollowsTransitions(t *testing.T) {
 	now := time.Now()
 	store := decision.NewStore()
-	h := deploymentHandler(t, store, 3, &now)
+	h := deploymentHandler(t, store, &now)
 
 	var lines []string
 	ctx := ctrllog.IntoContext(context.Background(),
@@ -297,7 +297,7 @@ func TestUndecidedTargetsFollowsTransitions(t *testing.T) {
 func TestUndecidedTargetsIsBounded(t *testing.T) {
 	t.Run("no longer registered", func(t *testing.T) {
 		now := time.Now()
-		h := deploymentHandler(t, decision.NewStore(), 3, &now)
+		h := deploymentHandler(t, decision.NewStore(), &now)
 		if _, err := getMetrics(context.Background(), h, managed); err != nil {
 			t.Fatal(err)
 		}
@@ -308,7 +308,7 @@ func TestUndecidedTargetsIsBounded(t *testing.T) {
 	})
 	t.Run("not asked about for undecidedStaleAfter", func(t *testing.T) {
 		now := time.Now()
-		h := deploymentHandler(t, decision.NewStore(), 3, &now)
+		h := deploymentHandler(t, decision.NewStore(), &now)
 		h.registry = nil // isolate the clock rule from registry liveness
 		if _, err := getMetrics(context.Background(), h, managed); err != nil {
 			t.Fatal(err)
@@ -329,7 +329,7 @@ func TestUndecidedTargetsGauge(t *testing.T) {
 	}
 	now := time.Now()
 	store := decision.NewStore()
-	h := deploymentHandler(t, store, 3, &now)
+	h := deploymentHandler(t, store, &now)
 	metrics.SetScalerUndecidedTargetsSource(h.UndecidedTargets)
 	t.Cleanup(func() { metrics.SetScalerUndecidedTargetsSource(nil) })
 
@@ -380,7 +380,7 @@ func TestGetMetricsAnswersStaleDecisionAsUndecided(t *testing.T) {
 	store := decision.NewStore()
 	store.Set(undecidedNS, "chat-deploy", 4)
 	now := time.Now()
-	h := deploymentHandler(t, store, 3, &now)
+	h := deploymentHandler(t, store, &now)
 
 	if got, err := getMetrics(context.Background(), h, managed); err != nil || got != 4 {
 		t.Fatalf("fresh: GetMetrics = %d, %v; want 4", got, err)
@@ -423,7 +423,7 @@ func TestDecisionTTLCoversTwoIntervals(t *testing.T) {
 	store := decision.NewStore()
 	store.Set(undecidedNS, "chat-deploy", 4)
 	now := time.Now()
-	h := deploymentHandler(t, store, 3, &now).WithDecisionInterval(func() time.Duration { return 60 * time.Second })
+	h := deploymentHandler(t, store, &now).WithDecisionInterval(func() time.Duration { return 60 * time.Second })
 
 	now = now.Add(61 * time.Second)
 	if got, err := getMetrics(context.Background(), h, managed); err != nil || got != 4 {
