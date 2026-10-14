@@ -140,7 +140,9 @@ No load forecasting; no scaling to an SLA target, only threshold tiers. A model
 has to saturate once before its capacity is priced for a new request shape: the
 P/D result above is the second exposure, and the cold pass before it ordered a
 spare replica and reached a 3.9 s p99. The warm pool and P/D numbers are single
-runs per arm on one cluster type (the P/D pair repeated once).
+runs per arm on one cluster type (the P/D pair repeated once). The Kueue quota
+source counts nominal quota only, not capacity a queue could borrow from its
+cohort. Planned work, with its issues, is on the [roadmap](roadmap.md).
 
 ## Trying it
 
