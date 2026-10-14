@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync/atomic"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
@@ -12,15 +13,27 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/resources"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // K8sWithGpuOperator implements CapacityDiscovery for Kubernetes clusters with GPU Operator
 type K8sWithGpuOperator struct {
 	Client         client.Client
 	metricsEmitter *metrics.MetricsEmitter
+
+	// podReader lists the Pods the usage walk counts; nil reads through Client.
+	// See WithPodReader.
+	podReader client.Reader
+	// podsDenied remembers whether the last pod list was Forbidden, so the
+	// error is logged when it starts rather than on every refresh.
+	podsDenied atomic.Bool
 }
+
+// podListPageSize bounds each page of an uncached pod list.
+const podListPageSize = 500
 
 // NewK8sWithGpuOperator creates a new K8sWithGpuOperator instance.
 func NewK8sWithGpuOperator(client client.Client) *K8sWithGpuOperator {
@@ -28,6 +41,21 @@ func NewK8sWithGpuOperator(client client.Client) *K8sWithGpuOperator {
 		Client:         client,
 		metricsEmitter: metrics.NewMetricsEmitter(),
 	}
+}
+
+// WithPodReader makes the usage walk list Pods through r, uncached and paged,
+// instead of through Client, and returns d.
+//
+// A namespace-scoped controller needs it. Its cache holds Pods of the managed
+// namespace only, and a list through it answers silently with that subset, so
+// GPUs that other tenants' Pods hold on the same nodes read as free and a
+// scale-up is admitted onto a full node. Reading uncached, the walk sees every
+// Pod on the GPU nodes when RBAC lets it list Pods cluster-wide. When it does
+// not, the walk falls back to the cache and reports the undercount
+// (wva_pod_access_denied and an error log); see listPods.
+func (d *K8sWithGpuOperator) WithPodReader(r client.Reader) *K8sWithGpuOperator {
+	d.podReader = r
+	return d
 }
 
 // listGPUNodes queries GPU-bearing nodes across all supported vendors
@@ -261,16 +289,16 @@ func (d *K8sWithGpuOperator) DiscoverUsageWithNodes(ctx context.Context) (map[st
 // usageWalk is the one pod walk behind every usage view: GPUs requested by
 // pods occupying GPU nodes, per accelerator type, per namespace and per node.
 func (d *K8sWithGpuOperator) usageWalk(ctx context.Context, nodeGPUType map[string]string) (map[string]int, map[string]map[string]int, map[string]int, error) {
-	var podList corev1.PodList
-	if err := d.Client.List(ctx, &podList); err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to list pods: %w", err)
+	pods, err := d.listPods(ctx)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 
 	usageByType := make(map[string]int)
 	usageByNamespace := make(map[string]map[string]int)
 	usageByNode := make(map[string]int)
 
-	for _, pod := range podList.Items {
+	for _, pod := range pods {
 		if pod.Spec.NodeName == "" {
 			continue
 		}
@@ -299,6 +327,59 @@ func (d *K8sWithGpuOperator) usageWalk(ctx context.Context, nodeGPUType map[stri
 	}
 
 	return usageByType, usageByNamespace, usageByNode, nil
+}
+
+// listPods returns every Pod the usage walk considers: through Client, or,
+// when a pod reader is set, through it, uncached and page by page.
+//
+// A Forbidden list through the pod reader falls back to Client, which counts
+// the Pods this controller's cache holds and no others, and says so: the
+// wva_pod_access_denied gauge reads 1 and an error is logged when the denial
+// starts. The fallback is a deliberate choice over publishing nothing. An
+// absent usage view sends the optimizer to its unlimited posture
+// (GPUUsageViews.MissingBasis), which bounds less than a known-low count does;
+// a reported undercount keeps the cap at the nodes' capacity and is visible.
+func (d *K8sWithGpuOperator) listPods(ctx context.Context) ([]corev1.Pod, error) {
+	if d.podReader != nil {
+		pods, err := listPodsPaged(ctx, d.podReader)
+		if err == nil {
+			metrics.SetPodAccessDenied(false)
+			d.podsDenied.Store(false)
+			return pods, nil
+		}
+		if !apierrors.IsForbidden(err) {
+			return nil, fmt.Errorf("failed to list pods cluster-wide: %w", err)
+		}
+		metrics.SetPodAccessDenied(true)
+		if !d.podsDenied.Swap(true) {
+			log.FromContext(ctx).Error(err, "Cannot list Pods cluster-wide. GPU usage counts only the Pods in "+
+				"this controller's own namespace, so GPUs other namespaces hold on the same nodes read as FREE "+
+				"and the physical limiter can admit scale-ups onto full nodes. Grant list on pods cluster-wide, "+
+				"or bound with a quota limiter instead.",
+				"metric", constants.WVAPodAccessDenied)
+		}
+	}
+	var list corev1.PodList
+	if err := d.Client.List(ctx, &list); err != nil {
+		return nil, fmt.Errorf("failed to list pods: %w", err)
+	}
+	return list.Items, nil
+}
+
+// listPodsPaged lists every Pod through r in pages of podListPageSize.
+func listPodsPaged(ctx context.Context, r client.Reader) ([]corev1.Pod, error) {
+	var pods []corev1.Pod
+	cont := ""
+	for {
+		var page corev1.PodList
+		if err := r.List(ctx, &page, client.Limit(podListPageSize), client.Continue(cont)); err != nil {
+			return nil, err
+		}
+		pods = append(pods, page.Items...)
+		if cont = page.Continue; cont == "" {
+			return pods, nil
+		}
+	}
 }
 
 // discoverNodeGPUTypes returns a map of node name to GPU type (model name).

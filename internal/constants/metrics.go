@@ -316,6 +316,13 @@ const (
 	// until someone turns the limiter on, and then it is load-bearing.
 	WVANodeAccessDenied = "wva_node_access_denied"
 
+	// WVAPodAccessDenied is 1 while the GPU usage walk of a namespace-scoped
+	// controller may not list Pods cluster-wide, and 0 when it can. Absent on a
+	// cluster-scoped controller, whose cache already holds every Pod. While it is
+	// 1 the usage walk counts only the controller's own namespace, so GPUs other
+	// namespaces hold on shared nodes read as free.
+	WVAPodAccessDenied = "wva_pod_access_denied"
+
 	// WVAConfigRejectedEntries is the number of entries of one scaling-policy
 	// ConfigMap that were rejected at its last load (labels: namespace,
 	// configmap). A rejected entry keeps the previous entry under its key in

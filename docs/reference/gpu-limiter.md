@@ -244,6 +244,14 @@ Grant the node read — `make setup-prereqs` creates the
 node-reader ClusterRole and its binding — or remove the limiter from cluster
 policy.
 
+A namespace-scoped controller also counts the GPUs that Pods in **other
+namespaces** hold on the same nodes. Its cache holds only its own namespace, so
+it lists Pods uncached and cluster-wide. That needs `list` on `pods` cluster-wide,
+which the node-reader grant does not include. Without it the list is Forbidden:
+`wva_pod_access_denied` is **1**, an error is logged, and usage counts only the
+controller's own namespace, so GPUs other namespaces hold on those nodes read as
+free. Grant `list` on `pods` cluster-wide, or bound with a quota limiter.
+
 ### What this does and does not bound
 
 **A guardrail, not an enforcement boundary.** Whoever owns the controller's

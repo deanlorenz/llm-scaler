@@ -743,6 +743,12 @@ With the scaling manager metrics, the value for the label `namespace` is the sca
   }
   ```
 
+### `wva_pod_access_denied`
+- **Type**: Gauge
+- **Description**: `1` while a namespace-scoped controller may not list Pods cluster-wide, so the GPUs other namespaces hold on shared nodes cannot be counted; `0` when it can. Absent on a cluster-scoped controller.
+- **Labels**: optional `controller_instance`
+- **Use Case**: while `1`, GPU usage counts only the controller's own namespace, so the physical limiter can admit scale-ups onto nodes other namespaces fill. See [GPU limiter](gpu-limiter.md#when-policy-demands-a-limiter-the-controller-cannot-serve).
+
 ### `wva_config_rejected_entries`
 - **Type**: Gauge
 - **Description**: entries of a scaling-policy ConfigMap rejected at its last load (an invalid value or wrong type). A rejected entry keeps the previous entry under its key, if there was one.

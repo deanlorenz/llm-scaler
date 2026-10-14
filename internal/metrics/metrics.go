@@ -70,6 +70,7 @@ var (
 	policyNamespaceUnverified           *prometheus.GaugeVec
 	configRejectedEntries               *prometheus.GaugeVec
 	configUnknownKeys                   *prometheus.GaugeVec
+	podAccessDenied                     *prometheus.GaugeVec
 	enforcerModificationsTotal          *prometheus.CounterVec
 	optimizerActive                     *prometheus.GaugeVec
 	configInfoGauge                     *prometheus.GaugeVec
@@ -522,6 +523,18 @@ func InitMetrics(registry prometheus.Registerer) error {
 		policyNamespaceUnverifiedLabels,
 	)
 
+	podAccessDeniedLabels := []string{}
+	if controllerInstance != "" {
+		podAccessDeniedLabels = append(podAccessDeniedLabels, constants.LabelControllerInstance)
+	}
+	podAccessDenied = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: constants.WVAPodAccessDenied,
+			Help: "1 while a namespace-scoped controller may not list Pods cluster-wide, so GPU usage counts its own namespace only and other namespaces' GPUs on shared nodes read as free",
+		},
+		podAccessDeniedLabels,
+	)
+
 	configRejectedEntriesLabels := []string{constants.LabelNamespace, "configmap"}
 	if controllerInstance != "" {
 		configRejectedEntriesLabels = append(configRejectedEntriesLabels, constants.LabelControllerInstance)
@@ -755,6 +768,9 @@ func InitMetrics(registry prometheus.Registerer) error {
 	}
 	if err := registry.Register(policyNamespaceUnverified); err != nil {
 		return fmt.Errorf("failed to register policyNamespaceUnverified metric: %w", err)
+	}
+	if err := registry.Register(podAccessDenied); err != nil {
+		return fmt.Errorf("failed to register podAccessDenied metric: %w", err)
 	}
 	if err := registry.Register(configRejectedEntries); err != nil {
 		return fmt.Errorf("failed to register configRejectedEntries metric: %w", err)
@@ -1352,6 +1368,23 @@ func SetPolicyNamespaceUnverified(unverified bool) {
 		value = 1.0
 	}
 	policyNamespaceUnverified.With(labels).Set(value)
+}
+
+// SetPodAccessDenied records whether the GPU usage walk was refused a
+// cluster-wide Pod list.
+func SetPodAccessDenied(denied bool) {
+	if podAccessDenied == nil {
+		return
+	}
+	labels := prometheus.Labels{}
+	if controllerInstance != "" {
+		labels[constants.LabelControllerInstance] = controllerInstance
+	}
+	value := 0.0
+	if denied {
+		value = 1.0
+	}
+	podAccessDenied.With(labels).Set(value)
 }
 
 // SetConfigRejectedEntries records how many entries of the scaling-policy

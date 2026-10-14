@@ -590,8 +590,16 @@ func main() {
 	//
 	// Re-read every tick, because the limiters list is live: switching it must not
 	// need a restart.
+	usageDiscovery := gpunodes.NewK8sWithGpuOperator(mgr.GetClient())
+	if watchNS != "" {
+		// The cache holds this namespace's Pods only, and a usage walk through it
+		// counts other tenants' GPUs on the same nodes as free. Read Pods uncached;
+		// when that is Forbidden the walk falls back to the cache and says so
+		// (wva_pod_access_denied).
+		usageDiscovery = usageDiscovery.WithPodReader(mgr.GetAPIReader())
+	}
 	usageRefresher := &gpuusage.Refresher{
-		Discovery: gpunodes.NewK8sWithGpuOperator(mgr.GetClient()),
+		Discovery: usageDiscovery,
 		Periodic:  func() bool { return allocation.NodeUsageWanted(cfg, watchNS != "") },
 	}
 	if err := mgr.Add(usageRefresher); err != nil {
