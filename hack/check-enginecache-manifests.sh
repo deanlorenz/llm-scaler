@@ -293,6 +293,9 @@ refuse "a selector with a trailing comma" apply -n ns --path /mnt/local/w --imag
 refuse "a selector with an empty pair" apply -n ns --path /mnt/local/w --image "$IMG" --node-selector 'a=b,,c=d' --dry-run
 refuse "a selector naming a key twice" apply -n ns --path /mnt/local/w --image "$IMG" --node-selector 'a=b,a=c' --dry-run
 refuse "a selector value with a space" apply -n ns --path /mnt/local/w --image "$IMG" --node-selector 'a=b c' --dry-run
+refuse "a selector with a newline between pairs" apply -n ns --path /mnt/local/w --image "$IMG" --node-selector $'a=b\nc=d' --dry-run
+refuse "a selector key with two slashes" apply -n ns --path /mnt/local/w --image "$IMG" --node-selector 'a/b/c=d' --dry-run
+refuse "a selector value ending in a dash" apply -n ns --path /mnt/local/w --image "$IMG" --node-selector 'a=b-' --dry-run
 # several pairs, comma separated: a node must carry every one
 SEL2=example.com/accelerator=h200,example.com/state=production
 if bash deploy/enginecache.sh apply -n ns --path /mnt/local/w --image "$IMG" --node-selector "$SEL2" --dry-run > "$T/render-sel2.yaml" 2>&1; then
@@ -302,8 +305,8 @@ if bash deploy/enginecache.sh apply -n ns --path /mnt/local/w --image "$IMG" --n
 else
     fail "a two-pair --node-selector was refused: $(tail -1 "$T/render-sel2.yaml")"
 fi
-"$PY" -c 'import re, sys; sys.exit(0 if re.search(r"\n      nodeSelector:\n        example\.com/accelerator: \"h200\"\n(?!        )", open(sys.argv[1]).read()) else 1)' "$T/render.yaml" \
-    && ok "one pair: the nodeSelector block is the one it always was" || fail "one pair: the nodeSelector block changed"
+"$PY" -c 'import re, sys; sys.exit(0 if re.search(r"\n      nodeSelector:\n        \"example\.com/accelerator\": \"h200\"\n(?!        )", open(sys.argv[1]).read()) else 1)' "$T/render.yaml" \
+    && ok "one pair: the nodeSelector block is the one it always was, the key now quoted as the value is" || fail "one pair: the nodeSelector block changed"
 refuse "--dry-run on status" status -n ns --dry-run
 refuse "an unknown command" prepare -n ns
 refuse "an unknown option" apply -n ns --path /mnt/local/w --image "$IMG" --bogus --dry-run

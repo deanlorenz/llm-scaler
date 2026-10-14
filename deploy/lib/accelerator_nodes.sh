@@ -15,10 +15,14 @@
 # on its CPU nodes, and Exists alone put a holder on four of them. An
 # explicit selector replaces both: one or more KEY=VALUE pairs separated by
 # commas, every one of which a node must carry (a nodeSelector map, and the
-# equality-only form of a `kubectl get nodes -l` selector). More than one
-# pair is how a cluster where no single label picks out the usable GPU
-# nodes -- the one label that would exclude a broken node is also on the
-# CPU nodes -- narrows them: the product label AND that one.
+# equality-only form of a `kubectl get nodes -l` selector). It does not add
+# to the default: no product label among the pairs means no GPU condition
+# at all. More than one pair is how a cluster where no single label picks
+# out the usable GPU nodes -- the one label that would exclude a broken
+# node is also on the CPU nodes -- selects them: the product label AND that
+# one. An empty VALUE is a valid label value and selects the nodes whose
+# label is empty: gpu.nvidia.com/model= is CoreWeave's CPU nodes, not its
+# GPU nodes.
 #
 # What places the model servers is their accelerator RESOURCE request, not
 # a label; these keys are the labels that say a node has one. On a cluster
@@ -61,14 +65,61 @@ accelerator_selector_pairs() {
     done
 }
 
+# Kubernetes label syntax. A key is an optional prefix and a name: the
+# prefix a DNS subdomain (at most 253 characters of lowercase letters,
+# digits, '-' and '.', a letter or digit at each end) followed by '/'; the
+# name at most 63 characters of letters, digits, '-', '_' and '.', a letter
+# or digit at each end. A value is empty, or follows the name rule.
+ACCELERATOR_LABEL_NAME_RE='^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$'
+ACCELERATOR_LABEL_PREFIX_RE='^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
+
+# accelerator_label_key_ok says whether $1 is a label key; prints why not.
+accelerator_label_key_ok() {
+    local key="$1" prefix="" name="$1"
+    case "$key" in
+        */*/*) echo "not a label key: '${key}' (at most one '/', between a DNS-subdomain prefix and a name)"; return 1 ;;
+        */*) prefix="${key%%/*}"; name="${key#*/}" ;;
+    esac
+    case "$key" in
+        */*)
+            if [ -z "$prefix" ] || [ "${#prefix}" -gt 253 ] || ! [[ "$prefix" =~ $ACCELERATOR_LABEL_PREFIX_RE ]]; then
+                echo "not a label key: '${key}' (the prefix before '/' is a DNS subdomain: at most 253 lowercase letters, digits, '-' and '.', a letter or digit at each end)"
+                return 1
+            fi ;;
+    esac
+    if [ -z "$name" ] || [ "${#name}" -gt 63 ] || ! [[ "$name" =~ $ACCELERATOR_LABEL_NAME_RE ]]; then
+        echo "not a label key: '${key}' (the name is at most 63 letters, digits, '-', '_' and '.', a letter or digit at each end)"
+        return 1
+    fi
+}
+
+# accelerator_label_value_ok says whether $1 is a label value; prints why
+# not. Empty is one: Kubernetes allows it, and it selects the nodes whose
+# label is empty -- gpu.nvidia.com/model= is CoreWeave's CPU nodes.
+accelerator_label_value_ok() {
+    local value="$1"
+    [ -n "$value" ] || return 0
+    if [ "${#value}" -gt 63 ] || ! [[ "$value" =~ $ACCELERATOR_LABEL_NAME_RE ]]; then
+        echo "not a label value: '${value}' (empty, or at most 63 letters, digits, '-', '_' and '.', a letter or digit at each end; no spaces, no quotes)"
+        return 1
+    fi
+}
+
 # accelerator_selector_ok says whether $1 is one or more KEY=VALUE pairs of
-# label characters, separated by single commas: each key of [A-Za-z0-9._/-],
-# each value of [A-Za-z0-9._-], one '=' per pair, no key twice (a
-# nodeSelector is a map). Empty is fine (the default). Prints why not,
-# returns 1, when it is not.
+# Kubernetes label syntax (above), separated by single commas: one '=' per
+# pair, no key twice (a nodeSelector is a map). A VALUE may be empty, which
+# selects nodes whose label is empty (not nodes that lack it). Empty
+# altogether is fine (the default). Prints why not, returns 1, when it is
+# not. A newline, carriage return or tab is refused before anything is
+# split: the pairs are read a line at a time, so a newline would otherwise
+# pass as a separator the nodeSelector and `kubectl get nodes -l` do not
+# share.
 accelerator_selector_ok() {
     [ -n "$1" ] || return 0
-    local pair key value seen=","
+    case "$1" in
+        *$'\n'*|*$'\r'*|*$'\t'*) echo "a newline, carriage return or tab in the selector (pairs are separated by one comma, no whitespace)"; return 1 ;;
+    esac
+    local pair key value seen="," why
     while IFS= read -r pair; do
         if [ -z "$pair" ]; then
             echo "an empty KEY=VALUE in '$1' (pairs are separated by one comma, none leading or trailing)"
@@ -76,16 +127,12 @@ accelerator_selector_ok() {
         fi
         case "$pair" in
             *=*) ;;
-            *) echo "must be KEY=VALUE[,KEY=VALUE...], got '$pair'"; return 1 ;;
+            *) echo "must be KEY=VALUE[,KEY=VALUE...] (a VALUE may be empty, which selects the nodes whose label is empty, not every node carrying the key), got '$pair'"; return 1 ;;
         esac
         key="${pair%%=*}"
         value="${pair#*=}"
-        case "$key" in
-            ""|*[!A-Za-z0-9._/-]*) echo "not a label key: '${key}'"; return 1 ;;
-        esac
-        case "$value" in
-            *[!A-Za-z0-9._-]*) echo "not a label value: '${value}' (letters, digits, . _ -; no spaces, no quotes)"; return 1 ;;
-        esac
+        why="$(accelerator_label_key_ok "$key")" || { echo "$why"; return 1; }
+        why="$(accelerator_label_value_ok "$value")" || { echo "$why"; return 1; }
         case "$seen" in
             *",${key},"*) echo "label key '${key}' given twice in '$1' (every pair must match, so one key takes one value)"; return 1 ;;
         esac
@@ -96,11 +143,12 @@ accelerator_selector_ok() {
 # accelerator_selector_from_json reads a nodeSelector map (JSON, as a
 # DaemonSet's pod template carries it) on stdin and prints it as a selector,
 # KEY=VALUE pairs joined by commas; empty for no map. A key or value holding
-# a comma or '=' would not read back as the map it came from, so such a map
-# prints as a string accelerator_selector_ok refuses.
+# a comma, '=' or a line break would not read back as the map it came from,
+# so such a map prints as a fixed string accelerator_selector_ok refuses as
+# one piece: it names no key, since a key holding a comma would split it.
 accelerator_selector_from_json() {
     jq -r 'to_entries
-        | if any(.[]; (.key + .value) | test("[,=]")) then "unreadable nodeSelector: " + (map(.key) | join(" "))
+        | if any(.[]; (.key + .value) | test("[,=\n\r\t]")) then "unreadable nodeSelector: a key or value holds a comma or an equals sign or a line break"
           else map(.key + "=" + .value) | join(",") end' 2>/dev/null || true
 }
 
@@ -126,13 +174,15 @@ accelerator_check_toleration() {
 # accelerator_placement_yaml prints the pod-spec placement for $1: with
 # KEY=VALUE pairs, a nodeSelector holding every pair in the order given;
 # empty, the OR-ed affinity over the product keys. Indented for a pod
-# template's spec (6 spaces), the way the DaemonSets here lay it out.
+# template's spec (6 spaces), the way the DaemonSets here lay it out. Keys
+# are quoted as values are: a key such as on, yes or true is a boolean to a
+# YAML 1.1 reader, and a nodeSelector key must be a string.
 accelerator_placement_yaml() {
     local selector="$1" pair
     if [ -n "$selector" ]; then
         echo "      nodeSelector:"
         while IFS= read -r pair; do
-            printf '        %s: "%s"\n' "${pair%%=*}" "${pair#*=}"
+            printf '        "%s": "%s"\n' "${pair%%=*}" "${pair#*=}"
         done < <(accelerator_selector_pairs "$selector")
         return
     fi

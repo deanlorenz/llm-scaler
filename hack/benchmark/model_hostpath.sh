@@ -83,11 +83,16 @@ fi
 # standup waited out its whole daemonSetTimeout and failed. A hostname NotIn
 # term takes such a node out of desired; nothing is done to the node itself.
 excluded='[]'
-if nodes_json="$(accelerator_nodes_json "$SELECTOR" 2>/dev/null)"; then
+# kubectl's stderr goes to its own file: it is the reason a listing failed
+# (a selector the API server refuses, a Forbidden), never part of the list.
+nodes_err="$(mktemp)"
+if nodes_json="$(accelerator_nodes_json "$SELECTOR" 2>"$nodes_err")"; then
     excluded="$(printf '%s' "$nodes_json" | accelerator_excluded_json "$(printf '%s' "$tolerations_json" | jq -c 'map(.key)')")"
 else
-    echo "model_hostpath: cannot list nodes, so the downloader is not kept off cordoned or tainted ones; a standup can then wait out daemonSetTimeout on such a node" >&2
+    reason="$(tr '\n' ' ' < "$nodes_err" | sed 's/ *$//')"
+    echo "model_hostpath: cannot list nodes${SELECTOR:+ with selector ${SELECTOR}} (kubectl: ${reason:-no error text}), so the downloader is not kept off cordoned or tainted ones; a standup can then wait out daemonSetTimeout on such a node" >&2
 fi
+rm -f "$nodes_err"
 if [ "$(printf '%s' "$excluded" | jq 'length')" -gt 0 ]; then
     notin="$(printf '%s' "$excluded" | jq -c '{key: "kubernetes.io/hostname", operator: "NotIn", values: map(.name)}')"
     if [ -n "$SELECTOR" ]; then

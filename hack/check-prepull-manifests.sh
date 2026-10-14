@@ -153,8 +153,70 @@ if bash deploy/prepull.sh apply -n check-ns --image a:1 --node-selector "$SEL2" 
 else
     fail "a two-pair --node-selector was refused: $(tail -1 "$T/render-sel2.yaml")"
 fi
-"$PY" -c 'import re, sys; sys.exit(0 if re.search(r"\n      nodeSelector:\n        example\.com/accelerator: \"h200\"\n(?!        )", open(sys.argv[1]).read()) else 1)' "$T/render.yaml" \
-    && ok "one pair: the nodeSelector block is the one it always was" || fail "one pair: the nodeSelector block changed"
+"$PY" -c 'import re, sys; sys.exit(0 if re.search(r"\n      nodeSelector:\n        \"example\.com/accelerator\": \"h200\"\n(?!        )", open(sys.argv[1]).read()) else 1)' "$T/render.yaml" \
+    && ok "one pair: the nodeSelector block is the one it always was, the key now quoted as the value is" || fail "one pair: the nodeSelector block changed"
+
+# A newline is not a pair separator: the pairs are read a line at a time, so
+# one inside a pair used to split it into two the nodeSelector rendered and
+# `kubectl get nodes -l` never saw. A carriage return and a tab go with it.
+selbad=0
+for badsel in $'a=b\nc=d' $'a=b\r' $'a=b\tc=d' $'a\n=b'; do
+    if bash deploy/prepull.sh apply -n check-ns --image a:1 --node-selector "$badsel" --dry-run >/dev/null 2>&1; then
+        fail "a --node-selector with a newline, CR or tab must be refused: $(printf '%q' "$badsel")"; selbad=1
+    fi
+done
+[ "$selbad" -eq 0 ] && ok "a --node-selector holding a newline, carriage return or tab is refused"
+# Kubernetes label syntax, not just label characters: a key is an optional
+# DNS-subdomain prefix (<= 253, lowercase) and '/', then a name (<= 63); a
+# value is empty or follows the name rule; names and values start and end
+# with a letter or digit.
+long64="$(printf 'k%.0s' $(seq 64))"
+long63="$(printf 'k%.0s' $(seq 63))"
+prefix254="$(printf 'p%.0s' $(seq 250)).com"
+selbad=0
+for badsel in 'a/b/c=v' '/x=v' 'x/=v' '-a=v' 'a-=v' '_a=v' 'a=-b' 'a=b-' 'a=.b' 'a=b=c' "${long64}=v" "k=${long64}" "ex.com/${long64}=v" "${prefix254}/k=v" 'Example.com/k=v' 'ex_ample.com/k=v' '-ex.com/k=v' 'ex.com-/k=v'; do
+    if bash deploy/prepull.sh apply -n check-ns --image a:1 --node-selector "$badsel" --dry-run >/dev/null 2>&1; then
+        fail "a --node-selector outside label syntax must be refused: '$badsel'"; selbad=1
+    fi
+done
+[ "$selbad" -eq 0 ] && ok "a key or value outside Kubernetes label syntax is refused (two slashes, an empty or bad prefix, a name or value over 63, a bad first or last character)"
+selgood=0
+for goodsel in 'a=b' 'a=' 'gpu.nvidia.com/model=' 'example.com/x_y.z=A-1_b.2' "${long63}=${long63}" "ex.com/${long63}=v" 'k8s.io/a=b,c=' 'A=b' 'a.b-c_d=0'; do
+    if ! bash deploy/prepull.sh apply -n check-ns --image a:1 --node-selector "$goodsel" --dry-run > "$T/render-good.yaml" 2>&1; then
+        fail "a --node-selector in label syntax must be accepted: '$goodsel': $(tail -1 "$T/render-good.yaml")"; selgood=1
+    fi
+done
+[ "$selgood" -eq 0 ] && ok "keys and values in label syntax are accepted, an empty value included (63-character names and values, a prefixed key)"
+# an empty value is a value: it selects the nodes whose label is empty, and
+# the nodeSelector carries it as ""
+bash deploy/prepull.sh apply -n check-ns --image a:1 --node-selector 'gpu.nvidia.com/model=' --dry-run > "$T/render-empty.yaml"
+[ "$(yq -o json -I0 'select(.kind == "DaemonSet") | .spec.template.spec.nodeSelector' "$T/render-empty.yaml")" = '{"gpu.nvidia.com/model":""}' ] \
+    && ok "an empty value renders as an empty-string nodeSelector entry" || fail "empty value rendered: $(yq -o json -I0 'select(.kind == "DaemonSet") | .spec.template.spec.nodeSelector' "$T/render-empty.yaml")"
+# Keys are quoted as values are. Unquoted, a key such as on, yes or true is a
+# boolean to a YAML 1.1 reader (PyYAML here), and a nodeSelector key must be
+# a string; yq (YAML 1.2) must read the same map.
+bash deploy/prepull.sh apply -n check-ns --image a:1 --node-selector 'on=yes,true=1,no=off' --dry-run > "$T/render-boolkeys.yaml"
+"$PY" -c '
+import sys, yaml
+ds = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d and d["kind"] == "DaemonSet"]
+ns = [d["spec"]["template"]["spec"]["nodeSelector"] for d in ds]
+want = {"on": "yes", "true": "1", "no": "off"}
+sys.exit(0 if ns and all(n == want and all(isinstance(k, str) for k in n) for n in ns) else "YAML 1.1 read %s" % ns)
+' "$T/render-boolkeys.yaml" && ok "keys such as on, true and no stay strings under a YAML 1.1 reader" || fail "keys read as booleans by a YAML 1.1 reader"
+[ "$(yq -o json -I0 'select(.kind == "DaemonSet") | .spec.template.spec.nodeSelector' "$T/render-boolkeys.yaml" | sort -u)" = '{"on":"yes","true":"1","no":"off"}' ] \
+    && [ "$(yq -r 'select(.kind == "DaemonSet") | .spec.template.spec.nodeSelector | keys | map(type) | unique | join(",")' "$T/render-boolkeys.yaml" | sort -u)" = '!!str' ] \
+    && ok "and yq reads the same map, string keys" || fail "yq read: $(yq -o json -I0 'select(.kind == "DaemonSet") | .spec.template.spec.nodeSelector' "$T/render-boolkeys.yaml")"
+# A live nodeSelector whose key holds a comma cannot be read back as pairs.
+# What is printed instead names no key, so no comma in a key splits it, and
+# it is refused whole.
+sentinel="$(printf '%s' '{"a,b":"c","d":"e"}' | bash -c '. deploy/lib/accelerator_nodes.sh; accelerator_selector_from_json')"
+why="$(bash -c '. deploy/lib/accelerator_nodes.sh; accelerator_selector_ok "$1"' _ "$sentinel")" && fail "the unreadable-nodeSelector string was accepted: '$sentinel'" || {
+    case "$sentinel" in
+        *,*) fail "the unreadable-nodeSelector string holds a comma, so it is split: '$sentinel' -> $why" ;;
+        "unreadable nodeSelector"*) ok "a live nodeSelector with a comma in a key reads as one fixed string, refused whole: $why" ;;
+        *) fail "the unreadable-nodeSelector string: '$sentinel'" ;;
+    esac
+}
 if bash deploy/prepull.sh status -n check-ns --dry-run >/dev/null 2>&1; then fail "status must refuse --dry-run"; else ok "status: --dry-run is refused (an apply/delete option)"; fi
 if bash deploy/prepull.sh apply -n check-ns --image a:1 --toleration '' --dry-run >/dev/null 2>&1; then
     fail "an empty --toleration (which tolerates every taint) must be refused"

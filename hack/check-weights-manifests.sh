@@ -178,11 +178,12 @@ if bash deploy/weights.sh apply -n check-ns --model Qwen/Qwen3-32B --path /mnt/l
 else
     fail "a two-pair --node-selector was refused: $(tail -1 "$T/render-sel2.yaml")"
 fi
-# one pair renders byte for byte as before: the key, the quoted value, nothing more
-"$PY" -c 'import re, sys; sys.exit(0 if re.search(r"\n      nodeSelector:\n        example\.com/accelerator: \"h200\"\n(?!        )", open(sys.argv[1]).read()) else 1)' "$T/render.yaml" \
-    && ok "one pair: the nodeSelector block is the one it always was" || fail "one pair: the nodeSelector block changed"
+# one pair renders the block it always did -- the quoted key, the quoted value,
+# nothing more (the key is quoted since a key such as on is a YAML 1.1 boolean)
+"$PY" -c 'import re, sys; sys.exit(0 if re.search(r"\n      nodeSelector:\n        \"example\.com/accelerator\": \"h200\"\n(?!        )", open(sys.argv[1]).read()) else 1)' "$T/render.yaml" \
+    && ok "one pair: the nodeSelector block is the one it always was, the key now quoted as the value is" || fail "one pair: the nodeSelector block changed"
 selbad=0
-for badsel in 'a=b,' ',a=b' 'a=b,,c=d' 'a=b,a=c' 'a=b c' 'a=b, c=d' 'a=b,c' 'a!=b' 'a in (b)'; do
+for badsel in 'a=b,' ',a=b' 'a=b,,c=d' 'a=b,a=c' 'a=b c' 'a=b, c=d' 'a=b,c' 'a!=b' 'a in (b)' $'a=b\nc=d' $'a=b\n'; do
     if bash deploy/weights.sh apply -n check-ns --model m --path /mnt/local/models --image "$IMG" --node-selector "$badsel" --dry-run >/dev/null 2>&1; then
         fail "a --node-selector of '$badsel' must be refused"; selbad=1
     fi
@@ -489,11 +490,20 @@ else
     fail "model_hostpath refused a two-pair selector: $(cat "$T/hp10.out")"
 fi
 selbad=0
-for badsel in 'a=b,' 'a=b,,c=d' 'a=b,a=c' 'a=b c'; do
+for badsel in 'a=b,' 'a=b,,c=d' 'a=b,a=c' 'a=b c' $'a=b\nc=d' 'a/b/c=d' 'a=-b'; do
     cp "$T/nested.yaml" "$T/n11.yaml"
     if PATH="$STUB_PATH" bash hack/benchmark/model_hostpath.sh "$T/n11.yaml" /mnt/local/wva check-ns "$badsel" >/dev/null 2>&1; then fail "model_hostpath accepted the selector '$badsel'"; selbad=1; fi
 done
-[ "$selbad" -eq 0 ] && ok "model_hostpath: a trailing comma, an empty pair, a key twice or a space is refused"
+[ "$selbad" -eq 0 ] && ok "model_hostpath: a trailing comma, an empty pair, a key twice, a space, a newline or a key or value outside label syntax is refused"
+# A node listing that fails says why: kubectl's own error is in the message
+# (a selector the API server refuses reads as that, not as a bare "cannot
+# list"), and it is never taken for the node list.
+cp "$T/nested.yaml" "$T/n12.yaml"
+STUB_NODES_ERROR='error: unable to parse requirement: stub refusal' STUB_SELECTOR=example.com/accelerator=h200 PATH="$STUB_PATH" \
+    bash hack/benchmark/model_hostpath.sh "$T/n12.yaml" /mnt/local/wva check-ns example.com/accelerator=h200 > "$T/hp12.out" 2>&1 || fail "model_hostpath with a failed node listing failed: $(cat "$T/hp12.out")"
+grep -qF 'cannot list nodes with selector example.com/accelerator=h200 (kubectl: error: unable to parse requirement: stub refusal)' "$T/hp12.out" \
+    && [ "$(yq -r '.scenario[0].common.storage.hostPath.nodeSelector["example.com/accelerator"]' "$T/n12.yaml")" = h200 ] \
+    && ok "model_hostpath: a failed node listing reports kubectl's error and the selector, and the edit still lands" || fail "model_hostpath node-listing error: $(cat "$T/hp12.out")"
 grep -q '^#' "$T/n1.yaml" && ok "model_hostpath: the scenario keeps its comments (yq, not a dump)" || fail "model_hostpath: comments lost"
 # The rule itself, on the cases the fixtures above do not reach: a toleration
 # with no key tolerates every taint, and PreferNoSchedule never excludes.

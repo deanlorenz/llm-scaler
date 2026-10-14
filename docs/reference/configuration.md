@@ -250,7 +250,7 @@ node, so a scale-up never starts with a pull. Full description in
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `IMAGES` | Comma-separated image references, exactly as the model server's pod spec names them | *(required for `prepull`)* |
-| `PREPULL_NODE_SELECTOR` | One or more `key=value` pairs, comma-separated (`k1=v1,k2=v2`), narrowing the nodes to what the model servers select on; a node must carry every pair. Empty: every node carrying a known GPU product label (`deploy/lib/accelerator_nodes.sh`) | *(empty)* |
+| `PREPULL_NODE_SELECTOR` | One or more `key=value` pairs, comma-separated (`k1=v1,k2=v2`), set to what the model servers select on; a node must carry every pair. An explicit selector replaces the default (nodes carrying a known GPU product label, `deploy/lib/accelerator_nodes.sh`); include the product label among the pairs to stay on GPU nodes. A value may be empty, and then selects the nodes whose label is empty (`gpu.nvidia.com/model=` is CoreWeave's CPU nodes, not its GPU nodes). Empty: the default | *(empty)* |
 | `PREPULL_TOLERATIONS` | Comma-separated taint keys the holder tolerates beyond `nvidia.com/gpu` | *(empty)* |
 | `BENCHMARK_PREPULL` | `false` makes `benchmark-standup` skip the pre-pull | `true` |
 | `BENCHMARK_PREPULL_IMAGES` | What `benchmark-standup` holds instead of the image the harness pins | *(the harness's pin)* |

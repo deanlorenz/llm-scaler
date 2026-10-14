@@ -129,7 +129,15 @@ to what the model servers select on.
 The selector takes one or more `key=value` pairs, comma-separated with no
 spaces, and a node must carry **every** pair -- the equality form of a
 Kubernetes `nodeSelector`, which is what each pair becomes on the holder
-(no set-based terms, no `!=`; a key may appear once). Two pairs are for a
+(no set-based terms, no `!=`; a key may appear once). An explicit selector
+replaces the default (nodes carrying a known GPU product label); it does
+not add to it, so include the product label among the pairs to stay on GPU
+nodes. Keys and values follow Kubernetes label syntax (a key is an optional
+DNS-subdomain prefix and `/`, then a name of at most 63 characters; a value
+is at most 63; both start and end with a letter or digit). A value may be
+empty, and then selects the nodes whose label is empty, not every node that
+carries the key: `gpu.nvidia.com/model=` is CoreWeave's CPU nodes, not its
+GPU nodes. Two pairs are for a
 cluster where no single label picks out the right nodes. Say one GPU node
 is unusable and the only label that sets the healthy ones apart is also on
 the CPU-only nodes: the product label alone takes in the broken node, the
@@ -361,7 +369,7 @@ make engine-cache-delete NAMESPACE=<ns>     # drop the claim, volume and prepare
 **What the node directory must be.** `ENGINE_CACHE_PATH` is one path that
 has to hold on every node the preparer selects -- by default every node
 carrying a known GPU product label, or `WEIGHTS_NODE_SELECTOR=<key=value>[,<key=value>]`
-(every pair must match) narrows it to the nodes your model servers select on (the model servers
+(every pair must match) replaces that default with the nodes your model servers select on (the model servers
 must then select the same ones: a replica on a node the preparer did not
 reach finds no cache there, and with the guard from the start-path table
 costs a compile rather than the replica). The directory must be:

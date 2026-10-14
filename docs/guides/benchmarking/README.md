@@ -336,9 +336,10 @@ the harness pins (`docker.io/vllm/vllm-openai:v0.26.0` in v0.7.8's
 `defaults.yaml`, read from the clone) on every accelerator node before it
 deploys anything -- `BENCHMARK_PREPULL=false` skips it,
 `BENCHMARK_PREPULL_IMAGES=<image>[,<image>]` overrides it,
-`PREPULL_NODE_SELECTOR` narrows the nodes (the default is every node with a
-known GPU product label; one or more `key=value` pairs, comma-separated, all
-of which a node must carry) and `PREPULL_TOLERATIONS` adds taints. The holders
+`PREPULL_NODE_SELECTOR` picks the nodes (one or more `key=value` pairs,
+comma-separated, all of which a node must carry; an explicit selector
+replaces the default, nodes carrying a known GPU product label, so include
+the product label among the pairs to stay on GPU nodes) and `PREPULL_TOLERATIONS` adds taints. The holders
 keep pulling while the standup goes on, so before the run:
 
 ```bash
@@ -357,7 +358,7 @@ pull the engine `IfNotPresent` for the same reason -- a pinned tag pulled
 the harness's own node-local mode in the scenario copy: `model-pvc` binds
 to a static hostPath volume there, a DaemonSet downloads the model onto
 every accelerator node (the placement `make prepull` uses; `PREPULL_NODE_SELECTOR`
-narrows it), and the engines deploy only once every node holds it --
+replaces it), and the engines deploy only once every node holds it --
 `patch_harness.sh` fix 11 gives that DaemonSet a readiness probe on the
 completion marker, since the harness's wait reads `numberReady` and a
 container with no probe is Ready the moment it starts, and skips its SELinux
