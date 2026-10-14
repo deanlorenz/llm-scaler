@@ -204,14 +204,16 @@ func (s *Store) LoadFromScaleTarget(namespace, modelID, variantName, accelerator
 		LearnedAt:       time.Now(),
 	}
 
-	// If num_gpu_blocks_override is set (vLLM), we can estimate k1.
-	if carriedKv > 0 {
+	// k1: the measured KV total carried across a flag change, or, if
+	// num_gpu_blocks_override is set (vLLM), an estimate from it.
+	switch {
+	case carriedKv > 0:
 		record.TotalKvCapacityTokens = carriedKv
-	} else if params.NumGpuBlocksOverride > 0 {
+	case params.NumGpuBlocksOverride > 0:
 		record.NumGpuBlocks = params.NumGpuBlocksOverride
 		record.BlockSize = params.BlockSize
 		record.TotalKvCapacityTokens = params.NumGpuBlocksOverride * params.BlockSize
-	} else if params.TotalKvTokensOverride > 0 {
+	case params.TotalKvTokensOverride > 0:
 		// SGLang exposes total KV token capacity directly via --max-total-tokens.
 		record.TotalKvCapacityTokens = params.TotalKvTokensOverride
 	}
