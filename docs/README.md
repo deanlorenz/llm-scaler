@@ -87,6 +87,7 @@ benchmark scenario behind it, and says which leg is short when one is.
 | [Bound a fleet by real GPUs](well-lit-paths/bound-by-gpus/) | a shared cluster where `maxReplicaCount` is not a real ceiling |
 | [Cap what each tenant may take](well-lit-paths/tenant-gpu-quotas/) | per-namespace or cluster-wide GPU allowances |
 | [Bound tenants by the quotas Kueue already holds](well-lit-paths/kueue-bounded-quotas/) | the allowance is Kueue's nominal quota, followed live — **experimental** |
+| [Share one GPU quota between models](well-lit-paths/utilization-share/) | several models under one quota, each given what its load needs and the rest shared — **experimental** |
 | [Different behaviour per workload class](well-lit-paths/workload-classes/) | interactive and batch, tuned as classes rather than per model |
 | [One model, two accelerator variants](well-lit-paths/accelerator-variants/) | letting the optimizer pick the cost-efficient hardware |
 | [A P/D-disaggregated model](well-lit-paths/pd-disaggregation/) | prefill and decode scaled apart — **experimental** |

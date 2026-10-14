@@ -44,5 +44,6 @@ The recipe may still change shape: the defaults are not settled, or the design
 is still moving. Each experimental page says which leg is short.
 
 **Stable** does not mean fully covered by CI. Every page's *How it is tested*
-section names its suites and states what is **not** covered, and two stable
-paths do carry a gap there — read it before depending on one.
+section names its suites and states what is **not** covered; read it before
+depending on a path. The evidence behind each path, side by side:
+[how mature each part is](../why.md#how-mature-each-part-is).
