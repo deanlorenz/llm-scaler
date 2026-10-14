@@ -29,8 +29,13 @@ Every option `deploy/install.sh` reads. Verified against the script: each entry 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `WVA_IMAGE_REPO` | controller image repository | `ghcr.io/ev-shindin/llm-scaling-manager` |
-| `WVA_IMAGE_TAG` | controller image tag | `main` |
-| `WVA_IMAGE_PULL_POLICY` | Image pull policy | `Always` |
+| `WVA_IMAGE_TAG` | controller image tag | `newTag` in `config/base/manager/kustomization.yaml`: `main`, or the release tag on a release commit |
+| `WVA_IMAGE_DIGEST` | pin one exact build; set by `IMG=<repo>@sha256:<digest>` and used instead of the tag | unset |
+| `WVA_IMAGE_PULL_POLICY` | Image pull policy | by reference: `IfNotPresent` for a digest or a `vX.Y.Z` tag, `Always` for anything else |
+
+`main`, `latest`, `dev` and `nightly` are floating tags: the same install deploys a
+different binary after the next push. The installer warns when it deploys one. For
+anything you need to reproduce, pass `IMG=<repo>@sha256:<digest>` or a release tag.
 
 ## Namespaces
 

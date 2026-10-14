@@ -34,7 +34,7 @@ Deprecated (ignored by install.sh; Helm chart removed):
 Environment Variables:
 
  The install
-  IMG                          WVA image as repo:tag (alternative to -i)
+  IMG                          WVA image as repo:tag or repo@sha256:<digest> (alternative to -i)
   WVA_NS                       Namespace to install the controller into (default: workload-variant-autoscaler-system)
   WVA_SCOPE                    cluster | namespace (default: cluster, or namespace on openshift)
                                  cluster   — manages every namespace, creates cluster-scoped RBAC,
@@ -133,22 +133,50 @@ Examples:
 EOF
 }
 
+# wva_split_image_ref sets WVA_IMAGE_REPO, WVA_IMAGE_TAG and WVA_IMAGE_DIGEST
+# from one image reference. Returns 1, changing nothing, when $1 names neither a
+# tag nor a digest.
+#
+# Splitting on the FIRST colon, as this used to, read a registry port as the tag:
+# localhost:5000/wva:dev became repo "localhost", tag "5000/wva:dev". And a
+# digest -- repo@sha256:<hex>, the one form that pins exactly what runs -- only
+# rendered because the halves happened to glue back together, while the hex was
+# treated as a tag everywhere else. A digest is carried as its own value now, so
+# the overlay can pin it and the pull policy can tell it from a moving tag.
+wva_split_image_ref() {
+  local ref="$1" name
+  if [[ "$ref" == *@* ]]; then
+    name="${ref%%@*}"
+    WVA_IMAGE_DIGEST="${ref#*@}"
+    # repo:tag@digest: the digest decides what is pulled; keep the tag for display.
+    if [[ "${name##*/}" == *:* ]]; then
+      WVA_IMAGE_REPO="${name%:*}"
+      WVA_IMAGE_TAG="${name##*:}"
+    else
+      WVA_IMAGE_REPO="$name"
+      WVA_IMAGE_TAG=""
+    fi
+    return 0
+  fi
+  # Only a colon in the LAST path segment separates a tag.
+  [[ "${ref##*/}" == *:* ]] || return 1
+  WVA_IMAGE_REPO="${ref%:*}"
+  WVA_IMAGE_TAG="${ref##*:}"
+  WVA_IMAGE_DIGEST=""
+}
+
 parse_args() {
   if [[ -n "$IMG" ]]; then
     log_info "Detected IMG environment variable: $IMG"
-    if [[ "$IMG" == *":"* ]]; then
-      IFS=':' read -r WVA_IMAGE_REPO WVA_IMAGE_TAG <<< "$IMG"
-    else
-      log_warning "IMG has wrong format, using default image"
+    if ! wva_split_image_ref "$IMG"; then
+      log_warning "IMG has wrong format (want repo:tag or repo@sha256:<digest>), using default image"
     fi
   fi
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       -i|--wva-image)
-        if [[ "$2" == *":"* ]]; then
-          IFS=':' read -r WVA_IMAGE_REPO WVA_IMAGE_TAG <<< "$2"
-        else
+        if ! wva_split_image_ref "$2"; then
           WVA_IMAGE_REPO="$2"
         fi
         shift 2

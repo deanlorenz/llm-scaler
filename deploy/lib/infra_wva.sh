@@ -182,9 +182,59 @@ wva_render_manager_config_patch() {
 EOF
 }
 
+# wva_image_pull_policy echoes the pull policy for an image reference: $1 is the
+# tag, $2 the digest (may be empty).
+#
+# IfNotPresent only for a reference that cannot move -- a digest, or a semver
+# release tag (v1.2.3). Everything else is Always: :main and :latest are rebuilt
+# on every push, and a tag this cannot classify (ref-<sha> in the OpenShift e2e,
+# re-pushed after a merge) is not known to be immutable. IfNotPresent on a moving
+# tag is how a node kept a 6-day-old :main through a restart.
+wva_image_pull_policy() {
+    local tag="$1" digest="${2:-}"
+    if [ -n "$digest" ]; then
+        echo IfNotPresent
+        return 0
+    fi
+    if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+        echo IfNotPresent
+        return 0
+    fi
+    echo Always
+}
+
+# wva_warn_floating_image warns when the controller image is a moving tag.
+#
+# :main is the default because this tree's manifests need a build of this tree
+# (see WVA_IMAGE_TAG in install.sh), and it is right for development. It is
+# wrong for anything that must be reproduced: the same install command deploys a
+# different binary after every push to main, and nothing records which one ran.
+# So say so, loudly, and say what to pass instead. A warning rather than a
+# refusal: developers and the kind e2e deploy :main on purpose.
+wva_warn_floating_image() {
+    local repo="$1" tag="$2" digest="${3:-}"
+    [ -z "$digest" ] || return 0
+    case "$tag" in
+        main|latest|dev|nightly|"") ;;
+        *) return 0 ;;
+    esac
+    log_warning "=================================================================="
+    log_warning "The controller image is a FLOATING tag: ${repo}:${tag:-<none>}"
+    log_warning "  It names whatever was pushed last, so this install is not reproducible:"
+    log_warning "  the same command deploys a different binary after the next push."
+    log_warning "  For anything beyond development, pin it:"
+    log_warning "    IMG=${repo}@sha256:<digest>   (exactly one build)"
+    log_warning "    IMG=${repo}:vX.Y.Z            (a release tag)"
+    log_warning "=================================================================="
+}
+
 deploy_wva_controller() {
     log_info "Deploying Workload-Variant-Autoscaler..."
-    log_info "Using image: $WVA_IMAGE_REPO:$WVA_IMAGE_TAG"
+    if [ -n "${WVA_IMAGE_DIGEST:-}" ]; then
+        log_info "Using image: $WVA_IMAGE_REPO@$WVA_IMAGE_DIGEST"
+    else
+        log_info "Using image: $WVA_IMAGE_REPO:$WVA_IMAGE_TAG"
+    fi
 
     # Select the Kustomize overlay by install SCOPE (WVA_SCOPE=cluster|namespace)
     # and platform. Both scopes work on both platforms; the default preserves the
@@ -231,12 +281,8 @@ deploy_wva_controller() {
     # behind it, so Always there would pull the REMOTE image over the one under
     # test. That path sets WVA_IMAGE_PULL_POLICY=IfNotPresent explicitly.
     local pull_policy="${WVA_IMAGE_PULL_POLICY:-}"
-    if [ -z "$pull_policy" ]; then
-        case "$WVA_IMAGE_TAG" in
-            main|latest|dev|nightly) pull_policy=Always ;;
-            *)                       pull_policy=IfNotPresent ;;
-        esac
-    fi
+    [ -n "$pull_policy" ] || pull_policy="$(wva_image_pull_policy "$WVA_IMAGE_TAG" "${WVA_IMAGE_DIGEST:-}")"
+    wva_warn_floating_image "$WVA_IMAGE_REPO" "$WVA_IMAGE_TAG" "${WVA_IMAGE_DIGEST:-}"
 
     cat > "$tmp_overlay/pull-policy-patch.yaml" <<EOF
 - op: replace
@@ -244,6 +290,10 @@ deploy_wva_controller() {
   value: $pull_policy
 EOF
 
+    # A digest replaces the tag rather than joining it: kustomize renders
+    # `digest:` as repo@sha256:..., which is what the node resolves.
+    local image_pin="  newTag: \"$WVA_IMAGE_TAG\""
+    [ -z "${WVA_IMAGE_DIGEST:-}" ] || image_pin="  digest: \"$WVA_IMAGE_DIGEST\""
     cat > "$tmp_overlay/kustomization.yaml" <<EOF
 namespace: $WVA_NS
 resources:
@@ -251,7 +301,7 @@ resources:
 images:
 - name: $base_image
   newName: $WVA_IMAGE_REPO
-  newTag: "$WVA_IMAGE_TAG"
+$image_pin
 EOF
 
     # Include Prometheus alerting rules component if requested

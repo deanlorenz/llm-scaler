@@ -45,8 +45,10 @@ Do these on the branch you intend to tag (e.g. `main`).
    - Add a release-specific changelog under `docs/` (e.g. `docs/CHANGELOG-v0.5.2.md`) summarizing user-facing and notable changes.  
    - Optionally reference it in release notes when you create the GitHub Release.
 
-2. **Kustomize default image tag (optional)**  
-   - If you want the default kustomize install to use the new version, update `config/base/manager/kustomization.yaml`: set `newTag` to the new version (e.g. `v0.5.2`) and commit.  
+2. **Kustomize default image tag (required)**  
+   - On the commit you tag, set `newTag` in `config/base/manager/kustomization.yaml` to the release tag (e.g. `v0.5.2`) and commit. The release workflow checks this before it builds anything and fails if `newTag` does not equal the tag, because otherwise the release's own manifests deploy the floating `:main` rather than the image being released.  
+   - After the tag is pushed, set `newTag` back to `main` on `main`, so development installs keep tracking the latest build. The pinned value lives on in the tag.  
+   - Installing a release then needs no `IMG`: `git checkout vX.Y.Z && make deploy-wva` deploys `:vX.Y.Z`, and the installer pulls it `IfNotPresent` because a release tag does not move. Any other build is pinned with `IMG=<repo>@sha256:<digest>`; the installer prints a warning whenever it deploys a floating tag (`main`, `latest`, `dev`, `nightly`).  
 
 3. **Upstream dependency pins**  
    - If this release pins a new version of an upstream dependency (e.g. [llm-d-inference-sim](https://github.com/llm-d/llm-d-inference-sim)), update the version pins in the [Makefile](../../Makefile) and the referenced files (e.g. `test/e2e/fixtures/model_service_builder.go`, `test/utils/resources/llmdsim.go`) before releasing.

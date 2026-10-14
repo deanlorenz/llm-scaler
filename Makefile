@@ -7,7 +7,13 @@ IMAGE_TAG_BASE ?= ghcr.io/ev-shindin
 # `main`, built by ci-main-image on every push to main -- reproducible from a
 # commit and multi-arch, unlike a tag pushed by hand from a laptop. Rebuilt
 # automatically, so it cannot silently go stale the way a personal tag does.
-IMG_TAG ?= main
+#
+# Read from config/base/manager/kustomization.yaml rather than repeated here, so
+# a release commit -- which pins newTag to its own tag (release-process.md) --
+# builds and installs that tag, and every other commit still gets `main`.
+ifeq ($(origin IMG_TAG),undefined)
+IMG_TAG := $(or $(shell awk '$$1 == "newTag:" {gsub(/["\r]/, "", $$2); print $$2; exit}' config/base/manager/kustomization.yaml 2>/dev/null),main)
+endif
 IMG ?= $(IMAGE_TAG_BASE)/llm-scaling-manager:$(IMG_TAG)
 # The warm-pool proxy ships as its own image because it runs in the pool's Pod,
 # not the controller's. Pin a digest in the manifest; this tag is for building.
@@ -994,9 +1000,10 @@ deploy-e2e-infra: ## Deploy e2e test infrastructure (WVA + EPP; no model server 
 			echo "Skipping image build (SKIP_BUILD=true) - assuming image already exists"; \
 		fi; \
 		echo "Extracting image repo and tag from IMG..."; \
-		if echo "$(IMG)" | grep -q ":"; then \
-			IMAGE_REPO=$$(echo $(IMG) | cut -d: -f1); \
-			IMAGE_TAG=$$(echo $(IMG) | cut -d: -f2); \
+		IMG_REF="$(IMG)"; \
+		if case "$${IMG_REF##*/}" in *:*) true ;; *) false ;; esac; then \
+			IMAGE_REPO="$${IMG_REF%:*}"; \
+			IMAGE_TAG="$${IMG_REF##*:}"; \
 		else \
 			IMAGE_REPO="$(IMG)"; \
 			IMAGE_TAG="latest"; \
@@ -2715,6 +2722,11 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# else can see it: the YAML is valid, the patch applies, and a cluster run
 	@# shows a healthy controller scaling a fleet.
 	@bash hack/check-limiter-declaration.sh
+	@echo "Checking the defaults the installer chooses..."
+	@# Which image is pulled and how, and whether a non-reproducible install
+	@# says so. A digest treated as a moving tag, or :main deployed in silence,
+	@# installs cleanly -- nothing else here would notice.
+	@bash hack/check-install-defaults.sh
 	@echo "Checking the tenant Role still covers the generated ClusterRole..."
 	@# The ClusterRole is GENERATED from kubebuilder markers; the namespaced Role
 	@# the tenant overlay installs is maintained by hand, so it does not move when
