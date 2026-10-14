@@ -98,10 +98,13 @@ intervals for the warm pool.
   ([scaling behavior](reference/scaledobject-trigger.md#scaling-behavior)).
 - **What it learned is held in memory**, so a restart or leader change learns
   it again ([#137](https://github.com/ev-shindin/llm-scaling-manager/issues/137)).
-- **One more port.** The scaler port is unauthenticated by default on this
-  release; restrict it to KEDA's namespace with a NetworkPolicy
+- **One more port.** The scaler port is plaintext and unauthenticated by
+  default. `make setup-prereqs` writes a NetworkPolicy admitting it only from
+  KEDA's namespace when it knows that namespace, and warns when it does not;
+  mutual TLS is opt-in and wired by hand
   ([network exposure](reference/security-model.md#network-exposure));
-  [#138](https://github.com/ev-shindin/llm-scaling-manager/issues/138).
+  [#138](https://github.com/ev-shindin/llm-scaling-manager/issues/138) makes
+  it the default.
 
 ## How mature each part is
 
@@ -160,8 +163,10 @@ runs per arm on one cluster type (the P/D pair repeated once).
   first decision; only a scale-down window holds the count through that gap.
 - Learned capacity is held in memory and re-learned after a restart
   ([#137](https://github.com/ev-shindin/llm-scaling-manager/issues/137)).
-- The scaler port is unauthenticated by default on this release
-  ([#138](https://github.com/ev-shindin/llm-scaling-manager/issues/138)).
+- The scaler port is plaintext by default; a NetworkPolicy is shipped and
+  mutual TLS is opt-in and manual
+  ([#138](https://github.com/ev-shindin/llm-scaling-manager/issues/138) makes
+  it the default).
 - The Kueue quota source counts nominal quota only, not capacity a queue could
   borrow from its cohort
   ([#136](https://github.com/ev-shindin/llm-scaling-manager/issues/136)).

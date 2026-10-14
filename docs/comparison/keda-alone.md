@@ -196,11 +196,15 @@ path"*. It is the better choice in these cases:
   ([known gaps](../why.md#known-gaps)). What it learned is held in memory, so a
   restart or leader change learns it again
   ([#137](https://github.com/ev-shindin/llm-scaling-manager/issues/137)).
-- **One more port.** KEDA reaches the controller over gRPC. The scaler port is
-  unauthenticated by default on this release; restrict it to KEDA's namespace
-  with a NetworkPolicy
+- **One more port.** KEDA reaches the controller over gRPC, plaintext and
+  unauthenticated by default. The admin phase (`make setup-prereqs`) writes a
+  NetworkPolicy admitting the port only from KEDA's namespace when it knows
+  that namespace, and warns that the port is open when it does not; it holds
+  only where the network plugin enforces NetworkPolicy. Mutual TLS is opt-in
+  and wired by hand
   ([network exposure](../reference/security-model.md#network-exposure));
-  [#138](https://github.com/ev-shindin/llm-scaling-manager/issues/138).
+  [#138](https://github.com/ev-shindin/llm-scaling-manager/issues/138) makes
+  it the default.
 
 ## Measured against KEDA alone
 
