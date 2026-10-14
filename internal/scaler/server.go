@@ -3,13 +3,17 @@ package scaler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"runtime/debug"
 	"sync/atomic"
 	"time"
 
 	pb "github.com/kedacore/keda/v2/pkg/scalers/externalscaler"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/status"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -182,6 +186,51 @@ func (s *Server) Start(ctx context.Context) error {
 	return s.run(ctx, srv)
 }
 
+// maxConcurrentStreams bounds the streams one client connection may hold open.
+//
+// It must stay well above the number of ScaledObjects one KEDA operator
+// manages with a push trigger: KEDA pools its gRPC connections by
+// scalerAddress, so EVERY ScaledObject naming this scaler shares one
+// connection, and each push trigger holds a StreamIsActive open on it for as
+// long as KEDA runs. A stream beyond the bound is not refused, it is queued
+// by the client -- so a bound sized like a web server's would silently stop
+// waking workloads from zero once the fleet outgrew it. What the bound is for
+// is the other kind of client: one that opens streams without limit and holds
+// a goroutine and a decision-store subscription for each.
+const maxConcurrentStreams = 4096
+
+// recoverUnary turns a panic in a unary handler into codes.Internal. Without
+// it a panic in any one call, for any one workload, takes the whole process
+// down -- every model's scaling with it, and the restart then has to rebuild
+// everything the process had learned.
+func recoverUnary(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp any, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = recovered(info.FullMethod, r)
+		}
+	}()
+	return handler(ctx, req)
+}
+
+// recoverStream is recoverUnary for streaming calls (StreamIsActive).
+func recoverStream(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = recovered(info.FullMethod, r)
+		}
+	}()
+	return handler(srv, ss)
+}
+
+// recovered logs a recovered panic with its stack and returns the error the
+// client gets. The stack goes to the log, never to the client.
+func recovered(method string, r any) error {
+	log.Log.WithName("external-scaler").Error(fmt.Errorf("panic: %v", r),
+		"KEDA external scaler handler panicked; answered Internal",
+		"method", method, "stack", string(debug.Stack()))
+	return status.Errorf(codes.Internal, "internal error in %s; see the WVA controller log", method)
+}
+
 // served is one gRPC server and the channel its Serve goroutine reports on.
 type served struct {
 	srv *grpc.Server
@@ -195,6 +244,11 @@ func (s *Server) bind(ctx context.Context, handler pb.ExternalScalerServer, opts
 		return nil, err
 	}
 	s.listening.Store(true)
+	opts = append([]grpc.ServerOption{
+		grpc.MaxConcurrentStreams(maxConcurrentStreams),
+		grpc.ChainUnaryInterceptor(recoverUnary),
+		grpc.ChainStreamInterceptor(recoverStream),
+	}, opts...)
 	r := &served{srv: grpc.NewServer(opts...), err: make(chan error, 1)}
 	pb.RegisterExternalScalerServer(r.srv, handler)
 	go func() { r.err <- r.srv.Serve(lis) }()

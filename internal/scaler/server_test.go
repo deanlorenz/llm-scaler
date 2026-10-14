@@ -33,6 +33,50 @@ func freePort() string {
 	return addr
 }
 
+// A panic in one call must cost that call, not the process: the server is in
+// the same binary as every engine, so an unrecovered panic in one workload's
+// GetMetrics stops scaling for the whole fleet.
+var _ = Describe("Server panic recovery", func() {
+	It("answers a panicking call with Internal and keeps serving", func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		addr := freePort()
+		// No client: resolving the scale target dereferences it, which panics in
+		// the handler goroutine -- the stand-in for any bug in a handler.
+		srv := &scaler.Server{Addr: addr, Registry: registry.New(time.Minute)}
+		done := make(chan error, 1)
+		go func() { done <- srv.Start(ctx) }()
+
+		conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		Expect(err).NotTo(HaveOccurred())
+		defer func() { Expect(conn.Close()).To(Succeed()) }()
+		cli := pb.NewExternalScalerClient(conn)
+
+		Eventually(func() error {
+			_, err := cli.GetMetricSpec(ctx, ref("chat-decode", nil))
+			return err
+		}, 5*time.Second).Should(Succeed())
+
+		By("unary: GetMetrics panics and is answered Internal")
+		_, err = cli.GetMetrics(ctx, &pb.GetMetricsRequest{ScaledObjectRef: ref("chat-decode", nil)})
+		Expect(status.Code(err)).To(Equal(codes.Internal), "got %v", err)
+
+		By("stream: StreamIsActive panics and is answered Internal")
+		stream, err := cli.StreamIsActive(ctx, ref("chat-decode", nil))
+		Expect(err).NotTo(HaveOccurred())
+		_, err = stream.Recv()
+		Expect(status.Code(err)).To(Equal(codes.Internal), "got %v", err)
+
+		By("the server is still up")
+		_, err = cli.GetMetricSpec(ctx, ref("chat-decode", nil))
+		Expect(err).NotTo(HaveOccurred())
+
+		cancel()
+		Eventually(done, 10*time.Second).Should(Receive(BeNil()))
+	})
+})
+
 // The Server runs in two phases over one address: a standby phase until the
 // lease is held, then the full server on a fresh listener. This spec drives a
 // real gRPC client through both, because the hand-off -- stop one server,
