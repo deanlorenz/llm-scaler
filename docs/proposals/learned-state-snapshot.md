@@ -55,20 +55,24 @@ and is why this is a ConfigMap and not a metric.
 ## The design
 
 **One ConfigMap**, `wva-learned-state`, in the controller's namespace, holding
-one JSON document:
+one JSON document under the data key `v1`:
 
 ```json
 {
   "version": 1,
   "writtenAt": "2026-10-14T18:00:00Z",
-  "writer": {"namespace": "<controller namespace>", "identity": "<leader-election identity>"},
-  "config": {"<ns>/<variant>": "<configuration fingerprint>"},
-  "k2":         {"<key>": {"values": [4000, 4100], "lastUsed": "...", "lastWritten": "..."}},
-  "throughput": {"<key>": {"values": [3.2], "lastUsed": "...", "lastWritten": "...", "sampledAt": "...", "lastRead": 3.2}},
-  "itlBaseline":  {"<key>": 0.0118},
-  "startSeconds": {"<key>": 71.5},
-  "variantSeenAt": {"<key>": "..."},
-  "accelerators": {"<ns>/<variant>": {"name": "H100", "lastUsed": "..."}}
+  "writer": {"namespace": "<controller namespace>", "identity": "<pod hostname>"},
+  "state": {
+    "config": {"<ns>/<variant>": "<configuration fingerprint>"},
+    "k2":         {"<key>": {"values": [4000, 4100], "lastUsed": "...", "lastWritten": "..."}},
+    "throughput": {"<key>": {"values": [3.2], "lastUsed": "...", "lastWritten": "...", "sampledAt": "...", "lastRead": 3.2}},
+    "itlBaseline":  {"<key>": 0.0118},
+    "startSeconds": {"<key>": 71.5},
+    "variantSeenAt": {"<key>": "..."},
+    "accelerators": {"<ns>/<variant>": {"name": "H100", "lastUsed": "..."}},
+    "itlLines": {"<configuration key>": {"a": 0.0001, "b": 0.011, "fromVariant": "...", "learnedAt": "..."}},
+    "k2BorrowedSince": {"<key>": "..."}
+  }
 }
 ```
 
@@ -78,9 +82,8 @@ interpret them.
 **What is not stored:** the raw `(k, ITL)` window samples, which age out in 30
 minutes and are refilled within that; the per-Pod "start already counted"
 records, which name Pods; and the per-model shape and decode-saturation memos,
-which are seconds-to-minutes state. A borrowed k2's relaxation clock (#132)
-joins the snapshot when #132 lands, so a restart does not restart a borrow at
-full strength.
+which are seconds-to-minutes state. A borrowed k2's relaxation clock (#132) is
+stored, so a restart does not restart a borrow at full strength.
 
 ### Rules
 
@@ -90,34 +93,50 @@ full strength.
    for the entry's variant from the scale target, so the check runs when the
    variant is first analysed after the restart rather than at load. An entry
    whose variant cannot be named -- a key from before per-variant keys (#132)
-   -- cannot be checked, and is not restored.
+   -- cannot be checked, and is not restored. Nor is one whose configuration
+   was not read **completely**, on either side: a flag the controller could
+   not resolve (`--max-num-seqs $VLLM_MAX_NUM_SEQS` from an `envFrom`) hashes
+   as its default, so two processes agree whatever the value is. The
+   accelerator memo is per variant and goes through the same check. Entries
+   still waiting for their variant's first cycle are written back with the
+   next document, so a second restart before a parked model wakes does not
+   lose them.
 2. **Every entry keeps its own clocks, and a restore applies the horizons to
    them.** A k2 window last read eight days ago is past `BucketRetention` and
    is not restored. A variant last seen two days ago is past `VariantTimeout`
    and its per-variant figures are not restored. A restore never makes a
-   figure younger than it was.
+   figure younger than it was: a clock more than a minute in the future is
+   refused, and one within a minute is taken as now, for clock skew.
 3. **Restore once, on the first cycle the controller acts.** Only the leader
    optimizes, so a standby never restores; on a leader change, the new
    leader restores what the old one last wrote.
 4. **Only the leader writes, at most once per minute,** in one
    read-modify-write with the ConfigMap's `resourceVersion` as the
-   concurrency check, and only when the state changed. The document records
-   its writer: the controller's namespace and leader-election identity. A
+   concurrency check, when what was learned changed -- a clock that a read
+   moved is not a change -- or every 15 minutes to keep the stored clocks
+   current. A write that loses the concurrency check is retried. The document
+   records its writer: the controller's namespace and its pod's hostname. A
    restore rejects a document with no writer, or one written from another
    namespace -- which a ConfigMap in this controller's namespace can only be
    if it was copied or edited by hand. That is a check against accident, not
-   against an attacker who can already write the controller's ConfigMaps.
+   against an attacker who can already write the controller's ConfigMaps, and
+   it is **less than issue #137 asks** ("a writer it cannot verify"): the
+   writer is self-reported, and it is not checked against the leader-election
+   Lease. Anything that can write this ConfigMap can write the Lease too, so a
+   Lease check would add a code path without adding a boundary.
 5. **Deleting the ConfigMap flushes.** A controller that has read the
-   ConfigMap and then finds it gone forgets what it restored rather than
-   writing it straight back. The next write creates it from what has been
-   learned since.
+   ConfigMap and then finds it gone forgets everything it learned, restored
+   or not, rather than writing it straight back -- what it learned since the
+   restart is mixed into the same windows and cannot be told apart. The next
+   write creates the ConfigMap from what is learned after that.
 6. **A read that fails is not an empty store.** NotFound means nothing was
    stored. Forbidden, or any other error, is logged as an error and restores
    nothing, and the controller keeps retrying rather than overwriting what
    it could not read.
-7. **Bounded.** The document stays under 900 KiB, below the API server's 1 MiB
-   object limit. When it would exceed that, the least recently used entries
-   are dropped first and the log names how many.
+7. **Bounded.** The document stays under 700 KiB, and all the ConfigMap's
+   data -- other versions' documents included -- under 900 KiB, below the API
+   server's 1 MiB object limit. When it would exceed that, the least recently
+   used entries are dropped first and the log names how many.
 8. **Versioned.** A document of another version is ignored, not guessed at.
 9. **Off by default** (`LEARNED_STATE_SNAPSHOT=true` turns it on), until a
    cluster run has shown a restart keeping k2 and the replica count.
