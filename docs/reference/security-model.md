@@ -131,7 +131,13 @@ install deploys (`DEPLOY_PROMETHEUS=true`, with the URL in
 the binding as optional: it never binds a guessed account or `default`, because a grant to an account nobody
 chose waits for whoever creates it. Pass `PROMETHEUS_SA=<namespace>/<serviceaccount>`
 to have your Prometheus granted the scrape
-([configuration](configuration.md)).
+([configuration](configuration.md)). Only those trusted sources write or
+repoint it: an admin re-run of `make setup-prereqs` with none of them **keeps**
+an existing binding as it is and warns, naming the account it is bound to and
+how to repoint it (`PROMETHEUS_SA=<namespace>/<serviceaccount>`) or remove it
+(`kubectl delete clusterrolebinding <name>`). A binding it cannot read is left
+alone and reported as unknown. The tenant phase (`make deploy-wva`) never reads,
+reports or patches it.
 
 ### Namespace-scoped, OpenShift
 
@@ -167,7 +173,7 @@ binding and the `metrics-reader` repoint are added as above.
 | Command | Grants | To whom |
 | --- | --- | --- |
 | `make enable-physical-limiter` (gpu-inventory) | ClusterRole + binding: get, list, watch on nodes | the ServiceAccount of each targeted controller |
-| `make enable-physical-limiter WVA_QUOTA_KUEUE=true` (quota) | ClusterRole + binding: get, list on clusterqueues, resourceflavors; get on the controller's managed Namespace only, by name | the same |
+| `make enable-physical-limiter WVA_QUOTA_KUEUE=true` (quota) | ClusterRole + binding: get, list on clusterqueues, resourceflavors; get on Namespaces, by name: the managed one when it is the controller's own or `WVA_LIMITER_TARGETS` names the controller's namespace, else its own namespace only (with a warning). Unrestricted only for a controller that looks cluster-scoped **and** whose namespace `WVA_LIMITER_TARGETS` names — a cluster-scoped Kueue user must be named there | the same |
 | `make enable-physical-limiter` | Role `wva-policy-reader` in the policy namespace (`wva-policy`, or the one a `wva.llmd.ai/policy-namespace` label names): get, list, watch on **all** ConfigMaps there, plus a RoleBinding | each controller that reads policy from that namespace |
 | `make dashboard` (OpenShift only; **not** part of a default install) | ServiceAccount `wva-grafana-datasource` with a **third legacy, non-expiring** token Secret (`wva-grafana-datasource-token`); RoleBinding to `view` on the namespace; a Role with get, list, **create** on `metrics.k8s.io` pods (the Thanos tenancy port checks `create` because Grafana POSTs) | the Grafana datasource, in the namespace the dashboard is created in. Whoever reads Secrets there can query that namespace's metrics and `view` its objects |
 
@@ -218,11 +224,19 @@ an existing `wva-external-scaler` policy admits, which is kept.
 APIService is NotFound, because the install is then the one putting KEDA there.
 When it would only be a guess, **no policy is applied**, the installer warns
 that `:9090` is reachable from every Pod, and `make verify-deployment` prints
-`No NetworkPolicy: scaler port open`; close it with
-`KEDA_NAMESPACE=<namespace> NAMESPACE=<ns> make setup-prereqs` or the mutual-TLS
-flags below. `make check-prereqs` lists the policy as optional.
+`No NetworkPolicy: scaler port open` (a policy it cannot read is reported as
+not checked, not open); close it with
+`KEDA_NAMESPACE=<keda ns> NAMESPACE=<managed ns> make setup-prereqs` — or
+`KEDA_NAMESPACE=<keda ns> NAMESPACE=<managed ns> make setup-prereqs WVA_NS=wva-<managed ns> WVA_WATCH_NS=<managed ns>`
+when the controller runs out of the tenant's reach, or
+`KEDA_NAMESPACE=<keda ns> make setup-prereqs SCOPE=cluster WVA_NS=<controller ns>`
+for a cluster-scoped install — or the mutual-TLS flags below. An existing policy
+the install cannot read, or one that admits `:9090` from anything other than
+exactly one namespace, is left as it is and reported `state UNKNOWN` (not open),
+with `kubectl get networkpolicy wva-external-scaler -n <ns> -o yaml` to check it. The installer prints that command for the install's own
+shape. `make check-prereqs` lists the policy as optional.
 `WVA_SCALER_NETWORKPOLICY=false` leaves it out on purpose; the controller-only
-`make deploy-wva` never deletes an existing one. A wrong namespace
+`make deploy-wva` never deletes an existing one, and reports it `state UNKNOWN`. A wrong namespace
 fails closed: KEDA is refused and nothing scales. The policy holds
 only where the network plugin enforces NetworkPolicy; for the rest, serve the
 scaler over TLS and require KEDA's client certificate

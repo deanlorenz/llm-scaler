@@ -212,8 +212,13 @@ every skipped Deployment as **NOT bound**, with the reason. A namespace named in
 and nothing is written for it. A skipped controller
 keeps the policy it read before. `make disable-physical-limiter` does not write a
 skipped controller's policy either. If that policy still declares a limiter, it
-says so. When a step fails, both commands exit non-zero and name the step that
-failed, rather than reporting the cluster bounded or unbounded.
+says so. A policy that declares no limiter is left unchanged by
+`disable-physical-limiter`, which prints `No limiter declared in
+<ns>/wva-scaling-policy-config; nothing to remove.` Both commands need
+`kubectl`, `jq` and `yq` on `PATH` and stop, naming the missing one, before
+touching anything. When a step fails, both commands exit
+non-zero and name the step that failed, rather than reporting the cluster
+bounded or unbounded; a failed edit never leaves an emptied policy behind.
 
 There is no setting for the policy namespace. A self-managed controller whose
 namespace carries no `wva.llmd.ai/policy-namespace` label always reads
@@ -253,7 +258,13 @@ make enable-physical-limiter WVA_LIMITER_TYPE=quota WVA_QUOTAS='H200=8'
 each namespace gets the smaller of Kueue's grant and `WVA_QUOTAS`, so
 `WVA_QUOTAS='H200=-1'` lets Kueue decide. It also grants each target
 controller the cluster-scoped half of the Kueue read (ClusterQueues,
-ResourceFlavors). Experimental: [bound tenants by the quotas Kueue already
+ResourceFlavors, and `get` on Namespaces). The Namespace read is limited by
+name: a namespace-scoped controller gets the namespace it manages when that is
+its own or you named it, and every other controller gets its own namespace only,
+with a warning. A **cluster-scoped** controller needs every Namespace and gets
+it only when its namespace is named in `WVA_LIMITER_TARGETS` (which then lists
+every target, not just that one), since the Deployment args that make it look
+cluster-scoped are editable by whoever owns that namespace. Experimental: [bound tenants by the quotas Kueue already
 holds](../../well-lit-paths/kueue-bounded-quotas/).
 
 ## Next

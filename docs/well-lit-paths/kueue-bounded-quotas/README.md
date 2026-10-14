@@ -78,11 +78,14 @@ or keep a finite static cap, which Kueue can only tighten.
   it manages through its Role, and needs the two cluster-scoped kinds, plus
   `get` on its managed Namespace (to evaluate a `namespaceSelector`), from the
   `kueue-reader` prerequisite, which the admin phase creates
-  (`make setup-prereqs SCOPE=namespace ENVIRONMENT=kubernetes`, the same run
+  (`NAMESPACE=<managed ns> make setup-prereqs SCOPE=namespace ENVIRONMENT=kubernetes`, the same run
   that creates `node-reader`). An install whose `kueue-reader` predates the
   Namespace read does **not** upgrade with this block on: when the controller
   cannot `get` its managed Namespace, the tenant's `make deploy-wva` refuses
-  and names the `make setup-prereqs` run a cluster admin makes first. Without
+  and names the `make setup-prereqs` run a cluster admin makes first. When it
+  cannot tell (the tenant may not impersonate the controller to ask, or cannot
+  read whether a Kueue source is configured) it warns with the same fix and
+  installs. Without
   the ClusterQueue and ResourceFlavor read, the reader logs
   `external quota source unreadable` each cycle.
 
@@ -99,8 +102,14 @@ WVA_LIMITER=quota WVA_QUOTAS='H100=-1' WVA_QUOTA_KUEUE=true make deploy-wva ...
 # the cluster policy (see admin-gpu-bounding for which controllers read it). With WVA_QUOTA_KUEUE=true this also
 # grants each target controller the cluster-scoped half of the Kueue read
 # (ClusterQueues, ResourceFlavors, and get on its managed Namespace only), as it
-# grants the node read for gpu-inventory.
+# grants the node read for gpu-inventory. A cluster-scoped controller needs get
+# on every Namespace, granted only when WVA_LIMITER_TARGETS names its namespace;
+# unnamed, it is limited to its own namespace and warned about.
 WVA_LIMITER_TYPE=quota WVA_QUOTAS='H100=-1' WVA_QUOTA_KUEUE=true make enable-physical-limiter
+# ...or, with a cluster-scoped controller. Targets replace discovery, so list
+# every controller namespace the limiter should reach, not just that one.
+WVA_LIMITER_TYPE=quota WVA_QUOTAS='H100=-1' WVA_QUOTA_KUEUE=true \
+  make enable-physical-limiter WVA_LIMITER_TARGETS='<cluster-scoped ns> <other ns>...'
 ```
 
 The LocalQueue read is in the controller's Role (`wva-manager-role`), which is an

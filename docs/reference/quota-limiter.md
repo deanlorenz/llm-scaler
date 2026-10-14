@@ -305,6 +305,14 @@ admin to re-run `make setup-prereqs`; the tenant's `make deploy-wva` does not
 apply Roles. A rule naming an API group the cluster does not serve
 is inert, so the grant is harmless without Kueue.
 
+`make enable-physical-limiter WVA_QUOTA_KUEUE=true` grants the same reader to
+each target controller, with the Namespace `get` limited by name: the managed
+namespace when it is the controller's own or `WVA_LIMITER_TARGETS` names the
+controller's namespace, otherwise its own namespace only, with a warning. A
+cluster-scoped controller needs every Namespace and gets it only when
+`WVA_LIMITER_TARGETS` names its namespace; unnamed, its selector-bearing queues
+are withheld from every namespace but its own.
+
 ### Validation
 
 `QuotaLimiterEntries.Validate()` returns a fatal error for any of:

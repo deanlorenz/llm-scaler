@@ -139,6 +139,18 @@ binding as optional); pass
 `PROMETHEUS_SA=<namespace>/<serviceaccount>` to grant your Prometheus
 ([configuration](configuration.md)).
 
+Only those three trusted sources write or repoint the binding. A `make
+setup-prereqs` re-run with none of them — an upgrade that left out the
+`PROMETHEUS_SA` or `PROMETHEUS_URL` the first install used — **keeps** an
+existing binding unchanged and warns, naming the account it is bound to and how
+to repoint it (`PROMETHEUS_SA=<namespace>/<serviceaccount>`, printed as the
+install's own `make setup-prereqs` command) or remove it
+(`kubectl delete clusterrolebinding wva-metrics-reader-rolebinding-<suffix>`, the
+name printed in the warning). A binding the re-run cannot read is left alone
+and reported as unknown, with a `kubectl get clusterrolebinding <name> -o yaml`
+to check it. The controller-only phase (`make deploy-wva`) never reads, reports
+or patches the binding.
+
 
 
 ## Security Considerations

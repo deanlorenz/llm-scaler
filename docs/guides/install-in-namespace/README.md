@@ -87,7 +87,13 @@ make setup-prereqs
 ```
 <!-- guide:deploy.prereqs end -->
 
-Once per namespace, not once per upgrade. It creates the cluster-scoped RBAC, the
+Once per namespace, and again when a release adds a prerequisite
+([upgrading](../../reference/upgrade-and-uninstall.md#upgrading-to-this-release)).
+Add `KEDA_NAMESPACE=<namespace KEDA runs in>` when the installer cannot find KEDA
+itself (it says so, and then writes no NetworkPolicy for the scaler port), and
+`PROMETHEUS_SA=<namespace>/<serviceaccount>` to grant your Prometheus the scrape
+of the controller's `/metrics`; a re-run without it keeps the binding an earlier
+run made. It creates the cluster-scoped RBAC, the
 ServiceAccounts, Roles and ServiceMonitor: the objects a namespace admin is not
 allowed to create — and the controller's namespace when `WVA_NS` names one apart
 from yours. Your namespace must already exist. See
@@ -129,14 +135,27 @@ cannot do it yourself, it stops and names what is missing for an admin.
 | the hashed ClusterRoles and ClusterRoleBindings | your admin | cluster-scoped |
 | the cluster policy namespace (`wva-policy`) | your admin | where a GPU budget lives when the admin publishes one |
 
-Whether a cluster policy governs your controller is in its startup log. This
-guide installs the controller in `${NAMESPACE}`; if your admin instead runs it
+Whether a cluster policy governs your controller is in the
+[`wva-controller-status` ConfigMap](../../reference/operations.md#what-the-controller-is-running-with)
+it publishes in its own namespace. This guide installs the controller in
+`${NAMESPACE}`; if your admin instead runs it
 [out of your reach](../admin-cluster-setup/README.md#keeping-the-controller-out-of-the-tenants-reach),
 it runs in **their** namespace (for example `wva-${NAMESPACE}`), so pass that to
-`-n` — and you can read its log only if they grant you `pods/log` there:
+`-n`:
 
 ```bash
 # -n: the namespace the CONTROLLER runs in, not necessarily ${NAMESPACE}
+kubectl get cm wva-controller-status -n ${NAMESPACE} \
+  -o jsonpath='{.data.policyNamespace} {.data.limiter}{"\n"}'
+```
+
+A `policyNamespace` other than the controller's own (such as `wva-policy`) means
+the limiters come from there and your ConfigMap's `limiters:` do not apply;
+`limiter` is the limiter in force. No ConfigMap means the controller predates it
+or lacks the grant to write it. Then fall back to the startup log, which you can
+read only with `pods/log` in the controller's namespace:
+
+```bash
 kubectl logs -n ${NAMESPACE} deploy/wva-controller-manager \
   | grep -E 'Cluster policy comes from|Could not read the managed Namespace'
 ```
@@ -404,6 +423,8 @@ override what the preflight reported.
 | `IMG` | the image CI builds from main — a **floating** tag; pin a release for anything you rely on ([pin the version](../../reference/upgrade-and-uninstall.md#pin-the-version)) | `ghcr.io/you/wva:dev` |
 | `PROMETHEUS_URL` | detected; Thanos on OpenShift | `https://prom.monitoring.svc:9090` |
 | `KEDA_HELM_INSTALL` | `false` on Kubernetes — assumes cluster KEDA | `true`, to install one with Helm |
+| `KEDA_NAMESPACE` | found from the KEDA-served external-metrics APIService, else an existing scaler NetworkPolicy; with neither, no NetworkPolicy is written and `:9090` stays open (admin step) | `keda` |
+| `PROMETHEUS_SA` | none — the `metrics-reader` binding goes only to a Prometheus you named; a re-run without it keeps an existing binding (admin step) | `monitoring/prometheus-k8s` |
 
 Full list: [Configuration reference](../../reference/configuration.md).
 
