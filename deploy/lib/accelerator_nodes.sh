@@ -71,7 +71,9 @@ accelerator_selector_pairs() {
 # name at most 63 characters of letters, digits, '-', '_' and '.', a letter
 # or digit at each end. A value is empty, or follows the name rule.
 ACCELERATOR_LABEL_NAME_RE='^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$'
-ACCELERATOR_LABEL_PREFIX_RE='^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
+# The prefix is DNS-1123: dot-separated labels, each a letter or digit at
+# both ends, so a..b, a.-b and a-.b are not prefixes.
+ACCELERATOR_LABEL_PREFIX_RE='^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'
 
 # accelerator_label_key_ok says whether $1 is a label key; prints why not.
 accelerator_label_key_ok() {
@@ -83,7 +85,7 @@ accelerator_label_key_ok() {
     case "$key" in
         */*)
             if [ -z "$prefix" ] || [ "${#prefix}" -gt 253 ] || ! [[ "$prefix" =~ $ACCELERATOR_LABEL_PREFIX_RE ]]; then
-                echo "not a label key: '${key}' (the prefix before '/' is a DNS subdomain: at most 253 lowercase letters, digits, '-' and '.', a letter or digit at each end)"
+                echo "not a label key: '${key}' (the prefix before '/' is a DNS subdomain: at most 253 lowercase letters, digits, '-' and '.', a letter or digit at each end of every dot-separated part)"
                 return 1
             fi ;;
     esac

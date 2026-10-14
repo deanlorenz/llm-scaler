@@ -391,8 +391,26 @@ cmd_apply() {
     if ! kubectl auth can-i create persistentvolumes -A -q 2>/dev/null; then
         log_error "apply needs leave to create PersistentVolumes (cluster-scoped), which a namespace tenant does not have -- ask the cluster admin to run apply (storage-admin on OpenShift)"
     fi
+    # A claim of this name on another storage class (or on none) is somebody
+    # else's: the volume here would never bind to it, and its size is not
+    # this script's to keep or change. Refused, and not offered for deletion
+    # -- weights.sh delete would take it. A claim that cannot be read is an
+    # error, not an absent claim.
+    local claim class err
+    claim="$(name_for "$MODEL")"
+    err="$(mktemp)"
+    if ! class="$(kubectl get pvc -n "$NAMESPACE" "$claim" --ignore-not-found -o 'jsonpath={.metadata.name}/{.spec.storageClassName}' 2>"$err")"; then
+        local why
+        why="$(tr '\n' ' ' < "$err" | sed 's/ *$//')"
+        rm -f "$err"
+        log_error "cannot read the claim ${claim} in ${NAMESPACE} (kubectl: ${why:-no error text}); apply must know whether a claim of that name is already there -- nothing was applied"
+    fi
+    rm -f "$err"
+    if [ -n "$class" ] && [ "${class#*/}" != "$STORAGE_CLASS" ]; then
+        log_error "namespace ${NAMESPACE} already has a claim named ${claim} on storage class '${class#*/}', which weights.sh did not make (its claims are on ${STORAGE_CLASS}); it is not this script's to resize or replace. Use a namespace without a claim of that name. Nothing was applied"
+    fi
     # an existing claim keeps its size (deploy/lib/nodedir.sh says why)
-    nodedir_claim_capacity "$NAMESPACE" "$(name_for "$MODEL")" "$CAPACITY_GIVEN" "weights.sh delete -n ${NAMESPACE} --model ${MODEL}"
+    nodedir_claim_capacity "$NAMESPACE" "$claim" "$CAPACITY_GIVEN" "weights.sh delete -n ${NAMESPACE} --model ${MODEL}"
     render | kubectl apply -f - >/dev/null
     log_info "downloading ${MODEL} under ${NODE_PATH} on $(accelerator_selector_text "$NODE_SELECTOR"); claim $(name_for "$MODEL") -- mount pvc://$(name_for "$MODEL")/models/${MODEL}"
     # On OpenShift the downloader runs as the project's range UID and the

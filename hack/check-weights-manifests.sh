@@ -265,6 +265,12 @@ case "\$1 \$2" in
             case "\$ARGV" in *" --ignore-not-found "*) ;; *) echo "stub kubectl: the size read lacks --ignore-not-found:\$ARGV" >&2; exit 2 ;; esac
             [ -z "\${STUB_PVC_READ_ERROR:-}" ] || { echo "\$STUB_PVC_READ_ERROR" >&2; exit 1; }
             [ -z "\${STUB_PVC_PHASE-Bound}" ] || printf '%s' "\${STUB_PVC_SIZE-1Ti}" ;;
+        *"jsonpath={.metadata.name}/{.spec.storageClassName}"*)
+            # whose claim it is: ours is on node-local-weights
+            case "\$ARGV" in *" ${NAME} "*) ;; *) echo "stub kubectl: the class read names no claim:\$ARGV" >&2; exit 2 ;; esac
+            case "\$ARGV" in *" --ignore-not-found "*) ;; *) echo "stub kubectl: the class read lacks --ignore-not-found:\$ARGV" >&2; exit 2 ;; esac
+            [ -z "\${STUB_PVC_READ_ERROR:-}" ] || { echo "\$STUB_PVC_READ_ERROR" >&2; exit 1; }
+            [ -z "\${STUB_PVC_PHASE-Bound}" ] || printf '%s/%s' "${NAME}" "\${STUB_PVC_CLASS-node-local-weights}" ;;
         *"model-pvc"*) printf '%s' "\${STUB_MODEL_PVC_CLASS:-}" ;;
         *) echo "stub kubectl: unexpected pvc read:\$ARGV" >&2; exit 2 ;;
       esac ;;
@@ -383,6 +389,39 @@ STUB_PVC_SIZE=200Gi STUB_APPLIED="$T/applied.yaml" PATH="$STUB_PATH" bash deploy
 if STUB_PVC_SIZE=200Gi PATH="$STUB_PATH" bash deploy/weights.sh "${WAPPLY[@]}" --capacity 1Ti > "$T/resize.out" 2>&1; then fail "re-apply must refuse a --capacity that differs from the existing claim"; else
     grep -q -- '--capacity 1Ti differs from the existing claim .* which is 200Gi: a claim bound to a static (node-local) volume cannot be resized' "$T/resize.out" && grep -q 'weights.sh delete -n check-ns --model Qwen/Qwen3-32B' "$T/resize.out" && ! grep -q '^apply -f' "$T/calls" \
         && ok "re-apply: a different --capacity is refused before anything lands, saying why and what frees the claim" || fail "re-apply resize: $(tail -1 "$T/resize.out"); calls: $(grep '^apply' "$T/calls")"; fi
+# the delete it names frees nothing while a pod mounts the claim: the
+# refusal says to scale the engines down first
+grep -q 'scale the model servers (engines) using .* to 0 first, or pvc-protection leaves it Terminating' "$T/resize.out" \
+    && ok "re-apply resize: the refusal says no pod may mount the claim (scale the engines to 0) or it stays Terminating" || fail "re-apply resize: no word on pods mounting the claim: $(tail -1 "$T/resize.out")"
+# A decimal size or an exponent is the same size as its integer spelling:
+# 1.5Ti against a claim stored as 1536Gi was compared as text and refused.
+: > "$T/applied.yaml"
+STUB_PVC_SIZE=1536Gi STUB_APPLIED="$T/applied.yaml" PATH="$STUB_PATH" bash deploy/weights.sh "${WAPPLY[@]}" --capacity 1.5Ti > "$T/equal3.out" 2>&1 || true
+[ "$(claim_size "$T/applied.yaml")" = 1536Gi ] && ok "re-apply: --capacity 1.5Ti against a 1536Gi claim applies, as the claim has it" || fail "re-apply 1.5Ti vs 1536Gi: '$(claim_size "$T/applied.yaml")'; $(head -2 "$T/equal3.out" | tr '\n' ';')"
+qbad=0
+for pair in '1.5Ti 1536Gi' '0.5Gi 512Mi' '.5Ki 512' '1e3 1k' '1E3 1k' '1.0Ti 1Ti' '2.5k 2500' '1e0 1' '1000e-3 1'; do
+    # shellcheck disable=SC2086
+    bash -c 'source deploy/lib/nodedir.sh; nodedir_same_quantity "$1" "$2"' _ $pair || { fail "nodedir_same_quantity: '${pair% *}' and '${pair#* }' are the same size"; qbad=1; }
+done
+for pair in '1.5Ti 1Ti' '1e3 1Ki' '0.5Gi 500Mi' '1.5Ti 1537Gi'; do
+    # shellcheck disable=SC2086
+    if bash -c 'source deploy/lib/nodedir.sh; nodedir_same_quantity "$1" "$2"' _ $pair; then fail "nodedir_same_quantity: '${pair% *}' and '${pair#* }' differ"; qbad=1; fi
+done
+# a fraction of a byte, or past 2^63, is no claim size: not parsed
+for q in 0.1 1.5 1e-1 16Ei 9999999999999999999 1e19 . ''; do
+    if bash -c 'source deploy/lib/nodedir.sh; nodedir_quantity_bytes "$1" >/dev/null' _ "$q"; then fail "nodedir_quantity_bytes: '$q' must not parse to whole bytes"; qbad=1; fi
+done
+[ "$(bash -c 'source deploy/lib/nodedir.sh; nodedir_quantity_bytes 1.5Ti')" = 1649267441664 ] || { fail "nodedir_quantity_bytes 1.5Ti: '$(bash -c 'source deploy/lib/nodedir.sh; nodedir_quantity_bytes 1.5Ti')'"; qbad=1; }
+[ "$qbad" -eq 0 ] && ok "sizes compare in bytes across decimals and exponents (1.5Ti = 1536Gi, 0.5Gi = 512Mi, 1e3 = 1k); a fraction of a byte or an overflow does not parse"
+# A claim of the model's name on another storage class is not this
+# script's: refused before anything lands, and not offered for deletion.
+for extra in "" "--capacity 1Ti"; do
+    : > "$T/calls"
+    # shellcheck disable=SC2086
+    if STUB_PVC_CLASS=standard PATH="$STUB_PATH" bash deploy/weights.sh "${WAPPLY[@]}" $extra > "$T/foreign.out" 2>&1; then fail "apply must refuse a claim of the model's name on another storage class (${extra:-no --capacity})"; else
+        grep -q "already has a claim named ${NAME} on storage class 'standard', which weights.sh did not make" "$T/foreign.out" && ! grep -qi 'delete' "$T/foreign.out" && ! grep -q '^apply -f' "$T/calls" \
+            && ok "apply: a claim of the model's name on another class is refused, named, not offered for deletion, nothing applied (${extra:-no --capacity})" || fail "apply on a foreign claim (${extra:-no --capacity}): $(tail -1 "$T/foreign.out"); calls: $(grep '^apply' "$T/calls")"; fi
+done
 : > "$T/applied.yaml"
 STUB_PVC_PHASE="" STUB_APPLIED="$T/applied.yaml" PATH="$STUB_PATH" bash deploy/weights.sh "${WAPPLY[@]}" > "$T/fresh.out" 2>&1 || true
 [ "$(claim_size "$T/applied.yaml")" = 1Ti ] && ! grep -q 'keeping that size' "$T/fresh.out" && ok "apply: no claim yet renders the default 1Ti" || fail "apply fresh: '$(claim_size "$T/applied.yaml")'"

@@ -56,23 +56,57 @@ nodedir_ok() {
 # unless the caller asked for one, and a size that differs from it is
 # refused before anything is applied.
 
-# nodedir_quantity_bytes prints quantity $1 in bytes when it is an integer
-# with a binary or decimal suffix (or none), and fails otherwise -- the
-# forms a capacity is written in. 1024Gi and 1Ti are then the same size,
-# which the API server, storing the canonical form, would report as 1Ti.
+# nodedir_quantity_bytes prints quantity $1 in bytes when it is a whole
+# number of bytes written as a decimal (1, 1.5, .5) with a binary or decimal
+# suffix (or none), or with a decimal exponent (1e3), and fails otherwise --
+# the forms a capacity is written in. 1024Gi, 1Ti and 1.0Ti are then the
+# same size, which the API server, storing the canonical form, would report
+# as 1Ti; and 1.5Ti is 1536Gi. Integer arithmetic only: the number is its
+# digits times 10^(exponent - fraction digits) times 2^(binary shift), and a
+# step that would leave a fraction of a byte or pass 2^63 fails.
 nodedir_quantity_bytes() {
-    local re='^([0-9]{1,15})(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)?$' n mult=1
+    local re='^([0-9]*)(\.([0-9]*))?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E|[eE]([+-]?[0-9]{1,2}))?$'
+    local max=$(( 0x7fffffffffffffff )) digits frac v ten=0 shift=0 i
     [[ "$1" =~ $re ]] || return 1
-    n="$((10#${BASH_REMATCH[1]}))"
-    case "${BASH_REMATCH[2]}" in
-        Ki) mult=$((1 << 10)) ;; Mi) mult=$((1 << 20)) ;; Gi) mult=$((1 << 30)) ;;
-        Ti) mult=$((1 << 40)) ;; Pi) mult=$((1 << 50)) ;; Ei) mult=$((1 << 60)) ;;
-        k) mult=1000 ;; M) mult=1000000 ;; G) mult=1000000000 ;;
-        T) mult=1000000000000 ;; P) mult=1000000000000000 ;; E) mult=1000000000000000000 ;;
+    frac="${BASH_REMATCH[3]}"
+    digits="${BASH_REMATCH[1]}${frac}"
+    [ -n "$digits" ] || return 1
+    # 18 digits always fit in 63 bits; past that the digits are no claim's
+    digits="${digits#"${digits%%[!0]*}"}"
+    [ "${#digits}" -le 18 ] || return 1
+    v=$(( 10#${digits:-0} ))
+    case "${BASH_REMATCH[4]}" in
+        Ki) shift=10 ;; Mi) shift=20 ;; Gi) shift=30 ;; Ti) shift=40 ;; Pi) shift=50 ;; Ei) shift=60 ;;
+        k) ten=3 ;; M) ten=6 ;; G) ten=9 ;; T) ten=12 ;; P) ten=15 ;; E) ten=18 ;;
+        e*|E*) ten=$(( 10#${BASH_REMATCH[5]#[+-]} )); [ "${BASH_REMATCH[5]:0:1}" != - ] || ten=$(( -ten )) ;;
     esac
-    # past 2^63 the product wraps; such a size is no claim's
-    [ "$n" -eq 0 ] || [ "$mult" -le $(( 0x7fffffffffffffff / n )) ] || return 1
-    printf '%s' "$((n * mult))"
+    ten=$(( ten - ${#frac} ))
+    # v * 10^ten * 2^shift, in whole bytes
+    if [ "$ten" -ge 0 ]; then
+        for (( i = 0; i < ten; i++ )); do
+            [ "$v" -le $(( max / 10 )) ] || return 1
+            v=$(( v * 10 ))
+        done
+    else
+        # 10^-m is 5^-m * 2^-m: the 5s must divide v, the 2s come off the shift
+        for (( i = 0; i < -ten; i++ )); do
+            [ $(( v % 5 )) -eq 0 ] || return 1
+            v=$(( v / 5 ))
+        done
+        shift=$(( shift + ten ))
+    fi
+    if [ "$shift" -ge 0 ]; then
+        for (( i = 0; i < shift; i++ )); do
+            [ "$v" -le $(( max / 2 )) ] || return 1
+            v=$(( v * 2 ))
+        done
+    else
+        for (( i = 0; i < -shift; i++ )); do
+            [ $(( v % 2 )) -eq 0 ] || return 1
+            v=$(( v / 2 ))
+        done
+    fi
+    printf '%s' "$v"
 }
 
 # nodedir_same_quantity says whether quantities $1 and $2 are the same size:
@@ -116,5 +150,5 @@ nodedir_claim_capacity() {
         CAPACITY="$current"
         return 0
     fi
-    log_error "--capacity ${CAPACITY} differs from the existing claim ${claim} in ${ns}, which is ${current}: a claim bound to a static (node-local) volume cannot be resized -- Kubernetes resizes only dynamically provisioned claims. Leave --capacity off to keep ${current}, or ${reset} first (the files on the nodes stay) and apply again with the new size. Nothing was applied"
+    log_error "--capacity ${CAPACITY} differs from the existing claim ${claim} in ${ns}, which is ${current}: a claim bound to a static (node-local) volume cannot be resized -- Kubernetes resizes only dynamically provisioned claims. Leave --capacity off to keep ${current}, or ${reset} first (the files on the nodes stay) and apply again with the new size. The delete frees the claim only once no pod mounts it: scale the model servers (engines) using ${claim} to 0 first, or pvc-protection leaves it Terminating. Nothing was applied"
 }

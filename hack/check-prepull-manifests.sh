@@ -174,14 +174,14 @@ long64="$(printf 'k%.0s' $(seq 64))"
 long63="$(printf 'k%.0s' $(seq 63))"
 prefix254="$(printf 'p%.0s' $(seq 250)).com"
 selbad=0
-for badsel in 'a/b/c=v' '/x=v' 'x/=v' '-a=v' 'a-=v' '_a=v' 'a=-b' 'a=b-' 'a=.b' 'a=b=c' "${long64}=v" "k=${long64}" "ex.com/${long64}=v" "${prefix254}/k=v" 'Example.com/k=v' 'ex_ample.com/k=v' '-ex.com/k=v' 'ex.com-/k=v'; do
+for badsel in 'a/b/c=v' '/x=v' 'x/=v' '-a=v' 'a-=v' '_a=v' 'a=-b' 'a=b-' 'a=.b' 'a=b=c' "${long64}=v" "k=${long64}" "ex.com/${long64}=v" "${prefix254}/k=v" 'Example.com/k=v' 'ex_ample.com/k=v' '-ex.com/k=v' 'ex.com-/k=v' 'a..b/k=v' 'a.-b/k=v' 'a-.b/k=v' '-a/k=v' 'a-/k=v' '.a/k=v' 'a./k=v'; do
     if bash deploy/prepull.sh apply -n check-ns --image a:1 --node-selector "$badsel" --dry-run >/dev/null 2>&1; then
         fail "a --node-selector outside label syntax must be refused: '$badsel'"; selbad=1
     fi
 done
-[ "$selbad" -eq 0 ] && ok "a key or value outside Kubernetes label syntax is refused (two slashes, an empty or bad prefix, a name or value over 63, a bad first or last character)"
+[ "$selbad" -eq 0 ] && ok "a key or value outside Kubernetes label syntax is refused (two slashes, an empty or bad prefix, a name or value over 63, a bad first or last character, a prefix with an empty or dash-edged dot-separated part)"
 selgood=0
-for goodsel in 'a=b' 'a=' 'gpu.nvidia.com/model=' 'example.com/x_y.z=A-1_b.2' "${long63}=${long63}" "ex.com/${long63}=v" 'k8s.io/a=b,c=' 'A=b' 'a.b-c_d=0'; do
+for goodsel in 'a=b' 'a=' 'gpu.nvidia.com/model=' 'example.com/x_y.z=A-1_b.2' "${long63}=${long63}" "ex.com/${long63}=v" 'k8s.io/a=b,c=' 'A=b' 'a.b-c_d=0' 'a.b-c/k=v' '10.0.0.1/k=v' 'kubernetes.io/k=v' 'a--b.c/k=v'; do
     if ! bash deploy/prepull.sh apply -n check-ns --image a:1 --node-selector "$goodsel" --dry-run > "$T/render-good.yaml" 2>&1; then
         fail "a --node-selector in label syntax must be accepted: '$goodsel': $(tail -1 "$T/render-good.yaml")"; selgood=1
     fi
