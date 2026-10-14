@@ -14,7 +14,8 @@ Set Prometheus configuration via environment variables in the scaling manager de
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: controller-manager
+  name: wva-controller-manager
+  namespace: <controller-namespace>
 spec:
   template:
     spec:
@@ -64,52 +65,72 @@ spec:
 
 ### 2. ConfigMap Configuration
 
-Alternatively, configure Prometheus via the controller's ConfigMap:
+Alternatively, configure Prometheus in the controller's ConfigMap. The settings
+sit inside its `config.yaml` key, which is mounted at `/etc/wva/config.yaml`.
+They are read at startup: restart the controller after a change.
 
 ```yaml
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: wva-manager-config
-  namespace: workload-variant-autoscaler-system
+  namespace: <controller-namespace>
 data:
-  PROMETHEUS_BASE_URL: "https://prometheus-k8s.monitoring.svc.cluster.local:9091"
-  PROMETHEUS_TLS_INSECURE_SKIP_VERIFY: "false"
-  PROMETHEUS_CA_CERT_PATH: "/etc/prometheus-certs/ca.crt"
-  PROMETHEUS_CLIENT_CERT_PATH: "/etc/prometheus-certs/client.crt"
-  PROMETHEUS_CLIENT_KEY_PATH: "/etc/prometheus-certs/client.key"
-  PROMETHEUS_SERVER_NAME: "prometheus-k8s.monitoring.svc.cluster.local"
-  PROMETHEUS_BEARER_TOKEN: "your-bearer-token"  # Not recommended - use Secret instead
+  config.yaml: |
+    PROMETHEUS_BASE_URL: "https://prometheus-k8s.monitoring.svc.cluster.local:9091"
+    PROMETHEUS_TLS_INSECURE_SKIP_VERIFY: "false"
+    PROMETHEUS_CA_CERT_PATH: "/etc/prometheus-certs/ca.crt"
+    PROMETHEUS_CLIENT_CERT_PATH: "/etc/prometheus-certs/client.crt"
+    PROMETHEUS_CLIENT_KEY_PATH: "/etc/prometheus-certs/client.key"
+    PROMETHEUS_SERVER_NAME: "prometheus-k8s.monitoring.svc.cluster.local"
 ```
+
+Do not put a bearer token in the ConfigMap; use the Secret-backed env variable above.
 **Configuration Priority:**
 1. Environment variables (checked first)
 2. ConfigMap values (fallback)
 3. Error if neither provides `PROMETHEUS_BASE_URL`
    
 ### Metrics Endpoint
-The metrics are exposed at the `/metrics` endpoint on port 8080 (HTTP).
+The metrics are served at `/metrics` on port 8443 over HTTPS (`--metrics-secure=true`),
+behind the Service `wva-controller-manager-metrics-service`. A caller needs a bearer
+token whose identity may `get` the non-resource URL `/metrics`; anything else gets
+`401`/`403`. To read them by hand, see
+[Monitoring](monitoring.md#the-metrics-that-answer-specific-questions).
 
 ### ServiceMonitor Configuration
 
-The scaling manager metrics are exposed on port 8080 (HTTP):
+The install ships the ServiceMonitor in
+[`config/base/monitoring/servicemonitor.yaml`](../../config/base/monitoring/servicemonitor.yaml),
+rendered as `wva-controller-manager-metrics-monitor` in the controller's namespace:
 ```yaml
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: workload-variant-autoscaler
-  namespace: workload-variant-autoscaler-system
+  name: wva-controller-manager-metrics-monitor
+  namespace: <controller-namespace>
   labels:
     release: kube-prometheus-stack
 spec:
   selector:
     matchLabels:
       control-plane: controller-manager
+      app.kubernetes.io/name: workload-variant-autoscaler
   endpoints:
-  - port: http
-    scheme: http
-    interval: 30s
+  - port: https
+    scheme: https
+    interval: 10s
     path: /metrics
+    bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+    tlsConfig:
+      insecureSkipVerify: true
 ```
+
+Prometheus scrapes with its own ServiceAccount token, so that account needs the
+install's metrics-reader ClusterRole (`wva-metrics-reader-<hash>`, `get` on
+`/metrics`; the suffix is per install). The install binds it for
+kube-prometheus-stack's account; bind your own Prometheus account if it differs
+(cluster admin).
 
 
 
@@ -179,7 +200,7 @@ query := fmt.Sprintf(`vllm_kv_cache_usage{namespace="%s"}`, escapedNamespace)
 The scaling manager exposes metrics providing insights into autoscaling behavior and optimization performance. These metrics are exposed via Prometheus at the `/metrics` endpoint.
 
 ### Notes on **name_space**s in metrics
-With the scaling manager metrics, the value for the label `namespace` is the scaling manager controller namespace, not the VA's namespace. The VA namespace has the label `exported_namespace`. Here's an example:
+With the scaling manager metrics, the value for the label `namespace` is the scaling manager controller namespace, not the workload's namespace. The workload's namespace is the label `exported_namespace`. Here's an example (from a test install whose controller namespace was `workload-variant-autoscaler-system`):
 ```text
 {
   "metric": "wva_desired_replicas",
@@ -747,6 +768,28 @@ With the scaling manager metrics, the value for the label `namespace` is the sca
   }
   ```
 
+### Ceilings, Wakes, Start Times and Warm Pool Metrics
+
+Every series below also carries `controller_instance` when `CONTROLLER_INSTANCE`
+is set, and is scraped with the workload's namespace as `exported_namespace`.
+
+| metric | type | labels | meaning | read it when |
+| --- | --- | --- | --- | --- |
+| `wva_variant_at_max_replicas` | gauge | `namespace`, `variant_name` | `1` while the variant's target sits on its own `maxReplicaCount`. Not a GPU shortage (that is `wva_decisions_limited_total`): the operator's ceiling binds, so the fix is a higher `maxReplicaCount`, not more GPUs. | Alone it is normal (a well-sized variant under load). With utilization above the scale-up threshold, demand is going unserved. |
+| `wva_unmeasured_queue` | gauge | `namespace`, `model_name` | Requests queued in EPP flow control for a model with **no** attributed replica to act on. `0` is normal, including for an idle model at zero. | Non-zero: traffic queues while the scaling manager is blind to the pods serving it. Usual causes: FMA launcher pods not scraped, a PodMonitor selecting a port the pods do not declare, ownerReferences that reach no scale target. |
+| `wva_model_replicas` | gauge | `namespace`, `model_name` | Replicas serving a model, summed across its variants. Exists to join against EPP metrics, which carry `model_name` and no namespace. | `0` with demand is a parked model that did not wake; see the `WVAModelParkedWhileRequestsRefused` alert. |
+| `wva_scale_from_zero_wake_seconds` | histogram | `namespace`, `model_name` | Time from the first activation published to the model being observed serving. Buckets 1 s to 300 s. | Wakes are slow. With a warm pool or FMA the distribution is bimodal; a shift toward the slow mode is the regression. |
+| `wva_saturation_metrics_up` | gauge | `variant_name`, `namespace` | `1` when the variant got a fresh decision this cycle; `0` when the analyzer knew the variant but its saturation and capacity gauges were not refreshed. | Gate alerts on the saturation gauges with this, rather than trusting a stale value. |
+| `wva_replica_start_seconds` | histogram | `variant_name`, `namespace` | Pod creation to Ready, one observation per replica started. Buckets 5 s to 900 s. | Scale-ups land late. It is also an input: the demand floor projects the queue over the start time. |
+| `wva_replica_start_seconds_estimate` | gauge | `variant_name`, `namespace`, `source` | The start time the controller is sizing with. `source` is `measured` or `seed`. | It disagrees with the histogram: the controller is sizing on a belief the cluster does not bear out. |
+| `wva_warmpool_free_pods` | gauge | `pool` | Warm-pool Pods that can serve a wake now (every instance asleep, none loading). Compare with the pool's `sleepMinSize`. | Below `sleepMinSize` for long. See [operating the warm pool](../guides/warm-pool/operating.md). |
+| `wva_warmpool_borrow_total` | counter | `namespace`, `model_name`, `outcome` | Attempts to cover a scale-up from the pool. `outcome`: `hit`, `blocked` (the model was resident but every holding Pod was busy: add Pods), `miss` (resident nowhere: fix the warm set). | The hit rate drops. |
+| `wva_warmpool_bridge_seconds` | histogram | `namespace`, `model_name` | How long a borrowed Pod served before ordinary replicas took over. Should track the ordinary start time. | It sits near `maxHoldSeconds`: ordinary scale-ups are failing and the pool is masking it. |
+| `wva_unattributed_gpus` | gauge | none | GPUs held by variants whose accelerator could not be resolved. Charged to no accelerator pool, so every pool looks freer than it is. | Any non-zero value: set a GPU product `nodeSelector` or `nodeAffinity` on the workload. |
+| `wva_analyzer_demand` | gauge | `analyzer_name`, `namespace`, `model_name`, `role` | Demand D per analyzer, in that analyzer's unit. `role` is empty for a non-P/D model. | A desired count looks wrong: desired is `ceil(demand / target)`. |
+| `wva_analyzer_target` | gauge | `analyzer_name`, `namespace`, `model_name`, `variant_name` | Per-replica target P, in the same unit as demand. | Same. |
+| `wva_analyzer_observed_replicas` | gauge | `analyzer_name`, `namespace`, `model_name`, `variant_name` | Replicas that reported metrics in the analyzer's last cycle. Compare with the target's **ready** replicas. | Lower than ready: a scrape gap. Higher: something the scale target does not own is serving the model. |
+
 ### Utilization-Share Optimizer Metrics
 
 Published when the [utilization-share optimizer](scaling-policy.md#optimizer-cluster-default-only-live)
@@ -905,6 +948,26 @@ carries `returned` set to true.
 Transfers are also recorded as Kubernetes Events on the scale targets they move;
 see [Events](monitoring.md#events-on-the-models-scale-targets).
 
+### `wva_model_scaling_blocked`
+
+- **Type**: Gauge, `1` for each reason that holds. A series exists only while its reason holds, so no series means nothing is blocking.
+- **Labels**: `namespace` (scraped as `exported_namespace`), `model_name`, `reason`, optional `controller_instance`. No `variant_name`, no `role`.
+- Several reasons can hold at once.
+
+Every reason the controller sets:
+
+| reason | set by | means | do |
+| --- | --- | --- | --- |
+| `variant-floor` | scale-to-zero policy | scale-to-zero is on, but a variant has `minReplicaCount > 0`, so the model never parks | set every variant's `minReplicaCount` to 0, or turn scale-to-zero off for the model. Alert: `WVAModelWillNotScaleToZero` |
+| `policy-forbids-zero` | scale-to-zero policy | every variant allows 0, but the model's resolved policy disables scale-to-zero | enable `scaleToZero` for the model's policy tier, or raise `minReplicaCount`. Alert: `WVAModelWillNotScaleToZero` |
+| `engine-unsupported` | scale-to-zero policy | the model runs both vLLM and SGLang, so no single request counter measures idleness; it is not parked | run one engine per model. Not alerted on by design |
+| `activation-retention` | scale-to-zero policy | just woken from zero and held for its retention period | nothing; clears by itself |
+| `no-wake-signal` | scale-from-zero | EPP exports no flow-control queue metric at all, so a parked model cannot wake | enable the EPP `flowControl` feature gate and restart the EPP. Alert: `WVAModelHasNoWakeSignal` |
+| `quiet-period`, `marks-unreadable`, `whole-replica-short`, `awaiting-release`, `quota-short`, `floor-pinned`, `floors-exceed-quota`, `donors-at-floor`, `no-compatible-donor`, `release-timeout`, `release-taken`, `release-shape-mismatch`, `reversal-hold`, `swinging`, `transfer-limit`, `burst-ending`, `fast-swing-capped`, `donor-not-steerable` | utilization-share optimizer, only while it acts | see the table below | see the table below |
+
+For the scale-to-zero reasons, see also
+[when a model will not park](../guides/scale-to-zero/README.md#when-a-model-will-not-park).
+
 ### `wva_model_scaling_blocked` reasons set by the utilization-share optimizer
 
 - **Type**: Gauge, `1` for each reason that holds; a series exists only while its reason holds.
@@ -1039,21 +1102,21 @@ see [Events](monitoring.md#events-on-the-models-scale-targets).
 
 ### `wva_replica_scaling_total`
 - **Type**: Counter
-- **Description**: Total number of replica scaling operations performed, labeled by direction and reason
+- **Description**: Counts the controller's **decisions**, not replica moves. It is incremented once per cycle for each variant whose decision is not "no change" (target differs from current). The HPA and KEDA act on their own schedule, so this is not a count of what the HPA did: a target the HPA is slow to reach counts once per cycle until it gets there.
 - **Labels**:
   - `variant_name`: Name of the variant
   - `namespace`: Kubernetes namespace
-  - `direction`: Scaling direction (`up`, `down`)
-  - `reason`: Reason for the scaling operation
-- **Use Case**: Detect scaling thrashing — backs the `WVAReplicaScalingThrashing` alert — and audit scaling activity per variant
+  - `direction`: `scale-up` or `scale-down`
+  - `reason`: decision category: `V2` (the normal pipeline), `saturation-only mode`, `scale-from-zero`, `rescale`, `utilization-share`
+- **Use Case**: Detect scaling thrashing — backs the `WVAReplicaScalingThrashing` alert — and audit decisions per variant. To see what actually moved, read the HPA (`kubectl describe hpa`) or `wva_current_replicas`.
 - **Example**:
   ```json
   {
     "metric": {
       "__name__": "wva_replica_scaling_total",
-      "direction": "up",
+      "direction": "scale-up",
       "namespace": "workload-variant-autoscaler-system",
-      "reason": "saturation",
+      "reason": "V2",
       "variant_name": "smoke-test-va"
     },
     "value": [
@@ -1101,7 +1164,7 @@ see [Events](monitoring.md#events-on-the-models-scale-targets).
 # Current replicas by variant
 wva_current_replicas
 
-# Scaling frequency
+# Scaling decisions per second (decisions, not HPA moves)
 rate(wva_replica_scaling_total[5m])
 
 # Desired replicas by variant
@@ -1110,14 +1173,14 @@ wva_desired_replicas
 
 ### Advanced Queries
 ```promql
-# Scaling frequency by direction
-rate(wva_replica_scaling_total{direction="scale_up"}[5m])
+# Scale-up decisions per second
+rate(wva_replica_scaling_total{direction="scale-up"}[5m])
 
 # Replica count mismatch
 abs(wva_desired_replicas - wva_current_replicas)
 
-# Scaling frequency by reason
-rate(wva_replica_scaling_total[5m]) by (reason)
+# Scaling decisions by reason
+sum by (reason) (rate(wva_replica_scaling_total[5m]))
 
 # Optimization duration 95th percentile
 histogram_quantile(0.95, rate(wva_optimization_duration_seconds_bucket[5m]))
@@ -1220,73 +1283,105 @@ wva_optimizer_active == 1
 
 ## Alerting Rules
 
-The scaling manager pre-defined a number of Prometheus alerting rules which can be optionally installed. These rules are defined in `config/components/prometheus-alerts/prometheusrule.yaml`.
-### Alerting Rules Installation
-- To install alerting rules, set environment variable `DEPLOY_ALERTING_RULES` to `true`, and run the installation, for example:
-  ```bash
-  export DEPLOY_ALERTING_RULES=true
-  make deploy-e2e-infra
-  ```
-- To remove alerting rules, set environment variable `DEPLOY_ALERTING_RULES` to `false`, and run the installation, for example:
-  ```bash
-  export DEPLOY_ALERTING_RULES=false
-  make deploy-e2e-infra
-  ```
+The scaling manager ships Prometheus alerting rules as a kustomize component,
+[`config/components/prometheus-alerts`](../../config/components/prometheus-alerts/prometheusrule.yaml):
+one PrometheusRule, `controller-manager-alerts`, group `wva.rules`, in the
+controller's namespace. They are off by default.
 
-### Alerting Rules Verification
-Once installed, you can verify as follows:
-- Check that PrometheusRule resource has been created:
-  ```bash
-  kubectl get PrometheusRule -n workload-variant-autoscaler-system controller-manager-alerts
-  NAME                        AGE
-  controller-manager-alerts   40h
-  ```
+### The shipped alerts
 
-- Check Prometheus:
-  - Forward Prometheus service to local host:
-    ```bash
-    kubectl port-forward -n workload-variant-autoscaler-monitoring svc/kube-prometheus-stack-prometheus 9090:9090
-    ```
+T = troubleshooting runbook on [Troubleshooting](troubleshooting.md).
 
-  - Browse to https://localhost:9090/alerts
-  - You should see `wva.rules`: ![wva.rules](./wva.rules.png)
-  - Here's an example of a triggered rule: ![wva.rules-firing](./wva.rules-firing.png)
+| alert | severity | for | fires when | what to do | runbook |
+| --- | --- | --- | --- | --- | --- |
+| `WVANodeAccessDenied` | critical | 2m | a `gpu-inventory` limiter is configured and the controller may not list nodes. **No variant scales up.** | grant the controller's ServiceAccount get/list/watch on nodes (cluster admin: `make enable-physical-limiter` grants every controller), or remove the limiter | [T: controller not Ready](troubleshooting.md#the-controller-is-not-ready-or-crash-looping) |
+| `WVAModelParkedWhileRequestsRefused` | critical | 5m | a model has 0 replicas and EPP returns `ServiceUnavailable` for it: traffic is being dropped | read `wva_model_scaling_blocked` for the model first | [T: will not wake](troubleshooting.md#a-model-will-not-wake-from-zero) |
+| `WVAModelHasNoWakeSignal` | warning | 10m | blocked reason `no-wake-signal`: EPP exports no flow-control queue, so a parked model cannot wake | enable the EPP `flowControl` feature gate, then restart the EPP Deployment (it reads its config once at start) | [T: will not wake](troubleshooting.md#a-model-will-not-wake-from-zero) |
+| `WVAHighErrorRate` | warning | 5m | `wva_errors_total` above 6/min for one `component`/`error_type` | grep the controller log for the `error_type` text | [Logs](monitoring.md#the-logs) |
+| `WVAMetricsCollectionFailing` | warning | 5m | `wva_metrics_collection_errors_total` above 5/min for one `query_type`/`reason`: decisions run on stale data | check Prometheus reachability and the controller's Prometheus settings | [T: metrics stale](troubleshooting.md#metrics-stale-or-missing) |
+| `WVAGPUResourceExhausted` | warning | 5m | GPU-labeled nodes report zero allocatable GPUs of a type. Only with a `gpu-inventory` limiter | check GPU node status and device-plugin pods. No alert does not mean GPUs are free: the metric exists only with that limiter | [T: GPUs held](troubleshooting.md#gpus-held-or-quota-spent) |
+| `WVAReplicaScalingThrashing` | warning | 10m | more than 2 scaling decisions per minute for one variant | read the model's `scaling-decision` lines and the stabilization windows | [T: flapping](troubleshooting.md#a-model-is-flapping) |
+| `WVAModelWillNotScaleToZero` | info | 15m | blocked reason `variant-floor` or `policy-forbids-zero`: the configuration asks to park and forbids it | make the two halves agree | [will not park](../guides/scale-to-zero/README.md#when-a-model-will-not-park) |
+| `WVAOptimizationLoopStalled` | info | 15m | `wva_models_processed` is 0 or absent for 10 minutes | expected when no ScaledObject names this scaler. Otherwise check the controller pod, its log and Prometheus | [T: controller not Ready](troubleshooting.md#the-controller-is-not-ready-or-crash-looping) |
 
-- Get fired-rule details:
-    From https://localhost:9090/alerts, if there's a rule has been fired, you can get the details as follows. Here's an example:
-    ```bash
-    curl -k https://localhost:9090/api/v1/alerts | jq .
+There is deliberately no alert on `engine-unsupported`: it is a standing property
+of a model, not an event, and would never clear.
 
-    {
-        "labels": {
-          "alertname": "WVAHighErrorRate",
-          "component": "controller",
-          "error_type": "Config is nil in ConfigMapReconciler bootstrap",
-          "severity": "warning"
-        },
-        "annotations": {
-          "description": "Controller component 'controller' error_type 'Config is nil in ConfigMapReconciler bootstrap' rate is 0.03/sec (>6/min threshold) sustained for 5+ minutes. Check controller logs for error patterns.",
-          "summary": "llm-scaling-manager error rate elevated in controller"
-        },
-        "state": "pending",
-        "activeAt": "2026-07-02T19:35:06.642428048Z",
-        "value": "3.1034482758620693e-02"
-    }
-    ```
+### Installing the alerts
 
-### Alerting Rules Notes
-- For `WVAGPUResourceExhausted` rule with `wva_available_gpus` metric, as described in [wva_available_gpus](#wva_available_gpus) this metric is not always available in which case this rule will not trigger. In other words, if there's no alert for this rule, it does not mean GPUs are available.
-  
-### Alerting Rules E2E Test
-E2E tests for alerting rules are in `test/e2e/prometheus_alerts_test.go`. The tests cover basic install and validation. Here are some scenarios:
-- should create PrometheusRule with the scaling manager alert rules
-- should have all expected alert rules defined
-- should have valid alert rule structure 
-- should only reference known the scaling manager metrics in alert expressions
+Set `DEPLOY_ALERTING_RULES=true` on the controller install. The installer adds
+the `prometheus-alerts` component to the overlay it renders:
 
-How to execute E2e Test:
 ```bash
-export DEPLOY_ALERTING_RULES=true
-make deploy-e2e-infra
-make test-e2e-smoke FOCUS="PrometheusAlerts"
+DEPLOY_ALERTING_RULES=true make deploy-wva NAMESPACE=<namespace>
 ```
+
+Re-running the install with `DEPLOY_ALERTING_RULES=false` (the default) deletes
+an existing `controller-manager-alerts`. So set it on **every** later install
+and upgrade, or the alerts disappear.
+
+Prerequisites: the `PrometheusRule` CRD (Prometheus Operator), rights to create
+a PrometheusRule in the controller's namespace, and a Prometheus that selects
+it. The rule carries `release: kube-prometheus-stack`; a Prometheus with a
+different `ruleSelector` or `ruleNamespaceSelector` will not load it. On
+OpenShift, user-workload monitoring loads PrometheusRules from user namespaces.
+
+To apply the rule by hand into an existing install instead:
+
+```bash
+kubectl apply -n "$NS" -f config/components/prometheus-alerts/prometheusrule.yaml
+```
+
+### Checking they loaded
+
+```bash
+kubectl get prometheusrule -n "$NS" controller-manager-alerts
+```
+
+Then open the Prometheus UI's `/alerts` page and look for the `wva.rules` group:
+
+```bash
+kubectl port-forward -n <monitoring-namespace> svc/kube-prometheus-stack-prometheus 9090:9090
+# http://localhost:9090/alerts
+```
+
+![wva.rules](./wva.rules.png)
+
+A firing rule, through the API:
+
+```bash
+curl -s http://localhost:9090/api/v1/alerts | jq '.data.alerts[] | select(.labels.alertname | startswith("WVA"))'
+```
+
+### Consider adding
+
+These are **not shipped**. They cover silent failures the shipped rules miss.
+Tune the `for:` to your cycle and start times.
+
+```promql
+# Requests queue for a model the scaling manager cannot see (for: 5m).
+wva_unmeasured_queue > 0
+
+# Pods decided on with stale or missing metrics (for: 10m).
+wva_metrics_freshness_status{status!="fresh"} > 0
+
+# A variant whose saturation gauges stopped refreshing (for: 10m).
+wva_saturation_metrics_up == 0
+
+# At its own ceiling and still over the scale-up threshold: demand unserved
+# (for: 15m). Replace 0.85 with your scaleUpThreshold.
+(wva_variant_at_max_replicas == 1)
+  and on (exported_namespace, variant_name)
+  (max by (exported_namespace, variant_name) (wva_saturation_utilization) > 0.85)
+
+# The decision is not being carried out (for: 15m): KEDA, the HPA or the
+# workload is stuck. Longer than your replica start time plus the HPA windows.
+wva_desired_replicas != wva_current_replicas
+```
+
+### Alerting Rules E2E Test
+
+E2E tests for the rules are in `test/e2e/prometheus_alerts_test.go`. They check
+that the PrometheusRule is created, that every expected rule is defined and well
+formed, and that the expressions reference only known metrics. `make test-e2e-smoke-with-setup` installs the rules and runs them; see
+[Testing](../developer-guide/testing.md).

@@ -222,13 +222,15 @@ many pods* are in that state — not a 0/1 flag. Compare the series:
 wva_metrics_freshness_status{status!="fresh"} > 0
 ```
 
-**Why is nothing scaling up?** — the two silent-stall causes, both of which look
+**Why is nothing scaling up?** — the silent-stall causes, each of which looks
 like "the scaling manager is fine" everywhere else:
 
 | metric | meaning |
 | --- | --- |
 | `wva_node_access_denied` | `1` = a GPU limiter is configured but nodes are unreadable. Every variant gets no budget and **will not scale up**. |
-| `wva_decisions_limited_total` | rising = a limiter is capping decisions. Pair with `wva_available_gpus` and `wva_spare_capacity`. |
+| `wva_decisions_limited_total` | rising = a limiter is capping decisions. Pair with `wva_available_gpus` and `wva_spare_capacity`. A fully spent quota can leave it flat: compare what the quota allows with what the model holds. |
+| `wva_variant_at_max_replicas` | `1` = the variant sits on its own `maxReplicaCount`. With utilization still above the scale-up threshold, raise `maxReplicaCount`; more GPUs will not help. |
+| `wva_unmeasured_queue` | non-zero = requests queue for a model with no attributed replica: the pods serving it are not scraped or not attributed, so nothing scales. |
 | `wva_unattributed_gpus` | GPUs in use that could not be charged to a pool — usually a workload whose accelerator did not resolve |
 
 **Is the decision itself sane?** — `wva_desired_replicas` vs `wva_current_replicas`,
@@ -244,11 +246,27 @@ Pod's metrics were missing from the cycle (a scrape gap, and the low desired is
 correct for what was seen); above it means something the scale target does not
 own is serving the model.
 
+**Tenant: query Prometheus.** The simplest way to read these for your own
+namespace is the cluster's Prometheus (or Thanos on OpenShift), filtered by
+`exported_namespace="<your-namespace>"`. On OpenShift, the tenant port of
+`thanos-querier` (9092) enforces per-namespace access.
+
+**Straight off the controller.** The endpoint is HTTPS and authenticated: a
+plain `curl` gets `401 Unauthorized`. It needs a bearer token for an identity
+allowed `get` on the non-resource URL `/metrics`, which only a ClusterRole and
+ClusterRoleBinding can grant (cluster admin). The install binds its
+metrics-reader ClusterRole to the Prometheus ServiceAccount, so a token for that
+account works:
+
 ```bash
-# read them straight off the controller
-kubectl port-forward -n $NS svc/wva-controller-manager-metrics-service 8443:8443
-curl -sk https://localhost:8443/metrics | grep -E '^wva_'
+kubectl auth can-i get /metrics --as=system:serviceaccount:<monitoring-namespace>:kube-prometheus-stack-prometheus
+TOKEN=$(kubectl create token kube-prometheus-stack-prometheus -n <monitoring-namespace>)
+kubectl port-forward -n "$NS" svc/wva-controller-manager-metrics-service 8443:8443 &
+curl -sk -H "Authorization: Bearer $TOKEN" https://localhost:8443/metrics | grep -E '^wva_'
+kill %1
 ```
+
+Use your own Prometheus ServiceAccount if it is not kube-prometheus-stack's.
 
 **What would the utilization-share optimizer do, and is it doing it?** — only
 when an [`optimizer:` block](scaling-policy.md#optimizer-cluster-default-only-live)
@@ -368,6 +386,39 @@ it says "a model in another namespace of its quota group", so one tenant's Event
 never name another tenant's models. A P/D model is named with its role, for
 example `model llama (decode)`; an aggregated model by its name alone.
 
+### Events
+
+The controller records Kubernetes Events for a model on its **ScaledObject**
+(the scaling manager has no object of its own), utilization-share transfers on
+the **scale target** (Deployment or LeaderWorkerSet), and one config warning on
+the **ConfigMap**. Read them per namespace:
+
+```bash
+kubectl get events -n <model-namespace> --field-selector involvedObject.kind=ScaledObject
+kubectl describe scaledobject <name> -n <model-namespace>     # Events at the bottom
+kubectl get events -n "$NS" --field-selector involvedObject.kind=ConfigMap
+```
+
+Every reason the controller emits:
+
+| reason | type | object | meaning | action |
+| --- | --- | --- | --- | --- |
+| `ScaledUp` | Normal | ScaledObject | the controller decided to add replicas; the message is the decision reason | none |
+| `ScaledDown` | Normal | ScaledObject | the controller decided to remove replicas | none |
+| `ScaledToZero` | Normal | ScaledObject | the controller decided to park the model at zero | none; if unexpected, check the model's `scaleToZero` policy |
+| `ResourceConstrained` | Warning | ScaledObject | a limiter (GPU inventory or quota) capped the decision below what demand asked for | add GPUs or raise the quota, or accept it. A fully spent quota can record nothing: see [GPUs held](troubleshooting.md#gpus-held-or-quota-spent) |
+| `MetricsUnavailable` | Warning | ScaledObject | the model's metrics went from available to unavailable; recorded on that transition only | [Metrics health](metrics.md#the-metricsunavailable-event) |
+| `OptimizationFailed` | Warning | ScaledObject | the controller could not publish the replica metric KEDA reads (`Failed to emit metrics for external autoscalers`) | read the controller log for the error |
+| `UnattributedReadyPods` | Warning | ScaledObject | the scale target has Ready pods, but none of their metrics were attributed to it | check the pods' ownerReferences reach the scale target; on FMA, scrape the launcher pods ([FMA launcher pods](operations.md#fma-launcher-pods)) |
+| `AcceleratorNotResolved` | Warning | ScaledObject | the workload constrains no accelerator, so its GPUs are charged to no pool | set a GPU product `nodeSelector` or `nodeAffinity` on the workload |
+| `ThroughputAnalyzerRestartRequired` | Warning | ConfigMap (global scaling policy, controller namespace) | the throughput analyzer was enabled or disabled in config, but analyzer registration is fixed at startup | restart the controller: `kubectl rollout restart -n "$NS" deploy/wva-controller-manager` |
+| `UtilizationShareGiving`, `UtilizationShareReceiving`, `UtilizationShareReceived`, `UtilizationShareCancelled`, `UtilizationShareRedirected` | Normal | Deployment / LeaderWorkerSet | a utilization-share transfer started, landed, was called off or redirected | none; [details](#events-on-the-models-scale-targets) |
+| `UtilizationShareReleaseAborted`, `UtilizationShareWrongPod`, `UtilizationShareFillTimedOut`, `UtilizationShareDonorNotSteerable` | Warning | Deployment / LeaderWorkerSet | a transfer did not land | [details](#events-on-the-models-scale-targets) |
+
+At most one Event per model variant per cycle, except `ResourceConstrained`,
+which can join a `ScaledUp`. The API server keeps Events for about an hour
+(`--event-ttl`), so they explain recent behavior, not history.
+
 ### The logs
 
 Useful when a metric tells you *which* model is wrong and you want to know *why*.
@@ -404,12 +455,12 @@ instead — they are always on. If you do want the line, raise verbosity on the
 container and put it back afterwards:
 
 ```bash
-kubectl patch deployment -n $NS wva-controller-manager --type=json \
+kubectl patch deployment -n "$NS" wva-controller-manager --type=json \
   -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--v=4"}]'
 ```
 
 ```bash
-kubectl logs -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler -f
+kubectl logs -n "$NS" -l app.kubernetes.io/name=workload-variant-autoscaler -f
 ```
 
 The scaling manager writes no custom resource, so its decisions are visible only in these logs, in

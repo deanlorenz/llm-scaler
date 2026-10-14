@@ -1,65 +1,115 @@
 # Troubleshooting
 
+From a symptom to a fix. Every command uses `$NS` for the namespace the
+**controller** runs in (see [Verifying the install](operations.md#verifying-the-install)),
+and `<ns>` for the model's namespace, which is the same for a namespace-scoped
+install. Steps marked **(cluster admin)** need rights a namespace owner does not
+have.
 
-## Deployment Not Scaling Up
+Most runbooks start from the controller's two per-cycle log lines
+([cycle log](cycle-log.md)). Set this once:
 
-**Symptom**: Deployment remains at 0 replicas despite pending requests.
+```bash
+LOGS="kubectl logs -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler --tail=-1"
+```
 
-**Possible Causes**:
+## Symptom index
 
-1. **InferencePool datastore is empty**:
+| symptom | first signal | likely causes | runbook |
+| --- | --- | --- | --- |
+| will not scale up | `scaling-decision` shows `tgt` equal to `curr` under load | utilization below `scaleUpThreshold` by the controller's measure, at its own max, a limiter, unscraped pods, stale metrics | [will not scale up](#a-model-will-not-scale-up) |
+| will not wake from zero | `WVAModelParkedWhileRequestsRefused`; `wva_model_scaling_blocked{reason="no-wake-signal"}`; `wva_model_replicas == 0` with requests queued | EPP flow control off or EPP not restarted, the direct EPP scrape failing, InferencePool API group mismatch | [will not wake](#a-model-will-not-wake-from-zero) |
+| will not park at zero | `wva_model_scaling_blocked{reason=~"variant-floor\|policy-forbids-zero\|activation-retention"}`; `WVAModelWillNotScaleToZero` | a variant floor, a policy that forbids zero, a just-woken model, an idle counter that does not exist yet | [will not park](#a-model-will-not-park-at-zero) |
+| flapping | `WVAReplicaScalingThrashing`; `tgt` alternating in `scaling-decision` | utilization crossing a narrow band, short stabilization windows, utilization-share swings | [flapping](#a-model-is-flapping) |
+| pinned at max | `wva_variant_at_max_replicas == 1`; `"atMax":true` in `scaling-decision` | `maxReplicaCount` too low for the load | [pinned at max](#a-model-is-pinned-at-max) |
+| desired is not current | `wva_desired_replicas != wva_current_replicas` for many cycles | HPA stabilization window, KEDA not reaching the scaler, Pods Pending (GPUs, ResourceQuota), slow starts | [actuation stuck](#desired-is-not-current-actuation-stuck) |
+| GPUs held / quota spent | `ResourceConstrained` Event; `wva_decisions_limited_total` rising; `wva_model_scaling_blocked{reason="quota-short"}` | the quota or GPU inventory is used up, unresolved accelerators, a lowered quota (it does not evict) | [GPUs held](#gpus-held-or-quota-spent) |
+| metrics stale or missing | `MetricsUnavailable` Event; `wva_metrics_freshness_status{status!="fresh"} > 0`; `WVAMetricsCollectionFailing`; `wva_unmeasured_queue > 0` | ServiceMonitor or PodMonitor not selecting the pods, Prometheus unreachable, FMA launcher pods not scraped | [metrics](#metrics-stale-or-missing) |
+| controller not Ready or crash-looping | pod `0/1` or `CrashLoopBackOff`; log `refusing to start unbounded`; readiness check `gpu-policy` failing | cluster policy unreadable, a `gpu-inventory` limiter with no node read, a Prometheus setting it refuses, an image older than the manifests | [controller not Ready](#the-controller-is-not-ready-or-crash-looping) |
+| ScaledObject `READY False` or `TARGETS <unknown>` | `kubectl get scaledobject,hpa -n <ns>` | `scalerAddress` names a namespace with no scaler, `modelID` missing, the controller not Ready, KEDA backing off after a reinstall | [ScaledObject](#scaledobject-ready-false-or-targets-unknown) |
+| utilization-share optimizer does nothing | `wva_utilization_share_mode`, `wva_utilization_share_actionable` | shadow mode, not planned, held, swinging | [optimizer](#the-optimizer-evaluates-but-never-moves-anything) |
+
+Alerts that point here are listed in [Prometheus: the shipped alerts](prometheus.md#the-shipped-alerts).
+Events are listed in [Monitoring: Events](monitoring.md#events).
+
+## A model will not scale up
+
+**Symptom**: load rises, latency rises, the replica count does not.
+
+Read the model's last decisions:
+
+```bash
+$LOGS | grep scaling-decision | grep '"modelID": "<model>"' | tail -5
+$LOGS | grep analyzer-result  | grep '"modelID": "<model>"' | tail -5
+```
+
+| what the lines show | means | go to |
+| --- | --- | --- |
+| `tgt` above `curr`, for several cycles | the decision is right; it is not being carried out | [actuation stuck](#desired-is-not-current-actuation-stuck) |
+| `"atMax":true` | the variant is at its own `maxReplicaCount` | [pinned at max](#a-model-is-pinned-at-max) |
+| `util` below `scaleUpThreshold` | by the controller's measure the model is not saturated; check the measure next | the metrics below |
+| no line for the model | the controller is not deciding for it: no ScaledObject names this scaler, or its metrics are missing | [ScaledObject](#scaledobject-ready-false-or-targets-unknown), [metrics](#metrics-stale-or-missing) |
+
+Then check the silent causes, in this order:
+
+```promql
+wva_model_scaling_blocked{model_name="<model>"}           # any reason holding it back
+wva_node_access_denied == 1                               # gpu-inventory limiter, nodes unreadable: nothing scales up
+increase(wva_decisions_limited_total[15m]) > 0            # a limiter capped it
+wva_unmeasured_queue{model_name="<model>"} > 0            # requests queue for pods it cannot see
+wva_metrics_freshness_status{status!="fresh"} > 0         # decided on stale or missing data
+```
+
+`wva_node_access_denied` is covered in [controller not Ready](#the-controller-is-not-ready-or-crash-looping);
+a limiter in [GPUs held](#gpus-held-or-quota-spent); the last two in
+[metrics](#metrics-stale-or-missing).
+
+## A model will not wake from zero
+
+**Symptom**: the workload stays at 0 replicas while requests are pending.
+
+Start with the [scale-to-zero guide's runbook](../guides/scale-to-zero/README.md#when-a-model-will-not-wake),
+which checks the whole wake chain. If that does not settle it:
+
+1. **The InferencePool.**
    ```bash
-   # Check if InferencePool exists and is reconciled
-   kubectl get inferencepool
+   kubectl get inferencepool -n <ns>
    ```
-   
-   the scaling manager watches a single InferencePool API group (`inference.networking.k8s.io` or `inference.networking.x-k8s.io`). If the cluster's pools use the other group, the datastore stays empty and scale-from-zero never gets a recommendation.
-   
-   **Solution**: Ensure InferencePool is created and reconciled before the workload's ScaledObject. When using **`make deploy-e2e-infra`**, `deploy/install-epp.sh` installs the GAIE standalone chart which creates the InferencePool after the EPP starts.
+   The scaling manager watches a single InferencePool API group
+   (`inference.networking.k8s.io` or `inference.networking.x-k8s.io`). If the
+   cluster's pools use the other group, the datastore stays empty and
+   scale-from-zero never gets a recommendation. Create the InferencePool, and
+   let it be reconciled, before the workload's ScaledObject.
 
-2. **Labels mismatch**:
+2. **Labels.** The workload's pod labels must match the InferencePool selector:
    ```bash
-   # Check deployment labels
-   kubectl get deployment llama-8b-deployment -o jsonpath='{.spec.template.metadata.labels}'
-   
-   # Check InferencePool selector
-   kubectl get inferencepool llama-pool -o jsonpath='{.spec.selector}'
+   kubectl get deployment <deployment> -n <ns> -o jsonpath='{.spec.template.metadata.labels}'
+   kubectl get inferencepool <pool> -n <ns> -o jsonpath='{.spec.selector}'
    ```
-   
-   **Solution**: Ensure deployment labels match InferencePool selector.
 
-3. **EPP metrics source not available**:
+3. **The EPP.** It must exist and export its flow-control queue:
    ```bash
-   # Check if EPP service exists
-   kubectl get svc | grep epp
+   kubectl get svc -n <ns> | grep epp
    ```
-   
-   **Solution**: Verify EndpointPicker service is running and metrics are being collected.
+   A model with no queue metric at all shows
+   `wva_model_scaling_blocked{reason="no-wake-signal"}`. Enable the EPP's
+   `flowControl` feature gate, then restart the EPP: it reads its config once
+   at start.
 
-4. **No pending requests in queue**:
-
-   Extract the Bearer token from the EPP metrics reader secret:
+4. **The queue itself.** Read it straight from the EPP, with the token the
+   controller uses:
    ```bash
-   TOKEN=$(kubectl -n workload-variant-autoscaler-system get secret wva-epp-metrics-token -o jsonpath='{.data.token}' | base64 --decode)
+   TOKEN=$(kubectl -n "$NS" get secret wva-epp-metrics-token -o jsonpath='{.data.token}' | base64 --decode)
+   kubectl port-forward -n <ns> svc/<epp-service> 9090:9090 &
+   curl -s -H "Authorization: Bearer $TOKEN" localhost:9090/metrics \
+     | grep -E 'llm_d_epp_flow_control_queue_size|inference_extension_flow_control_queue_size'
+   kill %1
    ```
-
-   Port-forward the EPP metrics service to localhost:9090:
-
-   ```bash
-   kubectl port-forward svc/epp 9090:9090
-   ```
-
-   In a separate terminal, query the metrics endpoint:
-   ```bash
-   curl -H "Authorization: Bearer $TOKEN" localhost:9090/metrics | grep inference_extension_flow_control_queue_size
-   ```
-
-   **Solution**: Verify requests are being sent to the correct model endpoint.
-
-   The metric family was renamed: llm-d's EPP exports
-   `llm_d_epp_flow_control_queue_size` and upstream gateway-api-inference-extension
-   still exports `inference_extension_flow_control_queue_size`. Grep for both — the scaling manager
-   reads whichever exists.
+   llm-d's EPP exports `llm_d_epp_flow_control_queue_size`; upstream
+   gateway-api-inference-extension exports
+   `inference_extension_flow_control_queue_size`. The scaling manager reads
+   whichever exists. A queue that stays at 0 means requests are not reaching the
+   EPP: send them through the inference gateway, not straight to model pods.
 
 ### The EPP scrape is failing but the scaling manager still wakes models (slowly)
 
@@ -73,72 +123,274 @@ interval — fix the direct path.
 
 and `wva_scale_from_zero_queue_fallback_active{pool="..."}` is `1`.
 
-**What it means**: The scaling manager reads the flow-control queue by scraping the EPP pod
-**directly** — pod IP, EPP metrics port, bearer token projected at
-`/var/run/secrets/epp-metrics/token`. Every other metric it consumes comes from
-Prometheus, so this one path can fail on its own. When it does, the scaling manager falls back to
-reading the same metric from Prometheus so models still wake. Nothing looks broken
-from the outside; wakes are just slower — bounded by the Prometheus scrape interval
-rather than the engine's 100 ms loop — and a sample older than 90 s is ignored, so
-a queue that has already drained cannot wake anything.
+**What it means**: the scaling manager reads the flow-control queue by scraping
+the EPP pod **directly** (pod IP, EPP metrics port, bearer token projected at
+`/var/run/secrets/epp-metrics/token`). Everything else comes from Prometheus, so
+this one path can fail on its own. When it does, the scaling manager reads the
+same metric from Prometheus so models still wake, only slower: bounded by the
+scrape interval instead of a 100 ms loop. A sample older than 90 s is ignored,
+so a queue that has already drained cannot wake anything.
 
-This is a degraded state, not a supported one. Check, in order:
+Check, in order:
 
-1. **The token.** `Failed to read EPP metrics token` in the log means the projected
-   volume is missing; the scaling manager then scrapes unauthenticated and the EPP rejects it.
+1. **The token.** `Failed to read EPP metrics token` in the log means the
+   projected volume is missing; the scrape then goes unauthenticated and the
+   EPP rejects it.
    ```bash
-   kubectl -n workload-variant-autoscaler-system exec deploy/wva-controller-manager --      ls -l /var/run/secrets/epp-metrics/token
+   kubectl -n "$NS" exec deploy/wva-controller-manager -- ls -l /var/run/secrets/epp-metrics/token
    ```
-2. **The EPP's tokenreview RBAC**, which authorizes the scaling manager's token. It is bound per
-   release name, so a renamed or reinstalled EPP release leaves the scaling manager's binding
-   pointing at nothing.
+2. **The EPP's tokenreview RBAC** (cluster admin), which authorizes the
+   controller's token. It is bound per EPP release name, so a renamed or
+   reinstalled EPP release leaves the binding pointing at nothing.
    ```bash
    kubectl get clusterrolebinding | grep epp-tokenreview
    ```
-3. **Network reachability to the EPP pod IP.** Prometheus scrapes the EPP too, so a
-   NetworkPolicy admitting the monitoring namespace but not the scaling manager's breaks exactly
-   this path and no other.
+3. **Network reachability to the EPP pod IP.** Prometheus scrapes the EPP too,
+   so a NetworkPolicy that admits the monitoring namespace but not the
+   controller's breaks exactly this path and no other.
 
-The gauge returns to `0` and the log reports the scrape recovered once the direct
-path works again.
+The gauge returns to `0` and the log reports the scrape recovered once the
+direct path works.
+
+### Slow wakes
+
+**Symptom**: the model wakes, but late. `wva_scale_from_zero_wake_seconds`
+shows the time from activation to serving.
+
+- **Many models waking at once.** The scale-from-zero engine processes at most
+  `SCALE_FROM_ZERO_ENGINE_MAX_CONCURRENCY` decisions at a time (default `10`).
+  Raise it for a cluster with many parked models:
+  ```bash
+  kubectl set env -n "$NS" deploy/wva-controller-manager SCALE_FROM_ZERO_ENGINE_MAX_CONCURRENCY=50
+  ```
+  This restarts the controller. Check it is still set after each later
+  `make deploy-wva`, which re-applies the Deployment.
+- **The replica itself starts slowly.** Compare with `wva_replica_start_seconds`;
+  see [Preparing a workload](workload-preparation.md).
+- **Requests bypass the gateway.** Requests sent straight to model pods never
+  queue in the EPP and never wake anything.
 
 ### E2E and infra-only deploys
 
 For e2e-style deploys, **`deploy/install-epp.sh`** enables EPP flow control when `ENABLE_SCALE_TO_ZERO=true` (adds the `flowControl` feature gate to the GAIE standalone chart). The **InferenceObjective** `e2e-default` is created by the scale-from-zero e2e tests (`test/e2e/fixtures`), not by the install scripts. See [deploy/install-epp.sh](../../deploy/install-epp.sh).
 
-## Slow Scale-Up Response
+## A model will not park at zero
 
-**Symptom**: Deployment takes too long to scale up from zero.
+**First signal**: `wva_model_scaling_blocked` for the model:
 
-**Possible Causes**:
+```promql
+wva_model_scaling_blocked{model_name="<model>"}
+```
 
-1. **High concurrent processing load**:
-   
-   This can happen when there are many variants that are scaled down to zero, causing the scale-from-zero engine to process multiple scaling decisions simultaneously.
-   
-   **Solution**: Increase `SCALE_FROM_ZERO_ENGINE_MAX_CONCURRENCY`:
+| reason | fix |
+| --- | --- |
+| `variant-floor` | a variant still has `minReplicaCount > 0`; set every variant to 0 |
+| `policy-forbids-zero` | the model's policy tier has `scaleToZero` off; turn it on, or accept that it stays up |
+| `activation-retention` | just woken and held for its retention period; clears by itself |
+| `engine-unsupported` | the model runs both vLLM and SGLang; run one engine per model |
 
-   Add the environment variable to the scaling manager controller deployment:
+No reason at all, and still not parked: a model that has never served a request
+has no request counter yet, so the controller keeps it where it is. Send one
+request. The full runbook is in the
+[scale-to-zero guide](../guides/scale-to-zero/README.md#when-a-model-will-not-park).
 
-   ```yaml
-   apiVersion: apps/v1
-   kind: Deployment
-   metadata:
-      name: controller-manager
-      namespace: workload-variant-autoscaler-system
-   spec:
-      template:
-         spec:
-            containers:
-            - name: manager
-            env:
-            - name: SCALE_FROM_ZERO_ENGINE_MAX_CONCURRENCY
-              value: "50"  # Increase for larger clusters
+## A model is flapping
+
+**Symptom**: replicas go up and down every few minutes. `WVAReplicaScalingThrashing`
+fires at more than two decisions a minute for one variant.
+
+1. **Read what the controller decided**, cycle by cycle:
+   ```bash
+   $LOGS | grep scaling-decision | grep '"modelID": "<model>"' | tail -40
    ```
+   `tgt` alternating between two values is the controller flapping. `tgt`
+   steady while the replica count moves is the HPA or something else moving
+   the workload: see [actuation stuck](#desired-is-not-current-actuation-stuck).
+2. **Read why**:
+   ```bash
+   $LOGS | grep analyzer-result | grep '"modelID": "<model>"' | tail -40
+   ```
+   Compare `util` with `scaleUpThreshold` and `scaleDownBoundary` on the same
+   line. `util` crossing back and forth over one of them is load sitting on the
+   edge of the band. Widen the band in the scaling policy (lower
+   `scaleDownBoundary`): see [Changing policy safely](operations.md#changing-policy-safely)
+   and [scaling policy](scaling-policy.md).
+3. **Check the HPA's stabilization windows.** KEDA's HPA acts on the
+   controller's number through the ScaledObject's
+   `advanced.horizontalPodAutoscalerConfig.behavior`:
+   ```bash
+   kubectl get scaledobject <name> -n <ns> \
+     -o jsonpath='{.spec.advanced.horizontalPodAutoscalerConfig.behavior}'
+   ```
+   The generated ScaledObjects use scale-up `stabilizationWindowSeconds: 0` and
+   scale-down `300`, set at generation by `WVA_SO_SCALE_UP_STABILIZATION` and
+   `WVA_SO_SCALE_DOWN_STABILIZATION` ([configuration](configuration.md)). A
+   scale-down window shorter than the model's load cycle releases a replica it
+   will need again. Raise it on the object:
+   ```bash
+   kubectl patch scaledobject <name> -n <ns> --type=merge -p \
+     '{"spec":{"advanced":{"horizontalPodAutoscalerConfig":{"behavior":{"scaleDown":{"stabilizationWindowSeconds":600}}}}}}'
+   ```
+   or set `WVA_SO_SCALE_DOWN_STABILIZATION` before `make scaledobjects-apply`.
+   If the ScaledObject is managed by GitOps, change it there.
+4. **Under the utilization-share optimizer**, a model whose load swings faster
+   than a transfer lands shows `swinging` or `fast-swing-capped`; see
+   [the optimizer runbook](#the-optimizer-evaluates-but-never-moves-anything).
 
-2. **Inference gateway not receiving requests**:
-   
-   **Solution**: Verify that requests are being routed through the inference gateway and not directly to model server endpoints.
+## A model is pinned at max
+
+**Symptom**: `wva_variant_at_max_replicas == 1`, or `"atMax":true` in
+`scaling-decision`, and latency is high.
+
+At max on its own is normal: a well-sized variant under load sits there. It is a
+problem only when `util` in `analyzer-result` is still above `scaleUpThreshold`.
+That is demand going unserved, and more GPUs will not help: the ceiling is yours.
+
+```bash
+kubectl get scaledobject <name> -n <ns> -o jsonpath='{.spec.maxReplicaCount}'
+kubectl patch scaledobject <name> -n <ns> --type=merge -p '{"spec":{"maxReplicaCount":<n>}}'
+```
+
+Check the GPUs first: a higher ceiling with no free GPUs turns into Pending
+pods ([GPUs held](#gpus-held-or-quota-spent)). A benchmark run pinned at its
+ceiling measures the ceiling, not the autoscaler.
+
+## Desired is not current (actuation stuck)
+
+**Symptom**: `wva_desired_replicas` differs from `wva_current_replicas` for many
+cycles; `scaling-decision` shows `tgt` not equal to `curr` cycle after cycle.
+
+The controller decided; KEDA, the HPA or the workload did not follow. Check the
+chain in order:
+
+1. **The scale-down window.** A scale-down waits out the HPA's
+   `stabilizationWindowSeconds` (300 s by default). Several minutes of
+   `tgt < curr` is the design.
+2. **KEDA got the number.**
+   ```bash
+   kubectl get scaledobject,hpa -n <ns>
+   kubectl describe hpa keda-hpa-<name> -n <ns>
+   ```
+   `READY True` and a numeric `TARGETS` mean KEDA reads the controller. Otherwise
+   go to [ScaledObject](#scaledobject-ready-false-or-targets-unknown). In the
+   HPA's conditions, `ScalingLimited` means it hit `minReplicaCount` or
+   `maxReplicaCount`.
+3. **The Pods.**
+   ```bash
+   kubectl get pods -n <ns> --field-selector=status.phase=Pending
+   kubectl get events -n <ns> --field-selector reason=FailedScheduling
+   kubectl get events -n <ns> --field-selector reason=FailedCreate
+   ```
+   `FailedScheduling` with insufficient `nvidia.com/gpu` is a full cluster.
+   `FailedCreate` with `exceeded quota` is a Kubernetes ResourceQuota
+   (`kubectl describe resourcequota -n <ns>`), which the scaling manager does
+   not see.
+4. **Slow starts.** Pods created but not Ready for minutes: compare
+   `wva_replica_start_seconds` with what you expect, and see
+   [Preparing a workload](workload-preparation.md).
+
+## GPUs held or quota spent
+
+**Symptom**: the controller wants more replicas and does not get them, or a
+model cannot grow while others hold GPUs.
+
+| signal | means |
+| --- | --- |
+| `ResourceConstrained` Warning Event on the ScaledObject | a limiter capped this cycle's decision |
+| `wva_decisions_limited_total` rising | same, as a counter per `limiter_name` |
+| `wva_available_gpus` | GPUs the `gpu-inventory` limiter sees per accelerator type |
+| `wva_unattributed_gpus > 0` | GPUs held by workloads whose accelerator did not resolve, charged to no pool, so every pool looks freer than it is |
+| `wva_model_scaling_blocked{reason="quota-short"}` | under the utilization-share optimizer, the whole group is short |
+
+A quota that is **fully** spent can show none of these: the decision lands at
+`no-change` (`tgt` equal to `curr` with `util` over the threshold) and no Event
+is recorded. Compare the quota with what the models hold:
+
+```bash
+kubectl get configmap wva-scaling-policy-config -n "$NS" -o yaml | grep -A10 limiters
+kubectl get pods -n <ns> -o custom-columns='NAME:.metadata.name,GPUS:.spec.containers[*].resources.limits.nvidia\.com/gpu'
+```
+
+What to do:
+
+- Raise the quota, or free GPUs by lowering another model's `minReplicaCount`
+  or `maxReplicaCount`. Lowering a quota does not evict: models move back under
+  it only as they scale down.
+- Resolve accelerators: set a GPU product `nodeSelector` or `nodeAffinity` on
+  each workload (`AcceleratorNotResolved` Event names them).
+- A `gpu-inventory` limiter counts allocatable GPUs on nodes, not GPUs free
+  for scheduling.
+
+See [the GPU limiter](gpu-limiter.md) and [the quota limiter](quota-limiter.md).
+
+## Metrics stale or missing
+
+**Symptom**: decisions look wrong or absent; a `MetricsUnavailable` Warning Event
+on the ScaledObject; `WVAMetricsCollectionFailing` firing.
+
+1. **Is Prometheus reachable?** `wva_metrics_collection_errors_total` rising, or
+   Prometheus errors in the controller log, mean the query fails. Check the
+   Prometheus URL and TLS settings ([Prometheus](prometheus.md#configuration)).
+2. **Are the model pods scraped?** `wva_metrics_pods_discovered` should be above
+   0 per model, and `wva_metrics_freshness_status{status="fresh"}` equal to the
+   pod count.
+   ```bash
+   make verify-deployment
+   kubectl get servicemonitor,podmonitor -n <ns>
+   ```
+   Then confirm the targets are up on Prometheus' `/targets` page.
+3. **Requests queue for pods it cannot see?** `wva_unmeasured_queue > 0`, or
+   `has N ready pod(s) but none attributed` in the log with an
+   `UnattributedReadyPods` Event: the serving pods are not scraped or their
+   ownerReferences do not reach the scale target. On FMA, see
+   [FMA launcher pods](operations.md#fma-launcher-pods).
+
+While a variant's metrics are unavailable it keeps its current replica count.
+Details: [Metrics health](metrics.md).
+
+## The controller is not Ready or crash-looping
+
+```bash
+kubectl get pods -n "$NS" -l app.kubernetes.io/name=workload-variant-autoscaler
+kubectl describe pod -n "$NS" -l app.kubernetes.io/name=workload-variant-autoscaler
+kubectl logs -n "$NS" deploy/wva-controller-manager --previous    # after a crash
+```
+
+A NotReady controller has no endpoints on the `wva-external-scaler` Service, so
+KEDA cannot reach it and **no** model scales. To see which readiness check fails:
+
+```bash
+kubectl port-forward -n "$NS" deploy/wva-controller-manager 8081:8081 &
+curl -s 'localhost:8081/readyz?verbose'
+kill %1
+```
+
+| failing check, or log line | means | fix |
+| --- | --- | --- |
+| `gpu-policy`: `cluster policy declares a gpu-inventory limiter but this controller may not list nodes` | a limiter was added to cluster policy and this controller lacks node read. Kept NotReady on purpose: otherwise every variant would silently stop scaling up. `wva_node_access_denied` and `WVANodeAccessDenied` report the same | (cluster admin) grant node read: `make enable-physical-limiter` grants every controller it finds. Or remove the limiter |
+| `readyz`: `initial ConfigMap bootstrap not complete`, with `cannot read cluster policy from <ns>/<name>, refusing to start unbounded` in the log | the controller cannot read the cluster policy ConfigMap in the policy namespace (`wva-policy` by default). It refuses to run without its limits | (cluster admin) grant it get/list/watch on ConfigMaps there; `make enable-physical-limiter` does this for every controller |
+| `external-scaler` | the gRPC scaler KEDA calls is not serving | read the log around startup for the bind error |
+| `CrashLoopBackOff`, log names a Prometheus setting | a plain `http://` URL without `PROMETHEUS_ALLOW_HTTP=true`, or TLS settings combined with plain HTTP | fix the Prometheus settings ([Prometheus](prometheus.md#configuration)) |
+| `CrashLoopBackOff`, `unknown flag` | the image is older than the manifests | deploy an image built from the same release as the manifests ([Upgrade](upgrade-and-uninstall.md)) |
+
+## ScaledObject READY False or TARGETS `<unknown>`
+
+```bash
+kubectl get scaledobject,hpa -n <ns>
+kubectl get scaledobject <name> -n <ns> -o jsonpath='{.spec.triggers[0].metadata}'
+kubectl get endpoints -n "$NS" wva-external-scaler
+```
+
+| sign | cause | fix |
+| --- | --- | --- |
+| `scalerAddress` names a namespace where no scaler runs | the ScaledObject points at another or a removed install | `make scaledobjects-repoint` |
+| the trigger has no `modelID` | the controller cannot tell which model to answer for | set `modelID` to what the container serves; `make verify-scaledobjects` |
+| `wva-external-scaler` has no endpoints | the controller is not Ready | [controller not Ready](#the-controller-is-not-ready-or-crash-looping) |
+| `TARGETS` reads `cpu: <unknown>/80%` | KEDA never got a metric spec and fell back to CPU | one of the above |
+| `no children to pick from` in KEDA's log, after an uninstall and reinstall | KEDA's gRPC client is still backing off on a name that did not resolve | (cluster admin) restart the KEDA operator ([details](operations.md#no-children-to-pick-from-after-a-reinstall)) |
+
+More rows: [First-line troubleshooting](operations.md#first-line-troubleshooting).
+Removing or reinstalling the controller: [Upgrade and uninstall](upgrade-and-uninstall.md).
 
 ## Utilization-Share Optimizer
 
