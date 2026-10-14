@@ -1,0 +1,33 @@
+# The saturation analyzer can carry what it has learned -- k2, throughput,
+# ITL baselines, start estimates -- across a controller restart in one ConfigMap
+# in the controller's own namespace, when LEARNED_STATE_SNAPSHOT is on
+# (docs/proposals/learned-state-snapshot.md). Without this Role the controller
+# logs the failure and starts every restart cold, as it did before the store
+# existed.
+#
+# A namespaced Role, so it installs in both scopes: a namespace admin may create
+# it in the namespace they install into. get and update are limited to the one
+# ConfigMap by name; create cannot be, because the name of an object that does
+# not exist yet is not known to the authorizer.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    app.kubernetes.io/name: workload-variant-autoscaler
+  name: learned-state-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  resourceNames:
+  - wva-learned-state
+  verbs:
+  - get
+  - update
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - create

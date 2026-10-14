@@ -25,10 +25,10 @@ var _ = Describe("learned state across a restart", func() {
 	}
 	// newProcess is one controller process: its own store, loaded from the
 	// scale target as the engine does before every cycle, and its analyzer.
-	newProcess := func(p *capacity.EngineParams) (*SaturationAnalyzer, *capacity.Store) {
+	newProcess := func(p *capacity.EngineParams) *SaturationAnalyzer {
 		store := capacity.NewStore()
 		store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: p})
-		return NewSaturationAnalyzer(store), store
+		return NewSaturationAnalyzer(store)
 	}
 	capacityOf := func(a *SaturationAnalyzer) float64 {
 		result, err := a.Analyze(context.Background(), makeAnalyzerInput(
@@ -58,11 +58,11 @@ var _ = Describe("learned state across a restart", func() {
 	}
 
 	It("restores k2 into a new process running the same configuration", func() {
-		first, _ := newProcess(params(256))
+		first := newProcess(params(256))
 		saved := carry(learn(first))
 		Expect(saved.Config).To(HaveKey("test-ns/variant-a"), "the variant's configuration travels with it")
 
-		second, _ := newProcess(params(256))
+		second := newProcess(params(256))
 		Expect(capacityOf(NewSaturationAnalyzer(capacity.NewStore()))).To(Equal(float64(12800)),
 			"the control: a process with nothing restored prices the replica at k1")
 		rep := second.RestoreLearnedState(saved)
@@ -72,10 +72,10 @@ var _ = Describe("learned state across a restart", func() {
 	})
 
 	It("does not restore into a variant whose engine configuration changed", func() {
-		first, _ := newProcess(params(256))
+		first := newProcess(params(256))
 		saved := carry(learn(first))
 
-		second, _ := newProcess(params(64))
+		second := newProcess(params(64))
 		second.RestoreLearnedState(saved)
 		Expect(capacityOf(second)).To(Equal(float64(12800)),
 			"a k2 measured under --max-num-seqs=256 priced an engine running 64")
@@ -85,21 +85,21 @@ var _ = Describe("learned state across a restart", func() {
 	})
 
 	It("does not restore an entry past its horizon", func() {
-		first, _ := newProcess(params(256))
+		first := newProcess(params(256))
 		saved := carry(learn(first))
 		for k, w := range saved.K2 {
 			w.LastUsed = time.Now().Add(-2 * capacity.HistoryRetention)
 			saved.K2[k] = w
 		}
 
-		second, _ := newProcess(params(256))
+		second := newProcess(params(256))
 		second.RestoreLearnedState(saved)
 		Expect(capacityOf(second)).To(Equal(float64(12800)),
 			"a window unread for longer than the retention came back as if it had been read")
 	})
 
 	It("keeps each entry's clocks, so a restore does not make a figure younger", func() {
-		first, _ := newProcess(params(256))
+		first := newProcess(params(256))
 		saved := learn(first)
 		var used time.Time
 		for k, w := range saved.K2 {
@@ -108,7 +108,7 @@ var _ = Describe("learned state across a restart", func() {
 			saved.K2[k] = w
 		}
 
-		second, _ := newProcess(params(256))
+		second := newProcess(params(256))
 		second.RestoreLearnedState(carry(saved))
 		second.mu.Lock()
 		key := ""
@@ -127,11 +127,11 @@ var _ = Describe("learned state across a restart", func() {
 	})
 
 	It("does not restore a variant whose configuration was not known when it was saved", func() {
-		first, _ := newProcess(params(256))
+		first := newProcess(params(256))
 		saved := carry(learn(first))
 		saved.Config = nil
 
-		second, _ := newProcess(params(256))
+		second := newProcess(params(256))
 		rep := second.RestoreLearnedState(saved)
 		Expect(rep.PendingVariants).To(BeZero())
 		Expect(rep.Unattributable).To(BeNumerically(">", 0))
@@ -139,10 +139,10 @@ var _ = Describe("learned state across a restart", func() {
 	})
 
 	It("never overwrites what the new process has already learned", func() {
-		first, _ := newProcess(params(256))
+		first := newProcess(params(256))
 		saved := carry(learn(first))
 
-		second, _ := newProcess(params(256))
+		second := newProcess(params(256))
 		_, err := second.Analyze(context.Background(), makeAnalyzerInput(
 			[]domain.ReplicaMetrics{makeReplicaMetrics("pod-a", "variant-a", 9000, 16000, 6, 100, 50)}, states))
 		Expect(err).NotTo(HaveOccurred())
@@ -151,7 +151,7 @@ var _ = Describe("learned state across a restart", func() {
 	})
 
 	It("forgets everything, restored or learned, when the store is flushed", func() {
-		first, _ := newProcess(params(256))
+		first := newProcess(params(256))
 		saved := carry(learn(first))
 		first.RestoreLearnedState(saved)
 		first.ForgetLearnedState()

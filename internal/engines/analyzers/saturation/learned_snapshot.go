@@ -87,7 +87,7 @@ type RestoredVariant struct {
 
 // pendingVariant is one variant's restored entries awaiting the check.
 type pendingVariant struct {
-	expect     string    // the fingerprint they were learned under
+	expect     string // the fingerprint they were learned under
 	state      LearnedState
 	restoredAt time.Time // when they were taken in, for the sweep
 }

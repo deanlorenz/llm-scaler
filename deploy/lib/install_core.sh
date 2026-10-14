@@ -57,12 +57,18 @@ wva_missing_prereqs() {
         #   wva-utilization-share-history-*  the utilization-share need history
         #                       store; without it a restart forgets the models'
         #                       peaks and caps their headroom for a window.
+        #   wva-learned-state-*  the learned-state snapshot
+        #                       (LEARNED_STATE_SNAPSHOT); without it a restart
+        #                       starts every model's learned capacity cold.
         case "$name" in
             wva-kueue-reader-*)
                 echo "OPTIONAL $kind/$name|the Kueue quota source (a quota limiter entry with kueue.enabled)"
                 continue ;;
             wva-utilization-share-history-role|wva-utilization-share-history-rolebinding)
                 echo "OPTIONAL $kind/$name|the utilization-share need history, kept across controller restarts"
+                continue ;;
+            wva-learned-state-role|wva-learned-state-rolebinding)
+                echo "OPTIONAL $kind/$name|the learned-state snapshot (LEARNED_STATE_SNAPSHOT), kept across controller restarts"
                 continue ;;
         esac
         case "$kind" in

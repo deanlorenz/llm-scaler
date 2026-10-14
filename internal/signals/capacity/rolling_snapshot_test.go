@@ -46,10 +46,10 @@ func TestRestoreKeepsOnlyUsableValues(t *testing.T) {
 func TestRestoreRefusesWhatCannotBeUsedHonestly(t *testing.T) {
 	now := time.Now()
 	for name, s := range map[string]RollingAverageSnapshot{
-		"no usable value":  {Values: []float64{math.NaN()}, LastUsed: now, LastWritten: now},
-		"no values":        {LastUsed: now, LastWritten: now},
-		"no last-used":     {Values: []float64{4000}, LastWritten: now},
-		"no last-written":  {Values: []float64{4000}, LastUsed: now},
+		"no usable value": {Values: []float64{math.NaN()}, LastUsed: now, LastWritten: now},
+		"no values":       {LastUsed: now, LastWritten: now},
+		"no last-used":    {Values: []float64{4000}, LastWritten: now},
+		"no last-written": {Values: []float64{4000}, LastUsed: now},
 	} {
 		_, ok := RestoreRollingAverage(s, 4)
 		assert.False(t, ok, name)
