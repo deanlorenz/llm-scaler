@@ -12,7 +12,7 @@ Each additional pool is another `create`, with its own name and the accelerator
 it is for:
 
 ```bash
-deploy/warmpool.sh create -n <namespace> --name h100   --accelerator NVIDIA-H100-80GB-HBM3 --gpus 1   --models 4 --model-size 8B   --wva-namespace <where WVA runs>
+deploy/warmpool.sh create -n <namespace> --name h100   --accelerator NVIDIA-H100-80GB-HBM3 --gpus 1   --models 4 --model-size 8B   --wva-namespace <where the scaling manager runs>
 ```
 
 `plan` will have told you which pools the namespace wants, and which models can
@@ -58,7 +58,7 @@ triggers:
 
 **With one pool you write none of this.** There is nothing to disambiguate, so a
 ScaledObject that says nothing still gets a warm copy. The key is only needed
-once a namespace holds more than one pool — and then it is required: The scaling manager will
+once a namespace holds more than one pool — and then it is required: the scaling manager will
 not guess, because guessing wrong spends a full model load on a copy that can
 never serve. It names the variant and the pools that exist instead.
 

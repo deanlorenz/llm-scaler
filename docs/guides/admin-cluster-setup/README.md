@@ -2,15 +2,20 @@
 
 ## Overview
 
-Creates, for one namespace, the things a namespace admin cannot: the namespace
-itself, the cluster-scoped RBAC, and the ServiceMonitor. After this, that
+Creates, for one namespace that already runs llm-d, the things a namespace
+admin cannot: the cluster-scoped RBAC and the ServiceMonitor (and the
+controller's own namespace, when it runs apart from the one it manages). After this, that
 namespace's owner installs and upgrades the controller with no cluster-scoped
 rights, and you are not in the loop again unless a release changes what it
 needs cluster-wide.
 
 ## Prerequisites
 
-Cluster-admin rights, and the namespace you are preparing:
+Cluster-admin rights, and the namespace you are preparing, with llm-d model
+servers **already running in it**. Both commands below refuse a namespace that
+does not exist or holds no model servers, and apply the same monitoring and EPP
+checks as the [install guide's prerequisites](../install-in-namespace/#prerequisites).
+So the order is: deploy llm-d, then `make check-prereqs`, then `make setup-prereqs`.
 
 <!-- guide:env.static.namespace start -->
 ```bash
@@ -38,14 +43,15 @@ Once per namespace, not once per upgrade.
 
 | object | why a namespace admin cannot create it |
 | --- | --- |
-| the namespace | cluster-scoped |
+| the controller's namespace, when `WVA_NS` names a separate one | cluster-scoped |
 | `wva-metrics-auth-role` + binding | the metrics filter issues **TokenReview** |
 | `wva-metrics-reader` + binding | lets Prometheus scrape the controller |
 | `wva-epp-metrics-reader-role` + binding | needs `nonResourceURLs: /metrics` |
 | `wva-node-reader-role` + binding | resolving a variant's accelerator reads **Nodes** |
 | the ServiceMonitor | the stock `admin` ClusterRole does not grant `monitoring.coreos.com` |
 | the controller's `Role` + `RoleBinding` | namespaced, but RBAC forbids granting permissions you do not hold yourself, and the controller's Role names resources a namespace admin does not have |
-| Prometheus / KEDA | only if the cluster has none |
+| Prometheus | Kubernetes only, and only if the cluster has none |
+| KEDA | Kubernetes only, and only with `KEDA_HELM_INSTALL=true`. On OpenShift, install the Custom Metrics Autoscaler operator beforehand |
 
 Every cluster-scoped object is named with a hash of the namespace, so two
 installs cannot take each other's and an uninstall removes only its own.
@@ -88,16 +94,22 @@ owner can then run `make deploy-wva` without you.
 
 ## Cleanup
 
+Undeploy names the namespace the **controller** runs in. For the default shape,
+where it runs in the namespace it manages:
+
 <!-- guide:cleanup.undo start -->
 ```bash
-# Undeploy targets ONE install, and this guide may have created two. Name the
-# namespace each controller runs in — a bare `make undeploy-wva` defaults to
-# workload-variant-autoscaler-system, which is neither of them, and leaves
-# the RBAC it granted in ${NAMESPACE} behind.
-make undeploy-wva WVA_NS=wva-${NAMESPACE}
 make undeploy-wva WVA_NS=${NAMESPACE}
 ```
 <!-- guide:cleanup.undo end -->
+
+For the out-of-reach shape above:
+
+<!-- guide:cleanup.out_of_reach start -->
+```bash
+make undeploy-wva WVA_NS=wva-${NAMESPACE}
+```
+<!-- guide:cleanup.out_of_reach end -->
 
 The namespace, Prometheus, KEDA and EPP stay.
 

@@ -9,7 +9,7 @@ discovered on the cluster, or per-accelerator caps an operator declares.
 `maxReplicaCount` was set as a safety limit rather than a real ceiling — which
 is to say, on any shared cluster.
 
-**Do not mistake it for enforcement.** the scaling manager's limiter is advisory: it stops the scaling manager
+**Do not mistake it for enforcement.** The scaling manager's limiter is advisory: it stops the controller
 *asking* for replicas that cannot be placed. The boundary that actually holds is
 a Kubernetes `ResourceQuota`. A limiter without a quota bounds a well-behaved
 autoscaler, not the cluster.

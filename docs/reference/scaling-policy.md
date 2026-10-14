@@ -1197,7 +1197,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: wva-scaling-policy-config
-  namespace: <workload-variant-autoscaler-namespace>
+  namespace: <controller-namespace>
 data:
   default: |
     analyzers:                    # selects V2 (default since v0.9.0)
@@ -1252,7 +1252,7 @@ Choose thresholds based on your workload characteristics and SLO requirements:
 Update `wva-scaling-policy-config` ConfigMap:
 
 ```bash
-kubectl edit cm wva-scaling-policy-config -n <workload-variant-autoscaler-namespace>
+kubectl edit cm wva-scaling-policy-config -n <controller-namespace>
 ```
 
 Changes take effect **immediately** (the scaling manager watches ConfigMap and auto-reloads).
@@ -1290,7 +1290,7 @@ kubectl rollout restart deployment/gaie-llama-70b-epp -n lab
 
 **the scaling manager verification:**
 ```bash
-kubectl get cm wva-scaling-policy-config -n <workload-variant-autoscaler-namespace> -o yaml
+kubectl get cm wva-scaling-policy-config -n <controller-namespace> -o yaml
 ```
 
 **EPP verification (per-model instance):**
@@ -1347,7 +1347,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: wva-scaling-policy-config
-  namespace: <workload-variant-autoscaler-namespace>
+  namespace: <controller-namespace>
 data:
   default: |
     analyzers:
@@ -1447,7 +1447,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: wva-scaling-policy-config
-  namespace: <workload-variant-autoscaler-namespace>
+  namespace: <controller-namespace>
 data:
   default: |
     analyzers:              # selects V2 (default since v0.9.0)
@@ -1672,12 +1672,12 @@ data:
 
 1. **Verify ConfigMap was updated:**
    ```bash
-   kubectl get cm wva-scaling-policy-config -n <workload-variant-autoscaler-namespace> -o yaml
+   kubectl get cm wva-scaling-policy-config -n <controller-namespace> -o yaml
    ```
 
 2. **Check controller logs for reload confirmation:**
    ```bash
-   kubectl logs -n <workload-variant-autoscaler-namespace> deploy/wva-controller-manager | grep -E "scaling policy|saturation config"
+   kubectl logs -n <controller-namespace> deploy/wva-controller-manager | grep -E "scaling policy|saturation config"
    ```
 
    Expected logs:
@@ -1687,12 +1687,12 @@ data:
    ```
 
 3. **If no logs appear, verify watch is working:**
-   - Check controller pod is running: `kubectl get pods -n <workload-variant-autoscaler-namespace>`
-   - Check for errors: `kubectl logs -n <workload-variant-autoscaler-namespace> deploy/wva-controller-manager --tail=100`
+   - Check controller pod is running: `kubectl get pods -n <controller-namespace>`
+   - Check for errors: `kubectl logs -n <controller-namespace> deploy/wva-controller-manager --tail=100`
 
 4. **Manual restart (last resort):**
    ```bash
-   kubectl rollout restart deploy/wva-controller-manager -n <workload-variant-autoscaler-namespace>
+   kubectl rollout restart deploy/wva-controller-manager -n <controller-namespace>
    ```
 
 ### Cache Initialization Failed
@@ -1713,7 +1713,7 @@ WARN Failed to load initial saturation scaling config, will use defaults
 
 3. Verify cache loaded:
    ```bash
-   kubectl logs -n <workload-variant-autoscaler-namespace> deploy/wva-controller-manager | grep "Updated global scaling policy from ConfigMap"
+   kubectl logs -n <controller-namespace> deploy/wva-controller-manager | grep "Updated global scaling policy from ConfigMap"
    ```
 
 ## Example: Production Setup
@@ -1724,7 +1724,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: wva-scaling-policy-config
-  namespace: <workload-variant-autoscaler-namespace>
+  namespace: <controller-namespace>
 data:
   # Conservative defaults for most workloads (V2 analyzer — the default since v0.9.0)
   default: |
@@ -1761,8 +1761,8 @@ kubectl apply -f deploy/configmap-scaling-policy.yaml
 
 Verify deployment:
 ```bash
-kubectl get cm wva-scaling-policy-config -n <workload-variant-autoscaler-namespace>
-kubectl describe cm wva-scaling-policy-config -n <workload-variant-autoscaler-namespace>
+kubectl get cm wva-scaling-policy-config -n <controller-namespace>
+kubectl describe cm wva-scaling-policy-config -n <controller-namespace>
 ```
 
 ## API Reference

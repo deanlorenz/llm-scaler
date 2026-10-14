@@ -53,7 +53,7 @@ Every option `deploy/install.sh` reads. Verified against the script: each entry 
 | `WVA_FMA_LAUNCHER_METRICS` | Apply a PodMonitor that scrapes FMA launcher pods, which nothing else does — they declare no container ports, so a port-name endpoint generates no target for them. Applied to the **workload** namespace (`WVA_WATCH_NS`, else `WVA_NS`), and skipped if another PodMonitor already scrapes launchers there. See [FMA launcher pods](operations.md#fma-launcher-pods) | `false` |
 | `DEPLOY_LLMD_NS` | Create an empty llm-d namespace up front. Useful only for a demo that wants it to exist before anything is deployed into it; `deploy/install-epp.sh` creates its own when it deploys EPP. The scaling manager does not watch namespaces, so this creates a namespace nothing is looking at | `false` |
 | `ENABLE_SCALE_TO_ZERO` | Allow a model to be parked at zero replicas, and enable the EPP `flowControl` gate that makes waking it possible | `true` |
-| `SKIP_CHECKS` | Skip prerequisite checks | `false` |
+| `SKIP_CHECKS` | Turn the preflight's refusals (no model servers in the namespace, model servers or EPP not scraped, the EPP `flowControl` gate off, missing permissions) into warnings: findings are still reported. It does not skip the guard against a second install on the cluster, or the post-install verification | `false` |
 | `SCALER_BACKEND` | `keda` or `none` (use a pre-installed backend) | `keda` |
 | `KEDA_NAMESPACE` | Namespace KEDA is installed in | `keda-system` |
 | `KEDA_HELM_INSTALL` | Install KEDA with Helm rather than assuming it is present | `false` |
@@ -338,7 +338,7 @@ Whichever combination you have, `./deploy/install.sh --check` answers it for you
 install specifically: it renders the overlay this install would apply and asks
 whether you may create each kind in it, rather than assuming from the scope name.
 
-Either way the grant is read-only: The scaling manager never writes to the cluster, because KEDA
+Either way the grant is read-only: the scaling manager never writes to the cluster, because KEDA
 performs the actuation. The one genuinely cluster-scoped read is **nodes**, used to
 resolve each variant's accelerator, which is why the `gpu-inventory` limiter needs
 the node-reader ClusterRole the prereqs phase creates — see

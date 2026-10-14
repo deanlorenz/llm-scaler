@@ -26,7 +26,7 @@ them than have a human split the traffic.
   get it wrong and you have two independent variants that happen to serve the
   same weights.
 - A relative cost per variant, as the `llm-d.ai/variant-cost` annotation. It is
-  a relative scalar, not a currency: The scaling manager does not read real prices from anywhere.
+  a relative scalar, not a currency: the scaling manager does not read real prices from anywhere.
 
 ## Setting it up
 

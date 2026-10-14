@@ -2,7 +2,7 @@
 
 ## Overview
 
-This guide installs one Workload-Variant-Autoscaler that sizes the llm-d model
+This guide installs one scaling manager (llm-scaling-manager) that sizes the llm-d model
 servers in **every** namespace. The scaling manager decides how many replicas each variant needs
 and hands the decision to KEDA, which owns the HPA and does the scaling.
 
@@ -22,15 +22,18 @@ asking the wrong questions. `SKIP_CHECKS=true` installs without them.
 
 - cluster-admin rights
 - llm-d model servers somewhere on the cluster
-- KEDA, installed for you if the cluster has none
+- KEDA. On Kubernetes, add `KEDA_HELM_INSTALL=true` to the deploy command to
+  install it with Helm if the cluster has none; on OpenShift, install the Custom
+  Metrics Autoscaler operator first. The install never adds KEDA on its own.
 - a Prometheus scraping those model servers
 
-Every EPP the controller will size from needs the `flowControl` feature gate.
-`make check-prereqs` is **fatal** without it — not degraded, refused — and the
-only way past, `SKIP_CHECKS=true`, disables every preflight check rather than
-that one. Cluster-wide this matters more than in a single namespace, because one
-EPP missing the gate blocks the install for all of them. Enable it in each EPP's
-`EndpointPickerConfig`:
+Every EPP the controller will size from needs the `flowControl` feature gate:
+it publishes the router queue the scaling manager reads as demand, and that
+queue is the only signal for a model at zero replicas. The install checks the
+gate only on EPPs in the namespace it watches (`WVA_WATCH_NS`, or the
+controller's own namespace), so a cluster-wide install does **not** see the
+EPPs in your model namespaces. Check each one yourself, and enable the gate in
+its `EndpointPickerConfig`:
 
 ```yaml
 featureGates:

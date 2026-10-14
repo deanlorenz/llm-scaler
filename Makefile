@@ -482,8 +482,9 @@ SCOPE ?= $(if $(WVA_SCOPE),$(WVA_SCOPE),namespace)
 #                                    Prometheus it resolved.
 #   2. setup-prereqs                 CLUSTER ADMIN, once per namespace: the
 #                                    namespace, cluster-scoped RBAC, the
-#                                    ServiceMonitor, and Prometheus / KEDA if the
-#                                    cluster has none.
+#                                    ServiceMonitor, and Prometheus if the cluster
+#                                    has none. KEDA only with KEDA_HELM_INSTALL=true
+#                                    (Kubernetes); OpenShift uses the platform's.
 #
 # Phases 1 and 2 take the platform as ENVIRONMENT=kubernetes|openshift; only
 # phase 3 also has -on-k8s / -on-openshift spellings. This block used to write
@@ -2202,11 +2203,11 @@ benchmark-run: ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<name
 		fi; \
 	fi
 
-## The one benchmark to run after installing: decode-heavy at 10 req/s for five
+## The one benchmark to run after installing: symmetric 1024/1024 at 15 req/s for five
 ## minutes, then a dashboard snapshot over exactly that window and a pointer to it.
 ## Answers "is WVA actually scaling this?" -- not "how fast is this model".
 .PHONY: benchmark-smoke
-benchmark-smoke: ## Post-install check: drive decode-heavy load, snapshot the dashboard, print where it is (NAMESPACE=<ns>)
+benchmark-smoke: ## Post-install check: drive symmetric 1024/1024 load at 15 req/s, snapshot the dashboard, print where it is (NAMESPACE=<ns>)
 	@bash hack/benchmark/smoke.sh $(if $(NAMESPACE),$(NAMESPACE),$(BENCHMARK_NAMESPACE))
 
 ## Generate a markdown table from the latest benchmark results

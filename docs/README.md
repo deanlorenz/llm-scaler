@@ -1,19 +1,74 @@
-# Workload-Variant-Autoscaler documentation
+# llm-scaling-manager documentation
 
-The scaling manager decides how many replicas of each model variant should run, and drives KEDA
-to make it so. It reads what your inference engines are doing, computes a target
-per model each cycle, and answers KEDA's external scaler with it.
+llm-scaling-manager decides how many replicas of each LLM model server should
+run on Kubernetes. It reads how loaded the servers are, sizes every model for
+its load, keeps the total inside a GPU budget if you set one, and hands the
+number to KEDA, which scales the workloads. It works with
+[llm-d](https://llm-d.ai) model servers running vLLM or SGLang.
 
-Three words, used throughout: a **model** is what a client asks for by name; a
-**variant** is one way of serving it — concretely one KEDA ScaledObject and the
-workload it scales, which is the unit the scaling manager decides for; a **replica** is one Pod
-of a variant. Variants whose triggers name the same `modelID` are variants of
-one model, and are scaled as a group.
+![How it fits together](concepts/figures/how-it-fits.svg)
+
+The picture, explained: [how the scaling manager fits together](concepts/architecture.md).
+
+## Terms you will meet
+
+| Term | Meaning |
+| --- | --- |
+| **model** | what a client asks for by name, e.g. `meta-llama/Llama-3.1-8B-Instruct` |
+| **variant** | one way of serving a model (a GPU type, a serving configuration): one KEDA ScaledObject and the workload it scales. Variants with the same `modelID` are sized together |
+| **replica** | one Pod of a variant |
+| **EPP** | llm-d's endpoint picker: the router in front of a model's replicas. Its queue is a demand signal, and the only one at zero replicas |
+| **saturation** | how full a replica is: KV-cache use and waiting requests. The default scaling signal |
+| **cycle** | the timer on which every model is re-sized: 15 s by default |
+| **tier** | a named set of scaling thresholds a ScaledObject selects with `scalingPolicy:` |
+| **limiter** | an optional GPU budget every decision must fit: free GPUs, a quota, or a Kueue quota |
+| **P/D** | prefill/decode disaggregation: a model's prefill and decode run as separate, separately scaled variants |
+
+## Getting started in three steps
+
+1. **Have a model to scale.** llm-d serving in a namespace, with the EPP's
+   `flowControl` feature gate on, plus KEDA and Prometheus on the cluster.
+   Nothing serving yet? [Install a small llm-d model](guides/install-small-model/) first.
+2. **Install the scaling manager** into that namespace. A cluster admin runs
+   the one-time setup; the namespace owner runs the rest:
+
+   ```bash
+   export NAMESPACE=<the namespace running llm-d>
+   make check-prereqs          # read-only: your permissions, the namespace, Prometheus
+   make setup-prereqs          # once per namespace, by a cluster admin
+   make deploy-wva             # the scaling manager itself
+   ```
+
+3. **Register your model servers.** Nothing is scaled until it has a ScaledObject:
+
+   ```bash
+   make scaledobjects-plan     # lists your model servers, writes an editable plan
+   make scaledobjects-apply    # creates the ScaledObjects
+   ```
+
+The full walk-through, with what each step checks:
+[install the scaling manager in a namespace](guides/install-in-namespace/).
+
+### What success looks like
+
+```bash
+kubectl get scaledobject,hpa -n $NAMESPACE
+```
+
+Each ScaledObject shows `READY True`, and its HPA's `TARGETS` shows a number
+such as `1/1 (avg)`. `cpu: <unknown>/80%` means KEDA could not reach the
+scaling manager: [first-line troubleshooting](reference/operations.md#first-line-troubleshooting).
+After a cycle or two, the controller's log shows its decisions:
+
+```bash
+kubectl logs -n $NAMESPACE deploy/wva-controller-manager | grep scaling-decision
+```
+
+## Where to go next
 
 | You want to | Start here |
 | --- | --- |
-| Solve a specific problem | **[Well-lit paths](well-lit-paths/)** — one page per scenario |
-| Get it installed | **[Install the scaling manager in a namespace](guides/install-in-namespace/)** |
+| Solve a specific problem | **[Well-lit paths](well-lit-paths/)**: one page per scenario |
 | Look something up | **[Reference](#reference--what-you-set-and-read)** |
 | Understand a decision it made | **[Concepts](#concepts--how-the-scaling-manager-decides)** |
 | Change the scaling manager itself | **[Developing the scaling manager](#developing-the-scaling-manager)** |
@@ -72,6 +127,7 @@ stack](guides/testing-with-llm-d/) · [benchmark the scaling manager](guides/ben
 
 ## Concepts — how the scaling manager decides
 
+- **[How the scaling manager fits together](concepts/architecture.md)**: the parts, one decision cycle, what gets installed. Start here
 - **[The steady-state engine](concepts/steady-state-engine.md)** — what it measures, and how a measurement becomes a replica count
 - **[GPU capacity accounting](concepts/gpu-capacity-accounting.md)** — what the GPU budget means, and three ways it over-states free capacity
 - **[Modeling and optimization](concepts/modeling-and-optimization.md)** — what is modelled, what is not, and how per-variant demands become replica counts

@@ -3,11 +3,11 @@
 Three things decide whether a scale-up actually helps: whether a new replica can
 get to Ready quickly -- its weights, and everything else on the way -- whether
 an old one can leave without dropping requests, and whether the Deployment says
-enough about itself for the scaling manager to act on. None are the scaling manager settings -- they are
-properties of the model server. `make workload-patch` writes the first two;
+enough about itself for the scaling manager to act on. None of them are
+scaling-manager settings -- they are properties of the model server. `make workload-patch` writes the first two;
 the rest of the start path is a checklist, below.
 
-> Part of the [the scaling manager deployment guide](../../deploy/). For what to watch once it is
+> Part of the [deployment guide](../../deploy/). For what to watch once it is
 > running, see [Watching what the scaling manager decides](monitoring.md).
 
 ## Weights and the model cache
@@ -474,6 +474,48 @@ The benchmark standup has the same measure under
 The benchmark harness this repository uses puts its own steps on the engine's
 start path; what they are and how the benchmark scenarios handle them is in
 [Benchmark the scaling manager](../guides/benchmarking/README.md#replica-start-time-in-the-harness).
+
+## The engine's memory budget (`gpuMemoryUtilization`)
+
+**`gpuMemoryUtilization` has to follow the model.** vLLM reads it as a fraction
+of the card's **total** memory, not of what is free, and then fills that budget
+with KV cache. A 32B model wants 0.95 of an 80GB card. A 0.6B model -- 1.12 GiB
+of weights -- does not, and asking for 0.95 anyway makes it claim **73.5 GiB of
+KV cache** and then fail:
+
+```
+Available KV cache memory: 73.53 GiB
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 594.00 MiB.
+GPU 0 has 79.18 GiB of which 500.69 MiB is free.
+```
+
+`make benchmark-standup` sets `GPU_MEM_UTIL` to **0.90** for every model. It is
+deliberately *not* lowered for small models: per-replica capacity IS the KV
+cache size, so shrinking KV to make a small model scale sooner does the
+autoscaler's job in the wrong layer, and throws away GPU you paid for to buy an
+effect `kvCacheThreshold` gives you for free. Size the card for serving; tune
+when a replica counts as full in the [scaling policy](scaling-policy.md).
+
+Expect the consequence on a small model. At 0.90 a 0.6B model gets **651,328
+tokens** of KV cache, and one replica absorbs an enormous amount of traffic
+without ever looking full. Measured: 121 concurrent requests, KV utilisation
+peaking at **10.5%**, and the scaling manager holding at one replica --
+correctly, because by the signal it sizes on nothing was saturated. To make a
+small model scale on a small load, lower `kvCacheThreshold`; do not shrink the
+cache.
+
+**Why it looks intermittent.** 0.95 works on an empty GPU, so the failure comes
+and goes. The memory that is already gone belongs to pods the *scheduler cannot
+see*: FMA launcher pods request **zero** GPUs while holding the engine, so
+Kubernetes places a model onto a card it believes is empty, and vLLM then
+measures 77.3 of 79.18 GiB free and budgets as though it had all of it. Any
+co-tenant that holds memory without requesting a GPU does the same.
+
+Override it on the standup when you need to:
+
+```bash
+make benchmark-standup BENCHMARK_NAMESPACE=<namespace> MODEL_ID=<model> GPU_MEM_UTIL=0.50
+```
 
 ## Draining before scale-down
 

@@ -35,17 +35,28 @@ autoscaled before anything is.
 
 ## Verifying it
 
-Three things, in this order:
+Three things, in this order. The commands assume the namespace install, where
+the controller runs in the namespace it manages; for a cluster-wide install, read
+the logs from the controller's namespace (`workload-variant-autoscaler-system` by
+default).
 
 ```bash
-# 1. the scaling manager is deciding at all: a target per model, per cycle
-wva_desired_replicas{exported_namespace="<your-namespace>"}
+export NAMESPACE=<your-namespace>
 
-# 2. It decided for a REASON: supply, demand and the threshold it compared them to
-kubectl logs -n <wva-namespace> deploy/<wva> | grep analyzer-result
+# 1. The scaling manager is deciding at all: one line per model, per cycle
+kubectl logs -n ${NAMESPACE} deploy/wva-controller-manager | grep scaling-decision
+
+# 2. It decided for a reason: supply, demand and the threshold it compared them to
+kubectl logs -n ${NAMESPACE} deploy/wva-controller-manager | grep analyzer-result
 
 # 3. KEDA acted on it
-kubectl get scaledobject,hpa -n <your-namespace>
+kubectl get scaledobject,hpa -n ${NAMESPACE}
+```
+
+The same decision, as a metric in Prometheus:
+
+```promql
+wva_desired_replicas{exported_namespace="<your-namespace>"}
 ```
 
 A target lower than the demand implies is usually not a bug: a limiter clamps
@@ -53,7 +64,7 @@ what the optimizer may ask for, and the reason is reported — see [bounding a
 fleet by real GPUs](../bound-by-gpus/). Different thresholds per class of
 workload are [tiers](../workload-classes/).
 
-The log line's fields are described in [the cycle log](../../reference/cycle-log.md);
+The log lines' fields are described in [the cycle log](../../reference/cycle-log.md);
 `exported_namespace` is the workload's namespace and plain `namespace` is the
 controller's, which is [why alerts group by the former](../../reference/monitoring.md).
 
@@ -71,7 +82,7 @@ the Prometheus queries it makes each cycle — one set per namespace, not per po
   driven by [Benchmark the scaling manager](../../guides/benchmarking/); the harness's own start-path settings are in [Replica start time in the harness](../../guides/benchmarking/README.md#replica-start-time-in-the-harness).
 - The recorded numbers in
   [benchmark-results.md](../../developer-guide/benchmark-results.md) were
-  measured on llm-scaling-manager v0.6.0's earlier saturation engine. They are a historical
+  measured on upstream WVA v0.6.0's earlier saturation engine. They are a historical
   baseline; they do not describe this engine.
 
 ## Tuning it

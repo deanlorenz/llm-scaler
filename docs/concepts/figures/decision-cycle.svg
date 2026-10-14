@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 380" width="960" height="380" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="14" fill="#1f2328">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#0969da"/>
+    </marker>
+  </defs>
+  <rect width="960" height="380" rx="12" fill="#ffffff"/>
+  <text x="20" y="30" font-size="12" fill="#0969da" font-weight="600">ONE CYCLE OF THE STEADY-STATE ENGINE (every 15 s by default)</text>
+
+  <g>
+    <rect x="20" y="50" width="168" height="150" rx="8" fill="#ddf4ff" stroke="#0969da"/>
+    <text x="104" y="76" text-anchor="middle" font-weight="700">1  Collect</text>
+    <text x="104" y="100" text-anchor="middle" font-size="12">per variant, from</text>
+    <text x="104" y="117" text-anchor="middle" font-size="12">Prometheus: KV cache,</text>
+    <text x="104" y="134" text-anchor="middle" font-size="12">running and waiting</text>
+    <text x="104" y="151" text-anchor="middle" font-size="12">requests, tokens;</text>
+    <text x="104" y="168" text-anchor="middle" font-size="12">the router's queue</text>
+  </g>
+  <line x1="188" y1="125" x2="206" y2="125" stroke="#0969da" stroke-width="2" marker-end="url(#a)"/>
+
+  <g>
+    <rect x="210" y="50" width="168" height="150" rx="8" fill="#ddf4ff" stroke="#0969da"/>
+    <text x="294" y="76" text-anchor="middle" font-weight="700">2  Analyze</text>
+    <text x="294" y="100" text-anchor="middle" font-size="12">how full is each</text>
+    <text x="294" y="117" text-anchor="middle" font-size="12">replica (saturation),</text>
+    <text x="294" y="134" text-anchor="middle" font-size="12">and how much capacity</text>
+    <text x="294" y="151" text-anchor="middle" font-size="12">the model needs</text>
+    <text x="294" y="168" text-anchor="middle" font-size="12">for its load</text>
+  </g>
+  <line x1="378" y1="125" x2="396" y2="125" stroke="#0969da" stroke-width="2" marker-end="url(#a)"/>
+
+  <g>
+    <rect x="400" y="50" width="168" height="150" rx="8" fill="#ddf4ff" stroke="#0969da"/>
+    <text x="484" y="76" text-anchor="middle" font-weight="700">3  Optimize</text>
+    <text x="484" y="100" text-anchor="middle" font-size="12">split that capacity</text>
+    <text x="484" y="117" text-anchor="middle" font-size="12">across the model's</text>
+    <text x="484" y="134" text-anchor="middle" font-size="12">variants, cheapest</text>
+    <text x="484" y="151" text-anchor="middle" font-size="12">first (variantCost)</text>
+  </g>
+  <line x1="568" y1="125" x2="586" y2="125" stroke="#0969da" stroke-width="2" marker-end="url(#a)"/>
+
+  <g>
+    <rect x="590" y="50" width="168" height="150" rx="8" fill="#ddf4ff" stroke="#0969da"/>
+    <text x="674" y="76" text-anchor="middle" font-weight="700">4  Bound</text>
+    <text x="674" y="100" text-anchor="middle" font-size="12">if a limiter is set:</text>
+    <text x="674" y="117" text-anchor="middle" font-size="12">fit every model into</text>
+    <text x="674" y="134" text-anchor="middle" font-size="12">the free GPUs or the</text>
+    <text x="674" y="151" text-anchor="middle" font-size="12">quota; optionally</text>
+    <text x="674" y="168" text-anchor="middle" font-size="12">share it (utilization</text>
+    <text x="674" y="185" text-anchor="middle" font-size="12">share)</text>
+  </g>
+  <line x1="758" y1="125" x2="776" y2="125" stroke="#0969da" stroke-width="2" marker-end="url(#a)"/>
+
+  <g>
+    <rect x="780" y="50" width="160" height="150" rx="8" fill="#ddf4ff" stroke="#0969da"/>
+    <text x="860" y="76" text-anchor="middle" font-weight="700">5  Publish</text>
+    <text x="860" y="100" text-anchor="middle" font-size="12">one replica count</text>
+    <text x="860" y="117" text-anchor="middle" font-size="12">per ScaledObject,</text>
+    <text x="860" y="134" text-anchor="middle" font-size="12">pushed to KEDA;</text>
+    <text x="860" y="151" text-anchor="middle" font-size="12">an Event when it</text>
+    <text x="860" y="168" text-anchor="middle" font-size="12">changes; metrics</text>
+  </g>
+
+  <rect x="20" y="230" width="920" height="90" rx="8" fill="#f6f8fa" stroke="#57606a"/>
+  <text x="40" y="256" font-weight="700">Beside it: the scale-from-zero engine</text>
+  <text x="40" y="280" font-size="13">Checks every 100 ms whether a model parked at zero replicas has requests waiting in the router's queue.</text>
+  <text x="40" y="300" font-size="13">If it has, and the GPU budget allows, it asks KEDA for one replica at once instead of waiting for the next cycle.</text>
+
+  <text x="20" y="350" font-size="12" fill="#57606a">Thresholds (scaleUpThreshold, kvCacheThreshold, ...), tiers and limiters all come from the scaling-policy ConfigMap,</text>
+  <text x="20" y="367" font-size="12" fill="#57606a">re-read live. The cycle interval is in the controller's own ConfigMap (wva-manager-config) and needs a restart.</text>
+</svg>
