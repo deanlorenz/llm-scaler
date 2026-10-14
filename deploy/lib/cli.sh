@@ -81,7 +81,7 @@ Environment Variables:
   PROMETHEUS_FORCE_INSTALL     Install even then (default: false). Two operators will contend over the same CRs.
   KUBE_PROMETHEUS_STACK_CHART_VERSION  Chart version the Prometheus stack is installed at (default: 92.7.0)
   PROMETHEUS_URL               Where WVA reads metrics from. Required when Prometheus is not deployed here.
-  PROMETHEUS_TLS_INSECURE_SKIP_VERIFY  Skip Prometheus certificate verification (default: the shipped config, true on Kubernetes)
+  PROMETHEUS_TLS_INSECURE_SKIP_VERIFY  Skip Prometheus certificate verification (default: true on Kubernetes, where the installer has no CA; false on OpenShift)
   DEPLOY_OPERATIONAL_DASHBOARD Publish the WVA Grafana dashboard (default: true). Works against an
                                existing Grafana — it is a sidecar-labelled ConfigMap.
   DASHBOARD_NS                 Namespace to publish the dashboard into (default: MONITORING_NAMESPACE)

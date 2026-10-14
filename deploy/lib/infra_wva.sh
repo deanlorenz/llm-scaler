@@ -160,8 +160,11 @@ wva_render_manager_config_patch() {
     [ -f "$src" ] || return 0
     [ -n "${PROMETHEUS_URL:-}" ] || return 0
 
+    local skip
+    skip="$(wva_prometheus_skip_verify)"
     rendered="$(yq '.data."config.yaml"' "$src" \
-        | yq ".PROMETHEUS_BASE_URL = \"$PROMETHEUS_URL\"")" || return 0
+        | yq ".PROMETHEUS_BASE_URL = \"$PROMETHEUS_URL\"" \
+        | if [ -n "$skip" ]; then yq ".PROMETHEUS_TLS_INSECURE_SKIP_VERIFY = \"$skip\""; else cat; fi)" || return 0
     [ -n "$rendered" ] || return 0
 
     {
@@ -398,17 +401,32 @@ wva_warn_floating_image() {
     log_warning "=================================================================="
 }
 
+# wva_prometheus_skip_verify echoes the PROMETHEUS_TLS_INSECURE_SKIP_VERIFY value
+# this install writes into the manager config, or nothing to leave the shipped
+# one ("false", verify) in place.
+#
+# The shipped config verifies. On Kubernetes the installer has no CA to give the
+# controller -- the certificate of the kube-prometheus-stack it deploys is
+# self-signed and generated on the workstation, and nothing mounts it into the
+# controller -- so it turns verification OFF there, explicitly, and
+# wva_warn_prometheus_tls says so at the end of the install. A manifest applied
+# without the installer keeps verification on. An explicit
+# PROMETHEUS_TLS_INSECURE_SKIP_VERIFY wins; OpenShift verifies against the
+# service CA; plain http:// takes no TLS settings at all.
+wva_prometheus_skip_verify() {
+    if [ -n "${PROMETHEUS_TLS_INSECURE_SKIP_VERIFY:-}" ]; then
+        printf '%s' "$PROMETHEUS_TLS_INSECURE_SKIP_VERIFY"
+        return 0
+    fi
+    [ "${ENVIRONMENT:-kubernetes}" != "openshift" ] || return 0
+    case "${PROMETHEUS_URL:-}" in
+        https://*) printf 'true' ;;
+    esac
+}
+
 # wva_warn_prometheus_tls warns when the controller will connect to an HTTPS
 # Prometheus without verifying its certificate. $1 is the manager config.yaml.
-#
-# The shipped config skips verification, and on Kubernetes it has to: the
-# installer has no CA to give the controller -- the certificate of the
-# kube-prometheus-stack it deploys is self-signed and generated on the
-# workstation, and nothing mounts it into the controller. Flipping the default
-# would make every such install exit on "x509: certificate signed by unknown
-# authority". So the default stays, and an install that ends up unverified says
-# so, with the production setting. OpenShift ships verification on (service CA)
-# and never reaches the warning.
+# OpenShift ships verification on (service CA) and never reaches the warning.
 wva_warn_prometheus_tls() {
     local cfg="$1" url skip ca
     [ -n "$cfg" ] || return 0
@@ -1056,8 +1074,10 @@ wva_reconcile_prometheus_scheme() {
         patch_manager_config ".PROMETHEUS_BASE_URL = \"$PROMETHEUS_URL\""
         wva_reconcile_prometheus_scheme "$PROMETHEUS_URL"
     fi
-    if [ -n "${PROMETHEUS_TLS_INSECURE_SKIP_VERIFY:-}" ]; then
-        patch_manager_config ".PROMETHEUS_TLS_INSECURE_SKIP_VERIFY = \"${PROMETHEUS_TLS_INSECURE_SKIP_VERIFY}\""
+    local skip_verify
+    skip_verify="$(wva_prometheus_skip_verify)"
+    if [ -n "$skip_verify" ]; then
+        patch_manager_config ".PROMETHEUS_TLS_INSECURE_SKIP_VERIFY = \"${skip_verify}\""
     fi
     # Read back what the controller will actually run with, after every patch
     # above, rather than reasoning about which of them applied.

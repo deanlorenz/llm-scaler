@@ -300,7 +300,7 @@ shipped default and **exits at startup** if nothing answers there
 |----------|-------------|---------|
 | `PROMETHEUS_URL` | Full base URL, e.g. `https://prom.monitoring.svc.cluster.local:9090` | the kube-prometheus-stack this install deploys |
 | `PROMETHEUS_SA` | `<namespace>/<serviceaccount>` of the Prometheus that scrapes the controller's `/metrics`; it is bound to the metrics-reader ClusterRole. Unset: the one non-default `serviceAccountName` the Prometheus CRs agree on in the namespace an explicitly set `PROMETHEUS_URL` addresses, else the kube-prometheus-stack this install deploys (`DEPLOY_PROMETHEUS=true`, with the URL in `MONITORING_NAMESPACE`). Never a Prometheus the installer only auto-detected, never another namespace's, and never `default`; with no such answer no binding is created (`--check` lists it as optional) and the installer says so | none |
-| `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY` | Connect without verifying the server certificate. The installer warns when an HTTPS install ends up unverified; see [TLS configuration](prometheus.md#tls-configuration) for the production setting | `true` in the shipped Kubernetes config, `false` on OpenShift |
+| `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY` | Connect without verifying the server certificate. The installer warns when an HTTPS install ends up unverified; see [TLS configuration](prometheus.md#tls-configuration) for the production setting | `false` in the shipped config; the installer sets `true` on Kubernetes, where it has no CA for the Prometheus it deploys |
 | `DEPLOY_PROMETHEUS` | Deploy a Prometheus stack when the cluster has none of its own — see [Deployment flags](#deployment-flags) | `true` |
 
 ## Which namespace is which

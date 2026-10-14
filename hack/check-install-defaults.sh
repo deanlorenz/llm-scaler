@@ -45,7 +45,7 @@ source "$WORK/infra_wva.sh"
 source "$WORK/scaledobject.sh"
 
 for fn in wva_split_image_ref wva_image_ref_fields wva_image_pull_policy wva_warn_floating_image \
-          wva_warn_prometheus_tls wva_prometheus_scraper_sa wva_prometheus_url_namespace \
+          wva_warn_prometheus_tls wva_prometheus_skip_verify wva_prometheus_scraper_sa wva_prometheus_url_namespace \
           wva_append_metrics_reader_decision render_default_scaledobject; do
     declare -F "$fn" >/dev/null || {
         printf 'FATAL: %s is not defined after sourcing the library.\n' "$fn" >&2
@@ -53,7 +53,7 @@ for fn in wva_split_image_ref wva_image_ref_fields wva_image_pull_policy wva_war
     }
 done
 
-EXPECT_CASES=49
+EXPECT_CASES=53
 RAN=0
 FAILED=0
 
@@ -180,9 +180,20 @@ tls_warned() { wva_warn_prometheus_tls "$1" 2>&1 | grep -c 'will NOT verify' || 
 # The shipped Kubernetes config, read from the file rather than restated here.
 SHIPPED_CFG="$(tr -d '\r' < "$ROOT/config/base/manager/manager-configmap.yaml" | yq '.data."config.yaml"')"
 [ -n "$SHIPPED_CFG" ] || { printf 'FATAL: could not read the shipped manager config.\n' >&2; exit 1; }
-check 'tls: the shipped config is warned about' '1' "$(tls_warned "$SHIPPED_CFG")"
+# The shipped config verifies: a manifest applied without the installer sends
+# its bearer token only to a Prometheus it has verified.
+check 'tls: the shipped config verifies' 'false' \
+    "$(printf '%s\n' "$SHIPPED_CFG" | yq -r '.PROMETHEUS_TLS_INSECURE_SKIP_VERIFY')"
+# What the installer writes over it, and that its choice is announced.
+skip_for() { ( ENVIRONMENT="$1" PROMETHEUS_URL="$2" PROMETHEUS_TLS_INSECURE_SKIP_VERIFY="$3" wva_prometheus_skip_verify ); }
+k8s_skip="$(skip_for kubernetes https://p:9090 '')"
+check 'tls: Kubernetes install, no CA to give: verification off' 'true' "$k8s_skip"
+check 'tls: OpenShift keeps the shipped verification (service CA)' '' "$(skip_for openshift https://t:9091 '')"
+check 'tls: an explicit choice wins' 'false' "$(skip_for kubernetes https://p:9090 false)"
+INSTALLED_CFG="$(printf '%s\n' "$SHIPPED_CFG" | yq ".PROMETHEUS_TLS_INSECURE_SKIP_VERIFY = \"$k8s_skip\"")"
+check 'tls: the installer choice on Kubernetes is warned about' '1' "$(tls_warned "$INSTALLED_CFG")"
 check 'tls: a CA path silences it' '0' \
-    "$(tls_warned "$(printf '%s\n' "$SHIPPED_CFG" | yq '.PROMETHEUS_CA_CERT_PATH = "/etc/ca/ca.crt"')")"
+    "$(tls_warned "$(printf '%s\n' "$INSTALLED_CFG" | yq '.PROMETHEUS_CA_CERT_PATH = "/etc/ca/ca.crt"')")"
 check 'tls: verification on is quiet' '0' \
     "$(tls_warned "$(printf '%s\n' "$SHIPPED_CFG" | yq '.PROMETHEUS_TLS_INSECURE_SKIP_VERIFY = "false"')")"
 check 'tls: plain HTTP is not this warning' '0' \
