@@ -152,14 +152,15 @@ last; it is the unit change that makes the other two land.
   restore never makes a figure younger; leader-only writes, deletion flushes,
   off by default. Supersedes the Prometheus refit in #116, which cannot
   attribute old readings to a variant now that learned state is per variant.
-- **[SLO tiers](slo-tiers.md)** — not built. A separate `slo` analyzer judges
-  the SLO on the router's TTFT (the one latency that includes the flow-control
-  queue) and prices each variant's capacity at the fill where its own latency
-  curve meets the target. It is combined by the composite on
-  `deanscaler/composite-analyzer`: guard mode (max with saturation, can only
-  tighten) or sizer mode (saturation disabled, falls back per variant).
-  Observe-only works on today's `main`; enforce waits on the composite and a
-  per-SO hold for variants that cannot meet the target.
+- **[SLO tiers](slo-tiers.md)** — phase 0 being built. A separate `slo`
+  analyzer prices each variant at the fill where its fitted ITL line meets a
+  mean-TPOT target, and judges a TTFT percentile on the router's histogram,
+  the one TTFT that includes the flow-control queue. Combined by the composite
+  on `deanscaler/composite-analyzer`: guard mode (max with saturation) or
+  sizer mode (saturation explicitly disabled, the per-variant fallback).
+  Three adversarial reviews are folded in, including a fill bound that would
+  have ratcheted the fleet down and an infeasibility hold that would have
+  frozen single-variant P/D models.
 
 ## Product and lifecycle
 
