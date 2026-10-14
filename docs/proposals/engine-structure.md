@@ -102,8 +102,8 @@ infrastructure     config, constants, metrics, logging, prometheus, accelerator,
                    today and are to be removed: utils → registry, datastore → collector/source
 ```
 
-Today's helper packages take these places: `engines/aggregation` and
-`engines/common` are `signals`; `engines/executor` and `engines/variantmeta`
+Today's helper packages take these places: `engines/aggregation` is
+`signals`; `engines/executor` and `engines/variantmeta`
 are `analyze`; `gpuusage` (publishes GPU usage from the decision store,
 imports `decision` and `gpunodes`, nothing in the pipeline imports it) is a
 reporter that sits beside `engine/`, like `warmpool/`. `controller/` and
