@@ -545,7 +545,7 @@ Work down the list in order.
    `make deploy-wva` reports both as optional prerequisites and installs
    without them; ask an admin to re-run `make setup-prereqs` in the
    install's shape (`NAMESPACE=<ns> make setup-prereqs`; out of reach
-   `NAMESPACE=<managed ns> make setup-prereqs WVA_NS=<controller ns> WVA_WATCH_NS=<managed ns>`;
+   `NAMESPACE=<managed ns> make setup-prereqs WVA_NS=wva-<managed ns> WVA_WATCH_NS=<managed ns>`;
    cluster-scoped `make setup-prereqs SCOPE=cluster WVA_NS=<controller ns>`) to
    enable the store. Nothing is restored, and nothing is
    written until a read succeeds, so the stored history is not overwritten.

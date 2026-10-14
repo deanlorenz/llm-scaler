@@ -78,8 +78,10 @@ or keep a finite static cap, which Kueue can only tighten.
   it manages through its Role, and needs the two cluster-scoped kinds, plus
   `get` on its managed Namespace (to evaluate a `namespaceSelector`), from the
   `kueue-reader` prerequisite, which the admin phase creates
-  (`NAMESPACE=<managed ns> make setup-prereqs SCOPE=namespace ENVIRONMENT=kubernetes`, the same run
-  that creates `node-reader`). An install whose `kueue-reader` predates the
+  (`NAMESPACE=<managed ns> make setup-prereqs SCOPE=namespace ENVIRONMENT=kubernetes`, or, when
+  the controller runs out of the tenant's reach,
+  `NAMESPACE=<managed ns> make setup-prereqs SCOPE=namespace ENVIRONMENT=kubernetes WVA_NS=wva-<managed ns> WVA_WATCH_NS=<managed ns>`;
+  the same run that creates `node-reader`). An install whose `kueue-reader` predates the
   Namespace read does **not** upgrade with this block on: when the controller
   cannot `get` its managed Namespace, the tenant's `make deploy-wva` refuses
   and names the `make setup-prereqs` run a cluster admin makes first. When it
@@ -101,16 +103,19 @@ WVA_LIMITER=quota WVA_QUOTAS='H100=-1' WVA_QUOTA_KUEUE=true make deploy-wva ...
 
 # the cluster policy (see admin-gpu-bounding for which controllers read it). With WVA_QUOTA_KUEUE=true this also
 # grants each target controller the cluster-scoped half of the Kueue read
-# (ClusterQueues, ResourceFlavors, and get on its managed Namespace only), as it
-# grants the node read for gpu-inventory. A cluster-scoped controller needs get
-# on every Namespace, granted only when WVA_LIMITER_TARGETS names its namespace;
-# unnamed, it is limited to its own namespace and warned about.
+# (ClusterQueues, ResourceFlavors, and get on Namespaces), as it grants the node
+# read for gpu-inventory. A namespace-scoped controller, tenant-owned or out of
+# reach, gets get on the namespace it manages: the same grant make setup-prereqs
+# renders for it, plus any name its role already holds. A cluster-scoped
+# controller the installer made already reads every Namespace through its
+# manager ClusterRole, so its Kueue read covers every Namespace too. Nothing
+# needs naming in WVA_LIMITER_TARGETS for any of them.
 WVA_LIMITER_TYPE=quota WVA_QUOTAS='H100=-1' WVA_QUOTA_KUEUE=true make enable-physical-limiter
-# ...or, with a cluster-scoped controller. Targets replace discovery, so list
-# every controller namespace the limiter should reach, not just that one.
-WVA_LIMITER_TYPE=quota WVA_QUOTAS='H100=-1' WVA_QUOTA_KUEUE=true \
-  make enable-physical-limiter WVA_LIMITER_TARGETS='<cluster-scoped ns> <other ns>...'
 ```
+
+It warns only when a controller that looks cluster-scoped really lacks the
+cluster-wide Namespace read, naming the `make setup-prereqs` run for that
+install, or when it cannot tell (it may not impersonate the controller).
 
 The LocalQueue read is in the controller's Role (`wva-manager-role`), which is an
 admin-phase object: the tenant's `make deploy-wva` does not apply Roles. So a

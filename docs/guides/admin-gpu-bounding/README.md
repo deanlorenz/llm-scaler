@@ -258,13 +258,16 @@ make enable-physical-limiter WVA_LIMITER_TYPE=quota WVA_QUOTAS='H200=8'
 each namespace gets the smaller of Kueue's grant and `WVA_QUOTAS`, so
 `WVA_QUOTAS='H200=-1'` lets Kueue decide. It also grants each target
 controller the cluster-scoped half of the Kueue read (ClusterQueues,
-ResourceFlavors, and `get` on Namespaces). The Namespace read is limited by
-name: a namespace-scoped controller gets the namespace it manages when that is
-its own or you named it, and every other controller gets its own namespace only,
-with a warning. A **cluster-scoped** controller needs every Namespace and gets
-it only when its namespace is named in `WVA_LIMITER_TARGETS` (which then lists
-every target, not just that one), since the Deployment args that make it look
-cluster-scoped are editable by whoever owns that namespace. Experimental: [bound tenants by the quotas Kueue already
+ResourceFlavors, and `get` on Namespaces). A namespace-scoped controller,
+tenant-owned or out of the tenant's reach, gets `get` on the namespace it
+manages, by name: the same grant `make setup-prereqs` renders for it, never
+fewer names than its role already holds. A **cluster-scoped** controller the
+installer made already reads every Namespace through its manager ClusterRole,
+so its Kueue read covers every Namespace too. So nothing needs naming in
+`WVA_LIMITER_TARGETS` for the Kueue read. The command warns only when a
+controller that looks cluster-scoped really lacks that cluster-wide read,
+naming the `make setup-prereqs` run for that install, or when it cannot tell
+(it may not impersonate the controller). Experimental: [bound tenants by the quotas Kueue already
 holds](../../well-lit-paths/kueue-bounded-quotas/).
 
 ## Next

@@ -24,6 +24,8 @@ git checkout v0.9.0
 make deploy-wva NAMESPACE=<namespace> IMG_TAG=v0.9.0
 # or a digest
 make deploy-wva NAMESPACE=<namespace> IMG=ghcr.io/ev-shindin/llm-scaling-manager@sha256:<digest>
+# out-of-reach shape (the cluster admin runs it): the controller runs in wva-<namespace>
+NAMESPACE=<namespace> make deploy-wva WVA_NS=wva-<namespace> WVA_WATCH_NS=<namespace> IMG_TAG=v0.9.0
 ```
 
 `IMG_TAG` sets the tag of the default `IMG`; `IMG` replaces the whole reference.
@@ -51,16 +53,24 @@ default `false`, for example, deletes the alert rules. The full list is in
 2. **Check prerequisites** against the new release. It is read-only:
    ```bash
    make check-prereqs NAMESPACE=<namespace>
+   # out-of-reach shape: the controller runs in wva-<namespace>
+   NAMESPACE=<namespace> make check-prereqs WVA_NS=wva-<namespace> WVA_WATCH_NS=<namespace>
    ```
    A new release can need a kind or a permission the old one did not. If it
    reports missing prerequisites, a cluster admin runs, once:
    ```bash
    NAMESPACE=<namespace> make setup-prereqs        # (cluster admin)
+   # out-of-reach shape
+   NAMESPACE=<namespace> make setup-prereqs WVA_NS=wva-<namespace> WVA_WATCH_NS=<namespace>
    ```
    A missing **optional** prerequisite does not stop the install: the controller
    runs without the feature that needs it, and says so. For this release that
    is not enough: see [Upgrading to this release](#upgrading-to-this-release).
-3. **Deploy** the pinned image, as above.
+3. **Deploy** the pinned image, as above, in the install's shape. For an
+   out-of-reach install the cluster admin runs the
+   `WVA_NS=wva-<namespace> WVA_WATCH_NS=<namespace>` form: the plain
+   `make deploy-wva NAMESPACE=<namespace>` installs a second controller in
+   `<namespace>` instead of upgrading the one in `wva-<namespace>`.
 4. **Verify**, naming the namespace as you did for the install. Without it both
    look at the default controller namespace, `workload-variant-autoscaler-system`:
    ```bash
@@ -89,8 +99,10 @@ in order:
    ```
    Add `KEDA_NAMESPACE=<namespace KEDA runs in>` unless the installer can find
    KEDA itself (the namespace serving the `v1beta1.external.metrics.k8s.io`
-   APIService when that Service is KEDA's, else an existing `wva-external-scaler`
-   policy, which is kept). When it cannot,
+   APIService when that Service is KEDA's; else, with `KEDA_HELM_INSTALL=true`
+   and that APIService NotFound, `KEDA_NAMESPACE`'s default, where this install
+   puts KEDA; else an existing `wva-external-scaler` policy, which is kept).
+   When it cannot,
    **no** NetworkPolicy is applied and the installer warns that `:9090` is
    reachable from every Pod (see [the scaler NetworkPolicy](#the-external-scaler-networkpolicy)).
 
@@ -140,8 +152,9 @@ in order:
      shape) prints no NetworkPolicy banner: neither the one that says the policy
      admits `:9090` only from a namespace KEDA does not run in, nor the one that
      says there is no policy and the port is open. A policy it could not read is
-     reported as unknown, not as open: run it as someone who can read
-     NetworkPolicies in the controller's namespace.
+     reported as not checked (an info line), not as open: run it as someone who
+     can read NetworkPolicies in the controller's namespace. Only a policy it
+     reads but does not recognise is reported `state UNKNOWN`.
    - The [`wva-controller-status` ConfigMap](operations.md#what-the-controller-is-running-with)
      names the policy namespace, limiter and acceptance the controller runs with:
      ```bash
@@ -166,11 +179,15 @@ leaves an existing policy in place; only the admin phase removes it.
 An existing policy the install cannot read, or one that admits `:9090` from
 anything other than exactly one namespace (so it names no KEDA namespace), is neither
 rewritten nor removed, and neither is any policy when the controller-only phase
-runs with `WVA_SCALER_NETWORKPOLICY=false`. Each is reported as
+runs with `WVA_SCALER_NETWORKPOLICY=false`. The install reports each as
 `NetworkPolicy wva-external-scaler in <ns>: left as it is, state UNKNOWN`, with
-`kubectl get networkpolicy wva-external-scaler -n <ns> -o yaml` to check it, and
-the prereqs summary lists it as `NOT written: NetworkPolicy/wva-external-scaler.
-Its state is UNKNOWN` rather than calling the port open. A tenant
+`kubectl get networkpolicy wva-external-scaler -n <ns> -o yaml` to check it,
+rather than calling the port open. The first two happen in the admin phase, and
+the `make setup-prereqs` summary also lists them as `NOT written:
+NetworkPolicy/wva-external-scaler. Its state is UNKNOWN`; the controller-only
+phase prints no prereqs summary, so there the warning is the only report.
+`make verify-deployment` differs: a policy it cannot read is `not checked`, an
+info line, and only one it reads but does not recognise is `state UNKNOWN`. A tenant
 usually cannot read the APIService, so on an upgrade:
 
 - Pass `KEDA_NAMESPACE=<namespace KEDA runs in>` to `make setup-prereqs`
@@ -191,7 +208,7 @@ usually cannot read the APIService, so on an upgrade:
 - Run `make verify-deployment` with the same `NAMESPACE` (and `WVA_NS`,
   `WVA_WATCH_NS` for the out-of-reach shape) and read its NetworkPolicy lines. A
   namespace you cannot see KEDA from is reported as not confirmed, not as
-  correct, and a policy you cannot read as unknown, not as open.
+  correct, and a policy you cannot read as not checked, not as open.
 - Earlier versions of these docs had you apply a policy by hand, named
   `wva-external-scaler-from-keda`. NetworkPolicies add up, so it still admits
   whatever namespace it names to `:9090`, and the installer neither reads nor

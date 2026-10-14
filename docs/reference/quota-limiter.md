@@ -306,12 +306,15 @@ apply Roles. A rule naming an API group the cluster does not serve
 is inert, so the grant is harmless without Kueue.
 
 `make enable-physical-limiter WVA_QUOTA_KUEUE=true` grants the same reader to
-each target controller, with the Namespace `get` limited by name: the managed
-namespace when it is the controller's own or `WVA_LIMITER_TARGETS` names the
-controller's namespace, otherwise its own namespace only, with a warning. A
-cluster-scoped controller needs every Namespace and gets it only when
-`WVA_LIMITER_TARGETS` names its namespace; unnamed, its selector-bearing queues
-are withheld from every namespace but its own.
+each target controller. A namespace-scoped controller, tenant-owned or out of
+the tenant's reach, gets `get` on the namespace it manages, by name: the same
+grant `make setup-prereqs` renders for it, never fewer names than its role
+already holds. A cluster-scoped controller the installer made already reads
+every Namespace through its manager ClusterRole, so its Kueue read covers every
+Namespace too. Nothing needs naming in `WVA_LIMITER_TARGETS`. The command warns
+only when a controller that looks cluster-scoped really lacks that cluster-wide
+read, naming the `make setup-prereqs` run for that install, or when it cannot
+tell (it may not impersonate the controller).
 
 ### Validation
 

@@ -151,8 +151,14 @@ kubectl get cm wva-controller-status -n ${NAMESPACE} \
 
 A `policyNamespace` other than the controller's own (such as `wva-policy`) means
 the limiters come from there and your ConfigMap's `limiters:` do not apply;
-`limiter` is the limiter in force. No ConfigMap means the controller predates it
-or lacks the grant to write it. Then fall back to the startup log, which you can
+`limiter` is the limiter in force. Reading it needs `get` on ConfigMaps in the
+controller's namespace. In the out-of-reach shape you normally lack that:
+`controller-status-role` binds only the controller's ServiceAccount, so the read
+returns Forbidden. Forbidden says nothing about the controller; ask your admin
+to read it for you, or read the Events the controller records on your
+ScaledObjects, where a limiter holding a scale-up shows as `ResourceConstrained`:
+`kubectl get events -n ${NAMESPACE} --field-selector involvedObject.kind=ScaledObject`. NotFound means the controller predates the ConfigMap or
+lacks the grant to write it. Then fall back to the startup log, which you can
 read only with `pods/log` in the controller's namespace:
 
 ```bash
@@ -423,7 +429,7 @@ override what the preflight reported.
 | `IMG` | the image CI builds from main — a **floating** tag; pin a release for anything you rely on ([pin the version](../../reference/upgrade-and-uninstall.md#pin-the-version)) | `ghcr.io/you/wva:dev` |
 | `PROMETHEUS_URL` | detected; Thanos on OpenShift | `https://prom.monitoring.svc:9090` |
 | `KEDA_HELM_INSTALL` | `false` on Kubernetes — assumes cluster KEDA | `true`, to install one with Helm |
-| `KEDA_NAMESPACE` | found from the KEDA-served external-metrics APIService, else an existing scaler NetworkPolicy; with neither, no NetworkPolicy is written and `:9090` stays open (admin step) | `keda` |
+| `KEDA_NAMESPACE` | found from the KEDA-served external-metrics APIService, else, with `KEDA_HELM_INSTALL=true` and that APIService NotFound, this default (the install puts KEDA there), else an existing scaler NetworkPolicy; with none, no NetworkPolicy is written and `:9090` stays open (admin step) | `keda` |
 | `PROMETHEUS_SA` | none — the `metrics-reader` binding goes only to a Prometheus you named; a re-run without it keeps an existing binding (admin step) | `monitoring/prometheus-k8s` |
 
 Full list: [Configuration reference](../../reference/configuration.md).
