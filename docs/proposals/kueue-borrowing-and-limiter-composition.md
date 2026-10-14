@@ -1,6 +1,7 @@
 # Kueue borrowing, and limiters that compose
 
-**Status:** proposed, revision 5. Nothing here is built. Revision 5 folds in
+**Status:** approved after five review rounds (revision 5). Implementation in
+progress. Revision 5 folds in
 four review rounds by five reviewers (see [Review record](#review-record)).
 Fixes [#136](https://github.com/ev-shindin/llm-scaling-manager/issues/136),
 and the in-repo part of upstream
@@ -23,10 +24,9 @@ and the in-repo part of upstream
    today's Kueue cap. Items 1-3 still apply.
 5. **The scaling manager can now scale borrowed replicas down by itself**,
    together with a P/D or LeaderWorkerSet partner when one side of the unit
-   borrowed. It
-   does this only when a lender that cannot take its GPUs back is waiting for
-   them, or when a borrowed replica cannot be placed. Elsewhere a tighter bound
-   still only stops growth.
+   borrowed. This happens only when a lender that cannot take its GPUs back is
+   waiting for them, or when a borrowed replica cannot be placed. Elsewhere a
+   tighter bound still only stops growth.
 6. **New RBAC:**
    - `get`/`list` on `cohorts.kueue.x-k8s.io`;
    - `get`/`list` on `resourcequotas` in the managed namespaces.
@@ -285,8 +285,12 @@ The reader uses fields already on Kueue's ClusterQueue and Cohort objects:
 - Fair Sharing and `effectiveQuotas` status;
 - cohort parents.
 
-The field list is in [Details](#details-what-is-read). New RBAC covers Cohort
-objects and the namespace's own ResourceQuotas.
+The field list is in [Details](#details-what-is-read). New RBAC:
+
+- `get`/`list` on Cohort objects;
+- `get`/`list` on Kueue Workloads;
+- `get`/`list` on the namespace's own ResourceQuotas;
+- `get` on the owners of GPU pods, for the managed check.
 
 ### B3. How much a queue can reach
 
@@ -327,10 +331,11 @@ From these, for this queue `Q`:
     8 GPUs between them, not 16.
   - **For a queue that can reclaim, the pool does not gate it.** That growth is
     guaranteed, because Kueue preempts the borrowers. It still debits the pool,
-    clamped at 0, so no other queue borrows the same GPUs in the same cycle. It
-    is not subject to the placement-timeout release (B5), since it may be
-    waiting on Kueue's reclaim. Today such a queue can grow to `N_Q`, and it
-    still can.
+    clamped at 0, so no other queue borrows the same GPUs in the same cycle.
+    Today such a queue can grow to `N_Q`, and it still can.
+
+    It is not subject to the placement-timeout release (B5), since it may be
+    waiting on Kueue's reclaim.
 - **Borrow cap** is `B_Q`, further bounded by the static entry and the
   namespace ResourceQuota.
 - **The free pool** `cohortFree` is shared with every other queue in the
@@ -455,14 +460,15 @@ When a lender is waiting:
     until KEDA's scale-down window passes and the pods are deleted. Until then,
     the lender still reads as waiting. So a released unit counts as in flight
     until two things have happened:
-    - its pods are gone;
+    - its pods are gone (every pod, for a group);
     - a fresh read of the lender's reservation postdates their deletion.
 
-    No further unit is released while one is in flight. The engine keeps
-    this in a ledger per lender and flavor. The ledger resets when the lender
-    stops waiting, and is rebuilt after a restart from the release events. Test:
-    a lender short 4 GPUs, with 32 lent out and a KEDA window longer than one
-    cycle, loses exactly one unit.
+    No further unit is released for that lender while one is in flight. This
+    holds across a controller restart. Each waiting lender has its own entry,
+    so two lenders can each have a unit in flight; the summed bound keeps that
+    safe. A unit still in flight after twice the grace period plus KEDA's
+    window, because the target was never actuated or a pod is stuck, keeps
+    blocking. It surfaces as reason `release-not-actuated`.
   - **It overrides** the analyzer's demand floor and hold, which would
     otherwise raise the target again next cycle.
   - **Order:** lowest-priority model first, then the most recently grown. After
@@ -481,8 +487,8 @@ When a lender is waiting:
   whole-node replica. It is replaced by a value measured in the e2e.
 
 **Stale reads freeze, never shrink.** A stale snapshot stops new borrowing and
-keeps every figure where it was. An API blip must not cause a reclaim the
-cluster did not ask for. A Kueue controller that is down while its status stays
+keeps every figure where it was, the release ledger included. An API blip must
+not cause a reclaim the cluster did not ask for. A Kueue controller that is down while its status stays
 readable is not detected. The placement hold and the placement timeout bound
 the damage. A stale reader also freezes the release for a waiting lender. The
 stale alert covers that, and the runbook says to hand capacity back by hand
@@ -716,9 +722,15 @@ For implementers. Paths are under `internal/` unless noted.
   - The guaranteed-only copy drops those three and follows `WithholdPromised`
     in `utilization_share_withhold.go`.
 - **Node view:** the physical limiter's usage walk (`gpuusage`) reports free
-  GPUs per schedulable node.
+  GPUs per schedulable node. `decision.NodeGPU` gains the node's taints, so a
+  flavor's tolerations can be matched.
 - **Placement hold:** a new unplaced-replica count beside `PendingReplicas`
   (`domain/saturation_analyzer.go`), from the same pod informer.
+- **Release ledger:** one entry per lender and flavor. It resets when the lender
+  stops waiting, and is persisted in `wva-controller-status` beside
+  `limiterBudgets` so it survives a restart. Events are best effort and expire,
+  so they are not the source. With no persisted entry, a waiting lender is
+  treated as in flight until the next fresh read.
 - **Status:** `controllerstatus/publisher.go` reads only config today.
 - **Tests that encode single-mode behaviour:** `limiter_factory_test.go`,
   `engine_limiter_reload_test.go`,
@@ -755,3 +767,6 @@ Round 4 (revision 4): docs, SRE, Kueue expert and whole-node approved. The
 maintainer asked for one fix: a release still in flight did not stop the next
 one, so KEDA's scale-down window could let many units go for one small
 shortfall. It is folded into revision 5 with every round-4 minor.
+
+Round 5 (revision 5): all five approved, with no blocker or major. Their minors
+are folded into this text. Implementation starts with step 1.
