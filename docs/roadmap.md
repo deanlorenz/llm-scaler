@@ -25,6 +25,13 @@ Gaps that are documented but not yet planned are listed in
   and the GPU budget.
   [#141](https://github.com/ev-shindin/llm-scaling-manager/issues/141)
 
+- **Price prefill from the router's prompt tokens.** The router knows the
+  prompt tokens in flight before an engine sees them; today that signal feeds
+  only shape-change holds. Planned: use it as a prefill demand input, priced by
+  the throughput the controller already learns, so prefill capacity is ordered
+  before engine queues fill.
+  [#144](https://github.com/ev-shindin/llm-scaling-manager/issues/144)
+
 ## Resilience
 
 - **Learned capacity survives a restart.** What the controller learns about a
@@ -42,3 +49,15 @@ Gaps that are documented but not yet planned are listed in
   (cert-manager when present, otherwise its own CA), wires every ScaledObject it
   generates or adopts, and pins KEDA's client identity.
   [#138](https://github.com/ev-shindin/llm-scaling-manager/issues/138)
+
+## Evidence
+
+- **Prove variant choice, and measure more.** An end-to-end spec that the
+  cheaper variant grows, a benchmark across two GPU types, repeated runs with
+  their spread, larger models, and a head-to-head with llm-d's recipes on their
+  own published setups.
+  [#142](https://github.com/ev-shindin/llm-scaling-manager/issues/142)
+- **Nightly end-to-end on real GPUs.** CI runs the suites on kind with a
+  simulator; a scheduled run on a GPU cluster would catch real-engine
+  regressions (metrics, sleep and wake, drain, P/D transfer).
+  [#143](https://github.com/ev-shindin/llm-scaling-manager/issues/143)
