@@ -64,6 +64,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/steadystate"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/gpunodes"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/gpuusage"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/kubecache"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	prometheusutil "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/prometheus"
@@ -477,6 +478,11 @@ func main() {
 			},
 		}
 	}
+	// Both shapes: keep only what readers use of each cached object. On a
+	// cluster-scoped install the Pod, Deployment and Node informers are
+	// cluster-wide and cannot be label-filtered (the GPU usage walk counts every
+	// Pod on a GPU node), so trimming is what bounds their memory.
+	kubecache.Trim(&mgrOptions.Cache)
 
 	mgr, err := ctrl.NewManager(restConfig, mgrOptions)
 	if err != nil {
