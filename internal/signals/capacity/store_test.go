@@ -161,6 +161,48 @@ var _ = Describe("Store", func() {
 				Expect(got.LearnedFrom).NotTo(Equal(LearnedFromLive),
 					"a capacity measured under --max-num-seqs=256 kept pricing an engine running 64")
 			})
+
+			loadImage := func(image string, args ...string) {
+				d := makeTestDeployment(args...)
+				d.Spec.Template.Spec.Containers[0].Image = image
+				store.LoadFromScaleTarget("ns-1", "model-a", "variant-h100", "H100", 1,
+					scaletarget.NewDeploymentAccessor(d))
+			}
+
+			It("keeps the live record across a rollout that changes only the image", func() {
+				// Replaced, a variant parked at zero was priced from the
+				// derived figure: 320,000 tokens at the defaults against the
+				// 12,800 measured.
+				loadImage("registry.example/vllm:v0.11.0", "--max-num-seqs=256")
+				goLive()
+				loadImage("registry.example/vllm:v0.11.1", "--max-num-seqs=256")
+
+				got := store.Get("ns-1", "model-a", "variant-h100")
+				Expect(got.LearnedFrom).To(Equal(LearnedFromLive), "a routine image bump discarded the measured capacity")
+				Expect(got.EffectiveCapacity).To(Equal(int64(12800)))
+			})
+
+			It("carries the measured KV capacity as k1 across a scheduler-flag change", func() {
+				load("--max-num-seqs=256")
+				goLive()
+				load("--max-num-seqs=64")
+
+				got := store.Get("ns-1", "model-a", "variant-h100")
+				Expect(got.LearnedFrom).NotTo(Equal(LearnedFromLive))
+				Expect(got.TotalKvCapacityTokens).To(Equal(int64(16000)),
+					"the KV cache is the same memory; without it a parked variant's derived figure has no k1 bound")
+			})
+
+			It("does not carry it when what sizes the KV cache changed", func() {
+				load("--max-num-seqs=256")
+				goLive()
+				load("--max-num-seqs=256", "--gpu-memory-utilization=0.5")
+
+				got := store.Get("ns-1", "model-a", "variant-h100")
+				Expect(got.LearnedFrom).NotTo(Equal(LearnedFromLive))
+				Expect(got.TotalKvCapacityTokens).To(BeZero(),
+					"a KV total measured at 0.9 of the memory bounded an engine given 0.5")
+			})
 		})
 
 		It("should handle nil scale target gracefully", func() {

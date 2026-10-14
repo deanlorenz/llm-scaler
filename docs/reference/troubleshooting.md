@@ -390,10 +390,11 @@ With it on, the log says what happened (logger `learned-state`):
   or `learned state not restored: the variant's engine configuration differs
   from the one it was learned under, or could not be read completely` -- a
   flag such as `--max-num-seqs $VLLM_MAX_NUM_SEQS` whose value comes from an
-  `envFrom`. Nothing is restored for that variant, by design. Expect it for
-  every variant on the first restart after a new engine image, and after an
-  upgrade of the scaling manager that changes the `fingerprint_version` label
-  of `wva_engine_config` -- this release moves it from 2 to 3.
+  `envFrom`. Nothing is restored for that variant, by design. Expect it on
+  the first restart after a variant's engine image changed, for that variant,
+  and for every variant after an upgrade of the scaling manager that changes
+  the `fingerprint_version` label of `wva_engine_config` -- this release moves
+  it from 2 to 3.
 - `Learned state: could not read the snapshot; nothing restored, and nothing
   will be written until a read succeeds` -- typically Forbidden: the Role
   `wva-learned-state-role` or its binding is missing. Ask an admin to re-run

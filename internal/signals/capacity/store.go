@@ -174,9 +174,26 @@ func (s *Store) LoadFromScaleTarget(namespace, modelID, variantName, accelerator
 	// capacity figures go too, not just the parameters: they were measured
 	// under the old arguments, and a parked variant is priced from them.
 	// The next live cycle measures the new configuration.
+	//
+	// The image is not one of the arguments here. It is part of the
+	// fingerprint, so a new release does not share a latency line, but a
+	// routine image bump with the same flags is not a new capacity, as
+	// IsCapacityCompatible already holds -- and replacing the record on it
+	// priced a variant parked at zero from the derived figure on every
+	// rollout: 320,000 tokens against a measured 12,800 at the defaults, so
+	// its first scale-from-zero order was sized ~25x too small.
+	var carriedKv int64
 	if existing, ok := s.records[key]; ok && existing.LearnedFrom == LearnedFromLive {
-		if existing.EngineParams == nil || reflect.DeepEqual(*existing.EngineParams, params) {
+		if existing.EngineParams == nil || sameArguments(*existing.EngineParams, params) {
 			return
+		}
+		// What the KV cache holds is a property of the memory, not of the
+		// scheduler flags. While nothing that shapes it changed, the measured
+		// total stays this variant's k1, so the derived estimate a parked
+		// variant falls back to is bounded by it (estimateStoredCapacity's
+		// own-k1 bound) rather than by nothing.
+		if sameKVGeometry(*existing.EngineParams, params) {
+			carriedKv = existing.TotalKvCapacityTokens
 		}
 	}
 	record := &Record{
@@ -188,7 +205,9 @@ func (s *Store) LoadFromScaleTarget(namespace, modelID, variantName, accelerator
 	}
 
 	// If num_gpu_blocks_override is set (vLLM), we can estimate k1.
-	if params.NumGpuBlocksOverride > 0 {
+	if carriedKv > 0 {
+		record.TotalKvCapacityTokens = carriedKv
+	} else if params.NumGpuBlocksOverride > 0 {
 		record.NumGpuBlocks = params.NumGpuBlocksOverride
 		record.BlockSize = params.BlockSize
 		record.TotalKvCapacityTokens = params.NumGpuBlocksOverride * params.BlockSize
@@ -314,4 +333,25 @@ func (s *Store) FindCompatible(modelID, accelerator string, gpuCount int, params
 	}
 
 	return best
+}
+
+// sameArguments reports whether two parses describe the same engine arguments,
+// leaving out the image: see LoadFromScaleTarget.
+func sameArguments(a, b EngineParams) bool {
+	a.Image, b.Image = "", ""
+	return reflect.DeepEqual(a, b)
+}
+
+// sameKVGeometry reports whether two parses size the KV cache alike: the
+// engine and image, the model's dtypes and quantization, the memory share,
+// the block size, the parallelism, and the overrides that set it outright.
+// Scheduler flags -- --max-num-seqs, the batch-token budget, the context
+// length -- decide how the cache is used, not how big it is.
+func sameKVGeometry(a, b EngineParams) bool {
+	return a.Engine == b.Engine && a.Image == b.Image &&
+		a.WeightDtype == b.WeightDtype && a.Quantization == b.Quantization &&
+		a.GpuMemoryUtilization == b.GpuMemoryUtilization && a.BlockSize == b.BlockSize &&
+		a.KvCacheDtype == b.KvCacheDtype && a.TensorParallelSize == b.TensorParallelSize &&
+		a.NumGpuBlocksOverride == b.NumGpuBlocksOverride && a.TotalKvTokensOverride == b.TotalKvTokensOverride &&
+		a.EnforceEager == b.EnforceEager
 }

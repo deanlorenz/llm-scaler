@@ -243,6 +243,13 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	// unresolved with pod placement on a fleet spread over two products, and
 	// a record filed under whichever value the last cycle saw was missed by
 	// the next lookup that saw the other.
+	//
+	// The cost, the same compromise the k2 keys make: on a variant whose pods
+	// sit on two products, the record holds whichever replica was priced last
+	// under the product last RESOLVED, so a compatible sibling parked on one
+	// product can be bounded or estimated from the other's capacity. It needs
+	// a mixed fleet and a compatible parked sibling on the same model; filed
+	// under the raw reading instead, the record matched no sibling at all.
 	a.capacityStore.Update(namespace, modelID, rm.VariantName, capacity.Record{
 		AcceleratorName:       a.StableAcceleratorFor(namespace, rm.VariantName, accelerator),
 		GpuCount:              gpuCount,
