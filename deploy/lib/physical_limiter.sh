@@ -255,6 +255,109 @@ subjects:
 EOF
 }
 
+# pl_grant_namespace_read grants one controller `get` on Namespaces, which it
+# needs to SEE the policy namespace at all.
+#
+# A namespace-scoped controller holds only a Role, and a Role cannot reach a
+# cluster-scoped Namespace. Without this, publishing policy into wva-policy was
+# a no-op for every such controller on Kubernetes: its lookup was Forbidden, it
+# fell back to its own ConfigMap, and this command still reported the cluster
+# bounded. Same object names as components/policy-namespace-reader, so a later
+# install or upgrade is an idempotent apply over these.
+pl_grant_namespace_read() {
+    local ns="$1" sa="$2" suffix
+    suffix="$(wva_ns_suffix "$ns")"
+    kubectl apply -f - >/dev/null <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: wva-policy-namespace-reader-role-${suffix}
+  labels:
+    app.kubernetes.io/name: workload-variant-autoscaler
+rules:
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: wva-policy-namespace-reader-rolebinding-${suffix}
+  labels:
+    app.kubernetes.io/name: workload-variant-autoscaler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: wva-policy-namespace-reader-role-${suffix}
+subjects:
+- kind: ServiceAccount
+  name: ${sa}
+  namespace: ${ns}
+EOF
+}
+
+# pl_can_read_namespace echoes yes | no | unknown: whether the controller's
+# ServiceAccount may get the Namespace $3. Asked BEFORE granting, because a
+# controller that could not read it resolved its policy to its own ConfigMap at
+# startup and keeps doing so until it is restarted. "unknown" when the caller
+# cannot impersonate -- never folded into either answer.
+pl_can_read_namespace() {
+    local ns="$1" sa="$2" target="$3" out rc=0
+    out="$(kubectl auth can-i get "namespaces/${target}" --as "system:serviceaccount:${ns}:${sa}" 2>&1)" || rc=$?
+    case "$out" in
+        yes*) echo yes ;;
+        no*)  if [ "$rc" -ne 0 ]; then echo no; else echo unknown; fi ;;
+        *)    echo unknown ;;
+    esac
+}
+
+# pl_grant_published_policy_read lets a controller being INSTALLED read a policy
+# that was published before it existed.
+#
+# enable_physical_limiter grants the read to the controllers it finds; one
+# installed afterwards resolved to the policy namespace, had no RoleBinding
+# there, and refused to start ("refusing to start unbounded"). So the prereqs
+# phase grants it too, whenever the namespace this controller will resolve to
+# exists. Only a SELF-MANAGED controller (it manages the namespace it runs in)
+# reads policy from another namespace; any other keeps its own ConfigMap, and
+# gets nothing here.
+#
+# Never fatal: the install goes on, and a controller that cannot read a policy
+# that exists says so at startup. Every outcome is logged.
+pl_grant_published_policy_read() {
+    local ns="$1" managed="$2" sa="${3:-wva-controller-manager}" target out rc=0
+    [ "$managed" = "$ns" ] || return 0
+    # The label wins, as in the controller. A failed read is reported, not
+    # folded into "no label": the label may point somewhere else entirely.
+    out="$(kubectl get namespace "$managed" \
+        -o jsonpath='{.metadata.labels.wva\.llmd\.ai/policy-namespace}' 2>&1)" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        log_warning "Could not read namespace $managed to find its cluster policy namespace: $out"
+        log_warning "  If a cluster policy is published for it, grant ${ns}/${sa} its read: re-run this phase as a cluster admin."
+        return 0
+    fi
+    target="${out:-$(pl_policy_ns)}"
+    rc=0
+    out="$(kubectl get namespace "$target" -o name 2>&1)" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        case "$out" in
+            *NotFound*|*"not found"*)
+                log_info "No cluster policy namespace ($target) yet; 'make enable-physical-limiter' grants this controller its read when it publishes one."
+                ;;
+            *)
+                log_warning "Could not tell whether the cluster policy namespace $target exists: $out"
+                log_warning "  If it does, ${ns}/${sa} cannot read it and the controller will refuse to start; re-run this phase as a cluster admin."
+                ;;
+        esac
+        return 0
+    fi
+    if ! pl_grant_policy_read "$ns" "$sa" "$target"; then
+        log_warning "Could not grant ${ns}/${sa} read of the cluster policy in $target; the controller will refuse to start until it can read it."
+        return 0
+    fi
+    log_success "  ${ns}/${sa} may read cluster policy in $target (Role wva-policy-reader, RoleBinding wva-policy-reader-$(wva_ns_suffix "$ns"))"
+}
+
 # pl_set_limiter writes the limiters list into the policy ConfigMap's default
 # entry, preserving every other setting in it.
 #
@@ -431,7 +534,7 @@ enable_physical_limiter() {
     # controller without node access must refuse — a self-inflicted outage across
     # the cluster, arriving as NotReady pods rather than as an error from this
     # command.
-    local targets="" restart_list="" cm_ns
+    local targets="" restart_list="" cm_ns ns_read
     for ns in $namespaces; do
         sa="$(pl_controller_sa "$ns")"
         if [ "$limiter" = "gpu-inventory" ]; then
@@ -442,8 +545,17 @@ enable_physical_limiter() {
         fi
         cm_ns="$(pl_policy_cm_ns "$ns")"
         if [ "$cm_ns" = "$policy_ns" ]; then
+            # Asked before the grant: a controller that could not SEE the policy
+            # namespace resolved to its own ConfigMap at startup, and a grant
+            # alone does not change that -- it needs the restart below too.
+            ns_read="$(pl_can_read_namespace "$ns" "$sa" "$policy_ns")"
+            pl_grant_namespace_read "$ns" "$sa"
             pl_grant_policy_read "$ns" "$sa" "$policy_ns"
-            pl_needs_restart "$ns" && restart_list="$restart_list $ns"
+            if pl_needs_restart "$ns" || [ "$ns_read" = no ]; then
+                restart_list="$restart_list $ns"
+            elif [ "$ns_read" = unknown ]; then
+                log_warning "  Could not tell whether $ns/$sa could already read namespace $policy_ns (impersonation was not allowed). If its controller logs 'Cannot tell whether a cluster admin published policy', restart it."
+            fi
         fi
         case " $targets " in *" $cm_ns "*) : ;; *) targets="$targets $cm_ns" ;; esac
         log_success "  $ns/$sa — reads policy from ${cm_ns}$([ "$limiter" = "gpu-inventory" ] && echo ', and may list nodes')$([ "$limiter" = "quota" ] && [ "${WVA_QUOTA_KUEUE:-false}" = "true" ] && echo ', and may read Kueue')"
@@ -467,7 +579,7 @@ enable_physical_limiter() {
     # its policy source to its OWN namespace and will never look again. Without
     # this the command reports success and changes nothing for it.
     for ns in $restart_list; do
-        log_info "  Restarting $ns: it resolved its policy source before $policy_ns existed, and that resolution runs once at startup"
+        log_info "  Restarting $ns: it resolved its policy source before it could see $policy_ns, and that resolution runs once at startup"
         kubectl rollout restart deploy -n "$ns" \
             -l app.kubernetes.io/name=workload-variant-autoscaler >/dev/null 2>&1 || \
             log_warning "    could not restart the controller in $ns — restart it yourself, or it keeps reading its own ConfigMap"

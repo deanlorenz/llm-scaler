@@ -22,10 +22,13 @@ import (
 //  2. the well-known namespace, config.WellKnownPolicyNamespace — self-managed only
 //  3. the controller's own namespace
 //
-// Reading step 1 needs `get namespaces`, which a namespace-scoped install does not
-// have. That read is best-effort and a denial is logged, not fatal — but it means
-// an admin who labels a tenant namespace must also grant that read, or the label
-// is silently not seen and the tenant keeps its own configuration.
+// Steps 1 and 2 need `get namespaces`, which a namespace-scoped install's Role
+// cannot grant: Namespaces are cluster-scoped. The prereqs phase grants it with a
+// per-install ClusterRole (components/policy-namespace-reader). An install
+// without that grant still starts on its own ConfigMap, as before, but the source
+// is recorded as config.PolicySourceLocalUnverified — logged with the remedy and
+// published as wva_policy_namespace_unverified — because "could not look" is not
+// "no policy was published".
 //
 // Rule 1 is an annotation on a NAMESPACE because that object is cluster-scoped: a
 // namespace admin holds RBAC inside their namespace and cannot edit it. So an
@@ -71,7 +74,13 @@ func ResolvePolicyNamespace(ctx context.Context, c client.Reader, cfg *config.Co
 	selfManaged := managedNS != "" && managedNS == systemNS
 
 	wellKnownExists, err := namespaceExists(ctx, c, config.WellKnownPolicyNamespace)
-	if err != nil {
+	// Forbidden is NOT absent. A namespace-scoped controller holds only a Role,
+	// which cannot reach a cluster-scoped Namespace, so folding the denial into
+	// "does not exist" made every such controller ignore a policy namespace an
+	// admin had published — silently, while the admin believed it was bounded.
+	// It is carried forward as its own answer and decided on below.
+	wellKnownDenied := apierrors.IsForbidden(err)
+	if err != nil && !wellKnownDenied {
 		// Never guess. Falling back on an API error would quietly downgrade a
 		// cluster-imposed bound to a self-chosen one, and nothing afterwards would
 		// show that this controller came up under the weaker rule.
@@ -100,6 +109,11 @@ func ResolvePolicyNamespace(ctx context.Context, c client.Reader, cfg *config.Co
 			logger.Info("A "+config.WellKnownPolicyNamespace+" namespace exists but is NOT used here: this controller does not manage its own namespace, so its own ConfigMap is authoritative.",
 				"policyNamespace", config.WellKnownPolicyNamespace)
 		}
+		if wellKnownDenied {
+			// Harmless here: the answer would not change the source.
+			logger.V(1).Info("Cannot read the "+config.WellKnownPolicyNamespace+" namespace; it would not be used by this controller either way",
+				"reason", err.Error())
+		}
 		return nil
 	}
 
@@ -109,16 +123,17 @@ func ResolvePolicyNamespace(ctx context.Context, c client.Reader, cfg *config.Co
 	// namespace-scoped deployment, and refusing to start over it would break the
 	// default shape on OpenShift for no gain.
 	ns := &corev1.Namespace{}
+	managedDenied := false
 	if err := c.Get(ctx, client.ObjectKey{Name: managedNS}, ns); err != nil {
 		if !apierrors.IsNotFound(err) && !apierrors.IsForbidden(err) {
 			return fmt.Errorf("failed reading namespace %s to resolve cluster policy: %w", managedNS, err)
 		}
+		managedDenied = apierrors.IsForbidden(err)
 		// Info, not V(1): this is the difference between "no policy applies" and
 		// "policy may apply and I cannot see it", and an admin who labelled this
 		// namespace has no other way to find out the label was never read.
 		logger.Info("Could not read the managed Namespace, so any wva.llmd.ai/policy-namespace label on it "+
-			"has NOT been applied. Grant this ServiceAccount get on namespaces if a cluster admin "+
-			"directs policy that way.",
+			"has NOT been applied. To fix: "+policyNamespaceReaderRemedy,
 			"namespace", managedNS, "reason", err.Error())
 	}
 
@@ -138,24 +153,60 @@ func ResolvePolicyNamespace(ctx context.Context, c client.Reader, cfg *config.Co
 		return nil
 	}
 
+	if wellKnownDenied || managedDenied {
+		// The fallback is today's behaviour — an install that predates the
+		// namespace-reader grant must keep starting — but it is no longer
+		// silent. The source is recorded as UNVERIFIED, which publishes
+		// wva_policy_namespace_unverified=1, and the log says what to grant.
+		cfg.SetPolicyNamespace(systemNS, config.PolicySourceLocalUnverified)
+		logger.Info("Cannot tell whether a cluster admin published policy for this controller: reading Namespaces is Forbidden. "+
+			"Falling back to this controller's own ConfigMap, which may be WEAKER than the policy in force. To fix: "+
+			policyNamespaceReaderRemedy,
+			"wellKnownPolicyNamespace", config.WellKnownPolicyNamespace,
+			"wellKnownReadDenied", wellKnownDenied,
+			"managedNamespaceReadDenied", managedDenied,
+			"fallbackNamespace", systemNS,
+			"metric", constants.WVAPolicyNamespaceUnverified)
+		return nil
+	}
+
 	cfg.SetPolicyNamespace(systemNS, config.PolicySourceLocal)
 	logger.V(1).Info("Cluster policy comes from this controller's own namespace", "namespace", systemNS)
 	return nil
 }
 
+// policyNamespaceReaderRemedy names the grant that lets a namespace-scoped
+// controller resolve its policy namespace, and the command that creates it.
+const policyNamespaceReaderRemedy = "grant this ServiceAccount get on namespaces " +
+	"(ClusterRole wva-policy-namespace-reader-role-<suffix> and its ClusterRoleBinding, " +
+	"created by 'NAMESPACE=<this namespace> make setup-prereqs' or 'make enable-physical-limiter'), then restart the controller"
+
+// policyReadRemedy says how to let this controller read the policy ConfigMap in
+// policyNS. For a separate policy namespace that is the Role/RoleBinding pair
+// `make enable-physical-limiter` and `make setup-prereqs` create there.
+func policyReadRemedy(policyNS string) string {
+	systemNS := config.SystemNamespace()
+	if policyNS == systemNS {
+		return "the controller's ServiceAccount needs get/list/watch on ConfigMaps in this namespace"
+	}
+	return fmt.Sprintf("the controller's ServiceAccount needs get/list/watch on ConfigMaps in %[1]s: "+
+		"Role wva-policy-reader and RoleBinding wva-policy-reader-<suffix> in %[1]s, bound to this controller's ServiceAccount. "+
+		"A cluster admin creates both with 'NAMESPACE=%[2]s make setup-prereqs' (or 'make enable-physical-limiter'); "+
+		"the next container restart picks it up", policyNS, systemNS)
+}
+
 // namespaceExists reports whether a namespace is present.
 //
-// Forbidden is reported as absent, and only here: this answer is used to FIND
-// policy, never to decide whether policy is required. A controller that cannot see
-// the well-known namespace still has to satisfy one of the other branches, so
-// treating it as missing narrows what it may do rather than widening it.
-func namespaceExists(ctx context.Context, c client.Reader, name string) (bool, error) {
+// Only NotFound means absent. Forbidden is returned as an error, because a
+// controller that cannot see a namespace does not know whether it exists, and
+// the caller has to say so rather than act as though it had looked.
+func namespaceExists(ctx context.Context, c client.Reader, name string) (bool, error) { //nolint:unparam // one caller today; the name stays a parameter so the lookup is testable on its own
 	ns := &corev1.Namespace{}
 	err := c.Get(ctx, client.ObjectKey{Name: name}, ns)
 	switch {
 	case err == nil:
 		return true, nil
-	case apierrors.IsNotFound(err), apierrors.IsForbidden(err):
+	case apierrors.IsNotFound(err):
 		return false, nil
 	default:
 		return false, err

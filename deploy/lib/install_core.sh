@@ -57,9 +57,16 @@ wva_missing_prereqs() {
         #   wva-utilization-share-history-*  the utilization-share need history
         #                       store; without it a restart forgets the models'
         #                       peaks and caps their headroom for a window.
+        #   wva-policy-namespace-reader-*  the Namespace get that finds a
+        #                       published cluster policy. Without it the
+        #                       controller runs on its own ConfigMap and reports
+        #                       wva_policy_namespace_unverified=1.
         case "$name" in
             wva-kueue-reader-*)
                 echo "OPTIONAL $kind/$name|the Kueue quota source (a quota limiter entry with kueue.enabled)"
+                continue ;;
+            wva-policy-namespace-reader-*)
+                echo "OPTIONAL $kind/$name|finding a cluster policy published in wva-policy (make enable-physical-limiter); without it that policy is NOT applied to this controller"
                 continue ;;
             wva-utilization-share-history-role|wva-utilization-share-history-rolebinding)
                 echo "OPTIONAL $kind/$name|the utilization-share need history, kept across controller restarts"
@@ -437,6 +444,12 @@ main() {
         if [ "$DEPLOY_WVA" = "true" ]; then
             WVA_APPLY_SCOPE=$([ "$phase" = "all" ] && echo all || echo prereqs) \
                 deploy_wva_controller
+            # A cluster policy published BEFORE this install granted its read to
+            # the controllers that existed then, not to this one -- which would
+            # resolve to that policy and refuse to start for want of a RoleBinding.
+            if [ "$(wva_install_scope)" = "namespace" ]; then
+                pl_grant_published_policy_read "$WVA_NS" "${WVA_WATCH_NS:-$WVA_NS}"
+            fi
         fi
 
         deploy_scaler_backend

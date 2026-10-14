@@ -32,3 +32,7 @@ components:
 # Kueue ClusterQueues and ResourceFlavors are cluster-scoped too; a quota entry
 # with kueue.enabled reads them. Inert on a cluster without Kueue.
 - ../../../components/kueue-reader/
+# Namespaces too: the controller reads them to find the cluster policy namespace
+# (wva-policy, or a wva.llmd.ai/policy-namespace label). Without it a published
+# cluster policy is invisible to this controller.
+- ../../../components/policy-namespace-reader/

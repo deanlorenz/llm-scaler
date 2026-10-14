@@ -11,8 +11,10 @@
 #                         WVA_LIMITER=none or quota.
 #   namespaces            listing namespaces to find namespace-local config, and
 #                         reading a policy annotation. Both are best-effort: a
-#                         single-namespace controller never lists, and the policy
-#                         read tolerates being denied.
+#                         single-namespace controller never lists. The policy
+#                         read (get) comes from components/policy-namespace-reader,
+#                         applied by the prereqs phase; denied, the controller
+#                         runs on its own ConfigMap and reports it unverified.
 #   clusterqueues,        Kueue quotas. Needed ONLY by a quota entry with
 #   resourceflavors       `kueue.enabled`; components/kueue-reader grants them,
 #                         applied by the prereqs phase like node-reader. The

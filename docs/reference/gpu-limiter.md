@@ -87,6 +87,15 @@ kubectl -n wva-policy create role wva-policy-reader \
 kubectl -n wva-policy create rolebinding team-a-wva \
   --role=wva-policy-reader \
   --serviceaccount=team-a:wva-controller-manager
+
+# Let it SEE wva-policy at all. Namespaces are cluster-scoped, so a
+# namespace-scoped controller's Role cannot read them; without this it never
+# finds the policy above. `make setup-prereqs` creates the same grant
+# (components/policy-namespace-reader).
+kubectl create clusterrole wva-policy-namespace-reader --verb=get --resource=namespaces
+kubectl create clusterrolebinding wva-policy-namespace-reader-team-a \
+  --clusterrole=wva-policy-namespace-reader \
+  --serviceaccount=team-a:wva-controller-manager
 ```
 
 A namespace that draws its limits from somewhere other than the default is
@@ -127,9 +136,21 @@ a limiter that reads as enforcing and enforces nothing is worse than either
 enforcing or erroring. Thresholds, tiers and per-model settings stay with the team
 running the workload: those are tuning, not entitlement.
 
+Steps 1 and 2 read Namespace objects, which needs `get namespaces`. If that read
+is **Forbidden**, the controller cannot tell whether policy was published for
+it. It starts on its own ConfigMap, as before the grant existed, but logs
+`Cannot tell whether a cluster admin published policy` with the fix and sets
+`wva_policy_namespace_unverified` to **1**. Fix it with
+`NAMESPACE=<ns> make setup-prereqs` or `make enable-physical-limiter`; both create
+the grant, and `enable-physical-limiter` also restarts the controllers it
+affects.
+
 If the policy ConfigMap **exists but cannot be read** — usually a missing
 RoleBinding — the controller refuses to start rather than run unbounded while an
-admin believes a quota applies.
+admin believes a quota applies. The error names the missing
+`wva-policy-reader-<suffix>` RoleBinding. `make setup-prereqs` creates it when
+the policy namespace already exists, so a controller installed after the policy
+was published can read it.
 
 ### When policy demands a limiter the controller cannot serve
 

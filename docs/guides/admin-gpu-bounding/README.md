@@ -51,7 +51,11 @@ every install that lacks node access at once. Controllers are discovered rather 
 configured — the hazard is the install you forgot.
 
 Policy lands where each controller actually reads it: the well-known namespace
-for a self-managed controller, its own ConfigMap for an admin-owned one.
+for a self-managed controller, its own ConfigMap for an admin-owned one. A
+self-managed controller also gets `get` on namespaces, which it needs to see the
+well-known namespace at all. If it could not see that namespace before, it is
+restarted so it picks up the policy. A controller installed later gets both
+grants from `make setup-prereqs`.
 
 ## Verification
 

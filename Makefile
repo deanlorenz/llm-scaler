@@ -2715,6 +2715,13 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# else can see it: the YAML is valid, the patch applies, and a cluster run
 	@# shows a healthy controller scaling a fleet.
 	@bash hack/check-limiter-declaration.sh
+	@echo "Checking every controller can find and read a published cluster policy..."
+	@# A namespace-scoped controller cannot read a cluster-scoped Namespace
+	@# through its Role, so it never saw wva-policy and ran on its own
+	@# ConfigMap while enable-physical-limiter reported the cluster bounded;
+	@# and one installed after the policy was published had no RoleBinding
+	@# to read it and refused to start. Executed against a stub kubectl.
+	@bash hack/check-policy-namespace-grants.sh
 	@echo "Checking the tenant Role still covers the generated ClusterRole..."
 	@# The ClusterRole is GENERATED from kubebuilder markers; the namespaced Role
 	@# the tenant overlay installs is maintained by hand, so it does not move when
