@@ -155,7 +155,7 @@ cluster-wide. The differences that matter for review:
 | Verbs | Resource | Scope | Note |
 | --- | --- | --- | --- |
 | get, list, watch | **configmaps** | **every namespace** | the controller's cache filters ConfigMaps by label, but the grant does not: it can read any ConfigMap in the cluster |
-| get, list, watch, **patch** | **pods** | **every namespace** | the code patches only pods of workloads it manages and warm-pool pods, but the grant reaches every pod, `kube-system` included |
+| get, list, watch | **pods** | **every namespace** | read only. `patch` is granted per namespace by Role `wva-pod-writer`, made where it is used (see [Grants made after install](#grants-made-after-install)) |
 | get, list, watch | namespaces, nodes, nodes/status | cluster | |
 | get, list | clusterqueues, localqueues, resourceflavors | cluster | |
 
@@ -168,6 +168,7 @@ binding and the `metrics-reader` repoint are added as above.
 
 | Command | Grants | To whom |
 | --- | --- | --- |
+| `deploy/warmpool.sh create`, `make utilization-share-activate` | Role `wva-pod-writer` (patch on pods) and a RoleBinding, in the pool's or the models' namespace only | `wva-controller-manager` of the controller namespace given. Needed by a cluster-scoped controller; a namespace-scoped one already has it in its Role |
 | `make enable-physical-limiter` (gpu-inventory) | ClusterRole + binding: get, list, watch on nodes | the ServiceAccount of each targeted controller |
 | `make enable-physical-limiter WVA_QUOTA_KUEUE=true` (quota) | ClusterRole + binding: get, list on clusterqueues, resourceflavors; get on the controller's managed Namespace only, by name | the same |
 | `make enable-physical-limiter` | Role `wva-policy-reader` in the policy namespace (`wva-policy`, or the one a `wva.llmd.ai/policy-namespace` label names): get, list, watch on **all** ConfigMaps there, plus a RoleBinding | each controller that reads policy from that namespace |

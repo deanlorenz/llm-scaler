@@ -31,16 +31,22 @@ package controller
 
 // Core resources read during optimization and metrics collection.
 //
-// Pods also take `patch`, and only for the warm pool: joining a woken pool Pod
-// to a model's InferencePool means writing that pool's selector labels onto it,
-// and leaving means removing them. Without this every borrow fails at the label
-// write -- and worse, every RETURN fails after the proxy has already been
-// cleared, leaving a Pod out of service with an awake model still holding its
-// GPU and no timeout that recovers it.
+// Pods are READ cluster-wide and never written through this ClusterRole. The
+// controller does patch pods in two opt-in places -- the warm pool (an
+// InferencePool's selector labels and a deletion cost on a lent pool Pod) and
+// the utilization-share optimizer (a deletion cost and its transfer mark) --
+// and `patch` for those is granted per namespace by role/wva-pod-writer
+// (deploy/lib/pod_writer.sh), which deploy/warmpool.sh and
+// deploy/utilization-share.sh create where they are used. A cluster-wide
+// `patch` on pods reached every Pod's image, kube-system included: a stolen
+// controller token could run code as any ServiceAccount. The warm pool checks
+// the grant itself (internal/warmpool/preflight.go) and disables a pool it
+// cannot lend from. The namespace-scoped tenant Role keeps `patch`: it is
+// namespaced already.
 //
 // `pods/status` is deliberately NOT taken: readiness is reported by the pool
 // Pod's own probe, so nothing here writes Pod status.
-// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;patch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 // Note: Namespace watch permission is required for label-based namespace opt-in for namespace-local ConfigMaps.

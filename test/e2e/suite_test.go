@@ -226,6 +226,14 @@ var _ = BeforeSuite(func() {
 		}
 	}
 
+	// The warm-pool specs lend Pods in the workload namespace, which is a pod
+	// patch. The controller's ClusterRole only reads pods; an operator gets the
+	// write from deploy/warmpool.sh, and the suite grants it the same way.
+	if k8sClient != nil {
+		Expect(fixtures.GrantPodWrites(ctx, k8sClient, cfg.LLMDNamespace, cfg.WVANamespace)).To(Succeed(),
+			"could not grant the controller patch on pods in %s", cfg.LLMDNamespace)
+	}
+
 	GinkgoWriter.Println("BeforeSuite completed successfully - infrastructure ready")
 })
 

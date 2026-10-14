@@ -23,6 +23,8 @@ RED='[0;31m'
 NC='[0m'
 # shellcheck source=lib/common.sh
 source "$HERE/lib/common.sh"
+# shellcheck source=lib/pod_writer.sh
+source "$HERE/lib/pod_writer.sh"
 # NOTE: log_error EXITS. Nothing may follow it that needs to run.
 
 NAMESPACE=""
@@ -544,6 +546,16 @@ $(warmpool_networkpolicy)"
 ---
 $(warmpool_podmonitor)"
   fi
+
+  # Lending a pool Pod means patching it: the InferencePool's selector labels
+  # and a deletion cost. The controller's ClusterRole only READS pods, so the
+  # write is granted here, in this namespace alone (lib/pod_writer.sh). Without
+  # it the controller's preflight finds it cannot patch and disables the pool.
+  # FIRST in the apply, so it exists before the ScaledObject that makes the
+  # controller look at this namespace.
+  manifest="$(wva_pod_writer_manifest "$NAMESPACE" "$WVA_NAMESPACE")
+---
+${manifest}"
 
   if [ "$APPLY" -eq 0 ]; then
     printf '%s\n' "$manifest"
@@ -1517,6 +1529,11 @@ cmd_delete() {
   # operator: a scrape config left behind selects Pods that no longer exist.
   kubectl delete podmonitor "wva-warm-pool-${POOL_NAME}" -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1 || true
   log_success "Pool '${POOL_NAME}' removed from ${NAMESPACE}: ScaledObject, workload, NetworkPolicy and PodMonitor"
+  # Not the pod-write grant: another pool, or the utilization-share optimizer,
+  # may still need it in this namespace, and nothing here can tell.
+  log_info "Kept role/wva-pod-writer and its RoleBinding in ${NAMESPACE} (the controller's patch on pods here). With no other pool and no utilization-share optimizer in this namespace, remove them:"
+  log_info "    kubectl delete role wva-pod-writer -n ${NAMESPACE}"
+  log_info "    kubectl get rolebinding -n ${NAMESPACE} -o name | grep /wva-pod-writer- | xargs -r kubectl delete -n ${NAMESPACE}"
 }
 
 if [ $# -lt 1 ]; then

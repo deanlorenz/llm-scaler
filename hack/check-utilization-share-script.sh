@@ -19,6 +19,11 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 # CR-stripped, for the reason hack/check-limiter-declaration.sh gives.
 tr -d '\r' < "$ROOT/deploy/utilization-share.sh" > "$WORK/us.sh"
+# Beside it, as in deploy/: activate sources lib/pod_writer.sh.
+mkdir -p "$WORK/lib"
+if [ -f "$ROOT/deploy/lib/pod_writer.sh" ]; then
+    tr -d '\r' < "$ROOT/deploy/lib/pod_writer.sh" > "$WORK/lib/pod_writer.sh"
+fi
 
 # shellcheck disable=SC1090
 . "$WORK/us.sh"
@@ -198,6 +203,9 @@ case "$args" in
   *" rollout "*)
     [ -e "$S/restart.noreload" ] || echo 'INFO Updated global scaling policy from ConfigMap' >> "$S/logs"
     exit 0 ;;
+  *" apply -f - "*)
+    [ -e "$S/apply.forbidden" ] && { echo 'Error from server (Forbidden): roles.rbac.authorization.k8s.io is forbidden' >&2; exit 1; }
+    cat >> "$S/applied"; exit 0 ;;
   *) echo "stub kubectl: unhandled: $*" >&2; exit 3 ;;
 esac
 STUB
@@ -251,6 +259,18 @@ vcase "shadow: an unreadable policy is not an absent one" \
 fresh "$QUOTA_POLICY"; run activate
 vcase "activate: refuses with no shadow block first" eval '[ $RC -ne 0 ] && [ "$(patches)" = 0 ]'
 
+# Active moves deletion costs, a pod patch the ClusterRole no longer grants:
+# activate grants it in the models namespace, and refuses to go active when
+# it cannot.
+fresh "$TUNED_POLICY"; run activate
+vcase "activate: grants the controller patch on pods in the models namespace" \
+    eval '[ $RC -eq 0 ] && grep -q "^kind: Role$" "$STATE/applied" && grep -q "namespace: team-a" "$STATE/applied" && grep -q "\"patch\"" "$STATE/applied"'
+fresh "$(printf '%s\n' "$TUNED_POLICY" | sed 's/shadow: true/shadow: false/')"; run activate
+vcase "activate: an already-active block still grants (a second namespace on one budget)" \
+    eval '[ $RC -eq 0 ] && [ "$(patches)" = 0 ] && grep -q "namespace: team-a" "$STATE/applied" && says "already active"'
+fresh "$TUNED_POLICY"; touch "$STATE/apply.forbidden"; run activate
+vcase "activate: a refused grant stops before going active" \
+    eval '[ $RC -ne 0 ] && [ "$(patches)" = 0 ] && says "role/wva-pod-writer"'
 fresh "$TUNED_POLICY"; run activate
 vcase "activate: from shadow sets shadow false, keeps tuning" \
     eval '[ $RC -eq 0 ] && [ "$(pol .optimizer.utilizationShare.shadow)" = false ] && [ "$(pol .optimizer.utilizationShare.maxHeadroomReplicas)" = 2 ]'
@@ -411,7 +431,7 @@ vcase "logs: every controller pod is read, not one that may be a standby" eval '
 fresh "$QUOTA_POLICY"; echo '{"level":"info","msg":"x","accelerator":"NVIDIA-H200"}' > "$STATE/logs"; run check
 vcase "check: reads accelerators from a json-encoded log" eval '[ $RC -eq 0 ] && says "resolves: NVIDIA-H200"'
 
-CASES_EXPECTED=67
+CASES_EXPECTED=70
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. A case was added or removed; update CASES_EXPECTED deliberately."
 fi

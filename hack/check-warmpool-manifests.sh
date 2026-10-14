@@ -64,6 +64,28 @@ fi
 [ "$(count_kind "$POOL" Deployment)" = 1 ] \
   && ok "one Deployment" || fail "expected exactly one Deployment"
 
+# The pod-write grant. The controller's ClusterRole only READS pods, and lending
+# a pool Pod is a patch -- so the pool brings the write with it, for this
+# namespace alone, and before the ScaledObject that makes the controller look.
+if command -v python3 >/dev/null 2>&1; then
+  grant="$(printf '%s\n' "$POOL" | python3 -c '
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+kinds = [d["kind"] for d in docs]
+role = [d for d in docs if d["kind"] == "Role" and d["metadata"]["name"] == "wva-pod-writer"]
+rb = [d for d in docs if d["kind"] == "RoleBinding" and d.get("roleRef", {}).get("name") == "wva-pod-writer"]
+ok = (len(role) == 1 and role[0]["metadata"]["namespace"] == "tenant"
+      and role[0]["rules"] == [{"apiGroups": [""], "resources": ["pods"], "verbs": ["patch"]}]
+      and len(rb) == 1 and rb[0]["metadata"]["namespace"] == "tenant"
+      and rb[0]["subjects"] == [{"kind": "ServiceAccount", "name": "wva-controller-manager", "namespace": "wva-system"}]
+      and "ScaledObject" in kinds and kinds.index("RoleBinding") < kinds.index("ScaledObject"))
+print("yes" if ok else "no")
+' 2>/dev/null)"
+  [ "$grant" = yes ] \
+    && ok "grants the controller patch on pods in the pool namespace only, before the ScaledObject" \
+    || fail "expected Role wva-pod-writer (patch pods, namespace tenant) bound to wva-system/wva-controller-manager, ahead of the ScaledObject"
+fi
+
 # THE OTHER ONE THAT SHIPPED BROKEN, and the one nothing else could see. Every
 # embedded Python program -- the preStop drain hook and both probes -- must
 # still be the program the manifest says, after passing through an UNQUOTED

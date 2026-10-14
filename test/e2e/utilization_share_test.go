@@ -74,6 +74,9 @@ var _ = Describe("Utilization share optimizer", Label("full", "utilization-share
 		}, metav1.CreateOptions{})
 		Expect(err).NotTo(HaveOccurred())
 		ns = nsObj.Name
+		// The optimizer marks donor pods (a deletion cost), which is a pod patch;
+		// make utilization-share-activate grants it per namespace, and so does this.
+		Expect(fixtures.GrantPodWrites(ctx, k8sClient, ns, cfg.WVANamespace)).To(Succeed())
 		By(fmt.Sprintf("Using namespace %s with a %d-GPU quota on %s", ns, quotaGPUs, product))
 		DeferCleanup(func() {
 			_ = k8sClient.CoreV1().Namespaces().Delete(context.Background(), ns, metav1.DeleteOptions{})

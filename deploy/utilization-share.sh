@@ -35,6 +35,9 @@
 # it above the controller's cycle interval).
 set -euo pipefail
 
+# shellcheck source=lib/pod_writer.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/pod_writer.sh"
+
 KUBECTL_TIMEOUT="${KUBECTL_TIMEOUT:-30s}"
 CONTROLLER_DEPLOY="${CONTROLLER_DEPLOY:-wva-controller-manager}"
 CONTROLLER_CONTAINER="${CONTROLLER_CONTAINER:-manager}"
@@ -538,11 +541,21 @@ verb_activate() {
     [ "$POLICY_FOUND" -eq 1 ] || die "no scaling policy in $POLICY_NS: there is nothing to activate"
     state="$(block_state)"
     case "${state% *}" in
-        active) ok "already active"; return 0 ;;
-        shadow) ;;
+        active|shadow) ;;
         off) die "no optimizer block: run shadow first and read what it would move" ;;
         *) die "the policy has an optimizer block this script does not own (${state% *}); it will not replace it" ;;
     esac
+    # Active moves pods' deletion cost, which is a patch. The controller's
+    # ClusterRole only reads pods, so the write is granted here, in this
+    # namespace alone (lib/pod_writer.sh), before the mode that needs it --
+    # and also when the block is already active, which is how a second
+    # namespace sharing one budget gets its grant.
+    wva_grant_pod_writes "$NS" "$CONTROLLER_NS" || die "could not grant the controller patch on pods in $NS (role/wva-pod-writer); this needs create on roles and rolebindings there"
+    ok "the controller in $CONTROLLER_NS may patch pods in $NS (role/wva-pod-writer)"
+    if [ "${state% *}" = active ]; then
+        ok "already active"
+        return 0
+    fi
     set_mode active
     info "for two to three minutes nothing in the group scales (quiet-period); the same follows every controller restart"
 }

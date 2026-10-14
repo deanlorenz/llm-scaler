@@ -126,7 +126,7 @@ optimization](modeling-and-optimization.md).
 | Service `wva-controller-manager-metrics-service`, port 8443 | its own `wva_*` metrics, for Prometheus |
 | ConfigMap `wva-scaling-policy-config` | thresholds, tiers, limiters; re-read live (at startup only, for a namespace-scoped controller reading it outside the namespace it manages) |
 | ConfigMap `wva-manager-config` | Prometheus address and the cycle interval; changes need a restart |
-| Roles and ClusterRoles | read pods, workloads, ScaledObjects, InferencePools, nodes and (optionally) Kueue queues; patch pods |
+| Roles and ClusterRoles | read pods, workloads, ScaledObjects, InferencePools, nodes and (optionally) Kueue queues; patch pods only in a namespace that runs a warm pool or the utilization-share optimizer |
 
 It has **no write access** to Deployments, ScaledObjects or HPAs. It patches
 pods: annotations (the deletion cost that tells Kubernetes which pod to remove

@@ -21,7 +21,8 @@ grants it. Nothing failed at install time, no manifest was invalid, and the pool
 was created and held its accelerators.
 
 So: every namespaced (apiGroup, resource) the ClusterRole grants must be granted
-by the Role with AT LEAST the same verbs. The Role may grant more (it does not),
+by the Role with AT LEAST the same verbs. The Role may grant more (it does:
+`patch` on pods, which the ClusterRole leaves to role/wva-pod-writer per namespace),
 and it may omit the cluster-scoped resources listed below, which are the only
 ones a Role cannot carry.
 """

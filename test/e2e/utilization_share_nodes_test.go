@@ -72,6 +72,8 @@ var _ = Describe("Utilization share optimizer on full GPU nodes", Label("full", 
 			DeferCleanup(func() {
 				_ = k8sClient.CoreV1().Namespaces().Delete(context.Background(), name, metav1.DeleteOptions{})
 			})
+			// Both namespaces hold pods the optimizer may mark (a pod patch).
+			Expect(fixtures.GrantPodWrites(ctx, k8sClient, name, cfg.WVANamespace)).To(Succeed())
 			if prefix == "ushn-" {
 				ns = name
 			} else {

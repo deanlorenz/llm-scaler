@@ -98,6 +98,12 @@ make utilization-share-activate
 ```
 <!-- guide:deploy.active end -->
 
+Activate also lets the controller patch pods in `NAMESPACE` (Role
+`wva-pod-writer`), because the optimizer changes pods' deletion cost and the
+controller's ClusterRole only reads pods. You need the right to create Roles in
+that namespace. If models in several namespaces share one budget, run activate
+once for each of them.
+
 On a cluster-wide quota you can act on a few namespaces first with
 `clusterNamespaces`; weights, floors and every other key are in the
 [scaling policy reference](../../reference/scaling-policy.md#optimizer-cluster-default-only-live).

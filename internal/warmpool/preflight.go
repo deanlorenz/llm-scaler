@@ -40,5 +40,6 @@ func CanBorrow(ctx context.Context, c client.Client, namespace string) (bool, er
 // BorrowDenied is what to tell an operator when the answer is no. Written once
 // here so the message and the manifest cannot drift apart.
 const BorrowDenied = "the warm pool is disabled: this controller may not patch Pods, so it could " +
-	"never lend one. Grant patch on pods in the pool namespace -- verbs get, list, watch, patch -- " +
-	"and restart. Running without it would hold GPUs, warm models, and fail every borrow."
+	"never lend one. Grant patch on pods in the pool namespace -- deploy/warmpool.sh create does, as " +
+	"role/wva-pod-writer -- and restart (a cluster-scoped controller retries on its own). Running " +
+	"without it would hold GPUs, warm models, and fail every borrow."

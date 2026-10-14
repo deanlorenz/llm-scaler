@@ -50,7 +50,7 @@ for fn in wva_append_crb_name_patches wva_append_metrics_reader_subject_patch \
     }
 done
 
-EXPECT_CASES=39
+EXPECT_CASES=41
 RAN=0
 FAILED=0
 
@@ -273,6 +273,38 @@ for overlay in cluster-scoped/kubernetes cluster-scoped/openshift \
     # /tmp writable, and from an emptyDir: a hostPath or a missing volume is not it.
     check "$overlay: /tmp is an emptyDir" 'emptyDir' \
         "$(printf '%s\n' "$dep" | yq -r '(.spec.template.spec.containers[] | select(.name == "manager") | .volumeMounts[] | select(.mountPath == "/tmp") | .name) as $v | .spec.template.spec.volumes[] | select(.name == $v) | keys | map(select(. != "name")) | .[0]')"
+done
+
+# ----------------------------------------------------------------------------
+# No cluster-wide write on pods for the controller
+# ----------------------------------------------------------------------------
+# A Pod's image is mutable on a live Pod, so `patch` (or `update`) on pods
+# granted cluster-wide lets a stolen controller token run code as any
+# ServiceAccount, kube-system included. The controller writes pods only where a
+# warm pool or the utilization-share optimizer runs, and gets that write per
+# namespace (deploy/lib/pod_writer.sh).
+for overlay in cluster-scoped/kubernetes cluster-scoped/openshift; do
+    out="$("${KBUILD[@]}" "config/overlays/$overlay")" || out=''
+    [ -n "$out" ] || { printf 'FATAL: %s did not render.\n' "$overlay" >&2; exit 1; }
+    roles="$(printf '%s\n' "$out" | yq -N -r 'select(.kind == "ClusterRoleBinding" and ([.subjects[]? | select(.kind == "ServiceAccount" and .name == "wva-controller-manager")] | length > 0) and .roleRef.kind == "ClusterRole") | .roleRef.name' | sort -u)"
+    [ -n "$roles" ] || { printf 'FATAL: no ClusterRole is bound to the controller in %s.\n' "$overlay" >&2; exit 1; }
+    writes=0
+    # One `contains` per (resource, verb) pair, chained selects, no `and`:
+    # select(A and B) over two collected sub-lists passed EVERY rule under yq
+    # 4.53, which reads as a grant that is not there. This form was checked
+    # under 4.53 and the CI pin 4.44.3: it names pods for the old role and nothing
+    # for this one.
+    for r in $roles; do
+        for res in pods '*'; do
+            for verb in patch update '*'; do
+                n="$(printf '%s\n' "$out" | R="$r" RES="$res" VERB="$verb" yq -N \
+                    'select(.kind == "ClusterRole" and .metadata.name == strenv(R)) | .rules[] | select(.resources | contains([strenv(RES)])) | select(.verbs | contains([strenv(VERB)])) | .resources | join(",")' \
+                    | grep -c .)"
+                writes=$((writes + n))
+            done
+        done
+    done
+    check "$overlay: no ClusterRole bound to the controller writes pods cluster-wide" '0' "$writes"
 done
 
 # ----------------------------------------------------------------------------

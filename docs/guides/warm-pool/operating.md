@@ -134,8 +134,9 @@ scale-ups they cover are failing, and the pool is hiding it.
 above.
 
 **The pool does not start at all.** The scaling manager logs
-`the warm pool is disabled: this controller may not patch Pods`. Grant `patch`
-on pods in the pool namespace and restart.
+`the warm pool is disabled: this controller may not patch Pods`. `deploy/warmpool.sh create`
+grants it in the pool namespace (Role `wva-pod-writer`); re-run it, or restart a
+namespace-scoped controller once the grant exists. A cluster-scoped one retries on its own.
 
 **A model never gets a warm copy in a multi-pool namespace.** The scaling manager logs
 `variant will get no warm copy` with the reason — either it named no pool, or it
