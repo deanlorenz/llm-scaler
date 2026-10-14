@@ -56,7 +56,7 @@ for fn in so_model_id so_resolve_env_ref; do
     }
 done
 
-EXPECT_CASES=71
+EXPECT_CASES=94
 RAN=0
 FAILED=0
 
@@ -252,7 +252,8 @@ command -v yq >/dev/null 2>&1 || {
     exit 1
 }
 for fn in render_default_scaledobject render_scaledobject so_adopt_patch so_adopt_needs_fallback \
-          so_fallback_check so_fallback_failures so_keda_fallback_probe so_fallback_note so_show_plan; do
+          so_fallback_check so_fallback_failures so_keda_fallback_probe so_fallback_note so_show_plan \
+          so_adopt_fallback_note so_value_trigger_warning; do
     declare -F "$fn" >/dev/null || {
         printf 'FATAL: %s is not defined after sourcing the library.\n' "$fn" >&2
         exit 1
@@ -308,23 +309,73 @@ check 'fallback: an unreadable KEDA CRD gets none' \
     'none' "$(SO_KEDA_FALLBACK_BEHAVIOR=unknown render_with 2 | fb_of)"
 
 # The probe, against a stub kubectl. Each in a subshell with the cache cleared,
-# so the answer is the probe and not the value set above.
+# so the answer is the probe and not the value set above. The stub answers
+# `kubectl explain` from EXPLAIN_* and everything else (the CRD read) from
+# CRD_*. The explain texts are what kubectl 1.31 printed against an envtest API
+# server serving the KEDA 2.18 CRD, with and without fallback.behavior.
+EXPLAIN_OUT='error: unable to reach the server'
+EXPLAIN_RC=1
 CRD_FIXTURE=''
 CRD_FIXTURE_RC=0
-kubectl() { printf '%s' "$CRD_FIXTURE"; return "$CRD_FIXTURE_RC"; }
+CRD_ERR=''
+kubectl() {
+    if [ "$1" = explain ]; then
+        printf '%s\n' "$EXPLAIN_OUT"
+        return "$EXPLAIN_RC"
+    fi
+    [ -z "$CRD_ERR" ] || printf '%s\n' "$CRD_ERR" >&2
+    printf '%s' "$CRD_FIXTURE"
+    return "$CRD_FIXTURE_RC"
+}
 probe() { ( unset SO_KEDA_FALLBACK_BEHAVIOR; so_keda_fallback_probe 2>/dev/null; printf '%s' "$SO_KEDA_FALLBACK_BEHAVIOR" ); }
-CRD_FIXTURE='{"spec":{"versions":[{"name":"v1alpha1","schema":{"openAPIV3Schema":{"properties":{"spec":{"properties":{"fallback":{"properties":{"failureThreshold":{},"replicas":{},"behavior":{"enum":["static","currentReplicas"]}}}}}}}}}]}}'
+probe_warning() { ( unset SO_KEDA_FALLBACK_BEHAVIOR; so_keda_fallback_probe 2>&1 >/dev/null ); }
+FORBIDDEN='Error from server (Forbidden): customresourcedefinitions.apiextensions.k8s.io "scaledobjects.keda.sh" is forbidden: User "tenant" cannot get resource "customresourcedefinitions" in API group "apiextensions.k8s.io" at the cluster scope'
+
+# OpenAPI first: any authenticated user may read it, where a tenant usually
+# may not get the CRD -- so these answer with the CRD read Forbidden.
+CRD_FIXTURE_RC=1
+CRD_ERR="$FORBIDDEN"
+EXPLAIN_OUT=$'GROUP:      keda.sh\nKIND:       ScaledObject\nVERSION:    v1alpha1\n\nFIELD: behavior <string>'
+EXPLAIN_RC=0
+check 'probe: the OpenAPI answers for a tenant that may not read the CRD' 'yes' "$(probe)"
+EXPLAIN_OUT=$'GROUP:      keda.sh\nKIND:       ScaledObject\nVERSION:    v1alpha1\n\nerror: field "behavior" does not exist'
+EXPLAIN_RC=1
+check 'probe: an OpenAPI without fallback.behavior is older' 'no' "$(probe)"
+EXPLAIN_OUT=$'error: field "fallback" does not exist'
+check 'probe: an OpenAPI without fallback at all is older' 'no' "$(probe)"
+EXPLAIN_OUT='error: unable to reach the server'
+check 'probe: neither source readable is unknown' 'unknown' "$(probe)"
+check 'probe: and the warning names Forbidden' \
+    'named' "$(probe_warning | grep -q 'Forbidden to this identity' && echo named || echo unnamed)"
+CRD_ERR=''
+
+# The CRD read, when the OpenAPI could not answer.
+CRD_FIXTURE_RC=0
+CRD_FIXTURE='{"spec":{"versions":[{"name":"v1alpha1","served":true,"schema":{"openAPIV3Schema":{"properties":{"spec":{"properties":{"fallback":{"properties":{"failureThreshold":{},"replicas":{},"behavior":{"enum":["static","currentReplicas"]}}}}}}}}}]}}'
 check 'probe: a CRD with fallback.behavior is KEDA 2.17 or later' 'yes' "$(probe)"
-CRD_FIXTURE='{"spec":{"versions":[{"name":"v1alpha1","schema":{"openAPIV3Schema":{"properties":{"spec":{"properties":{"fallback":{"properties":{"failureThreshold":{},"replicas":{}}}}}}}}}]}}'
+CRD_FIXTURE='{"spec":{"versions":[{"name":"v1alpha1","served":true,"schema":{"openAPIV3Schema":{"properties":{"spec":{"properties":{"fallback":{"properties":{"failureThreshold":{},"replicas":{}}}}}}}}}]}}'
 check 'probe: a CRD without it is older' 'no' "$(probe)"
 check 'probe: an older CRD says so in a warning' \
-    'warned' "$( (unset SO_KEDA_FALLBACK_BEHAVIOR; so_keda_fallback_probe 2>&1 >/dev/null) | grep -q 'KEDA 2.17' && echo warned || echo silent)"
+    'warned' "$(probe_warning | grep -q 'KEDA 2.17' && echo warned || echo silent)"
+CRD_FIXTURE='{"spec":{"versions":[{"name":"v1alpha1","served":true,"schema":{"openAPIV3Schema":{"properties":{"spec":{"properties":{"fallback":{"properties":{"replicas":{}}}}}}}}},{"name":"v1alpha2","served":false,"schema":{"openAPIV3Schema":{"properties":{"spec":{"properties":{"fallback":{"properties":{"behavior":{}}}}}}}}}]}}'
+check 'probe: the field on an unserved version only does not count' 'no' "$(probe)"
 CRD_FIXTURE=''
 CRD_FIXTURE_RC=1
 check 'probe: a CRD that cannot be read is unknown, not new' 'unknown' "$(probe)"
 CRD_FIXTURE_RC=0
 CRD_FIXTURE='not json'
 check 'probe: a CRD that does not parse is unknown' 'unknown' "$(probe)"
+
+# A plan whose every entry renders from a template writes no fallback, so it
+# does not probe, and does not warn about one.
+rows_of() { local a; for a in "$@"; do printf '%s\037ns\037Deployment\037d\037m\0372\0374\037\037\n' "$a"; done; }
+probed() { ( unset SO_KEDA_FALLBACK_BEHAVIOR; so_fallback_check "$1" 2>/dev/null; printf '%s' "${SO_KEDA_FALLBACK_BEHAVIOR:-unprobed}" ); }
+check 'probe: a template-only plan is not probed' \
+    'unprobed' "$(WVA_DEFAULT_SO_TEMPLATE=/x probed "$(rows_of yes no yes)")"
+check 'probe: an adopt entry in a template plan is' \
+    'unknown' "$(WVA_DEFAULT_SO_TEMPLATE=/x probed "$(rows_of yes adopt)")"
+check 'probe: a generated entry is' \
+    'unknown' "$(probed "$(rows_of yes)")"
 unset -f kubectl
 
 # What the plan table and the apply lines say about each entry.
@@ -366,11 +417,25 @@ check 'adopt: a kept zero fallback on a floor of zero is warned about' \
     'warned' "$(so_adopt_needs_fallback ns so 0 2>&1 >/dev/null | grep -q 'replicas is 0 with minReplicaCount 0' && echo warned || echo silent)"
 check 'adopt: a kept zero fallback above a floor is not' \
     'silent' "$(so_adopt_needs_fallback ns so 2 2>&1 >/dev/null | grep -q 'replicas is 0' && echo warned || echo silent)"
+SO_FIXTURE='{"failureThreshold":3,"replicas":4}'
+check 'adopt: a kept fallback above the new floor is warned about' \
+    'warned' "$(so_adopt_needs_fallback ns so 2 2>&1 >/dev/null | grep -q 'replicas (4) is above the minReplicaCount this plan sets (2)' && echo warned || echo silent)"
+SO_FIXTURE='{"failureThreshold":3,"replicas":2}'
+check 'adopt: a kept fallback at the new floor is not' \
+    'silent' "$(so_adopt_needs_fallback ns so 2 2>&1 >/dev/null | grep -q 'is above the minReplicaCount' && echo warned || echo silent)"
 SO_FIXTURE=''
 SO_FIXTURE_RC=1
 check 'adopt: an object that cannot be read is not one without a fallback' \
-    '' "$(so_adopt_needs_fallback ns so 2 2>/dev/null)"
+    'unreadable' "$(so_adopt_needs_fallback ns so 2 2>/dev/null)"
+check 'adopt: and the apply line says it was left as it was' \
+    '(fallback unchanged: could not read it)' "$(so_adopt_fallback_note "$(so_adopt_needs_fallback ns so 2 2>/dev/null)" 2)"
+check 'adopt: on a floor of zero too' \
+    '(fallback unchanged: could not read it)' "$(so_adopt_fallback_note "$(so_adopt_needs_fallback ns so 0 2>/dev/null)" 0)"
 SO_FIXTURE_RC=0
+check 'adopt: a kept fallback says so' \
+    '(kept its own fallback)' "$(so_adopt_fallback_note '' 2)"
+check 'adopt: an added fallback says so' \
+    '(+fallback)' "$(so_adopt_fallback_note yes 2)"
 check 'adopt: WVA_SO_FALLBACK=false adds none' \
     '' "$(WVA_SO_FALLBACK=false so_adopt_needs_fallback ns so 2)"
 unset -f kubectl
@@ -387,6 +452,39 @@ check 'template: the same template above a floor renders' \
     '2' "$(WVA_DEFAULT_SO_TEMPLATE="$TMPL_FIXTURE" render_scaledobject ns Deployment d m addr 2 4 2>/dev/null | yq -r '.spec.fallback.replicas')"
 check 'template: the shipped template renders a floor of 0 with no fallback' \
     'none,0' "$(WVA_DEFAULT_SO_TEMPLATE="$ROOT/config/samples/keda/external-scaler/scaledobject-template.yaml" render_scaledobject ns Deployment d m addr 0 4 2>/dev/null | yq -o=json '.spec' | jq -r '[(.fallback // "none"), .minReplicaCount] | map(tostring) | join(",")')"
+
+# The same zero fallback behind another document: yq answers once per
+# document, and the guard used to compare that whole multi-line answer with
+# "true".
+TMPL_MULTI="$WORK/multi-doc-template.yaml"
+{ printf '%s\n' 'apiVersion: v1' 'kind: ConfigMap' 'metadata:' '  name: {{NAME}}-notes' 'data:' '  a: b' '---'
+  cat "$TMPL_FIXTURE"; } > "$TMPL_MULTI"
+check 'template: a zero fallback in a multi-document template is refused' \
+    'refused' "$( (WVA_DEFAULT_SO_TEMPLATE="$TMPL_MULTI" render_scaledobject ns Deployment d m addr 0 4) > /dev/null 2>&1 && echo accepted || echo refused)"
+check 'template: the multi-document template above a floor renders both' \
+    'ConfigMap,ScaledObject' "$(WVA_DEFAULT_SO_TEMPLATE="$TMPL_MULTI" render_scaledobject ns Deployment d m addr 2 4 2>/dev/null | yq -r '.kind' | grep -v '^---$' | paste -sd, -)"
+TMPL_BROKEN="$WORK/broken-template.yaml"
+printf '%s\n' 'kind: ScaledObject' 'spec:' '  minReplicaCount: {{MIN}}' '  fallback: [unclosed' > "$TMPL_BROKEN"
+check 'template: a template yq cannot read is refused, not passed' \
+    'refused' "$( (WVA_DEFAULT_SO_TEMPLATE="$TMPL_BROKEN" render_scaledobject ns Deployment d m addr 0 4) > /dev/null 2>&1 && echo accepted || echo refused)"
+
+# metricType. The scaler answers a replica count, which only AverageValue keeps
+# a count, so the generator and the adopt patch say so explicitly and a
+# template that asks for Value is warned about.
+check 'metricType: the generator writes AverageValue on its trigger' \
+    'external-push:AverageValue' "$(render_with 2 | yq -r '.spec.triggers[0] | .type + ":" + .metricType')"
+check 'metricType: the adopt patch writes AverageValue on its trigger' \
+    'AverageValue' "$(so_adopt_patch m addr 2 8 10.0 '' '' | jq -r '.spec.triggers[0].metricType')"
+TMPL_VALUE="$WORK/value-template.yaml"
+printf '%s\n' 'apiVersion: keda.sh/v1alpha1' 'kind: ScaledObject' 'metadata:' '  name: {{NAME}}-wva' \
+    'spec:' '  minReplicaCount: {{MIN}}' '  triggers:' '    - type: external-push' '      name: wva-external-scaler' \
+    '      metricType: Value' '      metadata:' '        scalerAddress: {{SCALER_ADDRESS}}' > "$TMPL_VALUE"
+check 'metricType: a template trigger with Value is warned about' \
+    'warned' "$(WVA_DEFAULT_SO_TEMPLATE="$TMPL_VALUE" render_scaledobject ns Deployment d m addr 2 4 2>&1 >/dev/null | grep -q 'has metricType: Value' && echo warned || echo silent)"
+check 'metricType: and still renders' \
+    'Value' "$(WVA_DEFAULT_SO_TEMPLATE="$TMPL_VALUE" render_scaledobject ns Deployment d m addr 2 4 2>/dev/null | yq -r '.spec.triggers[0].metricType')"
+check 'metricType: the shipped template is not warned about' \
+    'silent' "$(WVA_DEFAULT_SO_TEMPLATE="$ROOT/config/samples/keda/external-scaler/scaledobject-template.yaml" render_scaledobject ns Deployment d m addr 2 4 2>&1 >/dev/null | grep -q 'metricType' && echo warned || echo silent)"
 
 # ----------------------------------------------------------------------------
 

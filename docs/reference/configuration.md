@@ -182,7 +182,7 @@ do is also reachable through plan-then-apply, which does not.
 | `WVA_SO_SCALE_UP_STABILIZATION` | `stabilizationWindowSeconds` for scale-up. This is the knob that delays a scale-up: HPA takes its most conservative recommendation across the window. `0` means act on the current one | `0` |
 | `WVA_SO_SCALE_DOWN_PERIOD` | `periodSeconds` on the scale-down policy | `120` |
 | `WVA_SO_SCALE_DOWN_STABILIZATION` | `stabilizationWindowSeconds` for scale-down — how long demand must stay low before a replica is removed | `300` |
-| `WVA_SO_FALLBACK` | `true` writes a KEDA `fallback` (`replicas` = the object's `minReplicaCount`, `behavior: currentReplicasIfHigher`) into every generated ScaledObject with a `minReplicaCount` of 1 or more, and into such an adopted one that has none. It covers a controller that is down or unreachable. A floor of `0` never gets one: KEDA would park a serving model on any trigger error. Nor does a cluster whose KEDA lacks `fallback.behavior` (before 2.17), checked on the CRD at plan and apply time. `false` leaves it out everywhere. See [the fallback](scaledobject-trigger.md#before-the-first-decision-and-the-fallback) | `true` |
+| `WVA_SO_FALLBACK` | `true` writes a KEDA `fallback` (`replicas` = the object's `minReplicaCount`, `behavior: currentReplicasIfHigher`) into every generated ScaledObject with a `minReplicaCount` of 1 or more, and into such an adopted one that has none. It covers a controller that is down or unreachable. A floor of `0` never gets one: KEDA would park a serving model on any trigger error. Nor does a cluster whose KEDA lacks `fallback.behavior` (before 2.17), checked at plan and apply time with `kubectl explain` (the OpenAPI any authenticated user may read) and then the CRD; a check that cannot answer writes none either, shown as `(no fallback: KEDA version unknown)`. A tenant install normally gets its answer from the OpenAPI. `false` leaves it out everywhere. See [the fallback](scaledobject-trigger.md#before-the-first-decision-and-the-fallback) | `true` |
 | `WVA_SO_FALLBACK_FAILURES` | `failureThreshold` of that fallback. KEDA applies the fallback once more than this many reads of the metric by the HPA (about one every 15 s) have failed in a row. A whole number from `1` to `2147483647`, no leading zero | `3` |
 
 `WVA_DEFAULT_SO_MIN` and `_MAX` are only the values the plan is *written* with.
@@ -207,8 +207,10 @@ repoints the triggers and bounds; polling interval, cooldown, fallback and
 `behavior` stay as whoever tuned them left them. The one addition: an object
 with no `fallback` at all gets the default one, unless `WVA_SO_FALLBACK=false`,
 its floor is `0`, or KEDA is older than 2.17. One that has a fallback keeps it
-unchanged, with a warning if it is `replicas: 0` on a floor of `0`, and one the
-installer cannot read is left without, with a warning.
+unchanged, with a warning if it is `replicas: 0` on a floor of `0` or if its
+`replicas` is above the new floor. An object the installer cannot read keeps
+whatever fallback it has, with a warning and `(fallback unchanged: could not
+read it)`. The adopted trigger is written with `metricType: AverageValue`.
 
 Set them on a deploy to do this during install:
 

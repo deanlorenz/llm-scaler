@@ -46,6 +46,7 @@ spec:
   triggers:
     - type: external-push
       name: wva-external-scaler
+      metricType: AverageValue               # the default; never Value, see "Before the first decision"
       metadata:
         scalerAddress: wva-external-scaler.<controller-namespace>.svc.cluster.local:9090
         modelID: "Qwen/Qwen3-32B"            # = the engine's --served-model-name
@@ -78,7 +79,8 @@ never plans it, so it never makes a decision for it, and `GetMetrics` keeps
 answering the target's current replica count ([before the first
 decision](#before-the-first-decision-and-the-fallback)) for as long as the typo
 stands. The HPA holds whatever count the workload had, under any load, and KEDA
-reports nothing wrong. Two things do: the counter
+reports nothing wrong. Three things do: the gauge
+`wva_scaler_undecided_targets` stays above 0 for the namespace, the counter
 `wva_scaler_undecided_answers_total{reason="not-managed"}` keeps growing, and
 the controller logs `external scaler has no decision for this target` once for
 that ScaledObject, with `reason` `not-managed`, at the default verbosity.
@@ -170,14 +172,32 @@ Override the defaults per install with
 After every controller restart and every leader change, the new leader has no
 decision until its first cycle completes. **Until then it answers KEDA's
 `GetMetrics` with the scale target's current replica count**, read from the
-target's `spec.replicas`. With the metric's target of 1 the HPA computes the
+target's `scale` subresource, the same place KEDA and the HPA read it, so a
+custom resource whose replica count lives somewhere other than `spec.replicas`
+is read correctly. With the metric's target of 1 the HPA computes the
 count it already has and holds: nothing scales down on a number nobody decided,
 and KEDA sees no error. Each such answer increments
-`wva_scaler_undecided_answers_total{reason="no-decision"}`, which stops growing
-once the first cycle publishes. `IsActive` and the push stream behave the same
+`wva_scaler_undecided_answers_total{reason="no-decision"}`, and the ScaledObject
+counts in `wva_scaler_undecided_targets` until its first decided answer.
+`IsActive` and the push stream behave the same
 way: before the first decision they report the target active if it has
 replicas. Only when the current count cannot be read does `GetMetrics` fail,
-with the code of the failed read.
+with the code of the failed read. A target kind with no `scale` subresource
+cannot be held this way and fails.
+
+A decision that stops being republished is treated the same way. A positive
+decision older than 60 s, or two optimization intervals if that is longer, is
+**stale**: `IsActive` stops honouring it and `GetMetrics` answers the current
+count instead (`reason="stale"`), so the HPA holds rather than following a
+number no engine stands behind.
+
+This holds only with the trigger's `metricType` at its default,
+`AverageValue`. The scaler answers a replica count, and with `AverageValue` the
+HPA computes `ceil(value / 1)`, the count itself. With `metricType: Value` it
+computes `ceil(current replicas × value)`, so a decision of 3 on 3 replicas
+asks for 9 and a held count squares. The installer writes
+`metricType: AverageValue` explicitly on the triggers it generates and warns
+about a `Value` trigger when it adopts a ScaledObject or renders a template.
 
 A standby replica, one that does not hold the leader lease, still refuses
 `GetMetrics` and `IsActive` with `Unavailable`: the leader may have decided
@@ -215,14 +235,28 @@ error only marks the trigger failing and scales nothing, so a scale-to-zero
 model is safer without one. The plan table and the apply lines show
 `(no fallback: floor 0)` for those entries.
 
-`behavior` needs KEDA 2.17 or later (the installer pins 2.19). The installer
-reads the ScaledObject CRD once per plan or apply and writes no fallback at all,
-with a warning and `(no fallback: KEDA < 2.17)`, when the field is missing or
-the CRD cannot be read: an older KEDA drops `behavior`, and the static fallback
-left behind would force `minReplicaCount` whatever the fleet is running.
+`behavior` needs KEDA 2.17 or later (the installer pins 2.19). Once per plan or
+apply the installer asks whether the ScaledObject schema has the field, first
+with `kubectl explain scaledobjects.spec.fallback.behavior`, which reads the
+published OpenAPI and works for any authenticated user, and then, if that
+cannot answer, by reading the ScaledObject CRD. It writes no fallback at all,
+with a warning, when the field is missing, shown as
+`(no fallback: KEDA < 2.17)`, or when neither read answers, shown as
+`(no fallback: KEDA version unknown)`. The warning says when the CRD read was
+`Forbidden`. An older KEDA drops `behavior`, and the static fallback left behind
+would force `minReplicaCount` whatever the fleet is running. A tenant install
+normally gets its answer from the OpenAPI, and so a fallback; if its identity
+cannot read that either, its ScaledObjects get none until it is run as one that
+can, or a template supplies one. A plan whose every entry renders from
+`WVA_DEFAULT_SO_TEMPLATE` writes no fallback and is not probed.
+
 `apply: adopt` adds the same fallback to an adopted ScaledObject that has none,
 and leaves one that has a fallback exactly as it is, with a warning if that
-fallback is the zero-replica shape on a floor of 0. A
+fallback is the zero-replica shape on a floor of 0, or if its `replicas` is
+above the `minReplicaCount` the plan sets (KEDA holds at least that many during
+an outage). An object the installer cannot read keeps whatever it has, and the
+apply line says `(fallback unchanged: could not read it)`. A
 `WVA_DEFAULT_SO_TEMPLATE` owns its own fallback; the shipped sample has none,
-and the installer refuses to render a template whose fallback comes out as
-`replicas: 0` on a floor of 0.
+and the installer refuses to render a template whose ScaledObject document has
+a fallback that comes out as `replicas: 0` on a floor of 0, or that `yq` cannot
+read.

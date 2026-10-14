@@ -61,6 +61,8 @@ spec:
   triggers:
     - type: external-push
       name: wva-external-scaler
+      # A replica count: keep AverageValue (the default), never Value.
+      metricType: AverageValue
       metadata:
         scalerAddress: {{SCALER_ADDRESS}}
         modelID: "{{MODEL_ID}}"

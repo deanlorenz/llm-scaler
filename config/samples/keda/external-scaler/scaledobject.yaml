@@ -93,6 +93,10 @@ spec:
   triggers:
   - type: external-push
     name: wva-external-scaler
+    # The scaler answers a replica count, which only AverageValue (KEDA's
+    # default) keeps a count; under Value the HPA multiplies it by the
+    # current replicas.
+    metricType: AverageValue
     metadata:
       # The WVA controller's external-scaler gRPC service (host:port).
       scalerAddress: wva-external-scaler.workload-variant-autoscaler-system.svc.cluster.local:9090
