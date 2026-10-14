@@ -152,13 +152,14 @@ last; it is the unit change that makes the other two land.
   restore never makes a figure younger; leader-only writes, deletion flushes,
   off by default. Supersedes the Prometheus refit in #116, which cannot
   attribute old readings to a variant now that learned state is per variant.
-- **[SLO tiers](slo-tiers.md)** — not built. A tier declares TTFT/TPOT targets
-  and each variant's scale-out fill is derived from its own latency curve:
-  TPOT by inverting the fitted ITL line, TTFT from queue-free intervals only,
-  since a TTFT regression already failed on queue wait. The derived fill
-  replaces `kvCacheThreshold` per variant, so the cost order, P/D pairing and
-  limiters are unchanged. Bounded so it can never price above the range it was
-  fitted on, and observe-only until a tier sets `mode: enforce`.
+- **[SLO tiers](slo-tiers.md)** — not built. A separate `slo` analyzer reads
+  the router's TTFT (the one latency that includes the flow-control queue) for
+  attainment, and the engines' histograms for each variant's fill: TPOT by
+  inverting saturation's ITL line, TTFT from prefill time, which has no queue
+  in it. Observe-only for free, since the engine already runs and discards
+  non-saturation analyzers. To enforce, it hands saturation a per-variant fill
+  rather than a second (D, P), because a rescaled capacity under-orders the
+  demand floor when an SLO loosens.
 
 ## Product and lifecycle
 
