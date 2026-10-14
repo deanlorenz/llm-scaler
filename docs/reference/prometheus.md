@@ -160,6 +160,28 @@ with the service CA.
   URL. Note that credentials and metrics are sent in cleartext, so use this only
   on a trusted network (dev/test or a secured in-cluster path).
 
+### EPP metrics token
+
+The controller scrapes the EPP's `/metrics` with the token of a dedicated
+ServiceAccount, `wva-epp-metrics-reader`, whose only grant is `get` on the
+`/metrics` non-resource URL. The token comes from a legacy
+`kubernetes.io/service-account-token` Secret, `wva-epp-metrics-token`, mounted at
+`/var/run/secrets/epp-metrics/token`. Such a token **does not expire**.
+
+It is kept rather than replaced with a projected token because a projected volume
+can only issue tokens for the Pod's own ServiceAccount: moving to one means binding
+the reader role to the controller's ServiceAccount and dropping the dedicated one,
+and the documented `kubectl get secret wva-epp-metrics-token` reads (this page's
+monitoring examples, the scale-to-zero and utilization-share guides) and the e2e
+suite all use the Secret today.
+
+What limits it: the token reads `/metrics` endpoints and nothing else. To rotate it,
+delete the Secret and re-apply the install (or `kubectl apply` the Secret again);
+the token controller fills in a new token and the old one stops working once the
+Secret is gone. The controller re-reads the file on every EPP scrape, so it picks
+up the new token as soon as the kubelet updates the mounted volume (typically
+within a minute), without a restart.
+
 ### PromQL Injection Prevention
 
 The scaling manager implements security measures to prevent PromQL injection attacks:

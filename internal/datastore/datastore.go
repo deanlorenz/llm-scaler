@@ -39,11 +39,15 @@ var (
 	errPoolIsNull    = errors.New("EndpointPool object is nil, does not exist")
 )
 
-// getEPPMetricsToken reads the EPP metrics token from the hardcoded path.
+// eppMetricsTokenPath is where the controller Deployment mounts the EPP metrics
+// token (config/base/manager/deployment.yaml).
+const eppMetricsTokenPath = "/var/run/secrets/epp-metrics/token"
+
+// getEPPMetricsToken reads the EPP metrics token from eppMetricsTokenPath.
 // This token is used for authenticating with EPP pods when scraping metrics.
 // Returns empty string if the file cannot be read.
 func getEPPMetricsToken() string {
-	const tokenPath = "/var/run/secrets/epp-metrics/token"
+	const tokenPath = eppMetricsTokenPath
 
 	tokenBytes, err := os.ReadFile(tokenPath)
 	if err != nil {
@@ -124,11 +128,18 @@ func (ds *datastore) PoolSet(ctx context.Context, client client.Client, pool *po
 	// from the mounted token file at /var/run/secrets/epp-metrics/token. This token
 	// is mounted from the epp-metrics service account with minimal privileges and is
 	// used for authenticating with EPP pods when scraping metrics.
+	//
+	// The file is also handed over as BearerTokenFile, which the source re-reads on
+	// every scrape: the copy read here is only the fallback. Without that, a
+	// rotated token -- the Secret re-created, or a projected token refreshed by
+	// the kubelet -- reached no scrape until the pool happened to be set again,
+	// and every EPP request in between was rejected with the old one.
 	podConfig := pod.PodScrapingSourceConfig{
 		ServiceName:      pool.EndpointPicker.ServiceName,
 		ServiceNamespace: pool.EndpointPicker.Namespace,
 		MetricsPort:      pool.EndpointPicker.MetricsPortNumber,
 		BearerToken:      getEPPMetricsToken(),
+		BearerTokenFile:  eppMetricsTokenPath,
 	}
 
 	podSource, err := pod.NewPodScrapingSource(ctx, client, podConfig)
