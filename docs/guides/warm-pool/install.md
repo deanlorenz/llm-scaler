@@ -4,52 +4,30 @@
 
 ## Prerequisites
 
-A model already serving under the scaling manager — follow
-[Install the scaling manager in a namespace](../install-in-namespace/) first.
-
-The pool needs, in its namespace:
-
-- Accelerators free for the pool Pods themselves, on the same GPU model as the
+- [ ] A model already serving under the scaling manager ([Install the scaling
+  manager in a namespace](../install-in-namespace/)).
+- [ ] Free accelerators in the pool's namespace, of the same GPU model as the
   workloads it will warm.
-- A shared model cache the pool Pods can read, so a warm copy loads from local
-  storage rather than a download. **This one is not optional, and it has to be
-  the SAME claim the model servers read**: every pool Pod mounts a claim named
-  `model-pvc` unless `--cache-claim NAME` says otherwise.
-
-  `create` warns when the claim you name is not one the namespace's GPU
-  workloads mount — which is the mistake worth catching, because a plausible
-  wrong claim exists on most clusters. Where the models mount `model-pvc` *at
-  path* `/model-cache`, a `model-cache` claim holding the Hugging Face cache
-  usually exists too; pick that one and the Pod mounts something real, at the
-  right path, containing no models. The engine is then started on a `--model`
-  path that is not in the Pod, never answers, and the controller waits out its
-  full admission window before reporting only that the port did not respond.
-
-  It cannot check that the claim EXISTS, and it says nothing when no GPU
-  workload is deployed yet. Without one `create` still reports SUCCESS, and the
-  Pods sit `Pending` on
-
-  ```
-  0/3 nodes are available: persistentvolumeclaim "model-pvc" not found
-  ```
-
-  while the pool reports itself empty. Create one first, in the pool's
-  namespace, with an RWX class:
+- [ ] **A shared model cache: the SAME claim the model servers read.** Every
+  pool Pod mounts a claim named `model-pvc` unless `--cache-claim NAME` says
+  otherwise. Not optional ([what goes wrong](#picking-the-cache-claim)). None
+  yet? Create one in the pool's namespace, with an RWX class:
 
   ```bash
+  # Create an RWX model cache; with no size or class it lists the RWX classes this cluster serves
   make model-cache NAMESPACE=<namespace> WVA_MODEL_PVC_SIZE=<size> WVA_MODEL_PVC_CLASS=<rwx-class>
   ```
 
-  Run it with neither size nor class and it lists the RWX classes this cluster
-  already serves from.
-- RBAC allowing the scaling manager to `patch` Pods. The shipped ClusterRole has this. If yours
-  was scoped by hand, the scaling manager refuses to start the pool and says so — it will not
-  hold accelerators to warm models it could never lend.
-- **Two container images, from two owners.** See below.
+- [ ] RBAC that lets the scaling manager `patch` Pods. The shipped ClusterRole
+  has it. If yours was scoped by hand, the scaling manager refuses to start the
+  pool and says so: it will not hold accelerators to warm models it could never
+  lend.
+- [ ] **Two container images, from two owners** (below), pullable from the pool
+  nodes.
 
 ### The images a pool Pod runs
 
-Each pool Pod runs two containers, and only one of them is built here:
+Each pool Pod runs two containers, and only one is built here:
 
 | container | image | owner |
 | --- | --- | --- |
@@ -57,53 +35,26 @@ Each pool Pod runs two containers, and only one of them is built here:
 | `inference-server` (pool of **groups**) | `ghcr.io/ev-shindin/fma-launcher:v0.6.4-headless` — `--launcher-image` is required, and `create` refuses without it | **our fork**, [ev-shindin/llm-d-fast-model-actuation](https://github.com/ev-shindin/llm-d-fast-model-actuation) — see [pools of groups](groups.md#a-group-needs-a-patched-supervisor-image) |
 | `proxy` | the image `config/warmpool` pins, or `--proxy-image` | this repo (`make docker-build-warmpool-proxy`) |
 
-Everything below is about the **stock** launcher, which a pool of Pods runs. A
-pool of groups needs the fork instead: the stock one cannot start a multi-node
-follower at all.
-
-The stock launcher image is **not** ours and is not optional. It is a full vLLM
-runtime — vLLM, torch and CUDA — with FMA's launcher on top, and the pool needs
-both halves of that:
-
-- **vLLM has to be in the Pod.** A warm copy is an engine already loaded on this
-  Pod's GPU. There is nothing to warm unless the engine runs here.
-- **The launcher is the API the scaling manager drives.** It serves `/v2/vllm/instances` on
-  :8001, which is how the controller creates a model in a Pod, lists what is
-  resident, and removes one. Without it a pool Pod holds accelerators and
-  answers nothing — the controller reports the pool EMPTY while its GPUs are
-  gone, which is exactly what happened when a hand-written manifest lost this
-  container.
-
-So a pool node must be able to pull from `ghcr.io/llm-d-incubation` — or, for a
-pool of groups, from `ghcr.io/ev-shindin`. On an air-gapped or mirrored registry,
-mirror whichever applies: it is easy to miss, because neither is built by this
-repo, and the stock one is not even named in a registry we control.
-
-Substituting your own is possible in principle: the launcher's source is
-vendored at `warmpool/supervisor/` and any image offering the same instance API
-over vLLM would do. FMA's is used because it is the one proven on this cluster.
-Note this repo does not build that image, so the vendored source is there to be
-read, not to be shipped — if FMA publishes a newer launcher, the copy here can
-be a different version from the one actually running.
-
-This is the live FMA dependency the [FMA post-mortem](../../proposals/fma-post-mortem.md)
-warns about: FMA was dropped as an *actuation strategy*, and its launcher is
-still what supervises every warm engine.
+A pool node must pull from `ghcr.io/llm-d-incubation`, or for a pool of groups
+from `ghcr.io/ev-shindin`. On an air-gapped or mirrored registry, mirror
+whichever applies. It is easy to miss: neither is built by this repo. A pool of
+groups needs the fork, because the stock launcher cannot start a multi-node
+follower at all. Why the stock launcher is required: see
+[Details](#why-the-launcher-image-is-required).
 
 ## Turning it on during installation
 
-The installer can create pools for you, as part of the same pass that creates
-ScaledObjects. It never does so by default: a pool holds its accelerators from
-the moment it exists, which is a cost decision, so it acts only on an explicit
-yes.
+The installer can create pools in the same pass that creates ScaledObjects. It
+never does so by default: a pool holds its accelerators from the moment it
+exists, so it acts only on an explicit yes.
 
 ```bash
+# Discover what runs, write a plan and open it in $EDITOR
 WVA_DEFAULT_SO=edit deploy/install.sh
 ```
 
-`WVA_DEFAULT_SO=edit` discovers what is running, writes a plan, and opens it in
-`$EDITOR`. Near the bottom is a `warmPools:` section — one suggestion per group
-of models that could share a pool, every one of them `apply: no`:
+Near the bottom of the plan is a `warmPools:` section: one suggestion per group
+of models that could share a pool, every one `apply: no`:
 
 ```yaml
 warmPools:
@@ -119,16 +70,16 @@ warmPools:
     apply: no        # <- change to yes for the pools you want
 ```
 
-The plan creates **bridges**. It carries no `type`/`maxHold`, so a pool that
-must be retained is created with the CLI instead --
-`deploy/warmpool.sh create --type retained ...` -- or the plan's pool is patched
-afterwards, during which it is a bridge and can lend and reclaim.
-
 Change the ones you want to `yes` and save. Pools are created **after** the
-ScaledObjects, because a pool nothing can borrow from is accelerators held for
-nothing.
+ScaledObjects, because a pool nothing can borrow from holds accelerators for
+nothing. `WVA_DEFAULT_SO=plan` writes the plan and stops; apply it later with
+`WVA_DEFAULT_SO_PLAN=<file>`.
 
-Three values the plan cannot know, and where they come from:
+The plan creates **bridges**: it carries no `type`/`maxHold`. For a retained
+pool use the CLI (`deploy/warmpool.sh create --type retained ...`), or patch the
+plan's pool afterwards; until then it is a bridge and can lend and reclaim.
+
+Three values the plan cannot know:
 
 | value | where it comes from | if it is missing |
 | --- | --- | --- |
@@ -136,50 +87,43 @@ Three values the plan cannot know, and where they come from:
 | `MONITORING_NAMESPACE` | the install already has it — where it put the monitoring stack | the pool is created **unscraped**: it works, and every model it lends to reads as having less demand than it has |
 | `WARMPOOL_RUNTIME_CLASS` | usually nothing — `create` adopts whatever the namespace's own GPU workloads use | nothing: most clusters need no RuntimeClass at all |
 
-`WVA_DEFAULT_SO=plan` writes the plan and stops, if you would rather edit it and
-apply later with `WVA_DEFAULT_SO_PLAN=<file>`.
-
 ## Creating a pool by hand
 
-The two objects a pool is made of — the Deployment and its ScaledObject — are
-only meaningful together, so there is one command that makes both:
+A pool is a Deployment and its ScaledObject, which only work together, so one
+command makes both:
 
 ```bash
+# Create the pool's Deployment, ScaledObject and NetworkPolicy
 deploy/warmpool.sh create -n <namespace> --name <pool>   --accelerator NVIDIA-H100-80GB-HBM3 --gpus 1   --models 4 --model-size 8B   --wva-namespace <where the scaling manager runs>
 ```
 
-`--models` and `--model-size` are how you size the Pod: they set the memory
-limit, which **is** the warm-set budget. Pass `--dry-run` to see the manifests
-without applying, and use `delete` to remove both objects together — removing
-only one leaves either accelerators nobody can borrow, or a trigger pointing at
-nothing.
-
-`create` also applies the ingress boundary, because the only cluster-specific
-value it needs is the scaling manager namespace and that is already a flag. It admits
-`:8000` from this namespace and `:8001`, `:8002` and the engine range from the scaling manager
-alone. Pass `--no-network-policy` if your cluster manages policy centrally --
-but not for convenience: without one, `:8001` accepts caller-supplied argv and
-environment from anything that can reach the Pod IP, in a container that mounts
-the shared model cache read-write.
+- `--models` and `--model-size` set the memory limit, which **is** the warm-set
+  budget ([sizing](sizing.md#how-many-models-fit-in-one-pod)).
+- `--dry-run` prints the manifests without applying them. `delete` removes both
+  objects together; removing only one leaves accelerators nobody can borrow, or a
+  trigger pointing at nothing.
+- Always pass `--accelerator`. Without it the Pods may land on any GPU node, and
+  the scaling manager declines every model whose accelerator it can prove
+  differs.
+- `create` also applies the ingress boundary: `:8000` from this namespace, and
+  `:8001`, `:8002` and the engine range from the scaling manager's namespace
+  only. `--no-network-policy` is for clusters that manage policy centrally, never
+  for convenience: without a policy, `:8001` accepts caller-supplied argv and
+  environment from anything that can reach the Pod IP, in a container that
+  mounts the shared model cache read-write.
 
 If the pool later reports itself **empty** while holding accelerators, suspect
-this first: a policy naming the wrong the scaling manager namespace denies the supervisor read,
-and the result is indistinguishable from a pool that is merely too small. Look
-for `warm pool Pod could not be read` in the controller log.
+the policy first. One naming the wrong scaling-manager namespace denies the
+supervisor read, which looks exactly like a pool that is too small. Look for
+`warm pool Pod could not be read` in the controller log.
 
-It deliberately does not guess your accelerator: omit `--accelerator` and the
-Pods may schedule on any GPU node, at which point the scaling manager declines every model whose
-accelerator it can prove differs.
-
-The rest of this section is the manual path, for when you want to edit the
-manifests directly.
+The rest of this section is the manual path, for editing the manifests yourself.
 
 ### 1. Nothing to point at the pool
 
-There is no step here, and that is the design. A namespace-scoped controller
-warms the namespace it watches; a cluster-scoped one acts on pools wherever a
-ScaledObject trigger declares them. Neither needs telling, and neither needs a
-restart when a pool appears.
+There is no step here, by design. A namespace-scoped controller warms the
+namespace it watches; a cluster-scoped one acts on pools wherever a ScaledObject
+trigger declares them. Neither needs telling, or a restart, when a pool appears.
 
 ### 2. Edit the four things the manifests cannot know
 
@@ -193,35 +137,37 @@ cluster-specific, and three fail in a way that looks like something else:
 | `warmpool-deployment.yaml` | the proxy `image` — build your own with `make docker-build-warmpool-proxy` | `ImagePullBackOff`; the shipped digest is a personal registry namespace |
 | `warmpool-deployment.yaml` | `runtimeClassName`, and the `claimName` of your model cache | admission fails outright; or the second replica sits Pending forever if the claim is not **ReadWriteMany** |
 
-The `scalerAddress` one is the quiet one: the placeholder is a legal YAML
-string, so nothing rejects it and nothing warns.
+The `scalerAddress` one is the quiet one: the placeholder is a legal string, so
+nothing rejects it and nothing warns.
 
 ### 3. Deploy the pool
 
 ```bash
+# Apply the edited template
 kubectl apply -k config/warmpool -n <namespace>
 ```
 
-`deploy/warmpool.sh create` renders and applies the same two objects, which is
-why the edits above do not arise on that path: it takes them as flags.
+`deploy/warmpool.sh create` renders the same two objects from flags, which is
+why the edits above do not arise on that path.
 
 ## Adding and removing a pool later
 
-Pools are ordinary day-2 objects. Nothing about adding or removing one needs the
-controller restarted: it discovers pools from the ScaledObjects that declare
-them, on its next pass.
+Pools are ordinary day-2 objects. The controller discovers them from the
+ScaledObjects that declare them on its next pass, so nothing needs a restart.
 
 **What exists now**
 
 ```bash
-deploy/warmpool.sh plan -n <namespace>       # what this namespace wants, from its triggers,
-                                            # and any pool workload nothing declares
+# What this namespace wants, from its triggers, and any pool workload nothing declares
+deploy/warmpool.sh plan -n <namespace>
+# The pool objects that exist
 kubectl get deploy,scaledobject,networkpolicy,podmonitor -n <namespace> -l app.kubernetes.io/component=warm-pool
 ```
 
 **Add one**
 
 ```bash
+# Create a scraped pool
 deploy/warmpool.sh create -n <namespace> --name <pool>   --accelerator NVIDIA-H100-80GB-HBM3 --gpus 1   --models 4 --model-size 8B   --wva-namespace <where the scaling manager runs>   --monitoring-namespace <where Prometheus runs>
 ```
 
@@ -233,64 +179,65 @@ warmPoolCopies: "1"    # optional: how many copies of THIS model to keep warm
 ```
 
 A model with no `warmPool` uses the namespace's only pool, if there is exactly
-one. Adding or removing that line is the whole of joining or leaving a pool —
-there is nothing to restart, and the next reconcile acts on it.
+one. Adding or removing that line is the whole of joining or leaving a pool; the
+next reconcile acts on it.
 
 **Add scraping to a pool that already exists**
 
 ```bash
+# Add the PodMonitor and admit the scraper to the serving port
 deploy/warmpool.sh monitor -n <namespace> --name <pool> --monitoring-namespace <where Prometheus runs>
 ```
 
-`create` does this for you. `monitor` is for pools that predate it, or that were
-applied from `config/warmpool`, which ships no PodMonitor because a static
-manifest cannot know where Prometheus runs. It adds the PodMonitor and admits the
-scraper to the serving port, and it is safe to re-run: an already-admitted
-namespace is left alone.
+`create` does this already. `monitor` is for older pools, or ones applied from
+`config/warmpool`, which ships no PodMonitor because a static manifest cannot
+know where Prometheus runs. It is safe to re-run: an already-admitted namespace
+is left alone.
 
 **Remove one**
 
 ```bash
+# Remove the ScaledObject, workload, NetworkPolicy and PodMonitor together
 deploy/warmpool.sh delete -n <namespace> --name <pool>
 ```
 
-That removes all four objects together — ScaledObject first so the scaling manager stops lending
-Pods that are about to disappear, then the workload, then the NetworkPolicy and
-PodMonitor. Pass `--dry-run` to see what it would remove.
+It deletes the ScaledObject first, so the scaling manager stops lending Pods
+about to disappear, then the workload, then the NetworkPolicy and PodMonitor.
+`--dry-run` shows what it would remove.
 
-Remove the `warmPool:` line from any model still naming it, or the scaling manager will report a
-variant pointed at a pool that does not exist. The models keep serving either
-way; what they lose is the bridge, so their next scale-up pays a full cold start.
+Then remove the `warmPool:` line from any model still naming it, or the scaling
+manager reports a variant pointed at a pool that does not exist. The models keep
+serving; they lose the bridge, so their next scale-up pays a full cold start.
 
-> **Do not delete only the ScaledObject.** It is what *declares* the pool. What
-> is left is a Deployment holding accelerators that the scaling manager reports as undeclared and
-> will never use again. To pin a pool's size instead, set `minReplicaCount` equal
-> to `maxReplicaCount` and leave the ScaledObject in place.
+> **Do not delete only the ScaledObject.** It *declares* the pool. What is left
+> is a Deployment holding accelerators that the scaling manager reports as
+> undeclared and never uses again. To pin a pool's size, set `minReplicaCount`
+> equal to `maxReplicaCount` and keep the ScaledObject.
 
 **Resize one**
 
 Re-run `create` with different `--replicas`/`--max`/`--reserve`/`--type`/
-`--max-hold`; it is an `apply`, so the objects are updated in place. `--type`
-and `--max-hold` are picked up live — the pool rebuilds from the trigger
-metadata on its next reconcile, with no restart — so a bridge can become
-retained, and back, on a running pool.
+`--max-hold`. It is an `apply`, so the objects update in place. `--type` and
+`--max-hold` apply live on the next reconcile, with no restart, so a bridge can
+become retained, and back, on a running pool.
 
-> **Pass `--type` again on every re-run of a retained pool.** Naming it emits the
-> key; omitting it emits nothing, and `apply` prunes what the previous apply
-> wrote — so a re-run to change `--replicas` silently turns a retained pool back
-> into a bridge, which will then reclaim its Pod on the hold timeout. Changing `--models`/`--model-size`
-changes the Pod's memory limit, which **rolls the pool** and reloads every
-resident model — cheap to say and expensive to do, so decide the warm-set budget
-before you fill it.
+> **Pass `--type` again on every re-run of a retained pool.** Omitting it emits
+> nothing, and `apply` prunes what the previous apply wrote, so a re-run to
+> change `--replicas` silently turns a retained pool back into a bridge, which
+> then reclaims its Pod on the hold timeout.
 
-Changing the pool's KIND — a single-Pod pool to a group pool or back — is
-refused, because `kubectl apply` would leave the old workload running and holding
-its GPUs where nothing would look for it again. Delete the pool first.
+Changing `--models`/`--model-size` changes the Pod's memory limit, which **rolls
+the pool** and reloads every resident model. Decide the warm-set budget before
+you fill it.
+
+Changing the pool's KIND (a single-Pod pool to a group pool, or back) is
+refused, because `kubectl apply` would leave the old workload running and
+holding its GPUs where nothing looks for it. Delete the pool first.
 
 ## The pool is its ScaledObject
 
-A warm pool is declared by a KEDA trigger, the same way every other thing the scaling manager
-knows about is. `warmPoolName` is what makes it a pool; the Deployment beside it
+A warm pool is declared by a KEDA trigger, like everything else the scaling
+manager knows about. `warmPoolName` makes it a pool; the Deployment beside it
 only supplies the Pods.
 
 ```yaml
@@ -305,18 +252,57 @@ spec:
         warmPoolSleepMinSize: "1" # the reserve
 ```
 
-**Deleting this ScaledObject deletes the pool**, not just its elasticity. The
-Deployment goes on holding accelerators and the scaling manager reports it as undeclared rather
-than using it. For a fixed-size pool set `minReplicaCount` and `maxReplicaCount`
-to the same number — do not delete the trigger.
+**Deleting this ScaledObject deletes the pool**, not just its elasticity: the
+Deployment keeps holding accelerators, reported as undeclared. For a fixed size,
+set `minReplicaCount` and `maxReplicaCount` equal. To remove a pool, remove both
+objects with `deploy/warmpool.sh delete -n <namespace> --name <pool>`. It
+deletes the ScaledObject, then the workload, then the NetworkPolicy `create`
+made, in that order, so live Pods are never left unprotected. It is safe to
+repeat. Models still naming that pool are then warmed by nothing; `plan` lists
+them.
 
-To remove a pool, remove both together:
+## Details
 
-```bash
-deploy/warmpool.sh delete -n <namespace> --name <pool>
+### Picking the cache claim
+
+`create` warns when the claim you name is not one the namespace's GPU workloads
+mount. That catches the common mistake: where the models mount `model-pvc` *at
+path* `/model-cache`, a `model-cache` claim holding the Hugging Face cache
+usually exists too. Pick that one and the Pod mounts something real, at the
+right path, containing no models. The engine then starts on a `--model` path
+that is not in the Pod, never answers, and the controller waits out its full
+admission window before reporting only that the port did not respond.
+
+`create` cannot check that the claim EXISTS, and says nothing when no GPU
+workload is deployed yet. Without one, `create` still reports SUCCESS, and the
+Pods sit `Pending` on
+
+```
+0/3 nodes are available: persistentvolumeclaim "model-pvc" not found
 ```
 
-It deletes the ScaledObject first, so the scaling manager stops lending Pods that are about to
-disappear, then the workload, then the NetworkPolicy `create` made -- in that
-order, so live Pods are never left unprotected. It is safe to repeat. Models still naming that pool in their
-trigger metadata are then warmed by nothing — `plan` lists them.
+while the pool reports itself empty.
+
+### Why the launcher image is required
+
+The stock launcher image is **not** ours and is not optional. It is a full vLLM
+runtime (vLLM, torch and CUDA) with FMA's launcher on top, and the pool needs
+both halves:
+
+- **vLLM has to be in the Pod.** A warm copy is an engine already loaded on this
+  Pod's GPU.
+- **The launcher is the API the scaling manager drives.** It serves
+  `/v2/vllm/instances` on :8001, which is how the controller creates a model in a
+  Pod, lists what is resident, and removes one. Without it a pool Pod holds
+  accelerators and answers nothing, and the controller reports the pool EMPTY.
+  That happened when a hand-written manifest lost this container.
+
+You could substitute your own: the launcher's source is vendored at
+`warmpool/supervisor/`, and any image offering the same instance API over vLLM
+would do. FMA's is used because it is the one proven on this cluster. This repo
+does not build that image, so the vendored source is for reading, not shipping;
+if FMA publishes a newer launcher, the copy here may differ from the one running.
+
+This is the live FMA dependency the [FMA post-mortem](../../proposals/fma-post-mortem.md)
+warns about: FMA was dropped as an *actuation strategy*, but its launcher still
+supervises every warm engine.

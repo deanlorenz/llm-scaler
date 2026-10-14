@@ -1,75 +1,90 @@
 # Scale a P/D-disaggregated model
 
+llm-d can run prefill (reading the prompt) and decode (writing the answer) as
+separate deployments. The scaling manager scales each role on its own
+evidence, not on an average of both. For anyone already running P/D, or
+evaluating it for long-context work on medium-to-large models.
+
+**Maturity:** **Experimental.** A working recipe with open items
+([what is short](#what-is-still-short)).
+
+## When not to take it
+
+- You have not measured that a single-role deployment is the problem. P/D adds
+  a second deployment and a transport to operate.
+- Your traffic is short-context. P/D buys little there.
+- You have no high-bandwidth network (IB, RoCE, EFA) between the roles. NIXL
+  runs over TCP, but the fast network is what makes the shape worth having.
+
 ## Start here
 
-- **Status:** Experimental (below).
-- **You need:** an llm-d P/D deployment, `llm-d.ai/role: prefill` or `decode` on each pod template, and a KV transport between the roles; the prerequisites of [the saturation path](../scale-on-saturation/#start-here).
-- **Do this:**
-  1. (namespace owner) Deploy the P/D model. No guide in this repository covers it: use [llm-d's own P/D guide](https://github.com/llm-d/llm-d/tree/main/guides/pd-disaggregation), adding `featureGates: [flowControl]` to its EPP's `EndpointPickerConfig` (that guide leaves the gate off, and the install refuses without it), or the benchmark scenario under [Setting it up](#setting-it-up).
-  2. (namespace owner, after the cluster admin's `make setup-prereqs`) [Install the scaling manager](../../guides/install-in-namespace/) and [register](../../guides/install-in-namespace/README.md#4-register-the-workloads) both roles under one `modelID`: `make scaledobjects-plan` lists the prefill and decode workloads.
-  3. (namespace owner) For long generations, set `defaultOutputTokens` on the decode trigger ([Tuning it](#tuning-it)).
-- **Check it works:** `wva_desired_replicas` shows one series per role ([Verifying it](#verifying-it)).
-- **Undo:** nothing specific to this path; [uninstalling](../../guides/install-in-namespace/README.md#cleanup) removes the ScaledObjects, and the model servers keep serving.
+You need an llm-d P/D deployment with a KV transport between the roles, and
+the prerequisites of [the saturation path](../scale-on-saturation/#start-here).
+The namespace owner runs every step.
 
-## What it is
+1. Deploy the P/D model with [llm-d's own P/D guide](https://github.com/llm-d/llm-d/tree/main/guides/pd-disaggregation), adding the EPP's `flowControl` feature gate, which that guide leaves off ([details](#what-it-needs)).
+2. After the cluster admin's `make setup-prereqs`, [install the scaling manager](../../guides/install-in-namespace/) and [register](../../guides/install-in-namespace/README.md#4-register-the-workloads) both roles under one `modelID`.
+3. For long generations, set `defaultOutputTokens` on the decode trigger ([how](#tuning-it)).
+4. Check it works: `wva_desired_replicas` shows one series per role ([details](#verifying-it)).
 
-> **Experimental.** The scenario stands up and runs, the scaling manager's role handling is
-> covered end to end, and the shape has a published benchmark (below). What is
-> still short: a shape the controller has never seen saturated is sized from
-> occupancy until it has (named under *Measured*); there is no
-> P/D-specific steady-state e2e spec; and the benchmark never ordered a second
-> prefill replica, so ordering both roles together (the joint commit) has run
-> in unit tests only. Take it as a working recipe with open items, not a
-> settled default.
+Nothing to undo beyond [uninstalling](../../guides/install-in-namespace/README.md#cleanup),
+which removes the ScaledObjects; the model servers keep serving.
 
-Prefill and decode have different shapes — prefill is compute-bound, decode is
-memory-bandwidth-bound — so llm-d can run them as separate deployments connected
-by a KV transport. The scaling manager treats each role as its own variant of the same model,
-which means the two are scaled apart on their own evidence rather than together
-on an average of both.
+## What it costs
 
-**Use it when** you already run P/D disaggregation, or are evaluating it for
-long-context workloads on medium-to-large models, and want the roles scaled
-independently.
+- Two deployments to operate instead of one, plus the transport.
+- No GPUs of the scaling manager's own. The measured run used 90.2 decode
+  GPU-minutes ([measured.md](measured.md)).
 
-**Do not use it when** you have not measured that a single-role deployment is
-the problem. P/D adds a transport dependency and a second deployment to operate;
-on short-context traffic it buys little.
+## Evidence
 
-## What it needs
+One scenario on 8 x H200 nodes, Qwen3-0.6B, controller built at `f5f98761`
+on 2026-09-23: a constant 6 req/s whose request shape changes halfway, so the
+right answer is two decode replicas, then three. Run as a pair (a cold pass,
+then a warm one), and the pair repeated a day later on the same build.
 
-- An llm-d P/D deployment: prefill and decode workloads with the role carried on
-  each pod template as the label `llm-d.ai/role: prefill` or
-  `llm-d.ai/role: decode`. On a LeaderWorkerSet the label is read from the
-  **leader** template. A missing label, or any other value, means `both` — a
-  workload that serves whole requests — so a typo silently turns a role into an
-  ordinary variant. Engine flags (`--kv-transfer-config`,
-  `--disaggregation-mode`) are not consulted. Check with
+| | warm pass | cold pass |
+|---|---|---|
+| decode replicas, mean / max | 2.34 / 3 | 2.47 / 4 |
+| time to first token p50 / p95 / p99 | 99 ms / **155 ms** / 229 ms | 99 ms / 204 ms / 3.9 s |
+| requests / errors | 13,288 / 0 | 13,287 / 0 |
+
+The repeat landed within a tenth of every figure, except the cold pass's
+first five minutes, which ranged 0.25 s to 5.6 s. Every row, the graphs and
+how to read them: [measured.md](measured.md).
+
+## Details
+
+### What is still short
+
+The scenario stands up and runs, the role handling is covered end to end, and
+the shape has the benchmark below. Still open:
+
+- A shape the controller has never seen saturated is sized from occupancy
+  until it has (the cold pass in [measured.md](measured.md)).
+- There is no P/D-specific steady-state e2e spec.
+- The benchmark never ordered a second prefill replica, so ordering both roles
+  together (the joint commit) has run in unit tests only.
+
+### What it needs
+
+- Prefill and decode workloads with the role on each pod template as the label
+  `llm-d.ai/role: prefill` or `llm-d.ai/role: decode`. On a LeaderWorkerSet
+  the label is read from the **leader** template. A missing label, or any
+  other value, means `both` (a workload that serves whole requests), so a typo
+  silently turns a role into an ordinary variant. Engine flags
+  (`--kv-transfer-config`, `--disaggregation-mode`) are not consulted. Check with
   `kubectl get deploy -n <ns> -o custom-columns=NAME:.metadata.name,ROLE:.spec.template.metadata.labels.llm-d\.ai/role`.
-- A KV transport between them. NIXL supports TCP, but high-bandwidth networking
-  (IB, RoCE, EFA) is what makes the shape worth having.
-- A ScaledObject per role, each with the model's `modelID` in trigger metadata.
+- A KV transport between the roles.
+- `featureGates: [flowControl]` in the EPP's `EndpointPickerConfig`; the
+  install refuses without it. No guide in this repository deploys P/D; the
+  benchmark scenario below does, for a benchmark.
+- A ScaledObject per role, each with the model's `modelID` in trigger
+  metadata. `make scaledobjects-plan` lists the prefill and decode workloads.
 
-## Setting it up
+### Verifying it
 
-The scenario file is
-`hack/benchmark/scenarios/guides/pd-disaggregation.yaml`, adapted from llm-d's
-own P/D guide, and it is run through [Benchmark the scaling manager](../../guides/benchmarking/).
-As written it names Qwen3-32B with one prefill and two decode pods; the
-benchmark targets substitute `MODEL_ID` (Qwen3-0.6B by default) and
-`BENCHMARK_DECODE_REPLICAS` (1), so a standup starts from one pod per role and
-the accelerator profile is auto-detected.
-
-Two pins in that file have to move together. `patch_harness.sh` pins the
-modelservice chart to v0.4.15, which renders the routing sidecar's flags as
-`--vllm-port/--connector`, and the scenario pins the sidecar to v0.9.0, the
-build that takes those flags. Letting either float is how every decode pod
-crash-loops on `unknown flag: --connector` at the next standup -- it happened
-once, and the file says so.
-
-## Verifying it
-
-```bash
+```promql
 # each role carries its own target
 wva_desired_replicas{exported_namespace="<ns>"}
 
@@ -77,272 +92,61 @@ wva_desired_replicas{exported_namespace="<ns>"}
 wva_required_capacity{exported_namespace="<ns>"}
 ```
 
-The role appears on the workload's pod template; the engine reports required and
-spare capacity per role rather than one number for the pair.
+The engine reports required and spare capacity per role, not one number for
+the pair.
 
-## What it costs
-
-Two deployments to operate instead of one, plus the transport. The scaling manager itself adds
-nothing: the roles cost what they would cost anyway.
-
-## How it is benchmarked
-
-**Scenario:** `shape_swap_replay_6k1000_1k4000_rps6_20m` in
-`test/benchmark/scenarios/` -- a GuideLLM trace replay at a constant 6 req/s,
-6000 in / 1000 out tokens for 1100s and then 1000 in / 4000 out for 1100s.
-Rate never changes, so the request shape is the only variable; and 6 req/s is
-chosen because one H200 decode replica of Qwen3-0.6B sustains ~5.4 req/s at
-the first shape and ~2.5 at the second (measured from the pod's own
-completion counters), so the right answer is **two decode replicas, then
-three** -- a fleet the autoscaler has to hold up, not one it can let fall to
-one. The trace is generated by `hack/benchmark/gen_shape_trace.py` from
-`shape_6k1000_1k4000_rps6_20m.params.yaml`; seed 42 makes it identical from
-run to run (13,288 requests: 6693 + 6595).
-
-**Stack:** the scenario above, one pod per role to start, `kvCacheThreshold`
-0.8, `queueLengthThreshold` 5, `scaleUpThreshold` 0.85, `scaleDownBoundary`
-0.7, a 15s optimize interval, KEDA min 1 / max 10 per role, and this HPA
-behaviour on both ScaledObjects: scale-up 100%/5s with no stabilization,
-scale-down 50%/120s with a 180s window.
-
-### Reproducing it
-
-On a Kubernetes cluster with H200 (or similar) nodes, an RDMA resource the
-scenario's `networkResource: auto` can find, and a Prometheus that scrapes
-PodMonitors from your namespace:
-
-```bash
-export BENCHMARK_NAMESPACE=<ns>
-export IMG=<the image under test>          # what is measured is what you set here
-export KEDA_HELM_INSTALL=true              # only if the cluster has no KEDA
-
-make benchmark-install
-make benchmark-standup BENCHMARK_SPEC=guides/pd-disaggregation MODEL_ID=Qwen/Qwen3-0.6B
-make prepull-status NAMESPACE=$BENCHMARK_NAMESPACE   # the standup held the engine image on the accelerator nodes; every node should read present
-
-# The HPA behaviour the results below were measured under. deploy/ ships a
-# 300s scale-down window with a 100% step; this is the tighter shape.
-for so in $(kubectl get scaledobject -n $BENCHMARK_NAMESPACE -o name); do
-  kubectl patch -n $BENCHMARK_NAMESPACE $so --type merge -p '{"spec":{"advanced":{"horizontalPodAutoscalerConfig":{"behavior":{"scaleDown":{"stabilizationWindowSeconds":180,"policies":[{"type":"Percent","value":50,"periodSeconds":120}]},"scaleUp":{"stabilizationWindowSeconds":0,"policies":[{"type":"Percent","value":100,"periodSeconds":5}]}}}}}}'
-done
-
-# The trace has to sit beside the profile: llm-d-benchmark bundles that whole
-# directory into the guidellm-profiles ConfigMap (1MiB cap; the trace is 900KB).
-cp test/benchmark/scenarios/shape_6k1000_1k4000_rps6_20m.jsonl llm-d-benchmark/workload/profiles/guidellm/
-
-make benchmark-run BENCHMARK_SPEC=guides/pd-disaggregation MODEL_ID=Qwen/Qwen3-0.6B \
-     BENCHMARK_HARNESS=guidellm BENCHMARK_WORKLOAD=shape_swap_replay_6k1000_1k4000_rps6_20m
-
-# Graphs, the k1/k2 decision report and the comparison table:
-bash hack/benchmark/post_run_analyze.sh <results dir> $BENCHMARK_NAMESPACE
-
-make benchmark-teardown
-```
-
-Two things that went wrong on the way and are worth knowing before they cost
-an hour. The harness's final `kubectl cp` of the results directory (500MB of
-raw scrapes) can die mid-stream with `read message: %!w(<nil>)` and report the
-whole run FAILED; the results are still on the workload PVC, and
-`kubectl exec <access-to-harness-data pod> -- tar czf` split into 40MB chunks
-copies fine. And a cluster whose kueue pod-webhook is unhealthy denies every
-Deployment pod with `Deployment.apps ... not found` -- nothing in this recipe
-causes it, so check `kubectl create deployment` works in your namespace first.
-
-One more, if you run several passes in a row: `make benchmark-run` starts a
-log tail and a replica sampler. Their paths carry the namespace AND a run id that
-is fixed once per `make` invocation (`/tmp/wva_replica_samples-<ns>-<runid>.json`,
-`/tmp/wva_controller_tail-<ns>-<runid>.log`, under `BENCHMARK_CAPTURE_DIR`), so
-two passes can never write to the same file -- not even two in the same namespace,
-and not two sessions benchmarking one namespace on different clusters. The recipe
-prints both paths when it starts them. Two captures writing at once used to
-produce an empty controller log for one run and a replica-sample file holding two
-concatenated JSON documents for another.
-
-A pass that ends badly can still leave a capture running. Stop it with the script
-that started it -- `bash hack/benchmark/sample_replicas.sh stop <outfile>` and
-`bash hack/benchmark/tail_wva_logs.sh stop <namespace> <outfile>` -- which kills
-that capture and nothing else. Do **not** `pkill -f tail_wva_logs.sh`: it matches
-on the command line, so it kills every capture on the box regardless of namespace
-or cluster, including another session's. `cat <outfile>.owner` says which
-namespace and context a running capture belongs to, and
-`BENCHMARK_KUBE_CONTEXT=<ctx>` names the cluster explicitly instead of inheriting
-whatever `KUBECONFIG` happens to say.
-
-Count what the captures hold before you trust a report built from them. Empty is
-the wrong test: an artefact that lost its whole capture is `{"snapshots": []}`,
-which is non-empty and valid JSON, and that is the shape that has actually cost
-data here. The workload numbers are unaffected either way, but the target path,
-the ordering times and the dashed line in the pipeline graph all come from these.
-
-```bash
-# one object per sample -- a full run is hundreds
-python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["snapshots"]))' \
-    <results>/metrics/processed/wva_replica_samples.json
-wc -l <results>/wva_controller.log
-```
-
-The sampler keeps the lines it assembled that artefact from, next to it as
-`<outfile>.snapshots.jsonl`, so a count that looks short can be checked against
-what was really captured -- and re-assembled from them if it was.
-
-## Measured
-
-The scenario, trace, policy and HPA behaviour above, on 8 x H200
-nodes (k1 = 930,508 tokens per decode replica), against the controller image
-built from this tree at `f5f98761`, on 2026-09-23. Two passes back to back:
-the headline column is the second, taken with the saturated throughput of
-both shapes on record from the first; the first, on a controller restarted
-so that it had seen nothing, is the second column (runs
-`guidellm-1790147333-mnjvnc_1` and `guidellm-1790144180-oz7fvy_1`). The
-graphs and tables are the ones `post_run_analyze.sh` writes.
-
-| | this run (warm) | the cold pass before it |
-|---|---|---|
-| decode replicas ordered | 1 → 2, held through the first phase → 3 at the shape change, held | 1 → 2 → 3 (first ramp) → 2 → 3 → 4 → 3 |
-| second decode replica ordered | +53 s after load start | +56 s |
-| third decode replica ordered | +1344 s, four minutes into the second phase | +131 s, released at +206 s; again at +1392 s |
-| prefill replicas | 1 throughout | 1 throughout |
-| decode replicas, mean / max | 2.34 / 3 | 2.47 / 4 |
-| TTFT p50 / p95 / p99 | 99 ms / **155 ms** / 229 ms | 99 ms / 204 ms / 3.9 s |
-| ITL p50 / p95 | 5.6 / 20.7 ms | 5.3 / 22.1 ms |
-| request latency p50 / p95 | 17.2 / 76.8 s | 14.4 / 82.3 s |
-| decode GPU-minutes | 90.2 | 95.4 |
-| requests / errors | 13,288 / 0 | 13,287 / 0 |
-
-Where the tail is, by five-minute window (p95 TTFT from the engines' own
-histograms, over the decode pods -- every request also leaves a ~0.4 s
-prefill sample, and a fleet-wide figure halves against this one):
-**0.23 s in minutes 0-5**, then 0.08 s for the rest of the first phase;
-**0.23 s in minutes 20-25**, then 0.04-0.07 s for the rest of the second. On
-the cold pass the same two windows read 0.25 s and 4.2 s.
-
-The pair was run twice, a day apart, on the same build. The repeat landed
-within a tenth of every figure above -- warm p95 167 ms against 155 ms, cold
-227 ms against 204 ms, the same replica paths -- except in the cold pass's
-first five minutes, where one replica tipping into preemption a cycle
-earlier or later moves that one window between 0.25 s and 5.6 s. Read the
-cold ramp as a range, not a number.
-
-![pipeline: replicas, demand vs capacity, KV, running, waiting, EPP queue](shape-swap-rps6-pipeline.png)
-
-![replica status over the run](shape-swap-rps6-replicas.png)
-
-How to read it.
-
-**The first ramp** (minutes 0-5). One decode replica serves 6 req/s until the
-second is Ready. The analyzer knows what one replica of this shape completes
-when saturated -- 5.66 req/s, priced from +38 s -- and the arrival rate over
-that is 1.06 replicas' worth, so it orders the second at +53 s: from the
-load, not from a queue, and before the first replica tips into preemption.
-Two replicas then carry the whole first phase. The largest backlog the floor
-ever prices is 4 requests (`backlogRequests` on the `throughput-demand-floor`
-line), and the gateway queue is flat after one spike in the first seconds.
-The cold pass, with nothing on record, is sized by occupancy for its first
-cycles instead: it orders a third replica at +131 s and releases it at
-+206 s, once the fleet's own reading arrives. Prefill is never ordered: prompts
-waiting at the scheduler are no longer charged to it as resident KV. (A
-later cold pass ordered one by a second path -- a prefill saturation
-recorded while decode was saturated -- which the analyzer now declines, and
-it holds prefill's demand where it neither orders nor releases while decode
-is full and queued, which is what kept prefill at one on the passes since:
-see "A prefill saturation records only while decode is not saturated" in
-the [floor guide](../../developer-guide/saturation-demand-floor.md). The
-replica and GPU-minute rows above count decode only, as the harness's
-report does; prefill's one replica is on top.)
-
-**The first phase, steady** (minutes 5-18). Occupancy is a fraction of one
-replica (5-15% KV) -- the reading that, taken alone, would size the fleet to
-one. The dashed target holds at two because the analyzer floors each role's
-demand at what the load requires in throughput: the arrival rate over the
-completion rate one replica sustained when it was last seen saturated.
-
-**The shape change** (minute 18 on). The third replica is ordered at
-+1344 s -- the same cycle in which the 4000-token shape's completion rate
-first comes on record (3.46 req/s), as the replicas' output length crosses
-into its bucket. No queue forms at all: the waiting panel is flat through
-the whole second phase, and the batch peaks at 62% KV and relaxes. The warm
-pass never asks for a fourth replica. The cold pass does, at +1512 s, on one
-noisy arrival-rate sample tipping the figure over the three-replica
-boundary, and asks for three again 75 s later; the HPA's 180 s window is
-what decides how long that spare is kept, and the sticky scale-down
-(`WVA_STICKY_SCALE_DOWN`, on by default) is what holds the published three
-against the creep unless demand at three reaches the scale-up threshold.
-
-What still moves: a controller that has never seen a shape saturated has no
-throughput for it and sizes that first ramp from occupancy and the backlog,
-which is the cold pass in the table -- a peak of three still, but the order
-comes 20 s later and the queue is deeper. The mechanism is in
-[the throughput floor](../../developer-guide/saturation-demand-floor.md); the
-analysis that led to it in [Sizing a backlog](../../proposals/backlog-sizing.md).
-
-## How it is tested
-
-End-to-end: `test/e2e/scale_from_zero_pd_test.go` — three specs, checking that
-the P/D role is carried on each workload's pod template, that a queued request
-wakes the **decode** variant, and that prefill is **never woken alone**.
-
-That is scale-from-zero behaviour for the P/D shape. Steady-state scaling of a
-P/D model rides on [the saturation path](../scale-on-saturation/) and its suites;
-there is no P/D-specific steady-state spec. The unit specs that hold the
-benchmark's behaviour in place are in
-`internal/engines/analyzers/saturation/`: `throughput_floor_test.go` and
-`throughput_floor_total_test.go` (the throughput floor, and the queue charged
-once across the pair), `downstream_saturation_test.go` (a prefill saturation
-under a saturated decode), `start_role_test.go` (start time per role), and the
-P/D cases in `analyzer_test.go` (per-role demand, prefill charged for input
-tokens only).
-
-The joint commit — growing prefill and decode together so the fleet keeps its
-ratio — is covered by `internal/engines/allocation/paired_exhausted_role_test.go`
-and nowhere else: both benchmark passes above held prefill at one replica, so
-no cluster run has exercised it.
-
-## Replica start time
-
-Every ramp in the benchmark above is sized by one number: how long the second
-replica of a role takes to become Ready while the first serves the load alone.
-The queue that builds in that time is charged to the fleet as demand, so two
-runs of the same trace against the same controller can differ by several
-replicas at the first ramp on nothing but the pod start. Two pages cover it:
-
-- what any workload the scaling manager scales should get right on its way to Ready -- no
-  installs at container start, a short probe period, engine caches that
-  outlive the pod, the image already on the node -- is the prerequisite
-  checklist in [Preparing a workload](../../reference/workload-preparation.md#the-rest-of-the-start-path);
-- what the benchmark harness adds to that path, and how this scenario removes
-  it, is in [Replica start time in the harness](../../guides/benchmarking/README.md#replica-start-time-in-the-harness).
-
-What is left is the cold process and, on a large model, its weight load; the
-autoscaler-side answer -- sizing a backlog by throughput rather than residency,
-so the ramp stops tracking the start time at all -- is the open item in
-[Sizing a backlog](../../proposals/backlog-sizing.md).
-
-## Tuning it
+### Tuning it
 
 **There are no per-role thresholds.** Both ScaledObjects carry one `modelID`,
-so both roles resolve to one policy: the same tier, the same per-model override
-(matched on `model_id` + `namespace`), and the same `scaleUpThreshold` /
-`scaleDownBoundary`, applied to each role's capacity separately. If the two
-triggers name different `scalingPolicy` tiers, the lexicographically smallest
-wins and the conflict is logged — name the same tier on both, or none. See
-[scaling policy](../../reference/scaling-policy.md).
+so both roles resolve to one policy: the same tier, the same per-model
+override (matched on `model_id` + `namespace`), and the same
+`scaleUpThreshold` / `scaleDownBoundary`, applied to each role's capacity
+separately. If the two triggers name different `scalingPolicy` tiers, the
+lexicographically smallest wins and the conflict is logged: name the same tier
+on both, or none. See [scaling policy](../../reference/scaling-policy.md).
 
-What you do set per role, on each ScaledObject
+What you set per role, on each ScaledObject
 ([trigger reference](../../reference/scaledobject-trigger.md)):
 
 - **`defaultOutputTokens` on the decode trigger** when generations are long. A
   queued request is priced at that many tokens of decode work until the fleet
-  has measured its own output length; the built-in 512 under-prices a
+  has measured its own output length. The built-in 512 under-prices a
   6000-token workload twelvefold. If both triggers carry one, the largest wins.
-- **`minReplicaCount` / `maxReplicaCount` per role.** Size each role's `max` from
-  its own GPUs per replica and what the cluster can hold; a role pinned at its
-  `max` stops growing while the other keeps going. Keep `min` at 1 or more on
-  both roles unless you mean to park the model.
+
+  ```bash
+  kubectl patch scaledobject <decode> -n <ns> --type=json -p '[{"op":"add","path":"/spec/triggers/0/metadata/defaultOutputTokens","value":"4000"}]'
+  ```
+
+  Re-running `make scaledobjects-plan` and `make scaledobjects-apply` keeps
+  keys you set on the trigger.
+- **`minReplicaCount` / `maxReplicaCount` per role.** Size each role's `max`
+  from its own GPUs per replica and what the cluster can hold. A role pinned at
+  its `max` stops growing while the other keeps going. Keep `min` at 1 or more
+  on both roles unless you mean to park the model.
 - **`scaleFromZero.requirePrefill`** (policy entry, default `false`). When a
   parked P/D model wakes and prefill cannot be placed, decode wakes alone and
-  runs both stages locally; set `requirePrefill: true` on the model's policy
-  entry if serving without prefill is worse than not serving.
+  runs both stages itself. Set `requirePrefill: true` if serving without
+  prefill is worse than not serving.
 
-What the roles mean to the
-engine's capacity model:
+What the roles mean to the engine's capacity model:
 [the steady-state engine](../../concepts/steady-state-engine.md).
+
+### How it is tested
+
+- End-to-end: `test/e2e/scale_from_zero_pd_test.go`, three specs, for
+  scale-from-zero only: the role is read from the pod template, a queued
+  request wakes **decode**, and prefill is **never woken alone**. Steady-state
+  scaling rides on [the saturation path](../scale-on-saturation/)'s suites.
+- Unit, in `internal/engines/analyzers/saturation/`: `throughput_floor_test.go`,
+  `throughput_floor_total_test.go`, `downstream_saturation_test.go`,
+  `start_role_test.go` and the P/D cases in `analyzer_test.go`
+  ([what each holds](measured.md#what-the-unit-specs-hold)).
+- The joint commit (growing both roles together) is covered only by
+  `internal/engines/allocation/paired_exhausted_role_test.go`.
+
+### Replica start time
+
+Every ramp is sized by how long a role's next replica takes to become Ready,
+so get the start path right first:
+[Preparing a workload](../../reference/workload-preparation.md#the-rest-of-the-start-path)
+([why it matters here](measured.md#replica-start-time)).

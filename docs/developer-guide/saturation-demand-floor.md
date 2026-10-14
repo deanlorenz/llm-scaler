@@ -1,22 +1,22 @@
 # The throughput floor
 
-Why the saturation analyzer floors its demand at what the offered load requires,
-what the floor is and is not invariant to, which of the claims here are measured
-versus assumed -- and why the floor it replaced, built on Little's law, was
+This page covers why the saturation analyzer floors its demand at what the
+offered load requires, what the floor is and is not invariant to, which claims
+are measured and which assumed, and why the Little's-law floor it replaced was
 retired.
 
-Code: the model and its arithmetic are `internal/signals/floor`; the window of
-saturated readings, the borrow between buckets and the application to the
-measured demand are `internal/engines/analyzers/saturation/throughput_floor.go`.
+Code: the model and its arithmetic are in `internal/signals/floor`. The window
+of saturated readings, the borrow between buckets and the application to the
+measured demand are in `internal/engines/analyzers/saturation/throughput_floor.go`.
 
 ## The problem
 
 Saturation's demand is **occupancy**: resident KV plus the waiting-queue
-footprint. Both are states of the *fleet* rather than properties of the *load*,
-and both shrink as capacity grows -- resident KV because residence time falls, the
-queue because it drains. The signal that sizes the fleet is therefore a function
-of the fleet, and once the fleet is adequate the signal decays toward zero and
-takes the replica count with it.
+footprint. Both belong to the *fleet*, not the *load*, and both shrink as
+capacity grows: resident KV because residence time falls, the queue because it
+drains. So the signal that sizes the fleet depends on the fleet. Once the fleet
+is big enough, the signal decays toward zero and takes the replica count with
+it.
 
 Measured on an H100 at 14 QPS (run `biran-20260822-021153-340`): demand fell from
 7.5M tokens to 152k as ten replicas drained a 910-deep queue, and the target
@@ -27,12 +27,12 @@ a minute, and the loop ran twice in 38 minutes.
 
 ## The floor
 
-What a replica can do does not move with the fleet: its completion rate when it
-is saturated. With the queue over `queueLengthThreshold` the engine is completing
-requests as fast as it can for this shape, so the P1 moment that records k2
+What a replica can do does not move with the fleet: its completion rate when
+saturated. With the queue over `queueLengthThreshold`, the engine completes
+requests as fast as it can for this shape. So the P1 moment that records k2
 (occupancy under a saturated queue) also records the replica's completion rate,
-`mu`, under the same history key. The fleet then needs `lambda / mu` replicas to
-keep up, which in the analyzer's (demand, per-replica capacity) contract is a
+`mu`, under the same history key. The fleet needs `lambda / mu` replicas to
+keep up. In the analyzer's (demand, per-replica capacity) contract that is a
 demand of
 
 ```
@@ -40,19 +40,22 @@ floor_role = ((lambda + B_role / T) / mu_role) x P_role    tokens
 demand     = max(resident KV, floor)                        never lowers, only raises
 ```
 
-applied per role on a P/D fleet (every request passes through both roles, so
-each must keep up with all of it) and on the total otherwise. `lambda` is the
-scheduler's arrival rate, or the generating replicas' completion rate when the
-scheduler reports none. `B` is the role's backlog -- the requests waiting in
-its engines' queues plus the scheduler's -- and `T` the drain target
-(`BacklogDrainSeconds`, 60): the fleet asked for clears the backlog in about
-`T` while keeping up with `lambda`. For a role with a `mu`, the queues enter
-the model this way and their residency charge (every queued request at its
-full KV footprint, as if all had to be resident at once) comes out; a role
-with no `mu` keeps the residency charge, except prefill's share of the
-scheduler queue, which is dropped -- a prefill replica holds a prompt for its
-prefill time plus the hand-off, and the only thing that makes it hold longer
-is decode being saturated, which more prefill replicas do not fix.
+It is applied per role on a P/D fleet (every request passes through both roles,
+so each must keep up with all of it), and on the total otherwise.
+
+- `lambda` is the scheduler's arrival rate, or the generating replicas'
+  completion rate when the scheduler reports none.
+- `B` is the role's backlog: the requests waiting in its engines' queues plus
+  the scheduler's. `T` is the drain target (`BacklogDrainSeconds`, 60). The
+  fleet asked for clears the backlog in about `T` while keeping up with
+  `lambda`.
+- For a role with a `mu`, the queues enter the model this way, and their
+  residency charge (every queued request at its full KV footprint, as if all
+  were resident at once) comes out.
+- A role with no `mu` keeps the residency charge, except prefill's share of the
+  scheduler queue, which is dropped. A prefill replica holds a prompt for its
+  prefill time plus the hand-off. Only a saturated decode makes it hold longer,
+  and more prefill replicas do not fix that.
 
 Properties, each with a spec in `throughput_floor_test.go`:
 
@@ -64,7 +67,9 @@ Properties, each with a spec in `throughput_floor_test.go`:
   KV pressure preemption drops it further. One run's readings for one
   replica were 5.4, 3.3 and 3.5 req/s while it was demonstrably completing
   5.4. The floor divides by `mu`, so a mean of under-reads would order
-  replicas that are not needed. It does NOT only under-read: in the last
+  replicas that are not needed.
+
+  It does NOT only under-read: in the last
   minute of an episode that ends by a replica landing, the queue gate (a
   one-minute max) stays up while the rate is fresh, and the fresh rate is
   the batch draining -- sequences admitted together finish together, and no
@@ -73,17 +78,23 @@ Properties, each with a spec in `throughput_floor_test.go`:
   sustained ~5.0 req/s full (token throughput on a plateau), read 6.67 --
   200 completions in 30 s, token throughput below the plateau -- on the
   last saturated cycle as the second replica took the arrivals, and the
-  window carried 6.67 for the rest of the phase. The fleet holds `n`
+  window carried 6.67 for the rest of the phase.
+
+  The fleet holds `n`
   replicas while `lambda > 0.7 x (n - 1) x mu`, so a figure too high
   releases where the true one holds, in the band between the two: for
   6.67 against 5.0, 3.5-4.7 req/s from two to one, and this trace's
-  phase-1 rate (5.4-6.2) sits where both hold two. The same pass's phase
+  phase-1 rate (5.4-6.2) sits where both hold two.
+
+  The same pass's phase
   switch shows it biting: the `xxlong` window's max, 3.27, was a 30 s burst
   on a still-full replica (token throughput under the plateau; the
   sustained figure is ~2.75), and at 5.8-6.9 req/s -- where phase 2 ran --
   3.27 releases the fourth replica the true figure holds; the fourth left
   at +1584 s on it, two minutes before the true figure would have let it
-  go. The max window has always taken these readings and nothing in it
+  go.
+
+  The max window has always taken these readings and nothing in it
   lowers one. A `mu` priced from the generation-token rate over the
   bucket's output length, which does not burst on a drain, is the
   follow-up; a reading gated on an instantaneous queue would catch the
@@ -100,7 +111,9 @@ Properties, each with a spec in `throughput_floor_test.go`:
   +144 s on the third. With a 60-100 s start the replica landed after the
   tip, and the queue that built in between was sized as five to seven extra
   replicas. `lambda / mu = 0.94` through the engine's scale-up headroom orders
-  that replica in the first cycle `lambda` is measured. There is no cap; the
+  that replica in the first cycle `lambda` is measured.
+
+  There is no cap; the
   bound is the formula, which does not move as replicas are added. What a
   `mu` that under-read costs is bounded by the under-read, and the window's
   max corrects it upward at the next saturation -- while the reading stays
@@ -114,7 +127,9 @@ Properties, each with a spec in `throughput_floor_test.go`:
   *single* reading is the first window's under-read (3.67 against a true
   7.13 on the run), and an order on it over-provisions in a way that
   removes the saturation which would have recorded the second, corrected
-  reading (`MinThroughputSamplesToOrder`, 2). Letting a single reading
+  reading (`MinThroughputSamplesToOrder`, 2).
+
+  Letting a single reading
   order one replica was tried, twice, and dropped: measured against the
   anticipated supply it ordered a fourth replica at a phase switch whose
   third was still starting; measured against the running supply it was a
@@ -123,8 +138,9 @@ Properties, each with a spec in `throughput_floor_test.go`:
   one start at a time, up to the full figure. Across four passes the one
   replica bought a single cycle over the plain hold (a third replica 30 s
   ahead of occupancy, on the under-read that then ran unneeded for 35
-  minutes). Two
-  readings are two *rate windows*. The completion
+  minutes).
+
+  Two readings are two *rate windows*. The completion
   rate is `rate(...[1m])` evaluated afresh every 15 s cycle, so the next
   cycle reads mostly the same window -- at 30 s scrapes exactly the same
   two samples, the same value to the digit -- and a reading counts as a
@@ -139,7 +155,9 @@ Properties, each with a spec in `throughput_floor_test.go`:
   residency charge out for a role with a `mu`) lands the cold ramp's next
   replica 15-45 s after the dead guard would have on the three measured
   cold passes -- occupancy orders it in the meantime, or the second
-  counted reading does. A reading inside the
+  counted reading does.
+
+  A reading inside the
   spacing is *folded* into the last sample, which becomes the max of its
   window -- the max the window kept when every cycle was added, no more;
   dropping in-spacing readings instead lost the highest reading of an
@@ -149,7 +167,9 @@ Properties, each with a spec in `throughput_floor_test.go`:
   reading is worth is the drain question above; the fold neither creates
   nor cures it.) Folding also makes two replicas saturating in one cycle
   one moment at the higher of the two, whichever row the collector's map
-  yields first. Value
+  yields first.
+
+  Value
   equality is not the test -- the rate is an integer count of completions
   over the scrape interval (every saturated rate logged on four passes is
   N/30 -- 103/30 = 3.43, 110/30 = 3.67, 165/30 = 5.5 -- but one, a freshly
@@ -157,7 +177,9 @@ Properties, each with a spec in `throughput_floor_test.go`:
   rate an extrapolation), so two windows agree to the digit a few percent
   of the time; a reading equal to the last one *given* at the boundary is
   the same pair read again across it, or a repeat, and only touches the
-  window, which costs a cycle or two. Measured on the shape-swap trace's first cold pass
+  window, which costs a cycle or two.
+
+  Measured on the shape-swap trace's first cold pass
   of 2026-09-19 (`guidellm-1789803750-vl4r9g_1`): one decode replica's 3.43 stood on four consecutive cycles,
   two scrape pairs, and let the floor order on it. What followed -- a third
   decode replica held for the remaining 35 minutes at `lambda / mu` = 1.75
@@ -181,7 +203,9 @@ Properties, each with a spec in `throughput_floor_test.go`:
   prefill shows -- the KV of finished prompts held until the pull, arrivals
   the scheduler's flow control releases in bursts, a completion rate that is
   decode's admission rate -- is metered by decode: decode's saturation seen
-  from upstream. Measured on the shape-swap benchmark's cold pass
+  from upstream.
+
+  Measured on the shape-swap benchmark's cold pass
   (2026-09-18): the one prefill replica read queue 30 and 357 800 resident
   tokens for the four cycles both decode replicas were over the threshold
   (+220..+265 s after load start), was priced at k2 = 357 800 against a k1
@@ -193,7 +217,9 @@ Properties, each with a spec in `throughput_floor_test.go`:
   nothing could correct either figure, since a prefill fleet of two never
   saturates again. The correlation is what was measured; the path is not
   settled (prefill's KV sat at 31 % of its cache on those rows, so it was
-  not block-starved). The analyzer now leaves such a reading unrecorded
+  not block-starved).
+
+  The analyzer now leaves such a reading unrecorded
   (`P1-obs-downstream` on the `k2-decision` line; k2 falls through to
   history or k1, and no `mu` is written), and clamps prefill's demand for
   the cycle into the band where the engine neither orders nor releases,
@@ -201,18 +227,23 @@ Properties, each with a spec in `throughput_floor_test.go`:
   (`prefill-demand-held`): against a small prefill k2 learned on some
   earlier, genuine saturation the held KV alone would read as several
   replicas, and against k1 on a fleet of two it reads as a release (537 800
-  on 1 839 718 is 29 %). What the floor of the band buys is not a re-order
+  on 1 839 718 is 29 %).
+
+  What the floor of the band buys is not a re-order
   avoided -- a replica released mid-episode would stay released, prefill
   reads near zero after one -- but the burst that ends an episode: the
   scheduler's flow control releases what it held in one go (124 requests,
   744k prompt tokens against a 919k k1 on the measured run), and it lands
-  on prefill first. A genuine prefill order is deferred for as long as any
+  on prefill first.
+
+  A genuine prefill order is deferred for as long as any
   decode replica's one-minute peak reads full and queued, plus the memory
   below: 195 s and two decode starts replayed on the measured cold pass,
   135 s and one on the warm, unbounded while decode is capped and cannot
-  grow. A prefill bottleneck
-  reduces decode's arrivals, so the two saturate at once only when decode
-  is short at prefill's completion rate. "Decode saturated" is a decode
+  grow. A prefill bottleneck reduces decode's arrivals, so the two saturate at once only when decode
+  is short at prefill's completion rate.
+
+  "Decode saturated" is a decode
   replica full AND queued -- resident KV at its k1, queue at the
   threshold -- not the queue alone: vLLM counts a request waiting for its
   remote KV in `num_requests_waiting`, so a fleet whose transfer keeps as
@@ -220,11 +251,15 @@ Properties, each with a spec in `throughput_floor_test.go`:
   read saturated every cycle on the queue alone, and prefill would then
   never record and, held, never be ordered. Full is decode unable to
   allocate the blocks a pull needs, which the transfer pipeline does not
-  produce. The test is remembered for the collector's row window
+  produce.
+
+  The test is remembered for the collector's row window
   (`DecodeSaturationMemory`, one minute): on the measured episode decode's
   occupancy dropped under k1 on the fourth cycle while its queue and
   prefill's row -- a one-minute max, repeated to the token -- had not
-  moved, and that row would otherwise have recorded. A decode bound by its
+  moved, and that row would otherwise have recorded.
+
+  A decode bound by its
   sequence ceiling before its KV does not gate; that is a prefill
   mislearned low, which costs money, where a prefill that cannot be
   ordered costs latency. Newer vLLM splits the waiting count by reason
@@ -259,10 +294,10 @@ and `heldAtFleet`; the per-replica `replica-capacity-decision` line carries
 
 ## What it is not invariant to
 
-`mu` is learned only at saturation, and saturation is defined by the queue.
-A replica that is falling behind by growing its running batch rather than its
-queue -- admitting everything while its inter-token latency climbs -- has not
-saturated by that definition and records nothing. Measured on the shape-swap
+`mu` is learned only at saturation, and the queue defines saturation. A
+replica that falls behind by growing its running batch instead of its queue
+(admitting everything while its inter-token latency climbs) has not saturated
+by that definition, and records nothing. Measured on the shape-swap
 benchmark's second phase (1000 in / 4000 out at 6 req/s): two decode replicas
 took their batch from 75 to 229 against a `max-num-seqs` of 256 over four
 minutes, ITL from 5.8 to 19.9 ms, completing 5.5 req/s between them against 6
@@ -270,16 +305,16 @@ arriving, with `waiting` never above 1. Until the batch reaches the engine's
 own ceiling and a queue forms, the floor has no `mu` for that shape and holds
 whatever the previous shape's was.
 
-That window closes on its own -- the batch does reach the ceiling -- provided
-nothing orders a replica first and drains the batch before saturation is
-observed. Which is what the retired floor did.
+That window closes on its own, because the batch does reach the ceiling,
+unless something orders a replica first and drains the batch before saturation
+is observed. The retired floor did exactly that.
 
 ## Why the Little's-law floor was retired
 
 The first version of this file built a floor from the load directly: `lambda x
 W x (avgIn + avgOut)`, with `W` the per-request service time the engines
-report. The premise was that `W` is a property of the load. It is not: service
-time is output length times inter-token latency, and ITL grows with the batch a
+report. The premise was that `W` belongs to the load. It does not. Service time
+is output length times inter-token latency, and ITL grows with the batch a
 replica runs, so `W` tracks how many replicas share the load. Measured on one
 decode pod across a run at a constant 6 req/s and a constant 6000 in / 1000 out:
 
@@ -292,8 +327,8 @@ decode pod across a run at a constant 6 req/s and a constant 6000 in / 1000 out:
 A 25x range at the same load and shape, so `lambda x W x tokens` with the `W`
 of the moment is current occupancy restated (`L = lambda W` is an identity). On
 the way down that made it useless: at six replicas it read 88k tokens against
-85k occupancy and let the fleet go to one. On the way up it made it harmful,
-and that is the measurement that retired it. In the shape-swap benchmark's
+85k occupancy and let the fleet go to one. On the way up it was harmful, and
+that measurement retired it. In the shape-swap benchmark's
 second phase, with the throughput floor holding two replicas:
 
 ```
@@ -311,10 +346,9 @@ throughput floor never got the `mu` that would have held three -- the floor
 that oscillated was also the one preventing the floor that would not.
 
 Its stated purpose, damping the collapse, is what the throughput floor does
-with a term that does not move. What it did beyond that -- ordering replicas on
-an inflated `W` -- is what occupancy and the queues do already, later and for
-the right reason. So it was removed rather than corrected; there is no `W` that
-is a property of the load.
+with a term that does not move. What it did beyond that, ordering replicas on
+an inflated `W`, occupancy and the queues already do, later and for the right
+reason. So it was removed, not corrected: no `W` belongs to the load.
 
 ## Claims in this document, and their status
 

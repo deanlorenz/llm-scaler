@@ -2,20 +2,18 @@
 
 ## Overview
 
-This guide brings up llm-d and the scaling manager together on a local kind cluster with
-**emulated GPUs**, so the whole chain — model server, EPP, KEDA, the scaling manager — can be
-exercised on a laptop. The model servers are simulators: they answer requests and
-emit vLLM metrics without a GPU.
+This brings up llm-d and the scaling manager on a local kind cluster with
+**emulated GPUs**, so you can run the whole chain (model server, EPP, KEDA, the
+scaling manager) on a laptop. The model servers are simulators: they answer
+requests and emit vLLM metrics without a GPU.
 
-For a real cluster, install llm-d from its own
-[guides](https://github.com/llm-d/llm-d/tree/main/guides) and then follow
-[Install the scaling manager in a namespace](../install-in-namespace/). The scaling manager does not
-install llm-d: which model, which accelerator and whose HuggingFace token are the
-deployment decision, not an autoscaler's.
+On a real cluster, install llm-d from its own
+[guides](https://github.com/llm-d/llm-d/tree/main/guides), then follow [Install
+the scaling manager in a namespace](../install-in-namespace/).
 
 ## Prerequisites
 
-kind, kubectl, helm, jq and a container runtime. No GPUs.
+- [ ] kind, kubectl, helm, jq and a container runtime. No GPUs.
 
 ## Installation Instructions
 
@@ -48,16 +46,27 @@ kubectl apply -k config/samples/simulator/nodeSelector/decode/
 ```
 <!-- guide:deploy.workload end -->
 
-The sample includes its own ScaledObject, which is the registration.
+The sample includes its own ScaledObject, which is the registration. Its
+`scalerAddress` names the default controller namespace, but the stack runs the
+controller in `llm-d-sim`, so point it at the running install:
+
+<!-- guide:deploy.repoint start -->
+```bash
+# Point the sample at the running install (it names the default controller namespace).
+make scaledobjects-repoint
+```
+<!-- guide:deploy.repoint end -->
+
+Skip this and KEDA cannot reach the scaler: the ScaledObject stays `READY False`
+and the HPA reads `cpu: <unknown>/80%`.
 
 ## Verification
 
 <!-- guide:verify.chain start -->
 ```bash
-# Both commands name llm-d-sim: `deploy-e2e-infra` installs the controller
-# beside the workload, not in the default namespace.
+# The controller and the workload both run in llm-d-sim.
 kubectl get scaledobject,hpa -n llm-d-sim
-kubectl logs -n llm-d-sim deploy/wva-controller-manager | grep scaling-decision
+kubectl logs -n llm-d-sim deploy/wva-controller-manager --tail=-1 | grep scaling-decision
 ```
 <!-- guide:verify.chain end -->
 
@@ -70,8 +79,8 @@ make test-e2e-smoke
 <!-- guide:verify.suite end -->
 
 `make test-e2e-full` runs everything. Pass `SCALE_TO_ZERO_ENABLED=true` to
-include the scale-from-zero suites: they skip silently without it, and a run that
-skips them still reports success.
+include the scale-from-zero suites. Without it they skip, and the run still
+reports success.
 
 ## Cleanup
 

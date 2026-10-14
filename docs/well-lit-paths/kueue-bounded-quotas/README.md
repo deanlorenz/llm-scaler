@@ -1,131 +1,103 @@
 # Bound tenants by the quotas Kueue already holds
 
+If Kueue already decides your GPU quotas, the scaling manager can read them
+instead of keeping a second copy. It then caps each namespace and accelerator
+type at **the smaller of Kueue's grant and its own static cap**, so it never
+asks KEDA for a replica Kueue would hold pending.
+
+**Maturity:** **Experimental.** No run yet against a live Kueue controller
+([details](#what-is-not-proven-yet)).
+
+## When not to take it
+
+- Several namespaces share one ClusterQueue and the shared total must hold.
+  Each namespace is capped at the queue's full grant
+  ([a shared queue is not a partition](#three-things-that-surprise-people)).
+- Tenants can create LocalQueues pointing at a queue that admits any namespace,
+  and your static cap is `-1` (unlimited). They would get that queue's grant
+  ([details](#check-what-your-clusterqueues-admit)).
+- With `-1` only, if the controller must stay bounded when Kueue cannot be
+  read. Before the first read, `-1` is no cap at all; use a finite static cap,
+  which Kueue can only tighten.
+
 ## Start here
 
-- **Status:** Experimental: no run yet against a live Kueue controller (below).
-- **You need:**
-  - everything [the tenant-quotas path](../tenant-gpu-quotas/#start-here) needs, including its Namespace-read note for the cluster policy on Kubernetes.
-  - Kueue's `ClusterQueue`, `LocalQueue` and `ResourceFlavor` served, with LocalQueues in the managed namespaces.
-  - for a namespace-scoped install, the `kueue-reader` prerequisite that `make setup-prereqs` creates (cluster admin; [What it needs](#what-it-needs)), including `get` on the managed Namespace. A controller set up before that read existed needs the admin to re-run it once ([upgrading](../../reference/upgrade-and-uninstall.md#upgrading-to-this-release)); until then the tenant's `make deploy-wva` refuses with this block on, and warns instead when it cannot tell.
-  - ClusterQueues whose `namespaceSelector` admits only the namespaces meant to have them: the reader honours the selector as Kueue does, so a queue with `{}`, or one matching a label a tenant can set, grants its quota to any namespace that points a LocalQueue at it ([why](#what-it-is)).
-  - **Not enforcement:** the limiter is advisory; back each tenant namespace with a GPU `ResourceQuota` ([bound at admission](../../guides/admin-cluster-setup/README.md#bound-the-namespaces-gpus-at-admission)).
-- **Do this** (no guide covers this path yet; the steps are on this page):
-  1. Check accelerators resolve: `kubectl get events -n <ns> --field-selector reason=AcceleratorNotResolved` (namespace owner; a cluster admin can use `-A`). No events is the healthy answer.
-  2. Declare the quota once, with the types at `-1` so Kueue sets the numbers ([Declaring it](#declaring-it)), one of:
-     - Namespace owner (advisory; you can edit it): `WVA_LIMITER=quota WVA_QUOTAS='<accelerator>=-1' WVA_QUOTA_KUEUE=true make deploy-wva`.
-     - Cluster admin (a budget the tenant cannot edit): `make enable-physical-limiter WVA_LIMITER_TYPE=quota WVA_QUOTAS='<accelerator>=-1' WVA_QUOTA_KUEUE=true`.
-- **Check it works:** `quota entry bounded by external caps` in the controller log, carrying the effective caps ([Verifying it](#verifying-it)). The two failure lines: `external quota source unreadable` is missing `kueue-reader` RBAC; `external quota source grants no GPUs` means no LocalQueue in the namespace reaches a ClusterQueue with a GPU resource.
-- **Undo** (no guide step). Left at `-1` without Kueue, the entry is no cap at all, so replace it rather than only dropping the flag:
-  - One install (namespace owner): re-run `make deploy-wva` with `WVA_LIMITER=quota`, a finite `WVA_QUOTAS` and no `WVA_QUOTA_KUEUE`, or with no `WVA_LIMITER` to declare no limiter.
-  - Cluster policy (cluster admin): re-run `make enable-physical-limiter WVA_LIMITER_TYPE=quota` with a finite `WVA_QUOTAS` and no `WVA_QUOTA_KUEUE`, or `make disable-physical-limiter`.
+This extends [capping what each tenant may take](../tenant-gpu-quotas/#start-here):
+read that first; everything there still applies. You also need Kueue's
+`ClusterQueue`, `LocalQueue` and `ResourceFlavor` kinds served, and
+LocalQueues in the managed namespaces. No guide covers this path yet, so the
+steps are here.
 
-## What it is
+1. Namespace owner or admin: check accelerators resolve, as in [the tenant path's step 1](../tenant-gpu-quotas/#start-here).
+2. Cluster admin, for a namespace-scoped install: run `make setup-prereqs` so the controller can read Kueue ([what it grants](#what-it-needs)).
+3. Declare the quota once, naming the types with `-1` so Kueue sets the numbers ([Declaring it](#declaring-it)), one of:
+   - Namespace owner, advisory: `WVA_LIMITER=quota WVA_QUOTAS='<accelerator>=-1' WVA_QUOTA_KUEUE=true make deploy-wva`.
+   - Cluster admin, a budget the tenant cannot edit: `make enable-physical-limiter WVA_LIMITER_TYPE=quota WVA_QUOTAS='<accelerator>=-1' WVA_QUOTA_KUEUE=true`.
+4. Check it works: the controller log shows `quota entry bounded by external caps` with the effective caps ([Verifying it](#verifying-it)).
 
-> **Experimental.** The merge rules, the reader and the installer knob are unit
-> tested, and an end-to-end suite proves the read-and-merge chain against a real
-> API server, up to the effective entry the limiter logs — but that suite
-> installs only Kueue's **CRDs**, not Kueue. **No run has yet been made against
-> a live Kueue controller**, so the two things only a live one shows — a queue
-> going inactive under it, and finalizers on its objects — are covered by tests
-> that imitate them. That is the short leg. Two defaults may still move: the
-> 30s `refreshInterval`, and how an untyped grant is applied (to each named type
-> separately, and the largest across vendors rather than the sum).
+To undo, replace the entry rather than only dropping the flag: left at `-1`
+without Kueue, it is no cap at all ([how](#undoing-it)).
 
-If Kueue is already the place where GPU quotas are decided, a second copy of
-every number in the scaling manager's ConfigMap is a second thing to keep right. On
-this path the scaling manager reads Kueue's ClusterQueues and enforces, per namespace and accelerator type,
-**the smaller of Kueue's grant and the static cap** — so the autoscaler does not
-ask KEDA for a replica that Kueue would then hold pending.
+## What it costs
 
-It is an extension of [capping what each tenant may take](../tenant-gpu-quotas/):
-everything there about scope, the reserved `default` key and what a quota does
-*not* bound still applies. Read that page first; this one adds one block to its
-entry.
+- Three list calls to the API server per `refreshInterval` (30s by default),
+  shared by both engines. No informer, no watch.
+- A lag: a change in Kueue takes effect after at most `refreshInterval` plus
+  one [optimize cycle](../../reference/cycle-log.md).
+- The reader's errors show only in the log; no metric reports them.
 
-**Use it when** the namespaces the scaling manager scales have LocalQueues, their GPU grants are
-ClusterQueue nominal quotas, and you want the scaling manager to follow those numbers as they
-change rather than mirror them by hand.
+## Evidence
 
-**Do not use it where several namespaces share one ClusterQueue and the shared
-total is what must hold**: each such namespace is capped at the queue's full
-grant (the second surprise below). And read the third surprise before choosing
-`-1` as the static cap: it decides what happens when Kueue cannot be read.
+No benchmark scenario: a bound changes what the optimizer may order, not how
+it scales. One end-to-end suite proves the read-and-merge chain against a real
+API server with Kueue's CRDs only ([How it is tested](#how-it-is-tested)).
 
-**Check what your ClusterQueues admit where tenants can create their own
-LocalQueues** and the static cap is `-1`. The controller grants a namespace the
-quota of a ClusterQueue one of its LocalQueues points at only when that queue's
-`namespaceSelector` admits the namespace, with Kueue's semantics: no selector
-admits nothing, `{}` admits every namespace, anything else is matched against
-the namespace's labels — and a namespace whose labels the controller cannot
-read gets nothing from a selector-bearing queue. What remains open is a queue
-whose selector is `{}`, or one that matches a label the tenant can set: a tenant
-who points a LocalQueue at it gets its grant as the controller sees it, as
-Kueue would admit their work there. Keep such queues out of tenants' reach (or
-LocalQueue creation with the admin: check whether your Kueue install aggregates
-LocalQueue rights into the namespace `admin` role with
-`kubectl auth can-i create localqueues.kueue.x-k8s.io -n <ns> --as=<tenant>`),
-or keep a finite static cap, which Kueue can only tighten.
+## Details
 
-## What it needs
+### What is not proven yet
 
-- Everything [tenant-gpu-quotas](../tenant-gpu-quotas/) needs.
-- Kueue's `ClusterQueue`, `LocalQueue` and `ResourceFlavor` kinds served by the
-  cluster. The scaling manager lists them and never talks to Kueue's controller, so the CRDs
-  alone are enough for the reader to work — but a real installation is what
-  makes the grants mean anything.
+The merge rules, the reader and the installer knob are unit tested. The
+end-to-end suite installs only Kueue's **CRDs**, not Kueue, and stops at the
+effective entry the limiter logs. **No run has been made against a live Kueue
+controller.** The two things only a live one shows, a queue going inactive and
+finalizers on its objects, are tested by imitation. Two defaults may still
+move: the 30s `refreshInterval`, and how an untyped grant applies (to each
+named type separately, and the largest across vendors rather than the sum).
+
+### What it needs
+
+- Everything [tenant-gpu-quotas](../tenant-gpu-quotas/) needs, including its
+  Namespace-read note for the cluster policy on Kubernetes.
+- Kueue's three kinds served. The scaling manager lists them and never talks to
+  Kueue's controller, so the CRDs alone let the reader work; a real
+  installation is what makes the grants mean anything.
 - RBAC to read them. A **cluster-scoped** install has it in the manager
-  ClusterRole. A **namespace-scoped** install reads LocalQueues in the namespace
-  it manages through its Role, and needs the two cluster-scoped kinds, plus
-  `get` on its managed Namespace (to evaluate a `namespaceSelector`), from the
-  `kueue-reader` prerequisite, which the admin phase creates
-  (`NAMESPACE=<managed ns> make setup-prereqs SCOPE=namespace ENVIRONMENT=kubernetes`, or, when
-  the controller runs out of the tenant's reach,
-  `NAMESPACE=<managed ns> make setup-prereqs SCOPE=namespace ENVIRONMENT=kubernetes WVA_NS=wva-<managed ns> WVA_WATCH_NS=<managed ns>`;
-  the same run that creates `node-reader`). An install whose `kueue-reader` predates the
-  Namespace read does **not** upgrade with this block on: when the controller
-  cannot `get` its managed Namespace, the tenant's `make deploy-wva` refuses
-  and names the `make setup-prereqs` run a cluster admin makes first. When it
-  cannot tell (the tenant may not impersonate the controller to ask, or cannot
-  read whether a Kueue source is configured) it warns with the same fix and
-  installs. Without
-  the ClusterQueue and ResourceFlavor read, the reader logs
-  `external quota source unreadable` each cycle.
+  ClusterRole. A **namespace-scoped** install reads LocalQueues through its
+  Role (`wva-manager-role`). It gets the two cluster-scoped kinds, plus `get` on
+  its managed Namespace (to evaluate a `namespaceSelector`), from the
+  `kueue-reader` prerequisite. The admin phase creates it, in the same run that
+  creates `node-reader`:
+  `NAMESPACE=<managed ns> make setup-prereqs SCOPE=namespace ENVIRONMENT=kubernetes`,
+  adding `WVA_NS=wva-<managed ns> WVA_WATCH_NS=<managed ns>` when the
+  controller is out of the tenant's reach.
+- Without the ClusterQueue and ResourceFlavor read, the reader logs
+  `external quota source unreadable` each cycle and runs on the static entry.
 
-## Declaring it
+**Older installs.** The tenant's `make deploy-wva` does not apply Roles. A
+namespace-scoped controller installed before this feature, or whose
+`kueue-reader` predates the Namespace read, needs a cluster admin to re-run
+`make setup-prereqs NAMESPACE=<ns>` once, with the original `WVA_NS` /
+`WVA_WATCH_NS` ([upgrading](../../reference/upgrade-and-uninstall.md#upgrading-to-this-release)).
+Until then, with this block on, the tenant's `make deploy-wva` refuses and
+names that run. When it cannot tell (it may not impersonate the controller, or
+cannot read whether a Kueue source is configured) it warns with the same fix
+and installs.
 
-The installer writes it. Add `WVA_QUOTA_KUEUE=true` to the same `WVA_LIMITER=quota`
-install the tenant-quotas path uses, and put the accelerator types in
-`WVA_QUOTAS`:
+### Declaring it
 
-```bash
-# one install's own policy
-WVA_LIMITER=quota WVA_QUOTAS='H100=-1' WVA_QUOTA_KUEUE=true make deploy-wva ...
-
-# the cluster policy (see admin-gpu-bounding for which controllers read it). With WVA_QUOTA_KUEUE=true this also
-# grants each target controller the cluster-scoped half of the Kueue read
-# (ClusterQueues, ResourceFlavors, and get on Namespaces), as it grants the node
-# read for gpu-inventory. A namespace-scoped controller, tenant-owned or out of
-# reach, gets get on the namespace it manages: the same grant make setup-prereqs
-# renders for it, plus any name its role already holds. A cluster-scoped
-# controller the installer made already reads every Namespace through its
-# manager ClusterRole, so its Kueue read covers every Namespace too. Nothing
-# needs naming in WVA_LIMITER_TARGETS for any of them.
-WVA_LIMITER_TYPE=quota WVA_QUOTAS='H100=-1' WVA_QUOTA_KUEUE=true make enable-physical-limiter
-```
-
-It warns only when a controller that looks cluster-scoped really lacks the
-cluster-wide Namespace read, naming the `make setup-prereqs` run for that
-install, or when it cannot tell (it may not impersonate the controller).
-
-The LocalQueue read is in the controller's Role (`wva-manager-role`), which is an
-admin-phase object: the tenant's `make deploy-wva` does not apply Roles. So a
-namespace-scoped controller installed before this feature existed needs **a
-cluster admin to re-run `make setup-prereqs NAMESPACE=<ns>`** (with the same
-`WVA_NS` / `WVA_WATCH_NS` as the original install) once; until then it logs
-`external quota source unreadable` and runs on the static entry.
-
-That renders as one more block on the quota entry (comments added here; the
-installer writes the two lines under `kueue:`):
+The installer writes it. Add `WVA_QUOTA_KUEUE=true` to the tenant path's
+`WVA_LIMITER=quota` install and name the types in `WVA_QUOTAS`. It renders as
+one more block on the quota entry:
 
 ```yaml
 limiters:
@@ -139,50 +111,73 @@ limiters:
         H100: -1                    # the TYPE is yours; the NUMBER is Kueue's
 ```
 
-Hand-write the entry when you want several namespaces named, or a finite static
-cap for some of them: wherever both sides name a type, the smaller figure wins.
+For the cluster policy, `make enable-physical-limiter` with
+`WVA_QUOTA_KUEUE=true` also grants each target controller the cluster-scoped
+half of the Kueue read (ClusterQueues, ResourceFlavors, `get` on Namespaces),
+as it grants the node read for `gpu-inventory`. A namespace-scoped controller
+gets `get` on the namespace it manages, plus any name its role already holds.
+A cluster-scoped controller the installer made already reads every Namespace.
+Nothing needs naming in `WVA_LIMITER_TARGETS`. It warns only when a controller
+that looks cluster-scoped lacks the cluster-wide Namespace read (naming the
+`make setup-prereqs` run to fix it), or when it cannot tell.
+
+Hand-write the entry to name several namespaces, or a finite static cap for
+some: wherever both sides name a type, the smaller figure wins.
 
 A namespace is **governed** by Kueue when one of its LocalQueues reaches a
 ClusterQueue that declares a GPU resource; it then gets that queue's grant. A
-namespace with no such LocalQueue is **not governed**, and the static entry
-alone decides for it. What each Kueue object becomes, and what is not read:
+namespace with no such LocalQueue is decided by the static entry alone. What
+each Kueue object becomes, and what is not read:
 [the reference](../../reference/quota-limiter.md#what-is-read).
 
-## Three things that surprise people
+### Check what your ClusterQueues admit
 
-**Kueue's usual flavors name no accelerator type, so Kueue alone cannot open one.**
-The quickstart's `default-flavor` has no node labels. Its grant is *untyped*: it
-bounds every type the static entry names and, on its own, names none. Turn the
-block on with **no static map** and untyped flavors, and the entry — now an
-empty map — **denies every type**; the limiter says so once in its log
-(`grants GPUs of no named accelerator type`, with the fix in the message). Hence
-the recipe above: name the types, let Kueue give the numbers (`H100: -1`). Give
-the flavors a product label (`nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3`)
-and the grant becomes typed — and then a per-flavor split (PCIe 4, SXM 0) is
-honoured exactly. The cost of the untyped shape: a namespace that names two
-types may reach the untyped grant on *each*; the limiter has no per-namespace
-total.
+This matters where tenants can create their own LocalQueues and the static cap
+is `-1`. A namespace gets a ClusterQueue's quota only when the queue's
+`namespaceSelector` admits it, with Kueue's semantics: no selector admits
+nothing, `{}` admits every namespace, anything else matches the namespace's
+labels. A namespace whose labels the controller cannot read gets nothing from
+a selector-bearing queue.
 
-**A shared ClusterQueue is a ceiling per namespace, not a partition.** Each
-namespace with a LocalQueue on it is capped at the queue's full grant, so three
-of them may in sum still ask for three times what the queue admits — Kueue holds
-the excess pending, as before. Give each tenant its own ClusterQueue, with a
-cohort for borrowing, where the shared total matters. Borrowing itself is not
-counted: only `nominalQuota` is read, so in a cohort that lends quota a model
-is held at its nominal share even when Kueue would admit more from borrowed
-capacity (tracked in [#136](https://github.com/ev-shindin/llm-scaling-manager/issues/136)).
+What remains open is a queue whose selector is `{}`, or one matching a label
+the tenant can set. A tenant who points a LocalQueue at it gets its grant, as
+Kueue would admit their work there. Keep such queues out of tenants' reach, or
+keep LocalQueue creation with the admin. To check whether your Kueue install
+gives tenants that right:
+`kubectl auth can-i create localqueues.kueue.x-k8s.io -n <ns> --as=<tenant>`.
+Or keep a finite static cap, which Kueue can only tighten.
 
-**A Kueue outage keeps the last grant; a Kueue that was never read leaves only
-the static entry.** A failed read keeps the last good snapshot in force, and the
-log says how old it is. Before the *first* successful read — RBAC missing, CRDs
-absent, a fresh controller — the static entry alone applies, and with `-1` that
-is **no cap at all**. If a controller must stay bounded when Kueue cannot be
-read, put a finite number in the static entry; Kueue then only tightens it. A
-missing CRD or a Forbidden is reported as such every cycle, never folded into
-"Kueue grants nothing"; both engines treat a limiter error as "no constraint",
-so `Refresh` never surfaces one and the reader's errors go to the log.
+### Three things that surprise people
 
-## Verifying it
+**Kueue's usual flavors name no accelerator type, so Kueue alone cannot open
+one.** The quickstart's `default-flavor` has no node labels. Its grant is
+*untyped*: it bounds every type the static entry names and names none itself.
+With the block on, **no static map** and untyped flavors, the entry is an
+empty map that **denies every type**. The limiter logs it once
+(`grants GPUs of no named accelerator type`, with the fix). Hence the recipe:
+name the types, let Kueue give the numbers (`H100: -1`). Give the flavors a
+product label (`nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3`) and the grant
+becomes typed; a per-flavor split (PCIe 4, SXM 0) is then honoured exactly.
+The untyped shape's cost: a namespace naming two types may reach the untyped
+grant on *each*, because there is no per-namespace total.
+
+**A shared ClusterQueue is a ceiling per namespace, not a partition.** Three
+namespaces on one queue may together ask for three times what it admits;
+Kueue holds the excess pending. Where the shared total matters, give each
+tenant its own ClusterQueue, with a cohort for borrowing. Only `nominalQuota`
+is read, so in a cohort that lends quota, a model is held at its nominal share
+even when Kueue would admit more
+([#136](https://github.com/ev-shindin/llm-scaling-manager/issues/136)).
+
+**A Kueue outage keeps the last grant; a Kueue never read leaves only the
+static entry.** A failed read keeps the last good snapshot, and the log says
+how old it is. Before the *first* successful read (RBAC missing, CRDs absent,
+a fresh controller) only the static entry applies, and `-1` is **no cap at
+all**. A missing CRD or a Forbidden is reported as such every cycle, never
+folded into "Kueue grants nothing". Both engines treat a limiter error as "no
+constraint", so `Refresh` never surfaces one; the reader's errors go to the log.
+
+### Verifying it
 
 ```bash
 # the effective entry, logged once each time Kueue's grant changes
@@ -190,30 +185,32 @@ kubectl logs -n <wva-namespace> deploy/wva-controller-manager \
   | grep -E 'quota entry bounded by external caps|external quota source'
 ```
 
-The `bounded by external caps` line carries four maps: Kueue's grant per
-namespace and for the cluster, and the **effective** namespace and cluster caps
-after the merge — the numbers the scaling manager enforces. `external quota source unreadable`
-names an RBAC or CRD problem and says whether a stale snapshot or the static
-entry is in force. `grants GPUs of no named accelerator type` is the
-untyped-flavor case above.
+- `bounded by external caps` carries four maps: Kueue's grant per namespace
+  and for the cluster, and the **effective** namespace and cluster caps after
+  the merge. The effective caps are what the scaling manager enforces.
+- `external quota source unreadable` names an RBAC or CRD problem, usually
+  missing `kueue-reader`, and says whether a stale snapshot or the static
+  entry is in force.
+- `external quota source grants no GPUs`: no LocalQueue in the namespace
+  reaches a ClusterQueue with a GPU resource.
+- `grants GPUs of no named accelerator type` is the untyped-flavor case above.
 
 **The reader's state is visible only here.** No metric or condition reports a
-Forbidden or a missing CRD; the tenant path's `wva_model_scaling_blocked` still
-shows a model held at its cap, but not why the cap is what it is.
+Forbidden or a missing CRD. The tenant path's `wva_model_scaling_blocked`
+still shows a model held at its cap, but not why the cap is what it is. The
+e2e runs with `refreshInterval: 5s` and allows three minutes; it asserts the
+transition, not its latency.
 
-A change in Kueue appears after at most `refreshInterval` plus one
-[optimize cycle](../../reference/cycle-log.md). The e2e runs with
-`refreshInterval: 5s` and allows three minutes; it asserts the transition, not
-its latency.
+### Undoing it
 
-## What it costs
+- One install (namespace owner): re-run `make deploy-wva` with
+  `WVA_LIMITER=quota`, a finite `WVA_QUOTAS` and no `WVA_QUOTA_KUEUE`, or with
+  `WVA_LIMITER=none`. With no `WVA_LIMITER`, the installer keeps the entry.
+- Cluster policy (cluster admin): re-run
+  `make enable-physical-limiter WVA_LIMITER_TYPE=quota` with a finite
+  `WVA_QUOTAS` and no `WVA_QUOTA_KUEUE`, or run `make disable-physical-limiter`.
 
-Three list calls against the API server per `refreshInterval` (30s by default),
-shared by both engines — no informer, no watch. And the lag above. No benchmark
-scenario backs this page: a bound changes what the optimizer may order, not how
-it scales.
-
-## How it is tested
+### How it is tested
 
 - Unit: `internal/config/quota_limiter_kueue_test.go` (every merge rule,
   untyped grants, the per-flavor split, the reserved key and exclusions),
@@ -224,25 +221,24 @@ it scales.
   reader), `internal/accelerator/identity_test.go` (how a full product label
   meets a short static key). `hack/check-limiter-declaration.sh` pins what
   `WVA_QUOTA_KUEUE` emits.
-- End-to-end: `test/e2e/kueue_quota_test.go` (label `full`, `kueue-quota`) on
-  kind — Kueue grants one GPU against a static cap of three; the limiter's
-  effective entry reads one, then three again after the LocalQueue is deleted.
-  It runs with Kueue's CRDs only (`deploy/ci-pr-checks/install-kueue-crds.sh`,
-  wired into `test-e2e-full-with-setup` on kind); it fails, not skips, when
-  they are absent there, and skips with a reason on a cluster that does not
-  serve them.
-- **Not covered:** a live Kueue controller (inactive queues, finalizers,
+- End-to-end: `test/e2e/kueue_quota_test.go` (labels `full`, `kueue-quota`) on
+  kind. Kueue grants one GPU against a static cap of three; the effective
+  entry reads one, then three again after the LocalQueue is deleted. It runs
+  with Kueue's CRDs only (`deploy/ci-pr-checks/install-kueue-crds.sh`, wired
+  into `test-e2e-full-with-setup` on kind). It fails, not skips, when they are
+  absent there, and skips with a reason on a cluster that does not serve them.
+- **Not covered:** a live Kueue controller (inactive queues, finalizers and
   `stopPolicy` transitions are imitated by fixtures); enforcement past the
-  effective entry, which is the same optimizer path
-  [tenant-gpu-quotas](../tenant-gpu-quotas/) relies on, with the same gap; and
-  the reader's state, which has no metric.
+  effective entry, the same optimizer path and gap as
+  [tenant-gpu-quotas](../tenant-gpu-quotas/); and the reader's state, which has
+  no metric.
 
-## Tuning it
+### Tuning it
 
 Every field, the full merge table and what is not read:
-[the quota limiter reference, "Kueue as a quota source"](../../reference/quota-limiter.md#kueue-as-a-quota-source)
-— `resources` narrows which extended resources count as GPUs, `refreshInterval`
-how often Kueue is re-read. The installer variables:
-[configuration](../../reference/configuration.md). Why a quota counts only
-the scaling manager's own consumption:
+[Kueue as a quota source](../../reference/quota-limiter.md#kueue-as-a-quota-source).
+`resources` narrows which extended resources count as GPUs; `refreshInterval`
+sets how often Kueue is re-read. Installer variables:
+[configuration](../../reference/configuration.md). Why a quota counts only the
+scaling manager's own consumption:
 [GPU capacity accounting](../../concepts/gpu-capacity-accounting.md).

@@ -1,26 +1,18 @@
 name: install-small-model
 
-env:
-  static:
-    namespace:
-      run: |
-        export NAMESPACE=<your-namespace>
-        export MODEL_ID=Qwen/Qwen3-0.6B
-
 prerequisites:
+  namespace:
+    note: Where the model goes, and which model.
+    run: |
+      export NAMESPACE=<your-namespace>
+      export MODEL_ID=Qwen/Qwen3-0.6B
   gpu:
-    note: |
-      One GPU, and a node that will schedule onto it. This deploys a real model
-      server, not a simulator.
+    note: List nodes with allocatable GPUs. You need at least one.
     run: kubectl get nodes -o custom-columns=NODE:.metadata.name,GPU:.status.allocatable.'nvidia\.com/gpu' --no-headers
 
 deploy:
   standup:
-    note: |
-      Deploys the model server, its EPP and the InferencePool, and holds the
-      engine image on the accelerator nodes (the prepull-* pods; BENCHMARK_PREPULL=false
-      skips that) -- nothing else. BENCHMARK_WVA_DEPLOY=false keeps the
-      autoscaler out of it: installing the scaling manager is the next guide's job.
+    note: Deploy the model server, its EPP and InferencePool. BENCHMARK_WVA_DEPLOY=false leaves the scaling manager out.
     run: |
       make benchmark-standup BENCHMARK_NAMESPACE=${NAMESPACE} MODEL_ID=${MODEL_ID} \
         BENCHMARK_WVA_DEPLOY=false

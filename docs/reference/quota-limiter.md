@@ -1,39 +1,45 @@
 # Quota Limiter
 
-The **quota limiter** enforces operator-declared GPU caps that are independent
-of the physical inventory observed in the cluster. It addresses the case where
-an administrator wants to cap accelerator consumption regardless of how many
-nodes actually exist — for example, to reserve burst capacity, divide a cluster
-across tenants, or simulate a smaller budget than the hardware allows.
+The **quota limiter** enforces GPU caps the operator declares, independent of
+the physical inventory. Use it to cap accelerator use whatever nodes exist: to
+reserve burst capacity, divide a cluster across tenants, or test a smaller
+budget than the hardware allows.
 
-This document covers the design, configuration, and pipeline integration of
-the quota limiter. The implementation closes
+This page covers its configuration, design and place in the pipeline. The
+implementation closes
 [#1002](https://github.com/llm-d/llm-d-workload-variant-autoscaler/issues/1002).
 
 ## Enabling
 
-**A `limiters:` list containing a `quota` entry** on the saturation-scaling
-ConfigMap's `default` entry, and that is the whole prerequisite. The installer
-writes it for you — `make deploy-wva-on-k8s WVA_LIMITER=quota WVA_QUOTAS='H200=8'`
-for one install's own policy, or `make enable-physical-limiter
-WVA_LIMITER_TYPE=quota WVA_QUOTAS='H200=8'` for the cluster policy every
-controller reads. `WVA_QUOTAS` is **required** by both: an entry that names no
-accelerator is a budget of zero for every type, not unlimited, and would stop
-every managed workload from scaling up. `WVA_QUOTA_SCOPE` selects `namespace`
-(the default: each managed namespace gets the budget) or `cluster` (the sum
-across all of them). It is the sole source that selects the quota
-limiter (see [Selection & lifecycle](#selection--lifecycle)) and is applied
-**live** — no restart, except where a namespace-scoped controller reads it from
-outside the namespace it manages (see [Reload lifecycle](#reload-lifecycle)). With no `limiters:` list, nothing limits: neither the
-optimizer budget nor the scale-from-zero capacity check.
+Add **a `limiters:` list with a `quota` entry** to the saturation-scaling
+ConfigMap's `default` entry. That is the whole prerequisite, and the installer
+writes it for you:
 
-> **Changed:** this used to require a second setting, `enableLimiter: true`, and a
-> `quota` entry declared without it was constructed and then never applied —
-> replicas scaled unconstrained while the config read as capped. Declaring the
-> limiter is now the request to be limited, so that failure mode is gone.
+```bash
+# One install's own policy
+make deploy-wva-on-k8s WVA_LIMITER=quota WVA_QUOTAS='H200=8'
+# The cluster policy every controller reads
+make enable-physical-limiter WVA_LIMITER_TYPE=quota WVA_QUOTAS='H200=8'
+```
 
-The quota entries use the same schema described below; place them inline under the
-saturation `default` entry's `limiters:` list (see
+- `WVA_QUOTAS` is **required** by both. An entry that names no accelerator is a
+  budget of zero for every type, not unlimited, and stops every managed
+  workload from scaling up.
+- `WVA_QUOTA_SCOPE` is `namespace` (the default: each managed namespace gets the
+  budget) or `cluster` (the sum across all of them).
+- The list is the only thing that selects the quota limiter
+  ([Selection & lifecycle](#selection--lifecycle)). It applies **live**, except
+  where a namespace-scoped controller reads it from outside the namespace it
+  manages ([Reload lifecycle](#reload-lifecycle)).
+- With no `limiters:` list nothing limits: neither the optimizer budget nor the
+  scale-from-zero capacity check.
+
+> **Changed:** this used to also need `enableLimiter: true`. A `quota` entry
+> without it was built but never applied, so replicas scaled unconstrained while
+> the config looked capped. Declaring the limiter now enables it.
+
+The entries use the schema below, inline under the saturation `default` entry's
+`limiters:` list (see
 [scaling-policy-config.md](scaling-policy.md#limiters-cluster-default-only-live)).
 
 ## Scope
@@ -102,14 +108,11 @@ limiters:
         H100: 2    # per-namespace fallback for unlisted namespaces
 ```
 
-> ⚠️ **Reserved key collision.** The string `default` is a reserved key in
-> `namespaceQuotas` and selects the per-namespace fallback for unlisted
-> namespaces. As a consequence, the *actual* Kubernetes `default` namespace
-> cannot be assigned a quota by listing it directly. To enforce a cap on
-> workloads in the K8s `default` namespace, either (a) list it in `exclude`
-> if you want it to bypass this limiter, or (b) use a strict allowlist
-> (omit the reserved key entirely so any unlisted namespace including
-> `default` is denied).
+> ⚠️ **Reserved key collision.** `default` in `namespaceQuotas` is the fallback
+> for unlisted namespaces, so the Kubernetes namespace named `default` cannot be
+> given a quota by listing it. Either list it in `exclude` to bypass this
+> limiter, or use a strict allowlist (no `default` key), so every unlisted
+> namespace, `default` included, is denied.
 
 ### Special values
 
@@ -119,8 +122,8 @@ limiters:
 | `-1` | Unlimited (Kubernetes convention; pass-through in the allocator) |
 | `0` or missing entry | Denied (no allocation) |
 
-A finite cap must not exceed `MaxQuotaValue` (`1 << 20` = 1,048,576) — far above any
-realistic accelerator count; a larger value is rejected at startup (see Validation).
+A finite cap must not exceed `MaxQuotaValue` (`1 << 20` = 1,048,576); a larger
+value is rejected at startup (see Validation).
 
 ### Namespace lookup rules
 
@@ -150,10 +153,9 @@ per `(namespace, type)`: it applies only when `N` is wholly unlisted.
 The decision above these fields — when to take this, what it costs, the
 evidence — is [the Kueue-bounded quotas path](../well-lit-paths/kueue-bounded-quotas/).
 
-A quota entry can be **bounded by Kueue**. Kueue is the cluster's admission-time
-quota authority; reading its figures makes the scaling manager respect the same caps before it
-asks KEDA for a replica that Kueue would then hold pending. Set `kueue.enabled`
-on the entry:
+A quota entry can be **bounded by Kueue**, the cluster's admission-time quota
+authority. The scaling manager then respects Kueue's caps before asking KEDA for
+a replica that Kueue would hold pending. Set `kueue.enabled` on the entry:
 
 ```yaml
 limiters:
@@ -185,8 +187,8 @@ map — denies every type (see *Merge rules*, row 3).
 | `LocalQueue` | namespaced | `spec.clusterQueue` links a namespace to a ClusterQueue. A namespace is granted the caps of every ClusterQueue one of its LocalQueues points at **and whose `spec.namespaceSelector` admits it**; two LocalQueues on one ClusterQueue count it once. |
 | `Namespace` | cluster | Labels, read (`get`, one per namespace) only when a ClusterQueue has a non-empty `namespaceSelector`. |
 
-The cluster-scope figure is the sum over **all** ClusterQueues. Six rules of
-the attribution that a first reading of the table would not give:
+The cluster-scope figure is the sum over **all** ClusterQueues. Six attribution
+rules the table does not show:
 
 - **A flavor without a product label is an untyped grant.** Kueue's quickstart
   `default-flavor`, or any single-GPU-type cluster. It is *not* named after the
@@ -220,11 +222,10 @@ the attribution that a first reading of the table would not give:
   reach 8 of *each*. The limiter has no per-namespace total; if the total is
   what must hold, give the flavors product labels so the grant is typed.
 
-The reads are
-unstructured and go through the API server directly (no informer, no watch),
-at most once per `refreshInterval`; the API version is whatever the cluster
-serves (the fields used are identical in `v1beta1` and `v1beta2`), and the
-project carries no Kueue module dependency.
+The reads are unstructured, straight to the API server (no informer, no watch),
+at most once per `refreshInterval`. The API version is whatever the cluster
+serves (the fields used are the same in `v1beta1` and `v1beta2`); the project
+has no Kueue module dependency.
 
 #### Merge rules
 
@@ -242,12 +243,11 @@ that:
 | Static `-1` (unlimited) | defers to Kueue's figure |
 
 A namespace is *governed by Kueue* when one of its LocalQueues reaches a
-ClusterQueue that **declares a GPU resource**. A LocalQueue pointing at a
-CPU-only queue, or at a queue that does not exist, says nothing about GPUs and
-leaves the namespace to the static entry — otherwise enabling the reader on a
-cluster that uses Kueue for CPU batch jobs would zero every inference namespace.
-A ClusterQueue that declares a GPU resource with `nominalQuota: 0` is a real
-grant of nothing and denies.
+ClusterQueue that **declares a GPU resource**. A LocalQueue on a CPU-only queue,
+or on a queue that does not exist, leaves the namespace to the static entry.
+Otherwise, enabling the reader on a cluster that uses Kueue for CPU batch jobs
+would zero every inference namespace. A ClusterQueue declaring a GPU resource
+with `nominalQuota: 0` is a real grant of nothing, and denies.
 
 Kueue never produces the reserved `default` key. Quotas Kueue holds for the
 Kubernetes namespace literally named `default` are skipped, for the same reason
@@ -264,9 +264,9 @@ allocator resolves through the same identity (`accelerator.FindKey`), so usage
 keyed by a raw product label, or by a lower-case GKE value, lands on the right
 pool whichever spelling the effective map carries.
 
-**The common Kueue install has no product labels on its flavors.** Then the
-whole of Kueue's grant is untyped and the pattern is: name the types in the
-static entry, let Kueue give the numbers:
+**The common Kueue install has no product labels on its flavors.** Then all of
+Kueue's grant is untyped. Name the types in the static entry and let Kueue give
+the numbers:
 
 ```yaml
 kueue: { enabled: true }
@@ -278,9 +278,8 @@ namespaceQuotas:
 
 `QuotaInventory.Refresh` reads the source and installs `static.BoundBy(snapshot)`
 as the effective entry. It **never returns an error**: both engines treat a
-failed `ComputeConstraints` as "no constraint" and fall back to their unlimited
-path, so surfacing a Kueue outage as an error would *lift* the cap the operator
-declared. Instead:
+failed `ComputeConstraints` as "no constraint", so an error from a Kueue outage
+would *lift* the declared cap. Instead:
 
 - with a previous snapshot, it stays in force and the error is logged with the
   snapshot's age (the reader hands back its last good read);
@@ -289,32 +288,40 @@ declared. Instead:
   read succeeds. A Forbidden or a missing CRD is reported as such, never folded
   into "Kueue grants nothing".
 
-Changes to the effective caps are logged once, at `Info`, with both the Kueue
-figures and the merged result, so "what is bounding this namespace?" is
-answerable from the controller log.
+A change to the effective caps is logged once, at `Info`, with the Kueue figures
+and the merged result, so the controller log answers "what is bounding this
+namespace?".
 
 #### RBAC
 
 The manager ClusterRole carries `get`/`list` on `clusterqueues`, `localqueues`
 and `resourceflavors` in `kueue.x-k8s.io`. A namespace-scoped install lists
-LocalQueues only in the namespace it manages (the controller's Role,
-`wva-manager-role`, grants that) and gets the two cluster-scoped kinds, and `get`
-on namespaces, from `components/kueue-reader`. Both are applied by the prereqs
-phase like `node-reader`, so an install that predates these rules needs a cluster
-admin to re-run `make setup-prereqs`; the tenant's `make deploy-wva` does not
-apply Roles. A rule naming an API group the cluster does not serve
-is inert, so the grant is harmless without Kueue.
+LocalQueues only in the namespace it manages (via `wva-manager-role`), and gets
+the two cluster-scoped kinds, plus `get` on namespaces, from
+`components/kueue-reader`. The prereqs phase applies both, like `node-reader`,
+so an install that predates these rules needs a cluster admin to re-run
+`make setup-prereqs`; the tenant's `make deploy-wva` does not apply Roles. A
+rule naming an API group the cluster does not serve is inert, so the grant is
+harmless without Kueue.
 
-`make enable-physical-limiter WVA_QUOTA_KUEUE=true` grants the same reader to
-each target controller. A namespace-scoped controller, tenant-owned or out of
-the tenant's reach, gets `get` on the namespace it manages, by name: the same
-grant `make setup-prereqs` renders for it, never fewer names than its role
-already holds. A cluster-scoped controller the installer made already reads
-every Namespace through its manager ClusterRole, so its Kueue read covers every
-Namespace too. Nothing needs naming in `WVA_LIMITER_TARGETS`. The command warns
-only when a controller that looks cluster-scoped really lacks that cluster-wide
-read, naming the `make setup-prereqs` run for that install, or when it cannot
-tell (it may not impersonate the controller).
+To publish a Kueue-backed quota and grant the same reader to each target
+controller (`WVA_LIMITER_TYPE` defaults to `gpu-inventory`, so name `quota`):
+
+```bash
+make enable-physical-limiter WVA_LIMITER_TYPE=quota WVA_QUOTAS='<type>=-1' WVA_QUOTA_KUEUE=true
+```
+
+`<type>` is the accelerator name the controller logs.
+
+- A namespace-scoped controller, tenant-owned or out of reach, gets `get` on
+  the namespace it manages, by name: the same grant `make setup-prereqs`
+  renders, never fewer names than its role already holds.
+- A cluster-scoped controller the installer made already reads every Namespace
+  through its manager ClusterRole. Nothing needs naming in
+  `WVA_LIMITER_TARGETS`.
+- The command warns only when a controller that looks cluster-scoped lacks that
+  read (naming the `make setup-prereqs` run for it), or when it cannot tell (it
+  may not impersonate the controller).
 
 ### Validation
 
@@ -331,21 +338,20 @@ tell (it may not impersonate the controller).
 - In a `kueue:` block, an empty resource name or a `refreshInterval` that is not
   a positive duration; a `kueue:` block on a `gpu-inventory` entry.
 
-It returns a non-fatal **warning** when a namespace appears in both `exclude`
-and `namespaceQuotas`. `exclude` wins; the warning surfaces a likely
-configuration mistake without rejecting the ConfigMap.
+A namespace in both `exclude` and `namespaceQuotas` gives a non-fatal
+**warning**: `exclude` wins, and the ConfigMap is still accepted.
 
 ### Reload lifecycle
 
-The quota configuration lives in the saturation-scaling ConfigMap and is applied
-**live**. The controller watches that ConfigMap, and the saturation engine rebuilds
-the GPU limiter at the top of the next optimization cycle whenever the effective
-limiter mode or quota entries change (`Engine.refreshLimiter`, keyed by
-`limiterSignature`). Editing the `limiters:` list therefore takes effect without a
-controller restart — no `kubectl rollout restart` required — wherever the
-controller watches that ConfigMap. A namespace-scoped controller watches only the
-namespace it manages, so a policy in `wva-policy`, a labelled policy namespace, or
-an out-of-reach install's own namespace is read at startup and needs a restart;
+The quota configuration lives in the saturation-scaling ConfigMap and applies
+**live**. The saturation engine rebuilds the GPU limiter at the start of the
+next cycle whenever the limiter mode or quota entries change
+(`Engine.refreshLimiter`, keyed by `limiterSignature`), with no restart, wherever
+the controller watches that ConfigMap.
+
+A namespace-scoped controller watches only the namespace it manages. A policy in
+`wva-policy`, a labelled policy namespace, or an out-of-reach install's own
+namespace is read at startup and needs a restart;
 `make enable-physical-limiter` and `make disable-physical-limiter` do it.
 
 ## Pipeline integration
@@ -378,23 +384,21 @@ the effective config — see [Kueue as a quota source](#kueue-as-a-quota-source)
 
 ### A quota is charged for the scaling manager's variants only
 
-`QuotaInventory` declares `UsageBasis() == allocation.ManagedUsage`, so the usage it
-is fed counts only what the scaling manager's own variants hold — summed from the saturation
-engine's population, not from the cluster-wide pod walk that feeds a physical
-inventory. Both figures are assembled per cycle and routed per provider; see
+`QuotaInventory` declares `UsageBasis() == allocation.ManagedUsage`: the usage it
+is fed counts only what the scaling manager's own variants hold, summed from the
+saturation engine's population, not the cluster-wide pod walk that feeds a
+physical inventory. See
 [GPU capacity accounting](../concepts/gpu-capacity-accounting.md) for the two bases.
 
-This is not a detail. A quota is an allowance granted to the scaling manager and may only be spent
-by the scaling manager. Charged the physical figure, a namespace with a 4-GPU the scaling manager quota sharing
-space with an unrelated 4-GPU training job reads as fully spent while the scaling manager has
-placed nothing, and every scale-up is refused with the allowance nominally
-untouched. The hardware being full is a separate statement, made by the physical
-limiter.
+This matters. A quota is an allowance for the scaling manager alone. Charged the
+physical figure, a namespace with a 4-GPU quota next to an unrelated 4-GPU
+training job would read as fully spent while the scaling manager had placed
+nothing, and every scale-up would be refused. Whether the hardware is full is the
+physical limiter's question.
 
-The corollary is that a quota does **not** bound the cluster: it can hand out
-capacity that unmanaged workloads have already taken. Deployments that need both
-guarantees compose a physical limiter and a quota limiter, and each is then fed
-the measure it is asking about.
+So a quota does **not** bound the cluster: it can hand out capacity unmanaged
+workloads already took. For both guarantees, compose a physical limiter and a
+quota limiter; each is fed the measure it asks about.
 
 ### `GetResourcePools` representation
 
@@ -524,14 +528,12 @@ intended model:
 - `QuotaInventory` knows what is **administratively allowed**.
 - The chain takes the minimum: a decision must fit under both.
 
-In the initial implementation the two are **mutually exclusive**, not composed:
-the `limiters:` list selects either physical inventory **or** quota (a `quota`
-entry wins over a `gpu-inventory` entry). There is no `min(physical, quota)` chain
-yet (tracked in sub-issue #1003), so quota mode does **not** enforce physical
-bounds at all — a deployment in quota mode will allocate beyond the cluster's
-actual capacity if the quota permits (the surplus simply yields `Pending` pods,
-not an isolation breach). Set quota caps at or below real capacity until
-composition with `TypeInventory` lands.
+Today the two are **mutually exclusive**, not composed: the `limiters:` list
+selects physical inventory **or** quota (a `quota` entry wins). With no
+`min(physical, quota)` chain yet (sub-issue #1003), quota mode enforces no
+physical bound: it allocates beyond real capacity if the quota permits, and the
+surplus is `Pending` pods (not an isolation breach). Set quota caps at or below
+real capacity until composition lands.
 
 ## Selection & lifecycle
 
@@ -541,7 +543,8 @@ sole source, honored only at that cluster-scope entry (like `enableRescale`):
 
 | `limiters:` on `default` | Behavior |
 |--------------------------|----------|
-| absent, or a `{type: gpu-inventory}` entry | `TypeInventory` discovers physical GPUs via the GPU operator and caps decisions at `min(physical, requested)`. This is the default. |
+| absent | No limiter: scaling is bounded only by each workload's `maxReplicaCount`. This is what ships. |
+| a `{type: gpu-inventory}` entry | `TypeInventory` discovers physical GPUs via the GPU operator and caps decisions at `min(physical, requested)`. |
 | a `{type: quota, ...}` entry | Operator-declared quotas from the inline entries. A `quota` entry wins over any `gpu-inventory` entry in the same list. The two are mutually exclusive in the initial implementation (composing with physical inventory as `min(physical, quota)` is tracked in [#1003](https://github.com/llm-d/llm-d-workload-variant-autoscaler/issues/1003)) — quota mode does **not** consult physical inventory. |
 
 The selection is exposed on `*config.Config` as `EffectiveLimiterMode()` and
@@ -569,16 +572,16 @@ the cycle's population (`computeCurrentGPUUsageByNamespace`). No additional
 discovery or API calls are needed.
 
 Every namespace being decided about must be **present** in that map, with an
-empty inner map when it holds nothing: `NamespaceResourcePools` materialises caps
-only for the namespaces it is given, so an absent one silently loses its quota and
-is judged against the cluster aggregate instead. Both callers guarantee this — the
-saturation engine for every namespace it is optimizing, the scale-from-zero engine
-for the namespace it is placing into.
+empty inner map when it holds nothing. `NamespaceResourcePools` builds caps only
+for the namespaces it is given, so an absent one silently loses its quota and is
+judged against the cluster aggregate. Both callers guarantee it: the saturation
+engine for every namespace it optimizes, the scale-from-zero engine for the
+namespace it places into.
 
 ### Example configuration
 
-Inventory mode is the default — no `limiters:` list is required. To select quota
-mode, add a `quota` entry to the saturation `default` entry's `limiters:` list:
+To select quota mode, add a `quota` entry to the saturation `default` entry's
+`limiters:` list:
 
 ```yaml
 # saturation-scaling ConfigMap, data."default":
@@ -634,9 +637,9 @@ publishes the physical view, which a quota never consults, so its timer runs onl
 when a physical limiter is declared (`Refresher.Periodic`, wired in
 `cmd/main.go`) — quota mode and no-limiter mode both fail that test.
 
-So a quota-only deployment takes no periodic observation and lists no nodes or
-pods for one. The gate is re-evaluated per tick rather than latched at startup,
-because limiter mode is live-reloadable.
+So a quota-only deployment runs no periodic observation and lists no nodes or
+pods for one. The gate is re-checked every tick, because the limiter mode
+reloads live.
 
 > **One caveat on "no Node API access".** The gate covers the *timer*, not
 > on-demand reads. The scale-from-zero engine calls `EnsureFresh` at the moment it
