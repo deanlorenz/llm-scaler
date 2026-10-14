@@ -23,7 +23,8 @@ every managed workload from scaling up. `WVA_QUOTA_SCOPE` selects `namespace`
 (the default: each managed namespace gets the budget) or `cluster` (the sum
 across all of them). It is the sole source that selects the quota
 limiter (see [Selection & lifecycle](#selection--lifecycle)) and is applied
-**live** — no restart. With no `limiters:` list, nothing limits: neither the
+**live** — no restart, except where a namespace-scoped controller reads it from
+outside the namespace it manages (see [Reload lifecycle](#reload-lifecycle)). With no `limiters:` list, nothing limits: neither the
 optimizer budget nor the scale-from-zero capacity check.
 
 > **Changed:** this used to require a second setting, `enableLimiter: true`, and a
@@ -180,7 +181,7 @@ map — denies every type (see *Merge rules*, row 3).
 | Kueue object | Scope | Used for |
 |---|---|---|
 | `ResourceFlavor` | cluster | `spec.nodeLabels` names the accelerator behind a flavor — the vendor product label (`nvidia.com/gpu.product`, `amd.com/gpu.product-name`, …, or the GKE alias), kept **as written**: a flavor exists to tell one product from another (a 40GB PCIe A100 from an 80GB SXM one), so the grant is keyed by the full product and meets a static key at bound time (see below). A flavor **without** a product label is an **untyped grant** — see the list below the table. |
-| `ClusterQueue` | cluster | `spec.resourceGroups[].flavors[].resources[].nominalQuota` for each GPU resource, per flavor, summed per product (typed flavors) or into the untyped grant (unlabelled flavors). Two grants of the **same** product add up; two products of one family (SXM and PCIe H100) stay apart until the static key says they are one. **`borrowingLimit`, `lendingLimit` and cohorts are not counted** — the bound wants the guaranteed figure. |
+| `ClusterQueue` | cluster | `spec.resourceGroups[].flavors[].resources[].nominalQuota` for each GPU resource, per flavor, summed per product (typed flavors) or into the untyped grant (unlabelled flavors). Two grants of the **same** product add up; two products of one family (SXM and PCIe H100) stay apart until the static key says they are one. **`borrowingLimit`, `lendingLimit` and cohorts are not counted** — the bound wants the guaranteed figure; counting borrowable cohort capacity is tracked in [#136](https://github.com/ev-shindin/llm-scaling-manager/issues/136). |
 | `LocalQueue` | namespaced | `spec.clusterQueue` links a namespace to a ClusterQueue. A namespace is granted the caps of every ClusterQueue one of its LocalQueues points at **and whose `spec.namespaceSelector` admits it**; two LocalQueues on one ClusterQueue count it once. |
 | `Namespace` | cluster | Labels, read (`get`, one per namespace) only when a ClusterQueue has a non-empty `namespaceSelector`. |
 
@@ -330,7 +331,11 @@ The quota configuration lives in the saturation-scaling ConfigMap and is applied
 the GPU limiter at the top of the next optimization cycle whenever the effective
 limiter mode or quota entries change (`Engine.refreshLimiter`, keyed by
 `limiterSignature`). Editing the `limiters:` list therefore takes effect without a
-controller restart — no `kubectl rollout restart` required.
+controller restart — no `kubectl rollout restart` required — wherever the
+controller watches that ConfigMap. A namespace-scoped controller watches only the
+namespace it manages, so a policy in `wva-policy`, a labelled policy namespace, or
+an out-of-reach install's own namespace is read at startup and needs a restart;
+`make enable-physical-limiter` and `make disable-physical-limiter` do it.
 
 ## Pipeline integration
 

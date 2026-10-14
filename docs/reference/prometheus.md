@@ -129,9 +129,15 @@ spec:
 
 Prometheus scrapes with its own ServiceAccount token, so that account needs the
 install's metrics-reader ClusterRole (`wva-metrics-reader-<hash>`, `get` on
-`/metrics`; the suffix is per install). The install binds it for
-kube-prometheus-stack's account; bind your own Prometheus account if it differs
-(cluster admin).
+`/metrics`; the suffix is per install). On Kubernetes the install binds it to
+`PROMETHEUS_SA` when set, else to the one non-default account of the Prometheus
+CRs in the namespace an explicitly set `PROMETHEUS_URL` addresses, else to the
+kube-prometheus-stack this install deploys (`DEPLOY_PROMETHEUS=true`, with the
+URL in `MONITORING_NAMESPACE`). A Prometheus the installer only detected is never
+granted. Otherwise it creates no binding and warns (`make check-prereqs` lists the
+binding as optional); pass
+`PROMETHEUS_SA=<namespace>/<serviceaccount>` to grant your Prometheus
+([configuration](configuration.md)).
 
 
 
@@ -1336,7 +1342,7 @@ T = troubleshooting runbook on [Troubleshooting](troubleshooting.md).
 
 | alert | severity | for | fires when | what to do | runbook |
 | --- | --- | --- | --- | --- | --- |
-| `WVANodeAccessDenied` | critical | 2m | a `gpu-inventory` limiter is configured and the controller may not list nodes. **No variant scales up.** | grant the controller's ServiceAccount get/list/watch on nodes (cluster admin: `make enable-physical-limiter` grants every controller that exists when it runs; re-run it after a new install), or remove the limiter | [T: controller not Ready](troubleshooting.md#the-controller-is-not-ready-or-crash-looping) |
+| `WVANodeAccessDenied` | critical | 2m | a `gpu-inventory` limiter is configured and the controller may not list nodes. **No variant scales up.** | grant the controller's ServiceAccount get/list/watch on nodes (cluster admin: `make enable-physical-limiter` grants every controller it finds and verifies when it runs; re-run it after a new install), or remove the limiter | [T: controller not Ready](troubleshooting.md#the-controller-is-not-ready-or-crash-looping) |
 | `WVAModelParkedWhileRequestsRefused` | critical | 5m | a model has 0 replicas and EPP returns `ServiceUnavailable` for it: traffic is being dropped | read `wva_model_scaling_blocked` for the model first | [T: will not wake](troubleshooting.md#a-model-will-not-wake-from-zero) |
 | `WVAModelHasNoWakeSignal` | warning | 10m | blocked reason `no-wake-signal`: EPP exports no flow-control queue, so a parked model cannot wake | enable the EPP `flowControl` feature gate, then restart the EPP Deployment (it reads its config once at start) | [T: will not wake](troubleshooting.md#a-model-will-not-wake-from-zero) |
 | `WVAHighErrorRate` | warning | 5m | `wva_errors_total` above 6/min for one `component`/`error_type` | grep the controller log for the `error_type` text | [Logs](monitoring.md#the-logs) |

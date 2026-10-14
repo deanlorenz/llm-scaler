@@ -103,7 +103,8 @@ not scale" from an invisible event into a declared policy somebody owns.
 The limiter is selected by the `limiters:` list on the scaling-policy
 ConfigMap's `default` entry — that list is the only thing the controller reads,
 and because it is dynamic configuration the engine rebuilds it without a
-restart. The installer writes that list for you: `WVA_LIMITER=quota` with
+restart (a namespace-scoped controller reading it from outside the namespace it
+manages reads it at startup; `make enable-physical-limiter` restarts those). The installer writes that list for you: `WVA_LIMITER=quota` with
 `WVA_QUOTAS='H200=8'` for one install's own policy, `WVA_LIMITER_TYPE` with the
 same `WVA_QUOTAS` for the cluster policy (read by the controllers listed in
 [the guide](../../guides/admin-gpu-bounding/#installation-instructions)). The quota form

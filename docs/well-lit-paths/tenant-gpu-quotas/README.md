@@ -34,7 +34,8 @@ cannot, so its budget is its own ConfigMap — the tenant's — and it reports
 `make setup-prereqs`.
 `WVA_LIMITER=quota` writes that ConfigMap; `WVA_LIMITER_TYPE=quota` with
 `make enable-physical-limiter` writes the policy namespace, and the own ConfigMap
-of every admin-owned controller. Where the budget must hold against the tenant,
+of every admin-owned controller it grants, and restarts each namespace-scoped
+controller that reads its policy outside the namespace it manages. Where the budget must hold against the tenant,
 run the controller
 [out of their reach](../../guides/admin-cluster-setup/README.md#keeping-the-controller-out-of-the-tenants-reach)
 and back it with a `ResourceQuota`.

@@ -42,20 +42,26 @@ verify:
   source:
     note: |
       Which policy each controller actually reads -- the truth, whatever the
-      enable command printed. "the well-known namespace" (or "the namespace
-      this one is labelled with") means a policy namespace governs it. The
-      own-ConfigMap branch logs only at V(1), so at the default verbosity NO
-      such line means the controller reads its own ConfigMap; "Could not read
-      the managed Namespace" means it never saw wva-policy. Logged once at
-      startup, so a long-running controller's line may have rotated out; a
-      restart prints it again.
+      enable command printed. The controller publishes it in the
+      wva-controller-status ConfigMap in its own namespace: the policy
+      namespace, the limiter in force, and whether the policy was accepted.
+      A controller that predates that ConfigMap, or lacks the Role to write it,
+      falls back to its startup log: "the well-known namespace" (or "the
+      namespace this one is labelled with") means a policy namespace governs
+      it. The own-ConfigMap branch logs only at V(1), so at the default
+      verbosity NO such line means the controller reads its own ConfigMap;
+      "Could not read the managed Namespace" or "Cannot tell whether" means it
+      never saw wva-policy. Logged once at startup, so a long-running
+      controller's line may have rotated out; a restart prints it again.
     run: |
       for ns in $(kubectl get deploy -A -l app.kubernetes.io/name=workload-variant-autoscaler,control-plane=controller-manager \
           -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{end}'); do
         echo "== $ns"
-        kubectl logs -n "$ns" deploy/wva-controller-manager \
-          | grep -E 'Cluster policy comes from|Could not read the managed Namespace' \
-          || echo "   (no line: reads its own ConfigMap in $ns)"
+        kubectl get cm wva-controller-status -n "$ns" \
+          -o jsonpath='{.data.policyNamespace} {.data.limiter} {.data.policyAccepted}{"\n"}' 2>/dev/null \
+          || kubectl logs -n "$ns" deploy/wva-controller-manager \
+          | grep -E 'Cluster policy comes from|Could not read the managed Namespace|Cannot tell whether' \
+          || echo "   (no status, no line: reads its own ConfigMap in $ns)"
       done
   budget:
     note: |
@@ -71,8 +77,12 @@ verify:
       -A12 rather than -A3: a quota entry is eight lines and -A3 cut off
       namespaceQuotas and every number, so the budget that was just
       published could not be read back from the verification step.
+      The policy namespace is the policyNamespace a controller publishes in
+      its wva-controller-status ConfigMap (above), else wva-policy.
     run: |
-      kubectl get configmap wva-scaling-policy-config -n wva-policy \
+      POLICY_NS=$(kubectl get cm wva-controller-status -n <wva-namespace> \
+        -o jsonpath='{.data.policyNamespace}' 2>/dev/null)
+      kubectl get configmap wva-scaling-policy-config -n "${POLICY_NS:-wva-policy}" \
         -o jsonpath='{.data.default}' | grep -A12 limiters
       kubectl logs -n <wva-namespace> deploy/wva-controller-manager | grep "GPU budgets available"
       kubectl logs -n <wva-namespace> deploy/wva-controller-manager \

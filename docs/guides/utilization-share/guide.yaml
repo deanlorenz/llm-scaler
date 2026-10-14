@@ -16,8 +16,11 @@ prerequisites:
     note: |
       The models' namespace. On a namespace-scoped install the controller is
       there too; otherwise also export CONTROLLER_NAMESPACE. The policy's
-      namespace is read from the controller's log (its own, or a policy
-      namespace such as wva-policy); POLICY_NAMESPACE overrides it.
+      namespace (its own, or a policy namespace such as wva-policy) is read
+      from the controller's wva-controller-status ConfigMap (policyNamespace),
+      else from its log, else worked out from the namespace's labels and
+      wva-policy. POLICY_NAMESPACE names it when none of those can; one that
+      disagrees with what the controller reports is refused.
     run: |
       export NAMESPACE=<namespace>
   check:

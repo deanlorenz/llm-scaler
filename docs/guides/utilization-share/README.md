@@ -47,8 +47,11 @@ Every command below reads one variable:
 ```bash
 # The models' namespace. On a namespace-scoped install the controller is
 # there too; otherwise also export CONTROLLER_NAMESPACE. The policy's
-# namespace is read from the controller's log (its own, or a policy
-# namespace such as wva-policy); POLICY_NAMESPACE overrides it.
+# namespace (its own, or a policy namespace such as wva-policy) is read
+# from the controller's wva-controller-status ConfigMap (policyNamespace),
+# else from its log, else worked out from the namespace's labels and
+# wva-policy. POLICY_NAMESPACE names it when none of those can; one that
+# disagrees with what the controller reports is refused.
 export NAMESPACE=<namespace>
 ```
 <!-- guide:prerequisites.vars end -->
@@ -200,8 +203,8 @@ on the cluster. Three things differ:
   `physicalGroups: true` the optimizer plans no group and moves nothing; the
   check warns about this.
 - **The policy is the cluster's.** `make enable-physical-limiter` publishes it
-  in `wva-policy`. The steps find that namespace in the controller's log and
-  write there, and refuse a `POLICY_NAMESPACE` the controller does not read.
+  in `wva-policy`. The steps find that namespace in the controller's
+  `wva-controller-status` ConfigMap (else its log) and write there, and refuse a `POLICY_NAMESPACE` the controller does not read.
   Only self-managed controllers read that policy — admin-owned controllers
   (cluster-scoped, out-of-reach) read their own ConfigMap by design — so the
   block turns the optimizer on for every self-managed controller, not just

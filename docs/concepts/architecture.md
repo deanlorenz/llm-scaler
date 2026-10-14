@@ -20,7 +20,9 @@ manager never changes a replica count itself.
   15 seconds it reads those metrics from Prometheus. For a model parked at zero
   replicas it also reads the EPP's queue directly, so a waiting request wakes
   the model at once. Its settings (thresholds, tiers, limiters) live in the
-  `wva-scaling-policy-config` ConfigMap and are re-read without a restart.
+  `wva-scaling-policy-config` ConfigMap and are re-read without a restart
+  (except by a namespace-scoped controller whose policy ConfigMap is outside
+  the namespace it manages: that one reads it at startup).
 - **The GPU budget is optional.** Without one, each model is sized on its own.
   With one, every decision has to fit: the GPUs physically free on the
   cluster, a quota you declare, or a quota read from Kueue.
@@ -120,7 +122,7 @@ optimization](modeling-and-optimization.md).
 | Deployment `wva-controller-manager` | the scaling manager |
 | Service `wva-external-scaler`, port 9090 | where KEDA asks for replica counts |
 | Service `wva-controller-manager-metrics-service`, port 8443 | its own `wva_*` metrics, for Prometheus |
-| ConfigMap `wva-scaling-policy-config` | thresholds, tiers, limiters; re-read live |
+| ConfigMap `wva-scaling-policy-config` | thresholds, tiers, limiters; re-read live (at startup only, for a namespace-scoped controller reading it outside the namespace it manages) |
 | ConfigMap `wva-manager-config` | Prometheus address and the cycle interval; changes need a restart |
 | Roles and ClusterRoles | read pods, workloads, ScaledObjects, InferencePools, nodes and (optionally) Kueue queues; patch pods |
 

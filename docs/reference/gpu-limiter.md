@@ -26,7 +26,9 @@ lets Kueue set the number
 to know first. Experimental).
 
 or later, by adding a `limiters:` entry to the `default` entry of the
-scaling-policy ConfigMap — applied live, no restart. **Read the next section
+scaling-policy ConfigMap — applied live, no restart, when that ConfigMap is in
+the namespace the controller manages (an out-of-reach `WVA_WATCH_NS` install
+reads its own ConfigMap only at startup, so restart it). **Read the next section
 first.**
 
 **Confirm the controller accepted it.** A malformed entry is rejected on read,
@@ -198,10 +200,14 @@ it. It starts on its own ConfigMap, as before the grant existed, but logs
 `wva_policy_namespace_unverified` to **1**. Fix it with
 `NAMESPACE=<ns> make setup-prereqs` or `make enable-physical-limiter`; both create
 the grant, and `enable-physical-limiter` also restarts the controllers it
-affects. Because the resolution runs only at startup, the first
-`enable-physical-limiter` after upgrading to a release with this grant restarts
-**every self-managed namespace-scoped controller**. It lists them as
-`WILL BE RESTARTED` before it changes anything.
+affects. A namespace-scoped controller caches only the namespace it manages
+(`cmd/main.go`) and reads any other ConfigMap at startup, so every
+`enable-physical-limiter` and `disable-physical-limiter` restarts **every
+namespace-scoped controller whose policy source is outside the namespace it
+manages**: a self-managed one reading `wva-policy` or its labelled namespace,
+and an out-of-reach one reading its own ConfigMap. It lists them as
+`WILL BE RESTARTED` before it changes anything, and exits non-zero naming any
+it could not restart.
 
 The label is read at startup too. Pointing `wva.llmd.ai/policy-namespace`
 somewhere else later needs a re-run of `make enable-physical-limiter`. That
@@ -225,8 +231,10 @@ because the situation has two arrival times:
 
 - **at install** — the rollout never completes, so the install fails loudly
   instead of reporting success;
-- **long after** — an admin adds the limiter to cluster policy, which the
-  controller reloads live. The pod goes NotReady, which is visible and alertable.
+- **long after** — an admin adds the limiter to cluster policy, which a
+  cluster-scoped controller reloads live and a namespace-scoped one reads at its
+  restart (`make enable-physical-limiter` restarts it). The pod goes NotReady,
+  which is visible and alertable.
 
 The alternative is the failure this guards against: every variant charged to no
 accelerator pool, given no GPU budget, and never scaling up again — indistinguishable
@@ -344,7 +352,8 @@ The consequence of a missing node permission therefore depends on the limiter:
 ### If the limiter is turned on later
 
 An admin can add a `limiters:` entry to the scaling-policy ConfigMap at any time,
-and it is applied live — including to a controller that was installed without node
+and it is applied live (at the next restart for a namespace-scoped controller
+whose policy is outside the namespace it manages) — including to a controller that was installed without node
 permission. That combination is the one failure with no natural symptom, so it is
 reported three ways:
 
