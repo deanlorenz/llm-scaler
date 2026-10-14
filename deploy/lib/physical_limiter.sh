@@ -293,9 +293,19 @@ pl_controller_targets() {
 # or nothing when it has none. On a failed read it echoes kubectl's error and
 # returns non-zero: a label that could not be read is not an absent one, because
 # it may point somewhere else entirely.
+#
+# The streams are kept apart (kc_capture): with 2>&1 a warning kubectl printed
+# on stderr while SUCCEEDING was read as the label, and the policy was then
+# written to -- and the controller granted -- a namespace named "Warning: ...".
 pl_policy_label() {
-    kubectl get namespace "$1" \
-        -o jsonpath='{.metadata.labels.wva\.llmd\.ai/policy-namespace}' 2>&1
+    local rc=0
+    kc_capture get namespace "$1" \
+        -o jsonpath='{.metadata.labels.wva\.llmd\.ai/policy-namespace}' || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        printf '%s\n' "${KC_ERR:-kubectl exited $rc}"
+        return "$rc"
+    fi
+    printf '%s' "$KC_OUT"
 }
 
 # pl_policy_resolution echoes `<namespace> <source>`: where the controller in
@@ -358,9 +368,10 @@ pl_policy_cm_ns() {
 pl_needs_restart() {
     local ns="$1" sel="${2:--}" target="$3" started created rc=0
     [ "$sel" != "-" ] && [ -n "$sel" ] || return 1
-    created="$(kubectl get namespace "$target" -o jsonpath='{.metadata.creationTimestamp}' 2>&1)" || rc=$?
+    kc_capture get namespace "$target" -o jsonpath='{.metadata.creationTimestamp}' || rc=$?
+    created="$KC_OUT"
     if [ "$rc" -ne 0 ]; then
-        case "$created" in
+        case "$KC_ERR" in
             *NotFound*|*"not found"*) created="" ;;
             *) return 1 ;;   # cannot tell: never restart on a guess
         esac
@@ -427,17 +438,42 @@ EOF
 # `get namespaces` is limited to it by resourceNames -- exactly what the
 # installer renders (wva_append_kueue_reader_scope_patch). Without that, this
 # command re-applied the same ClusterRole with an unrestricted Namespace get and
-# undid the installer's narrowing on every enable. A cluster-scoped controller
-# reads LocalQueues everywhere and keeps the unrestricted read; so does an
-# unknown one (`-`), which would otherwise be bounded at nothing.
+# undid the installer's narrowing on every enable.
+#
+# <managed> comes from the Deployment's args and env, which whoever owns the
+# namespace can edit, so it may NARROW the grant and never WIDEN it. The
+# unrestricted Namespace get goes only to a controller that looks cluster-scoped
+# (`*`) AND whose namespace the admin named in WVA_LIMITER_TARGETS; a
+# namespace-scoped one gets its managed namespace when that is its own or the
+# admin named it; every other row gets its own namespace and nothing more. A
+# tenant that drops --watch-namespace, or points it at another tenant, used to
+# be handed every Namespace -- or that tenant's -- by a cluster-admin command.
+# The ClusterQueue and ResourceFlavor reads stay as the installer renders them
+# (components/kueue-reader): every Kueue-reading controller needs them, and a
+# list cannot be limited by name.
 pl_grant_kueue_read() {
-    local ns="$1" sa="$2" managed="${3:--}" suffix names=""
+    local ns="$1" sa="$2" managed="${3:--}" suffix names="" scope_ns
     suffix="$(wva_ns_suffix "$ns")"
+    scope_ns="$ns"
     case "$managed" in
-        '*'|-|'') ;;
-        *) names="
-  resourceNames: [\"${managed}\"]" ;;
+        '*')
+            if pl_named_target "$ns"; then
+                scope_ns=""
+            else
+                log_warning "  $ns/$sa looks cluster-scoped, but $ns is not named in WVA_LIMITER_TARGETS: its Kueue Namespace read is limited to $ns. A genuine cluster-scoped controller needs every Namespace: name $ns in WVA_LIMITER_TARGETS and re-run."
+            fi
+            ;;
+        -|'') ;;
+        *)
+            if [ "$managed" = "$ns" ] || pl_named_target "$ns"; then
+                scope_ns="$managed"
+            else
+                log_warning "  $ns/$sa says it manages $managed, but $ns is not named in WVA_LIMITER_TARGETS: its Kueue Namespace read is limited to $ns. If it does manage $managed, name $ns in WVA_LIMITER_TARGETS and re-run."
+            fi
+            ;;
     esac
+    [ -z "$scope_ns" ] || names="
+  resourceNames: [\"${scope_ns}\"]"
     kubectl apply -f - >/dev/null <<EOF
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -572,7 +608,8 @@ EOF
 # cannot impersonate -- never folded into either answer.
 pl_can_read_namespace() {
     local ns="$1" sa="$2" target="$3" out rc=0
-    out="$(kubectl auth can-i get "namespaces/${target}" --as "system:serviceaccount:${ns}:${sa}" 2>&1)" || rc=$?
+    kc_capture auth can-i get "namespaces/${target}" --as "system:serviceaccount:${ns}:${sa}" || rc=$?
+    out="$KC_OUT"
     case "$out" in
         yes*) echo yes ;;
         no*)  if [ "$rc" -ne 0 ]; then echo no; else echo unknown; fi ;;
@@ -606,7 +643,8 @@ pl_grant_published_policy_read() {
     fi
     target="${out:-$(pl_policy_ns)}"
     rc=0
-    out="$(kubectl get namespace "$target" -o name 2>&1)" || rc=$?
+    kc_capture get namespace "$target" -o name || rc=$?
+    out="$KC_ERR"
     if [ "$rc" -ne 0 ]; then
         case "$out" in
             *NotFound*|*"not found"*)
@@ -651,17 +689,19 @@ pl_set_limiter() {
     # fell through to `limiters: []` and overwrote the policy. Ask the error
     # instead: kubectl says NotFound when the object is absent and something else
     # when it could not tell.
-    local probe probe_rc
-    probe="$(kubectl get configmap wva-scaling-policy-config -n "$policy_ns" -o jsonpath='{.data.default}' 2>&1)"
-    probe_rc=$?
+    #
+    # stdout and stderr apart (kc_capture): merged, a warning kubectl printed on
+    # a SUCCESSFUL read became part of the policy text, and was written back.
+    local probe_rc=0
+    kc_capture get configmap wva-scaling-policy-config -n "$policy_ns" -o jsonpath='{.data.default}' || probe_rc=$?
     if [ "$probe_rc" -eq 0 ]; then
         exists=1
-        current="$probe"
+        current="$KC_OUT"
     else
-        case "$probe" in
+        case "$KC_ERR" in
             *NotFound*|*"not found"*) : ;;   # genuinely absent: create it below
             *) log_error "could not read the policy ConfigMap in $policy_ns, and this is not a NotFound:
-    ${probe}
+    ${KC_ERR:-kubectl exited $probe_rc}
     Refusing to overwrite a policy this command cannot see." ;;
         esac
     fi
@@ -672,7 +712,12 @@ pl_set_limiter() {
         current="limiters: []"
     fi
     if [ "$limiter" = "none" ]; then
-        updated="$(printf '%s\n' "$current" | yq 'del(.limiters)')"
+        # Checked. Unchecked, a yq that failed -- absent, or one that could not
+        # parse the entry -- handed back an empty string, and the patch below
+        # wrote default: "" over the policy: every threshold gone, under
+        # "Removed the limiter".
+        updated="$(printf '%s\n' "$current" | yq 'del(.limiters)')" \
+            || log_error "could not remove the limiter from ${policy_ns}/wva-scaling-policy-config: yq del(.limiters) failed on its default entry. Nothing was written."
     else
         # Through limiter_entry_yaml, the same builder the installer uses.
         #
@@ -733,6 +778,12 @@ pl_set_limiter() {
     #
     # A merge patch names one key and leaves the rest alone, which is what the
     # installer's own path has always done.
+    #
+    # Never an empty entry: whatever produced it failed, and default: "" is a
+    # policy with every setting removed.
+    if [ -z "$(printf '%s' "$updated" | tr -d '[:space:]')" ]; then
+        log_error "refusing to write an empty default entry into ${policy_ns}/wva-scaling-policy-config (the new policy came out empty, so a step before this failed). Nothing was written."
+    fi
     if [ "$exists" -eq 1 ]; then
         # Checked. Unchecked with a bare `return 0` after it, a denied
         # configmaps/patch still reported "the limiter is now in force for every
@@ -800,16 +851,35 @@ pl_split_targets() {
 
 # pl_declared_limiters echoes how many limiters the policy ConfigMap in $1
 # declares: 0 when there is no ConfigMap. RETURNS non-zero when it cannot tell.
+#
+# Streams apart (kc_capture): a warning on stderr is not part of the policy, and
+# merged it made yq fail on a policy that parses -- "cannot tell" for a read
+# that succeeded. And only a number is an answer: a yq that printed nothing, or
+# something else, is "cannot tell" too, never 0.
 pl_declared_limiters() {
-    local out rc=0
-    out="$(kubectl get configmap wva-scaling-policy-config -n "$1" -o jsonpath='{.data.default}' 2>&1)" || rc=$?
+    local rc=0 n
+    kc_capture get configmap wva-scaling-policy-config -n "$1" -o jsonpath='{.data.default}' || rc=$?
     if [ "$rc" -ne 0 ]; then
-        case "$out" in
+        case "$KC_ERR" in
             *NotFound*|*"not found"*) echo 0; return 0 ;;
             *) return 1 ;;
         esac
     fi
-    printf '%s\n' "$out" | yq '(.limiters // []) | length' 2>/dev/null
+    n="$(printf '%s\n' "$KC_OUT" | yq '(.limiters // []) | length' 2>/dev/null)" || return 1
+    case "$n" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    echo "$n"
+}
+
+# pl_require_tools ends the command, naming the tool, when kubectl, jq or yq is
+# missing. Enable and disable both write the policy with jq and yq.
+pl_require_tools() {
+    local tool
+    for tool in kubectl jq yq; do
+        command -v "$tool" >/dev/null 2>&1 || \
+            log_error "$tool is required by this command and is not on PATH."
+    done
 }
 
 enable_physical_limiter() {
@@ -818,11 +888,7 @@ enable_physical_limiter() {
     # deploy/install.sh does -- and the write path now builds its patch with jq.
     # Absent, `-p ""` reaches kubectl, the patch is rejected, and with no `set -e`
     # on this path the command still announced the limiter in force.
-    local tool
-    for tool in kubectl jq yq; do
-        command -v "$tool" >/dev/null 2>&1 || \
-            log_error "$tool is required by this command and is not on PATH."
-    done
+    pl_require_tools
     pl_refuse_policy_ns_override
     local policy_ns; policy_ns="$(pl_policy_ns)"
     local namespaces ns sa granted=0
@@ -1039,6 +1105,9 @@ enable_physical_limiter() {
 }
 
 disable_physical_limiter() {
+    # The same tools enable asks for: this path rewrites the policy with yq and
+    # builds the patch with jq, and without them it wrote an empty entry.
+    pl_require_tools
     pl_refuse_policy_ns_override
     local policy_ns; policy_ns="$(pl_policy_ns)"
     local ns cm_ns res targets="" cleared=0 cleared_ns=" " to_restart=""
@@ -1074,19 +1143,31 @@ disable_physical_limiter() {
     # WVA installed tomorrow would read whatever was left there.
     case " $targets " in *" $policy_ns "*) : ;; *) targets="$targets $policy_ns" ;; esac
 
-    local probe probe_rc
+    local probe_rc declared
     for cm_ns in $targets; do
         # NotFound is "nothing to disable here"; anything else is a policy this
         # command could not see, and reporting it as absent is how an "off"
         # left a limiter in force.
         probe_rc=0
-        probe="$(kubectl get configmap wva-scaling-policy-config -n "$cm_ns" -o name 2>&1)" || probe_rc=$?
+        kc_capture get configmap wva-scaling-policy-config -n "$cm_ns" -o name || probe_rc=$?
         if [ "$probe_rc" -ne 0 ]; then
-            case "$probe" in
+            case "$KC_ERR" in
                 *NotFound*|*"not found"*) continue ;;
             esac
-            log_error "could not read ${cm_ns}/wva-scaling-policy-config, and this is not a NotFound: ${probe}
+            log_error "could not read ${cm_ns}/wva-scaling-policy-config, and this is not a NotFound: ${KC_ERR:-kubectl exited $probe_rc}
     Refusing to report a limiter removed from a policy this command cannot see."
+        fi
+        # Counted FIRST. A policy that declares no limiter has nothing to
+        # remove, and writing it anyway rewrote the entry, restarted every
+        # controller reading it, and announced "Removed the limiter" and
+        # "bounded by nothing" for a cluster that was never bounded.
+        if ! declared="$(pl_declared_limiters "$cm_ns")" || [ -z "$declared" ]; then
+            log_error "could not tell how many limiters ${cm_ns}/wva-scaling-policy-config declares (its default entry could not be read or parsed with yq). Nothing was written there.
+    Refusing to report a limiter removed from a policy this command cannot read."
+        fi
+        if [ "$declared" -eq 0 ]; then
+            log_info "No limiter declared in ${cm_ns}/wva-scaling-policy-config; nothing to remove."
+            continue
         fi
         pl_set_limiter "$cm_ns" none
         log_success "Removed the limiter from ${cm_ns}/wva-scaling-policy-config"

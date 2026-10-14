@@ -126,6 +126,10 @@ SCALE_DOWN_BOUNDARY         ?=
 E2E_MONITORING_NAMESPACE    ?= workload-variant-autoscaler-monitoring
 E2E_EMULATED_LLMD_NAMESPACE ?= llm-d-sim
 E2E_KEDA_NAMESPACE          ?= keda-system
+# The KEDA_NAMESPACE deploy-e2e-infra hands the install: on kind, where the
+# installer Helm-installs KEDA itself, the namespace it installs it into. A
+# KEDA_NAMESPACE already in the environment wins, since deploy_keda uses it too.
+E2E_KEDA_NAMESPACE_ENV = $(if $(filter kind-emulator,$(ENVIRONMENT)),KEDA_NAMESPACE=$${KEDA_NAMESPACE:-$(E2E_KEDA_NAMESPACE)},)
 E2E_WVA_SECONDARY_OVERLAY_PATH ?= $(CURDIR)/test/e2e/testdata/secondary-controller
 # llm-d-benchmark CLI configuration
 # Ensure brew-installed tools (helm >=3.19) take precedence over Rancher Desktop.
@@ -1007,6 +1011,14 @@ deploy-e2e-infra: ## Deploy e2e test infrastructure (WVA + EPP; no model server 
 	@# Measured: the controller came up in llm-d-sim while every ScaledObject named
 	@# wva-external-scaler.workload-variant-autoscaler-system, so no decision ever
 	@# reached KEDA and four specs sat at one replica for their full 600s.
+	@# KEDA_NAMESPACE is passed EXPLICITLY on kind (E2E_KEDA_NAMESPACE_ENV).
+	@# The install writes the external-scaler NetworkPolicy only when a source
+	@# it trusts says where KEDA runs, and on kind none does yet: KEDA is
+	@# Helm-installed into KEDA_NAMESPACE AFTER the controller, so no
+	@# external-metrics APIService exists when the policy is decided. Without
+	@# it, CI ran with :9090 open and never exercised the policy users get.
+	@# Other platforms bring their own KEDA, whose namespace this target does
+	@# not know, so they are left to the install's own resolution.
 	@echo "Deploying e2e test infrastructure..."
 	@if [ -n "$(IMG)" ]; then \
 		echo "IMG is set to '$(IMG)'"; \
@@ -1027,6 +1039,7 @@ deploy-e2e-infra: ## Deploy e2e test infrastructure (WVA + EPP; no model server 
 		SCALER_BACKEND=$(SCALER_BACKEND) \
 		ENABLE_SCALE_TO_ZERO=$(SCALE_TO_ZERO_ENABLED) \
 		DEPLOY_ALERTING_RULES=$(DEPLOY_ALERTING_RULES) \
+		$(E2E_KEDA_NAMESPACE_ENV) \
 		WVA_IMAGE_REPO=$$IMAGE_REPO \
 		WVA_IMAGE_TAG=$$IMAGE_TAG \
 		WVA_IMAGE_DIGEST=$$IMAGE_DIGEST \
@@ -1042,6 +1055,7 @@ deploy-e2e-infra: ## Deploy e2e test infrastructure (WVA + EPP; no model server 
 		SCALER_BACKEND=$(SCALER_BACKEND) \
 		ENABLE_SCALE_TO_ZERO=$(SCALE_TO_ZERO_ENABLED) \
 		DEPLOY_ALERTING_RULES=$(DEPLOY_ALERTING_RULES) \
+		$(E2E_KEDA_NAMESPACE_ENV) \
 		$(MAKE) deploy-wva \
 			ENVIRONMENT=$(ENVIRONMENT) \
 			WVA_NS=$(CONTROLLER_NAMESPACE) \

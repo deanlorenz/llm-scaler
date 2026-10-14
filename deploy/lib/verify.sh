@@ -214,7 +214,7 @@ verify_deployment() {
             log_warning "A ServiceMonitor was rejected by the prometheus-operator (InvalidConfiguration), and it does not re-evaluate on its own. The reason it gave:"
             printf '%s\n' "$sm_rejected" | sed 's/^/      /' >&2
             log_warning "  Until it is re-evaluated there is no scrape target and no wva_* series — on the dashboard the WVA panels stay empty while the vllm:* ones fill. Fix what the message names FIRST, then force one re-evaluation:"
-            log_warning "    kubectl -n $WVA_NS delete servicemonitor <name> && NAMESPACE=$WVA_NS make setup-prereqs"
+            log_warning "    kubectl -n $WVA_NS delete servicemonitor <name> && $(wva_make_cmd setup-prereqs)"
             log_warning "  Then confirm a target exists — a re-apply of unchanged content will NOT do it."
         elif [ -n "$sm_refs" ]; then
             log_success "WVA metrics ServiceMonitor references resolve (its scrape config is valid)"
@@ -361,7 +361,7 @@ wva_verify_scaler_networkpolicy() {
             if [ "${WVA_SCALER_NETWORKPOLICY:-true}" = "false" ]; then
                 log_warning "  WVA_SCALER_NETWORKPOLICY=false left it out on purpose."
             else
-                log_warning "  To close it, a cluster admin runs: KEDA_NAMESPACE=<namespace KEDA runs in> NAMESPACE=$WVA_NS make setup-prereqs"
+                log_warning "  To close it, a cluster admin runs: $(wva_make_cmd setup-prereqs 'KEDA_NAMESPACE=<namespace KEDA runs in>')"
             fi
             return 0
             ;;
@@ -369,7 +369,7 @@ wva_verify_scaler_networkpolicy() {
     rc=0
     keda="$(wva_keda_apiservice_ns)" || rc=$?
     if [ "$rc" != 0 ] || [ -z "$keda" ]; then
-        log_info "External scaler NetworkPolicy admits :9090 from $np_ns; where KEDA runs is not visible to you (no readable KEDA-served external-metrics APIService), so that is not confirmed. If KEDA runs elsewhere, re-run setup-prereqs with KEDA_NAMESPACE=<namespace>."
+        log_info "External scaler NetworkPolicy admits :9090 from $np_ns; where KEDA runs is not visible to you (no readable KEDA-served external-metrics APIService), so that is not confirmed. If KEDA runs elsewhere, a cluster admin runs: $(wva_make_cmd setup-prereqs 'KEDA_NAMESPACE=<namespace>')"
         return 0
     fi
     if [ "$keda" = "$np_ns" ]; then
@@ -381,7 +381,7 @@ wva_verify_scaler_networkpolicy() {
     log_warning "  but the external-metrics APIService is served by KEDA in: $keda"
     log_warning "  KEDA's calls are dropped: every ScaledObject naming this scaler goes"
     log_warning "  not-Ready and NOTHING SCALES, while the controller reports healthy."
-    log_warning "  Fix: re-run setup-prereqs with KEDA_NAMESPACE=<the namespace KEDA runs in>,"
+    log_warning "  Fix: $(wva_make_cmd setup-prereqs 'KEDA_NAMESPACE=<the namespace KEDA runs in>'),"
     log_warning "  or edit NetworkPolicy wva-external-scaler in $WVA_NS."
     log_warning "=================================================================="
     return 0

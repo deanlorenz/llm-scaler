@@ -217,6 +217,10 @@ EOF
 wva_resolve_scaler_keda_namespace() {
     WVA_SCALER_KEDA_NS=""
     WVA_SCALER_KEDA_UNREAD=""
+    # What is known about the policy ALREADY in WVA_NS, once it has been read:
+    # absent | unknown (could not be read) | unrecognised (present, but its :9090
+    # rule admits no single namespace). Empty when nobody looked.
+    WVA_SCALER_NP_STATE=""
     if [ "${KEDA_NAMESPACE_EXPLICIT:-false}" = "true" ]; then
         WVA_SCALER_KEDA_NS="$KEDA_NAMESPACE"
         log_info "External scaler NetworkPolicy admits KEDA from $WVA_SCALER_KEDA_NS (KEDA_NAMESPACE)"
@@ -251,7 +255,12 @@ wva_resolve_scaler_keda_namespace() {
             log_info "External scaler NetworkPolicy admits KEDA from $WVA_SCALER_KEDA_NS (kept from the policy already in $WVA_NS; set KEDA_NAMESPACE to change it)"
             return 0
             ;;
-        2) WVA_SCALER_KEDA_UNREAD="$WVA_SCALER_KEDA_UNREAD NetworkPolicy wva-external-scaler in $WVA_NS;" ;;
+        1) WVA_SCALER_NP_STATE=absent ;;
+        2)
+            WVA_SCALER_NP_STATE=unknown
+            WVA_SCALER_KEDA_UNREAD="$WVA_SCALER_KEDA_UNREAD NetworkPolicy wva-external-scaler in $WVA_NS;"
+            ;;
+        4) WVA_SCALER_NP_STATE=unrecognised ;;
     esac
     return 0
 }
@@ -260,7 +269,7 @@ wva_resolve_scaler_keda_namespace() {
 # no NetworkPolicy, and how to close it. $1 is why.
 wva_warn_scaler_port_open() {
     local why="$1" phase_cmd
-    phase_cmd="KEDA_NAMESPACE=<namespace KEDA runs in> NAMESPACE=$WVA_NS make setup-prereqs"
+    phase_cmd="$(wva_make_cmd setup-prereqs 'KEDA_NAMESPACE=<namespace KEDA runs in>')"
     log_warning "=================================================================="
     log_warning "NO NetworkPolicy for the external scaler: :9090 is reachable by ANY Pod"
     log_warning "  that can reach the controller. Any of them can rewrite another"
@@ -274,6 +283,23 @@ wva_warn_scaler_port_open() {
     log_warning "  or serve the scaler over mutual TLS (--external-scaler-cert-path and"
     log_warning "  --external-scaler-client-ca; see docs/reference/configuration.md)."
     log_warning "=================================================================="
+}
+
+# wva_warn_scaler_policy_unknown says the external-scaler NetworkPolicy in
+# WVA_NS was left as it is and that its state is not known here -- never that
+# there is none. $1 is why.
+#
+# Used when a policy may well exist: it could not be read, it is there in a
+# shape this install does not recognise, or this phase does not manage it.
+# "NO NetworkPolicy ... :9090 is reachable by ANY Pod" was printed in all three
+# cases, which told an admin with a correct policy that the port was open, and
+# pointed them at a fix for a problem that may not exist.
+wva_warn_scaler_policy_unknown() {
+    local why="$1"
+    log_warning "NetworkPolicy wva-external-scaler in $WVA_NS: left as it is, state UNKNOWN. $why"
+    log_warning "  If it is absent, the external scaler (:9090) is reachable by any Pod that can reach the controller."
+    log_warning "  Check:  kubectl get networkpolicy wva-external-scaler -n $WVA_NS -o yaml"
+    log_warning "  To (re)write it, a cluster admin runs:  $(wva_make_cmd setup-prereqs 'KEDA_NAMESPACE=<namespace KEDA runs in>')"
 }
 
 # wva_append_scaler_networkpolicy_patch points the external-scaler NetworkPolicy
@@ -294,15 +320,21 @@ wva_warn_scaler_port_open() {
 wva_append_scaler_networkpolicy_patch() {
     local kustomization="$1"
     WVA_SCALER_NP_APPLIED=false
+    WVA_SCALER_NP_STATE=""
     case "${WVA_SCALER_NETWORKPOLICY:-true}" in
         false)
-            log_warning "WVA_SCALER_NETWORKPOLICY=false: the external scaler (:9090) is reachable from every Pod that can reach the controller. Any of them can rewrite another workload's trigger metadata and read every scaling decision."
             # An apply never prunes, so an upgrade that opts out has to remove
             # the policy an earlier install left, or opting out does nothing.
-            # Only the phases that own the policy remove it.
+            # Only the phases that own the policy remove it -- and only they
+            # may say the port is open: the controller phase leaves the admin's
+            # policy alone, so there it is UNKNOWN whether :9090 is restricted.
             case "${WVA_APPLY_SCOPE:-all}" in
                 all|prereqs)
+                    log_warning "WVA_SCALER_NETWORKPOLICY=false: the external scaler (:9090) is reachable from every Pod that can reach the controller. Any of them can rewrite another workload's trigger metadata and read every scaling decision."
                     kubectl delete networkpolicy wva-external-scaler -n "$WVA_NS" --ignore-not-found >/dev/null 2>&1 || true ;;
+                *)
+                    wva_warn_scaler_policy_unknown "WVA_SCALER_NETWORKPOLICY=false does not reach it from this controller-only phase: the policy is the cluster admin's, and this phase neither writes nor removes it."
+                    log_warning "  To remove it, a cluster admin runs:  $(wva_make_cmd setup-prereqs WVA_SCALER_NETWORKPOLICY=false)" ;;
             esac
             wva_append_scaler_networkpolicy_delete "$kustomization"
             return 0
@@ -315,7 +347,16 @@ wva_append_scaler_networkpolicy_patch() {
     [ "${WVA_APPLY_SCOPE:-all}" != "controller" ] || return 0
     wva_resolve_scaler_keda_namespace
     if [ -z "$WVA_SCALER_KEDA_NS" ]; then
-        wva_warn_scaler_port_open "no source this install trusts says where KEDA runs (KEDA_NAMESPACE unset, no KEDA-served external-metrics APIService, no existing policy to keep), and a policy written from a guess refuses KEDA wherever the guess is wrong."
+        # Left out of the render either way, so an existing policy is not
+        # touched. Only an ABSENT one means the port is open.
+        case "$WVA_SCALER_NP_STATE" in
+            unknown)
+                wva_warn_scaler_policy_unknown "It could not be read with your permissions, and no other source this install trusts says where KEDA runs, so it is neither written nor removed.${WVA_SCALER_KEDA_UNREAD:+ Not readable:${WVA_SCALER_KEDA_UNREAD%;}.}" ;;
+            unrecognised)
+                wva_warn_scaler_policy_unknown "It exists, but its :9090 rule admits no single namespace, so this install cannot tell where it means KEDA to be; it is neither rewritten nor removed." ;;
+            *)
+                wva_warn_scaler_port_open "no source this install trusts says where KEDA runs (KEDA_NAMESPACE unset, no KEDA-served external-metrics APIService, no existing policy to keep), and a policy written from a guess refuses KEDA wherever the guess is wrong." ;;
+        esac
         wva_append_scaler_networkpolicy_delete "$kustomization"
         return 0
     fi
@@ -499,8 +540,10 @@ wva_prometheus_scraper_sa() {
 
 # wva_append_metrics_reader_subject_patch appends to kustomization $1 a patch
 # that points the metrics-reader binding at $3 ("<namespace> <serviceaccount>"),
-# or removes the binding when $3 is empty: no grant beats a grant to an account
-# nobody chose. $2 is the install namespace. Must come AFTER
+# or leaves the binding out of the render when $3 is empty: this install never
+# creates a grant to an account nobody chose. Left out, an existing binding is
+# not touched by the apply (wva_metrics_reader_binding keeps it, and says so).
+# $2 is the install namespace. Must come AFTER
 # wva_append_crb_name_patches, and targets the name that leaves the binding with
 # -- a target naming the shipped name matches nothing once it is renamed, and
 # kustomize says nothing about a patch that matched nothing.
@@ -555,6 +598,52 @@ wva_append_metrics_reader_decision() {
     wva_resolve_prometheus_url
     WVA_METRICS_READER_SCRAPER="$(wva_prometheus_scraper_sa)"
     wva_append_metrics_reader_subject_patch "$kustomization" "$ns" "$WVA_METRICS_READER_SCRAPER"
+}
+
+# wva_metrics_reader_binding is the install's half of the metrics-reader
+# decision, for kustomization $1 and install namespace $2: it writes or
+# repoints the binding when a trusted source names the Prometheus account, and
+# otherwise KEEPS whatever binding is already there and says so.
+#
+# Never a delete. "No trusted source answers" is what an upgrade sees whenever
+# its caller did not repeat PROMETHEUS_SA or PROMETHEUS_URL -- not evidence the
+# binding is wrong -- and deleting it on every such re-run stopped Prometheus
+# scraping the controller, silently: no error, just no wva_* series. Left out of
+# the render, the binding is not touched by the apply; the warning names it, who
+# it grants, and the two ways to change that.
+#
+# Only the phases that own the binding decide. The controller-only phase
+# (WVA_APPLY_SCOPE=controller) filters every ClusterRoleBinding out of what it
+# applies, so a decision and its messages there described something it does not
+# do -- the same reason wva_append_scaler_networkpolicy_patch returns early.
+wva_metrics_reader_binding() {
+    local kustomization="$1" ns="$2" scraper name rc=0 subjects
+    [ "${WVA_APPLY_SCOPE:-all}" != "controller" ] || return 0
+    wva_append_metrics_reader_decision "$kustomization" "$ns"
+    scraper="$WVA_METRICS_READER_SCRAPER"
+    if [ -n "$scraper" ]; then
+        log_info "Controller /metrics readable by ServiceAccount ${scraper#* } in ${scraper%% *}"
+        return 0
+    fi
+    name="wva-metrics-reader-rolebinding-$(wva_ns_suffix "$ns")"
+    kc_capture get clusterrolebinding "$name" \
+        -o jsonpath='{range .subjects[*]}{.namespace}{"/"}{.name}{" "}{end}' || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        subjects="$(printf '%s' "$KC_OUT" | sed 's/ *$//')"
+        log_warning "Kept ClusterRoleBinding $name as it is (grants the controller's /metrics to: ${subjects:-no subject}): nothing you set says which Prometheus account scrapes it, so this install neither repoints nor removes it."
+        log_warning "  Trusted sources: PROMETHEUS_SA, a PROMETHEUS_URL you passed (its namespace's Prometheus CR, one non-default serviceAccountName), or the kube-prometheus-stack this install deploys -- never a Prometheus found by detection (${PROMETHEUS_URL:-none})."
+        log_warning "  To repoint it:  $(wva_make_cmd setup-prereqs 'PROMETHEUS_SA=<namespace>/<serviceaccount>')"
+        log_warning "  To remove it:   kubectl delete clusterrolebinding $name"
+        return 0
+    fi
+    if ! kc_not_found "$KC_ERR"; then
+        log_warning "Could not read ClusterRoleBinding $name (${KC_ERR:-kubectl exited $rc}), so whether a Prometheus may read the controller's /metrics is unknown; this install leaves it as it is."
+        log_warning "  Check:          kubectl get clusterrolebinding $name -o yaml"
+        log_warning "  To grant one:   $(wva_make_cmd setup-prereqs 'PROMETHEUS_SA=<namespace>/<serviceaccount>')"
+        return 0
+    fi
+    log_warning "No Prometheus is granted the controller's /metrics: nothing you set says which account scrapes it. Only PROMETHEUS_SA, a PROMETHEUS_URL you passed (its namespace's Prometheus CR, one non-default serviceAccountName), or the kube-prometheus-stack this install deploys are trusted -- never a Prometheus found by detection (${PROMETHEUS_URL:-none})."
+    log_warning "  To grant it:  $(wva_make_cmd setup-prereqs 'PROMETHEUS_SA=<namespace>/<serviceaccount>'), or bind ClusterRole wva-metrics-reader-$(wva_ns_suffix "$ns") yourself."
 }
 
 # wva_append_kueue_reader_scope_patch narrows the namespace-scoped Kueue
@@ -748,21 +837,7 @@ EOF
     # Grant the Prometheus that will actually scrape the controller, not the one
     # the base names. See wva_append_metrics_reader_decision.
     if [ "${ENVIRONMENT:-}" != "openshift" ]; then
-        local scraper
-        wva_append_metrics_reader_decision "$tmp_overlay/kustomization.yaml" "$WVA_NS"
-        scraper="$WVA_METRICS_READER_SCRAPER"
-        if [ -n "$scraper" ]; then
-            log_info "Controller /metrics readable by ServiceAccount ${scraper#* } in ${scraper%% *}"
-        else
-            log_warning "No Prometheus is granted the controller's /metrics: nothing you set says which account scrapes it. Only PROMETHEUS_SA, a PROMETHEUS_URL you passed (its namespace's Prometheus CR, one non-default serviceAccountName), or the kube-prometheus-stack this install deploys are trusted -- never a Prometheus found by detection (${PROMETHEUS_URL:-none})."
-            log_warning "  Pass PROMETHEUS_SA=<namespace>/<serviceaccount> to grant it, or bind ClusterRole wva-metrics-reader-$(wva_ns_suffix "$WVA_NS") yourself."
-            # An earlier install may have left the binding with the shipped
-            # subject, or one this rule no longer trusts.
-            case "${WVA_APPLY_SCOPE:-all}" in
-                all|prereqs) kubectl delete clusterrolebinding "wva-metrics-reader-rolebinding-$(wva_ns_suffix "$WVA_NS")" \
-                    --ignore-not-found >/dev/null 2>&1 || true ;;
-            esac
-        fi
+        wva_metrics_reader_binding "$tmp_overlay/kustomization.yaml" "$WVA_NS"
     fi
 
     # Appended here, not in the heredoc above: wva_append_crb_name_patches writes

@@ -50,7 +50,7 @@ for fn in wva_append_crb_name_patches wva_append_metrics_reader_subject_patch \
     }
 done
 
-EXPECT_CASES=33
+EXPECT_CASES=35
 RAN=0
 FAILED=0
 
@@ -200,6 +200,29 @@ check '--check: neither is also reported missing' '0' \
     "$(printf '%s\n' "$mp" | grep -v '^OPTIONAL ' | grep -c 'wva-external-scaler\|wva-metrics-reader-rolebinding')"
 check '--check: a required object is still MISSING, not optional' '1' \
     "$(printf '%s\n' "$mp" | grep -cx "ClusterRoleBinding/wva-metrics-auth-rolebinding-$(wva_ns_suffix wns)")"
+
+# The kinds INSTALL_PHASE=wva is checked for are the kinds of what it APPLIES.
+# NetworkPolicy/wva-external-scaler is admin-owned by name, and dropping only
+# the admin KINDS left NetworkPolicy in the list: a tenant was asked for
+# `create networkpolicies`, for an object that phase never applies.
+controller_kinds() {
+    (
+        WVA_PROJECT="$ROOT" WVA_NS=wns ENVIRONMENT=kubernetes WVA_SCOPE=namespace WVA_WATCH_NS=''
+        PROMETHEUS_SA='' DEPLOY_PROMETHEUS=false
+        kubectl() {
+            case "$1" in
+                kustomize) command "${KBUILD[@]}" "$2" ;;
+                *) return 0 ;;
+            esac
+        }
+        wva_rendered_kinds controller
+    )
+}
+ck="$(controller_kinds | tr '\n' ' ')"
+check 'INSTALL_PHASE=wva kinds: no NetworkPolicy, nothing admin-owned' '0' \
+    "$(printf '%s\n' $ck | grep -cx 'NetworkPolicy\|ClusterRole\|ClusterRoleBinding\|Role\|RoleBinding\|ServiceMonitor\|ServiceAccount\|Secret\|Namespace')"
+check 'INSTALL_PHASE=wva kinds: still what it applies (Deployment, ConfigMap, Service)' '3' \
+    "$(printf '%s\n' $ck | grep -cx 'Deployment\|ConfigMap\|Service')"
 
 # ----------------------------------------------------------------------------
 # The namespace-scoped Kueue reader gets ONE Namespace: the managed one
