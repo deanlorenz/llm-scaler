@@ -14,19 +14,19 @@ manager never changes a replica count itself.
   EPP (endpoint picker, llm-d's router) chooses a replica for each request,
   and queues requests when every replica is busy. The model servers are vLLM
   or SGLang pods, run by a Deployment or a LeaderWorkerSet.
-- **Prometheus** scrapes the model servers: KV-cache use, running and waiting
-  requests, token counts, latency.
+- **Prometheus** scrapes the model servers (KV-cache use, running and waiting
+  requests, token counts, latency) and the EPP (its queue and arrival rate).
 - **The scaling manager** is one Deployment, `wva-controller-manager`. Every
-  15 seconds it reads those metrics, plus the EPP's queue, which it reads
-  directly. The queue is also how a model parked at zero replicas is woken.
-  Its settings (thresholds, tiers, limiters) live in the
+  15 seconds it reads those metrics from Prometheus. For a model parked at zero
+  replicas it also reads the EPP's queue directly, so a waiting request wakes
+  the model at once. Its settings (thresholds, tiers, limiters) live in the
   `wva-scaling-policy-config` ConfigMap and are re-read without a restart.
 - **The GPU budget is optional.** Without one, each model is sized on its own.
   With one, every decision has to fit: the GPUs physically free on the
   cluster, a quota you declare, or a quota read from Kueue.
 - **KEDA** asks the scaling manager for each variant's replica count over gRPC
-  (the `wva-external-scaler` Service, port 9090), and the HPA that KEDA
-  creates scales the workload to that number.
+  (the `wva-external-scaler` Service, port 9090). The HPA that KEDA creates
+  reads the count and scales the workload to it.
 
 ## The unit it scales: one ScaledObject per variant
 
@@ -60,24 +60,55 @@ registration; there is no other custom resource.
 
 ## One decision cycle
 
-![The five steps of one cycle: collect, analyze, optimize, bound, publish; and the scale-from-zero engine beside it](figures/decision-cycle.svg)
+![The five steps of one cycle: collect, analyze, decide inside the GPU budget, scale to zero, publish; how KEDA reads the result; and the scale-from-zero engine beside it](figures/decision-cycle.svg)
 
-1. **Collect.** Per variant: KV-cache use, running and waiting requests,
-   token rates, and the router's queue.
-2. **Analyze.** How full each replica is (*saturation*), and how much
-   capacity the model needs for its current load.
-3. **Optimize.** Split that capacity across the model's variants, filling the
-   cheapest (`variantCost`) first.
-4. **Bound.** With a limiter, fit every model into the free GPUs or the quota.
-   The [utilization-share optimizer](../well-lit-paths/utilization-share/)
-   (experimental) can share one quota between models, lending one model's
-   idle GPUs to another.
-5. **Publish.** One replica count per ScaledObject, pushed to KEDA, with an
-   Event on the ScaledObject when it changes.
+1. **Collect.** From Prometheus, per replica: KV-cache use, running and
+   waiting requests, token rates. Per model: the router's queue and arrival
+   rate.
+2. **Analyze.** The saturation analyzer works out how full each replica is
+   and how much capacity the model needs for its load. Throughput and custom
+   analyzers, when enabled, report metrics but do not change the decision.
+3. **Decide.** The optimizer splits that capacity across the model's
+   variants. With no limiter it fills the cheapest (`variantCost`) first. With
+   a limiter, the GPU budget for this cycle (free GPUs, a quota, or Kueue
+   quotas) is an input, and every model is fitted inside it by score. The
+   [utilization-share optimizer](../well-lit-paths/utilization-share/)
+   (experimental) then moves GPUs between the models of one quota.
+4. **Scale to zero.** If enabled, a model with no requests for its retention
+   period is set to zero.
+5. **Publish.** Each ScaledObject's replica count is kept in memory for KEDA,
+   with an Event on the ScaledObject when it changes, and metrics.
+
+**How KEDA gets the number.** The HPA that KEDA created reads it through
+`GetMetrics` on its own sync period; the metric's target is 1, so the replica
+count is the number returned. The push stream (`StreamIsActive`) carries only
+whether a variant is active, which is what takes it off zero.
+
+**Beside the cycle, the scale-from-zero engine** checks every 100 ms whether a
+model at zero has requests waiting in its EPP's queue, read directly from the
+EPP. If it has, and the GPU budget allows, it sets one replica, and the push
+stream wakes KEDA at once instead of on its next poll.
 
 How each step decides, in detail: [the steady-state
 engine](steady-state-engine.md) and [modeling and
 optimization](modeling-and-optimization.md).
+
+## Inside the scaling manager
+
+![The components inside the controller: what it reads (policy, the ScaledObjects KEDA asks about, Prometheus, GPU usage, Kueue, each pool's EPP), the steady-state engine's stages, the scale-from-zero engine, the warm pool, and what it writes (the decision store served to KEDA over gRPC, metrics, Events, pod annotations, the history ConfigMap)](figures/internal-architecture.svg)
+
+- **It learns its workloads from KEDA.** Each call KEDA makes for a
+  ScaledObject registers that ScaledObject; there is no list or watch of your
+  workloads. It does watch the scaling-policy ConfigMaps and the
+  InferencePools, to find each pool's EPP.
+- **One replica decides.** With more than one replica, leader election picks
+  one, and only it runs the engines. The external scaler runs on every
+  replica, but answers KEDA only once its replica is the leader.
+- **The decision lives in memory**, in the decision store, and is rebuilt
+  within one cycle after a restart. Until then KEDA is answered 0, which holds
+  each variant at its `minReplicaCount`.
+- **Package by package**, for contributors: [which component owns which
+  number](../developer-guide/signal-dataflow.md).
 
 ## What gets installed
 
