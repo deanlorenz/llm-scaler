@@ -103,6 +103,9 @@ args=" $* "
 ns=""; prev=""
 for a in "$@"; do [ "$prev" = "-n" ] && ns="$a"; prev="$a"; done
 case "$args" in
+  *" get configmap wva-controller-status "*)
+    [ -e "$S/status.json" ] || { echo 'Error from server (NotFound): configmaps "wva-controller-status" not found' >&2; exit 1; }
+    jq '{data: .}' "$S/status.json" ;;
   *" get configmap "*)
     [ -e "$S/cm.forbidden" ] && { echo 'Error from server (Forbidden): configmaps is forbidden' >&2; exit 1; }
     [ -e "$S/policy" ] || { echo 'Error from server (NotFound): configmaps "wva-scaling-policy-config" not found' >&2; exit 1; }
@@ -121,6 +124,22 @@ case "$args" in
     printf '%s' "$p" | jq -r '.data.default' > "$S/policy"
     echo $((rv + 1)) > "$S/rv"
     echo x >> "$S/patches"
+    # A status-publishing controller records what it applied, unless stalled.
+    if [ -e "$S/status.json" ] && [ ! -e "$S/status.stalled" ]; then
+      mode=off
+      if grep -q 'bogus' "$S/policy"; then mode=invalid
+      elif grep -q 'type: utilizationShare' "$S/policy"; then
+        if grep -q 'shadow: true' "$S/policy"; then mode=shadow; else mode=active; fi
+      fi
+      [ -e "$S/status.mode" ] && mode="$(cat "$S/status.mode")"
+      acc=true; [ -e "$S/status.reject" ] && acc=false
+      jq --arg rv "$((rv + 1))" --arg ns "$ns" --arg m "$mode" --arg a "$acc" \
+        '.policyResourceVersion=$rv | .policyNamespace=$ns | .utilizationShare=$m | .policyAccepted=$a
+         | .policyError=(if $a=="false" then "limiters: entry[0]: name must not be empty" else "" end)
+         | .utilizationShareError=(if $m=="invalid" then "unknown field bogus" else "" end)' \
+        "$S/status.json" > "$S/status.tmp" && mv "$S/status.tmp" "$S/status.json"
+    fi
+    case "$args" in *jsonpath*) printf '%s' "$((rv + 1))" ;; esac
     if [ ! -e "$S/noreload" ]; then
       if [ "$ns" = wva-policy ]; then
         echo 'INFO Loaded cluster policy from the policy namespace {"policyNamespace": "wva-policy"}' >> "$S/logs"
@@ -327,13 +346,40 @@ fresh "$QUOTA_POLICY"; run shadow --policy-namespace other-ns
 vcase "policy namespace: a flag naming one the controller does not read is refused" \
     eval '[ $RC -ne 0 ] && says "reads its own policy" && [ "$(patches)" = 0 ]'
 
+# A controller that publishes wva-controller-status: confirmed from it, no log.
+status_on() { printf '{"policyNamespace":"%s","policyResourceVersion":"1","utilizationShare":"off","policyAccepted":"true","limiter":"quota/install-quota"}' "${1:-team-a}" > "$STATE/status.json"; }
+fresh "$QUOTA_POLICY"; status_on; run shadow
+vcase "status: a shadow write is confirmed from the status, with no log at all" \
+    eval '[ $RC -eq 0 ] && says "applied version 2: utilization share is shadow"'
+
+fresh "$QUOTA_POLICY"; status_on; touch "$STATE/status.reject"; run shadow
+vcase "status: a rejected policy fails with the controller's reason" \
+    eval '[ $RC -ne 0 ] && says "rejected the policy: limiters"'
+
+fresh "$TUNED_POLICY
+    bogus: 1"; status_on; run activate
+vcase "status: an invalid optimizer block fails with its error" \
+    eval '[ $RC -ne 0 ] && says "optimizer block invalid: unknown field bogus"'
+
+fresh "$QUOTA_POLICY"; status_on; touch "$STATE/status.stalled"; run shadow
+vcase "status: a version never applied fails and names --restart" \
+    eval '[ $RC -ne 0 ] && says "has not applied version 2" && says "--restart"'
+
+fresh "$QUOTA_POLICY"; status_on wva-policy; run shadow --policy-namespace team-a
+vcase "status: the policy namespace it reports wins over a wrong flag" \
+    eval '[ $RC -ne 0 ] && says "reads its policy from wva-policy" && [ "$(patches)" = 0 ]'
+
+fresh "$QUOTA_POLICY"; status_on; echo active > "$STATE/status.mode"; run shadow
+vcase "status: a mode other than the one written fails" \
+    eval '[ $RC -ne 0 ] && says "mode '"'"'active'"'"', not '"'"'shadow'"'"'"'
+
 fresh "$TUNED_POLICY"; touch "$STATE/standby"; run activate
 vcase "logs: every controller pod is read, not one that may be a standby" eval '[ $RC -eq 0 ] && says "did not refuse it"'
 
 fresh "$QUOTA_POLICY"; echo '{"level":"info","msg":"x","accelerator":"NVIDIA-H200"}' > "$STATE/logs"; run check
 vcase "check: reads accelerators from a json-encoded log" eval '[ $RC -eq 0 ] && says "resolves: NVIDIA-H200"'
 
-CASES_EXPECTED=58
+CASES_EXPECTED=64
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. A case was added or removed; update CASES_EXPECTED deliberately."
 fi

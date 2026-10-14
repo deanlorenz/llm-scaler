@@ -26,14 +26,20 @@
 #   --restart                   restart the controller when it logs no reload of
 #                               the policy, then require the reload after start
 #
-# Environment: CYCLE_WAIT (default 45 s) is how long a write waits for a
-# refusal after the reload; keep it above the controller's cycle interval.
+# How a write is confirmed: a controller that publishes the ConfigMap
+# wva-controller-status (data contract: internal/controllerstatus) records the
+# policy resourceVersion it has applied, whether it accepted it, and the
+# optimizer mode in force; the script waits for the version it wrote and reads
+# the verdict there. An older controller without it is confirmed from its log
+# (CYCLE_WAIT, default 45 s, is then how long a write waits for a refusal; keep
+# it above the controller's cycle interval).
 set -euo pipefail
 
 KUBECTL_TIMEOUT="${KUBECTL_TIMEOUT:-30s}"
 CONTROLLER_DEPLOY="${CONTROLLER_DEPLOY:-wva-controller-manager}"
 CONTROLLER_CONTAINER="${CONTROLLER_CONTAINER:-manager}"
 POLICY_CM="wva-scaling-policy-config"
+STATUS_CM="wva-controller-status"
 MARK="llm-d.ai/utilization-share-transfer"
 # The controller watches the ConfigMap, so a reload takes seconds.
 RELOAD_WAIT="${RELOAD_WAIT:-90}"
@@ -180,11 +186,63 @@ limiter_kind() {
 # write_policy <policy> -- only over the version just read: a change made in
 # between (a limiter edit while `off` waited) fails the write instead of being
 # overwritten.
+WRITTEN_RV=""
 write_policy() {
     local out
     kread out patch configmap "$POLICY_CM" -n "$POLICY_NS" --type=merge \
         -p "$(jq -cn --arg d "$1" --arg rv "$POLICY_RV" '{metadata:{resourceVersion:$rv},data:{"default":$d}}')" \
+        -o jsonpath='{.metadata.resourceVersion}' \
         || die "could not write $POLICY_NS/$POLICY_CM (if it changed since it was read, rerun): $out"
+    WRITTEN_RV="$out"
+}
+
+# STATUS -- the controller's published status as JSON data, or empty when the
+# controller publishes none (an older version). Unreadable is not absent.
+STATUS=""
+read_status() {
+    local out
+    if kread out get configmap "$STATUS_CM" -n "$CONTROLLER_NS" -o json; then
+        STATUS="$(printf '%s' "$out" | jq -c '.data // {}')" || die "could not parse $CONTROLLER_NS/$STATUS_CM"
+        return 0
+    fi
+    case "$out" in
+        *NotFound*|*"not found"*) STATUS="" ;;
+        *) die "could not read $CONTROLLER_NS/$STATUS_CM: $out" ;;
+    esac
+}
+status_field() { printf '%s' "$STATUS" | jq -r --arg k "$1" '.[$k] // ""'; }
+
+# confirm_by_status <want mode> -- wait until the controller reports the version
+# just written, then require it accepted and running in <want>.
+confirm_by_status() {
+    local want="$1" deadline restarted=0 rv acc mode err
+    deadline=$(( $(date +%s) + RELOAD_WAIT ))
+    while :; do
+        read_status
+        rv="$(status_field policyResourceVersion)"
+        if [ "$rv" = "$WRITTEN_RV" ] && [ "$(status_field policyNamespace)" = "$POLICY_NS" ]; then
+            break
+        fi
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            if [ "$RESTART" -eq 1 ] && [ "$restarted" -eq 0 ]; then
+                info "the controller has not applied version $WRITTEN_RV; restarting it"
+                kread err rollout restart "deploy/$CONTROLLER_DEPLOY" -n "$CONTROLLER_NS" || die "could not restart the controller: $err"
+                kubectl rollout status "deploy/$CONTROLLER_DEPLOY" -n "$CONTROLLER_NS" --timeout=300s >/dev/null \
+                    || die "the controller did not come back within 300 s"
+                restarted=1
+                deadline=$(( $(date +%s) + RELOAD_WAIT ))
+                continue
+            fi
+            die "the controller has not applied version $WRITTEN_RV of $POLICY_NS/$POLICY_CM within ${RELOAD_WAIT}s (it reports version '${rv:-none}' from '$(status_field policyNamespace)'). The policy WAS written.$( [ "$restarted" -eq 1 ] || echo ' Rerun with --restart (RESTART=1) to restart the controller.')"
+        fi
+        sleep 2
+    done
+    acc="$(status_field policyAccepted)"
+    [ "$acc" != false ] || die "the controller rejected the policy: $(status_field policyError)"
+    mode="$(status_field utilizationShare)"
+    [ "$mode" != invalid ] || die "the controller found the optimizer block invalid: $(status_field utilizationShareError)"
+    [ "$mode" = "$want" ] || die "the controller applied the policy but runs the optimizer in mode '$mode', not '$want'"
+    ok "the controller applied version $WRITTEN_RV: utilization share is $mode"
 }
 
 # The controller's pods, by its Deployment's selector. With more than one
@@ -252,6 +310,16 @@ derived_policy_ns() {
 # else by the controller's rule.
 resolve_policy_ns() {
     local logged
+    read_status
+    logged="$(status_field policyNamespace)"
+    if [ -n "$logged" ]; then
+        if [ -n "$POLICY_NS" ] && [ "$POLICY_NS" != "$logged" ]; then
+            die "the controller reads its policy from $logged, not $POLICY_NS: a block written there would be ignored"
+        fi
+        POLICY_NS="$logged"
+        info "policy namespace: $POLICY_NS (from $CONTROLLER_NS/$STATUS_CM)"
+        return 0
+    fi
     read_logs
     logged="$(logged_policy_ns)"
     if [ -z "$logged" ]; then
@@ -333,7 +401,11 @@ set_mode() {
     write_policy "$updated"
     POLICY="$updated"
     info "wrote the optimizer block ($want) into $POLICY_NS/$POLICY_CM"
-    confirm_reload "$start"
+    if [ -n "$STATUS" ]; then
+        confirm_by_status "$want"
+    else
+        confirm_reload "$start"
+    fi
 }
 
 # MARKED -- pods carrying a transfer mark.
@@ -446,6 +518,11 @@ verb_status() {
     read_policy
     state="$(block_state)"
     info "policy: $POLICY_NS/$POLICY_CM; optimizer block: ${state% *}$( [ "${state#* }" = physical ] && echo ', physical groups' || true)"
+    if [ -n "$STATUS" ]; then
+        info "controller: mode $(status_field utilizationShare), limiter $(status_field limiter), policy version $(status_field policyResourceVersion) accepted=$(status_field policyAccepted), leader $(status_field leader)"
+        [ -z "$(status_field utilizationShareError)" ] || warn "optimizer block error: $(status_field utilizationShareError)"
+        [ "$(status_field policyAccepted)" != false ] || warn "policy rejected: $(status_field policyError)"
+    fi
     read_logs --since=30m
     decisions="$(printf '%s\n' "$LOGS" | grep -E 'Utilization share: (would rebalance|invalid optimizer block|transfer (started|ended|cancelled))' | tail -5 || true)"
     if [ -n "$decisions" ]; then
