@@ -1999,7 +1999,7 @@ ENGINENAMED
 #   one write to it reaches every node).
 #
 #   <node dir> is one path that must hold on every accelerator node
-#   (WEIGHTS_NODE_SELECTOR=<key=value> narrows which nodes; the model servers
+#   (WEIGHTS_NODE_SELECTOR=<key=value>[,<key=value>] narrows which nodes; the model servers
 #   must select the same ones). The caches land under <node dir>/engine-cache,
 #   and the directory must be:
 #     - absolute, at least two components (/mnt/local/weights/${ns}), no '..',

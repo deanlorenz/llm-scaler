@@ -137,12 +137,86 @@ print("  ok   %d DaemonSets rendered: names, placement (selector or product-key 
 PYEOF
 
 selbad=0
-for badsel in notakeyvalue 'a=b"' 'a=b,c=d' '=v' 'a b=c'; do
+for badsel in notakeyvalue 'a=b"' '=v' 'a b=c' 'a=b,' ',a=b' 'a=b,,c=d' 'a=b,a=c' 'a=b c' 'a=b, c=d' 'a=b,c' 'a!=b'; do
     if bash deploy/prepull.sh apply -n check-ns --image a:1 --node-selector "$badsel" --dry-run >/dev/null 2>&1; then
         fail "a --node-selector of '$badsel' must be refused"; selbad=1
     fi
 done
-[ "$selbad" -eq 0 ] && ok "a --node-selector that is not one KEY=VALUE of label characters is refused"
+[ "$selbad" -eq 0 ] && ok "a --node-selector that is not KEY=VALUE pairs of label characters, one comma apart, each key once, is refused"
+# several pairs, comma separated: a node must carry every one, so each is a
+# nodeSelector entry; the annotation records the selector as given
+SEL2=example.com/accelerator=h200,example.com/state=production
+if bash deploy/prepull.sh apply -n check-ns --image a:1 --node-selector "$SEL2" --dry-run > "$T/render-sel2.yaml" 2>&1; then
+    [ "$(yq -o json -I0 'select(.kind == "DaemonSet") | .spec.template.spec.nodeSelector' "$T/render-sel2.yaml")" = '{"example.com/accelerator":"h200","example.com/state":"production"}' ] \
+        && [ "$(yq -r 'select(.kind == "DaemonSet") | .metadata.annotations["wva.llmd.ai/prepull-node-selector"]' "$T/render-sel2.yaml")" = "$SEL2" ] \
+        && ok "two pairs: the nodeSelector carries both keys, the annotation the selector as given" || fail "two pairs rendered: $(yq -o json -I0 '[.metadata.annotations, .spec.template.spec.nodeSelector]' "$T/render-sel2.yaml")"
+else
+    fail "a two-pair --node-selector was refused: $(tail -1 "$T/render-sel2.yaml")"
+fi
+"$PY" -c 'import re, sys; sys.exit(0 if re.search(r"\n      nodeSelector:\n        \"example\.com/accelerator\": \"h200\"\n(?!        )", open(sys.argv[1]).read()) else 1)' "$T/render.yaml" \
+    && ok "one pair: the nodeSelector block is the one it always was, the key now quoted as the value is" || fail "one pair: the nodeSelector block changed"
+
+# A newline is not a pair separator: the pairs are read a line at a time, so
+# one inside a pair used to split it into two the nodeSelector rendered and
+# `kubectl get nodes -l` never saw. A carriage return and a tab go with it.
+selbad=0
+for badsel in $'a=b\nc=d' $'a=b\r' $'a=b\tc=d' $'a\n=b'; do
+    if bash deploy/prepull.sh apply -n check-ns --image a:1 --node-selector "$badsel" --dry-run >/dev/null 2>&1; then
+        fail "a --node-selector with a newline, CR or tab must be refused: $(printf '%q' "$badsel")"; selbad=1
+    fi
+done
+[ "$selbad" -eq 0 ] && ok "a --node-selector holding a newline, carriage return or tab is refused"
+# Kubernetes label syntax, not just label characters: a key is an optional
+# DNS-subdomain prefix (<= 253, lowercase) and '/', then a name (<= 63); a
+# value is empty or follows the name rule; names and values start and end
+# with a letter or digit.
+long64="$(printf 'k%.0s' $(seq 64))"
+long63="$(printf 'k%.0s' $(seq 63))"
+prefix254="$(printf 'p%.0s' $(seq 250)).com"
+selbad=0
+for badsel in 'a/b/c=v' '/x=v' 'x/=v' '-a=v' 'a-=v' '_a=v' 'a=-b' 'a=b-' 'a=.b' 'a=b=c' "${long64}=v" "k=${long64}" "ex.com/${long64}=v" "${prefix254}/k=v" 'Example.com/k=v' 'ex_ample.com/k=v' '-ex.com/k=v' 'ex.com-/k=v' 'a..b/k=v' 'a.-b/k=v' 'a-.b/k=v' '-a/k=v' 'a-/k=v' '.a/k=v' 'a./k=v'; do
+    if bash deploy/prepull.sh apply -n check-ns --image a:1 --node-selector "$badsel" --dry-run >/dev/null 2>&1; then
+        fail "a --node-selector outside label syntax must be refused: '$badsel'"; selbad=1
+    fi
+done
+[ "$selbad" -eq 0 ] && ok "a key or value outside Kubernetes label syntax is refused (two slashes, an empty or bad prefix, a name or value over 63, a bad first or last character, a prefix with an empty or dash-edged dot-separated part)"
+selgood=0
+for goodsel in 'a=b' 'a=' 'gpu.nvidia.com/model=' 'example.com/x_y.z=A-1_b.2' "${long63}=${long63}" "ex.com/${long63}=v" 'k8s.io/a=b,c=' 'A=b' 'a.b-c_d=0' 'a.b-c/k=v' '10.0.0.1/k=v' 'kubernetes.io/k=v' 'a--b.c/k=v'; do
+    if ! bash deploy/prepull.sh apply -n check-ns --image a:1 --node-selector "$goodsel" --dry-run > "$T/render-good.yaml" 2>&1; then
+        fail "a --node-selector in label syntax must be accepted: '$goodsel': $(tail -1 "$T/render-good.yaml")"; selgood=1
+    fi
+done
+[ "$selgood" -eq 0 ] && ok "keys and values in label syntax are accepted, an empty value included (63-character names and values, a prefixed key)"
+# an empty value is a value: it selects the nodes whose label is empty, and
+# the nodeSelector carries it as ""
+bash deploy/prepull.sh apply -n check-ns --image a:1 --node-selector 'gpu.nvidia.com/model=' --dry-run > "$T/render-empty.yaml"
+[ "$(yq -o json -I0 'select(.kind == "DaemonSet") | .spec.template.spec.nodeSelector' "$T/render-empty.yaml")" = '{"gpu.nvidia.com/model":""}' ] \
+    && ok "an empty value renders as an empty-string nodeSelector entry" || fail "empty value rendered: $(yq -o json -I0 'select(.kind == "DaemonSet") | .spec.template.spec.nodeSelector' "$T/render-empty.yaml")"
+# Keys are quoted as values are. Unquoted, a key such as on, yes or true is a
+# boolean to a YAML 1.1 reader (PyYAML here), and a nodeSelector key must be
+# a string; yq (YAML 1.2) must read the same map.
+bash deploy/prepull.sh apply -n check-ns --image a:1 --node-selector 'on=yes,true=1,no=off' --dry-run > "$T/render-boolkeys.yaml"
+"$PY" -c '
+import sys, yaml
+ds = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d and d["kind"] == "DaemonSet"]
+ns = [d["spec"]["template"]["spec"]["nodeSelector"] for d in ds]
+want = {"on": "yes", "true": "1", "no": "off"}
+sys.exit(0 if ns and all(n == want and all(isinstance(k, str) for k in n) for n in ns) else "YAML 1.1 read %s" % ns)
+' "$T/render-boolkeys.yaml" && ok "keys such as on, true and no stay strings under a YAML 1.1 reader" || fail "keys read as booleans by a YAML 1.1 reader"
+[ "$(yq -o json -I0 'select(.kind == "DaemonSet") | .spec.template.spec.nodeSelector' "$T/render-boolkeys.yaml" | sort -u)" = '{"on":"yes","true":"1","no":"off"}' ] \
+    && [ "$(yq -r 'select(.kind == "DaemonSet") | .spec.template.spec.nodeSelector | keys | map(type) | unique | join(",")' "$T/render-boolkeys.yaml" | sort -u)" = '!!str' ] \
+    && ok "and yq reads the same map, string keys" || fail "yq read: $(yq -o json -I0 'select(.kind == "DaemonSet") | .spec.template.spec.nodeSelector' "$T/render-boolkeys.yaml")"
+# A live nodeSelector whose key holds a comma cannot be read back as pairs.
+# What is printed instead names no key, so no comma in a key splits it, and
+# it is refused whole.
+sentinel="$(printf '%s' '{"a,b":"c","d":"e"}' | bash -c '. deploy/lib/accelerator_nodes.sh; accelerator_selector_from_json')"
+why="$(bash -c '. deploy/lib/accelerator_nodes.sh; accelerator_selector_ok "$1"' _ "$sentinel")" && fail "the unreadable-nodeSelector string was accepted: '$sentinel'" || {
+    case "$sentinel" in
+        *,*) fail "the unreadable-nodeSelector string holds a comma, so it is split: '$sentinel' -> $why" ;;
+        "unreadable nodeSelector"*) ok "a live nodeSelector with a comma in a key reads as one fixed string, refused whole: $why" ;;
+        *) fail "the unreadable-nodeSelector string: '$sentinel'" ;;
+    esac
+}
 if bash deploy/prepull.sh status -n check-ns --dry-run >/dev/null 2>&1; then fail "status must refuse --dry-run"; else ok "status: --dry-run is refused (an apply/delete option)"; fi
 if bash deploy/prepull.sh apply -n check-ns --image a:1 --toleration '' --dry-run >/dev/null 2>&1; then
     fail "an empty --toleration (which tolerates every taint) must be refused"
@@ -279,7 +353,7 @@ case "\$1 \$2" in
       if [ -n "\${STUB_SELECTOR:-}" ]; then want -l "\$STUB_SELECTOR"; else refuse -l; fi
       [ -n "\${STUB_NODES_FORBIDDEN:-}" ] && { echo 'Error from server (Forbidden): nodes is forbidden' >&2; exit 1; }
       [ -n "\${STUB_NODES_ERROR:-}" ] && { echo "\$STUB_NODES_ERROR" >&2; exit 1; }
-      cat "$T/nodes.json" ;;
+      if [ -n "\${STUB_NODES_FILE:-}" ]; then jq --arg s "\${STUB_SELECTOR:-}" '.items |= map(select((.metadata.labels // {}) as \$l | all(\$s | split(",")[]; index("=") as \$i | \$l[.[:\$i]] == .[\$i+1:])))' "\$STUB_NODES_FILE"; else cat "$T/nodes.json"; fi ;;
   "get pods")      want -n check-ns; want -l "$LBL"; cat "$T/pods.json" ;;
   "get daemonset")
       want -n check-ns
@@ -288,7 +362,7 @@ case "\$1 \$2" in
         *" -o json "*) cat "$T/ds.json" ;;
         *) want -o "jsonpath={.spec.template.spec.nodeSelector}"
            case "\$ARGV" in *" ${DS} "*|*" \${STUB_DS_NAME:-${DS}} "*) ;; *) echo "stub kubectl: get daemonset for a name that is not the DaemonSet:\$ARGV" >&2; exit 2 ;; esac
-           if [ -n "\${STUB_DS_SELECTOR:-}" ]; then jq -cn --arg k "\${STUB_DS_SELECTOR%%=*}" --arg v "\${STUB_DS_SELECTOR#*=}" '{(\$k): \$v}'; else printf '{}'; fi ;;
+           if [ -n "\${STUB_DS_SELECTOR:-}" ]; then printf '%s' "\$STUB_DS_SELECTOR" | jq -Rc 'split(",") | map(index("=") as \$i | {key: .[:\$i], value: .[\$i+1:]}) | from_entries'; else printf '{}'; fi ;;
       esac ;;
   "get events")    want -n check-ns; printf '%s' "\${STUB_EVENT:-}" ;;
   "apply -n")      want -n check-ns; cat >/dev/null; echo "daemonset.apps/x configured" ;;
@@ -402,6 +476,22 @@ cp "$T/nodes-all.json" "$T/nodes.json"
 : > "$T/calls"
 STUB_SELECTOR=example.com/accelerator=h200 PATH="$STUB_PATH" bash deploy/prepull.sh status -n check-ns --image "$IMG" --node-selector example.com/accelerator=h200 >/dev/null 2>&1 || true
 grep -q 'get nodes -l example.com/accelerator=h200' "$T/calls" && ok "status: --node-selector is what kubectl is asked with" || fail "status: selector not passed: $(grep 'get nodes' "$T/calls")"
+# a live nodeSelector of two keys reads back as both
+: > "$T/calls"
+STUB_DS_SELECTOR="$SEL2" STUB_SELECTOR="$SEL2" PATH="$STUB_PATH" bash deploy/prepull.sh status -n check-ns --image "$IMG" > "$T/sel2-live.out" 2>&1 || true
+grep -q "get nodes -l ${SEL2} " "$T/calls" && ok "status: every pair of the live nodeSelector reaches the node listing" || fail "status: two-key live selector read back as: $(grep 'get nodes' "$T/calls"); $(tail -1 "$T/sel2-live.out")"
+# a node matches only when it carries every pair
+cat > "$T/nodes-sel2.json" <<'EOF'
+{"items":[
+ {"metadata":{"name":"node-both",        "labels":{"example.com/accelerator":"h200","example.com/state":"production"}}},
+ {"metadata":{"name":"node-accel-only",  "labels":{"example.com/accelerator":"h200"}}},
+ {"metadata":{"name":"node-state-only",  "labels":{"example.com/state":"production"}}},
+ {"metadata":{"name":"node-other-state", "labels":{"example.com/accelerator":"h200","example.com/state":"broken"}}}
+]}
+EOF
+STUB_NODES_FILE="$T/nodes-sel2.json" STUB_SELECTOR="$SEL2" PATH="$STUB_PATH" bash deploy/prepull.sh status -n check-ns --image "$IMG" --node-selector "$SEL2" > "$T/sel2-status.out" 2>&1 || true
+grep -q '^  node-both ' "$T/sel2-status.out" && ! grep -Eq 'node-(accel-only|state-only|other-state)' "$T/sel2-status.out" \
+    && ok "status: a node carrying only one of the pairs is not counted" || fail "status two-pair node rows: $(grep -o 'node-[a-z-]*' "$T/sel2-status.out" | sort -u | tr '\n' ' ')"
 
 # delete: by name for --image, by both labels for --all; --dry-run makes no call
 : > "$T/calls"

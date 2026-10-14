@@ -125,6 +125,35 @@ default also holds a CUDA image on AMD, Intel or Gaudi nodes, where the
 engine can never run -- `prepull-status` names those nodes and warns, and
 there `PREPULL_NODE_SELECTOR=<key=value>` is required, not optional: set it
 to what the model servers select on.
+
+The selector takes one or more `key=value` pairs, comma-separated with no
+spaces, and a node must carry **every** pair -- the equality form of a
+Kubernetes `nodeSelector`, which is what each pair becomes on the holder
+(no set-based terms, no `!=`; a key may appear once). An explicit selector
+replaces the default (nodes carrying a known GPU product label); it does
+not add to it, so include the product label among the pairs to stay on GPU
+nodes. Keys and values follow Kubernetes label syntax (a key is an optional
+DNS-subdomain prefix and `/`, then a name of at most 63 characters; a value
+is at most 63; both start and end with a letter or digit). A value may be
+empty, and then selects the nodes whose label is empty, not every node that
+carries the key: `gpu.nvidia.com/model=` is CoreWeave's CPU nodes, not its
+GPU nodes. Two pairs are for a
+cluster where no single label picks out the right nodes. Say one GPU node
+is unusable and the only label that sets the healthy ones apart is also on
+the CPU-only nodes: the product label alone takes in the broken node, the
+other label alone takes in the CPU nodes, and both together take neither:
+
+```bash
+make prepull NAMESPACE=<ns> IMAGES=<image> \
+  PREPULL_NODE_SELECTOR=nvidia.com/gpu.product=NVIDIA-H200,example.com/node-state=production
+kubectl get nodes -l nvidia.com/gpu.product=NVIDIA-H200,example.com/node-state=production   # the nodes it lands on
+```
+
+The same form is taken by `WEIGHTS_NODE_SELECTOR`, by `--node-selector` on
+`deploy/prepull.sh`, `deploy/weights.sh` and `deploy/enginecache.sh`, and by
+the benchmark's node-local weights; the model servers must select the same
+nodes.
+
 `PREPULL_TOLERATIONS=<key>[,<key>]` adds taints beyond `nvidia.com/gpu`,
 which is always tolerated: a holder `Pending` on every node with no reason
 is a taint it does not tolerate. `prepull-status` lists the nodes each
@@ -202,7 +231,8 @@ make weights WEIGHTS_MODEL=Qwen/Qwen3-32B WEIGHTS_PATH=/mnt/local/models \
      WEIGHTS_IMAGE=docker.io/vllm/vllm-openai:v0.26.0 NAMESPACE=<ns>
 # on RHCOS (OpenShift) the directory is under /var, one per project: WEIGHTS_PATH=/var/mnt/weights/<ns>
 make weights-status NAMESPACE=<ns>          # per accelerator node: present / downloading, and why not
-make weights-delete NAMESPACE=<ns>          # drop the claim, volume and downloader; the files stay
+make weights-delete WEIGHTS_MODEL=<id> NAMESPACE=<ns>  # drop that model's claim, volume and downloader; the files stay
+                                            # (without WEIGHTS_MODEL: every model's in the namespace)
 ```
 
 One static `hostPath` PersistentVolume, one claim bound to it (and to no
@@ -244,7 +274,22 @@ What it costs, and what it needs:
   it). Ask the cluster admin to run `make weights` or to create the
   volume. The claim's `WEIGHTS_CAPACITY` (1Ti unless set) is a request a
   `requests.storage` quota charges -- a project with a storage quota
-  refuses the claim; set the capacity near the model's size there. And a
+  refuses the claim; set the capacity near the model's size there. The
+  claim is bound to a static volume, and Kubernetes resizes only
+  dynamically provisioned claims ("only dynamically provisioned pvc can
+  be resized"), so a re-run keeps an existing claim's size when
+  `WEIGHTS_CAPACITY` is not set, and refuses a `WEIGHTS_CAPACITY` that
+  differs from it before anything is applied. To change the size, scale
+  the model servers that mount the claim to 0 (pvc-protection leaves a
+  mounted claim Terminating), run
+  `make weights-delete WEIGHTS_MODEL=<id> NAMESPACE=<ns>` (the files on
+  the nodes stay; without `WEIGHTS_MODEL` it deletes every model's claim
+  in the namespace) and apply again; `--dry-run` reads nothing from the
+  cluster, so it shows the set or default size, not the kept one. The
+  same holds for `ENGINE_CACHE_CAPACITY` and the `engine-cache` claim,
+  freed with `make engine-cache-delete NAMESPACE=<ns>` (one claim per
+  namespace). A claim of the model's name on another storage class is not
+  the script's: apply refuses it and leaves it alone. And a
   cluster that reaches Hugging Face through a proxy does not inject its
   proxy into arbitrary pods: the downloader would need `HTTPS_PROXY`.
 - Pod Security `baseline` admits the downloader (it mounts the claim, not a
@@ -339,8 +384,8 @@ make engine-cache-delete NAMESPACE=<ns>     # drop the claim, volume and prepare
 
 **What the node directory must be.** `ENGINE_CACHE_PATH` is one path that
 has to hold on every node the preparer selects -- by default every node
-carrying a known GPU product label, or `WEIGHTS_NODE_SELECTOR=<key=value>`
-narrows it to the nodes your model servers select on (the model servers
+carrying a known GPU product label, or `WEIGHTS_NODE_SELECTOR=<key=value>[,<key=value>]`
+(every pair must match) replaces that default with the nodes your model servers select on (the model servers
 must then select the same ones: a replica on a node the preparer did not
 reach finds no cache there, and with the guard from the start-path table
 costs a compile rather than the replica). The directory must be:

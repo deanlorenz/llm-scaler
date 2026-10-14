@@ -289,6 +289,24 @@ refuse "a top-level directory on its own" apply -n ns --path /mnt --image "$IMG"
 refuse "an image with a space" apply -n ns --path /mnt/local/w --image "img one" --dry-run
 refuse "a capacity that is not a quantity" apply -n ns --path /mnt/local/w --image "$IMG" --capacity "1 Ti" --dry-run
 refuse "a selector with a quote" apply -n ns --path /mnt/local/w --image "$IMG" --node-selector 'a=b"' --dry-run
+refuse "a selector with a trailing comma" apply -n ns --path /mnt/local/w --image "$IMG" --node-selector 'a=b,' --dry-run
+refuse "a selector with an empty pair" apply -n ns --path /mnt/local/w --image "$IMG" --node-selector 'a=b,,c=d' --dry-run
+refuse "a selector naming a key twice" apply -n ns --path /mnt/local/w --image "$IMG" --node-selector 'a=b,a=c' --dry-run
+refuse "a selector value with a space" apply -n ns --path /mnt/local/w --image "$IMG" --node-selector 'a=b c' --dry-run
+refuse "a selector with a newline between pairs" apply -n ns --path /mnt/local/w --image "$IMG" --node-selector $'a=b\nc=d' --dry-run
+refuse "a selector key with two slashes" apply -n ns --path /mnt/local/w --image "$IMG" --node-selector 'a/b/c=d' --dry-run
+refuse "a selector value ending in a dash" apply -n ns --path /mnt/local/w --image "$IMG" --node-selector 'a=b-' --dry-run
+# several pairs, comma separated: a node must carry every one
+SEL2=example.com/accelerator=h200,example.com/state=production
+if bash deploy/enginecache.sh apply -n ns --path /mnt/local/w --image "$IMG" --node-selector "$SEL2" --dry-run > "$T/render-sel2.yaml" 2>&1; then
+    [ "$(yq -o json -I0 'select(.kind == "DaemonSet") | .spec.template.spec.nodeSelector' "$T/render-sel2.yaml")" = '{"example.com/accelerator":"h200","example.com/state":"production"}' ] \
+        && [ "$(yq -r 'select(.kind == "DaemonSet") | .metadata.annotations["wva.llmd.ai/engine-cache-node-selector"]' "$T/render-sel2.yaml")" = "$SEL2" ] \
+        && ok "two pairs: the nodeSelector carries both keys, the annotation the selector as given" || fail "two pairs rendered: $(yq -o json -I0 'select(.kind == "DaemonSet") | [.metadata.annotations, .spec.template.spec.nodeSelector]' "$T/render-sel2.yaml")"
+else
+    fail "a two-pair --node-selector was refused: $(tail -1 "$T/render-sel2.yaml")"
+fi
+"$PY" -c 'import re, sys; sys.exit(0 if re.search(r"\n      nodeSelector:\n        \"example\.com/accelerator\": \"h200\"\n(?!        )", open(sys.argv[1]).read()) else 1)' "$T/render.yaml" \
+    && ok "one pair: the nodeSelector block is the one it always was, the key now quoted as the value is" || fail "one pair: the nodeSelector block changed"
 refuse "--dry-run on status" status -n ns --dry-run
 refuse "an unknown command" prepare -n ns
 refuse "an unknown option" apply -n ns --path /mnt/local/w --image "$IMG" --bogus --dry-run
@@ -456,7 +474,7 @@ refuse() { case "\$ARGV" in *" \$1 "*) echo "stub kubectl: unexpected \$1 in:\$A
 case "\$1 \$2" in
   "get nodes")   if [ -n "\${STUB_SELECTOR:-}" ]; then want -l "\$STUB_SELECTOR"; else refuse -l; fi
                  [ -n "\${STUB_NODES_ERROR:-}" ] && { echo "\$STUB_NODES_ERROR" >&2; exit 1; }
-                 cat "$T/nodes.json" ;;
+                 if [ -n "\${STUB_NODES_FILE:-}" ]; then jq --arg s "\${STUB_SELECTOR:-}" '.items |= map(select((.metadata.labels // {}) as \$l | all(\$s | split(",")[]; index("=") as \$i | \$l[.[:\$i]] == .[\$i+1:])))' "\$STUB_NODES_FILE"; else cat "$T/nodes.json"; fi ;;
   "get pods")    want -n check-ns; want -l "$LBL"; cat "$T/pods.json" ;;
   "get daemonset")
       want -n check-ns
@@ -465,7 +483,7 @@ case "\$1 \$2" in
         *"engine-cache-path}"*) printf '%s' "\${STUB_DS_PATH-/mnt/local/weights/check-ns/engine-cache}" ;;
         *" -o json "*) cat "$T/ds.json" ;;
         *"jsonpath={.spec.template.spec.nodeSelector}"*)
-           if [ -n "\${STUB_DS_SELECTOR:-}" ]; then jq -cn --arg k "\${STUB_DS_SELECTOR%%=*}" --arg v "\${STUB_DS_SELECTOR#*=}" '{(\$k): \$v}'; else printf '{}'; fi ;;
+           if [ -n "\${STUB_DS_SELECTOR:-}" ]; then printf '%s' "\$STUB_DS_SELECTOR" | jq -Rc 'split(",") | map(index("=") as \$i | {key: .[:\$i], value: .[\$i+1:]}) | from_entries'; else printf '{}'; fi ;;
         *) echo "stub kubectl: unexpected daemonset read:\$ARGV" >&2; exit 2 ;;
       esac ;;
   "get pvc")
@@ -480,13 +498,17 @@ case "\$1 \$2" in
         *"jsonpath={.metadata.name}/{.spec.storageClassName}"*) [ -z "\${STUB_PVC_PHASE-Bound}" ] || printf 'engine-cache/%s' "\${STUB_PVC_CLASS-}" ;;
         *"jsonpath={.spec.volumeName}"*) [ -z "\${STUB_PVC_PHASE-Bound}" ] || printf '%s' "\${STUB_PVC_VOLUME-$PVNAME}" ;;
         *"jsonpath={.spec.storageClassName}"*) printf '%s' "\${STUB_PVC_CLASS-}" ;;
+        *"jsonpath={.spec.resources.requests.storage}"*)
+            case "\$ARGV" in *" --ignore-not-found "*) ;; *) echo "stub kubectl: the size read lacks --ignore-not-found:\$ARGV" >&2; exit 2 ;; esac
+            [ -z "\${STUB_PVC_READ_ERROR:-}" ] || { echo "\$STUB_PVC_READ_ERROR" >&2; exit 1; }
+            [ -z "\${STUB_PVC_PHASE-Bound}" ] || printf '%s' "\${STUB_PVC_SIZE-200Gi}" ;;
         *) echo "stub kubectl: unexpected pvc read:\$ARGV" >&2; exit 2 ;;
       esac ;;
   "get events")  want -n check-ns; printf '%s' "\${STUB_EVENT:-}" ;;
   "logs -n")     want -n check-ns; printf '%s\n' "\${STUB_LOG:-}" ;;
   "auth can-i")  case "\$ARGV" in *" create persistentvolumes -A -q "*) [ -z "\${STUB_NO_PV:-}" ] || exit 1; exit 0 ;; *) echo "stub kubectl: unexpected can-i:\$ARGV" >&2; exit 2 ;; esac ;;
   "api-resources --api-group=security.openshift.io") [ -n "\${STUB_OPENSHIFT:-}" ] && echo "securitycontextconstraints scc security.openshift.io/v1 false SecurityContextConstraints"; : ;;
-  "apply -f")    cat >/dev/null; echo applied ;;
+  "apply -f")    cat > "\${STUB_APPLIED:-/dev/null}"; echo applied ;;
   "delete daemonset"|"delete pvc"|"delete serviceaccount") want -n check-ns; echo deleted ;;
   "get pv")      refuse -n
                  case "\$ARGV" in
@@ -529,6 +551,20 @@ if STUB_DS_PATH="" PATH="$STUB_PATH" bash deploy/enginecache.sh status -n check-
 : > "$T/calls"
 STUB_DS_SELECTOR=example.com/accelerator=h200 STUB_SELECTOR=example.com/accelerator=h200 PATH="$STUB_PATH" bash deploy/enginecache.sh status -n check-ns >/dev/null 2>&1 || true
 grep -q 'get nodes -l example.com/accelerator=h200' "$T/calls" && ok "status: lists the nodes the DaemonSet was applied for (its live nodeSelector)" || fail "status: live selector not used: $(grep 'get nodes' "$T/calls")"
+: > "$T/calls"
+STUB_DS_SELECTOR="$SEL2" STUB_SELECTOR="$SEL2" PATH="$STUB_PATH" bash deploy/enginecache.sh status -n check-ns > "$T/sel2-live.out" 2>&1 || true
+grep -q "get nodes -l ${SEL2} " "$T/calls" && ok "status: every pair of the live nodeSelector reaches the node listing" || fail "status: two-key live selector read back as: $(grep 'get nodes' "$T/calls"); $(tail -1 "$T/sel2-live.out")"
+cat > "$T/nodes-sel2.json" <<'EOF'
+{"items":[
+ {"metadata":{"name":"node-both",        "labels":{"example.com/accelerator":"h200","example.com/state":"production"}}},
+ {"metadata":{"name":"node-accel-only",  "labels":{"example.com/accelerator":"h200"}}},
+ {"metadata":{"name":"node-state-only",  "labels":{"example.com/state":"production"}}},
+ {"metadata":{"name":"node-other-state", "labels":{"example.com/accelerator":"h200","example.com/state":"broken"}}}
+]}
+EOF
+STUB_NODES_FILE="$T/nodes-sel2.json" STUB_SELECTOR="$SEL2" PATH="$STUB_PATH" bash deploy/enginecache.sh status -n check-ns --node-selector "$SEL2" > "$T/sel2-status.out" 2>&1 || true
+grep -q '^  node-both ' "$T/sel2-status.out" && ! grep -Eq 'node-(accel-only|state-only|other-state)' "$T/sel2-status.out" \
+    && ok "status: a node carrying only one of the pairs is not counted" || fail "status two-pair node rows: $(grep -o 'node-[a-z-]*' "$T/sel2-status.out" | sort -u | tr '\n' ' ')"
 if STUB_DS_SELECTOR='a=b"c' PATH="$STUB_PATH" bash deploy/enginecache.sh status -n check-ns > "$T/edited.out" 2>&1; then fail "status must refuse a DaemonSet nodeSelector that is not label characters"; else
     grep -q 'this script did not write' "$T/edited.out" && ok "status: a DaemonSet nodeSelector this script did not write is refused before kubectl" || fail "status on an edited DaemonSet: $(tail -1 "$T/edited.out")"; fi
 if STUB_NODES_ERROR='Error from server (Forbidden): nodes is forbidden: User cannot list' PATH="$STUB_PATH" bash deploy/enginecache.sh status -n check-ns > "$T/forb.out" 2>&1; then fail "status must fail when nodes cannot be listed"; else
@@ -545,6 +581,28 @@ if STUB_PVC_CLASS=shared-vast PATH="$STUB_PATH" bash deploy/enginecache.sh apply
 STUB_PVC_CLASS=node-local-engine-cache PATH="$STUB_PATH" bash deploy/enginecache.sh apply -n check-ns --path /mnt/local/weights/check-ns --image "$IMG" > "$T/apply.out" 2>&1 || true
 grep -q '^apply -f' "$T/calls" && grep -q 'preparing /mnt/local/weights/check-ns/engine-cache on' "$T/apply.out" && grep -q '^  node-ready ' "$T/apply.out" && ok "apply: applies, says what it prepared where, and reports per node" || fail "apply: $(head -3 "$T/apply.out" | tr '\n' ';')"
 grep -q 'OpenShift:' "$T/apply.out" && fail "apply: the OpenShift notice printed on a cluster without SCCs" || ok "apply: no OpenShift notice on a cluster without SecurityContextConstraints"
+# A re-apply keeps an existing claim's size: the claim is bound to a static
+# volume, and only a dynamically provisioned claim can be resized.
+claim_size() { yq -r 'select(.kind == "PersistentVolumeClaim") | .spec.resources.requests.storage' "$1" 2>/dev/null; }
+EAPPLY=(apply -n check-ns --path /mnt/local/weights/check-ns --image "$IMG")
+: > "$T/applied.yaml"
+STUB_PVC_SIZE=150Gi STUB_PVC_CLASS=node-local-engine-cache STUB_APPLIED="$T/applied.yaml" PATH="$STUB_PATH" bash deploy/enginecache.sh "${EAPPLY[@]}" > "$T/keep.out" 2>&1 || true
+[ "$(claim_size "$T/applied.yaml")" = 150Gi ] && [ "$(yq -r 'select(.kind == "PersistentVolume") | .spec.capacity.storage' "$T/applied.yaml")" = 150Gi ] && grep -q 'exists at 150Gi; keeping that size' "$T/keep.out" \
+    && ok "re-apply: an existing 150Gi claim and no --capacity renders 150Gi on the claim and the volume" || fail "re-apply keep: '$(claim_size "$T/applied.yaml")'; $(head -2 "$T/keep.out" | tr '\n' ';')"
+: > "$T/applied.yaml"
+STUB_PVC_SIZE=150Gi STUB_PVC_CLASS=node-local-engine-cache STUB_APPLIED="$T/applied.yaml" PATH="$STUB_PATH" bash deploy/enginecache.sh "${EAPPLY[@]}" --capacity 150Gi > "$T/equal.out" 2>&1 || true
+[ "$(claim_size "$T/applied.yaml")" = 150Gi ] && ok "re-apply: --capacity equal to the existing claim applies" || fail "re-apply equal: '$(claim_size "$T/applied.yaml")'; $(head -2 "$T/equal.out" | tr '\n' ';')"
+: > "$T/calls"
+if STUB_PVC_SIZE=150Gi STUB_PVC_CLASS=node-local-engine-cache PATH="$STUB_PATH" bash deploy/enginecache.sh "${EAPPLY[@]}" --capacity 300Gi > "$T/resize.out" 2>&1; then fail "re-apply must refuse a --capacity that differs from the existing claim"; else
+    grep -q -- '--capacity 300Gi differs from the existing claim engine-cache in check-ns, which is 150Gi: a claim bound to a static (node-local) volume cannot be resized' "$T/resize.out" && grep -q 'enginecache.sh delete -n check-ns first' "$T/resize.out" && ! grep -q '^apply -f' "$T/calls" \
+        && ok "re-apply: a different --capacity is refused before anything lands, saying why and what frees the claim" || fail "re-apply resize: $(tail -1 "$T/resize.out"); calls: $(grep '^apply' "$T/calls")"; fi
+: > "$T/applied.yaml"
+STUB_DS_PATH="" STUB_PVC_PHASE="" STUB_APPLIED="$T/applied.yaml" PATH="$STUB_PATH" bash deploy/enginecache.sh "${EAPPLY[@]}" > "$T/fresh.out" 2>&1 || true
+[ "$(claim_size "$T/applied.yaml")" = 200Gi ] && ok "apply: no claim yet renders the default 200Gi" || fail "apply fresh: '$(claim_size "$T/applied.yaml")'; $(head -2 "$T/fresh.out" | tr '\n' ';')"
+: > "$T/calls"
+if STUB_PVC_READ_ERROR='Error from server (Forbidden): persistentvolumeclaims is forbidden: stub' STUB_PVC_CLASS=node-local-engine-cache PATH="$STUB_PATH" bash deploy/enginecache.sh "${EAPPLY[@]}" > "$T/pvcforb.out" 2>&1; then fail "apply must fail when the claim size cannot be read"; else
+    grep -q 'cannot read the claim engine-cache in check-ns (kubectl: Error from server (Forbidden)' "$T/pvcforb.out" && ! grep -q '^apply -f' "$T/calls" \
+        && ok "apply: a claim whose size cannot be read (Forbidden) is an error, not an absent claim; nothing applied" || fail "apply pvc Forbidden: $(tail -1 "$T/pvcforb.out"); calls: $(grep '^apply' "$T/calls")"; fi
 # a re-apply with another directory is refused: the claim's volume cannot
 # change -- read off the volume the claim is bound to, so a DaemonSet deleted
 # by hand does not make the claim look free
