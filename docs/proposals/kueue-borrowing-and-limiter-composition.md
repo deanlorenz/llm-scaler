@@ -1,24 +1,39 @@
 # Kueue borrowing, and limiters that compose
 
-**Status:** proposed, revision 2. Nothing here is built. Revision 2 folds in
-a five-person review (see [Review record](#review-record)). Fixes
-[#136](https://github.com/ev-shindin/llm-scaling-manager/issues/136), and
-the in-repo part of upstream
+**Status:** proposed, revision 3. Nothing here is built. Revision 3 folds in
+two review rounds by five reviewers (see [Review record](#review-record)).
+Fixes [#136](https://github.com/ev-shindin/llm-scaling-manager/issues/136),
+and the in-repo part of upstream
 [llm-d WVA #1003](https://github.com/llm-d/llm-d-workload-variant-autoscaler/issues/1003)
 (bounding by `min(physical, quota)`).
 
 ## What changes for you
 
-1. **A policy that declares both `gpu-inventory` and `quota` will be bounded by
+1. **A policy that declares both `gpu-inventory` and `quota` is bounded by
    both.** Today the quota wins and the physical limiter is silently dropped.
-2. **Policies whose limiter entries list different GPU types will stop allowing
-   a type that one entry denies.** Today they allow it. This is a bug fix.
-3. **A Kueue-bounded quota will count capacity it can borrow from its cohort.**
-   This is **on by default** from the release that also ships the live-Kueue
-   end-to-end test. Set `countBorrowable: false` on the entry, or
-   `WVA_QUOTA_KUEUE_BORROW=false` at install, to keep today's behaviour.
-   Borrowing applies only where it is safe; see
-   [When borrowing is counted](#b1-when-borrowing-is-counted).
+2. **Limiter entries that list different GPU types stop allowing a type that
+   one entry denies.** Today they allow it. This is a bug fix.
+3. **P/D pairs stop ordering both roles past a budget.** Today a budget of 8
+   with two 8-GPU roles orders 16 GPUs. This is a bug fix.
+4. **A Kueue-bounded quota counts capacity it can borrow from its cohort.**
+   This is **on by default**, from the release that also ships the live-Kueue
+   end-to-end test. It applies only where it is safe
+   ([B1](#b1-when-borrowing-is-counted)). Set `countBorrowable: false` on the
+   entry, or `WVA_QUOTA_KUEUE_BORROW=false` at install, to get exactly
+   today's cap.
+5. **The scaling manager can now scale borrowed replicas down by itself.** It
+   does this only when a lender that cannot take its GPUs back is waiting for
+   them, or when a borrowed replica cannot be placed. Elsewhere a tighter bound
+   still only stops growth.
+6. **New RBAC:**
+   - `get`/`list` on `cohorts.kueue.x-k8s.io`;
+   - `get`/`list` on `resourcequotas` in the managed namespaces.
+
+   A namespace-scoped install needs an admin to re-run `make setup-prereqs`.
+7. **Installer changes:**
+   - `WVA_LIMITER` accepts a list.
+   - With `WVA_QUOTA_KUEUE=true` on a cluster-scoped install, a
+     `gpu-inventory` entry is added unless `WVA_LIMITER_PHYSICAL=false`.
 
 ## The problem
 
@@ -27,15 +42,14 @@ Today the Kueue quota source caps a namespace at its ClusterQueue's
 admit more replicas, but the scaling manager never asks for them (#136).
 
 Counting borrowed capacity raises a quota above the guaranteed figure. That is
-safe only if something still bounds the decision by real GPUs. Nothing does
-today, because limiters do not compose. So this proposal fixes composition
-first (Part A), then adds borrowing (Part B).
+safe only if something still checks that the GPUs exist and that a replica fits
+on a node. Nothing does today, because limiters do not compose. So this
+proposal fixes composition first (Part A), then adds borrowing (Part B).
 
 ## Can all limiters work together today?
 
 No. Rows marked *measured* were run as throwaway tests against `main`
-(39b9d0c8), calling `FitsGPUBudget`, `mergeConstraints` and `bindingProvider`.
-The rest were read from the code.
+(39b9d0c8). The rest were read from the code.
 
 | Combination | Works? | What happens | Evidence |
 |---|---|---|---|
@@ -61,44 +75,30 @@ that type. So a type one provider omits passes if any other provider lists it:
 | that + a second namespace entry `x: {A100: 4}` | A100 = 2 in `x` | **yes** |
 | cluster quota `{H100: 8}` + namespace entry `x: {A100: 4}` | A100 = 2 in `x` | **yes** |
 
-The last row is a config that installs today.
-
-Limit attribution, the code that names which limiter capped a decision,
-disagrees with this. For namespace caps it treats an unlisted type as a deny,
-but it skips an unlisted cluster-scope type. Measured: in row 2 it names the
-second provider, not the quota.
+The last row is a config that installs today. Limit attribution (which limiter
+gets named as the one that capped a decision) disagrees with the merge: in row
+2 it names the second provider, not the quota (measured).
 
 **P/D pairs overspend a shared budget (read).** Prefill and decode are each
 picked against the same budget, and the budget is reduced only after both are
-committed. Every picked role commits at least one replica. A budget of 8 with
-two 8-GPU roles orders 16 GPUs. Kueue or the scheduler admits one role and the
-other waits. If prefill is the one admitted, the fleet gains nothing. This is
-rare today and becomes common with borrowing, where budgets come in small
-pieces.
+committed. Every picked role commits at least one replica.
 
 ### Gaps that appear once physical and quota compose
 
-Found by the maintainer review. Each was measured or read at the line it cites
-in [Details](#details-code-touch-points).
+Each was measured or read at the function named in
+[Details](#details-code-touch-points).
 
 - **A dropped type comes back through the namespace path (measured).** If the
   merge only removes a denied type, the namespace check reads the missing key
   as "no cluster bound", and allows it again.
-- **Different spellings for one GPU (measured).** Physical keys are short names
-  (`H100`). Quota keys are whatever the operator wrote. Under an intersection
-  merge, two spellings of one GPU would deny each other.
-- **Workloads with no named accelerator skip cluster bounds (measured).** In a
-  namespace with its own cap, such a workload is checked against the namespace
-  cap only, never against physical free GPUs.
+- **Different spellings of one GPU (measured).** Physical keys are short names.
+  Quota keys are whatever the operator wrote.
+- **Workloads with no named accelerator skip cluster bounds (measured)** in a
+  namespace that has its own cap.
 - **One unavailable view lifts every bound (read).** If any provider's usage
-  view has not been observed yet, both engines drop *all* constraints. One
-  provider's error has the same effect in scale-from-zero. Steady state already
-  skips a failing provider; nothing skips an unobserved one.
-- **The warm pool ignores cluster-scope bounds (read).** It reads namespace
-  caps only, so with a physical limiter it reads "unbounded" and grows.
-- **About ten places read the single limiter mode (read).** These include the
-  readiness gate, optimizer selection and the change detector that rebuilds the
-  limiter. They are listed in Details.
+  view has not been observed, both engines drop *all* constraints.
+- **The warm pool ignores cluster-scope bounds (read).**
+- **About ten places read the single limiter mode (read).**
 
 ## Part A: limiters compose
 
@@ -106,85 +106,86 @@ in [Details](#details-code-touch-points).
 allowed only if every limiter that has a view on it allows it. The budget is
 the smallest available figure among them.
 
-A limiter is **closed** when a type it does not list is denied. Physical
-inventory is closed: an undiscovered type has no GPUs. A cluster-scope quota is
-closed. A namespace-scope quota is closed **per namespace**. Its cluster-wide
-figure is only the sum of its namespace caps, so it is not a cluster bound.
+A limiter is **closed** when a type it does not list is denied:
+
+- Physical inventory is closed, because an undiscovered type has no GPUs.
+- A cluster-scope quota is closed.
+- A namespace-scope quota is closed **per namespace**.
+
+A namespace-scope quota's cluster-wide figure is the sum of its namespace
+caps. It keeps exactly its role today: it bounds the types it lists and denies
+nothing.
 
 ### A1. Merge by intersection
 
-- Every type that a closed limiter omits becomes an **explicit 0**, never a
-  missing key. Missing keys keep meaning "no bound".
-- Types are matched by accelerator identity, not by exact string, using the
-  same rule as the Kueue merge. Short names match long names. Two different long
-  names never match. The quota's spelling is kept.
-- The set of types considered includes namespace cap keys, not only
-  cluster-scope keys.
-- The namespace-scope quota's summed figure does not take part in the
-  cluster-wide minimum. The greedy optimizer's stop condition becomes
-  namespace-aware, so it does not stop the whole fleet when that figure is
-  empty.
-- A workload with no named accelerator is checked against the effective map,
-  meaning namespace caps already bounded by cluster caps.
-- Limit attribution uses the same rule, so it names the limiter that actually
-  bound the decision.
+- A type that a closed limiter omits becomes an **explicit 0**.
+- Types are matched by accelerator identity, not by exact string. This is the
+  rule the Kueue merge already uses: short names match long names, and two
+  different long names never match. The quota's spelling is kept.
+- The types considered include namespace cap keys.
+- A workload with no named accelerator is checked against namespace caps that
+  are already bounded by the cluster caps.
+- Limit attribution uses the same rule.
+- Everything else keeps today's meaning. That includes how a namespace that is
+  excluded from a namespace-scope quota is bounded.
 
 This is a bug fix and ships first. Its tests are the five union-leak rows, the
 spelling case, the namespace re-entry case and the unnamed-accelerator case.
-Each test must fail on the parent commit.
+A further test guards against a regression a reviewer measured on an earlier
+draft: a namespace excluded from a namespace-scope-only quota must still scale.
+Each new test must fail on the parent commit.
 
 ### A2. Fix the P/D pair commit
 
 Check the summed cost of all picked roles against the budget before
-committing, and scale them down together. Keep the existing rule that a role at
-its own `maxReplicas` is dropped from the pair; that fixed a measured
-starvation. Test: a budget of 8 with two 8-GPU roles orders 0, not 8+8.
+committing, and scale them down together. This only matters when the roles
+share an accelerator type. Keep the existing rule that a role at its own
+`maxReplicas` drops out of the pair, which fixed a measured starvation. Test: a
+budget of 8 with two 8-GPU roles orders 0, not 8+8.
 
 ### A3. Build every declared limiter
 
-- The factory builds the physical limiter, when declared, and every quota
-  entry, grouped together. Each provider already receives its own usage
-  figure: a quota counts only the scaling manager's pods, and the physical
-  limiter counts every GPU on the nodes.
-- The single limiter mode becomes a set. Every reader of the mode is updated
-  (list in Details), including the readiness gate, optimizer selection and the
-  limiter change detector.
+- The factory builds the physical limiter, when one is declared, and every
+  quota entry, grouped together. Each provider already gets its own usage
+  figure. A quota counts only the scaling manager's pods. The physical limiter
+  counts every GPU on the nodes.
+- The single limiter mode becomes a set. Every reader of the mode is updated,
+  including the readiness gate, optimizer selection and the limiter change
+  detector.
 - Validation allows at most one physical entry, under either spelling
-  (`gpu-inventory` or `inventory`).
-- The installer accepts both. `WVA_LIMITER` takes a list, and the policy
-  helpers stop replacing the whole list. A physical entry needs node read
-  access, which only the admin setup phase grants. Without it, the installer
-  refuses with that remedy instead of installing a controller that goes
-  NotReady.
+  (`gpu-inventory`, `inventory`).
+- The installer:
+  - `WVA_LIMITER` takes a list, and the policy helpers stop replacing the whole
+    list.
+  - A physical entry needs node read access, which only the admin setup phase
+    grants. Without it, the installer refuses with that remedy instead of
+    installing a controller that goes NotReady.
 
 ### A4. One missing input never lifts the others
 
 - A provider that errors, or whose usage view is not yet observed, is skipped
-  and logged by name. The other providers still bound the decision. This
-  applies to both engines.
+  and logged by name. The other providers still bound the decision, in both
+  engines.
 - Only when **every** provider is unavailable does a decision go unchecked.
-  Scale-from-zero then checks against the last snapshot it has, never against
-  nothing.
+  Scale-from-zero then checks against its last snapshot if that snapshot is
+  less than 5 minutes old. Older than that, it wakes unchecked, as it does
+  today.
 - The warm pool's headroom takes the same merged figures as the optimizer,
   cluster-scope bounds included.
 
-**Upgrade note for Part A.**
+**Upgrade note for Part A.** A policy that declares both kinds is now also
+bounded by physical GPUs.
 
-- A policy that declares both kinds is now bounded by physical GPUs as well.
-  This can lower allocations.
-- A tighter bound only stops growth. It does not shrink running replicas.
-- The physical view counts every GPU-holding pod, training included, so on a
-  busy night it can be tighter than the quota.
-- For one release before enforcing, the controller logs both the old and the
-  new allocation for such policies.
-- The physical limiter's cost is a walk of the pods on GPU nodes every
-  interval. That goes in the release notes too.
+- A tighter bound only stops growth. It never shrinks running replicas.
+- The physical view counts every GPU-holding pod, training included. When
+  training jobs hold GPUs, it can be tighter than the quota.
+- For one release before enforcing, the controller logs the old and new
+  allocation side by side for such policies.
+- The physical limiter walks the pods on GPU nodes every interval.
 
 ## Part B: count Kueue borrowing
 
 ### B1. When borrowing is counted
-
-Configuration, per quota entry:
 
 ```yaml
 limiters:
@@ -195,341 +196,431 @@ limiters:
     scope: namespace
     kueue:
       enabled: true
-      # countBorrowable: false   # default true; false = nominal quota only
+      # countBorrowable: false   # default true; false = exactly today's cap
     namespaceQuotas:
       default: { H100: -1 }
 ```
 
-On by default means "counted where safe". A namespace's borrowable figure is 0,
-with a reason the operator can see, unless **all** of these hold:
+"On by default" means *counted where safe*. A namespace's borrowable figure is
+0, with a visible reason, unless every condition holds:
 
 | Condition | Reason when it fails |
 |---|---|
-| The model's pod template carries `kueue.x-k8s.io/queue-name`, so Kueue admits the pods. Otherwise Kueue's usage misses every serving GPU and the cohort looks idle while it is not. | `not-kueue-managed` |
-| A placement bound is in force: the physical limiter, or a GPU `ResourceQuota` in the namespace. Borrowed GPUs belong to another tenant; something must check that they exist. | `no-placement-bound` |
-| The Kueue snapshot is fresh, and ClusterQueue status has been written. | `stale`, `no-status` |
-| The cohort's shape is known (B2). | `hierarchy-unknown`, `hierarchical-cohort` |
-| No ClusterQueue in the cohort uses `status.effectiveQuotas`. Kueue then schedules from it, not from `spec`. | `effective-quotas` |
-| Fair Sharing is not enabled on the cohort (see B8). | `fair-sharing` |
+| Kueue actually manages the model's pods | `not-kueue-managed` |
+| A GPU bound is in force | `no-gpu-bound` |
+| The Kueue snapshot is fresh, and status has been written | `stale`, `no-status` |
+| The cohort is flat | `hierarchical-cohort`, `hierarchy-unknown` |
+| No queue in the cohort uses `status.effectiveQuotas` | `effective-quotas` |
+| Kueue Fair Sharing is off | `fair-sharing` |
+| Its own ResourceQuota and Cohort objects are readable | `resourcequota-unreadable`, `hierarchy-unknown` |
 
-A namespace `ResourceQuota` also caps the ceiling. Borrowing past the
-ResourceQuota's `hard` limit would ask for pods that the API server rejects.
+Why each one:
+
+- **Kueue manages the pods.** The pods must carry Kueue's
+  `kueue.x-k8s.io/managed` label, or its `kueue.x-k8s.io/admission`
+  scheduling gate. That records what Kueue did, not what was asked of it:
+  - a queue-name label alone is not proof, since Kueue may have that
+    integration off or not select the namespace;
+  - Kueue can also manage unlabelled pods, through defaulting.
+
+  Otherwise Kueue's usage misses every serving GPU, the cohort looks idle
+  while it is not, and a lender's job is admitted onto GPUs serving already
+  holds. A model with no running pods takes its namespace's last answer.
+- **A GPU bound.** Borrowed GPUs belong to another tenant, so something must
+  check that they exist. That is the physical limiter, or a GPU
+  `ResourceQuota` whose `hard` is at most nominal plus `borrowingLimit`. A
+  ResourceQuota of 1000 proves nothing.
+- **Fresh status.** If the CRDs are installed without a running Kueue, status
+  is never written.
+- **Flat cohort, no `effectiveQuotas`, no Fair Sharing.** The formula in B3
+  does not cover those cases yet (B9).
+- **Readable objects.** A Forbidden read is never treated as "no ResourceQuota"
+  or "flat cohort".
+
+A namespace `ResourceQuota` also caps the ceiling. Past its `hard` limit, the
+API server rejects the pods (`FailedCreate`).
+
+With `countBorrowable: false`, none of Part B applies. The cap is nominal, as
+today.
 
 On a cluster-scoped install, `make deploy-wva` with `WVA_QUOTA_KUEUE=true` adds
-a `gpu-inventory` entry unless `WVA_LIMITER_PHYSICAL=false` is passed. It prints
-the resulting limiter set. A namespace-scoped install cannot list nodes, so it
-relies on the namespace ResourceQuota.
+a `gpu-inventory` entry unless `WVA_LIMITER_PHYSICAL=false`, and prints the
+resulting limiter set. A namespace-scoped install cannot list nodes, so it
+needs a ResourceQuota to borrow.
 
 ### B2. What is read
 
-| Field | Used for |
-|---|---|
-| ClusterQueue `spec.cohortName` (`spec.cohort` in the deprecated v1beta1) | cohort membership |
-| `…resources[].borrowingLimit`, `…lendingLimit` | how far a queue may borrow, and how much it lends |
-| `status.flavorsReservation[].resources[].total` | GPUs reserved per queue. Kueue charges quota at reservation; `flavorsUsage` lags it when admission checks are configured. |
-| `status.flavorsReservation[].resources[].borrowed` | a cross-check, logged next to the computed figure |
-| `status.pendingWorkloads` | input to the lender rule (B6) |
-| `spec.preemption.reclaimWithinCohort` | whether a queue can take its nominal back (B3, B6) |
-| `status.fairSharing`, `status.effectiveQuotas` | the conditions in B1 |
-| `Cohort` objects: `spec.parentName`, `spec.resourceGroups` | the cohort's shape |
+The reader uses fields already on Kueue's ClusterQueue and Cohort objects:
 
-The reader keeps resolving the version through the RESTMapper, which prefers
-the served storage version (v1beta2).
+- borrowing and lending limits;
+- reserved GPUs;
+- pending workloads;
+- reclaim policy;
+- Fair Sharing and `effectiveQuotas` status;
+- cohort parents.
 
-**New RBAC:** `get`/`list` on `cohorts.kueue.x-k8s.io`. Without it, a flat
-cohort and a nested one cannot be told apart, so a Forbidden read sets
-`hierarchy-unknown`. A cohort name with no `Cohort` object is a flat cohort,
-which is the common case. Reading the namespace's own `ResourceQuota` objects
-also needs `get`/`list` on `resourcequotas` in the managed namespaces.
+The field list is in [Details](#details-what-is-read). New RBAC covers Cohort
+objects and the namespace's own ResourceQuotas.
 
-### B3. The ceiling, per ClusterQueue, flavor and GPU resource
+### B3. How much a queue can reach
 
 **In words.** Each queue keeps part of its nominal quota for itself and lends
 the rest. The cohort's free pool is everything lent, minus what members use
 beyond the part they keep. A queue can reach its own usage, or its kept part if
 that is larger, plus the free pool. It never goes past nominal plus its
-borrowing limit. This is the same arithmetic as Kueue's own check. The Kueue
-reviewer derived it from Kueue's `resource_node.go`.
+borrowing limit. The Kueue reviewer derived this from Kueue's own scheduler
+code, and Kueue's [documented example](https://kueue.sigs.k8s.io/docs/concepts/cluster_queue/)
+holds: team-a has `nominal 9` and `borrowingLimit 1`, and team-b has
+`nominal 12` and is idle, so team-a reaches 10.
+
+Per flavor and GPU resource, for each member `m` of the cohort:
 
 ```
-For each member m of the cohort:
-  N_m = nominalQuota
-  L_m = min(lendingLimit, N_m)        (unset: N_m)
-  B_m = borrowingLimit                (unset: no limit)
-  U_m = reserved GPUs (status)
-  G_m = N_m - L_m                     kept for m, never lent
+N_m = nominalQuota
+L_m = min(lendingLimit, N_m)       (unset: N_m)
+B_m = borrowingLimit               (unset: no limit)
+U_m = reserved GPUs
+G_m = N_m - L_m                    kept for m, never lent
 
-cohortFree = max(0, Σ L_m  -  Σ max(0, U_m - G_m))
-reach_Q    = min(N_Q + B_Q,  max(U_Q, G_Q) + cohortFree)
-ceiling_Q  = max(N_Q, reach_Q)   if Q's reclaimWithinCohort is not Never
-           = reach_Q             otherwise
+cohortFree = max(0, Σ L_m − Σ max(0, U_m − G_m))
 ```
 
-- **The queue's own usage is inside `reach`.** A queue that is borrowing keeps
-  its borrowed replicas in its ceiling. A formula built from `cohortFree` alone
-  would drop the ceiling as soon as the queue borrowed, force a scale-down, and
-  repeat.
-- **Nominal is a floor only when the queue can reclaim it.** With Kueue's
-  default (`reclaimWithinCohort: Never`), unused nominal that a peer borrowed
-  stays with the peer. Today's cap gets this wrong too, and the proposal fixes
-  both.
-- **Kueue's documented example holds.** In the
-  [ClusterQueue concepts page](https://kueue.sigs.k8s.io/docs/concepts/cluster_queue/),
-  team-a has `nominal 9` and `borrowingLimit 1`, and team-b has `nominal 12`
-  and is idle. team-a's reach is 10.
+From these, for this queue `Q`:
 
-### B4. The free pool is shared, not copied
+- **Guaranteed** is `N_Q`, unless `Q` cannot reclaim
+  (`reclaimWithinCohort: Never`). Then it is `min(N_Q, max(U_Q, G_Q) +
+  cohortFree)`, because unused nominal that a peer has borrowed stays with the
+  peer. It gets its own reason, `nominal-lent-out`, and applies only when
+  borrowing is counted.
+- **Borrow cap** is `B_Q`, further bounded by the static entry and the
+  namespace ResourceQuota.
+- **The free pool** `cohortFree` is shared with every other queue in the
+  cohort (B4).
 
-Every queue in a cohort sees the same `cohortFree`. Handed to each namespace
-separately, it would be spent several times over. Two tenants would scale into
-the same GPUs, Kueue would admit one, and the other's pods would wait gated.
+### B4. One shape for borrowing
 
-- The constraints carry the free pool once, per cohort, flavor and type, as a
-  **shared pool**. The optimizer debits every borrowed allocation in that
-  cohort from it.
-- A namespace with LocalQueues on several queues of one cohort sums their
-  guaranteed parts and adds the shared pool once.
-- GPUs the scaling manager has just asked for, which Kueue has not reserved
-  yet, are subtracted from `cohortFree`. Otherwise status lags by one cycle and
-  the same GPUs are counted twice.
+Every consumer reads the same three figures:
+
+| Figure | Scope | What it is |
+|---|---|---|
+| guaranteed pool | per namespace and type | the namespace's limit, as today, at the guaranteed figure |
+| borrow cap | per namespace and type | how much past guaranteed the namespace may go |
+| shared pool | per cohort and type, kept as one chunk per flavor | the cohort's free GPUs, spent once across all namespaces in it |
+
+A namespace that is borrowing uses more than its guaranteed pool. Its pool then
+reads 0 available, and its borrowed replicas stay in place. Nothing in Part A
+shrinks a model that is over its limit.
+
+GPUs the scaling manager has asked for but Kueue has not reserved yet are taken
+out of the shared pool by the engine. These are managed pods behind Kueue's
+admission gate, plus the previous cycle's borrowed growth that is not yet
+visible as pods (dropped after two cycles). The reader cannot see them.
+
+How each consumer uses it:
+
+- **The greedy optimizer** spends a namespace's guaranteed pool first. It then
+  draws from the shared pool, up to the namespace's borrow cap. Every draw must
+  also fit the closed cluster bounds and a node (B5).
+- **Rescale, the warm pool and scale-from-zero** see the guaranteed pool only.
+- **The utilization-share optimizer** budgets guaranteed plus the borrowed GPUs
+  each group holds right now, frozen for the cycle. Held borrowed GPUs are not
+  debt. It starts no new borrowing. Under it, borrowed capacity is held but not
+  grown in this proposal; a follow-up can add it.
 
 A namespace-scoped controller sees only its own namespace. Two such
-controllers in one cohort can still both claim the pool. The ResourceQuota cap
-(B1) limits that, and the docs say so plainly.
+controllers in one cohort can both claim the shared pool. The ResourceQuota
+cap (B1) bounds the damage, and the docs say so.
 
-### B5. Borrowed GPUs must fit whole replicas
+### B5. A borrowed replica must fit on nodes
 
-Kueue admits on quota alone unless Topology-Aware Scheduling is on. The physical
-limiter is a cluster-wide count. Ten free GPUs spread across nodes cannot hold
-one 8-GPU replica. Once Kueue admits such a replica, its reservation sits
-inside the queue's own usage and stays in the ceiling for good.
+Kueue admits on quota, not placement, unless Topology-Aware Scheduling is on.
+Ten free GPUs spread over two nodes cannot hold one 8-GPU replica.
 
-- Borrowable is counted per flavor, rounded down to whole replicas of the
-  model, and then summed. A replica is admitted in one flavor and one queue, so
-  4 + 4 GPUs in two flavors is not room for one 8-GPU replica.
-- **Placement hold.** A model with Pending or Kueue-gated pods gets no new
-  borrowed growth until they place. This mirrors the hold the
-  utilization-share optimizer already applies to its fills.
-- An untyped grant (a flavor with no product label) bounds each named type
-  separately today. For borrowing it is split across types instead, so the
-  same GPUs cannot be ordered once per type.
-- A replica that straddles nominal and borrowed capacity is borrowing as a
-  whole in Kueue's eyes. All of its GPUs are preemptible, and reporting says
-  so.
+- **Node fit, when the physical limiter is present.** It already walks the
+  pods on GPU nodes, so it reports free GPUs per schedulable node. A borrowed
+  replica is spent only if its pods fit there, first-fit, with each node
+  debited. A 2x8 group needs two nodes. The shared pool's per-flavor chunks
+  are checked the same way: a replica uses one flavor.
+- **Release what cannot place.** A borrowed replica whose pods stay
+  unschedulable or Kueue-gated for longer than the placement timeout (default
+  5 minutes) is released, and the model's borrowing cooldown starts. Without a
+  node view, this is the only protection, and the docs say so.
+- **Placement hold.** A variant and role with *unplaced* pods gets no new
+  borrowed growth until they place. Unplaced means `PodScheduled=False` with
+  reason `Unschedulable`, or a Kueue gate older than one cycle. Pulling an image
+  or loading weights does not count as unplaced. The count is a new field
+  beside today's pending-replica count, from the same pod informer. For a
+  LeaderWorkerSet the hold lifts only when the whole group has placed.
 
 ### B6. Giving capacity back
 
 Inference Deployments never finish. A lender whose queue cannot reclaim
-(`reclaimWithinCohort: Never`) never gets its GPUs back unless the borrower
-hands them back.
+(`reclaimWithinCohort: Never`) gets its GPUs back only if the borrower hands
+them back.
 
-- **A lender is waiting** when `pendingWorkloads > 0` **and** its own GPU
-  reservation is below its nominal (`U_m < N_m`). Without the second check, a
-  stuck CPU job, or a borrower's own preempted pod, would pin the whole cohort.
-- **If a waiting lender cannot reclaim**, the borrower's ceiling drops to its
-  guaranteed part, and the scaling manager reduces the borrowed replicas
-  itself. Today the optimizer never shrinks a model whose usage is over its
-  limit; it only stops growth. Part B adds an over-limit release that applies
-  to borrowed replicas only.
+**A lender is waiting** when all of these hold, for the flavor and GPU resource
+being borrowed:
+
+- it has pending workloads;
+- its reservation is below its nominal;
+- both have held for 2 consecutive fresh reads and at least 60 seconds.
+
+Without the second check, a stuck CPU job, or a borrower's own preempted pod,
+would pin the whole cohort.
+
+When a lender is waiting:
+
 - **If the lender can reclaim**, no new borrowing starts, and Kueue preempts.
-- **Cooldown.** After a waiting lender, or after Kueue preempted one of a
-  model's borrowed pods, that cohort, and separately that model, borrow nothing
-  new for a cooldown. The cooldown defaults to 10 minutes and is configurable.
-  Lender batch jobs every 20 minutes would otherwise mean a reclaim storm.
-- **Stale reads freeze, never shrink.** A stale snapshot stops new borrowing
-  and keeps the ceiling at `max(N_Q, last U_Q)`. An API blip must not cause a
-  reclaim the cluster did not ask for.
+- **If it cannot**, the steady-state engine releases borrowed replicas:
+  - **How much:** up to the lender's lent-out nominal (`N_m − U_m`), and never
+    below any namespace's guaranteed figure.
+  - **In what order:** lowest-priority model first, then the most recently
+    grown.
+  - **In what units:** whole replicas, in P/D pairs at the pair's ratio, and
+    whole groups for a LeaderWorkerSet.
+  - Each release is logged with the lender's name.
+  - KEDA's scale-down window, up to 300 s, comes on top. Hand-back time is
+    roughly refresh plus one cycle plus that window, and the docs say so.
 
-**What preemption does to a serving pod.** Kueue admits a Deployment pod by
-pod. When it preempts one, it deletes the pod. The ReplicaSet recreates it
-gated, as a new pending workload in the borrower's queue. Kueue does not honour
-PodDisruptionBudgets and does not drain the router, so in-flight requests on
-that pod are lost.
+**Cooldowns:**
 
-A LeaderWorkerSet group is one workload, so preemption deletes the whole
-multi-node replica. Prefill and decode are separate workloads, so a pair can
-lose one side. The well-lit path therefore requires:
+- After a lender waits, the cohort borrows nothing new for the cooldown.
+- After Kueue preempts one of a model's borrowed pods, that model borrows
+  nothing new for the cooldown.
+- The default is 10 minutes, at least three replica start times for
+  whole-node models. It is replaced by a value measured in the e2e.
+
+**Stale reads freeze, never shrink.** A stale snapshot stops new borrowing and
+keeps every figure where it was. An API blip must not cause a reclaim the
+cluster did not ask for. A Kueue controller that is down while its status stays
+readable is not detected. The placement hold and the placement timeout bound
+the damage.
+
+**Pairs that lose one side.** Kueue preempts per workload. A prefill or decode
+pod is one workload, and a LeaderWorkerSet group is one workload. When one
+role's borrowed pods stay gated past the placement timeout after a preemption,
+the matching partner replica is released too, so the partner does not hold GPUs
+that produce nothing.
+
+**What preemption does to a serving pod.** Kueue deletes the pod. It does not
+use the Eviction API, so PodDisruptionBudgets do not apply, but the termination
+grace period does. The ReplicaSet recreates the pod gated. The
+[Kueue path](../well-lit-paths/kueue-bounded-quotas/) therefore requires:
 
 - a preStop drain hook on serving pods;
-- a Kueue `WorkloadPriorityClass` above batch for models that must keep their
-  replicas;
-- the group integration for multi-pod replicas.
+- a `WorkloadPriorityClass` above batch for models that must keep replicas;
+- the group integration for multi-pod replicas;
+- no `borrowWithinCohort` preemption on serving queues, so serving never
+  preempts a lender's training.
 
 ### B7. Where borrowed capacity may be spent
 
-- **Scale-from-zero** wakes against the guaranteed part only. A model woken
-  onto borrowed capacity can be preempted before it serves its first request.
-- **The utilization-share optimizer** plans transfers inside the guaranteed
-  part only. A borrowed figure that moves with every lender pod would otherwise
-  start transfers and then reverse them. Borrowed capacity reaches models
-  through growth and idle-fill, which already respect the placement hold.
-- **The greedy optimizer** may spend it, subject to the shared pool (B4) and
-  the placement hold (B5).
+- **Scale-from-zero** wakes against the guaranteed pool only. A model woken
+  onto borrowed capacity can be preempted before it serves.
+- **The warm pool and rescale** use the guaranteed pool only.
+- **Growth** may spend it, through the greedy optimizer, under B4 and B5.
 
-The guaranteed figure is taken across providers as
-`min over providers of (Limit − Borrowable)`. Taking the minimum of each field
-separately is wrong. Physical has nothing borrowable, so the separate minimum
-would erase the borrowed part and report all of it as guaranteed. Scale-from-zero
-and the share planner apply a *guaranteed-only* copy of the constraints. They
-do not merge a new field.
+### B8. What does not change
 
-### B8. Fair Sharing and nested cohorts
+- Borrowing moves capacity between queues and creates none. So the
+  cluster-scope quota figure, the sum of nominal quotas, stays as it is.
+- Shared ClusterQueues are still a per-namespace ceiling, not a partition.
 
-- **Fair Sharing.** Under Fair Sharing, Kueue admits borrowers by share, and
-  preemption follows different rules. A borrower competes with other borrowers,
-  not only with lenders. Borrowable is 0 with reason `fair-sharing` in this
-  proposal. A follow-up can cap it at the queue's fair-share entitlement.
-  AdmissionFairSharing orders LocalQueues inside one ClusterQueue and does not
-  change the ceiling.
-- **Nested cohorts.** A cohort with a parent, or with its own
-  `resourceGroups`, is counted as 0 with reason `hierarchical-cohort`. A
-  cohort's own quota is extra capacity that the formula would miss. A
-  follow-up walks the tree. A parent-only tree that declares no
-  `resourceGroups` creates no capacity, so the cluster-scope figure stays
-  right.
+### B9. Not covered yet
 
-Borrowing moves capacity between queues and creates none. So the cluster-scope
-quota figure, the sum of every queue's nominal quota, does not change.
+Each of these shows its reason, and borrowable is 0:
+
+- **Fair Sharing.** It is enabled controller-wide and seen through
+  `status.fairSharing`. Kueue then admits borrowers by share, and other
+  borrowers compete too. A follow-up can cap borrowing at the queue's
+  fair-share entitlement.
+- **Nested cohorts.** These are a cohort with a parent, with its own
+  `resourceGroups`, or **named as a parent by any other Cohort**. A root can
+  look flat while its children lend into it.
+- **`effectiveQuotas`.** When present, Kueue schedules from it instead of
+  `spec`.
+- **Other resources in the flavor.** A flavor must satisfy every resource it
+  covers. Borrowed GPUs with exhausted CPU in the same flavor leave pods gated.
+  The placement hold and timeout handle it.
 
 ## Part C: what on-call sees
 
-The question this has to answer is "why did my model drop from 6 to 4
-replicas?" There are three causes: Kueue preempted pods, the ceiling dropped,
-or demand and KEDA. The signals:
+The question to answer is "why did my model drop from 6 to 4 replicas?" There
+are four causes:
 
-- **Log.** The existing `quota entry bounded by external caps` line adds,
-  per namespace and type, `nominal`, `borrowable` and the Kueue `borrowed`
-  cross-check. When borrowable is 0, it adds the reason.
-- **Metric.** `wva_quota_limit_gpus{limiter_name, exported_namespace,
-  accelerator, tier}`, with `tier` as `nominal` or `borrowable`. A companion
-  `wva_quota_borrow_withheld{…, reason}` is 1 for the active reason.
-- **Scaling-blocked reasons.** `borrow-withdrawn` and `lender-reclaimed` are
-  added on `wva_model_scaling_blocked`.
-- **Events.** An event on the scale target when its ceiling drops below its
-  current allocation, naming the lender ClusterQueue.
-- **Gated pods.** A gauge counts managed pods behind Kueue's scheduling gate,
-  and a counter counts managed pods Kueue preempted.
-- **Status ConfigMap.** `wva-controller-status` gets `limiterBudgets`: per
-  entry, namespace and type, `limit`, `borrowable`, `used`, `reason` and
-  `asOf`. The publisher reads config today, so the engine publishes the figures
-  it used through a snapshot, like the existing decision snapshots.
-- **Alerts and runbook.** The well-lit path ships:
-  - a "replicas dropped" decision tree over the three causes;
-  - alerts for: the reader stale for more than 5 minutes; borrowing above 0
-    while a lender has waited more than 10 minutes; managed pods gated more
-    than 10 minutes; ResourceQuota `FailedCreate`.
+- Kueue preempted pods.
+- The scaling manager released borrowed replicas.
+- A replica did not place.
+- Demand fell.
+
+| Signal | What it adds |
+|---|---|
+| Log | The `quota entry bounded by external caps` line adds `guaranteed`, `borrowable`, Kueue's own `borrowed` figure as a cross-check, and the reason when borrowable is 0. |
+| `wva_quota_limit_gpus{limiter_name, exported_namespace, accelerator, tier}` | `tier` is `guaranteed` or `borrowable` |
+| `wva_quota_borrow_withheld{…, reason}` | 1 for the active reason |
+| `wva_model_scaling_blocked` reasons | `borrow-released`, `lender-reclaimed`, `borrow-unplaced`, `nominal-lent-out` |
+| Event on the scale target | when the scaling manager releases borrowed replicas, naming the lender ClusterQueue |
+| Gauges | managed pods unplaced for longer than the placement hold; managed pods Kueue preempted (counter) |
+| `wva-controller-status` | `limiterBudgets`: per entry, namespace and type, `guaranteed`, `borrowable`, `used`, `reason`, `asOf`. The engine publishes these through a snapshot, as it already does for decisions. |
+
+The Kueue path ships a "replicas dropped" decision tree over the four causes. It
+also ships alerts for:
+
+- the reader stale for more than 5 minutes;
+- borrowing above 0 while a lender has been waiting longer than the cooldown;
+- managed pods unplaced longer than the placement timeout;
+- ResourceQuota `FailedCreate`.
 
 ## Decided
 
-- **Borrowing is on by default** (owner's decision). It turns on in the release
-  that ships the live-Kueue e2e, not earlier. The release before it ships the
-  read-only log, so operators can see the figure first. The conditions in B1
-  make default-on safe where Kueue does not actually govern the pods.
-- **Not proposed: optimizer tiers.** The issue asks the optimizer to release
-  borrowed replicas first. The scaling manager cannot choose which pod Kueue
-  preempts. Lowering replicas lets the ReplicaSet pick a pod regardless of
-  tier. The lever that works is Kueue's `WorkloadPriorityClass`, which the
-  well-lit path documents.
-- **Scale-from-zero and the share planner use guaranteed capacity only.**
-- **Fair Sharing and nested cohorts count nothing borrowable for now.** Each
-  shows its reason.
+- **Borrowing is on by default** (owner's decision).
+  - It turns on in the release that ships the live-Kueue e2e. The release
+    before ships the figure as a log only.
+  - The B1 conditions make default-on safe where Kueue does not govern the
+    pods.
+  - `countBorrowable: false` restores exactly today's cap, including the
+    nominal floor.
+- **No optimizer tiers.** The issue asks the optimizer to release borrowed
+  replicas first. Kueue picks which pod to preempt, and a ReplicaSet picks
+  which pod to delete on scale-down. The one release the scaling manager does
+  own (B6) has an explicit order. For everything else the lever is Kueue's
+  `WorkloadPriorityClass`.
+- **Guaranteed capacity only** for scale-from-zero, the warm pool, rescale and
+  new share transfers.
 
 ## Order of work
 
 Each step is one PR. Its new tests must fail on the parent commit.
 
-1. **A1, the merge fix.** Intersection, explicit zeros, accelerator identity,
-   the unnamed-accelerator check, and attribution. No config change.
+1. **A1, the merge fix.** No config change.
 2. **A2, the P/D pair commit.**
-3. **A3 and A4, composition.** Includes the mode set and every reader of the
-   mode, the installer, the readiness gate, skipping unavailable providers, the
-   warm pool, the upgrade log, and docs (list in Details).
-4. **Read-only borrowing.** The reader parses cohorts, limits, status and
-   Cohort objects (new RBAC), and logs the figure it *would* apply, with its
-   reason. Ships one release before step 5.
-5. **Borrowing, default on, with the live-Kueue e2e in the same release.** B1
-   to B7 and Part C. The e2e installs the Kueue controller from
-   `registry.k8s.io`, runs a two-queue cohort, preempts a borrowed replica, and
-   asserts that the scaling manager lowers replicas and that no gated pods
-   remain. Unit tests cover:
+3. **A3 and A4, composition.** Includes the installer, RBAC fixtures, the
+   readiness gate, the side-by-side upgrade log, and the docs.
+4. **Read-only borrowing.** The reader parses everything in B2 (new RBAC) and
+   logs the figures it *would* apply, with reasons. Ships one release before
+   step 5.
+5. **Borrowing on by default, together with the live-Kueue e2e.** This covers
+   B1 to B7 and Part C. The e2e installs the Kueue controller from
+   `registry.k8s.io` and runs a two-queue cohort. It covers:
+   - a borrowed replica preempted, then replicas lowered, with no gated pods
+     left over;
+   - a `Never` lender waiting, then a released pair.
+
+   Unit tests cover:
    - the clamps;
-   - a lender reclaiming, with `Never` and with `Any`;
    - the shared pool with two borrowers;
-   - the whole-replica rounding (5 + 5 GPUs over two nodes for one 8-GPU
-     replica);
-   - the guaranteed-part merge (quota `Limit 12, Borrowable 4` with physical
-     `Limit 10` gives guaranteed 8, not 10);
-   - stale-read freeze;
+   - node fit with 5 + 5 free GPUs over two nodes against one 8-GPU replica;
+   - the placement timeout;
+   - the guaranteed-part merge (quota 12 with 4 borrowable, plus physical 10,
+     gives 8 guaranteed);
+   - the stale freeze;
+   - the debounced lender rule;
+   - pair-ratio release;
+   - share budget with borrowed GPUs held, which must create no debt;
    - v1beta1 against v1beta2.
-6. **Follow-ups:** nested cohorts, Fair Sharing, Topology-Aware Scheduling.
+6. **Follow-ups:** nested cohorts, Fair Sharing, `effectiveQuotas`, borrowing
+   under the utilization-share optimizer, Topology-Aware Scheduling.
 
 ## Open questions
 
-- **Scale-from-zero into borrowed capacity.** A model whose nominal is fully in
-  use cannot wake, even with idle lenders. A per-model `allowBorrowed` could
-  cover it. It would have to check node fit, not only the count.
-- **Shared ClusterQueues.** These are still a per-namespace ceiling, not a
-  partition. This is out of scope.
-- **Cooldown default.** 10 minutes is a guess. It should come from a measured
-  reclaim cycle in the e2e.
+- **Scale-from-zero into borrowed capacity.** A model whose guaranteed pool is
+  fully used cannot wake, even with idle lenders. A per-model `allowBorrowed`
+  would need node fit too.
+- **Timeouts.** The cooldown (10 minutes) and the placement timeout (5
+  minutes) are guesses. The e2e measures a reclaim cycle and a whole-node
+  start time, and both defaults, and the alerts, are set from that.
+
+## Details: what is read
+
+| Field | Used for |
+|---|---|
+| ClusterQueue `spec.cohortName` (`spec.cohort` in deprecated v1beta1) | cohort membership |
+| `…resources[].borrowingLimit`, `…lendingLimit` | B3 |
+| `status.flavorsReservation[].resources[].total` | reserved GPUs. Kueue charges quota at reservation; `flavorsUsage` lags it when admission checks are configured. |
+| `status.flavorsReservation[].resources[].borrowed` | cross-check, logged |
+| `status.pendingWorkloads` | lender rule (B6) |
+| `spec.preemption.reclaimWithinCohort` | guaranteed figure (B3), lender rule (B6) |
+| `status.fairSharing`, `status.effectiveQuotas` | B1 conditions |
+| Cohort `spec.parentName`, `spec.resourceGroups` | nested cohorts, including any Cohort that names this one as its parent |
+| Namespace `ResourceQuota` (GPU `hard`, `used`) | GPU bound and ceiling (B1) |
+| Pod labels `kueue.x-k8s.io/managed`, scheduling gate `kueue.x-k8s.io/admission` | Kueue-managed check (B1), unreserved requests (B4), placement hold (B5) |
+
+The reader resolves the version through the RESTMapper, which prefers the
+served version with the highest discovery priority (v1beta2 today). A cohort
+name with no Cohort object is a flat cohort.
 
 ## Details: code touch points
 
 For implementers. Paths are under `internal/` unless noted.
 
-- **Merge and attribution:** `engines/allocation/cost_aware_optimizer.go`
-  (`mergeConstraints`, `mergeNamespaceConstraints`),
-  `gpu_limit_attribution.go` (`bindingProvider` skips unlisted cluster types,
-  `namespaceHeadroom` reads `NamespacePools` only), `gpu_budget.go`
-  (`FitsGPUBudget` unnamed-accelerator branch, `GPUBudgets`),
-  `greedy_score_optimizer.go` (`effectiveAvailable`, the `totalGPUs` stop
-  condition), `utilization_share_groups.go` (`BuildShareGroups`, `PhysicalFree`).
-  `multi_backup/` is `//go:build ignore` and is not touched.
+- **Merge and attribution** (`engines/allocation/`):
+  - `cost_aware_optimizer.go`: `mergeConstraints`, `mergeNamespaceConstraints`;
+  - `gpu_limit_attribution.go`: `bindingProvider`, which skips unlisted
+    cluster types, and `namespaceHeadroom`, which reads namespace pools only;
+  - `gpu_budget.go`: `FitsGPUBudget`, whose unnamed-accelerator branch and
+    open-path deny on a missing key both matter, and `GPUBudgets`;
+  - `greedy_score_optimizer.go`: `effectiveAvailable`, `fairShareRolePick`;
+  - `utilization_share_groups.go`: `BuildShareGroups`. Its `PhysicalFree` is
+    renamed `ClusterFree`, the minimum over closed cluster pools, since under a
+    composed set it is no longer physical.
+  - `multi_backup/` is `//go:build ignore` and is not touched.
 - **P/D pair:** `engines/allocation/analyzer_helpers.go`
-  (`allocateForModelPaired`: picks at 504-521, commit at 573-581).
-- **Readers of the single mode:** `config/config.go` (`limiterModeOf`,
-  `EffectiveLimiterSummary`, `UnenforcedLimiterTypes`),
-  `config/saturation_scaling.go` (validation, both aliases),
-  `engines/allocation/limiter_factory.go` (`LimiterSignature` encodes only
-  quota entries), `usage_basis.go` (`PhysicalUsageConfigured`),
-  `cmd/main.go` (readiness `gpu-policy` gate, `LimitedMode` and unenforced
-  warnings), `scalingpolicy/inventory.go` (`ShouldCollectClusterInventory`),
-  `engines/steadystate/engine.go` (optimizer selection, `MissingBasis`
-  fallback, `ReportUnresolvedAccelerator`), `engine_v2.go` (idle-fleet
-  headroom), `controller/configmap_reconciler.go`,
-  `controller/configmap_helpers.go`, `engines/allocation/utilization_share_shadow.go`
-  (`ClusterIsQuota`), `engines/scalefromzero/candidates.go` (drop-all on error;
-  stale comment at 185-188).
-- **Installer:** `deploy/lib/cli.sh` (`WVA_LIMITER`),
-  `deploy/lib/limiter_policy.sh`, `deploy/lib/physical_limiter.sh`;
-  fixtures in `hack/check-limiter-declaration.sh` and
-  `hack/check-physical-limiter-targets.sh`.
-- **Kueue figures:** `kueue/reader.go`; `config/quota_limiter.go`
-  (`ExternalCaps` and `BoundBy` gain a borrowable map, so the effective
-  borrowable is `max(0, min(static, N+B) − min(static, N))`);
-  `engines/allocation/quota_inventory.go` (pools, `Refresh` fingerprint).
-  The guaranteed-only copy follows `WithholdPromised` in
-  `utilization_share_withhold.go`.
+  `allocateForModelPaired`.
+- **Readers of the single mode:**
+  - `config/config.go`: `limiterModeOf`, `EffectiveLimiterSummary`,
+    `UnenforcedLimiterTypes`;
+  - `config/saturation_scaling.go`: validation, both aliases;
+  - `engines/allocation/limiter_factory.go`: `LimiterSignature`, which encodes
+    only quota entries today;
+  - `engines/allocation/usage_basis.go`: `PhysicalUsageConfigured`;
+  - `cmd/main.go`: the readiness `gpu-policy` gate, and the `LimitedMode` and
+    unenforced warnings;
+  - `scalingpolicy/inventory.go`: `ShouldCollectClusterInventory`;
+  - `engines/steadystate/engine.go`: optimizer selection, the `MissingBasis`
+    fallback, `ReportUnresolvedAccelerator`;
+  - `engines/steadystate/engine_v2.go`: idle-fleet headroom;
+  - `controller/configmap_reconciler.go`, `controller/configmap_helpers.go`;
+  - `engines/allocation/utilization_share_shadow.go`: `ClusterIsQuota`;
+  - `engines/scalefromzero/candidates.go`: drop-all on error, and a stale doc
+    comment on the limiter mode.
+- **Installer:**
+  - `deploy/lib/cli.sh` (`WVA_LIMITER`), `deploy/lib/limiter_policy.sh`,
+    `deploy/lib/physical_limiter.sh`;
+  - fixtures in `hack/check-limiter-declaration.sh`,
+    `hack/check-physical-limiter-targets.sh`, and the RBAC checks for
+    `resourcequotas` and `cohorts`.
+- **Kueue figures:**
+  - `kueue/reader.go`;
+  - `config/quota_limiter.go`: `ExternalCaps` and `BoundBy` carry guaranteed
+    and borrow cap per namespace, and the shared pools per cohort;
+  - `engines/allocation/quota_inventory.go`: pools and the `Refresh`
+    fingerprint.
+  - `ResourceConstraints` gains the borrow caps, the shared pools and a
+    namespace-to-cohort map.
+  - The guaranteed-only copy drops those three and follows `WithholdPromised`
+    in `utilization_share_withhold.go`.
+- **Node view:** the physical limiter's usage walk (`gpuusage`) reports free
+  GPUs per schedulable node.
+- **Placement hold:** a new unplaced-replica count beside `PendingReplicas`
+  (`domain/saturation_analyzer.go`), from the same pod informer.
 - **Status:** `controllerstatus/publisher.go` reads only config today.
 - **Tests that encode single-mode behaviour:** `limiter_factory_test.go`,
   `engine_limiter_reload_test.go`,
   `TestPhysicalUsageConfiguredMatchesTheBuiltLimiter`.
-- **Docs to update in step 3:** `docs/reference/quota-limiter.md`,
-  `docs/reference/gpu-limiter.md`, `docs/reference/scaling-policy.md`,
-  `docs/reference/configuration.md`, `docs/reference/metrics.md`,
-  `docs/concepts/gpu-capacity-accounting.md`,
-  `docs/guides/admin-gpu-bounding/`, `docs/well-lit-paths/bound-by-gpus/`,
-  `config/base/manager/scaling-policy-configmap.yaml`.
+- **Docs to update in step 3** (all under `docs/`):
+  - `reference/quota-limiter.md`, `reference/gpu-limiter.md`,
+    `reference/scaling-policy.md`, `reference/configuration.md`,
+    `reference/metrics.md`;
+  - `concepts/gpu-capacity-accounting.md`;
+  - `guides/admin-gpu-bounding/`, `well-lit-paths/bound-by-gpus/`;
+  - plus `config/base/manager/scaling-policy-configmap.yaml`.
 
 ## Review record
 
-Revision 1 was reviewed on 2026-10-15 by five reviewers. All approved A1 in
-principle. Every finding below is folded into revision 2.
-
-| Reviewer | Verdict | Main findings |
-|---|---|---|
-| Kueue expert | request changes | formula matches Kueue once clamped; free pool double-counted; reclaim-aware nominal; noisy `pendingWorkloads`; Fair Sharing; `effectiveQuotas`; Cohort RBAC; preemption deletes pods |
-| Maintainer | request changes | dropped type re-enters via namespace path, spelling mismatch, unnamed accelerator (all measured); attribution skips cluster types; unobserved view lifts all bounds; about ten readers of the single mode; `Borrowable` merge |
-| SRE / cluster admin | request changes | default-on before live e2e; pods not Kueue-managed; stale read shrinks; reclaim storms; ResourceQuota vs borrowing; on-call signals, alerts, runbook |
-| Whole-node / P/D | request changes | borrowed GPUs counted not placed; P/D pair overspend; per-flavor rounding; utilization-share churn; multi-pod preemption |
-| Docs | approve with changes | behaviour change buried; formula unexplained; internals in the main flow; `Borrowable` merge |
+| Reviewer | Round 1 | Round 2 | Main round-2 findings, folded into revision 3 |
+|---|---|---|---|
+| Kueue expert | request changes | request changes | roots with child cohorts look flat; guaranteed under `Never`; lender rule per flavor; managed-pod detection |
+| Maintainer | request changes | request changes | dropping the namespace aggregate stops excluded namespaces (measured); borrowing had three shapes; ownership of in-flight GPUs and release |
+| SRE / cluster admin | request changes | request changes | queue-name label is not proof; below-nominal cap must not leak into the opt-out; release needs debounce and flavor match |
+| Whole-node / P/D | request changes | request changes | node fit before spending; pair-aware release and repair; share budget with held borrowed GPUs |
+| Docs | approve with changes | request changes | opt-out promise; four missing "what changes" items; internals to Details |
