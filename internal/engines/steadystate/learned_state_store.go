@@ -32,8 +32,9 @@ import (
 // writes. It restores once, on its first cycle, before anything is learned or
 // swept; until a read has succeeded it writes nothing, so a store it could not
 // read is never overwritten from an empty memory. It writes at most once per
-// learnedStateInterval, only when the state changed, in one read-modify-write
-// with the ConfigMap's resourceVersion as the concurrency check. Deleting the
+// learnedStateInterval, when what was learned changed or learnedStateRefresh
+// has passed, in one read-modify-write with the ConfigMap's resourceVersion as
+// the concurrency check. Deleting the
 // ConfigMap is a flush: a controller that has seen it and finds it gone forgets
 // what it knows rather than writing it straight back.
 const (
@@ -48,9 +49,17 @@ const (
 	// learnedStateInterval is the least time between two writes, and between
 	// two restore attempts after a failed read.
 	learnedStateInterval = time.Minute
-	// learnedStateMaxBytes bounds the document, below the API server's 1 MiB
-	// object limit with room for its metadata and other versions' keys.
+	// learnedStateRefresh is the most time between two writes while anything
+	// is stored. Reading a figure moves its last-used clock, and a change of
+	// clock alone is not worth a write a minute -- the horizons it feeds are
+	// days -- but the stored clocks must not fall far behind either.
+	learnedStateRefresh = 15 * time.Minute
+	// learnedStateMaxBytes bounds the document. learnedStateMaxData bounds all
+	// the ConfigMap's data, other versions' documents included, below the API
+	// server's 1 MiB object limit with room for its metadata: this version's
+	// document gets what the others leave, up to learnedStateMaxBytes.
 	learnedStateMaxBytes = 700 << 10
+	learnedStateMaxData  = 900 << 10
 )
 
 // learnedStateKey is the ConfigMap data key this version's document lives
@@ -230,13 +239,8 @@ func (e *Engine) writeLearnedState(ctx context.Context, now time.Time) {
 	}
 	logger := ctrl.LoggerFrom(ctx).WithName("learned-state")
 	state := analyzer.ExportLearnedState()
-	raw, dropped, err := encodeLearnedState(state, now, learnedStateMaxBytes)
-	if err != nil {
-		logger.Error(err, "Learned state: the snapshot could not be encoded; not written")
-		return
-	}
 	digest := learnedStateDigest(state)
-	if digest == st.lastDigest {
+	if digest == st.lastDigest && now.Sub(st.lastWrite) < learnedStateRefresh {
 		return
 	}
 	st.lastWrite = now
@@ -255,10 +259,25 @@ func (e *Engine) writeLearnedState(ctx context.Context, now time.Time) {
 			"configMap", learnedStateConfigMap)
 		return
 	}
+	budget := learnedStateMaxBytes
+	if cm != nil {
+		for k, v := range cm.Data {
+			if k != learnedStateKey() {
+				budget = min(budget, learnedStateMaxData-len(k)-len(v))
+			}
+		}
+	}
+	raw, dropped, err := encodeLearnedState(state, now, max(budget, 0))
+	if err != nil {
+		logger.Error(err, "Learned state: the snapshot could not be encoded within its bound; not written",
+			"maxBytes", budget)
+		return
+	}
 	if cm == nil {
 		cm = &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
 			Name: learnedStateConfigMap, Namespace: config.SystemNamespace(),
-			Labels: map[string]string{"app.kubernetes.io/name": "workload-variant-autoscaler"},
+			Labels: map[string]string{"app.kubernetes.io/component": "learned-state",
+				"app.kubernetes.io/part-of": "workload-variant-autoscaler"},
 		}}
 		cm.Data = map[string]string{learnedStateKey(): raw}
 		err = e.client.Create(ctx, cm)
@@ -271,7 +290,12 @@ func (e *Engine) writeLearnedState(ctx context.Context, now time.Time) {
 	}
 	if err != nil {
 		if apierrors.IsConflict(err) || apierrors.IsAlreadyExists(err) {
-			// Another writer moved first; this cycle's state goes next interval.
+			// Another writer moved first; this state goes next interval. Two
+			// writers alternating is two controllers acting at once -- leader
+			// election off with more than one replica -- so it is logged.
+			logger.V(1).Info("Learned state: another writer updated the snapshot first; retrying next interval",
+				"reason", apierrors.ReasonForError(err))
+			st.lastDigest = ""
 			return
 		}
 		e.reportLearnedStateErr(logger, err, "Learned state: could not write the snapshot")
@@ -281,13 +305,31 @@ func (e *Engine) writeLearnedState(ctx context.Context, now time.Time) {
 	st.seen, st.lastDigest = true, digest
 	if dropped > 0 {
 		logger.Info("Learned state: the snapshot was over its size bound; the least recently used entries were left out",
-			"dropped", dropped, "maxBytes", learnedStateMaxBytes)
+			"dropped", dropped, "maxBytes", budget)
 	}
 }
 
-// learnedStateDigest identifies the state's content, so an unchanged state is
-// not rewritten every interval.
+// learnedStateDigest identifies what was learned, so a state that changed only
+// in the clocks a read moves is not rewritten every interval: the windows' and
+// the memo's last-used clocks and the variants' last-seen times are left out.
+// learnedStateRefresh writes them anyway, often enough for horizons of days.
 func learnedStateDigest(s saturation.LearnedState) string {
+	s = cloneLearnedState(s)
+	for k, w := range s.K2 {
+		w.LastUsed = time.Time{}
+		s.K2[k] = w
+	}
+	for k, w := range s.Throughput {
+		w.LastUsed = time.Time{}
+		s.Throughput[k] = w
+	}
+	for k, m := range s.Accelerators {
+		m.LastUsed = time.Time{}
+		s.Accelerators[k] = m
+	}
+	for k := range s.VariantSeenAt {
+		s.VariantSeenAt[k] = time.Time{}
+	}
 	raw, err := json.Marshal(s)
 	if err != nil {
 		return ""

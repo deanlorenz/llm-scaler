@@ -3,6 +3,7 @@ package steadystate
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -232,6 +233,90 @@ func TestAnUnchangedStateIsNotRewritten(t *testing.T) {
 	e.writeLearnedState(ctx, now.Add(5*time.Minute))
 	_, second := storedDoc(t, c)
 	assert.Equal(t, first.ResourceVersion, second.ResourceVersion)
+}
+
+// Reading a figure moves its last-used clock every cycle; that alone is not
+// worth a write a minute. The refresh writes the clocks anyway, in time for
+// horizons of days.
+func TestAStateThatOnlyAgedIsRewrittenOnTheRefreshNotEveryInterval(t *testing.T) {
+	c := fake.NewClientBuilder().Build()
+	ctx := context.Background()
+	now := time.Now()
+	learned := sampleState(4000)
+	spy := &stateSpy{state: learned}
+	e := snapshotEngine(t, c, spy)
+	e.restoreLearnedState(ctx, now)
+	e.writeLearnedState(ctx, now)
+	_, first := storedDoc(t, c)
+
+	// The same figures, read since: only the last-used clock moved.
+	touched := func(at time.Time) saturation.LearnedState {
+		s := cloneLearnedState(learned)
+		for k, w := range s.K2 {
+			w.LastUsed = at
+			s.K2[k] = w
+		}
+		return s
+	}
+	spy.state = touched(now.Add(5 * time.Minute))
+	e.writeLearnedState(ctx, now.Add(5*time.Minute))
+	_, second := storedDoc(t, c)
+	assert.Equal(t, first.ResourceVersion, second.ResourceVersion, "a clock moved by a read was a write")
+
+	spy.state = touched(now.Add(learnedStateRefresh))
+	e.writeLearnedState(ctx, now.Add(learnedStateRefresh))
+	doc, third := storedDoc(t, c)
+	assert.NotEqual(t, first.ResourceVersion, third.ResourceVersion, "the clocks were never refreshed")
+	for _, w := range doc.State.K2 {
+		assert.WithinDuration(t, now.Add(learnedStateRefresh), w.LastUsed, time.Second)
+	}
+}
+
+// Another writer moving first is retried, not taken as written.
+func TestAConflictIsRetriedNextInterval(t *testing.T) {
+	base := fake.NewClientBuilder().Build()
+	ctx := context.Background()
+	now := time.Now()
+	first := snapshotEngine(t, base, &stateSpy{state: sampleState(4000)})
+	first.restoreLearnedState(ctx, now)
+	first.writeLearnedState(ctx, now)
+
+	conflict := true
+	racing := interceptor.NewClient(base, interceptor.Funcs{
+		Update: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			if conflict {
+				return apierrors.NewConflict(schema.GroupResource{Resource: "configmaps"}, obj.GetName(), nil)
+			}
+			return cl.Update(ctx, obj, opts...)
+		},
+	})
+	e := snapshotEngine(t, racing, &stateSpy{state: sampleState(9000)})
+	e.restoreLearnedState(ctx, now)
+	e.writeLearnedState(ctx, now)
+	conflict = false
+	e.writeLearnedState(ctx, now.Add(learnedStateInterval))
+	doc, _ := storedDoc(t, base)
+	assert.Equal(t, []float64{9000}, doc.State.K2["ns|v|m|H100|1|both|short|q5"].Values,
+		"a write that lost a conflict was taken as written, and not retried")
+}
+
+// The API server bounds the whole object: another version's document takes
+// from this one's bound.
+func TestAnotherVersionsDocumentCountsAgainstTheBound(t *testing.T) {
+	foreign := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: learnedStateConfigMap, Namespace: config.SystemNamespace()},
+		Data:       map[string]string{"v0": strings.Repeat("x", learnedStateMaxData-100)},
+	}
+	c := fake.NewClientBuilder().WithObjects(foreign).Build()
+	ctx := context.Background()
+	now := time.Now()
+	e := snapshotEngine(t, c, &stateSpy{state: sampleState(4000)})
+	e.restoreLearnedState(ctx, now)
+	e.writeLearnedState(ctx, now)
+	var cm corev1.ConfigMap
+	require.NoError(t, c.Get(ctx, client.ObjectKey{Namespace: config.SystemNamespace(), Name: learnedStateConfigMap}, &cm))
+	assert.NotContains(t, cm.Data, learnedStateKey(), "a document written past what the other version left")
+	assert.Len(t, cm.Data["v0"], learnedStateMaxData-100, "the other version's document was touched")
 }
 
 func TestTheSizeBoundLeavesOutTheLeastRecentlyUsedFirst(t *testing.T) {
