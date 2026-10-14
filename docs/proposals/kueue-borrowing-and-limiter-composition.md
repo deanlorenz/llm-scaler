@@ -1,7 +1,7 @@
 # Kueue borrowing, and limiters that compose
 
-**Status:** proposed, revision 4. Nothing here is built. Revision 4 folds in
-three review rounds by five reviewers (see [Review record](#review-record)).
+**Status:** proposed, revision 5. Nothing here is built. Revision 5 folds in
+four review rounds by five reviewers (see [Review record](#review-record)).
 Fixes [#136](https://github.com/ev-shindin/llm-scaling-manager/issues/136),
 and the in-repo part of upstream
 [llm-d WVA #1003](https://github.com/llm-d/llm-d-workload-variant-autoscaler/issues/1003)
@@ -21,7 +21,9 @@ and the in-repo part of upstream
    ([B1](#b1-when-borrowing-is-counted)). Set `countBorrowable: false` on the
    entry, or `WVA_QUOTA_KUEUE_BORROW=false` at install, to get exactly
    today's Kueue cap. Items 1-3 still apply.
-5. **The scaling manager can now scale borrowed replicas down by itself.** It
+5. **The scaling manager can now scale borrowed replicas down by itself**,
+   together with a P/D or LeaderWorkerSet partner when one side of the unit
+   borrowed. It
    does this only when a lender that cannot take its GPUs back is waiting for
    them, or when a borrowed replica cannot be placed. Elsewhere a tighter bound
    still only stops growth.
@@ -192,7 +194,7 @@ budget of 8 with two 8-GPU roles orders 0, not 8+8.
 bounded by physical GPUs.
 
 - A tighter physical or quota bound only stops growth. The one exception is
-  the release of borrowed replicas in B5 and B6.
+  the release of borrowed units, and their partners, in B5 and B6.
 - The physical view counts every GPU-holding pod, training included. When
   training jobs hold GPUs, it can be tighter than the quota.
 - For one release before enforcing, the controller logs the old and new
@@ -241,9 +243,14 @@ Why each one:
     integration off or not select the namespace;
   - Kueue can also manage unlabelled pods, through defaulting.
 
+  A pod of a Kueue-managed Job or other integration does not carry the label;
+  Kueue suspends its owner instead. It counts as managed when its controlling
+  owner carries `kueue.x-k8s.io/queue-name` and has a matching Workload.
+
   Otherwise Kueue's usage misses every serving GPU, the cohort looks idle
   while it is not, and a lender's job is admitted onto GPUs serving already
-  holds. A namespace with no GPU pods takes its last answer.
+  holds. A namespace with no GPU pods keeps its previous answer. On the first
+  read it counts as not managed.
 - **A GPU bound.** Borrowed GPUs belong to another tenant, so something must
   check that they exist. That is the physical limiter, or a GPU
   `ResourceQuota` whose `hard` is at most nominal plus `borrowingLimit`. A
@@ -310,14 +317,20 @@ From these, for this queue `Q`:
   (`reclaimWithinCohort: Never`), guaranteed is `min(N_Q, max(U_Q, G_Q))`:
   what it already uses or keeps. Unused nominal that a peer has borrowed stays
   with the peer. The reason is `nominal-lent-out`.
-- **Growth into lent-out nominal draws from the shared pool.** Kueue charges
-  any usage above `G_Q` to the cohort, even below `N_Q`. So growth from
-  `max(U_Q, G_Q)` up to `N_Q` is debited from `cohortFree` in the same cycle,
-  for queues that can reclaim and queues that cannot. It does not count
-  against the borrow cap, since it is within nominal. Without the debit, one
-  queue spends its nominal while another borrows the same GPUs. Example: a
-  `Never` queue with `N = 8, U = 0, G = 0` and `cohortFree = 8`, plus a second
-  borrower, must order 8 GPUs between them, not 16.
+- **Growth into lent-out nominal draws from the shared pool.** Kueue treats
+  usage above `G_Q` as cohort capacity, even below `N_Q`. So growth from
+  `max(U_Q, G_Q)` up to `N_Q` is taken from `cohortFree` in the same cycle.
+  It does not count against the borrow cap, since it is within nominal.
+  - **For a `Never` queue the pool gates this growth.** It can grow only as
+    far as the pool has room. Example: a `Never` queue with
+    `N = 8, U = 0, G = 0` and `cohortFree = 8`, plus a second borrower, order
+    8 GPUs between them, not 16.
+  - **For a queue that can reclaim, the pool does not gate it.** That growth is
+    guaranteed, because Kueue preempts the borrowers. It still debits the pool,
+    clamped at 0, so no other queue borrows the same GPUs in the same cycle. It
+    is not subject to the placement-timeout release (B5), since it may be
+    waiting on Kueue's reclaim. Today such a queue can grow to `N_Q`, and it
+    still can.
 - **Borrow cap** is `B_Q`, further bounded by the static entry and the
   namespace ResourceQuota.
 - **The free pool** `cohortFree` is shared with every other queue in the
@@ -375,10 +388,16 @@ Ten free GPUs spread over two nodes cannot hold one 8-GPU replica.
   pods on GPU nodes, so it reports free GPUs per schedulable node. A borrowed
   replica is spent only if its pods fit there, first-fit:
   - **Its flavor's nodes only.** A replica uses one flavor, and Kueue pins it
-    to that flavor's node labels.
+    to that flavor's node labels and tolerations. The reader already lists
+    ResourceFlavors and carries their full `nodeLabels` on each shared-pool
+    chunk. A flavor with no `nodeLabels` matches every GPU node.
   - **A 2x8 group needs two nodes.**
   - **Every replica ordered this cycle is debited from the node view**,
-    guaranteed and borrowed, across all models.
+    guaranteed and borrowed, across all models. A guaranteed replica that fits
+    no node debits nothing. It stays Pending and is reported as unplaced.
+  - **One node view per cycle, used in order.** The greedy optimizer places
+    first. The share planner's idle fill reads the same view afterwards, with
+    greedy's debits applied, so the two cannot place into the same hole.
 
   The view counts GPUs only. CPU or memory exhaustion on a node is caught by
   the placement hold and timeout.
@@ -389,7 +408,10 @@ Ten free GPUs spread over two nodes cannot hold one 8-GPU replica.
   - the model's borrowing cooldown starts;
   - the timeout defaults to 5 minutes and is configurable;
   - while a pod has a cluster-autoscaler `TriggeredScaleUp` event, the timeout
-    waits, since a new 8-GPU node often takes longer than 5 minutes.
+    waits, since a new 8-GPU node often takes longer than 5 minutes. The wait
+    is capped at three times the timeout, and ends at once on a later
+    `NotTriggerScaleUp` event. A scale-up that is never triggered does not
+    pause the timeout.
 
   Without a node view this is the only protection, and the docs say so.
 - **Placement hold.** A variant and role with *unplaced* pods gets no new
@@ -424,11 +446,23 @@ When a lender is waiting:
     LeaderWorkerSet group. A unit larger than the lender's need is still
     released. For whole-node models the alternative is releasing nothing. A
     pair of 8+8 GPUs against a 4-GPU shortfall releases the pair.
-  - **Bound:** the total released stays within the lent-out nominal of every
-    waiting lender on that flavor, summed, rounded up to a whole unit. Borrowed
-    pods that are already gated hold no reservation, so they are not counted
-    against the bound. The release never goes below a namespace's guaranteed
-    figure or a variant's `minReplicas`.
+  - **Bound:** add up the lent-out nominal of every waiting lender on that
+    flavor, and round up to a whole unit. The total released stays within
+    that. Gated borrowed pods hold no reservation, so they do not count. A
+    release never goes below a namespace's guaranteed figure or a variant's
+    `minReplicas`.
+  - **A release in flight blocks the next one.** A lowered target frees nothing
+    until KEDA's scale-down window passes and the pods are deleted. Until then,
+    the lender still reads as waiting. So a released unit counts as in flight
+    until two things have happened:
+    - its pods are gone;
+    - a fresh read of the lender's reservation postdates their deletion.
+
+    No further unit is released while one is in flight. The engine keeps
+    this in a ledger per lender and flavor. The ledger resets when the lender
+    stops waiting, and is rebuilt after a restart from the release events. Test:
+    a lender short 4 GPUs, with 32 lent out and a KEDA window longer than one
+    cycle, loses exactly one unit.
   - **It overrides** the analyzer's demand floor and hold, which would
     otherwise raise the target again next cycle.
   - **Order:** lowest-priority model first, then the most recently grown. After
@@ -460,8 +494,9 @@ role's borrowed pods stay gated past the placement timeout after a preemption,
 the matching partner replica is released too, so the partner does not hold GPUs
 that produce nothing. A borrowed partner is preferred, and a guaranteed one is
 released only if no borrowed one exists. A LeaderWorkerSet scales down its
-highest group index. That is normally the newest group, the one that borrowed.
-The release checks this, and logs it when it is not.
+highest group index; this is LeaderWorkerSet's behaviour, not Kueue's. That is
+normally the newest group, the one that borrowed. The release checks this, and
+logs it when it is not.
 
 **What preemption does to a serving pod.** Kueue deletes the pod. It does not
 use the Eviction API, so PodDisruptionBudgets do not apply, but the termination
@@ -579,6 +614,10 @@ Each step is one PR. Its new tests must fail on the parent commit.
      gives 8 guaranteed);
    - the stale freeze;
    - the debounced lender rule;
+   - one release in flight at a time (short 4, lent out 32, slow KEDA window:
+     exactly one unit released);
+   - a reclaiming queue whose nominal is all lent out still grows to nominal;
+   - the managed check for Job-owned pods and for LeaderWorkerSet pods;
    - pair-ratio release, including an 8+8 pair against a 4-GPU shortfall
      (releases the pair, not nothing);
    - the timeout release taking the placed partner;
@@ -641,7 +680,8 @@ For implementers. Paths are under `internal/` unless noted.
   - the accelerator match in `rescale.go`;
   - `BuildShareGroups`.
 - **Placement timeout** and the share optimizer's `HoldFill` timeout share one
-  setting, so the two cannot drift apart.
+  setting, so the two cannot drift apart. Tuning it for cluster-autoscaler
+  latency retunes both, and the configuration reference says so.
 - **Readers of the single mode:**
   - `config/config.go`: `limiterModeOf`, `EffectiveLimiterSummary`,
     `UnenforcedLimiterTypes`;
@@ -710,3 +750,8 @@ whole-node each asked for one fix, folded into revision 4:
   released nothing.
 
 Their minors are folded in too.
+
+Round 4 (revision 4): docs, SRE, Kueue expert and whole-node approved. The
+maintainer asked for one fix: a release still in flight did not stop the next
+one, so KEDA's scale-down window could let many units go for one small
+shortfall. It is folded into revision 5 with every round-4 minor.
