@@ -52,8 +52,10 @@ func (a *SaturationAnalyzer) stableAccelerator(namespace, variantName, accelerat
 		// Touched on READ as well as on write: the memo should live as long as the
 		// variant is being analysed, not as long as its accelerator keeps
 		// resolving -- a variant that stops resolving is exactly the one this
-		// exists for. A variant that stops being analysed goes quiet on both, and
-		// EvictStaleHistory then ages it out with the k2 history beside it.
+		// exists for. NoteVariantsPresent touches it too, so a variant parked at
+		// zero keeps it while it is parked; a variant that is gone goes quiet on
+		// all three and EvictStaleHistory ages it out. Its k2 and mu windows
+		// age on their own clock, so the two need not go together.
 		last.lastUsed = time.Now()
 		a.lastAccelerator[key] = last
 		return last.name

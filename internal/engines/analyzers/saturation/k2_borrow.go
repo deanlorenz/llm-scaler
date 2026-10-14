@@ -35,14 +35,22 @@ import (
 // The worst case of the relaxation is therefore the variant's no-borrow
 // behaviour, reached hours later rather than at once.
 //
-// The clock is per VARIANT, not per bucket. Keyed by the history key, a variant
-// whose traffic moved to another output bucket started a fresh full-strength
-// hold there, up to one per bucket. It still re-arms in two bounded ways, both
-// deliberate: a retention after the relaxation ended the sweep drops it, so a
-// variant that has still never measured itself borrows again -- a weekly
-// re-probe -- and a controller restart drops it with every other learned
-// figure, the donors' windows included, so nothing is borrowed until a donor
-// has measured again.
+// The clock is per BUCKET: one per own history key. A variant whose traffic
+// moves to an output bucket it has never measured gets that bucket's own hold
+// and relaxation, from the donor's figure FOR that bucket. Keyed per variant
+// instead, a variant past its first 6.5 hours jumped straight to its own k1 in
+// every new bucket -- measured in review at 3.2x the donor's figure, with no
+// hold and no gradual rise -- which is the TTFT-direction gap this borrow
+// exists to close. The cost of keying per bucket is the other direction: at
+// most one hold per output bucket a variant passes through, extra replicas
+// for a bounded time, which the k2 asymmetry ranks as the cheaper error.
+//
+// A clock is not reset by a donor that goes and comes back. It re-arms in two
+// bounded ways, both deliberate: a retention after the relaxation ended the
+// sweep drops it, so a variant that has still never measured that bucket
+// borrows again -- a weekly re-probe -- and a controller restart drops it with
+// every other learned figure, the donors' windows included, so nothing is
+// borrowed until a donor has measured again.
 
 const (
 	// BorrowedK2Hold is how long a borrowed k2 is used at full strength
@@ -134,7 +142,7 @@ func (a *SaturationAnalyzer) borrowedK2(ownKey, modelID string, own int64, ownPa
 		return k2Borrow{}, false
 	}
 
-	clockKey := namespace + "|" + variant
+	clockKey := ownKey
 	now := a.now()
 	a.mu.Lock()
 	since, started := a.k2BorrowedSince[clockKey]
@@ -170,7 +178,7 @@ func logBorrowedK2(logger logr.Logger, b k2Borrow, modelID, namespace, variantNa
 		"modelID", modelID, "namespace", namespace, "variant", variantName,
 		"priority", capacity.K2SrcBorrowed.String(), "historyKey", historyKey,
 		"donor", b.donor, "donorK2", b.donorK2,
-		"ownK2", own, "ownPriority", ownSource.String(),
+		"ownCapacity", own, "ownPriority", ownSource.String(),
 		"relaxed", b.relaxed, "borrowAgeSeconds", int64(b.age.Seconds()),
 		"k2", b.k2)
 }

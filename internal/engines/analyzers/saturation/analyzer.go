@@ -64,12 +64,13 @@ type SaturationAnalyzer struct {
 	// saturated replica HOLDS, this says how fast it COMPLETES, and only the
 	// latter tells how many replicas a given arrival rate needs.
 	saturatedThroughput map[string]*capacity.RollingAverage
-	// k2BorrowedSince is, per namespace|variant, when the variant first
-	// borrowed a sibling's k2 (borrowedK2). The relaxation back to the
-	// variant's own figure is measured from it, so it must NOT be reset by a
-	// donor that comes and goes, nor by the variant's traffic moving to another
-	// output bucket -- either would hold a borrowed figure at full strength
-	// again. Swept a retention after the relaxation ended.
+	// k2BorrowedSince is, per own historyKey (variant AND bucket), when the
+	// variant first borrowed a sibling's k2 for that bucket (borrowedK2). The
+	// relaxation back to the variant's own figure is measured from it, so it
+	// must NOT be reset by a donor that comes and goes, which would hold a
+	// borrowed figure at full strength again. A bucket the variant has never
+	// measured gets its own clock: see k2_borrow.go for why per bucket and not
+	// per variant. Swept a retention after the relaxation ended.
 	k2BorrowedSince map[string]time.Time
 	// throughputSampledAt is, per saturatedThroughput key, when the window
 	// last took a reading as a sample of its own, and throughputLastRead the
@@ -562,8 +563,10 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 	// that never saturates would be held at the donor's figure by the sweep
 	// instead of by a donor. After that long the restart is a deliberate
 	// re-probe: a variant that still has no reading of its own borrows again.
-	// Not on the variant's own window appearing: the clock covers every bucket
-	// of the variant, and a reading in one says nothing about another.
+	// Not on the variant's own window appearing: an own window displaces the
+	// borrow already (P2 reads it first), and a clock kept until its age runs
+	// out is what stops a variant hovering at full strength by moving between
+	// its own buckets.
 	borrowLife := BorrowedK2Hold + BorrowedK2Relax + bucketRetention
 	for key, since := range a.k2BorrowedSince {
 		if a.now().Sub(since) > borrowLife {

@@ -179,7 +179,7 @@ var _ = Describe("borrowing a sibling's k2", func() {
 		It("keeps its clock for its life, then lets the variant borrow again as a re-probe", func() {
 			_, ok := borrow()
 			Expect(ok).To(BeTrue())
-			const clockKey = "test-ns|variant-b"
+			clockKey := own
 
 			clock = clock.Add(BorrowedK2Hold + BorrowedK2Relax + a.horizons.BucketRetention - time.Minute)
 			a.computeCapacityHistory[donor].TouchAt(clock) // the donor's owner still reads it
@@ -195,9 +195,12 @@ var _ = Describe("borrowing a sibling's k2", func() {
 			Expect(b.k2).To(Equal(int64(4000)), "from full strength: this is the deliberate weekly re-probe")
 		})
 
-		It("is not restarted by the variant's traffic moving to another output bucket", func() {
-			// Keyed per bucket, the clock gave a variant one full-strength hold
-			// per output bucket it passed through.
+		It("gives a bucket the variant has never measured its own hold, and keeps each bucket's clock", func() {
+			// Keyed per variant, a variant past its first 6.5 hours jumped
+			// straight to its own k1 in every new bucket -- 3.2x the donor's
+			// figure, no hold, no gradual rise: the TTFT-direction gap the
+			// borrow exists to close. Per bucket, the cost is at most one hold
+			// per bucket, in extra replicas.
 			longOwn := a.historyKey("test-model", "test-ns", "variant-b", "H100", 1, domain.RoleBoth, 5000, 5)
 			longDonor := a.historyKey("test-model", "test-ns", "variant-a", "H100", 1, domain.RoleBoth, 5000, 5)
 			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
@@ -210,8 +213,12 @@ var _ = Describe("borrowing a sibling's k2", func() {
 			_, ok = borrow()
 			Expect(ok).To(BeFalse(), "precondition: fully relaxed in the first bucket")
 
-			_, ok = a.borrowedK2(longOwn, "test-model", 12800, params(256))
-			Expect(ok).To(BeFalse(), "a new bucket restarted the variant's hold at full strength")
+			b, ok := a.borrowedK2(longOwn, "test-model", 12800, params(256))
+			Expect(ok).To(BeTrue(), "a bucket the variant never measured went straight to k1")
+			Expect(b.k2).To(Equal(int64(4000)), "from full strength, for the new bucket")
+
+			_, ok = borrow()
+			Expect(ok).To(BeFalse(), "the first bucket's clock was restarted by the second's")
 		})
 	})
 

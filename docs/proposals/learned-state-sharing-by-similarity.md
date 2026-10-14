@@ -56,10 +56,10 @@ correct it.
 `nearestSaturatedThroughput` extends the pool once more: an empty output bucket
 borrows the nearest neighbour bucket's median, again with no variant in the key.
 
-PR #126 adds a fingerprint-keyed ITL line and an `enableLearnedStateReuse`
-switch that gates it. The switch does not reach the k2 or throughput windows,
-because their keys never had a variant to scope by. Main and #126 are
-byte-identical there.
+PR #126 added a fingerprint-keyed ITL line and an `enableLearnedStateReuse`
+switch that gates it, and the cross-variant capacity figure a zero-replica
+variant takes (`lookupCompatibleCapacity`). The switch does not reach the k2 or
+throughput windows, because their keys never had a variant to scope by.
 
 ## The problem with proving identity
 
@@ -147,7 +147,9 @@ three breaks that are about the digest describing the wrong thing: the ITL
 window not being re-keyed on a configuration change, and `EngineParams` frozen
 on the first live record. The unhashed engine image still needs its own change.
 It also gives `enableLearnedStateReuse` one meaning for all three quantities:
-off means a variant reads only its own records.
+off means no sibling's record becomes a variant's answer. A sibling's figure
+that can only lower a variant's capacity -- the k2 borrow below -- is used
+either way.
 
 ## Tiers
 
@@ -285,7 +287,8 @@ Kept, unchanged, and sound as reviewed:
 - The floor's cap-not-order routing, `mayOrder`/`borrowedOnly`, and the
   `heldWhy` composition.
 - `enableLearnedStateReuse`, which ships **off**. Under this proposal it gates
-  tiers 1 and 2 for all three quantities, not only the ITL line.
+  tiers 1 and 2 for all three quantities wherever a sibling's figure becomes
+  the answer. The k2 borrow (tier 2, lower-only) is the exception, below.
 
 The engine image is the one break this proposal does not address. It wants its
 own change: hash the image into the digest, or make an image change a tier-2
@@ -302,8 +305,8 @@ distance.
    with two variants of one model under different `--max-num-seqs`, showing
    that neither inherits the other's k2.
    **Built** for namespace and variant (`historyKey`, `throughputKey`), with
-   specs in `per_variant_history_test.go`; the configuration digest joins the
-   key once #126's `Fingerprint()` is on main. The cluster run is not done.
+   specs in `per_variant_history_test.go`; the configuration digest, now on
+   main with #126, is the next change to the key. The cluster run is not done.
    **Storage alone had a cost**, found in review: a variant with no
    saturated reading of its own used to read a sibling's pooled k2, and
    per-variant windows sent it to the derived figure or to k1 instead. In a
@@ -317,9 +320,13 @@ distance.
    own capacity, `min(k1, own k2)` (rule 1), held for `BorrowedK2Hold`
    (30 min) and relaxed to the own figure over `BorrowedK2Relax` (6 h)
    (rule 2), read without touching the donor (rule 3), and logged with the
-   donor named. The relaxation clock is per variant, so neither a flickering
-   donor nor a change of output bucket restarts it; a retention after it ends
-   the variant may borrow again (a weekly re-probe), and a restart clears it.
+   donor named. The relaxation clock is per bucket of the variant's own key:
+   a flickering donor does not restart it, and a bucket the variant has never
+   measured gets its own hold. Keyed per variant, a variant past its first
+   6.5 hours went straight to its own k1 in a new bucket (3.2x in review),
+   which is this gap again; per bucket, the cost is at most one hold per
+   bucket, in replicas. A retention after a clock ends the variant may borrow
+   again (a weekly re-probe), and a restart clears it.
    One side effect, accepted: the priced capacity is written to the capacity
    store as a live record, and `Store.FindCompatible` reads records across
    namespaces for zero-replica variants. A borrowed figure can reach another

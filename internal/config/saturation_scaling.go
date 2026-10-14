@@ -65,11 +65,20 @@ type ScalingPolicy struct {
 	// needs a way to stop it that does not involve a new image.
 	DisableShapeChangeHold bool `yaml:"disableShapeChangeHold,omitempty"`
 
-	// EnableLearnedStateReuse lets a variant be priced from a sibling's
-	// measurement instead of only its own: an ITL line fitted on one variant
-	// is shared with another, and a variant with no record of its own can take
-	// a capacity figure from a sibling. It does not control learning itself,
-	// and it clears nothing already stored.
+	// EnableLearnedStateReuse lets a sibling's measurement BECOME a variant's
+	// answer: an ITL line fitted on one variant is shared with another, and a
+	// variant with no record of its own can take a capacity figure from a
+	// sibling. It does not control learning itself, and it clears nothing
+	// already stored.
+	//
+	// It does not govern the k2 borrow (P2-borrow, saturation/k2_borrow.go),
+	// which uses a compatible sibling's measured k2 only where that is LOWER
+	// than the variant's own capacity, and relaxes back to it over 6.5 hours.
+	// That runs whatever this says, by the rule below: a figure that can only
+	// lower a capacity orders more replicas, never fewer. Its cost is in the
+	// other direction -- a false match, such as two configurations whose
+	// unread flags both fell back to defaults, holds extra replicas for up to
+	// the 6.5 hours -- and there is no switch for it.
 	//
 	// OFF BY DEFAULT, and that is the whole of this setting's story. Reuse is
 	// decided by an equality over a digest of 14 parsed engine flags, and that
@@ -85,8 +94,8 @@ type ScalingPolicy struct {
 	//
 	// So everything that merely DESCRIBES the configuration ships on by
 	// default -- the digest, wva_engine_config, the drift checks. Only the act
-	// of letting one variant's reading price another's decision waits for an
-	// operator to ask. The replacement is graded sharing by similarity rather
+	// of letting one variant's reading become another's answer -- which can
+	// price it HIGHER -- waits for an operator to ask. The replacement is graded sharing by similarity rather
 	// than by proven identity, where an unreadable flag is a distance penalty
 	// instead of a false equality; see
 	// docs/proposals/learned-state-sharing-by-similarity.md.
