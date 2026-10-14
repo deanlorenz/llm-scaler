@@ -463,6 +463,46 @@ disable-physical-limiter: ## CLUSTER ADMIN: remove the limiter from cluster poli
 	@WVA_POLICY_NS=$(WVA_POLICY_NS) \
 		bash -c 'source deploy/lib/common.sh; source deploy/lib/limiter_policy.sh; source deploy/lib/physical_limiter.sh; disable_physical_limiter'
 
+##@ Utilization share
+
+# One optimizer block in the scaling policy, managed through
+# deploy/utilization-share.sh: check, then shadow, then activate; off goes back
+# through shadow so the transfer marks are cleared first. NAMESPACE is the
+# models' namespace and must be given; the controller and its policy default to
+# it (CONTROLLER_NAMESPACE, POLICY_NAMESPACE). PHYSICAL_GROUPS=true plans GPUs
+# bounded only by the physical inventory (a gpu-inventory limiter, no quota).
+# RESTART=1 restarts the controller when it does not reload the policy itself.
+# CONTROLLER_NAMESPACE has an e2e default above, so it counts only when given.
+us_controller_ns_given = $(filter command line environment,$(origin CONTROLLER_NAMESPACE))
+us_args = -n "$(NAMESPACE)" $(if $(us_controller_ns_given),--controller-namespace "$(CONTROLLER_NAMESPACE)",) \
+	$(if $(POLICY_NAMESPACE),--policy-namespace "$(POLICY_NAMESPACE)",) $(if $(filter 1 true,$(RESTART)),--restart,)
+us_namespace_check = @test -n "$(prepull_namespace_given)" || { echo "$@: set NAMESPACE=<the models' namespace> (the Makefile default is not taken here)" >&2; exit 1; }
+
+.PHONY: utilization-share-check
+utilization-share-check: ## Utilization share: is there a budget to share, and do the accelerators resolve. NAMESPACE=<ns> [POLICY_NAMESPACE=] [CONTROLLER_NAMESPACE=]
+	$(us_namespace_check)
+	@bash deploy/utilization-share.sh check $(us_args)
+
+.PHONY: utilization-share-shadow
+utilization-share-shadow: ## Utilization share: compute and report, move nothing. NAMESPACE=<ns> [PHYSICAL_GROUPS=true] [RESTART=1]
+	$(us_namespace_check)
+	@bash deploy/utilization-share.sh shadow $(us_args) $(if $(filter 1 true,$(PHYSICAL_GROUPS)),--physical-groups,)
+
+.PHONY: utilization-share-activate
+utilization-share-activate: ## Utilization share: act on what shadow reported. NAMESPACE=<ns> [RESTART=1]
+	$(us_namespace_check)
+	@bash deploy/utilization-share.sh activate $(us_args)
+
+.PHONY: utilization-share-status
+utilization-share-status: ## Utilization share: mode, recent decisions, transfers, warnings, marked pods. NAMESPACE=<ns>
+	$(us_namespace_check)
+	@bash deploy/utilization-share.sh status $(us_args)
+
+.PHONY: utilization-share-off
+utilization-share-off: ## Utilization share: back through shadow, wait for the marks to clear, remove the block. NAMESPACE=<ns> [RESTART=1]
+	$(us_namespace_check)
+	@bash deploy/utilization-share.sh off $(us_args)
+
 ##@ Install, in three phases
 
 # SCOPE picks what the controller manages. NAMESPACE scope is the default because
@@ -2582,6 +2622,12 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@bash hack/check-quoted-programs.sh
 	@echo "Checking the jq marker predicates..."
 	@bash hack/check-jq-predicates.sh
+	@echo "Checking the utilization-share script..."
+	@# Executes its verbs against a stub kubectl. The ones that matter are
+	@# refusals: a pod list that fails read as "no pod is marked" would remove
+	@# the optimizer block and strand the marks, and parses perfectly.
+	@bash -n deploy/utilization-share.sh
+	@bash hack/check-utilization-share-script.sh
 	@echo "Checking workload readiness detection..."
 	@# Executes the real functions against fixture pod specs. `bash -n` above
 	@# cannot see any of what this covers: choosing the wrong container, counting

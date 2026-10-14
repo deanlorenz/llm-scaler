@@ -31,8 +31,8 @@ headroom costs nothing extra.
 **Do not use it when:**
 
 - **There is nothing to share.** One model per quota gains only headroom.
-- **There is no quota limiter.** Without a `limiters:` list the optimizer has
-  no budget and stays off (mode `invalid`).
+- **There is no limiter.** Without a `limiters:` list the optimizer has no
+  budget and stays off (mode `invalid`).
 - **You want idle GPUs given back.** It holds headroom on purpose
   ([What it costs](#what-it-costs)).
 - **The model that rises at a swap cannot wait.** GPUs held by another model
@@ -52,11 +52,15 @@ headroom costs nothing extra.
 
 ## What it needs
 
-- A quota limiter in the **cluster default** policy entry, with accelerators
-  that resolve: [cap what each tenant may take](../tenant-gpu-quotas/)
-  declares it, and [bound-by-gpus](../bound-by-gpus/) checks the accelerators.
-  The quota's key must be the accelerator name the controller logs for your
-  variants (for example `H200` on one cluster, `NVIDIA-H200` on another).
+- A limiter in the **cluster default** policy entry, with accelerators that
+  resolve. Either a quota, which
+  [cap what each tenant may take](../tenant-gpu-quotas/) declares (its key must
+  be the accelerator name the controller logs for your variants, for example
+  `H200` on one cluster and `NVIDIA-H200` on another), or the physical GPU
+  inventory that [bound-by-gpus](../bound-by-gpus/) declares, with
+  `physicalGroups: true` in the block. Only the quota has been measured; under
+  the physical limiter the budget is every GPU of a type on the cluster
+  ([what differs](../../guides/utilization-share/README.md#under-the-physical-gpu-limiter)).
 - Model servers that drain on termination (`preStop` and
   `terminationGracePeriodSeconds`): a transfer removes a donor pod through an
   ordinary scale-down.
@@ -85,10 +89,11 @@ In the order it is applied:
 ## Declaring it
 
 One `optimizer:` block in the scaling policy's `default` entry, beside the
-quota limiter, rolled out in two steps: **shadow** (it computes and reports,
-and moves nothing), then **active**. Write `shadow: true` explicitly: a block
-without the key acts from the next cycle. The commands, and the check after
-each step, are the guide:
+limiter, rolled out in two steps: **shadow** (it computes and reports, and
+moves nothing), then **active**. Each step is one `make` target
+(`utilization-share-check`, `-shadow`, `-activate`, `-status`, `-off`) that
+writes the block, waits for the controller to read it and reports a refusal.
+The guide has them in order:
 [Turn on the utilization-share optimizer, safely](../../guides/utilization-share/).
 
 Model owners choose a weight on their own policy entry (`weightClass:
