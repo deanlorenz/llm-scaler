@@ -1,7 +1,8 @@
 # Learned-state sharing by similarity, not by identity
 
-**Status:** proposed; step 3 of [Order of work](#order-of-work) is partly
-built (per-variant k2 and throughput windows), the rest is not. Supersedes part of the sharing key on
+**Status:** proposed; step 3 of [Order of work](#order-of-work) is built
+(per-variant k2 and throughput windows, and a compatible sibling's k2
+borrowed lower-only with an expiry), the rest is not. Supersedes part of the sharing key on
 `feat/engine-config-identity` (PR #126), and proposes a storage model for the
 k2 and saturated-throughput windows that main does not have; see
 [What this changes](#what-this-changes).
@@ -180,17 +181,34 @@ variant to tier 2 instead of dropping it to tier 3.
 1. **It may only make a variant more conservative, at every tier.** For k2 and
    saturated throughput that means a borrowed figure is used only when it is
    *lower* than what the variant would otherwise get from its own derivation;
-   a donor can never raise a variant's capacity. Too low costs replicas, which
-   the variant's own readings then correct. Too high costs TTFT and, as above,
-   suppresses the reading that would correct it. For the ITL line, #126
+   a donor can never raise a variant's capacity. Too high costs TTFT: the
+   fleet is held small, saturates, and P1-obs measures the true k2 within a
+   few cycles, but the tail latency of that episode does not recover. Too
+   low costs replicas and does **not** correct itself -- see rule 2. For the ITL line, #126
    already enforces the equivalent ("cap, never order"): `borrowedReading`
    routes the reading so `mayOrder` is never set, `thinOwnWindow` excludes it
    from the queue release, and `fleetHasMeasuredItself` refuses it. This rule
    does **not** relax for a tier-1 match. It is what makes a wrong prior
    survivable.
-2. **Own data displaces a prior, and sooner at a greater distance.** A tier-2
-   prior is displaced by fewer own observations than a tier-1 prior, since
-   there is less reason to believe it.
+2. **A prior gives way: to own data at once, and to the variant's own figure
+   over time even without it.** Own data displaces a prior, and sooner at a
+   greater distance: a tier-2 prior by fewer own observations than a tier-1
+   prior. But own data may never arrive, and for k2 and throughput rule 1
+   guarantees that is the case it is borrowed in. Both are measured only at
+   saturation (P1-obs needs the queue over its threshold), and a figure that is
+   too low orders extra replicas, so each runs light, nothing saturates, and
+   nothing is measured; the low capacity also blocks the scale-down that would
+   let a replica saturate. A donor's figure can be right for the donor and too
+   low for the borrower, and without an expiry it would stand for as long as
+   the donor exists. So a borrowed figure holds for a bounded time and then
+   **relaxes slowly to the variant's own figure** (P3 derived, or P4 k1). As
+   it rises the fleet thins a replica at a time until one saturates and the
+   variant measures itself. The relaxation never goes above the variant's own
+   figure, so rule 1 still holds throughout: its worst case is the variant's
+   no-borrow behaviour, reached hours later instead of at once. This is the
+   "relaxed upward only slowly" policy of
+   `docs/plans/analyzers/k2-capacity-model.md`, applied to a borrowed figure
+   rather than an own one.
 3. **Reading a donor does not extend the donor's life.** Today
    `computeCapacityHistory` and `nearestSaturatedThroughput` `Touch()` the
    window they read, so retention is "last used". Under per-variant storage a
@@ -239,7 +257,9 @@ already-reviewed answer to the same question.
 
 - `historyKey` and `throughputKey` gain namespace, variant and configuration
   digest.
-- `P2-hist` reads the variant's own window, then the tiers, under rule 1.
+- `P2-hist` reads the variant's own window. With none, a compatible sibling's
+  lower figure is borrowed as `P2-borrow` under rules 1 and 2 (built; see
+  step 3 below).
 - `nearestSaturatedThroughput` searches by distance as above, and stops
   touching what it borrows.
 - No migration. These windows live in the controller's memory and an upgrade
@@ -284,21 +304,31 @@ distance.
    **Built** for namespace and variant (`historyKey`, `throughputKey`), with
    specs in `per_variant_history_test.go`; the configuration digest joins the
    key once #126's `Fingerprint()` is on main. The cluster run is not done.
-   **The cost until step 4 lands:** a variant with no saturated reading of
-   its own used to read a sibling's pooled k2 and mu; now it falls to the
-   derived figure, or to k1 when it has no engine parameters, until it
-   saturates itself. Measured in a spec: a sibling saturated at 4000 tokens
-   gave a new variant a capacity of 4000 before this step and 12800 (its k1)
-   after it, so a new variant -- a canary, a rename -- starts at up to 3.2x
-   the capacity, ordering about a third of the replicas, which is the TTFT
-   direction. It is the same start every brand-new model already gets, and
-   a sibling's figure could equally have been higher than the truth; but it
-   is the canary case rule 4 names as the best case for borrowing. Step 4's
-   lower-only borrow is what restores it. Shipping step 3 alone accepts that
-   gap; building rule 1's borrow on main now would close it without waiting
-   for #126, using `IsCapacityCompatible` as the tier-2 predicate.
-4. **Tiers 1 and 2** behind `enableLearnedStateReuse`, with rule 1 enforced and
-   pinned by a spec in which a donor's higher k2 fails to raise the borrower's.
+   **Storage alone had a cost**, found in review: a variant with no
+   saturated reading of its own used to read a sibling's pooled k2, and
+   per-variant windows sent it to the derived figure or to k1 instead. In a
+   spec, a sibling saturated at 4000 tokens gave a new variant 4000 before
+   and 12800 (its k1) after: a canary starting at 3.2x the capacity, the
+   TTFT direction. **Closed by the k2 borrow, built with this step:**
+   `P2-borrow` (`k2_borrow.go`) reads a sibling in the same namespace, on the
+   same model, accelerator, GPU count, role, bucket and queue threshold,
+   whose engine parameters pass `IsCapacityCompatible` -- tier 2 on main,
+   without waiting for #126's digest. It is used only below the variant's
+   own figure (rule 1), held for `BorrowedK2Hold` (30 min) and relaxed to
+   the own figure over `BorrowedK2Relax` (6 h) (rule 2), read without
+   touching the donor (rule 3), and logged with the donor named. It is NOT
+   behind `enableLearnedStateReuse`: that switch gates where a sibling's
+   figure can become an answer that orders fewer replicas, and this one
+   cannot. Specs in `k2_borrow_test.go`, each with a mutation that fails it.
+   **Throughput is not borrowed across variants.** A canary with no mu of
+   its own simply has no floor until it measures one (the floor skips an
+   unpriced replica), so it carries no too-low risk to expire; a borrowed mu
+   would, and would need the same expiry before it could be added.
+4. **Tiers 1 and 2 for the ITL line** behind `enableLearnedStateReuse`, and
+   tier 1 (identical flags, by `Fingerprint()`) for k2 once the digest is on
+   main. The k2 half of rule 1 is already pinned: a spec in which a donor's
+   higher k2 fails to raise the borrower's ("never raises a variant above its
+   own figure").
 
 ## Open questions
 

@@ -379,6 +379,7 @@ func (e *Engine) evictStaleLearnedState(ctx context.Context) {
 		logger.Info("evicted stale learned state",
 			"k2History", history.K2History,
 			"muWindows", history.MuWindows,
+			"k2Borrows", history.K2Borrows,
 			"itlWindows", history.ITLWindows,
 			"itlBaselines", history.ITLBaselines,
 			"startEstimates", history.StartEstimates,

@@ -64,6 +64,13 @@ type SaturationAnalyzer struct {
 	// saturated replica HOLDS, this says how fast it COMPLETES, and only the
 	// latter tells how many replicas a given arrival rate needs.
 	saturatedThroughput map[string]*capacity.RollingAverage
+	// k2BorrowedSince is, per own historyKey, when the variant first borrowed
+	// a sibling's k2 (borrowedK2). The relaxation back to the variant's own
+	// figure is measured from it, so it must NOT be reset by a donor that
+	// comes and goes -- that would hold a borrowed figure at full strength
+	// forever. Swept once the variant has a window of its own, or long after
+	// the relaxation ended.
+	k2BorrowedSince map[string]time.Time
 	// throughputSampledAt is, per saturatedThroughput key, when the window
 	// last took a reading as a sample of its own, and throughputLastRead the
 	// last reading it was given, sample or not (recordSaturatedThroughput);
@@ -162,6 +169,8 @@ type Evicted struct {
 	// saturated-throughput windows the demand floor prices from.
 	K2History int
 	MuWindows int
+	// K2Borrows is the per-variant start of a borrowed k2 (borrowedK2).
+	K2Borrows int
 	// ITLWindows and ITLBaselines are the fitted ITL(k) state; StartEstimates
 	// and StartOutliers the learned replica start time and its reject
 	// counter; Pods the per-Pod records that say a start is already counted.
@@ -185,7 +194,7 @@ type Evicted struct {
 
 // Any reports whether the sweep evicted anything at all.
 func (e Evicted) Any() bool {
-	return e.K2History > 0 || e.MuWindows > 0 || e.ITLWindows > 0 ||
+	return e.K2History > 0 || e.MuWindows > 0 || e.K2Borrows > 0 || e.ITLWindows > 0 ||
 		e.ITLBaselines > 0 || e.StartEstimates > 0 || e.StartOutliers > 0 ||
 		e.Pods > 0 || e.Accelerators > 0 || e.DecodeSaturation > 0 ||
 		e.FleetShapes > 0 || e.VariantStamps > 0
@@ -206,6 +215,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		computeCapacityHistory: make(map[string]*capacity.RollingAverage),
 		lastAccelerator:        make(map[string]acceleratorMemo),
 		saturatedThroughput:    make(map[string]*capacity.RollingAverage),
+		k2BorrowedSince:        make(map[string]time.Time),
 		throughputSampledAt:    make(map[string]time.Time),
 		throughputLastRead:     make(map[string]float64),
 		capacityStore:          store,
@@ -485,6 +495,20 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 			delete(a.throughputSampledAt, key)
 			delete(a.throughputLastRead, key)
 			evicted.MuWindows++
+		}
+	}
+	// A borrow's start goes once the variant has a window of its own (the
+	// borrow is displaced and will not be consulted again), or a retention
+	// after its relaxation ended -- not sooner, because deleting it restarts
+	// the borrow at full strength, and a variant that never saturates would
+	// then be held at the donor's figure by a sweep instead of by a donor.
+	// After that long the restart is a deliberate re-probe: a week later, a
+	// variant that still has no reading of its own borrows again.
+	borrowLife := BorrowedK2Hold + BorrowedK2Relax + bucketRetention
+	for key, since := range a.k2BorrowedSince {
+		if _, own := a.computeCapacityHistory[key]; own || a.now().Sub(since) > borrowLife {
+			delete(a.k2BorrowedSince, key)
+			evicted.K2Borrows++
 		}
 	}
 	for key, at := range a.decodeSaturatedAt {

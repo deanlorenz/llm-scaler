@@ -125,7 +125,7 @@ func TestLogContract_ReportToolCollectsEveryMessage(t *testing.T) {
 // (k2ReasonObsImplausible, k2ReasonObsDownstream) that precede the tier a
 // declined observation fell through to. dump_k2_decisions.py legends all six.
 var k2PriorityLabels = map[string]bool{
-	"P1-obs": true, "P2-hist": true, "P3-k2": true, "P4-k1": true,
+	"P1-obs": true, "P2-hist": true, "P2-borrow": true, "P3-k2": true, "P4-k1": true,
 }
 
 // observedCtx returns a context carrying a logger that records everything the

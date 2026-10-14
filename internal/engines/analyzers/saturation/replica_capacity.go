@@ -634,6 +634,10 @@ func (a *SaturationAnalyzer) computeK2(
 	isPrefill := canonicalRole(role) == domain.RolePrefill
 	if !isPrefill {
 		if k2Derived := estimateCapacityFromParams(engineParams, avgInput, avgOutput); k2Derived > 0 {
+			if b, ok := a.borrowedK2(historyKey, modelID, k2Derived, engineParams); ok {
+				logBorrowedK2(logger, b, modelID, namespace, variantName, historyKey, k2Derived, capacity.K2SrcDerived)
+				return b.k2, capacity.K2SrcBorrowed
+			}
 			logger.V(logging.DEFAULT).Info("k2-decision",
 				"modelID", modelID, "namespace", namespace, "variant", variantName,
 				"priority", capacity.K2SrcDerived.String(), "historyKey", historyKey,
@@ -644,6 +648,10 @@ func (a *SaturationAnalyzer) computeK2(
 	}
 
 	// Priority 4: Fallback to k1
+	if b, ok := a.borrowedK2(historyKey, modelID, k1, engineParams); ok {
+		logBorrowedK2(logger, b, modelID, namespace, variantName, historyKey, k1, capacity.K2SrcFallback)
+		return b.k2, capacity.K2SrcBorrowed
+	}
 	reason := "no observed/historical/derived k2; capacity is memory-bound only"
 	if isPrefill {
 		reason = "prefill role: derived-from-args formula assumes decode-style output length; skipped"

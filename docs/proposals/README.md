@@ -133,7 +133,8 @@ last; it is the unit change that makes the other two land.
   throughput are pooled across namespaces and engine configurations, and the
   pooled k2 becomes a variant's own, so a donor with a higher one makes it
   order fewer replicas. A borrowed reading may only make a variant more
-  conservative. Replaces the identity digest as the gate for sharing on #126,
+  conservative, and it expires, because a k2 that is too low never corrects
+  itself: nothing saturates, so nothing is measured. Replaces the identity digest as the gate for sharing on #126,
   after seven measured ways to make that digest wrong.
 
 ## Product and lifecycle
