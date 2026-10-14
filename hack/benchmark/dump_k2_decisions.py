@@ -5,7 +5,7 @@ markdown report of which fallback tier fired, when, and why.
 
 Reads the following log lines:
   - k2-decision                    (saturation_v2) per replica, per cycle:
-                                    which of the four k2 priority tiers fired (or which observation was declined)
+                                    which of the k2 priority tiers fired (or which observation was declined)
                                     (observed / historical / derived /
                                     fallback-to-k1)
   - replica-capacity-decision      (saturation_v2) per replica, per cycle:
@@ -549,7 +549,8 @@ def render_report(events, start, stop, cycle_gap, workload_line=None):
         lines.append("One row per optimize cycle, totalled across every ready replica of this "
                      "variant that cycle (N). KVinUse/LocalQ/EPPq/TotalDemand are all in tokens; "
                      "Priority lists every k2 tier that fired across N replicas this cycle "
-                     "(P1-obs=observed, P2-hist=historical average, P3-k2=derived from deployment "
+                     "(P1-obs=observed, P2-hist=historical average, P2-borrow=a compatible "
+                     "sibling's lower figure, relaxing to this variant's own, P3-k2=derived from deployment "
                      "args, P4-k1=no signal, memory-bound only; P1-obs-invalid and "
                      "P1-obs-downstream mark an observation that was NOT recorded -- above the "
                      "KV ceiling, or a prefill saturation while decode was saturated -- and are "

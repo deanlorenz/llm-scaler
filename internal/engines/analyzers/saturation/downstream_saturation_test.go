@@ -43,14 +43,14 @@ var _ = Describe("a prefill saturation under a saturated decode", func() {
 		prefillVariant = "prefill-v"
 		prefillKv      = int64(1_149_312)
 		prefillK1      = 919_449.0 // prefillKv x 0.8, truncated
-		prefillKey     = "test-model|H200|1|prefill|short|q5"
-		decodeKey      = "test-model|H200|1|decode|long|q5"
+		prefillKey     = "test-ns|" + prefillVariant + "|test-model|H200|1|prefill|short|q5"
+		decodeKey      = "test-ns|" + decodeVariant + "|test-model|H200|1|decode|long|q5"
 		// Prefill's throughput window carries NO output bucket: it completes a
 		// request after one token, so the answer's length is not work it does,
 		// and keying by it split one population of readings across unrelated
 		// buckets (prefillOutputBucket). Decode still uses the fleet's output
 		// length, and the k2 history stays on the own key for both.
-		prefillMuKey = "test-model|H200|1|prefill|" + prefillOutputBucket + "|q5"
+		prefillMuKey = "test-ns|" + prefillVariant + "|test-model|H200|1|prefill|" + prefillOutputBucket + "|q5"
 	)
 	decode := func(pod string, tokensInUse int64, queue int) domain.ReplicaMetrics {
 		rm := makeReplicaMetrics(pod, decodeVariant, tokensInUse, runKvCapacity, queue, 6000, 1000)
@@ -287,7 +287,7 @@ var _ = Describe("a prefill saturation under a saturated decode", func() {
 		other.ModelID, other.Namespace = "other-model", "other-ns"
 		result, err := analyzer.Analyze(ctx, other)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(analyzer.computeCapacityHistory).To(HaveKey("other-model|H200|1|prefill|short|q5"))
+		Expect(analyzer.computeCapacityHistory).To(HaveKey("other-ns|" + prefillVariant + "|other-model|H200|1|prefill|short|q5"))
 		Expect(analyzer.computeCapacityHistory).NotTo(HaveKey(prefillKey), "the first model is still gated")
 		Expect(analyzer.decodeSaturatedAt).To(HaveLen(1))
 		Expect(analyzer.decodeSaturatedAt).To(HaveKey("test-ns|test-model"))
@@ -398,7 +398,7 @@ var _ = Describe("a prefill saturation under a saturated decode", func() {
 		_, err = both.Analyze(ctx, makeAnalyzerInput([]domain.ReplicaMetrics{rm},
 			[]domain.VariantReplicaState{{VariantName: "both-v", AcceleratorName: "H200", CurrentReplicas: 1, GPUsPerReplica: 1}}))
 		Expect(err).NotTo(HaveOccurred())
-		Expect(both.computeCapacityHistory).To(HaveKey("test-model|H200|1|both|long|q5"))
+		Expect(both.computeCapacityHistory).To(HaveKey("test-ns|both-v|test-model|H200|1|both|long|q5"))
 	})
 
 	It("decides decode's saturation over every decode row, whatever order the rows come in", func() {

@@ -459,14 +459,17 @@ getting any of them wrong silently changes replica counts.
 
 **Per-variant state** — the fitted ITL window and its baseline, the replica
 start estimate and its outlier counter — ages on `HistoryEvictionTimeout`
-measured from when the variant was last *reported*. It is a liveness stamp,
+measured from when the variant was last *reported*, or last found to exist:
+the engine stamps every active and every parked variant just before the sweep
+(`notePresentVariants` → `NoteVariantsPresent`). It is a liveness stamp,
 because an empty ITL window is not evidence that a variant is gone: a healthy
 fleet below k=0.15 offers readings every cycle and holds none, so sweeping on
 emptiness deleted the state of exactly the fleets that were doing fine.
 
 **Bucket-keyed windows** — the k2 history and the mu windows the demand floor
-prices from — are keyed by workload bucket rather than by variant, so they
-cannot use that stamp at all. They are kept for `HistoryRetention` (7d) from
+prices from — are keyed by workload bucket as well as by variant, and a bucket
+the variant has stopped serving must expire while the variant lives, so they
+do not use that stamp. They are kept for `HistoryRetention` (7d) from
 when they were last **read**: `Touch()` on the read path is what makes "last
 read" the measure. Their only writer needs a saturated queue, so aged on last
 *write* they would expire on exactly the fleets that are coping, and the figure
@@ -515,10 +518,11 @@ over a weekend keeps its engine params and capacity record. The store has no
 trust horizon on reads either; `Store.IsStale` and `StalenessTimeout` (30 min)
 exist but have no caller on the reconcile path.
 
-Net: at the defaults, 24h of quiet costs the *fitted* per-variant figures and
-seven days costs the bucket's measurement and the capacity record. A fleet
-parked past the variant timeout re-measures its ITL baseline and start estimate
-on wake.
+Net: at the defaults, a variant that is *deleted* loses its fitted per-variant
+figures 24h later. One that is merely parked keeps them, because
+`notePresentVariants` stamps every variant that exists just before the sweep,
+including on the cycle a long-parked fleet wakes. Seven days without a read costs the bucket's measurement, parked or
+not, and seven days costs the capacity record.
 
 **The horizons tick on cycles, not on wall clock.** The sweep is called from
 `optimizeV2`, and `optimize` returns early on "No active VariantAutoscalings

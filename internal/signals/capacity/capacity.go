@@ -19,11 +19,17 @@ const (
 	K2SrcHistorical                     // rolling average from prior observations
 	K2SrcDerived                        // estimated from deployment args
 	K2SrcFallback                       // fallback to k1 (memory-bound)
+	// K2SrcBorrowed is a compatible sibling variant's measured k2, used by a
+	// variant with no history of its own and only where it is LOWER than what
+	// the variant would otherwise get from P3 or P4. Not a step in the chain:
+	// it is checked after P3/P4 have produced the variant's own figure, and
+	// can only lower it. Numbered last so the others keep their values.
+	K2SrcBorrowed
 )
 
 // String is the log label of a K2Source; the labels are what the k2 decision
 // log line and the analyzer result's Reason carry. Empty for a source that is
-// none of the four.
+// none of the five.
 func (s K2Source) String() string {
 	switch s {
 	case K2SrcObserved:
@@ -34,6 +40,8 @@ func (s K2Source) String() string {
 		return "P3-k2"
 	case K2SrcFallback:
 		return "P4-k1"
+	case K2SrcBorrowed:
+		return "P2-borrow"
 	}
 	return ""
 }

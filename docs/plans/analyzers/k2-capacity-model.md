@@ -127,10 +127,11 @@ on half the picture.
 3. **Relaxation policy.** How does a bucket minimum ever move up when a workload
    genuinely gets cheaper? Slow age-based relaxation is the proposal; the rate and
    its interaction with the SLO asymmetry need choosing deliberately.
-4. **Bucket key.** Currently `model|accelerator|gpuCount|outputBucket` — no
-   namespace, no variant. That looks intentional (capacity as a property of
-   model+hardware, matching `lookupCompatibleCapacity`), but it means one deployment
-   can set another's ceiling. Confirm or scope it.
+4. **Bucket key.** Was `model|accelerator|gpuCount|outputBucket` — no
+   namespace, no variant — so one deployment could set another's ceiling.
+   Resolved: the k2 and throughput keys now lead with `namespace|variant`, and
+   starting one variant from another's figure is a read-side decision; see
+   [learned-state sharing by similarity](../../proposals/learned-state-sharing-by-similarity.md).
 5. **P/D disaggregation.** Not addressed by the direction above: μ from the
    generation-tokens histogram is decode-centric; a prefill pool needs
    `rate(vllm:request_prompt_tokens_count[1m])` as its μ.
