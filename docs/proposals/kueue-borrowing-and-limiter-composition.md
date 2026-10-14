@@ -132,7 +132,8 @@ over-states capacity (cordoned nodes still count), so the risk is one-way.
 
 ### Part B: count Kueue borrowing (#136)
 
-**B1. Configuration** is opt-in, per quota entry:
+**B1. Configuration** is on by default for every quota entry with
+`kueue.enabled`, and can be turned off per entry:
 
 ```yaml
 limiters:
@@ -143,15 +144,26 @@ limiters:
     scope: namespace
     kueue:
       enabled: true
-      countBorrowable: true      # default false: nominal quota only, as today
+      # countBorrowable: false   # default true; false = nominal quota only, as before
     namespaceQuotas:
       default: { H100: -1 }
 ```
 
-The installer gets `WVA_QUOTA_KUEUE_BORROW=true`. If `countBorrowable` is set
-and no `gpu-inventory` entry is declared, validation still accepts the config,
-but it logs a warning at every rebuild. Borrowed capacity is, by construction,
-GPUs another tenant owns. The warning stays until physical bounds are in force.
+The installer gets `WVA_QUOTA_KUEUE_BORROW=false` to turn it off. If borrowing
+is on and no `gpu-inventory` entry is declared, validation still accepts the
+config, but it logs a warning at every rebuild. Borrowed capacity is, by
+construction, GPUs another tenant owns. The warning stays until physical bounds
+are in force. On a cluster-scoped install, the installer adds a
+`gpu-inventory` entry with `WVA_QUOTA_KUEUE=true` unless the operator passes
+`WVA_LIMITER_PHYSICAL=false`. A namespace-scoped install cannot list nodes, so
+it gets only the warning.
+
+**Upgrade note.** Default on means every existing Kueue-bounded install starts
+counting borrowable capacity on upgrade. A namespace in a cohort with idle
+lenders will then grow past its nominal quota where it used to stop. This goes
+in the release notes with the one-line opt-out. Step 3 of
+[Order of work](#order-of-work) ships the read-only log one release earlier, so
+operators can see the figure before it applies.
 
 **B2. What is read.** No new kinds, and no new RBAC for flat cohorts. Every
 field below is on the ClusterQueue objects the reader already lists.
@@ -291,8 +303,6 @@ the parent commit, has to fail there.
 
 ## Open questions
 
-- **Default for `countBorrowable`.** It is proposed as `false`. A default of
-  `true` would change the figure for every Kueue user on upgrade.
 - **Scale-from-zero into borrowed capacity.** Waking against the guaranteed
   part only is proposed. A model whose whole nominal quota is in use then
   cannot wake, even when a lender is idle. A per-model
