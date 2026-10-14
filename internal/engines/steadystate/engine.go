@@ -1191,6 +1191,9 @@ func (e *Engine) optimizeV2(
 	e.pruneAnalyzerSeries(activeKeys)
 	e.pruneBlockedModels(activeKeys)
 	e.pruneLastDecided(e.stickyAge(), time.Now())
+	// Before the sweep, which would otherwise judge a variant on a stamp from
+	// before it parked: Analyze stamps too, but only after this point.
+	e.notePresentVariants(ctx, modelGroups)
 	e.evictStaleLearnedState(ctx)
 	e.scaleTargetUIDs = make(map[string]types.UID)
 
@@ -1755,8 +1758,6 @@ func (e *Engine) prepareModelData(
 		// keeps last cycle's count for as long as the gap lasts -- reading as
 		// a fully scraped fleet in exactly the case it exists to expose.
 		e.zeroObservedReplicas(namespace, modelID)
-		// Still here, though nothing ran: keep what was learned about it.
-		e.notePresentVariants(ctx, namespace, modelID, modelVAs, scaleTargets, k8sClient)
 		return nil, nil // nil modelData signals skip
 	}
 	// Measurable this cycle. Reset the gauge rather than leaving the last bad

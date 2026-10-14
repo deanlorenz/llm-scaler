@@ -3,10 +3,10 @@ package saturation
 import (
 	"fmt"
 	"maps"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 )
@@ -129,13 +129,12 @@ type SaturationAnalyzer struct {
 	// visit and so never swept at all. Both producers stamp their own key,
 	// rather than one relying on the other having run first.
 	//
-	// "REPORTED" means the variant was in the cycle's input, or -- for a model
-	// with no attributable replica at all, which skips analysis (steadystate,
-	// the len(replicaMetrics) == 0 branch) -- that the engine still discovered
-	// it, through NoteVariantsPresent. Before that stamp a fleet parked at
-	// zero went unstamped for as long as it was parked, and past
-	// VariantTimeout re-learned its ITL baseline and start estimate on wake.
-	// A deleted variant is not discovered, so it still ages out.
+	// "REPORTED" means the variant was in the cycle's input, or that the
+	// engine still found it -- active, or parked at zero replicas -- and said
+	// so through NoteVariantsPresent before the sweep. Before that stamp a
+	// fleet parked at zero went unstamped for as long as it was parked, and
+	// past VariantTimeout re-learned its ITL baseline and start estimate on
+	// wake. A deleted variant is not found, so it still ages out.
 	variantSeenAt map[string]time.Time
 	// now is the clock the memory reads; tests set it.
 	now func() time.Time
@@ -287,34 +286,53 @@ func (a *SaturationAnalyzer) variantIsStale(key string, now time.Time, timeout t
 	return !ok || now.Sub(seen) > timeout
 }
 
-// NoteVariantsPresent stamps each variant as seen this cycle without analysing
-// it, for a model the engine skips because none of its replicas reported.
+// NoteVariantsPresent refreshes the liveness stamp of every variant named, for
+// each key it has learned state under, and its accelerator memo. The engine
+// calls it once per cycle, before the sweep, for every variant that still
+// exists -- active or parked at zero replicas.
 //
-// Analyze stamps every variant in its input, so a variant parked at zero beside
-// a serving one is already covered. A model with EVERY variant at zero never
-// reaches Analyze, and without this its ITL baseline and start estimate were
-// swept after VariantTimeout of being parked: a fleet that parks overnight
-// woke on the default baseline and re-measured its start time from the first
-// Pod, which is the one case the timeout was felt rather than just bounding
-// memory. The variant still exists -- its scale target is what the engine
-// discovered it from -- so its learned state is still wanted. A variant that is
-// deleted stops being discovered, stops being stamped, and is swept as before.
+// Analyze stamps only the variants in its input, and it runs AFTER the sweep.
+// That left two gaps, each of which cost a fleet its ITL baseline and start
+// estimate after VariantTimeout and woke it on the defaults:
+//   - a variant PARKED at zero is inactive, never in the model groups the
+//     engine analyses, so nothing stamped it while any other model kept the
+//     engine optimizing;
+//   - a whole fleet parked for longer than the timeout stops the engine
+//     altogether, and on the cycle it wakes the sweep ran before Analyze, so
+//     the stale stamp evicted the state on exactly the cycle it was needed.
 //
-// The key is the one Analyze builds, through stableAccelerator, so a parked
-// fleet whose accelerator no longer resolves (no Pods to observe it from) stamps
-// the key it was learned under; that read also keeps the accelerator memo
-// itself alive across the gap.
-func (a *SaturationAnalyzer) NoteVariantsPresent(namespace, modelID string, states []domain.VariantReplicaState) {
-	// Keys first: itlWindowKey takes a.mu through stableAccelerator.
-	keys := make([]string, 0, len(states))
-	for _, vs := range states {
-		keys = append(keys, a.itlWindowKey(namespace, modelID, vs.VariantName, vs.AcceleratorName, vs.GPUsPerReplica))
+// By name rather than by the key Analyze would build: a parked variant has no
+// Pods to observe its accelerator from, so rebuilding the key could miss the
+// one its state was learned under. Matching the namespace|model|variant prefix
+// keeps every key that variant has, and only that variant's -- the trailing
+// separator keeps "v" from matching "v2". A variant that is deleted stops being
+// named, and its state is swept as before.
+func (a *SaturationAnalyzer) NoteVariantsPresent(namespace, modelID string, variantNames []string) {
+	if len(variantNames) == 0 {
+		return
+	}
+	prefixes := make([]string, 0, len(variantNames))
+	for _, v := range variantNames {
+		prefixes = append(prefixes, namespace+"|"+modelID+"|"+v+"|")
 	}
 	now := a.now()
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	for _, key := range keys {
-		a.noteVariantSeen(key, now)
+	for key := range a.variantSeenAt {
+		for _, p := range prefixes {
+			if strings.HasPrefix(key, p) {
+				a.noteVariantSeen(key, now)
+				break
+			}
+		}
+	}
+	// The memo ages on the wall clock (stableAccelerator), so it is touched on
+	// the wall clock too.
+	for _, v := range variantNames {
+		if memo, ok := a.lastAccelerator[namespace+"/"+v]; ok {
+			memo.lastUsed = time.Now()
+			a.lastAccelerator[namespace+"/"+v] = memo
+		}
 	}
 }
 
@@ -392,9 +410,10 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 	// The per-VARIANT maps below age on variantSeenAt: the time the variant
 	// was last REPORTED. Two other clocks are in play in this function and
 	// neither is a leftover. The k2 history and the mu windows age on their
-	// own last-use stamp, because they are keyed by workload BUCKET
-	// (model|accel|gpus|role|bucket|qN -- no namespace, no variant name), so
-	// they cannot be joined to a variant key at all; their reads call Touch
+	// own last-use stamp, because they are keyed by workload BUCKET as well as
+	// by variant (namespace|variant|model|accel|gpus|role|bucket|qN): a bucket
+	// the variant has stopped serving must still expire while the variant
+	// lives, which a per-variant stamp cannot express. Their reads call Touch
 	// so that "last use" is what it says. The accelerator memo, the
 	// decode-saturation memory and the fleet shape are per model, not per
 	// variant, and age on wall-clock time.Since.

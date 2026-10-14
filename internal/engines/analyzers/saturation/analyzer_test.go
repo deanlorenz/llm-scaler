@@ -533,10 +533,11 @@ var _ = Describe("SaturationAnalyzer", func() {
 			Expect(ok).To(BeTrue())
 			Expect(decodeHist.Average()).To(Equal(float64(3000)))
 
-			// Pre-fix, both observations landed in the single shared
-			// "test-model|H100|1|short|q5" key and averaged together.
-			_, ok = analyzer.computeCapacityHistory["test-model|H100|1|short|q5"]
-			Expect(ok).To(BeFalse())
+			// Pre-fix, both observations landed in one shared key and averaged
+			// together. Asserted as "exactly these two windows" rather than the
+			// absence of that old key, which no code can produce any more and
+			// so would pass whatever happened.
+			Expect(analyzer.computeCapacityHistory).To(HaveLen(2))
 		})
 	})
 

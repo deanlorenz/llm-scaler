@@ -284,6 +284,19 @@ distance.
    **Built** for namespace and variant (`historyKey`, `throughputKey`), with
    specs in `per_variant_history_test.go`; the configuration digest joins the
    key once #126's `Fingerprint()` is on main. The cluster run is not done.
+   **The cost until step 4 lands:** a variant with no saturated reading of
+   its own used to read a sibling's pooled k2 and mu; now it falls to the
+   derived figure, or to k1 when it has no engine parameters, until it
+   saturates itself. Measured in a spec: a sibling saturated at 4000 tokens
+   gave a new variant a capacity of 4000 before this step and 12800 (its k1)
+   after it, so a new variant -- a canary, a rename -- starts at up to 3.2x
+   the capacity, ordering about a third of the replicas, which is the TTFT
+   direction. It is the same start every brand-new model already gets, and
+   a sibling's figure could equally have been higher than the truth; but it
+   is the canary case rule 4 names as the best case for borrowing. Step 4's
+   lower-only borrow is what restores it. Shipping step 3 alone accepts that
+   gap; building rule 1's borrow on main now would close it without waiting
+   for #126, using `IsCapacityCompatible` as the tier-2 predicate.
 4. **Tiers 1 and 2** behind `enableLearnedStateReuse`, with rule 1 enforced and
    pinned by a spec in which a donor's higher k2 fails to raise the borrower's.
 

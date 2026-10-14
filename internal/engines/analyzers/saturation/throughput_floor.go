@@ -226,15 +226,16 @@ func (a *SaturationAnalyzer) nearestSaturatedThroughput(key string) (float64, st
 
 // splitHistoryKey takes a key of the form built by historyKey --
 // namespace|variant|model|accelerator|gpus|role|bucket|qN -- apart around its
-// bucket. The model ID may itself contain "|"-free "/" and other characters
-// but never "|", so counting from the right is safe: the bucket is the
-// second-to-last field. The namespace and variant land in prefix, so a borrow
-// walks the variant's OWN other buckets and never another variant's.
-// splitHistoryKey locates the OUTPUT bucket as the second-to-last |-field
-// and the queue threshold as the last. A throughput key carries an input
-// bucket too, ahead of the output one, so it lands in prefix and a neighbour
-// key re-formed from prefix+bucket+suffix keeps it -- a borrow crosses output
-// buckets, never input ones.
+// OUTPUT bucket, the second-to-last |-field; the queue threshold is the last.
+// No field contains "|" (Kubernetes names cannot, and model IDs do not), so
+// counting from the right is safe however many fields lead.
+//
+// Everything left of the bucket lands in prefix, and a neighbour key is
+// re-formed from prefix+bucket+suffix, so a borrow keeps all of it. That
+// includes the namespace and variant -- a borrow walks the variant's OWN other
+// buckets, never another variant's -- and, in a throughput key, the input
+// bucket ahead of the output one: a borrow crosses output buckets, never input
+// ones.
 func splitHistoryKey(key string) (prefix, bucket, suffix string, ok bool) {
 	last := strings.LastIndexByte(key, '|')
 	if last < 0 {

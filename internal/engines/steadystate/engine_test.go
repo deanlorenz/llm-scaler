@@ -44,16 +44,17 @@ import (
 	testutils "github.com/llm-d/llm-d-workload-variant-autoscaler/test/utils"
 )
 
-// newManagedScaledObject builds a KEDA ScaledObject targeting the given
-// Deployment, carrying WVA's configuration in its trigger metadata. It bears no
+// newManagedScaledObject builds a KEDA ScaledObject in the default namespace
+// targeting the given Deployment, carrying WVA's configuration in its trigger
+// metadata. It bears no
 // llm-d.ai/* annotations: those are gone, and a workload becomes WVA's by KEDA
 // calling the external scaler about it (see wvaDiscovery).
-func newManagedScaledObject(name, namespace, targetDeployment, modelID string) *kedav1alpha1.ScaledObject {
+func newManagedScaledObject(name, targetDeployment, modelID string) *kedav1alpha1.ScaledObject {
 	maxReplicas := int32(2)
 	return &kedav1alpha1.ScaledObject{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
-			Namespace: namespace,
+			Namespace: "default",
 		},
 		Spec: kedav1alpha1.ScaledObjectSpec{
 			ScaleTargetRef: &kedav1alpha1.ScaleTarget{
@@ -194,7 +195,7 @@ var _ = Describe("Saturation Engine", func() {
 				Expect(k8sClient.Create(ctx, d)).To(Succeed())
 
 				// Variants are discovered from the ScaledObject KEDA calls about.
-				Expect(k8sClient.Create(ctx, newManagedScaledObject(name, "default", name, modelID))).To(Succeed())
+				Expect(k8sClient.Create(ctx, newManagedScaledObject(name, name, modelID))).To(Succeed())
 			}
 		})
 
@@ -276,11 +277,32 @@ var _ = Describe("Saturation Engine", func() {
 				"engine should have queried Prometheus for at least one discovered variant")
 		})
 
-		It("stamps every variant of a model it skips for having no replica", func() {
-			// The mock reports no metrics at all, so every model takes the
-			// len(replicaMetrics) == 0 skip -- the path a fleet parked at zero
-			// takes every cycle. Its variants must still be stamped, or their
-			// learned state ages out while they are parked.
+		It("stamps every variant that exists, active or parked, before the sweep", func() {
+			// Analyze stamps only what it analyses, and only after the sweep, so
+			// the engine stamps every variant that still exists first:
+			//  - ACTIVE: the three models from BeforeEach. Stamped before the
+			//    sweep, a fleet waking after a park longer than the timeout keeps
+			//    its state on the cycle it wakes. They also keep optimize from
+			//    returning early on "No active VariantAutoscalings".
+			//  - PARKED: a Deployment that wants zero replicas is inactive and in
+			//    no model group, so no Analyze call would ever stamp it.
+			const parkedName, parkedModel = "multi-test-resource-parked", "parked-model"
+			parked := &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{Name: parkedName, Namespace: "default"},
+				Spec: appsv1.DeploymentSpec{
+					Replicas: utils.Ptr(int32(0)),
+					Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": parkedName}},
+					Template: v1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": parkedName}},
+						Spec: v1.PodSpec{Containers: []v1.Container{{
+							Name: "test-container", Image: "registry.k8s.io/pause:3.9",
+						}}},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, parked)).To(Succeed())
+			Expect(k8sClient.Create(ctx, newManagedScaledObject(parkedName, parkedName, parkedModel))).To(Succeed())
+
 			mockPromAPI := &testutils.MockPromAPI{
 				QueryResults: map[string]model.Value{},
 				QueryErrors:  map[string]error{},
@@ -306,8 +328,19 @@ var _ = Describe("Saturation Engine", func() {
 				modelID := fmt.Sprintf("model-%d-model-%d", i, i)
 				Expect(spy.noted).To(HaveKeyWithValue("default/"+modelID,
 					ConsistOf(fmt.Sprintf("multi-test-resource-%d", i))),
-					"a skipped model's variant was not stamped as present")
+					"an active model was not stamped as present")
 			}
+			Expect(spy.noted).To(HaveKeyWithValue("default/"+parkedModel, ConsistOf(parkedName)),
+				"a model parked at zero was not stamped as present")
+			Expect(spy.calls).To(ContainElement("sweep"), "precondition: the cycle swept")
+			last := len(spy.calls) - 1
+			for i, c := range spy.calls {
+				if c == "note" {
+					last = i
+				}
+			}
+			Expect(spy.calls[last+1:]).To(ContainElement("sweep"),
+				"a stamp landed after the sweep, so the sweep judged a variant on its stale stamp")
 		})
 	})
 
@@ -387,7 +420,7 @@ var _ = Describe("Saturation Engine", func() {
 				Expect(k8sClient.Create(ctx, d)).To(Succeed())
 
 				// Variants are discovered from the ScaledObject KEDA calls about.
-				Expect(k8sClient.Create(ctx, newManagedScaledObject(name, "default", name, modelID))).To(Succeed())
+				Expect(k8sClient.Create(ctx, newManagedScaledObject(name, name, modelID))).To(Succeed())
 			}
 		})
 
@@ -509,7 +542,7 @@ var _ = Describe("Saturation Engine", func() {
 			Expect(k8sClient.Create(ctx, d)).To(Succeed())
 
 			// Variant is discovered from an annotated HPA targeting the Deployment.
-			Expect(k8sClient.Create(ctx, newManagedScaledObject(testName, "default", testName, modelID))).To(Succeed())
+			Expect(k8sClient.Create(ctx, newManagedScaledObject(testName, testName, modelID))).To(Succeed())
 		})
 
 		AfterEach(func() {
@@ -597,17 +630,23 @@ var _ = Describe("Saturation Engine", func() {
 
 })
 
-// presenceSpy is the real saturation analyzer with NoteVariantsPresent
-// recorded, keyed namespace/model, so a spec can see which variants the
-// engine stamped without reaching into the analyzer's unexported maps.
+// presenceSpy is the real saturation analyzer with NoteVariantsPresent and the
+// sweep recorded, so a spec can see which variants the engine stamped, and
+// whether before the sweep, without reaching into the analyzer's unexported
+// maps. noted is keyed namespace/model; calls is the order of both.
 type presenceSpy struct {
 	*saturation.SaturationAnalyzer
 	noted map[string][]string
+	calls []string
 }
 
-func (s *presenceSpy) NoteVariantsPresent(namespace, modelID string, states []domain.VariantReplicaState) {
-	for _, vs := range states {
-		s.noted[namespace+"/"+modelID] = append(s.noted[namespace+"/"+modelID], vs.VariantName)
-	}
-	s.SaturationAnalyzer.NoteVariantsPresent(namespace, modelID, states)
+func (s *presenceSpy) NoteVariantsPresent(namespace, modelID string, variantNames []string) {
+	s.noted[namespace+"/"+modelID] = append(s.noted[namespace+"/"+modelID], variantNames...)
+	s.calls = append(s.calls, "note")
+	s.SaturationAnalyzer.NoteVariantsPresent(namespace, modelID, variantNames)
+}
+
+func (s *presenceSpy) EvictStaleHistory() saturation.Evicted {
+	s.calls = append(s.calls, "sweep")
+	return s.SaturationAnalyzer.EvictStaleHistory()
 }
