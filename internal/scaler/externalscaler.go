@@ -16,6 +16,7 @@ import (
 	pb "github.com/kedacore/keda/v2/pkg/scalers/externalscaler"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -211,12 +212,30 @@ func (h *Handler) targetName(ctx context.Context, ref *pb.ScaledObjectRef) (stri
 	var so kedav1alpha1.ScaledObject
 	nn := types.NamespacedName{Namespace: ref.Namespace, Name: ref.Name}
 	if err := h.client.Get(ctx, nn, &so); err != nil {
-		return "", status.Errorf(codes.NotFound, "getting ScaledObject %s: %v", nn, err)
+		return "", status.Errorf(readErrorCode(err), "getting ScaledObject %s: %v", nn, err)
 	}
 	if so.Spec.ScaleTargetRef == nil || so.Spec.ScaleTargetRef.Name == "" {
 		return "", status.Errorf(codes.FailedPrecondition, "ScaledObject %s has no scaleTargetRef.name", nn)
 	}
 	return so.Spec.ScaleTargetRef.Name, nil
+}
+
+// readErrorCode maps a failed API read to the gRPC code that names its cause.
+//
+// KEDA shows the code on the trigger error, so it is the operator's first clue:
+// NotFound means the object is gone; PermissionDenied means WVA's own RBAC (or
+// its credential) is the problem, which is never "not found"; anything else --
+// a timeout, throttling, a refused connection -- is transient, and Unavailable
+// is the retriable code KEDA simply asks again on.
+func readErrorCode(err error) codes.Code {
+	switch {
+	case apierrors.IsNotFound(err):
+		return codes.NotFound
+	case apierrors.IsForbidden(err), apierrors.IsUnauthorized(err):
+		return codes.PermissionDenied
+	default:
+		return codes.Unavailable
+	}
 }
 
 // decisionFor returns WVA's latest decision for the ref and whether one exists

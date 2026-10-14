@@ -2,6 +2,7 @@ package scaler_test
 
 import (
 	"context"
+	"errors"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -10,10 +11,13 @@ import (
 	pb "github.com/kedacore/keda/v2/pkg/scalers/externalscaler"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/registry"
@@ -126,8 +130,42 @@ var _ = Describe("External scaler handler", func() {
 			_, err := h.GetMetrics(ctx, &pb.GetMetricsRequest{
 				ScaledObjectRef: ref("missing", nil),
 			})
-			Expect(err).To(HaveOccurred())
+			Expect(status.Code(err)).To(Equal(codes.NotFound), "got %v", err)
 		})
+
+		// Forbidden is not absent, and a timeout is not either: reporting both as
+		// NotFound tells the operator reading KEDA's trigger error to look for a
+		// missing object when the fix is RBAC, or nothing at all.
+		DescribeTable("maps a failed ScaledObject read to the code that names its cause",
+			func(readErr error, want codes.Code) {
+				s := runtime.NewScheme()
+				Expect(kedav1alpha1.AddToScheme(s)).To(Succeed())
+				c := fake.NewClientBuilder().WithScheme(s).WithInterceptorFuncs(interceptor.Funcs{
+					Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+						return readErr
+					},
+				}).Build()
+				h := scaler.NewHandler(c, store, registry.New(0))
+
+				_, err := h.GetMetrics(ctx, &pb.GetMetricsRequest{ScaledObjectRef: ref("chat-decode", nil)})
+				Expect(status.Code(err)).To(Equal(want), "got %v", err)
+			},
+			Entry("NotFound -> NotFound",
+				apierrors.NewNotFound(schema.GroupResource{Group: "keda.sh", Resource: "scaledobjects"}, "chat-decode"),
+				codes.NotFound),
+			Entry("Forbidden -> PermissionDenied",
+				apierrors.NewForbidden(schema.GroupResource{Group: "keda.sh", Resource: "scaledobjects"}, "chat-decode", errors.New("rbac")),
+				codes.PermissionDenied),
+			Entry("Unauthorized -> PermissionDenied",
+				apierrors.NewUnauthorized("token expired"),
+				codes.PermissionDenied),
+			Entry("timeout -> Unavailable",
+				apierrors.NewTimeoutError("slow apiserver", 1),
+				codes.Unavailable),
+			Entry("anything else -> Unavailable",
+				errors.New("connection refused"),
+				codes.Unavailable),
+		)
 	})
 
 	Describe("IsActive", func() {
