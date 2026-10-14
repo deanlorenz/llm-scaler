@@ -394,6 +394,20 @@ const (
 	// Labels: namespace, reason
 	WVAPodMappingMissTotal = "wva_pod_mapping_miss_total"
 
+	// WVAScalerUndecidedAnswersTotal is a counter of GetMetrics answers the
+	// KEDA external scaler gave WITHOUT a WVA decision behind them: the scale
+	// target's current replica count, handed back so the HPA holds. A burst
+	// after a restart or a lease hand-off is expected; a series that keeps
+	// growing names a target WVA is asked about and never decides.
+	// Labels: namespace, reason (ScalerUndecided* values)
+	WVAScalerUndecidedAnswersTotal = "wva_scaler_undecided_answers_total"
+
+	// WVAScalerPanicsTotal is a counter of panics the KEDA external scaler's
+	// gRPC recovery interceptors caught and answered with codes.Internal. Any
+	// non-zero value is a bug; the stack is in the controller log.
+	// Labels: method (the full gRPC method name)
+	WVAScalerPanicsTotal = "wva_scaler_panics_total"
+
 	// WVAUnmeasuredQueue is a gauge carrying the number of requests queued for a
 	// model that WVA has NO attributed replica to act on.
 	//
@@ -778,6 +792,21 @@ const (
 	PodMappingMissOtherModelVariant = "other_model_variant"
 )
 
+// Undecided-answer reasons (values for the `reason` label of
+// WVAScalerUndecidedAnswersTotal).
+const (
+	// ScalerUndecidedNoDecision indicates a target WVA manages and has not
+	// decided yet -- normally the first cycle after a restart or a lease
+	// hand-off. Expected to stop growing within a cycle or two.
+	ScalerUndecidedNoDecision = "no-decision"
+
+	// ScalerUndecidedNotManaged indicates a target WVA will never decide: its
+	// trigger metadata does not parse (registry.ParseMeta rejects it), so
+	// every engine skips the workload. It holds at its current count until
+	// the ScaledObject is fixed.
+	ScalerUndecidedNotManaged = "not-managed"
+)
+
 // Metric Label Names
 // Common label names used across metrics for consistency.
 const (
@@ -787,6 +816,7 @@ const (
 	LabelVariantName        = "variant_name"
 	LabelDirection          = "direction"
 	LabelReason             = "reason"
+	LabelMethod             = "method"
 	LabelAcceleratorVendor  = "accelerator_vendor"
 	LabelAcceleratorModel   = "accelerator_model"
 	LabelAcceleratorType    = "accelerator_type"

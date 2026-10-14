@@ -10,6 +10,7 @@ import (
 
 	kedav1alpha1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 	pb "github.com/kedacore/keda/v2/pkg/scalers/externalscaler"
+	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -17,7 +18,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/registry"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/scaler"
 )
@@ -40,6 +43,8 @@ var _ = Describe("Server panic recovery", func() {
 	It("answers a panicking call with Internal and keeps serving", func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
+		promReg := prometheus.NewRegistry()
+		Expect(metrics.InitMetrics(promReg)).To(Succeed())
 
 		addr := freePort()
 		// No client: resolving the scale target dereferences it, which panics in
@@ -68,6 +73,12 @@ var _ = Describe("Server panic recovery", func() {
 		_, err = stream.Recv()
 		Expect(status.Code(err)).To(Equal(codes.Internal), "got %v", err)
 
+		By("each recovered panic is counted under its method")
+		Expect(panicsCounted(promReg)).To(Equal(map[string]float64{
+			"/externalscaler.ExternalScaler/GetMetrics":     1,
+			"/externalscaler.ExternalScaler/StreamIsActive": 1,
+		}))
+
 		By("the server is still up")
 		_, err = cli.GetMetricSpec(ctx, ref("chat-decode", nil))
 		Expect(err).NotTo(HaveOccurred())
@@ -76,6 +87,27 @@ var _ = Describe("Server panic recovery", func() {
 		Eventually(done, 10*time.Second).Should(Receive(BeNil()))
 	})
 })
+
+// panicsCounted reads wva_scaler_panics_total from reg, by method.
+func panicsCounted(reg *prometheus.Registry) map[string]float64 {
+	GinkgoHelper()
+	mfs, err := reg.Gather()
+	Expect(err).NotTo(HaveOccurred())
+	out := map[string]float64{}
+	for _, mf := range mfs {
+		if mf.GetName() != constants.WVAScalerPanicsTotal {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() == constants.LabelMethod {
+					out[l.GetValue()] = m.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	return out
+}
 
 // The Server runs in two phases over one address: a standby phase until the
 // lease is held, then the full server on a fresh listener. This spec drives a

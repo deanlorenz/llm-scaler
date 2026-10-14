@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/registry"
 )
 
@@ -197,35 +198,49 @@ func (s *Server) Start(ctx context.Context) error {
 // waking workloads from zero once the fleet outgrew it. What the bound is for
 // is the other kind of client: one that opens streams without limit and holds
 // a goroutine and a decision-store subscription for each.
+//
+// Unary calls count against the same budget: in gRPC every call is an HTTP/2
+// stream, so GetMetrics, IsActive and GetMetricSpec in flight on that one KEDA
+// connection share the 4096 with the open StreamIsActive streams. They last
+// milliseconds, so in practice the bound is the push streams plus a handful.
 const maxConcurrentStreams = 4096
 
 // recoverUnary turns a panic in a unary handler into codes.Internal. Without
 // it a panic in any one call, for any one workload, takes the whole process
 // down -- every model's scaling with it, and the restart then has to rebuild
 // everything the process had learned.
+//
+// It covers the handler's own goroutine only. recover() never sees a panic in
+// a goroutine the handler starts, and such a panic still kills the process; no
+// handler in this package starts one today -- StreamIsActive runs its whole
+// loop in the call -- and one that does must recover inside it.
 func recoverUnary(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp any, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = recovered(info.FullMethod, r)
+			err = recovered(ctx, info.FullMethod, r)
 		}
 	}()
 	return handler(ctx, req)
 }
 
-// recoverStream is recoverUnary for streaming calls (StreamIsActive).
+// recoverStream is recoverUnary for streaming calls (StreamIsActive), with the
+// same goroutine caveat.
 func recoverStream(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = recovered(info.FullMethod, r)
+			err = recovered(ss.Context(), info.FullMethod, r)
 		}
 	}()
 	return handler(srv, ss)
 }
 
-// recovered logs a recovered panic with its stack and returns the error the
-// client gets. The stack goes to the log, never to the client.
-func recovered(method string, r any) error {
-	log.Log.WithName("external-scaler").Error(fmt.Errorf("panic: %v", r),
+// recovered counts and logs a recovered panic with its stack, and returns the
+// error the client gets. The stack goes to the log, never to the client. The
+// logger is the request context's, which falls back to the global one when the
+// context carries none -- gRPC request contexts do not inherit the manager's.
+func recovered(ctx context.Context, method string, r any) error {
+	metrics.IncScalerPanic(method)
+	log.FromContext(ctx).WithName("external-scaler").Error(fmt.Errorf("panic: %v", r),
 		"KEDA external scaler handler panicked; answered Internal",
 		"method", method, "stack", string(debug.Stack()))
 	return status.Errorf(codes.Internal, "internal error in %s; see the WVA controller log", method)

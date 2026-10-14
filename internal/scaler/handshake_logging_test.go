@@ -10,6 +10,7 @@ import (
 
 	kedav1alpha1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 	pb "github.com/kedacore/keda/v2/pkg/scalers/externalscaler"
+	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -95,7 +96,11 @@ var _ = Describe("the KEDA handshake is visible in WVA's log", func() {
 	newHandler := func(name string) *scaler.Handler {
 		s := runtime.NewScheme()
 		Expect(kedav1alpha1.AddToScheme(s)).To(Succeed())
-		c := fake.NewClientBuilder().WithScheme(s).WithObjects(so(name)).Build()
+		// apps/v1 and a target at 3 replicas: before a decision GetMetrics
+		// answers the target's current count.
+		Expect(appsv1.AddToScheme(s)).To(Succeed())
+		c := fake.NewClientBuilder().WithScheme(s).
+			WithObjects(so(name), deployment(name+"-target", ptr(3))).Build()
 		// A nil elected channel reads as always-elected (see leadership_test).
 		return scaler.NewHandler(c, store, registry.New(0))
 	}
@@ -160,8 +165,8 @@ var _ = Describe("the KEDA handshake is visible in WVA's log", func() {
 		h := newHandler("chat-so")
 		// Keyed on the resolved SCALE TARGET, not the ScaledObject: decisionFor
 		// goes through targetName first. Seeded under the ScaledObject's own
-		// name the lookup misses and GetMetrics refuses (see the no-decision
-		// spec below).
+		// name the lookup misses and GetMetrics answers the target's current
+		// count instead (see the no-decision spec below).
 		store.Set(testNamespace, "chat-so-target", 3)
 
 		lines := captured(logging.DEFAULT, func(ctx context.Context) {
@@ -195,25 +200,33 @@ var _ = Describe("the KEDA handshake is visible in WVA's log", func() {
 			"a refusal that leaves no trace is how this failure mode stayed invisible")
 	})
 
-	It("records its own refusal when NO decision exists yet", func() {
-		// Nothing seeded here, so the lookup misses. GetMetrics refuses rather
-		// than answer a 0 nobody decided, and KEDA records that refusal as a
-		// trigger error; this line is what says, in WVA's own log, that the HPA
-		// is holding because no decision exists -- not because WVA decided 0.
+	It("records the count it held, and says once per target that WVA has not decided it", func() {
+		// Nothing seeded here, so the lookup misses and GetMetrics answers the
+		// target's current count (3). That value line alone reads exactly like
+		// WVA deciding 3; `decided` and the once-per-target line are what say
+		// the HPA is holding because no decision exists.
 		h := newHandler("chat-so")
 
 		lines := captured(logging.DEFAULT, func(ctx context.Context) {
-			_, err := h.GetMetrics(ctx, &pb.GetMetricsRequest{
-				ScaledObjectRef: ref("chat-so", nil), MetricName: scaler.MetricName,
-			})
-			Expect(err).To(HaveOccurred())
+			for range 3 {
+				_, err := h.GetMetrics(ctx, &pb.GetMetricsRequest{
+					ScaledObjectRef: ref("chat-so", nil), MetricName: scaler.MetricName,
+				})
+				Expect(err).NotTo(HaveOccurred())
+			}
 		})
 
-		Expect(logged(lines, "external scaler GetMetrics refused: no decision yet", "chat-so")).
-			To(BeTrue(), "a refusal that leaves no trace in WVA's log is the blind spot "+
-				"the not-leader line was added to close")
-		Expect(logged(lines, "external scaler GetMetrics", `"value"`)).To(BeFalse(),
-			"no value was handed to KEDA, so no value line may be written")
+		Expect(logged(lines, `"external scaler GetMetrics"`, `"value":3`, `"decided":false`)).To(BeTrue(),
+			"the held value must be in WVA's log, marked as not decided")
+		once := 0
+		for _, l := range lines {
+			if strings.Contains(l, "external scaler has no decision for this target") {
+				once++
+				Expect(l).To(ContainSubstring("chat-so"))
+				Expect(l).To(ContainSubstring(`"currentReplicas":3`))
+			}
+		}
+		Expect(once).To(Equal(1), "one line per target, not one per poll")
 	})
 
 	It("records its own failure when the lookup errors", func() {
@@ -312,11 +325,11 @@ var _ = Describe("the KEDA handshake is visible in WVA's log", func() {
 				ScaledObjectRef: ref("chat-so", nil), MetricName: scaler.MetricName,
 			})
 		}, "external scaler GetMetrics refused: not the leader"),
-		Entry("GetMetrics' refusal with no decision yet", func(h *scaler.Handler, ctx context.Context) {
+		Entry("GetMetrics' held count with no decision yet", func(h *scaler.Handler, ctx context.Context) {
 			_, _ = h.GetMetrics(ctx, &pb.GetMetricsRequest{
 				ScaledObjectRef: ref("chat-so", nil), MetricName: scaler.MetricName,
 			})
-		}, "external scaler GetMetrics refused: no decision yet"),
+		}, "external scaler has no decision for this target"),
 		Entry("IsActive", func(h *scaler.Handler, ctx context.Context) {
 			_, _ = h.IsActive(ctx, ref("chat-so", nil))
 		}, "external scaler IsActive"),

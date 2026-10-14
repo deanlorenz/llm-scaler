@@ -76,6 +76,8 @@ var (
 	metricsPodsDiscovered               *prometheus.GaugeVec
 	metricsFreshnessStatus              *prometheus.GaugeVec
 	podMappingMissTotal                 *prometheus.CounterVec
+	scalerUndecidedAnswersTotal         *prometheus.CounterVec
+	scalerPanicsTotal                   *prometheus.CounterVec
 
 	// Saturation and capacity metrics
 	saturationUtilization *prometheus.GaugeVec
@@ -600,6 +602,27 @@ func InitMetrics(registry prometheus.Registerer) error {
 		podMappingMissLabels,
 	)
 
+	scalerUndecidedLabels := []string{constants.LabelNamespace, constants.LabelReason}
+	scalerPanicLabels := []string{constants.LabelMethod}
+	if controllerInstance != "" {
+		scalerUndecidedLabels = append(scalerUndecidedLabels, constants.LabelControllerInstance)
+		scalerPanicLabels = append(scalerPanicLabels, constants.LabelControllerInstance)
+	}
+	scalerUndecidedAnswersTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: constants.WVAScalerUndecidedAnswersTotal,
+			Help: "Total number of KEDA GetMetrics answers given without a WVA decision (the scale target's current replica count)",
+		},
+		scalerUndecidedLabels,
+	)
+	scalerPanicsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: constants.WVAScalerPanicsTotal,
+			Help: "Total number of panics recovered in the KEDA external scaler's gRPC handlers",
+		},
+		scalerPanicLabels,
+	)
+
 	// Register metrics with the registry
 	if err := registry.Register(replicaScalingTotal); err != nil {
 		return fmt.Errorf("failed to register replicaScalingTotal metric: %w", err)
@@ -693,6 +716,12 @@ func InitMetrics(registry prometheus.Registerer) error {
 	}
 	if err := registry.Register(podMappingMissTotal); err != nil {
 		return fmt.Errorf("failed to register podMappingMissTotal metric: %w", err)
+	}
+	if err := registry.Register(scalerUndecidedAnswersTotal); err != nil {
+		return fmt.Errorf("failed to register scalerUndecidedAnswersTotal metric: %w", err)
+	}
+	if err := registry.Register(scalerPanicsTotal); err != nil {
+		return fmt.Errorf("failed to register scalerPanicsTotal metric: %w", err)
 	}
 	if err := registry.Register(metricsFreshnessStatus); err != nil {
 		return fmt.Errorf("failed to register metricsFreshnessStatus metric: %w", err)
@@ -1374,6 +1403,36 @@ func IncPodMappingMiss(namespace, reason string) {
 		labels[constants.LabelControllerInstance] = controllerInstance
 	}
 	podMappingMissTotal.With(labels).Inc()
+}
+
+// IncScalerUndecidedAnswer counts one GetMetrics answer the KEDA external
+// scaler gave without a WVA decision behind it. reason is one of the
+// constants.ScalerUndecided* values.
+func IncScalerUndecidedAnswer(namespace, reason string) {
+	if scalerUndecidedAnswersTotal == nil {
+		return
+	}
+	labels := prometheus.Labels{
+		constants.LabelNamespace: namespace,
+		constants.LabelReason:    reason,
+	}
+	if controllerInstance != "" {
+		labels[constants.LabelControllerInstance] = controllerInstance
+	}
+	scalerUndecidedAnswersTotal.With(labels).Inc()
+}
+
+// IncScalerPanic counts one panic recovered in a KEDA external scaler gRPC
+// handler. method is the full gRPC method name.
+func IncScalerPanic(method string) {
+	if scalerPanicsTotal == nil {
+		return
+	}
+	labels := prometheus.Labels{constants.LabelMethod: method}
+	if controllerInstance != "" {
+		labels[constants.LabelControllerInstance] = controllerInstance
+	}
+	scalerPanicsTotal.With(labels).Inc()
 }
 
 // SetMetricsPodsDiscovered sets the number of pods discovered in a namespace.

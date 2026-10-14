@@ -10,6 +10,7 @@ package scaler
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	kedav1alpha1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
@@ -22,7 +23,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/registry"
 )
 
@@ -63,6 +66,10 @@ type Handler struct {
 	// before it closes the store's silence means "not the leader", not "no
 	// decision yet" -- see leader.
 	elected <-chan struct{}
+	// undecidedLogged holds the ScaledObjects (types.NamespacedName) whose
+	// undecided GetMetrics answer has been logged, so the line prints once per
+	// target rather than once per poll. See undecided.
+	undecidedLogged sync.Map
 }
 
 // NewHandler builds a Handler. A nil store falls back to decision.Default, and a
@@ -88,11 +95,29 @@ func (h *Handler) WithElected(elected <-chan struct{}) *Handler {
 }
 
 // errNotLeader is what a replica that does not hold the lease answers with
-// for anything that needs a decision. Unavailable is the retriable code: KEDA
-// logs it, marks the trigger as erroring and takes no scaling action, and
-// asks again on its next poll -- by which time this replica is normally the
-// leader, since the only supported reason to be here is the window between
-// a pod becoming Ready and the outgoing pod's lease being released.
+// for anything that needs a decision. Unlike the no-decision case (see
+// GetMetrics) it cannot answer the current count, because the leader may have
+// decided something else, and two replicas answering differently would make
+// the HPA follow whichever one KEDA's connection happens to reach.
+//
+// What KEDA does with it (v2.18.0): GetMetricsAndActivity returns the error
+// (pkg/scalers/external_scaler.go), so the scale loop sees the trigger
+// inactive and erroring (pkg/scaling/scale_handler.go getScaledObjectState),
+// clears its scalers cache, and RequestScale (pkg/scaling/executor/
+// scale_scaledobjects.go) sets Ready=False/TriggerError when there is no
+// fallback and only logs when fallback.replicas is non-zero -- no scaling
+// action in either case. The one exception is a ScaledObject someone wrote
+// with fallback.replicas 0 and minReplicaCount 0, which that switch sends to
+// scaleToZeroOrIdle after cooldownPeriod; the installer never writes that
+// shape. On the HPA path the error counts as one failed read toward
+// fallback.failureThreshold (pkg/fallback/fallback.go).
+//
+// KEDA does not look for the leader itself: it keeps one pooled connection
+// per scalerAddress. The standby server closes connections after
+// standbyConnectionAge, the client re-dials through the Service, and by then
+// this replica is normally the leader -- the only supported reason to be here
+// is the window between a pod becoming Ready and the outgoing pod's lease
+// being released.
 var errNotLeader = status.Error(codes.Unavailable,
 	"this WVA replica does not hold the leader lease yet; decisions are made by the leader")
 
@@ -305,21 +330,30 @@ func (h *Handler) GetMetricSpec(ctx context.Context, ref *pb.ScaledObjectRef) (*
 	}, nil
 }
 
-// errNoDecision is what GetMetrics answers for a target WVA has not decided
-// yet. Unavailable, exactly like errNotLeader and for the same reason: a 0
-// would be an answer, and HPA acts on answers. With a target of 1 it computes
-// zero replicas and clamps to minReplicas, so the decision store being empty
-// -- which it is on every restart and every lease hand-off, until the new
-// leader's first cycle publishes -- would cut every running fleet to its floor.
-// An error is a trigger failure instead: HPA keeps the current count, and KEDA
-// applies the ScaledObject's fallback, if it has one, after failureThreshold.
-var errNoDecision = status.Error(codes.Unavailable,
-	"WVA has not published a decision for this target yet; holding the current replica count")
-
-// GetMetrics returns WVA's desired replica count as the metric value. Before the
-// first optimization decision exists for the target it refuses with Unavailable
-// (see errNoDecision), so HPA holds the current count rather than acting on a 0
-// nobody decided.
+// GetMetrics returns WVA's desired replica count as the metric value.
+//
+// Before the first decision exists for the target -- every restart and every
+// lease hand-off, until the new leader's first cycle publishes -- it answers
+// the scale target's CURRENT replica count instead (see undecided). With a
+// target of 1 the HPA then computes exactly the count it already has and
+// holds. Neither alternative holds as cleanly:
+//
+//   - 0 is an answer the HPA acts on: it computes zero replicas, clamps to
+//     minReplicas, and cuts every running fleet to its floor.
+//   - An error is a trigger failure. KEDA's GetMetricsAndActivity returns on
+//     a GetMetrics error before it ever calls IsActive
+//     (pkg/scalers/external_scaler.go, v2.18.0), so the scale loop sees the
+//     trigger inactive AND erroring. Without a fallback that is only a
+//     TriggerError condition; with `fallback.replicas: 0` and minReplicaCount
+//     0 it reaches scaleToZeroOrIdle (pkg/scaling/executor/
+//     scale_scaledobjects.go, the isActive == false branch), which parks a
+//     serving model once cooldownPeriod has passed, with no failureThreshold
+//     in the way.
+//
+// Answering the current count keeps the activity KEDA reads truthful too,
+// since its IsActive call now happens and reports the same current count.
+// Only a target whose current count cannot be read is refused, with the code
+// that names the read's failure.
 func (h *Handler) GetMetrics(ctx context.Context, req *pb.GetMetricsRequest) (*pb.GetMetricsResponse, error) {
 	ref := req.GetScaledObjectRef()
 	h.observe(ref)
@@ -342,24 +376,53 @@ func (h *Handler) GetMetrics(ctx context.Context, req *pb.GetMetricsRequest) (*p
 			"namespace", ref.GetNamespace(), "scaledObject", ref.GetName(), "err", err)
 		return nil, err
 	}
-	if !ok {
-		// Logged for the reason the not-leader refusal is: KEDA records the
-		// trigger error, and without this line WVA's own log has no trace of
-		// why the HPA stopped moving.
-		logger.V(1).Info("external scaler GetMetrics refused: no decision yet",
-			"namespace", ref.GetNamespace(), "scaledObject", ref.GetName())
-		return nil, errNoDecision
-	}
 	value := int64(d)
-	// The VALUE KEDA actuates on. Only a decided target reaches this line; an
-	// undecided one is refused above, so a 0 here is WVA's answer. That is why
-	// the line no longer carries a `decided` field: it could only ever be true.
+	if !ok {
+		if value, err = h.undecided(ctx, ref); err != nil {
+			logger.V(1).Info("external scaler GetMetrics failed: no decision yet and the current replica count is unreadable",
+				"namespace", ref.GetNamespace(), "scaledObject", ref.GetName(), "err", err)
+			return nil, err
+		}
+	}
+	// The VALUE KEDA actuates on. `decided` separates WVA's answer from the
+	// held current count, which otherwise look the same.
 	logger.V(1).Info("external scaler GetMetrics",
 		"namespace", ref.GetNamespace(), "scaledObject", ref.GetName(),
-		"metricName", MetricName, "value", value)
+		"metricName", MetricName, "value", value, "decided", ok)
 	return &pb.GetMetricsResponse{
 		MetricValues: []*pb.MetricValue{{MetricName: MetricName, MetricValue: value}},
 	}, nil
+}
+
+// undecided answers GetMetrics for a target with no decision: its current
+// replica count, so the HPA holds. Each answer is counted under the reason
+// WVA has none (wva_scaler_undecided_answers_total), and the first one per
+// target is logged, so a target that is asked about and never decided shows up
+// as a counter that keeps growing and one line naming it.
+func (h *Handler) undecided(ctx context.Context, ref *pb.ScaledObjectRef) (int64, error) {
+	n, err := h.currentReplicas(ctx, ref)
+	if err != nil {
+		return 0, err
+	}
+	reason := constants.ScalerUndecidedNoDecision
+	// A trigger ParseMeta rejects is skipped by every engine, so its target is
+	// never decided -- unlike a fresh leader's, which is decided next cycle.
+	if _, perr := registry.ParseMeta(ref.GetScalerMetadata()); perr != nil {
+		reason = constants.ScalerUndecidedNotManaged
+	}
+	metrics.IncScalerUndecidedAnswer(ref.GetNamespace(), reason)
+	logger := log.FromContext(ctx).V(1)
+	// Marked only where the line can print, so a disabled logger does not
+	// consume the one line a target gets.
+	if logger.Enabled() {
+		key := types.NamespacedName{Namespace: ref.GetNamespace(), Name: ref.GetName()}
+		if _, seen := h.undecidedLogged.LoadOrStore(key, struct{}{}); !seen {
+			logger.Info("external scaler has no decision for this target; answering its current replica count so the HPA holds",
+				"namespace", ref.GetNamespace(), "scaledObject", ref.GetName(),
+				"currentReplicas", n, "reason", reason)
+		}
+	}
+	return n, nil
 }
 
 // IsActive reports the target active unless WVA has decided it needs zero
@@ -426,14 +489,28 @@ func (h *Handler) isActive(ctx context.Context, ref *pb.ScaledObjectRef) (bool, 
 // answers true — the safe direction, since a false negative would scale a
 // running workload to zero on the strength of a failed lookup.
 func (h *Handler) currentlyRunning(ctx context.Context, ref *pb.ScaledObjectRef) bool {
-	logger := log.FromContext(ctx)
+	n, err := h.currentReplicas(ctx, ref)
+	if err != nil {
+		log.FromContext(ctx).V(1).Info("no decision yet and scale target unreadable; reporting active",
+			"namespace", ref.GetNamespace(), "scaledObject", ref.GetName(), "err", err)
+		return true
+	}
+	return n > 0
+}
 
+// currentReplicas reads the scale target's spec.replicas through the
+// ScaledObject's scaleTargetRef. It is what the scaler answers with before WVA
+// has decided: IsActive turns it into "running or not", GetMetrics hands it to
+// the HPA as is. A failed read is a gRPC status error whose code names the
+// cause (readErrorCode), for GetMetrics to pass on to KEDA.
+func (h *Handler) currentReplicas(ctx context.Context, ref *pb.ScaledObjectRef) (int64, error) {
 	var so kedav1alpha1.ScaledObject
 	nn := types.NamespacedName{Namespace: ref.GetNamespace(), Name: ref.GetName()}
-	if err := h.client.Get(ctx, nn, &so); err != nil || so.Spec.ScaleTargetRef == nil {
-		logger.V(1).Info("no decision yet and ScaledObject unreadable; reporting active",
-			"scaledObject", nn.String())
-		return true
+	if err := h.client.Get(ctx, nn, &so); err != nil {
+		return 0, status.Errorf(readErrorCode(err), "no decision yet, and getting ScaledObject %s failed: %v", nn, err)
+	}
+	if so.Spec.ScaleTargetRef == nil || so.Spec.ScaleTargetRef.Name == "" {
+		return 0, status.Errorf(codes.FailedPrecondition, "ScaledObject %s has no scaleTargetRef.name", nn)
 	}
 
 	target := &unstructured.Unstructured{}
@@ -449,18 +526,19 @@ func (h *Handler) currentlyRunning(ctx context.Context, ref *pb.ScaledObjectRef)
 	target.SetKind(kind)
 	targetKey := types.NamespacedName{Namespace: ref.GetNamespace(), Name: so.Spec.ScaleTargetRef.Name}
 	if err := h.client.Get(ctx, targetKey, target); err != nil {
-		logger.V(1).Info("no decision yet and scale target unreadable; reporting active",
-			"target", targetKey.String(), "kind", kind)
-		return true
+		return 0, status.Errorf(readErrorCode(err), "no decision yet, and getting %s %s failed: %v", kind, targetKey, err)
 	}
 
 	// An absent spec.replicas means the workload defaults to 1 (Deployment and
-	// LeaderWorkerSet both do), so absent reads as running.
+	// LeaderWorkerSet both do), so absent reads as 1.
 	replicas, found, err := unstructured.NestedInt64(target.Object, "spec", "replicas")
-	if err != nil || !found {
-		return true
+	if err != nil {
+		return 0, status.Errorf(codes.Internal, "%s %s has an unreadable spec.replicas: %v", kind, targetKey, err)
 	}
-	return replicas > 0
+	if !found {
+		return 1, nil
+	}
+	return replicas, nil
 }
 
 // streamKeepalive bounds how long StreamIsActive stays silent. Activation is

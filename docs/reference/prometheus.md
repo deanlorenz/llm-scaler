@@ -422,6 +422,23 @@ With the scaling manager metrics, the value for the label `namespace` is the sca
   }
   ```
 
+### KEDA External Scaler Metrics
+
+### `wva_scaler_undecided_answers_total`
+- **Type**: Counter
+- **Description**: `GetMetrics` answers the KEDA external scaler gave with no decision behind them. Before the scaling manager has decided a target it answers the target's current replica count, so the HPA holds; this counts those answers. See [before the first decision](scaledobject-trigger.md#before-the-first-decision-and-the-fallback).
+- **Labels**:
+  - `namespace`: the ScaledObject's namespace (scraped as `exported_namespace`; see the note on namespaces above)
+  - `reason`: `no-decision` (a target the scaling manager plans but has not decided yet, normally the first cycle after a restart or a leader change) or `not-managed` (the trigger metadata does not parse, so no engine will ever decide it)
+- **Use Case**: A burst of `no-decision` after a restart is expected and stops within a cycle or two. Alert on `not-managed` growing, or on `no-decision` growing for longer than a few optimization intervals: that model's replica count is frozen. The controller logs `external scaler has no decision for this target` once per ScaledObject, naming it.
+
+### `wva_scaler_panics_total`
+- **Type**: Counter
+- **Description**: Panics in the KEDA external scaler's gRPC handlers that were recovered and answered with `Internal`, so one failing call does not take the controller down. Any non-zero value is a bug; the stack trace is in the controller log under `KEDA external scaler handler panicked`.
+- **Labels**:
+  - `method`: the full gRPC method, for example `/externalscaler.ExternalScaler/GetMetrics`
+- **Use Case**: Alert on any increase.
+
 ### Optimization Metrics
 
 ### `wva_optimization_duration_seconds`
