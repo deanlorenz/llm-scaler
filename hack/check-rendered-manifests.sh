@@ -46,7 +46,7 @@ for fn in wva_append_crb_name_patches wva_append_metrics_reader_subject_patch; d
     }
 done
 
-EXPECT_CASES=3
+EXPECT_CASES=11
 RAN=0
 FAILED=0
 
@@ -93,6 +93,24 @@ check 'metrics-reader: no Prometheus known -> no binding at all' \
 check 'metrics-reader: the other bindings survive the delete' \
     '3' \
     "$(printf '%s\n' "$out" | yq -N -r 'select(.kind == "ClusterRoleBinding") | .metadata.name' | grep -c '^wva-')"
+
+# ----------------------------------------------------------------------------
+# The controller container runs on a read-only root filesystem, in every overlay
+# ----------------------------------------------------------------------------
+# Components patch this Deployment by index (args, env, volumes); a patch that
+# replaces the securityContext or the volume list would drop either silently.
+for overlay in cluster-scoped/kubernetes cluster-scoped/openshift \
+               namespace-scoped/kubernetes namespace-scoped/openshift; do
+    out="$("${KBUILD[@]}" "config/overlays/$overlay")" || out=''
+    [ -n "$out" ] || { printf 'FATAL: %s did not render.\n' "$overlay" >&2; exit 1; }
+    dep="$(printf '%s\n' "$out" | yq -N 'select(.kind == "Deployment" and .metadata.labels."control-plane" == "controller-manager")')"
+    [ -n "$dep" ] || { printf 'FATAL: no controller Deployment in %s.\n' "$overlay" >&2; exit 1; }
+    check "$overlay: manager has readOnlyRootFilesystem" 'true' \
+        "$(printf '%s\n' "$dep" | yq -r '.spec.template.spec.containers[] | select(.name == "manager") | .securityContext.readOnlyRootFilesystem')"
+    # /tmp writable, and from an emptyDir: a hostPath or a missing volume is not it.
+    check "$overlay: /tmp is an emptyDir" 'emptyDir' \
+        "$(printf '%s\n' "$dep" | yq -r '(.spec.template.spec.containers[] | select(.name == "manager") | .volumeMounts[] | select(.mountPath == "/tmp") | .name) as $v | .spec.template.spec.volumes[] | select(.name == $v) | keys | map(select(. != "name")) | .[0]')"
+done
 
 # ----------------------------------------------------------------------------
 
