@@ -2,56 +2,20 @@
 
 ## Overview
 
-llm-scaling-manager validates that the vLLM metrics it needs are actually
+llm-scaling-manager checks that the vLLM metrics it needs are actually
 arriving before it decides anything, and degrades predictably when they are
-not. This page covers what that judgement is, where you can see it, and what
-the controller does when a variant's metrics are missing or stale. It is the
-answer to "scaling looks stuck and I do not know whether the problem is the
-decision or the data".
+not. This page covers where you can see that judgement and what the controller
+does when a variant's metrics are missing or stale. It answers "scaling looks
+stuck and I do not know whether the problem is the decision or the data".
 
-> **Where to look.** The judgement is recorded as two conditions on the
-> variant object the controller builds in memory each cycle. That object is
-> **not** a Kubernetes resource: this project installs no CRD, so there is
-> nothing to `kubectl get`. The conditions reach you through the controller's
-> logs and through the health gauges in
-> [Monitoring](monitoring.md#the-metrics-that-answer-specific-questions) — start there.
+The scaling manager installs no CRD and writes no status condition you can
+`kubectl get`. The judgement reaches you three ways: the health gauges below,
+a `MetricsUnavailable` Warning Event on the workload's ScaledObject, and the
+controller log.
 
-## Status Conditions
+## The gauges
 
-Two conditions are set per variant, per cycle
-(`internal/variant/types.go`).
-
-### 1. MetricsAvailable
-
-Indicates whether vLLM metrics are available from Prometheus for the variant.
-
-**Status Values:**
-- `True`: Metrics are available and up-to-date
-- `False`: Metrics are missing, stale, or Prometheus query failed
-
-**Reasons:**
-- `MetricsFound`: Metrics successfully retrieved and up-to-date
-- `MetricsMissing`: No vLLM metrics found (likely ServiceMonitor misconfiguration)
-- `MetricsStale`: Metrics exist but are outdated (>5 minutes old)
-- `PrometheusError`: Error querying Prometheus API
-
-### 2. OptimizationReady
-
-Indicates whether the optimization engine can run successfully.
-
-**Status Values:**
-- `True`: Optimization completed successfully
-- `False`: Optimization cannot run or failed
-
-**Reasons:**
-- `OptimizationSucceeded`: Optimization completed and replicas calculated
-- `OptimizationFailed`: Optimization engine failed
-- `MetricsUnavailable`: Cannot optimize without valid metrics
-
-## Seeing the condition an operator can act on
-
-Three gauges carry the same information to a dashboard or an alert, and unlike
-the conditions they are queryable:
+These are queryable, and they are what to alert on:
 
 ```promql
 # Are the pods behind each model being found at all?
@@ -60,86 +24,72 @@ wva_metrics_pods_discovered
 # How many of them were decided on with fresh data this cycle?
 wva_metrics_freshness_status{status="fresh"}
 
-# Anything sitting in stale or missing is a MetricsAvailable=False variant.
+# Pods decided on with stale data, or none at all.
 wva_metrics_freshness_status{status!="fresh"} > 0
+
+# Did the variant get a fresh decision this cycle? 0 = its saturation gauges are stale.
+wva_saturation_metrics_up == 0
 ```
+
+`wva_metrics_freshness_status` counts pods per `(variant_name, status)`, with
+`status` one of `fresh`, `stale`, `missing`, `unavailable`. It is not a 0/1
+flag.
 
 `wva_metrics_collection_errors_total` rising alongside them points at
-`PrometheusError` rather than at a ServiceMonitor gap. The full catalogue,
-including what each one should read on a healthy fleet, is in
-[Monitoring](monitoring.md).
+Prometheus itself (a failing query) rather than at a ServiceMonitor gap. The
+full catalogue, with what each one should read on a healthy fleet, is in
+[Monitoring](monitoring.md#the-metrics-that-answer-specific-questions).
 
-The condition's own message text, which names the likely cause, appears in the
-controller log for the cycle that set it:
+## The `MetricsUnavailable` Event
+
+When a variant's metrics go from available to unavailable, the controller
+records a **Warning** Event, reason `MetricsUnavailable`, on the variant's
+**ScaledObject**. It fires on that transition only, not every cycle, and not
+for a variant whose metrics were never seen (one that started at zero).
+
+| message | means | remedy |
+| --- | --- | --- |
+| `Failed to collect metrics for model` | the Prometheus query failed | check Prometheus reachability and `wva_metrics_collection_errors_total`; the controller log carries the error |
+| `No saturation metrics available for model` | the query worked and returned nothing for this model | check that a ServiceMonitor or PodMonitor selects the model pods, that the pods are Ready and serve `/metrics`, and that Prometheus `/targets` shows them up |
 
 ```bash
-kubectl logs -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler \
-  | grep -iE 'MetricsMissing|MetricsStale|PrometheusError'
+kubectl get events -n <model-namespace> \
+  --field-selector involvedObject.kind=ScaledObject,reason=MetricsUnavailable
 ```
 
-A typical message:
+The matching log line, every cycle while it lasts:
 
-```text
-No vLLM metrics found for model 'meta-llama/Llama-3-8b' in namespace 'default'. Ensure:
-1. ServiceMonitor is created in the monitoring namespace
-2. ServiceMonitor selector matches vLLM service labels
-3. vLLM pods are running and exposing /metrics endpoint
-4. Prometheus is scraping the monitoring namespace
+```bash
+kubectl logs -n "$NS" -l app.kubernetes.io/name=workload-variant-autoscaler \
+  | grep 'No saturation metrics available for model'
 ```
 
-## Graceful Degradation
+## Graceful degradation
 
-When metrics are unavailable, the scaling manager implements graceful degradation:
+When a variant's metrics are unavailable, the scaling manager:
 
-1. **Skips optimization** for affected variants (no scaling decisions)
-2. **Maintains current replica count** (doesn't scale to zero or make random changes)
-3. **Records the condition** with an actionable message
-4. **Continues monitoring** and retries on next reconciliation interval
-5. **Other variants continue to optimize** if their metrics are available
+1. **Skips optimization** for that variant (no new scaling decision).
+2. **Keeps the current replica count.** It does not fall back to a default, and
+   it does not park.
+3. **Retries** on the next cycle.
+4. **Keeps optimizing other variants** whose metrics are available.
 
-The second point is the one to rely on: a variant whose metrics disappear holds
-the replica count it had. It does not fall back to a default, and it does not
-park.
+## Key components
 
-## Architecture
+- **`internal/collector`**: queries Prometheus, reports per-pod freshness, and
+  records the `MetricsUnavailable` Event.
+- **`internal/metrics`**: publishes the gauges above.
 
-### Metrics Validation Flow
+## Best practices
 
-```text
-1. Controller reconciles each discovered variant
-2. For each variant:
-   a. Validate metrics availability
-   b. Set MetricsAvailable condition
-   c. If metrics unavailable:
-      - Set OptimizationReady=False
-      - Skip optimization (graceful degradation)
-      - Continue to next variant
-   d. If metrics available:
-      - Collect metrics
-      - Continue with optimization
-3. Run optimization for all variants with valid metrics
-4. Set OptimizationReady condition based on optimization result
-```
+1. **Alert on `wva_metrics_freshness_status{status!="fresh"} > 0`** for a few
+   cycles.
+2. **Watch `MetricsUnavailable` Events** on the ScaledObjects you own.
+3. **Validate the ServiceMonitor** during initial deployment: `make verify-deployment`.
+4. **Test the metrics flow** before relying on the scaling manager in production.
 
-### Key Components
+## Related documentation
 
-- **`internal/collector`**: queries Prometheus and reports per-pod freshness
-- **`variant.SetCondition()`** (`internal/variant/types.go`): sets a condition on
-  the in-memory variant object
-- **`internal/metrics`**: publishes the gauges above, which are the operator-facing
-  form of the same judgement
-
-## Best Practices
-
-1. **Alert on `wva_metrics_freshness_status{status!="fresh"} > 0`** rather than
-   reading conditions
-2. **Set up alerts** for prolonged MetricsAvailable=False conditions
-3. **Review condition messages** in the controller log for troubleshooting guidance
-4. **Validate ServiceMonitor** configuration during initial deployment
-5. **Test metrics flow** before relying on the scaling manager for production autoscaling
-
-## Related Documentation
-
-- [Monitoring](monitoring.md) — the full metric catalogue and what each should read
-- [Prometheus Integration (Custom Metrics)](prometheus.md)
-- [ServiceMonitor Configuration](../../config/base/monitoring/servicemonitor.yaml)
+- [Monitoring](monitoring.md): the full metric catalogue and what each should read
+- [Prometheus integration](prometheus.md)
+- [ServiceMonitor configuration](../../config/base/monitoring/servicemonitor.yaml)

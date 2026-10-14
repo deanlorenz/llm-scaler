@@ -669,10 +669,20 @@ func (a *SaturationAnalyzer) computeK2(
 // capacity estimation for zero-replica variants that have no prior data.
 // The search is cross-namespace since capacity depends on hardware + config,
 // not namespace.
-func (a *SaturationAnalyzer) lookupCompatibleCapacity(namespace, modelID, variantName, accelerator string, gpuCount int) *capacity.Record {
+func (a *SaturationAnalyzer) lookupCompatibleCapacity(namespace, modelID, variantName, accelerator string, gpuCount int, reuseDisabled bool) *capacity.Record {
 	// Get EngineParams for this variant (from deployment-derived record)
 	rec := a.capacityStore.Get(namespace, modelID, variantName)
 	if rec == nil || rec.EngineParams == nil {
+		return nil
+	}
+	// Refused outright when reuse is off: this whole function exists to price a
+	// variant from a SIBLING's measurement, which is what the switch withholds.
+	// The caller's remaining branches fall back to the variant's own figures.
+	//
+	// This is the only capacity path the switch gates. estimateStoredCapacity's
+	// compatible-variant bound is deliberately left alone -- it is a max clamp,
+	// and withholding a clamp raises the estimate and orders FEWER replicas.
+	if reuseDisabled {
 		return nil
 	}
 	return a.capacityStore.FindCompatible(modelID, accelerator, gpuCount, rec.EngineParams)
@@ -734,6 +744,23 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 			}
 
 			// Bound by compatible variant's live EffectiveCapacity (already min(k1,k2))
+			//
+			// The reuse switch DELIBERATELY DOES NOT REACH HERE, and a
+			// first version of it did, which was a defect.
+			//
+			// This is a MAX clamp: it only ever LOWERS the estimate. Removing
+			// it raises capacity, and an over-stated capacity orders FEWER
+			// replicas -- the direction this project has on record as breaking
+			// TTFT irrecoverably. store.go measured it when the record was
+			// withheld for a different reason: 5,000 became 153,600.
+			//
+			// So an operator asking "stop pricing this variant from a sibling's
+			// measurement" must not silently get "and remove your capacity
+			// ceiling" as well. A ceiling is conservatism, not a borrow. The
+			// switch gates the two places a sibling's figure BECOMES this
+			// variant's answer -- the shared ITL line, and
+			// lookupCompatibleCapacity, where the record IS the estimate -- and
+			// leaves every clamp alone.
 			if compatible := a.capacityStore.FindCompatible(modelID, accelerator, gpuCount, rec.EngineParams); compatible != nil && compatible.LearnedFrom == capacity.LearnedFromLive && compatible.EffectiveCapacity > 0 {
 				if compatible.EffectiveCapacity < bounded {
 					bounded = compatible.EffectiveCapacity

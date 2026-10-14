@@ -36,7 +36,7 @@ Environment Variables:
  The install
   IMG                          WVA image as repo:tag (alternative to -i)
   WVA_NS                       Namespace to install the controller into (default: workload-variant-autoscaler-system)
-  WVA_SCOPE                    cluster | namespace (default: cluster, or namespace on openshift)
+  WVA_SCOPE                    cluster | namespace (default: namespace)
                                  cluster   — manages every namespace, creates cluster-scoped RBAC,
                                              needs a cluster admin
                                  namespace — manages ONE namespace. Its cluster-scoped RBAC (metrics

@@ -9,7 +9,7 @@ discovered on the cluster, or per-accelerator caps an operator declares.
 `maxReplicaCount` was set as a safety limit rather than a real ceiling — which
 is to say, on any shared cluster.
 
-**Do not mistake it for enforcement.** the scaling manager's limiter is advisory: it stops the scaling manager
+**Do not mistake it for enforcement.** The scaling manager's limiter is advisory: it stops the controller
 *asking* for replicas that cannot be placed. The boundary that actually holds is
 a Kubernetes `ResourceQuota`. A limiter without a quota bounds a well-behaved
 autoscaler, not the cluster.
@@ -17,7 +17,7 @@ autoscaler, not the cluster.
 ## What it needs
 
 - Cluster-admin rights, once: the policy must live where a tenant cannot edit
-  it, and every controller must be able to read it.
+  it, and every controller meant to follow it must be able to read it.
 - Every controller able to **list nodes**. A controller that cannot resolve a
   variant's accelerator gives that variant no budget and then never scales it
   up — a failure with no natural symptom, which is why the guide checks
@@ -26,10 +26,16 @@ autoscaler, not the cluster.
 
 ## Which limiter
 
-They answer different questions, and a deployment that needs both answers
-declares both — each is then fed the measure it is asking about.
+They answer different questions, but **declare one, not both**: the controller
+builds a single limiter, and when the `limiters:` list holds both kinds the
+quota wins and the physical limiter is dropped (it is logged as `notEnforced`).
+Pick the question that matters more; a `ResourceQuota` is the backstop for the
+other.
 
-| | `gpu-inventory` (the default) | `quota` |
+The shipped policy declares no limiter at all. `gpu-inventory` is only the
+default of `WVA_LIMITER_TYPE`, the variable `make enable-physical-limiter` reads.
+
+| | `gpu-inventory` | `quota` |
 | --- | --- | --- |
 | Question | is the hardware there? | is this tenant within its allowance? |
 | Counts | every GPU-holding Pod on the cluster | only what **the scaling manager's own variants** hold |
@@ -50,21 +56,35 @@ because the ConfigMap is the easy part and the access it then requires is not.
 ## Verifying it
 
 ```bash
-# the policy the controllers actually read
-kubectl get configmap wva-scaling-policy-config -n <system-namespace> -o yaml
+# where each controller reads its policy from: "the well-known namespace" means
+# wva-policy; no line (that branch logs only at V(1)) means its own ConfigMap
+kubectl logs -n <wva-namespace> deploy/wva-controller-manager | grep -E 'Cluster policy comes from|Could not read the managed Namespace'
+
+# the cluster policy, for the controllers that read wva-policy
+kubectl get configmap wva-scaling-policy-config -n wva-policy -o jsonpath='{.data.default}'
+
+# the limiter the controller actually built
+kubectl logs -n <wva-namespace> deploy/wva-controller-manager | grep 'GPU limiter constructed'
 
 # what the optimizer decided, and the reason code behind each entry
-kubectl logs -n <wva-namespace> deploy/<wva> | grep scaling-decision
+kubectl logs -n <wva-namespace> deploy/wva-controller-manager | grep scaling-decision
 ```
+
+On Kubernetes, a namespace-scoped controller cannot read Namespace objects, so it
+does not see `wva-policy` and reads its own ConfigMap instead — the first command
+shows it (`Could not read the managed Namespace`). Admin-owned controllers read their
+own ConfigMap by design. The Kubernetes gap is being fixed; see
+[the GPU limiter](../../reference/gpu-limiter.md#what-an-admin-sets-and-where).
 
 `wva_model_scaling_blocked` carries the reason as a label. A model that wanted
 more and did not get it is a normal, visible outcome here — not an error.
 
 ## What it costs
 
-No accelerators, and no latency. What it costs is a conversation: a limiter
-turns "why did we not scale" from an invisible event into a declared policy
-somebody owns.
+No accelerators. A budget that binds costs latency: a model held at its budget
+queues what an extra replica would have served, and that shows up as TTFT, not
+as an error. What else it costs is a conversation: a limiter turns "why did we
+not scale" from an invisible event into a declared policy somebody owns.
 
 ## How it is tested
 
@@ -82,9 +102,13 @@ ConfigMap's `default` entry — that list is the only thing the controller reads
 and because it is dynamic configuration the engine rebuilds it without a
 restart. The installer writes that list for you: `WVA_LIMITER=quota` with
 `WVA_QUOTAS='H200=8'` for one install's own policy, `WVA_LIMITER_TYPE` with the
-same `WVA_QUOTAS` for the cluster policy every controller reads. The quota form
+same `WVA_QUOTAS` for the cluster policy (read by the controllers listed in
+[the guide](../../guides/admin-gpu-bounding/#installation-instructions)). The quota form
 **requires** a budget; an entry naming no accelerator is a budget of zero, not
-unlimited.
+unlimited. Where Kueue already holds the numbers, `WVA_QUOTA_KUEUE=true` reads
+them from its ClusterQueues instead of repeating them here:
+[bound tenants by the quotas Kueue already holds](../kueue-bounded-quotas/)
+(experimental).
 Schema, scopes and validation: [quota limiter](../../reference/quota-limiter.md).
 Where the policy lives and who may edit it:
 [the GPU limiter](../../reference/gpu-limiter.md).

@@ -1,14 +1,13 @@
-# Contributing to Workload-Variant-Autoscaler
+# Contributing to the scaling manager
 
-Welcome! We're excited that you're interested in contributing to the Workload-Variant-Autoscaler (the scaling manager) project.
+Welcome! We're glad you're interested in contributing to llm-scaling-manager.
 
-## General Contributing Guidelines
+This project is a fork of [llm-d's workload-variant-autoscaler](https://github.com/llm-d/llm-d-workload-variant-autoscaler),
+and much of its design and code comes from that project. Issues and pull
+requests for this fork go to
+[github.com/ev-shindin/llm-scaling-manager](https://github.com/ev-shindin/llm-scaling-manager).
 
-For general contribution guidelines including code of conduct, commit message format, PR process, and community standards, please see the **llm-d Contributing Guide**.
-
-This document covers the development setup and workflows **specific to this project**.
-
-## The scaling manager-Specific Development
+## Setting Up
 
 ### Prerequisites
 
@@ -27,10 +26,10 @@ This document covers the development setup and workflows **specific to this proj
    cd llm-scaling-manager
    ```
 
-2. **Add upstream remote:**
+2. **Add the upstream remote** (this project's repository, not llm-d's):
 
    ```bash
-   git remote add upstream https://github.com/llm-d/llm-d-workload-variant-autoscaler.git
+   git remote add upstream https://github.com/ev-shindin/llm-scaling-manager.git
    ```
 
 3. **Install dependencies:**
@@ -51,56 +50,25 @@ This document covers the development setup and workflows **specific to this proj
    make test
    ```
 
-See [Developer Guide](docs/developer-guide/development.md) for detailed setup instructions.
+See the [Developer Guide](docs/developer-guide/development.md) for detailed
+setup, and its [package map](docs/developer-guide/development.md#project-structure)
+for where the code lives.
 
-### GitHub Agentic Workflows
+## Commits
 
-The repository uses AI-powered workflows to automate repetitive tasks:
+Every commit needs two things, and CI checks the second:
 
-- **Documentation Updates**: Automatically syncs docs with code changes
-- **Workflow Creation**: Interactive designer for new workflows
-- **Workflow Debugging**: Assists with troubleshooting
+- **A DCO sign-off.** Commit with `git commit -s`, which adds a
+  `Signed-off-by:` line with your git name and email. Do not type the line by
+  hand; it must match the commit's author.
+- **A signature.** The `signed-commits` check
+  (`.github/workflows/ci-signed-commits.yaml`) fails a PR with any commit that
+  GitHub cannot verify. Set up [GPG or SSH commit signing](https://docs.github.com/en/authentication/managing-commit-signature-verification)
+  and commit with `git commit -S -s` (or set `commit.gpgsign=true`).
 
-Learn more in the [Developer Guide](docs/developer-guide/development.md).
+Commit messages follow [conventional commits](https://www.conventionalcommits.org/).
 
-## llm-scaling-manager Project Structure
-
-```text
-llm-scaling-manager/
-├── api/v1alpha1/         # CRD definitions and types
-├── cmd/                  # Main application entry point
-├── config/               # Kubernetes manifests
-│   ├── base/            # Base manifests (crd/, manager/, monitoring/, rbac/)
-│   ├── components/      # Reusable kustomize components
-│   ├── overlays/        # Environment overlays (cluster-scoped/, namespace-scoped/)
-│   └── samples/         # Example resources (hpa/, keda/, simulator/)
-├── deploy/               # Deployment scripts
-│   ├── kubernetes/      # Standard K8s deployment
-│   ├── openshift/       # OpenShift-specific deployment
-│   └── kind-emulator/   # Local development with Kind
-├── docs/                 # Documentation
-│   ├── user-guide/      # User-facing documentation
-│   ├── developer-guide/ # Development and testing guides
-│   ├── integrations/    # Integration guides (HPA, KEDA, Prometheus)
-│   ├── tutorials/       # Step-by-step tutorials
-│   └── design/          # Architecture and design docs
-├── internal/             # Private application code
-│   ├── controller/      # Main reconciliation logic
-│   ├── collector/       # Metrics collection
-│   ├── engines/         # Scaling engines, analyzers, and optimizers
-│   ├── actuator/        # Metric emission & actuation
-│   ├── queueing/        # Queue theory models & config (analyzer, config)
-│   ├── metrics/         # Metrics definitions
-│   └── utils/           # Utility functions
-├── test/                 # Tests
-│   ├── e2e/             # End-to-end tests
-│   └── utils/           # Test utilities
-├── hack/                 # Dev scripts (e.g. hack/burst_load_generator.sh for manual load)
-```
-
-## The scaling manager-Specific Development Tasks
-
-### Testing Your Changes
+## Testing Your Changes
 
 **Run unit tests:**
 
@@ -123,8 +91,11 @@ make test-e2e-smoke
 # or make test-e2e-full
 
 # Run specific tests
-FOCUS="Basic VA lifecycle" make test-e2e-smoke
+FOCUS="Basic Autoscaling" make test-e2e-smoke
 ```
+
+A `FOCUS` that matches no spec runs 0 specs and still passes. Read the
+`Ran N of M Specs` line in the verbose output and check N is not 0.
 
 **Run linter:**
 
@@ -135,23 +106,33 @@ make lint
 make lint-fix
 ```
 
+What CI runs, and how to run each job locally, is in
+[Testing: Continuous Integration](docs/developer-guide/testing.md#continuous-integration).
+
 ### Modifying generated manifests
 
 This project installs no CustomResourceDefinition. A workload is registered by
-its KEDA ScaledObject, so there is no API type to version. What is generated is
-the RBAC and deepcopy code:
+its KEDA ScaledObject, so there is no API type to version. The only generated
+file is the manager's ClusterRole:
 
-1. **Regenerate after changing kubebuilder markers or API structs:**
+1. **Regenerate after changing `+kubebuilder:rbac` markers:**
 
    ```bash
-   make manifests generate
+   make manifests
    ```
+
+   This rewrites only `config/base/rbac/manager-clusterrole.yaml`.
 
 2. **Check what moved:**
 
    ```bash
-   git diff config/base/rbac internal/variant/deepcopy.go
+   git diff config/base/rbac
    ```
+
+The DeepCopy methods in `internal/variant/deepcopy.go` are hand-maintained. No
+type carries a `+kubebuilder:object` marker, so `make generate` produces
+nothing; when you change a struct in `internal/variant`, update `deepcopy.go` by
+hand.
 
 ### Building and Deploying
 
@@ -193,41 +174,23 @@ make deploy-e2e-infra IMG=<your-registry>/wva-controller:tag
 
 ## Documentation
 
-### Updating Documentation
+Where a page goes is set by [AGENTS.md](AGENTS.md#documentation). Three
+conventions that CI enforces:
 
-When making code changes, update relevant documentation in:
+- **Guides are generated.** The bash blocks in `docs/guides/<task>/README.md`
+  come from its `guide.yaml`. Edit the YAML, run `make guides-render`, and
+  `make guides-check` (which also checks every doc link).
+- **Config file names** under `config/` follow `(<app>-)?<kind>.yaml`, e.g.
+  `manager-clusterrole.yaml`.
+- **Shell checks are fixtures.** A new check is a `hack/check-*.sh` wired into
+  `make lint-deploy-scripts`.
 
-User-facing:
-
-- `docs/guides/<task>/` - a task someone runs, start to finish
-- `docs/reference/` - what an operator sets and reads: configuration, policy,
-  metrics, troubleshooting
-- `docs/concepts/` - how the scaling manager decides, in an operator's terms
-- `README.md` - high-level feature changes
-
-Developer-facing:
-
-- `docs/developer-guide/` - development workflow, and component internals
-  written in package paths and struct fields
-- `docs/proposals/` - design notes for work not built yet, or still moving
-- `docs/plans/<area>/` - agent plans and the specs behind them
-
-### Testing Documentation
-
-Verify all commands and examples work:
-
-```bash
-# Test installation steps from docs
-# Test configuration examples
-# Verify all code snippets are correct
-```
-
-## The scaling manager-Specific Code Guidelines
+## Code Guidelines
 
 ### Controller Development
 
-- Use the `logger` package from `internal/logger`
-- Always use backoff retries for Kubernetes API calls (see `internal/utils`)
+- Log through `ctrl.Log` (see [AGENTS.md](AGENTS.md)); verbosity levels are in `internal/logging`
+- Always use backoff retries for Kubernetes API calls (see `GetResourceWithBackoff` in `internal/resources`)
 - Emit metrics for observability
 
 ### Analyzers
@@ -250,11 +213,9 @@ When modifying optimizers in `internal/engines/allocation/`:
 
 ## Getting Help
 
-- Check [Developer Guide](docs/developer-guide/development.md)
+- Check the [Developer Guide](docs/developer-guide/development.md)
 - Review existing code and tests
-- Search [GitHub Issues](https://github.com/llm-d/llm-d-workload-variant-autoscaler/issues)
-- Ask in GitHub Discussions
-- Attend llm-d community meetings
+- Search [GitHub Issues](https://github.com/ev-shindin/llm-scaling-manager/issues)
 
 ## Common Development Tasks
 
@@ -272,14 +233,13 @@ CREATE_CLUSTER=true make deploy-e2e-infra
 
 ```bash
 # View controller logs
-kubectl logs -n workload-variant-autoscaler-system \
-  -l control-plane=controller-manager --tail=100 -f
+kubectl logs -n $NAMESPACE deploy/wva-controller-manager -f
 
 # Check what KEDA was told, and by whom
 kubectl describe scaledobject <name> -n <namespace>
 
-# Check emitted metrics
-kubectl get --raw "/apis/external.metrics.k8s.io/v1beta1/namespaces/<namespace>/wva_desired_replicas" | jq
+# Check the HPA KEDA drives from the decision
+kubectl describe hpa -n <namespace> keda-hpa-<scaledobject-name>
 ```
 
 ### Cleaning Up
@@ -288,11 +248,8 @@ kubectl get --raw "/apis/external.metrics.k8s.io/v1beta1/namespaces/<namespace>/
 # Destroy Kind cluster
 make destroy-kind-cluster
 
-# Undeploy from cluster
-make undeploy
-
-# Uninstall CRDs
-make uninstall
+# Undeploy from cluster (pass the ENVIRONMENT, SCOPE and namespace you installed with)
+make undeploy-wva
 ```
 
 ## Pre-Submission Checklist
@@ -303,6 +260,7 @@ Before submitting your PR, ensure:
 - [ ] `make lint` passes (fix issues with `make lint-fix`)
 - [ ] `make test-e2e-smoke` passes (if controller logic changed; use `make test-e2e-full` for full suite)
 - [ ] Documentation updated (if user-facing changes)
+- [ ] Every commit is signed off (`-s`) and signed
 - [ ] Commit messages follow [conventional commits](https://www.conventionalcommits.org/)
 - [ ] PR description clearly explains the change
 
@@ -312,4 +270,4 @@ By contributing, you agree that your contributions will be licensed under the Ap
 
 ---
 
-Thank you for contributing to Workload-Variant-Autoscaler!
+Thank you for contributing!

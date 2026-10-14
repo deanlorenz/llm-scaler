@@ -276,7 +276,7 @@ which is the 300-second load a retained pool exists to avoid paying twice.
 
 **This was measured, and it works** -- see
 [warm-pool-weight-transfer.md](warm-pool-weight-transfer.md), reproduction in
-`test/experiments/weight-transfer/`. On pokprod, Qwen3-0.6B, two H100s: a peer
+`test/experiments/weight-transfer/`. On an H100 OpenShift test cluster, Qwen3-0.6B, two H100s: a peer
 broadcast filled a level-2 sleeper with **1.40 GiB in 0.11 s (13.1 GB/s)**
 against **999 ms** for `reload_weights` from storage, and the refilled engine
 produced byte-identical output. It works on a plain scale-up too, with no pool at

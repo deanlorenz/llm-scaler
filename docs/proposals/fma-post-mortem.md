@@ -20,7 +20,7 @@ The promise was a scale-up that serves in ~3 s instead of ~41 s.
 
 ## Why it was dropped
 
-Measured on pokprod over 2026-08-18/19, and the failures were structural rather
+Measured on an H100 OpenShift test cluster over 2026-08-18/19, and the failures were structural rather
 than incidental:
 
 - **Placement is the bug, not GPU alignment.** A warm bind is node-local. Pinning
@@ -36,7 +36,7 @@ than incidental:
 
 A fork was started (`ev-shindin/llm-d-fast-model-actuation`, branch
 `feat/reuse-by-model`); its first commit fixed a port-conflict reclaim and was
-validated on pokprod (0 destroy events, first `warmAffinity` wake at 2 s). It was
+validated on an H100 OpenShift test cluster (0 destroy events, first `warmAffinity` wake at 2 s). It was
 not carried further.
 
 `fma-upstream-requests.md` gathered change requests against FMA
@@ -47,7 +47,7 @@ nothing was filed, accepted, or rejected. Treat them as unraised.
 
 `internal/warmpool` — a pool of Pods holding engines already loaded on a GPU,
 using vLLM sleep mode rather than FMA's bind/unbind. It is built, tested and
-cluster-verified: **~437 ms model switch against ~41 s cold** on pokprod.
+cluster-verified: **~437 ms model switch against ~41 s cold** on an H100 OpenShift test cluster.
 
 The design that shipped is
 [`fast-model-loading.md`](fast-model-loading.md) (the argument) and
@@ -101,7 +101,7 @@ needs its own decision.
   ownerReference walk ends with nothing and the Pod is dropped. That is what the
   locator pairing exists to fix.
 - **The PodMonitor-overwrite trap.** A second PodMonitor selecting the same Pods
-  hid launcher metrics entirely on pokprod. Symptom: the series simply do not
+  hid launcher metrics entirely on that cluster. Symptom: the series simply do not
   exist, with nothing reporting an error.
 - **GPU quota does not bound FMA's real consumption**, because a `LauncherConfig`
   does not express a warm pool. When planning capacity in an FMA namespace,

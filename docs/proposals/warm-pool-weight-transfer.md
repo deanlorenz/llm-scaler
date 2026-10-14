@@ -1,6 +1,6 @@
 # Transferring weights instead of reading them
 
-Status: investigated against `vllm/vllm-openai:v0.26.0` on pokprod, 2026-08-26.
+Status: investigated against `vllm/vllm-openai:v0.26.0` on an H100 OpenShift test cluster, 2026-08-26.
 Nothing built. This is what the shipped machinery can and cannot do, and which
 of it is worth building.
 
@@ -19,7 +19,7 @@ sections overturn earlier ones. **Read this table before reading linearly**, or
 | ...at TP>1 | **DESIGNED, NOT RUN** -- needs the sender to un-shard first | §4i |
 | A *dedicated* weight server is worth building | **NO** -- costs what a warm pool costs and is slower | §4b |
 | NIXL can move weights | **NO** -- the engine ships NCCL and IPC backends only | see sleep-levels §5c |
-| The bandwidth figures predict your fleet | **NO** -- pokprod is not the deployment target, and one run used TCP by mistake | §4f, §4g |
+| The bandwidth figures predict your fleet | **NO** -- the test cluster is not the deployment target, and one run used TCP by mistake | §4f, §4g |
 
 **The failure mode that governs all of it** (§4): a receiver that is dummy-loaded
 or level-2 woken, and whose transfer does not complete, serves confident nonsense
@@ -596,7 +596,7 @@ the first was level 2 serving `'!!!!!!!!'` behind four 200s.
 
 ## 4f. A note on which cluster these numbers came from
 
-Every bandwidth figure here was measured on pokprod, and pokprod is not the
+Every bandwidth figure here was measured on an H100 OpenShift test cluster, and that cluster is not the
 hardware any of this would be deployed on. Its fabric is what it is; a fleet
 bought for multi-node inference would have a faster one.
 

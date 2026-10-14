@@ -184,7 +184,15 @@ never enforced, while scale-from-zero consulted a limiter nobody had asked for.
 The `default` entry selects the GPU limiter for the scaling pipeline. This is the
 **sole source** — there is no `--limiter-type` flag or quota config file — and it is
 applied **live**: editing the ConfigMap switches the limiter without a controller
-restart (the engine rebuilds it on the next optimization cycle).
+restart (the engine rebuilds it on the next optimization cycle). **The exception:**
+when a separate policy namespace resolves (see
+[who is allowed to change the bound](gpu-limiter.md#who-is-allowed-to-change-the-bound)),
+a **namespace-scoped** controller (`--watch-namespace` set) reads that
+namespace's ConfigMap once at start and does not watch it, because its cache
+cannot hold a namespace it has no RBAC in (`cmd/main.go`). An edit there takes
+effect only when the controller restarts
+(`kubectl rollout restart deploy/wva-controller-manager -n <its ns>`). A
+cluster-scoped controller watches the policy namespace and picks the edit up live.
 
 A `limiters:` list selects a **single mode**, so declare **one** of these forms:
 
@@ -216,8 +224,10 @@ default: |
   A quota entry may also set `kueue: { enabled: true }` to be bounded by the quotas
   Kueue declares — see [Kueue as a quota source](quota-limiter.md#kueue-as-a-quota-source).
 - **Cluster-default only.** The list is read only from the global (system-namespace)
-  `default` entry — a budget-scope setting, like `enableRescale` — so a tenant cannot
-  widen a cap via a per-model or namespace-local entry. A `limiters:` block placed on any
+  `default` entry — or, when a policy namespace resolves, from the `default` entry
+  of the ConfigMap there, which then replaces the system-namespace copy's say —
+  a budget-scope setting, like `enableRescale`, so a tenant cannot
+  widen a cap via a per-model entry or a [namespace-local scaling-policy map](#namespace-local-scaling-policy-map). A `limiters:` block placed on any
   other entry parses and validates but is **silently ignored** at runtime.
 - With no `limiters:` block **nothing bounds scaling** — that is the shipped
   default, and the controller says so at startup: "scaling is UNCONSTRAINED".
@@ -356,7 +366,7 @@ log `invalid weight on a model's scaling-policy entry`; none of them rejects the
 entry. A number outside the classes' range (0.5 to 4 with the default classes) is
 clamped into it.
 
-A namespace with its own namespace-local scaling-policy map sets its models'
+A namespace with its own [namespace-local scaling-policy map](#namespace-local-scaling-policy-map) sets its models'
 weights and thresholds itself. Such a model is planned in its namespace's own
 quota group, which that namespace owns whole, but **not** in the cluster group,
 where its weight would be weighed against other tenants'; there today's optimizer
@@ -395,8 +405,11 @@ A model left out this way is listed in the log line's `frozen` field as
 `namespace not in utilizationShare.clusterNamespaces`.
 
 **Where the block is read.** Like `limiters:`, only from the cluster `default`
-entry, and live: an edit takes effect on the next cycle. An `optimizer:` block in
-a namespace-local scaling-policy map has no effect; the controller logs
+entry (or the policy namespace's, when one resolves), and live: an edit takes
+effect on the next cycle, except in a policy namespace read by a
+namespace-scoped controller, which reads it at start only (see
+[`limiters`](#limiters-cluster-default-only-live)).
+An `optimizer:` block in a [namespace-local scaling-policy map](#namespace-local-scaling-policy-map) has no effect; the controller logs
 `ignoring optimizer blocks in namespace-local scaling-policy maps` with the
 namespaces. A malformed block (an unknown key, a value out of range) turns only
 the optimizer off and logs `Utilization share: invalid optimizer block; keeping today's optimizer`;
@@ -821,15 +834,43 @@ lines and uninstall: see
 
 ### ConfigMap Structure
 
-The saturation scaling configuration is stored in a ConfigMap named `wva-scaling-policy-config` in llm-scaling-manager controller's namespace.
+The saturation scaling configuration is stored in a ConfigMap named `wva-scaling-policy-config` in llm-scaling-manager controller's namespace. The exception is `limiters:` and `optimizer:`: when a policy namespace resolves, those two are read from the ConfigMap there and the controller's own copy loses its say over them — see [who is allowed to change the bound](gpu-limiter.md#who-is-allowed-to-change-the-bound).
 
 **Location:** `deploy/configmap-scaling-policy.yaml`
+
+### Namespace-local scaling-policy map
+
+A **namespace-local scaling-policy map** is a ConfigMap with the same name,
+`wva-scaling-policy-config`, in a model namespace rather than in the
+controller's namespace. For the models in that namespace it **replaces the
+global map whole**: the controller reads that namespace's entries and nothing
+from the controller's copy — no field-by-field merge, so a namespace-local
+`default` entry has to carry every threshold it wants, and tiers and per-model
+entries defined only in the global map do not exist for that namespace
+(`internal/config/config.go`, `resolveScalingPolicyConfigMap`). Deleting the
+ConfigMap returns the namespace to the global map. It cannot set `limiters:` or
+`optimizer:`; those are read from the cluster `default` entry only.
+
+A namespace gets one when the controller reads a ConfigMap of that name there:
+
+- **Cluster-scoped install:** the namespace has registered workloads, or it
+  carries the label `wva.llmd.ai/config-enabled=true` (read at start;
+  `kubectl label namespace <ns> wva.llmd.ai/config-enabled=true`), and is not
+  excluded with the `wva.llmd.ai/exclude` annotation
+  (`internal/controller/configmap_reconciler.go`,
+  `shouldWatchNamespaceLocalConfigMap`). The ConfigMap must also carry the
+  label `app.kubernetes.io/name: workload-variant-autoscaler`, which the
+  controller's ConfigMap cache filters on in this mode.
+- **Namespace-scoped install, out-of-reach shape** (controller namespace ≠
+  watched namespace): the ConfigMap in the watched tenant namespace is always
+  read, no label needed (`internal/controller/predicates.go`). See
+  [the security model](security-model.md) for why this is by design.
 
 ### Parameters
 
 | Parameter | Type | Description | Recommended |
 |-----------|------|-------------|-------------|
-| `kvCacheThreshold` | float64 | Replica is considered saturated if KV cache utilization ≥ threshold (0.0-1.0) | 0.80 |
+| `kvCacheThreshold` | float64 | Ceiling on usable KV cache (0.0-1.0): a replica's capacity is its physical KV budget scaled by this, so utilization reaches 1.0 when KV occupancy reaches the ceiling. A capacity multiplier, not a saturation test: lower values scale out sooner. It compounds with `scaleUpThreshold` (scale-out at `kvCacheThreshold × scaleUpThreshold` of physical KV) | 0.80 |
 | `queueLengthThreshold` | float64 | Replica is considered saturated if queue length ≥ threshold | 5 |
 | `scaleUpThreshold` | float64 | Model-level utilization threshold above which scale-up is triggered (0.0-1.0). Applied by the engine post-step to every analyzer's result. | 0.85 |
 | `scaleDownBoundary` | float64 | Model-level utilization boundary below which scale-down is safe (0.0-1.0). Applied by the engine post-step to every analyzer's result. | 0.70 |
@@ -844,18 +885,17 @@ These parameters apply when `analyzerName: "saturation"` is set or when the `ana
 | `priority` | float64 | Multiplier for this model's scaling urgency in fair-share GPU allocation | 1.0 |
 | `analyzers` | list | Multi-analyzer pipeline registration — see [Multi-Analyzer Registration](#multi-analyzer-registration) | `[{name: "saturation", score: 1.0}]` |
 
-> `scaleUpThreshold` and `scaleDownBoundary` are honored only for saturation on this branch; see the `multi-analyzer-threshold` PR for the universal post-step that calibrates RC/SC across all analyzers.
-
 ### Expected output length
 
 This one is **not** a ConfigMap field. It is set on the ScaledObject, beside
-`modelID`, and a `defaultOutputTokens` key in this ConfigMap is ignored:
+`modelID`, and a `defaultOutputTokens` key in this ConfigMap is ignored. Every
+key the trigger carries is listed in [ScaledObject trigger metadata](scaledobject-trigger.md):
 
 ```yaml
 triggers:
   - type: external-push
     metadata:
-      scalerAddress: wva-external-scaler.<wva-namespace>.svc.cluster.local:9090
+      scalerAddress: wva-external-scaler.<controller-namespace>.svc.cluster.local:9090
       modelID: ibm/granite-13b
       defaultOutputTokens: "6000"
 ```
@@ -894,8 +934,10 @@ and the omission says so.
 
 **Why the trigger and not this ConfigMap.** The figure is a fact about one
 workload's traffic, not a threshold a class of workloads shares — a
-fleet-wide generation length is already what the built-in 512 is. It sits beside
-`replicaStartSeconds`, the other per-workload seed, for the same reason.
+fleet-wide generation length is already what the built-in 512 is. The trigger
+also declares `replicaStartSeconds`, a second per-workload seed, but that key is
+**reserved: nothing reads it yet**, and the analyzer uses its own default until it
+measures a replica start ([trigger reference](scaledobject-trigger.md)).
 
 **When a model's variants disagree.** A model under P/D has a ScaledObject per
 role, so the key can be written twice. The **largest** figure wins, and the
@@ -904,6 +946,122 @@ one role generates tokens: a prefill trigger carrying nothing must not pull
 decode's figure down to the built-in fallback, and under-pricing a queue is the
 failure the key exists to fix. Writing it on one variant and leaving it off the
 others is the simplest way to get this right.
+
+### `enableLearnedStateReuse`
+
+Lets a variant be priced from a sibling's measurement instead of only its own.
+**Off by default** — see [Why it is off](#why-it-is-off) before turning it on.
+
+```yaml
+default:
+  enableLearnedStateReuse: true
+```
+
+It resolves through the normal per-entry overlay, so it can also be set on a
+named tier or a per-model entry. A per-model entry is a ConfigMap data key of
+its own, identified by the `model_id` and `namespace` in its **body** — the key
+itself is arbitrary:
+
+```yaml
+llama-8b-prod:
+  model_id: meta-llama/Llama-3.1-8B
+  namespace: prod
+  enableLearnedStateReuse: true
+```
+
+Both `model_id` and `namespace` are load-bearing: an entry missing either one
+matches no model. It does not fail loudly — the parse is not strict, so an
+entry whose body names no model is registered as a selectable policy **tier**
+instead, under its own key. See
+[Per-Model Overrides](#4-per-model-overrides) for the full schema.
+
+The granularity is `(model_id, namespace)`, not a single variant. On a P/D model
+decode and prefill are two variants of one model and resolve the same answer,
+so this cannot enable reuse for one of them alone.
+
+One direction only: an entry can turn reuse **on** where the default leaves it
+off, but cannot turn it back **off** where a `default:` entry turned it on —
+to do that, change the `default:` entry. Check the `Effective scaling policy`
+log line for `enableLearnedStateReuse` to confirm what a model resolved to; a
+typo in the key name is silently nothing, which now means "still off".
+
+#### What it turns on
+
+A variant with nothing measured yet is priced from a sibling that runs the
+**same engine configuration** on the same accelerator and GPU count, so that a
+scaled-out variant can price its first decision from something other than a
+guess. That happens two ways, and this key governs **both**:
+
+| path | what is reused |
+| --- | --- |
+| the shared ITL line | the inter-token-latency model `ITL(k) = A·k + B` another variant fitted, used to derive this one's service rate |
+| the cross-variant capacity figure | another variant's measured per-replica capacity, as the estimate for a variant with no record of its own |
+
+It does not control learning. A variant learns from its own readings either
+way, and nothing already stored is cleared when the key changes.
+
+It also has no effect on any capacity *ceiling*. A sibling's figure is used in
+one further place as an upper bound on an estimate, and that bound applies
+whatever this key says — a bound only ever lowers a capacity, and lowering
+capacity orders *more* replicas, which is the safe direction. The key governs
+where a sibling's figure would *become* this variant's answer, never where it
+only limits it.
+
+#### Why it is off
+
+Reuse rests on an equality: two variants share only if a digest over the engine
+flags the scaling manager could read from their deployments matches. **That
+equality is not sound.** Five rounds of adversarial review found seven measured
+ways to produce a false match or to destroy a true one, and two attempts to
+close them inside the flag parser were reverted for costing more than they
+bought — one of them denied sharing to ordinary deployments because a shell
+preamble contained `grep -q`, while `-qfp8` still hashed as no flag at all.
+
+The sharpest case is that a configuration the manager reads *wrong* rather than
+not at all still produces a confident digest: SGLang flags parsed as vLLM read
+as a complete set of vLLM defaults, and would match every other default
+configuration of that model.
+
+So everything that merely **describes** a configuration ships on by default —
+the digest, the `wva_engine_config` metric, the drift checks. Only the act of
+letting one variant's reading price another's decision waits for you to ask for
+it. The intended replacement is graded sharing by **similarity** rather than by
+proven identity, where a flag the parser cannot read becomes a distance penalty
+instead of a false equality; see
+[learned-state sharing by similarity](../proposals/learned-state-sharing-by-similarity.md).
+
+#### What it costs to leave off
+
+A variant with no readings of its own prices its first decisions from its
+deployment-derived capacity alone, which is a weaker estimate. Expect a slower
+first ramp on a newly scaled-out variant.
+
+#### Before turning it on
+
+Check what the manager actually read, because the two paths degrade
+differently and the difference decides what you are buying into:
+
+- the **shared ITL line** is refused outright when flags could not be read. An
+  incomplete read produces no sharing key at all, so nothing is borrowed and
+  nothing lent.
+- the **cross-variant capacity figure** is *not* gated on a complete read, and
+  that is deliberate rather than an oversight — gating it was tried and cost a
+  30× capacity over-estimate, because refusing a sibling's measured figure
+  falls back to an estimate that is higher, and a higher capacity orders fewer
+  replicas. So with this key on, a variant whose flags were only partly read
+  **is** still priced from a sibling's capacity figure.
+
+Read `wva_engine_config` to tell the cases apart:
+
+| what you see | what it means |
+| --- | --- |
+| a series with a non-empty `unresolved` label | one or more flags could not be read, and `unresolved` names them (usually a value coming from a ConfigMap or `valueFrom`, which the manager cannot read). With the key on, no ITL line is shared, but the capacity figure is — so this is the riskiest case to enable. Fixing the flags is the better remedy. |
+| **no series at all** | no parsed engine configuration: no capacity record yet, nothing readable in the pod template, or no scale target resolved. Not a reliable signal on its own — the series is also briefly absent on a cycle where the variant drops out of the analyzer's series. |
+| a series with `unresolved` empty | the configuration was read in full, and with the key on the variant shares on **both** paths, keyed on `fingerprint`. This is the case the key is for. |
+
+Joining two variants on the fingerprint takes all four of `model_name`,
+`accelerator`, `gpus` and `fingerprint` — the sharing key is the tuple, not the
+digest alone — and, for the ITL line, `unresolved` empty on both sides.
 
 ### Default Configuration
 
@@ -1195,7 +1353,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: wva-scaling-policy-config
-  namespace: <workload-variant-autoscaler-namespace>
+  namespace: <controller-namespace>
 data:
   default: |
     analyzers:                    # selects V2 (default since v0.9.0)
@@ -1250,10 +1408,10 @@ Choose thresholds based on your workload characteristics and SLO requirements:
 Update `wva-scaling-policy-config` ConfigMap:
 
 ```bash
-kubectl edit cm wva-scaling-policy-config -n <workload-variant-autoscaler-namespace>
+kubectl edit cm wva-scaling-policy-config -n <controller-namespace>
 ```
 
-Changes take effect **immediately** (the scaling manager watches ConfigMap and auto-reloads).
+Changes take effect **immediately** (the scaling manager watches ConfigMap and auto-reloads). Thresholds are read from this copy in the controller's namespace; `limiters:` and `optimizer:` are not, when a policy namespace resolves — see [who is allowed to change the bound](gpu-limiter.md#who-is-allowed-to-change-the-bound).
 
 #### Step 3: Apply to EPP
 
@@ -1288,7 +1446,7 @@ kubectl rollout restart deployment/gaie-llama-70b-epp -n lab
 
 **the scaling manager verification:**
 ```bash
-kubectl get cm wva-scaling-policy-config -n <workload-variant-autoscaler-namespace> -o yaml
+kubectl get cm wva-scaling-policy-config -n <controller-namespace> -o yaml
 ```
 
 **EPP verification (per-model instance):**
@@ -1345,7 +1503,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: wva-scaling-policy-config
-  namespace: <workload-variant-autoscaler-namespace>
+  namespace: <controller-namespace>
 data:
   default: |
     analyzers:
@@ -1404,7 +1562,7 @@ the registration, so this needs nothing watched, listed, or matched:
 triggers:
   - type: external-push
     metadata:
-      scalerAddress: wva-external-scaler.<wva-namespace>.svc.cluster.local:9090
+      scalerAddress: wva-external-scaler.<controller-namespace>.svc.cluster.local:9090
       modelID: ibm/granite-13b
       scalingPolicy: interactive
 ```
@@ -1426,7 +1584,9 @@ are reported:
 
 - **Unknown tier** — a `scalingPolicy` naming no entry falls back to `default`.
   That is the right outcome and the wrong silence, so it is logged against the
-  variants that asked for it, listing the tiers that do exist.
+  variants that asked for it, listing the tiers that do exist: `Scaling policy not
+  found; this variant is scaling under the default entry.` (once per change, with
+  `scalingPolicy` and `knownPolicies` fields).
 - **Disagreeing variants** — when variants of one model name different tiers, the
   lexicographically smallest wins, so the allocation resolves the same way on
   every cycle and every replica rather than flipping with map order.
@@ -1435,17 +1595,20 @@ are reported:
 
 Add model-specific configuration entries to override defaults for specific model/namespace pairs.
 
-The saturation engine resolves per-model config using a lookup key in the format
-an entry whose body names the model (see `internal/config/scaling_policy.go` — `ResolveScalingPolicy()`).
-The ConfigMap data key **must** match this format for overrides to take effect.
-Lookup order: `modelID#namespace` → `default` → zero-value with defaults applied.
+The engine finds a model's override by the entry's **body**: the entry whose
+`model_id` and `namespace` equal the model's (`FindModelOverride()` in
+`internal/config/scaling_policy.go`). The ConfigMap key is not part of the
+lookup; any legal key works. If two entries name the same model and namespace,
+the one with the lexicographically smallest key wins. With no match the model
+scales under `default` (or its tier), and with no `default` under the built-in
+defaults.
 
 ```yaml
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: wva-scaling-policy-config
-  namespace: <workload-variant-autoscaler-namespace>
+  namespace: <controller-namespace>
 data:
   default: |
     analyzers:              # selects V2 (default since v0.9.0)
@@ -1485,7 +1648,7 @@ data:
 
 **Key points:**
 - An override entry is identified by its **body**: set `model_id` and `namespace`. Its ConfigMap key is arbitrary — pick something readable
-- The `model_id` and `namespace` YAML fields inside the entry are parsed but **not used for lookup**
+- `model_id` must equal the ScaledObject's `modelID` exactly, and `namespace` the workload's namespace
 - Overrides use **field-level merge**: only non-zero fields in the override replace the corresponding values from `default`; any field you omit (or set to its zero value) inherits from `default`. See `Merge()` in `internal/config/saturation_scaling.go`.
 - Multiple overrides can exist for different model/namespace combinations
 
@@ -1670,12 +1833,12 @@ data:
 
 1. **Verify ConfigMap was updated:**
    ```bash
-   kubectl get cm wva-scaling-policy-config -n <workload-variant-autoscaler-namespace> -o yaml
+   kubectl get cm wva-scaling-policy-config -n <controller-namespace> -o yaml
    ```
 
 2. **Check controller logs for reload confirmation:**
    ```bash
-   kubectl logs -n <workload-variant-autoscaler-namespace> deploy/wva-controller-manager | grep -E "scaling policy|saturation config"
+   kubectl logs -n <controller-namespace> deploy/wva-controller-manager | grep -E "scaling policy|saturation config"
    ```
 
    Expected logs:
@@ -1685,12 +1848,12 @@ data:
    ```
 
 3. **If no logs appear, verify watch is working:**
-   - Check controller pod is running: `kubectl get pods -n <workload-variant-autoscaler-namespace>`
-   - Check for errors: `kubectl logs -n <workload-variant-autoscaler-namespace> deploy/wva-controller-manager --tail=100`
+   - Check controller pod is running: `kubectl get pods -n <controller-namespace>`
+   - Check for errors: `kubectl logs -n <controller-namespace> deploy/wva-controller-manager --tail=100`
 
 4. **Manual restart (last resort):**
    ```bash
-   kubectl rollout restart deploy/wva-controller-manager -n <workload-variant-autoscaler-namespace>
+   kubectl rollout restart deploy/wva-controller-manager -n <controller-namespace>
    ```
 
 ### Cache Initialization Failed
@@ -1711,7 +1874,7 @@ WARN Failed to load initial saturation scaling config, will use defaults
 
 3. Verify cache loaded:
    ```bash
-   kubectl logs -n <workload-variant-autoscaler-namespace> deploy/wva-controller-manager | grep "Updated global scaling policy from ConfigMap"
+   kubectl logs -n <controller-namespace> deploy/wva-controller-manager | grep "Updated global scaling policy from ConfigMap"
    ```
 
 ## Example: Production Setup
@@ -1722,7 +1885,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: wva-scaling-policy-config
-  namespace: <workload-variant-autoscaler-namespace>
+  namespace: <controller-namespace>
 data:
   # Conservative defaults for most workloads (V2 analyzer — the default since v0.9.0)
   default: |
@@ -1759,8 +1922,8 @@ kubectl apply -f deploy/configmap-scaling-policy.yaml
 
 Verify deployment:
 ```bash
-kubectl get cm wva-scaling-policy-config -n <workload-variant-autoscaler-namespace>
-kubectl describe cm wva-scaling-policy-config -n <workload-variant-autoscaler-namespace>
+kubectl get cm wva-scaling-policy-config -n <controller-namespace>
+kubectl describe cm wva-scaling-policy-config -n <controller-namespace>
 ```
 
 ## API Reference

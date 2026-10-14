@@ -19,7 +19,7 @@ property of a replica **and a shape**, not of a replica. Every mechanism that
 exists to cope with that — the per-output-length bucket keys, the shape tracker,
 the stale-shape hold, the borrowed-reading rule — is downstream of the units.
 
-Measured cost, run QF (2026-10-03, kermit/`evgensh-shapeswap`, H200,
+Measured cost, run QF (2026-10-03, an H200 Kubernetes cluster, H200,
 Qwen3-0.6B, the `1k/6000 -> 20k/250` trace):
 
 | time | `heldWhy` | `replicasImplied` | `desired` | scheduler queue |

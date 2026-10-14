@@ -15,66 +15,72 @@ The scaling manager has a multi-layered testing strategy:
 ### Running Unit Tests
 
 ```bash
-# Run all unit tests
+# Run all unit tests (also runs check-import-direction and check-doc-comment-owner)
 make test
 
-# Run with coverage report
-go test -cover ./...
-
 # Run specific package
-go test ./internal/queueing/analyzer/...
+go test ./internal/engines/analyzers/saturation/...
 
 # Run with verbose output
 go test -v ./internal/controller/...
 
-# Generate HTML coverage report
-go test -coverprofile=coverage.out ./...
+# Coverage. Never `go test ./...`: it also runs test/e2e against your current
+# kube context, deleting and restarting things on whatever cluster that is.
+go test -coverprofile=coverage.out $(go list ./... | grep -v -e /e2e -e /benchmark)
 go tool cover -html=coverage.out -o coverage.html
 ```
 
-### Shell checks in `deploy/lib`
+`make test` builds that same package list (it excludes `/e2e` and
+`/benchmark`, then adds `./test/e2e/fixtures/`), sets `KUBEBUILDER_ASSETS`
+for the envtest suites, and first runs `hack/check-import-direction.sh` and
+`hack/check-doc-comment-owner.py`.
+
+### Run one test
+
+```bash
+make setup-envtest
+# 1.34 matches k8s.io/api v0.34 in go.mod; the Makefile derives it the same way
+export KUBEBUILDER_ASSETS="$(bin/setup-envtest use 1.34 --bin-dir bin -p path)"
+
+# A plain Go test
+go test ./internal/engines/steadystate/ -run TestGPUConstraintsAreLogged -v
+
+# One Ginkgo spec: -run selects the suite, -ginkgo.focus the spec
+go test ./internal/engines/steadystate/ -run TestSaturationEngine \
+  -ginkgo.focus "live GPU limiter rebuild" -ginkgo.v
+```
+
+Three packages start an envtest API server and need `KUBEBUILDER_ASSETS`:
+`internal/controller`, `internal/actuator` and `internal/engines/steadystate`.
+
+Check the spec count in the output. A focus that matches nothing runs 0 specs
+and exits 0, and e2e specs `Skip()` at runtime on environment flags (for
+example the scale-from-zero suites without `SCALE_TO_ZERO_ENABLED=true`). A
+skip also reports as success, so always run with `-ginkgo.v` and read what ran.
+
+### Shell checks in `deploy/` and `hack/`
 
 The installer decides what to autoscale by parsing pod specs in shell. That
 parsing has no Go test and never touches a cluster, so it is covered by
-fixture-executing checks under `hack/`, all of them run by one target that
-CI runs on every PR:
+fixture-executing checks under `hack/`. One target runs them all, and CI runs
+it on every PR (`deploy-scripts-check`):
 
 ```bash
 make lint-deploy-scripts
 ```
 
-- `check-workload-gaps.sh` -- readiness detection: which container is the
-  engine, whether weights persist, whether a drain hook is present.
-- `check-scaledobject-parsers.sh` -- model identification: `so_model_id`
-  (which token on a command line names the model) and `so_resolve_env_ref`
-  (a model name written as `$MODEL_NAME`, `${MODEL_NAME}` or
-  `$(MODEL_NAME)`). It also lifts the discovery `jq` query out of
-  `deploy/lib/scaledobject.sh` and runs it, to check that one workload still
-  produces one pipe-delimited record on one line.
+It runs every `hack/check-*` script listed in the target (26 at the time of
+writing: 23 shell, 3 Python; parsers, manifests, make recipes, quoted
+`jq`/`yq` programs, ...) besides `bash -n` on the deploy scripts. The other
+`hack/check-*` scripts (doc links, dashboards, import direction, doc-comment
+owners) run from their own targets. They need `jq` and `yq` and fail rather than skip without them,
+because a skip is how a green run comes to mean nothing. CI pins yq v4.44.3;
+some yq behaviour differs in newer releases, so reproduce a CI failure with
+that version.
 
-Both need `jq` (and the first needs `yq`) and fail rather than skip without
-them, because a skip is how a green run comes to mean nothing.
-
-### Unit Test Structure
-
-Unit tests are co-located with the code they test:
-
-```text
-internal/
-├── controller/
-│   ├── variantautoscaling_controller.go
-│   └── variantautoscaling_controller_test.go
-├── saturation/
-│   ├── analyzer.go
-│   └── analyzer_test.go
-├── collector/
-│   ├── collector.go
-│   └── collector_test.go
-└── queueing/
-    └── analyzer/
-        ├── queueanalyzer.go
-        └── queueanalyzer_test.go
-```
+A new fixture check follows the same convention (see AGENTS.md): a
+`hack/check-*.sh` script, called from `lint-deploy-scripts`. A check behind
+a new make target is one CI never runs.
 
 ### Writing Unit Tests
 
@@ -129,27 +135,10 @@ go test ./internal/controller/... -v
 
 ### envtest Setup
 
-Integration tests use controller-runtime's envtest, which provides a real Kubernetes API server for testing:
-
-```go
-var _ = BeforeSuite(func() {
-    testEnv = &envtest.Environment{
-        CRDDirectoryPaths: []string{
-            filepath.Join("..", "..", "config", "crd", "bases"),
-        },
-    }
-
-    cfg, err := testEnv.Start()
-    Expect(err).NotTo(HaveOccurred())
-
-    k8sClient, err = client.New(cfg, client.Options{Scheme: scheme})
-    Expect(err).NotTo(HaveOccurred())
-})
-
-var _ = AfterSuite(func() {
-    Expect(testEnv.Stop()).To(Succeed())
-})
-```
+Integration tests use controller-runtime's envtest, a real Kubernetes API
+server with no controllers. The project installs no CRD, so the suites load
+none; see `internal/controller/suite_test.go` for the setup, and
+[Run one test](#run-one-test) for running a suite by hand.
 
 ## End-to-End Tests
 
@@ -161,7 +150,7 @@ The scaling manager provides a **single consolidated E2E suite** that runs on mu
 
 ### Scope
 
-E2E is intended to be a **deterministic correctness signal**: resource wiring, reconciliation, and stable invariants (e.g., CRs reconcile, status conditions are set, scalers are created and point at the right targets/metrics). Traffic generation and performance/benchmarking scenarios should live outside `test/e2e/`.
+E2E is intended to be a **deterministic correctness signal**: resource wiring, reconciliation, and stable invariants (e.g., ScaledObjects become Ready, KEDA creates the HPA, scalers are created and point at the right targets/metrics). Traffic generation and performance/benchmarking scenarios should live outside `test/e2e/`.
 
 ### Controller state between runs
 
@@ -290,14 +279,19 @@ export ENVIRONMENT=openshift
 make test-e2e-smoke
 # or make test-e2e-full
 
-# Run a specific test by name
-FOCUS="Basic VA lifecycle" make test-e2e-smoke
+# Run a specific test by name (a Describe or It text, e.g. in smoke_keda_test.go)
+FOCUS="Basic Autoscaling" make test-e2e-smoke
 ```
+
+`test-e2e-smoke` filters on label `smoke` and `test-e2e-full` on
+`full && !smoke && !flaky`, so a `FOCUS` must name a spec in the tier you run. Either
+way, check `Ran N of M Specs` in the output: a focus that matches nothing runs
+0 specs and exits green.
 
 ### What the Suite Validates
 
-- **Smoke (label `smoke`)**: Infrastructure readiness, basic VA lifecycle, target condition validation
-- **Full (label `full`)**: Smoke plus additional deterministic correctness checks (scale-from-zero, limiter, pod scraping, etc.)
+- **Smoke (label `smoke`)**: Infrastructure readiness, basic autoscaling through the KEDA external scaler, error handling
+- **Full (label `full`, run as `full && !smoke && !flaky`)**: Deterministic correctness checks (scale-from-zero, limiter, pod scraping, etc.). The tiers are disjoint: `test-e2e-full` does not re-run the smoke specs, and specs labelled `flaky` run in neither. Run both targets for complete coverage.
 
 ### Configuration
 
@@ -337,82 +331,31 @@ two controllers on one cluster still allocate from one pool of GPUs (see
 
 ## Continuous Integration
 
-### GitHub Actions Workflows
+Two workflows gate a pull request. Every job maps to a make target you can run
+locally; run the same target before you push.
 
-The scaling manager uses GitHub Actions for automated testing:
+`ci-pr-checks.yaml` runs only on pull requests whose base is `main` or `dev`
+(plus pushes to `main` and manual dispatch). A PR stacked on another branch gets
+no build, test, lint or e2e at all, so retarget it to `main` before review.
 
-#### PR Checks Workflow
+| Workflow / job | What it runs | Reproduce locally |
+|----------------|--------------|-------------------|
+| `ci-pr-checks.yaml` / `lint-and-test` | golangci-lint v2.8.0, `make build`, `make test` | `make lint build test` |
+| `ci-pr-checks.yaml` / `deploy-scripts-check` | `make lint-deploy-scripts`, with yq pinned to v4.44.3 | `make lint-deploy-scripts`, with yq v4.44.3 on `PATH` |
+| `ci-pr-checks.yaml` / `docs-check` | `make guides-check` (guide blocks vs `guide.yaml`, plus `hack/check-doc-links.py`), `make warmpool-check`, `make dashboards-check` | the same three targets (needs Python with PyYAML) |
+| `ci-pr-checks.yaml` / `kustomize-build` | `kustomize build` of the cluster-scoped kubernetes, namespace-scoped kubernetes and namespace-scoped openshift overlays | `make kustomize`, then `bin/kustomize build config/overlays/<scope>/<env> > /dev/null` |
+| `ci-pr-checks.yaml` / `e2e-tests-smoke` | `make test-e2e-smoke-with-setup` on a fresh Kind cluster; skipped when a PR changes only docs or metadata | `CREATE_CLUSTER=true make test-e2e-smoke-with-setup` |
+| `ci-pr-checks.yaml` / `e2e-tests-full` | `make test-e2e-full-with-setup` with `SCALE_TO_ZERO_ENABLED=true`; returns early when no compiled file (Go, Makefile, `config/`, `test/`, workflows) changed | `CREATE_CLUSTER=true SCALE_TO_ZERO_ENABLED=true make test-e2e-full-with-setup` |
+| `ci-signed-commits.yaml` / `signed-commits` | fails if any commit in the PR lacks a verified signature | `git log --show-signature origin/main..HEAD` |
 
-**File**: `.github/workflows/ci-pr-checks.yaml`
+On a push to `main`, only `lint-and-test`, `deploy-scripts-check`, `docs-check`
+and `kustomize-build` run; the e2e jobs are PR-only.
 
-Runs on every pull request:
-- Linting (golangci-lint)
-- Unit tests
-- Build verification
-- Code coverage reporting
+`ci-e2e-openshift.yaml` (the GPU OpenShift run) is currently manual
+(`workflow_dispatch` only); its PR and `/ok-to-test` triggers are disabled.
 
-#### E2E Tests Workflow
-
-E2E workflows run the **consolidated suite** (`test/e2e/`):
-- **Smoke** (`make test-e2e-smoke`): Fast validation on Kind (or OpenShift when `ENVIRONMENT=openshift`)
-- **Full** (`make test-e2e-full`): Full suite; typically run with infra deployed via `deploy-e2e-infra` or equivalent
-
-Infrastructure is deployed in **infra-only** mode (the scaling manager + llm-d only); tests create VA, HPA, and model services dynamically.
-
-#### OpenShift E2E Tests Workflow
-
-**File**: `.github/workflows/ci-e2e-openshift.yaml`
-
-Runs OpenShift E2E tests on dedicated cluster:
-- Triggered manually or on specific labels
-- Deploys PR-specific namespaces
-- On failure: automatically scales down GPU workloads while preserving debugging resources (VA, HPA, logs)
-- Smart resource management frees GPUs for other PRs without manual intervention
-
-#### Triggering E2E via PR Comments
-
-You can trigger E2E runs by commenting on a PR:
-
-| Comment | Workflow | Who can use | Effect |
-|--------|----------|-------------|--------|
-| **`/ok-to-test`** | `ci-pr-checks.yaml` + `ci-e2e-openshift.yaml` | Users with write access | Runs the **full** Kind E2E suite **and** the OpenShift E2E (GPU) run on this PR. On fork PRs, this is required before OpenShift E2E can run. |
-| **`/retest`** | `ci-e2e-openshift.yaml` | Users with write access | **OpenShift E2E only:** Re-run the OpenShift E2E workflow (e.g. after a failure, flake, or new commits). Same workflow as `/ok-to-test`, different trigger intent. |
-
-**When to use:**
-
-- **`/ok-to-test`**: Comment this when you want the full E2E suite to run on your PR. It triggers both the full Kind E2E (instead of smoke only) and the OpenShift E2E. By default, PRs only run smoke E2E on Kind.
-- **`/retest`**: Use to re-run only the OpenShift E2E workflow (e.g. after a failure or new commits).
-- **Fork PRs**: If you opened a PR from a fork, OpenShift E2E will not run until a maintainer or admin comments **`/ok-to-test`**. Branch protection should require the **e2e-openshift** status check so merge stays blocked until that run passes (the gate check is intentionally green on fork PRs to avoid a false failure that cannot be updated from upstream).
-
-### Running CI Tests Locally
-
-#### Simulate PR Checks
-
-```bash
-# Run linter
-make lint
-
-# Run unit tests
-make test
-
-# Build binary
-make build
-
-# Build Docker image
-make docker-build
-```
-
-#### Simulate E2E CI
-
-```bash
-# Deploy infra (infra-only), then run smoke or full suite
-make deploy-e2e-infra
-make test-e2e-smoke
-# or: make test-e2e-full
-
-# One-shot: create cluster, deploy infra, run smoke tests
-make test-e2e-smoke-with-setup
-```
+Every commit also needs a DCO sign-off (`git commit -s`); see
+[CONTRIBUTING.md](../../CONTRIBUTING.md#commits).
 
 ## Testing Best Practices
 
@@ -535,7 +478,7 @@ var _ = Describe("Controller", func() {
 go test -v ./internal/engines/allocation/...
 
 # Enable Ginkgo trace
-go test -v ./internal/queueing/analyzer/... -ginkgo.trace
+go test -v ./internal/engines/steadystate/ -ginkgo.v -ginkgo.trace
 
 # Run with debugger (delve)
 dlv test ./internal/controller/... -- -ginkgo.v
@@ -548,7 +491,7 @@ dlv test ./internal/controller/... -- -ginkgo.v
 ```bash
 # Consolidated E2E suite (smoke or full)
 go test ./test/e2e/ -v -ginkgo.v -ginkgo.label-filter="smoke"
-go test ./test/e2e/ -v -ginkgo.v -ginkgo.label-filter="full && !flaky" -timeout 35m
+go test ./test/e2e/ -v -ginkgo.v -ginkgo.label-filter="full && !smoke && !flaky" -timeout 35m
 ```
 
 #### Access Test Cluster
@@ -557,12 +500,16 @@ go test ./test/e2e/ -v -ginkgo.v -ginkgo.label-filter="full && !flaky" -timeout 
 # For Kind E2E tests (default cluster name: kind-wva-gpu-cluster or from CLUSTER_NAME)
 export KUBECONFIG=~/.kube/config   # or path from kind get kubeconfig
 kubectl get pods -A
-kubectl logs -n workload-variant-autoscaler-system deployment/controller-manager
+kubectl logs -n llm-d-sim deploy/wva-controller-manager
 
-# For OpenShift E2E tests
+# For OpenShift E2E tests (same CONTROLLER_NAMESPACE, default llm-d-sim)
 oc get pods -A
-oc logs -n workload-variant-autoscaler-system deployment/controller-manager
+oc logs -n "${CONTROLLER_NAMESPACE:-llm-d-sim}" deploy/wva-controller-manager
 ```
+
+`deploy-e2e-infra` installs the controller in `CONTROLLER_NAMESPACE`, which
+defaults to `llm-d-sim` on every environment, not in
+`workload-variant-autoscaler-system`.
 
 #### Keep Cluster Alive After Failure
 
@@ -589,8 +536,8 @@ make test-e2e-smoke-with-setup
 **Debugging steps**:
 ```bash
 kubectl get events -A --sort-by='.lastTimestamp'
-kubectl describe va -n <namespace>
-kubectl logs -n workload-variant-autoscaler-system deployment/controller-manager
+kubectl describe scaledobject -n <namespace>
+kubectl logs -n llm-d-sim deploy/wva-controller-manager   # Kind e2e; else the controller's namespace
 ```
 
 #### Metrics Not Available
@@ -647,8 +594,8 @@ Current coverage targets:
 ### Checking Coverage
 
 ```bash
-# Generate coverage report
-go test -coverprofile=coverage.out ./...
+# Generate coverage report (never ./...: that runs test/e2e on your kube context)
+go test -coverprofile=coverage.out $(go list ./... | grep -v -e /e2e -e /benchmark)
 
 # View summary
 go tool cover -func=coverage.out

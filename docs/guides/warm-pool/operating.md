@@ -128,16 +128,16 @@ scale-ups they cover are failing, and the pool is hiding it.
 `sleep-min-size` — see [Sizing](sizing.md#sizing). The scaling manager logs
 `warm pool cannot admit any model: every Pod is reserve`.
 
-**The pool reports itself empty while Pods are running.** the scaling manager logs
+**The pool reports itself empty while Pods are running.** The scaling manager logs
 `no warm pool Pod could be read … usually the pool NetworkPolicy`. Its ingress
 `namespaceSelector` has to name the namespace the controller runs in — step 3
 above.
 
-**The pool does not start at all.** the scaling manager logs
+**The pool does not start at all.** The scaling manager logs
 `the warm pool is disabled: this controller may not patch Pods`. Grant `patch`
 on pods in the pool namespace and restart.
 
-**A model never gets a warm copy in a multi-pool namespace.** the scaling manager logs
+**A model never gets a warm copy in a multi-pool namespace.** The scaling manager logs
 `variant will get no warm copy` with the reason — either it named no pool, or it
 named one that does not exist. Both are fixed in the ScaledObject trigger
 metadata, and `deploy/warmpool.sh plan -n <namespace>` lists every model in
