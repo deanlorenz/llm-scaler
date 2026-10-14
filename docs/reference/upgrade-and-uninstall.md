@@ -70,13 +70,16 @@ A new controller pod starts with an empty in-memory decision. What happens
 meanwhile:
 
 - **Until its first cycle completes** (one `GLOBAL_OPT_INTERVAL`, 15 s by
-  default, plus leader election), the scaler refuses KEDA's `GetMetrics` with
-  `Unavailable` ("no decision yet"). KEDA records a trigger error and the HPA
-  holds its current count. After `failureThreshold` such polls (3 on generated
-  ScaledObjects) KEDA applies the ScaledObject's fallback, which on generated
-  objects also holds the current count. Expect a few `KEDAScalerFailed`
-  Events and a brief `Fallback` condition after every restart; neither means
-  replicas moved. See [before the first
+  default, plus leader election), the scaler answers KEDA's `GetMetrics` with
+  each target's current replica count, so the HPA holds and KEDA sees no
+  error. `wva_scaler_undecided_answers_total{reason="no-decision"}` grows
+  during that window and stops once the first cycle publishes. While the old
+  pod is gone and the new one is not yet serving, KEDA cannot reach the
+  scaler at all: that is the outage the generated fallback covers, applied
+  only once more than `failureThreshold` reads (3 on generated ScaledObjects,
+  about one read every 15 s) have failed in a row, and it too holds the
+  current count. A short rollout may log a `KEDAScalerFailed` Event or two
+  and never reach the fallback. See [before the first
   decision](scaledobject-trigger.md#before-the-first-decision-and-the-fallback).
 - **Under the utilization-share optimizer**, every planned model holds what it
   runs for one fill timeout, about three minutes with default timings, and

@@ -75,12 +75,13 @@ reads it. Its value is `wva-external-scaler.<controller-namespace>.svc.cluster.l
 `variantCost`, `warmPoolCopies` or `defaultOutputTokens` does not parse, the
 workload is skipped entirely (`internal/utils/variant.go`): the scaling manager
 never plans it, so it never makes a decision for it, and `GetMetrics` keeps
-refusing with `Unavailable` ([before the first
+answering the target's current replica count ([before the first
 decision](#before-the-first-decision-and-the-fallback)) for as long as the typo
-stands. The HPA holds whatever count the workload had, under any load. KEDA
-records the trigger error on the ScaledObject, with the message
-`WVA has not published a decision for this target yet`, and the controller logs
-`external scaler GetMetrics refused: no decision yet` at the default verbosity.
+stands. The HPA holds whatever count the workload had, under any load, and KEDA
+reports nothing wrong. Two things do: the counter
+`wva_scaler_undecided_answers_total{reason="not-managed"}` keeps growing, and
+the controller logs `external scaler has no decision for this target` once for
+that ScaledObject, with `reason` `not-managed`, at the default verbosity.
 The cause is a controller log line at verbosity 4, which the default
 verbosity (2) hides: add `--v=4` to the controller Deployment's `args` (see
 [configuration](configuration.md)) and look for
@@ -167,14 +168,24 @@ Override the defaults per install with
 ### Before the first decision, and the fallback
 
 After every controller restart and every leader change, the new leader has no
-decision until its first cycle completes. **Until then it refuses KEDA's
-`GetMetrics` with `Unavailable`** (`WVA has not published a decision for this
-target yet`), the same answer a standby gives. KEDA records a trigger error and
-the HPA holds the replica count it has; nothing scales down on a number nobody
-decided. `IsActive` and the push stream are unaffected: before the first
-decision they report the target active if it has replicas.
+decision until its first cycle completes. **Until then it answers KEDA's
+`GetMetrics` with the scale target's current replica count**, read from the
+target's `spec.replicas`. With the metric's target of 1 the HPA computes the
+count it already has and holds: nothing scales down on a number nobody decided,
+and KEDA sees no error. Each such answer increments
+`wva_scaler_undecided_answers_total{reason="no-decision"}`, which stops growing
+once the first cycle publishes. `IsActive` and the push stream behave the same
+way: before the first decision they report the target active if it has
+replicas. Only when the current count cannot be read does `GetMetrics` fail,
+with the code of the failed read.
 
-The generator also writes a KEDA `fallback` into every ScaledObject:
+A standby replica, one that does not hold the leader lease, still refuses
+`GetMetrics` and `IsActive` with `Unavailable`: the leader may have decided
+something else. KEDA records a trigger error and takes no scaling action, and
+its connection moves to the leader within seconds.
+
+The generator writes a KEDA `fallback` into every ScaledObject with a
+`minReplicaCount` of 1 or more:
 
 ```yaml
 fallback:
@@ -183,16 +194,35 @@ fallback:
   behavior: currentReplicasIfHigher
 ```
 
-After `failureThreshold` failed polls in a row, KEDA stops passing the error on
-and feeds the HPA `max(current replicas, replicas)` instead. Since `replicas` is
-the object's own `minReplicaCount`, that is the current count: the fallback
-never scales anything up or down. What it changes is that the HPA keeps
-recording a recommendation while the scaler is away, so the 300 s scale-down
-window still covers the moment the scaler returns, and the ScaledObject's
-`Fallback` condition says it is in effect. A fleet does not shed replicas on the
-first answer after an outage longer than the window.
+It covers a controller that is down or unreachable, which the scaler cannot
+answer for. Each failed read of the metric by the HPA, about one every 15 s,
+counts as a failure. Once more than `failureThreshold` reads have failed in a
+row, KEDA stops passing the error on and feeds the HPA
+`max(current replicas, replicas)` instead. With the default of 3 that is the
+fourth failed read, about a minute in. Since `replicas` is the object's own
+`minReplicaCount`, that is the current count: the fallback never scales anything
+up or down. What it changes is that the HPA keeps recording a recommendation
+while the scaler is away, so the 300 s scale-down window still covers the
+moment the scaler returns, and the ScaledObject's `Fallback` condition says it
+is in effect. A fleet does not shed replicas on the first answer after an
+outage longer than the window.
 
-`behavior` needs KEDA 2.17 or later (the installer pins 2.19); with an older
-KEDA, set `WVA_SO_FALLBACK=false`. `apply: adopt` adds the same fallback to an
-adopted ScaledObject that has none, and leaves one that has a fallback exactly
-as it is. The template sample carries the same block.
+**A `minReplicaCount` of 0 gets no fallback.** KEDA treats an erroring trigger
+as inactive, and with `fallback.replicas: 0` its scale loop takes the
+scale-to-zero path: a model that is serving is parked once `cooldownPeriod`
+passes, with no `failureThreshold` in the way. With no `fallback` the same
+error only marks the trigger failing and scales nothing, so a scale-to-zero
+model is safer without one. The plan table and the apply lines show
+`(no fallback: floor 0)` for those entries.
+
+`behavior` needs KEDA 2.17 or later (the installer pins 2.19). The installer
+reads the ScaledObject CRD once per plan or apply and writes no fallback at all,
+with a warning and `(no fallback: KEDA < 2.17)`, when the field is missing or
+the CRD cannot be read: an older KEDA drops `behavior`, and the static fallback
+left behind would force `minReplicaCount` whatever the fleet is running.
+`apply: adopt` adds the same fallback to an adopted ScaledObject that has none,
+and leaves one that has a fallback exactly as it is, with a warning if that
+fallback is the zero-replica shape on a floor of 0. A
+`WVA_DEFAULT_SO_TEMPLATE` owns its own fallback; the shipped sample has none,
+and the installer refuses to render a template whose fallback comes out as
+`replicas: 0` on a floor of 0.
