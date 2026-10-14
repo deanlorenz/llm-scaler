@@ -475,7 +475,12 @@ case "\$1 \$2" in
   "get nodes")   if [ -n "\${STUB_SELECTOR:-}" ]; then want -l "\$STUB_SELECTOR"; else refuse -l; fi
                  [ -n "\${STUB_NODES_ERROR:-}" ] && { echo "\$STUB_NODES_ERROR" >&2; exit 1; }
                  if [ -n "\${STUB_NODES_FILE:-}" ]; then jq --arg s "\${STUB_SELECTOR:-}" '.items |= map(select((.metadata.labels // {}) as \$l | all(\$s | split(",")[]; index("=") as \$i | \$l[.[:\$i]] == .[\$i+1:])))' "\$STUB_NODES_FILE"; else cat "$T/nodes.json"; fi ;;
-  "get pods")    want -n check-ns; want -l "$LBL"; cat "$T/pods.json" ;;
+  "get pods")    want -n check-ns; want -l "$LBL"
+                 [ -z "\${STUB_PODS_ERROR:-}" ] || { echo "\$STUB_PODS_ERROR" >&2; exit 1; }
+                 cat "\${STUB_PODS_FILE:-$T/pods.json}" ;;
+  "get pod")     want -n check-ns
+                 case "\$ARGV" in *"VLLM_CACHE_ROOT"*) cat "$T/engine-root/\$5" 2>/dev/null; exit 0 ;; *) echo "stub kubectl: unexpected pod read:\$ARGV" >&2; exit 2 ;; esac ;;
+  "exec -n")     want -n check-ns; exec bash "$T/exec-stub.sh" "\$@" ;;
   "get daemonset")
       want -n check-ns
       case "\$ARGV" in *" engine-cache "*) ;; *) echo "stub kubectl: get daemonset for a name that is not the DaemonSet:\$ARGV" >&2; exit 2 ;; esac
@@ -505,7 +510,11 @@ case "\$1 \$2" in
         *) echo "stub kubectl: unexpected pvc read:\$ARGV" >&2; exit 2 ;;
       esac ;;
   "get events")  want -n check-ns; printf '%s' "\${STUB_EVENT:-}" ;;
-  "logs -n")     want -n check-ns; printf '%s\n' "\${STUB_LOG:-}" ;;
+  "logs -n")     want -n check-ns
+                 case "\$ARGV" in
+                   *" -c vllm "*) [ -z "\${STUB_ENGINE_LOG_ERROR:-}" ] || { echo "\$STUB_ENGINE_LOG_ERROR" >&2; exit 1; }; cat "$T/engine-logs/\$4" ;;
+                   *) printf '%s\n' "\${STUB_LOG:-}" ;;
+                 esac ;;
   "auth can-i")  case "\$ARGV" in *" create persistentvolumes -A -q "*) [ -z "\${STUB_NO_PV:-}" ] || exit 1; exit 0 ;; *) echo "stub kubectl: unexpected can-i:\$ARGV" >&2; exit 2 ;; esac ;;
   "api-resources --api-group=security.openshift.io") [ -n "\${STUB_OPENSHIFT:-}" ] && echo "securitycontextconstraints scc security.openshift.io/v1 false SecurityContextConstraints"; : ;;
   "apply -f")    cat > "\${STUB_APPLIED:-/dev/null}"; echo applied ;;
@@ -637,6 +646,148 @@ PATH="$STUB_PATH" bash deploy/enginecache.sh delete -n check-ns --dry-run > "$T/
 grep -q '^delete ' "$T/calls" && fail "delete --dry-run deleted something" || ok "delete --dry-run: prints what would go, deletes nothing ($(grep -c 'would run' "$T/dry.out") lines)"
 
 # ---------------------------------------------------------------------------
+# 3c. verify and keys: the GPU-free cache check, against the same stub. The
+# exec into a preparer runs the real verify script locally, on a fake node
+# directory per pod ($T/ecv/<pod>/vllm), so what is asserted is what runs.
+# ---------------------------------------------------------------------------
+cat > "$T/exec-stub.sh" <<'EOF'
+#!/usr/bin/env bash
+# kubectl exec -n NS POD -c prepare -- /bin/sh -c SCRIPT sh ROOT KEY...
+pod="$4"
+case " ${STUB_EXEC_FORBIDDEN:-} " in *" $pod "*)
+    echo "Error from server (Forbidden): pods \"$pod\" is forbidden: User \"tenant\" cannot create resource \"pods/exec\" in API group \"\" in the namespace \"check-ns\"" >&2; exit 1 ;; esac
+case " ${STUB_EXEC_FAIL:-} " in *" $pod "*)
+    echo "error: unable to upgrade connection: container not found (\"prepare\")" >&2; exit 1 ;; esac
+[ "$5 $6 $7 $8 $9" = "-c prepare -- /bin/sh -c" ] || { echo "stub kubectl: exec is not sh -c in the prepare container: $*" >&2; exit 2; }
+[ "${11}" = sh ] && [ "${12}" = /engine-cache/vllm ] || { echo "stub kubectl: exec root is not /engine-cache/vllm: ${12}" >&2; exit 2; }
+script="${10}"
+shift 12
+exec "$STUB_SH" -c "$script" sh "$STUB_EC_ROOT/$pod/vllm" "$@"
+EOF
+ECV_SH=sh; command -v dash >/dev/null 2>&1 && ECV_SH=dash
+mkdir -p "$T/engine-logs" "$T/engine-root"
+K1=torch_compile_cache/3f2a9c1d0e
+K2=torch_compile_cache/77b0e1aa42
+ecv_reset() {  # every node holds both keys, two ranks each
+    rm -rf "$T/ecv"
+    local p k r
+    for p in ec-a ec-b ec-c ec-d; do for k in "$K1" "$K2"; do for r in rank_0_0 rank_1_0; do
+        mkdir -p "$T/ecv/$p/vllm/$k/$r/backbone"; echo artefact > "$T/ecv/$p/vllm/$k/$r/backbone/model.py"
+    done; done; done
+}
+ecv_pod() {  # ecv_pod NAME NODE READY
+    printf '{"metadata":{"name":"%s","labels":{"wva.llmd.ai/engine-cache":"engine-cache"}},"spec":{"nodeName":"%s"},"status":{"phase":"Running","containerStatuses":[{"ready":%s,"state":{"running":{}}}]}}' "$1" "$2" "$3"
+}
+ecv_node() { printf '{"metadata":{"name":"%s","labels":{"nvidia.com/gpu.product":"H200"}}}' "$1"; }
+printf '{"items":[%s,%s,%s]}' "$(ecv_node n-a)" "$(ecv_node n-b)" "$(ecv_node n-c)" > "$T/ecv-nodes.json"
+printf '{"items":[%s,%s,%s,%s]}' "$(ecv_pod ec-a n-a true)" "$(ecv_pod ec-b n-b true)" "$(ecv_pod ec-c n-c true)" \
+    "$(ecv_pod other-ds n-a true | sed 's/"engine-cache":"engine-cache"/"engine-cache":"other"/')" > "$T/ecv-pods.json"
+ecv() {  # ecv OUTFILE ARGS... -- verify against the fixture; prints the exit code
+    local out="$1"; shift
+    STUB_SH="$ECV_SH" STUB_EC_ROOT="$T/ecv" STUB_NODES_FILE="${ECV_NODES:-$T/ecv-nodes.json}" STUB_PODS_FILE="${ECV_PODS:-$T/ecv-pods.json}" \
+        PATH="$STUB_PATH" bash deploy/enginecache.sh verify -n check-ns "$@" > "$out" 2>&1
+    echo $?
+}
+ecv_row() { grep -qE "^  $2 +$3 +$4( |\$)" "$1"; }  # ecv_row FILE NODE RESULT KEY
+# every node has every key: a pass, a bare hash taken as torch_compile_cache/<hash>
+ecv_reset
+rc="$(ecv "$T/ecv-all.out" --keys "3f2a9c1d0e,$K2")"
+if [ "$rc" = 0 ] && grep -q '3 usable node(s) x 2 key(s): 6 present, 0 absent, 0 unreadable, 0 could not check' "$T/ecv-all.out" \
+    && grep -q 'VERIFIED: every key is on every usable node' "$T/ecv-all.out" && ecv_row "$T/ecv-all.out" n-b present "$K1"; then
+    ok "verify: every key on every node passes (6 of 6 present; a bare hash is torch_compile_cache/<hash>)"
+else fail "verify all present: rc=$rc $(tail -3 "$T/ecv-all.out" | tr '\n' ';')"; fi
+grep -q "^exec -n check-ns ec-a -c prepare -- /bin/sh -c " "$T/calls" && ! grep -q '^exec -n check-ns other-ds' "$T/calls" \
+    && ok "verify: reads through our preparer pods only, in the prepare container" || fail "verify exec calls: $(grep '^exec' "$T/calls" | cut -c1-60 | tr '\n' ';')"
+# one node lacks a key: a fail, naming the node and the key
+ecv_reset; rm -rf "$T/ecv/ec-b/vllm/$K2"
+rc="$(ecv "$T/ecv-miss.out" --keys "$K1,$K2")"
+if [ "$rc" != 0 ] && ecv_row "$T/ecv-miss.out" n-b ABSENT "$K2" && ecv_row "$T/ecv-miss.out" n-b present "$K1" && ecv_row "$T/ecv-miss.out" n-a present "$K2" \
+    && grep -q '5 present, 1 absent, 0 unreadable, 0 could not check' "$T/ecv-miss.out" && grep -q 'NOT VERIFIED' "$T/ecv-miss.out"; then
+    ok "verify: a node missing a key fails, and names the node and the key (n-b $K2)"
+else fail "verify one missing: rc=$rc $(grep -E 'n-b|present,' "$T/ecv-miss.out" | tr '\n' ';')"; fi
+# an empty key directory is not a cache
+ecv_reset; rm -rf "$T/ecv/ec-c/vllm/$K1"; mkdir -p "$T/ecv/ec-c/vllm/$K1/rank_0_0"
+rc="$(ecv "$T/ecv-empty.out" --keys "$K1")"
+[ "$rc" != 0 ] && grep -qE "^  n-c +ABSENT +$K1  \(an empty directory\)" "$T/ecv-empty.out" && ok "verify: a key directory with no file in it is absent" || fail "verify empty dir: rc=$rc $(grep n-c "$T/ecv-empty.out")"
+# Forbidden exec: could not check, never absent
+ecv_reset
+rc="$(STUB_EXEC_FORBIDDEN=ec-c ecv "$T/ecv-forb.out" --keys "$K1,$K2")"
+if [ "$rc" != 0 ] && ecv_row "$T/ecv-forb.out" n-c "COULD NOT CHECK" "$K1" && ecv_row "$T/ecv-forb.out" n-c "COULD NOT CHECK" "$K2" \
+    && ! grep -qE '^  n-c +ABSENT' "$T/ecv-forb.out" && grep -q 'exec Forbidden: reading the cache needs pods/exec' "$T/ecv-forb.out" \
+    && grep -q '4 present, 0 absent, 0 unreadable, 2 could not check' "$T/ecv-forb.out"; then
+    ok "verify: a Forbidden exec is could-not-check on that node, never absent, and names the permission"
+else fail "verify Forbidden: rc=$rc $(grep -E 'n-c|Forbidden|present,' "$T/ecv-forb.out" | tr '\n' ';')"; fi
+# an exec that fails for another reason: could not check, with the reason
+ecv_reset
+rc="$(STUB_EXEC_FAIL=ec-a ecv "$T/ecv-xfail.out" --keys "$K1")"
+[ "$rc" != 0 ] && ecv_row "$T/ecv-xfail.out" n-a "COULD NOT CHECK" "$K1" && grep -q 'exec into ec-a failed (exit 1): error: unable to upgrade connection' "$T/ecv-xfail.out" \
+    && ok "verify: a failed exec is could-not-check, with the error" || fail "verify exec failure: rc=$rc $(grep -E 'n-a|exec' "$T/ecv-xfail.out" | tr '\n' ';')"
+# a node whose preparer is not Ready, and one with no preparer at all: could not check
+ecv_reset
+printf '{"items":[%s,%s,%s]}' "$(ecv_node n-a)" "$(ecv_node n-d)" "$(ecv_node n-e)" > "$T/ecv-nodes2.json"
+printf '{"items":[%s,%s]}' "$(ecv_pod ec-a n-a true)" "$(ecv_pod ec-d n-d false)" > "$T/ecv-pods2.json"
+: > "$T/calls"
+rc="$(ECV_NODES="$T/ecv-nodes2.json" ECV_PODS="$T/ecv-pods2.json" ecv "$T/ecv-nopod.out" --keys "$K1")"
+if [ "$rc" != 0 ] && ecv_row "$T/ecv-nopod.out" n-d "COULD NOT CHECK" "$K1" && ecv_row "$T/ecv-nopod.out" n-e "COULD NOT CHECK" "$K1" \
+    && grep -q 'no Ready preparer on n-d (Running (not ready))' "$T/ecv-nopod.out" && grep -q 'no Ready preparer on n-e (no pod)' "$T/ecv-nopod.out" \
+    && ecv_row "$T/ecv-nopod.out" n-a present "$K1" && ! grep -q '^exec -n check-ns ec-d' "$T/calls"; then
+    ok "verify: a node with no Ready preparer (not ready, or no pod) fails as could-not-check, and is not exec-ed into"
+else fail "verify no Ready preparer: rc=$rc $(grep -E 'n-d|n-e' "$T/ecv-nopod.out" | tr '\n' ';')"; fi
+# a file that cannot be read: unreadable (needs a non-root runner)
+if [ "$(id -u)" = 0 ]; then ok "verify: (the unreadable-file case needs a non-root check runner)"; else
+    ecv_reset; chmod 000 "$T/ecv/ec-a/vllm/$K1/rank_1_0/backbone/model.py"
+    rc="$(ecv "$T/ecv-unread.out" --keys "$K1")"
+    chmod 644 "$T/ecv/ec-a/vllm/$K1/rank_1_0/backbone/model.py"
+    [ "$rc" != 0 ] && grep -qE "^  n-a +UNREADABLE +$K1  \($K1/rank_1_0/backbone/model.py\)" "$T/ecv-unread.out" \
+        && ok "verify: a key with a file that cannot be read is unreadable, naming the file" || fail "verify unreadable: rc=$rc $(grep n-a "$T/ecv-unread.out")"
+fi
+# the preparer pods cannot be listed: an error, nothing called absent
+rc="$(STUB_PODS_ERROR='Error from server (Forbidden): pods is forbidden: stub' ecv "$T/ecv-podsforb.out" --keys "$K1")"
+[ "$rc" != 0 ] && grep -q 'cannot list the engine-cache preparer pods in check-ns: Error from server (Forbidden)' "$T/ecv-podsforb.out" && grep -q 'nothing was checked' "$T/ecv-podsforb.out" && ! grep -q ABSENT "$T/ecv-podsforb.out" \
+    && ok "verify: preparer pods that cannot be listed are an error, nothing called absent" || fail "verify pods Forbidden: rc=$rc $(tail -1 "$T/ecv-podsforb.out")"
+# the multi-pair selector reaches the node listing, as for status
+: > "$T/calls"
+STUB_DS_SELECTOR="$SEL2" STUB_SELECTOR="$SEL2" STUB_SH="$ECV_SH" STUB_EC_ROOT="$T/ecv" STUB_PODS_FILE="$T/ecv-pods.json" PATH="$STUB_PATH" \
+    bash deploy/enginecache.sh verify -n check-ns --keys "$K1" > "$T/ecv-sel2.out" 2>&1
+grep -q "get nodes -l ${SEL2} " "$T/calls" && ok "verify: the live two-pair nodeSelector picks the nodes" || fail "verify selector: $(grep 'get nodes' "$T/calls")"
+refuse "verify without --keys" verify -n check-ns
+refuse "a key with '..'" verify -n check-ns --keys "torch_compile_cache/../x"
+refuse "an absolute key" verify -n check-ns --keys /engine-cache/vllm/x
+refuse "a key with a space" verify -n check-ns --keys "a b"
+refuse "an empty key in the list" verify -n check-ns --keys "a,,b"
+refuse "--keys on status" status -n check-ns --keys a
+refuse "keys without a pod" keys -n check-ns
+refuse "a pod name that is not one" keys -n check-ns 'Pod;x'
+# keys: read off the engine log, one per configuration, every rank folded
+cat > "$T/engine-logs/pd-decode-0" <<'EOF'
+INFO 10-14 [backends.py:550] Using cache directory: /engine-cache/vllm/torch_compile_cache/3f2a9c1d0e/rank_0_0/backbone for vLLM's torch.compile
+INFO 10-14 [backends.py:550] Using cache directory: /engine-cache/vllm/torch_compile_cache/3f2a9c1d0e/rank_1_0/backbone for vLLM's torch.compile
+INFO 10-14 [monitor.py:34] torch.compile takes 0.31 s in total
+EOF
+cat > "$T/engine-logs/pd-prefill-0" <<'EOF'
+INFO 10-14 [backends.py:550] Using cache directory: /engine-cache/vllm/torch_compile_cache/77b0e1aa42/rank_0_0/backbone for vLLM's torch.compile
+EOF
+cat > "$T/engine-logs/fell-back" <<'EOF'
+WARNING engine cache: /engine-cache/vllm not writable; unsetting VLLM_CACHE_ROOT
+INFO 10-14 [backends.py:550] Using cache directory: /root/.cache/vllm/torch_compile_cache/3f2a9c1d0e/rank_0_0/backbone for vLLM's torch.compile
+EOF
+printf 'INFO 10-14 Starting vLLM API server\n' > "$T/engine-logs/no-compile"
+for p in pd-decode-0 pd-prefill-0 fell-back no-compile; do printf /engine-cache/vllm > "$T/engine-root/$p"; done
+PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns pd-decode-0 > "$T/keys1.out" 2> "$T/keys1.err"; rc=$?
+[ "$rc" = 0 ] && [ "$(cat "$T/keys1.out")" = "$K1" ] && grep -q "make engine-cache-verify NAMESPACE=check-ns ENGINE_CACHE_KEYS=$K1\$" "$T/keys1.err" && ! grep -q WARNING "$T/keys1.err" \
+    && ok "keys: one key per configuration, every rank folded into it, and the verify line to run" || fail "keys one pod: rc=$rc out=$(tr '\n' ' ' < "$T/keys1.out") err=$(tr '\n' ' ' < "$T/keys1.err")"
+PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns pd-decode-0 pd-prefill-0 > "$T/keys2.out" 2> "$T/keys2.err"; rc=$?
+[ "$rc" = 0 ] && [ "$(tr '\n' ' ' < "$T/keys2.out")" = "$K1 $K2 " ] && grep -q "ENGINE_CACHE_KEYS=$K1,$K2\$" "$T/keys2.err" \
+    && ok "keys: prefill and decode give two keys, joined for verify" || fail "keys two pods: rc=$rc out=$(tr '\n' ' ' < "$T/keys2.out") err=$(tail -1 "$T/keys2.err")"
+PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns fell-back > "$T/keys3.out" 2> "$T/keys3.err"; rc=$?
+[ "$(cat "$T/keys3.out")" = "$K1" ] && grep -q 'compiled under /root/.cache/vllm, not VLLM_CACHE_ROOT=/engine-cache/vllm' "$T/keys3.err" \
+    && ok "keys: an engine that fell back off the cache root still names its key, and says the start did not fill the node cache" || fail "keys fell back: out=$(cat "$T/keys3.out") err=$(tr '\n' ' ' < "$T/keys3.err")"
+if PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns no-compile > "$T/keys4.out" 2>&1; then fail "keys must fail on a log with no cache directory"; else
+    grep -q 'no compile cache directory in its log' "$T/keys4.out" && ok "keys: a log with no cache directory is a failure, not an empty answer" || fail "keys no line: $(tail -1 "$T/keys4.out")"; fi
+if STUB_ENGINE_LOG_ERROR='Error from server (Forbidden): pods "pd-decode-0" is forbidden: cannot get resource "pods/log"' PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns pd-decode-0 > "$T/keys5.out" 2>&1; then fail "keys must fail when the log cannot be read"; else
+    grep -q 'cannot read the log of pd-decode-0 (container vllm): Error from server (Forbidden)' "$T/keys5.out" && ok "keys: a log that cannot be read (Forbidden) is a failure that says so" || fail "keys log Forbidden: $(tail -1 "$T/keys5.out")"; fi
+
+# ---------------------------------------------------------------------------
 # 4. The Makefile: the targets' argv and the standup's step.
 # ---------------------------------------------------------------------------
 line="$(make -n engine-cache ENGINE_CACHE_PATH=/mnt/local/w ENGINE_CACHE_IMAGE=i:1 ENGINE_CACHE_CAPACITY=50Gi NAMESPACE=ns PREPULL_TOLERATIONS=t1 2>/dev/null | tr -d '\\\n' | grep -o 'bash deploy/enginecache.sh apply.*' || true)"
@@ -656,6 +807,11 @@ line="$(make -n engine-cache-status NAMESPACE=ns WEIGHTS_NODE_SELECTOR=k=v 2>/de
 case "$line" in *'-n "ns"'*'--node-selector "k=v"'*) ok "make engine-cache-status: namespace and selector reach the script" ;; *) fail "make engine-cache-status argv: $line" ;; esac
 line="$(make -n engine-cache-delete NAMESPACE=ns 2>/dev/null | grep -o 'bash deploy/enginecache.sh delete.*' || true)"
 case "$line" in *'-n "ns"'*) ok "make engine-cache-delete: the namespace reaches the script" ;; *) fail "make engine-cache-delete argv: $line" ;; esac
+line="$(make -n engine-cache-verify NAMESPACE=ns ENGINE_CACHE_KEYS=torch_compile_cache/a,b WEIGHTS_NODE_SELECTOR=k=v,k2=v2 2>/dev/null | grep -o 'bash deploy/enginecache.sh verify.*' || true)"
+case "$line" in *'-n "ns" --keys "torch_compile_cache/a,b" --node-selector "k=v,k2=v2"'*) ok "make engine-cache-verify: namespace, keys and selector reach the script" ;; *) fail "make engine-cache-verify argv: $line" ;; esac
+if make -n engine-cache-verify NAMESPACE=ns 2>/dev/null | grep -q 'test -n ""'; then ok "make engine-cache-verify: without ENGINE_CACHE_KEYS the guard is empty and fails at run time"; else fail "make engine-cache-verify: no guard on ENGINE_CACHE_KEYS"; fi
+line="$(make -n engine-cache-keys NAMESPACE=ns ENGINE_CACHE_PODS='p-decode-1 p-prefill-2' 2>/dev/null | grep -o 'bash deploy/enginecache.sh keys.*' || true)"
+case "$line" in *'keys -n "ns" "p-decode-1" "p-prefill-2"'*) ok "make engine-cache-keys: each pod reaches the script as its own argument" ;; *) fail "make engine-cache-keys argv: $line" ;; esac
 n="$(make -n benchmark-standup BENCHMARK_NAMESPACE=ns BENCHMARK_MODEL_HOSTPATH=/mnt/local/w BENCHMARK_SPEC=guides/pd-disaggregation 2>/dev/null | grep -n 'model_hostpath.sh\|enginecache.sh apply\|engine_cache_claim.sh\|standup \\$' | cut -d: -f1 | tr '\n' ' ')"
 set -- $n
 if [ $# -ge 4 ] && [ "$1" -lt "$2" ] && [ "$2" -lt "$3" ] && [ "$3" -lt "$4" ]; then ok "benchmark-standup: BENCHMARK_MODEL_HOSTPATH alone turns the cache on too, after the weights edit and before the harness standup (apply, then the scenario edit)"; else fail "benchmark-standup ordering: $n"; fi

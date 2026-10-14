@@ -27,6 +27,9 @@
 #   enginecache.sh delete -n NS [--dry-run]                           drop the claim, volume and preparer (the caches stay)
 #   enginecache.sh publish -n NS [--dry-run]                          fill the seed claim from every prepared node, then re-seed every node
 #                                                                     (run once each engine configuration has started somewhere)
+#   enginecache.sh keys   -n NS [--container C] POD [POD...]         the compile cache key(s) a running engine pod used
+#   enginecache.sh verify -n NS --keys KEY[,KEY...] [--node-selector KEY=VALUE[,...]]
+#                                                                     is every key on every usable node, and readable
 #
 #   -n, --namespace NS          the namespace the claim and preparer live in
 #
@@ -120,6 +123,22 @@
 #                               effect); nvidia.com/gpu is always tolerated
 #   --dry-run                   apply: print the manifests instead of
 #                               applying them; delete: print what would go
+#   --keys KEY[,KEY...]         verify: the compile cache keys to look for,
+#                               as `keys` prints them -- a directory under
+#                               VLLM_CACHE_ROOT such as
+#                               torch_compile_cache/1a2b3c4d5e (a bare hash
+#                               means torch_compile_cache/<hash>)
+#   --container C               keys: the engine container (default vllm)
+#
+# Checking the cache without a second GPU start. Start each engine
+# configuration once (prefill and decode compile under different keys), run
+# `keys` on that pod, then `verify` with what it printed. verify reads each
+# key's directory through the preparer pod already Ready on every usable node
+# (kubectl exec into the preparer, which holds no GPU) and reads every file
+# under it. It exits non-zero when any node lacks a key, when a node has no
+# Ready preparer, or when a read could not be made -- a Forbidden exec is
+# "could not check", never "absent". It reads as the preparer's user, root
+# on Kubernetes.
 #
 # The claim is named engine-cache, one per namespace (the caches inside are
 # keyed by a hash of the engine config, so every model and flag set in the
@@ -193,6 +212,9 @@ SEED_MARKER=".seeded"
 SEED_CLAIM=""
 SEED_SUBPATH=""
 SA_NAME="engine-cache-preparer"
+KEYS=""
+CONTAINER="vllm"
+PODS=()
 
 usage() {
     sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//; $d'
@@ -551,18 +573,17 @@ cmd_apply() {
     cmd_status report || true
 }
 
-# cmd_status prints, per node, whether the node is prepared. Ready is the
-# marker present and the directory writable by the preparer's UID; a pod
-# that keeps failing shows its reason, and no pod at all is a node the
-# DaemonSet did not reach. Exits non-zero while any selected node is not
-# prepared or the claim is not Bound.
-cmd_status() {
-    local mode="${1:-verdict}"
-    command -v jq >/dev/null 2>&1 || log_error "jq is required for status (the node and pod lists are read with it)"
-    [ -n "$NAMESPACE" ] || log_error "status needs -n NAMESPACE"
-    local rc=0 ready=0 holders=0 selector="$NODE_SELECTOR" path
-    path="$(kubectl get daemonset -n "$NAMESPACE" "$CLAIM" -o jsonpath='{.metadata.annotations.wva\.llmd\.ai/engine-cache-path}' 2>/dev/null || true)"
-    if [ -z "$path" ]; then
+# ec_nodes MODE resolves what status and verify both read off the cluster:
+# EC_PATH, the node directory (the DaemonSet's annotation); EC_SELECTOR, the
+# nodes it covers (--node-selector, or the live DaemonSet's nodeSelector);
+# EC_EXCLUDED, the selected nodes no engine can use; EC_NODES_JSON, the
+# usable rest, never empty. In report mode a failure is a warning and a
+# return 1; otherwise it exits.
+ec_nodes() {
+    local mode="$1" why
+    EC_SELECTOR="$NODE_SELECTOR"
+    EC_PATH="$(kubectl get daemonset -n "$NAMESPACE" "$CLAIM" -o jsonpath='{.metadata.annotations.wva\.llmd\.ai/engine-cache-path}' 2>/dev/null || true)"
+    if [ -z "$EC_PATH" ]; then
         if [ "$mode" = report ]; then
             log_warning "no engine-cache DaemonSet in ${NAMESPACE}"
             return 1
@@ -572,20 +593,18 @@ cmd_status() {
     if [ "$NODE_SELECTOR_GIVEN" = false ]; then
         # Off the live DaemonSet's pod template, held to the same rule as
         # the flag before it reaches kubectl (a tenant can edit the object).
-        selector="$(kubectl get daemonset -n "$NAMESPACE" "$CLAIM" \
+        EC_SELECTOR="$(kubectl get daemonset -n "$NAMESPACE" "$CLAIM" \
             -o jsonpath='{.spec.template.spec.nodeSelector}' 2>/dev/null \
             | accelerator_selector_from_json || true)"
-        local why
-        if ! why="$(accelerator_selector_ok "$selector")"; then
+        if ! why="$(accelerator_selector_ok "$EC_SELECTOR")"; then
             [ "$mode" = report ] || log_error "DaemonSet ${CLAIM} carries a nodeSelector this script did not write (${why}); pass --node-selector to report on it"
             log_warning "DaemonSet ${CLAIM} carries a nodeSelector this script did not write (${why}); pass --node-selector to report on it"
             return 1
         fi
     fi
-    local nodes_json err_file
+    local err_file
     err_file="$(mktemp)"
-    if ! nodes_json="$(accelerator_nodes_json "$selector" 2>"$err_file")"; then
-        local why
+    if ! EC_NODES_JSON="$(accelerator_nodes_json "$EC_SELECTOR" 2>"$err_file")"; then
         if grep -q Forbidden "$err_file"; then
             why="a namespace tenant may not list nodes; this needs cluster-scoped node read (cluster-reader) -- ask for it or check with the cluster admin"
         else
@@ -597,18 +616,31 @@ cmd_status() {
         return 1
     fi
     rm -f "$err_file"
-    local node_count excluded
     # Usable nodes only: a cordoned or foreign-tainted node can never hold a
     # copy an engine starts on, and counting it failed finished preparations.
-    excluded="$(printf '%s' "$nodes_json" | accelerator_excluded_json "$(accelerator_ds_toleration_keys "$NAMESPACE" "$CLAIM" "${TOLERATIONS[@]}")")"
-    nodes_json="$(printf '%s' "$nodes_json" | accelerator_usable_nodes_json "$excluded")"
-    node_count="$(printf '%s' "$nodes_json" | jq '.items | length')"
-    [ "$node_count" -gt 0 ] || accelerator_print_excluded "$excluded" >&2
-    if [ "$node_count" -eq 0 ]; then
-        [ "$mode" = report ] || log_error "no node matches $(accelerator_selector_text "$selector") (--node-selector picks the nodes)"
-        log_warning "no node matches $(accelerator_selector_text "$selector"); the cache is prepared nowhere (--node-selector picks the nodes)"
+    EC_EXCLUDED="$(printf '%s' "$EC_NODES_JSON" | accelerator_excluded_json "$(accelerator_ds_toleration_keys "$NAMESPACE" "$CLAIM" "${TOLERATIONS[@]}")")"
+    EC_NODES_JSON="$(printf '%s' "$EC_NODES_JSON" | accelerator_usable_nodes_json "$EC_EXCLUDED")"
+    if [ "$(printf '%s' "$EC_NODES_JSON" | jq '.items | length')" -eq 0 ]; then
+        accelerator_print_excluded "$EC_EXCLUDED" >&2
+        [ "$mode" = report ] || log_error "no node matches $(accelerator_selector_text "$EC_SELECTOR") (--node-selector picks the nodes)"
+        log_warning "no node matches $(accelerator_selector_text "$EC_SELECTOR"); the cache is prepared nowhere (--node-selector picks the nodes)"
         return 1
     fi
+}
+
+# cmd_status prints, per node, whether the node is prepared. Ready is the
+# marker present and the directory writable by the preparer's UID; a pod
+# that keeps failing shows its reason, and no pod at all is a node the
+# DaemonSet did not reach. Exits non-zero while any selected node is not
+# prepared or the claim is not Bound.
+cmd_status() {
+    local mode="${1:-verdict}"
+    command -v jq >/dev/null 2>&1 || log_error "jq is required for status (the node and pod lists are read with it)"
+    [ -n "$NAMESPACE" ] || log_error "status needs -n NAMESPACE"
+    local rc=0 ready=0 holders=0
+    ec_nodes "$mode" || return 1
+    local path="$EC_PATH" selector="$EC_SELECTOR" nodes_json="$EC_NODES_JSON" excluded="$EC_EXCLUDED" node_count
+    node_count="$(printf '%s' "$nodes_json" | jq '.items | length')"
     local pods_file bound
     pods_file="$(mktemp)"
     kubectl get pods -n "$NAMESPACE" -l "$LABEL_COMPONENT" -o json > "$pods_file"
@@ -892,18 +924,187 @@ EOF
     log_success "published from ${i} node(s) into ${seed} (stamp ${stamp}); every preparer merges it on restart"
 }
 
+# KEY_RE matches the compile cache directory in an engine's log. vLLM logs
+# "Using cache directory: <VLLM_CACHE_ROOT>/torch_compile_cache/<hash>/rank_<r>_<dp>/<prefix>"
+# (torch_aot_compile/<hash>/rank_... for an AOT compile); the key is the
+# <dir>/<hash> part, the same directory on every node and every rank.
+KEY_RE='/[A-Za-z0-9._/-]*/(torch_compile_cache|torch_aot_compile)/[A-Za-z0-9_-]+/rank_'
+
+# normalize_key prints KEY as a directory under VLLM_CACHE_ROOT: a bare hash
+# is torch_compile_cache/<hash>. Refuses anything that could leave the cache.
+normalize_key() {
+    case "$1" in
+        ""|/*|*/|*..*|*//*|*[!A-Za-z0-9._/-]*) log_error "--keys: not a compile cache key: '${1}' (torch_compile_cache/<hash>, as enginecache.sh keys prints it, or the bare hash)" ;;
+        */*) printf '%s' "$1" ;;
+        *) printf 'torch_compile_cache/%s' "$1" ;;
+    esac
+}
+
+# cmd_keys prints the compile cache key(s) each named engine pod used, one per
+# line, read off its log. A key the engine wrote outside VLLM_CACHE_ROOT (the
+# guard fell back to the engine default) is still printed -- it is the same
+# hash -- with a warning that this start did not land on the node cache.
+cmd_keys() {
+    [ -n "$NAMESPACE" ] || log_error "keys needs -n NAMESPACE"
+    [ "${#PODS[@]}" -gt 0 ] || log_error "keys needs the engine pod(s): enginecache.sh keys -n NAMESPACE POD [POD...]"
+    local pod root log found dir key all="" rc=0 err_file
+    err_file="$(mktemp)"
+    for pod in "${PODS[@]}"; do
+        if ! root="$(kubectl get pod -n "$NAMESPACE" "$pod" -o jsonpath="{.spec.containers[?(@.name==\"${CONTAINER}\")].env[?(@.name==\"VLLM_CACHE_ROOT\")].value}" 2>"$err_file")"; then
+            log_warning "cannot read pod ${pod}: $(tr '\n' ' ' < "$err_file")"
+            rc=1; continue
+        fi
+        if ! log="$(kubectl logs -n "$NAMESPACE" "$pod" -c "$CONTAINER" 2>"$err_file")"; then
+            log_warning "cannot read the log of ${pod} (container ${CONTAINER}): $(tr '\n' ' ' < "$err_file")"
+            rc=1; continue
+        fi
+        found="$(printf '%s\n' "$log" | grep -oE "$KEY_RE" | sed 's#/rank_$##' | sort -u || true)"
+        if [ -z "$found" ]; then
+            log_warning "${pod}: no compile cache directory in its log (no \"Using cache directory\" line: the log rotated, or the engine does not compile)"
+            rc=1; continue
+        fi
+        for dir in $found; do
+            key="${dir#"${dir%/*/*}"/}"
+            if [ -z "$root" ]; then
+                log_warning "${pod}: container ${CONTAINER} sets no VLLM_CACHE_ROOT; it compiled under ${dir%/*/*}, which may not be the node cache"
+            elif [ "${dir%/*/*}" != "$root" ]; then
+                log_warning "${pod}: compiled under ${dir%/*/*}, not VLLM_CACHE_ROOT=${root} -- the cache root was not writable and the engine fell back; this start did not fill the node cache"
+            fi
+            case ",${all}," in *",${key},"*) ;; *) all="${all:+$all,}${key}"; printf '%s\n' "$key" ;; esac
+        done
+    done
+    rm -f "$err_file"
+    [ -z "$all" ] || echo "check every node with: make engine-cache-verify NAMESPACE=${NAMESPACE} ENGINE_CACHE_KEYS=${all}" >&2
+    return $rc
+}
+
+# verify_script runs inside a preparer pod (kubectl exec, no GPU) as
+# `sh -c SCRIPT sh ROOT KEY...`: per key, one line "ecv <result> <key> [detail]"
+# -- present (with the file count), absent, empty, or unreadable (with the
+# first path that could not be read). Every file is read in full, so a
+# directory listed but unreadable is not called present. A quoted heredoc,
+# like the others; dash has `local`.
+verify_script() {
+    cat <<'VERIFY'
+root="$1"; shift
+walk() {
+  local e
+  if [ ! -r "$1" ] || [ ! -x "$1" ]; then bad="$1"; return; fi
+  for e in "$1"/* "$1"/.[!.]*; do
+    [ -e "$e" ] || continue
+    if [ -d "$e" ] && [ ! -L "$e" ]; then
+      walk "$e"
+    elif [ -f "$e" ]; then
+      if cat "$e" > /dev/null 2>&1; then files="$files."; else bad="$e"; fi
+    fi
+    [ -z "$bad" ] || return 0
+  done
+}
+for k in "$@"; do
+  d="$root/$k"; files=""; bad=""
+  if [ -L "$d" ] || { [ -e "$d" ] && [ ! -d "$d" ]; }; then echo "ecv unreadable $k not-a-directory"; continue; fi
+  if [ ! -e "$d" ]; then echo "ecv absent $k"; continue; fi
+  walk "$d"
+  if [ -n "$bad" ]; then echo "ecv unreadable $k ${bad#"$root"/}"
+  elif [ -z "$files" ]; then echo "ecv empty $k"
+  else echo "ecv present $k ${#files}"; fi
+done
+VERIFY
+}
+
+# cmd_verify reads every key on every usable node the DaemonSet covers,
+# through the Ready preparer on that node, and exits non-zero unless every
+# key is present and readable everywhere. A node with no Ready preparer, an
+# exec that fails or is Forbidden, is "could not check" -- never "absent".
+cmd_verify() {
+    command -v jq >/dev/null 2>&1 || log_error "jq is required for verify (the node and pod lists are read with it)"
+    [ -n "$NAMESPACE" ] || log_error "verify needs -n NAMESPACE"
+    [ -n "$KEYS" ] || log_error "verify needs --keys KEY[,KEY...] (enginecache.sh keys prints the keys an engine pod used)"
+    local keys=() raw=() k
+    IFS=, read -r -a raw <<< "$KEYS"
+    for k in "${raw[@]}"; do
+        k="$(normalize_key "$k")" || exit 1
+        keys+=("$k")
+    done
+    ec_nodes verdict
+    local pods_file err_file
+    pods_file="$(mktemp)"; err_file="$(mktemp)"
+    if ! kubectl get pods -n "$NAMESPACE" -l "$LABEL_COMPONENT" -o json > "$pods_file" 2>"$err_file"; then
+        local why; why="$(tr '\n' ' ' < "$err_file")"
+        rm -f "$pods_file" "$err_file"
+        log_error "cannot list the engine-cache preparer pods in ${NAMESPACE}: ${why}; nothing was checked"
+    fi
+    local timeout=()
+    command -v timeout >/dev/null 2>&1 && timeout=(timeout 300)
+    echo "${EC_PATH}/vllm  (keys: ${#keys[@]}; nodes: $(accelerator_selector_text "$EC_SELECTOR"))"
+    printf '  %-28s %-20s %s\n' NODE RESULT KEY
+    accelerator_print_excluded "$EC_EXCLUDED"
+    local present=0 absent=0 unreadable=0 unchecked=0 nodes=0
+    local node pod ready phase out xrc why line result detail
+    while IFS=$'\x1f' read -r node pod ready phase; do
+        nodes=$((nodes + 1))
+        if [ "$ready" != yes ]; then
+            for k in "${keys[@]}"; do
+                printf '  %-28s %-20s %s\n' "$node" "COULD NOT CHECK" "$k"
+                unchecked=$((unchecked + 1))
+            done
+            echo "    no Ready preparer on ${node} (${phase}); enginecache.sh status says why"
+            continue
+        fi
+        xrc=0
+        out="$(${timeout[@]+"${timeout[@]}"} kubectl exec -n "$NAMESPACE" "$pod" -c prepare -- /bin/sh -c "$(verify_script)" sh /engine-cache/vllm "${keys[@]}" 2>"$err_file" < /dev/null)" || xrc=$?
+        why=""
+        if grep -q Forbidden "$err_file"; then
+            why="exec Forbidden: reading the cache needs pods/exec on the preparer pods in ${NAMESPACE}"
+        elif [ "$xrc" -ne 0 ]; then
+            why="exec into ${pod} failed (exit ${xrc}): $(head -1 "$err_file")"
+        fi
+        for k in "${keys[@]}"; do
+            line="$(printf '%s\n' "$out" | awk -v k="$k" '$1 == "ecv" && $3 == k { print $2 " " $4; exit }')"
+            result="${line%% *}"; detail="${line#* }"
+            case "$result" in
+                present) printf '  %-28s %-20s %s\n' "$node" "present" "$k  (${detail} files)"; present=$((present + 1)) ;;
+                absent) printf '  %-28s %-20s %s\n' "$node" "ABSENT" "$k"; absent=$((absent + 1)) ;;
+                empty) printf '  %-28s %-20s %s\n' "$node" "ABSENT" "$k  (an empty directory)"; absent=$((absent + 1)) ;;
+                unreadable) printf '  %-28s %-20s %s\n' "$node" "UNREADABLE" "$k  (${detail})"; unreadable=$((unreadable + 1)) ;;
+                *) printf '  %-28s %-20s %s\n' "$node" "COULD NOT CHECK" "$k"; unchecked=$((unchecked + 1))
+                   [ -n "$why" ] || why="no answer from ${pod} for this key (exit ${xrc})" ;;
+            esac
+        done
+        [ -z "$why" ] || echo "    ${why}"
+    done < <(jq -r --arg ds "$CLAIM" --slurpfile pods "$pods_file" \
+        '.items[] as $node
+         | [$pods[0].items[] | select(.metadata.labels["wva.llmd.ai/engine-cache"] == $ds
+              and .spec.nodeName == $node.metadata.name and .metadata.deletionTimestamp == null)]
+         | map(. + {ok: (.status.phase == "Running" and ((.status.containerStatuses // []) | length > 0 and (map(.ready) | all)))})
+         | ((map(select(.ok)) | first) // first) as $pod
+         | [ $node.metadata.name,
+             ($pod.metadata.name // ""),
+             (if $pod != null and $pod.ok then "yes" else "no" end),
+             (if $pod == null then "no pod" else ($pod.status.phase // "unknown") + " (not ready)" end)
+           ] | join("\u001f")' <<< "$EC_NODES_JSON")
+    rm -f "$pods_file" "$err_file"
+    local total=$((nodes * ${#keys[@]}))
+    echo "  ${nodes} usable node(s) x ${#keys[@]} key(s): ${present} present, ${absent} absent, ${unreadable} unreadable, ${unchecked} could not check"
+    if [ "$present" -ne "$total" ] || [ "$total" -eq 0 ]; then
+        echo "  NOT VERIFIED: a start on a node above that lacks a key compiles, or a node could not be checked"
+        return 1
+    fi
+    echo "  VERIFIED: every key is on every usable node"
+}
+
 CMD="${1:-}"
 [ -n "$CMD" ] || usage
 shift
 case "$CMD" in
     -h|--help|help) usage ;;
-    apply|status|delete|publish) ;;
-    *) log_error "unknown command: ${CMD} (apply | status | delete | publish)" ;;
+    apply|status|delete|publish|keys|verify) ;;
+    *) log_error "unknown command: ${CMD} (apply | status | delete | publish | keys | verify)" ;;
 esac
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        -n|--namespace|--path|--image|--capacity|--seed-claim|--node-selector|--toleration)
+        -n|--namespace|--path|--image|--capacity|--seed-claim|--node-selector|--toleration|--keys|--container)
             [ $# -ge 2 ] || log_error "$1 needs a value" ;;
     esac
     case "$1" in
@@ -914,9 +1115,16 @@ while [ $# -gt 0 ]; do
         --seed-claim) check_seed "$2"; shift 2 ;;
         --node-selector) NODE_SELECTOR="$2"; NODE_SELECTOR_GIVEN=true; shift 2 ;;
         --toleration) accelerator_check_toleration "$2"; TOLERATIONS+=("$2"); shift 2 ;;
-        --dry-run) [ "$CMD" != status ] || log_error "--dry-run applies to apply and delete, not status"; DRY_RUN=true; shift ;;
+        --dry-run) case "$CMD" in status|keys|verify) log_error "--dry-run applies to apply and delete, not ${CMD}" ;; esac; DRY_RUN=true; shift ;;
+        --keys) [ "$CMD" = verify ] || log_error "--keys applies to verify"; KEYS="$2"; shift 2 ;;
+        --container) [ "$CMD" = keys ] || log_error "--container applies to keys"
+            case "$2" in ""|*[!a-z0-9-]*) log_error "not a container name: '$2'" ;; esac
+            CONTAINER="$2"; shift 2 ;;
         -h|--help) usage ;;
-        *) log_error "unknown option: $1" ;;
+        -*) log_error "unknown option: $1" ;;
+        *) [ "$CMD" = keys ] || log_error "unknown argument: $1"
+           case "$1" in *[!a-z0-9.-]*) log_error "not a pod name: '$1'" ;; esac
+           PODS+=("$1"); shift ;;
     esac
 done
 accelerator_check_selector "$NODE_SELECTOR"

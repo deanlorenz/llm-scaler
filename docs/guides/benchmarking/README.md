@@ -509,6 +509,23 @@ a re-standup in a namespace with history; `none` seeds nothing; a
 not exist yet at that point and the first start per node compiles, as it
 always did.
 
+To check the cache is warm before a pass, start each role once -- the
+standup's first replica does that -- and do not start a second replica to
+prove it. Ask the first replica which key it used, then check that key on
+every node, with no GPU:
+
+```bash
+make engine-cache-keys NAMESPACE=$BENCHMARK_NAMESPACE ENGINE_CACHE_PODS='<decode pod> <prefill pod>'
+make engine-cache-verify NAMESPACE=$BENCHMARK_NAMESPACE ENGINE_CACHE_KEYS='<key>[,<key>]'
+```
+
+Prefill and decode compile under different keys, so name one pod of each
+role. `engine-cache-verify` fails on a node that lacks a key, a node with no
+Ready preparer, and a read it could not make
+([Engine caches on the node's disk](../../reference/workload-preparation.md#engine-caches-on-the-nodes-disk)).
+Run `make engine-cache-publish` first if the nodes have not been seeded
+with what the first starts compiled.
+
 After a standup, check what was rendered rather than trusting the scenario:
 
 ```bash

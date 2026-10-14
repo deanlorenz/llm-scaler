@@ -524,6 +524,32 @@ make engine-cache-status NAMESPACE=<ns>     # every usable node prepared again
 Run it again after adding a model or changing an engine flag: the new stamp
 makes every node merge the new keys.
 
+**Check the cache without a second start.** To know a node would start
+warm, you do not need to start an engine there. Start each engine
+configuration once, run `engine-cache-publish` so every node gets what it
+compiled, ask that pod which key it compiled under, then check the key on
+every node:
+
+```bash
+# the key(s) the running engine pods used: one per configuration
+make engine-cache-keys NAMESPACE=<ns> ENGINE_CACHE_PODS='<decode pod> <prefill pod>'
+# every usable node: is each key there, and can every file under it be read
+make engine-cache-verify NAMESPACE=<ns> ENGINE_CACHE_KEYS='torch_compile_cache/<hash>[,...]'
+```
+
+A key is the directory vLLM names in its log line `Using cache directory:
+<VLLM_CACHE_ROOT>/torch_compile_cache/<hash>/rank_0_0/...`; every rank of
+one configuration shares it. `engine-cache-verify` reads that directory on
+each node through the preparer pod already running there (`kubectl exec`,
+no GPU), so it needs `pods/exec` in the namespace and the node list
+`engine-cache-status` needs. Per node and key it prints `present`,
+`ABSENT`, `UNREADABLE`, or `COULD NOT CHECK` -- a node with no Ready
+preparer, or an exec that failed or was Forbidden, is never reported as
+absent -- and it exits non-zero unless every key is present everywhere.
+`engine-cache-keys` warns when the engine compiled outside
+`VLLM_CACHE_ROOT` (its cache root was not writable): that start did not
+fill the node cache.
+
 What it costs, and what it needs, is the weights section's list with two
 things changed. The size: a few gigabytes per engine config per node rather
 than a model. And what the directory holds: **code**. The caches are
