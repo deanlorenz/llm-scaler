@@ -70,7 +70,8 @@ package controller
 // direct client path — no informer, so no watch — and never writes: Kueue owns
 // these objects. Kueue itself is optional; a rule naming an API group the
 // cluster does not serve is inert, and the reader reports "not served" rather
-// than an empty quota when it is missing.
+// than an empty quota when it is missing. It also gets Namespaces, to evaluate a
+// ClusterQueue namespaceSelector; the namespaces rule above already covers that.
 // +kubebuilder:rbac:groups=kueue.x-k8s.io,resources=clusterqueues;localqueues;resourceflavors,verbs=get;list
 
 // InferencePool discovery and controller-owned ServiceMonitor observation.

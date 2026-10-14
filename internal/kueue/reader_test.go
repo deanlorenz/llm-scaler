@@ -33,7 +33,33 @@ func kueueMapper(version string) meta.RESTMapper {
 	m.Add(gv.WithKind(KindClusterQueue), meta.RESTScopeRoot)
 	m.Add(gv.WithKind(KindResourceFlavor), meta.RESTScopeRoot)
 	m.Add(gv.WithKind(KindLocalQueue), meta.RESTScopeNamespace)
+	m.Add(schema.GroupVersionKind{Version: "v1", Kind: "Namespace"}, meta.RESTScopeRoot)
 	return m
+}
+
+// namespace is a core Namespace with the given labels, for selector evaluation.
+func namespace(name string, lbls map[string]string) *unstructured.Unstructured {
+	u := &unstructured.Unstructured{}
+	u.SetAPIVersion("v1")
+	u.SetKind("Namespace")
+	u.SetName(name)
+	u.SetLabels(lbls)
+	return u
+}
+
+// withSelector sets spec.namespaceSelector on a ClusterQueue; nil removes it.
+func withSelector(cq *unstructured.Unstructured, sel map[string]interface{}) *unstructured.Unstructured {
+	if sel == nil {
+		unstructured.RemoveNestedField(cq.Object, "spec", "namespaceSelector")
+		return cq
+	}
+	Expect(unstructured.SetNestedMap(cq.Object, sel, "spec", "namespaceSelector")).To(Succeed())
+	return cq
+}
+
+// matchLabels is a namespaceSelector of one label.
+func matchLabels(k, v string) map[string]interface{} {
+	return map[string]interface{}{"matchLabels": map[string]interface{}{k: v}}
 }
 
 func obj(version, kind, ns, name string, spec map[string]interface{}) *unstructured.Unstructured {
@@ -70,6 +96,8 @@ func flavorQuotas(name string, resources ...map[string]interface{}) map[string]i
 	return map[string]interface{}{"name": name, "resources": rs}
 }
 
+// clusterQueue builds a ClusterQueue that admits every namespace (an empty
+// namespaceSelector), as Kueue's own quickstart does; withSelector narrows it.
 func clusterQueue(version, name string, flavors ...map[string]interface{}) *unstructured.Unstructured {
 	fs := make([]interface{}, 0, len(flavors))
 	covered := map[string]bool{}
@@ -84,6 +112,7 @@ func clusterQueue(version, name string, flavors ...map[string]interface{}) *unst
 		cr = append(cr, r)
 	}
 	return obj(version, KindClusterQueue, "", name, map[string]interface{}{
+		"namespaceSelector": map[string]interface{}{},
 		"resourceGroups": []interface{}{
 			map[string]interface{}{"coveredResources": cr, "flavors": fs},
 		},
@@ -329,6 +358,107 @@ var _ = Describe("Reader", func() {
 		snap, err := r.Quotas(ctx) // same instant, healthy context: a real read
 		Expect(err).NotTo(HaveOccurred())
 		Expect(snap.Namespace["team-a"]).To(Equal(config.ExternalCaps{Untyped: 6, HasUntyped: true}))
+	})
+
+	Describe("ClusterQueue namespaceSelector", func() {
+		// A LocalQueue is the tenant's to create, pointing at any ClusterQueue.
+		// Its namespace gets the queue's grant only where Kueue would admit
+		// through it. Semantics are Kueue's (ClusterQueueSpec.NamespaceSelector):
+		// nil admits no namespace, {} admits every namespace.
+		h100 := func() *unstructured.Unstructured {
+			return flavor(v, "h100", map[string]interface{}{"nvidia.com/gpu.product": "NVIDIA-H100-80GB-HBM3"})
+		}
+		eight := func(name string) *unstructured.Unstructured {
+			return clusterQueue(v, name, flavorQuotas("h100", quota("nvidia.com/gpu", "8")))
+		}
+		granted := typedCaps(map[string]int{"NVIDIA-H100-80GB-HBM3": 8})
+
+		It("grants the namespaces the selector matches", func() {
+			c := newFakeClient(v, h100(),
+				withSelector(eight("team-a-cq"), matchLabels("team", "a")),
+				namespace("team-a", map[string]string{"team": "a"}),
+				localQueue(v, "team-a", "lq", "team-a-cq"),
+			)
+			snap, err := NewReader(c, Options{}).Quotas(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(snap.Namespace).To(Equal(map[string]config.ExternalCaps{"team-a": granted}))
+		})
+
+		It("does not grant a namespace the selector does not match", func() {
+			c := newFakeClient(v, h100(),
+				withSelector(eight("team-a-cq"), matchLabels("team", "a")),
+				namespace("team-a", map[string]string{"team": "a"}),
+				namespace("intruder", map[string]string{"team": "b"}),
+				localQueue(v, "team-a", "lq", "team-a-cq"),
+				localQueue(v, "intruder", "lq", "team-a-cq"), // points at someone else's queue
+			)
+			snap, err := NewReader(c, Options{}).Quotas(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(snap.Namespace).NotTo(HaveKey("intruder"),
+				"a LocalQueue on a ClusterQueue whose selector excludes the namespace must not carry the grant")
+			Expect(snap.Namespace).To(HaveKeyWithValue("team-a", granted))
+			// The queue still counts once at cluster scope.
+			Expect(snap.Cluster).To(Equal(granted))
+		})
+
+		It("grants no namespace through a nil selector", func() {
+			c := newFakeClient(v, h100(),
+				withSelector(eight("cq"), nil),
+				namespace("team-a", map[string]string{"team": "a"}),
+				localQueue(v, "team-a", "lq", "cq"),
+			)
+			snap, err := NewReader(c, Options{}).Quotas(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(snap.Namespace).To(BeEmpty())
+		})
+
+		It("grants every namespace through an empty selector, without reading any Namespace", func() {
+			gets := 0
+			c := fake.NewClientBuilder().
+				WithScheme(runtime.NewScheme()).
+				WithRESTMapper(kueueMapper(v)).
+				WithObjects(h100(), eight("cq"),
+					localQueue(v, "team-a", "lq", "cq"),
+					localQueue(v, "team-b", "lq", "cq")).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, o client.Object, opts ...client.GetOption) error {
+						gets++
+						return cl.Get(ctx, key, o, opts...)
+					},
+				}).
+				Build()
+			snap, err := NewReader(c, Options{}).Quotas(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(snap.Namespace).To(Equal(map[string]config.ExternalCaps{"team-a": granted, "team-b": granted}))
+			Expect(gets).To(BeZero(), "an empty selector needs no namespace labels, and so no RBAC on namespaces")
+		})
+
+		It("withholds the grant, and bounds the namespace at nothing, when its labels cannot be read", func() {
+			c := fake.NewClientBuilder().
+				WithScheme(runtime.NewScheme()).
+				WithRESTMapper(kueueMapper(v)).
+				WithObjects(h100(),
+					withSelector(eight("team-a-cq"), matchLabels("team", "a")),
+					eight("open-cq"),
+					namespace("team-a", map[string]string{"team": "a"}),
+					namespace("team-b", map[string]string{"team": "a"}),
+					localQueue(v, "team-a", "lq", "team-a-cq"),
+					localQueue(v, "team-b", "lq", "team-a-cq"),
+					localQueue(v, "team-b", "lq2", "open-cq"),
+				).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, o client.Object, opts ...client.GetOption) error {
+						return errors.New(`namespaces "` + key.Name + `" is forbidden`)
+					},
+				}).
+				Build()
+			snap, err := NewReader(c, Options{}).Quotas(ctx)
+			Expect(err).NotTo(HaveOccurred(), "one unreadable namespace must not discard the whole snapshot")
+			// Not granted, and not left to the static entry either: governed, nothing.
+			Expect(snap.Namespace).To(HaveKeyWithValue("team-a", config.ExternalCaps{HasUntyped: true}))
+			// A namespace with another, verifiable grant keeps only that one.
+			Expect(snap.Namespace).To(HaveKeyWithValue("team-b", granted))
+		})
 	})
 
 	It("reports a cluster without Kueue as an error, not as no quota", func() {

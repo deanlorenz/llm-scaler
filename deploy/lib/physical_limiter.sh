@@ -274,8 +274,9 @@ EOF
 }
 
 # pl_grant_kueue_read grants one controller the cluster-scoped Kueue read a quota
-# entry with kueue.enabled needs: ClusterQueues and ResourceFlavors. LocalQueues
-# are namespaced and come with the controller's own Role.
+# entry with kueue.enabled needs: ClusterQueues and ResourceFlavors, and get on
+# Namespaces to evaluate a ClusterQueue namespaceSelector. LocalQueues are
+# namespaced and come with the controller's own Role.
 #
 # Same object names as components/kueue-reader, for the same reason as
 # pl_grant_node_read. Without this, a cluster policy carrying the kueue block
@@ -297,6 +298,9 @@ rules:
 - apiGroups: ["kueue.x-k8s.io"]
   resources: ["clusterqueues", "resourceflavors"]
   verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
