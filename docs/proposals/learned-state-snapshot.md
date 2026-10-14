@@ -126,6 +126,27 @@ and dropped by the sweep at their horizon, like any other unused entry.
   wrong value keeps it across the restart, as it already did across every
   cycle before it. Deleting the ConfigMap is the flush.
 
+## Related, not in scope
+
+Two steps of #116 are not about restarts and are carried here so that
+closing it does not lose them:
+
+- **Publish the learned figures** (#116's step 6), as `wva_learned_*`
+  families: the ITL line's slope, intercept and samples, k2 and the saturated
+  throughput per bucket. Worth doing on its own: it makes a decision after a
+  restart explicable on a dashboard, and it needs no trust from anyone because
+  nothing reads it back. #116 left three questions open that still apply: its
+  names collide with the `wva_itl_line_*` families in
+  [signals-as-metrics](signals-as-metrics.md); a `source` label would make a
+  restored figure a different series rather than an annotation on one; and
+  per-variant keys (#132) change the label set it proposed.
+- **Raise `DefaultWindowMaxSize`** (#116's step 7), the ITL window's sample
+  count, from about 20 toward 240, so the window reaches its 30-minute age
+  bound instead of stopping at a fraction of it. Measured in #116: **52% of
+  244 cycles** could not fit a line for want of `k` spread. Gate it on a
+  measurement that a wider window actually spans the 0.30 the fit needs; if it
+  does not, it buys only memory.
+
 ## Open questions
 
 1. Should a restored k2 count as an own reading for the throughput floor's

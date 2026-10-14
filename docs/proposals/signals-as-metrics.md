@@ -254,5 +254,13 @@ happens.
   the panels are a separate piece of work.
 - **Historical comparison across a restart.** Every signal here is in-memory
   and starts empty; a restart shows a gap, and the ITL families stay absent for
-  the ~51 cycles a fit takes. That is honest rather than fixable, and
-  `wva_itl_line_samples` is what makes it legible.
+  the ~28 cycles a fit takes, measured from load start (an earlier ~51 was
+  counted from the controller's boot; the correction is PR #116's). This
+  document called that gap honest rather than fixable. It is fixable, but not
+  by reading these series back: a `wva_` series has no writer identity (the
+  ServiceMonitor drops `pod`) and no honest age (`client_golang` cannot publish
+  a historical timestamp), so publishing a signal is safe and reading back one
+  WVA itself wrote is not. The learned state is carried across a restart in a
+  ConfigMap snapshot instead; see
+  [learned state across a restart](learned-state-snapshot.md).
+  `wva_itl_line_samples` still makes the gap legible where it remains.
