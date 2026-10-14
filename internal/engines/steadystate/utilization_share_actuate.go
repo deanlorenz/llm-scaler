@@ -258,7 +258,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 			e.unmarkDonorPods(ctx, logger, t)
 		}
 		switch {
-		case t.Donor != "" && t.Returned && t.Receiver == "":
+		case t.Donor != "" && t.Returned:
 			logger.Info("Utilization share: spare returned to the quota", "id", t.ID, "donor", t.Donor, "gpus", t.DonorGPUs)
 		case t.Donor != "" && t.Receiver == "" && t.SetID == "":
 			logger.Info("Utilization share: reserve refilled", "id", t.ID, "donor", t.Donor, "gpus", t.DonorGPUs)
@@ -304,7 +304,7 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 	nodes, units, domains := e.shareNodeInputs(ctx, logger, g, accessor, l.Promised()+l.WakeHeld(now),
 		shareMarkOwned(l, nil), now)
 	plan := allocation.PlanShareTransfers(l, allocation.SharePlanInput{
-		Roles: g.Roles, Held: held, Thresholds: g.Thresholds, DownThresholds: g.DownThresholds, Budget: g.Budget, Tolerance: us.Tolerance,
+		Roles: g.Roles, Held: held, Thresholds: g.Thresholds, DownThresholds: g.DownThresholds, BusiestQueueLoad: g.BusiestQueueLoad, Budget: g.Budget, Tolerance: us.Tolerance,
 		SkipWaits: shareSkipWaits(us), ConfirmCycles: us.Stabilization.ConsecutiveCyclesBeforeMove,
 		Give: g.Give, Grow: g.Grow, Nodes: nodes, DonorUnits: units, DomainKey: domains,
 		WakeHeld: l.WakeHeld(now), PhysicalFree: g.PhysicalFree,
@@ -320,18 +320,6 @@ func (e *Engine) actuateUtilizationShare(ctx context.Context, logger logr.Logger
 		e.shareCancelledEvents(t, accessor)
 		count(allocation.ShareOutcomeCancelled, t.Urgent)
 		logger.Info("Utilization share: transfer cancelled", "id", id, "donor", t.Donor, "receiver", t.Receiver)
-	}
-	for _, id := range plan.Assigned {
-		t, ok := l.Transfer(id)
-		if !ok {
-			continue
-		}
-		if t.ReceiverVariant != "" {
-			e.shareEvent(accessor(t.Receiver, t.ReceiverVariant), corev1.EventTypeNormal, constants.K8SEventUtilizationShareReceiving,
-				fmt.Sprintf("Utilization share: receiving %d GPUs that %s is giving back to the quota; raised once its replica is released",
-					t.GPUs, sharePeer(g, t.Receiver, t.Donor)))
-		}
-		logger.Info("Utilization share: returned spare handed to a receiver", "id", id, "donor", t.Donor, "receiver", t.Receiver)
 	}
 	// A donor set (section 6.5) starts whole or not at all: a primary whose
 	// contributor could not be marked would raise its receiver into a hole

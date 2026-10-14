@@ -171,7 +171,7 @@ func (e *Engine) shareEndedEvent(g allocation.ShareGroup, end allocation.ShareTr
 // both sides.
 func (e *Engine) shareCancelledEvents(t allocation.ShareTransfer, accessor func(string, string) scaletarget.ScaleTargetAccessor) {
 	msg := "Utilization share: the transfer was called off because demand reversed; its replica count is restored"
-	if t.Returned && t.Receiver == "" {
+	if t.Returned {
 		msg = "Utilization share: this model's demand came back, so it keeps the replica it was giving back"
 	}
 	e.shareEvent(accessor(t.Donor, t.DonorVariant), corev1.EventTypeNormal, constants.K8SEventUtilizationShareCancelled, msg)

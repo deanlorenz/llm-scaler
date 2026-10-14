@@ -172,6 +172,43 @@ if out="$(bash hack/benchmark/engine_image.sh "$T/nonexistent" 2>/dev/null)"; th
 mkdir -p "$T/clone2/config/templates/values"
 printf 'images:\n  vllm:\n    repository: docker.io/vllm/vllm-openai\n' > "$T/clone2/config/templates/values/defaults.yaml"
 if bash hack/benchmark/engine_image.sh "$T/clone2" >/dev/null 2>&1; then fail "engine_image.sh must fail without a tag"; else ok "engine_image.sh fails without a tag rather than guessing"; fi
+# A scenario's images.vllm overrides the default field by field: the prepull
+# and the engine-cache preparer must hold the image the engines will run, not
+# the harness default the scenario moved away from.
+cat > "$T/sc-shared.yaml" <<'EOF'
+shared:
+  images:
+    vllm:
+      tag: v0.31.0
+scenario:
+  - name: a
+  - name: b
+EOF
+got="$(bash hack/benchmark/engine_image.sh "$T/clone" "$T/sc-shared.yaml" || true)"
+if [ "$got" = "docker.io/vllm/vllm-openai:v0.31.0" ]; then ok "a shared images.vllm.tag overrides the default tag, repository kept"; else fail "shared override: engine_image.sh printed '$got'"; fi
+printf 'shared:\n  monitoring: {}\nscenario:\n  - name: a\n' > "$T/sc-none.yaml"
+got="$(bash hack/benchmark/engine_image.sh "$T/clone" "$T/sc-none.yaml" || true)"
+if [ "$got" = "docker.io/vllm/vllm-openai:v0.26.0" ]; then ok "a scenario without images.vllm keeps the default"; else fail "no override: engine_image.sh printed '$got'"; fi
+cat > "$T/sc-stack.yaml" <<'EOF'
+shared:
+  images:
+    vllm:
+      tag: v0.31.0
+scenario:
+  - name: a
+  - name: b
+    images:
+      vllm:
+        repository: quay.io/other/vllm
+EOF
+got="$(bash hack/benchmark/engine_image.sh "$T/clone" "$T/sc-stack.yaml" || true)"
+if [ "$got" = "docker.io/vllm/vllm-openai:v0.31.0,quay.io/other/vllm:v0.31.0" ]; then ok "a stack's own override layers on the shared one; distinct images print comma-separated"; else fail "stack override: engine_image.sh printed '$got'"; fi
+if out="$(bash hack/benchmark/engine_image.sh "$T/clone" "$T/no-such-scenario.yaml" 2>/dev/null)"; then fail "engine_image.sh must fail on a named scenario that is missing"; else
+    [ -z "$out" ] && ok "engine_image.sh prints nothing and fails on a missing scenario" || fail "engine_image.sh printed on a missing scenario: '$out'"; fi
+# The P/D share scenario moved off the harness default (NIXL on v0.26.0 drops
+# the KV link); what it pins is what the standup must hold on the nodes.
+got="$(bash hack/benchmark/engine_image.sh "$T/clone" hack/benchmark/scenarios/guides/two-model-shapes-pd.yaml || true)"
+if [ "$got" = "docker.io/vllm/vllm-openai:v0.31.0" ]; then ok "two-model-shapes-pd resolves to the engine it pins"; else fail "two-model-shapes-pd: engine_image.sh printed '$got'"; fi
 
 # ---------------------------------------------------------------------------
 # 3. status, delete and apply, offline, against what a cluster answered.
@@ -203,9 +240,13 @@ cat > "$T/nodes.json" <<EOF
  {"metadata":{"name":"node-noimages", "labels":{"nvidia.com/gpu.product":"H200"}}},
  {"metadata":{"name":"node-cpu",      "labels":{"kubernetes.io/os":"linux"}},       "status":{"images":[{"names":["${IMG}"]}]}},
  {"metadata":{"name":"node-cpu-cw",   "labels":{"gpu.nvidia.com/model":"","gpu.nvidia.com/class":""}}, "status":{"images":[]}},
- {"metadata":{"name":"node-amd",      "labels":{"amd.com/gpu.product-name":"MI300X"}}, "status":{"images":[]}}
+ {"metadata":{"name":"node-amd",      "labels":{"amd.com/gpu.product-name":"MI300X"}}, "status":{"images":[]}},
+ {"metadata":{"name":"node-cordoned", "labels":{"nvidia.com/gpu.product":"H200"}}, "spec":{"unschedulable":true,"taints":[{"key":"node.kubernetes.io/unschedulable","effect":"NoSchedule"},{"key":"node.kubernetes.io/disk-pressure","effect":"NoSchedule"}]}, "status":{"images":[]}},
+ {"metadata":{"name":"node-foreign",  "labels":{"nvidia.com/gpu.product":"H200"}}, "spec":{"taints":[{"key":"example.com/team-x","value":"only","effect":"NoSchedule"}]}, "status":{"images":[]}}
 ]}
 EOF
+# the DaemonSet as apply wrote it: it tolerates nvidia.com/gpu, nothing else
+printf '%s' '{"spec":{"template":{"spec":{"tolerations":[{"key":"nvidia.com/gpu","operator":"Exists"}]}}}}' > "$T/ds.json"
 cat > "$T/pods.json" <<EOF
 {"items":[
  {"metadata":{"labels":{"wva.llmd.ai/prepull":"${DS}"}},"spec":{"nodeName":"node-running"},"status":{"phase":"Running","containerStatuses":[{"ready":true,"state":{"running":{}}}]}},
@@ -222,6 +263,9 @@ cat > "$T/bin/kubectl" <<EOF
 #!/usr/bin/env bash
 # stub: the reads and writes prepull.sh and the standup step make, answered
 # from fixtures; every call is recorded and its scope arguments checked.
+# The benchmark recipes put --request-timeout first; it is recorded apart and
+# dropped, so the dispatch below reads the verb.
+case "\$1" in --request-timeout=*) printf '%s\n' "\$1" >> "$T/timeouts"; shift ;; esac
 printf '%s\n' "\$*" >> "$T/calls"
 ARGV=" \$* "   # the call's own argv; inside want/refuse \$* would be THEIR arguments
 want() {  # the argv must contain this exact argument pair
@@ -241,6 +285,7 @@ case "\$1 \$2" in
       want -n check-ns
       case " \$* " in
         *" -l "*) want -l "$LBL"; printf '%s\n' "\${STUB_DAEMONSETS-${IMG}}" ;;
+        *" -o json "*) cat "$T/ds.json" ;;
         *) want -o "jsonpath={.spec.template.spec.nodeSelector}"
            case "\$ARGV" in *" ${DS} "*|*" \${STUB_DS_NAME:-${DS}} "*) ;; *) echo "stub kubectl: get daemonset for a name that is not the DaemonSet:\$ARGV" >&2; exit 2 ;; esac
            if [ -n "\${STUB_DS_SELECTOR:-}" ]; then jq -cn --arg k "\${STUB_DS_SELECTOR%%=*}" --arg v "\${STUB_DS_SELECTOR#*=}" '{(\$k): \$v}'; else printf '{}'; fi ;;
@@ -275,7 +320,14 @@ grep -q '^  node-cpu ' "$T/status.out" && fail "status: a node with no product l
 grep -q '^  node-cpu-cw ' "$T/status.out" && fail "status: a node whose product labels are EMPTY (a CoreWeave CPU node) was counted" || ok "status: the default placement leaves a node with empty product labels out"
 grep -q 'node-evicted .*Evicted' "$T/status.out" && ok "status: the evicted holder shows its reason" || fail "status: Evicted reason missing"
 grep -q 'node-pulled .*not held' "$T/status.out" && ok "status: a pulled-but-unheld image says so" || fail "status: pulled/not-held note missing"
-grep -q '5/9 nodes have it (2 held, 3 pulled but not held); 4 do not' "$T/status.out" && ok "status: the tally separates held from pulled-not-held" || fail "status: tally wrong: $(grep 'nodes have' "$T/status.out")"
+grep -q '5/9 usable nodes have it (2 held, 3 pulled but not held); 4 do not' "$T/status.out" && ok "status: the tally separates held from pulled-not-held, on usable nodes" || fail "status: tally wrong: $(grep 'nodes have' "$T/status.out")"
+grep -qE '^  node-cordoned +excluded +cordoned' "$T/status.out" && grep -qE '^  node-foreign +excluded +tainted example.com/team-x:NoSchedule' "$T/status.out" && ok "status: a cordoned node and a node tainted against the holder are listed as excluded, with why" || fail "status: excluded rows: $(grep -E 'node-cordoned|node-foreign' "$T/status.out" | tr '\n' ';')"
+# A complete hold exits 0 beside a cordoned node and a foreign-tainted one:
+# counted, they reported 8/17 on a finished preparation and failed it.
+cp "$T/nodes.json" "$T/nodes-full.json"
+jq '.items |= map(select(.metadata.name == "node-running" or .metadata.name == "node-cordoned" or .metadata.name == "node-foreign"))' "$T/nodes-full.json" > "$T/nodes.json"
+if PATH="$STUB_PATH" bash deploy/prepull.sh status -n check-ns > "$T/done.out" 2>&1; then grep -q '1/1 usable nodes have it' "$T/done.out" && ok "status: every usable node holding the image is a pass, unusable nodes aside" || fail "status complete: $(grep 'nodes have' "$T/done.out")"; else fail "status: a complete hold failed on nodes no engine can use: $(grep -E 'nodes have|excluded' "$T/done.out" | tr '\n' ';')"; fi
+cp "$T/nodes-full.json" "$T/nodes.json"
 grep -q '1 node(s) carry an AMD, Intel or Gaudi accelerator label' "$T/status.out" && ok "status: under the default placement a non-NVIDIA node is named as held for nothing" || fail "status: vendor warning missing"
 grep -q 'carry an AMD' "$T/sel.out" 2>/dev/null && fail "status: the vendor warning must not print under an explicit selector" || true
 [ "$rc" -ne 0 ] && ok "status: exits non-zero while a node lacks the image" || fail "status: exit 0 with nodes lacking the image"
@@ -411,7 +463,7 @@ grep -q '^  node-running ' "$T/make-env.out" && ok "make prepull-status takes an
 # the apply, BENCHMARK_PREPULL=false skips, BENCHMARK_PREPULL_IMAGES overrides
 # tr -d: a CRLF checkout (Windows) turns each recipe continuation into a
 # backslash-CR, which bash does not read as a continuation.
-block="$(tr -d '\r' < Makefile | sed -n '/The engine image on every accelerator node BEFORE/,/Lives in a script, not inline here/p' | sed '1d;$d' | grep -v '^	@#' | sed 's/^	@//; s/\$\$/$/g; s/\$(BENCHMARK_PREPULL)/${BENCHMARK_PREPULL}/g; s/\$(BENCHMARK_PREPULL_IMAGES)/${BENCHMARK_PREPULL_IMAGES}/g; s/\$(BENCHMARK_REPO_DIR)/${BENCHMARK_REPO_DIR}/g; s/\$(BENCHMARK_NAMESPACE)/${BENCHMARK_NAMESPACE}/g; s/\$(PREPULL_ARGS)//g')"
+block="$(tr -d '\r' < Makefile | sed -n '/The engine image on every accelerator node BEFORE/,/Lives in a script, not inline here/p' | sed '1d;$d' | grep -v '^	@#' | sed 's/^	@//; s/\$\$/$/g; s/\$(BENCHMARK_PREPULL)/${BENCHMARK_PREPULL}/g; s/\$(BENCHMARK_PREPULL_IMAGES)/${BENCHMARK_PREPULL_IMAGES}/g; s/\$(BENCHMARK_REPO_DIR)/${BENCHMARK_REPO_DIR}/g; s/\$(BENCHMARK_SPEC)/${BENCHMARK_SPEC}/g; s/\$(BENCHMARK_NAMESPACE)/${BENCHMARK_NAMESPACE}/g; s/\$(BENCHMARK_KUBECTL_TIMEOUT)/${BENCHMARK_KUBECTL_TIMEOUT}/g; s/\$(PREPULL_ARGS)//g')"
 [ -n "$block" ] || fail "could not extract the benchmark-standup pre-pull block from the Makefile"
 # A make variable the substitution list above does not know would reach
 # bash as a command substitution -- `$(CURDIR)` runs a command named CURDIR,
@@ -423,9 +475,14 @@ if printf '%s' "$block" | grep -Eq '[$][(][A-Z_]+[)]'; then
 else
     ok "standup: the extracted block holds no untranslated make reference (a shell substitution is lowercase)"
 fi
-run_block() { env BENCHMARK_NAMESPACE=check-ns BENCHMARK_REPO_DIR="$T/clone" PATH="$STUB_PATH" "$@" bash -c "$block"; }
-: > "$T/calls"
+# The standup copies the scenario into the clone before this block runs; the
+# check's clone holds one with no engine override, so the default is read.
+mkdir -p "$T/clone/config/scenarios/check"
+cp "$T/sc-none.yaml" "$T/clone/config/scenarios/check/spec.yaml"
+run_block() { env BENCHMARK_NAMESPACE=check-ns BENCHMARK_REPO_DIR="$T/clone" BENCHMARK_SPEC=check/spec BENCHMARK_KUBECTL_TIMEOUT=30s PATH="$STUB_PATH" "$@" bash -c "$block"; }
+: > "$T/calls"; : > "$T/timeouts"
 run_block BENCHMARK_PREPULL=true BENCHMARK_PREPULL_IMAGES= > "$T/standup.out" 2>&1 || fail "standup block failed: $(cat "$T/standup.out")"
+[ "$(sort -u "$T/timeouts")" = "--request-timeout=30s" ] && ok "standup: the pre-pull step's kubectl requests carry the request timeout" || fail "standup: request timeouts seen: '$(sort -u "$T/timeouts" | tr '\n' ' ')'"
 if grep -q "^create namespace check-ns" "$T/calls" && grep -q "^apply -n check-ns" "$T/calls" \
    && [ "$(grep -n '^create namespace' "$T/calls" | head -1 | cut -d: -f1)" -lt "$(grep -n '^apply -n' "$T/calls" | head -1 | cut -d: -f1)" ]; then
     ok "standup: the namespace is created before the pre-pull apply"
@@ -439,6 +496,11 @@ run_block BENCHMARK_PREPULL=false BENCHMARK_PREPULL_IMAGES= > "$T/standup-skip.o
 : > "$T/calls"
 run_block BENCHMARK_PREPULL=true BENCHMARK_PREPULL_IMAGES=override/engine:9 > "$T/standup-override.out" 2>&1 || true
 grep -q 'Holding the engine image.*override/engine:9' "$T/standup-override.out" && ok "standup: BENCHMARK_PREPULL_IMAGES overrides the clone's pin" || fail "standup override: $(head -2 "$T/standup-override.out")"
+: > "$T/calls"
+mkdir -p "$T/clone/config/scenarios/check-pin"
+cp "$T/sc-shared.yaml" "$T/clone/config/scenarios/check-pin/spec.yaml"
+run_block BENCHMARK_PREPULL=true BENCHMARK_PREPULL_IMAGES= BENCHMARK_SPEC=check-pin/spec > "$T/standup-pin.out" 2>&1 || true
+grep -qF 'Holding the engine image on the accelerator nodes: docker.io/vllm/vllm-openai:v0.31.0 (' "$T/standup-pin.out" && ok "standup: a scenario's engine pin is the image held on the nodes" || fail "standup with a scenario pin: $(head -2 "$T/standup-pin.out")"
 : > "$T/calls"
 run_block BENCHMARK_PREPULL=true BENCHMARK_PREPULL_IMAGES= BENCHMARK_REPO_DIR="$T/nonexistent" > "$T/standup-noclone.out" 2>&1 || true
 grep -q 'WARNING: could not read the engine image' "$T/standup-noclone.out" && [ ! -s "$T/calls" ] && ok "standup: no clone means a warning and no apply" || fail "standup without a clone: $(head -2 "$T/standup-noclone.out")"

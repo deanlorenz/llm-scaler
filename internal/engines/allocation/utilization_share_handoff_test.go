@@ -6,93 +6,9 @@ import (
 	"time"
 )
 
-// A wake that claims a return handed to a receiver (Redirect) ends it as a
-// return: left Returned with no receiver, the next plan would hand it to
-// another receiver, or cancel it as a return, while the wake waits on its
-// GPUs.
-func TestShareRedirectEndsAReturn(t *testing.T) {
-	l := NewShareLedger()
-	tm := spareTimings()
-	held := map[string]int{"L": 3, "Q": 7}
-	r := l.Start(ShareTransfer{Donor: "Q", DonorGPUs: 1, Entitled: true, Returned: true, DonorPodGPUs: []int{1}},
-		held, time.Unix(1000, 0), tm)
-	if !l.AssignReturn(r.ID, "L", "l", 1) {
-		t.Fatal("setup: the return was not handed to L")
-	}
-	if prev, ok := l.Redirect(r.ID, time.Minute); !ok || prev.Receiver != "L" {
-		t.Fatalf("setup: redirect %v of %+v, want the return handed to L", ok, prev)
-	}
-	if tr, _ := l.Transfer(r.ID); tr.Returned || tr.Receiver != "" {
-		t.Fatalf("claimed by a wake, it is still a return: %+v", tr)
-	}
-	if l.AssignReturn(r.ID, "C", "c", 1) {
-		t.Fatal("a return a wake claimed was handed to another receiver")
-	}
-	// L is short again, Q calm: a plan does not hand the claimed GPUs over.
-	p := PlanShareTransfers(l, spareRun(5, 0.4, 7), time.Unix(1010, 0), tm)
-	if slices.Contains(p.Assigned, r.ID) {
-		t.Fatalf("the plan handed a claimed return to a receiver: %v", p.Assigned)
-	}
-	// Q's demand is back in full: what a return would be called off for. The
-	// wake's GPUs are not.
-	p = PlanShareTransfers(l, spareRun(5, 8, 7), time.Unix(1020, 0), tm)
-	if slices.Contains(p.Cancelled, r.ID) {
-		t.Fatalf("the plan cancelled a claimed return as a return: %v", p.Cancelled)
-	}
-	if _, ok := l.Transfer(r.ID); !ok {
-		t.Fatal("the claimed transfer left the ledger")
-	}
-}
-
-// returnFitPlan plans one cycle for R, short of its need (14 on 8) and a 1x8
-// pod, beside Q, which has one 8-GPU return still releasing: shape is the
-// returned pod's GPUs as the return recorded it, nil when unknown.
-func returnFitPlan(shape []int) (SharePlan, string) {
-	tm := simTimings()
-	t0 := time.Unix(1000, 0)
-	l := NewShareLedger()
-	held := map[string]int{"R": 8, "Q": 24}
-	roles := []ShareRole{
-		{Key: "R", Weight: 1, Need: 14, Floor: 8, Ceiling: 64, ReplicaGPUs: 8},
-		{Key: "Q", Weight: 1, Need: 2, Floor: 8, Ceiling: 64, ReplicaGPUs: 8},
-	}
-	tr := l.Start(ShareTransfer{Donor: "Q", DonorGPUs: 8, DonorVariant: "q", Entitled: true, Returned: true, DonorPodGPUs: shape},
-		held, t0.Add(-30*time.Second), tm)
-	l.ConfirmStarted(tr.ID, []string{"p"})
-	// Q gives from a 1x8 variant now: what it returned is judged on the shape
-	// it was returned from, not on what it would give today.
-	give := map[string]ShareVariant{"Q": {Name: "q", GPUs: 8, PodGPUs: []int{8}}}
-	grow := map[string]ShareVariant{"R": {Name: "r", GPUs: 8, PodGPUs: []int{8}}}
-	in := SharePlanInput{Roles: roles, Held: held, Thresholds: map[string]float64{"R": 0.8, "Q": 0.8}, Budget: 32,
-		Tolerance: 0.15, Give: give, Grow: grow, Headroom: ShareHeadroom{Capped: true, Replicas: 1}}
-	return PlanShareTransfers(l, in, t0, tm), tr.ID
-}
-
-// A return is handed over only where the returned pod's own shape covers the
-// receiver's pod: a 1x8 return frees a node for a 1x8 pod, a 2x4 one does not,
-// and one whose shape is not known -- read back from its marks after a
-// restart -- is not handed over at all. Judged on the donor's give variant
-// instead, a 2x4 return would be handed over whenever the donor gives 1x8.
-func TestShareReturnHandedOnlyWhereItsShapeFits(t *testing.T) {
-	for _, c := range []struct {
-		name   string
-		shape  []int
-		handed bool
-	}{
-		{"1x8 return, 1x8 receiver", []int{8}, true},
-		{"2x4 return, 1x8 receiver", []int{4, 4}, false},
-		{"return of unknown shape", nil, false},
-	} {
-		p, id := returnFitPlan(c.shape)
-		if got := slices.Contains(p.Assigned, id); got != c.handed {
-			t.Errorf("%s: handed to R %v, want %v (assigned %v)", c.name, got, c.handed, p.Assigned)
-		}
-	}
-}
-
-// A return records the shape of the replica it gives back, for the hand-off
-// to judge (fromReturns): the give variant's pods, or one pod of the whole
-// replica when they are not known.
+// A return records the shape of the replica it gives back, for returnsCover
+// to judge: the give variant's pods, or one pod of the whole replica when
+// they are not known.
 func TestShareReturnRecordsItsShape(t *testing.T) {
 	in := spareRun(2, 0.4, 7)
 	in.Give = map[string]ShareVariant{"Q": {Name: "q", GPUs: 1}, "L": {Name: "l", GPUs: 1}}
@@ -117,14 +33,14 @@ func TestShareReturnRecordsItsShape(t *testing.T) {
 // lwsReceiverPlan plans one cycle for R, short of its need (40 on 16) with a
 // replica of two 8-GPU pods, beside D, which gives 1x8 replicas: no single
 // donor replica fits R, so R is funded by a donor set -- unless returns D has
-// started, handed to nobody, are already freeing a replica of R.
+// started are already freeing a replica of R.
 func lwsReceiverPlan(returns int) SharePlan {
-	return lwsReceiverPlanTo(returns, "", 96)
+	return lwsReceiverPlanShaped(returns, 96, []int{8})
 }
 
-// lwsReceiverPlanTo is lwsReceiverPlan with the returns handed to receiver
-// to when it is not "": a 1x8 role short of its need of 20 on 8.
-func lwsReceiverPlanTo(returns int, to string, rCeiling int) SharePlan {
+// lwsReceiverPlanShaped is lwsReceiverPlan with R's ceiling at rCeiling and
+// each return's pods shaped as shape.
+func lwsReceiverPlanShaped(returns, rCeiling int, shape []int) SharePlan {
 	tm := simTimings()
 	t0 := time.Unix(100000, 0)
 	l := NewShareLedger()
@@ -134,19 +50,11 @@ func lwsReceiverPlanTo(returns int, to string, rCeiling int) SharePlan {
 		{Key: "D", Weight: 1, Need: 2, Floor: 8, Ceiling: 96, ReplicaGPUs: 8},
 	}
 	th := map[string]float64{"R": 0.8, "D": 0.8}
-	budget := 80
-	if to != "" {
-		roles = append(roles, ShareRole{Key: to, Weight: 1, Need: 20, Floor: 8, Ceiling: 64, ReplicaGPUs: 8})
-		held[to], th[to], budget = 8, 0.8, 88
-	}
 	for range returns {
-		r := l.Start(ShareTransfer{Donor: "D", DonorGPUs: 8, DonorVariant: "d", Entitled: true, Returned: true, DonorPodGPUs: []int{8}},
+		l.Start(ShareTransfer{Donor: "D", DonorGPUs: 8, DonorVariant: "d", Entitled: true, Returned: true, DonorPodGPUs: shape},
 			held, t0.Add(-30*time.Second), tm)
-		if to != "" && !l.AssignReturn(r.ID, to, "x", 8) {
-			panic("setup: a return was not handed to " + to)
-		}
 	}
-	in := SharePlanInput{Roles: roles, Held: held, Thresholds: th, Budget: budget,
+	in := SharePlanInput{Roles: roles, Held: held, Thresholds: th, Budget: 80,
 		Tolerance: 0.15, Headroom: ShareHeadroom{Capped: true, Replicas: 1},
 		Give: map[string]ShareVariant{"D": {Name: "d", GPUs: 8, PodGPUs: []int{8}}},
 		Grow: map[string]ShareVariant{"R": {Name: "r", GPUs: 16, PodGPUs: []int{8, 8}}}}
@@ -169,7 +77,7 @@ func TestShareLWSReceiverWaitsOnReturns(t *testing.T) {
 	}
 	// R's ceiling of 32 leaves it one replica short: two returns of 8 cover
 	// it, and no set drains D.
-	p := lwsReceiverPlanTo(2, "", 32)
+	p := lwsReceiverPlanShaped(2, 32, []int{8})
 	if n := toR(p); n != 0 {
 		t.Fatalf("a donor set started for R while 16 returned GPUs, all it lacks, release: %+v", p.Started)
 	}
@@ -186,42 +94,75 @@ func TestShareLWSReceiverWaitsOnReturns(t *testing.T) {
 	if p := lwsReceiverPlan(1); p.Withheld[ShareWithheldAwaitingReturn] != 0 {
 		t.Fatalf("R waited on 8 returned GPUs, half its replica: %v", p.Withheld)
 	}
-	// Returns already handed to another receiver free nothing for R.
-	if p := lwsReceiverPlanTo(2, "X", 96); p.Withheld[ShareWithheldAwaitingReturn] != 0 || toR(p) == 0 {
-		t.Fatalf("R waited on returns handed to X: withheld %v, cancelled %v, started %+v", p.Withheld, p.Cancelled, p.Started)
+	// Returns of two 4-GPU pods free no node for an 8-GPU pod: nothing to
+	// wait on.
+	if p := lwsReceiverPlanShaped(2, 32, []int{4, 4}); p.Withheld[ShareWithheldAwaitingReturn] != 0 ||
+		p.Unfunded["R"] == ShareUnfundedAwaitingReturn {
+		t.Fatalf("R waited on 2x4 returns its 8-GPU pods do not fit: withheld %v, unfunded %v", p.Withheld, p.Unfunded)
 	}
 	if n := toR(lwsReceiverPlan(0)); n == 0 {
 		t.Fatal("control: with nothing returning, no donor set funded R")
 	}
 }
 
-// A return handed to a receiver is a transfer now, and is judged as one when
-// its donor's demand comes back: Q's need of 2.5 is busier than the calm load
-// on the 4 it keeps -- reason enough to call off a return -- but not short of
-// its target, and L still needs the GPUs, so the move stands. Control: the
-// same return, handed to nobody, is called off.
-func TestShareAssignedReturnIsCancelledAsATransfer(t *testing.T) {
-	cancelled := func(assign bool) bool {
-		l := NewShareLedger()
-		burstHistory(l)
-		in := spareRun(5, 2.5, 7)
-		var first string
-		for i := range 3 {
-			tr := l.Start(ShareTransfer{Donor: "Q", DonorGPUs: 1, Entitled: true, Returned: true}, in.Held, time.Unix(1000, 0), spareTimings())
-			if i == 0 {
-				first = tr.ID
-			}
-		}
-		if assign && !l.AssignReturn(first, "L", "l", 1) {
-			t.Fatal("setup: the return was not handed to L")
-		}
-		return slices.Contains(PlanShareTransfers(l, in, time.Unix(1015, 0), spareTimings()).Cancelled, first)
+// singlePodWaitPlan plans one cycle for R, a 1x8 role short of its need (14
+// on 8), beside Q, which has one 8-GPU return still releasing, its pods shaped
+// as shape (nil when not known).
+func singlePodWaitPlan(shape []int) SharePlan {
+	tm := simTimings()
+	t0 := time.Unix(1000, 0)
+	l := NewShareLedger()
+	held := map[string]int{"R": 8, "Q": 24}
+	roles := []ShareRole{
+		{Key: "R", Weight: 1, Need: 14, Floor: 8, Ceiling: 16, ReplicaGPUs: 8},
+		{Key: "Q", Weight: 1, Need: 2, Floor: 8, Ceiling: 64, ReplicaGPUs: 8},
 	}
-	if cancelled(true) {
-		t.Fatal("a return handed to L was called off as a return, though neither Q is short nor L fine")
+	tr := l.Start(ShareTransfer{Donor: "Q", DonorGPUs: 8, DonorVariant: "q", Entitled: true, Returned: true, DonorPodGPUs: shape},
+		held, t0.Add(-30*time.Second), tm)
+	l.ConfirmStarted(tr.ID, []string{"p"})
+	vs := map[string]ShareVariant{"Q": {Name: "q", GPUs: 8, PodGPUs: []int{8}}, "R": {Name: "r", GPUs: 8, PodGPUs: []int{8}}}
+	in := SharePlanInput{Roles: roles, Held: held, Thresholds: map[string]float64{"R": 0.8, "Q": 0.8}, Budget: 32,
+		Tolerance: 0.15, Give: vs, Grow: vs, Headroom: ShareHeadroom{Capped: true, Replicas: 1}}
+	return PlanShareTransfers(l, in, t0, tm)
+}
+
+// A single-pod receiver short by a replica waits on a return that will free
+// it, as a multi-pod one does, and says so: it is credited, no donor drains
+// for GPUs already on their way, and it shows awaiting-return. Controls: a 2x4
+// return frees no node for its 1x8 pod, and a return of unknown shape counts
+// for nothing; either way a donor funds it.
+func TestShareSinglePodReceiverWaitsOnReturns(t *testing.T) {
+	p := singlePodWaitPlan([]int{8})
+	if p.Unfunded["R"] != ShareUnfundedAwaitingReturn || p.Withheld[ShareWithheldAwaitingReturn] == 0 {
+		t.Fatalf("R waits on a 1x8 return and nothing said so: unfunded %v, withheld %v", p.Unfunded, p.Withheld)
 	}
-	if !cancelled(false) {
-		t.Fatal("control: the same return, handed to nobody, was not called off")
+	for _, tr := range p.Started {
+		if tr.Receiver == "R" {
+			t.Fatalf("a donor drained for R while the return that covers it releases: %+v", tr)
+		}
+	}
+	for _, shape := range [][]int{{4, 4}, nil} {
+		p := singlePodWaitPlan(shape)
+		if p.Unfunded["R"] == ShareUnfundedAwaitingReturn || p.Withheld[ShareWithheldAwaitingReturn] != 0 {
+			t.Fatalf("return shaped %v: R waits on GPUs its pod cannot use: unfunded %v, withheld %v", shape, p.Unfunded, p.Withheld)
+		}
+	}
+}
+
+// A return is never redirected to a wake: it has no receiver whose GPUs a wake
+// could take. Pinned on the ledger even for a return restored with a receiver,
+// which the pod-mark validation rejects before it gets this far.
+func TestShareReturnIsNeverRedirected(t *testing.T) {
+	l := NewShareLedger()
+	l.Restore(ShareTransfer{ID: "r1", Donor: "Q", Receiver: "L", GPUs: 1, DonorGPUs: 1, Entitled: true, Returned: true,
+		Started: time.Unix(1000, 0), Deadline: time.Unix(2000, 0)}, 7)
+	if _, ok := l.Redirect("r1", time.Minute); ok {
+		t.Fatal("a return was redirected to a wake")
+	}
+	l.Restore(ShareTransfer{ID: "t1", Donor: "Q", Receiver: "L", GPUs: 1, DonorGPUs: 1,
+		Started: time.Unix(1000, 0), Deadline: time.Unix(2000, 0)}, 7)
+	if _, ok := l.Redirect("t1", time.Minute); !ok {
+		t.Fatal("control: a transfer to L was not redirected")
 	}
 }
 

@@ -74,6 +74,30 @@ else
     # the one renderer of the default placement, read as JSON
     placement_json="$(accelerator_placement_yaml "" | sed 's/^      //' | yq -o json '.')"
 fi
+# Kept off the nodes an engine cannot use (deploy/lib/accelerator_nodes.sh,
+# USABLE NODES). The harness waits until numberReady equals desired, and a
+# cordoned node under DiskPressure is in desired -- the DaemonSet controller
+# tolerates both taints by itself -- while its downloader is evicted: the
+# standup waited out its whole daemonSetTimeout and failed. A hostname NotIn
+# term takes such a node out of desired; nothing is done to the node itself.
+excluded='[]'
+if nodes_json="$(accelerator_nodes_json "$SELECTOR" 2>/dev/null)"; then
+    excluded="$(printf '%s' "$nodes_json" | accelerator_excluded_json "$(printf '%s' "$tolerations_json" | jq -c 'map(.key)')")"
+else
+    echo "model_hostpath: cannot list nodes, so the downloader is not kept off cordoned or tainted ones; a standup can then wait out daemonSetTimeout on such a node" >&2
+fi
+if [ "$(printf '%s' "$excluded" | jq 'length')" -gt 0 ]; then
+    notin="$(printf '%s' "$excluded" | jq -c '{key: "kubernetes.io/hostname", operator: "NotIn", values: map(.name)}')"
+    if [ -n "$SELECTOR" ]; then
+        placement_json="$(printf '%s' "$placement_json" | jq -c --argjson e "$notin" \
+            '. + {affinity: {nodeAffinity: {requiredDuringSchedulingIgnoredDuringExecution: {nodeSelectorTerms: [{matchExpressions: [$e]}]}}}}')"
+    else
+        placement_json="$(printf '%s' "$placement_json" | jq -c --argjson e "$notin" \
+            '.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms |= map(.matchExpressions += [$e])')"
+    fi
+    echo "node-local weights: kept off $(printf '%s' "$excluded" | jq -r 'map(.name + " (" + .reason + ")") | join(", ")'), where no engine can start"
+fi
+
 hp="$(mktemp)"
 trap 'rm -f "$hp"' EXIT
 printf '{"enabled":true,"path":"%s","storageClassName":"%s","capacity":"%s","daemonSetTimeout":3600}' \

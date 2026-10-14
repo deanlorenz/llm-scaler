@@ -63,27 +63,3 @@ func TestShareDonorSetJudgesASwingingDonorOnItsReading(t *testing.T) {
 		}
 	}
 }
-
-// A return is handed only to a receiver whose pod the returned pod's hole
-// holds: a 2x4 replica going does not free a node for a 1x8 pod.
-func TestShareReturnHandedOnlyWhereThePodFits(t *testing.T) {
-	tm := simTimings()
-	t0 := time.Unix(1000, 0)
-	rv := ShareVariant{Name: "r", GPUs: 8, PodGPUs: []int{8}}
-	qv := ShareVariant{Name: "q", GPUs: 8, PodGPUs: []int{4, 4}}
-	l := NewShareLedger()
-	held := map[string]int{"R": 8, "Q": 24}
-	roles := []ShareRole{
-		{Key: "R", Weight: 1, Need: 14, Floor: 8, Ceiling: 64, ReplicaGPUs: 8},
-		{Key: "Q", Weight: 1, Need: 2, Floor: 8, Ceiling: 64, ReplicaGPUs: 8},
-	}
-	l.RecordNeeds(map[string]float64{"R": 40, "Q": 40}, t0.Add(-60*time.Second), tm)
-	tr := l.Start(ShareTransfer{Donor: "Q", DonorGPUs: 8, DonorVariant: "q", Entitled: true, Returned: true}, held, t0.Add(-30*time.Second), tm)
-	l.ConfirmStarted(tr.ID, []string{"p"})
-	vs := map[string]ShareVariant{"Q": qv, "R": rv}
-	in := SharePlanInput{Roles: roles, Held: held, Thresholds: map[string]float64{"R": 0.8, "Q": 0.8}, Budget: 32,
-		Tolerance: 0.15, Give: vs, Grow: vs, Headroom: ShareHeadroom{Capped: true, Replicas: 1}}
-	if p := PlanShareTransfers(l, in, t0, tm); len(p.Assigned) != 0 {
-		t.Fatalf("a 2x4 return was handed to a 1x8 receiver: %v", p.Assigned)
-	}
-}

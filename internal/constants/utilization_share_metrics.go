@@ -54,7 +54,7 @@ const (
 	WVAUtilizationShareReserveDebtGPUs = "wva_utilization_share_reserve_debt_gpus"
 
 	// WVAUtilizationShareWithheldTotal is a counter: transfers not planned, by
-	// reason (reversal-hold, not-actionable, return-not-calm,
+	// reason (reversal-hold, not-actionable, return-not-calm, return-pod-busy,
 	// return-role-short, donor-peak, awaiting-return, scale-down-band).
 	WVAUtilizationShareWithheldTotal = "wva_utilization_share_withheld_total"
 

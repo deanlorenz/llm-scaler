@@ -96,14 +96,12 @@ type ShareTransfer struct {
 	// Returned marks a transfer that gives a replica above the donor's target
 	// back to the group (ShareCapSpare), started while no role was short of
 	// its own. It counts against neither the pace nor the concurrency limit.
-	// With no Receiver it goes to the unassigned GPUs, for the idle fill to
-	// raise whoever needs them; AssignReturn may later hand it to a short
-	// receiver, and it stays Returned. A wake that claims it (Redirect) makes
-	// it an ordinary release.
+	// It has no Receiver: it goes to the unassigned GPUs, for the idle fill
+	// to raise whoever needs them, and so it is never redirected to a wake.
 	Returned bool
 	// DonorPodGPUs is the GPUs of each pod of the returned replica, when its
-	// shape is known: a return is handed only to a receiver whose pod one of
-	// them holds (fromReturns). Empty for any other transfer, and for a
+	// shape is known: a return is credited only to a receiver whose pod one
+	// of them holds (returnsCover). Empty for any other transfer, and for a
 	// return read back from its marks after a restart.
 	DonorPodGPUs []int
 	// Urgent receivers are below their need (§6.4).
@@ -284,6 +282,9 @@ type ShareLedger struct {
 	// over counts each role's consecutive cycles holding more than its
 	// target (MarkOver).
 	over map[string]int
+	// podBusy is, per role whose busiest pod reads busy, how long the run
+	// of busy readings has lasted (NotePodBusy).
+	podBusy map[string]SharePodBusy
 	// releases are the durations of recent completed releases, newest last,
 	// for the measured release time (§8.4).
 	releases []time.Duration
@@ -325,6 +326,7 @@ func NewShareLedger() *ShareLedger {
 		confirm:     map[string]int{},
 		hard:        map[string]int{},
 		over:        map[string]int{},
+		podBusy:     map[string]SharePodBusy{},
 		seen:        map[string]time.Time{},
 		unsteerable: map[string]bool{},
 		busyUntil:   map[string]time.Time{},
@@ -350,12 +352,12 @@ func (l *ShareLedger) Transfers() []ShareTransfer {
 func (l *ShareLedger) InFlight() int {
 	seen := map[string]bool{}
 	for _, t := range l.transfers {
-		// A returned spare does not count, handed to a receiver or not:
-		// counted, a calm model's returns would hold every ordinary move for
-		// a release. A move that skipped the waits does: the unpaced moves of
-		// a hard imbalance pass the limit without consulting it, but an
-		// ordinary move started beside them would drain the same donor for
-		// headroom, and land after the burst it was not needed for.
+		// A returned spare does not count: counted, a calm model's returns
+		// would hold every ordinary move for a release. A move that skipped
+		// the waits does: the unpaced moves of a hard imbalance pass the
+		// limit without consulting it, but an ordinary move started beside
+		// them would drain the same donor for headroom, and land after the
+		// burst it was not needed for.
 		if t.Donor == "" || t.Returned {
 			continue
 		}
@@ -369,13 +371,12 @@ func (l *ShareLedger) InFlight() int {
 }
 
 // Unreleased is the GPUs releasing transfers took off their donors'
-// commitment and gave no receiver: all of a reserve refill's or an unassigned
-// return's, and whatever a transfer or a set takes beyond its receiver's
-// replica (an 8-GPU return handed to a 4-GPU receiver). The donors' pods
-// still run on them and the quota still counts them, so they are not idle
-// until released. Counted idle, the fill would raise a model into a full
-// quota, its pods would be refused at admission, and it would be raised again
-// at every fill timeout.
+// commitment and gave no receiver: all of a reserve refill's or a return's,
+// and whatever a transfer or a set takes beyond its receiver's replica (an
+// 8-GPU replica given to a 4-GPU receiver). The donors' pods still run on them
+// and the quota still counts them, so they are not idle until released.
+// Counted idle, the fill would raise a model into a full quota, its pods would
+// be refused at admission, and it would be raised again at every fill timeout.
 func (l *ShareLedger) Unreleased() int {
 	excess := map[string]int{}
 	for _, t := range l.transfers {
@@ -812,10 +813,7 @@ func (l *ShareLedger) Redirect(id string, hold time.Duration) (ShareTransfer, bo
 	for _, t := range l.transfers {
 		if t.ID == id && redirectable(t) {
 			prev := *t
-			// A return handed to a receiver is no longer a return once a wake
-			// claims it: left Returned with no receiver, it would be handed
-			// to another receiver, or cancelled, while the wake waits on it.
-			t.Receiver, t.ReceiverVariant, t.GPUs, t.Urgent, t.Returned = "", "", 0, false, false
+			t.Receiver, t.ReceiverVariant, t.GPUs, t.Urgent = "", "", 0, false
 			l.wakeHolds = append(l.wakeHolds, shareWakeHold{gpus: t.DonorGPUs, id: t.ID, hold: hold})
 			return prev, true
 		}
@@ -823,10 +821,10 @@ func (l *ShareLedger) Redirect(id string, hold time.Duration) (ShareTransfer, bo
 	return ShareTransfer{}, false
 }
 
-// redirectable is a transfer still releasing, for a receiver, and not part of
-// a donor set.
+// redirectable is a transfer still releasing, for a receiver, not part of a
+// donor set, and not a return.
 func redirectable(t *ShareTransfer) bool {
-	return t.State == ShareReleasing && t.Receiver != "" && t.SetID == ""
+	return t.State == ShareReleasing && t.Receiver != "" && t.SetID == "" && !t.Returned
 }
 
 // WakeHeld is the GPUs held for woken models now.
@@ -971,10 +969,10 @@ func (l *ShareLedger) RecentPeak(role string, now time.Time, d time.Duration) fl
 }
 
 // LongBursts reports whether role's longest burst -- a run of need above the
-// midpoint of its recorded range, completed or under way when the history
-// starts (needBursts) -- lasted at least d.
+// midpoint of its recorded range, completed or under way (needBursts,
+// sofar) -- lasted at least d.
 func (l *ShareLedger) LongBursts(role string, d time.Duration) bool {
-	return l.needBursts(role).longest >= max(d, 1)
+	return l.needBursts(role).sofar() >= max(d, 1)
 }
 
 // BurstsLong reports whether role bursts (LongBursts) over a range of at
@@ -982,15 +980,15 @@ func (l *ShareLedger) LongBursts(role string, d time.Duration) bool {
 // drifting across the middle of a narrow range.
 func (l *ShareLedger) BurstsLong(role string, d time.Duration) bool {
 	b := l.needBursts(role)
-	return b.longest >= max(d, 1) && b.spread >= ShareLongBurstSpread
+	return b.sofar() >= max(d, 1) && b.spread >= ShareLongBurstSpread
 }
 
 // SwingsFast reports whether role's need swings faster than d: at least two
-// bursts completed, none lasting d, over a range of at least
-// ShareFastSwingSpread of its highest need.
+// bursts completed, none -- the one under way included -- lasting d, over a
+// range of at least ShareFastSwingSpread of its highest need.
 func (l *ShareLedger) SwingsFast(role string, d time.Duration) bool {
 	b := l.needBursts(role)
-	return b.completed >= 2 && b.longest < d && b.spread >= ShareFastSwingSpread
+	return b.completed >= 2 && b.sofar() < d && b.spread >= ShareFastSwingSpread
 }
 
 // BurstEndsWithin reports whether role's burst is expected to end within d:
@@ -1063,9 +1061,10 @@ func (l *ShareLedger) ModelBurstEnds(role string, model []string, tm ShareTiming
 
 // shareBursts summarises a role's need history (ShareLedger.needBursts).
 type shareBursts struct {
-	// longest is the longest burst: a completed one, or one already under way
-	// when the history starts, whose length is a lower bound. last is the
-	// most recent completed burst; completed counts them.
+	// longest is the longest burst that has ended: a completed one, or one
+	// already under way when the history starts, whose length is a lower
+	// bound. A run still going is in ongoing, and sofar reads the two. last
+	// is the most recent completed burst; completed counts them.
 	longest, last time.Duration
 	completed     int
 	// ongoing is how long the burst under way has lasted, zero when none is.
@@ -1075,6 +1074,15 @@ type shareBursts struct {
 	spread float64
 }
 
+// sofar is the longest burst including the one under way. A model in its
+// first long burst -- already longer than a move, still running -- is a long
+// burster now, not once it ends: read on completed bursts alone, it did not
+// cap a fast swinger beside it on its mean, and its own short bursts before
+// it kept it reading as a fast swinger for as long as the long one lasted.
+func (b shareBursts) sofar() time.Duration {
+	return max(b.longest, b.ongoing)
+}
+
 // needBursts reads role's need history as bursts: runs of need above the
 // midpoint of its recorded range. Like PeakNeed it trusts no single reading:
 // the range runs from the lowest level two readings in a row stayed at or
@@ -1082,7 +1090,8 @@ type shareBursts struct {
 // readings in a row on its new side. One reading -- a scrape glitch, or a
 // tenant's forged metric -- would otherwise move the midpoint above every
 // real burst, or end a burst and log a short one in its place. A run still
-// going counts only as ongoing. One already under way when the history
+// going is recorded as ongoing, not in longest; the predicates that ask how
+// long a role bursts read both (sofar). One already under way when the history
 // starts is not a completed burst -- its start is not known, and taken as
 // the history's it would be counted short, predicting an early end and
 // making a long burster look like a fast swinger -- but its length is a
@@ -1156,21 +1165,6 @@ func (l *ShareLedger) PeakKnown(role string, now time.Time, tm ShareTimings) boo
 func (l *ShareLedger) Giving(role string) bool {
 	for _, t := range l.transfers {
 		if t.State == ShareReleasing && t.Donor == role {
-			return true
-		}
-	}
-	return false
-}
-
-// AssignReturn hands a returned spare that is still releasing to receiver:
-// its GPUs go to it when they come free, as a transfer's would, instead of
-// to the unassigned GPUs it would otherwise wait on. gpus is one receiver
-// replica, no more than the returned replica. It stays Returned, so it still
-// does not count against the concurrency limit. It reports whether it did.
-func (l *ShareLedger) AssignReturn(id, receiver, variant string, gpus int) bool {
-	for _, t := range l.transfers {
-		if t.ID == id && t.Returned && t.State == ShareReleasing && t.Receiver == "" && gpus <= t.DonorGPUs {
-			t.Receiver, t.ReceiverVariant, t.GPUs = receiver, variant, gpus
 			return true
 		}
 	}
@@ -1266,6 +1260,36 @@ func (l *ShareLedger) MarkOver(over map[string]bool) map[string]int {
 		}
 	}
 	return maps.Clone(l.over)
+}
+
+// SharePodBusy is a run of consecutive cycles in which a role's busiest pod
+// read busy: since the first of them, and how many.
+type SharePodBusy struct {
+	since  time.Time
+	cycles int
+}
+
+// NotePodBusy records which roles' busiest pod reads busy this cycle, and
+// returns, per role still busy, the run of busy cycles it is in. A role not
+// busy this cycle starts again from nothing.
+func (l *ShareLedger) NotePodBusy(busy map[string]bool, now time.Time) map[string]SharePodBusy {
+	for role := range l.podBusy {
+		if !busy[role] {
+			delete(l.podBusy, role)
+		}
+	}
+	for role, b := range busy {
+		if !b {
+			continue
+		}
+		run, ok := l.podBusy[role]
+		if !ok {
+			run.since = now
+		}
+		run.cycles++
+		l.podBusy[role] = run
+	}
+	return maps.Clone(l.podBusy)
 }
 
 // MeasuredRelease is the 90th percentile of recent completed releases, and
@@ -1495,6 +1519,7 @@ func (l *ShareLedger) Retain(present []string, now time.Time, tm ShareTimings) {
 		delete(l.needsSince, r)
 		delete(l.hard, r)
 		delete(l.over, r)
+		delete(l.podBusy, r)
 	}
 }
 

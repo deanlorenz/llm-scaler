@@ -3,292 +3,208 @@
 ## Overview
 
 The utilization-share optimizer shares one GPU quota between the models under
-it. Each model first gets the GPUs it needs, and the rest of the quota is shared
-as headroom, by weight. When the quota cannot hold every model at its recent
-peak at once, that headroom is capped at `maxHeadroomReplicas` replicas (one by
-default) times the model's weight, and what is left stays unassigned, for
-whichever model's demand rises next. When the shares drift, the optimizer moves GPUs from one
-model to another: the donor scales down first, and the receiver is raised only
-once the GPUs are free. Whether it suits your fleet, and what it costs, is on
-the well-lit path:
-[Share one GPU quota between models whose peaks do not coincide](../../well-lit-paths/utilization-share/).
+it: each model gets the GPUs its load needs, the rest is headroom shared by
+weight, and when one model's demand rises it takes GPUs another model does not
+need. Whether it suits your fleet, and what it costs, is on the well-lit path:
+[Share one GPU quota between models](../../well-lit-paths/utilization-share/).
 
-This guide turns it on in steps: in **shadow**, where it computes and reports
-but moves nothing; on a cluster quota, a **canary** that acts on a few
-namespaces only; then **active**; then, if needed, back out. It is
-one block in one ConfigMap, read live. The care is in the order: the
-`shadow` key **defaults to `false`**, so a block written without it moves
-replicas from the next cycle.
-
-**Experimental.** It has been tested on kind with emulated GPUs, and
-benchmarked in three runs on two aggregated models with 1 GPU per replica
-([what they measured](../../well-lit-paths/utilization-share/measured.md)).
-Two of them found a model held short for its whole burst; the fixes are built
-and not yet measured. P/D, whole-node and multi-GPU pods have not been
-measured.
+This guide turns it on in two steps -- **shadow**, where it computes and reports
+but moves nothing, then **active** -- and back out. It is one block in the
+scaling policy, read live. **Experimental.**
 
 ## Prerequisites
 
-A scaling-manager install with models registered, and a **quota limiter** in the
-cluster default policy. [Cap what each tenant may take](../../well-lit-paths/tenant-gpu-quotas/)
-declares one (`WVA_LIMITER=quota WVA_QUOTAS='<accelerator>=<n>'`). The optimizer
-shares the budget a quota gives, so without one it has nothing to share.
+Two or more models scaled by the scaling manager, under a **limiter**: a
+quota, or the physical GPU inventory
+([under the physical limiter](#under-the-physical-gpu-limiter) has what
+differs). You need `kubectl`, `jq`, `yq` and `make` in a checkout of this
+repository. If you do not have the models yet, the shortest route is the
+benchmark's two-model standup, which installs the scaling manager in your
+namespace with the quota and two models
+([the runbook](../benchmarking/two-model-utilization-share.md) has the detail).
+To build it from your own models instead:
+[install in a namespace](../install-in-namespace/) with
+`WVA_LIMITER=quota WVA_QUOTAS='<accelerator>=<n>'`, then
+[install a model](../install-small-model/) twice.
 
-`<policy-namespace>` below is the namespace that holds the cluster policy:
-`wva-policy` when an admin published one there, otherwise the controller's own
-namespace ([where policy lives](../../reference/gpu-limiter.md#what-the-controller-does-with-that)).
-
-<!-- guide:prerequisites.limiter start -->
+<!-- guide:prerequisites.setup start -->
 ```bash
-# The optimizer shares the budget a QUOTA limiter gives, so the cluster
-# default entry must already declare one. Without a limiters: list the
-# optimizer stays off and reports mode "invalid".
-# Read it from the namespace that holds the cluster policy: wva-policy when
-# an admin published one there, otherwise the controller's own namespace.
-# The last line says whether the controller ACCEPTED the entry: a malformed
-# one is rejected on read and leaves NO limiter while the ConfigMap still
-# looks healthy.
-kubectl get configmap wva-scaling-policy-config -n <policy-namespace> \
-  -o jsonpath='{.data.default}' | grep -A12 limiters
-kubectl logs -n <wva-namespace> deploy/wva-controller-manager \
-  | grep -E 'GPU limiter constructed|Invalid saturation scaling'
+# Only if you do not run two models under one quota yet. This builds a trial
+# setup: two 8B models, 1 GPU per replica, under one namespace quota of 4.
+# Use the accelerator name your nodes carry (H200, NVIDIA-H200, ...); the
+# check below reads the exact name the controller uses.
+export BENCHMARK_NAMESPACE=<namespace>
+WVA_QUOTAS='<accelerator>=4' make benchmark-two-model-preflight
+WVA_LIMITER=quota WVA_QUOTAS='<accelerator>=4' make benchmark-two-model-standup
+make benchmark-two-model-verify
 ```
-<!-- guide:prerequisites.limiter end -->
+<!-- guide:prerequisites.setup end -->
 
-Then check the accelerators. A missing quota entry denies, so a quota keyed on
-a name the controller never resolves is a quota of zero:
+Every command below reads one variable:
 
-<!-- guide:prerequisites.accelerators start -->
+<!-- guide:prerequisites.vars start -->
 ```bash
-# Every variant's accelerator must resolve, and the quota's type must be the
-# name the controller resolves. A variant whose accelerator does not resolve
-# gets no budget, and a quota key nobody resolves to is a quota of zero.
-# The event hangs on the ScaledObject, in the MODEL's namespace -- hence -A.
-kubectl get events -A --field-selector reason=AcceleratorNotResolved
+# The models' namespace. On a namespace-scoped install the controller and
+# its policy are there too; otherwise also export CONTROLLER_NAMESPACE and
+# POLICY_NAMESPACE.
+export NAMESPACE=<namespace>
 ```
-<!-- guide:prerequisites.accelerators end -->
+<!-- guide:prerequisites.vars end -->
 
-No output is the healthy answer.
+Check there is a budget to share:
 
-Before the optimizer acts, the model owners need one thing. A transfer removes a
-donor pod through an ordinary scale-down, so a request in flight on that pod
-survives only if the model server drains: a `preStop` hook and a
-`terminationGracePeriodSeconds` long enough to finish. If several controllers
-share the cluster, each also needs its own `CONTROLLER_INSTANCE`. Otherwise one
-controller's cleanup removes the other's live transfer marks.
+<!-- guide:prerequisites.check start -->
+```bash
+# Is there a budget to share, and does every variant's accelerator
+# resolve. It names the limiter in the policy and the one the controller
+# runs, and fails on no limiter, an unresolved accelerator, or anything it
+# could not read. It warns when a quota has no key for an accelerator the
+# controller logs: that key must be the logged name exactly.
+make utilization-share-check
+```
+<!-- guide:prerequisites.check end -->
 
 ## Installation Instructions
 
-**Step one: shadow.**
+Each step is one `make` target that runs `deploy/utilization-share.sh`; run
+the script with `--help` for its options.
+
+**Step 1: shadow.** Leave it in shadow long enough to cover each model's peak,
+then read what it would have done ([Verification](#verification)).
 
 <!-- guide:deploy.shadow start -->
 ```bash
-# Add the optimizer block to the SAME default entry as limiters:, in
-# shadow. shadow defaults to false, so a block without it ACTS from the
-# next cycle -- write shadow: true explicitly.
-# Read live on the next cycle. On a namespace-scoped install whose cluster
-# policy lives in a separate policy namespace, the controller reads that
-# policy only when it starts: restart it after the edit.
-kubectl edit configmap wva-scaling-policy-config -n <policy-namespace>
-# under data.default, beside limiters:
-#   optimizer:
-#     type: utilizationShare
-#     utilizationShare:
-#       shadow: true
-#       # clusterNamespaces: [team-canary]   # cluster quota only: plan these namespaces alone
+# Writes the optimizer block with shadow: true, keeping everything else in
+# the policy, then waits for the controller to read it and checks it was
+# not refused. It refuses a policy with no limiter or with another
+# optimizer block.
+make utilization-share-shadow
 ```
 <!-- guide:deploy.shadow end -->
 
-**Step two, on a cluster quota: a canary.** After reading what shadow would do
-(below), act on a few namespaces before the whole cluster. `clusterNamespaces`
-limits the cluster group to the models of the namespaces you list, and leaves
-every other model on today's optimizer. On **namespace** quotas there is no
-canary; keep a namespace out with `namespaces: {<ns>: {enabled: false}}`
-instead, and skip to step three. Each key is described in
-[the reference](../../reference/scaling-policy.md#optimizer-cluster-default-only-live).
-
-<!-- guide:deploy.canary start -->
-```bash
-# Cluster quota only, and optional: act on a few namespaces first.
-# clusterNamespaces limits the cluster group to the models of the
-# namespaces listed; every other model stays on today's optimizer, and the
-# GPUs it holds stay outside the group. Pick namespaces whose owners
-# agreed, act on them alone, and read the active checks below before
-# widening the list or removing it (empty plans every namespace).
-# On namespace quotas there is no canary: keep a namespace out with
-# namespaces: {<ns>: {enabled: false}} instead.
-kubectl edit configmap wva-scaling-policy-config -n <policy-namespace>
-#       shadow: false
-#       clusterNamespaces: [team-canary]
-```
-<!-- guide:deploy.canary end -->
-
-**Step three, after reading what shadow (and the canary) did: active.**
+**Step 2: active.**
 
 <!-- guide:deploy.active start -->
 ```bash
-# Only after reading what shadow would do (and, on a cluster quota, what
-# the canary did). From the first active cycle, each planned group holds
-# what it runs for one fill timeout (about three minutes with default
-# timings), nothing in it scales, and its models show the blocked reason
-# quiet-period. Expect the same after every controller restart.
-# After a canary, shadow is already false: widen or remove
-# clusterNamespaces instead.
-kubectl edit configmap wva-scaling-policy-config -n <policy-namespace>
-#       shadow: false
-#       # after a canary: clusterNamespaces: [team-canary, team-b], or remove the key
+# Only after reading what shadow would do. For two to three minutes after
+# this, nothing in the group scales and its models show quiet-period; the
+# same happens after every controller restart.
+make utilization-share-activate
 ```
 <!-- guide:deploy.active end -->
 
+On a cluster-wide quota you can act on a few namespaces first with
+`clusterNamespaces`; weights, floors and every other key are in the
+[scaling policy reference](../../reference/scaling-policy.md#optimizer-cluster-default-only-live).
+
 ## Verification
 
-**In shadow.** The mode comes first, then what the optimizer would do:
+There are two ways to read the optimizer's metrics:
 
-<!-- guide:verify.shadow start -->
-```bash
-# The mode first: exactly one series is 1. "invalid" means the block did not
-# validate or there is no limiters: list -- the log line below says which.
-# Then what it WOULD do: actionable roles, replicas_to_move per group, and
-# headroom per role (negative = short). spare_gpus below 0 means the quota
-# cannot cover every need, and no rebalance fixes that.
-# The leader publishes the mode; with more than one controller replica,
-# port-forward to the leader pod, or query Prometheus.
-kubectl port-forward -n <wva-namespace> svc/wva-controller-manager-metrics-service 8443:8443 &
-curl -sk https://localhost:8443/metrics | grep -E '^wva_utilization_share_(mode|actionable|replicas_to_move|headroom|spare_gpus)'
-kubectl logs -n <wva-namespace> deploy/wva-controller-manager \
-  | grep -E 'Utilization share: (would rebalance|invalid optimizer block)'
-# The same in PromQL:
-#   wva_utilization_share_mode == 1
-#   wva_utilization_share_actionable == 1
-#   wva_utilization_share_replicas_to_move
-#   wva_utilization_share_headroom
+- **As a namespace tenant: Prometheus.** Use the Prometheus your cluster gives
+  you (Grafana's Explore, or its API). The controller's own endpoint needs a
+  cluster-wide grant a tenant does not have. Scope every query to your
+  namespace: a shared Prometheus holds other tenants' models too.
+- **As a cluster admin: the controller's endpoint**, with the commands further
+  down.
+
+```promql
+# the mode: exactly one series is 1 -- off, invalid, shadow or active
+wva_utilization_share_mode{namespace="<namespace>"} == 1
+# what a move would fix, and how many replicas
+wva_utilization_share_actionable{exported_namespace="<namespace>"} == 1
+wva_utilization_share_replicas_to_move{scope="<namespace>"}
+wva_utilization_share_headroom{exported_namespace="<namespace>"}     # < 0: the model is short
+# once active: transfers that ended, by outcome (done is healthy)
+sum by (outcome) (increase(wva_utilization_share_transfers_total{scope="<namespace>"}[1h]))
+# models held back, and why
+wva_model_scaling_blocked{exported_namespace="<namespace>"} == 1
 ```
-<!-- guide:verify.shadow end -->
 
-| what you read | what it says |
+`exported_namespace` is the model's namespace; `namespace` on the mode is the
+controller's; `scope` is the quota's namespace. On a namespace-scoped install
+all three are yours.
+
+<!-- guide:verify.status start -->
+```bash
+# The mode, the last decisions in the log (what shadow would move;
+# transfers once active), the transfer events, any UtilizationShare
+# warning, and the pods marked for a transfer.
+make utilization-share-status
+```
+<!-- guide:verify.status end -->
+
+<!-- guide:verify.endpoint start -->
+```bash
+# For a cluster admin. The endpoint checks the caller against a
+# cluster-wide grant: the install's metrics-reader token passes where the
+# admin's install step created its binding. A 401 or 403 here means use
+# Prometheus instead.
+TOKEN=$(kubectl get secret wva-epp-metrics-token -n $NAMESPACE -o jsonpath='{.data.token}' | base64 -d)
+kubectl port-forward -n $NAMESPACE svc/wva-controller-manager-metrics-service 8443:8443 >/dev/null & PF=$!
+sleep 2
+curl -sSfk -H "Authorization: Bearer $TOKEN" https://localhost:8443/metrics \
+  | grep -E '^wva_(utilization_share_(mode|actionable|replicas_to_move|headroom|spare_gpus|transfers_total)|model_scaling_blocked)'
+kill $PF
+```
+<!-- guide:verify.endpoint end -->
+
+
+**Quiet but healthy:**
+
+| You see | It means |
 | --- | --- |
-| `wva_utilization_share_mode{mode="shadow"} 1` | the block is read and valid. `invalid` means the log names the problem; `off` means the controller read no `optimizer:` block, or one with an empty `type` |
-| `wva_utilization_share_actionable 1` | a role a move would fix now: outside its tolerance band, and off its whole-replica target |
-| `wva_utilization_share_replicas_to_move` | per quota group: how many replicas it would move |
-| `wva_utilization_share_headroom` | per role: the spike it absorbs before it must scale, as a fraction of need. Negative means the role is short |
-| `wva_utilization_share_spare_gpus` below `0` | the quota cannot cover every need. Moving GPUs cannot fix that |
+| no `would rebalance` log line in shadow | nothing would move; the line is written only when the set of moves changes |
+| no `headroom` series for a model | it has no load to need GPUs for |
+| `floor-pinned` on an idle model | it is at its floor (`minReplicaCount`), which is never taken |
+| `quiet-period` for two to three minutes | the group holds still after the switch to active and after a controller restart |
+| `spare_gpus` below 0 | the quota cannot cover every model's need; no move fixes that |
+| `invalid` mode | the block did not validate, or the policy has no `limiters:` list; the log says which |
 
-Leave it in shadow long enough to see each model's peak. Switch to active when
-the roles it would move, and how often, are what you expect. A model it never
-plans appears in the `frozen` field of the `would rebalance (shadow)` log line,
-with the reason. A model whose variants span two accelerator types is never
-planned at all. Shadow always caps headroom at `maxHeadroomReplicas`: it has no
-test of whether the models' peaks fit the quota, so on a quota where they do,
-active mode targets more headroom than shadow reported.
-
-**Active.** Transfers, the blocked reasons, and the Events on the scale targets:
-
-<!-- guide:verify.active start -->
-```bash
-# Transfers that ended, by outcome: done is healthy; rising aborted,
-# fill-timeout or wrong-pod means transfers are not landing. Every outcome
-# is published at 0 while a group acts, so increase() counts the first.
-# wrong-pod needs node information: a namespace-scoped install never
-# reports it. A model held back shows a reason on wva_model_scaling_blocked.
-# Every transfer is also an Event on the Deployment or LeaderWorkerSet it
-# moved, in the model's namespace. Warnings are the ones to read.
-curl -sk https://localhost:8443/metrics | grep -E '^wva_utilization_share_(mode|transfers_total|in_flight)'
-curl -sk https://localhost:8443/metrics | grep '^wva_model_scaling_blocked'
-kubectl get events -n <llmd-namespace> --field-selector reason=UtilizationShareGiving
-kubectl get events -n <llmd-namespace> --field-selector reason=UtilizationShareReceived
-kubectl get events -n <llmd-namespace> --field-selector type=Warning | grep UtilizationShare
-# The same in PromQL:
-#   sum by (outcome) (increase(wva_utilization_share_transfers_total[1h]))
-```
-<!-- guide:verify.active end -->
-
-| Event reason | type | means |
-| --- | --- | --- |
-| `UtilizationShareGiving` | Normal | a donor gives one replica; names the pod that goes and the receiver. A model giving back headroom it does not need names "the quota group's unassigned GPUs" instead: it has held more than `maxHeadroomReplicas` gives it for `consecutiveCyclesBeforeMove` cycles, its demand is low, and no model is short. The replica then goes after its scale-down window |
-| `UtilizationShareReceived` | Normal | the transfer landed: the receiver holds the GPUs. An idle fill says the GPUs came from the quota group's unassigned GPUs, either because its demand rose past what it held, or as headroom (`maxHeadroomReplicas`) that is given back when this model no longer needs it |
-| `UtilizationShareReleaseAborted` | Warning | the donor did not release within the release timeout; its count is restored. Or its donor set could not complete; the Event then says so, and the donor is not held back |
-| `UtilizationShareFillTimedOut` | Warning | the receiver's new replica did not take the released GPUs in time |
-| `UtilizationShareWrongPod` | Warning | a pod other than the marked one was removed |
-| `UtilizationShareDonorNotSteerable` | Warning | the pod that would go could not be chosen: a pod not Ready, or a rollout in progress |
-
-Events expire, after an hour by default: read them soon after a transfer, and
-use the counters for anything older.
-
-The full list, with `Receiving`, `Cancelled` and `Redirected`, is in
-[monitoring](../../reference/monitoring.md#events-on-the-models-scale-targets).
-What each blocked reason means and what to do about it is in
-[the metrics reference](../../reference/prometheus.md#wva_model_scaling_blocked-reasons-set-by-the-utilization-share-optimizer).
-
-Expect nothing to scale in a group for about three minutes after the switch.
-That is the freeze of one fill timeout described above, not a fault; its models
-show the blocked reason `quiet-period` meanwhile, and
-`wva_utilization_share_headroom_capped` is not published. After the first
-switch -- shadow mode stores no history -- until a
-`stabilization.flappingWindow` of history exists, headroom is capped (`wva_utilization_share_headroom_capped 1`) unless
-the models' `maxReplicas` fit the quota together: no model's peak is known yet,
-so each counts at its `maxReplicas`, and the log line that turns the cap on
-says `cause=peaks-unknown`. A later controller restart or leader change reads
-the history back from the ConfigMap `wva-utilization-share-history` in the
-controller's namespace (log line `Utilization share: need history restored`)
-and does not count the models at their `maxReplicas` again, unless that history is missing, unreadable, or ends
-more than ten minutes before the restart. If it
-still moves nothing after that, work down
+When it evaluates but never moves anything, work down
 [the troubleshooting list](../../reference/troubleshooting.md#the-optimizer-evaluates-but-never-moves-anything).
 
 ## Cleanup
 
-Back to shadow, and confirm no transfer marks are left on any pod:
-
-<!-- guide:cleanup.rollback start -->
+<!-- guide:cleanup.disable start -->
 ```bash
-# Back to shadow FIRST, and wait one optimization cycle. The controller then
-# removes every transfer mark it wrote and restores each pod's previous
-# deletion cost. Do this before a downgrade to a version without the
-# optimizer too: that version leaves the marks behind.
-# On a namespace-scoped install whose cluster policy lives in a separate
-# policy namespace: edit, restart the controller, then wait a cycle.
-# The last command must print nothing.
-kubectl edit configmap wva-scaling-policy-config -n <policy-namespace>
-#       shadow: true
-# namespace-scoped install, separate policy namespace only:
-#   kubectl rollout restart -n <wva-namespace> deploy/wva-controller-manager
-kubectl get pods -A -o json | jq -r '.items[]
-  | select(.metadata.annotations["llm-d.ai/utilization-share-transfer"] != null)
-  | .metadata.namespace + "/" + .metadata.name'
+# Back to shadow first, so the controller removes the transfer marks it
+# wrote; it waits for them to clear, then removes the block. Today's
+# optimizer runs again and the limiter is untouched. If the marks do not
+# clear, or the pods cannot be read, it stops with the block in shadow.
+make utilization-share-off
 ```
-<!-- guide:cleanup.rollback end -->
+<!-- guide:cleanup.disable end -->
 
-A mark is a `llm-d.ai/utilization-share-transfer` annotation and a low
-`controller.kubernetes.io/pod-deletion-cost`, so the ReplicaSet removes that pod
-first on any scale-down. A version without the optimizer does not remove them.
-If some are left after a downgrade, or after a `CONTROLLER_INSTANCE` was
-renamed, the cleanup is in
-[troubleshooting](../../reference/troubleshooting.md#transfer-marks-left-on-pods-after-a-downgrade).
+Back out the same way before a downgrade to a version without the optimizer:
+that version leaves the marks on the pods
+([how to remove them](../../reference/troubleshooting.md#transfer-marks-left-on-pods-after-a-downgrade)).
 
-Then remove the block:
+## Under the physical GPU limiter
 
-<!-- guide:cleanup.remove start -->
-```bash
-# Then delete the optimizer: block. The mode reads "off" and today's
-# optimizer runs; the limiters are untouched. The transfer counters keep
-# their last values, as counters do.
-kubectl edit configmap wva-scaling-policy-config -n <policy-namespace>
-```
-<!-- guide:cleanup.remove end -->
+With a `gpu-inventory` limiter and no quota, the budget is every GPU of a type
+on the cluster. Three things differ:
 
-## Monitoring
+- **Set `PHYSICAL_GROUPS=true` on the shadow step.** Without
+  `physicalGroups: true` the optimizer plans no group and moves nothing; the
+  check warns about this.
+- **The policy is the cluster's.** `make enable-physical-limiter` publishes it
+  in `wva-policy`, so export `POLICY_NAMESPACE=wva-policy`. Every controller on
+  the cluster reads that policy, so the block turns the optimizer on for every
+  one of them, not just yours. A controller reads a policy in another namespace
+  only at start: add `RESTART=1`, or the step stops and says the block was
+  written but not read.
+- **Spare GPUs are shared with everything else on the cluster.** Headroom fills
+  idle GPUs, and a GPU a donor releases can be taken by a pod the scaling
+  manager did not place. That transfer ends `release-taken`.
 
-The alerts worth having once it is configured are in
-[monitoring](../../reference/monitoring.md#the-metrics-that-answer-specific-questions):
-a block that turned `invalid` or `off`, transfers that do not land, releases
-close to their bound, and models held back by a condition that does not clear
-by itself.
+The quota benchmarks are the only ones measured; the physical limiter has not
+been run on a cluster with the optimizer.
 
 ## Next
 
-- [The well-lit path](../../well-lit-paths/utilization-share/): when not to
-  take it, what it costs, and how it is tested
-- [`optimizer` in the scaling policy](../../reference/scaling-policy.md#optimizer-cluster-default-only-live):
-  every key, weights per model, and what it writes on pods
-- [For model owners](../../reference/scaling-policy.md#for-model-owners-what-the-optimizer-may-take-and-how-to-protect-a-model):
-  what can be taken from a model, and how to protect one
+- What it costs, when not to use it, and what was measured:
+  [the well-lit path](../../well-lit-paths/utilization-share/).
+- Every metric, outcome and blocked reason:
+  [utilization-share metrics](../../reference/prometheus.md#utilization-share-optimizer-metrics);
+  the alerts: [monitoring](../../reference/monitoring.md#the-metrics-that-answer-specific-questions).

@@ -107,12 +107,56 @@ run's steps 1 to 3
 standup:
 
 ```bash
-make benchmark-two-model-preflight
+WVA_QUOTAS='<accelerator>=4' make benchmark-two-model-preflight   # places for the quota, not the ceilings
 WVA_LIMITER=quota WVA_QUOTAS='<accelerator>=4' make benchmark-two-model-standup
 make benchmark-two-model-verify
 ```
 
 Do **not** create a pool. Every share arm refuses to run while one is present.
+
+Keep the machine that runs these commands awake for the whole run. The load
+runs in the cluster, but the GPU sampler runs on this machine, and the arm's
+GPU-seconds come from it.
+
+- Each arm holds a sleep lock where the machine offers one:
+  `systemd-inhibit` on Linux, `caffeinate` on macOS. Neither reaches a Windows
+  host from WSL. There, keep it on mains power and, for the run, set sleep to
+  never and the lid to do nothing: `powercfg /change standby-timeout-ac 0`,
+  then `powercfg /setacvalueindex SCHEME_CURRENT SUB_BUTTONS LIDACTION 0` and
+  `powercfg /setactive SCHEME_CURRENT`. Put both back afterwards.
+- **Symptom of a machine that slept anyway:** `run` stops the arm with "the GPU
+  sampler did not run for Ns", and the arm's `gpus.jsonl` holds a line with
+  `stalled_since`. The arm's cost cannot be priced, so it is stopped at once and
+  its GPUs given back; rerun it. The report refuses such an arm too, and says
+  its latencies stand.
+- Each of the sampler's API calls is bounded by `GPU_SAMPLE_TIMEOUT_SECONDS`
+  (default `20`, whole seconds). A call that hangs past it is recorded as a
+  failed poll, not a stall.
+
+Running the sampler in the cluster, beside the load, would make the cost
+independent of this machine; it is not built.
+
+Settings the standup applies to its own copy of the scenario, so nothing under
+`hack/` is edited by hand. Set them on the `preflight` line too, and run
+`preflight` again after changing one: it counts with the same values.
+
+| setting | default | what it does |
+| --- | --- | --- |
+| `GATEWAY_REUSE` | `auto` | `auto` reuses the Istio the cluster already runs (an `istio.io/gateway-controller` GatewayClass exists) instead of installing `istio-base` over it, which fails part-way through. `true` and `false` force it. |
+| `GATEWAY_PROVIDER_NAMESPACE` | `istio-system` | where that control plane runs |
+| `DECODE_CPU`, `DECODE_MEMORY` | the scenario's (8, `64Gi`) | a decode Pod's request and limit. Lower them when `preflight` reports fewer placeable Pods than the run's peak because the nodes with free accelerators lack spare CPU. |
+| `BENCHMARK_RENDER_DRAIN` | `true` | the drain hook and grace go into the engines before they first start, so the drain patch after the standup finds nothing to change and no model starts twice |
+| `BENCHMARK_ENGINE_CACHE_HOSTPATH` | empty | a directory on the nodes for the engines' compile caches. Opt-in, so earlier runs stay comparable. |
+
+**Engine caches on the nodes.** The scenarios' engines keep their compile
+caches inside the container, so every start compiles from nothing: on an 8B
+model on H200, torch.compile took 14.4 s cold against 2.9 s from a cache,
+and starts took 75-81 s against 51-56 s. `BENCHMARK_ENGINE_CACHE_HOSTPATH=<node
+directory>` gives every engine role a cache on that node directory, prepared
+on every accelerator node before the engines start
+([Engine caches on the node's disk](../../reference/workload-preparation.md#engine-caches-on-the-nodes-disk)).
+Each node then compiles once. It needs leave to create PersistentVolumes. It
+changes start times, so compare a run with it only against runs with it.
 
 **2. First arm: today's optimizer.**
 
@@ -264,6 +308,50 @@ optimizer is built for, raise `PHASE_SECONDS` until a full swing is well past
 one swap per arm instead of two. Every arm of one comparison must use the same
 shape, or the report refuses them.
 
+## Load of your own: vary the prompts
+
+The arms' loader sends varied prompts, and the report refuses a run in which
+one engine did nearly all the work. A load you write yourself to watch a swap
+should vary its prompts too. With one identical prompt, the EPP's
+prefix-cache routing sends every request to the replica that already holds
+it, so added replicas serve nothing and time to first token measures the
+queue at one engine.
+
+That is what a cluster walk of the guide saw: streamed time to first token
+held at about 91 s and 83 s while each model went from 1 to 3 replicas. The
+first chunk was not held back on the gateway path: after it, the rest of
+every response took about 10 s, in all 8,144 requests. The fleet's
+throughput stayed at about 3.2 requests a second whatever the concurrency
+and replica count, which is one replica's 32 sequences. That cause is
+inferred from throughput, not yet confirmed per pod on a cluster; the
+engines' own prompt-token counters, which every arm records, would show it.
+
+## When the standup stalls on one node
+
+An engine Pod that sits in `Init` or `ContainerCreating` while its siblings
+start is usually a node fault, not the run. Look at its events:
+
+```bash
+kubectl get events -n $BENCHMARK_NAMESPACE --field-selector reason=FailedCreatePodSandBox
+```
+
+`no space left on device` there means the node cannot create the Pod's
+sandbox. That is for the cluster admin: cordon the node, or taint it so new
+Pods avoid it. Without node rights, keep this run's own engines off that node
+(it changes only the run's decode and prefill Deployments, and the next
+standup renders them without it):
+
+```bash
+BAD=<node name>
+for d in $(kubectl get deploy -n $BENCHMARK_NAMESPACE -o name | grep -E 'decode|prefill'); do
+  kubectl patch -n $BENCHMARK_NAMESPACE $d --type=merge -p "{\"spec\":{\"template\":{\"spec\":{\"affinity\":{\"nodeAffinity\":{\"requiredDuringSchedulingIgnoredDuringExecution\":{\"nodeSelectorTerms\":[{\"matchExpressions\":[{\"key\":\"kubernetes.io/hostname\",\"operator\":\"NotIn\",\"values\":[\"$BAD\"]}]}]}}}}}}}"
+done
+```
+
+Each patch rolls that Deployment once. Run `preflight` again afterwards: the
+node's accelerators still count as free, so the placeable count is one node
+too high until the node is fixed.
+
 ## What it does not measure
 
 Everything [the warm-pool run does not measure](two-model-warm-pool.md#what-it-does-not-measure),
@@ -276,8 +364,10 @@ and, in addition:
   8-GPU replicas. A P/D variant of the different-burst-shapes scenario,
   `hack/benchmark/scenarios/guides/two-model-shapes-pd.yaml` (both models
   disaggregated, four roles under one quota; how to drive it is in its
-  header), exists and has not been run. Its prefill and decode pods take one
-  accelerator each, so it says nothing about whole-node pods either.
+  header), has run once
+  ([results](../../well-lit-paths/utilization-share/measured.md#pd-two-disaggregated-models-under-one-quota)).
+  Its prefill and decode pods take one accelerator each, so it says nothing
+  about whole-node pods either.
 - **A cluster quota or a canary.** One namespace quota group.
 
 ## One P/D model (single-stack mode)
@@ -298,9 +388,10 @@ mode:
   default to the shared bounds. Reset, the ceiling and `budget.json` all apply
   them per role, and the report refuses arms whose bounds differ.
 
-**It has not produced a result.** On `Qwen/Qwen3-0.6B`, prefill stayed at one
-replica through 20 minutes of 15 000-token prompts at 12 rps, so there was
-nothing for the arms to compare ([why](../../well-lit-paths/utilization-share/measured.md#pd-not-measured)).
+**This mode has not produced a result.** On `Qwen/Qwen3-0.6B`, prefill stayed
+at one replica through 20 minutes of 15 000-token prompts at 12 rps, so there
+was nothing for the arms to compare ([why](../../well-lit-paths/utilization-share/measured.md#an-earlier-attempt-on-one-model)).
+The two-model P/D scenario above did produce one.
 Two tooling problems are also open:
 
 - The standup rendered the scenario's 32 CPU / 128 GiB engine requests despite

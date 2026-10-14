@@ -370,11 +370,13 @@ keeps an existing claim, and only its own mode skips the download Job and
 holds the engine deploy until every node is Ready; `make weights` beside it
 would leave the harness's Job writing a single node's copy. Three things to know: the harness waits for EVERY node the
 DaemonSet counts, and a DaemonSet counts a cordoned node and a node under
-`DiskPressure` too (its controller tolerates both taints), so a node that
-keeps evicting the downloader holds the standup until `daemonSetTimeout`
-(3600 s) and then fails it -- a `NoSchedule` taint of your own on that node
-takes it out of the count (seen once on a 17-node cluster: one cordoned node
-under DiskPressure since the day before, 16/17 for 22 minutes); the standup refuses a namespace whose
+`DiskPressure` too (its controller tolerates both taints) -- a node that
+kept evicting the downloader held the standup until `daemonSetTimeout`
+(3600 s) and then failed it. The standup now keeps the downloader off every
+node an engine cannot use (cordoned, or carrying a `NoSchedule` or
+`NoExecute` taint the run does not tolerate) with a `kubernetes.io/hostname
+NotIn` affinity on the scenario copy, and names those nodes; nothing is done
+to the nodes themselves, which on a shared cluster are not yours to taint; the standup refuses a namespace whose
 `model-pvc` already sits on another storage class -- the harness keeps an
 existing claim, and a run that looks like it measured a local read while
 reading the shared volume is the wrong measurement -- so use a fresh
@@ -395,7 +397,14 @@ with a disk mounted there). None of this has been run on OpenShift yet. `make we
 (the general form,
 [Weights on the node's disk](../../reference/workload-preparation.md#weights-on-the-nodes-disk))
 mounts the claim, carries no token, runs the engine image's own library,
-and needs only `baseline`. Fix 12 gives the harness's volume a name that
+and needs only `baseline`. It reuses a copy already in the same node
+directory when the copy carries its completion marker,
+`<dir>/models/<id>/.download-complete`: an earlier `make weights` with the
+same `WEIGHTS_PATH` writes it, and so does the harness's downloader, at the
+same place. The downloader then fetches nothing on that node. A copy
+without the marker -- one interrupted, or put there by hand -- is passed to
+huggingface_hub's `snapshot_download` again, and the library decides which
+of its files to fetch. Fix 12 gives the harness's volume a name that
 carries the namespace and a `claimRef` into it -- unpatched, the volume is
 named `model-pvc-hostpath-pv` cluster-wide with no `claimRef`, so any
 namespace's claim asking for the class takes it and a second benchmark

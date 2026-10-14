@@ -309,18 +309,13 @@ and plausible table. The tooling enforces every one rather than trusting it:
   helmfile. On a cluster that already runs Istio by other means that install
   does not merge: it fails on ownership metadata part-way through the standup,
   and the half-built namespace then trips the EPP-reuse guard on the next
-  attempt. If the cluster provides Istio, say so in the scenario's `gateway:`
-  block and the standup will reuse it:
-
-  ```yaml
-      gateway:
-        className: istio
-        providerNamespace: istio-system
-        skipInstall: true
-  ```
-
-  `preflight` checks this both ways round, so neither mistake reaches a
-  standup.
+  attempt. `GATEWAY_REUSE=auto`, the default, has the standup reuse the
+  Istio the cluster runs: it marks its own copy of the scenario
+  `skipInstall`, with the control plane in `GATEWAY_PROVIDER_NAMESPACE`
+  (`istio-system` unless set), and installs Istio only on a cluster with
+  none. `true` and `false` force it. `preflight` checks this both ways
+  round, so neither mistake reaches a standup, and no tracked scenario is
+  edited by hand.
 - **A node with 64 GiB free for the load Pod.** Each loader container is
   limited to 32 GiB, and it is not generous: inference-perf materializes
   synthetic prompts lazily in its worker processes and keeps every one, so

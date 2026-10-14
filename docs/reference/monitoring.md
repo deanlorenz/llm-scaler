@@ -245,9 +245,15 @@ correct for what was seen); above it means something the scale target does not
 own is serving the model.
 
 ```bash
-# read them straight off the controller
-kubectl port-forward -n $NS svc/wva-controller-manager-metrics-service 8443:8443
-curl -sk https://localhost:8443/metrics | grep -E '^wva_'
+# read them straight off the controller -- the cluster admin's route. The
+# endpoint checks the caller against a cluster-wide grant: the install's
+# metrics-reader token passes where the admin's install step created its
+# binding, and a namespace tenant has none. Without a token it answers 401
+# and the grep prints nothing. A tenant queries Prometheus, scoped to the
+# namespace: {exported_namespace="$NS"} on model series.
+TOKEN=$(kubectl get secret wva-epp-metrics-token -n $NS -o jsonpath='{.data.token}' | base64 -d)
+kubectl port-forward -n $NS svc/wva-controller-manager-metrics-service 8443:8443 &
+curl -sSfk -H "Authorization: Bearer $TOKEN" https://localhost:8443/metrics | grep -E '^wva_'
 ```
 
 **What would the utilization-share optimizer do, and is it doing it?** — only
@@ -350,7 +356,7 @@ kubectl get events -n <namespace> --field-selector reason=UtilizationShareGiving
 | reason | type | on | when |
 | --- | --- | --- | --- |
 | `UtilizationShareGiving` | Normal | donor | a transfer started: it gives one replica. Names the pod (or pods) that go, whom it gives to, and why: the receiver is below its need, or to even out headroom by weight. A move that skipped the waits says "without the usual waits: it is at its scale-up threshold and this model is nearly idle (stabilization.skipWaitsWhen)". A donor in a set names the receiver its set funds and how many other donor replicas fund it; a refill names the quota group's scale-from-zero reserve (`reserveGPUs`); a return names "the quota group's unassigned GPUs", "because it holds more headroom than maxHeadroomReplicas gives it while no model is short, and stays calm without it; the replica drains after its scale-down window, and is kept if its demand comes back before then; a model whose demand rises takes the GPUs at once" -- the reason a model shrank while no other model grew. |
-| `UtilizationShareReceiving` | Normal | receiver | a transfer started for it; it is raised once the donor's replica is released. When it is handed GPUs another model is still giving back to the quota, it says "receiving N GPUs that <model> is giving back to the quota; raised once its replica is released" |
+| `UtilizationShareReceiving` | Normal | receiver | a transfer started for it; it is raised once the donor's replica is released |
 | `UtilizationShareReceived` | Normal | receiver | the transfer landed: it holds the GPUs. An idle fill that lands says it received them "from the quota group's unassigned GPUs", and why: "because its demand rose past what it held", or "as headroom (maxHeadroomReplicas); given back when this model no longer needs it" -- the reason a model grew with no load to grow it |
 | `UtilizationShareCancelled` | Normal | donor and receiver | the transfer was called off because demand reversed; the donor's replica count is restored. A return called off says "this model's demand came back, so it keeps the replica it was giving back" |
 | `UtilizationShareRedirected` | Normal | receiver | the GPUs it was to receive went to a model waking from zero; it is planned again |
@@ -381,7 +387,6 @@ Useful when a metric tells you *which* model is wrong and you want to know *why*
 | `Utilization share: would rebalance (shadow)` | shadow mode found moves it would make; carries `actionable` and `frozen`. Logged when the set of actionable roles changes, not every cycle | Info |
 | `Utilization share: rebalancing` | the optimizer is acting on a group with actionable roles; same fields, same once-per-change rule | Info |
 | `Utilization share: transfer` | a transfer started, ended (with its `outcome`), was cancelled, or was redirected to a wake. `transfer started` carries `urgent`, `skippedWaits` and `returned` (`true` for a spare given back to the quota, which has no `receiver`) | Info |
-| `Utilization share: returned spare handed to a receiver` | a return still releasing was handed to a model that turned short; its GPUs go to that model when they come free. Carries `id`, `donor` and `receiver` | Info |
 | `Utilization share: the models' recent peaks`, `Utilization share: the models' peaks are not known yet` | the headroom cap turned on or off; carries `peakClaimGPUs` and `budget`. On: `cause=peaks-exceed-budget` (`recent peaks do not fit the quota together`) or `cause=peaks-unknown` (`peaks are not known yet`, with `unknownPeaks`: no model's peak is known, as after a restart with no history or for a new group), each with `maxHeadroomReplicas`. Off: `fit the quota together again`. Logged when it flips, and on a group's first acting cycle if capped | Info |
 | `Utilization share: spare returned to the quota` | a model's replica above its need plus its headroom (`maxHeadroomReplicas`) was released back to the quota group's unassigned GPUs; carries `donor` and `gpus` | Info |
 | `Utilization share: could not mark a donor pod` | a transfer was not started; the donor backs off (`donor-not-steerable`, and a `UtilizationShareDonorNotSteerable` Event on it) | Error |
