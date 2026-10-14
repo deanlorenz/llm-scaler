@@ -86,7 +86,30 @@ type SaturationAnalyzer struct {
 	// which ITL(k) = A*k + B is fitted so mu can be derived for the shape the
 	// fleet is serving NOW rather than waiting for it to saturate under it
 	// (mu_from_itl.go). Keyed like the throughput windows and swept with them.
+	//
+	// Per variant, and NOT pooled across the variants that share an engine
+	// configuration -- although ITL(k) is largely a property of the weights,
+	// the build and the hardware. An earlier version of this file pooled the
+	// OBSERVATIONS on that reasoning and it was the wrong mechanism: only A and
+	// B ever reach a decision, so what is worth sharing is the fitted LINE, not
+	// the data behind it. Sharing the line (itlLines below) is attributable,
+	// cannot blend two different traffic shapes into a figure describing
+	// neither, and does not make one variant's fit depend on the order the
+	// others happened to be iterated in.
 	itlWindows map[string]*itl.Window
+	// itlLines is the last line each ENGINE CONFIGURATION was measured at,
+	// keyed by itlPhysicsKey, with the variant that measured it and when.
+	//
+	// This is what a variant with no usable fit of its own borrows, so a
+	// rename, a second identical variant, or the same deployment in another
+	// namespace gets a line on its FIRST cycle instead of paying the ~28
+	// cycles a fit takes -- measured on one benchmark run from load start,
+	// which is the figure a controller-boot anchor had inflated to ~60. That
+	// is the whole saving this was built for. A
+	// borrowed line is marked as such all the way to the floor, which may hold
+	// the fleet on it but not grow it: the line is evidence about a
+	// configuration, not about this variant's own load.
+	itlLines map[string]learnedLine
 	// itlBaseline is the last B an OLS fit produced for each window key: the
 	// zero-contention decode step for THAT model on THAT accelerator. It is
 	// what the one-parameter fallback pins, so a fleet that has once been
@@ -186,14 +209,31 @@ type Evicted struct {
 	DecodeSaturation int
 	FleetShapes      int
 	VariantStamps    int
+	// ITLLines is the fitted lines shared between variants running the same
+	// engine configuration. Counted separately because it is the one map here
+	// keyed on a CONFIGURATION rather than a variant or a workload bucket, and
+	// a reader asking why a cold variant stopped finding a line to borrow
+	// needs to see it move.
+	ITLLines int
 }
 
 // Any reports whether the sweep evicted anything at all.
 func (e Evicted) Any() bool {
 	return e.K2History > 0 || e.MuWindows > 0 || e.ITLWindows > 0 ||
 		e.ITLBaselines > 0 || e.StartEstimates > 0 || e.StartOutliers > 0 ||
-		e.Pods > 0 || e.Accelerators > 0 || e.DecodeSaturation > 0 ||
+		e.Pods > 0 || e.ITLLines > 0 || e.Accelerators > 0 || e.DecodeSaturation > 0 ||
 		e.FleetShapes > 0 || e.VariantStamps > 0
+}
+
+// learnedLine is one measured ITL(k) line, with who measured it and when.
+//
+// fromVariant is the variant key (itlWindowKey) of the fit's owner rather than
+// a bare variant name, so "is this my own line" is one comparison and two
+// namespaces serving the same deployment are told apart.
+type learnedLine struct {
+	model       itl.Model
+	fromVariant string
+	learnedAt   time.Time
 }
 
 // acceleratorMemo is the last accelerator that resolved for a variant, with the
@@ -217,6 +257,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		decodeSaturatedAt:      make(map[string]time.Time),
 		fleetShape:             make(map[string]*shapeMemo),
 		itlWindows:             make(map[string]*itl.Window),
+		itlLines:               make(map[string]learnedLine),
 		itlBaseline:            make(map[string]float64),
 		startSeconds:           make(map[string]float64),
 		startSeenPods:          make(map[string]time.Time),
@@ -427,6 +468,25 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 			evicted.StartOutliers++
 		}
 	}
+	// On bucketRetention, with the per-configuration maps, because that is
+	// what itlLines is keyed on: the digest of an engine configuration, not a
+	// variant. A line is shared precisely so a variant with no history of its
+	// own can start from one measured elsewhere, so ageing it on the variant
+	// horizon would drop it while the configuration it describes is still
+	// running -- the same mistake the accelerator and fleet-shape memos were
+	// found making, one map over.
+	//
+	// learnedAt is last WRITTEN, and that is the one place in this function
+	// where the last-read clock does not apply: a learnedLine is a finished
+	// fit, not an accumulating window, so a read has nothing to keep alive. A
+	// line measured on a configuration nothing runs any more is not a starting
+	// point for anything.
+	for key, line := range a.itlLines {
+		if now.Sub(line.learnedAt) > bucketRetention {
+			delete(a.itlLines, key)
+			evicted.ITLLines++
+		}
+	}
 	for key, seen := range a.variantSeenAt {
 		if now.Sub(seen) > variantTimeout {
 			delete(a.variantSeenAt, key)
@@ -518,9 +578,125 @@ func engineParamsFor(a *SaturationAnalyzer, namespace, modelID, variantName stri
 // the replica start estimate and its outlier count. It carries the
 // accelerator (through stableAccelerator, which absorbs the flapping a
 // heterogeneous fleet reports) and the GPU count, and no shape dimension at
-// all. It is also the key the per-cycle sweep ages all four of those maps on,
-// through variantSeenAt.
+// all.
+//
+// It names the ITL window too: the window was never re-keyed, and sharing
+// happens on the fitted LINE instead (itlLines, itlPhysicsKey). An earlier
+// revision of this file did pool the window on the physics key, and this
+// comment described that design; see docs/proposals for why it was replaced.
 func (a *SaturationAnalyzer) itlWindowKey(namespace, modelID, variantName, accelerator string, gpuCount int) string {
 	return fmt.Sprintf("%s|%s|%s|%s|%d", namespace, modelID, variantName,
 		a.stableAccelerator(namespace, variantName, accelerator), gpuCount)
+}
+
+// publishLine records a variant's OWN fitted line as the line for its engine
+// configuration, so a sibling with nothing of its own can borrow it.
+//
+// Only a variant's own fit is published. A borrowed line is never
+// republished, which keeps the record traceable to one measurement instead of
+// letting a figure circulate between variants gathering authority it never
+// earned.
+func (a *SaturationAnalyzer) publishLine(
+	physicsKey, variantKey string, model itl.Model, now time.Time,
+) {
+	if physicsKey == "" || model.IsZero() {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.itlLines[physicsKey] = learnedLine{
+		model:       model,
+		fromVariant: variantKey,
+		learnedAt:   now,
+	}
+}
+
+// borrowLine returns the line last measured for this engine configuration by
+// SOME OTHER variant, for a variant whose own window cannot produce one.
+//
+// It reports the owner so the caller can log what was borrowed and from
+// where: a decision made on another variant's measurement has to be visible
+// as such. A line this variant measured itself is not a borrow and is not
+// returned -- the caller already has it, and calling it borrowed would
+// wrongly deny it the right to order.
+func (a *SaturationAnalyzer) borrowLine(physicsKey, variantKey string) (itl.Model, string, bool) {
+	if physicsKey == "" {
+		return itl.Model{}, "", false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	line, ok := a.itlLines[physicsKey]
+	if !ok || line.model.IsZero() || line.fromVariant == variantKey {
+		return itl.Model{}, "", false
+	}
+	return line.model, line.fromVariant, true
+}
+
+// itlPhysicsKey names one SHARED LINE record -- not a window -- by what the
+// line is a function of:
+// the model, the hardware, and the engine configuration that produced it.
+// Namespace and variant name are deliberately absent.
+//
+// An EMPTY fingerprint falls back to the variant key, which pools nothing.
+// That is the safe direction and it is not a detail: a fingerprint is absent
+// when the configuration could not be read, and treating "unknown" as a
+// shared identity would pool engines that have nothing in common -- including
+// a 0.6B and a 32B model, the worst mis-keying available here. Paying the fit
+// again is the lesser cost by a wide margin.
+func (a *SaturationAnalyzer) itlPhysicsKey(
+	namespace, modelID, variantName, accelerator string, gpuCount int, fingerprint string,
+) string {
+	if fingerprint == "" {
+		return a.itlWindowKey(namespace, modelID, variantName, accelerator, gpuCount)
+	}
+	return capacity.LearnedStateKey(modelID,
+		a.stableAccelerator(namespace, variantName, accelerator), gpuCount, fingerprint)
+}
+
+// engineFingerprint returns the fingerprint of the engine configuration a
+// variant is running, or "" when the capacity store holds no parsed params for
+// it OR when what it holds was not fully read.
+//
+// Read from the store rather than re-parsed, so that when there IS a key it is
+// computed from the same record wva_engine_config publishes. It is not the
+// same as that label in every case -- see the incompleteness note below.
+func (a *SaturationAnalyzer) engineFingerprint(namespace, modelID, variantName string) string {
+	if a.capacityStore == nil {
+		return ""
+	}
+	rec := a.capacityStore.Get(namespace, modelID, variantName)
+	if rec == nil || rec.EngineParams == nil {
+		return ""
+	}
+	// A configuration this controller could not fully READ does not get a
+	// sharing key, and an empty fingerprint is how itlPhysicsKey is told to
+	// fall back to the per-variant window key -- so such a variant learns its
+	// own line and neither lends nor borrows one.
+	//
+	// THIS DIVERGES FROM wva_engine_config ON PURPOSE, and the doc comment
+	// above used to claim it could not: publishEngineConfig hashes the same
+	// record unconditionally, so an incomplete variant HAS a published
+	// fingerprint and no learned-state key under it. That asymmetry is the
+	// honest one -- the metric's job is to show what was read, including that
+	// the read was partial, and its `unresolved` label is non-empty for
+	// exactly these variants. Joining the two on `fingerprint` finds nothing
+	// for them, which is the correct answer to "what has this configuration
+	// learned": nothing, by design.
+	//
+	// Without this the digest would be doing the one thing it must not: an
+	// llm-d Deployment passing `--block-size $VLLM_BLOCK_SIZE` leaves the
+	// default on every variant, so a whole fleet of differently-configured
+	// engines hashes alike and any of them may price itself from another's
+	// measured latency line. Hashing the unresolved SET stops an incomplete
+	// read colliding with a complete one; it cannot stop two incomplete reads
+	// colliding with each other, because the thing they disagree about is
+	// exactly what neither could read. Only refusing the key does that.
+	//
+	// The cost is that such a fleet gets no cross-variant head start, which is
+	// the feature degrading to its pre-existing behaviour rather than
+	// misfiring. wva_engine_config's `unresolved` label says why.
+	if !rec.EngineParams.Complete() {
+		return ""
+	}
+	return rec.EngineParams.Fingerprint()
 }

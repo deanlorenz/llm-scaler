@@ -341,6 +341,10 @@ func TestParserReadsTheNegativeBooleanForms(t *testing.T) {
 		t.Errorf("EffectiveMaxBatchedTokens = %d, want 32768: unchunked prefill "+
 			"budgets a whole sequence", off.EffectiveMaxBatchedTokens)
 	}
+	if on.Fingerprint() == off.Fingerprint() {
+		t.Error("chunked and unchunked prefill hash the same, so one could lend " +
+			"the other its latency line -- and they have different per-step budgets")
+	}
 
 	// --no-enforce-eager has no such override, so it works on either engine.
 	eager := parseShell("vllm serve m --enforce-eager --no-enforce-eager", nil)
@@ -350,6 +354,49 @@ func TestParserReadsTheNegativeBooleanForms(t *testing.T) {
 	stillEager := parseShell("vllm serve m --no-enforce-eager --enforce-eager", nil)
 	if !stillEager.EnforceEager {
 		t.Error("the later --enforce-eager did not win: argument order must decide")
+	}
+}
+
+// THE SAFETY PROPERTY, and the reason the set is hashed rather than only
+// logged: an incomplete read must never be mistaken for a complete one, and
+// must never license sharing.
+func TestAnIncompleteReadCannotPassForAMeasuredOne(t *testing.T) {
+	// Same flags; one deployment can be read and one cannot.
+	read := parseShell("vllm serve m --block-size 16", nil)
+	unread := parseShell("vllm serve m --block-size $NOPE", nil)
+
+	if read.BlockSize != unread.BlockSize {
+		t.Fatalf("the fixture is wrong: both must end up at BlockSize 16 "+
+			"(got %d and %d), or this test is not about the unresolved set",
+			read.BlockSize, unread.BlockSize)
+	}
+	if read.Fingerprint() == unread.Fingerprint() {
+		t.Error("a configuration whose block size could not be read hashes the " +
+			"same as one genuinely running the default: the digest asserts an " +
+			"equality it never verified")
+	}
+
+	// And hashing alone is NOT enough, which is why Complete() exists. Stated
+	// as the assertion it actually is: two deployments whose block size came
+	// from DIFFERENT unreadable references hash IDENTICALLY, because only the
+	// flag key is recorded and not which variable was missing. So the digest
+	// cannot separate them and the completeness flag has to.
+	//
+	// An earlier version of this put that in an `if ... { t.Log }` branch,
+	// which a review proved dead: the condition can never hold, and replacing
+	// it with a nonsense always-true comparison changed the test's output not
+	// at all. A branch that only logs is a test that does not know what it is
+	// asserting.
+	otherUnread := parseShell("vllm serve m --block-size $ALSO_NOPE", nil)
+	if unread.Fingerprint() != otherUnread.Fingerprint() {
+		t.Errorf("two configs differing only in WHICH reference was unreadable "+
+			"hashed differently (%s vs %s). If that ever becomes true the digest "+
+			"is carrying the variable name, and this test's premise -- that "+
+			"Complete() is load-bearing because the digest cannot tell them "+
+			"apart -- needs re-deriving", unread.Fingerprint(), otherUnread.Fingerprint())
+	}
+	if unread.Complete() || otherUnread.Complete() {
+		t.Error("Complete() must be false for both, so neither may lend the other a line")
 	}
 }
 
@@ -392,6 +439,28 @@ func TestFindCompatibleDoesNotGateOnCompleteness(t *testing.T) {
 	}
 	if got.EffectiveCapacity != 5000 {
 		t.Errorf("EffectiveCapacity = %d, want the donor's 5000", got.EffectiveCapacity)
+	}
+}
+
+// And where the completeness gate DOES belong: the new sharing key. Covered
+// end to end in internal/engines/analyzers/saturation
+// (TestAnUnreadableConfigurationIsNotASharingKey); this states the division so
+// the next reader does not reinstate the one above.
+func TestCompletenessGatesTheKeyAndNotTheCapacityPath(t *testing.T) {
+	unread := parseShell("vllm serve m --block-size $NOPE", nil)
+	read := parseShell("vllm serve m --block-size 128", nil)
+
+	if !read.Complete() || unread.Complete() {
+		t.Fatalf("fixtures wrong: read=%v unread=%v", read.Unresolved, unread.Unresolved)
+	}
+	// The digest still differs, so an incomplete read cannot pass for a
+	// complete one wherever a digest is the key.
+	if read.Fingerprint() == unread.Fingerprint() {
+		t.Error("the two hash alike; the unresolved set is not reaching the digest")
+	}
+	// But capacity compatibility is unaffected -- that is the point.
+	if !unread.IsCapacityCompatible(&unread) {
+		t.Error("IsCapacityCompatible must stay reflexive over an incomplete read")
 	}
 }
 
@@ -580,14 +649,9 @@ func TestTheParserReadsOnlyTheEngineContainer(t *testing.T) {
 	rev := d.DeepCopy()
 	rev.Spec.Template.Spec.Containers = []corev1.Container{sidecar, engine}
 	q := ParseVLLMArgs(scaletarget.NewDeploymentAccessor(rev))
-	// Asserted on the parsed fields rather than on the digest: the digest
-	// arrives with the sharing feature, and the property under test here --
-	// that container ORDER does not change what was parsed -- is the parser's.
-	if q.MaxModelLen != p.MaxModelLen || q.BlockSize != p.BlockSize ||
-		q.WeightDtype != p.WeightDtype {
-		t.Errorf("swapping the container order changed what was parsed: "+
-			"maxModelLen %d vs %d, blockSize %d vs %d, dtype %q vs %q",
-			p.MaxModelLen, q.MaxModelLen, p.BlockSize, q.BlockSize,
-			p.WeightDtype, q.WeightDtype)
+	if q.Fingerprint() != p.Fingerprint() {
+		t.Errorf("swapping the container order changed the digest (%s vs %s): the "+
+			"configuration depends on which container is listed last",
+			p.Fingerprint(), q.Fingerprint())
 	}
 }
