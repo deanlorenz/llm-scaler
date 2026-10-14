@@ -22,6 +22,8 @@ import (
 	"sync"
 	"time"
 
+	"k8s.io/apimachinery/pkg/types"
+
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 )
 
@@ -72,6 +74,10 @@ type Entry struct {
 // them into metadata would create a second copy that can disagree with the one
 // actually in force.
 type Target struct {
+	// UID is the ScaledObject's own UID. Events about the variant are recorded
+	// against the ScaledObject, and `kubectl describe` matches events to an
+	// object by UID, so an event without it is listed nowhere.
+	UID         types.UID
 	APIVersion  string
 	Kind        string
 	Name        string

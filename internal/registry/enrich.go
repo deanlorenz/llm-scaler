@@ -178,6 +178,7 @@ func (e *Enricher) readTarget(ctx context.Context, namespace, name string) (Targ
 // minimal `scaleTargetRef: {name: x}` resolves the same way KEDA resolves it.
 func TargetFromScaledObject(so *kedav1alpha1.ScaledObject) Target {
 	t := Target{
+		UID:         so.UID,
 		Labels:      maps.Clone(so.Labels),
 		MinReplicas: so.Spec.MinReplicaCount,
 		// GetHPAMaxReplicas applies KEDA's default rather than reporting nil, so

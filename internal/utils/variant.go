@@ -250,6 +250,10 @@ func registrySourcedVariants(ctx context.Context, reg *registry.Registry) []wvav
 				// The ScaledObject names the variant: there is one per scale target.
 				Name:      entry.Name,
 				Namespace: entry.Namespace,
+				// And lends it its UID, which is what lets an event recorded
+				// against the ScaledObject (variant.EventTarget) show up in
+				// `kubectl describe scaledobject`.
+				UID: target.UID,
 				// The ScaledObject's labels come along: the accelerator lookup falls
 				// back to them when the pod template names no GPU product, and
 				// multi-controller isolation filters on the controller-instance
