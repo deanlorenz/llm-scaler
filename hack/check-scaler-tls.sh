@@ -491,7 +491,9 @@ render_case() {
         ok '[ -z "$flags$mounts$vols$ann" ]' "$label: TLS is off but rendered: flags '$flags' mounts '$mounts' volumes '$vols' digest '$ann'"
     fi
     local svc_ann
-    svc_ann="$(yq 'select(.kind == "Service" and .metadata.name == "wva-external-scaler") | .metadata.annotations["service.beta.openshift.io/serving-cert-secret-name"] // ""' "$out")"
+    svc_ann="$(yq 'select(.kind == "Service" and .metadata.name == "wva-external-scaler") | .metadata.annotations["service.beta.openshift.io/serving-cert-secret-name"] // ""' "$out" \
+        | grep -vx -e '' -e '---' || true)"
+    # (yq 4.44 prints blank lines and --- for the documents a select drops.)
     case "$label" in
         *OpenShift*on*) ok '[ "$svc_ann" = "$SERVING" ]' "$label: scaler Service annotation '$svc_ann', want $SERVING" ;;
         *) ok '[ -z "$svc_ann" ]' "$label: the scaler Service asks the service CA for a certificate ('$svc_ann')" ;;
