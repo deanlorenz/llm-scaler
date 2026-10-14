@@ -14,9 +14,10 @@ prerequisites:
       make benchmark-two-model-verify
   vars:
     note: |
-      The models' namespace. On a namespace-scoped install the controller and
-      its policy are there too; otherwise also export CONTROLLER_NAMESPACE and
-      POLICY_NAMESPACE.
+      The models' namespace. On a namespace-scoped install the controller is
+      there too; otherwise also export CONTROLLER_NAMESPACE. The policy's
+      namespace is read from the controller's log (its own, or a policy
+      namespace such as wva-policy); POLICY_NAMESPACE overrides it.
     run: |
       export NAMESPACE=<namespace>
   check:

@@ -57,12 +57,18 @@ wva_missing_prereqs() {
         #   wva-utilization-share-history-*  the utilization-share need history
         #                       store; without it a restart forgets the models'
         #                       peaks and caps their headroom for a window.
+        #   wva-controller-status-*  the controller-status ConfigMap; without
+        #                       it the controller scales as before and only
+        #                       the published status is missing.
         case "$name" in
             wva-kueue-reader-*)
                 echo "OPTIONAL $kind/$name|the Kueue quota source (a quota limiter entry with kueue.enabled)"
                 continue ;;
             wva-utilization-share-history-role|wva-utilization-share-history-rolebinding)
                 echo "OPTIONAL $kind/$name|the utilization-share need history, kept across controller restarts"
+                continue ;;
+            wva-controller-status-role|wva-controller-status-rolebinding)
+                echo "OPTIONAL $kind/$name|the controller-status ConfigMap (the policy version and modes the controller is running with)"
                 continue ;;
         esac
         case "$kind" in
