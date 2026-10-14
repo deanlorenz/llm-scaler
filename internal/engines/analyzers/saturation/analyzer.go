@@ -3,6 +3,7 @@ package saturation
 import (
 	"fmt"
 	"maps"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,8 +25,8 @@ type SaturationAnalyzer struct {
 	// mu protects computeCapacityHistory from concurrent access.
 	mu sync.Mutex
 	// computeCapacityHistory stores rolling averages of observed k2 values,
-	// keyed by "modelID|accelerator|gpuCount|role|outputBucket|queueThreshold".
-	// TODO: check if we need to use other model parameters as key in the future.
+	// keyed by "namespace|variant|modelID|accelerator|gpuCount|role|outputBucket|queueThreshold"
+	// (historyKey): one variant's readings per window, never another's.
 	computeCapacityHistory map[string]*capacity.RollingAverage
 	// lastAccelerator remembers, per variant, the last accelerator that actually
 	// RESOLVED.
@@ -63,6 +64,14 @@ type SaturationAnalyzer struct {
 	// saturated replica HOLDS, this says how fast it COMPLETES, and only the
 	// latter tells how many replicas a given arrival rate needs.
 	saturatedThroughput map[string]*capacity.RollingAverage
+	// k2BorrowedSince is, per own historyKey (variant AND bucket), when the
+	// variant first borrowed a sibling's k2 for that bucket (borrowedK2). The
+	// relaxation back to the variant's own figure is measured from it, so it
+	// must NOT be reset by a donor that comes and goes, which would hold a
+	// borrowed figure at full strength again. A bucket the variant has never
+	// measured gets its own clock: see k2_borrow.go for why per bucket and not
+	// per variant. Swept a retention after the relaxation ended.
+	k2BorrowedSince map[string]time.Time
 	// throughputSampledAt is, per saturatedThroughput key, when the window
 	// last took a reading as a sample of its own, and throughputLastRead the
 	// last reading it was given, sample or not (recordSaturatedThroughput);
@@ -151,18 +160,12 @@ type SaturationAnalyzer struct {
 	// visit and so never swept at all. Both producers stamp their own key,
 	// rather than one relying on the other having run first.
 	//
-	// "REPORTED" means a replica of it was attributable this cycle, which is
-	// not the same as existing. A model with no attributable replicas skips
-	// analysis entirely (steadystate, the len(replicaMetrics) == 0 branch), so
-	// a fleet parked at zero is unstamped for as long as it is parked: past
-	// HistoryEvictionTimeout it re-learns its ITL baseline and start estimate
-	// on wake, which is the one case this timeout is felt rather than just
-	// bounding memory. The capacity STORE is what carries a parked variant --
-	// deliberately, on a seven-day timeout whose own comment names the
-	// weekend -- so engine params and the capacity record survive the gap and
-	// only the two fitted figures are re-measured. The asymmetry between the
-	// two timeouts is therefore intended, but it is an asymmetry: 24h of
-	// quiet costs the fit, seven days costs the record.
+	// "REPORTED" means the variant was in the cycle's input, or that the
+	// engine still found it -- active, or parked at zero replicas -- and said
+	// so through NoteVariantsPresent before the sweep. Before that stamp a
+	// fleet parked at zero went unstamped for as long as it was parked, and
+	// past VariantTimeout re-learned its ITL baseline and start estimate on
+	// wake. A deleted variant is not found, so it still ages out.
 	variantSeenAt map[string]time.Time
 	// now is the clock the memory reads; tests set it.
 	now func() time.Time
@@ -190,6 +193,8 @@ type Evicted struct {
 	// saturated-throughput windows the demand floor prices from.
 	K2History int
 	MuWindows int
+	// K2Borrows is the per-variant start of a borrowed k2 (borrowedK2).
+	K2Borrows int
 	// ITLWindows and ITLBaselines are the fitted ITL(k) state; StartEstimates
 	// and StartOutliers the learned replica start time and its reject
 	// counter; Pods the per-Pod records that say a start is already counted.
@@ -219,7 +224,7 @@ type Evicted struct {
 
 // Any reports whether the sweep evicted anything at all.
 func (e Evicted) Any() bool {
-	return e.K2History > 0 || e.MuWindows > 0 || e.ITLWindows > 0 ||
+	return e.K2History > 0 || e.MuWindows > 0 || e.K2Borrows > 0 || e.ITLWindows > 0 ||
 		e.ITLBaselines > 0 || e.StartEstimates > 0 || e.StartOutliers > 0 ||
 		e.Pods > 0 || e.ITLLines > 0 || e.Accelerators > 0 || e.DecodeSaturation > 0 ||
 		e.FleetShapes > 0 || e.VariantStamps > 0
@@ -251,6 +256,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		computeCapacityHistory: make(map[string]*capacity.RollingAverage),
 		lastAccelerator:        make(map[string]acceleratorMemo),
 		saturatedThroughput:    make(map[string]*capacity.RollingAverage),
+		k2BorrowedSince:        make(map[string]time.Time),
 		throughputSampledAt:    make(map[string]time.Time),
 		throughputLastRead:     make(map[string]float64),
 		capacityStore:          store,
@@ -332,6 +338,56 @@ func (a *SaturationAnalyzer) variantIsStale(key string, now time.Time, timeout t
 	return !ok || now.Sub(seen) > timeout
 }
 
+// NoteVariantsPresent refreshes the liveness stamp of every variant named, for
+// each key it has learned state under, and its accelerator memo. The engine
+// calls it once per cycle, before the sweep, for every variant that still
+// exists -- active or parked at zero replicas.
+//
+// Analyze stamps only the variants in its input, and it runs AFTER the sweep.
+// That left two gaps, each of which cost a fleet its ITL baseline and start
+// estimate after VariantTimeout and woke it on the defaults:
+//   - a variant PARKED at zero is inactive, never in the model groups the
+//     engine analyses, so nothing stamped it while any other model kept the
+//     engine optimizing;
+//   - a whole fleet parked for longer than the timeout stops the engine
+//     altogether, and on the cycle it wakes the sweep ran before Analyze, so
+//     the stale stamp evicted the state on exactly the cycle it was needed.
+//
+// By name rather than by the key Analyze would build: a parked variant has no
+// Pods to observe its accelerator from, so rebuilding the key could miss the
+// one its state was learned under. Matching the namespace|model|variant prefix
+// keeps every key that variant has, and only that variant's -- the trailing
+// separator keeps "v" from matching "v2". A variant that is deleted stops being
+// named, and its state is swept as before.
+func (a *SaturationAnalyzer) NoteVariantsPresent(namespace, modelID string, variantNames []string) {
+	if len(variantNames) == 0 {
+		return
+	}
+	prefixes := make([]string, 0, len(variantNames))
+	for _, v := range variantNames {
+		prefixes = append(prefixes, namespace+"|"+modelID+"|"+v+"|")
+	}
+	now := a.now()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for key := range a.variantSeenAt {
+		for _, p := range prefixes {
+			if strings.HasPrefix(key, p) {
+				a.noteVariantSeen(key, now)
+				break
+			}
+		}
+	}
+	// The memo ages on the wall clock (stableAccelerator), so it is touched on
+	// the wall clock too.
+	for _, v := range variantNames {
+		if memo, ok := a.lastAccelerator[namespace+"/"+v]; ok {
+			memo.lastUsed = time.Now()
+			a.lastAccelerator[namespace+"/"+v] = memo
+		}
+	}
+}
+
 // EvictStaleHistory removes learned state that is past its horizon, which
 // prevents unbounded memory growth from deleted models, renamed variants and
 // workload buckets that are no longer active.
@@ -406,9 +462,10 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 	// The per-VARIANT maps below age on variantSeenAt: the time the variant
 	// was last REPORTED. Two other clocks are in play in this function and
 	// neither is a leftover. The k2 history and the mu windows age on their
-	// own last-use stamp, because they are keyed by workload BUCKET
-	// (model|accel|gpus|role|bucket|qN -- no namespace, no variant name), so
-	// they cannot be joined to a variant key at all; their reads call Touch
+	// own last-use stamp, because they are keyed by workload BUCKET as well as
+	// by variant (namespace|variant|model|accel|gpus|role|bucket|qN): a bucket
+	// the variant has stopped serving must still expire while the variant
+	// lives, which a per-variant stamp cannot express. Their reads call Touch
 	// so that "last use" is what it says. The accelerator memo, the
 	// decode-saturation memory and the fleet shape are per model, not per
 	// variant, and age on wall-clock time.Since.
@@ -499,6 +556,22 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 			delete(a.throughputSampledAt, key)
 			delete(a.throughputLastRead, key)
 			evicted.MuWindows++
+		}
+	}
+	// A borrow's start goes a retention after its relaxation ended, and not
+	// sooner: deleting it restarts the borrow at full strength, so a variant
+	// that never saturates would be held at the donor's figure by the sweep
+	// instead of by a donor. After that long the restart is a deliberate
+	// re-probe: a variant that still has no reading of its own borrows again.
+	// Not on the variant's own window appearing: an own window displaces the
+	// borrow already (P2 reads it first), and a clock kept until its age runs
+	// out is what stops a variant hovering at full strength by moving between
+	// its own buckets.
+	borrowLife := BorrowedK2Hold + BorrowedK2Relax + bucketRetention
+	for key, since := range a.k2BorrowedSince {
+		if a.now().Sub(since) > borrowLife {
+			delete(a.k2BorrowedSince, key)
+			evicted.K2Borrows++
 		}
 	}
 	for key, at := range a.decodeSaturatedAt {

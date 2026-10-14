@@ -29,7 +29,8 @@ const (
 	EpisodeGap = 24 * time.Hour
 
 	// HistoryEvictionTimeout is how long PER-VARIANT learned state is kept
-	// after the variant was last reported -- the ITL window and baseline, the
+	// after the variant was last reported, or last found to exist (active or
+	// parked at zero) -- the ITL window and baseline, the
 	// start estimate and its outlier counter, and the per-model memos that
 	// key nothing. See the saturation analyzer's variantSeenAt.
 	//
@@ -78,7 +79,8 @@ type Horizons struct {
 	// starts a new window instead of joining this one.
 	EpisodeGap time.Duration
 	// VariantTimeout is how long per-variant learned state is kept after the
-	// variant was last reported.
+	// variant was last reported, or last found to exist (active or parked at
+	// zero).
 	VariantTimeout time.Duration
 	// BucketRetention is how long a bucket-keyed window, and the memos that
 	// resolve its key, are kept after the window was last read.

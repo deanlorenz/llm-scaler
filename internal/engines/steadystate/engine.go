@@ -1196,6 +1196,9 @@ func (e *Engine) optimizeV2(
 	e.pruneAnalyzerSeries(activeKeys)
 	e.pruneBlockedModels(activeKeys)
 	e.pruneLastDecided(e.stickyAge(), time.Now())
+	// Before the sweep, which would otherwise judge a variant on a stamp from
+	// before it parked: Analyze stamps too, but only after this point.
+	e.notePresentVariants(ctx, modelGroups)
 	e.evictStaleLearnedState(ctx)
 	e.scaleTargetUIDs = make(map[string]types.UID)
 

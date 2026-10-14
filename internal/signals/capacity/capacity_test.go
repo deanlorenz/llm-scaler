@@ -17,9 +17,10 @@ var _ = Describe("K2Source.String", func() {
 		Expect(K2SrcHistorical.String()).To(Equal("P2-hist"))
 		Expect(K2SrcDerived.String()).To(Equal("P3-k2"))
 		Expect(K2SrcFallback.String()).To(Equal("P4-k1"))
+		Expect(K2SrcBorrowed.String()).To(Equal("P2-borrow"))
 	})
 
-	It("is empty for a source that is none of the four", func() {
+	It("is empty for a source that is none of the five", func() {
 		// What the label map this method replaced returned for a missing
 		// key, and what the saturation analyzer's k2SourceLabel reads to
 		// fall back to domain.ReasonError.

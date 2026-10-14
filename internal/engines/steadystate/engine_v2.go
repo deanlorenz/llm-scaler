@@ -336,6 +336,62 @@ type staleHistoryEvictor interface {
 	EvictStaleHistory() saturation.Evicted
 }
 
+// presenceNoter is the part of the saturation analyzer notePresentVariants
+// needs, reached through an assertion for the same reason as
+// staleHistoryEvictor.
+type presenceNoter interface {
+	NoteVariantsPresent(namespace, modelID string, variantNames []string)
+}
+
+// Pinned at compile time: the assertion in notePresentVariants fails silently
+// at run time, so a rename of the method would otherwise let a parked fleet's
+// learned state age out again with every test green.
+var _ presenceNoter = (*saturation.SaturationAnalyzer)(nil)
+
+// notePresentVariants stamps every variant that still exists as present, ahead
+// of the sweep that would otherwise take its learned state (see
+// SaturationAnalyzer.NoteVariantsPresent). It runs before the sweep because
+// Analyze, the other stamp, runs after it.
+//
+// Two lists, because the engine analyses only one of them. modelGroups is the
+// ACTIVE variants; stamping them here is what keeps a fleet that was parked
+// for longer than the timeout from losing its state on the cycle it wakes. A
+// variant PARKED at zero replicas is inactive and in no model group, so the
+// inactive list is read for it. That list leaves out a VariantAutoscaling
+// whose scale target is missing or being deleted, so a variant that is really
+// gone is not stamped and still ages out.
+//
+// Best effort: a failed list stamps no parked variant this cycle, and the next
+// cycle tries again long before a 24h timeout could be reached.
+func (e *Engine) notePresentVariants(
+	ctx context.Context,
+	modelGroups map[string][]llmdVariantAutoscalingV1alpha1.VariantAutoscaling,
+) {
+	noter, ok := e.saturationV2Analyzer.(presenceNoter)
+	if !ok {
+		return
+	}
+	note := func(groups map[string][]llmdVariantAutoscalingV1alpha1.VariantAutoscaling) {
+		for _, modelVAs := range groups {
+			if len(modelVAs) == 0 {
+				continue
+			}
+			names := make([]string, 0, len(modelVAs))
+			for i := range modelVAs {
+				names = append(names, modelVAs[i].Name)
+			}
+			noter.NoteVariantsPresent(modelVAs[0].Namespace, modelVAs[0].Spec.ModelID, names)
+		}
+	}
+	note(modelGroups)
+	parked, _, err := utils.InactiveVariantAutoscaling(ctx, e.client, e.Variants)
+	if err != nil {
+		ctrl.LoggerFrom(ctx).V(logging.DEBUG).Info("Could not list parked variants to keep their learned state", "error", err.Error())
+		return
+	}
+	note(utils.GroupVariantAutoscalingByModel(parked))
+}
+
 // evictStaleLearnedState sweeps the two stores of learned per-variant state
 // whose eviction functions existed with no caller at all.
 //
@@ -365,7 +421,9 @@ type staleHistoryEvictor interface {
 // by what it had when it parked -- but it does mean the horizons describe a
 // fleet that is being reconciled, not wall-clock time. It also means a
 // variant's state ages out only while SOME variant is still live, which is the
-// normal case and the one worth testing.
+// normal case and the one worth testing. In that case a parked variant is kept
+// by notePresentVariants, which runs just before this sweep; what ages
+// out is a variant that is no longer discovered at all.
 func (e *Engine) evictStaleLearnedState(ctx context.Context) {
 	logger := ctrl.LoggerFrom(ctx)
 	var history saturation.Evicted
@@ -394,6 +452,7 @@ func (e *Engine) evictStaleLearnedState(ctx context.Context) {
 		logger.Info("evicted stale learned state",
 			"k2History", history.K2History,
 			"muWindows", history.MuWindows,
+			"k2Borrows", history.K2Borrows,
 			"itlWindows", history.ITLWindows,
 			"itlBaselines", history.ITLBaselines,
 			"startEstimates", history.StartEstimates,
