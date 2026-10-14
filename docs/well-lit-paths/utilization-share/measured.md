@@ -1,6 +1,6 @@
 # What sharing one quota did, measured
 
-[← Share one GPU quota between models whose peaks do not coincide](README.md)
+[← Share one GPU quota between models](README.md)
 
 Two models behind one gateway take turns at bursting, under **one** namespace
 quota that is smaller than their two peaks together. The same traffic ran
@@ -16,11 +16,12 @@ from `259c52f8` and deployed by digest. The scenario and the guards that keep
 the arms comparable are in the
 [benchmarking runbook](../../guides/benchmarking/two-model-utilization-share.md).
 The tables below are that report's, unedited, except where a row says it came
-from the controller log. Three later runs, on a scenario with different burst
+from the controller log. Five later runs, on a scenario with different burst
 shapes, follow in
 [their own section](#different-burst-shapes-a-cancel-that-stalled-the-rising-model);
-they found failures the first scenario could not show. Every run used 1 GPU
-per replica.
+they found failures the first scenario could not show. A run with both models
+[P/D-disaggregated](#pd-two-disaggregated-models-under-one-quota) closes the
+page. Every run used 1 GPU per replica.
 
 ## The setup
 
@@ -370,7 +371,8 @@ samples, and `share` in 6%.
   `"start":"measured"`, so the planner paced on the replica start time it had
   measured, not on the 5-minute default.
 - **The cost is not measured.** The `share` arm's GPU sampler stopped for 36
-  minutes mid-run, so the run's report refused to compare the arms; the table
+  minutes mid-run -- the machine driving the run went into standby; the load,
+  in the cluster, did not -- so the run's report refused to compare the arms; the table
   above is its latency rows with that guard relaxed. The 21 274 GPU-seconds
   the sampler did record are a floor, not a measurement.
 
@@ -468,31 +470,97 @@ What moved them:
 A simulation is not a measurement: only the rerun on a cluster will say
 whether the cluster scenario's second burst recovers.
 
-## P/D: not measured
+## P/D: two disaggregated models under one quota
 
-The same three arms were attempted on one P/D-disaggregated model
-(`Qwen/Qwen3-0.6B`, prefill and decode each 1–4 replicas, a quota of 5). The
-idea was for prefill and decode to compete for the quota through alternating
-prompt-heavy and decode-heavy phases. In the `today` arm, decode scaled 1 -> 4
-on the decode-heavy phase. **Prefill never left one replica**, including through
-20 minutes of 15 000-token prompts at 12 rps. With no prefill demand there is
-no prefill-versus-decode competition for the optimizer to resolve, so the
-comparison would only have re-measured decode. It was not run.
+The same three arms ran on two P/D-disaggregated models, each with its own
+prefill and decode Deployment, so **four roles** competed for one quota. There
+was one run of each arm on H200 nodes, from 2026-10-13 to 2026-10-14. The
+controller was deployed by digest (`sha256:13c196c6…`). The scenario is
+`hack/benchmark/scenarios/guides/two-model-shapes-pd.yaml`.
 
-Prefill does queue under such load, but the scaling manager reads that pressure
-on decode, not as prefill demand. Until prefill has a demand signal of its own,
-a P/D quota-sharing benchmark cannot exercise transfers between the two roles.
-The attempt also found two problems in the benchmark tooling, both open:
+| | |
+| --- | --- |
+| models | `unsloth/Meta-Llama-3.1-8B-Instruct` (A), `Qwen/Qwen3-8B` (B), each P/D with a NIXL KV transfer, 1 × H200 per Pod |
+| engine | vLLM v0.31.0 (see below for why not v0.26.0) |
+| quota | `NVIDIA-H200: 10`, one namespace quota for all four roles |
+| bounds | each role 1–4 replicas, so the four roles together could want 16 |
+| load | inference-perf, Poisson open-loop, synthetic prompts. A: 20 000 in / 250 out (prompt-heavy). B: 1000 in / 6000 out (output-heavy) |
+| schedule | 0.25 rps each at rest. B bursts at 1 rps from 120 s to 1320 s; A bursts at 4 rps from 1620 s to 2820 s. 6810 requests per arm |
+| router | EPP v0.11.0, flow control on, `defaultRequestTTL: 30s` (see the caveat below) |
 
-- The standup rendered the scenario's Qwen3-32B resource requests (32 CPU /
-  128 GiB per engine) despite logging the Qwen3-0.6B override. They were set
-  by hand.
-- The decode-heavy loader (4000-token outputs) wrote no results after its
-  load ended, within the 1200 s grace.
+### Time to first token, per rise (ms)
 
-A different P/D scenario now exists and has **not been run**:
-`hack/benchmark/scenarios/guides/two-model-shapes-pd.yaml`, the
-different-burst-shapes load with both 8B models disaggregated, so four roles
-compete for one quota. Its prefill and decode pods take 1 GPU each, and it
-shares an engine cache across replicas so only the first pod of each role
-compiles. It exercises nothing about 8-GPU or whole-node pods.
+| model | arm | served | failed | p50 | p95 | max |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Llama (A) | today | 720 | 240 | 27 827 | 72 752 | 88 687 |
+| Llama (A) | shadow | 783 | 177 | 27 377 | 68 906 | 84 416 |
+| Llama (A) | share | 703 | 257 | 33 185 | 59 154 | 69 037 |
+| Qwen (B) | today | 232 | 8 | 711 | 42 390 | 49 027 |
+| Qwen (B) | shadow | 223 | 17 | 141 | 51 813 | 61 241 |
+| Qwen (B) | share | 240 | 0 | 81 | **95** | 195 |
+
+Whole run, Qwen's p95 was 10 986 / 15 451 / 86 ms (today / shadow / share).
+
+### Accelerators
+
+| arm | GPU-seconds | peak GPUs |
+| --- | ---: | ---: |
+| today | 18 913 | 9 |
+| shadow | 19 676 | 10 |
+| share | 25 791 (+36.4%) | 10 |
+
+### What the optimizer did
+
+In the share arm, 8 transfers completed and none aborted. Qwen's decode lent
+GPUs to both of Llama's roles, prefill and decode. The share arm held models back for 3045 model-seconds, almost
+all of it `floor-pinned` (2850 s), plus 180 s `awaiting-release` and 15 s
+`fast-swing-capped`. The shadow arm planned moves for 2790 s and made none.
+
+### What this says, and how far it goes
+
+- **Qwen's output-heavy burst was served at once with sharing:** p95 95 ms
+  against 42 s today, with no failures.
+- **Llama's prompt-heavy burst was overloaded in every arm.** Sharing lowered
+  its p95 by 19% (72.8 s to 59.2 s), but 20 000-token prompts at 4 rps are more
+  than the quota can prefill.
+- **Sharing cost 36% more GPU-seconds.** The quota was binding (peak 10 of 10),
+  and the extra GPU-seconds are GPUs the quota allowed and today's
+  optimizer did not use.
+- **The failures are censored latency, not errors.** Every failed request was
+  a 429 `request evicted from queue: request TTL expired`: the router shed
+  anything queued past 30 s. A shed request is missing from the percentiles, so
+  Llama's p95 is a floor in every arm, and an arm that sheds more reads faster.
+  The aggregated runs above used an EPP that never expires a queued request, so
+  they had no such failures. The scenario now sets `defaultRequestTTL: 60s`;
+  this run predates that change.
+- This is one run of each arm, with one rise per model, and no repetition. A
+  difference the size of the shadow arm's spread from today (9 s on Qwen) is
+  not a result.
+
+### Why vLLM v0.31.0
+
+The first P/D attempts ran vLLM v0.26.0. Each one broke its KV link within
+minutes: prefill failed with `NIXL_ERR_REMOTE_DISCONNECT`, invalidated the
+decode agent, and every later request returned a 500. It happened with one
+prefill and one decode, at no load, with no scaling, so it was not the
+optimizer. The upstream reports match
+([vllm-project/vllm#59870](https://github.com/vllm-project/vllm/issues/59870),
+[#59971](https://github.com/vllm-project/vllm/issues/59971)). On v0.31.0 a
+single-pair test ran clean, including 20 000-token prompts while the
+autoscaler took Llama to 4 prefill and 2 decode replicas, and the run above
+logged no NIXL error on any engine. The scenario pins `v0.31.0`.
+
+The benchmark's model probe could not see that failure. It sent a one-word
+prompt, which fills no KV block, so prefill handed decode nothing and decode
+answered alone. On a P/D model it now sends three prompts of about a thousand
+tokens, each with its own first block, and all three must answer.
+
+### An earlier attempt, on one model
+
+Before this, the same arms were attempted on one P/D model (`Qwen/Qwen3-0.6B`,
+prefill and decode each 1–4 replicas, a quota of 5). Prefill never left one
+replica, including through 20 minutes of 15 000-token prompts at 12 rps: the
+scaling manager read the prefill queue as pressure on decode, so there was no
+prefill-versus-decode competition to resolve, and it was not run to the end.
+In the two-model scenario prefill does scale: on the prompt-heavy model it
+reached 4 replicas.

@@ -152,6 +152,18 @@ if bash deploy/weights.sh apply -n check-ns --model m --path /mnt/local/models -
 if bash deploy/weights.sh apply -n check-ns --model m --path /mnt/local/models --image "$IMG" --capacity '1Ti; rm' --dry-run >/dev/null 2>&1; then fail "a capacity that is not a quantity must be refused"; else ok "a capacity that is not a quantity is refused"; fi
 if bash deploy/weights.sh apply -n check-ns --model m --path /mnt/local/models --dry-run >/dev/null 2>&1; then fail "apply without --image must be refused"; else ok "apply without --image is refused"; fi
 if bash deploy/weights.sh apply -n check-ns --model m --path /mnt/local/models --image "$IMG" --all --dry-run >/dev/null 2>&1; then fail "apply must refuse --all"; else ok "apply: --all is refused"; fi
+# The downloader's memory limit. At 2Gi it was OOMKilled on every node fetching
+# Qwen/Qwen3-8B and Meta-Llama-3.1-8B, and restarted forever: the default must
+# cover an 8B model, and --memory must reach the container.
+mem_limit() { yq -r 'select(.kind == "DaemonSet") | .spec.template.spec.containers[0].resources.limits.memory' "$1"; }
+mem_default="$(mem_limit "$T/render-default.yaml")"
+case "$mem_default" in
+    *Gi) [ "${mem_default%Gi}" -ge 16 ] 2>/dev/null && ok "the downloader's default memory limit is $mem_default, enough for an 8B model" || fail "the downloader's default memory limit is $mem_default; 2Gi was OOMKilled on an 8B model" ;;
+    *) fail "the downloader's default memory limit is '$mem_default', not a Gi quantity of at least 16" ;;
+esac
+bash deploy/weights.sh apply -n check-ns --model Qwen/Qwen3-32B --path /mnt/local/models --image "$IMG" --memory 48Gi --dry-run > "$T/render-mem.yaml"
+[ "$(mem_limit "$T/render-mem.yaml")" = 48Gi ] && ok "--memory sets the downloader's memory limit" || fail "--memory 48Gi rendered a limit of '$(mem_limit "$T/render-mem.yaml")'"
+if bash deploy/weights.sh apply -n check-ns --model m --path /mnt/local/models --image "$IMG" --memory 'lots' --dry-run >/dev/null 2>&1; then fail "apply must refuse --memory that is not a quantity"; else ok "apply: --memory that is not a quantity is refused"; fi
 
 # ---------------------------------------------------------------------------
 # 2. status and delete, offline.
@@ -170,9 +182,13 @@ cat > "$T/nodes.json" <<EOF
  {"metadata":{"name":"node-amd",     "labels":{"amd.com/gpu.product-name":"MI300X"}}},
  {"metadata":{"name":"node-evicted", "labels":{"nvidia.com/gpu.product":"H200"}}},
  {"metadata":{"name":"node-unsched", "labels":{"nvidia.com/gpu.product":"H200"}}},
- {"metadata":{"name":"node-oom",     "labels":{"nvidia.com/gpu.product":"H200"}}}
+ {"metadata":{"name":"node-oom",     "labels":{"nvidia.com/gpu.product":"H200"}}},
+ {"metadata":{"name":"node-cordoned","labels":{"nvidia.com/gpu.product":"H200"}},"spec":{"unschedulable":true,"taints":[{"key":"node.kubernetes.io/unschedulable","effect":"NoSchedule"},{"key":"node.kubernetes.io/disk-pressure","effect":"NoSchedule"}]}},
+ {"metadata":{"name":"node-foreign", "labels":{"nvidia.com/gpu.product":"H200"}},"spec":{"taints":[{"key":"example.com/team-x","value":"only","effect":"NoSchedule"}]}}
 ]}
 EOF
+# the DaemonSet as apply wrote it: it tolerates nvidia.com/gpu, nothing else
+printf '%s' '{"spec":{"template":{"spec":{"tolerations":[{"key":"nvidia.com/gpu","operator":"Exists"}]}}}}' > "$T/ds.json"
 cat > "$T/pods.json" <<EOF
 {"items":[
  {"metadata":{"name":"dl-ready","labels":{"wva.llmd.ai/weights":"${NAME}"}},"spec":{"nodeName":"node-ready"},"status":{"phase":"Running","containerStatuses":[{"ready":true,"state":{"running":{}}}]}},
@@ -200,6 +216,8 @@ case "\$1 \$2" in
       want -n check-ns
       case "\$ARGV" in
         *" -l "*) want -l "$LBL"; printf '%s\n' "\${STUB_DAEMONSETS-Qwen/Qwen3-32B}" ;;
+        *" -o json "*) case "\$ARGV" in *" ${NAME} "*) ;; *) echo "stub kubectl: get daemonset for a name that is not the DaemonSet:\$ARGV" >&2; exit 2 ;; esac
+           cat "$T/ds.json" ;;
         *) want -o "jsonpath={.spec.template.spec.nodeSelector}"
            case "\$ARGV" in *" ${NAME} "*) ;; *) echo "stub kubectl: get daemonset for a name that is not the DaemonSet:\$ARGV" >&2; exit 2 ;; esac
            if [ -n "\${STUB_DS_SELECTOR:-}" ]; then jq -cn --arg k "\${STUB_DS_SELECTOR%%=*}" --arg v "\${STUB_DS_SELECTOR#*=}" '{(\$k): \$v}'; else printf '{}'; fi ;;
@@ -264,7 +282,18 @@ grep -q 'Permission denied' "$T/status.out" && fail "status: a permission diagno
 STUB_LOG='PermissionError: [Errno 13] Permission denied: /weights/models/Qwen' PATH="$STUB_PATH" bash deploy/weights.sh status -n check-ns > "$T/eacces.out" 2>&1 || true
 grep -q 'cannot write .*Permission denied in its log' "$T/eacces.out" && grep -q 'chgrp 0 DIR && chmod 2775 DIR && chcon -t container_file_t DIR' "$T/eacces.out" && ok "status: a downloader dying on Permission denied is named, with the node-directory steps (OpenShift: project UID, no relabel)" || fail "status EACCES diagnosis: $(grep -c 'Permission' "$T/eacces.out") line(s)"
 grep -q '^logs -n check-ns dl-failing --tail=20$' "$T/calls" && ok "status: the log read names the failing pod, no other" || fail "status: log read: $(grep '^logs' "$T/calls" | head -2 | tr '\n' ';')"
-grep -q '1/8 nodes hold it; 7 do not' "$T/status.out" && ok "status: the tally counts only Ready (download complete) as holding" || fail "status: tally: $(grep 'nodes hold' "$T/status.out")"
+grep -q '1/8 usable nodes hold it; 7 do not' "$T/status.out" && ok "status: the tally counts only Ready (download complete) as holding, on usable nodes" || fail "status: tally: $(grep 'nodes hold' "$T/status.out")"
+expect_line node-cordoned excluded
+grep -qE '^  node-foreign +excluded +tainted example.com/team-x:NoSchedule' "$T/status.out" && ok "status: a node tainted against the downloader is excluded, with the taint" || fail "status: foreign taint: $(grep '^  node-foreign' "$T/status.out")"
+grep -q '2 node(s) excluded and not counted' "$T/status.out" && ok "status: the excluded nodes are counted out, and said so" || fail "status: excluded note: $(grep excluded "$T/status.out" | tail -1)"
+# A finished preparation exits 0 although the cluster has a cordoned node
+# under DiskPressure and a node tainted for another team: neither can run an
+# engine, and counting them reported 8/17 and failed a complete preparation.
+cp "$T/nodes.json" "$T/nodes-full.json"
+jq '.items |= map(select(.metadata.name == "node-ready" or .metadata.name == "node-cordoned" or .metadata.name == "node-foreign"))' "$T/nodes-full.json" > "$T/nodes.json"
+if PATH="$STUB_PATH" bash deploy/weights.sh status -n check-ns > "$T/done.out" 2>&1; then grep -q '1/1 usable nodes hold it' "$T/done.out" && ok "status: every usable node holding the weights is a pass, cordoned and foreign-tainted nodes aside" || fail "status complete: $(grep 'nodes hold' "$T/done.out")"; else fail "status: a complete preparation failed on nodes no engine can use: $(grep -E 'nodes hold|excluded' "$T/done.out" | tr '
+' ';')"; fi
+cp "$T/nodes-full.json" "$T/nodes.json"
 grep -q '1 node(s) carry an AMD, Intel or Gaudi accelerator label' "$T/status.out" && ok "status: a non-NVIDIA node under the default placement is named" || fail "status: vendor warning missing"
 grep -q "claim ${NAME}: Bound" "$T/status.out" && ok "status: reports the claim Bound" || fail "status: claim line: $(head -1 "$T/status.out")"
 [ "$rc" -ne 0 ] && ok "status: exits non-zero while a node lacks the weights" || fail "status: exit 0 with nodes lacking the weights"
@@ -385,11 +414,31 @@ check([t["matchExpressions"][0]["key"] for t in terms] == ns["PRODUCT_KEYS"], "t
 check(all(t["matchExpressions"][1] == {"key": t["matchExpressions"][0]["key"], "operator": "NotIn", "values": [""]} for t in terms), "each term requires a non-empty label")
 check(hp["tolerations"] == [{"key": "nvidia.com/gpu", "operator": "Exists"}], "tolerates the accelerator taint")
 check(d["scenario"][0]["common"]["storage"]["modelPvc"]["size"] == "40Gi" and d["scenario"][0]["harness"] == {"name": "x"}, "nothing else changed")
+# The harness waits until numberReady equals desired; a cordoned node and a node
+# tainted for another team are in desired unless the affinity keeps them out.
+notin = {"key": "kubernetes.io/hostname", "operator": "NotIn", "values": ["node-cordoned", "node-foreign"]}
+check(all(len(t["matchExpressions"]) == 3 and t["matchExpressions"][2] == notin for t in terms), "every term keeps the downloader off the cordoned and the foreign-tainted node: %s" % [t["matchExpressions"][2:] for t in terms])
 if bad:
     [print("  FAIL " + b) for b in bad]; sys.exit(1)
 print("  ok   model_hostpath: nested layout gets the block under common.storage with the affinity and the claim's size")
+print("  ok   model_hostpath: the downloader is kept off a cordoned node and a node tainted against it, so the harness wait can complete")
 PYEOF
+grep -q 'kept off node-cordoned (cordoned), node-foreign (tainted example.com/team-x:NoSchedule)' "$T/hp1.out" && ok "model_hostpath: says which nodes it kept the downloader off, and why" || fail "model_hostpath exclusion message: $(cat "$T/hp1.out")"
+# a taint the run tolerates is not a reason to exclude
+cp "$T/nested.yaml" "$T/n8.yaml"
+PATH="$STUB_PATH" bash hack/benchmark/model_hostpath.sh "$T/n8.yaml" /mnt/local/wva check-ns "" example.com/team-x > "$T/hp8.out" 2>&1 || fail "model_hostpath with a toleration failed: $(cat "$T/hp8.out")"
+[ "$(yq -r '.scenario[0].common.storage.hostPath.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[2].values | join(",")' "$T/n8.yaml")" = node-cordoned ] && ok "model_hostpath: a node whose taint the run tolerates stays in; the cordoned one does not" || fail "model_hostpath tolerated taint: $(yq -o json -I0 '.scenario[0].common.storage.hostPath.affinity' "$T/n8.yaml")"
+# with a KEY=VALUE selector the exclusion is an affinity beside the nodeSelector
+cp "$T/nested.yaml" "$T/n9.yaml"
+STUB_SELECTOR=example.com/accelerator=h200 PATH="$STUB_PATH" bash hack/benchmark/model_hostpath.sh "$T/n9.yaml" /mnt/local/wva check-ns example.com/accelerator=h200 > "$T/hp9.out" 2>&1 || fail "model_hostpath with a selector failed: $(cat "$T/hp9.out")"
+[ "$(yq -r '.scenario[0].common.storage.hostPath | .nodeSelector["example.com/accelerator"] + " " + (.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].values | join(","))' "$T/n9.yaml")" = "h200 node-cordoned,node-foreign" ] && ok "model_hostpath: with a selector, the excluded nodes are an affinity beside the nodeSelector" || fail "model_hostpath selector exclusion: $(yq -o json -I0 '.scenario[0].common.storage.hostPath' "$T/n9.yaml")"
 grep -q '^#' "$T/n1.yaml" && ok "model_hostpath: the scenario keeps its comments (yq, not a dump)" || fail "model_hostpath: comments lost"
+# The rule itself, on the cases the fixtures above do not reach: a toleration
+# with no key tolerates every taint, and PreferNoSchedule never excludes.
+printf '%s' '{"items":[{"metadata":{"name":"soft"},"spec":{"taints":[{"key":"example.com/x","effect":"PreferNoSchedule"}]}},{"metadata":{"name":"hard"},"spec":{"taints":[{"key":"example.com/x","effect":"NoSchedule"}]}}]}' > "$T/rule.json"
+rule="$(bash -c '. deploy/lib/accelerator_nodes.sh; accelerator_excluded_json "$1" < "$2" | jq -r "map(.name) | join(\",\")"' _ '["nvidia.com/gpu"]' "$T/rule.json")"
+any="$(bash -c '. deploy/lib/accelerator_nodes.sh; accelerator_excluded_json "$1" < "$2" | jq -r "length"' _ '["*"]' "$T/rule.json")"
+[ "$rule" = hard ] && [ "$any" = 0 ] && ok "usable nodes: PreferNoSchedule never excludes, and a keyless toleration tolerates every taint" || fail "usable-node rule: excluded '$rule' with nvidia.com/gpu, $any with a keyless toleration"
 cp "$T/shared.yaml" "$T/s1.yaml"
 PATH="$STUB_PATH" bash hack/benchmark/model_hostpath.sh "$T/s1.yaml" /mnt/local/wva check-ns example.com/accelerator=h200 dedicated,example.com/pool > "$T/hp2.out" 2>&1 || fail "model_hostpath on the shared layout failed: $(cat "$T/hp2.out")"
 [ "$(yq -r '.shared.storage.hostPath.tolerations | map(.key) | join(",")' "$T/s1.yaml")" = "nvidia.com/gpu,dedicated,example.com/pool" ] && ok "model_hostpath: the taint keys reach the harness DaemonSet's tolerations, after nvidia.com/gpu" || fail "model_hostpath tolerations: $(yq '.shared.storage.hostPath.tolerations' "$T/s1.yaml")"

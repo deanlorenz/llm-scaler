@@ -341,8 +341,18 @@ shared:
   # metrics-data-source (v0.11.0's auto-created one does not reach the
   # engines; every endpoint then reads stale and is scored fully saturated).
   # See docs/reference/router-configuration.md and pd-disaggregation.yaml.
+  #
+  # The engine is vLLM v0.31.0, not the harness's v0.26.0. On v0.26.0 the
+  # NixlConnector loses a decode's link to its prefill minutes after start,
+  # with both Pods up, no load and no scaling: one NIXL_ERR_REMOTE_DISCONNECT,
+  # then "remote agent ... was invalidated" and a 500 on every request that
+  # pair serves, until the decode restarts (vllm-project/vllm#59870, #59971).
+  # The standup pre-pulls and prepares caches for this pin, not the default
+  # (hack/benchmark/engine_image.sh reads it from here).
   # --------------------------------------------------------------------------
   images:
+    vllm:
+      tag: v0.31.0
     routingSidecar:
       tag: v0.9.0
     routerEndpointPicker:
@@ -545,8 +555,16 @@ shared:
                 insecureSkipVerify: true
             - type: core-metrics-extractor
             flowControl:
-              # Saturated regime: endpoints exist and are busy.
-              defaultRequestTTL: 30s
+              # Saturated regime: endpoints exist and are busy. NOT the P/D
+              # guide's 30s, which is a serving objective: here it shed every
+              # request queued past 30s as a 429 (248, 194 and 257 per arm on
+              # the first run), and a shed request is missing from the TTFT
+              # percentiles, so the arm that sheds most reads fastest. 60s
+              # doubles the wait before a request is shed and still keeps the
+              # queue bounded. Keep it under the 300s route
+              # timeout (requestTimeout, above), so a request over budget is a
+              # readable 429 from the router rather than a gateway 504.
+              defaultRequestTTL: 60s
               # Empty-pool regime (scale-from-zero). This scenario never goes
               # to zero; kept as the P/D guide sets it.
               noEndpointRequestTTL: 180s

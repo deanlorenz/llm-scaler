@@ -91,7 +91,12 @@ NS="${BENCHMARK_NAMESPACE:-}"
 # only name this driver can rely on. The objects in a stack are named after a
 # shortName the harness GENERATES and that the scenario cannot override, so
 # every lookup here goes through the route rather than through a name.
+# Whether the caller named the scenario: teardown trusts a recorded standup
+# spec over a default, and refuses rather than guess (see verb_teardown).
+BENCH_SPEC_GIVEN="${BENCH_SPEC:+1}"
 BENCH_SPEC="${BENCH_SPEC:-guides/two-model-warm-pool}"
+# The ConfigMap the standup records its scenario in, for the teardown.
+STANDUP_RECORD="wva-two-model-standup"
 STACK_A="${STACK_A:-llama-31-8b}"
 STACK_B="${STACK_B:-qwen3-8b}"
 MODEL_A="${MODEL_A:-unsloth/Meta-Llama-3.1-8B-Instruct}"
@@ -226,6 +231,8 @@ POOL_RESERVE="${POOL_RESERVE:-1}"
 POOL_MIN_HOLD="${POOL_MIN_HOLD:-}"
 POOL_MAX_HOLD="${POOL_MAX_HOLD:-}"
 GPU_SAMPLE_SECONDS="${GPU_SAMPLE_SECONDS:-5}"
+# Whole seconds, for each of the sampler's API calls (check_sampler_settings).
+GPU_SAMPLE_TIMEOUT_SECONDS="${GPU_SAMPLE_TIMEOUT_SECONDS:-20}"
 OUT_ROOT="${OUT_ROOT:-$ROOT/two-model-results}"
 LOAD_IMAGE="${LOAD_IMAGE:-}"
 CACHE_CLAIM="${CACHE_CLAIM:-model-pvc}"
@@ -240,6 +247,17 @@ WVA_NS="${WVA_NS:-$NS}"
 MONITORING_NS="${MONITORING_NS:-}"
 ACCELERATOR="${ACCELERATOR:-}"
 RESET_TIMEOUT="${RESET_TIMEOUT:-600}"
+# Whether the standup reuses a gateway control plane the cluster already runs
+# (auto: when an istio.io/gateway-controller GatewayClass exists) instead of
+# installing istio-base over it. Applied to the scenario COPY the standup
+# renders, never to the tracked file.
+GATEWAY_REUSE="${GATEWAY_REUSE:-auto}"
+GATEWAY_PROVIDER_NAMESPACE="${GATEWAY_PROVIDER_NAMESPACE:-istio-system}"
+# A decode Pod's CPU and memory request, for nodes whose spare CPU is smaller
+# than the scenario's. Empty keeps the scenario's own values. Applied to the
+# scenario copy at standup, and used by preflight's placement count.
+DECODE_CPU="${DECODE_CPU:-}"
+DECODE_MEMORY="${DECODE_MEMORY:-}"
 
 BLUE=$'\033[0;34m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'; RED=$'\033[0;31m'; NC=$'\033[0m'
 info()  { echo "${BLUE}[INFO]${NC} $*" >&2; }
@@ -253,6 +271,11 @@ k()  { kubectl ${KUBE_CONTEXT:+--context "$KUBE_CONTEXT"} -n "$NS" "$@"; }
 kc() { kubectl ${KUBE_CONTEXT:+--context "$KUBE_CONTEXT"} "$@"; }
 
 need_ns() { [ -n "$NS" ] || die "BENCHMARK_NAMESPACE is required."; }
+
+case "$GATEWAY_REUSE" in
+    auto|true|false) ;;
+    *) die "GATEWAY_REUSE=$GATEWAY_REUSE: use auto (reuse the cluster's Istio when it runs one), true or false" ;;
+esac
 
 # The accelerators this run peaks at, and it is the SAME in both arms by
 # construction -- that is the point.
@@ -282,6 +305,30 @@ peak_gpus() {
     echo $(( models * per_model * GPUS_PER_REPLICA ))
 }
 
+# quota_cap prints the GPUs the standup quota allows the models -- WVA_QUOTAS,
+# the same value the standup line sets ('<accelerator>=<n>', several separated
+# by spaces or commas) -- or nothing when there is no quota to read. With
+# several accelerators it takes ACCELERATOR's entry, and without ACCELERATOR it
+# gives up rather than guess. A run under a quota below the models' combined
+# ceilings never holds more than the quota, so placing the ceilings asked for
+# accelerators the run cannot use: preflight refused a 4-GPU-quota run for a
+# peak of 6.
+quota_cap() {
+    [ -n "${WVA_QUOTAS:-}" ] || return 0
+    local entries=() e key val pick=""
+    read -r -a entries <<< "$(printf '%s' "$WVA_QUOTAS" | tr ',' ' ')"
+    for e in "${entries[@]}"; do
+        key="${e%%=*}"; val="${e#*=}"
+        case "$val" in ""|*[!0-9]*) return 0 ;; esac
+        if [ -n "$ACCELERATOR" ]; then
+            [ "$key" = "$ACCELERATOR" ] && pick="$val"
+        elif [ "${#entries[@]}" -eq 1 ]; then
+            pick="$val"
+        fi
+    done
+    printf '%s' "$pick"
+}
+
 # Whether the models are P/D: PD_SINGLE_STACK, or a scenario whose prefill is
 # enabled (two-model-shapes-pd). Read from the scenario, because preflight runs
 # before anything is deployed.
@@ -306,44 +353,112 @@ arm_max_replicas() { echo "$MAX_REPLICAS"; }
 # preflight
 # ---------------------------------------------------------------------------
 decode_cpu() {
-    # The decode Pod's CPU request, from the live Deployment when the stacks are
-    # up and from the scenario otherwise -- preflight runs before standup.
+    # The decode Pod's CPU request in whole cores: DECODE_CPU when set (the value
+    # the standup will apply), else the live Deployments when the stacks are up,
+    # else the scenario -- preflight runs before standup. A Pod asks for the SUM
+    # of its containers, and the largest decode Pod is the one that must fit.
     local v
-    v="$(k get deploy -o json 2>/dev/null | jq -r '
-        [.items[] | select(.metadata.name|test("decode"))
-         | .spec.template.spec.containers[]?.resources.requests.cpu // empty] | .[0] // ""' 2>/dev/null)"
+    v="$DECODE_CPU"
+    [ -z "$v" ] && v="$(k get deploy -o json 2>/dev/null | jq -r '
+        def mc: if test("m$") then (.[:-1] | tonumber) else (tonumber * 1000) end;
+        [.items[] | select(.metadata.name | test("decode"))
+         | [.spec.template.spec.containers[]?.resources.requests.cpu // empty | mc] | add // empty]
+        | max // empty | (. / 1000 | ceil)' 2>/dev/null)"
     [ -z "$v" ] && v="$(scenario_value 'cpu')"
     printf '%s' "${v:-16}"
 }
 
 decode_mem_gi() {
     local v
-    v="$(k get deploy -o json 2>/dev/null | jq -r '
-        [.items[] | select(.metadata.name|test("decode"))
-         | .spec.template.spec.containers[]?.resources.requests.memory // empty] | .[0] // ""' 2>/dev/null)"
+    v="$DECODE_MEMORY"
+    [ -z "$v" ] && v="$(k get deploy -o json 2>/dev/null | jq -r '
+        def gi: if test("Gi$") then (.[:-2] | tonumber)
+                elif test("Mi$") then ((.[:-2] | tonumber) / 1024)
+                elif test("Ki$") then ((.[:-2] | tonumber) / 1048576)
+                elif test("G$") then ((.[:-1] | tonumber) * 1000000000 / 1073741824)
+                else (tonumber / 1073741824) end;
+        [.items[] | select(.metadata.name | test("decode"))
+         | [.spec.template.spec.containers[]?.resources.requests.memory // empty | gi] | add // empty]
+        | max // empty | ceil | tostring + "Gi"' 2>/dev/null)"
     [ -z "$v" ] && v="$(scenario_value 'memory')"
     printf '%s' "${v:-64Gi}" | sed 's/Gi$//'
 }
 
 scenario_value() {
     # One decode resources.requests field out of the scenario spec, so preflight
-    # can answer before anything is deployed.
+    # can answer before anything is deployed: the LARGEST across the stacks.
+    #
+    # Read by indentation, not by the first match. The first `decode:` in these
+    # scenarios is the shared block (container ports, no requests), so a regex
+    # anchored there found nothing and preflight fell back to 16 CPU for a
+    # scenario that asks for 8 -- and refused a cluster with room, saying only
+    # five Pods could be placed.
     local key="$1" file="$ROOT/hack/benchmark/scenarios/$BENCH_SPEC.yaml"
     [ -f "$file" ] || return 0
     python3 - "$file" "$key" <<'PY' 2>/dev/null || true
 import re, sys
-text = open(sys.argv[1], encoding="utf-8").read()
+lines = open(sys.argv[1], encoding="utf-8").read().replace("\r\n", "\n").split("\n")
 key = sys.argv[2]
-# The decode block's requests, not the router's or the pool's: anchor on
-# `decode:` and take the first `requests:` under it.
-m = re.search(r"\n\s*decode:\n(.*?)(?=\n\s{0,6}\w+:\n)", text, re.S)
-block = m.group(1) if m else text
-r = re.search(r"requests:\n(.*?)(?=\n\s*\w+:|\Z)", block, re.S)
-if r:
-    v = re.search(r"\b%s:\s*\"?([^\"\n]+)\"?" % key, r.group(1))
-    if v:
-        print(v.group(1).strip().strip('"'))
+
+def depth(line):
+    return len(line) - len(line.lstrip(" "))
+
+def meaningful(line):
+    s = line.strip()
+    return bool(s) and not s.startswith("#")
+
+def size(v):
+    units = {"m": 0.001, "Ki": 1.0 / 1048576, "Mi": 1.0 / 1024, "Gi": 1.0, "G": 1e9 / 1073741824}
+    for u, f in units.items():
+        if v.endswith(u):
+            return float(v[: -len(u)]) * f
+    return float(v)
+
+found = []
+i = 0
+while i < len(lines):
+    m = re.match(r"^(\s*)decode:\s*(#.*)?$", lines[i])
+    if not m:
+        i += 1
+        continue
+    d = len(m.group(1))
+    req = None
+    j = i + 1
+    while j < len(lines):
+        line = lines[j]
+        if meaningful(line) and depth(line) <= d:
+            break
+        r = re.match(r"^(\s*)requests:\s*(#.*)?$", line)
+        if r:
+            req = len(r.group(1))
+        elif req is not None and meaningful(line):
+            if depth(line) <= req:
+                req = None
+            else:
+                v = re.match(r'^\s*%s:\s*"?([^"#\s]+)"?' % re.escape(key), line)
+                if v:
+                    found.append(v.group(1))
+        j += 1
+    i = j
+if found:
+    print(max(found, key=size))
 PY
+}
+
+istio_gatewayclasses() {
+    # How many GatewayClasses an existing Istio control plane serves here.
+    kc get gatewayclass -o json 2>/dev/null | jq -r '
+        [.items[] | select(.spec.controllerName == "istio.io/gateway-controller")] | length' 2>/dev/null
+}
+
+gateway_reuse() {
+    # true when the standup should reuse the gateway control plane the cluster
+    # already runs (skipInstall on the scenario copy) instead of installing
+    # istio-base over it. GATEWAY_REUSE=auto decides from the cluster.
+    case "$GATEWAY_REUSE" in
+        true|false) printf '%s' "$GATEWAY_REUSE" ;;
+        *) if [ "$(istio_gatewayclasses)" -gt 0 ] 2>/dev/null; then printf true; else printf false; fi ;;
+    esac
 }
 
 placeable_slots() {
@@ -395,18 +510,47 @@ verb_preflight() {
     # cordoned or NotReady nodes overstates it, and the run then spends its
     # bursts Pending -- which measures the scheduler, identically in both arms,
     # and hides whatever the pool did.
-    local total used free want
-    total="$(kc get nodes -o json 2>/dev/null | jq '
+    #
+    # Counted the way the placement below counts: a pod holds accelerators only
+    # once it is BOUND to a node (spec.nodeName). A Pending pod the scheduler
+    # cannot place holds none -- counting two such 8-GPU pods of another team
+    # made preflight report "only 2 free" beside "18 placeable" and fail. They
+    # are a risk instead (they may take accelerators first), and said so.
+    local total used free want nodes_f pods_f unbound
+    nodes_f="$(mktemp)"; pods_f="$(mktemp)"
+    kc get nodes -o json > "$nodes_f" 2>/dev/null || echo '{"items":[]}' > "$nodes_f"
+    kc get pods -A -o json > "$pods_f" 2>/dev/null || echo '{"items":[]}' > "$pods_f"
+    total="$(jq '
         [.items[]
          | select(.spec.unschedulable != true)
          | select([.status.conditions[]? | select(.type=="Ready" and .status=="True")] | length > 0)
-         | .status.allocatable["nvidia.com/gpu"] // "0" | tonumber] | add // 0')"
-    used="$(kc get pods -A -o json 2>/dev/null | jq '
-        [.items[] | select(.status.phase=="Running" or .status.phase=="Pending")
-         | .spec.containers[].resources.requests["nvidia.com/gpu"] // "0" | tonumber] | add // 0')"
+         | .status.allocatable["nvidia.com/gpu"] // "0" | tonumber] | add // 0' "$nodes_f")"
+    used="$(jq --slurpfile n "$nodes_f" '
+        [$n[0].items[]
+         | select(.spec.unschedulable != true)
+         | select([.status.conditions[]? | select(.type=="Ready" and .status=="True")] | length > 0)
+         | .metadata.name] as $usable
+        | [.items[] | select(.status.phase=="Running" or .status.phase=="Pending")
+           | select(.spec.nodeName != null and (.spec.nodeName as $x | $usable | index($x)) != null)
+           | .spec.containers[].resources.requests["nvidia.com/gpu"] // "0" | tonumber] | add // 0' "$pods_f")"
+    unbound="$(jq -r '
+        [.items[] | select(.status.phase=="Pending" and .spec.nodeName == null)
+         | {g: ([.spec.containers[].resources.requests["nvidia.com/gpu"] // "0" | tonumber] | add)}
+         | select(.g > 0) | .g] | "\(length) \(add // 0)"' "$pods_f")"
+    rm -f "$nodes_f" "$pods_f"
     free=$(( ${total:-0} - ${used:-0} ))
     want="$(peak_gpus)"
-    info "accelerators: ${total:-?} schedulable, ${used:-?} requested, ${free} free; this run peaks at ${want}"
+    local cap
+    cap="$(quota_cap)"
+    if [ -n "$cap" ] && [ "$cap" -lt "$want" ]; then
+        info "the quota (WVA_QUOTAS=${WVA_QUOTAS}) holds the models to ${cap} GPU(s), below the ${want} their ceilings allow; placement is checked for ${cap}"
+        want="$cap"
+    fi
+    info "accelerators: ${total:-?} schedulable, ${used:-?} held by pods on those nodes, ${free} free; this run peaks at ${want}"
+    if [ "${unbound%% *}" -gt 0 ] 2>/dev/null; then
+        warn "${unbound%% *} Pending pod(s) wait for ${unbound#* } accelerator(s) and hold none yet; they are not"
+        warn "  counted, but whatever frees up first may go to them rather than to this run."
+    fi
     info "  nopool arm: 2 models x 1..${MAX_REPLICAS} replicas"
     info "  floor arm:  2 models x ${FLOOR_REPLICAS}..${MAX_REPLICAS} replicas"
     info "  pool arm:   2 models x 1..${MAX_REPLICAS} replicas + a ${POOL_REPLICAS}-Pod pool on top -- the same ceiling in every arm; the insurance is priced in GPU-seconds"
@@ -443,7 +587,9 @@ verb_preflight() {
         warn "${free} accelerators are free but only ${slots} of them can actually take a Pod: the"
         warn "  run peaks at ${want}. The nodes with spare accelerators do not have $(decode_cpu) spare cores."
         warn "  Replicas would sit Pending and the arm would measure a fleet it never got."
-        warn "  Lower the decode CPU request, lower MAX_REPLICAS, or use a cluster with room."
+        warn "  Lower the decode request (DECODE_CPU=<cores>, DECODE_MEMORY=<n>Gi -- the standup applies"
+        warn "  them to its scenario copy), lower MAX_REPLICAS, or use a cluster with room; then run"
+        warn "  preflight again with the same settings."
         rc=1
     fi
     # The pool arm holds its Pods ON TOP of the models' ceiling. Reported, not
@@ -469,14 +615,19 @@ verb_preflight() {
         info "accelerator: $ACCELERATOR (from ACCELERATOR)"
     elif [ "${count:-0}" -eq 1 ]; then
         info "accelerator: $products"
+    # A POOL-ONLY question, so a warning and not a refusal: the models are placed
+    # by their accelerator request, not by this label, and the share arms refuse
+    # a pool outright. Refusing here failed preflight for runs that never create
+    # one -- on a cluster whose nodes carry the same GPU under two label keys.
+    # pool-create refuses without exactly one product, which is where it binds.
     elif [ "${count:-0}" -eq 0 ]; then
-        warn "no node advertises an accelerator product label this knows; set ACCELERATOR=<product> or the pool lands anywhere"
-        rc=1
+        warn "no node advertises an accelerator product label this knows. Only a pool arm needs one:"
+        warn "  set ACCELERATOR=<product> before pool-create, which refuses without it. Arms with no pool are unaffected."
     else
         warn "this cluster advertises ${count} accelerator products:"
         printf '%s\n' "$products" | sed 's/^/      /' >&2
-        warn "  A pool serves ONE of them. Set ACCELERATOR=<product> so the pool and the models agree."
-        rc=1
+        warn "  Only a pool arm needs one: a pool serves ONE product, so set ACCELERATOR=<product> before"
+        warn "  pool-create, which refuses without it. Arms with no pool (the share arms refuse one) are unaffected."
     fi
 
     # WHO OWNS ISTIO. The standup installs istio-base + istiod by helmfile, and
@@ -488,28 +639,30 @@ verb_preflight() {
     # earlier, not Helm-managed. The standup got as far as deploying one stack
     # before dying, and the half-built namespace then tripped the EPP-reuse
     # guard on the next attempt, so the fix was two failures away from the
-    # cause. The scenario can say "reuse what is there" instead.
-    local gw_installed gw_skips
-    gw_installed="$(kc get gatewayclass -o json 2>/dev/null | jq -r '
-        [.items[] | select(.spec.controllerName == "istio.io/gateway-controller")] | length')"
+    # cause. The standup reuses what is there instead: GATEWAY_REUSE=auto (the
+    # default) marks the scenario COPY skipInstall when the cluster runs Istio,
+    # so nobody hand-edits a tracked scenario to get past this.
+    local gw_installed gw_skips gw_reuse
+    gw_installed="$(istio_gatewayclasses)"
     gw_skips="$(grep -c 'skipInstall:[[:space:]]*true' \
         "$ROOT/hack/benchmark/scenarios/$BENCH_SPEC.yaml" 2>/dev/null || true)"
-    if [ "${gw_installed:-0}" -gt 0 ] && [ "${gw_skips:-0}" -eq 0 ]; then
+    gw_reuse="$(gateway_reuse)"
+    [ "${gw_skips:-0}" -gt 0 ] && gw_reuse=true
+    if [ "${gw_installed:-0}" -gt 0 ] && [ "$gw_reuse" != true ]; then
         warn "this cluster already provides Istio (an istio.io/gateway-controller GatewayClass exists),"
-        warn "  and the scenario does not say so. standup would try to install istio-base over it and"
+        warn "  and GATEWAY_REUSE=$GATEWAY_REUSE. standup would try to install istio-base over it and"
         warn "  fail on ownership metadata, part-way through, leaving a namespace that the next attempt"
-        warn "  refuses as someone else's. Add this under the scenario's gateway: block:"
-        warn "      providerNamespace: istio-system   # where the existing control plane lives"
-        warn "      skipInstall: true"
+        warn "  refuses as someone else's. Run with GATEWAY_REUSE=auto (the default) or true, and"
+        warn "  GATEWAY_PROVIDER_NAMESPACE=<namespace of the existing control plane> if it is not istio-system."
         rc=1
-    elif [ "${gw_installed:-0}" -eq 0 ] && [ "${gw_skips:-0}" -gt 0 ]; then
-        warn "the scenario sets gateway.skipInstall, but no istio.io/gateway-controller GatewayClass"
-        warn "  exists here. Nothing would install a control plane and the Gateway would never be"
-        warn "  Programmed -- the load then fails to resolve, in every arm. Drop skipInstall, or"
-        warn "  point it at the cluster that has Istio."
+    elif [ "${gw_installed:-0}" -eq 0 ] && [ "$gw_reuse" = true ]; then
+        warn "the standup would reuse an existing Istio (GATEWAY_REUSE=$GATEWAY_REUSE, or the scenario sets"
+        warn "  gateway.skipInstall), but no istio.io/gateway-controller GatewayClass exists here. Nothing"
+        warn "  would install a control plane and the Gateway would never be Programmed -- the load then"
+        warn "  fails to resolve, in every arm. Use GATEWAY_REUSE=auto, or point it at the cluster that has Istio."
         rc=1
     elif [ "${gw_installed:-0}" -gt 0 ]; then
-        ok "Istio is provided by the cluster and the scenario reuses it"
+        ok "Istio is provided by the cluster; the standup reuses it (control plane in $GATEWAY_PROVIDER_NAMESPACE)"
     fi
 
     # The model cache. A pool Pod loads its warm copies through the SAME claim
@@ -517,10 +670,23 @@ verb_preflight() {
     # --model path that is not in the Pod, never answers, and the controller
     # waits out its whole admission timeout before reporting only that the port
     # did not respond.
-    if k get pvc "$CACHE_CLAIM" >/dev/null 2>&1; then
+    #
+    # Missing is normal before the first standup, which creates it -- and
+    # node-local weights REQUIRE a fresh namespace, so on that path it is
+    # always missing here. The real guard is an EXISTING claim on another
+    # class when node-local weights are asked for: the harness keeps an
+    # existing claim, so the volume it would create never binds.
+    local cache_class
+    cache_class="$(k get pvc "$CACHE_CLAIM" -o jsonpath='{.spec.storageClassName}' 2>/dev/null || true)"
+    if [ -n "${BENCHMARK_MODEL_HOSTPATH:-}" ] && [ -n "$cache_class" ] && [ "$cache_class" != node-local-weights ]; then
+        warn "BENCHMARK_MODEL_HOSTPATH asks for node-local weights, but $CACHE_CLAIM already exists on storage class '$cache_class':"
+        warn "  the harness keeps an existing claim, so the node-local volume would never bind. Use a fresh namespace,"
+        warn "  or delete the claim (the shared copy of the weights goes with it)."
+        rc=1
+    elif k get pvc "$CACHE_CLAIM" >/dev/null 2>&1; then
         ok "model cache claim $CACHE_CLAIM exists"
     else
-        warn "no PVC named $CACHE_CLAIM in $NS -- it is created by standup; run this again after"
+        info "no PVC named $CACHE_CLAIM in $NS yet: the standup creates it"
     fi
 
     # The phase has to outlast scale-down stabilization or the premise fails --
@@ -597,8 +763,20 @@ verb_standup() {
         fi
     fi
 
+    # Recorded BEFORE the standup, so a standup that fails half-way still
+    # leaves the teardown the scenario it has to undo.
+    k create configmap "$STANDUP_RECORD" --from-literal=spec="$BENCH_SPEC" \
+        --dry-run=client -o yaml | k apply -f - >/dev/null \
+        || die "could not record the scenario in ConfigMap $STANDUP_RECORD; the teardown would not know what to undo"
     info "standing up both stacks from $BENCH_SPEC"
+    local gw_reuse
+    gw_reuse="$(gateway_reuse)"
+    [ "$gw_reuse" = true ] && info "reusing the cluster's gateway control plane in $GATEWAY_PROVIDER_NAMESPACE (GATEWAY_REUSE=$GATEWAY_REUSE)"
     ( cd "$ROOT" && \
+        BENCHMARK_GATEWAY_SKIP_INSTALL="$gw_reuse" \
+        BENCHMARK_GATEWAY_PROVIDER_NAMESPACE="$GATEWAY_PROVIDER_NAMESPACE" \
+        BENCHMARK_DECODE_CPU="$DECODE_CPU" \
+        BENCHMARK_DECODE_MEMORY="$DECODE_MEMORY" \
         BENCHMARK_ALLOW_EPP_REUSE="$allow_reuse" \
         BENCHMARK_NAMESPACE="$NS" \
         BENCHMARK_SPEC="$BENCH_SPEC" \
@@ -1249,8 +1427,15 @@ verb_verify() {
 #
 # So: create, wait for it to FINISH, read its log, delete. And try more than
 # once, because the first attempt after a rollout legitimately loses that race.
+#
+# On a P/D model the probe has to move KV. A one-word prompt fills no KV block,
+# so prefill hands decode nothing and decode serves it alone: a probe like that
+# kept answering 200 on a stack whose every real request was a 500 on a broken
+# KV link. So P/D sends three prompts of about a thousand tokens, each with its
+# own first block so no prefix cache can serve it, and all three must answer.
 verify_probe() {
-    local url="$1" model="$2" out pod attempt rc
+    local url="$1" model="$2" out pod attempt rc words=0 count=1
+    if scenario_is_pd; then words=1024; count=3; fi
     info "probing $model at $url"
     for attempt in 1 2 3; do
         pod="probe-$(date +%s)-$RANDOM"
@@ -1261,20 +1446,23 @@ import json,time,urllib.request
 # half-minute or so -- a mesh sidecar starts alongside the container and the
 # application does not wait for it -- and one attempt reports a serving model as
 # dead. Measured: attempts 1 and 2 failed to resolve, attempt 3 returned 200.
-body=json.dumps({'model':'$model','prompt':'hello','max_tokens':4}).encode()
+def body(i):
+    prompt='hello' if $words == 0 else 'probe %d %f ' % (i, time.time()) + 'hello ' * $words
+    return json.dumps({'model':'$model','prompt':prompt,'max_tokens':4}).encode()
 deadline=time.time()+180
 last=''
-while time.time()<deadline:
+done=0
+while time.time()<deadline and done<$count:
     try:
-        req=urllib.request.Request('$url', data=body, headers={'Content-Type':'application/json'})
+        req=urllib.request.Request('$url', data=body(done), headers={'Content-Type':'application/json'})
         r=urllib.request.urlopen(req, timeout=120)
-        print('HTTP', r.status)
-        break
+        if r.status!=200:
+            raise Exception('HTTP %d' % r.status)
+        done+=1
     except Exception as e:
         last=str(e)
         time.sleep(5)
-else:
-    print('FAILED', last)
+print('HTTP 200' if done==$count else 'FAILED after %d of $count: %s' % (done, last))
 " >/dev/null 2>&1 || true
         # A Pod that runs for a second is never observed Ready, so wait on the
         # phase instead of on a condition.
@@ -1665,16 +1853,25 @@ sample_gpus() {
     # A pool Pod that has been LENT carries the borrowing model's labels, so
     # lend and return are visible here without any metrics plumbing, which
     # matters on a cluster where Prometheus may not be reachable from this shell.
-    local out="$1" until_ts="$2" want
+    local out="$1" until_ts="$2" want now last="" pods_json line
     : > "$out"
-    while [ "$(date +%s)" -lt "$until_ts" ]; do
+    while [ "$(sampler_now)" -lt "$until_ts" ]; do
+        # A PASS THAT NEVER RAN must leave a mark too. A wall-clock jump past
+        # what one slow pass can take means this loop did not run: the machine
+        # running it was suspended, or a call blocked past both timeouts. The
+        # load runs in the cluster either way, so its latencies stand and the
+        # cost cannot be priced -- the mark lets the report say which, and the
+        # driver stop the arm (sampler_stalled).
+        now="$(sampler_now)"
+        sampler_mark_stall "$out" "$last" "$now"
+        last="$now"
         # What the Deployments ASKED for, beside what is actually Running.
         # Without this the arms cannot be told apart when one of them never got
         # the replicas it was allowed -- measured: an arm whose Deployments
         # scaled to 3 within four minutes and never had more than ONE replica
         # Available for the whole 36 minutes, because the rest could not be
         # placed. Its numbers described a one-replica fleet and nothing said so.
-        want="$(k get deploy -o json 2>/dev/null | jq -c '
+        want="$(sampler_k get deploy -o json 2>/dev/null | jq -c '
             [.items[] | select(.metadata.name | test("decode|prefill"))
              | {(.metadata.name): (.spec.replicas // 0)}] | add // {}')"
         # Explicit, not ${want:-{}}: the brace inside that expansion terminates
@@ -1686,7 +1883,13 @@ sample_gpus() {
         # and the file simply had no lines for it, which is indistinguishable
         # from a namespace that held no accelerators. The report then priced
         # that arm at a fraction of the other's and printed the ratio.
-        if ! k get pods -o json 2>/dev/null | jq -c --argjson now "$(date +%s)" \
+        #
+        # The status of the API call is read on its own, not through a pipe:
+        # with no pipefail a pipe returns the status of its last command,
+        # which exits 0 on empty input, so a failed poll wrote no mark at all.
+        # An answer that renders to nothing is a failed poll as well.
+        if ! pods_json="$(sampler_k get pods -o json 2>/dev/null)" || \
+           ! line="$(jq -c --argjson now "$(sampler_now)" \
             --argjson want "$want" '
           {ts: $now,
            pods: [ .items[]
@@ -1699,11 +1902,97 @@ sample_gpus() {
                 pool:  (.metadata.labels["llm-d.ai/warm-pool"] // ""),
                 serving: (.metadata.labels["llm-d.ai/inferenceServing"] // "")}
              | select(.gpus > 0) ],
-           desired: $want}' >> "$out" 2>/dev/null; then
-            printf '{"ts": %s, "failed": true}\n' "$(date +%s)" >> "$out"
+           desired: $want}' <<<"$pods_json" 2>/dev/null)" || [ -z "$line" ]; then
+            printf '{"ts": %s, "failed": true}\n' "$(sampler_now)" >> "$out"
+        else
+            printf '%s\n' "$line" >> "$out"
         fi
         sleep "$GPU_SAMPLE_SECONDS"
     done
+    # A stall that runs past the end of the window ends the loop without
+    # another pass through it, so it is looked for once more here.
+    sampler_mark_stall "$out" "$last" "$(sampler_now)"
+}
+
+# The sampler's clock, a function so the check can move it.
+sampler_now() { date +%s; }
+
+# Longer than a sleep plus two calls that each ran to their outer timeout
+# (sampler_k): past it, the loop did not run at all.
+sampler_stall_seconds() {
+    echo $(( GPU_SAMPLE_SECONDS + 2 * (GPU_SAMPLE_TIMEOUT_SECONDS + 5) + 10 ))
+}
+
+# sampler_mark_stall <out> <last> <now>: a stall mark, and a warning, when
+# more than sampler_stall_seconds passed between two passes of the loop.
+sampler_mark_stall() {
+    local out="$1" last="$2" now="$3"
+    { [ -n "$last" ] && [ $(( now - last )) -gt "$(sampler_stall_seconds)" ]; } || return 0
+    printf '{"ts": %s, "stalled_since": %s}\n' "$now" "$last" >> "$out"
+    warn "the GPU sampler did not run for $(( now - last ))s (the machine running it was suspended, or a call blocked); those seconds have no samples"
+}
+
+# sampler_k <kubectl args...>: one of the sampler's API calls, bounded twice.
+# --request-timeout bounds the request; an outer timeout, where the machine
+# has one, bounds what that does not -- an exec credential plugin, or a
+# connection that never gets as far as sending.
+sampler_k() {
+    local t="$GPU_SAMPLE_TIMEOUT_SECONDS"
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$(( t + 5 ))" kubectl ${KUBE_CONTEXT:+--context "$KUBE_CONTEXT"} -n "$NS" "$@" --request-timeout="${t}s"
+    else
+        k "$@" --request-timeout="${t}s"
+    fi
+}
+
+# sampler_stalled <gpus.jsonl>: print the seconds the sampler's stall marks
+# cover and succeed, or fail when there are none.
+sampler_stalled() {
+    local secs
+    grep -q '"stalled_since"' "$1" 2>/dev/null || return 1
+    secs="$(jq -rs '[.[] | select(.stalled_since != null) | .ts - .stalled_since] | add // 0' "$1" 2>/dev/null)"
+    printf '%s\n' "${secs:-unknown}"
+}
+
+# check_sampler_settings: the sampler does its stall arithmetic in whole
+# seconds. A duration kubectl understands (1m, 500ms) would reach kubectl
+# and silently switch the stall check off, so anything else is refused,
+# before an arm starts. Prints what is wrong and fails.
+check_sampler_settings() {
+    local v
+    for v in GPU_SAMPLE_SECONDS GPU_SAMPLE_TIMEOUT_SECONDS; do
+        if ! [[ "${!v}" =~ ^[0-9]+$ ]] || [ "${!v}" -eq 0 ]; then
+            echo "$v must be a whole number of seconds above zero (got '${!v}')"
+            return 1
+        fi
+    done
+}
+
+RUN_INHIBIT=""
+# hold_awake: keep the machine running this driver from sleeping while an arm
+# runs. The load runs in the cluster but the GPU sampler runs here, and a
+# machine that sleeps stops it, so the arm's cost cannot be priced.
+# systemd-inhibit (Linux with logind) and caffeinate (macOS) hold a sleep lock
+# for as long as this shell lives; run_cleanup releases it sooner. Neither
+# reaches a Windows host from WSL -- the runbook names the Windows settings --
+# and wherever none holds, the stall check stops the arm instead.
+hold_awake() {
+    if command -v systemd-inhibit >/dev/null 2>&1; then
+        systemd-inhibit --what=sleep:idle --who=two-model-benchmark \
+            --why="a benchmark arm is sampling GPUs" --mode=block \
+            tail --pid="$$" -f /dev/null >/dev/null 2>&1 &
+    elif command -v caffeinate >/dev/null 2>&1; then
+        caffeinate -i -s -w "$$" >/dev/null 2>&1 &
+    else
+        warn "no sleep inhibitor on this machine (systemd-inhibit, caffeinate): keep it awake for the whole arm, or the arm is stopped when the GPU sampler stalls"
+        return 0
+    fi
+    RUN_INHIBIT=$!
+    sleep 1
+    if ! kill -0 "$RUN_INHIBIT" 2>/dev/null; then
+        warn "the sleep inhibitor exited at once (no logind session?): keep this machine awake for the whole arm"
+        RUN_INHIBIT=""
+    fi
 }
 
 # WHICH REPLICAS ACTUALLY DID THE WORK.
@@ -1788,6 +2077,7 @@ run_cleanup() {
     # models' ceiling for the rest of the schedule, on a shared cluster, with
     # nobody watching. The sampler is a polling loop against the API server.
     [ -n "$RUN_SAMPLER" ] && kill "$RUN_SAMPLER" 2>/dev/null
+    [ -n "$RUN_INHIBIT" ] && kill "$RUN_INHIBIT" 2>/dev/null
     [ -n "$RUN_WORKER" ] && kill "$RUN_WORKER" 2>/dev/null
     if [ -n "$RUN_JOB" ]; then
         kubectl ${KUBE_CONTEXT:+--context "$KUBE_CONTEXT"} -n "$NS" \
@@ -1807,6 +2097,8 @@ verb_run() {
         pool|nopool|floor|today|shadow|share) ;;
         *) die "run takes an arm: nopool, pool or floor; or today, shadow or share for the utilization-share comparison (got '${arm:-<none>}')" ;;
     esac
+    local bad
+    bad="$(check_sampler_settings)" || die "$bad"
     local have_pool=0
     k get deploy "wva-warm-pool-$POOL_NAME" >/dev/null 2>&1 && have_pool=1
     if [ "$arm" = "pool" ] && [ "$have_pool" -eq 0 ]; then
@@ -1938,6 +2230,7 @@ verb_run() {
     # is holding accelerators from the moment the arm starts, and a window that
     # begins at the barrier would credit it with fewer than it held.
     local until_ts=$(( $(date +%s) + PRELOAD_GRACE + total + 300 ))
+    hold_awake
     sample_gpus "$out_dir/gpus.jsonl" "$until_ts" &
     RUN_SAMPLER=$!
 
@@ -1978,8 +2271,14 @@ verb_run() {
     # the results of every successful run.
     local budget=$(( PRELOAD_GRACE + total + RESULT_GRACE ))
     info "waiting for both loaders to report their results (up to ${budget}s)..."
-    local deadline=$(( $(date +%s) + budget )) pod="" done=0 log=""
+    local deadline=$(( $(date +%s) + budget )) pod="" done=0 log="" stalled=""
     while [ "$(date +%s)" -lt "$deadline" ]; do
+        # The sampler stalled: this arm's cost can no longer be priced and the
+        # report would refuse it, so the GPUs it holds on a shared cluster are
+        # given back now rather than at the end of the schedule.
+        if stalled="$(sampler_stalled "$out_dir/gpus.jsonl")"; then
+            break
+        fi
         pod="$(k get pods -l "job-name=$RUN_JOB" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
         if [ -n "$pod" ]; then
             # Bounded. A log stream that stalls on the API server otherwise
@@ -2019,6 +2318,9 @@ verb_run() {
         sleep 15
     done
     kill "$RUN_SAMPLER" 2>/dev/null; RUN_SAMPLER=""
+    if [ -n "$stalled" ]; then
+        die "arm $arm stopped: the GPU sampler did not run for ${stalled}s (the machine running this driver was suspended, or a call blocked), so the arm's GPU cost cannot be priced and the report would refuse it. Keep this machine awake (docs/guides/benchmarking/two-model-utilization-share.md) and rerun arm $arm."
+    fi
 
     if [ -n "$pod" ]; then
         k logs "$pod" --all-containers --prefix --request-timeout=120s > "$out_dir/loader.log" 2>&1 || true
@@ -2312,12 +2614,32 @@ verb_status() {
 
 verb_teardown() {
     need_ns
-    warn "tearing down everything this scenario created in $NS"
+    # THE STANDUP'S SCENARIO, not a default. The harness tears down what the
+    # spec it is given renders; given its default (guides/workload-autoscaling)
+    # for a two-model-shapes-pd namespace it missed that run's node-local
+    # downloader and hung on the volume behind it. The standup recorded its
+    # spec; a named BENCH_SPEC that disagrees is refused, and with no record
+    # and no BENCH_SPEC there is nothing safe to guess.
+    local recorded spec
+    recorded="$(k get configmap "$STANDUP_RECORD" -o jsonpath='{.data.spec}' 2>/dev/null || true)"
+    if [ -n "$recorded" ]; then
+        if [ -n "$BENCH_SPEC_GIVEN" ] && [ "$BENCH_SPEC" != "$recorded" ]; then
+            die "BENCH_SPEC=$BENCH_SPEC, but $NS was stood up with $recorded (ConfigMap $STANDUP_RECORD). Unset BENCH_SPEC, or set it to $recorded."
+        fi
+        spec="$recorded"
+    elif [ -n "$BENCH_SPEC_GIVEN" ]; then
+        warn "no record of the scenario $NS was stood up with; tearing down with BENCH_SPEC=$BENCH_SPEC as given"
+        spec="$BENCH_SPEC"
+    else
+        die "no record of the scenario $NS was stood up with (no ConfigMap $STANDUP_RECORD), and no BENCH_SPEC. Set BENCH_SPEC to the one the standup used: the harness only removes what that scenario renders."
+    fi
+    warn "tearing down everything $spec created in $NS"
     verb_pool_delete || true
-    k delete job -l app.kubernetes.io/name=wva-two-model-load --ignore-not-found >/dev/null 2>&1
-    k delete configmap wva-two-model-load --ignore-not-found >/dev/null 2>&1
-    ( cd "$ROOT" && BENCHMARK_NAMESPACE="$NS" make --no-print-directory benchmark-teardown ) || \
+    k delete job -l app.kubernetes.io/name=wva-two-model-load --ignore-not-found --timeout=120s >/dev/null 2>&1
+    k delete configmap wva-two-model-load --ignore-not-found --timeout=60s >/dev/null 2>&1
+    ( cd "$ROOT" && BENCHMARK_NAMESPACE="$NS" BENCHMARK_SPEC="$spec" make --no-print-directory benchmark-teardown ) || \
         warn "benchmark-teardown reported a problem; check for leftover GPU pods below"
+    k delete configmap "$STANDUP_RECORD" --ignore-not-found --timeout=60s >/dev/null 2>&1
     verb_status
     ok "teardown done. Anything still holding a GPU above is a leak -- this is a shared cluster."
 }

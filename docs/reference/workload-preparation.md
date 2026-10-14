@@ -129,7 +129,11 @@ to what the model servers select on.
 which is always tolerated: a holder `Pending` on every node with no reason
 is a taint it does not tolerate. `prepull-status` lists the nodes each
 DaemonSet was applied for (the selector is recorded on it), so it needs no
-selector of its own. The holder runs the image itself, asleep, with a
+selector of its own. It, `weights-status` and `engine-cache-status` count
+only the nodes a model server can use: a cordoned node, or one with a
+`NoSchedule` or `NoExecute` taint the DaemonSet does not tolerate, is listed
+as `excluded` with the reason and not counted, and the command exits 0 when
+every usable node is ready. The holder runs the image itself, asleep, with a
 memory limit and no accelerator: a container that exited would not protect
 its image from the kubelet's garbage collection, a running one does. The
 image has to carry `/bin/sh` for that; one that does not is still pulled
@@ -211,7 +215,11 @@ node". The model lands under `<dir>/models/<id>`, the layout the benchmark
 harness uses, and a model server mounts it as `pvc://<claim>/models/<id>`,
 the way it mounts any claim: each node then reads its own copy, and nothing
 in the pod spec says hostPath. A gated model takes
-`WEIGHTS_HF_TOKEN_SECRET=<secret>[/<key>]`. Deleting keeps the files; the
+`WEIGHTS_HF_TOKEN_SECRET=<secret>[/<key>]`. `WEIGHTS_MEMORY` sets the
+downloader's memory limit (`16Gi` unless set; `--memory` on
+`deploy/weights.sh`). The request stays 256 MiB, so a node reserves
+nothing for it. At the earlier 2 GiB the download of an 8B model's
+safetensors was OOMKilled on every node and never finished. Deleting keeps the files; the
 next apply finds the marker and downloads nothing.
 
 What it costs, and what it needs:
@@ -292,9 +300,9 @@ says so when the cluster has SecurityContextConstraints:
   replica scheduled there meanwhile reads from a directory that is being
   written. `weights-status` says which nodes are there yet. A cordoned node
   or one under `DiskPressure` still counts for the DaemonSet (its controller
-  tolerates both), keeps evicting the downloader, and shows as `absent
-  Failed (not ready) Evicted` for as long as it is in that state; nothing in
-  the namespace fixes that node.
+  tolerates both) and keeps evicting the downloader; `weights-status` lists
+  it as `excluded` and leaves it out of the count, since no engine can start
+  there either. Nothing in the namespace fixes that node.
 
 On node-local NVMe the engine's default loader (memory-mapped safetensors)
 is the right one; `--safetensors-load-strategy prefetch` exists for network
@@ -429,7 +437,8 @@ caches into each node's as it prepares it, file by file: an entry the
 node already has is kept, one it lacks is copied (a second engine config's
 key lands beside the node's own), a failed copy is removed and retried at
 the pod's next start, and a marker records which seed the node has, so a
-changed seed is merged in too (the seed's subPath must exist). With a
+changed seed is merged in too (a subPath that does not exist yet is
+nothing to seed, not an error). With a
 seed, a node is Ready only once it carries it, so `engine-cache-status`
 counts a node whose seed did not complete as not prepared; the engines do
 not wait on the preparer either way. What is
@@ -451,6 +460,24 @@ costs a compile, not the replica.
 make engine-cache ENGINE_CACHE_PATH=/mnt/local/weights/<ns> ENGINE_CACHE_IMAGE=<engine image> \
      ENGINE_CACHE_SEED_CLAIM=<shared claim>[:<subPath>] NAMESPACE=<ns>
 ```
+
+**A seed starts empty** in a fresh namespace, and the preparer only copies
+the seed *to* the nodes. Each engine configuration -- every model, and
+prefill and decode of a P/D model, which compile under different keys --
+then compiles once on every node it lands on. Measured on two P/D 8B models:
+a second replica that landed on a node its role had not run on compiled for
+12-17 s, against 2-3 s on a node it had. Fill the seed *from* the nodes once
+every configuration has started somewhere:
+
+```bash
+# every prepared node merges its caches into the seed (what the seed has is
+# kept), the seed is stamped, and every preparer restarts and merges it in
+make engine-cache-publish NAMESPACE=<ns>
+make engine-cache-status NAMESPACE=<ns>     # every usable node prepared again
+```
+
+Run it again after adding a model or changing an engine flag: the new stamp
+makes every node merge the new keys.
 
 What it costs, and what it needs, is the weights section's list with two
 things changed. The size: a few gigabytes per engine config per node rather

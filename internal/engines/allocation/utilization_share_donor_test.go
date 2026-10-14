@@ -80,9 +80,9 @@ func TestShareLongBursts(t *testing.T) {
 		t.Error("a completed burst of 4 minutes is long at 5 minutes")
 	}
 	l = NewShareLedger()
-	record(l, 1, 9, 9, 9, 9, 9)
-	if l.LongBursts("R", time.Minute) {
-		t.Error("a burst still running is not completed")
+	record(l, 1, 1, 9, 9, 9, 9, 9)
+	if !l.LongBursts("R", 4*time.Minute) || l.LongBursts("R", 5*time.Minute) {
+		t.Error("a burst 4 minutes under way is long at 4 minutes and not at 5")
 	}
 	l = NewShareLedger()
 	record(l, 5, 5, 5, 5)

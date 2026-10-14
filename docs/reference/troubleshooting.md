@@ -460,9 +460,9 @@ Work down the list in order.
    Two more reasons on the same counter are not holds: `donor-peak` (while the
    quota holds every model's peak, a model already at its need takes no
    headroom that would leave its donor below the donor's own recent peak, by
-   a single move or a donor set) and `awaiting-return` (a short model whose
-   replica spans several pods, such as a LeaderWorkerSet, is credited with
-   returns still releasing whose pods hold its pods, in whole replicas, and
+   a single move or a donor set) and `awaiting-return` (a short model is
+   credited with returns still releasing whose pods hold its pods, in whole
+   replicas, and
    only the rest is funded by draining other models; the model itself shows
    blocked reason `awaiting-release`). A third, `scale-down-band`, counts a
    return a model did not make because it would take the model lower than
@@ -615,7 +615,11 @@ scale-down window, as today's scale-down would. It does so only while no model i
 its need, and
 only while its load would stay at or below
 `stabilization.returnSpareWhenLoadAtMost` (default `0.6`) on what it keeps,
-not counting its headroom. It never goes below its need (the higher of its
+not counting its headroom. While more than 0.6 x `queueLengthThreshold`
+requests (3 by default) are waiting on one of its pods, for
+`consecutiveCyclesBeforeMove` cycles in a row, the return also waits -- for at
+most its scale-down window, after which it goes. A decode pod of a P/D model
+counts only while its KV cache is full; prefill pods are not counted. It never goes below its need (the higher of its
 current and average need while it swings) plus its headroom, below what the
 other models' recent peaks leave of the quota in whole replicas, its
 `minReplicaCount` or its last replica: a model that bursts alone keeps its
@@ -623,13 +627,9 @@ spare, and GPUs are returned only when another model's recent peak could use
 them. If, while the release is still in its
 scale-down window, the model is short of its target again or busier than that
 load on what it keeps, the return is called off and the model keeps the
-replica. If another model turns short while the return is still releasing, the
-returned GPUs go to that model when they come free: its scale target gets a
-`UtilizationShareReceiving` Event naming the model that is giving them back,
-and the log says `Utilization share: returned spare handed to a receiver`. A
-return is handed over only when the returned pod holds the short model's pod;
-a return rebuilt from its pod marks after a restart, whose shape is not known,
-is never handed over and goes to the unassigned GPUs.
+replica. If another model turns short while the return is still releasing,
+the returned GPUs go to the unassigned GPUs as usual, and the idle fill raises
+that model into them once the replica is released.
 
 **How to tell**: the donor's scale target carries a `UtilizationShareGiving`
 Event that names "the quota group's unassigned GPUs" and says "because it holds more headroom than maxHeadroomReplicas gives it while no model is short, and stays calm without it; the replica drains after its scale-down window, and is kept if its demand comes back before then; a model whose demand rises takes the GPUs at once". A return called off carries a
@@ -637,10 +637,13 @@ Event that names "the quota group's unassigned GPUs" and says "because it holds 
 the replica it was giving back". The controller log has
 `Utilization share: transfer started` with `returned` set to true and no
 `receiver`, then `Utilization share: spare returned to the quota` when the
-replica is released (unless it was handed to a receiver first). `wva_utilization_share_starts_total{kind="return"}`
+replica is released. `wva_utilization_share_starts_total{kind="return"}`
 counts returns per quota group. A model that holds more than its headroom and
 is not giving it back shows why in `wva_utilization_share_withheld_total`:
-`return-not-calm` (its load is above `returnSpareWhenLoadAtMost`) or
+`return-not-calm` (its load is above `returnSpareWhenLoadAtMost`),
+`return-pod-busy` (its load would let the return go, but more than
+`returnSpareWhenLoadAtMost` x `queueLengthThreshold` requests are waiting on
+one of its pods; counted until the scale-down window bound passes) or
 `return-role-short` (another model is short of its need).
 
 Whether the cap is on: `wva_utilization_share_headroom_capped == 1` for the

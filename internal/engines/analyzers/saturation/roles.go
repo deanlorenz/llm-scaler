@@ -86,15 +86,56 @@ func roleSaturated(metrics []domain.ReplicaMetrics, rolesByVariant map[string]st
 		if canonicalRole(rolesByVariant[rm.VariantName]) != role {
 			continue
 		}
-		if rm.QueueLength < int(queueThreshold) || rm.TokensInUse <= 0 || rm.TotalKvCapacityTokens <= 0 {
-			continue
-		}
-		if rm.TokensInUse > rm.TotalKvCapacityTokens {
-			continue
-		}
-		if rm.TokensInUse >= memoryBound(rm.TotalKvCapacityTokens, kvCacheThreshold) {
+		if rm.QueueLength >= int(queueThreshold) && kvFull(rm, kvCacheThreshold) {
 			return true
 		}
 	}
 	return false
+}
+
+// kvFull reports whether rm's resident KV is at or over its k1 (the cache
+// times kvCacheThreshold) and within the cache's physical ceiling: a reading
+// above the ceiling is a scrape artifact, and a row with no cache size or no
+// KV in use cannot be judged. A kvCacheThreshold at or below zero puts k1 at
+// zero, so any KV in use counts as full.
+func kvFull(rm domain.ReplicaMetrics, kvCacheThreshold float64) bool {
+	return rm.TokensInUse > 0 && rm.TotalKvCapacityTokens > 0 &&
+		rm.TokensInUse <= rm.TotalKvCapacityTokens &&
+		rm.TokensInUse >= memoryBound(rm.TotalKvCapacityTokens, kvCacheThreshold)
+}
+
+// busiestQueueLoadByVariant is, per decode or aggregated variant, the
+// deepest waiting queue on any one Ready replica as a fraction of
+// queueThreshold (domain.AnalyzerResult.VariantBusiestQueueLoad). Bridges
+// count, as in roleSaturated. A replica not Ready is not routed to, so its
+// queue says nothing about routing. Prefill is left out: its queue is
+// decode's back-pressure or the router's choice -- measured, 439 requests
+// on one prefill pod while three sat idle -- and keeping a replica relieves
+// neither. A decode row counts only while its KV is full (kvFull), since its
+// waiting count includes requests waiting for their remote KV; below that
+// it reads zero. A variant no role is known for, and every variant when
+// there is no positive threshold to measure against, is left out.
+func busiestQueueLoadByVariant(metrics []domain.ReplicaMetrics, rolesByVariant map[string]string, queueThreshold, kvCacheThreshold float64) map[string]float64 {
+	if !(queueThreshold > 0) {
+		return nil
+	}
+	out := map[string]float64{}
+	for _, rm := range metrics {
+		role, ok := rolesByVariant[rm.VariantName]
+		if !ok || !rm.Ready {
+			continue
+		}
+		v := rm.VariantName
+		switch canonicalRole(role) {
+		case domain.RolePrefill:
+			continue
+		case domain.RoleDecode:
+			if !kvFull(rm, kvCacheThreshold) {
+				out[v] = max(out[v], 0)
+				continue
+			}
+		}
+		out[v] = max(out[v], float64(max(rm.QueueLength, 0))/queueThreshold)
+	}
+	return out
 }

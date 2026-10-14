@@ -147,3 +147,65 @@ accelerator_vendor_warning() {
 accelerator_selector_text() {
     if [ -n "$1" ]; then printf '%s' "$1"; else printf 'any node carrying a known GPU product label'; fi
 }
+
+# USABLE NODES. A node a model server cannot be placed on is not one to wait
+# for or to count. A DaemonSet does not see that: its controller tolerates
+# node.kubernetes.io/unschedulable and the node-condition taints
+# (disk-pressure, not-ready, ...) by itself, so its desired count includes a
+# cordoned node under DiskPressure, the pod there is evicted or never starts,
+# and numberReady never reaches desired -- a standup waiting on it ran out
+# its whole 3600 s, and the status commands reported a finished preparation
+# as 8/17 and failed. A node is excluded when it is cordoned, or when it
+# carries a NoSchedule or NoExecute taint whose key the DaemonSet's own pod
+# template does not tolerate. Tolerations the controller adds by itself do
+# not count: they are exactly the ones an engine does not have.
+
+# accelerator_ds_toleration_keys NS DAEMONSET FALLBACK... prints, as a JSON
+# array, the taint keys the DaemonSet's pod template tolerates (what an apply
+# with --toleration wrote), or the FALLBACK keys when it cannot be read. A
+# toleration with no key tolerates every taint, and reads as "*".
+accelerator_ds_toleration_keys() {
+    local ns="$1" ds="$2" got
+    shift 2
+    got="$(kubectl get daemonset -n "$ns" "$ds" -o json 2>/dev/null \
+        | jq -c '[.spec.template.spec.tolerations[]? | (.key // "*")] | select(length > 0)' 2>/dev/null || true)"
+    if [ -n "$got" ]; then
+        printf '%s' "$got"
+        return
+    fi
+    printf '%s\n' "$@" | jq -R . | jq -sc 'map(select(. != ""))'
+}
+
+# accelerator_excluded_json KEYS reads a v1 NodeList on stdin and prints a
+# JSON array of {name, reason} for the nodes the rule above excludes, KEYS
+# being the tolerated taint keys as a JSON array.
+accelerator_excluded_json() {
+    jq -c --argjson tol "$1" '[.items[]
+        | {name: .metadata.name,
+           reason: (if .spec.unschedulable == true then "cordoned"
+                    elif any($tol[]; . == "*") then ""
+                    else ([.spec.taints[]?
+                           | select(.effect == "NoSchedule" or .effect == "NoExecute")
+                           | .key as $k
+                           | select(any($tol[]; . == $k) | not)
+                           | "tainted " + .key + ":" + .effect] | first // "") end)}
+        | select(.reason != "")]'
+}
+
+# accelerator_usable_nodes_json EXCLUDED reads a v1 NodeList on stdin and
+# prints it without the nodes in EXCLUDED (accelerator_excluded_json output).
+accelerator_usable_nodes_json() {
+    jq -c --argjson ex "$1" '.items |= map(select(.metadata.name as $n | any($ex[]; .name == $n) | not))'
+}
+
+# accelerator_print_excluded EXCLUDED prints a row per excluded node, in the
+# status tables' layout, and a line saying why they are not counted.
+accelerator_print_excluded() {
+    local n node reason
+    n="$(printf '%s' "$1" | jq 'length')"
+    [ "${n:-0}" -gt 0 ] || return 0
+    while IFS=$'\x1f' read -r node reason; do
+        printf '  %-28s %-12s %s\n' "$node" excluded "$reason"
+    done < <(printf '%s' "$1" | jq -r '.[] | [.name, .reason] | join("\u001f")')
+    echo "  ${n} node(s) excluded and not counted: an engine cannot start there (cordoned, or tainted against it)"
+}
