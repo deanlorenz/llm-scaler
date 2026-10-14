@@ -596,10 +596,11 @@ same helper (`distributeDemandByRole`) and folded into `RoleCapacities[*].TotalD
 Role-Aware Aggregation. Neither is attributed back to individual variants:
 `Σ VariantCapacity.TotalDemand` no longer sums to `result.TotalDemand`; the per-role sum does.
 
-**Note:** `SchedulerQueueMetrics` is passed via `AnalyzerInput.SchedulerQueue`. The TA handles
-nil correctly (queue demand = 0 when absent). The engine currently always passes nil due to a
-known bug (`engine_v2.go` never calls `CollectSchedulerQueueMetrics`); fixing this is tracked
-as a separate engine PR and will not require changes to the TA.
+**Note:** `SchedulerQueueMetrics` is passed via `AnalyzerInput.SchedulerQueue`. The engine
+collects it once per model per cycle (`engine.go` calls
+`ReplicaMetricsCollector.CollectSchedulerQueueMetrics`) and `engine_v2.go` passes it into the
+analyzer input. The TA handles nil correctly (queue demand = 0 when the EPP queue metrics are
+absent).
 
 ## Scaling Signal
 

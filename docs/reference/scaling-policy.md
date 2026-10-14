@@ -191,8 +191,11 @@ a **namespace-scoped** controller (`--watch-namespace` set) reads that
 namespace's ConfigMap once at start and does not watch it, because its cache
 cannot hold a namespace it has no RBAC in (`cmd/main.go`). An edit there takes
 effect only when the controller restarts
-(`kubectl rollout restart deploy/wva-controller-manager -n <its ns>`). A
-cluster-scoped controller watches the policy namespace and picks the edit up live.
+(`kubectl rollout restart deploy/wva-controller-manager -n <its ns>`). The same
+holds for an out-of-reach controller (`WVA_WATCH_NS` naming another namespace)
+and its own ConfigMap in its install namespace. `make enable-physical-limiter`
+and `make disable-physical-limiter` do those restarts. A cluster-scoped
+controller watches the policy namespace and picks the edit up live.
 
 A `limiters:` list selects a **single mode**, so declare **one** of these forms:
 
@@ -866,6 +869,33 @@ A namespace gets one when the controller reads a ConfigMap of that name there:
   read, no label needed (`internal/controller/predicates.go`). See
   [the security model](security-model.md) for why this is by design.
 
+### Re-running the installer resets the default entry
+
+`make deploy-wva` re-applies `wva-scaling-policy-config` in the controller's
+namespace from the shipped manifest on every run, upgrades included. The
+`default` entry comes back exactly as shipped — thresholds and analyzers, and
+**no** `scaleToZero`, `defaultPolicy`, `optimizer:` block or `limiters:` — while
+every other key (named tiers, per-model entries) is saved before the apply and
+restored after it (`deploy/lib/infra_wva.sh`). The installer then writes a
+limiter back into `default` only when `WVA_LIMITER` (and, for a quota,
+`WVA_QUOTAS`) is passed on that run.
+
+So anything you changed in `default` by hand is gone after a re-run:
+
+| you set, in `default` | after a re-run |
+| --- | --- |
+| `scaleToZero` | repeat it, or put it on a per-model entry (an entry whose body names the model), which is kept; a named tier is not read for parking |
+| `defaultPolicy` | re-apply it; the tiers it names are kept |
+| `optimizer:` (utilization share) | removed: run `make utilization-share-shadow`, then `make utilization-share-activate` again |
+| `limiters:` | kept only if `WVA_LIMITER`/`WVA_QUOTAS` are passed again; a hand-written entry has to be re-added |
+
+This touches only the controller's own ConfigMap. A policy published in
+`wva-policy` by `make enable-physical-limiter` is not re-applied — but that
+command also writes into the own ConfigMap of each admin-owned controller, and
+a re-run of `make deploy-wva` for one of those controllers resets it there.
+A namespace-local map in a model namespace other than the controller's is not
+touched.
+
 ### Parameters
 
 | Parameter | Type | Description | Recommended |
@@ -946,6 +976,122 @@ one role generates tokens: a prefill trigger carrying nothing must not pull
 decode's figure down to the built-in fallback, and under-pricing a queue is the
 failure the key exists to fix. Writing it on one variant and leaving it off the
 others is the simplest way to get this right.
+
+### `enableLearnedStateReuse`
+
+Lets a variant be priced from a sibling's measurement instead of only its own.
+**Off by default** — see [Why it is off](#why-it-is-off) before turning it on.
+
+```yaml
+default:
+  enableLearnedStateReuse: true
+```
+
+It resolves through the normal per-entry overlay, so it can also be set on a
+named tier or a per-model entry. A per-model entry is a ConfigMap data key of
+its own, identified by the `model_id` and `namespace` in its **body** — the key
+itself is arbitrary:
+
+```yaml
+llama-8b-prod:
+  model_id: meta-llama/Llama-3.1-8B
+  namespace: prod
+  enableLearnedStateReuse: true
+```
+
+Both `model_id` and `namespace` are load-bearing: an entry missing either one
+matches no model. It does not fail loudly — the parse is not strict, so an
+entry whose body names no model is registered as a selectable policy **tier**
+instead, under its own key. See
+[Per-Model Overrides](#4-per-model-overrides) for the full schema.
+
+The granularity is `(model_id, namespace)`, not a single variant. On a P/D model
+decode and prefill are two variants of one model and resolve the same answer,
+so this cannot enable reuse for one of them alone.
+
+One direction only: an entry can turn reuse **on** where the default leaves it
+off, but cannot turn it back **off** where a `default:` entry turned it on —
+to do that, change the `default:` entry. Check the `Effective scaling policy`
+log line for `enableLearnedStateReuse` to confirm what a model resolved to; a
+typo in the key name is silently nothing, which now means "still off".
+
+#### What it turns on
+
+A variant with nothing measured yet is priced from a sibling that runs the
+**same engine configuration** on the same accelerator and GPU count, so that a
+scaled-out variant can price its first decision from something other than a
+guess. That happens two ways, and this key governs **both**:
+
+| path | what is reused |
+| --- | --- |
+| the shared ITL line | the inter-token-latency model `ITL(k) = A·k + B` another variant fitted, used to derive this one's service rate |
+| the cross-variant capacity figure | another variant's measured per-replica capacity, as the estimate for a variant with no record of its own |
+
+It does not control learning. A variant learns from its own readings either
+way, and nothing already stored is cleared when the key changes.
+
+It also has no effect on any capacity *ceiling*. A sibling's figure is used in
+one further place as an upper bound on an estimate, and that bound applies
+whatever this key says — a bound only ever lowers a capacity, and lowering
+capacity orders *more* replicas, which is the safe direction. The key governs
+where a sibling's figure would *become* this variant's answer, never where it
+only limits it.
+
+#### Why it is off
+
+Reuse rests on an equality: two variants share only if a digest over the engine
+flags the scaling manager could read from their deployments matches. **That
+equality is not sound.** Five rounds of adversarial review found seven measured
+ways to produce a false match or to destroy a true one, and two attempts to
+close them inside the flag parser were reverted for costing more than they
+bought — one of them denied sharing to ordinary deployments because a shell
+preamble contained `grep -q`, while `-qfp8` still hashed as no flag at all.
+
+The sharpest case is that a configuration the manager reads *wrong* rather than
+not at all still produces a confident digest: SGLang flags parsed as vLLM read
+as a complete set of vLLM defaults, and would match every other default
+configuration of that model.
+
+So everything that merely **describes** a configuration ships on by default —
+the digest, the `wva_engine_config` metric, the drift checks. Only the act of
+letting one variant's reading price another's decision waits for you to ask for
+it. The intended replacement is graded sharing by **similarity** rather than by
+proven identity, where a flag the parser cannot read becomes a distance penalty
+instead of a false equality; see
+[learned-state sharing by similarity](../proposals/learned-state-sharing-by-similarity.md).
+
+#### What it costs to leave off
+
+A variant with no readings of its own prices its first decisions from its
+deployment-derived capacity alone, which is a weaker estimate. Expect a slower
+first ramp on a newly scaled-out variant.
+
+#### Before turning it on
+
+Check what the manager actually read, because the two paths degrade
+differently and the difference decides what you are buying into:
+
+- the **shared ITL line** is refused outright when flags could not be read. An
+  incomplete read produces no sharing key at all, so nothing is borrowed and
+  nothing lent.
+- the **cross-variant capacity figure** is *not* gated on a complete read, and
+  that is deliberate rather than an oversight — gating it was tried and cost a
+  30× capacity over-estimate, because refusing a sibling's measured figure
+  falls back to an estimate that is higher, and a higher capacity orders fewer
+  replicas. So with this key on, a variant whose flags were only partly read
+  **is** still priced from a sibling's capacity figure.
+
+Read `wva_engine_config` to tell the cases apart:
+
+| what you see | what it means |
+| --- | --- |
+| a series with a non-empty `unresolved` label | one or more flags could not be read, and `unresolved` names them (usually a value coming from a ConfigMap or `valueFrom`, which the manager cannot read). With the key on, no ITL line is shared, but the capacity figure is — so this is the riskiest case to enable. Fixing the flags is the better remedy. |
+| **no series at all** | no parsed engine configuration: no capacity record yet, nothing readable in the pod template, or no scale target resolved. Not a reliable signal on its own — the series is also briefly absent on a cycle where the variant drops out of the analyzer's series. |
+| a series with `unresolved` empty | the configuration was read in full, and with the key on the variant shares on **both** paths, keyed on `fingerprint`. This is the case the key is for. |
+
+Joining two variants on the fingerprint takes all four of `model_name`,
+`accelerator`, `gpus` and `fingerprint` — the sharing key is the tuple, not the
+digest alone — and, for the ITL line, `unresolved` empty on both sides.
 
 ### Default Configuration
 
@@ -1462,6 +1608,10 @@ triggers:
 
 `defaultPolicy` is read from the `default` entry only: a fallback chosen by a tier
 or by a per-model entry would be that entry choosing for everyone but itself.
+
+Parking is the exception: `scaleToZero` is resolved without the variant's tier
+(`ResolveScalingPolicy`, called from the steady-state engine), so only `default`,
+the tier `default.defaultPolicy` names, and the per-model override decide it.
 
 Two failure modes are resolved deterministically rather than silently, and both
 are reported:

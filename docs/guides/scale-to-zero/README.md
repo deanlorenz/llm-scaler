@@ -89,18 +89,28 @@ kubectl get deploy -n <llmd-namespace> -o jsonpath='{range .items[*]}{.metadata.
 # Half one: allow the model to park. Absent, this inherits from the
 # WVA_SCALE_TO_ZERO deployment flag.
 kubectl edit configmap wva-scaling-policy-config -n <wva-namespace>
-# under the entry this model resolves to (its scalingPolicy tier, or default):
+# under `default`, or under a per-model entry (one whose body names the
+# model's model_id and namespace); a variant's scalingPolicy tier is not
+# read for parking:
 #   scaleToZero:
 #     enabled: true
 #     retentionPeriod: 10m   # idle time before parking
 #
 # Time to zero is retentionPeriod + KEDA's cooldownPeriod, in sequence, and
 # applies to the final drop out of service only.
+#
+# Re-running `make deploy-wva` re-applies the shipped `default` entry, which
+# has no scaleToZero: repeat this edit after every re-run, or put it on a
+# per-model entry (an entry whose body names the model), which the
+# installer keeps.
 ```
 <!-- guide:deploy.policy end -->
 
-The entry is the one this model resolves to: its `scalingPolicy` tier from the
-ScaledObject's trigger metadata, or `default`. Policy is a **model** property, not
+The entry is `default` (with the tier `default.defaultPolicy` names, if set),
+overridden by a per-model entry whose body names the model's `model_id` and
+`namespace`. A variant's `scalingPolicy` tier from the ScaledObject's trigger
+metadata is **not** read for parking (`ResolveScalingPolicy` in
+`internal/config/scaling_policy.go`). Policy is a **model** property, not
 a variant one — a model is at zero only when nothing serves it, so there is
 nothing meaningful a single variant could decide here.
 
@@ -112,11 +122,20 @@ nothing meaningful a single variant could decide here.
 # NOTHING serves it, so one variant left at 1 keeps the whole model up and
 # the policy above does nothing.
 kubectl get scaledobject -n <llmd-namespace> -o custom-columns=NAME:.metadata.name,MIN:.spec.minReplicaCount,MAX:.spec.maxReplicaCount
+# Any MIN above 0: set it through the plan -- re-run it, set minReplicas: 0
+# on each of the model's entries (they read apply: adopt), apply it:
+make scaledobjects-plan
+make scaledobjects-apply
+# or patch one ScaledObject directly:
+#   kubectl patch scaledobject <name> -n <llmd-namespace> --type=merge -p '{"spec":{"minReplicaCount":0}}'
 ```
 <!-- guide:deploy.bounds end -->
 
 Every `MIN` must be `0`. One variant left at `1` keeps the whole model up, and the
-policy above then does nothing at all.
+policy above then does nothing at all. To set it, edit `minReplicas` on the
+model's entries in [the ScaledObject plan](../../reference/configuration.md#default-scaledobjects)
+— an existing ScaledObject appears there as `apply: adopt`, which updates its
+bounds in place — or patch the ScaledObject's `spec.minReplicaCount` directly.
 
 **Then the trap that costs the most time.**
 
@@ -126,8 +145,11 @@ policy above then does nothing at all.
 # minReplicas: 1 — the HPA API cannot express 0 — and drives 1->0 itself, so a
 # perfectly healthy parked workload sits behind an HPA reading 1. Only
 # spec.minReplicaCount on the ScaledObject decides whether zero is permitted.
-# If you changed it after KEDA built the HPA and nothing parks, delete the
-# ScaledObject and let KEDA rebuild rather than editing in place.
+# If you changed it after KEDA built the HPA and nothing parks, re-apply the
+# ScaledObject rather than editing the HPA: `make scaledobjects-plan`, set
+# `minReplicas: 0` on the model's entries (they read `apply: adopt`), then
+# `make scaledobjects-apply`. KEDA rebuilds the HPA from the ScaledObject;
+# nothing rebuilds a deleted ScaledObject for you.
 kubectl get scaledobject -n <llmd-namespace>         -o custom-columns=NAME:.metadata.name,MIN:.spec.minReplicaCount
 # minReplicas: 1 on the derived HPA below is EXPECTED, not a fault:
 kubectl get hpa -n <llmd-namespace> -o custom-columns=NAME:.metadata.name,MIN:.spec.minReplicas
@@ -141,8 +163,11 @@ about whether scale-to-zero is working. Verified on a cluster: a model observed 
 zero replicas had `minReplicas: 1` on its HPA throughout.
 
 What decides it is `spec.minReplicaCount` on the **ScaledObject**. If you changed
-that after KEDA had already built the HPA and nothing parks, delete the
-ScaledObject and let KEDA rebuild it rather than editing in place.
+that after KEDA had already built the HPA and nothing parks, re-apply the
+ScaledObject (`make scaledobjects-plan` with `minReplicas: 0` on its `apply:
+adopt` entries, then `make scaledobjects-apply`) rather than editing the HPA.
+KEDA rebuilds the HPA from the ScaledObject; it does not rebuild a ScaledObject
+you delete.
 
 ## Verification
 

@@ -27,8 +27,10 @@ make deploy-wva NAMESPACE=<namespace> IMG=ghcr.io/ev-shindin/llm-scaling-manager
 ```
 
 `IMG_TAG` sets the tag of the default `IMG`; `IMG` replaces the whole reference.
-Any tag other than `main`, `latest`, `dev` or `nightly`, and any digest, is
-pulled `IfNotPresent`. Confirm what runs:
+The pull policy follows the reference: `IfNotPresent` for a digest or a `vX.Y.Z`
+tag, `Always` for anything else, so any tag that is not a semver release is
+pulled again on every pod start (`WVA_IMAGE_PULL_POLICY` overrides it).
+Confirm what runs:
 
 ```bash
 kubectl get deploy wva-controller-manager -n "$NS" \
@@ -56,13 +58,108 @@ default `false`, for example, deletes the alert rules. The full list is in
    NAMESPACE=<namespace> make setup-prereqs        # (cluster admin)
    ```
    A missing **optional** prerequisite does not stop the install: the controller
-   runs without the feature that needs it, and says so.
+   runs without the feature that needs it, and says so. For this release that
+   is not enough: see [Upgrading to this release](#upgrading-to-this-release).
 3. **Deploy** the pinned image, as above.
 4. **Verify**:
    ```bash
    make verify-deployment
    make verify-scaledobjects
    ```
+
+### Upgrading to this release
+
+This release adds cluster-scoped grants and moves the external-scaler
+NetworkPolicy into the admin phase. `make check-prereqs` reports the new grants
+(`wva-policy-namespace-reader-*`, `wva-kueue-reader-*`,
+`wva-controller-status-*`) as **optional**, so a tenant's upgrade goes ahead
+without them, and the controller then runs without what they enable. Do this,
+in order:
+
+1. **A cluster admin re-runs `make setup-prereqs` first**, for every
+   namespace-scoped install, with the variables that install used, before the
+   namespace owner runs `make deploy-wva`:
+   ```bash
+   NAMESPACE=<namespace> make setup-prereqs        # (cluster admin)
+   # out-of-reach shape
+   make setup-prereqs WVA_NS=wva-<namespace> WVA_WATCH_NS=<namespace>
+   ```
+   Add `KEDA_NAMESPACE=<namespace KEDA runs in>` unless the installer can find
+   KEDA itself (the namespace serving the `v1beta1.external.metrics.k8s.io`
+   APIService when that Service is KEDA's, or an existing `wva-external-scaler`
+   policy, which is kept). When it cannot,
+   **no** NetworkPolicy is applied and the installer warns that `:9090` is
+   reachable from every Pod (see [the scaler NetworkPolicy](#the-external-scaler-networkpolicy)).
+2. **Policy may move.** After its next restart, a controller that manages the
+   namespace it runs in can read Namespaces, and so finds a published cluster
+   policy: the namespace its `wva.llmd.ai/policy-namespace` label names, else
+   `wva-policy` if it exists. Its limiters and optimizer selection then come
+   from there, and the
+   `limiters:` in its own `wva-scaling-policy-config` **stop applying**.
+   Thresholds, tiers and per-model entries still come from its own ConfigMap.
+3. **`make enable-physical-limiter` and `make disable-physical-limiter` restart
+   every namespace-scoped controller whose policy source is outside the
+   namespace it manages**, on this run and every later one: a self-managed one
+   reading `wva-policy` (or its labelled namespace), and an out-of-reach one
+   reading its own ConfigMap in `wva-<namespace>`. Such a controller caches only
+   the namespace it manages and reads any other ConfigMap at startup, so the plan
+   the command prints marks them `WILL BE RESTARTED`. Run it when a restart is
+   acceptable ([what a restart costs](#after-every-upgrade-or-restart)).
+4. **What now fails closed**:
+   - A Kueue ClusterQueue with a `namespaceSelector` grants a namespace its
+     quota only when the selector admits it (no selector admits nothing, `{}`
+     admits every namespace). If the controller cannot read the namespace's
+     labels, that queue's grant is withheld, so the namespace is bounded at
+     nothing by it.
+   - With a Kueue quota source configured, `make deploy-wva` (the controller-only
+     phase) **refuses** when the controller cannot `get` its managed Namespace,
+     and names the `make setup-prereqs` run that fixes it.
+   - A NetworkPolicy that admits a namespace KEDA does not run in drops every
+     KEDA call: every ScaledObject naming this scaler goes not-Ready and nothing
+     scales, while the controller reports healthy.
+5. **Check**:
+   - `wva_policy_namespace_unverified` is `0`. `1` means the controller could
+     not read its Namespace and runs on its own ConfigMap
+     (alert `WVAPolicyNamespaceUnverified`).
+   - `make verify-deployment` prints no NetworkPolicy banner: neither the one
+     that says the policy admits `:9090` only from a namespace KEDA does not run
+     in, nor the one that says there is no policy and the port is open.
+   - The [`wva-controller-status` ConfigMap](operations.md#what-the-controller-is-running-with)
+     names the policy namespace, limiter and acceptance the controller runs with:
+     ```bash
+     kubectl get cm wva-controller-status -n "$NS" \
+       -o jsonpath='{.data.policyNamespace} {.data.limiter} {.data.policyAccepted}{"\n"}'
+     ```
+
+### The external-scaler NetworkPolicy
+
+`wva-external-scaler` admits `:9090` only from KEDA's namespace. It is written in
+the admin phase (`make setup-prereqs`), and only when the installer **knows**
+where KEDA runs: `KEDA_NAMESPACE` set explicitly, the namespace serving the
+external-metrics APIService when that Service is KEDA's, `KEDA_NAMESPACE` with
+`KEDA_HELM_INSTALL=true` when that APIService does not exist yet (this install
+puts KEDA there), or the namespace an existing `wva-external-scaler` policy
+already admits. Otherwise none is written, the installer warns that `:9090` is
+open, and `make verify-deployment` prints `No NetworkPolicy: scaler port open`.
+`make check-prereqs` and the controller-only phase (`INSTALL_PHASE=wva`) list
+the policy as optional, and that phase with `WVA_SCALER_NETWORKPOLICY=false`
+leaves an existing policy in place; only the admin phase removes it. A tenant
+usually cannot read the APIService, so on an upgrade:
+
+- Pass `KEDA_NAMESPACE=<namespace>` to `make setup-prereqs` whenever KEDA is not
+  in a namespace the installer can find
+  (`KEDA_NAMESPACE=<namespace> NAMESPACE=<ns> make setup-prereqs`). An existing policy is kept as it is, so
+  a policy an earlier install pointed at the wrong namespace stays wrong until
+  `KEDA_NAMESPACE` replaces it.
+- Run `make verify-deployment` and read its NetworkPolicy lines. A namespace you
+  cannot see KEDA from is reported as not confirmed, not as correct.
+- Earlier versions of these docs had you apply a policy by hand, named
+  `wva-external-scaler-from-keda`. NetworkPolicies add up, so it still admits
+  whatever namespace it names to `:9090`, and the installer neither reads nor
+  updates it. Delete it once the shipped one is in place:
+  ```bash
+  kubectl delete networkpolicy wva-external-scaler-from-keda -n "$NS" --ignore-not-found
+  ```
 
 ## After every upgrade or restart
 
@@ -125,7 +222,7 @@ make undeploy-wva NAMESPACE=<namespace> WVA_NS=wva-<namespace>
 | Prometheus, KEDA, the EPP | shared; this install may not have created them | `UNDEPLOY_SHARED=true` removes them too, for everything on the cluster |
 | the PrometheusRule `controller-manager-alerts` | the uninstall does not render the alerts component | `kubectl delete prometheusrule controller-manager-alerts -n "$NS"` |
 | the dashboard ConfigMap `wva-operation-dashboard` | shared by every install on the cluster | (cluster admin, if it is in a shared monitoring namespace) `kubectl delete configmap wva-operation-dashboard -n <dashboard-namespace>` |
-| cluster policy in the policy namespace (`wva-policy`): the ConfigMap, Role `wva-policy-reader` and this install's RoleBinding | written by `make enable-physical-limiter`, for every controller on the cluster | (cluster admin) see below |
+| cluster policy in the policy namespace (`wva-policy`, or the one a `wva.llmd.ai/policy-namespace` label names): the ConfigMap, Role `wva-policy-reader` and this install's RoleBinding | written by `make enable-physical-limiter`, for every controller it granted | (cluster admin) see below |
 | ClusterRoles and bindings from an install older than per-install suffixes | they may be bound by another install | (cluster admin) delete by hand once no install uses them |
 | utilization-share transfer marks on pods | written while the optimizer acted | [Transfer marks left on pods](troubleshooting.md#transfer-marks-left-on-pods-after-a-downgrade); set `shadow: true` and wait a cycle **before** uninstalling to avoid them |
 
@@ -158,11 +255,15 @@ Then, for each:
 
 The per-install suffix is the first eight hex digits of the SHA-256 of the
 controller's namespace (`wva-<namespace>` in the out-of-reach shape). The policy
-namespace is `wva-policy` unless it was set with `WVA_POLICY_NS`; use the same
-value here:
+namespace is the `policyNamespace` in the controller's `wva-controller-status`
+ConfigMap, else `wva-policy`. The uninstall removes that ConfigMap, so read it
+first; afterwards, the managed namespace's `wva.llmd.ai/policy-namespace` label
+names it, if it is set:
 
 ```bash
-POLICY_NS="${WVA_POLICY_NS:-wva-policy}"
+POLICY_NS=$(kubectl get cm wva-controller-status -n "$NS" \
+  -o jsonpath='{.data.policyNamespace}' 2>/dev/null)
+POLICY_NS="${POLICY_NS:-wva-policy}"
 SUFFIX=$(printf '%s' "$NS" | sha256sum | cut -c1-8)
 kubectl delete rolebinding "wva-policy-reader-$SUFFIX" -n "$POLICY_NS"
 kubectl get clusterrole,clusterrolebinding | grep -- "-$SUFFIX"   # anything the uninstall could not remove
@@ -171,7 +272,7 @@ kubectl get clusterrole,clusterrolebinding | grep -- "-$SUFFIX"   # anything the
 Only when no scaling-manager install remains on the cluster:
 
 ```bash
-make disable-physical-limiter WVA_POLICY_NS="$POLICY_NS"   # clears the limiter from every policy ConfigMap it finds
+make disable-physical-limiter   # clears the limiter from wva-policy and every policy ConfigMap a controller reads
 kubectl delete namespace "$POLICY_NS"
 ```
 

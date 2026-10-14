@@ -2,13 +2,18 @@ package controller
 
 import (
 	"context"
+	"errors"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
@@ -128,6 +133,70 @@ var _ = Describe("ResolvePolicyNamespace", func() {
 		})
 	})
 
+	// A namespace-scoped controller holds only a Role, and a Role cannot reach a
+	// cluster-scoped Namespace. Reporting that denial as "the policy namespace does
+	// not exist" made every such controller ignore the policy an admin published
+	// with `make enable-physical-limiter` — silently.
+	Context("when reading Namespaces is Forbidden", func() {
+		It("falls back to its own ConfigMap but records the source as unverified", func() {
+			c := denyingNamespaces(newScheme(), func(string) bool { return true },
+				namespace(tenantNS, nil), namespace(config.WellKnownPolicyNamespace, nil))
+
+			cfg := selfManaged()
+			Expect(ResolvePolicyNamespace(context.Background(), c, cfg)).To(Succeed())
+
+			Expect(cfg.PolicySource()).To(Equal(config.PolicySourceLocalUnverified))
+			Expect(cfg.PolicyNamespace()).To(Equal(tenantNS))
+			Expect(cfg.PolicyNamespaceIsSeparate()).To(BeFalse())
+		})
+
+		It("records unverified when only the well-known namespace is denied", func() {
+			c := denyingNamespaces(newScheme(),
+				func(name string) bool { return name == config.WellKnownPolicyNamespace },
+				namespace(tenantNS, nil))
+
+			cfg := selfManaged()
+			Expect(ResolvePolicyNamespace(context.Background(), c, cfg)).To(Succeed())
+			Expect(cfg.PolicySource()).To(Equal(config.PolicySourceLocalUnverified))
+		})
+
+		It("still uses the well-known namespace when only the managed one is denied", func() {
+			c := denyingNamespaces(newScheme(),
+				func(name string) bool { return name == tenantNS },
+				namespace(config.WellKnownPolicyNamespace, nil))
+
+			cfg := selfManaged()
+			Expect(ResolvePolicyNamespace(context.Background(), c, cfg)).To(Succeed())
+			Expect(cfg.PolicyNamespace()).To(Equal(config.WellKnownPolicyNamespace))
+			Expect(cfg.PolicySource()).To(Equal(config.PolicySourceWellKnown))
+		})
+
+		// The denial changes nothing for an admin-owned controller, whose own
+		// ConfigMap is authoritative either way, so it is not flagged.
+		It("does not flag an admin-owned controller", func() {
+			GinkgoT().Setenv("POD_NAMESPACE", "wva-system")
+			c := denyingNamespaces(newScheme(), func(string) bool { return true })
+
+			cfg := &config.Config{}
+			config.SetWatchNamespaceForTest(cfg, tenantNS)
+			Expect(ResolvePolicyNamespace(context.Background(), c, cfg)).To(Succeed())
+			Expect(cfg.PolicySource()).To(Equal(config.PolicySourceLocal))
+		})
+
+		// Distinct from the Forbidden case: an error that says nothing about
+		// permission is still a reason to refuse rather than guess.
+		It("refuses to start on any other error reading the well-known namespace", func() {
+			c := fake.NewClientBuilder().WithScheme(newScheme()).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Get: func(_ context.Context, _ client.WithWatch, _ client.ObjectKey, _ client.Object, _ ...client.GetOption) error {
+						return apierrors.NewInternalError(errors.New("etcd unavailable"))
+					},
+				}).Build()
+
+			Expect(ResolvePolicyNamespace(context.Background(), c, selfManaged())).NotTo(Succeed())
+		})
+	})
+
 	Context("when the controller does not manage its own namespace", func() {
 		// An admin-run controller — cluster-scoped, or namespace-scoped from
 		// outside — is already beyond the tenant's reach, so it is not made to
@@ -160,5 +229,68 @@ var _ = Describe("ResolvePolicyNamespace", func() {
 			Expect(cfg.PolicySource()).To(Equal(config.PolicySourceLocal))
 			Expect(cfg.PolicyNamespaceIsSeparate()).To(BeFalse())
 		})
+	})
+})
+
+// denyingNamespaces builds a client whose Namespace Gets return Forbidden for
+// every name denied() accepts, the way the API server answers a ServiceAccount
+// that holds only a namespaced Role.
+func denyingNamespaces(s *runtime.Scheme, denied func(string) bool, objs ...client.Object) client.Client {
+	return fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, isNS := obj.(*corev1.Namespace); isNS && denied(key.Name) {
+					return apierrors.NewForbidden(schema.GroupResource{Resource: "namespaces"}, key.Name,
+						errors.New("namespaces is forbidden: cannot get resource \"namespaces\" at the cluster scope"))
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).Build()
+}
+
+var _ = Describe("namespaceExists", func() {
+	newScheme := func() *runtime.Scheme {
+		s := runtime.NewScheme()
+		Expect(corev1.AddToScheme(s)).To(Succeed())
+		return s
+	}
+
+	It("reports a present namespace", func() {
+		c := fake.NewClientBuilder().WithScheme(newScheme()).
+			WithObjects(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "wva-policy"}}).Build()
+		exists, err := namespaceExists(context.Background(), c, "wva-policy")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(exists).To(BeTrue())
+	})
+
+	It("reports NotFound as absent", func() {
+		c := fake.NewClientBuilder().WithScheme(newScheme()).Build()
+		exists, err := namespaceExists(context.Background(), c, "wva-policy")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(exists).To(BeFalse())
+	})
+
+	// Forbidden is not absent: the caller must be able to tell "I looked and it
+	// is not there" from "I was not allowed to look".
+	It("reports Forbidden as an error, not as absent", func() {
+		c := denyingNamespaces(newScheme(), func(string) bool { return true },
+			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "wva-policy"}})
+		exists, err := namespaceExists(context.Background(), c, "wva-policy")
+		Expect(apierrors.IsForbidden(err)).To(BeTrue(), "got err=%v", err)
+		Expect(exists).To(BeFalse())
+	})
+})
+
+var _ = Describe("policyReadRemedy", func() {
+	It("names the RoleBinding and the command when policy lives in another namespace", func() {
+		GinkgoT().Setenv("POD_NAMESPACE", "team-a")
+		got := policyReadRemedy("wva-policy")
+		Expect(got).To(ContainSubstring("RoleBinding wva-policy-reader-"))
+		Expect(got).To(ContainSubstring("NAMESPACE=team-a make setup-prereqs"))
+	})
+
+	It("keeps the plain hint for the controller's own namespace", func() {
+		GinkgoT().Setenv("POD_NAMESPACE", "team-a")
+		Expect(policyReadRemedy("team-a")).NotTo(ContainSubstring("setup-prereqs"))
 	})
 })

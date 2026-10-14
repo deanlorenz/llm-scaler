@@ -2,6 +2,7 @@ package scaler
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	pb "github.com/kedacore/keda/v2/pkg/scalers/externalscaler"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -52,6 +54,12 @@ type Server struct {
 	// only after it has started this runnable, so the standby phase would run
 	// for the moments in between and hand off for nothing.
 	Elected <-chan struct{}
+	// TLSConfig, when set, serves the scaler over TLS (see NewTLSConfig); a
+	// client that does not complete the handshake -- a plaintext one, or one
+	// without an accepted client certificate when the config demands one --
+	// reaches no RPC. Nil serves plaintext, which is the default: KEDA's
+	// external trigger dials plaintext unless its authentication names a CA.
+	TLSConfig *tls.Config
 
 	// listening is set once a listener is bound and cleared when Start returns.
 	// Where the platform allows it the hand-off binds the full server before
@@ -264,6 +272,9 @@ func (s *Server) bind(ctx context.Context, handler pb.ExternalScalerServer, opts
 		grpc.ChainUnaryInterceptor(recoverUnary),
 		grpc.ChainStreamInterceptor(recoverStream),
 	}, opts...)
+	if s.TLSConfig != nil {
+		opts = append(opts, grpc.Creds(credentials.NewTLS(s.TLSConfig)))
+	}
 	r := &served{srv: grpc.NewServer(opts...), err: make(chan error, 1)}
 	pb.RegisterExternalScalerServer(r.srv, handler)
 	go func() { r.err <- r.srv.Serve(lis) }()

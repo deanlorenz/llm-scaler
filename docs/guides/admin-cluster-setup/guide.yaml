@@ -26,11 +26,14 @@ deploy:
       kubectl -n ${NAMESPACE} describe quota wva-gpus
   namespace_read:
     note: |
-      Tenant-owned shape on Kubernetes only: lets the controller read its own
-      Namespace (for the wva.llmd.ai/policy-namespace label) and see whether
-      wva-policy exists. Nothing else. The resolution runs once at startup, so
-      restart the controller afterwards -- the controller Deployment only, not
-      the warm pool.
+      Tenant-owned shape on Kubernetes only, and only when make setup-prereqs
+      cannot be run. Two grants, and both are needed: the Namespace read lets
+      the controller read its own Namespace (for the
+      wva.llmd.ai/policy-namespace label) and see whether wva-policy exists;
+      the RoleBinding lets it read the policy ConfigMap there. With the first
+      and not the second, a controller that finds wva-policy refuses to start.
+      The resolution runs once at startup, so restart the controller
+      afterwards -- the controller Deployment only, not the warm pool.
     run: |
       kubectl apply -f - <<EOF
       apiVersion: rbac.authorization.k8s.io/v1
@@ -51,6 +54,30 @@ deploy:
         apiGroup: rbac.authorization.k8s.io
         kind: ClusterRole
         name: wva-namespace-reader-${NAMESPACE}
+      subjects:
+      - kind: ServiceAccount
+        name: wva-controller-manager
+        namespace: ${NAMESPACE}
+      ---
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: Role
+      metadata:
+        name: wva-policy-reader
+        namespace: wva-policy
+      rules:
+      - apiGroups: [""]
+        resources: ["configmaps"]
+        verbs: ["get", "list", "watch"]
+      ---
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        name: wva-policy-reader-${NAMESPACE}
+        namespace: wva-policy
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: Role
+        name: wva-policy-reader
       subjects:
       - kind: ServiceAccount
         name: wva-controller-manager

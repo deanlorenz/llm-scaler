@@ -1,0 +1,65 @@
+# Roadmap
+
+Planned work that changes what an operator can rely on. Each item links the
+GitHub issue that tracks it; the issue has the detail and the current state.
+[Known gaps](why.md#known-gaps) lists the main gaps; the planned work is here,
+each with its issue, alongside the evidence work.
+
+## GPU budgets
+
+- **Kueue borrowing.** The Kueue quota source bounds a namespace by its
+  ClusterQueue's nominal quota and does not count capacity the queue could
+  borrow from its cohort. In a cohort that lends quota, a model is held at its
+  nominal share even when Kueue would admit more from borrowed capacity.
+  Planned: count borrowable capacity, opt-in, and prefer releasing borrowed
+  replicas first.
+  [#136](https://github.com/ev-shindin/llm-scaling-manager/issues/136)
+  · today: [Kueue quotas](well-lit-paths/kueue-bounded-quotas/)
+
+## Scaling
+
+- **Scale to a latency target.** Tiers set how full a replica may run, not a
+  TTFT or TPOT target; an operator with an SLO translates it into thresholds by
+  hand. Planned: a tier may declare a latency target, and the controller derives
+  the fill that meets it from measured latency, keeping variants, P/D pairing
+  and the GPU budget.
+  [#141](https://github.com/ev-shindin/llm-scaling-manager/issues/141)
+
+- **Price prefill from the router's prompt tokens.** The router knows the
+  prompt tokens in flight before an engine sees them; today that signal feeds
+  only shape-change holds. Planned: use it as a prefill demand input, priced by
+  the throughput the controller already learns, so prefill capacity is ordered
+  before engine queues fill.
+  [#144](https://github.com/ev-shindin/llm-scaling-manager/issues/144)
+
+## Resilience
+
+- **Learned capacity survives a restart.** What the controller learns about a
+  model's capacity lives in memory, so a restart or a leader hand-off re-learns
+  it, and a request shape it had already priced is sized from occupancy again.
+  Planned: the leader writes its fitted state to a ConfigMap keyed on the engine's
+  configuration, and a new leader recalls only entries that match and are fresh.
+  [#137](https://github.com/ev-shindin/llm-scaling-manager/issues/137)
+
+## Security
+
+- **Mutual TLS on the scaler port by default.** The scaler port is plaintext
+  by default; a NetworkPolicy admitting only KEDA's namespace is shipped, and
+  mutual TLS (`--external-scaler-cert-path`, `--external-scaler-client-ca`,
+  `--external-scaler-client-san`) is opt-in and manual
+  ([network exposure](reference/security-model.md#network-exposure)). Planned: the installer provisions the certificates
+  (cert-manager when present, otherwise its own CA), wires every ScaledObject it
+  generates or adopts, and pins KEDA's client identity.
+  [#138](https://github.com/ev-shindin/llm-scaling-manager/issues/138)
+
+## Evidence
+
+- **Prove variant choice, and measure more.** An end-to-end spec that the
+  cheaper variant grows, a benchmark across two GPU types, repeated runs with
+  their spread, larger models, and a head-to-head with llm-d's recipes on their
+  own published setups.
+  [#142](https://github.com/ev-shindin/llm-scaling-manager/issues/142)
+- **Nightly end-to-end on real GPUs.** CI runs the suites on kind with a
+  simulator; a scheduled run on a GPU cluster would catch real-engine
+  regressions (metrics, sleep and wake, drain, P/D transfer).
+  [#143](https://github.com/ev-shindin/llm-scaling-manager/issues/143)

@@ -32,6 +32,7 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/controllerstatus"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/datastore"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 )
@@ -50,6 +51,11 @@ type ConfigMapReconciler struct {
 	// without a controller restart; the reconciler compares live config against
 	// this to warn when a runtime edit would be silently inert.
 	ThroughputRegistered bool
+
+	// Status receives the version of the authoritative policy ConfigMap each
+	// time one is applied, for the controller-status ConfigMap. Nil-safe:
+	// tests that do not check it leave it unset.
+	Status *controllerstatus.Publisher
 }
 
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
@@ -139,6 +145,7 @@ func (r *ConfigMapReconciler) handleConfigMapDeletion(ctx context.Context, name,
 			// to this controller's own namespace, handing limit-setting to whoever
 			// writes that — the party the policy namespace exists to take it from.
 			r.Config.UpdateClusterPolicy(&config.ScalingPolicy{})
+			r.Status.RecordPolicy(r.Config, namespace, name, "", nil)
 			logger.Info("Cluster policy ConfigMap deleted: no limiters or quotas are in force",
 				"policyNamespace", namespace, "configMap", name)
 		}
@@ -242,19 +249,22 @@ func (r *ConfigMapReconciler) supersededByCurrentName(ctx context.Context, cm *c
 func (r *ConfigMapReconciler) handleClusterPolicyConfigMap(ctx context.Context, cm *corev1.ConfigMap) {
 	logger := log.FromContext(ctx)
 
-	configs, _ := parseScalingPolicyConfig(cm.Data, logger)
-	policy, ok := configs["default"]
+	configs, _, rejected := parseScalingPolicyConfigRejects(cm.Data, logger)
+	policy, ok := configs[config.GlobalDefaultsKey]
 	if !ok {
 		// An empty or absent default entry means no bound was declared. That must
 		// clear any previous one rather than leave the last-known limiters in
 		// place: a cluster admin who deletes a quota expects it to stop applying.
 		r.Config.UpdateClusterPolicy(nil)
+		r.Status.RecordPolicy(r.Config, cm.GetNamespace(), cm.GetName(), cm.GetResourceVersion(),
+			rejected[config.GlobalDefaultsKey])
 		logger.Info("Policy namespace ConfigMap has no default entry: no cluster limiters or quotas are in force",
 			"policyNamespace", cm.GetNamespace(), "configMap", cm.GetName())
 		return
 	}
 
 	r.Config.UpdateClusterPolicy(&policy)
+	r.Status.RecordPolicy(r.Config, cm.GetNamespace(), cm.GetName(), cm.GetResourceVersion(), nil)
 	logger.Info("Loaded cluster policy from the policy namespace",
 		"policyNamespace", cm.GetNamespace(), "configMap", cm.GetName(),
 		"limiters", len(policy.Limiters), "limiterMode", r.Config.EffectiveLimiterMode())
@@ -270,7 +280,7 @@ func (r *ConfigMapReconciler) handleScalingPolicyConfigMap(ctx context.Context, 
 	}
 
 	// Parse scaling policy entries
-	configs, count := parseScalingPolicyConfig(cm.Data, logger)
+	configs, count, rejected := parseScalingPolicyConfigRejects(cm.Data, logger)
 
 	// Update global or namespace-local config
 	if isGlobal {
@@ -291,6 +301,15 @@ func (r *ConfigMapReconciler) handleScalingPolicyConfigMap(ctx context.Context, 
 			}
 		}
 		r.Config.UpdateScalingPolicyConfig(configs)
+		// This ConfigMap is the cluster policy only when no policy namespace is
+		// separate; otherwise that one's version is the one recorded, and this
+		// edit cannot move the limiter or the optimizer, which are read there.
+		if r.Config.PolicyNamespaceIsSeparate() {
+			r.Status.ObserveConfig(r.Config)
+		} else {
+			r.Status.RecordPolicy(r.Config, namespace, cm.GetName(), cm.GetResourceVersion(),
+				rejected[config.GlobalDefaultsKey])
+		}
 		logger.Info("Updated global scaling policy from ConfigMap", "entries", count)
 		r.warnIfThroughputRegistrationDiverged(logger, cm)
 	} else {

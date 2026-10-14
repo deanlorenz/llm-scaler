@@ -26,7 +26,7 @@ and read each `[SKIPPED]` reason.
 | Skips unless | Specs |
 | --- | --- |
 | `SCALE_TO_ZERO_ENABLED=true` at **both** `deploy-e2e-infra` and the test run (default `false`; it turns on EPP flow control) | every scale-from-zero and scale-to-zero spec, and the scaling-blocked-reason spec |
-| `USE_SIMULATOR=true` (the default) | KEDA external scaler, saturation, scaling policy tier, conceded supply, throughput analyzer, warm-pool attribution and borrow, SGLang |
+| `USE_SIMULATOR=true` (the default) | KEDA external scaler, saturation, scaling policy tier, conceded supply, throughput analyzer, warm-pool attribution and borrow, warm-pool retained, SGLang |
 | `USE_SIMULATOR=false` on a GPU cluster | warm-pool drain (label `gpu`, in neither tier) |
 | LeaderWorkerSet is served (`DEPLOY_LWS=true`) | LeaderWorkerSet scale-from-zero, warm-pool group |
 | Kueue CRDs are served | Kueue quota limiter |

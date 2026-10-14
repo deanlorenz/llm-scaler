@@ -28,9 +28,12 @@ const (
 // resolved scaling entry.
 //
 // The entry is the ONLY per-model surface: it arrives already resolved
-// namespace-local → global, then the named policy tier, then any per-model
-// override — which is matched on the modelID/namespace in its BODY, not its key —
-// so tiering and per-model precedence are settled before this is called. A
+// namespace-local → global, then the tier the default entry's defaultPolicy
+// names, then any per-model override — which is matched on the modelID/namespace
+// in its BODY, not its key — so precedence is settled before this is called.
+// Scale-to-zero is read from the default entry, the tier its defaultPolicy names,
+// or a per-model override — not from a tier a variant names: the callers resolve
+// with ResolveScalingPolicy, which passes no tier. A
 // separate wva-model-scale-to-zero-config ConfigMap used to carry the same
 // setting, which meant three places to look and a precedence rule to remember.
 //

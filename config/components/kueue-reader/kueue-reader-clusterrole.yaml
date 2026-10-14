@@ -11,3 +11,12 @@ rules:
   verbs:
   - get
   - list
+# Namespace labels, to evaluate a ClusterQueue spec.namespaceSelector before its
+# grant is attributed to a namespace. get only: one read per namespace whose
+# queue has a non-empty selector, never a list or watch.
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
+  verbs:
+  - get

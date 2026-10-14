@@ -29,8 +29,13 @@ Every option `deploy/install.sh` reads. Verified against the script: each entry 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `WVA_IMAGE_REPO` | controller image repository | `ghcr.io/ev-shindin/llm-scaling-manager` |
-| `WVA_IMAGE_TAG` | controller image tag | `main` |
-| `WVA_IMAGE_PULL_POLICY` | Image pull policy | `Always` |
+| `WVA_IMAGE_TAG` | controller image tag | `newTag` in `config/base/manager/kustomization.yaml`: `main`, or the release tag on a release commit |
+| `WVA_IMAGE_DIGEST` | pin one exact build; set by `IMG=<repo>@sha256:<digest>` and used instead of the tag | unset |
+| `WVA_IMAGE_PULL_POLICY` | Image pull policy | by reference: `IfNotPresent` for a digest or a `vX.Y.Z` tag, `Always` for anything else |
+
+`main`, `latest`, `dev` and `nightly` are floating tags: the same install deploys a
+different binary after the next push. The installer warns when it deploys one. For
+anything you need to reproduce, pass `IMG=<repo>@sha256:<digest>` or a release tag.
 
 ## Namespaces
 
@@ -55,7 +60,8 @@ Every option `deploy/install.sh` reads. Verified against the script: each entry 
 | `ENABLE_SCALE_TO_ZERO` | Allow a model to be parked at zero replicas, and enable the EPP `flowControl` gate that makes waking it possible | `true` |
 | `SKIP_CHECKS` | Turn the preflight's refusals (no model servers in the namespace, model servers or EPP not scraped, the EPP `flowControl` gate off, missing permissions) into warnings: findings are still reported. It does not skip the guard against a second install on the cluster, or the post-install verification | `false` |
 | `SCALER_BACKEND` | `keda` or `none` (use a pre-installed backend) | `keda` |
-| `KEDA_NAMESPACE` | Namespace KEDA is installed in | `keda-system` |
+| `KEDA_NAMESPACE` | Namespace KEDA is installed in. Set explicitly, it is also the namespace the external-scaler NetworkPolicy admits. Unset, the policy's namespace is found, in order: the namespace serving the `v1beta1.external.metrics.k8s.io` APIService when that Service is KEDA's; else, with `KEDA_HELM_INSTALL=true` and that APIService NotFound, this default (the install puts KEDA there); else the namespace an existing `wva-external-scaler` policy already admits, which is kept. With none, **no NetworkPolicy is applied** and the installer warns that `:9090` is reachable from every Pod, with the fix (`KEDA_NAMESPACE=<ns> NAMESPACE=<ns> make setup-prereqs`, or the scaler mutual-TLS flags) — never a guessed namespace. A source you cannot read counts as unknown, not absent. The policy is an admin-phase object (`make setup-prereqs`); `make check-prereqs` and `INSTALL_PHASE=wva` treat it as optional. `make verify-deployment` warns when the policy and KEDA's namespace differ, and prints `No NetworkPolicy: scaler port open` when there is no policy | `keda-system` for the KEDA install; detected for the NetworkPolicy |
+| `WVA_SCALER_NETWORKPOLICY` | Install the NetworkPolicy that admits the external scaler port (`:9090`) **only from KEDA's namespace**; metrics (`:8443`) and probes (`:8081`) stay open. `false` leaves `:9090` open to every Pod that can reach the controller, which can then rewrite any workload's trigger metadata and read every scaling decision. `false` removes an existing policy only in the admin phase (`make setup-prereqs`, or `INSTALL_PHASE=all`); the controller-only `make deploy-wva` leaves it in place | `true` |
 | `KEDA_HELM_INSTALL` | Install KEDA with Helm rather than assuming it is present | `false` |
 | `KEDA_CHART_VERSION` | KEDA Helm chart version | `2.19.0` |
 | `UNDEPLOY` | Remove instead of install (`install.sh` doubles as the uninstaller) | `false` |
@@ -290,7 +296,8 @@ shipped default and **exits at startup** if nothing answers there
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `PROMETHEUS_URL` | Full base URL, e.g. `https://prom.monitoring.svc.cluster.local:9090` | the kube-prometheus-stack this install deploys |
-| `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY` | Connect without verifying the server certificate | `true` in the shipped config |
+| `PROMETHEUS_SA` | `<namespace>/<serviceaccount>` of the Prometheus that scrapes the controller's `/metrics`; it is bound to the metrics-reader ClusterRole. Unset: the one non-default `serviceAccountName` the Prometheus CRs agree on in the namespace an explicitly set `PROMETHEUS_URL` addresses, else the kube-prometheus-stack this install deploys (`DEPLOY_PROMETHEUS=true`, with the URL in `MONITORING_NAMESPACE`). Never a Prometheus the installer only auto-detected, never another namespace's, and never `default`; with no such answer no binding is created (`--check` lists it as optional) and the installer says so | none |
+| `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY` | Connect without verifying the server certificate. The installer warns when an HTTPS install ends up unverified; see [TLS configuration](prometheus.md#tls-configuration) for the production setting | `true` in the shipped Kubernetes config, `false` on OpenShift |
 | `DEPLOY_PROMETHEUS` | Deploy a Prometheus stack when the cluster has none of its own — see [Deployment flags](#deployment-flags) | `true` |
 
 ## Which namespace is which
@@ -474,6 +481,59 @@ logged once at startup as `learned-state horizons`, so the log says what is actu
 running rather than what was asked for. Shortening them is how this is exercised on
 a cluster inside a test run instead of over a week.
 
+The external scaler serves **plaintext** gRPC by default and relies on the
+NetworkPolicy above. Two controller flags add TLS: `--external-scaler-cert-path`
+(a directory holding `tls.crt` and `tls.key`, reloaded on rotation) serves TLS, and
+KEDA then needs `caCert` in the trigger's TriggerAuthentication;
+`--external-scaler-client-ca` (a PEM bundle, read once) also requires every client
+to present a certificate it signed, i.e. KEDA's `tlsClientCert` and `tlsClientKey`;
+`--external-scaler-client-san` (comma-separated) then accepts only clients whose
+certificate carries one of those names as a DNS SAN, URI SAN or Common Name.
+All are off by default, and the shipped manifests do not set them.
+
+Before turning TLS on:
+
+- **Every ScaledObject that names this scaler needs a TriggerAuthentication
+  first.** The ScaledObjects `make scaledobjects-apply` generates or adopts carry
+  no `authenticationRef`, so with `--external-scaler-cert-path` set KEDA keeps
+  dialling plaintext and every one goes not-Ready. KEDA's external scaler reads
+  `caCert`, `tlsClientCert` and `tlsClientKey` from the trigger's authentication
+  (TLS is on whenever one of them is set):
+  ```yaml
+  apiVersion: keda.sh/v1alpha1
+  kind: TriggerAuthentication
+  metadata:
+    name: wva-external-scaler-tls
+    namespace: <model namespace>          # the ScaledObject's namespace
+  spec:
+    secretTargetRef:
+    - {parameter: caCert,        name: wva-scaler-client-tls, key: ca.crt}
+    - {parameter: tlsClientCert, name: wva-scaler-client-tls, key: tls.crt}   # mutual TLS only
+    - {parameter: tlsClientKey,  name: wva-scaler-client-tls, key: tls.key}   # mutual TLS only
+  ```
+  and on each trigger, `authenticationRef: {name: wva-external-scaler-tls}`. An
+  adopt merge-patches `triggers` as a whole, so re-running
+  `make scaledobjects-apply` on an adopted object drops the reference; check
+  it afterwards.
+- **The serving certificate must name the Service KEDA dials**:
+  `wva-external-scaler.<controller namespace>.svc`, and
+  `wva-external-scaler.<controller namespace>.svc.cluster.local`, the host in
+  the `scalerAddress` the installer writes.
+- **Mount the certificate** as a Secret volume (`tls.crt`, `tls.key`) on the
+  `manager` container, at the directory passed to `--external-scaler-cert-path`,
+  for example `/etc/wva/scaler-tls`. The root filesystem is read-only, so the
+  files must arrive by a mount. A client CA for `--external-scaler-client-ca`
+  is mounted the same way.
+
+What the NetworkPolicy does not cover:
+
+- It is enforced only by a CNI that implements NetworkPolicy. Without one, `:9090`
+  is open to every Pod; use the scaler TLS and client CA above.
+- It admits every Pod in KEDA's namespace, and most CNIs also let node and
+  `hostNetwork` traffic through.
+- The client CA must be dedicated to KEDA: any certificate it signed is accepted.
+  Pass `--external-scaler-client-san` to pin KEDA's identity.
+
 ## Optional: scaling band after `make deploy-e2e-infra`
 
 If `SCALE_UP_THRESHOLD` and/or `SCALE_DOWN_BOUNDARY` are set in the environment, the Makefile patches the `wva-scaling-policy-config` ConfigMap after install. Note the patch replaces the whole `default` entry, so it writes `analyzerName: saturation` alongside the band.
@@ -493,7 +553,12 @@ it afterwards, and nothing outside tests calls the cache updater.
 
 **Dynamic** — re-read when the ConfigMap changes, so a change applies in place:
 the scaling thresholds, the analyzer selection and tiers, scale-to-zero, and the
-limiter.
+limiter. The exception is a namespace-scoped controller reading a policy
+ConfigMap outside the namespace it manages — cluster policy in `wva-policy` (or
+a labelled policy namespace), or, for an out-of-reach install (`WVA_WATCH_NS`),
+its own ConfigMap in its install namespace. Its cache holds only the managed
+namespace (`cmd/main.go`), so it reads that ConfigMap at startup, and an edit
+needs a restart.
 
 The limiter is the one people expect to be a flag and it is not. It is selected
 by the `limiters:` list on the scaling-policy ConfigMap's `default` entry — there
@@ -507,5 +572,7 @@ is no CLI flag and no environment variable:
   cluster or namespace scope, declared inline.
 
 Because it is dynamic, the engine rebuilds the limiter when the ConfigMap
-changes and no restart is involved. The schema, the scopes and the validation
+changes and no restart is involved, except for the startup-read case above,
+where `make enable-physical-limiter` and `make disable-physical-limiter` restart
+the controller for you. The schema, the scopes and the validation
 rules are in the [quota limiter reference](quota-limiter.md).

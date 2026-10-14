@@ -1,9 +1,10 @@
 # llm-scaling-manager: project proposal
 
-**Status:** built and running, 2026-09-28; this page argues for adopting it. The
-scaling path, warm pool, scale-to-zero and quota limiting are cluster-verified
-on Kubernetes and on OpenShift, and every measurement below links to the run
-that produced it.
+**Status:** built and running, 2026-10-14; this page argues for adopting it. The
+scaling path, warm pool and scale-to-zero are cluster-verified on Kubernetes and
+on OpenShift. The GPU limiter is end-to-end tested; quota limiting is
+unit-tested, with the refusal path end to end. Every measurement below links to
+the run that produced it.
 
 ## Summary
 
@@ -11,9 +12,20 @@ llm-scaling-manager is an analytical autoscaler for llm-d inference. Analytical
 means the replica count is computed from a capacity model, from what one replica
 can actually serve at the shape of traffic arriving, rather than read off a
 threshold on a raw metric. It works out how many replicas each model and variant
-needs and decides for all of them together against one GPU budget. Alongside
+needs and decides for all of them together, against a GPU budget when you
+declare one (opt-in; off by default). Alongside
 that it ships a shared warm pool to cover the minutes a new replica spends
 loading, scale-to-zero, and separate handling for prefill and decode.
+
+llm-d has deprecated WVA upstream: `v0.9.0` is its final release, and existing
+users are told to migrate to KEDA + EPP. llm-d says KEDA + EPP covers WVA's
+capabilities except cost-aware placement across variants, some of them through
+a different layer (Kueue, kube-state-metrics), and advises deployments that
+depend on cost-aware placement or on fair sharing of a scarce accelerator pool
+to *"stay on WVA for now"*. This project is one way to stay on that path: an
+independently developed, advanced fork of WVA, still maintained, not affiliated
+with or endorsed by llm-d, and not upstream WVA (its actuation is a KEDA external
+scaler) ([KEDA alone, compared](comparison/keda-alone.md)).
 
 We built it because the signals a general-purpose autoscaler can act on do not
 tell you what you need to know. We have a benchmark where the request rate
@@ -41,15 +53,16 @@ at the second, so the fleet had to go from two replicas to three:
 | --- | --- | --- |
 | request rate | constant at 6 req/s | nothing to do |
 | gateway queue depth | flat, no queue ever formed | nothing to do |
-| KV-cache occupancy | 5–15 % in the steady phase | scale down to one |
+| a KV-occupancy trigger (as in llm-d's token-aware decode recipe) | 5–15 % in the steady phase | scale down to one |
+| running requests per replica (llm-d's default trigger) | a per-replica constant, valid for the one shape it was tuned on | re-tune when the shape changes |
 
 **Reacting after saturation is too late.** A replica is ready when the model has
 loaded and the kernels have compiled: about 41 s for an 8B server, 192 s for
 GLM-5.2-FP8, and 463 s if the JIT cache is cold. Only 40 s of that GLM start is
 the weights, so faster storage does not fix it.
 
-**A GPU is the unit of waste, and models compete for it.** At $2–4 an hour an
-unnecessary replica burns real money and a missing one breaks an SLO. A
+**A GPU is the unit of waste, and models compete for it.** At several dollars an
+hour an unnecessary replica burns real money and a missing one breaks an SLO. A
 general-purpose autoscaler decides one Deployment at a time and cannot know that
 scaling one model up may mean scaling another down.
 
@@ -73,7 +86,7 @@ priced from throughput rather than read off a queue, the order goes in early. A
 warm pool Pod holds an accelerator with models resident and lends it to a model
 that is scaling up, so it serves while its own replica starts.
 
-**Solve the whole fleet at once, inside one budget.** Every model and variant is
+**Solve the whole fleet at once, inside a budget when you declare one** (opt-in; off by default). Every model and variant is
 solved together each cycle. When the budget binds, GPUs go in order of a
 fair-share priority value, priority times remaining demand weighted by score,
 and every clamp is recorded against the variant that took it.
@@ -93,7 +106,7 @@ push path; quota-bounded scaling, against either a
 
 | Claim | Measured | Where |
 | --- | --- | --- |
-| A shape change is caught without a queue | Third replica ordered at +1344 s, the same cycle the new shape's completion rate came on record, on a controller that had seen both shapes. No queue at any point; p95 TTFT 0.23 s in the first five minutes of each phase, then 0.08 s for the rest of the first and 0.04–0.07 s for the rest of the second | [P/D path](well-lit-paths/pd-disaggregation/#measured) |
+| A shape change is caught without a queue | Third replica ordered at +1344 s, about four minutes after the shape change, once that shape's throughput was measured, on a controller that had seen both shapes. No queue formed in the second phase; p95 TTFT 0.23 s in the first five minutes of each phase, then 0.08 s for the rest of the first and 0.04–0.07 s for the rest of the second | [P/D path](well-lit-paths/pd-disaggregation/#measured) |
 | Missing it has a price | A cold controller sized the same window from occupancy: 4.2 s p95 in that five-minute window (204 ms over the whole run) | [P/D path](well-lit-paths/pd-disaggregation/) |
 | The decision precedes the queue | Second replica ordered at +53 s, before the first tipped into preemption | [P/D path](well-lit-paths/pd-disaggregation/) |
 | Roles scale on their own bottleneck | Decode 1 → 2 → 3, prefill never ordered | [P/D path](well-lit-paths/pd-disaggregation/) |
@@ -102,7 +115,7 @@ push path; quota-bounded scaling, against either a
 | And what it costs | 17 % more than holding nothing, which came in at 12 129 | [measured.md](well-lit-paths/warm-pool-bridge/measured.md) |
 | A warm Pod switches models fast | About 437 ms (four switches of 435–440 ms) against roughly 41 s cold, on an H100 test cluster | [warm pool](well-lit-paths/warm-pool-bridge/); measurement in [fast model loading](proposals/fast-model-loading.md#27-the-pool-was-built-and-measured-2026-08-21) |
 | Cold start is mostly not the weights | 8B ~41 s; GLM 192 s of which 40 s is weights; 463 s on a cold JIT cache | [weight transfer](proposals/warm-pool-weight-transfer.md) |
-| The P/D result reproduces | The pair was run twice a day apart, within a tenth of every number | [P/D path](well-lit-paths/pd-disaggregation/) |
+| The P/D result reproduces | The pair was run twice a day apart, within a tenth of every figure except the cold pass's first five minutes, where one window ranged from 0.25 s to 5.6 s | [P/D path](well-lit-paths/pd-disaggregation/) |
 
 Two caveats on reading these. The warm-pool run is four scale-up events per
 arm, one run each, so the 12 % and 17 % are single-run margins. The shape-swap
@@ -162,7 +175,7 @@ byte-identical at roughly 9× a storage reload, but it does not fix start latenc
 and they do not work: clean on one process, and they hang on a real multi-rank
 engine inside NVIDIA's checkpoint path.
 
-**A warm launcher holding no GPU.** An unbound sleeper often cannot wake at all.
+**An FMA launcher holding no GPU.** Two of three unbound sleepers could not wake at all.
 Holding the accelerator is what makes the wake possible.
 
 ## Scope and status
@@ -174,7 +187,7 @@ scale-down across cycles to stop one noisy sample pinning the fleet.
 
 Measured on H200 nodes; the warm-pool model switch on H100. Priority-weighted
 reallocation between models (`enableRescale`) is built, off by default and
-covered by unit tests only, and P/D role switching is experimental. Apache 2.0, and the module
+covered by unit tests only. Apache 2.0, and the module
 path has not changed.
 
 Design detail lives in [concepts/](concepts/): what gets measured and how it

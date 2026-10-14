@@ -19,6 +19,16 @@ decides the replica count; KEDA and the HPA actuate it. It is an advanced fork
 of llm-d's Workload Variant Autoscaler, developed independently, and has diverged
 substantially since.
 
+llm-d has deprecated WVA upstream: `v0.9.0` is its final release, and existing
+users are told to migrate to KEDA + EPP. llm-d says KEDA + EPP covers WVA's
+capabilities except cost-aware placement across variants, some of them through
+a different layer (Kueue, kube-state-metrics), and advises deployments that
+depend on cost-aware placement or on fair sharing of a scarce accelerator pool
+to *"stay on WVA for now"*. This project is one way to stay on that path: an
+independently developed, advanced fork of WVA, still maintained, not affiliated
+with or endorsed by llm-d, and not upstream WVA (its actuation is a KEDA external
+scaler) ([KEDA alone, compared](../comparison/keda-alone.md)).
+
 ## Why a scale-up is slow, and not for the reason people assume
 
 The models in that benchmark are 8B — deliberately, because they are the *cheap*
@@ -89,21 +99,21 @@ No failures in any arm — 30 720 of 30 720 served, three times over.
 ## The part that is not the warm pool
 
 A bridge only helps if the decision underneath it is right, and LLM autoscaling
-breaks the assumptions a web-service autoscaler is built on. The llm-d community's
-problem-space analysis (*Autoscaling in llm-d: The Production Problem Space*, by
-Naina Singh) sets out nine structural reasons why. Three shape this design most:
+breaks the assumptions a web-service autoscaler is built on. A problem-space
+analysis we drew on sets out nine structural reasons why. Three shape this design most:
 
 **Load is not request count.** Two requests to one model can differ by 1000× in
 compute — a 100-token chat completion against a 100K-token summarization. We
 scale on token throughput, KV-cache pressure and the prefill/decode ratio,
 through a closed-form capacity model: utilization against a fixed threshold
 (scale up above 0.85, release below 0.70), with each role's demand floored on the
-throughput one replica sustained when last saturated. Closed-form is deliberate. At $2–4/hr per GPU, an operator asked to
+throughput one replica sustained when last saturated. Closed-form is deliberate. At several dollars an hour per GPU, an operator asked to
 trust a scaling decision needs to be able to *read* it.
 
 **Models compete for the same GPUs.** This is the part most autoscalers do not
 attempt. Ours decides for the whole fleet at once rather than per Deployment:
-every model, every variant, one GPU budget, one allocation. A shared warm pool is
+every model, every variant, one allocation, inside a GPU budget when you
+declare one (opt-in; off by default). A shared warm pool is
 the same idea in hardware — one held accelerator insuring several models, which
 is why its economics improve with every model added to it.
 
@@ -126,7 +136,9 @@ choice.
 
 **SLA-target-driven scaling.** Scaling on *"will this batch tier miss its
 deadline"* rather than *"is queue depth > N"* is not built. We have named policy
-tiers, which is a coarse approximation. llm-d does not have it yet either.
+tiers, which is a coarse approximation. llm-d now has an SLO-aware KEDA recipe
+for one variant and one SLO pair, measured at 95.8 % attainment at 5.93 average
+replicas; we do not.
 
 **Maintenance pre-scaling and failure replacement.** Not built.
 
@@ -140,8 +152,8 @@ experiments narrowed it to NVIDIA's checkpoint path rather than anything the
 inference server can release.
 
 Two smaller negative results, for anyone about to spend a month on them: a
-GPU-less warm launcher **cannot wake** — holding the accelerator is what makes
-the wake possible — and a weights PVC is not a latency fix (430 MB/s measured; it
+sleeping engine whose GPU was released often **cannot wake** (two of three in
+our test) — holding the accelerator is what makes the wake possible — and a weights PVC is not a latency fix (430 MB/s measured; it
 avoids re-downloads, not cold starts).
 
 ## Try it

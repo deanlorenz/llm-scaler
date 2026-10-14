@@ -306,7 +306,7 @@ check_tenant_install() {
         # where the name lives: the controller refuses to become ready if cluster
         # policy demands node access it does not have, and verify_deployment turns
         # that into a failed install.
-        log_info "This namespace carries no wva.llmd.ai/policy-namespace label, so the controller will use its built-in default policy namespace."
+        log_info "This namespace carries no wva.llmd.ai/policy-namespace label, so the controller uses the well-known policy namespace if it exists and the controller can read Namespaces, and its own ConfigMap otherwise. Its log says which: 'Cluster policy comes from'."
         log_warning "  If no cluster policy exists there either, scaling here is bounded only by each workload's maxReplicas. A ResourceQuota on ${WVA_NS} is the way to bound it."
         return 0
     fi
@@ -569,6 +569,140 @@ wva_model_server_count() {
     echo "$total"
 }
 
+# wva_kueue_source_configured echoes where a Kueue quota source is configured
+# for this controller, nothing when there is none, or `unknown <what>` when a
+# policy it may read could not be read.
+#
+# Sources, in the controller's own terms (internal/controller/policy_namespace.go,
+# mirrored by pl_policy_resolution):
+#
+#   this install's WVA_LIMITER=quota with WVA_QUOTA_KUEUE=true;
+#   the controller's OWN ConfigMap in WVA_NS -- always: it is the only source
+#     of an admin-owned controller (cluster scope, or WVA_WATCH_NS naming
+#     another namespace), and the fallback of a self-managed one. An upgrade
+#     that does not repeat WVA_LIMITER/WVA_QUOTA_KUEUE still runs with the
+#     kueue block an earlier install wrote there;
+#   for a SELF-MANAGED controller only (it manages the namespace it runs in),
+#     the namespace its managed Namespace's wva.llmd.ai/policy-namespace label
+#     names, else wva-policy. An admin-owned controller never reads wva-policy,
+#     so a kueue block there must not refuse it.
+#
+# A Forbidden or otherwise unreadable read is "unknown", never "no source": the
+# caller warns rather than staying silent about a source it could not see.
+wva_kueue_source_configured() {
+    if [ "${WVA_LIMITER:-none}" = "quota" ] && [ "${WVA_QUOTA_KUEUE:-false}" = "true" ]; then
+        echo "WVA_QUOTA_KUEUE=true"
+        return 0
+    fi
+    local managed cands policy_ns out rc unread="" ns n
+    managed="${WVA_WATCH_NS:-$WVA_NS}"
+    cands="$WVA_NS"
+    if [ "$(wva_install_scope)" = "namespace" ] && [ "$managed" = "$WVA_NS" ]; then
+        rc=0
+        out="$(kubectl get namespace "$managed" \
+            -o jsonpath='{.metadata.labels.wva\.llmd\.ai/policy-namespace}' 2>&1)" || rc=$?
+        if [ "$rc" -ne 0 ]; then
+            case "$out" in
+                *NotFound*|*"not found"*) policy_ns=wva-policy ;;
+                *)
+                    # The label may point anywhere; wva-policy is still worth a look.
+                    unread="$unread Namespace $managed (its policy-namespace label);"
+                    policy_ns=wva-policy ;;
+            esac
+        else
+            policy_ns="${out:-wva-policy}"
+        fi
+        case " $cands " in *" $policy_ns "*) ;; *) cands="$policy_ns $cands" ;; esac
+    fi
+    for ns in $cands; do
+        rc=0
+        out="$(kubectl get configmap wva-scaling-policy-config -n "$ns" -o jsonpath='{.data.default}' 2>&1)" || rc=$?
+        if [ "$rc" -ne 0 ]; then
+            case "$out" in
+                *NotFound*|*"not found"*) ;;
+                *) unread="$unread $ns/wva-scaling-policy-config;" ;;
+            esac
+            continue
+        fi
+        n="$(printf '%s\n' "$out" | yq '[.limiters[]? | select(.kueue.enabled == true)] | length' 2>/dev/null)" || n=""
+        case "$n" in
+            0|null) ;;
+            '') unread="$unread $ns/wva-scaling-policy-config (does not parse);" ;;
+            *) echo "the policy in $ns/wva-scaling-policy-config"; return 0 ;;
+        esac
+    done
+    if [ -n "$unread" ]; then
+        echo "unknown${unread%;}"
+    fi
+    return 0
+}
+
+# wva_check_kueue_namespace_read refuses a controller-only install whose
+# controller could not read the Namespace a Kueue quota needs.
+#
+# The Kueue reader GETs the Namespace of each LocalQueue, to evaluate a
+# ClusterQueue namespaceSelector before its grant is counted. A kueue-reader
+# ClusterRole created before that read existed lacks `get namespaces`, and an
+# UPGRADE in the controller-only phase does not touch it -- that is the admin's
+# half. The new controller then withholds every selector-bearing queue's grant:
+# the namespace is bounded at nothing, i.e. it cannot scale up, with one log line
+# to say why. So it is a missing prerequisite, reported before anything moves.
+#
+# Only for INSTALL_PHASE=wva. The prereqs and all phases apply the role that
+# grants it, so asking first would refuse the very apply that fixes it. A
+# namespace-scoped role grants the managed namespace by name (resourceNames), so
+# that is the name asked about; cluster scope reads LocalQueues everywhere and
+# needs the unrestricted read.
+#
+# A source that could not be read (wva_kueue_source_configured: unknown) is
+# asked about too, but never refused on: a missing read is then a WARNING that
+# names what could not be read.
+wva_check_kueue_namespace_read() {
+    [ "${INSTALL_PHASE:-all}" = "wva" ] || return 0
+    local source sa managed target answer
+    source="$(wva_kueue_source_configured)"
+    [ -n "$source" ] || return 0
+    sa="system:serviceaccount:${WVA_NS}:wva-controller-manager"
+    managed="${WVA_WATCH_NS:-$WVA_NS}"
+    if [ "$(wva_install_scope)" = "namespace" ]; then
+        target="namespaces/$managed"
+    else
+        target="namespaces"
+    fi
+    answer="$(can_i_as "$sa" get "$target")"
+    case "$source" in
+        unknown*)
+            [ "$answer" != yes ] || return 0
+            log_warning "Could not tell whether a Kueue quota source is configured for this controller: not readable with your permissions:${source#unknown}."
+            log_warning "  If one is, $sa needs get on $target ($([ "$answer" = no ] && echo 'it does NOT have it' || echo 'could not verify: checking needs impersonate permission')), or the namespace is bounded at nothing and does not scale up. A cluster admin re-running 'NAMESPACE=$WVA_NS make setup-prereqs' grants it."
+            return 0
+            ;;
+    esac
+    case "$answer" in
+        yes)
+            log_success "The controller can get $target, which the Kueue quota source ($source) needs"
+            ;;
+        no)
+            log_error "A Kueue quota source is configured ($source), and $sa cannot get $target.
+
+The Kueue reader reads each LocalQueue's Namespace to evaluate a ClusterQueue
+namespaceSelector. Without it every such queue's grant is withheld, so the
+namespace is bounded at NOTHING and does not scale up. The kueue-reader role an
+earlier version created lacks this read, and this phase cannot change it.
+
+Ask a cluster admin to run, once, for this namespace:
+
+    NAMESPACE=$WVA_NS make setup-prereqs$([ "$(wva_install_scope)" = cluster ] && echo " SCOPE=cluster")
+
+then re-run this install."
+            ;;
+        *)
+            log_warning "A Kueue quota source is configured ($source); could not verify that $sa may get $target (checking needs impersonate permission)."
+            log_warning "  If the kueue-reader role predates that read, the namespace is bounded at nothing. A cluster admin re-running 'NAMESPACE=$WVA_NS make setup-prereqs' grants it."
+            ;;
+    esac
+}
+
 check_permissions() {
     log_info "Checking permissions..."
 
@@ -716,6 +850,11 @@ $advice"
         limiter_entry_yaml quota >/dev/null || exit 1
         log_success "WVA_QUOTAS parses, so the quota limiter can be declared at the end of the install"
     fi
+
+    # The Kueue reader's Namespace get, which an upgrade does not bring with it.
+    # See wva_check_kueue_namespace_read. Before the tenant early-return: the
+    # controller-only phase is exactly the one that cannot fix it.
+    wva_check_kueue_namespace_read
 
     # A tenant install has its own contract for what the CONTROLLER will need, and
     # it is not the node-read question below: the physical limiter's inventory is

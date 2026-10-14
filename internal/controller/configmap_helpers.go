@@ -34,7 +34,16 @@ import (
 // parseScalingPolicyConfig parses saturation scaling configuration from ConfigMap data.
 // Returns the parsed configs and count of successfully parsed entries.
 func parseScalingPolicyConfig(cmData map[string]string, logger logr.Logger) (config.ScalingPolicySet, int) {
+	configs, count, _ := parseScalingPolicyConfigRejects(cmData, logger)
+	return configs, count
+}
+
+// parseScalingPolicyConfigRejects is parseScalingPolicyConfig that also returns,
+// by key, why each entry that was dropped was dropped: a YAML error, or a
+// Normalize or Validate failure. An entry that parsed is never in it.
+func parseScalingPolicyConfigRejects(cmData map[string]string, logger logr.Logger) (config.ScalingPolicySet, int, map[string]error) {
 	configs := make(config.ScalingPolicySet)
+	rejected := map[string]error{}
 	count := 0
 	for key, yamlStr := range cmData {
 		var satConfig config.ScalingPolicy
@@ -42,6 +51,7 @@ func parseScalingPolicyConfig(cmData map[string]string, logger logr.Logger) (con
 			errorType := "Failed to parse saturation scaling config entry"
 			logger.Error(err, errorType, "key", key)
 			metrics.RecordError(constants.ComponentController, errorType)
+			rejected[key] = err
 			continue
 		}
 		// Fold analyzer plugin parameters into typed fields before defaulting/validation.
@@ -49,6 +59,7 @@ func parseScalingPolicyConfig(cmData map[string]string, logger logr.Logger) (con
 			errorType := "Invalid saturation scaling config entry"
 			logger.Error(err, errorType, "key", key)
 			metrics.RecordError(constants.ComponentController, errorType)
+			rejected[key] = err
 			continue
 		}
 		// Apply defaults before validation (handles omitempty zero-values like scaleUpThreshold)
@@ -57,6 +68,7 @@ func parseScalingPolicyConfig(cmData map[string]string, logger logr.Logger) (con
 			errorType := "Invalid saturation scaling config entry"
 			logger.Error(err, errorType, "key", key)
 			metrics.RecordError(constants.ComponentController, errorType)
+			rejected[key] = err
 			continue
 		}
 		// limiters: is a cluster-"default"-scope setting read only from the global
@@ -103,7 +115,7 @@ func parseScalingPolicyConfig(cmData map[string]string, logger logr.Logger) (con
 		configs[key] = satConfig
 		count++
 	}
-	return configs, count
+	return configs, count, rejected
 }
 
 // isNamespaceConfigEnabled checks if a namespace has the opt-in label for namespace-local ConfigMaps.

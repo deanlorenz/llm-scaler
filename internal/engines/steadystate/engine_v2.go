@@ -58,6 +58,28 @@ func (e *Engine) runV2AnalysisOnly(
 		e.capacityStore.LoadFromScaleTarget(namespace, modelID, va.Name, accelerator, gpuCount, scaleTarget)
 		logger.V(logging.DEBUG).Info("Pre-populated capacity store from scale target",
 			"variant", va.Name, "accelerator", accelerator, "gpuCount", gpuCount)
+		// Publish the engine-configuration fingerprint. Read back from the
+		// store rather than re-parsed, so the published digest is the one the
+		// rest of the pipeline will key on -- including when the record was
+		// learned live and LoadFromScaleTarget deliberately left it alone.
+		//
+		// The digest is keyed on -- it composes the learned-state key for ITL
+		// line sharing -- and publishing it here is what makes that key
+		// explicable on a dashboard. Note the two can diverge by design: a
+		// configuration the parser could not fully read is published WITH its
+		// unresolved label and withheld as a sharing key, so a variant can
+		// appear here and have no learned state filed under it.
+		//
+		// Published under the accelerator the learned-state key is built with,
+		// not the raw reading: the two differ on a fleet whose pods disagree,
+		// and that is the fleet an operator is reading this metric to
+		// understand. A missing analyzer leaves the raw value, which is what
+		// a test-built engine gets.
+		publishAccel := accelerator
+		if s, ok := e.saturationV2Analyzer.(acceleratorStabiliser); ok {
+			publishAccel = s.StableAcceleratorFor(namespace, va.Name, accelerator)
+		}
+		e.publishEngineConfig(namespace, modelID, va.Name, publishAccel, gpuCount)
 	}
 
 	// 2. Build AnalyzerInput
@@ -255,10 +277,61 @@ func (e *Engine) recordAnalyzerMetrics(namespace, modelID string, results []allo
 	e.evictStaleAnalyzerSeries(namespace, modelID, current)
 }
 
+// publishEngineConfig records wva_engine_config for one variant from the
+// capacity store's record. A variant with no record, or a record with no
+// parsed params, publishes nothing: an absent series is the honest signal for
+// "the configuration could not be read", and a partial one would be read as a
+// configuration.
+func (e *Engine) publishEngineConfig(namespace, modelID, variantName, accelerator string, gpuCount int) {
+	if e.capacityStore == nil || e.metricsEmitter == nil {
+		return
+	}
+	rec := e.capacityStore.Get(namespace, modelID, variantName)
+	if rec == nil || rec.EngineParams == nil {
+		return
+	}
+	e.metricsEmitter.RecordEngineConfig(
+		namespace, modelID, variantName, accelerator, gpuCount,
+		rec.EngineParams.Fingerprint(),
+		capacity.FingerprintVersion,
+		rec.EngineParams.FingerprintValues(),
+	)
+}
+
+// acceleratorStabiliser is the part of the saturation analyzer the engine-config
+// metric needs: the accelerator a variant's learned state is actually keyed
+// under. Reached through an assertion for the same reason staleHistoryEvictor
+// is -- saturationV2Analyzer is typed domain.Analyzer so tests can inject.
+//
+// Without it the metric published the raw reading while the key used the
+// stabilised one, which on a heterogeneous fleet made the label disagree with
+// the key it exists to explain.
+type acceleratorStabiliser interface {
+	StableAcceleratorFor(namespace, variantName, accelerator string) string
+}
+
+// Ensure SaturationAnalyzer implements acceleratorStabiliser.
+//
+// A dynamic assertion that nothing pins is a fallback waiting to become
+// permanent. Measured: renaming the method on the concrete type and updating
+// that package's own tests leaves `go build`, `go vet`, saturation 339/339 and
+// the whole 157-spec steadystate suite green, while runV2AnalysisOnly silently
+// goes back to publishing the raw accelerator for good. This line turns that
+// into a build error that names the missing method.
+var _ acceleratorStabiliser = (*saturation.SaturationAnalyzer)(nil)
+
 // staleHistoryEvictor is the part of the saturation analyzer this file needs.
 // saturationV2Analyzer is typed domain.Analyzer so tests can inject, so the
 // eviction entry point is reached through an assertion rather than a direct
 // call.
+// Ensure SaturationAnalyzer implements staleHistoryEvictor.
+//
+// The same hole as above, and here it is not hypothetical: this entry point
+// was written with no caller anywhere on the reconcile path, so the analyzer
+// kept one entry per variant it had ever seen for the lifetime of the process.
+// An unpinned assertion is how that reaches production looking healthy.
+var _ staleHistoryEvictor = (*saturation.SaturationAnalyzer)(nil)
+
 type staleHistoryEvictor interface {
 	EvictStaleHistory() saturation.Evicted
 }
@@ -326,6 +399,7 @@ func (e *Engine) evictStaleLearnedState(ctx context.Context) {
 			"startEstimates", history.StartEstimates,
 			"startOutliers", history.StartOutliers,
 			"startSeenPods", history.Pods,
+			"itlLines", history.ITLLines,
 			"accelerators", history.Accelerators,
 			"decodeSaturation", history.DecodeSaturation,
 			"fleetShapes", history.FleetShapes,
@@ -364,6 +438,9 @@ func (e *Engine) evictStaleAnalyzerSeries(namespace, modelID string, current ana
 		if _, still := current.target[prev]; !still {
 			e.metricsEmitter.DeleteAnalyzerTarget(prev.analyzer, namespace, modelID, prev.variant)
 			e.metricsEmitter.DeleteAnalyzerObservedReplicas(prev.analyzer, namespace, modelID, prev.variant)
+			// The config series is per variant, not per analyzer, so this is
+			// idempotent when several analyzers report the same variant.
+			e.metricsEmitter.DeleteEngineConfig(namespace, modelID, prev.variant)
 		}
 	}
 	e.lastAnalyzerSeries[modelKey] = current
@@ -388,6 +465,7 @@ func (e *Engine) pruneAnalyzerSeries(activeKeys map[string]bool) {
 	for modelKey, series := range e.lastAnalyzerSeries {
 		if !activeKeys[modelKey] {
 			e.metricsEmitter.DeleteAnalyzerSeriesForModel(series.namespace, series.modelID)
+			e.metricsEmitter.DeleteEngineConfigForModel(series.namespace, series.modelID)
 			delete(e.lastAnalyzerSeries, modelKey)
 		}
 	}
@@ -402,6 +480,7 @@ func (e *Engine) pruneAnalyzerSeries(activeKeys map[string]bool) {
 func (e *Engine) evictAllAnalyzerSeries() {
 	for modelKey, series := range e.lastAnalyzerSeries {
 		e.metricsEmitter.DeleteAnalyzerSeriesForModel(series.namespace, series.modelID)
+		e.metricsEmitter.DeleteEngineConfigForModel(series.namespace, series.modelID)
 		delete(e.lastAnalyzerSeries, modelKey)
 	}
 }

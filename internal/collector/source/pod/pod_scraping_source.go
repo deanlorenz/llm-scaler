@@ -10,7 +10,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -19,6 +22,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/go-logr/logr"
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
 
@@ -37,6 +41,13 @@ type PodScrapingSource struct {
 
 	mu    sync.RWMutex // protects the cache and refresh operations
 	cache *source.Cache
+
+	// log is where getAuthToken reports; ctrl.Log until a test swaps it.
+	log logr.Logger
+	// emptyTokenLogged is set once an empty token file has been reported, and
+	// cleared when the file yields a token again, so each empty spell is
+	// logged once rather than on every scrape.
+	emptyTokenLogged atomic.Bool
 }
 
 // NewPodScrapingSource creates a new PodScrapingSource for an InferencePool.
@@ -81,6 +92,7 @@ func NewPodScrapingSource(
 		httpClient: httpClient,
 		registry:   source.NewQueryList(),
 		cache:      source.NewCache(ctx, config.DefaultTTL, 1*time.Second),
+		log:        ctrl.Log.WithName("pod-scraping-source"),
 	}
 
 	// Register default query
@@ -304,8 +316,30 @@ func (p *PodScrapingSource) scrapePodMetrics(ctx context.Context, pod *corev1.Po
 }
 
 // getAuthToken returns the bearer token and whether authentication should be used.
-// If BearerToken is configured, it is returned; otherwise authentication is skipped.
+// A non-empty BearerTokenFile is preferred and re-read on every call; otherwise
+// BearerToken is returned if configured; otherwise authentication is skipped.
+//
+// A file that reads but holds only whitespace also falls back to BearerToken,
+// and is logged once at Info: unlike a missing file mid-rotation, an empty one
+// is usually a mis-mounted Secret, and every scrape would otherwise go out with
+// the registration token, or none, without a word.
 func (p *PodScrapingSource) getAuthToken() (string, bool) {
+	if p.config.BearerTokenFile != "" {
+		b, err := os.ReadFile(p.config.BearerTokenFile)
+		switch {
+		case err != nil:
+			p.log.V(logging.DEBUG).Info("Bearer token file unreadable, using the token read at registration",
+				"path", p.config.BearerTokenFile, "error", err.Error())
+		case strings.TrimSpace(string(b)) == "":
+			if p.emptyTokenLogged.CompareAndSwap(false, true) {
+				p.log.Info("Bearer token file is empty, using the token read at registration; logged once until the file holds a token",
+					"path", p.config.BearerTokenFile, "registrationTokenSet", p.config.BearerToken != "")
+			}
+		default:
+			p.emptyTokenLogged.Store(false)
+			return strings.TrimSpace(string(b)), true
+		}
+	}
 	if p.config.BearerToken != "" {
 		return p.config.BearerToken, true
 	}
