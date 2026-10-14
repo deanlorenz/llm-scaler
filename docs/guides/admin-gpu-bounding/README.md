@@ -39,9 +39,11 @@ from the nodes its running pods are on. A workload with neither gets no budget.
 
 <!-- guide:deploy.enable start -->
 ```bash
-# Publishes cluster policy AND grants every controller the node read it then
-# requires — grants first, because declaring the limiter without them takes
-# out every install that lacks node access at once.
+# Publishes cluster policy AND grants every controller that passes
+# verification the node read it then requires — grants first, because
+# declaring the limiter without them takes out every install that lacks node
+# access at once. Read the list it prints first: it names any controller it
+# will restart, and the summary names any it skipped as NOT bound.
 make enable-physical-limiter
 ```
 <!-- guide:deploy.enable end -->
@@ -50,12 +52,23 @@ Grants come first, then the policy: declaring the limiter without them takes out
 every install that lacks node access at once. Controllers are discovered rather than
 configured — the hazard is the install you forgot.
 
-Policy lands where each controller actually reads it: the well-known namespace
-for a self-managed controller, its own ConfigMap for an admin-owned one. A
-self-managed controller also gets `get` on namespaces, which it needs to see the
-well-known namespace at all. If it could not see that namespace before, it is
-restarted so it picks up the policy. A controller installed later gets both
+Policy lands where each controller actually reads it: for a self-managed
+controller, the namespace its managed namespace's `wva.llmd.ai/policy-namespace`
+label names, else the well-known namespace; for an admin-owned one, its own
+ConfigMap. A self-managed controller also gets `get` on namespaces, limited to
+the names it reads (its own namespace, `wva-policy` and its policy namespace),
+which it needs to find its policy at all. A controller installed later gets both
 grants from `make setup-prereqs`.
+
+**Expect restarts.** A controller works out where its policy lives once, at
+startup. Any self-managed controller that could not see its policy namespace when
+it started is restarted with `kubectl rollout restart`. On the first enable after
+upgrading to a release that grants the namespace read, that is **every
+self-managed namespace-scoped controller** on the cluster. The list printed before
+anything changes marks each one `WILL BE RESTARTED`. Changing the
+`wva.llmd.ai/policy-namespace` label later has the same cause: re-run
+`make enable-physical-limiter` to grant the new namespace and restart the
+controller.
 
 ## Verification
 
@@ -122,13 +135,37 @@ silently.
 | `WVA_POLICY_NS` | `wva-policy` | `platform-policy` |
 | `WVA_LIMITER_TARGETS` | every controller found | `team-a team-b` |
 | `WVA_CONTROLLER_SA` | `wva-controller-manager` | `my-wva-sa` |
-| `WVA_CONTROLLER_IMAGE_REPOS` | `ghcr.io/ev-shindin/llm-scaling-manager` | `'registry.local/wva ghcr.io/ev-shindin/llm-scaling-manager'` |
+| `WVA_CONTROLLER_IMAGE_REPOS` | `ghcr.io/ev-shindin/llm-scaling-manager`, plus the repository of `WVA_IMAGE_REPO` | `'registry.local/wva ghcr.io/ev-shindin/llm-scaling-manager'` |
 
 A Deployment carrying the controller label is granted only when it runs as
 `WVA_CONTROLLER_SA` and has a `manager` container whose image comes from one of
-`WVA_CONTROLLER_IMAGE_REPOS`. The label is one anyone can set, so anything else
-is named as `SKIPPED` and granted nothing; the list to be granted is printed
-first. Set `WVA_CONTROLLER_IMAGE_REPOS` when your controllers run from a mirror.
+`WVA_CONTROLLER_IMAGE_REPOS`. Anything else is named as `SKIPPED` and granted
+nothing, and the list to be granted is printed first.
+
+These checks are **signals, not proof**. Any tenant can create a ServiceAccount
+named `wva-controller-manager` and run the public image in a container named
+`manager`. The checks stop a grant to an account that a Deployment merely
+names, such as `default`. They do not stop a tenant who sets out to pass them.
+Where tenants are not trusted, run their controllers in admin-owned namespaces
+([the `WVA_WATCH_NS` shape](../../reference/gpu-limiter.md#the-arrangement-where-the-bound-does-hold))
+and name exactly those namespaces:
+
+```bash
+make enable-physical-limiter WVA_LIMITER_TARGETS='wva-team-a wva-team-b'
+```
+
+A namespace named in `WVA_LIMITER_TARGETS` is vouched for by the admin, so its
+controller's image is not checked; the ServiceAccount and the `manager`
+container still are. That is also how a controller built from a mirror or a
+custom image gets granted. The alternative is to list the mirror in
+`WVA_CONTROLLER_IMAGE_REPOS`. When that is unset, it is the published repository
+plus the repository of the installer's `WVA_IMAGE_REPO`.
+
+The closing summary names the controllers the limiter is in force for, and lists
+every skipped Deployment as **NOT bound**, with the reason. A skipped controller
+keeps the policy it read before. `make disable-physical-limiter` does not write a
+skipped controller's policy either. If that policy still declares a limiter, it
+says so.
 
 `WVA_LIMITER_TYPE` is not `WVA_LIMITER`. This one writes the **cluster** policy
 every controller reads; `WVA_LIMITER` writes a single install's own policy, which

@@ -28,9 +28,11 @@ prerequisites:
 deploy:
   enable:
     note: |
-      Publishes cluster policy AND grants every controller the node read it then
-      requires — grants first, because declaring the limiter without them takes
-      out every install that lacks node access at once.
+      Publishes cluster policy AND grants every controller that passes
+      verification the node read it then requires — grants first, because
+      declaring the limiter without them takes out every install that lacks node
+      access at once. Read the list it prints first: it names any controller it
+      will restart, and the summary names any it skipped as NOT bound.
     run: make enable-physical-limiter
 
 verify:

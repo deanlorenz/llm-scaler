@@ -448,14 +448,20 @@ main() {
         fi
 
         if [ "$DEPLOY_WVA" = "true" ]; then
-            WVA_APPLY_SCOPE=$([ "$phase" = "all" ] && echo all || echo prereqs) \
-                deploy_wva_controller
             # A cluster policy published BEFORE this install granted its read to
             # the controllers that existed then, not to this one -- which would
             # resolve to that policy and refuse to start for want of a RoleBinding.
+            #
+            # BEFORE deploy_wva_controller: with INSTALL_PHASE=all that call also
+            # applies the Deployment, and a grant made after it raced the first
+            # pod, which could resolve the policy, find no RoleBinding and refuse
+            # to start. A RoleBinding may name a ServiceAccount that does not exist
+            # yet, so nothing here needs the controller to be applied first.
             if [ "$(wva_install_scope)" = "namespace" ]; then
                 pl_grant_published_policy_read "$WVA_NS" "${WVA_WATCH_NS:-$WVA_NS}"
             fi
+            WVA_APPLY_SCOPE=$([ "$phase" = "all" ] && echo all || echo prereqs) \
+                deploy_wva_controller
         fi
 
         deploy_scaler_backend

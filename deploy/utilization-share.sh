@@ -212,16 +212,47 @@ read_status() {
 }
 status_field() { printf '%s' "$STATUS" | jq -r --arg k "$1" '.[$k] // ""'; }
 
+# us_block_json -- the optimizer block of the policy on stdin, as compact JSON
+# with sorted keys (null when there is none), so two policies compare by the
+# block alone.
+us_block_json() {
+    yq -o=json -I=0 '.optimizer' | jq -cS '.'
+}
+
+# later_version_keeps_block <rv> -- the ConfigMap is NOW at <rv> and still
+# carries the optimizer block this script wrote (POLICY). A concurrent write --
+# an admin raising a quota, another tool -- moves the resourceVersion past the
+# one written, and the controller then reports THAT version; requiring the
+# written one exactly failed a write the controller had applied. Only the
+# current version is accepted, so a status that lags behind ours never passes,
+# and only with our block intact, so a later write that replaced the block does
+# not count as ours being applied.
+later_version_keeps_block() {
+    local want_rv="$1" out cur_rv cur want
+    kread out get configmap "$POLICY_CM" -n "$POLICY_NS" -o json || return 1
+    cur_rv="$(printf '%s' "$out" | jq -r '.metadata.resourceVersion // ""')" || return 1
+    [ -n "$cur_rv" ] && [ "$cur_rv" = "$want_rv" ] || return 1
+    cur="$(printf '%s' "$out" | jq -r '.data.default // ""' | us_block_json)" || return 1
+    want="$(printf '%s\n' "$POLICY" | us_block_json)" || return 1
+    [ -n "$want" ] && [ "$cur" = "$want" ]
+}
+
 # confirm_by_status <want mode> -- wait until the controller reports the version
-# just written, then require it accepted and running in <want>.
+# just written (or a later one that still carries the block written, see
+# later_version_keeps_block), then require it accepted and running in <want>.
 confirm_by_status() {
     local want="$1" deadline restarted=0 rv acc mode err
     deadline=$(( $(date +%s) + RELOAD_WAIT ))
     while :; do
         read_status
         rv="$(status_field policyResourceVersion)"
-        if [ "$rv" = "$WRITTEN_RV" ] && [ "$(status_field policyNamespace)" = "$POLICY_NS" ]; then
-            break
+        if [ "$(status_field policyNamespace)" = "$POLICY_NS" ] && [ -n "$rv" ]; then
+            [ "$rv" != "$WRITTEN_RV" ] || break
+            if later_version_keeps_block "$rv"; then
+                info "the policy was written again after this script (version $rv); that version still carries the block written"
+                WRITTEN_RV="$rv"
+                break
+            fi
         fi
         if [ "$(date +%s)" -ge "$deadline" ]; then
             if [ "$RESTART" -eq 1 ] && [ "$restarted" -eq 0 ]; then

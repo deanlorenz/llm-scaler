@@ -104,7 +104,8 @@ case "$1" in
               deploys | jq -r "${path} // empty"
             fi ;;
         esac ;;
-      configmap) printf 'scaleUpThreshold: 0.85' ;;
+      # A namespace with <ns>.policy has that policy; every other one a plain one.
+      configmap) if [ -f "$KDEPLOYS/$ns.policy" ]; then cat "$KDEPLOYS/$ns.policy"; else printf 'scaleUpThreshold: 0.85'; fi ;;
       *) : ;;
     esac ;;
   *) : ;;
@@ -147,6 +148,19 @@ put_ns tenant-e "$(deploy_json aaa-impostor tenant-admin "$IMG")" \
                 "$(deploy_json wva-controller-manager wva-controller-manager "$IMG")"
 # A pinned digest and a registry port must still be recognised as the repo.
 put_ns tenant-f "$(deploy_json wva-controller-manager wva-controller-manager "ghcr.io/ev-shindin/llm-scaling-manager:v1.2@sha256:abc")"
+# A self-managed controller (the base manifest: --watch-namespace from
+# WVA_WATCH_NAMESPACE, which is $(POD_NAMESPACE)) with a sidecar listed FIRST.
+# Read from containers[0], it has no flag, looks cluster-scoped, and is never
+# granted the Namespace read it needs to find wva-policy.
+put_ns tenant-g "$(jq -n --arg img "$IMG" '
+    {metadata: {name: "wva-controller-manager", labels: {"app.kubernetes.io/name": "workload-variant-autoscaler"}},
+     spec: {selector: {matchLabels: {"control-plane": "controller-manager"}},
+            template: {spec: {serviceAccountName: "wva-controller-manager", containers: [
+              {name: "kube-rbac-proxy", image: "quay.io/brancz/kube-rbac-proxy:v0.18.0", args: ["--secure-listen-address=0.0.0.0:8443"]},
+              {name: "manager", image: $img,
+               args: ["--leader-elect=true", "--watch-namespace=$(WVA_WATCH_NAMESPACE)"],
+               env: [{name: "POD_NAMESPACE", valueFrom: {fieldRef: {fieldPath: "metadata.namespace"}}},
+                     {name: "WVA_WATCH_NAMESPACE", value: "$(POD_NAMESPACE)"}]}]}}}}')"
 
 # run_enable [VAR=value ...] -- enable_physical_limiter in a subshell, the stub
 # first on PATH. Output in $WORK/out, grants in $GRANTS, status in $RC.
@@ -157,11 +171,11 @@ run_enable() {
         PATH="$STUB:$PATH"; export PATH
         KGRANTS="$GRANTS" KCALLS="$CALLS" KDEPLOYS="$DEPLOYS"
         export KGRANTS KCALLS KDEPLOYS
-        KDEPLOY_NS_LIST="tenant-a tenant-b tenant-c tenant-d tenant-e tenant-f"
+        KDEPLOY_NS_LIST="tenant-a tenant-b tenant-c tenant-d tenant-e tenant-f tenant-g"
         export KDEPLOY_NS_LIST
         KDEPLOY_NS_LIST="$(printf '%s\n' $KDEPLOY_NS_LIST)"
         for kv in "$@"; do export "${kv?}"; done
-        enable_physical_limiter
+        "${PL_FN:-enable_physical_limiter}"
     ) >"$WORK/out" 2>&1
     RC=$?
 }
@@ -237,6 +251,45 @@ else
     ok "the final list is printed, and holds only verified controllers"
 fi
 
+# Honest about what verification is: signals any tenant can satisfy.
+case_begin
+if sed -n "${listed_at:-1},/Publishing/p" "$WORK/out" | grep -q 'signals, not proof'; then
+    ok "the list says verification is signals, not proof"
+else
+    fail "the list of controllers to be granted presents verification as proof: $(tail -15 "$WORK/out")"
+fi
+
+# The banner names who is bound and who is NOT. "In force for every WVA on this
+# cluster" was printed with three labelled Deployments in the skipped list.
+case_begin
+banner="$(sed -n '/limiter is now in force/,$p' "$WORK/out")"
+if grep -q 'every WVA' "$WORK/out"; then
+    fail "the banner still claims the limiter is in force for every WVA: $(grep 'every WVA' "$WORK/out")"
+elif ! grep -q 'in force for .*tenant-a/wva-controller-manager' <<<"$banner"; then
+    fail "the banner does not name the controllers it bound: $banner"
+elif ! grep -q 'NOT bound' <<<"$banner"; then
+    fail "the banner does not say which controllers are NOT bound: $banner"
+else
+    missing=""
+    for d in tenant-b/impostor tenant-c/lookalike tenant-d/sidecar; do
+        sed -n '/NOT bound/,$p' <<<"$banner" | grep -q "$d" || missing="$missing $d"
+    done
+    if [ -n "$missing" ]; then
+        fail "the NOT-bound list after the banner leaves out:$missing: $banner"
+    else
+        ok "the banner names the bound controllers, and every skipped one as NOT bound"
+    fi
+fi
+
+# containers[0] is not the manager. The sidecar-first controller in tenant-g
+# manages its own namespace, so it needs the Namespace read to find wva-policy.
+case_begin
+if grep -q '^GRANT ClusterRoleBinding wva-policy-namespace-reader-rolebinding-[^ ]* tenant-g/wva-controller-manager$' "$GRANTS"; then
+    ok "the manager container, not containers[0], decides the managed namespace"
+else
+    fail "the self-managed controller behind a sidecar was not granted the Namespace read (read as cluster-scoped from containers[0]?): $(grep tenant-g "$GRANTS")"
+fi
+
 # ---------------------------------------------------------------------------
 # WVA_LIMITER_TARGETS is an allowlist of namespaces, not of Deployments: naming
 # the impostor namespace does not make its Deployment genuine.
@@ -262,6 +315,18 @@ elif ! granted_to tenant-new/wva-controller-manager; then
     fail "a named namespace with no controller yet was not prepared for one: $(cat "$GRANTS")"
 else
     ok "a named namespace with no controller yet is granted only the controller account"
+fi
+
+# A namespace the admin NAMED relaxes the image check -- a controller built
+# from a mirror or a custom IMG -- but nothing else (tenant-b above: still not).
+case_begin
+run_enable WVA_LIMITER_TARGETS=tenant-c
+if [ "$RC" -ne 0 ]; then
+    fail "enable with WVA_LIMITER_TARGETS=tenant-c failed: $(tail -15 "$WORK/out")"
+elif ! granted_to tenant-c/wva-controller-manager; then
+    fail "a controller on a foreign image in a namespace the admin NAMED was skipped; a mirror-built controller can then never be granted: $(tail -15 "$WORK/out")"
+else
+    ok "a named namespace relaxes the image check, and only that"
 fi
 
 # A mirror is accepted when named, and the account can be renamed.
@@ -303,8 +368,34 @@ for pair in \
 done
 ok "pl_image_repo strips tags and digests, and keeps a registry port"
 
+# The installer image (a repo or a full reference) joins the published repo when
+# no explicit list is given, so a controller built from a custom IMG is known.
 case_begin
-CASES_EXPECTED=13
+got="$(WVA_IMAGE_REPO=registry.local:5000/me/wva:dev pl_image_repos)"
+if [ "$got" = "ghcr.io/ev-shindin/llm-scaling-manager registry.local:5000/me/wva" ]; then
+    ok "pl_image_repos adds the installer image repository to the published one"
+else
+    fail "pl_image_repos with WVA_IMAGE_REPO=registry.local:5000/me/wva:dev gave '$got'"
+fi
+
+# disable: a skipped controller whose own policy still declares a limiter is
+# reported, and not written to.
+case_begin
+printf 'limiters:\n- type: gpu-inventory\n  name: physical\n' > "$DEPLOYS/tenant-c.policy"
+PL_FN=disable_physical_limiter run_enable
+rm -f "$DEPLOYS/tenant-c.policy"
+if [ "$RC" -ne 0 ]; then
+    fail "disable failed on a cluster where everything answers: $(tail -15 "$WORK/out")"
+elif grep -q 'CALL\[patch configmap wva-scaling-policy-config -n tenant-c' "$CALLS"; then
+    fail "disable wrote the policy of a Deployment that failed verification"
+elif ! grep -q 'tenant-c/lookalike.*STILL declares 1 limiter' "$WORK/out"; then
+    fail "disable left a limiter in a skipped controller's policy without saying so: $(tail -15 "$WORK/out")"
+else
+    ok "disable names the limiter it left in a skipped controller's policy, and does not write it"
+fi
+
+case_begin
+CASES_EXPECTED=19
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately."
 else

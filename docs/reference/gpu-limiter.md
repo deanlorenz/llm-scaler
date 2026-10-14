@@ -91,10 +91,13 @@ kubectl -n wva-policy create rolebinding team-a-wva \
 # Let it SEE wva-policy at all. Namespaces are cluster-scoped, so a
 # namespace-scoped controller's Role cannot read them; without this it never
 # finds the policy above. `make setup-prereqs` creates the same grant
-# (components/policy-namespace-reader).
-kubectl create clusterrole wva-policy-namespace-reader --verb=get --resource=namespaces
+# (components/policy-namespace-reader). The controller only GETs these by
+# name -- its own namespace and wva-policy, never a list -- so the read can be
+# limited to them, as `make enable-physical-limiter` does.
+kubectl create clusterrole wva-policy-namespace-reader-team-a --verb=get \
+  --resource=namespaces --resource-name=team-a --resource-name=wva-policy
 kubectl create clusterrolebinding wva-policy-namespace-reader-team-a \
-  --clusterrole=wva-policy-namespace-reader \
+  --clusterrole=wva-policy-namespace-reader-team-a \
   --serviceaccount=team-a:wva-controller-manager
 ```
 
@@ -143,7 +146,15 @@ it. It starts on its own ConfigMap, as before the grant existed, but logs
 `wva_policy_namespace_unverified` to **1**. Fix it with
 `NAMESPACE=<ns> make setup-prereqs` or `make enable-physical-limiter`; both create
 the grant, and `enable-physical-limiter` also restarts the controllers it
-affects.
+affects. Because the resolution runs only at startup, the first
+`enable-physical-limiter` after upgrading to a release with this grant restarts
+**every self-managed namespace-scoped controller**. It lists them as
+`WILL BE RESTARTED` before it changes anything.
+
+The label is read at startup too. Pointing `wva.llmd.ai/policy-namespace`
+somewhere else later needs a re-run of `make enable-physical-limiter`. That
+grants the read of the new namespace and restarts the controller so it
+re-resolves.
 
 If the policy ConfigMap **exists but cannot be read** — usually a missing
 RoleBinding — the controller refuses to start rather than run unbounded while an
@@ -204,6 +215,19 @@ make deploy-wva-on-k8s WVA_SCOPE=namespace WVA_NS=wva-team-a WVA_WATCH_NS=team-a
 
 This is the recommended multi-tenant shape. Everything above then applies with the
 Deployment out of the tenant's reach.
+
+Name those admin-owned namespaces when you publish the limiter:
+
+```bash
+make enable-physical-limiter WVA_LIMITER_TARGETS='wva-team-a wva-team-b'
+```
+
+Without `WVA_LIMITER_TARGETS`, `enable-physical-limiter` finds controllers by
+label and grants the ones that run as `wva-controller-manager` with a `manager`
+container on a known image. Those are **signals, not proof**: any tenant can
+meet all three in their own namespace. The checks keep the grant off an account
+that a Deployment merely names, such as `default`. They do not tell a tenant's
+copy from yours.
 
 ## Why it ships off
 

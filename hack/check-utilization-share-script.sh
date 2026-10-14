@@ -125,7 +125,18 @@ case "$args" in
     [ -z "$prv" ] || [ "$prv" = "$rv" ] || {
       echo 'Error from server (Conflict): the object has been modified; please apply your changes to the latest version' >&2; exit 1; }
     printf '%s' "$p" | jq -r '.data.default' > "$S/policy"
-    echo $((rv + 1)) > "$S/rv"
+    newrv=$((rv + 1))
+    # Another writer edits the policy right after this one, and the controller
+    # applies THAT version: an unrelated key, or (concurrent.block) the block.
+    if [ -e "$S/concurrent" ]; then
+      if [ -e "$S/concurrent.block" ]; then
+        yq -i 'del(.optimizer)' "$S/policy"
+      else
+        printf 'scaleDownBoundary: 0.5\n' >> "$S/policy"
+      fi
+      newrv=$((rv + 2))
+    fi
+    echo "$newrv" > "$S/rv"
     echo x >> "$S/patches"
     # A status-publishing controller records what it applied, unless stalled.
     if [ -e "$S/status.json" ] && [ ! -e "$S/status.stalled" ]; then
@@ -136,7 +147,7 @@ case "$args" in
       fi
       [ -e "$S/status.mode" ] && mode="$(cat "$S/status.mode")"
       acc=true; [ -e "$S/status.reject" ] && acc=false
-      jq --arg rv "$((rv + 1))" --arg ns "$ns" --arg m "$mode" --arg a "$acc" \
+      jq --arg rv "$newrv" --arg ns "$ns" --arg m "$mode" --arg a "$acc" \
         '.policyResourceVersion=$rv | .policyNamespace=$ns | .utilizationShare=$m | .policyAccepted=$a
          | .policyError=(if $a=="false" then "limiters: entry[0]: name must not be empty" else "" end)
          | .utilizationShareError=(if $m=="invalid" then "unknown field bogus" else "" end)' \
@@ -368,6 +379,17 @@ fresh "$QUOTA_POLICY"; status_on; touch "$STATE/status.stalled"; run shadow
 vcase "status: a version never applied fails and names --restart" \
     eval '[ $RC -ne 0 ] && says "has not applied version 2" && says "--restart"'
 
+# A concurrent write moved the version on before the controller reported it.
+# Requiring the written version exactly failed a write the controller applied.
+fresh "$QUOTA_POLICY"; status_on; touch "$STATE/concurrent"; run shadow
+vcase "status: a later version that still carries the block written confirms it" \
+    eval '[ $RC -eq 0 ] && says "still carries the block written" && says "utilization share is shadow" && [ "$(pol .scaleDownBoundary)" = 0.5 ]'
+
+# ...and only then: a later write that took the block away is not ours applied.
+fresh "$QUOTA_POLICY"; status_on; touch "$STATE/concurrent" "$STATE/concurrent.block"; run shadow
+vcase "status: a later version that replaced the block is not a confirmation" \
+    eval '[ $RC -ne 0 ] && says "has not applied version 2" && ! says "still carries"'
+
 fresh "$QUOTA_POLICY"; status_on wva-policy; run shadow --policy-namespace team-a
 vcase "status: the policy namespace it reports wins over a wrong flag" \
     eval '[ $RC -ne 0 ] && says "reads its policy from wva-policy" && [ "$(patches)" = 0 ]'
@@ -389,7 +411,7 @@ vcase "logs: every controller pod is read, not one that may be a standby" eval '
 fresh "$QUOTA_POLICY"; echo '{"level":"info","msg":"x","accelerator":"NVIDIA-H200"}' > "$STATE/logs"; run check
 vcase "check: reads accelerators from a json-encoded log" eval '[ $RC -eq 0 ] && says "resolves: NVIDIA-H200"'
 
-CASES_EXPECTED=65
+CASES_EXPECTED=67
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. A case was added or removed; update CASES_EXPECTED deliberately."
 fi

@@ -70,8 +70,12 @@ case "$*" in
   "auth can-i get namespaces/"*)
       if [ "${CANI_NS:-no}" = yes ]; then echo yes; exit 0; fi
       echo no; exit 1 ;;
+  # Read in full BEFORE the block is opened: the other stages of a
+  # `create | apply` pipeline run concurrently and log their CALL lines, and
+  # one landing inside an open block made the whole stream unparseable.
   "apply -f -"*)
-      { echo "APPLY<<"; cat; echo ">>APPLY"; } >> "$KLOG"; exit 0 ;;
+      doc="$(cat)"
+      printf 'APPLY<<\n%s\n>>APPLY\n' "$doc" >> "$KLOG"; exit 0 ;;
   "get namespace "*)
       name="$3"
       case "$*" in
@@ -86,20 +90,35 @@ case "$*" in
       if [ -n "${NS_GET_ERR:-}" ]; then echo "$NS_GET_ERR" >&2; exit 1; fi
       echo "Error from server (NotFound): namespaces \"$name\" not found" >&2; exit 1 ;;
   "get deploy -A"*) printf '%s\n' "${DEPLOY_NS_LIST:-}"; exit 0 ;;
-  # By label, and (since enable-physical-limiter verifies its targets) by the
-  # verified Deployment's name.
-  "get deploy -n "*|"get deploy wva-controller-manager -n "*)
+  # The verification read of enable-physical-limiter: one genuine,
+  # SELF-MANAGED controller -- the base manifest shape, --watch-namespace
+  # expanded from WVA_WATCH_NAMESPACE, which is $(POD_NAMESPACE) -- with a
+  # sidecar listed FIRST, so a reader of containers[0] sees no flag at all.
+  "get deploy -n "*)
       case "$*" in
-        # The verification read of enable-physical-limiter: one genuine controller,
-        # the controller account and image, so the grants below are reached.
-        *' -o json')   # exactly -o json: '-o jsonpath=' reads go to the cases below
-            printf '%s' '{"items":[{"metadata":{"name":"wva-controller-manager"},"spec":{"template":{"spec":{"serviceAccountName":"wva-controller-manager","containers":[{"name":"manager","image":"ghcr.io/ev-shindin/llm-scaling-manager:main"}]}}}}]}' ;;
-        *'.args}'*) printf '%s' '["--watch-namespace=$(WVA_WATCH_NAMESPACE)"]' ;;
-        *'WVA_WATCH_NAMESPACE'*) printf '%s' '$(POD_NAMESPACE)' ;;
-        *'serviceAccountName'*) printf 'wva-controller-manager' ;;
+        *' -o json')   # exactly -o json
+            printf '%s' '{"items":[{"metadata":{"name":"wva-controller-manager"},"spec":{"selector":{"matchLabels":{"control-plane":"controller-manager"}},"template":{"spec":{"serviceAccountName":"wva-controller-manager","containers":[{"name":"kube-rbac-proxy","image":"quay.io/brancz/kube-rbac-proxy:v0.18.0","args":["--upstream=http://127.0.0.1:8080/"]},{"name":"manager","image":"ghcr.io/ev-shindin/llm-scaling-manager:main","args":["--leader-elect=true","--watch-namespace=$(WVA_WATCH_NAMESPACE)"],"env":[{"name":"POD_NAMESPACE","valueFrom":{"fieldRef":{"fieldPath":"metadata.namespace"}}},{"name":"WVA_WATCH_NAMESPACE","value":"$(POD_NAMESPACE)"}]}]}}}}]}' ;;
       esac
       exit 0 ;;
-  "get pods -n "*) printf '2026-02-01T00:00:00Z'; exit 0 ;;
+  # By the Deployment's own selector, the controller's pods: the newest Running
+  # one started after wva-policy was created; an older Running one and a
+  # Pending one did not. By the controller LABEL, an impostor's pod comes first
+  # and started long before -- what `.items[0]` of the label used to read.
+  "get pods -n "*)
+      case "$*" in
+        *"-l control-plane=controller-manager"*)
+            if [ -n "${PODS_JSON:-}" ]; then
+                printf '%s' "$PODS_JSON"
+            else
+                printf '%s' '{"items":[{"status":{"phase":"Running","startTime":"2025-12-15T00:00:00Z"}},{"status":{"phase":"Running","startTime":"2026-02-01T00:00:00Z"}},{"status":{"phase":"Pending"}}]}'
+            fi ;;
+        *"-l app.kubernetes.io/name=workload-variant-autoscaler"*)
+            case "$*" in
+              *jsonpath*) printf '2025-06-01T00:00:00Z' ;;
+              *) printf '%s' '{"items":[{"status":{"phase":"Running","startTime":"2025-06-01T00:00:00Z"}}]}' ;;
+            esac ;;
+      esac
+      exit 0 ;;
   "get configmap"*)
       echo 'Error from server (NotFound): configmaps "wva-scaling-policy-config" not found' >&2; exit 1 ;;
   "create "*"--dry-run=client"*)
@@ -117,7 +136,7 @@ run() {
     (
         PATH="$STUB:$PATH"; export PATH
         KLOG="$LOG"; export KLOG
-        export CANI_NS NS_LABEL EXISTING_NS NS_GET_ERR MANAGED_GET_ERR DEPLOY_NS_LIST
+        export CANI_NS NS_LABEL EXISTING_NS NS_GET_ERR MANAGED_GET_ERR DEPLOY_NS_LIST PODS_JSON
         "$@"
     ) >"$WORK/out" 2>&1
     RC=$?
@@ -273,6 +292,29 @@ else
     fail "a controller that could not read namespace wva-policy was granted it but not restarted; it keeps its own ConfigMap until something restarts it: $(grep '^CALL' "$LOG")"
 fi
 
+# The Namespace read is limited to the names the controller GETs by name
+# (ResolvePolicyNamespace: wva-policy, and its managed Namespace for the label).
+case_begin
+names="$(printf '%s' "$crole" | jq -c '.rules[0].resourceNames // [] | sort')"
+if [ "$names" = '["tenant-a","wva-policy"]' ]; then
+    ok "the Namespace read names only the managed namespace and wva-policy"
+else
+    fail "the Namespace read is not limited to the namespaces the controller reads (resourceNames=$names): $crole"
+fi
+
+# The restart is announced in the list printed BEFORE anything changes, with
+# the upgrade case named: every self-managed controller restarts on the first
+# enable after the Namespace read was added.
+case_begin
+listed="$(sed -n '/Controllers to be granted/,/Publishing cluster policy/p' <<<"$OUT")"
+if ! grep -q 'tenant-a/wva-controller-manager .*WILL BE RESTARTED' <<<"$listed"; then
+    fail "the pre-grant list does not say tenant-a will be restarted: $OUT"
+elif ! grep -q 'first enable after upgrading' <<<"$listed"; then
+    fail "the pre-grant list does not warn that the first enable after an upgrade restarts every self-managed controller: $OUT"
+else
+    ok "the restart is announced before anything is changed"
+fi
+
 case_begin
 CANI_NS=yes NS_LABEL='' EXISTING_NS='wva-policy' NS_GET_ERR='' MANAGED_GET_ERR='' DEPLOY_NS_LIST='tenant-a' \
     run enable_physical_limiter
@@ -282,6 +324,55 @@ elif grep -q '^CALL\[rollout restart' "$LOG"; then
     fail "a controller that could already see wva-policy, and started after it existed, was restarted for nothing"
 else
     ok "a controller that could already see wva-policy is not restarted"
+fi
+
+# ...and one whose newest Running pod predates wva-policy still is.
+case_begin
+CANI_NS=yes NS_LABEL='' EXISTING_NS='wva-policy' NS_GET_ERR='' MANAGED_GET_ERR='' DEPLOY_NS_LIST='tenant-a' \
+    PODS_JSON='{"items":[{"status":{"phase":"Running","startTime":"2025-12-15T00:00:00Z"}},{"status":{"phase":"Succeeded","startTime":"2026-03-01T00:00:00Z"}}]}' \
+    run enable_physical_limiter
+if [ "$RC" -ne 0 ]; then
+    fail "enable_physical_limiter failed under the stub: $OUT"
+elif grep -q '^CALL\[rollout restart deploy wva-controller-manager -n tenant-a' "$LOG"; then
+    ok "a controller whose newest Running pod started before wva-policy existed is restarted"
+else
+    fail "a controller that started before wva-policy existed was not restarted: $(grep '^CALL' "$LOG")"
+fi
+
+# ---------------------------------------------------------------------------
+# The wva.llmd.ai/policy-namespace label on the managed namespace wins, as it
+# does in the controller: the read, the Namespace grant and the policy go there.
+# ---------------------------------------------------------------------------
+case_begin
+CANI_NS=yes NS_LABEL='platform-policy' EXISTING_NS='platform-policy wva-policy' NS_GET_ERR='' MANAGED_GET_ERR='' DEPLOY_NS_LIST='tenant-a' \
+    run enable_physical_limiter
+rb="$(applied_doc RoleBinding "wva-policy-reader-$SUFFIX_A")"
+crole="$(applied_doc ClusterRole "wva-policy-namespace-reader-role-$SUFFIX_A")"
+if [ "$RC" -ne 0 ]; then
+    fail "enable_physical_limiter failed for a labelled namespace: $OUT"
+elif [ "$(printf '%s' "$rb" | jq -r '.metadata.namespace // ""')" != "platform-policy" ]; then
+    fail "the policy read was granted outside the namespace the label names: $(printf '%s' "$rb" | jq -c '.metadata')"
+elif [ "$(printf '%s' "$crole" | jq -c '.rules[0].resourceNames | sort')" != '["platform-policy","tenant-a","wva-policy"]' ]; then
+    fail "the Namespace read does not cover the labelled policy namespace: $crole"
+elif ! grep -q '^CALL\[create configmap wva-scaling-policy-config -n platform-policy' "$LOG"; then
+    fail "the limiter was not published where the labelled controller reads it: $(grep '^CALL' "$LOG")"
+else
+    ok "a labelled namespace's controller is granted, and bounded, in the namespace the label names"
+fi
+
+# A label that cannot be read is not an absent one: refuse before any change.
+case_begin
+CANI_NS=yes NS_LABEL='' EXISTING_NS='wva-policy' NS_GET_ERR='' DEPLOY_NS_LIST='tenant-a' \
+    MANAGED_GET_ERR='Error from server (Forbidden): namespaces "tenant-a" is forbidden' \
+    run enable_physical_limiter
+if [ "$RC" -eq 0 ]; then
+    fail "enable_physical_limiter went on without reading the managed namespace label: $OUT"
+elif grep -q '^APPLY<<' "$LOG"; then
+    fail "enable_physical_limiter changed the cluster before refusing over an unreadable label: $(grep '^CALL' "$LOG")"
+elif ! grep -q 'could not read Namespace tenant-a' <<<"$OUT"; then
+    fail "the refusal does not name the namespace it could not read: $OUT"
+else
+    ok "an unreadable policy-namespace label stops enable before it changes anything"
 fi
 
 # ---------------------------------------------------------------------------
@@ -294,7 +385,21 @@ tr -d '\r' < "$ROOT/deploy/lib/install_core.sh" | grep -qE '^[[:space:]]+pl_gran
     || fail "install_core.sh never calls pl_grant_published_policy_read"
 ok "the prereqs phase calls the policy-read grant"
 
-CASES_EXPECTED=13
+# BEFORE the controller is applied. With INSTALL_PHASE=all deploy_wva_controller
+# also applies the Deployment, and a grant made after it raced the first pod,
+# which could find the policy, no RoleBinding, and refuse to start.
+case_begin
+grant_at="$(tr -d '\r' < "$ROOT/deploy/lib/install_core.sh" | grep -nE '^[[:space:]]+pl_grant_published_policy_read ' | head -1 | cut -d: -f1)"
+deploy_at="$(tr -d '\r' < "$ROOT/deploy/lib/install_core.sh" | grep -nE '^[[:space:]]+deploy_wva_controller[[:space:]]*$' | head -1 | cut -d: -f1)"
+if [ -z "$grant_at" ] || [ -z "$deploy_at" ]; then
+    fail "could not find the prereqs-phase grant ($grant_at) or controller apply ($deploy_at) in install_core.sh; this case can no longer tell their order"
+elif [ "$grant_at" -lt "$deploy_at" ]; then
+    ok "the policy read is granted before the controller Deployment is applied"
+else
+    fail "install_core.sh grants the policy read (line $grant_at) after deploy_wva_controller (line $deploy_at): with INSTALL_PHASE=all the first pod can start before its RoleBinding exists"
+fi
+
+CASES_EXPECTED=19
 case_begin
 if [ "$CASES" -ne "$((CASES_EXPECTED + 1))" ]; then
     fail "$((CASES - 1)) cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately."
