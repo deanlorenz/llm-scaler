@@ -15,3 +15,21 @@ Gaps that are documented but not yet planned are listed in
   replicas first.
   [#136](https://github.com/ev-shindin/llm-scaling-manager/issues/136)
   · today: [Kueue quotas](well-lit-paths/kueue-bounded-quotas/)
+
+## Resilience
+
+- **Learned capacity survives a restart.** What the controller learns about a
+  model's capacity lives in memory, so a restart or a leader hand-off re-learns
+  it, and a request shape it had already priced is sized from occupancy again.
+  Planned: the leader writes its fitted state to a ConfigMap keyed on the engine's
+  configuration, and a new leader recalls only entries that match and are fresh.
+  [#137](https://github.com/ev-shindin/llm-scaling-manager/issues/137)
+
+## Security
+
+- **Mutual TLS on the scaler port by default.** The KEDA scaler port is
+  plaintext unless an operator sets up certificates and a `TriggerAuthentication`
+  for every ScaledObject. Planned: the installer provisions the certificates
+  (cert-manager when present, otherwise its own CA), wires every ScaledObject it
+  generates or adopts, and pins KEDA's client identity.
+  [#138](https://github.com/ev-shindin/llm-scaling-manager/issues/138)
