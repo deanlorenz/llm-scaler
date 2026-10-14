@@ -117,6 +117,14 @@ silently.
 | `WVA_QUOTA_SCOPE` | `namespace` | `cluster` |
 | `WVA_POLICY_NS` | `wva-policy` | `platform-policy` |
 | `WVA_LIMITER_TARGETS` | every controller found | `team-a team-b` |
+| `WVA_CONTROLLER_SA` | `wva-controller-manager` | `my-wva-sa` |
+| `WVA_CONTROLLER_IMAGE_REPOS` | `ghcr.io/ev-shindin/llm-scaling-manager` | `'registry.local/wva ghcr.io/ev-shindin/llm-scaling-manager'` |
+
+A Deployment carrying the controller label is granted only when it runs as
+`WVA_CONTROLLER_SA` and has a `manager` container whose image comes from one of
+`WVA_CONTROLLER_IMAGE_REPOS`. The label is one anyone can set, so anything else
+is named as `SKIPPED` and granted nothing; the list to be granted is printed
+first. Set `WVA_CONTROLLER_IMAGE_REPOS` when your controllers run from a mirror.
 
 `WVA_LIMITER_TYPE` is not `WVA_LIMITER`. This one writes the **cluster** policy
 every controller reads; `WVA_LIMITER` writes a single install's own policy, which
