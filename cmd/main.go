@@ -679,6 +679,7 @@ func main() {
 		engine.Variants = registry.Default
 		engine.Status = controllerStatus
 		engine.VariantEnricher = registry.NewEnricher(mgr.GetAPIReader(), registry.Default, registry.DefaultTargetMaxAge)
+		engine.VariantEnricher.Recorder = mgr.GetEventRecorderFor("workload-variant-autoscaler-registry")
 		// The registry is also what tells the datastore which namespaces to load
 		// configuration for. That used to come from a ScaledObject reconciler, whose
 		// watch was a cluster-wide informer; the registry knows the same thing for a
@@ -726,6 +727,7 @@ func main() {
 		// other has just read.
 		engine.Variants = registry.Default
 		engine.VariantEnricher = registry.NewEnricher(mgr.GetAPIReader(), registry.Default, registry.DefaultTargetMaxAge)
+		engine.VariantEnricher.Recorder = mgr.GetEventRecorderFor("workload-variant-autoscaler-registry")
 		// Let the engine bring the usage picture up to date immediately before it
 		// places a wake. The periodic observation alone can be a full interval old
 		// at the moment it is consulted, and a workload that has just started

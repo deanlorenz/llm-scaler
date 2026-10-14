@@ -175,6 +175,9 @@ const (
 	K8SEventOptimizationFailed                = "OptimizationFailed"
 	K8SEventUnattributedReadyPods             = "UnattributedReadyPods"
 	K8SEventThroughputAnalyzerRestartRequired = "ThroughputAnalyzerRestartRequired"
+	// K8SEventInvalidTriggerMetadata is a Warning on a ScaledObject whose WVA
+	// trigger metadata cannot be parsed; the workload is not scaled until fixed.
+	K8SEventInvalidTriggerMetadata = "InvalidTriggerMetadata"
 	// Utilization-share transfer Events, on the donor's and the receiver's
 	// scale targets.
 	K8SEventUtilizationShareGiving            = "UtilizationShareGiving"

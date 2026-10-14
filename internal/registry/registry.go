@@ -131,6 +131,9 @@ type Registry struct {
 type entry struct {
 	Entry
 	holds int
+	// metaProblem is the trigger-metadata problem last reported for this
+	// entry, "" when none was. See NoteMetadataProblem.
+	metaProblem string
 }
 
 // New returns an empty registry. A non-positive ttl uses DefaultTTL.
@@ -339,6 +342,24 @@ func (r *Registry) SetTarget(namespace, name string, t Target) {
 	}
 	e.Target = t
 	e.TargetAt = r.now()
+}
+
+// NoteMetadataProblem records problem ("" for none) as the current state of the
+// entry's trigger metadata, and reports whether it differs from what was last
+// recorded, so that a standing misconfiguration is reported once per change
+// rather than once per pass. Both engines run an Enricher over the shared
+// registry, which is why the memory lives here and not on an Enricher. False
+// for an entry that is not registered.
+func (r *Registry) NoteMetadataProblem(namespace, name, problem string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	e, ok := r.m[key(namespace, name)]
+	if !ok || e.metaProblem == problem {
+		return false
+	}
+	e.metaProblem = problem
+	return true
 }
 
 // TTL reports how long an entry survives without being called about. Read by the
