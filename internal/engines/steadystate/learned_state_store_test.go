@@ -318,6 +318,34 @@ func TestAFlushIsNoticedWithinAnIntervalWhenNothingChanged(t *testing.T) {
 	assert.Equal(t, 1, spy.forgot, "a flush with nothing new learned waited for the refresh")
 }
 
+// The store is working again once a read works, not only once a write lands:
+// with nothing new learned, the next write is a refresh away.
+func TestARecoveredReadClearsTheErrorWithoutAWrite(t *testing.T) {
+	base := fake.NewClientBuilder().Build()
+	ctx := context.Background()
+	now := time.Now()
+	denied := false
+	flaky := interceptor.NewClient(base, interceptor.Funcs{
+		Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if denied && key.Name == learnedStateConfigMap {
+				return apierrors.NewForbidden(schema.GroupResource{Resource: "configmaps"}, key.Name, nil)
+			}
+			return cl.Get(ctx, key, obj, opts...)
+		},
+	})
+	e := snapshotEngine(t, flaky, &stateSpy{state: sampleState(4000)})
+	e.restoreLearnedState(ctx, now)
+	e.writeLearnedState(ctx, now)
+
+	denied = true
+	e.writeLearnedState(ctx, now.Add(learnedStateInterval))
+	require.NotEmpty(t, e.learnedState.lastErr, "precondition: the failed read was reported")
+	denied = false
+	e.writeLearnedState(ctx, now.Add(2*learnedStateInterval))
+	assert.Empty(t, e.learnedState.lastErr,
+		"a read that works left the error standing until the next write; the same error again would not be logged")
+}
+
 // Every other version's document counts, not only the largest.
 func TestTwoOtherVersionsCountAgainstTheBoundTogether(t *testing.T) {
 	foreign := &corev1.ConfigMap{

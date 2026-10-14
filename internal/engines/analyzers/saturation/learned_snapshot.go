@@ -143,35 +143,55 @@ type pendingVariant struct {
 // its horizon on the clock it ages on live. A variant noted present keeps its
 // liveness fresh (notePendingPresent), so a parked one stays; a deleted one's
 // entries all age out, and it goes -- however often the controller restarts.
+// A clock in the future counts as dead, as it does at install: kept alive by
+// it, an entry that can never be installed would be written back forever.
 func (p *pendingVariant) alive(now, wall time.Time, h capacity.Horizons) bool {
 	s := p.state
 	for _, w := range s.K2 {
-		if wall.Sub(w.LastUsed) <= h.BucketRetention {
+		if within(w.LastUsed, wall, h.BucketRetention) {
 			return true
 		}
 	}
 	for _, w := range s.Throughput {
-		if wall.Sub(w.LastUsed) <= h.BucketRetention {
+		if within(w.LastUsed, wall, h.BucketRetention) {
 			return true
 		}
 	}
 	for _, seen := range s.VariantSeenAt {
-		if now.Sub(seen) <= h.VariantTimeout {
+		if within(seen, now, h.VariantTimeout) {
 			return true
 		}
 	}
 	for _, m := range s.Accelerators {
-		if wall.Sub(m.LastUsed) <= h.BucketRetention {
+		if within(m.LastUsed, wall, h.BucketRetention) {
 			return true
 		}
 	}
 	borrowLife := BorrowedK2Hold + BorrowedK2Relax + h.BucketRetention
 	for _, since := range s.K2BorrowedSince {
-		if now.Sub(since) <= borrowLife {
+		if within(since, now, borrowLife) {
 			return true
 		}
 	}
 	return false
+}
+
+// pruneWindows drops the k2 and throughput windows past the bucket retention
+// from a variant kept pending by its liveness: install would drop them, and
+// written back they only take room from the size bound.
+func (p *pendingVariant) pruneWindows(wall time.Time, h capacity.Horizons) {
+	maps.DeleteFunc(p.state.K2, func(_ string, w capacity.RollingAverageSnapshot) bool {
+		return !within(w.LastUsed, wall, h.BucketRetention)
+	})
+	maps.DeleteFunc(p.state.Throughput, func(_ string, w ThroughputSnapshot) bool {
+		return !within(w.LastUsed, wall, h.BucketRetention)
+	})
+}
+
+// within says whether clock t, as of ref, is inside horizon and not further
+// ahead of ref than maxClockSkew.
+func within(t, ref time.Time, horizon time.Duration) bool {
+	return !t.After(ref.Add(maxClockSkew)) && ref.Sub(t) <= horizon
 }
 
 func (p *pendingVariant) size() int {

@@ -285,6 +285,32 @@ var _ = Describe("learned state across a restart", func() {
 		Expect(rep.Aged).To(BeNumerically(">", 0))
 	})
 
+	It("does not keep pending entries alive on a clock from the future", func() {
+		saved := carry(learn(newProcess(params(256))))
+		saved.K2, saved.Throughput, saved.Accelerators, saved.K2BorrowedSince = nil, nil, nil, nil
+		for k := range saved.VariantSeenAt {
+			saved.VariantSeenAt[k] = time.Now().Add(100 * 365 * 24 * time.Hour)
+		}
+		rep := newProcess(params(256)).RestoreLearnedState(saved)
+		Expect(rep.PendingVariants).To(BeZero(),
+			"an entry that can never be installed was held, to be written back for a century")
+	})
+
+	It("prunes expired windows from a variant kept pending by its liveness", func() {
+		saved := carry(learn(newProcess(params(256))))
+		Expect(saved.K2).NotTo(BeEmpty(), "precondition")
+		for k, w := range saved.K2 {
+			w.LastUsed = time.Now().Add(-8 * 24 * time.Hour)
+			saved.K2[k] = w
+		}
+		second := newProcess(params(256))
+		second.RestoreLearnedState(saved)
+		second.EvictStaleHistory()
+		Expect(second.pendingRestore).To(HaveKey("test-ns/variant-a"), "precondition: still alive by its liveness")
+		Expect(second.pendingRestore["test-ns/variant-a"].state.K2).To(BeEmpty(),
+			"a window install would drop was kept, to be written back with every document")
+	})
+
 	It("does not export what was learned with no configuration known under a restored fingerprint", func() {
 		saved := carry(learn(newProcess(params(256))))
 		store := capacity.NewStore()

@@ -595,7 +595,9 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 		if !p.alive(a.now(), time.Now(), a.horizons) {
 			delete(a.pendingRestore, key)
 			evicted.PendingRestores++
+			continue
 		}
+		p.pruneWindows(time.Now(), a.horizons)
 	}
 	for key, at := range a.decodeSaturatedAt {
 		if time.Since(at) > variantTimeout {

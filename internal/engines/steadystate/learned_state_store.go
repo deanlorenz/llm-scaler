@@ -250,6 +250,8 @@ func (e *Engine) writeLearnedState(ctx context.Context, now time.Time) {
 		e.reportLearnedStateErr(logger, err, "Learned state: could not read the snapshot to update it; not written")
 		return
 	}
+	// A read that works is the store working, whether or not a write follows.
+	e.reportLearnedStateErr(logger, nil, "")
 	if cm == nil && st.seen {
 		// The operator deleted it. Written back from memory, the deletion
 		// would undo nothing.
