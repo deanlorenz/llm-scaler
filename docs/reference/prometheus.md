@@ -990,14 +990,14 @@ overload.
 | `wva_slo_observed_seconds` | gauge | `namespace`, `model_name`, `objective`, `statistic` | What the router (the llm-d EPP) measured over 5 minutes. For TPOT, the request-weighted mean; for TTFT, the percentile. The router's TTFT starts before its flow-control queue, so it includes the time a request waited there. `+Inf` when the percentile falls past the router's largest bucket. **Absent** in three cases: fewer than `max(50, 10 ÷ (1 − p))` requests completed in the window (100 at p90; 50 for the TPOT mean); the window is excluded (`wva_slo_excluded`); or the router reports nothing for the objective. | Above the target: the SLO is being missed. |
 | `wva_slo_attainment_ratio` | gauge | `namespace`, `model_name`, `objective`, `statistic` | TTFT only: the share of completed streaming requests whose TTFT was within the target. Exact when the target is a bucket bound of the router's histogram (3 s and 0.1 s are), interpolated otherwise. Absent in the same cases as `observed`. | Below the percentile (0.90 for `statistic="p90"`): the target is missed for more requests than the SLO allows. |
 | `wva_slo_window_requests` | gauge | `namespace`, `model_name`, `objective`, `statistic` | Requests the router recorded for **this objective** over the window, judged or not. Present whenever the router reported that objective's histogram. For TPOT it is `0`, not absent, when the router reports TTFT but clients do not send `stream_options.include_usage` (the router needs the usage block to count output tokens). | Present with `observed` absent and `excluded` all 0: too few requests to judge. Absent on a busy model: the router's histograms are not scraped. |
-| `wva_slo_excluded` | gauge | `namespace`, `model_name`, `reason` | `1` for the reason the model's window is not judged this cycle, `0` for the others; all `0` while it is judged. `reason`: `zero-replicas` (waking from zero), `starting` (a replica starting), `rise` (the replica count rose). A window stays excluded for the window plus 120 s after the transient, because its requests complete, and are recorded, after it. | Expected around every wake and scale-up. Always `1` on a busy model: the fleet never holds still for a whole window, so nothing is judged. |
+| `wva_slo_excluded` | gauge | `namespace`, `model_name`, `objective`, `reason` | Per objective, `1` for the reason its window is not judged this cycle, `0` for the others; all `0` while it is judged. `reason`: `zero-replicas` (waking from zero) or `starting` (a replica starting, which covers a scale-up until its replicas serve). A window stays excluded for the window plus a grace after the transient: the longer of 120 s and 1.5 times the longest mean request duration, because its requests complete, and are recorded, after it. TTFT is excluded on a transient of any variant (decode back-pressure delays first tokens); TPOT only on a transient of a decode or aggregated variant, so a prefill replica starting leaves TPOT judged. A Pod that was Ready and failed its probe is a flap, not a start: only Pods younger than 30 minutes count as starting. | Expected around every wake and scale-up. The share of time excluded is `avg_over_time(max by (exported_namespace, model_name) (wva_slo_excluded)[1d:])`. Near 1: the fleet never holds still long enough to be judged. |
 | `wva_slo_fill` | gauge | `namespace`, `model_name`, `variant_name`, `objective` | The KV fill, as a fraction of physical KV, at which the variant's mean inter-token latency meets the TPOT target. Clamped to [0.15, 0.80], and lowered to the fill the engine can reach when `max_num_seqs` binds. Absent when the variant could not be priced: see `wva_slo_source`. | Compare with the static scale-out point, `kvCacheThreshold × scaleUpThreshold` (0.68 by default). Higher: the target would let the variant run fuller than the tier does. Lower: the tier is too loose for it. |
 | `wva_slo_predicted_itl_seconds` | gauge | `namespace`, `model_name`, `variant_name` | The mean inter-token latency the variant's fitted line predicts at the fill it would actually run at, once `scaleUpThreshold` headroom is applied, never below the bottom of the fitted range. | It is the latency margin an SLO tier would really have. It differs per accelerator for the same `scaleUpThreshold`. |
 | `wva_slo_source` | gauge | `namespace`, `model_name`, `variant_name`, `source` | `1` for where the variant's SLO pricing came from, `0` for the others. See the source values below. Absent for a variant not priced for TPOT (a prefill variant). | See the source values below. |
-| `wva_slo_prefill_seconds` | gauge | `namespace`, `model_name`, `variant_name` | Under a TTFT target, for a variant that prefills (prefill or aggregated): its mean prefill time, scheduled to first token, which is TTFT without the engine's queue. Weighted by request rate over ready replicas. vLLM only. **Observed, not priced.** | Plotted against `wva_slo_prefill_utilization`, it is the curve TTFT will be priced from. A curve that does not rise with utilization cannot price anything. |
-| `wva_slo_engine_queue_seconds` | gauge | `namespace`, `model_name`, `variant_name` | The same variant's mean wait in the engine's scheduler queue before prefill, the other half of the engine's TTFT. | Rising while prefill time is flat: the variant is short of capacity, not slow. |
-| `wva_slo_prefill_utilization` | gauge | `namespace`, `model_name`, `variant_name` | Prefill tokens computed per ready replica over the learned ceiling below. Absent until the ceiling is known. | Near or above 1: the variant prefills at what it managed when it had a queue. |
-| `wva_slo_prefill_ceiling_tokens_per_second` | gauge | `namespace`, `model_name`, `variant_name` | The variant's learned prefill ceiling: the 90th percentile of the prefill token rate a replica computed while its engine queue was non-empty, over the last hour, from at least 10 readings. A high quantile, not the maximum, which a noisy rate inflates. | It never appears: the variant has not queued in the last hour, so there is no saturated reading to learn from. |
+| `wva_slo_prefill_seconds` | gauge | `namespace`, `model_name`, `variant_name` | Under a TTFT target, for a variant that prefills (prefill or aggregated): its mean prefill time, from first scheduled to first token. Weighted by request rate over ready replicas. vLLM only. **Observed, not priced.** Not a pure service time: a request preempted before its first token waits again inside it, and chunked prefill's turns in a mixed batch are in it. | Plotted against `wva_slo_prefill_utilization`, it is the curve TTFT will be priced from. A curve that does not rise with utilization cannot price anything. |
+| `wva_slo_engine_queue_seconds` | gauge | `namespace`, `model_name`, `variant_name` | The same variant's mean wait in the engine's scheduler queue before it was first scheduled. | Rising while prefill time is flat: the variant is short of capacity, not slow. |
+| `wva_slo_prefill_utilization` | gauge | `namespace`, `model_name`, `variant_name` | Prefill-role variants only: prefill tokens computed per ready replica over the learned ceiling below. Absent until a ceiling is known. It is throughput served, so under overload it reads about 1 whatever the queue does. | Near or above 1: the variant prefills at what it managed when it had a queue. |
+| `wva_slo_prefill_ceiling_tokens_per_second` | gauge | `namespace`, `model_name`, `variant_name` | Prefill-role variants only: the learned prefill ceiling. It is the 90th percentile, over the last hour, of per-cycle medians of the prefill token rate on replicas that were queued with KV below 0.80, from at least 10 cycles spread over 5 minutes. A replica queued with full KV is waiting on decode, not computing, so it does not count. The last ceiling is kept after the window runs dry. | It never appears: the variant has not been queued with KV to spare, so there is nothing to learn from. |
 
 The `wva_slo_source` values:
 
@@ -1018,51 +1018,65 @@ The `wva_slo_source` values:
   any load.
 - **`input-invalid`:** a reading was missing or non-finite.
 
-**Alerting.** These rules assume `CONTROLLER_INSTANCE` is unset; with it set,
-add `controller_instance` to every `on(...)`.
+**Alerting.** Two alerts ship (see [the shipped alerts](#the-shipped-alerts)):
+`WVAModelSLOMissed` and `WVAModelSLOUnjudged`. Write your own on the same
+pattern. Five things that pattern gets right, each of which a simpler rule got
+wrong:
 
-- **TTFT missed.** One rule per percentile in use:
-
-  ```promql
-  last_over_time(wva_slo_attainment_ratio{objective="ttft",statistic="p90"}[10m]) < 0.90
-  ```
-
-- **TPOT missed:**
-
-  ```promql
-  last_over_time(wva_slo_observed_seconds{objective="tpot"}[10m])
-    > on(exported_namespace, model_name, objective, statistic)
-  last_over_time(wva_slo_target_seconds[10m])
-  ```
-
-- **Why `last_over_time`.** Below the sample minimum, and while a window is
-  excluded, the observed and attainment series disappear, and an absent series
-  resets an alert's `for:`. `last_over_time(...[10m])` bridges those gaps with
-  the last real value. `max_over_time` also bridges them, but holds the worst
-  sample for the whole range: with any `for:` shorter than the range, one bad
-  cycle fires the alert.
-- **Wakes and scale-ups are already excluded.** `wva_slo_excluded` withholds
-  the judgement itself, so no suppression rule is needed.
-- **The shipped rule.** `WVAModelSLOMissed` (in
-  [the shipped alerts](#the-shipped-alerts)) covers both objectives with the
-  TPOT form above, applied to every objective (a TTFT percentile above its
-  target is the same miss as attainment below the percentile), gated on
-  replicas.
-- **Targets set but unjudged:**
+- **`max by (exported_namespace, model_name, objective, statistic)` on each
+  side of a join.** A controller restart or leader change leaves the old pod's
+  series in place for a while beside the new one's. Without the `max by`, the
+  join holds two series per group and errors with "many-to-many matching not
+  allowed", so the rule can neither fire nor resolve. With `CONTROLLER_INSTANCE`
+  set and two controllers managing one model, add `controller_instance` to the
+  `by` and the `on`.
+- **Count judged miss-minutes; do not bridge gaps.** The observed and attainment
+  series disappear below the sample minimum and while a window is excluded,
+  and an absent series resets an alert's `for:`. On a whole-node model one
+  exclusion lasts a replica's start time plus the window plus its grace, often
+  over ten minutes, so no `last_over_time` range is safely long enough.
+  Counting minutes in which a judged value missed, over a longer window, is
+  immune to the gaps:
 
   ```promql
-  wva_slo_target_seconds
-    unless on(exported_namespace, model_name, objective, statistic) wva_slo_observed_seconds
+  count_over_time((
+      max by (exported_namespace, model_name, objective, statistic) (wva_slo_observed_seconds)
+    > on (exported_namespace, model_name, objective, statistic)
+      max by (exported_namespace, model_name, objective, statistic) (wva_slo_target_seconds)
+  )[30m:1m]) >= 10
   ```
 
-  Read it with `wva_slo_window_requests` and `wva_slo_excluded` to tell "too
-  few requests" and "excluded" apart from "nothing scraped".
-- **Parked models.** Gate on replicas, so a model that parked just after a miss
-  does not keep the alert firing for ten minutes:
+  One expression covers both objectives: a TTFT percentile above its target is
+  the same miss as attainment below the percentile.
+- **Gate on the analyzer still publishing.** A model the engine skipped (a
+  Prometheus outage, or a policy that stopped listing `slo`) keeps its series
+  for ten minutes at their last values:
 
   ```promql
-  and on(exported_namespace, model_name) wva_model_replicas > 0
+  and on (exported_namespace, model_name, objective, statistic)
+    max by (exported_namespace, model_name, objective, statistic) (changes(wva_slo_window_requests[5m])) > 0
   ```
+
+- **Gate on replicas.** Then a model that parked just after a miss does not
+  keep the alert firing:
+
+  ```promql
+  and on (exported_namespace, model_name) sum by (exported_namespace, model_name) (wva_model_replicas) > 0
+  ```
+
+- **Alert on "unjudged" too.** A fleet that scales up more often than once
+  every window-plus-grace is never judged, which is exactly when misses
+  happen. `WVAModelSLOUnjudged` fires when targets are set, the model has
+  replicas, and nothing has been judged for an hour:
+
+  ```promql
+  max by (exported_namespace, model_name, objective, statistic) (wva_slo_target_seconds)
+    unless on (exported_namespace, model_name, objective, statistic)
+  max by (exported_namespace, model_name, objective, statistic) (last_over_time(wva_slo_observed_seconds[1h]))
+  ```
+
+  Read it with `wva_slo_window_requests` and `wva_slo_excluded` to tell
+  "excluded", "too few requests" and "nothing scraped" apart.
 
 ### Utilization-Share Optimizer Metrics
 
@@ -1643,7 +1657,8 @@ notifications link to it.
 | `WVAModelParkedWhileRequestsRefused` | critical | 5m | a model has 0 replicas and EPP returns `ServiceUnavailable` for it: traffic is being dropped | read `wva_model_scaling_blocked` for the model first | [T: will not wake](troubleshooting.md#a-model-will-not-wake-from-zero) |
 | `WVAModelHasNoWakeSignal` | warning | 10m | blocked reason `no-wake-signal`: EPP exports no flow-control queue, so a parked model cannot wake | enable the EPP `flowControl` feature gate, then restart the EPP Deployment (it reads its config once at start) | [T: will not wake](troubleshooting.md#a-model-will-not-wake-from-zero) |
 | `WVAScalerTargetsUndecided` | warning | 10m | `wva_scaler_undecided_targets` above 0 in a namespace: the scaler answers those ScaledObjects their current count, so their replica counts are frozen | `wva_scaler_undecided_answers_total` says why; the log line `external scaler has no decision for this target` names each one | [T: ScaledObject](troubleshooting.md#scaledobject-ready-false-or-targets-unknown) |
-| `WVAModelSLOMissed` | warning | 15m | a model whose policy lists the `slo` analyzer has its router-measured TTFT percentile or TPOT mean above the declared target, judged outside wakes, starts and rises, while it has replicas | compare `wva_slo_fill` with the tier's `kvCacheThreshold × scaleUpThreshold`: the tier runs replicas fuller than the target allows. On this release the analyzer observes, so the fix is the tier's thresholds | [SLO metrics](#slo-analyzer-metrics) |
+| `WVAModelSLOMissed` | warning | 5m | in at least 10 of the last 30 judged minutes, a model's router-measured TTFT percentile or TPOT mean was above its declared target, while the analyzer still publishes and the model has replicas | TPOT: compare `wva_slo_fill` with the tier's `kvCacheThreshold × scaleUpThreshold`. TTFT: read `wva_slo_engine_queue_seconds` and `wva_slo_prefill_seconds` per prefilling variant, and the router's flow-control queue. On this release the analyzer observes, so the fix is the tier's thresholds | [SLO metrics](#slo-analyzer-metrics) |
+| `WVAModelSLOUnjudged` | info | 15m | targets are set and the model has replicas, but no window of an objective has been judged for an hour | read `wva_slo_window_requests` and `wva_slo_excluded`: a fleet that never holds still, too little traffic, or histograms not scraped | [SLO metrics](#slo-analyzer-metrics) |
 | `WVAHighErrorRate` | warning | 5m | `wva_errors_total` above 6/min for one `component`/`error_type` | grep the controller log for the `error_type` text | [Logs](monitoring.md#the-logs) |
 | `WVAMetricsCollectionFailing` | warning | 5m | `wva_metrics_collection_errors_total` above 5/min for one `query_type`/`reason`: decisions run on stale data | check Prometheus reachability and the controller's Prometheus settings | [T: metrics stale](troubleshooting.md#metrics-stale-or-missing) |
 | `WVAPolicyNamespaceUnverified` | warning | 10m | the controller may not read Namespaces, so it cannot tell whether an admin published cluster policy for it. It runs on its own ConfigMap, which may be weaker than the admin intends | (cluster admin) `NAMESPACE=<ns> make setup-prereqs`, then restart the controller: the value is set once at startup | [T: policy namespace unverified](troubleshooting.md#cluster-policy-is-not-applied-policy-namespace-unverified) |

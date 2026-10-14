@@ -73,23 +73,25 @@ func registerSLOMetrics(registry prometheus.Registerer) error {
 	sloPublished = map[string]*sloModelSeries{}
 	sloPublishedMu.Unlock()
 	sloExcluded = gauge(constants.WVASLOExcluded,
-		"SLO analyzer: 1 for the reason a model's router window is not judged this cycle (a wake from "+
-			"zero, a replica starting, a rise), 0 for the others; all 0 while it is judged.",
-		withInstance(constants.LabelNamespace, constants.LabelModelName, constants.LabelReason))
+		"SLO analyzer: per objective, 1 for the reason its router window is not judged this cycle (a wake "+
+			"from zero, a replica starting), 0 for the others; all 0 while it is judged.",
+		withInstance(constants.LabelNamespace, constants.LabelModelName, constants.LabelObjective, constants.LabelReason))
 	variantLabels := withInstance(constants.LabelNamespace, constants.LabelModelName, constants.LabelVariantName)
 	sloPrefillSeconds = gauge(constants.WVASLOPrefillSeconds,
-		"SLO analyzer: the variant's mean prefill time, scheduled to first token (TTFT without the engine "+
-			"queue), weighted by request rate over its ready replicas. Observed, not priced.",
+		"SLO analyzer: the variant's mean prefill time, first scheduled to first token (a preemption's "+
+			"re-wait and chunked prefill's turns included), weighted by request rate over its ready replicas. "+
+			"Observed, not priced.",
 		variantLabels)
 	sloEngineQueueSeconds = gauge(constants.WVASLOEngineQueueSeconds,
 		"SLO analyzer: the variant's mean engine scheduler-queue wait, the other half of the engine's TTFT.",
 		variantLabels)
 	sloPrefillUtilization = gauge(constants.WVASLOPrefillUtilization,
-		"SLO analyzer: the variant's prefill token rate per ready replica over its learned prefill ceiling.",
+		"SLO analyzer: a prefill variant's prefill token rate per ready replica over its learned prefill ceiling.",
 		variantLabels)
 	sloPrefillCeiling = gauge(constants.WVASLOPrefillCeiling,
-		"SLO analyzer: the variant's learned prefill ceiling, the 90th percentile of the prefill token rate "+
-			"a replica computed while its engine queue was non-empty, in tokens per second.",
+		"SLO analyzer: a prefill variant's learned prefill ceiling in tokens per second: the 90th percentile, "+
+			"over the last hour, of per-cycle medians of the rate on replicas queued with KV below 0.80; the "+
+			"last ceiling is kept once the hour runs dry.",
 		variantLabels)
 	for _, g := range []*prometheus.GaugeVec{sloTarget, sloObserved, sloAttainment, sloFill, sloPredictedITL,
 		sloSource, sloRequests, sloExcluded,
@@ -116,6 +118,9 @@ type SLOObjectiveReading struct {
 	// WindowSeconds is the router window the figures were taken over; zero
 	// when the router reported nothing.
 	WindowSeconds float64
+	// Excluded is why the objective's window is not judged this cycle, one of
+	// constants.SLOExcludedReasons, or "" when it is.
+	Excluded string
 }
 
 // SLOVariantReading is one variant of one model, as PublishSLO takes it. A NaN
@@ -141,10 +146,6 @@ type SLOModelSnapshot struct {
 	ModelName  string
 	Objectives []SLOObjectiveReading
 	Variants   []SLOVariantReading
-	// Excluded is why the router window is not judged this cycle, one of
-	// constants.SLOExcludedReasons, or "" when it is. Published only for a
-	// model with objectives.
-	Excluded string
 }
 
 // sloStaleAfter is how long a model's SLO series outlive the last cycle that
@@ -204,14 +205,12 @@ func PublishSLO(snap SLOModelSnapshot, now time.Time) {
 		set(sloObserved, ol, o.Observed)
 		set(sloAttainment, ol, o.Attainment)
 		set(sloRequests, ol, o.Requests)
-	}
-	if len(snap.Objectives) > 0 {
 		for _, reason := range constants.SLOExcludedReasons {
 			on := 0.0
-			if reason == snap.Excluded {
+			if reason == o.Excluded {
 				on = 1
 			}
-			set(sloExcluded, labels(constants.LabelReason, reason), on)
+			set(sloExcluded, labels(constants.LabelObjective, o.Objective, constants.LabelReason, reason), on)
 		}
 	}
 	for _, v := range snap.Variants {

@@ -1239,11 +1239,15 @@ interactive: |
     count from the response's `usage`, which a streaming client gets only with
     `stream_options.include_usage` (or vLLM run with
     `--enable-force-include-usage`). Without it TTFT is judged and TPOT is not.
-  - **A wake, a start or a rise is not judged.** The 5-minute window would
+  - **A wake or a starting replica is not judged.** The 5-minute window would
     include requests that waited out a cold start (about 3 minutes for a large
-    model) or a replica still loading. While the window covers one, and for
-    120 s after, the observed figure and attainment are withheld, and
-    `wva_slo_excluded` says why.
+    model) or a replica still loading. While the window covers one, and for a
+    grace after (at least 120 s, longer for long generations), the observed
+    figure and attainment are withheld, and `wva_slo_excluded` says why. One
+    scale-up therefore leaves the model unjudged for about the replica's start
+    time plus 7 minutes. A fleet that scales up more often than that is never
+    judged, and `WVAModelSLOUnjudged` says so. The exclusion is per objective:
+    a prefill replica starting excludes TTFT and leaves TPOT judged.
 - **What it publishes** is listed under
   [SLO Analyzer Metrics](prometheus.md#slo-analyzer-metrics), plus its demand
   and per-replica capacity as `wva_analyzer_demand` / `wva_analyzer_target`
@@ -1254,7 +1258,11 @@ interactive: |
   price, so filter it `> 0`. Each cycle also logs `slo-model` and
   `slo-variant` lines at verbosity 3.
 - **Prefill is not priced.** On a P/D model only decode variants get an SLO
-  figure; TTFT is judged for the model but does not yet price a role. Warm-pool
+  figure; TTFT is judged for the model but does not yet price a role. Under a
+  TTFT target, every variant that prefills does publish the curve TTFT will be
+  priced from: `wva_slo_prefill_seconds`, `wva_slo_engine_queue_seconds`, and,
+  for a prefill role, `wva_slo_prefill_utilization` against a learned ceiling
+  (see [SLO Analyzer Metrics](prometheus.md#slo-analyzer-metrics)). Warm-pool
   bridges are left out of the latency line, so a variant served only by
   bridges reads `no-line` or `no-output-length`.
 - **Read the per-variant figures as estimates.** They are not checked against a

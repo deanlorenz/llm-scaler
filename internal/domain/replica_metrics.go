@@ -233,8 +233,10 @@ type ReplicaMetrics struct {
 	AvgTTFT float64
 
 	// AvgPrefillTime is the average time a request spent in prefill on this
-	// replica, from being scheduled to its first token, in seconds: TTFT with
-	// the engine's queue taken out. From vllm:request_prefill_time_seconds
+	// replica, from first being scheduled to its first token, in seconds. Not
+	// a pure service time: a request preempted before its first token waits
+	// again inside it, and chunked prefill's turns in a mixed batch are in it.
+	// From vllm:request_prefill_time_seconds
 	// over 1m; zero when unavailable (SGLang publishes no such figure).
 	// A DIAGNOSTIC, like AvgTTFT: the slo analyzer publishes it against
 	// prefill utilization, and nothing sizes from it.

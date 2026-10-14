@@ -25,6 +25,14 @@ var _ = Describe("quantileOf", func() {
 	})
 })
 
+// pre is a prefill replica's row: request rate, prefill and queue time, the
+// prefill token rate, how many requests wait, and its KV fill.
+func pre(pod string, rate, prefill, queue, tok float64, waiting int, kv float64) domain.ReplicaMetrics {
+	return domain.ReplicaMetrics{PodName: pod, VariantName: "pre", Ready: true, RequestRate: rate,
+		AvgPrefillTime: prefill, AvgQueueTime: queue, PrefillComputedTokenRate: tok, QueueLength: waiting,
+		KvUsageInstant: kv}
+}
+
 var _ = Describe("observeTTFTInputs", func() {
 	var (
 		a     *Analyzer
@@ -34,15 +42,20 @@ var _ = Describe("observeTTFTInputs", func() {
 		a = New(nil, nil)
 		clock = time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
 	})
-	pre := func(pod string, rate, prefill, queue, tok float64, waiting int) domain.ReplicaMetrics {
-		return domain.ReplicaMetrics{PodName: pod, VariantName: "pre", Ready: true, RequestRate: rate,
-			AvgPrefillTime: prefill, AvgQueueTime: queue, PrefillComputedTokenRate: tok, QueueLength: waiting}
+	// cycles feeds n cycles 30 s apart of one saturated replica at the given
+	// rates, cycling through them.
+	cycles := func(n int, rates ...float64) {
+		for i := range n {
+			a.observeTTFTInputs("k", "pre", domain.RolePrefill,
+				[]domain.ReplicaMetrics{pre("a", 1, 1, 0.5, rates[i%len(rates)], 3, 0.4)}, clock)
+			clock = clock.Add(30 * time.Second)
+		}
 	}
 
 	It("weights prefill and queue time by request rate over the variant's own ready rows", func() {
-		in := a.observeTTFTInputs("k", "pre", []domain.ReplicaMetrics{
-			pre("a", 3, 1.0, 0, 1000, 0),
-			pre("b", 1, 5.0, 4, 1000, 0),
+		in := a.observeTTFTInputs("k", "pre", domain.RolePrefill, []domain.ReplicaMetrics{
+			pre("a", 3, 1.0, 0, 1000, 0, 0.3),
+			pre("b", 1, 5.0, 4, 1000, 0, 0.3),
 			{PodName: "c", VariantName: "pre", Ready: false, RequestRate: 100, AvgPrefillTime: 99},
 			{PodName: "d", VariantName: "pre", Ready: true, FromWarmPool: true, RequestRate: 100, AvgPrefillTime: 99},
 			{PodName: "e", VariantName: "other", Ready: true, RequestRate: 100, AvgPrefillTime: 99},
@@ -55,81 +68,154 @@ var _ = Describe("observeTTFTInputs", func() {
 		Expect(math.IsNaN(in.utilization)).To(BeTrue())
 	})
 
-	It("learns the ceiling as the p90 of rates read while the queue was non-empty, then reports utilization", func() {
-		for i := range 10 {
-			a.observeTTFTInputs("k", "pre", []domain.ReplicaMetrics{
-				pre("a", 1, 1, 0.5, 10000+float64(i)*1000, 3), // saturated: 10k .. 19k
-			}, clock)
-			clock = clock.Add(15 * time.Second)
-		}
-		in := a.observeTTFTInputs("k", "pre", []domain.ReplicaMetrics{
-			pre("a", 1, 1, 0, 9000, 0), // not saturated: does not move the ceiling
-			pre("b", 1, 1, 0, 9000, 0),
+	It("learns the ceiling as the p90 of per-cycle medians, from ten cycles over five minutes", func() {
+		// 10 cycles, 30 s apart: 4.5 minutes, one short of the span.
+		cycles(10, 10000, 11000, 12000, 13000, 14000, 15000, 16000, 17000, 18000, 19000)
+		in := a.observeTTFTInputs("k", "pre", domain.RolePrefill,
+			[]domain.ReplicaMetrics{pre("a", 1, 1, 0, 9000, 0, 0.4)}, clock)
+		Expect(math.IsNaN(in.ceiling)).To(BeTrue(), "ten cycles inside five minutes is still one burst")
+		clock = clock.Add(time.Minute)
+		in = a.observeTTFTInputs("k", "pre", domain.RolePrefill, []domain.ReplicaMetrics{
+			pre("a", 1, 1, 0.5, 20000, 3, 0.4), // the 11th cycle, past five minutes
+			pre("b", 1, 1, 0, 9000, 0, 0.4),
 		}, clock)
-		Expect(in.ceiling).To(BeNumerically("~", 18100, 1e-9))
-		Expect(in.utilization).To(BeNumerically("~", 18000/(2*18100.0), 1e-12))
+		Expect(in.ceiling).To(BeNumerically("~", quantileOf([]float64{10000, 11000, 12000, 13000, 14000,
+			15000, 16000, 17000, 18000, 19000, 20000}, 0.9), 1e-9))
+		Expect(in.utilization).To(BeNumerically("~", 29000/(2*in.ceiling), 1e-12))
 	})
 
-	It("forgets saturated readings older than an hour", func() {
-		for range 10 {
-			a.observeTTFTInputs("k", "pre", []domain.ReplicaMetrics{pre("a", 1, 1, 0.5, 50000, 2)}, clock)
-		}
+	It("takes one sample per cycle however many replicas were saturated", func() {
+		a.observeTTFTInputs("k", "pre", domain.RolePrefill, []domain.ReplicaMetrics{
+			pre("a", 1, 1, 1, 1000, 2, 0.4), pre("b", 1, 1, 1, 3000, 2, 0.4), pre("c", 1, 1, 1, 9000, 2, 0.4),
+		}, clock)
+		Expect(a.ceilings["k"].samples).To(HaveLen(1))
+		Expect(a.ceilings["k"].samples[0].rate).To(Equal(3000.0), "the median of the cycle")
+	})
+
+	It("ignores a replica queued with full KV: it waits on decode, it is not computing", func() {
+		a.observeTTFTInputs("k", "pre", domain.RolePrefill,
+			[]domain.ReplicaMetrics{pre("a", 1, 1, 1, 500, 40, 0.95)}, clock)
+		Expect(a.ceilings["k"].samples).To(BeEmpty())
+	})
+
+	It("keeps the last ceiling after the window runs dry, and ages the samples", func() {
+		cycles(12, 10000)
+		learned := a.ceilings["k"].last
+		Expect(learned).To(BeNumerically("~", 10000, 1e-9))
 		clock = clock.Add(ceilingMaxAge + time.Minute)
-		in := a.observeTTFTInputs("k", "pre", []domain.ReplicaMetrics{pre("a", 1, 1, 0, 1000, 0)}, clock)
-		Expect(math.IsNaN(in.ceiling)).To(BeTrue())
-		Expect(a.ceilings["k"]).To(BeEmpty())
+		in := a.observeTTFTInputs("k", "pre", domain.RolePrefill,
+			[]domain.ReplicaMetrics{pre("a", 1, 1, 0, 5000, 0, 0.4)}, clock)
+		Expect(a.ceilings["k"].samples).To(BeEmpty())
+		Expect(in.ceiling).To(Equal(learned))
+		Expect(in.utilization).To(BeNumerically("~", 0.5, 1e-12))
 	})
 
-	It("keeps at most the newest readings", func() {
+	It("keeps at most the newest samples when cycles run faster than the age limit drops them", func() {
 		for i := range ceilingMaxSamples + 30 {
-			a.observeTTFTInputs("k", "pre", []domain.ReplicaMetrics{pre("a", 1, 1, 0.5, float64(i), 1)}, clock)
+			a.observeTTFTInputs("k", "pre", domain.RolePrefill,
+				[]domain.ReplicaMetrics{pre("a", 1, 1, 0.5, float64(i), 3, 0.4)}, clock)
+			clock = clock.Add(5 * time.Second)
 		}
-		Expect(a.ceilings["k"]).To(HaveLen(ceilingMaxSamples))
-		Expect(a.ceilings["k"][0].rate).To(Equal(30.0))
+		Expect(a.ceilings["k"].samples).To(HaveLen(ceilingMaxSamples))
+		Expect(a.ceilings["k"].samples[0].rate).To(Equal(30.0), "the oldest are the ones dropped")
+	})
+
+	It("gives an aggregated variant prefill and queue time but no ceiling", func() {
+		for range 12 {
+			in := a.observeTTFTInputs("k", "pre", domain.RoleBoth,
+				[]domain.ReplicaMetrics{pre("a", 1, 1, 0.5, 9000, 3, 0.4)}, clock)
+			Expect(in.prefillSeconds).To(Equal(1.0))
+			Expect(math.IsNaN(in.ceiling)).To(BeTrue())
+			Expect(math.IsNaN(in.utilization)).To(BeTrue())
+			clock = clock.Add(time.Minute)
+		}
+		Expect(a.ceilings).NotTo(HaveKey("k"))
+	})
+
+	It("forgets a variant's ceiling when the variant is swept", func() {
+		cycles(1, 10000)
+		Expect(a.ceilings).To(HaveKey("k"))
+		a.sweep(clock.Add(windowTimeout + time.Minute))
+		Expect(a.ceilings).NotTo(HaveKey("k"))
 	})
 })
 
 var _ = Describe("TTFT inputs in what Analyze publishes", func() {
-	It("publishes them for a prefill variant, with no TPOT source, and not for decode", func() {
-		registry := prometheus.NewRegistry()
+	var registry *prometheus.Registry
+	BeforeEach(func() {
+		registry = prometheus.NewRegistry()
 		Expect(metrics.InitMetrics(registry)).To(Succeed())
+	})
+	prefill := domain.VariantReplicaState{VariantName: "pre", Role: domain.RolePrefill, CurrentReplicas: 1}
+	decode := domain.VariantReplicaState{VariantName: "dec", Role: domain.RoleDecode, CurrentReplicas: 1}
+	preVar := map[string]string{constants.LabelVariantName: "pre"}
+	decVar := map[string]string{constants.LabelVariantName: "dec"}
+
+	It("publishes them, ceiling and utilization included, for a prefill variant, and nothing TPOT for it", func() {
 		a := New(nil, nil)
 		clock := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
 		a.now = func() time.Time { return clock }
-		prefill := domain.VariantReplicaState{VariantName: "pre", Role: domain.RolePrefill, CurrentReplicas: 1}
-		decode := domain.VariantReplicaState{VariantName: "dec", Role: domain.RoleDecode, CurrentReplicas: 1}
-		rows := []domain.ReplicaMetrics{
-			{PodName: "p", VariantName: "pre", Ready: true, RequestRate: 1, AvgPrefillTime: 0.8, AvgQueueTime: 0.2,
-				PrefillComputedTokenRate: 5000},
-			{PodName: "d", VariantName: "dec", Ready: true, RequestRate: 1, AvgOutputTokens: 500,
-				AvgPrefillTime: 0.1, KvUsageInstant: 0.3, AvgITL: 0.03},
+		for i := range 12 {
+			_, err := a.Analyze(context.Background(), domain.AnalyzerInput{
+				ModelID: "m", Namespace: "ns", Config: policy(0, 3*time.Second), ArrivalRate: 1,
+				VariantStates:  []domain.VariantReplicaState{prefill},
+				ReplicaMetrics: []domain.ReplicaMetrics{pre("p", 1, 0.8, 0.2, 10000+float64(i), 2, 0.4)},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			clock = clock.Add(30 * time.Second)
 		}
-		_, err := a.Analyze(context.Background(), domain.AnalyzerInput{
-			ModelID: "m", Namespace: "ns", Config: policy(0, 3*time.Second), ArrivalRate: 1,
-			VariantStates: []domain.VariantReplicaState{prefill, decode}, ReplicaMetrics: rows,
-		})
-		Expect(err).NotTo(HaveOccurred())
-		v, ok := gaugeIn(registry, constants.WVASLOPrefillSeconds, map[string]string{constants.LabelVariantName: "pre"})
-		Expect(ok).To(BeTrue())
+		v, _ := gaugeIn(registry, constants.WVASLOPrefillSeconds, preVar)
 		Expect(v).To(BeNumerically("~", 0.8, 1e-12))
-		q, _ := gaugeIn(registry, constants.WVASLOEngineQueueSeconds, map[string]string{constants.LabelVariantName: "pre"})
+		q, _ := gaugeIn(registry, constants.WVASLOEngineQueueSeconds, preVar)
 		Expect(q).To(BeNumerically("~", 0.2, 1e-12))
-		_, ok = gaugeIn(registry, constants.WVASLOSource, map[string]string{constants.LabelVariantName: "pre"})
-		Expect(ok).To(BeFalse(), "a prefill variant is not priced for TPOT, so it has no source")
-		_, ok = gaugeIn(registry, constants.WVASLOPrefillSeconds, map[string]string{constants.LabelVariantName: "dec"})
-		Expect(ok).To(BeFalse(), "decode's prefill is the KV handoff, not a prefill curve")
-		_, ok = gaugeIn(registry, constants.WVASLOPrefillCeiling, map[string]string{constants.LabelVariantName: "pre"})
-		Expect(ok).To(BeFalse(), "no ceiling until enough saturated readings")
+		c, ok := gaugeIn(registry, constants.WVASLOPrefillCeiling, preVar)
+		Expect(ok).To(BeTrue())
+		Expect(c).To(BeNumerically("~", 10009.9, 1e-6))
+		u, ok := gaugeIn(registry, constants.WVASLOPrefillUtilization, preVar)
+		Expect(ok).To(BeTrue())
+		Expect(u).To(BeNumerically("~", 10011/c, 1e-9))
+		for _, name := range []string{constants.WVASLOSource, constants.WVASLOFill, constants.WVASLOPredictedITLSeconds} {
+			_, ok = gaugeIn(registry, name, preVar)
+			Expect(ok).To(BeFalse(), name+": a prefill variant is not priced for TPOT")
+		}
+	})
+
+	It("publishes no prefill series for a decode variant priced for TPOT", func() {
+		a := New(nil, nil)
+		clock := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+		a.now = func() time.Time { return clock }
+		for i := range 5 {
+			// The decode rows carry prefill and queue times too, as vLLM reports
+			// them on a decode Pod: only the role keeps them off the curve.
+			rows := cycleRows("dec", i)
+			for j := range rows {
+				rows[j].AvgPrefillTime, rows[j].AvgQueueTime = 0.05, 0.01
+			}
+			rows = append(rows, pre("p", 1, 0.8, 0.2, 5000, 0, 0.3))
+			_, err := a.Analyze(context.Background(), domain.AnalyzerInput{
+				ModelID: "m", Namespace: "ns", Config: policy(44*time.Millisecond, 3*time.Second), ArrivalRate: 1,
+				VariantStates: []domain.VariantReplicaState{prefill, decode}, ReplicaMetrics: rows,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			clock = clock.Add(15 * time.Second)
+		}
+		_, ok := gaugeIn(registry, constants.WVASLOSource, decVar)
+		Expect(ok).To(BeTrue(), "the decode variant is priced")
+		for _, name := range []string{constants.WVASLOPrefillSeconds, constants.WVASLOEngineQueueSeconds,
+			constants.WVASLOPrefillUtilization, constants.WVASLOPrefillCeiling} {
+			_, ok = gaugeIn(registry, name, decVar)
+			Expect(ok).To(BeFalse(), name+": decode's prefill is the KV handoff, not a prefill curve")
+		}
+		_, ok = gaugeIn(registry, constants.WVASLOPrefillSeconds, preVar)
+		Expect(ok).To(BeTrue())
 	})
 
 	It("publishes nothing about prefill without a TTFT objective", func() {
-		registry := prometheus.NewRegistry()
-		Expect(metrics.InitMetrics(registry)).To(Succeed())
 		a := New(nil, nil)
 		_, err := a.Analyze(context.Background(), domain.AnalyzerInput{
 			ModelID: "m", Namespace: "ns", Config: policy(44*time.Millisecond, 0), ArrivalRate: 1,
-			VariantStates:  []domain.VariantReplicaState{{VariantName: "pre", Role: domain.RolePrefill, CurrentReplicas: 1}},
-			ReplicaMetrics: []domain.ReplicaMetrics{{PodName: "p", VariantName: "pre", Ready: true, AvgPrefillTime: 0.8}},
+			VariantStates:  []domain.VariantReplicaState{prefill},
+			ReplicaMetrics: []domain.ReplicaMetrics{pre("p", 1, 0.8, 0.2, 5000, 0, 0.3)},
 		})
 		Expect(err).NotTo(HaveOccurred())
 		_, ok := gaugeIn(registry, constants.WVASLOPrefillSeconds, nil)

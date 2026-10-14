@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 )
 
 // TTFT, phase 2a: the inputs of the prefill curve, observed and published, and
@@ -14,24 +15,36 @@ import (
 // See docs/proposals/slo-tiers.md, "TTFT (phase 2)".
 
 const (
-	// ceilingMaxSamples and ceilingMaxAge bound the readings a variant's
-	// prefill ceiling is estimated from.
-	ceilingMaxSamples = 120
-	ceilingMaxAge     = time.Hour
-	// ceilingMinSamples is the fewest readings the ceiling is reported from.
+	// ceilingMaxAge is how far back a variant's prefill ceiling looks.
+	ceilingMaxAge = time.Hour
+	// ceilingMaxSamples bounds the window: one sample per cycle, so an hour
+	// at a 15-second cycle.
+	ceilingMaxSamples = 240
+	// ceilingMinSamples and ceilingMinSpan are what a ceiling is reported
+	// from: enough cycles, spread over enough time, that it is not one burst.
 	ceilingMinSamples = 10
-	// ceilingQuantile is the share of saturated readings at or below the
+	ceilingMinSpan    = 5 * time.Minute
+	// ceilingQuantile is the share of saturated cycles at or below the
 	// ceiling. A high quantile, not the maximum: a running max of noisy rates
 	// is biased up, which would under-read utilization and over-price prefill.
 	ceilingQuantile = 0.9
 )
 
-// ceilingSample is one replica's prefill token rate on a cycle its engine
-// queue was non-empty: a reading of what it computes when it has more work
-// than it can take.
+// ceilingSample is one cycle's prefill token rate, the median over the
+// variant's replicas that were saturated on that cycle.
 type ceilingSample struct {
 	rate float64
 	at   time.Time
+}
+
+// ceilingState is a variant's saturated readings and the last ceiling they
+// gave. The last ceiling is kept when the window runs dry, so a fleet that has
+// stopped queueing still has utilization measured against something: dropping
+// it would leave the low-load half of the curve, the healthy half, unobserved.
+type ceilingState struct {
+	samples   []ceilingSample
+	last      float64
+	learnedAt time.Time
 }
 
 // ttftInputs is one variant's prefill-curve inputs this cycle. Any field is
@@ -43,11 +56,28 @@ type ttftInputs struct {
 	ceiling        float64
 }
 
-// observeTTFTInputs records the variant's saturated readings into its ceiling
-// window and returns this cycle's inputs: the request-rate-weighted means of
-// prefill time and engine queue time over the variant's ready, non-pool rows,
-// and its prefill utilization against the learned ceiling.
-func (a *Analyzer) observeTTFTInputs(key, variant string, rows []domain.ReplicaMetrics, now time.Time) ttftInputs {
+// saturatedForCeiling reports whether a prefill replica's reading is one of
+// the replica computing at its limit. Queued work alone is not enough: a P/D
+// prefill replica holds its KV until decode pulls it, so a decode short of
+// capacity fills prefill's cache, its queue grows and its compute sits idle --
+// a reading of decode, not of prefill. So the replica's own KV must be below
+// the range the engine is still working in.
+func saturatedForCeiling(rm domain.ReplicaMetrics) bool {
+	return rm.QueueLength > 0 && finite(rm.PrefillComputedTokenRate) && rm.PrefillComputedTokenRate > 0 &&
+		finite(rm.KvUsageInstant) && rm.KvUsageInstant < itl.DefaultMaxObservableK
+}
+
+// observeTTFTInputs returns this cycle's inputs for one variant: the
+// request-rate-weighted means of prefill time and engine queue time over its
+// ready, non-pool rows and, for a prefill-role variant, its prefill utilization
+// against the learned ceiling.
+//
+// The ceiling and utilization are a prefill role's only. The computed-token
+// counter is observed when a request finishes, which on an aggregated replica
+// is a whole generation after its prefill, and an aggregated replica's queue is
+// mostly KV held by decodes; a "ceiling" there is neither prefill's capacity
+// nor this cycle's.
+func (a *Analyzer) observeTTFTInputs(key, variant, role string, rows []domain.ReplicaMetrics, now time.Time) ttftInputs {
 	out := ttftInputs{prefillSeconds: math.NaN(), queueSeconds: math.NaN(),
 		utilization: math.NaN(), ceiling: math.NaN()}
 	var prefill, queue, wPrefill, wQueue, tokenRate float64
@@ -72,9 +102,9 @@ func (a *Analyzer) observeTTFTInputs(key, variant string, rows []domain.ReplicaM
 		}
 		if finite(rm.PrefillComputedTokenRate) && rm.PrefillComputedTokenRate > 0 {
 			tokenRate += rm.PrefillComputedTokenRate
-			if rm.QueueLength > 0 {
-				saturated = append(saturated, rm.PrefillComputedTokenRate)
-			}
+		}
+		if saturatedForCeiling(rm) {
+			saturated = append(saturated, rm.PrefillComputedTokenRate)
 		}
 	}
 	if wPrefill > 0 {
@@ -83,29 +113,39 @@ func (a *Analyzer) observeTTFTInputs(key, variant string, rows []domain.ReplicaM
 	if wQueue > 0 {
 		out.queueSeconds = queue / wQueue
 	}
+	if role != domain.RolePrefill {
+		return out
+	}
 
 	a.mu.Lock()
 	a.seen[key] = now
-	w := a.ceilings[key]
-	for _, r := range saturated {
-		w = append(w, ceilingSample{rate: r, at: now})
+	st := a.ceilings[key]
+	if st == nil {
+		st = &ceilingState{last: math.NaN()}
+		a.ceilings[key] = st
 	}
-	w = slices.DeleteFunc(w, func(s ceilingSample) bool { return now.Sub(s.at) > ceilingMaxAge })
-	if len(w) > ceilingMaxSamples {
-		w = w[len(w)-ceilingMaxSamples:]
+	// One sample per cycle, however many replicas were saturated on it:
+	// replicas of one cycle share one load state, and counting each would let
+	// a single cycle of ten replicas satisfy the minimum on its own.
+	if len(saturated) > 0 {
+		st.samples = append(st.samples, ceilingSample{rate: quantileOf(saturated, 0.5), at: now})
 	}
-	a.ceilings[key] = w
-	samples := make([]float64, len(w))
-	for i, s := range w {
-		samples[i] = s.rate
+	st.samples = slices.DeleteFunc(st.samples, func(s ceilingSample) bool { return now.Sub(s.at) > ceilingMaxAge })
+	if len(st.samples) > ceilingMaxSamples {
+		st.samples = slices.Clone(st.samples[len(st.samples)-ceilingMaxSamples:])
 	}
+	if n := len(st.samples); n >= ceilingMinSamples && st.samples[n-1].at.Sub(st.samples[0].at) >= ceilingMinSpan {
+		rates := make([]float64, n)
+		for i, s := range st.samples {
+			rates[i] = s.rate
+		}
+		st.last, st.learnedAt = quantileOf(rates, ceilingQuantile), now
+	}
+	out.ceiling = st.last
 	a.mu.Unlock()
 
-	if len(samples) >= ceilingMinSamples {
-		out.ceiling = quantileOf(samples, ceilingQuantile)
-		if replicas > 0 && out.ceiling > 0 {
-			out.utilization = tokenRate / (float64(replicas) * out.ceiling)
-		}
+	if finite(out.ceiling) && out.ceiling > 0 && replicas > 0 {
+		out.utilization = tokenRate / (float64(replicas) * out.ceiling)
 	}
 	return out
 }

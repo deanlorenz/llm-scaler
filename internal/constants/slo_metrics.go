@@ -38,15 +38,16 @@ const (
 
 	// WVASLOExcluded is 1 for the reason a model's router window is not being
 	// judged this cycle and 0 for the others; all 0 while it is judged. A
-	// window is excluded while it covers a wake from zero, a replica starting
-	// or a rise, and for a grace period after, because those requests waited
-	// out capacity no steady-state sizing could have had ready.
-	// Labels: namespace, model_name, reason.
+	// window is excluded while it covers a wake from zero or a replica
+	// starting, and for a grace period after, because those requests waited out
+	// capacity no steady-state sizing could have had ready. Per objective: a
+	// prefill replica starting excludes TTFT and not TPOT.
+	// Labels: namespace, model_name, objective, reason.
 	WVASLOExcluded = "wva_slo_excluded"
 
 	// WVASLOPrefillSeconds, WVASLOEngineQueueSeconds, WVASLOPrefillUtilization
 	// and WVASLOPrefillCeiling are the TTFT curve's inputs for a variant that
-	// prefills: its mean prefill time (TTFT without the engine queue), its mean
+	// prefills: its mean prefill time (first scheduled to first token), its mean
 	// engine queue wait, its prefill token rate per replica over its learned
 	// ceiling, and the ceiling itself in tokens per second. Observed and not
 	// priced: the curve is priced only once these show it can be learned.
@@ -98,11 +99,10 @@ const (
 const (
 	SLOExcludedZeroReplicas = "zero-replicas"
 	SLOExcludedStarting     = "starting"
-	SLOExcludedRise         = "rise"
 )
 
 // SLOExcludedReasons is every exclusion reason, in the order they are published.
-var SLOExcludedReasons = []string{SLOExcludedZeroReplicas, SLOExcludedStarting, SLOExcludedRise}
+var SLOExcludedReasons = []string{SLOExcludedZeroReplicas, SLOExcludedStarting}
 
 // SLOSources is every SLO source value, in the order they are published.
 var SLOSources = []string{

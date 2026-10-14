@@ -2673,7 +2673,7 @@
           "id": 77,
           "title": "Observed vs target, by model and objective",
           "type": "timeseries",
-          "description": "What the router measured over 5 minutes against what the policy declares: the TPOT mean, and the TTFT percentile. A gap in the observed line is a window with too few requests, or one excluded for a wake, a start or a rise (see the panel on the right).",
+          "description": "What the router measured over 5 minutes against what the policy declares: the TPOT mean, and the TTFT percentile. A gap in the observed line is a window with too few requests, or one excluded for a wake or a starting replica (see the panel at the bottom of the row).",
           "gridPos": {
             "h": 8,
             "w": 12,
@@ -2683,12 +2683,12 @@
           "targets": [
             {
               "expr": "wva_slo_observed_seconds{$namespace_label=~\"$namespace\"}",
-              "legendFormat": "{{model_name}} {{objective}} {{statistic}}",
+              "legendFormat": "{{$namespace_label}}/{{model_name}} {{objective}} {{statistic}}",
               "refId": "A"
             },
             {
               "expr": "wva_slo_target_seconds{$namespace_label=~\"$namespace\"}",
-              "legendFormat": "{{model_name}} {{objective}} target",
+              "legendFormat": "{{$namespace_label}}/{{model_name}} {{objective}} target",
               "refId": "B"
             }
           ],
@@ -2705,9 +2705,9 @@
         },
         {
           "id": 78,
-          "title": "Requests judged per window, and why a window was not",
+          "title": "Requests per window, by objective",
           "type": "timeseries",
-          "description": "Completed requests the router recorded per objective over the window, and 1 for the reason a window is excluded (zero-replicas, starting, rise). Requests present with no observed point and no exclusion: too few to judge.",
+          "description": "Completed requests the router recorded per objective over the window, judged or not. Present with no observed point: too few to judge, or the window is excluded (panel below).",
           "gridPos": {
             "h": 8,
             "w": 12,
@@ -2717,13 +2717,8 @@
           "targets": [
             {
               "expr": "wva_slo_window_requests{$namespace_label=~\"$namespace\"}",
-              "legendFormat": "{{model_name}} {{objective}} requests",
+              "legendFormat": "{{$namespace_label}}/{{model_name}} {{objective}} requests",
               "refId": "A"
-            },
-            {
-              "expr": "wva_slo_excluded{$namespace_label=~\"$namespace\", reason!=\"\"} == 1",
-              "legendFormat": "{{model_name}} excluded: {{reason}}",
-              "refId": "B"
             }
           ],
           "fieldConfig": {
@@ -2751,7 +2746,7 @@
           "targets": [
             {
               "expr": "wva_slo_attainment_ratio{$namespace_label=~\"$namespace\"}",
-              "legendFormat": "{{model_name}} {{statistic}}",
+              "legendFormat": "{{$namespace_label}}/{{model_name}} {{statistic}}",
               "refId": "A"
             }
           ],
@@ -2780,7 +2775,7 @@
           "targets": [
             {
               "expr": "wva_slo_fill{$namespace_label=~\"$namespace\"}",
-              "legendFormat": "{{model_name}}/{{variant_name}}",
+              "legendFormat": "{{$namespace_label}}/{{model_name}}/{{variant_name}}",
               "refId": "A"
             }
           ],
@@ -2809,7 +2804,7 @@
           "targets": [
             {
               "expr": "wva_slo_predicted_itl_seconds{$namespace_label=~\"$namespace\"}",
-              "legendFormat": "{{model_name}}/{{variant_name}}",
+              "legendFormat": "{{$namespace_label}}/{{model_name}}/{{variant_name}}",
               "refId": "A"
             }
           ],
@@ -2838,7 +2833,7 @@
           "targets": [
             {
               "expr": "wva_slo_source{$namespace_label=~\"$namespace\"} == 1",
-              "legendFormat": "{{model_name}}/{{variant_name}} {{source}}",
+              "legendFormat": "{{$namespace_label}}/{{model_name}}/{{variant_name}} {{source}}",
               "refId": "A"
             }
           ],
@@ -2857,7 +2852,7 @@
           "id": 83,
           "title": "Prefill time and engine queue time, per prefilling variant",
           "type": "timeseries",
-          "description": "The two halves of the engine's TTFT for a variant that prefills, under a TTFT target: prefill (scheduled to first token) and the scheduler-queue wait before it. Observed, not priced: plotted against the utilization panel, it is the curve TTFT will be priced from.",
+          "description": "The two halves of the engine's TTFT for a variant that prefills, under a TTFT target: prefill (first scheduled to first token; a preemption's re-wait and chunked prefill's turns are inside it) and the scheduler-queue wait before it. Observed, not priced.",
           "gridPos": {
             "h": 8,
             "w": 12,
@@ -2867,12 +2862,12 @@
           "targets": [
             {
               "expr": "wva_slo_prefill_seconds{$namespace_label=~\"$namespace\"}",
-              "legendFormat": "{{model_name}}/{{variant_name}} prefill",
+              "legendFormat": "{{$namespace_label}}/{{model_name}}/{{variant_name}} prefill",
               "refId": "A"
             },
             {
               "expr": "wva_slo_engine_queue_seconds{$namespace_label=~\"$namespace\"}",
-              "legendFormat": "{{model_name}}/{{variant_name}} queue",
+              "legendFormat": "{{$namespace_label}}/{{model_name}}/{{variant_name}} queue",
               "refId": "B"
             }
           ],
@@ -2891,7 +2886,7 @@
           "id": 84,
           "title": "Prefill utilization against the learned ceiling",
           "type": "timeseries",
-          "description": "Prefill tokens computed per ready replica over the variant's learned ceiling (the p90 of the rate it computed while its queue was non-empty). Absent until enough saturated readings.",
+          "description": "Prefill-role variants only: prefill tokens computed per ready replica over the variant's learned ceiling, the p90 over the last hour of per-cycle medians of the rate on replicas queued with KV below 0.80. It is throughput served, so under overload it reads about 1 whatever the queue does. Absent until a ceiling is known.",
           "gridPos": {
             "h": 8,
             "w": 12,
@@ -2901,7 +2896,7 @@
           "targets": [
             {
               "expr": "wva_slo_prefill_utilization{$namespace_label=~\"$namespace\"}",
-              "legendFormat": "{{model_name}}/{{variant_name}}",
+              "legendFormat": "{{$namespace_label}}/{{model_name}}/{{variant_name}}",
               "refId": "A"
             }
           ],
@@ -2912,6 +2907,31 @@
                 "drawStyle": "line",
                 "fillOpacity": 8
               }
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 85,
+          "title": "Why a window was not judged",
+          "type": "state-timeline",
+          "description": "Per model and objective, the reason its window is excluded this cycle: zero-replicas (waking) or starting (a replica starting, a scale-up in progress). Empty while judged.",
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 156
+          },
+          "targets": [
+            {
+              "expr": "wva_slo_excluded{$namespace_label=~\"$namespace\", reason!=\"\"} == 1",
+              "legendFormat": "{{$namespace_label}}/{{model_name}} {{objective}}: {{reason}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short"
             },
             "overrides": []
           }

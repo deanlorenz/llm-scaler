@@ -146,7 +146,7 @@ func RegisterQueueingModelQueries(sourceRegistry *source.SourceRegistry) {
 		Type:        source.QueryTypePromQL,
 		Template:    `max by (model_name, instance, pod) (rate(vllm:request_prefill_time_seconds_sum{namespace="{{.namespace}}"}[1m]) / rate(vllm:request_prefill_time_seconds_count{namespace="{{.namespace}}"}[1m]))`,
 		Params:      []string{source.ParamNamespace},
-		Description: "Average prefill time per instance (seconds), scheduled to first token: TTFT without the engine queue",
+		Description: "Average prefill time per instance (seconds), first scheduled to first token (preemption re-waits and chunked-prefill turns included)",
 	})
 	registry.MustRegister(source.QueryTemplate{
 		Name:        QueryAvgQueueTime,

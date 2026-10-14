@@ -65,9 +65,9 @@ type Analyzer struct {
 	// transients is each model's recent fleet history, keyed namespace/model,
 	// for the transient exclusion (transient.go).
 	transients map[string]*transientMemo
-	// ceilings is each prefill-capable variant's saturated prefill token
-	// rates, keyed like windows, for its learned prefill ceiling (ttft.go).
-	ceilings map[string][]ceilingSample
+	// ceilings is each prefill-role variant's saturated prefill token rates
+	// and last ceiling, keyed like windows (ttft.go).
+	ceilings map[string]*ceilingState
 }
 
 // New returns an SLO analyzer. router may be nil, in which case the SLO is
@@ -83,7 +83,7 @@ func New(router RouterLatencySource, store *capacity.Store) *Analyzer {
 		seen:     make(map[string]time.Time),
 
 		transients: make(map[string]*transientMemo),
-		ceilings:   make(map[string][]ceilingSample),
+		ceilings:   make(map[string]*ceilingState),
 	}
 }
 
@@ -134,15 +134,16 @@ func (a *Analyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 		// and published, nothing priced from them yet (ttft.go).
 		if cfg.SLO != nil && cfg.SLO.TTFT != nil && vs.Role != domain.RoleDecode {
 			in := a.observeTTFTInputs(windowKey(input.Namespace, input.ModelID, vs), vs.VariantName,
-				input.ReplicaMetrics, now)
+				vs.Role, input.ReplicaMetrics, now)
 			if reading == nil {
-				reading = &metrics.SLOVariantReading{Variant: vs.VariantName,
-					Fill: math.NaN(), PredictedITL: math.NaN()}
+				reading = newVariantReading(vs.VariantName, "")
 			}
 			reading.PrefillSeconds, reading.EngineQueueSeconds = in.prefillSeconds, in.queueSeconds
 			reading.PrefillUtilization, reading.PrefillCeiling = in.utilization, in.ceiling
 		}
-		if !shapeKnown && reading != nil {
+		// Only a variant that generates is priced for TPOT, so only its reading
+		// can lack the output length; a prefill reading carries TTFT inputs alone.
+		if !shapeKnown && reading != nil && isGenerating(vs.Role) {
 			vc.PerReplicaCapacity, vc.Reason = 0, domain.ReasonNoData
 			reading.Source = constants.SLOSourceNoOutputLength
 			reading.Fill, reading.PredictedITL = math.NaN(), math.NaN()
@@ -168,14 +169,19 @@ func (a *Analyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 	a.sweep(now)
 
 	snap.Objectives = a.judge(ctx, input, cfg.SLO)
-	// A window that covered a wake, a start or a rise is not judged: the
+	// A window that covered a wake or a starting replica is not judged: the
 	// requests in it waited out capacity no steady-state sizing could have had
 	// ready. The request count is still published, and the reason is.
-	snap.Excluded = a.noteTransient(input.Namespace+"/"+input.ModelID, input.VariantStates,
-		time.Duration(routerWindowSeconds(snap.Objectives))*time.Second, now)
-	if snap.Excluded != "" {
-		for i := range snap.Objectives {
-			snap.Objectives[i].Observed, snap.Objectives[i].Attainment = math.NaN(), math.NaN()
+	ttftExcluded, tpotExcluded := a.noteTransient(input.Namespace+"/"+input.ModelID, input.VariantStates,
+		time.Duration(routerWindowSeconds(snap.Objectives))*time.Second, transientGrace(input.ReplicaMetrics), now)
+	for i := range snap.Objectives {
+		o := &snap.Objectives[i]
+		o.Excluded = tpotExcluded
+		if o.Objective == constants.SLOObjectiveTTFT {
+			o.Excluded = ttftExcluded
+		}
+		if o.Excluded != "" {
+			o.Observed, o.Attainment = math.NaN(), math.NaN()
 		}
 	}
 	for _, o := range snap.Objectives {
@@ -183,7 +189,7 @@ func (a *Analyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 			"modelID", input.ModelID, "namespace", input.Namespace,
 			"objective", o.Objective, "statistic", o.Statistic,
 			"target", o.TargetSeconds, "observed", o.Observed, "attainment", o.Attainment,
-			"requests", o.Requests, "excluded", snap.Excluded,
+			"requests", o.Requests, "excluded", o.Excluded,
 			"demandTokensPerSec", demand, "outputTokens", fleet.shape.AvgOutputTokens)
 	}
 	metrics.PublishSLO(snap, now)
@@ -216,9 +222,7 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 	if !(tpotTarget > 0) {
 		return vc, nil
 	}
-	reading := &metrics.SLOVariantReading{
-		Variant: vs.VariantName, Source: source, Fill: math.NaN(), PredictedITL: math.NaN(),
-	}
+	reading := newVariantReading(vs.VariantName, source)
 	if source == constants.SLOSourceNoLine {
 		return vc, reading
 	}
@@ -254,6 +258,19 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 		reading.PredictedITL = line.ITLAt(k)
 	}
 	return vc, reading
+}
+
+// newVariantReading is a variant's reading with every figure unknown: NaN,
+// which PublishSLO does not publish. The one place readings are made, because a
+// field left at Go's zero value is published as a real 0 -- a decode variant
+// read as having an instant prefill and a learned ceiling of zero.
+func newVariantReading(variant, source string) *metrics.SLOVariantReading {
+	nan := math.NaN()
+	return &metrics.SLOVariantReading{
+		Variant: variant, Source: source,
+		Fill: nan, PredictedITL: nan,
+		PrefillSeconds: nan, EngineQueueSeconds: nan, PrefillUtilization: nan, PrefillCeiling: nan,
+	}
 }
 
 // fitLine adds this cycle's (k, ITL) readings for one variant to its window and

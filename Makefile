@@ -2698,6 +2698,10 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# rewrite another workload's trigger metadata. A policy that selects no Pod,
 	@# admits {} or drops the metrics port all apply cleanly.
 	@KUSTOMIZE=$(KUSTOMIZE) bash hack/check-external-scaler-networkpolicy.sh
+	@# An alert that errors at evaluation, or never fires, loads cleanly; promtool
+	@# evaluates the shipped rules on synthetic series.
+	@$(MAKE) --no-print-directory promtool
+	@PROMTOOL=$(PROMTOOL) bash hack/check-alert-rules.sh
 	@echo "Checking what warmpool.sh actually emits..."
 	@# Renders the pool manifests and asserts their shape. Every bug this covers
 	@# parses fine: one container with the proxy image under the supervisor's
@@ -2907,6 +2911,7 @@ CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
 HELM ?= $(LOCALBIN)/helm
+PROMTOOL ?= $(LOCALBIN)/promtool
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.6.0
@@ -2917,6 +2922,8 @@ ENVTEST_VERSION ?= $(shell go list -m -f "{{ .Version }}" sigs.k8s.io/controller
 ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -F'[v.]' '{printf "1.%d", $$3}')
 GOLANGCI_LINT_VERSION ?= v2.8.0
 HELM_VERSION ?= v3.17.1
+# PROMTOOL_VERSION is a Prometheus release; promtool comes from its tarball.
+PROMTOOL_VERSION ?= 2.54.1
 
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
@@ -2936,6 +2943,11 @@ setup-envtest: envtest ## Download the binaries required for ENVTEST in the loca
 		echo "Error: Failed to set up envtest binaries for version $(ENVTEST_K8S_VERSION)."; \
 		exit 1; \
 	}
+
+.PHONY: promtool
+promtool: $(PROMTOOL) ## Download promtool locally if necessary.
+$(PROMTOOL): $(LOCALBIN)
+	@bash hack/install-promtool.sh $(LOCALBIN) $(PROMTOOL_VERSION)
 
 .PHONY: envtest
 envtest: $(ENVTEST) ## Download setup-envtest locally if necessary.
