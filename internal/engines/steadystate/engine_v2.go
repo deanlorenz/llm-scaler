@@ -55,7 +55,17 @@ func (e *Engine) runV2AnalysisOnly(
 		// Get accelerator name from scale target nodeSelector/nodeAffinity or VA label
 		accelerator := accelerator.GetAcceleratorNameFromScaleTarget(va, scaleTarget)
 		gpuCount := scaleTarget.GetTotalGPUsPerReplica()
-		e.capacityStore.LoadFromScaleTarget(namespace, modelID, va.Name, accelerator, gpuCount, scaleTarget)
+		// Published, and filed, under the accelerator the learned-state key is
+		// built with, not the raw reading: the two differ on a fleet whose pods
+		// disagree, and that is the fleet an operator is reading this metric to
+		// understand -- and the one where a record filed under the raw value
+		// was missed by the analyzer's stabilised lookup. A missing analyzer
+		// leaves the raw value, which is what a test-built engine gets.
+		publishAccel := accelerator
+		if s, ok := e.saturationV2Analyzer.(acceleratorStabiliser); ok {
+			publishAccel = s.StableAcceleratorFor(namespace, va.Name, accelerator)
+		}
+		e.capacityStore.LoadFromScaleTarget(namespace, modelID, va.Name, publishAccel, gpuCount, scaleTarget)
 		logger.V(logging.DEBUG).Info("Pre-populated capacity store from scale target",
 			"variant", va.Name, "accelerator", accelerator, "gpuCount", gpuCount)
 		// Publish the engine-configuration fingerprint. Read back from the
@@ -69,16 +79,6 @@ func (e *Engine) runV2AnalysisOnly(
 		// configuration the parser could not fully read is published WITH its
 		// unresolved label and withheld as a sharing key, so a variant can
 		// appear here and have no learned state filed under it.
-		//
-		// Published under the accelerator the learned-state key is built with,
-		// not the raw reading: the two differ on a fleet whose pods disagree,
-		// and that is the fleet an operator is reading this metric to
-		// understand. A missing analyzer leaves the raw value, which is what
-		// a test-built engine gets.
-		publishAccel := accelerator
-		if s, ok := e.saturationV2Analyzer.(acceleratorStabiliser); ok {
-			publishAccel = s.StableAcceleratorFor(namespace, va.Name, accelerator)
-		}
 		e.publishEngineConfig(namespace, modelID, va.Name, publishAccel, gpuCount)
 	}
 

@@ -59,7 +59,12 @@ func (a *SaturationAnalyzer) aggregateByVariant(
 		// accelerator is an analyzer input (discovery-resolved, on VariantReplicaState),
 		// used below for cross-variant capacity lookup. It is NOT emitted on the output;
 		// the capacity builder fills per-variant identity from discovery.
-		accelerator := vs.AcceleratorName
+		//
+		// Stabilised, as the capacity store's records are filed: discovery
+		// reads a variant whose pods sit on two products as unresolved, and
+		// that flips with placement. A raw lookup then missed a record filed
+		// under the product on alternate cycles.
+		accelerator := a.StableAcceleratorFor(namespace, vs.VariantName, vs.AcceleratorName)
 
 		readyCount := vs.CurrentReplicas - vs.PendingReplicas
 		if readyCount < 0 {

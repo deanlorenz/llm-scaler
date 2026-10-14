@@ -238,8 +238,13 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	if existing := a.capacityStore.Get(namespace, modelID, rm.VariantName); existing != nil && existing.EngineParams != nil {
 		existingParams = existing.EngineParams
 	}
+	// Filed under the STABLE accelerator, as the k2 and throughput keys are
+	// and as every reader of the store looks it up: the raw reading flips to
+	// unresolved with pod placement on a fleet spread over two products, and
+	// a record filed under whichever value the last cycle saw was missed by
+	// the next lookup that saw the other.
 	a.capacityStore.Update(namespace, modelID, rm.VariantName, capacity.Record{
-		AcceleratorName:       accelerator,
+		AcceleratorName:       a.StableAcceleratorFor(namespace, rm.VariantName, accelerator),
 		GpuCount:              gpuCount,
 		NumGpuBlocks:          rm.NumGpuBlocks,
 		BlockSize:             rm.BlockSize,
