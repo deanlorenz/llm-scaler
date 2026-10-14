@@ -55,7 +55,9 @@ The split exists because the two answer different questions:
   attributed by the **node** a pod runs on, so nothing is unattributable and it
   does not depend on the controller having discovered the workload;
 - a **quota** asks *"how much of the operator's declared allowance have we
-  consumed?"*. A quota governs managed variants and nothing else. Charged the
+  consumed?"*. The allowance is declared in the policy, or read from Kueue's
+  ClusterQueues ([Kueue as a quota source](../reference/quota-limiter.md#kueue-as-a-quota-source)).
+  A quota governs managed variants and nothing else. Charged the
   physical figure, a namespace with a 4-GPU quota and an unrelated 4-GPU
   training job reads as fully spent while we have placed nothing, and every
   scale-up is refused. The managed view sums `CurrentReplicas × GPUsPerReplica`

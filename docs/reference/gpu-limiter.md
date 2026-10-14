@@ -18,6 +18,12 @@ every type, and every managed workload stops scaling up. Use `-1` for no cap on
 a type (`H100=-1`). The type is the name the scaling manager resolves, which it logs per variant
 (`"accelerator": "H200"`). `WVA_QUOTA_SCOPE` is `namespace` (the default: each
 managed namespace gets this budget) or `cluster` (one budget across all of them).
+`WVA_QUOTA_KUEUE=true` also reads Kueue's ClusterQueues, and each namespace
+gets the smaller of Kueue's grant and the static figure; `WVA_QUOTAS='H100=-1'`
+lets Kueue set the number
+([Kueue as a quota source](quota-limiter.md#kueue-as-a-quota-source); the
+[Kueue-bounded quotas path](../well-lit-paths/kueue-bounded-quotas/) has what
+to know first. Experimental).
 
 or later, by adding a `limiters:` entry to the `default` entry of the
 scaling-policy ConfigMap — applied live, no restart. **Read the next section

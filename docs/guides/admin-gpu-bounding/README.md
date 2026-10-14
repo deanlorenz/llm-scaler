@@ -115,6 +115,7 @@ silently.
 | `WVA_LIMITER_TYPE` | `gpu-inventory` | `quota` |
 | `WVA_QUOTAS` | — (**required** by `quota`) | `'H200=8 A100=4'` |
 | `WVA_QUOTA_SCOPE` | `namespace` | `cluster` |
+| `WVA_QUOTA_KUEUE` | `false` | `true` |
 | `WVA_POLICY_NS` | `wva-policy` | `platform-policy` |
 | `WVA_LIMITER_TARGETS` | every controller found | `team-a team-b` |
 
@@ -137,6 +138,13 @@ not a defect, but it is the one to know before picking a number.
 ```bash
 make enable-physical-limiter WVA_LIMITER_TYPE=quota WVA_QUOTAS='H200=8'
 ```
+
+`WVA_QUOTA_KUEUE=true` takes the numbers from Kueue's ClusterQueues instead:
+each namespace gets the smaller of Kueue's grant and `WVA_QUOTAS`, so
+`WVA_QUOTAS='H200=-1'` lets Kueue decide. It also grants each target
+controller the cluster-scoped half of the Kueue read (ClusterQueues,
+ResourceFlavors). Experimental: [bound tenants by the quotas Kueue already
+holds](../../well-lit-paths/kueue-bounded-quotas/).
 
 ## Next
 

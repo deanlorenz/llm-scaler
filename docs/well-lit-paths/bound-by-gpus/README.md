@@ -84,7 +84,10 @@ restart. The installer writes that list for you: `WVA_LIMITER=quota` with
 `WVA_QUOTAS='H200=8'` for one install's own policy, `WVA_LIMITER_TYPE` with the
 same `WVA_QUOTAS` for the cluster policy every controller reads. The quota form
 **requires** a budget; an entry naming no accelerator is a budget of zero, not
-unlimited.
+unlimited. Where Kueue already holds the numbers, `WVA_QUOTA_KUEUE=true` reads
+them from its ClusterQueues instead of repeating them here:
+[bound tenants by the quotas Kueue already holds](../kueue-bounded-quotas/)
+(experimental).
 Schema, scopes and validation: [quota limiter](../../reference/quota-limiter.md).
 Where the policy lives and who may edit it:
 [the GPU limiter](../../reference/gpu-limiter.md).
