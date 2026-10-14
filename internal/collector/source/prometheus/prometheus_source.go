@@ -62,6 +62,11 @@ func (p *PrometheusSource) QueryList() *source.QueryList {
 	return p.registry
 }
 
+// Close stops the source's cache cleanup goroutine. Idempotent.
+func (p *PrometheusSource) Close() {
+	p.cache.Close()
+}
+
 // Refresh executes queries and updates the cache.
 // If spec.Queries is empty, refreshes all registered queries for this source.
 func (p *PrometheusSource) Refresh(ctx context.Context, spec source.RefreshSpec) (map[string]*source.MetricResult, error) {
