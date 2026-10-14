@@ -254,6 +254,86 @@ wva_warn_prometheus_tls() {
     log_warning "  See docs/reference/prometheus.md#tls-configuration."
 }
 
+# wva_prometheus_scraper_sa echoes "<namespace> <serviceaccount>" for the
+# Prometheus that scrapes the controller's /metrics, or nothing when it cannot
+# tell.
+#
+# config/base names kube-prometheus-stack-prometheus in
+# workload-variant-autoscaler-monitoring: the Prometheus this installer deploys,
+# in its default namespace. On a cluster with its own Prometheus -- or with ours
+# in another MONITORING_NAMESPACE -- that subject is an account that does not
+# exist, so the grant reaches nobody it was meant for and waits for whoever
+# creates that name. In order:
+#   PROMETHEUS_SA=<ns>/<name>  an explicit answer
+#   a Prometheus CR            its spec.serviceAccountName (operator default:
+#                              "default"); the one whose namespace PROMETHEUS_URL
+#                              names, else the first
+#   DEPLOY_PROMETHEUS=true     the kube-prometheus-stack this install deploys
+wva_prometheus_scraper_sa() {
+    if [ -n "${PROMETHEUS_SA:-}" ]; then
+        case "$PROMETHEUS_SA" in
+            */*) printf '%s %s\n' "${PROMETHEUS_SA%%/*}" "${PROMETHEUS_SA#*/}"; return 0 ;;
+            *) log_warning "PROMETHEUS_SA must be <namespace>/<serviceaccount>; ignoring '$PROMETHEUS_SA'" ;;
+        esac
+    fi
+    local ns sa first="" chosen=""
+    while read -r ns sa; do
+        [ -n "$ns" ] || continue
+        [ -n "$sa" ] || sa=default
+        [ -n "$first" ] || first="$ns $sa"
+        case "${PROMETHEUS_URL:-}" in
+            *".${ns}.svc"*) chosen="$ns $sa"; break ;;
+        esac
+    done < <(kubectl get prometheuses.monitoring.coreos.com -A \
+        -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.spec.serviceAccountName}{"\n"}{end}' 2>/dev/null || true)
+    if [ -n "${chosen:-$first}" ]; then
+        printf '%s\n' "${chosen:-$first}"
+        return 0
+    fi
+    if [ "${DEPLOY_PROMETHEUS:-true}" = "true" ]; then
+        printf '%s kube-prometheus-stack-prometheus\n' "${MONITORING_NAMESPACE:-workload-variant-autoscaler-monitoring}"
+    fi
+}
+
+# wva_append_metrics_reader_subject_patch appends to kustomization $1 a patch
+# that points the metrics-reader binding at $3 ("<namespace> <serviceaccount>"),
+# or removes the binding when $3 is empty: no grant beats a grant to an account
+# nobody chose. $2 is the install namespace. Must come AFTER
+# wva_append_crb_name_patches, and targets the name that leaves the binding with
+# -- a target naming the shipped name matches nothing once it is renamed, and
+# kustomize says nothing about a patch that matched nothing.
+wva_append_metrics_reader_subject_patch() {
+    local kustomization="$1" ns="$2" scraper="$3" name
+    name="wva-metrics-reader-rolebinding-$(wva_ns_suffix "$ns")"
+    grep -q '^patches:' "$kustomization" || printf 'patches:\n' >> "$kustomization"
+    if [ -n "$scraper" ]; then
+        cat >> "$kustomization" <<EOF
+- patch: |-
+    - op: replace
+      path: /subjects
+      value:
+      - kind: ServiceAccount
+        name: ${scraper#* }
+        namespace: ${scraper%% *}
+  target:
+    kind: ClusterRoleBinding
+    name: ${name}
+EOF
+    else
+        cat >> "$kustomization" <<EOF
+- patch: |-
+    \$patch: delete
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRoleBinding
+    metadata:
+      name: ${name}
+  target:
+    kind: ClusterRoleBinding
+    name: ${name}
+EOF
+    fi
+}
+
 deploy_wva_controller() {
     log_info "Deploying Workload-Variant-Autoscaler..."
     if [ -n "${WVA_IMAGE_DIGEST:-}" ]; then
@@ -355,6 +435,26 @@ EOF
     # binding still names the same ServiceAccount, so nothing is lost while it
     # lingers, and `undeploy` removes both.
     wva_append_crb_name_patches "$tmp_overlay/kustomization.yaml" "$WVA_NS"
+
+    # Grant the Prometheus that will actually scrape the controller, not the one
+    # the base names. See wva_prometheus_scraper_sa.
+    if [ "${ENVIRONMENT:-}" != "openshift" ]; then
+        local scraper
+        scraper="$(wva_prometheus_scraper_sa)"
+        wva_append_metrics_reader_subject_patch "$tmp_overlay/kustomization.yaml" "$WVA_NS" "$scraper"
+        if [ -n "$scraper" ]; then
+            log_info "Controller /metrics readable by ServiceAccount ${scraper#* } in ${scraper%% *}"
+        else
+            log_warning "Could not tell which ServiceAccount your Prometheus runs as, so no Prometheus is granted the controller's /metrics."
+            log_warning "  Pass PROMETHEUS_SA=<namespace>/<serviceaccount> to grant it, or bind ClusterRole wva-metrics-reader-$(wva_ns_suffix "$WVA_NS") yourself."
+            # An earlier install may have left the binding with the shipped
+            # subject; it names an account that does not exist here.
+            case "${WVA_APPLY_SCOPE:-all}" in
+                all|prereqs) kubectl delete clusterrolebinding "wva-metrics-reader-rolebinding-$(wva_ns_suffix "$WVA_NS")" \
+                    --ignore-not-found >/dev/null 2>&1 || true ;;
+            esac
+        fi
+    fi
 
     # Appended here, not in the heredoc above: wva_append_crb_name_patches writes
     # its own `patches:` key, and a second one is a duplicate mapping key that

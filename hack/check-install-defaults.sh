@@ -39,14 +39,14 @@ source "$WORK/cli.sh"
 source "$WORK/infra_wva.sh"
 
 for fn in wva_split_image_ref wva_image_pull_policy wva_warn_floating_image \
-          wva_warn_prometheus_tls; do
+          wva_warn_prometheus_tls wva_prometheus_scraper_sa; do
     declare -F "$fn" >/dev/null || {
         printf 'FATAL: %s is not defined after sourcing the library.\n' "$fn" >&2
         exit 1
     }
 done
 
-EXPECT_CASES=21
+EXPECT_CASES=27
 RAN=0
 FAILED=0
 
@@ -152,6 +152,37 @@ check 'tls: verification on is quiet' '0' \
     "$(tls_warned "$(printf '%s\n' "$SHIPPED_CFG" | yq '.PROMETHEUS_TLS_INSECURE_SKIP_VERIFY = "false"')")"
 check 'tls: plain HTTP is not this warning' '0' \
     "$(tls_warned "$(printf 'PROMETHEUS_BASE_URL: "http://p:9090"\nPROMETHEUS_TLS_INSECURE_SKIP_VERIFY: "true"\n')")"
+
+# ----------------------------------------------------------------------------
+# Who may read the controller's /metrics: the Prometheus actually here
+# ----------------------------------------------------------------------------
+# A stub kubectl answering the Prometheus CR listing with $PROM_CRS
+# ("<namespace> <serviceAccountName>" per line).
+PROM_CRS=''
+kubectl() { [ -z "$PROM_CRS" ] || printf '%s\n' "$PROM_CRS"; }
+scraper() {
+    (
+        PROM_CRS="$1" PROMETHEUS_URL="$2" DEPLOY_PROMETHEUS="$3" PROMETHEUS_SA="${4:-}"
+        MONITORING_NAMESPACE=our-mon
+        wva_prometheus_scraper_sa 2>/dev/null
+    )
+}
+
+check 'scraper: PROMETHEUS_SA wins' 'ns1 sa1' \
+    "$(scraper 'mon prom' '' true ns1/sa1)"
+check 'scraper: the CR the URL names' 'obs obs-prom' \
+    "$(scraper "$(printf 'mon prom\nobs obs-prom')" 'https://prometheus-operated.obs.svc.cluster.local:9090' false)"
+check 'scraper: otherwise the first CR' 'mon prom' \
+    "$(scraper "$(printf 'mon prom\nobs obs-prom')" '' false)"
+check 'scraper: a CR with no serviceAccountName runs as default' 'mon default' \
+    "$(scraper 'mon ' '' false)"
+# The bug: the base names this account whatever the cluster has.
+check 'scraper: no CR, DEPLOY_PROMETHEUS -> ours, in MONITORING_NAMESPACE' \
+    'our-mon kube-prometheus-stack-prometheus' \
+    "$(scraper '' '' true)"
+check 'scraper: no CR and none deployed -> nobody' '' \
+    "$(scraper '' 'https://prom.example:9090' false)"
+unset -f kubectl
 
 # ----------------------------------------------------------------------------
 

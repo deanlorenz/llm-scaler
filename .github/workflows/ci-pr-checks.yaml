@@ -186,6 +186,18 @@ jobs:
       - name: Build namespace-scoped kubernetes overlay
         run: bin/kustomize build config/overlays/namespace-scoped/kubernetes > /dev/null
 
+      # The builds above prove each overlay renders; this asserts what it
+      # renders. Same yq pin and retries as deploy-scripts-check.
+      - name: Install yq
+        run: |
+          sudo curl -fsSL --retry 6 --retry-delay 10 --retry-all-errors -o /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          yq --version
+
+      - name: Check the rendered manifests
+        run: KUSTOMIZE=bin/kustomize bash hack/check-rendered-manifests.sh
+
   # E2E smoke tests - run automatically on every PR with code changes.
   # Skip if PR only contains docs/metadata changes.
   e2e-tests-smoke:
