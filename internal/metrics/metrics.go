@@ -67,6 +67,7 @@ var (
 	gpuDiscoveryUp                      *prometheus.GaugeVec
 	sfzQueueFallbackActive              *prometheus.GaugeVec
 	nodeAccessDenied                    *prometheus.GaugeVec
+	policyNamespaceUnverified           *prometheus.GaugeVec
 	enforcerModificationsTotal          *prometheus.CounterVec
 	optimizerActive                     *prometheus.GaugeVec
 	configInfoGauge                     *prometheus.GaugeVec
@@ -477,6 +478,18 @@ func InitMetrics(registry prometheus.Registerer) error {
 		nodeAccessDeniedLabels,
 	)
 
+	policyNamespaceUnverifiedLabels := []string{}
+	if controllerInstance != "" {
+		policyNamespaceUnverifiedLabels = append(policyNamespaceUnverifiedLabels, constants.LabelControllerInstance)
+	}
+	policyNamespaceUnverified = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: constants.WVAPolicyNamespaceUnverified,
+			Help: "1 when limiters and quotas fell back to the controller's own ConfigMap because reading the Namespaces that decide the policy source was Forbidden",
+		},
+		policyNamespaceUnverifiedLabels,
+	)
+
 	sfzQueueFallbackLabels := []string{"pool"}
 	if controllerInstance != "" {
 		sfzQueueFallbackLabels = append(sfzQueueFallbackLabels, constants.LabelControllerInstance)
@@ -666,6 +679,9 @@ func InitMetrics(registry prometheus.Registerer) error {
 	}
 	if err := registry.Register(nodeAccessDenied); err != nil {
 		return fmt.Errorf("failed to register nodeAccessDenied metric: %w", err)
+	}
+	if err := registry.Register(policyNamespaceUnverified); err != nil {
+		return fmt.Errorf("failed to register policyNamespaceUnverified metric: %w", err)
 	}
 	if err := registry.Register(sfzQueueFallbackActive); err != nil {
 		return fmt.Errorf("failed to register sfzQueueFallbackActive metric: %w", err)
@@ -1226,6 +1242,25 @@ func SetNodeAccessDenied(denied bool) {
 		value = 1.0
 	}
 	nodeAccessDenied.With(labels).Set(value)
+}
+
+// SetPolicyNamespaceUnverified records whether the policy-namespace resolution
+// fell back to the controller's own ConfigMap because a Namespace read was
+// Forbidden. The resolution runs once, before InitMetrics, so the caller
+// publishes its outcome after registration; a call before then is a no-op.
+func SetPolicyNamespaceUnverified(unverified bool) {
+	if policyNamespaceUnverified == nil {
+		return
+	}
+	labels := prometheus.Labels{}
+	if controllerInstance != "" {
+		labels[constants.LabelControllerInstance] = controllerInstance
+	}
+	value := 0.0
+	if unverified {
+		value = 1.0
+	}
+	policyNamespaceUnverified.With(labels).Set(value)
 }
 
 // SetScaleFromZeroQueueFallbackActive records whether scale-from-zero is reading

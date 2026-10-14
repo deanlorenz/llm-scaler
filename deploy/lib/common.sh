@@ -226,6 +226,8 @@ WVA_SHARED_CLUSTER_ROLE_BINDINGS=(
     wva-node-reader-rolebinding
     # Same story for the Kueue reads a kueue-enabled quota entry needs.
     wva-kueue-reader-rolebinding
+    # And for the Namespace get that finds the cluster policy namespace.
+    wva-policy-namespace-reader-rolebinding
 )
 
 # WVA_OWNED_CLUSTER_ROLES are the ClusterRoles this project defines, mapped to the
@@ -254,6 +256,7 @@ WVA_OWNED_CLUSTER_ROLES=(
     # pointing at a name nothing creates.
     "wva-node-reader-role:wva-node-reader-rolebinding"
     "wva-kueue-reader-role:wva-kueue-reader-rolebinding"
+    "wva-policy-namespace-reader-role:wva-policy-namespace-reader-rolebinding"
 )
 
 # wva_ns_suffix echoes the per-namespace suffix appended to those names.

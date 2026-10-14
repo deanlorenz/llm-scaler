@@ -980,6 +980,9 @@ func main() {
 		setupLog.Error(err, "failed to initialize metrics")
 		os.Exit(1)
 	}
+	// The policy namespace was resolved before the registry existed; publish the
+	// outcome now so a fallback forced by a Forbidden Namespace read is alertable.
+	metrics.SetPolicyNamespaceUnverified(cfg.PolicySource() == config.PolicySourceLocalUnverified)
 
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "problem running manager")

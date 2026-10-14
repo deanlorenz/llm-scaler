@@ -651,6 +651,12 @@ With the scaling manager metrics, the value for the label `namespace` is the sca
 - **Labels**: optional `controller_instance`
 - **Use Case**: the combination that fails with no other symptom. A GPU-aware limiter allocates out of per-accelerator pools, so without nodes every variant is charged to no pool, receives no budget, and stops scaling up — and an unresolved accelerator is otherwise a normal state, so nothing else complains. Alert on `wva_node_access_denied == 1`; the shipped `WVANodeAccessDenied` rule does.
 
+### `wva_policy_namespace_unverified`
+- **Type**: Gauge
+- **Description**: `1` when the controller took limiters and quotas from its own ConfigMap because reading the Namespaces that decide the policy source (`wva-policy`, or the `wva.llmd.ai/policy-namespace` label on the managed namespace) was Forbidden; `0` otherwise. Set once at startup.
+- **Labels**: optional `controller_instance`
+- **Use Case**: a `1` means a cluster policy may be published that this controller cannot see, so it may run under a weaker bound than an admin believes. Grant the read with `NAMESPACE=<ns> make setup-prereqs` or `make enable-physical-limiter`. See [GPU limiter](gpu-limiter.md#what-the-controller-does-with-that).
+
 ### `wva_scale_from_zero_queue_fallback_active`
 - **Type**: Gauge
 - **Description**: `1` while the scale-from-zero engine is reading the EPP flow-control queue from Prometheus because the **direct EPP scrape is failing**, `0` while the direct scrape works. The scaling manager reads the wake signal by scraping the EPP pod directly (pod IP, EPP metrics port, projected bearer token) — the one metric path that does not go through Prometheus — so it fails independently of everything else. The fallback keeps models waking; it does not make the direct path healthy.
