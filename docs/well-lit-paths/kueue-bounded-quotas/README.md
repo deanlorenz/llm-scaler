@@ -1,5 +1,26 @@
 # Bound tenants by the quotas Kueue already holds
 
+## Start here
+
+- **Status:** Experimental: no run yet against a live Kueue controller (below).
+- **You need:**
+  - everything [the tenant-quotas path](../tenant-gpu-quotas/#start-here) needs, including its Namespace-read note for the cluster policy on Kubernetes.
+  - Kueue's `ClusterQueue`, `LocalQueue` and `ResourceFlavor` served, with LocalQueues in the managed namespaces.
+  - for a namespace-scoped install, the `kueue-reader` prerequisite that `make setup-prereqs` creates (cluster admin; [What it needs](#what-it-needs)), including `get` on the managed Namespace. A controller set up before that read existed needs the admin to re-run it once ([upgrading](../../reference/upgrade-and-uninstall.md#upgrading-to-this-release)); until then the tenant's `make deploy-wva` refuses with this block on.
+  - ClusterQueues whose `namespaceSelector` admits only the namespaces meant to have them: the reader honours the selector as Kueue does, so a queue with `{}`, or one matching a label a tenant can set, grants its quota to any namespace that points a LocalQueue at it ([why](#what-it-is)).
+  - **Not enforcement:** the limiter is advisory; back each tenant namespace with a GPU `ResourceQuota` ([bound at admission](../../guides/admin-cluster-setup/README.md#bound-the-namespaces-gpus-at-admission)).
+- **Do this** (no guide covers this path yet; the steps are on this page):
+  1. Check accelerators resolve: `kubectl get events -n <ns> --field-selector reason=AcceleratorNotResolved` (namespace owner; a cluster admin can use `-A`). No events is the healthy answer.
+  2. Declare the quota once, with the types at `-1` so Kueue sets the numbers ([Declaring it](#declaring-it)), one of:
+     - Namespace owner (advisory; you can edit it): `WVA_LIMITER=quota WVA_QUOTAS='<accelerator>=-1' WVA_QUOTA_KUEUE=true make deploy-wva`.
+     - Cluster admin (a budget the tenant cannot edit): `make enable-physical-limiter WVA_LIMITER_TYPE=quota WVA_QUOTAS='<accelerator>=-1' WVA_QUOTA_KUEUE=true`.
+- **Check it works:** `quota entry bounded by external caps` in the controller log, carrying the effective caps ([Verifying it](#verifying-it)). The two failure lines: `external quota source unreadable` is missing `kueue-reader` RBAC; `external quota source grants no GPUs` means no LocalQueue in the namespace reaches a ClusterQueue with a GPU resource.
+- **Undo** (no guide step). Left at `-1` without Kueue, the entry is no cap at all, so replace it rather than only dropping the flag:
+  - One install (namespace owner): re-run `make deploy-wva` with `WVA_LIMITER=quota`, a finite `WVA_QUOTAS` and no `WVA_QUOTA_KUEUE`, or with no `WVA_LIMITER` to declare no limiter.
+  - Cluster policy (cluster admin): re-run `make enable-physical-limiter WVA_LIMITER_TYPE=quota` with a finite `WVA_QUOTAS` and no `WVA_QUOTA_KUEUE`, or `make disable-physical-limiter`.
+
+## What it is
+
 > **Experimental.** The merge rules, the reader and the installer knob are unit
 > tested, and an end-to-end suite proves the read-and-merge chain against a real
 > API server, up to the effective entry the limiter logs — but that suite

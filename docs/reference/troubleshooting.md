@@ -193,7 +193,7 @@ wva_model_scaling_blocked{model_name="<model>"}
 | reason | fix |
 | --- | --- |
 | `variant-floor` | a variant still has `minReplicaCount > 0`; set every variant to 0 |
-| `policy-forbids-zero` | the model's policy tier has `scaleToZero` off; turn it on, or accept that it stays up |
+| `policy-forbids-zero` | the model's resolved policy has `scaleToZero` off; turn it on on the `default` entry (or its `defaultPolicy` tier) or the model's per-model entry, or accept that it stays up |
 | `activation-retention` | just woken and held for its retention period; clears by itself |
 | `engine-unsupported` | the model runs both vLLM and SGLang; run one engine per model |
 

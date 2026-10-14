@@ -1007,7 +1007,7 @@ Every reason the controller sets:
 | reason | set by | means | do |
 | --- | --- | --- | --- |
 | `variant-floor` | scale-to-zero policy | scale-to-zero is on, but a variant has `minReplicaCount > 0`, so the model never parks | set every variant's `minReplicaCount` to 0, or turn scale-to-zero off for the model. Alert: `WVAModelWillNotScaleToZero` |
-| `policy-forbids-zero` | scale-to-zero policy | every variant allows 0, but the model's resolved policy disables scale-to-zero | enable `scaleToZero` for the model's policy tier, or raise `minReplicaCount`. Alert: `WVAModelWillNotScaleToZero` |
+| `policy-forbids-zero` | scale-to-zero policy | every variant allows 0, but the model's resolved policy disables scale-to-zero | enable `scaleToZero` on the `default` entry (or its `defaultPolicy` tier) or the model's per-model entry, or raise `minReplicaCount`. Alert: `WVAModelWillNotScaleToZero` |
 | `engine-unsupported` | scale-to-zero policy | the model runs both vLLM and SGLang, so no single request counter measures idleness; it is not parked | run one engine per model. Not alerted on by design |
 | `activation-retention` | scale-to-zero policy | just woken from zero and held for its retention period | nothing; clears by itself |
 | `no-wake-signal` | scale-from-zero | EPP exports no flow-control queue metric at all, so a parked model cannot wake | enable the EPP `flowControl` feature gate and restart the EPP. Alert: `WVAModelHasNoWakeSignal` |

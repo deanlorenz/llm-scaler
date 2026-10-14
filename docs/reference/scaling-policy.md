@@ -869,6 +869,33 @@ A namespace gets one when the controller reads a ConfigMap of that name there:
   read, no label needed (`internal/controller/predicates.go`). See
   [the security model](security-model.md) for why this is by design.
 
+### Re-running the installer resets the default entry
+
+`make deploy-wva` re-applies `wva-scaling-policy-config` in the controller's
+namespace from the shipped manifest on every run, upgrades included. The
+`default` entry comes back exactly as shipped — thresholds and analyzers, and
+**no** `scaleToZero`, `defaultPolicy`, `optimizer:` block or `limiters:` — while
+every other key (named tiers, per-model entries) is saved before the apply and
+restored after it (`deploy/lib/infra_wva.sh`). The installer then writes a
+limiter back into `default` only when `WVA_LIMITER` (and, for a quota,
+`WVA_QUOTAS`) is passed on that run.
+
+So anything you changed in `default` by hand is gone after a re-run:
+
+| you set, in `default` | after a re-run |
+| --- | --- |
+| `scaleToZero` | repeat it, or put it on a per-model entry (an entry whose body names the model), which is kept; a named tier is not read for parking |
+| `defaultPolicy` | re-apply it; the tiers it names are kept |
+| `optimizer:` (utilization share) | removed: run `make utilization-share-shadow`, then `make utilization-share-activate` again |
+| `limiters:` | kept only if `WVA_LIMITER`/`WVA_QUOTAS` are passed again; a hand-written entry has to be re-added |
+
+This touches only the controller's own ConfigMap. A policy published in
+`wva-policy` by `make enable-physical-limiter` is not re-applied — but that
+command also writes into the own ConfigMap of each admin-owned controller, and
+a re-run of `make deploy-wva` for one of those controllers resets it there.
+A namespace-local map in a model namespace other than the controller's is not
+touched.
+
 ### Parameters
 
 | Parameter | Type | Description | Recommended |
@@ -1581,6 +1608,10 @@ triggers:
 
 `defaultPolicy` is read from the `default` entry only: a fallback chosen by a tier
 or by a per-model entry would be that entry choosing for everyone but itself.
+
+Parking is the exception: `scaleToZero` is resolved without the variant's tier
+(`ResolveScalingPolicy`, called from the steady-state engine), so only `default`,
+the tier `default.defaultPolicy` names, and the per-model override decide it.
 
 Two failure modes are resolved deterministically rather than silently, and both
 are reported:

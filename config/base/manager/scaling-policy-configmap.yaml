@@ -109,7 +109,9 @@ data:
   # Resolution, most specific winning:
   #   default entry → named policy tier → per-model override
   #
-  # Policies may set thresholds, priority, scaleToZero and analyzer selection.
+  # Policies may set thresholds, priority and analyzer selection. scaleToZero is
+  # NOT read from a tier a variant names: parking reads the `default` entry (and
+  # the tier its defaultPolicy names) or a per-model override.
   # They may NOT set limiters or quotas — those are cluster-scope and read only
   # from the `default` entry, so a tenant cannot grant themselves capacity by
   # naming a policy.
@@ -122,12 +124,10 @@ data:
   #   scaleUpThreshold: 0.60      # scale out sooner; latency over cost
   #   scaleDownBoundary: 0.45
   #   priority: 2.0
-  #   scaleToZero: { enabled: false }
   #
   # batch: |
   #   scaleUpThreshold: 0.95      # pack hard; throughput over latency
   #   priority: 0.5
-  #   scaleToZero: { enabled: true, retentionPeriod: 2m }
   #
   # ...selected from the workload's ScaledObject:
   #

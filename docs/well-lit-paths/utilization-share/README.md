@@ -1,5 +1,22 @@
 # Share one GPU quota between models
 
+## Start here
+
+- **Status:** Experimental: one run per configuration, 1 GPU per Pod (below).
+- **You need:**
+  - two or more models scaled by the scaling manager under one limiter ([What it needs](#what-it-needs)): a quota on the controller's own install (namespace owner; tenant-editable), or the physical GPU inventory published as cluster policy (cluster admin).
+  - model servers that drain on termination; `kubectl`, `jq`, `yq` and `make` in a checkout of this repository.
+  - **Not enforcement:** the limiter is advisory; back each tenant namespace with a GPU `ResourceQuota` ([bound at admission](../../guides/admin-cluster-setup/README.md#bound-the-namespaces-gpus-at-admission)).
+- **Do this** ([Turn on the utilization-share optimizer, safely](../../guides/utilization-share/)). Steps 2 and 3 are run by whoever owns the policy: the namespace owner for an own-install quota, the cluster admin for a policy in `wva-policy`.
+  1. (namespace owner) Install with a quota: [install in a namespace](../../guides/install-in-namespace/) with `WVA_LIMITER=quota WVA_QUOTAS='<accelerator>=<n>'` ([configuration](../../reference/configuration.md#core-configuration)), or stand up the guide's [two-model trial](../../guides/utilization-share/README.md#prerequisites).
+  2. `make utilization-share-check`: is there a budget to share ([Prerequisites](../../guides/utilization-share/README.md#prerequisites)).
+  3. `make utilization-share-shadow`, read what it would move, then `make utilization-share-activate` ([Installation](../../guides/utilization-share/README.md#installation-instructions)).
+  The `optimizer:` block lives in the policy's `default` entry, and re-running `make deploy-wva` resets that entry in the controller's own ConfigMap to the shipped one, without the block and without the limiter unless `WVA_LIMITER`/`WVA_QUOTAS` are passed again. After an upgrade, repeat steps 2 and 3; shadow also clears transfer marks the active optimizer left ([why](../../reference/scaling-policy.md#re-running-the-installer-resets-the-default-entry)).
+- **Check it works:** `make utilization-share-status`; `wva_utilization_share_mode` reads `active`, and transfers end `done` ([Verification](../../guides/utilization-share/README.md#verification)).
+- **Undo:** `make utilization-share-off`: back through shadow, marks cleared, block removed ([Cleanup](../../guides/utilization-share/README.md#cleanup)). If you stood up the guide's two-model trial, also `make benchmark-two-model-teardown`: it holds GPUs until you do.
+
+## What it is
+
 > **Experimental.** Measured on H200s at 1 GPU per Pod, one run per
 > configuration ([what was measured](measured.md)): two aggregated models, and
 > two P/D-disaggregated models whose four roles share one quota. The P/D run in
@@ -17,15 +34,6 @@ the falling model's whole scale-down window. The utilization-share optimizer
 shares the quota on purpose: each model gets what it needs, the rest is spread
 as headroom by weight, and GPUs move from one model to another when the shares
 drift ([how](#how-it-shares-the-quota)).
-
-What it buys: on the most recent aggregated run (2026-10-12), the model that
-burst first was served at once — median time to first token 0.07 s, against
-25.6 s with the same fleet planned but not moved — because GPUs were already
-waiting for it. The model that burst second was no worse off: the same p95
-(287 s), and a median of 144 s against 215 s. That run's GPU cost was not
-measured. On the P/D run, the output-heavy burst was served at p95 95 ms
-against 42 s, and the prompt-heavy burst was overloaded in every arm, for
-36 % more GPU-seconds.
 
 **Use it when** two or more models scale under one quota, their demand moves
 between them over hours rather than minutes, and the GPUs are paid for whether
@@ -53,6 +61,15 @@ headroom costs nothing extra.
   a pod the scaling manager did not place (`release-taken`).
 - **A model runs on more than one accelerator type.** It is never planned; it
   stays on today's optimizer.
+
+What it buys: on the most recent aggregated run (2026-10-12), the model that
+burst first was served at once — median time to first token 0.07 s, against
+25.6 s with the same fleet planned but not moved — because GPUs were already
+waiting for it. The model that burst second was no worse off: the same p95
+(287 s), and a median of 144 s against 215 s. That run's GPU cost was not
+measured. On the P/D run, the output-heavy burst was served at p95 95 ms
+against 42 s, and the prompt-heavy burst was overloaded in every arm, for
+36 % more GPU-seconds.
 
 ## What it needs
 
