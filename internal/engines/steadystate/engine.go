@@ -184,6 +184,10 @@ type Engine struct {
 	// policy is in shadow mode; see evaluateUtilizationShare.
 	utilizationShare utilizationShareState
 
+	// learnedState is the learned-state snapshot store's between-cycle state
+	// (learned_state_store.go).
+	learnedState learnedStateStoreState
+
 	// lastBlockedModels records, keyed identically, every model this engine has
 	// published wva_model_scaling_blocked reasons for. Same reason as
 	// lastAnalyzerSeries — a GaugeVec cannot enumerate its own children — but the
@@ -1196,6 +1200,11 @@ func (e *Engine) optimizeV2(
 	e.pruneAnalyzerSeries(activeKeys)
 	e.pruneBlockedModels(activeKeys)
 	e.pruneLastDecided(e.stickyAge(), time.Now())
+	// The learned-state snapshot, restored once before anything is learned or
+	// swept, and written after the cycle has learned what it will.
+	e.restoreLearnedState(ctx, time.Now())
+	defer func() { e.writeLearnedState(ctx, time.Now()) }()
+
 	// Before the sweep, which would otherwise judge a variant on a stamp from
 	// before it parked: Analyze stamps too, but only after this point.
 	e.notePresentVariants(ctx, modelGroups)

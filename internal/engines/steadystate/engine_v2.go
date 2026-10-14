@@ -453,6 +453,7 @@ func (e *Engine) evictStaleLearnedState(ctx context.Context) {
 			"k2History", history.K2History,
 			"muWindows", history.MuWindows,
 			"k2Borrows", history.K2Borrows,
+			"pendingRestores", history.PendingRestores,
 			"itlWindows", history.ITLWindows,
 			"itlBaselines", history.ITLBaselines,
 			"startEstimates", history.StartEstimates,

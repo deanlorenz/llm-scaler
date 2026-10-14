@@ -11,6 +11,9 @@ resources:
 # Controller status: one ConfigMap in the controller's namespace.
 - controller-status-role.yaml
 - controller-status-rolebinding.yaml
+# Learned state across a restart: one ConfigMap in the controller's namespace.
+- learned-state-role.yaml
+- learned-state-rolebinding.yaml
 # Metrics endpoint authn/authz. Comment out to disable metrics endpoint protection.
 # More info: https://book.kubebuilder.io/reference/metrics.html
 - metrics-auth-clusterrole.yaml

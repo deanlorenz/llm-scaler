@@ -161,6 +161,14 @@ EOF
         log_warning "The utilization-share need history ConfigMap $history_cm in $WVA_NS was not removed:"
         printf '%s\n' "$history_err" | sed 's/^/    /'
     fi
+    # The learned-state snapshot (LEARNED_STATE_SNAPSHOT), for the same reason:
+    # a reinstall would restore capacities measured before the uninstall.
+    local learned_cm=wva-learned-state learned_err
+    learned_err="$(kubectl delete configmap "$learned_cm" -n "$WVA_NS" --ignore-not-found 2>&1 >/dev/null)" && learned_err=""
+    if [ -n "$learned_err" ]; then
+        log_warning "The learned-state ConfigMap $learned_cm in $WVA_NS was not removed:"
+        printf '%s\n' "$learned_err" | sed 's/^/    /'
+    fi
 
     # The controller-status ConfigMap is written by the controller too. Left
     # behind, it would report a policy version and modes no controller is

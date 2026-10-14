@@ -79,6 +79,10 @@ type infrastructureConfig struct {
 	learnedEpisodeGap      time.Duration
 	learnedVariantTimeout  time.Duration
 	learnedBucketRetention time.Duration
+	// learnedStateSnapshot carries what the saturation analyzer learned across
+	// a controller restart, in a ConfigMap (LEARNED_STATE_SNAPSHOT). Off by
+	// default; see docs/proposals/learned-state-snapshot.md.
+	learnedStateSnapshot bool
 }
 
 // tlsConfig holds TLS certificate paths
@@ -312,6 +316,14 @@ func (c *Config) LearnedStateHorizons() (episodeGap, variantTimeout, bucketReten
 	return c.infrastructure.learnedEpisodeGap,
 		c.infrastructure.learnedVariantTimeout,
 		c.infrastructure.learnedBucketRetention
+}
+
+// LearnedStateSnapshotEnabled reports whether learned state is carried across a
+// controller restart in a ConfigMap (LEARNED_STATE_SNAPSHOT). Thread-safe.
+func (c *Config) LearnedStateSnapshotEnabled() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.infrastructure.learnedStateSnapshot
 }
 
 // ============================================================================
@@ -618,6 +630,14 @@ func SetLearnedStateHorizonsForTest(c *Config, episodeGap, variantTimeout, bucke
 	c.infrastructure.learnedEpisodeGap = episodeGap
 	c.infrastructure.learnedVariantTimeout = variantTimeout
 	c.infrastructure.learnedBucketRetention = bucketRetention
+}
+
+// SetLearnedStateSnapshotForTest turns the learned-state snapshot on or off on a
+// test Config. Not for production use.
+func SetLearnedStateSnapshotForTest(c *Config, on bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.infrastructure.learnedStateSnapshot = on
 }
 
 // --- Bootstrap State Management ---

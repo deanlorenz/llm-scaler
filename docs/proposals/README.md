@@ -145,6 +145,13 @@ last; it is the unit change that makes the other two land.
 - **[Sizing against in-flight capacity](sizing-against-in-flight-capacity.md)**
   — count replicas already starting, and when they will serve, before ordering
   more or releasing one.
+- **[Learned state across a restart: a snapshot](learned-state-snapshot.md)**
+  — a restart forgets every k2, throughput window, ITL baseline and start
+  estimate, and a forgotten k2 falls back to a higher capacity, so fewer
+  replicas. Stores them in one ConfigMap, each entry with its own clocks so a
+  restore never makes a figure younger; leader-only writes, deletion flushes,
+  off by default. Supersedes the Prometheus refit in #116, which cannot
+  attribute old readings to a variant now that learned state is per variant.
 
 ## Product and lifecycle
 
