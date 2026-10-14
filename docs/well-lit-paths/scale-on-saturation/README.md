@@ -68,6 +68,52 @@ The log lines' fields are described in [the cycle log](../../reference/cycle-log
 `exported_namespace` is the workload's namespace and plain `namespace` is the
 controller's, which is [why alerts group by the former](../../reference/monitoring.md).
 
+## Is my model scaled right?
+
+Four checks, cheapest first. `<modelID>` is the trigger's `modelID`, which must
+equal the engine's `--served-model-name`.
+
+1. **The engine series exist for this model.** Everything else depends on it:
+
+   ```promql
+   count by (model_name) (vllm:kv_cache_usage_perc{model_name="<modelID>"})
+   # SGLang: count by (model_name) (sglang:token_usage{model_name="<modelID>"})
+   ```
+
+   An empty result means the scaling manager is blind to this model. It says so
+   with a `MetricsUnavailable` Warning Event on the ScaledObject
+   (`kubectl get events -n <ns> --field-selector reason=MetricsUnavailable`).
+   Fix the scrape (ServiceMonitor/PodMonitor reaching the engine's `/metrics`)
+   or the name (`--served-model-name` vs `modelID`) before tuning anything.
+2. **Utilization sits inside the band.** In the `analyzer-result` line compare
+   `util` with `scaleUpThreshold` and `scaleDownBoundary` (the same line carries
+   both). Under steady load `util` should settle between them: above
+   `scaleUpThreshold` the model should be growing, below `scaleDownBoundary`
+   shrinking. A `util` stuck above the threshold while replicas do not grow
+   points at a ceiling (`maxReplicaCount`, a limiter), not at the analyzer.
+3. **The target matches what runs.**
+
+   ```promql
+   wva_desired_replicas{exported_namespace="<ns>", variant_name="<scaledobject>"}
+     -
+   wva_current_replicas{exported_namespace="<ns>", variant_name="<scaledobject>"}
+   ```
+
+   A gap that persists beyond the HPA's scale-down window (300 s as generated)
+   or a pod's start time means KEDA/HPA is not acting: check
+   `kubectl get scaledobject,hpa -n <ns>` for `READY`/`ACTIVE` and the HPA's
+   conditions.
+4. **Latency is what you wanted.** TTFT from the engine's own histogram:
+
+   ```promql
+   histogram_quantile(0.9, sum by (le) (rate(
+     vllm:time_to_first_token_seconds_bucket{model_name="<modelID>"}[5m])))
+   ```
+
+   TTFT too high with `util` inside the band means the band is too high for
+   this model: move it to a lower [tier](../workload-classes/#choosing-a-tier).
+   TTFT well under target with many replicas means the band can go up.
+
 ## What it costs
 
 No accelerators. The controller is a small deployment, and the recurring cost is

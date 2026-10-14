@@ -10,6 +10,27 @@ the rest of the start path is a checklist, below.
 > Part of the [deployment guide](../../deploy/). For what to watch once it is
 > running, see [Watching what the scaling manager decides](monitoring.md).
 
+## What your pod must carry
+
+Check these before registering a model. `<ns>` is the model's namespace,
+`<modelID>` the `modelID` you put on the ScaledObject trigger
+([trigger reference](scaledobject-trigger.md)). On a LeaderWorkerSet read the
+**leader** template (`.spec.leaderWorkerTemplate.leaderTemplate`) where a
+Deployment has `.spec.template`.
+
+| # | The pod must carry | Without it | Check |
+| --- | --- | --- | --- |
+| 1 | `--served-model-name` equal to the trigger's `modelID` (else `--model`) | engine series are filtered on `model_name`; a mismatch reads as no metrics | `kubectl get deploy -n <ns> <name> -o jsonpath='{.spec.template.spec.containers[*].args}'` |
+| 2 | Pod-template label `llm-d.ai/inferenceServing: "true"`, or `llm-d.ai/role: prefill`/`decode` | `make scaledobjects-plan` does not list the workload (it can still be registered by hand) | `kubectl get deploy -n <ns> -o custom-columns='NAME:.metadata.name,SERVING:.spec.template.metadata.labels.llm-d\.ai/inferenceServing,ROLE:.spec.template.metadata.labels.llm-d\.ai/role'` |
+| 3 | On P/D: `llm-d.ai/role: prefill` or `decode` on each role's template; anything else is `both` | the role is scaled as a whole-request server ([P/D path](../well-lit-paths/pd-disaggregation/)) | same command as row 2 |
+| 4 | A GPU-product `nodeSelector` or `nodeAffinity` | `AcceleratorNotResolved` Warning; a GPU limiter charges its GPUs to no pool and it cannot grow | `kubectl get events -n <ns> --field-selector reason=AcceleratorNotResolved` |
+| 5 | Engine `/metrics` scraped by Prometheus (vLLM always; SGLang only with `--enable-metrics`) | `MetricsUnavailable` Warning on the ScaledObject; no scaling on load | PromQL `count(vllm:kv_cache_usage_perc{model_name="<modelID>"})` (SGLang: `sglang:token_usage`) is non-empty |
+| 6 | The EPP's `flowControl` feature gate, parsed by the running EPP | no router-queue demand signal; a model at zero never wakes | PromQL `count(llm_d_epp_flow_control_queue_size) or count(inference_extension_flow_control_queue_size)` is non-empty |
+| 7 | `preStop` hook on the engine container and `terminationGracePeriodSeconds` above it | every scale-down cuts in-flight streams | `make workload-patch NAMESPACE=<ns>` names workloads without a drain ([below](#draining-before-scale-down)) |
+| 8 | Weights read from a mounted model cache | every scale-up is a download | `make workload-patch NAMESPACE=<ns>` reports `RE-DOWNLOADS ITS WEIGHTS` ([below](#weights-and-the-model-cache)) |
+| 9 | Fast start: image held on the GPU nodes, engine cache on a volume, short probe period | each scale-up pays the pull and the compile | `make prepull-status NAMESPACE=<ns>`; `make workload-patch` reports `COMPILES FROM NOTHING` ([below](#the-rest-of-the-start-path)) |
+| 10 | A ScaledObject whose trigger is `external-push` with this `modelID` | nothing scales it — the controller has no watch of its own | `kubectl get scaledobject -n <ns> -o custom-columns='NAME:.metadata.name,MODEL:.spec.triggers[0].metadata.modelID,READY:.status.conditions[0].status'` |
+
 ## Weights and the model cache
 
 A replica that has to fetch its weights before it can serve turns every scale-up
@@ -574,6 +595,75 @@ ScaledObject is the moment scale-down becomes possible:
 note: Scale-down will cut in-flight requests: vllm declares no preStop hook,
       and terminationGracePeriodSeconds is 30. ...
 ```
+
+### In llm-d modelservice values
+
+The same two fields, written where the chart will keep them — once per role.
+**UNVERIFIED:** the chart is not vendored in this repository, so the key paths
+below (a `containers` list per role passed through to the pod, and a per-role
+`terminationGracePeriodSeconds`) have not been checked against the chart's
+templates. Render with `helm template` and confirm both fields reach the
+Deployment before relying on them.
+
+```yaml
+prefill:
+  terminationGracePeriodSeconds: 120   # UNVERIFIED key path
+  containers:
+  - name: vllm
+    lifecycle:
+      preStop:
+        exec:
+          command: ["/bin/sh", "-c", "sleep 45"]
+decode:
+  terminationGracePeriodSeconds: 600   # UNVERIFIED key path; cover the longest generation
+  containers:
+  - name: vllm
+    lifecycle:
+      preStop:
+        exec:
+          command: ["/bin/sh", "-c", "sleep 45"]
+```
+
+Decode holds the long-running streams, so its grace period is the one to size
+from the longest generation; a prefill request finishes in one forward pass.
+
+### On a LeaderWorkerSet
+
+`make workload-patch` skips LeaderWorkerSets and says so: the pod templates
+live under `spec.leaderWorkerTemplate`, the API server refuses a strategic merge
+on a custom resource, and the **worker** template has to drain too — killing a
+worker aborts the leader's in-flight generations whatever hook the leader has.
+Do it by hand, in the manifest or chart that owns the LWS:
+
+```yaml
+spec:
+  leaderWorkerTemplate:
+    leaderTemplate:            # if absent, workerTemplate is used for the leader too
+      spec:
+        terminationGracePeriodSeconds: 600
+        containers:
+        - name: vllm
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 45"]
+    workerTemplate:
+      spec:
+        # At least the leader's: a worker that leaves first ends the group's
+        # generations early.
+        terminationGracePeriodSeconds: 600
+        containers:
+        - name: vllm
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 45"]
+```
+
+To patch a live LWS instead, use a JSON patch (`kubectl patch lws <name> -n <ns>
+--type=json -p '[{"op":"add","path":"/spec/leaderWorkerTemplate/workerTemplate/spec/terminationGracePeriodSeconds","value":600}, ...]'`)
+— a `--type=merge` patch replaces the whole `containers` list. Both are reverted
+by the next `helm upgrade` if a chart owns the object.
 
 ## Writing the patch: `make workload-patch`
 

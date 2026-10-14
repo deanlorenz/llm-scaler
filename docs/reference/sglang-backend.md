@@ -25,8 +25,10 @@ Otherwise the variant is treated as **vLLM** (the default).
 There is nothing engine-specific to declare. A workload is registered by
 creating a KEDA ScaledObject for it, exactly as for vLLM, and the same
 ScaledObject works for either engine: the engine is read off the scale
-target's pod template, not off any field you set. See
-[workload preparation](workload-preparation.md) for the registration itself.
+target's pod template, not off any field you set. Register it with
+[step 4 of the namespace install](../guides/install-in-namespace/README.md#4-register-the-workloads);
+every key the trigger takes is in [ScaledObject trigger metadata](scaledobject-trigger.md),
+and what the pod itself must carry is in [workload preparation](workload-preparation.md).
 
 ## Metrics
 
@@ -44,7 +46,7 @@ The mapping:
 | Prompt tokens / request | `vllm:request_prompt_tokens_*` | `sglang:prompt_tokens_histogram_*` |
 | Generation tokens / request | `vllm:request_generation_tokens_*` | `sglang:generation_tokens_histogram_*` |
 | Prefix-cache hit rate | `vllm:prefix_cache_hits / _queries` | `sglang:cached_tokens_total / sglang:prompt_tokens_total` |
-| Request count (scale-to-zero) | `vllm:request_success_total` | `sglang:num_requests_total` *(not yet enabled — see Caveats)* |
+| Request count (scale-to-zero) | `vllm:request_success_total` | `sglang:num_requests_total` |
 
 > Make sure your Prometheus (or VictoriaMetrics) scrapes the SGLang pods' `/metrics`
 > endpoint, the same way you scrape vLLM. The scaling manager only consumes metrics that are
@@ -72,8 +74,11 @@ map onto the same internal parameters as their vLLM counterparts:
   SGLang signal is treated as vLLM.
 - **A variant runs a single engine.** Mixing vLLM and SGLang containers within one
   variant's pod is not supported.
-- **Metric availability.** SGLang must be started with metrics enabled so the
-  `sglang:*` series are exposed and scraped.
+- **Metric availability.** SGLang exposes no `sglang:*` series unless it is
+  started with `--enable-metrics` (an SGLang server argument; this repo's e2e
+  uses an SGLang emulator, so the flag itself is not exercised here). Then check
+  that Prometheus has the series for your model:
+  `count(sglang:token_usage{model_name="<modelID>"})` must be non-zero.
 - **Scale-to-zero reads the SGLang counter.** Idleness is measured from
   `sglang:num_requests_total` rather than the vLLM counter: the detected engine is
   passed to the enforcer, which selects the series for it

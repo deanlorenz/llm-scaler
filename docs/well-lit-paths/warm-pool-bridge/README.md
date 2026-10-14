@@ -18,7 +18,7 @@ to cover. Two shapes of traffic make that true:
   while the ordinary replica loads.
 
 How much it buys, and what it costs against a floor of held replicas, is
-[measured](measured.md).
+[measured](measured.md) — in one benchmark run per arm.
 
 **Do not use it when** load is steady, or when accelerators are the scarce
 thing. The pool is **insurance, not capacity**: every pool Pod holds its
@@ -106,7 +106,7 @@ stops being a bridge and becomes the capacity itself — that is
 kubectl get deploy -n <ns> -l app.kubernetes.io/component=warm-pool
 
 # a bridge was actually lent, and to whom
-kubectl logs -n <wva-namespace> deploy/<wva> | grep warm-pool-bridge
+kubectl logs -n <controller-namespace> deploy/<wva> | grep warm-pool-bridge
 ```
 
 A bridge is **not** one of the variant's own serving replicas, and the engine
@@ -121,7 +121,9 @@ often you spike and how long a replica takes to start — never by peak load.
 **Measured:** [What a warm pool buys](measured.md) — two models bursting out
 of phase with quiet stretches between, autoscaling alone against a one-Pod
 pool against a floor of two replicas, with the tables, the plots and the make
-targets to repeat it on your cluster. The short version: the pool turns
+targets to repeat it on your cluster. These figures are **one benchmark run per
+arm** on H200 nodes, four scale-up events each, so the margins are one run's,
+not a distribution. The short version: the pool turns
 5–9 s rises into 0.1–0.8 s, within tens of milliseconds of the floor, for
 17 % more than autoscaling alone and 12 % less than the floor. The pool's
 advantage grows with the number of models sharing it, not with more quiet;
