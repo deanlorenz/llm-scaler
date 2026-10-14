@@ -668,7 +668,9 @@ model-cache: ## Create the weights PVC. NAMESPACE=<ns> WVA_MODEL_PVC_SIZE=<size>
 ## PREPULL_NODE_SELECTOR is empty by default: the holder then lands on every
 ## node carrying any known GPU product label (deploy/lib/accelerator_nodes.sh),
 ## which is what the model servers schedule to when they select on nothing.
-## Set it to KEY=VALUE when they select on something. PREPULL_TOLERATIONS is a
+## Set it to KEY=VALUE when they select on something -- or to several pairs,
+## KEY=VALUE,KEY=VALUE, every one of which a node must carry (as in a
+## nodeSelector). PREPULL_TOLERATIONS is a
 ## comma list of taint keys beyond nvidia.com/gpu.
 ##
 ## NAMESPACE has a Makefile default (the install's), so these targets take it
@@ -725,7 +727,7 @@ BENCHMARK_RENDER_DRAIN ?= true
 # 7.5 minutes on a stalled API server with nothing printed.
 BENCHMARK_KUBECTL_TIMEOUT ?= 30s
 .PHONY: prepull prepull-status prepull-delete
-prepull: ## Hold IMAGES=<img>[,<img>] on every accelerator node of NAMESPACE=<ns>. PREPULL_NODE_SELECTOR=<key=value> narrows the nodes, PREPULL_TOLERATIONS=<key>[,<key>] adds taints.
+prepull: ## Hold IMAGES=<img>[,<img>] on every accelerator node of NAMESPACE=<ns>. PREPULL_NODE_SELECTOR=<key=value>[,<key=value>] narrows the nodes (all must match), PREPULL_TOLERATIONS=<key>[,<key>] adds taints.
 	@test -n "$(IMAGES)" || { echo "prepull: set IMAGES=<image>[,<image>] to exactly what the model server's pod spec names" >&2; exit 1; }
 	@test -n "$(prepull_namespace_given)" || { echo "prepull: set NAMESPACE=<ns> (the Makefile default is not taken here)" >&2; exit 1; }
 	@bash deploy/prepull.sh apply -n "$(NAMESPACE)" $(PREPULL_ARGS) $(foreach i,$(subst $(comma), ,$(IMAGES)),--image $(i))

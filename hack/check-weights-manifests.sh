@@ -164,6 +164,30 @@ esac
 bash deploy/weights.sh apply -n check-ns --model Qwen/Qwen3-32B --path /mnt/local/models --image "$IMG" --memory 48Gi --dry-run > "$T/render-mem.yaml"
 [ "$(mem_limit "$T/render-mem.yaml")" = 48Gi ] && ok "--memory sets the downloader's memory limit" || fail "--memory 48Gi rendered a limit of '$(mem_limit "$T/render-mem.yaml")'"
 if bash deploy/weights.sh apply -n check-ns --model m --path /mnt/local/models --image "$IMG" --memory 'lots' --dry-run >/dev/null 2>&1; then fail "apply must refuse --memory that is not a quantity"; else ok "apply: --memory that is not a quantity is refused"; fi
+# Several KEY=VALUE pairs, comma separated: a node must carry every one. Where
+# no single label picks out the usable GPU nodes, the product label AND a
+# second one does. Every pair is a nodeSelector entry, in the order given, and
+# the annotation reads back as the flag was given.
+SEL2=example.com/accelerator=h200,example.com/state=production
+if bash deploy/weights.sh apply -n check-ns --model Qwen/Qwen3-32B --path /mnt/local/models --image "$IMG" --node-selector "$SEL2" --dry-run > "$T/render-sel2.yaml" 2>&1; then
+    [ "$(yq -o json -I0 'select(.kind == "DaemonSet") | .spec.template.spec.nodeSelector' "$T/render-sel2.yaml")" = '{"example.com/accelerator":"h200","example.com/state":"production"}' ] \
+        && ok "two pairs: the nodeSelector carries both keys" || fail "two pairs rendered: $(yq -o json -I0 'select(.kind == "DaemonSet") | .spec.template.spec.nodeSelector' "$T/render-sel2.yaml")"
+    [ "$(yq -r 'select(.kind == "DaemonSet") | .metadata.annotations["wva.llmd.ai/weights-node-selector"]' "$T/render-sel2.yaml")" = "$SEL2" ] \
+        && [ "$(yq -r 'select(.kind == "DaemonSet") | .spec.template.spec | has("affinity")' "$T/render-sel2.yaml")" = false ] \
+        && ok "two pairs: the annotation records the selector as given, and no affinity is added" || fail "two pairs: annotation or affinity wrong"
+else
+    fail "a two-pair --node-selector was refused: $(tail -1 "$T/render-sel2.yaml")"
+fi
+# one pair renders byte for byte as before: the key, the quoted value, nothing more
+"$PY" -c 'import re, sys; sys.exit(0 if re.search(r"\n      nodeSelector:\n        example\.com/accelerator: \"h200\"\n(?!        )", open(sys.argv[1]).read()) else 1)' "$T/render.yaml" \
+    && ok "one pair: the nodeSelector block is the one it always was" || fail "one pair: the nodeSelector block changed"
+selbad=0
+for badsel in 'a=b,' ',a=b' 'a=b,,c=d' 'a=b,a=c' 'a=b c' 'a=b, c=d' 'a=b,c' 'a!=b' 'a in (b)'; do
+    if bash deploy/weights.sh apply -n check-ns --model m --path /mnt/local/models --image "$IMG" --node-selector "$badsel" --dry-run >/dev/null 2>&1; then
+        fail "a --node-selector of '$badsel' must be refused"; selbad=1
+    fi
+done
+[ "$selbad" -eq 0 ] && ok "a selector with an empty pair, a trailing or leading comma, a key twice, a space, a pair with no =, or a set-based term is refused"
 
 # ---------------------------------------------------------------------------
 # 2. status and delete, offline.
@@ -210,7 +234,7 @@ refuse() { case "\$ARGV" in *" \$1 "*) echo "stub kubectl: unexpected \$1 in:\$A
 case "\$1 \$2" in
   "get nodes")   if [ -n "\${STUB_SELECTOR:-}" ]; then want -l "\$STUB_SELECTOR"; else refuse -l; fi
                  [ -n "\${STUB_NODES_ERROR:-}" ] && { echo "\$STUB_NODES_ERROR" >&2; exit 1; }
-                 cat "$T/nodes.json" ;;
+                 if [ -n "\${STUB_NODES_FILE:-}" ]; then jq --arg s "\${STUB_SELECTOR:-}" '.items |= map(select((.metadata.labels // {}) as \$l | all(\$s | split(",")[]; index("=") as \$i | \$l[.[:\$i]] == .[\$i+1:])))' "\$STUB_NODES_FILE"; else cat "$T/nodes.json"; fi ;;
   "get pods")    want -n check-ns; want -l "$LBL"; cat "$T/pods.json" ;;
   "get daemonset")
       want -n check-ns
@@ -220,7 +244,7 @@ case "\$1 \$2" in
            cat "$T/ds.json" ;;
         *) want -o "jsonpath={.spec.template.spec.nodeSelector}"
            case "\$ARGV" in *" ${NAME} "*) ;; *) echo "stub kubectl: get daemonset for a name that is not the DaemonSet:\$ARGV" >&2; exit 2 ;; esac
-           if [ -n "\${STUB_DS_SELECTOR:-}" ]; then jq -cn --arg k "\${STUB_DS_SELECTOR%%=*}" --arg v "\${STUB_DS_SELECTOR#*=}" '{(\$k): \$v}'; else printf '{}'; fi ;;
+           if [ -n "\${STUB_DS_SELECTOR:-}" ]; then printf '%s' "\$STUB_DS_SELECTOR" | jq -Rc 'split(",") | map(index("=") as \$i | {key: .[:\$i], value: .[\$i+1:]}) | from_entries'; else printf '{}'; fi ;;
       esac ;;
   "get pvc")
       want -n check-ns
@@ -334,6 +358,25 @@ STUB_DS_SELECTOR=example.com/accelerator=h200 STUB_SELECTOR=example.com/accelera
 grep -q 'get nodes -l example.com/accelerator=h200' "$T/calls" && ok "status: lists the nodes the DaemonSet was applied for (its live nodeSelector)" || fail "status: live selector not used: $(grep 'get nodes' "$T/calls")"
 if STUB_DS_SELECTOR='a=b"c' PATH="$STUB_PATH" bash deploy/weights.sh status -n check-ns > "$T/edited.out" 2>&1; then fail "status must refuse a DaemonSet nodeSelector that is not label characters"; else
     grep -q 'this script did not write' "$T/edited.out" && ok "status: a DaemonSet nodeSelector this script did not write is refused before kubectl" || fail "status on an edited DaemonSet: $(tail -1 "$T/edited.out")"; fi
+# a live nodeSelector of two keys reads back as both: listing the nodes on
+# the first alone would count nodes the DaemonSet is never scheduled to
+: > "$T/calls"
+STUB_DS_SELECTOR="$SEL2" STUB_SELECTOR="$SEL2" PATH="$STUB_PATH" bash deploy/weights.sh status -n check-ns > "$T/sel2-live.out" 2>&1 || true
+grep -q "get nodes -l ${SEL2} " "$T/calls" && ok "status: every pair of the live nodeSelector reaches the node listing" || fail "status: two-key live selector read back as: $(grep 'get nodes' "$T/calls"); $(tail -1 "$T/sel2-live.out")"
+# a node matches only when it carries every pair
+cat > "$T/nodes-sel2.json" <<'EOF'
+{"items":[
+ {"metadata":{"name":"node-both",        "labels":{"example.com/accelerator":"h200","example.com/state":"production"}}},
+ {"metadata":{"name":"node-accel-only",  "labels":{"example.com/accelerator":"h200"}}},
+ {"metadata":{"name":"node-state-only",  "labels":{"example.com/state":"production"}}},
+ {"metadata":{"name":"node-other-state", "labels":{"example.com/accelerator":"h200","example.com/state":"broken"}}},
+ {"metadata":{"name":"node-both-cordoned","labels":{"example.com/accelerator":"h200","example.com/state":"production"}},"spec":{"unschedulable":true}},
+ {"metadata":{"name":"node-accel-cordoned","labels":{"example.com/accelerator":"h200"}},"spec":{"unschedulable":true}}
+]}
+EOF
+STUB_NODES_FILE="$T/nodes-sel2.json" STUB_SELECTOR="$SEL2" PATH="$STUB_PATH" bash deploy/weights.sh status -n check-ns --node-selector "$SEL2" > "$T/sel2-status.out" 2>&1 || true
+grep -q '^  node-both ' "$T/sel2-status.out" && ! grep -Eq 'node-(accel-only|state-only|other-state|accel-cordoned)' "$T/sel2-status.out" \
+    && ok "status: a node carrying only one of the pairs is not counted" || fail "status two-pair node rows: $(grep -o 'node-[a-z-]*' "$T/sel2-status.out" | sort -u | tr '\n' ' ')"
 if STUB_NODES_ERROR='error: unable to parse requirement' PATH="$STUB_PATH" bash deploy/weights.sh status -n check-ns > "$T/nf.out" 2>&1; then fail "status must fail when nodes cannot be listed"; else
     grep -q 'unable to parse requirement' "$T/nf.out" && ! grep -q cluster-reader "$T/nf.out" && ok "status: a node-list failure that is not a Forbidden reports kubectl's reason" || fail "status non-Forbidden: $(tail -1 "$T/nf.out")"; fi
 
@@ -432,6 +475,25 @@ PATH="$STUB_PATH" bash hack/benchmark/model_hostpath.sh "$T/n8.yaml" /mnt/local/
 cp "$T/nested.yaml" "$T/n9.yaml"
 STUB_SELECTOR=example.com/accelerator=h200 PATH="$STUB_PATH" bash hack/benchmark/model_hostpath.sh "$T/n9.yaml" /mnt/local/wva check-ns example.com/accelerator=h200 > "$T/hp9.out" 2>&1 || fail "model_hostpath with a selector failed: $(cat "$T/hp9.out")"
 [ "$(yq -r '.scenario[0].common.storage.hostPath | .nodeSelector["example.com/accelerator"] + " " + (.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].values | join(","))' "$T/n9.yaml")" = "h200 node-cordoned,node-foreign" ] && ok "model_hostpath: with a selector, the excluded nodes are an affinity beside the nodeSelector" || fail "model_hostpath selector exclusion: $(yq -o json -I0 '.scenario[0].common.storage.hostPath' "$T/n9.yaml")"
+# two pairs: both are nodeSelector entries, and the nodes kept off are only
+# those carrying both (a cordoned node with one of the labels is not a node
+# the downloader would go to, so it is not named)
+cp "$T/nested.yaml" "$T/n10.yaml"
+if STUB_NODES_FILE="$T/nodes-sel2.json" STUB_SELECTOR="$SEL2" PATH="$STUB_PATH" bash hack/benchmark/model_hostpath.sh "$T/n10.yaml" /mnt/local/wva check-ns "$SEL2" > "$T/hp10.out" 2>&1; then
+    [ "$(yq -o json -I0 '.scenario[0].common.storage.hostPath.nodeSelector' "$T/n10.yaml")" = '{"example.com/accelerator":"h200","example.com/state":"production"}' ] \
+        && ok "model_hostpath: two pairs become a nodeSelector with both keys" || fail "model_hostpath two pairs: $(yq -o json -I0 '.scenario[0].common.storage.hostPath' "$T/n10.yaml")"
+    [ "$(yq -r '.scenario[0].common.storage.hostPath.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].values | join(",")' "$T/n10.yaml")" = node-both-cordoned ] \
+        && ok "model_hostpath: with two pairs only a node carrying both is a candidate to keep off" || fail "model_hostpath two-pair exclusion: $(yq -o json -I0 '.scenario[0].common.storage.hostPath.affinity' "$T/n10.yaml")"
+    grep -q 'on nodes with example.com/accelerator=h200 and example.com/state=production;' "$T/hp10.out" && ok "model_hostpath: the message says both pairs must match" || fail "model_hostpath two-pair message: $(tail -1 "$T/hp10.out")"
+else
+    fail "model_hostpath refused a two-pair selector: $(cat "$T/hp10.out")"
+fi
+selbad=0
+for badsel in 'a=b,' 'a=b,,c=d' 'a=b,a=c' 'a=b c'; do
+    cp "$T/nested.yaml" "$T/n11.yaml"
+    if PATH="$STUB_PATH" bash hack/benchmark/model_hostpath.sh "$T/n11.yaml" /mnt/local/wva check-ns "$badsel" >/dev/null 2>&1; then fail "model_hostpath accepted the selector '$badsel'"; selbad=1; fi
+done
+[ "$selbad" -eq 0 ] && ok "model_hostpath: a trailing comma, an empty pair, a key twice or a space is refused"
 grep -q '^#' "$T/n1.yaml" && ok "model_hostpath: the scenario keeps its comments (yq, not a dump)" || fail "model_hostpath: comments lost"
 # The rule itself, on the cases the fixtures above do not reach: a toleration
 # with no key tolerates every taint, and PreferNoSchedule never excludes.
@@ -496,6 +558,8 @@ line="$(make -n weights WEIGHTS_MODEL=m WEIGHTS_PATH=/p WEIGHTS_IMAGE=i NAMESPAC
 case "$line" in *'--node-selector "k=v"'*) ok "make weights: PREPULL_NODE_SELECTOR is inherited" ;; *) fail "make weights inheritance: $line" ;; esac
 line="$(make -n weights WEIGHTS_MODEL=m WEIGHTS_PATH=/p WEIGHTS_IMAGE=i NAMESPACE=ns PREPULL_NODE_SELECTOR=k=v WEIGHTS_NODE_SELECTOR=w=x 2>/dev/null | tr -d '\\\n' || true)"
 case "$line" in *'--node-selector "w=x"'*) ok "make weights: WEIGHTS_NODE_SELECTOR overrides PREPULL_NODE_SELECTOR" ;; *) fail "make weights override: $line" ;; esac
+line="$(make -n weights WEIGHTS_MODEL=m WEIGHTS_PATH=/p WEIGHTS_IMAGE=i NAMESPACE=ns WEIGHTS_NODE_SELECTOR=k=v,w=x 2>/dev/null | tr -d '\\\n' || true)"
+case "$line" in *'--node-selector "k=v,w=x"'*) ok "make weights: a two-pair WEIGHTS_NODE_SELECTOR reaches the script whole" ;; *) fail "make weights two pairs: $line" ;; esac
 line="$(make -n weights-delete NAMESPACE=ns 2>/dev/null | grep 'weights.sh delete' || true)"
 case "$line" in *"--all"*) ok "make weights-delete with no WEIGHTS_MODEL deletes every model's holder" ;; *) fail "weights-delete: $line" ;; esac
 : > "$T/calls"

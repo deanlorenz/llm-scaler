@@ -14,7 +14,7 @@
 # mount any other; each node reads its own copy.
 #
 #   weights.sh apply  -n NS --model HFID --path DIR --image IMG [--dry-run]   download HFID under DIR on every accelerator node
-#   weights.sh status -n NS [--model HFID] [--node-selector KEY=VALUE]        which nodes have it, which are still downloading
+#   weights.sh status -n NS [--model HFID] [--node-selector KEY=VALUE[,...]]  which nodes have it, which are still downloading
 #   weights.sh delete -n NS (--model HFID | --all) [--dry-run]                drop the claim, volume and downloader (files stay)
 #
 #   -n, --namespace NS          the namespace the claim and downloader live in
@@ -37,13 +37,18 @@
 #                               the request stays 256Mi, so a node reserves
 #                               nothing for it). 2Gi was OOMKilled on every
 #                               node fetching an 8B model's safetensors
-#   --node-selector KEY=VALUE   which nodes count as accelerator nodes. The
+#   --node-selector KEY=VALUE[,KEY=VALUE...]
+#                               which nodes count as accelerator nodes. The
 #                               default is any node carrying a known GPU
 #                               product label (deploy/lib/accelerator_nodes.sh);
 #                               set this to what your model servers select
 #                               on when they select on something. `status`
 #                               lists the nodes each DaemonSet was applied
-#                               for; this overrides that
+#                               for; this overrides that.
+#                               One or more KEY=VALUE pairs, comma
+#                               separated, no spaces: a node must carry
+#                               every one (k1=v1,k2=v2 is k1=v1 AND
+#                               k2=v2, as in a nodeSelector)
 #   --toleration KEY            tolerate a taint with KEY (any value, any
 #                               effect); nvidia.com/gpu is always tolerated
 #   --dry-run                   apply: print the manifests instead of
@@ -435,12 +440,12 @@ cmd_status() {
         selector="$NODE_SELECTOR"
         if [ "$NODE_SELECTOR_GIVEN" = false ]; then
             # Off the live DaemonSet's pod template: a nodeSelector is the
-            # KEY=VALUE it was applied with, none is the affinity default.
+            # KEY=VALUE pairs it was applied with, none is the affinity default.
             # An object a namespace tenant can edit, so held to the same rule
             # as the flag before it reaches kubectl.
             selector="$(kubectl get daemonset -n "$NAMESPACE" "$name" \
                 -o jsonpath='{.spec.template.spec.nodeSelector}' 2>/dev/null \
-                | jq -r 'to_entries | map(.key + "=" + .value) | first // ""' 2>/dev/null || true)"
+                | accelerator_selector_from_json || true)"
             local why
             if ! why="$(accelerator_selector_ok "$selector")"; then
                 if [ "$mode" = report ]; then

@@ -23,7 +23,7 @@
 #
 #   enginecache.sh apply  -n NS --path DIR --image IMG [--seed-claim PVC[:SUBPATH]] [--dry-run]
 #                                                                     prepare DIR/engine-cache on every accelerator node
-#   enginecache.sh status -n NS [--node-selector KEY=VALUE]           which nodes are prepared, which are not, and why
+#   enginecache.sh status -n NS [--node-selector KEY=VALUE[,...]]     which nodes are prepared, which are not, and why
 #   enginecache.sh delete -n NS [--dry-run]                           drop the claim, volume and preparer (the caches stay)
 #   enginecache.sh publish -n NS [--dry-run]                          fill the seed claim from every prepared node, then re-seed every node
 #                                                                     (run once each engine configuration has started somewhere)
@@ -100,11 +100,16 @@
 #                               A changed seed is merged in too (the marker
 #                               records the seed). A subPath that does not
 #                               exist yet is nothing to seed, not an error.
-#   --node-selector KEY=VALUE   which nodes count as accelerator nodes. The
+#   --node-selector KEY=VALUE[,KEY=VALUE...]
+#                               which nodes count as accelerator nodes. The
 #                               default is any node carrying a known GPU
 #                               product label (deploy/lib/accelerator_nodes.sh);
 #                               set this to what your model servers select
-#                               on when they select on something
+#                               on when they select on something.
+#                               One or more KEY=VALUE pairs, comma
+#                               separated, no spaces: a node must carry
+#                               every one (k1=v1,k2=v2 is k1=v1 AND
+#                               k2=v2, as in a nodeSelector)
 #   --toleration KEY            tolerate a taint with KEY (any value, any
 #                               effect); nvidia.com/gpu is always tolerated
 #   --dry-run                   apply: print the manifests instead of
@@ -560,7 +565,7 @@ cmd_status() {
         # the flag before it reaches kubectl (a tenant can edit the object).
         selector="$(kubectl get daemonset -n "$NAMESPACE" "$CLAIM" \
             -o jsonpath='{.spec.template.spec.nodeSelector}' 2>/dev/null \
-            | jq -r 'to_entries | map(.key + "=" + .value) | first // ""' 2>/dev/null || true)"
+            | accelerator_selector_from_json || true)"
         local why
         if ! why="$(accelerator_selector_ok "$selector")"; then
             [ "$mode" = report ] || log_error "DaemonSet ${CLAIM} carries a nodeSelector this script did not write (${why}); pass --node-selector to report on it"

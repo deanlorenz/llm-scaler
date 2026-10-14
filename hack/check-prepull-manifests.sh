@@ -137,12 +137,24 @@ print("  ok   %d DaemonSets rendered: names, placement (selector or product-key 
 PYEOF
 
 selbad=0
-for badsel in notakeyvalue 'a=b"' 'a=b,c=d' '=v' 'a b=c'; do
+for badsel in notakeyvalue 'a=b"' '=v' 'a b=c' 'a=b,' ',a=b' 'a=b,,c=d' 'a=b,a=c' 'a=b c' 'a=b, c=d' 'a=b,c' 'a!=b'; do
     if bash deploy/prepull.sh apply -n check-ns --image a:1 --node-selector "$badsel" --dry-run >/dev/null 2>&1; then
         fail "a --node-selector of '$badsel' must be refused"; selbad=1
     fi
 done
-[ "$selbad" -eq 0 ] && ok "a --node-selector that is not one KEY=VALUE of label characters is refused"
+[ "$selbad" -eq 0 ] && ok "a --node-selector that is not KEY=VALUE pairs of label characters, one comma apart, each key once, is refused"
+# several pairs, comma separated: a node must carry every one, so each is a
+# nodeSelector entry; the annotation records the selector as given
+SEL2=example.com/accelerator=h200,example.com/state=production
+if bash deploy/prepull.sh apply -n check-ns --image a:1 --node-selector "$SEL2" --dry-run > "$T/render-sel2.yaml" 2>&1; then
+    [ "$(yq -o json -I0 'select(.kind == "DaemonSet") | .spec.template.spec.nodeSelector' "$T/render-sel2.yaml")" = '{"example.com/accelerator":"h200","example.com/state":"production"}' ] \
+        && [ "$(yq -r 'select(.kind == "DaemonSet") | .metadata.annotations["wva.llmd.ai/prepull-node-selector"]' "$T/render-sel2.yaml")" = "$SEL2" ] \
+        && ok "two pairs: the nodeSelector carries both keys, the annotation the selector as given" || fail "two pairs rendered: $(yq -o json -I0 '[.metadata.annotations, .spec.template.spec.nodeSelector]' "$T/render-sel2.yaml")"
+else
+    fail "a two-pair --node-selector was refused: $(tail -1 "$T/render-sel2.yaml")"
+fi
+"$PY" -c 'import re, sys; sys.exit(0 if re.search(r"\n      nodeSelector:\n        example\.com/accelerator: \"h200\"\n(?!        )", open(sys.argv[1]).read()) else 1)' "$T/render.yaml" \
+    && ok "one pair: the nodeSelector block is the one it always was" || fail "one pair: the nodeSelector block changed"
 if bash deploy/prepull.sh status -n check-ns --dry-run >/dev/null 2>&1; then fail "status must refuse --dry-run"; else ok "status: --dry-run is refused (an apply/delete option)"; fi
 if bash deploy/prepull.sh apply -n check-ns --image a:1 --toleration '' --dry-run >/dev/null 2>&1; then
     fail "an empty --toleration (which tolerates every taint) must be refused"
@@ -279,7 +291,7 @@ case "\$1 \$2" in
       if [ -n "\${STUB_SELECTOR:-}" ]; then want -l "\$STUB_SELECTOR"; else refuse -l; fi
       [ -n "\${STUB_NODES_FORBIDDEN:-}" ] && { echo 'Error from server (Forbidden): nodes is forbidden' >&2; exit 1; }
       [ -n "\${STUB_NODES_ERROR:-}" ] && { echo "\$STUB_NODES_ERROR" >&2; exit 1; }
-      cat "$T/nodes.json" ;;
+      if [ -n "\${STUB_NODES_FILE:-}" ]; then jq --arg s "\${STUB_SELECTOR:-}" '.items |= map(select((.metadata.labels // {}) as \$l | all(\$s | split(",")[]; index("=") as \$i | \$l[.[:\$i]] == .[\$i+1:])))' "\$STUB_NODES_FILE"; else cat "$T/nodes.json"; fi ;;
   "get pods")      want -n check-ns; want -l "$LBL"; cat "$T/pods.json" ;;
   "get daemonset")
       want -n check-ns
@@ -288,7 +300,7 @@ case "\$1 \$2" in
         *" -o json "*) cat "$T/ds.json" ;;
         *) want -o "jsonpath={.spec.template.spec.nodeSelector}"
            case "\$ARGV" in *" ${DS} "*|*" \${STUB_DS_NAME:-${DS}} "*) ;; *) echo "stub kubectl: get daemonset for a name that is not the DaemonSet:\$ARGV" >&2; exit 2 ;; esac
-           if [ -n "\${STUB_DS_SELECTOR:-}" ]; then jq -cn --arg k "\${STUB_DS_SELECTOR%%=*}" --arg v "\${STUB_DS_SELECTOR#*=}" '{(\$k): \$v}'; else printf '{}'; fi ;;
+           if [ -n "\${STUB_DS_SELECTOR:-}" ]; then printf '%s' "\$STUB_DS_SELECTOR" | jq -Rc 'split(",") | map(index("=") as \$i | {key: .[:\$i], value: .[\$i+1:]}) | from_entries'; else printf '{}'; fi ;;
       esac ;;
   "get events")    want -n check-ns; printf '%s' "\${STUB_EVENT:-}" ;;
   "apply -n")      want -n check-ns; cat >/dev/null; echo "daemonset.apps/x configured" ;;
@@ -402,6 +414,22 @@ cp "$T/nodes-all.json" "$T/nodes.json"
 : > "$T/calls"
 STUB_SELECTOR=example.com/accelerator=h200 PATH="$STUB_PATH" bash deploy/prepull.sh status -n check-ns --image "$IMG" --node-selector example.com/accelerator=h200 >/dev/null 2>&1 || true
 grep -q 'get nodes -l example.com/accelerator=h200' "$T/calls" && ok "status: --node-selector is what kubectl is asked with" || fail "status: selector not passed: $(grep 'get nodes' "$T/calls")"
+# a live nodeSelector of two keys reads back as both
+: > "$T/calls"
+STUB_DS_SELECTOR="$SEL2" STUB_SELECTOR="$SEL2" PATH="$STUB_PATH" bash deploy/prepull.sh status -n check-ns --image "$IMG" > "$T/sel2-live.out" 2>&1 || true
+grep -q "get nodes -l ${SEL2} " "$T/calls" && ok "status: every pair of the live nodeSelector reaches the node listing" || fail "status: two-key live selector read back as: $(grep 'get nodes' "$T/calls"); $(tail -1 "$T/sel2-live.out")"
+# a node matches only when it carries every pair
+cat > "$T/nodes-sel2.json" <<'EOF'
+{"items":[
+ {"metadata":{"name":"node-both",        "labels":{"example.com/accelerator":"h200","example.com/state":"production"}}},
+ {"metadata":{"name":"node-accel-only",  "labels":{"example.com/accelerator":"h200"}}},
+ {"metadata":{"name":"node-state-only",  "labels":{"example.com/state":"production"}}},
+ {"metadata":{"name":"node-other-state", "labels":{"example.com/accelerator":"h200","example.com/state":"broken"}}}
+]}
+EOF
+STUB_NODES_FILE="$T/nodes-sel2.json" STUB_SELECTOR="$SEL2" PATH="$STUB_PATH" bash deploy/prepull.sh status -n check-ns --image "$IMG" --node-selector "$SEL2" > "$T/sel2-status.out" 2>&1 || true
+grep -q '^  node-both ' "$T/sel2-status.out" && ! grep -Eq 'node-(accel-only|state-only|other-state)' "$T/sel2-status.out" \
+    && ok "status: a node carrying only one of the pairs is not counted" || fail "status two-pair node rows: $(grep -o 'node-[a-z-]*' "$T/sel2-status.out" | sort -u | tr '\n' ' ')"
 
 # delete: by name for --image, by both labels for --all; --dry-run makes no call
 : > "$T/calls"

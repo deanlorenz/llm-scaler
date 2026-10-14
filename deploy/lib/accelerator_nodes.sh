@@ -13,7 +13,12 @@
 # express -- and the node listing filters on the same keys. Each term is
 # "the key exists AND is not empty": CoreWeave writes gpu.nvidia.com/model=""
 # on its CPU nodes, and Exists alone put a holder on four of them. An
-# explicit KEY=VALUE selector replaces both.
+# explicit selector replaces both: one or more KEY=VALUE pairs separated by
+# commas, every one of which a node must carry (a nodeSelector map, and the
+# equality-only form of a `kubectl get nodes -l` selector). More than one
+# pair is how a cluster where no single label picks out the usable GPU
+# nodes -- the one label that would exclude a broken node is also on the
+# CPU nodes -- narrows them: the product label AND that one.
 #
 # What places the model servers is their accelerator RESOURCE request, not
 # a label; these keys are the labels that say a node has one. On a cluster
@@ -42,29 +47,68 @@ ACCELERATOR_PRODUCT_KEYS=(
     "gpu.intel.com/product"
 )
 
-# accelerator_selector_ok says whether $1 is one KEY=VALUE of label
-# characters: a key of [A-Za-z0-9._/-], a value of [A-Za-z0-9._-], one '='.
-# Empty is fine (the default). Prints why not, returns 1, when it is not.
+# accelerator_selector_pairs prints the KEY=VALUE pairs of selector $1, one
+# per line, in the order given. It splits on every comma and keeps empty
+# elements, so accelerator_selector_ok sees "a=b,,c=d" and a trailing comma
+# for what they are; callers that render run accelerator_selector_ok first.
+accelerator_selector_pairs() {
+    [ -n "$1" ] || return 0
+    local rest="$1," pair
+    while [ -n "$rest" ]; do
+        pair="${rest%%,*}"
+        rest="${rest#*,}"
+        printf '%s\n' "$pair"
+    done
+}
+
+# accelerator_selector_ok says whether $1 is one or more KEY=VALUE pairs of
+# label characters, separated by single commas: each key of [A-Za-z0-9._/-],
+# each value of [A-Za-z0-9._-], one '=' per pair, no key twice (a
+# nodeSelector is a map). Empty is fine (the default). Prints why not,
+# returns 1, when it is not.
 accelerator_selector_ok() {
     [ -n "$1" ] || return 0
-    local key="${1%%=*}" value="${1#*=}"
-    case "$1" in
-        *=*) ;;
-        *) echo "must be KEY=VALUE, got '$1'"; return 1 ;;
-    esac
-    case "$key" in
-        ""|*[!A-Za-z0-9._/-]*) echo "not a label key: '${key}'"; return 1 ;;
-    esac
-    case "$value" in
-        *[!A-Za-z0-9._-]*) echo "not a label value: '${value}' (letters, digits, . _ -; no comma, no quotes)"; return 1 ;;
-    esac
+    local pair key value seen=","
+    while IFS= read -r pair; do
+        if [ -z "$pair" ]; then
+            echo "an empty KEY=VALUE in '$1' (pairs are separated by one comma, none leading or trailing)"
+            return 1
+        fi
+        case "$pair" in
+            *=*) ;;
+            *) echo "must be KEY=VALUE[,KEY=VALUE...], got '$pair'"; return 1 ;;
+        esac
+        key="${pair%%=*}"
+        value="${pair#*=}"
+        case "$key" in
+            ""|*[!A-Za-z0-9._/-]*) echo "not a label key: '${key}'"; return 1 ;;
+        esac
+        case "$value" in
+            *[!A-Za-z0-9._-]*) echo "not a label value: '${value}' (letters, digits, . _ -; no spaces, no quotes)"; return 1 ;;
+        esac
+        case "$seen" in
+            *",${key},"*) echo "label key '${key}' given twice in '$1' (every pair must match, so one key takes one value)"; return 1 ;;
+        esac
+        seen="${seen}${key},"
+    done < <(accelerator_selector_pairs "$1")
+}
+
+# accelerator_selector_from_json reads a nodeSelector map (JSON, as a
+# DaemonSet's pod template carries it) on stdin and prints it as a selector,
+# KEY=VALUE pairs joined by commas; empty for no map. A key or value holding
+# a comma or '=' would not read back as the map it came from, so such a map
+# prints as a string accelerator_selector_ok refuses.
+accelerator_selector_from_json() {
+    jq -r 'to_entries
+        | if any(.[]; (.key + .value) | test("[,=]")) then "unreadable nodeSelector: " + (map(.key) | join(" "))
+          else map(.key + "=" + .value) | join(",") end' 2>/dev/null || true
 }
 
 # accelerator_check_selector refuses a --node-selector that is not one. The
 # string is substituted into a YAML document, where a quote or a newline
 # would open a different field, and passed to `kubectl get nodes -l`, where
-# a comma would mean a second term the DaemonSet's nodeSelector cannot
-# carry.
+# anything beyond KEY=VALUE pairs (set-based terms, !=) would select nodes
+# the DaemonSet's nodeSelector cannot express.
 accelerator_check_selector() {
     local why
     why="$(accelerator_selector_ok "$1")" || log_error "--node-selector: ${why}"
@@ -79,17 +123,17 @@ accelerator_check_toleration() {
     esac
 }
 
-# accelerator_placement_yaml prints the pod-spec placement for $1: with a
-# KEY=VALUE, a nodeSelector; empty, the OR-ed affinity over the product
-# keys. Indented for a pod template's spec (6 spaces), the way the
-# DaemonSets here lay it out.
+# accelerator_placement_yaml prints the pod-spec placement for $1: with
+# KEY=VALUE pairs, a nodeSelector holding every pair in the order given;
+# empty, the OR-ed affinity over the product keys. Indented for a pod
+# template's spec (6 spaces), the way the DaemonSets here lay it out.
 accelerator_placement_yaml() {
-    local selector="$1"
+    local selector="$1" pair
     if [ -n "$selector" ]; then
-        cat <<EOF
-      nodeSelector:
-        ${selector%%=*}: "${selector#*=}"
-EOF
+        echo "      nodeSelector:"
+        while IFS= read -r pair; do
+            printf '        %s: "%s"\n' "${pair%%=*}" "${pair#*=}"
+        done < <(accelerator_selector_pairs "$selector")
         return
     fi
     cat <<'EOF'
@@ -117,8 +161,9 @@ accelerator_keys_json() {
 }
 
 # accelerator_nodes_json prints the node list (a v1 NodeList JSON document)
-# the placement for $1 would match: `kubectl get nodes -l KEY=VALUE`, or
-# every node carrying any product key. Fails as kubectl fails (a Forbidden
+# the placement for $1 would match: `kubectl get nodes -l KEY=VALUE[,...]`
+# (a comma in a label selector is AND, as in the nodeSelector), or every
+# node carrying any product key. Fails as kubectl fails (a Forbidden
 # for a namespace tenant) -- the caller decides what that means.
 accelerator_nodes_json() {
     local selector="$1"
@@ -140,12 +185,22 @@ accelerator_vendor_warning() {
           | first($keys[] | select($l[.] != null and $l[.] != "")) // ""
           | select(startswith("amd.com/") or startswith("beta.amd.com/") or startswith("habana.ai/") or startswith("gpu.intel.com/"))] | length')"
     [ "${n:-0}" -gt 0 ] || return 0
-    log_warning "${n} node(s) carry an AMD, Intel or Gaudi accelerator label and are held too; if the image is CUDA-only that is disk for nothing -- --node-selector KEY=VALUE picks the nodes the model servers actually run on"
+    log_warning "${n} node(s) carry an AMD, Intel or Gaudi accelerator label and are held too; if the image is CUDA-only that is disk for nothing -- --node-selector KEY=VALUE[,KEY=VALUE...] picks the nodes the model servers actually run on"
 }
 
-# accelerator_selector_text says, for a log line, what $1 selects.
+# accelerator_selector_text says, for a log line, what $1 selects: the
+# selector itself for one pair (as it always read), every pair joined by
+# " and " for several, so a reader does not take the comma for "or".
 accelerator_selector_text() {
-    if [ -n "$1" ]; then printf '%s' "$1"; else printf 'any node carrying a known GPU product label'; fi
+    if [ -z "$1" ]; then
+        printf 'any node carrying a known GPU product label'
+    else
+        local pair text=""
+        while IFS= read -r pair; do
+            text="${text:+${text} and }${pair}"
+        done < <(accelerator_selector_pairs "$1")
+        printf '%s' "$text"
+    fi
 }
 
 # USABLE NODES. A node a model server cannot be placed on is not one to wait

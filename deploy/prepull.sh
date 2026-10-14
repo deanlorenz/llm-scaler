@@ -12,17 +12,22 @@
 # megabytes of memory.
 #
 #   prepull.sh apply  -n NS --image IMG [--image IMG ...] [--dry-run]   pre-pull IMG on every accelerator node
-#   prepull.sh status -n NS [--image IMG] [--node-selector KEY=VALUE]   which nodes have it, which do not
+#   prepull.sh status -n NS [--image IMG] [--node-selector KEY=VALUE[,...]] which nodes have it, which do not
 #   prepull.sh delete -n NS (--image IMG | --all) [--dry-run]           stop holding it
 #
 # Options:
-#   --node-selector KEY=VALUE   which nodes count as accelerator nodes. The
+#   --node-selector KEY=VALUE[,KEY=VALUE...]
+#                               which nodes count as accelerator nodes. The
 #                               default is any node carrying a known GPU
 #                               product label (GPU Feature Discovery,
 #                               CoreWeave, GKE, EKS, Karpenter, AMD -- the
 #                               list in deploy/lib/accelerator_nodes.sh);
 #                               set this to what your model servers select
-#                               on when they select on something
+#                               on when they select on something.
+#                               One or more KEY=VALUE pairs, comma
+#                               separated, no spaces: a node must carry
+#                               every one (k1=v1,k2=v2 is k1=v1 AND
+#                               k2=v2, as in a nodeSelector)
 #   --toleration KEY            tolerate a taint with KEY (any value, any
 #                               effect); nvidia.com/gpu is always tolerated
 #   --dry-run                   apply: print the manifests instead of
@@ -247,12 +252,12 @@ cmd_status() {
         selector="$NODE_SELECTOR"
         if [ "$NODE_SELECTOR_GIVEN" = false ]; then
             # Off the live DaemonSet's pod template, not an annotation: a
-            # nodeSelector is the KEY=VALUE it was applied with (a DaemonSet
+            # nodeSelector is the KEY=VALUE pairs it was applied with (a DaemonSet
             # from before this script recorded anything included), none is
             # the affinity default.
             selector="$(kubectl get daemonset -n "$NAMESPACE" "$name" \
                 -o jsonpath='{.spec.template.spec.nodeSelector}' 2>/dev/null \
-                | jq -r 'to_entries | map(.key + "=" + .value) | first // ""' 2>/dev/null || true)"
+                | accelerator_selector_from_json || true)"
             # Read off an object a namespace tenant can edit; held to the
             # same rule as the flag before it reaches kubectl.
             local why

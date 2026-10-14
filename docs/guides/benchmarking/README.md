@@ -337,7 +337,8 @@ the harness pins (`docker.io/vllm/vllm-openai:v0.26.0` in v0.7.8's
 deploys anything -- `BENCHMARK_PREPULL=false` skips it,
 `BENCHMARK_PREPULL_IMAGES=<image>[,<image>]` overrides it,
 `PREPULL_NODE_SELECTOR` narrows the nodes (the default is every node with a
-known GPU product label) and `PREPULL_TOLERATIONS` adds taints. The holders
+known GPU product label; one or more `key=value` pairs, comma-separated, all
+of which a node must carry) and `PREPULL_TOLERATIONS` adds taints. The holders
 keep pulling while the standup goes on, so before the run:
 
 ```bash
