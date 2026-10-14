@@ -411,6 +411,7 @@ kubectl get endpoints -n "$NS" wva-external-scaler
 | the trigger has no `modelID` | the controller cannot tell which model to answer for | set `modelID` to what the container serves; `make verify-scaledobjects` |
 | `wva-external-scaler` has no endpoints | the controller is not Ready | [controller not Ready](#the-controller-is-not-ready-or-crash-looping) |
 | `TARGETS` reads `cpu: <unknown>/80%` | KEDA never got a metric spec and fell back to CPU | one of the above |
+| `KEDAScalerFailed` with `WVA has not published a decision for this target yet`, or the `Fallback` condition `True` | normal for a cycle or two after a controller restart or leader change: the HPA holds its count until the first decision. Past that, the model is never planned, usually a trigger value that does not parse | [a bad value freezes the model](scaledobject-trigger.md#model-keys); the controller log at `--v=4` names the key |
 | `no children to pick from` in KEDA's log, after an uninstall and reinstall | KEDA's gRPC client is still backing off on a name that did not resolve | (cluster admin) restart the KEDA operator ([details](operations.md#no-children-to-pick-from-after-a-reinstall)) |
 
 More rows: [First-line troubleshooting](operations.md#first-line-troubleshooting).

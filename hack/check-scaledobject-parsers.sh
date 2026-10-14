@@ -56,7 +56,7 @@ for fn in so_model_id so_resolve_env_ref; do
     }
 done
 
-EXPECT_CASES=29
+EXPECT_CASES=43
 RAN=0
 FAILED=0
 
@@ -239,6 +239,68 @@ check 'pause GPUs: an LWS without a leaderTemplate runs the worker as leader' '8
 check 'pause GPUs: an LWS with a leaderTemplate counts it once' '10'     "$(gpus_of "{\"spec\":{\"leaderWorkerTemplate\":{\"size\":3,\"leaderTemplate\":{\"spec\":{\"containers\":[$(c nvidia.com/gpu 2)]}},\"workerTemplate\":{\"spec\":{\"containers\":[$(c nvidia.com/gpu 4)]}}}}}")"
 check 'pause GPUs: an LWS of size 1 without a leaderTemplate is one worker' '4'     "$(gpus_of "{\"spec\":{\"leaderWorkerTemplate\":{\"workerTemplate\":{\"spec\":{\"containers\":[$(c nvidia.com/gpu 4)]}}}}}")"
 check 'pause GPUs: no request reads as one GPU, as the controller defaults' '1'     "$(gpus_of '{"spec":{"template":{"spec":{"containers":[{"name":"c"}]}}}}')"
+unset -f kubectl
+
+# ----------------------------------------------------------------------------
+# The KEDA fallback on generated and adopted ScaledObjects
+# ----------------------------------------------------------------------------
+# Read back through yq, not grepped: the block is spliced into a heredoc, and
+# the failure that matters is one that still prints the words but at the wrong
+# indent -- a fallback under advanced, or an advanced block that lost its key.
+command -v yq >/dev/null 2>&1 || {
+    printf 'FATAL: yq is required for the fallback group.\n' >&2
+    exit 1
+}
+for fn in render_default_scaledobject so_adopt_patch so_adopt_needs_fallback so_fallback_check; do
+    declare -F "$fn" >/dev/null || {
+        printf 'FATAL: %s is not defined after sourcing the library.\n' "$fn" >&2
+        exit 1
+    }
+done
+render_with() {   # render_with <min> -- with whatever WVA_SO_FALLBACK* is set
+    render_default_scaledobject ns Deployment decode Qwen/Qwen3-0.6B addr:9090 "$1" 8 '' ''
+}
+fb_of() { yq -o=json '.spec.fallback' | jq -r 'if . == null then "none" else [.failureThreshold, .replicas, .behavior] | map(tostring) | join(",") end'; }
+
+check 'fallback: a generated object gets one, replicas at its minReplicaCount' \
+    '3,2,currentReplicasIfHigher' "$(render_with 2 | fb_of)"
+check 'fallback: the rest of the spec survives the splice' \
+    '2,8,true,300' \
+    "$(render_with 2 | yq -o=json '.spec' | jq -r '[.minReplicaCount, .maxReplicaCount, .advanced.restoreToOriginalReplicaCount, .advanced.horizontalPodAutoscalerConfig.behavior.scaleDown.stabilizationWindowSeconds] | map(tostring) | join(",")')"
+check 'fallback: a floor of zero falls back to zero, never above it' \
+    '3,0,currentReplicasIfHigher' "$(render_with 0 | fb_of)"
+check 'fallback: WVA_SO_FALLBACK_FAILURES sets failureThreshold' \
+    '5,1,currentReplicasIfHigher' "$(WVA_SO_FALLBACK_FAILURES=5 render_with 1 | fb_of)"
+check 'fallback: WVA_SO_FALLBACK=false leaves it out' \
+    'none' "$(WVA_SO_FALLBACK=false render_with 1 | fb_of)"
+check 'fallback: WVA_SO_FALLBACK=false still renders the advanced block' \
+    'true' "$(WVA_SO_FALLBACK=false render_with 1 | yq -r '.spec.advanced.restoreToOriginalReplicaCount')"
+check 'fallback: WVA_SO_FALLBACK must be true or false' \
+    'refused' "$( (WVA_SO_FALLBACK=yes so_fallback_check) 2>/dev/null && echo accepted || echo refused)"
+check 'fallback: a failureThreshold of 0 is refused' \
+    'refused' "$( (WVA_SO_FALLBACK_FAILURES=0 so_fallback_check) 2>/dev/null && echo accepted || echo refused)"
+
+# Adoption: added only to an object with none, never merged into one it has.
+check 'adopt: add_fallback=yes adds the default block' \
+    '3,2,currentReplicasIfHigher' \
+    "$(so_adopt_patch m addr 2 8 10.0 '' yes | jq -r '.spec.fallback | [.failureThreshold, .replicas, .behavior] | map(tostring) | join(",")')"
+check 'adopt: without add_fallback the patch has no fallback key' \
+    'false' "$(so_adopt_patch m addr 2 8 10.0 '' '' | jq -r '.spec | has("fallback")')"
+SO_FIXTURE=''
+SO_FIXTURE_RC=0
+kubectl() { printf '%s' "$SO_FIXTURE"; return "$SO_FIXTURE_RC"; }
+check 'adopt: an object with no fallback gets one' \
+    'yes' "$(so_adopt_needs_fallback ns so)"
+SO_FIXTURE='{"failureThreshold":9,"replicas":4}'
+check 'adopt: an object with a fallback keeps it' \
+    '' "$(so_adopt_needs_fallback ns so)"
+SO_FIXTURE=''
+SO_FIXTURE_RC=1
+check 'adopt: an object that cannot be read is not one without a fallback' \
+    '' "$(so_adopt_needs_fallback ns so 2>/dev/null)"
+SO_FIXTURE_RC=0
+check 'adopt: WVA_SO_FALLBACK=false adds none' \
+    '' "$(WVA_SO_FALLBACK=false so_adopt_needs_fallback ns so)"
 unset -f kubectl
 
 # ----------------------------------------------------------------------------

@@ -2594,8 +2594,12 @@ so_show_plan() {
 # so_apply_plan acts on every entry: creating for yes, repointing for adopt.
 so_apply_plan() {
     local file="$1" scaler_addr="wva-external-scaler.${WVA_NS}.svc.cluster.local:9090"
-    local apply ns kind name model min max cost policy existing rows
+    local apply ns kind name model min max cost policy existing rows add_fallback
     local created=0 adopted=0 skipped=0 unresolved=0
+
+    # Here, not in the render: log_error must stop this shell, before anything
+    # is applied, rather than one side of a pipeline per entry.
+    so_fallback_check
 
     # Read the whole plan before touching anything, and stop if it could not be
     # read. so_plan_rows exits on an unparseable file, but that exit happens in
@@ -2657,12 +2661,14 @@ so_apply_plan() {
 
         if [ "$apply" = "adopt" ]; then
             # Triggers and bounds, and nothing else: the rest of that object —
-            # polling interval, fallback, stabilization, whoever's labels — stays
+            # polling interval, any fallback, stabilization, whoever's labels — stays
             # as its author left it. The bounds are included because the plan
             # showed them, carried over from this very object, so applying them
-            # unedited is a no-op and editing them is how you change them.
+            # unedited is a no-op and editing them is how you change them. The
+            # one addition is a fallback for an object that has none at all.
+            add_fallback="$(so_adopt_needs_fallback "$ns" "$existing")"
             if kubectl patch scaledobject "$existing" -n "$ns" --type=merge \
-                -p "$(so_adopt_patch "$model" "$scaler_addr" "$min" "$max" "$cost" "$policy")" > /dev/null; then
+                -p "$(so_adopt_patch "$model" "$scaler_addr" "$min" "$max" "$cost" "$policy" "$add_fallback")" > /dev/null; then
                 log_success "  $ns/$name ($kind) -> ScaledObject $existing now scales on WVA (modelID: $model, $min-$max)"
                 adopted=$((adopted + 1))
             else
@@ -2855,23 +2861,51 @@ install_default_scaledobjects() {
 
 # so_adopt_patch prints the merge patch that repoints an existing ScaledObject at
 # WVA: its triggers, and the bounds and cost the plan carried. Everything else on that
-# object — polling interval, cooldown, fallback, advanced behavior, its labels —
+# object — polling interval, cooldown, any fallback, advanced behavior, its labels —
 # stays as whoever tuned it left it.
 #
 # `triggers` is a list, so a merge patch REPLACES it wholesale, which is what is
 # wanted. An object scaled by a prometheus or cpu trigger must stop being scaled by
 # it, or two scalers feed one HPA and the larger answer silently wins.
+#
+# The one exception is the fallback. add_fallback=yes adds the default block
+# (see so_fallback_block); the caller passes it only after reading the object
+# and finding no spec.fallback, because a merge patch would otherwise merge into
+# a fallback somebody chose and overwrite its fields.
 so_adopt_patch() {
     local model="$1" scaler_addr="$2" min="$3" max="$4" cost="$5" policy="${6:-}"
+    local add_fallback="${7:-}" failures=0
+    if [ "$add_fallback" = "yes" ]; then
+        failures="$(so_fallback_failures)" || exit 1
+    fi
     # scalingPolicy is added only when the entry names one: an empty value would
     # be a metadata key whose value says "the default", which is what its absence
     # already says, and it would survive in the object long after anybody knew why.
     jq -nc --arg m "$model" --arg a "$scaler_addr" --arg c "$cost" --arg p "$policy" \
         --argjson min "$min" --argjson max "$max" \
-        '{spec:{minReplicaCount:$min, maxReplicaCount:$max,
+        --arg fb "$add_fallback" --argjson n "$failures" \
+        '{spec:({minReplicaCount:$min, maxReplicaCount:$max,
           triggers:[{type:"external-push",name:"wva-external-scaler",
           metadata:({scalerAddress:$a, modelID:$m, variantCost:$c}
-                    + (if $p == "" then {} else {scalingPolicy:$p} end))}]}}'
+                    + (if $p == "" then {} else {scalingPolicy:$p} end))}]}
+          + (if $fb == "yes"
+             then {fallback:{failureThreshold:$n, replicas:$min,
+                             behavior:"currentReplicasIfHigher"}}
+             else {} end))}'
+}
+
+# so_adopt_needs_fallback answers yes when an adopted object should get the
+# default fallback: it is enabled and the object has none. A read that fails
+# answers no, with a warning -- an unreadable object is not one without a
+# fallback, and guessing would overwrite whatever it has.
+so_adopt_needs_fallback() {
+    local ns="$1" name="$2" fb
+    so_fallback_enabled || return 0
+    if ! fb="$(kubectl get scaledobject "$name" -n "$ns" -o jsonpath='{.spec.fallback}' 2>/dev/null)"; then
+        log_warning "  $ns/$name: could not read ScaledObject $name to check its fallback -- leaving that field alone."
+        return 0
+    fi
+    [ -n "$fb" ] || printf 'yes'
 }
 
 # so_repoint_stale repoints ScaledObjects that ask for WVA by name but name a WVA
@@ -3053,6 +3087,74 @@ so_repoint_candidates() {
         | jq -r --arg self "$self" "$filter" 2>/dev/null || true
 }
 
+# --- KEDA fallback --------------------------------------------------------------
+#
+# Every generated ScaledObject carries a KEDA fallback, and an adopted one that
+# has none gets the same.
+#
+# The scaler refuses GetMetrics with Unavailable whenever it has no decision
+# to give -- not the leader, or the leader before its first cycle after a
+# restart or a lease hand-off. Without a fallback that is a metric error and
+# nothing else: the HPA cannot compute, so it holds its count, but it also
+# records no recommendation for as long as the error lasts. When the scaler
+# comes back, the scale-down window holds only what was recorded before the
+# outage, and an outage longer than the window leaves it empty, so the first
+# low answer after recovery can drop the fleet in one step.
+#
+# With the fallback, after failureThreshold failed polls in a row KEDA stops
+# passing the error on and feeds the HPA a metric worth fallback.replicas.
+# currentReplicasIfHigher (KEDA 2.17 and later) makes that the CURRENT count
+# whenever the current count is higher, so the held count is now a reading the
+# HPA records, the scale-down window still covers the moment of recovery, and
+# the ScaledObject says Fallback in its status instead of only failing.
+# replicas is the object's own minReplicaCount: the floor the operator already
+# chose, never a number the installer made up. Below that floor the HPA would
+# not have been anyway, so the fallback never scales anything up by itself.
+#
+#   WVA_SO_FALLBACK=false          no fallback block at all
+#   WVA_SO_FALLBACK_FAILURES=<n>   failureThreshold, default 3
+#
+# An adopted object that already has a fallback keeps it, whatever it says.
+
+# so_fallback_enabled succeeds when generated objects get a fallback.
+so_fallback_enabled() {
+    case "${WVA_SO_FALLBACK:-true}" in
+        true)  return 0 ;;
+        false) return 1 ;;
+        *)     log_error "WVA_SO_FALLBACK must be true or false (got '${WVA_SO_FALLBACK}')" ;;
+    esac
+}
+
+# so_fallback_failures prints failureThreshold. Zero is refused: KEDA accepts
+# it, and it means the first failed poll already replaces the scaler.
+so_fallback_failures() {
+    local n="${WVA_SO_FALLBACK_FAILURES:-3}"
+    case "$n" in
+        ''|*[!0-9]*|0|00*) log_error "WVA_SO_FALLBACK_FAILURES must be a whole number of at least 1 (got '$n')" ;;
+    esac
+    printf '%s' "$n"
+}
+
+# so_fallback_check validates both knobs once, in the calling shell, where
+# log_error stops the run. Inside a render the same error would exit only the
+# left side of `render | kubectl apply` and surface as a failed apply.
+so_fallback_check() {
+    so_fallback_enabled || return 0
+    so_fallback_failures > /dev/null
+}
+
+# so_fallback_block prints the spec.fallback block at two-space indent.
+so_fallback_block() {
+    local min="$1" n
+    n="$(so_fallback_failures)" || exit 1
+    cat <<EOF
+  fallback:
+    failureThreshold: ${n}
+    replicas: ${min}
+    behavior: currentReplicasIfHigher
+EOF
+}
+
 # render_scaledobject prints one ScaledObject: the shipped shape, or yours.
 #
 # WVA_DEFAULT_SO_TEMPLATE=<file> substitutes your own template instead, so a fleet
@@ -3119,6 +3221,13 @@ render_default_scaledobject() {
     local policy_line=""
     [ -z "$policy" ] || policy_line=$'\n        scalingPolicy: "'"$policy"'"'
 
+    # The fallback block, or nothing when WVA_SO_FALLBACK=false. See
+    # so_fallback_block for why it is on by default.
+    local fallback_block=""
+    if so_fallback_enabled; then
+        fallback_block="$(so_fallback_block "$min")"$'\n'
+    fi
+
     cat <<EOF
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
@@ -3139,7 +3248,7 @@ spec:
   cooldownPeriod: 30
   minReplicaCount: ${min}
   maxReplicaCount: ${max}
-  advanced:
+${fallback_block}  advanced:
     restoreToOriginalReplicaCount: true
     # Scaling behaviour, stated rather than inherited.
     #

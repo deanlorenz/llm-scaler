@@ -176,6 +176,8 @@ do is also reachable through plan-then-apply, which does not.
 | `WVA_SO_SCALE_UP_STABILIZATION` | `stabilizationWindowSeconds` for scale-up. This is the knob that delays a scale-up: HPA takes its most conservative recommendation across the window. `0` means act on the current one | `0` |
 | `WVA_SO_SCALE_DOWN_PERIOD` | `periodSeconds` on the scale-down policy | `120` |
 | `WVA_SO_SCALE_DOWN_STABILIZATION` | `stabilizationWindowSeconds` for scale-down — how long demand must stay low before a replica is removed | `300` |
+| `WVA_SO_FALLBACK` | `true` writes a KEDA `fallback` (`replicas` = the object's `minReplicaCount`, `behavior: currentReplicasIfHigher`) into every generated ScaledObject, and into an adopted one that has none. `false` leaves it out. Needs KEDA 2.17 or later; see [the fallback](scaledobject-trigger.md#before-the-first-decision-and-the-fallback) | `true` |
+| `WVA_SO_FALLBACK_FAILURES` | `failureThreshold` of that fallback: how many failed polls in a row before KEDA applies it. At least `1` | `3` |
 
 `WVA_DEFAULT_SO_MIN` and `_MAX` are only the values the plan is *written* with.
 What gets applied is what the file says when you apply it, per entry.
@@ -196,7 +198,10 @@ costs money.
 
 **Adopting an existing ScaledObject leaves its behaviour alone.** `apply: adopt`
 repoints the triggers and bounds; polling interval, cooldown, fallback and
-`behavior` stay as whoever tuned them left them.
+`behavior` stay as whoever tuned them left them. The one addition: an object
+with no `fallback` at all gets the default one (unless `WVA_SO_FALLBACK=false`).
+One that has a fallback keeps it unchanged, and one the installer cannot read
+is left without, with a warning.
 
 Set them on a deploy to do this during install:
 
@@ -425,7 +430,10 @@ without one scales on CPU until the ScaledObject is edited. Everything that need
 with `Unavailable`, which KEDA reports as a trigger error and does not act on,
 and it cycles the connection every few seconds so KEDA re-dials and reaches the
 leader. The same applies to a single replica during a rollout, in the window
-between the new pod being Ready and the old pod's lease being released.
+between the new pod being Ready and the old pod's lease being released. The new
+leader then refuses `GetMetrics` the same way until its first cycle has decided
+each model, so the HPA holds its count across the whole hand-off; see [before
+the first decision](scaledobject-trigger.md#before-the-first-decision-and-the-fallback).
 
 ```bash
 make deploy-wva-on-k8s WVA_REPLICAS=2
