@@ -55,6 +55,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/source/prometheus"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/controller"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/controllerstatus"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/datastore"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
@@ -479,12 +480,22 @@ func main() {
 	// Create ConfigMap reconciler for configuration management.
 	// Bootstrap uses the temporary uncached client so ConfigMap-backed settings
 	// are loaded before any manager runnables start.
+	// The controller-status ConfigMap: what this controller has read and decided,
+	// for tools and operators that would otherwise grep the log. Built before the
+	// bootstrap so the policy it loads is recorded; written only by the leader.
+	controllerStatus := controllerstatus.New(mgr.GetClient(), mgr.GetAPIReader(), config.SystemNamespace())
+	if err := mgr.Add(controllerStatus); err != nil {
+		setupLog.Error(err, "unable to add the controller-status publisher to the manager")
+		os.Exit(1)
+	}
+
 	configMapReconciler := &controller.ConfigMapReconciler{
 		Reader:    mgr.GetAPIReader(),
 		Scheme:    mgr.GetScheme(),
 		Config:    cfg,
 		Datastore: ds,
 		Recorder:  mgr.GetEventRecorderFor("workload-variant-autoscaler-configmap-reconciler"),
+		Status:    controllerStatus,
 	}
 
 	ctx := context.Background()
@@ -653,6 +664,7 @@ func main() {
 		// ScaledObject is served by a cluster-wide informer, which is the LIST+WATCH
 		// this design exists to remove.
 		engine.Variants = registry.Default
+		engine.Status = controllerStatus
 		engine.VariantEnricher = registry.NewEnricher(mgr.GetAPIReader(), registry.Default, registry.DefaultTargetMaxAge)
 		// The registry is also what tells the datastore which namespaces to load
 		// configuration for. That used to come from a ScaledObject reconciler, whose

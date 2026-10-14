@@ -2,6 +2,7 @@ package config
 
 import (
 	"maps"
+	"strings"
 	"sync"
 	"time"
 
@@ -678,7 +679,12 @@ func (c *Config) MarkConfigMapsBootstrapFailed(err error) {
 func (c *Config) EffectiveLimiterMode() LimiterType {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	limiters := c.effectiveLimitersLocked()
+	return limiterModeOf(c.effectiveLimitersLocked())
+}
+
+// limiterModeOf is the limiter implementation a limiters: list selects: none
+// for an empty list, quota when any entry is a quota, otherwise inventory.
+func limiterModeOf(limiters []QuotaLimiterConfig) LimiterType {
 	if len(limiters) == 0 {
 		return LimiterTypeNone
 	}
@@ -688,6 +694,29 @@ func (c *Config) EffectiveLimiterMode() LimiterType {
 		}
 	}
 	return LimiterTypeInventory
+}
+
+// EffectiveLimiterSummary describes the limiter in force as "<mode>/<names>":
+// the mode EffectiveLimiterMode selects and, comma-separated in declared order,
+// the names of the entries that mode builds -- "quota/install-quota", say, or
+// "none" when no limiter is declared. Entries a mixed list does not enforce
+// (UnenforcedLimiterTypes) are left out, so the summary names only what bounds.
+// Thread-safe.
+func (c *Config) EffectiveLimiterSummary() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	limiters := c.effectiveLimitersLocked()
+	mode := limiterModeOf(limiters)
+	if mode == LimiterTypeNone {
+		return string(mode)
+	}
+	var names []string
+	for _, l := range limiters {
+		if (l.Type == string(LimiterTypeQuota)) == (mode == LimiterTypeQuota) {
+			names = append(names, l.Name)
+		}
+	}
+	return string(mode) + "/" + strings.Join(names, ",")
 }
 
 // UnenforcedLimiterTypes returns the limiter types cluster policy declares that
