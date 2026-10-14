@@ -48,16 +48,16 @@ import (
 // LearnedState is the analyzer's learned state in a form that survives a
 // process: plain values and their clocks, keyed by the analyzer's own keys.
 type LearnedState struct {
-	K2              map[string]capacity.RollingAverageSnapshot `json:"k2,omitempty"`
-	Throughput      map[string]ThroughputSnapshot              `json:"throughput,omitempty"`
-	ITLBaseline     map[string]float64                         `json:"itlBaseline,omitempty"`
-	StartSeconds    map[string]float64                         `json:"startSeconds,omitempty"`
-	VariantSeenAt   map[string]time.Time                       `json:"variantSeenAt,omitempty"`
+	K2            map[string]capacity.RollingAverageSnapshot `json:"k2,omitempty"`
+	Throughput    map[string]ThroughputSnapshot              `json:"throughput,omitempty"`
+	ITLBaseline   map[string]float64                         `json:"itlBaseline,omitempty"`
+	StartSeconds  map[string]float64                         `json:"startSeconds,omitempty"`
+	VariantSeenAt map[string]time.Time                       `json:"variantSeenAt,omitempty"`
 	// Accelerators is keyed namespace/variant: a per-variant entry like the
 	// rest, checked against the variant's configuration before it is used.
-	Accelerators map[string]AcceleratorSnapshot `json:"accelerators,omitempty"`
-	ITLLines        map[string]LineSnapshot                    `json:"itlLines,omitempty"`
-	K2BorrowedSince map[string]time.Time                       `json:"k2BorrowedSince,omitempty"`
+	Accelerators    map[string]AcceleratorSnapshot `json:"accelerators,omitempty"`
+	ITLLines        map[string]LineSnapshot        `json:"itlLines,omitempty"`
+	K2BorrowedSince map[string]time.Time           `json:"k2BorrowedSince,omitempty"`
 	// Config is the engine-configuration fingerprint each variant ran when
 	// this was exported, keyed namespace/variant.
 	Config map[string]string `json:"config,omitempty"`
