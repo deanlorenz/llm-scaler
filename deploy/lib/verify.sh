@@ -356,8 +356,17 @@ wva_verify_scaler_networkpolicy() {
             log_info "Could not read NetworkPolicy wva-external-scaler in $WVA_NS, so whether it admits KEDA is not checked."
             return 0
             ;;
+        4)
+            # A policy exists but admits :9090 from no single namespace: it is
+            # not the shape the installer writes, so what it lets in is not
+            # known here. The installer leaves it as it is and calls it
+            # UNKNOWN; saying "open" would send an admin to fix a port that
+            # may well be closed.
+            log_warning "NetworkPolicy wva-external-scaler in $WVA_NS is not one this install recognises (it admits :9090 from no single namespace): left as it is, state UNKNOWN. Check it: kubectl get networkpolicy wva-external-scaler -n $WVA_NS -o yaml"
+            return 0
+            ;;
         *)
-            log_warning "No NetworkPolicy: scaler port open. NetworkPolicy wva-external-scaler is absent from $WVA_NS (or admits :9090 from no single namespace), so the external scaler (:9090) is reachable by any Pod."
+            log_warning "No NetworkPolicy: scaler port open. NetworkPolicy wva-external-scaler is absent from $WVA_NS, so the external scaler (:9090) is reachable by any Pod."
             if [ "${WVA_SCALER_NETWORKPOLICY:-true}" = "false" ]; then
                 log_warning "  WVA_SCALER_NETWORKPOLICY=false left it out on purpose."
             else

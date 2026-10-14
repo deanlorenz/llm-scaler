@@ -487,9 +487,10 @@ fi
 
 # --- The post-deploy check: does the policy admit the namespace KEDA runs in?
 #
-# verify_case <label> <want: WARN | OPEN | QUIET> [VAR=value...]
+# verify_case <label> <want: WARN | OPEN | UNKNOWN | QUIET> [VAR=value...]
 # WARN: the mismatch warning is printed. OPEN: the "no NetworkPolicy: scaler
-# port open" warning. QUIET: no warning at all.
+# port open" warning. UNKNOWN: a policy is there but not recognised -- said as
+# UNKNOWN, never as open. QUIET: no warning at all.
 verify_case() {
     local label="$1" want="$2"
     shift 2
@@ -525,6 +526,9 @@ verify_case() {
         OPEN)
             if grep -q 'No NetworkPolicy: scaler port open' "$WORK/warnings"; then pass; else fail "$label: no warning that the scaler port is open: $(head -2 "$WORK/warnings")"; fi
             ;;
+        UNKNOWN)
+            if grep -q 'state UNKNOWN' "$WORK/warnings" && ! grep -q 'scaler port open' "$WORK/warnings"; then pass; else fail "$label: not reported as UNKNOWN: $(head -2 "$WORK/warnings")"; fi
+            ;;
         QUIET)
             if [ ! -s "$WORK/warnings" ]; then pass; else fail "$label: warned: $(head -2 "$WORK/warnings")"; fi
             ;;
@@ -543,6 +547,7 @@ verify_case "verify: nothing readable is not a mismatch" QUIET \
     STUB_NP=keda-system STUB_DEPLOYS=FORBIDDEN STUB_APISVC=FORBIDDEN
 verify_case "verify: no policy: the scaler port is open, said as a warning" OPEN \
     STUB_DEPLOYS=keda
+verify_case "verify: a policy admitting :9090 from two namespaces is UNKNOWN, not open" UNKNOWN     "STUB_NP='keda-a keda-b'"
 verify_case "verify: opted out: still said, the port is open" OPEN \
     WVA_SCALER_NETWORKPOLICY=false
 # The remedy repeats the install's shape (wva_make_cmd).
