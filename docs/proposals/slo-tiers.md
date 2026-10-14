@@ -1,7 +1,8 @@
 # SLO tiers: size to a TTFT/TPOT target, not only to a fill threshold
 
 **Status:** proposal, 2026-10-14, revised the same day against the router's
-metrics and the engine's analyzer loop. Nothing built. Tracks
+metrics, the engine's analyzer loop and the composite on
+`deanscaler/composite-analyzer`. Nothing built. Tracks
 [#141](https://github.com/ev-shindin/llm-scaling-manager/issues/141).
 
 ## The problem
@@ -43,20 +44,21 @@ A new **`slo` analyzer**, separate from saturation, owns everything about
 latency:
 
 - reading the router's and the engines' latency histograms
-- the per-variant latency curves
-- the tail ratios
+- the per-variant latency curves and tail ratios
 - attainment
-- the **fill** at which each variant meets the tier's target
 
-The saturation analyzer stays the sizer. When a tier sets `mode: enforce`, the
-`slo` analyzer's fill replaces the tier's static scale-out point for that
-variant, inside saturation, where it reaches both k1 and the price of the
-demand floor. Until a variant's curve is trustworthy, the static thresholds
-apply, and the source is labelled.
+It produces an ordinary `(D, P)` per role: demand in tokens/s, and for each
+variant the tokens/s one replica serves **while still meeting the target**.
+It is combined with saturation by the **composite** on
+`deanscaler/composite-analyzer`: per ScaledObject, `N = D ÷ P` from every
+eligible analyzer, take the max, and fall back to saturation only where
+nothing else has a signal. A tier chooses between two modes:
 
-[Why a separate analyzer, and why it does not hand the engine a second
-(D, P)](#where-it-lives-a-separate-analyzer-that-hands-saturation-a-fill)
-explains the split.
+- **Guard.** Both analyzers contribute. The SLO can only add replicas.
+- **Sizer.** Saturation is disabled for the tier. The SLO decides, and
+  saturation is the per-variant fallback until the SLO has a curve.
+
+Nothing in the sizing arithmetic is special-cased for the SLO.
 
 ## What llm-d's KEDA recipes read
 
@@ -171,117 +173,159 @@ From `main` at `cb37a21e2`:
 ```yaml
 data:
   interactive: |
-    scaleUpThreshold: 0.85
-    scaleDownBoundary: 0.70
+    scaleUpThreshold: 0.90        # headroom below the SLO's own replica count
+    scaleDownBoundary: 0.75
     analyzers:
       - name: saturation
+        enabled: false            # sizer mode; omit this line for guard mode
       - name: slo
+        shadow: true              # run and publish, contribute nothing
     slo:
       ttft: {target: 3s,    percentile: 90}
       tpot: {target: 100ms, percentile: 90}
-      margin: 0.10          # aim at target × (1 − margin)
-      mode: observe         # observe | enforce
 ```
 
 - **Listing `slo` under `analyzers:` turns the analyzer on.** This is the
   existing `AnalyzerEnabled` mechanism. The `slo` block gives it targets.
   Either objective may be omitted.
-- **`mode: observe`** (the default) runs the analyzer and publishes everything,
-  and changes no decision. **`mode: enforce`** hands its fills to saturation.
+- **The mode is the `analyzers:` list.** There is no separate switch.
+
+  | `analyzers:` | Mode | What decides |
+  | --- | --- | --- |
+  | `slo` with `shadow: true` | observe | saturation alone; the SLO's view is published |
+  | `saturation` + `slo` | guard | per SO, the larger of the two replica counts |
+  | `saturation {enabled: false}` + `slo` | sizer | the SLO; saturation where the SLO has no signal for that SO |
+
+- **`shadow`** is a new, generic field on the analyzer entry. A shadowed
+  analyzer runs and publishes `wva_analyzer_demand` / `wva_analyzer_target`,
+  and is left out of the composite's eligible set. It is the same exclusion
+  the composite already applies to a disabled saturation (`excludeByName`).
+  It is useful to every new analyzer, not only this one.
+- **There is no `margin`.** The composite applies the tier's
+  `scaleUpThreshold` to the SLO's replica count like any other:
+  `RC = D_sat ÷ scaleUp − anticipated`, so the fleet runs
+  `N_slo ÷ scaleUp` replicas. The SLO prices its `P` at the fill where the
+  percentile **equals** the target, and `scaleUpThreshold` is the headroom.
+  That leaves one knob, not two that compound. `scaleDownBoundary` stays the
+  hysteresis band.
 - **`percentile`** is an integer from 50 to 99. Default 90.
 - **Durations use Go syntax.** A value that does not parse is rejected through
   `Validate` → `RecordError`, with the key named. It is never read as zero.
 - **The `slo` block is replaced whole, not merged field by field**, by the
   `default → tier → per-model` overlay. A partial override cannot silently keep
   the other objective.
-- **The static thresholds remain** as the fallback and as the ceiling.
 
-## Where it lives: a separate analyzer that hands saturation a fill
+## Where it lives: an analyzer, combined by the composite
 
 ### Why a separate analyzer
 
-- **Observe mode is free.** The engine already runs every enabled analyzer,
-  isolates it, publishes its `(D, P)` and discards it. Phase 0 is a new
-  package, a `RegisterAnalyzer` call and queries. It needs no engine change and
-  carries no risk to a decision.
+- **Observe mode is free today.** On `main` the engine runs every enabled
+  analyzer, isolates it, publishes its `(D, P)` and uses only saturation's
+  (`engine_v2.go:982`). Phase 0 is a new package, a `RegisterAnalyzer` call and
+  queries. It needs no engine change and carries no risk to a decision.
 - **Ownership.** Latency histograms, quantile interpolation, tail ratios,
   isotonic curves and attainment are a body of code the size of the throughput
   floor. [analyzer-structure](analyzer-structure.md) measured the cost of
-  grab-bag files in `saturation/`, so this belongs in its own package.
+  grab-bag files in `saturation/`.
 - **Isolation.** A broken latency query or a panic in quantile code must not
-  stop saturation from sizing. The analyzer loop already guarantees that for
-  a non-saturation analyzer.
-- **The interface anticipated it.** `domain/analyzer.go` names "slo" as a
-  future analyzer.
+  stop saturation from sizing, and the analyzer loop already guarantees that.
+- **The contract fits.** [engine-structure](engine-structure.md) says what a
+  new analyzer must do and nothing else: demand and per-replica capacity in
+  **one unit per result**, per role; mark the roles it has no model for; state
+  its holds; register. The SLO analyzer is that, with nothing extra.
 
-### Why its `(D, P)` is not combined with saturation's
+### How the results combine: the composite
 
-The obvious enforcement is to give the engine two results and combine them.
-There are two ways to combine them, and both are wrong.
+The composite on `deanscaler/composite-analyzer` is the combine stage that
+[engine-structure](engine-structure.md) plans (stage 4, `analyze/combine`).
+The rules, as built there:
 
-1. **Max of required, min of spare** (any analyzer may grow, all must agree to
-   shrink). The SLO can then only *add* capacity. A loose SLO, the case where
-   the cost win is, can never let the fleet run fuller than saturation's
-   static point.
-2. **Rescale saturation's per-replica capacity by `k_slo ÷ k_static`.** The
-   demand floor is priced in replicas, `λ ÷ mu(k)`, where
-   `mu(k) ∝ N(k) ÷ ITL(k)`, and it is converted into capacity with saturation's
-   own `P`. Rescaling `P` by `r = k_slo ÷ k_static` moves the floor's replica
-   count by `1/r`. The true count moves by
-   `mu(k_static) ÷ mu(k_slo) = (1/r) × ITL(k_slo) ÷ ITL(k_static)`. When
-   **loosening** (`r > 1`, so `ITL(k_slo) > ITL(k_static)`), the rescale
-   **under-orders** the floor by that ITL ratio. That is the expensive
-   direction: an over-priced capacity is what breaks TTFT unrecoverably in this
-   codebase.
+```
+N_i(SO)      = D_i[role(SO)] ÷ P_i(SO)                    each eligible analyzer, in its own units
+N_com(SO)    = max over contributors of N_i(SO)            undefined values skipped, never read as 0
+               saturation is a contributor unless disabled, and the fallback when nothing contributed
+P_com(SO)    = D_sat[role] ÷ N_com(SO)                     back in saturation's units, as a definition
+RC, SC       = the existing applyUniversalThreshold, on P_com
+```
 
-The fill has to reach `pricingK` and k1 **inside** saturation, where
-`mu(k_slo)` is computed from the line rather than scaled.
+Each SO carries a decision path: `C0-agree`, `C1-single`, `C2-sat-fallback`
+or `C4-no-signal`.
 
-### So the split is
+Why this is the right combine for an SLO:
 
-| | `slo` analyzer | saturation |
+- **The SLO's replica count is computed in its own units.** It is not a
+  rescale of saturation's capacity. `P_slo` is the token rate at the SLO's
+  fill, from the ITL line (`itl.TokenRate(line, k_slo, kvMax, kvReq)`), so
+  `mu(k_slo)` is computed rather than scaled. A rescale would under-order
+  when loosening by `ITL(k_slo) ÷ ITL(k_static)`, so this matters.
+- **Guard and sizer are already in the rules.** With saturation eligible, the
+  max lets the SLO only tighten. With saturation disabled, the spec's §5.1
+  applies: *"saturation is a fallback, not a floor ... the composite may
+  legitimately come out below sat alone"*. That is the loosening path, per SO.
+- **Fallback per variant comes for free.** An SO for which the SLO has no
+  curve reports `ReasonNoData`, contributes nothing, and lands on
+  `C2-sat-fallback`. The decision path then says, per variant, whether the SLO
+  or saturation decided. That is the `source` this proposal would otherwise
+  have had to invent.
+- **Undefined is not zero.** The branch's `(value, ok)` rule is what an SLO
+  needs: a variant without a curve must neither vote 0 nor vote infinity.
+- **P/D is per role.** `D` is per role and `P` per SO. The cross-role coverage
+  rule, `min(cov(prefill), cov(decode)) + cov(both)`, which per-token-economy
+  already adopted, is the right model-level view for TTFT on prefill and TPOT
+  on decode.
+
+### What the SLO analyzer returns
+
+| Role | `D` | `P_v` |
 | --- | --- | --- |
-| Reads | router + engine latency histograms, saturation's ITL line (read-only), the tier's targets | as today |
-| Produces | per variant: `Fill{K, Source, Objective}`; per model: attainment and observed percentiles; a `(D, P)` for publication (below) | `(D, P)`, the composite, as today |
-| In `observe` | published, discarded | unchanged |
-| In `enforce` | its fills go to saturation's per-variant scale-out point | k1 and `pricingK` read the variant's fill when present, the static value otherwise |
+| decode / both | `λ × O` output tok/s, plus backlog over drain time (`signals/floor`, the same pricing saturation's floor uses) | `itl.TokenRate(line_v, k_v)` at `k_v = min(k_tpot_v, k_ttft_v)` |
+| prefill | `λ × ILeff` input tok/s, plus backlog | prefill token ceiling × `u_ttft_v` (the prefill utilization at which TTFT meets its budget) |
 
-**Its own `(D, P)`.** For publication only, the analyzer reports
-`P_v = mu_v(k_slo_v)` (req/s one replica serves within the SLO) and
-`D = ArrivalRate`. In observe mode, `wva_analyzer_target{analyzer="slo"}` and
-`wva_analyzer_demand{analyzer="slo"}` then give an operator "the SLO alone would
-want `D ÷ P` replicas" next to what saturation ordered. Nothing new is needed
-on a dashboard to read it. It is never the composite.
+The decode half already exists in the throughput analyzer, which prices
+decode per token (`λ × O` against `computeVariantSupply`). The SLO analyzer
+reuses that arithmetic at a different fill. It does not copy it: the shared
+pieces move to `signals` as engine-structure stage 1 did for the floor.
 
-### Changes in the engine
+### What the composite does not have yet
 
-These are small, and none are needed in observe mode.
+These are the parts the SLO needs on top of the branch, in order.
 
-1. **Order.** In enforce mode the engine runs `slo` before saturation and
-   passes `map[variant]Fill` into `runV2AnalysisOnly`. It is a new parameter,
-   not a field on the model-level `ScalingPolicy`, because the policy is per
-   model and the fill is per variant.
-2. **The line.** `SaturationAnalyzer` gains a read-only accessor for a
-   variant's current line and its source: `own`, `borrowed` or `none`. The
-   `slo` analyzer reads the line from the previous cycle. At a 15 s cycle, one
-   cycle of lag on a line fitted over a 30 m window is noise. Extracting the
-   line store into an engine-owned `signals/itl` store is cleaner, and is
-   proposed in analyzer-structure. The accessor does not block on it.
-3. **Saturation.** `memoryBound` and `pricingK` take the variant's fill when
-   one is present: `k_scale_out = fill.K`, so
-   `kvCacheThreshold_v = fill.K ÷ scaleUpThreshold`. Otherwise they use the
-   static value. `applyUniversalThreshold`, the allocators, the limiter and
-   the cost order are untouched.
+1. **The branch landed.** Our review (engine-structure, 2026-09-21) found three
+   things to fix before it merges:
+   - It regresses #82: quota charging is tied to `CompositeHasSignal`.
+   - The saturation fallback skips the per-SO `Reason` filter.
+   - The fallback's eligibility guard is untested on the real
+     `buildComposite`.
+
+   The branch is based on our `main` of 2026-09-11, so the rebase overlaps
+   #76/#82 and everything since. **Enforce mode depends on this. Observe mode
+   does not.**
+2. **`shadow: true`.** It excludes an analyzer from the eligible set while
+   still running and publishing it. Without it, after the composite lands,
+   listing `slo` means it votes.
+3. **A per-SO "do not grow" hold, for infeasibility.** Under the branch's
+   rules, `P ≤ 0` is *undefined*, and an undefined SO falls back to
+   saturation. In sizer mode, a variant that cannot meet the target at any
+   fill would then be grown at saturation's price, which is the opposite of
+   what we want. Engine-structure already plans holds on `AnalyzerResult`
+   (`Role, Reason, Cap`). The SLO needs that at SO grain: `Cap` = the current
+   replicas, `Reason = slo-infeasible`. The composite then caps `N_com` there,
+   and the cost order grows another variant. This is the one rule to agree
+   with the branch's author.
+4. **Read access to the ITL line.** It is saturation's private state
+   (`itlWindows` / `itlLines`). The options are an accessor on
+   `SaturationAnalyzer` (the previous cycle's line; one cycle of 15 s lag
+   against a 30 m window is noise), or the engine-owned `signals/itl` store
+   engine-structure points at. The accessor does not block on the store.
 
 ## TPOT
 
-For variant `v`, with a line `ITL_v(k) = A·k + B` that saturation has fitted
-(or borrowed, see bounds):
+For variant `v`, with a line `ITL_v(k) = A·k + B` that saturation has fitted:
 
 ```
 ρ_v      = q_p(per-request TPOT over v's pods) ÷ mean(ITL over v's pods)      over 5 m, ≥ 1
-budget   = tpotTarget × (1 − margin) ÷ ρ_v
-k_tpot_v = (budget − B) ÷ A
+k_tpot_v = (tpotTarget ÷ ρ_v − B) ÷ A
+P_v      = itl.TokenRate(line_v, min(k_tpot_v, bounds), kvMax_v, kvReq)       output tok/s
 ```
 
 - **The tail quantile.** Quantiles are taken from
@@ -295,12 +339,14 @@ k_tpot_v = (budget − B) ÷ A
 - **The bucket.** 0.1 s is a bucket bound on both histograms, so a 100 ms
   target is not interpolated.
 - **Smoothing.** `ρ` is a rolling maximum over the line's window.
-- **Infeasible.** If `budget ≤ A·k_min + B`, no fill meets the target on that
-  variant:
-  - Its fill is `0`, `Source=infeasible`. Saturation gives it no scale-up
-    capacity, so the cost order grows another variant.
+- **Infeasible.** If `tpotTarget ÷ ρ_v ≤ A·k_min + B`, no fill meets the target
+  on that variant:
+  - The analyzer emits the per-SO hold (`Cap` = current replicas,
+    `slo-infeasible`), not a `P` of zero. Under the composite's rules a zero
+    is *undefined* and would fall back to saturation, which would grow the
+    variant.
   - It is not scaled down below what it serves just for being infeasible.
-  - If every variant is infeasible, the model keeps its static fill, and
+  - If every variant is infeasible, the holds stand and
     `wva_model_scaling_blocked{reason="slo_infeasible"}` is set. It is a
     reason, not a new gauge.
 
@@ -315,26 +361,23 @@ TTFT_router  ≈  router queue  +  engine queue  +  prefill
 ```
 
 The **fill** can only buy the last term in steady state. The first two are
-queueing, and they are non-zero only when demand exceeds capacity. That is the
-saturation analyzer's queue charge and the demand floor, which already order
-capacity for a backlog.
+queueing, and they are non-zero only when demand exceeds capacity. The SLO
+analyzer's backlog term prices them, as saturation's floor does.
 
 - **The prefill curve.** Keep a monotone (isotonic) curve of mean
-  `request_prefill_time` against `k`, binned at 0.05, per variant. Add a tail
-  ratio as for TPOT, but from the router's TTFT over the intervals where both
-  queues were empty, because the engine's prefill buckets are too coarse for a
-  quantile (0.3 … 2.5, 5).
-  - **Aggregated variant:** `k` is KV fill. Chunked prefill competes with the
-    decode batch.
-  - **Prefill role:** `k` is `PrefillComputedTokenRate ÷` its learned ceiling.
+  `request_prefill_time` against utilization, binned at 0.05, per variant. Add
+  a tail ratio as for TPOT, but from the router's TTFT over the intervals where
+  both queues were empty, because the engine's prefill buckets are too coarse
+  for a quantile (0.3 … 2.5, 5).
+  - **Aggregated variant:** the utilization is KV fill. Chunked prefill
+    competes with the decode batch, so `k_ttft_v` caps the same `k` as TPOT.
+  - **Prefill role:** the utilization is `PrefillComputedTokenRate ÷` its
+    learned ceiling. `P_v` = ceiling × `u_ttft_v`.
   - **No regression, no intercept.** This is the failure the TTFT fit had.
-- **The budget.**
-  `k_ttft_v` = the largest bin whose upper bound meets
-  `ttftTarget × (1 − margin) − queueAllowance`, where `queueAllowance` is the
+- **The budget.** `u_ttft_v` is the largest bin whose upper bound meets
+  `ttftTarget − queueAllowance`, where `queueAllowance` is the
   router-plus-engine queue p-quantile observed at that fill. Steady state
   should leave it near zero; if it is not, the fill is too high.
-- **The queue condition.** An SLO tier with a TTFT target sets the effective
-  `queueLengthThreshold` to 1, unless the operator set it lower.
 - **The transient is out of scope for the fill.** A step in arrival lands
   before a new replica is Ready, whatever fill the fleet sat at, and llm-d sees
   the same thing. The levers are start time, the warm pool and
@@ -342,53 +385,55 @@ capacity for a backlog.
   measures it (attainment in the first 120 s of each rise) and does not claim
   to fix it.
 - **P/D.**
-  - TPOT constrains **decode** variants.
-  - TTFT constrains **prefill** variants, with
-    `budget = ttftTarget − q_p(KV transfer)`, floored at zero (which means
-    infeasible). The transfer time needs a new query on
-    `vllm:nixl_xfer_time_seconds`. Nothing in Go reads a NIXL metric today,
-    whatever [prefill-ttft-model](prefill-ttft-model.md) says.
-  - The pair commit is unchanged.
-  - The recipe lists P/D as future work.
+  - TPOT sizes **decode** SOs.
+  - TTFT sizes **prefill** SOs, with `budget = ttftTarget − q_p(KV transfer)`,
+    floored at zero (which means infeasible). The transfer time needs a new
+    query on `vllm:nixl_xfer_time_seconds`. Nothing in Go reads a NIXL metric
+    today, whatever [prefill-ttft-model](prefill-ttft-model.md) says.
+  - The composite's per-role `D` and the cross-role coverage rule tie the two
+    roles together. The recipe lists P/D as future work.
 - **Aggregated.** The fill is `min(k_tpot_v, k_ttft_v)`.
 
-## Bounds: what the fill may never do
+## Bounds: what the SLO's `P` may never do
 
-The tail of an over-estimate is the costliest failure here, so the fill is held
-to the same rules as k2.
+The tail of an over-estimate is the costliest failure here. Over-pricing `P`
+is what breaks TTFT unrecoverably, so `P` is held to the same rules as k2.
 
-1. **Never above the fitted range.** `K ≤ k_max_observed_v + 0.05`. A loose
+1. **Never above the fitted range.** `k ≤ k_max_observed_v + 0.05`. A loose
    SLO raises fill one step past the observed range per window, and the fleet
    earns the next step by running there.
-2. **Never above a hard ceiling.** `K ≤ 0.90` of physical KV, below the
+2. **Never above a hard ceiling.** `k ≤ 0.90` of physical KV, below the
    preemption cliff.
-3. **A borrowed line lowers, never raises.** Under `enableLearnedStateReuse`, a
-   variant priced from a sibling's line may get a fill **below** its static
-   point, never above. This is
+3. **A borrowed line never loosens.** Under `enableLearnedStateReuse` a variant
+   may be priced from a sibling's line. In guard mode that is safe, because the
+   max can only tighten. In sizer mode a borrowed line would let a sibling's
+   measurement run this variant fuller than saturation, so the analyzer
+   reports `ReasonNoData` for it and the SO falls back to saturation
+   (`C2-sat-fallback`). This is
    [learned-state sharing](learned-state-sharing-by-similarity.md)'s
    cap-never-order.
 4. **Fallback is explicit.** With no ready line, no `ρ`, or too few curve bins,
-   there is no fill, saturation uses its static point, and the published
-   source is `static`. A variant under flat load never passes the ITL window's
-   k-spread gate (≥ 0.30), so this state can last indefinitely and must look
-   different from "derived and met".
-5. **Non-finite input means fallback.** `A`, `B`, `ρ` and every quantile are
+   the SO reports `ReasonNoData`, and its decision path shows who decided.
+   A variant under flat load never passes the ITL window's k-spread gate
+   (≥ 0.30), so this state can last indefinitely and must look different from
+   "SLO decided and met".
+5. **Non-finite input means no data.** `A`, `B`, `ρ` and every quantile are
    checked with `math.IsNaN`/`IsInf` first, because `x <= 0` admits NaN.
 
 ## Closing the loop on attainment (phase 3)
 
-The fill is open-loop: a model of latency, trusted. Router-measured attainment
-is the check. A slow, bounded trim per variant:
+`P` is open-loop: a model of latency, trusted. Router-measured attainment is
+the check. A slow, bounded trim per variant:
 
 ```
-trim_v ∈ [0.5, 1.0];  K_effective = K × trim_v
-model attainment < percentile over 10 min, on an objective v constrains   → trim_v −= 0.05 (once per window)
-attainment ≥ percentile + 2 pp for 30 min                                  → trim_v += 0.02
+trim_v ∈ [0.5, 1.0];  k_effective = k × trim_v
+model attainment < percentile over 10 min, on an objective v serves   → trim_v −= 0.05 (once per window)
+attainment ≥ percentile + 2 pp for 30 min                              → trim_v += 0.02
 ```
 
 Attainment is per model, because the router has no variant label. On a
 multi-variant model the trim goes to the variants whose own engine-side
-percentile is over budget, and to all of them if none are.
+percentile is over target, and to all of them if none are.
 
 This is not llm-d's control law. That law reacts to latency within a minute
 and is the sizer. The trim corrects a model that drifted, over tens of
@@ -404,10 +449,16 @@ namespace is `exported_namespace`.
 | `wva_slo_target_seconds` | model, exported_namespace, tier, objective, percentile | The declared target |
 | `wva_slo_observed_seconds` | + scope (`model` from the router, `variant` from the engines), variant | Observed percentile over 5 m |
 | `wva_slo_attainment_ratio` | model, exported_namespace, objective | From the router: `bucket(le=target) ÷ count`. Exact when the target is a bucket bound (3 s and 0.1 s are), interpolated otherwise |
-| `wva_slo_fill` | + variant, objective, source (`derived`/`static`/`borrowed`/`infeasible`) | The fill computed, applied or not; `mode` says which |
+| `wva_slo_fill` | + variant, objective, source (`own`/`borrowed`/`none`/`infeasible`) | The fill behind the SLO's `P` |
 
-Plus `wva_analyzer_demand` / `wva_analyzer_target{analyzer="slo"}`, which
-already exist.
+Two things that already exist cover the rest:
+
+- `wva_analyzer_demand` / `wva_analyzer_target{analyzer="slo"}`: the SLO's
+  `(D, P)`. In shadow mode, `D ÷ P` next to the actual count answers "what
+  would the SLO want".
+- The composite's per-SO decision path and contributor list
+  (`composite-contributors` in the cycle log): which analyzer decided each
+  variant, this cycle.
 
 **Combined attainment** (both objectives met on one request) cannot come from
 two histograms. Where the predictor plugin and the SLO headers are present, the
@@ -417,15 +468,15 @@ queue.
 
 ## Phases
 
-Each phase can land alone, and nothing changes a decision before phase 1 with
-`mode: enforce`.
+Phase 0 needs nothing from the composite. Phases 1 and 2 need it landed.
 
-### Phase 0: the analyzer, observing
+### Phase 0: the analyzer, observing (on today's `main`)
 
 - The `slo` block: parse, validate, resolve.
 - The router and engine bucket queries, the Go quantile, and attainment.
-- The TPOT fill via the line accessor, `ρ`, and the metrics above.
-- The analyzer registered. **No engine change.**
+- `ρ`, the TPOT fill and `P`, via the ITL line accessor; the metrics above.
+- The analyzer registered. **No engine change.** On `main` its result is
+  published and discarded, which is shadow mode by construction.
 - Delete the dormant `ServiceClass` / `FindModelSLO` /
   `configmap-serviceclass.yaml`. Grep the whole repo first; this needs the
   maintainer's agreement.
@@ -435,14 +486,15 @@ nothing answers today.
 
 ### Phase 1: TPOT, enforce
 
-- The engine's order and the `map[variant]Fill` parameter.
-- The per-variant scale-out point in `memoryBound` and `pricingK`.
-- Bounds 1–5 and infeasibility.
+- **Depends on the composite branch landing**, with its three review fixes.
+- The `shadow` field.
+- The per-SO hold, agreed with the branch's author.
+- Bounds 1–5.
 
 ### Phase 2: TTFT, enforce
 
-- The prefill curve, the queue allowance, the queue-threshold override.
-- The P/D split with the transfer budget.
+- The prefill curve, the queue allowance, the transfer-time query.
+- The P/D roles.
 
 ### Phase 3: the attainment trim
 
@@ -452,59 +504,67 @@ nothing answers today.
 
 - Go quantile interpolation against `histogram_quantile` on the same buckets,
   including a target exactly on a bound.
-- TPOT inversion against a hand computation.
+- TPOT inversion and `P` against a hand computation.
 - Each bound alone.
 - NaN/Inf in each input.
-- Infeasible: zero fill, no scale-down below current, and the blocked reason
-  when every variant is infeasible.
-- Fallback: an unready window, flat load, a missing histogram. Each returns no
-  fill **and** publishes `static`.
+- Infeasible: a hold, not a zero `P`.
+- Fallback: an unready window, flat load, a missing histogram, and a borrowed
+  line in sizer mode. Each returns `ReasonNoData` for that SO.
 - The isotonic curve on non-monotone input.
 - The trim's asymmetry.
 - Old metric names answered by the `or` fallback.
 
-**In saturation:**
+**In the composite:**
 
-- With an empty fill map, `NamedAnalyzerResult` is byte-identical to today's.
-- With a fill, k1 and `pricingK` move together.
-- The loosening case of the floor: the under-order a rescale would produce
-  does not occur.
+- Guard mode: `N_com = max(N_sat, N_slo)` per SO.
+- Sizer mode: a variant with an SLO signal is decided by it (`C1-single`),
+  and one without falls back (`C2-sat-fallback`).
+- A shadowed analyzer changes no `N_com`.
+- An infeasible SO is held at current replicas in sizer mode. Without the hold
+  it would fall back to saturation and grow; that case is the negative control.
+- The loosening case: in sizer mode `N_com` comes out below saturation's.
 
 **e2e.** Two specs need nothing new from the simulator:
 
-- `slo` in observe mode changes no desired count.
-- On the simulator's constant latency, the line never fits, so the published
-  source is `static`.
+- `slo` in shadow mode changes no desired count.
+- On the simulator's constant latency, the line never fits, so every SO is
+  `C2-sat-fallback` in sizer mode.
 
-A derived-fill spec needs the simulator's latency to rise with load. Check
-whether `llm-d-inference-sim` v0.9.0 has a load factor; we pass none today.
+A spec where the SLO decides needs the simulator's latency to rise with load.
+Check whether `llm-d-inference-sim` v0.9.0 has a load factor; we pass none
+today.
 
 **Benchmark.** The G1 replication in
 [keda-recipe-comparison](https://github.com/ev-shindin/llm-scaling-manager/blob/bench/keda-recipe-arm/docs/plans/benchmark/keda-recipe-comparison.md)
 (branch `bench/keda-recipe-arm`) needs the attainment scorer it lists as to-do.
 That scorer and our `wva_slo_attainment_ratio` are cross-checks of each other
-on the same requests. Add the arm **ours-slo**: an `interactive` tier with
-`ttft 3s / tpot 100ms p90` and `mode: enforce`. These predictions are
-registered before any run:
+on the same requests. Add the arm **ours-slo**: an `interactive` tier in sizer
+mode with `ttft 3s / tpot 100ms p90`. These predictions are registered before
+any run:
 
 - TPOT does not bind for either arm: a 32B replica at our 0.68 point holds a
   batch of about 30. **ours-slo's advantage over ours must come from loosening
-  the fill against TTFT.** Expect `R̄_ours-slo < R̄_ours`, with attainment
-  within 2 pp.
-- If ours-slo does not hold fewer replicas than ours on this load, the
-  derivation bought nothing on llm-d's benchmark. The P/D and mixed-accelerator
+  against TTFT.** Expect `R̄_ours-slo < R̄_ours`, with attainment within 2 pp.
+- If ours-slo does not hold fewer replicas than ours on this load, the SLO
+  analyzer bought nothing on llm-d's benchmark. The P/D and mixed-accelerator
   cases are then the whole case for it, and they need their own runs.
 - Attainment in the first 120 s of each rise is reported apart from steady
   state.
 
 ## Alternatives considered
 
-- **SLO logic inside saturation.** It needs no ordering change, but it puts
-  histogram handling into a package already measured as too big. It also loses
-  the free observe mode and the isolation a registered analyzer gets.
-- **A combined `(D, P)` from two analyzers.** It can only tighten (max/min), or
-  it under-orders the floor when loosening (rescale). See
-  [above](#why-its-d-p-is-not-combined-with-saturations).
+- **SLO logic inside saturation.** It puts histogram handling into a package
+  already measured as too big, and it loses the free shadow mode and the
+  isolation a registered analyzer gets.
+- **Hand saturation a per-variant fill** (this proposal's earlier draft). It
+  reaches `pricingK` and k1 directly, but it needs an engine ordering change, a
+  new per-variant parameter through saturation, and its own fallback and
+  "who decided" reporting. The composite gives all three, and pricing `P` from
+  `itl.TokenRate` at the SLO's fill avoids the rescale error that motivated
+  the draft.
+- **Combining by rescaling saturation's capacity.** It under-orders when
+  loosening by `ITL(k_slo) ÷ ITL(k_static)`. The composite's
+  `N = D_i ÷ P_i`, each in the analyzer's own units, does not.
 - **llm-d's control law in the controller.** It is reactive (latency rises after
   capacity is short), it does not price variants, and it is blind to P/D.
   Phase 3 keeps its one good property, correction from measured latency, at a
@@ -517,18 +577,22 @@ registered before any run:
 
 ## Open questions
 
-1. **`ρ` across a shape change.** Is it reset with the ITL window on a
+1. **The per-SO hold.** Does the composite take per-SO holds (`Cap` on one
+   ScaledObject), or only the per-role holds engine-structure plans? The SLO
+   needs per SO: infeasibility is a property of one accelerator, not of a
+   role.
+2. **`ρ` across a shape change.** Is it reset with the ITL window on a
    shape-change hold, or kept? Keeping it is conservative only if the new
    shape's tail is no wider.
-2. **The window.** 5 m matches the line. llm-d smooths over 45 s. A shorter
+3. **The window.** 5 m matches the line. llm-d smooths over 45 s. A shorter
    window makes attainment noisy on a small fleet.
-3. **Several models behind one pool.** The router's latency metrics carry
+4. **Several models behind one pool.** The router's latency metrics carry
    `model_name`, but the arrival-rate join already refuses ambiguity
    (`count == 1`). Should attainment be refused there too, or published with
    a warning?
-4. **Scale to zero.** Should an SLO tier warn when the TTFT target is below the
+5. **Scale to zero.** Should an SLO tier warn when the TTFT target is below the
    measured cold-start time? Proposed: warn in the effective-policy log line,
    do not refuse.
-5. **The utilization-share optimizer** reads `ScaleUpThreshold` directly
-   (`utilization_share_groups.go:359`). It must read the variant's fill
-   instead, or the two are mutually exclusive in phase 1.
+6. **The utilization-share optimizer** reads `ScaleUpThreshold` and the
+   per-replica capacity directly (`utilization_share_groups.go:359`). Does it
+   consume the composite's `P_com`, and does it after the branch lands?
