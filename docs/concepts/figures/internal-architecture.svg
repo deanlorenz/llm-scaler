@@ -1,161 +1,193 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 720" width="960" height="720" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="13" fill="#1f2328">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 870" width="1000" height="870" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="13" fill="#1f2328">
   <defs>
-    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+    <marker id="blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M0,0 L10,5 L0,10 z" fill="#0969da"/>
     </marker>
-    <marker id="g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
-      <path d="M0,0 L10,5 L0,10 z" fill="#57606a"/>
+    <marker id="gray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6e7781"/>
     </marker>
+    <marker id="green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1a7f37"/>
+    </marker>
+    <filter id="shadow" x="-5%" y="-5%" width="110%" height="120%">
+      <feDropShadow dx="0" dy="1" stdDeviation="1.2" flood-color="#1f2328" flood-opacity="0.12"/>
+    </filter>
   </defs>
-  <rect width="960" height="720" rx="12" fill="#ffffff"/>
-  <text x="20" y="30" font-size="12" fill="#0969da" font-weight="600">INSIDE THE SCALING MANAGER: one process, the wva-controller-manager Deployment</text>
+  <rect width="1000" height="870" rx="14" fill="#ffffff"/>
 
-  <!-- column headers -->
-  <text x="125" y="58" text-anchor="middle" font-size="12" fill="#57606a" font-weight="600">WHAT IT READS</text>
-  <text x="480" y="58" text-anchor="middle" font-size="12" fill="#57606a" font-weight="600">WHAT DECIDES (leader replica only)</text>
-  <text x="835" y="58" text-anchor="middle" font-size="12" fill="#57606a" font-weight="600">OUTSIDE IT</text>
-  <text x="835" y="180" text-anchor="middle" font-size="12" fill="#57606a" font-weight="600">WHAT IT WRITES</text>
+  <!-- title -->
+  <text x="24" y="38" font-size="20" font-weight="700">Inside llm-scaling-manager</text>
+  <text x="24" y="60" font-size="12.5" fill="#57606a">One process, the wva-controller-manager Deployment. With several replicas, only the leader runs the engines.</text>
 
-  <!-- inputs -->
+  <!-- outside band -->
+  <text x="24" y="92" font-size="11" font-weight="700" fill="#6e7781" letter-spacing="1">OUTSIDE THE PROCESS</text>
+  <rect x="20" y="102" width="250" height="56" rx="10" fill="#f6f8fa" stroke="#d0d7de" filter="url(#shadow)"/>
+  <text x="145" y="125" text-anchor="middle" font-weight="600">Kubernetes API · Prometheus</text>
+  <text x="145" y="144" text-anchor="middle" font-size="12" fill="#57606a">each pool's EPP · Kueue (optional)</text>
+  <rect x="730" y="102" width="250" height="56" rx="10" fill="#f6f8fa" stroke="#d0d7de" filter="url(#shadow)"/>
+  <text x="855" y="125" text-anchor="middle" font-weight="600">KEDA + the HPA it creates</text>
+  <text x="855" y="144" text-anchor="middle" font-size="12" fill="#57606a">one ScaledObject per variant</text>
+  <line x1="145" y1="158" x2="145" y2="180" stroke="#6e7781" stroke-width="2" marker-end="url(#gray)"/>
+
+  <!-- lane A: reads -->
+  <rect x="20" y="184" width="250" height="610" rx="14" fill="#f6f8fa" stroke="#d0d7de"/>
+  <text x="36" y="208" font-size="11" font-weight="700" fill="#6e7781" letter-spacing="1">READS</text>
   <g font-size="12">
-    <rect x="20" y="70" width="210" height="58" rx="6" fill="#f6f8fa" stroke="#57606a"/>
-    <text x="30" y="90" font-weight="600">Policy reader</text>
-    <text x="30" y="106">scaling-policy ConfigMaps, live</text>
-    <text x="30" y="121" font-size="10" fill="#57606a">internal/controller, internal/config</text>
+    <rect x="36" y="220" width="218" height="74" rx="9" fill="#ffffff" stroke="#d0d7de" filter="url(#shadow)"/>
+    <text x="48" y="242" font-weight="700" font-size="13">Policy reader</text>
+    <text x="48" y="260" fill="#424a53">scaling policy, re-read live</text>
+    <text x="48" y="280" font-size="10" fill="#8c959f" font-family="ui-monospace, SFMono-Regular, Consolas, monospace">internal/controller · config</text>
 
-    <rect x="20" y="138" width="210" height="58" rx="6" fill="#f6f8fa" stroke="#57606a"/>
-    <text x="30" y="158" font-weight="600">Workload registry</text>
-    <text x="30" y="174">ScaledObjects KEDA asks about</text>
-    <text x="30" y="189" font-size="10" fill="#57606a">internal/registry</text>
+    <rect x="36" y="306" width="218" height="74" rx="9" fill="#ffffff" stroke="#d0d7de" filter="url(#shadow)"/>
+    <text x="48" y="328" font-weight="700" font-size="13">Workload registry</text>
+    <text x="48" y="346" fill="#424a53">the ScaledObjects KEDA asks about</text>
+    <text x="48" y="366" font-size="10" fill="#8c959f" font-family="ui-monospace, SFMono-Regular, Consolas, monospace">internal/registry</text>
 
-    <rect x="20" y="206" width="210" height="58" rx="6" fill="#f6f8fa" stroke="#57606a"/>
-    <text x="30" y="226" font-weight="600">Prometheus source</text>
-    <text x="30" y="242">PromQL, cached per cycle</text>
-    <text x="30" y="257" font-size="10" fill="#57606a">internal/collector/source/prometheus</text>
+    <rect x="36" y="392" width="218" height="74" rx="9" fill="#ffffff" stroke="#d0d7de" filter="url(#shadow)"/>
+    <text x="48" y="414" font-weight="700" font-size="13">Prometheus source</text>
+    <text x="48" y="432" fill="#424a53">engine and EPP metrics, PromQL</text>
+    <text x="48" y="452" font-size="10" fill="#8c959f" font-family="ui-monospace, SFMono-Regular, Consolas, monospace">internal/collector/source</text>
 
-    <rect x="20" y="410" width="210" height="58" rx="6" fill="#f6f8fa" stroke="#57606a"/>
-    <text x="30" y="430" font-weight="600">InferencePool datastore</text>
-    <text x="30" y="446">each pool's EPP, scraped directly</text>
-    <text x="30" y="461" font-size="10" fill="#57606a">internal/datastore, source/pod</text>
+    <rect x="36" y="478" width="218" height="74" rx="9" fill="#ffffff" stroke="#8c959f" stroke-dasharray="5 4"/>
+    <text x="48" y="500" font-weight="700" font-size="13">GPU usage</text>
+    <text x="48" y="518" fill="#424a53">GPUs in use on each node</text>
+    <text x="48" y="538" font-size="10" fill="#8c959f" font-family="ui-monospace, SFMono-Regular, Consolas, monospace">internal/gpuusage</text>
 
-    <rect x="20" y="274" width="210" height="58" rx="6" fill="#f6f8fa" stroke="#57606a" stroke-dasharray="5 4"/>
-    <text x="30" y="294" font-weight="600">GPU usage refresher</text>
-    <text x="30" y="310">GPUs in use on each node</text>
-    <text x="30" y="325" font-size="10" fill="#57606a">internal/gpuusage</text>
+    <rect x="36" y="564" width="218" height="74" rx="9" fill="#ffffff" stroke="#8c959f" stroke-dasharray="5 4"/>
+    <text x="48" y="586" font-weight="700" font-size="13">Kueue reader</text>
+    <text x="48" y="604" fill="#424a53">ClusterQueue quotas</text>
+    <text x="48" y="624" font-size="10" fill="#8c959f" font-family="ui-monospace, SFMono-Regular, Consolas, monospace">internal/kueue</text>
 
-    <rect x="20" y="342" width="210" height="58" rx="6" fill="#f6f8fa" stroke="#57606a" stroke-dasharray="5 4"/>
-    <text x="30" y="362" font-weight="600">Kueue reader</text>
-    <text x="30" y="378">ClusterQueue quotas</text>
-    <text x="30" y="393" font-size="10" fill="#57606a">internal/kueue</text>
+    <rect x="36" y="690" width="218" height="74" rx="9" fill="#ffffff" stroke="#d0d7de" filter="url(#shadow)"/>
+    <text x="48" y="712" font-weight="700" font-size="13">InferencePool datastore</text>
+    <text x="48" y="730" fill="#424a53">each pool's EPP, read directly</text>
+    <text x="48" y="750" font-size="10" fill="#8c959f" font-family="ui-monospace, SFMono-Regular, Consolas, monospace">internal/datastore</text>
   </g>
 
-  <!-- steady-state engine -->
-  <rect x="270" y="70" width="420" height="400" rx="10" fill="#ddf4ff" stroke="#0969da" stroke-width="2"/>
-  <text x="290" y="94" font-weight="700" fill="#0969da">Steady-state engine, every 15 s</text>
-  <text x="290" y="110" font-size="10" fill="#57606a">internal/engines/steadystate</text>
+  <!-- lane B: decides -->
+  <rect x="290" y="184" width="420" height="610" rx="14" fill="#f3f8ff" stroke="#b6d4fe"/>
+  <text x="306" y="208" font-size="11" font-weight="700" fill="#0969da" letter-spacing="1">DECIDES</text>
+
+  <rect x="306" y="220" width="388" height="446" rx="12" fill="#ffffff" stroke="#0969da" stroke-width="2" filter="url(#shadow)"/>
+  <text x="322" y="246" font-weight="700" font-size="15">Steady-state engine</text>
+  <rect x="602" y="231" width="78" height="22" rx="11" fill="#ddf4ff"/>
+  <text x="641" y="246" text-anchor="middle" font-size="11.5" font-weight="600" fill="#0969da">every 15 s</text>
+  <text x="322" y="264" font-size="10" fill="#8c959f" font-family="ui-monospace, SFMono-Regular, Consolas, monospace">internal/engines/steadystate</text>
+
+  <g font-size="11.5">
+    <!-- 1 -->
+    <rect x="322" y="276" width="356" height="46" rx="8" fill="#f6f8fa" stroke="#d0d7de"/>
+    <circle cx="344" cy="299" r="12" fill="#0969da"/><text x="344" y="303.5" text-anchor="middle" font-size="12" font-weight="700" fill="#ffffff">1</text>
+    <text x="366" y="294" font-weight="700" font-size="13">Collect</text>
+    <text x="366" y="312" fill="#57606a">per-replica load, router queue, arrival rate</text>
+    <!-- 2 -->
+    <rect x="322" y="330" width="356" height="46" rx="8" fill="#f6f8fa" stroke="#d0d7de"/>
+    <circle cx="344" cy="353" r="12" fill="#0969da"/><text x="344" y="357.5" text-anchor="middle" font-size="12" font-weight="700" fill="#ffffff">2</text>
+    <text x="366" y="348" font-weight="700" font-size="13">Saturation analyzer</text>
+    <text x="366" y="366" fill="#57606a">how full each replica is; capacity the model needs</text>
+    <!-- 3 -->
+    <rect x="322" y="384" width="356" height="46" rx="8" fill="#ffffff" stroke="#8c959f" stroke-dasharray="5 4"/>
+    <circle cx="344" cy="407" r="12" fill="#ffffff" stroke="#0969da" stroke-width="2"/><text x="344" y="411.5" text-anchor="middle" font-size="12" font-weight="700" fill="#0969da">3</text>
+    <text x="366" y="402" font-weight="700" font-size="13">Limiter</text>
+    <text x="366" y="420" fill="#57606a">this cycle's GPU budget: free GPUs, quota, Kueue</text>
+    <!-- 4 -->
+    <rect x="322" y="438" width="356" height="46" rx="8" fill="#f6f8fa" stroke="#d0d7de"/>
+    <circle cx="344" cy="461" r="12" fill="#0969da"/><text x="344" y="465.5" text-anchor="middle" font-size="12" font-weight="700" fill="#ffffff">4</text>
+    <text x="366" y="456" font-weight="700" font-size="13">Optimizer</text>
+    <text x="366" y="474" fill="#57606a">replicas per variant: cheapest first, or by score in budget</text>
+    <!-- 5 -->
+    <rect x="322" y="492" width="356" height="46" rx="8" fill="#ffffff" stroke="#8c959f" stroke-dasharray="5 4"/>
+    <circle cx="344" cy="515" r="12" fill="#ffffff" stroke="#0969da" stroke-width="2"/><text x="344" y="519.5" text-anchor="middle" font-size="12" font-weight="700" fill="#0969da">5</text>
+    <text x="366" y="510" font-weight="700" font-size="13">Utilization share</text>
+    <text x="366" y="528" fill="#57606a">moves GPUs between the models of one quota</text>
+    <!-- 6 -->
+    <rect x="322" y="546" width="356" height="46" rx="8" fill="#ffffff" stroke="#8c959f" stroke-dasharray="5 4"/>
+    <circle cx="344" cy="569" r="12" fill="#ffffff" stroke="#0969da" stroke-width="2"/><text x="344" y="573.5" text-anchor="middle" font-size="12" font-weight="700" fill="#0969da">6</text>
+    <text x="366" y="564" font-weight="700" font-size="13">Scale to zero</text>
+    <text x="366" y="582" fill="#57606a">idle past its retention period: zero replicas</text>
+    <!-- 7 -->
+    <rect x="322" y="600" width="356" height="50" rx="8" fill="#ddf4ff" stroke="#0969da"/>
+    <circle cx="344" cy="625" r="12" fill="#0969da"/><text x="344" y="629.5" text-anchor="middle" font-size="12" font-weight="700" fill="#ffffff">7</text>
+    <text x="366" y="620" font-weight="700" font-size="13">Actuator</text>
+    <text x="366" y="638" fill="#57606a">publishes each decision, its Event and metrics</text>
+  </g>
+
+  <rect x="306" y="680" width="388" height="58" rx="12" fill="#ffffff" stroke="#0969da" stroke-width="2" stroke-dasharray="7 4"/>
+  <text x="322" y="703" font-weight="700" font-size="14">Scale-from-zero engine</text>
+  <rect x="592" y="690" width="88" height="22" rx="11" fill="#ddf4ff"/>
+  <text x="636" y="705" text-anchor="middle" font-size="11.5" font-weight="600" fill="#0969da">every 100 ms</text>
+  <text x="322" y="724" font-size="12" fill="#424a53">only for a model at zero: requests in its EPP queue, one replica</text>
+
+  <rect x="306" y="748" width="388" height="36" rx="10" fill="#ffffff" stroke="#8c959f" stroke-dasharray="5 4"/>
+  <text x="322" y="771" font-weight="700" font-size="13">Warm pool</text>
+  <text x="400" y="771" font-size="12" fill="#57606a">lends a sleeping model while a replica starts</text>
+
+  <!-- lane C: writes -->
+  <rect x="730" y="184" width="250" height="610" rx="14" fill="#f0faf3" stroke="#aceebb"/>
+  <text x="746" y="208" font-size="11" font-weight="700" fill="#1a7f37" letter-spacing="1">SERVES AND WRITES</text>
   <g font-size="12">
-    <rect x="290" y="122" width="380" height="40" rx="6" fill="#ffffff" stroke="#0969da"/>
-    <text x="302" y="140" font-weight="600">Collector</text>
-    <text x="302" y="155">per-replica metrics, router queue, arrival rate</text>
-    <rect x="290" y="172" width="380" height="40" rx="6" fill="#ffffff" stroke="#0969da"/>
-    <text x="302" y="190" font-weight="600">Saturation analyzer</text>
-    <text x="302" y="205">how full each replica is; the capacity the model needs</text>
-    <rect x="290" y="222" width="380" height="40" rx="6" fill="#ffffff" stroke="#0969da" stroke-dasharray="5 4"/>
-    <text x="302" y="240" font-weight="600">Limiter</text>
-    <text x="302" y="255">this cycle's GPU budget: free GPUs, quota, Kueue</text>
-    <rect x="290" y="272" width="380" height="40" rx="6" fill="#ffffff" stroke="#0969da"/>
-    <text x="302" y="290" font-weight="600">Optimizer</text>
-    <text x="302" y="305">replicas per variant: cost-aware, or greedy-by-score in the budget</text>
-    <rect x="290" y="322" width="380" height="40" rx="6" fill="#ffffff" stroke="#0969da" stroke-dasharray="5 4"/>
-    <text x="302" y="340" font-weight="600">Utilization share</text>
-    <text x="302" y="355">moves GPUs between models in one quota</text>
-    <rect x="290" y="372" width="380" height="40" rx="6" fill="#ffffff" stroke="#0969da" stroke-dasharray="5 4"/>
-    <text x="302" y="390" font-weight="600">Scale-to-zero enforcer</text>
-    <text x="302" y="405">idle past its retention period: zero</text>
-    <rect x="290" y="422" width="380" height="40" rx="6" fill="#ffffff" stroke="#0969da"/>
-    <text x="302" y="440" font-weight="600">Actuator</text>
-    <text x="302" y="455">publishes each decision, its Event and metrics</text>
-  </g>
-  <g stroke="#0969da" stroke-width="1.5">
-    <line x1="480" y1="162" x2="480" y2="170" marker-end="url(#a)"/>
-    <line x1="480" y1="212" x2="480" y2="220" marker-end="url(#a)"/>
-    <line x1="480" y1="262" x2="480" y2="270" marker-end="url(#a)"/>
-    <line x1="480" y1="312" x2="480" y2="320" marker-end="url(#a)"/>
-    <line x1="480" y1="362" x2="480" y2="370" marker-end="url(#a)"/>
-    <line x1="480" y1="412" x2="480" y2="420" marker-end="url(#a)"/>
+    <rect x="746" y="222" width="218" height="96" rx="9" fill="#ffffff" stroke="#0969da" stroke-width="2" filter="url(#shadow)"/>
+    <text x="758" y="244" font-weight="700" font-size="13">External scaler, gRPC :9090</text>
+    <text x="758" y="263" fill="#424a53">GetMetrics: the replica count</text>
+    <text x="758" y="280" fill="#424a53">StreamIsActive: active or not</text>
+    <text x="758" y="303" font-size="11" fill="#57606a">every replica; answers as leader</text>
+
+    <rect x="746" y="340" width="218" height="74" rx="9" fill="#ddf4ff" stroke="#0969da" filter="url(#shadow)"/>
+    <text x="758" y="362" font-weight="700" font-size="13">Decision store</text>
+    <text x="758" y="380" fill="#424a53">replica count per ScaledObject</text>
+    <text x="758" y="400" font-size="10" fill="#8c959f" font-family="ui-monospace, SFMono-Regular, Consolas, monospace">internal/decision · in memory</text>
+
+    <text x="746" y="446" font-size="11" font-weight="700" fill="#1a7f37" letter-spacing="1">ALSO WRITES</text>
+    <rect x="746" y="456" width="218" height="52" rx="9" fill="#ffffff" stroke="#d0d7de"/>
+    <text x="758" y="477" font-weight="700" font-size="13">Metrics, :8443</text>
+    <text x="758" y="495" fill="#424a53">wva_* for Prometheus</text>
+    <rect x="746" y="518" width="218" height="52" rx="9" fill="#ffffff" stroke="#d0d7de"/>
+    <text x="758" y="539" font-weight="700" font-size="13">Events</text>
+    <text x="758" y="557" fill="#424a53">on each ScaledObject</text>
+    <rect x="746" y="580" width="218" height="52" rx="9" fill="#ffffff" stroke="#d0d7de"/>
+    <text x="758" y="601" font-weight="700" font-size="13">Pod annotations</text>
+    <text x="758" y="619" fill="#424a53">deletion cost; transfer marks</text>
+    <rect x="746" y="642" width="218" height="52" rx="9" fill="#ffffff" stroke="#d0d7de"/>
+    <text x="758" y="663" font-weight="700" font-size="13">ConfigMap</text>
+    <text x="758" y="681" fill="#424a53">utilization-share history</text>
   </g>
 
-  <!-- scale from zero + warm pool -->
-  <rect x="270" y="490" width="420" height="62" rx="10" fill="#ddf4ff" stroke="#0969da" stroke-width="2"/>
-  <text x="290" y="512" font-weight="700" fill="#0969da">Scale-from-zero engine, every 100 ms</text>
-  <text x="290" y="530" font-size="12">a model at zero with requests queued in its EPP: one replica</text>
-  <text x="290" y="545" font-size="10" fill="#57606a">internal/engines/scalefromzero</text>
-
-  <rect x="270" y="566" width="420" height="58" rx="10" fill="#f6f8fa" stroke="#57606a" stroke-dasharray="5 4"/>
-  <text x="290" y="588" font-weight="700">Warm pool</text>
-  <text x="290" y="606" font-size="12">lends a pod with the model asleep while a replica starts</text>
-  <text x="290" y="619" font-size="10" fill="#57606a">internal/warmpool</text>
-
-  <!-- inputs to engines -->
-  <g stroke="#57606a" stroke-width="1.5">
-    <line x1="230" y1="99" x2="266" y2="99" marker-end="url(#g)"/>
-    <line x1="230" y1="167" x2="266" y2="167" marker-end="url(#g)"/>
-    <line x1="230" y1="235" x2="286" y2="150" marker-end="url(#g)"/>
-    <line x1="230" y1="303" x2="286" y2="240" marker-end="url(#g)"/>
-    <line x1="230" y1="371" x2="286" y2="252" marker-end="url(#g)"/>
-    <line x1="230" y1="439" x2="266" y2="515" marker-end="url(#g)"/>
+  <!-- reads -> engines -->
+  <g stroke="#6e7781" stroke-width="1.8">
+    <line x1="254" y1="257" x2="302" y2="257" marker-end="url(#gray)"/>
+    <line x1="254" y1="343" x2="302" y2="343" marker-end="url(#gray)"/>
+    <line x1="254" y1="429" x2="302" y2="429" marker-end="url(#gray)"/>
+    <line x1="254" y1="515" x2="302" y2="515" marker-end="url(#gray)"/>
+    <line x1="254" y1="601" x2="302" y2="601" marker-end="url(#gray)"/>
+    <line x1="254" y1="709" x2="302" y2="709" marker-end="url(#gray)"/>
   </g>
 
-  <!-- outputs -->
-  <g font-size="12">
-    <rect x="730" y="190" width="210" height="80" rx="6" fill="#ddf4ff" stroke="#0969da" stroke-width="2"/>
-    <text x="740" y="211" font-weight="700">Decision store</text>
-    <text x="740" y="228">in memory: the replica count</text>
-    <text x="740" y="244">for each ScaledObject</text>
-    <text x="740" y="260" font-size="10" fill="#57606a">internal/decision</text>
-
-    <rect x="730" y="300" width="210" height="96" rx="6" fill="#ddf4ff" stroke="#0969da" stroke-width="2"/>
-    <text x="740" y="321" font-weight="700">External scaler, gRPC :9090</text>
-    <text x="740" y="338">GetMetrics: the count, for the HPA</text>
-    <text x="740" y="354">StreamIsActive: active or not</text>
-    <text x="740" y="370">runs on every replica; answers</text>
-    <text x="740" y="386">once it is the leader</text>
-
-    <rect x="730" y="420" width="210" height="44" rx="6" fill="#f6f8fa" stroke="#57606a"/>
-    <text x="740" y="439" font-weight="600">Metrics :8443</text>
-    <text x="740" y="455">wva_* for Prometheus</text>
-
-    <rect x="730" y="472" width="210" height="44" rx="6" fill="#f6f8fa" stroke="#57606a"/>
-    <text x="740" y="491" font-weight="600">Events</text>
-    <text x="740" y="507">on each ScaledObject</text>
-
-    <rect x="730" y="524" width="210" height="58" rx="6" fill="#f6f8fa" stroke="#57606a"/>
-    <text x="740" y="543" font-weight="600">Pod annotations</text>
-    <text x="740" y="559">deletion cost; transfer marks</text>
-    <text x="740" y="574">of utilization share</text>
-
-    <rect x="730" y="590" width="210" height="44" rx="6" fill="#f6f8fa" stroke="#57606a"/>
-    <text x="740" y="609" font-weight="600">ConfigMap</text>
-    <text x="740" y="625">utilization-share history</text>
+  <!-- engines -> decision store -> scaler -->
+  <g stroke="#0969da" stroke-width="2.2" fill="none">
+    <polyline points="678,625 714,625 714,377 742,377" marker-end="url(#blue)"/>
+    <polyline points="694,709 722,709 722,392 742,392" marker-end="url(#blue)"/>
+    <line x1="855" y1="340" x2="855" y2="322" marker-end="url(#blue)"/>
   </g>
-
-  <!-- engines to outputs -->
-  <g stroke="#0969da" stroke-width="2">
-    <line x1="670" y1="442" x2="726" y2="250" marker-end="url(#a)"/>
-    <line x1="690" y1="520" x2="726" y2="262" marker-end="url(#a)"/>
-    <line x1="835" y1="270" x2="835" y2="296" marker-end="url(#a)"/>
+  <g stroke="#1a7f37" stroke-width="1.6" fill="none">
+    <line x1="714" y1="482" x2="742" y2="482" marker-end="url(#green)"/>
+    <line x1="714" y1="544" x2="742" y2="544" marker-end="url(#green)"/>
   </g>
-  <line x1="690" y1="450" x2="726" y2="470" stroke="#57606a" stroke-width="1.5" marker-end="url(#g)"/>
+  <circle cx="714" cy="482" r="3" fill="#0969da"/>
+  <circle cx="714" cy="544" r="3" fill="#0969da"/>
 
-  <!-- KEDA -->
-  <rect x="730" y="80" width="210" height="70" rx="6" fill="#f6f8fa" stroke="#57606a"/>
-  <text x="835" y="106" text-anchor="middle" font-weight="700">KEDA</text>
-  <text x="835" y="124" text-anchor="middle" font-size="12">and the HPA it made</text>
-  <text x="835" y="140" text-anchor="middle" font-size="12">for each ScaledObject</text>
-  <path d="M940,348 C957,348 957,115 944,115" fill="none" stroke="#0969da" stroke-width="2" marker-start="url(#a)" marker-end="url(#a)"/>
-  <text x="900" y="166" font-size="11" fill="#0969da">asks</text>
+  <!-- KEDA <-> external scaler, drawn over the lane -->
+  <line x1="900" y1="161" x2="900" y2="218" stroke="#0969da" stroke-width="2.5" marker-start="url(#blue)" marker-end="url(#blue)"/>
+  <rect x="742" y="163" width="148" height="18" rx="9" fill="#ffffff"/>
+  <text x="816" y="176" text-anchor="middle" font-size="11" font-weight="600" fill="#0969da">GetMetrics · StreamIsActive</text>
 
-  <text x="20" y="664" font-size="12" fill="#57606a">Dashed boxes: optional, or only when configured. Every component runs on the leader replica except the external</text>
-  <text x="20" y="681" font-size="12" fill="#57606a">scaler, which runs on all of them and refuses to answer KEDA until its replica becomes the leader.</text>
-  <text x="20" y="698" font-size="12" fill="#57606a">The controller never writes a replica count: KEDA's HPA does, from GetMetrics.</text>
+  <!-- legend -->
+  <g font-size="12" fill="#57606a">
+    <line x1="24" y1="826" x2="54" y2="826" stroke="#0969da" stroke-width="2.5" marker-end="url(#blue)"/>
+    <text x="62" y="830">the decision path</text>
+    <line x1="190" y1="826" x2="220" y2="826" stroke="#6e7781" stroke-width="2" marker-end="url(#gray)"/>
+    <text x="228" y="830">what an engine reads</text>
+    <rect x="380" y="817" width="30" height="18" rx="4" fill="#ffffff" stroke="#8c959f" stroke-dasharray="5 4"/>
+    <text x="418" y="830">optional, or only when configured</text>
+    <text x="24" y="856">The controller never writes a replica count: the HPA reads it with GetMetrics. The external scaler refuses KEDA until its replica is the leader.</text>
+  </g>
 </svg>
