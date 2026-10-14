@@ -15,7 +15,8 @@ scaling policy, read live. **Experimental.**
 ## Prerequisites
 
 Two or more models scaled by the scaling manager, under a **limiter**: a
-quota, or the physical GPU inventory
+quota (declared, or [read from Kueue](../../well-lit-paths/kueue-bounded-quotas/)),
+or the physical GPU inventory
 ([under the physical limiter](#under-the-physical-gpu-limiter) has what
 differs). You need `kubectl`, `jq`, `yq` and `make` in a checkout of this
 repository. If you do not have the models yet, the shortest route is the
