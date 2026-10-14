@@ -190,7 +190,9 @@ Deeper diagnosis — EPP metrics, scale-from-zero, slow scale-up — is in
 
 Thresholds, tiers, scale-to-zero and limiters live in the scaling-policy
 ConfigMap, `wva-scaling-policy-config` in the controller's namespace. The
-controller re-reads it live; no restart. Cluster limits an admin publishes live
+controller re-reads it live; no restart — unless it was installed out of reach
+(`WVA_WATCH_NS` naming another namespace), when it reads that ConfigMap only at
+start, as below. Cluster limits an admin publishes live
 in the same-named ConfigMap in the policy namespace (`wva-policy` by default),
 and editing that one is a cluster-admin action. The exception: a
 namespace-scoped controller does not watch a separate policy namespace, so it
@@ -246,6 +248,36 @@ These settings are read **only at startup**; changing them needs
 
 The full split is in [Configuration](configuration.md#what-a-change-needs-a-restart-or-not).
 A restart has its own cost; see [Upgrade and uninstall](upgrade-and-uninstall.md#after-every-upgrade-or-restart).
+
+## What the controller is running with
+
+The controller publishes what it has actually read and decided in one
+ConfigMap, `wva-controller-status`, in its own namespace. Read it instead of
+the log to confirm that a policy edit took, or which policy governs a
+controller:
+
+```bash
+kubectl get cm wva-controller-status -n "$NS" -o jsonpath='{.data}{"\n"}'
+```
+
+| key | value |
+| --- | --- |
+| `policyNamespace` | the namespace whose `wva-scaling-policy-config` is the cluster policy, the one limiters and the optimizer selection come from: its own, or a policy namespace such as `wva-policy` |
+| `policyConfigMap` | that ConfigMap's name |
+| `policyResourceVersion` | `metadata.resourceVersion` of the policy ConfigMap last **loaded**, accepted or rejected. Written only once that content is in force, so after an edit, a match with the ConfigMap's own `resourceVersion` means the controller runs with it. Empty when no policy ConfigMap is in force. Compare for equality only |
+| `policyAccepted` | `true`, or `false` when the `default` entry was rejected; the controller then runs without it |
+| `policyError` | why the `default` entry was rejected; empty when accepted |
+| `limiter` | the limiter in force, `<mode>/<entry names>`, e.g. `quota/install-quota`, or `none` |
+| `utilizationShare` | the optimizer's mode: `off`, `invalid`, `shadow` or `active` |
+| `utilizationShareError` | the optimizer block's error when the mode is `invalid` |
+| `leader` | the pod that wrote it |
+| `controllerInstance` | the `controller_instance` metrics label, when set |
+| `formatVersion` | `1`; bumped only for an incompatible change to these keys |
+
+Only the leader writes it, and only when a value changes. A failed write is
+logged and retried and never stops scaling, so a missing ConfigMap means the
+controller predates it or lacks the `wva-controller-status-role` grant — re-run
+`make setup-prereqs` as a cluster admin — not that it is not scaling.
 
 ## Command cheatsheet
 

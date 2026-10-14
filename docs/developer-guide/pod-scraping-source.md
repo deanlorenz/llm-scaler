@@ -93,6 +93,7 @@ source, err := pod.NewPodScrapingSource(ctx, k8sClient, config)
 | `MetricsReaderSecretNamespace` | `string` | No | `ServiceNamespace` | Namespace where the secret is located (defaults to service namespace) |
 | `MetricsReaderSecretKey` | `string` | No | `"token"` | Key in secret containing the token |
 | `BearerToken` | `string` | No | `""` | Direct Bearer token (overrides secret) |
+| `BearerTokenFile` | `string` | No | `""` | File re-read on every scrape; overrides `BearerToken`, which becomes the fallback while the file is unreadable. The datastore sets it to `/var/run/secrets/epp-metrics/token` |
 | `ScrapeTimeout` | `time.Duration` | No | `5s` | HTTP request timeout per pod |
 | `MaxConcurrentScrapes` | `int` | No | `10` | Maximum concurrent pod scrapes |
 | `DefaultTTL` | `time.Duration` | No | `30s` | Cache TTL for scraped metrics |

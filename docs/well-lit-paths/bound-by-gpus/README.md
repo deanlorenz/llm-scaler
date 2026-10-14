@@ -70,11 +70,14 @@ kubectl logs -n <wva-namespace> deploy/wva-controller-manager | grep 'GPU limite
 kubectl logs -n <wva-namespace> deploy/wva-controller-manager | grep scaling-decision
 ```
 
-On Kubernetes, a namespace-scoped controller cannot read Namespace objects, so it
-does not see `wva-policy` and reads its own ConfigMap instead — the first command
-shows it (`Could not read the managed Namespace`). Admin-owned controllers read their
-own ConfigMap by design. The Kubernetes gap is being fixed; see
-[the GPU limiter](../../reference/gpu-limiter.md#what-an-admin-sets-and-where).
+On Kubernetes, a namespace-scoped controller reads Namespace objects only
+through the grant `make setup-prereqs` creates. One set up before that grant
+existed does not see `wva-policy` and reads its own ConfigMap instead — the
+first command shows it (`Could not read the managed Namespace`), and
+`wva_policy_namespace_unverified` reads 1 — until a cluster admin re-runs
+`NAMESPACE=<ns> make setup-prereqs`, or `make enable-physical-limiter`, which
+also restarts it. Admin-owned controllers read their own ConfigMap by design;
+see [the GPU limiter](../../reference/gpu-limiter.md#what-an-admin-sets-and-where).
 
 `wva_model_scaling_blocked` carries the reason as a label. A model that wanted
 more and did not get it is a normal, visible outcome here — not an error.
@@ -100,7 +103,8 @@ not scale" from an invisible event into a declared policy somebody owns.
 The limiter is selected by the `limiters:` list on the scaling-policy
 ConfigMap's `default` entry — that list is the only thing the controller reads,
 and because it is dynamic configuration the engine rebuilds it without a
-restart. The installer writes that list for you: `WVA_LIMITER=quota` with
+restart (a namespace-scoped controller reading it from outside the namespace it
+manages reads it at startup; `make enable-physical-limiter` restarts those). The installer writes that list for you: `WVA_LIMITER=quota` with
 `WVA_QUOTAS='H200=8'` for one install's own policy, `WVA_LIMITER_TYPE` with the
 same `WVA_QUOTAS` for the cluster policy (read by the controllers listed in
 [the guide](../../guides/admin-gpu-bounding/#installation-instructions)). The quota form

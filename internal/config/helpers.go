@@ -113,6 +113,12 @@ const (
 	// PolicySourceLocal means policy comes from the controller's own namespace —
 	// the default, and correct when that namespace belongs to an admin.
 	PolicySourceLocal PolicySource = "controller-namespace"
+	// PolicySourceLocalUnverified means policy comes from the controller's own
+	// namespace because the namespaces that decide otherwise could not be read:
+	// reading a Namespace was Forbidden. A cluster admin may have published
+	// policy this controller cannot see, so this is reported, never assumed to
+	// mean "no policy applies".
+	PolicySourceLocalUnverified PolicySource = "controller-namespace-unverified"
 )
 
 // ConfigMapName returns the main ConfigMap name from environment variable or default (DefaultConfigMapName).

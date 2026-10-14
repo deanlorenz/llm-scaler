@@ -41,8 +41,10 @@ Do these on the branch you intend to tag (e.g. `main`).
    - Add a release-specific changelog under `docs/` (e.g. `docs/CHANGELOG-v0.5.2.md`) summarizing user-facing and notable changes.  
    - Optionally reference it in release notes when you create the GitHub Release.
 
-2. **Kustomize default image tag (optional)**  
-   - If you want the default kustomize install to use the new version, update `config/base/manager/kustomization.yaml`: set `newTag` to the new version (e.g. `v0.5.2`) and commit.  
+2. **Kustomize default image tag (required)**  
+   - On the commit you tag, set `newTag` in `config/base/manager/kustomization.yaml` to the release tag (e.g. `v0.5.2`) and commit. The release workflow checks this before it builds anything and fails if `newTag` does not equal the tag, because otherwise the release's own manifests deploy the floating `:main` rather than the image being released.  
+   - After the tag is pushed, set `newTag` back to `main` on `main`, so development installs keep tracking the latest build. The pinned value lives on in the tag.  
+   - Installing a release then needs no `IMG`: `git checkout vX.Y.Z && make deploy-wva` deploys `:vX.Y.Z`, and the installer pulls it `IfNotPresent` because a release tag does not move. Any other build is pinned with `IMG=<repo>@sha256:<digest>`; the installer prints a warning whenever it deploys a floating tag (`main`, `latest`, `dev`, `nightly`).  
 
 3. **Upstream dependency pins**  
    - If this release pins a new version of an upstream dependency (e.g. [llm-d-inference-sim](https://github.com/llm-d/llm-d-inference-sim)), update the version pins in the [Makefile](../../Makefile) and the referenced files (e.g. `test/e2e/fixtures/model_service_builder.go`, `test/utils/resources/llmdsim.go`) before releasing.
@@ -62,11 +64,11 @@ git push origin vX.Y.Z
 
 - Pushing a tag matching `v*` triggers [`.github/workflows/ci-release.yaml`](../../.github/workflows/ci-release.yaml), which builds the image for `linux/amd64` and `linux/arm64`, pushes it as `ghcr.io/<owner>/<repo>:<tag>` and `:latest`, and runs a Trivy scan on it. Publishing a GitHub Release runs the same workflow again.
 
-> **Note:** the workflow is being fixed. Today `ci-release.yaml` hardcodes the
-> registry path as `ghcr.io/llm-d/<repo>`, which this repository cannot push
-> to. This page describes the release after that fix, when the path is derived
-> from the repository owner. Until it lands, check the workflow's `IMAGE=` line
-> before tagging.
+> **Note:** the registry path is derived, not hardcoded: `ci-release.yaml`
+> builds `IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/<repo>`, so a fork pushes
+> to its own owner's `ghcr.io` namespace, the one the kustomization and the
+> installer pull from. It logs in with the `GHCR_TOKEN` secret, which must be
+> able to write packages for that owner.
 
 ### 2. Create the GitHub Release
 

@@ -25,6 +25,9 @@ resources:
 # needs a cluster admin. Namespace scope here is blast-radius reduction, not
 # self-service. `deploy/install.sh --check` renders this overlay and says so.
 components:
+# Admits the external scaler port only from KEDA's namespace. Listed first so
+# a later component (openshift) can repoint it. See the component.
+- ../../../components/external-scaler-networkpolicy/
 - ../../../components/namespace-scoped/
 - ../../../components/openshift/
 - ../../../components/tenant-installable/
@@ -33,3 +36,6 @@ components:
 - ../../../components/node-reader/
 # Likewise for the Kueue objects a kueue-enabled quota entry reads.
 - ../../../components/kueue-reader/
+# And for the Namespace reads that find the cluster policy namespace. Today
+# cluster-monitoring-view happens to grant them here; this does not rely on that.
+- ../../../components/policy-namespace-reader/

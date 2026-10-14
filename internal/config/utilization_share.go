@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 )
 
 // OptimizerTypeUtilizationShare selects the utilization-share optimizer: the
@@ -590,4 +592,28 @@ func (c *Config) UtilizationShareWakeScores(namespace, modelID string) (zNamespa
 func (c *Config) UtilizationShareActive() bool {
 	us, selected, err := c.UtilizationShare()
 	return err == nil && selected && !us.Shadow
+}
+
+// UtilizationShareMode returns the mode the optimizer's configuration puts it
+// in -- one of the constants.UtilizationShareMode* values -- and, when that
+// mode is invalid, the configuration error.
+// Thread-safe.
+func (c *Config) UtilizationShareMode() (string, error) {
+	us, selected, err := c.UtilizationShare()
+	return UtilizationShareModeOf(us, selected, err), err
+}
+
+// UtilizationShareModeOf maps what Config.UtilizationShare returned to the
+// optimizer's mode: invalid on an error, off when nothing is selected, shadow
+// or active otherwise.
+func UtilizationShareModeOf(us UtilizationShare, selected bool, err error) string {
+	switch {
+	case err != nil:
+		return constants.UtilizationShareModeInvalid
+	case !selected:
+		return constants.UtilizationShareModeOff
+	case us.Shadow:
+		return constants.UtilizationShareModeShadow
+	}
+	return constants.UtilizationShareModeActive
 }

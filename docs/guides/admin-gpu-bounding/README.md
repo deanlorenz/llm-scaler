@@ -39,9 +39,11 @@ from the nodes its running pods are on. A workload with neither gets no budget.
 
 <!-- guide:deploy.enable start -->
 ```bash
-# Publishes cluster policy AND grants every controller the node read it then
-# requires — grants first, because declaring the limiter without them takes
-# out every install that lacks node access at once.
+# Publishes cluster policy AND grants every controller that passes
+# verification the node read it then requires — grants first, because
+# declaring the limiter without them takes out every install that lacks node
+# access at once. Read the list it prints first: it names any controller it
+# will restart, and the summary names any it skipped as NOT bound.
 make enable-physical-limiter
 ```
 <!-- guide:deploy.enable end -->
@@ -50,57 +52,32 @@ Grants come first, then the policy: declaring the limiter without them takes out
 every install that lacks node access at once. Controllers are discovered rather than
 configured — the hazard is the install you forgot.
 
-Policy lands where the command *expects* each controller to read it: the
-well-known namespace for a self-managed controller, its own ConfigMap for an
-admin-owned one. Admin-owned controllers (cluster-scoped, or out-of-reach) read
-their own ConfigMap **by design** and never `wva-policy`. Self-managed ones read
-`wva-policy` only if they can read Namespace objects — **on Kubernetes they
-cannot** (being fixed), so for them the command writes `wva-policy`, which they
-never see, and leaves their own ConfigMap, which they do read, untouched. The
-closing banner (`The ... limiter is now in force for every WVA on this cluster`)
-is therefore wrong for every self-managed controller on Kubernetes; the
-[`verify.source`](#verification) step is the truth.
+Policy lands where each controller actually reads it: for a self-managed
+controller, the namespace its managed namespace's `wva.llmd.ai/policy-namespace`
+label names, else the well-known namespace; for an admin-owned one, its own
+ConfigMap. A self-managed controller also gets `get` on namespaces, limited to
+the names it reads (its own namespace, `wva-policy` and its policy namespace),
+which it needs to find its policy at all. A controller installed later gets both
+grants from `make setup-prereqs`.
 
-### Blast radius — read before running it
-
-`deploy/lib/physical_limiter.sh` acts on every namespace it decides holds a
-controller, and it decides by label. For each one it:
-
-| action | on what |
-| --- | --- |
-| grants node read (`gpu-inventory`), or Kueue read (`quota` with `WVA_QUOTA_KUEUE=true`), cluster-wide | the ServiceAccount named by the **first Deployment labelled `app.kubernetes.io/name=workload-variant-autoscaler`** in that namespace — any Deployment carrying the label, not only a controller |
-| grants `get`, `list`, `watch` on every ConfigMap in the policy namespace | that ServiceAccount, when the controller looks self-managed |
-| **overwrites** the `limiters:` list in the `default` entry of `wva-scaling-policy-config` | the policy namespace, and the controller's **own** ConfigMap for every admin-owned controller (cluster-scoped, or out-of-reach). Other keys are kept; any limiter a tenant or admin had there is replaced |
-| `kubectl rollout restart` of **every Deployment with that label** in the namespace | a self-managed controller that started before the policy namespace existed, so it re-resolves its policy source. **On Kubernetes this achieves nothing** — the restarted controller still cannot read Namespaces and comes back on its own ConfigMap — yet it also restarts the **warm-pool Deployments** in that namespace, which carry the label and **drop every model they had loaded** |
-
-So a Deployment anyone labels `app.kubernetes.io/name=workload-variant-autoscaler`
-gets its ServiceAccount a cluster-wide node read. Discovery by label is being
-replaced; until then, name the targets and read the list the command prints
-(`<ns>/<sa> — reads policy from <ns>`) before trusting it:
-
-```bash
-make enable-physical-limiter WVA_LIMITER_TARGETS='team-a team-b'
-```
-
-On Kubernetes, until the namespace read is granted (by hand —
-[manifest](../admin-cluster-setup/README.md#grant-the-namespace-read-by-hand) —
-or by the fix), **leave self-managed namespaces with a warm pool out of
-`WVA_LIMITER_TARGETS`**: for them the command bounds nothing and restarts the
-pool.
+**Expect restarts, on every run.** A namespace-scoped controller caches
+ConfigMaps only in the namespace it manages, so it reads a policy anywhere else
+once, at startup. `make enable-physical-limiter` and `make disable-physical-limiter`
+therefore restart (`kubectl rollout restart`) every namespace-scoped controller
+whose policy source is outside the namespace it manages: a self-managed one
+reading `wva-policy` (or the namespace its label names), and an out-of-reach one
+reading its own ConfigMap in `wva-<namespace>`. A cluster-scoped controller
+reloads policy live and is not restarted. The list printed before anything
+changes marks each one `WILL BE RESTARTED`. If a restart or any other step fails,
+the command exits non-zero and names what failed; it does not report the limiter
+in force (or removed) for a controller that does not read it yet. Changing the
+`wva.llmd.ai/policy-namespace` label later has the same cause: re-run
+`make enable-physical-limiter` to grant the new namespace and restart the
+controller.
 
 Cluster scope in a budget is **per controller**: N controllers each enforce
 their own copy, so the cluster permits N times the figure. See
 [Configuration](#configuration).
-
-> **Namespace-scoped controllers on Kubernetes do not read `wva-policy` yet.**
-> They cannot read Namespace objects, so they cannot see that the policy
-> namespace exists, and keep using their own ConfigMap — which this command does
-> not write for them. They still receive the node read. Being fixed; until then
-> grant each such ServiceAccount `get` on namespaces
-> ([manifest](../admin-cluster-setup/README.md#grant-the-namespace-read-by-hand))
-> and restart it, or use the out-of-reach shape, whose own ConfigMap this
-> command does write. The verification below — not the command's banner — shows
-> which source each controller took.
 
 ## Verification
 
@@ -114,19 +91,25 @@ kubectl get pods -A -l app.kubernetes.io/name=workload-variant-autoscaler
 <!-- guide:verify.source start -->
 ```bash
 # Which policy each controller actually reads -- the truth, whatever the
-# enable command printed. "the well-known namespace" (or "the namespace
-# this one is labelled with") means a policy namespace governs it. The
-# own-ConfigMap branch logs only at V(1), so at the default verbosity NO
-# such line means the controller reads its own ConfigMap; "Could not read
-# the managed Namespace" means it never saw wva-policy. Logged once at
-# startup, so a long-running controller's line may have rotated out; a
-# restart prints it again.
+# enable command printed. The controller publishes it in the
+# wva-controller-status ConfigMap in its own namespace: the policy
+# namespace, the limiter in force, and whether the policy was accepted.
+# A controller that predates that ConfigMap, or lacks the Role to write it,
+# falls back to its startup log: "the well-known namespace" (or "the
+# namespace this one is labelled with") means a policy namespace governs
+# it. The own-ConfigMap branch logs only at V(1), so at the default
+# verbosity NO such line means the controller reads its own ConfigMap;
+# "Could not read the managed Namespace" or "Cannot tell whether" means it
+# never saw wva-policy. Logged once at startup, so a long-running
+# controller's line may have rotated out; a restart prints it again.
 for ns in $(kubectl get deploy -A -l app.kubernetes.io/name=workload-variant-autoscaler,control-plane=controller-manager \
     -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{end}'); do
   echo "== $ns"
-  kubectl logs -n "$ns" deploy/wva-controller-manager \
-    | grep -E 'Cluster policy comes from|Could not read the managed Namespace' \
-    || echo "   (no line: reads its own ConfigMap in $ns)"
+  kubectl get cm wva-controller-status -n "$ns" \
+    -o jsonpath='{.data.policyNamespace} {.data.limiter} {.data.policyAccepted}{"\n"}' 2>/dev/null \
+    || kubectl logs -n "$ns" deploy/wva-controller-manager \
+    | grep -E 'Cluster policy comes from|Could not read the managed Namespace|Cannot tell whether' \
+    || echo "   (no status, no line: reads its own ConfigMap in $ns)"
 done
 ```
 <!-- guide:verify.source end -->
@@ -145,7 +128,11 @@ done
 # -A12 rather than -A3: a quota entry is eight lines and -A3 cut off
 # namespaceQuotas and every number, so the budget that was just
 # published could not be read back from the verification step.
-kubectl get configmap wva-scaling-policy-config -n wva-policy \
+# The policy namespace is the policyNamespace a controller publishes in
+# its wva-controller-status ConfigMap (above), else wva-policy.
+POLICY_NS=$(kubectl get cm wva-controller-status -n <wva-namespace> \
+  -o jsonpath='{.data.policyNamespace}' 2>/dev/null)
+kubectl get configmap wva-scaling-policy-config -n "${POLICY_NS:-wva-policy}" \
   -o jsonpath='{.data.default}' | grep -A12 limiters
 kubectl logs -n <wva-namespace> deploy/wva-controller-manager | grep "GPU budgets available"
 kubectl logs -n <wva-namespace> deploy/wva-controller-manager \
@@ -153,9 +140,11 @@ kubectl logs -n <wva-namespace> deploy/wva-controller-manager \
 ```
 <!-- guide:verify.budget end -->
 
-The first command reads `wva-policy`, which governs only the controllers whose
-startup line names the well-known namespace. For the others, read
-`wva-scaling-policy-config` in the controller's own namespace.
+The first command reads the policy namespace (`wva-policy` unless the managed
+namespace's `wva.llmd.ai/policy-namespace` label names another), which governs only the controllers whose
+`wva-controller-status` `policyNamespace` (or startup line) names it. For the
+others, read `wva-scaling-policy-config` in the namespace their
+`policyNamespace` names — their own, for an admin-owned controller.
 
 ## Cleanup
 
@@ -189,8 +178,56 @@ silently.
 | `WVA_QUOTAS` | — (**required** by `quota`) | `'H200=8 A100=4'` |
 | `WVA_QUOTA_SCOPE` | `namespace` | `cluster` |
 | `WVA_QUOTA_KUEUE` | `false` | `true` |
-| `WVA_POLICY_NS` | `wva-policy` | `platform-policy` |
-| `WVA_LIMITER_TARGETS` | every controller found | `team-a team-b` |
+| `WVA_LIMITER_TARGETS` | every labelled controller that passes the checks below | `team-a team-b` |
+| `WVA_CONTROLLER_SA` | `wva-controller-manager` | `my-wva-sa` |
+| `WVA_CONTROLLER_IMAGE_REPOS` | `ghcr.io/ev-shindin/llm-scaling-manager`, plus the repository of `IMG` (when it differs) | `'registry.local/wva ghcr.io/ev-shindin/llm-scaling-manager'` |
+
+A Deployment carrying the controller label is granted only when it runs as
+`WVA_CONTROLLER_SA` and has a `manager` container whose image comes from one of
+`WVA_CONTROLLER_IMAGE_REPOS`. Anything else is named as `SKIPPED` and granted
+nothing, and the list to be granted is printed first.
+
+These checks are **signals, not proof**. Any tenant can create a ServiceAccount
+named `wva-controller-manager` and run the public image in a container named
+`manager`. The checks stop a grant to an account that a Deployment merely
+names, such as `default`. They do not stop a tenant who sets out to pass them.
+Where tenants are not trusted, run their controllers in admin-owned namespaces
+([the `WVA_WATCH_NS` shape](../../reference/gpu-limiter.md#the-arrangement-where-the-bound-does-hold))
+and name exactly those namespaces:
+
+```bash
+make enable-physical-limiter WVA_LIMITER_TARGETS='wva-team-a wva-team-b'
+```
+
+A namespace named in `WVA_LIMITER_TARGETS` is vouched for by the admin, so its
+controller's image is not checked; the ServiceAccount and the `manager`
+container still are. That is also how a controller built from a mirror or a
+custom image gets granted. The alternative is to list the mirror in
+`WVA_CONTROLLER_IMAGE_REPOS`. When that is unset, it is the published repository
+plus the repository of `IMG`, as `make` splits it.
+
+The closing summary names the controllers the limiter is in force for, and lists
+every skipped Deployment as **NOT bound**, with the reason. A namespace named in
+`WVA_LIMITER_TARGETS` where no controller is found is listed as NOT bound too,
+and nothing is written for it. A skipped controller
+keeps the policy it read before. `make disable-physical-limiter` does not write a
+skipped controller's policy either. If that policy still declares a limiter, it
+says so. When a step fails, both commands exit non-zero and name the step that
+failed, rather than reporting the cluster bounded or unbounded.
+
+There is no setting for the policy namespace. A self-managed controller whose
+namespace carries no `wva.llmd.ai/policy-namespace` label always reads
+`wva-policy`, a name fixed in the controller. To point one elsewhere, label the
+namespace it manages, then re-run `make enable-physical-limiter`, which grants
+and publishes there too:
+
+```bash
+kubectl label namespace <managed-namespace> wva.llmd.ai/policy-namespace=<policy-namespace>
+make enable-physical-limiter
+```
+
+`WVA_POLICY_NS`, which earlier releases read, is refused before anything changes
+when it names anything other than `wva-policy`.
 
 `WVA_LIMITER_TYPE` is not `WVA_LIMITER`. This one writes the **cluster** policy
 (and the own ConfigMap of each admin-owned controller); `WVA_LIMITER` writes a

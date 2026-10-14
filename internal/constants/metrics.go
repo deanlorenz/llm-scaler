@@ -316,6 +316,16 @@ const (
 	// until someone turns the limiter on, and then it is load-bearing.
 	WVANodeAccessDenied = "wva_node_access_denied"
 
+	// WVAPolicyNamespaceUnverified is 1 when the controller fell back to its own
+	// ConfigMap for limiters and quotas because reading the Namespaces that decide
+	// the policy source was Forbidden, and 0 otherwise. Set once at startup.
+	//
+	// A 1 means a cluster admin may have published policy (the well-known
+	// wva-policy namespace, or a wva.llmd.ai/policy-namespace label) that this
+	// controller cannot see, so it may be running under a weaker bound than the
+	// admin believes is in force.
+	WVAPolicyNamespaceUnverified = "wva_policy_namespace_unverified"
+
 	// WVAScaleFromZeroQueueFallbackActive is 1 while the scale-from-zero engine is
 	// reading the EPP flow-control queue from Prometheus because the direct EPP
 	// scrape is failing, and 0 while the direct scrape works. A sustained 1 means

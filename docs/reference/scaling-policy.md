@@ -191,8 +191,11 @@ a **namespace-scoped** controller (`--watch-namespace` set) reads that
 namespace's ConfigMap once at start and does not watch it, because its cache
 cannot hold a namespace it has no RBAC in (`cmd/main.go`). An edit there takes
 effect only when the controller restarts
-(`kubectl rollout restart deploy/wva-controller-manager -n <its ns>`). A
-cluster-scoped controller watches the policy namespace and picks the edit up live.
+(`kubectl rollout restart deploy/wva-controller-manager -n <its ns>`). The same
+holds for an out-of-reach controller (`WVA_WATCH_NS` naming another namespace)
+and its own ConfigMap in its install namespace. `make enable-physical-limiter`
+and `make disable-physical-limiter` do those restarts. A cluster-scoped
+controller watches the policy namespace and picks the edit up live.
 
 A `limiters:` list selects a **single mode**, so declare **one** of these forms:
 

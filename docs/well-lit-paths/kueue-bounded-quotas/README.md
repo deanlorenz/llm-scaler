@@ -30,16 +30,20 @@ total is what must hold**: each such namespace is capped at the queue's full
 grant (the second surprise below). And read the third surprise before choosing
 `-1` as the static cap: it decides what happens when Kueue cannot be read.
 
-**Do not use it where tenants can create their own LocalQueues** and the static
-cap is `-1`. The controller grants a namespace the quota of any ClusterQueue one
-of its LocalQueues points at, and does not check that ClusterQueue's
-`namespaceSelector` — which is what stops Kueue itself from admitting that
-namespace's work there. So a tenant who can create a LocalQueue pointing at a
-larger ClusterQueue gets that queue's grant as the controller sees it. A fix is
-being made. Until then, keep LocalQueue creation with the admin (check whether
-your Kueue install aggregates LocalQueue rights into the namespace `admin` role:
-`kubectl auth can-i create localqueues.kueue.x-k8s.io -n <ns> --as=<tenant>`), or
-keep a finite static cap, which Kueue can only tighten.
+**Check what your ClusterQueues admit where tenants can create their own
+LocalQueues** and the static cap is `-1`. The controller grants a namespace the
+quota of a ClusterQueue one of its LocalQueues points at only when that queue's
+`namespaceSelector` admits the namespace, with Kueue's semantics: no selector
+admits nothing, `{}` admits every namespace, anything else is matched against
+the namespace's labels — and a namespace whose labels the controller cannot
+read gets nothing from a selector-bearing queue. What remains open is a queue
+whose selector is `{}`, or one that matches a label the tenant can set: a tenant
+who points a LocalQueue at it gets its grant as the controller sees it, as
+Kueue would admit their work there. Keep such queues out of tenants' reach (or
+LocalQueue creation with the admin: check whether your Kueue install aggregates
+LocalQueue rights into the namespace `admin` role with
+`kubectl auth can-i create localqueues.kueue.x-k8s.io -n <ns> --as=<tenant>`),
+or keep a finite static cap, which Kueue can only tighten.
 
 ## What it needs
 
@@ -50,12 +54,16 @@ keep a finite static cap, which Kueue can only tighten.
   makes the grants mean anything.
 - RBAC to read them. A **cluster-scoped** install has it in the manager
   ClusterRole. A **namespace-scoped** install reads LocalQueues in the namespace
-  it manages through its Role, and needs the two cluster-scoped kinds from the
+  it manages through its Role, and needs the two cluster-scoped kinds, plus
+  `get` on its managed Namespace (to evaluate a `namespaceSelector`), from the
   `kueue-reader` prerequisite, which the admin phase creates
   (`make setup-prereqs SCOPE=namespace ENVIRONMENT=kubernetes`, the same run
-  that creates `node-reader`). An install that predates the prerequisite still
-  upgrades; the reader logs `external quota source unreadable` each cycle if
-  the block is turned on without it.
+  that creates `node-reader`). An install whose `kueue-reader` predates the
+  Namespace read does **not** upgrade with this block on: when the controller
+  cannot `get` its managed Namespace, the tenant's `make deploy-wva` refuses
+  and names the `make setup-prereqs` run a cluster admin makes first. Without
+  the ClusterQueue and ResourceFlavor read, the reader logs
+  `external quota source unreadable` each cycle.
 
 ## Declaring it
 
@@ -69,7 +77,8 @@ WVA_LIMITER=quota WVA_QUOTAS='H100=-1' WVA_QUOTA_KUEUE=true make deploy-wva ...
 
 # the cluster policy (see admin-gpu-bounding for which controllers read it). With WVA_QUOTA_KUEUE=true this also
 # grants each target controller the cluster-scoped half of the Kueue read
-# (ClusterQueues, ResourceFlavors), as it grants the node read for gpu-inventory.
+# (ClusterQueues, ResourceFlavors, and get on its managed Namespace only), as it
+# grants the node read for gpu-inventory.
 WVA_LIMITER_TYPE=quota WVA_QUOTAS='H100=-1' WVA_QUOTA_KUEUE=true make enable-physical-limiter
 ```
 
@@ -123,7 +132,10 @@ total.
 namespace with a LocalQueue on it is capped at the queue's full grant, so three
 of them may in sum still ask for three times what the queue admits — Kueue holds
 the excess pending, as before. Give each tenant its own ClusterQueue, with a
-cohort for borrowing, where the shared total matters.
+cohort for borrowing, where the shared total matters. Borrowing itself is not
+counted: only `nominalQuota` is read, so in a cohort that lends quota a model
+is held at its nominal share even when Kueue would admit more from borrowed
+capacity (tracked in [#136](https://github.com/ev-shindin/llm-scaling-manager/issues/136)).
 
 **A Kueue outage keeps the last grant; a Kueue that was never read leaves only
 the static entry.** A failed read keeps the last good snapshot in force, and the

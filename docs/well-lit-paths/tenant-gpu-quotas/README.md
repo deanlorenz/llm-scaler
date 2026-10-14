@@ -28,10 +28,14 @@ controller takes it from depends on where the controller runs:
 
 A policy namespace resolves only for a controller that manages its own namespace
 **and** can read Namespace objects. On Kubernetes a namespace-scoped controller
-cannot (being fixed), so today its budget is its own ConfigMap — the tenant's.
+gets that read from `make setup-prereqs`; one set up before the grant existed
+cannot, so its budget is its own ConfigMap — the tenant's — and it reports
+`wva_policy_namespace_unverified` = 1 until a cluster admin re-runs
+`make setup-prereqs`.
 `WVA_LIMITER=quota` writes that ConfigMap; `WVA_LIMITER_TYPE=quota` with
 `make enable-physical-limiter` writes the policy namespace, and the own ConfigMap
-of every admin-owned controller. Where the budget must hold against the tenant,
+of every admin-owned controller it grants, and restarts each namespace-scoped
+controller that reads its policy outside the namespace it manages. Where the budget must hold against the tenant,
 run the controller
 [out of their reach](../../guides/admin-cluster-setup/README.md#keeping-the-controller-out-of-the-tenants-reach)
 and back it with a `ResourceQuota`.

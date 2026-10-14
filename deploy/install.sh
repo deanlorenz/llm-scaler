@@ -58,8 +58,19 @@ PROMETHEUS_SECRET_NS=${PROMETHEUS_SECRET_NS:-$MONITORING_NAMESPACE}
 # cannot silently go stale. Both tags select the Always pull policy in
 # infra_wva.sh, so this changes what is pulled, not how.
 WVA_IMAGE_REPO=${WVA_IMAGE_REPO:-"ghcr.io/ev-shindin/llm-scaling-manager"}
+#
+# The tag is the one config/base/manager/kustomization.yaml names: `main` on the
+# main branch, the release tag on a release commit (release-process.md pins it
+# there), so a checkout of vX.Y.Z installs vX.Y.Z without being told.
+WVA_IMAGE_TAG=${WVA_IMAGE_TAG:-$(awk '$1 == "newTag:" {gsub(/["\r]/, "", $2); print $2; exit}' "$WVA_PROJECT/config/base/manager/kustomization.yaml" 2>/dev/null)}
 WVA_IMAGE_TAG=${WVA_IMAGE_TAG:-"main"}
-WVA_IMAGE_PULL_POLICY=${WVA_IMAGE_PULL_POLICY:-"Always"}
+# A digest (IMG=repo@sha256:<hex>) pins exactly what runs; see wva_split_image_ref.
+WVA_IMAGE_DIGEST=${WVA_IMAGE_DIGEST:-}
+# Empty means "choose by reference": Always for a moving tag (main, latest, ...),
+# IfNotPresent for a release tag or a digest -- see wva_image_pull_policy. This
+# defaulted to Always, which made that choice dead code: a pinned release tag was
+# re-pulled on every pod start for nothing.
+WVA_IMAGE_PULL_POLICY=${WVA_IMAGE_PULL_POLICY:-}
 # An existing docker-registry Secret in WVA_NS, for an image in a private
 # registry. Named rather than created here: a script that built the secret would
 # have to be handed a password, and this way the credential is created once by
@@ -117,6 +128,10 @@ fi
 # - keda on openshift: platform-managed KEDA only (no Helm install from this script).
 # - none: skip scaler install (cluster already provides external metrics).
 SCALER_BACKEND=${SCALER_BACKEND:-keda}
+# Recorded before the default lands: the external-scaler NetworkPolicy trusts an
+# explicit KEDA_NAMESPACE, and otherwise looks for where KEDA actually runs.
+KEDA_NAMESPACE_EXPLICIT=false
+[ -n "${KEDA_NAMESPACE:-}" ] && KEDA_NAMESPACE_EXPLICIT=true
 KEDA_NAMESPACE=${KEDA_NAMESPACE:-keda-system}
 # Pinned for reproducible Helm installs (used when deploy_keda actually runs helm upgrade).
 KEDA_CHART_VERSION=${KEDA_CHART_VERSION:-2.19.0}
@@ -165,6 +180,9 @@ source "$DEPLOY_LIB_DIR/infra_scaler_backend.sh"
 source "$DEPLOY_LIB_DIR/scaler_runtime.sh"
 # shellcheck source=lib/limiter_policy.sh
 source "$DEPLOY_LIB_DIR/limiter_policy.sh"
+# Function definitions only; the prereqs phase uses its policy-read grant.
+# shellcheck source=lib/physical_limiter.sh
+source "$DEPLOY_LIB_DIR/physical_limiter.sh"
 # shellcheck source=lib/infra_wva.sh
 source "$DEPLOY_LIB_DIR/infra_wva.sh"
 # shellcheck source=lib/infra_epp.sh

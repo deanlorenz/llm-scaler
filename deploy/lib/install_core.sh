@@ -57,12 +57,41 @@ wva_missing_prereqs() {
         #   wva-utilization-share-history-*  the utilization-share need history
         #                       store; without it a restart forgets the models'
         #                       peaks and caps their headroom for a window.
+        #   wva-controller-status-*  the controller-status ConfigMap; without
+        #                       it the controller scales as before and only
+        #                       the published status is missing.
+        #   wva-policy-namespace-reader-*  the Namespace get that finds a
+        #                       published cluster policy. Without it the
+        #                       controller runs on its own ConfigMap and reports
+        #                       wva_policy_namespace_unverified=1.
         case "$name" in
             wva-kueue-reader-*)
                 echo "OPTIONAL $kind/$name|the Kueue quota source (a quota limiter entry with kueue.enabled)"
                 continue ;;
+            wva-policy-namespace-reader-*)
+                echo "OPTIONAL $kind/$name|finding a cluster policy published in wva-policy (make enable-physical-limiter); without it that policy is NOT applied to this controller"
+                continue ;;
             wva-utilization-share-history-role|wva-utilization-share-history-rolebinding)
                 echo "OPTIONAL $kind/$name|the utilization-share need history, kept across controller restarts"
+                continue ;;
+            wva-controller-status-role|wva-controller-status-rolebinding)
+                echo "OPTIONAL $kind/$name|the controller-status ConfigMap (the policy version and modes the controller is running with)"
+                continue ;;
+        esac
+        # Two more that an admin phase may leave out ON PURPOSE, so a phase that
+        # sees differently (a tenant cannot read KEDA's APIService or a
+        # Prometheus CR) must not call them missing -- that reported them
+        # MISSING on every --check and refused INSTALL_PHASE=wva forever:
+        #   NetworkPolicy wva-external-scaler  written only when the admin
+        #       phase KNOWS where KEDA runs (wva_resolve_scaler_keda_namespace).
+        #   wva-metrics-reader-rolebinding-*  written only for a Prometheus
+        #       account the install was told about (wva_prometheus_scraper_sa).
+        case "$kind/$name" in
+            NetworkPolicy/wva-external-scaler)
+                echo "OPTIONAL $kind/$name|admitting only KEDA to the external scaler (:9090); without it the port is reachable by any Pod (KEDA_NAMESPACE=<ns> make setup-prereqs writes it)"
+                continue ;;
+            ClusterRoleBinding/wva-metrics-reader-rolebinding-*)
+                echo "OPTIONAL $kind/$name|Prometheus reading the controller's /metrics (PROMETHEUS_SA=<ns>/<sa> make setup-prereqs grants it)"
                 continue ;;
         esac
         case "$kind" in
@@ -172,8 +201,17 @@ print_prereqs_summary() {
     echo "=========================================="
     echo ""
     echo "  Created (or already present):"
-    wva_rendered_prereq_objects | sed 's|^\([^ ]*\) |    \1/|'
+    # Not the NetworkPolicy when this phase left it out: it was not created, and
+    # the warning above says why and how to add it.
+    wva_rendered_prereq_objects \
+        | if [ "${WVA_SCALER_NP_APPLIED:-true}" = "false" ]; then grep -vx 'NetworkPolicy wva-external-scaler' || true; else cat; fi \
+        | sed 's|^\([^ ]*\) |    \1/|'
     echo "    plus the scaler backend and monitoring, if this cluster had none"
+    if [ "${WVA_SCALER_NP_APPLIED:-true}" = "false" ]; then
+        echo ""
+        echo "  NOT created: NetworkPolicy/wva-external-scaler, so the external scaler"
+        echo "  port (:9090) is open to any Pod. See the warning above."
+    fi
     echo ""
     echo "  NOT created: the controller itself. Whoever owns $WVA_NS installs it,"
     echo "  and every later upgrade, with no cluster-scoped rights:"
@@ -435,6 +473,18 @@ main() {
         fi
 
         if [ "$DEPLOY_WVA" = "true" ]; then
+            # A cluster policy published BEFORE this install granted its read to
+            # the controllers that existed then, not to this one -- which would
+            # resolve to that policy and refuse to start for want of a RoleBinding.
+            #
+            # BEFORE deploy_wva_controller: with INSTALL_PHASE=all that call also
+            # applies the Deployment, and a grant made after it raced the first
+            # pod, which could resolve the policy, find no RoleBinding and refuse
+            # to start. A RoleBinding may name a ServiceAccount that does not exist
+            # yet, so nothing here needs the controller to be applied first.
+            if [ "$(wva_install_scope)" = "namespace" ]; then
+                pl_grant_published_policy_read "$WVA_NS" "${WVA_WATCH_NS:-$WVA_NS}"
+            fi
             WVA_APPLY_SCOPE=$([ "$phase" = "all" ] && echo all || echo prereqs) \
                 deploy_wva_controller
         fi

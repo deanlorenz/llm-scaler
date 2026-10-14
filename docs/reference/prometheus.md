@@ -129,9 +129,15 @@ spec:
 
 Prometheus scrapes with its own ServiceAccount token, so that account needs the
 install's metrics-reader ClusterRole (`wva-metrics-reader-<hash>`, `get` on
-`/metrics`; the suffix is per install). The install binds it for
-kube-prometheus-stack's account; bind your own Prometheus account if it differs
-(cluster admin).
+`/metrics`; the suffix is per install). On Kubernetes the install binds it to
+`PROMETHEUS_SA` when set, else to the one non-default account of the Prometheus
+CRs in the namespace an explicitly set `PROMETHEUS_URL` addresses, else to the
+kube-prometheus-stack this install deploys (`DEPLOY_PROMETHEUS=true`, with the
+URL in `MONITORING_NAMESPACE`). A Prometheus the installer only detected is never
+granted. Otherwise it creates no binding and warns (`make check-prereqs` lists the
+binding as optional); pass
+`PROMETHEUS_SA=<namespace>/<serviceaccount>` to grant your Prometheus
+([configuration](configuration.md)).
 
 
 
@@ -139,10 +145,28 @@ kube-prometheus-stack's account; bind your own Prometheus account if it differs
 
 ### TLS Configuration
 
+**What ships:** the Kubernetes overlays set `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY: "true"`
+in the manager ConfigMap. The installer has no CA to hand the controller there: the
+kube-prometheus-stack it deploys serves a self-signed certificate, and nothing mounts
+it into the controller, so verification on by default would stop every such install
+with `x509: certificate signed by unknown authority`. The OpenShift overlays verify
+against the service CA and ship `false`. The installer prints a warning at the end of
+any install that will connect over HTTPS without verifying.
+
 **Production Deployments:**
 - Always use HTTPS endpoints (`https://`)
-- Provide CA certificate via `PROMETHEUS_CA_CERT_PATH`
+- Mount the CA that signed the Prometheus certificate into the controller (a ConfigMap
+  or Secret volume), and set `PROMETHEUS_CA_CERT_PATH` to the file and
+  `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY` to `"false"` in the manager ConfigMap
+  (`wva-manager-config`, key `config.yaml`)
 - Never set `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true` in production
+
+The controller's own `/metrics` endpoint is the other direction: the shipped
+ServiceMonitor scrapes it with `insecureSkipVerify: true` because the controller
+generates a self-signed serving certificate in memory. To verify that scrape, start
+the controller with `--metrics-cert-path` pointing at a mounted certificate and
+replace `tlsConfig` in the ServiceMonitor with its CA, as the OpenShift overlay does
+with the service CA.
 
 **Development/Testing:**
 - You may set `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true` for local clusters
@@ -163,6 +187,28 @@ kube-prometheus-stack's account; bind your own Prometheus account if it differs
   bearer token auth — the scaling manager refuses to start if those are set alongside a plain HTTP
   URL. Note that credentials and metrics are sent in cleartext, so use this only
   on a trusted network (dev/test or a secured in-cluster path).
+
+### EPP metrics token
+
+The controller scrapes the EPP's `/metrics` with the token of a dedicated
+ServiceAccount, `wva-epp-metrics-reader`, whose only grant is `get` on the
+`/metrics` non-resource URL. The token comes from a legacy
+`kubernetes.io/service-account-token` Secret, `wva-epp-metrics-token`, mounted at
+`/var/run/secrets/epp-metrics/token`. Such a token **does not expire**.
+
+It is kept rather than replaced with a projected token because a projected volume
+can only issue tokens for the Pod's own ServiceAccount: moving to one means binding
+the reader role to the controller's ServiceAccount and dropping the dedicated one,
+and the documented `kubectl get secret wva-epp-metrics-token` reads (this page's
+monitoring examples, the scale-to-zero and utilization-share guides) and the e2e
+suite all use the Secret today.
+
+What limits it: the token reads `/metrics` endpoints and nothing else. To rotate it,
+delete the Secret and re-apply the install (or `kubectl apply` the Secret again);
+the token controller fills in a new token and the old one stops working once the
+Secret is gone. The controller re-reads the file on every EPP scrape, so it picks
+up the new token as soon as the kubelet updates the mounted volume (typically
+within a minute), without a restart.
 
 ### PromQL Injection Prevention
 
@@ -672,6 +718,12 @@ With the scaling manager metrics, the value for the label `namespace` is the sca
 - **Description**: `1` while a configured physical GPU limiter cannot read nodes, `0` when it can. Absent when no physical limiter is configured — nothing is asking for them.
 - **Labels**: optional `controller_instance`
 - **Use Case**: the combination that fails with no other symptom. A GPU-aware limiter allocates out of per-accelerator pools, so without nodes every variant is charged to no pool, receives no budget, and stops scaling up — and an unresolved accelerator is otherwise a normal state, so nothing else complains. Alert on `wva_node_access_denied == 1`; the shipped `WVANodeAccessDenied` rule does.
+
+### `wva_policy_namespace_unverified`
+- **Type**: Gauge
+- **Description**: `1` when the controller took limiters and quotas from its own ConfigMap because reading the Namespaces that decide the policy source (`wva-policy`, or the `wva.llmd.ai/policy-namespace` label on the managed namespace) was Forbidden; `0` otherwise. Set once at startup.
+- **Labels**: optional `controller_instance`
+- **Use Case**: a `1` means a cluster policy may be published that this controller cannot see, so it may run under a weaker bound than an admin believes. Grant the read with `NAMESPACE=<ns> make setup-prereqs` or `make enable-physical-limiter`. The shipped `WVAPolicyNamespaceUnverified` rule (warning, after 10m) alerts on it, by `namespace`: a controller-level gauge carries no model namespace. See [GPU limiter](gpu-limiter.md#what-the-controller-does-with-that).
 
 ### `wva_scale_from_zero_queue_fallback_active`
 - **Type**: Gauge
@@ -1290,7 +1342,7 @@ T = troubleshooting runbook on [Troubleshooting](troubleshooting.md).
 
 | alert | severity | for | fires when | what to do | runbook |
 | --- | --- | --- | --- | --- | --- |
-| `WVANodeAccessDenied` | critical | 2m | a `gpu-inventory` limiter is configured and the controller may not list nodes. **No variant scales up.** | grant the controller's ServiceAccount get/list/watch on nodes (cluster admin: `make enable-physical-limiter` grants every controller that exists when it runs; re-run it after a new install), or remove the limiter | [T: controller not Ready](troubleshooting.md#the-controller-is-not-ready-or-crash-looping) |
+| `WVANodeAccessDenied` | critical | 2m | a `gpu-inventory` limiter is configured and the controller may not list nodes. **No variant scales up.** | grant the controller's ServiceAccount get/list/watch on nodes (cluster admin: `make enable-physical-limiter` grants every controller it finds and verifies when it runs; re-run it after a new install), or remove the limiter | [T: controller not Ready](troubleshooting.md#the-controller-is-not-ready-or-crash-looping) |
 | `WVAModelParkedWhileRequestsRefused` | critical | 5m | a model has 0 replicas and EPP returns `ServiceUnavailable` for it: traffic is being dropped | read `wva_model_scaling_blocked` for the model first | [T: will not wake](troubleshooting.md#a-model-will-not-wake-from-zero) |
 | `WVAModelHasNoWakeSignal` | warning | 10m | blocked reason `no-wake-signal`: EPP exports no flow-control queue, so a parked model cannot wake | enable the EPP `flowControl` feature gate, then restart the EPP Deployment (it reads its config once at start) | [T: will not wake](troubleshooting.md#a-model-will-not-wake-from-zero) |
 | `WVAHighErrorRate` | warning | 5m | `wva_errors_total` above 6/min for one `component`/`error_type` | grep the controller log for the `error_type` text | [Logs](monitoring.md#the-logs) |
