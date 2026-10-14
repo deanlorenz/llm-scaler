@@ -1755,6 +1755,8 @@ func (e *Engine) prepareModelData(
 		// keeps last cycle's count for as long as the gap lasts -- reading as
 		// a fully scraped fleet in exactly the case it exists to expose.
 		e.zeroObservedReplicas(namespace, modelID)
+		// Still here, though nothing ran: keep what was learned about it.
+		e.notePresentVariants(ctx, namespace, modelID, modelVAs, scaleTargets, k8sClient)
 		return nil, nil // nil modelData signals skip
 	}
 	// Measurable this cycle. Reset the gauge rather than leaving the last bad

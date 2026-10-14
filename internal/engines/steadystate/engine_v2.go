@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-logr/logr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
@@ -20,6 +21,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/throughput"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/variantmeta"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
@@ -261,6 +263,43 @@ func (e *Engine) recordAnalyzerMetrics(namespace, modelID string, results []allo
 // call.
 type staleHistoryEvictor interface {
 	EvictStaleHistory() saturation.Evicted
+}
+
+// presenceNoter is the part of the saturation analyzer notePresentVariants
+// needs, reached through an assertion for the same reason as
+// staleHistoryEvictor.
+type presenceNoter interface {
+	NoteVariantsPresent(namespace, modelID string, states []domain.VariantReplicaState)
+}
+
+// Pinned at compile time: the assertion in notePresentVariants fails silently
+// at run time, so a rename of the method would otherwise let a parked fleet's
+// learned state age out again with every test green.
+var _ presenceNoter = (*saturation.SaturationAnalyzer)(nil)
+
+// notePresentVariants stamps a model's variants as present on the cycle the
+// engine skips it for having no attributable replica, so a fleet parked at
+// zero keeps its learned ITL baseline and start estimate (see
+// SaturationAnalyzer.NoteVariantsPresent). The variant states are discovered
+// the way prepareModelData discovers them for a measurable model, so the keys
+// match the ones the analyzer will build on wake.
+func (e *Engine) notePresentVariants(
+	ctx context.Context,
+	namespace, modelID string,
+	modelVAs []llmdVariantAutoscalingV1alpha1.VariantAutoscaling,
+	scaleTargets map[string]scaletarget.ScaleTargetAccessor,
+	k8sClient client.Client,
+) {
+	noter, ok := e.saturationV2Analyzer.(presenceNoter)
+	if !ok {
+		return
+	}
+	metas := variantmeta.Discover(ctx, modelVAs, scaleTargets, k8sClient, observeAccelerators(e.Config))
+	states := make([]domain.VariantReplicaState, 0, len(metas))
+	for _, m := range metas {
+		states = append(states, m.ToReplicaState())
+	}
+	noter.NoteVariantsPresent(namespace, modelID, states)
 }
 
 // evictStaleLearnedState sweeps the two stores of learned per-variant state

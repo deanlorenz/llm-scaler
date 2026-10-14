@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 )
@@ -128,18 +129,13 @@ type SaturationAnalyzer struct {
 	// visit and so never swept at all. Both producers stamp their own key,
 	// rather than one relying on the other having run first.
 	//
-	// "REPORTED" means a replica of it was attributable this cycle, which is
-	// not the same as existing. A model with no attributable replicas skips
-	// analysis entirely (steadystate, the len(replicaMetrics) == 0 branch), so
-	// a fleet parked at zero is unstamped for as long as it is parked: past
-	// HistoryEvictionTimeout it re-learns its ITL baseline and start estimate
-	// on wake, which is the one case this timeout is felt rather than just
-	// bounding memory. The capacity STORE is what carries a parked variant --
-	// deliberately, on a seven-day timeout whose own comment names the
-	// weekend -- so engine params and the capacity record survive the gap and
-	// only the two fitted figures are re-measured. The asymmetry between the
-	// two timeouts is therefore intended, but it is an asymmetry: 24h of
-	// quiet costs the fit, seven days costs the record.
+	// "REPORTED" means the variant was in the cycle's input, or -- for a model
+	// with no attributable replica at all, which skips analysis (steadystate,
+	// the len(replicaMetrics) == 0 branch) -- that the engine still discovered
+	// it, through NoteVariantsPresent. Before that stamp a fleet parked at
+	// zero went unstamped for as long as it was parked, and past
+	// VariantTimeout re-learned its ITL baseline and start estimate on wake.
+	// A deleted variant is not discovered, so it still ages out.
 	variantSeenAt map[string]time.Time
 	// now is the clock the memory reads; tests set it.
 	now func() time.Time
@@ -289,6 +285,37 @@ func (a *SaturationAnalyzer) noteVariantSeen(key string, now time.Time) {
 func (a *SaturationAnalyzer) variantIsStale(key string, now time.Time, timeout time.Duration) bool {
 	seen, ok := a.variantSeenAt[key]
 	return !ok || now.Sub(seen) > timeout
+}
+
+// NoteVariantsPresent stamps each variant as seen this cycle without analysing
+// it, for a model the engine skips because none of its replicas reported.
+//
+// Analyze stamps every variant in its input, so a variant parked at zero beside
+// a serving one is already covered. A model with EVERY variant at zero never
+// reaches Analyze, and without this its ITL baseline and start estimate were
+// swept after VariantTimeout of being parked: a fleet that parks overnight
+// woke on the default baseline and re-measured its start time from the first
+// Pod, which is the one case the timeout was felt rather than just bounding
+// memory. The variant still exists -- its scale target is what the engine
+// discovered it from -- so its learned state is still wanted. A variant that is
+// deleted stops being discovered, stops being stamped, and is swept as before.
+//
+// The key is the one Analyze builds, through stableAccelerator, so a parked
+// fleet whose accelerator no longer resolves (no Pods to observe it from) stamps
+// the key it was learned under; that read also keeps the accelerator memo
+// itself alive across the gap.
+func (a *SaturationAnalyzer) NoteVariantsPresent(namespace, modelID string, states []domain.VariantReplicaState) {
+	// Keys first: itlWindowKey takes a.mu through stableAccelerator.
+	keys := make([]string, 0, len(states))
+	for _, vs := range states {
+		keys = append(keys, a.itlWindowKey(namespace, modelID, vs.VariantName, vs.AcceleratorName, vs.GPUsPerReplica))
+	}
+	now := a.now()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, key := range keys {
+		a.noteVariantSeen(key, now)
+	}
 }
 
 // EvictStaleHistory removes learned state that is past its horizon, which

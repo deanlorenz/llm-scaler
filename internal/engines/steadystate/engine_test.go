@@ -36,8 +36,10 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/registry"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	utils "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils"
 	testutils "github.com/llm-d/llm-d-workload-variant-autoscaler/test/utils"
 )
@@ -78,15 +80,15 @@ func newManagedScaledObject(name, namespace, targetDeployment, modelID string) *
 }
 
 // wvaDiscovery stands in for KEDA calling WVA's external scaler about every
-// ScaledObject in the namespace, and returns the registry plus an enricher that
-// resolves each one against the live test API server — the same pair the engine
-// is wired with in production.
-func wvaDiscovery(ctx context.Context, namespace string) (*registry.Registry, *registry.Enricher) {
+// ScaledObject in the default namespace, where every spec here creates them,
+// and returns the registry plus an enricher that resolves each one against the
+// live test API server — the same pair the engine is wired with in production.
+func wvaDiscovery(ctx context.Context) (*registry.Registry, *registry.Enricher) {
 	GinkgoHelper()
 	reg := registry.New(0)
 
 	var soList kedav1alpha1.ScaledObjectList
-	Expect(k8sClient.List(ctx, &soList, client.InNamespace(namespace))).To(Succeed())
+	Expect(k8sClient.List(ctx, &soList, client.InNamespace("default"))).To(Succeed())
 	for i := range soList.Items {
 		so := &soList.Items[i]
 		if len(so.Spec.Triggers) == 0 {
@@ -260,7 +262,7 @@ var _ = Describe("Saturation Engine", func() {
 			})
 			fakeRecorder := record.NewFakeRecorder(100)
 			engine := NewEngine(k8sClient, k8sClient, k8sClient.Scheme(), fakeRecorder, sourceRegistry, testConfig, allocation.NewNoOpLimiter("test"))
-			engine.Variants, engine.VariantEnricher = wvaDiscovery(ctx, "default")
+			engine.Variants, engine.VariantEnricher = wvaDiscovery(ctx)
 
 			By("Performing optimization loop")
 			err := engine.optimize(ctx)
@@ -272,6 +274,40 @@ var _ = Describe("Saturation Engine", func() {
 			// proves the variants were discovered and fed through the saturation pipeline.
 			Expect(mockPromAPI.QueryCallCounts).NotTo(BeEmpty(),
 				"engine should have queried Prometheus for at least one discovered variant")
+		})
+
+		It("stamps every variant of a model it skips for having no replica", func() {
+			// The mock reports no metrics at all, so every model takes the
+			// len(replicaMetrics) == 0 skip -- the path a fleet parked at zero
+			// takes every cycle. Its variants must still be stamped, or their
+			// learned state ages out while they are parked.
+			mockPromAPI := &testutils.MockPromAPI{
+				QueryResults: map[string]model.Value{},
+				QueryErrors:  map[string]error{},
+			}
+			sourceRegistry := source.NewSourceRegistry()
+			promSource := prometheus.NewPrometheusSource(ctx, mockPromAPI, prometheus.DefaultPrometheusSourceConfig())
+			sourceRegistry.Register("prometheus", promSource) // nolint:errcheck
+			testConfig := config.NewTestConfig()
+			testConfig.UpdateScalingPolicyConfig(map[string]config.ScalingPolicy{
+				"default": {},
+			})
+			engine := NewEngine(k8sClient, k8sClient, k8sClient.Scheme(), record.NewFakeRecorder(100), sourceRegistry, testConfig, allocation.NewNoOpLimiter("test"))
+			engine.Variants, engine.VariantEnricher = wvaDiscovery(ctx)
+			spy := &presenceSpy{
+				SaturationAnalyzer: saturation.NewSaturationAnalyzer(capacity.NewStore()),
+				noted:              map[string][]string{},
+			}
+			engine.saturationV2Analyzer = spy
+
+			Expect(engine.optimize(ctx)).To(Succeed())
+
+			for i := range totalVAs {
+				modelID := fmt.Sprintf("model-%d-model-%d", i, i)
+				Expect(spy.noted).To(HaveKeyWithValue("default/"+modelID,
+					ConsistOf(fmt.Sprintf("multi-test-resource-%d", i))),
+					"a skipped model's variant was not stamped as present")
+			}
 		})
 	})
 
@@ -413,7 +449,7 @@ var _ = Describe("Saturation Engine", func() {
 			})
 			fakeRecorder := record.NewFakeRecorder(100)
 			engine := NewEngine(k8sClient, k8sClient, k8sClient.Scheme(), fakeRecorder, sourceRegistry, testConfig, allocation.NewNoOpLimiter("test"))
-			engine.Variants, engine.VariantEnricher = wvaDiscovery(ctx, "default")
+			engine.Variants, engine.VariantEnricher = wvaDiscovery(ctx)
 
 			By("Performing optimization loop with source infrastructure")
 			err := engine.optimize(ctx)
@@ -522,7 +558,7 @@ var _ = Describe("Saturation Engine", func() {
 			}
 			withLimiters()
 			engine := NewEngine(k8sClient, k8sClient, k8sClient.Scheme(), nil, sourceRegistry, testConfig, allocation.NewNoOpLimiter("test"))
-			engine.Variants, engine.VariantEnricher = wvaDiscovery(ctx, "default")
+			engine.Variants, engine.VariantEnricher = wvaDiscovery(ctx)
 
 			By("Running optimize() with no limiters")
 			err := engine.optimize(ctx)
@@ -560,3 +596,18 @@ var _ = Describe("Saturation Engine", func() {
 	})
 
 })
+
+// presenceSpy is the real saturation analyzer with NoteVariantsPresent
+// recorded, keyed namespace/model, so a spec can see which variants the
+// engine stamped without reaching into the analyzer's unexported maps.
+type presenceSpy struct {
+	*saturation.SaturationAnalyzer
+	noted map[string][]string
+}
+
+func (s *presenceSpy) NoteVariantsPresent(namespace, modelID string, states []domain.VariantReplicaState) {
+	for _, vs := range states {
+		s.noted[namespace+"/"+modelID] = append(s.noted[namespace+"/"+modelID], vs.VariantName)
+	}
+	s.SaturationAnalyzer.NoteVariantsPresent(namespace, modelID, states)
+}
