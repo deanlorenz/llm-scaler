@@ -1,8 +1,8 @@
 # Every signal as a metric
 
-**Status:** proposed, nothing built. Names and label keys below are the thing to
-argue about; they are the part that becomes a compatibility promise the moment
-anything scrapes them.
+**Status:** proposed; stage 3 (service rate and the ITL line) built. Names and
+label keys below are the thing to argue about; they are the part that becomes a
+compatibility promise the moment anything scrapes them.
 
 Today a scaling decision can only be reconstructed from the controller log. The
 numbers that produce it — `KVreq`, `k1`, `k2`, `mu`, `kPrice`, the ITL line,
@@ -65,27 +65,39 @@ against it.
 
 | key | values | why |
 | --- | --- | --- |
-| `exported_namespace` | the **model's** namespace | Not `namespace`. WVA's own series already carry the model namespace as `exported_namespace`, because `namespace` is taken by the controller's own namespace through the scrape. Alerts that keyed on `namespace` matched the controller and silently returned nothing. |
-| `model` | model ID | matches the existing analyzer metrics |
-| `variant` | variant name | omitted on model-level series |
+| `namespace` | the **model's** namespace | Set as `namespace`, as every per-variant WVA series is, and *scraped* as `exported_namespace`: the scrape takes `namespace` for the controller's own. So a query reads `exported_namespace`. Alerts that keyed on `namespace` matched the controller and silently returned nothing. |
+| `model_name` | model ID | the key `wva_analyzer_target` and `wva_engine_config` carry, so these series join them without a `label_replace` |
+| `variant_name` | variant name | the same; omitted on model-level series |
 | `role` | `prefill`, `decode`, `both` | the canonical role, never the raw label |
 | `window` | `1m`, `5m` | only where a signal genuinely exists at two timescales |
 | `basis` | `fleet`, `priced` | the fleet's own reading vs the figure a decision used |
-| `source` | `measured`, `derived`, `observed`, `historical`, `fallback`, `seed` | which path answered |
+| `source` | `measured`, `derived`, `neighbour`, `observed`, `historical`, `fallback`, `seed` | which path answered |
 | `bound` | `k1`, `k2` | which capacity bound |
 
 `pod` appears on **nothing** proposed here. See cardinality.
+
+An earlier draft keyed these `model` and `variant`. Every per-variant family
+WVA already publishes uses `model_name` and `variant_name`, and a new family
+on different keys could not be joined to `wva_analyzer_target` -- the series it
+exists to explain -- without a `label_replace` in every query. Every metric
+block below uses these keys, built or not.
+
+`source` gained `neighbour` in stage 3: a service rate read from a
+neighbouring output-length bucket's window because the bucket being served has
+no reading of its own yet. It is wrong in a known direction, and the floor may
+hold a fleet on it but not grow one, so it is a different source from
+`measured` rather than a qualifier on it.
 
 ## The metrics
 
 ### The shape
 
 ```
-wva_shape_input_tokens{exported_namespace,model,role,window}      gauge
-wva_shape_output_tokens{exported_namespace,model,role,window}     gauge
-wva_shape_prefix_hit_rate{exported_namespace,model,role}          gauge
-wva_shape_kv_tokens_per_request{exported_namespace,model,role,basis}  gauge
-wva_shape_change_active{exported_namespace,model}                 gauge  0|1
+wva_shape_input_tokens{namespace,model_name,role,window}      gauge
+wva_shape_output_tokens{namespace,model_name,role,window}     gauge
+wva_shape_prefix_hit_rate{namespace,model_name,role}          gauge
+wva_shape_kv_tokens_per_request{namespace,model_name,role,basis}  gauge
+wva_shape_change_active{namespace,model_name}                 gauge  0|1
 ```
 
 `wva_shape_kv_tokens_per_request` with `basis` is the one to build first. It is
@@ -103,9 +115,9 @@ analyzer prices mu at during a shape change.
 ### Per-replica capacity
 
 ```
-wva_replica_capacity_bound_tokens{exported_namespace,model,variant,role,bound}  gauge
-wva_replica_capacity_tokens{exported_namespace,model,variant,role}              gauge
-wva_replica_capacity_source{exported_namespace,model,variant,role,source}      gauge  0|1
+wva_replica_capacity_bound_tokens{namespace,model_name,variant_name,role,bound}  gauge
+wva_replica_capacity_tokens{namespace,model_name,variant_name,role}              gauge
+wva_replica_capacity_source{namespace,model_name,variant_name,role,source}      gauge  0|1
 ```
 
 `bound` publishes `k1` and `k2` as two series; `wva_replica_capacity_tokens` is
@@ -117,13 +129,20 @@ that answered.
 ### The service rate
 
 ```
-wva_service_rate_per_replica{exported_namespace,model,variant,role,source}  gauge
-wva_pricing_k{exported_namespace,model}                                     gauge
-wva_itl_line_slope{exported_namespace,model,variant}                        gauge
-wva_itl_line_intercept{exported_namespace,model,variant}                    gauge
-wva_itl_seconds_at_pricing_k{exported_namespace,model,variant}              gauge
-wva_itl_line_samples{exported_namespace,model,variant}                      gauge
+wva_service_rate_per_replica{namespace,model_name,variant_name,role,source}  gauge
+wva_pricing_k{namespace,model_name}                                          gauge
+wva_itl_line_slope{namespace,model_name,variant_name}                        gauge
+wva_itl_line_intercept{namespace,model_name,variant_name}                    gauge
+wva_itl_seconds_at_pricing_k{namespace,model_name,variant_name}              gauge
+wva_itl_line_samples{namespace,model_name,variant_name}                      gauge
 ```
+
+Built (stage 3). `source` is `derived`, `measured` or `neighbour`; the rate is
+the median over the variant's own replicas, never a bridge, and the series is
+absent while none has a rate. The ITL series are decode-only, because only
+decode fits a line; `wva_itl_line_samples` counts the variant's *own* window
+even when it is priced on a borrowed line. See
+[the reference](../reference/prometheus.md#service-rate).
 
 `wva_pricing_k` is worth its own series despite being derived from
 configuration, because it is *composed* — `kvCacheThreshold × scaleUpThreshold`,
@@ -137,11 +156,11 @@ almost always the sample count or the `k` spread rather than anything wrong.
 ### The throughput floor
 
 ```
-wva_floor_arrival_rate{exported_namespace,model,role}                   gauge
-wva_floor_backlog_requests{exported_namespace,model,role,basis}         gauge
-wva_floor_replicas_implied{exported_namespace,model,role}               gauge
-wva_floor_per_replica_capacity{exported_namespace,model,role}           gauge
-wva_floor_held{exported_namespace,model,role,reason}                    gauge  0|1
+wva_floor_arrival_rate{namespace,model_name,role}                   gauge
+wva_floor_backlog_requests{namespace,model_name,role,basis}         gauge
+wva_floor_replicas_implied{namespace,model_name,role}               gauge
+wva_floor_per_replica_capacity{namespace,model_name,role}           gauge
+wva_floor_held{namespace,model_name,role,reason}                    gauge  0|1
 ```
 
 `basis` here is `observed` and `projected` — the queue now, and the queue a
@@ -155,7 +174,7 @@ currently a log field nobody plots.
 ### Demand attribution
 
 ```
-wva_demand_tokens{exported_namespace,model,role,source}  gauge
+wva_demand_tokens{namespace,model_name,role,source}  gauge
 ```
 
 `source` is `replica` (what running pods hold) and `scheduler_queue` (what the
@@ -236,10 +255,15 @@ and the cardinality above does not justify one.
    `wva_desired_replicas` is the most common question asked of a scaling
    decision after the fact.
 3. **Service rate and the ITL line.** Includes `wva_itl_line_samples`, which
-   explains absences.
+   explains absences. **Built**, with the drift test below scoped to
+   `derived-mu` (`TestDerivedMuFieldsArePublished` in the saturation analyzer
+   package): every key of that log line is mapped to a registered metric or
+   excluded with a reason, and a key added without either fails.
 4. **Capacity and demand attribution.**
 5. **The drift test** above, which should arguably be first — but it needs one
-   family in place to be written against.
+   family in place to be written against. Started with stage 3 for
+   `derived-mu`; `replica-capacity-decision` and `throughput-demand-floor`
+   join it as their families are built.
 
 Each stage is independently useful, and none changes a decision. A stage that
 changes a decision has a bug: these are observations of arithmetic that already

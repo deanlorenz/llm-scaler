@@ -1235,6 +1235,76 @@ For the scale-to-zero reasons, see also
   }
   ```
 
+### Service rate
+
+What the saturation analyzer priced a variant's service rate on this cycle:
+the ITL(k) line, the point it is evaluated at, and the per-replica completion
+rate that comes out. They explain `wva_analyzer_target` and the throughput
+floor rather than drive anything: these are observations of arithmetic the
+analyzer already does, and none of them is a scaling input for KEDA or an HPA
+to threshold. All are set from one record per variant per cycle, beside
+`wva_analyzer_target`, and a series is deleted when its variant or model stops
+being analyzed.
+
+Labels are the ones `wva_analyzer_target` and `wva_engine_config` carry, so the
+three join directly. `namespace` is the **model's** namespace and arrives in
+Prometheus as `exported_namespace` (see the note on namespaces above), plus
+`controller_instance` when `CONTROLLER_INSTANCE` is set. Every value here is a
+variant-level reading; the `derived-mu` log line carries the same quantities
+per pod.
+
+### `wva_itl_line_slope`
+- **Type**: Gauge
+- **Description**: Slope A of the line ITL(k) = A*k + B a decode variant is priced on, in seconds per unit of KV utilization. The line is the variant's own fit, or one borrowed from a sibling with the same engine configuration (only when `enableLearnedStateReuse` is on). Absent while the variant has no line.
+- **Labels**:
+  - `namespace`: the model's namespace (scraped as `exported_namespace`)
+  - `model_name`: model ID
+  - `variant_name`: variant name
+- **Use Case**: Watch the contention term a derived service rate rests on. A slope that jumps is a line refitted on different load.
+
+### `wva_itl_line_intercept`
+- **Type**: Gauge
+- **Description**: Intercept B of the same line, in seconds: the inter-token latency at an empty cache, the hardware floor. Absent while the variant has no line.
+- **Labels**: as `wva_itl_line_slope`
+- **Use Case**: Compare a variant's floor across accelerators; an intercept far from the card's usual figure is a fit on too narrow a range of k.
+
+### `wva_itl_seconds_at_pricing_k`
+- **Type**: Gauge
+- **Description**: The line evaluated at `wva_pricing_k`, in seconds: the inter-token latency the derived service rate is priced at. Absent while the variant has no line.
+- **Labels**: as `wva_itl_line_slope`
+- **Use Case**: Compare against the ITL the engines report under load. A priced ITL well below the observed one means the derived rate over-states what a replica completes.
+
+### `wva_itl_line_samples`
+- **Type**: Gauge
+- **Description**: How many (k, ITL) readings a decode variant's **own** ITL window holds, published while it has no line too, zero included. A line needs enough readings spread far enough apart in k; a variant priced on a borrowed line still reports its own count here.
+- **Labels**: as `wva_itl_line_slope`
+- **Use Case**: Explain an absent line. A fleet with no line produces no derived service rate, and the reason is almost always this count or the spread of k rather than anything wrong. A fresh fleet takes about 28 cycles from load start to fit.
+- **Example**: decode variants still without a line of their own:
+  ```promql
+  wva_itl_line_samples unless on (exported_namespace, model_name, variant_name) wva_itl_line_slope
+  ```
+
+### `wva_service_rate_per_replica`
+- **Type**: Gauge
+- **Description**: The saturated completion rate one replica of a variant is priced at, in requests per second: the median over the variant's own replicas that have one, never a warm pool bridge. One series per variant; `source` names the path that answered for the median replica. Absent while no replica has a rate.
+- **Labels**:
+  - `namespace`, `model_name`, `variant_name`: as `wva_itl_line_slope`
+  - `role`: `prefill`, `decode` or `both`
+  - `source`: `derived` (from the ITL line at the pricing k), `measured` (the variant's own saturated window for the output length being served) or `neighbour` (a neighbouring output-length bucket's window, used until the served bucket has its own; the floor may hold a fleet on it but not grow one)
+- **Use Case**: Read the floor's divisor directly: arrival rate over this rate is the replica count the load implies. A `source` that stays `neighbour` after a shape change means the fleet has not yet measured itself under the new shape.
+- **Example**: variants priced on a neighbouring bucket's reading, and for how long:
+  ```promql
+  wva_service_rate_per_replica{source="neighbour"}
+  ```
+
+### `wva_pricing_k`
+- **Type**: Gauge
+- **Description**: The KV utilization the ITL line is evaluated at to price a decode replica: `kvCacheThreshold` x `scaleUpThreshold`, clamped to the range a line is fitted over. Composed, so 0.68 with the shipped defaults, not the 0.85 that `k_sat` suggests.
+- **Labels**:
+  - `namespace`: the model's namespace (scraped as `exported_namespace`)
+  - `model_name`: model ID
+- **Use Case**: Settle which utilization the autoscaler targets when pricing a replica, without recomputing it from configuration.
+
 ## Example Queries
 
 ### Basic Queries

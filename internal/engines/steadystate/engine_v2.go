@@ -230,6 +230,11 @@ type analyzerSeries struct {
 	modelID   string
 	demand    map[analyzerDemandSeries]struct{}
 	target    map[analyzerTargetSeries]struct{}
+	// serviceRate holds the variants whose service-rate signal was published,
+	// and pricingK whether the model's wva_pricing_k was. Per variant, not per
+	// analyzer: only the saturation analyzer prices a service rate.
+	serviceRate map[string]struct{}
+	pricingK    bool
 }
 
 // recordAnalyzerMetrics publishes the wva_analyzer_demand / wva_analyzer_target
@@ -246,10 +251,11 @@ type analyzerSeries struct {
 // could tell it apart from a live reading.
 func (e *Engine) recordAnalyzerMetrics(namespace, modelID string, results []allocation.NamedAnalyzerResult) {
 	current := analyzerSeries{
-		namespace: namespace,
-		modelID:   modelID,
-		demand:    make(map[analyzerDemandSeries]struct{}),
-		target:    make(map[analyzerTargetSeries]struct{}),
+		namespace:   namespace,
+		modelID:     modelID,
+		demand:      make(map[analyzerDemandSeries]struct{}),
+		target:      make(map[analyzerTargetSeries]struct{}),
+		serviceRate: make(map[string]struct{}),
 	}
 
 	for _, nr := range results {
@@ -269,6 +275,17 @@ func (e *Engine) recordAnalyzerMetrics(namespace, modelID string, results []allo
 			e.metricsEmitter.RecordAnalyzerTarget(nr.Name, namespace, modelID, vc.VariantName, vc.PerReplicaCapacity)
 			e.metricsEmitter.RecordAnalyzerObservedReplicas(nr.Name, namespace, modelID, vc.VariantName, vc.ObservedReplicas)
 			current.target[analyzerTargetSeries{analyzer: nr.Name, variant: vc.VariantName}] = struct{}{}
+			// Beside the target it explains, from the struct the analyzer
+			// priced with (domain.ServiceRateSignal), so the published line
+			// and rate are the ones the target came from.
+			if vc.ServiceRate != nil {
+				e.metricsEmitter.RecordServiceRateSignal(namespace, modelID, vc.VariantName, *vc.ServiceRate)
+				current.serviceRate[vc.VariantName] = struct{}{}
+			}
+		}
+		if nr.Result.PricingK > 0 {
+			e.metricsEmitter.RecordPricingK(namespace, modelID, nr.Result.PricingK)
+			current.pricingK = true
 		}
 	}
 
@@ -503,6 +520,14 @@ func (e *Engine) evictStaleAnalyzerSeries(namespace, modelID string, current ana
 			e.metricsEmitter.DeleteEngineConfig(namespace, modelID, prev.variant)
 		}
 	}
+	for prev := range e.lastAnalyzerSeries[modelKey].serviceRate {
+		if _, still := current.serviceRate[prev]; !still {
+			e.metricsEmitter.DeleteServiceRateSignal(namespace, modelID, prev)
+		}
+	}
+	if e.lastAnalyzerSeries[modelKey].pricingK && !current.pricingK {
+		e.metricsEmitter.DeletePricingK(namespace, modelID)
+	}
 	e.lastAnalyzerSeries[modelKey] = current
 }
 
@@ -526,6 +551,7 @@ func (e *Engine) pruneAnalyzerSeries(activeKeys map[string]bool) {
 		if !activeKeys[modelKey] {
 			e.metricsEmitter.DeleteAnalyzerSeriesForModel(series.namespace, series.modelID)
 			e.metricsEmitter.DeleteEngineConfigForModel(series.namespace, series.modelID)
+			e.metricsEmitter.DeleteServiceRateSeriesForModel(series.namespace, series.modelID)
 			delete(e.lastAnalyzerSeries, modelKey)
 		}
 	}
@@ -541,6 +567,7 @@ func (e *Engine) evictAllAnalyzerSeries() {
 	for modelKey, series := range e.lastAnalyzerSeries {
 		e.metricsEmitter.DeleteAnalyzerSeriesForModel(series.namespace, series.modelID)
 		e.metricsEmitter.DeleteEngineConfigForModel(series.namespace, series.modelID)
+		e.metricsEmitter.DeleteServiceRateSeriesForModel(series.namespace, series.modelID)
 		delete(e.lastAnalyzerSeries, modelKey)
 	}
 }

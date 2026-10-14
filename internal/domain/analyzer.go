@@ -168,6 +168,14 @@ type AnalyzerResult struct {
 	// only while its KV is full, since requests waiting for their remote KV
 	// sit in the same count.
 	VariantBusiestQueueLoad map[string]float64
+
+	// PricingK is the KV utilization a decode replica's ITL line is evaluated
+	// at to price its service rate: kvCacheThreshold x scaleUpThreshold,
+	// clamped to the range a line is fitted over. Composed, so 0.68 with the
+	// shipped defaults rather than the 0.85 k_sat suggests -- the reason it is
+	// published (wva_pricing_k). 0 for an analyzer that does not price on a
+	// line.
+	PricingK float64
 }
 
 // VariantCapacity is one variant's entry in an analyzer's (D, P) signal, in
@@ -307,4 +315,10 @@ type VariantCapacity struct {
 
 	// Utilization is TotalDemand / (ReplicaCount × PerReplicaCapacity), 0.0-1.0.
 	Utilization float64
+
+	// ServiceRate is the ITL line and per-replica service rate the analyzer
+	// priced this variant on this cycle, published as wva_itl_line_* and
+	// wva_service_rate_per_replica. Nil for an analyzer that does not price a
+	// service rate. Diagnostic only: nothing downstream sizes from it.
+	ServiceRate *ServiceRateSignal
 }
