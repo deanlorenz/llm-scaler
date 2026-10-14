@@ -17,7 +17,7 @@ over it via shared free functions in `internal/engines/allocation/`.
 
 ```text
 ┌──────────────────────────────────────────────────────────┐
-│ Config (SaturationScalingConfig per model/namespace)     │
+│ Config (config.ScalingPolicy per model/namespace)        │
 │   Priority, Analyzers[]:                                 │
 │     name, enabled, Score,                                │
 │     ScaleUpThreshold, ScaleDownBoundary                  │
@@ -41,8 +41,9 @@ over it via shared free functions in `internal/engines/allocation/`.
 │ non-saturation analyzer in registration order:           │
 │   • skip if Enabled:false                                │
 │   • Analyze(ctx, input) → *AnalyzerResult                │
-│   • applyUniversalThreshold(result, scaleUp, scaleDown)  │
-│     → writes RC/SC at model scope + each role scope      │
+│   • buildCapacities(nr, ...) → supply from capacities,   │
+│     then applyUniversalThreshold(nr, scaleUp, scaleDown) │
+│     → writes RC/SC on nr at model + each role scope      │
 │   • append NamedAnalyzerResult{                          │
 │       Name, Result,                                      │
 │       Score     ← config.Analyzers[name].Score,          │
@@ -67,8 +68,8 @@ over it via shared free functions in `internal/engines/allocation/`.
 │       pick(role) → variant; joint Δ_util commit          │
 │       applyAllocation → decrement Remaining              │
 │   • Scale-down: scaleDownRoleIterated                    │
-│       needsScaleDownForRole → veto gate (ALL live agree) │
-│       safeRemovalReplicasForRole → min across live       │
+│       needsScaleDownForRole → saturation spare, if live  │
+│       safeRemovalReplicasForRole → saturation only       │
 │       applyDeallocationForRole → decrement RoleSpare     │
 └──────────────────────────┬───────────────────────────────┘
                            │
@@ -164,7 +165,7 @@ type.
 | Per-role `RoleCapacities[role].Total*` | **Builder** (`buildRoleCapacities`), pairing analyzer `RoleDemand` with supply it groups by role | Engine post-step, optimizer |
 | `RequiredCapacity`, `SpareCapacity` (model + role scope) | **Engine post-step only** — analyzer-written values are overwritten | Optimizer |
 | `NamedAnalyzerResult.Remaining`, `Spare`, `RoleSpare` | Optimizer helpers (`applyAllocation`, `applyDeallocationForRole`) | Optimizer allocation loop |
-| `NamedAnalyzerResult.Live` | Engine (`runAnalyzersAndScore`, each cycle) | Scale-down veto gate (`needsScaleDownForRole`, `safeRemovalReplicasForRole`) |
+| `NamedAnalyzerResult.Live` | Engine (`runAnalyzersAndScore`, each cycle) | Scale-down gate on saturation's entry (`needsScaleDownForRole`, `safeRemovalReplicasForRole`); other analyzers' liveness is recorded, not forwarded |
 
 ---
 
@@ -176,10 +177,11 @@ type.
   pre-registered at slot 0. The registry is snapshotted at `StartOptimizeLoop`;
   late registration returns an error.
 - **Engine post-step** — `internal/engines/steadystate/engine_v2.go`:
-  `applyUniversalThreshold(*AnalyzerResult, scaleUp, scaleDown)` applies the
-  formula `RC = max(0, TotalDemand/scaleUp − TotalAnticipatedSupply)` /
+  `applyUniversalThreshold(*allocation.NamedAnalyzerResult, scaleUp, scaleDown)`,
+  called from `buildCapacities`, applies the formula
+  `RC = max(0, TotalDemand/scaleUp − TotalAnticipatedSupply)` /
   `SC = max(0, TotalSupply − TotalDemand/scaleDown)` at model scope and
-  each role in `RoleCapacities`.
+  each role in `RoleCapacities`, writing them on the `NamedAnalyzerResult`.
 - **Capacity-build step** — `internal/engines/steadystate/engine_v2.go`:
   `buildCapacities(ctx, *NamedAnalyzerResult, metaByVariant, scaleUp, scaleDown)`
   runs between the analyzers and the optimizer. It joins discovery identity,
@@ -201,7 +203,7 @@ type.
 
 ## User configuration
 
-Analyzers are configured via `SaturationScalingConfig.Analyzers` (YAML key
+Analyzers are configured via `config.ScalingPolicy.Analyzers` (YAML key
 `analyzers`). Each entry is an `AnalyzerScoreConfig` struct
 (`internal/config/saturation_scaling.go`):
 
@@ -227,16 +229,16 @@ analyzers:
 ```
 
 When `enabled` is false the analyzer is neither called nor included in the
-result slice, so it cannot veto scale-down decisions.
+result slice: it is not run at all.
 
 **Participation is opt-in.** An analyzer registered in code
 (`Engine.RegisterAnalyzer`) participates in a cycle only when it has an
 explicit entry in `analyzers` with `enabled` `true` or unset. An analyzer with
 no entry at all does not run and is not included in the result slice,
 exactly as if `enabled: false` had been set. This prevents a
-registered-but-unconfigured analyzer from returning `SpareCapacity=0` and
-silently vetoing scale-down, since the per-role scale-down decision requires
-every analyzer in the slice to agree. Saturation is exempt from this gate —
+registered-but-unconfigured analyzer out of the cycle. Only saturation's
+result reaches the optimizer today (see [How results combine](#how-results-combine)),
+so no other analyzer can block scale-down either way. Saturation is exempt from this gate —
 it is always run, independent of `analyzers` config, because the engine
 identifies it by name before this check applies.
 
@@ -329,11 +331,15 @@ analyzer's; an analyzer normally has no reason to call them.
 
 ## How results combine
 
-**Scale-down gate** (`needsScaleDownForRole`): ALL **live** analyzers in the
-slice must have `Spare > 0` for a role to scale down. One live analyzer with
-`RequiredCapacity > 0` (i.e., `Spare == 0`) blocks scale-down for that role.
-`safeRemovalReplicasForRole` (the safe-removal-count computation) applies the
-same live-only filter.
+**Scale-down gate** (`needsScaleDownForRole`): the optimizer receives one
+result, saturation's (`CompositeSignal: namedResults[0]` in `collectV2ModelRequest`,
+`engine_v2.go`). A role scales down only when that entry is live and its `RoleSpare`
+for the role is above zero; `safeRemovalReplicasForRole` reads the same entry.
+Throughput and custom analyzers run, are scored and report metrics, but cannot
+veto scale-down. A version in which every live analyzer votes is kept in
+`internal/engines/allocation/multi_backup/` behind `//go:build ignore`; the
+"vote" and "veto" wording below describes that design, and today applies to
+saturation's entry alone.
 
 **Liveness.** An analyzer is live for the current cycle iff it produced a
 non-error, capacity-bearing result within the staleness window (a fixed
@@ -429,15 +435,18 @@ Understanding what transforms where prevents the most common mistake: treating
 **`domain.AnalyzerResult`** is the immutable record an analyzer returns.
 The engine owns its calibration:
 
-1. The analyzer populates `VariantCapacities[]`, `TotalSupply`, `TotalDemand`,
-   `TotalAnticipatedSupply` (and `RoleCapacities` for P/D models). It must NOT
-   populate `RequiredCapacity` or `SpareCapacity`.
-2. `applyUniversalThreshold` overwrites `RequiredCapacity` / `SpareCapacity` at
-   model scope, and each `RoleCapacities[role].RequiredCapacity` /
-   `SpareCapacity`. The analyzer's view of supply and demand is fixed here.
-3. The engine wraps the calibrated result in a `NamedAnalyzerResult` and never
-   mutates `Result` again. `Result.*` values are stable read-only data for the
-   rest of the cycle.
+1. The analyzer populates `VariantCapacities[]`, `TotalDemand` and, for P/D
+   models, `RoleDemand`. `AnalyzerResult` has no supply or capacity-signal
+   fields: the analyzer cannot publish supply, `RequiredCapacity` or
+   `SpareCapacity`.
+2. The engine wraps the result in a `NamedAnalyzerResult`, and
+   `buildCapacities` derives `TotalSupply`, `TotalAnticipatedSupply` and
+   `RoleCapacities` on it from `VariantCapacities`, then calls
+   `applyUniversalThreshold`, which writes `RequiredCapacity` / `SpareCapacity`
+   on the `NamedAnalyzerResult` at model scope and on each
+   `RoleCapacities[role]`.
+3. `Result` is never mutated. `Result.*` values are stable read-only data for
+   the rest of the cycle.
 
 **`allocation.NamedAnalyzerResult`** is the working unit the optimizer operates on.
 Its fields fall into three categories:
@@ -536,7 +545,7 @@ and therefore how many GPUs it attracts in a constrained environment.
 ## Optimizer consumption
 
 The `[]NamedAnalyzerResult` slice is passed to one of two optimizers depending
-on whether `SaturationScalingConfig` declares any `limiters:` entry:
+on whether the `config.ScalingPolicy` declares any `limiters:` entry:
 
 - **`CostAwareOptimizer`** (no limiters declared): operates
   on the saturation entry's `VariantCapacities` for cost and role data; scales

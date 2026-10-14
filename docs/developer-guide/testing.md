@@ -69,9 +69,11 @@ it on every PR (`deploy-scripts-check`):
 make lint-deploy-scripts
 ```
 
-It runs about twenty `hack/check-*` scripts (parsers, manifests, make
-recipes, quoted `jq`/`yq` programs, ...) besides `bash -n` on the deploy
-scripts. They need `jq` and `yq` and fail rather than skip without them,
+It runs every `hack/check-*` script listed in the target (26 at the time of
+writing: 23 shell, 3 Python; parsers, manifests, make recipes, quoted
+`jq`/`yq` programs, ...) besides `bash -n` on the deploy scripts. The other
+`hack/check-*` scripts (doc links, dashboards, import direction, doc-comment
+owners) run from their own targets. They need `jq` and `yq` and fail rather than skip without them,
 because a skip is how a green run comes to mean nothing. CI pins yq v4.44.3;
 some yq behaviour differs in newer releases, so reproduce a CI failure with
 that version.
@@ -282,14 +284,14 @@ FOCUS="Basic Autoscaling" make test-e2e-smoke
 ```
 
 `test-e2e-smoke` filters on label `smoke` and `test-e2e-full` on
-`full && !smoke`, so a `FOCUS` must name a spec in the tier you run. Either
+`full && !smoke && !flaky`, so a `FOCUS` must name a spec in the tier you run. Either
 way, check `Ran N of M Specs` in the output: a focus that matches nothing runs
 0 specs and exits green.
 
 ### What the Suite Validates
 
 - **Smoke (label `smoke`)**: Infrastructure readiness, basic autoscaling through the KEDA external scaler, error handling
-- **Full (label `full`)**: Smoke plus additional deterministic correctness checks (scale-from-zero, limiter, pod scraping, etc.)
+- **Full (label `full`, run as `full && !smoke && !flaky`)**: Deterministic correctness checks (scale-from-zero, limiter, pod scraping, etc.). The tiers are disjoint: `test-e2e-full` does not re-run the smoke specs, and specs labelled `flaky` run in neither. Run both targets for complete coverage.
 
 ### Configuration
 
@@ -332,13 +334,17 @@ two controllers on one cluster still allocate from one pool of GPUs (see
 Two workflows gate a pull request. Every job maps to a make target you can run
 locally; run the same target before you push.
 
+`ci-pr-checks.yaml` runs only on pull requests whose base is `main` or `dev`
+(plus pushes to `main` and manual dispatch). A PR stacked on another branch gets
+no build, test, lint or e2e at all, so retarget it to `main` before review.
+
 | Workflow / job | What it runs | Reproduce locally |
 |----------------|--------------|-------------------|
 | `ci-pr-checks.yaml` / `lint-and-test` | golangci-lint v2.8.0, `make build`, `make test` | `make lint build test` |
 | `ci-pr-checks.yaml` / `deploy-scripts-check` | `make lint-deploy-scripts`, with yq pinned to v4.44.3 | `make lint-deploy-scripts`, with yq v4.44.3 on `PATH` |
 | `ci-pr-checks.yaml` / `docs-check` | `make guides-check` (guide blocks vs `guide.yaml`, plus `hack/check-doc-links.py`), `make warmpool-check`, `make dashboards-check` | the same three targets (needs Python with PyYAML) |
 | `ci-pr-checks.yaml` / `kustomize-build` | `kustomize build` of the cluster-scoped kubernetes, namespace-scoped kubernetes and namespace-scoped openshift overlays | `make kustomize`, then `bin/kustomize build config/overlays/<scope>/<env> > /dev/null` |
-| `ci-pr-checks.yaml` / `e2e-tests-smoke` | `make test-e2e-smoke-with-setup` on a fresh Kind cluster; skipped when a PR changes only docs | `CREATE_CLUSTER=true make test-e2e-smoke-with-setup` |
+| `ci-pr-checks.yaml` / `e2e-tests-smoke` | `make test-e2e-smoke-with-setup` on a fresh Kind cluster; skipped when a PR changes only docs or metadata | `CREATE_CLUSTER=true make test-e2e-smoke-with-setup` |
 | `ci-pr-checks.yaml` / `e2e-tests-full` | `make test-e2e-full-with-setup` with `SCALE_TO_ZERO_ENABLED=true`; returns early when no compiled file (Go, Makefile, `config/`, `test/`, workflows) changed | `CREATE_CLUSTER=true SCALE_TO_ZERO_ENABLED=true make test-e2e-full-with-setup` |
 | `ci-signed-commits.yaml` / `signed-commits` | fails if any commit in the PR lacks a verified signature | `git log --show-signature origin/main..HEAD` |
 
@@ -485,7 +491,7 @@ dlv test ./internal/controller/... -- -ginkgo.v
 ```bash
 # Consolidated E2E suite (smoke or full)
 go test ./test/e2e/ -v -ginkgo.v -ginkgo.label-filter="smoke"
-go test ./test/e2e/ -v -ginkgo.v -ginkgo.label-filter="full && !flaky" -timeout 35m
+go test ./test/e2e/ -v -ginkgo.v -ginkgo.label-filter="full && !smoke && !flaky" -timeout 35m
 ```
 
 #### Access Test Cluster
@@ -494,12 +500,16 @@ go test ./test/e2e/ -v -ginkgo.v -ginkgo.label-filter="full && !flaky" -timeout 
 # For Kind E2E tests (default cluster name: kind-wva-gpu-cluster or from CLUSTER_NAME)
 export KUBECONFIG=~/.kube/config   # or path from kind get kubeconfig
 kubectl get pods -A
-kubectl logs -n workload-variant-autoscaler-system deploy/wva-controller-manager
+kubectl logs -n llm-d-sim deploy/wva-controller-manager
 
-# For OpenShift E2E tests
+# For OpenShift E2E tests (same CONTROLLER_NAMESPACE, default llm-d-sim)
 oc get pods -A
-oc logs -n workload-variant-autoscaler-system deploy/wva-controller-manager
+oc logs -n "${CONTROLLER_NAMESPACE:-llm-d-sim}" deploy/wva-controller-manager
 ```
+
+`deploy-e2e-infra` installs the controller in `CONTROLLER_NAMESPACE`, which
+defaults to `llm-d-sim` on every environment, not in
+`workload-variant-autoscaler-system`.
 
 #### Keep Cluster Alive After Failure
 
@@ -527,7 +537,7 @@ make test-e2e-smoke-with-setup
 ```bash
 kubectl get events -A --sort-by='.lastTimestamp'
 kubectl describe scaledobject -n <namespace>
-kubectl logs -n workload-variant-autoscaler-system deploy/wva-controller-manager
+kubectl logs -n llm-d-sim deploy/wva-controller-manager   # Kind e2e; else the controller's namespace
 ```
 
 #### Metrics Not Available

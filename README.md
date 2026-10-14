@@ -4,36 +4,39 @@
 [![CI](https://github.com/ev-shindin/llm-scaling-manager/actions/workflows/ci-pr-checks.yaml/badge.svg?branch=main)](https://github.com/ev-shindin/llm-scaling-manager/actions/workflows/ci-pr-checks.yaml)
 [![Go](https://img.shields.io/github/go-mod/go-version/ev-shindin/llm-scaling-manager)](go.mod)
 
-**Right-size every LLM model on your GPUs, before the queue forms, inside one GPU budget.**
+**Sub-second scale-ups for LLMs on Kubernetes, for 12 % less GPU than holding spare replicas.**
 
-llm-scaling-manager is an autoscaler for [llm-d](https://llm-d.ai) on
-Kubernetes. It prices load from what each replica can actually serve (KV cache,
-queues, token throughput) rather than from request counts, sizes every model and
-variant together against one GPU budget, and hands the answer to KEDA. A warm
-pool of sleeping models covers the minutes a new replica takes to load.
+An advanced fork of [llm-d](https://llm-d.ai)'s workload-variant-autoscaler. It
+sizes every model by the work its replicas can actually serve, keeps the fleet
+inside one GPU budget, and lets KEDA do the scaling. An optional warm pool of
+sleeping models covers the minutes a new replica takes to load.
 
 **Measured on GPU clusters** (single runs unless noted; method and caveats linked):
 
-- **Scale-ups without the latency spike.** p95 time to first token per rise
-  falls from **5.1–8.8 s to 0.11–0.83 s** with a one-Pod warm pool, using
-  **12 % fewer GPU-seconds** than a floor of two replicas
+- **Scale-ups at near-floor latency on 3 of 4 rises.** p95 time to first
+  token per rise falls from **5.2–8.8 s to 0.11–0.83 s** with a one-Pod warm
+  pool: within 50 ms of a two-replica floor on three rises, 831 ms against the
+  floor's 127 ms on the fourth. It uses **12 % fewer GPU-seconds** than that
+  floor, and 17 % more than no pool
   ([warm pool, measured](docs/well-lit-paths/warm-pool-bridge/measured.md)).
-- **It sees the shape, not just the queue.** At a constant 6 req/s, with no
-  queue and 5–15 % of the KV cache in use, it ordered the replica the new
-  request shape needed: p95 TTFT **155 ms, 0 errors in 13 288 requests**, run
-  twice a day apart ([P/D path](docs/well-lit-paths/pd-disaggregation/)).
-- **A warm Pod switches models in 437 ms**, against about 41 s cold
-  ([fast model loading](docs/proposals/fast-model-loading.md)).
-- **Scale to zero**, and wake on the first queued request
-  ([scale to zero](docs/well-lit-paths/scale-to-zero/)).
+- **It prices the request shape, not just the queue.** Qwen3-0.6B at a
+  constant 6 req/s, on the experimental P/D path: through the first phase it
+  held two decode replicas while KV-cache use of 5–15 % alone said one; when
+  the request shape changed it ordered a third (KV peaked at 62 %), and no
+  queue formed at any point. On a second exposure, with both shapes already
+  seen, p95 TTFT was **155 ms with 0 errors in 13 288 requests**; a cold
+  controller reached a 3.9 s p99
+  ([P/D path, measured](docs/well-lit-paths/pd-disaggregation/#measured);
+  [known gaps](docs/why.md#known-gaps)).
+- **A warm Pod switches models in about 437 ms** (four switches of 435–440 ms
+  on an H100 test cluster), against about 41 s for a cold start
+  ([warm pool](docs/well-lit-paths/warm-pool-bridge/)).
 
-![Warm pool: near-floor latency for 12 % fewer GPU-seconds](docs/figures/warm-pool-latency-vs-cost.svg)
+![Warm pool: near-floor latency on 3 of 4 rises, for 12 % fewer GPU-seconds](docs/figures/warm-pool-latency-vs-cost.svg)
 
 **[Why llm-scaling-manager](docs/why.md)** (the one-page case, costs and
 maturity) · **[Get started](docs/README.md#getting-started-in-three-steps)** ·
 **[Pick your scenario](docs/well-lit-paths/)**
-
-![How it fits together](docs/concepts/figures/how-it-fits.svg)
 
 > An independently developed, advanced fork of llm-d's
 > [workload-variant-autoscaler](https://github.com/llm-d/llm-d-workload-variant-autoscaler)
@@ -64,6 +67,13 @@ is the whole registration.
   one while a variant's own replica starts.
 
 ## Installing
+
+On a shared cluster, have a cluster admin run the controller out of the
+tenant's reach (`WVA_NS=wva-<ns> WVA_WATCH_NS=<ns>` on `setup-prereqs` and
+`deploy-wva`); see [Cluster-admin setup](docs/guides/admin-cluster-setup/README.md#keeping-the-controller-out-of-the-tenants-reach).
+The tenant-owned default below is for single-team or trusted clusters. Either
+way, the bound that actually holds is a GPU ResourceQuota on the namespace:
+[bound the namespace's GPUs at admission](docs/guides/admin-cluster-setup/README.md#bound-the-namespaces-gpus-at-admission).
 
 ```bash
 export NAMESPACE=<the namespace running llm-d>
@@ -107,6 +117,8 @@ has how a measurement becomes a replica count and what the GPU budget counts.
 See the [docs](docs/) directory for design docs, developer guide, and more.
 
 ## How It Works
+
+![How it fits together](docs/concepts/figures/how-it-fits.svg)
 
 **Prerequisites:** deploy llm-d infrastructure (model servers), have Prometheus
 scraping them, and create a **KEDA ScaledObject** per workload whose trigger points

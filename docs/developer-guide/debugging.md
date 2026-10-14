@@ -125,8 +125,11 @@ Start the scaling manager from your IDE or terminal. With the environment variab
 /path/to/wva/binary --metrics-bind-address :8443 --metrics-secure=true --v=4
 ```
 
-Log verbosity is the `-v` flag (`cmd/main.go`); `--v=4` shows debug lines.
-There is no log-level environment variable: `LOG_LEVEL` is read by no code path.
+Log verbosity is set only by the `--v=N` flag (`cmd/main.go`, default 2);
+`--v=4` shows debug lines. There is no log-level environment variable:
+`config/base/manager/deployment.yaml` still sets `LOG_LEVEL: info`, but no code
+path reads it, and changing it changes nothing. To raise verbosity in a cluster,
+add `--v=4` to the manager container's `args`.
 
 A controller run this way decides nothing on its own. Workloads register only
 through KEDA's external-scaler calls, and KEDA dials the in-cluster

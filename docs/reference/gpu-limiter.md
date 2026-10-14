@@ -69,7 +69,20 @@ controller — its Deployment, its args, its env, its ServiceAccount. Nothing ca
 on the controller can bound the person who can edit the controller. A quota its
 subject can edit is not a quota.
 
-So the scaling manager does not accept its limits from anything that person can write.
+So a controller that manages its own namespace takes its limits from a policy
+namespace (`wva-policy`, or one named by a label) **when it can see one**, rather
+than from its own ConfigMap. Two qualifications decide whether that happens:
+
+- **On Kubernetes it cannot see one today.** The namespace-scoped install has no
+  `get` on Namespace objects, so the controller never finds `wva-policy` or the
+  label and keeps reading the ConfigMap its tenant can write (being fixed; the
+  workaround is in the note below).
+- **An admin-owned controller never reads `wva-policy`, by design.** A
+  cluster-scoped controller, or one in the out-of-reach shape, reads its own
+  ConfigMap, which already lives where only an admin can write.
+
+Where neither the policy namespace nor the out-of-reach shape applies, the bound
+is only as strong as a `ResourceQuota` on the namespace.
 
 ### What an admin sets, and where
 
@@ -117,8 +130,10 @@ kubectl get ns -l wva.llmd.ai/policy-namespace=platform-policy
 > carries on with its own ConfigMap, so the label is silently not applied. The
 > same denial hides `wva-policy`: the controller cannot tell it exists. This is
 > being fixed. Until then, grant the controller's ServiceAccount `get` on
-> namespaces, and check the result with the log line below. On OpenShift the
-> `cluster-monitoring-view` binding already carries that read.
+> namespaces ([manifest](../guides/admin-cluster-setup/README.md#grant-the-namespace-read-by-hand)), restart it, and check the result with the log line below. On OpenShift the
+> `cluster-monitoring-view` binding is reported to carry that read; nothing in
+> this repository pins the role's contents, so confirm it with
+> `kubectl auth can-i get namespaces --as=system:serviceaccount:<controller namespace>:wva-controller-manager`.
 
 ### What the controller does with that
 
@@ -132,13 +147,19 @@ Policy is resolved once at startup, in order:
 
 Steps 1 and 2 apply only to a controller that manages its own namespace, and
 only when it may read Namespace objects (see the note above). The startup log
-says which step won; every branch logs a line starting `Cluster policy comes
-from`:
+says which step won: steps 1 and 2 log `Cluster policy comes from ...` at Info;
+step 3 logs the same prefix only at V(1), which the default verbosity hides; and
+a controller denied the Namespace read also logs `Could not read the managed
+Namespace` at Info:
 
 ```bash
 # NS: the controller's namespace
-kubectl logs -n "$NS" deploy/wva-controller-manager | grep 'Cluster policy comes from'
+kubectl logs -n "$NS" deploy/wva-controller-manager \
+  | grep -E 'Cluster policy comes from|Could not read the managed Namespace'
 ```
+
+No `Cluster policy comes from` line at the default verbosity means step 3: the
+controller's own ConfigMap.
 
 A **cluster-scoped** controller already runs where only a cluster admin can write,
 so its own ConfigMap *is* cluster-defined policy — a second namespace would add a
@@ -182,7 +203,7 @@ policy.
 **A guardrail, not an enforcement boundary.** Whoever owns the controller's
 Deployment owns its args, env and image, so a tenant running the scaling manager inside their own
 namespace can change what bounds them. What this does guarantee is that the GPU
-budget is authoritative for every controller actually running the scaling manager — which covers
+budget is authoritative for every controller that actually reads the policy holding it — which covers
 misconfiguration and drift.
 
 The scaling manager's limiter also bounds only what *the scaling manager* asks for. The ScaledObject belongs to

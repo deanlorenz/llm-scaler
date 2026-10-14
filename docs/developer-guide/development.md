@@ -53,12 +53,16 @@ with the types that cross each boundary.
 | `engines/aggregation/` | Supply, from the same per-replica capacity. |
 | `engines/allocation/` | The optimizer and the GPU limiters (quota, inventory, Kueue). |
 | `engines/steadystate/` | The per-cycle driver: runs the analyzers, applies thresholds, calls the optimizer, records the decision. |
+| `scalingpolicy/` | Between the optimizer's plan and the published order: sticky scale-down, the reasons a model is blocked from scaling (to zero), and whether an inventory read is worth its cost. |
 | `actuator/` | Emits the decision as metrics for the scale target. |
 | `decision/` | Holds the latest decision per target in memory. |
 | `scaler/` | KEDA's ExternalScaler gRPC service: serves the decision to KEDA. |
 | `engines/scalefromzero/` | Wakes a model parked at zero replicas from the EPP queue. |
 | `warmpool/` | Runs the warm pool: policy, pool Pods, the proxy. |
 | `kueue/` | Reads GPU quotas from Kueue. |
+| `gpunodes/` | Discovers GPU capacity and usage per node, per namespace and cluster-wide, for the limiters. |
+| `gpuusage/` | Keeps the cluster's GPU usage picture refreshed independently of any engine, so it exists even when every model is parked. |
+| `datastore/` | In-memory store of the EPP endpoint pools (and their metrics sources) and the namespaces being tracked. |
 | `registry/` | The managed workloads, registered by KEDA calling the scaler. |
 | `controller/` | Reconcilers for the ConfigMaps and InferencePools. |
 | `config/` | Configuration types, loading and validation. |
@@ -98,7 +102,7 @@ make deploy-e2e-infra
 
 **Step 2 (optional) — Deploy a simulator model service:**
 
-The simulator samples are under `config/samples/simulator/` and support three configurations:
+The simulator samples are under `config/samples/simulator/nodeSelector/` and come in four configurations:
 
 ```bash
 # Decode only
@@ -109,9 +113,26 @@ kubectl apply -k config/samples/simulator/nodeSelector/prefill/
 
 # Both prefill and decode (disaggregated serving)
 kubectl apply -k config/samples/simulator/nodeSelector/disaggregated/
+
+# Decode as a LeaderWorkerSet
+kubectl apply -k config/samples/simulator/nodeSelector/decode-lws/
+
+# Then point the samples' triggers at the controller you installed
+make scaledobjects-repoint
 ```
 
-Each configuration creates a Deployment (using `llm-d-inference-sim:v0.9.0`), a Service, a ServiceMonitor, and a KEDA `ScaledObject` in the `llm-d-sim` namespace.
+Each configuration creates the workload (a Deployment using
+`llm-d-inference-sim:v0.9.0`, or a LeaderWorkerSet for `decode-lws`), a Service
+and a KEDA `ScaledObject` in the `llm-d-sim` namespace, plus a ServiceMonitor in
+the `workload-variant-autoscaler-monitoring` namespace that selects the pods in
+`llm-d-sim`.
+
+**Run `make scaledobjects-repoint` after applying.** The samples' triggers name
+a controller in `workload-variant-autoscaler-system`, but `deploy-e2e-infra`
+installs it in `llm-d-sim`. A trigger that resolves to nothing fails quietly:
+KEDA falls back to a CPU metric, the HPA reads `cpu: <unknown>/80%`, and nothing
+scales. The target finds the running install and rewrites only `scalerAddress`;
+see [the kind emulator README](../../deploy/kind-emulator/).
 
 The `ScaledObject` is what makes the workload the scaling manager's to manage: The scaling manager has no watch and no listing, and learns a variant exists from the KEDA call its trigger causes. Its `modelID` must match what the container serves (`--model test-model` here) — that is the grouping key for every multi-variant decision. KEDA creates the HPA that actuates; nothing here writes one by hand.
 
@@ -119,8 +140,12 @@ Confirm the chain is live:
 
 ```bash
 kubectl -n llm-d-sim get scaledobject,hpa
-kubectl -n workload-variant-autoscaler-system logs deploy/wva-controller-manager | grep dev-model-decode
+kubectl -n llm-d-sim logs deploy/wva-controller-manager | grep dev-model-decode
 ```
+
+`deploy-e2e-infra` installs the controller in `llm-d-sim` (its
+`CONTROLLER_NAMESPACE`). For an install made with `make deploy-wva`, use the
+namespace you passed as `WVA_NS` (default `workload-variant-autoscaler-system`).
 
 To clean up the simulator, use the same path you applied:
 
@@ -128,6 +153,10 @@ To clean up the simulator, use the same path you applied:
 kubectl delete -k config/samples/simulator/nodeSelector/decode/
 # or
 kubectl delete -k config/samples/simulator/nodeSelector/disaggregated/
+# or
+kubectl delete -k config/samples/simulator/nodeSelector/prefill/
+# or
+kubectl delete -k config/samples/simulator/nodeSelector/decode-lws/
 ```
 
 To tear down the cluster entirely:
@@ -146,12 +175,17 @@ make destroy-kind-cluster
 
 2. **Make your changes**
 
-3. **Regenerate if needed** (after changing kubebuilder RBAC markers or the
-   structs in `internal/variant`):
+3. **Regenerate RBAC if needed** (after changing `+kubebuilder:rbac` markers):
 
    ```bash
-   make manifests generate
+   make manifests
    ```
+
+   This regenerates only `config/base/rbac/manager-clusterrole.yaml`. The
+   DeepCopy methods in `internal/variant/deepcopy.go` are hand-maintained: no
+   type carries a `+kubebuilder:object` marker, so `make generate` produces
+   nothing. Update `deepcopy.go` by hand when you change the structs in
+   `internal/variant`.
 
 4. **Run unit tests:**
 
@@ -248,12 +282,14 @@ See [Testing Guide](testing.md) and [E2E Test Suite README](../../test/e2e/) for
 
    ```bash
    kubectl apply -k config/samples/simulator/nodeSelector/disaggregated/
+   make scaledobjects-repoint
    ```
 
-3. **Monitor controller logs:**
+3. **Monitor controller logs** (`deploy-e2e-infra` installs the controller in
+   `llm-d-sim`):
 
    ```bash
-   kubectl logs -n workload-variant-autoscaler-system deploy/wva-controller-manager -f
+   kubectl logs -n llm-d-sim deploy/wva-controller-manager -f
    ```
 
 ## Debugging
@@ -293,7 +329,9 @@ go build -gcflags="all=-N -l" -o bin/manager cmd/main.go
 ### Viewing Controller Logs
 
 ```bash
-kubectl logs -n workload-variant-autoscaler-system deploy/wva-controller-manager --tail=100 -f
+# llm-d-sim for the kind install; otherwise the WVA_NS you installed with
+# (default workload-variant-autoscaler-system)
+kubectl logs -n "$WVA_NS" deploy/wva-controller-manager --tail=100 -f
 ```
 
 ## Common Development Tasks

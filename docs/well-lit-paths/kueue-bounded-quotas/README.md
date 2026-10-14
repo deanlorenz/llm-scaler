@@ -67,16 +67,18 @@ install the tenant-quotas path uses, and put the accelerator types in
 # one install's own policy
 WVA_LIMITER=quota WVA_QUOTAS='H100=-1' WVA_QUOTA_KUEUE=true make deploy-wva ...
 
-# the cluster policy every controller reads. With WVA_QUOTA_KUEUE=true this also
+# the cluster policy (see admin-gpu-bounding for which controllers read it). With WVA_QUOTA_KUEUE=true this also
 # grants each target controller the cluster-scoped half of the Kueue read
 # (ClusterQueues, ResourceFlavors), as it grants the node read for gpu-inventory.
 WVA_LIMITER_TYPE=quota WVA_QUOTAS='H100=-1' WVA_QUOTA_KUEUE=true make enable-physical-limiter
 ```
 
-The LocalQueue read is in the tenant Role, so a namespace-scoped controller
-installed before this feature existed also needs its owner to run
-`make deploy-wva` once; until then it logs `external quota source unreadable`
-and runs on the static entry.
+The LocalQueue read is in the controller's Role (`wva-manager-role`), which is an
+admin-phase object: the tenant's `make deploy-wva` does not apply Roles. So a
+namespace-scoped controller installed before this feature existed needs **a
+cluster admin to re-run `make setup-prereqs NAMESPACE=<ns>`** (with the same
+`WVA_NS` / `WVA_WATCH_NS` as the original install) once; until then it logs
+`external quota source unreadable` and runs on the static entry.
 
 That renders as one more block on the quota entry (comments added here; the
 installer writes the two lines under `kueue:`):

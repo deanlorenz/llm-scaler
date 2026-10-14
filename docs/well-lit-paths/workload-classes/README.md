@@ -26,12 +26,24 @@ data:
     scaleDownBoundary: 0.70
     priority: 1.0
     defaultPolicy: standard      # what a variant naming no tier gets
+  standard: |                    # must exist: defaultPolicy names it
+    priority: 1.0
   interactive: |
-    priority: 5.0
-    scaleUpThreshold: 0.75
+    scaleUpThreshold: 0.60
+    scaleDownBoundary: 0.45
+    priority: 2.0
   batch: |
+    scaleUpThreshold: 0.95
     priority: 0.5
 ```
+
+  The numbers are the shipped examples from the table under
+  [Choosing a tier](#choosing-a-tier). **`defaultPolicy` must name a tier that
+  exists.** Unlike a tier named on a trigger, a `defaultPolicy` naming no entry is
+  never reported: every variant that names no tier silently scales under the
+  bare `default` entry. Here `standard` repeats the default numbers, so it is
+  only a place to retune the unnamed fleet later; delete it and `defaultPolicy`
+  together, never one without the other.
 
 - A `scalingPolicy` key in each variant's KEDA trigger metadata. The trigger is
   already the registration, so selecting a tier needs nothing watched, listed or
@@ -90,7 +102,13 @@ Two things that could be silent are not:
 
 - **A tier that does not exist** falls back to `default` — the right outcome and
   the wrong silence, so it is logged against the variants that asked for it,
-  listing the tiers that do exist.
+  listing the tiers that do exist. This covers a tier named in `scalingPolicy`
+  only: a `defaultPolicy` naming a missing tier falls back the same way and is
+  **not** logged (`internal/engines/steadystate/engine.go`,
+  `resolveModelPolicy`). The `Effective scaling policy` line does not tell the
+  two apart either: for a variant naming no tier it reads
+  `scalingPolicy="(default entry)"` whether or not `defaultPolicy` resolved, so
+  check the thresholds and `priority` it prints against the tier you meant.
 - **Variants of one model naming different tiers** resolve to the
   lexicographically smallest, so the allocation comes out the same on every
   cycle rather than flipping with map order.

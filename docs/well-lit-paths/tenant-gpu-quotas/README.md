@@ -24,7 +24,7 @@ controller takes it from depends on where the controller runs:
 | --- | --- | --- |
 | `limiters:` and `optimizer:` (the budget) | the policy namespace, when one resolves for this controller (`wva-policy`, or the namespace a `wva.llmd.ai/policy-namespace` label names) | the cluster admin |
 | `limiters:` and `optimizer:`, when no policy namespace resolves | the controller's own `wva-scaling-policy-config` | whoever owns the controller's namespace: the admin for a cluster-scoped or out-of-reach controller, **the tenant** for one running in their own namespace |
-| thresholds, tiers, per-model entries | always the controller's own ConfigMap | the same |
+| thresholds, tiers, per-model entries, utilization-share weights | a `wva-scaling-policy-config` in the **managed** namespace, if there is one (read as a namespace-local map, in every shape); otherwise the controller's own ConfigMap | the namespace's owner — so in the out-of-reach shape the tenant still sets these for their models, though never the budget |
 
 A policy namespace resolves only for a controller that manages its own namespace
 **and** can read Namespace objects. On Kubernetes a namespace-scoped controller
@@ -123,19 +123,26 @@ the fair-share split is computed — a ceiling on the outcome, not an input to i
 
 ## Verifying it
 
-As a tenant, start from what you can read — your controller's log, in your
-namespace:
+As a tenant, start from what you can read — the controller's log. Where the
+controller runs depends on the shape: in your namespace if you installed it
+there; in the admin's namespace (for example `wva-<your-namespace>`) in the
+out-of-reach shape, where you can read its log only if the admin grants
+`pods/log` there — otherwise ask them for these two lines.
 
 ```bash
+# <controller-namespace>: yours in the tenant-owned shape, the admin's in the out-of-reach one
 # which policy governs this controller, read once at startup
-kubectl logs -n <your-namespace> deploy/wva-controller-manager | grep 'Cluster policy comes from'
+kubectl logs -n <controller-namespace> deploy/wva-controller-manager \
+  | grep -E 'Cluster policy comes from|Could not read the managed Namespace'
 
 # the limiter it built from that policy, and its name
-kubectl logs -n <your-namespace> deploy/wva-controller-manager | grep 'GPU limiter constructed'
+kubectl logs -n <controller-namespace> deploy/wva-controller-manager | grep 'GPU limiter constructed'
 ```
 
-`Cluster policy comes from this controller's own namespace` means the budget is
-in your own `wva-scaling-policy-config`, which you can read. `... the well-known
+No `Cluster policy comes from` line at the default verbosity (that branch logs
+only at V(1)) means the budget is in the controller's own
+`wva-scaling-policy-config` — yours in the tenant-owned shape, the admin's in
+the out-of-reach one. `... the well-known
 namespace` (or `... labelled with`) names a policy namespace you normally cannot
 read: ask the admin for `get` on `wva-scaling-policy-config` there, or for the
 figures. Then, in Prometheus:

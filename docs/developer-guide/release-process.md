@@ -18,7 +18,7 @@ A full release typically involves:
 
 1. **This repo (the scaling manager)**  
    - A version tag (e.g. `v0.5.2`).  
-   - A container image built and pushed to `ghcr.io/ev-shindin/llm-scaling-manager:<tag>`.  
+   - A multi-arch container image built and pushed to `ghcr.io/<owner>/<repo>:<tag>` (and `:latest`); for this repository, `ghcr.io/ev-shindin/llm-scaling-manager:<tag>`.  
 
 2. **Documentation in this repo**  
    - Changelog and, if needed, upstream version pins (`LLM_D_ROUTER_VERSION`, `GAIE_VERSION` in the [Makefile](../../Makefile)).
@@ -28,7 +28,7 @@ A full release typically involves:
 ## Prerequisites
 
 - **Permissions:** Ability to push tags and create/publish GitHub Releases.
-- **Secrets:** `CR_TOKEN` and `CR_USER` (or equivalent) configured for GHCR so the release workflow can push the image.
+- **Secrets:** a `GHCR_TOKEN` repository secret with `write:packages` on the target package. The workflow logs in to `ghcr.io` as `github.actor` with it; there is no separate user secret.
 - **State of main:** Release from a clean, tested state (e.g. main or a release branch). Run tests locally or rely on CI before tagging.
 
 ---
@@ -60,7 +60,13 @@ git tag vX.Y.Z
 git push origin vX.Y.Z
 ```
 
-- Pushing a tag matching `v*` triggers [`.github/workflows/ci-release.yaml`](../../.github/workflows/ci-release.yaml), which builds and pushes the Docker image to `ghcr.io/ev-shindin/llm-scaling-manager:<tag>`.
+- Pushing a tag matching `v*` triggers [`.github/workflows/ci-release.yaml`](../../.github/workflows/ci-release.yaml), which builds the image for `linux/amd64` and `linux/arm64`, pushes it as `ghcr.io/<owner>/<repo>:<tag>` and `:latest`, and runs a Trivy scan on it. Publishing a GitHub Release runs the same workflow again.
+
+> **Note:** the workflow is being fixed. Today `ci-release.yaml` hardcodes the
+> registry path as `ghcr.io/llm-d/<repo>`, which this repository cannot push
+> to. This page describes the release after that fix, when the path is derived
+> from the repository owner. Until it lands, check the workflow's `IMAGE=` line
+> before tagging.
 
 ### 2. Create the GitHub Release
 
@@ -79,7 +85,7 @@ To allow other team members to perform releases:
    - Grant them permission to push tags and to create/publish GitHub Releases.
 
 2. **Secrets**  
-   - Ensure release workflows have access to the required GHCR credentials (`CR_TOKEN`, `CR_USER` or org equivalent). Document where these are set (e.g. repo or org secrets) in internal runbooks.
+   - Ensure the release workflow can read the `GHCR_TOKEN` secret (repository or organization secret). Document where it is set in internal runbooks.
 
 3. **Documentation**  
    - Point them to this guide and to the workflows:

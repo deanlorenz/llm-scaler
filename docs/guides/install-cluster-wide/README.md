@@ -187,11 +187,11 @@ Optional.
 | --- | --- | --- |
 | `SCOPE` | `namespace` — **set `cluster` for this guide** | `cluster` |
 | `WVA_NS` | `workload-variant-autoscaler-system` | `wva-system` |
+| `IMG` | the image CI builds from main — a **floating** tag; pin a release for anything you rely on ([pin the version](../../reference/upgrade-and-uninstall.md#pin-the-version)) | `ghcr.io/you/wva:dev` |
 
 Every permission a cluster-scoped install holds — including read on every
 ConfigMap and patch on every pod in the cluster — is listed in the
 [security model](../../reference/security-model.md#cluster-scoped-both-platforms).
-| `IMG` | the image CI builds from main | `ghcr.io/you/wva:dev` |
 
 Full list: [Configuration reference](../../reference/configuration.md).
 

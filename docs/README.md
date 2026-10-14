@@ -9,6 +9,8 @@ number to KEDA, which scales the workloads. It works with
 ![How it fits together](concepts/figures/how-it-fits.svg)
 
 The picture, explained: [how the scaling manager fits together](concepts/architecture.md).
+Evaluating it? [Why llm-scaling-manager](why.md) is the one-page case: what it
+was measured to do, what it costs, and how mature each part is.
 
 ## Terms you will meet
 
@@ -30,7 +32,13 @@ The picture, explained: [how the scaling manager fits together](concepts/archite
    `flowControl` feature gate on, plus KEDA and Prometheus on the cluster.
    Nothing serving yet? [Install a small llm-d model](guides/install-small-model/) first.
 2. **Install the scaling manager** into that namespace. A cluster admin runs
-   the one-time setup; the namespace owner runs the rest:
+   the one-time setup; the namespace owner runs the rest. On a shared
+   cluster, have a cluster admin run the controller out of the tenant's reach
+   (`WVA_NS=wva-<ns> WVA_WATCH_NS=<ns>` on `setup-prereqs` and `deploy-wva`);
+   see [Cluster-admin setup](guides/admin-cluster-setup/README.md#keeping-the-controller-out-of-the-tenants-reach).
+   The tenant-owned default below is for single-team or trusted clusters.
+   Either way, the bound that actually holds is a GPU ResourceQuota on the
+   namespace: [bound the namespace's GPUs at admission](guides/admin-cluster-setup/README.md#bound-the-namespaces-gpus-at-admission).
 
    ```bash
    export NAMESPACE=<the namespace running llm-d>

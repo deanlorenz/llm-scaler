@@ -42,12 +42,13 @@ default).
 
 ```bash
 export NAMESPACE=<your-namespace>
+NS=${NAMESPACE}   # the controller's namespace; workload-variant-autoscaler-system for a cluster-wide install
 
 # 1. The scaling manager is deciding at all: one line per model, per cycle
-kubectl logs -n ${NAMESPACE} deploy/wva-controller-manager | grep scaling-decision
+kubectl logs -n "$NS" deploy/wva-controller-manager | grep scaling-decision
 
 # 2. It decided for a reason: supply, demand and the threshold it compared them to
-kubectl logs -n ${NAMESPACE} deploy/wva-controller-manager | grep analyzer-result
+kubectl logs -n "$NS" deploy/wva-controller-manager | grep analyzer-result
 
 # 3. KEDA acted on it
 kubectl get scaledobject,hpa -n ${NAMESPACE}

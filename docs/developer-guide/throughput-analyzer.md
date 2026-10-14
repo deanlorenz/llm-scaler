@@ -160,8 +160,8 @@ value, `max = avg` — the choice has no effect on correctness. This follows the
 by every other per-pod query in this codebase.
 
 **There is no `llm_d_ai_variant` in the grouping.** The label was dropped from every
-per-pod query (issue #1263) and is read by no code: `internal/constants/labels.go` still
-defines `VariantLabelKey`, but nothing consumes it. vLLM and SGLang never emitted it — it
+per-pod query (issue #1263) and is read by no code; no constant for it is defined any
+more. vLLM and SGLang never emitted it — it
 existed only where an operator configured a `ServiceMonitor`/`PodMonitor` relabel to copy
 the pod label `llm-d.ai/variant` onto the scraped series.
 
@@ -211,16 +211,17 @@ these fields directly rather than registering duplicate queries.
 | OL (avg output tokens) | `ReplicaMetrics.AvgOutputTokens` | `QueryAvgOutputTokens` | `RegisterSaturationQueries` |
 | IL (avg input tokens) | `ReplicaMetrics.AvgInputTokens` | `QueryAvgInputTokens` | `RegisterSaturationQueries` |
 | H％ (prefix hit rate) | `ReplicaMetrics.PrefixCacheHitRate` | `QueryPrefixCacheHitRate` | `RegisterSaturationQueries` |
-| λ_req (per-pod, req/s) | `ReplicaMetrics.ArrivalRate` | `QuerySchedulerDispatchRate` | `RegisterQueueingModelQueries` |
+| Λ_req (model-level, req/s) | `AnalyzerInput.ArrivalRate` | `QueryModelArrivalRate` | `RegisterAlwaysOnQueries` |
 | Q (scheduler queue size) | `SchedulerQueueMetrics.QueueSize` (model-level) | `QuerySchedulerQueueSize` | `RegisterSaturationQueries` |
 
-**λ_dec primary:** `Σ ArrivalRate_r × AvgOutputTokens_r` across all replicas (EPP deployed).  
-**λ_dec fallback:** `Σ RequestRate_r × AvgOutputTokens_r` (EPP absent, all ArrivalRate == 0).
+**λ_dec primary:** `AnalyzerInput.ArrivalRate × avgOL` at model level (EPP deployed).  
+**λ_dec fallback:** `Σ RequestRate_r × AvgOutputTokens_r` (EPP absent, `ArrivalRate == 0`).
 
-**Note on arrival rate:** `ArrivalRate` comes from `QuerySchedulerDispatchRate` which is per-pod,
-namespaced, and model-scoped — correctly isolating traffic to a specific variant. The TA sums
-per-replica λ_dec in the analyzer rather than using a model-level query, which avoids the
-namespace filtering limitation of the scheduler metric.
+**Note on arrival rate:** there is no per-pod arrival rate any more. `QueryModelArrivalRate`
+(`internal/collector/registration/throughput_analyzer.go`) is grouped only by `namespace` and
+`target_model_name`, so it has no `pod_name`/`port` labels to mis-attribute. The per-pod form
+was removed because the EPP reports the port it routes to while every engine series is keyed on
+the port it is scraped on, so the two could not be joined.
 
 **Note on metric freshness:** the collector derives each replica's
 `ReplicaMetricsMetadata.Age`/`FreshnessStatus` from the same scrape timestamps used for the
@@ -241,12 +242,12 @@ only: the stale-metrics sanity issue is reported but not currently used to gate 
 | `QueryGenerationTokenRate` | vLLM | `sum by (model_name, instance, pod)` | 1m rate | μ_dec^obs per pod (observability) |
 | `QueryKvUsageInstant` | vLLM | `max by (model_name, instance, pod)` | instant | k* (no max_over_time) |
 | `QueryRequestRate` | vLLM | `sum by (model_name, instance, pod)` | 1m rate | Fallback λ_req; histogram weight |
-| `TotalKvCapacityTokens` | `KvCacheConfigInfo` labels | derived | static | KV_max = blocks × block_size |
+| `TotalKvCapacityTokens` | `registration.QueryCacheConfigInfo` labels | derived | static | KV_max = blocks × block_size |
 | `AvgITL` | `QueryAvgITL` | `max by (model_name, instance, pod)` | 1m rate | ITL_obs for OLS calibration |
 | `AvgOutputTokens` | `QueryAvgOutputTokens` | `max by (model_name, instance, pod)` | 5m rate | OL for KV_req and λ_dec |
 | `AvgInputTokens` | `QueryAvgInputTokens` | `max by (model_name, instance, pod)` | 5m rate | IL for IL_eff = IL × (1−H％) |
 | `PrefixCacheHitRate` | `QueryPrefixCacheHitRate` | `max by (model_name, instance, pod)` | 5m rate | H％ for IL_eff |
-| `ArrivalRate` | `QuerySchedulerDispatchRate` | `sum by (pod_name, port, namespace)` | 1m rate | λ_req per pod (primary) |
+| `AnalyzerInput.ArrivalRate` | `QueryModelArrivalRate` | `sum by (namespace, target_model_name)` | 1m rate | Λ_req per model (primary) |
 
 ## Architecture
 
@@ -395,7 +396,7 @@ On leader failover the incoming leader starts with an empty analyzer. During war
        │ vllm:request_generation_tokens_*        (QueryAvgOutputTokens       → AvgOutputTokens)
        │ vllm:request_prompt_tokens_*            (QueryAvgInputTokens        → AvgInputTokens)
        │ vllm:prefix_cache_hits/queries          (QueryPrefixCacheHitRate    → PrefixCacheHitRate)
-       │ inference_extension_scheduler_*         (QuerySchedulerDispatchRate → ArrivalRate)
+       │ inference_extension_flow_control_*      (QueryModelArrivalRate      → AnalyzerInput.ArrivalRate)
        │ inference_extension_flow_control_*      (QuerySchedulerQueueSize    → QueueSize)
        ↓
 ┌─────────────────────────┐
@@ -511,8 +512,8 @@ arrivalDecodeDemand = AnalyzerInput.ArrivalRate × avgOL
 ```
 
 `AnalyzerInput.ArrivalRate` is collected from a single model-level query with no
-`pod`/`port`/`instance` labels, so unlike the per-pod `ReplicaMetrics.ArrivalRate`
-(`QuerySchedulerDispatchRate`) it cannot partially mis-attribute. No witness metric is needed.
+`pod`/`port`/`instance` labels (`QueryModelArrivalRate`), so unlike the per-pod arrival rate
+it replaced it cannot partially mis-attribute. No witness metric is needed.
 
 The query reads the flow-control **enqueue** counter, which increments when a request is
 accepted, and falls back to the scheduler's placement counter where flow control is not

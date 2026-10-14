@@ -654,6 +654,39 @@ decode:
 Decode holds the long-running streams, so its grace period is the one to size
 from the longest generation; a prefill request finishes in one forward pass.
 
+**What to check in the chart before relying on the paths above.** Find which
+chart and version your release runs, pull that chart, and read the paths off
+its Deployment template:
+
+```bash
+helm list -n <ns>                                # the CHART column: name and version of <model>-ms
+helm pull <repo>/<chart> --version <version> --untar -d /tmp/ms
+grep -rn "terminationGracePeriodSeconds\|lifecycle\|preStop" /tmp/ms/*/templates/
+```
+
+The `.Values.…` expression each match reads **is** the values path. You are
+looking for two things, per role (`prefill`, `decode`): the expression that
+fills `spec.template.spec.terminationGracePeriodSeconds`, and how the
+`vllm` container's `lifecycle` is filled — either a values key that is
+rendered into it, or a role-level `containers` list that is passed through
+whole. If neither is templated, the chart cannot set the field and the patch
+has to go on the rendered Deployment instead (and is reverted by the next
+`helm upgrade`). Then confirm on the rendered output, and once more on the
+live object after the upgrade:
+
+```bash
+helm template <model>-ms <repo>/<chart> --version <version> -f values.yaml \
+  | yq 'select(.kind == "Deployment") | [.metadata.name, .spec.template.spec.terminationGracePeriodSeconds, (.spec.template.spec.containers[] | select(.name == "vllm") | .lifecycle.preStop)]'
+kubectl get deploy -n <ns> -o custom-columns=NAME:.metadata.name,GRACE:.spec.template.spec.terminationGracePeriodSeconds
+```
+
+A null grace period or preStop in either output means the key path is wrong
+for your chart version. `make scaledobjects-plan` is the last check: the
+`Scale-down will cut in-flight requests` note disappears for a workload once
+its engine container has a preStop hook. It does not look at the grace period
+(`so_drain_note` in `deploy/lib/scaledobject.sh`), so confirm that one with
+the `kubectl` line above.
+
 ### On a LeaderWorkerSet
 
 `make workload-patch` skips LeaderWorkerSets and says so: the pod templates

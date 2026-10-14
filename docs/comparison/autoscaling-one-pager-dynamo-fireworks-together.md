@@ -1,6 +1,6 @@
 # LLM Autoscaling Landscape — Dynamo · Fireworks · Together
 
-> One-page summary · verified **2026-08-09** · the scaling manager shown as baseline · full detail: [autoscaling-nvidia-mooncake-sglang-vs-wva.md](./autoscaling-nvidia-mooncake-sglang-vs-wva.md)
+> One-page summary · verified **2026-08-09** · the scaling manager (an advanced fork of llm-d's workload-variant-autoscaler) shown as baseline · full detail: [autoscaling-nvidia-mooncake-sglang-vs-wva.md](./autoscaling-nvidia-mooncake-sglang-vs-wva.md)
 
 **Two categories, not three competitors.** NVIDIA **Dynamo** is deployable software and the scaling manager's only true peer. **Fireworks** and **Together** are managed SaaS: they scale *one endpoint you rent*, and the fleet problem the scaling manager solves is the provider's, structurally invisible through their APIs. Compare Dynamo on scope; compare the SaaS pair on control law and signal choice.
 
@@ -9,13 +9,13 @@
 | | **the scaling manager** (baseline) | **NVIDIA Dynamo Planner** | **Fireworks AI** | **Together AI** |
 |---|---|---|---|---|
 | **Category** | Deployable OSS (K8s controller) | Deployable OSS | Managed SaaS | Managed SaaS |
-| **Control law** | Saturation optimizer; weighted multi-analyzer ballot | SLA perf-model → replicas | Threshold per target; **max across targets wins** | Proportional `ceil(N × observed/target)` |
+| **Control law** | Saturation optimizer; demand floored on measured per-replica throughput | SLA perf-model → replicas | Threshold per target; **max across targets wins** | Proportional `ceil(N × observed/target)` |
 | **Signals** | Queue depth, KV util, request rate, token supply/demand | Prometheus rate + ISL/OSL + KV-hit; event-plane ForwardPassMetrics | 5 per-replica rates: `default` (0–1), `tokens_generated_per_second`, `prompt_tokens_per_second`, `requests_per_second`, `concurrent_requests` | 8, **exactly one at a time**: `inflight_requests` (default), `ttft`, `e2e_latency`, `gpu_utilization`, `token_utilization` (= KV-cache), `throughput_per_replica`, `decoding_speed`, `cache_hit_rate` |
 | **Forecasting** | **None** (reactive) | **Yes** — Constant / **ARIMA** / Kalman / Prophet, 1-interval look-ahead | None | None |
 | **SLA → capacity** | Learns online from metrics; no profiling step | Interpolated perf model, **required** for the SLA planner. **No traces needed** — you pass target ISL/OSL + TTFT/ITL. Default **AIConfigurator: 20–30 s, no GPU**; opt-in **AIPerf: 2–4 h, GPU**. Load-based mode needs no profiling but is `enable_load_scaling=False` by default | None | Latency metrics only (`p50–p99`, default `p95`) — **and they don't work, see below** |
 | **Multi-model / global** | **Yes** — multi-tenant, global fair-share | No — single DGD | No — per endpoint | No — per endpoint |
 | **Heterogeneous GPUs** | **Yes**, first-class | No — one GPU type | Not exposed (one SKU/deployment) | Not exposed (one `hardware` string) |
-| **Cost aware** | **Yes** — relative `variant-cost` + **GPU quota/fair-share limiter** | No — cost-blind, only `max_gpu_budget=8` | Per-GPU-second billing; `max` is the only ceiling | `max_replicas` is the only ceiling |
+| **Cost aware** | **Yes** — relative `variantCost` per variant + **GPU quota/fair-share limiter** | No — cost-blind, only `max_gpu_budget=8` | Per-GPU-second billing; `max` is the only ceiling | `max_replicas` is the only ceiling |
 | **P/D disaggregation** | Roles first-class, role-aware demand | **Independent P/D scaling** (core feature) | Not exposed | Not exposed |
 | **Scale to zero** | Reactive scale-from-zero engine | Not a focus | **Headline feature** — idle window default **1 h** (min 5 m) | **No auto-wake** — `min=max=0` is a *stopped* state; `inactive_timeout` auto-stops |
 | **Up / down windows** | HPA/KEDA stabilization | 180 s predictive · 5 s reactive (off by default) | **30 s** / **10 m** | **0 s** / **5 m** |
@@ -38,7 +38,7 @@ Together ships `ttft` p95, then **published that it doesn't work**. In their own
 - **TTFT** stays low under saturation — continuous batching absorbs queue pressure into *end-to-end* latency, so the metric looks healthy exactly when you need to scale.
 - **GPU utilization** misleads — *"utilization measures arithmetic intensity, not pressure"*; a GPU reads 60% busy while the queue backs up.
 
-A competitor's published negative result validating the scaling manager's signal choice: **scale on saturation/queue, not latency or GPU busy-ness.** Cite it when challenged with "why not just target TTFT?" or "why not DCGM utilization?". It argues against a naive TTFT analyzer in the ballot.
+A competitor's published negative result validating the scaling manager's signal choice: **scale on saturation/queue, not latency or GPU busy-ness.** Cite it when challenged with "why not just target TTFT?" or "why not DCGM utilization?". It argues against adding a naive TTFT analyzer.
 
 **Published cold-start figures** (Together, 1×H100 — rare public data, useful for scale-from-zero calibration): base model → READY **86 s**; fine-tune (18 GB) → READY **145 s**; READY → first token **+26–40 s**; scale-up 1→2 **≈2.5 min**. This ~2-minute floor is why both SaaS vendors set scale-down windows of 5–10 minutes.
 

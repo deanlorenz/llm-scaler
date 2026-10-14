@@ -75,7 +75,8 @@ every variant of every model, inside whatever accelerator budget the limiter
 declares. Two things decide the outcome.
 
 **Cost, when there is room.** Variants are ranked by serving capacity per unit
-of cost — the relative scalar each carries as `llm-d.ai/variant-cost` — so the
+of cost — the relative scalar each carries in its ScaledObject trigger's
+`variantCost` key — so the
 *most efficient* variant grows first, which is not always the cheapest one. A
 TP=2 variant at twice the cost of a TP=1 variant is the better buy whenever it
 serves more than twice as much. See `cost_aware_optimizer.go` and

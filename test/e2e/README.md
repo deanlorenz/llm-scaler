@@ -42,13 +42,17 @@ and read each `[SKIPPED]` reason.
 
 | Target | Ginkgo label filter | CI |
 | --- | --- | --- |
-| `make test-e2e-smoke` | `smoke` | every PR, with `SCALE_TO_ZERO_ENABLED=false` |
+| `make test-e2e-smoke` | `smoke` | every PR into `main` or `dev` that changes something besides `docs/**`, `README.md`, `CONTRIBUTING.md`, `LICENSE`, `OWNERS` or `PROJECT`, with `SCALE_TO_ZERO_ENABLED=false` |
 | `make test-e2e-full` | `full && !smoke && !flaky` | PRs that touch code, config or tests, with `SCALE_TO_ZERO_ENABLED=true` and `DEPLOY_LWS=true` |
 | `make test-e2e-multi-controller` | `multi-controller` specs | — |
 | `make test-e2e-smoke-with-setup` / `test-e2e-full-with-setup` | deploy the infra first, then run the tier | what CI runs |
 
 Smoke and full are **disjoint**: the full target excludes `smoke`, so run both
 for complete coverage.
+
+CI runs these only on pull requests whose base is `main` or `dev`
+(`ci-pr-checks.yaml`). A PR stacked on another branch gets no e2e, build, test or
+lint run at all.
 
 ```bash
 # one Describe or It by its text

@@ -112,20 +112,27 @@ What CI runs, and how to run each job locally, is in
 ### Modifying generated manifests
 
 This project installs no CustomResourceDefinition. A workload is registered by
-its KEDA ScaledObject, so there is no API type to version. What is generated is
-the RBAC and deepcopy code:
+its KEDA ScaledObject, so there is no API type to version. The only generated
+file is the manager's ClusterRole:
 
-1. **Regenerate after changing kubebuilder markers or API structs:**
+1. **Regenerate after changing `+kubebuilder:rbac` markers:**
 
    ```bash
-   make manifests generate
+   make manifests
    ```
+
+   This rewrites only `config/base/rbac/manager-clusterrole.yaml`.
 
 2. **Check what moved:**
 
    ```bash
-   git diff config/base/rbac internal/variant/deepcopy.go
+   git diff config/base/rbac
    ```
+
+The DeepCopy methods in `internal/variant/deepcopy.go` are hand-maintained. No
+type carries a `+kubebuilder:object` marker, so `make generate` produces
+nothing; when you change a struct in `internal/variant`, update `deepcopy.go` by
+hand.
 
 ### Building and Deploying
 

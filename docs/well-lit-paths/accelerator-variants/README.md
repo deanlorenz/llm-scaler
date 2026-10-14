@@ -7,8 +7,12 @@ The scaling manager groups them and scales the group, not the deployments.
 
 On scale-up the optimizer grows the variant with the **lowest cost per unit of
 capacity** — `variantCost` divided by the capacity one replica of that variant
-serves — which is not the same as the cheapest replica. On scale-down it removes
-replicas from the variant with the highest `variantCost` first. With the shipped
+serves — which is not the same as the cheapest replica. Scale-down does **not**
+use that ratio: it removes replicas from the variant with the highest
+`variantCost` per replica first (ties broken by the analyzer's score, then by
+name), and keeps at least one replica on the cheapest variant while no more
+expensive variant holds any. So a variant that is grown first for efficiency can
+also be the one shed first, if its replicas are the dearer ones. With the shipped
 example pricing — a TP=2 primary at cost 10 and a TP=1 secondary at cost 5 —
 both cost the same per GPU, a TP=2 replica serves more than twice a TP=1 one, so
 the primary is the more efficient variant and grows first.

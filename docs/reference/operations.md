@@ -32,17 +32,25 @@ running and ready in `<ns>`"), or — if there is more than one scaling-manager
 install on this cluster, or none — lists every candidate and stops rather than
 guess; choose yours from that list.
 
-For a namespace-scoped install (the common case — the controller runs in the
-same namespace it manages):
+Set `NS` to the controller's namespace. In a fresh shell, find it the way the
+controller check does, by its Deployment label:
 
 ```bash
-NS="${NAMESPACE:-}"
+kubectl get deploy -A -l app.kubernetes.io/name=workload-variant-autoscaler \
+  -o custom-columns=NAMESPACE:.metadata.namespace,NAME:.metadata.name
+NS=$(kubectl get deploy -A -l app.kubernetes.io/name=workload-variant-autoscaler \
+  -o jsonpath='{.items[0].metadata.namespace}')
 ```
 
-For a cluster-scoped install, or one installed with `WVA_NS` set explicitly:
+With more than one install the second command takes the first one listed: pick
+yours from the first command's list and set `NS` by hand. A tenant without
+cluster-wide read sets it directly: `NS=<your-namespace>` for a
+namespace-scoped install (the controller runs in the namespace it manages), or
+the `WVA_NS` it was installed with. `MODEL_NS` below is the namespace your
+workloads run in, the same as `NS` for a namespace-scoped install:
 
 ```bash
-NS="${WVA_NS:-}"
+MODEL_NS="$NS"   # or the namespace holding your ScaledObjects
 ```
 
 Confirm registration matches what is actually serving:
@@ -55,8 +63,8 @@ For more detail, straight from the controller and KEDA:
 
 ```bash
 kubectl get pods -n "$NS"                     # the controller is Running
-kubectl get scaledobject -n "$NAMESPACE"      # your managed workloads
-kubectl get hpa -n "$NAMESPACE"               # KEDA created one per ScaledObject
+kubectl get scaledobject -n "$MODEL_NS"       # your managed workloads
+kubectl get hpa -n "$MODEL_NS"                # KEDA created one per ScaledObject
 ```
 
 The whole chain works when the ScaledObject reads `READY True` and its HPA's
@@ -113,7 +121,7 @@ simulator and the e2e suites, are in [Testing](../developer-guide/testing.md).
 | nothing scales, no errors | a limiter is declared and the workload's accelerator does not resolve, so it gets no GPU budget | `kubectl logs -n "$NS" -l app.kubernetes.io/name=workload-variant-autoscaler \| grep -i accelerator` |
 | a model never wakes from zero | the EPP flow-control queue is not reaching the scaling manager | see [Troubleshooting](troubleshooting.md) |
 | `READY False` on the ScaledObject, and the HPA's `TARGETS` reads `cpu: <unknown>/80%` | KEDA could not fetch the metric spec from the scaling manager, so it fell back to a CPU metric. The trigger names a scaler it cannot reach — most often a `scalerAddress` naming a **different install's namespace** than the controller actually runs in. `make scaledobjects-repoint` fixes exactly this: it rewrites `scalerAddress` on objects that ask for the scaling manager but name a namespace where no scaler runs, and leaves one pointing at a second live install alone | `kubectl get scaledobject -n <ns> -o custom-columns=NAME:.metadata.name,ADDR:.spec.triggers[0].metadata.scalerAddress`, then `kubectl get svc -n "$NS" wva-external-scaler` (the address must be `wva-external-scaler.$NS...`). Admin, across the cluster: the same with `-A` |
-| demand looks far too low for the load you are driving, and `has N ready pod(s) but none attributed` appears each cycle | FMA is in the namespace and nothing is scraping its launcher pods, so the traffic they serve is invisible | `make verify-fma`, see also [FMA launcher pods](#fma-launcher-pods) |
+| demand looks far too low for the load you are driving, and an `UnattributedReadyPods` Warning Event (`has N ready pod(s) but none attributed`) keeps recurring | FMA is in the namespace and nothing is scraping its launcher pods, so the traffic they serve is invisible | `kubectl get events -n <ns> --field-selector reason=UnattributedReadyPods`, then `make verify-fma`, see also [FMA launcher pods](#fma-launcher-pods) |
 | The scaling manager applies no decisions for a workload, silently, though the HPA reads a healthy ratio the whole time | the ScaledObject's `modelID` no longer matches what the container actually serves — a hand-changed model that nothing re-syncs | `make verify-scaledobjects` |
 | `check-prereqs`/`deploy-wva` refuses: "No llm-d found in `<ns>`" | the namespace holds no llm-d model servers yet | finish the llm-d install in `<ns>`, or `SKIP_CHECKS=true` |
 | refuses: "Monitoring not enabled for your llm-d servers; please enable Model-server metrics" | nothing scrapes the model servers — the scaling manager would hold every workload at `minReplicas` and say so only in its log | `kubectl apply -n <ns> -k config/modelserver-metrics` (or llm-d's own `guides/recipes/modelserver/components/monitoring`) |
@@ -156,9 +164,14 @@ does not do by default, and both fail silently when missing:
 - **the plan must target the requester**, not a decode Deployment, when the
   requester is the only serving workload there.
 
-Symptoms: demand far lower than the load you are driving, `has N ready pod(s)
-but none attributed` once per cycle, or a variant flat at `minReplicaCount`
-while the queue grows.
+Symptoms: demand far lower than the load you are driving, a recurring
+`UnattributedReadyPods` Warning Event (`has N ready pod(s) but none
+attributed`), or a variant flat at `minReplicaCount` while the queue grows. The
+text is the Event's, not a log line:
+
+```bash
+kubectl get events -n <ns> --field-selector reason=UnattributedReadyPods
+```
 
 The whole story — how attribution works, how to size `maxReplicas` from the
 launcher pool, why GPU accounting is a lower bound, and what to check — is in
@@ -179,7 +192,11 @@ Thresholds, tiers, scale-to-zero and limiters live in the scaling-policy
 ConfigMap, `wva-scaling-policy-config` in the controller's namespace. The
 controller re-reads it live; no restart. Cluster limits an admin publishes live
 in the same-named ConfigMap in the policy namespace (`wva-policy` by default),
-and editing that one is a cluster-admin action.
+and editing that one is a cluster-admin action. The exception: a
+namespace-scoped controller does not watch a separate policy namespace, so it
+reads that policy once at start. After editing it, restart each such
+controller (`kubectl rollout restart deploy/wva-controller-manager -n <its ns>`);
+a cluster-scoped controller picks the edit up live.
 
 1. **Back up** (strip the fields that would block a later replace):
 

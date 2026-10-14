@@ -366,7 +366,7 @@ pool](../guides/warm-pool/).
 Steps 1, 2, 3 and 3a were run on an H100 OpenShift test cluster. One log line covers three of them:
 
 ```
-warm pool enabled  {"namespace":"evgensh-wva-test","sleepMinSize":1,"maxHold":"2m0s",
+warm pool enabled  {"namespace":"wva-test","sleepMinSize":1,"maxHold":"2m0s",
                     "memoryBudgetBytes":0,"gpuMemoryUtilization":0.9,"preloadTop":2}
 warm pool state    {"pool":"default","state":"pods=2 free=2 resident=2 variants=1
                     lent=0 accelerator=NVIDIA-H100-80GB-HBM3"}

@@ -153,7 +153,7 @@ what happens: `# scaledObject:` names the object `adopt` would repoint, and
 | `modelID` | **Required.** What the container serves, and the grouping key — entries sharing a `modelID` are sized against each other. An entry with none is never applied: an object created without it registers a variant of a model nobody runs |
 | `minReplicas` / `maxReplicas` | What KEDA holds the workload between; the scaling manager decides within them. Default 1 and 10, and for `adopt` they are read from the object being adopted, so applying it unedited changes only who decides the count |
 | `variantCost` | The relative price of one replica of this variant. Only the ratio between variants of one model matters, so with one variant it changes nothing |
-| `scalingPolicy` | Optional, and commented out by default. Names a reusable policy tier — `interactive`, `standard`, `batch` — from the scaling-policy ConfigMap. Leaving it out means "whatever the cluster default says", which an admin can then change for every workload at once; naming one opts this workload out of that. A name no tier matches falls back to the default silently |
+| `scalingPolicy` | Optional, and commented out by default. Names a reusable policy tier — `interactive`, `standard`, `batch` — from the scaling-policy ConfigMap. Leaving it out means "whatever the cluster default says", which an admin can then change for every workload at once; naming one opts this workload out of that. A name no tier matches falls back to the `default` entry and is logged once per change: `Scaling policy not found; this variant is scaling under the default entry`, with the name and the known tiers |
 | `inferencePool` | Informational, a comment, never applied: the EPP queue that workload sits behind, resolved by matching pod labels against each pool's selector — the same way the scaling manager resolves it. `(none)` means no pool has adopted it |
 
 Entries that cannot be applied are marked `no` **and kept**, with the reason,
@@ -378,6 +378,19 @@ cluster-scoped controller manages every namespace. Workloads never overlap — e
 registers with the scaler address its trigger names — but GPU budgets do:
 namespace-scoped controllers each read the same nodes and allocate without seeing
 each other's claims, so bound them with quota limiters or separate GPU nodes.
+
+The refusal depends on the installer being able to **see** the other installs,
+which takes listing Deployments cluster-wide. A namespace admin cannot, so a
+tenant-run `make deploy-wva` logs `Cannot check whether another WVA is already
+installed` and **carries on**. Run `make check-prereqs` as a cluster admin for
+that namespace first (it runs the same check with the rights to see), or confirm
+no cluster-scoped controller exists — any row whose args lack
+`--watch-namespace`:
+
+```bash
+kubectl get deploy -A -l app.kubernetes.io/name=workload-variant-autoscaler,control-plane=controller-manager \
+  -o custom-columns=NAMESPACE:.metadata.namespace,NAME:.metadata.name,ARGS:.spec.template.spec.containers[0].args
+```
 
 ## Adding a model later
 

@@ -28,7 +28,8 @@ spec:
 
         # Optional: TLS configuration
         - name: PROMETHEUS_TLS_INSECURE_SKIP_VERIFY
-          value: "false"  # Set to "true" only for testing/development
+          value: "false"  # production: verify, with PROMETHEUS_CA_CERT_PATH set.
+                          # The shipped Kubernetes config sets "true"; see the table.
 
         - name: PROMETHEUS_CA_CERT_PATH
           value: "/etc/prometheus-certs/ca.crt"
@@ -56,7 +57,7 @@ spec:
 |----------|----------|-------------|---------|
 | `PROMETHEUS_BASE_URL` | Yes | Prometheus server URL (HTTPS only in production) | - |
 | `PROMETHEUS_ALLOW_HTTP` | No | Allow a plain `http://` `PROMETHEUS_BASE_URL` (dev/test only; cannot be combined with TLS settings or bearer token auth) | `false` |
-| `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY` | No | Skip TLS certificate verification (dev/test only) | `false` |
+| `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY` | No | Skip TLS certificate verification. The binary defaults to `false`, but the shipped Kubernetes config (`config/base/manager/manager-configmap.yaml`) sets `"true"`; the OpenShift overlay sets `"false"`. In production set `"false"` and point `PROMETHEUS_CA_CERT_PATH` at the CA that signed Prometheus's certificate | `false` (binary); `"true"` (shipped Kubernetes config) |
 | `PROMETHEUS_CA_CERT_PATH` | No | Path to CA certificate for TLS verification | - |
 | `PROMETHEUS_CLIENT_CERT_PATH` | No | Path to client certificate for mutual TLS | - |
 | `PROMETHEUS_CLIENT_KEY_PATH` | No | Path to client private key for mutual TLS | - |
@@ -1289,13 +1290,13 @@ T = troubleshooting runbook on [Troubleshooting](troubleshooting.md).
 
 | alert | severity | for | fires when | what to do | runbook |
 | --- | --- | --- | --- | --- | --- |
-| `WVANodeAccessDenied` | critical | 2m | a `gpu-inventory` limiter is configured and the controller may not list nodes. **No variant scales up.** | grant the controller's ServiceAccount get/list/watch on nodes (cluster admin: `make enable-physical-limiter` grants every controller), or remove the limiter | [T: controller not Ready](troubleshooting.md#the-controller-is-not-ready-or-crash-looping) |
+| `WVANodeAccessDenied` | critical | 2m | a `gpu-inventory` limiter is configured and the controller may not list nodes. **No variant scales up.** | grant the controller's ServiceAccount get/list/watch on nodes (cluster admin: `make enable-physical-limiter` grants every controller that exists when it runs; re-run it after a new install), or remove the limiter | [T: controller not Ready](troubleshooting.md#the-controller-is-not-ready-or-crash-looping) |
 | `WVAModelParkedWhileRequestsRefused` | critical | 5m | a model has 0 replicas and EPP returns `ServiceUnavailable` for it: traffic is being dropped | read `wva_model_scaling_blocked` for the model first | [T: will not wake](troubleshooting.md#a-model-will-not-wake-from-zero) |
 | `WVAModelHasNoWakeSignal` | warning | 10m | blocked reason `no-wake-signal`: EPP exports no flow-control queue, so a parked model cannot wake | enable the EPP `flowControl` feature gate, then restart the EPP Deployment (it reads its config once at start) | [T: will not wake](troubleshooting.md#a-model-will-not-wake-from-zero) |
 | `WVAHighErrorRate` | warning | 5m | `wva_errors_total` above 6/min for one `component`/`error_type` | grep the controller log for the `error_type` text | [Logs](monitoring.md#the-logs) |
 | `WVAMetricsCollectionFailing` | warning | 5m | `wva_metrics_collection_errors_total` above 5/min for one `query_type`/`reason`: decisions run on stale data | check Prometheus reachability and the controller's Prometheus settings | [T: metrics stale](troubleshooting.md#metrics-stale-or-missing) |
 | `WVAGPUResourceExhausted` | warning | 5m | GPU-labeled nodes report zero allocatable GPUs of a type. Only with a `gpu-inventory` limiter | check GPU node status and device-plugin pods. No alert does not mean GPUs are free: the metric exists only with that limiter | [T: GPUs held](troubleshooting.md#gpus-held-or-quota-spent) |
-| `WVAReplicaScalingThrashing` | warning | 10m | more than 2 scaling decisions per minute for one variant | read the model's `scaling-decision` lines and the stabilization windows | [T: flapping](troubleshooting.md#a-model-is-flapping) |
+| `WVAReplicaScalingThrashing` | warning | 10m | more than 2 cycles per minute for one variant whose decision was not `no-change`. The counter rises on every such cycle, so it fires on flapping **and** on a scale-up the workload never catches up with: actuation stuck, Pods Pending, slow replica starts | read the model's `scaling-decision` lines: `tgt` alternating is flapping; `tgt` steady above `curr` is actuation not landing | [T: flapping](troubleshooting.md#a-model-is-flapping), [T: actuation stuck](troubleshooting.md#desired-is-not-current-actuation-stuck) |
 | `WVAModelWillNotScaleToZero` | info | 15m | blocked reason `variant-floor` or `policy-forbids-zero`: the configuration asks to park and forbids it | make the two halves agree | [will not park](../guides/scale-to-zero/README.md#when-a-model-will-not-park) |
 | `WVAOptimizationLoopStalled` | info | 15m | `wva_models_processed` is 0 or absent for 10 minutes | expected when no ScaledObject names this scaler. Otherwise check the controller pod, its log and Prometheus | [T: controller not Ready](troubleshooting.md#the-controller-is-not-ready-or-crash-looping) |
 

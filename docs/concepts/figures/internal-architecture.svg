@@ -94,7 +94,7 @@
     <rect x="322" y="438" width="356" height="46" rx="8" fill="#f6f8fa" stroke="#d0d7de"/>
     <circle cx="344" cy="461" r="12" fill="#0969da"/><text x="344" y="465.5" text-anchor="middle" font-size="12" font-weight="700" fill="#ffffff">4</text>
     <text x="366" y="456" font-weight="700" font-size="13">Optimizer</text>
-    <text x="366" y="474" fill="#57606a">replicas per variant: cheapest first, or by score in budget</text>
+    <text x="366" y="474" fill="#57606a">lowest cost per unit of capacity; by score in budget</text>
     <!-- 5 -->
     <rect x="322" y="492" width="356" height="46" rx="8" fill="#ffffff" stroke="#8c959f" stroke-dasharray="5 4"/>
     <circle cx="344" cy="515" r="12" fill="#ffffff" stroke="#0969da" stroke-width="2"/><text x="344" y="519.5" text-anchor="middle" font-size="12" font-weight="700" fill="#0969da">5</text>
@@ -118,9 +118,10 @@
   <text x="636" y="705" text-anchor="middle" font-size="11.5" font-weight="600" fill="#0969da">every 100 ms</text>
   <text x="322" y="724" font-size="12" fill="#424a53">only for a model at zero: requests in its EPP queue, one replica</text>
 
-  <rect x="306" y="748" width="388" height="36" rx="10" fill="#ffffff" stroke="#8c959f" stroke-dasharray="5 4"/>
-  <text x="322" y="771" font-weight="700" font-size="13">Warm pool</text>
-  <text x="400" y="771" font-size="12" fill="#57606a">lends a sleeping model while a replica starts</text>
+  <rect x="306" y="746" width="388" height="42" rx="10" fill="#ffffff" stroke="#8c959f" stroke-dasharray="5 4"/>
+  <text x="322" y="764" font-weight="700" font-size="13">Warm pool</text>
+  <text x="400" y="764" font-size="12" fill="#57606a">lends a sleeping model while a replica starts</text>
+  <text x="322" y="780" font-size="10" fill="#8c959f" font-family="ui-monospace, SFMono-Regular, Consolas, monospace">internal/warmpool</text>
 
   <!-- lane C: writes -->
   <rect x="730" y="184" width="250" height="610" rx="14" fill="#f0faf3" stroke="#aceebb"/>
@@ -128,9 +129,10 @@
   <g font-size="12">
     <rect x="746" y="222" width="218" height="96" rx="9" fill="#ffffff" stroke="#0969da" stroke-width="2" filter="url(#shadow)"/>
     <text x="758" y="244" font-weight="700" font-size="13">External scaler, gRPC :9090</text>
-    <text x="758" y="263" fill="#424a53">GetMetrics: the replica count</text>
-    <text x="758" y="280" fill="#424a53">StreamIsActive: active or not</text>
-    <text x="758" y="303" font-size="11" fill="#57606a">every replica; answers as leader</text>
+    <text x="758" y="262" fill="#424a53">GetMetrics: the replica count</text>
+    <text x="758" y="278" fill="#424a53">StreamIsActive: active or not</text>
+    <text x="758" y="295" font-size="11" fill="#57606a">every replica; answers as leader</text>
+    <text x="758" y="310" font-size="10" fill="#8c959f" font-family="ui-monospace, SFMono-Regular, Consolas, monospace">internal/scaler</text>
 
     <rect x="746" y="340" width="218" height="74" rx="9" fill="#ddf4ff" stroke="#0969da" filter="url(#shadow)"/>
     <text x="758" y="362" font-weight="700" font-size="13">Decision store</text>

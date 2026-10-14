@@ -63,7 +63,7 @@ These appear on a ScaledObject that scales a model server.
 | `modelID` | yes, unless `warmPoolName` is set | — | non-empty | every engine; it is the grouping key | Names the model this workload serves. Must equal the engine's `--served-model-name` (else `--model`), because engine metrics are matched on `model_name`. ScaledObjects with the same `modelID` in one namespace are variants of one model and are sized against each other. |
 | `variantCost` | no | `"10.0"` | a number, `>= 0` | cost-aware optimizer; scale-from-zero variant choice | Price of **one replica** of this variant, relative to the model's other variants: GPUs per replica × relative GPU price. On scale-up the optimizer grows the variant with the lowest cost per unit of capacity; on scale-down it sheds the most expensive variant first. With one variant per model it changes nothing. See [accelerator variants](../well-lit-paths/accelerator-variants/). |
 | `scalingPolicy` | no | the `default` entry's `defaultPolicy`, else the `default` entry | any string | steady-state engine policy resolution | Names a policy **tier** in the scaling-policy ConfigMap. A name with no matching entry falls back to the default entry and logs `Scaling policy not found; this variant is scaling under the default entry.` Variants of one model naming different tiers: the lexicographically smallest wins. See [tiers](../well-lit-paths/workload-classes/#choosing-a-tier). |
-| `defaultOutputTokens` | no | built-in 512 | whole number `>= 0`; `"0"` means unset | steady-state engine (demand floor) | Seeds how many tokens one request generates, so a router queue is priced before any replica has completed a generation. Replaced by the fleet's own measurement as soon as one exists. Across a model's variants the **largest** wins (set it on the decode trigger under P/D). See [expected output length](scaling-policy.md#expected-output-length). |
+| `defaultOutputTokens` | no | built-in 512 | whole number `>= 0`; `"0"` means unset | steady-state engine (demand floor) | Seeds how many tokens one request generates, so a router queue is priced before any replica has completed a generation. Replaced by the fleet's own measurement as soon as one exists, and also outranked by the output length the fleet last recorded, which is carried across a gap in readings: the seed is used only when the fleet has neither. Across a model's variants the **largest** wins (set it on the decode trigger under P/D). See [expected output length](scaling-policy.md#expected-output-length). |
 | `warmPool` | no | the namespace's only pool | any string | warm-pool controller | Which warm pool this model may borrow from. Needed only when the namespace has more than one pool; with several pools and none named, the model gets no warm copy and the controller logs why. |
 | `warmPoolCopies` | no | absent = automatic | whole number `>= 0` | warm-pool controller | How many warm copies of this model the pool holds. Absent: the pool ranks it and holds at most one. `"0"`: never warm it. `"1"`: always keep one. `"N"`: keep N, so N scale-ups can bridge at once. |
 | `replicaStartSeconds` | no | — | — | **nothing yet** | **Reserved.** Declared as the seed for how long a replica takes to become Ready, but not read by any code path today. The analyzer uses its own default until it measures a replica start. Setting it has no effect. |
@@ -71,12 +71,19 @@ These appear on a ScaledObject that scales a model server.
 `scalerAddress` is KEDA's own key (where to dial); the scaling manager never
 reads it. Its value is `wva-external-scaler.<controller-namespace>.svc.cluster.local:9090`.
 
-**A bad value drops the workload.** If `modelID` is empty or `variantCost`,
-`warmPoolCopies` or `defaultOutputTokens` does not parse, the workload is
-skipped entirely, and the only trace is a log line at verbosity 4 (`-v=4`):
-`Skipping a registered workload with unusable trigger metadata`, with the key
-and value in `error`. KEDA shows nothing on the ScaledObject. If a registered
-model never gets a decision, check these values first.
+**A bad value pins the model at `minReplicaCount`.** If `modelID` is empty or
+`variantCost`, `warmPoolCopies` or `defaultOutputTokens` does not parse, the
+workload is skipped entirely (`internal/utils/variant.go`): the scaling manager
+never plans it, so it never makes a decision for it, and `GetMetrics` keeps
+answering 0, which the HPA reads as "go to `minReplicaCount`" for as long as the
+typo stands. A typo such as `variantCost: "$10"` therefore pins the model at
+`minReplicaCount` under any load. KEDA shows nothing on the ScaledObject. The
+only trace is a controller log line at verbosity 4, which the default
+verbosity (2) hides: add `--v=4` to the controller Deployment's `args` (see
+[configuration](configuration.md)) and look for
+`Skipping a registered workload with unusable trigger metadata`, with the
+ScaledObject in `scaledObject` and the key and value in `error`. If a
+registered model never gets a decision, check these values first.
 
 ## Warm-pool keys
 

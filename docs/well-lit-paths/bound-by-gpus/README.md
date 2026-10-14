@@ -17,7 +17,7 @@ autoscaler, not the cluster.
 ## What it needs
 
 - Cluster-admin rights, once: the policy must live where a tenant cannot edit
-  it, and every controller must be able to read it.
+  it, and every controller meant to follow it must be able to read it.
 - Every controller able to **list nodes**. A controller that cannot resolve a
   variant's accelerator gives that variant no budget and then never scales it
   up — a failure with no natural symptom, which is why the guide checks
@@ -57,8 +57,8 @@ because the ConfigMap is the easy part and the access it then requires is not.
 
 ```bash
 # where each controller reads its policy from: "the well-known namespace" means
-# wva-policy, "this controller's own namespace" means its own ConfigMap
-kubectl logs -n <wva-namespace> deploy/wva-controller-manager | grep 'Cluster policy comes from'
+# wva-policy; no line (that branch logs only at V(1)) means its own ConfigMap
+kubectl logs -n <wva-namespace> deploy/wva-controller-manager | grep -E 'Cluster policy comes from|Could not read the managed Namespace'
 
 # the cluster policy, for the controllers that read wva-policy
 kubectl get configmap wva-scaling-policy-config -n wva-policy -o jsonpath='{.data.default}'
@@ -72,7 +72,8 @@ kubectl logs -n <wva-namespace> deploy/wva-controller-manager | grep scaling-dec
 
 On Kubernetes, a namespace-scoped controller cannot read Namespace objects, so it
 does not see `wva-policy` and reads its own ConfigMap instead — the first command
-shows it. This is being fixed; see
+shows it (`Could not read the managed Namespace`). Admin-owned controllers read their
+own ConfigMap by design. The Kubernetes gap is being fixed; see
 [the GPU limiter](../../reference/gpu-limiter.md#what-an-admin-sets-and-where).
 
 `wva_model_scaling_blocked` carries the reason as a label. A model that wanted
@@ -101,7 +102,8 @@ ConfigMap's `default` entry — that list is the only thing the controller reads
 and because it is dynamic configuration the engine rebuilds it without a
 restart. The installer writes that list for you: `WVA_LIMITER=quota` with
 `WVA_QUOTAS='H200=8'` for one install's own policy, `WVA_LIMITER_TYPE` with the
-same `WVA_QUOTAS` for the cluster policy every controller reads. The quota form
+same `WVA_QUOTAS` for the cluster policy (read by the controllers listed in
+[the guide](../../guides/admin-gpu-bounding/#installation-instructions)). The quota form
 **requires** a budget; an entry naming no accelerator is a budget of zero, not
 unlimited. Where Kueue already holds the numbers, `WVA_QUOTA_KUEUE=true` reads
 them from its ClusterQueues instead of repeating them here:

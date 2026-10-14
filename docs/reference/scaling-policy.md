@@ -184,7 +184,15 @@ never enforced, while scale-from-zero consulted a limiter nobody had asked for.
 The `default` entry selects the GPU limiter for the scaling pipeline. This is the
 **sole source** — there is no `--limiter-type` flag or quota config file — and it is
 applied **live**: editing the ConfigMap switches the limiter without a controller
-restart (the engine rebuilds it on the next optimization cycle).
+restart (the engine rebuilds it on the next optimization cycle). **The exception:**
+when a separate policy namespace resolves (see
+[who is allowed to change the bound](gpu-limiter.md#who-is-allowed-to-change-the-bound)),
+a **namespace-scoped** controller (`--watch-namespace` set) reads that
+namespace's ConfigMap once at start and does not watch it, because its cache
+cannot hold a namespace it has no RBAC in (`cmd/main.go`). An edit there takes
+effect only when the controller restarts
+(`kubectl rollout restart deploy/wva-controller-manager -n <its ns>`). A
+cluster-scoped controller watches the policy namespace and picks the edit up live.
 
 A `limiters:` list selects a **single mode**, so declare **one** of these forms:
 
@@ -216,8 +224,10 @@ default: |
   A quota entry may also set `kueue: { enabled: true }` to be bounded by the quotas
   Kueue declares — see [Kueue as a quota source](quota-limiter.md#kueue-as-a-quota-source).
 - **Cluster-default only.** The list is read only from the global (system-namespace)
-  `default` entry — a budget-scope setting, like `enableRescale` — so a tenant cannot
-  widen a cap via a per-model or namespace-local entry. A `limiters:` block placed on any
+  `default` entry — or, when a policy namespace resolves, from the `default` entry
+  of the ConfigMap there, which then replaces the system-namespace copy's say —
+  a budget-scope setting, like `enableRescale`, so a tenant cannot
+  widen a cap via a per-model entry or a [namespace-local scaling-policy map](#namespace-local-scaling-policy-map). A `limiters:` block placed on any
   other entry parses and validates but is **silently ignored** at runtime.
 - With no `limiters:` block **nothing bounds scaling** — that is the shipped
   default, and the controller says so at startup: "scaling is UNCONSTRAINED".
@@ -356,7 +366,7 @@ log `invalid weight on a model's scaling-policy entry`; none of them rejects the
 entry. A number outside the classes' range (0.5 to 4 with the default classes) is
 clamped into it.
 
-A namespace with its own namespace-local scaling-policy map sets its models'
+A namespace with its own [namespace-local scaling-policy map](#namespace-local-scaling-policy-map) sets its models'
 weights and thresholds itself. Such a model is planned in its namespace's own
 quota group, which that namespace owns whole, but **not** in the cluster group,
 where its weight would be weighed against other tenants'; there today's optimizer
@@ -395,8 +405,11 @@ A model left out this way is listed in the log line's `frozen` field as
 `namespace not in utilizationShare.clusterNamespaces`.
 
 **Where the block is read.** Like `limiters:`, only from the cluster `default`
-entry, and live: an edit takes effect on the next cycle. An `optimizer:` block in
-a namespace-local scaling-policy map has no effect; the controller logs
+entry (or the policy namespace's, when one resolves), and live: an edit takes
+effect on the next cycle, except in a policy namespace read by a
+namespace-scoped controller, which reads it at start only (see
+[`limiters`](#limiters-cluster-default-only-live)).
+An `optimizer:` block in a [namespace-local scaling-policy map](#namespace-local-scaling-policy-map) has no effect; the controller logs
 `ignoring optimizer blocks in namespace-local scaling-policy maps` with the
 namespaces. A malformed block (an unknown key, a value out of range) turns only
 the optimizer off and logs `Utilization share: invalid optimizer block; keeping today's optimizer`;
@@ -824,6 +837,34 @@ lines and uninstall: see
 The saturation scaling configuration is stored in a ConfigMap named `wva-scaling-policy-config` in llm-scaling-manager controller's namespace. The exception is `limiters:` and `optimizer:`: when a policy namespace resolves, those two are read from the ConfigMap there and the controller's own copy loses its say over them — see [who is allowed to change the bound](gpu-limiter.md#who-is-allowed-to-change-the-bound).
 
 **Location:** `deploy/configmap-scaling-policy.yaml`
+
+### Namespace-local scaling-policy map
+
+A **namespace-local scaling-policy map** is a ConfigMap with the same name,
+`wva-scaling-policy-config`, in a model namespace rather than in the
+controller's namespace. For the models in that namespace it **replaces the
+global map whole**: the controller reads that namespace's entries and nothing
+from the controller's copy — no field-by-field merge, so a namespace-local
+`default` entry has to carry every threshold it wants, and tiers and per-model
+entries defined only in the global map do not exist for that namespace
+(`internal/config/config.go`, `resolveScalingPolicyConfigMap`). Deleting the
+ConfigMap returns the namespace to the global map. It cannot set `limiters:` or
+`optimizer:`; those are read from the cluster `default` entry only.
+
+A namespace gets one when the controller reads a ConfigMap of that name there:
+
+- **Cluster-scoped install:** the namespace has registered workloads, or it
+  carries the label `wva.llmd.ai/config-enabled=true` (read at start;
+  `kubectl label namespace <ns> wva.llmd.ai/config-enabled=true`), and is not
+  excluded with the `wva.llmd.ai/exclude` annotation
+  (`internal/controller/configmap_reconciler.go`,
+  `shouldWatchNamespaceLocalConfigMap`). The ConfigMap must also carry the
+  label `app.kubernetes.io/name: workload-variant-autoscaler`, which the
+  controller's ConfigMap cache filters on in this mode.
+- **Namespace-scoped install, out-of-reach shape** (controller namespace ≠
+  watched namespace): the ConfigMap in the watched tenant namespace is always
+  read, no label needed (`internal/controller/predicates.go`). See
+  [the security model](security-model.md) for why this is by design.
 
 ### Parameters
 

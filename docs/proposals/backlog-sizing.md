@@ -327,7 +327,7 @@ p95 tail 200x lower.
   after 3108s of successful load. The results were still on the workload PVC;
   streamed off as a gzip in 40MB chunks with per-chunk checksums, which
   worked first time. Worth a retry-with-chunks in the harness.
-- fozzie, the emptier CoreWeave cluster, could not create ANY pod from a
+- A second, emptier test cluster could not create ANY pod from a
   Deployment on 2026-09-16: its kueue pod webhook denied every one with
   `Deployment.apps ... not found` (a newer kueue revision was crash-looping
   beside the old one). Not touched; noted so nobody spends an hour on it.

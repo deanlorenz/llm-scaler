@@ -22,6 +22,18 @@ the ScaledObject points at) and classifies it as SGLang when **either**:
 
 Otherwise the variant is treated as **vLLM** (the default).
 
+**Any container counts, sidecars included.** An SGLang signal in a sidecar
+decides the whole pod (`internal/inferenceengine/engine.go`), so a vLLM engine
+with an `sglang-router` sidecar whose image is `lmsysorg/sglang-router:...` (or
+any image reference containing `sglang`) is detected as SGLang. The scaling
+manager then looks for `sglang:*` series that the vLLM engine never emits, and
+the model gets no saturation metrics: a `MetricsUnavailable` Warning event and
+no scaling decision. There is no field to override detection. The fix is to
+keep the `sglang` signal out of the scale target's pod template: run the router
+as its own Deployment rather than as a sidecar of the engine, or pull its image
+under a reference that does not contain `sglang` and launch it with a command
+that does not contain `sglang.launch_server` or `sglang serve`.
+
 There is nothing engine-specific to declare. A workload is registered by
 creating a KEDA ScaledObject for it, exactly as for vLLM, and the same
 ScaledObject works for either engine: the engine is read off the scale
@@ -70,8 +82,9 @@ map onto the same internal parameters as their vLLM counterparts:
 
 ## Caveats
 
-- **vLLM remains the default.** Detection is conservative: anything without a clear
-  SGLang signal is treated as vLLM.
+- **vLLM remains the default.** Anything without an SGLang signal is treated as
+  vLLM, but the signal is read from every container, so an SGLang sidecar beside
+  a vLLM engine flips the pod to SGLang; see [How detection works](#how-detection-works).
 - **A variant runs a single engine.** Mixing vLLM and SGLang containers within one
   variant's pod is not supported.
 - **Metric availability.** SGLang exposes no `sglang:*` series unless it is

@@ -19,8 +19,8 @@ LOGS="kubectl logs -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler 
 | --- | --- | --- | --- |
 | will not scale up | `scaling-decision` shows `tgt` equal to `curr` under load | utilization below `scaleUpThreshold` by the controller's measure, at its own max, a limiter, unscraped pods, stale metrics | [will not scale up](#a-model-will-not-scale-up) |
 | will not wake from zero | `WVAModelParkedWhileRequestsRefused`; `wva_model_scaling_blocked{reason="no-wake-signal"}`; `wva_model_replicas == 0` with requests queued | EPP flow control off or EPP not restarted, the direct EPP scrape failing, InferencePool API group mismatch | [will not wake](#a-model-will-not-wake-from-zero) |
-| will not park at zero | `wva_model_scaling_blocked{reason=~"variant-floor\|policy-forbids-zero\|activation-retention"}`; `WVAModelWillNotScaleToZero` | a variant floor, a policy that forbids zero, a just-woken model, an idle counter that does not exist yet | [will not park](#a-model-will-not-park-at-zero) |
-| flapping | `WVAReplicaScalingThrashing`; `tgt` alternating in `scaling-decision` | utilization crossing a narrow band, short stabilization windows, utilization-share swings | [flapping](#a-model-is-flapping) |
+| will not park at zero | `wva_model_scaling_blocked{reason=~"variant-floor\|policy-forbids-zero\|activation-retention\|engine-unsupported"}`; `WVAModelWillNotScaleToZero` | a variant floor, a policy that forbids zero, a just-woken model, a model running both vLLM and SGLang, an idle counter that does not exist yet | [will not park](#a-model-will-not-park-at-zero) |
+| flapping, or a scale-up that never lands | `WVAReplicaScalingThrashing` (it counts every cycle that is not `no-change`); `tgt` alternating in `scaling-decision`, or `tgt` steady above `curr` | utilization crossing a narrow band, short stabilization windows, utilization-share swings; or actuation stuck, Pods Pending, slow replica starts | [flapping](#a-model-is-flapping); [actuation stuck](#desired-is-not-current-actuation-stuck) |
 | pinned at max | `wva_variant_at_max_replicas == 1`; `"atMax":true` in `scaling-decision` | `maxReplicaCount` too low for the load | [pinned at max](#a-model-is-pinned-at-max) |
 | desired is not current | `wva_desired_replicas != wva_current_replicas` for many cycles | HPA stabilization window, KEDA not reaching the scaler, Pods Pending (GPUs, ResourceQuota), slow starts | [actuation stuck](#desired-is-not-current-actuation-stuck) |
 | GPUs held / quota spent | `ResourceConstrained` Event; `wva_decisions_limited_total` rising; `wva_model_scaling_blocked{reason="quota-short"}` | the quota or GPU inventory is used up, unresolved accelerators, a lowered quota (it does not evict) | [GPUs held](#gpus-held-or-quota-spent) |
@@ -68,8 +68,8 @@ a limiter in [GPUs held](#gpus-held-or-quota-spent); the last two in
 
 **Symptom**: the workload stays at 0 replicas while requests are pending.
 
-Start with the [scale-to-zero guide's runbook](../guides/scale-to-zero/README.md#when-a-model-will-not-wake),
-which checks the whole wake chain. If that does not settle it:
+Work through these in order. Do not run `hack/verify_scale_from_zero.sh` during
+an incident: it parks the model first.
 
 1. **The InferencePool.**
    ```bash
@@ -97,8 +97,10 @@ which checks the whole wake chain. If that does not settle it:
    at start.
 
 4. **The queue itself.** Read it straight from the EPP, with the token the
-   controller uses:
+   controller uses. The EPP's metrics port varies by release; find it first
+   and use it in place of `9090` below:
    ```bash
+   kubectl get svc <epp-service> -n <ns> -o jsonpath='{.spec.ports}'; echo
    TOKEN=$(kubectl -n "$NS" get secret wva-epp-metrics-token -o jsonpath='{.data.token}' | base64 --decode)
    kubectl port-forward -n <ns> svc/<epp-service> 9090:9090 &
    curl -s -H "Authorization: Bearer $TOKEN" localhost:9090/metrics \
@@ -136,9 +138,15 @@ Check, in order:
 1. **The token.** `Failed to read EPP metrics token` in the log means the
    projected volume is missing; the scrape then goes unauthenticated and the
    EPP rejects it.
+   The image is distroless, so there is no shell to `exec` into. Check the
+   Secret has a token, and that the Deployment mounts it:
    ```bash
-   kubectl -n "$NS" exec deploy/wva-controller-manager -- ls -l /var/run/secrets/epp-metrics/token
+   kubectl get secret wva-epp-metrics-token -n "$NS" -o jsonpath='{.data.token}' | wc -c
+   kubectl get deploy wva-controller-manager -n "$NS" \
+     -o jsonpath='{.spec.template.spec.volumes[?(@.name=="epp-metrics-token")]}'; echo
    ```
+   A count of `0` means the token controller never filled the Secret; an
+   empty second line means the volume is missing from the Deployment.
 2. **The EPP's tokenreview RBAC** (cluster admin), which authorizes the
    controller's token. It is bound per EPP release name, so a renamed or
    reinstalled EPP release leaves the binding pointing at nothing.
@@ -198,6 +206,12 @@ request. The full runbook is in the
 
 **Symptom**: replicas go up and down every few minutes. `WVAReplicaScalingThrashing`
 fires at more than two decisions a minute for one variant.
+
+That alert is not proof of flapping. Its counter, `wva_replica_scaling_total`,
+rises on every cycle whose decision is not `no-change`, so a scale-up that keeps
+being asked for and never lands fires it too: actuation stuck, Pods Pending, or
+replicas that take minutes to start. Step 1 tells the two apart; if `tgt` is
+steady above `curr`, go to [actuation stuck](#desired-is-not-current-actuation-stuck).
 
 1. **Read what the controller decided**, cycle by cycle:
    ```bash
@@ -306,8 +320,14 @@ A quota that is **fully** spent can show none of these: the decision lands at
 `no-change` (`tgt` equal to `curr` with `util` over the threshold) and no Event
 is recorded. Compare the quota with what the models hold:
 
+First find where the limiters come from. When a policy namespace governs this
+controller (`wva-policy` by default), the limiters are read there and any in the
+controller's own ConfigMap are ignored:
+
 ```bash
+$LOGS | grep -E 'Cluster policy comes from|Loaded cluster policy from the policy namespace|Ignoring limiters in the controller.s own ConfigMap' | tail -5
 kubectl get configmap wva-scaling-policy-config -n "$NS" -o yaml | grep -A10 limiters
+kubectl get configmap wva-scaling-policy-config -n wva-policy -o yaml | grep -A10 limiters   # (cluster admin) the policy namespace, if the log names another, use that
 kubectl get pods -n <ns> -o custom-columns='NAME:.metadata.name,GPUS:.spec.containers[*].resources.limits.nvidia\.com/gpu'
 ```
 
@@ -339,9 +359,13 @@ on the ScaledObject; `WVAMetricsCollectionFailing` firing.
    kubectl get servicemonitor,podmonitor -n <ns>
    ```
    Then confirm the targets are up on Prometheus' `/targets` page.
-3. **Requests queue for pods it cannot see?** `wva_unmeasured_queue > 0`, or
-   `has N ready pod(s) but none attributed` in the log with an
-   `UnattributedReadyPods` Event: the serving pods are not scraped or their
+3. **Requests queue for pods it cannot see?** `wva_unmeasured_queue > 0`, or an
+   `UnattributedReadyPods` Warning Event (`<variant> has N ready pod(s) but none
+   attributed`):
+   ```bash
+   kubectl get events -n <ns> --field-selector reason=UnattributedReadyPods
+   ```
+   The serving pods are not scraped or their
    ownerReferences do not reach the scale target. On FMA, see
    [FMA launcher pods](operations.md#fma-launcher-pods).
 
@@ -367,8 +391,8 @@ kill %1
 
 | failing check, or log line | means | fix |
 | --- | --- | --- |
-| `gpu-policy`: `cluster policy declares a gpu-inventory limiter but this controller may not list nodes` | a limiter was added to cluster policy and this controller lacks node read. Kept NotReady on purpose: otherwise every variant would silently stop scaling up. `wva_node_access_denied` and `WVANodeAccessDenied` report the same | (cluster admin) grant node read: `make enable-physical-limiter` grants every controller it finds. Or remove the limiter |
-| `readyz`: `initial ConfigMap bootstrap not complete`, with `cannot read cluster policy from <ns>/<name>, refusing to start unbounded` in the log | the controller cannot read the cluster policy ConfigMap in the policy namespace (`wva-policy` by default). It refuses to run without its limits | (cluster admin) grant it get/list/watch on ConfigMaps there; `make enable-physical-limiter` does this for every controller |
+| `gpu-policy`: `cluster policy declares a gpu-inventory limiter but this controller may not list nodes` | a limiter was added to cluster policy and this controller lacks node read. Kept NotReady on purpose: otherwise every variant would silently stop scaling up. `wva_node_access_denied` and `WVANodeAccessDenied` report the same | (cluster admin) grant node read: `make enable-physical-limiter` grants every controller that exists when it runs, so re-run it after a new install. Or remove the limiter |
+| `readyz`: `initial ConfigMap bootstrap not complete`, with `cannot read cluster policy from <ns>/<name>, refusing to start unbounded` in the log | the controller cannot read the cluster policy ConfigMap in the policy namespace (`wva-policy` by default). It refuses to run without its limits | (cluster admin) grant it get/list/watch on ConfigMaps there; `make enable-physical-limiter` does this for every controller that exists when it runs (re-run it after a new install) |
 | `external-scaler` | the gRPC scaler KEDA calls is not serving | read the log around startup for the bind error |
 | `CrashLoopBackOff`, log names a Prometheus setting | a plain `http://` URL without `PROMETHEUS_ALLOW_HTTP=true`, or TLS settings combined with plain HTTP | fix the Prometheus settings ([Prometheus](prometheus.md#configuration)) |
 | `CrashLoopBackOff`, `unknown flag` | the image is older than the manifests | deploy an image built from the same release as the manifests ([Upgrade](upgrade-and-uninstall.md)) |
@@ -720,7 +744,9 @@ name stay.
 cycle. The controller removes the marks it wrote and restores each pod's previous
 deletion cost. On a namespace-scoped install that reads its cluster policy from a
 separate policy namespace, that edit takes effect only after a controller
-restart: edit, restart, then wait a cycle. Check that none are left:
+restart: edit, restart, then wait a cycle. Check that none are left. Both
+commands below read every namespace (cluster admin); a tenant replaces `-A`
+with `-n <ns>` for each namespace it manages:
 
 ```bash
 kubectl get pods -A -o json | jq -r '.items[]
@@ -730,7 +756,7 @@ kubectl get pods -A -o json | jq -r '.items[]
 
 **Cleanup after the fact**: the mark records the pod's deletion cost from before
 the transfer as `prevCost`; restore it, or remove the cost when the mark has
-none, and remove the mark:
+none, and remove the mark (cluster admin as written; `-n <ns>` for a tenant):
 
 ```bash
 kubectl get pods -A -o json \

@@ -106,7 +106,7 @@ stops being a bridge and becomes the capacity itself — that is
 kubectl get deploy -n <ns> -l app.kubernetes.io/component=warm-pool
 
 # a bridge was actually lent, and to whom
-kubectl logs -n <controller-namespace> deploy/<wva> | grep warm-pool-bridge
+kubectl logs -n "$NS" deploy/wva-controller-manager | grep warm-pool-bridge   # NS: the controller's namespace
 ```
 
 A bridge is **not** one of the variant's own serving replicas, and the engine

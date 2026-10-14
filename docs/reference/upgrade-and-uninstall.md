@@ -91,6 +91,14 @@ uninstall renders the same overlay and deletes what it renders.
 make undeploy-wva NAMESPACE=<namespace>
 ```
 
+If the controller was installed in a namespace of its own (`WVA_NS`), as in the
+out-of-reach shape where it runs in `wva-<namespace>` and manages `<namespace>`,
+pass both, or the uninstall looks for the controller in the wrong place:
+
+```bash
+make undeploy-wva NAMESPACE=<namespace> WVA_NS=wva-<namespace>
+```
+
 ### What it removes
 
 | object | note |
@@ -142,19 +150,23 @@ Then, for each:
 
 ### Policy namespace and limiter leftovers (cluster admin)
 
-The per-install suffix is the first eight hex digits of the namespace's SHA-256:
+The per-install suffix is the first eight hex digits of the SHA-256 of the
+controller's namespace (`wva-<namespace>` in the out-of-reach shape). The policy
+namespace is `wva-policy` unless it was set with `WVA_POLICY_NS`; use the same
+value here:
 
 ```bash
+POLICY_NS="${WVA_POLICY_NS:-wva-policy}"
 SUFFIX=$(printf '%s' "$NS" | sha256sum | cut -c1-8)
-kubectl delete rolebinding "wva-policy-reader-$SUFFIX" -n wva-policy
+kubectl delete rolebinding "wva-policy-reader-$SUFFIX" -n "$POLICY_NS"
 kubectl get clusterrole,clusterrolebinding | grep -- "-$SUFFIX"   # anything the uninstall could not remove
 ```
 
 Only when no scaling-manager install remains on the cluster:
 
 ```bash
-make disable-physical-limiter        # clears the limiter from every policy ConfigMap it finds
-kubectl delete namespace wva-policy
+make disable-physical-limiter WVA_POLICY_NS="$POLICY_NS"   # clears the limiter from every policy ConfigMap it finds
+kubectl delete namespace "$POLICY_NS"
 ```
 
 `disable-physical-limiter` leaves the read-only RBAC in place on purpose; the

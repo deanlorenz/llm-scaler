@@ -1,7 +1,7 @@
 # Autoscaling Landscape vs. llm-scaling-manager — NVIDIA Dynamo, Mooncake, SGLang, Fireworks AI, Together AI
 
 > **Status:** research comparison · **Date:** 2026-08-03, managed providers added 2026-08-09, the scaling manager's column updated 2026-10-14
-> **Baseline:** llm-scaling-manager (**the scaling manager**), an independently developed fork of llm-d's workload-variant-autoscaler
+> **Baseline:** llm-scaling-manager (**the scaling manager**), an independently developed, advanced fork of llm-d's workload-variant-autoscaler
 > **Compared — deployable systems:** NVIDIA Dynamo Planner, Mooncake, SGLang · **managed platforms:** Fireworks AI, Together AI
 > All claims are sourced against latest docs/code — see [Sources](#sources).
 
@@ -32,7 +32,7 @@
 
 | Dimension | **the scaling manager** | **Dynamo Planner** | **Mooncake** | **SGLang** |
 |---|---|---|---|---|
-| **Type** | Global SLO/cost autoscaler | SLA-driven autoscaler (2 modes) | Scheduler + admission control | Engine + router (no autoscaler) |
+| **Type** | Global, cost-aware capacity autoscaler (SLOs only through threshold tiers) | SLA-driven autoscaler (2 modes) | Scheduler + admission control | Engine + router (no autoscaler) |
 | **What it scales** | Replicas per model×variant | Prefill/decode replicas (independent) | Nothing (P:D ratio **preset**) | Nothing native (external scales replicas) |
 | **Scope** | **Multi-model, multi-tenant, global** | **Single DGD** (GlobalPlanner = same model only) | Single cluster, fixed | Per-deployment (external) |
 | **Signals** | Prometheus: queue depth, KV util, request rate, token supply/demand | Prometheus (rate, ISL/OSL, KV-hit) **+** event-plane ForwardPassMetrics | KV reuse, P/D load, TTFT/TBT, predicted decode load | Engine Prometheus (`num_queue_reqs`, `token_usage`, TTFT/TPOT) → external |
@@ -95,9 +95,9 @@ Both sell **dedicated/on-demand endpoints**: you pick a model and a GPU SKU, set
 
 | Dimension | **Fireworks AI** | **Together AI** | **the scaling manager** (for reference) |
 |---|---|---|---|
-| **Control law** | Threshold per load target; with several targets, **max replica count across all** wins | **Proportional**: `ceil(N × observed/target)`, dampened by windows, clamped to bounds | Saturation optimizer; multi-analyzer ballot with per-analyzer scores |
+| **Control law** | Threshold per load target; with several targets, **max replica count across all** wins | **Proportional**: `ceil(N × observed/target)`, dampened by windows, clamped to bounds | Saturation optimizer, demand floored on the throughput one replica sustained; other analyzers report metrics only |
 | **Signals** | `default` (0–1 load fraction), `tokens_generated_per_second`, `prompt_tokens_per_second` (added Feb 2026, prefill-heavy), `requests_per_second`, `concurrent_requests` — all **per replica** | Exactly 8: `inflight_requests` (default), `ttft`, `e2e_latency`, `gpu_utilization`, **`token_utilization` (= KV-cache utilization, 0–100)**, `throughput_per_replica`, `decoding_speed`, `cache_hit_rate` (prompt-cache, 0–100). No custom/Prometheus metric support | Queue depth, KV utilization, request rate; token supply/demand |
-| **Multi-signal** | **Yes** — several targets, max wins | **No** — *"A deployment scales on a single metric, so you set exactly one"* | **Yes** — weighted combine across analyzers |
+| **Multi-signal** | **Yes** — several targets, max wins | **No** — *"A deployment scales on a single metric, so you set exactly one"* | **Yes** — KV cache, queues and token throughput, inside one saturation analyzer |
 | **Latency/SLO scaling** | **None** | `ttft` / `e2e_latency` with `p50/p90/p95/p99` (default `p95`) — **but see below** | Saturation-derived, not latency-triggered |
 | **Forecasting** | None | None | None |
 | **Scale-up window** | `--scale-up-window`, default **30 s** | `--scale-up-window`, default **0 s** (blog recommends 60 s) | HPA/KEDA stabilization |
@@ -106,7 +106,7 @@ Both sell **dedicated/on-demand endpoints**: you pick a model and a GPU SKU, set
 | **Cold-start UX** | **503 `DEPLOYMENT_SCALING_UP`, not queued** — client must retry with backoff | Requests to a stopped endpoint error; restart is manual (1–2 min) | — |
 | **Heterogeneous GPUs** | Not exposed (pick one SKU per deployment; base quota 8×A100 / 8×H100) | Not exposed (one `hardware` string per endpoint) | **First-class** |
 | **P/D disaggregation** | Not exposed | Not exposed | Roles first-class |
-| **Cost model** | Per **GPU-second** while replicas are up — *"costs accumulate even if there are no active API calls"* | Per replica-time; `max_replicas` is the cost ceiling | Relative `variant-cost` + quota limiter |
+| **Cost model** | Per **GPU-second** while replicas are up — *"costs accumulate even if there are no active API calls"* | Per replica-time; `max_replicas` is the cost ceiling | Relative `variantCost` per variant + GPU limiters (free GPUs, quotas, Kueue) |
 
 ### The finding worth stealing: Together's own data says both TTFT *and* GPU utilization are bad scaling signals
 
@@ -115,7 +115,7 @@ Together ships `ttft` p95 — the most SLO-shaped knob any vendor here offers �
 - **TTFT** stays low under saturation because **continuous batching absorbs queue pressure into end-to-end latency**, not first-token latency. The metric looks healthy precisely when you most need to scale.
 - **GPU utilization** misleads because *"utilization measures arithmetic intensity, not pressure"* — a GPU can read 60% busy while the engine's queue is already backing up.
 
-This is independent, production-sourced confirmation of the choice the scaling manager already made: **scale on saturation/queue depth, not on observed latency or GPU busy-ness.** Worth citing directly whenever the scaling manager is challenged with "why not just target TTFT?" or "why not just use DCGM utilization?" — the answer is no longer theoretical, it is a competitor's own published negative result. It argues *against* adding a naive TTFT-target analyzer to the multi-analyzer ballot, and *for* keeping the saturation signal primary.
+This is independent, production-sourced confirmation of the choice the scaling manager already made: **scale on saturation/queue depth, not on observed latency or GPU busy-ness.** Worth citing directly whenever the scaling manager is challenged with "why not just target TTFT?" or "why not just use DCGM utilization?" — the answer is no longer theoretical, it is a competitor's own published negative result. It argues *against* adding a naive TTFT-target analyzer, and *for* keeping the saturation signal primary.
 
 Note the convergence: Together's default (`inflight_requests`) and its `token_utilization` (KV-cache utilization) are the same two signals the scaling manager leans on. Two teams reached the same conclusion independently.
 

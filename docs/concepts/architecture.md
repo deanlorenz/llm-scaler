@@ -50,7 +50,7 @@ spec:
       metadata:
         scalerAddress: wva-external-scaler.<controller-namespace>.svc.cluster.local:9090
         modelID: meta-llama/Llama-3.1-8B-Instruct
-        variantCost: "10"        # relative cost: cheaper variants are filled first
+        variantCost: "10"        # relative cost of one replica of this variant
 ```
 
 You rarely write this by hand: `make scaledobjects-plan` lists the model
@@ -67,9 +67,12 @@ registration; there is no other custom resource.
    rate.
 2. **Analyze.** The saturation analyzer works out how full each replica is
    and how much capacity the model needs for its load. Throughput and custom
-   analyzers, when enabled, report metrics but do not change the decision.
+   analyzers, when enabled, report metrics (`wva_analyzer_demand`,
+   `wva_analyzer_target`) but are not passed to the optimizer, so they do not
+   change the decision.
 3. **Decide.** The optimizer splits that capacity across the model's
-   variants. With no limiter it fills the cheapest (`variantCost`) first. With
+   variants. With no limiter it grows the variant with the lowest cost per
+   unit of capacity (`variantCost` over what one replica serves) first. With
    a limiter, the GPU budget for this cycle (free GPUs, a quota, or Kueue
    quotas) is an input, and every model is fitted inside it by score. The
    [utilization-share optimizer](../well-lit-paths/utilization-share/)
@@ -133,9 +136,14 @@ managing only the model servers there. A cluster admin runs a one-time setup
 for the cluster-wide pieces first. Both steps are in [install in a
 namespace](../guides/install-in-namespace/). A [cluster-wide
 install](../guides/install-cluster-wide/) runs one controller for every
-namespace. A cluster admin can also publish one policy for every controller
-in the `wva-policy` namespace: [bound every install by real
-GPUs](../guides/admin-gpu-bounding/).
+namespace. A cluster admin can also publish one policy in the `wva-policy`
+namespace, which self-managed controllers read in place of their own. Two
+kinds do not read it: on Kubernetes, namespace-scoped controllers cannot see
+that namespace yet (they keep their own ConfigMap; a fix is in progress), and
+admin-owned controllers (cluster-scoped, or out of the tenant's reach) read
+their own ConfigMap by design, which the admin's command writes for them.
+Each controller logs which source it took at startup: [bound every install by
+real GPUs](../guides/admin-gpu-bounding/).
 
 ## What it writes back
 

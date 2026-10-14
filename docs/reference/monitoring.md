@@ -251,6 +251,23 @@ namespace is the cluster's Prometheus (or Thanos on OpenShift), filtered by
 `exported_namespace="<your-namespace>"`. On OpenShift, the tenant port of
 `thanos-querier` (9092) enforces per-namespace access.
 
+**Tenant whose controller runs elsewhere.** In the out-of-reach shape the admin
+installs your controller in `wva-<your-namespace>`, which you cannot read. Its
+series carry `namespace="wva-<your-namespace>"` (the scrape target's namespace)
+with yours only in `exported_namespace`, and the OpenShift tenancy port filters
+on `namespace`, so through port 9092 you see none of them. What you can read
+yourself, in your own namespace:
+
+```bash
+kubectl get events -n <your-namespace> --field-selector involvedObject.kind=ScaledObject
+kubectl get scaledobject,hpa -n <your-namespace>
+kubectl describe hpa -n <your-namespace> keda-hpa-<so-name>   # desired vs current, conditions
+```
+
+For anything more, ask the admin for read access to `wva-<your-namespace>`
+(pods and `pods/log`, for the controller log), or for a Prometheus or Grafana
+datasource that can query the controller's series by `exported_namespace`.
+
 **Straight off the controller.** The endpoint is HTTPS and authenticated: a
 plain `curl` gets `401 Unauthorized`. It needs a bearer token for an identity
 allowed `get` on the non-resource URL `/metrics`, which only a ClusterRole and
@@ -440,7 +457,6 @@ Useful when a metric tells you *which* model is wrong and you want to know *why*
 | `Utilization share: could not read the stored need history`, `Utilization share: could not store the need history` | the need history store failed for `group` (typically Forbidden: the Role `wva-utilization-share-history-role` is missing, as on an install upgraded before an admin re-ran `make setup-prereqs`). After a failed read nothing is restored or written for that group until a read succeeds; logged once per group and change, `the need history store works again` on that group's recovery | Error |
 | `Utilization share: need history truncated; the roles left out count at their ceiling after a restart` | a group's entry was over its bound (128 roles, or its equal share of 900 KiB): the roles with the smallest stored peaks were left out; carries `group`, `droppedRoles`, `dropped` (the first ten). Logged once per change | Info |
 | `Utilization share: the need history ConfigMap was deleted; every model's need history is forgotten` | the ConfigMap was deleted after the controller had read or written it: the flush. Every model's peak is unknown again for a `flappingWindow` | Info |
-| `Utilization share: the need history ConfigMap was deleted` | the history was flushed; the controller forgot its in-memory history too | Info |
 | `Utilization share: invalid optimizer block` | the block did not validate; today's optimizer runs | Error |
 | `Utilization share: evaluation` | the per-group table, every cycle | **`-v=4`** |
 | `Collected replica metrics` | metrics are arriving | **`-v=4`** |
@@ -454,6 +470,16 @@ container and put it back afterwards:
 ```bash
 kubectl patch deployment -n "$NS" wva-controller-manager --type=json \
   -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--v=4"}]'
+```
+
+Put it back when done. The patch above made a new rollout, so undoing it
+returns the template from before it (and drops any other change made to the
+Deployment after the patch):
+
+```bash
+kubectl rollout undo deployment/wva-controller-manager -n "$NS"
+kubectl get deployment wva-controller-manager -n "$NS" \
+  -o jsonpath='{.spec.template.spec.containers[0].args}'; echo   # no --v=4 left
 ```
 
 ```bash

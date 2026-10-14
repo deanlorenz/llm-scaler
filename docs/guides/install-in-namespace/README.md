@@ -101,6 +101,11 @@ Metrics Autoscaler operator and re-run.
 Already done for your namespace? Go to step 2: it checks, and names anything
 still missing.
 
+On a **shared cluster** your admin should instead run the controller
+[out of your reach](../admin-cluster-setup/README.md#keeping-the-controller-out-of-the-tenants-reach),
+in a namespace they own: the GPU bound then holds against the namespace's owner.
+In that shape the admin does steps 1 and 2, and you start at step 3.
+
 ### 2. Install the controller
 
 <!-- guide:deploy.controller start -->
@@ -124,14 +129,22 @@ cannot do it yourself, it stops and names what is missing for an admin.
 | the hashed ClusterRoles and ClusterRoleBindings | your admin | cluster-scoped |
 | the cluster policy namespace (`wva-policy`) | your admin | where a GPU budget lives when the admin publishes one |
 
-Whether a cluster policy governs your controller is in its startup log:
+Whether a cluster policy governs your controller is in its startup log. This
+guide installs the controller in `${NAMESPACE}`; if your admin instead runs it
+[out of your reach](../admin-cluster-setup/README.md#keeping-the-controller-out-of-the-tenants-reach),
+it runs in **their** namespace (for example `wva-${NAMESPACE}`), so pass that to
+`-n` — and you can read its log only if they grant you `pods/log` there:
 
 ```bash
-kubectl logs -n ${NAMESPACE} deploy/wva-controller-manager | grep 'Cluster policy comes from'
+# -n: the namespace the CONTROLLER runs in, not necessarily ${NAMESPACE}
+kubectl logs -n ${NAMESPACE} deploy/wva-controller-manager \
+  | grep -E 'Cluster policy comes from|Could not read the managed Namespace'
 ```
 
-`this controller's own namespace` means your ConfigMap's `limiters:` are in
-force. On Kubernetes that is the answer today even when the admin has published
+No `Cluster policy comes from` line (the own-ConfigMap branch logs only at V(1),
+hidden at the default verbosity) means your ConfigMap's `limiters:` are in
+force; `Could not read the managed Namespace` says why a policy namespace was
+not seen. On Kubernetes that is the answer today even when the admin has published
 `wva-policy`: a namespace-scoped controller cannot read Namespace objects, so it
 cannot see the policy namespace (being fixed). The full list of permissions and
 their reasons is in the [security model](../../reference/security-model.md).
@@ -298,7 +311,10 @@ missing. It also refuses a namespace with no model servers in it: the namespace
 is what the datasource enforces and what the dashboard pins its variable to, so
 the wrong one yields a dashboard that is empty rather than broken. Prints the
 dashboard URL and the admin password on every run, so it is safe to re-run for
-either.
+either. Its datasource ServiceAccount, `wva-grafana-datasource`, gets a
+**non-expiring** token Secret, `view` on the namespace and `create` on
+`metrics.k8s.io` pods; whoever reads Secrets in the namespace holds it — see the
+[security model](../../reference/security-model.md#grants-made-after-install).
 
 ### 4. (Optional) Drive some load and look at it
 
@@ -382,7 +398,7 @@ override what the preflight reported.
 | Parameter | Default | Example |
 | --- | --- | --- |
 | `NAMESPACE` | none — **required**, never discovered | `llm-d-optimized-baseline` |
-| `IMG` | the image CI builds from main | `ghcr.io/you/wva:dev` |
+| `IMG` | the image CI builds from main — a **floating** tag; pin a release for anything you rely on ([pin the version](../../reference/upgrade-and-uninstall.md#pin-the-version)) | `ghcr.io/you/wva:dev` |
 | `PROMETHEUS_URL` | detected; Thanos on OpenShift | `https://prom.monitoring.svc:9090` |
 | `KEDA_HELM_INSTALL` | `false` on Kubernetes — assumes cluster KEDA | `true`, to install one with Helm |
 

@@ -37,6 +37,16 @@ make check-prereqs
 
 ## Installation Instructions
 
+**Choose the shape first.** On a **shared cluster**, where the GPU bound must
+hold against the namespace's owner, use the
+[out-of-reach shape](#keeping-the-controller-out-of-the-tenants-reach): the
+controller runs in a namespace you own and manages theirs. The tenant-owned
+shape below — the controller in the namespace it manages — is for a cluster with
+one team, or one where you trust every namespace owner: that owner can edit the
+controller, and therefore every bound it carries.
+
+Tenant-owned shape:
+
 <!-- guide:deploy.prereqs start -->
 ```bash
 make setup-prereqs
@@ -85,7 +95,56 @@ the condition in the second column.
 | `wva-node-reader-role`: get, list, watch on nodes, cluster-wide | the policy that governs the controller declares the `gpu-inventory` limiter | `make setup-prereqs` (always, in namespace scope); `make enable-physical-limiter` | with `gpu-inventory`: the controller goes **NotReady**. With no limiter: it runs degraded — accelerators unresolved, no accelerator label on metrics |
 | `wva-kueue-reader-role`: get, list on clusterqueues, resourceflavors | a quota limiter entry has `kueue.enabled: true` | `make setup-prereqs`; `make enable-physical-limiter WVA_QUOTA_KUEUE=true` | logs `external quota source unreadable` every cycle and applies the static quota entry alone |
 | RoleBinding to `wva-policy-reader` in the policy namespace: get, list, watch on its ConfigMaps | the cluster has a policy namespace (`wva-policy`, or one named by a `wva.llmd.ai/policy-namespace` label) and the controller reads policy from it | `make enable-physical-limiter` | the controller **refuses to start** rather than run unbounded |
-| get on namespaces, cluster-wide | on **Kubernetes**, for a controller that manages its own namespace to see the policy-namespace label or `wva-policy` at all | nothing yet — grant it by hand (being fixed) | the label and `wva-policy` are not seen and the controller uses its own ConfigMap; it logs `Could not read the managed Namespace` |
+| get on namespaces, cluster-wide | on **Kubernetes**, for a controller that manages its own namespace to see the policy-namespace label or `wva-policy` at all | nothing yet — grant it by hand, [below](#grant-the-namespace-read-by-hand) (being fixed) | the label and `wva-policy` are not seen and the controller uses its own ConfigMap; it logs `Could not read the managed Namespace` |
+
+#### Grant the namespace read by hand
+
+Only for the tenant-owned shape on Kubernetes, and only if a policy namespace
+(`wva-policy`, or a `wva.llmd.ai/policy-namespace` label) should govern this
+controller. The grant names exactly the two Namespace objects the controller
+reads: its own, and `wva-policy`.
+
+<!-- guide:deploy.namespace_read start -->
+```bash
+# Tenant-owned shape on Kubernetes only: lets the controller read its own
+# Namespace (for the wva.llmd.ai/policy-namespace label) and see whether
+# wva-policy exists. Nothing else. The resolution runs once at startup, so
+# restart the controller afterwards -- the controller Deployment only, not
+# the warm pool.
+kubectl apply -f - <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: wva-namespace-reader-${NAMESPACE}
+rules:
+- apiGroups: [""]
+  resources: ["namespaces"]
+  resourceNames: ["${NAMESPACE}", "wva-policy"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: wva-namespace-reader-${NAMESPACE}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: wva-namespace-reader-${NAMESPACE}
+subjects:
+- kind: ServiceAccount
+  name: wva-controller-manager
+  namespace: ${NAMESPACE}
+EOF
+kubectl -n ${NAMESPACE} rollout restart deploy/wva-controller-manager
+```
+<!-- guide:deploy.namespace_read end -->
+
+Then check that the controller took it: the restarted pod logs `Cluster policy
+comes from the well-known namespace` (or `... the namespace this one is labelled
+with`) and no longer logs `Could not read the managed Namespace`. `make
+undeploy-wva` does not know about this grant: delete
+`clusterrole,clusterrolebinding wva-namespace-reader-${NAMESPACE}` yourself
+when the install goes.
 
 ### Keeping the controller out of the tenant's reach
 
@@ -105,7 +164,11 @@ make deploy-wva      WVA_NS=wva-${NAMESPACE} WVA_WATCH_NS=${NAMESPACE}
 
 with `WVA_NS` yours and `WVA_WATCH_NS` theirs. This is the recommended
 multi-tenant shape. Its limiters come from its own ConfigMap in `wva-${NAMESPACE}`,
-which you own; `wva-policy` does not apply to it.
+which you own; `wva-policy` does not apply to it. What the tenant keeps:
+a `wva-scaling-policy-config` in **their** namespace is still read, as a
+namespace-local map that sets thresholds, tiers and utilization-share weights
+for their models — never the limiters
+([security model](../../reference/security-model.md#multi-tenancy)).
 
 Pass `WVA_WATCH_NS` to **both** commands. The controller needs permissions in the
 namespace it manages, and writing RBAC into someone else's namespace is an
@@ -113,7 +176,43 @@ admin's act by definition — so `setup-prereqs` creates that Role and RoleBindi
 and the uninstall removes them. Without it the controller starts, cannot read the
 namespace it was pointed at, and crash-loops on its first ConfigMap read.
 
+### Bound the namespace's GPUs at admission
+
+The limiter bounds what the scaling manager *asks* for; a `ResourceQuota`
+bounds what the cluster *admits*, whoever owns the controller and whatever
+`maxReplicaCount` says. On a shared cluster it is the real bound — create it in
+either shape:
+
+<!-- guide:deploy.gpu_quota start -->
+```bash
+# The bound that holds whoever owns the controller: admission refuses any
+# pod that would take the namespace past this many GPUs. Size it to the
+# tenant's entitlement; use the resource name your device plugin advertises.
+kubectl -n ${NAMESPACE} create quota wva-gpus --hard=requests.nvidia.com/gpu=8
+kubectl -n ${NAMESPACE} describe quota wva-gpus
+```
+<!-- guide:deploy.gpu_quota end -->
+
 ## Verification
+
+Before handing over in the tenant-owned shape, check for a cluster-scoped
+controller yourself. The tenant's `make deploy-wva` cannot list Deployments
+cluster-wide, so it **warns and carries on** rather than refusing when one
+exists — and two controllers managing the same workloads each spend the same
+free GPUs. `make check-prereqs` run as you already does this check; the
+command below is the same question asked directly:
+
+<!-- guide:verify.no_cluster_install start -->
+```bash
+# A tenant's install cannot list Deployments cluster-wide, so it warns and
+# CONTINUES instead of refusing when a cluster-scoped controller already
+# exists. Check for them once, as you. An empty result means none; any line
+# without --watch-namespace in its args is cluster-scoped and would manage
+# the same workloads.
+kubectl get deploy -A -l app.kubernetes.io/name=workload-variant-autoscaler,control-plane=controller-manager \
+  -o custom-columns=NAMESPACE:.metadata.namespace,NAME:.metadata.name,ARGS:.spec.template.spec.containers[0].args
+```
+<!-- guide:verify.no_cluster_install end -->
 
 <!-- guide:verify.objects start -->
 ```bash
