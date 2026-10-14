@@ -73,7 +73,7 @@ carry a hash suffix (below).
 | Secret `wva-epp-metrics-token` | a **long-lived, non-expiring** ServiceAccount token for `wva-epp-metrics-reader`, which the controller mounts to scrape EPP metrics. On OpenShift also `wva-controller-manager-token`, which the ServiceMonitor scrapes with |
 | ConfigMap `wva-metrics-server-ca` | **OpenShift only**: the service CA the ServiceMonitor verifies the controller's certificate with |
 | the ServiceMonitor | the stock `admin` ClusterRole does not grant `monitoring.coreos.com` |
-| Roles `wva-manager-role`, `wva-leader-election-role`, `wva-utilization-share-history-role`, and their RoleBindings | namespaced, but RBAC forbids granting permissions you do not hold yourself, and the controller's Role names resources a namespace admin does not have |
+| Roles `wva-manager-role`, `wva-leader-election-role`, `wva-utilization-share-history-role`, `wva-learned-state-role`, and their RoleBindings | namespaced, but RBAC forbids granting permissions you do not hold yourself, and the controller's Role names resources a namespace admin does not have |
 | Prometheus | Kubernetes only, and only if the cluster has none |
 | KEDA | Kubernetes only, and only with `KEDA_HELM_INSTALL=true`. On OpenShift, install the Custom Metrics Autoscaler operator beforehand |
 

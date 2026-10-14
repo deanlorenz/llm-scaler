@@ -49,7 +49,7 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 		}
 		msg := "learned state restored"
 		if !r.Installed {
-			msg = "learned state not restored: the variant runs a different engine configuration than it was learned under"
+			msg = "learned state not restored: the variant's engine configuration differs from the one it was learned under, or could not be read completely"
 		}
 		ctrl.LoggerFrom(ctx).Info(msg, "namespace", r.Namespace, "variant", r.Variant, "entries", r.Entries)
 	}

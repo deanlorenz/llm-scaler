@@ -447,6 +447,7 @@ namespace-scoped installs side by side: each one's budget is its own.
 | `WVA_LOG_LEVEL` | **Inert.** The installer sets it but nothing reads it, and the controller's `LOG_LEVEL` env var is not read either. Verbosity is the controller's `--v=N` argument (default `2`; `4` is debug) — edit the Deployment's args to change it | `info` |
 | `LEARNED_STATE_EPISODE_GAP` | How long a gap in saturated observations before the next one starts a **new window** instead of blending into the old one. A variant that goes quiet over a weekend should not average Monday's capacity with Friday's | `24h` |
 | `LEARNED_STATE_VARIANT_TIMEOUT` | How long **per-variant** learned state — the fitted ITL window and its baseline, the replica start estimate — is kept after the variant stops being discovered, i.e. once its scale target or ScaledObject is gone. A variant parked at zero replicas is still discovered and keeps it for as long as it is parked | `24h` |
+| `LEARNED_STATE_SNAPSHOT` | `true` carries what the saturation analyzer learned across a controller restart or a leader change, in the ConfigMap `wva-learned-state` in the controller's namespace. **Off by default** — see [Learned state across a restart](#learned-state-across-a-restart) | `false` |
 | `LEARNED_STATE_BUCKET_RETENTION` | How long a **bucket-keyed** window — the k2 history and the mu windows the demand floor prices from, one per variant and traffic-shape bucket — is kept from when it was last read. Longer than the timeout on purpose: a retained measurement is the lowest capacity figure available for its bucket, and dropping it falls through to an estimate that orders *fewer* replicas | `168h` (7 days) |
 | `PROMETHEUS_SECRET_NAME` | Secret holding the Prometheus serving cert | `prometheus-web-tls` |
 | `PROMETHEUS_SECRET_NS` | Namespace of that secret | `$MONITORING_NAMESPACE` |
@@ -463,6 +464,40 @@ default and the controller logs which ones it replaced. The horizons in force ar
 logged once at startup as `learned-state horizons`, so the log says what is actually
 running rather than what was asked for. Shortening them is how this is exercised on
 a cluster inside a test run instead of over a week.
+
+None of the `LEARNED_STATE_*` variables is set by the installer: they are read from
+the controller's own environment, so set them on its Deployment
+(`kubectl set env deployment/<controller> -n <controller-namespace> LEARNED_STATE_SNAPSHOT=true`),
+which restarts it.
+
+### Learned state across a restart
+
+Without `LEARNED_STATE_SNAPSHOT`, a restarted controller has forgotten every
+measured capacity, and until a model saturates again it prices replicas from
+the deployment-derived figure, which is higher. That orders **fewer** replicas,
+so TTFT suffers after every upgrade or leader change until the fleet has
+saturated once more. With it on, the acting controller writes what it learned
+to the ConfigMap `wva-learned-state` at most once a minute, and the next
+controller reads it on its first cycle.
+
+What is restored, and what is not:
+
+- a variant's measured capacity, saturated throughput, ITL baseline and
+  replica start estimate are restored **only if it runs the same engine
+  configuration** as when they were learned, read completely: a deployment
+  whose flags come from a variable the controller cannot resolve restores
+  nothing, because a changed value would look identical;
+- the ages travel with the figures, so a restore never makes a figure younger,
+  and one past its horizon above is not restored;
+- a figure the new controller has already measured is never replaced.
+
+The log line `Learned state: snapshot restored` says how many variants are
+pending their first cycle; `learned state restored` or `learned state not
+restored` follows for each on its first cycle. It needs the Role `wva-learned-state-role`, which
+`make setup-prereqs` installs; an install upgraded from before the store existed
+reports it as an optional prerequisite. See
+[troubleshooting](troubleshooting.md#capacity-priced-high-after-a-restart) for
+what the log lines mean when it does not work, and how to flush the store.
 
 ## Optional: scaling band after `make deploy-e2e-infra`
 

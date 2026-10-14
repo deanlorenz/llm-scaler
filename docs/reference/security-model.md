@@ -107,7 +107,8 @@ Role and its binding in the managed namespace).
 | get, list, watch, create, update, patch, delete | leases | own namespace (`leader-election-role`) | leader election |
 | create, patch | events | own namespace (`leader-election-role`) | |
 | get, update | configmaps named `wva-utilization-share-history` | own namespace (`utilization-share-history-role`) | the utilization-share optimizer's need history |
-| create | configmaps (any name — `create` cannot be narrowed by name) | own namespace | creating that history ConfigMap the first time |
+| get, update | configmaps named `wva-learned-state` | own namespace (`learned-state-role`) | learned state across a restart, when `LEARNED_STATE_SNAPSHOT` is on |
+| create | configmaps (any name — `create` cannot be narrowed by name) | own namespace | creating either ConfigMap the first time |
 | get, list, watch | nodes, nodes/status | **cluster** (`node-reader-role`) | resolving a variant's accelerator; required by the `gpu-inventory` limiter |
 | get, list | clusterqueues, resourceflavors | **cluster** (`kueue-reader-role`) | the Kueue quota source. Inert on a cluster without Kueue |
 | create | tokenreviews, subjectaccessreviews | **cluster** (`metrics-auth-role`) | authenticating and authorizing scrapes of `:8443` |
@@ -180,6 +181,7 @@ ScaledObjects or HPAs**. KEDA does the scaling. What it does write:
 | Events | create, patch | warnings and decisions, mostly on ScaledObjects |
 | Leases | leader election | own namespace |
 | ConfigMap `wva-utilization-share-history` | the optimizer's need history | own namespace, utilization-share only |
+| ConfigMap `wva-learned-state` | the saturation analyzer's learned state | own namespace, `LEARNED_STATE_SNAPSHOT` only |
 | Warm-pool supervisor (HTTP, not the API) | start, sleep, wake and stop engine instances | warm pool only |
 
 A cluster-scoped grant to patch pods is therefore a grant to change which pods
