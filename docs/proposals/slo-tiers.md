@@ -493,6 +493,16 @@ direction, unless noted.
 This is the least certain part. It is enforced only after phase 0 has run in
 shadow on real traffic and shown the curve can be learned.
 
+**Step 2a is built: the curve's inputs, observed.** For every variant that
+prefills, under a TTFT target, the analyzer publishes its mean prefill time
+(`vllm:request_prefill_time_seconds`: scheduled to first token, so no queue in
+it), its mean engine queue wait (`vllm:request_queue_time_seconds`), its prefill
+utilization, and the learned ceiling that utilization is measured against
+(the p90 of the prefill token rate on cycles its engine queue was non-empty,
+over the last hour). Nothing is priced from them. Plotting prefill time against
+utilization on real traffic is what shows whether the curve below is learnable.
+vLLM only: SGLang publishes no per-stage prefill figure.
+
 ```
 TTFT_router  ≈  router queue  +  engine queue  +  prefill
 ```
@@ -706,8 +716,10 @@ nothing answers today.
 
 ### Phase 2: TTFT
 
-The prefill-token contributor, the curve, the ceiling state and the blame
-rule. Shadow first.
+- **2a (built):** the curve's inputs and the ceiling state, published.
+- **2b:** the prefill-token contributor, the isotonic curve, the tail ratio
+  and the blame rule, in shadow, once 2a's data shows the curve can be
+  learned.
 
 ### Phase 3: the attainment trim
 
