@@ -429,8 +429,17 @@ install_operational_dashboard() {
     # one. The version it was published with is stamped on the object, and a
     # lower version leaves it alone and says so.
     local ours existing
-    ours="${IMG##*:}"
-    [ -n "$ours" ] && [ "$ours" != "$IMG" ] || ours="unknown"
+    # The tag wva_split_image_ref parsed, not "${IMG##*:}": that read the hex of
+    # a digest (repo@sha256:<hex>) as the version, and the path of a tagless
+    # registry-with-port reference (host:5000/wva) likewise. A digest-only
+    # reference has no version to compare and publishes as "unknown".
+    # `make dashboard` passes IMG alone, so fall back to its tag by the same rule:
+    # a colon in the last path segment, and no digest.
+    ours="${WVA_IMAGE_TAG:-}"
+    if [ -z "$ours" ] && [ -n "${IMG:-}" ] && [[ "$IMG" != *@* ]] && [[ "${IMG##*/}" == *:* ]]; then
+        ours="${IMG##*:}"
+    fi
+    [ -n "$ours" ] || ours="unknown"
     existing=$(kubectl get configmap wva-operation-dashboard -n "$ns" \
         -o jsonpath='{.metadata.annotations.wva\.llmd\.ai/dashboard-version}' 2>/dev/null || true)
 

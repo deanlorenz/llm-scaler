@@ -78,6 +78,44 @@ because a skip is how a green run comes to mean nothing. CI pins yq v4.44.3;
 some yq behaviour differs in newer releases, so reproduce a CI failure with
 that version.
 
+- `check-install-defaults.sh` -- what a plain install ships: how `IMG` is
+  split (registry ports, digests), the pull policy for a reference, the
+  floating-tag and unverified-Prometheus-TLS warnings, and which Prometheus
+  ServiceAccount is granted the controller's `/metrics`.
+
+Both need `jq` (and the first needs `yq`) and fail rather than skip without
+them, because a skip is how a green run comes to mean nothing.
+
+`check-rendered-manifests.sh` needs kustomize as well, so it runs in the
+`kustomize-build` CI job rather than under `make lint-deploy-scripts`. It
+renders the overlays -- and the overlay the installer wraps around them -- and
+asserts what they contain, where the builds alone only prove they render:
+
+```bash
+make kustomize && KUSTOMIZE=bin/kustomize bash hack/check-rendered-manifests.sh
+```
+
+### Unit Test Structure
+
+Unit tests are co-located with the code they test:
+
+```text
+internal/
+├── controller/
+│   ├── variantautoscaling_controller.go
+│   └── variantautoscaling_controller_test.go
+├── saturation/
+│   ├── analyzer.go
+│   └── analyzer_test.go
+├── collector/
+│   ├── collector.go
+│   └── collector_test.go
+└── queueing/
+    └── analyzer/
+        ├── queueanalyzer.go
+        └── queueanalyzer_test.go
+```
+
 A new fixture check follows the same convention (see AGENTS.md): a
 `hack/check-*.sh` script, called from `lint-deploy-scripts`. A check behind
 a new make target is one CI never runs.

@@ -170,6 +170,16 @@ EOF
         printf '%s\n' "$learned_err" | sed 's/^/    /'
     fi
 
+    # The controller-status ConfigMap is written by the controller too. Left
+    # behind, it would report a policy version and modes no controller is
+    # running with.
+    local status_cm=wva-controller-status status_err
+    status_err="$(kubectl delete configmap "$status_cm" -n "$WVA_NS" --ignore-not-found 2>&1 >/dev/null)" && status_err=""
+    if [ -n "$status_err" ]; then
+        log_warning "The controller-status ConfigMap $status_cm in $WVA_NS was not removed:"
+        printf '%s\n' "$status_err" | sed 's/^/    /'
+    fi
+
     log_info "Left in place: namespace $WVA_NS. Delete it yourself if you want it gone."
 
     # ScaledObjects outlive the controller, and that is a trap rather than a

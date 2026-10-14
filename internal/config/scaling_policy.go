@@ -6,7 +6,11 @@ import "strings"
 // `scalingPolicy` key in its scaler's trigger metadata.
 //
 // A policy is a SCALING TIER — "interactive", "standard", "batch" — carrying
-// thresholds, analyzer selection and scale-to-zero settings. It is deliberately
+// thresholds, priority and analyzer selection. It does not decide scale-to-zero
+// for the variants that name it: scale-to-zero is read from the default entry,
+// the tier its defaultPolicy names, or a per-model override — not from a tier a
+// variant names (the enforcement path calls ResolveScalingPolicy, which passes
+// no tier). It is deliberately
 // IDENTITY-FREE: no model, no namespace. That is the whole point. Per-(model,
 // namespace) entries bind settings to identity, so "loosen the thresholds for
 // everything interactive" is an edit per model; a tier makes it one edit, and the

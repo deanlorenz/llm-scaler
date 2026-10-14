@@ -1,5 +1,26 @@
 # Scale a model on saturation
 
+## Start here
+
+- **Status:** Stable. The default path; every other path assumes it is in place.
+- **You need:**
+  - llm-d model servers already serving in the namespace (none yet? [install a small llm-d model](../../guides/install-small-model/)).
+  - a Prometheus scraping the model servers and their EPP.
+  - the EPP's `featureGates: [flowControl]` in its `EndpointPickerConfig`: `make check-prereqs` and `make deploy-wva` refuse without it.
+  - a cluster admin, for KEDA on the cluster and `make setup-prereqs` once per namespace.
+- **Do this** ([Install the scaling manager in a namespace](../../guides/install-in-namespace/)):
+  0. (namespace owner) [Prerequisites](../../guides/install-in-namespace/README.md#prerequisites): `export NAMESPACE=<your-namespace>`, then `make check-prereqs` (read-only).
+  1. (cluster admin) [Prepare the namespace](../../guides/install-in-namespace/README.md#1-cluster-admin-prepare-the-namespace) (`make setup-prereqs`).
+  2. (namespace owner; the cluster admin when the controller runs in `wva-<ns>`) [Install the controller](../../guides/install-in-namespace/README.md#2-install-the-controller) (`make deploy-wva`).
+  3. (namespace owner) [Make the workloads safe to scale](../../guides/install-in-namespace/README.md#3-make-the-workloads-safe-to-scale): `make workload-patch` writes a patch for you to apply through your modelservice chart; it changes nothing on its own ([writing the patch](../../reference/workload-preparation.md#writing-the-patch-make-workload-patch)).
+  4. (namespace owner) [Register the workloads](../../guides/install-in-namespace/README.md#4-register-the-workloads) (`make scaledobjects-plan`, edit the plan, `make scaledobjects-apply`).
+  5. (namespace owner) Confirm only KEDA can reach the scaler's port `:9090`, which is plaintext and unauthenticated by default: `make verify-deployment` reads the `wva-external-scaler` NetworkPolicy that step 1 writes when it knows KEDA's namespace. If it prints `No NetworkPolicy: scaler port open`, the cluster admin re-runs step 1 with `KEDA_NAMESPACE=<namespace KEDA runs in>`, or you serve the scaler over mutual TLS ([network exposure](../../reference/security-model.md#network-exposure)).
+  One controller for every namespace instead (cluster admin): [install cluster-wide](../../guides/install-cluster-wide/).
+- **Check it works:** `kubectl get scaledobject,hpa -n $NAMESPACE` shows `READY True` and a number under `TARGETS`; a few minutes later the controller log has `scaling-decision` lines ([Verification](../../guides/install-in-namespace/README.md#verification)). The controller runs in `$NAMESPACE`, or in `wva-$NAMESPACE` when the admin keeps it out of your reach.
+- **Undo:** (namespace owner; the cluster admin when the controller runs in `wva-<ns>`) `make undeploy-wva` ([Cleanup](../../guides/install-in-namespace/README.md#cleanup)); the model servers keep running. ScaledObjects you adopted are left in place and listed for you to repoint or remove. Cluster-scoped objects the admin created stay until the admin removes them ([what an uninstall run by you leaves behind](../../guides/install-in-namespace/README.md#what-an-uninstall-run-by-you-leaves-behind)).
+
+## What it is
+
 The default path, and the one every other path builds on. The scaling manager reads what your
 inference engines are actually doing — KV-cache occupancy, queues, token rates —
 turns it into a supply-and-demand statement per model, and answers KEDA with a
@@ -35,26 +56,27 @@ autoscaled before anything is.
 
 ## Verifying it
 
-Three things, in this order. The commands assume the namespace install, where
-the controller runs in the namespace it manages; for a cluster-wide install, read
-the logs from the controller's namespace (`workload-variant-autoscaler-system` by
-default).
+Three things, in this order. `$NAMESPACE` is the namespace the models run in.
+The controller runs there too in the default namespace install; in
+`wva-$NAMESPACE` when the admin keeps it out of your reach; and in
+`workload-variant-autoscaler-system` (by default) for a cluster-wide install.
 
 ```bash
 export NAMESPACE=<your-namespace>
-NS=${NAMESPACE}   # the controller's namespace; workload-variant-autoscaler-system for a cluster-wide install
+WVA_NS=$NAMESPACE   # the controller's namespace: wva-$NAMESPACE out of reach, workload-variant-autoscaler-system cluster-wide
 
 # 1. The scaling manager is deciding at all: one line per model, per cycle
-kubectl logs -n "$NS" deploy/wva-controller-manager | grep scaling-decision
+kubectl logs -n "$WVA_NS" deploy/wva-controller-manager | grep scaling-decision
 
 # 2. It decided for a reason: supply, demand and the threshold it compared them to
-kubectl logs -n "$NS" deploy/wva-controller-manager | grep analyzer-result
+kubectl logs -n "$WVA_NS" deploy/wva-controller-manager | grep analyzer-result
 
 # 3. KEDA acted on it
-kubectl get scaledobject,hpa -n ${NAMESPACE}
+kubectl get scaledobject,hpa -n "$NAMESPACE"
 ```
 
-The same decision, as a metric in Prometheus:
+The same decision, as a metric in Prometheus (PromQL takes the namespace
+literally, so write the value of `$NAMESPACE`):
 
 ```promql
 wva_desired_replicas{exported_namespace="<your-namespace>"}
@@ -83,7 +105,7 @@ equal the engine's `--served-model-name`.
 
    An empty result means the scaling manager is blind to this model. It says so
    with a `MetricsUnavailable` Warning Event on the ScaledObject
-   (`kubectl get events -n <ns> --field-selector reason=MetricsUnavailable`).
+   (`kubectl get events -n "$NAMESPACE" --field-selector reason=MetricsUnavailable`).
    Fix the scrape (ServiceMonitor/PodMonitor reaching the engine's `/metrics`)
    or the name (`--served-model-name` vs `modelID`) before tuning anything.
 2. **Utilization sits inside the band.** In the `analyzer-result` line compare
@@ -95,14 +117,14 @@ equal the engine's `--served-model-name`.
 3. **The target matches what runs.**
 
    ```promql
-   wva_desired_replicas{exported_namespace="<ns>", variant_name="<scaledobject>"}
+   wva_desired_replicas{exported_namespace="<your-namespace>", variant_name="<scaledobject>"}
      -
-   wva_current_replicas{exported_namespace="<ns>", variant_name="<scaledobject>"}
+   wva_current_replicas{exported_namespace="<your-namespace>", variant_name="<scaledobject>"}
    ```
 
    A gap that persists beyond the HPA's scale-down window (300 s as generated)
    or a pod's start time means KEDA/HPA is not acting: check
-   `kubectl get scaledobject,hpa -n <ns>` for `READY`/`ACTIVE` and the HPA's
+   `kubectl get scaledobject,hpa -n "$NAMESPACE"` for `READY`/`ACTIVE` and the HPA's
    conditions.
 4. **Latency is what you wanted.** TTFT from the engine's own histogram:
 
@@ -122,7 +144,7 @@ the Prometheus queries it makes each cycle — one set per namespace, not per po
 
 ## How it is tested
 
-- End-to-end: `test/e2e/saturation_test.go`,
+- End-to-end: `test/e2e/saturation_v2_test.go` (`Saturation V2 engine`),
   `saturation_analyzer_path_test.go`, `saturation_config_test.go`,
   `external_scaler_keda_test.go`, `smoke_keda_test.go`.
 - Benchmark scenario: `hack/benchmark/scenarios/guides/workload-autoscaling.yaml`,

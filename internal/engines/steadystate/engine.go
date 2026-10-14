@@ -43,6 +43,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/source"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/controllerstatus"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
@@ -92,6 +93,10 @@ type Engine struct {
 	policies *scalingpolicy.ChangeReporter
 
 	Config *config.Config // Unified configuration (injected from main.go)
+
+	// Status receives the utilization-share mode each cycle for the
+	// controller-status ConfigMap. Nil-safe: tests leave it unset.
+	Status *controllerstatus.Publisher
 
 	// ReplicaMetricsCollector is the collector for replica metrics using the source infrastructure
 	ReplicaMetricsCollector *collector.ReplicaMetricsCollector

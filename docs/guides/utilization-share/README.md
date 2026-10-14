@@ -15,7 +15,8 @@ scaling policy, read live. **Experimental.**
 ## Prerequisites
 
 Two or more models scaled by the scaling manager, under a **limiter**: a
-quota, or the physical GPU inventory
+quota (declared, or [read from Kueue](../../well-lit-paths/kueue-bounded-quotas/)),
+or the physical GPU inventory
 ([under the physical limiter](#under-the-physical-gpu-limiter) has what
 differs). You need `kubectl`, `jq`, `yq` and `make` in a checkout of this
 repository. If you do not have the models yet, the shortest route is the
@@ -44,9 +45,13 @@ Every command below reads one variable:
 
 <!-- guide:prerequisites.vars start -->
 ```bash
-# The models' namespace. On a namespace-scoped install the controller and
-# its policy are there too; otherwise also export CONTROLLER_NAMESPACE and
-# POLICY_NAMESPACE.
+# The models' namespace. On a namespace-scoped install the controller is
+# there too; otherwise also export CONTROLLER_NAMESPACE. The policy's
+# namespace (its own, or a policy namespace such as wva-policy) is read
+# from the controller's wva-controller-status ConfigMap (policyNamespace),
+# else from its log, else worked out from the namespace's labels and
+# wva-policy. POLICY_NAMESPACE names it when none of those can; one that
+# disagrees with what the controller reports is refused.
 export NAMESPACE=<namespace>
 ```
 <!-- guide:prerequisites.vars end -->
@@ -198,14 +203,13 @@ on the cluster. Three things differ:
   `physicalGroups: true` the optimizer plans no group and moves nothing; the
   check warns about this.
 - **The policy is the cluster's.** `make enable-physical-limiter` publishes it
-  in `wva-policy`, so export `POLICY_NAMESPACE=wva-policy`. Only self-managed
-  controllers that can read Namespaces read that policy — admin-owned
-  controllers (cluster-scoped, out-of-reach) read their own ConfigMap by
-  design, and namespace-scoped ones on Kubernetes cannot see `wva-policy` yet
-  (being fixed) — so the block turns the optimizer on for every controller that
-  does read it, not just one. A controller reads a policy in another namespace
-  only at start: add `RESTART=1`, or the step stops and says the block was
-  written but not read.
+  in `wva-policy`. The steps find that namespace in the controller's
+  `wva-controller-status` ConfigMap (else its log) and write there, and refuse a `POLICY_NAMESPACE` the controller does not read.
+  Only self-managed controllers read that policy — admin-owned controllers
+  (cluster-scoped, out-of-reach) read their own ConfigMap by design — so the
+  block turns the optimizer on for every self-managed controller, not just
+  yours. A controller reads a policy in another namespace only at start: add
+  `RESTART=1`, or the step stops and says the block was written but not read.
 - **Spare GPUs are shared with everything else on the cluster.** Headroom fills
   idle GPUs, and a GPU a donor releases can be taken by a pod the scaling
   manager did not place. That transfer ends `release-taken`.

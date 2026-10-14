@@ -1,5 +1,18 @@
 # Bridge a scale-up with a warm pool
 
+## Start here
+
+- **Status:** Stable.
+- **You need:** [the saturation path](../scale-on-saturation/#start-here) in place; accelerators free for the pool, of the same shape as the models it warms; the RWX model-cache claim the model servers already mount; the pool's two images, pullable from the pool's nodes: the launcher `ghcr.io/llm-d-incubation/llm-d-fast-model-actuation/launcher` (external, from Fast Model Actuation, not built here) and the proxy `ghcr.io/ev-shindin/llm-scaler/warmpool-proxy` (or your `--proxy-image`). On a mirrored or air-gapped registry, mirror both first ([the images](../../guides/warm-pool/install.md#the-images-a-pool-pod-runs)).
+- **Do this** ([Bridge a scale-up with a warm pool](../../guides/warm-pool/)):
+  1. (namespace owner) [Check the model can be warmed here](../../guides/warm-pool/README.md#should-this-model-be-warmed-here-at-all) (`deploy/warmpool.sh sizing`) and [which pools you need](../../guides/warm-pool/README.md#which-pools-do-you-need) (`deploy/warmpool.sh plan`).
+  2. (namespace owner) Meet the [pool's prerequisites](../../guides/warm-pool/install.md#prerequisites): the cache claim and [the images](../../guides/warm-pool/install.md#the-images-a-pool-pod-runs).
+  3. (namespace owner) [Create the pool and point the models at it](../../guides/warm-pool/install.md#adding-and-removing-a-pool-later) (`deploy/warmpool.sh create`, then `warmPool:` in each model's trigger), or [at install time](../../guides/warm-pool/install.md#turning-it-on-during-installation).
+- **Check it works:** a `warm pool state` line in the controller log, then `wva_warmpool_borrow_total{outcome="hit"}` rising on a scale-up ([Checking it works](../../guides/warm-pool/operating.md#checking-it-works)).
+- **Undo:** (namespace owner) `deploy/warmpool.sh delete`, and remove `warmPool:` from the models ([Remove one](../../guides/warm-pool/install.md#adding-and-removing-a-pool-later)).
+
+## What it is
+
 A scale-up is slow because a new replica must load a model before it can serve.
 A warm pool holds a few Pods with models already loaded and asleep, and lends
 one to a variant that is scaling up. The borrowed Pod joins the model's
@@ -123,21 +136,25 @@ of phase with quiet stretches between, autoscaling alone against a one-Pod
 pool against a floor of two replicas, with the tables, the plots and the make
 targets to repeat it on your cluster. These figures are **one benchmark run per
 arm** on H200 nodes, four scale-up events each, so the margins are one run's,
-not a distribution. The short version: the pool turns
-5–9 s rises into 0.1–0.8 s, within tens of milliseconds of the floor, for
+not a distribution. The short version: the pool turns rises of 5.2–8.8 s at
+p95 into 0.11–0.83 s, within 50 ms of the floor on three of the four rises, for
 17 % more than autoscaling alone and 12 % less than the floor. The pool's
 advantage grows with the number of models sharing it, not with more quiet;
 when a model is always bursting, a floor is the cheaper insurance.
 
 ## How it is tested
 
-End-to-end, eight suites: `test/e2e/warm_pool_test.go`,
-`warm_pool_borrow_test.go`, `warm_pool_return_drain_test.go`,
-`warm_pool_drain_gpu_test.go`, `warm_pool_group_test.go`,
+End-to-end, nine suite files in `test/e2e/`. Eight are labelled `full` and
+run by `make test-e2e-full`: `warm_pool_test.go`, `warm_pool_borrow_test.go`,
+`warm_pool_return_drain_test.go`, `warm_pool_group_test.go`,
 `warm_pool_policy_test.go`, `warm_pool_quota_test.go`,
-`warm_pool_attribution_test.go` — covering the borrow, the hand-back, the drain,
+`warm_pool_attribution_test.go` and `warm_pool_retained_test.go` (simulator
+only) — covering the borrow, the hand-back, the controller's drain on return,
 multi-GPU groups, the policy that vets an engine before pointing at it, quota
-refusal, and how a bridge is attributed.
+refusal, how a bridge is attributed, and a retained pool keeping its lent Pod.
+The ninth, `warm_pool_drain_gpu_test.go` (a returned Pod finishing what it was
+writing), is labelled `gpu` only, so neither `make test-e2e-smoke` nor
+`make test-e2e-full` runs it.
 
 ## Tuning it
 

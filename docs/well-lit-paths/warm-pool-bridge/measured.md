@@ -74,8 +74,8 @@ the pool's own accelerator costs twice what that saves.
 
 ## Reading it
 
-**The pool does what it claims.** Every rise goes from 5–8.8 s at p95 to
-0.1–0.8 s — within 50 ms of the floor on three of the four rises — and the
+**The pool does what it claims.** Every rise goes from 5.2–8.8 s at p95 to
+0.11–0.83 s — within 50 ms of the floor on three of the four rises — and the
 models' own replica-seconds fall by 16 %, because the bridge lets each
 scale-up be smaller and shorter (the fleet peaks at 4 GPUs instead of 5, and
 is never short of what it asked for). Every cold rise in nopool drives the
@@ -84,7 +84,7 @@ scale-down window, so autoscaling alone averages 3.0 GPUs where the pool
 arm's models average 2.5.
 
 **What it costs, honestly.** Autoscaling alone is the cheapest arm, at
-12 129 GPU-s, and pays for it with 5–9 s rises. The pool is **17 % more** —
+12 129 GPU-s, and pays for it with 5.2–8.8 s rises. The pool is **17 % more** —
 its accelerator is held for the whole run and lent for 421 s of it, so the
 insurance costs about twice what the smaller scale-ups save — and the floor
 is **33 % more**. Against the floor it replaces, the pool serves the same

@@ -1,11 +1,26 @@
 # Scale a P/D-disaggregated model
 
+## Start here
+
+- **Status:** Experimental (below).
+- **You need:** an llm-d P/D deployment, `llm-d.ai/role: prefill` or `decode` on each pod template, and a KV transport between the roles; the prerequisites of [the saturation path](../scale-on-saturation/#start-here).
+- **Do this:**
+  1. (namespace owner) Deploy the P/D model. No guide in this repository covers it: use [llm-d's own P/D guide](https://github.com/llm-d/llm-d/tree/main/guides/pd-disaggregation), adding `featureGates: [flowControl]` to its EPP's `EndpointPickerConfig` (that guide leaves the gate off, and the install refuses without it), or the benchmark scenario under [Setting it up](#setting-it-up).
+  2. (namespace owner, after the cluster admin's `make setup-prereqs`) [Install the scaling manager](../../guides/install-in-namespace/) and [register](../../guides/install-in-namespace/README.md#4-register-the-workloads) both roles under one `modelID`: `make scaledobjects-plan` lists the prefill and decode workloads.
+  3. (namespace owner) For long generations, set `defaultOutputTokens` on the decode trigger ([Tuning it](#tuning-it)).
+- **Check it works:** `wva_desired_replicas` shows one series per role ([Verifying it](#verifying-it)).
+- **Undo:** nothing specific to this path; [uninstalling](../../guides/install-in-namespace/README.md#cleanup) removes the ScaledObjects, and the model servers keep serving.
+
+## What it is
+
 > **Experimental.** The scenario stands up and runs, the scaling manager's role handling is
 > covered end to end, and the shape has a published benchmark (below). What is
 > still short: a shape the controller has never seen saturated is sized from
-> occupancy until it has (named under *Measured*), and there is no
-> P/D-specific steady-state e2e spec. Take it as a working recipe with one
-> open item, not a settled default.
+> occupancy until it has (named under *Measured*); there is no
+> P/D-specific steady-state e2e spec; and the benchmark never ordered a second
+> prefill replica, so ordering both roles together (the joint commit) has run
+> in unit tests only. Take it as a working recipe with open items, not a
+> settled default.
 
 Prefill and decode have different shapes — prefill is compute-bound, decode is
 memory-bandwidth-bound — so llm-d can run them as separate deployments connected
@@ -270,9 +285,17 @@ That is scale-from-zero behaviour for the P/D shape. Steady-state scaling of a
 P/D model rides on [the saturation path](../scale-on-saturation/) and its suites;
 there is no P/D-specific steady-state spec. The unit specs that hold the
 benchmark's behaviour in place are in
-`internal/engines/analyzers/saturation/` (`throughput_floor_test.go`, and
-the P/D cases in `arrival_demand_test.go` and `analyzer_test.go`), each with a
-negative control against the code it replaced.
+`internal/engines/analyzers/saturation/`: `throughput_floor_test.go` and
+`throughput_floor_total_test.go` (the throughput floor, and the queue charged
+once across the pair), `downstream_saturation_test.go` (a prefill saturation
+under a saturated decode), `start_role_test.go` (start time per role), and the
+P/D cases in `analyzer_test.go` (per-role demand, prefill charged for input
+tokens only).
+
+The joint commit — growing prefill and decode together so the fleet keeps its
+ratio — is covered by `internal/engines/allocation/paired_exhausted_role_test.go`
+and nowhere else: both benchmark passes above held prefill at one replica, so
+no cluster run has exercised it.
 
 ## Replica start time
 

@@ -191,8 +191,11 @@ a **namespace-scoped** controller (`--watch-namespace` set) reads that
 namespace's ConfigMap once at start and does not watch it, because its cache
 cannot hold a namespace it has no RBAC in (`cmd/main.go`). An edit there takes
 effect only when the controller restarts
-(`kubectl rollout restart deploy/wva-controller-manager -n <its ns>`). A
-cluster-scoped controller watches the policy namespace and picks the edit up live.
+(`kubectl rollout restart deploy/wva-controller-manager -n <its ns>`). The same
+holds for an out-of-reach controller (`WVA_WATCH_NS` naming another namespace)
+and its own ConfigMap in its install namespace. `make enable-physical-limiter`
+and `make disable-physical-limiter` do those restarts. A cluster-scoped
+controller watches the policy namespace and picks the edit up live.
 
 A `limiters:` list selects a **single mode**, so declare **one** of these forms:
 
@@ -865,6 +868,33 @@ A namespace gets one when the controller reads a ConfigMap of that name there:
   watched namespace): the ConfigMap in the watched tenant namespace is always
   read, no label needed (`internal/controller/predicates.go`). See
   [the security model](security-model.md) for why this is by design.
+
+### Re-running the installer resets the default entry
+
+`make deploy-wva` re-applies `wva-scaling-policy-config` in the controller's
+namespace from the shipped manifest on every run, upgrades included. The
+`default` entry comes back exactly as shipped — thresholds and analyzers, and
+**no** `scaleToZero`, `defaultPolicy`, `optimizer:` block or `limiters:` — while
+every other key (named tiers, per-model entries) is saved before the apply and
+restored after it (`deploy/lib/infra_wva.sh`). The installer then writes a
+limiter back into `default` only when `WVA_LIMITER` (and, for a quota,
+`WVA_QUOTAS`) is passed on that run.
+
+So anything you changed in `default` by hand is gone after a re-run:
+
+| you set, in `default` | after a re-run |
+| --- | --- |
+| `scaleToZero` | repeat it, or put it on a per-model entry (an entry whose body names the model), which is kept; a named tier is not read for parking |
+| `defaultPolicy` | re-apply it; the tiers it names are kept |
+| `optimizer:` (utilization share) | removed: run `make utilization-share-shadow`, then `make utilization-share-activate` again |
+| `limiters:` | kept only if `WVA_LIMITER`/`WVA_QUOTAS` are passed again; a hand-written entry has to be re-added |
+
+This touches only the controller's own ConfigMap. A policy published in
+`wva-policy` by `make enable-physical-limiter` is not re-applied — but that
+command also writes into the own ConfigMap of each admin-owned controller, and
+a re-run of `make deploy-wva` for one of those controllers resets it there.
+A namespace-local map in a model namespace other than the controller's is not
+touched.
 
 ### Parameters
 
@@ -1598,6 +1628,10 @@ triggers:
 
 `defaultPolicy` is read from the `default` entry only: a fallback chosen by a tier
 or by a per-model entry would be that entry choosing for everyone but itself.
+
+Parking is the exception: `scaleToZero` is resolved without the variant's tier
+(`ResolveScalingPolicy`, called from the steady-state engine), so only `default`,
+the tier `default.defaultPolicy` names, and the per-model override decide it.
 
 Two failure modes are resolved deterministically rather than silently, and both
 are reported:
