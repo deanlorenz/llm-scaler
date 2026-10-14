@@ -725,6 +725,9 @@ func TestLineMismatchIsLoggedNotEnforced(t *testing.T) {
 		core, logs := observer.New(zapcore.Level(-logging.DEFAULT))
 		a := NewSaturationAnalyzer(capacity.NewStore())
 		a.noteLineMismatch(runPModel, tracedParams, rm, role, fleet.KVreq,
+			// An OWN line, not a borrowed one: this spec is about the fit
+			// drifting, which is the other half of what the line now reports.
+			"",
 			zapr.NewLogger(zap.New(core)))
 		return logs
 	}
