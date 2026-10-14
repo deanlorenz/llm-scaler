@@ -16,6 +16,15 @@ Gaps that are documented but not yet planned are listed in
   [#136](https://github.com/ev-shindin/llm-scaling-manager/issues/136)
   · today: [Kueue quotas](well-lit-paths/kueue-bounded-quotas/)
 
+## Scaling
+
+- **Scale to a latency target.** Tiers set how full a replica may run, not a
+  TTFT or TPOT target; an operator with an SLO translates it into thresholds by
+  hand. Planned: a tier may declare a latency target, and the controller derives
+  the fill that meets it from measured latency, keeping variants, P/D pairing
+  and the GPU budget.
+  [#141](https://github.com/ev-shindin/llm-scaling-manager/issues/141)
+
 ## Resilience
 
 - **Learned capacity survives a restart.** What the controller learns about a
