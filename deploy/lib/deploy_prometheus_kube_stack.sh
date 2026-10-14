@@ -3,7 +3,7 @@
 # Shared kube-prometheus-stack install for Kubernetes-like environments
 # (vanilla Kubernetes, Kind emulator, etc.). Sourced by deploy/*/install.sh.
 # Requires vars: MONITORING_NAMESPACE, PROMETHEUS_SECRET_NAME,
-# PROMETHEUS_PORT, PROMETHEUS_URL.
+# PROMETHEUS_PORT, PROMETHEUS_URL, KUBE_PROMETHEUS_STACK_CHART_VERSION.
 # Requires funcs: log_info/log_warning/log_success.
 #
 
@@ -58,7 +58,11 @@ deploy_prometheus_kube_stack() {
             ;;
     esac
 
+    if [ -z "${KUBE_PROMETHEUS_STACK_CHART_VERSION:-}" ]; then
+        log_error "KUBE_PROMETHEUS_STACK_CHART_VERSION is empty: refusing an unpinned kube-prometheus-stack, which upgrades the release every WVA on this cluster shares to whatever the repository serves today."
+    fi
     helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+        --version "$KUBE_PROMETHEUS_STACK_CHART_VERSION" \
         -n "$MONITORING_NAMESPACE" \
         --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false \
         --set prometheus.prometheusSpec.podMonitorSelectorNilUsesHelmValues=false \

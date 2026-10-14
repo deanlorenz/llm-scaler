@@ -248,6 +248,40 @@ for target in setup-prereqs deploy-wva deploy-wva-on-k8s deploy-wva-on-openshift
     fi
 done
 
+# --- CHART --------------------------------------------------------------------
+#
+# kube-prometheus-stack is one release shared by every WVA on the cluster. With
+# no --version, each install took whatever the repository served that day and a
+# re-run upgraded everyone's Prometheus to it.
+tr -d '\r' < "$ROOT/deploy/lib/deploy_prometheus_kube_stack.sh" > "$WORK/deploy_prometheus_kube_stack.sh"
+kps_default="$(tr -d '\r' < "$ROOT/deploy/install.sh" | sed -n 's/^KUBE_PROMETHEUS_STACK_CHART_VERSION=\${KUBE_PROMETHEUS_STACK_CHART_VERSION:-\([^}]*\)}$/\1/p')"
+kps_run() {
+    : > "$KUBECTL_LOG"
+    (
+        openssl() { return 0; }
+        jq() { echo; }
+        install_operational_dashboard() { :; }
+        MONITORING_NAMESPACE=mon PROMETHEUS_SECRET_NAME=s PROMETHEUS_PORT=9090 PROMETHEUS_URL=u \
+            DEPLOY_OPERATIONAL_DASHBOARD=false SKIP_HELM_REPO_UPDATE=true
+        # shellcheck disable=SC1091
+        . "$WORK/deploy_prometheus_kube_stack.sh"
+        deploy_prometheus_kube_stack
+    ) > "$WORK/kps.out" 2>&1
+}
+KUBE_PROMETHEUS_STACK_CHART_VERSION="$kps_default" kps_run
+kps_helm="$(grep '^helm upgrade --install kube-prometheus-stack' "$KUBECTL_LOG")"
+if [ -n "$kps_default" ] && printf '%s' "$kps_helm" | grep -q -- "--version $kps_default"; then
+    ok "kube-prometheus-stack is installed at the pinned chart version ($kps_default)"
+else
+    fail "kube-prometheus-stack must be installed with --version (install.sh default: '${kps_default}')" "$kps_helm"
+fi
+KUBE_PROMETHEUS_STACK_CHART_VERSION="" kps_run
+if grep -q '^helm upgrade --install kube-prometheus-stack' "$KUBECTL_LOG"; then
+    fail "an empty KUBE_PROMETHEUS_STACK_CHART_VERSION must refuse, not install unpinned" "$(cat "$WORK/kps.out")"
+else
+    ok "an empty KUBE_PROMETHEUS_STACK_CHART_VERSION refuses rather than installing unpinned"
+fi
+
 echo ""
 echo "check-install-flow: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] && [ "$PASS" -gt 0 ]
