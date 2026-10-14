@@ -84,16 +84,33 @@ var _ = Describe("PublishSLO", func() {
 		Expect(family(constants.WVASLOSource)).To(HaveLen(len(constants.SLOSources)))
 	})
 
-	It("leaves another model's series alone, and drops a model silent past the stale horizon", func() {
+	It("sweeps a model silent past the stale horizon, and leaves a live one alone", func() {
 		PublishSLO(snapshot("m1"), t0)
 		PublishSLO(snapshot("m2"), t0.Add(time.Minute))
 		Expect(family(constants.WVASLOTargetSeconds)).To(HaveLen(4))
 
-		PublishSLO(snapshot("m2"), t0.Add(sloStaleAfter+time.Minute+time.Second))
+		SweepSLO(t0.Add(sloStaleAfter + 30*time.Second))
 		targets := family(constants.WVASLOTargetSeconds)
 		Expect(targets).To(HaveLen(2))
 		for _, m := range targets {
 			Expect(label(m, constants.LabelModelName)).To(Equal("m2"))
+		}
+	})
+
+	// The case a sweep inside PublishSLO missed: the only model publishing
+	// stops, so nothing publishes again and only the engine's per-cycle sweep
+	// can remove its series.
+	It("sweeps the last model even when nothing publishes after it", func() {
+		PublishSLO(snapshot("m", SLOVariantReading{Variant: "v", Source: constants.SLOSourceOwn,
+			Fill: 0.6, PredictedITL: 0.04}), t0)
+		SweepSLO(t0.Add(sloStaleAfter - time.Second))
+		Expect(family(constants.WVASLOTargetSeconds)).To(HaveLen(2), "not yet stale")
+
+		SweepSLO(t0.Add(sloStaleAfter + time.Second))
+		for _, name := range []string{constants.WVASLOTargetSeconds, constants.WVASLOObservedSeconds,
+			constants.WVASLOAttainmentRatio, constants.WVASLOFill, constants.WVASLOPredictedITLSeconds,
+			constants.WVASLOSource} {
+			Expect(family(name)).To(BeEmpty(), name)
 		}
 	})
 })

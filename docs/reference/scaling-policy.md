@@ -1189,8 +1189,10 @@ interactive: |
 
 - **Both halves are needed.** Without `slo` under `analyzers:`, the targets
   are read by nothing. Without targets, the analyzer has nothing to aim at.
-  Either half alone is logged once per model as `SLO policy is
-  half-configured`, and is not an error.
+  Either half alone is logged as `SLO policy is half-configured`, once
+  each time a model's resolved policy changes into that state, and is not an
+  error. The `Effective scaling policy` line shows what a model resolved to
+  in its `slo` field, for example `tpot mean<=100ms, ttft p90<=3s (observe)`.
 - **TPOT is a mean** and takes no percentile; setting one is a validation
   error. **TTFT is a percentile**, 50 to 99, defaulting to 90.
 - **Targets are Go durations** (`100ms`, `3s`). A bare number is refused

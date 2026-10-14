@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"errors"
 	"math"
 	"sort"
 	"testing"
@@ -74,4 +75,59 @@ func TestCollectRouterLatency_NilWhenRouterSilent(t *testing.T) {
 	}
 	assert.Nil(t, NewReplicaMetricsCollector(mockSource, nil, nil, nil, nil).
 		CollectRouterLatency(context.Background(), "model-a", "ns"))
+}
+
+// TestCollectRouterLatency_FailuresReadAsAbsent pins that a failed query never
+// reads as a latency: an error from the source, and a result carrying its own
+// error, both leave the SLO unjudged rather than met or missed.
+func TestCollectRouterLatency_FailuresReadAsAbsent(t *testing.T) {
+	failing := &mockMetricsSource{
+		refreshFunc: func(_ context.Context, _ source.RefreshSpec) (map[string]*source.MetricResult, error) {
+			return nil, errors.New("prometheus unreachable")
+		},
+	}
+	assert.Nil(t, NewReplicaMetricsCollector(failing, nil, nil, nil, nil).
+		CollectRouterLatency(context.Background(), "model-a", "ns"))
+
+	erroring := &mockMetricsSource{
+		refreshFunc: func(_ context.Context, _ source.RefreshSpec) (map[string]*source.MetricResult, error) {
+			return map[string]*source.MetricResult{
+				registration.QuerySLORouterTTFTBuckets: {Error: errors.New("bad query"), Values: []source.MetricValue{
+					{Labels: map[string]string{seriesTargetModelLabel: "model-a", "le": "+Inf"}, Value: 1},
+				}},
+			}, nil
+		},
+	}
+	assert.Nil(t, NewReplicaMetricsCollector(erroring, nil, nil, nil, nil).
+		CollectRouterLatency(context.Background(), "model-a", "ns"))
+}
+
+// TestCollectRouterLatency_SkipsUnreadableBoundsAndKeepsTPOTAlone pins that a
+// bucket whose bound does not parse is dropped rather than read as zero, and
+// that a router exporting TPOT and no TTFT still yields a reading.
+func TestCollectRouterLatency_SkipsUnreadableBoundsAndKeepsTPOTAlone(t *testing.T) {
+	mockSource := &mockMetricsSource{
+		refreshFunc: func(_ context.Context, _ source.RefreshSpec) (map[string]*source.MetricResult, error) {
+			return map[string]*source.MetricResult{
+				registration.QuerySLORouterTTFTBuckets: {Values: []source.MetricValue{
+					{Labels: map[string]string{seriesTargetModelLabel: "model-a", "le": "fast"}, Value: 1},
+					{Labels: map[string]string{seriesTargetModelLabel: "model-a", "le": "NaN"}, Value: 1},
+					{Labels: map[string]string{seriesTargetModelLabel: "model-a"}, Value: 1},
+				}},
+				registration.QuerySLORouterTPOTSum: {Values: []source.MetricValue{
+					{Labels: map[string]string{seriesTargetModelLabel: "model-a"}, Value: 0.08},
+					{Labels: map[string]string{seriesTargetModelLabel: "model-a"}, Value: math.Inf(1)},
+				}},
+				registration.QuerySLORouterTPOTCount: {Values: []source.MetricValue{
+					{Labels: map[string]string{seriesTargetModelLabel: "model-a"}, Value: 1},
+				}},
+			}, nil
+		},
+	}
+	got := NewReplicaMetricsCollector(mockSource, nil, nil, nil, nil).
+		CollectRouterLatency(context.Background(), "model-a", "ns")
+	require.NotNil(t, got)
+	assert.Empty(t, got.TTFTBuckets)
+	assert.Equal(t, 0.08, got.TPOTSumRate)
+	assert.Equal(t, 1.0, got.TPOTCountRate)
 }

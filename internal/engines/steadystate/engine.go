@@ -679,6 +679,7 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 	e.reconcileExternalAnalyzers(ctx)  // sync the runtime external-analyzer registry with the catalog
 	e.recordDefaultConfigMetrics()     // record as soon as possible to reflect any changes in configuration
 	e.observeUtilizationShareMode(ctx) // every cycle, even one with no model to plan
+	metrics.SweepSLO(time.Now())       // drop the SLO series of a model no longer published
 
 	if e.Config.ScaleToZeroEnabled() {
 		logger.Info("Scaling to zero is enabled")
@@ -961,6 +962,7 @@ func (e *Engine) resolveModelPolicy(
 	}
 
 	e.policies.ReportEffectivePolicy(ctx, namespace, modelID, tier, resolved)
+	e.policies.ReportSLOMisconfiguration(ctx, namespace, modelID, resolved.SLOMisconfiguration())
 	return resolved
 }
 

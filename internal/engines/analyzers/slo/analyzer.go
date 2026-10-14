@@ -18,7 +18,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-logr/logr"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
@@ -63,9 +62,6 @@ type Analyzer struct {
 	// pinned fit holds B to once the fleet stops spanning k.
 	baseline map[string]float64
 	seen     map[string]time.Time
-	// warned records a misconfiguration already logged for a model, so a
-	// half-configured policy says so once and not every cycle.
-	warned map[string]string
 }
 
 // New returns an SLO analyzer. router may be nil, in which case the SLO is
@@ -79,7 +75,6 @@ func New(router RouterLatencySource, store *capacity.Store) *Analyzer {
 		windows:  make(map[string]*itl.Window),
 		baseline: make(map[string]float64),
 		seen:     make(map[string]time.Time),
-		warned:   make(map[string]string),
 	}
 }
 
@@ -94,8 +89,6 @@ func (a *Analyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 	if cfg == nil {
 		return nil, fmt.Errorf("slo analyzer: config is %T, want *config.ScalingPolicy", input.Config)
 	}
-	a.warnOnce(logger, input, cfg.SLOMisconfiguration())
-
 	result := &domain.AnalyzerResult{
 		AnalyzerName: domain.SLOAnalyzerName,
 		ModelID:      input.ModelID,
@@ -320,22 +313,6 @@ func (a *Analyzer) sweep(now time.Time) {
 			delete(a.windows, key)
 			delete(a.baseline, key)
 		}
-	}
-}
-
-func (a *Analyzer) warnOnce(logger logr.Logger, input domain.AnalyzerInput, problem string) {
-	key := input.Namespace + "/" + input.ModelID
-	a.mu.Lock()
-	already := a.warned[key] == problem
-	if problem == "" {
-		delete(a.warned, key)
-	} else {
-		a.warned[key] = problem
-	}
-	a.mu.Unlock()
-	if problem != "" && !already {
-		logger.Info("SLO policy is half-configured", "modelID", input.ModelID,
-			"namespace", input.Namespace, "problem", problem)
 	}
 }
 

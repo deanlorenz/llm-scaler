@@ -101,7 +101,7 @@ type SLOModelSnapshot struct {
 // sloStaleAfter is how long a model's SLO series outlive the last cycle that
 // published them. The analyzer is only called for models whose policy lists
 // it, so a model that left -- or whose policy stopped listing the analyzer --
-// is noticed only by its silence.
+// is noticed only by its silence, which SweepSLO reads every cycle.
 const sloStaleAfter = 10 * time.Minute
 
 type sloModelSeries struct {
@@ -116,8 +116,7 @@ var (
 
 // PublishSLO makes one model's SLO series exactly this snapshot: it sets every
 // current series first and only then deletes those the model no longer has, so
-// a scrape never lands on a gap. It also deletes every series of a model not
-// published for sloStaleAfter.
+// a scrape never lands on a gap.
 func PublishSLO(snap SLOModelSnapshot, now time.Time) {
 	if sloTarget == nil {
 		return
@@ -174,8 +173,20 @@ func PublishSLO(snap SLOModelSnapshot, now time.Time) {
 		deleteGone(prev.series, current)
 	}
 	sloPublished[key] = &sloModelSeries{series: current, lastSeen: now}
+}
+
+// SweepSLO deletes every series of a model not published for sloStaleAfter.
+// The engine calls it every cycle, whether or not any model runs the analyzer:
+// a sweep that ran only inside PublishSLO never ran once the last model
+// stopped publishing, and that model's series stayed for ever.
+func SweepSLO(now time.Time) {
+	if sloTarget == nil {
+		return
+	}
+	sloPublishedMu.Lock()
+	defer sloPublishedMu.Unlock()
 	for k, m := range sloPublished {
-		if k != key && now.Sub(m.lastSeen) > sloStaleAfter {
+		if now.Sub(m.lastSeen) > sloStaleAfter {
 			deleteGone(m.series, nil)
 			delete(sloPublished, k)
 		}

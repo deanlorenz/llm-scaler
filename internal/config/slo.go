@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -108,6 +109,30 @@ func (s *SLOPolicy) Validate() error {
 // SLOAnalyzerListed reports whether the policy runs the SLO analyzer.
 func (c ScalingPolicy) SLOAnalyzerListed() bool {
 	return c.AnalyzerEnabled(sloAnalyzerName)
+}
+
+// SLOSummary renders the policy's SLO for a log line: the targets, and whether
+// the analyzer that reads them is listed. "off" when neither is set.
+func (c ScalingPolicy) SLOSummary() string {
+	listed := c.SLOAnalyzerListed()
+	if c.SLO.Empty() && !listed {
+		return "off"
+	}
+	var parts []string
+	if c.SLO != nil && c.SLO.TPOT != nil {
+		parts = append(parts, "tpot mean<="+c.SLO.TPOT.Target.String())
+	}
+	if c.SLO != nil && c.SLO.TTFT != nil {
+		parts = append(parts, fmt.Sprintf("ttft p%d<=%s", c.SLO.TTFTPercentile(), c.SLO.TTFT.Target))
+	}
+	if len(parts) == 0 {
+		parts = append(parts, "no targets")
+	}
+	analyzer := "analyzer not listed"
+	if listed {
+		analyzer = "observe"
+	}
+	return strings.Join(parts, ", ") + " (" + analyzer + ")"
 }
 
 // SLOMisconfiguration names a half-configured SLO -- targets the analyzer will

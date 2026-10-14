@@ -78,6 +78,24 @@ var _ = Describe("SLOPolicy", func() {
 		Expect(base.SLO.TPOT.Target.Duration).To(Equal(100 * time.Millisecond))
 	})
 
+	Context("SLOSummary", func() {
+		It("reads off when neither half is set", func() {
+			Expect(ScalingPolicy{}.SLOSummary()).To(Equal("off"))
+		})
+		It("names each target and whether the analyzer reads them", func() {
+			p := ScalingPolicy{
+				Analyzers: []AnalyzerScoreConfig{{Name: sloAnalyzerName}},
+				SLO: &SLOPolicy{
+					TPOT: &SLOObjective{Target: SLODuration{100 * time.Millisecond}},
+					TTFT: &SLOObjective{Target: SLODuration{3 * time.Second}},
+				},
+			}
+			Expect(p.SLOSummary()).To(Equal("tpot mean<=100ms, ttft p90<=3s (observe)"))
+			p.Analyzers = nil
+			Expect(p.SLOSummary()).To(HaveSuffix("(analyzer not listed)"))
+		})
+	})
+
 	Context("SLOMisconfiguration", func() {
 		targets := &SLOPolicy{TPOT: &SLOObjective{Target: SLODuration{100 * time.Millisecond}}}
 		slo := AnalyzerScoreConfig{Name: sloAnalyzerName}
