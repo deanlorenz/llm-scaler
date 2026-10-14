@@ -1168,6 +1168,52 @@ Joining two variants on the fingerprint takes all four of `model_name`,
 `accelerator`, `gpus` and `fingerprint` — the sharing key is the tuple, not the
 digest alone — and, for the ITL line, `unresolved` empty on both sides.
 
+### `slo` (observe only)
+
+Latency targets, and the analyzer that reads them. **On this release it
+reports and does not decide**: replica counts still come from the saturation
+analyzer alone. Use it to answer whether a tier meets an SLO, and what the SLO
+would let each variant do, before any of it sizes a fleet. The design, and
+what enforcing it will take, is in
+[SLO tiers](../proposals/slo-tiers.md).
+
+```yaml
+interactive: |
+  analyzers:
+    - name: saturation          # keep it listed: an analyzers: list replaces the whole list
+    - name: slo
+  slo:
+    tpot: {target: 100ms}                  # a mean
+    ttft: {target: 3s, percentile: 90}     # a percentile
+```
+
+- **Both halves are needed.** Without `slo` under `analyzers:`, the targets
+  are read by nothing. Without targets, the analyzer has nothing to aim at.
+  Either half alone is logged once per model as `SLO policy is
+  half-configured`, and is not an error.
+- **TPOT is a mean** and takes no percentile; setting one is a validation
+  error. **TTFT is a percentile**, 50 to 99, defaulting to 90.
+- **Targets are Go durations** (`100ms`, `3s`). A bare number is refused
+  rather than read as nanoseconds. Like every validation error, a malformed
+  `slo` block drops the whole entry it is on.
+- **The block is replaced whole by an override**, not merged objective by
+  objective, so a per-model entry that sets only `ttft` has no `tpot`.
+- **It is judged on the router's numbers.** TTFT and TPOT come from the llm-d
+  EPP's `llm_d_epp_request_ttft_seconds` and
+  `llm_d_epp_request_streaming_tpot_seconds`, streaming requests only. The
+  router's TTFT includes the time a request waited in its flow-control queue;
+  the engine's does not. A router that does not publish these names leaves the
+  SLO unjudged, and the observed series stay absent.
+- **What it publishes** is listed under
+  [SLO Analyzer Metrics](prometheus.md#slo-analyzer-metrics), plus its demand
+  and per-replica capacity as `wva_analyzer_demand` / `wva_analyzer_target`
+  with `analyzer_name="slo"`, in output tokens per second. Their ratio is the
+  replica count the TPOT target alone would ask for; compare it with
+  `wva_desired_replicas`. Each cycle also logs `slo-model` and `slo-variant`
+  lines.
+- **Prefill is not priced.** On a P/D model only decode variants get an SLO
+  figure; TTFT is judged for the model but does not yet price a role.
+
 ### Default Configuration
 
 Since v0.9.0 the shipped `default` entry selects **V2** (token/capacity-based) via

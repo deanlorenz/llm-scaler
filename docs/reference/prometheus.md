@@ -963,6 +963,25 @@ is set, and is scraped with the workload's namespace as `exported_namespace`.
 | `wva_analyzer_target` | gauge | `analyzer_name`, `namespace`, `model_name`, `variant_name` | Per-replica target P, in the same unit as demand. | Same. |
 | `wva_analyzer_observed_replicas` | gauge | `analyzer_name`, `namespace`, `model_name`, `variant_name` | Replicas that reported metrics in the analyzer's last cycle. Compare with the target's **ready** replicas. | Lower than ready: a scrape gap. Higher: something the scale target does not own is serving the model. |
 
+### SLO Analyzer Metrics
+
+Published for a model whose policy lists the `slo` analyzer and sets
+[`slo` targets](scaling-policy.md#slo-observe-only). On this release they
+describe, and do not decide: no replica count is computed from them. A model's
+series are replaced every cycle and deleted ten minutes after the last cycle
+that published them. Every series also carries `controller_instance` when
+`CONTROLLER_INSTANCE` is set, and is scraped with the model's namespace as
+`exported_namespace`.
+
+| metric | type | labels | meaning | read it when |
+| --- | --- | --- | --- | --- |
+| `wva_slo_target_seconds` | gauge | `namespace`, `model_name`, `objective`, `statistic` | The target the policy declares. `objective` is `ttft` or `tpot`; `statistic` is `mean` for TPOT and `p90` (or the configured percentile) for TTFT. | Plotting the observed figure against it. |
+| `wva_slo_observed_seconds` | gauge | `namespace`, `model_name`, `objective`, `statistic` | What the router (the llm-d EPP) measured over 5 minutes: the mean streaming TPOT, or the TTFT percentile. The router's TTFT starts before its flow-control queue, so it includes the time a request waited there. **Absent** when fewer than `max(50, 10 ÷ (1 − p))` requests arrived in the window (100 at p90), or when the router exports nothing for the model. | Above the target: the SLO is being missed. Absent on a busy model: the router's `llm_d_epp_request_ttft_seconds` is not being scraped. |
+| `wva_slo_attainment_ratio` | gauge | `namespace`, `model_name`, `objective` | TTFT only: the share of streaming requests whose TTFT was within the target. Exact when the target is a bucket bound of the router's histogram (3 s and 0.1 s are), interpolated otherwise. Absent under the same sample minimum. | Below the percentile (0.90 for p90): the target is missed for more requests than the SLO allows. |
+| `wva_slo_fill` | gauge | `namespace`, `model_name`, `variant_name`, `objective` | The KV fill, as a fraction of physical KV, at which the variant's mean inter-token latency meets the TPOT target, clamped to [0.15, 0.80]. Absent when the variant could not be priced: see `wva_slo_source`. | Compare with the static scale-out point, `kvCacheThreshold × scaleUpThreshold` (0.68 by default). Higher: the target would let the variant run fuller than the tier does. Lower: the tier is too loose for it. |
+| `wva_slo_predicted_itl_seconds` | gauge | `namespace`, `model_name`, `variant_name` | The mean inter-token latency the variant's fitted line predicts at the fill it would actually run at, once `scaleUpThreshold` headroom is applied. | It is the latency margin an SLO tier would really have. It differs per accelerator for the same `scaleUpThreshold`. |
+| `wva_slo_source` | gauge | `namespace`, `model_name`, `variant_name`, `source` | `1` for where the variant's SLO pricing came from, `0` for the others. `own`: a full fit of its inter-token latency against KV fill. `pinned`: the replicas sat at too similar a fill to fit a slope and an intercept, so the intercept is pinned. `no-line`: too few readings yet. `infeasible`: no fill in range meets the target on this accelerator. `input-invalid`: a reading was missing or non-finite. | `pinned` for long is normal on a balanced fleet and is the weaker estimate. `infeasible`: that accelerator cannot meet the TPOT target at any load. |
+
 ### Utilization-Share Optimizer Metrics
 
 Published when the [utilization-share optimizer](scaling-policy.md#optimizer-cluster-default-only-live)
