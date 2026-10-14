@@ -55,6 +55,12 @@ var (
 		// compared field goes; see TestCapacityCompatibilityStaysReflexive for
 		// why including it would make the equality non-reflexive.
 		"Unresolved": "provenance; including it breaks reflexivity",
+		// The engine's code. It can move capacity across a release, but a tag
+		// changes on every rebuild, and comparing it would refuse every record
+		// across a routine rollout -- for estimateStoredCapacity a refused
+		// record removes a MAX clamp, which over-states capacity. The latency
+		// fingerprint hashes it instead.
+		"Image": "a tag changes every rebuild; refusing records removes a max clamp",
 	}
 )
 

@@ -905,4 +905,8 @@ var EngineConfigFlagLabels = []string{
 	// invisible: a block_size of 16 reads identically whether the engine
 	// runs 16 or the flag was "$VLLM_BLOCK_SIZE" and nothing resolved it.
 	"unresolved",
+	// The engine container's image: the engine's code, which no flag
+	// describes. One value per configuration, so no cardinality beyond the
+	// configurations themselves.
+	"image",
 }

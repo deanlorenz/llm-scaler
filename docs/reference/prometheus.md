@@ -299,6 +299,22 @@ With the scaling manager metrics, the value for the label `namespace` is the sca
   }
   ```
 
+### `wva_engine_config`
+- **Type**: Gauge
+- **Description**: The engine configuration each variant runs, as the scaling manager read it from the scale target's launch flags (value is always 1). One series per variant.
+- **Labels**:
+  - `namespace` (scraped as `exported_namespace`), `model_name`, `variant_name`: the variant
+  - `accelerator`, `gpus`: the hardware its learned state is filed under. On a fleet whose pods sit on two GPU products this is the last product that resolved, not this cycle's reading, so it can differ from what discovery reports for the same variant
+  - `fingerprint`: a 16-hex-digit digest of the labels below. Two variants of one model on the same `accelerator` and `gpus` with the same `fingerprint` run the same engine configuration as far as the scaling manager can tell, and may share a learned latency line when `enableLearnedStateReuse` is on ([scaling policy](scaling-policy.md))
+  - `fingerprint_version`: the digest's format. A new version changes every fingerprint at once, so learned state keyed on the old ones starts cold after an upgrade
+  - `engine`, `weight_dtype`, `quantization`, `gpu_memory_utilization`, `block_size`, `kv_cache_dtype`, `tensor_parallel_size`, `num_gpu_blocks_override`, `total_kv_tokens_override`, `effective_max_batched_tokens`, `max_num_seqs`, `max_model_len`, `enforce_eager`: the flags that are hashed, after defaults
+  - `unresolved`: the flags the scaling manager could not read, for example a value given as an unexpanded `$VARIABLE`. Those flags carry their defaults in the labels above. **Empty is the good case.** A variant with anything here is not used as a key for sharing a latency line
+  - `image`: the engine container's image. Two variants with identical flags on different engine releases get different fingerprints
+- **Use Case**: Answers "why did these two variants share (or not share) what they learned?" and "did the scaling manager read this engine's configuration correctly?". Compare `fingerprint` across variants of a model, and alert on a non-empty `unresolved`:
+  ```promql
+  wva_engine_config{unresolved!=""}
+  ```
+
 ### `wva_config_optimization_interval_seconds`
 - **Type**: Gauge
 - **Description**: Optimization interval in seconds

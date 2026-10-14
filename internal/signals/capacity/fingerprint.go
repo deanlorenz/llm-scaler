@@ -36,7 +36,11 @@ import (
 // 128, and the digest asserted an equality it had never verified. The set is
 // hashed so an incompletely-read configuration can never collide with a
 // fully-read one.
-const FingerprintVersion = 2
+//
+// Version 3 adds the engine image. Two engines with identical flags on
+// different engine releases hashed identically, so a canary on a new release
+// would have borrowed the old release's measured latency line as its own.
+const FingerprintVersion = 3
 
 // fingerprintLength is how much of the digest reaches the label. 16 hex
 // characters is 64 bits: for the few hundred distinct engine configurations a
@@ -113,6 +117,10 @@ func (p *EngineParams) Fingerprint() string {
 		// sharing -- callers gate on Complete() as well. Comma-joined over a
 		// sorted, deduplicated list, so it is stable.
 		"unresolved=" + strings.Join(p.Unresolved, ","),
+		// The engine's code, which no flag describes. A tag that changes on
+		// every rebuild splits the key on each rollout: the safe direction,
+		// since the cost is that the new image learns its own line.
+		"image=" + p.Image,
 	}
 
 	h := sha256.New()
@@ -189,6 +197,7 @@ func (p *EngineParams) FingerprintValues() []string {
 		strconv.FormatInt(p.MaxModelLen, 10),
 		strconv.FormatBool(p.EnforceEager),
 		strings.Join(p.Unresolved, ","),
+		p.Image,
 	}
 }
 

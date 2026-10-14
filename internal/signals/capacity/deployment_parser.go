@@ -15,10 +15,33 @@ import (
 // EngineParams. It dispatches to ParseSGLangArgs for SGLang and ParseVLLMArgs
 // otherwise (the default), so existing vLLM behavior is unchanged.
 func ParseEngineArgs(engine inferenceengine.Engine, scaleTarget scaletarget.ScaleTargetAccessor) EngineParams {
+	var params EngineParams
 	if engine == inferenceengine.EngineSGLang {
-		return ParseSGLangArgs(scaleTarget)
+		params = ParseSGLangArgs(scaleTarget)
+	} else {
+		params = ParseVLLMArgs(scaleTarget)
 	}
-	return ParseVLLMArgs(scaleTarget)
+	params.Image = engineImage(engine, scaleTarget)
+	return params
+}
+
+// engineImage is the image of the engine's own container(s), chosen by the
+// same rule the flags are read with (inferenceengine.ConfigContainers), so a
+// router or exporter sidecar's image is not taken for the engine's. Several
+// containers -- the fallback when nothing identifies the engine -- give their
+// images sorted and comma-joined, which is stable.
+func engineImage(engine inferenceengine.Engine, scaleTarget scaletarget.ScaleTargetAccessor) string {
+	if scaleTarget == nil {
+		return ""
+	}
+	var images []string
+	for _, c := range inferenceengine.ConfigContainers(scaleTarget.GetLeaderPodTemplateSpec(), engine) {
+		if c.Image != "" && !slices.Contains(images, c.Image) {
+			images = append(images, c.Image)
+		}
+	}
+	slices.Sort(images)
+	return strings.Join(images, ",")
 }
 
 // EngineParams holds inference-engine configuration parameters parsed from a
@@ -131,6 +154,16 @@ type EngineParams struct {
 	//
 	// Sorted and deduplicated, so it is stable enough to hash.
 	Unresolved []string
+
+	// Image is the engine container's image as the scale target names it
+	// (tag or digest), set by ParseEngineArgs. It is the engine's CODE, which
+	// no flag describes: vllm-openai:v0.8.5 and :v0.11.0 with identical flags
+	// are different engines, and a canary rollout is the likeliest way to get
+	// two variants that differ in nothing else -- with the new, cold one the
+	// borrower. Hashed into the fingerprint, which keys latency lines; not
+	// compared for capacity, where a tag that changes on every rebuild would
+	// refuse every record across a routine rollout.
+	Image string
 }
 
 // Complete reports whether every flag this parser maps was actually read.

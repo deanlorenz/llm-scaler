@@ -36,6 +36,8 @@ var fingerprintHashed = []string{
 	// same unreadable flag still agree here -- which is why sharing also gates
 	// on Complete(); see the field's comment in deployment_parser.go.
 	"Unresolved",
+	// The engine's code, which no flag describes.
+	"Image",
 }
 
 // All three are excluded on one rule: they exist only to resolve
@@ -127,6 +129,7 @@ func TestFingerprintChangesWithEveryHashedField(t *testing.T) {
 		"Unresolved": func(p *EngineParams) {
 			p.Unresolved = []string{"block_size"}
 		},
+		"Image": func(p *EngineParams) { p.Image = "vllm/vllm-openai:v0.11.0" },
 	}
 
 	if len(mutations) != len(fingerprintHashed) {
@@ -331,6 +334,7 @@ func TestFingerprintLabelsDescribeTheirValues(t *testing.T) {
 		"unresolved": func(p *EngineParams) {
 			p.Unresolved = []string{"block_size"}
 		},
+		"image": func(p *EngineParams) { p.Image = "vllm/vllm-openai:v0.11.0" },
 	}
 
 	names := FingerprintFields()
