@@ -786,8 +786,9 @@ func main() {
 		Addr:     *externalScalerBindAddress,
 		Client:   mgr.GetAPIReader(),
 		Registry: registry.Default,
-		// A decision is stale after two optimize intervals (and never before
-		// 60 s); the interval can be reloaded, so it is read per call.
+		// A decision is stale after three optimize intervals (and never before
+		// 60 s). The engines read the interval once, when they start, so this
+		// matches what they publish at.
 		DecisionInterval: cfg.OptimizationInterval,
 	}
 	// Without leader election this replica is the leader from the start; the

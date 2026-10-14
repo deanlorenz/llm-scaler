@@ -139,15 +139,23 @@ func (h *Handler) clock() time.Time {
 }
 
 // decisionTTL is how long a positive decision is honoured without being
-// refreshed: activationTTL, or two publish intervals when that is longer. With
+// refreshed: activationTTL, or three publish intervals when that is longer. With
 // GLOBAL_OPT_INTERVAL at or above activationTTL -- the OpenShift overlay ships
 // 60 s -- a TTL of activationTTL alone expires decisions between ordinary
 // publishes, and GetMetrics would then answer the current count in that gap.
+//
+// Three, not two: the engine loop is sliding (wait.UntilWithContext in
+// internal/engines/executor), so the next cycle starts one interval after the
+// previous one returns, and a variant is republished every interval plus the
+// cycle's own duration (plus any retry backoff). Three intervals keep a healthy
+// decision fresh through a cycle that takes up to twice the interval; two would
+// call it stale after any cycle longer than one interval and pause a scale that
+// is in flight.
 func (h *Handler) decisionTTL() time.Duration {
 	ttl := activationTTL
 	if h.interval != nil {
-		if two := 2 * h.interval(); two > ttl {
-			ttl = two
+		if three := 3 * h.interval(); three > ttl {
+			ttl = three
 		}
 	}
 	return ttl
@@ -232,7 +240,7 @@ func (h *Handler) observe(ref *pb.ScaledObjectRef) {
 //     engine every optimize interval (GLOBAL_OPT_INTERVAL, default 15s) — so an
 //     unrefreshed positive decision means nobody is making the claim any more,
 //     and the honest answer is to look at the target instead (see
-//     currentlyRunning). decisionTTL is at least two publish intervals, so a
+//     currentlyRunning). decisionTTL is at least three publish intervals, so a
 //     deployment configuring GLOBAL_OPT_INTERVAL at or above activationTTL (the
 //     OpenShift overlay ships 60s) does not expire decisions between publishes.
 //

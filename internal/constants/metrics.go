@@ -858,7 +858,7 @@ const (
 	ScalerUndecidedNotManaged = "not-managed"
 
 	// ScalerUndecidedStale indicates a target whose last positive decision is
-	// older than the scaler's decision TTL (at least 60 s, and at least two
+	// older than the scaler's decision TTL (at least 60 s, and at least three
 	// optimize intervals): no engine is republishing it. The scaler answers
 	// the current count, as IsActive already does for such a decision.
 	ScalerUndecidedStale = "stale"

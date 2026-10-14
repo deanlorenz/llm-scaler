@@ -186,7 +186,7 @@ with the code of the failed read. A target kind with no `scale` subresource
 cannot be held this way and fails.
 
 A decision that stops being republished is treated the same way. A positive
-decision older than 60 s, or two optimization intervals if that is longer, is
+decision older than 60 s, or three optimization intervals if that is longer, is
 **stale**: `IsActive` stops honouring it and `GetMetrics` answers the current
 count instead (`reason="stale"`), so the HPA holds rather than following a
 number no engine stands behind.

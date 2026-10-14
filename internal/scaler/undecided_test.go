@@ -416,10 +416,12 @@ func TestGetMetricsAnswersStaleDecisionAsUndecided(t *testing.T) {
 	}
 }
 
-// TestDecisionTTLCoversTwoIntervals: with GLOBAL_OPT_INTERVAL at 60 s (the
-// OpenShift overlay) a decision is republished every 60 s, and the 60 s floor
-// alone would call it stale between two ordinary publishes.
-func TestDecisionTTLCoversTwoIntervals(t *testing.T) {
+// TestDecisionTTLCoversASlowCycle: with GLOBAL_OPT_INTERVAL at 60 s (the
+// OpenShift overlay) the sliding engine loop republishes a decision every 60 s
+// plus the cycle's duration. A decision republished after a cycle of up to two
+// intervals (60 s + 119 s) is still fresh; the 60 s floor alone, or two
+// intervals, would call it stale between two ordinary publishes.
+func TestDecisionTTLCoversASlowCycle(t *testing.T) {
 	store := decision.NewStore()
 	store.Set(undecidedNS, "chat-deploy", 4)
 	now := time.Now()
@@ -429,8 +431,12 @@ func TestDecisionTTLCoversTwoIntervals(t *testing.T) {
 	if got, err := getMetrics(context.Background(), h, managed); err != nil || got != 4 {
 		t.Fatalf("61 s old at a 60 s interval: GetMetrics = %d, %v; want the decision 4", got, err)
 	}
-	now = now.Add(60 * time.Second)
+	now = now.Add(118 * time.Second)
+	if got, err := getMetrics(context.Background(), h, managed); err != nil || got != 4 {
+		t.Fatalf("179 s old at a 60 s interval (cycle of 119 s): GetMetrics = %d, %v; want the decision 4", got, err)
+	}
+	now = now.Add(2 * time.Second)
 	if got, err := getMetrics(context.Background(), h, managed); err != nil || got != 3 {
-		t.Fatalf("121 s old at a 60 s interval: GetMetrics = %d, %v; want the current count 3", got, err)
+		t.Fatalf("181 s old at a 60 s interval: GetMetrics = %d, %v; want the current count 3", got, err)
 	}
 }
