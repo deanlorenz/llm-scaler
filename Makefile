@@ -2650,6 +2650,7 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@bash -n hack/benchmark/file_capture.sh
 	@bash -n hack/check-install-flow.sh
 	@bash -n hack/check-e2e-images.sh
+	@bash -n hack/check-policy-apply-docs.sh
 	@for script in deploy/lib/*.sh; do bash -n "$$script"; done
 	@for script in deploy/*/install.sh; do if [ -f "$$script" ]; then bash -n "$$script"; fi; done
 	@for script in deploy/kind-emulator/*.sh; do if [ -f "$$script" ]; then bash -n "$$script"; fi; done
@@ -2787,6 +2788,9 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@echo "Checking every image the e2e Go code names has a registry host..."
 	@# AGENTS.md: never docker.io in e2e. An image with no host resolves there.
 	@bash hack/check-e2e-images.sh
+	@echo "Checking no doc applies the sample scaling policy over an install..."
+	@# The sample has no limiters: applying it removes the GPU limit.
+	@bash hack/check-policy-apply-docs.sh
 	@echo "Checking the tenant Role still covers the generated ClusterRole..."
 	@# The ClusterRole is GENERATED from kubebuilder markers; the namespaced Role
 	@# the tenant overlay installs is maintained by hand, so it does not move when
