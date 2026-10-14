@@ -468,6 +468,36 @@ With the scaling manager metrics, the value for the label `namespace` is the sca
   }
   ```
 
+### KEDA External Scaler Metrics
+
+### `wva_scaler_undecided_answers_total`
+- **Type**: Counter
+- **Description**: `GetMetrics` answers the KEDA external scaler gave with no usable decision behind them. Without one the scaler answers the target's current replica count, so the HPA holds; this counts those answers. See [before the first decision](scaledobject-trigger.md#before-the-first-decision-and-the-fallback).
+- **Labels**:
+  - `namespace`: the ScaledObject's namespace (scraped as `exported_namespace`; see the note on namespaces above)
+  - `reason`: `no-decision` (a target the scaling manager plans but has not decided yet, normally the first cycle after a restart or a leader change), `stale` (its last decision is older than the decision TTL, 60 s or three optimization intervals, whichever is longer: no engine is republishing it), or `not-managed` (the trigger metadata does not parse, so no engine will ever decide it)
+- **Use Case**: Which reason, and how fast. A counter grows on every poll of every undecided target, so its rate says more about polling than about how many models are frozen: alert on `wva_scaler_undecided_targets`, not on this.
+
+### `wva_scaler_undecided_targets`
+- **Type**: Gauge
+- **Description**: ScaledObjects the KEDA external scaler is currently answering without a usable decision (with the target's current replica count). A ScaledObject enters on an undecided `GetMetrics` answer and leaves on the next decided one, when it is no longer registered, or two minutes after its last undecided answer (KEDA stops asking about a target parked at zero or deleted). Read at scrape time; a namespace with none has no series.
+- **Labels**:
+  - `namespace`: the ScaledObject's namespace (scraped as `exported_namespace`)
+- **Use Case**: Non-zero for a cycle or two after a restart or leader change is expected. Alert when it stays above 0 for 10 minutes: those models' replica counts are frozen. The shipped rules do, as `WVAScalerTargetsUndecided` (see [Alerting Rules](#alerting-rules)). `wva_scaler_undecided_answers_total` says why. The controller logs `external scaler has no decision for this target` each time a ScaledObject enters the set, naming it, and `external scaler has a decision for this target again` when it leaves on a decision.
+
+  ```yaml
+  - alert: WVAScalerTargetsUndecided
+    expr: max by (exported_namespace) (wva_scaler_undecided_targets) > 0
+    for: 10m
+  ```
+
+### `wva_scaler_panics_total`
+- **Type**: Counter
+- **Description**: Panics in the KEDA external scaler's gRPC handlers that were recovered and answered with `Internal`, so one failing call does not take the controller down. Any non-zero value is a bug; the stack trace is in the controller log under `KEDA external scaler handler panicked`.
+- **Labels**:
+  - `method`: the full gRPC method, for example `/externalscaler.ExternalScaler/GetMetrics`
+- **Use Case**: Alert on any increase.
+
 ### Optimization Metrics
 
 ### `wva_optimization_duration_seconds`
@@ -1345,6 +1375,7 @@ T = troubleshooting runbook on [Troubleshooting](troubleshooting.md).
 | `WVANodeAccessDenied` | critical | 2m | a `gpu-inventory` limiter is configured and the controller may not list nodes. **No variant scales up.** | grant the controller's ServiceAccount get/list/watch on nodes (cluster admin: `make enable-physical-limiter` grants every controller it finds and verifies when it runs; re-run it after a new install), or remove the limiter | [T: controller not Ready](troubleshooting.md#the-controller-is-not-ready-or-crash-looping) |
 | `WVAModelParkedWhileRequestsRefused` | critical | 5m | a model has 0 replicas and EPP returns `ServiceUnavailable` for it: traffic is being dropped | read `wva_model_scaling_blocked` for the model first | [T: will not wake](troubleshooting.md#a-model-will-not-wake-from-zero) |
 | `WVAModelHasNoWakeSignal` | warning | 10m | blocked reason `no-wake-signal`: EPP exports no flow-control queue, so a parked model cannot wake | enable the EPP `flowControl` feature gate, then restart the EPP Deployment (it reads its config once at start) | [T: will not wake](troubleshooting.md#a-model-will-not-wake-from-zero) |
+| `WVAScalerTargetsUndecided` | warning | 10m | `wva_scaler_undecided_targets` above 0 in a namespace: the scaler answers those ScaledObjects their current count, so their replica counts are frozen | `wva_scaler_undecided_answers_total` says why; the log line `external scaler has no decision for this target` names each one | [T: ScaledObject](troubleshooting.md#scaledobject-ready-false-or-targets-unknown) |
 | `WVAHighErrorRate` | warning | 5m | `wva_errors_total` above 6/min for one `component`/`error_type` | grep the controller log for the `error_type` text | [Logs](monitoring.md#the-logs) |
 | `WVAMetricsCollectionFailing` | warning | 5m | `wva_metrics_collection_errors_total` above 5/min for one `query_type`/`reason`: decisions run on stale data | check Prometheus reachability and the controller's Prometheus settings | [T: metrics stale](troubleshooting.md#metrics-stale-or-missing) |
 | `WVAGPUResourceExhausted` | warning | 5m | GPU-labeled nodes report zero allocatable GPUs of a type. Only with a `gpu-inventory` limiter | check GPU node status and device-plugin pods. No alert does not mean GPUs are free: the metric exists only with that limiter | [T: GPUs held](troubleshooting.md#gpus-held-or-quota-spent) |

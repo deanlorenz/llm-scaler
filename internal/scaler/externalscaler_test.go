@@ -2,18 +2,28 @@ package scaler_test
 
 import (
 	"context"
+	"errors"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	kedav1alpha1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 	pb "github.com/kedacore/keda/v2/pkg/scalers/externalscaler"
+	"github.com/prometheus/client_golang/prometheus"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	appsv1 "k8s.io/api/apps/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/registry"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/scaler"
 )
@@ -30,6 +40,37 @@ func ref(name string, metadata map[string]string) *pb.ScaledObjectRef {
 
 func ptr(v int32) *int32 { return &v }
 
+// deployment is a scale target with the given spec.replicas; nil leaves the
+// field absent.
+func deployment(name string, replicas *int32) *appsv1.Deployment {
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: name},
+		Spec:       appsv1.DeploymentSpec{Replicas: replicas},
+	}
+}
+
+// undecidedCount reads wva_scaler_undecided_answers_total for testNamespace
+// and reason from reg; 0 when the series does not exist.
+func undecidedCount(reg *prometheus.Registry, reason string) float64 {
+	mfs, err := reg.Gather()
+	Expect(err).NotTo(HaveOccurred())
+	for _, mf := range mfs {
+		if mf.GetName() != constants.WVAScalerUndecidedAnswersTotal {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			labels := map[string]string{}
+			for _, l := range m.GetLabel() {
+				labels[l.GetName()] = l.GetValue()
+			}
+			if labels[constants.LabelNamespace] == testNamespace && labels[constants.LabelReason] == reason {
+				return m.GetCounter().GetValue()
+			}
+		}
+	}
+	return 0
+}
+
 var _ = Describe("External scaler handler", func() {
 	var (
 		ctx   context.Context
@@ -41,6 +82,9 @@ var _ = Describe("External scaler handler", func() {
 	newHandler := func(objs ...client.Object) *scaler.Handler {
 		s := runtime.NewScheme()
 		Expect(kedav1alpha1.AddToScheme(s)).To(Succeed())
+		// apps/v1 so the handler can read a Deployment scale target when it
+		// answers with the current replica count.
+		Expect(appsv1.AddToScheme(s)).To(Succeed())
 		c := fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).Build()
 		return scaler.NewHandler(c, store, registry.New(0))
 	}
@@ -85,14 +129,63 @@ var _ = Describe("External scaler handler", func() {
 			Expect(resp.MetricValues[0].MetricValue).To(Equal(int64(5)))
 		})
 
-		It("returns 0 before any optimization decision exists", func() {
+		// Before the first decision -- every restart, every lease hand-off --
+		// the answer is the target's CURRENT count, so the HPA computes the
+		// count it already has and holds. A 0 would cut every running fleet to
+		// its floor; an error is a trigger failure, which on a min-0 object
+		// with a zero fallback reaches KEDA's scale-to-zero path.
+		DescribeTable("answers the scale target's current replica count before any decision exists",
+			func(target client.Object, want int64) {
+				h := newHandler(scaledObject(testNamespace, "chat-decode", "chat-decode-deploy"), target)
+
+				resp, err := h.GetMetrics(ctx, &pb.GetMetricsRequest{
+					ScaledObjectRef: ref("chat-decode", nil),
+				})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resp.MetricValues).To(HaveLen(1))
+				Expect(resp.MetricValues[0].MetricName).To(Equal(scaler.MetricName))
+				Expect(resp.MetricValues[0].MetricValue).To(Equal(want))
+			},
+			Entry("a running target holds its count", deployment("chat-decode-deploy", ptr(4)), int64(4)),
+			Entry("a parked target answers 0", deployment("chat-decode-deploy", ptr(0)), int64(0)),
+			Entry("an absent spec.replicas is the API default of 1", deployment("chat-decode-deploy", nil), int64(1)),
+		)
+
+		It("errors, with the code of the failed read, only when the current count cannot be read", func() {
+			// No Deployment: nothing to hold, and an invented number would be an
+			// answer the HPA acts on.
 			h := newHandler(scaledObject(testNamespace, "chat-decode", "chat-decode-deploy"))
 
 			resp, err := h.GetMetrics(ctx, &pb.GetMetricsRequest{
 				ScaledObjectRef: ref("chat-decode", nil),
 			})
-			Expect(err).NotTo(HaveOccurred())
-			Expect(resp.MetricValues[0].MetricValue).To(Equal(int64(0)))
+			Expect(status.Code(err)).To(Equal(codes.NotFound), "got %v", err)
+			Expect(resp).To(BeNil())
+		})
+
+		It("counts undecided answers by why there is no decision", func() {
+			reg := prometheus.NewRegistry()
+			Expect(metrics.InitMetrics(reg)).To(Succeed())
+			h := newHandler(scaledObject(testNamespace, "chat-decode", "chat-decode-deploy"),
+				deployment("chat-decode-deploy", ptr(2)))
+			ask := func(md map[string]string) {
+				_, err := h.GetMetrics(ctx, &pb.GetMetricsRequest{ScaledObjectRef: ref("chat-decode", md)})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			ask(map[string]string{registry.ModelIDKey: "default/default"})
+			ask(map[string]string{registry.ModelIDKey: "default/default"})
+			// No modelID: ParseMeta rejects it, every engine skips the workload,
+			// and it will never be decided.
+			ask(nil)
+
+			Expect(undecidedCount(reg, constants.ScalerUndecidedNoDecision)).To(Equal(2.0))
+			Expect(undecidedCount(reg, constants.ScalerUndecidedNotManaged)).To(Equal(1.0))
+
+			By("a decided answer is not counted")
+			store.Set(testNamespace, "chat-decode-deploy", 5)
+			ask(map[string]string{registry.ModelIDKey: "default/default"})
+			Expect(undecidedCount(reg, constants.ScalerUndecidedNoDecision)).To(Equal(2.0))
 		})
 
 		It("ignores a scale target named in trigger metadata; the ScaledObject decides", func() {
@@ -119,8 +212,42 @@ var _ = Describe("External scaler handler", func() {
 			_, err := h.GetMetrics(ctx, &pb.GetMetricsRequest{
 				ScaledObjectRef: ref("missing", nil),
 			})
-			Expect(err).To(HaveOccurred())
+			Expect(status.Code(err)).To(Equal(codes.NotFound), "got %v", err)
 		})
+
+		// Forbidden is not absent, and a timeout is not either: reporting both as
+		// NotFound tells the operator reading KEDA's trigger error to look for a
+		// missing object when the fix is RBAC, or nothing at all.
+		DescribeTable("maps a failed ScaledObject read to the code that names its cause",
+			func(readErr error, want codes.Code) {
+				s := runtime.NewScheme()
+				Expect(kedav1alpha1.AddToScheme(s)).To(Succeed())
+				c := fake.NewClientBuilder().WithScheme(s).WithInterceptorFuncs(interceptor.Funcs{
+					Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+						return readErr
+					},
+				}).Build()
+				h := scaler.NewHandler(c, store, registry.New(0))
+
+				_, err := h.GetMetrics(ctx, &pb.GetMetricsRequest{ScaledObjectRef: ref("chat-decode", nil)})
+				Expect(status.Code(err)).To(Equal(want), "got %v", err)
+			},
+			Entry("NotFound -> NotFound",
+				apierrors.NewNotFound(schema.GroupResource{Group: "keda.sh", Resource: "scaledobjects"}, "chat-decode"),
+				codes.NotFound),
+			Entry("Forbidden -> PermissionDenied",
+				apierrors.NewForbidden(schema.GroupResource{Group: "keda.sh", Resource: "scaledobjects"}, "chat-decode", errors.New("rbac")),
+				codes.PermissionDenied),
+			Entry("Unauthorized -> PermissionDenied",
+				apierrors.NewUnauthorized("token expired"),
+				codes.PermissionDenied),
+			Entry("timeout -> Unavailable",
+				apierrors.NewTimeoutError("slow apiserver", 1),
+				codes.Unavailable),
+			Entry("anything else -> Unavailable",
+				errors.New("connection refused"),
+				codes.Unavailable),
+		)
 	})
 
 	Describe("IsActive", func() {

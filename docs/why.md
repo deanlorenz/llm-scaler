@@ -92,10 +92,11 @@ intervals for the warm pool.
 - **Adopting it** takes a one-time cluster-admin setup per namespace, the EPP's
   `flowControl` feature gate, Prometheus scraping the model servers, and per
   workload: a ScaledObject (generated for you), a drain hook and fast starts.
-- **It answers 0 until it has decided.** After a restart or leader change,
-  KEDA reads 0 for a model until the first decision for it; the 300 s
-  scale-down window on generated ScaledObjects holds the count through that gap
-  ([scaling behavior](reference/scaledobject-trigger.md#scaling-behavior)).
+- **A restart is a short scaler outage.** Until a replica holds the leader
+  lease KEDA's reads fail, which only a KEDA `fallback` covers; after that, and
+  until its first decision for a model, the scaler answers the current replica
+  count, so the HPA holds
+  ([before the first decision](reference/scaledobject-trigger.md#before-the-first-decision-and-the-fallback)).
 - **What it learned is held in memory**, so a restart or leader change learns
   it again ([#137](https://github.com/ev-shindin/llm-scaling-manager/issues/137)).
 - **One more port.** The scaler port is plaintext and unauthenticated by
@@ -159,8 +160,9 @@ P/D result above is the second exposure, and the cold pass before it ordered a
 spare replica and reached a 3.9 s p99. The warm pool and P/D numbers are single
 runs per arm on one cluster type (the P/D pair repeated once).
 
-- After a restart or leader change, the scaler answers 0 for a model until its
-  first decision; only a scale-down window holds the count through that gap.
+- After a restart or leader change, the scaler holds each model at its current
+  replica count until its first decision; while no replica holds the leader
+  lease KEDA cannot read it at all, and only a KEDA `fallback` covers that.
 - Learned capacity is held in memory and re-learned after a restart
   ([#137](https://github.com/ev-shindin/llm-scaling-manager/issues/137)).
 - The scaler port is plaintext by default; a NetworkPolicy is shipped and

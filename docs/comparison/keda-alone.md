@@ -177,17 +177,14 @@ path"*. It is the better choice in these cases:
 - **One more controller in the scaling path.** KEDA asks it for every count. It
   runs leader-elected and holds no GPU, but its availability now matters. Set a
   `fallback` on your ScaledObjects.
-- **It answers 0 until it has decided.** After every controller restart and
-  leader change, `GetMetrics` answers 0 for a model until the controller's first
-  decision for it. The HPA reads 0 as "go to `minReplicaCount`". Only a
-  scale-down window holds the count through that gap: the 300 s window our
-  generated ScaledObjects set does, and an object without one can shed replicas
-  in the first seconds
-  ([scaling behavior](../reference/scaledobject-trigger.md#scaling-behavior)).
+- **It holds until it has decided.** After every controller restart and
+  leader change, `GetMetrics` answers a model's current replica count until the
+  controller's first decision for it, so the HPA holds
+  ([before the first decision](../reference/scaledobject-trigger.md#before-the-first-decision-and-the-fallback)).
   While no replica holds the leader lease, the call errors instead. KEDA's
-  `fallback` covers that case if it is set; the ScaledObjects generated on
-  this release set none, so set one through `WVA_DEFAULT_SO_TEMPLATE` (the
-  template sample sets `currentReplicasIfHigher`).
+  `fallback` covers that case if it is set: the installer writes one
+  (`currentReplicasIfHigher`) on generated ScaledObjects with a floor of 1 or
+  more when KEDA is 2.17 or later, and none on a floor of 0.
 - **Engine and router metrics.** Prometheus must scrape vLLM or SGLang. The
   router's (EPP) metrics supply the queues and the wake from zero.
 - **It learns, and it forgets on restart.** A controller that has never seen a

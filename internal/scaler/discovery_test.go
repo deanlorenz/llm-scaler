@@ -9,6 +9,7 @@ import (
 
 	kedav1alpha1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 	pb "github.com/kedacore/keda/v2/pkg/scalers/externalscaler"
+	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -35,6 +36,7 @@ var _ = Describe("Call-driven discovery", func() {
 	newHandler := func(objs ...client.Object) *scaler.Handler {
 		s := runtime.NewScheme()
 		Expect(kedav1alpha1.AddToScheme(s)).To(Succeed())
+		Expect(appsv1.AddToScheme(s)).To(Succeed())
 		// The scale target is resolved by READING the ScaledObject; it is not in
 		// trigger metadata, precisely so a hand-written copy cannot disagree with
 		// the spec that decides what KEDA scales. So the object has to exist.
@@ -82,11 +84,13 @@ var _ = Describe("Call-driven discovery", func() {
 	})
 
 	It("registers the workload from GetMetrics", func() {
-		h := newHandler()
+		h := newHandler(deployment("chat-decode-deploy", ptr(2)))
 		_, err := h.GetMetrics(ctx, &pb.GetMetricsRequest{
 			ScaledObjectRef: ref("chat-decode", triggerMetadata),
 			MetricName:      scaler.MetricName,
 		})
+		// No decision exists yet, so the answer is the current count -- and the
+		// call registers, which is what lets the engines ever produce one.
 		Expect(err).NotTo(HaveOccurred())
 
 		_, ok := reg.Get(testNamespace, "chat-decode")

@@ -4,18 +4,23 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"net/http"
+	"runtime/debug"
 	"sync/atomic"
 	"time"
 
 	pb "github.com/kedacore/keda/v2/pkg/scalers/externalscaler"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/status"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/registry"
 )
 
@@ -38,7 +43,9 @@ type Server struct {
 	// Client reads KEDA ScaledObjects to resolve scale targets. It MUST be an
 	// uncached reader (manager.GetAPIReader): a cached Get of a ScaledObject
 	// lazily starts a cluster-wide LIST+WATCH informer for the kind, which is the
-	// watch this design removes.
+	// watch this design removes. Without a decision the scaler also reads the
+	// target's scale subresource through it, which the manager's API reader (a
+	// full client.Client) supports; a reader that cannot fails those answers.
 	Client client.Reader
 	// Registry is where incoming calls register the workloads they name — WVA's
 	// discovery. Nil uses registry.Default, which is what the engines read.
@@ -55,6 +62,10 @@ type Server struct {
 	// reaches no RPC. Nil serves plaintext, which is the default: KEDA's
 	// external trigger dials plaintext unless its authentication names a CA.
 	TLSConfig *tls.Config
+	// DecisionInterval reports the engines' publish interval
+	// (config.OptimizationInterval). A positive decision older than two of
+	// them is answered as stale; nil keeps the 60 s floor alone.
+	DecisionInterval func() time.Duration
 
 	// listening is set once a listener is bound and cleared when Start returns.
 	// Where the platform allows it the hand-off binds the full server before
@@ -138,7 +149,10 @@ func (s *Server) Start(ctx context.Context) error {
 	// On every exit, including a cancellation that lands during the hand-off.
 	defer s.listening.Store(false)
 
-	full := NewHandler(s.Client, nil, s.Registry).WithElected(s.Elected)
+	full := NewHandler(s.Client, nil, s.Registry).WithElected(s.Elected).WithDecisionInterval(s.DecisionInterval)
+	// Only the full handler ever answers without a decision; the standby
+	// refuses instead, so its set would always read empty.
+	metrics.SetScalerUndecidedTargetsSource(full.UndecidedTargets)
 	if full.leader() {
 		logger.Info("KEDA external scaler listening", "addr", s.Addr)
 		srv, err := s.bind(ctx, full)
@@ -190,6 +204,65 @@ func (s *Server) Start(ctx context.Context) error {
 	return s.run(ctx, srv)
 }
 
+// maxConcurrentStreams bounds the streams one client connection may hold open.
+//
+// It must stay well above the number of ScaledObjects one KEDA operator
+// manages with a push trigger: KEDA pools its gRPC connections by
+// scalerAddress, so EVERY ScaledObject naming this scaler shares one
+// connection, and each push trigger holds a StreamIsActive open on it for as
+// long as KEDA runs. A stream beyond the bound is not refused, it is queued
+// by the client -- so a bound sized like a web server's would silently stop
+// waking workloads from zero once the fleet outgrew it. What the bound is for
+// is the other kind of client: one that opens streams without limit and holds
+// a goroutine and a decision-store subscription for each.
+//
+// Unary calls count against the same budget: in gRPC every call is an HTTP/2
+// stream, so GetMetrics, IsActive and GetMetricSpec in flight on that one KEDA
+// connection share the 4096 with the open StreamIsActive streams. They last
+// milliseconds, so in practice the bound is the push streams plus a handful.
+const maxConcurrentStreams = 4096
+
+// recoverUnary turns a panic in a unary handler into codes.Internal. Without
+// it a panic in any one call, for any one workload, takes the whole process
+// down -- every model's scaling with it, and the restart then has to rebuild
+// everything the process had learned.
+//
+// It covers the handler's own goroutine only. recover() never sees a panic in
+// a goroutine the handler starts, and such a panic still kills the process; no
+// handler in this package starts one today -- StreamIsActive runs its whole
+// loop in the call -- and one that does must recover inside it.
+func recoverUnary(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp any, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = recovered(ctx, info.FullMethod, r)
+		}
+	}()
+	return handler(ctx, req)
+}
+
+// recoverStream is recoverUnary for streaming calls (StreamIsActive), with the
+// same goroutine caveat.
+func recoverStream(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = recovered(ss.Context(), info.FullMethod, r)
+		}
+	}()
+	return handler(srv, ss)
+}
+
+// recovered counts and logs a recovered panic with its stack, and returns the
+// error the client gets. The stack goes to the log, never to the client. The
+// logger is the request context's, which falls back to the global one when the
+// context carries none -- gRPC request contexts do not inherit the manager's.
+func recovered(ctx context.Context, method string, r any) error {
+	metrics.IncScalerPanic(method)
+	log.FromContext(ctx).WithName("external-scaler").Error(fmt.Errorf("panic: %v", r),
+		"KEDA external scaler handler panicked; answered Internal",
+		"method", method, "stack", string(debug.Stack()))
+	return status.Errorf(codes.Internal, "internal error in %s; see the WVA controller log", method)
+}
+
 // served is one gRPC server and the channel its Serve goroutine reports on.
 type served struct {
 	srv *grpc.Server
@@ -203,6 +276,11 @@ func (s *Server) bind(ctx context.Context, handler pb.ExternalScalerServer, opts
 		return nil, err
 	}
 	s.listening.Store(true)
+	opts = append([]grpc.ServerOption{
+		grpc.MaxConcurrentStreams(maxConcurrentStreams),
+		grpc.ChainUnaryInterceptor(recoverUnary),
+		grpc.ChainStreamInterceptor(recoverStream),
+	}, opts...)
 	if s.TLSConfig != nil {
 		opts = append(opts, grpc.Creds(credentials.NewTLS(s.TLSConfig)))
 	}

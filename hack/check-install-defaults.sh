@@ -283,8 +283,9 @@ unset -f kubectl
 # The shipped sample ScaledObject scales like the ones the installer writes
 # ----------------------------------------------------------------------------
 # The sample is what people copy. It had a 0s scale-down window at 100%/30s,
-# while the scaler answers 0 until WVA's first decision -- so a copied sample
-# could drop a serving workload to its floor before WVA had looked at it.
+# so a copied sample shed replicas on a single low reading. (Before WVA's first
+# decision the scaler now answers the current replica count, so it no longer
+# answers 0 there either.)
 gen_behavior="$(
     unset WVA_SO_SCALE_UP_STABILIZATION WVA_SO_SCALE_UP_PERIOD \
           WVA_SO_SCALE_DOWN_STABILIZATION WVA_SO_SCALE_DOWN_PERIOD
