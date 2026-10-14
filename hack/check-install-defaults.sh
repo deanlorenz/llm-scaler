@@ -17,6 +17,10 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+command -v make >/dev/null 2>&1 || {
+    printf 'FATAL: make is required to run these checks.\n' >&2
+    exit 1
+}
 command -v yq >/dev/null 2>&1 || {
     printf 'FATAL: yq is required to run these checks.\n' >&2
     exit 1
@@ -40,15 +44,16 @@ source "$WORK/infra_wva.sh"
 # shellcheck source=/dev/null
 source "$WORK/scaledobject.sh"
 
-for fn in wva_split_image_ref wva_image_pull_policy wva_warn_floating_image \
-          wva_warn_prometheus_tls wva_prometheus_scraper_sa render_default_scaledobject; do
+for fn in wva_split_image_ref wva_image_ref_fields wva_image_pull_policy wva_warn_floating_image \
+          wva_warn_prometheus_tls wva_prometheus_scraper_sa wva_prometheus_url_namespace \
+          wva_append_metrics_reader_decision render_default_scaledobject; do
     declare -F "$fn" >/dev/null || {
         printf 'FATAL: %s is not defined after sourcing the library.\n' "$fn" >&2
         exit 1
     }
 done
 
-EXPECT_CASES=29
+EXPECT_CASES=47
 RAN=0
 FAILED=0
 
@@ -120,6 +125,34 @@ check 'IMG: plain repo:tag' \
     'ghcr.io/o/wva|main|' \
     "$(via_img ghcr.io/o/wva:main)"
 
+# The fields the Makefile reads (deploy-e2e-infra, WVA_CONTROLLER_IMAGE_REPOS).
+# It split IMG inline on the last colon, so a digest became repo
+# "ghcr.io/o/w@sha256" with the hex as its tag.
+DIGEST="sha256:$(printf '0123456789abcdef%.0s' 1 2 3 4)"
+check 'fields: registry port with tag' 'localhost:5000/w|dev|' "$(wva_image_ref_fields localhost:5000/w:dev)"
+check 'fields: ref-<sha> tag' 'ghcr.io/o/w|ref-abc|' "$(wva_image_ref_fields ghcr.io/o/w:ref-abc)"
+check 'fields: digest' "ghcr.io/o/w||$DIGEST" "$(wva_image_ref_fields "ghcr.io/o/w@$DIGEST")"
+check 'fields: bare repo pulls latest' 'ghcr.io/o/w|latest|' "$(wva_image_ref_fields ghcr.io/o/w)"
+
+# The Makefile itself, evaluated by make: the recipe and the repository list run
+# exactly these expressions.
+make_eval() {
+    make -s --no-print-directory -C "$ROOT" --eval "b133-print: ; @echo '$1'" b133-print "${@:2}" 2>/dev/null
+}
+check 'Makefile: the e2e IMG split is the tested helper (digest)' "ghcr.io/o/w||$DIGEST" \
+    "$(make_eval "\$(shell \$(WVA_IMAGE_REF_FIELDS) 'ghcr.io/o/w@$DIGEST')")"
+check 'Makefile: deploy-e2e-infra splits IMG with the helper and passes the digest' '2' \
+    "$(sed -n '/^deploy-e2e-infra:/,/^[^[:space:]#].*:/p' "$ROOT/Makefile" | tr -d '\r' \
+        | grep -c -e 'IMG_FIELDS="\$\$(\$(WVA_IMAGE_REF_FIELDS)' -e 'WVA_IMAGE_DIGEST=\$\$IMAGE_DIGEST')"
+check 'Makefile: controller repos, default IMG' 'ghcr.io/ev-shindin/llm-scaling-manager' \
+    "$(make_eval '$(WVA_CONTROLLER_IMAGE_REPOS)')"
+check 'Makefile: controller repos, a custom IMG is appended' 'ghcr.io/ev-shindin/llm-scaling-manager localhost:5000/w' \
+    "$(make_eval '$(WVA_CONTROLLER_IMAGE_REPOS)' IMG=localhost:5000/w:dev)"
+check 'Makefile: controller repos, a digest of the published repo adds nothing' 'ghcr.io/ev-shindin/llm-scaling-manager' \
+    "$(make_eval '$(WVA_CONTROLLER_IMAGE_REPOS)' "IMG=ghcr.io/ev-shindin/llm-scaling-manager@$DIGEST")"
+check 'Makefile: controller repos stay overridable' 'registry.local/wva' \
+    "$(make_eval '$(WVA_CONTROLLER_IMAGE_REPOS)' IMG=localhost:5000/w:dev WVA_CONTROLLER_IMAGE_REPOS=registry.local/wva)"
+
 # ----------------------------------------------------------------------------
 # Pull policy: IfNotPresent only for what cannot move
 # ----------------------------------------------------------------------------
@@ -159,7 +192,8 @@ check 'tls: plain HTTP is not this warning' '0' \
 # Who may read the controller's /metrics: the Prometheus actually here
 # ----------------------------------------------------------------------------
 # A stub kubectl answering the Prometheus CR listing with $PROM_CRS
-# ("<namespace> <serviceAccountName>" per line).
+# ("<namespace> <serviceAccountName>" per line). It ignores -n on purpose: the
+# function must itself keep only the namespace PROMETHEUS_URL addresses.
 PROM_CRS=''
 kubectl() { [ -z "$PROM_CRS" ] || printf '%s\n' "$PROM_CRS"; }
 scraper() {
@@ -169,21 +203,53 @@ scraper() {
         wva_prometheus_scraper_sa 2>/dev/null
     )
 }
+OBS_URL='https://prometheus-operated.obs.svc.cluster.local:9090'
+MON_URL='http://prom.mon.svc:9090'
 
 check 'scraper: PROMETHEUS_SA wins' 'ns1 sa1' \
-    "$(scraper 'mon prom' '' true ns1/sa1)"
-check 'scraper: the CR the URL names' 'obs obs-prom' \
-    "$(scraper "$(printf 'mon prom\nobs obs-prom')" 'https://prometheus-operated.obs.svc.cluster.local:9090' false)"
-check 'scraper: otherwise the first CR' 'mon prom' \
-    "$(scraper "$(printf 'mon prom\nobs obs-prom')" '' false)"
-check 'scraper: a CR with no serviceAccountName runs as default' 'mon default' \
-    "$(scraper 'mon ' '' false)"
-# The bug: the base names this account whatever the cluster has.
-check 'scraper: no CR, DEPLOY_PROMETHEUS -> ours, in MONITORING_NAMESPACE' \
+    "$(scraper 'mon prom' "$MON_URL" true ns1/sa1)"
+check 'scraper: a malformed PROMETHEUS_SA grants nobody, not a detected CR' '' \
+    "$(scraper 'mon prom' "$MON_URL" true just-a-name)"
+check 'scraper: the CR in the namespace the URL names' 'obs obs-prom' \
+    "$(scraper "$(printf 'mon prom\nobs obs-prom')" "$OBS_URL" false)"
+# Was "otherwise the first CR": on a shared cluster, someone else's Prometheus.
+check 'scraper: no URL namespace -> nobody, never the first CR' '' \
+    "$(scraper "$(printf 'mon prom\nobs obs-prom')" 'https://prom.example:9090' false)"
+check 'scraper: a CR only in another namespace is not chosen' '' \
+    "$(scraper 'mon prom' "$OBS_URL" false)"
+# Was granted `default`: every Pod in that namespace without its own account.
+check 'scraper: a CR with no serviceAccountName (default) is not granted' '' \
+    "$(scraper 'mon ' "$MON_URL" false)"
+check 'scraper: CRs in that namespace disagreeing -> nobody' '' \
+    "$(scraper "$(printf 'obs a\nobs b')" "$OBS_URL" false)"
+check 'scraper: two CRs agreeing on one account' 'obs a' \
+    "$(scraper "$(printf 'obs a\nobs a')" "$OBS_URL" false)"
+check 'scraper: no CR yet, our stack in MONITORING_NAMESPACE -> its account' \
     'our-mon kube-prometheus-stack-prometheus' \
-    "$(scraper '' '' true)"
+    "$(scraper '' 'https://kube-prometheus-stack-prometheus.our-mon.svc.cluster.local:9090' true)"
+check 'scraper: no CR, DEPLOY_PROMETHEUS, URL elsewhere -> nobody' '' \
+    "$(scraper '' "$OBS_URL" true)"
 check 'scraper: no CR and none deployed -> nobody' '' \
     "$(scraper '' 'https://prom.example:9090' false)"
+check 'url namespace: service.namespace.svc' 'obs' "$(wva_prometheus_url_namespace "$OBS_URL")"
+check 'url namespace: an external host has none' '' "$(wva_prometheus_url_namespace 'https://prom.example.com:9090')"
+
+# The URL is resolved BEFORE the subject is chosen. Asked first, it read the
+# namespace of the shipped default rather than of the Prometheus detected.
+decision() {
+    (
+        PROM_CRS="$(printf 'obs obs-prom\nworkload-variant-autoscaler-monitoring kube-prometheus-stack-prometheus')"
+        PROMETHEUS_URL='https://kube-prometheus-stack-prometheus.workload-variant-autoscaler-monitoring.svc.cluster.local:9090'
+        PROMETHEUS_URL_EXPLICIT='' WVA_PROMETHEUS_URL_RESOLVED='' PROMETHEUS_SA=''
+        DEPLOY_PROMETHEUS=false
+        wva_detect_prometheus_url() { printf '%s\n' "$OBS_URL"; }
+        log_info() { :; }
+        k="$(mktemp "$WORK/kust.XXXXXX")"
+        wva_append_metrics_reader_decision "$k" wns >/dev/null 2>&1
+        printf '%s' "$WVA_METRICS_READER_SCRAPER"
+    )
+}
+check 'scraper: the detected URL decides, not the shipped default' 'obs obs-prom' "$(decision)"
 unset -f kubectl
 
 # ----------------------------------------------------------------------------

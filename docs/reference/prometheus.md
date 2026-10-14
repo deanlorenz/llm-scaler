@@ -695,7 +695,7 @@ With the scaling manager metrics, the value for the label `namespace` is the sca
 - **Type**: Gauge
 - **Description**: `1` when the controller took limiters and quotas from its own ConfigMap because reading the Namespaces that decide the policy source (`wva-policy`, or the `wva.llmd.ai/policy-namespace` label on the managed namespace) was Forbidden; `0` otherwise. Set once at startup.
 - **Labels**: optional `controller_instance`
-- **Use Case**: a `1` means a cluster policy may be published that this controller cannot see, so it may run under a weaker bound than an admin believes. Grant the read with `NAMESPACE=<ns> make setup-prereqs` or `make enable-physical-limiter`. See [GPU limiter](gpu-limiter.md#what-the-controller-does-with-that).
+- **Use Case**: a `1` means a cluster policy may be published that this controller cannot see, so it may run under a weaker bound than an admin believes. Grant the read with `NAMESPACE=<ns> make setup-prereqs` or `make enable-physical-limiter`. The shipped `WVAPolicyNamespaceUnverified` rule (warning, after 10m) alerts on it, by `namespace`: a controller-level gauge carries no model namespace. See [GPU limiter](gpu-limiter.md#what-the-controller-does-with-that).
 
 ### `wva_scale_from_zero_queue_fallback_active`
 - **Type**: Gauge

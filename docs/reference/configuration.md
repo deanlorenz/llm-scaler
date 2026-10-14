@@ -60,7 +60,7 @@ anything you need to reproduce, pass `IMG=<repo>@sha256:<digest>` or a release t
 | `ENABLE_SCALE_TO_ZERO` | Allow a model to be parked at zero replicas, and enable the EPP `flowControl` gate that makes waking it possible | `true` |
 | `SKIP_CHECKS` | Skip prerequisite checks | `false` |
 | `SCALER_BACKEND` | `keda` or `none` (use a pre-installed backend) | `keda` |
-| `KEDA_NAMESPACE` | Namespace KEDA is installed in. Set, it is also the namespace the external-scaler NetworkPolicy admits; unset, the installer admits the namespace it finds a KEDA operator Pod in, else `keda-system` (`openshift-keda` on OpenShift) | `keda-system` |
+| `KEDA_NAMESPACE` | Namespace KEDA is installed in. Set, it is also the namespace the external-scaler NetworkPolicy admits. Unset, the installer takes, in order: the namespace serving the `v1beta1.external.metrics.k8s.io` APIService when that Service is KEDA's; the namespace an existing `wva-external-scaler` policy already admits; the one namespace holding a Deployment named `keda-operator` (never a Pod label, which any tenant can set); else `keda-system` (`openshift-keda` on OpenShift) with a warning. A source you cannot read counts as unknown, not absent. `make verify-deployment` warns when the policy and KEDA's namespace differ | `keda-system` |
 | `WVA_SCALER_NETWORKPOLICY` | Install the NetworkPolicy that admits the external scaler port (`:9090`) **only from KEDA's namespace**; metrics (`:8443`) and probes (`:8081`) stay open. `false` leaves `:9090` open to every Pod that can reach the controller, which can then rewrite any workload's trigger metadata and read every scaling decision | `true` |
 | `KEDA_HELM_INSTALL` | Install KEDA with Helm rather than assuming it is present | `false` |
 | `KEDA_CHART_VERSION` | KEDA Helm chart version | `2.19.0` |
@@ -291,7 +291,7 @@ shipped default and **exits at startup** if nothing answers there
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `PROMETHEUS_URL` | Full base URL, e.g. `https://prom.monitoring.svc.cluster.local:9090` | the kube-prometheus-stack this install deploys |
-| `PROMETHEUS_SA` | `<namespace>/<serviceaccount>` of the Prometheus that scrapes the controller's `/metrics`; it is bound to the metrics-reader ClusterRole. Unset: a Prometheus CR's `serviceAccountName` (the one in `PROMETHEUS_URL`'s namespace, else the first), else the kube-prometheus-stack this install deploys; with none, no binding is created and the installer says so | detected |
+| `PROMETHEUS_SA` | `<namespace>/<serviceaccount>` of the Prometheus that scrapes the controller's `/metrics`; it is bound to the metrics-reader ClusterRole. Unset: the `serviceAccountName` the Prometheus CRs in the namespace `PROMETHEUS_URL` addresses agree on, else the kube-prometheus-stack this install deploys when `PROMETHEUS_URL` addresses `MONITORING_NAMESPACE`. Never another namespace's Prometheus, and never `default`; with no such answer no binding is created (and none is expected by `--check`) and the installer says so | detected |
 | `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY` | Connect without verifying the server certificate. The installer warns when an HTTPS install ends up unverified; see [TLS configuration](prometheus.md#tls-configuration) for the production setting | `true` in the shipped Kubernetes config, `false` on OpenShift |
 | `DEPLOY_PROMETHEUS` | Deploy a Prometheus stack when the cluster has none of its own — see [Deployment flags](#deployment-flags) | `true` |
 
@@ -456,6 +456,15 @@ KEDA then needs `caCert` in the trigger's TriggerAuthentication;
 `--external-scaler-client-ca` (a PEM bundle, read once) also requires every client
 to present a certificate it signed, i.e. KEDA's `tlsClientCert` and `tlsClientKey`.
 Both are off by default, and the shipped manifests do not set them.
+
+What the NetworkPolicy does not cover:
+
+- It is enforced only by a CNI that implements NetworkPolicy. Without one, `:9090`
+  is open to every Pod; use the scaler TLS and client CA above.
+- It admits every Pod in KEDA's namespace, and most CNIs also let node and
+  `hostNetwork` traffic through.
+- The client CA must be dedicated to KEDA: any certificate it signed is accepted.
+  Pass `--external-scaler-client-san` to pin KEDA's identity.
 
 ## Optional: scaling band after `make deploy-e2e-infra`
 

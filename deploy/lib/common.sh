@@ -202,6 +202,80 @@ wva_scaler_has_endpoints() {
     [ -n "$(printf '%s' "$out" | tr -d '[:space:]')" ]
 }
 
+# --- Where KEDA runs, for the external-scaler NetworkPolicy.
+#
+# Three readers, each returning 0 with an answer, 1 for "looked, and there is
+# none", and 2 for "could not look". 2 is never folded into 1: a Forbidden read
+# reported as "none found" sent the install to keda-system on a cluster whose
+# KEDA runs in `keda`, and KEDA was then refused by the policy written for it.
+# Shared by the install (wva_resolve_scaler_keda_namespace) and the post-deploy
+# verify (wva_verify_scaler_networkpolicy), which must agree on what "KEDA is
+# there" means.
+
+# wva_keda_apiservice_ns echoes the namespace of the Service behind the
+# v1beta1.external.metrics.k8s.io APIService, when that Service is KEDA's.
+#
+# The strongest answer there is: the APIService is cluster-scoped and written by
+# whoever installed KEDA, so no tenant can plant it, and KEDA's metrics server
+# and operator are installed into one namespace by the Helm chart, the operator
+# manifests and OpenShift's Custom Metrics Autoscaler alike. Returns 3 when the
+# APIService is served by something that is not KEDA (prometheus-adapter); the
+# Service it names is then echoed as "<namespace>/<name>" for the message.
+wva_keda_apiservice_ns() {
+    local out rc=0 ns name
+    out=$(kubectl get apiservice v1beta1.external.metrics.k8s.io \
+        -o jsonpath='{.spec.service.namespace}{" "}{.spec.service.name}' 2>&1) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        printf '%s' "$out" | grep -qi 'notfound\|not found' && return 1
+        return 2
+    fi
+    read -r ns name <<< "$out"
+    [ -n "$ns" ] || return 1
+    case "$name" in
+        *keda*) printf '%s\n' "$ns"; return 0 ;;
+        *) printf '%s/%s\n' "$ns" "$name"; return 3 ;;
+    esac
+}
+
+# wva_scaler_np_keda_ns echoes the namespace an existing wva-external-scaler
+# NetworkPolicy in $1 admits to :9090. Returns 1 when there is no such policy,
+# or it admits :9090 from anything other than exactly one namespace.
+wva_scaler_np_keda_ns() {
+    local ns="$1" out rc=0 found
+    out=$(kubectl get networkpolicy wva-external-scaler -n "$ns" \
+        -o jsonpath='{range .spec.ingress[*]}{range .ports[*]}{.port}{" "}{end}{"|"}{range .from[*]}{.namespaceSelector.matchLabels.kubernetes\.io/metadata\.name}{" "}{end}{"\n"}{end}' 2>&1) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        printf '%s' "$out" | grep -qi 'notfound\|not found' && return 1
+        return 2
+    fi
+    found="$(printf '%s\n' "$out" | awk -F'|' '{
+            n = split($1, p, " "); hit = 0
+            for (i = 1; i <= n; i++) if (p[i] == "9090") hit = 1
+            if (hit) { m = split($2, f, " "); for (j = 1; j <= m; j++) print f[j] }
+        }' | sort -u)"
+    [ -n "$found" ] || return 1
+    [ "$(printf '%s\n' "$found" | wc -l | tr -d ' ')" = 1 ] || return 1
+    printf '%s\n' "$found"
+}
+
+# wva_keda_operator_namespaces echoes, one per line, each namespace holding a
+# Deployment named keda-operator -- the name every KEDA distribution gives it.
+#
+# Not a Pod label. app=keda-operator is a label any tenant can put on any Pod in
+# their own namespace, and a label search then either pointed the policy at that
+# namespace (opening :9090 to the tenant) or found "two KEDAs" and aborted the
+# install. Returns 1 when none is visible, 2 when Deployments cannot be listed
+# cluster-wide.
+wva_keda_operator_namespaces() {
+    local out rc=0
+    out=$(kubectl get deployments -A --field-selector metadata.name=keda-operator \
+        -o jsonpath='{range .items[*]}{.metadata.namespace}{"\n"}{end}' 2>&1) || rc=$?
+    [ "$rc" -eq 0 ] || return 2
+    out="$(printf '%s\n' "$out" | sed '/^[[:space:]]*$/d' | sort -u)"
+    [ -n "$out" ] || return 1
+    printf '%s\n' "$out"
+}
+
 # WVA_SHARED_CLUSTER_ROLE_BINDINGS are the cluster-scoped bindings every overlay
 # applies under fixed names. They are renamed per install so two installs cannot
 # take them from one another.
@@ -725,6 +799,21 @@ wva_render_manifests() {
     if wva_prepare_overlay_base "$tmp" >/dev/null 2>&1; then
         printf 'namespace: %s\nresources:\n- ./base\n' "$ns" > "$tmp/kustomization.yaml"
         wva_append_crb_name_patches "$tmp/kustomization.yaml" "$ns"
+        # The same per-install decisions deploy_wva_controller applies, so the
+        # objects this lists are the objects that install creates. Without the
+        # metrics-reader one, an install that DROPPED that binding (no
+        # Prometheus account it trusts) left it in the expected set, and the
+        # controller-only phase reported it missing and refused forever.
+        #
+        # Guarded because Makefile targets source this file without
+        # infra_wva.sh; none of them renders, so the guard never decides an
+        # install.
+        if [ "$(wva_install_scope)" = "namespace" ] && declare -F wva_append_kueue_reader_scope_patch >/dev/null; then
+            wva_append_kueue_reader_scope_patch "$tmp/kustomization.yaml" "$ns" "${WVA_WATCH_NS:-$ns}"
+        fi
+        if [ "${ENVIRONMENT:-}" != "openshift" ] && declare -F wva_append_metrics_reader_decision >/dev/null; then
+            wva_append_metrics_reader_decision "$tmp/kustomization.yaml" "$ns" >/dev/null 2>&1
+        fi
         # `|| true` because the callers run under `set -e` with pipefail, and a
         # render that fails is the case they exist to handle: it must reach them
         # as empty output, not as the whole install script exiting.

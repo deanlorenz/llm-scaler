@@ -459,7 +459,14 @@ WVA_LIMITER_TARGETS ?=
 # What a labelled Deployment must run as, and from, to be granted. The label
 # alone is not identity: anyone who can create a Deployment can set it.
 WVA_CONTROLLER_SA          ?= wva-controller-manager
-WVA_CONTROLLER_IMAGE_REPOS ?= $(IMAGE_TAG_BASE)/llm-scaling-manager
+# The repository of IMG, split the way the installer splits it (a registry
+# port is not a tag, a digest is not a tag). Recursive, so the shell runs only
+# for a target that reads it.
+WVA_IMAGE_REF_FIELDS = bash -c '. deploy/lib/cli.sh && wva_image_ref_fields "$$0"'
+IMG_REPO = $(firstword $(subst |, ,$(shell $(WVA_IMAGE_REF_FIELDS) '$(IMG)')))
+# A controller deployed from a custom IMG is a controller too: its repository is
+# appended when it is not the published one. Set this to replace the whole list.
+WVA_CONTROLLER_IMAGE_REPOS ?= $(strip $(IMAGE_TAG_BASE)/llm-scaling-manager $(filter-out $(IMAGE_TAG_BASE)/llm-scaling-manager,$(IMG_REPO)))
 
 .PHONY: enable-physical-limiter
 enable-physical-limiter: ## CLUSTER ADMIN: bound every WVA by real GPUs. Publishes cluster policy and grants each controller the node read it then requires. WVA_LIMITER_TYPE=gpu-inventory|quota (quota also needs WVA_QUOTAS), WVA_POLICY_NS, WVA_LIMITER_TARGETS.
@@ -1007,21 +1014,20 @@ deploy-e2e-infra: ## Deploy e2e test infrastructure (WVA + EPP; no model server 
 		else \
 			echo "Skipping image build (SKIP_BUILD=true) - assuming image already exists"; \
 		fi; \
-		echo "Extracting image repo and tag from IMG..."; \
-		IMG_REF="$(IMG)"; \
-		if case "$${IMG_REF##*/}" in *:*) true ;; *) false ;; esac; then \
-			IMAGE_REPO="$${IMG_REF%:*}"; \
-			IMAGE_TAG="$${IMG_REF##*:}"; \
-		else \
-			IMAGE_REPO="$(IMG)"; \
-			IMAGE_TAG="latest"; \
-		fi; \
-		echo "Using local image: $$IMAGE_REPO:$$IMAGE_TAG"; \
+		echo "Extracting image repo, tag and digest from IMG..."; \
+		IMG_FIELDS="$$($(WVA_IMAGE_REF_FIELDS) "$(IMG)")"; \
+		IMAGE_REPO="$${IMG_FIELDS%%|*}"; \
+		IMG_FIELDS="$${IMG_FIELDS#*|}"; \
+		IMAGE_TAG="$${IMG_FIELDS%%|*}"; \
+		IMAGE_DIGEST="$${IMG_FIELDS#*|}"; \
+		if [ -z "$$IMAGE_REPO" ]; then echo "Could not split IMG=$(IMG)" >&2; exit 1; fi; \
+		echo "Using local image: $$IMAGE_REPO:$$IMAGE_TAG$${IMAGE_DIGEST:+@$$IMAGE_DIGEST}"; \
 		SCALER_BACKEND=$(SCALER_BACKEND) \
 		ENABLE_SCALE_TO_ZERO=$(SCALE_TO_ZERO_ENABLED) \
 		DEPLOY_ALERTING_RULES=$(DEPLOY_ALERTING_RULES) \
 		WVA_IMAGE_REPO=$$IMAGE_REPO \
 		WVA_IMAGE_TAG=$$IMAGE_TAG \
+		WVA_IMAGE_DIGEST=$$IMAGE_DIGEST \
 		WVA_IMAGE_PULL_POLICY=IfNotPresent \
 		$(MAKE) deploy-wva \
 			ENVIRONMENT=$(ENVIRONMENT) \
@@ -2752,6 +2758,11 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# says so. A digest treated as a moving tag, or :main deployed in silence,
 	@# installs cleanly -- nothing else here would notice.
 	@bash hack/check-install-defaults.sh
+	@echo "Checking the Kueue reader Namespace grant on upgrade..."
+	@# A kueue-reader role from before the Namespace read, kept by a
+	@# controller-only upgrade, bounds the namespace at nothing. The
+	@# preflight must refuse that phase; executed against a stub kubectl.
+	@bash hack/check-kueue-namespace-grant.sh
 	@echo "Checking the tenant Role still covers the generated ClusterRole..."
 	@# The ClusterRole is GENERATED from kubebuilder markers; the namespaced Role
 	@# the tenant overlay installs is maintained by hand, so it does not move when

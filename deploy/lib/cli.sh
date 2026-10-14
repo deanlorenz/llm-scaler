@@ -169,6 +169,21 @@ wva_split_image_ref() {
   WVA_IMAGE_DIGEST=""
 }
 
+# wva_image_ref_fields echoes "<repo>|<tag>|<digest>" for an image reference,
+# split by wva_split_image_ref. A reference with neither tag nor digest is
+# repo|latest|, which is what a container runtime pulls for it.
+#
+# For the Makefile, which used to split IMG inline on the last colon: a digest
+# then became repo "ghcr.io/o/w@sha256" with the hex as its tag.
+wva_image_ref_fields() {
+  local WVA_IMAGE_REPO="" WVA_IMAGE_TAG="" WVA_IMAGE_DIGEST=""
+  if ! wva_split_image_ref "$1"; then
+    WVA_IMAGE_REPO="$1"
+    WVA_IMAGE_TAG="latest"
+  fi
+  printf '%s|%s|%s\n' "$WVA_IMAGE_REPO" "$WVA_IMAGE_TAG" "$WVA_IMAGE_DIGEST"
+}
+
 parse_args() {
   if [[ -n "$IMG" ]]; then
     log_info "Detected IMG environment variable: $IMG"

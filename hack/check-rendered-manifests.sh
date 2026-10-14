@@ -39,14 +39,15 @@ BLUE='' GREEN='' YELLOW='' RED='' NC=''
 source "$WORK/common.sh"
 # shellcheck source=/dev/null
 source "$WORK/infra_wva.sh"
-for fn in wva_append_crb_name_patches wva_append_metrics_reader_subject_patch; do
+for fn in wva_append_crb_name_patches wva_append_metrics_reader_subject_patch \
+          wva_append_kueue_reader_scope_patch wva_rendered_prereq_objects; do
     declare -F "$fn" >/dev/null || {
         printf 'FATAL: %s is not defined after sourcing the library.\n' "$fn" >&2
         exit 1
     }
 done
 
-EXPECT_CASES=11
+EXPECT_CASES=19
 RAN=0
 FAILED=0
 
@@ -93,6 +94,63 @@ check 'metrics-reader: no Prometheus known -> no binding at all' \
 check 'metrics-reader: the other bindings survive the delete' \
     '3' \
     "$(printf '%s\n' "$out" | yq -N -r 'select(.kind == "ClusterRoleBinding") | .metadata.name' | grep -c '^wva-')"
+
+# ----------------------------------------------------------------------------
+# The expected set of admin-owned objects makes the install's own decision
+# ----------------------------------------------------------------------------
+# wva_rendered_prereq_objects is what the controller-only phase requires to
+# exist. It listed the metrics-reader binding even when the install had DROPPED
+# it (no Prometheus account it trusts), so that phase reported it missing and
+# refused, forever. Rendered here through the real function, with only kubectl
+# (the kustomize build and the Prometheus CR listing) and the URL detection
+# stubbed.
+prereq_objects() {
+    (
+        WVA_PROJECT="$ROOT" WVA_NS=wns ENVIRONMENT=kubernetes WVA_SCOPE="$1" WVA_WATCH_NS=''
+        PROMETHEUS_SA="$2" PROMETHEUS_URL='https://prom.obs.svc:9090'
+        PROMETHEUS_URL_EXPLICIT=1 DEPLOY_PROMETHEUS=false
+        kubectl() {
+            case "$1" in
+                # `command`: KBUILD may itself be `kubectl kustomize`.
+                kustomize) command "${KBUILD[@]}" "$2" ;;
+                *) return 0 ;;   # no Prometheus CR anywhere
+            esac
+        }
+        wva_rendered_prereq_objects
+    )
+}
+reader_crb="ClusterRoleBinding wva-metrics-reader-rolebinding-$(wva_ns_suffix wns)"
+for scope in cluster namespace; do
+    objs="$(prereq_objects "$scope" '')"
+    [ -n "$objs" ] || { printf 'FATAL: wva_rendered_prereq_objects rendered nothing (%s scope).\n' "$scope" >&2; exit 1; }
+    check "$scope scope: no trusted Prometheus account -> the binding is not expected" '0' \
+        "$(printf '%s\n' "$objs" | grep -cxF "$reader_crb")"
+    check "$scope scope: PROMETHEUS_SA -> the binding is expected" '1' \
+        "$(prereq_objects "$scope" obs/prom-sa | grep -cxF "$reader_crb")"
+done
+
+# ----------------------------------------------------------------------------
+# The namespace-scoped Kueue reader gets ONE Namespace: the managed one
+# ----------------------------------------------------------------------------
+# internal/kueue GETs a LocalQueue's Namespace by name, and a namespace-scoped
+# controller lists LocalQueues in its managed namespace only.
+render_kueue_role() {
+    local dir overlay="$1" managed="$2"
+    dir="$(mktemp -d "$WORK/ovl.XXXXXX")"
+    ln -s "$ROOT/config/overlays/$overlay" "$dir/base"
+    printf 'namespace: wns\nresources:\n- ./base\n' > "$dir/kustomization.yaml"
+    wva_append_crb_name_patches "$dir/kustomization.yaml" wns
+    wva_append_kueue_reader_scope_patch "$dir/kustomization.yaml" wns "$managed"
+    "${KBUILD[@]}" "$dir" | yq -N "select(.kind == \"ClusterRole\" and .metadata.name == \"wva-kueue-reader-role-$(wva_ns_suffix wns)\")"
+}
+for overlay in namespace-scoped/kubernetes namespace-scoped/openshift; do
+    role="$(render_kueue_role "$overlay" tenant-a)" || role=''
+    [ -n "$role" ] || { printf 'FATAL: no kueue-reader ClusterRole rendered for %s.\n' "$overlay" >&2; exit 1; }
+    check "$overlay: kueue-reader gets only the managed Namespace" 'tenant-a' \
+        "$(printf '%s\n' "$role" | yq -r '.rules[] | select(.resources[] == "namespaces") | .resourceNames | join(",")')"
+    check "$overlay: kueue-reader Kueue rules stay unnamed" 'true' \
+        "$(printf '%s\n' "$role" | yq -r '[.rules[] | select(.apiGroups[] == "kueue.x-k8s.io") | has("resourceNames") | not] | all')"
+done
 
 # ----------------------------------------------------------------------------
 # The controller container runs on a read-only root filesystem, in every overlay

@@ -37,6 +37,15 @@ spec:
         summary: "llm-scaling-manager metrics collection failing for {{ $labels.query_type }}"
         description: "Metrics collection query_type '{{ $labels.query_type }}' failing with reason '{{ $labels.reason }}' at {{ $value | printf \"%.2f\" }}/sec (>5/min threshold) sustained for 5+ minutes. Scaling decisions may be based on stale data. Verify Prometheus/metrics endpoint connectivity."
 
+    - alert: WVAPolicyNamespaceUnverified
+      expr: max by (namespace) (wva_policy_namespace_unverified) == 1
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: "llm-scaling-manager in {{ $labels.namespace }} cannot see the cluster policy namespace"
+        description: "The controller in {{ $labels.namespace }} was denied get on the Namespaces that decide where its limiters and quotas come from (the wva-policy namespace, or a wva.llmd.ai/policy-namespace label), so it runs on its own ConfigMap. A cluster policy an admin published is NOT applied to it, and it may be scaling under a weaker bound than the admin believes is in force. Grouped by namespace, not exported_namespace: this is a controller-level gauge with no model namespace, so the scrape's namespace label is the controller's own. Fix: have a cluster admin re-run 'NAMESPACE=<ns> make setup-prereqs', which grants the Namespace get (components/policy-namespace-reader). The value is set once at startup, so restart the controller after the grant."
+
     - alert: WVANodeAccessDenied
       expr: wva_node_access_denied == 1
       for: 2m
