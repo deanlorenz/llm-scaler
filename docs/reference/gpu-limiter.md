@@ -73,10 +73,11 @@ So a controller that manages its own namespace takes its limits from a policy
 namespace (`wva-policy`, or one named by a label) **when it can see one**, rather
 than from its own ConfigMap. Two qualifications decide whether that happens:
 
-- **On Kubernetes it cannot see one today.** The namespace-scoped install has no
-  `get` on Namespace objects, so the controller never finds `wva-policy` or the
-  label and keeps reading the ConfigMap its tenant can write (being fixed; the
-  workaround is in the note below).
+- **On Kubernetes it needs a grant to see one.** A Role cannot reach a
+  Namespace object, so `make setup-prereqs` and `make enable-physical-limiter`
+  grant `get` on the few Namespaces the controller reads. Without it (an
+  install set up before the grant existed) the controller keeps reading the
+  ConfigMap its tenant can write, and says so; see the note below.
 - **An admin-owned controller never reads `wva-policy`, by design.** A
   cluster-scoped controller, or one in the out-of-reach shape, reads its own
   ConfigMap, which already lives where only an admin can write.
@@ -136,13 +137,18 @@ auditing:
 kubectl get ns -l wva.llmd.ai/policy-namespace=platform-policy
 ```
 
-> **On Kubernetes, a namespace-scoped controller does not see the label.**
-> Reading it needs `get` on Namespace objects, which the namespace-scoped Role
-> does not grant. The controller logs `Could not read the managed Namespace` and
-> carries on with its own ConfigMap, so the label is silently not applied. The
-> same denial hides `wva-policy`: the controller cannot tell it exists. This is
-> being fixed. Until then, grant the controller's ServiceAccount `get` on
-> namespaces ([manifest](../guides/admin-cluster-setup/README.md#grant-the-namespace-read-by-hand)), restart it, and check the result with the log line below. On OpenShift the
+> **On Kubernetes, a namespace-scoped controller sees the label only through a
+> grant.** Reading it needs `get` on Namespace objects, which a Role cannot
+> give. `make setup-prereqs` (namespace scope) and `make enable-physical-limiter`
+> grant it with a ClusterRole limited by name to the Namespaces the controller
+> reads. An install set up before that grant existed has a cluster admin re-run
+> `NAMESPACE=<ns> make setup-prereqs` (or apply the
+> [manual grant](../guides/admin-cluster-setup/README.md#grant-the-namespace-read-by-hand)),
+> then restarts the controller. Without the grant the label and `wva-policy` are
+> not seen and the controller runs on its own ConfigMap, but not silently: it
+> logs `Could not read the managed Namespace` and `Cannot tell whether a cluster
+> admin published policy`, and sets `wva_policy_namespace_unverified` to 1
+> (alert `WVAPolicyNamespaceUnverified`). On OpenShift the
 > `cluster-monitoring-view` binding is reported to carry that read; nothing in
 > this repository pins the role's contents, so confirm it with
 > `kubectl auth can-i get namespaces --as=system:serviceaccount:<controller namespace>:wva-controller-manager`.

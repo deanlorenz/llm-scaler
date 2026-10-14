@@ -64,11 +64,11 @@ git push origin vX.Y.Z
 
 - Pushing a tag matching `v*` triggers [`.github/workflows/ci-release.yaml`](../../.github/workflows/ci-release.yaml), which builds the image for `linux/amd64` and `linux/arm64`, pushes it as `ghcr.io/<owner>/<repo>:<tag>` and `:latest`, and runs a Trivy scan on it. Publishing a GitHub Release runs the same workflow again.
 
-> **Note:** the workflow is being fixed. Today `ci-release.yaml` hardcodes the
-> registry path as `ghcr.io/llm-d/<repo>`, which this repository cannot push
-> to. This page describes the release after that fix, when the path is derived
-> from the repository owner. Until it lands, check the workflow's `IMAGE=` line
-> before tagging.
+> **Note:** the registry path is derived, not hardcoded: `ci-release.yaml`
+> builds `IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/<repo>`, so a fork pushes
+> to its own owner's `ghcr.io` namespace, the one the kustomization and the
+> installer pull from. It logs in with the `GHCR_TOKEN` secret, which must be
+> able to write packages for that owner.
 
 ### 2. Create the GitHub Release
 

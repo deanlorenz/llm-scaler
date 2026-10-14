@@ -543,6 +543,57 @@ wva_append_kueue_reader_scope_patch() {
 EOF
 }
 
+# wva_managed_policy_label echoes the wva.llmd.ai/policy-namespace label on
+# namespace $1, or nothing when it is absent or cannot be read. Only ever ADDS
+# a name to the grant below, so an unreadable label costs the controller the
+# read of a namespace it does not GET anyway (it uses the label's value as is).
+wva_managed_policy_label() {
+    [ -n "$1" ] || return 0
+    kubectl get namespace "$1" \
+        -o jsonpath='{.metadata.labels.wva\.llmd\.ai/policy-namespace}' 2>/dev/null || true
+}
+
+# wva_append_policy_namespace_reader_scope_patch narrows the namespace-scoped
+# policy-namespace reader's `get namespaces`, in kustomization $1 for install
+# namespace $2, to the Namespaces the controller reads (managed namespace $3,
+# plus the names after it). Must come after wva_append_crb_name_patches: it
+# targets the renamed ClusterRole.
+#
+# ResolvePolicyNamespace GETs two Namespaces by name, never a list: the
+# well-known wva-policy, and the managed one for its policy-namespace label.
+# The names are the set pl_grant_namespace_read (physical_limiter.sh) writes
+# under the SAME ClusterRole name -- its own namespace, wva-policy, and the
+# policy namespace -- so neither apply widens what the other narrowed. The
+# shipped component carries no resourceNames, and an install over a limiter's
+# narrowed grant used to re-widen it to every Namespace in the cluster.
+#
+# The `test` op makes a reordered rule fail the build rather than narrow the
+# wrong one.
+wva_append_policy_namespace_reader_scope_patch() {
+    local kustomization="$1" ns="$2" managed="$3" n names="" seen=" "
+    shift 3
+    [ -n "$ns" ] || return 0
+    for n in "$ns" "$managed" wva-policy "$@"; do
+        [ -n "$n" ] || continue
+        case "$seen" in *" $n "*) continue ;; esac
+        seen="$seen$n "
+        names="$names      - \"$n\""$'\n'
+    done
+    grep -q '^patches:' "$kustomization" || printf 'patches:\n' >> "$kustomization"
+    cat >> "$kustomization" <<EOF
+- patch: |-
+    - op: test
+      path: /rules/0/resources/0
+      value: namespaces
+    - op: add
+      path: /rules/0/resourceNames
+      value:
+${names}  target:
+    kind: ClusterRole
+    name: wva-policy-namespace-reader-role-$(wva_ns_suffix "$ns")
+EOF
+}
+
 deploy_wva_controller() {
     log_info "Deploying Workload-Variant-Autoscaler..."
     if [ -n "${WVA_IMAGE_DIGEST:-}" ]; then
@@ -646,6 +697,8 @@ EOF
     wva_append_crb_name_patches "$tmp_overlay/kustomization.yaml" "$WVA_NS"
     if [ "$(wva_install_scope)" = "namespace" ]; then
         wva_append_kueue_reader_scope_patch "$tmp_overlay/kustomization.yaml" "$WVA_NS" "${WVA_WATCH_NS:-$WVA_NS}"
+        wva_append_policy_namespace_reader_scope_patch "$tmp_overlay/kustomization.yaml" "$WVA_NS" \
+            "${WVA_WATCH_NS:-$WVA_NS}" "${WVA_POLICY_NS:-}" "$(wva_managed_policy_label "${WVA_WATCH_NS:-$WVA_NS}")"
     fi
 
     # Grant the Prometheus that will actually scrape the controller, not the one

@@ -40,14 +40,15 @@ source "$WORK/common.sh"
 # shellcheck source=/dev/null
 source "$WORK/infra_wva.sh"
 for fn in wva_append_crb_name_patches wva_append_metrics_reader_subject_patch \
-          wva_append_kueue_reader_scope_patch wva_rendered_prereq_objects; do
+          wva_append_kueue_reader_scope_patch wva_append_policy_namespace_reader_scope_patch \
+          wva_rendered_prereq_objects; do
     declare -F "$fn" >/dev/null || {
         printf 'FATAL: %s is not defined after sourcing the library.\n' "$fn" >&2
         exit 1
     }
 done
 
-EXPECT_CASES=19
+EXPECT_CASES=23
 RAN=0
 FAILED=0
 
@@ -150,6 +151,39 @@ for overlay in namespace-scoped/kubernetes namespace-scoped/openshift; do
         "$(printf '%s\n' "$role" | yq -r '.rules[] | select(.resources[] == "namespaces") | .resourceNames | join(",")')"
     check "$overlay: kueue-reader Kueue rules stay unnamed" 'true' \
         "$(printf '%s\n' "$role" | yq -r '[.rules[] | select(.apiGroups[] == "kueue.x-k8s.io") | has("resourceNames") | not] | all')"
+done
+
+# ----------------------------------------------------------------------------
+# The namespace-scoped policy-namespace reader gets only the Namespaces it reads
+# ----------------------------------------------------------------------------
+# ResolvePolicyNamespace GETs wva-policy and the managed Namespace by name.
+# enable-physical-limiter writes the SAME ClusterRole limited by resourceNames;
+# an install that renders the shipped rule unnamed re-widened it to every
+# Namespace in the cluster.
+render_policy_ns_role() {
+    local dir overlay="$1"
+    shift
+    dir="$(mktemp -d "$WORK/ovl.XXXXXX")"
+    ln -s "$ROOT/config/overlays/$overlay" "$dir/base"
+    printf 'namespace: wns\nresources:\n- ./base\n' > "$dir/kustomization.yaml"
+    wva_append_crb_name_patches "$dir/kustomization.yaml" wns
+    wva_append_policy_namespace_reader_scope_patch "$dir/kustomization.yaml" wns "$@"
+    "${KBUILD[@]}" "$dir" | yq -N "select(.kind == \"ClusterRole\" and .metadata.name == \"wva-policy-namespace-reader-role-$(wva_ns_suffix wns)\")"
+}
+policy_ns_names() {
+    yq -r '.rules[] | select(.resources[] == "namespaces") | .resourceNames // [] | sort | join(",")'
+}
+for overlay in namespace-scoped/kubernetes namespace-scoped/openshift; do
+    # Self-managed, labelled to a policy namespace of its own.
+    role="$(render_policy_ns_role "$overlay" wns '' platform-policy)" || role=''
+    [ -n "$role" ] || { printf 'FATAL: no policy-namespace-reader ClusterRole rendered for %s.\n' "$overlay" >&2; exit 1; }
+    check "$overlay: policy-namespace reader gets own, wva-policy and the labelled namespace" \
+        'platform-policy,wns,wva-policy' "$(printf '%s\n' "$role" | policy_ns_names)"
+    # Admin-owned, managing another namespace; WVA_POLICY_NS repeats wva-policy.
+    role="$(render_policy_ns_role "$overlay" tenant-a wva-policy '')" || role=''
+    [ -n "$role" ] || { printf 'FATAL: no policy-namespace-reader ClusterRole rendered for %s.\n' "$overlay" >&2; exit 1; }
+    check "$overlay: policy-namespace reader names each Namespace once, nothing unread" \
+        'tenant-a,wns,wva-policy' "$(printf '%s\n' "$role" | policy_ns_names)"
 done
 
 # ----------------------------------------------------------------------------

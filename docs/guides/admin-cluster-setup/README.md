@@ -93,16 +93,23 @@ the condition in the second column.
 | grant | needed when | created by | without it |
 | --- | --- | --- | --- |
 | `wva-node-reader-role`: get, list, watch on nodes, cluster-wide | the policy that governs the controller declares the `gpu-inventory` limiter | `make setup-prereqs` (always, in namespace scope); `make enable-physical-limiter` | with `gpu-inventory`: the controller goes **NotReady**. With no limiter: it runs degraded — accelerators unresolved, no accelerator label on metrics |
-| `wva-kueue-reader-role`: get, list on clusterqueues, resourceflavors | a quota limiter entry has `kueue.enabled: true` | `make setup-prereqs`; `make enable-physical-limiter WVA_QUOTA_KUEUE=true` | logs `external quota source unreadable` every cycle and applies the static quota entry alone |
+| `wva-kueue-reader-role`: get, list on clusterqueues, resourceflavors; get on the managed Namespace | a quota limiter entry has `kueue.enabled: true` | `make setup-prereqs`; `make enable-physical-limiter WVA_QUOTA_KUEUE=true` | logs `external quota source unreadable` every cycle and applies the static quota entry alone. Without the Namespace read only (a role created before it was added): every ClusterQueue with a `namespaceSelector` is withheld, so the namespace is bounded at nothing by it until a cluster admin re-runs `make setup-prereqs` |
 | RoleBinding to `wva-policy-reader` in the policy namespace: get, list, watch on its ConfigMaps | the cluster has a policy namespace (`wva-policy`, or one named by a `wva.llmd.ai/policy-namespace` label) and the controller reads policy from it | `make enable-physical-limiter` | the controller **refuses to start** rather than run unbounded |
-| get on namespaces, cluster-wide | on **Kubernetes**, for a controller that manages its own namespace to see the policy-namespace label or `wva-policy` at all | nothing yet — grant it by hand, [below](#grant-the-namespace-read-by-hand) (being fixed) | the label and `wva-policy` are not seen and the controller uses its own ConfigMap; it logs `Could not read the managed Namespace` |
+| `wva-policy-namespace-reader-role`: get on namespaces, by name — the controller's own, the managed one, `wva-policy` (or `WVA_POLICY_NS`) and the namespace the managed one is labelled with | on **Kubernetes**, for a controller that manages its own namespace to see the policy-namespace label or `wva-policy` at all | `make setup-prereqs` (namespace scope); `make enable-physical-limiter`; or [by hand](#grant-the-namespace-read-by-hand) | the label and `wva-policy` are not seen and the controller uses its own ConfigMap; it logs `Could not read the managed Namespace` and `Cannot tell whether a cluster admin published policy` with the fix, and sets `wva_policy_namespace_unverified` to 1 (alert `WVAPolicyNamespaceUnverified`) |
 
 #### Grant the namespace read by hand
 
-Only for the tenant-owned shape on Kubernetes, and only if a policy namespace
-(`wva-policy`, or a `wva.llmd.ai/policy-namespace` label) should govern this
-controller. The grant names exactly the two Namespace objects the controller
-reads: its own, and `wva-policy`.
+`make setup-prereqs` creates this grant for a namespace-scoped install, so an
+install whose admin ran it needs nothing here. An install set up before the
+grant existed lacks it: re-run `NAMESPACE=${NAMESPACE} make setup-prereqs` as a
+cluster admin, then restart the controller, which resolves its policy once at
+startup.
+
+The manifest below is the manual alternative, for a cluster whose RBAC is
+managed by something else. Only for the tenant-owned shape on Kubernetes, and
+only if a policy namespace (`wva-policy`, or a `wva.llmd.ai/policy-namespace`
+label) should govern this controller. The grant names exactly the two
+Namespace objects the controller reads: its own, and `wva-policy`.
 
 <!-- guide:deploy.namespace_read start -->
 ```bash
@@ -141,8 +148,9 @@ kubectl -n ${NAMESPACE} rollout restart deploy/wva-controller-manager
 
 Then check that the controller took it: the restarted pod logs `Cluster policy
 comes from the well-known namespace` (or `... the namespace this one is labelled
-with`) and no longer logs `Could not read the managed Namespace`. `make
-undeploy-wva` does not know about this grant: delete
+with`), no longer logs `Could not read the managed Namespace`, and
+`wva_policy_namespace_unverified` reads 0. `make
+undeploy-wva` does not know about this manual grant: delete
 `clusterrole,clusterrolebinding wva-namespace-reader-${NAMESPACE}` yourself
 when the install goes.
 

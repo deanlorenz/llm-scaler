@@ -162,7 +162,7 @@ silently.
 | `WVA_QUOTA_SCOPE` | `namespace` | `cluster` |
 | `WVA_QUOTA_KUEUE` | `false` | `true` |
 | `WVA_POLICY_NS` | `wva-policy` | `platform-policy` |
-| `WVA_LIMITER_TARGETS` | every controller found | `team-a team-b` |
+| `WVA_LIMITER_TARGETS` | every labelled controller that passes the checks below | `team-a team-b` |
 | `WVA_CONTROLLER_SA` | `wva-controller-manager` | `my-wva-sa` |
 | `WVA_CONTROLLER_IMAGE_REPOS` | `ghcr.io/ev-shindin/llm-scaling-manager`, plus the repository of `WVA_IMAGE_REPO` | `'registry.local/wva ghcr.io/ev-shindin/llm-scaling-manager'` |
 

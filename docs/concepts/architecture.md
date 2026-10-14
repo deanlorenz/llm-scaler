@@ -138,9 +138,9 @@ namespace](../guides/install-in-namespace/). A [cluster-wide
 install](../guides/install-cluster-wide/) runs one controller for every
 namespace. A cluster admin can also publish one policy in the `wva-policy`
 namespace, which self-managed controllers read in place of their own. Two
-kinds do not read it: on Kubernetes, namespace-scoped controllers cannot see
-that namespace yet (they keep their own ConfigMap; a fix is in progress), and
-admin-owned controllers (cluster-scoped, or out of the tenant's reach) read
+kinds do not read it: a namespace-scoped controller on Kubernetes without the
+Namespace read `make setup-prereqs` grants (it keeps its own ConfigMap and
+reports `wva_policy_namespace_unverified`), and admin-owned controllers (cluster-scoped, or out of the tenant's reach) read
 their own ConfigMap by design, which the admin's command writes for them.
 Each controller logs which source it took at startup: [bound every install by
 real GPUs](../guides/admin-gpu-bounding/).

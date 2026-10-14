@@ -476,8 +476,10 @@ NetworkPolicy above. Two controller flags add TLS: `--external-scaler-cert-path`
 (a directory holding `tls.crt` and `tls.key`, reloaded on rotation) serves TLS, and
 KEDA then needs `caCert` in the trigger's TriggerAuthentication;
 `--external-scaler-client-ca` (a PEM bundle, read once) also requires every client
-to present a certificate it signed, i.e. KEDA's `tlsClientCert` and `tlsClientKey`.
-Both are off by default, and the shipped manifests do not set them.
+to present a certificate it signed, i.e. KEDA's `tlsClientCert` and `tlsClientKey`;
+`--external-scaler-client-san` (comma-separated) then accepts only clients whose
+certificate carries one of those names as a DNS SAN, URI SAN or Common Name.
+All are off by default, and the shipped manifests do not set them.
 
 What the NetworkPolicy does not cover:
 
