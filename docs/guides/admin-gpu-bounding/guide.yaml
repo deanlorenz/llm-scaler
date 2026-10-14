@@ -37,6 +37,18 @@ verify:
   controllers:
     note: A controller that is not Ready is one this did not reach.
     run: kubectl get pods -A -l app.kubernetes.io/name=workload-variant-autoscaler
+  source:
+    note: |
+      Which policy each controller actually reads. "the well-known namespace"
+      means wva-policy governs it; "this controller's own namespace" means its
+      own ConfigMap does. Logged once at startup, so a long-running controller's
+      line may have rotated out; a restart prints it again.
+    run: |
+      for ns in $(kubectl get deploy -A -l app.kubernetes.io/name=workload-variant-autoscaler,control-plane=controller-manager \
+          -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{end}'); do
+        echo "== $ns"
+        kubectl logs -n "$ns" deploy/wva-controller-manager | grep 'Cluster policy comes from'
+      done
   budget:
     note: |
       The ConfigMap is the fact; the log line is not. "GPU budgets available" is

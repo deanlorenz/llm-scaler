@@ -149,6 +149,23 @@ make undeploy-wva SCOPE=cluster
 Prometheus, KEDA and the namespaces stay — they are shared, and this install may
 not have created them. `UNDEPLOY_SHARED=true` removes them too.
 
+### Uninstalling touches every namespace
+
+The uninstall lists ScaledObjects that call this controller across the whole
+cluster, and treats them by who made them:
+
+- **ScaledObjects the installer created are deleted**, in every namespace. They
+  carry `restoreToOriginalReplicaCount: true`, so KEDA puts each workload back to
+  the replica count it had before it was autoscaled — a cluster-wide resize, as
+  part of the uninstall.
+- **ScaledObjects you adopted (`apply: adopt`) are kept and listed.** They still
+  point at the external scaler you just removed, so KEDA keeps their HPAs calling
+  a scaler that is gone, and any of them parked at zero cannot be woken. Repoint
+  or delete them.
+
+`UNDEPLOY_SCALEDOBJECTS=false` keeps the created ones too. Upgrade and uninstall
+in full: [Upgrade and uninstall](../../reference/upgrade-and-uninstall.md).
+
 That removes the **autoscaler only**. Model servers keep serving in every
 namespace the controller was managing, which matters more here than in a
 single-namespace install: one `undeploy` can leave many namespaces running.
@@ -170,6 +187,10 @@ Optional.
 | --- | --- | --- |
 | `SCOPE` | `namespace` — **set `cluster` for this guide** | `cluster` |
 | `WVA_NS` | `workload-variant-autoscaler-system` | `wva-system` |
+
+Every permission a cluster-scoped install holds — including read on every
+ConfigMap and patch on every pod in the cluster — is listed in the
+[security model](../../reference/security-model.md#cluster-scoped-both-platforms).
 | `IMG` | the image CI builds from main | `ghcr.io/you/wva:dev` |
 
 Full list: [Configuration reference](../../reference/configuration.md).

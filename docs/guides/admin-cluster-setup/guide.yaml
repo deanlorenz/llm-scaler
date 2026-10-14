@@ -19,9 +19,14 @@ deploy:
 
 verify:
   objects:
+    note: |
+      The cluster-scoped names end in the first 8 hex digits of the SHA-256 of
+      the CONTROLLER's namespace -- NAMESPACE in the default shape,
+      wva-NAMESPACE in the out-of-reach one. Grepping for wva- alone lists
+      every install on the cluster. On macOS use shasum -a 256.
     run: |
       kubectl get servicemonitor -n ${NAMESPACE}
-      kubectl get clusterrole,clusterrolebinding | grep wva-
+      kubectl get clusterrole,clusterrolebinding | grep "$(printf '%s' "${NAMESPACE}" | sha256sum | cut -c1-8)"
 
 cleanup:
   undo:

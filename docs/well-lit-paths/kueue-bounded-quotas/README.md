@@ -11,8 +11,8 @@
 > separately, and the largest across vendors rather than the sum).
 
 If Kueue is already the place where GPU quotas are decided, a second copy of
-every number in the scaling manager's ConfigMap is a second thing to keep right. This path has
-The scaling manager read Kueue's ClusterQueues and enforce, per namespace and accelerator type,
+every number in the scaling manager's ConfigMap is a second thing to keep right. On
+this path the scaling manager reads Kueue's ClusterQueues and enforces, per namespace and accelerator type,
 **the smaller of Kueue's grant and the static cap** — so the autoscaler does not
 ask KEDA for a replica that Kueue would then hold pending.
 
@@ -29,6 +29,17 @@ change rather than mirror them by hand.
 total is what must hold**: each such namespace is capped at the queue's full
 grant (the second surprise below). And read the third surprise before choosing
 `-1` as the static cap: it decides what happens when Kueue cannot be read.
+
+**Do not use it where tenants can create their own LocalQueues** and the static
+cap is `-1`. The controller grants a namespace the quota of any ClusterQueue one
+of its LocalQueues points at, and does not check that ClusterQueue's
+`namespaceSelector` — which is what stops Kueue itself from admitting that
+namespace's work there. So a tenant who can create a LocalQueue pointing at a
+larger ClusterQueue gets that queue's grant as the controller sees it. A fix is
+being made. Until then, keep LocalQueue creation with the admin (check whether
+your Kueue install aggregates LocalQueue rights into the namespace `admin` role:
+`kubectl auth can-i create localqueues.kueue.x-k8s.io -n <ns> --as=<tenant>`), or
+keep a finite static cap, which Kueue can only tighten.
 
 ## What it needs
 
@@ -184,5 +195,5 @@ Every field, the full merge table and what is not read:
 — `resources` narrows which extended resources count as GPUs, `refreshInterval`
 how often Kueue is re-read. The installer variables:
 [configuration](../../reference/configuration.md). Why a quota counts only
-The scaling manager's own consumption:
+the scaling manager's own consumption:
 [GPU capacity accounting](../../concepts/gpu-capacity-accounting.md).

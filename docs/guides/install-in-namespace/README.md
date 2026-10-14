@@ -87,10 +87,12 @@ make setup-prereqs
 ```
 <!-- guide:deploy.prereqs end -->
 
-Once per namespace, not once per upgrade. It creates the namespace, the
-cluster-scoped RBAC and the ServiceMonitor: the objects a namespace admin is not
-allowed to create. See [Cluster-admin setup](../admin-cluster-setup/)
-for what each one is and why it needs an admin.
+Once per namespace, not once per upgrade. It creates the cluster-scoped RBAC, the
+ServiceAccounts, Roles and ServiceMonitor: the objects a namespace admin is not
+allowed to create — and the controller's namespace when `WVA_NS` names one apart
+from yours. Your namespace must already exist. See
+[Cluster-admin setup](../admin-cluster-setup/) for what each one is and why it
+needs an admin.
 
 On Kubernetes with no KEDA, the step stops and tells you to re-run it as
 `KEDA_HELM_INSTALL=true make setup-prereqs`; on OpenShift, install the Custom
@@ -111,6 +113,28 @@ It works out which half is left to do, and says which it chose. Run by a
 namespace owner, or once step 1 has run, it installs the controller only. Run by
 a cluster admin before step 1, it does both. If step 1 has not happened and you
 cannot do it yourself, it stops and names what is missing for an admin.
+
+### What you own, and what your admin owns
+
+| | owned by | what that means |
+| --- | --- | --- |
+| the controller Deployment, its Services, `wva-manager-config` | you | you install and upgrade them with namespace rights |
+| `wva-scaling-policy-config` in your namespace | you | in a namespace-scoped install this is the controller's **global** map, not a namespace-local override: its `default` entry is the default for everything the controller manages. Thresholds, tiers and per-model entries are yours. So are the limiters — unless a cluster policy namespace governs this controller; see below |
+| ServiceAccounts, Roles, RoleBindings, the ServiceMonitor, the token Secrets | your admin | created by step 1, in your namespace; RBAC forbids you granting what you do not hold |
+| the hashed ClusterRoles and ClusterRoleBindings | your admin | cluster-scoped |
+| the cluster policy namespace (`wva-policy`) | your admin | where a GPU budget lives when the admin publishes one |
+
+Whether a cluster policy governs your controller is in its startup log:
+
+```bash
+kubectl logs -n ${NAMESPACE} deploy/wva-controller-manager | grep 'Cluster policy comes from'
+```
+
+`this controller's own namespace` means your ConfigMap's `limiters:` are in
+force. On Kubernetes that is the answer today even when the admin has published
+`wva-policy`: a namespace-scoped controller cannot read Namespace objects, so it
+cannot see the policy namespace (being fixed). The full list of permissions and
+their reasons is in the [security model](../../reference/security-model.md).
 
 ### 3. Make the workloads safe to scale
 
@@ -334,21 +358,30 @@ Run it **after** `make undeploy-wva`, not instead of it. It tears down the llm-d
 releases and the namespace, and a controller left behind would keep calling a
 scaler for workloads that no longer exist.
 
-To check nothing was missed — a namespace-scoped install still creates
-cluster-scoped RBAC, which deleting the namespace alone would strand:
+### What an uninstall run by you leaves behind
+
+A namespace-scoped install has cluster-scoped RBAC that you cannot delete. Run
+by you, `make undeploy-wva` removes everything you may delete, then prints the
+`Forbidden` objects it could not and asks for a cluster admin. Deleting the
+namespace strands them too. Send your admin this, which removes this install's
+hashed ClusterRoles and ClusterRoleBindings and nothing else:
 
 ```bash
-kubectl get clusterrole,clusterrolebinding -o name | grep -i "${NAMESPACE}"
+# Run by a cluster admin. The suffix is the first 8 hex digits of the SHA-256
+# of the controller's namespace (shasum -a 256 on macOS).
+SUFFIX=$(printf '%s' "<the namespace>" | sha256sum | cut -c1-8)
+kubectl get clusterrole,clusterrolebinding -o name | grep -- "-${SUFFIX}$"
+NAMESPACE=<the namespace> make undeploy-wva     # removes them; or delete the listed objects by hand
 ```
 
 ## Configuration
 
-Optional. Everything below is detected; set one only to override what the
-preflight reported.
+`NAMESPACE` is required; everything else is detected, so set one only to
+override what the preflight reported.
 
 | Parameter | Default | Example |
 | --- | --- | --- |
-| `NAMESPACE` | the namespace running llm-d, discovered | `llm-d-optimized-baseline` |
+| `NAMESPACE` | none — **required**, never discovered | `llm-d-optimized-baseline` |
 | `IMG` | the image CI builds from main | `ghcr.io/you/wva:dev` |
 | `PROMETHEUS_URL` | detected; Thanos on OpenShift | `https://prom.monitoring.svc:9090` |
 | `KEDA_HELM_INSTALL` | `false` on Kubernetes — assumes cluster KEDA | `true`, to install one with Helm |

@@ -26,10 +26,16 @@ autoscaler, not the cluster.
 
 ## Which limiter
 
-They answer different questions, and a deployment that needs both answers
-declares both — each is then fed the measure it is asking about.
+They answer different questions, but **declare one, not both**: the controller
+builds a single limiter, and when the `limiters:` list holds both kinds the
+quota wins and the physical limiter is dropped (it is logged as `notEnforced`).
+Pick the question that matters more; a `ResourceQuota` is the backstop for the
+other.
 
-| | `gpu-inventory` (the default) | `quota` |
+The shipped policy declares no limiter at all. `gpu-inventory` is only the
+default of `WVA_LIMITER_TYPE`, the variable `make enable-physical-limiter` reads.
+
+| | `gpu-inventory` | `quota` |
 | --- | --- | --- |
 | Question | is the hardware there? | is this tenant within its allowance? |
 | Counts | every GPU-holding Pod on the cluster | only what **the scaling manager's own variants** hold |
@@ -50,21 +56,34 @@ because the ConfigMap is the easy part and the access it then requires is not.
 ## Verifying it
 
 ```bash
-# the policy the controllers actually read
-kubectl get configmap wva-scaling-policy-config -n <system-namespace> -o yaml
+# where each controller reads its policy from: "the well-known namespace" means
+# wva-policy, "this controller's own namespace" means its own ConfigMap
+kubectl logs -n <wva-namespace> deploy/wva-controller-manager | grep 'Cluster policy comes from'
+
+# the cluster policy, for the controllers that read wva-policy
+kubectl get configmap wva-scaling-policy-config -n wva-policy -o jsonpath='{.data.default}'
+
+# the limiter the controller actually built
+kubectl logs -n <wva-namespace> deploy/wva-controller-manager | grep 'GPU limiter constructed'
 
 # what the optimizer decided, and the reason code behind each entry
-kubectl logs -n <wva-namespace> deploy/<wva> | grep scaling-decision
+kubectl logs -n <wva-namespace> deploy/wva-controller-manager | grep scaling-decision
 ```
+
+On Kubernetes, a namespace-scoped controller cannot read Namespace objects, so it
+does not see `wva-policy` and reads its own ConfigMap instead — the first command
+shows it. This is being fixed; see
+[the GPU limiter](../../reference/gpu-limiter.md#what-an-admin-sets-and-where).
 
 `wva_model_scaling_blocked` carries the reason as a label. A model that wanted
 more and did not get it is a normal, visible outcome here — not an error.
 
 ## What it costs
 
-No accelerators, and no latency. What it costs is a conversation: a limiter
-turns "why did we not scale" from an invisible event into a declared policy
-somebody owns.
+No accelerators. A budget that binds costs latency: a model held at its budget
+queues what an extra replica would have served, and that shows up as TTFT, not
+as an error. What else it costs is a conversation: a limiter turns "why did we
+not scale" from an invisible event into a declared policy somebody owns.
 
 ## How it is tested
 

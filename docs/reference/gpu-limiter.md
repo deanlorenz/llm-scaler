@@ -82,7 +82,8 @@ RBAC *inside* their namespace and can neither create a `Namespace` nor edit one'
 annotations.
 
 ```bash
-# Once per cluster. Every install on the cluster reads this, and none can opt out.
+# Once per cluster. Read by every controller that manages its own namespace
+# and can read Namespace objects -- see "What the controller does with that".
 kubectl create namespace wva-policy
 kubectl -n wva-policy create configmap wva-scaling-policy-config \
   --from-file=default=cluster-limiters.yaml
@@ -110,6 +111,15 @@ auditing:
 kubectl get ns -l wva.llmd.ai/policy-namespace=platform-policy
 ```
 
+> **On Kubernetes, a namespace-scoped controller does not see the label.**
+> Reading it needs `get` on Namespace objects, which the namespace-scoped Role
+> does not grant. The controller logs `Could not read the managed Namespace` and
+> carries on with its own ConfigMap, so the label is silently not applied. The
+> same denial hides `wva-policy`: the controller cannot tell it exists. This is
+> being fixed. Until then, grant the controller's ServiceAccount `get` on
+> namespaces, and check the result with the log line below. On OpenShift the
+> `cluster-monitoring-view` binding already carries that read.
+
 ### What the controller does with that
 
 Policy is resolved once at startup, in order:
@@ -120,8 +130,17 @@ Policy is resolved once at startup, in order:
    so the two cannot drift
 3. the controller's own namespace
 
-Step 2 applies only to a controller that manages its own namespace. A
-**cluster-scoped** controller already runs where only a cluster admin can write,
+Steps 1 and 2 apply only to a controller that manages its own namespace, and
+only when it may read Namespace objects (see the note above). The startup log
+says which step won; every branch logs a line starting `Cluster policy comes
+from`:
+
+```bash
+# NS: the controller's namespace
+kubectl logs -n "$NS" deploy/wva-controller-manager | grep 'Cluster policy comes from'
+```
+
+A **cluster-scoped** controller already runs where only a cluster admin can write,
 so its own ConfigMap *is* cluster-defined policy — a second namespace would add a
 place to look and nothing else. It is also a deliberate guard: letting `wva-policy`
 override an admin-owned controller meant that creating it for one tenant silently
@@ -187,8 +206,11 @@ it:
 make deploy-wva-on-k8s WVA_SCOPE=namespace WVA_NS=wva-team-a WVA_WATCH_NS=team-a
 ```
 
-This is the recommended multi-tenant shape. Everything above then applies with the
-Deployment out of the tenant's reach.
+This is the recommended multi-tenant shape. Such a controller does not manage
+its own namespace, so it reads limiters from **its own ConfigMap**, in `wva-team-a`
+— which the admin owns, so the bound and its subject already have different
+owners. The label and `wva-policy` do not apply to it; `make
+enable-physical-limiter` writes the limiter into that ConfigMap instead.
 
 ## Why it ships off
 
@@ -222,8 +244,10 @@ spec:
 ```
 
 ```bash
+# NS: the controller's namespace. NAMESPACE: the models'. Equal unless WVA_WATCH_NS is set.
 kubectl get nodes -L nvidia.com/gpu.product          # what your nodes advertise
-kubectl logs -n workload-variant-autoscaler-system   -l app.kubernetes.io/name=workload-variant-autoscaler | grep -i "Accelerator not resolved"
+kubectl get events -n "$NAMESPACE" --field-selector reason=AcceleratorNotResolved   # on the ScaledObjects
+kubectl logs -n "$NS" deploy/wva-controller-manager | grep -i "Accelerator not resolved"
 ```
 
 ## Permission: nodes

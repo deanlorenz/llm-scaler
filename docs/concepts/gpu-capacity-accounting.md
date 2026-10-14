@@ -192,7 +192,7 @@ is the scale target this file is about.
 
 The gap opens on unbind. The launcher keeps its vLLM instance resident — that is
 what makes the next bind take seconds — and goes on occupying a physical GPU
-charged to nobody. Measured on pokprod001 with every requester at `replicas: 0`:
+charged to nobody. Measured on an OpenShift cluster with every requester at `replicas: 0`:
 
 ```text
 GPU requests charged in the namespace : 1

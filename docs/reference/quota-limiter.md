@@ -195,7 +195,10 @@ the attribution that a first reading of the table would not give:
   `HoldAndDrain`, admits nothing in Kueue; here it becomes an untyped grant of
   0, so its namespaces are denied rather than left to the static entry.
   `namespaceSelector` is not evaluated (it would need namespace labels a tenant
-  install cannot read).
+  install cannot read). The consequence: a tenant who can create a LocalQueue
+  pointing at any ClusterQueue is granted that queue's quota here, even where
+  Kueue itself would not admit their work to it. Being fixed; until then
+  restrict LocalQueue creation, or keep a finite static cap.
 - **A shared ClusterQueue is a per-namespace ceiling, not a partition.** Every
   namespace with a LocalQueue on it is bounded at the queue's full nominal
   quota, so several such namespaces may in sum still ask for more than the
