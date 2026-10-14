@@ -1,5 +1,18 @@
 # Bound a fleet by real GPUs
 
+## Start here
+
+- **Status:** Stable.
+- **You need:** cluster-admin rights; controllers installed by [the saturation path](../scale-on-saturation/#start-here), each able to list nodes; accelerators that resolve.
+- **Do this** ([Bound every install by real GPUs](../../guides/admin-gpu-bounding/)):
+  1. [Check accelerators resolve](../../guides/admin-gpu-bounding/README.md#prerequisites): the failure with no symptom.
+  2. Read the [blast radius](../../guides/admin-gpu-bounding/README.md#blast-radius--read-before-running-it), then run [`make enable-physical-limiter`](../../guides/admin-gpu-bounding/README.md#installation-instructions).
+  One install only: `WVA_LIMITER=gpu-inventory` on its `make deploy-wva` ([configuration](../../reference/configuration.md#core-configuration)).
+- **Check it works:** each controller's log has `GPU limiter constructed` and no `Invalid saturation scaling` ([Verification](../../guides/admin-gpu-bounding/README.md#verification)).
+- **Undo:** `make disable-physical-limiter` ([Cleanup](../../guides/admin-gpu-bounding/README.md#cleanup)).
+
+## What it is
+
 Without a limiter, each controller scales its workloads up to their
 `maxReplicaCount` and nothing checks that against the accelerators that exist.
 A limiter gives the optimizer a budget: either the GPU inventory actually

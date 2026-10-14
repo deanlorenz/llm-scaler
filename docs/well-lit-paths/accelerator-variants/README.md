@@ -1,9 +1,22 @@
 # Serve one model on two accelerator variants
 
+## Start here
+
+- **Status:** Stable; no end-to-end spec asserts which variant grows ([How it is tested](#how-it-is-tested)).
+- **You need:** [the saturation path](../scale-on-saturation/#start-here) in place; two deployments of the same model behind one InferencePool and one EPP.
+- **Do this:**
+  1. [`make scaledobjects-plan`](../../guides/install-in-namespace/README.md#4-register-the-workloads): both deployments appear as entries; give them the same `modelID`.
+  2. Set each entry's `variantCost` to the price of one replica ([What it needs](#what-it-needs)), then `make scaledobjects-apply`.
+  No guide stands up the second deployment; [the two-variant benchmark](../../developer-guide/two-variant-wva-benchmark.md) does, for a benchmark.
+- **Check it works:** `wva_desired_replicas` has one series per variant, and `analyzer-result` shows which one grew ([Verifying it](#verifying-it)).
+- **Undo:** nothing specific to this path; [uninstalling](../../guides/install-in-namespace/README.md#cleanup) removes the ScaledObjects.
+
+## What it is
+
 One model, deployed twice on different hardware or different tensor-parallel
 widths, behind one InferencePool and one EPP. Each deployment has its own
 ScaledObject, and both carry the same `modelID` in their trigger metadata — so
-The scaling manager groups them and scales the group, not the deployments.
+the scaling manager groups them and scales the group, not the deployments.
 
 On scale-up the optimizer grows the variant with the **lowest cost per unit of
 capacity** — `variantCost` divided by the capacity one replica of that variant
@@ -72,9 +85,13 @@ decision in the wrong direction.
 - Benchmark scenario:
   `hack/benchmark/scenarios/guides/two-variant-wva.yaml`, with the variant
   definitions under `scenarios/guides/variants/`; the harness's own start-path settings are in [Replica start time in the harness](../../guides/benchmarking/README.md#replica-start-time-in-the-harness).
-- **No end-to-end suite covers two variants of one model.** The evidence for
-  this path is the benchmark scenario and its written-up run, not a CI spec —
-  which is the leg to add if you depend on it.
+- **No end-to-end spec asserts which variant grows.** `test/e2e/limiter_test.go`
+  runs two variants of one model, one per accelerator type, and asserts that
+  both are discovered, both get `wva_desired_replicas`, and neither exceeds its
+  `maxReplicaCount` — the discovery and the GPU bound, not the cost ordering
+  this path rests on. The evidence for the ordering is the benchmark scenario
+  and its written-up run, not a CI spec — which is the leg to add if you
+  depend on it.
 
 ## Tuning it
 

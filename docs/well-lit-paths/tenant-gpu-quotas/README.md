@@ -1,5 +1,18 @@
 # Cap what each tenant may take
 
+## Start here
+
+- **Status:** Stable; no end-to-end spec yet bounds the default optimizer by a quota ([How it is tested](#how-it-is-tested)).
+- **You need:** the accelerator names the controller logs (a quota key must match one exactly); a cluster admin, for a budget the tenant cannot edit ([Who owns what](#who-owns-what)).
+- **Do this:**
+  1. [Check accelerators resolve](../../guides/admin-gpu-bounding/README.md#prerequisites).
+  2. Declare the quota. One install's own policy: `WVA_LIMITER=quota WVA_QUOTAS='<accelerator>=<n>'` on `make deploy-wva` ([configuration](../../reference/configuration.md#core-configuration)). The cluster policy: `make enable-physical-limiter WVA_LIMITER_TYPE=quota WVA_QUOTAS='<accelerator>=<n>'` ([admin guide](../../guides/admin-gpu-bounding/README.md#configuration)).
+  3. Several namespaces named one by one: hand-write the entry ([Declaring it](#declaring-it)).
+- **Check it works:** `GPU limiter constructed` in the controller log, then `wva_model_scaling_blocked` for a model held at its allowance ([Verifying it](#verifying-it)).
+- **Undo:** the cluster policy: `make disable-physical-limiter` ([Cleanup](../../guides/admin-gpu-bounding/README.md#cleanup)). One install: no guide step; remove the `limiters:` entry from the policy's `default` entry ([quota limiter reference](../../reference/quota-limiter.md)).
+
+## What it is
+
 Declare how many GPUs of each accelerator type the scaling manager may hold — for the whole
 cluster, or per namespace — so one team's autoscaling cannot spend the fleet.
 This is the other half of [bounding a fleet by real GPUs](../bound-by-gpus/):
@@ -178,7 +191,14 @@ separate GPU nodes, removes the overlap.
   reports and charges).
 - End-to-end: `test/e2e/warm_pool_quota_test.go` covers a refusal — a pool
   asking for accelerators the quota will not give.
-- **No e2e covers the quota limiter's own allocation path.**
+  `test/e2e/kueue_quota_test.go` asserts the effective quota entry the limiter
+  logs after merging a Kueue grant into a static cap (one, then three again
+  once the LocalQueue is gone) — the entry, not what the optimizer then orders.
+  `test/e2e/utilization_share_test.go` runs two models under a spent 4-GPU
+  namespace quota and asserts the utilization-share optimizer's transfer (the
+  donor's marked pod leaves before the receiver grows) — that optimizer, not
+  the default one.
+- **No e2e covers the default optimizer's allocation under a static quota.**
   `test/e2e/limiter_test.go` exercises the GPU-inventory limiter only. That is
   the leg to add before treating a tenant cap as something CI protects.
 

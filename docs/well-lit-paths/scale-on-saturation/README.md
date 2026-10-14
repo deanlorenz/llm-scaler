@@ -1,5 +1,20 @@
 # Scale a model on saturation
 
+## Start here
+
+- **Status:** Stable. The default path; every other path assumes it is in place.
+- **You need:** KEDA; a Prometheus scraping the model servers and their EPP; the EPP's `flowControl` feature gate; a cluster admin for one command.
+- **Do this** ([Install the scaling manager in a namespace](../../guides/install-in-namespace/)):
+  1. Cluster admin: [prepare the namespace](../../guides/install-in-namespace/README.md#1-cluster-admin-prepare-the-namespace) (`make setup-prereqs`).
+  2. [Install the controller](../../guides/install-in-namespace/README.md#2-install-the-controller) (`make deploy-wva`).
+  3. [Make the workloads safe to scale](../../guides/install-in-namespace/README.md#3-make-the-workloads-safe-to-scale) (`make workload-patch`).
+  4. [Register the workloads](../../guides/install-in-namespace/README.md#4-register-the-workloads) (`make scaledobjects-plan`, edit the plan, `make scaledobjects-apply`).
+  One controller for every namespace instead: [install cluster-wide](../../guides/install-cluster-wide/).
+- **Check it works:** `kubectl get scaledobject,hpa` shows `READY True` and a number under `TARGETS`; a few minutes later the controller log has `scaling-decision` lines ([Verification](../../guides/install-in-namespace/README.md#verification)).
+- **Undo:** `make undeploy-wva` ([Cleanup](../../guides/install-in-namespace/README.md#cleanup)); the model servers keep running.
+
+## What it is
+
 The default path, and the one every other path builds on. The scaling manager reads what your
 inference engines are actually doing — KV-cache occupancy, queues, token rates —
 turns it into a supply-and-demand statement per model, and answers KEDA with a
@@ -122,7 +137,7 @@ the Prometheus queries it makes each cycle — one set per namespace, not per po
 
 ## How it is tested
 
-- End-to-end: `test/e2e/saturation_test.go`,
+- End-to-end: `test/e2e/saturation_v2_test.go` (`Saturation V2 engine`),
   `saturation_analyzer_path_test.go`, `saturation_config_test.go`,
   `external_scaler_keda_test.go`, `smoke_keda_test.go`.
 - Benchmark scenario: `hack/benchmark/scenarios/guides/workload-autoscaling.yaml`,

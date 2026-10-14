@@ -1,5 +1,17 @@
 # Scale to zero, and get back
 
+## Start here
+
+- **Status:** Stable.
+- **You need:** [the saturation path](../scale-on-saturation/#start-here) in place; the EPP's `flowControl` gate parsed by the running EPP pod (it is the wake signal); a model that has served at least one request.
+- **Do this** ([Scale a model to zero, and get it back](../../guides/scale-to-zero/)):
+  1. [Check the wake signal](../../guides/scale-to-zero/README.md#prerequisites) before anything parks.
+  2. [Allow parking in the policy, and let every variant reach zero](../../guides/scale-to-zero/README.md#installation-instructions): `scaleToZero.enabled` **and** `minReplicaCount: 0`, both halves.
+- **Check it works:** no `wva_model_scaling_blocked` reason, the model parks after `retentionPeriod`, and `hack/verify_scale_from_zero.sh` wakes it end to end ([Verification](../../guides/scale-to-zero/README.md#verification)).
+- **Undo:** set `scaleToZero.enabled: false` and raise the variants' `minReplicaCount` back ([Cleanup](../../guides/scale-to-zero/README.md#cleanup)).
+
+## What it is
+
 An idle model releases its accelerators entirely, and comes back when a request
 arrives. Two mechanisms that fail independently: **parking** is the scaling manager's — a model
 that serves nothing for `retentionPeriod` goes to zero — and **waking** is the

@@ -1,5 +1,17 @@
 # Give classes of workloads different scaling behaviour
 
+## Start here
+
+- **Status:** Stable.
+- **You need:** [the saturation path](../scale-on-saturation/#start-here) in place, and edit rights on the scaling-policy ConfigMap the controller reads (`wva-scaling-policy-config`).
+- **Do this** (no guide covers this path; the steps are on this page):
+  1. Add the tier entries, and a `defaultPolicy` naming one that exists ([What it needs](#what-it-needs); the shipped numbers in [Choosing a tier](#choosing-a-tier)).
+  2. Name a tier on each variant: `scalingPolicy: <tier>` in its trigger metadata, or in its entry in [the ScaledObject plan](../../reference/configuration.md#default-scaledobjects) before `make scaledobjects-apply`.
+- **Check it works:** `Effective scaling policy` in the controller log names the tier, and there is no `Scaling policy not found` ([Verifying it](#verifying-it)).
+- **Undo:** remove `scalingPolicy` from the trigger; the variant scales under the `default` entry again. The policy is read live, with no restart.
+
+## What it is
+
 An interactive assistant and an overnight batch job should not be scaled the
 same way, and neither should be configured one model at a time. A **tier** is a
 named, reusable policy entry — `interactive`, `standard`, `batch` — that a

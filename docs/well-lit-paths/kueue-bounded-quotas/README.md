@@ -1,5 +1,17 @@
 # Bound tenants by the quotas Kueue already holds
 
+## Start here
+
+- **Status:** Experimental: no run yet against a live Kueue controller (below).
+- **You need:** everything [the tenant-quotas path](../tenant-gpu-quotas/#start-here) needs; Kueue's `ClusterQueue`, `LocalQueue` and `ResourceFlavor` served, with LocalQueues in the managed namespaces; for a namespace-scoped install, the `kueue-reader` prerequisite that `make setup-prereqs` creates ([What it needs](#what-it-needs)).
+- **Do this** (no guide covers this path yet; the steps are on this page):
+  1. Take [the tenant-quotas path](../tenant-gpu-quotas/#start-here) first.
+  2. Declare its quota again with `WVA_QUOTA_KUEUE=true` and the types at `-1` ([Declaring it](#declaring-it)). A controller installed before this feature needs a cluster admin to re-run `make setup-prereqs` once.
+- **Check it works:** `quota entry bounded by external caps` in the controller log, carrying the effective caps ([Verifying it](#verifying-it)).
+- **Undo:** no guide step. For one install, re-run `make deploy-wva` with `WVA_LIMITER=quota`, a finite `WVA_QUOTAS` and no `WVA_QUOTA_KUEUE`; the installer replaces the entry it wrote. Left at `-1` without Kueue, the entry is no cap at all.
+
+## What it is
+
 > **Experimental.** The merge rules, the reader and the installer knob are unit
 > tested, and an end-to-end suite proves the read-and-merge chain against a real
 > API server, up to the effective entry the limiter logs — but that suite

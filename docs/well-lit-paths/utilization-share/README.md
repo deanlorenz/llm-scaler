@@ -1,5 +1,18 @@
 # Share one GPU quota between models
 
+## Start here
+
+- **Status:** Experimental: one run per configuration, 1 GPU per Pod (below).
+- **You need:** two or more models scaled by the scaling manager under one limiter: a quota, or the physical GPU inventory ([What it needs](#what-it-needs)); model servers that drain on termination; `kubectl`, `jq`, `yq` and `make` in a checkout of this repository.
+- **Do this** ([Turn on the utilization-share optimizer, safely](../../guides/utilization-share/)):
+  1. Install with a quota: [install in a namespace](../../guides/install-in-namespace/) with `WVA_LIMITER=quota WVA_QUOTAS='<accelerator>=<n>'` ([configuration](../../reference/configuration.md#core-configuration)), or stand up the guide's [two-model trial](../../guides/utilization-share/README.md#prerequisites).
+  2. `make utilization-share-check`: is there a budget to share ([Prerequisites](../../guides/utilization-share/README.md#prerequisites)).
+  3. `make utilization-share-shadow`, read what it would move, then `make utilization-share-activate` ([Installation](../../guides/utilization-share/README.md#installation-instructions)).
+- **Check it works:** `make utilization-share-status`; `wva_utilization_share_mode` reads `active`, and transfers end `done` ([Verification](../../guides/utilization-share/README.md#verification)).
+- **Undo:** `make utilization-share-off`: back through shadow, marks cleared, block removed ([Cleanup](../../guides/utilization-share/README.md#cleanup)).
+
+## What it is
+
 > **Experimental.** Measured on H200s at 1 GPU per Pod, one run per
 > configuration ([what was measured](measured.md)): two aggregated models, and
 > two P/D-disaggregated models whose four roles share one quota. The P/D run in
@@ -17,15 +30,6 @@ the falling model's whole scale-down window. The utilization-share optimizer
 shares the quota on purpose: each model gets what it needs, the rest is spread
 as headroom by weight, and GPUs move from one model to another when the shares
 drift ([how](#how-it-shares-the-quota)).
-
-What it buys: on the most recent aggregated run (2026-10-12), the model that
-burst first was served at once — median time to first token 0.07 s, against
-25.6 s with the same fleet planned but not moved — because GPUs were already
-waiting for it. The model that burst second was no worse off: the same p95
-(287 s), and a median of 144 s against 215 s. That run's GPU cost was not
-measured. On the P/D run, the output-heavy burst was served at p95 95 ms
-against 42 s, and the prompt-heavy burst was overloaded in every arm, for
-36 % more GPU-seconds.
 
 **Use it when** two or more models scale under one quota, their demand moves
 between them over hours rather than minutes, and the GPUs are paid for whether
@@ -53,6 +57,15 @@ headroom costs nothing extra.
   a pod the scaling manager did not place (`release-taken`).
 - **A model runs on more than one accelerator type.** It is never planned; it
   stays on today's optimizer.
+
+What it buys: on the most recent aggregated run (2026-10-12), the model that
+burst first was served at once — median time to first token 0.07 s, against
+25.6 s with the same fleet planned but not moved — because GPUs were already
+waiting for it. The model that burst second was no worse off: the same p95
+(287 s), and a median of 144 s against 215 s. That run's GPU cost was not
+measured. On the P/D run, the output-heavy burst was served at p95 95 ms
+against 42 s, and the prompt-heavy burst was overloaded in every arm, for
+36 % more GPU-seconds.
 
 ## What it needs
 
