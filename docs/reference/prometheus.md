@@ -117,10 +117,28 @@ spec:
 
 ### TLS Configuration
 
+**What ships:** the Kubernetes overlays set `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY: "true"`
+in the manager ConfigMap. The installer has no CA to hand the controller there: the
+kube-prometheus-stack it deploys serves a self-signed certificate, and nothing mounts
+it into the controller, so verification on by default would stop every such install
+with `x509: certificate signed by unknown authority`. The OpenShift overlays verify
+against the service CA and ship `false`. The installer prints a warning at the end of
+any install that will connect over HTTPS without verifying.
+
 **Production Deployments:**
 - Always use HTTPS endpoints (`https://`)
-- Provide CA certificate via `PROMETHEUS_CA_CERT_PATH`
+- Mount the CA that signed the Prometheus certificate into the controller (a ConfigMap
+  or Secret volume), and set `PROMETHEUS_CA_CERT_PATH` to the file and
+  `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY` to `"false"` in the manager ConfigMap
+  (`wva-manager-config`, key `config.yaml`)
 - Never set `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true` in production
+
+The controller's own `/metrics` endpoint is the other direction: the shipped
+ServiceMonitor scrapes it with `insecureSkipVerify: true` because the controller
+generates a self-signed serving certificate in memory. To verify that scrape, start
+the controller with `--metrics-cert-path` pointing at a mounted certificate and
+replace `tlsConfig` in the ServiceMonitor with its CA, as the OpenShift overlay does
+with the service CA.
 
 **Development/Testing:**
 - You may set `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true` for local clusters

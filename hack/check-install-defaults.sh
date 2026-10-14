@@ -38,14 +38,15 @@ source "$WORK/cli.sh"
 # shellcheck source=/dev/null
 source "$WORK/infra_wva.sh"
 
-for fn in wva_split_image_ref wva_image_pull_policy wva_warn_floating_image; do
+for fn in wva_split_image_ref wva_image_pull_policy wva_warn_floating_image \
+          wva_warn_prometheus_tls; do
     declare -F "$fn" >/dev/null || {
         printf 'FATAL: %s is not defined after sourcing the library.\n' "$fn" >&2
         exit 1
     }
 done
 
-EXPECT_CASES=17
+EXPECT_CASES=21
 RAN=0
 FAILED=0
 
@@ -135,6 +136,22 @@ check 'warning: main is announced'      '1' "$(warned ghcr.io/o/wva main '')"
 check 'warning: latest is announced'    '1' "$(warned ghcr.io/o/wva latest '')"
 check 'warning: a release tag is quiet' '0' "$(warned ghcr.io/o/wva v0.6.0 '')"
 check 'warning: a digest is quiet'      '0' "$(warned ghcr.io/o/wva main sha256:abc)"
+
+# ----------------------------------------------------------------------------
+# Prometheus TLS: an unverified HTTPS connection is announced
+# ----------------------------------------------------------------------------
+tls_warned() { wva_warn_prometheus_tls "$1" 2>&1 | grep -c 'will NOT verify' || true; }
+
+# The shipped Kubernetes config, read from the file rather than restated here.
+SHIPPED_CFG="$(tr -d '\r' < "$ROOT/config/base/manager/manager-configmap.yaml" | yq '.data."config.yaml"')"
+[ -n "$SHIPPED_CFG" ] || { printf 'FATAL: could not read the shipped manager config.\n' >&2; exit 1; }
+check 'tls: the shipped config is warned about' '1' "$(tls_warned "$SHIPPED_CFG")"
+check 'tls: a CA path silences it' '0' \
+    "$(tls_warned "$(printf '%s\n' "$SHIPPED_CFG" | yq '.PROMETHEUS_CA_CERT_PATH = "/etc/ca/ca.crt"')")"
+check 'tls: verification on is quiet' '0' \
+    "$(tls_warned "$(printf '%s\n' "$SHIPPED_CFG" | yq '.PROMETHEUS_TLS_INSECURE_SKIP_VERIFY = "false"')")"
+check 'tls: plain HTTP is not this warning' '0' \
+    "$(tls_warned "$(printf 'PROMETHEUS_BASE_URL: "http://p:9090"\nPROMETHEUS_TLS_INSECURE_SKIP_VERIFY: "true"\n')")"
 
 # ----------------------------------------------------------------------------
 

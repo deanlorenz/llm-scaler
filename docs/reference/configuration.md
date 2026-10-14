@@ -290,7 +290,7 @@ shipped default and **exits at startup** if nothing answers there
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `PROMETHEUS_URL` | Full base URL, e.g. `https://prom.monitoring.svc.cluster.local:9090` | the kube-prometheus-stack this install deploys |
-| `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY` | Connect without verifying the server certificate | `true` in the shipped config |
+| `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY` | Connect without verifying the server certificate. The installer warns when an HTTPS install ends up unverified; see [TLS configuration](prometheus.md#tls-configuration) for the production setting | `true` in the shipped Kubernetes config, `false` on OpenShift |
 | `DEPLOY_PROMETHEUS` | Deploy a Prometheus stack when the cluster has none of its own — see [Deployment flags](#deployment-flags) | `true` |
 
 ## Which namespace is which

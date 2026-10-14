@@ -228,6 +228,32 @@ wva_warn_floating_image() {
     log_warning "=================================================================="
 }
 
+# wva_warn_prometheus_tls warns when the controller will connect to an HTTPS
+# Prometheus without verifying its certificate. $1 is the manager config.yaml.
+#
+# The shipped config skips verification, and on Kubernetes it has to: the
+# installer has no CA to give the controller -- the certificate of the
+# kube-prometheus-stack it deploys is self-signed and generated on the
+# workstation, and nothing mounts it into the controller. Flipping the default
+# would make every such install exit on "x509: certificate signed by unknown
+# authority". So the default stays, and an install that ends up unverified says
+# so, with the production setting. OpenShift ships verification on (service CA)
+# and never reaches the warning.
+wva_warn_prometheus_tls() {
+    local cfg="$1" url skip ca
+    [ -n "$cfg" ] || return 0
+    url="$(printf '%s\n' "$cfg" | yq -r '.PROMETHEUS_BASE_URL // ""' 2>/dev/null || true)"
+    skip="$(printf '%s\n' "$cfg" | yq -r '.PROMETHEUS_TLS_INSECURE_SKIP_VERIFY // ""' 2>/dev/null || true)"
+    ca="$(printf '%s\n' "$cfg" | yq -r '.PROMETHEUS_CA_CERT_PATH // ""' 2>/dev/null || true)"
+    case "$url" in https://*) ;; *) return 0 ;; esac
+    [ "$skip" = "true" ] || return 0
+    [ -z "$ca" ] || return 0
+    log_warning "WVA will NOT verify the TLS certificate of $url (PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true, no PROMETHEUS_CA_CERT_PATH)."
+    log_warning "  Fine for a development cluster. In production, mount the CA that signed the Prometheus certificate into the"
+    log_warning "  controller and set PROMETHEUS_CA_CERT_PATH=<file> and PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=false."
+    log_warning "  See docs/reference/prometheus.md#tls-configuration."
+}
+
 deploy_wva_controller() {
     log_info "Deploying Workload-Variant-Autoscaler..."
     if [ -n "${WVA_IMAGE_DIGEST:-}" ]; then
@@ -621,6 +647,10 @@ wva_reconcile_prometheus_scheme() {
     if [ -n "${PROMETHEUS_TLS_INSECURE_SKIP_VERIFY:-}" ]; then
         patch_manager_config ".PROMETHEUS_TLS_INSECURE_SKIP_VERIFY = \"${PROMETHEUS_TLS_INSECURE_SKIP_VERIFY}\""
     fi
+    # Read back what the controller will actually run with, after every patch
+    # above, rather than reasoning about which of them applied.
+    wva_warn_prometheus_tls "$(kubectl get configmap wva-manager-config -n "$WVA_NS" \
+        -o jsonpath='{.data.config\.yaml}' 2>/dev/null || true)"
 
     if [ "${ENABLE_SCALE_TO_ZERO:-false}" = "true" ]; then
         log_info "Enabling scale-to-zero in WVA ConfigMap (ENABLE_SCALE_TO_ZERO=true)..."

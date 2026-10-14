@@ -80,7 +80,7 @@ Environment Variables:
                                cluster already has a Prometheus outside MONITORING_NAMESPACE.
   PROMETHEUS_FORCE_INSTALL     Install even then (default: false). Two operators will contend over the same CRs.
   PROMETHEUS_URL               Where WVA reads metrics from. Required when Prometheus is not deployed here.
-  PROMETHEUS_TLS_INSECURE_SKIP_VERIFY  Skip Prometheus certificate verification (default: false)
+  PROMETHEUS_TLS_INSECURE_SKIP_VERIFY  Skip Prometheus certificate verification (default: the shipped config, true on Kubernetes)
   DEPLOY_OPERATIONAL_DASHBOARD Publish the WVA Grafana dashboard (default: true). Works against an
                                existing Grafana — it is a sidecar-labelled ConfigMap.
   DASHBOARD_NS                 Namespace to publish the dashboard into (default: MONITORING_NAMESPACE)
