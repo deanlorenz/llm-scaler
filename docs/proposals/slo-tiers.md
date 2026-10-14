@@ -194,7 +194,7 @@ From `main` at `cb37a21e2`:
 | Saturation runs first in the cycle | `engine_v2.go:146-150` | The `slo` analyzer can read **this** cycle's ITL line |
 | Analyzers are registered once, before the loop starts | `cmd/main.go:673`; throughput only if config listed it at boot | The `slo` analyzer is registered unconditionally, and per-model enablement gates it at no cost (below) |
 | The ITL line is saturation's private state, and **decode-only** | `itlWindows` / `itlLines` on `SaturationAnalyzer` (`analyzer.go:85-117`); `fitLines` skips every role but decode (`analyze.go:341`) | An aggregated replica (role `both`) never gets a line there, so the `slo` analyzer fits its own (below) |
-| `TokenRate` has no batch cap | `itl.TokenRate(m, k, kvMax, kvReq)` (`signals/itl/rate.go:40`); saturation caps at `max_num_seqs` before dividing (`mu_from_itl.go:186-190`), with C from `capacityTokensFor(params, …)` | The `slo` analyzer needs the capacity store's engine params too |
+| `TokenRate` has no batch cap | `itl.TokenRate(m, k, kvMax, kvReq)` (`signals/itl/rate.go:40`); saturation caps at `max_num_seqs` before dividing (`mu_from_itl.go:226-227`), with C from `capacityTokensFor(params, …)` | The `slo` analyzer needs the capacity store's engine params too |
 | The line's fitted range is [0.15, 0.80] of physical KV | `itl.DefaultMinObservableK` / `DefaultMaxObservableK` (`window.go`); `pricingK` clamps to it (`mu_from_itl.go:176`) | The SLO's fill uses the same clamp |
 | No percentile is computed anywhere in Go | Engine latency is read as `rate(_sum)/rate(_count)` means only; router latency appears only in `operational-dashboard.json` | Bucket queries are new |
 | `AvgTTFT` is diagnostic by decision | `domain/replica_metrics.go:222` | A `TTFT(T) = A·T + B` fit was built and removed: queue wait landed in the intercept (82 s) |
@@ -471,8 +471,8 @@ direction, unless noted.
    penalises extrapolation without the ratchet bound 1 removed. Re-run bound
    1's closed-loop test with it. Store `B` only from fits whose standard error
    is small.
-5. **The window counts cycles, not replica readings.** `DefaultWindowMaxSize`
-   is 20 readings, so ten replicas turn it over in two cycles of nearly equal
+5. **The window should count cycles; it counts replica readings.**
+   `DefaultWindowMaxSize` is 20 readings, so ten replicas turn it over in two cycles of nearly equal
    `k`. Keep one point per replica per cycle and weight by time.
 6. **An aggregated line is shape-specific.** On a `both` replica every step
    mixes decodes with prefill chunks, so ITL at a given `k` rises when prompts
@@ -584,13 +584,15 @@ From the router, per model and objective, over 5 minutes:
     rather than reading 0 or 1.
   - A quantile landing in the `+Inf` bucket is published as `+Inf`, not the
     top finite bound (built).
-- **Transients are excluded and counted (not built in phase 0).** Windows in
-  which the model had 0 ready replicas, had a replica starting, or were within
-  120 s of a rise are to be excluded, and the excluded share published. A
-  parked model's wake (192 s measured for a GLM-class model) would otherwise
-  read as a capacity miss. Phase 0 publishes the raw 5-minute figure, which is
-  enough to observe and not enough to trim on; the exclusion is a precondition
-  of phase 3.
+- **Transients are excluded (built).** A window is not judged while it covers
+  a cycle in which the model had no current replica (waking), had a replica
+  starting (pending less stuck), or rose in committed replicas, nor for 120 s
+  after: its requests complete, and are recorded, after the transient. The
+  observed figure and attainment are withheld, the request count is still
+  published, and `wva_slo_excluded{reason}` says why. A parked model's wake
+  (192 s measured for a GLM-class model) would otherwise read as a capacity
+  miss. A model at zero is not analyzed at all, so the exclusion sees the wake
+  from the cycle its replica is ordered.
 
 ## Observability
 
@@ -602,7 +604,8 @@ Labels follow the shipped `wva_*` convention: `namespace`, `model_name`,
 | `wva_slo_target_seconds` | namespace, model_name, objective, statistic (`mean`/`p90`…) | The declared target |
 | `wva_slo_observed_seconds` | namespace, model_name, objective, statistic | The router's observed mean (TPOT) or percentile (TTFT), over 5 m |
 | `wva_slo_attainment_ratio` | namespace, model_name, objective, statistic | The TTFT share within target; absent below the sample minimum |
-| `wva_slo_window_requests` | namespace, model_name, objective, statistic | Completed requests the router recorded over the window, so "unjudged" (too few) reads apart from "absent" (nothing reported) |
+| `wva_slo_window_requests` | namespace, model_name, objective, statistic | Completed requests the router recorded for the objective over the window, so "unjudged" (too few) reads apart from "absent" (nothing reported) |
+| `wva_slo_excluded` | namespace, model_name, reason | 0/1 per reason (`zero-replicas`, `starting`, `rise`): why the window is not judged this cycle |
 | `wva_slo_fill` | namespace, model_name, variant_name, objective | The fill `k_v` behind `P_slo`, physical KV fraction |
 | `wva_slo_predicted_itl_seconds` | namespace, model_name, variant_name | The mean ITL the line predicts at the **realised** fill (`k_v` after the scale-up headroom): the margin an operator actually has |
 | `wva_slo_source` | namespace, model_name, variant_name, source | 0/1 per source, like `wva_replica_capacity_source`: `own`, `pinned`, `pinned-default`, `no-line`, `no-output-length`, `infeasible`, `input-invalid`. Phase 1 adds `borrowed` (bound 3) |
@@ -673,7 +676,7 @@ sizer. The trim corrects a model that drifted, over tens of minutes.
   the analyzer: the analyzer runs only when it is listed, so it never sees
   targets without the analyzer.
 - The router queries: TTFT buckets and TPOT mean, per model, with the
-  attainment rules above except the transient exclusion.
+  attainment rules above, the transient exclusion included.
 - The TPOT pricing: the analyzer's own lines, `k_tpot`, the clamp, `P_v` with
   the batch cap, and `D` with the router backlog.
 - The metrics above, documented in `docs/reference/prometheus.md`, and the
@@ -760,7 +763,10 @@ It is deferred until a user asks for a TPOT percentile.
 - Built and passing after the second review round: 60 specs in the package;
   `reachableFill`, the unknown-output-length path, `pinned-default`, the request
   count and the `+Inf` publication have their own specs, and six more
-  mutations (28 in all) fail the suite on each.
+  mutations (28 in all) fail the suite on each. A third round added the
+  transient exclusion and specs that read what `Analyze` publishes, the engine
+  wiring (router source, query registration, the per-cycle sweep, the
+  misconfiguration report) and the registry-built query text.
 
 **In the composite (phase 1):**
 
