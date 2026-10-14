@@ -472,11 +472,24 @@ With the scaling manager metrics, the value for the label `namespace` is the sca
 
 ### `wva_scaler_undecided_answers_total`
 - **Type**: Counter
-- **Description**: `GetMetrics` answers the KEDA external scaler gave with no decision behind them. Before the scaling manager has decided a target it answers the target's current replica count, so the HPA holds; this counts those answers. See [before the first decision](scaledobject-trigger.md#before-the-first-decision-and-the-fallback).
+- **Description**: `GetMetrics` answers the KEDA external scaler gave with no usable decision behind them. Without one the scaler answers the target's current replica count, so the HPA holds; this counts those answers. See [before the first decision](scaledobject-trigger.md#before-the-first-decision-and-the-fallback).
 - **Labels**:
   - `namespace`: the ScaledObject's namespace (scraped as `exported_namespace`; see the note on namespaces above)
-  - `reason`: `no-decision` (a target the scaling manager plans but has not decided yet, normally the first cycle after a restart or a leader change) or `not-managed` (the trigger metadata does not parse, so no engine will ever decide it)
-- **Use Case**: A burst of `no-decision` after a restart is expected and stops within a cycle or two. Alert on `not-managed` growing, or on `no-decision` growing for longer than a few optimization intervals: that model's replica count is frozen. The controller logs `external scaler has no decision for this target` once per ScaledObject, naming it.
+  - `reason`: `no-decision` (a target the scaling manager plans but has not decided yet, normally the first cycle after a restart or a leader change), `stale` (its last decision is older than the decision TTL, 60 s or two optimization intervals, whichever is longer: no engine is republishing it), or `not-managed` (the trigger metadata does not parse, so no engine will ever decide it)
+- **Use Case**: Which reason, and how fast. A counter grows on every poll of every undecided target, so its rate says more about polling than about how many models are frozen: alert on `wva_scaler_undecided_targets`, not on this.
+
+### `wva_scaler_undecided_targets`
+- **Type**: Gauge
+- **Description**: ScaledObjects the KEDA external scaler is currently answering without a usable decision (with the target's current replica count). A ScaledObject enters on an undecided `GetMetrics` answer and leaves on the next decided one, when it is no longer registered, or two minutes after its last undecided answer (KEDA stops asking about a target parked at zero or deleted). Read at scrape time; a namespace with none has no series.
+- **Labels**:
+  - `namespace`: the ScaledObject's namespace (scraped as `exported_namespace`)
+- **Use Case**: Non-zero for a cycle or two after a restart or leader change is expected. Alert when it stays above 0 for 10 minutes: those models' replica counts are frozen. `wva_scaler_undecided_answers_total` says why. The controller logs `external scaler has no decision for this target` each time a ScaledObject enters the set, naming it, and `external scaler has a decision for this target again` when it leaves on a decision.
+
+  ```yaml
+  - alert: WVAScalerTargetsUndecided
+    expr: max by (exported_namespace) (wva_scaler_undecided_targets) > 0
+    for: 10m
+  ```
 
 ### `wva_scaler_panics_total`
 - **Type**: Counter

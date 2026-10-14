@@ -786,6 +786,9 @@ func main() {
 		Addr:     *externalScalerBindAddress,
 		Client:   mgr.GetAPIReader(),
 		Registry: registry.Default,
+		// A decision is stale after two optimize intervals (and never before
+		// 60 s); the interval can be reloaded, so it is read per call.
+		DecisionInterval: cfg.OptimizationInterval,
 	}
 	// Without leader election this replica is the leader from the start; the
 	// manager's Elected channel says so too, but only after it has started

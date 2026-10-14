@@ -767,6 +767,9 @@ func InitMetrics(registry prometheus.Registerer) error {
 	if err := registry.Register(scalerPanicsTotal); err != nil {
 		return fmt.Errorf("failed to register scalerPanicsTotal metric: %w", err)
 	}
+	if err := registry.Register(newScalerUndecidedTargetsCollector(controllerInstance)); err != nil {
+		return fmt.Errorf("failed to register scalerUndecidedTargets metric: %w", err)
+	}
 	if err := registry.Register(metricsFreshnessStatus); err != nil {
 		return fmt.Errorf("failed to register metricsFreshnessStatus metric: %w", err)
 	}
@@ -1486,6 +1489,67 @@ func IncScalerUndecidedAnswer(namespace, reason string) {
 		labels[constants.LabelControllerInstance] = controllerInstance
 	}
 	scalerUndecidedAnswersTotal.With(labels).Inc()
+}
+
+var (
+	// scalerUndecidedTargetsMu guards scalerUndecidedTargetsFn.
+	scalerUndecidedTargetsMu sync.Mutex
+	// scalerUndecidedTargetsFn reports, per namespace, how many ScaledObjects
+	// the external scaler is currently answering without a decision. Read at
+	// scrape time, so the gauge never outlives the state it reports.
+	scalerUndecidedTargetsFn func() map[string]int
+)
+
+// SetScalerUndecidedTargetsSource sets the function wva_scaler_undecided_targets
+// is read from at scrape time (scaler.Handler.UndecidedTargets). Nil reports
+// nothing.
+func SetScalerUndecidedTargetsSource(fn func() map[string]int) {
+	scalerUndecidedTargetsMu.Lock()
+	defer scalerUndecidedTargetsMu.Unlock()
+	scalerUndecidedTargetsFn = fn
+}
+
+// scalerUndecidedTargetsCollector emits wva_scaler_undecided_targets from
+// scalerUndecidedTargetsFn on every scrape. A collector rather than a GaugeVec:
+// the set is pruned when read, so a namespace whose last undecided target is
+// deleted drops out of the scrape instead of keeping a series set by a call
+// that will never come again.
+type scalerUndecidedTargetsCollector struct {
+	desc     *prometheus.Desc
+	instance string
+}
+
+func newScalerUndecidedTargetsCollector(instance string) *scalerUndecidedTargetsCollector {
+	labels := []string{constants.LabelNamespace}
+	if instance != "" {
+		labels = append(labels, constants.LabelControllerInstance)
+	}
+	return &scalerUndecidedTargetsCollector{
+		desc: prometheus.NewDesc(constants.WVAScalerUndecidedTargets,
+			"Number of ScaledObjects the KEDA external scaler is currently answering without a WVA decision (with the scale target's current replica count)",
+			labels, nil),
+		instance: instance,
+	}
+}
+
+// Describe implements prometheus.Collector.
+func (c *scalerUndecidedTargetsCollector) Describe(ch chan<- *prometheus.Desc) { ch <- c.desc }
+
+// Collect implements prometheus.Collector.
+func (c *scalerUndecidedTargetsCollector) Collect(ch chan<- prometheus.Metric) {
+	scalerUndecidedTargetsMu.Lock()
+	fn := scalerUndecidedTargetsFn
+	scalerUndecidedTargetsMu.Unlock()
+	if fn == nil {
+		return
+	}
+	for ns, n := range fn() {
+		values := []string{ns}
+		if c.instance != "" {
+			values = append(values, c.instance)
+		}
+		ch <- prometheus.MustNewConstMetric(c.desc, prometheus.GaugeValue, float64(n), values...)
+	}
 }
 
 // IncScalerPanic counts one panic recovered in a KEDA external scaler gRPC

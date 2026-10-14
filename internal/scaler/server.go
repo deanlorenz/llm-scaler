@@ -43,7 +43,9 @@ type Server struct {
 	// Client reads KEDA ScaledObjects to resolve scale targets. It MUST be an
 	// uncached reader (manager.GetAPIReader): a cached Get of a ScaledObject
 	// lazily starts a cluster-wide LIST+WATCH informer for the kind, which is the
-	// watch this design removes.
+	// watch this design removes. Without a decision the scaler also reads the
+	// target's scale subresource through it, which the manager's API reader (a
+	// full client.Client) supports; a reader that cannot fails those answers.
 	Client client.Reader
 	// Registry is where incoming calls register the workloads they name — WVA's
 	// discovery. Nil uses registry.Default, which is what the engines read.
@@ -60,6 +62,10 @@ type Server struct {
 	// reaches no RPC. Nil serves plaintext, which is the default: KEDA's
 	// external trigger dials plaintext unless its authentication names a CA.
 	TLSConfig *tls.Config
+	// DecisionInterval reports the engines' publish interval
+	// (config.OptimizationInterval). A positive decision older than two of
+	// them is answered as stale; nil keeps the 60 s floor alone.
+	DecisionInterval func() time.Duration
 
 	// listening is set once a listener is bound and cleared when Start returns.
 	// Where the platform allows it the hand-off binds the full server before
@@ -143,7 +149,10 @@ func (s *Server) Start(ctx context.Context) error {
 	// On every exit, including a cancellation that lands during the hand-off.
 	defer s.listening.Store(false)
 
-	full := NewHandler(s.Client, nil, s.Registry).WithElected(s.Elected)
+	full := NewHandler(s.Client, nil, s.Registry).WithElected(s.Elected).WithDecisionInterval(s.DecisionInterval)
+	// Only the full handler ever answers without a decision; the standby
+	// refuses instead, so its set would always read empty.
+	metrics.SetScalerUndecidedTargetsSource(full.UndecidedTargets)
 	if full.leader() {
 		logger.Info("KEDA external scaler listening", "addr", s.Addr)
 		srv, err := s.bind(ctx, full)

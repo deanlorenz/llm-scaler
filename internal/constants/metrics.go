@@ -444,6 +444,15 @@ const (
 	// Labels: namespace, reason (ScalerUndecided* values)
 	WVAScalerUndecidedAnswersTotal = "wva_scaler_undecided_answers_total"
 
+	// WVAScalerUndecidedTargets is a gauge of ScaledObjects the KEDA external
+	// scaler is CURRENTLY answering without a WVA decision. A ScaledObject
+	// leaves it when a decided answer is given for it, when it is no longer
+	// registered, or two minutes after its last undecided answer. Non-zero for
+	// a cycle or two after a restart is expected; non-zero for minutes names a
+	// target WVA is asked about and does not decide.
+	// Labels: namespace
+	WVAScalerUndecidedTargets = "wva_scaler_undecided_targets"
+
 	// WVAScalerPanicsTotal is a counter of panics the KEDA external scaler's
 	// gRPC recovery interceptors caught and answered with codes.Internal. Any
 	// non-zero value is a bug; the stack is in the controller log.
@@ -847,6 +856,12 @@ const (
 	// every engine skips the workload. It holds at its current count until
 	// the ScaledObject is fixed.
 	ScalerUndecidedNotManaged = "not-managed"
+
+	// ScalerUndecidedStale indicates a target whose last positive decision is
+	// older than the scaler's decision TTL (at least 60 s, and at least two
+	// optimize intervals): no engine is republishing it. The scaler answers
+	// the current count, as IsActive already does for such a decision.
+	ScalerUndecidedStale = "stale"
 )
 
 // Metric Label Names
