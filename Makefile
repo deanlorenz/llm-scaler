@@ -2896,13 +2896,21 @@ $(HELM): $(LOCALBIN)
 # $1 - target path with name of binary
 # $2 - package url which can be installed
 # $3 - specific version of package
+# go-install-tool retries: the module proxy and checksum server occasionally
+# drop an HTTP/2 stream ("stream error ... INTERNAL_ERROR"), and a CI job
+# with no module cache then fails before it builds anything.
 define go-install-tool
 @[ -f "$(1)-$(3)" ] || { \
 set -e; \
 package=$(2)@$(3) ;\
 echo "Downloading $${package}" ;\
 rm -f $(1) || true ;\
-GOBIN=$(LOCALBIN) go install $${package} ;\
+for attempt in 1 2 3; do \
+  GOBIN=$(LOCALBIN) go install $${package} && break ;\
+  [ $$attempt -lt 3 ] || exit 1 ;\
+  echo "go install $${package} failed (attempt $$attempt of 3), retrying" ;\
+  sleep $$((attempt * 10)) ;\
+done ;\
 mv $(1) $(1)-$(3) ;\
 } ;\
 ln -sf $(1)-$(3) $(1)
