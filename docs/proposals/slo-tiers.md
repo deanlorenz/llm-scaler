@@ -493,15 +493,52 @@ direction, unless noted.
 This is the least certain part. It is enforced only after phase 0 has run in
 shadow on real traffic and shown the curve can be learned.
 
-**Step 2a is built: the curve's inputs, observed.** For every variant that
-prefills, under a TTFT target, the analyzer publishes its mean prefill time
-(`vllm:request_prefill_time_seconds`: scheduled to first token, so no queue in
-it), its mean engine queue wait (`vllm:request_queue_time_seconds`), its prefill
-utilization, and the learned ceiling that utilization is measured against
-(the p90 of the prefill token rate on cycles its engine queue was non-empty,
-over the last hour). Nothing is priced from them. Plotting prefill time against
-utilization on real traffic is what shows whether the curve below is learnable.
-vLLM only: SGLang publishes no per-stage prefill figure.
+**Step 2a is built: the curve's inputs, observed.** Nothing is priced from
+them. Plotting prefill time against utilization on real traffic is what shows
+whether the curve below is learnable. vLLM only: SGLang publishes no per-stage
+prefill figure.
+
+- **For every variant that prefills, under a TTFT target:**
+  - its mean prefill time, `vllm:request_prefill_time_seconds`: from first
+    scheduled to first token. It is not a pure service time: a request
+    preempted before its first token waits again inside it, and chunked
+    prefill's turns in a mixed batch are in it;
+  - its mean engine queue wait, `vllm:request_queue_time_seconds`: the first
+    wait only.
+- **For a prefill-role variant only:**
+  - its prefill utilization;
+  - the learned ceiling that utilization is measured against.
+
+  The ceiling is the p90 over the last hour of per-cycle medians of the prefill
+  token rate on replicas that were queued with KV below 0.80, from at least ten
+  cycles spread over five minutes. The last ceiling is kept when the window
+  runs dry.
+
+  An aggregated variant gets no ceiling. Its computed-token counter is
+  recorded a whole generation after the prefill, and its queue is mostly KV
+  held by decodes.
+
+**What the 2a data must answer before 2b prices anything.** These are from the
+fourth review round:
+
+- **The x-axis.** Served utilization pins at 1 under overload, whatever the
+  queue does, so the overload end of the curve is vertical. 2b plots offered
+  prompt load (`ArrivalRate × ILeff`) against the ceiling, or cuts at the
+  cycle the queue starts growing.
+- **Per-replica points, not variant means.** Prefill and queue time are
+  convex in utilization, so pooled means sit above the per-replica curve.
+- **Absolute tokens per second, normalised once.** A ceiling that moves every
+  cycle puts points from different hours on different scales.
+- **A ceiling keyed by prompt-length bucket.** It moves with attention cost.
+- **A defined effective sample size.** Cycles read overlapping 1 m and 5 m
+  windows.
+- **The saturation gate.** It is the 1-minute peak of the waiting gauge, so a
+  minute with one momentary wait counts as saturated.
+- **Preemptions alongside each point.** A point taken under preemption is
+  flagged.
+- **A check that the pieces add up.** On real traffic, router mean TTFT should
+  be about engine queue plus prefill. Otherwise the residual (EPP queue,
+  sidecar, KV transfer) hides in the tail ratio.
 
 ```
 TTFT_router  ≈  router queue  +  engine queue  +  prefill
@@ -595,11 +632,24 @@ From the router, per model and objective, over 5 minutes:
   - A quantile landing in the `+Inf` bucket is published as `+Inf`, not the
     top finite bound (built).
 - **Transients are excluded (built).** A window is not judged while it covers
-  a cycle in which the model had no current replica (waking), had a replica
-  starting (pending less stuck), or rose in committed replicas, nor for 120 s
-  after: its requests complete, and are recorded, after the transient. The
-  observed figure and attainment are withheld, the request count is still
-  published, and `wva_slo_excluded{reason}` says why. A parked model's wake
+  a cycle in which the model had no ready replica (waking) or had a replica
+  starting (a not-Ready Pod younger than 30 minutes; an older one was Ready and
+  failed its probe, a flap, not a start), nor for a grace after: its requests complete,
+  and are recorded, after the transient. The grace is the longer of 120 s and
+  1.5 times the longest mean request duration among the ready replicas,
+  because a request queued through a wake is recorded only when its whole
+  generation ends. A rise is not a reason of its own: its new replicas are
+  "starting" until they serve, and excluding it after that would drop exactly
+  the windows in which the new sizing is being tested, biasing attainment up. The
+  exclusion is per objective: TTFT on a transient of any variant, since a
+  decode short of capacity back-pressures prefill; TPOT only on a transient of
+  a decode or aggregated variant, since a prefill replica starting does not
+  change how fast tokens come out. The observed figure and attainment are
+  withheld, the request count is still published, and
+  `wva_slo_excluded{objective,reason}` says why. One scale-up leaves an
+  objective unjudged for about the start time plus 7 minutes, so a fleet that
+  scales more often than that is never judged; the `WVAModelSLOUnjudged` alert
+  says so rather than the miss alert going quiet. A parked model's wake
   (192 s measured for a GLM-class model) would otherwise read as a capacity
   miss. A model at zero is not analyzed at all, so the exclusion sees the wake
   from the cycle its replica is ordered.
@@ -615,7 +665,7 @@ Labels follow the shipped `wva_*` convention: `namespace`, `model_name`,
 | `wva_slo_observed_seconds` | namespace, model_name, objective, statistic | The router's observed mean (TPOT) or percentile (TTFT), over 5 m |
 | `wva_slo_attainment_ratio` | namespace, model_name, objective, statistic | The TTFT share within target; absent below the sample minimum |
 | `wva_slo_window_requests` | namespace, model_name, objective, statistic | Completed requests the router recorded for the objective over the window, so "unjudged" (too few) reads apart from "absent" (nothing reported) |
-| `wva_slo_excluded` | namespace, model_name, reason | 0/1 per reason (`zero-replicas`, `starting`, `rise`): why the window is not judged this cycle |
+| `wva_slo_excluded` | namespace, model_name, objective, reason | 0/1 per objective and reason (`zero-replicas`, `starting`): why the window is not judged this cycle |
 | `wva_slo_fill` | namespace, model_name, variant_name, objective | The fill `k_v` behind `P_slo`, physical KV fraction |
 | `wva_slo_predicted_itl_seconds` | namespace, model_name, variant_name | The mean ITL the line predicts at the **realised** fill (`k_v` after the scale-up headroom): the margin an operator actually has |
 | `wva_slo_source` | namespace, model_name, variant_name, source | 0/1 per source, like `wva_replica_capacity_source`: `own`, `pinned`, `pinned-default`, `no-line`, `no-output-length`, `infeasible`, `input-invalid`. Phase 1 adds `borrowed` (bound 3) |
