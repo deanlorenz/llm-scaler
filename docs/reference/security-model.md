@@ -199,7 +199,7 @@ an InferencePool serves from, wherever warm pools exist.
 
 | Port | Protocol | Exposed by | Authentication | Notes |
 | --- | --- | --- | --- | --- |
-| `9090` | gRPC, **plaintext** by default; TLS with `--external-scaler-cert-path` | Service `wva-external-scaler` (ClusterIP); NetworkPolicy `wva-external-scaler` admits only KEDA's namespace | **none** by default; mutual TLS with `--external-scaler-client-ca`, limited to named clients with `--external-scaler-client-san` | the KEDA external scaler |
+| `9090` | gRPC, **plaintext** by default; mutual TLS with `WVA_SCALER_TLS=true` (or the `--external-scaler-*` flags by hand) | Service `wva-external-scaler` (ClusterIP); NetworkPolicy `wva-external-scaler` admits only KEDA's namespace | **none** by default; with `WVA_SCALER_TLS=true`, only a client certificate the install's CA signed for `wva-keda-client` | the KEDA external scaler |
 | `8443` | HTTPS | Service `wva-controller-manager-metrics-service` (ClusterIP) | TokenReview + SubjectAccessReview on `get /metrics` | self-signed certificate unless `--metrics-cert-path` is set (OpenShift sets it, from the service CA) |
 | `8081` | HTTP | no Service; the kubelet's probes | none | `/healthz`, `/readyz` |
 | `8001` (warm pool only) | HTTP, **plaintext** | the warm-pool pod's launcher (supervisor); also `8002` (proxy control) and `9001`-`9016` (engine instances) | **none** | the supervisor starts engine processes with **caller-supplied argv and env**, in a pod that mounts the shared model cache (`model-pvc`) **read-write**. The only protection is the pool's NetworkPolicy (`config/warmpool/warmpool-networkpolicy.yaml`), which admits these ports only from controller pods in `workload-variant-autoscaler-system` — so it holds only if your network plugin enforces NetworkPolicy, and anyone who can start a pod with the controller's labels in that namespace passes it |
@@ -264,6 +264,28 @@ it; delete it ([upgrade](upgrade-and-uninstall.md#the-external-scaler-networkpol
 namespace if you want that port closed too; it is already authenticated. The
 shipped policy admits `8081` from every source, because kubelet probes come
 from the node, which no `from:` selector can name.
+
+### Scaler mutual TLS
+
+The NetworkPolicy holds only on a network plugin that enforces it. Mutual TLS
+holds on any network. `WVA_SCALER_TLS=true make deploy-wva` turns it on:
+
+- The installer issues a serving certificate for the scaler Service and a
+  client certificate for KEDA, from cert-manager when it is installed and from
+  a private CA of its own otherwise (on OpenShift the serving certificate comes
+  from the service CA). Details: [configuration](configuration.md#advanced).
+- The controller then accepts only a client certificate that CA signed **and**
+  that names `wva-keda-client`. Anything else is refused in the TLS handshake,
+  before any call can register a workload or read a decision.
+- **Not on by default yet**: the installer does not yet attach a
+  TriggerAuthentication to the ScaledObjects it writes, and KEDA dials a
+  ScaledObject without one in plaintext, which a TLS server refuses. Add one to
+  each before turning TLS on; `make verify-deployment` lists those still missing.
+- It protects the port only where the tenant cannot edit the controller's
+  Deployment (the controller in an admin-owned namespace): whoever owns the
+  Deployment owns its flags. The client key is as sensitive as the port: anyone
+  who can read Secret `wva-external-scaler-client-tls`, or a copy of it, can
+  call the scaler as KEDA.
 
 ## Data handled
 
@@ -368,13 +390,16 @@ scaling manager asks for; the quota bounds what the cluster admits
 | Two limiter kinds declared | only the quota is built; the physical limiter is dropped and named as `notEnforced` | **open** on physical capacity |
 | The installer cannot tell where KEDA runs | no external-scaler NetworkPolicy is applied; the installer warns and `make verify-deployment` reports `:9090` open | **open**, and reported |
 | The external-scaler NetworkPolicy names a namespace KEDA does not run in | KEDA's calls are dropped; ScaledObjects go not-Ready and nothing scales | closed |
+| Scaler TLS on, a ScaledObject with no TriggerAuthentication | KEDA dials it in plaintext, the handshake fails; it goes not-Ready and nothing it targets scales. `make verify-deployment` names it | closed |
+| Scaler TLS on, the serving certificate expired (no cert-manager, no re-install) | every handshake fails; nothing scales. `make verify-deployment` warns 30 days ahead | closed |
+| The installer finds a Secret, Issuer or Certificate it did not create, or cannot read one | it refuses to install TLS and changes nothing | closed |
 
 ## Production hardening checklist
 
 - [ ] Prometheus TLS verified: `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY: "false"` and `PROMETHEUS_CA_CERT_PATH` set (the controller sends its token there).
 - [ ] A real certificate for `:8443`: `--metrics-cert-path` (OpenShift does this; on Kubernetes the shipped ServiceMonitor also skips verification).
 - [ ] Controller image pinned to a tag or digest, not `:main`.
-- [ ] The shipped external-scaler NetworkPolicy in place (`WVA_SCALER_NETWORKPOLICY` not `false`), naming the KEDA operator's namespace (`make verify-deployment` prints no NetworkPolicy warning), on a network plugin that enforces it — or scaler mutual TLS (`--external-scaler-client-ca` with `--external-scaler-client-san`) on a controller Deployment an admin owns.
+- [ ] The shipped external-scaler NetworkPolicy in place (`WVA_SCALER_NETWORKPOLICY` not `false`), naming the KEDA operator's namespace (`make verify-deployment` prints no NetworkPolicy warning), on a network plugin that enforces it — or scaler mutual TLS (`WVA_SCALER_TLS=true`, every ScaledObject with a TriggerAuthentication) on a controller Deployment an admin owns. `make verify-deployment` reports which, and the certificate's expiry.
 - [ ] A `ResourceQuota` on the GPU resource in every tenant namespace — the real bound.
 - [ ] The controller out of the tenant's reach (`WVA_NS` admin-owned, `WVA_WATCH_NS` the tenant's) wherever a bound must hold.
 - [ ] `make enable-physical-limiter` run with an explicit `WVA_LIMITER_TARGETS`.

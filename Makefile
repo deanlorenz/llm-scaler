@@ -2679,6 +2679,11 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# rewrite another workload's trigger metadata. A policy that selects no Pod,
 	@# admits {} or drops the metrics port all apply cleanly.
 	@KUSTOMIZE=$(KUSTOMIZE) bash hack/check-external-scaler-networkpolicy.sh
+	@echo "Checking the external-scaler TLS provisioning..."
+	@# Runs the certificate code against a stubbed kubectl and the real openssl:
+	@# a certificate naming the wrong host, a re-install that drops TLS, or a
+	@# foreign Secret overwritten all install cleanly.
+	@KUSTOMIZE=$(KUSTOMIZE) bash hack/check-scaler-tls.sh
 	@echo "Checking what warmpool.sh actually emits..."
 	@# Renders the pool manifests and asserts their shape. Every bug this covers
 	@# parses fine: one container with the proxy image under the supervisor's

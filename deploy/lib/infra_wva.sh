@@ -271,8 +271,8 @@ wva_warn_scaler_port_open() {
     fi
     log_warning "  To close it, as a cluster admin:"
     log_warning "    $phase_cmd"
-    log_warning "  or serve the scaler over mutual TLS (--external-scaler-cert-path and"
-    log_warning "  --external-scaler-client-ca; see docs/reference/configuration.md)."
+    log_warning "  or serve the scaler over mutual TLS (WVA_SCALER_TLS=true; see"
+    log_warning "  docs/reference/configuration.md)."
     log_warning "=================================================================="
 }
 
@@ -786,6 +786,11 @@ EOF
 
     # Who may call the external scaler: KEDA's namespace only, unless opted out.
     wva_append_scaler_networkpolicy_patch "$tmp_overlay/kustomization.yaml"
+
+    # How KEDA's calls are authenticated: WVA_SCALER_TLS provisions the
+    # certificates and mounts them (deploy/lib/scaler_tls.sh). Before the apply,
+    # so the first pod of a TLS install finds its Secrets.
+    wva_scaler_tls_prepare "$tmp_overlay/kustomization.yaml"
 
     # Prune on INSTALL as well as uninstall. Waiting for an uninstall would leave
     # the grant in place on every cluster that already has it, since upgrading is

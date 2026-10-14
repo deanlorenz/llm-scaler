@@ -109,6 +109,11 @@ Environment Variables:
                                none of those, NO policy is written and :9090 stays open (warned)
   WVA_SCALER_NETWORKPOLICY     false skips the NetworkPolicy that admits :9090 only from KEDA
                                (default: true)
+  WVA_SCALER_TLS               true serves the external scaler over mutual TLS, with certificates
+                               the installer provisions (default: false for a new install; a
+                               re-install keeps what the running controller has)
+  WVA_SCALER_TLS_PROVIDER      auto (default) | cert-manager | openssl: who issues those
+                               certificates. auto uses cert-manager when it is installed
   CRD_INSTALL                  if-missing (default) | always | never. Gateway API and GAIE CRDs are
                                cluster-scoped and shared; 'always' overwrites what other controllers use.
   DEPLOY_LWS                   Install the LeaderWorkerSet CRD if absent (default: false)

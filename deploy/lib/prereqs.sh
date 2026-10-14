@@ -71,7 +71,10 @@ append_conditional_tools() {
         tools+=("column")
     fi
     # openssl mints the self-signed cert for a Prometheus this install deploys.
-    if [ "${DEPLOY_PROMETHEUS:-true}" = "true" ]; then
+    # It also mints the external scaler certificates when there is no
+    # cert-manager; asked for whenever scaler TLS is requested, since whether
+    # cert-manager answers is only known later.
+    if [ "${DEPLOY_PROMETHEUS:-true}" = "true" ] || [ "${WVA_SCALER_TLS:-}" = "true" ]; then
         tools+=("openssl")
     fi
     if [ "${ENVIRONMENT:-kubernetes}" = "openshift" ]; then
@@ -793,6 +796,18 @@ check_permissions() {
             denied+=("create namespace $ns (it does not exist yet)")
             cluster_denied=1
         fi
+    fi
+
+    # The external scaler certificates (WVA_SCALER_TLS). Written by the
+    # controller phase beside the overlay rather than rendered in it, so the
+    # loop above never sees them -- and Secret is an admin-phase kind there,
+    # which a tenant phase would otherwise never be asked about.
+    if declare -F wva_scaler_tls_permission_needs >/dev/null; then
+        local tls_need
+        for tls_need in $(wva_scaler_tls_permission_needs); do
+            kubectl auth can-i create "$tls_need" -n "$ns" >/dev/null 2>&1 \
+                || denied+=("create $tls_need in $ns (external scaler TLS; WVA_SCALER_TLS=false skips it)")
+        done
     fi
 
     if [ ${#unknown[@]} -ne 0 ]; then

@@ -150,6 +150,12 @@ EOF
     fi
     rm -rf "$tmp_overlay"
 
+    # The external scaler certificates (WVA_SCALER_TLS) are written beside the
+    # overlay, not rendered by it; only the ones carrying the installer's label.
+    if declare -F wva_scaler_tls_undeploy >/dev/null; then
+        wva_scaler_tls_undeploy
+    fi
+
     # The utilization-share need history is written by the controller, not
     # rendered, so the filtered delete above never names it. Left behind, a
     # reinstall would restore peaks recorded before the uninstall. Deleted
