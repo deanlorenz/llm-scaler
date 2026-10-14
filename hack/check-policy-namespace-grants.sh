@@ -86,8 +86,14 @@ case "$*" in
       if [ -n "${NS_GET_ERR:-}" ]; then echo "$NS_GET_ERR" >&2; exit 1; fi
       echo "Error from server (NotFound): namespaces \"$name\" not found" >&2; exit 1 ;;
   "get deploy -A"*) printf '%s\n' "${DEPLOY_NS_LIST:-}"; exit 0 ;;
-  "get deploy -n "*)
+  # By label, and (since enable-physical-limiter verifies its targets) by the
+  # verified Deployment's name.
+  "get deploy -n "*|"get deploy wva-controller-manager -n "*)
       case "$*" in
+        # The verification read of enable-physical-limiter: one genuine controller,
+        # the controller account and image, so the grants below are reached.
+        *' -o json')   # exactly -o json: '-o jsonpath=' reads go to the cases below
+            printf '%s' '{"items":[{"metadata":{"name":"wva-controller-manager"},"spec":{"template":{"spec":{"serviceAccountName":"wva-controller-manager","containers":[{"name":"manager","image":"ghcr.io/ev-shindin/llm-scaling-manager:main"}]}}}}]}' ;;
         *'.args}'*) printf '%s' '["--watch-namespace=$(WVA_WATCH_NAMESPACE)"]' ;;
         *'WVA_WATCH_NAMESPACE'*) printf '%s' '$(POD_NAMESPACE)' ;;
         *'serviceAccountName'*) printf 'wva-controller-manager' ;;
@@ -259,7 +265,9 @@ else
 fi
 
 case_begin
-if grep -q '^CALL\[rollout restart deploy -n tenant-a' "$LOG"; then
+# By name: enable-physical-limiter restarts the Deployment it verified, never
+# whatever else carries the controller label.
+if grep -q '^CALL\[rollout restart deploy wva-controller-manager -n tenant-a' "$LOG"; then
     ok "a controller that could not see wva-policy is restarted, so it re-resolves its policy source"
 else
     fail "a controller that could not read namespace wva-policy was granted it but not restarted; it keeps its own ConfigMap until something restarts it: $(grep '^CALL' "$LOG")"
