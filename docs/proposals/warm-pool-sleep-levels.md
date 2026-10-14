@@ -1,6 +1,6 @@
 # Sleep level 1 or 2, and whether NVMe can stand in for RAM
 
-Status: measured on pokprod, 2026-08-26. The pool implements **level 1 only**,
+Status: measured on an H100 OpenShift test cluster, 2026-08-26. The pool implements **level 1 only**,
 and this is the case for that, plus what level 2 would cost if host RAM ever
 becomes the binding constraint.
 
@@ -142,7 +142,7 @@ context. `shape.go` charges its overhead term per rank for that reason.
 
 ## 5. Does NVMe help? Less than it looks
 
-Measured with direct I/O, three runs each, on a pokprod GPU node:
+Measured with direct I/O, three runs each, on a GPU node of an H100 OpenShift test cluster:
 
 | | bandwidth |
 | --- | --- |
@@ -320,7 +320,7 @@ its failure must take the engine out of service.
 ## 5d. Page-cache warming, measured at last -- and it is parse that binds
 
 Recommended three times in this document and its neighbours as "the cheapest
-thing on the list, price it first". Now priced, on a pokprod GPU node:
+thing on the list, price it first". Now priced, on a GPU node of the same cluster:
 
 | | rate |
 | --- | --- |

@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -329,4 +330,77 @@ func controllerLogsSince(t time.Time) string {
 		b.Write(out)
 	}
 	return b.String()
+}
+
+// roleShortOf reports whether the controller's two most recent analyzer
+// results for model in ns ask its role for at least one more replica than it
+// holds, and says what it read. "Short" here is the condition the
+// utilization-share planner's returnSpare tests: while a role that can grow is
+// short of its claim, a donor's spare goes to it by a transfer; while none is,
+// the spare is RETURNED to the quota and the short role fills from idle GPUs
+// later, with no transfer at all.
+//
+// A donor-set spec lowers the donor's floor and then waits for a transfer, so
+// the receiver has to be seen short BEFORE the floor drops. This removes the
+// race that was observed; it does not make a return impossible. returnSpare
+// also lets the spare go while a short receiver is marked Unfunded -- every
+// single donor misfits and the set was refused that cycle by a hold, the pace
+// or the concurrency limit -- which no log line here can be gated on. Waiting only for
+// the group to be evaluated was not enough: on a GitHub runner the receiver's
+// load can take longer to show than the donor takes to qualify for a return,
+// and the spare was given back -- the run ended with the receiver grown by the
+// idle fill and no "transfer started" line, a spec failure that was the
+// planner doing the right thing for what it could see.
+//
+// A role's required capacity is what it needs beyond what it holds (rc, or
+// roleRC on a disaggregated model); it is short once that is positive. At
+// least one whole replica's capacity is asked for, not just above zero, so a
+// role a hair over is not counted as short for a cycle and then not.
+func roleShortOf(ns, model, role string, since time.Time) (bool, string) {
+	type result struct {
+		RC       float64            `json:"rc"`
+		RoleRC   map[string]float64 `json:"roleRC"`
+		Variants []struct {
+			PRC  float64 `json:"prc"`
+			Role string  `json:"role"`
+		} `json:"variants"`
+	}
+	var recent []result
+	for _, line := range strings.Split(controllerLogsSince(since), "\n") {
+		// Saturation's result only: each analyzer logs its own line per cycle,
+		// and the share planner reads saturation's alone.
+		i := strings.Index(line, "analyzer-result")
+		if i < 0 || !strings.Contains(line, `"modelID": "`+model+`"`) || !strings.Contains(line, `"namespace": "`+ns+`"`) ||
+			!strings.Contains(line, `"analyzer": "saturation"`) {
+			continue
+		}
+		j := strings.Index(line[i:], "{")
+		if j < 0 {
+			continue
+		}
+		var r result
+		if json.Unmarshal([]byte(line[i+j:]), &r) == nil {
+			recent = append(recent, r)
+		}
+	}
+	if len(recent) < 2 {
+		return false, fmt.Sprintf("%d analyzer results for %s in %s so far", len(recent), model, ns)
+	}
+	var why []string
+	short := true
+	for _, r := range recent[len(recent)-2:] {
+		rc, ok := r.RoleRC[role]
+		if !ok {
+			rc = r.RC
+		}
+		prc := 0.0
+		for _, v := range r.Variants {
+			if v.Role == role {
+				prc = max(prc, v.PRC)
+			}
+		}
+		why = append(why, fmt.Sprintf("rc=%.1f replicaCapacity=%.1f", rc, prc))
+		short = short && prc > 0 && rc >= prc
+	}
+	return short, model + "/" + role + ", last two cycles: " + strings.Join(why, "; ")
 }

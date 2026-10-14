@@ -92,8 +92,9 @@ so_plan_preamble() {
 #                whose thresholds this variant scales under. Leave it out and the
 #                cluster's own default applies, which an admin can change for
 #                every workload at once; name one here and this workload stops
-#                following that. A name no tier matches falls back to the default
-#                silently, so an entry naming one is a claim that can go stale.
+#                following that. A name no tier matches falls back to the default,
+#                and the controller logs "Scaling policy not found", so an entry
+#                naming one is a claim that can go stale.
 #
 # namespace      Where the workload is; with kind and name, what the ScaledObject
 # kind           will target.

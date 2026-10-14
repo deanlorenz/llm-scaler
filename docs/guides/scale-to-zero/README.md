@@ -18,7 +18,7 @@ perfectly and be unable to wake it, and nothing about the park looks wrong — s
 Turning this on is two settings that must agree. Scale-to-zero enabled on the
 model, and `minReplicaCount: 0` on **every** variant. Set one without the other
 and you get a valid configuration that quietly does not do what it looks like it
-does: The scaling manager reports which half is missing rather than leaving you to find out from
+does: the scaling manager reports which half is missing rather than leaving you to find out from
 the bill.
 
 ## Prerequisites

@@ -1,383 +1,163 @@
-# Local Development with Kind Emulator
+# Local development on kind with emulated GPUs
 
-Quick start guide for local development using Kind (Kubernetes in Docker) with emulated GPU resources.
+A kind cluster whose nodes advertise fake GPUs, with the scaling manager,
+Prometheus, KEDA and an llm-d EPP on it — the same stack the e2e suite runs
+against. Nothing here needs a GPU or a Hugging Face token.
 
-> **Note**: This guide covers Kind-specific deployment for local testing. For a complete overview of deployment methods and the full configuration reference, see the [main deployment guide](../).
+```bash
+CREATE_CLUSTER=true make deploy-e2e-infra
+```
 
-## Table of Contents
-
-- [Prerequisites](#prerequisites)
-- [Quick Start](#quick-start)
-- [Configuration Options](#configuration-options)
-- [Scripts](#scripts)
-- [Cluster Configuration](#cluster-configuration)
-- [Testing Locally](#testing-locally)
-- [Troubleshooting](#troubleshooting)
-- [Development Workflow](#development-workflow)
-- [Clean Up](#clean-up)
-- [Next Steps](#next-steps)
+For the full llm-d stack on kind, see
+[Test against a full llm-d stack](../../docs/guides/testing-with-llm-d/); for
+every install variable, the [configuration reference](../../docs/reference/configuration.md).
 
 ## Prerequisites
 
-- Docker
-- Kind
-- kubectl
-- Helm
+Docker, kind, kubectl, Helm, jq and go-yq v4.
 
-## Quick Start
+## What `deploy-e2e-infra` creates
 
-### Setup
+| Component | Namespace |
+| --- | --- |
+| kind cluster `kind-wva-gpu-cluster`: 3 nodes, 16 emulated GPUs each, mixed vendors | — |
+| The scaling manager controller (`wva-controller-manager`), cluster scope | `llm-d-sim` |
+| kube-prometheus-stack | `workload-variant-autoscaler-monitoring` |
+| KEDA | `keda-system` |
+| llm-d EPP and InferencePool (`llm-d-router-standalone` chart) | `llm-d-sim` |
 
-```bash
-CREATE_CLUSTER=true make deploy-e2e-infra
-```
+No model server and no ScaledObject: the e2e specs create their own. Leave out
+`CREATE_CLUSTER=true` to reuse a cluster that already exists. `IMG=<image>`
+builds that image locally (unless `SKIP_BUILD=true`) and loads it into kind.
 
-This deploys:
-
-- Kind cluster with 3 nodes, emulated GPUs (mixed vendors)
-- The scaling manager controller
-- llm-d EPP (llm-d-router-standalone chart)
-- Prometheus monitoring + KEDA (external metrics)
-
-To also deploy a simulator model service for manual testing:
+## Add a model server by hand
 
 ```bash
-# Both prefill and decode (disaggregated serving)
+# prefill and decode (disaggregated serving)
 kubectl apply -k config/samples/simulator/nodeSelector/disaggregated/
-
-# Or deploy only what you need
+# or one of them
 kubectl apply -k config/samples/simulator/nodeSelector/decode/
 kubectl apply -k config/samples/simulator/nodeSelector/prefill/
 kubectl apply -k config/samples/simulator/nodeSelector/decode-lws/
-```
 
-Each sample includes its own KEDA `ScaledObject`. That object is the
-registration — without it the scaling manager is never called about the workload and scales
-nothing, quietly.
-
-**Those ScaledObjects name the controller's namespace**, and they name the
-default one, because that is where `deploy-e2e-infra` above installs it. If you
-installed the scaling manager somewhere else — a namespace-scoped install puts the controller in
-the workload's own namespace — the trigger resolves to nothing, and the symptom
-is quiet rather than loud: KEDA cannot fetch a metric spec, falls back to a CPU
-metric, and the HPA sits at `cpu: <unknown>/80%` with `READY False` while nothing
-scales.
-
-Repoint them at whichever install is actually running, without editing the
-samples:
-
-```bash
 make scaledobjects-repoint
 ```
 
-No arguments: it finds the running install itself and scans the cluster. It
-rewrites `scalerAddress` and nothing else — the `modelID`, `variantCost` and
-replica bounds you set are left alone — and it is idempotent, so it is safe to
-run whenever a workload is not scaling and you are not sure why. It only touches
-objects that already ask for the scaling manager by name *and* whose address resolves to no
-running scaler: a ScaledObject pointing at a second, live the scaling manager install is a
-deliberate choice, and it is reported and left as it is rather than taken over.
+Each sample carries its own KEDA `ScaledObject`, and that object is the
+registration: without it the scaling manager is never asked about the workload
+and scales nothing.
 
-If you run several the scaling manager installs it will not guess between them — pass
-`WVA_NS=<namespace>` to say which one these workloads belong to.
+**Run `make scaledobjects-repoint` after applying them.** The samples' triggers
+name a controller in `workload-variant-autoscaler-system`, but `deploy-e2e-infra`
+installs it in `llm-d-sim`. A trigger that resolves to nothing fails quietly:
+KEDA cannot fetch a metric spec, falls back to a CPU metric, and the HPA sits at
+`cpu: <unknown>/80%` with `READY False` while nothing scales.
 
-## Configuration Options
+`scaledobjects-repoint` finds the running install itself and rewrites only
+`scalerAddress`, leaving `modelID`, `variantCost` and replica bounds alone. It
+is idempotent, and it touches only ScaledObjects that name the scaling manager
+*and* point at an address where no scaler runs; one pointing at a second, live
+install is left as it is. With several installs it will not guess — pass
+`WVA_NS=<namespace>`.
 
-For a complete list of environment variables and configuration options, see the [Configuration Reference](../../docs/reference/configuration.md) in the main deployment guide.
-
-**Key environment variables for Kind emulator**:
-
-```bash
-export HF_TOKEN="hf_xxxxx"                  # Required: HuggingFace token
-export MODEL_ID="unsloth/Meta-Llama-3.1-8B" # Model to deploy
-export ACCELERATOR_TYPE="H100"              # Emulated GPU type
-export GATEWAY_PROVIDER="kgateway"          # Gateway for Kind (kgateway recommended)
-export ITL_AVERAGE_LATENCY_MS=20            # Average inter-token latency for the llm-d-inference-sim
-export TTFT_AVERAGE_LATENCY_MS=200          # Average time-to-first-token for the llm-d-inference-sim
-
-# Performance tuning (optional)
-export HPA_STABILIZATION_SECONDS=240        # HPA stabilization window
-
-# Image load (optional; auto-detected if unset)
-export KIND_IMAGE_PLATFORM=linux/amd64      # Single platform for kind load (avoids "digest not found")
-```
-
-**Deployment flags**:
+## Cluster options
 
 ```bash
-export DEPLOY_PROMETHEUS=true               # Deploy Prometheus stack
-export DEPLOY_OPERATIONAL_DASHBOARD=true    # Deploy Grafana and operational dashboard
-export DEPLOY_WVA=true                      # Deploy the scaling manager controller
-export SCALER_BACKEND=keda                  # Deploy KEDA for external metrics
-# llm-d: deploy model serving separately via the llm-d guides after install.sh
-```
-
-### Step-by-Step Setup
-
-**1. Create Kind cluster:**
-
-```bash
-make create-kind-cluster
-
-# With custom configuration
-make create-kind-cluster KIND_ARGS="-t mix -n 4 -g 2"
-# -t: vendor type (nvidia, amd, intel-gaudi, intel-i915, intel-xe, mix)
-# -n: number of nodes
-# -g: GPUs per node
-```
-
-**2. Deploy the scaling manager + monitoring only (no llm-d):**
-
-```bash
-cd /path/to/repo
-export ENVIRONMENT=kind-emulator
-./deploy/install.sh
-```
-
-**3. Full stack (the scaling manager + EPP + monitoring):**
-
-```bash
-CREATE_CLUSTER=true make deploy-e2e-infra
-```
-
-## Scripts
-
-### setup.sh
-
-Creates Kind cluster with emulated GPU support.
-
-```bash
-./setup.sh -t mix -n 3 -g 2
-```
-
-**Options:**
-
-- `-t`: Vendor type - default: mix (nvidia|amd|intel-gaudi|intel-i915|intel-xe|mix|nvidia-mix|amd-mix)
-- `-n`: Number of nodes - default: 3
-- `-g`: GPUs per node - default: 2
-
-### teardown.sh
-
-Destroys the Kind cluster.
-
-```bash
-./teardown.sh
-```
-
-### install.sh (Kind environment plugin)
-
-`deploy/kind-emulator/install.sh` is **sourced** by `deploy/install.sh` when `ENVIRONMENT=kind-emulator`. It handles Kind-specific setup (namespaces, image load, monitoring wiring, and related helpers). llm-d model serving (EPP + ModelService) is deployed separately using `deploy/install-epp.sh` or the [llm-d guides](https://github.com/llm-d/llm-d/tree/main/guides/optimized-baseline).
-
-## Cluster Configuration
-
-Default cluster created by `setup.sh`:
-
-```yaml
-kind: Cluster
-apiVersion: kind.x-k8s.io/v1alpha4
-nodes:
-  - role: control-plane
-    extraMounts:
-      - hostPath: /dev/null
-        containerPath: /dev/nvidia0
-  - role: worker
-  - role: worker
-```
-
-GPUs are emulated using extended resources:
-
-- `nvidia.com/gpu`
-- `amd.com/gpu`
-- `habana.ai/gaudi`
-- `gpu.intel.com/i915`
-- `gpu.intel.com/xe`
-
-## Testing Locally
-
-### 1. Access metrics, Services and Pods
-
-**Port-forward the scaling manager metrics:**
-
-```bash
-kubectl port-forward -n workload-variant-autoscaler-system \
-  svc/wva-controller-manager-metrics-service 8080:8080
-```
-
-**Port-forward Prometheus:**
-
-```bash
-kubectl port-forward -n workload-variant-autoscaler-monitoring \
-  svc/prometheus-operated 9090:9090
-```
-
-**Port-forward Inference Gateway:**
-
-```bash
-kubectl port-forward -n llm-d-sim svc/infra-sim-inference-gateway 8000:80
-```
-
-### 2. Create Test Resources
-
-```bash
-# Register a workload. The ScaledObject IS the registration: naming the
-# external scaler in a trigger is what puts a workload under management.
-kubectl kustomize ../../config/samples/keda | kubectl apply -f -
-```
-
-### 3. Run E2E test
-
-**Option A — Run E2E tests (recommended)**  
-The consolidated e2e suite (`test/e2e/`) exercises infra-only deploy, resource wiring, reconciliation, and deterministic correctness checks. For sustained load or benchmarking, use **Option B** or separate perf workflows — not required for e2e.
-
-```bash
-# From repo root, after deploying infra (make create-kind-cluster && make deploy-e2e-infra)
-make deploy-e2e-infra   # if not already done
-make test-e2e-smoke    # quick validation
-# or
-make test-e2e-full     # full suite (`full && !flaky`)
-```
-
-See [Testing Guide](../../docs/developer-guide/testing.md) and [E2E Test Suite README](../../test/e2e/).
-
-### 4. Generate Load
-
-**Option B — Manual load with burst script**  
-Use the script in the e2e fixtures (requires only `curl`; no Python). After port-forwarding the inference gateway or vLLM service to `localhost:8000`:
-
-```bash
-# From repo root
-export TARGET_URL="http://localhost:8000/v1/chat/completions"
-export MODEL_ID="unsloth/Meta-Llama-3.1-8B"
-export TOTAL_REQUESTS=100
-export BATCH_SIZE=10
-./hack/burst_load_generator.sh
-```
-
-Tune load with `TOTAL_REQUESTS`, `BATCH_SIZE`, and optional `BATCH_SLEEP`, `MAX_TOKENS`, `CURL_TIMEOUT` (see script header).
-
-### 5. Monitor
-
-```bash
-# Watch deployments scale
-watch kubectl get deploy -n llm-d-sim
-
-# Watch what the scaler is publishing
-watch kubectl get scaledobject -A
-
-# View controller logs
-kubectl logs -n workload-variant-autoscaler-system \
-  -l control-plane=controller-manager -f
-```
-
-## Troubleshooting
-
-### Cluster Creation Fails
-
-```bash
-# Clean up and retry
-kind delete cluster --name kind-wva-gpu-cluster
-make create-kind-cluster
-```
-
-### Controller Not Starting
-
-```bash
-# Check controller logs
-kubectl logs -n workload-variant-autoscaler-system \
-  deployment/controller-manager
-
-# Verify KEDA's CRDs are installed (this project installs none of its own)
-kubectl get crd scaledobjects.keda.sh
-
-# Check RBAC
-kubectl get clusterrole,clusterrolebinding -l app.kubernetes.io/name=workload-variant-autoscaler
-```
-
-### GPUs Not Appearing
-
-```bash
-# Verify GPU labels on nodes
-kubectl get nodes -o json | jq '.items[].status.capacity'
-
-# Should see nvidia.com/gpu, amd.com/gpu, habana.ai/gaudi, gpu.intel.com/i915 or gpu.intel.com/xe
-```
-
-### Port-Forward Issues
-
-```bash
-# Kill existing port-forwards
-pkill -f "kubectl port-forward"
-
-# Verify pod is running before port-forwarding
-kubectl get pods -n <namespace>
-```
-
-### `kind load` fails with "content digest ... not found"
-
-This can happen when loading a multi-platform image into Kind: the image manifest references blobs for multiple platforms (e.g. `linux/arm64`, `linux/amd64`), but the stream that `kind load` feeds into containerd does not include all of them, so `ctr` reports a missing digest. See [kubernetes-sigs/kind#3795](https://github.com/kubernetes-sigs/kind/issues/3795) and [kubernetes-sigs/kind#3845](https://github.com/kubernetes-sigs/kind/issues/3845). The install script works around it by pulling a single-platform image before loading. If you still see the error or need a specific architecture, set the platform explicitly:
-
-```bash
-# Force linux/amd64 (e.g. for Intel or emulated nodes)
-KIND_IMAGE_PLATFORM=linux/amd64 make create-kind-cluster && make deploy-e2e-infra
-
-# Force linux/arm64 (e.g. for Apple Silicon with native arm64 nodes)
-KIND_IMAGE_PLATFORM=linux/arm64 make create-kind-cluster && make deploy-e2e-infra
-```
-
-Alternatively, build the image locally and deploy with `IfNotPresent` so the script skips the registry pull and loads your local single-platform image:
-
-```bash
-make docker-build IMG=ghcr.io/ev-shindin/llm-scaling-manager:main
-CREATE_CLUSTER=true WVA_IMAGE_PULL_POLICY=IfNotPresent make deploy-e2e-infra IMG=ghcr.io/ev-shindin/llm-scaling-manager:main
-```
-
-## Development Workflow
-
-1. **Make code changes**
-2. **Build new image:**
-
-   ```bash
-   make docker-build IMG=localhost:5000/wva:dev
-   ```
-
-3. **Load image to Kind:**
-
-   ```bash
-   kind load docker-image localhost:5000/wva:dev --name kind-inferno-gpu-cluster
-   ```
-
-4. **Update deployment:**
-
-   ```bash
-   kubectl set image deployment/controller-manager \
-     -n workload-variant-autoscaler-system \
-     manager=localhost:5000/wva:dev
-   ```
-
-5. **Verify changes:**
-
-   ```bash
-   kubectl logs -n workload-variant-autoscaler-system \
-     deployment/controller-manager -f
-   ```
-
-## Clean Up
-
-**Remove simulator model service (if deployed):**
-
-```bash
-kubectl delete -k config/samples/simulator/nodeSelector/disaggregated/
-# or whichever target you applied (decode/ or prefill/)
-```
-
-**Destroy cluster:**
-
-```bash
+make create-kind-cluster CLUSTER_GPU_TYPE=mix CLUSTER_NODES=4 CLUSTER_GPUS=8
 make destroy-kind-cluster
 ```
 
-## Next Steps
+| Variable | `create-kind-cluster` default | Meaning |
+| --- | --- | --- |
+| `CLUSTER_GPU_TYPE` | `nvidia-mix` | `nvidia`, `amd`, `intel-gaudi`, `intel-i915`, `intel-xe`, `mix`, `nvidia-mix`, `amd-mix` |
+| `CLUSTER_NODES` | `3` | nodes |
+| `CLUSTER_GPUS` | `16` | emulated GPUs per node |
+| `K8S_VERSION` | `v1.32.0` | node image version |
 
-- [Run E2E tests](../../docs/developer-guide/testing.md#end-to-end-tests)
-- [Development Guide](../../docs/developer-guide/development.md)
-- [Testing Guide](../../docs/developer-guide/testing.md)
+`CREATE_CLUSTER=true make deploy-e2e-infra` creates the cluster itself and
+defaults to `mix`, 3 nodes and 16 GPUs. The GPUs are extended resources
+(`nvidia.com/gpu`, `amd.com/gpu`, `habana.ai/gaudi`, `gpu.intel.com/i915`,
+`gpu.intel.com/xe`) patched onto node status; no device exists.
+
+`deploy/kind-emulator/setup.sh` and `teardown.sh` are what the two make targets
+call; `deploy/kind-emulator/install.sh` is sourced by `deploy/install.sh` when
+`ENVIRONMENT=kind-emulator`.
+
+## Look at it
+
+```bash
+# controller logs
+kubectl logs -n llm-d-sim deploy/wva-controller-manager -f
+
+# controller metrics (HTTPS)
+kubectl port-forward -n llm-d-sim svc/wva-controller-manager-metrics-service 8443:8443
+
+# Prometheus
+kubectl port-forward -n workload-variant-autoscaler-monitoring svc/kube-prometheus-stack-prometheus 9090:9090
+
+# what KEDA is doing
+watch kubectl get scaledobject,hpa,deploy -n llm-d-sim
+```
+
+To send load, port-forward the gateway Service in `llm-d-sim`
+(`kubectl get svc -n llm-d-sim`) to `localhost:8000`, then:
+
+```bash
+TARGET_URL=http://localhost:8000/v1/chat/completions \
+MODEL_ID=<the sample's model> TOTAL_REQUESTS=100 BATCH_SIZE=10 \
+  ./hack/burst_load_generator.sh
+```
+
+The script needs only `curl`; its header lists the other knobs (`BATCH_SLEEP`,
+`MAX_TOKENS`, `CURL_TIMEOUT`).
+
+## Run the e2e suite
+
+```bash
+make test-e2e-smoke
+make test-e2e-full
+```
+
+See the [e2e README](../../test/e2e/) for what each runs and which specs skip
+on which flags.
+
+## Rebuild after a code change
+
+```bash
+make deploy-e2e-infra IMG=localhost/llm-scaling-manager:dev
+```
+
+It builds the image, loads it into kind, and re-applies the controller. Reusing
+a tag can leave the running Pod on the old image; then
+`kubectl rollout restart deploy/wva-controller-manager -n llm-d-sim`.
+
+## Troubleshooting
+
+**Cluster creation fails.** `kind delete cluster --name kind-wva-gpu-cluster`,
+then create it again.
+
+**Controller not starting.** Check its logs (above) and that KEDA's CRD is
+served: `kubectl get crd scaledobjects.keda.sh`. The project installs no CRD of
+its own.
+
+**No GPUs on the nodes.** `kubectl get nodes -o json | jq '.items[].status.capacity'`
+should list one of the extended resources above.
+
+**`kind load` fails with "content digest ... not found".** Loading a
+multi-platform image can miss blobs
+([kubernetes-sigs/kind#3795](https://github.com/kubernetes-sigs/kind/issues/3795),
+[#3845](https://github.com/kubernetes-sigs/kind/issues/3845)). The installer
+already pulls a single platform first; to choose it yourself set
+`KIND_IMAGE_PLATFORM=linux/amd64` (or `linux/arm64`), or build locally and
+install with `WVA_IMAGE_PULL_POLICY=IfNotPresent`:
+
+```bash
+make docker-build IMG=ghcr.io/ev-shindin/llm-scaling-manager:main
+CREATE_CLUSTER=true WVA_IMAGE_PULL_POLICY=IfNotPresent \
+  make deploy-e2e-infra IMG=ghcr.io/ev-shindin/llm-scaling-manager:main
+```
+
+## More
+
+- [Testing guide](../../docs/developer-guide/testing.md)
+- [Development guide](../../docs/developer-guide/development.md)

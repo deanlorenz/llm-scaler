@@ -137,6 +137,14 @@ last; it is the unit change that makes the other two land.
   ranking instead of false equality. Says what it keeps on #126, and names
   the risk it does not remove: a cold variant may never graduate to its own
   fit, so cap-never-order stays absolute.
+- **[Engine structure](engine-structure.md)** — scope and layering of the
+  engine packages: what to split, and which way imports may point.
+- **[A role at its ceiling starves every other role](prefill-starved-by-exhausted-role.md)**
+  — on a P/D fleet, one role at its `maxReplicas` aborted the scale-up pass for
+  both roles; one `break` in the paired allocator.
+- **[Sizing against in-flight capacity](sizing-against-in-flight-capacity.md)**
+  — count replicas already starting, and when they will serve, before ordering
+  more or releasing one.
 
 ## Product and lifecycle
 

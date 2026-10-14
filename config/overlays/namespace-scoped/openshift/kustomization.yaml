@@ -20,8 +20,8 @@ resources:
 #
 # What tenant-installable subtracts is the manager ClusterRole/Binding and the
 # Namespace — NOT the monitoring bindings, which are the whole reason this
-# component exists. So THIS OVERLAY IS NOT TENANT-INSTALLABLE: it renders 3
-# ClusterRoles and 5 ClusterRoleBindings, including cluster-monitoring-view, and
+# component exists. So THIS OVERLAY IS NOT TENANT-INSTALLABLE: it renders 5
+# ClusterRoles and 6 ClusterRoleBindings, including cluster-monitoring-view, and
 # needs a cluster admin. Namespace scope here is blast-radius reduction, not
 # self-service. `deploy/install.sh --check` renders this overlay and says so.
 components:

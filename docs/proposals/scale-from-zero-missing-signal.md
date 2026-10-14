@@ -52,7 +52,7 @@ wrong component, because every artifact matched: same image digest, same
 ConfigMap, same feature gate, same auth. The difference was *when the process
 last read its config*, which appears in none of them.
 
-The same code on pokprod wakes correctly: queue depth 40, `Published
+The same code on an H100 OpenShift test cluster wakes correctly: queue depth 40, `Published
 scale-from-zero activation`, `0/0 -> 1/1` in under 10s.
 
 ## 3. Scope, and why not a status condition
@@ -300,7 +300,7 @@ debugging a stuck workload looks. Emitting on another controller's object is
 conventional (KEDA does it too) and is not the ownership problem that writing its
 `status` would be. Use `variant.EventTarget()`: events on the synthesized
 `VariantAutoscaling` are silently dropped with `no kind is registered for the type
-variant.VariantAutoscaling in scheme`, a live bug seen in pokprod logs today — a
+variant.VariantAutoscaling in scheme`, a live bug seen in that cluster's logs today — a
 wake succeeded and left no Event behind.
 
 **Not used for these conditions**, though, and the reason is worth recording:

@@ -129,9 +129,12 @@ var _ = Describe("Utilization share optimizer on a P/D LeaderWorkerSet model", L
 			}
 		})
 
+		// 40 minutes: the spec's waits add up to 30 at worst, and B must stay
+		// short for all of them. The namespace goes in cleanup, and the Job
+		// with it, so a longer deadline costs a passing run nothing.
 		By("Loading B's decode well past one group's capacity")
 		job := buildThroughputSustainedLoadJob(ns, loadJob, fmt.Sprintf("http://%s-service:8000/v1/completions", msDecode),
-			modelB, 8, int64(1800))
+			modelB, 8, int64(2400))
 		_, err = k8sClient.BatchV1().Jobs(ns).Create(ctx, job, metav1.CreateOptions{})
 		Expect(err).NotTo(HaveOccurred())
 	})
@@ -141,6 +144,14 @@ var _ = Describe("Utilization share optimizer on a P/D LeaderWorkerSet model", L
 		Eventually(func(g Gomega) {
 			g.Expect(controllerLogsSince(start.Add(-5 * time.Minute))).To(ContainSubstring("scope\": \"" + ns))
 		}, 5*time.Minute, 10*time.Second).Should(Succeed(), "the optimizer never evaluated the namespace's group")
+
+		// Before A can give: a spare offered while B's decode is not yet seen
+		// short is returned to the quota, not transferred (roleShortOf).
+		By("Waiting until the controller sees B's decode short of a whole group")
+		Eventually(func(g Gomega) {
+			short, read := roleShortOf(ns, modelB, domain.RoleDecode, start.Add(-5*time.Minute))
+			g.Expect(short).To(BeTrue(), read)
+		}, 5*time.Minute, 10*time.Second).Should(Succeed(), "B's decode never read short, so A's spare would be returned, not transferred")
 
 		By("Lowering A's floor to 1, so it has replicas to give")
 		Expect(fixtures.EnsureScaledObject(ctx, crClient, ns, soA, depA, depA, 1, 4, cfg.MonitoringNS,
@@ -158,7 +169,15 @@ var _ = Describe("Utilization share optimizer on a P/D LeaderWorkerSet model", L
 		Eventually(func(g Gomega) {
 			members := map[string]int{}
 			receivers := map[string]string{}
+			returns := 0
 			for _, line := range strings.Split(controllerLogsSince(start), "\n") {
+				// Counted when a return STARTS, so one still draining, or
+				// called off, is seen too; the "spare returned" line comes
+				// only once the release lands.
+				if strings.Contains(line, "transfer started") && strings.Contains(line, `"returned": true`) &&
+					strings.Contains(line, ns) {
+					returns++
+				}
 				if !strings.Contains(line, "transfer started") {
 					continue
 				}
@@ -174,7 +193,11 @@ var _ = Describe("Utilization share optimizer on a P/D LeaderWorkerSet model", L
 					setID = id
 				}
 			}
-			g.Expect(setID).NotTo(BeEmpty(), "no set of two A replicas funding B's decode has started: %v", members)
+			// The returns are the diagnosis of the failure this used to hit
+			// before roleShortOf gated the floor change: A's spare given back
+			// to the quota, and B grown from idle GPUs with no transfer.
+			g.Expect(setID).NotTo(BeEmpty(), "no set of two A replicas funding B's decode has started: %v; spare returns in %s: %d",
+				members, ns, returns)
 		}, 12*time.Minute, 5*time.Second).Should(Succeed())
 		GinkgoWriter.Printf("donor set: %s\n", setID)
 

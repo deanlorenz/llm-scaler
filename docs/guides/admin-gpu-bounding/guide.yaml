@@ -37,6 +37,24 @@ verify:
   controllers:
     note: A controller that is not Ready is one this did not reach.
     run: kubectl get pods -A -l app.kubernetes.io/name=workload-variant-autoscaler
+  source:
+    note: |
+      Which policy each controller actually reads -- the truth, whatever the
+      enable command printed. "the well-known namespace" (or "the namespace
+      this one is labelled with") means a policy namespace governs it. The
+      own-ConfigMap branch logs only at V(1), so at the default verbosity NO
+      such line means the controller reads its own ConfigMap; "Could not read
+      the managed Namespace" means it never saw wva-policy. Logged once at
+      startup, so a long-running controller's line may have rotated out; a
+      restart prints it again.
+    run: |
+      for ns in $(kubectl get deploy -A -l app.kubernetes.io/name=workload-variant-autoscaler,control-plane=controller-manager \
+          -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{end}'); do
+        echo "== $ns"
+        kubectl logs -n "$ns" deploy/wva-controller-manager \
+          | grep -E 'Cluster policy comes from|Could not read the managed Namespace' \
+          || echo "   (no line: reads its own ConfigMap in $ns)"
+      done
   budget:
     note: |
       The ConfigMap is the fact; the log line is not. "GPU budgets available" is

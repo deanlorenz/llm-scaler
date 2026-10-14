@@ -4,48 +4,76 @@
 [![CI](https://github.com/ev-shindin/llm-scaling-manager/actions/workflows/ci-pr-checks.yaml/badge.svg?branch=main)](https://github.com/ev-shindin/llm-scaling-manager/actions/workflows/ci-pr-checks.yaml)
 [![Go](https://img.shields.io/github/go-mod/go-version/ev-shindin/llm-scaling-manager)](go.mod)
 
-> **An advanced fork of [llm-d/llm-d-workload-variant-autoscaler](https://github.com/llm-d/llm-d-workload-variant-autoscaler).**
->
-> This fork keeps WVA's core idea -- variant-aware autoscaling for LLM inference --
-> and has diverged substantially from it. The largest additions here are a **KEDA
-> external scaler**, which lets it answer KEDA directly over gRPC instead of
-> publishing a metric and hoping; a **warm pool** that bridges a slow scale-up
-> by lending a Pod with the model already loaded and asleep, so the variant
-> serves while its own replica starts; the **ScaledObject discovery and install
-> tooling** behind `make scaledobjects-plan`, which writes an editable plan of
-> what would be autoscaled before anything is applied; and **fixture-executing
-> check suites** that run the deploy shell against recorded pod specs in CI.
->
-> Developed independently. Not affiliated with, nor endorsed by, the llm-d project.
->
-> The rename is brand-level only: the Kubernetes objects, make targets and
-> metrics keep their `wva-` / `wva_` names, so dashboards, alerts and existing
-> installs are unaffected.
+**Sub-second scale-ups for LLMs on Kubernetes, for 12 % less GPU than holding spare replicas.**
 
-**An analytical scaling manager for llm-d inference: multi-model, variant- and
-P/D-aware — scaling, warm capacity and placement under one GPU budget.**
+An advanced fork of [llm-d](https://llm-d.ai)'s workload-variant-autoscaler. It
+sizes every model by the work its replicas can actually serve, keeps the fleet
+inside one GPU budget, and lets KEDA do the scaling. An optional warm pool of
+sleeping models covers the minutes a new replica takes to load.
 
-llm-scaling-manager is a Kubernetes-based global scaling manager for inference model servers serving LLMs. It works alongside the standard Kubernetes HPA and external autoscalers like KEDA to drive the scale subresource of inference deployments — it decides, KEDA and the HPA actuate. The algorithms are documented in [docs/concepts/](docs/concepts/). It determines optimal replica counts for a given request traffic load by considering constraints such as GPU availability, energy budget, and performance budget (latency/throughput).
+**Measured on GPU clusters** (single runs unless noted; method and caveats linked):
 
-### What is a Variant?
+- **Scale-ups at near-floor latency on 3 of 4 rises.** p95 time to first
+  token per rise falls from **5.2–8.8 s to 0.11–0.83 s** with a one-Pod warm
+  pool: within 50 ms of a two-replica floor on three rises, 831 ms against the
+  floor's 127 ms on the fourth. It uses **12 % fewer GPU-seconds** than that
+  floor, and 17 % more than no pool
+  ([warm pool, measured](docs/well-lit-paths/warm-pool-bridge/measured.md)).
+- **It prices the request shape, not just the queue.** Qwen3-0.6B at a
+  constant 6 req/s, on the experimental P/D path: through the first phase it
+  held two decode replicas while KV-cache use of 5–15 % alone said one; when
+  the request shape changed it ordered a third (KV peaked at 62 %), and no
+  queue formed at any point. On a second exposure, with both shapes already
+  seen, p95 TTFT was **155 ms with 0 errors in 13 288 requests**; a cold
+  controller reached a 3.9 s p99
+  ([P/D path, measured](docs/well-lit-paths/pd-disaggregation/#measured);
+  [known gaps](docs/why.md#known-gaps)).
+- **A warm Pod switches models in about 437 ms** (four switches of 435–440 ms
+  on an H100 test cluster), against about 41 s for a cold start
+  ([warm pool](docs/well-lit-paths/warm-pool-bridge/)).
 
-llm-scaling-manager keeps WVA's concept of **variants** — multiple model servers in an InferencePool that all serve the same base model but differ in hardware configuration (e.g., GPU type), serving configuration (e.g., tensor parallelism, max batch size, quantization), or both.
+![Warm pool: near-floor latency on 3 of 4 rises, for 12 % fewer GPU-seconds](docs/figures/warm-pool-latency-vs-cost.svg)
 
-Concretely, **a variant is a scaling entity: one KEDA ScaledObject and the workload it scales.** That is the unit llm-scaling-manager discovers, decides for, and reports on — a Pod's variant is the managed scaler its `ownerReferences` lead to, not a label anyone stamps. Variants whose triggers name the same `modelID` are variants of one model, and it scales the group rather than each ScaledObject alone. Creating a variant therefore means creating a ScaledObject; there is no other registration.
+**[Why llm-scaling-manager](docs/why.md)** (the one-page case, costs and
+maturity) · **[Get started](docs/README.md#getting-started-in-three-steps)** ·
+**[Pick your scenario](docs/well-lit-paths/)**
 
-Use cases include:
+> An independently developed, advanced fork of llm-d's
+> [workload-variant-autoscaler](https://github.com/llm-d/llm-d-workload-variant-autoscaler)
+> (WVA); not affiliated with or endorsed by the llm-d project. Kubernetes
+> objects, make targets and metrics keep their `wva-` / `wva_` names.
+> [What is different from upstream](#what-is-different-from-upstream).
 
-- **P/D disaggregation**: prefill is one variant, decode is another — variant = role in a disaggregated pipeline.
-- **[batch-gateway](https://github.com/llm-d-incubation/batch-gateway)**: variants distinguish batch vs. interactive workloads sharing the same pool.
-- **Autoscaler**: a costed serving configuration the autoscaler chooses among.
+### Models and variants
 
-## Key Features
+A **model** is what a client asks for by name. A **variant** is one way of
+serving it: a GPU type, a serving configuration (tensor parallelism, batch
+size, quantization), or a role such as prefill or decode. Each variant is one
+KEDA ScaledObject plus the workload it scales, and variants whose triggers name
+the same `modelID` are sized together, as one model. Creating the ScaledObject
+is the whole registration.
 
-- **Intelligent Autoscaling**: Optimizes replica count by observing the current state of the system
-- **Cost Optimization**: Minimizes infrastructure costs by picking the correct accelerator variant
-- **Warm-Pool Bridging**: Optionally holds models loaded and asleep, and lends one to a variant while its own replica starts
+## Key features
+
+- **Scaling from real load**: replica counts follow KV-cache use, queues and
+  token throughput, per model and across its variants.
+- **Cost-aware variant choice**: when a model has several variants, it grows
+  the one with the lowest cost per unit of capacity (`variantCost`).
+- **A GPU budget**: optionally bound every decision by the GPUs that are free,
+  a per-namespace quota, or Kueue's quotas.
+- **Scale to zero and back**: an idle model releases its GPUs; a queued request
+  wakes it.
+- **Warm-pool bridging**: optionally keep models loaded and asleep, and lend
+  one while a variant's own replica starts.
 
 ## Installing
+
+On a shared cluster, have a cluster admin run the controller out of the
+tenant's reach (`WVA_NS=wva-<ns> WVA_WATCH_NS=<ns>` on `setup-prereqs` and
+`deploy-wva`); see [Cluster-admin setup](docs/guides/admin-cluster-setup/README.md#keeping-the-controller-out-of-the-tenants-reach).
+The tenant-owned default below is for single-team or trusted clusters. Either
+way, the bound that actually holds is a GPU ResourceQuota on the namespace:
+[bound the namespace's GPUs at admission](docs/guides/admin-cluster-setup/README.md#bound-the-namespaces-gpus-at-admission).
 
 ```bash
 export NAMESPACE=<the namespace running llm-d>
@@ -62,11 +90,13 @@ permission: a cluster admin runs `setup-prereqs` once for the namespace, and the
 namespace's owner does everything after it, including every later upgrade. If you
 are both, `make deploy-wva` does the two in one command.
 
-Prometheus and KEDA are found on the cluster, or installed if it has neither.
+KEDA must already be on the cluster: on Kubernetes, `KEDA_HELM_INSTALL=true`
+installs it for you; on OpenShift, use the platform's KEDA. Prometheus is found
+on the cluster, or installed if there is none.
 
 The last two steps are not optional. A **KEDA ScaledObject** is how a workload
-registers with llm-scaling-manager: the controller has no watch and no
-listing, so until one exists it is running and idle.
+registers with llm-scaling-manager: it does not list or watch your workloads,
+so until a ScaledObject exists it runs and scales nothing.
 
 | Then | |
 | --- | --- |
@@ -80,12 +110,15 @@ listing, so until one exists it is running and idle.
 
 ## Documentation
 
-See [docs/concepts/](docs/concepts/) for how a measurement becomes a replica
-count, the queueing model, and what the GPU budget actually counts.
+Start with [how the scaling manager fits together](docs/concepts/architecture.md):
+the parts, one decision cycle, and what gets installed. [docs/concepts/](docs/concepts/)
+has how a measurement becomes a replica count and what the GPU budget counts.
 
 See the [docs](docs/) directory for design docs, developer guide, and more.
 
 ## How It Works
+
+![How it fits together](docs/concepts/figures/how-it-fits.svg)
 
 **Prerequisites:** deploy llm-d infrastructure (model servers), have Prometheus
 scraping them, and create a **KEDA ScaledObject** per workload whose trigger points
@@ -93,9 +126,9 @@ at llm-scaling-manager's external scaler.
 
 **llm-scaling-manager then:**
 
-1. Learns which workloads it manages **from the KEDA calls themselves** — there is
-   no watch, no listing and no opt-in annotation. Being called is being managed,
-   and the trigger `metadata` is the per-workload configuration.
+1. Learns which workloads it manages **from the KEDA calls themselves**: it does
+   not list or watch workloads, and there is no opt-in annotation. Being called
+   is being managed, and the trigger `metadata` is the per-workload configuration.
 2. Continuously reads request rates and server performance from Prometheus.
 3. Runs its capacity model — KV-cache utilization, queue depth, token throughput —
    to decide the replica count each model needs, across all its variants at once
@@ -117,15 +150,15 @@ spec:
     kind: Deployment
     name: llama-8b
   pollingInterval: 5
-  minReplicaCount: 1        # 0 to allow scale-to-zero (alpha)
+  minReplicaCount: 1        # 0 to allow scale to zero
   maxReplicaCount: 10
   triggers:
   - type: external-push     # push: wakes a parked workload immediately
     name: wva-external-scaler
     metadata:
-      scalerAddress: wva-external-scaler.workload-variant-autoscaler-system.svc.cluster.local:9090
+      scalerAddress: wva-external-scaler.<controller-namespace>.svc.cluster.local:9090  # your NAMESPACE on a namespace install
       modelID: meta/llama-3-8b   # required — the only field you must supply
-      scalingPolicy: interactive # optional — a named policy tier
+      scalingPolicy: interactive # optional — a tier you add to the scaling policy; none ship enabled
       variantCost: "10.0"        # optional — defaults to "10.0"
 ```
 
@@ -139,13 +172,27 @@ can check for you — a `modelID` that does not match what the container serves
 groups the workload with a model it does not run, and mis-scales both. See
 [the guides](docs/guides/).
 
-More examples in [config/samples/keda/](config/samples/keda/).
+Every trigger key, its default and who reads it: [the trigger reference](docs/reference/scaledobject-trigger.md). More examples in [config/samples/keda/](config/samples/keda/).
+
+## What is different from upstream
+
+The fork keeps WVA's core idea, variant-aware autoscaling for LLM inference,
+and has diverged substantially from it. The largest additions:
+
+- a **KEDA external scaler**, so it answers KEDA directly over gRPC instead of
+  publishing a metric;
+- a **warm pool** that bridges a slow scale-up by lending a Pod with the model
+  already loaded and asleep;
+- **ScaledObject discovery and install tooling**: `make scaledobjects-plan`
+  writes an editable plan of what would be autoscaled before anything is applied;
+- **GPU budgets** shared across models: physical inventory, quotas, Kueue, and
+  the experimental utilization-share optimizer;
 
 ## Contributing
 
 We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
-Join the [llm-d autoscaling community meetings](https://llm-d.ai/slack) to get involved.
+Questions, bugs and ideas: [GitHub issues](https://github.com/ev-shindin/llm-scaling-manager/issues).
 
 ## License
 
