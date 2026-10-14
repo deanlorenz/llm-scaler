@@ -170,7 +170,8 @@ var _ = Describe("Utilization share optimizer on a P/D LeaderWorkerSet model", L
 			members := map[string]int{}
 			receivers := map[string]string{}
 			returns := 0
-			for _, line := range strings.Split(controllerLogsSince(start), "\n") {
+			logs := controllerLogsSince(start)
+			for _, line := range strings.Split(logs, "\n") {
 				// Counted when a return STARTS, so one still draining, or
 				// called off, is seen too; the "spare returned" line comes
 				// only once the release lands.
@@ -195,9 +196,12 @@ var _ = Describe("Utilization share optimizer on a P/D LeaderWorkerSet model", L
 			}
 			// The returns are the diagnosis of the failure this used to hit
 			// before roleShortOf gated the floor change: A's spare given back
-			// to the quota, and B grown from idle GPUs with no transfer.
-			g.Expect(setID).NotTo(BeEmpty(), "no set of two A replicas funding B's decode has started: %v; spare returns in %s: %d",
-				members, ns, returns)
+			// to the quota, and B grown from idle GPUs with no transfer. The
+			// planner's own lines and B's readings say why: a return goes
+			// while no role that can grow reads short, so the decode
+			// demand in the analyzer results is the first thing to read.
+			g.Expect(setID).NotTo(BeEmpty(), "no set of two A replicas funding B's decode has started: %v; spare returns in %s: %d\n%s",
+				members, ns, returns, sharePlannerLines(logs, ns, modelB, 80))
 		}, 12*time.Minute, 5*time.Second).Should(Succeed())
 		GinkgoWriter.Printf("donor set: %s\n", setID)
 
@@ -233,6 +237,37 @@ func logLineTime(line string) (time.Time, bool) {
 	}
 	t, err := time.Parse(time.RFC3339Nano, ts)
 	return t, err == nil
+}
+
+// sharePlannerLines is the controller's account of the share planner for
+// namespace ns, for a failure message: its "Utilization share" lines, and the
+// saturation analyzer's results and shape holds for model, whose readings
+// decide whether a role reads short. The first limit lines -- what decides
+// whether A's spare is transferred or returned happens in the first minutes
+// after the floor drops, and the analyzer logs every cycle until the timeout
+// -- or a note that there were none.
+func sharePlannerLines(logs, ns, model string, limit int) string {
+	var out []string
+	for _, line := range strings.Split(logs, "\n") {
+		if !strings.Contains(line, ns) {
+			continue
+		}
+		forModel := strings.Contains(line, `"modelID": "`+model+`"`)
+		if strings.Contains(line, "Utilization share:") ||
+			(forModel && strings.Contains(line, "analyzer-result") && strings.Contains(line, `"analyzer": "saturation"`)) ||
+			(forModel && strings.Contains(line, "fleet-shape-hold")) {
+			out = append(out, line)
+		}
+	}
+	if len(out) == 0 {
+		return "no share-planner or analyzer lines for " + ns + " in the controller log"
+	}
+	head := fmt.Sprintf("share planner and %s analyzer lines for %s (%d", model, ns, len(out))
+	if len(out) > limit {
+		out = out[:limit]
+		head += fmt.Sprintf(", the first %d", limit)
+	}
+	return head + "):\n" + strings.Join(out, "\n")
 }
 
 // expectSetCompleted checks a donor set of two from the controller's log:
