@@ -198,13 +198,16 @@ jobs:
               }
 
               // NOTE: This list must stay in sync with concurrency group logic (lines 23-25)
-              // A command may name the commit it approves: `/ok-to-test <sha>`.
+              // A command may name the commit it approves: `/ok-to-test <sha>`, the
+              // FULL 40-character SHA. A short prefix is not an approval: a fork
+              // author can brute-force a commit sharing a 7-hex prefix (2^28 tries)
+              // and push it between the review and the comment.
               const validCommands = ['/ok-to-test', '/retest'];
               const parts = comment.split(/\s+/);
               const command = parts[0];
               const approvedSha = (parts[1] || '').toLowerCase();
               if (!validCommands.includes(command) || parts.length > 2 ||
-                  (approvedSha !== '' && !/^[0-9a-f]{7,40}$/.test(approvedSha))) {
+                  (approvedSha !== '' && !/^[0-9a-f]{40}$/.test(approvedSha))) {
                 console.log(`Comment "${comment}" is not a valid trigger command, skipping`);
                 core.setOutput('should_run', 'false');
                 return;
@@ -246,7 +249,7 @@ jobs:
                 });
                 return;
               }
-              if (approvedSha !== '' && !pr.head.sha.startsWith(approvedSha)) {
+              if (approvedSha !== '' && pr.head.sha.toLowerCase() !== approvedSha) {
                 console.log(`${command} approved ${approvedSha}, but the PR head is now ${pr.head.sha}; refusing`);
                 core.setOutput('should_run', 'false');
                 await github.rest.issues.createComment({
@@ -669,7 +672,7 @@ jobs:
               state: state,
               target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
               description: description,
-              context: '${{ github.workflow }} / e2e (comment trigger)'
+              context: `${context.workflow} / e2e (comment trigger)`
             });
 
             console.log('Status reported successfully');
