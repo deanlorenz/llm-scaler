@@ -288,8 +288,13 @@ cmd_status() {
             log_error "cannot list nodes: ${why}"
         fi
         rm -f "$err_file"
-        local node_count
+        local node_count excluded
+        # Usable nodes only: a cordoned or foreign-tainted node can never hold a
+        # copy an engine starts on, and counting it failed finished preparations.
+        excluded="$(printf '%s' "$nodes_json" | accelerator_excluded_json "$(accelerator_ds_toleration_keys "$NAMESPACE" "$name" "${TOLERATIONS[@]}")")"
+        nodes_json="$(printf '%s' "$nodes_json" | accelerator_usable_nodes_json "$excluded")"
         node_count="$(printf '%s' "$nodes_json" | jq '.items | length')"
+        [ "$node_count" -gt 0 ] || accelerator_print_excluded "$excluded" >&2
         if [ "$node_count" -eq 0 ]; then
             if [ "$mode" = report ]; then
                 log_warning "no node matches $(accelerator_selector_text "$selector"); ${image} will be held nowhere (--node-selector picks the nodes)"
@@ -300,6 +305,7 @@ cmd_status() {
         fi
         echo "${image}  (nodes: $(accelerator_selector_text "$selector"))"
         printf '  %-28s %-8s %s\n' NODE IMAGE HOLDER
+        accelerator_print_excluded "$excluded"
         # Per node: listed-by-kubelet, holder phase, holder reason (the pod's
         # own status.reason first -- Evicted -- then the container state's).
         while IFS=$'\t' read -r node listed phase reason; do
@@ -332,7 +338,7 @@ cmd_status() {
                  (if $pod == null then ""
                   else ($pod.status.reason // ((($pod.status.containerStatuses // [])[0].state // {}) | to_entries | (.[0].value.reason // ""))) end)
                ] | @tsv')
-        echo "  $((present + pulled))/${node_count} nodes have it (${present} held, ${pulled} pulled but not held); $((node_count - present - pulled)) do not"
+        echo "  $((present + pulled))/${node_count} usable nodes have it (${present} held, ${pulled} pulled but not held); $((node_count - present - pulled)) do not"
         [ -n "$selector" ] || printf '%s' "$nodes_json" | accelerator_vendor_warning
         # No holder anywhere is the DaemonSet controller failing to create
         # pods -- a Pod Security "restricted" namespace (runAsNonRoot), a

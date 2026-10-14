@@ -582,7 +582,7 @@ func createUnownedReplica(namespace, deploymentName, podName string) {
 	// fraction of them.
 	//
 	// Copying the template wholesale made this spec the one that runs out of
-	// room. Each simulator replica requests 1 CPU and 2Gi, the fleet is already
+	// room. Each simulator replica then requested 1 CPU and 2Gi, the fleet is already
 	// at its target when the copy is added, and by the time this spec runs late
 	// in the full suite the two schedulable kind nodes are carrying everything
 	// else the run has left behind. The pod then sits Pending until the spec

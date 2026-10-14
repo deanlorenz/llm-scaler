@@ -70,14 +70,23 @@ func WithAcceleratorNodeSelectorKV(key, productName string) ModelServiceOption {
 // largest single node rather than a sum, because filling is per-node -- a pod
 // cannot straddle two.
 func AllocatableGPUsForProduct(ctx context.Context, k8sClient *kubernetes.Clientset, product string) int {
+	_, gpus := LargestNodeForProduct(ctx, k8sClient, product)
+	return gpus
+}
+
+// LargestNodeForProduct is the schedulable node carrying product that
+// advertises the most GPUs, and that number; "" and 0 when there is none. A
+// cordoned node, or one with a NoSchedule or NoExecute taint, is not
+// schedulable: a spec that pins pods to it would leave them Pending.
+func LargestNodeForProduct(ctx context.Context, k8sClient *kubernetes.Clientset, product string) (string, int) {
 	nodes, err := k8sClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return 0
+		return "", 0
 	}
-	best := 0
+	bestNode, best := "", 0
 	for i := range nodes.Items {
 		node := &nodes.Items[i]
-		schedulable := true
+		schedulable := !node.Spec.Unschedulable
 		for _, t := range node.Spec.Taints {
 			if t.Effect == corev1.TaintEffectNoSchedule || t.Effect == corev1.TaintEffectNoExecute {
 				schedulable = false
@@ -101,12 +110,12 @@ func AllocatableGPUsForProduct(ctx context.Context, k8sClient *kubernetes.Client
 			}
 			if q, ok := node.Status.Allocatable[corev1.ResourceName(vendor.ResourceName)]; ok {
 				if n := int(q.Value()); n > best {
-					best = n
+					bestNode, best = node.Name, n
 				}
 			}
 		}
 	}
-	return best
+	return bestNode, best
 }
 
 // NoAcceleratorPinAnnotation opts a workload OUT of the default pin below.
@@ -216,6 +225,12 @@ func DiscoverAcceleratorProduct(ctx context.Context, k8sClient *kubernetes.Clien
 	return key, product, ok
 }
 
+// DiscoverAccelerator is DiscoverAcceleratorProduct plus the vendor's
+// resource name, for a caller that requests the GPUs itself (WithLWSGPUs).
+func DiscoverAccelerator(ctx context.Context, k8sClient *kubernetes.Clientset) (key, product, resourceName string, ok bool) {
+	return discoverAccelerator(ctx, k8sClient)
+}
+
 // discoverAccelerator also reports the vendor's RESOURCE name, which a caller
 // needs to ask for one of these GPUs: the product label and the resource are a
 // pair (amd.com/gpu.product-name goes with amd.com/gpu), and mixing them across
@@ -287,10 +302,12 @@ func discoverAccelerator(ctx context.Context, k8sClient *kubernetes.Clientset) (
 	return totals[best].key, totals[best].product, totals[best].resource, true
 }
 
-// WithGPURequest sets the pod's GPU resource request/limit, which is how WVA
-// derives GPUs-per-replica (scaletarget.GetTotalGPUsPerReplica).
-func WithGPURequest(count int64) ModelServiceOption {
+// WithGPUs requests count GPUs of the named vendor resource on every container,
+// as a request and a limit. Pass the resource the accelerator pin discovered
+// (DiscoverAccelerator), so it matches the pin's nodeSelector.
+func WithGPUs(resourceName string, count int64) ModelServiceOption {
 	return func(d *appsv1.Deployment) {
+		qty := *resource.NewQuantity(count, resource.DecimalSI)
 		for i := range d.Spec.Template.Spec.Containers {
 			c := &d.Spec.Template.Spec.Containers[i]
 			if c.Resources.Requests == nil {
@@ -299,11 +316,17 @@ func WithGPURequest(count int64) ModelServiceOption {
 			if c.Resources.Limits == nil {
 				c.Resources.Limits = corev1.ResourceList{}
 			}
-			qty := *resource.NewQuantity(count, resource.DecimalSI)
-			c.Resources.Requests["nvidia.com/gpu"] = qty
-			c.Resources.Limits["nvidia.com/gpu"] = qty
+			c.Resources.Requests[corev1.ResourceName(resourceName)] = qty
+			c.Resources.Limits[corev1.ResourceName(resourceName)] = qty
 		}
 	}
+}
+
+// WithGPURequest sets the pod's nvidia.com/gpu request/limit, which is how WVA
+// derives GPUs-per-replica (scaletarget.GetTotalGPUsPerReplica). On a node of
+// another vendor use WithGPUs with the discovered resource name.
+func WithGPURequest(count int64) ModelServiceOption {
+	return WithGPUs("nvidia.com/gpu", count)
 }
 
 // CreateModelService creates the model-server Deployment only (name + "-decode").
@@ -519,12 +542,21 @@ func resourcePtr(s string) *resource.Quantity {
 // cluster the pin chose the AMD node and every pod asked it for an NVIDIA
 // resource it does not advertise, so nothing scheduled and five suites failed in
 // BeforeAll waiting for pods that could never start.
+//
+// The simulator's REQUESTS are a fraction of a core for the same reason:
+// every workload this package creates is pinned to one node (the discovered
+// accelerator's), and a GitHub runner gives each kind node 4 CPUs and 16 GB.
+// At 1 CPU and 2Gi a request, about two simulator replicas fit beside the
+// node's own pods -- every utilization-share spec, which stands up four to
+// seven replicas, timed out in BeforeAll at "2 of 3" and "2 of 4" Ready on
+// every CI run, while passing on a 22-CPU workstation. The simulator idles
+// far below this request; the limits still bound it.
 func buildModelServiceResources(useSimulator bool) corev1.ResourceRequirements {
 	if useSimulator {
 		return corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("1"),
-				corev1.ResourceMemory: resource.MustParse("2Gi"),
+				corev1.ResourceCPU:    resource.MustParse("100m"),
+				corev1.ResourceMemory: resource.MustParse("256Mi"),
 			},
 			Limits: corev1.ResourceList{
 				corev1.ResourceCPU:    resource.MustParse("2"),

@@ -136,19 +136,19 @@ plain = [d for d in yaml.safe_load_all(open(sys.argv[3], encoding="utf-8")) if d
 vols = {v["name"]: v for v in seed["volumes"]}
 check(vols.get("seed", {}).get("persistentVolumeClaim") == {"claimName": "workload-pvc", "readOnly": True}, "the seed claim is a read-only volume: %s" % vols.get("seed"))
 mounts = {m["name"]: m for m in seed["containers"][0]["volumeMounts"]}
-check(mounts.get("seed") == {"name": "seed", "mountPath": "/seed", "readOnly": True, "subPath": "engine-cache"}, "the seed is mounted read-only at /seed with its subPath: %s" % mounts.get("seed"))
+check(mounts.get("seed") == {"name": "seed", "mountPath": "/seed", "readOnly": True}, "the seed claim is mounted whole, read-only, with NO subPath (the kubelet would have to create it; on a fresh claim the pod never starts): %s" % mounts.get("seed"))
 m2 = {m["name"]: m for m in seed2["containers"][0]["volumeMounts"]}
 check("subPath" not in m2.get("seed", {}), "no subPath when none was given: %s" % m2.get("seed"))
 script = seed["containers"][0]["args"][0]
 check('merge() {' in script and 'local e n t' in script and 'merge "$e" "$t"' in script and 'elif [ ! -e "$t" ]' in script and 'cp -a --no-preserve=ownership "$e" "$2/"' in script, "the seed is merged file by file, descending directories both sides have: what the node has is kept, what it lacks is copied")
 check(script.index("if [ -d /seed ]") < script.index('touch "/engine-cache/$MARKER"'), "the seed is copied before the prepared marker is written")
-check('[ "$seeded_from" != "$SEED_ID" ]' in script and 'echo "$SEED_ID" > "/engine-cache/$SEED_MARKER"' in script, "the seed marker records the seed, and a different seed is merged in")
-i_ok = script.index('if [ "$complete" = 1 ]'); i_mark = script.index('echo "$SEED_ID" > "/engine-cache/$SEED_MARKER"'); i_loop = script.index('if cp -a --no-preserve=ownership')
+check('[ "$seeded_from" != "$want" ]' in script and 'echo "$want" > "/engine-cache/$SEED_MARKER"' in script and 'want="$SEED_ID@$stamp"' in script, "the seed marker records the seed and its publish stamp, and a different seed or a new stamp is merged in")
+i_ok = script.index('if [ "$complete" = 1 ]'); i_mark = script.index('echo "$want" > "/engine-cache/$SEED_MARKER"'); i_loop = script.index('if cp -a --no-preserve=ownership')
 check(i_loop < i_ok < i_mark and 'else complete=0; rm -rf "$t"' in script, "the marker is written only after every copy succeeded; a failed copy is removed and the seed retried next start")
 probe_seed = seed["containers"][0]["readinessProbe"]["exec"]["command"][2]
-check(probe_seed.endswith('&& grep -qx "workload-pvc:engine-cache" /engine-cache/.seeded'), "with a seed, Ready also requires the node to carry that seed: %s" % probe_seed)
+check(probe_seed.endswith('&& grep -qx -e "workload-pvc:engine-cache" -e "workload-pvc:engine-cache@[0-9]*" -e "none:workload-pvc:engine-cache" /engine-cache/.seeded'), "with a seed, Ready also requires the node to carry that seed (as published, or before any publish), or the record that it had nothing to seed: %s" % probe_seed)
 env = {e["name"]: e["value"] for e in seed["containers"][0]["env"]}
-check(env.get("SEED_MARKER") == ".seeded" and env.get("SEED_ID") == "workload-pvc:engine-cache", "the seed marker's name and the seed's identity come from the environment")
+check(env.get("SEED_MARKER") == ".seeded" and env.get("SEED_ID") == "workload-pvc:engine-cache" and env.get("SEED_SUBPATH") == "engine-cache", "the seed marker's name, the seed's identity and its subPath come from the environment: %s" % env)
 check("$(" not in script and "$$" not in script, "still no $( or $$ in the command")
 plain_ps = plain["spec"]["template"]["spec"]
 check(all(v["name"] != "seed" for v in plain_ps["volumes"]) and all(m["name"] != "seed" for m in plain_ps["containers"][0]["volumeMounts"]), "no --seed-claim: no seed volume or mount")
@@ -182,8 +182,96 @@ mkdir -p "$M/seed/triton/y"; echo y > "$M/seed/triton/y/f"; chmod 000 "$M/seed/t
 SEED_MARKER=.seeded SEED_ID=shared:z MARKER=.prepared HOSTNAME=n1 "$SH" "$M/p.sh" > "$M/run4.out" 2>&1; chmod 755 "$M/seed/triton/y"
 if [ "$(id -u)" = 0 ]; then ok "merge: (the failed-copy case needs a non-root check runner)"; else
 grep -q "did not complete" "$M/run4.out" && [ "$(cat "$M/cache/.seeded")" = shared:y ] && [ ! -e "$M/cache/triton/y" ] && ok "merge: a copy that fails leaves the marker at the previous seed and nothing half-copied" || fail "merge run 4: $(cat "$M/run4.out"; cat "$M/cache/.seeded")"; fi
+# a seed claim whose subPath does not exist yet -- a fresh stand-up's
+# workload claim: nothing to seed, said so, and Ready; the seed is merged
+# once it appears
+F="$T/fresh"; mkdir -p "$F/seed" "$F/cache"
+sed -n "/^preparer_script() {/,/^SCRIPT$/p" deploy/enginecache.sh | sed '1,2d;$d' | sed "s|/seed|$F/seed|g; s|/engine-cache|$F/cache|g; s|^trap .*||" > "$F/p.sh"
+SEED_MARKER=.seeded SEED_ID=workload-pvc:engine-cache SEED_SUBPATH=engine-cache MARKER=.prepared HOSTNAME=n1 "$SH" "$F/p.sh" > "$F/run1.out" 2>&1; rc=$?
+[ "$rc" = 0 ] && [ -f "$F/cache/.prepared" ] && [ "$(cat "$F/cache/.seeded")" = "none:workload-pvc:engine-cache" ] && grep -q "nothing to seed" "$F/run1.out" \
+    && ok "seed: an absent subPath is nothing to seed -- prepared, marked none:, and said so" || fail "seed absent: rc=$rc $(cat "$F/run1.out"; cat "$F/cache/.seeded" 2>&1)"
+mkdir -p "$F/seed/engine-cache/vllm/torch_compile_cache/keyS"; echo s > "$F/seed/engine-cache/vllm/torch_compile_cache/keyS/f"
+SEED_MARKER=.seeded SEED_ID=workload-pvc:engine-cache SEED_SUBPATH=engine-cache MARKER=.prepared HOSTNAME=n1 "$SH" "$F/p.sh" > "$F/run2.out" 2>&1
+[ "$(cat "$F/cache/vllm/torch_compile_cache/keyS/f" 2>/dev/null)" = s ] && [ "$(cat "$F/cache/.seeded")" = workload-pvc:engine-cache ] \
+    && ok "seed: a seed that appears later is merged from its subPath, and the marker records it" || fail "seed appears later: $(cat "$F/run2.out"; cat "$F/cache/.seeded")"
+# publish: a node's caches go into the seed (what the seed has is kept), and
+# a stamped seed is merged again by a node already seeded from it
+P="$T/publish"; mkdir -p "$P/node/vllm/torch_compile_cache/keyN" "$P/node/triton/t" "$P/seed/engine-cache/vllm/torch_compile_cache/keyS"
+echo n > "$P/node/vllm/torch_compile_cache/keyN/f"; echo t > "$P/node/triton/t/f"; echo s > "$P/seed/engine-cache/vllm/torch_compile_cache/keyS/f"
+sed -n "/^publish_script() {/,/^SCRIPT$/p" deploy/enginecache.sh | sed '1,2d;$d' | sed "s|/seed|$P/seed|g; s|/engine-cache|$P/node|g" > "$P/pub.sh"
+grep -q 'cp -a' "$P/pub.sh" || fail "publish: no publish_script extracted"
+SEED_SUBPATH=engine-cache NODE_NAME=n1 "$SH" "$P/pub.sh" > "$P/pub.out" 2>&1; rc=$?
+[ "$rc" = 0 ] && [ "$(cat "$P/seed/engine-cache/vllm/torch_compile_cache/keyN/f")" = n ] && [ "$(cat "$P/seed/engine-cache/triton/t/f")" = t ] \
+    && [ "$(cat "$P/seed/engine-cache/vllm/torch_compile_cache/keyS/f")" = s ] && grep -q "published from n1: 2 entries" "$P/pub.out" \
+    && ok "publish: a node's caches are merged into the seed, the seed's own entries kept" || fail "publish run: rc=$rc $(cat "$P/pub.out")"
+# the node seeded before the publish ($F, marker workload-pvc:engine-cache) merges again once the seed is stamped
+echo 20261013120000 > "$F/seed/engine-cache/.published"
+mkdir -p "$F/seed/engine-cache/vllm/torch_compile_cache/keyP"; echo p > "$F/seed/engine-cache/vllm/torch_compile_cache/keyP/f"
+SEED_MARKER=.seeded SEED_ID=workload-pvc:engine-cache SEED_SUBPATH=engine-cache MARKER=.prepared HOSTNAME=n1 "$SH" "$F/p.sh" > "$F/run3.out" 2>&1
+[ "$(cat "$F/cache/vllm/torch_compile_cache/keyP/f" 2>/dev/null)" = p ] && [ "$(cat "$F/cache/.seeded")" = "workload-pvc:engine-cache@20261013120000" ] \
+    && ok "seed: a stamped seed is merged again by a node already seeded, and the marker records the stamp" || fail "stamped seed: $(cat "$F/run3.out"; cat "$F/cache/.seeded")"
+SEED_MARKER=.seeded SEED_ID=workload-pvc:engine-cache SEED_SUBPATH=engine-cache MARKER=.prepared HOSTNAME=n1 "$SH" "$F/p.sh" > "$F/run4.out" 2>&1
+grep -q "seeded on" "$F/run4.out" && fail "stamped seed: merged again with no new stamp" || ok "seed: the same stamp is not merged twice"
+# the readiness probe accepts every marker form the preparer writes
+for m in "workload-pvc:engine-cache" "workload-pvc:engine-cache@20261013120000" "none:workload-pvc:engine-cache"; do
+    echo "$m" > "$T/marker"
+    grep -qx -e "workload-pvc:engine-cache" -e "workload-pvc:engine-cache@[0-9]*" -e "none:workload-pvc:engine-cache" "$T/marker" || fail "probe refuses marker $m"
+done
+echo "other-claim:x" > "$T/marker"
+grep -qx -e "workload-pvc:engine-cache" -e "workload-pvc:engine-cache@[0-9]*" -e "none:workload-pvc:engine-cache" "$T/marker" && fail "probe accepts another seed's marker" || ok "probe: accepts the seed's three marker forms, refuses another seed's"
+# publish waits on the usable nodes (status), never `rollout status`, which
+# also waits for a cordoned node's pod that never comes up
+pub_body="$(sed -n '/^cmd_publish() {/,/^}/p' deploy/enginecache.sh | grep -v '^[[:space:]]*#')"
+if [ -z "$pub_body" ]; then fail "publish: no cmd_publish found"
+elif printf '%s' "$pub_body" | grep -q 'rollout status'; then fail "publish: waits with rollout status, which counts cordoned nodes"
+elif printf '%s' "$pub_body" | grep -q 'enginecache.sh" status'; then ok "publish: waits for the usable nodes to re-seed, not for every DaemonSet pod"
+else fail "publish: no wait for the preparers to re-seed"; fi
+# a publish pod that Failed is reported at once, not after the whole timeout
+if printf '%s' "$pub_body" | grep -q 'for=jsonpath=.{.status.phase}.=Succeeded'; then
+    fail "publish: waits on Succeeded alone, so a Failed pod sits out the timeout"
+fi
+# the re-seed wait counts only preparers of the restarted template: status alone
+# passes on the pods from before the restart
+printf '%s' "$pub_body" | grep -q 'stale_preparers "$gen"' && ok "publish: the re-seed wait needs every live preparer of the restarted template" \
+    || fail "publish: the re-seed wait passes on preparers from before the restart"
+sp_body="$(sed -n '/^stale_preparers() {/,/^}/p' deploy/enginecache.sh)"
+if [ -z "$sp_body" ]; then fail "publish: no stale_preparers"; else
+    # n1 Ready, n2 not. The last pod is being deleted on n2, where no kubelet can confirm it.
+    pods='{"items":[
+      {"metadata":{"labels":{"pod-template-generation":"13"}},"spec":{"nodeName":"n1"},"status":{"phase":"Running"}},
+      {"metadata":{"labels":{"pod-template-generation":"12"}},"spec":{"nodeName":"n1"},"status":{"phase":"Running"}},
+      {"metadata":{"labels":{"pod-template-generation":"12"}},"spec":{"nodeName":"n1"},"status":{"phase":"Failed"}},
+      {"metadata":{"labels":{"pod-template-generation":"12"},"deletionTimestamp":"2026-10-13T00:00:00Z"},"spec":{"nodeName":"n2"},"status":{"phase":"Running"}}]}'
+    nodes='{"items":[
+      {"metadata":{"name":"n1"},"status":{"conditions":[{"type":"Ready","status":"True"}]}},
+      {"metadata":{"name":"n2"},"status":{"conditions":[{"type":"Ready","status":"Unknown"}]}}]}'
+    # MODE:GEN:WANT -- ok reads both; nodesfail cannot list nodes; podsfail cannot read the pods
+    for c in "ok:13:1" "ok:14:2" "nodesfail:13:2" "podsfail:13:?"; do
+        out="$(MODE="${c%%:*}" PODS="$pods" NODES="$nodes" bash -c 'kubectl() {
+              case "$MODE:$2" in podsfail:pods|nodesfail:nodes) return 1 ;; *:pods) printf %s "$PODS" ;; *:nodes) printf %s "$NODES" ;; esac; }
+            NAMESPACE=ns; '"$sp_body"'
+stale_preparers '"$(echo "$c" | cut -d: -f2)")"
+        want="${c##*:}"
+        [ "$out" = "$want" ] && ok "stale_preparers ($c): $out" || fail "stale_preparers ($c): got '$out', want $want"
+    done
+    printf '%s' "$pub_body" | grep -q 'deprecated\\.daemonset\\.template\\.generation' \
+        && ok "publish: compares against the DaemonSet's template generation, which the pod label follows" \
+        || fail "publish: compares against .metadata.generation, which also moves on edits outside the template"
+fi
+ps_body="$(sed -n '/^pod_succeeded() {/,/^}/p' deploy/enginecache.sh)"
+if [ -z "$ps_body" ]; then fail "publish: no pod_succeeded"; else
+    for c in Succeeded:0 Failed:1 Pending:1; do
+        out="$(PHASE="${c%%:*}" bash -c 'kubectl() { printf %s "$PHASE"; }; sleep() { SECONDS=$((SECONDS + $1)); }; NAMESPACE=ns; '"$ps_body"'
+SECONDS=0; pod_succeeded p 900; echo "rc=$? after=$SECONDS"')"
+        want="rc=${c#*:}"
+        case "$c:$out" in
+            Pending*) [ "${out%% *}" = "$want" ] && ok "pod_succeeded: a pod still $(echo "${c%%:*}") at the deadline is a failure" || fail "pod_succeeded on ${c%%:*}: $out" ;;
+            *) [ "$out" = "$want after=0" ] && ok "pod_succeeded: ${c%%:*} answers at once ($want)" || fail "pod_succeeded on ${c%%:*}: $out (want $want at once)" ;;
+        esac
+    done
+fi
 n="$(grep -c "cat <<'SCRIPT'" deploy/enginecache.sh)"
-[ "$n" = 1 ] && grep -q '^\$(preparer_script | sed' deploy/enginecache.sh && ok "render: the preparer's command comes from a quoted heredoc, so nothing in it is evaluated at apply time" || fail "render: the preparer's command is not in a quoted heredoc ($n)"
+[ "$n" = 2 ] && grep -q '^\$(preparer_script | sed' deploy/enginecache.sh && grep -q '^\$(publish_script | sed' deploy/enginecache.sh && ok "render: the preparer's and the publisher's commands come from quoted heredocs, so nothing in them is evaluated at apply time" || fail "render: a preparer or publisher command is not in a quoted heredoc ($n of 2)"
 
 # ---------------------------------------------------------------------------
 # 2. What apply refuses, before any kubectl.
@@ -298,16 +386,25 @@ if PATH="$STUB_PATH" bash hack/benchmark/engine_cache_claim.sh "$T/s5.yaml" chec
 cp "$T/scenario.yaml" "$T/s6.yaml"
 if PATH="$STUB_PATH" bash hack/benchmark/engine_cache_claim.sh "$T/s6.yaml" check-ns 'Bad_Name' >/dev/null 2>&1; then fail "engine_cache_claim accepted a claim name that is not a label"; else ok "engine_cache_claim: a claim name that is not a DNS label is refused"; fi
 # every shipped scenario that carries the volume is repointed (two roles in
-# the P/D one, one in the others), and the one without it is refused
+# the P/D one, one in the others); a vLLM scenario without one gets one per
+# engine role, with the cache directories under it; one with no vLLM role to
+# add it to is refused
+EC_ROLES='.. | select(type == "!!map" and (has("decode") or has("prefill"))) | (.decode, .prefill) | select(type == "!!map" and has("vllm") and .enabled != false)'
 for sc in hack/benchmark/scenarios/guides/*.yaml; do
     cp "$sc" "$T/real.yaml"
     have="$(yq -r '[.. | select(type == "!!map" and has("additionalVolumes")) | .additionalVolumes[] | select(.name == "engine-cache")] | length' "$sc")"
+    roles="$(yq -r "[${EC_ROLES}] | length" "$sc")"
+    want="$have"; [ "$have" -gt 0 ] || want="$roles"
     if PATH="$STUB_PATH" bash hack/benchmark/engine_cache_claim.sh "$T/real.yaml" check-ns > "$T/real.out" 2>&1; then
         n="$(yq -r '[.. | select(type == "!!map" and has("additionalVolumes")) | .additionalVolumes[] | select(.name == "engine-cache") | .persistentVolumeClaim.claimName] | map(select(. == "engine-cache")) | length' "$T/real.yaml")"
         sub="$(yq -r '[.. | select(type == "!!map" and has("additionalVolumeMounts")) | .additionalVolumeMounts[] | select(.name == "engine-cache") | has("subPath")] | map(select(.)) | length' "$T/real.yaml")"
-        [ "$have" -gt 0 ] && [ "$n" = "$have" ] && [ "$sub" = 0 ] && ok "engine_cache_claim: $(basename "$sc") -- $n engine-cache volume(s) repointed, no subPath left" || fail "engine_cache_claim on $(basename "$sc"): had $have, repointed $n, subPaths left $sub"
+        [ "$want" -gt 0 ] && [ "$n" = "$want" ] && [ "$sub" = 0 ] && ok "engine_cache_claim: $(basename "$sc") -- $n engine-cache volume(s) on the claim, no subPath left" || fail "engine_cache_claim on $(basename "$sc"): had $have, wanted $want, on the claim $n, subPaths left $sub"
+        if [ "$have" = 0 ]; then
+            wired="$(yq -r "[${EC_ROLES} | select(.vllm.cacheRoot == \"/engine-cache/vllm\" and ([.extraEnvVars[] | select(.name == \"FLASHINFER_WORKSPACE_DIR\" or .name == \"TRITON_CACHE_DIR\") | .value] | join(\",\")) == \"/engine-cache/flashinfer,/engine-cache/triton\" and ([.additionalVolumeMounts[] | select(.name == \"engine-cache\" and .mountPath == \"/engine-cache\")] | length) == 1)] | length" "$T/real.yaml")"
+            [ "$wired" = "$roles" ] && grep -q 'added an engine cache' "$T/real.out" && ok "engine_cache_claim: $(basename "$sc") -- had no engine cache; all $roles vLLM role(s) now keep VLLM_CACHE_ROOT, FlashInfer and Triton under /engine-cache" || fail "engine_cache_claim on $(basename "$sc"): added wiring on $wired of $roles role(s): $(cat "$T/real.out")"
+        fi
     else
-        [ "$have" = 0 ] && grep -q 'declares no engine cache to move' "$T/real.out" && ok "engine_cache_claim: $(basename "$sc") -- carries no engine-cache volume and is refused" || fail "engine_cache_claim on $(basename "$sc"): $(cat "$T/real.out")"
+        [ "$have" = 0 ] && [ "$roles" = 0 ] && grep -q 'declares no engine cache to move' "$T/real.out" && ok "engine_cache_claim: $(basename "$sc") -- carries no engine-cache volume and no vLLM role, and is refused" || fail "engine_cache_claim on $(basename "$sc"): $(cat "$T/real.out")"
     fi
 done
 
@@ -325,7 +422,9 @@ cat > "$T/nodes.json" <<EOF
  {"metadata":{"name":"node-failing", "labels":{"nvidia.com/gpu.product":"H200"}}},
  {"metadata":{"name":"node-nopod",   "labels":{"nvidia.com/gpu.product":"H200"}}},
  {"metadata":{"name":"node-cpu",     "labels":{"gpu.nvidia.com/model":""}}},
- {"metadata":{"name":"node-evicted", "labels":{"nvidia.com/gpu.product":"H200"}}}
+ {"metadata":{"name":"node-evicted", "labels":{"nvidia.com/gpu.product":"H200"}}},
+ {"metadata":{"name":"node-cordoned","labels":{"nvidia.com/gpu.product":"H200"}},"spec":{"unschedulable":true,"taints":[{"key":"node.kubernetes.io/unschedulable","effect":"NoSchedule"}]}},
+ {"metadata":{"name":"node-foreign", "labels":{"nvidia.com/gpu.product":"H200"}},"spec":{"taints":[{"key":"example.com/team-x","effect":"NoExecute"}]}}
 ]}
 EOF
 cat > "$T/pods.json" <<EOF
@@ -337,6 +436,8 @@ cat > "$T/pods.json" <<EOF
  {"metadata":{"name":"ec-evicted","labels":{"wva.llmd.ai/engine-cache":"engine-cache"}},"spec":{"nodeName":"node-evicted"},"status":{"phase":"Failed","reason":"Evicted","message":"The node had condition: [DiskPressure]."}}
 ]}
 EOF
+# the DaemonSet as apply wrote it: it tolerates nvidia.com/gpu, nothing else
+printf '%s' '{"spec":{"template":{"spec":{"tolerations":[{"key":"nvidia.com/gpu","operator":"Exists"}]}}}}' > "$T/ds.json"
 # the volumes carrying our labels: ours, the same claim in another namespace,
 # and one whose claimRef is a weights claim that somehow carries our labels
 cat > "$T/pvs.json" <<EOF
@@ -362,6 +463,7 @@ case "\$1 \$2" in
       case "\$ARGV" in *" engine-cache "*) ;; *) echo "stub kubectl: get daemonset for a name that is not the DaemonSet:\$ARGV" >&2; exit 2 ;; esac
       case "\$ARGV" in
         *"engine-cache-path}"*) printf '%s' "\${STUB_DS_PATH-/mnt/local/weights/check-ns/engine-cache}" ;;
+        *" -o json "*) cat "$T/ds.json" ;;
         *"jsonpath={.spec.template.spec.nodeSelector}"*)
            if [ -n "\${STUB_DS_SELECTOR:-}" ]; then jq -cn --arg k "\${STUB_DS_SELECTOR%%=*}" --arg v "\${STUB_DS_SELECTOR#*=}" '{(\$k): \$v}'; else printf '{}'; fi ;;
         *) echo "stub kubectl: unexpected daemonset read:\$ARGV" >&2; exit 2 ;;
@@ -411,7 +513,12 @@ expect_line node-evicted  absent
 grep -q 'node-evicted .*Evicted' "$T/status.out" && ok "status: an evicted preparer shows its reason" || fail "status: Evicted reason missing"
 grep -q '^  node-cpu ' "$T/status.out" && fail "status: a node with an empty product label was counted" || ok "status: the default placement leaves the empty-label node out"
 grep -q 'Permission denied\|Read-only' "$T/status.out" && fail "status: a permission diagnosis with no such error in the log" || ok "status: no permission diagnosis when the log shows none"
-grep -q '1/5 nodes prepared; 4 not' "$T/status.out" && ok "status: the tally counts only Ready as prepared" || fail "status: tally: $(grep 'nodes prepared' "$T/status.out")"
+grep -q '1/5 usable nodes prepared; 4 not' "$T/status.out" && ok "status: the tally counts only Ready as prepared, on usable nodes" || fail "status: tally: $(grep 'nodes prepared' "$T/status.out")"
+grep -qE '^  node-cordoned +excluded +cordoned' "$T/status.out" && grep -qE '^  node-foreign +excluded +tainted example.com/team-x:NoExecute' "$T/status.out" && ok "status: a cordoned node and a node tainted against the preparer are listed as excluded, with why" || fail "status: excluded rows: $(grep -E 'node-cordoned|node-foreign' "$T/status.out" | tr '\n' ';')"
+cp "$T/nodes.json" "$T/nodes-full.json"
+jq '.items |= map(select(.metadata.name == "node-ready" or .metadata.name == "node-cordoned" or .metadata.name == "node-foreign"))' "$T/nodes-full.json" > "$T/nodes.json"
+if PATH="$STUB_PATH" bash deploy/enginecache.sh status -n check-ns > "$T/done.out" 2>&1; then grep -q '1/1 usable nodes prepared' "$T/done.out" && ok "status: every usable node prepared is a pass, unusable nodes aside" || fail "status complete: $(grep 'nodes prepared' "$T/done.out")"; else fail "status: a complete preparation failed on nodes no engine can use: $(grep -E 'nodes prepared|excluded' "$T/done.out" | tr '\n' ';')"; fi
+cp "$T/nodes-full.json" "$T/nodes.json"
 grep -q "claim engine-cache: Bound" "$T/status.out" && grep -q '^/mnt/local/weights/check-ns/engine-cache  (claim' "$T/status.out" && ok "status: reports the directory (off the DaemonSet's annotation) and the claim Bound" || fail "status: header: $(head -1 "$T/status.out")"
 [ "$rc" -ne 0 ] && ok "status: exits non-zero while a node is not prepared" || fail "status: exit 0 with nodes not prepared"
 grep -q 'stub kubectl:' "$T/status.out" && fail "status: a kubectl call lacked its scope: $(grep 'stub kubectl:' "$T/status.out" | head -1)" || ok "status: every kubectl call carried -n / -l"
@@ -503,11 +610,13 @@ if make -n benchmark-standup BENCHMARK_NAMESPACE=ns BENCHMARK_SPEC=guides/pd-dis
 if make -n benchmark-standup BENCHMARK_NAMESPACE=ns BENCHMARK_ENGINE_CACHE_HOSTPATH=/mnt/local/c BENCHMARK_SPEC=guides/pd-disaggregation 2>/dev/null | grep -A1 'if \[ -n "/mnt/local/c" \]; then' | grep -q 'img='; then ok "benchmark-standup: the cache step is guarded by BENCHMARK_ENGINE_CACHE_HOSTPATH itself" ; else fail "benchmark-standup: the cache step's guard is not on BENCHMARK_ENGINE_CACHE_HOSTPATH"; fi
 if make -n benchmark-standup BENCHMARK_NAMESPACE=ns BENCHMARK_ENGINE_CACHE_HOSTPATH=/mnt/local/c BENCHMARK_SPEC=guides/pd-disaggregation 2>/dev/null | grep -q -- 'enginecache.sh apply -n "ns" --path "/mnt/local/c"'; then ok "benchmark-standup: BENCHMARK_ENGINE_CACHE_HOSTPATH on its own takes its own directory" ; else fail "benchmark-standup: the cache directory did not reach the apply"; fi
 rec="$(make -n benchmark-standup BENCHMARK_NAMESPACE=ns BENCHMARK_ENGINE_CACHE_HOSTPATH=/mnt/local/c BENCHMARK_SPEC=guides/pd-disaggregation 2>/dev/null)"
-printf '%s\n' "$rec" | grep -q 'seed="auto";' && printf '%s\n' "$rec" | grep -q 'kubectl get pvc -n "ns" workload-pvc' && printf '%s\n' "$rec" | grep -q 'seed=workload-pvc:engine-cache' && ok "benchmark-standup: the default seed is the harness workload PVC's engine-cache, when that claim exists" || fail "benchmark-standup: the auto seed is not the workload PVC"
+printf '%s\n' "$rec" | grep -q 'seed="auto";' && printf '%s\n' "$rec" | grep -qE 'kubectl (--request-timeout=[^ ]+ )?get pvc -n "ns" workload-pvc' && printf '%s\n' "$rec" | grep -q 'seed=workload-pvc:engine-cache' && ok "benchmark-standup: the default seed is the harness workload PVC's engine-cache, when that claim exists" || fail "benchmark-standup: the auto seed is not the workload PVC"
 # make -n prints the shell, not its evaluation: the assertion is that the
 # seed rides on the guarded apply line itself, as a shell conditional
 printf '%s\n' "$rec" | grep -A12 'if \[ -n "/mnt/local/c" \]; then' | grep -q 'enginecache.sh apply -n "ns" --path "/mnt/local/c" .*${seed:+--seed-claim "$seed"}' && ok "benchmark-standup: the seed rides on the guarded apply, as a shell conditional on its value" || fail "benchmark-standup: --seed-claim is not on the guarded apply line"
 rec="$(make -n benchmark-standup BENCHMARK_NAMESPACE=ns BENCHMARK_ENGINE_CACHE_HOSTPATH=/mnt/local/c BENCHMARK_ENGINE_CACHE_SEED=none BENCHMARK_SPEC=guides/pd-disaggregation 2>/dev/null)"
 printf '%s\n' "$rec" | grep -q 'seed="none";' && ok "benchmark-standup: BENCHMARK_ENGINE_CACHE_SEED=none reaches the step" || fail "benchmark-standup: seed=none did not reach the recipe"
+# the preparer compiles for the engine the scenario pins, not the harness default
+printf '%s\n' "$rec" | grep -A2 'if \[ -n "/mnt/local/c" \]; then' | grep -q 'engine_image.sh "[^"]*" "[^"]*/config/scenarios/guides/pd-disaggregation.yaml"' && ok "benchmark-standup: the preparer's image is read with the run's scenario" || fail "benchmark-standup: the preparer's image ignores the scenario's engine pin"
 
 exit $FAILED

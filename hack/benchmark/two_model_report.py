@@ -172,7 +172,9 @@ def gpu_series(path, t0):
         except ValueError:
             continue
         ts = s.get("ts")
-        if ts is None or s.get("failed"):
+        # A stall mark is not a sample: it holds no Pods, and pricing it as
+        # zero accelerators would understate exactly the arm that lost time.
+        if ts is None or s.get("failed") or "stalled_since" in s:
             continue
         total = pool = lent = 0
         for p in s.get("pods", []):
@@ -189,6 +191,44 @@ def gpu_series(path, t0):
         out.append((ts - t0, total, pool, lent))
     out.sort(key=lambda r: r[0])
     return out
+
+
+def sampler_stalls(path, t0=0, t_end=None):
+    """Seconds the sampler itself did not run, from its stall marks, inside
+    the run's window [t0, t0 + t_end] -- the window accelerator-seconds are
+    integrated over (clip_series): a stall before the load or after it costs
+    the run nothing.
+
+    A failed poll is the cluster's answer; a stall is the machine running the
+    sampler (measured: 2185s in standby). The load runs in the cluster either
+    way, so a stall loses the cost and not the latencies, and the refusal says
+    so rather than reading as a cluster that stopped answering.
+    """
+    total = 0
+    if not os.path.exists(path):
+        return total
+    hi = None if t_end is None else t0 + t_end
+    for line in open(path):
+        try:
+            s = json.loads(line)
+        except ValueError:
+            continue
+        if "stalled_since" not in s or s.get("ts") is None:
+            continue
+        lo_s, hi_s = max(s["stalled_since"], t0), s["ts"]
+        if hi is not None:
+            hi_s = min(hi_s, hi)
+        total += max(0, hi_s - lo_s)
+    return total
+
+
+def stall_note(stalled):
+    """The refusal's second sentence when the sampler, not the cluster, stopped."""
+    if not stalled:
+        return ""
+    return (" %.0fs of it the sampler itself did not run (its host was suspended or "
+            "a poll blocked); the load ran in the cluster, so this arm's latencies "
+            "stand and only its cost needs a rerun." % stalled)
 
 
 def integrate(series, index, gap_limit=None):
@@ -257,6 +297,8 @@ def schedule_signature(meta):
         "schedule": meta.get("schedule"),
         "input_tokens": meta.get("input_tokens"),
         "output_tokens": meta.get("output_tokens"),
+        "input_tokens_b": meta.get("input_tokens_b", meta.get("input_tokens")),
+        "output_tokens_b": meta.get("output_tokens_b", meta.get("output_tokens")),
         "model_a": meta.get("model_a"),
         "model_b": meta.get("model_b"),
         "seed": meta.get("seed"),
@@ -274,6 +316,11 @@ def load_budget(d):
         return json.load(fh)
 
 
+# The baseline arm's name. nopool for the warm-pool comparison; the
+# utilization-share comparison calls its baseline today (--baseline-name).
+BASELINE = "nopool"
+
+
 def budget_problem(a, b):
     """The arms must have been allowed the same per-model ceiling.
 
@@ -287,21 +334,28 @@ def budget_problem(a, b):
     """
     ba, bb = a.get("budget"), b.get("budget")
     if not ba or not bb:
-        return ("the %s arm or the nopool arm did not record its replica budget "
+        return ("the %s arm or the %s arm did not record its replica budget "
                 "(budget.json), so nothing establishes that it was not simply allowed "
-                "more cluster" % b["name"])
+                "more cluster" % (b["name"], BASELINE))
     if b["name"].startswith("pool") and bb.get("pool_replicas", 0) <= 0:
         return "the pool arm recorded no pool Pods; it was not the pool arm"
     if b["name"].startswith("floor") and bb.get("min_replicas_per_model", 0) <= ba.get("min_replicas_per_model", 1):
-        return ("the floor arm's floor (%s per model) is no higher than the nopool "
+        return ("the floor arm's floor (%s per model) is no higher than the %s "
                 "arm's (%s); it was not the floor arm"
-                % (bb.get("min_replicas_per_model"), ba.get("min_replicas_per_model", 1)))
+                % (bb.get("min_replicas_per_model"), BASELINE, ba.get("min_replicas_per_model", 1)))
+    # Per-role bounds, recorded by a P/D run. Absent on older budgets, which had
+    # one ceiling for every role.
+    for key in ("max_prefill", "max_decode", "min_prefill", "min_decode"):
+        if key in ba and key in bb and ba[key] != bb[key]:
+            return ("the %s arm ran with %s=%s against the %s arm's %s: its roles were "
+                    "bounded differently, so its TTFT differs for a reason that is not "
+                    "the thing under test." % (b["name"], key, bb[key], BASELINE, ba[key]))
     if (bb["max_replicas_per_model"] != ba["max_replicas_per_model"]
             or bb["gpus_per_replica"] != ba["gpus_per_replica"]):
         return ("the %s arm capped each model at %d replicas of %d accelerator(s) against "
-                "the nopool arm's %d of %d: its models were allowed a different ceiling, "
+                "the %s arm's %d of %d: its models were allowed a different ceiling, "
                 "so its TTFT differs for a reason that is not the insurance under test."
-                % (b["name"], bb["max_replicas_per_model"], bb["gpus_per_replica"],
+                % (b["name"], bb["max_replicas_per_model"], bb["gpus_per_replica"], BASELINE,
                    ba["max_replicas_per_model"], ba["gpus_per_replica"]))
     return None
 
@@ -674,12 +728,13 @@ def admissible(arms, max_queue_delay, max_short=300.0, max_overlap=0.0,
     for b in arms[1:]:
         if schedule_signature(a["meta"]) != schedule_signature(b["meta"]):
             diffs = []
-            for k in ("input_tokens", "output_tokens", "model_a", "model_b", "seed", "data"):
+            for k in ("input_tokens", "output_tokens", "input_tokens_b", "output_tokens_b",
+                      "model_a", "model_b", "seed", "data"):
                 if a["meta"].get(k) != b["meta"].get(k):
-                    diffs.append("%s: nopool=%s %s=%s" % (k, a["meta"].get(k), b["name"], b["meta"].get(k)))
+                    diffs.append("%s: %s=%s %s=%s" % (k, a["name"], a["meta"].get(k), b["name"], b["meta"].get(k)))
             if a["meta"].get("schedule") != b["meta"].get("schedule"):
                 diffs.append("the schedule itself (phases, rates or durations)")
-            problems.append("the nopool and %s arms did not run the same scenario -- %s"
+            problems.append("the " + a["name"] + " and %s arms did not run the same scenario -- %s"
                             % (b["name"], "; ".join(diffs)))
     for arm in arms:
         m = arm["meta"]
@@ -732,8 +787,9 @@ def admissible(arms, max_queue_delay, max_short=300.0, max_overlap=0.0,
                                 "%.0fs window (%.0f%%). Accelerator-seconds are integrated "
                                 "from those samples, so a hole is priced as whatever the "
                                 "sample before it held -- and the cost half of this "
-                                "comparison is what the pool is being judged on."
-                                % (arm["name"], gapped, span, 100.0 * gapped / span))
+                                "comparison is what the pool is being judged on.%s"
+                                % (arm["name"], gapped, span, 100.0 * gapped / span,
+                                   stall_note(arm.get("stalled", 0))))
         drift = phase_drift(arm)
         arm["drift"] = drift
         overlap = burst_overlap(arm)
@@ -773,6 +829,8 @@ def main(argv):
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--nopool", required=True, help="the baseline arm's results directory")
+    p.add_argument("--baseline-name", default="nopool",
+                   help="what to call the baseline arm (today, for the utilization-share comparison)")
     p.add_argument("--pool", help="the warm-pool arm's results directory")
     p.add_argument("--floor", help="the over-provisioned arm's results directory: no pool, "
                                    "every model held at a floor of replicas for the whole run")
@@ -799,6 +857,8 @@ def main(argv):
     p.add_argument("--json", help="also write every number the tables hold to this file, "
                                   "for the plots and for anyone comparing runs")
     args = p.parse_args(argv)
+    global BASELINE
+    BASELINE = args.baseline_name
 
     extra = []
     for spec in args.arm:
@@ -806,15 +866,15 @@ def main(argv):
             print("--arm takes NAME=DIR, got %r" % spec, file=sys.stderr)
             return 2
         name, d = spec.split("=", 1)
-        if name in ("nopool", "pool", "floor") or not name:
+        if name in (BASELINE, "nopool", "pool", "floor") or not name:
             print("--arm name %r collides with a built-in arm; pick another" % name, file=sys.stderr)
             return 2
         extra.append((d, name))
     if not args.pool and not args.floor and not extra:
-        print("nothing to compare nopool against: give --pool, --floor and/or --arm", file=sys.stderr)
+        print("nothing to compare %s against: give --pool, --floor and/or --arm" % BASELINE, file=sys.stderr)
         return 2
     arms = []
-    for d, name in [(args.nopool, "nopool"), (args.pool, "pool"), (args.floor, "floor")] + extra:
+    for d, name in [(args.nopool, BASELINE), (args.pool, "pool"), (args.floor, "floor")] + extra:
         if not d:
             continue
         meta = load_meta(d)
@@ -824,6 +884,8 @@ def main(argv):
             "rows": load_rows(os.path.join(d, "requests.jsonl")),
             "gpus": clip_series(gpu_series(os.path.join(d, "gpus.jsonl"), (meta or {}).get("t0", 0)),
                                 sched[-1]["end"] if sched else None),
+            "stalled": sampler_stalls(os.path.join(d, "gpus.jsonl"), (meta or {}).get("t0", 0),
+                                      sched[-1]["end"] if sched else None),
             "budget": load_budget(d),
             "work": pod_work(d),
             "queue_p95": None,
@@ -981,22 +1043,22 @@ def main(argv):
                       % (label, lo, abs(delta), "lower" if delta > 0 else "higher", what,
                          fmt_ms(sn["p95"]), fmt_ms(sp["p95"]),
                          sn["n"], sp["n"], sn["failed"], sp["failed"]))
-        gt_n, gt_p = totals.get("nopool"), totals.get(b["name"])
+        gt_n, gt_p = totals.get(BASELINE), totals.get(b["name"])
         if gt_n and gt_p:
             diff = gt_p - gt_n
             if diff > 0:
-                print("- The %s arm spent **%.0f more GPU-seconds** than nopool (%.1f%%).%s"
-                      % (b["name"], diff, 100.0 * diff / gt_n,
+                print("- The %s arm spent **%.0f more GPU-seconds** than %s (%.1f%%).%s"
+                      % (b["name"], diff, BASELINE, 100.0 * diff / gt_n,
                          " Note this EXCLUDES the pool's warm-up, which happens before the "
                          "run starts, so it understates the cost of holding one."
                          if b["name"].startswith("pool") else ""))
             else:
-                print("- The %s arm spent **%.0f fewer GPU-seconds** than nopool (%.1f%%)."
-                      % (b["name"], -diff, 100.0 * -diff / gt_n))
+                print("- The %s arm spent **%.0f fewer GPU-seconds** than %s (%.1f%%)."
+                      % (b["name"], -diff, BASELINE, 100.0 * -diff / gt_n))
         else:
-            print("- GPU-seconds are missing for the nopool or %s arm, so the cost side of "
+            print("- GPU-seconds are missing for the %s or %s arm, so the cost side of "
                   "that comparison is **not** established; the TTFT numbers alone do not "
-                  "settle it." % b["name"])
+                  "settle it." % (BASELINE, b["name"]))
     # The comparison the third arm exists for: two kinds of insurance, priced
     # against each other on what they bought.
     by_name = {arm["name"]: arm for arm in arms}

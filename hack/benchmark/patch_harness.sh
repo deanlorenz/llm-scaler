@@ -917,7 +917,10 @@ OLD = '''            "usage=model-cache",
 '''
 NEW = '''            f"usage=model-cache,wva.llmd.ai/model-namespace={context.require_namespace()}",  # wva-patch
 '''
-if NEW in src:
+# Fix 15 rewrites both sites around one namespace-scoped selector, so after
+# it neither OLD nor NEW is there; the scoped label with no unscoped site
+# left is this fix applied, and a second run must say so, not fail.
+if NEW in src or (OLD not in src and "wva.llmd.ai/model-namespace=" in src):
     done += 1
 else:
     if src.count(OLD) != 2:
@@ -1077,5 +1080,331 @@ if src.count(OLD) != 1:
 src = src.replace(OLD, NEW, 1)
 io.open(path, "w", encoding="utf-8", newline="\n").write(src)
 print("  fix 14 (libcuda from the loader cache): applied")
+PYEOF
+fi
+
+# ---------------------------------------------------------------------------
+# Fix 15 -- teardown: the node-local weights go downloader first, then the
+# claim, then the volume, and no wait is unbounded.
+#
+# step_03_delete_resources deleted the hostPath volume (`kubectl delete pv`,
+# which waits for the object to go) while the harness's downloader DaemonSet
+# still mounted the claim and the claim was still bound. A bound claim keeps
+# its volume in Terminating (pv-protection), a mounted claim stays (pvc-
+# protection), and the teardown deleted neither -- measured on a P/D run, it
+# waited until someone deleted the DaemonSet and the claim by hand, 20 minutes
+# in. Now: the downloader (component=model-download), then the claim the
+# volume names in its claimRef (fix 12 sets it), then the volume, each with a
+# --timeout; on a timeout it says which pods still mount the claim.
+# Applies after fix 12, whose scoped label the anchor carries.
+# ---------------------------------------------------------------------------
+TD3="$REPO_DIR/llmdbenchmark/teardown/steps/step_03_delete_resources.py"
+if [ ! -f "$TD3" ]; then
+    note "fix 15 (hostPath volume torn down in order, bounded): no step_03, skipped"
+else
+    "$PY" - "$TD3" <<'PYEOF' || fail "fix 15 (hostPath volume torn down in order, bounded) failed"
+import io, sys
+
+path = sys.argv[1]
+src = io.open(path, encoding="utf-8", newline="").read().replace("\r\n", "\n")
+
+IMPORT = "from llmdbenchmark.executor.command import CommandExecutor\n"
+HELPER = IMPORT + '''
+
+# wva-patch (fix 15): the node-local weights go downloader, claim, volume; each bounded.
+_WVA_DELETE_TIMEOUT = "120s"
+
+
+def _wva_pods_mounting(cmd, ns, claims):
+    """The pods in ns that mount any of claims, for a timeout message."""
+    r = cmd.kube("get", "pods", "-n", ns, "-o", "json", check=False)
+    if not r.success:
+        return f"unknown: the pods in {ns} could not be read ({r.stderr.strip()})"
+    try:
+        pods = json.loads(r.stdout or "{}").get("items", [])
+    except ValueError:
+        return f"unknown: the pod list of {ns} did not parse"
+    names = [
+        p["metadata"]["name"]
+        for p in pods
+        if any((v.get("persistentVolumeClaim") or {}).get("claimName") in claims
+               for v in (p.get("spec") or {}).get("volumes") or [])
+    ]
+    return ", ".join(names) or "no pod mounts the claim; look at its finalizers"
+
+
+def _wva_delete_hostpath_volume(cmd, context, ns):
+    """Delete this namespace's node-local weights in the order the protections
+    demand: the downloader DaemonSet, the claim, then the volume."""
+    sel = f"usage=model-cache,wva.llmd.ai/model-namespace={ns}"
+    pv = cmd.kube("get", "pv", "-l", sel, "-o", "json", check=False)
+    if not pv.success:
+        context.logger.log_warning(f"  hostPath PV(s) not read, so not deleted: {pv.stderr.strip()}")
+        return
+    try:
+        items = json.loads(pv.stdout or "{}").get("items", [])
+    except ValueError:
+        items = []
+    if not items:
+        return
+    claims = sorted({((i.get("spec") or {}).get("claimRef") or {}).get("name") for i in items} - {None})
+    steps = [("the weights downloader DaemonSet",
+              ("delete", "daemonset", "-n", ns, "-l", "component=model-download",
+               "--ignore-not-found", f"--timeout={_WVA_DELETE_TIMEOUT}"))]
+    for claim in claims:
+        steps.append((f"claim {ns}/{claim}",
+                      ("delete", "pvc", "-n", ns, claim, "--ignore-not-found", f"--timeout={_WVA_DELETE_TIMEOUT}")))
+    steps.append(("the hostPath PV(s)",
+                  ("delete", "pv", "-l", sel, "--ignore-not-found", f"--timeout={_WVA_DELETE_TIMEOUT}")))
+    for what, args in steps:
+        r = cmd.kube(*args, check=False)
+        if not r.success:
+            context.logger.log_warning(f"  {what} not deleted within {_WVA_DELETE_TIMEOUT}: {r.stderr.strip()}")
+            context.logger.log_warning(f"  still mounting {', '.join(claims) or 'the claim'}: {_wva_pods_mounting(cmd, ns, claims)}")
+            return
+    context.logger.log_info("  Deleted hostPath PV(s): the downloader, then the claim, then the volume")
+'''
+
+SITE_OLD = '''        # Clean up cluster-scoped hostPath PVs created by the benchmark.
+        pv_result = cmd.kube(
+            "delete",
+            "pv",
+            "-l",
+            f"usage=model-cache,wva.llmd.ai/model-namespace={context.require_namespace()}",  # wva-patch
+            "--ignore-not-found",
+            check=False,
+        )
+        if pv_result.success and pv_result.stdout.strip():
+            context.logger.log_info("  Deleted hostPath PV(s)")
+'''
+SITE_NEW = '''        # Clean up cluster-scoped hostPath PVs created by the benchmark.
+        # wva-patch (fix 15): downloader, then claim, then volume; each bounded.
+        _wva_delete_hostpath_volume(cmd, context, context.require_namespace())
+'''
+if "_wva_delete_hostpath_volume(cmd, context, context.require_namespace())" in src and "def _wva_delete_hostpath_volume" in src:
+    print("  fix 15 (hostPath volume torn down in order, bounded): already applied")
+    sys.exit(0)
+if "import json\n" not in src:
+    sys.exit("anchor missing (upstream shape changed): import json")
+if src.count(IMPORT) != 1:
+    sys.exit("anchor missing or ambiguous (upstream shape changed): " + IMPORT.strip())
+if src.count(SITE_OLD) != 2:
+    sys.exit("anchor missing or ambiguous (upstream shape changed): the hostPath PV delete, expected 2 sites after fix 12, found %d" % src.count(SITE_OLD))
+src = src.replace(IMPORT, HELPER, 1).replace(SITE_OLD, SITE_NEW)
+io.open(path, "w", encoding="utf-8", newline="\n").write(src)
+print("  fix 15 (hostPath volume torn down in order, bounded): applied")
+PYEOF
+fi
+
+# ---------------------------------------------------------------------------
+# Fix 16 -- teardown: do not say WVA was never installed.
+#
+# On a platform other than OpenShift the harness's own WVA install is skipped,
+# and its teardown logged "WVA was never installed" -- printed on namespaces
+# where the scaling manager's own installer HAD put WVA, and where
+# `make benchmark-teardown` had just removed it with its own uninstall. The line
+# now says what is true: the harness has none of its own to remove, and a WVA
+# another installer put there is that installer's to remove.
+# ---------------------------------------------------------------------------
+TD1="$REPO_DIR/llmdbenchmark/teardown/steps/step_01_uninstall_helm.py"
+if [ ! -f "$TD1" ]; then
+    note "fix 16 (no false 'WVA was never installed'): no step_01, skipped"
+else
+    "$PY" - "$TD1" <<'PYEOF' || fail "fix 16 (no false 'WVA was never installed') failed"
+import io, sys
+
+path = sys.argv[1]
+src = io.open(path, encoding="utf-8", newline="").read().replace("\r\n", "\n")
+FIRST = '                f"WVA teardown skipped: platform is {context.platform_type}, "\n'
+NEW = ('                f"WVA teardown skipped by the harness: on {context.platform_type} (not OpenShift) "  # wva-patch (fix 16)\n'
+       '                "the harness standup does not install WVA, so it has none of its own to remove here. "\n'
+       '                "A WVA another installer put in this namespace is that installer\'s to remove "\n'
+       '                "(make benchmark-teardown runs the scaling manager\'s own uninstall before this)."\n')
+if "wva-patch (fix 16)" in src:
+    print("  fix 16 (no false 'WVA was never installed'): already applied")
+    sys.exit(0)
+if src.count(FIRST) != 1:
+    sys.exit("anchor missing or ambiguous (upstream shape changed): " + FIRST.strip())
+i = src.index(FIRST)
+j = src.index("\n", i + len(FIRST)) + 1
+second = src[i + len(FIRST):j]
+if "WVA was never installed" not in second:
+    sys.exit("anchor missing (upstream shape changed): the line after the WVA skip message does not say 'WVA was never installed'")
+src = src[:i] + NEW + src[j:]
+io.open(path, "w", encoding="utf-8", newline="\n").write(src)
+print("  fix 16 (no false 'WVA was never installed'): applied")
+PYEOF
+fi
+
+# ---------------------------------------------------------------------------
+# Fix 17 -- teardown: a cluster-scoped role or binding another namespace may
+# use is kept.
+#
+# step_04_clean_cluster_roles deleted the well-known ClusterRoles
+# <release>-modelservice-{admin,editor,viewer,...} -- names without a
+# namespace, so shared by every benchmark namespace on the cluster -- and,
+# through _delete_matching, every ClusterRole and ClusterRoleBinding whose
+# name merely contains the release name. One namespace's teardown removed
+# them for all. Now a ClusterRole goes only when no binding anywhere
+# references it, a ClusterRoleBinding only when every subject it binds is in
+# this teardown's namespaces, and either is kept -- and the log says why --
+# when the bindings cannot be read (Forbidden is not absent).
+# ---------------------------------------------------------------------------
+TD4="$REPO_DIR/llmdbenchmark/teardown/steps/step_04_clean_cluster_roles.py"
+if [ ! -f "$TD4" ]; then
+    note "fix 17 (shared cluster roles kept): no step_04, skipped"
+else
+    "$PY" - "$TD4" <<'PYEOF' || fail "fix 17 (shared cluster roles kept) failed"
+import io, sys
+
+path = sys.argv[1]
+src = io.open(path, encoding="utf-8", newline="").read().replace("\r\n", "\n")
+
+PREFIX = '_LEGACY_NOP_SERVICE_VIEWER_PREFIX = "inference-perf-service-viewer-"\n'
+HELPERS = PREFIX + '''
+
+# wva-patch (fix 17): cluster-scoped objects are shared by every namespace.
+import json as _wva_json
+
+
+def _wva_namespaces(context):
+    return {n for n in (getattr(context, a, None) for a in ("namespace", "harness_namespace", "wva_namespace")) if n}
+
+
+def _wva_bindings(cmd):
+    """Every ClusterRoleBinding and RoleBinding on the cluster, or None when they
+    cannot be read."""
+    r = cmd.kube("get", "clusterrolebindings,rolebindings", "-A", "-o", "json", check=False)
+    if not r.success:
+        return None
+    try:
+        return _wva_json.loads(r.stdout or "{}").get("items", [])
+    except ValueError:
+        return None
+
+
+def _wva_ours(context, b):
+    """Whether binding b goes with this teardown: a RoleBinding in one of its
+    namespaces, or a ClusterRoleBinding whose every subject is in one."""
+    ours = _wva_namespaces(context)
+    if b.get("kind") == "RoleBinding":
+        return (b.get("metadata") or {}).get("namespace") in ours
+    subjects = b.get("subjects") or []
+    return bool(subjects) and all(s.get("namespace") in ours for s in subjects)
+
+
+def _wva_role_unused(context, bindings, name):
+    """True when no binding outside this teardown references ClusterRole name."""
+    if bindings is None:
+        context.logger.log_info(f"  Keeping ClusterRole/{name}: the bindings could not be read, and one this teardown cannot see may use it")
+        return False
+    users = [
+        f"{(b.get('metadata') or {}).get('namespace') or 'cluster'}/{(b.get('metadata') or {}).get('name')}"
+        for b in bindings
+        if (b.get("roleRef") or {}).get("kind") == "ClusterRole" and (b.get("roleRef") or {}).get("name") == name
+        and not _wva_ours(context, b)
+    ]
+    if users:
+        context.logger.log_info(f"  Keeping ClusterRole/{name}: still bound by {', '.join(users[:5])} -- cluster-scoped, so shared by every namespace")
+        return False
+    return True
+
+
+def _wva_may_delete(cmd, context, kind, resource_name):
+    """Whether this teardown may delete a cluster-scoped object it matched by name."""
+    name = resource_name.split("/")[-1]
+    bindings = _wva_bindings(cmd)
+    if kind == "ClusterRole":
+        return _wva_role_unused(context, bindings, name)
+    if bindings is None:
+        context.logger.log_info(f"  Keeping {kind}/{name}: the bindings could not be read")
+        return False
+    ours = _wva_namespaces(context)
+    for b in bindings:
+        if b.get("kind") == "ClusterRoleBinding" and (b.get("metadata") or {}).get("name") == name:
+            if _wva_ours(context, b):
+                return True
+            context.logger.log_info(f"  Keeping {kind}/{name}: it binds subjects outside {', '.join(sorted(ours)) or 'this teardown'}")
+            return False
+    return True
+'''
+
+LOOP_OLD = '''        context.logger.log_info("Deleting well-known modelservice ClusterRoles...")
+        for suffix in _MODELSERVICE_ROLE_SUFFIXES:
+            cr_name = f"{release}-{suffix}"
+'''
+LOOP_NEW = '''        context.logger.log_info("Deleting well-known modelservice ClusterRoles...")
+        _wva_bound = _wva_bindings(cmd)  # wva-patch (fix 17)
+        for suffix in _MODELSERVICE_ROLE_SUFFIXES:
+            cr_name = f"{release}-{suffix}"
+            if not _wva_role_unused(context, _wva_bound, cr_name):  # wva-patch (fix 17)
+                continue
+'''
+MATCH_OLD = '''            if release in resource_name:
+'''
+MATCH_NEW = '''            if release in resource_name and _wva_may_delete(cmd, context, kind, resource_name):  # wva-patch (fix 17)
+'''
+if "def _wva_may_delete" in src and LOOP_NEW in src and MATCH_NEW in src:
+    if HELPERS in src:
+        print("  fix 17 (shared cluster roles kept): already applied")
+        sys.exit(0)
+    # An earlier version of this fix: swap its helpers for the current ones.
+    start = src.find("# wva-patch (fix 17): cluster-scoped objects are shared by every namespace.")
+    end = src.find("\n\n\nclass ", start)
+    if start < 0 or end < 0 or src.count(PREFIX) != 1:
+        sys.exit("anchor missing (an earlier fix 17 is applied but its helpers are not where it puts them)")
+    src = src[:src.find(PREFIX)] + HELPERS + src[end + 1:]
+    io.open(path, "w", encoding="utf-8", newline="\n").write(src)
+    print("  fix 17 (shared cluster roles kept): upgraded")
+    sys.exit(0)
+for anchor in (PREFIX, LOOP_OLD, MATCH_OLD):
+    if src.count(anchor) != 1:
+        sys.exit("anchor missing or ambiguous (upstream shape changed): " + anchor.strip().splitlines()[0])
+src = src.replace(PREFIX, HELPERS, 1).replace(LOOP_OLD, LOOP_NEW, 1).replace(MATCH_OLD, MATCH_NEW, 1)
+io.open(path, "w", encoding="utf-8", newline="\n").write(src)
+print("  fix 17 (shared cluster roles kept): applied")
+PYEOF
+fi
+
+# ---------------------------------------------------------------------------
+# Fix 18 -- standup: a reused Istio does not need Istio's Helm repository.
+#
+# step_02_admin_prerequisites adds every configured Helm repository, and
+# skips Istio's only when Istio is not the gateway class. With
+# gateway.skipInstall -- the standup reusing the control plane the cluster
+# already runs (BENCHMARK_GATEWAY_SKIP_INSTALL, GATEWAY_REUSE=auto) -- no
+# Istio chart is installed, yet the standup still ran `helm repo add istio
+# https://istio-release.storage.googleapis.com/charts`. When that bucket
+# started answering 403 to anonymous callers, every standup on a cluster that
+# already runs Istio failed at step 02 over a repository it would never read.
+# Now the repository is skipped when skipInstall is set, as it is for any
+# other gateway class. Not yet reported upstream.
+# ---------------------------------------------------------------------------
+ADMIN="$REPO_DIR/llmdbenchmark/standup/steps/step_02_admin_prerequisites.py"
+if [ ! -f "$ADMIN" ]; then
+    note "fix 18 (reused Istio needs no Istio repo): no step_02, skipped"
+else
+    "$PY" - "$ADMIN" <<'PYEOF' || fail "fix 18 (reused Istio needs no Istio repo) failed"
+import io, sys
+
+path = sys.argv[1]
+src = io.open(path, encoding="utf-8", newline="").read().replace("\r\n", "\n")
+
+OLD = '''        for repo_key, repo_info in helm_repos.items():
+'''
+NEW = '''        for repo_key, repo_info in helm_repos.items():
+            # wva-patch (fix 18): a reused Istio (gateway.skipInstall) installs
+            # no Istio chart, so its repository is never read.
+            if repo_key == "istio" and gateway_class == "istio" and (plan_config.get("gateway") or {}).get("skipInstall"):
+                cmd.logger.log_info("Skipping Istio Helm repo: gateway.skipInstall reuses the Istio the cluster runs")
+                continue
+'''
+if NEW in src:
+    print("  fix 18 (reused Istio needs no Istio repo): already applied")
+    sys.exit(0)
+if src.count(OLD) != 1:
+    sys.exit("anchor missing or ambiguous (upstream shape changed): the helm repository loop in _add_helm_repos")
+io.open(path, "w", encoding="utf-8", newline="\n").write(src.replace(OLD, NEW, 1))
+print("  fix 18 (reused Istio needs no Istio repo): applied")
 PYEOF
 fi

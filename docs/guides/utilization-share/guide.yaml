@@ -1,0 +1,79 @@
+name: utilization-share
+
+prerequisites:
+  setup:
+    note: |
+      Only if you do not run two models under one quota yet. This builds a trial
+      setup: two 8B models, 1 GPU per replica, under one namespace quota of 4.
+      Use the accelerator name your nodes carry (H200, NVIDIA-H200, ...); the
+      check below reads the exact name the controller uses.
+    run: |
+      export BENCHMARK_NAMESPACE=<namespace>
+      WVA_QUOTAS='<accelerator>=4' make benchmark-two-model-preflight
+      WVA_LIMITER=quota WVA_QUOTAS='<accelerator>=4' make benchmark-two-model-standup
+      make benchmark-two-model-verify
+  vars:
+    note: |
+      The models' namespace. On a namespace-scoped install the controller and
+      its policy are there too; otherwise also export CONTROLLER_NAMESPACE and
+      POLICY_NAMESPACE.
+    run: |
+      export NAMESPACE=<namespace>
+  check:
+    note: |
+      Is there a budget to share, and does every variant's accelerator
+      resolve. It names the limiter in the policy and the one the controller
+      runs, and fails on no limiter, an unresolved accelerator, or anything it
+      could not read. It warns when a quota has no key for an accelerator the
+      controller logs: that key must be the logged name exactly.
+    run: |
+      make utilization-share-check
+
+deploy:
+  shadow:
+    note: |
+      Writes the optimizer block with shadow: true, keeping everything else in
+      the policy, then waits for the controller to read it and checks it was
+      not refused. It refuses a policy with no limiter or with another
+      optimizer block.
+    run: |
+      make utilization-share-shadow
+  active:
+    note: |
+      Only after reading what shadow would do. For two to three minutes after
+      this, nothing in the group scales and its models show quiet-period; the
+      same happens after every controller restart.
+    run: |
+      make utilization-share-activate
+
+verify:
+  status:
+    note: |
+      The mode, the last decisions in the log (what shadow would move;
+      transfers once active), the transfer events, any UtilizationShare
+      warning, and the pods marked for a transfer.
+    run: |
+      make utilization-share-status
+  endpoint:
+    note: |
+      For a cluster admin. The endpoint checks the caller against a
+      cluster-wide grant: the install's metrics-reader token passes where the
+      admin's install step created its binding. A 401 or 403 here means use
+      Prometheus instead.
+    run: |
+      TOKEN=$(kubectl get secret wva-epp-metrics-token -n $NAMESPACE -o jsonpath='{.data.token}' | base64 -d)
+      kubectl port-forward -n $NAMESPACE svc/wva-controller-manager-metrics-service 8443:8443 >/dev/null & PF=$!
+      sleep 2
+      curl -sSfk -H "Authorization: Bearer $TOKEN" https://localhost:8443/metrics \
+        | grep -E '^wva_(utilization_share_(mode|actionable|replicas_to_move|headroom|spare_gpus|transfers_total)|model_scaling_blocked)'
+      kill $PF
+
+cleanup:
+  disable:
+    note: |
+      Back to shadow first, so the controller removes the transfer marks it
+      wrote; it waits for them to clear, then removes the block. Today's
+      optimizer runs again and the limiter is untouched. If the marks do not
+      clear, or the pods cannot be read, it stops with the block in shadow.
+    run: |
+      make utilization-share-off

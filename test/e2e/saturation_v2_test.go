@@ -225,18 +225,9 @@ var _ = Describe("Saturation V2 engine", Label("smoke", "full"), Ordered, func()
 		// grows is equally consistent with WVA recommending nothing and with KEDA
 		// never wiring the metric that carries the recommendation -- and the
 		// second reads as the first for the whole timeout. Measured at 20-35s on
-		// kind, so 120s is generous; failing here is a different diagnosis, not a
-		// slower one.
-		//
-		// The report covers the one state polling cannot fix: an HPA with no
-		// external metric at all. A CI run burned the whole 120 s against exactly
-		// that, with the ScaledObject reporting Ready=True throughout, so the
-		// failure said nothing about its own cause.
-		Eventually(func(g Gomega) {
-			reportIfHPAOnCPUDefault(cfg.LLMDNamespace, modelDecodeDeployment)
-			expectKEDAExternalMetricWired(g, cfg.LLMDNamespace, modelDecodeDeployment)
-		}, 120*time.Second, time.Duration(cfg.PollIntervalSec)*time.Second).
-			Should(Succeed())
+		// kind, so the budget is generous; failing here is a different diagnosis,
+		// not a slower one.
+		waitForKEDAExternalMetricWired(cfg.LLMDNamespace, modelDecodeDeployment, scalerBaseName)
 
 		By("Asserting KEDA actuates scale-up to ≥ 2 replicas")
 		// Chain: WVA (15 s interval) → wva_desired_replicas=2 → KEDA (5 s poll) →

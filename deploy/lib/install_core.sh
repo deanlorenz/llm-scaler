@@ -46,14 +46,23 @@ wva_missing_prereqs() {
             echo "UNVERIFIABLE $kind/$name"
             continue
         fi
-        # The Kueue read is needed only by a quota entry that enables it, and it
-        # arrived after installs already existed. Refusing every upgrade until an
-        # admin re-runs prereqs, for a feature the tenant may never turn on,
-        # would send them back to the admin for nothing; the controller runs
-        # fine without it and the reader logs Forbidden if it is ever enabled.
+        # Some objects serve one optional feature and arrived after installs
+        # already existed. Refusing every upgrade until an admin re-runs prereqs,
+        # for a feature the tenant may never use, would send them back to the
+        # admin for nothing; the controller runs fine without them and logs
+        # Forbidden where the feature needs them. Each is reported with the
+        # feature it serves:
+        #   wva-kueue-reader-*  the Kueue read, used only by a quota limiter
+        #                       entry with kueue.enabled.
+        #   wva-utilization-share-history-*  the utilization-share need history
+        #                       store; without it a restart forgets the models'
+        #                       peaks and caps their headroom for a window.
         case "$name" in
             wva-kueue-reader-*)
-                echo "OPTIONAL $kind/$name"
+                echo "OPTIONAL $kind/$name|the Kueue quota source (a quota limiter entry with kueue.enabled)"
+                continue ;;
+            wva-utilization-share-history-role|wva-utilization-share-history-rolebinding)
+                echo "OPTIONAL $kind/$name|the utilization-share need history, kept across controller restarts"
                 continue ;;
         esac
         case "$kind" in
@@ -118,8 +127,12 @@ require_prereqs_present() {
     done <<< "$(wva_missing_prereqs)"
 
     if [ ${#optional[@]} -ne 0 ]; then
-        log_info "Optional cluster-admin prerequisites are absent: ${optional[*]}"
-        log_info "  Needed only by a quota limiter entry with kueue.enabled. To add them, ask an admin to re-run 'NAMESPACE=$WVA_NS make setup-prereqs'."
+        log_info "Optional cluster-admin prerequisites are absent; the controller installs without them:"
+        local entry
+        for entry in "${optional[@]}"; do
+            log_info "  - ${entry%%|*}: needed only by ${entry#*|}"
+        done
+        log_info "  To add them, ask an admin to re-run 'NAMESPACE=$WVA_NS make setup-prereqs'."
     fi
 
     if [ ${#missing[@]} -ne 0 ]; then

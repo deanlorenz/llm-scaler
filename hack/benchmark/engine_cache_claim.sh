@@ -47,7 +47,28 @@ class="$(kubectl get pvc -n "$NAMESPACE" "$CLAIM" -o jsonpath='{.spec.storageCla
 
 # every engine-cache volume, wherever the scenario keeps it
 n="$(yq -r '[.. | select(type == "!!map" and has("additionalVolumes")) | .additionalVolumes[] | select(.name == "engine-cache")] | length' "$SCENARIO")"
-[ "$n" -gt 0 ] || log_error "no additionalVolumes entry named engine-cache in ${SCENARIO}; the scenario declares no engine cache to move"
+
+# A vLLM scenario with no engine cache at all -- the aggregated two-model ones
+# keep their caches in the container, so every start compiles from nothing --
+# gets the wiring the P/D scenario carries: the volume, its mount at
+# /engine-cache, vllm.cacheRoot (which the harness emits as VLLM_CACHE_ROOT)
+# and the FlashInfer and Triton directories under it. Only here, because only
+# a reader who asked for the node-local cache reaches this script: the default
+# standup keeps the scenario as it is, and so keeps it comparable with earlier
+# runs.
+ROLES='.. | select(type == "!!map" and (has("decode") or has("prefill"))) | (.decode, .prefill) | select(type == "!!map" and has("vllm") and .enabled != false)'
+if [ "$n" -eq 0 ]; then
+    roles="$(yq -r "[${ROLES}] | length" "$SCENARIO")"
+    [ "$roles" -gt 0 ] || log_error "no additionalVolumes entry named engine-cache in ${SCENARIO}, and no vLLM role to add one to; the scenario declares no engine cache to move"
+    yq -i "(${ROLES}) |= (
+        .additionalVolumes = ((.additionalVolumes // []) + [{\"name\": \"engine-cache\", \"type\": \"persistentVolumeClaim\", \"persistentVolumeClaim\": {\"claimName\": strenv(CLAIM_NAME)}}])
+        | .additionalVolumeMounts = ((.additionalVolumeMounts // []) + [{\"name\": \"engine-cache\", \"mountPath\": \"/engine-cache\"}])
+        | .vllm.cacheRoot = \"/engine-cache/vllm\"
+        | .extraEnvVars = ([(.extraEnvVars // [])[] | select(.name != \"FLASHINFER_WORKSPACE_DIR\" and .name != \"TRITON_CACHE_DIR\")]
+            + [{\"name\": \"FLASHINFER_WORKSPACE_DIR\", \"value\": \"/engine-cache/flashinfer\"}, {\"name\": \"TRITON_CACHE_DIR\", \"value\": \"/engine-cache/triton\"}]))" "$SCENARIO"
+    echo "node-local engine caches: added an engine cache to ${roles} vLLM role(s) that had none"
+    n="$(yq -r '[.. | select(type == "!!map" and has("additionalVolumes")) | .additionalVolumes[] | select(.name == "engine-cache")] | length' "$SCENARIO")"
+fi
 yq -i '(.. | select(type == "!!map" and has("additionalVolumes")) | .additionalVolumes[] | select(.name == "engine-cache")) |= (.type = "persistentVolumeClaim" | .persistentVolumeClaim = {"claimName": strenv(CLAIM_NAME)})' "$SCENARIO"
 yq -i 'del(.. | select(type == "!!map" and has("additionalVolumeMounts")) | .additionalVolumeMounts[] | select(.name == "engine-cache") | .subPath)' "$SCENARIO"
 

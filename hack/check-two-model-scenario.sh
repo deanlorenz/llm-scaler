@@ -55,6 +55,66 @@ cat > "$STUB/kubectl" <<'STUBEOF'
 printf 'CALL[%s]\n' "$*" >> "${KCALLS:-/dev/null}"
 args="$*"
 case "$args" in
+  *"get scaledobject -o json"*)
+      if [ "${PD_STUB:-0}" = "1" ]; then
+        echo '{"items":[{"metadata":{"name":"pd-decode-wva"},"spec":{"scaleTargetRef":{"name":"pd-decode"},"triggers":[{"metadata":{}}]}},
+                        {"metadata":{"name":"pd-prefill-wva"},"spec":{"scaleTargetRef":{"name":"pd-prefill"},"triggers":[{"metadata":{}}]}}]}'
+      elif [ "${TWO_PD_STUB:-0}" = "1" ]; then
+        # Two P/D stacks (two-model-shapes-pd): a ScaledObject per ROLE per
+        # model, on the Deployments the route resolves to.
+        so() { printf '{"metadata":{"name":"%s-wva"},"spec":{"scaleTargetRef":{"name":"%s"},"triggers":[{"metadata":{}}]}}' "$1" "$1"; }
+        echo "{\"items\":[$(so unsloth--244120d9-instruct-decode),$(so unsloth--244120d9-instruct-prefill),$(so qwen-qwe-6e036fd5-qwen3-8b-decode),$(so qwen-qwe-6e036fd5-qwen3-8b-prefill)]}"
+      else
+        echo '{"items":[]}'
+      fi
+      exit 0 ;;
+  # The controller, which decides whether the policy is the benchmark's own:
+  # namespace-scoped (the standup's install) unless CTL_SCOPE says otherwise.
+  *"get deploy wva-controller-manager"*"-o json"*)
+      case "${CTL_SCOPE:-own}" in
+        own) echo '{"spec":{"template":{"spec":{"containers":[{"args":["--watch-namespace=$(WVA_WATCH_NAMESPACE)"],
+               "env":[{"name":"POD_NAMESPACE","valueFrom":{"fieldRef":{"fieldPath":"metadata.namespace"}}},
+                      {"name":"WVA_WATCH_NAMESPACE","value":"$(POD_NAMESPACE)"}]}]}}}}' ;;
+        # An older install: the flag names the pod namespace variable directly.
+        pod) echo '{"spec":{"template":{"spec":{"containers":[{"args":["--watch-namespace=$(POD_NAMESPACE)"],
+               "env":[{"name":"POD_NAMESPACE","valueFrom":{"fieldRef":{"fieldPath":"metadata.namespace"}}}]}]}}}}' ;;
+        cluster) echo '{"spec":{"template":{"spec":{"containers":[{"args":["--leader-elect"]}]}}}}' ;;
+        # The flag twice: the controller takes the last, here every namespace.
+        multiple) echo '{"spec":{"template":{"spec":{"containers":[{"args":["--watch-namespace=ns-under-test","--watch-namespace="]}]}}}}' ;;
+        # A namespace from a ConfigMap key: nothing this check can resolve.
+        configmap) echo '{"spec":{"template":{"spec":{"containers":[{"args":["--watch-namespace=$(NS_FROM_CM)"],
+               "env":[{"name":"NS_FROM_CM","valueFrom":{"configMapKeyRef":{"name":"x","key":"ns"}}}]}]}}}}' ;;
+        # The flag and its value as two arguments, and a sidecar listed first.
+        twoarg) echo '{"spec":{"template":{"spec":{"containers":[{"name":"proxy","args":["--upstream=x"]},
+               {"name":"manager","args":["--watch-namespace","ns-under-test"]}]}}}}' ;;
+        # kubectl writes throttling notices to stderr; they are not the JSON.
+        noisy) echo 'I1009 throttling request took 1.2s' >&2
+               echo '{"spec":{"template":{"spec":{"containers":[{"args":["--watch-namespace=ns-under-test"]}]}}}}' ;;
+        fail) echo 'Error from server (Forbidden): deployments.apps is forbidden' >&2; exit 1 ;;
+        *) echo '{"spec":{"template":{"spec":{"containers":[{"args":["--watch-namespace='"$CTL_SCOPE"'"]}]}}}}' ;;
+      esac
+      exit 0 ;;
+  *"get scaledobject pd-prefill-wva"*"scaleTargetRef"*) echo "pd-prefill"; exit 0 ;;
+  *"get scaledobject pd-decode-wva"*"scaleTargetRef"*) echo "pd-decode"; exit 0 ;;
+  # TWO_PD_STUB's ScaledObjects are named <target>-wva.
+  *"get scaledobject "*"-wva -o jsonpath={.spec.scaleTargetRef.name}"*)
+      n="${args#*get scaledobject }"; echo "${n%%-wva *}"; exit 0 ;;
+  # As the modelservice chart renders them: the role is on the pod template,
+  # and the Deployment's own labels carry none -- plus an EPP with no role.
+  *"get deploy -o json"*)
+      if [ "${PD_STUB:-0}" = "1" ]; then
+        echo '{"items":[
+          {"metadata":{"name":"pd-decode","labels":{"helm.sh/chart":"llm-d-modelservice"}},
+           "spec":{"template":{"metadata":{"labels":{"llm-d.ai/role":"decode"}}}}},
+          {"metadata":{"name":"pd-prefill","labels":{"helm.sh/chart":"llm-d-modelservice"}},
+           "spec":{"template":{"metadata":{"labels":{"llm-d.ai/role":"prefill"}}}}},
+          {"metadata":{"name":"pd-router-epp"},"spec":{"template":{"metadata":{"labels":{}}}}}]}'
+        exit 0
+      fi ;;&
+  *"get deploy pd-prefill -o jsonpath={.spec.template.metadata.labels"*) echo "prefill"; exit 0 ;;
+  *"get deploy pd-decode -o jsonpath={.spec.template.metadata.labels"*) echo "decode"; exit 0 ;;
+  *"get deploy "*"-prefill -o jsonpath={.spec.template.metadata.labels"*) echo "prefill"; exit 0 ;;
+  *"get deploy "*"-decode -o jsonpath={.spec.template.metadata.labels"*) echo "decode"; exit 0 ;;
   *"get deploy wva-warm-pool-"*)
       [ "${POOL_EXISTS:-0}" = "1" ] && exit 0
       echo 'Error from server (NotFound): deployments.apps "wva-warm-pool-x" not found' >&2
@@ -86,6 +146,8 @@ case "$args" in
   # Without this branch the readiness check reads empty and verify refuses for
   # the wrong reason -- which is how the EPP case first passed while proving
   # nothing about EPPs.
+  # PREFILL_READY: a prefill Deployment's count, apart from decode's.
+  *"get deploy "*"-prefill -o jsonpath={.status."*) echo "${PREFILL_READY:-${READY:-1}}"; exit 0 ;;
   *"get deploy "*"-o jsonpath={.status.readyReplicas}"*) echo "${READY:-1}"; exit 0 ;;
   *"get deploy "*"-o jsonpath={.status.replicas}"*) echo "${READY:-1}"; exit 0 ;;
   # The routing table, which is how a stack name resolves to its backend. Names
@@ -118,11 +180,48 @@ case "$args" in
         echo "MODELS ${FC_MODELS-unsloth/Meta-Llama-3.1-8B-Instruct Qwen/Qwen3-8B}"; fi
       exit 0 ;;
   *"rollout restart"*|*"rollout status"*) exit 0 ;;
-  *"get pvc"*) [ "${HAS_PVC:-1}" = "1" ] && exit 0; exit 1 ;;
+  # The scaling policy the share arms rewrite, and the query Pod that reads
+  # the controller's mode back. PQUERY_OUT is what that Pod printed.
+  *"get configmap wva-scaling-policy-config"*) printf '%s' "${POLICY_TEXT:-}"; exit 0 ;;
+  # STANDUP_SPEC: the scenario the standup recorded; unset, there is no record.
+  *"get configmap wva-two-model-standup"*) printf '%s' "${STANDUP_SPEC:-}"; exit 0 ;;
+  # Which policy a self-managed controller reads: a label on its namespace,
+  # then a wva-policy namespace, then its own.
+  *"get namespace wva-policy"*)
+      if [ "${WVA_POLICY_NS:-0}" = "1" ]; then echo "namespace/wva-policy"; exit 0; fi
+      echo 'Error from server (NotFound): namespaces "wva-policy" not found' >&2
+      exit 1 ;;
+  *"get namespace "*"-o json"*)
+      if [ -n "${NS_POLICY_LABEL:-}" ]; then
+        echo '{"metadata":{"name":"ns-under-test","labels":{"wva.llmd.ai/policy-namespace":"'"$NS_POLICY_LABEL"'"}}}'
+      else
+        echo '{"metadata":{"name":"ns-under-test"}}'
+      fi
+      exit 0 ;;
+  *"get pod pquery-"*"jsonpath={.status.phase}"*) echo "Succeeded"; exit 0 ;;
+  *"logs pquery-"*) echo "${PQUERY_OUT:-}"; exit 0 ;;
+  # PVC_CLASS: the storage class an existing claim reports.
+  *"get pvc"*) [ "${HAS_PVC:-1}" = "1" ] || exit 1
+      case "$args" in *storageClassName*) printf '%s' "${PVC_CLASS:-}" ;; esac
+      exit 0 ;;
   *"get pods -l llm-d.ai/warm-pool"*)
       [ "${POOL_EXISTS:-0}" = "1" ] && echo "wva-warm-pool-twomodel-abc"
       exit 0 ;;
-  *"get pods -o json"*) echo '{"items":[]}' ; exit 0 ;;
+  # TERMINATING: a decode pod still in its grace period, holding its GPUs.
+  *"get pods -o json"*)
+      if [ "${TERMINATING:-0}" = "1" ]; then
+        echo '{"items":[{"metadata":{"name":"pd-decode-abc-1","deletionTimestamp":"2026-01-01T00:00:00Z",
+               "labels":{"pod-template-hash":"abc"},
+               "ownerReferences":[{"kind":"ReplicaSet","name":"pd-decode-abc"}]}}]}'
+      elif [ "${TERMINATING:-0}" = "sibling" ]; then
+        # A sibling Deployment whose name extends pd-decode: not the fleet.
+        echo '{"items":[{"metadata":{"name":"pd-decode-b-xyz-1","deletionTimestamp":"2026-01-01T00:00:00Z",
+               "labels":{"pod-template-hash":"xyz"},
+               "ownerReferences":[{"kind":"ReplicaSet","name":"pd-decode-b-xyz"}]}}]}'
+      else
+        echo '{"items":[]}'
+      fi
+      exit 0 ;;
   *exec*)
       # The supervisor answers, and holds NOTHING -- the cold pool.
       echo "${RESIDENT_JSON:-[]}"
@@ -140,11 +239,41 @@ case "$args" in
            "metadata":{"name":"n1","labels":{"gpu.nvidia.com/model":"H200"}}}]}'
       fi
       exit 0 ;;
-  *"get pods -A -o json"*) echo '{"items":[]}' ; exit 0 ;;
+  # FOREIGN_PENDING=1: another team's two whole-node pods, Pending and bound to
+  # no node. BOUND_GPUS=<n>: a Running pod on n1 holding n accelerators.
+  *"get pods -A -o json"*)
+      items=""
+      if [ "${FOREIGN_PENDING:-0}" = "1" ]; then
+        for i in 1 2; do
+          items="${items:+$items,}{\"metadata\":{\"name\":\"other-$i\",\"namespace\":\"other-team\"},\"spec\":{\"containers\":[{\"resources\":{\"requests\":{\"nvidia.com/gpu\":\"8\",\"cpu\":\"8\"}}}]},\"status\":{\"phase\":\"Pending\"}}"
+        done
+      fi
+      if [ -n "${BOUND_GPUS:-}" ]; then
+        items="${items:+$items,}{\"metadata\":{\"name\":\"bound\",\"namespace\":\"other-team\"},\"spec\":{\"nodeName\":\"n1\",\"containers\":[{\"resources\":{\"requests\":{\"nvidia.com/gpu\":\"${BOUND_GPUS}\",\"cpu\":\"1\"}}}]},\"status\":{\"phase\":\"Running\"}}"
+      fi
+      echo "{\"items\":[${items}]}"
+      exit 0 ;;
+  # GWCLASS=1: the cluster already runs Istio (an istio.io GatewayClass).
+  *"get gatewayclass -o json"*)
+      if [ "${GWCLASS:-0}" = "1" ]; then
+        echo '{"items":[{"metadata":{"name":"istio"},"spec":{"controllerName":"istio.io/gateway-controller"}}]}'
+      else
+        echo '{"items":[]}'
+      fi
+      exit 0 ;;
   *) exit 0 ;;
 esac
 STUBEOF
 chmod +x "$STUB/kubectl"
+
+# A make that records the target and the scenario it was handed, so the
+# teardown can be checked without running the harness's.
+cat > "$STUB/make" <<'STUBEOF'
+#!/usr/bin/env bash
+printf 'MAKE[%s] SPEC=%s\n' "$*" "${BENCHMARK_SPEC:-}" >> "${KCALLS:-/dev/null}"
+exit 0
+STUBEOF
+chmod +x "$STUB/make"
 
 # run_verb <verb...> -- the script with the stub first on PATH, into $OUT/$RC.
 run_verb() {
@@ -154,8 +283,17 @@ run_verb() {
         GATEWAYS="${GATEWAYS:-1}" HAS_PVC="${HAS_PVC:-1}" \
         NODE_GPUS="${NODE_GPUS:-8}" MIXED_ACCEL="${MIXED_ACCEL:-0}" \
         RESIDENT_JSON="${RESIDENT_JSON:-[]}" \
-        WARM_GATE_TIMEOUT=1 \
-        bash "$SCRIPT" "$@" 2>&1)"
+        POLICY_TEXT="${POLICY_TEXT:-}" PQUERY_OUT="${PQUERY_OUT:-}" WVA_NS="${WVA_NS:-ns-under-test}" \
+        WVA_POLICY_NS="${WVA_POLICY_NS:-0}" NS_POLICY_LABEL="${NS_POLICY_LABEL:-}" \
+        CTL_SCOPE="${CTL_SCOPE:-own}" TERMINATING="${TERMINATING:-0}" \
+        SHARE_ALLOW_SHARED_POLICY="${SHARE_ALLOW_SHARED_POLICY:-0}" \
+        PD_STUB="${PD_STUB:-0}" PD_SINGLE_STACK="${PD_SINGLE_STACK:-0}" PD_ENDPOINT="${PD_ENDPOINT:-}" \
+        MIN_PREFILL="${MIN_PREFILL:-}" MIN_DECODE="${MIN_DECODE:-}" \
+        MAX_PREFILL="${MAX_PREFILL:-}" MAX_DECODE="${MAX_DECODE:-}" RESET_TIMEOUT="${RESET_TIMEOUT:-}" \
+        SHARE_MODE_TIMEOUT=1 SHARE_MODE_POLL=1 \
+        GPU_SAMPLE_SECONDS="${GPU_SAMPLE_SECONDS:-5}" GPU_SAMPLE_TIMEOUT_SECONDS="${GPU_SAMPLE_TIMEOUT_SECONDS:-20}" \
+        WARM_GATE_TIMEOUT=1 OUT_ROOT="$WORK/out" \
+        ${VERB_TIMEOUT:+timeout "$VERB_TIMEOUT"} bash "$SCRIPT" "$@" 2>&1)"
     RC=$?
 }
 
@@ -182,6 +320,311 @@ elif ! printf '%s' "$OUT" | grep -q 'pool-delete'; then
     fail "'run nopool' refused without naming the fix: $OUT"
 else
     ok "'run nopool' with a pool present is refused"
+fi
+
+# A controller outside the benchmark namespace serves others: its policy is
+# theirs too, and the share arms must not rewrite it.
+case_begin
+WVA_NS=shared-controller POLICY_TEXT='limiters: []' VERB_TIMEOUT=60 run_verb run share
+if [ "$RC" -eq 0 ]; then
+    fail "'run share' was accepted against a controller in another namespace"
+elif ! printf '%s' "$OUT" | grep -q 'shared with every namespace'; then
+    fail "'run share' refused a shared controller without saying why: $OUT"
+elif grep -q 'patch configmap' "$CALLS" 2>/dev/null; then
+    fail "'run share' rewrote a shared policy before refusing: $(cat "$CALLS")"
+else
+    ok "'run share' refuses to rewrite a policy a controller in another namespace serves"
+fi
+
+# The utilization-share arms compare two optimizers under ONE quota. Without a
+# quota the optimizer has no budget, reports `invalid`, and the arm would be
+# today's optimizer under the name share.
+case_begin
+POLICY_TEXT='limiters: []' VERB_TIMEOUT=60 run_verb run share
+if [ "$RC" -eq 0 ]; then
+    fail "'run share' was accepted under a policy with no quota limiter"
+elif ! printf '%s' "$OUT" | grep -q 'WVA_LIMITER=quota'; then
+    fail "'run share' refused without naming the fix: $OUT"
+elif grep -q 'CALL\[.*patch configmap' "$CALLS" 2>/dev/null || grep -q 'CALL\[apply' "$CALLS" 2>/dev/null; then
+    fail "'run share' changed something before refusing: $(cat "$CALLS")"
+else
+    ok "'run share' with no quota in the policy is refused, before anything is written"
+fi
+
+# The policy is intent; the controller's mode is the fact. A controller that
+# never re-read the policy is still running the previous arm.
+QUOTA_POLICY='limiters:
+  - name: q
+    type: quota
+    scope: namespace
+    namespaceQuotas:
+      ns-under-test:
+        H200: 5'
+case_begin
+POLICY_TEXT="$QUOTA_POLICY" PQUERY_OUT='RESULT {"max by (mode) (wva_utilization_share_mode{namespace=\"ns-under-test\"})": [{"metric": {"mode": "off"}, "value": [0, "1"]}]}' \
+    VERB_TIMEOUT=60 run_verb run share
+if [ "$RC" -eq 0 ]; then
+    fail "'run share' started while the controller reported mode off; it would measure today's optimizer as share"
+elif ! printf '%s' "$OUT" | grep -q 'not running the optimizer mode'; then
+    fail "'run share' refused without naming the mode as the reason: $OUT"
+elif ! grep 'patch configmap wva-scaling-policy-config' "$CALLS" | grep -q 'shadow: false'; then
+    fail "'run share' did not write an acting optimizer block into the policy: $(cat "$CALLS")"
+elif ! grep 'patch configmap wva-scaling-policy-config' "$CALLS" | grep -q 'H200: 5'; then
+    fail "'run share' dropped the quota when it wrote the optimizer block: $(cat "$CALLS")"
+elif grep -q 'CALL\[apply' "$CALLS" 2>/dev/null; then
+    fail "'run share' started the load before the mode was confirmed: $(cat "$CALLS")"
+else
+    ok "'run share' writes the acting block, keeps the quota, and waits for the controller to report it"
+fi
+
+# The share arms rewrite the benchmark namespace's policy. A controller that
+# reads another one -- a wva-policy namespace, or the namespace its own is
+# labelled to read -- would run every arm under a quota nobody wrote down, and
+# that policy is shared, so it is not the benchmark's to rewrite.
+case_begin
+WVA_POLICY_NS=1 POLICY_TEXT="$QUOTA_POLICY" VERB_TIMEOUT=60 run_verb run today
+if [ "$RC" -eq 0 ]; then
+    fail "'run today' was accepted while a wva-policy namespace exists; the controller reads that policy, not the one the arm rewrites"
+elif ! printf '%s' "$OUT" | grep -q 'shared'; then
+    fail "'run today' refused without saying the wva-policy policy is shared: $OUT"
+elif grep -q 'patch configmap' "$CALLS" 2>/dev/null; then
+    fail "'run today' rewrote a policy before refusing: $(cat "$CALLS")"
+else
+    ok "'run today' refuses when a wva-policy namespace holds the policy in force"
+fi
+
+case_begin
+NS_POLICY_LABEL=team-policy POLICY_TEXT="$QUOTA_POLICY" VERB_TIMEOUT=60 run_verb run today
+if [ "$RC" -eq 0 ]; then
+    fail "'run today' was accepted while its namespace is labelled to read team-policy's policy"
+elif ! printf '%s' "$OUT" | grep -q 'team-policy'; then
+    fail "'run today' refused without naming the labelled policy namespace: $OUT"
+elif grep -q 'patch configmap' "$CALLS" 2>/dev/null; then
+    fail "'run today' rewrote a policy before refusing: $(cat "$CALLS")"
+else
+    ok "'run today' refuses when its namespace is labelled to read another namespace's policy"
+fi
+
+# Sitting in the benchmark namespace is not being namespace-scoped: a
+# cluster-scoped controller installed there manages every namespace, and so does
+# its policy.
+case_begin
+CTL_SCOPE=cluster POLICY_TEXT="$QUOTA_POLICY" VERB_TIMEOUT=60 run_verb run today
+if [ "$RC" -eq 0 ]; then
+    fail "'run today' was accepted with a controller that watches every namespace"
+elif ! printf '%s' "$OUT" | grep -q 'watches every namespace'; then
+    fail "'run today' refused a cluster-scoped controller without saying why: $OUT"
+elif grep -q 'patch configmap' "$CALLS" 2>/dev/null; then
+    fail "'run today' rewrote a policy before refusing: $(cat "$CALLS")"
+else
+    ok "'run today' refuses a controller that watches every namespace, even in its own"
+fi
+
+case_begin
+CTL_SCOPE=team-a POLICY_TEXT="$QUOTA_POLICY" VERB_TIMEOUT=60 run_verb run today
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'watches team-a'; then
+    fail "'run today' with a controller watching another namespace: rc $RC, $OUT"
+else
+    ok "'run today' refuses a controller that watches another namespace"
+fi
+
+# Both shapes the installs render resolve to the pod's own namespace: the
+# chain through WVA_WATCH_NAMESPACE (every case above), and an older install
+# naming POD_NAMESPACE in the flag -- which a first version of the guard read
+# as a namespace called "$(POD_NAMESPACE)" and refused on a real cluster.
+case_begin
+CTL_SCOPE=pod POLICY_TEXT="$QUOTA_POLICY" VERB_TIMEOUT=60 run_verb run today
+if printf '%s' "$OUT" | grep -q 'watches'; then
+    fail "'run today' refused a controller watching \$(POD_NAMESPACE), its own namespace: $OUT"
+elif ! grep -q 'get namespace ns-under-test' "$CALLS"; then
+    fail "'run today' never reached the check after the scope check: $OUT"
+else
+    ok "'run today' accepts a controller watching its own namespace through POD_NAMESPACE"
+fi
+
+# The scope check must not be fooled, and must not refuse a correct install.
+# guard_case <scope> <want: refuse|accept> <phrase> <description>
+guard_case() {
+    case_begin
+    CTL_SCOPE="$1" POLICY_TEXT="$QUOTA_POLICY" VERB_TIMEOUT=60 run_verb run today
+    if [ "$2" = refuse ]; then
+        if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q "$3"; then
+            fail "$4: rc $RC, want a refusal saying '$3': $OUT"
+        elif grep -q 'patch configmap' "$CALLS" 2>/dev/null; then
+            fail "$4: a policy was rewritten before the refusal"
+        else
+            ok "$4"
+        fi
+    elif printf '%s' "$OUT" | grep -qE 'watches|more than once|cannot resolve|could not'; then
+        fail "$4: refused: $OUT"
+    elif ! grep -q 'get namespace ns-under-test' "$CALLS"; then
+        fail "$4: never reached the check after the scope check: $OUT"
+    else
+        ok "$4"
+    fi
+}
+guard_case multiple refuse 'more than once' "'run today' refuses a controller giving --watch-namespace twice (it takes the last)"
+guard_case configmap refuse 'cannot resolve' "'run today' refuses a watch namespace it cannot resolve"
+guard_case fail refuse 'could not read the controller' "'run today' refuses when it cannot read the controller"
+guard_case twoarg accept '' "'run today' reads --watch-namespace as two arguments, in the manager container"
+guard_case noisy accept '' "'run today' keeps kubectl stderr out of the JSON it parses"
+
+case_begin
+SHARE_ALLOW_SHARED_POLICY=1 CTL_SCOPE=cluster POLICY_TEXT="$QUOTA_POLICY" VERB_TIMEOUT=60 run_verb run today
+if printf '%s' "$OUT" | grep -q 'watches every namespace'; then
+    fail "SHARE_ALLOW_SHARED_POLICY=1 did not let a cluster-scoped controller through: $OUT"
+else
+    ok "SHARE_ALLOW_SHARED_POLICY=1 lets an operator who owns the policy through"
+fi
+
+# Reset settles only when no pod of the fleet is still terminating: one in its
+# grace period still holds its GPUs, and the next arm would start short.
+case_begin
+TERMINATING=1 PD_STUB=1 PD_SINGLE_STACK=1 MIN_PREFILL=1 MIN_DECODE=1 RESET_TIMEOUT=1 run_verb reset
+RC_TERM="$RC"
+TERMINATING=0 PD_STUB=1 PD_SINGLE_STACK=1 MIN_PREFILL=1 MIN_DECODE=1 RESET_TIMEOUT=1 run_verb reset
+TERMINATING=sibling PD_STUB=1 PD_SINGLE_STACK=1 MIN_PREFILL=1 MIN_DECODE=1 RESET_TIMEOUT=1 run_verb reset
+RC_SIB="$RC"
+if [ "$RC_TERM" -eq 0 ]; then
+    fail "reset settled while a decode pod was still terminating"
+elif [ "$RC" -ne 0 ]; then
+    fail "control: reset did not settle with no pod terminating: $OUT"
+elif [ "$RC_SIB" -ne 0 ]; then
+    fail "reset waited on a terminating pod of pd-decode-b, a sibling Deployment, not the fleet's pd-decode"
+else
+    ok "reset waits for the fleet's terminating pods, and only the fleet's"
+fi
+
+# A single-stack P/D model: one prefill and one decode Deployment. Every arm
+# starts from each ROLE's floor; a reset that scaled only decode left prefill
+# frozen at whatever the previous arm grew it to.
+case_begin
+PD_STUB=1 PD_SINGLE_STACK=1 MIN_PREFILL=2 MIN_DECODE=1 RESET_TIMEOUT=1 run_verb reset
+if ! grep -q 'scale deploy pd-prefill --replicas=2' "$CALLS"; then
+    fail "P/D reset did not scale prefill to MIN_PREFILL: $(grep scale "$CALLS")"
+elif ! grep -q 'scale deploy pd-decode --replicas=1' "$CALLS"; then
+    fail "P/D reset did not scale decode to MIN_DECODE: $(grep scale "$CALLS")"
+elif ! grep 'patch scaledobject pd-prefill-wva' "$CALLS" | grep -q 'minReplicaCount.:2'; then
+    fail "P/D reset did not set prefill's floor on its ScaledObject: $(grep 'patch scaledobject' "$CALLS")"
+else
+    ok "P/D reset puts each role at its own floor, prefill included"
+fi
+
+# The ceiling is per role: one number for both let prefill hold GPUs it never
+# uses, or capped decode below its need.
+case_begin
+PD_STUB=1 PD_SINGLE_STACK=1 PD_ENDPOINT=http://pd-router.ns-under-test.svc:80 \
+    MAX_PREFILL=4 MAX_DECODE=3 POLICY_TEXT="$QUOTA_POLICY" \
+    PQUERY_OUT='RESULT {"max by (mode) (wva_utilization_share_mode{namespace=\"ns-under-test\"})": [{"metric": {"mode": "off"}, "value": [0, "1"]}]}' \
+    VERB_TIMEOUT=60 run_verb run today
+if ! grep 'patch scaledobject pd-prefill-wva' "$CALLS" | grep -q 'maxReplicaCount.:4'; then
+    fail "P/D run did not cap prefill at MAX_PREFILL: $(grep 'maxReplicaCount' "$CALLS")"
+elif ! grep 'patch scaledobject pd-decode-wva' "$CALLS" | grep -q 'maxReplicaCount.:3'; then
+    fail "P/D run did not cap decode at MAX_DECODE: $(grep 'maxReplicaCount' "$CALLS")"
+elif ! grep -q "base_url: 'http://pd-router.ns-under-test.svc:80'" "$WORK/out/today/profile-a.yaml" 2>/dev/null || \
+     ! grep -q "base_url: 'http://pd-router.ns-under-test.svc:80'" "$WORK/out/today/profile-b.yaml" 2>/dev/null; then
+    fail "P/D run did not send both loaders to PD_ENDPOINT: $(grep -h -i 'url\|endpoint\|base' "$WORK"/out/today/profile-*.yaml 2>/dev/null | head -4)"
+else
+    ok "P/D run caps each role at its own ceiling and drives PD_ENDPOINT"
+fi
+
+case_begin
+PD_SINGLE_STACK=1 VERB_TIMEOUT=60 run_verb standup
+if [ "$RC" -eq 0 ]; then
+    fail "standup ran with PD_SINGLE_STACK=1; the two-stack standup would render the wrong scenario"
+elif ! printf '%s' "$OUT" | grep -q 'BENCHMARK_SPEC=guides/pd-disaggregation'; then
+    fail "standup refused P/D without naming the standup to use: $OUT"
+else
+    ok "standup refuses a single-stack P/D run and names the standup to use"
+fi
+
+# ---------------------------------------------------------------------------
+# TWO P/D stacks (two-model-shapes-pd), driven through the shared route, not
+# PD_SINGLE_STACK: each model's decode and its prefill are separate scaled roles.
+# ---------------------------------------------------------------------------
+# The peak counts both roles of both models. Counted as one role per model it
+# was HALF the fleet, and preflight passed on a cluster with room for half.
+case_begin
+BENCH_SPEC=guides/two-model-shapes-pd NODE_GPUS=16 run_verb preflight
+PD_PEAK_OUT="$OUT"
+BENCH_SPEC=guides/two-model-shapes NODE_GPUS=16 run_verb preflight
+if ! printf '%s' "$PD_PEAK_OUT" | grep -q 'peaks at 12'; then
+    fail "preflight for two P/D models (2 x (prefill 3 + decode 3)) did not report a peak of 12: $(printf '%s' "$PD_PEAK_OUT" | grep peaks)"
+elif ! printf '%s' "$PD_PEAK_OUT" | grep -q 'P/D: every model is two roles'; then
+    fail "preflight for two P/D models did not state the per-role ranges: $PD_PEAK_OUT"
+elif ! printf '%s' "$OUT" | grep -q 'peaks at 6'; then
+    fail "control: the aggregated two-model-shapes no longer peaks at 6: $(printf '%s' "$OUT" | grep peaks)"
+else
+    ok "preflight counts prefill and decode of both P/D models, and an aggregated scenario as before"
+fi
+
+case_begin
+TWO_PD_STUB=1 MIN_PREFILL=2 MIN_DECODE=1 RESET_TIMEOUT=1 run_verb reset
+miss=""
+for d in unsloth--244120d9-instruct-prefill qwen-qwe-6e036fd5-qwen3-8b-prefill; do
+    grep -q "scale deploy $d --replicas=2" "$CALLS" || miss="$miss $d"
+    grep "patch scaledobject $d-wva" "$CALLS" | grep -q 'minReplicaCount.:2' || miss="$miss $d-wva"
+done
+for d in unsloth--244120d9-instruct-decode qwen-qwe-6e036fd5-qwen3-8b-decode; do
+    grep -q "scale deploy $d --replicas=1" "$CALLS" || miss="$miss $d"
+done
+if [ -n "$miss" ]; then
+    fail "two-stack P/D reset did not put every role of both models at its floor; missing:$miss
+$(grep -E 'scale deploy|minReplicaCount' "$CALLS")"
+else
+    ok "two-stack P/D reset puts both models' prefill and decode at their own floors"
+fi
+
+case_begin
+TWO_PD_STUB=1 MAX_PREFILL=4 MAX_DECODE=3 POLICY_TEXT="$QUOTA_POLICY" \
+    PQUERY_OUT='RESULT {"max by (mode) (wva_utilization_share_mode{namespace=\"ns-under-test\"})": [{"metric": {"mode": "off"}, "value": [0, "1"]}]}' \
+    VERB_TIMEOUT=60 run_verb run today
+miss=""
+for so in unsloth--244120d9-instruct-prefill qwen-qwe-6e036fd5-qwen3-8b-prefill; do
+    grep "patch scaledobject $so-wva" "$CALLS" | grep -q 'maxReplicaCount.:4' || miss="$miss $so"
+done
+for so in unsloth--244120d9-instruct-decode qwen-qwe-6e036fd5-qwen3-8b-decode; do
+    grep "patch scaledobject $so-wva" "$CALLS" | grep -q 'maxReplicaCount.:3' || miss="$miss $so"
+done
+if [ -n "$miss" ]; then
+    fail "two-stack P/D run did not cap every role at its own ceiling; wrong or missing:$miss
+$(grep maxReplicaCount "$CALLS")"
+else
+    ok "two-stack P/D run caps both models' prefill at MAX_PREFILL and decode at MAX_DECODE"
+fi
+
+# A P/D model with no ready prefill serves through decode alone; the run would
+# measure an aggregated model under a P/D name.
+case_begin
+TWO_PD_STUB=1 DEPLOY_EXISTS=1 ROUTES=1 PREFILL_READY=0 run_verb verify
+if [ "$RC" -eq 0 ]; then
+    fail "verify passed two P/D stacks whose prefill Deployments have no ready replica"
+elif ! printf '%s' "$OUT" | grep -q 'prefill Deployment .*-prefill has no ready replica'; then
+    fail "verify refused without naming the unready prefill Deployment: $OUT"
+else
+    ok "verify refuses a P/D stack whose prefill is not serving"
+fi
+
+# The floor arm raises EVERY model ScaledObject, so it must wait for every role.
+# Waiting on decode alone started the arm while prefill was still short.
+case_begin
+TWO_PD_STUB=1 FLOOR_REPLICAS=2 READY=2 PREFILL_READY=1 RESET_TIMEOUT=1 VERB_TIMEOUT=60 run_verb run floor
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'did not reach the floor'; then
+    fail "the floor arm started while both prefill Deployments were below the floor (decode at 2, prefill at 1): rc $RC
+$(printf '%s' "$OUT" | tail -5)"
+else
+    ok "the floor arm waits for prefill as well as decode"
+fi
+
+# A floor above a role's ceiling cannot be reached: KEDA refuses the patch. The
+# arm must say so at once, not wait RESET_TIMEOUT and report a missed floor.
+case_begin
+TWO_PD_STUB=1 FLOOR_REPLICAS=2 MAX_PREFILL=1 READY=2 RESET_TIMEOUT=1 VERB_TIMEOUT=60 run_verb run floor
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q "above a role's ceiling (1)"; then
+    fail "the floor arm did not refuse a floor of 2 over a prefill ceiling of 1: rc $RC
+$(printf '%s' "$OUT" | tail -5)"
+else
+    ok "the floor arm refuses a floor above a role's ceiling, by name"
 fi
 
 # A COLD pool is the worst result this scenario can produce: the arm runs to
@@ -261,13 +704,49 @@ else
 fi
 
 case_begin
+# Two accelerator names are a POOL question: preflight warns and passes (the
+# models are placed by their accelerator request, and the share arms refuse a
+# pool), and pool-create is where it refuses. Refusing in preflight failed runs
+# that never create a pool, on nodes that carry one GPU under two label keys.
 MIXED_ACCEL=1 run_verb preflight
-if [ "$RC" -eq 0 ]; then
-    fail "preflight passed on a cluster advertising TWO accelerator products; a warm copy is only reusable on the one it was loaded on, so the pool would never be eligible to lend and the run would complete reporting that it did nothing"
-elif ! printf '%s' "$OUT" | grep -q 'ACCELERATOR'; then
-    fail "preflight refused without naming the variable that resolves it: $OUT"
+if [ "$RC" -ne 0 ]; then
+    fail "preflight refused a cluster advertising two accelerator names, though only a pool arm needs one: $(printf '%s' "$OUT" | grep -A2 'accelerator products')"
+elif ! printf '%s' "$OUT" | grep -q 'set ACCELERATOR=<product> before'; then
+    fail "preflight did not say a pool arm needs ACCELERATOR, and why the others do not: $OUT"
 else
-    ok "an ambiguous accelerator is refused, naming ACCELERATOR"
+    ok "two accelerator names warn in preflight, naming ACCELERATOR for a pool arm, and do not fail it"
+fi
+
+case_begin
+MIXED_ACCEL=1 run_verb pool-create
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'set ACCELERATOR=<product'; then
+    fail "pool-create did not refuse an ambiguous accelerator; a pool on the wrong product is never eligible to lend: $OUT"
+elif grep -q 'CALL\[apply' "$CALLS" 2>/dev/null; then
+    fail "pool-create created something before refusing: $(cat "$CALLS")"
+else
+    ok "pool-create refuses an ambiguous accelerator, before anything is created"
+fi
+
+# A missing model claim is normal before the first standup, which creates it,
+# and node-local weights require a fresh namespace. What refuses is a claim
+# that exists on a class the node-local volume could never replace.
+case_begin
+HAS_PVC=0 run_verb preflight
+if [ "$RC" -ne 0 ] || ! printf '%s' "$OUT" | grep -q 'the standup creates it'; then
+    fail "a fresh namespace with no model claim did not pass preflight: $(printf '%s' "$OUT" | grep -iE 'pvc|claim')"
+else
+    ok "a fresh namespace passes: the model claim is the standup's to create"
+fi
+case_begin
+HAS_PVC=1 PVC_CLASS=shared-vast BENCHMARK_MODEL_HOSTPATH=/mnt/local/w run_verb preflight
+c1="$RC"; o1="$OUT"
+HAS_PVC=1 PVC_CLASS=node-local-weights BENCHMARK_MODEL_HOSTPATH=/mnt/local/w run_verb preflight
+if [ "$c1" -eq 0 ] || ! printf '%s' "$o1" | grep -q "already exists on storage class 'shared-vast'"; then
+    fail "node-local weights over an existing shared-class claim passed preflight; the node-local volume would never bind: $(printf '%s' "$o1" | grep -iE 'claim|pvc')"
+elif [ "$RC" -ne 0 ]; then
+    fail "an existing claim already on the node-local class was refused: $(printf '%s' "$OUT" | grep -iE 'claim|pvc')"
+else
+    ok "node-local weights refuse an existing claim on another class, and accept one on their own"
 fi
 
 case_begin
@@ -308,6 +787,89 @@ elif ! grep -q 'scenarios/guides/two-model-warm-pool.yaml' "$SPEC_DIR/two-model-
     fail "the specification points at a scenario other than its own: $(grep -A1 scenario_file "$SPEC_DIR/two-model-warm-pool.yaml.j2")"
 else
     ok "the scenario and its specification both exist, and the specification names it"
+fi
+
+# two-model-shapes is two-model-warm-pool with room for 20k-token prompts and
+# nothing else. A copy drifts: every non-comment line but those three must
+# match, and its specification must name it, not the scenario it was copied
+# from.
+case_begin
+if [ ! -f "$SPEC_DIR/two-model-shapes.yaml" ] || [ ! -f "$SPEC_DIR/two-model-shapes.yaml.j2" ]; then
+    fail "two-model-shapes.yaml or its specification is missing"
+elif ! grep -q 'scenarios/guides/two-model-shapes.yaml' "$SPEC_DIR/two-model-shapes.yaml.j2"; then
+    fail "the shapes specification points at a scenario other than its own: $(grep -A1 scenario_file "$SPEC_DIR/two-model-shapes.yaml.j2")"
+else
+    drift="$(diff <(grep -vE '^[[:space:]]*#' "$SPEC_DIR/two-model-warm-pool.yaml" | tr -d '\r') \
+                  <(grep -vE '^[[:space:]]*#' "$SPEC_DIR/two-model-shapes.yaml" | tr -d '\r') | grep -E '^[<>]')"
+    expected="< workDir: \"~/data/two-model-warm-pool\"
+<       maxModelLen: 8192
+<       maxModelLen: 8192
+>   workDir: \"~/data/two-model-shapes\"
+>       maxModelLen: 32768
+>       maxModelLen: 32768"
+    if [ "$(printf '%s\n' "$drift" | sed 's/^\([<>]\) */\1 /' | sort)" != "$(printf '%s\n' "$expected" | sed 's/^\([<>]\) */\1 /' | sort)" ]; then
+        fail "two-model-shapes.yaml differs from two-model-warm-pool.yaml in more than workDir and maxModelLen: $drift"
+    else
+        ok "two-model-shapes differs from two-model-warm-pool only in workDir and maxModelLen, and its specification names it"
+    fi
+fi
+
+# two-model-shapes-pd is two-model-shapes with both models disaggregated. Its
+# STACKS must differ from two-model-shapes' only by the prefill block each one
+# adds -- the models, the decode sizing and the WVA bounds are the comparison's
+# fixed points, and a copy drifts.
+case_begin
+if [ ! -f "$SPEC_DIR/two-model-shapes-pd.yaml" ] || [ ! -f "$SPEC_DIR/two-model-shapes-pd.yaml.j2" ]; then
+    fail "two-model-shapes-pd.yaml or its specification is missing"
+elif ! grep -q 'scenarios/guides/two-model-shapes-pd.yaml' "$SPEC_DIR/two-model-shapes-pd.yaml.j2"; then
+    fail "the P/D shapes specification points at a scenario other than its own: $(grep -A1 scenario_file "$SPEC_DIR/two-model-shapes-pd.yaml.j2")"
+else
+    # The scenario: list, comments and blank lines out; for the P/D file, each
+    # stack's `      prefill:` block (up to the next key at its indent) too.
+    stacks_of() {
+        tr -d '\r' < "$1" | sed -n '/^scenario:/,$p' | grep -vE '^[[:space:]]*(#|$)' | awk '
+            /^      prefill:$/ { skip = 1; next }
+            skip && /^ {0,6}[^ ]/ { skip = 0 }
+            !skip { print }'
+    }
+    drift="$(diff <(stacks_of "$SPEC_DIR/two-model-shapes.yaml") <(stacks_of "$SPEC_DIR/two-model-shapes-pd.yaml"))"
+    n_prefill="$(tr -d '\r' < "$SPEC_DIR/two-model-shapes-pd.yaml" | sed -n '/^scenario:/,$p' | grep -c '^      prefill:$')"
+    if [ "$n_prefill" -ne 2 ]; then
+        fail "two-model-shapes-pd has $n_prefill per-stack prefill blocks, not 2 -- one per model"
+    elif [ -n "$drift" ]; then
+        fail "two-model-shapes-pd's stacks differ from two-model-shapes' in more than their prefill blocks: $drift"
+    else
+        ok "two-model-shapes-pd's stacks are two-model-shapes' plus one prefill block each, and its specification names it"
+    fi
+fi
+
+# What makes it P/D, in the shared block every stack inherits. Any one missing
+# does not crash: requests fall back to decode doing its own prefill, or route
+# to one role, and the run measures an aggregated model under a P/D name.
+case_begin
+pd_body="$(tr -d '\r' < "$SPEC_DIR/two-model-shapes-pd.yaml" | grep -vE '^[[:space:]]*#')"
+shared_body="$(printf '%s\n' "$pd_body" | sed -n '/^shared:/,/^scenario:/p')"
+missing=""
+printf '%s\n' "$shared_body" | grep -qE '^    prefill:$' || missing="$missing shared.modelservice.prefill"
+printf '%s\n' "$shared_body" | sed -n '/^    prefill:$/,/^    [a-z]/p' | grep -qE '^      enabled: true$' || missing="$missing prefill.enabled=true"
+printf '%s\n' "$shared_body" | grep -qE '^      connector: nixlv2$' || missing="$missing routing.connector=nixlv2"
+printf '%s\n' "$shared_body" | grep -qE 'pluginsConfigFile: "pd-config.yaml"' || missing="$missing pluginsConfigFile=pd-config.yaml"
+for plugin in always-disagg-pd-decider disagg-profile-handler prefill-filter decode-filter metrics-data-source; do
+    printf '%s\n' "$shared_body" | grep -qE -- "- type: $plugin\$" || missing="$missing plugin:$plugin"
+done
+printf '%s\n' "$shared_body" | grep -qE -- '- flowControl$' || missing="$missing featureGates:flowControl"
+printf '%s\n' "$shared_body" | grep -A1 -E '^    routerEndpointPicker:$' | grep -qE 'tag: v0\.11\.0$' || missing="$missing images.routerEndpointPicker=v0.11.0"
+[ "$(printf '%s\n' "$pd_body" | grep -c 'kv_connector":"NixlConnector"')" -eq 2 ] || missing="$missing NixlConnector-on-both-roles"
+if printf '%s\n' "$pd_body" | grep -q 'matchLabels'; then
+    missing="$missing no-matchLabels(each-InferencePool-would-select-both-models)"
+fi
+if [ -n "$missing" ]; then
+    fail "two-model-shapes-pd is not P/D on every stack; missing or wrong:$missing"
+elif ! grep -qE '^  - name: "llama-31-8b"' "$SPEC_DIR/two-model-shapes-pd.yaml" || \
+     ! grep -qE '^  - name: "qwen3-8b"' "$SPEC_DIR/two-model-shapes-pd.yaml"; then
+    fail "two-model-shapes-pd's stack names are not the driver's STACK_A/STACK_B defaults"
+else
+    ok "two-model-shapes-pd enables prefill with the nixlv2 connector and the P/D EPP config for every stack"
 fi
 
 case_begin
@@ -502,6 +1064,158 @@ else
     ok "roomy nodes raise no placeability complaint"
 fi
 
+# THE DECODE REQUEST IS THE SCENARIO'S. Preflight read it with a regex anchored
+# on the first `decode:` -- the shared block, which has no requests -- found
+# nothing, and placed 16-CPU Pods for a scenario that asks for 8. On a busy
+# cluster that turned six placeable slots into "only 5 can take a Pod" and a
+# refusal. Measured on a shared H200 cluster, before any standup.
+case_begin
+NODE_CPU=127 NODE_GPUS=8 run_verb preflight
+if ! printf '%s' "$OUT" | grep -q 'Pod(s) of 8 CPU / 64Gi'; then
+    fail "preflight did not place the scenario's own 8-CPU / 64Gi decode Pod: $(printf '%s' "$OUT" | grep placeable)"
+else
+    ok "preflight places the decode Pod the scenario declares (8 CPU / 64Gi), not a 16-CPU default"
+fi
+
+# DECODE_CPU is the knob the refusal names, and preflight counts with it.
+case_begin
+DECODE_CPU=4 NODE_CPU=127 NODE_GPUS=8 run_verb preflight
+if ! printf '%s' "$OUT" | grep -q 'Pod(s) of 4 CPU'; then
+    fail "DECODE_CPU=4 did not reach preflight's placement count: $(printf '%s' "$OUT" | grep placeable)"
+else
+    ok "DECODE_CPU sets the decode request preflight places"
+fi
+
+case_begin
+NODE_CPU=10 NODE_GPUS=8 run_verb preflight
+if [ "$RC" -eq 0 ]; then
+    fail "preflight passed with one 8-CPU decode Pod placeable on a 10-core node and a peak of 6"
+elif ! printf '%s' "$OUT" | grep -q 'DECODE_CPU=<cores>'; then
+    fail "the placement refusal does not name the knob that lowers the request: $(printf '%s' "$OUT" | grep -A3 'can actually take')"
+else
+    ok "the placement refusal names DECODE_CPU, the knob that fixes it"
+fi
+
+# A PENDING POD HOLDS NO ACCELERATOR. Preflight subtracted another team's two
+# unschedulable 8-GPU pods from the free count and refused with "only 2 free",
+# beside its own count of 18 placeable. Bound pods count; unbound ones are a
+# warning.
+case_begin
+FOREIGN_PENDING=1 NODE_GPUS=8 run_verb preflight
+if [ "$RC" -ne 0 ] || ! printf '%s' "$OUT" | grep -q '8 free'; then
+    fail "two unbound Pending pods were counted as holding accelerators: $(printf '%s' "$OUT" | grep -E 'free|accelerators')"
+elif ! printf '%s' "$OUT" | grep -q '2 Pending pod(s) wait for 16 accelerator(s)'; then
+    fail "unbound Pending pods were not named as a risk: $OUT"
+else
+    ok "unbound Pending pods hold no accelerators: counted out, named as a risk, preflight passes"
+fi
+case_begin
+BOUND_GPUS=4 NODE_GPUS=8 run_verb preflight
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q '4 held by pods on those nodes, 4 free'; then
+    fail "a Running pod bound to the node was not counted: $(printf '%s' "$OUT" | grep -E 'free|accelerators')"
+else
+    ok "a pod bound to a node holds its accelerators, and a peak of 6 against 4 free is refused"
+fi
+
+# THE TEARDOWN UNDOES THE STANDUP'S SCENARIO. It used to hand the harness its
+# default spec (guides/workload-autoscaling) for a two-model-shapes-pd
+# namespace, which missed that run's node-local downloader and hung for 20
+# minutes on the volume behind it.
+case_begin
+STANDUP_SPEC=guides/two-model-shapes-pd VERB_TIMEOUT=60 run_verb teardown
+if ! grep -q 'MAKE\[--no-print-directory benchmark-teardown\] SPEC=guides/two-model-shapes-pd' "$CALLS"; then
+    fail "teardown did not hand the harness the scenario the standup recorded: $(grep 'MAKE' "$CALLS" || echo 'no make call')"
+else
+    ok "teardown uses the scenario the standup recorded"
+fi
+case_begin
+STANDUP_SPEC=guides/two-model-shapes-pd BENCH_SPEC=guides/two-model-shapes VERB_TIMEOUT=60 run_verb teardown
+c1="$RC"; m1="$(grep -c 'MAKE\[' "$CALLS")"
+VERB_TIMEOUT=60 run_verb teardown
+if [ "$c1" -eq 0 ] || [ "$m1" -ne 0 ]; then
+    fail "teardown with a BENCH_SPEC that disagrees with the recorded scenario was not refused before the harness ran"
+elif [ "$RC" -eq 0 ] || grep -q 'MAKE\[' "$CALLS" || ! printf '%s' "$OUT" | grep -q 'no record of the scenario'; then
+    fail "teardown with no record and no BENCH_SPEC guessed a scenario instead of refusing: $OUT"
+else
+    ok "teardown refuses a BENCH_SPEC that disagrees with the record, and refuses to guess with neither"
+fi
+case_begin
+VERB_TIMEOUT=60 run_verb standup
+if ! grep -q 'create configmap wva-two-model-standup --from-literal=spec=guides/two-model-warm-pool' "$CALLS"; then
+    fail "the standup did not record its scenario for the teardown: $(grep -E 'configmap|MAKE' "$CALLS" | head -3)"
+elif [ "$(grep -n 'wva-two-model-standup' "$CALLS" | head -1 | cut -d: -f1)" -gt "$(grep -n 'MAKE\[' "$CALLS" | head -1 | cut -d: -f1)" ]; then
+    fail "the standup recorded its scenario only after the harness ran; a standup that fails half-way leaves no record"
+else
+    ok "the standup records its scenario before the harness runs"
+fi
+
+# A QUOTA BELOW THE CEILINGS IS THE PEAK. The share runbook stands up under a
+# 4-GPU quota with two models of up to 3; preflight asked for 6 placeable and
+# refused a cluster with 5, though the run can never hold more than 4.
+case_begin
+NODE_CPU=40 NODE_GPUS=8 run_verb preflight
+if [ "$RC" -eq 0 ]; then
+    fail "the control does not refuse: 40 cores place 5 decode Pods of 8 CPU against a peak of 6"
+else
+    ok "without a quota, 5 placeable against a peak of 6 is refused (the control)"
+fi
+case_begin
+WVA_QUOTAS='H200=4' NODE_CPU=40 NODE_GPUS=8 run_verb preflight
+if [ "$RC" -ne 0 ] || ! printf '%s' "$OUT" | grep -q 'holds the models to 4 GPU(s)'; then
+    fail "WVA_QUOTAS='H200=4' did not cap the peak at the quota: $(printf '%s' "$OUT" | grep -E 'peaks at|quota|can actually')"
+else
+    ok "a quota below the ceilings is the peak preflight places for"
+fi
+case_begin
+WVA_QUOTAS='H200=4 A100=8' NODE_CPU=40 NODE_GPUS=8 run_verb preflight
+c1="$RC"
+ACCELERATOR=H200 WVA_QUOTAS='H200=4,A100=8' NODE_CPU=40 NODE_GPUS=8 run_verb preflight
+if [ "$c1" -eq 0 ] || [ "$RC" -ne 0 ]; then
+    fail "with two quota entries, preflight must not guess (rc $c1) and must take ACCELERATOR's entry (rc $RC)"
+else
+    ok "with two quota entries the cap is ACCELERATOR's, and without ACCELERATOR there is none"
+fi
+
+# WHO OWNS ISTIO, without editing a tracked file. Preflight used to tell the
+# reader to add skipInstall to the scenario under hack/; GATEWAY_REUSE=auto
+# now does that on the copy the standup renders.
+case_begin
+GWCLASS=1 NODE_CPU=127 run_verb preflight
+if printf '%s' "$OUT" | grep -q 'already provides Istio'; then
+    fail "preflight still refuses a cluster that runs Istio under GATEWAY_REUSE=auto: $(printf '%s' "$OUT" | grep -A4 'already provides')"
+elif ! printf '%s' "$OUT" | grep -q 'the standup reuses it'; then
+    fail "preflight did not say the standup will reuse the cluster's Istio: $OUT"
+else
+    ok "a cluster that runs Istio passes preflight: the standup reuses it, no tracked file edited"
+fi
+
+case_begin
+GWCLASS=1 GATEWAY_REUSE=false NODE_CPU=127 run_verb preflight
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'GATEWAY_REUSE=auto (the default) or true'; then
+    fail "GATEWAY_REUSE=false on a cluster that runs Istio was not refused with the knob named: $OUT"
+else
+    ok "GATEWAY_REUSE=false on a cluster that runs Istio is refused, naming GATEWAY_REUSE"
+fi
+
+case_begin
+GWCLASS=0 GATEWAY_REUSE=true NODE_CPU=127 run_verb preflight
+if [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'no istio.io/gateway-controller GatewayClass exists'; then
+    fail "GATEWAY_REUSE=true on a cluster with no Istio passed preflight; the Gateway would never be Programmed: $OUT"
+else
+    ok "GATEWAY_REUSE=true with no Istio on the cluster is refused"
+fi
+
+case_begin
+missing=""
+for v in BENCHMARK_GATEWAY_SKIP_INSTALL BENCHMARK_GATEWAY_PROVIDER_NAMESPACE BENCHMARK_DECODE_CPU BENCHMARK_DECODE_MEMORY; do
+    sed -n '/^verb_standup() {/,/^}/p' "$SCRIPT" | grep -q "$v=" || missing="$missing $v"
+done
+if [ -n "$missing" ]; then
+    fail "the standup does not hand$missing to make benchmark-standup, so the setting stops at preflight"
+else
+    ok "the standup hands the gateway and decode settings to make benchmark-standup"
+fi
+
 # THE BURSTS MUST NOT OVERLAP. The two models cross a stage boundary at
 # different moments -- a stage ends when its requests drain and the bursting
 # model drains slower -- so the band is what keeps the drift from becoming time
@@ -527,6 +1241,205 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# The GPU sampler keeps writing. A share arm lost 2185s of samples with no line
+# saying why: the machine running the sampler was suspended. A hung or failed
+# API call silences it the same way.
+# ---------------------------------------------------------------------------
+# run_bounded <seconds> <cmd...> -- in the background, in its own process
+# group, killed whole at the limit: a sampler that hangs (or spins on a clock
+# that never arrives) fails this check instead of stalling it, and the stub
+# processes it started go with it.
+run_bounded() {
+    local limit="$1"; shift
+    set -m
+    ( "$@" ) &
+    local pid=$! waited=0
+    set +m
+    while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt "$limit" ]; do
+        command sleep 1; waited=$((waited + 1))
+    done
+    kill -- "-$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    return 0
+}
+
+# A kubectl per case, each in its own directory: KSTUB_MODE picks it.
+KSTUB="$WORK/kstub"; mkdir -p "$KSTUB"
+cat > "$KSTUB/kubectl" <<'KSTUBEOF'
+#!/usr/bin/env bash
+case "${KSTUB_MODE:-items}" in
+  # Hangs unless the call carries a request timeout, then fails as a
+  # timed-out call does.
+  honours) case "$*" in *--request-timeout=*) exit 1 ;; esac; exec sleep 60 ;;
+  # Hangs whatever the call says: an exec credential plugin that never returns.
+  ignores) exec sleep 60 ;;
+  # Succeeds with nothing on stdout.
+  empty) exit 0 ;;
+  *) echo '{"items":[]}' ;;
+esac
+KSTUBEOF
+chmod +x "$KSTUB/kubectl"
+
+case_begin
+SAMPLES="$WORK/hang-gpus.jsonl"
+hang_sample() { KSTUB_MODE=honours PATH="$KSTUB:$PATH" GPU_SAMPLE_SECONDS=1 sample_gpus "$SAMPLES" "$(( $(date +%s) + 3 ))" 2>/dev/null; }
+run_bounded 8 hang_sample
+if ! grep -q '"failed": true' "$SAMPLES" 2>/dev/null; then
+    fail "against an API call that fails once its request timeout fires the sampler wrote $(wc -l < "$SAMPLES" 2>/dev/null || echo 0) line(s) and no failure mark"
+else
+    ok "a call that times out is marked as a failed poll"
+fi
+
+case_begin
+SAMPLES="$WORK/outer-gpus.jsonl"
+outer_sample() { KSTUB_MODE=ignores PATH="$KSTUB:$PATH" GPU_SAMPLE_SECONDS=1 GPU_SAMPLE_TIMEOUT_SECONDS=1 sample_gpus "$SAMPLES" "$(( $(date +%s) + 3 ))" 2>/dev/null; }
+if ! command -v timeout >/dev/null 2>&1; then
+    fail "this machine has no timeout(1), so the sampler's outer bound cannot be checked here"
+else
+    run_bounded 20 outer_sample
+    if ! grep -q '"failed": true' "$SAMPLES" 2>/dev/null; then
+        fail "against a call that ignores its request timeout the sampler wrote $(wc -l < "$SAMPLES" 2>/dev/null || echo 0) line(s) and no failure mark: the outer timeout did not bound it"
+    else
+        ok "a call that ignores its request timeout is cut off by the outer one and marked"
+    fi
+fi
+
+case_begin
+SAMPLES="$WORK/empty-gpus.jsonl"
+empty_sample() { KSTUB_MODE=empty PATH="$KSTUB:$PATH" GPU_SAMPLE_SECONDS=1 sample_gpus "$SAMPLES" "$(( $(date +%s) + 2 ))" 2>/dev/null; }
+run_bounded 8 empty_sample
+if ! grep -q '"failed": true' "$SAMPLES" 2>/dev/null || grep -q '"pods"' "$SAMPLES" 2>/dev/null; then
+    fail "a call that succeeded with an empty answer was not marked as a failed poll: $(head -c 300 "$SAMPLES" 2>/dev/null)"
+else
+    ok "an empty answer is a failed poll, not a sample"
+fi
+
+# stall_run <jump> <until offset>: the sampler on a clock moved by hand. Every
+# sleep is 5s except the second, which is <jump> seconds; the window ends
+# <until offset> seconds after the start. GPU_SAMPLE_SECONDS=5 and
+# GPU_SAMPLE_TIMEOUT_SECONDS=20 put the stall line at 5 + 2 x 25 + 10 = 65s.
+CLOCK="$WORK/clock"
+stall_run() {
+    local jump="$1" until_off="$2"
+    SAMPLES="$WORK/stall-$jump-gpus.jsonl"
+    stall_body() {
+        echo 1000 > "$CLOCK"; echo 0 > "$CLOCK.n"
+        sampler_now() { cat "$CLOCK"; }
+        sleep() {
+            local n; n=$(( $(cat "$CLOCK.n") + 1 )); echo "$n" > "$CLOCK.n"
+            if [ "$n" -eq 2 ]; then echo $(( $(cat "$CLOCK") + jump )) > "$CLOCK"
+            else echo $(( $(cat "$CLOCK") + 5 )) > "$CLOCK"; fi
+        }
+        KSTUB_MODE=items PATH="$KSTUB:$PATH" GPU_SAMPLE_SECONDS=5 GPU_SAMPLE_TIMEOUT_SECONDS=20 \
+            sample_gpus "$SAMPLES" "$(( 1000 + until_off ))" 2>"$WORK/stall.err"
+    }
+    run_bounded 15 stall_body
+}
+
+case_begin
+stall_run 3000 3020
+marks="$(grep -c stalled_since "$SAMPLES" 2>/dev/null)"
+if ! grep -q '"stalled_since": 1005' "$SAMPLES" 2>/dev/null; then
+    fail "a 3000s stall of the sampler left no stall mark: $(head -c 300 "$SAMPLES" 2>/dev/null)"
+elif [ "$marks" -ne 1 ]; then
+    fail "the 5s sleeps were also marked as stalls: $marks marks"
+elif ! grep -q 'did not run for 3000s' "$WORK/stall.err"; then
+    fail "the stall was marked but not said: $(cat "$WORK/stall.err")"
+elif ! sed -n '/stalled_since/,$p' "$SAMPLES" | grep -q '"pods"'; then
+    fail "the sampler wrote no sample after the stall: it did not resume"
+else
+    ok "a stall is written down and said, sampling resumes after it, and ordinary sleeps are not stalls"
+fi
+
+case_begin
+stall_run 65 200
+legal="$(grep -c stalled_since "$SAMPLES" 2>/dev/null)"
+stall_run 66 200
+if [ "$legal" -ne 0 ]; then
+    fail "a pass 65s after the last -- a sleep and two calls at their outer timeout, the most a live loop takes -- was marked a stall"
+elif ! grep -q '"stalled_since": 1005' "$SAMPLES" 2>/dev/null; then
+    fail "a pass 66s after the last, one past the stall line, was not marked"
+else
+    ok "the stall line sits just past the slowest legal pass"
+fi
+
+case_begin
+stall_run 3000 1500
+if ! grep -q '"stalled_since": 1005' "$SAMPLES" 2>/dev/null; then
+    fail "a stall that ran past the end of the window left no mark: $(cat "$SAMPLES" 2>/dev/null)"
+else
+    ok "a stall that runs past the end of the window is marked too"
+fi
+
+case_begin
+STALLED="$WORK/stalled.jsonl"
+printf '%s\n' '{"ts": 1000, "pods": []}' '{"ts": 1400, "stalled_since": 1000}' '{"ts": 1405, "pods": []}' > "$STALLED"
+got="$(sampler_stalled "$STALLED")"; rc=$?
+if [ "$rc" -ne 0 ] || [ "$got" != "400" ]; then
+    fail "sampler_stalled read a 400s stall as rc $rc, '$got'"
+elif sampler_stalled "$WORK/hang-gpus.jsonl" >/dev/null; then
+    fail "sampler_stalled reported a stall in a file with none"
+elif ! grep -q 'stalled="$(sampler_stalled "$out_dir/gpus.jsonl")"' "$SCRIPT" ||
+     ! grep -q 'die "arm $arm stopped: the GPU sampler did not run' "$SCRIPT"; then
+    fail "the run verb no longer stops an arm whose sampler stalled; its cost cannot be priced and the GPUs it holds on a shared cluster are held for nothing"
+else
+    ok "a stall is found in the samples, and the run verb stops the arm on it"
+fi
+
+case_begin
+GPU_SAMPLE_TIMEOUT_SECONDS=1m run_verb run today
+bad_unit="$RC:$OUT"
+GPU_SAMPLE_SECONDS=0.5 run_verb run today
+if [ "${bad_unit%%:*}" -eq 0 ] || ! printf '%s' "$bad_unit" | grep -q 'GPU_SAMPLE_TIMEOUT_SECONDS must be a whole number of seconds'; then
+    fail "GPU_SAMPLE_TIMEOUT_SECONDS=1m was not refused: it would reach kubectl and switch the stall check off. ${bad_unit:0:300}"
+elif [ "$RC" -eq 0 ] || ! printf '%s' "$OUT" | grep -q 'GPU_SAMPLE_SECONDS must be a whole number'; then
+    fail "GPU_SAMPLE_SECONDS=0.5 was not refused: ${OUT:0:300}"
+elif grep -q 'CALL\[.*apply' "$CALLS" 2>/dev/null; then
+    fail "a sampler setting was refused only after something was created: $(cat "$CALLS")"
+else
+    ok "sampler settings in anything but whole seconds are refused before an arm starts"
+fi
+
+case_begin
+INH="$WORK/inhibit"; mkdir -p "$INH"
+cat > "$INH/systemd-inhibit" <<'INHEOF'
+#!/usr/bin/env bash
+echo "$*" > "${INH_LOG:?}"
+exec sleep 30
+INHEOF
+chmod +x "$INH/systemd-inhibit"
+INH_LOG="$WORK/inhibit.log"; export INH_LOG
+RUN_INHIBIT=""
+PATH="$INH:$PATH" hold_awake 2>/dev/null
+held="$RUN_INHIBIT"
+alive=no; [ -n "$held" ] && kill -0 "$held" 2>/dev/null && alive=yes
+run_cleanup
+# Killed is gone: a zombie this shell has not reaped yet holds no lock.
+command sleep 0.3
+gone=yes
+if [ -n "$held" ] && kill -0 "$held" 2>/dev/null; then
+    case "$(ps -o stat= -p "$held" 2>/dev/null)" in Z*) ;; *) gone=no ;; esac
+fi
+if [ "$alive" != yes ] || ! grep -q -- '--what=sleep' "$INH_LOG" 2>/dev/null; then
+    fail "hold_awake took no sleep lock through systemd-inhibit (pid '$held', args '$(cat "$INH_LOG" 2>/dev/null)')"
+elif [ "$gone" != yes ]; then
+    kill "$held" 2>/dev/null
+    fail "run_cleanup left the sleep lock held"
+else
+    ok "an arm holds a sleep lock where the machine offers one, and gives it back on cleanup"
+fi
+
+case_begin
+NOINH="$WORK/noinhibit"; mkdir -p "$NOINH"
+RUN_INHIBIT=""
+said="$(PATH="$NOINH" hold_awake 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ] || [ -n "$RUN_INHIBIT" ] || ! printf '%s' "$said" | grep -q 'keep it awake'; then
+    fail "with no inhibitor hold_awake returned $rc, held '$RUN_INHIBIT', said '$said'"
+else
+    ok "with no inhibitor the arm still runs, and says to keep the machine awake"
+fi
+
+# ---------------------------------------------------------------------------
 # The schedule and the report, executed.
 # ---------------------------------------------------------------------------
 case_begin
@@ -537,7 +1450,7 @@ else
 fi
 
 case_begin
-CASES_EXPECTED=32
+CASES_EXPECTED=87
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately rather than letting coverage drift out."
 else
