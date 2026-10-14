@@ -941,8 +941,16 @@ func main() {
 	}
 
 	if err = inferencePoolReconciler.SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create inferencePool controller")
-		os.Exit(1)
+		if !errors.Is(err, controller.ErrInferencePoolCRDNotServed) {
+			setupLog.Error(err, "unable to create inferencePool controller")
+			os.Exit(1)
+		}
+		// Starting without it beats the alternative: a controller for an unserved
+		// kind never syncs, and once this replica wins the lease the manager exits
+		// on the cache-sync timeout, a crash loop that only shows after election.
+		setupLog.Error(err, "InferencePool CRD not found: the InferencePool controller is NOT running, so no "+
+			"EPP pool is tracked and EPP queue metrics are unavailable. Install the Gateway API Inference "+
+			"Extension CRDs and restart the controller.", "poolGroup", poolGKNN.Group)
 	}
 
 	if err = configMapReconciler.SetupWithManager(mgr); err != nil {
