@@ -79,7 +79,13 @@
 #                               choice, and it is then held on the node as a
 #                               side effect
 #   --capacity SIZE             the volume's declared capacity (default 200Gi;
-#                               it is a declaration, hostPath has no quota)
+#                               it is a declaration, hostPath has no quota).
+#                               A re-apply keeps an existing claim's size
+#                               when this is not given, and refuses a SIZE
+#                               that differs from it: a claim on a static
+#                               volume cannot be resized (delete first).
+#                               --dry-run reads no cluster, so it renders
+#                               SIZE or the default
 #   --seed-claim PVC[:SUBPATH]  a claim in the namespace holding caches to
 #                               copy onto each node before it is prepared --
 #                               the shared claim the caches lived on before,
@@ -173,6 +179,7 @@ NAMESPACE=""
 NODE_PATH=""
 IMAGE=""
 CAPACITY="200Gi"
+CAPACITY_GIVEN=false
 NODE_SELECTOR=""          # empty: every node carrying a known GPU product label
 NODE_SELECTOR_GIVEN=false
 TOLERATIONS=("nvidia.com/gpu")
@@ -530,6 +537,8 @@ cmd_apply() {
         seed_phase="$(kubectl get pvc -n "$NAMESPACE" "$SEED_CLAIM" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
         [ "$seed_phase" = Bound ] || log_error "--seed-claim ${SEED_CLAIM}: no Bound claim of that name in ${NAMESPACE} (found: '${seed_phase:-none}'); the preparer would mount it and never start"
     fi
+    # an existing claim keeps its size (deploy/lib/nodedir.sh says why)
+    nodedir_claim_capacity "$NAMESPACE" "$CLAIM" "$CAPACITY_GIVEN" "enginecache.sh delete -n ${NAMESPACE}"
     render | kubectl apply -f - >/dev/null
     log_info "preparing ${NODE_PATH}/${SUBDIR} on $(accelerator_selector_text "$NODE_SELECTOR"); claim ${CLAIM}${SEED_CLAIM:+, seeded from ${SEED_CLAIM}${SEED_SUBPATH:+:$SEED_SUBPATH}} -- mount it read-write and point VLLM_CACHE_ROOT, FLASHINFER_WORKSPACE_DIR and TRITON_CACHE_DIR under it"
     if kubectl api-resources --api-group=security.openshift.io 2>/dev/null | grep -q securitycontextconstraints; then
@@ -901,7 +910,7 @@ while [ $# -gt 0 ]; do
         -n|--namespace) NAMESPACE="$2"; shift 2 ;;
         --path) NODE_PATH="$2"; shift 2 ;;
         --image) IMAGE="$2"; shift 2 ;;
-        --capacity) CAPACITY="$2"; shift 2 ;;
+        --capacity) CAPACITY="$2"; CAPACITY_GIVEN=true; shift 2 ;;
         --seed-claim) check_seed "$2"; shift 2 ;;
         --node-selector) NODE_SELECTOR="$2"; NODE_SELECTOR_GIVEN=true; shift 2 ;;
         --toleration) accelerator_check_toleration "$2"; TOLERATIONS+=("$2"); shift 2 ;;

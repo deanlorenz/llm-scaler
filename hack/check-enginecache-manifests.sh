@@ -498,13 +498,17 @@ case "\$1 \$2" in
         *"jsonpath={.metadata.name}/{.spec.storageClassName}"*) [ -z "\${STUB_PVC_PHASE-Bound}" ] || printf 'engine-cache/%s' "\${STUB_PVC_CLASS-}" ;;
         *"jsonpath={.spec.volumeName}"*) [ -z "\${STUB_PVC_PHASE-Bound}" ] || printf '%s' "\${STUB_PVC_VOLUME-$PVNAME}" ;;
         *"jsonpath={.spec.storageClassName}"*) printf '%s' "\${STUB_PVC_CLASS-}" ;;
+        *"jsonpath={.spec.resources.requests.storage}"*)
+            case "\$ARGV" in *" --ignore-not-found "*) ;; *) echo "stub kubectl: the size read lacks --ignore-not-found:\$ARGV" >&2; exit 2 ;; esac
+            [ -z "\${STUB_PVC_READ_ERROR:-}" ] || { echo "\$STUB_PVC_READ_ERROR" >&2; exit 1; }
+            [ -z "\${STUB_PVC_PHASE-Bound}" ] || printf '%s' "\${STUB_PVC_SIZE-200Gi}" ;;
         *) echo "stub kubectl: unexpected pvc read:\$ARGV" >&2; exit 2 ;;
       esac ;;
   "get events")  want -n check-ns; printf '%s' "\${STUB_EVENT:-}" ;;
   "logs -n")     want -n check-ns; printf '%s\n' "\${STUB_LOG:-}" ;;
   "auth can-i")  case "\$ARGV" in *" create persistentvolumes -A -q "*) [ -z "\${STUB_NO_PV:-}" ] || exit 1; exit 0 ;; *) echo "stub kubectl: unexpected can-i:\$ARGV" >&2; exit 2 ;; esac ;;
   "api-resources --api-group=security.openshift.io") [ -n "\${STUB_OPENSHIFT:-}" ] && echo "securitycontextconstraints scc security.openshift.io/v1 false SecurityContextConstraints"; : ;;
-  "apply -f")    cat >/dev/null; echo applied ;;
+  "apply -f")    cat > "\${STUB_APPLIED:-/dev/null}"; echo applied ;;
   "delete daemonset"|"delete pvc"|"delete serviceaccount") want -n check-ns; echo deleted ;;
   "get pv")      refuse -n
                  case "\$ARGV" in
@@ -577,6 +581,28 @@ if STUB_PVC_CLASS=shared-vast PATH="$STUB_PATH" bash deploy/enginecache.sh apply
 STUB_PVC_CLASS=node-local-engine-cache PATH="$STUB_PATH" bash deploy/enginecache.sh apply -n check-ns --path /mnt/local/weights/check-ns --image "$IMG" > "$T/apply.out" 2>&1 || true
 grep -q '^apply -f' "$T/calls" && grep -q 'preparing /mnt/local/weights/check-ns/engine-cache on' "$T/apply.out" && grep -q '^  node-ready ' "$T/apply.out" && ok "apply: applies, says what it prepared where, and reports per node" || fail "apply: $(head -3 "$T/apply.out" | tr '\n' ';')"
 grep -q 'OpenShift:' "$T/apply.out" && fail "apply: the OpenShift notice printed on a cluster without SCCs" || ok "apply: no OpenShift notice on a cluster without SecurityContextConstraints"
+# A re-apply keeps an existing claim's size: the claim is bound to a static
+# volume, and only a dynamically provisioned claim can be resized.
+claim_size() { yq -r 'select(.kind == "PersistentVolumeClaim") | .spec.resources.requests.storage' "$1" 2>/dev/null; }
+EAPPLY=(apply -n check-ns --path /mnt/local/weights/check-ns --image "$IMG")
+: > "$T/applied.yaml"
+STUB_PVC_SIZE=150Gi STUB_PVC_CLASS=node-local-engine-cache STUB_APPLIED="$T/applied.yaml" PATH="$STUB_PATH" bash deploy/enginecache.sh "${EAPPLY[@]}" > "$T/keep.out" 2>&1 || true
+[ "$(claim_size "$T/applied.yaml")" = 150Gi ] && [ "$(yq -r 'select(.kind == "PersistentVolume") | .spec.capacity.storage' "$T/applied.yaml")" = 150Gi ] && grep -q 'exists at 150Gi; keeping that size' "$T/keep.out" \
+    && ok "re-apply: an existing 150Gi claim and no --capacity renders 150Gi on the claim and the volume" || fail "re-apply keep: '$(claim_size "$T/applied.yaml")'; $(head -2 "$T/keep.out" | tr '\n' ';')"
+: > "$T/applied.yaml"
+STUB_PVC_SIZE=150Gi STUB_PVC_CLASS=node-local-engine-cache STUB_APPLIED="$T/applied.yaml" PATH="$STUB_PATH" bash deploy/enginecache.sh "${EAPPLY[@]}" --capacity 150Gi > "$T/equal.out" 2>&1 || true
+[ "$(claim_size "$T/applied.yaml")" = 150Gi ] && ok "re-apply: --capacity equal to the existing claim applies" || fail "re-apply equal: '$(claim_size "$T/applied.yaml")'; $(head -2 "$T/equal.out" | tr '\n' ';')"
+: > "$T/calls"
+if STUB_PVC_SIZE=150Gi STUB_PVC_CLASS=node-local-engine-cache PATH="$STUB_PATH" bash deploy/enginecache.sh "${EAPPLY[@]}" --capacity 300Gi > "$T/resize.out" 2>&1; then fail "re-apply must refuse a --capacity that differs from the existing claim"; else
+    grep -q -- '--capacity 300Gi differs from the existing claim engine-cache in check-ns, which is 150Gi: a claim bound to a static (node-local) volume cannot be resized' "$T/resize.out" && grep -q 'enginecache.sh delete -n check-ns first' "$T/resize.out" && ! grep -q '^apply -f' "$T/calls" \
+        && ok "re-apply: a different --capacity is refused before anything lands, saying why and what frees the claim" || fail "re-apply resize: $(tail -1 "$T/resize.out"); calls: $(grep '^apply' "$T/calls")"; fi
+: > "$T/applied.yaml"
+STUB_DS_PATH="" STUB_PVC_PHASE="" STUB_APPLIED="$T/applied.yaml" PATH="$STUB_PATH" bash deploy/enginecache.sh "${EAPPLY[@]}" > "$T/fresh.out" 2>&1 || true
+[ "$(claim_size "$T/applied.yaml")" = 200Gi ] && ok "apply: no claim yet renders the default 200Gi" || fail "apply fresh: '$(claim_size "$T/applied.yaml")'; $(head -2 "$T/fresh.out" | tr '\n' ';')"
+: > "$T/calls"
+if STUB_PVC_READ_ERROR='Error from server (Forbidden): persistentvolumeclaims is forbidden: stub' STUB_PVC_CLASS=node-local-engine-cache PATH="$STUB_PATH" bash deploy/enginecache.sh "${EAPPLY[@]}" > "$T/pvcforb.out" 2>&1; then fail "apply must fail when the claim size cannot be read"; else
+    grep -q 'cannot read the claim engine-cache in check-ns (kubectl: Error from server (Forbidden)' "$T/pvcforb.out" && ! grep -q '^apply -f' "$T/calls" \
+        && ok "apply: a claim whose size cannot be read (Forbidden) is an error, not an absent claim; nothing applied" || fail "apply pvc Forbidden: $(tail -1 "$T/pvcforb.out"); calls: $(grep '^apply' "$T/calls")"; fi
 # a re-apply with another directory is refused: the claim's volume cannot
 # change -- read off the volume the claim is bound to, so a DaemonSet deleted
 # by hand does not make the claim look free

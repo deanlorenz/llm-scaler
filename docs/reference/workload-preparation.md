@@ -273,7 +273,16 @@ What it costs, and what it needs:
   it). Ask the cluster admin to run `make weights` or to create the
   volume. The claim's `WEIGHTS_CAPACITY` (1Ti unless set) is a request a
   `requests.storage` quota charges -- a project with a storage quota
-  refuses the claim; set the capacity near the model's size there. And a
+  refuses the claim; set the capacity near the model's size there. The
+  claim is bound to a static volume, and Kubernetes resizes only
+  dynamically provisioned claims ("only dynamically provisioned pvc can
+  be resized"), so a re-run keeps an existing claim's size when
+  `WEIGHTS_CAPACITY` is not set, and refuses a `WEIGHTS_CAPACITY` that
+  differs from it before anything is applied. To change the size, run
+  `make weights-delete` for the model (the files on the nodes stay) and
+  apply again; `--dry-run` reads nothing from the cluster, so it shows the
+  set or default size, not the kept one. The same holds for
+  `ENGINE_CACHE_CAPACITY` and the `engine-cache` claim. And a
   cluster that reaches Hugging Face through a proxy does not inject its
   proxy into arbitrary pods: the downloader would need `HTTPS_PROXY`.
 - Pod Security `baseline` admits the downloader (it mounts the claim, not a

@@ -32,7 +32,13 @@
 #   --hf-token-secret NAME[/KEY]  Secret with a Hugging Face token for gated
 #                               models (key defaults to HF_TOKEN)
 #   --capacity SIZE             the volume's declared capacity (default 1Ti;
-#                               it is a declaration, hostPath has no quota)
+#                               it is a declaration, hostPath has no quota).
+#                               A re-apply keeps an existing claim's size
+#                               when this is not given, and refuses a SIZE
+#                               that differs from it: a claim on a static
+#                               volume cannot be resized (delete first).
+#                               --dry-run reads no cluster, so it renders
+#                               SIZE or the default
 #   --memory SIZE               the downloader's memory limit (default 16Gi;
 #                               the request stays 256Mi, so a node reserves
 #                               nothing for it). 2Gi was OOMKilled on every
@@ -110,6 +116,7 @@ NODE_PATH=""
 IMAGE=""
 HF_SECRET=""
 CAPACITY="1Ti"
+CAPACITY_GIVEN=false
 # The downloader's memory LIMIT. huggingface_hub fetches several files at once
 # (max_workers=8) and buffers each, and at 2Gi the download of an 8B model
 # (four or more multi-GB safetensors) was OOMKilled on every node and
@@ -384,6 +391,8 @@ cmd_apply() {
     if ! kubectl auth can-i create persistentvolumes -A -q 2>/dev/null; then
         log_error "apply needs leave to create PersistentVolumes (cluster-scoped), which a namespace tenant does not have -- ask the cluster admin to run apply (storage-admin on OpenShift)"
     fi
+    # an existing claim keeps its size (deploy/lib/nodedir.sh says why)
+    nodedir_claim_capacity "$NAMESPACE" "$(name_for "$MODEL")" "$CAPACITY_GIVEN" "weights.sh delete -n ${NAMESPACE} --model ${MODEL}"
     render | kubectl apply -f - >/dev/null
     log_info "downloading ${MODEL} under ${NODE_PATH} on $(accelerator_selector_text "$NODE_SELECTOR"); claim $(name_for "$MODEL") -- mount pvc://$(name_for "$MODEL")/models/${MODEL}"
     # On OpenShift the downloader runs as the project's range UID and the
@@ -629,7 +638,7 @@ while [ $# -gt 0 ]; do
         --path) NODE_PATH="$2"; shift 2 ;;
         --image) IMAGE="$2"; shift 2 ;;
         --hf-token-secret) HF_SECRET="$2"; shift 2 ;;
-        --capacity) CAPACITY="$2"; shift 2 ;;
+        --capacity) CAPACITY="$2"; CAPACITY_GIVEN=true; shift 2 ;;
         --memory) MEMORY="$2"; shift 2 ;;
         --node-selector) NODE_SELECTOR="$2"; NODE_SELECTOR_GIVEN=true; shift 2 ;;
         --toleration) accelerator_check_toleration "$2"; TOLERATIONS+=("$2"); shift 2 ;;

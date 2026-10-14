@@ -258,6 +258,13 @@ case "\$1 \$2" in
         *"jsonpath={.spec.volumeName}"*)
             case "\$ARGV" in *" -l "*) echo "stub kubectl: a single-object jsonpath on a list get:\$ARGV" >&2; exit 2 ;; esac
             case "\$ARGV" in *" ${NAME} "*) printf '%s\n' "\${STUB_PVC_VOLUMES-${PVNAME}}" ;; *) : ;; esac ;;
+        *"jsonpath={.spec.resources.requests.storage}"*)
+            # the size a re-apply keeps: absent is --ignore-not-found's empty
+            # answer, never a failure; a failure is an error the stub names
+            case "\$ARGV" in *" ${NAME} "*) ;; *) echo "stub kubectl: the size read names no claim:\$ARGV" >&2; exit 2 ;; esac
+            case "\$ARGV" in *" --ignore-not-found "*) ;; *) echo "stub kubectl: the size read lacks --ignore-not-found:\$ARGV" >&2; exit 2 ;; esac
+            [ -z "\${STUB_PVC_READ_ERROR:-}" ] || { echo "\$STUB_PVC_READ_ERROR" >&2; exit 1; }
+            [ -z "\${STUB_PVC_PHASE-Bound}" ] || printf '%s' "\${STUB_PVC_SIZE-1Ti}" ;;
         *"model-pvc"*) printf '%s' "\${STUB_MODEL_PVC_CLASS:-}" ;;
         *) echo "stub kubectl: unexpected pvc read:\$ARGV" >&2; exit 2 ;;
       esac ;;
@@ -266,7 +273,7 @@ case "\$1 \$2" in
   "auth can-i")  case "\$ARGV" in *" create persistentvolumes -A -q "*) [ -z "\${STUB_NO_PV:-}" ] || exit 1; exit 0 ;; *) echo "stub kubectl: unexpected can-i:\$ARGV" >&2; exit 2 ;; esac ;;
   "api-resources --api-group=security.openshift.io") [ -n "\${STUB_OPENSHIFT:-}" ] && echo "securitycontextconstraints scc security.openshift.io/v1 false SecurityContextConstraints"; : ;;
   "delete serviceaccount") want -n check-ns; echo deleted ;;
-  "apply -f")    cat >/dev/null; echo applied ;;
+  "apply -f")    cat > "\${STUB_APPLIED:-/dev/null}"; echo applied ;;
   "delete daemonset"|"delete pvc") want -n check-ns; echo deleted ;;
   "get pv")      want -l "$LBL"; want -o json; refuse -n; cat "$T/pvs.json" ;;
   "delete pv")   refuse -n; echo deleted ;;
@@ -353,6 +360,37 @@ if STUB_PVC_PHASE=Pending PATH="$STUB_PATH" bash deploy/weights.sh status -n che
 : > "$T/calls"
 if STUB_NO_PV=1 PATH="$STUB_PATH" bash deploy/weights.sh apply -n check-ns --model Qwen/Qwen3-32B --path /mnt/local/models --image "$IMG" > "$T/nopv.out" 2>&1; then fail "apply must refuse without leave to create PersistentVolumes"; else
     grep -q 'leave to create PersistentVolumes' "$T/nopv.out" && ! grep -q '^apply -f' "$T/calls" && ok "apply: without leave to create PersistentVolumes nothing is applied, and the reason names the cluster admin" || fail "apply without PV rights: $(tail -1 "$T/nopv.out"); calls: $(grep '^apply' "$T/calls")"; fi
+# A re-apply keeps an existing claim's size. The claim is bound to a static
+# volume and only a dynamically provisioned claim can be resized, so a
+# re-apply rendering the default failed mid-apply on every re-run once the
+# default changed. --capacity equal to the claim is fine (in any spelling of
+# the size); a different one is refused before anything lands; a claim that
+# cannot be read is an error, not an absent claim.
+claim_size() { yq -r 'select(.kind == "PersistentVolumeClaim") | .spec.resources.requests.storage' "$1" 2>/dev/null; }
+pv_size() { yq -r 'select(.kind == "PersistentVolume") | .spec.capacity.storage' "$1" 2>/dev/null; }
+WAPPLY=(apply -n check-ns --model Qwen/Qwen3-32B --path /mnt/local/models --image "$IMG")
+: > "$T/applied.yaml"
+STUB_PVC_SIZE=200Gi STUB_APPLIED="$T/applied.yaml" PATH="$STUB_PATH" bash deploy/weights.sh "${WAPPLY[@]}" > "$T/keep.out" 2>&1 || true
+[ "$(claim_size "$T/applied.yaml")" = 200Gi ] && [ "$(pv_size "$T/applied.yaml")" = 200Gi ] && grep -q 'exists at 200Gi; keeping that size' "$T/keep.out" \
+    && ok "re-apply: an existing 200Gi claim and no --capacity renders 200Gi on the claim and the volume, and says so" || fail "re-apply keep: claim '$(claim_size "$T/applied.yaml")' volume '$(pv_size "$T/applied.yaml")'; $(head -2 "$T/keep.out" | tr '\n' ';')"
+: > "$T/applied.yaml"
+STUB_PVC_SIZE=200Gi STUB_APPLIED="$T/applied.yaml" PATH="$STUB_PATH" bash deploy/weights.sh "${WAPPLY[@]}" --capacity 200Gi > "$T/equal.out" 2>&1 || true
+[ "$(claim_size "$T/applied.yaml")" = 200Gi ] && ! grep -q 'cannot be resized' "$T/equal.out" && ok "re-apply: --capacity equal to the existing claim applies" || fail "re-apply equal: '$(claim_size "$T/applied.yaml")'; $(head -2 "$T/equal.out" | tr '\n' ';')"
+: > "$T/applied.yaml"
+STUB_PVC_SIZE=200Gi STUB_APPLIED="$T/applied.yaml" PATH="$STUB_PATH" bash deploy/weights.sh "${WAPPLY[@]}" --capacity 204800Mi > "$T/equal2.out" 2>&1 || true
+[ "$(claim_size "$T/applied.yaml")" = 200Gi ] && ok "re-apply: --capacity of the same size written otherwise (204800Mi for 200Gi) applies, as the claim has it" || fail "re-apply same size: '$(claim_size "$T/applied.yaml")'; $(head -2 "$T/equal2.out" | tr '\n' ';')"
+: > "$T/calls"
+if STUB_PVC_SIZE=200Gi PATH="$STUB_PATH" bash deploy/weights.sh "${WAPPLY[@]}" --capacity 1Ti > "$T/resize.out" 2>&1; then fail "re-apply must refuse a --capacity that differs from the existing claim"; else
+    grep -q -- '--capacity 1Ti differs from the existing claim .* which is 200Gi: a claim bound to a static (node-local) volume cannot be resized' "$T/resize.out" && grep -q 'weights.sh delete -n check-ns --model Qwen/Qwen3-32B' "$T/resize.out" && ! grep -q '^apply -f' "$T/calls" \
+        && ok "re-apply: a different --capacity is refused before anything lands, saying why and what frees the claim" || fail "re-apply resize: $(tail -1 "$T/resize.out"); calls: $(grep '^apply' "$T/calls")"; fi
+: > "$T/applied.yaml"
+STUB_PVC_PHASE="" STUB_APPLIED="$T/applied.yaml" PATH="$STUB_PATH" bash deploy/weights.sh "${WAPPLY[@]}" > "$T/fresh.out" 2>&1 || true
+[ "$(claim_size "$T/applied.yaml")" = 1Ti ] && ! grep -q 'keeping that size' "$T/fresh.out" && ok "apply: no claim yet renders the default 1Ti" || fail "apply fresh: '$(claim_size "$T/applied.yaml")'"
+: > "$T/calls"
+if STUB_PVC_READ_ERROR='Error from server (Forbidden): persistentvolumeclaims is forbidden: stub' PATH="$STUB_PATH" bash deploy/weights.sh "${WAPPLY[@]}" > "$T/pvcforb.out" 2>&1; then fail "apply must fail when the claim cannot be read"; else
+    grep -q 'cannot read the claim .*(kubectl: Error from server (Forbidden): persistentvolumeclaims is forbidden: stub)' "$T/pvcforb.out" && ! grep -q '^apply -f' "$T/calls" \
+        && ok "apply: a claim that cannot be read (Forbidden) is an error with kubectl's reason, not an absent claim; nothing applied" || fail "apply pvc Forbidden: $(tail -1 "$T/pvcforb.out"); calls: $(grep '^apply' "$T/calls")"; fi
+if STUB_PVC_READ_ERROR='stub: must not be read' PATH="$STUB_PATH" bash deploy/weights.sh "${WAPPLY[@]}" --dry-run > "$T/dry.out" 2>&1 && [ "$(claim_size "$T/dry.out")" = 1Ti ]; then ok "apply --dry-run reads no claim and renders the default"; else fail "apply --dry-run: $(tail -1 "$T/dry.out")"; fi
 if STUB_DAEMONSETS="" PATH="$STUB_PATH" bash deploy/weights.sh status -n check-ns > "$T/none.out" 2>&1; then fail "status with nothing to check must fail"; else grep -q 'no weights DaemonSets' "$T/none.out" && ok "status: no DaemonSets and no --model is refused with a reason" || fail "status: $(tail -1 "$T/none.out")"; fi
 : > "$T/calls"
 STUB_DS_SELECTOR=example.com/accelerator=h200 STUB_SELECTOR=example.com/accelerator=h200 PATH="$STUB_PATH" bash deploy/weights.sh status -n check-ns >/dev/null 2>&1 || true

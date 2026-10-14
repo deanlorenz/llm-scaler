@@ -47,3 +47,74 @@ nodedir_ok() {
     done
     return 0
 }
+
+# THE CLAIM'S SIZE ON A RE-APPLY. The claim over a node directory is bound
+# to a static volume, and Kubernetes resizes only a dynamically provisioned
+# claim: a re-apply that renders another size fails mid-apply with "only
+# dynamically provisioned pvc can be resized" -- which every re-run did once
+# the script's default size changed. So an existing claim keeps its size
+# unless the caller asked for one, and a size that differs from it is
+# refused before anything is applied.
+
+# nodedir_quantity_bytes prints quantity $1 in bytes when it is an integer
+# with a binary or decimal suffix (or none), and fails otherwise -- the
+# forms a capacity is written in. 1024Gi and 1Ti are then the same size,
+# which the API server, storing the canonical form, would report as 1Ti.
+nodedir_quantity_bytes() {
+    local re='^([0-9]{1,15})(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)?$' n mult=1
+    [[ "$1" =~ $re ]] || return 1
+    n="$((10#${BASH_REMATCH[1]}))"
+    case "${BASH_REMATCH[2]}" in
+        Ki) mult=$((1 << 10)) ;; Mi) mult=$((1 << 20)) ;; Gi) mult=$((1 << 30)) ;;
+        Ti) mult=$((1 << 40)) ;; Pi) mult=$((1 << 50)) ;; Ei) mult=$((1 << 60)) ;;
+        k) mult=1000 ;; M) mult=1000000 ;; G) mult=1000000000 ;;
+        T) mult=1000000000000 ;; P) mult=1000000000000000 ;; E) mult=1000000000000000000 ;;
+    esac
+    # past 2^63 the product wraps; such a size is no claim's
+    [ "$n" -eq 0 ] || [ "$mult" -le $(( 0x7fffffffffffffff / n )) ] || return 1
+    printf '%s' "$((n * mult))"
+}
+
+# nodedir_same_quantity says whether quantities $1 and $2 are the same size:
+# equal in bytes when both parse, equal as text otherwise.
+nodedir_same_quantity() {
+    local a b
+    if a="$(nodedir_quantity_bytes "$1")" && b="$(nodedir_quantity_bytes "$2")"; then
+        [ "$a" = "$b" ]
+    else
+        [ "$1" = "$2" ]
+    fi
+}
+
+# nodedir_claim_capacity NAMESPACE CLAIM GIVEN RESET sets CAPACITY to the size
+# a re-apply renders: an existing claim's own size when GIVEN is false (no
+# --capacity), CAPACITY as it is when there is no claim or when --capacity
+# equals the claim's size. A --capacity that differs from an existing
+# claim's size is refused, RESET being the command that frees the claim for
+# a new size. A claim that cannot be read (Forbidden, an unreachable API
+# server) is an error, not an absent claim: the apply would otherwise
+# render the default and fail mid-apply on the resize. Exits via
+# log_error, so call it outside a command substitution.
+nodedir_claim_capacity() {
+    local ns="$1" claim="$2" given="$3" reset="$4" err current
+    err="$(mktemp)"
+    if ! current="$(kubectl get pvc -n "$ns" "$claim" --ignore-not-found -o jsonpath='{.spec.resources.requests.storage}' 2>"$err")"; then
+        local why
+        why="$(tr '\n' ' ' < "$err" | sed 's/ *$//')"
+        rm -f "$err"
+        log_error "cannot read the claim ${claim} in ${ns} (kubectl: ${why:-no error text}); a re-apply keeps an existing claim's size, so it must know whether there is one -- nothing was applied"
+    fi
+    rm -f "$err"
+    [ -n "$current" ] || return 0
+    if [ "$given" != true ]; then
+        [ "$current" = "$CAPACITY" ] || log_info "claim ${claim} in ${ns} exists at ${current}; keeping that size (a node-local claim cannot be resized; --capacity to say otherwise)"
+        CAPACITY="$current"
+        return 0
+    fi
+    # the same size written another way renders as the claim has it
+    if nodedir_same_quantity "$CAPACITY" "$current"; then
+        CAPACITY="$current"
+        return 0
+    fi
+    log_error "--capacity ${CAPACITY} differs from the existing claim ${claim} in ${ns}, which is ${current}: a claim bound to a static (node-local) volume cannot be resized -- Kubernetes resizes only dynamically provisioned claims. Leave --capacity off to keep ${current}, or ${reset} first (the files on the nodes stay) and apply again with the new size. Nothing was applied"
+}
