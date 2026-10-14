@@ -94,25 +94,56 @@ STATE="$WORK/state"
 mkdir -p "$WORK/bin"
 cat > "$WORK/bin/kubectl" <<'STUB'
 #!/usr/bin/env bash
+# A cluster in files. policy + rv is the ConfigMap; logs is every controller
+# pod's log; standby makes `logs deploy/X` read a standby pod that logs
+# nothing; warn makes every call print a client warning on stderr.
 S="$STUB_STATE"
 args=" $* "
+[ -e "$S/warn" ] && echo 'WARNING: the gcp auth plugin is deprecated; use gcloud instead.' >&2
+ns=""; prev=""
+for a in "$@"; do [ "$prev" = "-n" ] && ns="$a"; prev="$a"; done
 case "$args" in
   *" get configmap "*)
     [ -e "$S/cm.forbidden" ] && { echo 'Error from server (Forbidden): configmaps is forbidden' >&2; exit 1; }
     [ -e "$S/policy" ] || { echo 'Error from server (NotFound): configmaps "wva-scaling-policy-config" not found' >&2; exit 1; }
-    cat "$S/policy" ;;
+    case "$args" in
+      *jsonpath*) cat "$S/policy" ;;
+      *) jq -n --rawfile d "$S/policy" --arg rv "$(cat "$S/rv" 2>/dev/null || echo 1)" \
+           '{metadata:{resourceVersion:$rv},data:{default:$d}}' ;;
+    esac ;;
   *" patch configmap "*)
     p=""; prev=""
     for a in "$@"; do [ "$prev" = "-p" ] && p="$a"; prev="$a"; done
+    rv="$(cat "$S/rv" 2>/dev/null || echo 1)"
+    prv="$(printf '%s' "$p" | jq -r '.metadata.resourceVersion // ""')"
+    [ -z "$prv" ] || [ "$prv" = "$rv" ] || {
+      echo 'Error from server (Conflict): the object has been modified; please apply your changes to the latest version' >&2; exit 1; }
     printf '%s' "$p" | jq -r '.data.default' > "$S/policy"
+    echo $((rv + 1)) > "$S/rv"
     echo x >> "$S/patches"
-    [ -e "$S/noreload" ] || echo 'INFO Updated global scaling policy from ConfigMap' >> "$S/logs"
+    if [ ! -e "$S/noreload" ]; then
+      if [ "$ns" = wva-policy ]; then
+        echo 'INFO Loaded cluster policy from the policy namespace {"policyNamespace": "wva-policy"}' >> "$S/logs"
+      else
+        echo 'INFO Updated global scaling policy from ConfigMap' >> "$S/logs"
+      fi
+    fi
     grep -q 'bogus' "$S/policy" && echo 'ERROR Utilization share: invalid optimizer block; keeping the optimizer' >> "$S/logs"
     # shadow removes the active optimizer's marks
     grep -q 'shadow: true' "$S/policy" && [ ! -e "$S/marks.stick" ] && echo '{"items":[]}' > "$S/pods.json"
     exit 0 ;;
+  *" get namespace "*)
+    case "$args" in
+      *" wva-policy "*) [ -e "$S/ns.wva-policy" ] && { echo namespace/wva-policy; exit 0; }
+                        echo 'Error from server (NotFound): namespaces "wva-policy" not found' >&2; exit 1 ;;
+      *) jq -n --arg l "$(cat "$S/ns.label" 2>/dev/null)" \
+           '{metadata:{labels:(if $l == "" then {} else {"wva.llmd.ai/policy-namespace":$l} end)}}' ;;
+    esac ;;
+  *" get deploy "*)
+    echo '{"spec":{"selector":{"matchLabels":{"control-plane":"controller-manager"}}}}' ;;
   *" logs "*)
     [ -e "$S/logs.forbidden" ] && { echo 'Error from server (Forbidden): pods/log is forbidden' >&2; exit 1; }
+    case "$args" in *" -l "*) ;; *) [ -e "$S/standby" ] && exit 0 ;; esac
     cat "$S/logs" 2>/dev/null; exit 0 ;;
   *" get events "*)
     [ -e "$S/events.forbidden" ] && { echo 'Error from server (Forbidden): events is forbidden' >&2; exit 1; }
@@ -123,8 +154,17 @@ case "$args" in
     exit 0 ;;
   *" get pods "*)
     [ -e "$S/pods.forbidden" ] && { echo 'Error from server (Forbidden): pods is forbidden' >&2; exit 1; }
+    # An admin edits the limiter while `off` waits for the marks.
+    if [ -e "$S/admin.edit" ]; then
+      n=$(( $(cat "$S/pods.calls" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$S/pods.calls"
+      if [ "$n" -eq 1 ]; then
+        sed -i 's/NVIDIA-H200: 8/NVIDIA-H200: 6/' "$S/policy"; echo $(( $(cat "$S/rv" 2>/dev/null || echo 1) + 1 )) > "$S/rv"
+      fi
+    fi
     cat "$S/pods.json" 2>/dev/null || echo '{"items":[]}' ;;
-  *" rollout "*) echo 'INFO Updated global scaling policy from ConfigMap' >> "$S/logs"; exit 0 ;;
+  *" rollout "*)
+    [ -e "$S/restart.noreload" ] || echo 'INFO Updated global scaling policy from ConfigMap' >> "$S/logs"
+    exit 0 ;;
   *) echo "stub kubectl: unhandled: $*" >&2; exit 3 ;;
 esac
 STUB
@@ -234,7 +274,66 @@ fresh "$TUNED_POLICY"; printf '%s' "$MARKED_PODS" > "$STATE/pods.json"; echo 'LA
 vcase "status: reports the mode, warnings and marks" \
     eval '[ $RC -eq 0 ] && says "optimizer block: shadow" && says "UtilizationShareCancelled" && says "donor-0"'
 
-CASES_EXPECTED=42
+# --- the second review's findings ------------------------------------------
+expect "state: an optimizer that is not a map" "other:not-a-map plain" "$(printf 'optimizer: foo\n' | us_block_state)"
+( cd "$WORK" && touch x && expect "state: a glob-like type is not expanded" "other:? plain" "$(printf 'optimizer:\n  type: "?"\n' | us_block_state)"; rm -f x )
+CASES=$((CASES + 1))
+expect "documents: two" 2 "$(printf 'a: 1\n---\nb: 2\n' | us_doc_count)"
+
+POLICYNS_LOG='INFO Cluster policy comes from the well-known namespace {"policyNamespace": "wva-policy"}'
+fresh "$QUOTA_POLICY"; echo "$POLICYNS_LOG" > "$STATE/logs"; run shadow
+vcase "policy namespace: found in the log, written there, confirmed by its own reload line" \
+    eval '[ $RC -eq 0 ] && says "policy namespace: wva-policy" && [ "$(pol .optimizer.utilizationShare.shadow)" = true ]'
+
+fresh "$QUOTA_POLICY"; echo "$POLICYNS_LOG" > "$STATE/logs"; run shadow --policy-namespace team-a
+vcase "policy namespace: one the controller does not read is refused" \
+    eval '[ $RC -ne 0 ] && says "reads its policy from wva-policy" && [ "$(patches)" = 0 ]'
+
+fresh "$TUNED_POLICY"; touch "$STATE/noreload" "$STATE/restart.noreload"; run activate --restart
+vcase "restart: no reload after the restart either is a failure, not OK" \
+    eval '[ $RC -ne 0 ] && says "logged no read"'
+
+fresh "$QUOTA_POLICY"; touch "$STATE/warn"; run shadow
+vcase "a kubectl warning on stderr is not written into the policy" \
+    eval '[ $RC -eq 0 ] && ! grep -q "gcp auth plugin" "$STATE/policy"'
+
+fresh "$(printf '%s\n' "$TUNED_POLICY" | us_policy_with_mode active)"; printf '%s' "$MARKED_PODS" > "$STATE/pods.json"; touch "$STATE/admin.edit"; run off
+vcase "off: a limiter edit made while it waited is kept" \
+    eval '[ $RC -eq 0 ] && [ "$(pol .optimizer)" = null ] && [ "$(pol .limiters[0].namespaceQuotas.team-a.NVIDIA-H200)" = 6 ]'
+
+fresh "$QUOTA_POLICY
+---
+other: 1"; run shadow
+vcase "a policy of two YAML documents is refused" eval '[ $RC -ne 0 ] && says "more than one YAML document" && [ "$(patches)" = 0 ]'
+
+fresh "$QUOTA_POLICY
+optimizer: foo"; run shadow
+vcase "an optimizer that is not a map is not overwritten" eval '[ $RC -ne 0 ] && [ "$(patches)" = 0 ]'
+
+# The kubelet rotated the startup line away: the controller's rule decides.
+fresh "$QUOTA_POLICY"; touch "$STATE/ns.wva-policy"; run shadow
+vcase "policy namespace: no log line, wva-policy exists: written there" \
+    eval '[ $RC -eq 0 ] && says "policy namespace: wva-policy" && says "into wva-policy/"'
+
+fresh "$QUOTA_POLICY"; echo team-policy > "$STATE/ns.label"; touch "$STATE/ns.wva-policy"; RELOAD_T=1 run shadow
+vcase "policy namespace: no log line, the Namespace label wins over wva-policy" \
+    eval 'says "policy namespace: team-policy"'
+
+fresh "$QUOTA_POLICY"; touch "$STATE/ns.wva-policy"; run shadow --controller-namespace wva-system
+vcase "policy namespace: a controller managing another namespace reads its own" \
+    eval '[ $RC -eq 0 ] && says "into wva-system/"'
+
+fresh "$QUOTA_POLICY"; run shadow --policy-namespace other-ns
+vcase "policy namespace: a flag naming one the controller does not read is refused" \
+    eval '[ $RC -ne 0 ] && says "reads its own policy" && [ "$(patches)" = 0 ]'
+
+fresh "$TUNED_POLICY"; touch "$STATE/standby"; run activate
+vcase "logs: every controller pod is read, not one that may be a standby" eval '[ $RC -eq 0 ] && says "did not refuse it"'
+
+fresh "$QUOTA_POLICY"; echo '{"level":"info","msg":"x","accelerator":"NVIDIA-H200"}' > "$STATE/logs"; run check
+vcase "check: reads accelerators from a json-encoded log" eval '[ $RC -eq 0 ] && says "resolves: NVIDIA-H200"'
+
+CASES_EXPECTED=58
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. A case was added or removed; update CASES_EXPECTED deliberately."
 fi

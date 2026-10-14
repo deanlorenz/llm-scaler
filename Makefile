@@ -468,10 +468,12 @@ disable-physical-limiter: ## CLUSTER ADMIN: remove the limiter from cluster poli
 # One optimizer block in the scaling policy, managed through
 # deploy/utilization-share.sh: check, then shadow, then activate; off goes back
 # through shadow so the transfer marks are cleared first. NAMESPACE is the
-# models' namespace and must be given; the controller and its policy default to
-# it (CONTROLLER_NAMESPACE, POLICY_NAMESPACE). PHYSICAL_GROUPS=true plans GPUs
+# models' namespace and must be given; the controller defaults to it
+# (CONTROLLER_NAMESPACE), and the policy to the namespace the controller logs
+# reading it from (POLICY_NAMESPACE overrides). PHYSICAL_GROUPS=true plans GPUs
 # bounded only by the physical inventory (a gpu-inventory limiter, no quota).
-# RESTART=1 restarts the controller when it does not reload the policy itself.
+# RESTART=1 restarts the controller when it logs no reload of a write, and then
+# requires the reload.
 # CONTROLLER_NAMESPACE has an e2e default above, so it counts only when given.
 us_controller_ns_given = $(filter command line environment,$(origin CONTROLLER_NAMESPACE))
 us_args = -n "$(NAMESPACE)" $(if $(us_controller_ns_given),--controller-namespace "$(CONTROLLER_NAMESPACE)",) \
