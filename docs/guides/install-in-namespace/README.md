@@ -144,9 +144,12 @@ kubectl logs -n ${NAMESPACE} deploy/wva-controller-manager \
 No `Cluster policy comes from` line (the own-ConfigMap branch logs only at V(1),
 hidden at the default verbosity) means your ConfigMap's `limiters:` are in
 force; `Could not read the managed Namespace` says why a policy namespace was
-not seen. On Kubernetes that is the answer today even when the admin has published
-`wva-policy`: a namespace-scoped controller cannot read Namespace objects, so it
-cannot see the policy namespace (being fixed). The full list of permissions and
+not seen. On Kubernetes that means the controller lacks `get` on Namespaces,
+which `make setup-prereqs` grants: an install set up before that grant existed
+cannot see a published `wva-policy` until a cluster admin re-runs
+`NAMESPACE=${NAMESPACE} make setup-prereqs` and the controller restarts. Until
+then it also logs `Cannot tell whether a cluster admin published policy` and
+sets `wva_policy_namespace_unverified` to 1. The full list of permissions and
 their reasons is in the [security model](../../reference/security-model.md).
 
 ### 3. Make the workloads safe to scale

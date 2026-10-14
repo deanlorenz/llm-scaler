@@ -26,7 +26,9 @@ lets Kueue set the number
 to know first. Experimental).
 
 or later, by adding a `limiters:` entry to the `default` entry of the
-scaling-policy ConfigMap — applied live, no restart. **Read the next section
+scaling-policy ConfigMap — applied live, no restart, when that ConfigMap is in
+the namespace the controller manages (an out-of-reach `WVA_WATCH_NS` install
+reads its own ConfigMap only at startup, so restart it). **Read the next section
 first.**
 
 **Confirm the controller accepted it.** A malformed entry is rejected on read,
@@ -73,10 +75,11 @@ So a controller that manages its own namespace takes its limits from a policy
 namespace (`wva-policy`, or one named by a label) **when it can see one**, rather
 than from its own ConfigMap. Two qualifications decide whether that happens:
 
-- **On Kubernetes it cannot see one today.** The namespace-scoped install has no
-  `get` on Namespace objects, so the controller never finds `wva-policy` or the
-  label and keeps reading the ConfigMap its tenant can write (being fixed; the
-  workaround is in the note below).
+- **On Kubernetes it needs a grant to see one.** A Role cannot reach a
+  Namespace object, so `make setup-prereqs` and `make enable-physical-limiter`
+  grant `get` on the few Namespaces the controller reads. Without it (an
+  install set up before the grant existed) the controller keeps reading the
+  ConfigMap its tenant can write, and says so; see the note below.
 - **An admin-owned controller never reads `wva-policy`, by design.** A
   cluster-scoped controller, or one in the out-of-reach shape, reads its own
   ConfigMap, which already lives where only an admin can write.
@@ -107,6 +110,18 @@ kubectl -n wva-policy create role wva-policy-reader \
 kubectl -n wva-policy create rolebinding team-a-wva \
   --role=wva-policy-reader \
   --serviceaccount=team-a:wva-controller-manager
+
+# Let it SEE wva-policy at all. Namespaces are cluster-scoped, so a
+# namespace-scoped controller's Role cannot read them; without this it never
+# finds the policy above. `make setup-prereqs` creates the same grant
+# (components/policy-namespace-reader). The controller only GETs these by
+# name -- its own namespace and wva-policy, never a list -- so the read can be
+# limited to them, as `make enable-physical-limiter` does.
+kubectl create clusterrole wva-policy-namespace-reader-team-a --verb=get \
+  --resource=namespaces --resource-name=team-a --resource-name=wva-policy
+kubectl create clusterrolebinding wva-policy-namespace-reader-team-a \
+  --clusterrole=wva-policy-namespace-reader-team-a \
+  --serviceaccount=team-a:wva-controller-manager
 ```
 
 A namespace that draws its limits from somewhere other than the default is
@@ -124,13 +139,18 @@ auditing:
 kubectl get ns -l wva.llmd.ai/policy-namespace=platform-policy
 ```
 
-> **On Kubernetes, a namespace-scoped controller does not see the label.**
-> Reading it needs `get` on Namespace objects, which the namespace-scoped Role
-> does not grant. The controller logs `Could not read the managed Namespace` and
-> carries on with its own ConfigMap, so the label is silently not applied. The
-> same denial hides `wva-policy`: the controller cannot tell it exists. This is
-> being fixed. Until then, grant the controller's ServiceAccount `get` on
-> namespaces ([manifest](../guides/admin-cluster-setup/README.md#grant-the-namespace-read-by-hand)), restart it, and check the result with the log line below. On OpenShift the
+> **On Kubernetes, a namespace-scoped controller sees the label only through a
+> grant.** Reading it needs `get` on Namespace objects, which a Role cannot
+> give. `make setup-prereqs` (namespace scope) and `make enable-physical-limiter`
+> grant it with a ClusterRole limited by name to the Namespaces the controller
+> reads. An install set up before that grant existed has a cluster admin re-run
+> `NAMESPACE=<ns> make setup-prereqs` (or apply the
+> [manual grant](../guides/admin-cluster-setup/README.md#grant-the-namespace-read-by-hand)),
+> then restarts the controller. Without the grant the label and `wva-policy` are
+> not seen and the controller runs on its own ConfigMap, but not silently: it
+> logs `Could not read the managed Namespace` and `Cannot tell whether a cluster
+> admin published policy`, and sets `wva_policy_namespace_unverified` to 1
+> (alert `WVAPolicyNamespaceUnverified`). On OpenShift the
 > `cluster-monitoring-view` binding is reported to carry that read; nothing in
 > this repository pins the role's contents, so confirm it with
 > `kubectl auth can-i get namespaces --as=system:serviceaccount:<controller namespace>:wva-controller-manager`.
@@ -173,9 +193,33 @@ a limiter that reads as enforcing and enforces nothing is worse than either
 enforcing or erroring. Thresholds, tiers and per-model settings stay with the team
 running the workload: those are tuning, not entitlement.
 
+Steps 1 and 2 read Namespace objects, which needs `get namespaces`. If that read
+is **Forbidden**, the controller cannot tell whether policy was published for
+it. It starts on its own ConfigMap, as before the grant existed, but logs
+`Cannot tell whether a cluster admin published policy` with the fix and sets
+`wva_policy_namespace_unverified` to **1**. Fix it with
+`NAMESPACE=<ns> make setup-prereqs` or `make enable-physical-limiter`; both create
+the grant, and `enable-physical-limiter` also restarts the controllers it
+affects. A namespace-scoped controller caches only the namespace it manages
+(`cmd/main.go`) and reads any other ConfigMap at startup, so every
+`enable-physical-limiter` and `disable-physical-limiter` restarts **every
+namespace-scoped controller whose policy source is outside the namespace it
+manages**: a self-managed one reading `wva-policy` or its labelled namespace,
+and an out-of-reach one reading its own ConfigMap. It lists them as
+`WILL BE RESTARTED` before it changes anything, and exits non-zero naming any
+it could not restart.
+
+The label is read at startup too. Pointing `wva.llmd.ai/policy-namespace`
+somewhere else later needs a re-run of `make enable-physical-limiter`. That
+grants the read of the new namespace and restarts the controller so it
+re-resolves.
+
 If the policy ConfigMap **exists but cannot be read** — usually a missing
 RoleBinding — the controller refuses to start rather than run unbounded while an
-admin believes a quota applies.
+admin believes a quota applies. The error names the missing
+`wva-policy-reader-<suffix>` RoleBinding. `make setup-prereqs` creates it when
+the policy namespace already exists, so a controller installed after the policy
+was published can read it.
 
 ### When policy demands a limiter the controller cannot serve
 
@@ -187,8 +231,10 @@ because the situation has two arrival times:
 
 - **at install** — the rollout never completes, so the install fails loudly
   instead of reporting success;
-- **long after** — an admin adds the limiter to cluster policy, which the
-  controller reloads live. The pod goes NotReady, which is visible and alertable.
+- **long after** — an admin adds the limiter to cluster policy, which a
+  cluster-scoped controller reloads live and a namespace-scoped one reads at its
+  restart (`make enable-physical-limiter` restarts it). The pod goes NotReady,
+  which is visible and alertable.
 
 The alternative is the failure this guards against: every variant charged to no
 accelerator pool, given no GPU budget, and never scaling up again — indistinguishable
@@ -232,6 +278,19 @@ its own namespace, so it reads limiters from **its own ConfigMap**, in `wva-team
 — which the admin owns, so the bound and its subject already have different
 owners. The label and `wva-policy` do not apply to it; `make
 enable-physical-limiter` writes the limiter into that ConfigMap instead.
+
+Name those admin-owned namespaces when you publish the limiter:
+
+```bash
+make enable-physical-limiter WVA_LIMITER_TARGETS='wva-team-a wva-team-b'
+```
+
+Without `WVA_LIMITER_TARGETS`, `enable-physical-limiter` finds controllers by
+label and grants the ones that run as `wva-controller-manager` with a `manager`
+container on a known image. Those are **signals, not proof**: any tenant can
+meet all three in their own namespace. The checks keep the grant off an account
+that a Deployment merely names, such as `default`. They do not tell a tenant's
+copy from yours.
 
 ## Why it ships off
 
@@ -293,7 +352,8 @@ The consequence of a missing node permission therefore depends on the limiter:
 ### If the limiter is turned on later
 
 An admin can add a `limiters:` entry to the scaling-policy ConfigMap at any time,
-and it is applied live — including to a controller that was installed without node
+and it is applied live (at the next restart for a namespace-scoped controller
+whose policy is outside the namespace it manages) — including to a controller that was installed without node
 permission. That combination is the one failure with no natural symptom, so it is
 reported three ways:
 

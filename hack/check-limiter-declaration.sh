@@ -497,6 +497,10 @@ case "$1" in
          # CURRENT_POLICY made `get deploy -A` hand back the policy text as a
          # list of NAMESPACES, and the command then looped over "scaleUpThreshold:".
          *"deploy -A"*) printf '%s\n' "${DEPLOY_NS_LIST:-}" ;;
+         # The per-namespace read that decides which labelled Deployments are
+         # genuine controllers (pl_controller_targets). Anchored at the end:
+         # `-o json` is also a prefix of every `-o jsonpath=...` read.
+         *"deploy -n "*" -o json") printf '%s' "${DEPLOY_JSON:-}" ;;
          *nodes*)       printf '%s' "${NODE_JSON:-}" ;;
          *)             printf '%s' "${CURRENT_POLICY:-}" ;;
        esac ;;
@@ -827,6 +831,10 @@ run_enable() {   # run_enable <fn> [fail-list]
         KCALLS="$CALLS"; export KCALLS
         NODE_JSON=""; export NODE_JSON
         DEPLOY_NS_LIST="tenant-a"; export DEPLOY_NS_LIST
+        # A genuine controller there, so the grant path is reached.
+        DEPLOY_JSON='{"items":[{"metadata":{"name":"wva-controller-manager"},"spec":{"template":{"spec":{"serviceAccountName":"wva-controller-manager","containers":[{"name":"manager","image":"ghcr.io/ev-shindin/llm-scaling-manager:main"}]}}}}]}'
+        export DEPLOY_JSON
+        unset WVA_CONTROLLER_SA WVA_CONTROLLER_IMAGE_REPOS WVA_IMAGE_REPO
         CURRENT_POLICY="scaleUpThreshold: 0.85"; export CURRENT_POLICY
         if [ "${2:-}" = "fail-list" ]; then
             FAIL_LIST_DEPLOY=1; export FAIL_LIST_DEPLOY

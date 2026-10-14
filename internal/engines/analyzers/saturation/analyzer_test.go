@@ -1481,6 +1481,29 @@ var _ = Describe("fleetOutputLength", func() {
 	})
 })
 
+// makeReusingAnalyzerInput is makeAnalyzerInput with learned-state reuse
+// ENABLED, for the specs whose subject IS the reuse path.
+//
+// Reuse ships OFF -- the equality deciding who may share is not sound -- and
+// makeAnalyzerInput deliberately keeps that default so every other spec in
+// this package runs on what an operator actually gets. A spec that needs a
+// borrow to happen therefore has to say so.
+//
+// It is a separate helper rather than a flag threaded through
+// makeAnalyzerInput because the call sites are the point: `grep
+// makeReusingAnalyzerInput` is the list of specs that depend on reuse. When the
+// default pointed the other way, five specs depended on it silently, and
+// flipping it broke all five -- each on its own premise guard, which is the
+// only reason it was visible instead of five newly-vacuous passes.
+func makeReusingAnalyzerInput(
+	metrics []domain.ReplicaMetrics,
+	states []domain.VariantReplicaState,
+) domain.AnalyzerInput {
+	in := makeAnalyzerInput(metrics, states)
+	in.Config.(*config.ScalingPolicy).EnableLearnedStateReuse = true
+	return in
+}
+
 func makeAnalyzerInput(
 	metrics []domain.ReplicaMetrics,
 	states []domain.VariantReplicaState,

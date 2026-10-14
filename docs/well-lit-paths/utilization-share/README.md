@@ -77,8 +77,9 @@ against 42 s, and the prompt-heavy burst was overloaded in every arm, for
   resolve. Either a quota, which
   [cap what each tenant may take](../tenant-gpu-quotas/) declares (its key must
   be the accelerator name the controller logs for your variants, for example
-  `H200` on one cluster and `NVIDIA-H200` on another), or the physical GPU
-  inventory that [bound-by-gpus](../bound-by-gpus/) declares, with
+  `H200` on one cluster and `NVIDIA-H200` on another; its numbers can also be
+  read from Kueue's ClusterQueues: [bound tenants by the quotas Kueue already
+  holds](../kueue-bounded-quotas/)), or the physical GPU inventory that [bound-by-gpus](../bound-by-gpus/) declares, with
   `physicalGroups: true` in the block. Only the quota has been measured; under
   the physical limiter the budget is every GPU of a type on the cluster
   ([what differs](../../guides/utilization-share/README.md#under-the-physical-gpu-limiter)).

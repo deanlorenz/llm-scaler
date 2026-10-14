@@ -64,7 +64,7 @@ carry a hash suffix (below).
 | --- | --- |
 | the controller's namespace, when `WVA_NS` names a separate one | cluster-scoped |
 | `wva-metrics-auth-role` + binding | the metrics filter issues **TokenReview** and **SubjectAccessReview** |
-| `wva-metrics-reader` + binding | `nonResourceURLs: /metrics`. On Kubernetes it is bound to `kube-prometheus-stack-prometheus` in `workload-variant-autoscaler-monitoring`; on a cluster with its own Prometheus, rebind it to that Prometheus's ServiceAccount or delete it. On OpenShift it is bound to the controller's own ServiceAccount |
+| `wva-metrics-reader` + binding | `nonResourceURLs: /metrics`. On Kubernetes the binding goes to the Prometheus that scrapes the controller, and only to one you named: `PROMETHEUS_SA` when set, else the single non-default `serviceAccountName` of the Prometheus CRs in the namespace a `PROMETHEUS_URL` you set addresses, else the kube-prometheus-stack this install deploys (`DEPLOY_PROMETHEUS=true`, with the URL in `MONITORING_NAMESPACE`). A Prometheus the installer only detected never gets it. Otherwise no binding is created, the installer warns, and `make check-prereqs` lists the binding as optional ([configuration](../../reference/configuration.md)). On OpenShift it is bound to the controller's own ServiceAccount |
 | `wva-epp-metrics-reader-role` + binding | `nonResourceURLs: /metrics`, for the EPP scrape, cluster-wide |
 | `wva-node-reader-role` + binding | resolving a variant's accelerator reads **Nodes** |
 | `wva-kueue-reader-role` + binding | Kueue **ClusterQueues** and **ResourceFlavors** are cluster-scoped. Inert without Kueue |
@@ -73,7 +73,8 @@ carry a hash suffix (below).
 | Secret `wva-epp-metrics-token` | a **long-lived, non-expiring** ServiceAccount token for `wva-epp-metrics-reader`, which the controller mounts to scrape EPP metrics. On OpenShift also `wva-controller-manager-token`, which the ServiceMonitor scrapes with |
 | ConfigMap `wva-metrics-server-ca` | **OpenShift only**: the service CA the ServiceMonitor verifies the controller's certificate with |
 | the ServiceMonitor | the stock `admin` ClusterRole does not grant `monitoring.coreos.com` |
-| Roles `wva-manager-role`, `wva-leader-election-role`, `wva-utilization-share-history-role`, and their RoleBindings | namespaced, but RBAC forbids granting permissions you do not hold yourself, and the controller's Role names resources a namespace admin does not have |
+| Roles `wva-manager-role`, `wva-leader-election-role`, `wva-utilization-share-history-role`, `wva-controller-status-role`, and their RoleBindings | namespaced, but RBAC forbids granting permissions you do not hold yourself, and the controller's Role names resources a namespace admin does not have |
+| NetworkPolicy `wva-external-scaler` | admits the external scaler port (`:9090`) only from KEDA's namespace, which only cluster-scoped state shows. Written only when that namespace is known: `KEDA_NAMESPACE` set, the `v1beta1.external.metrics.k8s.io` APIService served by KEDA, or an existing policy, which is kept. Otherwise none is written and the command warns that `:9090` is open to every Pod; close it with `KEDA_NAMESPACE=<ns> NAMESPACE=<ns> make setup-prereqs`, or serve the scaler over mutual TLS. `make check-prereqs` lists it as optional |
 | Prometheus | Kubernetes only, and only if the cluster has none |
 | KEDA | Kubernetes only, and only with `KEDA_HELM_INSTALL=true`. On OpenShift, install the Custom Metrics Autoscaler operator beforehand |
 
@@ -93,24 +94,40 @@ the condition in the second column.
 | grant | needed when | created by | without it |
 | --- | --- | --- | --- |
 | `wva-node-reader-role`: get, list, watch on nodes, cluster-wide | the policy that governs the controller declares the `gpu-inventory` limiter | `make setup-prereqs` (always, in namespace scope); `make enable-physical-limiter` | with `gpu-inventory`: the controller goes **NotReady**. With no limiter: it runs degraded — accelerators unresolved, no accelerator label on metrics |
-| `wva-kueue-reader-role`: get, list on clusterqueues, resourceflavors | a quota limiter entry has `kueue.enabled: true` | `make setup-prereqs`; `make enable-physical-limiter WVA_QUOTA_KUEUE=true` | logs `external quota source unreadable` every cycle and applies the static quota entry alone |
+| `wva-kueue-reader-role`: get, list on clusterqueues, resourceflavors; get on the managed Namespace only (by name, in both paths) | a quota limiter entry has `kueue.enabled: true` | `make setup-prereqs`; `make enable-physical-limiter WVA_QUOTA_KUEUE=true` | logs `external quota source unreadable` every cycle and applies the static quota entry alone. Without the Namespace read only (a role created before it was added): every ClusterQueue with a `namespaceSelector` is withheld, so the namespace is bounded at nothing by it until a cluster admin re-runs `make setup-prereqs`; the tenant's `make deploy-wva` refuses in that state rather than install it |
 | RoleBinding to `wva-policy-reader` in the policy namespace: get, list, watch on its ConfigMaps | the cluster has a policy namespace (`wva-policy`, or one named by a `wva.llmd.ai/policy-namespace` label) and the controller reads policy from it | `make enable-physical-limiter` | the controller **refuses to start** rather than run unbounded |
-| get on namespaces, cluster-wide | on **Kubernetes**, for a controller that manages its own namespace to see the policy-namespace label or `wva-policy` at all | nothing yet — grant it by hand, [below](#grant-the-namespace-read-by-hand) (being fixed) | the label and `wva-policy` are not seen and the controller uses its own ConfigMap; it logs `Could not read the managed Namespace` |
+| `wva-policy-namespace-reader-role`: get on namespaces, by name — the controller's own, the managed one, `wva-policy` and the namespace the managed one is labelled with (`make setup-prereqs` also adds `WVA_POLICY_NS` when it is exported, as one more name; no controller reads policy there unless a label names it) | on **Kubernetes**, for a controller that manages its own namespace to see the policy-namespace label or `wva-policy` at all | `make setup-prereqs` (namespace scope); `make enable-physical-limiter`; or [by hand](#grant-the-namespace-read-by-hand) | the label and `wva-policy` are not seen and the controller uses its own ConfigMap; it logs `Could not read the managed Namespace` and `Cannot tell whether a cluster admin published policy` with the fix, and sets `wva_policy_namespace_unverified` to 1 (alert `WVAPolicyNamespaceUnverified`) |
 
 #### Grant the namespace read by hand
 
-Only for the tenant-owned shape on Kubernetes, and only if a policy namespace
-(`wva-policy`, or a `wva.llmd.ai/policy-namespace` label) should govern this
-controller. The grant names exactly the two Namespace objects the controller
-reads: its own, and `wva-policy`.
+**Run `make setup-prereqs` instead, if you can.** It creates this grant for a
+namespace-scoped install, together with the read of the policy ConfigMap
+(Role `wva-policy-reader` and a RoleBinding in `wva-policy`) whenever that
+namespace exists, so an install whose admin ran it needs nothing here. An
+install set up before the grant existed lacks it: re-run
+`NAMESPACE=${NAMESPACE} make setup-prereqs` as a cluster admin, then restart
+the controller, which resolves its policy once at startup.
+
+The manifest below is the manual fallback, for a cluster whose RBAC is managed
+by something else. Only for the tenant-owned shape on Kubernetes, and only if
+`wva-policy` exists and should govern this controller. It is **both** grants:
+the Namespace read names exactly the two Namespace objects the controller reads
+(its own, and `wva-policy`), and the RoleBinding lets it read the policy there.
+The Namespace read alone is worse than neither: the controller then finds
+`wva-policy`, cannot read its ConfigMap, and refuses to start. For a policy
+namespace named by a `wva.llmd.ai/policy-namespace` label instead, add that
+name to `resourceNames` and put the Role and RoleBinding there.
 
 <!-- guide:deploy.namespace_read start -->
 ```bash
-# Tenant-owned shape on Kubernetes only: lets the controller read its own
-# Namespace (for the wva.llmd.ai/policy-namespace label) and see whether
-# wva-policy exists. Nothing else. The resolution runs once at startup, so
-# restart the controller afterwards -- the controller Deployment only, not
-# the warm pool.
+# Tenant-owned shape on Kubernetes only, and only when make setup-prereqs
+# cannot be run. Two grants, and both are needed: the Namespace read lets
+# the controller read its own Namespace (for the
+# wva.llmd.ai/policy-namespace label) and see whether wva-policy exists;
+# the RoleBinding lets it read the policy ConfigMap there. With the first
+# and not the second, a controller that finds wva-policy refuses to start.
+# The resolution runs once at startup, so restart the controller
+# afterwards -- the controller Deployment only, not the warm pool.
 kubectl apply -f - <<EOF
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -134,6 +151,30 @@ subjects:
 - kind: ServiceAccount
   name: wva-controller-manager
   namespace: ${NAMESPACE}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: wva-policy-reader
+  namespace: wva-policy
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: wva-policy-reader-${NAMESPACE}
+  namespace: wva-policy
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: wva-policy-reader
+subjects:
+- kind: ServiceAccount
+  name: wva-controller-manager
+  namespace: ${NAMESPACE}
 EOF
 kubectl -n ${NAMESPACE} rollout restart deploy/wva-controller-manager
 ```
@@ -141,10 +182,13 @@ kubectl -n ${NAMESPACE} rollout restart deploy/wva-controller-manager
 
 Then check that the controller took it: the restarted pod logs `Cluster policy
 comes from the well-known namespace` (or `... the namespace this one is labelled
-with`) and no longer logs `Could not read the managed Namespace`. `make
-undeploy-wva` does not know about this grant: delete
-`clusterrole,clusterrolebinding wva-namespace-reader-${NAMESPACE}` yourself
-when the install goes.
+with`), no longer logs `Could not read the managed Namespace`, and
+`wva_policy_namespace_unverified` reads 0. `make
+undeploy-wva` does not know about this manual grant: delete
+`clusterrole,clusterrolebinding wva-namespace-reader-${NAMESPACE}` and
+`rolebinding wva-policy-reader-${NAMESPACE} -n wva-policy` yourself when the
+install goes (the Role `wva-policy-reader` is shared by every controller that
+reads `wva-policy`).
 
 ### Keeping the controller out of the tenant's reach
 

@@ -138,7 +138,7 @@ func (e *Engine) evaluateUtilizationShare(ctx context.Context, requests []alloca
 	if err != nil {
 		errText = err.Error()
 	}
-	metrics.SetUtilizationShareMode(shareMode(us, selected, err))
+	metrics.SetUtilizationShareMode(config.UtilizationShareModeOf(us, selected, err))
 	if errText != st.lastConfigErr {
 		if err != nil {
 			logger.Error(err, "Utilization share: invalid optimizer block; keeping today's optimizer. The limiters are unaffected")
@@ -549,32 +549,24 @@ func (st *utilizationShareState) clock() time.Time {
 	return time.Now()
 }
 
-// shareMode is the mode the optimizer's configuration puts it in.
-func shareMode(us config.UtilizationShare, selected bool, err error) string {
-	switch {
-	case err != nil:
-		return constants.UtilizationShareModeInvalid
-	case !selected:
-		return constants.UtilizationShareModeOff
-	case us.Shadow:
-		return constants.UtilizationShareModeShadow
-	}
-	return constants.UtilizationShareModeActive
-}
-
 // observeUtilizationShareMode publishes the optimizer's mode and, when it is
 // not acting, removes its marks -- on every cycle, including the ones that
 // plan no model (no active variant, or every model failed collection) and so
 // never reach evaluateUtilizationShare. Without it the mode would go stale,
 // and "switch to shadow, wait a cycle" before a downgrade would clean nothing
 // while the fleet is parked.
+//
+// It also hands the mode to the controller-status ConfigMap (Engine.Status),
+// which rewrites only on a change. The ConfigMap reconciler publishes the same
+// mode the moment it applies a policy, so this cycle's copy is the backstop,
+// not the only writer.
 func (e *Engine) observeUtilizationShareMode(ctx context.Context) {
 	if e.Config == nil {
 		return
 	}
-	us, selected, err := e.Config.UtilizationShare()
-	mode := shareMode(us, selected, err)
+	mode, err := e.Config.UtilizationShareMode()
 	metrics.SetUtilizationShareMode(mode)
+	e.Status.SetUtilizationShare(mode, err)
 	if mode != constants.UtilizationShareModeActive {
 		e.dropShareActuation(ctx, ctrl.LoggerFrom(ctx).WithName("utilization-share"))
 	}

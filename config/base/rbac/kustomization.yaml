@@ -8,6 +8,9 @@ resources:
 # Utilization-share need history: one ConfigMap in the controller's namespace.
 - utilization-share-history-role.yaml
 - utilization-share-history-rolebinding.yaml
+# Controller status: one ConfigMap in the controller's namespace.
+- controller-status-role.yaml
+- controller-status-rolebinding.yaml
 # Metrics endpoint authn/authz. Comment out to disable metrics endpoint protection.
 # More info: https://book.kubebuilder.io/reference/metrics.html
 - metrics-auth-clusterrole.yaml

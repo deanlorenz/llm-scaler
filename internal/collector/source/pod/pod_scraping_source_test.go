@@ -6,8 +6,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/prometheus/client_golang/prometheus"
@@ -367,6 +370,90 @@ var _ = Describe("PodScrapingSource", func() {
 			Expect(useAuth).To(BeFalse())
 			Expect(token).To(BeEmpty())
 		})
+
+		// A rotated token must reach the next scrape, not wait for the pool to
+		// be registered again.
+		It("should re-read BearerTokenFile on every call", func() {
+			client := fakeClient.Build()
+			path := filepath.Join(GinkgoT().TempDir(), "token")
+			Expect(os.WriteFile(path, []byte("first "), 0o600)).To(Succeed())
+
+			config := PodScrapingSourceConfig{
+				ServiceName:      "test-pool-epp",
+				ServiceNamespace: "test-ns",
+				BearerToken:      "registered",
+				BearerTokenFile:  path,
+				MetricsPort:      9090,
+			}
+			source, err := NewPodScrapingSource(ctx, client, config)
+			Expect(err).NotTo(HaveOccurred())
+
+			token, useAuth := source.getAuthToken()
+			Expect(useAuth).To(BeTrue())
+			Expect(token).To(Equal("first"))
+
+			Expect(os.WriteFile(path, []byte("rotated"), 0o600)).To(Succeed())
+			token, useAuth = source.getAuthToken()
+			Expect(useAuth).To(BeTrue())
+			Expect(token).To(Equal("rotated"))
+		})
+
+		It("should fall back to BearerToken while BearerTokenFile is unreadable", func() {
+			client := fakeClient.Build()
+
+			config := PodScrapingSourceConfig{
+				ServiceName:      "test-pool-epp",
+				ServiceNamespace: "test-ns",
+				BearerToken:      "registered",
+				BearerTokenFile:  filepath.Join(GinkgoT().TempDir(), "missing"),
+				MetricsPort:      9090,
+			}
+			source, err := NewPodScrapingSource(ctx, client, config)
+			Expect(err).NotTo(HaveOccurred())
+
+			token, useAuth := source.getAuthToken()
+			Expect(useAuth).To(BeTrue())
+			Expect(token).To(Equal("registered"))
+		})
+
+		// An empty (or whitespace-only) file is a mis-mounted Secret more often
+		// than a rotation in flight: fall back, and say so once at Info.
+		DescribeTable("should fall back to BearerToken, logging once at Info, while BearerTokenFile is blank",
+			func(content string) {
+				path := filepath.Join(GinkgoT().TempDir(), "token")
+				Expect(os.WriteFile(path, []byte(content), 0o600)).To(Succeed())
+				source, err := NewPodScrapingSource(ctx, fakeClient.Build(), PodScrapingSourceConfig{
+					ServiceName:      "test-pool-epp",
+					ServiceNamespace: "test-ns",
+					BearerToken:      "registered",
+					BearerTokenFile:  path,
+					MetricsPort:      9090,
+				})
+				Expect(err).NotTo(HaveOccurred())
+				var logged []string
+				// Verbosity 0: only Info-level lines reach the sink, so a
+				// V(DEBUG) line would not count.
+				source.log = funcr.New(func(_, args string) { logged = append(logged, args) }, funcr.Options{Verbosity: 0})
+
+				for range 3 {
+					token, useAuth := source.getAuthToken()
+					Expect(useAuth).To(BeTrue())
+					Expect(token).To(Equal("registered"))
+				}
+				Expect(logged).To(HaveLen(1), "logged once, not once per scrape")
+				Expect(logged[0]).To(ContainSubstring("empty"))
+
+				// A token in the file re-arms the log for the next empty spell.
+				Expect(os.WriteFile(path, []byte("rotated"), 0o600)).To(Succeed())
+				token, _ := source.getAuthToken()
+				Expect(token).To(Equal("rotated"))
+				Expect(os.WriteFile(path, []byte(content), 0o600)).To(Succeed())
+				_, _ = source.getAuthToken()
+				Expect(logged).To(HaveLen(2))
+			},
+			Entry("empty file", ""),
+			Entry("whitespace-only file", " \n\t\n"),
+		)
 	})
 
 	Describe("parsePrometheusMetrics", func() {

@@ -154,7 +154,7 @@ func (r *ConfigMapReconciler) bootstrapClusterPolicy(ctx context.Context) error 
 		errorType := "Failed to read cluster policy"
 		logger.Error(err, errorType,
 			"policyNamespace", policyNS, "configMap", name,
-			"hint", "the controller's ServiceAccount needs get/list/watch on ConfigMaps in this namespace")
+			"hint", policyReadRemedy(policyNS))
 		metrics.RecordError(constants.ComponentController, errorType)
 		r.Config.MarkConfigMapsBootstrapFailed(err)
 		return fmt.Errorf("cannot read cluster policy from %s/%s, refusing to start unbounded: %w", policyNS, name, err)
@@ -170,6 +170,7 @@ func (r *ConfigMapReconciler) bootstrapClusterPolicy(ctx context.Context) error 
 	logger.Info("No cluster policy ConfigMap in the policy namespace: no limiters or quotas are in force",
 		"policyNamespace", policyNS, "expectedNames", config.ScalingPolicyConfigMapNames())
 	r.Config.UpdateClusterPolicy(&config.ScalingPolicy{})
+	r.Status.RecordPolicy(r.Config, policyNS, config.ScalingPolicyConfigMapName(), "", nil)
 	return nil
 }
 

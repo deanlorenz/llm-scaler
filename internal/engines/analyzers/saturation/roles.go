@@ -61,6 +61,32 @@ func (a *SaturationAnalyzer) stableAccelerator(namespace, variantName, accelerat
 	return accelerator
 }
 
+// StableAcceleratorFor reports the accelerator a variant's learned state is
+// keyed under, WITHOUT recording or touching anything.
+//
+// For the metric that explains the key. wva_engine_config was publishing the
+// raw reading while the key used the stabilised one, so on a heterogeneous
+// fleet -- the only fleet where the difference exists -- the label and the key
+// disagreed and the series churned between two label sets every cycle.
+//
+// Read-only on purpose, and that is the whole reason this is not just a call to
+// stableAccelerator: that one writes the memo on a resolved reading and touches
+// lastUsed on an unresolved one. lastUsed is the eviction clock, so publishing
+// through it would make the memo live as long as the metric publishes rather
+// than as long as the variant is analysed -- which is precisely the coupling
+// the per-cycle sweep was changed to avoid.
+func (a *SaturationAnalyzer) StableAcceleratorFor(namespace, variantName, accelerator string) string {
+	if constants.IsAcceleratorResolved(accelerator) {
+		return accelerator
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if last, ok := a.lastAccelerator[namespace+"/"+variantName]; ok {
+		return last.name
+	}
+	return accelerator
+}
+
 // canonicalRole normalizes an empty variant role to domain.RoleBoth, matching
 // aggregation.AggregateByRole.
 func canonicalRole(role string) string {

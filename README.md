@@ -107,7 +107,9 @@ the gate is off.
 The install is split across two people, because it is split across two levels of
 permission: a cluster admin runs `setup-prereqs` once for the namespace, and the
 namespace's owner does everything after it, including every later upgrade. If you
-are both, `make deploy-wva` does the two in one command.
+are both, `make deploy-wva` does the two in one command. An upgrade to a release
+that adds a prerequisite needs the admin's step again first:
+[Upgrading to this release](docs/reference/upgrade-and-uninstall.md#upgrading-to-this-release).
 
 KEDA must already be on the cluster: on Kubernetes, `KEDA_HELM_INSTALL=true`
 installs it for you; on OpenShift, use the platform's KEDA. Prometheus is found

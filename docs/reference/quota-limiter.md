@@ -23,7 +23,8 @@ every managed workload from scaling up. `WVA_QUOTA_SCOPE` selects `namespace`
 (the default: each managed namespace gets the budget) or `cluster` (the sum
 across all of them). It is the sole source that selects the quota
 limiter (see [Selection & lifecycle](#selection--lifecycle)) and is applied
-**live** — no restart. With no `limiters:` list, nothing limits: neither the
+**live** — no restart, except where a namespace-scoped controller reads it from
+outside the namespace it manages (see [Reload lifecycle](#reload-lifecycle)). With no `limiters:` list, nothing limits: neither the
 optimizer budget nor the scale-from-zero capacity check.
 
 > **Changed:** this used to require a second setting, `enableLimiter: true`, and a
@@ -180,10 +181,11 @@ map — denies every type (see *Merge rules*, row 3).
 | Kueue object | Scope | Used for |
 |---|---|---|
 | `ResourceFlavor` | cluster | `spec.nodeLabels` names the accelerator behind a flavor — the vendor product label (`nvidia.com/gpu.product`, `amd.com/gpu.product-name`, …, or the GKE alias), kept **as written**: a flavor exists to tell one product from another (a 40GB PCIe A100 from an 80GB SXM one), so the grant is keyed by the full product and meets a static key at bound time (see below). A flavor **without** a product label is an **untyped grant** — see the list below the table. |
-| `ClusterQueue` | cluster | `spec.resourceGroups[].flavors[].resources[].nominalQuota` for each GPU resource, per flavor, summed per product (typed flavors) or into the untyped grant (unlabelled flavors). Two grants of the **same** product add up; two products of one family (SXM and PCIe H100) stay apart until the static key says they are one. **`borrowingLimit`, `lendingLimit` and cohorts are not counted** — the bound wants the guaranteed figure. |
-| `LocalQueue` | namespaced | `spec.clusterQueue` links a namespace to a ClusterQueue. A namespace is granted the caps of every ClusterQueue one of its LocalQueues points at; two LocalQueues on one ClusterQueue count it once. |
+| `ClusterQueue` | cluster | `spec.resourceGroups[].flavors[].resources[].nominalQuota` for each GPU resource, per flavor, summed per product (typed flavors) or into the untyped grant (unlabelled flavors). Two grants of the **same** product add up; two products of one family (SXM and PCIe H100) stay apart until the static key says they are one. **`borrowingLimit`, `lendingLimit` and cohorts are not counted** — the bound wants the guaranteed figure; counting borrowable cohort capacity is tracked in [#136](https://github.com/ev-shindin/llm-scaling-manager/issues/136). |
+| `LocalQueue` | namespaced | `spec.clusterQueue` links a namespace to a ClusterQueue. A namespace is granted the caps of every ClusterQueue one of its LocalQueues points at **and whose `spec.namespaceSelector` admits it**; two LocalQueues on one ClusterQueue count it once. |
+| `Namespace` | cluster | Labels, read (`get`, one per namespace) only when a ClusterQueue has a non-empty `namespaceSelector`. |
 
-The cluster-scope figure is the sum over **all** ClusterQueues. Five rules of
+The cluster-scope figure is the sum over **all** ClusterQueues. Six rules of
 the attribution that a first reading of the table would not give:
 
 - **A flavor without a product label is an untyped grant.** Kueue's quickstart
@@ -194,11 +196,14 @@ the attribution that a first reading of the table would not give:
   flavor **not present** on the cluster, or whose `stopPolicy` is `Hold` or
   `HoldAndDrain`, admits nothing in Kueue; here it becomes an untyped grant of
   0, so its namespaces are denied rather than left to the static entry.
-  `namespaceSelector` is not evaluated (it would need namespace labels a tenant
-  install cannot read). The consequence: a tenant who can create a LocalQueue
-  pointing at any ClusterQueue is granted that queue's quota here, even where
-  Kueue itself would not admit their work to it. Being fixed; until then
-  restrict LocalQueue creation, or keep a finite static cap.
+- **A ClusterQueue grants only the namespaces its `namespaceSelector` admits.**
+  Kueue semantics: absent (null) admits **no** namespace, `{}` admits every
+  namespace, anything else is matched against the namespace labels. A
+  LocalQueue on a queue that does not admit its namespace is ignored, like a
+  dangling one — a tenant cannot borrow another team's grant by pointing a
+  LocalQueue at it. If the labels cannot be read (no `get` on namespaces),
+  that queue's grant is withheld and the namespace, with no other grant, is
+  bounded at nothing; the error is logged once with the remedy.
 - **A shared ClusterQueue is a per-namespace ceiling, not a partition.** Every
   namespace with a LocalQueue on it is bounded at the queue's full nominal
   quota, so several such namespaces may in sum still ask for more than the
@@ -293,9 +298,9 @@ answerable from the controller log.
 The manager ClusterRole carries `get`/`list` on `clusterqueues`, `localqueues`
 and `resourceflavors` in `kueue.x-k8s.io`. A namespace-scoped install lists
 LocalQueues only in the namespace it manages (the controller's Role,
-`wva-manager-role`, grants that) and gets the two cluster-scoped kinds from
-`components/kueue-reader`. Both are applied by the prereqs phase like
-`node-reader`, so an install that predates the LocalQueue rule needs a cluster
+`wva-manager-role`, grants that) and gets the two cluster-scoped kinds, and `get`
+on namespaces, from `components/kueue-reader`. Both are applied by the prereqs
+phase like `node-reader`, so an install that predates these rules needs a cluster
 admin to re-run `make setup-prereqs`; the tenant's `make deploy-wva` does not
 apply Roles. A rule naming an API group the cluster does not serve
 is inert, so the grant is harmless without Kueue.
@@ -326,7 +331,11 @@ The quota configuration lives in the saturation-scaling ConfigMap and is applied
 the GPU limiter at the top of the next optimization cycle whenever the effective
 limiter mode or quota entries change (`Engine.refreshLimiter`, keyed by
 `limiterSignature`). Editing the `limiters:` list therefore takes effect without a
-controller restart — no `kubectl rollout restart` required.
+controller restart — no `kubectl rollout restart` required — wherever the
+controller watches that ConfigMap. A namespace-scoped controller watches only the
+namespace it manages, so a policy in `wva-policy`, a labelled policy namespace, or
+an out-of-reach install's own namespace is read at startup and needs a restart;
+`make enable-physical-limiter` and `make disable-physical-limiter` do it.
 
 ## Pipeline integration
 

@@ -7,7 +7,13 @@ IMAGE_TAG_BASE ?= ghcr.io/ev-shindin
 # `main`, built by ci-main-image on every push to main -- reproducible from a
 # commit and multi-arch, unlike a tag pushed by hand from a laptop. Rebuilt
 # automatically, so it cannot silently go stale the way a personal tag does.
-IMG_TAG ?= main
+#
+# Read from config/base/manager/kustomization.yaml rather than repeated here, so
+# a release commit -- which pins newTag to its own tag (release-process.md) --
+# builds and installs that tag, and every other commit still gets `main`.
+ifeq ($(origin IMG_TAG),undefined)
+IMG_TAG := $(or $(shell awk '$$1 == "newTag:" {gsub(/["\r]/, "", $$2); print $$2; exit}' config/base/manager/kustomization.yaml 2>/dev/null),main)
+endif
 IMG ?= $(IMAGE_TAG_BASE)/llm-scaling-manager:$(IMG_TAG)
 # The warm-pool proxy ships as its own image because it runs in the pool's Pod,
 # not the controller's. Pin a digest in the manifest; this tag is for building.
@@ -442,25 +448,39 @@ docs-links-external: ## Resolve every external doc link over the network (not in
 
 ##@ Cluster-admin actions (advanced; they affect every WVA on the cluster)
 
-# Where cluster policy is published. The default is the name the controller looks
-# for, and a tenant cannot point their WVA at a more permissive one.
-WVA_POLICY_NS       ?= wva-policy
+# Cluster policy is published in wva-policy, the namespace the controller reads
+# (fixed in the controller), and in every namespace a wva.llmd.ai/policy-namespace
+# label points a controller at. There is no setting for it: WVA_POLICY_NS, if
+# exported, must be wva-policy (deploy/lib/physical_limiter.sh refuses others).
 # gpu-inventory (bounded by GPUs actually free) or quota (bounded by declared caps).
 WVA_LIMITER_TYPE    ?= gpu-inventory
 # Namespaces whose controllers to grant. Empty = every controller on the cluster,
 # which is what you want: the hazard is the install you forgot.
 WVA_LIMITER_TARGETS ?=
+# What a labelled Deployment must run as, and from, to be granted. The label
+# alone is not identity: anyone who can create a Deployment can set it.
+WVA_CONTROLLER_SA          ?= wva-controller-manager
+# The repository of IMG, split the way the installer splits it (a registry
+# port is not a tag, a digest is not a tag). Recursive, so the shell runs only
+# for a target that reads it.
+WVA_IMAGE_REF_FIELDS = bash -c '. deploy/lib/cli.sh && wva_image_ref_fields "$$0"'
+IMG_REPO = $(firstword $(subst |, ,$(shell $(WVA_IMAGE_REF_FIELDS) '$(IMG)')))
+# A controller deployed from a custom IMG is a controller too: its repository is
+# appended when it is not the published one. Set this to replace the whole list.
+WVA_CONTROLLER_IMAGE_REPOS ?= $(strip $(IMAGE_TAG_BASE)/llm-scaling-manager $(filter-out $(IMAGE_TAG_BASE)/llm-scaling-manager,$(IMG_REPO)))
 
 .PHONY: enable-physical-limiter
-enable-physical-limiter: ## CLUSTER ADMIN: bound every WVA by real GPUs. Publishes cluster policy and grants each controller the node read it then requires. WVA_LIMITER_TYPE=gpu-inventory|quota (quota also needs WVA_QUOTAS), WVA_POLICY_NS, WVA_LIMITER_TARGETS.
-	@WVA_POLICY_NS=$(WVA_POLICY_NS) WVA_LIMITER_TYPE=$(WVA_LIMITER_TYPE) \
+enable-physical-limiter: ## CLUSTER ADMIN: bound every WVA by real GPUs. Publishes cluster policy and grants each controller the node read it then requires. WVA_LIMITER_TYPE=gpu-inventory|quota (quota also needs WVA_QUOTAS), WVA_LIMITER_TARGETS.
+	@WVA_LIMITER_TYPE=$(WVA_LIMITER_TYPE) \
 		WVA_LIMITER_TARGETS="$(WVA_LIMITER_TARGETS)" \
+		WVA_CONTROLLER_SA='$(WVA_CONTROLLER_SA)' WVA_CONTROLLER_IMAGE_REPOS='$(WVA_CONTROLLER_IMAGE_REPOS)' \
 		WVA_QUOTAS='$(WVA_QUOTAS)' WVA_QUOTA_SCOPE=$(WVA_QUOTA_SCOPE) WVA_QUOTA_KUEUE=$(WVA_QUOTA_KUEUE) \
 		bash -c 'source deploy/lib/common.sh; source deploy/lib/limiter_policy.sh; source deploy/lib/physical_limiter.sh; enable_physical_limiter'
 
 .PHONY: disable-physical-limiter
 disable-physical-limiter: ## CLUSTER ADMIN: remove the limiter from cluster policy. Scaling becomes unbounded for every WVA that reads it.
-	@WVA_POLICY_NS=$(WVA_POLICY_NS) \
+	@WVA_LIMITER_TARGETS="$(WVA_LIMITER_TARGETS)" \
+		WVA_CONTROLLER_SA='$(WVA_CONTROLLER_SA)' WVA_CONTROLLER_IMAGE_REPOS='$(WVA_CONTROLLER_IMAGE_REPOS)' \
 		bash -c 'source deploy/lib/common.sh; source deploy/lib/limiter_policy.sh; source deploy/lib/physical_limiter.sh; disable_physical_limiter'
 
 ##@ Utilization share
@@ -468,10 +488,12 @@ disable-physical-limiter: ## CLUSTER ADMIN: remove the limiter from cluster poli
 # One optimizer block in the scaling policy, managed through
 # deploy/utilization-share.sh: check, then shadow, then activate; off goes back
 # through shadow so the transfer marks are cleared first. NAMESPACE is the
-# models' namespace and must be given; the controller and its policy default to
-# it (CONTROLLER_NAMESPACE, POLICY_NAMESPACE). PHYSICAL_GROUPS=true plans GPUs
+# models' namespace and must be given; the controller defaults to it
+# (CONTROLLER_NAMESPACE), and the policy to the namespace the controller logs
+# reading it from (POLICY_NAMESPACE overrides). PHYSICAL_GROUPS=true plans GPUs
 # bounded only by the physical inventory (a gpu-inventory limiter, no quota).
-# RESTART=1 restarts the controller when it does not reload the policy itself.
+# RESTART=1 restarts the controller when it logs no reload of a write, and then
+# requires the reload.
 # CONTROLLER_NAMESPACE has an e2e default above, so it counts only when given.
 us_controller_ns_given = $(filter command line environment,$(origin CONTROLLER_NAMESPACE))
 us_args = -n "$(NAMESPACE)" $(if $(us_controller_ns_given),--controller-namespace "$(CONTROLLER_NAMESPACE)",) \
@@ -994,20 +1016,20 @@ deploy-e2e-infra: ## Deploy e2e test infrastructure (WVA + EPP; no model server 
 		else \
 			echo "Skipping image build (SKIP_BUILD=true) - assuming image already exists"; \
 		fi; \
-		echo "Extracting image repo and tag from IMG..."; \
-		if echo "$(IMG)" | grep -q ":"; then \
-			IMAGE_REPO=$$(echo $(IMG) | cut -d: -f1); \
-			IMAGE_TAG=$$(echo $(IMG) | cut -d: -f2); \
-		else \
-			IMAGE_REPO="$(IMG)"; \
-			IMAGE_TAG="latest"; \
-		fi; \
-		echo "Using local image: $$IMAGE_REPO:$$IMAGE_TAG"; \
+		echo "Extracting image repo, tag and digest from IMG..."; \
+		IMG_FIELDS="$$($(WVA_IMAGE_REF_FIELDS) "$(IMG)")"; \
+		IMAGE_REPO="$${IMG_FIELDS%%|*}"; \
+		IMG_FIELDS="$${IMG_FIELDS#*|}"; \
+		IMAGE_TAG="$${IMG_FIELDS%%|*}"; \
+		IMAGE_DIGEST="$${IMG_FIELDS#*|}"; \
+		if [ -z "$$IMAGE_REPO" ]; then echo "Could not split IMG=$(IMG)" >&2; exit 1; fi; \
+		echo "Using local image: $$IMAGE_REPO:$$IMAGE_TAG$${IMAGE_DIGEST:+@$$IMAGE_DIGEST}"; \
 		SCALER_BACKEND=$(SCALER_BACKEND) \
 		ENABLE_SCALE_TO_ZERO=$(SCALE_TO_ZERO_ENABLED) \
 		DEPLOY_ALERTING_RULES=$(DEPLOY_ALERTING_RULES) \
 		WVA_IMAGE_REPO=$$IMAGE_REPO \
 		WVA_IMAGE_TAG=$$IMAGE_TAG \
+		WVA_IMAGE_DIGEST=$$IMAGE_DIGEST \
 		WVA_IMAGE_PULL_POLICY=IfNotPresent \
 		$(MAKE) deploy-wva \
 			ENVIRONMENT=$(ENVIRONMENT) \
@@ -2646,6 +2668,11 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# read as the literal $$MODEL_NAME, or an env value whose newline splits one
 	@# workload record into two, both parse perfectly.
 	@bash hack/check-scaledobject-parsers.sh
+	@echo "Checking the external-scaler NetworkPolicy..."
+	@# The scaler port has no authentication by default: whoever reaches it can
+	@# rewrite another workload's trigger metadata. A policy that selects no Pod,
+	@# admits {} or drops the metrics port all apply cleanly.
+	@KUSTOMIZE=$(KUSTOMIZE) bash hack/check-external-scaler-networkpolicy.sh
 	@echo "Checking what warmpool.sh actually emits..."
 	@# Renders the pool manifests and asserts their shape. Every bug this covers
 	@# parses fine: one container with the proxy image under the supervisor's
@@ -2716,6 +2743,28 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# else can see it: the YAML is valid, the patch applies, and a cluster run
 	@# shows a healthy controller scaling a fleet.
 	@bash hack/check-limiter-declaration.sh
+	@echo "Checking every controller can find and read a published cluster policy..."
+	@# A namespace-scoped controller cannot read a cluster-scoped Namespace
+	@# through its Role, so it never saw wva-policy and ran on its own
+	@# ConfigMap while enable-physical-limiter reported the cluster bounded;
+	@# and one installed after the policy was published had no RoleBinding
+	@# to read it and refused to start. Executed against a stub kubectl.
+	@bash hack/check-policy-namespace-grants.sh
+	@echo "Checking who enable-physical-limiter grants node read to..."
+	@# The label it finds controllers by is one anyone can set, and the grant went
+	@# to whatever ServiceAccount the labelled Deployment named. Executed against a
+	@# stub kubectl, on an impostor beside a genuine controller.
+	@bash hack/check-physical-limiter-targets.sh
+	@echo "Checking the defaults the installer chooses..."
+	@# Which image is pulled and how, and whether a non-reproducible install
+	@# says so. A digest treated as a moving tag, or :main deployed in silence,
+	@# installs cleanly -- nothing else here would notice.
+	@bash hack/check-install-defaults.sh
+	@echo "Checking the Kueue reader Namespace grant on upgrade..."
+	@# A kueue-reader role from before the Namespace read, kept by a
+	@# controller-only upgrade, bounds the namespace at nothing. The
+	@# preflight must refuse that phase; executed against a stub kubectl.
+	@bash hack/check-kueue-namespace-grant.sh
 	@echo "Checking the tenant Role still covers the generated ClusterRole..."
 	@# The ClusterRole is GENERATED from kubebuilder markers; the namespaced Role
 	@# the tenant overlay installs is maintained by hand, so it does not move when
