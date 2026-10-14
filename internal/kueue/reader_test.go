@@ -6,9 +6,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -121,6 +124,12 @@ func clusterQueue(version, name string, flavors ...map[string]interface{}) *unst
 
 func localQueue(version, ns, name, cq string) *unstructured.Unstructured {
 	return obj(version, KindLocalQueue, ns, name, map[string]interface{}{"clusterQueue": cq})
+}
+
+// forbidden is the API server's answer to a get on a Namespace the caller may
+// not read.
+func forbidden(name string) error {
+	return apierrors.NewForbidden(schema.GroupResource{Resource: "namespaces"}, name, errors.New("no RBAC"))
 }
 
 // typedCaps is a grant of typed caps only.
@@ -448,7 +457,7 @@ var _ = Describe("Reader", func() {
 				).
 				WithInterceptorFuncs(interceptor.Funcs{
 					Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, o client.Object, opts ...client.GetOption) error {
-						return errors.New(`namespaces "` + key.Name + `" is forbidden`)
+						return forbidden(key.Name)
 					},
 				}).
 				Build()
@@ -458,6 +467,168 @@ var _ = Describe("Reader", func() {
 			Expect(snap.Namespace).To(HaveKeyWithValue("team-a", config.ExternalCaps{HasUntyped: true}))
 			// A namespace with another, verifiable grant keeps only that one.
 			Expect(snap.Namespace).To(HaveKeyWithValue("team-b", granted))
+		})
+
+		It("withholds the grant from a namespace that no longer exists", func() {
+			// The LocalQueue was listed, then its Namespace was deleted before
+			// the label read. No namespace object is created here at all.
+			c := newFakeClient(v, h100(),
+				withSelector(eight("team-a-cq"), matchLabels("team", "a")),
+				localQueue(v, "gone", "lq", "team-a-cq"),
+			)
+			snap, err := NewReader(c, Options{}).Quotas(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(snap.Namespace).To(HaveKeyWithValue("gone", config.ExternalCaps{HasUntyped: true}))
+		})
+
+		It("keeps the previous snapshot when a Namespace read fails transiently", func() {
+			now := time.Unix(1000, 0)
+			fail := false
+			c := fake.NewClientBuilder().
+				WithScheme(runtime.NewScheme()).
+				WithRESTMapper(kueueMapper(v)).
+				WithObjects(h100(),
+					withSelector(eight("team-a-cq"), matchLabels("team", "a")),
+					namespace("team-a", map[string]string{"team": "a"}),
+					localQueue(v, "team-a", "lq", "team-a-cq"),
+				).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, o client.Object, opts ...client.GetOption) error {
+						if fail {
+							return apierrors.NewServiceUnavailable("etcd leader change")
+						}
+						return cl.Get(ctx, key, o, opts...)
+					},
+				}).
+				Build()
+			r := NewReader(c, Options{RefreshInterval: time.Second, now: func() time.Time { return now }})
+			first, err := r.Quotas(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(first.Namespace).To(HaveKeyWithValue("team-a", granted))
+
+			fail = true
+			now = now.Add(time.Minute)
+			snap, err := r.Quotas(ctx)
+			Expect(err).To(HaveOccurred(), "a transient Namespace read must fail the read, not withhold the grant")
+			Expect(snap).To(Equal(first), "the previous snapshot stays in force")
+		})
+
+		It("does not cache a snapshot from a read cancelled mid-way", func() {
+			now := time.Unix(1000, 0)
+			cctx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			c := fake.NewClientBuilder().
+				WithScheme(runtime.NewScheme()).
+				WithRESTMapper(kueueMapper(v)).
+				WithObjects(h100(),
+					withSelector(eight("team-a-cq"), matchLabels("team", "a")),
+					namespace("team-a", map[string]string{"team": "a"}),
+					localQueue(v, "team-a", "lq", "team-a-cq"),
+				).
+				WithInterceptorFuncs(interceptor.Funcs{
+					// The caller gives up while the label read is in flight; the
+					// API answers with a status error rather than ctx.Err().
+					Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, o client.Object, opts ...client.GetOption) error {
+						cancel()
+						return forbidden(key.Name)
+					},
+				}).
+				Build()
+			r := NewReader(c, Options{RefreshInterval: time.Minute, now: func() time.Time { return now }})
+			snap, err := r.Quotas(cctx)
+			Expect(err).To(HaveOccurred())
+			Expect(snap.ObservedAt).To(BeZero(), "nothing was cached")
+			Expect(r.last.ObservedAt).To(BeZero())
+			Expect(r.lastTry).To(BeZero(), "the next caller reads afresh")
+		})
+
+		It("reads an unreadable Namespace once per read, however many queues need it", func() {
+			gets := 0
+			c := fake.NewClientBuilder().
+				WithScheme(runtime.NewScheme()).
+				WithRESTMapper(kueueMapper(v)).
+				WithObjects(h100(),
+					withSelector(eight("cq-1"), matchLabels("team", "a")),
+					withSelector(eight("cq-2"), matchLabels("tier", "gpu")),
+					withSelector(eight("cq-3"), matchLabels("team", "a")),
+					localQueue(v, "team-a", "lq-1", "cq-1"),
+					localQueue(v, "team-a", "lq-2", "cq-2"),
+					localQueue(v, "team-a", "lq-3", "cq-3"),
+				).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, o client.Object, opts ...client.GetOption) error {
+						gets++
+						return forbidden(key.Name)
+					},
+				}).
+				Build()
+			snap, err := NewReader(c, Options{}).Quotas(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(snap.Namespace).To(HaveKeyWithValue("team-a", config.ExternalCaps{HasUntyped: true}))
+			Expect(gets).To(Equal(1))
+		})
+
+		It("evaluates a matchExpressions selector, granting only the queue that admits the namespace", func() {
+			inB := map[string]interface{}{"matchExpressions": []interface{}{
+				map[string]interface{}{"key": "team", "operator": "In", "values": []interface{}{"b", "c"}},
+			}}
+			c := newFakeClient(v, h100(),
+				withSelector(eight("team-a-cq"), matchLabels("team", "a")),
+				withSelector(clusterQueue(v, "team-b-cq", flavorQuotas("h100", quota("nvidia.com/gpu", "3"))), inB),
+				namespace("team-b", map[string]string{"team": "b"}),
+				localQueue(v, "team-b", "lq-a", "team-a-cq"), // not admitted
+				localQueue(v, "team-b", "lq-b", "team-b-cq"), // admitted
+			)
+			snap, err := NewReader(c, Options{}).Quotas(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(snap.Namespace).To(Equal(map[string]config.ExternalCaps{
+				"team-b": typedCaps(map[string]int{"NVIDIA-H100-80GB-HBM3": 3}),
+			}))
+		})
+
+		It("logs a withheld grant once, and again after a successful read re-arms it", func() {
+			now := time.Unix(1000, 0)
+			deny := true
+			var logged []string
+			lctx := logr.NewContext(ctx, funcr.New(func(prefix, args string) {
+				logged = append(logged, args)
+			}, funcr.Options{}))
+			c := fake.NewClientBuilder().
+				WithScheme(runtime.NewScheme()).
+				WithRESTMapper(kueueMapper(v)).
+				WithObjects(h100(),
+					withSelector(eight("team-a-cq"), matchLabels("team", "a")),
+					namespace("team-a", map[string]string{"team": "a"}),
+					localQueue(v, "team-a", "lq", "team-a-cq"),
+				).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, o client.Object, opts ...client.GetOption) error {
+						if deny {
+							return forbidden(key.Name)
+						}
+						return cl.Get(ctx, key, o, opts...)
+					},
+				}).
+				Build()
+			r := NewReader(c, Options{now: func() time.Time { return now }})
+			read := func() config.ExternalQuotas {
+				now = now.Add(time.Minute)
+				snap, err := r.Quotas(lctx)
+				Expect(err).NotTo(HaveOccurred())
+				return snap
+			}
+
+			read()
+			Expect(logged).To(HaveLen(1))
+			Expect(logged[0]).To(ContainSubstring("grant get on namespaces"))
+			read()
+			Expect(logged).To(HaveLen(1), "a standing denial is logged once")
+
+			deny = false
+			Expect(read().Namespace).To(HaveKeyWithValue("team-a", granted))
+			deny = true
+			read()
+			Expect(logged).To(HaveLen(2), "a revoke after a successful read is news and is logged again")
 		})
 	})
 

@@ -3,9 +3,11 @@ package controllerstatus
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -276,5 +278,94 @@ func TestStartWritesAndCoalesces(t *testing.T) {
 	}
 	if w.creates != 1 || w.updates != 1 {
 		t.Errorf("writes = %d creates, %d updates; want 1, 1", w.creates, w.updates)
+	}
+}
+
+// TestFlushCreateLosesRaceToAnotherWriter: between this process's read (no
+// ConfigMap) and its create, another writer -- a previous leader still
+// finishing its term -- creates the ConfigMap with its own content. The create
+// fails AlreadyExists; the flush must re-read and overwrite with its content,
+// not give up or report the race as a failure.
+func TestFlushCreateLosesRaceToAnotherWriter(t *testing.T) {
+	w := &writes{}
+	p, c := newTestPublisher(t, w)
+	raced := false
+	p.writer = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
+		Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			w.creates++
+			if !raced {
+				raced = true
+				other := &corev1.ConfigMap{}
+				other.Name, other.Namespace = ConfigMapName, testNamespace
+				other.Data = map[string]string{KeyLeader: "the-other-leader"}
+				if err := cl.Create(ctx, other); err != nil {
+					t.Fatalf("seeding the race winner: %v", err)
+				}
+				return apierrors.NewAlreadyExists(configMapsResource, ConfigMapName)
+			}
+			return cl.Create(ctx, obj, opts...)
+		},
+		Update: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			w.updates++
+			return cl.Update(ctx, obj, opts...)
+		},
+	})
+	if err := p.flush(context.Background()); err != nil {
+		t.Fatalf("flush after losing the create race: %v", err)
+	}
+	cm := stored(t, c)
+	if got := cm.Data[KeyLeader]; got != "wva-controller-manager-abc" {
+		t.Errorf("leader = %q, want this process's content written over the race winner's", got)
+	}
+	if cm.Labels[labelComponent] != componentValue {
+		t.Errorf("labels = %v", cm.Labels)
+	}
+	if w.creates != 1 || w.updates != 1 {
+		t.Errorf("writes = %d creates, %d updates; want 1 (lost), 1", w.creates, w.updates)
+	}
+	if p.written == nil {
+		t.Error("written not recorded after the race was resolved")
+	}
+}
+
+// TestReportErrThrottlesUnchangedError: an unchanged error is logged once per
+// errorRelogEvery, a changed one at once, and recovery re-arms it.
+func TestReportErrThrottlesUnchangedError(t *testing.T) {
+	p, _ := newTestPublisher(t, &writes{})
+	now := time.Unix(1000, 0)
+	p.now = func() time.Time { return now }
+	var logged []string
+	logger := funcr.New(func(_, args string) { logged = append(logged, args) }, funcr.Options{})
+	forbidden := apierrors.NewForbidden(configMapsResource, ConfigMapName, errors.New("no Role"))
+
+	p.reportErr(logger, forbidden)
+	if len(logged) != 1 {
+		t.Fatalf("first error: %d lines logged, want 1", len(logged))
+	}
+	if !strings.Contains(logged[0], "wva-controller-status-role") {
+		t.Errorf("a Forbidden must carry the RBAC hint: %s", logged[0])
+	}
+	now = now.Add(errorRelogEvery - time.Second)
+	p.reportErr(logger, forbidden)
+	if len(logged) != 1 {
+		t.Errorf("unchanged error inside %v: %d lines, want 1", errorRelogEvery, len(logged))
+	}
+	now = now.Add(time.Second)
+	p.reportErr(logger, forbidden)
+	if len(logged) != 2 {
+		t.Errorf("unchanged error after %v: %d lines, want 2", errorRelogEvery, len(logged))
+	}
+	p.reportErr(logger, errors.New("connection refused"))
+	if len(logged) != 3 {
+		t.Errorf("changed error: %d lines, want 3 (logged at once)", len(logged))
+	}
+
+	p.reportRecovered(logger)
+	if len(logged) != 4 {
+		t.Errorf("recovery: %d lines, want 4", len(logged))
+	}
+	p.reportErr(logger, errors.New("connection refused"))
+	if len(logged) != 5 {
+		t.Errorf("the same error after a recovery: %d lines, want 5 (re-armed)", len(logged))
 	}
 }

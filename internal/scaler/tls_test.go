@@ -11,8 +11,10 @@ import (
 	"encoding/pem"
 	"math/big"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -59,7 +61,7 @@ func newTestCA() *testCA {
 }
 
 // leaf returns a PEM certificate and key signed by the CA.
-func (ca *testCA) leaf(serial int64, usage x509.ExtKeyUsage) (certPEM, keyPEM []byte) {
+func (ca *testCA) leaf(serial int64, usage x509.ExtKeyUsage, opts ...func(*x509.Certificate)) (certPEM, keyPEM []byte) {
 	GinkgoHelper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	Expect(err).NotTo(HaveOccurred())
@@ -72,6 +74,9 @@ func (ca *testCA) leaf(serial int64, usage x509.ExtKeyUsage) (certPEM, keyPEM []
 		ExtKeyUsage:  []x509.ExtKeyUsage{usage},
 		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
 	}
+	for _, o := range opts {
+		o(tmpl)
+	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.cert, &key.PublicKey, ca.key)
 	Expect(err).NotTo(HaveOccurred())
 	keyDER, err := x509.MarshalECPrivateKey(key)
@@ -81,8 +86,9 @@ func (ca *testCA) leaf(serial int64, usage x509.ExtKeyUsage) (certPEM, keyPEM []
 }
 
 // startTLSServer runs an elected Server over TLS and returns its address.
-// clientCA, when non-nil, is the CA client certificates must chain to.
-func startTLSServer(ctx context.Context, ca *testCA, clientCA *testCA) string {
+// clientCA, when non-nil, is the CA client certificates must chain to, and
+// allowed the client identities accepted among them.
+func startTLSServer(ctx context.Context, ca *testCA, clientCA *testCA, allowed ...string) string {
 	GinkgoHelper()
 	dir := GinkgoT().TempDir()
 	certPEM, keyPEM := ca.leaf(2, x509.ExtKeyUsageServerAuth)
@@ -93,7 +99,7 @@ func startTLSServer(ctx context.Context, ca *testCA, clientCA *testCA) string {
 		caFile = filepath.Join(dir, "client-ca.crt")
 		Expect(os.WriteFile(caFile, clientCA.pem, 0o600)).To(Succeed())
 	}
-	cfg, err := scaler.NewTLSConfig(func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return &pair, nil }, caFile)
+	cfg, err := scaler.NewTLSConfig(func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return &pair, nil }, caFile, allowed)
 	Expect(err).NotTo(HaveOccurred())
 
 	s := runtime.NewScheme()
@@ -167,7 +173,112 @@ var _ = Describe("Server over TLS", func() {
 	It("rejects a client CA file with no certificate in it", func() {
 		f := filepath.Join(GinkgoT().TempDir(), "empty.crt")
 		Expect(os.WriteFile(f, []byte("not a certificate"), 0o600)).To(Succeed())
-		_, err := scaler.NewTLSConfig(func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return nil, nil }, f)
+		_, err := scaler.NewTLSConfig(func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return nil, nil }, f, nil)
 		Expect(err).To(HaveOccurred())
+	})
+
+	Describe("client identity allowlist", func() {
+		// clientCreds is a TLS client that trusts ca and presents a leaf the
+		// client CA signed, carrying the identities set by opt.
+		clientCreds := func(ca, clientCA *testCA, serial int64, opt func(*x509.Certificate)) credentials.TransportCredentials {
+			GinkgoHelper()
+			pool := x509.NewCertPool()
+			pool.AddCert(ca.cert)
+			certPEM, keyPEM := clientCA.leaf(serial, x509.ExtKeyUsageClientAuth, opt)
+			pair, err := tls.X509KeyPair(certPEM, keyPEM)
+			Expect(err).NotTo(HaveOccurred())
+			return credentials.NewTLS(&tls.Config{RootCAs: pool, Certificates: []tls.Certificate{pair}, MinVersion: tls.VersionTLS12})
+		}
+		dns := func(name string) func(*x509.Certificate) {
+			return func(c *x509.Certificate) { c.DNSNames = []string{name} }
+		}
+
+		It("accepts a client the CA signed whose SAN is allowed, and refuses one with another SAN", func() {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			ca, clientCA := newTestCA(), newTestCA()
+			addr := startTLSServer(ctx, ca, clientCA,
+				"keda-operator.keda.svc", "spiffe://cluster.local/ns/keda/sa/keda-operator")
+
+			By("an allowed DNS SAN")
+			Expect(metricSpec(ctx, addr, clientCreds(ca, clientCA, 10, dns("keda-operator.keda.svc")))).To(Succeed())
+
+			By("an allowed URI SAN")
+			spiffe, err := url.Parse("spiffe://cluster.local/ns/keda/sa/keda-operator")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(metricSpec(ctx, addr, clientCreds(ca, clientCA, 11, func(c *x509.Certificate) {
+				c.URIs = []*url.URL{spiffe}
+			}))).To(Succeed())
+
+			By("another SAN from the same CA")
+			Expect(metricSpec(ctx, addr, clientCreds(ca, clientCA, 12, dns("intruder.default.svc")))).To(HaveOccurred(),
+				"a certificate the client CA signed for another identity reached an RPC")
+		})
+
+		It("accepts a client by its subject Common Name", func() {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			ca, clientCA := newTestCA(), newTestCA()
+			addr := startTLSServer(ctx, ca, clientCA, "keda-operator")
+			Expect(metricSpec(ctx, addr, clientCreds(ca, clientCA, 13, func(c *x509.Certificate) {
+				c.Subject.CommonName = "keda-operator"
+			}))).To(Succeed())
+			// leaf's default CN is "leaf".
+			Expect(metricSpec(ctx, addr, clientCreds(ca, clientCA, 14, func(*x509.Certificate) {}))).To(HaveOccurred())
+		})
+
+		It("is refused without a client CA", func() {
+			_, err := scaler.NewTLSConfig(func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return nil, nil }, "", []string{"keda-operator"})
+			Expect(err).To(MatchError(ContainSubstring("needs a client CA")))
+		})
+
+		It("parses a comma-separated list, dropping blanks", func() {
+			Expect(scaler.ParseClientIdentities(" a.svc, ,spiffe://x/y ,")).To(Equal([]string{"a.svc", "spiffe://x/y"}))
+			Expect(scaler.ParseClientIdentities("")).To(BeEmpty())
+		})
+	})
+
+	It("serves a rotated certificate on the next handshake", func() {
+		ca := newTestCA()
+		certs := make([]tls.Certificate, 2)
+		for i := range certs {
+			certPEM, keyPEM := ca.leaf(int64(20+i), x509.ExtKeyUsageServerAuth)
+			pair, err := tls.X509KeyPair(certPEM, keyPEM)
+			Expect(err).NotTo(HaveOccurred())
+			certs[i] = pair
+		}
+		// current stands in for certwatcher: what GetCertificate returns is
+		// whatever was last loaded from the Secret.
+		var current atomic.Pointer[tls.Certificate]
+		current.Store(&certs[0])
+		cfg, err := scaler.NewTLSConfig(func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return current.Load(), nil }, "", nil)
+		Expect(err).NotTo(HaveOccurred())
+
+		ln, err := tls.Listen("tcp", "127.0.0.1:0", cfg)
+		Expect(err).NotTo(HaveOccurred())
+		defer func() { _ = ln.Close() }()
+		go func() {
+			for {
+				conn, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				_ = conn.(*tls.Conn).Handshake()
+				_ = conn.Close()
+			}
+		}()
+
+		pool := x509.NewCertPool()
+		pool.AddCert(ca.cert)
+		served := func() *big.Int {
+			GinkgoHelper()
+			conn, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12})
+			Expect(err).NotTo(HaveOccurred())
+			defer func() { _ = conn.Close() }()
+			return conn.ConnectionState().PeerCertificates[0].SerialNumber
+		}
+		Expect(served()).To(Equal(big.NewInt(20)))
+		current.Store(&certs[1])
+		Expect(served()).To(Equal(big.NewInt(21)), "a rotated certificate must be served without rebuilding the TLS config")
 	})
 })

@@ -146,6 +146,11 @@ func main() {
 		"A PEM CA bundle; when set, every external scaler client must present a certificate "+
 			"it signed (mutual TLS: KEDA's tlsClientCert and tlsClientKey). "+
 			"Requires --external-scaler-cert-path.")
+	externalScalerClientSAN := flag.String("external-scaler-client-san", "",
+		"A comma-separated list of client identities the external scaler accepts under mutual TLS: "+
+			"each matches a client certificate's DNS SAN, URI SAN, or subject Common Name exactly. "+
+			"Empty, the default, accepts any certificate --external-scaler-client-ca signed. "+
+			"Requires --external-scaler-client-ca.")
 
 	// The warm pool is OFF unless a namespace is named, because it holds GPUs
 	// continuously: that is a cost decision an operator makes, never a default.
@@ -792,6 +797,11 @@ func main() {
 		setupLog.Error(nil, "--external-scaler-client-ca needs --external-scaler-cert-path: mutual TLS needs a serving certificate")
 		os.Exit(1)
 	}
+	allowedScalerClients := scaler.ParseClientIdentities(*externalScalerClientSAN)
+	if len(allowedScalerClients) > 0 && *externalScalerClientCA == "" {
+		setupLog.Error(nil, "--external-scaler-client-san needs --external-scaler-client-ca: a client name is verified only under mutual TLS")
+		os.Exit(1)
+	}
 	if *externalScalerCertPath != "" {
 		scalerCertWatcher, err := certwatcher.New(
 			filepath.Join(*externalScalerCertPath, "tls.crt"),
@@ -801,7 +811,7 @@ func main() {
 			setupLog.Error(err, "Failed to initialize external scaler certificate watcher")
 			os.Exit(1)
 		}
-		externalScaler.TLSConfig, err = scaler.NewTLSConfig(scalerCertWatcher.GetCertificate, *externalScalerClientCA)
+		externalScaler.TLSConfig, err = scaler.NewTLSConfig(scalerCertWatcher.GetCertificate, *externalScalerClientCA, allowedScalerClients)
 		if err != nil {
 			setupLog.Error(err, "unable to configure external scaler TLS")
 			os.Exit(1)
@@ -811,7 +821,13 @@ func main() {
 			os.Exit(1)
 		}
 		setupLog.Info("KEDA external scaler serves TLS",
-			"certPath", *externalScalerCertPath, "mutualTLS", *externalScalerClientCA != "")
+			"certPath", *externalScalerCertPath, "mutualTLS", *externalScalerClientCA != "",
+			"allowedClients", allowedScalerClients)
+		if *externalScalerClientCA != "" && len(allowedScalerClients) == 0 {
+			setupLog.Info("WARNING: the external scaler accepts ANY client certificate the client CA signed; "+
+				"set --external-scaler-client-san to accept only KEDA's identity",
+				"clientCA", *externalScalerClientCA)
+		}
 	}
 	if err := mgr.Add(externalScaler); err != nil {
 		setupLog.Error(err, "unable to add KEDA external scaler to manager")

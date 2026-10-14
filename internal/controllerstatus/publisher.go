@@ -137,6 +137,9 @@ type Publisher struct {
 
 	errText   string
 	errLogged time.Time
+
+	// now is the clock reportErr throttles by; tests replace it.
+	now func() time.Time
 }
 
 // New returns a Publisher that writes ConfigMapName in namespace through
@@ -149,7 +152,12 @@ func New(writer client.Client, reader client.Reader, namespace string) *Publishe
 	}
 	leader := os.Getenv("POD_NAME")
 	if leader == "" {
-		leader, _ = os.Hostname()
+		var err error
+		if leader, err = os.Hostname(); err != nil {
+			ctrl.Log.WithName("controller-status").Error(err,
+				"Cannot determine the hostname; the controller-status leader key will be empty. Set POD_NAME (the downward API metadata.name) to name the writer.",
+				"key", KeyLeader)
+		}
 	}
 	return &Publisher{
 		writer:    writer,
@@ -159,6 +167,7 @@ func New(writer client.Client, reader client.Reader, namespace string) *Publishe
 		retryMin:  defaultRetryMin,
 		retryMax:  defaultRetryMax,
 		notify:    make(chan struct{}, 1),
+		now:       time.Now,
 		desired: map[string]string{
 			KeyFormatVersion:         FormatVersion,
 			KeyPolicyNamespace:       config.SystemNamespace(),
@@ -247,6 +256,13 @@ func (p *Publisher) Start(ctx context.Context) error {
 	p.mu.Unlock()
 	p.signal() // the first write after election, whatever is pending
 	backoff := p.retryMin
+	// One timer for the whole term, armed only while a write is failing. retry
+	// is nil while disarmed, so a tick can never be received then; and Stop and
+	// Reset (Go 1.23+) discard a tick that fired but was not received, so a
+	// re-armed timer never delivers the previous attempt's tick early.
+	timer := time.NewTimer(time.Hour)
+	timer.Stop()
+	defer timer.Stop()
 	var retry <-chan time.Time
 	for {
 		select {
@@ -260,11 +276,13 @@ func (p *Publisher) Start(ctx context.Context) error {
 		}
 		if err := p.flush(ctx); err != nil {
 			p.reportErr(logger, err)
-			retry = time.After(backoff)
+			timer.Reset(backoff)
+			retry = timer.C
 			backoff = min(2*backoff, p.retryMax)
 			continue
 		}
 		p.reportRecovered(logger)
+		timer.Stop()
 		retry, backoff = nil, p.retryMin
 	}
 }
@@ -353,7 +371,7 @@ func (p *Publisher) writeOnce(ctx context.Context, want map[string]string) error
 func (p *Publisher) reportErr(logger logr.Logger, err error) {
 	p.mu.Lock()
 	text := err.Error()
-	now := time.Now()
+	now := p.now()
 	relog := text != p.errText || now.Sub(p.errLogged) >= errorRelogEvery
 	p.errText = text
 	if relog {
