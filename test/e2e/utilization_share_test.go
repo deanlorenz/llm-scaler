@@ -357,6 +357,12 @@ func controllerLogsSince(t time.Time) string {
 // least one whole replica's capacity is asked for, not just above zero, so a
 // role a hair over is not counted as short for a cycle and then not.
 func roleShortOf(ns, model, role string, since time.Time) (bool, string) {
+	return roleShortFor(ns, model, role, since, 2)
+}
+
+// roleShortFor is roleShortOf over the last cycles analyzer results since
+// since: short only when every one of them asks for a whole replica more.
+func roleShortFor(ns, model, role string, since time.Time, cycles int) (bool, string) {
 	type result struct {
 		RC       float64            `json:"rc"`
 		RoleRC   map[string]float64 `json:"roleRC"`
@@ -383,12 +389,12 @@ func roleShortOf(ns, model, role string, since time.Time) (bool, string) {
 			recent = append(recent, r)
 		}
 	}
-	if len(recent) < 2 {
+	if len(recent) < cycles {
 		return false, fmt.Sprintf("%d analyzer results for %s in %s so far", len(recent), model, ns)
 	}
 	var why []string
 	short := true
-	for _, r := range recent[len(recent)-2:] {
+	for _, r := range recent[len(recent)-cycles:] {
 		rc, ok := r.RoleRC[role]
 		if !ok {
 			rc = r.RC
@@ -402,5 +408,5 @@ func roleShortOf(ns, model, role string, since time.Time) (bool, string) {
 		why = append(why, fmt.Sprintf("rc=%.1f replicaCapacity=%.1f", rc, prc))
 		short = short && prc > 0 && rc >= prc
 	}
-	return short, model + "/" + role + ", last two cycles: " + strings.Join(why, "; ")
+	return short, fmt.Sprintf("%s/%s, last %d cycles: %s", model, role, cycles, strings.Join(why, "; "))
 }
