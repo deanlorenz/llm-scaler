@@ -5,10 +5,15 @@ package domain
 // wva_service_rate_per_replica, so a dashboard can tell a rate priced for the
 // shape arriving now from one remembered from a saturated cycle.
 const (
-	// ServiceRateSourceDerived is a rate derived from the variant's ITL(k)
-	// line -- its own, or one borrowed from a sibling that shares its engine
-	// configuration -- at the pricing k.
+	// ServiceRateSourceDerived is a rate derived from the variant's OWN
+	// ITL(k) line at the pricing k.
 	ServiceRateSourceDerived = "derived"
+	// ServiceRateSourceBorrowedLine is a rate derived from a line a sibling
+	// with the same engine configuration fitted (enableLearnedStateReuse).
+	// The arithmetic is the same as derived, the authority is not: the
+	// throughput floor may hold a fleet on it and may not grow one -- the
+	// floor's heldWhy=borrowed-line.
+	ServiceRateSourceBorrowedLine = "borrowed-line"
 	// ServiceRateSourceMeasured is a rate read from the variant's own
 	// saturated-throughput window for the output-length bucket the fleet is
 	// serving.
@@ -17,6 +22,11 @@ const (
 	// window, because the bucket the fleet is serving has no reading of its
 	// own yet. Wrong in a known direction; the throughput floor may hold a
 	// fleet on it and may not grow one.
+	//
+	// A measured window too thin to order on (fewer readings than
+	// floor.MinThroughputSamplesToOrder) is a third hold-only case, and is
+	// not a source of its own: it is measured, and the floor's heldWhy says
+	// single-sample.
 	ServiceRateSourceNeighbour = "neighbour"
 )
 

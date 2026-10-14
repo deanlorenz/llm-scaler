@@ -117,6 +117,10 @@ func variantServiceRate(variant string, caps []capacity.ReplicaCapacity) (float6
 // (capacity.ReplicaCapacity), and reading them would mislabel it.
 func serviceRateSource(rc capacity.ReplicaCapacity) string {
 	switch {
+	case rc.SaturatedThroughputLineBorrowed:
+		// Set only when the derived figure is the one in use AND its line
+		// is a sibling's (priceReplicas), so it is a subset of Derived.
+		return domain.ServiceRateSourceBorrowedLine
 	case rc.SaturatedThroughputDerived:
 		return domain.ServiceRateSourceDerived
 	case rc.SaturatedThroughputBorrowed:

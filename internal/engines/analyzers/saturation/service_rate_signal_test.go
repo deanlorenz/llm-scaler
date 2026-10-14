@@ -145,6 +145,9 @@ func TestServiceRateSignal_BorrowedLine(t *testing.T) {
 	assert.True(t, sig.ITLWindowed)
 	assert.Equal(t, 0, sig.LineSamples, "the variant's OWN window, not the lender's")
 	assert.Equal(t, 10, own.LineSamples)
+	assert.Equal(t, domain.ServiceRateSourceBorrowedLine, sig.RateSource,
+		"a rate derived from a sibling's line was published as the variant's own derived rate; the floor will not grow a fleet on it")
+	assert.Equal(t, domain.ServiceRateSourceDerived, own.RateSource)
 }
 
 // A decode variant whose window holds readings but not enough to fit has no
@@ -225,6 +228,9 @@ func TestVariantServiceRate(t *testing.T) {
 		{"measured", []capacity.ReplicaCapacity{rc("v", 2, nil)}, 2, domain.ServiceRateSourceMeasured},
 		{"neighbour", []capacity.ReplicaCapacity{rc("v", 2, neighbour)}, 2, domain.ServiceRateSourceNeighbour},
 		{"derived", []capacity.ReplicaCapacity{rc("v", 2, derived)}, 2, domain.ServiceRateSourceDerived},
+		{"borrowed line", []capacity.ReplicaCapacity{rc("v", 2, func(r *capacity.ReplicaCapacity) {
+			r.SaturatedThroughputDerived, r.SaturatedThroughputLineBorrowed = true, true
+		})}, 2, domain.ServiceRateSourceBorrowedLine},
 		// Derived wins over the Borrowed flag: when the derived figure is in
 		// use, Borrowed describes the measured window that was NOT used.
 		{"derived beside a borrowed window", []capacity.ReplicaCapacity{

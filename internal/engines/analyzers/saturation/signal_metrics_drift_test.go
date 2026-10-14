@@ -37,7 +37,7 @@ type derivedMuField struct {
 
 var derivedMuMetricFields = map[string]derivedMuField{
 	"variant":         {metric: constants.WVAServiceRatePerReplica}, // the variant_name label every series carries
-	"ok":              {metric: constants.WVAServiceRatePerReplica}, // source=derived is ok at variant level
+	"ok":              {metric: constants.WVAServiceRatePerReplica}, // a derived rate in use shows as source=derived or borrowed-line; ok=true alone does not mean it was used (an own measured window can win)
 	"rate":            {metric: constants.WVAServiceRatePerReplica},
 	"kPrice":          {metric: constants.WVAPricingK},
 	"itlAtKPrice":     {metric: constants.WVAITLSecondsAtPricingK},
@@ -50,8 +50,8 @@ var derivedMuMetricFields = map[string]derivedMuField{
 	"pod":              {excluded: "per-pod is the log's granularity; a pod label scales the series with the fleet being autoscaled"},
 	"seqs":             {excluded: "per-pod intermediate of rate (k*C/KVreq capped at maxNumSeqs); rate carries the result"},
 	"tokenSec":         {excluded: "per-pod intermediate of rate (rate = tokenSec / muDivisor)"},
-	"lineBorrowed":     {excluded: "line provenance belongs to the learned-state borrow family, not the service rate"},
-	"lineBorrowedFrom": {excluded: "a lender variant name; line provenance belongs to the learned-state borrow family"},
+	"lineBorrowed":     {metric: constants.WVAServiceRatePerReplica}, // source=borrowed-line
+	"lineBorrowedFrom": {excluded: "a lender variant name: a label value that changes with the lender, published as donor on wva_learned_state_borrowed (PR #152), not here"},
 	"avgOutputTokens":  {excluded: "the shape family (stage 1, wva_shape_output_tokens), not built yet"},
 	"muDivisor":        {excluded: "the shape family (stage 1, wva_shape_output_tokens{window}), not built yet"},
 	"avgInputTokens":   {excluded: "the shape family (stage 1, wva_shape_input_tokens), not built yet"},

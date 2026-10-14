@@ -71,7 +71,7 @@ against it.
 | `role` | `prefill`, `decode`, `both` | the canonical role, never the raw label |
 | `window` | `1m`, `5m` | only where a signal genuinely exists at two timescales |
 | `basis` | `fleet`, `priced` | the fleet's own reading vs the figure a decision used |
-| `source` | `measured`, `derived`, `neighbour`, `observed`, `historical`, `fallback`, `seed` | which path answered |
+| `source` | `measured`, `derived`, `borrowed-line`, `neighbour`, `observed`, `historical`, `fallback`, `seed` | which path answered |
 | `bound` | `k1`, `k2` | which capacity bound |
 
 `pod` appears on **nothing** proposed here. See cardinality.
@@ -82,11 +82,12 @@ on different keys could not be joined to `wva_analyzer_target` -- the series it
 exists to explain -- without a `label_replace` in every query. Every metric
 block below uses these keys, built or not.
 
-`source` gained `neighbour` in stage 3: a service rate read from a
-neighbouring output-length bucket's window because the bucket being served has
-no reading of its own yet. It is wrong in a known direction, and the floor may
-hold a fleet on it but not grow one, so it is a different source from
-`measured` rather than a qualifier on it.
+`source` gained `neighbour` and `borrowed-line` in stage 3. `neighbour` is a
+service rate read from a neighbouring output-length bucket's window because the
+bucket being served has no reading of its own yet; `borrowed-line` is one
+derived from a line another variant fitted. The floor may hold a fleet on
+either but not grow one, so each is a source of its own rather than a qualifier
+on `measured` or `derived`.
 
 ## The metrics
 
@@ -137,7 +138,8 @@ wva_itl_seconds_at_pricing_k{namespace,model_name,variant_name}              gau
 wva_itl_line_samples{namespace,model_name,variant_name}                      gauge
 ```
 
-Built (stage 3). `source` is `derived`, `measured` or `neighbour`; the rate is
+Built (stage 3). `source` is `derived`, `borrowed-line`, `measured` or
+`neighbour`; the rate is
 the median over the variant's own replicas, never a bridge, and the series is
 absent while none has a rate. The ITL series are decode-only, because only
 decode fits a line; `wva_itl_line_samples` counts the variant's *own* window

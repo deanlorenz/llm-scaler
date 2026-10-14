@@ -1255,7 +1255,7 @@ per pod.
 
 ### `wva_itl_line_slope`
 - **Type**: Gauge
-- **Description**: Slope A of the line ITL(k) = A*k + B a decode variant is priced on, in seconds per unit of KV utilization. The line is the variant's own fit, or one borrowed from a sibling with the same engine configuration (only when `enableLearnedStateReuse` is on). Absent while the variant has no line.
+- **Description**: Slope A of the line ITL(k) = A*k + B a decode variant would derive its service rate from, in seconds per unit of KV utilization. Whether the derived rate is the one in use is `wva_service_rate_per_replica`'s `source`: an own measured window with enough readings wins over it. The line is the variant's own fit, or one borrowed from a sibling with the same engine configuration (only when `enableLearnedStateReuse` is on). Absent while the variant has no line.
 - **Labels**:
   - `namespace`: the model's namespace (scraped as `exported_namespace`)
   - `model_name`: model ID
@@ -1290,8 +1290,8 @@ per pod.
 - **Labels**:
   - `namespace`, `model_name`, `variant_name`: as `wva_itl_line_slope`
   - `role`: `prefill`, `decode` or `both`
-  - `source`: `derived` (from the ITL line at the pricing k), `measured` (the variant's own saturated window for the output length being served) or `neighbour` (a neighbouring output-length bucket's window, used until the served bucket has its own; the floor may hold a fleet on it but not grow one)
-- **Use Case**: Read the floor's divisor directly: arrival rate over this rate is the replica count the load implies. A `source` that stays `neighbour` after a shape change means the fleet has not yet measured itself under the new shape.
+  - `source`: `derived` (from the variant's own ITL line at the pricing k), `borrowed-line` (the same, from a line a sibling with the same engine configuration fitted), `measured` (the variant's own saturated window for the output length being served) or `neighbour` (a neighbouring output-length bucket's window, used until the served bucket has its own). The throughput floor may hold a fleet on a `borrowed-line` or `neighbour` rate but not grow one -- nor on a `measured` window with too few readings, which the floor's `heldWhy=single-sample` reports
+- **Use Case**: What one replica of the variant is priced to complete at saturation. It is the variant's own figure, not the floor's divisor: the floor works per role, takes the median over the role's replicas that read their own bucket (dropping neighbour and borrowed-line readings whenever one does), and adds the backlog. On a role with one variant and readings of one kind the two agree. A `source` that stays `neighbour` after a shape change means the fleet has not yet measured itself under the new shape.
 - **Example**: variants priced on a neighbouring bucket's reading, and for how long:
   ```promql
   wva_service_rate_per_replica{source="neighbour"}
@@ -1299,7 +1299,7 @@ per pod.
 
 ### `wva_pricing_k`
 - **Type**: Gauge
-- **Description**: The KV utilization the ITL line is evaluated at to price a decode replica: `kvCacheThreshold` x `scaleUpThreshold`, clamped to the range a line is fitted over. Composed, so 0.68 with the shipped defaults, not the 0.85 that `k_sat` suggests.
+- **Description**: The KV utilization an ITL line is evaluated at to derive a decode replica's service rate, published for every model the saturation analyzer runs on, including those with no decode role: `kvCacheThreshold` x `scaleUpThreshold`, clamped to the range a line is fitted over. Composed, so 0.68 with the shipped defaults, not the 0.85 that `k_sat` suggests.
 - **Labels**:
   - `namespace`: the model's namespace (scraped as `exported_namespace`)
   - `model_name`: model ID
