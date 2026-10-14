@@ -2082,7 +2082,19 @@ so_target_namespaces() {
         # admin-owned controller — the whole point of which is to sit outside the
         # namespace it manages — planned against its own empty namespace and
         # reported that there was nothing to autoscale.
-        wva) echo "${WVA_WATCH_NS:-$WVA_NS}"; return ;;
+        #
+        # With WVA_NS given and no WVA_WATCH_NS, a NAMESPACE that differs from it
+        # is the managed one: `NAMESPACE=<ns> make scaledobjects-plan WVA_NS=<ctl>`
+        # is the out-of-reach shape spelled the obvious way, and it scanned the
+        # controller's own empty namespace.
+        wva) if [ -n "${WVA_WATCH_NS:-}" ]; then
+                 echo "$WVA_WATCH_NS"
+             elif [ -n "${NAMESPACE_EXPLICIT:-}" ] && [ "$(wva_install_scope)" = namespace ]; then
+                 echo "$NAMESPACE_EXPLICIT"
+             else
+                 echo "$WVA_NS"
+             fi
+             return ;;
         all) : ;;
         *)   echo "$scope"; return ;;
     esac
@@ -2174,9 +2186,201 @@ so_existing_info() {
                    | .metadata.scalingPolicy // empty ] | first // ""),
                 (([ .spec.triggers[]?.metadata.scalerAddress // ""
                     | select(startswith("wva-external-scaler.")) ] | length > 0)
-                 | tostring) ]
+                 | tostring),
+                # The WVA trigger itself, for what adoption must not reset: the
+                # modelID it already carries, every key the plan does not write
+                # (comma-joined, sorted), and the address it already names.
+                (([ .spec.triggers[]? | .metadata // {}
+                    | select((.scalerAddress // "") | startswith("wva-external-scaler.")) ]
+                  | first // {}) as $w
+                 | ($w.modelID // ""),
+                   ($w | del(.scalerAddress, .modelID, .variantCost, .scalingPolicy)
+                       | keys | join(",")),
+                   ($w.scalerAddress // "")) ]
+            | map(tostring | gsub("[\u001e\u001f\n]"; " "))
             | join("")' 2>/dev/null \
         | head -1
+}
+
+# so_kept_trigger_keys echoes, as a JSON object, the metadata of the WVA trigger on
+# ScaledObject $2 in $1 minus the keys an adopt writes (scalerAddress, modelID,
+# variantCost, scalingPolicy). That is what an adopt carries over: hand-set keys
+# such as defaultOutputTokens or warmPool, which the plan never names and a merge
+# patch -- which REPLACES the triggers list -- would otherwise drop.
+#
+# Only a trigger already naming a wva-external-scaler contributes. A prometheus or
+# cpu trigger is what adoption exists to displace, and its serverAddress or query
+# carried onto the WVA trigger would be nonsense.
+#
+# `{}` for an object with no WVA trigger. Non-zero when the object cannot be read:
+# "nothing to keep" and "could not look" must not be the same answer, because the
+# second one, patched over, is exactly the loss this exists to prevent.
+so_kept_trigger_keys() {
+    local ns="$1" so="$2" json
+    json=$(kubectl get scaledobject "$so" -n "$ns" -o json 2>/dev/null) || return 1
+    [ -n "$json" ] || return 1
+    printf '%s' "$json" | jq -ce '
+        [ .spec.triggers[]? | .metadata // {}
+          | select((.scalerAddress // "") | startswith("wva-external-scaler.")) ]
+        | first // {}
+        | del(.scalerAddress, .modelID, .variantCost, .scalingPolicy)' 2>/dev/null
+}
+
+# so_address_ns echoes the namespace a scalerAddress names:
+# wva-external-scaler.<namespace>.svc...:port, or the short form
+# wva-external-scaler.<namespace>:port. The port is cut first, so the short form
+# does not leave it stuck to the namespace.
+so_address_ns() {
+    printf '%s' "$1" | cut -d: -f1 | cut -d. -f2
+}
+
+# so_prefer_existing_model keeps the modelID an adopted ScaledObject already
+# carries, for the plan entry so_discover is writing. It reads and sets the
+# caller's locals: model, note, existing_model, existing_name.
+#
+# Re-discovery is a guess about what the container serves -- --served-model-name,
+# else --model, else a positional -- and the object's modelID is what somebody
+# registered, possibly by hand because the guess was wrong. A plan re-run
+# unedited replaced the second with the first, so `apply: adopt` "refreshing in
+# place" could re-register a working workload under a model no metric reports.
+# The existing value wins, and a mismatch is said out loud with the edit that
+# follows the container instead.
+#
+# SO_PREFER_EXISTING_MODEL=false turns it off. so_verify_scaledobjects does,
+# because its plan is a measurement of what the containers serve: preferring the
+# object's own modelID there would make every drift compare equal to itself.
+so_prefer_existing_model() {
+    local ns="$1" name="$2" rs=$'\036'
+    [ "${SO_PREFER_EXISTING_MODEL:-true}" = "true" ] || return 0
+    [ -n "${existing_model:-}" ] || return 0
+    [ "$existing_model" != "$model" ] || return 0
+    if [ -z "$model" ]; then
+        note="${note:+$note$rs}modelID is the one ScaledObject $existing_name already carries; discovery could not read one from the container."
+    else
+        log_warning "  $ns/$name: ScaledObject $existing_name carries modelID '$existing_model', but the container reads as serving '$model'. The plan keeps '$existing_model'; set modelID: \"$model\" in it to follow the container."
+        note="${note:+$note$rs}modelID kept as the one ScaledObject $existing_name already carries. Discovery reads \"$model\" from the container: if that is what it serves now, set modelID: \"$model\" here, or WVA matches no metric for it (make verify-scaledobjects reports DRIFT)."
+    fi
+    model="$existing_model"
+}
+
+# so_kept_keys_note says, in the entry so_discover is writing, which trigger keys
+# an adopt carries over untouched. Reads the caller's existing_kept and
+# existing_name, appends to its note.
+so_kept_keys_note() {
+    local rs=$'\036'
+    [ -n "${existing_kept:-}" ] || return 0
+    note="${note:+$note$rs}apply: adopt keeps these trigger keys of ScaledObject $existing_name as they are: ${existing_kept//,/, }. It rewrites only scalerAddress, modelID, variantCost and scalingPolicy."
+}
+
+# so_scaler_evidence echoes, one per line, the namespaces that the objects in
+# namespace $1 say the controller managing it runs in:
+#
+#   - the RoleBinding the installer writes into a managed namespace for a
+#     controller installed elsewhere (labelled managed-by llm-scaling-manager,
+#     subject ServiceAccount wva-controller-manager in the controller's
+#     namespace) -- written by whoever installed that controller, so it is the
+#     out-of-reach shape's own record of where its controller lives;
+#   - the address every WVA ScaledObject there already names.
+#
+# Evidence, not a verdict: the caller checks each for a live Service. A read that
+# fails contributes nothing, and the caller's refusal says how to name it instead.
+so_scaler_evidence() {
+    local ns="$1"
+    kubectl get rolebinding -n "$ns" -l app.kubernetes.io/managed-by=llm-scaling-manager -o json 2>/dev/null \
+        | jq -r '.items[]? | .subjects[]?
+            | select(.kind == "ServiceAccount" and .name == "wva-controller-manager")
+            | .namespace // empty' 2>/dev/null || true
+    kubectl get scaledobject -n "$ns" -o json 2>/dev/null \
+        | jq -r '.items[]? | .spec.triggers[]? | .metadata.scalerAddress // ""
+            | select(startswith("wva-external-scaler."))' 2>/dev/null \
+        | while IFS= read -r a; do so_address_ns "$a"; echo; done || true
+}
+
+# so_resolve_scaler_ns sets SO_SCALER_NS: the namespace of the WVA install whose
+# scaler every trigger this run writes will name. $@ are the namespaces the run
+# writes ScaledObjects (or pools) into. Call it directly, never inside $( ): it
+# refuses through log_error, and an exit in a subshell is no refusal.
+#
+# WVA_NS used to be written into every address unexamined, and WVA_NS is the
+# MANAGED namespace whenever NAMESPACE is set and the scope is namespace -- which
+# is right for a controller installed beside its workloads and wrong for one
+# installed out of reach in another namespace. A tenant running the plan/apply
+# targets there got wva-external-scaler.<their namespace>, where nothing runs:
+# KEDA cannot fetch a metric spec and the HPA falls back to CPU, on an install
+# that otherwise looks healthy. Re-running `apply: adopt` did the same to objects
+# that had been working.
+#
+# In order:
+#   1. WVA_NS given explicitly: used. A Service the API server says is absent is
+#      refused; one it will not show us (Forbidden) is used with a warning -- a
+#      tenant may not be allowed to read the controller's namespace at all.
+#   2. A wva-external-scaler Service in WVA_NS: used.
+#   3. Otherwise the namespaces' own record (so_scaler_evidence), keeping only
+#      those that are not provably dead. Exactly one is used; several, or none,
+#      is refused with the command that names it.
+#
+# Never a dead address: an address nothing answers is the failure being fixed.
+SO_SCALER_NS=""
+so_resolve_scaler_ns() {
+    local rc=0 ns c own_state own_err cands="" live="" unverified="" picked n
+    SO_SCALER_NS=""
+    if [ -n "${WVA_NS_EXPLICIT:-}" ]; then
+        wva_scaler_svc_state "$WVA_NS_EXPLICIT" || rc=$?
+        case "$rc" in
+            0) SO_SCALER_NS="$WVA_NS_EXPLICIT"; return 0 ;;
+            1) log_error "WVA_NS=$WVA_NS_EXPLICIT has no wva-external-scaler Service, so every trigger written would name a scaler nothing answers and KEDA would fall back to CPU. Pass the namespace the WVA controller runs in." ;;
+            *) log_warning "Cannot verify (Forbidden or unreadable) that WVA_NS=$WVA_NS_EXPLICIT runs a wva-external-scaler Service: ${WVA_SCALER_SVC_ERR:-no detail}"
+               log_warning "  Using it as given. If it is wrong, KEDA reports the trigger failing and the HPA falls back to CPU."
+               SO_SCALER_NS="$WVA_NS_EXPLICIT"; return 0 ;;
+        esac
+    fi
+
+    wva_scaler_svc_state "$WVA_NS" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        SO_SCALER_NS="$WVA_NS"
+        return 0
+    fi
+    own_state="$rc" own_err="${WVA_SCALER_SVC_ERR:-}"
+
+    for ns in "$@"; do
+        [ -n "$ns" ] || continue
+        cands="$cands
+$(so_scaler_evidence "$ns")"
+    done
+    cands=$(printf '%s\n' "$cands" | grep -v '^[[:space:]]*$' | sort -u || true)
+    while IFS= read -r c; do
+        [ -n "$c" ] || continue
+        rc=0
+        wva_scaler_svc_state "$c" || rc=$?
+        case "$rc" in
+            0) live="$live $c" ;;
+            1) : ;;
+            *) unverified="$unverified $c" ;;
+        esac
+    done <<< "$cands"
+    picked="$(printf '%s\n' $live $unverified | grep -v '^$' | sort -u || true)"
+    n=$(printf '%s' "$picked" | grep -c . || true)
+
+    local first_ns="${1:-<namespace>}" cmd
+    cmd="NAMESPACE=$first_ns make scaledobjects-apply WVA_NS=<controller-namespace> WVA_WATCH_NS=$first_ns${WVA_DEFAULT_SO_PLAN:+ WVA_DEFAULT_SO_PLAN=$WVA_DEFAULT_SO_PLAN}"
+    if [ "$n" -eq 1 ]; then
+        SO_SCALER_NS="$picked"
+        case " $live " in
+            *" $picked "*) log_info "Scaler: wva-external-scaler.$picked -- the controller $(printf '%s' "$*" | tr ' ' ',') already names (no scaler Service in $WVA_NS)." ;;
+            *) log_warning "Scaler: wva-external-scaler.$picked, the controller $(printf '%s' "$*" | tr ' ' ',') already names. Cannot verify (Forbidden) that it is running; to say so explicitly: NAMESPACE=$1 make scaledobjects-apply WVA_NS=$picked WVA_WATCH_NS=$1" ;;
+        esac
+        return 0
+    fi
+    if [ "$n" -gt 1 ]; then
+        log_error "The objects in $(printf '%s' "$*" | tr ' ' ',') name several WVA installs ($(printf '%s' "$picked" | tr '\n' ' ')). Which one these workloads belong to is your decision; name it:
+    $cmd"
+    fi
+    if [ "$own_state" -eq 1 ]; then
+        log_error "There is no wva-external-scaler Service in $WVA_NS, and nothing in $(printf '%s' "$*" | tr ' ' ',') names the controller that manages it. Writing that address would point KEDA at nothing. Name the namespace the WVA controller runs in:
+    $cmd"
+    fi
+    log_error "Cannot verify (Forbidden or unreadable) a wva-external-scaler Service in $WVA_NS: ${own_err:-no detail}. Nothing in $(printf '%s' "$*" | tr ' ' ',') names the controller either. Name the namespace the WVA controller runs in:
+    $cmd"
 }
 
 # so_existing_name echoes just the name, for callers that only ask whether one is
@@ -2192,7 +2396,7 @@ so_existing_name() {
 # deliberate act rather than an undiscoverable one.
 so_discover() {
     local ns name args envs labels objlabels model model_ref pool kind apply note drain weights caches
-    local existing existing_name existing_min existing_max existing_cost existing_policy existing_is_wva
+    local existing existing_name existing_min existing_max existing_cost existing_policy existing_is_wva existing_model existing_kept
     local min max cost policy
     so_plan_preamble
     echo "plan:"
@@ -2284,10 +2488,12 @@ so_discover() {
                     # Its own bounds are carried into the entry either way, so
                     # adopting or re-applying unedited changes only who decides
                     # the count, never the count itself.
-                    IFS=$'\037' read -r existing_name existing_min existing_max existing_cost existing_policy existing_is_wva <<< "$existing"
+                    IFS=$'\037' read -r existing_name existing_min existing_max existing_cost existing_policy existing_is_wva existing_model existing_kept _ <<< "$existing"
                     min="$existing_min"; max="$existing_max"; cost="$existing_cost"
                     policy="$existing_policy"
                     if [ "$existing_is_wva" = "true" ]; then
+                        so_prefer_existing_model "$ns" "$name"
+                        so_kept_keys_note
                         # Already assigned to WVA -- nothing to protect by
                         # defaulting to no here. Re-applying just refreshes the
                         # object in place (this is exactly the modelID-drift
@@ -2458,7 +2664,7 @@ so_warmpool_block() {
 # which is the failure this whole function exists to remove.
 so_discover_fma_requesters() {
     local ns="$1" name model_label model apply note pool
-    local existing existing_name existing_min existing_max existing_cost existing_policy existing_is_wva
+    local existing existing_name existing_min existing_max existing_cost existing_policy existing_is_wva existing_model existing_kept
     local min max cost policy sibling scrapers launchers
 
     while IFS='|' read -r name model_label; do
@@ -2531,10 +2737,12 @@ so_discover_fma_requesters() {
 
         existing=$(so_existing_info "$ns" "$name")
         if [ -n "$existing" ]; then
-            IFS=$'\037' read -r existing_name existing_min existing_max existing_cost existing_policy existing_is_wva <<< "$existing"
+            IFS=$'\037' read -r existing_name existing_min existing_max existing_cost existing_policy existing_is_wva existing_model existing_kept _ <<< "$existing"
             min="$existing_min"; max="$existing_max"; cost="$existing_cost"
             policy="$existing_policy"
             if [ "$existing_is_wva" = "true" ]; then
+                so_prefer_existing_model "$ns" "$name"
+                so_kept_keys_note
                 apply=adopt
                 note="${note:+$note}Already targets WVA (ScaledObject $existing_name, min $existing_min, max $existing_max) — apply: adopt refreshes it in place. Set apply: no to leave it untouched."
             else
@@ -2611,6 +2819,18 @@ so_apply_plan() {
         return 0
     fi
 
+    # Where the scaler is, settled once and before anything is written -- and only
+    # when an entry will write an address. See so_resolve_scaler_ns: WVA_NS alone
+    # names the managed namespace in the out-of-reach shape, where no scaler runs.
+    local write_nss
+    write_nss=$(printf '%s\n' "$rows" | awk -F'\037' '$1 == "yes" || $1 == "adopt" {print $2}' | sort -u | tr '\n' ' ')
+    if [ -n "${write_nss// /}" ]; then
+        # shellcheck disable=SC2086
+        so_resolve_scaler_ns $write_nss
+        scaler_addr="wva-external-scaler.${SO_SCALER_NS}.svc.cluster.local:9090"
+    fi
+
+    local kept kept_keys entry_addr old_addr old_ns old_state
     while IFS=$'\037' read -r apply ns kind name model min max cost policy; do
         [ -n "$name" ] || continue
         case "$apply" in
@@ -2661,9 +2881,40 @@ so_apply_plan() {
             # as its author left it. The bounds are included because the plan
             # showed them, carried over from this very object, so applying them
             # unedited is a no-op and editing them is how you change them.
+            #
+            # Every OTHER key on its WVA trigger is carried over: the patch
+            # replaces the triggers list wholesale, so defaultOutputTokens,
+            # warmPool and the rest of what somebody set by hand were stripped by
+            # every re-run. Unreadable is not "nothing to keep" -- patching then
+            # would be that loss -- so it skips the entry instead.
+            if ! kept=$(so_kept_trigger_keys "$ns" "$existing") || [ -z "$kept" ]; then
+                log_warning "  $ns/$name: could not read ScaledObject $existing, so its trigger keys cannot be kept — NOT patching it. Check you can get scaledobjects in $ns and re-run."
+                skipped=$((skipped + 1)); continue
+            fi
+            kept_keys=$(printf '%s' "$kept" | jq -r 'keys | join(", ")' 2>/dev/null || true)
+
+            # An object already pointing at a WVA that answers stays on it unless
+            # WVA_NS was given: re-running a plan is not a decision to move a
+            # working workload to another install. Only a provably dead address
+            # is rewritten.
+            entry_addr="$scaler_addr"
+            old_addr=$(kubectl get scaledobject "$existing" -n "$ns" -o json 2>/dev/null \
+                | jq -r '[.spec.triggers[]?.metadata.scalerAddress // "" | select(startswith("wva-external-scaler."))] | first // ""' 2>/dev/null || true)
+            if [ -n "$old_addr" ] && [ -z "${WVA_NS_EXPLICIT:-}" ]; then
+                old_ns=$(so_address_ns "$old_addr")
+                if [ -n "$old_ns" ] && [ "$old_ns" != "$SO_SCALER_NS" ]; then
+                    old_state=0
+                    wva_scaler_svc_state "$old_ns" || old_state=$?
+                    if [ "$old_state" -ne 1 ]; then
+                        entry_addr="$old_addr"
+                        log_info "  $ns/$name: keeps its scaler $old_addr$([ "$old_state" -eq 0 ] || printf ' (cannot verify, Forbidden)'). To move it: NAMESPACE=$ns make scaledobjects-apply WVA_NS=$SO_SCALER_NS WVA_WATCH_NS=$ns"
+                    fi
+                fi
+            fi
+
             if kubectl patch scaledobject "$existing" -n "$ns" --type=merge \
-                -p "$(so_adopt_patch "$model" "$scaler_addr" "$min" "$max" "$cost" "$policy")" > /dev/null; then
-                log_success "  $ns/$name ($kind) -> ScaledObject $existing now scales on WVA (modelID: $model, $min-$max)"
+                -p "$(so_adopt_patch "$model" "$entry_addr" "$min" "$max" "$cost" "$policy" "$kept")" > /dev/null; then
+                log_success "  $ns/$name ($kind) -> ScaledObject $existing now scales on WVA (modelID: $model, $min-$max${kept_keys:+; kept: $kept_keys})"
                 adopted=$((adopted + 1))
             else
                 log_warning "  $ns/$name: failed to update ScaledObject $existing"
@@ -2738,6 +2989,16 @@ so_apply_warmpools() {
         log_warning "  holding accelerators while reporting itself empty. Set WVA_NS and re-apply."
         return 0
     fi
+    # And the CONTROLLER's namespace, not WVA_NS as given: in the out-of-reach
+    # shape WVA_NS is the managed namespace, and a policy admitting it denies
+    # the controller every read. Already settled when the plan wrote a
+    # ScaledObject; settled here when it only asked for pools.
+    if [ -z "${SO_SCALER_NS:-}" ]; then
+        local pool_nss
+        pool_nss=$(printf '%s\n' "$rows" | awk -F'\037' '{print $1}' | sort -u | tr '\n' ' ')
+        # shellcheck disable=SC2086
+        so_resolve_scaler_ns $pool_nss
+    fi
 
     # Optional now. warmpool.sh defaults to the proxy image config/warmpool pins,
     # which is published, so an install that builds nothing still gets a working
@@ -2775,7 +3036,7 @@ so_apply_warmpools() {
                 -n "$wp_ns" --name "$wp_name" --gpus "$wp_gpus" \
                 --accelerator "$wp_acc" --models "$wp_models" --model-size "$wp_size" \
                 --replicas "$wp_replicas" --max "$wp_max" --reserve "$wp_reserve" \
-                ${image:+--proxy-image "$image"} --wva-namespace "$WVA_NS" \
+                ${image:+--proxy-image "$image"} --wva-namespace "$SO_SCALER_NS" \
                 --monitoring-namespace "${MONITORING_NAMESPACE:-}" \
                 --runtime-class "${WARMPOOL_RUNTIME_CLASS:-nvidia-legacy}"; then
             made=$((made + 1))
@@ -2861,16 +3122,22 @@ install_default_scaledobjects() {
 # `triggers` is a list, so a merge patch REPLACES it wholesale, which is what is
 # wanted. An object scaled by a prometheus or cpu trigger must stop being scaled by
 # it, or two scalers feed one HPA and the larger answer silently wins.
+#
+# $7 is the JSON object of trigger keys to keep (so_kept_trigger_keys): every key
+# of the existing WVA trigger the plan does not write. They go in first, so a key
+# the plan does write always wins.
 so_adopt_patch() {
-    local model="$1" scaler_addr="$2" min="$3" max="$4" cost="$5" policy="${6:-}"
+    local model="$1" scaler_addr="$2" min="$3" max="$4" cost="$5" policy="${6:-}" kept="${7:-}"
+    [ -n "$kept" ] || kept='{}'
     # scalingPolicy is added only when the entry names one: an empty value would
     # be a metadata key whose value says "the default", which is what its absence
     # already says, and it would survive in the object long after anybody knew why.
     jq -nc --arg m "$model" --arg a "$scaler_addr" --arg c "$cost" --arg p "$policy" \
-        --argjson min "$min" --argjson max "$max" \
+        --argjson min "$min" --argjson max "$max" --argjson kept "$kept" \
         '{spec:{minReplicaCount:$min, maxReplicaCount:$max,
           triggers:[{type:"external-push",name:"wva-external-scaler",
-          metadata:({scalerAddress:$a, modelID:$m, variantCost:$c}
+          metadata:(($kept | del(.scalerAddress, .modelID, .variantCost, .scalingPolicy))
+                    + {scalerAddress:$a, modelID:$m, variantCost:$c}
                     + (if $p == "" then {} else {scalingPolicy:$p} end))}]}}'
 }
 
@@ -2924,11 +3191,23 @@ so_repoint_stale() {
         # `wva-external-scaler.<ns>:9090` is legal and leaves the port stuck to the
         # namespace, which would make a live install look dead and get its
         # workload taken away.
-        named_ns=$(printf '%s' "$addr" | cut -d: -f1 | cut -d. -f2)
-        if [ -n "$named_ns" ] && kubectl get svc wva-external-scaler -n "$named_ns" > /dev/null 2>&1; then
-            log_info "  $ns/$name: points at a WVA that is running in $named_ns — leaving it alone. Repointing it here would take it off that install."
-            left=$((left + 1))
-            continue
+        named_ns=$(so_address_ns "$addr")
+        if [ -n "$named_ns" ]; then
+            # Three answers, not two. Forbidden is not absent: a namespace we may
+            # not read is one we cannot call dead, and taking a workload off a
+            # live install on that guess is the hijack (2) above exists to stop.
+            local svc_state=0
+            wva_scaler_svc_state "$named_ns" || svc_state=$?
+            if [ "$svc_state" -eq 0 ]; then
+                log_info "  $ns/$name: points at a WVA that is running in $named_ns — leaving it alone. Repointing it here would take it off that install."
+                left=$((left + 1))
+                continue
+            fi
+            if [ "$svc_state" -ne 1 ]; then
+                log_warning "  $ns/$name: points at $named_ns, and whether a scaler runs there cannot be verified (Forbidden or unreadable: ${WVA_SCALER_SVC_ERR:-no detail}) — leaving it alone. If it is dead, adopt it explicitly: NAMESPACE=$ns make scaledobjects-plan WVA_NS=$dest WVA_WATCH_NS=$ns, then scaledobjects-apply with the same variables and WVA_DEFAULT_SO_PLAN=<file>."
+                left=$((left + 1))
+                continue
+            fi
         fi
 
         triggers=$(kubectl get scaledobject "$name" -n "$ns" -o json 2>/dev/null \
@@ -2966,10 +3245,16 @@ so_repoint_stale() {
 so_repoint_destination() {
     local found n
     if [ -n "${WVA_NS_EXPLICIT:-}" ]; then
-        if ! kubectl get svc wva-external-scaler -n "$WVA_NS_EXPLICIT" > /dev/null 2>&1; then
-            log_error "WVA_NS=$WVA_NS_EXPLICIT has no wva-external-scaler Service, so nothing would answer at that address. Install WVA there, or drop WVA_NS and let this find the install."
-            return 1
-        fi
+        local rc=0
+        wva_scaler_svc_state "$WVA_NS_EXPLICIT" || rc=$?
+        case "$rc" in
+            0) : ;;
+            1) log_error "WVA_NS=$WVA_NS_EXPLICIT has no wva-external-scaler Service, so nothing would answer at that address. Install WVA there, or drop WVA_NS and let this find the install."
+               return 1 ;;
+            *) # A tenant may not read the controller's namespace at all. Named
+               # explicitly, it is taken as given rather than refused as absent.
+               log_warning "Cannot verify (Forbidden or unreadable) that WVA_NS=$WVA_NS_EXPLICIT runs a wva-external-scaler Service: ${WVA_SCALER_SVC_ERR:-no detail}. Repointing at it as given." ;;
+        esac
         echo "$WVA_NS_EXPLICIT"
         return 0
     fi
@@ -3573,7 +3858,7 @@ so_verify_scaledobjects() {
     # Silenced on both streams: log_info/log_success write to stderr, and this
     # call's own "plan written, edit it" messaging is about a temp file this
     # function deletes before returning -- irrelevant to what verify reports.
-    WVA_DEFAULT_SO=plan WVA_DEFAULT_SO_PLAN="$plan_file" install_default_scaledobjects >/dev/null 2>&1
+    SO_PREFER_EXISTING_MODEL=false WVA_DEFAULT_SO=plan WVA_DEFAULT_SO_PLAN="$plan_file" install_default_scaledobjects >/dev/null 2>&1
 
     echo
     echo "=== modelID drift check ==="

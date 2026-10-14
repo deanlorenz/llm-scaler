@@ -215,15 +215,12 @@ var _ = Describe("PrometheusAlerts", Label("smoke"), Label("prometheus-alerts"),
 		GinkgoWriter.Printf("✓ Rule group '%s' is loaded in Prometheus\n", prometheusGroupName)
 
 		By("Verifying all rules are healthy")
-		Expect(wvaGroup.Rules).To(HaveLen(5), "Should have 5 rules loaded")
-
-		expectedRules := []string{
-			"WVAHighErrorRate",
-			"WVAOptimizationLoopStalled",
-			"WVAMetricsCollectionFailing",
-			"WVAGPUResourceExhausted",
-			"WVAReplicaScalingThrashing",
-		}
+		// Read from the manifest we ship, like the structure spec above: a list
+		// written out here asserted 5 rules against a file holding 10.
+		expectedRules, rulesErr := alerts.AlertNames()
+		Expect(rulesErr).NotTo(HaveOccurred())
+		Expect(wvaGroup.Rules).To(HaveLen(len(expectedRules)),
+			"Prometheus should load every rule in config/components/prometheus-alerts/prometheusrule.yaml")
 
 		foundRules := make(map[string]bool)
 		for _, rule := range wvaGroup.Rules {
@@ -255,14 +252,9 @@ var _ = Describe("PrometheusAlerts", Label("smoke"), Label("prometheus-alerts"),
 		}, prometheusRule)
 		Expect(err).NotTo(HaveOccurred(), "PrometheusRule should exist")
 
-		By("Verifying all 5 alert rules are present")
-		expectedAlerts := []string{
-			"WVAHighErrorRate",
-			"WVAOptimizationLoopStalled",
-			"WVAMetricsCollectionFailing",
-			"WVAGPUResourceExhausted",
-			"WVAReplicaScalingThrashing",
-		}
+		By("Verifying every shipped alert rule is present")
+		expectedAlerts, alertsErr := alerts.AlertNames()
+		Expect(alertsErr).NotTo(HaveOccurred())
 
 		rules := prometheusRule.Spec.Groups[0].Rules
 		foundAlerts := make(map[string]bool)

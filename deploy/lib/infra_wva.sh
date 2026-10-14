@@ -6,39 +6,6 @@
 # Requires funcs: log_info/log_warning/log_success/log_error, containsElement().
 #
 
-set_tls_verification() {
-    log_info "Setting TLS verification..."
-
-    # Auto-detect TLS verification setting if not specified
-    if ! containsElement "$ENVIRONMENT" "${NON_EMULATED_ENV_LIST[@]}"; then
-            SKIP_TLS_VERIFY="true"
-            log_info "Emulated environment detected - enabling TLS skip verification for self-signed certificates"
-    else
-        case "$ENVIRONMENT" in
-            "kubernetes")
-                # TODO: change to false when Kubernetes support for TLS verification is enabled
-                SKIP_TLS_VERIFY="true"
-                log_info "Kubernetes cluster - enabling TLS skip verification for self-signed certificates"
-                ;;
-            "openshift")
-                # For OpenShift, we can use proper TLS verification since we have the Service CA
-                # However, defaulting to true for now to match current behavior
-                # TODO: Set to false once Service CA certificate extraction is fully validated
-                SKIP_TLS_VERIFY="true"
-                log_info "OpenShift cluster - TLS verification setting: $SKIP_TLS_VERIFY"
-                ;;
-            *)
-                SKIP_TLS_VERIFY="true"
-                log_warning "Unknown environment - enabling TLS skip verification for self-signed certificates"
-                ;;
-        esac
-    fi
-
-    export SKIP_TLS_VERIFY
-
-    log_success "Successfully set TLS verification to: $SKIP_TLS_VERIFY"
-}
-
 set_wva_logging_level() {
     log_info "Setting WVA logging level..."
 
@@ -1037,6 +1004,16 @@ EOF
             | jq -c 'if .data then {data: (.data | del(.default))} else empty end' 2>/dev/null || true)"
         # `{"data":{}}` is "nothing but default", which needs no restoring.
         [ "$preserved_policy" = '{"data":{}}' ] && preserved_policy=""
+
+        # And the limiter the live `default` declares, which the same apply resets
+        # to the shipped none. Kept below when WVA_LIMITER is not given -- see
+        # wva_live_limiters. Unreadable with WVA_LIMITER unset is a refusal: the
+        # install cannot tell whether it is about to unbound a bounded controller.
+        local live_rc=0
+        wva_live_limiters "$WVA_NS" || live_rc=$?
+        if [ "$live_rc" -ne 0 ] && [ -z "${WVA_LIMITER:-}" ]; then
+            log_error "Cannot read the limiter this controller runs with now (${WVA_LIVE_LIMITERS_ERR:-wva-scaling-policy-config in $WVA_NS is unreadable}), and this apply resets it. Re-run naming it: WVA_LIMITER=gpu-inventory|quota to declare one, or WVA_LIMITER=none to run without."
+        fi
     fi
 
     log_info "Applying Kustomize overlay: $kustomize_overlay (scope: ${WVA_APPLY_SCOPE:-all})"
@@ -1190,8 +1167,21 @@ wva_reconcile_prometheus_scheme() {
     #
     # Patches the "default" entry rather than shipping a second copy of it: the
     # entry carries every other default too, and a duplicate would drift.
-    case "${WVA_LIMITER:-none}" in
+    case "${WVA_LIMITER:-}" in
+        '')
+            # Not given: keep what the live policy declared before the apply reset
+            # it. An upgrade is not a decision to unbound a controller -- least of
+            # all one an admin bounded with enable-physical-limiter, whose owner
+            # may not be the person upgrading it.
+            if [ -n "${WVA_LIVE_LIMITERS:-}" ]; then
+                wva_keep_live_limiters "$WVA_NS" "$WVA_LIVE_LIMITERS"
+            fi
+            ;;
         none)
+            if [ -n "${WVA_LIVE_LIMITERS:-}" ]; then
+                log_warning "WVA_LIMITER=none: the limiter this controller had is REMOVED, and scaling is now UNBOUNDED. It was:"
+                printf '%s\n' "$WVA_LIVE_LIMITERS" | yq -P '.' 2>/dev/null | sed 's/^/    /' >&2 || true
+            fi
             # Nothing to do, and that is MEASURED rather than assumed. A branch
             # here removed a previously declared limiter, on the theory that
             # re-installing with the default left one in force. It does not: the

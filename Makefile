@@ -44,15 +44,18 @@ NAMESPACE           ?= llm-d-optimized-baseline
 # Install scope: cluster | namespace. Empty means the historical default —
 # namespace on OpenShift, cluster elsewhere. See deploy/lib/common.sh.
 WVA_SCOPE           ?=
-# Declare a GPU limiter at install: none | gpu-inventory | quota. Default none,
-# matching the shipped config — see docs/reference/gpu-limiter.md.
+# Declare a GPU limiter at install: none | gpu-inventory | quota. Unset keeps the
+# limiter the live policy already declares (a first install has none, matching the
+# shipped config); none removes it -- the default was none before, so every
+# re-install silently unbounded a bounded controller.
+# See docs/reference/gpu-limiter.md.
 # `quota` additionally REQUIRES WVA_QUOTAS, the per-accelerator budget
 # (WVA_QUOTAS='H200=8 A100=4'); there is no default, and an empty quota entry is
 # a budget of zero rather than unlimited. WVA_QUOTA_SCOPE is namespace|cluster.
 # WVA_QUOTA_KUEUE=true also reads Kueue: per namespace and accelerator type the
 # smaller of the Kueue nominal quota and WVA_QUOTAS applies (name the types with
 # -1 to let Kueue set the figure) -- docs/well-lit-paths/kueue-bounded-quotas/.
-WVA_LIMITER         ?= none
+WVA_LIMITER         ?=
 # A ScaledObject is how a workload registers with WVA. WVA_DEFAULT_SO=true has the
 # installer create one per llm-d model server; WVA_DEFAULT_SO_NS picks the
 # namespace, or "all" for every namespace holding one (cluster-scoped installs).
@@ -1205,7 +1208,8 @@ test-e2e-full: ## Run full e2e test suite
 # Convenience targets for local e2e testing
 
 # Convenience target that deploys KEDA infra + runs smoke tests.
-# Set DELETE_CLUSTER=true to delete Kind cluster after tests (default: keep cluster for debugging).
+# It never deletes the cluster: DELETE_CLUSTER has no effect here. Remove it with
+# `make destroy-kind-cluster` (or `kind delete cluster`) when done.
 .PHONY: test-e2e-smoke-with-setup
 test-e2e-smoke-with-setup:
 	$(MAKE) deploy-e2e-infra DEPLOY_ALERTING_RULES=true SCALER_BACKEND=keda
@@ -1242,7 +1246,8 @@ test-e2e-multi-controller: ## Run multi-controller e2e tests
 test-e2e-multi-controller-with-setup: deploy-e2e-infra test-e2e-multi-controller
 
 # Convenience target that deploys KEDA infra + runs full test suite.
-# Set DELETE_CLUSTER=true to delete Kind cluster after tests (default: keep cluster for debugging).
+# It never deletes the cluster: DELETE_CLUSTER has no effect here. Remove it with
+# `make destroy-kind-cluster` (or `kind delete cluster`) when done.
 # LWS is installed because the full suite includes LeaderWorkerSet scale-from-zero tests.
 .PHONY: test-e2e-full-with-setup
 test-e2e-full-with-setup:

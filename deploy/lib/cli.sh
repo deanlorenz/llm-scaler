@@ -53,7 +53,9 @@ Environment Variables:
                                changing your global current-context (default: unset)
 
  Scaling behaviour
-  WVA_LIMITER                  none (default) | gpu-inventory | quota. none means scaling is UNBOUNDED.
+  WVA_LIMITER                  (unset) | none | gpu-inventory | quota. Unset keeps the limiter the live
+                               policy already declares (none on a first install); none REMOVES it and
+                               scaling is UNBOUNDED.
                                gpu-inventory requires the controller to be able to list nodes.
   WVA_QUOTAS                   REQUIRED by WVA_LIMITER=quota: the per-accelerator budget, as
                                TYPE=N pairs — WVA_QUOTAS='H200=8 A100=4'. Use -1 for no cap on a

@@ -188,9 +188,35 @@ wva_scaler_namespaces() {
         printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | sort -u
         return 0
     fi
-    # No cluster-wide list. The one namespace we can name is still worth checking.
-    kubectl get svc wva-external-scaler -n "$WVA_NS" > /dev/null 2>&1 && echo "$WVA_NS"
+    # No cluster-wide list. The one namespace we can name is still worth checking
+    # -- and a Forbidden answer there is said, not folded into "none".
+    local rc=0
+    wva_scaler_svc_state "$WVA_NS" || rc=$?
+    case "$rc" in
+        0) echo "$WVA_NS" ;;
+        1) : ;;
+        *) log_warning "Cannot list Services cluster-wide, and cannot verify (Forbidden or unreadable) a wva-external-scaler Service in $WVA_NS either: ${WVA_SCALER_SVC_ERR:-no detail}. Pass WVA_NS=<namespace> to name the install." ;;
+    esac
     return 0
+}
+
+# wva_scaler_svc_state reports on the wva-external-scaler Service in namespace $1:
+# 0 it is there, 1 the API server says it is not, 2 could not look -- Forbidden,
+# or any other error. On 2, WVA_SCALER_SVC_ERR holds kubectl's first error line.
+#
+# Three answers because two of them were being read as one. A tenant whose
+# controller runs in a namespace they may not read gets Forbidden for a Service
+# that is there and answering, and treating that as "no scaler" either refused a
+# correct WVA_NS or rewrote a working address. Call it directly, not in $( ):
+# the variable is the caller's.
+wva_scaler_svc_state() {
+    local rc=0
+    WVA_SCALER_SVC_ERR=""
+    kc_capture get svc wva-external-scaler -n "$1" -o name || rc=$?
+    [ "$rc" -eq 0 ] && return 0
+    kc_not_found "$KC_ERR" && return 1
+    WVA_SCALER_SVC_ERR="$(printf '%s\n' "$KC_ERR" | grep -v '^[[:space:]]*$' | head -1)"
+    return 2
 }
 
 # wva_any_pod_ready reports whether any pod matching selector $2 in namespace $1
@@ -821,7 +847,9 @@ NAMESPACE is llm-d's own variable, so if you followed one of its guides it is al
 exported in that shell.
 
 (WVA_NS is a different setting: it names where the CONTROLLER is installed, which
-only differs from the managed namespace in the cluster-wide shape.)"
+differs from the managed namespace in the cluster-wide shape, and when the controller
+is installed out of reach in a namespace of its own: then pass both, as
+NAMESPACE=<managed> WVA_NS=<controller namespace> WVA_WATCH_NS=<managed>.)"
 }
 
 wva_resolve_namespace() {

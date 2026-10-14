@@ -3,7 +3,7 @@
 # Core install orchestration for deploy/install.sh.
 # Requires vars: ENVIRONMENT, SCRIPT_DIR, SKIP_CHECKS, deployment toggles.
 # Requires funcs sourced by install.sh: parse_args(), check_prerequisites(),
-# set_tls_verification(), set_wva_logging_level(), create_namespaces(), deploy_*(), verify_deployment(), print_summary().
+# set_wva_logging_level(), create_namespaces(), deploy_*(), verify_deployment(), print_summary().
 # llm-d install: see llm-d project guides or deploy/install-epp.sh for kind EPP setup.
 #
 
@@ -325,7 +325,7 @@ main() {
         # premise, ScaledObjects are its own output. This reports what is already
         # registered, so the reader knows whether 'adopt' will come up in the plan.
         wva_report_scaledobjects
-        log_success "Preflight passed for ENVIRONMENT=$ENVIRONMENT, WVA_SCOPE=${WVA_SCOPE:-<platform default>}, WVA_LIMITER=${WVA_LIMITER:-none}"
+        log_success "Preflight passed for ENVIRONMENT=$ENVIRONMENT, WVA_SCOPE=${WVA_SCOPE:-<platform default>}, WVA_LIMITER=${WVA_LIMITER:-<unset: keeps the live limiter>}"
         exit 0
     fi
 
@@ -419,7 +419,6 @@ main() {
         fi
     fi
 
-    set_tls_verification
     set_wva_logging_level
 
     if [ "${WVA_ENV_SOURCED:-false}" = "true" ]; then
