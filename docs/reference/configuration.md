@@ -55,7 +55,8 @@ Every option `deploy/install.sh` reads. Verified against the script: each entry 
 | `ENABLE_SCALE_TO_ZERO` | Allow a model to be parked at zero replicas, and enable the EPP `flowControl` gate that makes waking it possible | `true` |
 | `SKIP_CHECKS` | Skip prerequisite checks | `false` |
 | `SCALER_BACKEND` | `keda` or `none` (use a pre-installed backend) | `keda` |
-| `KEDA_NAMESPACE` | Namespace KEDA is installed in | `keda-system` |
+| `KEDA_NAMESPACE` | Namespace KEDA is installed in. Set, it is also the namespace the external-scaler NetworkPolicy admits; unset, the installer admits the namespace it finds a KEDA operator Pod in, else `keda-system` (`openshift-keda` on OpenShift) | `keda-system` |
+| `WVA_SCALER_NETWORKPOLICY` | Install the NetworkPolicy that admits the external scaler port (`:9090`) **only from KEDA's namespace**; metrics (`:8443`) and probes (`:8081`) stay open. `false` leaves `:9090` open to every Pod that can reach the controller, which can then rewrite any workload's trigger metadata and read every scaling decision | `true` |
 | `KEDA_HELM_INSTALL` | Install KEDA with Helm rather than assuming it is present | `false` |
 | `KEDA_CHART_VERSION` | KEDA Helm chart version | `2.19.0` |
 | `UNDEPLOY` | Remove instead of install (`install.sh` doubles as the uninstaller) | `false` |
@@ -441,6 +442,14 @@ default and the controller logs which ones it replaced. The horizons in force ar
 logged once at startup as `learned-state horizons`, so the log says what is actually
 running rather than what was asked for. Shortening them is how this is exercised on
 a cluster inside a test run instead of over a week.
+
+The external scaler serves **plaintext** gRPC by default and relies on the
+NetworkPolicy above. Two controller flags add TLS: `--external-scaler-cert-path`
+(a directory holding `tls.crt` and `tls.key`, reloaded on rotation) serves TLS, and
+KEDA then needs `caCert` in the trigger's TriggerAuthentication;
+`--external-scaler-client-ca` (a PEM bundle, read once) also requires every client
+to present a certificate it signed, i.e. KEDA's `tlsClientCert` and `tlsClientKey`.
+Both are off by default, and the shipped manifests do not set them.
 
 ## Optional: scaling band after `make deploy-e2e-infra`
 

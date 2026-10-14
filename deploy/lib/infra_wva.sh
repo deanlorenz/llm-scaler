@@ -182,6 +182,105 @@ wva_render_manager_config_patch() {
 EOF
 }
 
+# wva_resolve_scaler_keda_namespace sets WVA_SCALER_KEDA_NS to the namespace the
+# external-scaler NetworkPolicy admits to :9090 -- the one KEDA's operator runs in.
+#
+# A wrong answer fails CLOSED: KEDA is refused, its ScaledObjects go not-Ready
+# and nothing scales. So it is never guessed past what the cluster says:
+#
+#   1. KEDA_NAMESPACE, when the caller set it -- or when this install is the one
+#      putting KEDA there (KEDA_HELM_INSTALL=true; KEDA is installed AFTER the
+#      controller, so it cannot be found yet).
+#   2. Where a KEDA operator Pod is running, if exactly one namespace has one.
+#      Platform-managed KEDA is the reason: on OpenShift it is openshift-keda
+#      while KEDA_NAMESPACE defaults to keda-system.
+#   3. The platform default, openshift-keda or keda-system, when nothing is
+#      found -- a tenant often cannot list Pods cluster-wide.
+#
+# Sets a variable rather than echoing: log_error is an exit, and an exit inside
+# `$( )` would end only the subshell.
+wva_resolve_scaler_keda_namespace() {
+    if [ "${KEDA_NAMESPACE_EXPLICIT:-false}" = "true" ] || [ "${KEDA_HELM_INSTALL:-false}" = "true" ]; then
+        WVA_SCALER_KEDA_NS="$KEDA_NAMESPACE"
+        log_info "External scaler NetworkPolicy admits KEDA from $WVA_SCALER_KEDA_NS (KEDA_NAMESPACE)"
+        return 0
+    fi
+    local found="" sel count
+    for sel in "$KEDA_OPERATOR_LABEL_SELECTOR" app=keda-operator; do
+        found="$found $(kubectl get pods -A -l "$sel" -o jsonpath='{.items[*].metadata.namespace}' 2>/dev/null || true)"
+    done
+    found="$(printf '%s' "$found" | tr ' ' '\n' | sed '/^$/d' | sort -u)"
+    count=0
+    [ -n "$found" ] && count="$(printf '%s\n' "$found" | wc -l | tr -d ' ')"
+    case "$count" in
+        1)
+            WVA_SCALER_KEDA_NS="$found"
+            log_info "External scaler NetworkPolicy admits KEDA from $WVA_SCALER_KEDA_NS (where its operator runs)"
+            ;;
+        0)
+            if [ "${ENVIRONMENT:-}" = "openshift" ]; then
+                WVA_SCALER_KEDA_NS=openshift-keda
+            else
+                WVA_SCALER_KEDA_NS="$KEDA_NAMESPACE"
+            fi
+            log_info "External scaler NetworkPolicy admits KEDA from $WVA_SCALER_KEDA_NS (platform default; no KEDA operator Pod was visible). If KEDA runs elsewhere, set KEDA_NAMESPACE."
+            ;;
+        *)
+            log_error "KEDA operator Pods run in more than one namespace ($(printf '%s' "$found" | tr '\n' ' ')), so which one may call the external scaler is ambiguous. Set KEDA_NAMESPACE to the one that serves this cluster's ScaledObjects, or WVA_SCALER_NETWORKPOLICY=false to install without the policy."
+            ;;
+    esac
+}
+
+# wva_append_scaler_networkpolicy_patch points the external-scaler NetworkPolicy
+# at KEDA's namespace, or removes it with WVA_SCALER_NETWORKPOLICY=false. It
+# appends to the `patches:` list of the throw-away overlay's kustomization.yaml,
+# which must already exist.
+#
+# The `test` op makes a change to the shipped rule's shape fail the build rather
+# than rewrite whatever now sits at that path.
+wva_append_scaler_networkpolicy_patch() {
+    local kustomization="$1"
+    case "${WVA_SCALER_NETWORKPOLICY:-true}" in
+        false)
+            log_warning "WVA_SCALER_NETWORKPOLICY=false: the external scaler (:9090) is reachable from every Pod that can reach the controller. Any of them can rewrite another workload's trigger metadata and read every scaling decision."
+            # An apply never prunes, so an upgrade that opts out has to remove
+            # the policy an earlier install left, or opting out does nothing.
+            if [ "${WVA_APPLY_SCOPE:-all}" != "prereqs" ]; then
+                kubectl delete networkpolicy wva-external-scaler -n "$WVA_NS" --ignore-not-found >/dev/null 2>&1 || true
+            fi
+            cat >> "$kustomization" <<PATCH
+- patch: |-
+    \$patch: delete
+    apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: wva-external-scaler
+  target:
+    group: networking.k8s.io
+    kind: NetworkPolicy
+    name: wva-external-scaler
+PATCH
+            return 0
+            ;;
+        true) ;;
+        *) log_error "WVA_SCALER_NETWORKPOLICY must be true or false (got '${WVA_SCALER_NETWORKPOLICY}')" ;;
+    esac
+    wva_resolve_scaler_keda_namespace
+    cat >> "$kustomization" <<PATCH
+- patch: |-
+    - op: test
+      path: /spec/ingress/1/ports/0/port
+      value: 9090
+    - op: replace
+      path: /spec/ingress/1/from/0/namespaceSelector/matchLabels/kubernetes.io~1metadata.name
+      value: "${WVA_SCALER_KEDA_NS}"
+  target:
+    group: networking.k8s.io
+    kind: NetworkPolicy
+    name: wva-external-scaler
+PATCH
+}
+
 deploy_wva_controller() {
     log_info "Deploying Workload-Variant-Autoscaler..."
     log_info "Using image: $WVA_IMAGE_REPO:$WVA_IMAGE_TAG"
@@ -298,6 +397,9 @@ EOF
     # reason the pull-policy patch is.
     wva_resolve_prometheus_url
     wva_render_manager_config_patch "$tmp_overlay"
+
+    # Who may call the external scaler: KEDA's namespace only, unless opted out.
+    wva_append_scaler_networkpolicy_patch "$tmp_overlay/kustomization.yaml"
 
     # Prune on INSTALL as well as uninstall. Waiting for an uninstall would leave
     # the grant in place on every cluster that already has it, since upgrading is

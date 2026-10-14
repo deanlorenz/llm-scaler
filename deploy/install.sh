@@ -117,6 +117,10 @@ fi
 # - keda on openshift: platform-managed KEDA only (no Helm install from this script).
 # - none: skip scaler install (cluster already provides external metrics).
 SCALER_BACKEND=${SCALER_BACKEND:-keda}
+# Recorded before the default lands: the external-scaler NetworkPolicy trusts an
+# explicit KEDA_NAMESPACE, and otherwise looks for where KEDA actually runs.
+KEDA_NAMESPACE_EXPLICIT=false
+[ -n "${KEDA_NAMESPACE:-}" ] && KEDA_NAMESPACE_EXPLICIT=true
 KEDA_NAMESPACE=${KEDA_NAMESPACE:-keda-system}
 # Pinned for reproducible Helm installs (used when deploy_keda actually runs helm upgrade).
 KEDA_CHART_VERSION=${KEDA_CHART_VERSION:-2.19.0}
