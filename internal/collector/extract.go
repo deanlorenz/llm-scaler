@@ -45,8 +45,13 @@ type podMetricData struct {
 	avgTTFTTimestamp                  time.Time
 	prefillComputedTokenRate          float64
 	prefillComputedTokenRateTimestamp time.Time
-	avgServiceTime                    float64
-	avgServiceTimeTimestamp           time.Time
+	// Not freshness-tracked: diagnostics the slo analyzer publishes, not
+	// inputs any decision reads, so a missing one must not mark a replica
+	// stale.
+	avgPrefillTime          float64
+	avgQueueTime            float64
+	avgServiceTime          float64
+	avgServiceTimeTimestamp time.Time
 	// Throughput analyzer fields
 	generationTokenRate float64
 	kvUsageInstant      float64
@@ -424,6 +429,39 @@ func (c *ReplicaMetricsCollector) extractPodMetrics(
 					podData[instanceKey].prefillComputedTokenRateTimestamp = value.Timestamp
 				}
 			}
+		}
+	}
+
+	// Process average prefill time and engine queue time (seconds). A zero
+	// queue wait is a real reading -- an idle scheduler -- so it is kept.
+	for _, q := range []struct {
+		name     string
+		set      func(*podMetricData, float64)
+		zeroIsOK bool
+	}{
+		{registration.QueryAvgPrefillTime, func(d *podMetricData, v float64) { d.avgPrefillTime = v }, false},
+		{registration.QueryAvgQueueTime, func(d *podMetricData, v float64) { d.avgQueueTime = v }, true},
+	} {
+		result := results[q.name]
+		if result == nil || result.HasError() {
+			continue
+		}
+		for _, value := range result.Values {
+			instanceKey, podName, vaName := c.buildInstanceKey(ctx, namespace, value.Labels)
+			if instanceKey == "" {
+				continue
+			}
+			if podData[instanceKey] == nil {
+				podData[instanceKey] = &podMetricData{
+					podName: podName,
+					vaName:  vaName,
+				}
+			}
+			v := value.Value
+			if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || (v == 0 && !q.zeroIsOK) {
+				continue
+			}
+			q.set(podData[instanceKey], v)
 		}
 	}
 

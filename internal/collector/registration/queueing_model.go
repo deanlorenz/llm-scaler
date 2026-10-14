@@ -64,6 +64,24 @@ const (
 	// registration below and an SGLang prefill variant keeps the request-rate
 	// reading it has today.
 	QueryPrefillComputedTokenRate = "prefill_computed_token_rate"
+
+	// QueryAvgPrefillTime is the query name for the average time a request
+	// spends in prefill on a replica (seconds): from being scheduled to its
+	// first token. Source: vllm:request_prefill_time_seconds.
+	//
+	// It is TTFT with the engine's queue taken out, which is what makes it
+	// usable where TTFT is not: a fit on TTFT put queue wait in its
+	// intercept (docs/proposals/prefill-ttft-model.md), and this has none.
+	// Read by the slo analyzer, which publishes it against prefill
+	// utilization so the TTFT curve can be seen before anything is priced
+	// from it (docs/proposals/slo-tiers.md, TTFT).
+	QueryAvgPrefillTime = "avg_prefill_time"
+
+	// QueryAvgQueueTime is the query name for the average time a request
+	// waits in a replica's scheduler queue before prefill (seconds).
+	// Source: vllm:request_queue_time_seconds. The other half of the engine's
+	// TTFT, beside QueryAvgPrefillTime.
+	QueryAvgQueueTime = "avg_queue_time"
 )
 
 // RegisterQueueingModelQueries registers queries used by the queueing model analyzer.
@@ -117,6 +135,25 @@ func RegisterQueueingModelQueries(sourceRegistry *source.SourceRegistry) {
 		Params:   []string{source.ParamNamespace},
 		Description: "Prefill KV tokens computed per second per instance, " +
 			"excluding cached prefix; prefill's capacity unit",
+	})
+
+	// Average prefill time and engine queue time per instance (seconds), 1m
+	// window, like TTFT beside them. vLLM only, registered under their bare
+	// names as the computed-token rate is: SGLang publishes no per-stage
+	// prefill figure, so on an SGLang fleet these return no series.
+	registry.MustRegister(source.QueryTemplate{
+		Name:        QueryAvgPrefillTime,
+		Type:        source.QueryTypePromQL,
+		Template:    `max by (model_name, instance, pod) (rate(vllm:request_prefill_time_seconds_sum{namespace="{{.namespace}}"}[1m]) / rate(vllm:request_prefill_time_seconds_count{namespace="{{.namespace}}"}[1m]))`,
+		Params:      []string{source.ParamNamespace},
+		Description: "Average prefill time per instance (seconds), scheduled to first token: TTFT without the engine queue",
+	})
+	registry.MustRegister(source.QueryTemplate{
+		Name:        QueryAvgQueueTime,
+		Type:        source.QueryTypePromQL,
+		Template:    `max by (model_name, instance, pod) (rate(vllm:request_queue_time_seconds_sum{namespace="{{.namespace}}"}[1m]) / rate(vllm:request_queue_time_seconds_count{namespace="{{.namespace}}"}[1m]))`,
+		Params:      []string{source.ParamNamespace},
+		Description: "Average engine scheduler-queue wait per instance (seconds)",
 	})
 
 	registerSGLangQueueingModelQueries(registry)

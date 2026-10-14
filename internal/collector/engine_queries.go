@@ -56,6 +56,9 @@ var agnosticReplicaQueries = []string{
 	// Putting it in EngineSpecificQueries instead would assert a variant that
 	// does not exist, and the parity test says so.
 	registration.QueryPrefillComputedTokenRate,
+	// Prefill time and engine queue time: vLLM-only for the same reason.
+	registration.QueryAvgPrefillTime,
+	registration.QueryAvgQueueTime,
 }
 
 // unpartitionedReplicaQueries lists the logical replica queries whose series

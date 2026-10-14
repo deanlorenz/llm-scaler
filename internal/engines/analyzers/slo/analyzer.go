@@ -65,6 +65,9 @@ type Analyzer struct {
 	// transients is each model's recent fleet history, keyed namespace/model,
 	// for the transient exclusion (transient.go).
 	transients map[string]*transientMemo
+	// ceilings is each prefill-capable variant's saturated prefill token
+	// rates, keyed like windows, for its learned prefill ceiling (ttft.go).
+	ceilings map[string][]ceilingSample
 }
 
 // New returns an SLO analyzer. router may be nil, in which case the SLO is
@@ -80,6 +83,7 @@ func New(router RouterLatencySource, store *capacity.Store) *Analyzer {
 		seen:     make(map[string]time.Time),
 
 		transients: make(map[string]*transientMemo),
+		ceilings:   make(map[string][]ceilingSample),
 	}
 }
 
@@ -126,6 +130,18 @@ func (a *Analyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 	}
 	for _, vs := range fleet.variants {
 		vc, reading := a.priceVariant(input, vs, fleet, tpotTarget, cfg.ScaleUpThreshold, now)
+		// The TTFT curve's inputs, for every variant that prefills: observed
+		// and published, nothing priced from them yet (ttft.go).
+		if cfg.SLO != nil && cfg.SLO.TTFT != nil && vs.Role != domain.RoleDecode {
+			in := a.observeTTFTInputs(windowKey(input.Namespace, input.ModelID, vs), vs.VariantName,
+				input.ReplicaMetrics, now)
+			if reading == nil {
+				reading = &metrics.SLOVariantReading{Variant: vs.VariantName,
+					Fill: math.NaN(), PredictedITL: math.NaN()}
+			}
+			reading.PrefillSeconds, reading.EngineQueueSeconds = in.prefillSeconds, in.queueSeconds
+			reading.PrefillUtilization, reading.PrefillCeiling = in.utilization, in.ceiling
+		}
 		if !shapeKnown && reading != nil {
 			vc.PerReplicaCapacity, vc.Reason = 0, domain.ReasonNoData
 			reading.Source = constants.SLOSourceNoOutputLength
@@ -144,7 +160,9 @@ func (a *Analyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 				"modelID", input.ModelID, "namespace", input.Namespace,
 				"variant", vs.VariantName, "role", vs.Role, "source", reading.Source,
 				"fill", reading.Fill, "predictedITL", reading.PredictedITL,
-				"perReplicaTokensPerSec", vc.PerReplicaCapacity, "reason", vc.Reason)
+				"perReplicaTokensPerSec", vc.PerReplicaCapacity, "reason", vc.Reason,
+				"prefillSeconds", reading.PrefillSeconds, "engineQueueSeconds", reading.EngineQueueSeconds,
+				"prefillUtilization", reading.PrefillUtilization, "prefillCeiling", reading.PrefillCeiling)
 		}
 	}
 	a.sweep(now)
@@ -375,6 +393,7 @@ func (a *Analyzer) sweep(now time.Time) {
 			delete(a.seen, key)
 			delete(a.windows, key)
 			delete(a.baseline, key)
+			delete(a.ceilings, key)
 		}
 	}
 	for key, m := range a.transients {

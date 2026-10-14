@@ -2852,6 +2852,69 @@
             },
             "overrides": []
           }
+        },
+        {
+          "id": 83,
+          "title": "Prefill time and engine queue time, per prefilling variant",
+          "type": "timeseries",
+          "description": "The two halves of the engine's TTFT for a variant that prefills, under a TTFT target: prefill (scheduled to first token) and the scheduler-queue wait before it. Observed, not priced: plotted against the utilization panel, it is the curve TTFT will be priced from.",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 148
+          },
+          "targets": [
+            {
+              "expr": "wva_slo_prefill_seconds{$namespace_label=~\"$namespace\"}",
+              "legendFormat": "{{model_name}}/{{variant_name}} prefill",
+              "refId": "A"
+            },
+            {
+              "expr": "wva_slo_engine_queue_seconds{$namespace_label=~\"$namespace\"}",
+              "legendFormat": "{{model_name}}/{{variant_name}} queue",
+              "refId": "B"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 8
+              }
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 84,
+          "title": "Prefill utilization against the learned ceiling",
+          "type": "timeseries",
+          "description": "Prefill tokens computed per ready replica over the variant's learned ceiling (the p90 of the rate it computed while its queue was non-empty). Absent until enough saturated readings.",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 148
+          },
+          "targets": [
+            {
+              "expr": "wva_slo_prefill_utilization{$namespace_label=~\"$namespace\"}",
+              "legendFormat": "{{model_name}}/{{variant_name}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 8
+              }
+            },
+            "overrides": []
+          }
         }
       ]
     }
