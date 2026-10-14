@@ -341,7 +341,11 @@ func controllerLogsSince(t time.Time) string {
 // later, with no transfer at all.
 //
 // A donor-set spec lowers the donor's floor and then waits for a transfer, so
-// the receiver has to be seen short BEFORE the floor drops. Waiting only for
+// the receiver has to be seen short BEFORE the floor drops. This removes the
+// race that was observed; it does not make a return impossible. returnSpare
+// also lets the spare go while a short receiver is marked Unfunded -- every
+// single donor misfits and the set was refused that cycle by a hold, the pace
+// or the concurrency limit -- which no log line here can be gated on. Waiting only for
 // the group to be evaluated was not enough: on a GitHub runner the receiver's
 // load can take longer to show than the donor takes to qualify for a return,
 // and the spare was given back -- the run ended with the receiver grown by the
@@ -363,8 +367,11 @@ func roleShortOf(ns, model, role string, since time.Time) (bool, string) {
 	}
 	var recent []result
 	for _, line := range strings.Split(controllerLogsSince(since), "\n") {
+		// Saturation's result only: each analyzer logs its own line per cycle,
+		// and the share planner reads saturation's alone.
 		i := strings.Index(line, "analyzer-result")
-		if i < 0 || !strings.Contains(line, `"modelID": "`+model+`"`) || !strings.Contains(line, `"namespace": "`+ns+`"`) {
+		if i < 0 || !strings.Contains(line, `"modelID": "`+model+`"`) || !strings.Contains(line, `"namespace": "`+ns+`"`) ||
+			!strings.Contains(line, `"analyzer": "saturation"`) {
 			continue
 		}
 		j := strings.Index(line[i:], "{")

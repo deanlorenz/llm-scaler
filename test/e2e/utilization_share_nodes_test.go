@@ -170,9 +170,11 @@ var _ = Describe("Utilization share optimizer on full GPU nodes", Label("full", 
 			_ = fixtures.DeleteScaledObject(context.Background(), crClient, ns, soB)
 		})
 
+		// Long enough to outlast every wait below, including the gate on B
+		// reading short; the namespace, and the Job, go in cleanup.
 		By("Loading model B well past one replica's capacity")
 		job := buildThroughputSustainedLoadJob(ns, loadJob, fmt.Sprintf("http://%s-service:8000/v1/completions", msB),
-			modelB, 8, int64(1800))
+			modelB, 8, int64(2400))
 		_, err = k8sClient.BatchV1().Jobs(ns).Create(ctx, job, metav1.CreateOptions{})
 		Expect(err).NotTo(HaveOccurred())
 	})

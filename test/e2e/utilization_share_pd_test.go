@@ -129,9 +129,12 @@ var _ = Describe("Utilization share optimizer on a P/D LeaderWorkerSet model", L
 			}
 		})
 
+		// 40 minutes: the spec's waits add up to 30 at worst, and B must stay
+		// short for all of them. The namespace goes in cleanup, and the Job
+		// with it, so a longer deadline costs a passing run nothing.
 		By("Loading B's decode well past one group's capacity")
 		job := buildThroughputSustainedLoadJob(ns, loadJob, fmt.Sprintf("http://%s-service:8000/v1/completions", msDecode),
-			modelB, 8, int64(1800))
+			modelB, 8, int64(2400))
 		_, err = k8sClient.BatchV1().Jobs(ns).Create(ctx, job, metav1.CreateOptions{})
 		Expect(err).NotTo(HaveOccurred())
 	})
@@ -168,7 +171,11 @@ var _ = Describe("Utilization share optimizer on a P/D LeaderWorkerSet model", L
 			receivers := map[string]string{}
 			returns := 0
 			for _, line := range strings.Split(controllerLogsSince(start), "\n") {
-				if strings.Contains(line, "spare returned to the quota") && strings.Contains(line, ns) {
+				// Counted when a return STARTS, so one still draining, or
+				// called off, is seen too; the "spare returned" line comes
+				// only once the release lands.
+				if strings.Contains(line, "transfer started") && strings.Contains(line, `"returned": true`) &&
+					strings.Contains(line, ns) {
 					returns++
 				}
 				if !strings.Contains(line, "transfer started") {
