@@ -51,7 +51,7 @@ index, then follow the guide that path links to. Nothing installed yet? The
    make deploy-wva             # the scaling manager itself
    ```
 
-3. **Register your model servers.** Nothing is scaled until it has a ScaledObject:
+3. **Prepare and register your model servers.** Nothing is scaled until it has a ScaledObject:
 
    ```bash
    make workload-patch         # writes a patch (drain hook, weights, engine cache); apply it through your model-server chart

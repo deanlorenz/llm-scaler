@@ -129,9 +129,9 @@ spec:
       containers:
         - name: inference-server
           # The launcher published by Fast Model Actuation: it spawns and
-          # supervises vLLM engines inside this container. Copied into
-          # warmpool/supervisor/ so the source is readable here; the image is
-          # theirs because it is the one proven on this cluster.
+          # supervises vLLM engines inside this container. The source of our
+          # fork build (used for group pools) is vendored in warmpool/supervisor/;
+          # single-Pod pools run this upstream build.
           # PINNED BY DIGEST, and by digest rather than tag because this is the
           # one image here that somebody else controls. A tag can be moved; this
           # cannot. The proxy beside it has always been pinned this way, and the

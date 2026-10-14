@@ -2,8 +2,8 @@
 
 Planned work that changes what an operator can rely on. Each item links the
 GitHub issue that tracks it; the issue has the detail and the current state.
-[Known gaps](why.md#known-gaps) lists every documented gap; those with an
-issue are here.
+[Known gaps](why.md#known-gaps) lists the main gaps; the planned work is here,
+each with its issue, alongside the evidence work.
 
 ## GPU budgets
 

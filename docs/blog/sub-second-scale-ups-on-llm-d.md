@@ -24,10 +24,10 @@ users are told to migrate to KEDA + EPP. llm-d says KEDA + EPP covers WVA's
 capabilities except cost-aware placement across variants, some of them through
 a different layer (Kueue, kube-state-metrics), and advises deployments that
 depend on cost-aware placement or on fair sharing of a scarce accelerator pool
-to *"stay on WVA for now"*. We are that path, maintained. We are not affiliated
-with or endorsed by llm-d, and we changed WVA's actuation to a KEDA external
-scaler, so this is not upstream WVA
-([KEDA alone, compared](../comparison/keda-alone.md)).
+to *"stay on WVA for now"*. This project is one way to stay on that path: an
+independently developed, advanced fork of WVA, still maintained, not affiliated
+with or endorsed by llm-d, and not upstream WVA (its actuation is a KEDA external
+scaler) ([KEDA alone, compared](../comparison/keda-alone.md)).
 
 ## Why a scale-up is slow, and not for the reason people assume
 
