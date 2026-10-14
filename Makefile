@@ -2649,6 +2649,7 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@bash -n hack/benchmark/tail_wva_logs.sh
 	@bash -n hack/benchmark/file_capture.sh
 	@bash -n hack/check-install-flow.sh
+	@bash -n hack/check-e2e-images.sh
 	@for script in deploy/lib/*.sh; do bash -n "$$script"; done
 	@for script in deploy/*/install.sh; do if [ -f "$$script" ]; then bash -n "$$script"; fi; done
 	@for script in deploy/kind-emulator/*.sh; do if [ -f "$$script" ]; then bash -n "$$script"; fi; done
@@ -2783,6 +2784,9 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# KEDA preflight and install order, image pinning, chart pinning, TLS
 	@# verification, uninstall grants and summaries: each parses and is wrong.
 	@bash hack/check-install-flow.sh
+	@echo "Checking every image the e2e Go code names has a registry host..."
+	@# AGENTS.md: never docker.io in e2e. An image with no host resolves there.
+	@bash hack/check-e2e-images.sh
 	@echo "Checking the tenant Role still covers the generated ClusterRole..."
 	@# The ClusterRole is GENERATED from kubebuilder markers; the namespaced Role
 	@# the tenant overlay installs is maintained by hand, so it does not move when
