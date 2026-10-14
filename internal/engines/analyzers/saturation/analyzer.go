@@ -72,6 +72,13 @@ type SaturationAnalyzer struct {
 	// measured gets its own clock: see k2_borrow.go for why per bucket and not
 	// per variant. Swept a retention after the relaxation ended.
 	k2BorrowedSince map[string]time.Time
+	// pendingRestore is learned state restored after a controller restart and
+	// not yet installed, keyed namespace/variant: it waits for its variant's
+	// first cycle, when the engine configuration it runs is known, and is
+	// installed only if that is the configuration it was learned under
+	// (installRestored, learned_snapshot.go). Swept a retention after the
+	// restore, for a variant that never comes back.
+	pendingRestore map[string]*pendingVariant
 	// throughputSampledAt is, per saturatedThroughput key, when the window
 	// last took a reading as a sample of its own, and throughputLastRead the
 	// last reading it was given, sample or not (recordSaturatedThroughput);
@@ -195,6 +202,8 @@ type Evicted struct {
 	MuWindows int
 	// K2Borrows is the per-variant start of a borrowed k2 (borrowedK2).
 	K2Borrows int
+	// PendingRestores is restored learned state whose variant never came back.
+	PendingRestores int
 	// ITLWindows and ITLBaselines are the fitted ITL(k) state; StartEstimates
 	// and StartOutliers the learned replica start time and its reject
 	// counter; Pods the per-Pod records that say a start is already counted.
@@ -224,7 +233,7 @@ type Evicted struct {
 
 // Any reports whether the sweep evicted anything at all.
 func (e Evicted) Any() bool {
-	return e.K2History > 0 || e.MuWindows > 0 || e.K2Borrows > 0 || e.ITLWindows > 0 ||
+	return e.K2History > 0 || e.MuWindows > 0 || e.K2Borrows > 0 || e.PendingRestores > 0 || e.ITLWindows > 0 ||
 		e.ITLBaselines > 0 || e.StartEstimates > 0 || e.StartOutliers > 0 ||
 		e.Pods > 0 || e.ITLLines > 0 || e.Accelerators > 0 || e.DecodeSaturation > 0 ||
 		e.FleetShapes > 0 || e.VariantStamps > 0
@@ -257,6 +266,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		lastAccelerator:        make(map[string]acceleratorMemo),
 		saturatedThroughput:    make(map[string]*capacity.RollingAverage),
 		k2BorrowedSince:        make(map[string]time.Time),
+		pendingRestore:         make(map[string]*pendingVariant),
 		throughputSampledAt:    make(map[string]time.Time),
 		throughputLastRead:     make(map[string]float64),
 		capacityStore:          store,
@@ -572,6 +582,15 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 		if a.now().Sub(since) > borrowLife {
 			delete(a.k2BorrowedSince, key)
 			evicted.K2Borrows++
+		}
+	}
+	// Restored entries for a variant that has not been analysed since the
+	// restore. A retention later, any entry in them is past its own horizon
+	// too, so none could have been installed.
+	for key, p := range a.pendingRestore {
+		if a.now().Sub(p.restoredAt) > bucketRetention {
+			delete(a.pendingRestore, key)
+			evicted.PendingRestores++
 		}
 	}
 	for key, at := range a.decodeSaturatedAt {
