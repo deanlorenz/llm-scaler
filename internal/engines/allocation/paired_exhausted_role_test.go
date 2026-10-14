@@ -123,6 +123,9 @@ var _ = Describe("allocateForModelPaired with a role at its ceiling", func() {
 	})
 })
 
+// accH100 is the accelerator of the role whose pool runs dry.
+const accH100 = "H100"
+
 var _ = Describe("allocateForModelPaired with a role that needs nothing", func() {
 	// A role whose required capacity is zero commits nothing in the joint
 	// commit (its k is 0), so its only possible effect on the pass was a veto.
@@ -132,8 +135,8 @@ var _ = Describe("allocateForModelPaired with a role that needs nothing", func()
 	It("orders decode on free H200 while prefill needs nothing and its H100 pool is empty", func() {
 		e, variants, stateMap, targets := pairedFleet(1, 10, 1, 10, 0)
 		variants[0].AcceleratorName = "H200"
-		variants[1].AcceleratorName = "H100"
-		available := map[string]int{"H200": 8, "H100": 0}
+		variants[1].AcceleratorName = accH100
+		available := map[string]int{"H200": 8, accH100: 0}
 		limited := make(gpuLimitTracker)
 
 		roles, ps := initRoleState(&e)
@@ -151,12 +154,12 @@ var _ = Describe("allocateForModelPaired with a role that needs nothing", func()
 
 	It("orders decode on one accelerator when only prefill's replica is too large to fit", func() {
 		e, variants, stateMap, targets := pairedFleet(1, 10, 1, 10, 0)
-		variants[0].AcceleratorName = "H100"
-		variants[1].AcceleratorName = "H100"
+		variants[0].AcceleratorName = accH100
+		variants[1].AcceleratorName = accH100
 		decode, prefill := stateMap["decode"], stateMap["prefill"]
 		decode.GPUsPerReplica, prefill.GPUsPerReplica = 2, 8
 		stateMap["decode"], stateMap["prefill"] = decode, prefill
-		available := map[string]int{"H100": 4}
+		available := map[string]int{accH100: 4}
 		limited := make(gpuLimitTracker)
 
 		roles, ps := initRoleState(&e)
@@ -176,8 +179,8 @@ var _ = Describe("allocateForModelPaired with a role that needs nothing", func()
 	It("still holds decode when prefill needs capacity and has no GPUs", func() {
 		e, variants, stateMap, targets := pairedFleet(1, 10, 1, 10, 400)
 		variants[0].AcceleratorName = "H200"
-		variants[1].AcceleratorName = "H100"
-		available := map[string]int{"H200": 8, "H100": 0}
+		variants[1].AcceleratorName = accH100
+		available := map[string]int{"H200": 8, accH100: 0}
 		limited := make(gpuLimitTracker)
 
 		roles, ps := initRoleState(&e)
