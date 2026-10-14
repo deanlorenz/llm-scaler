@@ -36,7 +36,7 @@ for fn in wva_check_kueue_namespace_read wva_kueue_source_configured check_permi
     }
 done
 
-EXPECT_CASES=23
+EXPECT_CASES=25
 RAN=0
 FAILED=0
 
@@ -256,6 +256,17 @@ check 'INSTALL_PHASE=wva: no create networkpolicies asked, not refused' \
     'configmaps deployments ' "$(run_perm wva)"
 check 'INSTALL_PHASE=all still asks it, and a denial refuses (the stub can tell)' \
     'clusterroles configmaps deployments networkpolicies roles REFUSED' "$(run_perm all)"
+# A render that comes back empty falls back to a fixed kind list. That list
+# carried the admin kinds (Role, RoleBinding, Secret, ServiceAccount,
+# ServiceMonitor) into the controller-only phase, and a tenant denied them was
+# refused. ServiceMonitor is not served by the stub, so it is never asked.
+ADMIN_KINDS_DENIED='roles rolebindings secrets serviceaccounts'
+check 'unrendered fallback, INSTALL_PHASE=wva: only the tenant kinds asked, not refused' \
+    'configmaps deployments services ' \
+    "$(run_perm wva RENDER_FIXTURE= "STUB_DENY_CREATE='$ADMIN_KINDS_DENIED'")"
+check 'unrendered fallback, INSTALL_PHASE=all: the admin kinds still asked, a denial refuses' \
+    'configmaps deployments rolebindings roles secrets serviceaccounts services REFUSED' \
+    "$(run_perm all RENDER_FIXTURE= "STUB_DENY_CREATE='$ADMIN_KINDS_DENIED'")"
 
 # Wired into check_permissions -- which --check and the install both run --
 # BEFORE the tenant early-return, or the namespace-scoped default never reaches it.

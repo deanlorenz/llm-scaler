@@ -390,6 +390,54 @@ wva_ns_suffix() {
     fi
 }
 
+# wva_kueue_reader_names sets WVA_KUEUE_READER_NAMES to the Namespaces, space
+# separated, that the Kueue reader of the controller installed in $1 may `get`:
+# $2 first (the namespace it manages), then every name the live ClusterRole
+# wva-kueue-reader-role-<suffix> already carries on its Namespace rule.
+#
+# ONE answer for the two commands that write that ClusterRole: the installer's
+# prereqs phase (wva_append_kueue_reader_scope_patch) and
+# `make enable-physical-limiter` (pl_grant_kueue_read). Each used to compute its
+# own set -- the installer the managed namespace, enable the controller's own --
+# so for a controller in wva-foo managing foo every enable took `get
+# namespaces/foo` away, its Kueue source bounded foo at nothing, and the next
+# setup-prereqs gave it back. Both now start from the managed namespace and keep
+# what is there: a name an admin added by hand survives either command. A rule
+# with no resourceNames adds nothing -- narrowing an unrestricted read to the
+# managed namespace is what the installer always did.
+#
+# Only DNS-label names are kept, since they are written into YAML. Sets
+# variables rather than echoing (call it as `wva_kueue_reader_names ... ||
+# rc=$?`). A role that exists and cannot be read RETURNS non-zero with the
+# reason in KC_ERR: Forbidden is not absent, and writing the role without
+# knowing what it holds may remove a name.
+wva_kueue_reader_names() {
+    local ns="$1" managed="$2" rc=0 n existing="" seen=" "
+    WVA_KUEUE_READER_NAMES=""
+    KC_ERR=""
+    kc_capture get clusterrole "wva-kueue-reader-role-$(wva_ns_suffix "$ns")" -o yaml || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        kc_not_found "$KC_ERR" || { KC_ERR="${KC_ERR:-kubectl exited $rc}"; return 1; }
+    elif [ -n "$KC_OUT" ]; then
+        if ! existing="$(printf '%s\n' "$KC_OUT" \
+            | yq '.rules[] | select((.resources // [])[] == "namespaces") | (.resourceNames // [])[]' 2>&1)"; then
+            KC_ERR="could not parse it: $existing"
+            return 1
+        fi
+    fi
+    local -a all
+    # read -a, not an unquoted expansion: a `*` in a hand-edited role must not
+    # glob into the names of files in the working directory.
+    read -r -a all <<< "$managed $(printf '%s' "$existing" | tr '\n' ' ')"
+    for n in "${all[@]}"; do
+        case "$n" in ''|*[!a-z0-9-]*) continue ;; esac
+        case "$seen" in *" $n "*) continue ;; esac
+        seen="$seen$n "
+        WVA_KUEUE_READER_NAMES="${WVA_KUEUE_READER_NAMES:+$WVA_KUEUE_READER_NAMES }$n"
+    done
+    return 0
+}
+
 # WVA_LEGACY_CLUSTER_ROLE_BINDINGS are cluster-scoped bindings this project used
 # to render and no longer does.
 #

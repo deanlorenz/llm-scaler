@@ -657,9 +657,21 @@ wva_metrics_reader_binding() {
 # ever read, and a grant to read every Namespace's labels is more than the
 # reader uses. The `test` op makes a reordered rule fail the build rather than
 # narrow the wrong one.
+#
+# Names after $3 are kept too: the install passes what wva_kueue_reader_names
+# found on the live role, so a name an admin or `make enable-physical-limiter`
+# put there is not taken away by the next install (common.sh says why the two
+# must agree).
 wva_append_kueue_reader_scope_patch() {
-    local kustomization="$1" ns="$2" managed="$3"
+    local kustomization="$1" ns="$2" managed="${3:-}" n names="" seen=" "
     [ -n "$managed" ] || return 0
+    shift 3
+    for n in "$managed" "$@"; do
+        [ -n "$n" ] || continue
+        case "$seen" in *" $n "*) continue ;; esac
+        seen="$seen$n "
+        names="$names      - \"$n\""$'\n'
+    done
     grep -q '^patches:' "$kustomization" || printf 'patches:\n' >> "$kustomization"
     cat >> "$kustomization" <<EOF
 - patch: |-
@@ -669,11 +681,35 @@ wva_append_kueue_reader_scope_patch() {
     - op: add
       path: /rules/1/resourceNames
       value:
-      - ${managed}
-  target:
+${names}  target:
     kind: ClusterRole
     name: wva-kueue-reader-role-$(wva_ns_suffix "$ns")
 EOF
+}
+
+# wva_append_install_kueue_reader_scope_patch is the install's call of
+# wva_append_kueue_reader_scope_patch (same arguments): the managed namespace
+# $3, plus the names the live role already carries (wva_kueue_reader_names) --
+# the set `make enable-physical-limiter` writes, so neither undoes the other.
+#
+# Only a phase that applies the role reads it: the controller-only phase
+# (WVA_APPLY_SCOPE=controller) writes no cluster-scoped RBAC, and a tenant may
+# not read it. A role that exists and cannot be read stops the install rather
+# than lose a name.
+wva_append_install_kueue_reader_scope_patch() {
+    local kustomization="$1" ns="$2" managed="$3"
+    WVA_KUEUE_READER_NAMES="$managed"
+    case "${WVA_APPLY_SCOPE:-all}" in
+        all|prereqs)
+            wva_kueue_reader_names "$ns" "$managed" \
+                || log_error "Could not read ClusterRole wva-kueue-reader-role-$(wva_ns_suffix "$ns") ($KC_ERR). Refusing to rewrite it without knowing which Namespaces it already names: the rewrite could take one away."
+            ;;
+    esac
+    # The managed name as given when the helper kept none, as before: an empty
+    # list would leave the shipped rule unnamed, which is every Namespace.
+    [ -n "$WVA_KUEUE_READER_NAMES" ] || WVA_KUEUE_READER_NAMES="$managed"
+    # shellcheck disable=SC2086 # one word per Namespace name
+    wva_append_kueue_reader_scope_patch "$kustomization" "$ns" $WVA_KUEUE_READER_NAMES
 }
 
 # wva_managed_policy_label echoes the wva.llmd.ai/policy-namespace label on
@@ -829,7 +865,7 @@ EOF
     # lingers, and `undeploy` removes both.
     wva_append_crb_name_patches "$tmp_overlay/kustomization.yaml" "$WVA_NS"
     if [ "$(wva_install_scope)" = "namespace" ]; then
-        wva_append_kueue_reader_scope_patch "$tmp_overlay/kustomization.yaml" "$WVA_NS" "${WVA_WATCH_NS:-$WVA_NS}"
+        wva_append_install_kueue_reader_scope_patch "$tmp_overlay/kustomization.yaml" "$WVA_NS" "${WVA_WATCH_NS:-$WVA_NS}"
         wva_append_policy_namespace_reader_scope_patch "$tmp_overlay/kustomization.yaml" "$WVA_NS" \
             "${WVA_WATCH_NS:-$WVA_NS}" "${WVA_POLICY_NS:-}" "$(wva_managed_policy_label "${WVA_WATCH_NS:-$WVA_NS}")"
     fi

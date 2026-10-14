@@ -86,7 +86,17 @@ deploys() {
 # of the arguments),
 # KCM_NOTFOUND / KCM_FORBIDDEN (every policy ConfigMap read).
 case "$1" in
-  auth) exit 0 ;;
+  auth)
+    # KCANI_WATCH_NS: namespaces whose controller account may watch every
+    # Namespace -- what a cluster-scoped install gets from its manager
+    # ClusterRole. Every other account may not.
+    case "$*" in
+      "auth can-i watch namespaces --as system:serviceaccount:"*)
+        as="$*"; as="${as##*system:serviceaccount:}"; as="${as%%:*}"
+        case " ${KCANI_WATCH_NS:-} " in *" $as "*) echo yes; exit 0 ;; esac
+        echo no; exit 1 ;;
+    esac
+    exit 0 ;;
   create)
     printf 'apiVersion: v1\nkind: %s\nmetadata:\n  name: %s\n' "$2" "$3"
     exit 0 ;;
@@ -127,6 +137,12 @@ case "$1" in
         [ -z "${KCM_FORBIDDEN:-}" ] || { echo 'Error from server (Forbidden): configmaps is forbidden' >&2; exit 1; }
         [ -z "${KCM_NOTFOUND:-}" ] || { echo 'Error from server (NotFound): configmaps "wva-scaling-policy-config" not found' >&2; exit 1; }
         if [ -f "$KDEPLOYS/$ns.policy" ]; then cat "$KDEPLOYS/$ns.policy"; else printf 'scaleUpThreshold: 0.85'; fi ;;
+      # The live ClusterRole <name>: $KDEPLOYS/clusterrole-<name>.yaml, else
+      # NotFound; KCR_FORBIDDEN makes every read Forbidden.
+      clusterrole)
+        [ -z "${KCR_FORBIDDEN:-}" ] || { echo 'Error from server (Forbidden): clusterroles.rbac.authorization.k8s.io is forbidden' >&2; exit 1; }
+        if [ -f "$KDEPLOYS/clusterrole-$name.yaml" ]; then cat "$KDEPLOYS/clusterrole-$name.yaml"; exit 0; fi
+        echo "Error from server (NotFound): clusterroles.rbac.authorization.k8s.io \"$name\" not found" >&2; exit 1 ;;
       *) : ;;
     esac ;;
   *) : ;;
@@ -420,14 +436,18 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# The Kueue reader: enable must narrow `get namespaces` exactly as the installer
-# does (wva_append_kueue_reader_scope_patch), or every enable re-widens it.
+# The Kueue reader: enable writes the Namespace rule the installer writes for
+# the same controller (wva_kueue_reader_names, shared), or the two undo each
+# other on every run.
 #
-# And what a Deployment SAYS it manages comes from args and env its namespace
-# owner can edit, so it may narrow the grant, never widen it: the unrestricted
-# read goes only to a cluster-scoped-looking controller in a namespace the admin
-# NAMED; anything else gets its own namespace.
+# A namespace-scoped controller gets its MANAGED namespace -- what it lists
+# LocalQueues in -- plus every name the live role already carries. A
+# cluster-scoped-looking one gets every Namespace only when the admin NAMED its
+# namespace, or its account already reads every Namespace (the manager
+# ClusterRole of a cluster-scoped install); a tenant that drops --watch-namespace
+# is never handed that read.
 kueue_rule() { grep "^NSRULE wva-kueue-reader-role-$(wva_ns_suffix "$1") " "$GRANTS" | tail -1 | awk '{print $NF}'; }
+kueue_warning() { grep "$1/wva-controller-manager looks cluster-scoped" "$WORK/out"; }
 case_begin
 run_enable WVA_LIMITER_TYPE=quota WVA_QUOTA_KUEUE=true WVA_QUOTAS=H200=8
 if [ "$RC" -ne 0 ]; then
@@ -435,11 +455,31 @@ if [ "$RC" -ne 0 ]; then
 elif [ "$(kueue_rule tenant-g)" != "tenant-g" ]; then
     fail "the namespace-scoped controller in tenant-g got Kueue get namespaces on [$(kueue_rule tenant-g)], want only tenant-g"
 elif [ "$(kueue_rule tenant-a)" != "tenant-a" ]; then
-    fail "the cluster-scoped-LOOKING controller in tenant-a, not named in WVA_LIMITER_TARGETS, got Kueue get namespaces on [$(kueue_rule tenant-a)], want only tenant-a: a tenant drops --watch-namespace and reads every Namespace"
-elif ! grep -q 'tenant-a/wva-controller-manager looks cluster-scoped, but tenant-a is not named in WVA_LIMITER_TARGETS' "$WORK/out"; then
+    fail "the cluster-scoped-LOOKING controller in tenant-a, not named and not reading Namespaces cluster-wide, got Kueue get namespaces on [$(kueue_rule tenant-a)], want only tenant-a: a tenant drops --watch-namespace and reads every Namespace"
+elif ! kueue_warning tenant-a | grep -q 'cannot read Namespaces cluster-wide'; then
     fail "the narrowed cluster-scoped grant was not explained: $(grep -i kueue "$WORK/out" | head -3)"
+elif ! kueue_warning tenant-a | grep -q 'make setup-prereqs SCOPE=cluster WVA_NS=tenant-a'; then
+    fail "the narrowed cluster-scoped grant does not point at that install's prerequisites: $(kueue_warning tenant-a)"
+elif kueue_warning tenant-a | grep -q 'WVA_LIMITER_TARGETS'; then
+    fail "the narrowed cluster-scoped grant still advises WVA_LIMITER_TARGETS, which limits enable to the named namespaces: $(kueue_warning tenant-a)"
 else
-    ok "Kueue get namespaces, nothing named: each controller gets its own namespace, and the narrowing is said"
+    ok "Kueue get namespaces, nothing named: each controller gets what it manages, and a narrowed cluster-scoped one is told to re-run its prerequisites"
+fi
+# A cluster-scoped install: its manager ClusterRole already reads every
+# Namespace, so the unrestricted rule widens nothing -- and there is nothing to
+# warn about.
+case_begin
+run_enable WVA_LIMITER_TYPE=quota WVA_QUOTA_KUEUE=true WVA_QUOTAS=H200=8 KCANI_WATCH_NS=tenant-a
+if [ "$RC" -ne 0 ]; then
+    fail "enable for a cluster-scoped install failed: $(tail -15 "$WORK/out")"
+elif [ "$(kueue_rule tenant-a)" != "*" ]; then
+    fail "the cluster-scoped install in tenant-a, whose account reads every Namespace already, got [$(kueue_rule tenant-a)]"
+elif kueue_warning tenant-a >/dev/null; then
+    fail "a cluster-scoped install that already reads every Namespace was warned about: $(kueue_warning tenant-a)"
+elif [ "$(kueue_rule tenant-g)" != "tenant-g" ]; then
+    fail "another account reading Namespaces widened tenant-g to [$(kueue_rule tenant-g)]"
+else
+    ok "Kueue get namespaces: a cluster-scoped install that reads every Namespace is granted it, quietly"
 fi
 case_begin
 run_enable WVA_LIMITER_TYPE=quota WVA_QUOTA_KUEUE=true WVA_QUOTAS=H200=8 'WVA_LIMITER_TARGETS=tenant-a tenant-g'
@@ -452,24 +492,74 @@ elif [ "$(kueue_rule tenant-g)" != "tenant-g" ]; then
 else
     ok "Kueue get namespaces: the unrestricted read only for a named cluster-scoped controller"
 fi
-# A controller claiming to manage ANOTHER tenant's namespace.
-put_ns tenant-h "$(jq -n --arg img "$IMG" '
+# The out-of-reach shape: a controller in wva-foo managing foo. The installer
+# grants it `get namespaces/foo`; enable granted wva-foo and took foo away.
+put_ns wva-foo "$(jq -n --arg img "$IMG" '
     {metadata: {name: "wva-controller-manager", labels: {"app.kubernetes.io/name": "workload-variant-autoscaler"}},
      spec: {template: {spec: {serviceAccountName: "wva-controller-manager", containers: [
-       {name: "manager", image: $img, args: ["--watch-namespace=tenant-victim"]}]}}}}')"
+       {name: "manager", image: $img, args: ["--watch-namespace=foo"]}]}}}}')"
 case_begin
-run_enable WVA_LIMITER_TYPE=quota WVA_QUOTA_KUEUE=true WVA_QUOTAS=H200=8 KDEPLOY_NS_LIST=tenant-h
-h_unnamed="$(kueue_rule tenant-h)"
-run_enable WVA_LIMITER_TYPE=quota WVA_QUOTA_KUEUE=true WVA_QUOTAS=H200=8 WVA_LIMITER_TARGETS=tenant-h
-h_named="$(kueue_rule tenant-h)"
-if [ "$h_unnamed" != "tenant-h" ]; then
-    fail "a controller in tenant-h claiming tenant-victim, unnamed, got Kueue get namespaces on [$h_unnamed], want only tenant-h"
-elif [ "$h_named" != "tenant-victim" ]; then
-    fail "named in WVA_LIMITER_TARGETS, the out-of-reach controller in tenant-h got [$h_named], want tenant-victim"
+run_enable WVA_LIMITER_TYPE=quota WVA_QUOTA_KUEUE=true WVA_QUOTAS=H200=8 KDEPLOY_NS_LIST=wva-foo
+foo_unnamed="$(kueue_rule wva-foo)"
+run_enable WVA_LIMITER_TYPE=quota WVA_QUOTA_KUEUE=true WVA_QUOTAS=H200=8 WVA_LIMITER_TARGETS=wva-foo
+foo_named="$(kueue_rule wva-foo)"
+if [ "$foo_unnamed" != "foo" ]; then
+    fail "the out-of-reach controller in wva-foo managing foo got Kueue get namespaces on [$foo_unnamed], want foo: its Kueue source bounds foo at nothing"
+elif [ "$foo_named" != "foo" ]; then
+    fail "named in WVA_LIMITER_TARGETS, the out-of-reach controller in wva-foo got [$foo_named], want foo"
 else
-    ok "Kueue get namespaces: another namespace only when the admin named the controller's"
+    ok "Kueue get namespaces: an out-of-reach controller gets the namespace it manages, named or not"
 fi
-rm -f "$DEPLOYS/tenant-h.json"
+# Never fewer names than the live role holds: one an admin added survives.
+cat > "$DEPLOYS/clusterrole-wva-kueue-reader-role-$(wva_ns_suffix wva-foo).yaml" <<'CREOF'
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: placeholder
+rules:
+- apiGroups: ["kueue.x-k8s.io"]
+  resources: ["clusterqueues", "resourceflavors"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["namespaces"]
+  resourceNames: ["foo", "admin-added"]
+  verbs: ["get"]
+CREOF
+case_begin
+run_enable WVA_LIMITER_TYPE=quota WVA_QUOTA_KUEUE=true WVA_QUOTAS=H200=8 KDEPLOY_NS_LIST=wva-foo
+if [ "$(kueue_rule wva-foo)" != "foo,admin-added" ]; then
+    fail "enable rewrote a role naming [foo, admin-added] to [$(kueue_rule wva-foo)]: a name the admin set was removed"
+else
+    ok "Kueue get namespaces: enable keeps every name the live role carries"
+fi
+# A role that cannot be read is not an absent one: the rewrite could remove a
+# name, so enable stops instead.
+case_begin
+run_enable WVA_LIMITER_TYPE=quota WVA_QUOTA_KUEUE=true WVA_QUOTAS=H200=8 KDEPLOY_NS_LIST=wva-foo KCR_FORBIDDEN=1
+if [ "$RC" -eq 0 ]; then
+    fail "enable rewrote a kueue-reader role it could not read: $(tail -4 "$WORK/out")"
+elif [ -n "$(kueue_rule wva-foo)" ]; then
+    fail "enable applied a kueue-reader role it could not read: [$(kueue_rule wva-foo)]"
+elif ! grep -q 'Not rewriting it' "$WORK/out"; then
+    fail "the unreadable kueue-reader role was not named as the reason: $(tail -4 "$WORK/out")"
+else
+    ok "Kueue get namespaces: an unreadable live role stops enable before it is rewritten"
+fi
+# An empty resourceNames list is no restriction at all: a managed value that is
+# not a Namespace name must fall back to the controller's own namespace.
+rm -f "$DEPLOYS"/clusterrole-*.yaml
+put_ns wva-foo "$(jq -n --arg img "$IMG" '
+    {metadata: {name: "wva-controller-manager", labels: {"app.kubernetes.io/name": "workload-variant-autoscaler"}},
+     spec: {template: {spec: {serviceAccountName: "wva-controller-manager", containers: [
+       {name: "manager", image: $img, args: ["--watch-namespace=Not_A_Namespace"]}]}}}}')"
+case_begin
+run_enable WVA_LIMITER_TYPE=quota WVA_QUOTA_KUEUE=true WVA_QUOTAS=H200=8 KDEPLOY_NS_LIST=wva-foo
+if [ "$(kueue_rule wva-foo)" != "wva-foo" ]; then
+    fail "a controller managing a non-Namespace name got Kueue get namespaces on [$(kueue_rule wva-foo)], want wva-foo (an empty list is every Namespace)"
+else
+    ok "Kueue get namespaces: a managed value that is not a Namespace name falls back to the own namespace"
+fi
+rm -f "$DEPLOYS/wva-foo.json" "$DEPLOYS"/clusterrole-*.yaml
 
 # A namespace-scoped controller does not watch a policy namespace outside the
 # one it manages, so it sees the new policy only after a restart -- which
@@ -630,7 +720,7 @@ else
 fi
 
 case_begin
-CASES_EXPECTED=35
+CASES_EXPECTED=39
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately."
 else

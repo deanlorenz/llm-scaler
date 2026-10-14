@@ -753,6 +753,13 @@ check_permissions() {
         log_warning "Could not render the install overlay, so this check falls back to the kinds each scope is expected to create. It may miss something the overlay adds; the install itself renders the same overlay and will fail if it is broken."
         kinds=$'ConfigMap\nDeployment\nRole\nRoleBinding\nSecret\nService\nServiceAccount\nServiceMonitor'
         wva_scope_is_tenant || kinds="$kinds"$'\nClusterRole\nClusterRoleBinding\nNamespace'
+        # The fallback obeys the phase too. Unfiltered, it asked a tenant in the
+        # controller-only phase for create rights on Roles, RoleBindings,
+        # Secrets, ServiceAccounts and ServiceMonitors -- the admin's half
+        # (WVA_PREREQ_KINDS) -- and refused the install that phase exists for.
+        if [ "${INSTALL_PHASE:-all}" = "wva" ]; then
+            kinds="$(printf '%s\n' "$kinds" | grep -vxF -f <(printf '%s\n' "${WVA_PREREQ_KINDS[@]}") || true)"
+        fi
     fi
 
     for kind in $kinds; do

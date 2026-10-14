@@ -433,47 +433,62 @@ EOF
 # never read" each cycle, and ran on the static entry alone -- which for the
 # recommended `-1` budget is no cap at all.
 #
-# $3 is the namespace the controller manages (`*` cluster-scoped). A
-# namespace-scoped controller lists LocalQueues in that namespace only, so its
-# `get namespaces` is limited to it by resourceNames -- exactly what the
-# installer renders (wva_append_kueue_reader_scope_patch). Without that, this
-# command re-applied the same ClusterRole with an unrestricted Namespace get and
-# undid the installer's narrowing on every enable.
+# $3 is the namespace the controller manages (`*` cluster-scoped). The Namespace
+# rule it writes is the one the installer writes for the same controller, so the
+# two commands cannot undo each other:
+#
+#   * namespace-scoped: the MANAGED namespace, plus every name the live role
+#     already carries (wva_kueue_reader_names, shared with the installer). It
+#     lists LocalQueues there and nowhere else. Granting its OWN namespace
+#     instead took `get namespaces/foo` from a controller in wva-foo managing
+#     foo on every enable, and its Kueue source bounded foo at nothing until the
+#     next setup-prereqs gave it back. Never fewer names than the role holds.
+#   * cluster-scoped: every Namespace (no resourceNames) when the admin named
+#     its namespace in WVA_LIMITER_TARGETS, or when its ServiceAccount already
+#     reads every Namespace -- a cluster-scoped install does, through its manager
+#     ClusterRole -- so the rule widens nothing. Otherwise its own namespace,
+#     plus the names the role carries.
 #
 # <managed> comes from the Deployment's args and env, which whoever owns the
-# namespace can edit, so it may NARROW the grant and never WIDEN it. The
-# unrestricted Namespace get goes only to a controller that looks cluster-scoped
-# (`*`) AND whose namespace the admin named in WVA_LIMITER_TARGETS; a
-# namespace-scoped one gets its managed namespace when that is its own or the
-# admin named it; every other row gets its own namespace and nothing more. A
-# tenant that drops --watch-namespace, or points it at another tenant, used to
-# be handed every Namespace -- or that tenant's -- by a cluster-admin command.
+# namespace can edit. One named Namespace is what the installer would grant for
+# the same args; the read of EVERY Namespace is not, so a tenant that drops
+# --watch-namespace is never handed it by a cluster-admin command.
 # The ClusterQueue and ResourceFlavor reads stay as the installer renders them
 # (components/kueue-reader): every Kueue-reading controller needs them, and a
 # list cannot be limited by name.
 pl_grant_kueue_read() {
-    local ns="$1" sa="$2" managed="${3:--}" suffix names="" scope_ns
+    local ns="$1" sa="$2" managed="${3:--}" suffix names="" first="$1" held="" rc=0 n
     suffix="$(wva_ns_suffix "$ns")"
-    scope_ns="$ns"
     case "$managed" in
         '*')
             if pl_named_target "$ns"; then
-                scope_ns=""
+                first='*'
             else
-                log_warning "  $ns/$sa looks cluster-scoped, but $ns is not named in WVA_LIMITER_TARGETS: its Kueue Namespace read is limited to $ns. A genuine cluster-scoped controller needs every Namespace: name $ns in WVA_LIMITER_TARGETS and re-run."
+                held="$(pl_can_watch_namespaces "$ns" "$sa")"
+                [ "$held" = yes ] && first='*'
             fi
             ;;
         -|'') ;;
-        *)
-            if [ "$managed" = "$ns" ] || pl_named_target "$ns"; then
-                scope_ns="$managed"
-            else
-                log_warning "  $ns/$sa says it manages $managed, but $ns is not named in WVA_LIMITER_TARGETS: its Kueue Namespace read is limited to $ns. If it does manage $managed, name $ns in WVA_LIMITER_TARGETS and re-run."
-            fi
-            ;;
+        *) first="$managed" ;;
     esac
-    [ -z "$scope_ns" ] || names="
-  resourceNames: [\"${scope_ns}\"]"
+    if [ "$first" != '*' ]; then
+        wva_kueue_reader_names "$ns" "$first" || rc=$?
+        if [ "$rc" -ne 0 ]; then
+            log_warning "  Could not read ClusterRole wva-kueue-reader-role-${suffix} (${KC_ERR}). Not rewriting it without knowing which Namespaces it already names."
+            return 1
+        fi
+        # An empty resourceNames list is NO restriction, so a managed value that
+        # is not a Namespace name (an unexpanded $(VAR), say) falls back to the
+        # controller's own namespace rather than to every Namespace.
+        [ -n "$WVA_KUEUE_READER_NAMES" ] || WVA_KUEUE_READER_NAMES="$ns"
+        for n in $WVA_KUEUE_READER_NAMES; do names="${names:+$names, }\"$n\""; done
+        names="
+  resourceNames: [${names}]"
+        case "$held" in
+            no) log_warning "  $ns/$sa looks cluster-scoped (no --watch-namespace) but cannot read Namespaces cluster-wide, which a cluster-scoped install gets from its manager ClusterRole. Its Kueue Namespace read is limited to ${WVA_KUEUE_READER_NAMES// /, }, so Kueue quota in any other namespace is bounded at nothing. If it is a cluster-scoped install, re-run its prerequisites: $(WVA_NS="$ns" WVA_SCOPE=cluster WVA_WATCH_NS='' wva_make_cmd setup-prereqs)" ;;
+            unknown) log_warning "  $ns/$sa looks cluster-scoped (no --watch-namespace); could not tell whether it reads Namespaces cluster-wide (impersonation was not allowed). Its Kueue Namespace read is limited to ${WVA_KUEUE_READER_NAMES// /, }. Check: kubectl auth can-i watch namespaces --as system:serviceaccount:${ns}:${sa}" ;;
+        esac
+    fi
     kubectl apply -f - >/dev/null <<EOF
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -504,6 +519,22 @@ subjects:
   name: ${sa}
   namespace: ${ns}
 EOF
+}
+
+# pl_can_watch_namespaces echoes yes | no | unknown: whether ServiceAccount $2
+# in $1 may WATCH every Namespace. Watch, not get: the kueue-reader role grants
+# get only, so a yes comes from somewhere else -- the manager ClusterRole of a
+# cluster-scoped install, or an admin's own grant -- and never from the role
+# pl_grant_kueue_read is about to rewrite. "unknown" when the caller cannot
+# impersonate, never folded into either answer.
+pl_can_watch_namespaces() {
+    local ns="$1" sa="$2" rc=0
+    kc_capture auth can-i watch namespaces --as "system:serviceaccount:${ns}:${sa}" || rc=$?
+    case "$KC_OUT" in
+        yes*) echo yes ;;
+        no*)  if [ "$rc" -ne 0 ]; then echo no; else echo unknown; fi ;;
+        *)    echo unknown ;;
+    esac
 }
 
 # pl_grant_policy_read lets one controller READ the policy ConfigMap. Read only,
