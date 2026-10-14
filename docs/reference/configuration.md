@@ -544,9 +544,13 @@ What is restored, and what is not:
 
 - a variant's measured capacity, saturated throughput, ITL baseline and
   replica start estimate are restored **only if it runs the same engine
-  configuration** as when they were learned, read completely: a deployment
-  whose flags come from a variable the controller cannot resolve restores
-  nothing, because a changed value would look identical;
+  configuration** as when they were learned -- the same arguments and the
+  same engine image -- read completely: a deployment whose flags come from a
+  variable the controller cannot resolve restores nothing, because a changed
+  value would look identical. A rollout during the downtime that changes
+  either one therefore starts that variant cold, as does the first restart
+  after an upgrade that changes how the configuration is identified (the
+  `fingerprint_version` label of `wva_engine_config`);
 - the ages travel with the figures, so a restore never makes a figure younger,
   and one past its horizon above is not restored;
 - a figure the new controller has already measured is never replaced.
