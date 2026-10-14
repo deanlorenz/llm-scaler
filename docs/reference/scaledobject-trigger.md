@@ -196,8 +196,9 @@ This holds only with the trigger's `metricType` at its default,
 HPA computes `ceil(value / 1)`, the count itself. With `metricType: Value` it
 computes `ceil(current replicas × value)`, so a decision of 3 on 3 replicas
 asks for 9 and a held count squares. The installer writes
-`metricType: AverageValue` explicitly on the triggers it generates and warns
-about a `Value` trigger when it adopts a ScaledObject or renders a template.
+`metricType: AverageValue` explicitly on the triggers it generates, including
+when it adopts a ScaledObject (adoption replaces the triggers), and warns about
+a `Value` trigger when it renders a ScaledObject template.
 
 A standby replica, one that does not hold the leader lease, still refuses
 `GetMetrics` and `IsActive` with `Unavailable`: the leader may have decided
