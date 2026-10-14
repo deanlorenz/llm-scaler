@@ -56,7 +56,7 @@ for fn in so_model_id so_resolve_env_ref; do
     }
 done
 
-EXPECT_CASES=43
+EXPECT_CASES=71
 RAN=0
 FAILED=0
 
@@ -251,12 +251,16 @@ command -v yq >/dev/null 2>&1 || {
     printf 'FATAL: yq is required for the fallback group.\n' >&2
     exit 1
 }
-for fn in render_default_scaledobject so_adopt_patch so_adopt_needs_fallback so_fallback_check; do
+for fn in render_default_scaledobject render_scaledobject so_adopt_patch so_adopt_needs_fallback \
+          so_fallback_check so_fallback_failures so_keda_fallback_probe so_fallback_note so_show_plan; do
     declare -F "$fn" >/dev/null || {
         printf 'FATAL: %s is not defined after sourcing the library.\n' "$fn" >&2
         exit 1
     }
 done
+# Every case below runs against a KEDA that has fallback.behavior unless it says
+# otherwise. Set, not probed: the probe would call the real kubectl.
+SO_KEDA_FALLBACK_BEHAVIOR=yes
 render_with() {   # render_with <min> -- with whatever WVA_SO_FALLBACK* is set
     render_default_scaledobject ns Deployment decode Qwen/Qwen3-0.6B addr:9090 "$1" 8 '' ''
 }
@@ -267,8 +271,16 @@ check 'fallback: a generated object gets one, replicas at its minReplicaCount' \
 check 'fallback: the rest of the spec survives the splice' \
     '2,8,true,300' \
     "$(render_with 2 | yq -o=json '.spec' | jq -r '[.minReplicaCount, .maxReplicaCount, .advanced.restoreToOriginalReplicaCount, .advanced.horizontalPodAutoscalerConfig.behavior.scaleDown.stabilizationWindowSeconds] | map(tostring) | join(",")')"
-check 'fallback: a floor of zero falls back to zero, never above it' \
-    '3,0,currentReplicasIfHigher' "$(render_with 0 | fb_of)"
+# A floor of 0 gets NO fallback. KEDA sends a trigger error on an object with
+# fallback.replicas 0 and minReplicaCount 0 to scaleToZeroOrIdle, so a zero
+# fallback parks a serving model on any error window.
+check 'fallback: a floor of zero gets none' \
+    'none' "$(render_with 0 | fb_of)"
+check 'fallback: a floor written 00 is still zero' \
+    'none' "$(render_with 00 | fb_of)"
+check 'fallback: a floor of zero still renders a valid object' \
+    '0,8,true' \
+    "$(render_with 0 | yq -o=json '.spec' | jq -r '[.minReplicaCount, .maxReplicaCount, .advanced.restoreToOriginalReplicaCount] | map(tostring) | join(",")')"
 check 'fallback: WVA_SO_FALLBACK_FAILURES sets failureThreshold' \
     '5,1,currentReplicasIfHigher' "$(WVA_SO_FALLBACK_FAILURES=5 render_with 1 | fb_of)"
 check 'fallback: WVA_SO_FALLBACK=false leaves it out' \
@@ -278,7 +290,58 @@ check 'fallback: WVA_SO_FALLBACK=false still renders the advanced block' \
 check 'fallback: WVA_SO_FALLBACK must be true or false' \
     'refused' "$( (WVA_SO_FALLBACK=yes so_fallback_check) 2>/dev/null && echo accepted || echo refused)"
 check 'fallback: a failureThreshold of 0 is refused' \
-    'refused' "$( (WVA_SO_FALLBACK_FAILURES=0 so_fallback_check) 2>/dev/null && echo accepted || echo refused)"
+    'refused' "$( (WVA_SO_FALLBACK_FAILURES=0 so_fallback_failures) > /dev/null 2>&1 && echo accepted || echo refused)"
+check 'fallback: a failureThreshold with a leading zero is refused' \
+    'refused' "$( (WVA_SO_FALLBACK_FAILURES=010 so_fallback_failures) > /dev/null 2>&1 && echo accepted || echo refused)"
+check 'fallback: a failureThreshold of int32 max is accepted' \
+    '2147483647' "$(WVA_SO_FALLBACK_FAILURES=2147483647 so_fallback_failures 2>/dev/null)"
+check 'fallback: a failureThreshold above int32 is refused' \
+    'refused' "$( (WVA_SO_FALLBACK_FAILURES=2147483648 so_fallback_failures) > /dev/null 2>&1 && echo accepted || echo refused)"
+check 'fallback: a failureThreshold of eleven digits is refused' \
+    'refused' "$( (WVA_SO_FALLBACK_FAILURES=99999999999 so_fallback_failures) > /dev/null 2>&1 && echo accepted || echo refused)"
+
+# KEDA before 2.17 has no fallback.behavior: its CRD prunes the field and the
+# fallback that is left is static at minReplicaCount. None at all instead.
+check 'fallback: KEDA < 2.17 gets none' \
+    'none' "$(SO_KEDA_FALLBACK_BEHAVIOR=no render_with 2 | fb_of)"
+check 'fallback: an unreadable KEDA CRD gets none' \
+    'none' "$(SO_KEDA_FALLBACK_BEHAVIOR=unknown render_with 2 | fb_of)"
+
+# The probe, against a stub kubectl. Each in a subshell with the cache cleared,
+# so the answer is the probe and not the value set above.
+CRD_FIXTURE=''
+CRD_FIXTURE_RC=0
+kubectl() { printf '%s' "$CRD_FIXTURE"; return "$CRD_FIXTURE_RC"; }
+probe() { ( unset SO_KEDA_FALLBACK_BEHAVIOR; so_keda_fallback_probe 2>/dev/null; printf '%s' "$SO_KEDA_FALLBACK_BEHAVIOR" ); }
+CRD_FIXTURE='{"spec":{"versions":[{"name":"v1alpha1","schema":{"openAPIV3Schema":{"properties":{"spec":{"properties":{"fallback":{"properties":{"failureThreshold":{},"replicas":{},"behavior":{"enum":["static","currentReplicas"]}}}}}}}}}]}}'
+check 'probe: a CRD with fallback.behavior is KEDA 2.17 or later' 'yes' "$(probe)"
+CRD_FIXTURE='{"spec":{"versions":[{"name":"v1alpha1","schema":{"openAPIV3Schema":{"properties":{"spec":{"properties":{"fallback":{"properties":{"failureThreshold":{},"replicas":{}}}}}}}}}]}}'
+check 'probe: a CRD without it is older' 'no' "$(probe)"
+check 'probe: an older CRD says so in a warning' \
+    'warned' "$( (unset SO_KEDA_FALLBACK_BEHAVIOR; so_keda_fallback_probe 2>&1 >/dev/null) | grep -q 'KEDA 2.17' && echo warned || echo silent)"
+CRD_FIXTURE=''
+CRD_FIXTURE_RC=1
+check 'probe: a CRD that cannot be read is unknown, not new' 'unknown' "$(probe)"
+CRD_FIXTURE_RC=0
+CRD_FIXTURE='not json'
+check 'probe: a CRD that does not parse is unknown' 'unknown' "$(probe)"
+unset -f kubectl
+
+# What the plan table and the apply lines say about each entry.
+check 'note: a generated entry with a floor gets one' '(+fallback)' "$(so_fallback_note yes 2)"
+check 'note: a floor of zero says why it gets none' '(no fallback: floor 0)' "$(so_fallback_note yes 0)"
+check 'note: an old KEDA says why it gets none' '(no fallback: KEDA < 2.17)' "$(SO_KEDA_FALLBACK_BEHAVIOR=no so_fallback_note yes 2)"
+check 'note: an adopted entry keeps a fallback it has' '(+fallback unless it has one)' "$(so_fallback_note adopt 2)"
+check 'note: an entry not applied says nothing' '-' "$(so_fallback_note no 2)"
+check 'note: a template decides its own' '(fallback: as the template says)' "$(WVA_DEFAULT_SO_TEMPLATE=/x so_fallback_note yes 2)"
+PLAN_FIXTURE="$WORK/plan.yaml"
+printf '%s\n' 'plan:' \
+    '  - {apply: yes, namespace: ns, kind: Deployment, name: up, modelID: m, minReplicas: 2, maxReplicas: 4}' \
+    '  - {apply: yes, namespace: ns, kind: Deployment, name: parked, modelID: m, minReplicas: 0, maxReplicas: 4}' \
+    > "$PLAN_FIXTURE"
+check 'plan table: a FALLBACK column per entry' \
+    'up:(+fallback)|parked:(no fallback: floor 0)' \
+    "$(so_show_plan "$PLAN_FIXTURE" 2>/dev/null | awk '$4 == "up" || $4 == "parked" { print $4 ":" substr($0, index($0, "(")) }' | sed 's/ *$//' | paste -sd'|' -)"
 
 # Adoption: added only to an object with none, never merged into one it has.
 check 'adopt: add_fallback=yes adds the default block' \
@@ -290,18 +353,40 @@ SO_FIXTURE=''
 SO_FIXTURE_RC=0
 kubectl() { printf '%s' "$SO_FIXTURE"; return "$SO_FIXTURE_RC"; }
 check 'adopt: an object with no fallback gets one' \
-    'yes' "$(so_adopt_needs_fallback ns so)"
+    'yes' "$(so_adopt_needs_fallback ns so 2)"
+check 'adopt: an object with a floor of zero gets none' \
+    '' "$(so_adopt_needs_fallback ns so 0)"
+check 'adopt: an old KEDA adds none' \
+    '' "$(SO_KEDA_FALLBACK_BEHAVIOR=no so_adopt_needs_fallback ns so 2)"
 SO_FIXTURE='{"failureThreshold":9,"replicas":4}'
 check 'adopt: an object with a fallback keeps it' \
-    '' "$(so_adopt_needs_fallback ns so)"
+    '' "$(so_adopt_needs_fallback ns so 2)"
+SO_FIXTURE='{"failureThreshold":3,"replicas":0}'
+check 'adopt: a kept zero fallback on a floor of zero is warned about' \
+    'warned' "$(so_adopt_needs_fallback ns so 0 2>&1 >/dev/null | grep -q 'replicas is 0 with minReplicaCount 0' && echo warned || echo silent)"
+check 'adopt: a kept zero fallback above a floor is not' \
+    'silent' "$(so_adopt_needs_fallback ns so 2 2>&1 >/dev/null | grep -q 'replicas is 0' && echo warned || echo silent)"
 SO_FIXTURE=''
 SO_FIXTURE_RC=1
 check 'adopt: an object that cannot be read is not one without a fallback' \
-    '' "$(so_adopt_needs_fallback ns so 2>/dev/null)"
+    '' "$(so_adopt_needs_fallback ns so 2 2>/dev/null)"
 SO_FIXTURE_RC=0
 check 'adopt: WVA_SO_FALLBACK=false adds none' \
-    '' "$(WVA_SO_FALLBACK=false so_adopt_needs_fallback ns so)"
+    '' "$(WVA_SO_FALLBACK=false so_adopt_needs_fallback ns so 2)"
 unset -f kubectl
+
+# A template owns its fallback, except the one shape KEDA scales to zero on.
+TMPL_FIXTURE="$WORK/zero-fallback-template.yaml"
+printf '%s\n' 'apiVersion: keda.sh/v1alpha1' 'kind: ScaledObject' 'metadata:' '  name: {{NAME}}-wva' \
+    'spec:' '  minReplicaCount: {{MIN}}' '  fallback:' '    failureThreshold: 3' '    replicas: {{MIN}}' > "$TMPL_FIXTURE"
+check 'template: fallback.replicas 0 on a floor of 0 is refused' \
+    'refused' "$( (WVA_DEFAULT_SO_TEMPLATE="$TMPL_FIXTURE" render_scaledobject ns Deployment d m addr 0 4) > /dev/null 2>&1 && echo accepted || echo refused)"
+check 'template: and prints no manifest for kubectl to apply' \
+    '' "$( (WVA_DEFAULT_SO_TEMPLATE="$TMPL_FIXTURE" render_scaledobject ns Deployment d m addr 0 4) 2>/dev/null)"
+check 'template: the same template above a floor renders' \
+    '2' "$(WVA_DEFAULT_SO_TEMPLATE="$TMPL_FIXTURE" render_scaledobject ns Deployment d m addr 2 4 2>/dev/null | yq -r '.spec.fallback.replicas')"
+check 'template: the shipped template renders a floor of 0 with no fallback' \
+    'none,0' "$(WVA_DEFAULT_SO_TEMPLATE="$ROOT/config/samples/keda/external-scaler/scaledobject-template.yaml" render_scaledobject ns Deployment d m addr 0 4 2>/dev/null | yq -o=json '.spec' | jq -r '[(.fallback // "none"), .minReplicaCount] | map(tostring) | join(",")')"
 
 # ----------------------------------------------------------------------------
 

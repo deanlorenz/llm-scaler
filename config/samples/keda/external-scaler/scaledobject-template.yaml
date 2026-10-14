@@ -38,12 +38,24 @@ spec:
   cooldownPeriod: 30
   minReplicaCount: {{MIN}}
   maxReplicaCount: {{MAX}}
-  # Keep serving on WVA's terms if the scaler goes away, rather than collapsing to
-  # minReplicaCount the moment it cannot be reached.
-  fallback:
-    failureThreshold: 3
-    replicas: {{MIN}}
-    behavior: currentReplicasIfHigher
+  # No fallback here, deliberately. A template OWNS its fallback -- the installer
+  # adds none to a templated object -- and one template is rendered for every
+  # entry, including scale-to-zero ones whose {{MIN}} is 0. `replicas: {{MIN}}`
+  # then renders fallback.replicas 0 on minReplicaCount 0, which KEDA scales to
+  # zero on ANY trigger error once cooldownPeriod passes (its RequestScale treats
+  # an erroring trigger as inactive), so the installer refuses that render.
+  #
+  # The fallback covers a WVA controller that is down or unreachable; before its
+  # first decision after a restart WVA answers the current replica count and no
+  # fallback is involved. To keep one, use it only where every entry has a floor
+  # of at least 1, or write a fixed replicas of at least 1 instead of {{MIN}}.
+  # behavior needs KEDA 2.17 or later: an older KEDA drops the field and the
+  # fallback becomes static, forcing replicas whatever the fleet is running.
+  #
+  # fallback:
+  #   failureThreshold: 3
+  #   replicas: {{MIN}}
+  #   behavior: currentReplicasIfHigher
   advanced:
     restoreToOriginalReplicaCount: true
   triggers:

@@ -53,10 +53,16 @@ spec:
   # arrives over the push stream.
   minReplicaCount: 0
   maxReplicaCount: 10
-  fallback:
-    failureThreshold: 3
-    replicas: 2
-    behavior: "currentReplicasIfHigher"
+  # No fallback, because the floor is 0. KEDA treats a trigger error as
+  # "inactive": with no fallback that only marks the trigger as failing, but
+  # with fallback.replicas 0 it parks the workload once cooldownPeriod passes.
+  # A non-zero replicas avoids that but raises a running fleet to at least that
+  # many for as long as the scaler fails, which a floor of 0 did not ask for.
+  # Before WVA's first decision after a restart the scaler answers the current
+  # replica count, so a restart needs no fallback either way. With a floor of
+  # 1 or more, add one -- it covers a controller that is down:
+  #   fallback: {failureThreshold: 3, replicas: <the floor>, behavior: currentReplicasIfHigher}
+  # (behavior needs KEDA 2.17 or later.)
   advanced:
     restoreToOriginalReplicaCount: false
     horizontalPodAutoscalerConfig:
