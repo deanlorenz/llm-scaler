@@ -29,8 +29,7 @@ llm-d's SLO-aware recipe takes the target directly. Its benchmark reports
 The recipe is scoped to *"one inference pool serving one model variant against
 one SLO pair"*, and its residual violations sit *"at the first capacity
 crossing"*. Our comparison page,
-[keda-alone](https://github.com/ev-shindin/llm-scaling-manager/blob/docs/keda-comparison/docs/comparison/keda-alone.md)
-(on branch `docs/keda-comparison`), lists this as a case where KEDA alone is the
+[keda-alone](../comparison/keda-alone.md), lists this as a case where KEDA alone is the
 better choice today.
 
 The goal is to close that row **without giving up what the recipe lacks**:
