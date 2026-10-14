@@ -1,7 +1,7 @@
 # Autoscaling Landscape vs. llm-scaling-manager — NVIDIA Dynamo, Mooncake, SGLang, Fireworks AI, Together AI
 
-> **Status:** Research comparison (untracked working doc) · **Date:** 2026-08-03 · **Managed providers added:** 2026-08-09
-> **Baseline:** llm-d llm-scaling-manager (**the scaling manager**)
+> **Status:** research comparison · **Date:** 2026-08-03, managed providers added 2026-08-09, the scaling manager's column updated 2026-10-14
+> **Baseline:** llm-scaling-manager (**the scaling manager**), an independently developed, advanced fork of llm-d's workload-variant-autoscaler
 > **Compared — deployable systems:** NVIDIA Dynamo Planner, Mooncake, SGLang · **managed platforms:** Fireworks AI, Together AI
 > All claims are sourced against latest docs/code — see [Sources](#sources).
 
@@ -11,7 +11,7 @@
 
 | System | Is it an autoscaler? | One-line posture |
 |---|---|---|
-| **the scaling manager** (baseline) | **Yes** | Global, SLO/cost-aware, **heterogeneous, multi-model** controller; emits desired replicas → HPA/KEDA. |
+| **the scaling manager** (baseline) | **Yes** | Global, cost-aware, **heterogeneous, multi-model** controller; SLOs only through named threshold tiers (no SLA-target scaling); answers KEDA's external scaler with desired replicas. |
 | **NVIDIA Dynamo Planner** | **Yes** | SLA-driven controller with **traffic forecasting** + **pre-deployment profiling**; scales prefill/decode independently; **single-model, homogeneous, cost-blind**. |
 | **Mooncake** | **No** | KVCache-aware scheduler + **early-rejection admission control** over a *fixed* pool. Sheds load; does not add capacity. Scheduling "brain" is **not open-source**. |
 | **SGLang** | **No (native)** | Engine + **router/gateway** (membership + cache-aware LB). Scaling delegated entirely to **external K8s** (HPA/KEDA, OME/Knative/LWS). |
@@ -32,17 +32,17 @@
 
 | Dimension | **the scaling manager** | **Dynamo Planner** | **Mooncake** | **SGLang** |
 |---|---|---|---|---|
-| **Type** | Global SLO/cost autoscaler | SLA-driven autoscaler (2 modes) | Scheduler + admission control | Engine + router (no autoscaler) |
+| **Type** | Global, cost-aware capacity autoscaler (SLOs only through threshold tiers) | SLA-driven autoscaler (2 modes) | Scheduler + admission control | Engine + router (no autoscaler) |
 | **What it scales** | Replicas per model×variant | Prefill/decode replicas (independent) | Nothing (P:D ratio **preset**) | Nothing native (external scales replicas) |
 | **Scope** | **Multi-model, multi-tenant, global** | **Single DGD** (GlobalPlanner = same model only) | Single cluster, fixed | Per-deployment (external) |
 | **Signals** | Prometheus: queue depth, KV util, request rate, token supply/demand | Prometheus (rate, ISL/OSL, KV-hit) **+** event-plane ForwardPassMetrics | KV reuse, P/D load, TTFT/TBT, predicted decode load | Engine Prometheus (`num_queue_reqs`, `token_usage`, TTFT/TPOT) → external |
 | **Forecasting** | **None** (reactive; EWMA/rate-anchored smoothing only) | **Yes** — Constant/ARIMA(default)/Kalman/Prophet, 1-interval look-ahead | For **admission** only (predict decode load to reject early), not capacity | None |
 | **SLA→capacity** | Saturation optimizer; greedy-by-saturation; learns online, **no profiling needed** | Interpolated perf model from **pre-deployment profiling** (AIC rapid / AIPerf thorough) | No (SLA → which requests to admit/reject) | None (thresholds live in external KEDA rules) |
-| **Cost / heterogeneity** | **Yes** — heterogeneous accelerators first-class; cost-aware optimizer (relative `variant-cost`); **GPU quota/fair-share limiter** | **No** — homogeneous single GPU type, cost-blind; only a GPU-count cap (`max_gpu_budget=8`) | No (reuses idle CPU/DRAM/SSD on fixed HW) | No (only heterogeneous-TP KV transfer, a data-plane opt) |
-| **Actuation** | **Metrics-first** → Prometheus Adapter → **HPA/KEDA** → `scale` (opt-in `llm-d.ai/managed`); optional direct scale for scale-from-zero | **Own controller** patches DGD CRD via operator (`DynamoGraphDeploymentScalingAdapter`); **VirtualConnector** publishes decisions without managing infra (suggest-only) | Actuates on **requests** (route/reject/replicate KV); no fleet actuation | Dynamic worker register/deregister + K8s service discovery (membership, not scaling) |
+| **Cost / heterogeneity** | **Yes** — heterogeneous accelerators first-class; cost-aware optimizer (relative `variantCost` in the ScaledObject trigger); **GPU quota/fair-share limiter** | **No** — homogeneous single GPU type, cost-blind; only a GPU-count cap (`max_gpu_budget=8`) | No (reuses idle CPU/DRAM/SSD on fixed HW) | No (only heterogeneous-TP KV transfer, a data-plane opt) |
+| **Actuation** | **KEDA external scaler (gRPC)**: KEDA's HPA reads the desired replicas; registration is the ScaledObject; it never writes replica counts itself, scale-from-zero included | **Own controller** patches DGD CRD via operator (`DynamoGraphDeploymentScalingAdapter`); **VirtualConnector** publishes decisions without managing infra (suggest-only) | Actuates on **requests** (route/reject/replicate KV); no fleet actuation | Dynamic worker register/deregister + K8s service discovery (membership, not scaling) |
 | **P/D disaggregation** | Roles first-class (`llm-d.ai/role`), role-aware demand | **Independent prefill/decode scaling** (core feature) | Separate P/D pools, **preset ratio** | Separate pools, **manual** scaling |
-| **Maturity** | Incubation/active (VA-CR → annotation migration); paper published | GA v1.0 (Mar 2026, unverified), v1.3.1 (6 Aug 2026); both modes production-ready | Production at Kimi; **Conductor + rejection policy NOT open-sourced** | Engine mature; router shipped but mid-rewrite; PD scaling manual |
-| **Openness** | Open (Apache-2, llm-d) | Open (ai-dynamo) | **Partial** — transport/store open; scheduler internal | Open (sgl-project) |
+| **Maturity** | Active; Stable and Experimental paths marked per scenario ([well-lit paths](../well-lit-paths/)); upstream WVA paper published | GA v1.0 (Mar 2026, unverified), v1.3.1 (6 Aug 2026); both modes production-ready | Production at Kimi; **Conductor + rejection policy NOT open-sourced** | Engine mature; router shipped but mid-rewrite; PD scaling manual |
+| **Openness** | Open (Apache-2.0); independent of the llm-d project | Open (ai-dynamo) | **Partial** — transport/store open; scheduler internal | Open (sgl-project) |
 
 ---
 
@@ -95,9 +95,9 @@ Both sell **dedicated/on-demand endpoints**: you pick a model and a GPU SKU, set
 
 | Dimension | **Fireworks AI** | **Together AI** | **the scaling manager** (for reference) |
 |---|---|---|---|
-| **Control law** | Threshold per load target; with several targets, **max replica count across all** wins | **Proportional**: `ceil(N × observed/target)`, dampened by windows, clamped to bounds | Saturation optimizer; multi-analyzer ballot with per-analyzer scores |
+| **Control law** | Threshold per load target; with several targets, **max replica count across all** wins | **Proportional**: `ceil(N × observed/target)`, dampened by windows, clamped to bounds | Saturation optimizer, demand floored on the throughput one replica sustained; other analyzers report metrics only |
 | **Signals** | `default` (0–1 load fraction), `tokens_generated_per_second`, `prompt_tokens_per_second` (added Feb 2026, prefill-heavy), `requests_per_second`, `concurrent_requests` — all **per replica** | Exactly 8: `inflight_requests` (default), `ttft`, `e2e_latency`, `gpu_utilization`, **`token_utilization` (= KV-cache utilization, 0–100)**, `throughput_per_replica`, `decoding_speed`, `cache_hit_rate` (prompt-cache, 0–100). No custom/Prometheus metric support | Queue depth, KV utilization, request rate; token supply/demand |
-| **Multi-signal** | **Yes** — several targets, max wins | **No** — *"A deployment scales on a single metric, so you set exactly one"* | **Yes** — weighted combine across analyzers |
+| **Multi-signal** | **Yes** — several targets, max wins | **No** — *"A deployment scales on a single metric, so you set exactly one"* | **Yes** — KV cache, queues and token throughput, inside one saturation analyzer |
 | **Latency/SLO scaling** | **None** | `ttft` / `e2e_latency` with `p50/p90/p95/p99` (default `p95`) — **but see below** | Saturation-derived, not latency-triggered |
 | **Forecasting** | None | None | None |
 | **Scale-up window** | `--scale-up-window`, default **30 s** | `--scale-up-window`, default **0 s** (blog recommends 60 s) | HPA/KEDA stabilization |
@@ -106,7 +106,7 @@ Both sell **dedicated/on-demand endpoints**: you pick a model and a GPU SKU, set
 | **Cold-start UX** | **503 `DEPLOYMENT_SCALING_UP`, not queued** — client must retry with backoff | Requests to a stopped endpoint error; restart is manual (1–2 min) | — |
 | **Heterogeneous GPUs** | Not exposed (pick one SKU per deployment; base quota 8×A100 / 8×H100) | Not exposed (one `hardware` string per endpoint) | **First-class** |
 | **P/D disaggregation** | Not exposed | Not exposed | Roles first-class |
-| **Cost model** | Per **GPU-second** while replicas are up — *"costs accumulate even if there are no active API calls"* | Per replica-time; `max_replicas` is the cost ceiling | Relative `variant-cost` + quota limiter |
+| **Cost model** | Per **GPU-second** while replicas are up — *"costs accumulate even if there are no active API calls"* | Per replica-time; `max_replicas` is the cost ceiling | Relative `variantCost` per variant + GPU limiters (free GPUs, quotas, Kueue) |
 
 ### The finding worth stealing: Together's own data says both TTFT *and* GPU utilization are bad scaling signals
 
@@ -115,7 +115,7 @@ Together ships `ttft` p95 — the most SLO-shaped knob any vendor here offers �
 - **TTFT** stays low under saturation because **continuous batching absorbs queue pressure into end-to-end latency**, not first-token latency. The metric looks healthy precisely when you most need to scale.
 - **GPU utilization** misleads because *"utilization measures arithmetic intensity, not pressure"* — a GPU can read 60% busy while the engine's queue is already backing up.
 
-This is independent, production-sourced confirmation of the choice the scaling manager already made: **scale on saturation/queue depth, not on observed latency or GPU busy-ness.** Worth citing directly whenever the scaling manager is challenged with "why not just target TTFT?" or "why not just use DCGM utilization?" — the answer is no longer theoretical, it is a competitor's own published negative result. It argues *against* adding a naive TTFT-target analyzer to the multi-analyzer ballot, and *for* keeping the saturation signal primary.
+This is independent, production-sourced confirmation of the choice the scaling manager already made: **scale on saturation/queue depth, not on observed latency or GPU busy-ness.** Worth citing directly whenever the scaling manager is challenged with "why not just target TTFT?" or "why not just use DCGM utilization?" — the answer is no longer theoretical, it is a competitor's own published negative result. It argues *against* adding a naive TTFT-target analyzer, and *for* keeping the saturation signal primary.
 
 Note the convergence: Together's default (`inflight_requests`) and its `token_utilization` (KV-cache utilization) are the same two signals the scaling manager leans on. Two teams reached the same conclusion independently.
 

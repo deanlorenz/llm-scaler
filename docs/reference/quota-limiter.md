@@ -296,9 +296,12 @@ answerable from the controller log.
 
 The manager ClusterRole carries `get`/`list` on `clusterqueues`, `localqueues`
 and `resourceflavors` in `kueue.x-k8s.io`. A namespace-scoped install lists
-LocalQueues only in the namespace it manages (the tenant Role grants that) and gets the
-two cluster-scoped kinds, and `get` on namespaces, from `components/kueue-reader`, applied by the prereqs
-phase like `node-reader`. A rule naming an API group the cluster does not serve
+LocalQueues only in the namespace it manages (the controller's Role,
+`wva-manager-role`, grants that) and gets the two cluster-scoped kinds, and `get`
+on namespaces, from `components/kueue-reader`. Both are applied by the prereqs
+phase like `node-reader`, so an install that predates these rules needs a cluster
+admin to re-run `make setup-prereqs`; the tenant's `make deploy-wva` does not
+apply Roles. A rule naming an API group the cluster does not serve
 is inert, so the grant is harmless without Kueue.
 
 ### Validation

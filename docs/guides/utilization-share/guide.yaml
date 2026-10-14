@@ -57,13 +57,16 @@ verify:
       make utilization-share-status
   endpoint:
     note: |
-      For a cluster admin. The endpoint checks the caller against a
-      cluster-wide grant: the install's metrics-reader token passes where the
-      admin's install step created its binding. A 401 or 403 here means use
-      Prometheus instead.
+      Whoever can read Secrets and port-forward in the CONTROLLER's namespace:
+      the tenant in the default shape, the admin when the controller runs out
+      of the tenant's reach. The endpoint checks the caller against a
+      cluster-wide /metrics grant, which the EPP metrics token carries once the
+      admin's prereqs step has run. A 401 or 403 here means use Prometheus
+      instead.
     run: |
-      TOKEN=$(kubectl get secret wva-epp-metrics-token -n $NAMESPACE -o jsonpath='{.data.token}' | base64 -d)
-      kubectl port-forward -n $NAMESPACE svc/wva-controller-manager-metrics-service 8443:8443 >/dev/null & PF=$!
+      CONTROLLER_NAMESPACE=${CONTROLLER_NAMESPACE:-$NAMESPACE}
+      TOKEN=$(kubectl get secret wva-epp-metrics-token -n $CONTROLLER_NAMESPACE -o jsonpath='{.data.token}' | base64 -d)
+      kubectl port-forward -n $CONTROLLER_NAMESPACE svc/wva-controller-manager-metrics-service 8443:8443 >/dev/null & PF=$!
       sleep 2
       curl -sSfk -H "Authorization: Bearer $TOKEN" https://localhost:8443/metrics \
         | grep -E '^wva_(utilization_share_(mode|actionable|replicas_to_move|headroom|spare_gpus|transfers_total)|model_scaling_blocked)'

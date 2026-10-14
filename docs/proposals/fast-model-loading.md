@@ -203,7 +203,7 @@ than burst's, because parked models spike rarely by definition.
 
 ### 2.7 The pool was built and measured (2026-08-21)
 
-Not a projection. A GPU-**holding** pool Pod was deployed to pokprod
+Not a projection. A GPU-**holding** pool Pod was deployed to an H100 OpenShift test cluster
 (`config/warmpool/`), two models were made resident in it, and every number below
 was measured on it the same day.
 
@@ -600,7 +600,7 @@ project, and that is a feature.
 
 ### 6.1 They were run, and the cluster cannot answer them (2026-08-21)
 
-Measured on pokprod, 7 days, read-only queries:
+Measured on an H100 OpenShift test cluster, 7 days, read-only queries:
 
 | question | result |
 | --- | --- |
@@ -610,7 +610,7 @@ Measured on pokprod, 7 days, read-only queries:
 | `T_ordinary` from `wva_scale_from_zero_wake_seconds` | **no observations at all in 7 days** |
 
 **This is not evidence that spikes are independent. It is evidence of an idle
-cluster.** pokprod is a test and benchmark cluster: the scale-ups in it are our
+cluster.** That cluster is a test and benchmark cluster: the scale-ups in it are our
 own runs, and 7 busy buckets in a week cannot distinguish independent arrivals
 from correlated ones. Nor can 3 active models say anything useful about a Zipf
 exponent over N.

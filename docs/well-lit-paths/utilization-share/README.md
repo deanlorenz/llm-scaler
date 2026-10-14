@@ -1,11 +1,12 @@
 # Share one GPU quota between models
 
-> **Experimental.** Measured on H200s with two aggregated models at 1 GPU per
-> replica, one run per configuration ([what was measured](measured.md)). Not
-> yet measured with this optimizer: whole-node or multi-GPU pods, P/D models
-> (P/D scaling itself is measured on [its own path](../pd-disaggregation/)), a
-> cluster-wide quota, and the GPU cost of the current build. The defaults are
-> starting points.
+> **Experimental.** Measured on H200s at 1 GPU per Pod, one run per
+> configuration ([what was measured](measured.md)): two aggregated models, and
+> two P/D-disaggregated models whose four roles share one quota. The P/D run in
+> [measured.md](measured.md#pd-two-disaggregated-models-under-one-quota) is the
+> most recent valid one; a later rerun is in progress. Not yet measured with
+> this optimizer: whole-node or multi-GPU pods, and a cluster-wide quota. The
+> defaults are starting points.
 
 Several models share one GPU quota, and their traffic peaks at different times.
 Today's optimizer hands the quota out first come, first served: a model that
@@ -17,11 +18,14 @@ shares the quota on purpose: each model gets what it needs, the rest is spread
 as headroom by weight, and GPUs move from one model to another when the shares
 drift ([how](#how-it-shares-the-quota)).
 
-What it buys: on the latest run, the model that burst first was served at once —
-median time to first token 0.07 s, against 25.6 s with the same fleet planned
-but not moved — because GPUs were already waiting for it. The model that burst
-second was no worse off: the same p95 (287 s), and a median of 144 s against
-215 s.
+What it buys: on the most recent aggregated run (2026-10-12), the model that
+burst first was served at once — median time to first token 0.07 s, against
+25.6 s with the same fleet planned but not moved — because GPUs were already
+waiting for it. The model that burst second was no worse off: the same p95
+(287 s), and a median of 144 s against 215 s. That run's GPU cost was not
+measured. On the P/D run, the output-heavy burst was served at p95 95 ms
+against 42 s, and the prompt-heavy burst was overloaded in every arm, for
+36 % more GPU-seconds.
 
 **Use it when** two or more models scale under one quota, their demand moves
 between them over hours rather than minutes, and the GPUs are paid for whether

@@ -1,6 +1,6 @@
 # llm-scaling-manager: project proposal
 
-**Status:** proposal, 2026-09-28. Built and running, not a design note. The
+**Status:** built and running, 2026-09-28; this page argues for adopting it. The
 scaling path, warm pool, scale-to-zero and quota limiting are cluster-verified
 on Kubernetes and on OpenShift, and every measurement below links to the run
 that produced it.
@@ -16,14 +16,16 @@ that it ships a shared warm pool to cover the minutes a new replica spends
 loading, scale-to-zero, and separate handling for prefill and decode.
 
 We built it because the signals a general-purpose autoscaler can act on do not
-tell you what you need to know. We have a benchmark where request rate, queue
-depth and cache occupancy all said the fleet was fine and the right answer was
-to triple it.
+tell you what you need to know. We have a benchmark where the request rate
+never changed, no queue formed, and cache occupancy said one replica would do,
+while the load needed two replicas, and three after the request shape changed.
 
-It started as a fork of llm-d's Workload Variant Autoscaler
-(`llm-d/llm-d-workload-variant-autoscaler`, still the module path in `go.mod`)
-and has moved a long way since. Shorter version, for readers outside the
-repository: [Sub-second scale-ups on llm-d](blog/sub-second-scale-ups-on-llm-d.md).
+It is an advanced fork of llm-d's Workload Variant Autoscaler
+(`llm-d/llm-d-workload-variant-autoscaler`, still the module path in `go.mod`),
+developed independently and a long way on since. The one-page case for
+evaluators, with costs and maturity: [Why llm-scaling-manager](why.md). Shorter
+version, for readers outside the repository:
+[Sub-second scale-ups on llm-d](blog/sub-second-scale-ups-on-llm-d.md).
 
 ## The problem
 
@@ -91,14 +93,14 @@ push path; quota-bounded scaling, against either a
 
 | Claim | Measured | Where |
 | --- | --- | --- |
-| A shape change is caught without a queue | Third replica ordered at +1344 s, the same cycle the new shape's completion rate came on record. No queue at any point; p95 TTFT 0.08 s in the first phase, 0.04–0.07 s in the second | [P/D path](well-lit-paths/pd-disaggregation/) |
-| Missing it has a price | A cold controller sized the same window from occupancy and paid 4.2 s p95 | [P/D path](well-lit-paths/pd-disaggregation/) |
+| A shape change is caught without a queue | Third replica ordered at +1344 s, the same cycle the new shape's completion rate came on record, on a controller that had seen both shapes. No queue at any point; p95 TTFT 0.23 s in the first five minutes of each phase, then 0.08 s for the rest of the first and 0.04–0.07 s for the rest of the second | [P/D path](well-lit-paths/pd-disaggregation/#measured) |
+| Missing it has a price | A cold controller sized the same window from occupancy: 4.2 s p95 in that five-minute window (204 ms over the whole run) | [P/D path](well-lit-paths/pd-disaggregation/) |
 | The decision precedes the queue | Second replica ordered at +53 s, before the first tipped into preemption | [P/D path](well-lit-paths/pd-disaggregation/) |
 | Roles scale on their own bottleneck | Decode 1 → 2 → 3, prefill never ordered | [P/D path](well-lit-paths/pd-disaggregation/) |
-| The warm pool covers the rise | p95 TTFT per rise falls from 5.1–8.8 s to 0.11–0.83 s | [measured.md](well-lit-paths/warm-pool-bridge/measured.md) |
+| The warm pool covers the rise | p95 TTFT per rise falls from 5.2–8.8 s to 0.11–0.83 s | [measured.md](well-lit-paths/warm-pool-bridge/measured.md) |
 | It beats the floor it replaces | 14 138 GPU-seconds against 16 080, 12 % less, within 50 ms of the floor's latency on three of four rises | [measured.md](well-lit-paths/warm-pool-bridge/measured.md) |
 | And what it costs | 17 % more than holding nothing, which came in at 12 129 | [measured.md](well-lit-paths/warm-pool-bridge/measured.md) |
-| A warm Pod switches models fast | 437 ms against roughly 41 s cold, serving real gateway traffic | [fast model loading](proposals/fast-model-loading.md) |
+| A warm Pod switches models fast | About 437 ms (four switches of 435–440 ms) against roughly 41 s cold, on an H100 test cluster | [warm pool](well-lit-paths/warm-pool-bridge/); measurement in [fast model loading](proposals/fast-model-loading.md#27-the-pool-was-built-and-measured-2026-08-21) |
 | Cold start is mostly not the weights | 8B ~41 s; GLM 192 s of which 40 s is weights; 463 s on a cold JIT cache | [weight transfer](proposals/warm-pool-weight-transfer.md) |
 | The P/D result reproduces | The pair was run twice a day apart, within a tenth of every number | [P/D path](well-lit-paths/pd-disaggregation/) |
 
@@ -110,7 +112,7 @@ model; the result is demonstrated there and expected, not shown, above it.
 ## Non-goals and limits
 
 **Out of scope by design.** Node provisioning belongs to the cluster autoscaler,
-quota between models to Kueue, and tenant quota and routing to the gateway. We
+tenant arbitration to Kueue, and routing to the gateway. We
 decide replica counts. We do not place Pods, arbitrate between tenants, or route
 requests.
 
@@ -142,9 +144,11 @@ approximation; maintenance pre-scaling; failure replacement.
 
 ## Alternatives considered
 
-**Threshold autoscaling on KEDA's own signals.** The shape-swap run settles it:
-at a constant rate with no queue, occupancy pointed at one replica when three
-were needed.
+**Threshold autoscaling on KEDA's own signals.** The shape-swap run argues
+against it, though it had no KEDA-threshold arm: at a constant rate with no
+queue, occupancy of 5–15 % pointed at one replica while the load needed two,
+and three after the shape changed. A head-to-head against plain KEDA thresholds
+is not yet measured.
 
 **A floor of replicas.** The closest competitor on latency, and 33 % more
 GPU-seconds against the pool's 17 %. Still the better choice when a model is
@@ -168,8 +172,9 @@ with KEDA owning the HPA. One consequence worth knowing: the HPA takes the
 maximum published inside its scale-down window, so we hold a published
 scale-down across cycles to stop one noisy sample pinning the fleet.
 
-Measured on H200 nodes. Replica reallocation across priorities is designed but
-not built, and P/D role switching is experimental. Apache 2.0, and the module
+Measured on H200 nodes; the warm-pool model switch on H100. Priority-weighted
+reallocation between models (`enableRescale`) is built, off by default and
+covered by unit tests only, and P/D role switching is experimental. Apache 2.0, and the module
 path has not changed.
 
 Design detail lives in [concepts/](concepts/): what gets measured and how it

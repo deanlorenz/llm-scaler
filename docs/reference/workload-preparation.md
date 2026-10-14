@@ -3,12 +3,33 @@
 Three things decide whether a scale-up actually helps: whether a new replica can
 get to Ready quickly -- its weights, and everything else on the way -- whether
 an old one can leave without dropping requests, and whether the Deployment says
-enough about itself for the scaling manager to act on. None are the scaling manager settings -- they are
-properties of the model server. `make workload-patch` writes the first two;
+enough about itself for the scaling manager to act on. None of them are
+scaling-manager settings -- they are properties of the model server. `make workload-patch` writes the first two;
 the rest of the start path is a checklist, below.
 
-> Part of the [the scaling manager deployment guide](../../deploy/). For what to watch once it is
+> Part of the [deployment guide](../../deploy/). For what to watch once it is
 > running, see [Watching what the scaling manager decides](monitoring.md).
+
+## What your pod must carry
+
+Check these before registering a model. `<ns>` is the model's namespace,
+`<modelID>` the `modelID` you put on the ScaledObject trigger
+([trigger reference](scaledobject-trigger.md)). On a LeaderWorkerSet read the
+**leader** template (`.spec.leaderWorkerTemplate.leaderTemplate`) where a
+Deployment has `.spec.template`.
+
+| # | The pod must carry | Without it | Check |
+| --- | --- | --- | --- |
+| 1 | `--served-model-name` equal to the trigger's `modelID` (else `--model`) | engine series are filtered on `model_name`; a mismatch reads as no metrics | `kubectl get deploy -n <ns> <name> -o jsonpath='{.spec.template.spec.containers[*].args}'` |
+| 2 | Pod-template label `llm-d.ai/inferenceServing: "true"`, or `llm-d.ai/role: prefill`/`decode` | `make scaledobjects-plan` does not list the workload (it can still be registered by hand) | `kubectl get deploy -n <ns> -o custom-columns='NAME:.metadata.name,SERVING:.spec.template.metadata.labels.llm-d\.ai/inferenceServing,ROLE:.spec.template.metadata.labels.llm-d\.ai/role'` |
+| 3 | On P/D: `llm-d.ai/role: prefill` or `decode` on each role's template; anything else is `both` | the role is scaled as a whole-request server ([P/D path](../well-lit-paths/pd-disaggregation/)) | same command as row 2 |
+| 4 | A GPU-product `nodeSelector` or `nodeAffinity` | `AcceleratorNotResolved` Warning; a GPU limiter charges its GPUs to no pool and it cannot grow | `kubectl get events -n <ns> --field-selector reason=AcceleratorNotResolved` |
+| 5 | Engine `/metrics` scraped by Prometheus (vLLM always; SGLang only with `--enable-metrics`) | `MetricsUnavailable` Warning on the ScaledObject; no scaling on load | PromQL `count(vllm:kv_cache_usage_perc{model_name="<modelID>"})` (SGLang: `sglang:token_usage`) is non-empty |
+| 6 | The EPP's `flowControl` feature gate, parsed by the running EPP | no router-queue demand signal; a model at zero never wakes | PromQL `count(llm_d_epp_flow_control_queue_size) or count(inference_extension_flow_control_queue_size)` is non-empty |
+| 7 | `preStop` hook on the engine container and `terminationGracePeriodSeconds` above it | every scale-down cuts in-flight streams | `make workload-patch NAMESPACE=<ns>` names workloads without a drain ([below](#draining-before-scale-down)) |
+| 8 | Weights read from a mounted model cache | every scale-up is a download | `make workload-patch NAMESPACE=<ns>` reports `RE-DOWNLOADS ITS WEIGHTS` ([below](#weights-and-the-model-cache)) |
+| 9 | Fast start: image held on the GPU nodes, engine cache on a volume, short probe period | each scale-up pays the pull and the compile | `make prepull-status NAMESPACE=<ns>`; `make workload-patch` reports `COMPILES FROM NOTHING` ([below](#the-rest-of-the-start-path)) |
+| 10 | A ScaledObject whose trigger is `external-push` with this `modelID` | nothing scales it — the controller has no watch of its own | `kubectl get scaledobject -n <ns> -o custom-columns='NAME:.metadata.name,MODEL:.spec.triggers[0].metadata.modelID,READY:.status.conditions[0].status'` |
 
 ## Weights and the model cache
 
@@ -502,6 +523,48 @@ The benchmark harness this repository uses puts its own steps on the engine's
 start path; what they are and how the benchmark scenarios handle them is in
 [Benchmark the scaling manager](../guides/benchmarking/README.md#replica-start-time-in-the-harness).
 
+## The engine's memory budget (`gpuMemoryUtilization`)
+
+**`gpuMemoryUtilization` has to follow the model.** vLLM reads it as a fraction
+of the card's **total** memory, not of what is free, and then fills that budget
+with KV cache. A 32B model wants 0.95 of an 80GB card. A 0.6B model -- 1.12 GiB
+of weights -- does not, and asking for 0.95 anyway makes it claim **73.5 GiB of
+KV cache** and then fail:
+
+```
+Available KV cache memory: 73.53 GiB
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 594.00 MiB.
+GPU 0 has 79.18 GiB of which 500.69 MiB is free.
+```
+
+`make benchmark-standup` sets `GPU_MEM_UTIL` to **0.90** for every model. It is
+deliberately *not* lowered for small models: per-replica capacity IS the KV
+cache size, so shrinking KV to make a small model scale sooner does the
+autoscaler's job in the wrong layer, and throws away GPU you paid for to buy an
+effect `kvCacheThreshold` gives you for free. Size the card for serving; tune
+when a replica counts as full in the [scaling policy](scaling-policy.md).
+
+Expect the consequence on a small model. At 0.90 a 0.6B model gets **651,328
+tokens** of KV cache, and one replica absorbs an enormous amount of traffic
+without ever looking full. Measured: 121 concurrent requests, KV utilisation
+peaking at **10.5%**, and the scaling manager holding at one replica --
+correctly, because by the signal it sizes on nothing was saturated. To make a
+small model scale on a small load, lower `kvCacheThreshold`; do not shrink the
+cache.
+
+**Why it looks intermittent.** 0.95 works on an empty GPU, so the failure comes
+and goes. The memory that is already gone belongs to pods the *scheduler cannot
+see*: FMA launcher pods request **zero** GPUs while holding the engine, so
+Kubernetes places a model onto a card it believes is empty, and vLLM then
+measures 77.3 of 79.18 GiB free and budgets as though it had all of it. Any
+co-tenant that holds memory without requesting a GPU does the same.
+
+Override it on the standup when you need to:
+
+```bash
+make benchmark-standup BENCHMARK_NAMESPACE=<namespace> MODEL_ID=<model> GPU_MEM_UTIL=0.50
+```
+
 ## Draining before scale-down
 
 A replica removed while it is streaming takes its open responses with it. The
@@ -559,6 +622,108 @@ ScaledObject is the moment scale-down becomes possible:
 note: Scale-down will cut in-flight requests: vllm declares no preStop hook,
       and terminationGracePeriodSeconds is 30. ...
 ```
+
+### In llm-d modelservice values
+
+The same two fields, written where the chart will keep them — once per role.
+**UNVERIFIED:** the chart is not vendored in this repository, so the key paths
+below (a `containers` list per role passed through to the pod, and a per-role
+`terminationGracePeriodSeconds`) have not been checked against the chart's
+templates. Render with `helm template` and confirm both fields reach the
+Deployment before relying on them.
+
+```yaml
+prefill:
+  terminationGracePeriodSeconds: 120   # UNVERIFIED key path
+  containers:
+  - name: vllm
+    lifecycle:
+      preStop:
+        exec:
+          command: ["/bin/sh", "-c", "sleep 45"]
+decode:
+  terminationGracePeriodSeconds: 600   # UNVERIFIED key path; cover the longest generation
+  containers:
+  - name: vllm
+    lifecycle:
+      preStop:
+        exec:
+          command: ["/bin/sh", "-c", "sleep 45"]
+```
+
+Decode holds the long-running streams, so its grace period is the one to size
+from the longest generation; a prefill request finishes in one forward pass.
+
+**What to check in the chart before relying on the paths above.** Find which
+chart and version your release runs, pull that chart, and read the paths off
+its Deployment template:
+
+```bash
+helm list -n <ns>                                # the CHART column: name and version of <model>-ms
+helm pull <repo>/<chart> --version <version> --untar -d /tmp/ms
+grep -rn "terminationGracePeriodSeconds\|lifecycle\|preStop" /tmp/ms/*/templates/
+```
+
+The `.Values.…` expression each match reads **is** the values path. You are
+looking for two things, per role (`prefill`, `decode`): the expression that
+fills `spec.template.spec.terminationGracePeriodSeconds`, and how the
+`vllm` container's `lifecycle` is filled — either a values key that is
+rendered into it, or a role-level `containers` list that is passed through
+whole. If neither is templated, the chart cannot set the field and the patch
+has to go on the rendered Deployment instead (and is reverted by the next
+`helm upgrade`). Then confirm on the rendered output, and once more on the
+live object after the upgrade:
+
+```bash
+helm template <model>-ms <repo>/<chart> --version <version> -f values.yaml \
+  | yq 'select(.kind == "Deployment") | [.metadata.name, .spec.template.spec.terminationGracePeriodSeconds, (.spec.template.spec.containers[] | select(.name == "vllm") | .lifecycle.preStop)]'
+kubectl get deploy -n <ns> -o custom-columns=NAME:.metadata.name,GRACE:.spec.template.spec.terminationGracePeriodSeconds
+```
+
+A null grace period or preStop in either output means the key path is wrong
+for your chart version. `make scaledobjects-plan` is the last check: the
+`Scale-down will cut in-flight requests` note disappears for a workload once
+its engine container has a preStop hook. It does not look at the grace period
+(`so_drain_note` in `deploy/lib/scaledobject.sh`), so confirm that one with
+the `kubectl` line above.
+
+### On a LeaderWorkerSet
+
+`make workload-patch` skips LeaderWorkerSets and says so: the pod templates
+live under `spec.leaderWorkerTemplate`, the API server refuses a strategic merge
+on a custom resource, and the **worker** template has to drain too — killing a
+worker aborts the leader's in-flight generations whatever hook the leader has.
+Do it by hand, in the manifest or chart that owns the LWS:
+
+```yaml
+spec:
+  leaderWorkerTemplate:
+    leaderTemplate:            # if absent, workerTemplate is used for the leader too
+      spec:
+        terminationGracePeriodSeconds: 600
+        containers:
+        - name: vllm
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 45"]
+    workerTemplate:
+      spec:
+        # At least the leader's: a worker that leaves first ends the group's
+        # generations early.
+        terminationGracePeriodSeconds: 600
+        containers:
+        - name: vllm
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 45"]
+```
+
+To patch a live LWS instead, use a JSON patch (`kubectl patch lws <name> -n <ns>
+--type=json -p '[{"op":"add","path":"/spec/leaderWorkerTemplate/workerTemplate/spec/terminationGracePeriodSeconds","value":600}, ...]'`)
+— a `--type=merge` patch replaces the whole `containers` list. Both are reverted
+by the next `helm upgrade` if a chart owns the object.
 
 ## Writing the patch: `make workload-patch`
 

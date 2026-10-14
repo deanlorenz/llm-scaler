@@ -70,6 +70,10 @@ anything changes marks each one `WILL BE RESTARTED`. Changing the
 `make enable-physical-limiter` to grant the new namespace and restart the
 controller.
 
+Cluster scope in a budget is **per controller**: N controllers each enforce
+their own copy, so the cluster permits N times the figure. See
+[Configuration](#configuration).
+
 ## Verification
 
 <!-- guide:verify.controllers start -->
@@ -78,6 +82,26 @@ controller.
 kubectl get pods -A -l app.kubernetes.io/name=workload-variant-autoscaler
 ```
 <!-- guide:verify.controllers end -->
+
+<!-- guide:verify.source start -->
+```bash
+# Which policy each controller actually reads -- the truth, whatever the
+# enable command printed. "the well-known namespace" (or "the namespace
+# this one is labelled with") means a policy namespace governs it. The
+# own-ConfigMap branch logs only at V(1), so at the default verbosity NO
+# such line means the controller reads its own ConfigMap; "Could not read
+# the managed Namespace" means it never saw wva-policy. Logged once at
+# startup, so a long-running controller's line may have rotated out; a
+# restart prints it again.
+for ns in $(kubectl get deploy -A -l app.kubernetes.io/name=workload-variant-autoscaler,control-plane=controller-manager \
+    -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{end}'); do
+  echo "== $ns"
+  kubectl logs -n "$ns" deploy/wva-controller-manager \
+    | grep -E 'Cluster policy comes from|Could not read the managed Namespace' \
+    || echo "   (no line: reads its own ConfigMap in $ns)"
+done
+```
+<!-- guide:verify.source end -->
 
 <!-- guide:verify.budget start -->
 ```bash
@@ -100,6 +124,10 @@ kubectl logs -n <wva-namespace> deploy/wva-controller-manager \
   | grep -E 'GPU limiter constructed|Invalid saturation scaling'
 ```
 <!-- guide:verify.budget end -->
+
+The first command reads `wva-policy`, which governs only the controllers whose
+startup line names the well-known namespace. For the others, read
+`wva-scaling-policy-config` in the controller's own namespace.
 
 ## Cleanup
 
@@ -132,6 +160,7 @@ silently.
 | `WVA_LIMITER_TYPE` | `gpu-inventory` | `quota` |
 | `WVA_QUOTAS` | — (**required** by `quota`) | `'H200=8 A100=4'` |
 | `WVA_QUOTA_SCOPE` | `namespace` | `cluster` |
+| `WVA_QUOTA_KUEUE` | `false` | `true` |
 | `WVA_POLICY_NS` | `wva-policy` | `platform-policy` |
 | `WVA_LIMITER_TARGETS` | every controller found | `team-a team-b` |
 | `WVA_CONTROLLER_SA` | `wva-controller-manager` | `my-wva-sa` |
@@ -168,8 +197,8 @@ skipped controller's policy either. If that policy still declares a limiter, it
 says so.
 
 `WVA_LIMITER_TYPE` is not `WVA_LIMITER`. This one writes the **cluster** policy
-every controller reads; `WVA_LIMITER` writes a single install's own policy, which
-that install's owner can then edit.
+(and the own ConfigMap of each admin-owned controller); `WVA_LIMITER` writes a
+single install's own policy, which that install's owner can then edit.
 
 `WVA_QUOTAS` has no default and `WVA_LIMITER_TYPE=quota` refuses to run without
 one — before it creates the policy namespace or grants anything. A quota entry
@@ -177,7 +206,7 @@ that names no accelerator is not "unlimited": it is a budget of zero for every
 type, and published here it would stop every managed workload on the cluster
 from scaling up. `WVA_QUOTA_SCOPE=namespace` (the default) gives each managed
 namespace that budget; `cluster` caps the sum — **within one controller**. This
-command publishes to every controller on the cluster and each enforces its own
+command publishes to every controller it targets and each that reads it enforces its own
 copy, so with `cluster` scope and N admin-owned controllers the cluster permits
 N x the number. The default, `namespace`, is keyed on the reserved
 per-unlisted-namespace key and multiplies the same way; that is the semantic,
@@ -186,6 +215,13 @@ not a defect, but it is the one to know before picking a number.
 ```bash
 make enable-physical-limiter WVA_LIMITER_TYPE=quota WVA_QUOTAS='H200=8'
 ```
+
+`WVA_QUOTA_KUEUE=true` takes the numbers from Kueue's ClusterQueues instead:
+each namespace gets the smaller of Kueue's grant and `WVA_QUOTAS`, so
+`WVA_QUOTAS='H200=-1'` lets Kueue decide. It also grants each target
+controller the cluster-scoped half of the Kueue read (ClusterQueues,
+ResourceFlavors). Experimental: [bound tenants by the quotas Kueue already
+holds](../../well-lit-paths/kueue-bounded-quotas/).
 
 ## Next
 

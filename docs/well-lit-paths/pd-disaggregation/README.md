@@ -24,7 +24,13 @@ on short-context traffic it buys little.
 ## What it needs
 
 - An llm-d P/D deployment: prefill and decode workloads with the role carried on
-  each pod template.
+  each pod template as the label `llm-d.ai/role: prefill` or
+  `llm-d.ai/role: decode`. On a LeaderWorkerSet the label is read from the
+  **leader** template. A missing label, or any other value, means `both` — a
+  workload that serves whole requests — so a typo silently turns a role into an
+  ordinary variant. Engine flags (`--kv-transfer-config`,
+  `--disaggregation-mode`) are not consulted. Check with
+  `kubectl get deploy -n <ns> -o custom-columns=NAME:.metadata.name,ROLE:.spec.template.metadata.labels.llm-d\.ai/role`.
 - A KV transport between them. NIXL supports TCP, but high-bandwidth networking
   (IB, RoCE, EFA) is what makes the shape worth having.
 - A ScaledObject per role, each with the model's `modelID` in trigger metadata.
@@ -166,7 +172,7 @@ what was really captured -- and re-assembled from them if it was.
 
 ## Measured
 
-The scenario, trace, policy and HPA behaviour above, on CoreWeave 8 x H200
+The scenario, trace, policy and HPA behaviour above, on 8 x H200
 nodes (k1 = 930,508 tokens per decode replica), against the controller image
 built from this tree at `f5f98761`, on 2026-09-23. Two passes back to back:
 the headline column is the second, taken with the saturated throughput of
@@ -290,7 +296,30 @@ so the ramp stops tracking the start time at all -- is the open item in
 
 ## Tuning it
 
-Per-role thresholds follow the ordinary policy surface:
-[scaling policy](../../reference/scaling-policy.md). What the roles mean to the
+**There are no per-role thresholds.** Both ScaledObjects carry one `modelID`,
+so both roles resolve to one policy: the same tier, the same per-model override
+(matched on `model_id` + `namespace`), and the same `scaleUpThreshold` /
+`scaleDownBoundary`, applied to each role's capacity separately. If the two
+triggers name different `scalingPolicy` tiers, the lexicographically smallest
+wins and the conflict is logged — name the same tier on both, or none. See
+[scaling policy](../../reference/scaling-policy.md).
+
+What you do set per role, on each ScaledObject
+([trigger reference](../../reference/scaledobject-trigger.md)):
+
+- **`defaultOutputTokens` on the decode trigger** when generations are long. A
+  queued request is priced at that many tokens of decode work until the fleet
+  has measured its own output length; the built-in 512 under-prices a
+  6000-token workload twelvefold. If both triggers carry one, the largest wins.
+- **`minReplicaCount` / `maxReplicaCount` per role.** Size each role's `max` from
+  its own GPUs per replica and what the cluster can hold; a role pinned at its
+  `max` stops growing while the other keeps going. Keep `min` at 1 or more on
+  both roles unless you mean to park the model.
+- **`scaleFromZero.requirePrefill`** (policy entry, default `false`). When a
+  parked P/D model wakes and prefill cannot be placed, decode wakes alone and
+  runs both stages locally; set `requirePrefill: true` on the model's policy
+  entry if serving without prefill is worse than not serving.
+
+What the roles mean to the
 engine's capacity model:
 [the steady-state engine](../../concepts/steady-state-engine.md).

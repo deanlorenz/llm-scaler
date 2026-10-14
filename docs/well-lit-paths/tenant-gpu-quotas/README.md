@@ -15,6 +15,27 @@ and only the scaling manager — it is an allowance granted to the autoscaler, n
 rule. The thing that stops any Pod is a Kubernetes `ResourceQuota`, and on a
 cluster where unmanaged workloads compete for the same accelerators you want both.
 
+## Who owns what
+
+A quota only bounds a tenant if the tenant cannot edit it. Which ConfigMap the
+controller takes it from depends on where the controller runs:
+
+| setting | read from | owned by |
+| --- | --- | --- |
+| `limiters:` and `optimizer:` (the budget) | the policy namespace, when one resolves for this controller (`wva-policy`, or the namespace a `wva.llmd.ai/policy-namespace` label names) | the cluster admin |
+| `limiters:` and `optimizer:`, when no policy namespace resolves | the controller's own `wva-scaling-policy-config` | whoever owns the controller's namespace: the admin for a cluster-scoped or out-of-reach controller, **the tenant** for one running in their own namespace |
+| thresholds, tiers, per-model entries, utilization-share weights | a `wva-scaling-policy-config` in the **managed** namespace, if there is one (read as a namespace-local map, in every shape); otherwise the controller's own ConfigMap | the namespace's owner — so in the out-of-reach shape the tenant still sets these for their models, though never the budget |
+
+A policy namespace resolves only for a controller that manages its own namespace
+**and** can read Namespace objects. On Kubernetes a namespace-scoped controller
+cannot (being fixed), so today its budget is its own ConfigMap — the tenant's.
+`WVA_LIMITER=quota` writes that ConfigMap; `WVA_LIMITER_TYPE=quota` with
+`make enable-physical-limiter` writes the policy namespace, and the own ConfigMap
+of every admin-owned controller. Where the budget must hold against the tenant,
+run the controller
+[out of their reach](../../guides/admin-cluster-setup/README.md#keeping-the-controller-out-of-the-tenants-reach)
+and back it with a `ResourceQuota`.
+
 ## What it needs
 
 - Cluster-admin rights to publish the policy where a tenant cannot edit it, and
@@ -36,7 +57,9 @@ manages, a **cluster-scoped** one on the reserved `default` key, whose meaning
 is the paragraph after next. Hand-write the entry when you want several
 namespaces named explicitly; `WVA_QUOTAS` writes one.
 
-**Cluster scope** caps a type across every namespace:
+**Cluster scope** caps a type across every namespace **one controller
+manages**. It is per controller: N controllers each enforce their own copy of
+the entry, so a cluster running N of them permits N times the figure.
 
 ```yaml
 limiters:
@@ -78,7 +101,7 @@ that anything unlisted is denied.
 hold, so it can hand out capacity that unmanaged workloads have already taken.
 Charging it the physical figure would be worse: a namespace with a 4-GPU
 allowance beside an unrelated 4-GPU training job would read as fully spent while
-The scaling manager had placed nothing, and every scale-up would be refused against an untouched
+the scaling manager had placed nothing, and every scale-up would be refused against an untouched
 allowance. "The hardware is full" is a different statement, made by the physical
 limiter.
 
@@ -100,10 +123,31 @@ the fair-share split is computed — a ceiling on the outcome, not an input to i
 
 ## Verifying it
 
-```bash
-# the policy every controller reads
-kubectl get configmap wva-scaling-policy-config -n <system-namespace> -o yaml
+As a tenant, start from what you can read — the controller's log. Where the
+controller runs depends on the shape: in your namespace if you installed it
+there; in the admin's namespace (for example `wva-<your-namespace>`) in the
+out-of-reach shape, where you can read its log only if the admin grants
+`pods/log` there — otherwise ask them for these two lines.
 
+```bash
+# <controller-namespace>: yours in the tenant-owned shape, the admin's in the out-of-reach one
+# which policy governs this controller, read once at startup
+kubectl logs -n <controller-namespace> deploy/wva-controller-manager \
+  | grep -E 'Cluster policy comes from|Could not read the managed Namespace'
+
+# the limiter it built from that policy, and its name
+kubectl logs -n <controller-namespace> deploy/wva-controller-manager | grep 'GPU limiter constructed'
+```
+
+No `Cluster policy comes from` line at the default verbosity (that branch logs
+only at V(1)) means the budget is in the controller's own
+`wva-scaling-policy-config` — yours in the tenant-owned shape, the admin's in
+the out-of-reach one. `... the well-known
+namespace` (or `... labelled with`) names a policy namespace you normally cannot
+read: ask the admin for `get` on `wva-scaling-policy-config` there, or for the
+figures. Then, in Prometheus:
+
+```text
 # a model that wanted more and was held at its allowance
 wva_model_scaling_blocked{exported_namespace="<ns>"}
 ```
@@ -113,9 +157,18 @@ error, and not silence.
 
 ## What it costs
 
-No accelerators and no latency. What it costs is the fairness gap above, and the
-ownership question of who may edit the policy — which is why it lives outside
-tenant namespaces.
+No accelerators. A cap that binds costs latency: a model held at its allowance
+queues what another replica would have served, and that shows up as TTFT. It
+also costs the fairness gap above, and the ownership question of who may edit
+the policy — see [Who owns what](#who-owns-what).
+
+**Several namespace-scoped controllers under `gpu-inventory` can over-ask
+together.** Each computes free capacity from the same nodes and allocates
+without seeing the others' claims in the same cycle, so in sum they can order
+more than is free; the scheduler then leaves the excess Pending. The installer
+says this about side-by-side installs (`deploy/lib/single_install.sh`); it is
+inferred from the design, not measured. A per-namespace quota on each, or
+separate GPU nodes, removes the overlap.
 
 ## How it is tested
 

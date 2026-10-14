@@ -5,6 +5,19 @@ cycle per model. These lines are the primary observability instrument for
 understanding what the analyzer and optimizer computed without enabling
 verbose debug logging.
 
+The controller logs in zap's development **console** format, not JSON: a
+timestamp, the level, the caller, the message, then the fields as one JSON
+object. So a line looks like this (wrapped here; it is one line in the log):
+
+```text
+2026-10-14T09:12:03.512Z  INFO  steadystate/engine_v2.go:1246  analyzer-result
+  {"modelID": "my-model", "namespace": "default", "analyzer": "saturation", ...}
+```
+
+The top-level fields are written `"key": value`, with a space after the colon.
+Nested values (`variants`, `decisions`) are compact JSON with no spaces. The
+greps below rely on both.
+
 ---
 
 ## Log lines
@@ -15,26 +28,16 @@ Emitted once per analyzer that ran for a model, immediately after the
 universal threshold post-step has been applied. The values reflect what the
 optimizer actually receives.
 
-```json
-{
-  "level": "info",
-  "msg": "analyzer-result",
-  "modelID": "my-model",
-  "namespace": "default",
-  "analyzer": "saturation",
-  "supply": 658534,
-  "demand": 1041047,
-  "util": 1.58,
-  "rc": 0,
-  "sc": 50000,
-  "scaleUpThreshold": 1.1,
-  "scaleDownBoundary": 0.7,
-  "variants": [
-    {"name": "primary", "prc": 1152000, "role": "both", "reason": "P3-k2"},
-    {"name": "v2",      "prc":  403391, "role": "both", "reason": "P1-obs"}
-  ]
-}
+```text
+2026-10-14T09:12:03.512Z  INFO  analyzer-result  {"modelID": "my-model", "namespace": "default",
+  "analyzer": "saturation", "supply": 658534, "demand": 1041047, "util": 1.58, "rc": 0,
+  "sc": 50000, "scaleUpThreshold": 1.1, "scaleDownBoundary": 0.7,
+  "variants": [{"name":"primary","prc":1152000,"role":"both","reason":"P3-k2","observed":2},
+               {"name":"v2","prc":403391,"role":"both","reason":"P1-obs","observed":1}]}
 ```
+
+A P/D model also carries `roleRC` and `roleSC`, the per-role required and spare
+capacity the optimizer branches on.
 
 | Field | Description |
 |---|---|
@@ -52,6 +55,8 @@ optimizer actually receives.
 | `variants[].prc` | Per-replica capacity in analyzer units (tokens for saturation) |
 | `variants[].role` | Resolved P/D role: `prefill`, `decode`, or `both`. Renders as `both` both when the scale target has no `llm-d.ai/role` label and when the analyzer does not populate the role at all. Saturation V2 charges waiting requests by this role, so it is needed to interpret `demand` |
 | `variants[].reason` | How the variant's capacity was computed (see below) |
+| `variants[].observed` | Replicas that reported metrics this cycle, before any cap; compare with the target's ready replicas |
+| `roleRC`, `roleSC` | Per-role `rc` and `sc`; present only for a P/D model. A role over its own threshold keeps the model scaling up even when the model-level `rc` is 0 |
 
 If an analyzer does not compute per-variant capacity, `variants` is an empty
 array. Multiple `analyzer-result` lines appear when more than one analyzer is
@@ -62,17 +67,10 @@ enabled; each has the same `modelID`/`namespace` and its own `analyzer` field.
 Emitted once per model after the optimizer has produced its final per-variant
 replica targets.
 
-```json
-{
-  "level": "info",
-  "msg": "scaling-decision",
-  "modelID": "my-model",
-  "namespace": "default",
-  "decisions": [
-    {"name": "primary", "curr": 1, "tgt": 2, "action": "ScaleUp"},
-    {"name": "v2",      "curr": 1, "tgt": 1, "action": "NoChange"}
-  ]
-}
+```text
+2026-10-14T09:12:03.540Z  INFO  scaling-decision  {"modelID": "my-model", "namespace": "default",
+  "decisions": [{"name":"primary","curr":1,"tgt":2,"action":"scale-up"},
+                {"name":"v2","curr":3,"tgt":3,"action":"no-change","atMax":true}]}
 ```
 
 | Field | Description |
@@ -82,7 +80,8 @@ replica targets.
 | `decisions[].name` | Variant name |
 | `decisions[].curr` | Current replica count at the time of this cycle |
 | `decisions[].tgt` | Target replica count chosen by the optimizer |
-| `decisions[].action` | `ScaleUp`, `ScaleDown`, or `NoChange` |
+| `decisions[].action` | `scale-up`, `scale-down`, or `no-change` |
+| `decisions[].atMax` | `true` when the target sits on the variant's `maxReplicaCount`; absent otherwise. Same as `wva_variant_at_max_replicas` |
 
 ---
 
@@ -133,18 +132,23 @@ Other analyzers may set their own reason values or leave `reason` empty.
 ## Grep patterns
 
 ```bash
+LOGS="kubectl logs -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler --tail=-1"
+
 # All analyzer results for a specific model
-kubectl logs <pod> | grep '"msg":"analyzer-result"' | grep '"modelID":"my-model"'
+$LOGS | grep analyzer-result | grep '"modelID": "my-model"'
 
 # Saturation analyzer only
-kubectl logs <pod> | grep '"msg":"analyzer-result"' | grep '"analyzer":"saturation"'
+$LOGS | grep analyzer-result | grep '"analyzer": "saturation"'
 
-# Scaling decisions only (scale-up events)
-kubectl logs <pod> | grep '"msg":"scaling-decision"' | grep '"action":"ScaleUp"'
+# Scale-up decisions only
+$LOGS | grep scaling-decision | grep '"action":"scale-up"'
 
 # Full cycle for one model (both lines)
-kubectl logs <pod> | grep -E '"analyzer-result"|"scaling-decision"' | grep '"modelID":"my-model"'
+$LOGS | grep -E 'analyzer-result|scaling-decision' | grep '"modelID": "my-model"'
 ```
+
+`modelID` is unique only within a namespace; add `| grep '"namespace": "<ns>"'`
+when two namespaces serve the same model.
 
 ---
 

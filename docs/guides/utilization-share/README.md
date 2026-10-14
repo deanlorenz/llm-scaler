@@ -103,12 +103,15 @@ On a cluster-wide quota you can act on a few namespaces first with
 
 There are two ways to read the optimizer's metrics:
 
-- **As a namespace tenant: Prometheus.** Use the Prometheus your cluster gives
-  you (Grafana's Explore, or its API). The controller's own endpoint needs a
-  cluster-wide grant a tenant does not have. Scope every query to your
-  namespace: a shared Prometheus holds other tenants' models too.
-- **As a cluster admin: the controller's endpoint**, with the commands further
-  down.
+- **Prometheus**, for anyone. Use the Prometheus your cluster gives you
+  (Grafana's Explore, or its API). Scope every query to your namespace: a
+  shared Prometheus holds other tenants' models too.
+- **The controller's endpoint**, with the commands further down, for whoever
+  can read Secrets in the controller's namespace. In the default shape, where
+  the controller runs in the namespace it manages, that includes the tenant:
+  the `wva-epp-metrics-token` there carries the cluster-wide `/metrics` grant
+  the endpoint checks. In the out-of-reach shape the token is in the admin's
+  namespace, so a tenant uses Prometheus.
 
 ```promql
 # the mode: exactly one series is 1 -- off, invalid, shadow or active
@@ -138,12 +141,15 @@ make utilization-share-status
 
 <!-- guide:verify.endpoint start -->
 ```bash
-# For a cluster admin. The endpoint checks the caller against a
-# cluster-wide grant: the install's metrics-reader token passes where the
-# admin's install step created its binding. A 401 or 403 here means use
-# Prometheus instead.
-TOKEN=$(kubectl get secret wva-epp-metrics-token -n $NAMESPACE -o jsonpath='{.data.token}' | base64 -d)
-kubectl port-forward -n $NAMESPACE svc/wva-controller-manager-metrics-service 8443:8443 >/dev/null & PF=$!
+# Whoever can read Secrets and port-forward in the CONTROLLER's namespace:
+# the tenant in the default shape, the admin when the controller runs out
+# of the tenant's reach. The endpoint checks the caller against a
+# cluster-wide /metrics grant, which the EPP metrics token carries once the
+# admin's prereqs step has run. A 401 or 403 here means use Prometheus
+# instead.
+CONTROLLER_NAMESPACE=${CONTROLLER_NAMESPACE:-$NAMESPACE}
+TOKEN=$(kubectl get secret wva-epp-metrics-token -n $CONTROLLER_NAMESPACE -o jsonpath='{.data.token}' | base64 -d)
+kubectl port-forward -n $CONTROLLER_NAMESPACE svc/wva-controller-manager-metrics-service 8443:8443 >/dev/null & PF=$!
 sleep 2
 curl -sSfk -H "Authorization: Bearer $TOKEN" https://localhost:8443/metrics \
   | grep -E '^wva_(utilization_share_(mode|actionable|replicas_to_move|headroom|spare_gpus|transfers_total)|model_scaling_blocked)'
@@ -184,6 +190,9 @@ that version leaves the marks on the pods
 
 ## Under the physical GPU limiter
 
+**A cluster-admin task.** The policy here is the cluster's, in `wva-policy`,
+which a tenant cannot write.
+
 With a `gpu-inventory` limiter and no quota, the budget is every GPU of a type
 on the cluster. Three things differ:
 
@@ -193,8 +202,11 @@ on the cluster. Three things differ:
 - **The policy is the cluster's.** `make enable-physical-limiter` publishes it
   in `wva-policy`. The steps find that namespace in the controller's log and
   write there, and refuse a `POLICY_NAMESPACE` the controller does not read.
-  Every controller on the cluster reads that policy, so the block turns the
-  optimizer on for every one of them, not just yours.
+  Only self-managed controllers read that policy — admin-owned controllers
+  (cluster-scoped, out-of-reach) read their own ConfigMap by design — so the
+  block turns the optimizer on for every self-managed controller, not just
+  yours. A controller reads a policy in another namespace only at start: add
+  `RESTART=1`, or the step stops and says the block was written but not read.
 - **Spare GPUs are shared with everything else on the cluster.** Headroom fills
   idle GPUs, and a GPU a donor releases can be taken by a pod the scaling
   manager did not place. That transfer ends `release-taken`.

@@ -2,7 +2,7 @@
 
 ## Overview
 
-This guide installs one Workload-Variant-Autoscaler that sizes the llm-d model
+This guide installs one scaling manager (llm-scaling-manager) that sizes the llm-d model
 servers in **every** namespace. The scaling manager decides how many replicas each variant needs
 and hands the decision to KEDA, which owns the HPA and does the scaling.
 
@@ -22,15 +22,18 @@ asking the wrong questions. `SKIP_CHECKS=true` installs without them.
 
 - cluster-admin rights
 - llm-d model servers somewhere on the cluster
-- KEDA, installed for you if the cluster has none
+- KEDA. On Kubernetes, add `KEDA_HELM_INSTALL=true` to the deploy command to
+  install it with Helm if the cluster has none; on OpenShift, install the Custom
+  Metrics Autoscaler operator first. The install never adds KEDA on its own.
 - a Prometheus scraping those model servers
 
-Every EPP the controller will size from needs the `flowControl` feature gate.
-`make check-prereqs` is **fatal** without it — not degraded, refused — and the
-only way past, `SKIP_CHECKS=true`, disables every preflight check rather than
-that one. Cluster-wide this matters more than in a single namespace, because one
-EPP missing the gate blocks the install for all of them. Enable it in each EPP's
-`EndpointPickerConfig`:
+Every EPP the controller will size from needs the `flowControl` feature gate:
+it publishes the router queue the scaling manager reads as demand, and that
+queue is the only signal for a model at zero replicas. The install checks the
+gate only on EPPs in the namespace it watches (`WVA_WATCH_NS`, or the
+controller's own namespace), so a cluster-wide install does **not** see the
+EPPs in your model namespaces. Check each one yourself, and enable the gate in
+its `EndpointPickerConfig`:
 
 ```yaml
 featureGates:
@@ -146,6 +149,23 @@ make undeploy-wva SCOPE=cluster
 Prometheus, KEDA and the namespaces stay — they are shared, and this install may
 not have created them. `UNDEPLOY_SHARED=true` removes them too.
 
+### Uninstalling touches every namespace
+
+The uninstall lists ScaledObjects that call this controller across the whole
+cluster, and treats them by who made them:
+
+- **ScaledObjects the installer created are deleted**, in every namespace. They
+  carry `restoreToOriginalReplicaCount: true`, so KEDA puts each workload back to
+  the replica count it had before it was autoscaled — a cluster-wide resize, as
+  part of the uninstall.
+- **ScaledObjects you adopted (`apply: adopt`) are kept and listed.** They still
+  point at the external scaler you just removed, so KEDA keeps their HPAs calling
+  a scaler that is gone, and any of them parked at zero cannot be woken. Repoint
+  or delete them.
+
+`UNDEPLOY_SCALEDOBJECTS=false` keeps the created ones too. Upgrade and uninstall
+in full: [Upgrade and uninstall](../../reference/upgrade-and-uninstall.md).
+
 That removes the **autoscaler only**. Model servers keep serving in every
 namespace the controller was managing, which matters more here than in a
 single-namespace install: one `undeploy` can leave many namespaces running.
@@ -167,7 +187,11 @@ Optional.
 | --- | --- | --- |
 | `SCOPE` | `namespace` — **set `cluster` for this guide** | `cluster` |
 | `WVA_NS` | `workload-variant-autoscaler-system` | `wva-system` |
-| `IMG` | the image CI builds from main | `ghcr.io/you/wva:dev` |
+| `IMG` | the image CI builds from main — a **floating** tag; pin a release for anything you rely on ([pin the version](../../reference/upgrade-and-uninstall.md#pin-the-version)) | `ghcr.io/you/wva:dev` |
+
+Every permission a cluster-scoped install holds — including read on every
+ConfigMap and patch on every pod in the cluster — is listed in the
+[security model](../../reference/security-model.md#cluster-scoped-both-platforms).
 
 Full list: [Configuration reference](../../reference/configuration.md).
 

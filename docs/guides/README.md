@@ -52,8 +52,8 @@ source docs/guides/env.sh
 make benchmark-smoke NAMESPACE=<namespace>
 ```
 
-Decode-heavy load at 10 req/s for five minutes against what you already
-installed, then a dashboard snapshot over that window. It stands nothing up and
+Symmetric 1024-in/1024-out load at 15 req/s for five minutes against what you
+already installed, then a dashboard snapshot over that window. It stands nothing up and
 needs no benchmark CLI; it checks the whole chain first — KEDA, a scaling-manager
 controller managing *this* namespace, model servers, an EPP, a ScaledObject —
 and names every gap at once. Runs on plain Kubernetes and OpenShift.

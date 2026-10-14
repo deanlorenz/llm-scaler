@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Shared environment for the WVA guides. Source it before running guide commands:
+# Shared environment for the guides. Source it before running guide commands:
 #
 #     source docs/guides/env.sh
 #
@@ -36,7 +36,7 @@ export REPO_ROOT
 # moving target on purpose.
 export IMG="${IMG:-ghcr.io/ev-shindin/llm-scaling-manager:main}"
 
-# The namespace WVA installs into.
+# The namespace the scaling manager installs into.
 #
 # Left unset on purpose. The install uses WVA_NS, then NAMESPACE — llm-d's own
 # variable — and if neither is set it FINDS the namespace running llm-d model
@@ -45,6 +45,7 @@ export IMG="${IMG:-ghcr.io/ev-shindin/llm-scaling-manager:main}"
 #
 #   export NAMESPACE=llm-d-optimized-baseline
 
-# KEDA and Prometheus are prerequisites rather than variables: the install adds
-# KEDA if the cluster has none, and detects Prometheus (on OpenShift, the
-# platform's Thanos Querier at a fixed address). PROMETHEUS_URL overrides that.
+# KEDA and Prometheus are prerequisites rather than variables. KEDA must already
+# be on the cluster (on Kubernetes, KEDA_HELM_INSTALL=true installs it with Helm;
+# on OpenShift, use the platform's KEDA). Prometheus is detected (on OpenShift,
+# the platform's Thanos Querier at a fixed address); PROMETHEUS_URL overrides that.

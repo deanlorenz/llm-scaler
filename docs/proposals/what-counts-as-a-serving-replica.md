@@ -36,7 +36,7 @@ So the count today includes:
 
 ## The three symptoms
 
-All measured on pokprod or in the e2e suite, 2026-08-30/31.
+All measured on an H100 OpenShift test cluster or in the e2e suite, 2026-08-30/31.
 
 - **`ready 1, serving 4` with no bridge lent.** The scale target had one replica;
   three others had existed minutes earlier. The warm pool's return rule was

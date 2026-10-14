@@ -9,7 +9,7 @@ holding one engine, with the API on the leader. A pool can hold those too, as
 standing groups rather than standing Pods.
 
 ```bash
-deploy/warmpool.sh create -n <namespace> --name h200-2pod   --group-size 2 --gpus 8   --accelerator NVIDIA-H200-141GB   --models 2 --model-size 70B   --wva-namespace <where WVA runs>   --launcher-image ghcr.io/ev-shindin/fma-launcher:v0.6.4-headless
+deploy/warmpool.sh create -n <namespace> --name h200-2pod   --group-size 2 --gpus 8   --accelerator NVIDIA-H200-141GB   --models 2 --model-size 70B   --wva-namespace <where the scaling manager runs>   --launcher-image ghcr.io/ev-shindin/fma-launcher:v0.6.4-headless
 ```
 
 `--group-size` is what makes it a group pool. Everything else means what it did:

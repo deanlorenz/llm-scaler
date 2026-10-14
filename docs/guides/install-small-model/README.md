@@ -25,7 +25,9 @@ simulators on kind.
 
 - one GPU, and a node that will schedule onto it
 - `kubectl`, and rights to create workloads in your namespace
-- the benchmark CLI's prerequisites, which the standup installs for you
+- `git`, `helmfile`, and `uv` (or Python 3 with `venv`). The standup clones
+  llm-d-benchmark and installs its CLI itself (`make benchmark-install`), and
+  stops with install commands if one of these is missing.
 
 <!-- guide:env.static.namespace start -->
 ```bash
@@ -48,18 +50,42 @@ kubectl get nodes -o custom-columns=NODE:.metadata.name,GPU:.status.allocatable.
 ```bash
 # Deploys the model server, its EPP and the InferencePool, and holds the
 # engine image on the accelerator nodes (the prepull-* pods; BENCHMARK_PREPULL=false
-# skips that) -- nothing else. BENCHMARK_WVA_DEPLOY=false is what keeps the
-# autoscaler out of it: this guide gets you a model to scale, and installing
-# the scaling manager is the next guide's job.
-make benchmark-standup BENCHMARK_NAMESPACE=${NAMESPACE} MODEL_ID=${MODEL_ID}         BENCHMARK_WVA_DEPLOY=false
+# skips that) -- nothing else. BENCHMARK_WVA_DEPLOY=false keeps the
+# autoscaler out of it: installing the scaling manager is the next guide's job.
+make benchmark-standup BENCHMARK_NAMESPACE=${NAMESPACE} MODEL_ID=${MODEL_ID} \
+  BENCHMARK_WVA_DEPLOY=false
 ```
 <!-- guide:deploy.standup end -->
 
-This deploys the model server, its EPP and the InferencePool — and stops
-there. `BENCHMARK_WVA_DEPLOY=false` is what keeps the autoscaler out: this guide
-gets you something to scale, and installing the scaling manager is the next guide's job. Doing
-them together hides which half failed, and the scaling manager's own preflight refuses a
-namespace with no model servers in it, so the order is not arbitrary.
+Doing the two installs separately shows which half failed, and the scaling
+manager's preflight refuses a namespace with no model servers in it, so the
+model comes first.
+
+The EPP it deploys runs with the `flowControl` feature gate on. The next guide's
+install refuses an EPP without it, because that gate publishes the router queue
+the scaling manager reads as demand (and the only signal at zero replicas). If
+you bring your own EPP, or reuse one an llm-d guide deployed, it has the gate off
+unless you turned it on. Check, then add it to the `EndpointPickerConfig` and
+restart the EPP:
+
+```bash
+kubectl get cm -n ${NAMESPACE} -o yaml | grep -A3 featureGates
+```
+
+```yaml
+featureGates:
+- flowControl
+```
+
+With flow control on, a backlog shows up in the EPP's queue (the **EPP
+Flow-Control Queue** dashboard panel), not in `vllm:num_requests_waiting`.
+
+**Memory budget.** The standup sets vLLM's `gpuMemoryUtilization` to 0.90 for
+every model, deliberately, and a small model then gets so much KV cache that one
+replica rarely looks full. To make it scale on a small load, lower
+`kvCacheThreshold` in the scaling policy rather than shrinking the cache. Why,
+the intermittent out-of-memory failure, and how to override it (`GPU_MEM_UTIL`):
+[The engine's memory budget](../../reference/workload-preparation.md#the-engines-memory-budget-gpumemoryutilization).
 
 ### Then install the scaling manager into that namespace
 
@@ -75,92 +101,8 @@ make scaledobjects-plan WVA_DEFAULT_SO_PLAN=wva-plan.yaml
 make scaledobjects-apply WVA_DEFAULT_SO_PLAN=wva-plan.yaml
 ```
 
-The ScaledObject is the registration: The scaling manager has no watch and no listing, so until
-one exists it is never called and scales nothing.
-
-### The EPP setting the next guide will refuse without
-
-**The EPP needs the `flowControl` feature gate.** the scaling manager's install preflight is
-fatal on its absence — `wva_require_epp_metrics` refuses to continue, and the
-only way past it, `SKIP_CHECKS=true`, switches off *every* preflight check rather
-than that one. So an EPP without the gate does not produce a degraded install; it
-produces no install at all.
-
-The standup above enables it for you. This matters when you bring your own EPP,
-or reuse one an llm-d guide deployed, because those have it off unless you turned
-it on. Check what an EPP is running with:
-
-```bash
-kubectl get cm -n ${NAMESPACE} -o yaml | grep -A3 featureGates
-```
-
-Enable it in the EPP's `EndpointPickerConfig`:
-
-```yaml
-featureGates:
-- flowControl
-```
-
-Then restart the EPP. llm-d documents the gate in `guides/flow-control/tuning.md`.
-
-**What it changes about the numbers you will see.** Flow control queues requests
-at the *router* and admits only what an engine can absorb, so a backlog shows up
-in the EPP rather than as `vllm:num_requests_waiting`. Read the **EPP
-Flow-Control Queue** panel for queued demand, and the engine queue only for
-whether an engine itself is behind.
-
-On this guide's stack neither queue ever forms, and that is the expected result
-rather than a fault: measured on Qwen3-0.6B at 10 req/s, the engine held ~115
-concurrent requests with KV at 27% and both queues flat at 0. One replica of a
-model this small absorbs the load outright. Queues appear only once offered
-concurrency exceeds the engine's batch width (vLLM's default is 256 sequences).
-
-Without the gate neither the queue nor scale-from-zero has anything to read.
-
-### The one setting that matters for a small model
-
-**`gpuMemoryUtilization` has to follow the model.** vLLM reads it as a fraction
-of the card's **total** memory, not of what is free, and it then fills that
-budget with KV cache. A 32B model wants 0.95 of an 80GB card. A 0.6B model —
-1.12 GiB of weights — does not, and asking for 0.95 anyway makes it claim
-**73.5 GiB of KV cache** and then fail:
-
-```
-Available KV cache memory: 73.53 GiB
-torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 594.00 MiB.
-GPU 0 has 79.18 GiB of which 500.69 MiB is free.
-```
-
-The standup sets `GPU_MEM_UTIL` to **0.90** — one value, for every model. It is
-deliberately *not* lowered for small models, and the reason is worth knowing
-before you reach for it: per-replica capacity IS the KV cache size, so shrinking
-KV to make a small model scale sooner does the autoscaler's job in the wrong
-layer. It throws away GPU you paid for to buy an effect `kvCacheThreshold`
-gives you for free. Size the card for serving; tune when a replica counts as
-full in the scaling policy.
-
-The practical consequence on a small model is worth expecting. At 0.90 a 0.6B
-model gets **651,328 tokens** of KV cache, and one replica then absorbs an
-enormous amount of traffic without ever looking full. Measured on this guide's
-own stack: 121 concurrent requests, KV utilisation peaking at **10.5%**, and the scaling manager
-holding at one replica — correctly, because by the signal it sizes on nothing
-was saturated. If you want a small model to scale on a small load, lower
-`kvCacheThreshold` in the scaling policy. Do not shrink the cache.
-
-**Why it looks intermittent.** 0.95 works on an empty GPU, so this failed only
-sometimes and looked like flakiness. It is not: the memory that is already gone
-belongs to pods the *scheduler cannot see*. FMA launcher pods request **zero**
-GPUs while holding the engine — that is the whole design — so Kubernetes places
-your model onto a card it believes is empty, and vLLM then measures 77.3 of 79.18
-GiB free and budgets as though it had all of it. Any co-tenant that holds memory
-without requesting a GPU does the same thing.
-
-Override it when you need to:
-
-```bash
-make benchmark-standup BENCHMARK_NAMESPACE=${NAMESPACE} MODEL_ID=${MODEL_ID} \
-     IMG=${IMG} GPU_MEM_UTIL=0.50
-```
+The ScaledObject is the registration: the scaling manager has no watch and no
+listing, so until one exists it is never called and scales nothing.
 
 ## Verification
 
@@ -239,7 +181,6 @@ kubectl get clusterrole,clusterrolebinding -o name | grep -i "${NAMESPACE}"
 | --- | --- | --- |
 | `BENCHMARK_NAMESPACE` | — (required) | where everything lands |
 | `MODEL_ID` | `Qwen/Qwen3-0.6B` | the served model |
-| `IMG` | a build of this branch | released images reject this branch's flags |
 | `GPU_MEM_UTIL` | `0.90` | fraction of **total** GPU memory; one value for every model, deliberately |
 | `WARM_REPLICAS` | `0` | FMA warm pool size, if the scenario uses one |
 
@@ -278,9 +219,7 @@ deployment) puts a copy on every accelerator node's disk --
 In order:
 
 1. [Install the scaling manager in a namespace](../install-in-namespace/) — the model is now there
-   for it to scale. (The standup above already installs the scaling manager; use this when you
-   want the install on its own, or are adding the scaling manager to a model somebody else
-   deployed.)
+   for it to scale. The standup above did not install it (`BENCHMARK_WVA_DEPLOY=false`).
 2. `make benchmark-smoke NAMESPACE=<ns>` — drive load at it and snapshot the
    dashboard. Run it **last**, once everything is deployed.
 3. [Benchmark the scaling manager](../benchmarking/) — when you want numbers to compare

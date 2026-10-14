@@ -86,7 +86,7 @@ lines.
 
 ```bash
 # which model the pool is holding awake, and why it moved
-kubectl logs -n <wva-namespace> deploy/<wva> | grep "retained pool is switching"
+kubectl logs -n <controller-namespace> deploy/<wva> | grep "retained pool is switching"
 ```
 
 The line names the model, the reason and the interval. The decision **not** to

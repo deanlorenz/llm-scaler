@@ -543,8 +543,9 @@ SCOPE ?= $(if $(WVA_SCOPE),$(WVA_SCOPE),namespace)
 #                                    Prometheus it resolved.
 #   2. setup-prereqs                 CLUSTER ADMIN, once per namespace: the
 #                                    namespace, cluster-scoped RBAC, the
-#                                    ServiceMonitor, and Prometheus / KEDA if the
-#                                    cluster has none.
+#                                    ServiceMonitor, and Prometheus if the cluster
+#                                    has none. KEDA only with KEDA_HELM_INSTALL=true
+#                                    (Kubernetes); OpenShift uses the platform's.
 #
 # Phases 1 and 2 take the platform as ENVIRONMENT=kubernetes|openshift; only
 # phase 3 also has -on-k8s / -on-openshift spellings. This block used to write
@@ -2296,11 +2297,11 @@ benchmark-run: ## Run a single benchmark workload (set BENCHMARK_NAMESPACE=<name
 		fi; \
 	fi
 
-## The one benchmark to run after installing: decode-heavy at 10 req/s for five
+## The one benchmark to run after installing: symmetric 1024/1024 at 15 req/s for five
 ## minutes, then a dashboard snapshot over exactly that window and a pointer to it.
 ## Answers "is WVA actually scaling this?" -- not "how fast is this model".
 .PHONY: benchmark-smoke
-benchmark-smoke: ## Post-install check: drive decode-heavy load, snapshot the dashboard, print where it is (NAMESPACE=<ns>)
+benchmark-smoke: ## Post-install check: drive symmetric 1024/1024 load at 15 req/s, snapshot the dashboard, print where it is (NAMESPACE=<ns>)
 	@bash hack/benchmark/smoke.sh $(if $(NAMESPACE),$(NAMESPACE),$(BENCHMARK_NAMESPACE))
 
 ## Generate a markdown table from the latest benchmark results
@@ -2943,13 +2944,21 @@ $(HELM): $(LOCALBIN)
 # $1 - target path with name of binary
 # $2 - package url which can be installed
 # $3 - specific version of package
+# go-install-tool retries: the module proxy and checksum server occasionally
+# drop an HTTP/2 stream ("stream error ... INTERNAL_ERROR"), and a CI job
+# with no module cache then fails before it builds anything.
 define go-install-tool
 @[ -f "$(1)-$(3)" ] || { \
 set -e; \
 package=$(2)@$(3) ;\
 echo "Downloading $${package}" ;\
 rm -f $(1) || true ;\
-GOBIN=$(LOCALBIN) go install $${package} ;\
+for attempt in 1 2 3; do \
+  GOBIN=$(LOCALBIN) go install $${package} && break ;\
+  [ $$attempt -lt 3 ] || exit 1 ;\
+  echo "go install $${package} failed (attempt $$attempt of 3), retrying" ;\
+  sleep $$((attempt * 10)) ;\
+done ;\
 mv $(1) $(1)-$(3) ;\
 } ;\
 ln -sf $(1)-$(3) $(1)

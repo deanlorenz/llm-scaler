@@ -7,7 +7,7 @@ How to build the pool described in
 **Status.** The mechanism is BUILT and running: `internal/warmpool` (port,
 adapter, policy, reconciler), `internal/warmpool/proxy` + `cmd/warmpool-proxy`,
 `config/warmpool`, wired into the controller and on wherever a ScaledObject
-trigger declares a pool. A pool Pod has served real EPP traffic on pokprod with ~437 ms
+trigger declares a pool. A pool Pod has served real EPP traffic on an H100 OpenShift test cluster with ~437 ms
 model switches.
 
 What is NOT built, and is marked so where it appears below: eviction and
@@ -56,7 +56,7 @@ A sweep of the older documents (prompted by asking whether FMA already supports
 M>1) says the pool may not need building at all:
 
 - **`maxInstances: 4` per launcher and `--sleeper-limit=2` per GPU are already
-  running on pokprod.** Several models resident on one GPU is a *flag*, not a
+  running on an H100 OpenShift test cluster.** Several models resident on one GPU is a *flag*, not a
   feature to build. A sleeper costs ~1.4 GiB of GPU memory, so on an 80 GiB card
   memory is nowhere near binding — **`--sleeper-limit` is**, and it is
   controller-global rather than per pool (upstream ask 4).
@@ -841,7 +841,7 @@ smaller than the rewrite; measure that on day one, not by argument.
   scripted latencies exercises hit, miss, wake-failure, eviction and drain without
   a GPU. The SGLang emitter fixture is the precedent for this pattern.
 - **The one thing kind cannot cover** is a real wake, which needs a real engine on
-  a real GPU. That stays a manual measurement on pokprod, reported through
+  a real GPU. That stays a manual measurement on an H100 OpenShift test cluster, reported through
   `wva_scale_from_zero_wake_seconds`.
 
 ## 13. Out of scope
