@@ -110,9 +110,14 @@ cover.
 
 - **Plain KEDA or HPA on a metric** (queue length, KV use): no model of what a
   replica can serve, so it reacts after the queue forms, and it has no shared
-  GPU budget across models. Not yet benchmarked head to head.
-- **llm-d's workload-variant-autoscaler**: the project this one forked from.
-  This fork answers KEDA directly over gRPC and adds the warm pool, the GPU
+  GPU budget across models. llm-d now recommends this, with the router's
+  queue and running requests; [KEDA alone](comparison/keda-alone.md) compares
+  it need by need. Measured head to head once, in July 2026, on an older
+  controller and recipe.
+- **llm-d's workload-variant-autoscaler**: the project this one forked from,
+  now deprecated upstream in favour of the KEDA recipes above (llm-d keeps it
+  as the answer for cost-aware placement across variants, which the recipes
+  do not offer). This fork answers KEDA directly over gRPC and adds the warm pool, the GPU
   budgets, scale-from-zero on a queued request and the install tooling.
 - **NVIDIA Dynamo Planner**: forecasts load and profiles before deployment, for
   one model on one GPU type. [The comparison](comparison/) has the detail.
