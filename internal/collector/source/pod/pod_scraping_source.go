@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -304,8 +306,20 @@ func (p *PodScrapingSource) scrapePodMetrics(ctx context.Context, pod *corev1.Po
 }
 
 // getAuthToken returns the bearer token and whether authentication should be used.
-// If BearerToken is configured, it is returned; otherwise authentication is skipped.
+// A non-empty BearerTokenFile is preferred and re-read on every call; otherwise
+// BearerToken is returned if configured; otherwise authentication is skipped.
 func (p *PodScrapingSource) getAuthToken() (string, bool) {
+	if p.config.BearerTokenFile != "" {
+		b, err := os.ReadFile(p.config.BearerTokenFile)
+		if err == nil {
+			if token := strings.TrimSpace(string(b)); token != "" {
+				return token, true
+			}
+		} else {
+			ctrl.Log.V(logging.DEBUG).Info("Bearer token file unreadable, using the token read at registration",
+				"path", p.config.BearerTokenFile, "error", err.Error())
+		}
+	}
 	if p.config.BearerToken != "" {
 		return p.config.BearerToken, true
 	}

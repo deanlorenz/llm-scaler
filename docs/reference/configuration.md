@@ -29,8 +29,13 @@ Every option `deploy/install.sh` reads. Verified against the script: each entry 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `WVA_IMAGE_REPO` | controller image repository | `ghcr.io/ev-shindin/llm-scaling-manager` |
-| `WVA_IMAGE_TAG` | controller image tag | `main` |
-| `WVA_IMAGE_PULL_POLICY` | Image pull policy | `Always` |
+| `WVA_IMAGE_TAG` | controller image tag | `newTag` in `config/base/manager/kustomization.yaml`: `main`, or the release tag on a release commit |
+| `WVA_IMAGE_DIGEST` | pin one exact build; set by `IMG=<repo>@sha256:<digest>` and used instead of the tag | unset |
+| `WVA_IMAGE_PULL_POLICY` | Image pull policy | by reference: `IfNotPresent` for a digest or a `vX.Y.Z` tag, `Always` for anything else |
+
+`main`, `latest`, `dev` and `nightly` are floating tags: the same install deploys a
+different binary after the next push. The installer warns when it deploys one. For
+anything you need to reproduce, pass `IMG=<repo>@sha256:<digest>` or a release tag.
 
 ## Namespaces
 
@@ -286,7 +291,8 @@ shipped default and **exits at startup** if nothing answers there
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `PROMETHEUS_URL` | Full base URL, e.g. `https://prom.monitoring.svc.cluster.local:9090` | the kube-prometheus-stack this install deploys |
-| `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY` | Connect without verifying the server certificate | `true` in the shipped config |
+| `PROMETHEUS_SA` | `<namespace>/<serviceaccount>` of the Prometheus that scrapes the controller's `/metrics`; it is bound to the metrics-reader ClusterRole. Unset: a Prometheus CR's `serviceAccountName` (the one in `PROMETHEUS_URL`'s namespace, else the first), else the kube-prometheus-stack this install deploys; with none, no binding is created and the installer says so | detected |
+| `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY` | Connect without verifying the server certificate. The installer warns when an HTTPS install ends up unverified; see [TLS configuration](prometheus.md#tls-configuration) for the production setting | `true` in the shipped Kubernetes config, `false` on OpenShift |
 | `DEPLOY_PROMETHEUS` | Deploy a Prometheus stack when the cluster has none of its own — see [Deployment flags](#deployment-flags) | `true` |
 
 ## Which namespace is which

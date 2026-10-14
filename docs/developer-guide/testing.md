@@ -52,8 +52,22 @@ make lint-deploy-scripts
   `deploy/lib/scaledobject.sh` and runs it, to check that one workload still
   produces one pipe-delimited record on one line.
 
+- `check-install-defaults.sh` -- what a plain install ships: how `IMG` is
+  split (registry ports, digests), the pull policy for a reference, the
+  floating-tag and unverified-Prometheus-TLS warnings, and which Prometheus
+  ServiceAccount is granted the controller's `/metrics`.
+
 Both need `jq` (and the first needs `yq`) and fail rather than skip without
 them, because a skip is how a green run comes to mean nothing.
+
+`check-rendered-manifests.sh` needs kustomize as well, so it runs in the
+`kustomize-build` CI job rather than under `make lint-deploy-scripts`. It
+renders the overlays -- and the overlay the installer wraps around them -- and
+asserts what they contain, where the builds alone only prove they render:
+
+```bash
+make kustomize && KUSTOMIZE=bin/kustomize bash hack/check-rendered-manifests.sh
+```
 
 ### Unit Test Structure
 

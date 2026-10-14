@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -366,6 +368,51 @@ var _ = Describe("PodScrapingSource", func() {
 			token, useAuth := source.getAuthToken()
 			Expect(useAuth).To(BeFalse())
 			Expect(token).To(BeEmpty())
+		})
+
+		// A rotated token must reach the next scrape, not wait for the pool to
+		// be registered again.
+		It("should re-read BearerTokenFile on every call", func() {
+			client := fakeClient.Build()
+			path := filepath.Join(GinkgoT().TempDir(), "token")
+			Expect(os.WriteFile(path, []byte("first "), 0o600)).To(Succeed())
+
+			config := PodScrapingSourceConfig{
+				ServiceName:      "test-pool-epp",
+				ServiceNamespace: "test-ns",
+				BearerToken:      "registered",
+				BearerTokenFile:  path,
+				MetricsPort:      9090,
+			}
+			source, err := NewPodScrapingSource(ctx, client, config)
+			Expect(err).NotTo(HaveOccurred())
+
+			token, useAuth := source.getAuthToken()
+			Expect(useAuth).To(BeTrue())
+			Expect(token).To(Equal("first"))
+
+			Expect(os.WriteFile(path, []byte("rotated"), 0o600)).To(Succeed())
+			token, useAuth = source.getAuthToken()
+			Expect(useAuth).To(BeTrue())
+			Expect(token).To(Equal("rotated"))
+		})
+
+		It("should fall back to BearerToken while BearerTokenFile is unreadable", func() {
+			client := fakeClient.Build()
+
+			config := PodScrapingSourceConfig{
+				ServiceName:      "test-pool-epp",
+				ServiceNamespace: "test-ns",
+				BearerToken:      "registered",
+				BearerTokenFile:  filepath.Join(GinkgoT().TempDir(), "missing"),
+				MetricsPort:      9090,
+			}
+			source, err := NewPodScrapingSource(ctx, client, config)
+			Expect(err).NotTo(HaveOccurred())
+
+			token, useAuth := source.getAuthToken()
+			Expect(useAuth).To(BeTrue())
+			Expect(token).To(Equal("registered"))
 		})
 	})
 

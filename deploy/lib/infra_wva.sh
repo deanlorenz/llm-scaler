@@ -281,9 +281,165 @@ PATCH
 PATCH
 }
 
+# wva_image_pull_policy echoes the pull policy for an image reference: $1 is the
+# tag, $2 the digest (may be empty).
+#
+# IfNotPresent only for a reference that cannot move -- a digest, or a semver
+# release tag (v1.2.3). Everything else is Always: :main and :latest are rebuilt
+# on every push, and a tag this cannot classify (ref-<sha> in the OpenShift e2e,
+# re-pushed after a merge) is not known to be immutable. IfNotPresent on a moving
+# tag is how a node kept a 6-day-old :main through a restart.
+wva_image_pull_policy() {
+    local tag="$1" digest="${2:-}"
+    if [ -n "$digest" ]; then
+        echo IfNotPresent
+        return 0
+    fi
+    if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+        echo IfNotPresent
+        return 0
+    fi
+    echo Always
+}
+
+# wva_warn_floating_image warns when the controller image is a moving tag.
+#
+# :main is the default because this tree's manifests need a build of this tree
+# (see WVA_IMAGE_TAG in install.sh), and it is right for development. It is
+# wrong for anything that must be reproduced: the same install command deploys a
+# different binary after every push to main, and nothing records which one ran.
+# So say so, loudly, and say what to pass instead. A warning rather than a
+# refusal: developers and the kind e2e deploy :main on purpose.
+wva_warn_floating_image() {
+    local repo="$1" tag="$2" digest="${3:-}"
+    [ -z "$digest" ] || return 0
+    case "$tag" in
+        main|latest|dev|nightly|"") ;;
+        *) return 0 ;;
+    esac
+    log_warning "=================================================================="
+    log_warning "The controller image is a FLOATING tag: ${repo}:${tag:-<none>}"
+    log_warning "  It names whatever was pushed last, so this install is not reproducible:"
+    log_warning "  the same command deploys a different binary after the next push."
+    log_warning "  For anything beyond development, pin it:"
+    log_warning "    IMG=${repo}@sha256:<digest>   (exactly one build)"
+    log_warning "    IMG=${repo}:vX.Y.Z            (a release tag)"
+    log_warning "=================================================================="
+}
+
+# wva_warn_prometheus_tls warns when the controller will connect to an HTTPS
+# Prometheus without verifying its certificate. $1 is the manager config.yaml.
+#
+# The shipped config skips verification, and on Kubernetes it has to: the
+# installer has no CA to give the controller -- the certificate of the
+# kube-prometheus-stack it deploys is self-signed and generated on the
+# workstation, and nothing mounts it into the controller. Flipping the default
+# would make every such install exit on "x509: certificate signed by unknown
+# authority". So the default stays, and an install that ends up unverified says
+# so, with the production setting. OpenShift ships verification on (service CA)
+# and never reaches the warning.
+wva_warn_prometheus_tls() {
+    local cfg="$1" url skip ca
+    [ -n "$cfg" ] || return 0
+    url="$(printf '%s\n' "$cfg" | yq -r '.PROMETHEUS_BASE_URL // ""' 2>/dev/null || true)"
+    skip="$(printf '%s\n' "$cfg" | yq -r '.PROMETHEUS_TLS_INSECURE_SKIP_VERIFY // ""' 2>/dev/null || true)"
+    ca="$(printf '%s\n' "$cfg" | yq -r '.PROMETHEUS_CA_CERT_PATH // ""' 2>/dev/null || true)"
+    case "$url" in https://*) ;; *) return 0 ;; esac
+    [ "$skip" = "true" ] || return 0
+    [ -z "$ca" ] || return 0
+    log_warning "WVA will NOT verify the TLS certificate of $url (PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true, no PROMETHEUS_CA_CERT_PATH)."
+    log_warning "  Fine for a development cluster. In production, mount the CA that signed the Prometheus certificate into the"
+    log_warning "  controller and set PROMETHEUS_CA_CERT_PATH=<file> and PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=false."
+    log_warning "  See docs/reference/prometheus.md#tls-configuration."
+}
+
+# wva_prometheus_scraper_sa echoes "<namespace> <serviceaccount>" for the
+# Prometheus that scrapes the controller's /metrics, or nothing when it cannot
+# tell.
+#
+# config/base names kube-prometheus-stack-prometheus in
+# workload-variant-autoscaler-monitoring: the Prometheus this installer deploys,
+# in its default namespace. On a cluster with its own Prometheus -- or with ours
+# in another MONITORING_NAMESPACE -- that subject is an account that does not
+# exist, so the grant reaches nobody it was meant for and waits for whoever
+# creates that name. In order:
+#   PROMETHEUS_SA=<ns>/<name>  an explicit answer
+#   a Prometheus CR            its spec.serviceAccountName (operator default:
+#                              "default"); the one whose namespace PROMETHEUS_URL
+#                              names, else the first
+#   DEPLOY_PROMETHEUS=true     the kube-prometheus-stack this install deploys
+wva_prometheus_scraper_sa() {
+    if [ -n "${PROMETHEUS_SA:-}" ]; then
+        case "$PROMETHEUS_SA" in
+            */*) printf '%s %s\n' "${PROMETHEUS_SA%%/*}" "${PROMETHEUS_SA#*/}"; return 0 ;;
+            *) log_warning "PROMETHEUS_SA must be <namespace>/<serviceaccount>; ignoring '$PROMETHEUS_SA'" ;;
+        esac
+    fi
+    local ns sa first="" chosen=""
+    while read -r ns sa; do
+        [ -n "$ns" ] || continue
+        [ -n "$sa" ] || sa=default
+        [ -n "$first" ] || first="$ns $sa"
+        case "${PROMETHEUS_URL:-}" in
+            *".${ns}.svc"*) chosen="$ns $sa"; break ;;
+        esac
+    done < <(kubectl get prometheuses.monitoring.coreos.com -A \
+        -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.spec.serviceAccountName}{"\n"}{end}' 2>/dev/null || true)
+    if [ -n "${chosen:-$first}" ]; then
+        printf '%s\n' "${chosen:-$first}"
+        return 0
+    fi
+    if [ "${DEPLOY_PROMETHEUS:-true}" = "true" ]; then
+        printf '%s kube-prometheus-stack-prometheus\n' "${MONITORING_NAMESPACE:-workload-variant-autoscaler-monitoring}"
+    fi
+}
+
+# wva_append_metrics_reader_subject_patch appends to kustomization $1 a patch
+# that points the metrics-reader binding at $3 ("<namespace> <serviceaccount>"),
+# or removes the binding when $3 is empty: no grant beats a grant to an account
+# nobody chose. $2 is the install namespace. Must come AFTER
+# wva_append_crb_name_patches, and targets the name that leaves the binding with
+# -- a target naming the shipped name matches nothing once it is renamed, and
+# kustomize says nothing about a patch that matched nothing.
+wva_append_metrics_reader_subject_patch() {
+    local kustomization="$1" ns="$2" scraper="$3" name
+    name="wva-metrics-reader-rolebinding-$(wva_ns_suffix "$ns")"
+    grep -q '^patches:' "$kustomization" || printf 'patches:\n' >> "$kustomization"
+    if [ -n "$scraper" ]; then
+        cat >> "$kustomization" <<EOF
+- patch: |-
+    - op: replace
+      path: /subjects
+      value:
+      - kind: ServiceAccount
+        name: ${scraper#* }
+        namespace: ${scraper%% *}
+  target:
+    kind: ClusterRoleBinding
+    name: ${name}
+EOF
+    else
+        cat >> "$kustomization" <<EOF
+- patch: |-
+    \$patch: delete
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRoleBinding
+    metadata:
+      name: ${name}
+  target:
+    kind: ClusterRoleBinding
+    name: ${name}
+EOF
+    fi
+}
+
 deploy_wva_controller() {
     log_info "Deploying Workload-Variant-Autoscaler..."
-    log_info "Using image: $WVA_IMAGE_REPO:$WVA_IMAGE_TAG"
+    if [ -n "${WVA_IMAGE_DIGEST:-}" ]; then
+        log_info "Using image: $WVA_IMAGE_REPO@$WVA_IMAGE_DIGEST"
+    else
+        log_info "Using image: $WVA_IMAGE_REPO:$WVA_IMAGE_TAG"
+    fi
 
     # Select the Kustomize overlay by install SCOPE (WVA_SCOPE=cluster|namespace)
     # and platform. Both scopes work on both platforms; the default preserves the
@@ -330,12 +486,8 @@ deploy_wva_controller() {
     # behind it, so Always there would pull the REMOTE image over the one under
     # test. That path sets WVA_IMAGE_PULL_POLICY=IfNotPresent explicitly.
     local pull_policy="${WVA_IMAGE_PULL_POLICY:-}"
-    if [ -z "$pull_policy" ]; then
-        case "$WVA_IMAGE_TAG" in
-            main|latest|dev|nightly) pull_policy=Always ;;
-            *)                       pull_policy=IfNotPresent ;;
-        esac
-    fi
+    [ -n "$pull_policy" ] || pull_policy="$(wva_image_pull_policy "$WVA_IMAGE_TAG" "${WVA_IMAGE_DIGEST:-}")"
+    wva_warn_floating_image "$WVA_IMAGE_REPO" "$WVA_IMAGE_TAG" "${WVA_IMAGE_DIGEST:-}"
 
     cat > "$tmp_overlay/pull-policy-patch.yaml" <<EOF
 - op: replace
@@ -343,6 +495,10 @@ deploy_wva_controller() {
   value: $pull_policy
 EOF
 
+    # A digest replaces the tag rather than joining it: kustomize renders
+    # `digest:` as repo@sha256:..., which is what the node resolves.
+    local image_pin="  newTag: \"$WVA_IMAGE_TAG\""
+    [ -z "${WVA_IMAGE_DIGEST:-}" ] || image_pin="  digest: \"$WVA_IMAGE_DIGEST\""
     cat > "$tmp_overlay/kustomization.yaml" <<EOF
 namespace: $WVA_NS
 resources:
@@ -350,7 +506,7 @@ resources:
 images:
 - name: $base_image
   newName: $WVA_IMAGE_REPO
-  newTag: "$WVA_IMAGE_TAG"
+$image_pin
 EOF
 
     # Include Prometheus alerting rules component if requested
@@ -378,6 +534,26 @@ EOF
     # binding still names the same ServiceAccount, so nothing is lost while it
     # lingers, and `undeploy` removes both.
     wva_append_crb_name_patches "$tmp_overlay/kustomization.yaml" "$WVA_NS"
+
+    # Grant the Prometheus that will actually scrape the controller, not the one
+    # the base names. See wva_prometheus_scraper_sa.
+    if [ "${ENVIRONMENT:-}" != "openshift" ]; then
+        local scraper
+        scraper="$(wva_prometheus_scraper_sa)"
+        wva_append_metrics_reader_subject_patch "$tmp_overlay/kustomization.yaml" "$WVA_NS" "$scraper"
+        if [ -n "$scraper" ]; then
+            log_info "Controller /metrics readable by ServiceAccount ${scraper#* } in ${scraper%% *}"
+        else
+            log_warning "Could not tell which ServiceAccount your Prometheus runs as, so no Prometheus is granted the controller's /metrics."
+            log_warning "  Pass PROMETHEUS_SA=<namespace>/<serviceaccount> to grant it, or bind ClusterRole wva-metrics-reader-$(wva_ns_suffix "$WVA_NS") yourself."
+            # An earlier install may have left the binding with the shipped
+            # subject; it names an account that does not exist here.
+            case "${WVA_APPLY_SCOPE:-all}" in
+                all|prereqs) kubectl delete clusterrolebinding "wva-metrics-reader-rolebinding-$(wva_ns_suffix "$WVA_NS")" \
+                    --ignore-not-found >/dev/null 2>&1 || true ;;
+            esac
+        fi
+    fi
 
     # Appended here, not in the heredoc above: wva_append_crb_name_patches writes
     # its own `patches:` key, and a second one is a duplicate mapping key that
@@ -673,6 +849,10 @@ wva_reconcile_prometheus_scheme() {
     if [ -n "${PROMETHEUS_TLS_INSECURE_SKIP_VERIFY:-}" ]; then
         patch_manager_config ".PROMETHEUS_TLS_INSECURE_SKIP_VERIFY = \"${PROMETHEUS_TLS_INSECURE_SKIP_VERIFY}\""
     fi
+    # Read back what the controller will actually run with, after every patch
+    # above, rather than reasoning about which of them applied.
+    wva_warn_prometheus_tls "$(kubectl get configmap wva-manager-config -n "$WVA_NS" \
+        -o jsonpath='{.data.config\.yaml}' 2>/dev/null || true)"
 
     if [ "${ENABLE_SCALE_TO_ZERO:-false}" = "true" ]; then
         log_info "Enabling scale-to-zero in WVA ConfigMap (ENABLE_SCALE_TO_ZERO=true)..."

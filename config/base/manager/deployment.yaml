@@ -79,6 +79,12 @@ spec:
             protocol: TCP
         securityContext:
           allowPrivilegeEscalation: false
+          # The controller writes nothing to its filesystem: its metrics
+          # certificate is generated in memory (no --metrics-cert-path), it
+          # registers no webhooks, logs go to stderr, and every file it reads --
+          # config, tokens, CA -- is a read-only mount. /tmp is an emptyDir
+          # below anyway, for a library that reaches for os.TempDir().
+          readOnlyRootFilesystem: true
           capabilities:
             drop:
             - "ALL"
@@ -133,6 +139,8 @@ spec:
         - name: epp-metrics-token
           mountPath: /var/run/secrets/epp-metrics
           readOnly: true
+        - name: tmp
+          mountPath: /tmp
       volumes:
       - name: wva-config
         configMap:
@@ -141,5 +149,8 @@ spec:
         secret:
           secretName: epp-metrics-token
           defaultMode: 420
+      - name: tmp
+        emptyDir:
+          sizeLimit: 64Mi
       serviceAccountName: controller-manager
       terminationGracePeriodSeconds: 10

@@ -117,10 +117,28 @@ spec:
 
 ### TLS Configuration
 
+**What ships:** the Kubernetes overlays set `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY: "true"`
+in the manager ConfigMap. The installer has no CA to hand the controller there: the
+kube-prometheus-stack it deploys serves a self-signed certificate, and nothing mounts
+it into the controller, so verification on by default would stop every such install
+with `x509: certificate signed by unknown authority`. The OpenShift overlays verify
+against the service CA and ship `false`. The installer prints a warning at the end of
+any install that will connect over HTTPS without verifying.
+
 **Production Deployments:**
 - Always use HTTPS endpoints (`https://`)
-- Provide CA certificate via `PROMETHEUS_CA_CERT_PATH`
+- Mount the CA that signed the Prometheus certificate into the controller (a ConfigMap
+  or Secret volume), and set `PROMETHEUS_CA_CERT_PATH` to the file and
+  `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY` to `"false"` in the manager ConfigMap
+  (`wva-manager-config`, key `config.yaml`)
 - Never set `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true` in production
+
+The controller's own `/metrics` endpoint is the other direction: the shipped
+ServiceMonitor scrapes it with `insecureSkipVerify: true` because the controller
+generates a self-signed serving certificate in memory. To verify that scrape, start
+the controller with `--metrics-cert-path` pointing at a mounted certificate and
+replace `tlsConfig` in the ServiceMonitor with its CA, as the OpenShift overlay does
+with the service CA.
 
 **Development/Testing:**
 - You may set `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true` for local clusters
@@ -141,6 +159,28 @@ spec:
   bearer token auth — the scaling manager refuses to start if those are set alongside a plain HTTP
   URL. Note that credentials and metrics are sent in cleartext, so use this only
   on a trusted network (dev/test or a secured in-cluster path).
+
+### EPP metrics token
+
+The controller scrapes the EPP's `/metrics` with the token of a dedicated
+ServiceAccount, `wva-epp-metrics-reader`, whose only grant is `get` on the
+`/metrics` non-resource URL. The token comes from a legacy
+`kubernetes.io/service-account-token` Secret, `wva-epp-metrics-token`, mounted at
+`/var/run/secrets/epp-metrics/token`. Such a token **does not expire**.
+
+It is kept rather than replaced with a projected token because a projected volume
+can only issue tokens for the Pod's own ServiceAccount: moving to one means binding
+the reader role to the controller's ServiceAccount and dropping the dedicated one,
+and the documented `kubectl get secret wva-epp-metrics-token` reads (this page's
+monitoring examples, the scale-to-zero and utilization-share guides) and the e2e
+suite all use the Secret today.
+
+What limits it: the token reads `/metrics` endpoints and nothing else. To rotate it,
+delete the Secret and re-apply the install (or `kubectl apply` the Secret again);
+the token controller fills in a new token and the old one stops working once the
+Secret is gone. The controller re-reads the file on every EPP scrape, so it picks
+up the new token as soon as the kubelet updates the mounted volume (typically
+within a minute), without a restart.
 
 ### PromQL Injection Prevention
 

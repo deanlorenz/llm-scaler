@@ -39,6 +39,23 @@ jobs:
           fi
         shell: bash
 
+      # A release must install the image it releases. config/base/manager/
+      # kustomization.yaml otherwise names :main, a floating tag, so the release's
+      # own `kubectl apply -k` would deploy whatever main was last -- not this
+      # build, and a different binary next week. Checked before anything is
+      # pushed, so a forgotten pin costs a re-tag rather than a published image
+      # whose manifests do not use it. See docs/developer-guide/release-process.md.
+      - name: Verify the kustomization pins this release
+        if: steps.tag.outputs.tag != 'latest'
+        run: |
+          want="${{ steps.tag.outputs.tag }}"
+          have="$(awk '$1 == "newTag:" {print $2}' config/base/manager/kustomization.yaml | tr -d '"')"
+          if [ "$have" != "$want" ]; then
+            echo "::error file=config/base/manager/kustomization.yaml::newTag is '${have}', expected '${want}'. Pin the release tag on the tagged commit (release-process.md, step 2)."
+            exit 1
+          fi
+          echo "kustomization newTag: ${have}"
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
 
@@ -49,9 +66,14 @@ jobs:
         run: echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
       - name: Build and push multi-arch image
+        id: build
         run: |
-          IMAGE=ghcr.io/llm-d/${{ steps.version.outputs.project_name }}
+          # The repository owner, as ci-main-image does: the kustomization and
+          # the installer both pull from ghcr.io/<owner>/<repo>, and a release
+          # pushed anywhere else is one no install of this tree can find.
+          IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${{ steps.version.outputs.project_name }}
           VERSION_TAG=${{ steps.tag.outputs.tag }}
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
           echo "Building $IMAGE with tags $VERSION_TAG and latest for linux/amd64 and linux/arm64"
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
@@ -65,4 +87,4 @@ jobs:
       - name: Run Trivy scan
         uses: ./.github/actions/trivy-scan
         with:
-          image: ghcr.io/llm-d/${{ steps.version.outputs.project_name }}:${{ steps.tag.outputs.tag }}
+          image: ${{ steps.build.outputs.image }}:${{ steps.tag.outputs.tag }}
