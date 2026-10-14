@@ -145,7 +145,7 @@ The two objects a pool is made of — the Deployment and its ScaledObject — ar
 only meaningful together, so there is one command that makes both:
 
 ```bash
-deploy/warmpool.sh create -n <namespace> --name <pool>   --accelerator NVIDIA-H100-80GB-HBM3 --gpus 1   --models 4 --model-size 8B   --wva-namespace <where WVA runs>
+deploy/warmpool.sh create -n <namespace> --name <pool>   --accelerator NVIDIA-H100-80GB-HBM3 --gpus 1   --models 4 --model-size 8B   --wva-namespace <where the scaling manager runs>
 ```
 
 `--models` and `--model-size` are how you size the Pod: they set the memory
@@ -222,7 +222,7 @@ kubectl get deploy,scaledobject,networkpolicy,podmonitor -n <namespace> -l app.k
 **Add one**
 
 ```bash
-deploy/warmpool.sh create -n <namespace> --name <pool>   --accelerator NVIDIA-H100-80GB-HBM3 --gpus 1   --models 4 --model-size 8B   --wva-namespace <where WVA runs>   --monitoring-namespace <where Prometheus runs>
+deploy/warmpool.sh create -n <namespace> --name <pool>   --accelerator NVIDIA-H100-80GB-HBM3 --gpus 1   --models 4 --model-size 8B   --wva-namespace <where the scaling manager runs>   --monitoring-namespace <where Prometheus runs>
 ```
 
 Then point models at it, in each one's ScaledObject trigger metadata:

@@ -22,11 +22,25 @@ the ScaledObject points at) and classifies it as SGLang when **either**:
 
 Otherwise the variant is treated as **vLLM** (the default).
 
+**Any container counts, sidecars included.** An SGLang signal in a sidecar
+decides the whole pod (`internal/inferenceengine/engine.go`), so a vLLM engine
+with an `sglang-router` sidecar whose image is `lmsysorg/sglang-router:...` (or
+any image reference containing `sglang`) is detected as SGLang. The scaling
+manager then looks for `sglang:*` series that the vLLM engine never emits, and
+the model gets no saturation metrics: a `MetricsUnavailable` Warning event and
+no scaling decision. There is no field to override detection. The fix is to
+keep the `sglang` signal out of the scale target's pod template: run the router
+as its own Deployment rather than as a sidecar of the engine, or pull its image
+under a reference that does not contain `sglang` and launch it with a command
+that does not contain `sglang.launch_server` or `sglang serve`.
+
 There is nothing engine-specific to declare. A workload is registered by
 creating a KEDA ScaledObject for it, exactly as for vLLM, and the same
 ScaledObject works for either engine: the engine is read off the scale
-target's pod template, not off any field you set. See
-[workload preparation](workload-preparation.md) for the registration itself.
+target's pod template, not off any field you set. Register it with
+[step 4 of the namespace install](../guides/install-in-namespace/README.md#4-register-the-workloads);
+every key the trigger takes is in [ScaledObject trigger metadata](scaledobject-trigger.md),
+and what the pod itself must carry is in [workload preparation](workload-preparation.md).
 
 ## Metrics
 
@@ -44,7 +58,7 @@ The mapping:
 | Prompt tokens / request | `vllm:request_prompt_tokens_*` | `sglang:prompt_tokens_histogram_*` |
 | Generation tokens / request | `vllm:request_generation_tokens_*` | `sglang:generation_tokens_histogram_*` |
 | Prefix-cache hit rate | `vllm:prefix_cache_hits / _queries` | `sglang:cached_tokens_total / sglang:prompt_tokens_total` |
-| Request count (scale-to-zero) | `vllm:request_success_total` | `sglang:num_requests_total` *(not yet enabled — see Caveats)* |
+| Request count (scale-to-zero) | `vllm:request_success_total` | `sglang:num_requests_total` |
 
 > Make sure your Prometheus (or VictoriaMetrics) scrapes the SGLang pods' `/metrics`
 > endpoint, the same way you scrape vLLM. The scaling manager only consumes metrics that are
@@ -68,12 +82,16 @@ map onto the same internal parameters as their vLLM counterparts:
 
 ## Caveats
 
-- **vLLM remains the default.** Detection is conservative: anything without a clear
-  SGLang signal is treated as vLLM.
+- **vLLM remains the default.** Anything without an SGLang signal is treated as
+  vLLM, but the signal is read from every container, so an SGLang sidecar beside
+  a vLLM engine flips the pod to SGLang; see [How detection works](#how-detection-works).
 - **A variant runs a single engine.** Mixing vLLM and SGLang containers within one
   variant's pod is not supported.
-- **Metric availability.** SGLang must be started with metrics enabled so the
-  `sglang:*` series are exposed and scraped.
+- **Metric availability.** SGLang exposes no `sglang:*` series unless it is
+  started with `--enable-metrics` (an SGLang server argument; this repo's e2e
+  uses an SGLang emulator, so the flag itself is not exercised here). Then check
+  that Prometheus has the series for your model:
+  `count(sglang:token_usage{model_name="<modelID>"})` must be non-zero.
 - **Scale-to-zero reads the SGLang counter.** Idleness is measured from
   `sglang:num_requests_total` rather than the vLLM counter: the detected engine is
   passed to the enforcer, which selects the series for it

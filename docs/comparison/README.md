@@ -13,3 +13,12 @@ than guessing.
 - **[Dynamo, Fireworks and Together, on one page](autoscaling-one-pager-dynamo-fireworks-together.md)**
   — the same ground against the hosted platforms, compressed: which signals each
   one scales on, and how many of them you are allowed to use at once.
+
+Neither page benchmarks anything, and nothing here measures the scaling manager
+against **plain KEDA or HPA thresholds** on the same engine: that head-to-head
+has not been run. The case against a threshold on one metric is argued, not
+measured, in [Why llm-scaling-manager](../why.md#against-the-alternatives).
+
+The scaling manager is an advanced fork of llm-d's
+[workload-variant-autoscaler](https://github.com/llm-d/llm-d-workload-variant-autoscaler),
+developed independently; these pages compare mechanisms, not the two projects.

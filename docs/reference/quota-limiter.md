@@ -195,7 +195,10 @@ the attribution that a first reading of the table would not give:
   `HoldAndDrain`, admits nothing in Kueue; here it becomes an untyped grant of
   0, so its namespaces are denied rather than left to the static entry.
   `namespaceSelector` is not evaluated (it would need namespace labels a tenant
-  install cannot read).
+  install cannot read). The consequence: a tenant who can create a LocalQueue
+  pointing at any ClusterQueue is granted that queue's quota here, even where
+  Kueue itself would not admit their work to it. Being fixed; until then
+  restrict LocalQueue creation, or keep a finite static cap.
 - **A shared ClusterQueue is a per-namespace ceiling, not a partition.** Every
   namespace with a LocalQueue on it is bounded at the queue's full nominal
   quota, so several such namespaces may in sum still ask for more than the
@@ -289,9 +292,12 @@ answerable from the controller log.
 
 The manager ClusterRole carries `get`/`list` on `clusterqueues`, `localqueues`
 and `resourceflavors` in `kueue.x-k8s.io`. A namespace-scoped install lists
-LocalQueues only in the namespace it manages (the tenant Role grants that) and gets the
-two cluster-scoped kinds from `components/kueue-reader`, applied by the prereqs
-phase like `node-reader`. A rule naming an API group the cluster does not serve
+LocalQueues only in the namespace it manages (the controller's Role,
+`wva-manager-role`, grants that) and gets the two cluster-scoped kinds from
+`components/kueue-reader`. Both are applied by the prereqs phase like
+`node-reader`, so an install that predates the LocalQueue rule needs a cluster
+admin to re-run `make setup-prereqs`; the tenant's `make deploy-wva` does not
+apply Roles. A rule naming an API group the cluster does not serve
 is inert, so the grant is harmless without Kueue.
 
 ### Validation

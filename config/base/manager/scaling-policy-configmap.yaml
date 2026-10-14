@@ -100,13 +100,14 @@ data:
   # trigger metadata, so one tier serves many models and retuning it is a single
   # edit rather than an edit per model.
   #
-  # Entry keys distinguish the three kinds:
-  #   default                 this cluster default entry
-  #   {modelID}#{namespace}   a per-model override (contains "#")
+  # Three kinds of entry:
+  #   default                 this cluster default entry (the key "default")
+  #   a per-model override    any key whose entry sets model_id and namespace;
+  #                           matched on those two fields, never on the key
   #   anything else           a named policy tier
   #
   # Resolution, most specific winning:
-  #   default entry → named policy tier → {modelID}#{namespace} override
+  #   default entry → named policy tier → per-model override
   #
   # Policies may set thresholds, priority, scaleToZero and analyzer selection.
   # They may NOT set limiters or quotas — those are cluster-scope and read only

@@ -19,11 +19,11 @@ deploy:
     note: |
       Deploys the model server, its EPP and the InferencePool, and holds the
       engine image on the accelerator nodes (the prepull-* pods; BENCHMARK_PREPULL=false
-      skips that) -- nothing else. BENCHMARK_WVA_DEPLOY=false is what keeps the
-      autoscaler out of it: this guide gets you a model to scale, and installing
-      the scaling manager is the next guide's job.
+      skips that) -- nothing else. BENCHMARK_WVA_DEPLOY=false keeps the
+      autoscaler out of it: installing the scaling manager is the next guide's job.
     run: |
-      make benchmark-standup BENCHMARK_NAMESPACE=${NAMESPACE} MODEL_ID=${MODEL_ID}         BENCHMARK_WVA_DEPLOY=false
+      make benchmark-standup BENCHMARK_NAMESPACE=${NAMESPACE} MODEL_ID=${MODEL_ID} \
+        BENCHMARK_WVA_DEPLOY=false
 
 verify:
   serving:

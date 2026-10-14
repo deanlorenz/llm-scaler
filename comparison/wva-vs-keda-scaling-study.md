@@ -5,6 +5,16 @@
 > llm-scaling-manager · **KEDA is the actuator in every run here.**
 > Every run is one model, one accelerator, one variant. Figures: [`figures/src/`](./figures/src/).
 
+> **When and what was measured.** These runs predate 2026-08-04, the date this
+> study was committed. The scaling-manager arm ran this project's controller as
+> it stood then — still named WVA, a fork of llm-d's workload-variant-autoscaler,
+> and *before* it became a KEDA external scaler (that landed 2026-08-05) — so its
+> target reached KEDA by an earlier path, not today's gRPC push. Its analyzer
+> has changed since. The KEDA arm ran llm-d's own KEDA configuration for the EPP,
+> unmodified. **Each figure is a single run per arm**; no run was repeated, so
+> read differences as indicative, with no measured variance behind them. Treat this page as a historical record of the design
+> argument, not as a benchmark of the current release.
+
 ---
 
 ## Before the numbers
@@ -14,7 +24,7 @@
 | Arm | What computes the target |
 |---|---|
 | **KEDA alone** | A **threshold on a serving metric**: scale when running requests pass **16 per pod**. |
-| **the scaling manager + KEDA** | A **capacity model**: scale when token demand approaches **measured KV capacity**. |
+| **The scaling manager + KEDA** | A **capacity model**: scale when token demand approaches **measured KV capacity**. |
 
 **Colour code:** in the tables below, the highlighted arm is the one that won that row. Every run is **one model, one accelerator, one variant** — the single-variant case.
 
@@ -34,7 +44,7 @@
 
 ## All five runs on one page
 
-The scaling manager held fewer GPUs every time. Run 3 is the only one where that saving costs something.
+In these single runs the scaling manager held fewer GPUs every time. Run 3 is the only one where that saving costs something.
 
 | # | What we ran | GPUs held (the scaling manager vs other) | Dropped (the scaling manager vs other) | What it means |
 |---|---|---|---|---|
@@ -50,11 +60,12 @@ The scaling manager held fewer GPUs every time. Run 3 is the only one where that
 
 ## The KEDA arm runs the *shipped* configuration
 
-Unmodified well-lit-path settings — aggressive by design, and they over-scale.
+Unmodified well-lit-path settings from llm-d. They are tuned to react fast, and
+on these workloads that meant holding more replicas than the load needed.
 
 ```yaml
-# hack/benchmark/scenarios/keda-epp/scaledobject.yaml
-# mirrors llm-d PR #1981, the KEDA conversion of the EPP autoscaling guide
+# the benchmark scenario used at the time (not kept in this repository);
+# it mirrors llm-d PR #1981, the KEDA conversion of the EPP autoscaling guide
 scale up when, per pod:
     50 queued requests
     16 running requests
@@ -94,13 +105,13 @@ scale down:
 
 **Hero:** **1.00 vs 2.46 GPUs held** — −59% GPU-time, **nothing queued on either arm.**
 
-| | the scaling manager + KEDA — flat at 1 replica | KEDA-EPP alone — steps to 4 |
+| | The scaling manager + KEDA — flat at 1 replica | KEDA-EPP alone — steps to 4 |
 |---|---|---|
 | | ![Run 2 the scaling manager](figures/src/exp2_wva.png) | ![Run 2 KEDA](figures/src/exp2_keda.png) |
 
 - The scaling manager's target never moves; KEDA-EPP steps 2 → 3 → 4 as the request count climbs.
 - The scaling manager's demand stays far under the capacity line — that headroom is what it reads.
-- KV panel: The scaling manager holds 5–15%, KEDA-EPP 2–8% — the *same* demand spread across more replicas.
+- KV panel: the scaling manager holds 5–15%, KEDA-EPP 2–8% — the *same* demand spread across more replicas.
 - **Queues are flat on both arms**, so the extra replicas bought no service — only cost.
 
 ---
@@ -111,14 +122,14 @@ scale down:
 
 **Hero:** **1.56 vs 4.01 GPUs held** — −61% GPU-time — *paid for in the tail.*
 
-| | the scaling manager + KEDA — two cycles, then flat at 1 | KEDA-EPP alone — settles at 5 and holds |
+| | The scaling manager + KEDA — two cycles, then flat at 1 | KEDA-EPP alone — settles at 5 and holds |
 |---|---|---|
 | | ![Run 3 the scaling manager](figures/src/exp3_wva.png) | ![Run 3 KEDA](figures/src/exp3_keda.png) |
 
 - The scaling manager runs two overshoot-and-correct cycles, then holds 1 replica; KEDA-EPP climbs 1 → 2 → 4 → 5 and holds, with vLLM waiting at exactly 0 throughout.
 - **The errors and the tail live in the scaling manager's cycles:** each drain to one replica cuts live streams. Capping the drain rate (Pods 1 / N s) is what got the scaling manager to converge — *not* thresholds.
 
-> **Honest caveat (a scaling-manager bug, not a defense of thresholds):** the scaling manager's compute-capacity estimate recovers toward the memory bound once the queue drains, so it released replicas while arrivals were unchanged. A replacement estimator exists behind a build flag and has **not** yet been measured on this workload — read the tail as *current behaviour*, not settled. This is the one axis where a reactive threshold wins today.
+> **Honest caveat (a scaling-manager bug, not a defense of thresholds):** the scaling manager's compute-capacity estimate recovers toward the memory bound once the queue drains, so it released replicas while arrivals were unchanged. At the time, a replacement estimator existed behind a build flag and had **not** been measured on this workload — read the tail as the behaviour of that build, not as settled. In these runs this is the one axis where a reactive threshold won.
 
 ---
 
@@ -128,7 +139,7 @@ scale down:
 
 **Hero:** **2.21 vs 5.97 GPUs held** — −63% GPU-time, and **no tail cost at all.**
 
-| | the scaling manager + KEDA — one cycle, then low | KEDA-EPP alone — pinned at 10 |
+| | The scaling manager + KEDA — one cycle, then low | KEDA-EPP alone — pinned at 10 |
 |---|---|---|
 | | ![Run 4 the scaling manager](figures/src/exp4dh_wva.png) | ![Run 4 KEDA](figures/src/exp4dh_keda_epp.png) |
 
@@ -155,7 +166,7 @@ scale down:
 
 ## What the five runs generalise to
 
-| Reality | KEDA alone | the scaling manager + KEDA | Evidence |
+| Reality | KEDA alone | The scaling manager + KEDA | Evidence |
 |---|---|---|---|
 | Bursty arrivals around a steady mean | Threshold crossings → oscillation and dropped requests | Capacity model → stable target | Run 1 |
 | Cheap requests arriving in bulk | Counts requests, not the work they represent | Scales on GPU pressure, not arrivals | Run 2 |
@@ -173,8 +184,11 @@ scale down:
 
 ## Recommendation
 
+Written after these runs, in August 2026, for the build measured above. Check the
+current [documentation](../docs/) before acting on it.
+
 **Run today**
-- **the scaling manager + KEDA** as the default for steady and moderate load — cheaper at equal service in every run below saturation.
+- **The scaling manager + KEDA** as the default for steady and moderate load — cheaper at equal service in every one of these runs below saturation.
 - **Keep KEDA as the actuator.** Nothing in the deployment changes except *what publishes the target.*
 - **Cap the scale-down drain** (`Pods 1 / 120s` was the best cost-and-reliability point of six legs tested).
 - Where **the tail is the SLO** and load sits past the crossover rate, **KEDA-EPP is still the safer default.**
@@ -198,4 +212,4 @@ scale down:
 | 4 | ≈100/1000 | sustained @ 24, 39 600 req/arm | 2.21 vs 5.97 | 6 vs 2 |
 | 5 | prefill/decode | 6-GPU split | 3:3 vs 5:1 | — |
 
-*Run 3's the scaling manager leg shown is `scaleDown = Pods 1/180s` (cheapest of six legs); `Pods 1/120s` was the most reliable (78 errors, TTFT p99 4.30 s).*
+*Run 3's scaling-manager leg shown is `scaleDown = Pods 1/180s` (cheapest of six legs); `Pods 1/120s` was the most reliable (78 errors, TTFT p99 4.30 s).*

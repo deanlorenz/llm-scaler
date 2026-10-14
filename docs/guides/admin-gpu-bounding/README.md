@@ -50,8 +50,57 @@ Grants come first, then the policy: declaring the limiter without them takes out
 every install that lacks node access at once. Controllers are discovered rather than
 configured — the hazard is the install you forgot.
 
-Policy lands where each controller actually reads it: the well-known namespace
-for a self-managed controller, its own ConfigMap for an admin-owned one.
+Policy lands where the command *expects* each controller to read it: the
+well-known namespace for a self-managed controller, its own ConfigMap for an
+admin-owned one. Admin-owned controllers (cluster-scoped, or out-of-reach) read
+their own ConfigMap **by design** and never `wva-policy`. Self-managed ones read
+`wva-policy` only if they can read Namespace objects — **on Kubernetes they
+cannot** (being fixed), so for them the command writes `wva-policy`, which they
+never see, and leaves their own ConfigMap, which they do read, untouched. The
+closing banner (`The ... limiter is now in force for every WVA on this cluster`)
+is therefore wrong for every self-managed controller on Kubernetes; the
+[`verify.source`](#verification) step is the truth.
+
+### Blast radius — read before running it
+
+`deploy/lib/physical_limiter.sh` acts on every namespace it decides holds a
+controller, and it decides by label. For each one it:
+
+| action | on what |
+| --- | --- |
+| grants node read (`gpu-inventory`), or Kueue read (`quota` with `WVA_QUOTA_KUEUE=true`), cluster-wide | the ServiceAccount named by the **first Deployment labelled `app.kubernetes.io/name=workload-variant-autoscaler`** in that namespace — any Deployment carrying the label, not only a controller |
+| grants `get`, `list`, `watch` on every ConfigMap in the policy namespace | that ServiceAccount, when the controller looks self-managed |
+| **overwrites** the `limiters:` list in the `default` entry of `wva-scaling-policy-config` | the policy namespace, and the controller's **own** ConfigMap for every admin-owned controller (cluster-scoped, or out-of-reach). Other keys are kept; any limiter a tenant or admin had there is replaced |
+| `kubectl rollout restart` of **every Deployment with that label** in the namespace | a self-managed controller that started before the policy namespace existed, so it re-resolves its policy source. **On Kubernetes this achieves nothing** — the restarted controller still cannot read Namespaces and comes back on its own ConfigMap — yet it also restarts the **warm-pool Deployments** in that namespace, which carry the label and **drop every model they had loaded** |
+
+So a Deployment anyone labels `app.kubernetes.io/name=workload-variant-autoscaler`
+gets its ServiceAccount a cluster-wide node read. Discovery by label is being
+replaced; until then, name the targets and read the list the command prints
+(`<ns>/<sa> — reads policy from <ns>`) before trusting it:
+
+```bash
+make enable-physical-limiter WVA_LIMITER_TARGETS='team-a team-b'
+```
+
+On Kubernetes, until the namespace read is granted (by hand —
+[manifest](../admin-cluster-setup/README.md#grant-the-namespace-read-by-hand) —
+or by the fix), **leave self-managed namespaces with a warm pool out of
+`WVA_LIMITER_TARGETS`**: for them the command bounds nothing and restarts the
+pool.
+
+Cluster scope in a budget is **per controller**: N controllers each enforce
+their own copy, so the cluster permits N times the figure. See
+[Configuration](#configuration).
+
+> **Namespace-scoped controllers on Kubernetes do not read `wva-policy` yet.**
+> They cannot read Namespace objects, so they cannot see that the policy
+> namespace exists, and keep using their own ConfigMap — which this command does
+> not write for them. They still receive the node read. Being fixed; until then
+> grant each such ServiceAccount `get` on namespaces
+> ([manifest](../admin-cluster-setup/README.md#grant-the-namespace-read-by-hand))
+> and restart it, or use the out-of-reach shape, whose own ConfigMap this
+> command does write. The verification below — not the command's banner — shows
+> which source each controller took.
 
 ## Verification
 
@@ -61,6 +110,26 @@ for a self-managed controller, its own ConfigMap for an admin-owned one.
 kubectl get pods -A -l app.kubernetes.io/name=workload-variant-autoscaler
 ```
 <!-- guide:verify.controllers end -->
+
+<!-- guide:verify.source start -->
+```bash
+# Which policy each controller actually reads -- the truth, whatever the
+# enable command printed. "the well-known namespace" (or "the namespace
+# this one is labelled with") means a policy namespace governs it. The
+# own-ConfigMap branch logs only at V(1), so at the default verbosity NO
+# such line means the controller reads its own ConfigMap; "Could not read
+# the managed Namespace" means it never saw wva-policy. Logged once at
+# startup, so a long-running controller's line may have rotated out; a
+# restart prints it again.
+for ns in $(kubectl get deploy -A -l app.kubernetes.io/name=workload-variant-autoscaler,control-plane=controller-manager \
+    -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{end}'); do
+  echo "== $ns"
+  kubectl logs -n "$ns" deploy/wva-controller-manager \
+    | grep -E 'Cluster policy comes from|Could not read the managed Namespace' \
+    || echo "   (no line: reads its own ConfigMap in $ns)"
+done
+```
+<!-- guide:verify.source end -->
 
 <!-- guide:verify.budget start -->
 ```bash
@@ -83,6 +152,10 @@ kubectl logs -n <wva-namespace> deploy/wva-controller-manager \
   | grep -E 'GPU limiter constructed|Invalid saturation scaling'
 ```
 <!-- guide:verify.budget end -->
+
+The first command reads `wva-policy`, which governs only the controllers whose
+startup line names the well-known namespace. For the others, read
+`wva-scaling-policy-config` in the controller's own namespace.
 
 ## Cleanup
 
@@ -115,12 +188,13 @@ silently.
 | `WVA_LIMITER_TYPE` | `gpu-inventory` | `quota` |
 | `WVA_QUOTAS` | — (**required** by `quota`) | `'H200=8 A100=4'` |
 | `WVA_QUOTA_SCOPE` | `namespace` | `cluster` |
+| `WVA_QUOTA_KUEUE` | `false` | `true` |
 | `WVA_POLICY_NS` | `wva-policy` | `platform-policy` |
 | `WVA_LIMITER_TARGETS` | every controller found | `team-a team-b` |
 
 `WVA_LIMITER_TYPE` is not `WVA_LIMITER`. This one writes the **cluster** policy
-every controller reads; `WVA_LIMITER` writes a single install's own policy, which
-that install's owner can then edit.
+(and the own ConfigMap of each admin-owned controller); `WVA_LIMITER` writes a
+single install's own policy, which that install's owner can then edit.
 
 `WVA_QUOTAS` has no default and `WVA_LIMITER_TYPE=quota` refuses to run without
 one — before it creates the policy namespace or grants anything. A quota entry
@@ -128,7 +202,7 @@ that names no accelerator is not "unlimited": it is a budget of zero for every
 type, and published here it would stop every managed workload on the cluster
 from scaling up. `WVA_QUOTA_SCOPE=namespace` (the default) gives each managed
 namespace that budget; `cluster` caps the sum — **within one controller**. This
-command publishes to every controller on the cluster and each enforces its own
+command publishes to every controller it targets and each that reads it enforces its own
 copy, so with `cluster` scope and N admin-owned controllers the cluster permits
 N x the number. The default, `namespace`, is keyed on the reserved
 per-unlisted-namespace key and multiplies the same way; that is the semantic,
@@ -137,6 +211,13 @@ not a defect, but it is the one to know before picking a number.
 ```bash
 make enable-physical-limiter WVA_LIMITER_TYPE=quota WVA_QUOTAS='H200=8'
 ```
+
+`WVA_QUOTA_KUEUE=true` takes the numbers from Kueue's ClusterQueues instead:
+each namespace gets the smaller of Kueue's grant and `WVA_QUOTAS`, so
+`WVA_QUOTAS='H200=-1'` lets Kueue decide. It also grants each target
+controller the cluster-scoped half of the Kueue read (ClusterQueues,
+ResourceFlavors). Experimental: [bound tenants by the quotas Kueue already
+holds](../../well-lit-paths/kueue-bounded-quotas/).
 
 ## Next
 

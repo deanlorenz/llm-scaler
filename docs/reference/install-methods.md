@@ -97,7 +97,7 @@ LLM_D_ROUTER_VERSION=v0.9.0 GAIE_VERSION=v1.5.0 NAMESPACE=llm-d-optimized-baseli
 make deploy-e2e-infra ENVIRONMENT=kind-emulator IMG=localhost/llm-scaling-manager:dev
 ```
 
-##### Example 3: The scaling manager + monitoring only (no llm-d)
+##### Example 3: The scaling manager and monitoring only (no llm-d)
 
 ```bash
 export DEPLOY_WVA=true
@@ -126,11 +126,11 @@ things around them that the raw apply does not, and each one has bitten somebody
 | What the script does | If you skip it |
 | --- | --- |
 | Writes `PROMETHEUS_URL` into the controller ConfigMap | The controller starts, looks healthy, and reads no metrics — it uses the shipped in-cluster default, which is not your Prometheus |
-| Renames the shared ClusterRoleBindings per install | A second install **takes the bindings from the first**, which silently loses all its permissions |
-| Checks no incompatible the scaling manager is already installed | Two controllers scaling the same workloads |
-| Refuses to delete the namespace and shared ClusterRoles on undeploy | `kubectl delete -k` removes the **Namespace** — taking the model servers in it — and the shared **ClusterRoles**, breaking every other the scaling manager on the cluster |
+| Renames the ClusterRoles and ClusterRoleBindings per install, with a hash of the namespace | A second install **takes the bindings from the first**, which silently loses all its permissions |
+| Checks that no incompatible install already exists | Two controllers scaling the same workloads |
+| Keeps the Namespace on undeploy, and deletes only this install's renamed ClusterRoles | `kubectl delete -k` removes the **Namespace** — taking the model servers in it — and the unrenamed **ClusterRoles**, breaking every other install on the cluster that binds them |
 
-So use this method when you are installing **one** the scaling manager and wiring Prometheus
+So use this method when you are installing **one** scaling manager and wiring Prometheus
 yourself, or when a GitOps tool owns the manifests. Otherwise prefer Method 1.
 
 #### Applying the overlays directly
@@ -160,16 +160,17 @@ kubectl -n wva-system edit configmap wva-manager-config
 kubectl -n wva-system rollout restart deployment wva-controller-manager
 ```
 
-If you will run **more than one** the scaling manager on this cluster, rename the shared
-ClusterRoleBindings in your overlay first — otherwise the second install takes them
-from the first. `deploy/lib/common.sh:wva_append_crb_name_patches` is the patch set
-the script generates; the names are listed in `WVA_SHARED_CLUSTER_ROLE_BINDINGS`.
+If you will run **more than one** scaling manager on this cluster, rename the
+ClusterRoles and ClusterRoleBindings in your overlay first — otherwise the second
+install takes them from the first. `deploy/lib/common.sh:wva_append_crb_name_patches`
+is the patch set the script generates; the names are listed in
+`WVA_SHARED_CLUSTER_ROLE_BINDINGS` and `WVA_OWNED_CLUSTER_ROLES`.
 
 #### Undeploy
 
 `kubectl delete -k` is **not** the inverse of the apply: the overlay contains a
 Namespace and the shared ClusterRoles, and deleting those takes the workloads in
-that namespace and the permissions of every other the scaling manager with it. Delete the
+that namespace and the permissions of every other install with it. Delete the
 install's own objects and leave the shared ones:
 
 ```bash

@@ -1,6 +1,6 @@
-# Sub-second scale-ups on llm-d: a multi-model autoscaler with a shared warm pool
+# Sub-second time to first token during scale-ups on llm-d: a multi-model autoscaler with a shared warm pool
 
-*Measurements on CoreWeave H200s, September 2026.*
+*Measurements on H200 nodes, September 2026. One run per arm; caveats below the table.*
 
 Traffic triples. The autoscaler notices, asks for a second replica, and
 Kubernetes schedules it in about a second. Then the pod spends the next forty
@@ -9,20 +9,22 @@ arrived in the meantime is queued behind a replica that is running but cannot
 serve. By the time it can, the spike is half over.
 
 That gap is what this post is about. On two 8B models behind one gateway, a cold
-scale-up pushed p95 time-to-first-token to **5.1–8.8 s**. With one shared warm
+scale-up pushed p95 time-to-first-token to **5.2–8.8 s**. With one shared warm
 GPU bridging the rise, the same spikes served at **0.11–0.83 s** — and cost
 **12 % less GPU** than the usual fix of holding a floor of spare replicas.
 
 We are [llm-scaling-manager](https://github.com/ev-shindin/llm-scaling-manager): a
 multi-model autoscaler for llm-d, with warm capacity and scale-to-zero on top. It
-decides the replica count; KEDA and the HPA actuate it. It began as a fork of
-llm-d's Workload Variant Autoscaler and has diverged substantially since.
+decides the replica count; KEDA and the HPA actuate it. It is an advanced fork
+of llm-d's Workload Variant Autoscaler, developed independently, and has diverged
+substantially since.
 
 ## Why a scale-up is slow, and not for the reason people assume
 
 The models in that benchmark are 8B — deliberately, because they are the *cheap*
 case. A model server that is not already running takes **~41 s** to serve its
-first request (33–37 s on this cluster). That is the gap those rises are paying,
+first request (measured on an H100 test cluster, not on the H200 nodes of the
+benchmark). That is the gap those rises are paying,
 and it is already long enough to ruin a spike.
 
 It gets worse with model size, and the instinct — weights are the problem, so put
@@ -46,8 +48,8 @@ and in neither case is it mostly the weights. A cold start cannot be made fast.
 It can only be *not paid*. That is what a
 warm pool is: a Pod holding an accelerator with models already resident, lent to
 a model that is scaling up so it serves while its own replica starts. On a pool
-Pod serving real gateway traffic we measured a **437 ms model switch against a
-~41 s cold start**.
+Pod with two models resident, on that H100 test cluster, four model switches
+took **435–440 ms, against a ~41 s cold start**.
 
 ## What it costs, measured three ways
 
@@ -56,20 +58,25 @@ Two models bursting out of phase — the shape a pool exists for — 4020 second
 
 | arm | p95 TTFT per rise | GPU-seconds |
 | --- | --- | ---: |
-| autoscaling alone | 5.1 – 8.8 s | **12 129** |
+| autoscaling alone | 5.2 – 8.8 s | **12 129** |
 | + one-Pod warm pool | **0.11 – 0.83 s** | 14 138 (+17 %) |
 | floor of 2 replicas per model | 0.09 – 0.13 s | 16 080 (+33 %) |
 
+*Four scale-up events per arm, one run each, no confidence intervals: the
+direction holds on all four rises; the margins are one run's.*
+
 Read that honestly, because the uncomfortable column is the useful one.
 **Autoscaling alone is the cheapest arm** — it just pays for it with
-five-to-nine-second rises. The pool buys floor-like latency and costs 17 % more
-than holding nothing, because its accelerator is charged for the whole run.
+five-to-nine-second rises. The pool buys near-floor latency on three of the four
+rises (the first reached 831 ms at p95, against the floor's 127 ms) and costs
+17 % more than holding nothing, because its accelerator is charged for the whole
+run.
 
 The claim that survives is narrower and more actionable:
 
-- **If you were going to hold a floor, hold a pool instead.** Same rises within
-  tens of milliseconds, for **12 % less**, and one Pod covers every model that
-  does not burst at the same time as another.
+- **If you were going to hold a floor, hold a pool instead.** Three of four
+  rises within 50 ms of the floor, for **12 % less**, and one Pod covers every
+  model that does not burst at the same time as another.
 - **If you hold nothing and can live with multi-second rises, keep holding
   nothing.** We would rather tell you that than sell you a Pod.
 - **The lever is models per Pod, not quiet per burst.** Two models and one Pod
@@ -89,8 +96,9 @@ Naina Singh) sets out nine structural reasons why. Three shape this design most:
 **Load is not request count.** Two requests to one model can differ by 1000× in
 compute — a 100-token chat completion against a 100K-token summarization. We
 scale on token throughput, KV-cache pressure and the prefill/decode ratio,
-through a closed-form model: an inter-token-latency fit plus a fair-share
-allocation. Closed-form is deliberate. At $2–4/hr per GPU, an operator asked to
+through a closed-form capacity model: utilization against a fixed threshold
+(scale up above 0.85, release below 0.70), with each role's demand floored on the
+throughput one replica sustained when last saturated. Closed-form is deliberate. At $2–4/hr per GPU, an operator asked to
 trust a scaling decision needs to be able to *read* it.
 
 **Models compete for the same GPUs.** This is the part most autoscalers do not
@@ -118,7 +126,7 @@ choice.
 
 **SLA-target-driven scaling.** Scaling on *"will this batch tier miss its
 deadline"* rather than *"is queue depth > N"* is not built. We have named policy
-tiers, which is a coarse approximation. Nobody upstream has solved this either.
+tiers, which is a coarse approximation. llm-d does not have it yet either.
 
 **Maintenance pre-scaling and failure replacement.** Not built.
 
@@ -155,7 +163,8 @@ Method, guards and the full result:
 [measured.md](../well-lit-paths/warm-pool-bridge/measured.md). The warm pool is
 opt-in and off by default: [warm-pool-bridge](../well-lit-paths/warm-pool-bridge/).
 What the project does and does not cover, property by property against the llm-d
-problem space: [the project proposal](../project-proposal.md).
+problem space: [the project proposal](../project-proposal.md). The one-page case,
+with costs and maturity per part: [Why llm-scaling-manager](../why.md).
 
 Caveats, in the open: four scale-up events per arm, one run each, no confidence
 intervals. The direction is consistent across all four rises; the margins are one

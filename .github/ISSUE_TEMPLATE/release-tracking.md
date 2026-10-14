@@ -102,7 +102,7 @@ This document defines the process for releasing llm-scaling-manager.
 
 1. Pushing the tag triggers CI action to build and publish the llm-scaling-manager image (`ghcr.io/ev-shindin/llm-scaling-manager`) to the [ghcr registry].
 1. Verify the [CI release workflow] completed successfully before proceeding.
-1. Test the steps in the tagged quickstart guide after the PR merges.
+1. Run the [install guide](https://github.com/ev-shindin/llm-scaling-manager/tree/main/docs/guides/install-in-namespace) against the tagged image.
 
 ### Create the release!
 
@@ -153,7 +153,7 @@ Use the following steps to announce the release.
    ### Container Images
    * Controller: ghcr.io/ev-shindin/llm-scaling-manager:${VERSION}
 
-      ### Release Notes
+   ### Release Notes
    For more details, please see the GitHub release notes: https://github.com/ev-shindin/llm-scaling-manager/releases/tag/${VERSION}
    EOF
    ```

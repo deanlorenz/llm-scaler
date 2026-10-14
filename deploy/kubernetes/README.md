@@ -1,670 +1,92 @@
-# Workload-Variant-Autoscaler Kubernetes Deployment Script
+# Installing on Kubernetes
 
-Automated deployment script for the scaling manager, llm-d infrastructure, Prometheus, and HPA on Kubernetes clusters.
-
-> **Note**: This guide covers Kubernetes-specific deployment details. For a complete overview of deployment methods and the full configuration reference, see the [main deployment guide](../).
-
-## Table of Contents
-
-- [Overview](#overview)
-- [Prerequisites](#prerequisites)
-- [Quick Start](#quick-start)
-- [Configuration Options](#configuration-options)
-- [Usage Examples](#usage-examples)
-- [Script Features](#script-features)
-- [What Gets Deployed](#what-gets-deployed)
-- [Troubleshooting](#troubleshooting)
-- [Post-Deployment](#post-deployment)
-- [Cleanup](#cleanup)
-- [Advanced Usage](#advanced-usage)
-- [Performance Tuning](#performance-tuning)
-
-## Overview
-
-This script automates the complete deployment process on kubernetes cluster including:
-
-- **kube-prometheus-stack** (Prometheus + Grafana + Alertmanager)
-- **Workload-Variant-Autoscaler** controller with metrics validation
-- **llm-d infrastructure** (Gateway, Scheduler, vLLM)
-- **KEDA** for external metrics (ScaledObject-driven)
-- **ServiceMonitors** for metrics collection
-- All required ConfigMaps and RBAC
-
-> **Note:** the `VariantAutoscaling` CRD is gone and no longer shipped. A workload is
-> managed by creating a **KEDA ScaledObject** whose trigger names the scaling manager's external
-> scaler — the call IS the registration. KEDA owns the HPA behind it.
-
-
-## Prerequisites
-
-### Required Tools
-
-- **kubectl** - Kubernetes CLI
-- **helm** (v3+) - Package manager
-- **git** - Version control
-- **jq** - JSON processor (patches the shipped ConfigMaps)
-- **yq** (v4+) - YAML processor (filters the rendered overlay; go-yq, not the python jq wrapper)
-
-### Required Access
-
-- Kubernetes cluster with **cluster-admin** privileges (or sufficient RBAC)
-- `kubectl` configured and connected to your cluster
-- GPUs available in the cluster (or use emulator mode for demo)
-
-### Required Tokens
-
-- **HuggingFace token** for model downloads (required for llm-d deployment)
-
-## Quick Start
-
-### 1. Set Environment Variables
+What `make deploy-wva` does on a Kubernetes cluster, and the Kubernetes-only
+settings. For the full walk-through start with a guide —
+[install in a namespace](../../docs/guides/install-in-namespace/) is the common
+case — and for every variable see the
+[configuration reference](../../docs/reference/configuration.md).
 
 ```bash
-# Required: Set your HuggingFace token
-export HF_TOKEN="your-hf-token-here"
-
-# Optional
-export WVA_IMAGE_REPO="ghcr.io/ev-shindin/llm-scaling-manager"   # Default
-export WVA_IMAGE_TAG="main"                                               # Default
-export WVA_NS="workload-variant-autoscaler-system"                        # Default
-export WVA_SCOPE="cluster"                                                # cluster | namespace
+export NAMESPACE=<namespace where llm-d already serves>
+make check-prereqs ENVIRONMENT=kubernetes     # read-only
+make deploy-wva   ENVIRONMENT=kubernetes
 ```
 
-### 2. Run the Deployment Script using Make
+`ENVIRONMENT` is detected when unset (a cluster that serves `route.openshift.io`
+is OpenShift; anything else is Kubernetes). `make deploy-wva-on-k8s` is the same
+install with `ENVIRONMENT=kubernetes` fixed.
+
+## Before you start
+
+- **llm-d is already running in `NAMESPACE`.** The scaling manager does not deploy
+  models or llm-d; it scales what is there. The preflight refuses to install
+  when it cannot find model-server and EPP metrics (`SKIP_CHECKS=true` overrides).
+- **KEDA is installed on the cluster.** On Kubernetes the installer does **not**
+  install KEDA unless you ask: set `KEDA_HELM_INSTALL=true` to have it install
+  KEDA with Helm into `keda-system`.
+- **Tools:** `kubectl`, `helm`, `git`, `jq`, and go-yq v4.
+- **Rights:** a namespace install splits in two. A cluster admin runs
+  `make setup-prereqs` once per namespace; the namespace owner then runs
+  `make deploy-wva`, which installs only the controller when the admin half is
+  already there. See [cluster-admin setup](../../docs/guides/admin-cluster-setup/).
+
+## What the install creates
+
+| Component | Where | Notes |
+| --- | --- | --- |
+| Controller `wva-controller-manager` | `NAMESPACE` (namespace scope, the default); `workload-variant-autoscaler-system` with `SCOPE=cluster` | 1 replica (`WVA_REPLICAS`); extras are leader-election standbys |
+| External scaler Service `wva-external-scaler` | same namespace, port 9090 (gRPC) | what every ScaledObject trigger names |
+| ConfigMaps `wva-manager-config`, `wva-scaling-policy-config` | same namespace | |
+| kube-prometheus-stack | `workload-variant-autoscaler-monitoring` | only when the cluster has no Prometheus of its own; otherwise the existing one is used (`PROMETHEUS_URL`, `PROMETHEUS_FORCE_INSTALL`) |
+| Grafana dashboard ConfigMap | the monitoring namespace | `DEPLOY_OPERATIONAL_DASHBOARD=false` to skip |
+| KEDA | `keda-system` | only with `KEDA_HELM_INSTALL=true` |
+| LeaderWorkerSet CRD | `lws-system` | only with `DEPLOY_LWS=true` |
+
+It creates **no ScaledObject** unless asked. Without one, nothing is scaled: the
+scaling manager learns a workload exists only when KEDA calls it about one.
 
 ```bash
-make deploy-wva-on-k8s
+make scaledobjects-plan      # lists your model servers; applies nothing
+make scaledobjects-apply
 ```
 
-That's it! The script will:
-
-1. Check prerequisites
-2. Detect GPU types
-3. Create namespaces  (by default)
-4. Deploy Prometheus stack  (by default)
-5. Deploy the scaling manager controller  (by default)
-6. Deploy llm-d infrastructure  (by default)
-7. Deploy KEDA for external metrics (by default)
-8. Create the KEDA ScaledObject for the vLLM deployment (by default) — KEDA
-   creates the HPA behind it
-10. Verify the deployment process
-11. Print a summary with next steps
-
-## Configuration Options
-
-For a complete list of environment variables and configuration options, see the [Configuration Reference](../../docs/reference/configuration.md) in the main deployment guide.
-
-**Key environment variables for Kubernetes**:
-
-```bash
-export HF_TOKEN="hf_xxxxx"                  # Required: HuggingFace token
-export MODEL_ID="unsloth/Meta-Llama-3.1-8B" # Model to deploy
-export ACCELERATOR_TYPE="H100"              # GPU type
-export WVA_IMAGE_TAG="main"                 # controller version
-# HPA stabilization: configure on the HPA resource directly, not install.sh
-
-# Performance tuning (optional; set in llm-d ModelService manifest)
-export ACCELERATOR_TYPE="A100"              # GPU type (auto-detected)
-```
-
-**Deployment flags** (`deploy/install.sh`) — VA/HPA are managed separately; llm-d is deployed via `deploy/install-epp.sh` or the [llm-d guides](https://github.com/llm-d/llm-d/tree/main/guides/optimized-baseline):
-
-```bash
-export DEPLOY_PROMETHEUS=true               # Deploy kube-prometheus-stack
-export DEPLOY_OPERATIONAL_DASHBOARD=true    # Deploy kube-prometheus-stack-grafana
-export DEPLOY_WVA=true                      # Deploy the scaling manager controller
-export SCALER_BACKEND=keda                  # Deploy KEDA for external metrics
-```
-
-## Usage Examples
-
-### Example 1: Full Deployment (Default)
-
-```bash
-export HF_TOKEN="hf_xxxxx"
-make deploy-wva-on-k8s
-```
-
-### Example 2: A different namespace
-
-```bash
-export HF_TOKEN="hf_xxxxx"
-export WVA_NS="my-inference"     # where the controller runs
-make deploy-wva-on-k8s
-```
-
-The model is not chosen here. The scaling manager does not deploy models — it scales the ones
-already running, and it learns which ones from the ScaledObjects that name its
-external scaler. Deploy models with the llm-d guides, then see
+or pass `WVA_DEFAULT_SO=plan|edit|true` to the install. See
 [Default ScaledObjects](../../docs/reference/configuration.md#default-scaledobjects).
 
-### Example 3: CI-style stack (the scaling manager + llm-d)
+## Settings you are most likely to change
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `NAMESPACE` | none (required in namespace scope) | where llm-d serves; the controller is installed there too |
+| `SCOPE` | `namespace` | `cluster` installs one controller for every namespace (work in progress) |
+| `IMG` | `ghcr.io/ev-shindin/llm-scaling-manager:main` | controller image |
+| `PROMETHEUS_URL` | detected | the Prometheus the controller reads |
+| `KEDA_HELM_INSTALL` | `false` | install KEDA with Helm |
+| `WVA_LIMITER` | `none` | `none` leaves scaling unbounded except by `maxReplicaCount`; see [bounding GPU usage](../../docs/guides/admin-gpu-bounding/) |
+| `SKIP_CHECKS` | `false` | skip the preflight |
+
+`deploy/install.sh --help` prints every variable the installer reads.
+
+## Check it
 
 ```bash
-export HF_TOKEN="hf_xxxxx"
-make deploy-wva-on-k8s   # install.sh (the scaling manager + monitoring + scaler + LWS)
+make verify-deployment
+kubectl get scaledobject,hpa -n "$NAMESPACE"
+kubectl logs -n "$NAMESPACE" deploy/wva-controller-manager -f
 ```
 
-### Example 4: Deploy only the scaling manager + Prometheus (llm-d already deployed)
+KEDA creates and owns the HPA behind each ScaledObject (`keda-hpa-<name>`); do
+not edit it by hand. The scaling manager's decision reaches KEDA over gRPC, so
+it does not appear on the external-metrics API; read it from Prometheus as
+`wva_desired_replicas`. For a workload that does not scale, see
+[troubleshooting](../../docs/reference/troubleshooting.md).
+
+## Remove it
 
 ```bash
-export DEPLOY_WVA=true
-export DEPLOY_PROMETHEUS=true
-export DEPLOY_OPERATIONAL_DASHBOARD=true  # Grafana and operational dashboard
-export SCALER_BACKEND=none                # Skip scaler backend (KEDA already installed)
-make deploy-wva-on-k8s
+make undeploy-wva ENVIRONMENT=kubernetes
 ```
 
-### Example 5: Demo Mode (No GPUs Available)
-
-```bash
-export HF_TOKEN="hf_xxxxx"
-export USE_VLLM_EMULATOR=true
-make deploy-wva-on-k8s
-```
-
-### Example 6: Parameter Estimation Setup
-
-```bash
-export HF_TOKEN="hf_xxxxx"
-export MODEL_ID="unsloth/Meta-Llama-3.1-8B"
-make deploy-wva-on-k8s
-```
-
-### Example 7: Deploy with Different llm-scaling-manager Image
-
-```bash
-export HF_TOKEN="hf_xxxxx"
-export IMG="ghcr.io/yourorg/llm-scaling-manager:latest"
-make deploy-wva-on-k8s
-```
-
-## Script Features
-
-### Automatic Detection
-
-- **GPU Type**: Automatically detects A100, H100, L40S, etc.
-- **GPU Availability**: Detects if GPUs are visible to Kubernetes
-- **Emulator Mode**: Auto-enables if no GPUs detected
-- **Kubernetes Connection**: Verifies cluster connectivity
-
-### Error Handling
-
-- Exits on any error (`set -e`)
-- Validates prerequisites before starting
-- Checks for required environment variables
-- Provides detailed error messages
-
-### Progress Tracking
-
-- Color-coded output (INFO, SUCCESS, WARNING, ERROR)
-- Step-by-step progress indicators
-- Detailed logging of each operation
-
-### Deployment Verification
-
-After deployment, the script verifies:
-
-- The scaling manager controller is running
-- Prometheus stack is deployed
-- llm-d infrastructure is deployed
-- the ScaledObject exists and KEDA created its HPA
-- ServiceMonitors are created
-
-### Summary Report
-
-Displays:
-
-- All deployed components
-- Resource names and namespaces
-- Next steps and useful commands
-- Troubleshooting tips
-
-## What Gets Deployed
-
-### 1. kube-prometheus-stack
-
-- **Namespace**: `workload-variant-autoscaler-monitoring`
-- **Components**:
-  - Prometheus server (HTTPS/TLS enabled)
-  - Grafana dashboards
-  - Alertmanager
-  - kube-state-metrics
-  - node-exporter
-  - ServiceMonitor CRDs and operators
-
-### 2. Workload-Variant-Autoscaler
-
-- **Namespace**: `workload-variant-autoscaler-system`
-- **Components**:
-  - Controller manager deployment (2 replicas)
-  - Service for metrics (port 8443)
-  - ServiceMonitor for the scaling manager metrics
-  - ConfigMaps (service classes, accelerator costs, config)
-  - RBAC (roles, bindings, service account)
-
-### 3. llm-d Infrastructure
-
-- **Namespace**: `llm-d-optimized-baseline` (default)
-- **Components**:
-  - Gateway
-  - Inference Scheduler (GAIE/EPP)
-  - vLLM deployment with model
-  - Service for vLLM (port 8200)
-  - ServiceMonitor for vLLM metrics
-  - HuggingFace token secret
-
-### 4. KEDA
-
-- **Namespace**: `keda-system`
-- **Components**:
-  - KEDA operator and metrics-apiserver deployments
-  - External metrics API (`external.metrics.k8s.io`)
-  - Prometheus scaler triggers driven by ScaledObjects
-
-### 5. Autoscaling Resources
-
-- **ScaledObject**: the KEDA object whose trigger registers the workload with the scaling manager
-- **HPA**: created and owned by KEDA for each ScaledObject — not authored by hand
-- **ServiceMonitors**: Metrics collection configuration
-
-## Troubleshooting
-
-### Script Fails: Missing Prerequisites
-
-```bash
-[ERROR] Missing required tools: helm kubectl
-```
-
-**Solution**: Install missing tools:
-
-```bash
-# Using package manager
-sudo apt-get install helm kubectl  # Debian/Ubuntu
-brew install helm kubectl          # macOS
-
-# Or download from official sites
-```
-
-### Script Fails: Cannot Connect to Kubernetes
-
-```bash
-[ERROR] Cannot connect to Kubernetes cluster
-```
-
-**Solution**: Check kubectl configuration:
-
-```bash
-kubectl cluster-info
-kubectl get nodes
-```
-
-### Script Fails: HF_TOKEN Not Set
-
-**Solution**: Set your HuggingFace token:
-
-```bash
-export HF_TOKEN="hf_xxxxxxxxxxxxxxxxxxxxx"
-```
-
-### GPUs Not Visible to Kubernetes
-
-**Symptoms**:
-
-```bash
-[WARNING] No GPUs visible to Kubernetes
-vLLM pods: Pending
-Reason: Insufficient nvidia.com/gpu
-```
-
-**Diagnosis**:
-
-```bash
-# Check if GPUs exist on host
-nvidia-smi
-
-# Check if GPUs visible to Kubernetes
-kubectl get nodes -o json | jq '.items[].status.allocatable["nvidia.com/gpu"]'
-```
-
-**Solution**:
-
-**Option 1**: Install NVIDIA GPU Operator
-
-```bash
-helm repo add nvidia https://helm.ngc.nvidia.com/nvidia
-helm repo update
-helm install --wait --generate-name \
-  -n gpu-operator --create-namespace \
-  nvidia/gpu-operator
-```
-
-**Option 2**: Install NVIDIA Device Plugin
-
-```bash
-kubectl create -f https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.14.0/nvidia-device-plugin.yml
-```
-
-**Option 3**: Use Emulator Mode (for demo/testing)
-
-```bash
-export USE_VLLM_EMULATOR=true
-make deploy-wva-on-k8s
-```
-
-**Note for KIND clusters**: KIND (Kubernetes IN Docker) requires special configuration for GPU passthrough. Consider using a real Kubernetes cluster or emulator mode.
-
-### Metrics Not Available After Deployment
-
-**Wait 1-2 minutes** for:
-
-- vLLM pods to start
-- Prometheus to scrape metrics
-- KEDA to read them via its Prometheus scaler
-- External metrics API to update
-
-**Check metrics availability**:
-
-```bash
-# Check the scaling manager logs
-kubectl logs -n workload-variant-autoscaler-system -l control-plane=controller-manager --tail=50
-
-# Look for metrics validation
-kubectl logs -n workload-variant-autoscaler-system -l control-plane=controller-manager | grep "Metrics unavailable"
-
-# Check if vLLM is exposing metrics
-kubectl port-forward -n llm-d-optimized-baseline <vllm-pod> 8200:8200
-curl http://localhost:8200/metrics | grep vllm:
-```
-
-### vLLM Pods Not Starting
-
-**Check logs**:
-
-```bash
-kubectl logs -n llm-d-optimized-baseline deployment/optimized-baseline-nvidia-gpu-vllm-decode
-kubectl describe pod -n llm-d-optimized-baseline -l llm-d.ai/model
-```
-
-**Common issues**:
-
-- Insufficient GPU resources
-- HuggingFace token invalid/expired
-- Model download timeout
-- Image pull errors
-
-### ServiceMonitor Not Scraping
-
-**Verify ServiceMonitor exists**:
-
-```bash
-kubectl get servicemonitor -n workload-variant-autoscaler-monitoring
-```
-
-**Check Prometheus targets**:
-
-```bash
-kubectl port-forward -n workload-variant-autoscaler-monitoring svc/kube-prometheus-stack-prometheus 9090:9090
-# Visit http://localhost:9090/targets
-```
-
-**Verify service selector matches**:
-
-```bash
-kubectl get servicemonitor vllm-servicemonitor -n workload-variant-autoscaler-monitoring -o yaml
-kubectl get svc -n llm-d-optimized-baseline --show-labels
-```
-
-## Post-Deployment
-
-### Verify Deployment
-
-```bash
-# Check all namespaces
-kubectl get pods -n workload-variant-autoscaler-system
-kubectl get pods -n workload-variant-autoscaler-monitoring
-kubectl get pods -n llm-d-optimized-baseline
-
-# Check the managed workloads and what KEDA is doing with the scaling manager's decision
-kubectl get scaledobject -n llm-d-optimized-baseline
-kubectl get hpa -n llm-d-optimized-baseline
-
-# Check HPA
-kubectl get hpa -n llm-d-optimized-baseline
-
-# Check external metrics
-# The scaling manager's decision reaches KEDA over gRPC, not through the external-metrics API.
-# Read it from Prometheus, or from the HPA KEDA drives:
-kubectl port-forward -n <monitoring-namespace> svc/kube-prometheus-stack-prometheus 9090:9090
-#   then query:  wva_desired_replicas
-kubectl describe hpa -n <namespace> keda-hpa-<scaledobject-name>
-```
-
-### Monitor llm-scaling-manager Logs (See Metrics Validation!)
-
-```bash
-# Watch live logs
-kubectl logs -n workload-variant-autoscaler-system \
-  -l control-plane=controller-manager \
-  -f
-
-# Filter for metrics validation messages
-kubectl logs -n workload-variant-autoscaler-system \
-  -l control-plane=controller-manager | \
-  jq 'select(.reason=="MetricsMissing" or .reason=="MetricsFound")'
-```
-
-### Access Prometheus UI
-
-```bash
-kubectl port-forward -n workload-variant-autoscaler-monitoring \
-  svc/kube-prometheus-stack-prometheus 9090:9090
-
-# Visit http://localhost:9090
-# Query: vllm:request_success_total
-# Query: wva_desired_replicas
-```
-
-### Access Grafana Dashboards
-
-```bash
-# Get admin password
-kubectl get secret -n workload-variant-autoscaler-monitoring \
-  kube-prometheus-stack-grafana \
-  -o jsonpath="{.data.admin-password}" | base64 -d ; echo
-
-# Port forward
-kubectl port-forward -n workload-variant-autoscaler-monitoring \
-  svc/kube-prometheus-stack-grafana 3000:80
-
-# Visit http://localhost:3000
-# Username: admin
-# Password: <from above command>
-```
-
-### Generate Load (Test Autoscaling)
-
-If using real vLLM with model loaded:
-
-```bash
-# Deploy guidellm load generator
-kubectl apply -f - <<EOF
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: guidellm-load-test
-  namespace: llm-d-optimized-baseline
-spec:
-  template:
-    spec:
-      containers:
-      - name: guidellm
-        image: quay.io/vishakharamani/guidellm:latest
-        args:
-          - benchmark
-          - --target=http://optimized-baseline-inference-gateway:80
-          - --rate-type=constant
-          - --rate=10
-          - --max-seconds=300
-          - --model=unsloth/Meta-Llama-3.1-8B
-      restartPolicy: Never
-EOF
-```
-
-Watch the autoscaling:
-
-```bash
-# Watch the ScaledObject
-kubectl get scaledobject -n llm-d-optimized-baseline -w
-
-# Watch HPA scaling
-kubectl get hpa -n llm-d-optimized-baseline -w
-
-# Watch pod count change
-kubectl get pods -n llm-d-optimized-baseline -w
-```
-
-## Cleanup
-
-To remove all deployed components:
-
-```bash
-make undeploy-wva
-```
-
-Or manually:
-
-```bash
-# Delete llm-d infrastructure (v0.7.0+)
-helm uninstall optimized-baseline -n llm-d-optimized-baseline
-kubectl delete -k llm-d/guides/optimized-baseline/modelserver/gpu/vllm/base -n llm-d-optimized-baseline
-
-# Delete KEDA
-helm uninstall keda -n keda-system
-
-# Delete kube-prometheus-stack
-helm uninstall kube-prometheus-stack -n workload-variant-autoscaler-monitoring
-
-# Delete the scaling manager
-cd /path/to/llm-scaling-manager
-kubectl delete -k config/overlays/cluster-scoped/kubernetes
-
-# Delete namespaces
-kubectl delete namespace llm-d-optimized-baseline
-kubectl delete namespace workload-variant-autoscaler-system
-kubectl delete namespace workload-variant-autoscaler-monitoring
-```
-
-## Metrics Health
-
-The scaling manager validates that vLLM metrics exist before it optimizes a workload, and degrades
-gracefully rather than guessing when they do not.
-
-There is no custom resource to read this from — the scaling manager writes none. Metrics health is
-observable in two places:
-
-```bash
-# The metrics the scaling manager publishes about its own collection
-kubectl port-forward -n workload-variant-autoscaler-system svc/wva-metrics 8443:8443
-# then look for wva_metrics_freshness_status and wva_metrics_collection_errors_total
-
-# The controller's own account of what it found
-kubectl logs -n workload-variant-autoscaler-system   -l app.kubernetes.io/name=workload-variant-autoscaler | grep -i "metrics"
-```
-
-A workload with no usable metrics is not scaled, and the reason is logged. The
-most common cause is a ServiceMonitor that does not select the model-server pods,
-so the series never reach Prometheus at all.
-
-### Understanding Metrics Validation Logs
-
-When metrics are unavailable, you'll see structured logs like:
-
-```json
-{
-  "level": "WARN",
-  "ts": "2025-10-13T18:36:52.670Z",
-  "msg": "Metrics unavailable, skipping optimization for variant",
-  "variant": "optimized-baseline-nvidia-gpu-vllm-decode",
-  "namespace": "llm-d-optimized-baseline",
-  "model": "meta-llama/Llama-3.1-8B",
-  "reason": "MetricsMissing",
-  "troubleshooting": "Check: (1) ServiceMonitor exists in monitoring namespace..."
-}
-```
-
-This means:
-
-- The scaling manager is working correctly
-- Detecting no metrics available
-- Skipping optimization gracefully
-- Providing troubleshooting steps
-- Will retry automatically
-
-## Advanced Usage
-
-### Custom Prometheus Configuration
-
-```bash
-# Use existing Prometheus
-export DEPLOY_PROMETHEUS=false
-export PROMETHEUS_URL="https://my-prometheus.monitoring.svc:9090"
-make deploy-wva-on-k8s
-```
-
-### Deploy to Specific Cluster Context
-
-```bash
-kubectl config use-context my-cluster
-make deploy-wva-on-k8s
-```
-
-### Debug Mode
-
-```bash
-# Enable debug logging in the scaling manager
-kubectl set env deployment/controller-manager \
-  LOG_LEVEL=debug \
-  -n workload-variant-autoscaler-system
-```
-
-### Update llm-scaling-manager Image
-
-```bash
-export IMG="ghcr.io/yourorg/llm-scaling-manager:custom-tag"
-export DEPLOY_PROMETHEUS=false
-make deploy-wva-on-k8s   # the scaling manager + monitoring + scaler + LWS; llm-d is managed separately
-```
-
-## Performance Tuning
-
-### Optimization Interval
-
-```bash
-# Change how often the scaling manager runs optimization (default: 15s, minimum 1s, unit required)
-kubectl patch configmap wva-manager-config \
-  -n workload-variant-autoscaler-system \
-  --type merge \
-  -p '{"data":{"GLOBAL_OPT_INTERVAL":"30s"}}'
-
-# Restart the scaling manager to apply
-kubectl rollout restart deployment controller-manager \
-  -n workload-variant-autoscaler-system
-```
-
-### HPA Tuning
-
-```bash
-# Faster scale-up
-kubectl patch hpa vllm-deployment-hpa -n llm-d-optimized-baseline --type merge -p '
-{
-  "spec": {
-    "behavior": {
-      "scaleUp": {
-        "stabilizationWindowSeconds": 0,
-        "policies": [{"type": "Pods", "value": 10, "periodSeconds": 15}]
-      }
-    }
-  }
-}'
-```
+Pass the same `NAMESPACE` and `SCOPE` you installed with. Prometheus, KEDA and
+the EPP are left in place unless `UNDEPLOY_SHARED=true`; namespaces are kept
+unless `DELETE_NAMESPACES=true`.
