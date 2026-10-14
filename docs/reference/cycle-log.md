@@ -1,7 +1,8 @@
 # llm-scaling-manager Cycle Log
 
 The scaling manager saturation engine emits two structured INFO log lines per reconcile
-cycle per model. These lines are the primary observability instrument for
+cycle per model, and a third, `throughput-demand-floor`, on a cycle where the
+throughput floor changes a role's demand. These lines are the primary observability instrument for
 understanding what the analyzer and optimizer computed without enabling
 verbose debug logging.
 
@@ -82,6 +83,38 @@ replica targets.
 | `decisions[].tgt` | Target replica count chosen by the optimizer |
 | `decisions[].action` | `scale-up`, `scale-down`, or `no-change` |
 | `decisions[].atMax` | `true` when the target sits on the variant's `maxReplicaCount`; absent otherwise. Same as `wva_variant_at_max_replicas` |
+
+### `throughput-demand-floor`
+
+Emitted per role during the analysis, so before that model's
+`analyzer-result`, and only on a cycle where the
+throughput floor changed that role's demand: the arrival rate divided by the
+throughput one replica sustains (`saturatedThroughput`) asked for more than
+occupancy measured, or a standing queue was priced as a backlog. Most cycles
+of a fleet that is coping have none.
+
+| Field | Description |
+|---|---|
+| `role` | `prefill`, `decode` or `both` |
+| `demandBeforeFloor`, `flooredTo` | the role's demand before and after the floor, in the same unit as `analyzer-result`'s `demand` |
+| `arrivalRate`, `saturatedThroughput`, `replicasImplied` | the requests per second arriving, what one replica completes at saturation, and the replicas their ratio asks for |
+| `backlogRequests`, `projectedBacklog`, `drainSeconds` | the queue measured, the queue the floor priced over the next replica's start time, and how fast it is to be drained |
+| `heldAtFleet` | `true` when the floor was capped at what the current fleet supplies at the scale-up threshold: it may hold the fleet up, but not order more replicas |
+| `heldWhy` | why it was capped; see below. Empty when `heldAtFleet` is `false` |
+| `mayOrder`, `borrowedOnly` | whether the role's rate is one the floor may order on, and whether every rate it has is borrowed rather than measured by the role's own replicas |
+
+**`heldWhy` values.** Each says which reading the floor would not order on:
+
+| Value | Meaning | What changes it |
+| --- | --- | --- |
+| `single-sample` | the role's own throughput window holds one reading | more saturated readings |
+| `borrowed` | the only rate is borrowed from a neighbouring output-length bucket | a reading in the bucket the traffic is in now |
+| `borrowed-line` | the rate is derived from an inter-token-latency line another variant fitted (shared because `enableLearnedStateReuse` is on) | the variant fitting its own line |
+| `shape-change` | the traffic's shape changed and the rate was measured on the old one | the new shape settling |
+| `borrowed+shape-change`, `borrowed-line+shape-change` | both at once; the borrow is named first because it is the one that does not go away on its own | as above, both |
+
+A borrowed figure never orders replicas here: it can hold demand up while the
+role measures itself, never raise it above what the fleet already supplies.
 
 ---
 
