@@ -1,6 +1,6 @@
 # Learned state across a restart: a snapshot
 
-**Status:** proposed, and being built in the same PR. Supersedes Part 3 and
+**Status:** proposed, and being built in the same PR; closes issue #137. Supersedes Part 3 and
 Appendix A of the restart proposal in PR #116
 (`docs/proposals/learned-state-across-restarts.md` on that branch), which
 chose to rebuild the latency line from the engines' Prometheus series and
@@ -61,6 +61,8 @@ one JSON document:
 {
   "version": 1,
   "writtenAt": "2026-10-14T18:00:00Z",
+  "writer": {"namespace": "<controller namespace>", "identity": "<leader-election identity>"},
+  "config": {"<ns>/<variant>": "<configuration fingerprint>"},
   "k2":         {"<key>": {"values": [4000, 4100], "lastUsed": "...", "lastWritten": "..."}},
   "throughput": {"<key>": {"values": [3.2], "lastUsed": "...", "lastWritten": "...", "sampledAt": "...", "lastRead": 3.2}},
   "itlBaseline":  {"<key>": 0.0118},
@@ -82,31 +84,47 @@ full strength.
 
 ### Rules
 
-1. **Every entry keeps its own clocks, and a restore applies the horizons to
+1. **Every entry names the engine configuration it was learned under, and a
+   restore rejects one whose variant now runs a different configuration**
+   (issue #137). The identity is the configuration fingerprint of #126, read
+   for the entry's variant from the scale target, so the check runs when the
+   variant is first analysed after the restart rather than at load. An entry
+   whose variant cannot be named -- a key from before per-variant keys (#132)
+   -- cannot be checked, and is not restored.
+2. **Every entry keeps its own clocks, and a restore applies the horizons to
    them.** A k2 window last read eight days ago is past `BucketRetention` and
    is not restored. A variant last seen two days ago is past `VariantTimeout`
    and its per-variant figures are not restored. A restore never makes a
    figure younger than it was.
-2. **Restore once, on the first cycle the controller acts.** Only the leader
+3. **Restore once, on the first cycle the controller acts.** Only the leader
    optimizes, so a standby never restores; on a leader change, the new
    leader restores what the old one last wrote.
-3. **Only the leader writes, at most once per minute,** in one
+4. **Only the leader writes, at most once per minute,** in one
    read-modify-write with the ConfigMap's `resourceVersion` as the
-   concurrency check, and only when the state changed.
-4. **Deleting the ConfigMap flushes.** A controller that has read the
+   concurrency check, and only when the state changed. The document records
+   its writer: the controller's namespace and leader-election identity. A
+   restore rejects a document with no writer, or one written from another
+   namespace -- which a ConfigMap in this controller's namespace can only be
+   if it was copied or edited by hand. That is a check against accident, not
+   against an attacker who can already write the controller's ConfigMaps.
+5. **Deleting the ConfigMap flushes.** A controller that has read the
    ConfigMap and then finds it gone forgets what it restored rather than
    writing it straight back. The next write creates it from what has been
    learned since.
-5. **A read that fails is not an empty store.** NotFound means nothing was
+6. **A read that fails is not an empty store.** NotFound means nothing was
    stored. Forbidden, or any other error, is logged as an error and restores
    nothing, and the controller keeps retrying rather than overwriting what
    it could not read.
-6. **Bounded.** The document stays under 900 KiB, below the API server's 1 MiB
+7. **Bounded.** The document stays under 900 KiB, below the API server's 1 MiB
    object limit. When it would exceed that, the least recently used entries
    are dropped first and the log names how many.
-7. **Versioned.** A document of another version is ignored, not guessed at.
-8. **Off by default** (`LEARNED_STATE_SNAPSHOT=true` turns it on), until a
+8. **Versioned.** A document of another version is ignored, not guessed at.
+9. **Off by default** (`LEARNED_STATE_SNAPSHOT=true` turns it on), until a
    cluster run has shown a restart keeping k2 and the replica count.
+10. **Tested** for the four cases issue #137 names: a restart (state comes
+   back), a leader hand-off (the new leader restores what the old one
+   wrote), a changed engine configuration (the entry is rejected) and an
+   aged entry (not restored).
 
 ### Keys that change shape
 
