@@ -36,7 +36,7 @@ for fn in wva_check_kueue_namespace_read wva_kueue_source_configured check_permi
     }
 done
 
-EXPECT_CASES=13
+EXPECT_CASES=18
 RAN=0
 FAILED=0
 
@@ -60,6 +60,10 @@ POLICY_WITH_KUEUE='limiters:
 # REFUSED, WARNED or OK, then the can-i question asked ("-" for none).
 #   STUB_CANI      yes | no | unknown (impersonation denied)
 #   STUB_POLICY    the cluster policy default entry in wva-policy ("" = none)
+#   STUB_OWN       the default entry of the controller's own ConfigMap ("" = none)
+#   STUB_LABEL     the managed Namespace's policy-namespace label, or FORBIDDEN
+#   STUB_LABELLED_POLICY  the default entry in the namespace that label names
+#   STUB_CM_FORBIDDEN     namespaces whose policy ConfigMap read is Forbidden
 run_check() {
     : > "$WORK/kubectl.log"
     : > "$WORK/out"
@@ -78,10 +82,24 @@ run_check() {
                         *) echo 'Error from server (Forbidden): users "x" is forbidden: cannot impersonate'; return 1 ;;
                     esac
                     ;;
-                "get configmap -n wva-policy -o name")
-                    [ -z "${STUB_POLICY:-}" ] || echo configmap/scaling-policy-config ;;
-                "get configmap scaling-policy-config -n wva-policy "*)
-                    printf '%s\n' "${STUB_POLICY:-}" ;;
+                "get namespace "*)
+                    case "${STUB_LABEL:-}" in
+                        FORBIDDEN) echo 'Error from server (Forbidden): namespaces is forbidden'; return 1 ;;
+                        *) printf '%s' "${STUB_LABEL:-}" ;;
+                    esac
+                    ;;
+                "get configmap wva-scaling-policy-config -n "*)
+                    local cns="${5:-}" body=""
+                    case " ${STUB_CM_FORBIDDEN:-} " in
+                        *" $cns "*) echo 'Error from server (Forbidden): configmaps is forbidden'; return 1 ;;
+                    esac
+                    case "$cns" in
+                        wva-policy) body="${STUB_POLICY:-}" ;;
+                        "${STUB_LABEL:-none}") body="${STUB_LABELLED_POLICY:-}" ;;
+                        "$WVA_NS") body="${STUB_OWN:-}" ;;
+                    esac
+                    [ -n "$body" ] || { echo 'Error from server (NotFound): configmaps "wva-scaling-policy-config" not found'; return 1; }
+                    printf '%s\n' "$body" ;;
                 *) return 0 ;;
             esac
         }
@@ -122,6 +140,24 @@ check 'a cluster policy with kueue.enabled is a configured source' \
 check 'a cluster policy without kueue is not' \
     'OK -' \
     "$(run_check WVA_LIMITER=none WVA_QUOTA_KUEUE=false "STUB_POLICY='limiters: [{name: g, type: gpu-inventory}]'")"
+
+# The policy the controller ACTUALLY reads, resolved the way the controller
+# resolves it (pl_policy_resolution), and Forbidden is unknown, not none.
+check 'its own ConfigMap with kueue is a source: an upgrade need not repeat WVA_QUOTA_KUEUE' \
+    'REFUSED get namespaces/wva-ctl' \
+    "$(run_check WVA_LIMITER=none WVA_QUOTA_KUEUE=false "STUB_OWN='$POLICY_WITH_KUEUE'")"
+check 'admin-owned (manages another namespace): kueue only in wva-policy, which it never reads -> nothing asked' \
+    'OK -' \
+    "$(run_check WVA_LIMITER=none WVA_QUOTA_KUEUE=false WVA_WATCH_NS=tenant-a "STUB_POLICY='$POLICY_WITH_KUEUE'")"
+check 'a label-named policy namespace with kueue is a source' \
+    'REFUSED get namespaces/wva-ctl' \
+    "$(run_check WVA_LIMITER=none WVA_QUOTA_KUEUE=false STUB_LABEL=platform-policy "STUB_LABELLED_POLICY='$POLICY_WITH_KUEUE'")"
+check 'an unreadable policy is unknown: warned, not silently no source' \
+    'WARNED get namespaces/wva-ctl' \
+    "$(run_check WVA_LIMITER=none WVA_QUOTA_KUEUE=false STUB_CM_FORBIDDEN=wva-policy)"
+check 'unknown source, read already granted -> quiet' \
+    'OK get namespaces/wva-ctl' \
+    "$(run_check WVA_LIMITER=none WVA_QUOTA_KUEUE=false STUB_CM_FORBIDDEN=wva-policy STUB_CANI=yes)"
 
 # Wired into check_permissions -- which --check and the install both run --
 # BEFORE the tenant early-return, or the namespace-scoped default never reaches it.

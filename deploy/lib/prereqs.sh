@@ -570,28 +570,71 @@ wva_model_server_count() {
 }
 
 # wva_kueue_source_configured echoes where a Kueue quota source is configured
-# for this controller, or nothing: this install's WVA_LIMITER=quota with
-# WVA_QUOTA_KUEUE=true, or a cluster policy (the label-named policy namespace,
-# else wva-policy) whose `default` declares a limiter with kueue.enabled. A
-# policy this caller cannot read is not a configured source -- the controller
-# reports its own Forbidden for that.
+# for this controller, nothing when there is none, or `unknown <what>` when a
+# policy it may read could not be read.
+#
+# Sources, in the controller's own terms (internal/controller/policy_namespace.go,
+# mirrored by pl_policy_resolution):
+#
+#   this install's WVA_LIMITER=quota with WVA_QUOTA_KUEUE=true;
+#   the controller's OWN ConfigMap in WVA_NS -- always: it is the only source
+#     of an admin-owned controller (cluster scope, or WVA_WATCH_NS naming
+#     another namespace), and the fallback of a self-managed one. An upgrade
+#     that does not repeat WVA_LIMITER/WVA_QUOTA_KUEUE still runs with the
+#     kueue block an earlier install wrote there;
+#   for a SELF-MANAGED controller only (it manages the namespace it runs in),
+#     the namespace its managed Namespace's wva.llmd.ai/policy-namespace label
+#     names, else wva-policy. An admin-owned controller never reads wva-policy,
+#     so a kueue block there must not refuse it.
+#
+# A Forbidden or otherwise unreadable read is "unknown", never "no source": the
+# caller warns rather than staying silent about a source it could not see.
 wva_kueue_source_configured() {
     if [ "${WVA_LIMITER:-none}" = "quota" ] && [ "${WVA_QUOTA_KUEUE:-false}" = "true" ]; then
         echo "WVA_QUOTA_KUEUE=true"
         return 0
     fi
-    local policy_ns cm n
-    policy_ns="$(wva_cluster_policy_ns 2>/dev/null || true)"
-    case "$policy_ns" in ""|unknown) policy_ns=wva-policy ;; esac
-    cm="$(kubectl get configmap -n "$policy_ns" -o name 2>/dev/null \
-        | grep -E "configmap/(wva-)?scaling-policy-config$" | head -1 | cut -d/ -f2 || true)"
-    [ -n "$cm" ] || return 0
-    n="$(kubectl get configmap "$cm" -n "$policy_ns" -o jsonpath='{.data.default}' 2>/dev/null \
-        | yq '[.limiters[]? | select(.kueue.enabled == true)] | length' 2>/dev/null || true)"
-    case "$n" in
-        ''|0|null) return 0 ;;
-    esac
-    echo "the cluster policy in $policy_ns/$cm"
+    local managed cands policy_ns out rc unread="" ns n
+    managed="${WVA_WATCH_NS:-$WVA_NS}"
+    cands="$WVA_NS"
+    if [ "$(wva_install_scope)" = "namespace" ] && [ "$managed" = "$WVA_NS" ]; then
+        rc=0
+        out="$(kubectl get namespace "$managed" \
+            -o jsonpath='{.metadata.labels.wva\.llmd\.ai/policy-namespace}' 2>&1)" || rc=$?
+        if [ "$rc" -ne 0 ]; then
+            case "$out" in
+                *NotFound*|*"not found"*) policy_ns=wva-policy ;;
+                *)
+                    # The label may point anywhere; wva-policy is still worth a look.
+                    unread="$unread Namespace $managed (its policy-namespace label);"
+                    policy_ns=wva-policy ;;
+            esac
+        else
+            policy_ns="${out:-wva-policy}"
+        fi
+        case " $cands " in *" $policy_ns "*) ;; *) cands="$policy_ns $cands" ;; esac
+    fi
+    for ns in $cands; do
+        rc=0
+        out="$(kubectl get configmap wva-scaling-policy-config -n "$ns" -o jsonpath='{.data.default}' 2>&1)" || rc=$?
+        if [ "$rc" -ne 0 ]; then
+            case "$out" in
+                *NotFound*|*"not found"*) ;;
+                *) unread="$unread $ns/wva-scaling-policy-config;" ;;
+            esac
+            continue
+        fi
+        n="$(printf '%s\n' "$out" | yq '[.limiters[]? | select(.kueue.enabled == true)] | length' 2>/dev/null)" || n=""
+        case "$n" in
+            0|null) ;;
+            '') unread="$unread $ns/wva-scaling-policy-config (does not parse);" ;;
+            *) echo "the policy in $ns/wva-scaling-policy-config"; return 0 ;;
+        esac
+    done
+    if [ -n "$unread" ]; then
+        echo "unknown${unread%;}"
+    fi
+    return 0
 }
 
 # wva_check_kueue_namespace_read refuses a controller-only install whose
@@ -610,6 +653,10 @@ wva_kueue_source_configured() {
 # namespace-scoped role grants the managed namespace by name (resourceNames), so
 # that is the name asked about; cluster scope reads LocalQueues everywhere and
 # needs the unrestricted read.
+#
+# A source that could not be read (wva_kueue_source_configured: unknown) is
+# asked about too, but never refused on: a missing read is then a WARNING that
+# names what could not be read.
 wva_check_kueue_namespace_read() {
     [ "${INSTALL_PHASE:-all}" = "wva" ] || return 0
     local source sa managed target answer
@@ -623,6 +670,14 @@ wva_check_kueue_namespace_read() {
         target="namespaces"
     fi
     answer="$(can_i_as "$sa" get "$target")"
+    case "$source" in
+        unknown*)
+            [ "$answer" != yes ] || return 0
+            log_warning "Could not tell whether a Kueue quota source is configured for this controller: not readable with your permissions:${source#unknown}."
+            log_warning "  If one is, $sa needs get on $target ($([ "$answer" = no ] && echo 'it does NOT have it' || echo 'could not verify: checking needs impersonate permission')), or the namespace is bounded at nothing and does not scale up. A cluster admin re-running 'NAMESPACE=$WVA_NS make setup-prereqs' grants it."
+            return 0
+            ;;
+    esac
     case "$answer" in
         yes)
             log_success "The controller can get $target, which the Kueue quota source ($source) needs"

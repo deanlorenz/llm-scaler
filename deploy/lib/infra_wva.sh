@@ -183,35 +183,46 @@ EOF
 }
 
 # wva_resolve_scaler_keda_namespace sets WVA_SCALER_KEDA_NS to the namespace the
-# external-scaler NetworkPolicy admits to :9090 -- the one KEDA's operator runs in.
+# external-scaler NetworkPolicy admits to :9090 -- the one KEDA's operator runs in
+# -- when that namespace is KNOWN, and to empty when it would only be a guess.
 #
 # A wrong answer either fails CLOSED (KEDA refused, its ScaledObjects go
 # not-Ready and nothing scales) or OPEN (a tenant namespace reaches :9090 and
 # can rewrite any workload's trigger metadata). So each source is one a tenant
 # cannot plant, and an unreadable source is "unknown", never "not there":
 #
-#   1. KEDA_NAMESPACE, when the caller set it -- or when this install is the one
-#      putting KEDA there (KEDA_HELM_INSTALL=true; KEDA is installed AFTER the
-#      controller, so it cannot be found yet).
+#   1. KEDA_NAMESPACE, when the caller set it.
 #   2. The namespace of the Service behind the v1beta1.external.metrics.k8s.io
 #      APIService, when that Service is KEDA's. Cluster-scoped and admin-written.
-#   3. The namespace an EXISTING wva-external-scaler NetworkPolicy in WVA_NS
+#   3. KEDA_NAMESPACE again, when KEDA_HELM_INSTALL=true AND that APIService is
+#      NotFound: this install is the one putting KEDA there (deploy_keda runs
+#      after the controller, so it cannot be found yet). With the APIService
+#      present, KEDA already runs somewhere and deploy_keda will not install a
+#      second one, so KEDA_NAMESPACE says nothing about where it is.
+#   4. The namespace an EXISTING wva-external-scaler NetworkPolicy in WVA_NS
 #      already admits. An admin who corrected the policy by hand must not have
-#      the correction undone by the next tenant upgrade, which cannot see KEDA.
-#   4. Where a Deployment named keda-operator runs, if exactly one namespace has
-#      one. Not a Pod label: any tenant can label a Pod app=keda-operator.
-#   5. The platform default, openshift-keda or keda-system, with a WARNING that
-#      names KEDA_NAMESPACE -- the guess is the one step here that can be wrong.
+#      the correction undone by the next upgrade.
 #
-# Sets a variable rather than echoing: log_error is an exit, and an exit inside
-# `$( )` would end only the subshell.
+# Nothing else. A Deployment named keda-operator is not a source: any tenant can
+# create one, and it then either pointed the policy at their namespace (opening
+# :9090 to them) or made the answer "ambiguous" and stopped the install. Nor is
+# the platform default: on a cluster whose KEDA runs in `keda`, a policy written
+# for keda-system refuses KEDA and nothing scales. When no source answers, no
+# policy is written (wva_append_scaler_networkpolicy_patch) and the caller is
+# told, loudly, how to close the port.
+#
+# Sets variables rather than echoing: log_error is an exit, and an exit inside
+# `$( )` would end only the subshell. WVA_SCALER_KEDA_UNREAD names the sources
+# that could not be read, for the warning.
 wva_resolve_scaler_keda_namespace() {
-    if [ "${KEDA_NAMESPACE_EXPLICIT:-false}" = "true" ] || [ "${KEDA_HELM_INSTALL:-false}" = "true" ]; then
+    WVA_SCALER_KEDA_NS=""
+    WVA_SCALER_KEDA_UNREAD=""
+    if [ "${KEDA_NAMESPACE_EXPLICIT:-false}" = "true" ]; then
         WVA_SCALER_KEDA_NS="$KEDA_NAMESPACE"
         log_info "External scaler NetworkPolicy admits KEDA from $WVA_SCALER_KEDA_NS (KEDA_NAMESPACE)"
         return 0
     fi
-    local found rc unread="" count
+    local found rc
 
     rc=0
     found="$(wva_keda_apiservice_ns)" || rc=$?
@@ -221,7 +232,14 @@ wva_resolve_scaler_keda_namespace() {
             log_info "External scaler NetworkPolicy admits KEDA from $WVA_SCALER_KEDA_NS (the namespace serving the external-metrics APIService)"
             return 0
             ;;
-        2) unread="$unread the external-metrics APIService;" ;;
+        1)
+            if [ "${KEDA_HELM_INSTALL:-false}" = "true" ]; then
+                WVA_SCALER_KEDA_NS="$KEDA_NAMESPACE"
+                log_info "External scaler NetworkPolicy admits KEDA from $WVA_SCALER_KEDA_NS (KEDA_HELM_INSTALL=true installs KEDA there; no external-metrics APIService exists yet)"
+                return 0
+            fi
+            ;;
+        2) WVA_SCALER_KEDA_UNREAD="$WVA_SCALER_KEDA_UNREAD the external-metrics APIService;" ;;
         3) log_info "The external-metrics APIService is served by $found, which is not KEDA; looking further." ;;
     esac
 
@@ -233,73 +251,75 @@ wva_resolve_scaler_keda_namespace() {
             log_info "External scaler NetworkPolicy admits KEDA from $WVA_SCALER_KEDA_NS (kept from the policy already in $WVA_NS; set KEDA_NAMESPACE to change it)"
             return 0
             ;;
-        2) unread="$unread NetworkPolicy wva-external-scaler in $WVA_NS;" ;;
+        2) WVA_SCALER_KEDA_UNREAD="$WVA_SCALER_KEDA_UNREAD NetworkPolicy wva-external-scaler in $WVA_NS;" ;;
     esac
+    return 0
+}
 
-    rc=0
-    found="$(wva_keda_operator_namespaces)" || rc=$?
-    [ "$rc" = 2 ] && unread="$unread Deployments cluster-wide;"
-    count=0
-    [ "$rc" = 0 ] && count="$(printf '%s\n' "$found" | wc -l | tr -d ' ')"
-    case "$count" in
-        0) ;;
-        1)
-            WVA_SCALER_KEDA_NS="$found"
-            log_info "External scaler NetworkPolicy admits KEDA from $WVA_SCALER_KEDA_NS (where the keda-operator Deployment runs)"
-            return 0
-            ;;
-        *)
-            log_error "A Deployment named keda-operator runs in more than one namespace ($(printf '%s' "$found" | tr '\n' ' ')), so which one may call the external scaler is ambiguous. Set KEDA_NAMESPACE to the one that serves this cluster's ScaledObjects, or WVA_SCALER_NETWORKPOLICY=false to install without the policy."
-            ;;
-    esac
-
-    if [ "${ENVIRONMENT:-}" = "openshift" ]; then
-        WVA_SCALER_KEDA_NS=openshift-keda
-    else
-        WVA_SCALER_KEDA_NS="$KEDA_NAMESPACE"
+# wva_warn_scaler_port_open says, loudly, that the external scaler's :9090 has
+# no NetworkPolicy, and how to close it. $1 is why.
+wva_warn_scaler_port_open() {
+    local why="$1" phase_cmd
+    phase_cmd="KEDA_NAMESPACE=<namespace KEDA runs in> NAMESPACE=$WVA_NS make setup-prereqs"
+    log_warning "=================================================================="
+    log_warning "NO NetworkPolicy for the external scaler: :9090 is reachable by ANY Pod"
+    log_warning "  that can reach the controller. Any of them can rewrite another"
+    log_warning "  workload's trigger metadata and read every scaling decision."
+    log_warning "  Why: $why"
+    if [ -n "${WVA_SCALER_KEDA_UNREAD:-}" ]; then
+        log_warning "  Not readable with your permissions, so unknown rather than absent:${WVA_SCALER_KEDA_UNREAD%;}."
     fi
-    log_warning "External scaler NetworkPolicy admits KEDA from $WVA_SCALER_KEDA_NS -- a GUESS (the platform default): no source this install trusts said where KEDA runs."
-    if [ -n "$unread" ]; then
-        log_warning "  Not readable with your permissions, so unknown rather than absent:${unread%;}."
-    fi
-    log_warning "  If KEDA runs anywhere else it is refused and nothing scales. Set KEDA_NAMESPACE=<namespace> to say where."
+    log_warning "  To close it, as a cluster admin:"
+    log_warning "    $phase_cmd"
+    log_warning "  or serve the scaler over mutual TLS (--external-scaler-cert-path and"
+    log_warning "  --external-scaler-client-ca; see docs/reference/configuration.md)."
+    log_warning "=================================================================="
 }
 
 # wva_append_scaler_networkpolicy_patch points the external-scaler NetworkPolicy
-# at KEDA's namespace, or removes it with WVA_SCALER_NETWORKPOLICY=false. It
-# appends to the `patches:` list of the throw-away overlay's kustomization.yaml,
-# which must already exist.
+# at KEDA's namespace, or leaves it out of the render. It appends to the
+# `patches:` list of the throw-away overlay's kustomization.yaml, which must
+# already exist.
+#
+# The policy is an ADMIN-phase object (WVA_PREREQ_NAMED): only the phase that
+# can read where KEDA runs writes it. The controller phase neither applies it
+# nor resolves anything for it, because a tenant cannot see KEDA and every
+# answer it reached was a guess. Left out of the render, rather than written
+# from a guess, when no trusted source says where KEDA is
+# (wva_resolve_scaler_keda_namespace); WVA_SCALER_NETWORKPOLICY=false leaves it
+# out on purpose. WVA_SCALER_NP_APPLIED records which, for the summary.
 #
 # The `test` op makes a change to the shipped rule's shape fail the build rather
 # than rewrite whatever now sits at that path.
 wva_append_scaler_networkpolicy_patch() {
     local kustomization="$1"
+    WVA_SCALER_NP_APPLIED=false
     case "${WVA_SCALER_NETWORKPOLICY:-true}" in
         false)
             log_warning "WVA_SCALER_NETWORKPOLICY=false: the external scaler (:9090) is reachable from every Pod that can reach the controller. Any of them can rewrite another workload's trigger metadata and read every scaling decision."
             # An apply never prunes, so an upgrade that opts out has to remove
             # the policy an earlier install left, or opting out does nothing.
-            if [ "${WVA_APPLY_SCOPE:-all}" != "prereqs" ]; then
-                kubectl delete networkpolicy wva-external-scaler -n "$WVA_NS" --ignore-not-found >/dev/null 2>&1 || true
-            fi
-            cat >> "$kustomization" <<PATCH
-- patch: |-
-    \$patch: delete
-    apiVersion: networking.k8s.io/v1
-    kind: NetworkPolicy
-    metadata:
-      name: wva-external-scaler
-  target:
-    group: networking.k8s.io
-    kind: NetworkPolicy
-    name: wva-external-scaler
-PATCH
+            # Only the phases that own the policy remove it.
+            case "${WVA_APPLY_SCOPE:-all}" in
+                all|prereqs)
+                    kubectl delete networkpolicy wva-external-scaler -n "$WVA_NS" --ignore-not-found >/dev/null 2>&1 || true ;;
+            esac
+            wva_append_scaler_networkpolicy_delete "$kustomization"
             return 0
             ;;
         true) ;;
         *) log_error "WVA_SCALER_NETWORKPOLICY must be true or false (got '${WVA_SCALER_NETWORKPOLICY}')" ;;
     esac
+    # The controller phase filters the policy out of what it applies; nothing to
+    # decide, and nothing it could decide correctly.
+    [ "${WVA_APPLY_SCOPE:-all}" != "controller" ] || return 0
     wva_resolve_scaler_keda_namespace
+    if [ -z "$WVA_SCALER_KEDA_NS" ]; then
+        wva_warn_scaler_port_open "no source this install trusts says where KEDA runs (KEDA_NAMESPACE unset, no KEDA-served external-metrics APIService, no existing policy to keep), and a policy written from a guess refuses KEDA wherever the guess is wrong."
+        wva_append_scaler_networkpolicy_delete "$kustomization"
+        return 0
+    fi
+    WVA_SCALER_NP_APPLIED=true
     cat >> "$kustomization" <<PATCH
 - patch: |-
     - op: test
@@ -308,6 +328,23 @@ PATCH
     - op: replace
       path: /spec/ingress/1/from/0/namespaceSelector/matchLabels/kubernetes.io~1metadata.name
       value: "${WVA_SCALER_KEDA_NS}"
+  target:
+    group: networking.k8s.io
+    kind: NetworkPolicy
+    name: wva-external-scaler
+PATCH
+}
+
+# wva_append_scaler_networkpolicy_delete removes the external-scaler
+# NetworkPolicy from the render of kustomization $1.
+wva_append_scaler_networkpolicy_delete() {
+    cat >> "$1" <<PATCH
+- patch: |-
+    \$patch: delete
+    apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: wva-external-scaler
   target:
     group: networking.k8s.io
     kind: NetworkPolicy
@@ -408,21 +445,26 @@ wva_prometheus_url_namespace() {
 # config/base names kube-prometheus-stack-prometheus in
 # workload-variant-autoscaler-monitoring: the Prometheus this installer deploys,
 # in its default namespace. On a cluster with its own Prometheus that subject is
-# an account that does not exist. Only two answers are trusted:
+# an account that does not exist. Only three answers are trusted, each one the
+# caller CHOSE:
 #
 #   PROMETHEUS_SA=<ns>/<name>  an explicit answer
-#   a Prometheus CR in the namespace PROMETHEUS_URL addresses -- the one the
-#                              controller will actually be read by -- when the
-#                              CRs there agree on ONE spec.serviceAccountName
+#   PROMETHEUS_URL, set by the caller (PROMETHEUS_URL_EXPLICIT), addressing a
+#                              namespace whose Prometheus CRs agree on ONE
+#                              non-default spec.serviceAccountName
+#   the kube-prometheus-stack THIS install deploys: DEPLOY_PROMETHEUS=true and
+#                              PROMETHEUS_URL addressing MONITORING_NAMESPACE --
+#                              its account is known, not read
 #
-# and, for the kube-prometheus-stack this install deploys, its known account
-# when PROMETHEUS_URL addresses MONITORING_NAMESPACE before the CR exists.
-#
-# Never "the first Prometheus CR on the cluster": that is whichever sorts first,
-# on a shared cluster usually someone else's. Never `default`, which is what a
-# CR with no serviceAccountName runs as: every Pod in that namespace without its
-# own account would be granted. PROMETHEUS_URL must be resolved before this is
-# asked (wva_resolve_prometheus_url), or the namespace is the default's.
+# Never from an AUTO-DETECTED URL. wva_detect_prometheus_url returns the first
+# prometheus-operated Service it finds in the order the API lists Prometheus
+# CRs; on a shared cluster that is whichever namespace sorts first, usually
+# someone else's, and the grant then went to an account in a namespace nobody
+# named. Never "the first Prometheus CR on the cluster" for the same reason, and
+# never `default`, which is what a CR with no serviceAccountName runs as: every
+# Pod in that namespace without its own account would be granted. PROMETHEUS_URL
+# must be resolved before this is asked (wva_resolve_prometheus_url), or the
+# namespace is the default's.
 wva_prometheus_scraper_sa() {
     if [ -n "${PROMETHEUS_SA:-}" ]; then
         case "$PROMETHEUS_SA" in
@@ -434,18 +476,20 @@ wva_prometheus_scraper_sa() {
     local url_ns ns sa sas=""
     url_ns="$(wva_prometheus_url_namespace "${PROMETHEUS_URL:-}")"
     [ -n "$url_ns" ] || return 0
-    while read -r ns sa; do
-        [ "$ns" = "$url_ns" ] || continue
-        sas="$sas ${sa:-default}"
-    done < <(kubectl get prometheuses.monitoring.coreos.com -n "$url_ns" \
-        -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.spec.serviceAccountName}{"\n"}{end}' 2>/dev/null || true)
-    sas="$(printf '%s\n' $sas | sort -u)"
-    if [ -n "$sas" ]; then
-        # One account, and not `default`; anything else is not an answer.
-        [ "$(printf '%s\n' "$sas" | wc -l | tr -d ' ')" = 1 ] || return 0
-        [ "$sas" != default ] || return 0
-        printf '%s %s\n' "$url_ns" "$sas"
-        return 0
+    if [ -n "${PROMETHEUS_URL_EXPLICIT:-}" ]; then
+        while read -r ns sa; do
+            [ "$ns" = "$url_ns" ] || continue
+            sas="$sas ${sa:-default}"
+        done < <(kubectl get prometheuses.monitoring.coreos.com -n "$url_ns" \
+            -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.spec.serviceAccountName}{"\n"}{end}' 2>/dev/null || true)
+        sas="$(printf '%s\n' $sas | sort -u)"
+        if [ -n "$sas" ]; then
+            # One account, and not `default`; anything else is not an answer.
+            [ "$(printf '%s\n' "$sas" | wc -l | tr -d ' ')" = 1 ] || return 0
+            [ "$sas" != default ] || return 0
+            printf '%s %s\n' "$url_ns" "$sas"
+            return 0
+        fi
     fi
     if [ "${DEPLOY_PROMETHEUS:-true}" = "true" ] \
         && [ "$url_ns" = "${MONITORING_NAMESPACE:-workload-variant-autoscaler-monitoring}" ]; then
@@ -710,7 +754,7 @@ EOF
         if [ -n "$scraper" ]; then
             log_info "Controller /metrics readable by ServiceAccount ${scraper#* } in ${scraper%% *}"
         else
-            log_warning "No Prometheus is granted the controller's /metrics: neither PROMETHEUS_SA nor a Prometheus CR with one non-default serviceAccountName in the namespace ${PROMETHEUS_URL:-PROMETHEUS_URL} addresses says which account scrapes it."
+            log_warning "No Prometheus is granted the controller's /metrics: nothing you set says which account scrapes it. Only PROMETHEUS_SA, a PROMETHEUS_URL you passed (its namespace's Prometheus CR, one non-default serviceAccountName), or the kube-prometheus-stack this install deploys are trusted -- never a Prometheus found by detection (${PROMETHEUS_URL:-none})."
             log_warning "  Pass PROMETHEUS_SA=<namespace>/<serviceaccount> to grant it, or bind ClusterRole wva-metrics-reader-$(wva_ns_suffix "$WVA_NS") yourself."
             # An earlier install may have left the binding with the shipped
             # subject, or one this rule no longer trusts.

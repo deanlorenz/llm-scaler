@@ -315,15 +315,24 @@ else
     ok "the restart is announced before anything is changed"
 fi
 
+# A self-managed controller that could already see wva-policy, and started
+# after it existed, is STILL restarted: it does not watch wva-policy
+# (cmd/main.go caches ConfigMaps in its managed namespace only), so the policy
+# this command writes reaches it only at its next start. Not restarting it was
+# how "the limiter is now in force" was printed for a controller still running
+# on the policy it read at startup. The reason given is that one, not a
+# pretended inability to read.
 case_begin
 CANI_NS=yes NS_LABEL='' EXISTING_NS='wva-policy' NS_GET_ERR='' MANAGED_GET_ERR='' DEPLOY_NS_LIST='tenant-a' \
     run enable_physical_limiter
 if [ "$RC" -ne 0 ]; then
     fail "enable_physical_limiter failed under the stub: $OUT"
-elif grep -q '^CALL\[rollout restart' "$LOG"; then
-    fail "a controller that could already see wva-policy, and started after it existed, was restarted for nothing"
+elif ! grep -q '^CALL\[rollout restart' "$LOG"; then
+    fail "a self-managed controller that does not watch wva-policy was not restarted, so it never reads the policy just written: $OUT"
+elif ! grep -q 'tenant-a/wva-controller-manager .*WILL BE RESTARTED: it does not watch wva-policy' <<<"$OUT"; then
+    fail "the restart of a controller that could already read wva-policy does not say why (it does not watch it): $OUT"
 else
-    ok "a controller that could already see wva-policy is not restarted"
+    ok "a controller that could already see wva-policy is restarted, because it does not watch it"
 fi
 
 # ...and one whose newest Running pod predates wva-policy still is.

@@ -78,12 +78,27 @@ deploys() {
   case " ${KFAIL_NS:-} " in *" $ns "*) exit 1 ;; esac
   if [ -f "$KDEPLOYS/$ns.json" ]; then cat "$KDEPLOYS/$ns.json"; else printf '{"items":[]}'; fi
 }
+# Failure injection, each matched against the joined arguments or the applied
+# document: KFAIL_APPLY (a substring of the document), KFAIL_PATCH (a substring
+# of the arguments),
+# KCM_NOTFOUND / KCM_FORBIDDEN (every policy ConfigMap read).
 case "$1" in
   auth) exit 0 ;;
+  create)
+    printf 'apiVersion: v1\nkind: %s\nmetadata:\n  name: %s\n' "$2" "$3"
+    exit 0 ;;
+  label) cat; exit 0 ;;
+  patch)
+    [ -n "${KFAIL_PATCH:-}" ] && [ "$*" != "${*#*"$KFAIL_PATCH"}" ] && { echo "Error from server (Forbidden): cannot patch" >&2; exit 1; }
+    exit 0 ;;
   apply)
     doc="$(cat)"
+    [ -n "${KFAIL_APPLY:-}" ] && [ "$doc" != "${doc#*"$KFAIL_APPLY"}" ] && { echo "Error from server (Forbidden): cannot apply" >&2; exit 1; }
     printf '%s\n' "$doc" | yq -N e 'select(.kind == "ClusterRoleBinding" or .kind == "RoleBinding") | .kind + " " + .metadata.name + " " + .subjects[0].namespace + "/" + .subjects[0].name' - \
       | sed 's/^/GRANT /' >> "$KGRANTS"
+    # The Namespace rule of every ClusterRole: its resourceNames, or * for none.
+    printf '%s\n' "$doc" | yq -N e 'select(.kind == "ClusterRole") | .metadata.name + " " + ([.rules[] | select(.resources[] == "namespaces") | ((.resourceNames // ["*"]) | join(","))] | join(";"))' - \
+      | sed 's/^/NSRULE /' >> "$KGRANTS"
     exit 0 ;;
   get)
     case "$2" in
@@ -105,7 +120,10 @@ case "$1" in
             fi ;;
         esac ;;
       # A namespace with <ns>.policy has that policy; every other one a plain one.
-      configmap) if [ -f "$KDEPLOYS/$ns.policy" ]; then cat "$KDEPLOYS/$ns.policy"; else printf 'scaleUpThreshold: 0.85'; fi ;;
+      configmap)
+        [ -z "${KCM_FORBIDDEN:-}" ] || { echo 'Error from server (Forbidden): configmaps is forbidden' >&2; exit 1; }
+        [ -z "${KCM_NOTFOUND:-}" ] || { echo 'Error from server (NotFound): configmaps "wva-scaling-policy-config" not found' >&2; exit 1; }
+        if [ -f "$KDEPLOYS/$ns.policy" ]; then cat "$KDEPLOYS/$ns.policy"; else printf 'scaleUpThreshold: 0.85'; fi ;;
       *) : ;;
     esac ;;
   *) : ;;
@@ -305,16 +323,20 @@ else
     ok "WVA_LIMITER_TARGETS does not turn an impostor into a controller, and limits the grant to the named namespaces"
 fi
 
-# A named namespace with no controller yet gets the controller account and
-# nothing else -- the install about to happen there runs as it.
+# A named namespace with no controller is SKIPPED: nothing granted, nothing
+# written there, and it is listed as NOT bound, with the reason.
 case_begin
 run_enable WVA_LIMITER_TARGETS=tenant-new
 if [ "$RC" -ne 0 ]; then
-    fail "enable with a not-yet-installed target failed: $(tail -15 "$WORK/out")"
-elif ! granted_to tenant-new/wva-controller-manager; then
-    fail "a named namespace with no controller yet was not prepared for one: $(cat "$GRANTS")"
+    fail "enable with a target holding no controller failed: $(tail -15 "$WORK/out")"
+elif any_grant_in tenant-new; then
+    fail "a named namespace with no controller was granted: $(grep tenant-new "$GRANTS")"
+elif grep -q 'CALL\[\(patch\|apply\|create\) .*-n tenant-new' "$CALLS"; then
+    fail "a policy was written into a named namespace with no controller: $(grep tenant-new "$CALLS")"
+elif ! sed -n '/NOT bound/,$p' "$WORK/out" | grep -q 'tenant-new: no controller found'; then
+    fail "the namespace with no controller is not listed as NOT bound, 'no controller found': $(tail -15 "$WORK/out")"
 else
-    ok "a named namespace with no controller yet is granted only the controller account"
+    ok "a named namespace with no controller is skipped, written nothing, and listed as NOT bound"
 fi
 
 # A namespace the admin NAMED relaxes the image check -- a controller built
@@ -394,8 +416,97 @@ else
     ok "disable names the limiter it left in a skipped controller's policy, and does not write it"
 fi
 
+# ---------------------------------------------------------------------------
+# The Kueue reader: enable must narrow `get namespaces` exactly as the installer
+# does (wva_append_kueue_reader_scope_patch), or every enable re-widens it.
 case_begin
-CASES_EXPECTED=19
+run_enable WVA_LIMITER_TYPE=quota WVA_QUOTA_KUEUE=true WVA_QUOTAS=H200=8
+g_rule="$(grep "^NSRULE wva-kueue-reader-role-$(wva_ns_suffix tenant-g) " "$GRANTS" | tail -1)"
+a_rule="$(grep "^NSRULE wva-kueue-reader-role-$(wva_ns_suffix tenant-a) " "$GRANTS" | tail -1)"
+if [ "$RC" -ne 0 ]; then
+    fail "enable with a Kueue quota failed: $(tail -15 "$WORK/out")"
+elif [ "${g_rule##* }" != "tenant-g" ]; then
+    fail "the namespace-scoped controller in tenant-g got Kueue get namespaces on [${g_rule##* }], want only tenant-g"
+elif [ "${a_rule##* }" != "*" ]; then
+    fail "the cluster-scoped controller in tenant-a got a narrowed Kueue namespace read [${a_rule##* }]; it reads LocalQueues everywhere"
+else
+    ok "the Kueue reader's get namespaces names the managed namespace (namespace scope) and nothing else"
+fi
+
+# A namespace-scoped controller does not watch a policy namespace outside the
+# one it manages, so it sees the new policy only after a restart -- which
+# enable must do, after the write. A cluster-scoped one reloads live.
+case_begin
+run_enable
+restart_g="$(grep -n 'CALL\[rollout restart deploy wva-controller-manager -n tenant-g\]' "$CALLS" | head -1 | cut -d: -f1)"
+write_wp="$(grep -n 'CALL\[patch configmap wva-scaling-policy-config -n wva-policy' "$CALLS" | head -1 | cut -d: -f1)"
+if [ -z "$restart_g" ]; then
+    fail "the self-managed controller in tenant-g, which reads wva-policy only at startup, was not restarted: $(grep -i restart "$WORK/out")"
+elif [ -z "$write_wp" ] || [ "$restart_g" -lt "$write_wp" ]; then
+    fail "tenant-g was restarted before the policy it must read was written (restart at $restart_g, write at ${write_wp:-never})"
+elif grep -q 'CALL\[rollout restart deploy wva-controller-manager -n tenant-a\]' "$CALLS"; then
+    fail "the cluster-scoped controller in tenant-a was restarted; it reloads policy live"
+elif grep -q 'applies live' "$WORK/out"; then
+    fail "enable still says the policy applies live to every controller: $(grep 'applies live' "$WORK/out")"
+else
+    ok "namespace-scoped controllers are restarted after the write; a cluster-scoped one is not"
+fi
+
+# Messages may not claim more than the code did. Each failure below must end
+# the command non-zero, name the step, and never print "in force".
+# expect_failed <label> <substring the error must carry>
+expect_failed() {
+    if [ "$RC" -eq 0 ]; then
+        fail "$1: exited 0: $(tail -6 "$WORK/out")"
+    elif grep -q 'in force\|Removed the limiter' "$WORK/out"; then
+        fail "$1: still announced success: $(grep 'in force\|Removed the limiter' "$WORK/out")"
+    elif ! grep -q "$2" "$WORK/out"; then
+        fail "$1: the error does not name the step ('$2'): $(tail -4 "$WORK/out")"
+    else
+        ok "$1"
+    fi
+}
+case_begin
+run_enable KFAIL_APPLY=wva-node-reader-role
+expect_failed "a node-read grant that fails stops enable" "node read"
+case_begin
+run_enable 'KFAIL_APPLY=kind: namespace'
+expect_failed "a policy Namespace that cannot be created stops enable" "could not create Namespace wva-policy"
+case_begin
+run_enable KCM_NOTFOUND=1 KFAIL_APPLY=wva-scaling-policy-config
+expect_failed "a policy ConfigMap create that fails mid-pipeline stops enable" "could not create the policy ConfigMap"
+case_begin
+PL_FN=disable_physical_limiter run_enable KCM_FORBIDDEN=1
+expect_failed "disable: a Forbidden policy read is an error, not nothing to disable" "not a NotFound"
+case_begin
+printf 'limiters:\n- type: gpu-inventory\n  name: physical\n' > "$DEPLOYS/tenant-a.policy"
+PL_FN=disable_physical_limiter run_enable WVA_LIMITER_TARGETS=tenant-a KFAIL_PATCH=null
+rm -f "$DEPLOYS/tenant-a.policy"
+expect_failed "disable: a failed removal of the default entry is an error, not Removed" "could not remove the limiter from tenant-a"
+
+# The well-known namespace is fixed in the controller: WVA_POLICY_NS cannot move
+# it, so naming another is refused, and `wellknown` always means wva-policy.
+case_begin
+run_enable WVA_POLICY_NS=platform-policy
+if [ "$RC" -eq 0 ]; then
+    fail "WVA_POLICY_NS=platform-policy was accepted: a policy no controller reads: $(grep -i 'policy in' "$WORK/out")"
+elif [ -s "$GRANTS" ]; then
+    fail "WVA_POLICY_NS=platform-policy granted before refusing: $(cat "$GRANTS")"
+elif ! grep -q 'wva.llmd.ai/policy-namespace' "$WORK/out"; then
+    fail "the WVA_POLICY_NS refusal does not say to label the namespace instead: $(tail -4 "$WORK/out")"
+else
+    ok "WVA_POLICY_NS naming another namespace is refused before anything changes"
+fi
+case_begin
+got="$(PATH="$STUB:$PATH" KCALLS="$WORK/calls" KDEPLOYS="$DEPLOYS" WVA_POLICY_NS=platform-policy pl_policy_resolution tenant-g tenant-g)"
+if [ "$got" = "wva-policy wellknown" ]; then
+    ok "an unlabelled self-managed controller resolves to wva-policy whatever WVA_POLICY_NS says"
+else
+    fail "pl_policy_resolution for an unlabelled self-managed controller gave '$got', want 'wva-policy wellknown'"
+fi
+
+case_begin
+CASES_EXPECTED=28
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. Update CASES_EXPECTED deliberately."
 else

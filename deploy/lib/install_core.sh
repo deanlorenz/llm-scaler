@@ -78,6 +78,22 @@ wva_missing_prereqs() {
                 echo "OPTIONAL $kind/$name|the controller-status ConfigMap (the policy version and modes the controller is running with)"
                 continue ;;
         esac
+        # Two more that an admin phase may leave out ON PURPOSE, so a phase that
+        # sees differently (a tenant cannot read KEDA's APIService or a
+        # Prometheus CR) must not call them missing -- that reported them
+        # MISSING on every --check and refused INSTALL_PHASE=wva forever:
+        #   NetworkPolicy wva-external-scaler  written only when the admin
+        #       phase KNOWS where KEDA runs (wva_resolve_scaler_keda_namespace).
+        #   wva-metrics-reader-rolebinding-*  written only for a Prometheus
+        #       account the install was told about (wva_prometheus_scraper_sa).
+        case "$kind/$name" in
+            NetworkPolicy/wva-external-scaler)
+                echo "OPTIONAL $kind/$name|admitting only KEDA to the external scaler (:9090); without it the port is reachable by any Pod (KEDA_NAMESPACE=<ns> make setup-prereqs writes it)"
+                continue ;;
+            ClusterRoleBinding/wva-metrics-reader-rolebinding-*)
+                echo "OPTIONAL $kind/$name|Prometheus reading the controller's /metrics (PROMETHEUS_SA=<ns>/<sa> make setup-prereqs grants it)"
+                continue ;;
+        esac
         case "$kind" in
             Namespace|ClusterRole|ClusterRoleBinding|CustomResourceDefinition)
                 echo "$kind/$name" ;;
@@ -185,8 +201,17 @@ print_prereqs_summary() {
     echo "=========================================="
     echo ""
     echo "  Created (or already present):"
-    wva_rendered_prereq_objects | sed 's|^\([^ ]*\) |    \1/|'
+    # Not the NetworkPolicy when this phase left it out: it was not created, and
+    # the warning above says why and how to add it.
+    wva_rendered_prereq_objects \
+        | if [ "${WVA_SCALER_NP_APPLIED:-true}" = "false" ]; then grep -vx 'NetworkPolicy wva-external-scaler' || true; else cat; fi \
+        | sed 's|^\([^ ]*\) |    \1/|'
     echo "    plus the scaler backend and monitoring, if this cluster had none"
+    if [ "${WVA_SCALER_NP_APPLIED:-true}" = "false" ]; then
+        echo ""
+        echo "  NOT created: NetworkPolicy/wva-external-scaler, so the external scaler"
+        echo "  port (:9090) is open to any Pod. See the warning above."
+    fi
     echo ""
     echo "  NOT created: the controller itself. Whoever owns $WVA_NS installs it,"
     echo "  and every later upgrade, with no cluster-scoped rights:"

@@ -4,7 +4,8 @@
 # for every WVA controller on the cluster that passes verification -- and name
 # the ones that do not.
 #
-# Requires vars: WVA_POLICY_NS, WVA_LIMITER_TYPE, WVA_LIMITER_TARGETS.
+# Requires vars: WVA_LIMITER_TYPE, WVA_LIMITER_TARGETS. WVA_POLICY_NS, when set,
+# must be wva-policy (pl_refuse_policy_ns_override).
 # Optional vars: WVA_CONTROLLER_SA, WVA_CONTROLLER_IMAGE_REPOS, WVA_IMAGE_REPO
 # (pl_controller_targets).
 # Requires funcs: log_info/log_success/log_warning/log_error, wva_ns_suffix.
@@ -26,14 +27,38 @@
 # the limiter takes out every existing WVA that lacks node access, all at once.
 # So this grants it to each of them FIRST, and says which controllers it touched.
 
-# pl_policy_ns echoes the namespace cluster policy is published in.
+# PL_WELL_KNOWN_POLICY_NS is the namespace an unlabelled self-managed controller
+# reads cluster policy from: config.WellKnownPolicyNamespace
+# (internal/config/helpers.go), a constant the controller does not let anything
+# configure, so a tenant cannot point their WVA somewhere more permissive.
+PL_WELL_KNOWN_POLICY_NS=wva-policy
+
+# pl_policy_ns echoes the namespace cluster policy is published in: always the
+# well-known one.
 #
-# The default is the well-known name the controller looks for, and "well-known
-# wins" is deliberate in the controller: a tenant cannot point their WVA somewhere
-# more permissive. Overriding it here is for a cluster that already keeps policy
-# elsewhere and labels its namespaces accordingly.
+# It honoured WVA_POLICY_NS, and that was a bound that bound nobody: no
+# controller reads a namespace by that setting. An unlabelled self-managed
+# controller reads wva-policy whatever this command is told, so publishing to
+# WVA_POLICY_NS=platform-policy wrote a policy no controller read, and the
+# `wellknown` resolution then claimed controllers read it. A namespace a
+# wva.llmd.ai/policy-namespace LABEL names is found per controller
+# (pl_policy_resolution) and written without being named here. So
+# WVA_POLICY_NS has no correct use left, and a value other than the well-known
+# name is refused rather than ignored (pl_refuse_policy_ns_override): the caller
+# meant something by it.
 pl_policy_ns() {
-    echo "${WVA_POLICY_NS:-wva-policy}"
+    echo "$PL_WELL_KNOWN_POLICY_NS"
+}
+
+# pl_refuse_policy_ns_override stops the command when WVA_POLICY_NS names a
+# namespace other than the well-known one. Called directly, never in `$( )`,
+# where its exit would end only the subshell.
+pl_refuse_policy_ns_override() {
+    if [ -n "${WVA_POLICY_NS:-}" ] && [ "$WVA_POLICY_NS" != "$PL_WELL_KNOWN_POLICY_NS" ]; then
+        log_error "WVA_POLICY_NS=$WVA_POLICY_NS is no longer supported: no controller reads policy from a namespace this command chooses. An unlabelled self-managed controller reads $PL_WELL_KNOWN_POLICY_NS (fixed in the controller); to send one elsewhere, label its namespace instead:
+    kubectl label namespace <managed-namespace> wva.llmd.ai/policy-namespace=$WVA_POLICY_NS
+and re-run without WVA_POLICY_NS -- this command then publishes there too."
+    fi
 }
 
 # pl_controller_namespaces echoes every namespace running a WVA controller.
@@ -200,9 +225,8 @@ def managed($c; $ns):
 # A namespace named in WVA_LIMITER_TARGETS relaxes the image check (the admin
 # vouched for it by name, which is how a controller from a mirror or a custom
 # IMG gets granted); the ServiceAccount and the manager container are still
-# required there. A named namespace with no labelled Deployment yet is echoed
-# with deployment `-` and the expected ServiceAccount: the admin named it, and
-# the controller about to be installed there runs as that account.
+# required there. A named namespace with no labelled Deployment is SKIPPED
+# (`! <namespace> - - no controller found`): there is nothing to bind there.
 #
 # Every skipped Deployment is named on stderr, and echoed on stdout as
 # `! <namespace> <deployment> <managed> <reason...>` (no namespace starts with
@@ -224,9 +248,16 @@ pl_controller_targets() {
             return 1
         fi
         if [ -z "$rows" ]; then
+            # Named, and nothing there: SKIPPED, never written. Granting the
+            # account a controller "about to be installed" would run as, and
+            # writing policy where it would read, bound nothing that runs today
+            # -- and an install that later comes up managing another namespace
+            # reads a different policy altogether. The install's own prereqs
+            # phase grants a controller its read when it is installed
+            # (pl_grant_published_policy_read).
             if [ -n "${WVA_LIMITER_TARGETS:-}" ]; then
-                log_info "  $ns: no controller Deployment yet; granting the controller ServiceAccount $expected"
-                echo "$ns - $expected - -"
+                log_warning "  SKIPPED $ns: no controller found (no labelled Deployment). Not granted, and no policy written there."
+                echo "! $ns - - no controller found"
             fi
             continue
         fi
@@ -298,7 +329,7 @@ pl_policy_resolution() {
     if [ -n "$label" ]; then
         echo "$label label"
     else
-        echo "$(pl_policy_ns) wellknown"
+        echo "$PL_WELL_KNOWN_POLICY_NS wellknown"
     fi
 }
 
@@ -390,9 +421,23 @@ EOF
 # prerequisite existed read it, logged "external quota source unreadable and
 # never read" each cycle, and ran on the static entry alone -- which for the
 # recommended `-1` budget is no cap at all.
+#
+# $3 is the namespace the controller manages (`*` cluster-scoped). A
+# namespace-scoped controller lists LocalQueues in that namespace only, so its
+# `get namespaces` is limited to it by resourceNames -- exactly what the
+# installer renders (wva_append_kueue_reader_scope_patch). Without that, this
+# command re-applied the same ClusterRole with an unrestricted Namespace get and
+# undid the installer's narrowing on every enable. A cluster-scoped controller
+# reads LocalQueues everywhere and keeps the unrestricted read; so does an
+# unknown one (`-`), which would otherwise be bounded at nothing.
 pl_grant_kueue_read() {
-    local ns="$1" sa="$2" suffix
+    local ns="$1" sa="$2" managed="${3:--}" suffix names=""
     suffix="$(wva_ns_suffix "$ns")"
+    case "$managed" in
+        '*'|-|'') ;;
+        *) names="
+  resourceNames: [\"${managed}\"]" ;;
+    esac
     kubectl apply -f - >/dev/null <<EOF
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -405,7 +450,7 @@ rules:
   resources: ["clusterqueues", "resourceflavors"]
   verbs: ["get", "list"]
 - apiGroups: [""]
-  resources: ["namespaces"]
+  resources: ["namespaces"]${names}
   verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -664,9 +709,13 @@ pl_set_limiter() {
         # other entry in it -- the per-model and named-tier policies an operator
         # added -- which is the same data loss this file was just fixed for, on
         # the disable path. A null value in a merge patch removes one key.
+        # Checked: `|| true` here let disable report "Removed the limiter" over
+        # a denied patch that removed nothing.
         if [ "$exists" -eq 1 ]; then
-            kubectl patch configmap wva-scaling-policy-config -n "$policy_ns" --type=merge \
-                -p '{"data":{"default":null}}' >/dev/null 2>&1 || true
+            local perr
+            perr="$(kubectl patch configmap wva-scaling-policy-config -n "$policy_ns" --type=merge \
+                -p '{"data":{"default":null}}' 2>&1 >/dev/null)" \
+                || log_error "could not remove the limiter from ${policy_ns}/wva-scaling-policy-config (patching data.default to null failed): ${perr}"
         fi
         return 0
     fi
@@ -694,10 +743,51 @@ pl_set_limiter() {
             || log_error "could not write the policy into ${policy_ns}/wva-scaling-policy-config."
         return 0
     fi
+    # Every stage's status, not only the last one's. The Makefile runs this from
+    # a bare `bash -c` (no pipefail, no set -e), so the pipeline's own exit is
+    # apply's alone and was never even read: a denied create or apply went on to
+    # "the limiter is now in force".
     kubectl create configmap wva-scaling-policy-config -n "$policy_ns" \
         --from-literal=default="$updated" --dry-run=client -o yaml \
         | kubectl label --local -f - app.kubernetes.io/name=workload-variant-autoscaler -o yaml \
         | kubectl apply -f - >/dev/null
+    local st=("${PIPESTATUS[@]}")
+    if [ "${st[0]}" -ne 0 ] || [ "${st[1]}" -ne 0 ] || [ "${st[2]}" -ne 0 ]; then
+        log_error "could not create the policy ConfigMap ${policy_ns}/wva-scaling-policy-config (create/label/apply exit ${st[0]}/${st[1]}/${st[2]})."
+    fi
+}
+
+# pl_policy_is_live reports whether a controller managing $1 (`*`
+# cluster-scoped, `-` unknown) sees an edit to the policy in namespace $2
+# without a restart.
+#
+# cmd/main.go: a namespace-scoped controller caches ConfigMaps in the namespace
+# it manages ONLY -- the policy namespace is deliberately not added, because an
+# informer that cannot list it never syncs. So a policy anywhere else is read at
+# startup and not again. A cluster-scoped controller caches every namespace's
+# ConfigMaps (the policy namespace without the label filter) and reloads live.
+# Unknown is answered "live": nothing to restart on a guess.
+pl_policy_is_live() {
+    case "$1" in
+        '*'|-|'') return 0 ;;
+    esac
+    [ "$1" = "$2" ]
+}
+
+# pl_ensure_namespace creates Namespace $1 if it is absent, and ends the
+# command with an error naming it when that fails.
+pl_ensure_namespace() {
+    local manifest err
+    manifest="$(kubectl create namespace "$1" --dry-run=client -o yaml 2>&1)" \
+        || log_error "could not render Namespace $1: ${manifest}. Nothing was published."
+    err="$(printf '%s\n' "$manifest" | kubectl apply -f - 2>&1 >/dev/null)" \
+        || log_error "could not create Namespace $1, where the policy is to be published: ${err}. Nothing was published."
+}
+
+# pl_target_label echoes how a target is named in messages: <ns>/<deployment>,
+# or <ns> alone when no Deployment was found there.
+pl_target_label() {
+    if [ "$2" = "-" ]; then echo "$1"; else echo "$1/$2"; fi
 }
 
 # pl_split_targets <pl_controller_targets output> sets PL_GRANT (the verified
@@ -733,6 +823,7 @@ enable_physical_limiter() {
         command -v "$tool" >/dev/null 2>&1 || \
             log_error "$tool is required by this command and is not on PATH."
     done
+    pl_refuse_policy_ns_override
     local policy_ns; policy_ns="$(pl_policy_ns)"
     local namespaces ns sa granted=0
 
@@ -807,13 +898,19 @@ enable_physical_limiter() {
                 restart=unknown
             fi
         fi
-        plan="${plan}${ns} ${deploy} ${sa} ${cm_ns} ${src} ${restart}"$'\n'
+        # And a controller that does not WATCH the namespace it reads policy
+        # from sees the edit this command is about to make only at its next
+        # start (pl_policy_is_live), so it is restarted after the write.
+        case "$restart" in
+            no|unknown) pl_policy_is_live "$managed" "$cm_ns" || restart=not-watched ;;
+        esac
+        plan="${plan}${ns} ${deploy} ${sa} ${cm_ns} ${src} ${restart} ${managed}"$'\n'
     done 3<<< "$PL_GRANT"
 
     if [ -n "$plan" ]; then
         log_info "Controllers to be granted (namespace/Deployment, ServiceAccount, where it reads policy):"
         log_info "  Verified by signals, not proof: any tenant can satisfy them. Where tenants are not trusted, see WVA_LIMITER_TARGETS in docs/guides/admin-gpu-bounding."
-        while read -r ns deploy sa cm_ns src restart <&3; do
+        while read -r ns deploy sa cm_ns src restart managed <&3; do
             [ -n "$ns" ] || continue
             case "$restart" in
                 cannot-read)
@@ -822,29 +919,32 @@ enable_physical_limiter() {
                 started-before)
                     note="; WILL BE RESTARTED: it started before $cm_ns existed"
                     n_restart=$((n_restart + 1)) ;;
+                not-watched)
+                    note="; WILL BE RESTARTED: it does not watch $cm_ns, so it reads the policy there only at startup"
+                    n_restart=$((n_restart + 1)) ;;
                 unknown) note="; may need a restart (could not impersonate it to ask)" ;;
                 *) note="" ;;
             esac
             log_info "  $ns/$deploy as ServiceAccount $sa; reads policy from $cm_ns$note"
         done 3<<< "$plan"
         if [ "$n_restart" -gt 0 ]; then
-            log_warning "  $n_restart controller(s) above will be restarted (kubectl rollout restart): a namespace-scoped controller resolves where its policy lives once, at startup. On the first enable after upgrading to a release with the Namespace read grant, that is every self-managed namespace-scoped controller."
+            log_warning "  $n_restart controller(s) above will be restarted (kubectl rollout restart) after the policy is written: a namespace-scoped controller resolves where its policy lives once, at startup, and does not watch a policy namespace other than the one it manages, so it reads a change there only when it starts. On the first enable after upgrading to a release with the Namespace read grant, that is every self-managed namespace-scoped controller -- and it remains true on every later enable or disable."
         fi
     fi
 
     log_info "Publishing cluster policy in $policy_ns (limiter: $limiter)"
-    kubectl create namespace "$policy_ns" --dry-run=client -o yaml \
-        | kubectl apply -f - >/dev/null
+    # Each step's status checked: this runs from a bare `bash -c` with no
+    # `set -e`, and an unchecked failure here went on to "now in force".
+    pl_ensure_namespace "$policy_ns"
     # And every namespace a wva.llmd.ai/policy-namespace label points at: the
     # controller reads it whether or not it exists, so the Role, the binding and
     # the policy below need it to.
     local made=" $policy_ns "
-    while read -r ns deploy sa cm_ns src restart <&3; do
+    while read -r ns deploy sa cm_ns src restart managed <&3; do
         [ "$src" = label ] || continue
         case "$made" in *" $cm_ns "*) continue ;; esac
         made="$made$cm_ns "
-        kubectl create namespace "$cm_ns" --dry-run=client -o yaml \
-            | kubectl apply -f - >/dev/null
+        pl_ensure_namespace "$cm_ns"
     done 3<<< "$plan"
 
     # Grants BEFORE the policy. The other order publishes a limiter that every
@@ -852,30 +952,30 @@ enable_physical_limiter() {
     # the cluster, arriving as NotReady pods rather than as an error from this
     # command.
     local targets="" restart_list="" bound=""
-    while read -r ns deploy sa cm_ns src restart <&3; do
+    while read -r ns deploy sa cm_ns src restart managed <&3; do
         [ -n "$ns" ] || continue
         if [ "$limiter" = "gpu-inventory" ]; then
-            pl_grant_node_read "$ns" "$sa"
+            pl_grant_node_read "$ns" "$sa" \
+                || log_error "could not grant $ns/$sa the node read (ClusterRole/ClusterRoleBinding wva-node-reader-*-$(wva_ns_suffix "$ns")). Nothing was published; the grants made before this one stay in place."
         fi
         if [ "$limiter" = "quota" ] && [ "${WVA_QUOTA_KUEUE:-false}" = "true" ]; then
-            pl_grant_kueue_read "$ns" "$sa"
+            pl_grant_kueue_read "$ns" "$sa" "$managed" \
+                || log_error "could not grant $ns/$sa the Kueue read (ClusterRole/ClusterRoleBinding wva-kueue-reader-*-$(wva_ns_suffix "$ns")). Nothing was published; the grants made before this one stay in place."
         fi
         if [ "$src" != own ]; then
-            pl_grant_namespace_read "$ns" "$sa" "$cm_ns"
-            pl_grant_policy_read "$ns" "$sa" "$cm_ns"
-            case "$restart" in
-                cannot-read|started-before) restart_list="$restart_list $ns/$deploy" ;;
-                unknown) log_warning "  Could not tell whether $ns/$sa could already read the Namespace it finds its policy through (impersonation was not allowed). If its controller logs 'Cannot tell whether a cluster admin published policy', restart it." ;;
-            esac
+            pl_grant_namespace_read "$ns" "$sa" "$cm_ns" \
+                || log_error "could not grant $ns/$sa the Namespace read it finds its policy through (wva-policy-namespace-reader-*-$(wva_ns_suffix "$ns")). Nothing was published."
+            pl_grant_policy_read "$ns" "$sa" "$cm_ns" \
+                || log_error "could not grant $ns/$sa read of the policy in $cm_ns (Role wva-policy-reader, RoleBinding wva-policy-reader-$(wva_ns_suffix "$ns")). Nothing was published."
         fi
+        case "$restart" in
+            cannot-read|started-before|not-watched) restart_list="$restart_list $ns/$deploy" ;;
+            unknown) log_warning "  Could not tell whether $ns/$sa could already read the Namespace it finds its policy through (impersonation was not allowed). If its controller logs 'Cannot tell whether a cluster admin published policy', restart it." ;;
+        esac
         case " $targets " in *" $cm_ns "*) : ;; *) targets="$targets $cm_ns" ;; esac
         log_success "  $ns/$sa — reads policy from ${cm_ns}$([ "$limiter" = "gpu-inventory" ] && echo ', and may list nodes')$([ "$limiter" = "quota" ] && [ "${WVA_QUOTA_KUEUE:-false}" = "true" ] && echo ', and may read Kueue')"
         granted=$((granted + 1))
-        if [ "$deploy" = "-" ]; then
-            bound="${bound:+$bound, }$ns (no controller yet)"
-        else
-            bound="${bound:+$bound, }$ns/$deploy"
-        fi
+        bound="${bound:+$bound, }$ns/$deploy"
     done 3<<< "$plan"
 
     # The well-known namespace too, matching what disable already clears — and it
@@ -892,17 +992,24 @@ enable_physical_limiter() {
     done
 
     # A controller that resolved its policy source before it could see it reads
-    # its OWN namespace and will never look again. Without this the command
-    # reports success and changes nothing for it. The named Deployment, not the
-    # label: the label also selects the Deployments skipped above.
-    local entry
+    # its OWN namespace and will never look again, and one that does not watch
+    # its policy namespace reads the new policy only when it starts. Without
+    # this the command reports success and changes nothing for either. The named
+    # Deployment, not the label: the label also selects the Deployments skipped
+    # above. A failed restart is a controller this did NOT bind, so it ends the
+    # command with an error instead of a banner.
+    local entry not_restarted=""
     for entry in $restart_list; do
         ns="${entry%%/*}"; deploy="${entry#*/}"
-        [ "$deploy" != "-" ] || continue   # nothing is running there to restart
-        log_info "  Restarting $ns/$deploy: it resolved its policy source before it could see it, and that resolution runs once at startup"
-        kubectl rollout restart deploy "$deploy" -n "$ns" >/dev/null 2>&1 || \
-            log_warning "    could not restart the controller in $ns — restart it yourself, or it keeps reading its own ConfigMap"
+        log_info "  Restarting $ns/$deploy: it reads its policy source only at startup"
+        if ! kubectl rollout restart deploy "$deploy" -n "$ns" >/dev/null 2>&1; then
+            log_warning "    could not restart $ns/$deploy"
+            not_restarted="${not_restarted:+$not_restarted, }$ns/$deploy"
+        fi
     done
+    if [ -n "$not_restarted" ]; then
+        log_error "the ${limiter} limiter is written (policy in: ${targets# }), but these controllers could not be restarted and do NOT read it yet: ${not_restarted}. Restart them (kubectl rollout restart deploy <name> -n <namespace>) before relying on the bound."
+    fi
 
     # The banner names WHO is bound. "In force for every WVA on this cluster" was
     # printed while a controller from a mirror sat in the skipped list, reading
@@ -914,10 +1021,10 @@ enable_physical_limiter() {
         log_success "The ${limiter} limiter is published in ${policy_ns}. No running controller was granted, so it is in force for none yet; a WVA installed later reads it at startup."
     fi
     if [ -n "$PL_SKIP" ]; then
-        log_warning "  NOT bound by this command -- labelled Deployments it skipped, and granted nothing:"
+        log_warning "  NOT bound by this command -- labelled Deployments it skipped, and named namespaces with no controller; granted nothing:"
         while read -r ns deploy managed note <&3; do
             [ -n "$ns" ] || continue
-            log_warning "    $ns/$deploy: $note"
+            log_warning "    $(pl_target_label "$ns" "$deploy"): $note"
         done 3<<< "$PL_SKIP"
         log_warning "  A skipped controller keeps whatever policy it read before. One that can see a policy namespace it has no read grant for refuses to start at its next restart. If one is genuine, name its namespace in WVA_LIMITER_TARGETS and re-run."
     fi
@@ -926,14 +1033,15 @@ enable_physical_limiter() {
     if [ -n "${WVA_LIMITER_TARGETS:-}" ]; then
         log_warning "  WVA_LIMITER_TARGETS was set, so only those namespaces were granted. Any OTHER controller on this cluster that reads this policy cannot honour it, and will report NotReady until it is granted too."
     fi
-    log_info "  It applies live — controllers reload policy without a restart; a granted controller that cannot serve it reports NotReady."
+    log_info "  A cluster-scoped controller reloads policy live. A namespace-scoped one reads a policy outside the namespace it manages only at startup; this command restarted the granted ones that needed it, and any later edit to that policy needs a restart too. A granted controller that cannot serve it reports NotReady."
     log_info "  Check:       kubectl get pods -A -l app.kubernetes.io/name=workload-variant-autoscaler"
     log_info "               a controller that stays NotReady is one this did not reach."
 }
 
 disable_physical_limiter() {
+    pl_refuse_policy_ns_override
     local policy_ns; policy_ns="$(pl_policy_ns)"
-    local ns cm_ns res targets="" cleared=0
+    local ns cm_ns res targets="" cleared=0 cleared_ns=" " to_restart=""
 
     # The SAME per-controller resolution enable uses. Looking only at the
     # well-known namespace left the limiter in force everywhere it had actually
@@ -958,45 +1066,74 @@ disable_physical_limiter() {
         fi
         cm_ns="${res%% *}"
         case " $targets " in *" $cm_ns "*) : ;; *) targets="$targets $cm_ns" ;; esac
+        # One that does not watch its policy namespace sees the removal only
+        # when it restarts (pl_policy_is_live).
+        pl_policy_is_live "$managed" "$cm_ns" || to_restart="$to_restart $ns/$deploy/$cm_ns"
     done 3<<< "$PL_GRANT"
     # The well-known namespace too, even with no controller reading it today: a
     # WVA installed tomorrow would read whatever was left there.
     case " $targets " in *" $policy_ns "*) : ;; *) targets="$targets $policy_ns" ;; esac
 
+    local probe probe_rc
     for cm_ns in $targets; do
-        kubectl get configmap wva-scaling-policy-config -n "$cm_ns" >/dev/null 2>&1 || continue
+        # NotFound is "nothing to disable here"; anything else is a policy this
+        # command could not see, and reporting it as absent is how an "off"
+        # left a limiter in force.
+        probe_rc=0
+        probe="$(kubectl get configmap wva-scaling-policy-config -n "$cm_ns" -o name 2>&1)" || probe_rc=$?
+        if [ "$probe_rc" -ne 0 ]; then
+            case "$probe" in
+                *NotFound*|*"not found"*) continue ;;
+            esac
+            log_error "could not read ${cm_ns}/wva-scaling-policy-config, and this is not a NotFound: ${probe}
+    Refusing to report a limiter removed from a policy this command cannot see."
+        fi
         pl_set_limiter "$cm_ns" none
         log_success "Removed the limiter from ${cm_ns}/wva-scaling-policy-config"
         cleared=$((cleared + 1))
+        cleared_ns="$cleared_ns$cm_ns "
     done
+
+    local entry r_ns r_deploy r_cm not_restarted=""
+    for entry in $to_restart; do
+        r_ns="${entry%%/*}"; r_cm="${entry##*/}"; r_deploy="${entry#*/}"; r_deploy="${r_deploy%/*}"
+        case "$cleared_ns" in *" $r_cm "*) ;; *) continue ;; esac
+        log_info "  Restarting $r_ns/$r_deploy: it reads its policy in $r_cm only at startup"
+        if ! kubectl rollout restart deploy "$r_deploy" -n "$r_ns" >/dev/null 2>&1; then
+            not_restarted="${not_restarted:+$not_restarted, }$r_ns/$r_deploy"
+        fi
+    done
+    if [ -n "$not_restarted" ]; then
+        log_error "the limiter is removed from the policy, but these controllers could not be restarted and still run with it: ${not_restarted}. Restart them (kubectl rollout restart deploy <name> -n <namespace>)."
+    fi
 
     # The skipped ones, each with what is left in the policy it reads. Silence
     # here meant a limiter still in force in a mirror-built controller's own
     # ConfigMap under an "off" that looked complete.
     local left=0
     if [ -n "$PL_SKIP" ]; then
-        log_warning "Labelled Deployments skipped by verification -- this command did not write their policy:"
+        log_warning "Labelled Deployments skipped by verification, and named namespaces with no controller -- this command did not write their policy:"
         while read -r ns deploy managed note <&3; do
             [ -n "$ns" ] || continue
             if ! res="$(pl_policy_resolution "$ns" "$managed")"; then
-                log_warning "  $ns/$deploy: $note. Could not read Namespace $ns to tell where it reads policy; check it by hand."
+                log_warning "  $(pl_target_label "$ns" "$deploy"): $note. Could not read Namespace $ns to tell where it reads policy; check it by hand."
                 continue
             fi
             cm_ns="${res%% *}"
             case " $targets " in
                 *" $cm_ns "*)
-                    log_warning "  $ns/$deploy: $note. It reads policy from $cm_ns, cleared above."
+                    log_warning "  $(pl_target_label "$ns" "$deploy"): $note. It reads policy from $cm_ns, cleared above."
                     continue ;;
             esac
             if ! n="$(pl_declared_limiters "$cm_ns")" || [ -z "$n" ]; then
-                log_warning "  $ns/$deploy: $note. Could not read ${cm_ns}/wva-scaling-policy-config; check it by hand."
+                log_warning "  $(pl_target_label "$ns" "$deploy"): $note. Could not read ${cm_ns}/wva-scaling-policy-config; check it by hand."
                 continue
             fi
             if [ "$n" -gt 0 ]; then
-                log_warning "  $ns/$deploy: $note. Its policy in ${cm_ns}/wva-scaling-policy-config STILL declares $n limiter(s): NOT cleared. Name $ns in WVA_LIMITER_TARGETS and re-run to clear it."
+                log_warning "  $(pl_target_label "$ns" "$deploy"): $note. Its policy in ${cm_ns}/wva-scaling-policy-config STILL declares $n limiter(s): NOT cleared. Name $ns in WVA_LIMITER_TARGETS and re-run to clear it."
                 left=$((left + 1))
             else
-                log_warning "  $ns/$deploy: $note. Its policy in ${cm_ns} declares no limiter."
+                log_warning "  $(pl_target_label "$ns" "$deploy"): $note. Its policy in ${cm_ns} declares no limiter."
             fi
         done 3<<< "$PL_SKIP"
     fi

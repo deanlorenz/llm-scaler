@@ -103,8 +103,10 @@ Environment Variables:
   SCALER_BACKEND               keda (default) or none. WVA needs KEDA to actuate.
   KEDA_HELM_INSTALL            Install KEDA via Helm on kubernetes (default: false — assumes cluster KEDA)
   KEDA_NAMESPACE               Namespace for KEDA (default: keda-system). Also the one the
-                               external-scaler NetworkPolicy admits; unset, it admits the
-                               namespace a KEDA operator Pod is found in
+                               external-scaler NetworkPolicy admits (written by the admin
+                               phase, setup-prereqs); unset, the namespace serving the
+                               external-metrics APIService, else the existing policy's. With
+                               none of those, NO policy is written and :9090 stays open (warned)
   WVA_SCALER_NETWORKPOLICY     false skips the NetworkPolicy that admits :9090 only from KEDA
                                (default: true)
   CRD_INSTALL                  if-missing (default) | always | never. Gateway API and GAIE CRDs are

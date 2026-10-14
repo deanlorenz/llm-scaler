@@ -31,7 +31,7 @@ fi
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
-for lib in common.sh infra_wva.sh; do
+for lib in common.sh infra_wva.sh install_core.sh; do
     tr -d '\r' < "deploy/lib/$lib" > "$WORK/$lib"
 done
 BLUE='' GREEN='' YELLOW='' RED='' NC=''
@@ -39,16 +39,18 @@ BLUE='' GREEN='' YELLOW='' RED='' NC=''
 source "$WORK/common.sh"
 # shellcheck source=/dev/null
 source "$WORK/infra_wva.sh"
+# shellcheck source=/dev/null
+source "$WORK/install_core.sh"
 for fn in wva_append_crb_name_patches wva_append_metrics_reader_subject_patch \
           wva_append_kueue_reader_scope_patch wva_append_policy_namespace_reader_scope_patch \
-          wva_rendered_prereq_objects; do
+          wva_rendered_prereq_objects wva_prometheus_scraper_sa wva_missing_prereqs; do
     declare -F "$fn" >/dev/null || {
         printf 'FATAL: %s is not defined after sourcing the library.\n' "$fn" >&2
         exit 1
     }
 done
 
-EXPECT_CASES=23
+EXPECT_CASES=33
 RAN=0
 FAILED=0
 
@@ -129,6 +131,75 @@ for scope in cluster namespace; do
     check "$scope scope: PROMETHEUS_SA -> the binding is expected" '1' \
         "$(prereq_objects "$scope" obs/prom-sa | grep -cxF "$reader_crb")"
 done
+
+# ----------------------------------------------------------------------------
+# Who the metrics-reader binding names: only an account the caller CHOSE
+# ----------------------------------------------------------------------------
+# scraper <PROMETHEUS_SA> <PROMETHEUS_URL> <explicit: 1|''> <DEPLOY_PROMETHEUS>
+# runs wva_prometheus_scraper_sa against a stub that knows two Prometheus CRs:
+# one in `obs` running as prom-sa, one in `dflt` with no serviceAccountName.
+# An AUTO-DETECTED URL is whichever Prometheus the API listed first -- on a
+# shared cluster someone else's -- and must never decide the subject.
+scraper() {
+    (
+        PROMETHEUS_SA="$1" PROMETHEUS_URL="$2" PROMETHEUS_URL_EXPLICIT="$3" DEPLOY_PROMETHEUS="$4"
+        MONITORING_NAMESPACE=wva-mon
+        log_warning() { :; }
+        kubectl() {
+            case "$*" in
+                "get prometheuses.monitoring.coreos.com -n obs "*) echo "obs prom-sa" ;;
+                "get prometheuses.monitoring.coreos.com -n dflt "*) echo "dflt " ;;
+                *) return 0 ;;
+            esac
+        }
+        wva_prometheus_scraper_sa
+    )
+}
+check 'metrics-reader subject: an auto-detected Prometheus is never granted' '' \
+    "$(scraper '' 'https://prometheus-operated.obs.svc.cluster.local:9090' '' false)"
+check 'metrics-reader subject: auto-detected beside DEPLOY_PROMETHEUS, outside MONITORING_NAMESPACE: none' '' \
+    "$(scraper '' 'https://prometheus-operated.obs.svc.cluster.local:9090' '' true)"
+check 'metrics-reader subject: an explicit PROMETHEUS_URL reads its Prometheus CR' 'obs prom-sa' \
+    "$(scraper '' 'https://prometheus-operated.obs.svc.cluster.local:9090' 1 false)"
+check 'metrics-reader subject: explicit URL, CR on the default account: none' '' \
+    "$(scraper '' 'https://prometheus-operated.dflt.svc:9090' 1 false)"
+check 'metrics-reader subject: PROMETHEUS_SA is taken as given' 'ops scraper' \
+    "$(scraper 'ops/scraper' 'https://prometheus-operated.obs.svc:9090' '' false)"
+check 'metrics-reader subject: the stack this install deploys' 'wva-mon kube-prometheus-stack-prometheus' \
+    "$(scraper '' 'https://kube-prometheus-stack-prometheus.wva-mon.svc.cluster.local:9090' '' true)"
+
+# ----------------------------------------------------------------------------
+# --check and INSTALL_PHASE=wva: objects an admin phase may leave out ON PURPOSE
+# ----------------------------------------------------------------------------
+# The external-scaler NetworkPolicy (written only where KEDA's namespace is
+# known) and the metrics-reader binding (only for a Prometheus account the
+# caller named) are absent on a correct install, and a tenant cannot see why.
+# Reported MISSING, they made --check fail forever and INSTALL_PHASE=wva refuse.
+missing_prereqs() {
+    (
+        WVA_PROJECT="$ROOT" WVA_NS=wns ENVIRONMENT=kubernetes WVA_SCOPE=namespace WVA_WATCH_NS=''
+        PROMETHEUS_SA=obs/prom-sa PROMETHEUS_URL='https://prom.obs.svc:9090'
+        PROMETHEUS_URL_EXPLICIT=1 DEPLOY_PROMETHEUS=false
+        kubectl() {
+            case "$1" in
+                kustomize) command "${KBUILD[@]}" "$2" ;;
+                get) echo "Error from server (NotFound): $2 \"$3\" not found" >&2; return 1 ;;
+                *) return 0 ;;
+            esac
+        }
+        wva_missing_prereqs
+    )
+}
+mp="$(missing_prereqs)"
+[ -n "$mp" ] || { printf 'FATAL: wva_missing_prereqs reported nothing on an empty cluster.\n' >&2; exit 1; }
+check '--check: an absent external-scaler NetworkPolicy is OPTIONAL' '1' \
+    "$(printf '%s\n' "$mp" | grep -c '^OPTIONAL NetworkPolicy/wva-external-scaler|')"
+check '--check: an absent metrics-reader binding is OPTIONAL' '1' \
+    "$(printf '%s\n' "$mp" | grep -c "^OPTIONAL ClusterRoleBinding/wva-metrics-reader-rolebinding-$(wva_ns_suffix wns)|")"
+check '--check: neither is also reported missing' '0' \
+    "$(printf '%s\n' "$mp" | grep -v '^OPTIONAL ' | grep -c 'wva-external-scaler\|wva-metrics-reader-rolebinding')"
+check '--check: a required object is still MISSING, not optional' '1' \
+    "$(printf '%s\n' "$mp" | grep -cx "ClusterRoleBinding/wva-metrics-auth-rolebinding-$(wva_ns_suffix wns)")"
 
 # ----------------------------------------------------------------------------
 # The namespace-scoped Kueue reader gets ONE Namespace: the managed one

@@ -448,9 +448,10 @@ docs-links-external: ## Resolve every external doc link over the network (not in
 
 ##@ Cluster-admin actions (advanced; they affect every WVA on the cluster)
 
-# Where cluster policy is published. The default is the name the controller looks
-# for, and a tenant cannot point their WVA at a more permissive one.
-WVA_POLICY_NS       ?= wva-policy
+# Cluster policy is published in wva-policy, the namespace the controller reads
+# (fixed in the controller), and in every namespace a wva.llmd.ai/policy-namespace
+# label points a controller at. There is no setting for it: WVA_POLICY_NS, if
+# exported, must be wva-policy (deploy/lib/physical_limiter.sh refuses others).
 # gpu-inventory (bounded by GPUs actually free) or quota (bounded by declared caps).
 WVA_LIMITER_TYPE    ?= gpu-inventory
 # Namespaces whose controllers to grant. Empty = every controller on the cluster,
@@ -469,8 +470,8 @@ IMG_REPO = $(firstword $(subst |, ,$(shell $(WVA_IMAGE_REF_FIELDS) '$(IMG)')))
 WVA_CONTROLLER_IMAGE_REPOS ?= $(strip $(IMAGE_TAG_BASE)/llm-scaling-manager $(filter-out $(IMAGE_TAG_BASE)/llm-scaling-manager,$(IMG_REPO)))
 
 .PHONY: enable-physical-limiter
-enable-physical-limiter: ## CLUSTER ADMIN: bound every WVA by real GPUs. Publishes cluster policy and grants each controller the node read it then requires. WVA_LIMITER_TYPE=gpu-inventory|quota (quota also needs WVA_QUOTAS), WVA_POLICY_NS, WVA_LIMITER_TARGETS.
-	@WVA_POLICY_NS=$(WVA_POLICY_NS) WVA_LIMITER_TYPE=$(WVA_LIMITER_TYPE) \
+enable-physical-limiter: ## CLUSTER ADMIN: bound every WVA by real GPUs. Publishes cluster policy and grants each controller the node read it then requires. WVA_LIMITER_TYPE=gpu-inventory|quota (quota also needs WVA_QUOTAS), WVA_LIMITER_TARGETS.
+	@WVA_LIMITER_TYPE=$(WVA_LIMITER_TYPE) \
 		WVA_LIMITER_TARGETS="$(WVA_LIMITER_TARGETS)" \
 		WVA_CONTROLLER_SA='$(WVA_CONTROLLER_SA)' WVA_CONTROLLER_IMAGE_REPOS='$(WVA_CONTROLLER_IMAGE_REPOS)' \
 		WVA_QUOTAS='$(WVA_QUOTAS)' WVA_QUOTA_SCOPE=$(WVA_QUOTA_SCOPE) WVA_QUOTA_KUEUE=$(WVA_QUOTA_KUEUE) \
@@ -478,7 +479,7 @@ enable-physical-limiter: ## CLUSTER ADMIN: bound every WVA by real GPUs. Publish
 
 .PHONY: disable-physical-limiter
 disable-physical-limiter: ## CLUSTER ADMIN: remove the limiter from cluster policy. Scaling becomes unbounded for every WVA that reads it.
-	@WVA_POLICY_NS=$(WVA_POLICY_NS) \
+	@WVA_LIMITER_TARGETS="$(WVA_LIMITER_TARGETS)" \
 		WVA_CONTROLLER_SA='$(WVA_CONTROLLER_SA)' WVA_CONTROLLER_IMAGE_REPOS='$(WVA_CONTROLLER_IMAGE_REPOS)' \
 		bash -c 'source deploy/lib/common.sh; source deploy/lib/limiter_policy.sh; source deploy/lib/physical_limiter.sh; disable_physical_limiter'
 

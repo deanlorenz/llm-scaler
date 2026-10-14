@@ -16,9 +16,11 @@
 #   the wrong KEDA namespace                        KEDA refused, nothing scales
 #
 # Then it executes the installer's wva_append_scaler_networkpolicy_patch against
-# a STUBBED kubectl, renders the result, and asserts which namespace it chose --
-# and the post-deploy wva_verify_scaler_networkpolicy, which compares the
-# policy with where KEDA runs.
+# a STUBBED kubectl, renders the result, and asserts which namespace it chose,
+# or that it wrote NO policy (and said :9090 is open) when no trusted source
+# knows where KEDA runs -- a guess fails closed wherever it is wrong. Then that
+# the policy belongs to the admin phase, and the post-deploy
+# wva_verify_scaler_networkpolicy, which compares the policy with where KEDA runs.
 
 set -u
 
@@ -169,7 +171,8 @@ stub_answer() {
 # stub_kubectl answers the reads that locate KEDA from STUB_* variables:
 #   STUB_APISVC   "<namespace> <service>" behind the external-metrics APIService
 #   STUB_NP       the namespace an existing wva-external-scaler policy admits
-#   STUB_DEPLOYS  namespaces holding a Deployment named keda-operator
+#   STUB_DEPLOYS  namespaces holding a Deployment named keda-operator -- also a
+#                 decoy: any tenant can create one, so nothing may trust it
 #   STUB_PODS_*   namespaces of Pods carrying a KEDA operator LABEL -- decoys:
 #                 any tenant can set a label, so nothing may trust them
 # Unset means not found (an empty list, for the listings).
@@ -196,20 +199,24 @@ stub_kubectl() {
     esac
 }
 
-# install_case <label> <overlay> <want: namespace | ABSENT | REFUSED> [VAR=value...]
-# EXPECT_WARN=1 among the values also asserts the install WARNED and named
-# KEDA_NAMESPACE: a guessed namespace said only at info level is how a wrong
-# guess went unnoticed. EXPECT_UNREAD=1 asserts it said what it could not read.
+# install_case <label> <overlay> <want> [VAR=value...]
+#   want: a namespace   the policy is rendered, admitting :9090 from it only
+#         ABSENT        opted out: not rendered, and an existing one deleted
+#         OPEN          no trusted source: NOT rendered, NOT deleted, and a loud
+#                       warning that :9090 is open naming make setup-prereqs
+#         CONTROLLER    the controller phase: no read, no warning, no delete
+#         KEPT          opted out in the controller phase: nothing deleted
+#         REFUSED       the patch function exits 1
+# EXPECT_UNREAD=1 among the values also asserts it said what it could not read.
 install_case() {
-    local label="$1" overlay="$2" want="$3" dir="$WORK/install" kv expect_warn="" expect_unread=""
+    local label="$1" overlay="$2" want="$3" dir="$WORK/install" kv expect_unread=""
     shift 3
     for kv in "$@"; do
         case "$kv" in
-            EXPECT_WARN=1) expect_warn=1 ;;
             EXPECT_UNREAD=1) expect_unread=1 ;;
         esac
     done
-    case "$want" in ABSENT | REFUSED) echo "== $label" ;; esac
+    case "$want" in ABSENT | REFUSED | OPEN | CONTROLLER | KEPT) echo "== $label" ;; esac
     rm -rf "$dir"
     mkdir -p "$dir"
     ln -s "$ROOT/$overlay" "$dir/base"
@@ -249,20 +256,41 @@ install_case() {
         fail "$label: exit $rc: $(cat "$WORK/refusal" 2>/dev/null)"
         return
     fi
+    case "$want" in
+        CONTROLLER)
+            if [ ! -s "$WORK/kubectl.log" ]; then pass; else fail "$label: the controller phase still read the cluster for KEDA: $(tr '\n' ';' <"$WORK/kubectl.log")"; fi
+            if [ ! -s "$WORK/warnings" ]; then pass; else fail "$label: the controller phase warned about a policy it does not apply: $(head -2 "$WORK/warnings")"; fi
+            return
+            ;;
+        KEPT)
+            if grep -q "delete networkpolicy" "$WORK/kubectl.log"; then fail "$label: the controller phase deleted the admin-owned policy"; else pass; fi
+            return
+            ;;
+    esac
     if ! render "$dir" "$WORK/installed.yaml" 2>"$WORK/err"; then
         fail "$label: the patched overlay does not render: $(head -3 "$WORK/err")"
         return
     fi
-    if [ "$want" = ABSENT ]; then
-        if [ -z "$(yq "$POLICY | .metadata.name" "$WORK/installed.yaml")" ]; then pass; else fail "$label: the policy is still rendered"; fi
-        if grep -q "delete networkpolicy wva-external-scaler -n wva-check" "$WORK/kubectl.log"; then pass; else fail "$label: an existing policy is not removed on opt-out"; fi
-        return
-    fi
-    if [ -n "$expect_warn" ]; then
-        if grep -q KEDA_NAMESPACE "$WORK/warnings"; then pass; else fail "$label: a guessed namespace was not WARNED about naming KEDA_NAMESPACE"; fi
-    fi
-    if [ -n "$expect_unread" ]; then
-        if grep -q 'Not readable' "$WORK/warnings"; then pass; else fail "$label: an unreadable source was not reported as unknown"; fi
+    case "$want" in
+        ABSENT)
+            if [ -z "$(yq "$POLICY | .metadata.name" "$WORK/installed.yaml")" ]; then pass; else fail "$label: the policy is still rendered"; fi
+            if grep -q "delete networkpolicy wva-external-scaler -n wva-check" "$WORK/kubectl.log"; then pass; else fail "$label: an existing policy is not removed on opt-out"; fi
+            return
+            ;;
+        OPEN)
+            if [ -z "$(yq "$POLICY | .metadata.name" "$WORK/installed.yaml")" ]; then pass; else fail "$label: a policy was rendered from a guess: admits $(yq "$POLICY | .spec.ingress[1].from[0].namespaceSelector.matchLabels" "$WORK/installed.yaml" | tr '\n' ' ')"; fi
+            if grep -q "delete networkpolicy" "$WORK/kubectl.log"; then fail "$label: an existing policy was deleted on a guess"; else pass; fi
+            if grep -q 'NO NetworkPolicy' "$WORK/warnings" && grep -q 'KEDA_NAMESPACE=' "$WORK/warnings" && grep -q 'make setup-prereqs' "$WORK/warnings"; then pass; else fail "$label: no loud warning that :9090 is open, naming KEDA_NAMESPACE=<ns> make setup-prereqs: $(head -3 "$WORK/warnings")"; fi
+            if [ -n "$expect_unread" ]; then
+                if grep -q 'Not readable' "$WORK/warnings"; then pass; else fail "$label: an unreadable source was not reported as unknown"; fi
+            fi
+            return
+            ;;
+    esac
+    if [ -s "$WORK/warnings" ]; then
+        fail "$label: a KNOWN namespace was warned about: $(head -2 "$WORK/warnings")"
+    else
+        pass
     fi
     check_policy "$label" "$WORK/installed.yaml" "$want"
 }
@@ -271,38 +299,74 @@ install_case "installer: explicit KEDA_NAMESPACE wins" config/overlays/cluster-s
     KEDA_NAMESPACE=my-keda KEDA_NAMESPACE_EXPLICIT=true "STUB_APISVC='keda keda-operator-metrics-apiserver'" STUB_DEPLOYS=elsewhere
 install_case "installer: the external-metrics APIService wins over a decoy Pod" config/overlays/namespace-scoped/kubernetes keda \
     "STUB_APISVC='keda keda-operator-metrics-apiserver'" STUB_PODS_STD=tenant-decoy STUB_PODS_APP=tenant-decoy
-install_case "installer: an APIService served by prometheus-adapter is not KEDA" config/overlays/cluster-scoped/kubernetes found-keda \
+install_case "installer: an APIService served by prometheus-adapter is not KEDA, nor is a keda-operator Deployment" config/overlays/cluster-scoped/kubernetes OPEN \
     "STUB_APISVC='monitoring prometheus-adapter'" STUB_DEPLOYS=found-keda
 install_case "installer: OpenShift CMA found by its APIService" config/overlays/namespace-scoped/openshift openshift-keda \
     "STUB_APISVC='openshift-keda keda-metrics-apiserver'" ENVIRONMENT=openshift
-install_case "installer: KEDA found where its keda-operator Deployment runs" config/overlays/namespace-scoped/kubernetes found-keda \
-    STUB_APISVC=FORBIDDEN STUB_DEPLOYS=found-keda
-install_case "installer: a Pod labelled app=keda-operator is not KEDA" config/overlays/cluster-scoped/kubernetes keda-system \
-    STUB_PODS_STD=tenant-ns STUB_PODS_APP=tenant-ns EXPECT_WARN=1
-install_case "installer: two label decoys no longer abort the install" config/overlays/cluster-scoped/kubernetes keda-system \
-    STUB_PODS_STD=keda-a STUB_PODS_APP=keda-b EXPECT_WARN=1
-install_case "installer: two keda-operator Deployments refuse" config/overlays/cluster-scoped/kubernetes REFUSED \
+install_case "installer: a Deployment named keda-operator is not a source (a tenant can plant one)" config/overlays/namespace-scoped/kubernetes OPEN \
+    STUB_APISVC=FORBIDDEN STUB_DEPLOYS=tenant-planted EXPECT_UNREAD=1
+install_case "installer: a Pod labelled app=keda-operator is not KEDA" config/overlays/cluster-scoped/kubernetes OPEN \
+    STUB_PODS_STD=tenant-ns STUB_PODS_APP=tenant-ns
+install_case "installer: two label decoys do not abort the install" config/overlays/cluster-scoped/kubernetes OPEN \
+    STUB_PODS_STD=keda-a STUB_PODS_APP=keda-b
+install_case "installer: two keda-operator Deployments no longer block the install" config/overlays/cluster-scoped/kubernetes OPEN \
     "STUB_DEPLOYS='keda-a keda-b'"
 install_case "installer: an existing policy's namespace is kept" config/overlays/namespace-scoped/kubernetes admin-keda \
     STUB_APISVC=FORBIDDEN STUB_NP=admin-keda STUB_DEPLOYS=other-keda
-install_case "installer: Forbidden is unknown, not absent (warned, named)" config/overlays/cluster-scoped/kubernetes keda-system \
+install_case "installer: Forbidden is unknown, not absent: no policy, warned, named" config/overlays/cluster-scoped/kubernetes OPEN \
     STUB_APISVC=FORBIDDEN STUB_NP=FORBIDDEN STUB_DEPLOYS=FORBIDDEN STUB_PODS_STD=FORBIDDEN STUB_PODS_APP=FORBIDDEN \
-    EXPECT_WARN=1 EXPECT_UNREAD=1
-install_case "installer: Forbidden on OpenShift: platform default, warned" config/overlays/namespace-scoped/openshift openshift-keda \
-    STUB_APISVC=FORBIDDEN STUB_DEPLOYS=FORBIDDEN ENVIRONMENT=openshift EXPECT_WARN=1 EXPECT_UNREAD=1
-install_case "installer: nothing visible on Kubernetes: KEDA_NAMESPACE default, warned" config/overlays/cluster-scoped/kubernetes keda-system \
-    EXPECT_WARN=1
+    EXPECT_UNREAD=1
+install_case "installer: Forbidden on OpenShift: no openshift-keda guess" config/overlays/namespace-scoped/openshift OPEN \
+    STUB_APISVC=FORBIDDEN STUB_DEPLOYS=FORBIDDEN ENVIRONMENT=openshift EXPECT_UNREAD=1
+install_case "installer: nothing visible on Kubernetes: no keda-system guess" config/overlays/cluster-scoped/kubernetes OPEN
 install_case "installer: Helm-installed KEDA is not there yet" config/overlays/cluster-scoped/kubernetes helm-keda \
     KEDA_NAMESPACE=helm-keda KEDA_HELM_INSTALL=true
+install_case "installer: KEDA_HELM_INSTALL=true with KEDA already elsewhere follows the APIService" config/overlays/cluster-scoped/kubernetes keda \
+    KEDA_HELM_INSTALL=true "STUB_APISVC='keda keda-operator-metrics-apiserver'"
+install_case "installer: KEDA_HELM_INSTALL=true with the APIService unreadable is no answer" config/overlays/cluster-scoped/kubernetes OPEN \
+    KEDA_NAMESPACE=helm-keda KEDA_HELM_INSTALL=true STUB_APISVC=FORBIDDEN EXPECT_UNREAD=1
+install_case "installer: the prereqs phase writes the policy it can locate" config/overlays/namespace-scoped/kubernetes keda \
+    WVA_APPLY_SCOPE=prereqs "STUB_APISVC='keda keda-operator-metrics-apiserver'"
+install_case "installer: the controller phase neither reads for KEDA nor warns" config/overlays/namespace-scoped/kubernetes CONTROLLER \
+    WVA_APPLY_SCOPE=controller STUB_APISVC=FORBIDDEN STUB_NP=FORBIDDEN
 install_case "installer: WVA_SCALER_NETWORKPOLICY=false drops the policy" config/overlays/cluster-scoped/kubernetes ABSENT \
     WVA_SCALER_NETWORKPOLICY=false
+install_case "installer: opting out in the controller phase leaves the admin policy alone" config/overlays/namespace-scoped/kubernetes KEPT \
+    WVA_SCALER_NETWORKPOLICY=false WVA_APPLY_SCOPE=controller
 install_case "installer: WVA_SCALER_NETWORKPOLICY=bogus refuses" config/overlays/cluster-scoped/kubernetes REFUSED \
     WVA_SCALER_NETWORKPOLICY=bogus
 
+# --- Which phase owns the policy: the admin's, by name (WVA_PREREQ_NAMED).
+#
+# The tenant phase cannot read where KEDA runs, so a policy it applied was a
+# guess. The phase split must put the policy in the prereqs half, and only there.
+echo "== phase split: the policy is an admin-phase object"
+if render "$ROOT/config/overlays/namespace-scoped/kubernetes" "$WORK/split.yaml" 2>"$WORK/err"; then
+    sel="$(
+        # shellcheck disable=SC1091
+        . "$WORK/constants.sh"
+        # shellcheck disable=SC1091
+        . "$WORK/common.sh"
+        yq "$(wva_prereq_kind_filter select) | .kind + \"/\" + .metadata.name" "$WORK/split.yaml" | grep -cx 'NetworkPolicy/wva-external-scaler'
+    )"
+    exc="$(
+        # shellcheck disable=SC1091
+        . "$WORK/constants.sh"
+        # shellcheck disable=SC1091
+        . "$WORK/common.sh"
+        yq "$(wva_prereq_kind_filter exclude) | .kind + \"/\" + .metadata.name" "$WORK/split.yaml" | grep -cx 'NetworkPolicy/wva-external-scaler'
+    )"
+    if [ "$sel" = 1 ]; then pass; else fail "phase split: the prereqs phase does not apply NetworkPolicy/wva-external-scaler (selected $sel)"; fi
+    if [ "$exc" = 0 ]; then pass; else fail "phase split: the controller phase still applies NetworkPolicy/wva-external-scaler"; fi
+else
+    fail "phase split: the namespace-scoped overlay does not render: $(head -3 "$WORK/err")"
+fi
+
 # --- The post-deploy check: does the policy admit the namespace KEDA runs in?
 #
-# verify_case <label> <want: WARN | QUIET> [VAR=value...]
-# WARN: the mismatch warning is printed. QUIET: no warning at all.
+# verify_case <label> <want: WARN | OPEN | QUIET> [VAR=value...]
+# WARN: the mismatch warning is printed. OPEN: the "no NetworkPolicy: scaler
+# port open" warning. QUIET: no warning at all.
 verify_case() {
     local label="$1" want="$2"
     shift 2
@@ -335,22 +399,29 @@ verify_case() {
         WARN)
             if grep -q 'NOTHING SCALES' "$WORK/warnings" && grep -q KEDA_NAMESPACE "$WORK/warnings"; then pass; else fail "$label: no loud mismatch warning naming KEDA_NAMESPACE"; fi
             ;;
+        OPEN)
+            if grep -q 'No NetworkPolicy: scaler port open' "$WORK/warnings"; then pass; else fail "$label: no warning that the scaler port is open: $(head -2 "$WORK/warnings")"; fi
+            ;;
         QUIET)
             if [ ! -s "$WORK/warnings" ]; then pass; else fail "$label: warned: $(head -2 "$WORK/warnings")"; fi
             ;;
     esac
 }
 
-verify_case "verify: the policy admits keda-system, KEDA runs in keda" WARN \
-    STUB_NP=keda-system STUB_DEPLOYS=keda
-verify_case "verify: the policy admits where KEDA runs" QUIET \
-    STUB_NP=keda STUB_DEPLOYS=keda
-verify_case "verify: Deployments unreadable, the APIService still decides" WARN \
-    STUB_NP=keda-system STUB_DEPLOYS=FORBIDDEN "STUB_APISVC='keda keda-operator-metrics-apiserver'"
+verify_case "verify: the policy admits keda-system, the APIService says keda" WARN \
+    STUB_NP=keda-system "STUB_APISVC='keda keda-operator-metrics-apiserver'"
+verify_case "verify: the policy admits where the APIService says KEDA runs" QUIET \
+    STUB_NP=keda "STUB_APISVC='keda keda-operator-metrics-apiserver'"
+verify_case "verify: a keda-operator Deployment cannot call the policy wrong" QUIET \
+    STUB_NP=keda-system STUB_DEPLOYS=tenant-planted
+verify_case "verify: the APIService decides even beside a decoy Deployment" WARN \
+    STUB_NP=keda-system STUB_DEPLOYS=keda-system "STUB_APISVC='keda keda-operator-metrics-apiserver'"
 verify_case "verify: nothing readable is not a mismatch" QUIET \
     STUB_NP=keda-system STUB_DEPLOYS=FORBIDDEN STUB_APISVC=FORBIDDEN
-verify_case "verify: no policy, nothing to compare" QUIET \
+verify_case "verify: no policy: the scaler port is open, said as a warning" OPEN \
     STUB_DEPLOYS=keda
+verify_case "verify: opted out: still said, the port is open" OPEN \
+    WVA_SCALER_NETWORKPOLICY=false
 
 echo ""
 if [ "$FAIL" -gt 0 ]; then

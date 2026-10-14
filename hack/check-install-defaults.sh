@@ -53,7 +53,7 @@ for fn in wva_split_image_ref wva_image_ref_fields wva_image_pull_policy wva_war
     }
 done
 
-EXPECT_CASES=47
+EXPECT_CASES=49
 RAN=0
 FAILED=0
 
@@ -196,9 +196,13 @@ check 'tls: plain HTTP is not this warning' '0' \
 # function must itself keep only the namespace PROMETHEUS_URL addresses.
 PROM_CRS=''
 kubectl() { [ -z "$PROM_CRS" ] || printf '%s\n' "$PROM_CRS"; }
+# scraper <CRs> <URL> <DEPLOY_PROMETHEUS> [PROMETHEUS_SA] [explicit URL]: the
+# fifth argument is PROMETHEUS_URL_EXPLICIT, and defaults to the URL itself --
+# the caller passed it. Pass '' for a URL the installer DETECTED.
 scraper() {
     (
         PROM_CRS="$1" PROMETHEUS_URL="$2" DEPLOY_PROMETHEUS="$3" PROMETHEUS_SA="${4:-}"
+        PROMETHEUS_URL_EXPLICIT="${5-$2}"
         MONITORING_NAMESPACE=our-mon
         wva_prometheus_scraper_sa 2>/dev/null
     )
@@ -224,6 +228,10 @@ check 'scraper: CRs in that namespace disagreeing -> nobody' '' \
     "$(scraper "$(printf 'obs a\nobs b')" "$OBS_URL" false)"
 check 'scraper: two CRs agreeing on one account' 'obs a' \
     "$(scraper "$(printf 'obs a\nobs a')" "$OBS_URL" false)"
+# A DETECTED URL is whichever Prometheus the API listed first -- on a shared
+# cluster someone else's -- so its CR never names the subject.
+check 'scraper: a detected URL never decides the subject' '' \
+    "$(scraper "$(printf 'mon prom\nobs obs-prom')" "$OBS_URL" false '' '')"
 check 'scraper: no CR yet, our stack in MONITORING_NAMESPACE -> its account' \
     'our-mon kube-prometheus-stack-prometheus' \
     "$(scraper '' 'https://kube-prometheus-stack-prometheus.our-mon.svc.cluster.local:9090' true)"
@@ -235,7 +243,9 @@ check 'url namespace: service.namespace.svc' 'obs' "$(wva_prometheus_url_namespa
 check 'url namespace: an external host has none' '' "$(wva_prometheus_url_namespace 'https://prom.example.com:9090')"
 
 # The URL is resolved BEFORE the subject is chosen. Asked first, it read the
-# namespace of the shipped default rather than of the Prometheus detected.
+# namespace of the shipped default rather than of the Prometheus detected. And
+# neither decides: the default's account is trusted only when this install
+# deploys that stack (DEPLOY_PROMETHEUS=true), and a detected one never.
 decision() {
     (
         PROM_CRS="$(printf 'obs obs-prom\nworkload-variant-autoscaler-monitoring kube-prometheus-stack-prometheus')"
@@ -249,7 +259,24 @@ decision() {
         printf '%s' "$WVA_METRICS_READER_SCRAPER"
     )
 }
-check 'scraper: the detected URL decides, not the shipped default' 'obs obs-prom' "$(decision)"
+check 'scraper: neither the detected URL nor the shipped default decides' '' "$(decision)"
+# Where the order still matters: the stack this install deploys is recognised
+# by the RESOLVED URL addressing MONITORING_NAMESPACE, not the shipped default's.
+decision_ours() {
+    (
+        PROM_CRS=''
+        PROMETHEUS_URL='https://kube-prometheus-stack-prometheus.workload-variant-autoscaler-monitoring.svc.cluster.local:9090'
+        PROMETHEUS_URL_EXPLICIT='' WVA_PROMETHEUS_URL_RESOLVED='' PROMETHEUS_SA=''
+        DEPLOY_PROMETHEUS=true MONITORING_NAMESPACE=obs
+        wva_detect_prometheus_url() { printf '%s\n' "$OBS_URL"; }
+        log_info() { :; }
+        k="$(mktemp "$WORK/kust.XXXXXX")"
+        wva_append_metrics_reader_decision "$k" wns >/dev/null 2>&1
+        printf '%s' "$WVA_METRICS_READER_SCRAPER"
+    )
+}
+check 'scraper: the resolved URL, not the shipped default, finds the stack this install deploys' \
+    'obs kube-prometheus-stack-prometheus' "$(decision_ours)"
 unset -f kubectl
 
 # ----------------------------------------------------------------------------

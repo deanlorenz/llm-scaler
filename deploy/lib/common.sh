@@ -204,7 +204,7 @@ wva_scaler_has_endpoints() {
 
 # --- Where KEDA runs, for the external-scaler NetworkPolicy.
 #
-# Three readers, each returning 0 with an answer, 1 for "looked, and there is
+# Two readers, each returning 0 with an answer, 1 for "looked, and there is
 # none", and 2 for "could not look". 2 is never folded into 1: a Forbidden read
 # reported as "none found" sent the install to keda-system on a cluster whose
 # KEDA runs in `keda`, and KEDA was then refused by the policy written for it.
@@ -258,23 +258,10 @@ wva_scaler_np_keda_ns() {
     printf '%s\n' "$found"
 }
 
-# wva_keda_operator_namespaces echoes, one per line, each namespace holding a
-# Deployment named keda-operator -- the name every KEDA distribution gives it.
-#
-# Not a Pod label. app=keda-operator is a label any tenant can put on any Pod in
-# their own namespace, and a label search then either pointed the policy at that
-# namespace (opening :9090 to the tenant) or found "two KEDAs" and aborted the
-# install. Returns 1 when none is visible, 2 when Deployments cannot be listed
-# cluster-wide.
-wva_keda_operator_namespaces() {
-    local out rc=0
-    out=$(kubectl get deployments -A --field-selector metadata.name=keda-operator \
-        -o jsonpath='{range .items[*]}{.metadata.namespace}{"\n"}{end}' 2>&1) || rc=$?
-    [ "$rc" -eq 0 ] || return 2
-    out="$(printf '%s\n' "$out" | sed '/^[[:space:]]*$/d' | sort -u)"
-    [ -n "$out" ] || return 1
-    printf '%s\n' "$out"
-}
+# There is no third reader. "Where a Deployment named keda-operator runs" was
+# one, and it was plantable: any tenant can create a Deployment of that name, and
+# the answer then pointed the policy at their namespace (opening :9090 to them)
+# or made it "ambiguous" and stopped the install.
 
 # WVA_SHARED_CLUSTER_ROLE_BINDINGS are the cluster-scoped bindings every overlay
 # applies under fixed names. They are renamed per install so two installs cannot
@@ -587,8 +574,18 @@ WVA_PREREQ_KINDS=(Namespace ClusterRole ClusterRoleBinding ServiceMonitor Role R
 # wva-scaling-policy-config, which a namespace owner is meant to edit. Making
 # every ConfigMap admin-owned to fix one of them would take the scaling policy
 # with it.
+#
+# NetworkPolicy/wva-external-scaler is here for a different reason: it must name
+# the namespace KEDA runs in, and only the admin's phase can read that (the
+# external.metrics APIService is cluster-scoped). Applied from the tenant's
+# phase it was always a guess -- keda-system -- and with KEDA in `keda` it
+# refused KEDA and nothing scaled. The tenant phase now neither writes nor
+# requires it: wva_missing_prereqs reports it OPTIONAL, because an admin phase
+# that could not find KEDA leaves it out on purpose
+# (wva_append_scaler_networkpolicy_patch) rather than write a guess.
 WVA_PREREQ_NAMED=(
     "ConfigMap/wva-metrics-server-ca"
+    "NetworkPolicy/wva-external-scaler"
 )
 
 wva_prereq_kind_filter() {

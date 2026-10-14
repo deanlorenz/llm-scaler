@@ -334,16 +334,18 @@ verify_deployment() {
 }
 
 # wva_verify_scaler_networkpolicy compares the namespace the external-scaler
-# NetworkPolicy admits to :9090 with where the KEDA operator actually runs, and
-# says so LOUDLY when they differ: KEDA is then refused, every ScaledObject that
-# names this scaler goes not-Ready, and nothing scales -- while the controller
-# itself reports healthy. The install picks the namespace from what it can read
-# (wva_resolve_scaler_keda_namespace); this is the check on that pick, made after
-# the fact with whatever this identity can read. Never fatal, and silent about
-# what it cannot read beyond one line saying so.
+# NetworkPolicy admits to :9090 with where KEDA runs, and says so LOUDLY when
+# they differ: KEDA is then refused, every ScaledObject that names this scaler
+# goes not-Ready, and nothing scales -- while the controller itself reports
+# healthy. And it says, as a warning, when there is no policy at all: :9090 is
+# then open to any Pod. Never fatal, and silent about what it cannot read beyond
+# one line saying so.
 #
-# Where KEDA runs: a Deployment named keda-operator, else the namespace serving
-# the external-metrics APIService when that is KEDA's (common.sh).
+# Where KEDA runs is read the way the install reads it
+# (wva_resolve_scaler_keda_namespace): the namespace serving the external-metrics
+# APIService, when that is KEDA's. Nothing weaker. A Deployment named
+# keda-operator is not evidence -- any tenant can create one -- so it can neither
+# confirm a policy nor call one wrong.
 wva_verify_scaler_networkpolicy() {
     local np_ns keda rc
     rc=0
@@ -354,28 +356,32 @@ wva_verify_scaler_networkpolicy() {
             log_info "Could not read NetworkPolicy wva-external-scaler in $WVA_NS, so whether it admits KEDA is not checked."
             return 0
             ;;
-        *) return 0 ;;   # no policy (WVA_SCALER_NETWORKPOLICY=false): nothing to compare
+        *)
+            log_warning "No NetworkPolicy: scaler port open. NetworkPolicy wva-external-scaler is absent from $WVA_NS (or admits :9090 from no single namespace), so the external scaler (:9090) is reachable by any Pod."
+            if [ "${WVA_SCALER_NETWORKPOLICY:-true}" = "false" ]; then
+                log_warning "  WVA_SCALER_NETWORKPOLICY=false left it out on purpose."
+            else
+                log_warning "  To close it, a cluster admin runs: KEDA_NAMESPACE=<namespace KEDA runs in> NAMESPACE=$WVA_NS make setup-prereqs"
+            fi
+            return 0
+            ;;
     esac
     rc=0
-    keda="$(wva_keda_operator_namespaces)" || rc=$?
-    if [ "$rc" != 0 ]; then
-        rc=0
-        keda="$(wva_keda_apiservice_ns)" || rc=$?
-    fi
+    keda="$(wva_keda_apiservice_ns)" || rc=$?
     if [ "$rc" != 0 ] || [ -z "$keda" ]; then
-        log_info "External scaler NetworkPolicy admits :9090 from $np_ns; where KEDA runs is not visible to you, so that is not confirmed. If KEDA runs elsewhere, re-run with KEDA_NAMESPACE=<namespace>."
+        log_info "External scaler NetworkPolicy admits :9090 from $np_ns; where KEDA runs is not visible to you (no readable KEDA-served external-metrics APIService), so that is not confirmed. If KEDA runs elsewhere, re-run setup-prereqs with KEDA_NAMESPACE=<namespace>."
         return 0
     fi
-    if printf '%s\n' "$keda" | grep -qxF "$np_ns"; then
-        log_success "External scaler NetworkPolicy admits KEDA from $np_ns, where it runs"
+    if [ "$keda" = "$np_ns" ]; then
+        log_success "External scaler NetworkPolicy admits KEDA from $np_ns, the namespace serving the external-metrics APIService"
         return 0
     fi
     log_warning "=================================================================="
     log_warning "The external scaler NetworkPolicy admits :9090 ONLY from $np_ns,"
-    log_warning "  but KEDA runs in: $(printf '%s' "$keda" | tr '\n' ' ')"
+    log_warning "  but the external-metrics APIService is served by KEDA in: $keda"
     log_warning "  KEDA's calls are dropped: every ScaledObject naming this scaler goes"
     log_warning "  not-Ready and NOTHING SCALES, while the controller reports healthy."
-    log_warning "  Fix: re-run the install with KEDA_NAMESPACE=<the namespace KEDA runs in>,"
+    log_warning "  Fix: re-run setup-prereqs with KEDA_NAMESPACE=<the namespace KEDA runs in>,"
     log_warning "  or edit NetworkPolicy wva-external-scaler in $WVA_NS."
     log_warning "=================================================================="
     return 0
