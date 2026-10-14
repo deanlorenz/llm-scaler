@@ -64,7 +64,8 @@ func (a *SaturationAnalyzer) throughputKey(
 	if canonicalRole(role) == domain.RolePrefill {
 		outBucket = prefillOutputBucket
 	}
-	return fmt.Sprintf("%s|%s|%d|%s|i%s|%s|q%g",
+	return fmt.Sprintf("%s|%s|%s|%s|%d|%s|i%s|%s|q%g",
+		namespace, variantName,
 		modelID, a.stableAccelerator(namespace, variantName, accelerator),
 		gpuCount, canonicalRole(role), classifyInputLength(avgInput),
 		outBucket, queueThreshold)
@@ -90,6 +91,20 @@ func (a *SaturationAnalyzer) throughputKey(
 // under the old one. Measured: a k2 of 2 learned under a low threshold kept
 // a variant at utilization 1.0 under a threshold of 100, where P1 could not
 // fire at all.
+//
+// Scoped by namespace and variant, so a window holds one variant's readings
+// and nobody else's. Without them the key was model|accelerator|gpus|role|...,
+// and every variant of a model on that hardware wrote into one window and read
+// its average back as its own k2 -- in P1-obs, which returns the blended
+// average, as well as in P2-hist. Two variants of one model differing in
+// --max-num-seqs then share one k2, and the higher one makes the other claim
+// more KV per replica than it holds and order fewer replicas. That is the
+// direction that does not recover: a fleet held small does not saturate, so
+// it never produces the reading that would correct it. Starting another
+// variant from what one has measured is a separate question, answered on the
+// read side with the source named (docs/proposals/
+// learned-state-sharing-by-similarity.md); pooling on the write side destroys
+// the provenance that answer needs.
 func (a *SaturationAnalyzer) historyKey(
 	modelID, namespace, variantName, accelerator string,
 	gpuCount int,
@@ -97,7 +112,8 @@ func (a *SaturationAnalyzer) historyKey(
 	avgOutput float64,
 	queueThreshold float64,
 ) string {
-	return fmt.Sprintf("%s|%s|%d|%s|%s|q%g",
+	return fmt.Sprintf("%s|%s|%s|%s|%d|%s|%s|q%g",
+		namespace, variantName,
 		modelID, a.stableAccelerator(namespace, variantName, accelerator),
 		gpuCount, canonicalRole(role), classifyOutputLength(avgOutput), queueThreshold)
 }

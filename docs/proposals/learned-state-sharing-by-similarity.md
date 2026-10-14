@@ -1,6 +1,7 @@
 # Learned-state sharing by similarity, not by identity
 
-**Status:** proposed, not built. Supersedes part of the sharing key on
+**Status:** proposed; step 3 of [Order of work](#order-of-work) is partly
+built (per-variant k2 and throughput windows), the rest is not. Supersedes part of the sharing key on
 `feat/engine-config-identity` (PR #126), and proposes a storage model for the
 k2 and saturated-throughput windows that main does not have; see
 [What this changes](#what-this-changes).
@@ -37,7 +38,9 @@ the same way.
 | k2 (saturated occupancy) | `historyKey`: `model\|accelerator\|gpus\|role\|outBucket\|qN` | **pooled** across namespaces, variants and engine configurations |
 | saturated throughput | `throughputKey`: `model\|accelerator\|gpus\|role\|inBucket\|outBucket\|qN` | **pooled**, the same way |
 
-(`internal/engines/analyzers/saturation/analyzer.go` and `keys.go`.)
+(`internal/engines/analyzers/saturation/analyzer.go` and `keys.go`, before the
+change that ships with this proposal; that change makes the two pooled rows
+per variant.)
 
 The pooled windows are not a cap. `P2-hist` returns the pooled window's average
 as **this variant's k2** (`replica_capacity.go`, the `K2SrcHistorical` branch),
@@ -239,10 +242,10 @@ already-reviewed answer to the same question.
 - `P2-hist` reads the variant's own window, then the tiers, under rule 1.
 - `nearestSaturatedThroughput` searches by distance as above, and stops
   touching what it borrows.
-- On upgrade, every k2 and throughput window starts empty under its new key.
-  That costs one learning period per variant and should be said in the release
-  note; the alternative, migrating a pooled window into per-variant ones,
-  would invent provenance the old window does not have.
+- No migration. These windows live in the controller's memory and an upgrade
+  restarts it, so they start empty whatever the key; the new key costs nothing
+  a restart does not already cost. What changes after that is how fast a
+  window fills: one variant's replicas feed it, not every variant's.
 
 **On PR #126**, this supersedes the key and keeps everything else.
 
@@ -278,6 +281,9 @@ distance.
    cross-variant k2 pooling whatever the switch says. It needs a cluster run
    with two variants of one model under different `--max-num-seqs`, showing
    that neither inherits the other's k2.
+   **Built** for namespace and variant (`historyKey`, `throughputKey`), with
+   specs in `per_variant_history_test.go`; the configuration digest joins the
+   key once #126's `Fingerprint()` is on main. The cluster run is not done.
 4. **Tiers 1 and 2** behind `enableLearnedStateReuse`, with rule 1 enforced and
    pinned by a spec in which a donor's higher k2 fails to raise the borrower's.
 

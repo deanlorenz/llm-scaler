@@ -225,10 +225,11 @@ func (a *SaturationAnalyzer) nearestSaturatedThroughput(key string) (float64, st
 }
 
 // splitHistoryKey takes a key of the form built by historyKey --
-// model|accelerator|gpus|role|bucket|qN -- apart around its bucket. The
-// model ID may itself contain "|"-free "/" and other characters but never
-// "|", so counting from the right is safe: the bucket is the second-to-last
-// field.
+// namespace|variant|model|accelerator|gpus|role|bucket|qN -- apart around its
+// bucket. The model ID may itself contain "|"-free "/" and other characters
+// but never "|", so counting from the right is safe: the bucket is the
+// second-to-last field. The namespace and variant land in prefix, so a borrow
+// walks the variant's OWN other buckets and never another variant's.
 // splitHistoryKey locates the OUTPUT bucket as the second-to-last |-field
 // and the queue threshold as the last. A throughput key carries an input
 // bucket too, ahead of the output one, so it lands in prefix and a neighbour

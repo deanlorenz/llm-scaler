@@ -425,7 +425,7 @@ which is also why there is no supported way to run two.
 | `WVA_LOG_LEVEL` | the scaling manager logging level | `info` |
 | `LEARNED_STATE_EPISODE_GAP` | How long a gap in saturated observations before the next one starts a **new window** instead of blending into the old one. A variant that goes quiet over a weekend should not average Monday's capacity with Friday's | `24h` |
 | `LEARNED_STATE_VARIANT_TIMEOUT` | How long **per-variant** learned state — the fitted ITL window and its baseline, the replica start estimate — is kept after the variant stops being reported. Shorten it and a fleet that parks re-measures sooner on wake | `24h` |
-| `LEARNED_STATE_BUCKET_RETENTION` | How long a **bucket-keyed** window — the k2 history and the mu windows the demand floor prices from — is kept from when it was last read. Longer than the timeout on purpose: a retained measurement is the lowest capacity figure available for its bucket, and dropping it falls through to an estimate that orders *fewer* replicas | `168h` (7 days) |
+| `LEARNED_STATE_BUCKET_RETENTION` | How long a **bucket-keyed** window — the k2 history and the mu windows the demand floor prices from, one per variant and traffic-shape bucket — is kept from when it was last read. Longer than the timeout on purpose: a retained measurement is the lowest capacity figure available for its bucket, and dropping it falls through to an estimate that orders *fewer* replicas | `168h` (7 days) |
 | `PROMETHEUS_SECRET_NAME` | Secret holding the Prometheus serving cert | `prometheus-web-tls` |
 | `PROMETHEUS_SECRET_NS` | Namespace of that secret | `$MONITORING_NAMESPACE` |
 | `PROM_CA_CERT_PATH` | Where the extracted Prometheus CA is written | `/tmp/prometheus-ca.crt` |

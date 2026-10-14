@@ -130,7 +130,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			// Verify k2 was stored in history
-			histKey := "test-model|H100|1|both|short|q5"
+			histKey := "test-ns|variant-a|test-model|H100|1|both|short|q5"
 			ra, ok := analyzer.computeCapacityHistory[histKey]
 			Expect(ok).To(BeTrue())
 			Expect(ra.Average()).To(Equal(float64(8000)))
@@ -292,7 +292,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 			result, err := analyzer.Analyze(ctx, input)
 			Expect(err).NotTo(HaveOccurred())
 
-			ra, ok := analyzer.computeCapacityHistory["test-model|H100|1|both|short|q5"]
+			ra, ok := analyzer.computeCapacityHistory["test-ns|variant-a|test-model|H100|1|both|short|q5"]
 			Expect(ok).To(BeTrue(), "a legitimate high-occupancy reading must seed history")
 			Expect(ra.Average()).To(Equal(float64(14000)))
 			// k1 still bounds what the analyzer reports this cycle.
@@ -313,7 +313,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 			_, err := analyzer.Analyze(ctx, input)
 			Expect(err).NotTo(HaveOccurred())
 
-			histKey := "test-model|H100|1|both|short|q5"
+			histKey := "test-ns|variant-a|test-model|H100|1|both|short|q5"
 			_, ok := analyzer.computeCapacityHistory[histKey]
 			Expect(ok).To(BeFalse())
 		})
@@ -398,7 +398,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 			)
 			_, err := analyzer.Analyze(ctx, resolved)
 			Expect(err).NotTo(HaveOccurred())
-			ra, ok := analyzer.computeCapacityHistory["test-model|H100|1|both|short|q5"]
+			ra, ok := analyzer.computeCapacityHistory["test-ns|variant-a|test-model|H100|1|both|short|q5"]
 			Expect(ok).To(BeTrue())
 			Expect(ra.Average()).To(Equal(float64(8000)))
 
@@ -415,7 +415,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 			_, err = analyzer.Analyze(ctx, unresolved)
 			Expect(err).NotTo(HaveOccurred())
 
-			_, spurious := analyzer.computeCapacityHistory["test-model|unknown|1|both|short|q5"]
+			_, spurious := analyzer.computeCapacityHistory["test-ns|variant-a|test-model|unknown|1|both|short|q5"]
 			Expect(spurious).To(BeFalse(),
 				"an unresolved accelerator opened a second history bucket; this is the oscillation")
 			Expect(ra.Average()).To(Equal(float64(8500)),
@@ -469,7 +469,7 @@ var _ = Describe("SaturationAnalyzer", func() {
 			)
 			_, err := analyzer.Analyze(ctx, seed)
 			Expect(err).NotTo(HaveOccurred())
-			_, ok := analyzer.computeCapacityHistory["test-model|H100|1|both|short|q5"]
+			_, ok := analyzer.computeCapacityHistory["test-ns|variant-a|test-model|H100|1|both|short|q5"]
 			Expect(ok).To(BeTrue())
 
 			// The operator retunes the threshold. The old observation is not a
@@ -500,6 +500,11 @@ var _ = Describe("SaturationAnalyzer", func() {
 			// decode variant that happens to be at "short" too (e.g. a cold
 			// replica before it's served real traffic).
 			//
+			// The two roles are two variants here, and the key is per variant,
+			// so the variant alone now keeps these windows apart. The role stays
+			// in the key for the case this fixture cannot build: one variant
+			// whose role changes, which must not read the other role's window.
+			//
 			// Saturated on separate cycles: a prefill saturation is recorded
 			// only while decode is not saturated (computeK2), so one cycle with
 			// both over the threshold would seed decode's history alone.
@@ -520,11 +525,11 @@ var _ = Describe("SaturationAnalyzer", func() {
 				}, states))
 			Expect(err).NotTo(HaveOccurred())
 
-			prefillHist, ok := analyzer.computeCapacityHistory["test-model|H100|1|prefill|short|q5"]
+			prefillHist, ok := analyzer.computeCapacityHistory["test-ns|variant-p|test-model|H100|1|prefill|short|q5"]
 			Expect(ok).To(BeTrue())
 			Expect(prefillHist.Average()).To(Equal(float64(8000)))
 
-			decodeHist, ok := analyzer.computeCapacityHistory["test-model|H100|1|decode|short|q5"]
+			decodeHist, ok := analyzer.computeCapacityHistory["test-ns|variant-d|test-model|H100|1|decode|short|q5"]
 			Expect(ok).To(BeTrue())
 			Expect(decodeHist.Average()).To(Equal(float64(3000)))
 
