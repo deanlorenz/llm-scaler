@@ -306,7 +306,7 @@ check_tenant_install() {
         # where the name lives: the controller refuses to become ready if cluster
         # policy demands node access it does not have, and verify_deployment turns
         # that into a failed install.
-        log_info "This namespace carries no wva.llmd.ai/policy-namespace label, so the controller will use its built-in default policy namespace."
+        log_info "This namespace carries no wva.llmd.ai/policy-namespace label, so the controller uses the well-known policy namespace if it exists and the controller can read Namespaces, and its own ConfigMap otherwise. Its log says which: 'Cluster policy comes from'."
         log_warning "  If no cluster policy exists there either, scaling here is bounded only by each workload's maxReplicas. A ResourceQuota on ${WVA_NS} is the way to bound it."
         return 0
     fi
