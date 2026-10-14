@@ -126,6 +126,16 @@ last; it is the unit change that makes the other two land.
   observability yes, a metric for KEDA to threshold instead of WVA computing
   the target no.
 
+- **[Learned-state sharing by similarity](learned-state-sharing-by-similarity.md)**
+  — each variant stores only its own k2, throughput and ITL readings, and a
+  variant with none reads the most compatible other variant's: same flags,
+  then compatible on what matters, then the formula. Today k2 and saturated
+  throughput are pooled across namespaces and engine configurations, and the
+  pooled k2 becomes a variant's own, so a donor with a higher one makes it
+  order fewer replicas. A borrowed reading may only make a variant more
+  conservative. Replaces the identity digest as the gate for sharing on #126,
+  after seven measured ways to make that digest wrong.
+
 ## Product and lifecycle
 
 - **[Capacity-planner positioning](capacity-planner-positioning.md)** — where a
