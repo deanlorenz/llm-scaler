@@ -93,6 +93,43 @@ func TestLearnedStateBorrowsReplaceWhatWasPublishedBefore(t *testing.T) {
 	}
 }
 
+// A shared ITL line may come from a variant of the same name in another
+// namespace. The donor's namespace tells them apart -- and tells a borrow
+// from ns-a apart from the variant borrowing from itself.
+func TestLearnedStateBorrowsNameTheDonorsNamespace(t *testing.T) {
+	emitter, registry := engineConfigEmitter(t)
+	emitter.RecordLearnedStateBorrows("ns-b", "m", "decode", []domain.LearnedStateBorrow{
+		{Quantity: domain.BorrowedITLLine, Donor: "decode", DonorNamespace: "ns-a"},
+	})
+	if _, ok := seriesValue(t, registry, constants.WVALearnedStateBorrowed, map[string]string{
+		constants.LabelNamespace: "ns-b", constants.LabelDonor: "decode", constants.LabelDonorNamespace: "ns-a",
+	}); !ok {
+		t.Fatal("the donor's namespace is not on the series")
+	}
+}
+
+// A k2 borrow that ends while a line borrow continues takes its relaxation
+// with it, and leaves the line's series.
+func TestLearnedStateBorrowsDropTheRelaxationWithTheK2Borrow(t *testing.T) {
+	emitter, registry := engineConfigEmitter(t)
+	line := domain.LearnedStateBorrow{Quantity: domain.BorrowedITLLine, Donor: "a", DonorNamespace: "ns"}
+	emitter.RecordLearnedStateBorrows("ns", "m", "canary", []domain.LearnedStateBorrow{
+		{Quantity: domain.BorrowedK2, Donor: "main", DonorNamespace: "ns", Relaxed: 0.3}, line,
+	})
+	emitter.RecordLearnedStateBorrows("ns", "m", "canary", []domain.LearnedStateBorrow{line})
+	if got := countSeries(t, registry, constants.WVALearnedStateBorrowRelaxed); got != 0 {
+		t.Fatalf("%d relaxed series after the k2 borrow ended, want 0", got)
+	}
+	if _, ok := seriesValue(t, registry, constants.WVALearnedStateBorrowed, map[string]string{
+		constants.LabelQuantity: "itl-line",
+	}); !ok {
+		t.Fatal("the line borrow, still in effect, was removed with the k2 borrow")
+	}
+	if got := countSeries(t, registry, constants.WVALearnedStateBorrowed); got != 1 {
+		t.Fatalf("%d borrow series, want the line's alone", got)
+	}
+}
+
 // Deleting one model's variant must not touch another model's variant of the
 // same name in the same namespace.
 func TestDeletingLearnedStateBorrowsIsScopedToTheModel(t *testing.T) {

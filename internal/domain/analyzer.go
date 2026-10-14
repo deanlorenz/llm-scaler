@@ -170,6 +170,30 @@ type AnalyzerResult struct {
 	VariantBusiestQueueLoad map[string]float64
 }
 
+// LearnedStateBorrow is one figure a variant was priced from that a sibling
+// variant learned.
+type LearnedStateBorrow struct {
+	// Quantity is what was borrowed: BorrowedK2 or BorrowedITLLine.
+	Quantity string
+	// Donor is the variant that measured it, and DonorNamespace its
+	// namespace. A k2 is borrowed only within a namespace; an ITL line is
+	// shared by engine configuration, whatever namespace the lender runs in,
+	// so the variant name alone can be ambiguous -- or read as the variant
+	// borrowing from itself.
+	Donor          string
+	DonorNamespace string
+	// Relaxed is how far a k2 borrow has relaxed back to the variant's own
+	// figure: 0 at full strength, 1 fully relaxed. Always 0 for a line,
+	// which is used as it is.
+	Relaxed float64
+}
+
+// The quantities a variant can borrow from a sibling.
+const (
+	BorrowedK2      = "k2"
+	BorrowedITLLine = "itl-line"
+)
+
 // VariantCapacity is one variant's entry in an analyzer's (D, P) signal, in
 // analyzer-specific units. For saturation: tokens. For throughput: tokens/sec.
 // For SLO: latency-constrained capacity.
@@ -185,25 +209,6 @@ type AnalyzerResult struct {
 // with the per-role supply grouped from these entries, so both halves must be
 // keyed the same way. The builder still overlays it from discovery so the two
 // cannot drift.
-// LearnedStateBorrow is one figure a variant was priced from that a sibling
-// variant learned.
-type LearnedStateBorrow struct {
-	// Quantity is what was borrowed: BorrowedK2 or BorrowedITLLine.
-	Quantity string
-	// Donor is the variant that measured it.
-	Donor string
-	// Relaxed is how far a k2 borrow has relaxed back to the variant's own
-	// figure: 0 at full strength, 1 fully relaxed. Always 0 for a line,
-	// which is used as it is.
-	Relaxed float64
-}
-
-// The quantities a variant can borrow from a sibling.
-const (
-	BorrowedK2      = "k2"
-	BorrowedITLLine = "itl-line"
-)
-
 type VariantCapacity struct {
 	VariantName string
 	Role        string // "prefill", "decode", "both", "" (empty = non-disaggregated)

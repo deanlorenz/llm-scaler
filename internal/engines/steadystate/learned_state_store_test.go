@@ -408,6 +408,17 @@ func TestRestoreOutcomesAndReadErrorsAreCounted(t *testing.T) {
 	denied.restoreLearnedState(ctx, now)
 	assert.Equal(t, 1.0, counterValue(t, registry, constants.WVALearnedStateSnapshotErrorsTotal,
 		constants.LabelOperation, metrics.LearnedStateOpRead), "a Forbidden read was not counted")
+
+	// A document that cannot be parsed is a read that failed too.
+	garbled := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: learnedStateConfigMap, Namespace: config.SystemNamespace()},
+		Data:       map[string]string{learnedStateKey(): "{not json"},
+	}
+	unreadable := snapshotEngine(t, fake.NewClientBuilder().WithObjects(garbled).Build(), &stateSpy{})
+	unreadable.metricsEmitter = metrics.NewMetricsEmitter()
+	unreadable.restoreLearnedState(ctx, now)
+	assert.Equal(t, 2.0, counterValue(t, registry, constants.WVALearnedStateSnapshotErrorsTotal,
+		constants.LabelOperation, metrics.LearnedStateOpRead), "an unparseable snapshot was not counted")
 }
 
 // Every other version's document counts, not only the largest.

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
@@ -163,7 +164,7 @@ func InitMetrics(registry prometheus.Registerer) error {
 	analyzerTargetLabels := []string{constants.LabelAnalyzerName, constants.LabelNamespace, constants.LabelModelName, constants.LabelVariantName}
 	// learnedBorrowLabels: one series per variant and borrowed quantity.
 	learnedBorrowLabels := []string{constants.LabelNamespace, constants.LabelModelName, constants.LabelVariantName,
-		constants.LabelQuantity, constants.LabelDonor}
+		constants.LabelQuantity, constants.LabelDonor, constants.LabelDonorNamespace}
 	learnedRelaxedLabels := []string{constants.LabelNamespace, constants.LabelModelName, constants.LabelVariantName}
 	// engineConfigLabels: the key learned state is filed under -- model,
 	// accelerator, GPUs per replica, fingerprint -- followed by the engine
@@ -291,7 +292,7 @@ func InitMetrics(registry prometheus.Registerer) error {
 	learnedStateBorrowed = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: constants.WVALearnedStateBorrowed,
-			Help: "1 while a variant is priced from a figure a sibling variant learned: quantity=k2 is a measured k2 lower than its own capacity (P2-borrow), quantity=itl-line a shared ITL line. donor names the sibling. Absent when the variant uses only its own figures.",
+			Help: "1 while a variant is priced from a figure a sibling variant learned: quantity=k2 is a measured k2 lower than its own capacity (P2-borrow), quantity=itl-line a shared ITL line. donor and donor_namespace name the sibling. Absent when the variant uses only its own figures.",
 		},
 		learnedBorrowLabels,
 	)
@@ -1718,39 +1719,66 @@ const (
 	LearnedStateOpWrite          = "write"
 )
 
-// RecordLearnedStateBorrows publishes what a variant borrowed this cycle,
-// replacing whatever it published before: a borrow that ended, or whose donor
-// changed, must not leave its series behind.
+// RecordLearnedStateBorrows publishes what a variant borrowed this cycle, and
+// removes whatever it published before that is not borrowed now -- a borrow
+// that ended, or whose donor changed, must not leave its series behind. The
+// new series are set before the old ones go, so a borrow still in effect is
+// never absent from a concurrent scrape.
 func (m *MetricsEmitter) RecordLearnedStateBorrows(namespace, modelID, variantName string, borrows []domain.LearnedStateBorrow) {
 	if learnedStateBorrowed == nil || learnedStateRelaxed == nil {
 		return
 	}
-	m.DeleteLearnedStateBorrows(namespace, modelID, variantName)
-	for _, b := range borrows {
-		labels := prometheus.Labels{
+	variantLabels := func() prometheus.Labels {
+		l := prometheus.Labels{
 			constants.LabelNamespace:   namespace,
 			constants.LabelModelName:   modelID,
 			constants.LabelVariantName: variantName,
-			constants.LabelQuantity:    b.Quantity,
-			constants.LabelDonor:       b.Donor,
 		}
 		if controllerInstance != "" {
-			labels[constants.LabelControllerInstance] = controllerInstance
+			l[constants.LabelControllerInstance] = controllerInstance
 		}
+		return l
+	}
+	keep := map[string]bool{}
+	relaxedSet := false
+	for _, b := range borrows {
+		labels := variantLabels()
+		labels[constants.LabelQuantity] = b.Quantity
+		labels[constants.LabelDonor] = b.Donor
+		labels[constants.LabelDonorNamespace] = b.DonorNamespace
 		learnedStateBorrowed.With(labels).Set(1)
+		keep[b.Quantity+"|"+b.DonorNamespace+"|"+b.Donor] = true
 		if b.Quantity == domain.BorrowedK2 {
-			relaxed := prometheus.Labels{
-				constants.LabelNamespace:   namespace,
-				constants.LabelModelName:   modelID,
-				constants.LabelVariantName: variantName,
-			}
-			if controllerInstance != "" {
-				relaxed[constants.LabelControllerInstance] = controllerInstance
-			}
-			learnedStateRelaxed.With(relaxed).Set(b.Relaxed)
+			learnedStateRelaxed.With(variantLabels()).Set(b.Relaxed)
+			relaxedSet = true
 		}
 	}
+	learnedBorrowsMu.Lock()
+	key := namespace + "|" + modelID + "|" + variantName
+	prev := learnedBorrowsPublished[key]
+	learnedBorrowsPublished[key] = borrows
+	learnedBorrowsMu.Unlock()
+	for _, b := range prev {
+		if keep[b.Quantity+"|"+b.DonorNamespace+"|"+b.Donor] {
+			continue
+		}
+		labels := variantLabels()
+		labels[constants.LabelQuantity] = b.Quantity
+		labels[constants.LabelDonor] = b.Donor
+		labels[constants.LabelDonorNamespace] = b.DonorNamespace
+		learnedStateBorrowed.Delete(labels)
+	}
+	if !relaxedSet {
+		learnedStateRelaxed.Delete(variantLabels())
+	}
 }
+
+// learnedBorrowsPublished is what RecordLearnedStateBorrows last published per
+// namespace|model|variant, so the next call can remove exactly what ended.
+var (
+	learnedBorrowsMu        sync.Mutex
+	learnedBorrowsPublished = map[string][]domain.LearnedStateBorrow{}
+)
 
 // DeleteLearnedStateBorrows removes one variant's borrow series, whatever it
 // borrowed and from whom. modelID is part of the match: a variant name is
@@ -1766,6 +1794,9 @@ func (m *MetricsEmitter) DeleteLearnedStateBorrows(namespace, modelID, variantNa
 	}
 	learnedStateBorrowed.DeletePartialMatch(match)
 	learnedStateRelaxed.DeletePartialMatch(match)
+	learnedBorrowsMu.Lock()
+	delete(learnedBorrowsPublished, namespace+"|"+modelID+"|"+variantName)
+	learnedBorrowsMu.Unlock()
 }
 
 // DeleteLearnedStateBorrowsForModel removes every borrow series of a model, for
@@ -1777,6 +1808,13 @@ func (m *MetricsEmitter) DeleteLearnedStateBorrowsForModel(namespace, modelID st
 	match := prometheus.Labels{constants.LabelNamespace: namespace, constants.LabelModelName: modelID}
 	learnedStateBorrowed.DeletePartialMatch(match)
 	learnedStateRelaxed.DeletePartialMatch(match)
+	learnedBorrowsMu.Lock()
+	for k := range learnedBorrowsPublished {
+		if strings.HasPrefix(k, namespace+"|"+modelID+"|") {
+			delete(learnedBorrowsPublished, k)
+		}
+	}
+	learnedBorrowsMu.Unlock()
 }
 
 // AddLearnedStateRestores counts restored variants by outcome.

@@ -284,7 +284,7 @@ const (
 	// WVALearnedStateBorrowed is a gauge, 1 while a variant is priced from a
 	// figure a sibling variant learned: a k2 below its own capacity, or a
 	// shared ITL line. Labels: namespace, model_name, variant_name, quantity
-	// (k2 or itl-line), donor. Absent when it borrows nothing.
+	// (k2 or itl-line), donor, donor_namespace. Absent when it borrows nothing.
 	WVALearnedStateBorrowed = "wva_learned_state_borrowed"
 	// WVALearnedStateBorrowRelaxed is a gauge of how far a variant's k2 borrow
 	// has relaxed back to its own figure: 0 at full strength, 1 fully relaxed.
@@ -865,6 +865,8 @@ const (
 	// itl-line), and LabelDonor the sibling it borrowed from.
 	LabelQuantity = "quantity"
 	LabelDonor    = "donor"
+	// LabelDonorNamespace is the donor variant's namespace.
+	LabelDonorNamespace = "donor_namespace"
 	// LabelOperation names the operation a store error happened in.
 	LabelOperation          = "operation"
 	LabelErrorType          = "error_type"

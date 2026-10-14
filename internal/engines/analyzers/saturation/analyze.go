@@ -527,15 +527,20 @@ func (c *cycle) priceDemand(caps []capacity.ReplicaCapacity) demandParts {
 	for i := range variantCapacities {
 		vc := &variantCapacities[i]
 		from := c.itlBorrowedFrom[vc.VariantName]
-		if from == "" {
+		// Only a variant with replicas of its own reporting is priced from the
+		// line: fitLines resolves one for every known variant, a variant at
+		// zero or carried by bridges alone included, but only own rows read it.
+		if from == "" || vc.ObservedReplicas == 0 {
 			continue
 		}
-		// from is the lender's itlWindowKey, namespace|model|variant|...
-		donor := from
+		// from is the lender's itlWindowKey, namespace|model|variant|...: the
+		// line is shared by configuration, so the lender may be in another
+		// namespace, and is named with it.
+		b := domain.LearnedStateBorrow{Quantity: domain.BorrowedITLLine, Donor: from}
 		if f := strings.Split(from, "|"); len(f) > 2 {
-			donor = f[2]
+			b.DonorNamespace, b.Donor = f[0], f[2]
 		}
-		vc.Borrowed = append(vc.Borrowed, domain.LearnedStateBorrow{Quantity: domain.BorrowedITLLine, Donor: donor})
+		vc.Borrowed = append(vc.Borrowed, b)
 	}
 
 	// Model-level demand D (the analyzer owns demand attribution). Supply,

@@ -114,7 +114,7 @@ func TestBorrowedLineReachesTheRecord(t *testing.T) {
 		switch vc.VariantName {
 		case starved:
 			require.Contains(t, vc.Borrowed,
-				domain.LearnedStateBorrow{Quantity: domain.BorrowedITLLine, Donor: lender},
+				domain.LearnedStateBorrow{Quantity: domain.BorrowedITLLine, Donor: lender, DonorNamespace: ns},
 				"a variant priced on a sibling's ITL line does not say so")
 		case lender:
 			for _, b := range vc.Borrowed {
@@ -154,4 +154,18 @@ func TestBorrowedLineReachesTheRecord(t *testing.T) {
 	}
 	require.True(t, sawStarved, "no record for the starved variant: the test proves nothing")
 	require.True(t, sawLender, "no record for the lender: the test proves nothing")
+
+	// Cycle 3: the starved variant has no replica reporting -- scaled to
+	// zero, or between pods. fitLines still resolves a line for it, but no
+	// row is priced from one, so it borrows nothing.
+	res, err = a.Analyze(ctx, makeReusingAnalyzerInput(lenderRows(), states))
+	require.NoError(t, err)
+	for _, vc := range res.VariantCapacities {
+		if vc.VariantName == starved {
+			for _, b := range vc.Borrowed {
+				require.NotEqual(t, domain.BorrowedITLLine, b.Quantity,
+					"a variant with no replica of its own reporting was reported as priced from a line")
+			}
+		}
+	}
 }

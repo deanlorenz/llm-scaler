@@ -201,6 +201,7 @@ func (e *Engine) restoreLearnedState(ctx context.Context, now time.Time) {
 	}
 	var doc learnedStateDoc
 	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		e.metricsEmitter.IncLearnedStateSnapshotError(metrics.LearnedStateOpRead)
 		logger.Error(err, "Learned state: the snapshot could not be read; nothing restored, and it will be replaced")
 		return
 	}

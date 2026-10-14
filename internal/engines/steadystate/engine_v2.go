@@ -274,9 +274,12 @@ func (e *Engine) recordAnalyzerMetrics(namespace, modelID string, results []allo
 		}
 	}
 	// Per variant, not per analyzer: gathered across every analyzer that
-	// reported the variant, so one that borrows nothing does not unpublish
-	// another's borrow. Every reported variant is written, borrowing or not,
-	// which is what removes a borrow that ended.
+	// reported the variant this cycle, so one that borrows nothing does not
+	// unpublish another's borrow. Every reported variant is written,
+	// borrowing or not, which is what removes a borrow that ended. (A variant
+	// that one analyzer stops reporting while another still does has its
+	// borrow deleted by the eviction below and republished next cycle, as
+	// wva_engine_config is; only the saturation analyzer borrows today.)
 	for variant, b := range borrows {
 		e.metricsEmitter.RecordLearnedStateBorrows(namespace, modelID, variant, b)
 	}

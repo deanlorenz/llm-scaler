@@ -238,7 +238,7 @@ func (a *SaturationAnalyzer) aggregateByVariant(
 			TotalDemand:                totalDemand,
 			Utilization:                utilization,
 			Reason:                     capacityLabel,
-			Borrowed:                   k2BorrowOf(ownRowsOf(replicas)),
+			Borrowed:                   k2BorrowOf(namespace, ownRowsOf(replicas)),
 		})
 		if warmPoolReplicas > 0 {
 			logger.Info("warm-pool-bridge-supply",
@@ -294,37 +294,6 @@ func (a *SaturationAnalyzer) aggregateRoleDemand(
 // per-replica capacities, where every reading is trusted and the midpoint is
 // the better estimate. The floor's median follows the same convention for
 // the same reason.
-// ownRowsOf is a variant's own replicas: the bridges a warm pool lent it do
-// not borrow anything of its learned state.
-func ownRowsOf(replicas []capacity.ReplicaCapacity) []capacity.ReplicaCapacity {
-	own := make([]capacity.ReplicaCapacity, 0, len(replicas))
-	for _, rc := range replicas {
-		if !rc.FromWarmPool {
-			own = append(own, rc)
-		}
-	}
-	return own
-}
-
-// k2BorrowOf reports a variant's k2 borrow, if any of its replicas was priced
-// from one. Replicas in different output buckets can borrow at different
-// stages of relaxation; the one held hardest -- least relaxed -- is reported,
-// since that is the replica the borrow constrains most.
-func k2BorrowOf(rows []capacity.ReplicaCapacity) []domain.LearnedStateBorrow {
-	var out []domain.LearnedStateBorrow
-	for _, rc := range rows {
-		if rc.K2Priority != capacity.K2SrcBorrowed || rc.K2BorrowedFrom == "" {
-			continue
-		}
-		if len(out) == 0 || rc.K2BorrowRelaxed < out[0].Relaxed {
-			out = []domain.LearnedStateBorrow{{
-				Quantity: domain.BorrowedK2, Donor: rc.K2BorrowedFrom, Relaxed: rc.K2BorrowRelaxed,
-			}}
-		}
-	}
-	return out
-}
-
 func median(values []int64) int64 {
 	n := len(values)
 	if n == 0 {
@@ -339,4 +308,37 @@ func median(values []int64) int64 {
 		return (sorted[n/2-1] + sorted[n/2]) / 2
 	}
 	return sorted[n/2]
+}
+
+// ownRowsOf is a variant's own replicas: the bridges a warm pool lent it do
+// not borrow anything of its learned state.
+func ownRowsOf(replicas []capacity.ReplicaCapacity) []capacity.ReplicaCapacity {
+	own := make([]capacity.ReplicaCapacity, 0, len(replicas))
+	for _, rc := range replicas {
+		if !rc.FromWarmPool {
+			own = append(own, rc)
+		}
+	}
+	return own
+}
+
+// k2BorrowOf reports a variant's k2 borrow, if any of its replicas was priced
+// from one, with the donor's namespace: a k2 is borrowed only within the
+// variant's own. Replicas in different output buckets can borrow at different
+// stages of relaxation; the one held hardest -- least relaxed -- is reported,
+// since that is the replica the borrow constrains most.
+func k2BorrowOf(namespace string, rows []capacity.ReplicaCapacity) []domain.LearnedStateBorrow {
+	var out []domain.LearnedStateBorrow
+	for _, rc := range rows {
+		if rc.K2Priority != capacity.K2SrcBorrowed || rc.K2BorrowedFrom == "" {
+			continue
+		}
+		if len(out) == 0 || rc.K2BorrowRelaxed < out[0].Relaxed {
+			out = []domain.LearnedStateBorrow{{
+				Quantity: domain.BorrowedK2, Donor: rc.K2BorrowedFrom, DonorNamespace: namespace,
+				Relaxed: rc.K2BorrowRelaxed,
+			}}
+		}
+	}
+	return out
 }

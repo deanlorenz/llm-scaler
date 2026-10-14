@@ -20,10 +20,10 @@ func TestK2BorrowOfReportsTheLeastRelaxedReplica(t *testing.T) {
 		{K2Priority: capacity.K2SrcBorrowed, K2BorrowedFrom: "main", K2BorrowRelaxed: 0.5},
 	}
 	assert.Equal(t, []domain.LearnedStateBorrow{
-		{Quantity: domain.BorrowedK2, Donor: "main", Relaxed: 0.2},
-	}, k2BorrowOf(rows))
+		{Quantity: domain.BorrowedK2, Donor: "main", DonorNamespace: "ns", Relaxed: 0.2},
+	}, k2BorrowOf("ns", rows))
 
-	assert.Empty(t, k2BorrowOf([]capacity.ReplicaCapacity{{K2Priority: capacity.K2SrcObserved}}),
+	assert.Empty(t, k2BorrowOf("ns", []capacity.ReplicaCapacity{{K2Priority: capacity.K2SrcObserved}}),
 		"a variant that borrowed nothing reported a borrow")
 }
 

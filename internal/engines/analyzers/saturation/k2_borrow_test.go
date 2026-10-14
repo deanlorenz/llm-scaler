@@ -87,7 +87,7 @@ var _ = Describe("borrowing a sibling's k2", func() {
 		cycle(4000, 6, 1000, 16000, 0)
 		result := cycle(1000, 0, 1000, 16000, 0)
 		Expect(borrowedOf(result, "variant-b")).To(Equal([]domain.LearnedStateBorrow{
-			{Quantity: domain.BorrowedK2, Donor: "variant-a", Relaxed: 0},
+			{Quantity: domain.BorrowedK2, Donor: "variant-a", DonorNamespace: "test-ns", Relaxed: 0},
 		}), "a variant priced from a sibling's k2 does not say so")
 		Expect(borrowedOf(result, "variant-a")).To(BeEmpty(), "the donor reported a borrow of its own")
 
