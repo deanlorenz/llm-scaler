@@ -4,11 +4,18 @@
 [![CI](https://github.com/ev-shindin/llm-scaling-manager/actions/workflows/ci-pr-checks.yaml/badge.svg?branch=main)](https://github.com/ev-shindin/llm-scaling-manager/actions/workflows/ci-pr-checks.yaml)
 [![Go](https://img.shields.io/github/go-mod/go-version/ev-shindin/llm-scaling-manager)](go.mod)
 
-**Sub-second scale-ups for LLMs on Kubernetes, for 12 % less GPU than holding spare replicas.**
+**Sub-second time to first token while it scales up, for 12 % less GPU than a floor of spare replicas.**
+(One run per arm: two 8B models on H200 with a one-Pod warm pool;
+[measured](docs/well-lit-paths/warm-pool-bridge/measured.md).)
+
+llm-d has deprecated its workload-variant-autoscaler, and says deployments
+that depend on cost-aware placement across variants or on fair sharing of a
+scarce accelerator pool should *"stay on WVA for now"*; this fork is that path,
+maintained ([KEDA alone, compared](docs/comparison/keda-alone.md)).
 
 An advanced fork of [llm-d](https://llm-d.ai)'s workload-variant-autoscaler. It
 sizes every model by the work its replicas can actually serve, keeps the fleet
-inside one GPU budget, and lets KEDA do the scaling. An optional warm pool of
+inside a GPU budget when you declare one (`limiters:`; none ships), and lets KEDA do the scaling. An optional warm pool of
 sleeping models covers the minutes a new replica takes to load.
 
 **Measured on GPU clusters** (single runs unless noted; method and caveats linked):
@@ -61,8 +68,9 @@ is the whole registration.
   the one with the lowest cost per unit of capacity (`variantCost`).
 - **A GPU budget**: optionally bound every decision by the GPUs that are free,
   a per-namespace quota, or Kueue's quotas.
-- **Scale to zero and back**: an idle model releases its GPUs; a queued request
-  wakes it.
+- **Scale to zero and back**: KEDA's own scale to zero releases an idle
+  model's GPUs; the controller pushes activation within 100 ms of a queued
+  request.
 - **Warm-pool bridging**: optionally keep models loaded and asleep, and lend
   one while a variant's own replica starts.
 
@@ -180,13 +188,17 @@ The fork keeps WVA's core idea, variant-aware autoscaling for LLM inference,
 and has diverged substantially from it. The largest additions:
 
 - a **KEDA external scaler**, so it answers KEDA directly over gRPC instead of
-  publishing a metric;
+  publishing a metric, and pushes activation from zero instead of waiting for a
+  poll;
 - a **warm pool** that bridges a slow scale-up by lending a Pod with the model
   already loaded and asleep;
 - **ScaledObject discovery and install tooling**: `make scaledobjects-plan`
   writes an editable plan of what would be autoscaled before anything is applied;
-- **GPU budgets** shared across models: physical inventory, quotas, Kueue, and
-  the experimental utilization-share optimizer;
+- **quotas read from Kueue** and the experimental **utilization-share
+  optimizer**, on top of the GPU and quota limiters upstream already had;
+- **capacity model changes**: demand priced from the throughput one replica
+  sustains, and holds through a request-shape change. Scale-from-zero itself
+  came from upstream;
 
 ## Contributing
 

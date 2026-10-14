@@ -103,7 +103,8 @@ trust a scaling decision needs to be able to *read* it.
 
 **Models compete for the same GPUs.** This is the part most autoscalers do not
 attempt. Ours decides for the whole fleet at once rather than per Deployment:
-every model, every variant, one GPU budget, one allocation. A shared warm pool is
+every model, every variant, one allocation, inside a GPU budget when you
+declare one (`limiters:`; none ships). A shared warm pool is
 the same idea in hardware — one held accelerator insuring several models, which
 is why its economics improve with every model added to it.
 
@@ -126,7 +127,9 @@ choice.
 
 **SLA-target-driven scaling.** Scaling on *"will this batch tier miss its
 deadline"* rather than *"is queue depth > N"* is not built. We have named policy
-tiers, which is a coarse approximation. llm-d does not have it yet either.
+tiers, which is a coarse approximation. llm-d now has an SLO-aware KEDA recipe
+for one variant and one SLO pair, measured at 95.8 % attainment at 5.93 average
+replicas; we do not.
 
 **Maintenance pre-scaling and failure replacement.** Not built.
 

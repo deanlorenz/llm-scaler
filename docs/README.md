@@ -12,6 +12,10 @@ The picture, explained: [how the scaling manager fits together](concepts/archite
 Evaluating it? [Why llm-scaling-manager](why.md) is the one-page case: what it
 was measured to do, what it costs, and how mature each part is.
 
+**Start here.** Pick your scenario in the [well-lit paths](well-lit-paths/)
+index, then follow the guide that path links to. Nothing installed yet? The
+[three steps below](#getting-started-in-three-steps) come first.
+
 ## Terms you will meet
 
 | Term | Meaning |
@@ -83,7 +87,8 @@ kubectl logs -n $NAMESPACE deploy/wva-controller-manager | grep scaling-decision
 
 ## Well-lit paths — start from the problem
 
-Documented, tested and benchmarked recipes. Each page names the suites and the
+Recipes for one scenario each, meant to be documented, tested and benchmarked;
+not every path clears all three yet. Each page names the suites and the
 benchmark scenario behind it, and says which leg is short when one is.
 
 | Path | For |
@@ -165,7 +170,7 @@ stack](guides/testing-with-llm-d/) · [benchmark the scaling manager](guides/ben
 ## Design notes
 
 - **[proposals/](proposals/)** — work not built yet, or built and still moving. The warm pool's argument and implementation design live here, as does the [FMA post-mortem](proposals/fma-post-mortem.md) explaining what the pool inherited.
-- **[comparison/](comparison/)** — how the scaling manager's autoscaling compares with Dynamo, Mooncake, SGLang and the hosted platforms.
+- **[comparison/](comparison/)** — how the scaling manager's autoscaling compares with [KEDA alone (llm-d's recipes)](comparison/keda-alone.md), Dynamo, Mooncake, SGLang and the hosted platforms.
 - **[plans/](plans/)** — agent plans and the specs behind them.
 
 ## Elsewhere in the repo

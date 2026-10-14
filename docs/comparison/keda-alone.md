@@ -1,31 +1,40 @@
 # llm-scaling-manager and KEDA alone
 
-**KEDA scales your pods in both setups.** This page is about the one thing that
+llm-d says its KEDA recipes do not cover everything WVA did. Its architecture
+page says KEDA + EPP *"does not replace WVA feature for feature"* and
+*"If a deployment depends on cost-aware placement across variants or on fair
+sharing of a scarce accelerator pool, stay on WVA for now"*
+([architecture](https://github.com/llm-d/llm-d/blob/7d5f86d1de99c9df39f58eba0c8a7e20c00cfaa4/docs/architecture/autoscaling/README.md)).
+Upstream, *"The WVA path is no longer developed and receives no further
+releases"*
+([llm-d](https://github.com/llm-d/llm-d/blob/7d5f86d1de99c9df39f58eba0c8a7e20c00cfaa4/guides/workload-autoscaling/README.md)).
+llm-scaling-manager is an independently developed, advanced fork of WVA, and it
+is still maintained. That makes it one way to stay on that path.
+
+**KEDA scales your pods in both setups.** This page covers the one thing that
 differs: what computes the replica count KEDA applies.
 
 - **KEDA alone** turns metrics into replicas with thresholds. With a Prometheus
   trigger at `metricType: AverageValue`, the count is the metric's sum divided
-  by the threshold, rounded up; when a ScaledObject has several triggers, the
+  by the threshold, rounded up. When a ScaledObject has several triggers, the
   HPA takes the largest count.
 - **With llm-scaling-manager**, KEDA's trigger is an
   [external scaler](../reference/scaledobject-trigger.md) that answers with a
-  replica count. The count comes from a capacity model of each replica, decided
-  for every model and variant it manages together, inside a GPU budget when
-  you configure one. KEDA still owns activation, the HPA and its behaviour
-  windows, fallback and pausing.
+  replica count. The count comes from a capacity model of each replica. The
+  scaler decides for every model and variant it manages together, and inside a
+  GPU budget when you configure one. KEDA still owns activation, the HPA and its
+  behaviour windows, fallback and pausing.
 
-So the question is not which tool to install: KEDA is required either way. It
-is whether a threshold per workload is enough for your fleet.
+So the choice is not which tool to install, because KEDA is required either way.
+The question is whether one threshold per workload is enough for your fleet.
 
 ## What "KEDA alone" means here
 
-llm-d's own guidance, at llm-d commit
+This page follows llm-d's own guidance at llm-d commit
 [`7d5f86d`](https://github.com/llm-d/llm-d/tree/7d5f86d1de99c9df39f58eba0c8a7e20c00cfaa4/guides/workload-autoscaling)
-(2026-10-14). llm-d now recommends KEDA with the router's (EPP) metrics and has
-stopped developing its workload-variant-autoscaler, of which this project is an
-advanced fork. Its recommended default, the
-[queue recipe](https://github.com/llm-d/llm-d/blob/7d5f86d1de99c9df39f58eba0c8a7e20c00cfaa4/guides/workload-autoscaling/keda-epp/optimized-baseline/overlays/k8s/queue/scaledobject.yaml),
-is:
+(2026-10-14). llm-d now recommends KEDA with the router's (EPP) metrics. Its
+recommended default is the
+[queue recipe](https://github.com/llm-d/llm-d/blob/7d5f86d1de99c9df39f58eba0c8a7e20c00cfaa4/guides/workload-autoscaling/keda-epp/optimized-baseline/overlays/k8s/queue/scaledobject.yaml):
 
 | Setting | Value |
 | --- | --- |
@@ -33,21 +42,33 @@ is:
 | Windows | 300 s stabilization on scale-up **and** scale-down; polling 15 s; cooldown 300 s (scale to zero only) |
 | Bounds | min 1 (0 optional), max 8 |
 
-llm-d also publishes experimental recipes: router pool saturation, token-aware
-sizing (in-flight tokens over a calibrated prefill throughput, and summed KV
-use, with per-role ScaledObjects for prefill/decode), an SLO-aware control law,
-and Kueue cohorts for a GPU budget below the autoscaler. The table names them
-where they answer a need the default does not.
+Beyond the default, llm-d publishes these recipes:
+
+- A router pool-saturation overlay (experimental).
+- [Token-aware sizing](https://github.com/llm-d/llm-d/blob/7d5f86d1de99c9df39f58eba0c8a7e20c00cfaa4/guides/workload-autoscaling/keda-epp-token-aware/README.md)
+  (experimental). It divides in-flight prompt tokens by a hand-calibrated
+  prefill throughput `V_P` and sums KV use, with per-role ScaledObjects for
+  prefill and decode.
+- An [SLO-aware recipe](https://github.com/llm-d/llm-d/blob/7d5f86d1de99c9df39f58eba0c8a7e20c00cfaa4/guides/workload-autoscaling/slo-aware/README.md),
+  a control law on p90 TTFT and TPOT against the SLO.
+- [Kueue rebalancing](https://github.com/llm-d/llm-d/blob/7d5f86d1de99c9df39f58eba0c8a7e20c00cfaa4/guides/workload-autoscaling/kueue-rebalancing/README.md)
+  (experimental), which puts a GPU budget below the autoscaler.
+- [FMA + KEDA](https://github.com/llm-d/llm-d/blob/7d5f86d1de99c9df39f58eba0c8a7e20c00cfaa4/guides/fast-model-actuation/fast-model-actuation-keda/README.md),
+  which points the queue trigger at llm-d's fast model actuation to cut the cold
+  start.
+
+llm-d's renamed WVA repository,
+[llm-d-autoscaling](https://github.com/llm-d/llm-d-autoscaling/blob/e036371f7d04317920ef03a596fbe0c64745942a/README.md),
+now holds KEDA manifest blueprints. They include a recommended
+[P/D blueprint](https://github.com/llm-d/llm-d-autoscaling/blob/e036371f7d04317920ef03a596fbe0c64745942a/benchmark/config/scenarios/guides/pd-disaggregation.yaml)
+on vLLM's own metrics. The table below names each recipe where it answers a need
+the default does not.
 
 llm-d states the default's limits itself: *"No cross-variant placement"*, *"No
-cost-aware choice of hardware"*, *"Warmup is paid at every scale-up"*, and its
-thresholds *"are not universal … Do not assume a value validated for one
+cost-aware choice of hardware"*, *"Warmup is paid at every scale-up"*. It also
+says its thresholds *"are not universal … Do not assume a value validated for one
 model, accelerator, or tensor-parallel degree transfers to another"*
 ([guide](https://github.com/llm-d/llm-d/blob/7d5f86d1de99c9df39f58eba0c8a7e20c00cfaa4/guides/workload-autoscaling/keda-epp/README.md)).
-Its architecture page adds that KEDA + EPP *"does not replace WVA feature for
-feature"* and that deployments relying on cost-aware placement or fair sharing
-of a scarce accelerator pool should *"stay on WVA for now"*
-([architecture](https://github.com/llm-d/llm-d/blob/7d5f86d1de99c9df39f58eba0c8a7e20c00cfaa4/docs/architecture/autoscaling/README.md)).
 
 ## What each can do
 
@@ -55,63 +76,82 @@ Evidence levels follow [why.md](../why.md#how-mature-each-part-is).
 
 | Need | llm-d's KEDA recipes | With llm-scaling-manager | Evidence for our column |
 | --- | --- | --- | --- |
-| **What sets the count** | Thresholds per ScaledObject, tuned per model, accelerator and parallelism (llm-d's caveat). Token-aware recipe: one calibrated prefill throughput per hardware and model. | A capacity model per replica, from KV-cache use, queues and the token throughput one replica sustains, learned while it serves. Thresholds are tiers of how full a replica may run, not per-model numbers. | [Scale on saturation](../well-lit-paths/scale-on-saturation/): end-to-end suites |
-| **Requests of very different cost** | Running requests count a 100-token and an 8 000-token request alike; summed KV use follows occupancy, which lags a shape change. | Demand is priced from measured throughput, so a change in request shape can order capacity before a queue forms. | Experimental P/D path, [run twice](../well-lit-paths/pd-disaggregation/#measured): held 2 replicas at 5–15 % KV where occupancy alone said 1; ordered a 3rd at the shape change; no queue formed. That was the second exposure; a cold controller sizes from occupancy first |
-| **Reacting to a rise** | The default delays every scale-up by its 300 s window, which llm-d sets to absorb startup overshoot and calls *"blunt"*. | Scale-up acts at once (0 s window); the capacity model counts replicas that are still starting, so it does not re-order them while they load. | End-to-end suites; no benchmark against the 300 s recipe yet |
-| **The cold start of a new replica** | Paid at every scale-up. llm-d's fast-model-actuation benchmark measured its cold baseline at p95 TTFT 52–74 s on Qwen3 14B/32B ([results](https://github.com/llm-d/llm-d/tree/7d5f86d1de99c9df39f58eba0c8a7e20c00cfaa4/guides/fast-model-actuation/fast-model-actuation-keda/benchmark-results)). | Optional [warm pool](../well-lit-paths/warm-pool-bridge/): sleeping models lend a replica while the variant's own starts. | p95 TTFT per scale-up 0.11–0.83 s with a one-Pod pool against 5.2–8.8 s without it, on two 8B models; one run per arm. Different models and load from llm-d's figures, so not a head-to-head |
-| **Several variants of one model** (GPU types, TP sizes) | One ScaledObject per Deployment; *"no cross-variant placement"*. | Variants decided together: scale-up grows the one with the lowest cost per unit of capacity, scale-down sheds the highest `variantCost` first. | [Accelerator variants](../well-lit-paths/accelerator-variants/): one GPU type, two TP sizes; not measured across GPU types |
-| **Prefill and decode** | Token-aware and blueprint recipes: one ScaledObject per role, independent, no coupling of the two. | Each role sized from its own demand, and the pair committed together so one role cannot outrun the other. | [P/D disaggregation](../well-lit-paths/pd-disaggregation/): experimental, benchmark run twice |
-| **A GPU budget** | Below the autoscaler: Kueue cohorts with per-model floors, borrowing and preemption (experimental); demand over budget waits as Pending Pods. | Optional `limiters:` (GPUs free, a quota per namespace, or the quotas Kueue holds). Each model is fitted inside the budget before KEDA sees a number, and a capped decision raises `wva_decisions_limited_total` and a `ResourceConstrained` Event. Advisory: a `ResourceQuota` stays the hard bound. | [Bound by GPUs](../well-lit-paths/bound-by-gpus/): end-to-end; [tenant quotas](../well-lit-paths/tenant-gpu-quotas/): unit tests, refusal path end-to-end; [Kueue](../well-lit-paths/kueue-bounded-quotas/): experimental |
-| **Many models on one fleet** | Each ScaledObject scales alone; Kueue decides who is admitted. | Opt-in priority-weighted rescale under a budget (unit-tested only), and the experimental [utilization-share optimizer](../well-lit-paths/utilization-share/), which moves GPUs between models as demand shifts. | Utilization share: single benchmark runs per arm |
-| **A latency SLO** | The SLO-aware recipe scales on p90 TTFT/TPOT against the SLO, *"one variant, one SLO pair"*; llm-d measured 95.8 % attainment at 5.93 average replicas against a static 8. | No SLO target: replicas are sized from capacity, and tiers set how full they may run. | Not applicable |
+| **What sets the count** | Default: 16 running requests and 1 queued request per replica, per ScaledObject. llm-d says to tune these per model, accelerator and parallelism. Token-aware: one hand-calibrated prefill throughput per hardware and model. | A capacity model per replica, built from KV-cache use, queues and the token throughput one replica sustains, learned while it serves. Thresholds are tiers that set how full a replica may run, not per-model numbers. | [Scale on saturation](../well-lit-paths/scale-on-saturation/): end-to-end suites on kind with a simulator, which exercise the control path. The capacity model itself is measured only on the [P/D run](../well-lit-paths/pd-disaggregation/#measured) |
+| **Requests of very different cost** | The running-request trigger counts a 100-token request and an 8 000-token request alike. Token-aware prices prefill as in-flight prompt tokens over a hand-calibrated `V_P`. It prices decode by summed KV use, which follows occupancy and lags a shape change. | Demand is priced from measured throughput, so a change in request shape can order capacity before a queue forms. | Experimental P/D path, [run twice](../well-lit-paths/pd-disaggregation/#measured). It held 2 replicas at 5–15 % KV where occupancy alone said 1, and ordered a 3rd at the shape change. No queue formed. That was the second exposure: a cold controller sizes from occupancy first |
+| **Reacting to a rise** | The default's 300 s scale-up window absorbs startup overshoot. llm-d calls it *"blunt"* because it delays every scale-up equally. The token-aware recipes use a 0 s window and add at most 1 pod per 180 s. The SLO-aware recipe uses a 30 s window, and its control law credits replicas that are still starting (ready over total). | Scale-up acts at once (0 s window). The capacity model counts replicas that are still starting, so it does not re-order them while they load. | End-to-end suites (simulator). Not benchmarked against llm-d's current recipes |
+| **The cold start of a new replica** | The default pays it at every scale-up. In llm-d's fast-model-actuation benchmark, its plain KEDA + EPP baseline measured a cold p95 TTFT of 52–74 s. [FMA + KEDA](https://github.com/llm-d/llm-d/blob/7d5f86d1de99c9df39f58eba0c8a7e20c00cfaa4/guides/fast-model-actuation/fast-model-actuation-keda/README.md) cuts it: its hot arm measured p95 TTFT 1.5 s on Qwen3-14B and 13.4 s or 24.1 s (saturation or queue trigger) on Qwen3-32B, with 0 failures, on H100 ([results](https://github.com/llm-d/llm-d/tree/7d5f86d1de99c9df39f58eba0c8a7e20c00cfaa4/guides/fast-model-actuation/fast-model-actuation-keda/benchmark-results)). | Optional [warm pool](../well-lit-paths/warm-pool-bridge/): sleeping models lend a replica while the variant's own replica starts. | p95 TTFT per scale-up was 0.11–0.83 s with a one-Pod pool, against 5.2–8.8 s without it, on two 8B models. One run per arm. The models and load differ from llm-d's, so this is not a head-to-head |
+| **Several variants of one model** (GPU types, TP sizes) | One ScaledObject per Deployment. llm-d: *"No cross-variant placement"*. | Variants are decided together. Scale-up grows the one with the lowest cost per unit of capacity, and scale-down sheds the highest `variantCost` first. | [Accelerator variants](../well-lit-paths/accelerator-variants/): one benchmark run in July 2026, on an earlier build, with one GPU type and two TP sizes. `limiter_test.go` runs two variants but asserts discovery and the GPU bound. No spec asserts which variant grows |
+| **Prefill and decode** | The [token-aware P/D recipe](https://github.com/llm-d/llm-d/blob/7d5f86d1de99c9df39f58eba0c8a7e20c00cfaa4/guides/workload-autoscaling/keda-epp-token-aware/README.md) and the llm-d-autoscaling [P/D blueprint](https://github.com/llm-d/llm-d-autoscaling/blob/e036371f7d04317920ef03a596fbe0c64745942a/benchmark/config/scenarios/guides/pd-disaggregation.yaml) use one ScaledObject per role: *"prefill and decode scale independently"*, with no coupling between them. | Each role is sized from its own demand. The pair is committed together, so one role cannot outrun the other. | [P/D disaggregation](../well-lit-paths/pd-disaggregation/) (experimental): the benchmark, run twice, never scaled prefill (1 replica throughout). The joint commit has unit tests only (`internal/engines/allocation`) |
+| **A GPU budget** | Below the autoscaler: Kueue cohorts with per-model floors, borrowing and preemption (experimental). Demand over budget waits as Pending Pods. | Optional `limiters:`: GPUs free, a quota per namespace, or the quotas Kueue holds. Each model is fitted inside the budget before KEDA sees a number. A capped decision raises `wva_decisions_limited_total` and a `ResourceConstrained` Event. The limiter is advisory, and a `ResourceQuota` stays the hard bound. | [Bound by GPUs](../well-lit-paths/bound-by-gpus/): end-to-end. [Tenant quotas](../well-lit-paths/tenant-gpu-quotas/): unit tests, with the refusal path end-to-end. [Kueue](../well-lit-paths/kueue-bounded-quotas/): experimental |
+| **Many models on one fleet** | Each ScaledObject scales alone, and Kueue decides who is admitted. | An opt-in priority-weighted rescale under a budget (unit tests only). The experimental [utilization-share optimizer](../well-lit-paths/utilization-share/) moves GPUs between models as demand shifts. | Utilization share: single benchmark runs per arm. Sharing cost 24–81 % more GPU-seconds than the default optimizer in those runs ([measured](../well-lit-paths/utilization-share/measured.md)) |
+| **A latency SLO** | The SLO-aware recipe scales on p90 TTFT and TPOT against the SLO, for *"one variant, one SLO pair"*. llm-d measured 95.8 % attainment at 5.93 average replicas, against a static pool of 8. | No SLO target. Replicas are sized from capacity, and tiers set how full they may run. | Not applicable |
 | **Interactive and batch urgency** | A different threshold per ScaledObject. | Named tiers in one policy ([workload classes](../well-lit-paths/workload-classes/)). | End-to-end suite (simulator) |
-| **Scale to zero** | KEDA's own: `minReplicaCount: 0`; the router buffers requests and its queue metric wakes the target. A request queued at zero is lost if the router restarts (llm-d's caveat). | KEDA's own mechanism, plus the controller reads the router's queue every 100 ms and pushes activation, instead of waiting for the next poll. Only the 0 → 1 step is pushed. The wake is still a cold start, about 41 s on an H100 test cluster, unless a warm pool holds the model. | [Scale to zero](../well-lit-paths/scale-to-zero/): end-to-end, cluster-verified |
-| **Flapping** | HPA behaviour windows (300 s both ways in the default) and the HPA's 10 % tolerance. | The same HPA behaviour (our generated ScaledObject: 0 s up, 300 s down), plus holds in the controller (sticky scale-down, shape-change holds). | End-to-end suites |
-| **Explaining a decision** | Each trigger's metric value, the HPA's current and desired counts. | Two log lines per model per cycle that say why ([cycle log](../reference/cycle-log.md)), Events, `wva_model_scaling_blocked` reasons, dashboards. | [Monitoring](../reference/monitoring.md) |
-| **When the signal source fails** | KEDA `fallback`, if configured; Prometheus is the only dependency. | An extra controller in the path. Our generated ScaledObjects set no `fallback` (the template sample sets `currentReplicasIfHigher`); if the controller is unreachable when KEDA first builds the HPA, KEDA falls back to a CPU metric. | [Trigger reference](../reference/scaledobject-trigger.md) |
+| **Scale to zero** | KEDA's own `minReplicaCount: 0`. The router buffers requests, and its queue metric wakes the target. llm-d's caveat: a request queued at zero is lost if the router restarts. | KEDA's own mechanism. The controller also reads the router's queue every 100 ms and pushes activation, instead of waiting for the next poll. Only the 0 → 1 step is pushed. The request waits in the same router queue, so a router restart loses it here too. The wake is still a cold start, about 41 s on an H100 test cluster, unless a warm pool holds the model. | [Scale to zero](../well-lit-paths/scale-to-zero/): end-to-end, cluster-verified |
+| **Flapping** | HPA behaviour windows (300 s both ways in the default) and the HPA's 10 % tolerance. | The same HPA behaviour (our generated ScaledObject uses 0 s up and 300 s down). The controller adds holds of its own: sticky scale-down and shape-change holds. | End-to-end suites |
+| **Explaining a decision** | Each trigger's metric value, and the HPA's current and desired counts. | Two log lines per model per cycle that say why ([cycle log](../reference/cycle-log.md)), Events, `wva_model_scaling_blocked` reasons and dashboards. | [Monitoring](../reference/monitoring.md) |
+| **When the signal source fails** | KEDA `fallback`, if configured. Prometheus is the only dependency. | One more controller in the path. Our generated ScaledObjects set no `fallback` (the template sample sets `currentReplicasIfHigher`). If the controller is unreachable when KEDA first builds the HPA, KEDA falls back to a CPU metric. | [After the install: first-line troubleshooting](../reference/operations.md#first-line-troubleshooting) (`cpu: <unknown>/80%`) |
 
 ## Where KEDA alone is enough
 
-KEDA alone is one component fewer, and llm-d's recipes are maintained upstream.
-It is the better choice when:
+KEDA alone is one component fewer, and llm-d maintains its recipes upstream.
+It is the better choice in these cases:
 
-- **One model, one GPU type, one request shape**, and you can tune a threshold
-  for it and re-tune when traffic changes.
-- **No shared GPU budget**: each model has GPUs reserved for its maximum, or
+- **One model, one GPU type, one request shape.** You can tune a threshold for
+  it and re-tune when traffic changes.
+- **No shared GPU budget.** Each model has GPUs reserved for its maximum, or
   Kueue cohorts are enough.
-- **You scale to a latency SLO** on a single variant: llm-d's SLO-aware recipe
+- **You scale to a latency SLO** on a single variant. llm-d's SLO-aware recipe
   targets it directly; we do not.
-- **Latency first, cost second**: a low threshold over-provisions, which is the
+- **Latency first, cost second.** A low threshold over-provisions, which is the
   safe direction when the tail is the SLO.
 
 ## What it costs to add llm-scaling-manager
 
 - **One more controller in the scaling path.** KEDA asks it for every count. It
-  runs leader-elected and holds no GPU, but its availability now matters; set a
+  runs leader-elected and holds no GPU, but its availability now matters. Set a
   `fallback` on your ScaledObjects.
-- **Engine and router metrics.** vLLM or SGLang scraped by Prometheus, and the
-  router's (EPP) metrics for queues and waking from zero.
-- **It learns.** A controller that has never seen a model or a request shape
-  saturated sizes it from occupancy first; the throughput model applies from the
-  second exposure ([known gaps](../why.md#known-gaps)).
+- **It answers 0 until it has decided.** After every controller restart and
+  leader change, `GetMetrics` answers 0 for a model until the controller's first
+  decision for it. The HPA reads 0 as "go to `minReplicaCount`". Only a
+  scale-down window holds the count through that gap: the 300 s window our
+  generated ScaledObjects set does, and an object without one can shed replicas
+  in the first seconds
+  ([scaling behavior](../reference/scaledobject-trigger.md#scaling-behavior)).
+- **Engine and router metrics.** Prometheus must scrape vLLM or SGLang. The
+  router's (EPP) metrics supply the queues and the wake from zero.
+- **It learns, and it forgets on restart.** A controller that has never seen a
+  model or a request shape saturated sizes it from occupancy first. The
+  throughput model applies from the second exposure
+  ([known gaps](../why.md#known-gaps)). What it learned is held in memory, so a
+  restart or leader change learns it again.
+- **One more port.** KEDA reaches the controller over gRPC on `:9090`. On this
+  release that port is unauthenticated, so restrict it with a NetworkPolicy
+  ([network exposure](../reference/security-model.md#network-exposure)).
 
 ## Measured against KEDA alone
 
-A five-run study in July 2026 compared the two on single-variant workloads, with
-KEDA actuating both arms: the
-[scaling study](../../comparison/wva-vs-keda-scaling-study.md). The threshold
-arm held 1.9–2.7× the GPUs at equal service in the four runs below saturation;
-past saturation on prefill-heavy traffic, it had the better tail.
+A five-run study in July 2026 compared the two on single-variant workloads,
+with KEDA actuating both arms: the
+[scaling study](../../comparison/wva-vs-keda-scaling-study.md).
+
+- **Runs 1, 2 and 4, below saturation.** The threshold arm held 1.9–2.7× the
+  GPUs (1.88, 2.46 and 2.70 times ours).
+- **Drops were not equal.** In Runs 1 and 2 the threshold arm dropped 30 and 21
+  requests, against our 0. In Run 4 we dropped 6, against its 2.
+- **Run 3, saturated.** On sustained prefill-heavy traffic the threshold arm
+  held 4.01 GPUs against our 1.56, and it had the better tail: 14 dropped
+  against our 101. Our leg there was the cheapest of six scale-down settings
+  tried, against one KEDA configuration.
 
 **Read it as history.** Both sides have moved since:
 
-- **The recipe.** Our arm used 16 running requests and a queue of 1 per replica,
-  as llm-d's recipe still does, but with max 10 and a 120 s scale-down window,
-  where the recipe shipped max 8 and 300 s. llm-d has since added a 300 s
-  scale-up window against startup overshoot, the very behaviour the study
-  measured.
+- **The recipe.** Our arm used 16 running requests and a queue of 1 per
+  replica, as llm-d's recipe still does. It used the older EPP metric names,
+  max 10 and a 120 s scale-down window, where the recipe shipped max 8 and
+  300 s. llm-d has since added a 300 s scale-up window against startup
+  overshoot, the very behaviour the study measured.
 - **The controller.** The capacity model has changed: backlog priced by
-  throughput, the arrival floor, shape-change holds and sticky scale-down. The
-  study's one loss (Run 3's tail) has not been re-run.
+  throughput, the throughput-priced demand floor, shape-change holds and sticky
+  scale-down. The study's one loss, Run 3's tail, has not been re-run.
 
 A re-run of the threshold arm on llm-d's current default recipe is planned.

@@ -1,9 +1,10 @@
 # llm-scaling-manager: project proposal
 
 **Status:** built and running, 2026-09-28; this page argues for adopting it. The
-scaling path, warm pool, scale-to-zero and quota limiting are cluster-verified
-on Kubernetes and on OpenShift, and every measurement below links to the run
-that produced it.
+scaling path, warm pool and scale-to-zero are cluster-verified on Kubernetes and
+on OpenShift. The GPU limiter is end-to-end tested; quota limiting is
+unit-tested, with the refusal path end to end. Every measurement below links to
+the run that produced it.
 
 ## Summary
 
@@ -11,7 +12,8 @@ llm-scaling-manager is an analytical autoscaler for llm-d inference. Analytical
 means the replica count is computed from a capacity model, from what one replica
 can actually serve at the shape of traffic arriving, rather than read off a
 threshold on a raw metric. It works out how many replicas each model and variant
-needs and decides for all of them together against one GPU budget. Alongside
+needs and decides for all of them together, against a GPU budget when you
+declare one (`limiters:`; none ships). Alongside
 that it ships a shared warm pool to cover the minutes a new replica spends
 loading, scale-to-zero, and separate handling for prefill and decode.
 
@@ -41,7 +43,8 @@ at the second, so the fleet had to go from two replicas to three:
 | --- | --- | --- |
 | request rate | constant at 6 req/s | nothing to do |
 | gateway queue depth | flat, no queue ever formed | nothing to do |
-| KV-cache occupancy | 5–15 % in the steady phase | scale down to one |
+| a KV-occupancy trigger (as in llm-d's token-aware decode recipe) | 5–15 % in the steady phase | scale down to one |
+| running requests per replica (llm-d's default trigger) | a per-replica constant, valid for the one shape it was tuned on | re-tune when the shape changes |
 
 **Reacting after saturation is too late.** A replica is ready when the model has
 loaded and the kernels have compiled: about 41 s for an 8B server, 192 s for
@@ -73,7 +76,7 @@ priced from throughput rather than read off a queue, the order goes in early. A
 warm pool Pod holds an accelerator with models resident and lends it to a model
 that is scaling up, so it serves while its own replica starts.
 
-**Solve the whole fleet at once, inside one budget.** Every model and variant is
+**Solve the whole fleet at once, inside a budget when you declare one** (`limiters:`; none ships). Every model and variant is
 solved together each cycle. When the budget binds, GPUs go in order of a
 fair-share priority value, priority times remaining demand weighted by score,
 and every clamp is recorded against the variant that took it.
@@ -102,7 +105,7 @@ push path; quota-bounded scaling, against either a
 | And what it costs | 17 % more than holding nothing, which came in at 12 129 | [measured.md](well-lit-paths/warm-pool-bridge/measured.md) |
 | A warm Pod switches models fast | About 437 ms (four switches of 435–440 ms) against roughly 41 s cold, on an H100 test cluster | [warm pool](well-lit-paths/warm-pool-bridge/); measurement in [fast model loading](proposals/fast-model-loading.md#27-the-pool-was-built-and-measured-2026-08-21) |
 | Cold start is mostly not the weights | 8B ~41 s; GLM 192 s of which 40 s is weights; 463 s on a cold JIT cache | [weight transfer](proposals/warm-pool-weight-transfer.md) |
-| The P/D result reproduces | The pair was run twice a day apart, within a tenth of every number | [P/D path](well-lit-paths/pd-disaggregation/) |
+| The P/D result reproduces | The pair was run twice a day apart, within a tenth of every figure except the cold pass's first five minutes, where one window ranged from 0.25 s to 5.6 s | [P/D path](well-lit-paths/pd-disaggregation/) |
 
 Two caveats on reading these. The warm-pool run is four scale-up events per
 arm, one run each, so the 12 % and 17 % are single-run margins. The shape-swap
@@ -174,7 +177,7 @@ scale-down across cycles to stop one noisy sample pinning the fleet.
 
 Measured on H200 nodes; the warm-pool model switch on H100. Priority-weighted
 reallocation between models (`enableRescale`) is built, off by default and
-covered by unit tests only, and P/D role switching is experimental. Apache 2.0, and the module
+covered by unit tests only. Apache 2.0, and the module
 path has not changed.
 
 Design detail lives in [concepts/](concepts/): what gets measured and how it

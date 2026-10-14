@@ -30,10 +30,10 @@ optimizer actually receives.
 
 ```text
 2026-10-14T09:12:03.512Z  INFO  analyzer-result  {"modelID": "my-model", "namespace": "default",
-  "analyzer": "saturation", "supply": 658534, "demand": 1041047, "util": 1.58, "rc": 0,
-  "sc": 50000, "scaleUpThreshold": 1.1, "scaleDownBoundary": 0.7,
-  "variants": [{"name":"primary","prc":1152000,"role":"both","reason":"P3-k2","observed":2},
-               {"name":"v2","prc":403391,"role":"both","reason":"P1-obs","observed":1}]}
+  "analyzer": "saturation", "supply": 2362173, "demand": 2240000, "util": 0.95, "rc": 273121,
+  "sc": 0, "scaleUpThreshold": 0.85, "scaleDownBoundary": 0.7,
+  "variants": [{"name":"primary","prc":1152000,"role":"both","reason":"P3-k2","observed":1},
+               {"name":"v2","prc":403391,"role":"both","reason":"P1-obs","observed":3}]}
 ```
 
 A P/D model also carries `roleRC` and `roleSC`, the per-role required and spare
