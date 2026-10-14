@@ -98,10 +98,16 @@ func (a *Analyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 	snap := metrics.SLOModelSnapshot{Namespace: input.Namespace, ModelName: input.ModelID}
 
 	fleet := readFleet(input)
+	// An output length nobody has reported yet is not a demand of zero: it is
+	// no demand at all, and a combiner must read it as undefined. So the demand
+	// is left out, and every generating variant below reports no data.
+	shapeKnown := fleet.shape.AvgOutputTokens > 0 && finite(fleet.shape.AvgOutputTokens)
 	demand := fleet.demand(input)
-	result.TotalDemand = demand
-	if fleet.disaggregated {
-		result.RoleDemand = map[string]float64{domain.RoleDecode: demand}
+	if shapeKnown {
+		result.TotalDemand = demand
+		if fleet.disaggregated {
+			result.RoleDemand = map[string]float64{domain.RoleDecode: demand}
+		}
 	}
 
 	var tpotTarget float64
@@ -110,7 +116,12 @@ func (a *Analyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 	}
 	for _, vs := range fleet.variants {
 		vc, reading := a.priceVariant(input, vs, fleet, tpotTarget, cfg.ScaleUpThreshold, now)
-		if fleet.generatingReplicas > 0 && isGenerating(vs.Role) {
+		if !shapeKnown && reading != nil {
+			vc.PerReplicaCapacity, vc.Reason = 0, domain.ReasonNoData
+			reading.Source = constants.SLOSourceNoOutputLength
+			reading.Fill, reading.PredictedITL = math.NaN(), math.NaN()
+		}
+		if shapeKnown && fleet.generatingReplicas > 0 && isGenerating(vs.Role) {
 			vc.TotalDemand = demand * float64(fleet.ready[vs.VariantName]) / float64(fleet.generatingReplicas)
 		}
 		if vc.PerReplicaCapacity > 0 && vc.ReplicaCount > 0 {
@@ -119,7 +130,7 @@ func (a *Analyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 		result.VariantCapacities = append(result.VariantCapacities, vc)
 		if reading != nil {
 			snap.Variants = append(snap.Variants, *reading)
-			logger.V(logging.DEFAULT).Info("slo-variant",
+			logger.V(logging.VERBOSE).Info("slo-variant",
 				"modelID", input.ModelID, "namespace", input.Namespace,
 				"variant", vs.VariantName, "role", vs.Role, "source", reading.Source,
 				"fill", reading.Fill, "predictedITL", reading.PredictedITL,
@@ -130,7 +141,7 @@ func (a *Analyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 
 	snap.Objectives = a.judge(ctx, input, cfg.SLO)
 	for _, o := range snap.Objectives {
-		logger.V(logging.DEFAULT).Info("slo-model",
+		logger.V(logging.VERBOSE).Info("slo-model",
 			"modelID", input.ModelID, "namespace", input.Namespace,
 			"objective", o.Objective, "statistic", o.Statistic,
 			"target", o.TargetSeconds, "observed", o.Observed, "attainment", o.Attainment,
@@ -190,7 +201,8 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 		maxSeqs = params.MaxNumSeqs
 	}
 	capTokens := fleet.capacityTokens(vs.VariantName, params)
-	rate := replicaTokenRate(line, p.fill, capTokens, fleet.shape.KVreq, maxSeqs)
+	fill := reachableFill(p.fill, capTokens, fleet.shape.KVreq, maxSeqs)
+	rate := replicaTokenRate(line, fill, capTokens, fleet.shape.KVreq, maxSeqs)
 	if !(rate > 0) {
 		reading.Source = constants.SLOSourceInputInvalid
 		vc.Reason = domain.ReasonError
@@ -198,8 +210,8 @@ func (a *Analyzer) priceVariant(input domain.AnalyzerInput, vs domain.VariantRep
 	}
 	vc.PerReplicaCapacity = rate
 	vc.Reason = "slo-" + source
-	reading.Fill = p.fill
-	if k := realisedFill(line, p.fill, scaleUp, capTokens, fleet.shape.KVreq, maxSeqs); finite(k) {
+	reading.Fill = fill
+	if k := realisedFill(line, fill, scaleUp, capTokens, fleet.shape.KVreq, maxSeqs); finite(k) {
 		reading.PredictedITL = line.ITLAt(k)
 	}
 	return vc, reading
@@ -244,12 +256,15 @@ func (a *Analyzer) fitLine(key string, rows []domain.ReplicaMetrics, variant str
 	if len(obs) < itl.DefaultMinSamples {
 		return itl.Model{}, constants.SLOSourceNoLine
 	}
+	source := constants.SLOSourcePinned
 	b, learned := a.baseline[key]
 	if !learned || !(b > 0) {
-		b = itl.DefaultBaselineSec
+		// Not a measurement of this hardware: a constant for another card.
+		// Labelled apart, so the line it pins is not read as one.
+		b, source = itl.DefaultBaselineSec, constants.SLOSourcePinnedDefault
 	}
 	if m, ok := itl.FitPinnedB(obs, b); ok {
-		return m, constants.SLOSourcePinned
+		return m, source
 	}
 	return itl.Model{}, constants.SLOSourceNoLine
 }
@@ -270,9 +285,13 @@ func (a *Analyzer) judge(ctx context.Context, input domain.AnalyzerInput, slo *c
 		r := metrics.SLOObjectiveReading{
 			Objective: constants.SLOObjectiveTPOT, Statistic: "mean",
 			TargetSeconds: slo.TPOT.Target.Seconds(), Observed: math.NaN(), Attainment: math.NaN(),
+			Requests: math.NaN(),
 		}
-		if rl != nil && rl.TPOTCountRate*rl.WindowSeconds >= minSamples(0) {
-			r.Observed = rl.TPOTSumRate / rl.TPOTCountRate
+		if rl != nil {
+			r.Requests = rl.TPOTCountRate * rl.WindowSeconds
+			if r.Requests >= minSamples(0) {
+				r.Observed = rl.TPOTSumRate / rl.TPOTCountRate
+			}
 		}
 		out = append(out, r)
 	}
@@ -281,11 +300,15 @@ func (a *Analyzer) judge(ctx context.Context, input domain.AnalyzerInput, slo *c
 		r := metrics.SLOObjectiveReading{
 			Objective: constants.SLOObjectiveTTFT, Statistic: "p" + strconv.Itoa(p),
 			TargetSeconds: slo.TTFT.Target.Seconds(), Observed: math.NaN(), Attainment: math.NaN(),
+			Requests: math.NaN(),
 		}
 		if rl != nil {
-			if h, ok := newHistogram(rl.TTFTBuckets); ok && h.total*rl.WindowSeconds >= minSamples(p) {
-				r.Observed = h.quantile(float64(p) / 100)
-				r.Attainment, _ = h.fractionWithin(r.TargetSeconds)
+			if h, ok := newHistogram(rl.TTFTBuckets); ok {
+				r.Requests = h.total * rl.WindowSeconds
+				if r.Requests >= minSamples(p) {
+					r.Observed = h.quantile(float64(p) / 100)
+					r.Attainment, _ = h.fractionWithin(r.TargetSeconds)
+				}
 			}
 		}
 		out = append(out, r)

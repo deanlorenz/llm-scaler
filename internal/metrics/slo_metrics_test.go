@@ -51,6 +51,33 @@ var _ = Describe("PublishSLO", func() {
 		Expect(InitMetrics(registry)).To(Succeed())
 	})
 
+	It("publishes a percentile in the +Inf bucket as +Inf, not as absent", func() {
+		snap := snapshot("m")
+		snap.Objectives[0].Observed = math.Inf(1)
+		PublishSLO(snap, t0)
+		var found bool
+		for _, m := range family(constants.WVASLOObservedSeconds) {
+			if label(m, constants.LabelObjective) == constants.SLOObjectiveTTFT {
+				Expect(math.IsInf(m.GetGauge().GetValue(), 1)).To(BeTrue())
+				found = true
+			}
+		}
+		Expect(found).To(BeTrue())
+	})
+
+	It("labels attainment with its statistic, and publishes the window's request count", func() {
+		snap := snapshot("m")
+		snap.Objectives[0].Requests = 300
+		snap.Objectives[1].Requests = math.NaN()
+		PublishSLO(snap, t0)
+		att := family(constants.WVASLOAttainmentRatio)
+		Expect(att).To(HaveLen(1))
+		Expect(label(att[0], constants.LabelStatistic)).To(Equal("p90"))
+		req := family(constants.WVASLOWindowRequests)
+		Expect(req).To(HaveLen(1))
+		Expect(req[0].GetGauge().GetValue()).To(Equal(300.0))
+	})
+
 	It("publishes targets, the judged figures, and one source per variant set to 1", func() {
 		PublishSLO(snapshot("m", SLOVariantReading{Variant: "v", Source: constants.SLOSourceOwn,
 			Fill: 0.6, PredictedITL: 0.04}), t0)

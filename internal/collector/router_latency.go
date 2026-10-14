@@ -9,8 +9,11 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/registration"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/source"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/prometheus"
 )
 
 // CollectRouterLatency collects one model's request latency as the router
@@ -30,8 +33,13 @@ func (c *ReplicaMetricsCollector) CollectRouterLatency(
 	}
 	results, err := c.refreshShared(ctx, queries, map[string]string{source.ParamNamespace: namespace})
 	if err != nil {
+		// Counted, not only logged: an absent latency series reads the same
+		// whether the router is unscraped or Prometheus is down, and the
+		// collection-error counter is what tells the two apart.
+		reason := prometheus.CategorizePrometheusError(err)
+		metrics.IncMetricsCollectionErrors(constants.QueryTypeRouterLatency, reason)
 		logger.V(logging.DEBUG).Info("Router latency unavailable",
-			"modelID", modelID, "namespace", namespace, "error", err)
+			"modelID", modelID, "namespace", namespace, "reason", reason, "error", err)
 		return nil
 	}
 

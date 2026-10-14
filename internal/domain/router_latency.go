@@ -1,9 +1,5 @@
 package domain
 
-// SLOAnalyzerName is the name the SLO analyzer registers under and the name a
-// scaling policy lists in its analyzers: section to run it.
-const SLOAnalyzerName = "slo"
-
 // LatencyBucket is one cumulative histogram bucket: the per-second rate of
 // requests whose latency was at most UpperBound seconds. The +Inf bucket has
 // UpperBound = math.Inf(1) and carries the total.

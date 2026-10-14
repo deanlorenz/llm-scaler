@@ -973,14 +973,35 @@ that published them. Every series also carries `controller_instance` when
 `CONTROLLER_INSTANCE` is set, and is scraped with the model's namespace as
 `exported_namespace`.
 
+The router records a request when its stream **completes**, so every judged
+figure below counts completed streaming requests only: a request shed, timed
+out or abandoned is not in it, and attainment reads high under overload.
+
 | metric | type | labels | meaning | read it when |
 | --- | --- | --- | --- | --- |
-| `wva_slo_target_seconds` | gauge | `namespace`, `model_name`, `objective`, `statistic` | The target the policy declares. `objective` is `ttft` or `tpot`; `statistic` is `mean` for TPOT and `p90` (or the configured percentile) for TTFT. | Plotting the observed figure against it. |
-| `wva_slo_observed_seconds` | gauge | `namespace`, `model_name`, `objective`, `statistic` | What the router (the llm-d EPP) measured over 5 minutes: the mean streaming TPOT, or the TTFT percentile. The router's TTFT starts before its flow-control queue, so it includes the time a request waited there. **Absent** when fewer than `max(50, 10 ÷ (1 − p))` requests arrived in the window (100 at p90), or when the router exports nothing for the model. | Above the target: the SLO is being missed. Absent on a busy model: the router's `llm_d_epp_request_ttft_seconds` is not being scraped. |
-| `wva_slo_attainment_ratio` | gauge | `namespace`, `model_name`, `objective` | TTFT only: the share of streaming requests whose TTFT was within the target. Exact when the target is a bucket bound of the router's histogram (3 s and 0.1 s are), interpolated otherwise. Absent under the same sample minimum. | Below the percentile (0.90 for p90): the target is missed for more requests than the SLO allows. |
-| `wva_slo_fill` | gauge | `namespace`, `model_name`, `variant_name`, `objective` | The KV fill, as a fraction of physical KV, at which the variant's mean inter-token latency meets the TPOT target, clamped to [0.15, 0.80]. Absent when the variant could not be priced: see `wva_slo_source`. | Compare with the static scale-out point, `kvCacheThreshold × scaleUpThreshold` (0.68 by default). Higher: the target would let the variant run fuller than the tier does. Lower: the tier is too loose for it. |
-| `wva_slo_predicted_itl_seconds` | gauge | `namespace`, `model_name`, `variant_name` | The mean inter-token latency the variant's fitted line predicts at the fill it would actually run at, once `scaleUpThreshold` headroom is applied. | It is the latency margin an SLO tier would really have. It differs per accelerator for the same `scaleUpThreshold`. |
-| `wva_slo_source` | gauge | `namespace`, `model_name`, `variant_name`, `source` | `1` for where the variant's SLO pricing came from, `0` for the others. `own`: a full fit of its inter-token latency against KV fill. `pinned`: the replicas sat at too similar a fill to fit a slope and an intercept, so the intercept is pinned. `no-line`: too few readings yet. `infeasible`: no fill in range meets the target on this accelerator. `input-invalid`: a reading was missing or non-finite. | `pinned` for long is normal on a balanced fleet and is the weaker estimate. `infeasible`: that accelerator cannot meet the TPOT target at any load. |
+| `wva_slo_target_seconds` | gauge | `namespace`, `model_name`, `objective`, `statistic` | The target the policy declares. `objective` is `ttft` or `tpot`; `statistic` is `mean` for TPOT and `p90` (or the configured percentile) for TTFT. Always present while the policy sets the target. | Plotting the observed figure against it. |
+| `wva_slo_observed_seconds` | gauge | `namespace`, `model_name`, `objective`, `statistic` | What the router (the llm-d EPP) measured over 5 minutes: the request-weighted mean TPOT, or the TTFT percentile. The router's TTFT starts before its flow-control queue, so it includes the time a request waited there. `+Inf` when the percentile falls past the router's largest bucket. **Absent** when fewer than `max(50, 10 ÷ (1 − p))` requests completed in the window (100 at p90; 50 for the TPOT mean), or when the router reports nothing for the model. | Above the target: the SLO is being missed. |
+| `wva_slo_attainment_ratio` | gauge | `namespace`, `model_name`, `objective`, `statistic` | TTFT only: the share of completed streaming requests whose TTFT was within the target. Exact when the target is a bucket bound of the router's histogram (3 s and 0.1 s are), interpolated otherwise. Absent under the same sample minimum. | Below the percentile (0.90 for `statistic="p90"`): the target is missed for more requests than the SLO allows. |
+| `wva_slo_window_requests` | gauge | `namespace`, `model_name`, `objective`, `statistic` | Requests the router recorded for the objective over the window. Present whenever the router reported anything for the model, judged or not. | Present with `observed` absent: too few requests to judge. Both absent on a busy model: the router's histograms are not scraped, or (TPOT only) clients do not send `stream_options.include_usage`. |
+| `wva_slo_fill` | gauge | `namespace`, `model_name`, `variant_name`, `objective` | The KV fill, as a fraction of physical KV, at which the variant's mean inter-token latency meets the TPOT target, clamped to [0.15, 0.80], and lowered to the fill the engine can reach when `max_num_seqs` binds. Absent when the variant could not be priced: see `wva_slo_source`. | Compare with the static scale-out point, `kvCacheThreshold × scaleUpThreshold` (0.68 by default). Higher: the target would let the variant run fuller than the tier does. Lower: the tier is too loose for it. |
+| `wva_slo_predicted_itl_seconds` | gauge | `namespace`, `model_name`, `variant_name` | The mean inter-token latency the variant's fitted line predicts at the fill it would actually run at, once `scaleUpThreshold` headroom is applied, never below the bottom of the fitted range. | It is the latency margin an SLO tier would really have. It differs per accelerator for the same `scaleUpThreshold`. |
+| `wva_slo_source` | gauge | `namespace`, `model_name`, `variant_name`, `source` | `1` for where the variant's SLO pricing came from, `0` for the others. `own`: a full fit of its inter-token latency against KV fill. `pinned`: the replicas sat at too similar a fill to fit a slope and an intercept, so the intercept is pinned to one this variant was measured at. `pinned-default`: the same, pinned to the built-in 6 ms floor because no full fit has happened since the controller started. `no-line`: too few readings yet. `no-output-length`: no replica has reported an output length, so neither demand nor the per-request footprint is known. `infeasible`: no fill in range meets the target on this accelerator. `input-invalid`: a reading was missing or non-finite. | `pinned` for long is normal on a balanced fleet. `pinned-default` is not a measurement: on a large accelerator the real intercept is several times 6 ms, so `wva_slo_fill` reads low. `infeasible`: that accelerator cannot meet the TPOT target at any load. |
+
+Alerting on these:
+
+- **TTFT missed:** `wva_slo_attainment_ratio{objective="ttft",statistic="p90"} < 0.90`,
+  one rule per percentile in use.
+- **TPOT missed:** `wva_slo_observed_seconds{objective="tpot"} > on(namespace, model_name, objective, statistic) wva_slo_target_seconds`.
+- **Low traffic:** below the sample minimum the observed and attainment series
+  disappear, which resets an alert's `for:`. Alert on
+  `max_over_time(...[10m])` (or `min_over_time` for attainment) instead of the
+  raw series.
+- **Targets set but unjudged:**
+  `wva_slo_target_seconds unless on(namespace, model_name, objective, statistic) wva_slo_observed_seconds`.
+- **Wakes and rises:** the 5-minute window includes requests that waited out a
+  scale-from-zero wake or a scale-up. Suppress with
+  `unless on(exported_namespace) changes(wva_current_replicas[10m]) > 0`, or
+  the closest equivalent your labels allow.
 
 ### Utilization-Share Optimizer Metrics
 

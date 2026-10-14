@@ -98,3 +98,25 @@ var _ = Describe("realisedFill", func() {
 		Expect(math.IsNaN(realisedFill(line, 0.6, 0.85, 0, 500, 0))).To(BeTrue())
 	})
 })
+
+var _ = Describe("reachableFill", func() {
+	It("is k when the engine admits every sequence k implies", func() {
+		Expect(reachableFill(0.6, 100000, 500, 256)).To(Equal(0.6))
+		Expect(reachableFill(0.6, 100000, 500, 0)).To(Equal(0.6))
+	})
+
+	It("is the fill max_num_seqs stops at when it binds", func() {
+		Expect(reachableFill(0.6, 100000, 500, 64)).To(BeNumerically("~", 0.32, 1e-12))
+	})
+
+	It("never goes below the fitted range", func() {
+		Expect(reachableFill(0.6, 100000, 500, 8)).To(Equal(minFill))
+	})
+})
+
+var _ = Describe("realisedFill below the fitted range", func() {
+	It("reports the bottom of the range rather than extrapolating under it", func() {
+		// A very low headroom drives the realised fill under 0.15.
+		Expect(realisedFill(line, 0.2, 0.3, 100000, 500, 0)).To(Equal(minFill))
+	})
+})

@@ -12,7 +12,7 @@ const (
 	WVASLOObservedSeconds = "wva_slo_observed_seconds"
 	// WVASLOAttainmentRatio is the share of requests whose TTFT met the target.
 	// Absent below the sample minimum, never 0 or 1 by default.
-	// Labels: namespace, model_name, objective.
+	// Labels: namespace, model_name, objective, statistic.
 	WVASLOAttainmentRatio = "wva_slo_attainment_ratio"
 	// WVASLOFill is the KV fill, as a fraction of physical KV, at which a
 	// variant's mean inter-token latency meets the TPOT target -- the fill its
@@ -28,6 +28,13 @@ const (
 	// for every other, like wva_replica_capacity_source.
 	// Labels: namespace, model_name, variant_name, source.
 	WVASLOSource = "wva_slo_source"
+
+	// WVASLOWindowRequests is how many requests the router recorded for the
+	// objective over its window. Present whenever the router reported anything,
+	// so an absent wva_slo_observed_seconds beside it means "too few requests to
+	// judge", and both absent means the router reported nothing.
+	// Labels: namespace, model_name, objective, statistic.
+	WVASLOWindowRequests = "wva_slo_window_requests"
 
 	// LabelObjective names an SLO objective: "ttft" or "tpot".
 	LabelObjective = "objective"
@@ -51,6 +58,14 @@ const (
 	// readings did not span enough of k to fit both coefficients. A balanced
 	// fleet often sits here indefinitely.
 	SLOSourcePinned = "pinned"
+	// SLOSourcePinnedDefault: a pinned fit whose intercept is the built-in
+	// floor, not one this variant was ever measured at. Not a measurement of
+	// the hardware: on a large accelerator the real intercept is several times
+	// the floor, and the slope fitted against it is too steep.
+	SLOSourcePinnedDefault = "pinned-default"
+	// SLOSourceNoOutputLength: no replica has reported an output length, so
+	// neither the demand nor the per-request KV footprint is known.
+	SLOSourceNoOutputLength = "no-output-length"
 	// SLOSourceNoLine: too few readings to fit any line.
 	SLOSourceNoLine = "no-line"
 	// SLOSourceInfeasible: no fill in the line's range meets the target.
@@ -61,5 +76,6 @@ const (
 
 // SLOSources is every SLO source value, in the order they are published.
 var SLOSources = []string{
-	SLOSourceOwn, SLOSourcePinned, SLOSourceNoLine, SLOSourceInfeasible, SLOSourceInputInvalid,
+	SLOSourceOwn, SLOSourcePinned, SLOSourcePinnedDefault, SLOSourceNoLine, SLOSourceNoOutputLength,
+	SLOSourceInfeasible, SLOSourceInputInvalid,
 }

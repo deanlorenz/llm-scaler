@@ -36,6 +36,11 @@ const (
 // SaturationAnalyzerName is the canonical name for the saturation analyzer.
 const SaturationAnalyzerName = "saturation"
 
+// SLOAnalyzerName is the name the SLO analyzer registers under and the name a
+// scaling policy lists in its analyzers: section to run it. Reserved: an
+// external analyzer of the same name is never run.
+const SLOAnalyzerName = "slo"
+
 // RoleBoth represents the default role when a variant serves both prefill and decode.
 const RoleBoth = "both"
 

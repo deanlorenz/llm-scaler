@@ -1172,13 +1172,16 @@ digest alone — and, for the ITL line, `unresolved` empty on both sides.
 
 Latency targets, and the analyzer that reads them. **On this release it
 reports and does not decide**: replica counts still come from the saturation
-analyzer alone. Use it to answer whether a tier meets an SLO, and what the SLO
-would let each variant do, before any of it sizes a fleet. The design, and
-what enforcing it will take, is in
-[SLO tiers](../proposals/slo-tiers.md).
+analyzer alone, and a policy written for this release keeps observing when
+enforcement ships, because enforcing will need an explicit `slo.mode: enforce`.
+Use it to answer whether a tier meets an SLO, and what the SLO would let each
+variant do, before any of it sizes a fleet. The design, and what enforcing it
+will take, is in [SLO tiers](../proposals/slo-tiers.md).
 
 ```yaml
 interactive: |
+  scaleUpThreshold: 0.85        # restate the band: see the warning below
+  scaleDownBoundary: 0.70
   analyzers:
     - name: saturation          # keep it listed: an analyzers: list replaces the whole list
     - name: slo
@@ -1187,6 +1190,12 @@ interactive: |
     ttft: {target: 3s, percentile: 90}     # a percentile
 ```
 
+- **A tier that lists `analyzers:` resets the scaling band.** An entry with an
+  `analyzers:` list gets `scaleUpThreshold: 0.85` / `scaleDownBoundary: 0.70`
+  filled in when it is parsed, and those then override a band tuned on the
+  `default` entry. The list also replaces the inherited one whole, so
+  saturation's per-analyzer `parameters:` or `score` from the default are lost
+  too. Copy the band, and saturation's whole entry, into the tier.
 - **Both halves are needed.** Without `slo` under `analyzers:`, the targets
   are read by nothing. Without targets, the analyzer has nothing to aim at.
   Either half alone is logged as `SLO policy is half-configured`, once
@@ -1200,21 +1209,52 @@ interactive: |
   `slo` block drops the whole entry it is on.
 - **The block is replaced whole by an override**, not merged objective by
   objective, so a per-model entry that sets only `ttft` has no `tpot`.
+- **A namespace-local scaling-policy map replaces the global one whole.** A
+  tier defined only in the global map does not exist in that namespace; a model
+  naming it falls back to the namespace's `default` entry and loses its `slo`
+  block (reported as an unknown policy).
+- **The name `slo` is reserved.** An external analyzer named `slo` is never
+  run.
 - **It is judged on the router's numbers.** TTFT and TPOT come from the llm-d
   EPP's `llm_d_epp_request_ttft_seconds` and
-  `llm_d_epp_request_streaming_tpot_seconds`, streaming requests only. The
-  router's TTFT includes the time a request waited in its flow-control queue;
-  the engine's does not. A router that does not publish these names leaves the
-  SLO unjudged, and the observed series stay absent.
+  `llm_d_epp_request_streaming_tpot_seconds`, streaming requests only, scoped
+  by the namespace the EPP is scraped in, so the EPP must run in the model's
+  namespace. The router's TTFT includes the time a request waited in its
+  flow-control queue; the engine's does not. Three things follow from how the
+  router records them:
+  - **Only completed requests count.** The router records a request when its
+    stream ends. A request shed, timed out or abandoned is never recorded, so
+    attainment reads high when the fleet is overloaded, and a request's TTFT
+    is counted up to its whole decode time after its first token.
+  - **TPOT needs `usage` in the stream.** The router reads the output-token
+    count from the response's `usage`, which a streaming client gets only with
+    `stream_options.include_usage` (or vLLM run with
+    `--enable-force-include-usage`). Without it TTFT is judged and TPOT is not.
+  - **A wake from zero, and the minutes after it, read as a miss.** The
+    5-minute window includes requests that waited out a cold start (about
+    3 minutes for a large model), and nothing excludes them on this release.
+    Suppress an alert while replicas changed recently (see
+    [SLO Analyzer Metrics](prometheus.md#slo-analyzer-metrics)).
 - **What it publishes** is listed under
   [SLO Analyzer Metrics](prometheus.md#slo-analyzer-metrics), plus its demand
   and per-replica capacity as `wva_analyzer_demand` / `wva_analyzer_target`
-  with `analyzer_name="slo"`, in output tokens per second. Their ratio is the
-  replica count the TPOT target alone would ask for; compare it with
-  `wva_desired_replicas`. Each cycle also logs `slo-model` and `slo-variant`
-  lines.
+  with `analyzer_name="slo"`, in output tokens per second. For a model with
+  one generating variant, `demand ÷ (target × scaleUpThreshold)` is the replica
+  count the TPOT target alone would ask for; compare it with
+  `wva_desired_replicas`. The target is `0` for a variant the SLO could not
+  price, so filter it `> 0`. Each cycle also logs `slo-model` and
+  `slo-variant` lines at verbosity 3.
 - **Prefill is not priced.** On a P/D model only decode variants get an SLO
-  figure; TTFT is judged for the model but does not yet price a role.
+  figure; TTFT is judged for the model but does not yet price a role. Warm-pool
+  bridges are left out of the latency line, so a variant served only by
+  bridges reads `no-line` or `no-output-length`.
+- **Read the per-variant figures as estimates.** They are not checked against a
+  live fleet yet, and are known to be off in three cases: under speculative
+  decoding (the engine's ITL is per step, not per token), with a high prefix
+  cache hit rate (the per-request KV footprint is under-counted), and on a pod
+  running several data-parallel ranks behind one API server. The
+  [proposal](../proposals/slo-tiers.md#before-phase-1-prices-anything) lists
+  what is fixed before any of it sizes a fleet.
 
 ### Default Configuration
 

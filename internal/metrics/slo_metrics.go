@@ -17,6 +17,7 @@ var (
 	sloFill         *prometheus.GaugeVec
 	sloPredictedITL *prometheus.GaugeVec
 	sloSource       *prometheus.GaugeVec
+	sloRequests     *prometheus.GaugeVec
 )
 
 // registerSLOMetrics creates and registers the SLO analyzer's gauges. Called
@@ -41,9 +42,13 @@ func registerSLOMetrics(registry prometheus.Registerer) error {
 			"TPOT, the configured percentile for TTFT. Absent when too few requests were seen to judge.",
 		objectiveLabels)
 	sloAttainment = gauge(constants.WVASLOAttainmentRatio,
-		"SLO analyzer: the share of requests whose TTFT met the target, as the router measured it "+
-			"(including its queue). Absent below the sample minimum.",
-		withInstance(constants.LabelNamespace, constants.LabelModelName, constants.LabelObjective))
+		"SLO analyzer: the share of completed streaming requests whose TTFT met the target, as the "+
+			"router measured it (including its queue). Absent below the sample minimum.",
+		objectiveLabels)
+	sloRequests = gauge(constants.WVASLOWindowRequests,
+		"SLO analyzer: requests the router recorded for the objective over its window. Present "+
+			"whenever the router reported anything for the model.",
+		objectiveLabels)
 	sloFill = gauge(constants.WVASLOFill,
 		"SLO analyzer: the KV fill, as a fraction of physical KV, at which a variant's mean "+
 			"inter-token latency meets the TPOT target. Absent when the variant could not be priced.",
@@ -61,7 +66,8 @@ func registerSLOMetrics(registry prometheus.Registerer) error {
 	sloPublishedMu.Lock()
 	sloPublished = map[string]*sloModelSeries{}
 	sloPublishedMu.Unlock()
-	for _, g := range []*prometheus.GaugeVec{sloTarget, sloObserved, sloAttainment, sloFill, sloPredictedITL, sloSource} {
+	for _, g := range []*prometheus.GaugeVec{sloTarget, sloObserved, sloAttainment, sloFill, sloPredictedITL,
+		sloSource, sloRequests} {
 		if err := registry.Register(g); err != nil {
 			return err
 		}
@@ -70,14 +76,17 @@ func registerSLOMetrics(registry prometheus.Registerer) error {
 }
 
 // SLOObjectiveReading is one objective of one model, as PublishSLO takes it.
-// A NaN Observed or Attainment is not published: absence is the honest value
-// for "not enough requests to judge".
+// A NaN Observed, Attainment or Requests is not published: absence is the
+// honest value for "not enough requests to judge" (Observed, Attainment) and
+// for "the router reported nothing" (Requests). An infinite Observed -- a
+// percentile in the router's +Inf bucket -- is published as +Inf.
 type SLOObjectiveReading struct {
 	Objective     string
 	Statistic     string
 	TargetSeconds float64
 	Observed      float64
 	Attainment    float64
+	Requests      float64
 }
 
 // SLOVariantReading is one variant of one model, as PublishSLO takes it. A NaN
@@ -126,7 +135,7 @@ func PublishSLO(snap SLOModelSnapshot, now time.Time) {
 
 	current := map[*prometheus.GaugeVec]map[string]prometheus.Labels{}
 	set := func(g *prometheus.GaugeVec, l prometheus.Labels, v float64) {
-		if math.IsNaN(v) || math.IsInf(v, 0) {
+		if math.IsNaN(v) {
 			return
 		}
 		g.With(l).Set(v)
@@ -153,7 +162,8 @@ func PublishSLO(snap SLOModelSnapshot, now time.Time) {
 		ol := labels(constants.LabelObjective, o.Objective, constants.LabelStatistic, o.Statistic)
 		set(sloTarget, ol, o.TargetSeconds)
 		set(sloObserved, ol, o.Observed)
-		set(sloAttainment, labels(constants.LabelObjective, o.Objective), o.Attainment)
+		set(sloAttainment, ol, o.Attainment)
+		set(sloRequests, ol, o.Requests)
 	}
 	for _, v := range snap.Variants {
 		set(sloFill, labels(constants.LabelVariantName, v.Variant,

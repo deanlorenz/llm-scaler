@@ -83,10 +83,12 @@ var _ = Describe("Analyzer state and inputs", func() {
 			return s
 		}
 
-		It("caps the resident sequences at the engine's max_num_seqs", func() {
+		It("caps the resident sequences at max_num_seqs and prices the fill the engine can reach", func() {
 			res := warmWith(newAt(store(capacity.EngineParams{MaxNumSeqs: 64})), noop)
-			// 120 sequences at k = 0.6, capped at 64.
-			Expect(res.VariantCapacities[0].PerReplicaCapacity).To(BeNumerically("~", 64/0.044, 1e-6))
+			// k = 0.6 implies 120 sequences; the engine admits 64, so the cache
+			// never fills past 64 * 500 / 100000 = 0.32, and 64 sequences
+			// advance at ITL(0.32) = 32.8 ms, not ITL(0.6).
+			Expect(res.VariantCapacities[0].PerReplicaCapacity).To(BeNumerically("~", 64/line.ITLAt(0.32), 1e-6))
 		})
 
 		It("reads the configured KV override where the live reading is absent or the overflow sentinel", func() {
@@ -220,5 +222,24 @@ var _ = Describe("judge's sample minimums and labels", func() {
 			TTFTBuckets: buckets(1, 3.9, 3, 3.96, inf, 4.0)}, slo)
 		Expect(enough[0].Observed).To(BeNumerically("~", 3.0, 1e-9))
 		Expect(enough[0].Attainment).To(BeNumerically("~", 0.99, 1e-12))
+	})
+})
+
+var _ = Describe("judge's request counts", func() {
+	It("reports how many requests the router saw, even below the minimum", func() {
+		slo := policy(100*time.Millisecond, 3*time.Second).SLO
+		out := New(fakeRouter{latency: &domain.RouterLatency{WindowSeconds: 300,
+			TPOTSumRate: 0.008, TPOTCountRate: 0.1, TTFTBuckets: buckets(1, 0.18, 3, 0.19, inf, 0.2)}}, nil).
+			judge(context.Background(), domain.AnalyzerInput{ModelID: "m", Namespace: "ns"}, slo)
+		Expect(out[0].Requests).To(BeNumerically("~", 30, 1e-9))
+		Expect(math.IsNaN(out[0].Observed)).To(BeTrue())
+		Expect(out[1].Requests).To(BeNumerically("~", 60, 1e-9))
+		Expect(math.IsNaN(out[1].Observed)).To(BeTrue())
+	})
+
+	It("reports no request count when the router reported nothing", func() {
+		out := New(fakeRouter{}, nil).judge(context.Background(),
+			domain.AnalyzerInput{ModelID: "m", Namespace: "ns"}, policy(0, 3*time.Second).SLO)
+		Expect(math.IsNaN(out[0].Requests)).To(BeTrue())
 	})
 })

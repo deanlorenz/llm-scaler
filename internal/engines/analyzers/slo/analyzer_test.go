@@ -121,7 +121,7 @@ var _ = Describe("Analyzer", func() {
 		Expect(math.IsNaN(reading.Fill)).To(BeTrue())
 	})
 
-	It("falls back to a pinned intercept when the fleet does not span enough of k", func() {
+	It("falls back to the default intercept, labelled as such, when the fleet never spanned enough of k", func() {
 		cfg := policy(44*time.Millisecond, 0)
 		var res *domain.AnalyzerResult
 		for range 5 {
@@ -129,7 +129,7 @@ var _ = Describe("Analyzer", func() {
 				[]domain.ReplicaMetrics{row("agg", "agg-a", 0.5), row("agg", "agg-b", 0.52)})
 			clock = clock.Add(15 * time.Second)
 		}
-		Expect(res.VariantCapacities[0].Reason).To(Equal("slo-" + constants.SLOSourcePinned))
+		Expect(res.VariantCapacities[0].Reason).To(Equal("slo-" + constants.SLOSourcePinnedDefault))
 	})
 
 	// Each case feeds readings that alone would fill the window and fit a line,
@@ -245,5 +245,35 @@ var _ = Describe("judge", func() {
 		got := judgeWith(rl, policy(100*time.Millisecond, 0).SLO)
 		Expect(got[0]).To(BeNumerically("~", 0.08, 1e-12))
 		Expect(math.IsNaN(got[1])).To(BeTrue())
+	})
+})
+
+var _ = Describe("Analyzer with no output length reported", func() {
+	It("leaves demand undefined and every generating variant without data", func() {
+		a := New(nil, nil)
+		clock := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+		a.now = func() time.Time { return clock }
+		agg := domain.VariantReplicaState{VariantName: "agg", Role: domain.RoleBoth, CurrentReplicas: 2}
+		dec := domain.VariantReplicaState{VariantName: "dec", Role: domain.RoleDecode, CurrentReplicas: 1}
+		var res *domain.AnalyzerResult
+		for i := range 5 {
+			rows := append(cycleRows("agg", i), cycleRows("dec", i)...)
+			for j := range rows {
+				rows[j].AvgOutputTokens = 0
+			}
+			var err error
+			res, err = a.Analyze(context.Background(), domain.AnalyzerInput{
+				ModelID: "m", Namespace: "ns", Config: policy(44*time.Millisecond, 0), ArrivalRate: 2,
+				VariantStates: []domain.VariantReplicaState{agg, dec}, ReplicaMetrics: rows,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			clock = clock.Add(15 * time.Second)
+		}
+		Expect(res.TotalDemand).To(BeZero())
+		Expect(res.RoleDemand).To(BeNil(), "a role demand of zero would read as idle, not unknown")
+		for _, vc := range res.VariantCapacities {
+			Expect(vc.Reason).To(Equal(domain.ReasonNoData), vc.VariantName)
+			Expect(vc.PerReplicaCapacity).To(BeZero(), vc.VariantName)
+		}
 	})
 })

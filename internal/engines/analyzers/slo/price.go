@@ -87,6 +87,22 @@ func replicaTokenRate(line itl.Model, k, capacityTokens, kvPerRequest float64, m
 	return rate
 }
 
+// reachableFill is the fill a replica can actually reach at k: k itself, unless
+// the engine's max_num_seqs admits fewer sequences than k implies. Then the
+// cache never fills past maxNumSeqs*KVreq/C, and pricing the ITL of k would
+// charge the latency of a load the engine cannot carry. Never below minFill,
+// where the line was not fitted: the ITL there is the higher, safer reading.
+func reachableFill(k, capacityTokens, kvPerRequest float64, maxNumSeqs int64) float64 {
+	if maxNumSeqs <= 0 || !(capacityTokens > 0) || !(kvPerRequest > 0) {
+		return k
+	}
+	kCap := float64(maxNumSeqs) * kvPerRequest / capacityTokens
+	if kCap >= k {
+		return k
+	}
+	return max(kCap, minFill)
+}
+
 // realisedFill is the fill a replica actually runs at once the fleet carries
 // scale-up headroom: N_slo / scaleUp replicas share the load, so each sustains
 // scaleUp times the token rate it was priced at. The rate is not linear in k,
@@ -110,7 +126,9 @@ func realisedFill(line itl.Model, k, scaleUp, capacityTokens, kvPerRequest float
 			hi = mid
 		}
 	}
-	return hi
+	// Below the fitted range the line says nothing; the ITL at its bottom is
+	// the higher, safer reading.
+	return max(hi, minFill)
 }
 
 func finite(x float64) bool {
