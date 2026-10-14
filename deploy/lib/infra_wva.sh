@@ -966,6 +966,12 @@ EOF
             ;;
     esac
 
+    # The ServiceMonitor references wva-metrics-scraper-token now; the token the
+    # controller's own ServiceAccount used to be scraped with goes.
+    case "${WVA_APPLY_SCOPE:-all}" in
+        all|prereqs) wva_delete_legacy_controller_token "$WVA_NS" ;;
+    esac
+
     # Put the operator's own entries back. A merge patch names only the keys it
     # carries, so `default` -- which the apply has just refreshed from the
     # shipped manifest -- is left exactly as applied.

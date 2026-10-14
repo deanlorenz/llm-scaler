@@ -34,7 +34,8 @@ on the controller can bound the person who can edit it**. See
 | ServiceAccount `wva-controller-manager` | the prereqs phase (`make setup-prereqs`) | everything the controller does against the API server, and its queries to Prometheus (`PROMETHEUS_TOKEN_PATH` points at this SA's projected token) |
 | ServiceAccount `wva-epp-metrics-reader` | the prereqs phase | scraping EPP `/metrics`. Bound cluster-wide to `get` on the non-resource URL `/metrics` |
 | Secret `wva-epp-metrics-token` | the prereqs phase | a **legacy, non-expiring** `kubernetes.io/service-account-token` for `wva-epp-metrics-reader`, mounted into the controller at `/var/run/secrets/epp-metrics` |
-| Secret `wva-controller-manager-token` | the prereqs phase, **OpenShift only** | a **legacy, non-expiring** token for the controller SA, referenced by the ServiceMonitor's `bearerTokenSecret` so user-workload Prometheus can scrape `:8443` |
+| ServiceAccount `wva-metrics-scraper` | the prereqs phase, **OpenShift only** | the identity user-workload Prometheus scrapes the controller's `:8443` with. Its only grant is `get` on `/metrics` (the repointed `metrics-reader`) |
+| Secret `wva-metrics-scraper-token` | the prereqs phase, **OpenShift only** | a **legacy, non-expiring** token for `wva-metrics-scraper`, referenced by the ServiceMonitor's `bearerTokenSecret` (the prometheus-operator can only read a Secret) |
 
 Two things to know about the token Secrets. They do not expire and are not
 rotated: deleting the Secret and re-running the prereqs phase is the rotation.
@@ -43,14 +44,14 @@ default namespace-scoped install that is the tenant, so the tenant holds a token
 that can `get /metrics` on every component in the cluster that authorizes
 `/metrics` through the API server, including the API server's own.
 
-**On OpenShift, `wva-controller-manager-token` is the controller's own identity.**
-It is a non-expiring token for `wva-controller-manager`, so whoever can read
-Secrets in the controller's namespace holds everything that ServiceAccount
-holds: `patch` on pods and reads of every ConfigMap in the managed namespace,
-cluster-wide node and Kueue read, `get /metrics` cluster-wide (the repointed
-`metrics-reader`), and `cluster-monitoring-view` — which also lets it query the
-platform Prometheus / Thanos for **every namespace's** series. In the
-tenant-owned shape that reader is the tenant. Keep the controller
+**On OpenShift the scrape token is not the controller's identity.** It used to
+be (`wva-controller-manager-token`, a non-expiring token for the controller's
+own ServiceAccount); the installer deletes that Secret on upgrade and on
+uninstall. Whoever can read Secrets in the controller's namespace still holds
+`wva-epp-metrics-token` and `wva-metrics-scraper-token`, both `get /metrics`
+only. The controller's own token stays projected and short-lived, and it
+carries `cluster-monitoring-view`, which lets it query the platform
+Prometheus / Thanos for **every namespace's** series. Keep the controller
 [out of the tenant's reach](../guides/admin-cluster-setup/README.md#keeping-the-controller-out-of-the-tenants-reach)
 on a shared OpenShift cluster.
 
@@ -141,7 +142,7 @@ Everything in the Kubernetes table, plus:
 | Verbs | Resource | Scope | Why |
 | --- | --- | --- | --- |
 | (OpenShift's role) | ClusterRoleBinding to `cluster-monitoring-view` | **cluster** | querying Thanos Querier with the controller's own token — which reads the platform Prometheus series of **every** namespace, not just the managed one. That role is reported to carry `get` on namespaces, which would let the controller read Namespace objects on OpenShift; nothing in this repository pins the role's contents, so verify on your cluster with `kubectl auth can-i get namespaces --as=system:serviceaccount:<controller namespace>:wva-controller-manager` |
-| get | non-resource URL `/metrics` | **cluster** (`metrics-reader`) | repointed at the controller's own SA, whose token Secret the ServiceMonitor uses to scrape `:8443` |
+| get | non-resource URL `/metrics` | **cluster** (`metrics-reader`) | repointed at `wva-metrics-scraper`, whose token Secret the ServiceMonitor uses to scrape `:8443`. Not the controller: its token no longer sits in a Secret |
 
 Because of `cluster-monitoring-view`, a namespace-scoped install on OpenShift
 always needs a cluster admin, and the installer's preflight says so.

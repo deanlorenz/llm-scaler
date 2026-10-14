@@ -388,6 +388,39 @@ wva_delete_legacy_crbs() {
     done
 }
 
+# wva_delete_legacy_controller_token removes the non-expiring token Secret the
+# OpenShift overlay used to mint for the CONTROLLER's ServiceAccount, in
+# namespace $1.
+#
+# The ServiceMonitor now scrapes as wva-metrics-scraper, which holds only
+# `get /metrics`. The old Secret is no longer rendered, so `kubectl apply`
+# leaves it behind and `delete -k` can never see it -- and while it exists it is
+# a permanent copy of the controller's whole identity for anyone who can read
+# Secrets in the namespace. Deleted by name, and only when its annotation still
+# names wva-controller-manager: a Secret of that name that is something else is
+# not ours to remove. Called after the apply, once nothing references it.
+wva_delete_legacy_controller_token() {
+    local ns="$1" name="wva-controller-manager-token" sa err rc=0
+    [ -n "$ns" ] || return 0
+    sa="$(kubectl get secret "$name" -n "$ns" \
+        -o jsonpath='{.metadata.annotations.kubernetes\.io/service-account\.name}' 2>&1)" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        case "$sa" in
+            *NotFound*|*"not found"*) return 0 ;;
+        esac
+        log_warning "Could not check for the obsolete token Secret $ns/$name: $sa"
+        log_warning "  If it exists it is a non-expiring token for the controller's ServiceAccount; remove it: kubectl delete secret $name -n $ns"
+        return 0
+    fi
+    [ "$sa" = "wva-controller-manager" ] || return 0
+    if err="$(kubectl delete secret "$name" -n "$ns" 2>&1)"; then
+        log_info "Removed obsolete Secret $ns/$name (a non-expiring token for the controller ServiceAccount; the ServiceMonitor scrapes as wva-metrics-scraper now)."
+    else
+        log_warning "Obsolete Secret $ns/$name is still present ($err). It is a non-expiring token for the controller ServiceAccount; remove it:"
+        log_warning "    kubectl delete secret $name -n $ns"
+    fi
+}
+
 # wva_append_crb_name_patches appends the rename patches to a kustomization file.
 #
 # Deploy AND undeploy must both use this. They diverged once, with real cost: the
@@ -507,7 +540,7 @@ wva_overlay_dir() {
 # ordering is the whole point.
 #
 # On OPENSHIFT the ServiceMonitor authenticates with `bearerTokenSecret:
-# wva-controller-manager-token`. (On Kubernetes it uses `bearerTokenFile` -- a
+# wva-metrics-scraper-token`. (On Kubernetes it uses `bearerTokenFile` -- a
 # projected service-account token the kubelet supplies -- so there is no Secret
 # for the operator to resolve and this failure cannot occur there. The kinds move
 # on both platforms anyway: the objects reference each other on both, and one

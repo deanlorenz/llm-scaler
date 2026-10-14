@@ -69,8 +69,8 @@ carry a hash suffix (below).
 | `wva-node-reader-role` + binding | resolving a variant's accelerator reads **Nodes** |
 | `wva-kueue-reader-role` + binding | Kueue **ClusterQueues** and **ResourceFlavors** are cluster-scoped. Inert without Kueue |
 | `wva-manager-cluster-monitoring-view` | **OpenShift only**: binds the platform's `cluster-monitoring-view`, so the controller can query Thanos |
-| ServiceAccounts `wva-controller-manager` and `wva-epp-metrics-reader` | namespaced, but referenced by the RBAC and the ServiceMonitor above, so they are applied in the same phase |
-| Secret `wva-epp-metrics-token` | a **long-lived, non-expiring** ServiceAccount token for `wva-epp-metrics-reader`, which the controller mounts to scrape EPP metrics. On OpenShift also `wva-controller-manager-token`, which the ServiceMonitor scrapes with |
+| ServiceAccounts `wva-controller-manager`, `wva-epp-metrics-reader` and, on OpenShift, `wva-metrics-scraper` | namespaced, but referenced by the RBAC and the ServiceMonitor above, so they are applied in the same phase |
+| Secret `wva-epp-metrics-token` | a **long-lived, non-expiring** ServiceAccount token for `wva-epp-metrics-reader`, which the controller mounts to scrape EPP metrics. On OpenShift also `wva-metrics-scraper-token`, which the ServiceMonitor scrapes with; it grants only `get /metrics` |
 | ConfigMap `wva-metrics-server-ca` | **OpenShift only**: the service CA the ServiceMonitor verifies the controller's certificate with |
 | the ServiceMonitor | the stock `admin` ClusterRole does not grant `monitoring.coreos.com` |
 | Roles `wva-manager-role`, `wva-leader-election-role`, `wva-utilization-share-history-role`, `wva-controller-status-role`, `wva-learned-state-role`, and their RoleBindings | namespaced, but RBAC forbids granting permissions you do not hold yourself, and the controller's Role names resources a namespace admin does not have |

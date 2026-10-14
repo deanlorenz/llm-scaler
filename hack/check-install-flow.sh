@@ -248,6 +248,52 @@ for target in setup-prereqs deploy-wva deploy-wva-on-k8s deploy-wva-on-openshift
     fi
 done
 
+# --- TOKEN --------------------------------------------------------------------
+#
+# The OpenShift overlay used to mint a non-expiring token Secret for the
+# controller's own ServiceAccount. It is no longer rendered, so nothing but a
+# delete by name removes it from an existing install.
+if ! declare -F wva_delete_legacy_controller_token >/dev/null; then
+    fail "TOKEN: wva_delete_legacy_controller_token is not defined -- an upgraded install keeps the controller token Secret"
+else
+    token_case() {
+        : > "$KUBECTL_LOG"
+        out="$(
+            kubectl() {
+                printf '%s\n' "$*" >> "$KUBECTL_LOG"
+                case "$1 $2" in
+                    "get secret")
+                        case "$TOKEN_SA" in
+                            absent)    echo 'Error from server (NotFound): secrets "wva-controller-manager-token" not found'; return 1 ;;
+                            forbidden) echo 'Error from server (Forbidden): secrets "wva-controller-manager-token" is forbidden'; return 1 ;;
+                            *)         printf '%s' "$TOKEN_SA" ;;
+                        esac ;;
+                esac
+                return 0
+            }
+            wva_delete_legacy_controller_token wns 2>&1
+        )"
+    }
+    TOKEN_SA=wva-controller-manager token_case
+    if grep -qx 'delete secret wva-controller-manager-token -n wns' "$KUBECTL_LOG"; then
+        ok "TOKEN: the controller token Secret is deleted"
+    else
+        fail "TOKEN: the controller token Secret must be deleted" "$(cat "$KUBECTL_LOG")"
+    fi
+    TOKEN_SA=someone-else token_case
+    if grep -q '^delete' "$KUBECTL_LOG"; then
+        fail "TOKEN: a Secret of that name for another account is not ours to delete" "$(cat "$KUBECTL_LOG")"
+    else
+        ok "TOKEN: a Secret of that name for another account is left alone"
+    fi
+    TOKEN_SA=forbidden token_case
+    if ! grep -q '^delete' "$KUBECTL_LOG" && printf '%s' "$out" | grep -q 'Could not check'; then
+        ok "TOKEN: Forbidden is reported, not taken for absent"
+    else
+        fail "TOKEN: Forbidden must warn, not pass silently" "$out"
+    fi
+fi
+
 # --- CHART --------------------------------------------------------------------
 #
 # kube-prometheus-stack is one release shared by every WVA on the cluster. With

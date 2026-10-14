@@ -107,6 +107,8 @@ EOF
     # delete below -- it removes what is rendered, and these are not. Without this
     # they survive every uninstall, forever.
     wva_delete_legacy_crbs "$WVA_NS"
+    # Same for the controller token Secret the OpenShift overlay used to render.
+    wva_delete_legacy_controller_token "$WVA_NS"
 
     # Render and FILTER, rather than `kubectl delete -k`. One kind in the rendered
     # set does not belong to this install and must survive it:

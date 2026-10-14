@@ -50,7 +50,7 @@ for fn in wva_append_crb_name_patches wva_append_metrics_reader_subject_patch \
     }
 done
 
-EXPECT_CASES=33
+EXPECT_CASES=39
 RAN=0
 FAILED=0
 
@@ -273,6 +273,24 @@ for overlay in cluster-scoped/kubernetes cluster-scoped/openshift \
     # /tmp writable, and from an emptyDir: a hostPath or a missing volume is not it.
     check "$overlay: /tmp is an emptyDir" 'emptyDir' \
         "$(printf '%s\n' "$dep" | yq -r '(.spec.template.spec.containers[] | select(.name == "manager") | .volumeMounts[] | select(.mountPath == "/tmp") | .name) as $v | .spec.template.spec.volumes[] | select(.name == $v) | keys | map(select(. != "name")) | .[0]')"
+done
+
+# ----------------------------------------------------------------------------
+# OpenShift: the ServiceMonitor scrapes as its own account, never the controller
+# ----------------------------------------------------------------------------
+# A legacy token Secret never expires. Minted for the controller's SA it was the
+# controller's whole identity for anyone who could read Secrets in its
+# namespace; the scrape needs only `get /metrics`.
+for overlay in cluster-scoped/openshift namespace-scoped/openshift; do
+    out="$("${KBUILD[@]}" "config/overlays/$overlay")" || out=''
+    [ -n "$out" ] || { printf 'FATAL: %s did not render.\n' "$overlay" >&2; exit 1; }
+    check "$overlay: no long-lived token Secret for the controller ServiceAccount" '0' \
+        "$(printf '%s\n' "$out" | yq -N -r 'select(.kind == "Secret" and .type == "kubernetes.io/service-account-token") | .metadata.annotations."kubernetes.io/service-account.name"' | grep -cx 'wva-controller-manager')"
+    sm_secret="$(printf '%s\n' "$out" | yq -N -r 'select(.kind == "ServiceMonitor" and .metadata.name == "wva-controller-manager-metrics-monitor") | .spec.endpoints[0].bearerTokenSecret.name')"
+    check "$overlay: the ServiceMonitor token belongs to wva-metrics-scraper" 'wva-metrics-scraper' \
+        "$(printf '%s\n' "$out" | yq -N -r "select(.kind == \"Secret\" and .metadata.name == \"${sm_secret}\") | .metadata.annotations.\"kubernetes.io/service-account.name\"")"
+    check "$overlay: metrics-reader names wva-metrics-scraper alone" 'wva-system/wva-metrics-scraper' \
+        "$(printf '%s\n' "$out" | reader_subjects)"
 done
 
 # ----------------------------------------------------------------------------

@@ -13,7 +13,7 @@ resources:
 #
 # What actually makes the scrape work, and none of it is an RBAC grant to
 # Prometheus:
-#   the bearerTokenSecret patch    authenticates the scrape as WVA's OWN SA
+#   the bearerTokenSecret patch    authenticates the scrape as metrics-scraper
 #   the metrics-reader repoint     gives that SA nonResourceURLs: /metrics
 #   UWM's own discovery            with enableUserWorkload: true it scrapes
 #                                  ServiceMonitors in user-defined projects
@@ -26,8 +26,12 @@ resources:
 #
 # So the binding handed the UWM Prometheus SA unrestricted platform-API read --
 # every namespace's series -- from a WVA install, for no effect.
-# Long-lived SA token referenced by the ServiceMonitor's bearerTokenSecret.
-- controller-manager-token-secret.yaml
+# The scrape identity and its long-lived token, referenced by the
+# ServiceMonitor's bearerTokenSecret. A ServiceAccount of its own, never the
+# controller's: a non-expiring token for the controller SA handed its whole
+# identity to anyone who could read Secrets here, and to every Prometheus admin.
+- metrics-scraper-serviceaccount.yaml
+- metrics-scraper-token-secret.yaml
 # Service-ca CA bundle used by the ServiceMonitor to verify the controller's
 # metrics serving certificate (replaces insecureSkipVerify).
 - metrics-server-ca-configmap.yaml
@@ -61,14 +65,14 @@ patches:
       name: controller-manager-metrics-service
       annotations:
         service.beta.openshift.io/serving-cert-secret-name: metrics-server-cert
-# Grant the WVA controller manager SA read access to its own /metrics endpoint
+# Grant the scrape identity read access to the controller's /metrics endpoint
 # so the ServiceMonitor can scrape it.
 - patch: |-
     - op: replace
       path: /subjects/0
       value:
         kind: ServiceAccount
-        name: controller-manager
+        name: metrics-scraper
   target:
     kind: ClusterRoleBinding
     name: metrics-reader-rolebinding
@@ -80,13 +84,13 @@ patches:
       value: "true"
   target:
     kind: Namespace
-# Configure the ServiceMonitor to authenticate using the WVA SA token Secret,
-# which is granted metrics-reader access via the patch above.
+# Configure the ServiceMonitor to authenticate using the metrics-scraper token
+# Secret, which is granted metrics-reader access via the patch above.
 - patch: |-
     - op: add
       path: /spec/endpoints/0/bearerTokenSecret
       value:
-        name: controller-manager-token
+        name: metrics-scraper-token
         key: token
     - op: remove
       path: /spec/endpoints/0/bearerTokenFile
