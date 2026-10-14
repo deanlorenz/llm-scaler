@@ -286,9 +286,21 @@ func (h *Handler) GetMetricSpec(ctx context.Context, ref *pb.ScaledObjectRef) (*
 	}, nil
 }
 
+// errNoDecision is what GetMetrics answers for a target WVA has not decided
+// yet. Unavailable, exactly like errNotLeader and for the same reason: a 0
+// would be an answer, and HPA acts on answers. With a target of 1 it computes
+// zero replicas and clamps to minReplicas, so the decision store being empty
+// -- which it is on every restart and every lease hand-off, until the new
+// leader's first cycle publishes -- would cut every running fleet to its floor.
+// An error is a trigger failure instead: HPA keeps the current count, and KEDA
+// applies the ScaledObject's fallback, if it has one, after failureThreshold.
+var errNoDecision = status.Error(codes.Unavailable,
+	"WVA has not published a decision for this target yet; holding the current replica count")
+
 // GetMetrics returns WVA's desired replica count as the metric value. Before the
-// first optimization decision exists it returns 0, so HPA holds the target at
-// minReplicaCount rather than acting on a guess.
+// first optimization decision exists for the target it refuses with Unavailable
+// (see errNoDecision), so HPA holds the current count rather than acting on a 0
+// nobody decided.
 func (h *Handler) GetMetrics(ctx context.Context, req *pb.GetMetricsRequest) (*pb.GetMetricsResponse, error) {
 	ref := req.GetScaledObjectRef()
 	h.observe(ref)
@@ -311,16 +323,21 @@ func (h *Handler) GetMetrics(ctx context.Context, req *pb.GetMetricsRequest) (*p
 			"namespace", ref.GetNamespace(), "scaledObject", ref.GetName(), "err", err)
 		return nil, err
 	}
-	var value int64
-	if ok {
-		value = int64(d)
+	if !ok {
+		// Logged for the reason the not-leader refusal is: KEDA records the
+		// trigger error, and without this line WVA's own log has no trace of
+		// why the HPA stopped moving.
+		logger.V(1).Info("external scaler GetMetrics refused: no decision yet",
+			"namespace", ref.GetNamespace(), "scaledObject", ref.GetName())
+		return nil, errNoDecision
 	}
-	// The VALUE KEDA actuates on. `decided` separates "WVA says 1" from "WVA
-	// has not decided yet, so 0 means hold at minReplicaCount" -- the two are
-	// the same number on the wire and mean opposite things.
+	value := int64(d)
+	// The VALUE KEDA actuates on. Only a decided target reaches this line; an
+	// undecided one is refused above, so a 0 here is WVA's answer. That is why
+	// the line no longer carries a `decided` field: it could only ever be true.
 	logger.V(1).Info("external scaler GetMetrics",
 		"namespace", ref.GetNamespace(), "scaledObject", ref.GetName(),
-		"metricName", MetricName, "value", value, "decided", ok)
+		"metricName", MetricName, "value", value)
 	return &pb.GetMetricsResponse{
 		MetricValues: []*pb.MetricValue{{MetricName: MetricName, MetricValue: value}},
 	}, nil

@@ -8,6 +8,8 @@ import (
 
 	kedav1alpha1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 	pb "github.com/kedacore/keda/v2/pkg/scalers/externalscaler"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -85,14 +87,19 @@ var _ = Describe("External scaler handler", func() {
 			Expect(resp.MetricValues[0].MetricValue).To(Equal(int64(5)))
 		})
 
-		It("returns 0 before any optimization decision exists", func() {
+		It("refuses with Unavailable before any optimization decision exists", func() {
+			// A 0 here is an answer HPA acts on: with a target of 1 it computes
+			// zero replicas and clamps to minReplicas, so a restarted or newly
+			// elected leader would cut every running fleet to its floor before
+			// its first cycle. Unavailable is a trigger error -- HPA holds the
+			// current count, KEDA applies fallback if one is configured.
 			h := newHandler(scaledObject(testNamespace, "chat-decode", "chat-decode-deploy"))
 
 			resp, err := h.GetMetrics(ctx, &pb.GetMetricsRequest{
 				ScaledObjectRef: ref("chat-decode", nil),
 			})
-			Expect(err).NotTo(HaveOccurred())
-			Expect(resp.MetricValues[0].MetricValue).To(Equal(int64(0)))
+			Expect(status.Code(err)).To(Equal(codes.Unavailable), "got %v", err)
+			Expect(resp).To(BeNil())
 		})
 
 		It("ignores a scale target named in trigger metadata; the ScaledObject decides", func() {

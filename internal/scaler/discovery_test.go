@@ -9,6 +9,8 @@ import (
 
 	kedav1alpha1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 	pb "github.com/kedacore/keda/v2/pkg/scalers/externalscaler"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -87,7 +89,9 @@ var _ = Describe("Call-driven discovery", func() {
 			ScaledObjectRef: ref("chat-decode", triggerMetadata),
 			MetricName:      scaler.MetricName,
 		})
-		Expect(err).NotTo(HaveOccurred())
+		// No decision exists yet, so the answer is refused -- but the call still
+		// registers, which is what lets the engines ever produce one.
+		Expect(status.Code(err)).To(Equal(codes.Unavailable), "got %v", err)
 
 		_, ok := reg.Get(testNamespace, "chat-decode")
 		Expect(ok).To(BeTrue(), "the metrics path must keep a running workload registered")

@@ -63,7 +63,12 @@ spec:
       name: wva-keda-hpa-sample-deployment
       behavior:
         scaleDown:
-          stabilizationWindowSeconds: 0
+          # 300 s, the installer's default (WVA_SO_SCALE_DOWN_STABILIZATION in
+          # deploy/lib/scaledobject.sh). With 0 and "Percent 100" one HPA step
+          # can take the whole fleet to minReplicaCount on a single low reading;
+          # removing a replica too eagerly costs a cold start on the next
+          # request, keeping one too long only costs money.
+          stabilizationWindowSeconds: 300
           policies:
           - type: Percent
             value: 100
