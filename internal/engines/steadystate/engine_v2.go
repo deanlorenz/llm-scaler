@@ -251,6 +251,7 @@ func (e *Engine) recordAnalyzerMetrics(namespace, modelID string, results []allo
 		demand:    make(map[analyzerDemandSeries]struct{}),
 		target:    make(map[analyzerTargetSeries]struct{}),
 	}
+	borrows := map[string][]domain.LearnedStateBorrow{}
 
 	for _, nr := range results {
 		if nr.Result == nil {
@@ -269,7 +270,15 @@ func (e *Engine) recordAnalyzerMetrics(namespace, modelID string, results []allo
 			e.metricsEmitter.RecordAnalyzerTarget(nr.Name, namespace, modelID, vc.VariantName, vc.PerReplicaCapacity)
 			e.metricsEmitter.RecordAnalyzerObservedReplicas(nr.Name, namespace, modelID, vc.VariantName, vc.ObservedReplicas)
 			current.target[analyzerTargetSeries{analyzer: nr.Name, variant: vc.VariantName}] = struct{}{}
+			borrows[vc.VariantName] = append(borrows[vc.VariantName], vc.Borrowed...)
 		}
+	}
+	// Per variant, not per analyzer: gathered across every analyzer that
+	// reported the variant, so one that borrows nothing does not unpublish
+	// another's borrow. Every reported variant is written, borrowing or not,
+	// which is what removes a borrow that ended.
+	for variant, b := range borrows {
+		e.metricsEmitter.RecordLearnedStateBorrows(namespace, modelID, variant, b)
 	}
 
 	// Evict after emitting, never before, so a series that survives the cycle is
@@ -501,6 +510,7 @@ func (e *Engine) evictStaleAnalyzerSeries(namespace, modelID string, current ana
 			// The config series is per variant, not per analyzer, so this is
 			// idempotent when several analyzers report the same variant.
 			e.metricsEmitter.DeleteEngineConfig(namespace, modelID, prev.variant)
+			e.metricsEmitter.DeleteLearnedStateBorrows(namespace, modelID, prev.variant)
 		}
 	}
 	e.lastAnalyzerSeries[modelKey] = current
@@ -526,6 +536,7 @@ func (e *Engine) pruneAnalyzerSeries(activeKeys map[string]bool) {
 		if !activeKeys[modelKey] {
 			e.metricsEmitter.DeleteAnalyzerSeriesForModel(series.namespace, series.modelID)
 			e.metricsEmitter.DeleteEngineConfigForModel(series.namespace, series.modelID)
+			e.metricsEmitter.DeleteLearnedStateBorrowsForModel(series.namespace, series.modelID)
 			delete(e.lastAnalyzerSeries, modelKey)
 		}
 	}
@@ -541,6 +552,7 @@ func (e *Engine) evictAllAnalyzerSeries() {
 	for modelKey, series := range e.lastAnalyzerSeries {
 		e.metricsEmitter.DeleteAnalyzerSeriesForModel(series.namespace, series.modelID)
 		e.metricsEmitter.DeleteEngineConfigForModel(series.namespace, series.modelID)
+		e.metricsEmitter.DeleteLearnedStateBorrowsForModel(series.namespace, series.modelID)
 		delete(e.lastAnalyzerSeries, modelKey)
 	}
 }

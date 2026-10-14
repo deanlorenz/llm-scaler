@@ -323,6 +323,45 @@ With the scaling manager metrics, the value for the label `namespace` is the sca
     ]
   }
   ```
+
+### Learned state
+
+What the saturation analyzer learned, and where it came from. A variant priced
+from a figure a sibling measured, and the snapshot that carries learned state
+across a restart, are otherwise visible only in the logs.
+
+### `wva_learned_state_borrowed`
+- **Type**: Gauge
+- **Description**: 1 while a variant is priced from a figure a sibling variant learned. Absent when the variant uses only its own figures.
+- **Labels**:
+  - `namespace` (scraped as `exported_namespace`), `model_name`, `variant_name`: the variant that borrows
+  - `quantity`: `k2` -- a sibling's measured k2, used only where it is lower than this variant's own capacity (`P2-borrow` in the [cycle log](cycle-log.md)); or `itl-line` -- a sibling's fitted ITL line, shared when `enableLearnedStateReuse` is on ([scaling policy](scaling-policy.md))
+  - `donor`: the sibling variant it was learned on
+- **Use Case**: Answers "is this variant priced from its own measurement?" A canary or a newly scaled-out variant borrows until it saturates and measures for itself; one that borrows for days never saturates, which is the case the k2 borrow's relaxation exists for:
+  ```promql
+  wva_learned_state_borrowed{quantity="k2"}
+  ```
+
+### `wva_learned_state_borrow_relaxed`
+- **Type**: Gauge
+- **Description**: How far a variant's k2 borrow has relaxed back to its own figure: 0 at full strength for the first 30 minutes, rising linearly to 1 over the next 6 hours, when the variant is on its own figure again. When replicas in different output-length buckets borrow at different stages, the least relaxed is reported.
+- **Labels**: `namespace` (scraped as `exported_namespace`), `model_name`, `variant_name`. Present only while `wva_learned_state_borrowed{quantity="k2"}` is.
+
+### `wva_learned_state_restores_total`
+- **Type**: Counter
+- **Description**: Variants whose learned state was restored from the snapshot after a controller restart (`LEARNED_STATE_SNAPSHOT`, see [configuration](configuration.md#learned-state-across-a-restart)), counted on the variant's first cycle.
+- **Labels**: `outcome`: `installed`, or `rejected` -- the variant's engine configuration differs from the one the state was learned under, or could not be read completely. Both are published at 0 from startup.
+- **Use Case**: After a restart, `rejected` well above `installed` means the snapshot was mostly not used -- a rollout during the downtime, flags the controller cannot resolve, or an upgrade that changed how configurations are identified ([troubleshooting](troubleshooting.md#capacity-priced-high-after-a-restart)).
+
+### `wva_learned_state_snapshot_errors_total`
+- **Type**: Counter
+- **Description**: Failed reads and writes of the learned-state snapshot ConfigMap `wva-learned-state`.
+- **Labels**: `operation`: `read` or `write`. Both are published at 0 from startup.
+- **Use Case**: A rising `read` count is typically Forbidden -- the Role `wva-learned-state-role` is missing -- and blocks every write until a read succeeds, so the stored state is never overwritten from an empty memory:
+  ```promql
+  increase(wva_learned_state_snapshot_errors_total{operation="read"}[15m]) > 0
+  ```
+
 ### Metrics Collection Observability
 
 ### `wva_metrics_collection_duration_seconds`

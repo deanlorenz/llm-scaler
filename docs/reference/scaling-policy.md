@@ -1042,7 +1042,9 @@ this variant's answer, never where it only limits it. There are two such places:
 
 - **A ceiling on a stored estimate.** A variant with no ready replica is priced
   from its stored record, bounded above by a compatible sibling's.
-- **The k2 borrow** (`P2-borrow` in the [cycle log](cycle-log.md)). A variant
+- **The k2 borrow** (`P2-borrow` in the [cycle log](cycle-log.md), and
+  `wva_learned_state_borrowed{quantity="k2"}` in
+  [Prometheus](prometheus.md#wva_learned_state_borrowed)). A variant
   that has not yet measured its own k2 for the traffic it is serving uses a
   compatible sibling's measured k2 in the same namespace, but only where it is
   lower than the variant's own capacity. After 30 minutes it relaxes back to the

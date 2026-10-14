@@ -84,7 +84,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	}
 	historyKey := a.historyKey(modelID, namespace, rm.VariantName, accelerator, gpuCount, role,
 		rm.AvgOutputTokens, config.QueueLengthThreshold)
-	k2, k2Priority := a.computeK2(
+	k2, k2Priority, k2Borrowed := a.computeK2Borrow(
 		historyKey,
 		modelID, namespace, rm.VariantName,
 		rm.QueueLength, rm.TokensInUse,
@@ -260,6 +260,8 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		MemoryBoundCapacity:         k1,
 		ComputeBoundCapacity:        k2,
 		K2Priority:                  k2Priority,
+		K2BorrowedFrom:              k2Borrowed.donor,
+		K2BorrowRelaxed:             k2Borrowed.relaxed,
 		EffectiveCapacity:           effectiveCapacity,
 		ReplicaDemand:               replicaDemand,
 		FromWarmPool:                rm.FromWarmPool,
@@ -403,6 +405,27 @@ func (a *SaturationAnalyzer) computeK2(
 	downstreamSaturated bool,
 	logger logr.Logger,
 ) (int64, capacity.K2Source) {
+	k2, src, _ := a.computeK2Borrow(historyKey, modelID, namespace, variantName,
+		queueLen, tokensInUse, avgOutput, avgInput, queueThreshold, engineParams,
+		k1, kvCeiling, role, downstreamSaturated, logger)
+	return k2, src
+}
+
+// computeK2Borrow is computeK2 that also returns the borrow it used, if
+// it borrowed: zero otherwise.
+func (a *SaturationAnalyzer) computeK2Borrow(
+	historyKey string,
+	modelID, namespace, variantName string,
+	queueLen int, tokensInUse int64,
+	avgOutput, avgInput float64,
+	queueThreshold float64,
+	engineParams *capacity.EngineParams,
+	k1 int64,
+	kvCeiling int64,
+	role string,
+	downstreamSaturated bool,
+	logger logr.Logger,
+) (int64, capacity.K2Source, k2Borrow) {
 	// Priority 1: Observed (queue saturated)
 	//
 	// A reading above the KV cache's PHYSICAL ceiling is a scrape artifact
@@ -531,7 +554,7 @@ func (a *SaturationAnalyzer) computeK2(
 				"priority", capacity.K2SrcObserved.String(), "historyKey", historyKey,
 				"queueLength", queueLen, "queueThreshold", queueThreshold,
 				"k2Observed", k2Observed, "k2", k2Smoothed, "historyWindowLen", historyLen)
-			return k2Smoothed, capacity.K2SrcObserved
+			return k2Smoothed, capacity.K2SrcObserved, k2Borrow{}
 		}
 	}
 
@@ -583,7 +606,7 @@ func (a *SaturationAnalyzer) computeK2(
 			"queueLength", queueLen, "queueThreshold", queueThreshold,
 			"k2", int64(histAvg), "historyWindowLen", histLen,
 			"historyAgeSeconds", int64(histAge.Seconds()))
-		return int64(histAvg), capacity.K2SrcHistorical
+		return int64(histAvg), capacity.K2SrcHistorical, k2Borrow{}
 	}
 
 	// Priority 3: Derived from deployment args
@@ -636,21 +659,21 @@ func (a *SaturationAnalyzer) computeK2(
 		if k2Derived := estimateCapacityFromParams(engineParams, avgInput, avgOutput); k2Derived > 0 {
 			if b, ok := a.borrowedK2(historyKey, modelID, min(k1, k2Derived), engineParams); ok {
 				logBorrowedK2(logger, b, modelID, namespace, variantName, historyKey, min(k1, k2Derived), capacity.K2SrcDerived)
-				return b.k2, capacity.K2SrcBorrowed
+				return b.k2, capacity.K2SrcBorrowed, b
 			}
 			logger.V(logging.DEFAULT).Info("k2-decision",
 				"modelID", modelID, "namespace", namespace, "variant", variantName,
 				"priority", capacity.K2SrcDerived.String(), "historyKey", historyKey,
 				"avgInputTokens", avgInput, "avgOutputTokens", avgOutput,
 				"engineParams", engineParams, "k2", k2Derived)
-			return k2Derived, capacity.K2SrcDerived
+			return k2Derived, capacity.K2SrcDerived, k2Borrow{}
 		}
 	}
 
 	// Priority 4: Fallback to k1
 	if b, ok := a.borrowedK2(historyKey, modelID, k1, engineParams); ok {
 		logBorrowedK2(logger, b, modelID, namespace, variantName, historyKey, k1, capacity.K2SrcFallback)
-		return b.k2, capacity.K2SrcBorrowed
+		return b.k2, capacity.K2SrcBorrowed, b
 	}
 	reason := "no observed/historical/derived k2; capacity is memory-bound only"
 	if isPrefill {
@@ -661,7 +684,7 @@ func (a *SaturationAnalyzer) computeK2(
 		"priority", capacity.K2SrcFallback.String(), "historyKey", historyKey,
 		"reason", reason,
 		"k1", k1)
-	return k1, capacity.K2SrcFallback
+	return k1, capacity.K2SrcFallback, k2Borrow{}
 }
 
 // lookupCompatibleCapacity searches the capacity store for a record from

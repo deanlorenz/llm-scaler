@@ -589,6 +589,16 @@ func (a *SaturationAnalyzer) notePendingPresent(namespace string, prefixes, vari
 	}
 }
 
+// TakeRestoreOutcomes returns how many variants' restored state was installed
+// and how many rejected since it was last called, and resets both.
+func (a *SaturationAnalyzer) TakeRestoreOutcomes() (installed, rejected int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	installed, rejected = a.restoresInstalled, a.restoresRejected
+	a.restoresInstalled, a.restoresRejected = 0, 0
+	return installed, rejected
+}
+
 // ForgetLearnedState drops everything learned and everything pending, for an
 // operator who deleted the stored snapshot: written back from memory, the
 // deletion would undo nothing.

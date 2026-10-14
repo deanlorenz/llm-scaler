@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -18,7 +19,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 )
 
@@ -29,6 +32,8 @@ type stateSpy struct {
 	state    saturation.LearnedState
 	restored []saturation.LearnedState
 	forgot   int
+	// installed and rejected are what TakeRestoreOutcomes reports next.
+	installed, rejected int
 }
 
 func (s *stateSpy) ExportLearnedState() saturation.LearnedState { return s.state }
@@ -37,6 +42,11 @@ func (s *stateSpy) RestoreLearnedState(st saturation.LearnedState) saturation.Re
 	return saturation.RestoreReport{}
 }
 func (s *stateSpy) ForgetLearnedState() { s.forgot++ }
+func (s *stateSpy) TakeRestoreOutcomes() (installed, rejected int) {
+	installed, rejected = s.installed, s.rejected
+	s.installed, s.rejected = 0, 0
+	return installed, rejected
+}
 
 func sampleState(k2 float64) saturation.LearnedState {
 	now := time.Now()
@@ -344,6 +354,60 @@ func TestARecoveredReadClearsTheErrorWithoutAWrite(t *testing.T) {
 	e.writeLearnedState(ctx, now.Add(2*learnedStateInterval))
 	assert.Empty(t, e.learnedState.lastErr,
 		"a read that works left the error standing until the next write; the same error again would not be logged")
+}
+
+// counterValue reads one series of a counter family by one label.
+func counterValue(t *testing.T, registry *prometheus.Registry, name, label, value string) float64 {
+	t.Helper()
+	mfs, err := registry.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, lp := range m.GetLabel() {
+				if lp.GetName() == label && lp.GetValue() == value {
+					return m.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	t.Fatalf("no %s{%s=%q}", name, label, value)
+	return 0
+}
+
+// The analyzer's restore outcomes reach the counter on the cycle they happen,
+// not at the next write, and a failed read is counted.
+func TestRestoreOutcomesAndReadErrorsAreCounted(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	require.NoError(t, metrics.InitMetrics(registry))
+	base := fake.NewClientBuilder().Build()
+	ctx := context.Background()
+	now := time.Now()
+
+	spy := &stateSpy{state: sampleState(4000)}
+	e := snapshotEngine(t, base, spy)
+	e.metricsEmitter = metrics.NewMetricsEmitter()
+	e.restoreLearnedState(ctx, now)
+	e.writeLearnedState(ctx, now)
+	spy.installed, spy.rejected = 2, 1
+	e.writeLearnedState(ctx, now.Add(time.Second)) // inside the write interval
+	assert.Equal(t, 2.0, counterValue(t, registry, constants.WVALearnedStateRestoresTotal,
+		constants.LabelOutcome, metrics.LearnedStateRestoreInstalled))
+	assert.Equal(t, 1.0, counterValue(t, registry, constants.WVALearnedStateRestoresTotal,
+		constants.LabelOutcome, metrics.LearnedStateRestoreRejected))
+
+	forbidden := interceptor.NewClient(base, interceptor.Funcs{
+		Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			return apierrors.NewForbidden(schema.GroupResource{Resource: "configmaps"}, key.Name, nil)
+		},
+	})
+	denied := snapshotEngine(t, forbidden, &stateSpy{})
+	denied.metricsEmitter = metrics.NewMetricsEmitter()
+	denied.restoreLearnedState(ctx, now)
+	assert.Equal(t, 1.0, counterValue(t, registry, constants.WVALearnedStateSnapshotErrorsTotal,
+		constants.LabelOperation, metrics.LearnedStateOpRead), "a Forbidden read was not counted")
 }
 
 // Every other version's document counts, not only the largest.

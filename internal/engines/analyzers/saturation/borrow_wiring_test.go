@@ -108,6 +108,21 @@ func TestBorrowedLineReachesTheRecord(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, res)
 
+	// And the result says so, for wva_learned_state_borrowed: the lender by
+	// name, not the window key it is filed under.
+	for _, vc := range res.VariantCapacities {
+		switch vc.VariantName {
+		case starved:
+			require.Contains(t, vc.Borrowed,
+				domain.LearnedStateBorrow{Quantity: domain.BorrowedITLLine, Donor: lender},
+				"a variant priced on a sibling's ITL line does not say so")
+		case lender:
+			for _, b := range vc.Borrowed {
+				require.NotEqual(t, domain.BorrowedITLLine, b.Quantity, "the lender reported borrowing its own line")
+			}
+		}
+	}
+
 	// Re-run the stages that produce the records, so the flag can be read off
 	// them: Analyze returns demand, not the per-replica capacities.
 	in := makeReusingAnalyzerInput(rows, states)

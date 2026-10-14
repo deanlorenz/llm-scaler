@@ -91,6 +91,10 @@ var (
 	analyzerDemand           *prometheus.GaugeVec
 	analyzerTarget           *prometheus.GaugeVec
 	engineConfig             *prometheus.GaugeVec
+	learnedStateBorrowed     *prometheus.GaugeVec
+	learnedStateRelaxed      *prometheus.GaugeVec
+	learnedStateRestores     *prometheus.CounterVec
+	learnedStateErrors       *prometheus.CounterVec
 	analyzerObservedReplicas *prometheus.GaugeVec
 
 	// controllerInstance stores the optional controller instance identifier.
@@ -157,6 +161,10 @@ func InitMetrics(registry prometheus.Registerer) error {
 	modelReplicasLabels := []string{constants.LabelNamespace, constants.LabelModelName}
 	// analyzerTargetLabels: per-analyzer per-replica target P, per variant.
 	analyzerTargetLabels := []string{constants.LabelAnalyzerName, constants.LabelNamespace, constants.LabelModelName, constants.LabelVariantName}
+	// learnedBorrowLabels: one series per variant and borrowed quantity.
+	learnedBorrowLabels := []string{constants.LabelNamespace, constants.LabelModelName, constants.LabelVariantName,
+		constants.LabelQuantity, constants.LabelDonor}
+	learnedRelaxedLabels := []string{constants.LabelNamespace, constants.LabelModelName, constants.LabelVariantName}
 	// engineConfigLabels: the key learned state is filed under -- model,
 	// accelerator, GPUs per replica, fingerprint -- followed by the engine
 	// flags the fingerprint hashes.
@@ -188,6 +196,8 @@ func InitMetrics(registry prometheus.Registerer) error {
 		analyzerDemandLabels = append(analyzerDemandLabels, constants.LabelControllerInstance)
 		analyzerTargetLabels = append(analyzerTargetLabels, constants.LabelControllerInstance)
 		engineConfigLabels = append(engineConfigLabels, constants.LabelControllerInstance)
+		learnedBorrowLabels = append(learnedBorrowLabels, constants.LabelControllerInstance)
+		learnedRelaxedLabels = append(learnedRelaxedLabels, constants.LabelControllerInstance)
 		unmeasuredQueueLabels = append(unmeasuredQueueLabels, constants.LabelControllerInstance)
 		variantAtMaxLabels = append(variantAtMaxLabels, constants.LabelControllerInstance)
 		modelScalingBlockedLabels = append(modelScalingBlockedLabels, constants.LabelControllerInstance)
@@ -278,6 +288,40 @@ func InitMetrics(registry prometheus.Registerer) error {
 		},
 		analyzerDemandLabels,
 	)
+	learnedStateBorrowed = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: constants.WVALearnedStateBorrowed,
+			Help: "1 while a variant is priced from a figure a sibling variant learned: quantity=k2 is a measured k2 lower than its own capacity (P2-borrow), quantity=itl-line a shared ITL line. donor names the sibling. Absent when the variant uses only its own figures.",
+		},
+		learnedBorrowLabels,
+	)
+	learnedStateRelaxed = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: constants.WVALearnedStateBorrowRelaxed,
+			Help: "How far a variant's k2 borrow has relaxed back to its own figure: 0 at full strength (the first 30 minutes), rising to 1 over the next 6 hours. Present only while the variant borrows k2.",
+		},
+		learnedRelaxedLabels,
+	)
+	learnedStateRestores = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: constants.WVALearnedStateRestoresTotal,
+			Help: "Variants whose learned state was restored from the snapshot after a controller restart (LEARNED_STATE_SNAPSHOT), by outcome: installed, or rejected because the variant's engine configuration differed from the one it was learned under or could not be read completely.",
+		},
+		[]string{constants.LabelOutcome},
+	)
+	learnedStateErrors = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: constants.WVALearnedStateSnapshotErrorsTotal,
+			Help: "Failed reads and writes of the learned-state snapshot ConfigMap (LEARNED_STATE_SNAPSHOT), by operation. A read error -- typically Forbidden -- blocks every write until a read succeeds.",
+		},
+		[]string{constants.LabelOperation},
+	)
+	for _, o := range []string{LearnedStateRestoreInstalled, LearnedStateRestoreRejected} {
+		learnedStateRestores.WithLabelValues(o)
+	}
+	for _, o := range []string{LearnedStateOpRead, LearnedStateOpWrite} {
+		learnedStateErrors.WithLabelValues(o)
+	}
 	engineConfig = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: constants.WVAEngineConfig,
@@ -767,6 +811,11 @@ func InitMetrics(registry prometheus.Registerer) error {
 	}
 	if err := registry.Register(engineConfig); err != nil {
 		return fmt.Errorf("failed to register %s: %w", constants.WVAEngineConfig, err)
+	}
+	for _, c := range []prometheus.Collector{learnedStateBorrowed, learnedStateRelaxed, learnedStateRestores, learnedStateErrors} {
+		if err := registry.Register(c); err != nil {
+			return fmt.Errorf("failed to register a learned-state metric: %w", err)
+		}
 	}
 	if err := registry.Register(analyzerTarget); err != nil {
 		return fmt.Errorf("failed to register analyzerTarget metric: %w", err)
@@ -1657,6 +1706,99 @@ func (m *MetricsEmitter) DeleteEngineConfigForModel(namespace, modelID string) {
 		constants.LabelNamespace: namespace,
 		constants.LabelModelName: modelID,
 	})
+}
+
+// The outcomes of a learned-state restore, and the operations of the
+// snapshot store, as the counters label them. Each is published at zero from
+// registration, so rate() over a fresh controller reads 0 rather than nothing.
+const (
+	LearnedStateRestoreInstalled = "installed"
+	LearnedStateRestoreRejected  = "rejected"
+	LearnedStateOpRead           = "read"
+	LearnedStateOpWrite          = "write"
+)
+
+// RecordLearnedStateBorrows publishes what a variant borrowed this cycle,
+// replacing whatever it published before: a borrow that ended, or whose donor
+// changed, must not leave its series behind.
+func (m *MetricsEmitter) RecordLearnedStateBorrows(namespace, modelID, variantName string, borrows []domain.LearnedStateBorrow) {
+	if learnedStateBorrowed == nil || learnedStateRelaxed == nil {
+		return
+	}
+	m.DeleteLearnedStateBorrows(namespace, modelID, variantName)
+	for _, b := range borrows {
+		labels := prometheus.Labels{
+			constants.LabelNamespace:   namespace,
+			constants.LabelModelName:   modelID,
+			constants.LabelVariantName: variantName,
+			constants.LabelQuantity:    b.Quantity,
+			constants.LabelDonor:       b.Donor,
+		}
+		if controllerInstance != "" {
+			labels[constants.LabelControllerInstance] = controllerInstance
+		}
+		learnedStateBorrowed.With(labels).Set(1)
+		if b.Quantity == domain.BorrowedK2 {
+			relaxed := prometheus.Labels{
+				constants.LabelNamespace:   namespace,
+				constants.LabelModelName:   modelID,
+				constants.LabelVariantName: variantName,
+			}
+			if controllerInstance != "" {
+				relaxed[constants.LabelControllerInstance] = controllerInstance
+			}
+			learnedStateRelaxed.With(relaxed).Set(b.Relaxed)
+		}
+	}
+}
+
+// DeleteLearnedStateBorrows removes one variant's borrow series, whatever it
+// borrowed and from whom. modelID is part of the match: a variant name is
+// unique within a model, not within a namespace (see DeleteEngineConfig).
+func (m *MetricsEmitter) DeleteLearnedStateBorrows(namespace, modelID, variantName string) {
+	if learnedStateBorrowed == nil || learnedStateRelaxed == nil {
+		return
+	}
+	match := prometheus.Labels{
+		constants.LabelNamespace:   namespace,
+		constants.LabelModelName:   modelID,
+		constants.LabelVariantName: variantName,
+	}
+	learnedStateBorrowed.DeletePartialMatch(match)
+	learnedStateRelaxed.DeletePartialMatch(match)
+}
+
+// DeleteLearnedStateBorrowsForModel removes every borrow series of a model, for
+// a model that stops being reconciled.
+func (m *MetricsEmitter) DeleteLearnedStateBorrowsForModel(namespace, modelID string) {
+	if learnedStateBorrowed == nil || learnedStateRelaxed == nil {
+		return
+	}
+	match := prometheus.Labels{constants.LabelNamespace: namespace, constants.LabelModelName: modelID}
+	learnedStateBorrowed.DeletePartialMatch(match)
+	learnedStateRelaxed.DeletePartialMatch(match)
+}
+
+// AddLearnedStateRestores counts restored variants by outcome.
+func (m *MetricsEmitter) AddLearnedStateRestores(installed, rejected int) {
+	if learnedStateRestores == nil {
+		return
+	}
+	if installed > 0 {
+		learnedStateRestores.WithLabelValues(LearnedStateRestoreInstalled).Add(float64(installed))
+	}
+	if rejected > 0 {
+		learnedStateRestores.WithLabelValues(LearnedStateRestoreRejected).Add(float64(rejected))
+	}
+}
+
+// IncLearnedStateSnapshotError counts one failed read or write of the
+// snapshot store.
+func (m *MetricsEmitter) IncLearnedStateSnapshotError(operation string) {
+	if learnedStateErrors == nil {
+		return
+	}
+	learnedStateErrors.WithLabelValues(operation).Inc()
 }
 
 // DeleteAnalyzerDemand removes one wva_analyzer_demand series. Absence is

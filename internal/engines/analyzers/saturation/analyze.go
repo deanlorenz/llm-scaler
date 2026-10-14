@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -48,9 +49,14 @@ func (a *SaturationAnalyzer) Analyze(ctx context.Context, input domain.AnalyzerI
 			continue
 		}
 		msg := "learned state restored"
-		if !r.Installed {
+		a.mu.Lock()
+		if r.Installed {
+			a.restoresInstalled++
+		} else {
+			a.restoresRejected++
 			msg = "learned state not restored: the variant's engine configuration differs from the one it was learned under, or could not be read completely"
 		}
+		a.mu.Unlock()
 		ctrl.LoggerFrom(ctx).Info(msg, "namespace", r.Namespace, "variant", r.Variant, "entries", r.Entries)
 	}
 
@@ -518,6 +524,19 @@ func (c *cycle) priceDemand(caps []capacity.ReplicaCapacity) demandParts {
 	variantCapacities := c.a.aggregateByVariant(caps, c.input.ReplicaMetrics,
 		c.input.VariantStates, c.input.ModelID, c.input.Namespace, c.cfg.KvCacheThreshold,
 		!c.cfg.EnableLearnedStateReuse, c.logger)
+	for i := range variantCapacities {
+		vc := &variantCapacities[i]
+		from := c.itlBorrowedFrom[vc.VariantName]
+		if from == "" {
+			continue
+		}
+		// from is the lender's itlWindowKey, namespace|model|variant|...
+		donor := from
+		if f := strings.Split(from, "|"); len(f) > 2 {
+			donor = f[2]
+		}
+		vc.Borrowed = append(vc.Borrowed, domain.LearnedStateBorrow{Quantity: domain.BorrowedITLLine, Donor: donor})
+	}
 
 	// Model-level demand D (the analyzer owns demand attribution). Supply,
 	// utilization, and RoleCapacities are assembled downstream by the engine's

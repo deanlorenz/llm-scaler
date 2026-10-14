@@ -185,6 +185,25 @@ type AnalyzerResult struct {
 // with the per-role supply grouped from these entries, so both halves must be
 // keyed the same way. The builder still overlays it from discovery so the two
 // cannot drift.
+// LearnedStateBorrow is one figure a variant was priced from that a sibling
+// variant learned.
+type LearnedStateBorrow struct {
+	// Quantity is what was borrowed: BorrowedK2 or BorrowedITLLine.
+	Quantity string
+	// Donor is the variant that measured it.
+	Donor string
+	// Relaxed is how far a k2 borrow has relaxed back to the variant's own
+	// figure: 0 at full strength, 1 fully relaxed. Always 0 for a line,
+	// which is used as it is.
+	Relaxed float64
+}
+
+// The quantities a variant can borrow from a sibling.
+const (
+	BorrowedK2      = "k2"
+	BorrowedITLLine = "itl-line"
+)
+
 type VariantCapacity struct {
 	VariantName string
 	Role        string // "prefill", "decode", "both", "" (empty = non-disaggregated)
@@ -266,6 +285,14 @@ type VariantCapacity struct {
 	// "P2-borrow", "P3-k2", "P4-k1", "no-data", "error". Throughput uses "T1-ols",
 	// "T2-pinned", "T2-default", "T2-failed".
 	Reason string
+
+	// Borrowed lists what this variant was priced from that a sibling
+	// variant learned, this cycle: a k2 below its own capacity (P2-borrow) and
+	// a shared ITL line. Diagnostics only -- published as
+	// wva_learned_state_borrowed -- so that a variant priced from someone
+	// else's measurement is visible without reading the cycle log. Nil when
+	// it borrowed nothing.
+	Borrowed []LearnedStateBorrow
 
 	// WarmPoolReplicas is how many BRIDGES are serving this variant: warm pool
 	// Pods lent to it while it is short, counted in the same scale-target units
