@@ -15,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/test/e2e/fixtures"
 )
 
@@ -181,6 +182,14 @@ var _ = Describe("Utilization share optimizer on full GPU nodes", Label("full", 
 		Eventually(func(g Gomega) {
 			g.Expect(controllerLogsSince(start.Add(-5 * time.Minute))).To(ContainSubstring("scope\": \"" + ns))
 		}, 5*time.Minute, 10*time.Second).Should(Succeed(), "the optimizer never evaluated the namespace's group")
+
+		// Before A can give: a spare offered while B is not yet seen short is
+		// returned to the quota, not transferred (roleShortOf).
+		By("Waiting until the controller sees B short of a whole replica")
+		Eventually(func(g Gomega) {
+			short, read := roleShortOf(ns, modelB, domain.RoleBoth, start.Add(-5*time.Minute))
+			g.Expect(short).To(BeTrue(), read)
+		}, 5*time.Minute, 10*time.Second).Should(Succeed(), "B never read short, so A's spare would be returned, not transferred")
 
 		By("Lowering A's floor to 1, so it has replicas to give")
 		Expect(fixtures.EnsureScaledObject(ctx, crClient, ns, soA, depA, depA, 1, 4, cfg.MonitoringNS,
