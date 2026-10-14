@@ -1,6 +1,7 @@
 package saturation
 
 import (
+	"maps"
 	"math"
 	"strings"
 	"time"
@@ -134,9 +135,43 @@ type RestoredVariant struct {
 
 // pendingVariant is one variant's restored entries awaiting the check.
 type pendingVariant struct {
-	expect     string // the fingerprint they were learned under
-	state      LearnedState
-	restoredAt time.Time // when they were taken in, for the sweep
+	expect string // the fingerprint they were learned under
+	state  LearnedState
+}
+
+// alive says whether any of the entries could still be installed: one within
+// its horizon on the clock it ages on live. A variant noted present keeps its
+// liveness fresh (notePendingPresent), so a parked one stays; a deleted one's
+// entries all age out, and it goes -- however often the controller restarts.
+func (p *pendingVariant) alive(now, wall time.Time, h capacity.Horizons) bool {
+	s := p.state
+	for _, w := range s.K2 {
+		if wall.Sub(w.LastUsed) <= h.BucketRetention {
+			return true
+		}
+	}
+	for _, w := range s.Throughput {
+		if wall.Sub(w.LastUsed) <= h.BucketRetention {
+			return true
+		}
+	}
+	for _, seen := range s.VariantSeenAt {
+		if now.Sub(seen) <= h.VariantTimeout {
+			return true
+		}
+	}
+	for _, m := range s.Accelerators {
+		if wall.Sub(m.LastUsed) <= h.BucketRetention {
+			return true
+		}
+	}
+	borrowLife := BorrowedK2Hold + BorrowedK2Relax + h.BucketRetention
+	for _, since := range s.K2BorrowedSince {
+		if now.Sub(since) <= borrowLife {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *pendingVariant) size() int {
@@ -246,8 +281,16 @@ func (a *SaturationAnalyzer) ExportLearnedState() LearnedState {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for v, p := range a.pendingRestore {
-		if cfg, ok := s.Config[v]; ok && cfg != p.expect {
+		cfg, ok := s.Config[v]
+		if ok && cfg != p.expect {
 			continue
+		}
+		if !ok && models[v] != "" {
+			// Learned live with no configuration known -- the scale target not
+			// read yet, or not completely. Under the pending entries' fingerprint
+			// those figures would read as checked; on their own they would not
+			// be restored anyway.
+			dropVariant(&s, v)
 		}
 		s.Config[v] = p.expect
 		mergeAbsent(s.K2, p.state.K2)
@@ -259,6 +302,18 @@ func (a *SaturationAnalyzer) ExportLearnedState() LearnedState {
 		mergeAbsent(s.Accelerators, p.state.Accelerators)
 	}
 	return s
+}
+
+// dropVariant removes one variant's per-variant entries from s.
+func dropVariant(s *LearnedState, v string) {
+	of := func(k string) bool { got, _, ok := variantOfKey(k); return ok && got == v }
+	maps.DeleteFunc(s.K2, func(k string, _ capacity.RollingAverageSnapshot) bool { return of(k) })
+	maps.DeleteFunc(s.Throughput, func(k string, _ ThroughputSnapshot) bool { return of(k) })
+	maps.DeleteFunc(s.VariantSeenAt, func(k string, _ time.Time) bool { return of(k) })
+	maps.DeleteFunc(s.ITLBaseline, func(k string, _ float64) bool { return of(k) })
+	maps.DeleteFunc(s.StartSeconds, func(k string, _ float64) bool { return of(k) })
+	maps.DeleteFunc(s.K2BorrowedSince, func(k string, _ time.Time) bool { return of(k) })
+	delete(s.Accelerators, v)
 }
 
 // mergeAbsent copies into dst the keys of src it does not have.
@@ -308,7 +363,7 @@ func (a *SaturationAnalyzer) RestoreLearnedState(s LearnedState) RestoreReport {
 		}
 		p := a.pendingRestore[v]
 		if p == nil {
-			p = &pendingVariant{expect: expect, restoredAt: now}
+			p = &pendingVariant{expect: expect}
 			a.pendingRestore[v] = p
 		}
 		return p
@@ -369,6 +424,12 @@ func (a *SaturationAnalyzer) RestoreLearnedState(s LearnedState) RestoreReport {
 				p.state.K2BorrowedSince = map[string]time.Time{}
 			}
 			p.state.K2BorrowedSince[k] = since
+		}
+	}
+	for v, p := range a.pendingRestore {
+		if !p.alive(now, time.Now(), a.horizons) {
+			rep.Aged += p.size()
+			delete(a.pendingRestore, v)
 		}
 	}
 	rep.PendingVariants = len(a.pendingRestore)

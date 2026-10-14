@@ -91,11 +91,14 @@ type learnedStateStoreState struct {
 	restored bool
 	// seen is set once the ConfigMap has been read or written, so that
 	// finding it gone afterwards is a flush rather than a first start.
-	seen       bool
-	lastTry    time.Time
-	lastWrite  time.Time
-	lastDigest string
-	lastErr    string
+	seen    bool
+	lastTry time.Time
+	// lastWrite is the last write attempt, which paces the reads;
+	// lastWriteDone the last write that landed, which paces the refresh.
+	lastWrite     time.Time
+	lastWriteDone time.Time
+	lastDigest    string
+	lastErr       string
 }
 
 // learnedStater is the part of the saturation analyzer the store needs,
@@ -238,13 +241,10 @@ func (e *Engine) writeLearnedState(ctx context.Context, now time.Time) {
 		return
 	}
 	logger := ctrl.LoggerFrom(ctx).WithName("learned-state")
-	state := analyzer.ExportLearnedState()
-	digest := learnedStateDigest(state)
-	if digest == st.lastDigest && now.Sub(st.lastWrite) < learnedStateRefresh {
-		return
-	}
 	st.lastWrite = now
 
+	// Read every interval, written or not: a flush must be noticed within an
+	// interval, not at the next refresh.
 	cm, err := e.readLearnedState(ctx)
 	if err != nil {
 		e.reportLearnedStateErr(logger, err, "Learned state: could not read the snapshot to update it; not written")
@@ -259,18 +259,23 @@ func (e *Engine) writeLearnedState(ctx context.Context, now time.Time) {
 			"configMap", learnedStateConfigMap)
 		return
 	}
-	budget := learnedStateMaxBytes
+	state := analyzer.ExportLearnedState()
+	digest := learnedStateDigest(state)
+	if digest == st.lastDigest && now.Sub(st.lastWriteDone) < learnedStateRefresh {
+		return
+	}
+	others := 0
 	if cm != nil {
 		for k, v := range cm.Data {
 			if k != learnedStateKey() {
-				budget = min(budget, learnedStateMaxData-len(k)-len(v))
+				others += len(k) + len(v)
 			}
 		}
 	}
-	raw, dropped, err := encodeLearnedState(state, now, max(budget, 0))
+	budget := max(min(learnedStateMaxBytes, learnedStateMaxData-others), 0)
+	raw, dropped, err := encodeLearnedState(state, now, budget)
 	if err != nil {
-		logger.Error(err, "Learned state: the snapshot could not be encoded within its bound; not written",
-			"maxBytes", budget)
+		e.reportLearnedStateErr(logger, err, "Learned state: the snapshot does not fit its bound beside the other versions' documents; not written")
 		return
 	}
 	if cm == nil {
@@ -302,7 +307,7 @@ func (e *Engine) writeLearnedState(ctx context.Context, now time.Time) {
 		return
 	}
 	e.reportLearnedStateErr(logger, nil, "")
-	st.seen, st.lastDigest = true, digest
+	st.seen, st.lastDigest, st.lastWriteDone = true, digest, now
 	if dropped > 0 {
 		logger.Info("Learned state: the snapshot was over its size bound; the least recently used entries were left out",
 			"dropped", dropped, "maxBytes", budget)

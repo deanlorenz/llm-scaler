@@ -247,6 +247,63 @@ var _ = Describe("learned state across a restart", func() {
 		Expect(installed).To(BeFalse(), "a memo installed under a changed configuration")
 	})
 
+	It("keeps a parked variant's pending entries past the bucket retention while it is noted present", func() {
+		saved := carry(learn(newProcess(params(256))))
+		second := newProcess(params(256))
+		clock := time.Now()
+		second.now = func() time.Time { return clock }
+		second.RestoreLearnedState(saved)
+		for range 8 {
+			clock = clock.Add(24 * time.Hour)
+			second.NoteVariantsPresent("test-ns", "test-model", []string{"variant-a"})
+			second.EvictStaleHistory()
+		}
+		Expect(second.pendingRestore).To(HaveKey("test-ns/variant-a"),
+			"a parked variant's restored state was swept a retention after the restart")
+	})
+
+	It("lets a deleted variant's pending entries go once none of them could be installed", func() {
+		saved := carry(learn(newProcess(params(256))))
+		// Only the per-variant liveness: entries that age on the analyzer's
+		// clock, which the spec can move.
+		saved.K2, saved.Throughput, saved.Accelerators, saved.K2BorrowedSince = nil, nil, nil, nil
+		Expect(saved.VariantSeenAt).NotTo(BeEmpty(), "precondition")
+		second := newProcess(params(256))
+		clock := time.Now()
+		second.now = func() time.Time { return clock }
+		second.RestoreLearnedState(saved)
+		Expect(second.pendingRestore).To(HaveKey("test-ns/variant-a"))
+
+		clock = clock.Add(second.horizons.VariantTimeout + time.Hour)
+		Expect(second.EvictStaleHistory().PendingRestores).To(Equal(1),
+			"a deleted variant's entries, all past their horizon, were kept to be written back again")
+
+		third := newProcess(params(256))
+		third.now = func() time.Time { return clock }
+		rep := third.RestoreLearnedState(saved)
+		Expect(rep.PendingVariants).To(BeZero(), "entries past every horizon were held as pending at restore")
+		Expect(rep.Aged).To(BeNumerically(">", 0))
+	})
+
+	It("does not export what was learned with no configuration known under a restored fingerprint", func() {
+		saved := carry(learn(newProcess(params(256))))
+		store := capacity.NewStore()
+		store.Update("test-ns", "test-model", "variant-a", capacity.Record{}) // scale target not read yet
+		second := NewSaturationAnalyzer(store)
+		second.RestoreLearnedState(saved)
+		_, err := second.Analyze(context.Background(), makeAnalyzerInput(
+			[]domain.ReplicaMetrics{makeReplicaMetrics("pod-a", "variant-a", 9000, 16000, 6, 100, 50)}, states))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(second.pendingRestore).To(HaveKey("test-ns/variant-a"), "precondition: still pending")
+
+		out := second.ExportLearnedState()
+		for k, w := range out.K2 {
+			Expect(w.Values).NotTo(ContainElement(float64(9000)),
+				"k2 learned with no configuration known went out as checked, under %s", k)
+		}
+		Expect(out.K2).NotTo(BeEmpty(), "the restored entries were dropped with the unchecked ones")
+	})
+
 	It("keeps a parked variant's pending liveness fresh while it stays parked", func() {
 		saved := carry(learn(newProcess(params(256))))
 		second := newProcess(params(256))

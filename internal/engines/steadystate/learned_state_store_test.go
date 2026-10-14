@@ -300,6 +300,52 @@ func TestAConflictIsRetriedNextInterval(t *testing.T) {
 		"a write that lost a conflict was taken as written, and not retried")
 }
 
+// A flush is noticed within an interval even when nothing new was learned:
+// with the digest unchanged, nothing else would read the ConfigMap until the
+// refresh.
+func TestAFlushIsNoticedWithinAnIntervalWhenNothingChanged(t *testing.T) {
+	c := fake.NewClientBuilder().Build()
+	ctx := context.Background()
+	now := time.Now()
+	spy := &stateSpy{state: sampleState(4000)}
+	e := snapshotEngine(t, c, spy)
+	e.restoreLearnedState(ctx, now)
+	e.writeLearnedState(ctx, now)
+	_, cm := storedDoc(t, c)
+	require.NoError(t, c.Delete(ctx, cm))
+
+	e.writeLearnedState(ctx, now.Add(learnedStateInterval))
+	assert.Equal(t, 1, spy.forgot, "a flush with nothing new learned waited for the refresh")
+}
+
+// Every other version's document counts, not only the largest.
+func TestTwoOtherVersionsCountAgainstTheBoundTogether(t *testing.T) {
+	foreign := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: learnedStateConfigMap, Namespace: config.SystemNamespace()},
+		Data: map[string]string{
+			"v0": strings.Repeat("x", learnedStateMaxData/2-50),
+			"v2": strings.Repeat("y", learnedStateMaxData/2-50),
+		},
+	}
+	c := fake.NewClientBuilder().WithObjects(foreign).Build()
+	ctx := context.Background()
+	now := time.Now()
+	e := snapshotEngine(t, c, &stateSpy{state: sampleState(4000)})
+	e.restoreLearnedState(ctx, now)
+	e.writeLearnedState(ctx, now)
+	var cm corev1.ConfigMap
+	require.NoError(t, c.Get(ctx, client.ObjectKey{Namespace: config.SystemNamespace(), Name: learnedStateConfigMap}, &cm))
+	total := 0
+	for k, v := range cm.Data {
+		total += len(k) + len(v)
+	}
+	assert.LessOrEqual(t, total, learnedStateMaxData, "the data went past its bound with two other versions")
+	assert.NotEmpty(t, e.learnedState.lastErr, "a snapshot that does not fit was not reported")
+
+	e.writeLearnedState(ctx, now.Add(learnedStateInterval))
+	assert.NotEmpty(t, e.learnedState.lastErr, "the failure stays reported, once, rather than logged every minute")
+}
+
 // The API server bounds the whole object: another version's document takes
 // from this one's bound.
 func TestAnotherVersionsDocumentCountsAgainstTheBound(t *testing.T) {

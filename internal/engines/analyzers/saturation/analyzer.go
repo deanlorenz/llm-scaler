@@ -588,8 +588,11 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 	// Restored entries for a variant that has not been analysed since the
 	// restore. A retention later, any entry in them is past its own horizon
 	// too, so none could have been installed.
+	// Pending entries go when none of them could be installed any more, on
+	// their own clocks -- not on when they were restored, which every restart
+	// resets and which a parked variant noted present never moves.
 	for key, p := range a.pendingRestore {
-		if a.now().Sub(p.restoredAt) > bucketRetention {
+		if !p.alive(a.now(), time.Now(), a.horizons) {
 			delete(a.pendingRestore, key)
 			evicted.PendingRestores++
 		}
