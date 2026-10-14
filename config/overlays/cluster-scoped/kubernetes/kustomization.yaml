@@ -8,3 +8,8 @@ namePrefix: wva-
 resources:
 - ../../../base/
 
+components:
+# Admits the external scaler port only from KEDA's namespace. Listed first so
+# a later component (openshift) can repoint it. See the component.
+- ../../../components/external-scaler-networkpolicy/
+

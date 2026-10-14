@@ -23,6 +23,9 @@ resources:
 - ../../../base/
 
 components:
+# Admits the external scaler port only from KEDA's namespace. Listed first so
+# a later component (openshift) can repoint it. See the component.
+- ../../../components/external-scaler-networkpolicy/
 - ../../../components/namespace-scoped/
 - ../../../components/tenant-installable/
 # Nodes are cluster-scoped, so no Role can reach them and a namespace-scoped

@@ -113,3 +113,18 @@ patches:
   target:
     kind: ServiceMonitor
     name: controller-manager-metrics-monitor
+# OpenShift's KEDA is the Custom Metrics Autoscaler operator, whose operand runs
+# in openshift-keda, not keda-system. Matches nothing, harmlessly, when the
+# overlay leaves components/external-scaler-networkpolicy out. The `test` makes
+# a changed default fail the build rather than be silently overwritten.
+- patch: |-
+    - op: test
+      path: /spec/ingress/1/from/0/namespaceSelector/matchLabels/kubernetes.io~1metadata.name
+      value: keda-system
+    - op: replace
+      path: /spec/ingress/1/from/0/namespaceSelector/matchLabels/kubernetes.io~1metadata.name
+      value: openshift-keda
+  target:
+    group: networking.k8s.io
+    kind: NetworkPolicy
+    name: external-scaler
