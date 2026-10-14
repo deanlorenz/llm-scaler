@@ -109,6 +109,15 @@ spec:
 # taking the two alerts above with it. The reason is still on the metric and on
 # the operational dashboard, which is where a permanent condition belongs.
 
+    - alert: WVAModelSLOMissed
+      expr: (last_over_time(wva_slo_observed_seconds[10m]) > on (exported_namespace, model_name, objective, statistic) last_over_time(wva_slo_target_seconds[10m])) and on (exported_namespace, model_name) (sum by (exported_namespace, model_name) (wva_model_replicas) > 0)
+      for: 15m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Model {{ $labels.exported_namespace }}/{{ $labels.model_name }} misses its {{ $labels.objective }} SLO ({{ $labels.statistic }})"
+        description: "The router-measured {{ $labels.objective }} {{ $labels.statistic }} is {{ $value | humanizeDuration }}, above the target its scaling policy declares, sustained for 15+ minutes. Fires only for a model whose policy lists the slo analyzer; on this release that analyzer observes and does not size, so this says the current thresholds do not meet the SLO, not that the autoscaler failed one. Windows that cover a wake, a starting replica or a rise are not judged (wva_slo_excluded), and last_over_time bridges the cycles that are not, so an alert here is a steady-state miss. It counts completed streaming requests only, so under overload the real attainment is worse than shown. Compare wva_slo_fill with the tier's kvCacheThreshold x scaleUpThreshold to see whether the tier runs replicas fuller than the target allows."
+
     - alert: WVAModelParkedWhileRequestsRefused
       expr: (sum by (exported_namespace, model_name) (wva_model_replicas) == 0) and on (model_name) (sum by (model_name) (rate(llm_d_epp_request_error_total{error_code="ServiceUnavailable"}[5m])) > 0)
       for: 5m

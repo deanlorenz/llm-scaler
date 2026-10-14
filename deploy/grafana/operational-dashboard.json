@@ -2656,6 +2656,204 @@
           }
         }
       ]
+    },
+    {
+      "id": 76,
+      "type": "row",
+      "title": "SLO: latency targets as the slo analyzer observes them (observe only)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 123
+      },
+      "collapsed": true,
+      "panels": [
+        {
+          "id": 77,
+          "title": "Observed vs target, by model and objective",
+          "type": "timeseries",
+          "description": "What the router measured over 5 minutes against what the policy declares: the TPOT mean, and the TTFT percentile. A gap in the observed line is a window with too few requests, or one excluded for a wake, a start or a rise (see the panel on the right).",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 124
+          },
+          "targets": [
+            {
+              "expr": "wva_slo_observed_seconds{$namespace_label=~\"$namespace\"}",
+              "legendFormat": "{{model_name}} {{objective}} {{statistic}}",
+              "refId": "A"
+            },
+            {
+              "expr": "wva_slo_target_seconds{$namespace_label=~\"$namespace\"}",
+              "legendFormat": "{{model_name}} {{objective}} target",
+              "refId": "B"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 8
+              }
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 78,
+          "title": "Requests judged per window, and why a window was not",
+          "type": "timeseries",
+          "description": "Completed requests the router recorded per objective over the window, and 1 for the reason a window is excluded (zero-replicas, starting, rise). Requests present with no observed point and no exclusion: too few to judge.",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 124
+          },
+          "targets": [
+            {
+              "expr": "wva_slo_window_requests{$namespace_label=~\"$namespace\"}",
+              "legendFormat": "{{model_name}} {{objective}} requests",
+              "refId": "A"
+            },
+            {
+              "expr": "wva_slo_excluded{$namespace_label=~\"$namespace\", reason!=\"\"} == 1",
+              "legendFormat": "{{model_name}} excluded: {{reason}}",
+              "refId": "B"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 8
+              }
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 79,
+          "title": "TTFT attainment",
+          "type": "timeseries",
+          "description": "Share of completed streaming requests within the TTFT target. Compare with the percentile in the statistic label (0.90 for p90). Counts completed requests only, so under overload the real share is lower.",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 132
+          },
+          "targets": [
+            {
+              "expr": "wva_slo_attainment_ratio{$namespace_label=~\"$namespace\"}",
+              "legendFormat": "{{model_name}} {{statistic}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 8
+              }
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 80,
+          "title": "Fill the TPOT target allows, per variant",
+          "type": "timeseries",
+          "description": "The KV fill, as a fraction of physical KV, at which the variant's mean inter-token latency meets the TPOT target. Above the tier's kvCacheThreshold x scaleUpThreshold (0.68 by default): the target would let it run fuller; below: the tier is too loose for it.",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 132
+          },
+          "targets": [
+            {
+              "expr": "wva_slo_fill{$namespace_label=~\"$namespace\"}",
+              "legendFormat": "{{model_name}}/{{variant_name}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 8
+              }
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 81,
+          "title": "Predicted inter-token latency at the realised fill, per variant",
+          "type": "timeseries",
+          "description": "The mean ITL the variant's line predicts once the scale-up headroom is applied: the latency margin an SLO tier would really have.",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 140
+          },
+          "targets": [
+            {
+              "expr": "wva_slo_predicted_itl_seconds{$namespace_label=~\"$namespace\"}",
+              "legendFormat": "{{model_name}}/{{variant_name}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 8
+              }
+            },
+            "overrides": []
+          }
+        },
+        {
+          "id": 82,
+          "title": "Where each variant's SLO pricing came from",
+          "type": "timeseries",
+          "description": "1 for the source in force: own (a full fit), pinned, pinned-default (not a measurement), no-line, no-output-length, infeasible, input-invalid.",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 140
+          },
+          "targets": [
+            {
+              "expr": "wva_slo_source{$namespace_label=~\"$namespace\"} == 1",
+              "legendFormat": "{{model_name}}/{{variant_name}} {{source}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 8
+              }
+            },
+            "overrides": []
+          }
+        }
+      ]
     }
   ],
   "refresh": "",

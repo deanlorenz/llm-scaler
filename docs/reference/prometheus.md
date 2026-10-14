@@ -1039,6 +1039,11 @@ add `controller_instance` to every `on(...)`.
   cycle fires the alert.
 - **Wakes and scale-ups are already excluded.** `wva_slo_excluded` withholds
   the judgement itself, so no suppression rule is needed.
+- **The shipped rule.** `WVAModelSLOMissed` (in
+  [the shipped alerts](#the-shipped-alerts)) covers both objectives with the
+  TPOT form above, applied to every objective (a TTFT percentile above its
+  target is the same miss as attainment below the percentile), gated on
+  replicas.
 - **Targets set but unjudged:**
 
   ```promql
@@ -1634,6 +1639,7 @@ notifications link to it.
 | `WVAModelParkedWhileRequestsRefused` | critical | 5m | a model has 0 replicas and EPP returns `ServiceUnavailable` for it: traffic is being dropped | read `wva_model_scaling_blocked` for the model first | [T: will not wake](troubleshooting.md#a-model-will-not-wake-from-zero) |
 | `WVAModelHasNoWakeSignal` | warning | 10m | blocked reason `no-wake-signal`: EPP exports no flow-control queue, so a parked model cannot wake | enable the EPP `flowControl` feature gate, then restart the EPP Deployment (it reads its config once at start) | [T: will not wake](troubleshooting.md#a-model-will-not-wake-from-zero) |
 | `WVAScalerTargetsUndecided` | warning | 10m | `wva_scaler_undecided_targets` above 0 in a namespace: the scaler answers those ScaledObjects their current count, so their replica counts are frozen | `wva_scaler_undecided_answers_total` says why; the log line `external scaler has no decision for this target` names each one | [T: ScaledObject](troubleshooting.md#scaledobject-ready-false-or-targets-unknown) |
+| `WVAModelSLOMissed` | warning | 15m | a model whose policy lists the `slo` analyzer has its router-measured TTFT percentile or TPOT mean above the declared target, judged outside wakes, starts and rises, while it has replicas | compare `wva_slo_fill` with the tier's `kvCacheThreshold × scaleUpThreshold`: the tier runs replicas fuller than the target allows. On this release the analyzer observes, so the fix is the tier's thresholds | [SLO metrics](#slo-analyzer-metrics) |
 | `WVAHighErrorRate` | warning | 5m | `wva_errors_total` above 6/min for one `component`/`error_type` | grep the controller log for the `error_type` text | [Logs](monitoring.md#the-logs) |
 | `WVAMetricsCollectionFailing` | warning | 5m | `wva_metrics_collection_errors_total` above 5/min for one `query_type`/`reason`: decisions run on stale data | check Prometheus reachability and the controller's Prometheus settings | [T: metrics stale](troubleshooting.md#metrics-stale-or-missing) |
 | `WVAPolicyNamespaceUnverified` | warning | 10m | the controller may not read Namespaces, so it cannot tell whether an admin published cluster policy for it. It runs on its own ConfigMap, which may be weaker than the admin intends | (cluster admin) `NAMESPACE=<ns> make setup-prereqs`, then restart the controller: the value is set once at startup | [T: policy namespace unverified](troubleshooting.md#cluster-policy-is-not-applied-policy-namespace-unverified) |
