@@ -316,6 +316,19 @@ const (
 	// until someone turns the limiter on, and then it is load-bearing.
 	WVANodeAccessDenied = "wva_node_access_denied"
 
+	// WVAConfigRejectedEntries is the number of entries of one scaling-policy
+	// ConfigMap that were rejected at its last load (labels: namespace,
+	// configmap). A rejected entry keeps the previous entry under its key in
+	// force when there was one; either way the ConfigMap does not say what is
+	// running, so any value above 0 needs fixing.
+	WVAConfigRejectedEntries = "wva_config_rejected_entries"
+
+	// WVAConfigUnknownKeys is the number of keys, across the entries of one
+	// scaling-policy ConfigMap, that the schema does not define (labels:
+	// namespace, configmap). The entries apply with those keys ignored; a key
+	// counted here is usually a misspelling of one that was meant to apply.
+	WVAConfigUnknownKeys = "wva_config_unknown_keys"
+
 	// WVAPolicyNamespaceUnverified is 1 when the controller fell back to its own
 	// ConfigMap for limiters and quotas because reading the Namespaces that decide
 	// the policy source was Forbidden, and 0 otherwise. Set once at startup.

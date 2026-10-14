@@ -68,6 +68,8 @@ var (
 	sfzQueueFallbackActive              *prometheus.GaugeVec
 	nodeAccessDenied                    *prometheus.GaugeVec
 	policyNamespaceUnverified           *prometheus.GaugeVec
+	configRejectedEntries               *prometheus.GaugeVec
+	configUnknownKeys                   *prometheus.GaugeVec
 	enforcerModificationsTotal          *prometheus.CounterVec
 	optimizerActive                     *prometheus.GaugeVec
 	configInfoGauge                     *prometheus.GaugeVec
@@ -520,6 +522,26 @@ func InitMetrics(registry prometheus.Registerer) error {
 		policyNamespaceUnverifiedLabels,
 	)
 
+	configRejectedEntriesLabels := []string{constants.LabelNamespace, "configmap"}
+	if controllerInstance != "" {
+		configRejectedEntriesLabels = append(configRejectedEntriesLabels, constants.LabelControllerInstance)
+	}
+	configRejectedEntries = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: constants.WVAConfigRejectedEntries,
+			Help: "Entries of a scaling-policy ConfigMap rejected at its last load; a rejected entry keeps the previous one under its key, if any",
+		},
+		configRejectedEntriesLabels,
+	)
+
+	configUnknownKeys = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: constants.WVAConfigUnknownKeys,
+			Help: "Keys of a scaling-policy ConfigMap's entries that the schema does not define; ignored, the entries still apply",
+		},
+		configRejectedEntriesLabels,
+	)
+
 	sfzQueueFallbackLabels := []string{"pool"}
 	if controllerInstance != "" {
 		sfzQueueFallbackLabels = append(sfzQueueFallbackLabels, constants.LabelControllerInstance)
@@ -733,6 +755,12 @@ func InitMetrics(registry prometheus.Registerer) error {
 	}
 	if err := registry.Register(policyNamespaceUnverified); err != nil {
 		return fmt.Errorf("failed to register policyNamespaceUnverified metric: %w", err)
+	}
+	if err := registry.Register(configRejectedEntries); err != nil {
+		return fmt.Errorf("failed to register configRejectedEntries metric: %w", err)
+	}
+	if err := registry.Register(configUnknownKeys); err != nil {
+		return fmt.Errorf("failed to register configUnknownKeys metric: %w", err)
 	}
 	if err := registry.Register(sfzQueueFallbackActive); err != nil {
 		return fmt.Errorf("failed to register sfzQueueFallbackActive metric: %w", err)
@@ -1324,6 +1352,33 @@ func SetPolicyNamespaceUnverified(unverified bool) {
 		value = 1.0
 	}
 	policyNamespaceUnverified.With(labels).Set(value)
+}
+
+// SetConfigRejectedEntries records how many entries of the scaling-policy
+// ConfigMap namespace/name were rejected at its last load. Set on every load,
+// so a fixed ConfigMap reads 0.
+func SetConfigRejectedEntries(namespace, name string, rejected int) {
+	if configRejectedEntries == nil {
+		return
+	}
+	labels := prometheus.Labels{constants.LabelNamespace: namespace, "configmap": name}
+	if controllerInstance != "" {
+		labels[constants.LabelControllerInstance] = controllerInstance
+	}
+	configRejectedEntries.With(labels).Set(float64(rejected))
+}
+
+// SetConfigUnknownKeys records how many keys the schema does not define the
+// scaling-policy ConfigMap namespace/name carried at its last load.
+func SetConfigUnknownKeys(namespace, name string, unknown int) {
+	if configUnknownKeys == nil {
+		return
+	}
+	labels := prometheus.Labels{constants.LabelNamespace: namespace, "configmap": name}
+	if controllerInstance != "" {
+		labels[constants.LabelControllerInstance] = controllerInstance
+	}
+	configUnknownKeys.With(labels).Set(float64(unknown))
 }
 
 // SetScaleFromZeroQueueFallbackActive records whether scale-from-zero is reading

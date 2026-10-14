@@ -146,7 +146,8 @@ type ScalingPolicy struct {
 	// folded in from the model's trigger metadata
 	// (registry.DefaultOutputTokensKey), which is why it carries no yaml tag --
 	// a `defaultOutputTokens` key in this ConfigMap is ignored, deliberately, so
-	// there is exactly one place an operator sets it.
+	// there is exactly one place an operator sets it. It is the one key
+	// UnknownScalingPolicyKeys does not report.
 	//
 	// ExpectedOutputTokens states where it sits in the precedence.
 	DefaultOutputTokens int `yaml:"-"`

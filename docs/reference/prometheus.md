@@ -743,6 +743,18 @@ With the scaling manager metrics, the value for the label `namespace` is the sca
   }
   ```
 
+### `wva_config_rejected_entries`
+- **Type**: Gauge
+- **Description**: entries of a scaling-policy ConfigMap rejected at its last load (an invalid value or wrong type). A rejected entry keeps the previous entry under its key, if there was one.
+- **Labels**: `namespace`, `configmap`, optional `controller_instance`
+- **Use Case**: any value above 0 means the ConfigMap does not say what is running. The `ConfigEntryRejected` event on the ConfigMap names the entry.
+
+### `wva_config_unknown_keys`
+- **Type**: Gauge
+- **Description**: keys in a scaling-policy ConfigMap's entries that the schema does not define, at its last load. They are ignored; the entries still apply.
+- **Labels**: `namespace`, `configmap`, optional `controller_instance`
+- **Use Case**: a value above 0 is usually a misspelled key whose setting is not in force. The `ConfigEntryUnknownKeys` event names it and its line.
+
 ### `wva_node_access_denied`
 - **Type**: Gauge
 - **Description**: `1` while a configured physical GPU limiter cannot read nodes, `0` when it can. Absent when no physical limiter is configured — nothing is asking for them.
