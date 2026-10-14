@@ -314,9 +314,18 @@ distance.
    same model, accelerator, GPU count, role, bucket and queue threshold,
    whose engine parameters pass `IsCapacityCompatible` -- tier 2 on main,
    without waiting for #126's digest. It is used only below the variant's
-   own figure (rule 1), held for `BorrowedK2Hold` (30 min) and relaxed to
-   the own figure over `BorrowedK2Relax` (6 h) (rule 2), read without
-   touching the donor (rule 3), and logged with the donor named. It is NOT
+   own capacity, `min(k1, own k2)` (rule 1), held for `BorrowedK2Hold`
+   (30 min) and relaxed to the own figure over `BorrowedK2Relax` (6 h)
+   (rule 2), read without touching the donor (rule 3), and logged with the
+   donor named. The relaxation clock is per variant, so neither a flickering
+   donor nor a change of output bucket restarts it; a retention after it ends
+   the variant may borrow again (a weekly re-probe), and a restart clears it.
+   One side effect, accepted: the priced capacity is written to the capacity
+   store as a live record, and `Store.FindCompatible` reads records across
+   namespaces for zero-replica variants. A borrowed figure can reach another
+   namespace that way, without relaxation. It can only lower what it reaches,
+   and P3/P4 figures already travel the same path; the k2 windows themselves
+   are written only by P1-obs, so a borrowed figure never becomes a donor. It is NOT
    behind `enableLearnedStateReuse`: that switch gates where a sibling's
    figure can become an answer that orders fewer replicas, and this one
    cannot. Specs in `k2_borrow_test.go`, each with a mutation that fails it.

@@ -64,12 +64,12 @@ type SaturationAnalyzer struct {
 	// saturated replica HOLDS, this says how fast it COMPLETES, and only the
 	// latter tells how many replicas a given arrival rate needs.
 	saturatedThroughput map[string]*capacity.RollingAverage
-	// k2BorrowedSince is, per own historyKey, when the variant first borrowed
-	// a sibling's k2 (borrowedK2). The relaxation back to the variant's own
-	// figure is measured from it, so it must NOT be reset by a donor that
-	// comes and goes -- that would hold a borrowed figure at full strength
-	// forever. Swept once the variant has a window of its own, or long after
-	// the relaxation ended.
+	// k2BorrowedSince is, per namespace|variant, when the variant first
+	// borrowed a sibling's k2 (borrowedK2). The relaxation back to the
+	// variant's own figure is measured from it, so it must NOT be reset by a
+	// donor that comes and goes, nor by the variant's traffic moving to another
+	// output bucket -- either would hold a borrowed figure at full strength
+	// again. Swept a retention after the relaxation ended.
 	k2BorrowedSince map[string]time.Time
 	// throughputSampledAt is, per saturatedThroughput key, when the window
 	// last took a reading as a sample of its own, and throughputLastRead the
@@ -497,16 +497,16 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 			evicted.MuWindows++
 		}
 	}
-	// A borrow's start goes once the variant has a window of its own (the
-	// borrow is displaced and will not be consulted again), or a retention
-	// after its relaxation ended -- not sooner, because deleting it restarts
-	// the borrow at full strength, and a variant that never saturates would
-	// then be held at the donor's figure by a sweep instead of by a donor.
-	// After that long the restart is a deliberate re-probe: a week later, a
-	// variant that still has no reading of its own borrows again.
+	// A borrow's start goes a retention after its relaxation ended, and not
+	// sooner: deleting it restarts the borrow at full strength, so a variant
+	// that never saturates would be held at the donor's figure by the sweep
+	// instead of by a donor. After that long the restart is a deliberate
+	// re-probe: a variant that still has no reading of its own borrows again.
+	// Not on the variant's own window appearing: the clock covers every bucket
+	// of the variant, and a reading in one says nothing about another.
 	borrowLife := BorrowedK2Hold + BorrowedK2Relax + bucketRetention
 	for key, since := range a.k2BorrowedSince {
-		if _, own := a.computeCapacityHistory[key]; own || a.now().Sub(since) > borrowLife {
+		if a.now().Sub(since) > borrowLife {
 			delete(a.k2BorrowedSince, key)
 			evicted.K2Borrows++
 		}

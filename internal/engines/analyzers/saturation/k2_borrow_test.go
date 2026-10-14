@@ -176,18 +176,106 @@ var _ = Describe("borrowing a sibling's k2", func() {
 			Expect(ok).To(BeFalse())
 		})
 
-		It("is swept once the variant has its own window, and kept while it has none", func() {
+		It("keeps its clock for its life, then lets the variant borrow again as a re-probe", func() {
 			_, ok := borrow()
 			Expect(ok).To(BeTrue())
+			const clockKey = "test-ns|variant-b"
 
+			clock = clock.Add(BorrowedK2Hold + BorrowedK2Relax + a.horizons.BucketRetention - time.Minute)
+			a.computeCapacityHistory[donor].TouchAt(clock) // the donor's owner still reads it
 			Expect(a.EvictStaleHistory().K2Borrows).To(BeZero())
-			Expect(a.k2BorrowedSince).To(HaveKey(own), "still borrowing: the clock must survive the sweep")
+			Expect(a.k2BorrowedSince).To(HaveKey(clockKey),
+				"swept early, the clock restarts and the variant is held at the donor's figure again")
 
-			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
-			ra.Add(9000)
-			a.computeCapacityHistory[own] = ra
+			clock = clock.Add(2 * time.Minute)
+			a.computeCapacityHistory[donor].TouchAt(clock)
 			Expect(a.EvictStaleHistory().K2Borrows).To(Equal(1))
-			Expect(a.k2BorrowedSince).NotTo(HaveKey(own))
+			b, ok := borrow()
+			Expect(ok).To(BeTrue(), "a variant that has still never measured itself borrows again")
+			Expect(b.k2).To(Equal(int64(4000)), "from full strength: this is the deliberate weekly re-probe")
+		})
+
+		It("is not restarted by the variant's traffic moving to another output bucket", func() {
+			// Keyed per bucket, the clock gave a variant one full-strength hold
+			// per output bucket it passed through.
+			longOwn := a.historyKey("test-model", "test-ns", "variant-b", "H100", 1, domain.RoleBoth, 5000, 5)
+			longDonor := a.historyKey("test-model", "test-ns", "variant-a", "H100", 1, domain.RoleBoth, 5000, 5)
+			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
+			ra.Add(4000)
+			a.computeCapacityHistory[longDonor] = ra
+
+			_, ok := borrow()
+			Expect(ok).To(BeTrue())
+			clock = clock.Add(BorrowedK2Hold + BorrowedK2Relax)
+			_, ok = borrow()
+			Expect(ok).To(BeFalse(), "precondition: fully relaxed in the first bucket")
+
+			_, ok = a.borrowedK2(longOwn, "test-model", 12800, params(256))
+			Expect(ok).To(BeFalse(), "a new bucket restarted the variant's hold at full strength")
+		})
+	})
+
+	Describe("which sibling", func() {
+		seed := func(variant string, avgOutput float64, k2 float64) {
+			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
+			ra.Add(k2)
+			a.computeCapacityHistory[a.historyKey("test-model", "test-ns", variant, "H100", 1, domain.RoleBoth, avgOutput, 5)] = ra
+		}
+
+		It("takes the highest of several lower donors", func() {
+			store.Update("test-ns", "test-model", "variant-c", capacity.Record{EngineParams: params(256)})
+			seed("variant-a", 50, 3000)
+			seed("variant-c", 50, 6000)
+			b, ok := a.borrowedK2(keyOf("variant-b"), "test-model", 12800, params(256))
+			Expect(ok).To(BeTrue())
+			Expect(b.k2).To(Equal(int64(6000)), "the least far below own: the fewest replicas spent on someone else's figure")
+			Expect(b.donor).To(Equal("variant-c"))
+		})
+
+		It("does not borrow across an output bucket", func() {
+			// A k2 is occupancy at saturation, and how much a saturated replica
+			// holds depends on how long its answers are.
+			seed("variant-a", 5000, 4000)
+			_, ok := a.borrowedK2(keyOf("variant-b"), "test-model", 12800, params(256))
+			Expect(ok).To(BeFalse())
+		})
+	})
+
+	Describe("against the variant's own capacity, not its own k2", func() {
+		// The derived figure can sit ABOVE k1, and capacity is min(k1, k2).
+		// 2048-token batches with 100-in/50-out requests derive 256 sequences
+		// x 125 = 32000, against a k1 of 12800.
+		var budget *capacity.EngineParams
+		BeforeEach(func() {
+			budget = &capacity.EngineParams{Engine: "vllm", MaxNumSeqs: 256, EffectiveMaxBatchedTokens: 2048}
+			store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: budget})
+			store.Update("test-ns", "test-model", "variant-b", capacity.Record{EngineParams: budget})
+			Expect(estimateCapacityFromParams(budget, 100, 50)).To(Equal(int64(32000)), "precondition: derived above k1")
+		})
+
+		It("borrows on the derived path when the donor is below the variant's capacity", func() {
+			budget.EffectiveMaxBatchedTokens = 60 // derives 2500, below k1
+			ra := capacity.NewRollingAverage(capacity.RollingAverageWindowSize)
+			ra.Add(2000)
+			a.computeCapacityHistory[keyOf("variant-a")] = ra
+
+			result := cycle(1000, 0, 1000, 16000, 0)
+			Expect(capacityOf(result, "variant-b")).To(Equal(float64(2000)),
+				"a P3 variant -- the usual canary, with engine parameters -- must borrow too")
+		})
+
+		It("does not report a borrow that changes nothing", func() {
+			// The donor saturated at 14000: below the derived 32000, above k1.
+			// Capacity is k1 either way, so this is no borrow, and its clock
+			// must not start.
+			cycle(14000, 6, 1000, 16000, 0)
+			result := cycle(1000, 0, 1000, 16000, 0)
+			for _, vc := range result.VariantCapacities {
+				if vc.VariantName == "variant-b" {
+					Expect(vc.Reason).NotTo(Equal("P2-borrow"))
+				}
+			}
+			Expect(a.k2BorrowedSince).To(BeEmpty(), "the hold was spent on a borrow that did nothing")
 		})
 	})
 })

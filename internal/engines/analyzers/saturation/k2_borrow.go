@@ -34,6 +34,15 @@ import (
 // itself, which displaces the borrow at once (P1, then P2 on its own window).
 // The worst case of the relaxation is therefore the variant's no-borrow
 // behaviour, reached hours later rather than at once.
+//
+// The clock is per VARIANT, not per bucket. Keyed by the history key, a variant
+// whose traffic moved to another output bucket started a fresh full-strength
+// hold there, up to one per bucket. It still re-arms in two bounded ways, both
+// deliberate: a retention after the relaxation ended the sweep drops it, so a
+// variant that has still never measured itself borrows again -- a weekly
+// re-probe -- and a controller restart drops it with every other learned
+// figure, the donors' windows included, so nothing is borrowed until a donor
+// has measured again.
 
 const (
 	// BorrowedK2Hold is how long a borrowed k2 is used at full strength
@@ -79,7 +88,10 @@ func splitVariantKey(key string) (namespace, variant, rest string, ok bool) {
 // The donor's window is read without Touch: borrowing must not keep a donor's
 // measurement alive past its own owner's use of it.
 //
-// own is the figure the variant would use without borrowing; ok is false when
+// own is the CAPACITY the variant would have without borrowing: min(k1, its
+// own k2). Compared against its own k2 alone, a donor between k1 and a derived
+// k2 above k1 was "lower", was reported as P2-borrow and started the clock,
+// while capacity -- clamped to k1 either way -- did not move. ok is false when
 // there is nothing to borrow, or the relaxation has run its course.
 func (a *SaturationAnalyzer) borrowedK2(ownKey, modelID string, own int64, ownParams *capacity.EngineParams) (k2Borrow, bool) {
 	if own <= 0 || ownParams == nil {
@@ -122,12 +134,13 @@ func (a *SaturationAnalyzer) borrowedK2(ownKey, modelID string, own int64, ownPa
 		return k2Borrow{}, false
 	}
 
+	clockKey := namespace + "|" + variant
 	now := a.now()
 	a.mu.Lock()
-	since, started := a.k2BorrowedSince[ownKey]
+	since, started := a.k2BorrowedSince[clockKey]
 	if !started {
 		since = now
-		a.k2BorrowedSince[ownKey] = since
+		a.k2BorrowedSince[clockKey] = since
 	}
 	a.mu.Unlock()
 

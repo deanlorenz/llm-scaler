@@ -634,8 +634,8 @@ func (a *SaturationAnalyzer) computeK2(
 	isPrefill := canonicalRole(role) == domain.RolePrefill
 	if !isPrefill {
 		if k2Derived := estimateCapacityFromParams(engineParams, avgInput, avgOutput); k2Derived > 0 {
-			if b, ok := a.borrowedK2(historyKey, modelID, k2Derived, engineParams); ok {
-				logBorrowedK2(logger, b, modelID, namespace, variantName, historyKey, k2Derived, capacity.K2SrcDerived)
+			if b, ok := a.borrowedK2(historyKey, modelID, min(k1, k2Derived), engineParams); ok {
+				logBorrowedK2(logger, b, modelID, namespace, variantName, historyKey, min(k1, k2Derived), capacity.K2SrcDerived)
 				return b.k2, capacity.K2SrcBorrowed
 			}
 			logger.V(logging.DEFAULT).Info("k2-decision",
