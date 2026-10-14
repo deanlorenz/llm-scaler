@@ -70,7 +70,7 @@ expect "active: shadow false" false "$(printf '%s\n' "$out" | yq '.optimizer.uti
 expect "active: tuning kept" 2 "$(printf '%s\n' "$out" | yq '.optimizer.utilizationShare.maxHeadroomReplicas')"
 expect "active: limiters kept" 8 "$(printf '%s\n' "$out" | yq '.limiters[0].namespaceQuotas.team-a.NVIDIA-H200')"
 case_
-if printf '%s\n' "$out" | grep -q '^# shipped thresholds'; then ok "active: comments kept"; else fail "active: the policy's comment was dropped"; fi
+if grep -q '^# shipped thresholds' <<<"$out"; then ok "active: comments kept"; else fail "active: the policy's comment was dropped"; fi
 out="$(printf '%s\n' "$INV_POLICY" | us_policy_with_mode shadow physical)"
 expect "shadow physical: physicalGroups" true "$(printf '%s\n' "$out" | yq '.optimizer.utilizationShare.physicalGroups')"
 expect "shadow physical: shadow" true "$(printf '%s\n' "$out" | yq '.optimizer.utilizationShare.shadow')"
@@ -84,9 +84,12 @@ case_
 src="$(tr -d '\r' < "$ROOT/internal/config/utilization_share.go")"
 missing=""
 for tag in 'yaml:"shadow' 'yaml:"physicalGroups' 'yaml:"utilizationShare'; do
-    printf '%s' "$src" | grep -qF "$tag" || missing="$missing $tag"
+    # A here-string, not a pipe: the sourced script set pipefail, and grep -q
+    # exiting at its first match killed printf with SIGPIPE, which pipefail then
+    # reported as a missing tag -- intermittently, as the file grew.
+    grep -qF -- "$tag" <<<"$src" || missing="$missing $tag"
 done
-printf '%s' "$src" | grep -qE 'OptimizerTypeUtilizationShare[[:space:]]*=[[:space:]]*"utilizationShare"' || missing="$missing type-constant"
+grep -qE 'OptimizerTypeUtilizationShare[[:space:]]*=[[:space:]]*"utilizationShare"' <<<"$src" || missing="$missing type-constant"
 if [ -z "$missing" ]; then ok "the keys written are the ones internal/config decodes"; else fail "internal/config no longer decodes:$missing"; fi
 
 # --- verbs, against a stubbed kubectl ---------------------------------------
@@ -373,13 +376,20 @@ fresh "$QUOTA_POLICY"; status_on; echo active > "$STATE/status.mode"; run shadow
 vcase "status: a mode other than the one written fails" \
     eval '[ $RC -ne 0 ] && says "mode '"'"'active'"'"', not '"'"'shadow'"'"'"'
 
+# A large log with the reload line FIRST: printf | grep -q under pipefail lost it
+# to SIGPIPE once the log outgrew a pipe buffer.
+fresh "$TUNED_POLICY"; touch "$STATE/noreload"
+{ echo 'INFO Updated global scaling policy from ConfigMap'; head -c 1048576 /dev/zero | tr '\0' 'x' | fold -w 200; } > "$STATE/logs"
+run activate
+vcase "a reload line at the top of a large log is found" eval '[ $RC -eq 0 ] && says "did not refuse it"'
+
 fresh "$TUNED_POLICY"; touch "$STATE/standby"; run activate
 vcase "logs: every controller pod is read, not one that may be a standby" eval '[ $RC -eq 0 ] && says "did not refuse it"'
 
 fresh "$QUOTA_POLICY"; echo '{"level":"info","msg":"x","accelerator":"NVIDIA-H200"}' > "$STATE/logs"; run check
 vcase "check: reads accelerators from a json-encoded log" eval '[ $RC -eq 0 ] && says "resolves: NVIDIA-H200"'
 
-CASES_EXPECTED=64
+CASES_EXPECTED=65
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. A case was added or removed; update CASES_EXPECTED deliberately."
 fi

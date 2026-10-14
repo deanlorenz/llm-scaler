@@ -341,12 +341,15 @@ resolve_policy_ns() {
 
 # reload_seen -- LOGS hold the line the controller logs when it reads
 # POLICY_NS's policy.
+#
+# Here-strings, never `printf | grep -q`: under pipefail, grep -q exiting at its
+# first match kills printf with SIGPIPE, and a large log then reads as one that
+# does not hold the line at all.
 reload_seen() {
     if [ "$POLICY_NS" = "$CONTROLLER_NS" ]; then
-        printf '%s\n' "$LOGS" | grep -q 'Updated global scaling policy'
+        grep -q 'Updated global scaling policy' <<<"$LOGS"
     else
-        printf '%s\n' "$LOGS" | grep 'Loaded cluster policy from the policy namespace' \
-            | grep -qE "\"policyNamespace\": ?\"$POLICY_NS\""
+        grep -qE "Loaded cluster policy from the policy namespace.*\"policyNamespace\": ?\"$POLICY_NS\"" <<<"$LOGS"
     fi
 }
 
@@ -464,7 +467,7 @@ verb_check() {
     if [ "$kind" = quota ] && [ -n "$accels" ]; then
         keys="$(printf '%s\n' "$POLICY" | us_quota_keys)" || die "could not parse the quota entries"
         for a in $accels; do
-            printf '%s\n' "$keys" | grep -qxF -- "$a" \
+            grep -qxF -- "$a" <<<"$keys" \
                 || warn "the quota has no '$a' key: its models are charged to no quota group (the key must be the name the controller logs)"
         done
     fi
@@ -535,7 +538,7 @@ verb_status() {
         info "$ev events: $(printf '%s' "$names" | grep -c . || true)"
     done
     kread warnings get events -n "$NS" --field-selector type=Warning || die "could not read events in $NS: $warnings"
-    if printf '%s\n' "$warnings" | grep -q UtilizationShare; then
+    if grep -q UtilizationShare <<<"$warnings"; then
         warn "UtilizationShare warnings:"
         printf '%s\n' "$warnings" | grep UtilizationShare | sed 's/^/    /' >&2
     else
