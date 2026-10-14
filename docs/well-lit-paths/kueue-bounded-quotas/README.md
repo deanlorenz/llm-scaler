@@ -6,7 +6,7 @@
 - **You need:**
   - everything [the tenant-quotas path](../tenant-gpu-quotas/#start-here) needs, including its Namespace-read note for the cluster policy on Kubernetes.
   - Kueue's `ClusterQueue`, `LocalQueue` and `ResourceFlavor` served, with LocalQueues in the managed namespaces.
-  - for a namespace-scoped install, the `kueue-reader` prerequisite that `make setup-prereqs` creates (cluster admin; [What it needs](#what-it-needs)), including `get` on the managed Namespace. A controller set up before that read existed needs the admin to re-run it once ([upgrading](../../reference/upgrade-and-uninstall.md#upgrading-to-this-release)); until then the tenant's `make deploy-wva` refuses with this block on.
+  - for a namespace-scoped install, the `kueue-reader` prerequisite that `make setup-prereqs` creates (cluster admin; [What it needs](#what-it-needs)), including `get` on the managed Namespace. A controller set up before that read existed needs the admin to re-run it once ([upgrading](../../reference/upgrade-and-uninstall.md#upgrading-to-this-release)); until then the tenant's `make deploy-wva` refuses with this block on, and warns instead when it cannot tell.
   - ClusterQueues whose `namespaceSelector` admits only the namespaces meant to have them: the reader honours the selector as Kueue does, so a queue with `{}`, or one matching a label a tenant can set, grants its quota to any namespace that points a LocalQueue at it ([why](#what-it-is)).
   - **Not enforcement:** the limiter is advisory; back each tenant namespace with a GPU `ResourceQuota` ([bound at admission](../../guides/admin-cluster-setup/README.md#bound-the-namespaces-gpus-at-admission)).
 - **Do this** (no guide covers this path yet; the steps are on this page):

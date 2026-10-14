@@ -3,7 +3,7 @@
 ## Start here
 
 - **Status:** Stable.
-- **You need:** [the saturation path](../scale-on-saturation/#start-here) in place, and edit rights on a scaling-policy ConfigMap (`wva-scaling-policy-config`) the controller reads. That is the one in the controller's namespace — the namespace owner's in the default install. When a cluster admin keeps the controller out of your reach, you cannot edit that one: create a [namespace-local `wva-scaling-policy-config`](../../reference/scaling-policy.md#namespace-local-scaling-policy-map) in your own namespace (it replaces the global map whole for your models), or ask the admin.
+- **You need:** [the saturation path](../scale-on-saturation/#start-here) in place, and edit rights on a scaling-policy ConfigMap (`wva-scaling-policy-config`) the controller reads. That is the one in the controller's namespace — the namespace owner's in the default install. When a cluster admin keeps the controller out of your reach, you cannot edit that one: create a [namespace-local `wva-scaling-policy-config`](../../reference/scaling-policy.md#namespace-local-scaling-policy-map) in your own namespace (it replaces the global map whole for your models), or ask the admin. An out-of-reach controller reads the admin's ConfigMap only at start, so the admin restarts it after the edit ([why](../../reference/scaling-policy.md#limiters-cluster-default-only-live)).
 - **Do this** (no guide covers this path; the steps are on this page):
   1. (owner of that ConfigMap) Add the tier entries, and a `defaultPolicy` naming one that exists ([What it needs](#what-it-needs); the shipped numbers in [Choosing a tier](#choosing-a-tier)).
   2. (namespace owner) Name a tier on each variant: `scalingPolicy: <tier>` in its trigger metadata, or in its entry in [the ScaledObject plan](../../reference/configuration.md#default-scaledobjects) before `make scaledobjects-apply`.
@@ -136,7 +136,10 @@ Two things that could be silent are not:
 The tier surface, the full field list and the per-model override that outranks
 it are in [the scaling policy reference](../../reference/scaling-policy.md).
 Tiers are edited in place: the policy is dynamic configuration, so the engine
-picks up a changed ConfigMap without a restart.
+picks up a changed ConfigMap without a restart. The exception is a controller
+run out of the tenant's reach (`WVA_WATCH_NS`): it reads its own ConfigMap at
+start, so restart it after editing that one. A namespace-local map in the
+model's namespace is still picked up live.
 
 ## Verifying it
 

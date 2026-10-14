@@ -114,6 +114,13 @@ metadata is **not** read for parking (`ResolveScalingPolicy` in
 a variant one — a model is at zero only when nothing serves it, so there is
 nothing meaningful a single variant could decide here.
 
+A controller run out of the tenant's reach (in an admin namespace, with
+`WVA_WATCH_NS` naming the model's) reads its own ConfigMap only at start: after
+editing that one, restart it with
+`kubectl rollout restart deploy/wva-controller-manager -n <wva-namespace>`. A
+namespace-local map in the model's namespace is read live
+([why](../../reference/scaling-policy.md#limiters-cluster-default-only-live)).
+
 **Half two — let every variant reach zero.**
 
 <!-- guide:deploy.bounds start -->

@@ -215,6 +215,10 @@ meanwhile:
   runs for one fill timeout, about three minutes with default timings, and
   shows the blocked reason `quiet-period`. Expect it on every upgrade and leader
   change.
+- **What it learned is held in memory.** Learned capacity and throughput are
+  re-learned after every restart or leader change, so a request shape it had
+  already priced is sized from occupancy again until it saturates once more
+  ([#137](https://github.com/ev-shindin/llm-scaling-manager/issues/137)).
 
 Do not judge an upgrade by the first few minutes of decisions.
 

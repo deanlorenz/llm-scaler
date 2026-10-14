@@ -409,8 +409,9 @@ A model left out this way is listed in the log line's `frozen` field as
 
 **Where the block is read.** Like `limiters:`, only from the cluster `default`
 entry (or the policy namespace's, when one resolves), and live: an edit takes
-effect on the next cycle, except in a policy namespace read by a
-namespace-scoped controller, which reads it at start only (see
+effect on the next cycle, except where a namespace-scoped controller reads it
+outside the namespace it manages (a policy namespace, or an out-of-reach
+controller's own ConfigMap), which it reads at start only (see
 [`limiters`](#limiters-cluster-default-only-live)).
 An `optimizer:` block in a [namespace-local scaling-policy map](#namespace-local-scaling-policy-map) has no effect; the controller logs
 `ignoring optimizer blocks in namespace-local scaling-policy maps` with the
@@ -1441,7 +1442,7 @@ Update `wva-scaling-policy-config` ConfigMap:
 kubectl edit cm wva-scaling-policy-config -n <controller-namespace>
 ```
 
-Changes take effect **immediately** (the scaling manager watches ConfigMap and auto-reloads). Thresholds are read from this copy in the controller's namespace; `limiters:` and `optimizer:` are not, when a policy namespace resolves — see [who is allowed to change the bound](gpu-limiter.md#who-is-allowed-to-change-the-bound).
+Changes take effect **immediately** (the scaling manager watches ConfigMap and auto-reloads), except on a controller run out of the tenant's reach (`WVA_WATCH_NS`), which reads this ConfigMap at start: restart it after the edit. Thresholds are read from this copy in the controller's namespace; `limiters:` and `optimizer:` are not, when a policy namespace resolves — see [who is allowed to change the bound](gpu-limiter.md#who-is-allowed-to-change-the-bound).
 
 #### Step 3: Apply to EPP
 

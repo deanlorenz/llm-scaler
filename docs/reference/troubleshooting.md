@@ -543,8 +543,11 @@ Work down the list in order.
    `wva-utilization-share-history-role` or its binding is missing. On an
    install upgraded from before the store existed, the controller-only
    `make deploy-wva` reports both as optional prerequisites and installs
-   without them; ask an admin to re-run `NAMESPACE=<controller-namespace> make
-   setup-prereqs` to enable the store. Nothing is restored, and nothing is
+   without them; ask an admin to re-run `make setup-prereqs` in the
+   install's shape (`NAMESPACE=<ns> make setup-prereqs`; out of reach
+   `NAMESPACE=<managed ns> make setup-prereqs WVA_NS=<controller ns> WVA_WATCH_NS=<managed ns>`;
+   cluster-scoped `make setup-prereqs SCOPE=cluster WVA_NS=<controller ns>`) to
+   enable the store. Nothing is restored, and nothing is
    written until a read succeeds, so the stored history is not overwritten.
    `Utilization share: could not store the need history; a restart now forgets
    the models' peaks` is the same for the write. Both are logged per group,
