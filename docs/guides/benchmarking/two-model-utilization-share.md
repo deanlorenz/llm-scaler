@@ -364,8 +364,10 @@ and, in addition:
   8-GPU replicas. A P/D variant of the different-burst-shapes scenario,
   `hack/benchmark/scenarios/guides/two-model-shapes-pd.yaml` (both models
   disaggregated, four roles under one quota; how to drive it is in its
-  header), exists and has not been run. Its prefill and decode pods take one
-  accelerator each, so it says nothing about whole-node pods either.
+  header), has run once
+  ([results](../../well-lit-paths/utilization-share/measured.md#pd-two-disaggregated-models-under-one-quota)).
+  Its prefill and decode pods take one accelerator each, so it says nothing
+  about whole-node pods either.
 - **A cluster quota or a canary.** One namespace quota group.
 
 ## One P/D model (single-stack mode)
@@ -386,9 +388,10 @@ mode:
   default to the shared bounds. Reset, the ceiling and `budget.json` all apply
   them per role, and the report refuses arms whose bounds differ.
 
-**It has not produced a result.** On `Qwen/Qwen3-0.6B`, prefill stayed at one
-replica through 20 minutes of 15 000-token prompts at 12 rps, so there was
-nothing for the arms to compare ([why](../../well-lit-paths/utilization-share/measured.md#pd-not-measured)).
+**This mode has not produced a result.** On `Qwen/Qwen3-0.6B`, prefill stayed
+at one replica through 20 minutes of 15 000-token prompts at 12 rps, so there
+was nothing for the arms to compare ([why](../../well-lit-paths/utilization-share/measured.md#an-earlier-attempt-on-one-model)).
+The two-model P/D scenario above did produce one.
 Two tooling problems are also open:
 
 - The standup rendered the scenario's 32 CPU / 128 GiB engine requests despite

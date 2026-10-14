@@ -183,7 +183,8 @@ kill $PF
 # Warnings are the ones to read.
 kubectl get events -n $NS --field-selector reason=UtilizationShareGiving
 kubectl get events -n $NS --field-selector reason=UtilizationShareReceived
-kubectl get events -n $NS --field-selector type=Warning | grep UtilizationShare
+warnings="$(kubectl get events -n $NS --field-selector type=Warning)" &&
+  { printf '%s\n' "$warnings" | grep UtilizationShare || echo "no UtilizationShare warnings"; }
 ```
 <!-- guide:verify.events end -->
 

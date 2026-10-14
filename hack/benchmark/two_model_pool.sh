@@ -1427,8 +1427,15 @@ verb_verify() {
 #
 # So: create, wait for it to FINISH, read its log, delete. And try more than
 # once, because the first attempt after a rollout legitimately loses that race.
+#
+# On a P/D model the probe has to move KV. A one-word prompt fills no KV block,
+# so prefill hands decode nothing and decode serves it alone: a probe like that
+# kept answering 200 on a stack whose every real request was a 500 on a broken
+# KV link. So P/D sends three prompts of about a thousand tokens, each with its
+# own first block so no prefix cache can serve it, and all three must answer.
 verify_probe() {
-    local url="$1" model="$2" out pod attempt rc
+    local url="$1" model="$2" out pod attempt rc words=0 count=1
+    if scenario_is_pd; then words=1024; count=3; fi
     info "probing $model at $url"
     for attempt in 1 2 3; do
         pod="probe-$(date +%s)-$RANDOM"
@@ -1439,20 +1446,23 @@ import json,time,urllib.request
 # half-minute or so -- a mesh sidecar starts alongside the container and the
 # application does not wait for it -- and one attempt reports a serving model as
 # dead. Measured: attempts 1 and 2 failed to resolve, attempt 3 returned 200.
-body=json.dumps({'model':'$model','prompt':'hello','max_tokens':4}).encode()
+def body(i):
+    prompt='hello' if $words == 0 else 'probe %d %f ' % (i, time.time()) + 'hello ' * $words
+    return json.dumps({'model':'$model','prompt':prompt,'max_tokens':4}).encode()
 deadline=time.time()+180
 last=''
-while time.time()<deadline:
+done=0
+while time.time()<deadline and done<$count:
     try:
-        req=urllib.request.Request('$url', data=body, headers={'Content-Type':'application/json'})
+        req=urllib.request.Request('$url', data=body(done), headers={'Content-Type':'application/json'})
         r=urllib.request.urlopen(req, timeout=120)
-        print('HTTP', r.status)
-        break
+        if r.status!=200:
+            raise Exception('HTTP %d' % r.status)
+        done+=1
     except Exception as e:
         last=str(e)
         time.sleep(5)
-else:
-    print('FAILED', last)
+print('HTTP 200' if done==$count else 'FAILED after %d of $count: %s' % (done, last))
 " >/dev/null 2>&1 || true
         # A Pod that runs for a second is never observed Ready, so wait on the
         # phase instead of on a condition.

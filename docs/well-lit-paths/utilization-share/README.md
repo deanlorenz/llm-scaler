@@ -198,12 +198,9 @@ two 8B models at 1 GPU per replica:
 | With those fixes | First burst gained (12 s against 35 s); second lost (p95 313 s against 139 s): the spare sat on the idle model, draining long outputs. Led to the headroom cap. |
 | With the headroom cap | First burst 0.07 s against 41 s; second reached its fleet sooner; +34% GPU-seconds, mostly an idle-fill bug. |
 | With the idle-fill fix | First burst 0.07 s against 25.6 s; second no worse; GPU cost lost to a sampling gap. |
+| Both models P/D, four roles, 10-GPU quota | Output-heavy burst 0.095 s against 42 s; prompt-heavy burst overloaded in every arm (p95 59 s against 73 s); +36% GPU-seconds. Run on vLLM v0.31.0 ([why](measured.md#why-vllm-v0310)). |
 
-A P/D version was attempted once and stopped after its `today` arm: prefill
-never left one replica, so prefill and decode never competed for GPUs
-([why](measured.md#pd-not-measured)). A four-role P/D scenario,
-`two-model-shapes-pd`, is ready and has not been run. Every number, table and
-timeline is in [measured](measured.md).
+Every number, table and timeline is in [measured](measured.md).
 
 ## How it is tested
 

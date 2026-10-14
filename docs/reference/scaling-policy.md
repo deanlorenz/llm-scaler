@@ -648,7 +648,7 @@ length, so a restart, a leader change or a shift in prompt length puts prefill
 back on KV-memory pricing until it queues on its own again. In the one P/D
 benchmark attempt prefill never queued on its own and never left one replica
 under 15 000-token prompts
-([why](../well-lit-paths/utilization-share/measured.md#pd-not-measured)).
+([why](../well-lit-paths/utilization-share/measured.md#an-earlier-attempt-on-one-model)).
 
 With short prompts that is right, and prefill is a fair donor. With long
 prompts, a prefill whose need reads small also counts as a lightly loaded donor, so its
