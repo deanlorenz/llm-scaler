@@ -20,8 +20,8 @@ Fixes #
 <!-- If these boxes are not checked, you will be asked to complete these requirements or explain why they do not apply to your PR. -->
 
 - [ ] **E2E tests** for any new behavior
-- [ ] **Docs PR** for any user-facing impact
-- [ ] **Proposal PR** for any new enhancement or change to existing behavior
+- [ ] **Docs** updated under `docs/` for any user-facing impact
+- [ ] **Proposal** under `docs/proposals/` for any new enhancement or change to existing behavior
 
 **Release Note**
 
@@ -30,7 +30,7 @@ Fixes #
 below. Include the string "action required" if additional action is required of
 users switching to the new release, for example in case of a breaking change.
 
-Write as if you are speaking to users, not other wva contributors. If this
+Write as if you are speaking to users, not other contributors. If this
 change has no user-visible impact, no release note is needed.
 -->
 
@@ -42,7 +42,7 @@ change has no user-visible impact, no release note is needed.
 **Docs**
 
 <!--
-:book: If this change has user-visible impact, link to an issue or PR in
-- https://github.com/llm-d/llm-d/tree/main/docs/architecture/advanced/autoscaling for user-facingdocumentation
-- https://github.com/llm-d/llm-d/tree/main/guides/workload-autoscaling for guides
+:book: If this change has user-visible impact, list the pages it updates in this
+repository: docs/reference/, docs/concepts/ or docs/well-lit-paths/ for user-facing
+documentation, docs/guides/ for guides (edit guide.yaml and run `make guides-render`).
 -->

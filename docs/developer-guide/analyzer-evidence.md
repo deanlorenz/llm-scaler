@@ -8,7 +8,7 @@ rather than with an assertion.
 Every entry names its date and its run. A figure without one of those is not
 evidence, and does not belong here.
 
-The stands: CoreWeave 8 x H200 nodes, Qwen3-0.6B on a P/D fleet, guidellm
+The stands: 8 x H200 nodes, Qwen3-0.6B on a P/D fleet, guidellm
 driving a replayed trace at a constant arrival rate, the shape switching once
 mid-run. `k1` (the memory-bound per-replica capacity the analyzer prices with)
 is 930,508 tokens there; the engine's physical KV capacity is 1,163,136.

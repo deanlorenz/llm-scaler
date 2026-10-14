@@ -1,6 +1,6 @@
 # Release Process
 
-This guide describes how to cut a release of the llm-scaling-manager. It covers changes in this repository (tag, image), required updates in the llm-d repo's workload-autoscaling guide once the release is out.
+This guide describes how to cut a release of the llm-scaling-manager. It covers the tag and the image. Nothing outside this repository needs updating: the llm-d workload-autoscaling guide documents the upstream workload-variant-autoscaler this project forked from, not this fork.
 
 ## Quick reference
 
@@ -9,7 +9,6 @@ This guide describes how to cut a release of the llm-scaling-manager. It covers 
 | 1. Pre-release | This repo | Changelog, optional version bumps (see below) |
 | 2. Tag & release | GitHub | Create tag `vX.Y.Z`, push; create GitHub Release (publish) |
 | 3. Automation | GitHub Actions | Image build + push |
-| 4. Post-release | llm-d repo | **Required:** Update [workload-autoscaling](https://github.com/llm-d/llm-d/tree/main/guides/workload-autoscaling) guide (version callout, CRD/sample URLs) |
 
 ---
 
@@ -21,10 +20,7 @@ A full release typically involves:
    - A version tag (e.g. `v0.5.2`).  
    - A container image built and pushed to `ghcr.io/ev-shindin/llm-scaling-manager:<tag>`.  
 
-2. **llm-d repo and guides (required)**  
-   - Once the release is out, the [workload-autoscaling](https://github.com/llm-d/llm-d/tree/main/guides/workload-autoscaling) guide in [llm-d/llm-d](https://github.com/llm-d/llm-d) must be updated to the new the scaling manager version so users get consistent instructions and correct CRD/sample URLs.
-
-3. **Documentation in this repo**  
+2. **Documentation in this repo**  
    - Changelog and, if needed, upstream version pins (`LLM_D_ROUTER_VERSION`, `GAIE_VERSION` in the [Makefile](../../Makefile)).
 
 ---
@@ -75,25 +71,6 @@ git push origin vX.Y.Z
 
 ---
 
-## llm-d repo and guides (post-release, required)
-
-The [llm-d](https://github.com/llm-d/llm-d) repo hosts a **workload-autoscaling guide** that references the scaling manager. Once a release is out, this guide **must** be updated so install instructions and URLs match the new version. Update the following:
-
-1. **Version compatibility note**  
-   - In `guides/workload-autoscaling/README.md`, update the "Version Compatibility" callout to state the new the scaling manager version (e.g. "tested and validated with **the scaling manager vX.Y.Z**").
-
-2. **URLs that embed the version tag**  
-   - **CRD install:** Any URLs that embed the release tag (e.g. `.../llm-scaling-manager/vX.Y.Z/...`) — replace the version segment with the new release tag.
-   - **Prometheus Adapter values:** All `curl`/download URLs that point at `.../llm-scaling-manager/vX.Y.Z/config/samples/...` (e.g. `prometheus-adapter-values.yaml`, `prometheus-adapter-values-ocp.yaml`).
-   - **Upgrading section:** Any CRD or sample URLs in the "Upgrading" section that include the version tag.
-
-3. **Breaking changes and upgrading text**  
-   - If the new release has breaking changes, add or update the "Breaking Changes" / "Upgrading" content and migration steps in the README.
-
-**Guide location:** [guides/workload-autoscaling](https://github.com/llm-d/llm-d/tree/main/guides/workload-autoscaling) (main branch). After editing, open a PR in the [llm-d/llm-d](https://github.com/llm-d/llm-d) repo so the guide stays in sync with the scaling manager release.
-
----
-
 ## Enabling others to cut releases
 
 To allow other team members to perform releases:
@@ -109,7 +86,7 @@ To allow other team members to perform releases:
      - [`.github/workflows/ci-release.yaml`](../../.github/workflows/ci-release.yaml) — image build on tag push.
 
 4. **Optional runbook**  
-   - Maintain a short internal checklist (e.g. "pre-release checklist → tag → release → update llm-d guide") so the steps above are easy to follow without re-reading the full doc.
+   - Maintain a short internal checklist (e.g. "pre-release checklist → tag → release") so the steps above are easy to follow without re-reading the full doc.
 
 ---
 
@@ -118,7 +95,6 @@ To allow other team members to perform releases:
 | Item | Action |
 |------|--------|
 | **the scaling manager release** | Tag `vX.Y.Z` → push → create and publish GitHub Release. CI builds and pushes the image. |
-| **Guide / llm-d repo** | **Required:** After release, update the [workload-autoscaling](https://github.com/llm-d/llm-d/tree/main/guides/workload-autoscaling) guide (version callout, CRD/sample URLs) and open a PR in llm-d/llm-d. |
 | **Team** | Use this doc plus repo permissions and GHCR secrets so others can run the same process safely.
 
 For workflow details, see [`.github/workflows/ci-release.yaml`](../../.github/workflows/ci-release.yaml).

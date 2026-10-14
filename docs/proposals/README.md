@@ -126,6 +126,15 @@ last; it is the unit change that makes the other two land.
   observability yes, a metric for KEDA to threshold instead of WVA computing
   the target no.
 
+- **[Engine structure](engine-structure.md)** — scope and layering of the
+  engine packages: what to split, and which way imports may point.
+- **[A role at its ceiling starves every other role](prefill-starved-by-exhausted-role.md)**
+  — on a P/D fleet, one role at its `maxReplicas` aborted the scale-up pass for
+  both roles; one `break` in the paired allocator.
+- **[Sizing against in-flight capacity](sizing-against-in-flight-capacity.md)**
+  — count replicas already starting, and when they will serve, before ordering
+  more or releasing one.
+
 ## Product and lifecycle
 
 - **[Capacity-planner positioning](capacity-planner-positioning.md)** — where a

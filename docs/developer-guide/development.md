@@ -1,6 +1,6 @@
 # Developer Guide
 
-Guide for developers contributing to Workload-Variant-Autoscaler.
+Guide for developers contributing to the scaling manager.
 
 ## Development Environment Setup
 
@@ -37,38 +37,34 @@ Guide for developers contributing to Workload-Variant-Autoscaler.
 
 ## Project Structure
 
-```bash
-llm-scaling-manager/
-├── api/v1alpha1/          # CRD definitions
-├── cmd/                   # Main application entry points
-├── config/                # Kubernetes manifests
-│   ├── base/             # Base manifests (crd/, manager/, monitoring/, rbac/)
-│   ├── components/       # Reusable kustomize components (namespace-scoped/)
-│   ├── overlays/         # Environment overlays (cluster-scoped/, namespace-scoped/)
-│   └── samples/          # Example resources (analyzers/, keda/, simulator/)
-├── deploy/                # Deployment scripts
-│   ├── kind-emulator/    # Local Kind cluster with GPU emulation
-├── docs/                  # Documentation
-├── internal/              # Private application code
-│   ├── actuator/         # Metric emission & scaling
-│   ├── collector/        # Metrics collection
-│   ├── config/           # Internal configuration
-│   ├── constants/        # Application constants
-│   ├── controller/       # Controller implementation
-│   ├── datastore/        # Data storage abstractions
-│   ├── discovery/        # Resource discovery
-│   ├── engines/          # Scaling engines (saturation, scale-from-zero)
-│   ├── indexers/         # Kubernetes indexers
-│   ├── interfaces/       # Interface definitions
-│   ├── logging/          # Logging utilities
-│   ├── metrics/          # Metrics definitions
-│   ├── queueing/         # Queue theory models & config (analyzer, config)
-│   ├── saturation/       # Saturation detection logic
-│   └── utils/            # Utility functions
-├── test/                  # Tests
-│   ├── e2e/                  # E2E tests (consolidated suite: Kind, OpenShift)
-│   └── utils/                 # Test utilities
-```
+Top level: `cmd/` (the manager, and `warmpool-proxy/`), `config/` (kustomize
+bases, overlays and samples), `deploy/` (install scripts, `kind-emulator/`),
+`hack/` (check and render scripts), `test/e2e/` (the e2e suite), `docs/`.
+
+The packages under `internal/`, in the order one scaling decision flows through
+them. The [signal dataflow](signal-dataflow.md#the-chain) draws the same chain
+with the types that cross each boundary.
+
+| Package | What it does |
+|---------|--------------|
+| `collector/` | Scrapes engine and EPP metrics (Prometheus or the pods), and attributes each replica to its variant. |
+| `signals/` | Stateless arithmetic over those readings: `shape`, `itl`, `capacity`, `fleet`, `floor`. |
+| `engines/analyzers/saturation`, `throughput`, `external` | Turn readings into demand and per-replica capacity. Never read a target. |
+| `engines/aggregation/` | Supply, from the same per-replica capacity. |
+| `engines/allocation/` | The optimizer and the GPU limiters (quota, inventory, Kueue). |
+| `engines/steadystate/` | The per-cycle driver: runs the analyzers, applies thresholds, calls the optimizer, records the decision. |
+| `actuator/` | Emits the decision as metrics for the scale target. |
+| `decision/` | Holds the latest decision per target in memory. |
+| `scaler/` | KEDA's ExternalScaler gRPC service: serves the decision to KEDA. |
+| `engines/scalefromzero/` | Wakes a model parked at zero replicas from the EPP queue. |
+| `warmpool/` | Runs the warm pool: policy, pool Pods, the proxy. |
+| `kueue/` | Reads GPU quotas from Kueue. |
+| `registry/` | The managed workloads, registered by KEDA calling the scaler. |
+| `controller/` | Reconcilers for the ConfigMaps and InferencePools. |
+| `config/` | Configuration types, loading and validation. |
+
+Shared types live in `domain/`; the rest (`metrics/`, `logging/`, `utils/`,
+`accelerator/`, ...) are support packages.
 
 ## Development Workflow
 
@@ -80,6 +76,9 @@ llm-scaling-manager/
 # Run the controller on your machine (connects to configured cluster)
 make run
 ```
+
+A controller run this way gets no KEDA calls, so it manages nothing until a
+ScaledObject points at it. See [Debugging](debugging.md).
 
 #### Option 2: In a Kind cluster
 
@@ -147,10 +146,10 @@ make destroy-kind-cluster
 
 2. **Make your changes**
 
-3. **Generate code if needed:**
+3. **Regenerate if needed** (after changing kubebuilder RBAC markers or the
+   structs in `internal/variant`):
 
    ```bash
-   # After modifying CRDs
    make manifests generate
    ```
 
@@ -205,8 +204,9 @@ make test
 # Run specific package tests
 go test ./internal/controller/...
 
-# With coverage
-go test -cover ./...
+# With coverage -- never `go test ./...`: that also runs test/e2e against
+# your current kube context
+go test -cover $(go list ./... | grep -v -e /e2e -e /benchmark)
 ```
 
 ### E2E Tests
@@ -228,8 +228,11 @@ make test-e2e-smoke
 # or make test-e2e-full
 
 # Run specific tests
-FOCUS="Basic VA lifecycle" make test-e2e-smoke
+FOCUS="Basic Autoscaling" make test-e2e-smoke
 ```
+
+A `FOCUS` that matches nothing runs 0 specs and still exits 0. Check the
+`Ran N of M Specs` line, and that N is not 0.
 
 See [Testing Guide](testing.md) and [E2E Test Suite README](../../test/e2e/) for infra-only setup and configuration. For OpenShift, set `ENVIRONMENT=openshift` and use the same targets.
 
@@ -250,18 +253,8 @@ See [Testing Guide](testing.md) and [E2E Test Suite README](../../test/e2e/) for
 3. **Monitor controller logs:**
 
    ```bash
-   kubectl logs -n workload-variant-autoscaler-system \
-     deployment/controller-manager -f
+   kubectl logs -n workload-variant-autoscaler-system deploy/wva-controller-manager -f
    ```
-
-## Code Generation
-
-### After Modifying CRDs
-
-```bash
-# Generate deepcopy, CRD manifests, and RBAC
-make manifests generate
-```
 
 ## Debugging
 
@@ -300,18 +293,10 @@ go build -gcflags="all=-N -l" -o bin/manager cmd/main.go
 ### Viewing Controller Logs
 
 ```bash
-kubectl logs -n workload-variant-autoscaler-system \
-  -l control-plane=controller-manager --tail=100 -f
+kubectl logs -n workload-variant-autoscaler-system deploy/wva-controller-manager --tail=100 -f
 ```
 
 ## Common Development Tasks
-
-### Adding a New Field to CRD
-
-1. Modify `api/v1alpha1/variantautoscaling_types.go`
-2. Run `make manifests generate`
-3. Update tests
-4. Update user documentation
 
 ### Adding a New Metric
 
@@ -329,37 +314,16 @@ kubectl logs -n workload-variant-autoscaler-system \
 
 ## Documentation
 
-### Updating Documentation
+Where a page goes is set by [AGENTS.md](../../AGENTS.md#documentation). Three
+conventions that CI enforces:
 
-After code changes, update relevant docs in:
-
-- `docs/guides/` - the step-by-step paths a reader follows
-- `docs/reference/` - configuration, operations, metrics, troubleshooting
-- `docs/concepts/` - how the engine models capacity and decides
-- `docs/well-lit-paths/` - what a scenario buys, and the evidence it works
-
-**Note**: Documentation updates are partially automated via the [Update Docs workflow](../../.github/workflows/update-docs.md). The workflow analyzes code changes and creates draft PRs with documentation updates.
-
-### Testing Documentation
-
-Verify all commands and examples in documentation work:
-
-```bash
-# Test installation steps
-# Test configuration examples
-# Test all code snippets
-```
-
-## GitHub Agentic Workflows
-
-The repository uses AI-powered workflows to automate documentation updates, workflow creation, and debugging. These workflows are powered by the `gh-aw` CLI extension.
-
-Key workflows:
-- **Update Docs**: Automatically updates documentation on every push to main
-- **Create Agentic Workflow**: Interactive workflow designer
-- **Debug Agentic Workflow**: Workflow debugging assistant
-
-See the workflow definitions under [`.github/workflows/`](../../.github/workflows/) for details on these automation tools.
+- **Guides are generated.** The bash blocks in `docs/guides/<task>/README.md`
+  come from its `guide.yaml`. Edit the YAML, run `make guides-render`, and
+  `make guides-check` (which also checks every doc link).
+- **Config file names** under `config/` follow `(<app>-)?<kind>.yaml`, e.g.
+  `manager-clusterrole.yaml`.
+- **Shell checks are fixtures.** A new check is a `hack/check-*.sh` wired into
+  `make lint-deploy-scripts`; a check behind a new target is one nobody runs.
 
 ## Release Process
 
@@ -368,15 +332,13 @@ See the [Release Process](release-process.md) guide for how to cut a release. It
 - Pre-release checklist (changelog, optional version bumps, upstream pins)
 - Creating the tag and GitHub Release (which triggers the image build)
 - What runs automatically: Docker image build and push to GHCR
-- Post-release (required): update the llm-d [workload-autoscaling](https://github.com/llm-d/llm-d/tree/main/guides/workload-autoscaling) guide to the new the scaling manager version
 - Enabling other team members to perform releases (permissions, secrets, documentation)
 
 ## Getting Help
 
 - Check [CONTRIBUTING.md](../../CONTRIBUTING.md)
 - Review existing code and tests
-- Ask in GitHub Discussions
-- Attend community meetings
+- Search or open [GitHub Issues](https://github.com/ev-shindin/llm-scaling-manager/issues)
 
 ## Useful Commands
 
@@ -403,8 +365,8 @@ make create-kind-cluster
 
 ## Next Steps
 
-- Review [Code Style Guidelines](../../CONTRIBUTING.md#general-contributing-guidelines)
-- Check out [Good First Issues](https://github.com/llm-d/llm-d-workload-variant-autoscaler/labels/good%20first%20issue)
+- Review [Code Style Guidelines](../../CONTRIBUTING.md#code-guidelines)
+- Check out [Good First Issues](https://github.com/ev-shindin/llm-scaling-manager/labels/good%20first%20issue)
 
 ---
 

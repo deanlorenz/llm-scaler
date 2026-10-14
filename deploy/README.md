@@ -29,7 +29,7 @@ needs and hands that to KEDA, which owns the HPA and does the scaling.
 
 ## Two things every path shares
 
-**Nothing scales until a ScaledObject exists.** the scaling manager has no watch and no listing:
+**Nothing scales until a ScaledObject exists.** The scaling manager has no watch and no listing:
 it learns a workload exists only when KEDA calls it about one.
 
 ```bash
@@ -41,7 +41,9 @@ make scaledobjects-apply
 `maxReplicaCount`. [Bounding GPU usage](../docs/guides/admin-gpu-bounding/)
 is the one command that changes that, and it is an admin's to run.
 
-> **Coming from llm-d's docs?** the scaling manager ships **no CustomResourceDefinition** — a
-> workload is registered by a KEDA ScaledObject naming the scaling manager's external scaler — so
-> any instruction to apply a `VariantAutoscaling` CRD, or to point an HPA at a scaling-manager
-> metric, predates that.
+> **Coming from llm-d's docs?** The scaling manager ships **no CustomResourceDefinition**. A
+> workload is registered by a KEDA ScaledObject whose `external-push` trigger names the
+> scaling manager's external scaler
+> (`wva-external-scaler.<controller-namespace>.svc.cluster.local:9090`). Instructions to
+> apply a `VariantAutoscaling` CRD, or to point an HPA or Prometheus Adapter at a
+> `wva_` metric, describe upstream WVA and do not apply here.

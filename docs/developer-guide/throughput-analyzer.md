@@ -110,7 +110,7 @@ for the full `analyzers:` field reference and combine algorithm.
 `RegisterAlwaysOnQueries` (in `internal/collector/registration/throughput_analyzer.go`)
 registers the queries the demand floor needs on every cycle, whether or not this
 analyzer is enabled.
-All other TA inputs are read from `interfaces.ReplicaMetrics` fields populated by the other
+All other TA inputs are read from `domain.ReplicaMetrics` fields populated by the other
 registrations in `internal/collector/registration/`.
 
 ### Throughput Analyzer Queries
@@ -286,7 +286,7 @@ opt-in analyzer.
 `RegisterSaturationQueries` and `RegisterQueueingModelQueries`.
 
 **Metrics Collector (`internal/collector/`)**  
-Populates all `interfaces.ReplicaMetrics` fields in a single `Refresh()` call covering the
+Populates all `domain.ReplicaMetrics` fields in a single `Refresh()` call covering the
 eleven per-replica queries `engine_queries.go` lists (`query.go` fetches, `extract.go` reads the series per instance,
 `attribute.go` builds the rows, `replica_metrics.go` sequences them). The three TA-exclusive fields are:
 `GenerationTokenRate`, `KvUsageInstant`, `RequestRate`.
@@ -310,7 +310,7 @@ to `k ∈ [0.15, 0.85]` (reliable linear-model range). Reports `Ready()` when �
 Two-tier calibration of `ITL(k) = A·k + B`. See [ITL Model Calibration](#itl-model-calibration).
 
 **ThroughputAnalyzer (`analyzer.go`)**  
-Implements `interfaces.Analyzer`. Groups replicas by `VariantName`, runs sanity checks,
+Implements `domain.Analyzer`. Groups replicas by `VariantName`, runs sanity checks,
 updates per-variant shape tracker and observation window in `Observe()`, then computes
 supply and demand signals in `Analyze()`, publishing raw `Total*` fields.
 The engine's universal threshold post-step writes `RequiredCapacity` and `SpareCapacity`.
@@ -402,7 +402,7 @@ On leader failover the incoming leader starts with an empty analyzer. During war
 │ ReplicaMetricsCollector │  ← internal/collector/ (replica_metrics.go sequences query/extract/attribute)
 │ CollectReplicaMetrics() │     single Refresh() call, 12 queries
 └──────┬──────────────────┘
-       │ []interfaces.ReplicaMetrics + SchedulerQueueMetrics
+       │ []domain.ReplicaMetrics + SchedulerQueueMetrics
        ↓
 ┌──────────────────────────────────────────────────────────┐
 │ ThroughputAnalyzer.Analyze()                             │

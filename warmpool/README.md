@@ -7,10 +7,11 @@ Design: [`docs/proposals/fast-model-loading.md`](../docs/proposals/fast-model-lo
 and [the implementation design](../docs/proposals/fast-model-loading-implementation.md).
 
 **Status: built, and running on a test cluster.** A pool Pod holding two models
-has served real EPP traffic on pokprod, switching between them in ~437 ms. It is
-off by default in the controller (`--warm-pool-namespace`), and the proxy image
-in `config/warmpool` is still a personal-namespace build -- see the note there
-before deploying anywhere that matters.
+has served real EPP traffic on an H100 OpenShift test cluster, switching between them in ~437 ms. No
+pool exists until you create one: see the
+[warm pool guide](../docs/guides/warm-pool/) (`deploy/warmpool.sh`). The proxy
+image in `config/warmpool` is pinned by digest under the project's registry
+namespace; read the note beside it before replacing it.
 
 ## Why this exists rather than using Fast Model Actuation
 
@@ -21,7 +22,7 @@ and it is the thing that decides whether a warm pool works:
 **In FMA the launcher requests no GPU; the *requester* holds it.** When the
 requester goes away the device allocation is released while the sleeping engine's
 `cumem` handles still refer to memory on that device, which another tenant then
-takes. Measured on pokprod: two of three unbound sleepers **could not be woken at
+takes. Measured on an H100 OpenShift test cluster: two of three unbound sleepers **could not be woken at
 all** —
 
 ```
@@ -36,8 +37,8 @@ than a fork.
 
 The second reason is scope: FMA's Kubernetes half (dual-pods controller,
 launcher-populator, `LauncherPopulationPolicy`, the requester/SPI/proxy path)
-exists to pair transient requester Pods with launchers. A pool needs none of it —
-The scaling manager already runs a control loop, knows the InferencePools, and decides what
+exists to pair transient requester Pods with launchers. A pool needs none of it:
+the scaling manager already runs a control loop, knows the InferencePools, and decides what
 should be warm.
 
 ## What is copied, and from where
@@ -48,7 +49,9 @@ commit **`65ba31b`** (upstream `2c01cf8`, plus the port-conflict reclaim fix in
 
 | file | origin | why it earns its place |
 | --- | --- | --- |
-| `supervisor/launcher.py` | `inference_server/launcher/launcher.py` | spawns and supervises vLLM engines inside one container. Proven: every 2-3 s wake measured on pokprod came from an instance it created |
+| `supervisor/launcher.py` | `inference_server/launcher/launcher.py` | spawns and supervises vLLM engines inside one container. Proven: every 2-3 s wake measured on the test cluster came from an instance it created |
+| `supervisor/gputranslator.py` | `inference_server/launcher/gputranslator.py` | GPU UUID ↔ index mapping via pynvml, with a mock mode for tests |
+| `supervisor/tests/` | the same tree | the evidence the above works; kept so adaptation is not blind |
 
 > **Vendored, not maintained here.** These files are a copy taken at fork commit
 > `65ba31b`; edit them upstream and re-copy rather than in place.
@@ -66,8 +69,6 @@ commit **`65ba31b`** (upstream `2c01cf8`, plus the port-conflict reclaim fix in
 >
 > The tests under `supervisor/tests/` came with the source and are not wired into
 > any make target or CI job.
-| `supervisor/gputranslator.py` | `inference_server/launcher/gputranslator.py` | GPU UUID ↔ index mapping via pynvml, with a mock mode for tests |
-| `supervisor/tests/` | the same tree | the evidence the above works; kept so adaptation is not blind |
 
 ## The split of responsibilities
 

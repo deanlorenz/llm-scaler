@@ -111,7 +111,6 @@ Example (adjust paths and values as needed):
 ```shell
 export GLOBAL_OPT_INTERVAL=60s
 export KUBECONFIG=/path/to/your/kubeconfig
-export LOG_LEVEL=DEBUG
 export PROMETHEUS_BASE_URL=https://127.0.0.1:9091
 export PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true
 export PROMETHEUS_BEARER_TOKEN="$(</tmp/wva.token)"
@@ -123,8 +122,18 @@ export WVA_SCALE_TO_ZERO=false
 Start the scaling manager from your IDE or terminal. With the environment variables above, the scaling manager should query Prometheus via the forwarded thanos-querier and expose metrics on https://localhost:8443, reachable from the cluster via the SSH tunnel at https://ssh-gateway.debugging.svc.cluster.local:8443.
 
 ```shell
-/path/to/wva/binary --metrics-bind-address :8443 --metrics-secure=true
+/path/to/wva/binary --metrics-bind-address :8443 --metrics-secure=true --v=4
 ```
+
+Log verbosity is the `-v` flag (`cmd/main.go`); `--v=4` shows debug lines.
+There is no log-level environment variable: `LOG_LEVEL` is read by no code path.
+
+A controller run this way decides nothing on its own. Workloads register only
+through KEDA's external-scaler calls, and KEDA dials the in-cluster
+`wva-external-scaler:9090` Service named in each ScaledObject's
+`scalerAddress`, not your machine. To have the local process size a workload,
+point that ScaledObject's `scalerAddress` at it (for example through the SSH
+tunnel above).
 
 ### Troubleshooting / verification
 

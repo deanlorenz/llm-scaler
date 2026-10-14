@@ -17,8 +17,8 @@ assignees:
     - [ ] Guides (`docs/guides/`) update PR(s):
 
 <!-- Uncomment when using AI assistants to generate designs and plans
-- Design Document (the how): docs/specs/...
-- Plan Document (the when and where): docs/plans/...
+- Design Document (the how): docs/plans/<area>/...
+- Plan Document (the when and where): docs/plans/<area>/...
 -->
 
 <!-- Uncomment these as you prepare the enhancement for the next stage
@@ -32,4 +32,4 @@ assignees:
   - [ ] Guides (`docs/guides/`) update PR(s):
 -->
 
-_Please keep this description up to date. This will help the Enhancement Team to track the evolution of the enhancement efficiently._
+_Please keep this description up to date. This helps the maintainers track the evolution of the enhancement._
