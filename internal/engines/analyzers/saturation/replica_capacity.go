@@ -84,7 +84,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	}
 	historyKey := a.historyKey(modelID, namespace, rm.VariantName, accelerator, gpuCount, role,
 		rm.AvgOutputTokens, config.QueueLengthThreshold)
-	k2, k2Priority, k2Borrowed := a.computeK2Borrow(
+	k2, k2Priority, k2Borrowed := a.computeK2(
 		historyKey,
 		modelID, namespace, rm.VariantName,
 		rm.QueueLength, rm.TokensInUse,
@@ -389,31 +389,11 @@ const derivedBucket = "derived"
 // 2. Historical → rolling average from previous observations
 // 3. Derived (from deployment args) → formula-based estimate
 // 4. Fallback → k1 (memory-bound only)
-// Returns the k2 value and the priority level (1–4) that produced it.
+// Returns the k2 value, the priority level (1–4) that produced it, and the
+// sibling's k2 it borrowed when that is P2-borrow (zero otherwise).
 // historyKey is the replica's bucket from historyKey(); modelID, namespace
 // and variantName are for the log lines only.
 func (a *SaturationAnalyzer) computeK2(
-	historyKey string,
-	modelID, namespace, variantName string,
-	queueLen int, tokensInUse int64,
-	avgOutput, avgInput float64,
-	queueThreshold float64,
-	engineParams *capacity.EngineParams,
-	k1 int64,
-	kvCeiling int64,
-	role string,
-	downstreamSaturated bool,
-	logger logr.Logger,
-) (int64, capacity.K2Source) {
-	k2, src, _ := a.computeK2Borrow(historyKey, modelID, namespace, variantName,
-		queueLen, tokensInUse, avgOutput, avgInput, queueThreshold, engineParams,
-		k1, kvCeiling, role, downstreamSaturated, logger)
-	return k2, src
-}
-
-// computeK2Borrow is computeK2 that also returns the borrow it used, if
-// it borrowed: zero otherwise.
-func (a *SaturationAnalyzer) computeK2Borrow(
 	historyKey string,
 	modelID, namespace, variantName string,
 	queueLen int, tokensInUse int64,

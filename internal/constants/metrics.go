@@ -860,13 +860,13 @@ const (
 	LabelPool               = "pool"
 	// LabelOutcome distinguishes a borrow that hit, one blocked by an exhausted
 	// reserve, and one that missed because the model was resident nowhere.
-	LabelOutcome            = "outcome"
+	LabelOutcome = "outcome"
 	// LabelQuantity names what a variant borrowed from a sibling (k2 or
 	// itl-line), and LabelDonor the sibling it borrowed from.
 	LabelQuantity = "quantity"
 	LabelDonor    = "donor"
 	// LabelOperation names the operation a store error happened in.
-	LabelOperation = "operation"
+	LabelOperation          = "operation"
 	LabelErrorType          = "error_type"
 	LabelAnalyzerName       = "analyzer_name"
 	LabelLimiterEnabled     = "limiter_enabled"

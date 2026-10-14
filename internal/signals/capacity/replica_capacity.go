@@ -17,9 +17,9 @@ type ReplicaCapacity struct {
 	// borrow has relaxed back to the variant's own figure, 0 at full strength
 	// and 1 fully relaxed. Diagnostics: published as
 	// wva_learned_state_borrowed and wva_learned_state_borrow_relaxed.
-	K2BorrowedFrom  string
-	K2BorrowRelaxed float64
-	EffectiveCapacity     int64    // min(k1, k2)
+	K2BorrowedFrom    string
+	K2BorrowRelaxed   float64
+	EffectiveCapacity int64 // min(k1, k2)
 	// ReplicaDemand is the replica's resident KV tokens — TokensInUse on the main
 	// path, kvCacheUsage * effectiveCapacity on the fallback path — plus the
 	// role-aware waiting-queue footprint: queueLength * avgInputTokens for
