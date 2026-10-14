@@ -914,6 +914,8 @@ These parameters apply when `analyzerName: "saturation"` is set or when the `ana
 | `analyzerName` | string | Legacy selector, retained for backward compatibility: `"saturation"` names the token-based analyzer, which also runs when the field is empty. Prefer the `analyzers:` list, which the shipped default uses. | `""` |
 | `priority` | float64 | Multiplier for this model's scaling urgency in fair-share GPU allocation | 1.0 |
 | `analyzers` | list | Multi-analyzer pipeline registration — see [Multi-Analyzer Registration](#multi-analyzer-registration) | `[{name: "saturation", score: 1.0}]` |
+| `shapeChangeHoldSeconds` | int | How long the fleet is held back from scale-down after the workload's shape changes. Raise it for long generations (long context, long chain-of-thought). A tier or a per-model override can set it. | `0` (5 minutes) |
+| `disableShapeChangeHold` | bool | Turns the shape-change hold off. A tier or a per-model override can turn it off; it cannot turn back on a hold the `default` entry turned off. | `false` |
 
 ### Expected output length
 
@@ -1726,6 +1728,7 @@ just one threshold, specify only that field:
 >
 > - `analyzers: []` → inherits from `default` (cannot clear a non-empty analyzer list)
 > - `enableRescale: false` → inherits from `default` (cannot disable rescale per model)
+> - `disableShapeChangeHold: false` → inherits from `default` (cannot re-enable a hold `default` turned off)
 >
 > See `Merge()` in `internal/config/saturation_scaling.go`.
 

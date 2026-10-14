@@ -585,10 +585,8 @@ func (c *ScalingPolicy) Merge(override ScalingPolicy) {
 	// for -- the single direction would have pointed at "off, permanently, for
 	// everyone", which is not a switch.
 	//
-	// DisableShapeChangeHold and ShapeChangeHoldSeconds have the same gap and
-	// are deliberately left alone here: they are not this change's to fix, and
-	// fixing them silently would alter behaviour for configs that already rely
-	// on the current scope.
+	// DisableShapeChangeHold and ShapeChangeHoldSeconds had the same gap and are
+	// merged too, below: a tier or a per-model override can set the hold.
 	if override.EnableLearnedStateReuse {
 		c.EnableLearnedStateReuse = true
 	}
