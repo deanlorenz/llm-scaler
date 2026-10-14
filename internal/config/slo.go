@@ -1,0 +1,126 @@
+package config
+
+import (
+	"errors"
+	"fmt"
+	"time"
+
+	"gopkg.in/yaml.v3"
+)
+
+// sloAnalyzerName is the SLO analyzer's registered name (domain.SLOAnalyzerName),
+// spelled here because internal/config is a lower layer than the domain's
+// analyzer constants are read from -- the same arrangement as
+// throughputAnalyzerName.
+const sloAnalyzerName = "slo"
+
+// DefaultTTFTPercentile is the percentile a TTFT target is judged at when the
+// policy names none. 90 matches llm-d's SLO-aware recipe.
+const DefaultTTFTPercentile = 90
+
+// SLOPolicy is a tier's latency targets. The two objectives are different
+// statistics, and that is not a configuration choice:
+//
+//   - TPOT is a MEAN, the average time per output token. It is the quantity the
+//     inter-token-latency line ITL(k) = A*k + B is fitted on, so a TPOT target
+//     inverts that line directly.
+//   - TTFT is a PERCENTILE. It is dominated by queueing and has a long tail, so a
+//     mean says little about it.
+//
+// See docs/proposals/slo-tiers.md.
+type SLOPolicy struct {
+	TPOT *SLOObjective `yaml:"tpot,omitempty"`
+	TTFT *SLOObjective `yaml:"ttft,omitempty"`
+}
+
+// SLOObjective is one latency target.
+type SLOObjective struct {
+	// Target is the latency to meet, as a Go duration ("100ms", "3s").
+	Target SLODuration `yaml:"target"`
+	// Percentile is the share of requests, in percent, that must meet Target.
+	// TTFT only: zero means DefaultTTFTPercentile. A TPOT objective is a mean
+	// and must leave it unset.
+	Percentile int `yaml:"percentile,omitempty"`
+}
+
+// SLODuration is a time.Duration read from a Go duration string. A bare number
+// is refused rather than read as nanoseconds.
+type SLODuration struct {
+	time.Duration
+}
+
+// UnmarshalYAML parses a Go duration string.
+func (d *SLODuration) UnmarshalYAML(node *yaml.Node) error {
+	var s string
+	if err := node.Decode(&s); err != nil {
+		return fmt.Errorf("target must be a duration string such as \"100ms\": %w", err)
+	}
+	parsed, err := time.ParseDuration(s)
+	if err != nil {
+		return fmt.Errorf("target %q is not a duration (use a unit, e.g. \"100ms\" or \"3s\"): %w", s, err)
+	}
+	d.Duration = parsed
+	return nil
+}
+
+// Empty reports whether the policy sets no objective at all.
+func (s *SLOPolicy) Empty() bool {
+	return s == nil || (s.TPOT == nil && s.TTFT == nil)
+}
+
+// TTFTPercentile is the TTFT objective's percentile with its default applied,
+// or 0 when there is no TTFT objective.
+func (s *SLOPolicy) TTFTPercentile() int {
+	if s == nil || s.TTFT == nil {
+		return 0
+	}
+	if s.TTFT.Percentile == 0 {
+		return DefaultTTFTPercentile
+	}
+	return s.TTFT.Percentile
+}
+
+// Validate checks every objective that is set. A malformed SLO is an error and,
+// like every ScalingPolicy error, drops the whole entry it is on.
+func (s *SLOPolicy) Validate() error {
+	if s == nil {
+		return nil
+	}
+	if s.TPOT != nil {
+		if s.TPOT.Target.Duration <= 0 {
+			return errors.New("tpot.target must be a positive duration")
+		}
+		if s.TPOT.Percentile != 0 {
+			return errors.New("tpot is a mean: tpot.percentile is not supported")
+		}
+	}
+	if s.TTFT != nil {
+		if s.TTFT.Target.Duration <= 0 {
+			return errors.New("ttft.target must be a positive duration")
+		}
+		if p := s.TTFT.Percentile; p != 0 && (p < 50 || p > 99) {
+			return fmt.Errorf("ttft.percentile must be between 50 and 99, got %d", p)
+		}
+	}
+	return nil
+}
+
+// SLOAnalyzerListed reports whether the policy runs the SLO analyzer.
+func (c ScalingPolicy) SLOAnalyzerListed() bool {
+	return c.AnalyzerEnabled(sloAnalyzerName)
+}
+
+// SLOMisconfiguration names a half-configured SLO -- targets the analyzer will
+// never read, or the analyzer listed with nothing to aim at -- or returns "".
+// It is a warning and not a Validate error, because an error would drop the
+// whole policy entry and with it every threshold the operator did set.
+func (c ScalingPolicy) SLOMisconfiguration() string {
+	listed := c.SLOAnalyzerListed()
+	switch {
+	case !c.SLO.Empty() && !listed:
+		return "slo targets are set but the slo analyzer is not listed under analyzers:, so nothing reads them"
+	case c.SLO.Empty() && listed:
+		return "the slo analyzer is listed but the policy sets no slo targets, so it has nothing to aim at"
+	}
+	return ""
+}

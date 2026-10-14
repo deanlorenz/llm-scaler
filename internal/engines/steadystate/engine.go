@@ -49,6 +49,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/external"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/slo"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/executor"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/variantmeta"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
@@ -338,6 +339,12 @@ func NewEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 		metricsEmitter:          metrics.NewMetricsEmitter(),
 		analyzers: []analyzerEntry{
 			{name: domain.SaturationAnalyzerName, analyzer: satV2},
+			// Built in and always registered: it runs only for a model whose
+			// policy lists it under analyzers:, so registering it costs nothing
+			// elsewhere, and enabling it needs no restart. Its result is
+			// published and, like every non-saturation result, not yet consumed
+			// (docs/proposals/slo-tiers.md, phase 0).
+			{name: domain.SLOAnalyzerName, analyzer: slo.New(replicaCollector, capacityStore)},
 		},
 		externalAnalyzers: make(map[string]domain.Analyzer),
 	}
@@ -363,6 +370,10 @@ func NewEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 	// ReplicaMetrics struct and used by the queueing model analyzer to
 	// estimate per-replica arrival rate and model queue behavior.
 	registration.RegisterQueueingModelQueries(metricsRegistry)
+
+	// The router latency the slo analyzer judges an SLO on. Run only when that
+	// analyzer asks for them.
+	registration.RegisterSLOQueries(metricsRegistry)
 
 	return &engine
 }

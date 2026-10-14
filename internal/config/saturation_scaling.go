@@ -189,6 +189,13 @@ type ScalingPolicy struct {
 	// resolved post-merge — it no longer routes to a different engine.
 	Analyzers []AnalyzerScoreConfig `yaml:"analyzers,omitempty"`
 
+	// SLO is the latency targets the slo analyzer prices this policy's models
+	// against: a mean TPOT and a TTFT percentile. Read only when the policy also
+	// lists the slo analyzer under Analyzers. Replaced whole by an override, never
+	// merged objective by objective, so a per-model entry that sets one objective
+	// cannot silently keep the other. See docs/proposals/slo-tiers.md.
+	SLO *SLOPolicy `yaml:"slo,omitempty"`
+
 	// ScaleToZero optionally enables/disables scaling to zero replicas for this
 	// entry. When set, it overrides the separate wva-model-scale-to-zero-config
 	// ConfigMap for the matching model/namespace; when nil, that ConfigMap (and
@@ -585,6 +592,11 @@ func (c *ScalingPolicy) Merge(override ScalingPolicy) {
 	if len(override.Analyzers) > 0 {
 		c.Analyzers = override.Analyzers
 	}
+	// Whole, like Analyzers: both objectives come from the most specific entry
+	// that sets the block.
+	if override.SLO != nil {
+		c.SLO = override.SLO
+	}
 	// MERGED, so the key works where an operator would actually reach for it.
 	//
 	// A review caught it missing: without this it is silently dropped from a
@@ -728,6 +740,10 @@ func (c *ScalingPolicy) Validate() error {
 
 	if err := c.validateLimiters(); err != nil {
 		return err
+	}
+
+	if err := c.SLO.Validate(); err != nil {
+		return fmt.Errorf("slo: %w", err)
 	}
 
 	return nil

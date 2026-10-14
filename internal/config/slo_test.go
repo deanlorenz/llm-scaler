@@ -1,0 +1,103 @@
+package config
+
+import (
+	"time"
+
+	yaml "gopkg.in/yaml.v3"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+)
+
+var _ = Describe("SLOPolicy", func() {
+	parse := func(doc string) (ScalingPolicy, error) {
+		var p ScalingPolicy
+		err := yaml.Unmarshal([]byte(doc), &p)
+		return p, err
+	}
+
+	It("reads targets as Go durations", func() {
+		p, err := parse("slo:\n  tpot: {target: 100ms}\n  ttft: {target: 3s, percentile: 95}\n")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(p.SLO.TPOT.Target.Duration).To(Equal(100 * time.Millisecond))
+		Expect(p.SLO.TTFT.Target.Duration).To(Equal(3 * time.Second))
+		Expect(p.SLO.TTFTPercentile()).To(Equal(95))
+		Expect(p.SLO.Validate()).To(Succeed())
+	})
+
+	It("refuses a target with no unit rather than reading it as nanoseconds", func() {
+		_, err := parse("slo:\n  tpot: {target: 100}\n")
+		Expect(err).To(MatchError(ContainSubstring("use a unit")))
+	})
+
+	It("defaults the TTFT percentile to 90", func() {
+		p, err := parse("slo:\n  ttft: {target: 3s}\n")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(p.SLO.TTFTPercentile()).To(Equal(DefaultTTFTPercentile))
+	})
+
+	DescribeTable("Validate",
+		func(s SLOPolicy, wantErr string) {
+			err := s.Validate()
+			if wantErr == "" {
+				Expect(err).NotTo(HaveOccurred())
+				return
+			}
+			Expect(err).To(MatchError(ContainSubstring(wantErr)))
+		},
+		Entry("a mean TPOT", SLOPolicy{TPOT: &SLOObjective{Target: SLODuration{100 * time.Millisecond}}}, ""),
+		Entry("a TPOT percentile: TPOT is a mean",
+			SLOPolicy{TPOT: &SLOObjective{Target: SLODuration{100 * time.Millisecond}, Percentile: 90}},
+			"tpot is a mean"),
+		Entry("a zero TPOT target", SLOPolicy{TPOT: &SLOObjective{}}, "tpot.target"),
+		Entry("a negative TTFT target", SLOPolicy{TTFT: &SLOObjective{Target: SLODuration{-time.Second}}}, "ttft.target"),
+		Entry("a TTFT percentile below 50",
+			SLOPolicy{TTFT: &SLOObjective{Target: SLODuration{time.Second}, Percentile: 40}}, "between 50 and 99"),
+		Entry("a TTFT percentile of 100",
+			SLOPolicy{TTFT: &SLOObjective{Target: SLODuration{time.Second}, Percentile: 100}}, "between 50 and 99"),
+	)
+
+	It("fails the whole policy entry's Validate when the SLO is malformed", func() {
+		p := ScalingPolicy{SLO: &SLOPolicy{TPOT: &SLOObjective{}}}
+		Expect(p.Validate()).To(MatchError(ContainSubstring("slo: tpot.target")))
+	})
+
+	It("replaces the block whole on Merge, so an override cannot keep the other objective", func() {
+		base := ScalingPolicy{SLO: &SLOPolicy{
+			TPOT: &SLOObjective{Target: SLODuration{100 * time.Millisecond}},
+			TTFT: &SLOObjective{Target: SLODuration{3 * time.Second}},
+		}}
+		base.Merge(ScalingPolicy{SLO: &SLOPolicy{TTFT: &SLOObjective{Target: SLODuration{time.Second}}}})
+		Expect(base.SLO.TPOT).To(BeNil())
+		Expect(base.SLO.TTFT.Target.Duration).To(Equal(time.Second))
+	})
+
+	It("keeps the base block when the override sets none", func() {
+		base := ScalingPolicy{SLO: &SLOPolicy{TPOT: &SLOObjective{Target: SLODuration{100 * time.Millisecond}}}}
+		base.Merge(ScalingPolicy{ScaleUpThreshold: 0.9})
+		Expect(base.SLO.TPOT.Target.Duration).To(Equal(100 * time.Millisecond))
+	})
+
+	Context("SLOMisconfiguration", func() {
+		targets := &SLOPolicy{TPOT: &SLOObjective{Target: SLODuration{100 * time.Millisecond}}}
+		slo := AnalyzerScoreConfig{Name: sloAnalyzerName}
+		sat := AnalyzerScoreConfig{Name: "saturation"}
+
+		It("says nothing when both halves are there", func() {
+			p := ScalingPolicy{SLO: targets, Analyzers: []AnalyzerScoreConfig{sat, slo}}
+			Expect(p.SLOMisconfiguration()).To(BeEmpty())
+		})
+		It("says nothing when neither is", func() {
+			p := ScalingPolicy{Analyzers: []AnalyzerScoreConfig{sat}}
+			Expect(p.SLOMisconfiguration()).To(BeEmpty())
+		})
+		It("names targets nothing reads", func() {
+			p := ScalingPolicy{SLO: targets, Analyzers: []AnalyzerScoreConfig{sat}}
+			Expect(p.SLOMisconfiguration()).To(ContainSubstring("nothing reads them"))
+		})
+		It("names an analyzer with nothing to aim at", func() {
+			p := ScalingPolicy{Analyzers: []AnalyzerScoreConfig{sat, slo}}
+			Expect(p.SLOMisconfiguration()).To(ContainSubstring("no slo targets"))
+		})
+	})
+})
