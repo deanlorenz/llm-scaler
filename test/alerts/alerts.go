@@ -103,6 +103,11 @@ var ExternalMetrics = map[string]bool{
 	// there is no namespace, which is why the join partner has to be a
 	// model-keyed WVA series (see constants.WVAModelReplicas).
 	"llm_d_epp_request_error_total": true,
+	// EPP's TTFT histogram, the series the slo analyzer judges TTFT from.
+	// WVAModelSLOUnjudged reads its streaming request count to tell clients
+	// without include_usage from an idle model, on the namespace label the
+	// collector's router queries already select on.
+	"llm_d_epp_request_ttft_seconds": true,
 }
 
 // IsKnown reports whether name is a defined metric, allowing for the suffixes the
