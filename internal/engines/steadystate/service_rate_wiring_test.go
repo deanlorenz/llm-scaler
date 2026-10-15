@@ -108,6 +108,34 @@ func TestPruneAnalyzerSeries_DeletesTheServiceRateOfADepartedModel(t *testing.T)
 	}
 }
 
+// A model with no replica rows skips analysis, and its service rate must not
+// stay published at the last value for as long as it stays parked. Only its
+// own series go -- the target series stay, as zeroObservedReplicas keeps them
+// -- and the next analyzed cycle publishes them again.
+func TestDropServiceRateSeries_SkippedModel(t *testing.T) {
+	e, registry := engineConfigEngine(t)
+	for _, m := range []string{"m1", "m2"} {
+		e.recordAnalyzerMetrics("ns", m, []allocation.NamedAnalyzerResult{serviceRateResult(0.68, "v")})
+	}
+
+	e.dropServiceRateSeries("ns", "m2")
+
+	for _, name := range append(serviceRateFamilies, constants.WVAPricingK) {
+		assert.ElementsMatch(t, []string{"m1"}, seriesLabels(t, registry, name, constants.LabelModelName),
+			"%s: a model priced on nothing this cycle must not keep its last reading", name)
+	}
+	assert.ElementsMatch(t, []string{"m1", "m2"},
+		seriesLabels(t, registry, constants.WVAAnalyzerTarget, constants.LabelModelName),
+		"the target series are kept through a skipped cycle")
+
+	e.recordAnalyzerMetrics("ns", "m2", []allocation.NamedAnalyzerResult{serviceRateResult(0.68, "v")})
+	for _, name := range append(serviceRateFamilies, constants.WVAPricingK) {
+		assert.ElementsMatch(t, []string{"m1", "m2"}, seriesLabels(t, registry, name, constants.LabelModelName),
+			"%s: the next analyzed cycle publishes again", name)
+	}
+	e.dropServiceRateSeries("ns", "never-published")
+}
+
 func TestEvictAllAnalyzerSeries_ClearsEveryServiceRateSeries(t *testing.T) {
 	e, registry := engineConfigEngine(t)
 	for _, m := range []string{"m1", "m2"} {

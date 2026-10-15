@@ -1772,6 +1772,11 @@ func (e *Engine) prepareModelData(
 		// keeps last cycle's count for as long as the gap lasts -- reading as
 		// a fully scraped fleet in exactly the case it exists to expose.
 		e.zeroObservedReplicas(namespace, modelID)
+		// The service rate and its line describe a cycle that priced the
+		// model, and this one priced nothing: left in place they read as a
+		// parked fleet still priced at its last rate for as long as it stays
+		// parked.
+		e.dropServiceRateSeries(namespace, modelID)
 		return nil, nil // nil modelData signals skip
 	}
 	// Measurable this cycle. Reset the gauge rather than leaving the last bad

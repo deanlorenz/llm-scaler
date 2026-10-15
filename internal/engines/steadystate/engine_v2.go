@@ -499,6 +499,29 @@ func (e *Engine) zeroObservedReplicas(namespace, modelID string) {
 	}
 }
 
+// dropServiceRateSeries deletes every service-rate series this model
+// published last cycle, wva_pricing_k included, and forgets them. Called on the
+// same skipped cycle as zeroObservedReplicas, and unlike it deletes rather
+// than zeroes: a rate of 0 would read as a replica that completes nothing, and
+// "absent" is what the series document for a variant nothing priced. The next
+// cycle that analyzes the model publishes them again.
+func (e *Engine) dropServiceRateSeries(namespace, modelID string) {
+	modelKey := utils.GetNamespacedKey(namespace, modelID)
+	series, ok := e.lastAnalyzerSeries[modelKey]
+	if !ok {
+		return
+	}
+	for prev := range series.serviceRate {
+		e.metricsEmitter.DeleteServiceRateSignal(namespace, modelID, prev)
+	}
+	if series.pricingK {
+		e.metricsEmitter.DeletePricingK(namespace, modelID)
+	}
+	series.serviceRate = make(map[string]struct{})
+	series.pricingK = false
+	e.lastAnalyzerSeries[modelKey] = series
+}
+
 // evictStaleAnalyzerSeries deletes the analyzer series this model published on
 // the previous cycle but not on this one, then records the current set.
 func (e *Engine) evictStaleAnalyzerSeries(namespace, modelID string, current analyzerSeries) {

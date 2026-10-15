@@ -1244,7 +1244,9 @@ floor rather than drive anything: these are observations of arithmetic the
 analyzer already does, and none of them is a scaling input for KEDA or an HPA
 to threshold. All are set from one record per variant per cycle, beside
 `wva_analyzer_target`, and a series is deleted when its variant or model stops
-being analyzed.
+being analyzed, and on any cycle where the model has no scraped replica (a
+model scaled to zero, or one whose pods are not scraped), so a parked fleet
+does not keep its last rate.
 
 Labels are the ones `wva_analyzer_target` and `wva_engine_config` carry, so the
 three join directly. `namespace` is the **model's** namespace and arrives in
