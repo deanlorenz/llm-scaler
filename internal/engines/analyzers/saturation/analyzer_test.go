@@ -1557,6 +1557,10 @@ func makeReplicaMetrics(
 		AvgOutputTokens:       avgOutput,
 		ModelID:               "test-model",
 		Namespace:             "test-ns",
+		// Ready, as a serving replica is: only a Ready replica's saturated
+		// reading is recorded as k2 (computeReplicaCapacity). A spec about a
+		// replica that is not yet Ready says so.
+		Ready: true,
 	}
 }
 

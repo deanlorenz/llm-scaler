@@ -18,6 +18,13 @@ const k2ReasonObsImplausible = "P1-obs-invalid"
 // analyzer falls through to the next priority.
 const k2ReasonObsDownstream = "P1-obs-downstream"
 
+// k2ReasonObsUnadmitted labels the diagnostic emitted when a saturated reading
+// is left unrecorded because the row is a warm-pool bridge or a Pod that is not
+// Ready -- the rows the saturated-throughput write already refuses
+// (computeReplicaCapacity). Not a capacity.K2Source: the analyzer falls through
+// to the next priority.
+const k2ReasonObsUnadmitted = "P1-obs-unadmitted"
+
 const (
 	satReasonP0Store = "P0-store" // capacity from store or compatible-variant record; no live replicas
 	// satReasonNoData marks a variant with no live replicas and no store record.

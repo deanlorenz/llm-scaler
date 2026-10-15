@@ -84,6 +84,25 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	}
 	historyKey := a.historyKey(modelID, namespace, rm.VariantName, accelerator, gpuCount, role,
 		rm.AvgOutputTokens, config.QueueLengthThreshold)
+	// The rows whose saturated reading may become the variant's k2 are the
+	// rows whose saturated throughput may become its mu, below: Ready, and
+	// the variant's own. A warm-pool bridge is filed under the variant it is
+	// lent to but runs its engine on the pool's terms (a lower
+	// --gpu-memory-utilization, a different batch ceiling), so its occupancy
+	// at saturation is the pool engine's, not this variant's. A Pod that is
+	// not Ready is not routed to; a queue on it is what it held when it was,
+	// or a hang, and its resident KV is frozen with it. Either one recorded
+	// lowers the window, and a low k2 never corrects itself: it orders
+	// replicas, so nothing saturates to write a higher one, and every read
+	// keeps the window alive (Priority 2's Touch). Unadmitted rows still read
+	// the window; they only do not write it.
+	var unadmitted string
+	switch {
+	case rm.FromWarmPool:
+		unadmitted = "a warm-pool bridge runs the pool's engine configuration, not this variant's"
+	case !rm.Ready:
+		unadmitted = "the pod is not Ready: no traffic is routed to it, so its queue and resident KV do not measure this variant's saturation"
+	}
 	k2, k2Priority := a.computeK2(
 		historyKey,
 		modelID, namespace, rm.VariantName,
@@ -95,6 +114,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		rm.TotalKvCapacityTokens,
 		role,
 		downstreamSaturated,
+		unadmitted,
 		logger,
 	)
 	// The same saturated moment that yields a k2 observation yields the
@@ -234,20 +254,27 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 
 	// Update capacity store with live data, preserving EngineParams from any
 	// existing record (parsed from deployment args and needed for FindCompatible).
-	var existingParams *capacity.EngineParams
-	if existing := a.capacityStore.Get(namespace, modelID, rm.VariantName); existing != nil && existing.EngineParams != nil {
-		existingParams = existing.EngineParams
+	//
+	// Not from a warm-pool bridge. Its KV cache and capacity are the pool
+	// engine's, and a record filed live under the variant it is lent to
+	// would price that variant -- once parked, and as a compatible sibling's
+	// clamp -- on an engine it does not run.
+	if !rm.FromWarmPool {
+		var existingParams *capacity.EngineParams
+		if existing := a.capacityStore.Get(namespace, modelID, rm.VariantName); existing != nil && existing.EngineParams != nil {
+			existingParams = existing.EngineParams
+		}
+		a.capacityStore.Update(namespace, modelID, rm.VariantName, capacity.Record{
+			AcceleratorName:       accelerator,
+			GpuCount:              gpuCount,
+			NumGpuBlocks:          rm.NumGpuBlocks,
+			BlockSize:             rm.BlockSize,
+			TotalKvCapacityTokens: rm.TotalKvCapacityTokens,
+			EffectiveCapacity:     effectiveCapacity,
+			EngineParams:          existingParams,
+			LearnedFrom:           capacity.LearnedFromLive,
+		})
 	}
-	a.capacityStore.Update(namespace, modelID, rm.VariantName, capacity.Record{
-		AcceleratorName:       accelerator,
-		GpuCount:              gpuCount,
-		NumGpuBlocks:          rm.NumGpuBlocks,
-		BlockSize:             rm.BlockSize,
-		TotalKvCapacityTokens: rm.TotalKvCapacityTokens,
-		EffectiveCapacity:     effectiveCapacity,
-		EngineParams:          existingParams,
-		LearnedFrom:           capacity.LearnedFromLive,
-	})
 
 	return &capacity.ReplicaCapacity{
 		PodName:                     rm.PodName,
@@ -389,7 +416,10 @@ const derivedBucket = "derived"
 // 4. Fallback → k1 (memory-bound only)
 // Returns the k2 value and the priority level (1–4) that produced it.
 // historyKey is the replica's bucket from historyKey(); modelID, namespace
-// and variantName are for the log lines only.
+// and variantName are for the log lines only. A non-empty unadmitted says why
+// this replica's reading may not be recorded (computeReplicaCapacity): a
+// saturated reading is then logged as P1-obs-unadmitted and the chain falls
+// through, as for a prefill reading under a saturated decode.
 func (a *SaturationAnalyzer) computeK2(
 	historyKey string,
 	modelID, namespace, variantName string,
@@ -401,6 +431,7 @@ func (a *SaturationAnalyzer) computeK2(
 	kvCeiling int64,
 	role string,
 	downstreamSaturated bool,
+	unadmitted string,
 	logger logr.Logger,
 ) (int64, capacity.K2Source) {
 	// Priority 1: Observed (queue saturated)
@@ -492,14 +523,23 @@ func (a *SaturationAnalyzer) computeK2(
 	// recorded. A decode bound by its sequence ceiling before its KV does
 	// not gate; that is a prefill mislearned low, which costs money, where
 	// a prefill that cannot be ordered costs latency.
-	if queueLen >= int(queueThreshold) && tokensInUse > 0 && downstreamSaturated {
+	saturatedReading := queueLen >= int(queueThreshold) && tokensInUse > 0
+	switch {
+	case saturatedReading && downstreamSaturated:
 		logger.V(logging.DEFAULT).Info("k2-decision",
 			"modelID", modelID, "namespace", namespace, "variant", variantName,
 			"priority", k2ReasonObsDownstream, "historyKey", historyKey,
 			"queueLength", queueLen, "queueThreshold", queueThreshold,
 			"reason", "queue saturated while the decode role is; a prefill completes only when decode admits it, so this is decode's saturation seen from prefill; not recorded",
 			"tokensInUse", tokensInUse, "k1", k1)
-	} else if queueLen >= int(queueThreshold) && tokensInUse > 0 {
+	case saturatedReading && unadmitted != "":
+		logger.V(logging.DEFAULT).Info("k2-decision",
+			"modelID", modelID, "namespace", namespace, "variant", variantName,
+			"priority", k2ReasonObsUnadmitted, "historyKey", historyKey,
+			"queueLength", queueLen, "queueThreshold", queueThreshold,
+			"reason", unadmitted+"; not recorded",
+			"tokensInUse", tokensInUse, "k1", k1)
+	case saturatedReading:
 		k2Observed := tokensInUse
 		if kvCeiling > 0 && k2Observed > kvCeiling {
 			logger.V(logging.DEFAULT).Info("k2-decision",

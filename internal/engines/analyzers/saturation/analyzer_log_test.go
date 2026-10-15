@@ -131,9 +131,10 @@ func TestLogContract_ReportToolCollectsEveryMessage(t *testing.T) {
 }
 
 // k2PriorityLabels is the vocabulary a k2 SOURCE is labelled with; the
-// report's Priority column renders these four, plus the two diagnostic values
-// (k2ReasonObsImplausible, k2ReasonObsDownstream) that precede the tier a
-// declined observation fell through to. dump_k2_decisions.py legends all six.
+// report's Priority column renders these five, plus the three diagnostic
+// values (k2ReasonObsImplausible, k2ReasonObsDownstream, k2ReasonObsUnadmitted)
+// that precede the tier a declined observation fell through to.
+// dump_k2_decisions.py legends all eight.
 var k2PriorityLabels = map[string]bool{
 	"P1-obs": true, "P2-hist": true, "P2-borrow": true, "P3-k2": true, "P4-k1": true,
 }
