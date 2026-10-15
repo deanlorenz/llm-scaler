@@ -379,15 +379,12 @@ func (o *GreedyByScoreOptimizer) rescaleModelDecisions(
 	// size on, and shrinking or growing the other roles around it strands one
 	// role's output. Taking its GPUs out of the budget instead put the whole
 	// cut of a contended model on decode.
-	pinned := false
 	for _, role := range roles {
 		curByRole[role] = roleCurrentGPUs(records, stateMap, accType, role)
 		demByRole[role] = roleDemandGPUs(satNamed, records, stateMap, accType, role)
 		floorByRole[role] = roleFloorGPUs(records, stateMap, accType, role)
-		if h := satNamed.Holds[role]; h.NoScaleUp && h.NoScaleDown {
-			pinned = true
-		}
 	}
+	pinned := pinnedModel(satNamed)
 	tgtByRole := curByRole
 	if !pinned {
 		tgtByRole = distributeGPUsByWeight(targetGPUs, roles, demByRole, curByRole, floorByRole)
@@ -688,6 +685,17 @@ func rescaleInputsForGroup(reqs []ModelScalingRequest, accType string, budget in
 			capGPUs = min(capGPUs, budget) // unbounded max: cap at the group budget
 		}
 		capGPUs = max(capGPUs, floorGPUs)
+		// A model with a role held both ways is frozen by rescaleModelDecisions,
+		// so it holds exactly what it has: the water-fill gives it that and
+		// shares the rest. Weighed on its demand, it was set a share it never
+		// took, and the GPUs sat idle while another model stayed short.
+		if pinnedModel(satNamed) {
+			cur := 0
+			for _, role := range modelRolesOnType(records, accType) {
+				cur += roleCurrentGPUs(records, stateMap, accType, role)
+			}
+			floorGPUs, capGPUs, demandGPUs = cur, cur, cur
+		}
 
 		inputs = append(inputs, rescaleInput{
 			ID:        modelKey(req),
@@ -699,6 +707,17 @@ func rescaleInputsForGroup(reqs []ModelScalingRequest, accType string, budget in
 		sumDemandGPUs += demandGPUs
 	}
 	return inputs, sumDemandGPUs
+}
+
+// pinnedModel reports whether the composite holds any of the model's roles
+// both ways, which freezes the model's rescale.
+func pinnedModel(nr NamedAnalyzerResult) bool {
+	for _, h := range nr.Holds {
+		if h.NoScaleUp && h.NoScaleDown {
+			return true
+		}
+	}
+	return false
 }
 
 // modelDemandGPUs is the model's demand-in-GPUs summed across its roles on accType

@@ -70,6 +70,15 @@ type Decision struct {
 	// saturation; defined only when OthersOK.
 	Others   float64
 	OthersOK bool
+	// Needs is each contributor's need other than saturation's, in the order
+	// the entries list them.
+	Needs []AnalyzerNeed
+}
+
+// AnalyzerNeed is one analyzer's replica need for a variant.
+type AnalyzerNeed struct {
+	Analyzer string
+	N        float64
 }
 
 // ResolveSO decides one variant's replica need from entries, the analyzers
@@ -98,8 +107,11 @@ func ResolveSO(entries []NamedAnalyzerResult, sat *NamedAnalyzerResult, variant 
 		}
 		if sat != nil && e.Name == sat.Name {
 			d.Saturation, d.SaturationN = true, n
-		} else if !d.OthersOK || n > d.Others {
-			d.Others, d.OthersOK = n, true
+		} else {
+			d.Needs = append(d.Needs, AnalyzerNeed{Analyzer: e.Name, N: n})
+			if !d.OthersOK || n > d.Others {
+				d.Others, d.OthersOK = n, true
+			}
 		}
 	}
 	switch len(d.Contributors) {

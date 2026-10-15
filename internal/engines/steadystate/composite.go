@@ -2,6 +2,7 @@ package steadystate
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"math"
 	"slices"
@@ -120,13 +121,16 @@ func buildComposite(
 	result.VariantBusiestQueueLoad = maps.Clone(sat.Result.VariantBusiestQueueLoad)
 	roles := rolesPresent(sat.Result.VariantCapacities)
 	sized := make(map[string]bool, len(byRole))
+	pricings := make([]rolePricing, 0, len(byRole))
 	for _, role := range roles {
 		vs, ok := byRole[role]
 		if !ok {
 			continue
 		}
-		s, dropped := priceRole(&result, role, satDemand[role], vs)
+		p, s, dropped := priceRole(&result, role, satDemand[role], vs)
 		sized[role] = s
+		pricings = append(pricings, p)
+		logPricing(ctx, sat.Result, p)
 		for _, i := range dropped {
 			logger.Info("a listed analyzer's need is dropped: saturation has no per-replica capacity for the variant",
 				"modelID", sat.Result.ModelID, "namespace", sat.Result.Namespace,
@@ -143,6 +147,7 @@ func buildComposite(
 		Holds:             compositeHolds(*sat, eligibleAnalyzers, roles, sized),
 	}
 	buildCapacities(ctx, &composite, nil, scaleUp, scaleDown)
+	boundAllSpare(&composite, pricings, scaleDown)
 	applyHolds(&composite, roles)
 	for role, h := range composite.Holds {
 		logger.Info("composite holds a role",
@@ -170,40 +175,103 @@ func warnModelLevelOnly(ctx context.Context, sat allocation.NamedAnalyzerResult,
 	}
 }
 
-// variantNeed is one variant's need as each side reads it: saturation's,
-// and the largest among the other listed analyzers'.
+// variantNeed is one variant's need as each analyzer reads it: saturation's,
+// and each other listed analyzer's.
 type variantNeed struct {
 	index    int
 	sat      float64
 	satOK    bool
-	others   float64
-	othersOK bool
+	others   map[string]float64
 	replicas float64
 	// prc is saturation's per-replica capacity for the variant.
 	prc float64
 }
 
-// newVariantNeed reads one variant's decision. An others' need whose demand
-// at saturation's PRC overflows is no reading.
+// newVariantNeed reads one variant's decision. A need whose demand at
+// saturation's PRC overflows is no reading.
 func newVariantNeed(i int, vc domain.VariantCapacity, d allocation.Decision) variantNeed {
-	others := d.OthersOK && (!(vc.PerReplicaCapacity > 0) || !math.IsInf(d.Others*vc.PerReplicaCapacity, 0))
-	return variantNeed{
-		index: i, sat: d.SaturationN, satOK: d.Saturation, others: d.Others, othersOK: others,
+	v := variantNeed{
+		index: i, sat: d.SaturationN, satOK: d.Saturation,
 		replicas: float64(vc.ReplicaCount), prc: vc.PerReplicaCapacity,
 	}
+	for _, n := range d.Needs {
+		if !(v.prc > 0) || !math.IsInf(n.N*v.prc, 0) {
+			if v.others == nil {
+				v.others = make(map[string]float64, len(d.Needs))
+			}
+			v.others[n.Analyzer] = n.N
+		}
+	}
+	return v
 }
 
-// coverage is how much of a need the role's running replicas cover: the sum
-// over its variants of w / N, where N is the variant's need under need and w
-// its replicas (1 each when none of them has replicas, so a role scaling from
-// zero compares the needs themselves). A variant need does not define is left
-// out; a zero need is covered however few replicas there are. The lower the
-// coverage, the larger the need.
-func coverage(vs []variantNeed, need func(variantNeed) (float64, bool)) float64 {
+// pricingFrame is one analyzer's view of a role: the role's demand in
+// saturation's units, and each variant's need. Saturation's frame is its own
+// demand and needs; another analyzer's demand is the largest N x PRC_sat over
+// the variants it sizes, and a variant it does not size is read at
+// saturation's ratio to those it does (D / PRC_sat).
+type pricingFrame struct {
+	analyzer string // "" for saturation
+	demand   float64
+	need     func(variantNeed) (float64, bool)
+}
+
+// prc is the per-replica capacity frame f gives variant v: D / N where it
+// sizes v, saturation's PRC otherwise.
+func (f pricingFrame) prc(v variantNeed) float64 {
+	if f.analyzer == "" {
+		return v.prc
+	}
+	if n, ok := v.others[f.analyzer]; ok && n > 0 && f.demand > 0 {
+		return f.demand / n
+	}
+	return v.prc
+}
+
+// roleFrames returns the frames that size a role with variants vs and
+// saturation demand dSat: saturation's when it contributed, then one per other
+// analyzer that sizes a variant saturation can price, in name order.
+func roleFrames(dSat float64, vs []variantNeed) []pricingFrame {
+	var frames []pricingFrame
+	if slices.ContainsFunc(vs, func(v variantNeed) bool { return v.satOK }) {
+		frames = append(frames, pricingFrame{demand: dSat,
+			need: func(v variantNeed) (float64, bool) { return v.sat, v.satOK }})
+	}
+	demand := make(map[string]float64)
+	for _, v := range vs {
+		for a, n := range v.others {
+			if cur, ok := demand[a]; v.prc > 0 && (!ok || n*v.prc > cur) {
+				demand[a] = n * v.prc
+			}
+		}
+	}
+	for _, a := range slices.Sorted(maps.Keys(demand)) {
+		target := demand[a]
+		frames = append(frames, pricingFrame{analyzer: a, demand: target,
+			need: func(v variantNeed) (float64, bool) {
+				if n, ok := v.others[a]; ok {
+					return n, true
+				}
+				if v.prc > 0 {
+					return target / v.prc, true
+				}
+				return 0, false
+			}})
+	}
+	return frames
+}
+
+// coverage is how much of frame f's need the role's running replicas cover:
+// the sum over its variants of w / N, with w the variant's replicas (1 each
+// when none of them has replicas, so a role scaling from zero compares the
+// needs themselves). A variant f has no need for is left out; a zero need is
+// covered however few replicas there are. The lower the coverage, the larger
+// the need.
+func coverage(vs []variantNeed, f pricingFrame) float64 {
 	weighted := slices.ContainsFunc(vs, func(v variantNeed) bool { return v.replicas > 0 })
 	var c float64
 	for _, v := range vs {
-		n, ok := need(v)
+		n, ok := f.need(v)
 		w := 1.0
 		if weighted {
 			w = v.replicas
@@ -216,62 +284,76 @@ func coverage(vs []variantNeed, need func(variantNeed) (float64, bool)) float64 
 	return c
 }
 
+// rolePricing is how priceRole priced one role: every frame that sizes it and
+// the one chosen, for the scale-down bound (boundSpare).
+type rolePricing struct {
+	role   string
+	vs     []variantNeed
+	frames []pricingFrame
+	chosen int
+}
+
 // priceRole prices one role of result, whose saturation demand is dSat and
 // whose variants' needs are vs, and reports whether a listed analyzer sized
-// it. It returns the index of each variant whose need another analyzer
-// defined but the role could not carry: saturation has no PRC for it and the
-// role is priced in saturation's units.
+// it. dropped is the index of each variant another analyzer sized but the
+// chosen frame cannot carry: saturation has no PRC for it and the chosen
+// frame does not size it.
 //
-// The role is priced in one frame, saturation's or the other analyzers',
-// whichever needs more replicas for the fleet the role runs (lower coverage;
-// saturation's on a tie, so it stays exact). Mixing the two per variant asked
-// for more than either: with saturation deciding one accelerator and another
-// analyzer the other, the role was short by more than either analyzer's need.
+// The role is priced in one analyzer's frame (roleFrames): whichever needs
+// more replicas for the fleet the role runs, the lowest coverage, saturation's
+// on a tie so it stays exact. Mixing frames per variant asked for more than
+// any analyzer, and taking the largest need among the others per variant let
+// one analyzer's zero need on a variant veto another's.
 //
 //   - Saturation's frame: saturation's demand and PRCs stand. Its
-//     HeldRoleDemand (its demand before its own hold) is raised to the
-//     others' need in its units, D_sat x coverage_sat / coverage_others, and
-//     dropped when that reaches D_sat: the hold no longer sets the demand, and
-//     kept the share optimizer would give nothing from the role.
-//   - The others' frame: the role's demand is the largest N x PRC_sat over the
-//     variants they size, which is defined when saturation sees the role as
-//     idle, so another analyzer can grow it. Each variant they size is priced
-//     at D / N, so it needs exactly the N they asked, and variants on different
-//     accelerators keep their view of the relative worth; a variant they do not
-//     size keeps saturation's PRC, and so saturation's ratio to the others. The
+//     HeldRoleDemand (its demand before its own hold) is raised to the most
+//     demanding other analyzer's need in its units, D_sat x coverage_sat /
+//     coverage_other, and dropped when that reaches D_sat: the hold no longer
+//     sets the demand, and kept, the share optimizer would give nothing from
+//     the role.
+//   - Another analyzer's frame: the role's demand is that frame's, defined
+//     when saturation sees the role as idle, so another analyzer can grow it.
+//     Each variant it sizes is priced at D / N, so it needs exactly the N it
+//     asked, and variants on different accelerators keep its view of their
+//     relative worth; a variant it does not size keeps saturation's PRC. The
 //     model's TotalDemand moves with the role, the role's variants share it in
-//     saturation's proportions, and HeldRoleDemand is dropped: saturation's
-//     hold did not set the demand.
-func priceRole(result *domain.AnalyzerResult, role string, dSat float64, vs []variantNeed) (sized bool, dropped []int) {
-	satAny := slices.ContainsFunc(vs, func(v variantNeed) bool { return v.satOK })
-	target, othersAny := 0.0, false
+//     saturation's proportions, and HeldRoleDemand is dropped.
+//
+// Scale-up follows the chosen frame alone: when the analyzers rate a role's
+// accelerators differently, a variant the chosen frame grows may leave another
+// frame short for a cycle, until the next cycle reads the new replicas.
+// Scale-down is bounded by every frame (boundSpare).
+func priceRole(result *domain.AnalyzerResult, role string, dSat float64, vs []variantNeed) (
+	pricing rolePricing, sized bool, dropped []int) {
+	pricing = rolePricing{role: role, vs: vs, frames: roleFrames(dSat, vs), chosen: -1}
+	best := math.Inf(1)
+	for i, f := range pricing.frames {
+		if c := coverage(vs, f); pricing.chosen < 0 || c < best {
+			pricing.chosen, best = i, c
+		}
+	}
+	chosen := pricingFrame{}
+	if pricing.chosen >= 0 {
+		chosen = pricing.frames[pricing.chosen]
+	}
 	for _, v := range vs {
-		if v.othersOK && v.prc > 0 && (!othersAny || v.others*v.prc > target) {
-			target, othersAny = v.others*v.prc, true
-		}
-	}
-	satNeed := func(v variantNeed) (float64, bool) { return v.sat, v.satOK }
-	othersNeed := func(v variantNeed) (float64, bool) {
-		if v.othersOK {
-			return v.others, true
-		}
-		if v.prc > 0 {
-			return target / v.prc, true
-		}
-		return 0, false
-	}
-	useOthers := othersAny && (!satAny || coverage(vs, othersNeed) < coverage(vs, satNeed))
-	if !useOthers {
-		for _, v := range vs {
-			if v.othersOK && !(v.prc > 0) {
+		if len(v.others) > 0 && !(v.prc > 0) {
+			if _, ok := v.others[chosen.analyzer]; chosen.analyzer == "" || !ok {
 				dropped = append(dropped, v.index)
 			}
 		}
-		if !satAny {
-			return false, dropped
-		}
-		if before, held := result.HeldRoleDemand[role]; held && othersAny {
-			equiv := dSat * coverage(vs, satNeed) / coverage(vs, othersNeed)
+	}
+	if pricing.chosen < 0 {
+		return pricing, false, dropped
+	}
+
+	if chosen.analyzer == "" {
+		if before, held := result.HeldRoleDemand[role]; held && len(pricing.frames) > 1 {
+			cs, co := coverage(vs, chosen), math.Inf(1)
+			for _, f := range pricing.frames[1:] {
+				co = min(co, coverage(vs, f))
+			}
+			equiv := dSat * cs / co
 			switch {
 			case equiv >= dSat:
 				delete(result.HeldRoleDemand, role)
@@ -279,9 +361,10 @@ func priceRole(result *domain.AnalyzerResult, role string, dSat float64, vs []va
 				result.HeldRoleDemand[role] = equiv
 			}
 		}
-		return true, dropped
+		return pricing, true, dropped
 	}
 
+	target := chosen.demand
 	delete(result.HeldRoleDemand, role)
 	if result.RoleDemand == nil {
 		result.TotalDemand = target
@@ -291,17 +374,118 @@ func priceRole(result *domain.AnalyzerResult, role string, dSat float64, vs []va
 	}
 	redistributeVariantDemand(result.VariantCapacities, role, target)
 	for _, v := range vs {
-		if !v.othersOK || !(v.others > 0) || !(target > 0) {
+		n, ok := v.others[chosen.analyzer]
+		if !ok || !(n > 0) || !(target > 0) {
 			continue
 		}
 		vc := &result.VariantCapacities[v.index]
-		vc.PerReplicaCapacity = target / v.others
+		vc.PerReplicaCapacity = target / n
 		vc.Utilization = 0
 		if vc.ReplicaCount > 0 {
 			vc.Utilization = vc.TotalDemand / (float64(vc.ReplicaCount) * vc.PerReplicaCapacity)
 		}
 	}
-	return true, nil
+	return pricing, true, dropped
+}
+
+// boundSpare caps the spare capacity of each role p priced so that releasing
+// it is safe in every frame that sizes the role, not only the chosen one: the
+// optimizer releases in the chosen frame's units, and where analyzers rate a
+// role's accelerators differently, the replicas it sheds can be worth far more
+// to another. Shedding X of the chosen frame's capacity sheds at most X x r
+// of frame f's, r the largest PRC_f / PRC_chosen over the variants running, so
+// X is capped at f's own spare, supply_f - D_f / scaleDown, over r. Returns
+// the capped spare, which is spare when no other frame sizes the role.
+func boundSpare(p rolePricing, result *domain.AnalyzerResult, spare, scaleDown float64) float64 {
+	if p.chosen < 0 || len(p.frames) < 2 || !(scaleDown > 0) {
+		return spare
+	}
+	for i, f := range p.frames {
+		if i == p.chosen {
+			continue
+		}
+		var supply, ratio float64
+		for _, v := range p.vs {
+			if v.replicas == 0 {
+				continue
+			}
+			pf := f.prc(v)
+			if !(pf > 0) {
+				continue
+			}
+			supply += v.replicas * pf
+			if pc := result.VariantCapacities[v.index].PerReplicaCapacity; pc > 0 {
+				ratio = max(ratio, pf/pc)
+			}
+		}
+		own := supply - f.demand/scaleDown
+		switch {
+		// supply_f / D_f is frame f's coverage, and the chosen frame's is the
+		// lowest, so with spare in the chosen frame every other frame has some:
+		// this guards a negative bound if that ever stops holding.
+		case !(own > 0):
+			return 0
+		case ratio > 0:
+			spare = min(spare, own/ratio)
+		}
+	}
+	return spare
+}
+
+// boundAllSpare applies boundSpare to each priced role's spare capacity: the
+// role's own on P/D, the model's on an aggregated model, which has no role
+// capacities. On P/D the model-level spare is then capped at the roles' sum
+// when a bound lowered one, so it cannot release what the roles may not.
+func boundAllSpare(nr *allocation.NamedAnalyzerResult, pricings []rolePricing, scaleDown float64) {
+	if len(nr.RoleCapacities) == 0 {
+		for _, p := range pricings {
+			if p.role == domain.RoleBoth {
+				nr.SpareCapacity = boundSpare(p, nr.Result, nr.SpareCapacity, scaleDown)
+			}
+		}
+		return
+	}
+	lowered := false
+	for _, p := range pricings {
+		rc, ok := nr.RoleCapacities[p.role]
+		if !ok {
+			continue
+		}
+		if b := boundSpare(p, nr.Result, rc.SpareCapacity, scaleDown); b < rc.SpareCapacity {
+			rc.SpareCapacity, lowered = b, true
+			nr.RoleCapacities[p.role] = rc
+		}
+	}
+	if lowered {
+		var sum float64
+		for _, rc := range nr.RoleCapacities {
+			sum += rc.SpareCapacity
+		}
+		nr.SpareCapacity = min(nr.SpareCapacity, sum)
+	}
+}
+
+// logPricing logs, at VERBOSE, the frame each role is priced in, every
+// frame's coverage and demand: a role sized on another analyzer's frame can
+// differ from every variant's composite-contributors line.
+func logPricing(ctx context.Context, sat *domain.AnalyzerResult, p rolePricing) {
+	logger := ctrl.LoggerFrom(ctx).V(logging.VERBOSE)
+	if !logger.Enabled() || p.chosen < 0 {
+		return
+	}
+	name := func(f pricingFrame) string {
+		if f.analyzer == "" {
+			return domain.SaturationAnalyzerName
+		}
+		return f.analyzer
+	}
+	frames := make([]string, 0, len(p.frames))
+	for _, f := range p.frames {
+		frames = append(frames, fmt.Sprintf("%s:coverage=%g,demand=%g", name(f), coverage(p.vs, f), f.demand))
+	}
+	logger.Info("composite-pricing",
+		"modelID", sat.ModelID, "namespace", sat.Namespace, "role", p.role,
+		"frame", name(p.frames[p.chosen]), "frames", frames)
 }
 
 // redistributeVariantDemand sets the TotalDemand of role's variants in vcs to

@@ -21,8 +21,9 @@ package allocation
 //
 // A model whose composite fails this check had no listed analyzer able to
 // size any variant this cycle. The engine reports it as no-composite-signal.
-// With saturation listed, the optimizer still sizes it on saturation's
-// measured capacity; without, every role is held (RoleHold). Its replicas are
+// With saturation listed, the optimizer acts on saturation's own result, as
+// it did before the composite existed; without, every role is held
+// (RoleHold). Its replicas are
 // charged to a quota either way (measuredThisCycle), since they hold their
 // GPUs.
 func CompositeHasSignal(composite NamedAnalyzerResult) bool {

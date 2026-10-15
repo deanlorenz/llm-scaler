@@ -83,6 +83,21 @@ func TestRescaleFreezesAModelWithAPinnedRole(t *testing.T) {
 	}
 }
 
+// TestRescaleInputHoldsAPinnedModelAtWhatItHas: a model rescale freezes is
+// given exactly its GPUs in the water-fill, so the rest of the budget goes to
+// the others. Weighed on its demand it was set a share it never took, and the
+// GPUs sat idle while another model stayed short.
+func TestRescaleInputHoldsAPinnedModelAtWhatItHas(t *testing.T) {
+	free, _ := rescaleInputsForGroup([]ModelScalingRequest{pdRescaleRequest(nil)}, "A100", 16)
+	assert.Equal(t, 7, free[0].CapGPUs, "unheld: prefill 1 + decode 6 from demand")
+
+	both := map[string]RoleHold{domain.RolePrefill: {NoScaleUp: true, NoScaleDown: true}}
+	in, sum := rescaleInputsForGroup([]ModelScalingRequest{pdRescaleRequest(both)}, "A100", 16)
+	assert.Equal(t, 8, in[0].FloorGPUs)
+	assert.Equal(t, 8, in[0].CapGPUs)
+	assert.Equal(t, 8, sum, "it contends for what it holds")
+}
+
 // TestRescaleDoesNotFillAHeldRole: a role held against growth is not filled,
 // though its share and the free GPUs would allow it.
 func TestRescaleDoesNotFillAHeldRole(t *testing.T) {

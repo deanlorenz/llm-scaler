@@ -406,8 +406,9 @@ func NewEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 			// policy lists it under analyzers:, and its router queries run only
 			// for such a model, so registering it costs nothing elsewhere, and
 			// enabling it needs no restart. Its result is
-			// published and, like every non-saturation result, not yet consumed
-			// (docs/proposals/slo-tiers.md, phase 0).
+			// published and, unlike the other listed analyzers, never sizes a
+			// model: the composite leaves it out (docs/proposals/slo-tiers.md,
+			// phase 0).
 			{name: domain.SLOAnalyzerName, analyzer: sloAnalyzer},
 		},
 		externalAnalyzers: make(map[string]domain.Analyzer),
