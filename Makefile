@@ -415,6 +415,10 @@ check-doc-comment-owner: ## Fail on a doc comment describing a different declara
 .PHONY: test
 test: manifests generate fmt vet setup-envtest helm check-import-direction check-doc-comment-owner ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" PATH="$(LOCALBIN):$(PATH)" go test $$(go list ./... | grep -v /e2e | grep -v /benchmark) ./test/e2e/fixtures/ -coverprofile cover.out
+	@# The race detector on the packages whose concurrency spec only it can
+	@# check (a few seconds): without -race that spec proves no deadlock and
+	@# nothing more.
+	CGO_ENABLED=1 go test -race -count=1 ./internal/engines/analyzers/slo/ ./internal/signals/itl/
 
 # Creates a multi-node Kind cluster
 # Adds emulated GPU labels and capacities per node

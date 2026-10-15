@@ -108,6 +108,19 @@ var _ = Describe("Analyzer state and inputs", func() {
 			"never resolved: the reading itself")
 	})
 
+	It("keeps a parked variant's accelerator memo while it is reported present", func() {
+		a := newAt(nil)
+		warmWith(a, noop)
+		resolved := windowKey("ns", "m", agg)
+		clock = clock.Add(windowTimeout - time.Minute)
+		a.NoteVariantsPresent("ns", "m", []string{"agg"})
+		a.EvictStale(clock.Add(2 * time.Minute))
+		unresolved := agg
+		unresolved.AcceleratorName = constants.UnresolvedAcceleratorType
+		Expect(a.variantKey("ns", "m", unresolved)).To(Equal(resolved),
+			"parked past the timeout but present: it wakes keyed where its line is")
+	})
+
 	Context("engine params from the capacity store", func() {
 		store := func(params capacity.EngineParams) *capacity.Store {
 			s := capacity.NewStore()
@@ -287,6 +300,20 @@ var _ = Describe("judge's sample minimums and labels", func() {
 				policy(100*time.Millisecond, 0).SLO)
 			Expect(math.IsNaN(out[0].Observed)).To(BeTrue(), "rate %v", rate)
 		}
+	})
+
+	It("counts 0 TTFT requests for an idle model, and none for a malformed histogram", func() {
+		// The router reported its histogram and served nobody: a count of 0.
+		// Absent would read as "the router's series are missing", which fires
+		// WVAModelSLOUnjudged on every idle night.
+		idle := judge(&domain.RouterLatency{WindowSeconds: 300, TTFTBuckets: buckets(1, 0, 3, 0, inf, 0)},
+			policy(0, 3*time.Second).SLO)
+		Expect(idle[0].Requests).To(Equal(0.0))
+		Expect(math.IsNaN(idle[0].Observed)).To(BeTrue())
+		// No +Inf bucket: unreadable, not idle.
+		bad := judge(&domain.RouterLatency{WindowSeconds: 300, TTFTBuckets: buckets(1, 0, 3, 0)},
+			policy(0, 3*time.Second).SLO)
+		Expect(math.IsNaN(bad[0].Requests)).To(BeTrue())
 	})
 
 	It("reports no TPOT mean from a count with no time behind it", func() {

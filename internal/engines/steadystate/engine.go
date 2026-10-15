@@ -141,9 +141,6 @@ type Engine struct {
 	// learned state whether or not any model runs it. Nil in tests that build
 	// an Engine by hand.
 	sloAnalyzer sloStateKeeper
-	// sloNamespaces is this cycle's namespaces in which a model ran the slo
-	// analyzer; handed to the collector when the cycle ends.
-	sloNamespaces map[string]bool
 	// reportedCollisions is the external analyzer labels already logged as
 	// taken by a built-in, so each is logged once.
 	reportedCollisions map[string]bool
@@ -355,8 +352,8 @@ func NewEngine(client client.Client, apiReader client.Reader, scheme *runtime.Sc
 			{name: domain.SaturationAnalyzerName, analyzer: satV2},
 			// Built in and always registered: it runs only for a model whose
 			// policy lists it under analyzers:, and its router queries and the
-			// replica queries only it reads run only in a namespace where it
-			// ran (handOverSLONamespaces), so registering it costs nothing
+			// replica queries only it reads run only in a namespace where a
+			// policy lists it (noteSLOPolicy), so registering it costs nothing
 			// elsewhere, and enabling it needs no restart. Its result is
 			// published and, like every non-saturation result, not yet consumed
 			// (docs/proposals/slo-tiers.md, phase 0).
@@ -706,6 +703,7 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 	e.recordDefaultConfigMetrics()     // record as soon as possible to reflect any changes in configuration
 	e.observeUtilizationShareMode(ctx) // every cycle, even one with no model to plan
 	metrics.SweepSLO(time.Now())       // drop the SLO series of a model no longer published
+	e.beginSLOCycle()                  // every cycle, so a model skipped on one is seen to be
 
 	if e.Config.ScaleToZeroEnabled() {
 		logger.Info("Scaling to zero is enabled")
@@ -1320,7 +1318,6 @@ func (e *Engine) optimizeV2(
 	// swept, and written after the cycle has learned what it will.
 	e.restoreLearnedState(ctx, time.Now())
 	defer func() { e.writeLearnedState(ctx, time.Now()) }()
-	defer e.handOverSLONamespaces()
 
 	// Before the sweep, which would otherwise judge a variant on a stamp from
 	// before it parked: Analyze stamps too, but only after this point.
@@ -1364,6 +1361,7 @@ func (e *Engine) optimizeV2(
 		}
 
 		scalingPolicyConfig := e.resolveModelPolicy(ctx, saturationConfigMap, modelID, namespace, modelVAs)
+		e.noteSLOPolicy(namespace, scalingPolicyConfig)
 		data, err := e.prepareModelData(ctx, modelID, modelVAs, e.client)
 		if err != nil {
 			msg := "Model data preparation failed"

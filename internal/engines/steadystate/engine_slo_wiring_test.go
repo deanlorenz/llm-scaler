@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/source"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/source/prometheus"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
@@ -134,9 +135,11 @@ func TestResolveModelPolicyReportsAHalfConfiguredSLO(t *testing.T) {
 
 // sloKeeperSpy records how the engine's sweeps reached the slo analyzer.
 type sloKeeperSpy struct {
-	evictions int
-	present   map[string][]string
+	evictions, cycles int
+	present           map[string][]string
 }
+
+func (s *sloKeeperSpy) BeginCycle() { s.cycles++ }
 
 func (s *sloKeeperSpy) NoteVariantsPresent(namespace, modelID string, names []string) {
 	if s.present == nil {
@@ -196,27 +199,81 @@ func TestNotePresentVariantsStampsTheSLOAnalyzer(t *testing.T) {
 	}
 }
 
-// TestSLONamespacesReachTheCollectorEachCycle pins the gate on the replica
-// queries only the slo analyzer reads: the namespaces it ran in this cycle are
-// the ones collected with them next cycle, and a namespace it stopped running
-// in loses them.
-func TestSLONamespacesReachTheCollectorEachCycle(t *testing.T) {
+// TestSLOPolicyMarksItsNamespaceTheSameCycle pins the gate on the replica
+// queries only the slo analyzer reads: a model whose resolved policy lists it
+// marks its namespace before it is collected, so the inputs arrive that cycle
+// (a mark made after analysis reached the collector a cycle late, which lost
+// them on the cycle after every skip); each cycle starts with none.
+func TestSLOPolicyMarksItsNamespaceTheSameCycle(t *testing.T) {
 	e := sloWiringEngine(t)
-	e.noteSLONamespace("chat")
-	e.handOverSLONamespaces()
+	withSLO := config.ScalingPolicy{Analyzers: []config.AnalyzerScoreConfig{
+		{Name: domain.SaturationAnalyzerName}, {Name: domain.SLOAnalyzerName}}}
+	e.noteSLOPolicy("chat", withSLO)
+	e.noteSLOPolicy("batch", config.ScalingPolicy{})
 	if !e.ReplicaMetricsCollector.CollectsSLOInputs("chat") || e.ReplicaMetricsCollector.CollectsSLOInputs("batch") {
-		t.Fatal("the collector must fetch the slo inputs in chat, where the analyzer ran, and only there")
+		t.Fatal("the collector must fetch the slo inputs in chat, whose policy lists the analyzer, and only there")
 	}
-	e.handOverSLONamespaces()
+	e.beginSLOCycle()
 	if e.ReplicaMetricsCollector.CollectsSLOInputs("chat") {
-		t.Fatal("a cycle with no slo model must stop the inputs it no longer reads")
+		t.Fatal("a new cycle must start with no namespace marked")
 	}
+}
 
-	// And a cycle hands its set over on the way out.
-	e.noteSLONamespace("chat")
-	e.optimizeV2(context.Background(), nil, nil)
+// emptySource is a metrics source that knows its queries and returns no
+// series, so a cycle can run without a Prometheus.
+type emptySource struct{ queries *source.QueryList }
+
+func (s *emptySource) QueryList() *source.QueryList { return s.queries }
+
+func (s *emptySource) Refresh(context.Context, source.RefreshSpec) (map[string]*source.MetricResult, error) {
+	return map[string]*source.MetricResult{}, nil
+}
+
+func (s *emptySource) Get(string, map[string]string) *source.CachedValue { return nil }
+
+// TestOptimizeMarksANamespaceFromItsResolvedPolicy pins the call site: the
+// cycle's own loop marks a model's namespace from the policy it resolves,
+// before the model is collected -- here even though its data cannot be
+// prepared (it has no scale target), which is when the mark must already
+// stand.
+func TestOptimizeMarksANamespaceFromItsResolvedPolicy(t *testing.T) {
+	c := fake.NewClientBuilder().Build()
+	sources := source.NewSourceRegistry()
+	if err := sources.Register("prometheus", &emptySource{queries: source.NewQueryList()}); err != nil {
+		t.Fatal(err)
+	}
+	e := NewEngine(c, c, c.Scheme(), nil, sources, config.NewTestConfig(), allocation.NewNoOpLimiter("test"))
+	e.Variants = registry.New(0)
+	e.Config.UpdateScalingPolicyConfig(map[string]config.ScalingPolicy{
+		config.GlobalDefaultsKey: {ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70, Analyzers: []config.AnalyzerScoreConfig{
+			{Name: domain.SaturationAnalyzerName}, {Name: domain.SLOAnalyzerName}}},
+	})
+	e.optimizeV2(context.Background(), map[string][]llmdVariantAutoscalingV1alpha1.VariantAutoscaling{
+		"chat/m": {{
+			ObjectMeta: metav1.ObjectMeta{Name: "chat-a", Namespace: "chat"},
+			Spec:       llmdVariantAutoscalingV1alpha1.VariantAutoscalingSpec{ModelID: "m"},
+		}},
+	}, nil)
 	if !e.ReplicaMetricsCollector.CollectsSLOInputs("chat") {
-		t.Fatal("optimizeV2 did not hand this cycle's slo namespaces to the collector")
+		t.Fatal("a model whose policy lists slo did not mark its namespace in the cycle's loop")
+	}
+}
+
+// TestEveryCycleBeginsAnSLOCycle pins that the cycle count the unobserved
+// exclusion reads advances on every cycle, one with no model to analyze
+// included: counting only cycles that analyze something would hide the cycles
+// a parked fleet was not watched for.
+func TestEveryCycleBeginsAnSLOCycle(t *testing.T) {
+	e := sloWiringEngine(t)
+	spy := &sloKeeperSpy{}
+	e.sloAnalyzer = spy
+	for range 2 {
+		if err := e.optimize(context.Background()); err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("optimize: %v", err)
+		}
+	}
+	if spy.cycles != 2 {
+		t.Fatalf("two cycles began %d slo cycles, want 2", spy.cycles)
 	}
 }
 
@@ -256,7 +313,17 @@ func TestTheSLOAnalyzerCostsNothingWhereNoPolicyListsIt(t *testing.T) {
 	router := &countingRouter{}
 	sat := &fakeAnalyzerWithResult{analyzerName: domain.SaturationAnalyzerName, result: &domain.AnalyzerResult{}}
 	e := &Engine{saturationV2Analyzer: sat, started: true, analyzersSnapshot: []analyzerEntry{
-		{name: domain.SaturationAnalyzerName, analyzer: sat}, {name: domain.SLOAnalyzerName, analyzer: slo.New(router, nil)}}}
+		{name: domain.SaturationAnalyzerName, analyzer: sat}, {name: domain.SLOAnalyzerName, analyzer: slo.New(router, nil)}},
+		ReplicaMetricsCollector: collector.NewReplicaMetricsCollector(nil, nil, nil, nil, nil)}
+	// As the engine runs a model: resolve (which marks the namespace), then analyze.
+	run := func(namespace string, policy config.ScalingPolicy, states []domain.VariantReplicaState) {
+		t.Helper()
+		e.noteSLOPolicy(namespace, policy)
+		if _, err := e.runAnalyzersAndScore(context.Background(), "m", namespace, nil, policy, states, nil, nil, nil, nil, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	marked := e.ReplicaMetricsCollector.CollectsSLOInputs
 	targets := &config.SLOPolicy{TTFT: &config.SLOObjective{Target: config.SLODuration{Duration: 3 * time.Second}}}
 	plain := config.ScalingPolicy{ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70, SLO: targets}
 	withSLO := plain
@@ -265,19 +332,15 @@ func TestTheSLOAnalyzerCostsNothingWhereNoPolicyListsIt(t *testing.T) {
 
 	// Targets set, analyzer not listed: the half-configured case, which must
 	// still cost nothing.
-	if _, err := e.runAnalyzersAndScore(context.Background(), "m", "batch", nil, plain, states, nil, nil, nil, nil, 0); err != nil {
-		t.Fatal(err)
+	run("batch", plain, states)
+	if router.calls != 0 || sloSeries() != 0 || marked("batch") {
+		t.Fatalf("unlisted: %d router queries, %d slo series, inputs marked %v; want none",
+			router.calls, sloSeries(), marked("batch"))
 	}
-	if router.calls != 0 || sloSeries() != 0 || len(e.sloNamespaces) != 0 {
-		t.Fatalf("unlisted: %d router queries, %d slo series, slo namespaces %v; want none",
-			router.calls, sloSeries(), e.sloNamespaces)
-	}
-	if _, err := e.runAnalyzersAndScore(context.Background(), "m", "chat", nil, withSLO, states, nil, nil, nil, nil, 0); err != nil {
-		t.Fatal(err)
-	}
-	if router.calls != 1 || sloSeries() == 0 || !e.sloNamespaces["chat"] || e.sloNamespaces["batch"] {
-		t.Fatalf("listed: %d router queries, %d slo series, slo namespaces %v; want 1, some, only chat",
-			router.calls, sloSeries(), e.sloNamespaces)
+	run("chat", withSLO, states)
+	if router.calls != 1 || sloSeries() == 0 || !marked("chat") || marked("batch") {
+		t.Fatalf("listed: %d router queries, %d slo series, chat marked %v; want 1, some, true",
+			router.calls, sloSeries(), marked("chat"))
 	}
 }
 

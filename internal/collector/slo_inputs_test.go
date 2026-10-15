@@ -31,7 +31,7 @@ func TestReplicaCollectionFetchesSLOInputsOnlyWhereTheAnalyzerRuns(t *testing.T)
 		assert.NotContains(t, asked, q, "no model here runs the slo analyzer")
 	}
 
-	c.SetSLOInputNamespaces(map[string]bool{"slo": true})
+	c.AddSLOInputNamespace("slo")
 	asked = nil
 	_, _, err = c.queryReplicaSeries(context.Background(), "m", "slo", nil)
 	require.NoError(t, err)
@@ -45,4 +45,7 @@ func TestReplicaCollectionFetchesSLOInputsOnlyWhereTheAnalyzerRuns(t *testing.T)
 		"only the namespaces named")
 	assert.Contains(t, agnosticReplicaQueries, registration.QueryAvgPrefillTime,
 		"the shared list itself is left whole")
+
+	c.ResetSLOInputNamespaces()
+	assert.False(t, c.CollectsSLOInputs("slo"), "each cycle starts with no namespace marked")
 }

@@ -25,11 +25,6 @@ const maxTransientGrace = 30 * time.Minute
 // a reason to stop judging the fleet it belongs to.
 const startingMaxAge = 30 * time.Minute
 
-// minUnobservedGap is the least gap between two analyzed cycles of a model that
-// can mean cycles were skipped: below it, a gap is jitter in the engine's
-// interval.
-const minUnobservedGap = 20 * time.Second
-
 // transientMemo is one model's last transient cycle per objective scope, and
 // when the model was last seen.
 type transientMemo struct {
@@ -37,12 +32,12 @@ type transientMemo struct {
 	// the decode and aggregated variants alone.
 	all, generating transientMark
 	// seenAt is when the model was last analyzed or reported present, and the
-	// memo is evicted on it. analyzedAt is when it was last analyzed and
-	// interval the gap before that: a gap well over the usual one is cycles
-	// this analyzer did not see. Presence does not touch them, or a parked
-	// model would look as if it had been watched all along.
-	seenAt, analyzedAt time.Time
-	interval           time.Duration
+	// memo is evicted on it.
+	seenAt time.Time
+	// analyzedCycle is the engine cycle (BeginCycle) the model was last
+	// analyzed in. Presence does not touch it, or a parked model would look
+	// as if it had been watched all along.
+	analyzedCycle uint64
 	// pendingSince is when each variant with replicas pending began to have
 	// them, for boundPending.
 	pendingSince map[string]time.Time
@@ -134,17 +129,15 @@ func (a *Analyzer) noteTransient(key string, states []domain.VariantReplicaState
 		m = &transientMemo{}
 		a.transients[key] = m
 	}
-	// A model the analyzer did not see on the cycles before this one was
+	// A model the analyzer did not analyze on the previous engine cycle was
 	// skipped -- a wake whose Pods had no metrics yet, which the engine does
-	// not analyze -- or this process has just started and holds none of its
-	// history. Either way the window may hold requests from a transient no
-	// cycle here saw, so it is not judged until window+grace from now.
-	gap := now.Sub(m.analyzedAt)
-	unobserved := fresh || (gap > 2*m.interval && gap > minUnobservedGap)
-	if !fresh {
-		m.interval = gap
-	}
-	m.seenAt, m.analyzedAt = now, now
+	// not analyze, a parked model, a cycle its policy did not list slo -- or
+	// this process has just started and holds none of its history. Either way
+	// the window may hold requests from a transient no cycle here saw, so it
+	// is not judged until window+grace from now. Counted in cycles, not read
+	// from timing: a slow cycle is not a skipped one.
+	unobserved := fresh || a.cycle > m.analyzedCycle+1
+	m.seenAt, m.analyzedCycle = now, a.cycle
 	states = boundPending(m, states, now)
 
 	if unobserved {

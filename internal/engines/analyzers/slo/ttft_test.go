@@ -159,13 +159,13 @@ var _ = Describe("observeTTFTInputs", func() {
 		Expect(in.utilization).To(BeNumerically("~", 0.5, 1e-12))
 	})
 
-	It("measures utilization over the replicas that report a prefill rate", func() {
+	It("measures utilization over every Ready replica, an idle one included", func() {
 		cycles(12, 10000)
 		in := a.observeTTFTInputs("k", "pre", domain.RolePrefill, []domain.ReplicaMetrics{
 			pre("a", 1, 1, 0, 5000, 0, 0.4),
-			pre("fresh", 1, 1, 0, 0, 0, 0.4), // Ready, no rate series yet
+			pre("idle", 1, 1, 0, 0, 0, 0.4), // Ready, computing nothing
 		}, clock)
-		Expect(in.utilization).To(BeNumerically("~", 0.5, 1e-12), "5000 of one replica's 10000, not of two")
+		Expect(in.utilization).To(BeNumerically("~", 0.25, 1e-12), "5000 of two replicas' 20000: the idle one counts")
 	})
 
 	It("keeps at most the newest samples when cycles run faster than the age limit drops them", func() {

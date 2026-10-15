@@ -144,6 +144,10 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, now
 
 // Sweep prunes every window and forgets the window and intercept of each key
 // stale reports true for. It returns how many of each it forgot.
+//
+// stale runs under the tracker's lock: it must be cheap and must not call back
+// into the tracker. What it reads of the caller's state is the caller's to
+// guard -- both analyzers call Sweep holding their own lock.
 func (t *Tracker) Sweep(now time.Time, stale func(key string) bool) (windows, baselines int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()

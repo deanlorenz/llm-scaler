@@ -59,8 +59,8 @@ var agnosticReplicaQueries = []string{
 
 // sloInputQueries are the replica queries only the slo analyzer reads: the
 // TTFT curve's prefill and engine-queue time. They are fetched only in a
-// namespace where a model ran the analyzer on the last cycle, so a fleet that
-// does not use it pays nothing for them (SetSLOInputNamespaces).
+// namespace where a model's policy lists the analyzer this cycle, so a fleet
+// that does not use it pays nothing for them (AddSLOInputNamespace).
 var sloInputQueries = []string{registration.QueryAvgPrefillTime, registration.QueryAvgQueueTime}
 
 // unpartitionedReplicaQueries lists the logical replica queries whose series

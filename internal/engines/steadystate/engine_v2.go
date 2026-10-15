@@ -192,9 +192,6 @@ func (e *Engine) runAnalyzersAndScore(
 		if !config.AnalyzerEnabled(entry.name) {
 			continue
 		}
-		if entry.name == domain.SLOAnalyzerName {
-			e.noteSLONamespace(namespace)
-		}
 		result := runRegisteredAnalyzer(ctx, logger, entry, modelID, input)
 		if result == nil {
 			continue
@@ -364,22 +361,26 @@ type presenceNoter interface {
 	NoteVariantsPresent(namespace, modelID string, variantNames []string)
 }
 
-// noteSLONamespace records that a model in namespace ran the slo analyzer this
-// cycle, so the next cycle's collection there fetches the inputs only it reads.
-func (e *Engine) noteSLONamespace(namespace string) {
-	if e.sloNamespaces == nil {
-		e.sloNamespaces = map[string]bool{}
+// beginSLOCycle starts a cycle for the slo analyzer: its cycle count, by
+// which a model it did not analyze on the cycle before is unobserved, and the
+// collector's set of namespaces fetching the inputs only it reads. Called once
+// at the top of every cycle, before any early return.
+func (e *Engine) beginSLOCycle() {
+	if e.sloAnalyzer != nil {
+		e.sloAnalyzer.BeginCycle()
 	}
-	e.sloNamespaces[namespace] = true
+	if e.ReplicaMetricsCollector != nil {
+		e.ReplicaMetricsCollector.ResetSLOInputNamespaces()
+	}
 }
 
-// handOverSLONamespaces gives the collector this cycle's slo namespaces and
-// starts the next cycle's set empty.
-func (e *Engine) handOverSLONamespaces() {
-	if e.ReplicaMetricsCollector != nil {
-		e.ReplicaMetricsCollector.SetSLOInputNamespaces(e.sloNamespaces)
+// noteSLOPolicy marks a model's namespace for the slo analyzer's inputs when
+// its resolved policy lists the analyzer, before the model is collected, so
+// they arrive the same cycle.
+func (e *Engine) noteSLOPolicy(namespace string, policy config.ScalingPolicy) {
+	if e.ReplicaMetricsCollector != nil && policy.AnalyzerEnabled(domain.SLOAnalyzerName) {
+		e.ReplicaMetricsCollector.AddSLOInputNamespace(namespace)
 	}
-	e.sloNamespaces = nil
 }
 
 // sloStateKeeper is the part of the slo analyzer the per-cycle sweeps need:
@@ -388,6 +389,7 @@ func (e *Engine) handOverSLONamespaces() {
 type sloStateKeeper interface {
 	presenceNoter
 	EvictStale(now time.Time) slo.Evicted
+	BeginCycle()
 }
 
 var _ sloStateKeeper = (*slo.Analyzer)(nil)

@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -60,6 +61,9 @@ type Analyzer struct {
 	lines *itl.Tracker
 
 	mu sync.Mutex
+	// cycle counts the engine's cycles (BeginCycle), so a model can tell it
+	// was not analyzed on the one before.
+	cycle uint64
 	// seen is when each variant key was last analyzed or reported present:
 	// its line and its prefill ceiling are evicted on it (EvictStale).
 	seen map[string]time.Time
@@ -368,6 +372,12 @@ func (a *Analyzer) judge(ctx context.Context, input domain.AnalyzerInput, slo *c
 					r.Observed = h.quantile(float64(p) / 100)
 					r.Attainment, _ = h.fractionWithin(r.TargetSeconds)
 				}
+			} else if slices.ContainsFunc(rl.TTFTBuckets, func(b domain.LatencyBucket) bool { return math.IsInf(b.UpperBound, 1) }) &&
+				!slices.ContainsFunc(rl.TTFTBuckets, func(b domain.LatencyBucket) bool { return b.Rate != 0 }) {
+				// The router reported the histogram and nobody was served: a
+				// count of 0, not an absent one. Absent reads as "the router's
+				// series are missing", which an idle model's are not.
+				r.Requests = 0
 			}
 		}
 		out = append(out, r)
@@ -435,6 +445,16 @@ func (e Evicted) Any() bool {
 	return e.Lines+e.Baselines+e.Ceilings+e.Transients+e.Accelerators > 0
 }
 
+// BeginCycle marks the start of an engine cycle. The engine calls it once per
+// cycle, before any model is analyzed and whether or not any is: a model not
+// analyzed on the cycle before the one it is analyzed in was skipped, and its
+// window is not judged (unobserved).
+func (a *Analyzer) BeginCycle() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.cycle++
+}
+
 // NoteVariantsPresent stamps the learned state of a model's variants that
 // were discovered this cycle, analyzed or not: a variant parked at zero is
 // not analyzed, and must not lose its line for it.
@@ -443,6 +463,13 @@ func (a *Analyzer) NoteVariantsPresent(namespace, modelID string, variantNames [
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, name := range variantNames {
+		// The accelerator memo too, as saturation's presence does: a variant
+		// parked past windowTimeout would otherwise wake with no memo, and a
+		// first cycle of unresolved readings would key a new, empty line.
+		if m, ok := a.accelerators[namespace+"/"+name]; ok {
+			m.lastUsed = now
+			a.accelerators[namespace+"/"+name] = m
+		}
 		prefix := namespace + "|" + modelID + "|" + name + "|"
 		for key := range a.seen {
 			if strings.HasPrefix(key, prefix) {

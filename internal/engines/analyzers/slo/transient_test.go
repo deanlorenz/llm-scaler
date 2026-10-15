@@ -29,13 +29,12 @@ func everyVariant(domain.VariantReplicaState) bool { return true }
 // cadence is the engine interval these tests run cycles at.
 const cadence = 15 * time.Second
 
-// watched gives a model the history of an analyzed cycle one cadence before
-// now, so a test of another rule does not meet the analyzer's first sight of
-// the model (unobserved). The test then runs its cycles at cadence: a jump of
-// the clock between two cycles is itself a gap the analyzer reads.
+// watched gives a model the history of having been analyzed on the analyzer's
+// current cycle, so a test of another rule does not meet the analyzer's first
+// sight of the model (unobserved). Tests that never call BeginCycle stay on
+// that one cycle, however their clock moves.
 func watched(a *Analyzer, key string, now time.Time) {
-	before := now.Add(-cadence)
-	a.transients[key] = &transientMemo{seenAt: before, analyzedAt: before, interval: cadence}
+	a.transients[key] = &transientMemo{seenAt: now, analyzedCycle: a.cycle}
 }
 
 // ticks returns the cycle times after from, cadence apart, ending exactly at to.
@@ -160,39 +159,73 @@ var _ = Describe("noteTransient", func() {
 		Expect(tpot).To(BeEmpty())
 	})
 
+	// cycle runs one engine cycle for ns/m: BeginCycle, the presence report the
+	// engine makes for every discovered model, and, unless the engine skipped
+	// it, the analysis.
+	cycle := func(at time.Time, analyzed bool) string {
+		a.BeginCycle()
+		a.now = func() time.Time { return at }
+		a.NoteVariantsPresent("ns", "m", []string{"v"})
+		if !analyzed {
+			return "skipped"
+		}
+		ttft, _ := a.noteTransient("ns/m", steady, window, grace, at)
+		return ttft
+	}
+
 	It("does not judge the window after cycles it did not see: the wake the engine skipped", func() {
 		at := clock
-		for _, at = range ticks(clock, clock.Add(4*cadence)) {
-			ttft, _ := a.noteTransient("ns/m", steady, window, grace, at)
-			Expect(ttft).To(BeEmpty())
+		for range 4 {
+			at = at.Add(cadence)
+			Expect(cycle(at, true)).To(BeEmpty())
 		}
-		// Parked, then woken: the engine skipped the model while its Pod had
-		// no metrics, so the first cycle the analyzer sees is already steady.
-		// The engine reports it present every cycle of the gap, and that
-		// must not hide the gap.
-		woke := at.Add(3 * time.Minute)
-		for _, p := range ticks(at, woke.Add(-cadence)) {
-			a.now = func() time.Time { return p }
-			a.NoteVariantsPresent("ns", "m", []string{"v"})
+		// Woken from zero: the engine skips the model while its Pod has no
+		// metrics, and reports it present every one of those cycles, which
+		// must not hide them. The first cycle it is analyzed is already steady.
+		for range 12 {
+			at = at.Add(cadence)
+			cycle(at, false)
 		}
-		ttft, tpot := a.noteTransient("ns/m", steady, window, grace, woke)
-		Expect(ttft).To(Equal(constants.SLOExcludedUnobserved))
-		Expect(tpot).To(Equal(constants.SLOExcludedUnobserved))
-		// Back on the cadence, a cycle is a cycle: the one mark expires after
-		// window+grace and nothing renews it.
-		for _, at = range ticks(woke, woke.Add(window+grace)) {
-			ttft, _ = a.noteTransient("ns/m", steady, window, grace, at)
+		at = at.Add(cadence)
+		woke := at
+		Expect(cycle(at, true)).To(Equal(constants.SLOExcludedUnobserved))
+		for at.Before(woke.Add(window + grace - cadence)) {
+			at = at.Add(cadence)
+			Expect(cycle(at, true)).To(Equal(constants.SLOExcludedUnobserved), "the mark holds window+grace")
 		}
-		Expect(ttft).To(BeEmpty())
+		Expect(cycle(woke.Add(window+grace), true)).To(BeEmpty(), "and nothing analyzed since renews it")
 	})
 
-	It("reads jitter in the engine's interval as a cycle, not a gap", func() {
+	It("sees a single skipped cycle, and a second skip soon after a first", func() {
+		at := clock.Add(cadence)
+		Expect(cycle(at, true)).To(BeEmpty())
+		at = at.Add(cadence)
+		cycle(at, false)
+		at = at.Add(cadence)
+		Expect(cycle(at, true)).To(Equal(constants.SLOExcludedUnobserved), "one cycle skipped is enough")
+		for _, t := range ticks(at, at.Add(window+grace)) {
+			at = t
+			cycle(at, true)
+		}
+		at = at.Add(cadence)
+		cycle(at, false)
+		at = at.Add(cadence)
+		Expect(cycle(at, true)).To(Equal(constants.SLOExcludedUnobserved))
+	})
+
+	It("reads a slow cycle as a cycle: only a skipped one is unobserved", func() {
+		// A cycle's period stretches with its own run time; a slow Prometheus
+		// makes one take three times as long now and then. Timing would read
+		// that as a skip, and on a recurring stutter exclude the model for
+		// ever. Cycles counted cannot.
 		at := clock
-		for _, step := range []time.Duration{15 * time.Second, 15 * time.Second, 19 * time.Second,
-			15 * time.Second, 25 * time.Second, 15 * time.Second} {
+		for i := range 40 {
+			step := 16 * time.Second
+			if i%9 == 4 {
+				step = 45 * time.Second
+			}
 			at = at.Add(step)
-			ttft, _ := a.noteTransient("ns/m", steady, window, grace, at)
-			Expect(ttft).To(BeEmpty(), "a %v step", step)
+			Expect(cycle(at, true)).To(BeEmpty(), "cycle %d", i)
 		}
 	})
 
@@ -212,10 +245,13 @@ var _ = Describe("noteTransient", func() {
 			ttft, _ = a.noteTransient("ns/m", group, window, grace, at)
 		}
 		Expect(ttft).To(Equal(constants.SLOExcludedStarting), "the last start's window and grace still hold")
-		for _, at := range ticks(clock.Add(startingMaxAge), clock.Add(startingMaxAge+window+grace)) {
+		// The last cycle counted as starting is the one before 30 minutes of
+		// pending: judged exactly window+grace after it.
+		lastStart := clock.Add(startingMaxAge - cadence)
+		for _, at := range ticks(clock.Add(startingMaxAge), lastStart.Add(window+grace)) {
 			ttft, _ = a.noteTransient("ns/m", group, window, grace, at)
 		}
-		Expect(ttft).To(BeEmpty(), "pending for longer than any start: judged")
+		Expect(ttft).To(BeEmpty(), "pending for 30 minutes is no longer a start: judged")
 
 		// Settled, then a new scale-up: a fresh start again.
 		steadyAt := clock.Add(startingMaxAge + window + grace + cadence)
@@ -239,8 +275,9 @@ var _ = Describe("noteTransient", func() {
 
 	It("forgets a model not seen for the window timeout", func() {
 		a.noteTransient("ns/m", steady, window, grace, clock)
-		Expect(a.EvictStale(clock.Add(windowTimeout+time.Minute)).Transients).To(Equal(3),
-			"ns/m and the two other models this suite watches")
+		held := len(a.transients)
+		Expect(held).To(BeNumerically(">=", 1))
+		Expect(a.EvictStale(clock.Add(windowTimeout + time.Minute)).Transients).To(Equal(held))
 		Expect(a.transients).To(BeEmpty())
 	})
 })

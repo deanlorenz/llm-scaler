@@ -15,8 +15,8 @@ import (
 // The engine analyzes one model at a time today, but the analyzer says it is
 // safe for concurrent use, and the per-cycle sweeps reach it from the engine
 // while a cycle could be analyzing. Run with go test -race this is what holds
-// the claim (dropping one lock made it report three races). CI does not run
-// the race detector, so there this checks only that nothing deadlocks.
+// the claim (dropping one lock made it report three races); make test runs
+// this package under -race for that reason.
 var _ = Describe("Analyzer under concurrent use", func() {
 	It("analyzes models, sweeps and notes presence at once without a race", func() {
 		rl := &domain.RouterLatency{WindowSeconds: 300, TTFTBuckets: buckets(1, 0.9, 3, 0.95, inf, 1.0),

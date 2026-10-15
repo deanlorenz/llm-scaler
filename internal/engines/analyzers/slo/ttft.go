@@ -100,12 +100,14 @@ func (a *Analyzer) observeTTFTInputs(key, variant, role string, rows []domain.Re
 			queue += w * rm.AvgQueueTime
 			wQueue += w
 		}
-		// Utilization is over the replicas that report a rate: one whose
-		// series is missing, or a fresh one with no rate yet, is not a
-		// replica computing nothing, and counting it would read low.
+		// Utilization is over every Ready replica. The collector reports a
+		// missing rate series and a replica computing nothing alike, as 0, and
+		// an idle replica beside busy ones -- low load, or prefill held back by
+		// decode -- is exactly what utilization must show. The cost is the
+		// rarer case: a replica whose series is missing reads as idle.
+		replicas++
 		if finite(rm.PrefillComputedTokenRate) && rm.PrefillComputedTokenRate > 0 {
 			tokenRate += rm.PrefillComputedTokenRate
-			replicas++
 		}
 		if saturatedForCeiling(rm) {
 			saturated = append(saturated, rm.PrefillComputedTokenRate)
