@@ -83,6 +83,9 @@ type GreedyByScoreOptimizer struct {
 
 	// draws is what the last non-shadow pass borrowed (BorrowDraws).
 	draws []BorrowDraw
+	// reclaims is what the last non-shadow pass grew into by Kueue's
+	// preemption of borrowers (ReclaimDraws).
+	reclaims []BorrowDraw
 	// flavors is what the last non-shadow pass placed on Kueue flavors'
 	// nodes (PlacedFlavors).
 	flavors []flavorUse
@@ -93,6 +96,15 @@ type GreedyByScoreOptimizer struct {
 // The engine keeps these as in flight until the pods exist.
 func (o *GreedyByScoreOptimizer) BorrowDraws() []BorrowDraw {
 	return o.draws
+}
+
+// ReclaimDraws returns the guaranteed replicas the last Optimize pass placed
+// on nominal Kueue reclaims from borrowers (BorrowDraw.Reclaim), one entry per
+// replica; nil when it placed none. The engine keeps them in flight, as it
+// does the draws, so neither a later cycle nor the wake spends the same
+// borrowed GPUs again before a read shows them.
+func (o *GreedyByScoreOptimizer) ReclaimDraws() []BorrowDraw {
+	return o.reclaims
 }
 
 // spendOp is one debit a pass made: gpus from key of the cluster budget (ns
@@ -223,11 +235,12 @@ func (o *GreedyByScoreOptimizer) Optimize(
 		bs.setCredit(o.BorrowCredit)
 	}
 	if !o.quiet {
-		o.draws, o.flavors = nil, nil
+		o.draws, o.flavors, o.reclaims = nil, nil, nil
 		defer func() {
 			o.draws = bs.drawsByVariant()
 			if bs != nil {
 				o.flavors = bs.flavors
+				o.reclaims = bs.reclaims
 			}
 		}()
 	}

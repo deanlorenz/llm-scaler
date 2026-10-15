@@ -291,10 +291,21 @@ type QueueFigures struct {
 	// Nominal for a queue that can reclaim, min(N, max(U, G) + cohortFree) for
 	// one that cannot. Nominal whenever Reason is set.
 	WithinNominal int
-	// LentOut is, for a counted queue that can reclaim, the part of its nominal
-	// a peer may hold now: N - max(U, G). Growth into it is guaranteed but
-	// debits the cohort's free pool (B3). 0 otherwise.
+	// LentOut is, for a counted queue that can reclaim (reclaimWithinCohort
+	// Any; LowerPriority is not counted), the part of its unused nominal that
+	// peers borrow now and Kueue would preempt them for: what its growth needs
+	// past PreemptAfter, capped at what the cohort's other members borrow on
+	// this flavor and resource (Kueue's status borrowed),
+	// min(Σ borrowed, max(0, N - max(U, G) - cohortFree)). Only growth into it
+	// may skip a node hole or count the borrowers' GPUs as free: those GPUs
+	// exist and are freed when Kueue preempts. 0 otherwise.
 	LentOut int
+	// PreemptAfter is, for a counted queue that can reclaim, how far it grows
+	// before Kueue has to preempt for it: what it keeps unused, max(0, G - U),
+	// plus the part of its unused nominal the cohort's free pool still covers.
+	// That growth is admitted without preemption, so it needs a node hole like
+	// any other; it debits the cohort's free pool (B3). 0 otherwise.
+	PreemptAfter int
 	// CohortFree is the cohort's free pool for this key; 0 when withheld.
 	CohortFree int
 	// KueueBorrowed is Kueue's own borrowed figure, a cross-check.
@@ -464,7 +475,8 @@ func ComputeBorrowing(t Topology, stale bool) Borrowing {
 			if reason == "" {
 				f.CohortFree = cohortFree(members[q.Cohort], key)
 				f.Guaranteed, f.Borrowable = reach(q, r, f.CohortFree)
-				f.WithinNominal, f.LentOut = withinNominal(q, r, f.CohortFree)
+				f.WithinNominal = withinNominal(q, r, f.CohortFree)
+				f.LentOut, f.PreemptAfter = reclaimable(q, r, f.CohortFree, peersBorrowed(members[q.Cohort], q.Name, key))
 				f.CoHeadroom, f.CoKept = coReach(q, key.Flavor)
 				if f.Guaranteed < r.Nominal {
 					f.GuaranteedReason = ReasonNominalLentOut
@@ -704,23 +716,54 @@ func reach(q QueueState, r QueueResource, free int) (guaranteed, borrowable int)
 	return guaranteed, max(0, top-guaranteed)
 }
 
-// withinNominal returns what a counted queue could reach without borrowing, and
-// the part of its nominal a peer may hold now (B3, B7).
+// withinNominal returns what a counted queue could reach without borrowing
+// (B7).
 //
 // A queue that can reclaim reaches its nominal whatever its peers hold, since
-// Kueue preempts them; the gap between what it keeps or uses and its nominal is
-// lent out, and growing into it takes those GPUs back from the free pool. A
-// queue that cannot reclaim reaches only what Kueue would admit now without
-// borrowing: what it keeps or uses, plus the free pool, never past nominal.
-// Using its guaranteed figure here instead would stop an idle queue on Kueue's
-// default (Never) from ever waking.
-func withinNominal(q QueueState, r QueueResource, free int) (within, lentOut int) {
+// Kueue preempts them. A queue that cannot reclaim reaches only what Kueue
+// would admit now without borrowing: what it keeps or uses, plus the free
+// pool, never past nominal. Using its guaranteed figure here instead would
+// stop an idle queue on Kueue's default (Never) from ever waking.
+func withinNominal(q QueueState, r QueueResource, free int) int {
 	_, kept := r.lent()
 	base := max(r.Reserved, kept)
 	if q.CanReclaim() {
-		return r.Nominal, max(0, r.Nominal-base)
+		return r.Nominal
 	}
-	return min(r.Nominal, addCapped(base, free)), 0
+	return min(r.Nominal, addCapped(base, free))
+}
+
+// reclaimable splits a reclaiming queue's growth up to its nominal (B3, N1).
+// Kueue admits it without preemption as far as what the queue keeps unused
+// and the cohort's free pool cover (after); past that it preempts borrowers,
+// and only as far as they borrow (lentOut): the GPUs a node hole is not
+// needed for, since a borrower's pods hold them now. Unused nominal nobody
+// borrows is not lent out: growth into it needs a node like any other, and
+// Kueue preempts nothing for it. Both 0 for a queue that cannot reclaim.
+func reclaimable(q QueueState, r QueueResource, free, borrowed int) (lentOut, after int) {
+	if !q.CanReclaim() {
+		return 0, 0
+	}
+	_, kept := r.lent()
+	unused := max(0, r.Nominal-max(r.Reserved, kept))
+	fromPool := min(unused, free)
+	return min(borrowed, unused-fromPool), max(0, kept-r.Reserved) + fromPool
+}
+
+// peersBorrowed is what the cohort's members other than self borrow of key,
+// by Kueue's own status figure: what Kueue may preempt to give a reclaiming
+// queue its nominal back.
+func peersBorrowed(qs []QueueState, self string, key ResourceKey) int {
+	n := 0
+	for _, q := range qs {
+		if q.Name == self {
+			continue
+		}
+		if r, ok := q.Resources[key]; ok {
+			n = addCapped(n, max(0, r.Borrowed))
+		}
+	}
+	return n
 }
 
 // BorrowDrift is, per ClusterQueue in a cohort whose reservation status Kueue

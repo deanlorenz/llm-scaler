@@ -120,12 +120,12 @@ type SelectionInput struct {
 	// fits by pools alone. A set fits only if each member's replica lands on a
 	// node: free GPUs as 4+4+8 hold one 8-GPU replica, not a P/D pair.
 	Nodes *allocation.NodeView
-	// Reclaimable is, per accelerator type, the nominal of the namespace's
-	// reclaiming queues that a peer holds now (allocation.ReclaimableNominal),
+	// Reclaimable is, per accelerator type, how the namespace's growth within
+	// its reclaiming queues' nominal splits (allocation.ReclaimableNominal),
 	// less what this tick's earlier wakes took of it: a replica no node holds
-	// still fits while it covers its GPUs, since Kueue preempts the borrowers
-	// filling those nodes to admit it.
-	Reclaimable map[string]int
+	// still fits when Kueue admits it by preempting the borrowers filling
+	// those nodes (allocation.Reclaim).
+	Reclaimable map[string]allocation.Reclaim
 	// QueueFlavor is, per accelerator, the flavor Kueue admits the namespace's
 	// replicas on within its queues (allocation.QueueFlavorOf): node fit lands
 	// each pod only on nodes carrying its node labels, with its tolerations, as

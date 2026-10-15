@@ -147,6 +147,9 @@ func (e *Engine) prepareBorrowing(ctx context.Context, constraints []*allocation
 	u := st.inFlight.Unreserved(now)
 	u.Gated, u.Admitted = gated, admitted
 	constraints = allocation.DeductUnreservedAt(constraints, u)
+	// What earlier cycles and wakes grew into by Kueue's reclaim is not
+	// reclaimable again until a read shows it (N1).
+	constraints = allocation.DeductReclaimed(constraints, u.InFlight)
 	// A namespace whose gated pods could not be listed may hold any number of
 	// them: its cohorts borrow nothing new this cycle (G3).
 	unreadableCohorts := cohortsOf(constraints, unreadable)
@@ -236,7 +239,9 @@ func (e *Engine) warnBorrowNamespacesSplit(ctx context.Context, constraints []*a
 // them is not spent (W9) -- each cut to its variant's decided target. The
 // draws already in flight are cut to the decided targets too (Trim): a
 // target of 0 the engine decided is known, unlike a desired count read back
-// as 0 (W6).
+// as 0 (W6). The replicas the pass grew into nominal Kueue reclaims from
+// borrowers are recorded beside them, the same way, and not returned: they
+// borrow nothing (N1).
 func (e *Engine) recordBorrowDraws(optimizer allocation.ScalingOptimizer, decisions []domain.VariantDecision, now time.Time) []allocation.BorrowDraw {
 	e.borrowing.passFlavors = nil
 	g, ok := optimizer.(*allocation.GreedyByScoreOptimizer)
@@ -245,27 +250,31 @@ func (e *Engine) recordBorrowDraws(optimizer allocation.ScalingOptimizer, decisi
 	}
 	e.borrowing.passFlavors = g.PlacedFlavors()
 	targets := decidedTargets(decisions)
-	var draws []allocation.BorrowDraw
-	for _, d := range g.BorrowDraws() {
-		if e.cyclePlanned[utils.GetNamespacedKey(d.Namespace, d.ModelID)] {
-			continue
-		}
-		if t, ok := targets[d.Namespace+"/"+d.Variant]; ok && t < d.Target {
-			cut := d.Target - t
-			if cut >= d.Replicas {
+	keep := func(in []allocation.BorrowDraw) []allocation.BorrowDraw {
+		var out []allocation.BorrowDraw
+		for _, d := range in {
+			if e.cyclePlanned[utils.GetNamespacedKey(d.Namespace, d.ModelID)] {
 				continue
 			}
-			per := (d.GPUs + d.Replicas - 1) / d.Replicas
-			d.Replicas -= cut
-			d.GPUs = min(d.GPUs, d.Replicas*per)
-			d.CreditReplicas = min(d.CreditReplicas, d.Replicas)
-			d.CreditGPUs = min(d.CreditGPUs, d.GPUs)
-			d.Target = t
+			if t, ok := targets[d.Namespace+"/"+d.Variant]; ok && t < d.Target {
+				cut := d.Target - t
+				if cut >= d.Replicas {
+					continue
+				}
+				per := (d.GPUs + d.Replicas - 1) / d.Replicas
+				d.Replicas -= cut
+				d.GPUs = min(d.GPUs, d.Replicas*per)
+				d.CreditReplicas = min(d.CreditReplicas, d.Replicas)
+				d.CreditGPUs = min(d.CreditGPUs, d.GPUs)
+				d.Target = t
+			}
+			out = append(out, d)
 		}
-		draws = append(draws, d)
+		return out
 	}
+	draws := keep(g.BorrowDraws())
 	e.borrowing.inFlight.Trim(targets)
-	e.borrowing.inFlight.RecordAt(draws, now)
+	e.borrowing.inFlight.RecordAt(slices.Concat(draws, keep(g.ReclaimDraws())), now)
 	return draws
 }
 

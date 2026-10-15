@@ -50,31 +50,32 @@ func (e *Engine) beginTick() {
 
 // debitReclaimed records what a wake took of its namespace's reclaimable
 // nominal. Caller holds wakeMu.
-func (e *Engine) debitReclaimed(namespace string, took map[string]int) {
+func (e *Engine) debitReclaimed(namespace string, took map[string]allocation.Reclaim) {
 	if len(took) == 0 {
 		return
 	}
 	if e.tickReclaimed == nil {
-		e.tickReclaimed = map[string]map[string]int{}
+		e.tickReclaimed = map[string]map[string]allocation.Reclaim{}
 	}
 	if e.tickReclaimed[namespace] == nil {
-		e.tickReclaimed[namespace] = map[string]int{}
+		e.tickReclaimed[namespace] = map[string]allocation.Reclaim{}
 	}
 	for t, n := range took {
-		e.tickReclaimed[namespace][t] += n
+		prev := e.tickReclaimed[namespace][t]
+		e.tickReclaimed[namespace][t] = allocation.Reclaim{After: prev.After + n.After, GPUs: prev.GPUs + n.GPUs}
 	}
 }
 
 // reclaimableLeft is reclaimable less what this tick's earlier wakes of
 // namespace took of it. Caller holds wakeMu.
-func (e *Engine) reclaimableLeft(namespace string, reclaimable map[string]int) map[string]int {
+func (e *Engine) reclaimableLeft(namespace string, reclaimable map[string]allocation.Reclaim) map[string]allocation.Reclaim {
 	took := e.tickReclaimed[namespace]
 	if len(took) == 0 || len(reclaimable) == 0 {
 		return reclaimable
 	}
-	out := make(map[string]int, len(reclaimable))
-	for t, n := range reclaimable {
-		out[t] = max(0, n-took[t])
+	out := make(map[string]allocation.Reclaim, len(reclaimable))
+	for t, r := range reclaimable {
+		out[t] = allocation.Reclaim{After: max(0, r.After-took[t].After), GPUs: max(0, r.GPUs-took[t].GPUs)}
 	}
 	return out
 }

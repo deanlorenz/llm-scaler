@@ -486,9 +486,14 @@ type ExternalBorrow struct {
 	BorrowCap int `json:"borrowCap"`
 	// WithinNominal is what the queue could reach without borrowing (B7).
 	WithinNominal int `json:"withinNominal"`
-	// LentOut is the guaranteed part of a reclaiming queue's nominal a peer may
-	// hold now; growing into it debits the cohort's free pool.
+	// LentOut is the part of a reclaiming queue's (reclaimWithinCohort Any)
+	// unused nominal its peers borrow now and Kueue would preempt them for,
+	// past PreemptAfter: growth into it needs no node hole.
 	LentOut int `json:"lentOut,omitempty"`
+	// PreemptAfter is how far a reclaiming queue grows before Kueue has to
+	// preempt for it: what it keeps unused plus what the cohort's free pool
+	// covers. Growth into it needs a node hole and debits the pool.
+	PreemptAfter int `json:"preemptAfter,omitempty"`
 	// SourceBorrowed is the source's own figure of what the queue borrows now,
 	// logged as a cross-check.
 	SourceBorrowed int    `json:"kueueBorrowed"`
@@ -519,7 +524,7 @@ const BorrowReasonNominalLentOut = "nominal-lent-out"
 // Withheld returns b with borrowing not counted, for reason: the guaranteed
 // and within-nominal figures fall back to nominal, as when borrowing is off.
 func (b ExternalBorrow) Withheld(reason string) ExternalBorrow {
-	b.Guaranteed, b.WithinNominal, b.Borrowable, b.LentOut, b.Reason = b.Nominal, b.Nominal, 0, 0, reason
+	b.Guaranteed, b.WithinNominal, b.Borrowable, b.LentOut, b.PreemptAfter, b.Reason = b.Nominal, b.Nominal, 0, 0, 0, reason
 	return b
 }
 

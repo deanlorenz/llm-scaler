@@ -20,11 +20,16 @@ import (
 // NominalFigures is one namespace's nominal figures for one accelerator type,
 // summed over the queues it is granted.
 type NominalFigures struct {
-	// LentOut is the nominal of its reclaiming queues (reclaimWithinCohort Any,
-	// or LowerPriority while it outranks the borrowers) that a peer may hold
-	// now: growth into it places without a node hole, since Kueue preempts the
-	// borrowers to admit it.
+	// LentOut is the nominal of its reclaiming queues (reclaimWithinCohort Any
+	// only: a LowerPriority queue is read as one that cannot reclaim) that
+	// peers borrow now and Kueue preempts them for, past PreemptAfter
+	// (kueue.QueueFigures.LentOut): a whole replica grown into it places
+	// without a node hole, since the borrowers' pods hold its GPUs.
 	LentOut int
+	// PreemptAfter is the growth Kueue admits for it before it preempts: what
+	// its reclaiming queues keep unused plus what the cohort's free pool
+	// covers. It needs a node hole.
+	PreemptAfter int
 	// WithinNominal is what it can reach without borrowing (B7).
 	WithinNominal int
 	// Guaranteed is what it reaches whatever the cohort's free pool holds:
@@ -63,10 +68,11 @@ func (q *QuotaInventory) uncountedNominal(ext config.ExternalQuotas, view *borro
 				f.Guaranteed += r.Guaranteed
 				if r.Counted() {
 					f.LentOut += r.LentOut
+					f.PreemptAfter += r.PreemptAfter
 				}
 			}
 			f.NominalLentOut = max(0, nominal-f.WithinNominal)
-			if f.LentOut == 0 && f.NominalLentOut == 0 && f.WithinNominal <= f.Guaranteed {
+			if f.LentOut == 0 && f.PreemptAfter == 0 && f.NominalLentOut == 0 && f.WithinNominal <= f.Guaranteed {
 				continue // nominal, whatever the pool holds: nothing to carry
 			}
 			if out[ns] == nil {
@@ -111,25 +117,53 @@ func (q *QuotaInventory) NamespaceNominal(activeNamespaces []string) map[string]
 	return out
 }
 
-// lentOutFor is the nominal of ns's reclaiming queues a peer holds, of the
-// type acc, as constraints read it: from NamespaceBorrow where the namespace
-// is counted, else from NamespaceNominal. Two entries reading one queue give
-// the smaller figure.
-func lentOutFor(constraints []*ResourceConstraints, ns, acc string) int {
-	got, seen := 0, false
-	take := func(n int) {
-		if !seen || n < got {
-			got, seen = n, true
+// Reclaim is how one namespace's growth of one type within its reclaiming
+// queues' nominal splits (kueue.QueueFigures): After is the growth Kueue
+// admits before it preempts for it, which needs a node hole; GPUs is what it
+// then reclaims from borrowers, which does not. A replica places without a
+// hole only when After no longer covers it and GPUs covers it whole.
+type Reclaim struct {
+	After int
+	GPUs  int
+}
+
+// exempt reports whether a replica of g GPUs grown next is Kueue's to
+// reclaim: past After, and whole within GPUs.
+func (r Reclaim) exempt(g int) bool {
+	return r.After < g && r.GPUs >= g
+}
+
+// take is what a replica of g GPUs grown next consumes: After first, then
+// GPUs, each clamped at 0.
+func (r Reclaim) take(g int) Reclaim {
+	after := min(g, max(0, r.After))
+	return Reclaim{After: after, GPUs: min(g-after, max(0, r.GPUs))}
+}
+
+// reclaimFor is ns's Reclaim of the type acc, as constraints read it: from
+// NamespaceBorrow where the namespace is counted, else from NamespaceNominal.
+// Two entries reading one queue give the cautious figure: the smaller GPUs,
+// the larger After.
+func reclaimFor(constraints []*ResourceConstraints, ns, acc string) Reclaim {
+	var got Reclaim
+	seen := false
+	take := func(lentOut, after int) {
+		if !seen {
+			got, seen = Reclaim{After: after, GPUs: lentOut}, true
+			return
 		}
+		got.GPUs, got.After = min(got.GPUs, lentOut), max(got.After, after)
 	}
 	for _, c := range constraints {
 		if c == nil {
 			continue
 		}
 		if k, ok := accelerator.FindKey(c.NamespaceBorrow[ns], acc); ok {
-			take(c.NamespaceBorrow[ns][k].LentOut)
+			b := c.NamespaceBorrow[ns][k]
+			take(b.LentOut, b.PreemptAfter)
 		} else if k, ok := accelerator.FindKey(c.NamespaceNominal[ns], acc); ok {
-			take(c.NamespaceNominal[ns][k].LentOut)
+			f := c.NamespaceNominal[ns][k]
+			take(f.LentOut, f.PreemptAfter)
 		}
 	}
 	return got
@@ -182,11 +216,13 @@ func (bs *borrowState) withLent(ns string, available map[string]int) map[string]
 
 // CreditReclaimable returns copies of constraints whose cluster bounds (every
 // provider that is not namespace-scoped: the physical limiter, a cluster
-// quota) count reclaimable -- per type, the nominal a namespace's reclaiming
-// queues lent out (ReclaimableNominal) -- as free for that namespace's wake:
-// the borrowers hold those GPUs, and Kueue preempts them to admit it. The
-// input when reclaimable is empty.
-func CreditReclaimable(constraints []*ResourceConstraints, reclaimable map[string]int) []*ResourceConstraints {
+// quota) count reclaimable -- per type, the GPUs a namespace's reclaiming
+// queues take back from borrowers (ReclaimableNominal, Reclaim.GPUs) -- as
+// free for that namespace's wake: the borrowers hold those GPUs, and Kueue
+// preempts them to admit it. Unused nominal nobody borrows is not credited:
+// its GPUs are as free, or as used by others, as the bounds say. The input
+// when reclaimable is empty.
+func CreditReclaimable(constraints []*ResourceConstraints, reclaimable map[string]Reclaim) []*ResourceConstraints {
 	if len(reclaimable) == 0 {
 		return constraints
 	}
@@ -199,9 +235,9 @@ func CreditReclaimable(constraints []*ResourceConstraints, reclaimable map[strin
 		cc := *c
 		cc.Pools = maps.Clone(c.Pools)
 		for t, p := range cc.Pools {
-			for rt, n := range reclaimable {
+			for rt, r := range reclaimable {
 				if accelerator.SameName(rt, t) {
-					p.Used = max(0, p.Used-n)
+					p.Used = max(0, p.Used-r.GPUs)
 				}
 			}
 			cc.Pools[t] = p
@@ -325,11 +361,12 @@ func poolLimit(c *ResourceConstraints, ns, t string) int {
 	return config.QuotaUnlimited
 }
 
-// ReclaimableNominal is, per accelerator type, the nominal of ns's reclaiming
-// queues that a peer holds (NominalFigures.LentOut): a wake into it needs no
-// node hole, since Kueue preempts the borrowers to admit it. Read from the
-// constraints before WithinNominal drops the borrowing figures.
-func ReclaimableNominal(constraints []*ResourceConstraints, ns string) map[string]int {
+// ReclaimableNominal is, per accelerator type, how ns's growth within its
+// reclaiming queues' nominal splits (Reclaim): a wake past After and within
+// GPUs -- what peers borrow that Kueue preempts them for -- needs no node
+// hole. Types with nothing to reclaim are left out. Read from the constraints
+// before WithinNominal drops the borrowing figures.
+func ReclaimableNominal(constraints []*ResourceConstraints, ns string) map[string]Reclaim {
 	types := map[string]bool{}
 	for _, c := range constraints {
 		if c == nil {
@@ -342,13 +379,13 @@ func ReclaimableNominal(constraints []*ResourceConstraints, ns string) map[strin
 			types[t] = true
 		}
 	}
-	var out map[string]int
+	var out map[string]Reclaim
 	for t := range types {
-		if n := lentOutFor(constraints, ns, t); n > 0 {
+		if r := reclaimFor(constraints, ns, t); r.GPUs > 0 {
 			if out == nil {
-				out = map[string]int{}
+				out = map[string]Reclaim{}
 			}
-			out[t] = n
+			out[t] = r
 		}
 	}
 	return out

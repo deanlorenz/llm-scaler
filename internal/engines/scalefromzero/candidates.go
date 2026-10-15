@@ -240,10 +240,11 @@ type placement struct {
 	// reclaim: its within-nominal figure, which the wake is checked against,
 	// is below its nominal.
 	nominalLentOut bool
-	// reclaimable is, per type, the nominal the namespace's reclaiming queues
-	// lent out (allocation.ReclaimableNominal): a wake into it needs no node
-	// hole. decideWake takes off what this tick's earlier wakes used.
-	reclaimable map[string]int
+	// reclaimable is, per type, how the namespace's growth within its
+	// reclaiming queues' nominal splits (allocation.ReclaimableNominal): a
+	// wake replica Kueue admits by preempting borrowers needs no node hole.
+	// decideWake takes off what this tick's earlier wakes used.
+	reclaimable map[string]allocation.Reclaim
 	// queueFlavor is SelectionInput.QueueFlavor, read from the constraints
 	// before the wake's within-nominal view drops their borrowing figures.
 	queueFlavor func(accelerator string) *kueue.FlavorPlacement
@@ -311,18 +312,21 @@ func (e *Engine) placementFor(ctx context.Context, namespace string) placement {
 	// off it first, from the process-wide record (A1, W7). A namespace read
 	// and not counted is held to its queues' within-nominal figure too.
 	p.nominalLentOut = allocation.NominalLentOutAny(constraints, namespace)
-	// Nominal a reclaiming queue of the namespace lent out is its to take
-	// back: Kueue preempts the borrowers whose pods fill those GPUs and nodes
-	// to admit the wake, so neither the cluster bounds nor the node view
-	// refuse it for their being in use (W1).
-	p.reclaimable = allocation.ReclaimableNominal(constraints, namespace)
+	// Nominal a reclaiming queue of the namespace lent out and peers borrow
+	// is its to take back: Kueue preempts the borrowers whose pods fill those
+	// GPUs and nodes to admit the wake, so neither the cluster bounds nor the
+	// node view refuse it for their being in use (W1) -- only that part, and
+	// only once the cohort's free pool no longer covers the growth (N1), less
+	// what earlier cycles and wakes already grew into that way.
+	record := allocation.DefaultBorrowInFlight
+	unreserved := record.Unreserved(now)
+	p.reclaimable = allocation.ReclaimableNominal(allocation.DeductReclaimed(constraints, unreserved.InFlight), namespace)
 	// Kueue admits the wake's pods on the queue's flavor, within nominal too:
 	// the node fit lands them only where it does (W5), as the steady placer
 	// fits a guaranteed replica.
 	p.queueFlavor = allocation.QueueFlavorOf(constraints, namespace)
-	record := allocation.DefaultBorrowInFlight
 	constraints = allocation.CreditReclaimable(
-		allocation.WithinNominalNow(constraints, record.Unreserved(now), record.Blocked(now)), p.reclaimable)
+		allocation.WithinNominalNow(constraints, unreserved, record.Blocked(now)), p.reclaimable)
 	e.logBudgets(ctx, namespace, constraints, views, skipped, snapshotAge)
 	p.constraints = constraints
 	return p

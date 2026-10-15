@@ -124,16 +124,17 @@ func TestBorrowInFlightEntriesOrderIsStable(t *testing.T) {
 }
 
 func TestCompareInFlightKeys(t *testing.T) {
-	base := inFlightKey{"a", "v", "c", "f", "r"}
+	base := inFlightKey{"a", "v", "c", "f", "r", false}
 	if compareInFlightKeys(base, base) != 0 {
 		t.Error("a key compares unequal to itself")
 	}
 	later := []inFlightKey{
-		{"b", "a", "a", "a", "a"},
-		{"a", "w", "a", "a", "a"},
-		{"a", "v", "d", "a", "a"},
-		{"a", "v", "c", "g", "a"},
-		{"a", "v", "c", "f", "s"},
+		{"b", "a", "a", "a", "a", false},
+		{"a", "w", "a", "a", "a", false},
+		{"a", "v", "d", "a", "a", false},
+		{"a", "v", "c", "g", "a", false},
+		{"a", "v", "c", "f", "s", false},
+		{"a", "v", "c", "f", "r", true},
 	}
 	for _, k := range later {
 		if compareInFlightKeys(base, k) >= 0 || compareInFlightKeys(k, base) <= 0 {

@@ -29,7 +29,7 @@ func borrowModel(ns, id string, gpr, current, want int, podGPUs []int) ModelScal
 type nsBorrow struct {
 	ns                        string
 	guaranteed, used, cap, wn int
-	lentOut                   int
+	lentOut, after            int
 }
 
 // borrowQuota is a namespace-scope quota provider counting borrowing for nss,
@@ -46,7 +46,8 @@ func borrowQuota(free int, nss ...nsBorrow) *ResourceConstraints {
 	}
 	for _, n := range nss {
 		c.NamespacePools[n.ns] = map[string]ResourcePool{"H100": {Limit: n.guaranteed, Used: n.used}}
-		c.NamespaceBorrow[n.ns] = map[string]NamespaceBorrow{"H100": {Cap: n.cap, WithinNominal: n.wn, LentOut: n.lentOut}}
+		c.NamespaceBorrow[n.ns] = map[string]NamespaceBorrow{"H100": {Cap: n.cap, WithinNominal: n.wn, LentOut: n.lentOut,
+			PreemptAfter: n.after}}
 		c.NamespaceCohorts[n.ns] = []string{"c"}
 	}
 	c.Pools = reachAggregate(reachPools(c.NamespacePools, c.NamespaceBorrow))

@@ -27,11 +27,19 @@ type NamespaceBorrow struct {
 	// when the static entry leaves the type unlimited and Kueue does not bound
 	// it either.
 	WithinNominal int
-	// LentOut is the part of the guaranteed figure a peer may hold now: nominal
-	// of a reclaiming queue that is lent out. Growth into it is not gated, since
-	// Kueue preempts the borrower, but debits the shared pool in the same cycle,
-	// clamped at 0, so no other queue borrows the same GPUs.
+	// LentOut is the part of the guaranteed figure that peers borrow now and
+	// Kueue preempts them for (kueue.QueueFigures.LentOut): nominal of a
+	// reclaiming queue (reclaimWithinCohort Any) past PreemptAfter, capped at
+	// what the cohort's other members borrow. Only a whole replica within it,
+	// grown past PreemptAfter, may place without a node hole, since the
+	// borrowers' pods hold its GPUs; it debits the shared pool in the same
+	// cycle, clamped at 0, so no other queue borrows the same GPUs.
 	LentOut int
+	// PreemptAfter is the guaranteed growth Kueue admits before it preempts
+	// for the namespace: what its reclaiming queues keep unused plus the part
+	// of their unused nominal the cohort's free pool covers. It needs a node
+	// hole like any replica, and debits the shared pool.
+	PreemptAfter int
 	// NominalLentOut is the part of the namespace's nominal quota it cannot
 	// reach: a queue that cannot reclaim lent it to a peer, so its guaranteed
 	// figure is below nominal (kueue.ReasonNominalLentOut). Reported, not

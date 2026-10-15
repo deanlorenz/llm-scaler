@@ -178,7 +178,7 @@ type Engine struct {
 	tickNodes tickNodeView
 	// tickReclaimed is, per namespace and type, the lent-out nominal this
 	// tick's wakes grew into without a node hole (placement.reclaimable).
-	tickReclaimed map[string]map[string]int
+	tickReclaimed map[string]map[string]allocation.Reclaim
 	// lentOutBlocked is the models (modelGroup.key) this loop set
 	// nominal-lent-out on wva_model_scaling_blocked for (reportLentOutBlocked).
 	lentOutBlocked sync.Map

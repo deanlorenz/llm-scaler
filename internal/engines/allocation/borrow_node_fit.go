@@ -67,33 +67,41 @@ func (v *NodeView) eligibleFit(r replicaFit) []int {
 
 // PlaceReplicasReclaiming is PlaceReplicas for a wake that may grow into
 // nominal its namespace's reclaiming queues lent out (reclaimable, per type;
-// ReclaimableNominal): a replica no node holds still places while what is
-// left of reclaimable covers its GPUs -- Kueue preempts the borrowers whose
-// pods fill those nodes to admit it -- and is taken from it. A replica a node
-// holds is debited there and takes nothing. It reports whether every replica
-// placed and, per key of reclaimable, what the placement took from it. A nil
-// view places everything and takes nothing.
-func (v *NodeView) PlaceReplicasReclaiming(reps []ReplicaShape, commit bool, reclaimable map[string]int) (bool, map[string]int) {
+// ReclaimableNominal). Each replica, in order, grows the namespace: it takes
+// what is left of the type's Reclaim.After first -- growth Kueue admits
+// without preemption -- then of its GPUs (Reclaim.take). A replica no node
+// holds still places when it is Kueue's to reclaim (Reclaim.exempt: past
+// After, and whole within the GPUs peers borrow) -- Kueue preempts the
+// borrowers whose pods fill those nodes to admit it. A replica a node holds is
+// debited there. It reports whether every replica placed and, per key of
+// reclaimable, what the placement took of it. A nil view places everything
+// and takes nothing.
+func (v *NodeView) PlaceReplicasReclaiming(reps []ReplicaShape, commit bool, reclaimable map[string]Reclaim) (bool, map[string]Reclaim) {
 	if v == nil {
 		return true, nil
 	}
 	trial := v.Clone()
 	left := maps.Clone(reclaimable)
-	var took map[string]int
+	var took map[string]Reclaim
 	for _, r := range reps {
-		if trial.place(trial.fitOf(r)) {
+		onNode := trial.place(trial.fitOf(r))
+		k, ok := accelerator.FindKey(left, r.Accelerator)
+		if !ok {
+			if !onNode {
+				return false, nil
+			}
 			continue
 		}
-		k, ok := accelerator.FindKey(left, r.Accelerator)
 		g := max(r.GPUs, 1)
-		if !ok || left[k] < g {
+		if !onNode && !left[k].exempt(g) {
 			return false, nil
 		}
-		left[k] -= g
+		t := left[k].take(g)
+		left[k] = Reclaim{After: left[k].After - t.After, GPUs: left[k].GPUs - t.GPUs}
 		if took == nil {
-			took = map[string]int{}
+			took = map[string]Reclaim{}
 		}
-		took[k] += g
+		took[k] = Reclaim{After: took[k].After + t.After, GPUs: took[k].GPUs + t.GPUs}
 	}
 	if commit {
 		v.adopt(trial)

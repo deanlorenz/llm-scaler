@@ -39,6 +39,15 @@ type BorrowDraw struct {
 	// on the variant's own draw still in flight (GreedyByScoreOptimizer.
 	// BorrowCredit): borrowed this pass, already in the record.
 	CreditGPUs, CreditReplicas int
+	// Reclaim marks growth within nominal that Kueue admits by preempting
+	// borrowers (Reclaim.GPUs), not a draw on the pool: held in flight so
+	// that no later decision -- the next cycle, a wake -- counts the same
+	// borrowed GPUs as reclaimable again (DeductReclaimed). Cohort, Flavor
+	// and Resource name the chunk whose read shows it once it lands; empty
+	// when the namespace's cohorts have none serving the accelerator.
+	Reclaim bool
+	// Accelerator is the type a Reclaim entry was placed for.
+	Accelerator string
 }
 
 // nsBorrowLeft is what one namespace may still borrow of one accelerator type
@@ -47,8 +56,11 @@ type nsBorrowLeft struct {
 	// cap is the GPUs it may still draw past its guaranteed figure; negative
 	// is no cap but the pool's.
 	cap int
-	// lentOut is guaranteed growth still to debit from the pool.
-	lentOut int
+	// after and lentOut are the namespace's Reclaim still to grow into:
+	// guaranteed growth Kueue admits before it preempts for it, then what it
+	// reclaims from borrowers (NamespaceBorrow.PreemptAfter and LentOut).
+	// Growth into either debits the pool.
+	after, lentOut int
 	// priority is NamespaceBorrow.HighestPriority, the higher of two entries'.
 	priority *int32
 	// coHeadroom and coKept are NamespaceBorrow.CoHeadroom and CoKept still
@@ -84,6 +96,9 @@ type borrowState struct {
 	// flavors is every replica the pass placed on a Kueue flavor's nodes, in
 	// order (PlacedFlavors); rolled back with the placement.
 	flavors []flavorUse
+	// reclaims is every guaranteed replica the pass grew into nominal Kueue
+	// reclaims from borrowers (ReclaimDraws); rolled back with the placement.
+	reclaims []BorrowDraw
 	// blocked reports a variant that may not borrow this pass; nil blocks none.
 	blocked func(namespace, modelID, variant string) bool
 	// blockedIn reports a model that may not draw on one cohort's pools this
@@ -115,7 +130,7 @@ func newBorrowState(constraints []*ResourceConstraints, nodes *NodeView) *borrow
 				}
 				prev, seen := bs.borrow[ns][accType]
 				if !seen {
-					bs.borrow[ns][accType] = &nsBorrowLeft{cap: drawable, lentOut: b.LentOut, priority: b.HighestPriority,
+					bs.borrow[ns][accType] = &nsBorrowLeft{cap: drawable, after: b.PreemptAfter, lentOut: b.LentOut, priority: b.HighestPriority,
 						coHeadroom: maps.Clone(b.CoHeadroom), coKept: maps.Clone(b.CoKept)}
 					continue
 				}
@@ -124,6 +139,7 @@ func newBorrowState(constraints []*ResourceConstraints, nodes *NodeView) *borrow
 				// Two Kueue-backed entries hold the namespace: the tighter cap.
 				prev.cap = tighterBudget(prev.cap, drawable)
 				prev.lentOut = max(prev.lentOut, b.LentOut)
+				prev.after = max(prev.after, b.PreemptAfter)
 				if b.HighestPriority != nil && (prev.priority == nil || *b.HighestPriority > *prev.priority) {
 					prev.priority = b.HighestPriority
 				}
@@ -145,9 +161,10 @@ func newBorrowState(constraints []*ResourceConstraints, nodes *NodeView) *borrow
 			for accType, f := range perType {
 				if prev, seen := bs.lent[ns][accType]; seen {
 					prev.lentOut = min(prev.lentOut, f.LentOut)
+					prev.after = max(prev.after, f.PreemptAfter)
 					continue
 				}
-				bs.lent[ns][accType] = &nsBorrowLeft{lentOut: f.LentOut}
+				bs.lent[ns][accType] = &nsBorrowLeft{after: f.PreemptAfter, lentOut: f.LentOut}
 			}
 		}
 	}
@@ -198,6 +215,19 @@ func (bs *borrowState) debitPool(ns, acc string, n int) {
 	}
 }
 
+// reclaimDraw is the in-flight entry of one guaranteed replica of gpus GPUs
+// that Kueue admits by preempting borrowers (BorrowDraw.Reclaim), named after
+// the first of the namespace's cohort chunks serving acc, whose read shows the
+// replica once it lands.
+func (bs *borrowState) reclaimDraw(ns, modelID, variant, acc string, gpus, target int) BorrowDraw {
+	d := BorrowDraw{Namespace: ns, ModelID: modelID, Variant: variant, GPUs: gpus, Replicas: 1, Target: target,
+		Reclaim: true, Accelerator: acc}
+	if cs := bs.cohortChunks(ns, acc); len(cs) > 0 {
+		d.Cohort, d.Flavor, d.Resource = cs[0].Cohort, cs[0].Flavor, cs[0].Resource
+	}
+	return d
+}
+
 // saveLeft copies a per-namespace allowance map by value, co-resource
 // allowances included.
 func saveLeft(m map[string]map[string]*nsBorrowLeft) map[string]map[string]nsBorrowLeft {
@@ -233,6 +263,7 @@ type borrowSave struct {
 	guaranteed map[string]int
 	credit     map[string]map[string]int
 	flavors    int
+	reclaims   int
 }
 
 // flavorUse is one replica placed on a Kueue flavor's nodes.
@@ -347,7 +378,7 @@ func cloneCredit(m map[string]map[string]int) map[string]map[string]int {
 }
 
 func (bs *borrowState) save(guaranteed map[string]int) borrowSave {
-	s := borrowSave{borrow: saveLeft(bs.borrow), lent: saveLeft(bs.lent), nodes: bs.nodes.saveDebits(), draws: len(bs.draws), guaranteed: maps.Clone(guaranteed), credit: cloneCredit(bs.credit), flavors: len(bs.flavors)}
+	s := borrowSave{borrow: saveLeft(bs.borrow), lent: saveLeft(bs.lent), nodes: bs.nodes.saveDebits(), draws: len(bs.draws), guaranteed: maps.Clone(guaranteed), credit: cloneCredit(bs.credit), flavors: len(bs.flavors), reclaims: len(bs.reclaims)}
 	for _, c := range bs.chunks {
 		s.free = append(s.free, c.Free)
 		s.coFree = append(s.coFree, maps.Clone(c.CoFree))
@@ -368,6 +399,7 @@ func (bs *borrowState) restore(s borrowSave, guaranteed map[string]int) {
 	bs.draws = bs.draws[:s.draws]
 	bs.credit = s.credit
 	bs.flavors = bs.flavors[:s.flavors]
+	bs.reclaims = bs.reclaims[:s.reclaims]
 	clear(guaranteed)
 	maps.Copy(guaranteed, s.guaranteed)
 }
@@ -601,14 +633,21 @@ func (p *modelPlacer) placeReplica(variant string, r replicaFit, g int, requests
 	if left < 0 || left >= g {
 		// Growth into nominal a reclaiming queue lent out: the namespace's
 		// own, counted or not (W1). A lender at zero whose nodes borrowers
-		// fill must still order the replica Kueue preempts them for.
+		// fill must still order the replica Kueue preempts them for -- but
+		// only a replica Kueue does preempt for: past what it admits without
+		// preemption (after), and whole within what peers borrow (lentOut,
+		// N1). Unused nominal nobody borrows frees no node.
 		lent := borrow
 		if lent == nil {
 			if k, ok := accelerator.FindKey(bs.lent[p.namespace], acc); ok {
 				lent = bs.lent[p.namespace][k]
 			}
 		}
-		reclaim := lent != nil && lent.lentOut > 0
+		var share Reclaim
+		if lent != nil {
+			share = Reclaim{After: lent.after, GPUs: lent.lentOut}
+		}
+		reclaim := share.exempt(g)
 		if !bs.coGuaranteed(p.namespace, acc, borrow, requests, reclaim) { // K2c
 			return p.refuse(variant, false), false
 		}
@@ -628,10 +667,16 @@ func (p *modelPlacer) placeReplica(variant string, r replicaFit, g int, requests
 		if left >= 0 {
 			p.guaranteed[key] = left - g
 		}
-		if reclaim {
-			n := min(g, lent.lentOut)
-			lent.lentOut -= n
-			bs.debitPool(p.namespace, acc, n)
+		if lent != nil {
+			// Kueue charges it to the cohort either way: from the free pool
+			// first, then from what it preempts.
+			took := share.take(g)
+			lent.after -= took.After
+			lent.lentOut -= took.GPUs
+			bs.debitPool(p.namespace, acc, took.After+took.GPUs)
+			if took.GPUs > 0 {
+				bs.reclaims = append(bs.reclaims, bs.reclaimDraw(p.namespace, p.modelID, variant, acc, took.GPUs, target))
+			}
 		}
 		return true, false
 	}

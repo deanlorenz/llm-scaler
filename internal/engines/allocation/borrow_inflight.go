@@ -6,6 +6,8 @@ import (
 	"slices"
 	"sync"
 	"time"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
 )
 
 // BorrowInFlight is borrowed growth the greedy optimizer ordered that Kueue
@@ -72,10 +74,13 @@ type Unreserved struct {
 
 type inFlightKey struct {
 	namespace, variant, cohort, flavor, resource string
+	// reclaim keeps a variant's growth by Kueue's reclaim apart from its draw
+	// on the same chunk.
+	reclaim bool
 }
 
 func keyOfDraw(d BorrowDraw) inFlightKey {
-	return inFlightKey{d.Namespace, d.Variant, d.Cohort, d.Flavor, d.Resource}
+	return inFlightKey{d.Namespace, d.Variant, d.Cohort, d.Flavor, d.Resource, d.Reclaim}
 }
 
 // VariantObservation is one variant's replica counts as a cycle sees them.
@@ -230,14 +235,15 @@ func trimDraw(d BorrowDraw, target int) (BorrowDraw, bool) {
 }
 
 // Entries returns the draws still in flight -- ordered, their pods not
-// created -- in a stable order. The lagging ones are not among them.
+// created -- in a stable order. The lagging ones are not among them, nor is
+// growth by Kueue's reclaim (BorrowDraw.Reclaim), which draws on no pool.
 func (b *BorrowInFlight) Entries() []BorrowDraw {
 	if b == nil {
 		return nil
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.entriesLocked()
+	return slices.DeleteFunc(b.entriesLocked(), func(d BorrowDraw) bool { return d.Reclaim })
 }
 
 func (b *BorrowInFlight) entriesLocked() []BorrowDraw {
@@ -292,7 +298,8 @@ func (b *BorrowInFlight) Blocked(now time.Time) map[string]bool {
 }
 
 // compareInFlightKeys orders keys by namespace, variant, cohort, flavor and
-// resource. Keys are unique in the record, so the order is total.
+// resource, a draw before a reclaim. Keys are unique in the record, so the
+// order is total.
 func compareInFlightKeys(a, b inFlightKey) int {
 	return cmp.Or(
 		cmp.Compare(a.namespace, b.namespace),
@@ -300,7 +307,16 @@ func compareInFlightKeys(a, b inFlightKey) int {
 		cmp.Compare(a.cohort, b.cohort),
 		cmp.Compare(a.flavor, b.flavor),
 		cmp.Compare(a.resource, b.resource),
+		cmp.Compare(boolOrder(a.reclaim), boolOrder(b.reclaim)),
 	)
+}
+
+// boolOrder orders false before true.
+func boolOrder(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // DeductUnreserved returns copies of constraints whose shared pools no longer
@@ -332,7 +348,9 @@ func DeductUnreservedAt(constraints []*ResourceConstraints, u Unreserved) []*Res
 	if !HasBorrowing(constraints) || (len(u.InFlight) == 0 && len(u.Gated) == 0 && len(u.Admitted) == 0 && !anyPending(constraints)) {
 		return constraints
 	}
-	inFlight := lagCoveredByGated(u.InFlight, u.Gated, u.Admitted)
+	// Growth by Kueue's reclaim draws on no pool (DeductReclaimed).
+	inFlight := lagCoveredByGated(slices.DeleteFunc(slices.Clone(u.InFlight), func(d BorrowDraw) bool { return d.Reclaim }),
+		u.Gated, u.Admitted)
 	out := make([]*ResourceConstraints, 0, len(constraints))
 	for _, c := range constraints {
 		if c == nil || c.NamespaceBorrow == nil || len(c.SharedPools) == 0 {
@@ -417,6 +435,58 @@ func lagCoveredByGated(draws []BorrowDraw, gated map[string]map[string]int, admi
 		c := min(cover[d.Namespace], d.GPUs)
 		d.GPUs -= c
 		cover[d.Namespace] -= c
+	}
+	return out
+}
+
+// DeductReclaimed returns copies of constraints whose namespaces' LentOut
+// (NamespaceBorrow and NamespaceNominal) no longer count what the scaling
+// manager already grew into by Kueue's reclaim and a read may not show yet:
+// the Reclaim entries of inFlight, in flight, or lagging until a read of
+// their chunk after they resolved (W3). Without one, the GPUs peers borrow
+// stay reclaimable to the next cycle and the next wake, which would order
+// replicas for the same borrowed GPUs again (N1). Every figure clamps at 0.
+func DeductReclaimed(constraints []*ResourceConstraints, inFlight []BorrowDraw) []*ResourceConstraints {
+	var reclaims []BorrowDraw
+	for _, d := range inFlight {
+		if d.Reclaim && d.GPUs > 0 {
+			reclaims = append(reclaims, d)
+		}
+	}
+	if len(reclaims) == 0 {
+		return constraints
+	}
+	out := make([]*ResourceConstraints, 0, len(constraints))
+	for _, c := range constraints {
+		if c == nil || (len(c.NamespaceBorrow) == 0 && len(c.NamespaceNominal) == 0) {
+			out = append(out, c)
+			continue
+		}
+		cc := *c
+		cc.NamespaceBorrow = maps.Clone(c.NamespaceBorrow)
+		cc.NamespaceNominal = maps.Clone(c.NamespaceNominal)
+		for _, d := range reclaims {
+			if !d.ResolvedAt.IsZero() && slices.ContainsFunc(c.SharedPools, func(p SharedPoolChunk) bool {
+				return p.Cohort == d.Cohort && p.Flavor == d.Flavor && p.Resource == d.Resource && readAfter(&p, d.ResolvedAt)
+			}) {
+				continue // a read after it landed counts it
+			}
+			if k, ok := accelerator.FindKey(cc.NamespaceBorrow[d.Namespace], d.Accelerator); ok {
+				perType := maps.Clone(cc.NamespaceBorrow[d.Namespace])
+				b := perType[k]
+				b.LentOut = max(0, b.LentOut-d.GPUs)
+				perType[k] = b
+				cc.NamespaceBorrow[d.Namespace] = perType
+			}
+			if k, ok := accelerator.FindKey(cc.NamespaceNominal[d.Namespace], d.Accelerator); ok {
+				perType := maps.Clone(cc.NamespaceNominal[d.Namespace])
+				f := perType[k]
+				f.LentOut = max(0, f.LentOut-d.GPUs)
+				perType[k] = f
+				cc.NamespaceNominal[d.Namespace] = perType
+			}
+		}
+		out = append(out, &cc)
 	}
 	return out
 }
