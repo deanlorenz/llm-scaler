@@ -145,7 +145,7 @@ var _ = Describe("gpuUsageViews", func() {
 // name violated the mission's "sat invisible downstream" rule even though
 // its body already only called allocation.CompositeHasSignal); these cases
 // now exercise the gate through its real callers directly.
-var _ = Describe("quota usage gate (allocation.CompositeHasSignal, post-rename)", func() {
+var _ = Describe("quota usage gate (measuredThisCycle, post-rename)", func() {
 	requestWithComposite := func(composite allocation.NamedAnalyzerResult, replicas int) allocation.ModelScalingRequest {
 		return allocation.ModelScalingRequest{
 			Namespace:       "team-a",
@@ -178,13 +178,13 @@ var _ = Describe("quota usage gate (allocation.CompositeHasSignal, post-rename)"
 		Expect(usage).To(HaveKeyWithValue("A100", 3))
 	})
 
-	// test 8d: no signal at all -> no autoscaling, and specifically here, no
-	// quota charge for a request that was not usefully measured this cycle.
-	// The composite's own Reason vocabulary is the decision path (C0-agree,
-	// C1-single, C2-sat-fallback, C4-no-signal — spec §5.1.2), not an
-	// analyzer's no-data/error/P0-store sentinels: a real composite with no
-	// usable signal for an SO records allocation.DecisionNoSignal there.
-	It("does not charge usage for a request whose composite carries no usable signal (test 8d)", func() {
+	// test 8d, revised on the port to main: no signal at all -> no autoscaling
+	// decision, but the replicas still hold their GPUs, so the quota is still
+	// charged for them. Charging them nothing published headroom the warm
+	// pool then grew into (TestASteadyFleetStillPublishesHeadroom, added on
+	// main after this branch forked). The decision gate is
+	// allocation.CompositeHasSignal; the accounting gate is a result at all.
+	It("still charges usage for a request whose composite carries no usable signal (test 8d)", func() {
 		noSignal := allocation.NamedAnalyzerResult{
 			Name: "CompositeSignal",
 			Result: &domain.AnalyzerResult{
@@ -193,7 +193,8 @@ var _ = Describe("quota usage gate (allocation.CompositeHasSignal, post-rename)"
 		}
 		req := requestWithComposite(noSignal, 3)
 		usage := computeCurrentGPUUsage([]allocation.ModelScalingRequest{req})
-		Expect(usage).ToNot(HaveKey("A100"))
+		Expect(usage).To(HaveKeyWithValue("A100", 3))
+		Expect(allocation.CompositeHasSignal(noSignal)).To(BeFalse(), "and it still decides nothing")
 	})
 
 	It("does not charge usage for a request with a nil composite Result (absent — not measured this cycle)", func() {

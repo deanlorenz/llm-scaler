@@ -1131,10 +1131,21 @@ func gpuUsageByType(req allocation.ModelScalingRequest, perType map[string]int) 
 // computeCurrentGPUUsage sums the GPUs WVA's own variants hold, per accelerator
 // type, across this cycle's population. This is the ManagedUsage view: the only
 // consumption an operator-declared quota may be charged for.
+// measuredThisCycle reports whether the request carries a result this cycle,
+// so its replica counts are charged to a quota. A result with no usable signal
+// still counts: its replicas hold their GPUs whatever the analyzers made of
+// them, and charging them nothing published headroom the warm pool then grew
+// into (TestASteadyFleetStillPublishesHeadroom). A request with no result at
+// all was not measured, and is not charged. Deliberately not
+// allocation.CompositeHasSignal, which gates decisions, not accounting.
+func measuredThisCycle(req allocation.ModelScalingRequest) bool {
+	return req.CompositeSignal.Result != nil
+}
+
 func computeCurrentGPUUsage(requests []allocation.ModelScalingRequest) map[string]int {
 	usage := make(map[string]int)
 	for _, req := range requests {
-		if !allocation.CompositeHasSignal(req.CompositeSignal) {
+		if !measuredThisCycle(req) {
 			continue
 		}
 		gpuUsageByType(req, usage)
@@ -1155,7 +1166,7 @@ func computeCurrentGPUUsageByNamespace(requests []allocation.ModelScalingRequest
 			perType = make(map[string]int)
 			usage[req.Namespace] = perType
 		}
-		if !allocation.CompositeHasSignal(req.CompositeSignal) {
+		if !measuredThisCycle(req) {
 			continue
 		}
 		gpuUsageByType(req, perType)
