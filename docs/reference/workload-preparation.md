@@ -476,9 +476,10 @@ file by file:
 - a subPath that does not exist yet is nothing to seed, not an error;
 - a symbolic link is skipped, and the log names it: vLLM writes none, and a
   link is not the cache;
-- a file only its owner can read is copied readable by every user, and the
+- a file not every user can read is copied readable by every user, and the
   log counts it: the engine may run as another user;
 - every directory it creates is readable and searchable by every user.
+  Publish does the same in the seed.
 
 The copies are made as root. Kept at their source modes, vLLM's `600` AOT files
 would be unreadable to an engine that does not run as root, on every seeded
@@ -681,8 +682,9 @@ make engine-cache-verify NAMESPACE=<ns> ENGINE_CACHE_KEYS='<key>' ENGINE_CACHE_U
 ```
 
 vLLM writes no symbolic links. A link under the key, or a linked directory on
-the way to it, is `UNREADABLE` and is never followed. Seeding and publish never
-copy a link, so one found here was made on that node.
+the way to it, is `UNREADABLE` and is never followed. Seeding and publish do
+not copy links. An earlier version copied with `cp -a`, which copies links,
+so a link found here was made on that node or copied by that version.
 
 `engine-cache-keys` takes no key from a log line saying an AOT save failed
 (`unable to save AOT compiled function to ...`), or that a load failed and

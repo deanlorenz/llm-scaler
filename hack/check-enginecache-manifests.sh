@@ -283,8 +283,36 @@ if [ "$(cat "$LC/rank_0_0/f" 2>/dev/null)" = l ] && [ ! -e "$LC/rank_0_0/link" ]
 else
     fail "merge copied a symlink, or did not say so: $(ls -lR "$LC" 2>&1 | head -12; cat "$L/run.out")"
 fi
-ls -ld "$LC/rank_0_0/private" 2>/dev/null | grep -q '^-......r' && grep -q '1 file(s) only their owner could read were copied readable by every user' "$L/run.out" \
+ls -ld "$LC/rank_0_0/private" 2>/dev/null | grep -q '^-......r' && grep -q '1 file(s) not readable by every user were copied readable by every user' "$L/run.out" \
     && ok "merge: a file only its owner could read is copied readable by every user, and counted" || fail "merge: private file: $(ls -ld "$LC/rank_0_0/private" 2>&1); $(cat "$L/run.out")"
+# a name with two leading dots is copied like any other; a 640 file counts as
+# not readable by every user, a 644 file does not
+DD="$T/dotdot"; DK="$DD/seed/vllm/torch_compile_cache"
+mkdir -p "$DK/keyD" "$DK/keyG" "$DD/cache"
+echo o > "$DK/keyD/..odd"; echo f > "$DK/keyD/f"; echo g > "$DK/keyG/g640"; chmod 640 "$DK/keyG/g640"; echo h > "$DK/keyG/g644"; chmod 644 "$DK/keyG/g644"
+sed -n "/^preparer_script() {/,/^SCRIPT$/p" deploy/enginecache.sh | sed '1,2d;$d' | sed "s|/seed|$DD/seed|g; s|/engine-cache|$DD/cache|g; s|^trap .*||" > "$DD/p.sh"
+SEED_MARKER=.seeded SEED_ID=shared:dd MARKER=.prepared HOSTNAME=n1 "$SH" "$DD/p.sh" > "$DD/run.out" 2>&1
+[ "$(cat "$DD/cache/vllm/torch_compile_cache/keyD/..odd" 2>/dev/null)" = o ] && grep -q "4 file(s) copied" "$DD/run.out" \
+    && ok "merge: a file named ..odd is copied and counted" || fail "merge: ..odd: $(ls -la "$DD/cache/vllm/torch_compile_cache/keyD" 2>&1 | tr '\n' ';') $(cat "$DD/run.out")"
+grep -q "1 file(s) not readable by every user were copied readable by every user, for example $DK/keyG/g640" "$DD/run.out" \
+    && ok "merge: a 640 file is counted as not readable by every user, a 644 file is not" || fail "merge: 640 count: $(cat "$DD/run.out")"
+# a file whose copy fails is not counted as copied readable: not in a
+# directory the node already had, nor under a new directory that is then
+# removed. A fake cp fails on zFAIL, so this holds under root too.
+mkdir -p "$T/failz"
+cat > "$T/failz/cp" <<EOF
+#!/bin/sh
+for a in "\$@"; do case "\$a" in *zFAIL*) echo "cp: fake failure on \$a" >&2; exit 1 ;; esac; done
+exec "$REAL_CP" "\$@"
+EOF
+chmod +x "$T/failz/cp"
+FZ="$T/failcount"; FK="$FZ/seed/vllm/torch_compile_cache"
+mkdir -p "$FK/keyE" "$FK/keyR" "$FZ/cache/vllm/torch_compile_cache/keyE"
+echo e > "$FK/keyE/zFAIL"; chmod 600 "$FK/keyE/zFAIL"; echo a > "$FK/keyR/a"; chmod 600 "$FK/keyR/a"; echo z > "$FK/keyR/zFAIL"
+sed -n "/^preparer_script() {/,/^SCRIPT$/p" deploy/enginecache.sh | sed '1,2d;$d' | sed "s|/seed|$FZ/seed|g; s|/engine-cache|$FZ/cache|g; s|^trap .*||" > "$FZ/p.sh"
+PATH="$T/failz:$PATH" SEED_MARKER=.seeded SEED_ID=shared:fz MARKER=.prepared HOSTNAME=n1 "$SH" "$FZ/p.sh" > "$FZ/run.out" 2>&1
+grep -q "did not complete" "$FZ/run.out" && [ ! -e "$FZ/cache/vllm/torch_compile_cache/keyR" ] && ! grep -q "copied readable by every user" "$FZ/run.out" \
+    && ok "merge: a file whose copy failed, or was removed with its new directory, is not counted as copied readable" || fail "merge: failed copies counted: $(cat "$FZ/run.out")"
 LP="$T/linkpub"; mkdir -p "$LP/node/vllm/torch_compile_cache/keyM" "$LP/seed"
 echo m > "$LP/node/vllm/torch_compile_cache/keyM/f"; echo q > "$LP/node/vllm/torch_compile_cache/keyM/private"; chmod 600 "$LP/node/vllm/torch_compile_cache/keyM/private"
 ln -s /etc/hostname "$LP/node/vllm/torch_compile_cache/keyM/link"
@@ -317,6 +345,10 @@ modes_case() { # $1: merge or publish; $2: gnu or busybox
     for d in vllm/torch_compile_cache vllm/torch_compile_cache/torch_aot_compile "$k" "$k/rank_0_0"; do
         ls -ld "$dst/$d" 2>/dev/null | grep -q '^d......r.x' || bad="$bad $d not o+rx;"
     done
+    # publish also creates the seed subPath and its engine directory
+    if [ "$1" = publish ]; then
+        for d in . vllm; do ls -ld "$dst/$d" 2>/dev/null | grep -q '^d......r.x' || bad="$bad seed $d not o+rx;"; done
+    fi
     [ "$rc" = 0 ] && [ -z "$bad" ] && ok "$1 ($2 cp): a 600 file under 700 directories is copied o+r, its directories o+rx" \
         || fail "$1 ($2 cp) modes: rc=$rc$bad $(ls -lR "$dst/vllm" 2>&1 | head -12 | tr '\n' ';') $(cat "$W/run.out")"
 }

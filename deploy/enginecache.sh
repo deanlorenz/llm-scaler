@@ -286,17 +286,19 @@ rm -f /tmp/.ec-cp-check /tmp/.ec-cp-check.2
 # node's own. It walks every directory and copies one file at a time:
 #  * a symlink is skipped and logged: vLLM writes none, and a link is not
 #    the cache (it would point at whatever the target is on each node);
-#  * a file only its owner can read is copied readable by every user, and
-#    counted: the engine may run as another UID;
+#  * a file not every user can read is copied readable by every user, and
+#    counted once its copy succeeds: the engine may run as another UID;
 #  * a new directory is removed whole when any copy under it fails, so no
 #    half-copied key is left behind, and the merge is marked incomplete;
+#    what was counted under it is uncounted;
 #    a directory that cannot be listed is a failed copy, not an empty one.
-# The copier owns every copy, whatever owned the original.
+# The copier owns every copy, whatever owned the original. The globs match
+# every name: plain, one leading dot, and two leading dots (..x).
 merge() {
-  local e n t was
+  local e n t was wa wp wpe pub
   # a directory that cannot be listed would glob to nothing and read as empty
   ls -a "$1" >/dev/null || { complete=0; return; }
-  for e in "$1"/* "$1"/.[!.]*; do
+  for e in "$1"/* "$1"/.[!.]* "$1"/..?*; do
     [ -e "$e" ] || [ -L "$e" ] || continue
     n="${e##*/}"; t="$2/$n"
     if [ -L "$e" ]; then
@@ -304,13 +306,15 @@ merge() {
     elif [ -e "$t" ] || [ -L "$t" ]; then
       if [ -d "$e" ] && [ -d "$t" ] && [ ! -L "$t" ]; then merge "$e" "$t"; fi
     elif [ -d "$e" ]; then
-      was="$complete"; complete=1
+      was="$complete"; wa="$added"; wp="$private"; wpe="$private_eg"; complete=1
       mkdir "$t" && chmod a+rx "$t" || complete=0
       [ "$complete" = 0 ] || merge "$e" "$t"
-      if [ "$complete" = 1 ]; then complete="$was"; else complete=0; rm -rf "$t"; fi
+      if [ "$complete" = 1 ]; then complete="$was"; else complete=0; rm -rf "$t"; added="$wa"; private="$wp"; private_eg="$wpe"; fi
     elif [ -f "$e" ]; then
-      ls -ld "$e" | grep -q '^-......r' || { private="$private."; [ -n "$private_eg" ] || private_eg="$e"; }
-      if [ "$cpa" = 1 ]; then cp -a --no-preserve=ownership "$e" "$t"; else cp "$e" "$t"; fi && chmod a+r "$t" && added="$added." || { complete=0; rm -f "$t"; }
+      pub=0; ls -ld "$e" | grep -q '^-......r' && pub=1
+      if [ "$cpa" = 1 ]; then cp -a --no-preserve=ownership "$e" "$t"; else cp "$e" "$t"; fi && chmod a+r "$t" || { complete=0; rm -f "$t"; continue; }
+      added="$added."
+      [ "$pub" = 1 ] || { private="$private."; [ -n "$private_eg" ] || private_eg="$e"; }
     else
       echo "engine cache: skipped $e: not a file or a directory"
     fi
@@ -319,7 +323,7 @@ merge() {
 # merge_report prints what the merge skipped or changed.
 merge_report() {
   [ -z "$links" ] || echo "engine cache: ${#links} symlink(s) skipped (named above)"
-  [ -z "$private" ] || echo "engine cache: ${#private} file(s) only their owner could read were copied readable by every user, for example $private_eg"
+  [ -z "$private" ] || echo "engine cache: ${#private} file(s) not readable by every user were copied readable by every user, for example $private_eg"
 }
 seeded_from=""
 [ ! -f "/engine-cache/$SEED_MARKER" ] || read -r seeded_from < "/engine-cache/$SEED_MARKER" || seeded_from=""
@@ -830,7 +834,9 @@ cmd_delete() {
 publish_script() {
     cat <<'SCRIPT'
 dst="/seed${SEED_SUBPATH:+/$SEED_SUBPATH}"
-mkdir -p "$dst" || exit 1
+# umask 022: every directory mkdir -p creates is readable and searchable by
+# every user, as the merge makes its own; one that exists is left as it is
+(umask 022; mkdir -p "$dst") || exit 1
 # cp -a without ownership is GNU only; busybox cp refuses the option. Try it
 # once; without it a plain cp copies the content and mode, not the times.
 cpa=0
@@ -841,17 +847,19 @@ rm -f /tmp/.ec-cp-check /tmp/.ec-cp-check.2
 # node's own. It walks every directory and copies one file at a time:
 #  * a symlink is skipped and logged: vLLM writes none, and a link is not
 #    the cache (it would point at whatever the target is on each node);
-#  * a file only its owner can read is copied readable by every user, and
-#    counted: the engine may run as another UID;
+#  * a file not every user can read is copied readable by every user, and
+#    counted once its copy succeeds: the engine may run as another UID;
 #  * a new directory is removed whole when any copy under it fails, so no
 #    half-copied key is left behind, and the merge is marked incomplete;
+#    what was counted under it is uncounted;
 #    a directory that cannot be listed is a failed copy, not an empty one.
-# The copier owns every copy, whatever owned the original.
+# The copier owns every copy, whatever owned the original. The globs match
+# every name: plain, one leading dot, and two leading dots (..x).
 merge() {
-  local e n t was
+  local e n t was wa wp wpe pub
   # a directory that cannot be listed would glob to nothing and read as empty
   ls -a "$1" >/dev/null || { complete=0; return; }
-  for e in "$1"/* "$1"/.[!.]*; do
+  for e in "$1"/* "$1"/.[!.]* "$1"/..?*; do
     [ -e "$e" ] || [ -L "$e" ] || continue
     n="${e##*/}"; t="$2/$n"
     if [ -L "$e" ]; then
@@ -859,13 +867,15 @@ merge() {
     elif [ -e "$t" ] || [ -L "$t" ]; then
       if [ -d "$e" ] && [ -d "$t" ] && [ ! -L "$t" ]; then merge "$e" "$t"; fi
     elif [ -d "$e" ]; then
-      was="$complete"; complete=1
+      was="$complete"; wa="$added"; wp="$private"; wpe="$private_eg"; complete=1
       mkdir "$t" && chmod a+rx "$t" || complete=0
       [ "$complete" = 0 ] || merge "$e" "$t"
-      if [ "$complete" = 1 ]; then complete="$was"; else complete=0; rm -rf "$t"; fi
+      if [ "$complete" = 1 ]; then complete="$was"; else complete=0; rm -rf "$t"; added="$wa"; private="$wp"; private_eg="$wpe"; fi
     elif [ -f "$e" ]; then
-      ls -ld "$e" | grep -q '^-......r' || { private="$private."; [ -n "$private_eg" ] || private_eg="$e"; }
-      if [ "$cpa" = 1 ]; then cp -a --no-preserve=ownership "$e" "$t"; else cp "$e" "$t"; fi && chmod a+r "$t" && added="$added." || { complete=0; rm -f "$t"; }
+      pub=0; ls -ld "$e" | grep -q '^-......r' && pub=1
+      if [ "$cpa" = 1 ]; then cp -a --no-preserve=ownership "$e" "$t"; else cp "$e" "$t"; fi && chmod a+r "$t" || { complete=0; rm -f "$t"; continue; }
+      added="$added."
+      [ "$pub" = 1 ] || { private="$private."; [ -n "$private_eg" ] || private_eg="$e"; }
     else
       echo "engine cache: skipped $e: not a file or a directory"
     fi
@@ -874,12 +884,12 @@ merge() {
 # merge_report prints what the merge skipped or changed.
 merge_report() {
   [ -z "$links" ] || echo "engine cache: ${#links} symlink(s) skipped (named above)"
-  [ -z "$private" ] || echo "engine cache: ${#private} file(s) only their owner could read were copied readable by every user, for example $private_eg"
+  [ -z "$private" ] || echo "engine cache: ${#private} file(s) not readable by every user were copied readable by every user, for example $private_eg"
 }
 complete=1; added=""; links=""; private=""; private_eg=""
 for d in vllm flashinfer triton; do
   [ -d "/engine-cache/$d" ] || continue
-  mkdir -p "$dst/$d" || exit 1
+  (umask 022; mkdir -p "$dst/$d") || exit 1
   merge "/engine-cache/$d" "$dst/$d"
 done
 merge_report
@@ -1184,7 +1194,7 @@ root="$1"; shift
 walk() {
   local e
   if [ ! -r "$1" ] || [ ! -x "$1" ]; then bad="$1"; return; fi
-  for e in "$1"/* "$1"/.[!.]*; do
+  for e in "$1"/* "$1"/.[!.]* "$1"/..?*; do
     if [ -L "$e" ]; then link="$e"; return 0; fi
     [ -e "$e" ] || continue
     if [ -d "$e" ]; then
@@ -1272,7 +1282,7 @@ private() {
 }
 hasfile() {
   local e
-  for e in "$1"/* "$1"/.[!.]*; do
+  for e in "$1"/* "$1"/.[!.]* "$1"/..?*; do
     [ -L "$e" ] && continue
     [ -f "$e" ] && return 0
     [ -d "$e" ] && hasfile "$e" && return 0
