@@ -35,7 +35,25 @@ const (
 	// limitedByNodeFit: the pools had the GPUs, but no node held a whole
 	// replica (NodeView).
 	limitedByNodeFit
+	// limitedByPairWhole: a rule, not scarcity: a P/D pair borrows only
+	// whole, and its next pair would straddle guaranteed and borrowed
+	// capacity.
+	limitedByPairWhole
 )
+
+// PairBorrowsWholeName is what LimitedBy carries when the rule that a P/D
+// pair borrows only whole (the Kueue borrowing proposal, B9) -- not a pool,
+// not node fit -- held a pair back: its next pair would have put one role on
+// guaranteed and the other on borrowed capacity, and the guaranteed remainder
+// could not be filled by one role alone.
+const PairBorrowsWholeName = "pd-pair-borrows-whole"
+
+// markPairWhole records that the pair-borrows-whole rule held variantName back.
+func (t gpuLimitTracker) markPairWhole(variantName string) {
+	if t != nil {
+		t[variantName] = limitedByPairWhole
+	}
+}
 
 // NodeFitLimiterName is what LimitedBy, the ResourceConstrained event and the
 // limiter_name label of wva_decisions_limited_total carry when node fit, not a
@@ -102,9 +120,15 @@ func applyGPULimitAttribution(
 			continue
 		}
 		d.WasLimited = true
-		if cause == limitedByNodeFit {
+		switch cause {
+		case limitedByNodeFit:
 			d.LimitedBy = NodeFitLimiterName
-		} else {
+		case limitedByPairWhole:
+			// A rule held it back, not scarcity: no warm pool contends.
+			d.LimitedBy = PairBorrowsWholeName
+			emitter.RecordDecisionsLimitedTotalMetric(d.VariantName, d.Namespace, d.LimitedBy)
+			continue
+		default:
 			d.LimitedBy = bindingProvider(constraints, d.Namespace, d.AcceleratorName)
 		}
 		emitter.RecordDecisionsLimitedTotalMetric(d.VariantName, d.Namespace, d.LimitedBy)

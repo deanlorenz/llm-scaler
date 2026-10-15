@@ -50,11 +50,40 @@ var _ = Describe("Kueue borrowing, stage 2", func() {
 				[]*ResourceConstraints{physicalH100(64), borrowQuota(16, nsBorrow{ns: "b", guaranteed: guaranteed, used: 16, cap: config.QuotaUnlimited})}))
 			Expect(got["pd"]).To(Equal(want))
 		},
-		Entry("minReplicas 1: 8 guaranteed left, no straddling pair", 1, 24, 0),
-		Entry("minReplicas 0: 8 guaranteed left, no straddling pair", 0, 24, 0),
+		// W2: the odd guaranteed remainder takes one role alone, then the next
+		// pair borrows whole: 8 + 16, not 0.
+		Entry("minReplicas 1: 8 guaranteed left, one role fills it, the next pair borrows whole", 1, 24, 24),
+		Entry("minReplicas 0: 8 guaranteed left, one role fills it, the next pair borrows whole", 0, 24, 24),
 		Entry("control: guaranteed spent, the pair borrows whole", 1, 16, 16),
 		Entry("control: 16 guaranteed left, a guaranteed pair, then a wholly borrowed one", 0, 32, 32),
 	)
+
+	// W2 / A5: nominal 24, 8+8 pairs. After the first pair 8 guaranteed are
+	// left; every later pair would straddle it. The remainder takes one role
+	// alone on guaranteed capacity, and the pair after borrows whole: no
+	// borrowed draw without its partner.
+	It("fills an odd guaranteed remainder with one role, then borrows the next pair whole", func() {
+		o := NewGreedyByScoreOptimizer()
+		got := addedGPUs(o.Optimize(ctx, []ModelScalingRequest{pdGrowth(1)},
+			[]*ResourceConstraints{physicalH100(64), borrowQuota(64, nsBorrow{ns: "b", guaranteed: 24, used: 16, cap: config.QuotaUnlimited})}))
+		Expect(got["pd"]).To(Equal(32), "8 on guaranteed, then a borrowed pair and the last role alone")
+		borrowed := map[string]int{}
+		for _, d := range o.BorrowDraws() {
+			borrowed[d.Variant] += d.GPUs
+		}
+		Expect(borrowed["p"]+borrowed["d"]).To(Equal(24), "everything past guaranteed is borrowed")
+		Expect(borrowed["p"]).To(BeNumerically(">=", 8))
+		Expect(borrowed["d"]).To(BeNumerically(">=", 8), "the borrowed pair is whole")
+	})
+
+	// A pair the rule alone holds back is not attributed to a pool.
+	It("names the pair-borrows-whole rule, not a pool, when no role fills the remainder alone", func() {
+		limited := gpuLimitTracker{}
+		limited.markPairWhole("d")
+		ds := []domain.VariantDecision{{VariantName: "d", Namespace: "b", AcceleratorName: "H100"}}
+		applyGPULimitAttribution(ds, limited, nil)
+		Expect(ds[0].LimitedBy).To(Equal(PairBorrowsWholeName))
+	})
 
 	// B12: per (model, cohort), the cooldown doubles on a repeat up to 4x
 	// (40m with the 10m default) and one clean cooldown resets it.

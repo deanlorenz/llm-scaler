@@ -306,6 +306,9 @@ type modelPlacer struct {
 	// class is the priority class of the variant being placed
 	// (domain.VariantReplicaState.PriorityClass).
 	class string
+	// straddled is set when the last unit refused would have straddled
+	// guaranteed and borrowed capacity.
+	straddled bool
 }
 
 // newModelPlacer returns the placer for one model, or nil when the pass counts
@@ -328,17 +331,31 @@ func (bs *borrowState) newModelPlacer(namespace, modelID string, nsBudget map[st
 // even one replica of each role places, in which case nothing is committed.
 // Every trim marks the variant whose replica was refused: by node fit
 // (NodeFitLimiterName) when a pool held its GPUs and no node held it, else
-// by the pool.
+// by the pool. A unit refused only for straddling guaranteed and borrowed
+// capacity first fills the guaranteed remainder with one role alone
+// (fillGuaranteed), so the next pair borrows whole; when no role can, the
+// refusal is the rule's (PairBorrowsWholeName), not scarcity.
 func (p *modelPlacer) placeUnit(picked []string, kByRole map[string]int, variantByRole map[string]string,
 	variants []variantRecord, stateMap map[string]domain.VariantReplicaState) bool {
 	gpus := func(role string) int { return gpusPerReplicaFromState(stateMap, variantByRole[role]) }
 	for {
 		saved := p.bs.save(p.guaranteed)
-		p.cut, p.cutByNodes = "", false
+		p.cut, p.cutByNodes, p.straddled = "", false, false
 		if p.tryUnit(picked, kByRole, variantByRole, variants, stateMap) {
 			return true
 		}
 		p.bs.restore(saved, p.guaranteed)
+		if p.straddled {
+			// An odd guaranteed remainder (W2): fill it with one role's
+			// replicas alone -- a unit of one role straddles nothing -- and
+			// the next pair, all past guaranteed, borrows whole.
+			if p.fillGuaranteed(picked, kByRole, variantByRole, variants, stateMap) {
+				return true
+			}
+			// What is left is the rule's, not scarcity.
+			p.limited.markPairWhole(p.cut)
+			p.cut = ""
+		}
 		p.markCut()
 		largest := ""
 		for _, role := range picked {
@@ -374,7 +391,8 @@ func (p *modelPlacer) markCut() {
 // Kueue reclaims the decode, leave a prefill serving nothing; with minReplicas
 // 1 the placement timeout could not release the prefill either, and with
 // minReplicas 0 releasing it would give back guaranteed capacity. Such a unit
-// does not place; placeUnit then tries a smaller one.
+// does not place; placeUnit then fills the guaranteed remainder with one role
+// alone, or tries a smaller unit.
 func (p *modelPlacer) tryUnit(picked []string, kByRole map[string]int, variantByRole map[string]string,
 	variants []variantRecord, stateMap map[string]domain.VariantReplicaState) bool {
 	var borrowed, guaranteed int
@@ -399,9 +417,43 @@ func (p *modelPlacer) tryUnit(picked []string, kByRole map[string]int, variantBy
 	if len(picked) > 1 && borrowed > 0 && guaranteed > 0 {
 		// A P/D unit straddling guaranteed and borrowed capacity: the
 		// guaranteed figure ran out for part of it.
+		p.straddled = true
 		return p.refuse(variantByRole[picked[len(picked)-1]], false)
 	}
 	return true
+}
+
+// fillGuaranteed places, for the first role of picked that can, as many of
+// its kByRole replicas as fit the guaranteed budget alone, at least one, and
+// none on borrowed capacity; kByRole is then that role's count and 0 for the
+// others. It reports false, committing nothing, when no role places one
+// replica that way.
+func (p *modelPlacer) fillGuaranteed(picked []string, kByRole map[string]int, variantByRole map[string]string,
+	variants []variantRecord, stateMap map[string]domain.VariantReplicaState) bool {
+	for _, role := range picked {
+		v := variantByRole[role]
+		r := p.replica(variants, stateMap, v)
+		g := gpusPerReplicaFromState(stateMap, v)
+		n := 0
+		for n < kByRole[role] && p.guaranteed != nil && p.guaranteed[budgetKey(p.guaranteed, r.acc)] >= g {
+			saved := p.bs.save(p.guaranteed)
+			placed, drew := p.placeReplica(v, r, g, stateMap[v].ReplicaRequests, p.targets[v]+n+1)
+			if !placed || drew {
+				p.bs.restore(saved, p.guaranteed)
+				break
+			}
+			n++
+		}
+		if n == 0 {
+			continue
+		}
+		for _, other := range picked {
+			kByRole[other] = 0
+		}
+		kByRole[role] = n
+		return true
+	}
+	return false
 }
 
 // replica is one replica of variant v as the placer fits it: the view's
