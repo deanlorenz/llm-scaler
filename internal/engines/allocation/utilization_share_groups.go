@@ -2,6 +2,7 @@ package allocation
 
 import (
 	"cmp"
+	"fmt"
 	"maps"
 	"math"
 	"slices"
@@ -92,7 +93,8 @@ type ShareGroup struct {
 	// the type in the budget over every namespace (a cluster quota or the
 	// physical inventory), which a namespace quota can exceed (as in
 	// applyRescale). math.MaxInt when no such budget bounds the type: the sum
-	// of the namespace quotas is not one.
+	// of the namespace quotas is not one. The cluster group's is what that
+	// budget leaves after the namespace groups' claims (BuildShareGroups).
 	PhysicalFree int
 	// PoolCarve is the warm pools' unheld target taken out of Budget.
 	PoolCarve int
@@ -119,11 +121,14 @@ type ShareGroup struct {
 }
 
 // UnsharedExcludedNamespace is why a model of a namespace a namespace-scoped
-// quota excludes is planned in no group when no cluster-scoped quota bounds it:
-// such a namespace bypasses the namespace quota, so the only budget it could be
-// planned over is the other tenants' free quota, which does not count what it
-// holds.
-const UnsharedExcludedNamespace = "its namespace is excluded from the namespace quota and no cluster quota bounds it"
+// quota excludes is planned in no group when no finite cluster-scoped quota
+// covers its accelerator type acc: such a namespace bypasses the namespace
+// quota, so the only budget it could be planned over is the other tenants'
+// free quota, which does not count what it holds. A cluster quota of -1 for
+// the type is unlimited and counts as none.
+func UnsharedExcludedNamespace(acc string) string {
+	return fmt.Sprintf("excluded from the namespace quota, and no finite scope: cluster quota covers %s; add one to share it", acc)
+}
 
 // ShareGroupOptions controls which groups BuildShareGroups returns.
 type ShareGroupOptions struct {
@@ -135,7 +140,7 @@ type ShareGroupOptions struct {
 	ClusterIsQuota bool
 	PhysicalGroups bool
 	// Unshared, when set, is called for each model planned in no group
-	// because no budget bounds it, with why (UnsharedExcludedNamespace).
+	// because no budget bounds it, with why (UnsharedExcludedNamespace(acc)).
 	// Today's optimizer keeps such a model.
 	Unshared func(req ModelScalingRequest, why string)
 	// NamespaceEnabled reports whether a namespace-quota group takes part. Nil
@@ -226,7 +231,7 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 			// whatever ClusterIsQuota and PhysicalGroups say.
 			if free, ok := available[acc]; namespaceQuota && (!ok || free > MaxShareBudgetGPUs) {
 				if opts.Unshared != nil {
-					opts.Unshared(req, UnsharedExcludedNamespace)
+					opts.Unshared(req, UnsharedExcludedNamespace(acc))
 				}
 				continue
 			}
@@ -280,10 +285,30 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 		}
 	}
 
-	out := make([]ShareGroup, 0, len(groups))
-	for _, k := range slices.SortedFunc(maps.Keys(groups), func(a, b key) int {
+	keys := slices.SortedFunc(maps.Keys(groups), func(a, b key) int {
 		return cmp.Or(cmp.Compare(a.acc, b.acc), cmp.Compare(a.scope, b.scope))
-	}) {
+	})
+	// Every group draws on the same cluster budget: a namespace group may fill
+	// up to its own namespace's free quota, and every GPU it places is also
+	// charged to the cluster budget (a cluster quota counts every namespace).
+	// So the cluster group gets only what the cluster budget leaves after the
+	// namespace groups' largest claim: the cluster free less, per accelerator
+	// type, the sum of the namespace groups' free quota, floored at 0. (Capping
+	// each claim at the cluster free first gives the same remainder: once one
+	// claim reaches it, nothing is left either way.) The namespace groups keep
+	// the whole cluster free as their PhysicalFree; together they claim at
+	// most their sum. Planned fills across every group then stay within the
+	// cluster free.
+	claimed := map[string]int{}
+	for _, k := range keys {
+		nsFree, ok := availableByNS[k.scope][k.acc]
+		if k.scope != "" && ok && nsFree >= 0 && nsFree <= MaxShareBudgetGPUs {
+			claimed[k.acc] += nsFree // a namespace group formed over a finite budget
+		}
+	}
+
+	out := make([]ShareGroup, 0, len(groups))
+	for _, k := range keys {
 		g := groups[k]
 		free, ok := available[k.acc]
 		if k.scope != "" {
@@ -291,6 +316,14 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 		}
 		if !ok || free < 0 || free > MaxShareBudgetGPUs {
 			continue // unlimited, unknown, or no real bound: nothing to "use all of" (proposal §7.3)
+		}
+		physicalFree := math.MaxInt
+		if pf, ok := available[k.acc]; ok && pf >= 0 && pf < math.MaxInt {
+			physicalFree = pf
+		}
+		if k.scope == "" {
+			free = max(0, free-claimed[k.acc])
+			physicalFree = free
 		}
 		// free is net of what the group's planned roles hold by replica
 		// count: a namespace group's is its own namespace's quota, and the
@@ -305,10 +338,7 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 		}
 		g.PoolCarve = poolCarve(opts.PoolUnheld, k.acc, k.scope)
 		g.Budget = max(0, free+g.listed-opts.ReserveGPUs-g.PoolCarve)
-		g.PhysicalFree = math.MaxInt
-		if pf, ok := available[k.acc]; ok && pf >= 0 && pf < math.MaxInt {
-			g.PhysicalFree = pf
-		}
+		g.PhysicalFree = physicalFree
 		slices.SortFunc(g.Roles, func(a, b ShareRole) int { return cmp.Compare(a.Key, b.Key) })
 		slices.Sort(g.Frozen)
 		out = append(out, *g)

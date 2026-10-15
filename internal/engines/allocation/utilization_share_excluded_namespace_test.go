@@ -56,7 +56,20 @@ var _ = Describe("BuildShareGroups: a namespace a namespace quota excludes", fun
 			shareReq("mx", "ns-x", 100, held), // nearly idle: a need of 0.125 GPU
 		}
 	}
-	excluded := []string{"ns-x/mx: " + UnsharedExcludedNamespace}
+	excluded := []string{"ns-x/mx: " + UnsharedExcludedNamespace("A100")}
+	// expectNotPlanned checks that no group plans a role or a variant of the
+	// excluded namespace, not only that the cluster group is absent.
+	expectNotPlanned := func(groups map[string]ShareGroup) {
+		GinkgoHelper()
+		for scope, g := range groups {
+			for _, r := range g.Roles {
+				Expect(r.Key).NotTo(HavePrefix("ns-x/"), "group %q plans %s", scope, r.Key)
+			}
+			for k := range g.Variants {
+				Expect(k).NotTo(HavePrefix("ns-x/"), "group %q lists variants of %s", scope, k)
+			}
+		}
+	}
 
 	It("forms no cluster group without a cluster quota, however much the namespace holds", func() {
 		for _, held := range []int{2, 14, 26} {
@@ -65,9 +78,10 @@ var _ = Describe("BuildShareGroups: a namespace a namespace quota excludes", fun
 			}, namespaceQuota)
 			// ClusterIsQuota as the engine used to pass it for any quota entry:
 			// the namespace quota's sum must not be read as a cluster budget.
-			for _, opts := range []ShareGroupOptions{{ClusterIsQuota: true}, {}} {
+			for _, opts := range []ShareGroupOptions{{ClusterIsQuota: true}, {PhysicalGroups: true}, {}} {
 				groups, unshared := build(fleet(held), cons, opts)
 				Expect(groups).NotTo(HaveKey(""), "held=%d: a cluster group over the other tenants' quota", held)
+				expectNotPlanned(groups)
 				Expect(unshared).To(Equal(excluded), "held=%d", held)
 				// The tenants keep their own groups and their own budgets.
 				Expect(groups).To(HaveKey("team-a"))
@@ -92,7 +106,49 @@ var _ = Describe("BuildShareGroups: a namespace a namespace quota excludes", fun
 		Expect(unshared).To(Equal(excluded))
 	})
 
-	It("plans it in the cluster group over the cluster quota alone when one is declared", func() {
+	It("says which accelerator type has no finite cluster quota", func() {
+		Expect(UnsharedExcludedNamespace("H100")).To(Equal(
+			"excluded from the namespace quota, and no finite scope: cluster quota covers H100; add one to share it"))
+	})
+
+	It("asks nothing more of an unshared model: no exclusion check, no weight", func() {
+		cons := constraintsOf(map[string]map[string]int{
+			"team-a": {"A100": 2}, "team-b": {"A100": 2}, "ns-x": {"A100": 2},
+		}, namespaceQuota)
+		var asked []string
+		opts := ShareGroupOptions{
+			ClusterIsQuota: true,
+			Exclude: func(req ModelScalingRequest, _ bool) string {
+				asked = append(asked, "exclude "+modelKey(req))
+				return ""
+			},
+			Weight: func(req ModelScalingRequest, _ bool) float64 {
+				asked = append(asked, "weight "+modelKey(req))
+				return 1
+			},
+		}
+		groups, unshared := build(fleet(2), cons, opts)
+		Expect(unshared).To(Equal(excluded))
+		expectNotPlanned(groups)
+		Expect(asked).NotTo(ContainElement(HaveSuffix("ns-x/mx")))
+		Expect(asked).To(ContainElement("exclude team-a/ma"))
+	})
+
+	It("does not share it under a cluster quota of -1 for its type: an unlimited quota is no finite bound", func() {
+		unlimited := config.QuotaLimiterConfig{
+			Name: "cluster", Type: "quota", Scope: config.QuotaScopeCluster,
+			ClusterQuotas: map[string]int{"A100": -1},
+		}
+		cons := constraintsOf(map[string]map[string]int{
+			"team-a": {"A100": 2}, "team-b": {"A100": 2}, "ns-x": {"A100": 2},
+		}, namespaceQuota, unlimited)
+		groups, unshared := build(fleet(2), cons, ShareGroupOptions{ClusterIsQuota: true})
+		Expect(groups).NotTo(HaveKey(""))
+		expectNotPlanned(groups)
+		Expect(unshared).To(Equal(excluded))
+	})
+
+	It("plans it in the cluster group over what the cluster quota leaves after the tenants' claims", func() {
 		clusterQuota := config.QuotaLimiterConfig{
 			Name: "cluster", Type: "quota", Scope: config.QuotaScopeCluster,
 			ClusterQuotas: map[string]int{"A100": 20},
@@ -100,11 +156,13 @@ var _ = Describe("BuildShareGroups: a namespace a namespace quota excludes", fun
 		for _, c := range []struct {
 			held, budget, idle int
 		}{
-			// 20 less the tenants' 4 is 16 for ns-x however much it holds;
-			// past that it keeps what it holds and fills nothing.
-			{held: 2, budget: 16, idle: 14},
-			{held: 14, budget: 16, idle: 2},
-			{held: 26, budget: 26, idle: 0},
+			// The cluster quota's free 20-4-held, less what team-a (free 6)
+			// and team-b (free 4) may still claim of it. Past that ns-x keeps
+			// what it holds and fills nothing.
+			{held: 2, budget: 2 + 4, idle: 4}, // 14 free; 14-(6+4) = 4
+			{held: 8, budget: 8 + 0, idle: 0}, // 8 free; 8-(6+4) < 0
+			{held: 14, budget: 14, idle: 0},   // 2 free
+			{held: 26, budget: 26, idle: 0},   // over the quota: 0 free
 		} {
 			cons := constraintsOf(map[string]map[string]int{
 				"team-a": {"A100": 2}, "team-b": {"A100": 2}, "ns-x": {"A100": c.held},
@@ -115,11 +173,93 @@ var _ = Describe("BuildShareGroups: a namespace a namespace quota excludes", fun
 			g := groups[""]
 			Expect(g.Roles).To(HaveLen(1))
 			Expect(g.Roles[0].Key).To(Equal("ns-x/mx/both"))
-			// Not min(cluster free, the tenants' free 10): the tenants' quota
-			// does not bound a namespace it excludes.
 			Expect(g.Budget).To(Equal(c.budget), "held=%d", c.held)
 			Expect(g.Budget-g.Committed["ns-x/mx/both"]).To(Equal(c.idle), "held=%d", c.held)
-			Expect(g.PhysicalFree).To(Equal(c.idle), "held=%d: the cluster quota's free GPUs", c.held)
+			Expect(g.PhysicalFree).To(Equal(c.idle), "held=%d: what the tenants leave of the cluster free", c.held)
+			// The tenants keep their own budgets, bounded by the whole
+			// cluster free.
+			clusterFree := max(0, 20-4-c.held)
+			Expect(groups["team-a"].Budget).To(Equal(8))
+			Expect(groups["team-a"].PhysicalFree).To(Equal(clusterFree), "held=%d", c.held)
+			Expect(groups["team-b"].Budget).To(Equal(6))
+			Expect(groups["team-b"].PhysicalFree).To(Equal(clusterFree), "held=%d", c.held)
+		}
+	})
+
+	// Every group's idle fill is charged to the cluster quota, so the groups
+	// together must not plan more than it has free. a6d6e1828 gave the cluster
+	// group the cluster quota's whole free count beside the tenants' own:
+	// 14 + 6 + 4 = 24 planned at a cluster quota of 20 with 14 free.
+	It("plans no more idle fill across all groups than the cluster quota has free", func() {
+		for _, limit := range []int{20, 100} {
+			clusterQuota := config.QuotaLimiterConfig{
+				Name: "cluster", Type: "quota", Scope: config.QuotaScopeCluster,
+				ClusterQuotas: map[string]int{"A100": limit},
+			}
+			cons := constraintsOf(map[string]map[string]int{
+				"team-a": {"A100": 2}, "team-b": {"A100": 2}, "ns-x": {"A100": 2},
+			}, namespaceQuota, clusterQuota)
+			reqs := []ModelScalingRequest{
+				shareReq("ma", "team-a", 9000, 2), shareReq("mb", "team-b", 9000, 2), shareReq("mx", "ns-x", 9000, 2),
+			}
+			groups, unshared := build(reqs, cons, ShareGroupOptions{ClusterIsQuota: true})
+			Expect(unshared).To(BeEmpty())
+			Expect(groups).To(HaveLen(3))
+			clusterFree := limit - 6
+			idle := map[string]int{}
+			total := 0
+			for scope, g := range groups {
+				committed := 0
+				for _, n := range g.Committed {
+					committed += n
+				}
+				idle[scope] = max(0, min(g.Budget-committed, g.PhysicalFree))
+				total += idle[scope]
+			}
+			Expect(total).To(BeNumerically("<=", clusterFree), "limit=%d: idle by group %v", limit, idle)
+			// The tenants' own fill is untouched; the excluded namespace gets
+			// the rest of the cluster free.
+			Expect(idle).To(Equal(map[string]int{"team-a": 6, "team-b": 4, "": clusterFree - 10}), "limit=%d", limit)
+		}
+	})
+
+	It("never budgets the cluster group below what it holds when the tenants claim more than is free", func() {
+		// Whole 8-GPU nodes: the tenants may claim 16 + 8, the cluster has 8
+		// free. The cluster group keeps its 16 GPUs, and fills nothing.
+		cons := []*ResourceConstraints{
+			{Pools: map[string]ResourcePool{"A100": {Limit: 48, Used: 40}}},
+			{NamespaceScoped: true, NamespacePools: map[string]map[string]ResourcePool{
+				"team-a": {"A100": {Limit: 24, Used: 8}},
+				"team-b": {"A100": {Limit: 16, Used: 8}},
+			}},
+		}
+		node := func(id, ns string, replicas int) ModelScalingRequest {
+			req := shareReq(id, ns, 9000, replicas)
+			req.VariantStates[0].GPUsPerReplica = 8
+			return req
+		}
+		reqs := []ModelScalingRequest{node("ma", "team-a", 1), node("mb", "team-b", 1), node("mx", "ns-x", 2)}
+		groups, _ := build(reqs, cons, ShareGroupOptions{ClusterIsQuota: true})
+		Expect(groups).To(HaveKey(""))
+		Expect(groups[""].Budget).To(Equal(16))
+		Expect(groups[""].PhysicalFree).To(Equal(0))
+		Expect(groups["team-a"].PhysicalFree).To(Equal(8))
+		Expect(groups["team-b"].PhysicalFree).To(Equal(8))
+	})
+
+	It("reports nothing unshared without a namespace quota", func() {
+		reqs := []ModelScalingRequest{shareReq("mx", "ns-x", 100, 2)}
+		for name, cons := range map[string][]*ResourceConstraints{
+			// A cluster quota of -1: no finite bound, and no namespace quota.
+			"unlimited cluster quota": {{Pools: map[string]ResourcePool{"A100": {Limit: -1}}}},
+			// An inventory with no pool of the model's type.
+			"inventory without the type": {{Pools: map[string]ResourcePool{"H100": {Limit: 8}}}},
+		} {
+			for _, opts := range []ShareGroupOptions{{ClusterIsQuota: true}, {PhysicalGroups: true}} {
+				groups, unshared := build(reqs, cons, opts)
+				Expect(unshared).To(BeEmpty(), name)
+				Expect(groups).To(BeEmpty(), name)
+			}
 		}
 	})
 
@@ -129,7 +269,27 @@ var _ = Describe("BuildShareGroups: a namespace a namespace quota excludes", fun
 		}, namespaceQuota)
 		groups, unshared := build(fleet(2), cons, ShareGroupOptions{PhysicalGroups: true})
 		Expect(groups).NotTo(HaveKey(""))
+		expectNotPlanned(groups)
 		Expect(unshared).To(Equal(excluded))
+	})
+
+	// NamespaceResourcePools documents that a namespace-scoped inventory
+	// returns a map; one that carries NamespacePools without setting
+	// NamespaceScoped (a third-party inventory, or an older one) is still no
+	// budget over every namespace.
+	It("reads a provider with namespace pools as namespace-scoped, whether or not it says so", func() {
+		cluster := &ResourceConstraints{Pools: map[string]ResourcePool{"A100": {Limit: 20, Used: 6}}}
+		unflagged := &ResourceConstraints{
+			Pools:          map[string]ResourcePool{"A100": {Limit: 14, Used: 4}},
+			NamespacePools: map[string]map[string]ResourcePool{"team-a": {"A100": {Limit: 8, Used: 2}}},
+		}
+		available, namespaced := clusterBudgets([]*ResourceConstraints{unflagged, cluster, nil})
+		Expect(namespaced).To(BeTrue())
+		Expect(available).To(Equal(map[string]int{"A100": 14}), "the cluster quota's free, not the namespace sum's 10")
+
+		available, namespaced = clusterBudgets([]*ResourceConstraints{unflagged})
+		Expect(namespaced).To(BeTrue())
+		Expect(available).To(BeEmpty())
 	})
 
 	It("still plans every namespace in a physical group in inventory mode", func() {

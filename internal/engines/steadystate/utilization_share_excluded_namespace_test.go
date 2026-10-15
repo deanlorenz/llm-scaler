@@ -95,12 +95,60 @@ func TestUtilizationShareReportsAnExcludedNamespaceUnshared(t *testing.T) {
 	if got := family(t, reg, constants.WVAUtilizationShareReplicasToMove); len(got) != 0 {
 		t.Errorf("published %d groups for a namespace no quota bounds, want none", len(got))
 	}
-	lines := logs.FilterMessage("Utilization share: not sharing models no quota bounds; today's optimizer keeps them").All()
+	lines := logs.FilterMessage(unsharedMessage).All()
 	if len(lines) != 1 {
 		t.Fatalf("want the unshared model reported once over two cycles, got %d lines", len(lines))
 	}
 	models, ok := lines[0].ContextMap()["models"].([]any)
-	if want := "ns-x/X: " + allocation.UnsharedExcludedNamespace; !ok || len(models) != 1 || models[0] != want {
+	if want := "ns-x/X: " + allocation.UnsharedExcludedNamespace("A100"); !ok || len(models) != 1 || models[0] != want {
 		t.Errorf("models = %v, want [%s]", lines[0].ContextMap()["models"], want)
+	}
+
+	// The model goes away: nothing new to say, and no second line.
+	e.evaluateUtilizationShare(ctx, nil, cons, nil)
+	if got := len(logs.FilterMessage(unsharedMessage).All()); got != 1 {
+		t.Fatalf("after the model left: %d lines, want still 1", got)
+	}
+	// It comes back: that is a change, and it is reported again.
+	e.evaluateUtilizationShare(ctx, reqs, cons, nil)
+	if got := len(logs.FilterMessage(unsharedMessage).All()); got != 2 {
+		t.Fatalf("after the model returned: %d lines, want 2", got)
+	}
+}
+
+const unsharedMessage = "Utilization share: not sharing models no quota bounds; today's optimizer keeps them"
+
+// Two unshared models reported in either order are the same set: one line,
+// the models sorted.
+func TestUtilizationShareReportsUnsharedModelsOnceInAnyOrder(t *testing.T) {
+	freshMetrics(t)
+	ctx, logs := observe(t)
+	e := &Engine{Config: namespaceQuotaConfig(t)}
+	x := shadowRequest("X", "", 100, 2)
+	x.Namespace = "ns-x"
+	y := shadowRequest("Y", "", 100, 2)
+	y.Namespace = "ns-x"
+	q := e.Config.EffectiveQuotaEntries()
+	if len(q) != 1 {
+		t.Fatalf("want one quota entry, got %d", len(q))
+	}
+	rc, err := allocation.NewDefaultLimiter(q[0].Name, allocation.NewQuotaInventory(q[0])).ComputeConstraints(
+		context.Background(), map[string]int{"A100": 4}, map[string]map[string]int{"ns-x": {"A100": 4}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cons := []*allocation.ResourceConstraints{rc}
+
+	e.evaluateUtilizationShare(ctx, []allocation.ModelScalingRequest{y, x}, cons, nil)
+	e.evaluateUtilizationShare(ctx, []allocation.ModelScalingRequest{x, y}, cons, nil)
+
+	lines := logs.FilterMessage(unsharedMessage).All()
+	if len(lines) != 1 {
+		t.Fatalf("want one line for the same two models in either order, got %d", len(lines))
+	}
+	why := allocation.UnsharedExcludedNamespace("A100")
+	models, ok := lines[0].ContextMap()["models"].([]any)
+	if !ok || len(models) != 2 || models[0] != "ns-x/X: "+why || models[1] != "ns-x/Y: "+why {
+		t.Errorf("models = %v, want ns-x/X then ns-x/Y", lines[0].ContextMap()["models"])
 	}
 }

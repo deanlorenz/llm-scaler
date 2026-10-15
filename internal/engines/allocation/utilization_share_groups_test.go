@@ -311,15 +311,19 @@ var _ = Describe("BuildShareGroups: scopes and bounds", func() {
 	It("builds a namespace-quota group beside the cluster group, each with its own budget", func() {
 		reqs := []ModelScalingRequest{shareReq("A", "team-a", 4000, 4), shareReq("B", "other", 3000, 8)}
 		cons := []*ResourceConstraints{
-			{Pools: map[string]ResourcePool{"A100": {Limit: 16, Used: 12}}},
+			{Pools: map[string]ResourcePool{"A100": {Limit: 20, Used: 12}}},
 			{NamespaceScoped: true, NamespacePools: map[string]map[string]ResourcePool{"team-a": {"A100": {Limit: 8, Used: 4}}}},
 		}
 		groups := BuildShareGroups(reqs, cons, ShareGroupOptions{ClusterIsQuota: true})
 		Expect(groups).To(HaveLen(2))
 		Expect(groups[0].Scope).To(BeEmpty())
-		Expect(groups[0].Budget).To(Equal(4 + 8)) // the cluster's free 4 + B's 8
+		// The cluster's free 8 less team-a's claim of 4, + B's 8.
+		Expect(groups[0].Budget).To(Equal(4 + 8))
+		Expect(groups[0].PhysicalFree).To(Equal(4))
 		Expect(groups[1].Scope).To(Equal("team-a"))
 		Expect(groups[1].Budget).To(Equal(4 + 4)) // team-a's free 4 + A's 4
+		// A namespace group is bounded by the whole cluster free.
+		Expect(groups[1].PhysicalFree).To(Equal(8))
 	})
 
 	It("builds a namespace-quota group even when the cluster budget is the physical inventory", func() {
