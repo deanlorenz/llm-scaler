@@ -98,8 +98,10 @@ pushed every release twice):
 4. **Build and push once.** One `linux/amd64,linux/arm64` buildx build, pushed with
    an SBOM (`sbom: true`) and a max-mode SLSA provenance attestation
    (`provenance: mode=max`).
-5. **Tags.** Always `:<version>`. `:latest` moves only for a final release; a tag
-   with a prerelease suffix (`v0.6.0-rc1`) never touches `latest`.
+5. **Tags.** Always `:<version>`. `:latest` moves only for the highest final
+   release in the repository. A tag with a prerelease suffix (`v0.6.0-rc1`)
+   never touches `latest`, and neither does a backport (`v0.5.3` tagged after
+   `v0.6.0`). `hack/check-release-latest.sh` tests this.
 6. **Sign.** Keyless `cosign sign` of the pushed digest, with the workflow's OIDC
    identity as the signer. The run summary prints the digest and the verify
    command.

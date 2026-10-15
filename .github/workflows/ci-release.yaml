@@ -41,6 +41,10 @@ jobs:
           # Nothing after this needs git credentials; do not leave the token in
           # .git/config beside a docker build context.
           persist-credentials: false
+          # Every tag, so the step below can tell whether this one is the
+          # highest final release. A shallow checkout has none of the others.
+          fetch-depth: 0
+          fetch-tags: true
 
       # The image goes to the repository owner's namespace, as ci-main-image.yaml
       # does: ghcr.io/ev-shindin/llm-scaling-manager here, which is what
@@ -48,7 +52,10 @@ jobs:
       # used to be hardcoded to ghcr.io/llm-d/..., an org this repository cannot
       # write to.
       #
-      # Only a final semver tag moves `latest`. A v1.2.0-rc1 used to overwrite it.
+      # Only the HIGHEST final semver tag moves `latest`. A v1.2.0-rc1 used to
+      # overwrite it, and so did a backport: v1.2.1 tagged after v1.3.0 moved
+      # `latest` back to the older line. hack/check-release-latest.sh runs this
+      # step against a scratch repository.
       - name: Resolve image, version and tags
         id: meta
         env:
@@ -64,7 +71,20 @@ jobs:
           TAGS="$IMAGE:$VERSION"
           case "$VERSION" in
             *-*) PRERELEASE=true ;;
-            *)   PRERELEASE=false; TAGS="$TAGS,$IMAGE:latest" ;;
+            *)
+              PRERELEASE=false
+              HIGHEST="$(git tag --list 'v*' --sort=-v:refname \
+                | { grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || true; } | sed -n 1p)"
+              if [ -z "$HIGHEST" ]; then
+                echo "::error::no final vMAJOR.MINOR.PATCH tag in this checkout, not even $VERSION; the tags were not fetched"
+                exit 1
+              fi
+              if [ "$HIGHEST" = "$VERSION" ]; then
+                TAGS="$TAGS,$IMAGE:latest"
+              else
+                echo "::notice::$VERSION is not the highest final release ($HIGHEST is); latest stays where it is"
+              fi
+              ;;
           esac
           {
             echo "image=$IMAGE"
