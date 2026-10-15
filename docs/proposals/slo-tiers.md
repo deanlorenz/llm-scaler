@@ -137,9 +137,16 @@ queueing**; only the proxy hop is missing. The catches:
   is not recorded. Nothing publishes the judged share of traffic.
 - **Priority bands are pooled** (open). Flow control's deliberate queueing of
   a low-priority band counts as a miss, so phase 1 enforce would add replicas
-  to remove it. Options: select `priority >= 0`, or a per-objective selector.
+  to remove it. Options: drop negative bands with `priority!~"-.*"` (labels
+  are strings), or a per-objective selector.
 - **LoRA adapters are counted under the adapter's name** (`target_model_name`),
-  never the base model's (open: map adapters to their base model).
+  never the base model's (open: map adapters to their base model). A model
+  whose traffic all goes to adapters reads as idle, and `WVAModelSLOUnjudged`
+  stays silent.
+- **An EPP scraped twice doubles counts**: the percentile holds, but the
+  sample minimum is met with half the real requests.
+- **Router per-request SLO headers** (latency-predictor plugin) are a second
+  source of targets that nothing reconciles with the tier's. Pick one.
 
 ### Metrics this design reads
 
@@ -289,9 +296,9 @@ is what breaks TTFT unrecoverably, so `P` is held to rules like k2's.
    measurement: on a large accelerator the real intercept is several times the
    floor, so the slope is too steep. A window the pinned fit refused is
    `declined` and not priced (built). In sizer mode `pinned-default` is no data
-   (phase 1); seeding from a profile is its remedy ([Before
-   phase 1](#before-phase-1-prices-anything), item 9). Whether `pinned` may
-   price there is open.
+   (phase 1). Once seeding from a profile exists ([Before
+   phase 1](#before-phase-1-prices-anything), item 9), `pinned-default` never
+   prices in either mode. Whether `pinned` may price in sizer mode is open.
 3. **A borrowed line never loosens** (phase 1). A sibling's line may price in
    guard mode only; in sizer mode it reports no data
    ([learned-state sharing](learned-state-sharing-by-similarity.md)).
@@ -313,12 +320,14 @@ is what breaks TTFT unrecoverably, so `P` is held to rules like k2's.
 Phase 0 publishes `P_slo`; phase 1 lets it decide. These estimator errors do
 not matter while nothing reads the number, and do once something does. Items
 2 and 8 over-price `P`. Items 1 (speculative decoding) and 7 (a batch cap too
-low per instance) under-price it. Items 3 and 6 can go either way; items 4 and
-5 are about how far to trust the line. All are phase 1 except item 7, a
+low per instance) under-price it. Items 3 and 6 can go either way, and so can
+item 9 (a seed from a different vLLM version, config or shape); items 4 and 5
+are about how far to trust the line. All are phase 1 except item 7, a
 separate collector fix.
 
-1. **Speculative decoding** (above): fit on ITL per token
-   (`rate(vllm:generation_tokens_total) ÷ rate(…inter_token_latency_seconds_count)`).
+1. **Speculative decoding** (above): fit on ITL per token,
+   `rate(vllm:inter_token_latency_seconds_sum) ÷ rate(vllm:generation_tokens_total)`.
+   It also counts each request's first token: negligible for long outputs.
 2. **Measure the per-request KV footprint.** `KVreq = ILeff + O ÷ 2`
    under-counts twice. A prefix hit on a block no running request holds still
    makes it resident (0.8 hits on a 4000-token prompt read 1050 tokens against
@@ -327,9 +336,10 @@ separate collector fix.
    `KVreq_obs = k·C ÷ num_requests_running` per variant.
 3. **Regress on a windowed `k`** (`avg_over_time(…kv_cache_usage_perc[1m])`).
    Noise in an instantaneous `k` flattens `A`. A flattened or pinned-`B` line
-   rotates about the window's centroid `(k̄, ȳ)`, so the pricing error's sign
-   is `sign(T − ȳ) × sign(slope error)`: with a slope too flat, a target above
-   `ȳ` over-prices and one below it under-prices.
+   rotates about approximately the window's centroid `(k̄, ȳ)` (a pinned fit
+   pivots at the k-weighted `Σk² ÷ Σk = k̄(1 + CV²)`), so the pricing error's
+   sign is `sign(T − ȳ) × sign(slope error)`: with a slope too flat, a target
+   above `ȳ` over-prices and one below it under-prices.
 4. **A confidence bound on `k`.** Price where the upper one-sided 90 % band of
    `ITL(k)` meets the target; it penalises extrapolation without a ratchet.
 5. **Count cycles, not replica readings.** 20 readings turn over in two cycles
@@ -345,8 +355,9 @@ separate collector fix.
    cap is `min(max_num_seqs, max_num_batched_tokens ÷ (1 + n_spec))`.
 9. **Seed a line from a profile**, the direct remedy for `pinned-default`
    (bound 2). A measured or estimated profile gives a variant its `B` before
-   the fleet spans `k`. A seeded `B` gets its own source label, and
-   `pinned-default` never prices.
+   the fleet spans `k`. A seeded `B` gets its own source label and goes
+   through the same pinned-vs-own disagreement test (Y, open question 1) as a
+   pinned one; `pinned-default` then never prices in either mode.
 
 ## TTFT (phase 2)
 
@@ -402,18 +413,22 @@ From the router, per model and objective, over 5 minutes. All built.
   rate first, then sum, so a counter reset on one EPP replica is handled.
   Summed buckets are repaired to be monotone, as `histogram_quantile` does.
 - **TTFT attainment** = `bucket(le=target) ÷ count`, exact when the target is a
-  bucket bound (3 s is), interpolated otherwise. In a tail bucket, linear
-  interpolation over-reads the percentile and under-reads attainment, so the
-  error is conservative; choose a target on a bucket bound to avoid it.
-  Sampling error at the publish minimum is about ±3 points at p90 (n = 100)
-  and ±0.3 at p99 (n = 1000).
+  bucket bound (3 s is), interpolated otherwise. Where density falls within a
+  tail bucket, linear interpolation over-reads the percentile and under-reads
+  attainment, so the error is conservative. Under queueing the TTFT mode can
+  sit in the target's bucket, and then it is not; choose a target on a bucket
+  bound. Sampling error at the publish minimum is about ±3 points at p90
+  (n = 100) and ±0.3 at p99 (n = 1000): 1σ binomial, assuming independent
+  misses. A 95 % band is about twice that.
 - **TPOT** is the router's **mean**, `rate(_sum) ÷ rate(_count)`, against the
-  target. A mean is met or missed; it is not a share. The TPOT histogram's
-  share under target could be published beside it as a diagnostic (not built).
+  target. A mean is met or missed; it is not a share. Define `att_tpot` as the
+  share of requests under target from the router's per-request TPOT
+  histogram, published beside the mean as a diagnostic (not built).
 - **No combined attainment.** The router publishes two marginal histograms, so
   joint goodput (both objectives met on one request) cannot be computed. The
-  Fréchet lower bound `att_ttft + att_tpot − 1` is a defensible floor to
-  compare with llm-d's combined figure (not built).
+  Fréchet lower bound `max(0, att_ttft + att_tpot − 1)` is a floor on it (not
+  built). The two figures count different populations (TPOT only for
+  responses that carry `usage`), so the bound holds only over that traffic.
 - **No data instead of a guess.** Fewer than `max(50, 10 ÷ (1 − p))` requests
   (100 at p90, 1000 at p99) means no attainment, not 0 or 1. On a small
   whole-node fleet, p99 is usually not measurable in 5 minutes. A quantile in
@@ -432,18 +447,23 @@ A window is not judged while it may hold requests that waited out capacity no
 steady-state sizing could have had ready: a wake, a replica still starting, or
 a cycle the analyzer did not see. Stuck or unschedulable capacity is judged.
 The rules are in [scaling-policy](../reference/scaling-policy.md), under
-*`slo` (observe only)*. Why they are shaped this way:
+*`slo` (observe only)*. These sections land with PR #148. Why they are shaped
+this way:
 
 - **A grace follows the window**, because a request queued through a wake is
   recorded only when its generation ends. One scale-up leaves an objective
   unjudged for the start time, plus the 5-minute window, plus a grace of 2 to
   30 minutes: 7 to 35 minutes after the transient. A fleet that scales more
-  often is never judged; `WVAModelSLOUnjudged` says so.
+  often is never judged; `WVAModelSLOUnjudged` says so. The grace is the
+  longer of 120 s and 1.5 × the longest mean request duration, capped at 30
+  minutes.
 - **The grace uses the mean service time, but clearing is a tail question.**
   With exponential-like output lengths, about 22 % (e^−1.5) of requests queued
   through a wake finish after the grace and land in judged windows as false
-  misses (conservative; speculative until measured on real traffic). A high
-  quantile of service time would fix it.
+  misses (conservative; speculative until measured on real traffic). The 22 %
+  holds only when the grace is 1.5 × the mean (a mean above 80 s); backlog
+  drain pushes it up, and using the longest mean pushes it down. A rough
+  figure, not a bound. A high quantile of service time would fix it.
 - **`unobserved` is counted in cycles, not timing**: a slow cycle is not a
   skipped one. A failed cycle and its retry count as one.
 - **A rise is not a reason of its own**: excluding it after its replicas serve
@@ -460,16 +480,17 @@ records.
 
 The `wva_slo_*` metrics are listed in [prometheus](../reference/prometheus.md)
 (*SLO Analyzer Metrics*), and the two alerts are explained in
-[troubleshooting](../reference/troubleshooting.md). The design choices behind
-them:
+[troubleshooting](../reference/troubleshooting.md). These sections land with
+PR #148. The design choices behind them:
 
 - **Absent, not zero.** Too few requests, or an excluded window, publishes no
   attainment; `wva_slo_window_requests` tells "too few" from "nothing".
 - **Alerts count judged minutes only**, so an exclusion neither fires nor
   resets `WVAModelSLOMissed`. Both gate on replicas with `max_over_time` over
   5 m, so a controller restart does not resolve and re-fire them.
-  `WVAModelSLOUnjudged` fires only with a cause to act on, read from the
-  router's own streaming request counter. On this release a miss means the
+  `WVAModelSLOUnjudged` fires only with a cause to act on. Its TPOT cause
+  (streams sent without `include_usage`) is read from the router's own
+  streaming request counter. On this release a miss means the
   tier's thresholds do not meet the SLO, not that the autoscaler failed.
 
 ## Phases
@@ -533,24 +554,31 @@ accelerator, in its own run.
 
 - **SLO logic inside saturation, or handing saturation a per-variant fill.**
   Loses the free shadow mode and isolation, and rebuilds what the composite
-  gives. **Rescaling saturation's capacity** under-orders when loosening.
+  gives. **Rescaling saturation's capacity** under-orders when loosening, by
+  `ITL(k_slo) ÷ ITL(k_static)`.
 - **Plain HPA/KEDA on a latency percentile** (llm-d's slo-aware recipe). No
   controller, and it takes the target directly. But it is reactive by design,
   has no variant choice, does not yet handle P/D, and a proportional law on a
   percentile oscillates around it.
-- **Dynamo Planner's SLA planner: offline profile, online ratio correction,
-  load forecast.** It interpolates decode ITL on (throughput per GPU, context
-  length) and prefill TTFT on (throughput per GPU, ISL) from a profile, so a
-  shape change inside the profiled range is handled. Every adjustment interval
-  (180 s by default) it corrects with actual-over-expected ratios:
-  `decode_correction = actual_itl ÷ expected_itl`, priced at
-  `target_itl ÷ decode_correction`. The profile can be estimated ("AI
-  Configurator") instead of swept on GPUs. Throughput-based planning is
-  disaggregated only; aggregated mode is load-based. The honest argument
-  against it: one profile per variant and accelerator, to produce and keep
-  current. Our real advantage: we price aggregated variants, which its
-  throughput planner does not. Seeding our line from a profile is
-  [item 9](#before-phase-1-prices-anything) before phase 1.
+- **Dynamo Planner's SLA planner: two modes, both SLA-driven.**
+  - **Throughput-based** works from a profile (swept on GPUs or estimated by
+    "AI Configurator"): ITL and TTFT against load and shape, so a shape change
+    inside the profiled range is handled. Earlier releases corrected it online
+    with actual-over-expected ratios. It is documented for prefill and decode.
+  - **Load-based** needs no profile. Each engine emits per-iteration
+    forward-pass metrics; the planner fits a linear regression of iteration
+    wall time over a sliding window of them: decode on summed decode KV
+    tokens, prefill on summed prefill tokens (TTFT estimated by simulating
+    chunked prefill), aggregated on both (2D, TTFT and ITL together). It scales
+    up when the estimate exceeds the SLA and down when it is below SLA × a
+    sensitivity factor, ±1 replica per interval.
+  - With both on, throughput planning sets a floor and load-based adjusts
+    above it: structurally our guard mode.
+
+  Our advantage: a replica count (`D ÷ P`) instead of ±1 steps, cost-aware
+  choice among variants, P/D pairing, a shared GPU budget and scale to zero.
+  Dynamo does estimate aggregated TTFT, which our 2b excludes. Seeding our
+  line from a profile is [item 9](#before-phase-1-prices-anything).
 - **AIBrix's GPU optimizer.** The closest peer for several variants with
   cost-aware choice. An ILP based on Melange picks an SLO- and cost-aware mix
   of heterogeneous GPUs from offline per-GPU, per-model profiles; its
@@ -578,13 +606,17 @@ accelerator, in its own run.
        engine ITL. The router TPOT is model-wide and mixes variants.
 
      Plus `pinned`-vs-`own` disagreement below Y, and a TPOT-bound benchmark
-     at or above target with no more replicas than saturation alone. The
-     error is **out of sample**: one cycle's prediction, scored at the
-     fill reached later (a pinned line passes near its window's mean by
-     construction). Scored **at the set point**: only windows whose realised
-     fill is within ±0.05 of `wva_slo_fill`, with a minimum count per variant,
-     or a forced-fill run. Bucketed by how far the fill moved, **signed**
-     (rising apart from falling, relative to the window centroid): a rotated
+     with attainment at or above target and no more replicas than saturation
+     alone. The error is **out of sample**: one cycle's prediction, scored at
+     the fill reached later (a pinned line passes near its window's mean by
+     construction). Scored **at the set point**, primarily by a forced-fill
+     run: a fleet with `scaleUpThreshold` headroom runs below `wva_slo_fill`
+     by design, so windows whose measured fill is within ±0.05 of it rarely
+     occur by chance (count them, with a minimum per variant, when they do).
+     Also score the published prediction `wva_slo_predicted_itl_seconds`, at
+     the post-headroom fill, against the measured engine ITL there. Bucketed
+     by how far the fill moved, **signed** (rising apart from falling,
+     relative to the window centroid): a rotated
      line over-prices on one side and under-prices on the other ("Before
      phase 1", item 3), and an unsigned average lets them cancel. None of
      this is computable today: it needs the phase-0 follow-up.
@@ -623,7 +655,8 @@ accelerator, in its own run.
    share of traffic ([Which latency](#which-latency-measured-where)).
 10. **The docs to change with phase 1** in `docs/reference/scaling-policy.md`:
     `enabled` is no longer "reserved"; saturation no longer drives every
-    decision; *Strict* stops being the low-latency SLO answer.
+    decision; *Strict* stops being the low-latency SLO answer;
+    `queueLengthThreshold` has no effect on an SLO-decided ScaledObject.
 
 ## Review findings
 
