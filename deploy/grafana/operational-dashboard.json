@@ -2671,9 +2671,9 @@
       "panels": [
         {
           "id": 77,
-          "title": "Observed vs target, by model and objective",
+          "title": "TTFT: observed vs target, by model",
           "type": "timeseries",
-          "description": "What the router measured over 5 minutes against what the policy declares: the TPOT mean, and the TTFT percentile. A gap in the observed line is a window with too few requests, or one excluded for a wake or a starting replica (see the panel at the bottom of the row).",
+          "description": "What the router measured over 5 minutes against what the policy declares: the TTFT percentile named in the legend. A gap is a window not judged: too few requests, or excluded for a wake, a starting replica or a restart (the panel at the bottom of the row). A percentile past the router's largest bucket is +Inf, which Grafana also draws as a gap: read the attainment panel beside it.",
           "gridPos": {
             "h": 8,
             "w": 12,
@@ -2682,7 +2682,7 @@
           },
           "targets": [
             {
-              "expr": "wva_slo_observed_seconds{$namespace_label=~\"$namespace\"}",
+              "expr": "max by ($namespace_label, model_name, objective, statistic) (wva_slo_observed_seconds{$namespace_label=~\"$namespace\", objective=\"ttft\"})",
               "legendFormat": "{{$namespace_label}}/{{model_name}} {{objective}} {{statistic}}",
               "refId": "A",
               "datasource": {
@@ -2691,7 +2691,7 @@
               }
             },
             {
-              "expr": "wva_slo_target_seconds{$namespace_label=~\"$namespace\"}",
+              "expr": "max by ($namespace_label, model_name, objective, statistic) (wva_slo_target_seconds{$namespace_label=~\"$namespace\", objective=\"ttft\"})",
               "legendFormat": "{{$namespace_label}}/{{model_name}} {{objective}} target",
               "refId": "B",
               "datasource": {
@@ -2706,7 +2706,55 @@
               "custom": {
                 "drawStyle": "line",
                 "fillOpacity": 8
+              },
+              "noValue": "No data: no model here lists the slo analyzer (scaling-policy.md, the slo section)"
+            },
+            "overrides": []
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource_uid}"
+          }
+        },
+        {
+          "id": 86,
+          "title": "TPOT: observed mean vs target, by model",
+          "type": "timeseries",
+          "description": "What the router measured over 5 minutes against what the policy declares: the mean time per output token. Apart from TTFT because the two differ by orders of magnitude. A gap is a window not judged (see the panel at the bottom of the row); no TPOT at all while TTFT shows usually means clients do not send stream_options.include_usage.",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 124
+          },
+          "targets": [
+            {
+              "expr": "max by ($namespace_label, model_name, objective, statistic) (wva_slo_observed_seconds{$namespace_label=~\"$namespace\", objective=\"tpot\"})",
+              "legendFormat": "{{$namespace_label}}/{{model_name}} {{objective}} {{statistic}}",
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource_uid}"
               }
+            },
+            {
+              "expr": "max by ($namespace_label, model_name, objective, statistic) (wva_slo_target_seconds{$namespace_label=~\"$namespace\", objective=\"tpot\"})",
+              "legendFormat": "{{$namespace_label}}/{{model_name}} {{objective}} target",
+              "refId": "B",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource_uid}"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 8
+              },
+              "noValue": "No data: no model here lists the slo analyzer (scaling-policy.md, the slo section)"
             },
             "overrides": []
           },
@@ -2723,8 +2771,8 @@
           "gridPos": {
             "h": 8,
             "w": 12,
-            "x": 12,
-            "y": 124
+            "x": 0,
+            "y": 132
           },
           "targets": [
             {
@@ -2743,7 +2791,8 @@
               "custom": {
                 "drawStyle": "line",
                 "fillOpacity": 8
-              }
+              },
+              "noValue": "No data: no model here lists the slo analyzer (scaling-policy.md, the slo section)"
             },
             "overrides": []
           },
@@ -2760,7 +2809,7 @@
           "gridPos": {
             "h": 8,
             "w": 12,
-            "x": 0,
+            "x": 12,
             "y": 132
           },
           "targets": [
@@ -2780,7 +2829,8 @@
               "custom": {
                 "drawStyle": "line",
                 "fillOpacity": 8
-              }
+              },
+              "noValue": "No data: no model here lists the slo analyzer (scaling-policy.md, the slo section)"
             },
             "overrides": []
           },
@@ -2793,12 +2843,12 @@
           "id": 80,
           "title": "Fill the TPOT target allows, per variant",
           "type": "timeseries",
-          "description": "The KV fill, as a fraction of physical KV, at which the variant's mean inter-token latency meets the TPOT target. Above the tier's kvCacheThreshold x scaleUpThreshold (0.68 by default): the target would let it run fuller; below: the tier is too loose for it.",
+          "description": "The KV fill, as a fraction of physical KV, at which the variant's mean inter-token latency meets the TPOT target. Above the tier's kvCacheThreshold x scaleUpThreshold (0.68 by default): the target would let it run fuller; below: the tier is too loose for it. An estimate, not checked against a live fleet yet: known to be off under speculative decoding, a high prefix-cache hit rate, and a pod running several data-parallel ranks behind one API server.",
           "gridPos": {
             "h": 8,
             "w": 12,
-            "x": 12,
-            "y": 132
+            "x": 0,
+            "y": 140
           },
           "targets": [
             {
@@ -2817,7 +2867,8 @@
               "custom": {
                 "drawStyle": "line",
                 "fillOpacity": 8
-              }
+              },
+              "noValue": "No data: no model here lists the slo analyzer (scaling-policy.md, the slo section)"
             },
             "overrides": []
           },
@@ -2830,11 +2881,11 @@
           "id": 81,
           "title": "Predicted inter-token latency at the realised fill, per variant",
           "type": "timeseries",
-          "description": "The mean ITL the variant's line predicts once the scale-up headroom is applied: the latency margin an SLO tier would really have.",
+          "description": "The mean ITL the variant's line predicts once the scale-up headroom is applied: the latency margin an SLO tier would really have. An estimate, not checked against a live fleet yet: known to be off under speculative decoding, a high prefix-cache hit rate, and a pod running several data-parallel ranks behind one API server.",
           "gridPos": {
             "h": 8,
             "w": 12,
-            "x": 0,
+            "x": 12,
             "y": 140
           },
           "targets": [
@@ -2854,7 +2905,8 @@
               "custom": {
                 "drawStyle": "line",
                 "fillOpacity": 8
-              }
+              },
+              "noValue": "No data: no model here lists the slo analyzer (scaling-policy.md, the slo section)"
             },
             "overrides": []
           },
@@ -2866,17 +2918,17 @@
         {
           "id": 82,
           "title": "Where each variant's SLO pricing came from",
-          "type": "timeseries",
-          "description": "1 for the source in force: own (a full fit), pinned, pinned-default (not a measurement), no-line, no-output-length, infeasible, input-invalid.",
+          "type": "state-timeline",
+          "description": "The source of each variant's TPOT pricing over time: own (a full fit), pinned, pinned-default (not a measurement), no-line, no-output-length, infeasible, input-invalid. A change of colour is the variant moving from one to another.",
           "gridPos": {
             "h": 8,
             "w": 12,
-            "x": 12,
-            "y": 140
+            "x": 0,
+            "y": 148
           },
           "targets": [
             {
-              "expr": "wva_slo_source{$namespace_label=~\"$namespace\"} == 1",
+              "expr": "max by ($namespace_label, model_name, variant_name, source) (wva_slo_source{$namespace_label=~\"$namespace\"}) == 1",
               "legendFormat": "{{$namespace_label}}/{{model_name}}/{{variant_name}} {{source}}",
               "refId": "A",
               "datasource": {
@@ -2888,10 +2940,7 @@
           "fieldConfig": {
             "defaults": {
               "unit": "short",
-              "custom": {
-                "drawStyle": "line",
-                "fillOpacity": 8
-              }
+              "noValue": "No data: no model here lists the slo analyzer (scaling-policy.md, the slo section)"
             },
             "overrides": []
           },
@@ -2908,7 +2957,7 @@
           "gridPos": {
             "h": 8,
             "w": 12,
-            "x": 0,
+            "x": 12,
             "y": 148
           },
           "targets": [
@@ -2937,7 +2986,8 @@
               "custom": {
                 "drawStyle": "line",
                 "fillOpacity": 8
-              }
+              },
+              "noValue": "No data: no model here lists the slo analyzer (scaling-policy.md, the slo section)"
             },
             "overrides": []
           },
@@ -2954,8 +3004,8 @@
           "gridPos": {
             "h": 8,
             "w": 12,
-            "x": 12,
-            "y": 148
+            "x": 0,
+            "y": 156
           },
           "targets": [
             {
@@ -2974,7 +3024,8 @@
               "custom": {
                 "drawStyle": "line",
                 "fillOpacity": 8
-              }
+              },
+              "noValue": "No data: no model here lists the slo analyzer (scaling-policy.md, the slo section)"
             },
             "overrides": []
           },
@@ -2987,11 +3038,11 @@
           "id": 85,
           "title": "Why a window was not judged",
           "type": "state-timeline",
-          "description": "Per model and objective, the reason its window is excluded this cycle: zero-replicas (waking) or starting (a replica starting, a scale-up in progress). Empty while judged.",
+          "description": "Per model and objective, the reason its window is excluded this cycle: zero-replicas (waking), starting (a replica starting, a scale-up in progress), or unobserved (just after a controller restart, or after cycles the engine skipped the model). Capacity that cannot be scheduled is not excluded. Empty while judged.",
           "gridPos": {
             "h": 8,
-            "w": 24,
-            "x": 0,
+            "w": 12,
+            "x": 12,
             "y": 156
           },
           "targets": [
@@ -3007,7 +3058,8 @@
           ],
           "fieldConfig": {
             "defaults": {
-              "unit": "short"
+              "unit": "short",
+              "noValue": "Nothing excluded, or no model here lists the slo analyzer"
             },
             "overrides": []
           },

@@ -255,3 +255,82 @@ tests:
         alertname: WVAModelSLOUnjudged
         exp_alerts:
           - exp_labels: {severity: info, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
+
+  # 13. A quiet model: requests below the sample minimum all hour, nothing
+  #     excluded. Too little traffic to judge is not something to act on.
+  - interval: 1m
+    input_series:
+      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '3x150'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '30x150'
+      - series: 'wva_slo_excluded{exported_namespace="ns",model_name="m",objective="ttft",reason="starting"}'
+        values: '0x150'
+      - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
+        values: '2x150'
+    alert_rule_test:
+      - eval_time: 100m
+        alertname: WVAModelSLOUnjudged
+        exp_alerts: []
+
+  # 14. The same quiet model with one scale-up in the hour: excluded for 10
+  #     minutes of 60, still not a fleet that never holds still.
+  - interval: 1m
+    input_series:
+      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '3x150'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '30x150'
+      - series: 'wva_slo_excluded{exported_namespace="ns",model_name="m",objective="ttft",reason="starting"}'
+        values: '0x60 1x10 0x80'
+      - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
+        values: '2x150'
+    alert_rule_test:
+      - eval_time: 100m
+        alertname: WVAModelSLOUnjudged
+        exp_alerts: []
+
+  # 15. A fleet excluded the whole time (it keeps scaling up), with traffic:
+  #     pending from 60m, firing from 75m.
+  - interval: 1m
+    input_series:
+      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '3x150'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '300+1x150'
+      - series: 'wva_slo_excluded{exported_namespace="ns",model_name="m",objective="ttft",reason="starting"}'
+        values: '1x150'
+      - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
+        values: '2x150'
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: WVAModelSLOUnjudged
+        exp_alerts: []
+      - eval_time: 80m
+        alertname: WVAModelSLOUnjudged
+        exp_alerts:
+          - exp_labels: {severity: info, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
+
+  # 16. TPOT sees no requests while TTFT sees plenty: clients do not send
+  #     include_usage. TPOT is unjudged and fires; TTFT, judged, does not.
+  - interval: 1m
+    input_series:
+      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
+        values: '0.1x150'
+      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '3x150'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
+        values: '0x150'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '300+1x150'
+      - series: 'wva_slo_observed_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '1x150'
+      - series: 'wva_slo_excluded{exported_namespace="ns",model_name="m",objective="tpot",reason="starting"}'
+        values: '0x150'
+      - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
+        values: '2x150'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: WVAModelSLOUnjudged
+        exp_alerts:
+          - exp_labels: {severity: info, exported_namespace: ns, model_name: m, objective: tpot, statistic: mean}
