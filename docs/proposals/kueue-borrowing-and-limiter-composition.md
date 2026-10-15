@@ -136,17 +136,19 @@ which lands with #164.
   cycle: declared, not skipped, and with a node snapshot under 2 minutes old.
   - Every replica ordered that cycle debits the node view, across models. "No
     node fits a whole replica" is scarcity; a P/D pair needs both roles placed.
-  - A refusal by node fit is attributed to node fit, not to the pool with the
-    least free.
-  - It counts GPUs only: no CPU, memory, taints or affinity. PR-B adds node
-    labels and taints, to match a flavor. A replica whose pod layout is
-    unknown and larger than every node is judged on the pool only.
+  - A refusal by node fit is attributed to `node-fit` (the Event and
+    `wva_decisions_limited_total`), not to the pool with the least free.
+  - Rescale, the utilization-share idle fill and the warm pool use the same
+    view. A node promised to a share receiver is held for it.
+  - Placement is best-fit, and honours taints the pod template does not
+    tolerate. A wide-EP group is placed within one domain. PR-B adds node
+    labels, to match a flavor. CPU and memory are not checked. A replica whose
+    pod layout is unknown and larger than every node is judged on the pool only.
   - Pending pods with a `nodeName` or `nominatedNodeName` debit their node.
-    Other Pending pods do not, so a hole can look free until the scheduler
-    nominates them.
-  - Wakes in one tick are checked against the same snapshot and a per-tick
-    ledger. Across ticks, a woken replica holds nothing until its pods are
-    scheduled or nominated.
+  - Growth and wakes ordered but not yet placed hold their node holes in an
+    in-flight ledger shared by both engines, until their pods are scheduled or
+    nominated, for at most 5 minutes. A wake's quota demand is not carried
+    across ticks; only its node hole is.
 - **A6. The warm pool takes the same bounds**, counted in whole units per node
   and published after the optimizer pass. 12 free GPUs as 4+4+4 afford no
   8-GPU pool pod.
