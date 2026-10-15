@@ -326,12 +326,13 @@ the first in table order wins: withheld, then frozen, then counted but 0. The
 reason is logged and published on `wva_quota_borrow_withheld`; what to do for
 each is in [Borrowing is withheld](troubleshooting.md#borrowing-is-withheld).
 
-**Withheld**: borrowable is 0 and the namespace stays at guaranteed.
+**Withheld**: borrowable is 0, and the namespace is capped at its nominal
+quota, exactly as with `countBorrowable: false`.
 
 | Borrowing needs | Reason when it fails |
 |---|---|
 | The namespace is in the entry's `borrowNamespaces`, when that list is set | `not-selected` |
-| Kueue Workloads are read cluster-wide, without error. A namespace-scoped or tenant install that may list Workloads only in its own namespace, a Forbidden, or a failed list cannot see a lender wait | `lenders-unreadable` |
+| Kueue Workloads are read cluster-wide, without error. Every install reads them cluster-wide; a namespace-scoped one once a cluster admin has re-run the admin phase ([RBAC](#rbac)). A Forbidden or a failed list cannot see a lender wait | `lenders-unreadable` |
 | Kueue charges every GPU pod in the namespace: a Workload owned by the pod, or by an owner up its chain, has quota reserved (for a pod at Kueue's admission gate, the Workload exists). The Workload must request a GPU and be owned by a kind a Kueue integration owns Workloads by: Pod, batch Job, JobSet, LeaderWorkerSet or StatefulSet; the reserved Workloads must request at least the GPUs their owners' running pods do, each Workload counted once and at the pod count Kueue admitted. GPU work of other integrations (Kubeflow, Ray, AppWrapper) reads as not managed, as do GPUs asked for only through pod-level resources or DRA claims, and a pod whose owner the controller may not read. Kueue's labels and gate alone are not enough, since a tenant can write them | `not-kueue-managed` |
 | The namespace's ResourceQuotas are readable (Forbidden at once; any other failure after five refresh intervals of failing) | `resourcequota-unreadable` |
 | Something checks that borrowed GPUs exist: a `gpu-inventory` limiter, or a GPU `ResourceQuota` whose `hard` is at most nominal plus `borrowingLimit` | `no-gpu-bound` |
@@ -347,7 +348,7 @@ each is in [Borrowing is withheld](troubleshooting.md#borrowing-is-withheld).
 | No queue in the cohort declares its GPUs in a flavor with Topology-Aware Scheduling (`topologyName`) | `topology-aware` |
 | No queue in the cohort names admission checks (`admissionChecks`, or `admissionChecksStrategy` as MultiKueue uses) | `admission-checks` |
 | No queue in the cohort sets `preemption.borrowWithinCohort` other than `Never` | `borrow-within-cohort` |
-| Where the queue has more than one flavor for the GPU, or `flavorFungibility.whenCanBorrow` is `Borrow` or `MayStopSearch`, every variant's pod template pins the flavor's `nodeLabels` | `flavor-unpinned` |
+| Where more than one flavor of the queue offers the GPU, every variant's pod template pins the flavor's `nodeLabels`. A queue with one GPU flavor needs no pin | `flavor-unpinned` |
 | Every resource the GPU flavor's resource group covers (CPU, memory, ...) has a per-replica request in each variant's pod template | `co-resource-bound` |
 
 **Frozen**: nothing new is borrowed, and the last figures are kept (0 when
@@ -357,22 +358,24 @@ freeze never shrinks a running model.
 | Borrowing needs | Reason when it fails |
 |---|---|
 | The Kueue read is fresh: the last read succeeded and is under twice `refreshInterval` old. A Cohort list that fails for a reason other than Forbidden reads as stale too, and so does one namespace's ResourceQuota read failing (other than Forbidden) for up to five refresh intervals | `stale` |
-| The Kueue controller is up: its leader-election Lease's `renewTime` is under twice its `leaseDuration` old, or, with no Lease, the `kueue-controller-manager` Deployment has a ready replica. A Deployment or Lease never found, or Forbidden (no Role in the Kueue namespace), counts as down | `kueue-controller-down` |
+| The Kueue controller is up: its leader-election Lease's `renewTime` is under twice its `leaseDuration` old, or, with no Lease, the `kueue-controller-manager` Deployment has a ready replica. A Deployment or Lease never found, or Forbidden (no Role in the Kueue namespace), counts as down. Only Kueue's default Lease, `c1f6bfd2.kueue.x-k8s.io`, is read: a Kueue built with another leader-election ID always reads as down | `kueue-controller-down` |
 
 **Counted, but 0 this cycle**: borrowing is on, and there is nothing to draw.
 
 | Reason | Meaning |
 |---|---|
-| `lender-cannot-reclaim` | the cohort's only unused capacity belongs to lenders Kueue would not reclaim for (see *the shared pool*) |
+| `lender-cannot-reclaim` | the cohort's only unused capacity belongs to lenders Kueue would not reclaim for (see *the shared pool*). The namespace stays counted, at its guaranteed figure |
 | `lender-waiting` | a lender waits for capacity it lent: what is borrowed stays, and nothing new is borrowed in the cohort |
 | `cohort-pool-empty` | the free pool holds no GPUs, after what is in flight and gated |
 | `no-borrow-cap` | `borrowingLimit`, the static entry or the namespace ResourceQuota stops the namespace at guaranteed |
 | `preemptions-unreadable` | Kueue's preemptions in the namespace could not be read this cycle, so none of its models grows on borrowed capacity |
 
-Withholding stops new borrowing only. A withheld namespace that Kueue still
-reads as borrowing borrows nothing new, and is capped at its guaranteed
-figure, not at nominal, so it does not grow into nominal a peer has borrowed.
-Its cohort's lenders are still read, so their wait still stops new borrowing.
+Withholding stops new borrowing only; it evicts nothing. A withheld
+namespace is capped at its nominal quota. One that Kueue reads as borrowing
+right now (past its nominal) is frozen instead: it borrows nothing new, and
+is capped at its guaranteed figure, so it does not grow into nominal a peer
+has borrowed. Its cohort's lenders are still read, so their wait still stops
+new borrowing.
 
 A declared `gpu-inventory` limiter that is skipped in a cycle (no node read,
 or its view not observed yet; `wva_constraint_provider_skipped`) checks
@@ -382,6 +385,13 @@ the give-back steps carry on.
 
 **Not supported, and not detected**: Kueue's `waitForPodsReady` with
 `blockAdmission: true`. Borrowing assumes it is off.
+
+**Known risk: `waitForPodsReady` at all.** With it on, Kueue evicts a
+Workload whose pods are not all Ready within its `timeout` (5 minutes by
+default) and queues it again. A model server that loads weights for longer
+than that is evicted on every start, borrowed or not. The scaling manager
+does not detect it. Raise `waitForPodsReady.timeout` above your slowest
+replica start, or leave the feature off.
 
 **The three figures.** Where borrowing is counted, a namespace has:
 
@@ -397,11 +407,13 @@ the give-back steps carry on.
 - **the shared pool**: the cohort's free GPUs, one pool per cohort, flavor and
   GPU resource, spent once across every namespace in the cohort. It counts a
   lender's unused nominal only when Kueue would take it back for that lender:
-  always under `reclaimWithinCohort: Any`; under `LowerPriority` when the
-  lender's highest Workload priority (`spec.priority`, reserved or pending)
-  outranks at least one Workload of the namespaces that borrow in the cohort
-  (their own Workloads' priority, not their ClusterQueue's highest); never
-  under `Never`, and never when either priority is unknown. Borrowing what a
+  always under `reclaimWithinCohort: Any`; under `LowerPriority` only for a
+  borrowing model whose own Workload priority (`spec.priority`, set by its
+  `WorkloadPriorityClass` or `priorityClassName`) is strictly below the
+  lender's, since Kueue reclaims only for a Workload that outranks the
+  borrower; never under `Never`, and never when either priority is unknown.
+  One low-priority Workload elsewhere in the cohort opens nothing for the
+  other models. Borrowing what a
   lender cannot get back would hold its nominal until the borrower shrinks on
   its own. The borrowing namespaces' own queues are not lenders here: their
   unused nominal is theirs. What the borrowers hold is taken from the counted
@@ -508,7 +520,7 @@ change.
 | Key | Default | What it does |
 |---|---|---|
 | `countBorrowable` | `true` | `false` caps every namespace at nominal, as before borrowing was counted |
-| `borrowNamespaces` | empty (all) | a pilot: borrowing is counted only in the listed namespaces; every other namespace keeps its guaranteed figure, withheld as `not-selected`, and costs no eligibility read |
+| `borrowNamespaces` | empty (all) | a pilot: borrowing is counted only in the listed namespaces; every other namespace is capped at nominal, withheld as `not-selected`, and costs no eligibility read |
 | `placementTimeout` | `5m` | how long a borrowed replica may stay unplaced |
 | `borrowCooldown` | `10m` | how long a cohort borrows nothing new after a lender waited, and a model after a preemption or a placement-timeout release; doubled on a repeat, up to four times. Published on `wva_kueue_borrow_cooldown_seconds` |
 | `lenderDebounce` | `60s` | how long a lender must read as waiting, over at least two fresh reads, before its wait is published and alerted on. New borrowing stops at the first sighting regardless |
@@ -522,15 +534,14 @@ list on both entries, or on neither.
 
 ##### Supported Kueue versions
 
-Borrowing reads Kueue fields and conditions that are checked against these
-releases. The tested versions are the ones the `e2e-tests-kueue-borrow` CI job
-runs. Outside them, borrowing is withheld (`kueue-version-untested`); the
+Borrowing reads Kueue fields and conditions that were checked against these
+releases. Outside them, borrowing is withheld (`kueue-version-untested`); the
 nominal quotas still apply.
 
 | Kueue | Borrowing |
 |---|---|
-| v0.20.x | tested |
-| v0.19.x | tested |
+| v0.20.x | counted. The `e2e-tests-kueue-borrow` CI job runs v0.20.0 |
+| v0.19.x | counted. Its fields were checked against the source; no CI job runs it |
 | anything else | withheld: `kueue-version-untested` |
 | a version that cannot be read | withheld: `kueue-version-unknown`, unless `assumeTestedVersion: true` |
 
@@ -549,15 +560,16 @@ cross-check, `reason`), the applied figures and the withheld reasons; at most
 guaranteed. The same figures are metrics and the `limiterBudgets` status key
 ([Prometheus](prometheus.md#kueue-borrowing-metrics)). When replicas drop,
 start at [replicas dropped](troubleshooting.md#replicas-dropped-under-kueue-borrowing).
-The design, with the formulas, is the proposal
-`docs/proposals/kueue-borrowing-and-limiter-composition.md`; the internals are
-on [Kueue borrowing internals](../developer-guide/kueue-borrowing.md).
+The design, with the formulas, is the Kueue borrowing and limiter
+composition proposal (in #161); the internals are on
+[Kueue borrowing internals](../developer-guide/kueue-borrowing.md).
 
 #### RBAC
 
-The manager ClusterRole carries `get`/`list` on `clusterqueues`, `cohorts`,
-`localqueues` and `resourceflavors`, and `get`/`list`/`watch` on `workloads`
-in `kueue.x-k8s.io`: Workloads are read cluster-wide through an informer,
+The manager ClusterRole of a cluster-scoped install carries `get`/`list` on
+`clusterqueues`, `cohorts`, `localqueues` and `resourceflavors`, and
+`get`/`list`/`watch` on `workloads` in `kueue.x-k8s.io`, and reads `events`
+in every namespace. Workloads are read cluster-wide through an informer,
 indexed by owner, which starts on the first borrowing check (a cluster
 without Kueue starts none). Until it has synced, or if `watch` is denied,
 every check lists Workloads from the API server instead. Namespace labels, for
@@ -570,17 +582,28 @@ through its Role (`wva-manager-role`), and the cluster-scoped kinds
 Namespace, from `components/kueue-reader`. Borrowing also needs, from the
 same prereqs phase:
 
-- `list`/`watch` on `workloads` in every namespace; without it borrowing is
-  withheld as `lenders-unreadable`;
+- `get`/`list`/`watch` on `workloads` in every namespace, from the same
+  `components/kueue-reader` ClusterRole: a lender's pending Workload can be in
+  any namespace. Without it borrowing is withheld as `lenders-unreadable`;
 - a Role in the Kueue namespace (`kueue-system`, or `kueue.controllerNamespace`)
   to `get` the `kueue-controller-manager` Deployment and its leader-election
   Lease (`coordination.k8s.io`). Without it the controller cannot tell Kueue
   runs, and borrowing freezes as `kueue-controller-down`.
 
 The prereqs phase applies these, so an install that predates them needs a
-cluster admin to re-run `make setup-prereqs`; the tenant's `make deploy-wva`
-does not apply Roles. A rule naming an API group the cluster does not serve
-is inert, so the grant is harmless without Kueue.
+cluster admin to re-run it, with the variables the install used. Where Kueue
+runs elsewhere than `kueue-system`, name its namespace, or the Role lands in
+`kueue-system`:
+
+```bash
+KUEUE_NAMESPACE=<kueue-ns> NAMESPACE=<namespace> make setup-prereqs
+```
+
+The tenant's `make deploy-wva` does not apply Roles. A rule naming an API
+group the cluster does not serve is inert, so the grant is harmless without
+Kueue. The Workload read is cluster-wide, pod templates included: see
+[the security model](security-model.md). An install that must not read other
+namespaces cannot count borrowing safely; set `countBorrowable: false`.
 
 To publish a Kueue-backed quota and grant the same reader to each target
 controller (`WVA_LIMITER_TYPE` defaults to `gpu-inventory`, so name `quota`):

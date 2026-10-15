@@ -461,8 +461,9 @@ design: see above.
 
 ## Borrowing is withheld
 
-**Symptom**: a model on a Kueue quota stays at its guaranteed figure while its
-cohort has idle GPUs; `wva_quota_borrow_withheld == 1` names a reason.
+**Symptom**: a model on a Kueue quota stops at its nominal quota (or its
+guaranteed figure) while its cohort has idle GPUs;
+`wva_quota_borrow_withheld == 1` names a reason.
 
 ```bash
 kubectl get configmap wva-controller-status -n "$NS" -o jsonpath='{.data.limiterBudgets}' \
@@ -473,19 +474,23 @@ $LOGS | grep 'Kueue borrowing applied' | tail -1
 Each namespace shows one reason: the first in this table that applies. Every
 reason below is published on `wva_quota_borrow_withheld`. "Re-run the admin
 phase" means a cluster admin runs `NAMESPACE=<ns> make setup-prereqs` with the
-variables the install used. `<controller SA>` is
-`system:serviceaccount:$NS:wva-controller-manager`.
+variables the install used, adding `KUEUE_NAMESPACE=<kueue-ns>` where Kueue
+runs elsewhere than `kueue-system`. `<controller SA>` is
+`system:serviceaccount:$NS:wva-controller-manager`; `<kueue-ns>` is where
+Kueue runs.
 
-**Withheld**: borrowable is 0, and the namespace stays at guaranteed.
+**Withheld**: borrowable is 0, and the namespace is capped at its nominal
+quota, as with `countBorrowable: false`. One that holds borrowed capacity now
+is frozen at its guaranteed figure instead, until it scales down.
 
 | reason | what it means | what to do |
 | --- | --- | --- |
 | `not-selected` | the entry's `borrowNamespaces` is set and does not list this namespace | add it to `borrowNamespaces`, or remove the list to borrow everywhere ([pilot](../guides/kueue-borrowing/#pilot-on-a-few-namespaces)) |
-| `lenders-unreadable` | the controller cannot list Kueue Workloads in every namespace (a namespace-scoped install, a Forbidden, a failed list), so it could not see a lender wait | **(cluster admin)** re-run the admin phase; `kubectl auth can-i list workloads.kueue.x-k8s.io --all-namespaces --as=<controller SA>` must say yes. An install that must not read other namespaces cannot borrow safely: set `countBorrowable: false` |
+| `lenders-unreadable` | the controller cannot list Kueue Workloads in every namespace (a namespace-scoped install whose admin phase predates the grant, a Forbidden, a failed list), so it could not see a lender wait | **(cluster admin)** re-run the admin phase: it grants the cluster-wide Workload read. `kubectl auth can-i list workloads.kueue.x-k8s.io --all-namespaces --as=<controller SA>` must then say yes. An install that must not read other namespaces cannot borrow safely: set `countBorrowable: false` |
 | `not-kueue-managed` | a GPU pod in the namespace is not backed by a Workload with quota reserved, owned by a kind a Kueue integration manages; or the controller may not read the pod's owner | find it: `kubectl get workloads.kueue.x-k8s.io -n <ns>` against `kubectl get pods -n <ns>`. Put the workload behind a LocalQueue (`kueue.x-k8s.io/queue-name`), or move it out of the namespace. For a Forbidden owner read, re-run the admin phase |
 | `resourcequota-unreadable` | the namespace's ResourceQuotas cannot be read: Forbidden, or failing for five refresh intervals | `kubectl auth can-i list resourcequotas -n <ns> --as=<controller SA>`; re-run the admin phase |
 | `no-gpu-bound` | nothing checks that borrowed GPUs exist: no `gpu-inventory` limiter, and no GPU `ResourceQuota` at most nominal plus `borrowingLimit` | declare one ([prerequisites](../guides/kueue-borrowing/#prerequisites)) |
-| `kueue-version-unknown` | the `kueue-controller-manager` Deployment was read, but its image carries no version tag (a digest-only image, say) | check the image: `kubectl get deploy kueue-controller-manager -n kueue-system -o jsonpath='{.spec.template.spec.containers[*].image}'`. If it runs a [tested version](quota-limiter.md#supported-kueue-versions), set `kueue.assumeTestedVersion: true` on the entry |
+| `kueue-version-unknown` | the `kueue-controller-manager` Deployment was read, but its image carries no version tag (a digest-only image, say) | check the image: `kubectl get deploy kueue-controller-manager -n <kueue-ns> -o jsonpath='{.spec.template.spec.containers[*].image}'`. If it runs a [tested version](quota-limiter.md#supported-kueue-versions), set `kueue.assumeTestedVersion: true` on the entry |
 | `kueue-version-untested` | Kueue runs a release outside the tested range | run a [tested version](quota-limiter.md#supported-kueue-versions); the nominal cap applies meanwhile |
 | `no-cohort` | the namespace's ClusterQueue is in no cohort, so there is nothing to borrow from | set `spec.cohortName` on the ClusterQueue, if borrowing is wanted |
 | `inactive` | the ClusterQueue admits nothing: `stopPolicy` is `Hold` or `HoldAndDrain`, or it names a flavor that does not exist | `kubectl get clusterqueue <cq> -o yaml`: read its `Active` condition |
@@ -498,7 +503,7 @@ variables the install used. `<controller SA>` is
 | `topology-aware` | a GPU flavor in the cohort has a `topologyName` (Topology-Aware Scheduling) | not supported |
 | `admission-checks` | a queue in the cohort has admission checks, MultiKueue included | not supported |
 | `borrow-within-cohort` | a queue in the cohort sets `preemption.borrowWithinCohort` other than `Never`, so a borrower could preempt another queue's work | set `borrowWithinCohort.policy: Never` (or remove it) on every queue in the cohort |
-| `flavor-unpinned` | the queue has more than one flavor for the GPU, or `flavorFungibility.whenCanBorrow` is `Borrow` or `MayStopSearch`, and a variant's pod template does not select the flavor's `nodeLabels`, so Kueue could admit it on another flavor than the one counted | add the flavor's `nodeLabels` to the variant's `nodeSelector` |
+| `flavor-unpinned` | more than one flavor of the queue offers the GPU, and a variant's pod template does not select the flavor's `nodeLabels`, so Kueue could admit it on another flavor than the one counted. A queue with one GPU flavor never shows it | add the flavor's `nodeLabels` to the variant's `nodeSelector` |
 | `co-resource-bound` | the GPU flavor's resource group also covers other resources (CPU, memory) and a variant's per-replica request for one of them cannot be read from its pod template | set requests for every covered resource on the variant's containers |
 
 **Frozen**: nothing new is borrowed, the last figures are kept, and nothing
@@ -507,13 +512,13 @@ borrowed is taken away.
 | reason | what it means | what to do |
 | --- | --- | --- |
 | `stale` | the last Kueue read failed, or is older than twice `refreshInterval`; or one namespace's ResourceQuota read is failing | `$LOGS \| grep 'external quota source unreadable'` names the read; usually RBAC or a missing CRD. Alert `WVAKueueReaderStale` |
-| `kueue-controller-down` | Kueue's leader Lease was not renewed within twice its `leaseDuration` (with no Lease, the Deployment has no ready replica), or the controller cannot read the Deployment or the Lease at all: never found, or Forbidden for want of the Role in the Kueue namespace | `kubectl get deploy kueue-controller-manager -n kueue-system`; `kubectl auth can-i get deployments/kueue-controller-manager -n kueue-system --as=<controller SA>` (and the same for `leases.coordination.k8s.io/c1f6bfd2.kueue.x-k8s.io`); re-run the admin phase. Kueue elsewhere: set `kueue.controllerNamespace` |
+| `kueue-controller-down` | Kueue's leader Lease was not renewed within twice its `leaseDuration` (with no Lease, the Deployment has no ready replica), or the controller cannot read the Deployment or the Lease at all: never found, or Forbidden for want of the Role in the Kueue namespace | see [WVAKueueControllerDown](#wvakueuecontrollerdown): check Kueue runs, then the controller's read of its Deployment and Lease in `<kueue-ns>`; re-run the admin phase. Kueue elsewhere: set `kueue.controllerNamespace` too |
 
 **Counted, but 0 this cycle**: borrowing is on, and there is nothing to draw.
 
 | reason | what it means | what to do |
 | --- | --- | --- |
-| `lender-cannot-reclaim` | the cohort's only unused capacity belongs to lenders Kueue would not reclaim for: `reclaimWithinCohort: Never`, or `LowerPriority` with Workloads that outrank no borrowing Workload | set `reclaimWithinCohort: Any` on the lender's ClusterQueue, if serving may use its capacity |
+| `lender-cannot-reclaim` | the cohort's only unused capacity belongs to lenders Kueue would not reclaim for: `reclaimWithinCohort: Never`, or `LowerPriority` whose Workloads do not outrank this model's. The namespace stays counted, at its guaranteed figure | set `reclaimWithinCohort: Any` on the lender's ClusterQueue, if serving may use its capacity; or give the serving model a lower `WorkloadPriorityClass` than the lender |
 | `lender-waiting` | a lender waits for capacity it lent. What is borrowed stays until Kueue preempts it; nothing new is borrowed in the cohort, until `borrowCooldown` after the wait ends | nothing: Kueue reclaims for the lender. If it lasts, see [WVAKueueLenderWaitingPastCooldown](#wvakueuelenderwaitingpastcooldown) |
 | `cohort-pool-empty` | the cohort's free pool holds no GPUs, after what is in flight and held at Kueue's gate | nothing: the cohort is in use |
 | `no-borrow-cap` | `borrowingLimit`, the static entry or the namespace ResourceQuota stops the namespace at guaranteed | raise the one that binds, if borrowing is wanted |
@@ -550,7 +555,8 @@ borrowed, per cohort and flavor.
 What to do, if it is not wanted:
 
 - Set `countBorrowable: false` on the entry, or pilot with
-  `borrowNamespaces` ([the guide](../guides/kueue-borrowing/#cleanup)). This
+  `borrowNamespaces` ([pilot](../guides/kueue-borrowing/#pilot-on-a-few-namespaces),
+  [turn off](../guides/kueue-borrowing/#cleanup)). This
   evicts nothing: the cap only stops growth, and models move back under
   nominal as they scale down.
 - To hand GPUs back now, lower the model's `maxReplicaCount` on its

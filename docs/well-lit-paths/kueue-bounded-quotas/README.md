@@ -34,9 +34,12 @@ What backs it: [Evidence](#evidence).
   lender asks for its quota, and the scaling manager gives back a borrowed
   replica that did not place within `placementTimeout` (5m). Each loss is a
   cold start.
-- **Prerequisites to keep true**: a GPU bound, Kueue-managed GPU pods, and a
-  Role in the Kueue namespace for a namespace-scoped install
+- **Prerequisites to keep true**: a GPU bound, Kueue-managed GPU pods, and,
+  for a namespace-scoped install, a Role in the Kueue namespace and a read of
+  every namespace's Kueue Workloads
   ([the guide's prerequisites](../../guides/kueue-borrowing/#prerequisites)).
+- **A wider read**: borrowing reads every tenant's Kueue Workloads, pod
+  templates included ([security model](../../reference/security-model.md#kueue-borrowing)).
 
 Failures are visible. A failed read freezes borrowing at the last figures
 (`wva_quota_borrow_withheld{reason="stale"}`, alert `WVAKueueReaderStale`).
@@ -64,7 +67,8 @@ alert `WVAKueueNeverRead`) while the other limiters still bound.
   Sharing, Topology-Aware Scheduling, admission checks (MultiKueue),
   `borrowWithinCohort` preemption, and `waitForPodsReady` with
   `blockAdmission`. Each but the last withholds borrowing with a reason; the
-  last is not detected.
+  last is not detected. `waitForPodsReady` at all is a risk: Kueue evicts a
+  model whose pods are not Ready within its timeout (5 minutes by default).
 - **Two scaling managers borrow from one cohort.** Run one per cohort, or set
   `countBorrowable: false` on the Kueue entries of all but one.
 

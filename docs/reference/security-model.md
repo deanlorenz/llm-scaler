@@ -114,7 +114,7 @@ Role and its binding in the managed namespace).
 | get, list, watch | inferencepools (both InferencePool API groups) | managed namespace | which EPP queue a workload sits behind |
 | get | scaledobjects (keda.sh) | managed namespace | the scale target behind a KEDA call |
 | get, list | localqueues (kueue.x-k8s.io) | managed namespace | the Kueue quota source |
-| get, list, watch | workloads (kueue.x-k8s.io) | managed namespace | cohort borrowing, through an informer of the namespace |
+| get, list, watch | workloads (kueue.x-k8s.io) | managed namespace | cohort borrowing; also granted cluster-wide below |
 | get, list, watch | leaderworkersets; get leaderworkersets/scale | managed namespace | LWS scale targets |
 | get, list, watch | servicemonitors | managed namespace | preflight of what is scraped |
 | get, list, watch, create, update, patch, delete | leases | own namespace (`leader-election-role`) | leader election |
@@ -126,6 +126,8 @@ Role and its binding in the managed namespace).
 | get, list, watch | nodes, nodes/status | **cluster** (`node-reader-role`) | resolving a variant's accelerator; required by the `gpu-inventory` limiter |
 | get, list | clusterqueues, cohorts, resourceflavors | **cluster** (`kueue-reader-role`) | the Kueue quota source; cohorts for cohort borrowing. Inert on a cluster without Kueue |
 | get | namespaces, by name: the managed one only | **cluster** (`kueue-reader-role`) | its labels, to evaluate a ClusterQueue `namespaceSelector` |
+| get, list, watch | workloads (kueue.x-k8s.io) | **cluster** (`kueue-reader-role`) | cohort borrowing: a lender's pending Workload can be in any namespace. Reaches **every tenant's** Kueue Workloads, pod templates included (see [Kueue borrowing](#kueue-borrowing)). Inert without Kueue |
+| get | the `kueue-controller-manager` Deployment and the Lease `c1f6bfd2.kueue.x-k8s.io`, by name | Kueue namespace (Role `wva-kueue-controller-reader-<suffix>`, labelled with the suffix) | the Kueue version, and whether Kueue runs. Made by the prereqs phase in `KUEUE_NAMESPACE` (default `kueue-system`); removed by `make undeploy-wva` and by `make disable-limiter WVA_LIMITER_TYPE=quota` |
 | get | namespaces, by name: its own, the managed one, `wva-policy` and the namespace the managed one is labelled with | **cluster** (`policy-namespace-reader-role`) | finding a published cluster policy — see [Multi-tenancy](#multi-tenancy) |
 | create | tokenreviews, subjectaccessreviews | **cluster** (`metrics-auth-role`) | authenticating and authorizing scrapes of `:8443` |
 | get | non-resource URL `/metrics` | **cluster** (`metrics-reader`) | bound to the Prometheus that scrapes the controller, **not** to the controller — see below |
@@ -181,7 +183,7 @@ cluster-wide. The differences that matter for review:
 | get, list, watch | **pods** | **every namespace** | read only. `patch` is granted per namespace by Role `wva-pod-writer`, made where it is used (see [Grants made after install](#grants-made-after-install)) |
 | get, list, watch | namespaces, nodes, nodes/status | cluster | |
 | get, list | clusterqueues, cohorts, localqueues, resourceflavors | cluster | Kueue's queues and flavors |
-| get, list, watch | workloads | cluster | reaches **every namespace's** Kueue Workloads: their pod sets, priority and admission, not only the managed models'. Watched through an informer that holds them in memory, started on the first borrowing check |
+| get, list, watch | workloads | cluster | reaches **every namespace's** Kueue Workloads: their pod sets (full pod templates), priority and admission, not only the managed models'. Watched through an informer that holds them in memory, started on the first borrowing check |
 | get, list | **events** | **every namespace** | read for the cluster autoscaler's `TriggeredScaleUp` on a borrowed pod; the grant reaches every Event in the cluster, whose messages can name objects and carry error text |
 
 `node-reader` and `kueue-reader` are not rendered at this scope; `manager-role`
@@ -412,12 +414,23 @@ A cluster-scoped or out-of-reach controller always logs the own-namespace line.
 ### Kueue borrowing
 
 - **What borrowing reads beyond the managed namespace.** Kueue Workloads in
-  every namespace (to see a lender wait; they carry other teams' workload
-  names, owners, requests and priorities), and, through a Role in the Kueue
-  namespace, `get` on the `kueue-controller-manager` Deployment and its
-  leader-election Lease. All read-only. An install that must not read other
-  namespaces' Workloads cannot count borrowing safely: without the read it is
-  withheld (`lenders-unreadable`); set `countBorrowable: false` there.
+  every namespace, at every install scope: a lender's pending Workload can be
+  anywhere. A Workload carries its pod templates whole: other teams' images,
+  commands, arguments, inline environment values, requests and priorities.
+  A cluster-scoped install also reads Events in every namespace. Through a
+  Role in the Kueue namespace, it reads the `kueue-controller-manager`
+  Deployment and its leader-election Lease. All read-only. For a
+  namespace-scoped install, the cluster-wide Workload read comes from the
+  `kueue-reader` ClusterRole that `make setup-prereqs` grants. An install that
+  must not read other namespaces' Workloads cannot count borrowing safely:
+  without the read it is withheld (`lenders-unreadable`); set
+  `countBorrowable: false` there.
+- **The cluster autoscaler's Events are trusted.** A `TriggeredScaleUp` Event
+  on an unplaced pod stretches its placement timeout up to three times. The
+  Event's source is not verified, so anyone who may create Events in the
+  namespace can write one. The most it buys is a borrowed replica held
+  unplaced for three placement timeouts (15 minutes at the default) before it
+  is given back. Do not grant tenants `create` on Events where that matters.
 - **The managed check is a heuristic, not a boundary.** Borrowing is counted
   for a namespace only when its GPU pods are Kueue-managed, each backed by a
   Workload with quota reserved that requests a GPU and is owned by a kind a
@@ -441,12 +454,12 @@ A cluster-scoped or out-of-reach controller always logs the own-namespace line.
   until they free; the placement timeout gives it back if that takes too long.
 - **A `Never` lender's capacity is not borrowed.** With `reclaimWithinCohort:
   Never`, Kueue never takes capacity back, so the scaling manager does not
-  count what such a lender lends (`lender-cannot-reclaim`). `LowerPriority` is
-  treated the same way unless the lender outranks a Workload of the borrowing
-  namespaces. The priorities are read from the Workloads, which a tenant sets
-  through its own priority classes: a tenant that raises its serving
-  Workloads' priority above every lender's makes a `LowerPriority` lender's
-  capacity uncountable, never the reverse.
+  count what such a lender lends (`lender-cannot-reclaim`). A `LowerPriority`
+  lender is counted only for a borrowing model whose own priority is below
+  the lender's. The priorities are read from the Workloads, which a tenant
+  sets through its own priority classes: a tenant that raises its serving
+  Workloads' priority above a lender's makes that lender's capacity
+  uncountable for itself, never the reverse.
 - **In a cohort shared between tenants**, give every lender that must get
   capacity back from serving `reclaimWithinCohort: Any`.
 

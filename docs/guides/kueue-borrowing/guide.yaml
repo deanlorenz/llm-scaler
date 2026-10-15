@@ -3,26 +3,30 @@ name: kueue-borrowing
 prerequisites:
   kueue:
     note: >-
-      Kueue runs, and its image carries a version tag. List the ClusterQueues with
-      their cohort and preemption settings (v1beta1 calls the cohort field spec.cohort).
+      Kueue runs, and its image carries a version tag. <kueue-ns> is where Kueue runs,
+      kueue-system by default. List the ClusterQueues with their cohort and preemption
+      settings (v1beta1 calls the cohort field spec.cohort).
     run: |
-      kubectl get deploy kueue-controller-manager -n kueue-system \
+      kubectl get deploy kueue-controller-manager -n <kueue-ns> \
         -o jsonpath='{.status.readyReplicas} ready, image {.spec.template.spec.containers[*].image}{"\n"}'
       kubectl get clusterqueue -o custom-columns='NAME:.metadata.name,COHORT:.spec.cohortName,RECLAIM:.spec.preemption.reclaimWithinCohort,BORROW_WITHIN:.spec.preemption.borrowWithinCohort'
   rbac:
     note: >-
-      (cluster admin) A namespace-scoped install: re-run the admin phase, with the
-      variables the install used. It creates the Role in the Kueue namespace and the
-      cluster-wide reads borrowing needs. Then check what the controller may read:
-      every line must print yes.
+      Check what the controller may read. Every line must print yes.
     run: |
-      NAMESPACE=<namespace> make setup-prereqs
       SA=system:serviceaccount:<wva-namespace>:wva-controller-manager
       kubectl auth can-i list workloads.kueue.x-k8s.io --all-namespaces --as="$SA"
       kubectl auth can-i list cohorts.kueue.x-k8s.io --as="$SA"
-      kubectl auth can-i get deployments/kueue-controller-manager -n kueue-system --as="$SA"
-      kubectl auth can-i get leases.coordination.k8s.io/c1f6bfd2.kueue.x-k8s.io -n kueue-system --as="$SA"
+      kubectl auth can-i get deployments/kueue-controller-manager -n <kueue-ns> --as="$SA"
+      kubectl auth can-i get leases.coordination.k8s.io/c1f6bfd2.kueue.x-k8s.io -n <kueue-ns> --as="$SA"
       kubectl auth can-i list resourcequotas -n <namespace> --as="$SA"
+  grant:
+    note: >-
+      (cluster admin) Any no above: re-run the admin phase, with the variables the
+      install used. It grants the cluster-wide Workload read and the Role in the Kueue
+      namespace. KUEUE_NAMESPACE puts that Role where Kueue runs.
+    run: |
+      KUEUE_NAMESPACE=<kueue-ns> NAMESPACE=<namespace> make setup-prereqs
   bound:
     note: >-
       Borrowing needs a GPU bound. Print the queue's nominal and borrowingLimit per
@@ -34,10 +38,11 @@ prerequisites:
       kubectl get resourcequota -n <namespace> -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.hard}{"\n"}{end}'
   kueueconfig:
     note: >-
-      Kueue settings borrowing does not support. Expect no fairSharing block and no
-      waitForPodsReady with blockAdmission true.
+      Kueue settings borrowing does not support. Expect no fairSharing block, and no
+      waitForPodsReady; if waitForPodsReady is there, its timeout must exceed your
+      slowest replica start.
     run: |
-      kubectl get configmap kueue-manager-config -n kueue-system \
+      kubectl get configmap kueue-manager-config -n <kueue-ns> \
         -o jsonpath='{.data.controller_manager_config\.yaml}' | grep -A4 -E 'fairSharing|waitForPodsReady'
   managed:
     note: >-
@@ -47,6 +52,13 @@ prerequisites:
       kubectl get workloads.kueue.x-k8s.io -n <namespace> \
         -o custom-columns='NAME:.metadata.name,OWNER:.metadata.ownerReferences[0].kind,RESERVED:.status.conditions[?(@.type=="QuotaReserved")].status'
       kubectl auth can-i create workloads.kueue.x-k8s.io -n <namespace> --as=<tenant>
+  drain:
+    note: >-
+      Serving pods drain on a preemption. The first command writes the drain patch and
+      shows it; the second applies it, restarting the model servers.
+    run: |
+      make workload-patch NAMESPACE=<namespace>
+      make workload-patch NAMESPACE=<namespace> WVA_WORKLOAD_PATCH_APPLY=true
 
 deploy:
   enable:
@@ -81,14 +93,18 @@ verify:
 pilot:
   set:
     note: >-
-      Count borrowing only in the namespaces listed. Find where the policy lives, then
-      set borrowNamespaces on the Kueue-backed quota entry.
+      Count borrowing only in the namespaces listed. Find the policy ConfigMap the
+      controller reads, then set borrowNamespaces on the Kueue-backed quota entry.
     run: |
-      POLICY_NS=$(kubectl get cm wva-controller-status -n <wva-namespace> -o jsonpath='{.data.policyNamespace}')
-      kubectl get configmap wva-scaling-policy-config -n "${POLICY_NS:-<wva-namespace>}" -o jsonpath='{.data.default}' \
+      STATUS=$(kubectl get cm wva-controller-status -n <wva-namespace> -o json)
+      POLICY_NS=$(printf '%s' "$STATUS" | jq -r '.data.policyNamespace // empty')
+      POLICY_NS=${POLICY_NS:-<wva-namespace>}
+      POLICY_CM=$(printf '%s' "$STATUS" | jq -r '.data.policyConfigMap // empty')
+      POLICY_CM=${POLICY_CM:-wva-scaling-policy-config}
+      kubectl get configmap "$POLICY_CM" -n "$POLICY_NS" -o jsonpath='{.data.default}' \
         | yq '(.limiters[] | select(.type == "quota" and .kueue.enabled == true) | .kueue.borrowNamespaces) = ["<namespace>"]' \
         > policy-default.yaml
-      kubectl patch configmap wva-scaling-policy-config -n "${POLICY_NS:-<wva-namespace>}" --type=merge \
+      kubectl patch configmap "$POLICY_CM" -n "$POLICY_NS" --type=merge \
         -p "$(jq -n --rawfile d policy-default.yaml '{data: {default: $d}}')"
   check:
     note: Every namespace left out now reads not-selected.
@@ -106,8 +122,8 @@ reasons:
 cleanup:
   stop:
     note: >-
-      Stop counting borrowing; the Kueue cap stays, at guaranteed. Nothing is evicted.
-      This rewrites the quota entry, so a borrowNamespaces list goes too.
+      Stop counting borrowing; the Kueue cap stays, at nominal. Nothing is evicted.
+      The rest of the entry's kueue block, borrowNamespaces included, is kept.
     run: |
       make deploy-wva NAMESPACE=<namespace> \
         WVA_LIMITER=gpu-inventory,quota WVA_QUOTAS='<accelerator>=-1' WVA_QUOTA_KUEUE=true WVA_QUOTA_KUEUE_BORROW=false
@@ -115,8 +131,10 @@ cleanup:
       # make enable-physical-limiter WVA_LIMITER_TYPE=quota WVA_QUOTAS='<accelerator>=-1' WVA_QUOTA_KUEUE=true WVA_QUOTA_KUEUE_BORROW=false
   drain:
     note: >-
-      Models move back under guaranteed only as they scale down. Lists the ones still
-      above it; empty when nothing borrowed is left.
+      Models move back under the cap only as they scale down. Lists the ones still
+      above it, then how many entries the list left out (truncated); done when both
+      are empty and 0.
     run: |
-      kubectl get configmap wva-controller-status -n <wva-namespace> -o jsonpath='{.data.limiterBudgets}' \
-        | jq -c '.entries[] | select(.guaranteed >= 0 and .used > .guaranteed) | {namespace, accelerator, guaranteed, used}'
+      BUDGETS=$(kubectl get configmap wva-controller-status -n <wva-namespace> -o jsonpath='{.data.limiterBudgets}')
+      printf '%s' "$BUDGETS" | jq -c '.entries[] | select(.guaranteed >= 0 and .used > .guaranteed) | {namespace, accelerator, guaranteed, used}'
+      printf '%s' "$BUDGETS" | jq '.truncated // 0'

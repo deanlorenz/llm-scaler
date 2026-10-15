@@ -4,15 +4,14 @@ How Kueue cohort borrowing is built, for contributors. Paths are under
 `internal/` unless noted. What an operator does and sees is in
 [the guide](../guides/kueue-borrowing/) and
 [the quota limiter reference](../reference/quota-limiter.md#cohort-borrowing);
-the design, with the formulas, is the proposal
-`docs/proposals/kueue-borrowing-and-limiter-composition.md` (Part B and its
-observability).
+the design, with the formulas, is the Kueue borrowing and limiter
+composition proposal (in #161; Part B and its observability).
 
 This page covers borrowing only. How the declared limiters are built and
 composed, the node view, and the scale-from-zero snapshot (Part A) are on
 [How the limiter set is built](limiter-composition.md). Counting and handing
-back the capacity of lenders that do not reclaim is a later, opt-in change
-(PR-C, `feat/kueue-borrow-release`), not built here.
+back the capacity of lenders that do not reclaim is a later, opt-in change,
+not built here.
 
 ## What is read
 
@@ -27,7 +26,7 @@ All read-only. A cohort name with no Cohort object is a flat cohort.
 | ClusterQueue `status.flavorsReservation[].resources[].borrowed` | `wva_kueue_borrow_drift_gpus` |
 | ClusterQueue `spec.preemption.reclaimWithinCohort` | the guaranteed figure, which lenders count |
 | ClusterQueue `spec.preemption.borrowWithinCohort` | `borrow-within-cohort` |
-| ClusterQueue `spec.flavorFungibility.whenCanBorrow`, flavors per resource | `flavor-unpinned` |
+| ClusterQueue flavors per GPU resource | `flavor-unpinned`, only where more than one flavor offers the GPU |
 | ClusterQueue `spec.admissionChecks`, `status.fairSharing`, `status.effectiveQuotas` | withheld reasons |
 | Cohort `spec.parentName`, and any Cohort naming this one as parent | nested cohorts |
 | ResourceFlavor `nodeLabels`, `tolerations`, `topologyName` | node fit per flavor, flavor pinning, `topology-aware` |
@@ -95,11 +94,11 @@ answer; on the first read it counts as not managed. Eligibility is evaluated
 only for namespaces with managed variants, spread over the interval, and only
 for the namespaces `borrowNamespaces` selects.
 
-**Which lenders count.** `CanReclaim` is evaluated against the priority of the
-borrowing namespaces' own Workloads, not the highest priority reserved in
-their ClusterQueue. `Any` reclaims; `LowerPriority` reclaims when a lender
-Workload outranks at least one borrowing Workload, as Kueue decides; `Never`
-does not. Only reclaiming lenders' lent nominal enters the pool. When the pool
+**Which lenders count.** `Any` reclaims for every borrower. `LowerPriority`
+counts per borrowing model: the lender's capacity is counted for a model only
+when the model's own Workload priority is strictly below the lender's, as
+Kueue reclaims only for a Workload that outranks the borrower. `Never` does
+not reclaim. Only reclaiming lenders' lent nominal enters the pool. When the pool
 is 0 while non-reclaiming lenders hold unused nominal, the reason is
 `lender-cannot-reclaim`.
 
@@ -129,7 +128,7 @@ It exists only while the physical limiter bounds the cycle: declared, not
 skipped, and with a node snapshot younger than `decision.NodeGPUsMaxAge` (2
 minutes). It counts GPUs only, not CPU or memory. Part A already judges a
 pod's tolerations against the node's taints, places best-fit and keeps an
-exclusive-topology group in one domain. PR-B adds two filters
+exclusive-topology group in one domain. Borrowing adds two filters
 (`eligibleFit`, cached per cycle like Part A's eligible list): the pod
 templates' `nodeSelector` and required node affinity, and, for a borrowed
 unit, the flavor's `nodeLabels`, with the flavor's tolerations added to the
@@ -196,10 +195,13 @@ persist under `borrowReleaseLedger`.
 `kueue-controller-manager` Deployment's image and its leader Lease. Down: the
 Lease's `renewTime` older than twice its `leaseDuration`, else
 `readyReplicas` 0. Not found or Forbidden: down, so a missing Role in the
-Kueue namespace reads as `kueue-controller-down`. A Deployment read whose
-image carries no version publishes `wva_kueue_controller_version_known` 0 and
-withholds with `kueue-version-unknown`, unless `kueue.assumeTestedVersion`,
-which lifts that reason only.
+Kueue namespace reads as `kueue-controller-down`; so does a Kueue whose
+leader-election ID is not the default (the Lease is read by name). A
+Deployment read whose image carries no version withholds with
+`kueue-version-unknown`, unless `kueue.assumeTestedVersion`, which lifts that
+reason only. `wva_kueue_controller_version_known` is `Known ||
+assumeTestedVersion`, published only while some entry counts borrowing, so an
+opted-out cluster never pages `WVAKueueVersionUnknown`.
 
 **Never-read.** An entry with a static `-1` and no successful Kueue read is an
 unobserved provider: `wva_constraint_provider_skipped{reason="unobserved"}`,
@@ -245,12 +247,13 @@ bounded log line is emitted only on change.
   absent there, and skips with a reason on a cluster that does not serve them.
 - **End to end, live Kueue**: `test/e2e/kueue_borrow_test.go` (label
   `kueue-borrow`). The live e2e runs in CI job `e2e-tests-kueue-borrow`.
-  The model holds at nominal, withheld as `lender-cannot-reclaim` with
-  nothing borrowable, while its only lender is on `Never`; with the lender on
-  `Any`, borrowing is withheld while an unmanaged GPU pod runs, and the model
-  is not ordered past its nominal while the Kueue controller is down -- each
-  hold the only one in force; once Kueue is back it grows into the cohort
-  with every pod placed; after Kueue preempts the borrowed pods the model drops back, borrows
+  The model holds at its guaranteed figure, counted at 0 as
+  `lender-cannot-reclaim`, while its only lender is on `Never`; with the
+  lender on `Any`, borrowing is withheld while an unmanaged GPU pod runs, and
+  the model is not ordered past its nominal while the Kueue controller is
+  down -- each hold the only one in force; once Kueue is back it grows into
+  the cohort with every pod placed; after Kueue preempts the borrowed pods the
+  model drops back, borrows
   nothing during the cooldown and grows again after it.
   `deploy/ci-pr-checks/install-kueue.sh` installs Kueue from `registry.k8s.io`
   and refuses a non-kind context unless `KUEUE_ALLOW_NON_KIND=true`.
@@ -259,7 +262,7 @@ bounded log line is emitted only on change.
   [Kueue specs](testing.md#kueue-specs).
 - **Not covered end to end**: inactive queues, finalizers and `stopPolicy`
   transitions (imitated by fixtures), and enforcement past the effective entry.
-- **Tested Kueue versions** are the ones `e2e-tests-kueue-borrow` runs, and
-  `TestedKueueVersions` in `kueue/version.go` must match them. Adding one means
+- **Kueue versions.** `TestedKueueVersions` in `kueue/kueue_constants.go`
+  accepts v0.19 and v0.20; `e2e-tests-kueue-borrow` runs v0.20.0 only. Adding one means
   re-copying the constants in `kueue/kueue_constants.go` and running the e2e
   against it.

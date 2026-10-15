@@ -234,8 +234,8 @@ tests do. The controller goes into `CONTROLLER_NAMESPACE`, which defaults to
   It is excluded from the full tier's label filter and runs in its own CI job,
   `e2e-tests-kueue-borrow`. A loaded simulator model runs on one queue of a
   two-queue cohort (2 GPUs each):
-  - the only lender is on `Never`: nothing it lends is counted (borrowable
-    0), so the model holds at its nominal 2, withheld as
+  - the only lender is on `Never`: nothing it lends is counted, so the model
+    holds at its nominal 2, counted at 0 as
     `lender-cannot-reclaim`;
   - a GPU pod in the namespace that Kueue does not manage withholds
     borrowing; the lender is then patched to `Any`, and the model still holds

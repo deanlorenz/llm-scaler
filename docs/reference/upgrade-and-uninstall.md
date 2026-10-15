@@ -174,8 +174,11 @@ they enable. Do this, in order:
 >    namespace-scoped install ([step 1 above](#upgrading-to-this-release)).
 >    It adds the cluster-wide Workload read and a Role in the Kueue namespace
 >    to read the `kueue-controller-manager` Deployment and its leader Lease.
->    Without that Role, borrowing stops with `kueue-controller-down`; without
->    the Workload read, with `lenders-unreadable`.
+>    Where Kueue runs elsewhere than `kueue-system`, add
+>    `KUEUE_NAMESPACE=<kueue-ns>`. Without that Role, borrowing stops with
+>    `kueue-controller-down`; without the Workload read, with
+>    `lenders-unreadable`. The Workload read reaches every tenant's Workloads,
+>    pod templates included ([security model](security-model.md#kueue-borrowing)).
 > 2. **Check the node read** for every policy that declares `gpu-inventory`
 >    beside `quota` (below).
 > 3. **Choose, per Kueue-backed entry**:
@@ -363,6 +366,10 @@ Installer:
   Exit codes are in [Uninstall](#policy-namespace-and-limiter-leftovers-cluster-admin).
 - `WVA_QUOTA_KUEUE_BORROW=false`, beside `WVA_QUOTA_KUEUE=true`, keeps the
   Kueue cap at nominal (`countBorrowable: false`).
+- A re-run of the install, or of `make enable-physical-limiter`, keeps the
+  quota entry's whole `kueue:` block (`borrowNamespaces`,
+  `assumeTestedVersion`, the timings), and rewrites only what its variables
+  set.
 - With `WVA_QUOTA_KUEUE=true` the installer adds no `gpu-inventory` entry.
   Name it yourself (`WVA_LIMITER=gpu-inventory,quota`) to give borrowing its
   GPU bound.

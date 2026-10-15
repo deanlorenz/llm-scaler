@@ -176,7 +176,7 @@ runs per arm on one cluster type (the P/D pair repeated once).
   it the default).
 - The Kueue quota source counts cohort borrowing only on a flat cohort
   without Fair Sharing or `effectiveQuotas`, and only from lenders Kueue would
-  reclaim for; elsewhere it caps at guaranteed
+  reclaim for; elsewhere it counts none and caps at nominal
   ([#136](https://github.com/ev-shindin/llm-scaling-manager/issues/136)).
 
 Planned work, with its issues, is on the [roadmap](roadmap.md).
