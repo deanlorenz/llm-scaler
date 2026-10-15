@@ -485,6 +485,32 @@ would be unreadable to an engine that does not run as root, on every seeded
 node. The cache directory is already world-writable and shared by every engine
 on the node, so world-readable copies expose nothing more.
 
+**A node seeded by an earlier version keeps its old copies.** A merge keeps
+what a node already has. Earlier versions of the preparer kept the source
+modes, so a node they seeded can still hold files only root can read, such as
+vLLM's `600` AOT files. An engine that is not root cannot read them, and
+`make engine-cache-verify ENGINE_CACHE_UID=<uid>` shows them as `UNREADABLE`.
+Fix it once on that node, through its preparer, which runs as root on
+Kubernetes:
+
+```bash
+# the preparer pod on that node
+kubectl get pods -n <ns> -l wva.llmd.ai/engine-cache=engine-cache --field-selector spec.nodeName=<node>
+# make every file readable and every directory searchable by every user
+kubectl exec -n <ns> <preparer pod> -c prepare -- \
+  chmod -R a+rX /engine-cache/vllm /engine-cache/flashinfer /engine-cache/triton
+```
+
+Or reseed the node: with no engine running there, delete its cache and the
+record of its seed, then restart its preparer, which merges the seed again.
+This also drops what the node compiled itself.
+
+```bash
+kubectl exec -n <ns> <preparer pod> -c prepare -- \
+  rm -rf /engine-cache/vllm /engine-cache/flashinfer /engine-cache/triton /engine-cache/.seeded
+kubectl delete pod -n <ns> <preparer pod>
+```
+
 Each copy belongs to the user the preparer runs as (root on Kubernetes), not to
 the user that compiled it. An engine under another user can read what was
 seeded, but cannot change it. Any image with `/bin/sh` works: with GNU `cp` the
@@ -554,7 +580,8 @@ If your engines do not run as root and any node was seeded or published to,
 add `ENGINE_CACHE_UID=$(kubectl exec -n <ns> <engine pod> -- id -u)`.
 Without it, a key owned by root is judged for root and passes even when your
 engines cannot read it: seeded and published copies are readable by every
-user, but a key written by a root engine may not be. The UID is also the
+user, but a key written by a root engine may not be, nor one a node kept from
+a seed by an earlier version (see seeding above). The UID is also the
 pod's `securityContext.runAsUser` (or the container's), when set.
 `ENGINE_CACHE_UID` is one UID for every pod: if prefill and decode run as
 different users, run the check once for each.
