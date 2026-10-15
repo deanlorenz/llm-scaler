@@ -339,15 +339,17 @@ func (g *BorrowGovernor) markModelCooldown(modelKey string, at time.Time) {
 func (g *BorrowGovernor) MarkPreemptedIn(modelKey string, cohorts []string, at time.Time) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.markBackoff(modelKey, cohorts, at)
+	g.markBackoff(modelKey, cohorts, at, true)
 }
 
 // BackoffEntry is one (model, cohort)'s borrowing cooldown: until when, how
-// many times it doubled, and the event that last started it.
+// many times it doubled, and the event that last started it -- a preemption
+// (Preempted) or a placement-timeout release.
 type BackoffEntry struct {
-	Until  time.Time `json:"until"`
-	Level  int       `json:"level,omitempty"`
-	LastAt time.Time `json:"lastAt"`
+	Until     time.Time `json:"until"`
+	Level     int       `json:"level,omitempty"`
+	LastAt    time.Time `json:"lastAt"`
+	Preempted bool      `json:"preempted,omitempty"`
 }
 
 // Backoff bounds (B12): the cooldown doubles on a repeat up to four times its
@@ -370,7 +372,14 @@ func (g *BorrowGovernor) backoffFor(level int) time.Duration {
 // doubles it, up to maxBackoffLevel; one clean cooldown resets it (pruneClocks
 // forgets the entry). An event at the same time as the last (sameEvent), or
 // older, starts nothing new, and nothing shortens a cooldown in force.
-func (g *BorrowGovernor) markBackoff(modelKey string, cohorts []string, at time.Time) {
+//
+// preempted says the event is a preemption; else it is a placement-timeout
+// release. A release while a preemption's cooldown is in force is the same
+// event (W4): Kueue preempted the borrowed pod, its replacement waited gated
+// for the placement timeout, and the release that follows is the preemption's
+// consequence, not a second reclaim. Doubling for it held the model off its
+// cohort for 20 minutes after one reclaim, about 25 in all.
+func (g *BorrowGovernor) markBackoff(modelKey string, cohorts []string, at time.Time, preempted bool) {
 	if len(cohorts) == 0 {
 		g.markModelCooldown(modelKey, at)
 		return
@@ -381,6 +390,9 @@ func (g *BorrowGovernor) markBackoff(modelKey string, cohorts []string, at time.
 		if ok && at.Sub(e.LastAt) < sameEvent {
 			continue
 		}
+		if ok && !preempted && e.Preempted && at.Before(e.Until) {
+			continue
+		}
 		level := 0
 		if ok && at.Before(e.Until.Add(g.settings.Cooldown)) {
 			level = min(e.Level+1, maxBackoffLevel)
@@ -389,7 +401,7 @@ func (g *BorrowGovernor) markBackoff(modelKey string, cohorts []string, at time.
 		if ok && e.Until.After(until) {
 			until = e.Until
 		}
-		g.backoff[k] = BackoffEntry{Until: until, Level: level, LastAt: at}
+		g.backoff[k] = BackoffEntry{Until: until, Level: level, LastAt: at, Preempted: preempted}
 	}
 }
 
@@ -762,7 +774,7 @@ func (g *BorrowGovernor) timeoutReleases(c BorrowCycle, states map[string]varian
 				below = 0
 			}
 			heldPast[req.Namespace][typeKey] -= gpus
-			g.markBackoff(req.Namespace+"/"+req.ModelID, namespaceCohorts(c.Constraints, req.Namespace), c.Now)
+			g.markBackoff(req.Namespace+"/"+req.ModelID, namespaceCohorts(c.Constraints, req.Namespace), c.Now, false)
 			break // one release per model per cycle: the counts above are now stale
 		}
 	}
