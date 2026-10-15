@@ -126,6 +126,6 @@ var _ = Describe("PublishSLO values", func() {
 			constants.SLOSourceNoLine, constants.SLOSourceNoOutputLength, constants.SLOSourceInfeasible,
 			constants.SLOSourceInputInvalid))
 		Expect(constants.SLOExcludedReasons).To(ConsistOf(
-			constants.SLOExcludedZeroReplicas, constants.SLOExcludedStarting))
+			constants.SLOExcludedZeroReplicas, constants.SLOExcludedStarting, constants.SLOExcludedUnobserved))
 	})
 })

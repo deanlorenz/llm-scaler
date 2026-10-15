@@ -105,6 +105,46 @@ func TestCollectRouterLatency_FailuresReadAsAbsent(t *testing.T) {
 		CollectRouterLatency(context.Background(), "model-a", "ns"))
 }
 
+// TestCollectRouterLatency_HalfATPOTPairIsNone pins that the TPOT mean is read
+// from both halves or not at all. With the _sum query failed and _count back,
+// summing what came back published a mean of 0: a met TPOT that neither alert
+// could see past.
+func TestCollectRouterLatency_HalfATPOTPairIsNone(t *testing.T) {
+	ttft := &source.MetricResult{Values: []source.MetricValue{
+		{Labels: map[string]string{seriesTargetModelLabel: "model-a", "le": "+Inf"}, Value: 1},
+	}}
+	good := func(v float64) *source.MetricResult {
+		return &source.MetricResult{Values: []source.MetricValue{
+			{Labels: map[string]string{seriesTargetModelLabel: "model-a"}, Value: v},
+		}}
+	}
+	failed := &source.MetricResult{Error: errors.New("timeout")}
+	for name, tc := range map[string]struct{ sum, count *source.MetricResult }{
+		"sum failed":    {failed, good(1)},
+		"count failed":  {good(0.08), failed},
+		"sum missing":   {nil, good(1)},
+		"sum zero":      {good(0), good(1)},
+		"count missing": {good(0.08), nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			results := map[string]*source.MetricResult{registration.QuerySLORouterTTFTBuckets: ttft}
+			if tc.sum != nil {
+				results[registration.QuerySLORouterTPOTSum] = tc.sum
+			}
+			if tc.count != nil {
+				results[registration.QuerySLORouterTPOTCount] = tc.count
+			}
+			src := &mockMetricsSource{refreshFunc: func(context.Context, source.RefreshSpec) (map[string]*source.MetricResult, error) {
+				return results, nil
+			}}
+			got := NewReplicaMetricsCollector(src, nil, nil, nil, nil).CollectRouterLatency(context.Background(), "model-a", "ns")
+			require.NotNil(t, got, "TTFT is still read")
+			assert.Zero(t, got.TPOTSumRate)
+			assert.Zero(t, got.TPOTCountRate, "no TPOT requests means TPOT unjudged, not met")
+		})
+	}
+}
+
 // TestCollectRouterLatency_SkipsUnreadableBoundsAndKeepsTPOTAlone pins that a
 // bucket whose bound does not parse is dropped rather than read as zero, and
 // that a router exporting TPOT and no TTFT still yields a reading.

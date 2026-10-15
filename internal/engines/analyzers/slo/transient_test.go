@@ -26,6 +26,31 @@ func vs(role string, current, pending, stuck int, ages ...float64) domain.Varian
 
 func everyVariant(domain.VariantReplicaState) bool { return true }
 
+// cadence is the engine interval these tests run cycles at.
+const cadence = 15 * time.Second
+
+// watched gives a model the history of an analyzed cycle one cadence before
+// now, so a test of another rule does not meet the analyzer's first sight of
+// the model (unobserved). The test then runs its cycles at cadence: a jump of
+// the clock between two cycles is itself a gap the analyzer reads.
+func watched(a *Analyzer, key string, now time.Time) {
+	before := now.Add(-cadence)
+	a.transients[key] = &transientMemo{seenAt: before, analyzedAt: before, interval: cadence}
+}
+
+// ticks returns the cycle times after from, cadence apart, ending exactly at to.
+func ticks(from, to time.Time) []time.Time {
+	var out []time.Time
+	for at := from; at.Before(to); {
+		at = at.Add(cadence)
+		if at.After(to) {
+			at = to
+		}
+		out = append(out, at)
+	}
+	return out
+}
+
 var _ = Describe("transientOf", func() {
 	DescribeTable("names what makes a cycle transient over a set of variants",
 		func(states []domain.VariantReplicaState, want string) {
@@ -90,18 +115,20 @@ var _ = Describe("noteTransient", func() {
 	BeforeEach(func() {
 		a = New(nil, nil)
 		clock = time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+		for _, key := range []string{"ns/m", "ns/a", "ns/b"} {
+			watched(a, key, clock)
+		}
 	})
 
 	It("excludes the window from a wake until the window and the grace have passed", func() {
 		ttft, tpot := a.noteTransient("ns/m", []domain.VariantReplicaState{vs(domain.RoleBoth, 1, 1, 0)}, window, grace, clock)
 		Expect(ttft).To(Equal(constants.SLOExcludedZeroReplicas))
 		Expect(tpot).To(Equal(constants.SLOExcludedZeroReplicas))
-		at := clock
-		clock = at.Add(window + grace - time.Second)
-		ttft, _ = a.noteTransient("ns/m", steady, window, grace, clock)
+		for _, at := range ticks(clock, clock.Add(window+grace-time.Second)) {
+			ttft, _ = a.noteTransient("ns/m", steady, window, grace, at)
+		}
 		Expect(ttft).To(Equal(constants.SLOExcludedZeroReplicas), "the window still holds requests that waited out the wake")
-		clock = at.Add(window + grace)
-		ttft, tpot = a.noteTransient("ns/m", steady, window, grace, clock)
+		ttft, tpot = a.noteTransient("ns/m", steady, window, grace, clock.Add(window+grace))
 		Expect(ttft).To(BeEmpty())
 		Expect(tpot).To(BeEmpty())
 	})
@@ -120,6 +147,82 @@ var _ = Describe("noteTransient", func() {
 		Expect(tpot).To(Equal(constants.SLOExcludedStarting))
 	})
 
+	It("does not judge a model's first window: nothing here saw what came before it", func() {
+		ttft, tpot := a.noteTransient("ns/new", steady, window, grace, clock)
+		Expect(ttft).To(Equal(constants.SLOExcludedUnobserved), "a restart, or the first cycle ever")
+		Expect(tpot).To(Equal(constants.SLOExcludedUnobserved))
+		for _, at := range ticks(clock, clock.Add(window+grace-time.Second)) {
+			ttft, _ = a.noteTransient("ns/new", steady, window, grace, at)
+			Expect(ttft).To(Equal(constants.SLOExcludedUnobserved), "at %v", at.Sub(clock))
+		}
+		ttft, tpot = a.noteTransient("ns/new", steady, window, grace, clock.Add(window+grace))
+		Expect(ttft).To(BeEmpty())
+		Expect(tpot).To(BeEmpty())
+	})
+
+	It("does not judge the window after cycles it did not see: the wake the engine skipped", func() {
+		at := clock
+		for _, at = range ticks(clock, clock.Add(4*cadence)) {
+			ttft, _ := a.noteTransient("ns/m", steady, window, grace, at)
+			Expect(ttft).To(BeEmpty())
+		}
+		// Parked, then woken: the engine skipped the model while its Pod had
+		// no metrics, so the first cycle the analyzer sees is already steady.
+		// The engine reports it present every cycle of the gap, and that
+		// must not hide the gap.
+		woke := at.Add(3 * time.Minute)
+		for _, p := range ticks(at, woke.Add(-cadence)) {
+			a.now = func() time.Time { return p }
+			a.NoteVariantsPresent("ns", "m", []string{"v"})
+		}
+		ttft, tpot := a.noteTransient("ns/m", steady, window, grace, woke)
+		Expect(ttft).To(Equal(constants.SLOExcludedUnobserved))
+		Expect(tpot).To(Equal(constants.SLOExcludedUnobserved))
+		// Back on the cadence, a cycle is a cycle: the one mark expires after
+		// window+grace and nothing renews it.
+		for _, at = range ticks(woke, woke.Add(window+grace)) {
+			ttft, _ = a.noteTransient("ns/m", steady, window, grace, at)
+		}
+		Expect(ttft).To(BeEmpty())
+	})
+
+	It("reads jitter in the engine's interval as a cycle, not a gap", func() {
+		at := clock
+		for _, step := range []time.Duration{15, 15, 19, 15, 25, 15} {
+			at = at.Add(step * time.Second)
+			ttft, _ := a.noteTransient("ns/m", steady, window, grace, at)
+			Expect(ttft).To(BeEmpty(), "a %ds step", step)
+		}
+	})
+
+	It("judges a model at zero whose only Pod cannot be scheduled: a shortfall, not a wake", func() {
+		ttft, tpot := a.noteTransient("ns/m", []domain.VariantReplicaState{vs(domain.RoleBoth, 1, 1, 1)}, window, grace, clock)
+		Expect(ttft).To(BeEmpty())
+		Expect(tpot).To(BeEmpty())
+	})
+
+	It("stops counting a group's pending replicas as starting after the flap age", func() {
+		// A LeaderWorkerSet group lists no Pod ages: only how long it has
+		// been pending tells a slow start from a group that will never land.
+		group := []domain.VariantReplicaState{vs(domain.RoleBoth, 3, 1, 0)}
+		ttft, _ := a.noteTransient("ns/m", group, window, grace, clock)
+		Expect(ttft).To(Equal(constants.SLOExcludedStarting))
+		for _, at := range ticks(clock, clock.Add(startingMaxAge)) {
+			ttft, _ = a.noteTransient("ns/m", group, window, grace, at)
+		}
+		Expect(ttft).To(Equal(constants.SLOExcludedStarting), "the last start's window and grace still hold")
+		for _, at := range ticks(clock.Add(startingMaxAge), clock.Add(startingMaxAge+window+grace)) {
+			ttft, _ = a.noteTransient("ns/m", group, window, grace, at)
+		}
+		Expect(ttft).To(BeEmpty(), "pending for longer than any start: judged")
+
+		// Settled, then a new scale-up: a fresh start again.
+		steadyAt := clock.Add(startingMaxAge + window + grace + cadence)
+		a.noteTransient("ns/m", []domain.VariantReplicaState{vs(domain.RoleBoth, 3, 0, 0)}, window, grace, steadyAt)
+		ttft, _ = a.noteTransient("ns/m", group, window, grace, steadyAt.Add(cadence))
+		Expect(ttft).To(Equal(constants.SLOExcludedStarting))
+	})
+
 	It("judges a steady model", func() {
 		ttft, tpot := a.noteTransient("ns/m", steady, window, grace, clock)
 		Expect(ttft).To(BeEmpty())
@@ -135,8 +238,9 @@ var _ = Describe("noteTransient", func() {
 
 	It("forgets a model not seen for the window timeout", func() {
 		a.noteTransient("ns/m", steady, window, grace, clock)
-		Expect(a.EvictStale(clock.Add(windowTimeout + time.Minute)).Transients).To(Equal(1))
-		Expect(a.transients).NotTo(HaveKey("ns/m"))
+		Expect(a.EvictStale(clock.Add(windowTimeout+time.Minute)).Transients).To(Equal(3),
+			"ns/m and the two other models this suite watches")
+		Expect(a.transients).To(BeEmpty())
 	})
 })
 
@@ -148,6 +252,7 @@ var _ = Describe("Analyze with a transient", func() {
 		a := New(fakeRouter{latency: rl}, nil)
 		clock := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
 		a.now = func() time.Time { return clock }
+		watched(a, "ns/m", clock)
 		run := func(current, pending int) {
 			_, err := a.Analyze(context.Background(), domain.AnalyzerInput{
 				ModelID: "m", Namespace: "ns", Config: policy(0, 3*time.Second), ArrivalRate: 1,
@@ -171,8 +276,9 @@ var _ = Describe("Analyze with a transient", func() {
 		// The router's own window (120 s here, not the 300 s default) plus the
 		// grace decides when judging resumes: a second before, still excluded.
 		start := clock
-		clock = start.Add(120*time.Second + minTransientGrace - time.Second)
-		run(1, 0)
+		for _, clock = range ticks(start, start.Add(120*time.Second+minTransientGrace-time.Second)) {
+			run(1, 0)
+		}
 		_, observed = gaugeIn(registry, constants.WVASLOObservedSeconds, ttft)
 		Expect(observed).To(BeFalse())
 		clock = start.Add(120*time.Second + minTransientGrace)
@@ -195,6 +301,7 @@ var _ = Describe("Analyze with a transient", func() {
 			rl := &domain.RouterLatency{WindowSeconds: 300, TTFTBuckets: buckets(1, 0.9, 3, 0.95, inf, 1.0),
 				TPOTSumRate: 0.04, TPOTCountRate: 1}
 			a := New(fakeRouter{latency: rl}, nil)
+			watched(a, "ns/m", time.Now())
 			_, err := a.Analyze(context.Background(), domain.AnalyzerInput{
 				ModelID: "m", Namespace: "ns", Config: policy(44*time.Millisecond, 3*time.Second), ArrivalRate: 1,
 				VariantStates: []domain.VariantReplicaState{vs(domain.RolePrefill, 2, prefillPending, 0),
@@ -226,6 +333,7 @@ var _ = Describe("Analyze with a transient", func() {
 		a := New(fakeRouter{latency: rl}, nil)
 		clock := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
 		a.now = func() time.Time { return clock }
+		watched(a, "ns/m", clock)
 		// Requests that last 400 s on average: the grace is 600 s, not the 120 s floor.
 		rows := []domain.ReplicaMetrics{{PodName: "p", VariantName: "v", Ready: true, AvgServiceTime: 400}}
 		run := func(pending int) {
@@ -240,12 +348,14 @@ var _ = Describe("Analyze with a transient", func() {
 		ttft := map[string]string{constants.LabelObjective: constants.SLOObjectiveTTFT}
 		run(1)
 		start := clock
-		clock = start.Add(120*time.Second + minTransientGrace)
-		run(0)
+		for _, clock = range ticks(start, start.Add(120*time.Second+minTransientGrace)) {
+			run(0)
+		}
 		_, observed := gaugeIn(registry, constants.WVASLOObservedSeconds, ttft)
 		Expect(observed).To(BeFalse(), "past the floor, inside the request-duration grace")
-		clock = start.Add(120*time.Second + 600*time.Second)
-		run(0)
+		for _, clock = range ticks(clock, start.Add(120*time.Second+600*time.Second)) {
+			run(0)
+		}
 		_, observed = gaugeIn(registry, constants.WVASLOObservedSeconds, ttft)
 		Expect(observed).To(BeTrue())
 	})

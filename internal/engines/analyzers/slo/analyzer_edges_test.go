@@ -233,6 +233,14 @@ var _ = Describe("judge's sample minimums and labels", func() {
 		}
 	})
 
+	It("reports no TPOT mean from a count with no time behind it", func() {
+		// 300 requests and a sum of 0: half a reading, which as a mean of 0
+		// would count as a met TPOT.
+		out := judge(&domain.RouterLatency{WindowSeconds: 300, TPOTCountRate: 1}, policy(100*time.Millisecond, 0).SLO)
+		Expect(math.IsNaN(out[0].Observed)).To(BeTrue())
+		Expect(out[0].Requests).To(BeNumerically("~", 300, 1e-9))
+	})
+
 	It("labels each objective with its statistic", func() {
 		slo := policy(100*time.Millisecond, 3*time.Second).SLO
 		slo.TTFT.Percentile = 99

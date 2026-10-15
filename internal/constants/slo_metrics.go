@@ -40,8 +40,9 @@ const (
 	// judged this cycle and 0 for the others; all 0 while it is judged. A
 	// window is excluded while it covers a wake from zero or a replica
 	// starting, and for a grace period after, because those requests waited out
-	// capacity no steady-state sizing could have had ready. Per objective: a
-	// prefill replica starting excludes TTFT and not TPOT.
+	// capacity no steady-state sizing could have had ready; and after cycles the
+	// analyzer did not see (a skipped model, a controller restart). Per
+	// objective: a prefill replica starting excludes TTFT and not TPOT.
 	// Labels: namespace, model_name, objective, reason.
 	WVASLOExcluded = "wva_slo_excluded"
 
@@ -99,10 +100,15 @@ const (
 const (
 	SLOExcludedZeroReplicas = "zero-replicas"
 	SLOExcludedStarting     = "starting"
+	// SLOExcludedUnobserved: the analyzer did not see the model's previous
+	// cycles -- it was skipped, as a waking model whose Pods have no metrics
+	// yet is, or the controller restarted -- so the window may hold a
+	// transient nothing here saw.
+	SLOExcludedUnobserved = "unobserved"
 )
 
 // SLOExcludedReasons is every exclusion reason, in the order they are published.
-var SLOExcludedReasons = []string{SLOExcludedZeroReplicas, SLOExcludedStarting}
+var SLOExcludedReasons = []string{SLOExcludedZeroReplicas, SLOExcludedStarting, SLOExcludedUnobserved}
 
 // SLOSources is every SLO source value, in the order they are published.
 var SLOSources = []string{

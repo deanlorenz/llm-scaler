@@ -69,11 +69,21 @@ func (c *ReplicaMetricsCollector) CollectRouterLatency(
 	for le, rate := range byBound {
 		out.TTFTBuckets = append(out.TTFTBuckets, domain.LatencyBucket{UpperBound: le, Rate: rate})
 	}
-	for _, v := range modelValues(results[registration.QuerySLORouterTPOTSum], modelID) {
-		out.TPOTSumRate += v.Value
-	}
-	for _, v := range modelValues(results[registration.QuerySLORouterTPOTCount], modelID) {
-		out.TPOTCountRate += v.Value
+	// The mean is sum over count, so the pair is one reading: with either
+	// query failed it is none. Summing the half that came back published a
+	// mean of 0 -- a met TPOT -- whenever the _sum query alone failed.
+	sum, count := results[registration.QuerySLORouterTPOTSum], results[registration.QuerySLORouterTPOTCount]
+	if sum != nil && !sum.HasError() && count != nil && !count.HasError() {
+		for _, v := range modelValues(sum, modelID) {
+			out.TPOTSumRate += v.Value
+		}
+		for _, v := range modelValues(count, modelID) {
+			out.TPOTCountRate += v.Value
+		}
+		// No time per token at all is not a reading of streams either.
+		if !(out.TPOTSumRate > 0) {
+			out.TPOTSumRate, out.TPOTCountRate = 0, 0
+		}
 	}
 	if len(out.TTFTBuckets) == 0 && out.TPOTCountRate == 0 {
 		return nil

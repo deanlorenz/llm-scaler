@@ -341,7 +341,8 @@ func (a *Analyzer) judge(ctx context.Context, input domain.AnalyzerInput, slo *c
 		if rl != nil {
 			r.WindowSeconds = rl.WindowSeconds
 			r.Requests = rl.TPOTCountRate * rl.WindowSeconds
-			if r.Requests >= minSamples(0) {
+			// A mean of 0 is no reading: it would count as met.
+			if r.Requests >= minSamples(0) && rl.TPOTSumRate > 0 {
 				r.Observed = rl.TPOTSumRate / rl.TPOTCountRate
 			}
 		}

@@ -1,6 +1,7 @@
 package slo
 
 import (
+	"slices"
 	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
@@ -24,13 +25,27 @@ const maxTransientGrace = 30 * time.Minute
 // a reason to stop judging the fleet it belongs to.
 const startingMaxAge = 30 * time.Minute
 
+// minUnobservedGap is the least gap between two analyzed cycles of a model that
+// can mean cycles were skipped: below it, a gap is jitter in the engine's
+// interval.
+const minUnobservedGap = 20 * time.Second
+
 // transientMemo is one model's last transient cycle per objective scope, and
 // when the model was last seen.
 type transientMemo struct {
 	// all is the last transient over every variant; generating the last over
 	// the decode and aggregated variants alone.
 	all, generating transientMark
-	seenAt          time.Time
+	// seenAt is when the model was last analyzed or reported present, and the
+	// memo is evicted on it. analyzedAt is when it was last analyzed and
+	// interval the gap before that: a gap well over the usual one is cycles
+	// this analyzer did not see. Presence does not touch them, or a parked
+	// model would look as if it had been watched all along.
+	seenAt, analyzedAt time.Time
+	interval           time.Duration
+	// pendingSince is when each variant with replicas pending began to have
+	// them, for boundPending.
+	pendingSince map[string]time.Time
 }
 
 type transientMark struct {
@@ -58,23 +73,24 @@ func starting(vs domain.VariantReplicaState) int {
 
 // transientOf names what makes this cycle transient over a set of variants, or
 // "". The set is waking when none of it has a ready replica but some of it is
-// on its way (CurrentReplicas is status.replicas, Pods not Ready included, so
+// starting (CurrentReplicas is status.replicas, Pods not Ready included, so
 // ready is Current - Pending). A set with nothing at all is parked, and a
 // parked model is not analyzed; within a model, a variant at zero beside one
-// that serves is not a wake. A replica starting anywhere in the set is a rise
-// in progress, so a rise needs no reason of its own.
+// that serves is not a wake. Nor is a set at zero whose Pods are stuck -- one
+// that cannot be scheduled is a shortfall, and its misses are judged. A
+// replica starting anywhere in the set is a rise in progress, so a rise needs
+// no reason of its own.
 func transientOf(states []domain.VariantReplicaState, in func(domain.VariantReplicaState) bool) string {
-	var ready, committed, starts int
+	var ready, starts int
 	for _, vs := range states {
 		if !in(vs) {
 			continue
 		}
 		ready += max(vs.CurrentReplicas-vs.PendingReplicas, 0)
-		committed += vs.CurrentReplicas + vs.PendingReplicas
 		starts += starting(vs)
 	}
 	switch {
-	case ready == 0 && committed > 0:
+	case ready == 0 && starts > 0:
 		return constants.SLOExcludedZeroReplicas
 	case starts > 0:
 		return constants.SLOExcludedStarting
@@ -113,11 +129,28 @@ func (a *Analyzer) noteTransient(key string, states []domain.VariantReplicaState
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	m := a.transients[key]
-	if m == nil {
+	fresh := m == nil
+	if fresh {
 		m = &transientMemo{}
 		a.transients[key] = m
 	}
-	m.seenAt = now
+	// A model the analyzer did not see on the cycles before this one was
+	// skipped -- a wake whose Pods had no metrics yet, which the engine does
+	// not analyze -- or this process has just started and holds none of its
+	// history. Either way the window may hold requests from a transient no
+	// cycle here saw, so it is not judged until window+grace from now.
+	gap := now.Sub(m.analyzedAt)
+	unobserved := fresh || (gap > 2*m.interval && gap > minUnobservedGap)
+	if !fresh {
+		m.interval = gap
+	}
+	m.seenAt, m.analyzedAt = now, now
+	states = boundPending(m, states, now)
+
+	if unobserved {
+		mark := transientMark{at: now, reason: constants.SLOExcludedUnobserved}
+		m.all, m.generating = mark, mark
+	}
 	if r := transientOf(states, func(domain.VariantReplicaState) bool { return true }); r != "" {
 		m.all = transientMark{at: now, reason: r}
 	}
@@ -131,4 +164,40 @@ func (a *Analyzer) noteTransient(key string, states []domain.VariantReplicaState
 		return ""
 	}
 	return held(m.all), held(m.generating)
+}
+
+// boundPending applies the flap rule to a variant whose Pods have no ages. A
+// LeaderWorkerSet group lists no ages (discovery cannot tell which group a Pod
+// is in), so its pending replicas were all "starting" for as long as they
+// stayed pending -- a group that cannot be scheduled, unjudged for ever, when
+// that shortfall is exactly an SLO miss worth seeing. Pending continuously for
+// startingMaxAge, such a variant's pending replicas stop counting as starting,
+// as a Pod older than startingMaxAge does.
+//
+// Returns states itself when nothing changes, else a copy.
+func boundPending(m *transientMemo, states []domain.VariantReplicaState, now time.Time) []domain.VariantReplicaState {
+	since := make(map[string]time.Time, len(states))
+	var out []domain.VariantReplicaState
+	for i, vs := range states {
+		if vs.PendingReplicas <= 0 {
+			continue
+		}
+		at, ok := m.pendingSince[vs.VariantName]
+		if !ok {
+			at = now
+		}
+		since[vs.VariantName] = at
+		if vs.PendingAges == nil && now.Sub(at) >= startingMaxAge {
+			if out == nil {
+				out = slices.Clone(states)
+			}
+			// Ages read and none of them young: starting() counts none.
+			out[i].PendingAges = []float64{}
+		}
+	}
+	m.pendingSince = since
+	if out == nil {
+		return states
+	}
+	return out
 }
