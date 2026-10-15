@@ -141,8 +141,50 @@ var _ = Describe("QuotaLimiterEntries.Validate", func() {
 		}
 		warnings, err := entries.Validate()
 		Expect(err).NotTo(HaveOccurred())
-		Expect(warnings).To(HaveLen(1))
-		Expect(warnings[0]).To(ContainSubstring("team-a"))
+		Expect(warnings).To(ContainElement(And(ContainSubstring("team-a"), ContainSubstring("both exclude and namespaceQuotas"))))
+	})
+
+	Describe("exclude warnings", func() {
+		tenants := func(exclude ...string) QuotaLimiterConfig {
+			return QuotaLimiterConfig{Name: "tenants", Type: "quota", Scope: QuotaScopeNamespace,
+				Exclude: exclude, NamespaceQuotas: map[string]map[string]int{"team-a": {"A100": 8, "H100": 4}}}
+		}
+		cluster := func(quotas map[string]int) QuotaLimiterConfig {
+			return QuotaLimiterConfig{Name: "cluster", Type: "quota", Scope: QuotaScopeCluster, ClusterQuotas: quotas}
+		}
+		validate := func(entries ...QuotaLimiterConfig) []string {
+			GinkgoHelper()
+			warnings, err := (&QuotaLimiterEntries{Limiters: entries}).Validate()
+			Expect(err).NotTo(HaveOccurred())
+			return warnings
+		}
+
+		It("warns that an excluded namespace has no limit without a finite cluster quota", func() {
+			Expect(validate(tenants("ns-x"))).To(ConsistOf(
+				And(ContainSubstring("[ns-x]"), ContainSubstring("no scope: cluster quota"))))
+			Expect(validate(tenants("ns-x"), cluster(map[string]int{"A100": -1, "H100": -1}))).To(HaveLen(1),
+				"an unlimited cluster quota bounds nothing")
+			excludeOnly := QuotaLimiterConfig{Name: "tenants", Type: "quota", Scope: QuotaScopeNamespace, Exclude: []string{"ns-x"}}
+			Expect(validate(excludeOnly)).To(ConsistOf(ContainSubstring("[ns-x] have no GPU limit")),
+				"also when the namespace quota names no accelerator type")
+		})
+
+		It("names the accelerator types no cluster quota bounds", func() {
+			Expect(validate(tenants("ns-x"), cluster(map[string]int{"H100": 16}))).To(ConsistOf(
+				And(ContainSubstring("[ns-x]"), ContainSubstring("on [A100]"))))
+			Expect(validate(tenants("ns-x"), cluster(map[string]int{"H100": 16, "A100": 20}))).To(BeEmpty())
+		})
+
+		It("does not warn without an exclude list", func() {
+			Expect(validate(tenants())).To(BeEmpty())
+		})
+
+		It("warns about an exclude entry that can never match a namespace", func() {
+			bounded := cluster(map[string]int{"H100": 16, "A100": 20})
+			Expect(validate(tenants(" ns-x"), bounded)).To(ConsistOf(ContainSubstring(`" ns-x" is not a valid namespace name`)))
+			Expect(validate(tenants("NS-X"), bounded)).To(ConsistOf(ContainSubstring(`"NS-X" is not a valid namespace name`)))
+			Expect(validate(tenants("ns-x"), bounded)).To(BeEmpty())
+		})
 	})
 
 	It("accumulates multiple errors instead of failing fast", func() {

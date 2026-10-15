@@ -121,6 +121,13 @@ func parseScalingPolicyConfigRejects(cmData map[string]string, logger logr.Logge
 				"issue #1003 for bounding by min(physical, quota)",
 				"key", key, "notEnforced", dropped, "enforcing", config.LimiterTypeQuota)
 		}
+		// Quota findings that do not reject the config, such as a namespace in
+		// exclude that nothing bounds. Logged here, once per config change.
+		if key == config.GlobalDefaultsKey {
+			for _, w := range satConfig.LimiterWarnings() {
+				logger.Info("WARNING: "+w, "key", key)
+			}
+		}
 		// Analyzer DEFINITIONS are tier-level, like limiters. A named policy
 		// selects and weights analyzers by name; it does not get to invent the
 		// PromQL behind one, because that query runs against the shared Prometheus

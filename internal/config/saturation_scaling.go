@@ -854,6 +854,26 @@ func (c *ScalingPolicy) validateLimiters() error {
 	return nil
 }
 
+// LimiterWarnings returns the non-fatal findings about this policy's quota
+// limiters (see QuotaLimiterEntries.Validate). Empty when there are none, or
+// when the quota entries do not validate: the error is reported elsewhere.
+func (c ScalingPolicy) LimiterWarnings() []string {
+	var quotaOnes []QuotaLimiterConfig
+	for _, l := range c.Limiters {
+		if l.Type == string(LimiterTypeQuota) {
+			quotaOnes = append(quotaOnes, l)
+		}
+	}
+	if len(quotaOnes) == 0 {
+		return nil
+	}
+	warnings, err := (&QuotaLimiterEntries{Limiters: quotaOnes}).Validate()
+	if err != nil {
+		return nil
+	}
+	return warnings
+}
+
 // UnenforcedLimiterTypes returns the limiter types this policy declares that
 // will NOT be built, in declaration order and de-duplicated. Empty when
 // everything declared is enforced.

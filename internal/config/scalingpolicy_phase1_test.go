@@ -362,6 +362,24 @@ var _ = Describe("Config.EffectiveLimiterMode / EffectiveQuotaEntries", func() {
 		})
 	})
 
+	Describe("LimiterWarnings", func() {
+		It("returns the quota entries' warnings, such as an excluded namespace nothing bounds", func() {
+			p := ScalingPolicy{Limiters: []QuotaLimiterConfig{
+				{Type: "gpu-inventory"},
+				{Type: "quota", Name: "tenants", Scope: QuotaScopeNamespace, Exclude: []string{"ns-x"},
+					NamespaceQuotas: map[string]map[string]int{"team-a": {"A100": 8}}},
+			}}
+			Expect(p.LimiterWarnings()).To(ConsistOf(ContainSubstring("[ns-x] have no GPU limit")))
+		})
+
+		It("returns nothing without quota limiters, or for entries that do not validate", func() {
+			Expect(ScalingPolicy{Limiters: []QuotaLimiterConfig{{Type: "gpu-inventory"}}}.LimiterWarnings()).To(BeEmpty())
+			Expect(ScalingPolicy{Limiters: []QuotaLimiterConfig{
+				{Type: "quota", Name: "tenants", Scope: "bogus", Exclude: []string{"ns-x"}},
+			}}.LimiterWarnings()).To(BeEmpty())
+		})
+	})
+
 	It("ignores limiters declared on a non-default (per-model) entry", func() {
 		c := &Config{}
 		c.UpdateScalingPolicyConfig(map[string]ScalingPolicy{
