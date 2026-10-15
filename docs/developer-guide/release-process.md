@@ -9,10 +9,11 @@ Every release, `-rc` ones included, takes **two PRs to `main`** and one tag:
 
 | Step | Where | What |
 |------|--------|------|
-| 1. Release PR | PR to `main` | Changelog and `newTag: vX.Y.Z`; merge it |
-| 2. Tag | Your clone | Tag `origin/main`, check it is on `main`, push the tag |
-| 3. Reset PR | PR to `main` | `newTag: main` again, right away |
-| 4. Publish | GitHub | Publish the GitHub Release; verify the signature |
+| 1. Release PR | PR to `main` | `newTag: vX.Y.Z`; merge it |
+| 2. Tag | Your clone | Tag the merge commit of the release PR, check it, push the tag |
+| 3. Wait | GitHub Actions | The release run must succeed |
+| 4. Reset PR | PR to `main` | `newTag: main` again, only after the run succeeded |
+| 5. Publish | GitHub | Publish the GitHub Release with the release notes; verify the signature |
 
 ---
 
@@ -22,7 +23,8 @@ Every release, `-rc` ones included, takes **two PRs to `main`** and one tag:
    `vMAJOR.MINOR.PATCH-PRERELEASE` (e.g. `v0.6.0`, `v0.6.0-rc1`).
 2. **A container image** at `ghcr.io/<repository owner>/llm-scaling-manager:<tag>`,
    i.e. `ghcr.io/ev-shindin/llm-scaling-manager:<tag>` for this repository.
-3. **Release notes and documentation** in this repository.
+3. **Release notes**, in the GitHub Release. They are not kept as a file in
+   this repository.
 
 Only `main`'s current line can be released. The workflow refuses a tag that is
 not on `main`, and needs `newTag` on the tagged commit to equal the tag. There
@@ -43,15 +45,18 @@ cannot be released.
 
 ## Pre-release checklist
 
-1. **Open the release PR to `main`.** It holds two changes:
-   - `docs/CHANGELOG-vX.Y.Z.md`, summarising user-facing and notable changes.
-   - `newTag: vX.Y.Z` in `config/base/manager/kustomization.yaml`. The release
-     fails before it builds anything if `newTag` is not the tag.
+1. **Open the release PR to `main`.** It sets `newTag: vX.Y.Z` in
+   `config/base/manager/kustomization.yaml`. The release fails before it builds
+   anything if `newTag` is not the tag.
 2. **Bump dependency pins**, if the release moves one (for example
    [llm-d-inference-sim](https://github.com/llm-d/llm-d-inference-sim)): the
    [Makefile](../../Makefile), `test/e2e/fixtures/model_service_builder.go` and
    `test/utils/resources/llmdsim.go`. Same PR.
-3. **Merge it.**
+3. **Draft the release notes** for the GitHub Release: user-facing and notable
+   changes, and the upgrade steps. You paste them when you publish.
+4. **Merge the PR, then tag right away.** From the merge until the release run
+   pushes the image, an install from `main` pulls `:vX.Y.Z`, which does not
+   exist yet.
 
 ---
 
@@ -59,44 +64,67 @@ cannot be released.
 
 ### 1. Push the tag
 
-Tag the merged commit on `origin/main`, not your local branch:
+Tag the merge commit of the release PR, not `origin/main` (another PR may have
+merged since) and not your local branch. The command checks that the tagged
+commit pins the release and is on `main`, and pushes only then:
 
 ```bash
 git fetch origin
-git tag vX.Y.Z origin/main
-git merge-base --is-ancestor vX.Y.Z origin/main && git push origin vX.Y.Z
+git tag vX.Y.Z <merge commit of the release PR>
+git show vX.Y.Z:config/base/manager/kustomization.yaml | grep -x '  newTag: vX.Y.Z' \
+  && git merge-base --is-ancestor vX.Y.Z origin/main && git push origin vX.Y.Z
 ```
 
 The push starts [`ci-release.yaml`](../../.github/workflows/ci-release.yaml).
 Watch it in the **Actions** tab.
 
-### 2. Set `newTag` back to `main`
+### 2. Wait for the run to succeed
 
-Right away, open a second PR to `main` that sets `newTag: main` again. Until it
-merges, an install from `main` deploys the release image instead of `:main`.
+Do not merge anything that changes `newTag` yet. If the run fails, see
+[If the release fails](#if-the-release-fails).
 
-### 3. Publish the GitHub Release
+### 3. Set `newTag` back to `main`
 
-In **Releases**, choose the tag, paste the changelog, mark it as a pre-release if
-the tag has a prerelease suffix, and publish.
+Once the run has succeeded, open a second PR to `main` that sets `newTag: main`
+again, and merge it. Until it merges, an install from `main` deploys the release
+image instead of `:main`. Merged earlier, a re-tag after a failed run would fail
+the pin check.
+
+### 4. Publish the GitHub Release
+
+In **Releases**, choose the tag, paste the release notes, mark it as a
+pre-release if the tag has a prerelease suffix, and publish.
 
 ### If the release fails
 
 Find the failed step in the run.
 
-- **It failed before "Build and push the multi-arch image".** Nothing was
-  published. Delete the tag, fix the problem on `main` with a PR, and tag again:
+**It failed before "Build and push the multi-arch image".** Nothing was
+published.
+
+- A flaky check: open the run and use **Re-run failed jobs**.
+- Anything else: delete the tag, fix the problem with a PR to `main` that keeps
+  `newTag: vX.Y.Z`, tag that PR's merge commit as in step 1, and repeat:
   ```bash
   git push origin --delete vX.Y.Z && git tag -d vX.Y.Z
   ```
-- **It failed at or after "Build and push the multi-arch image".** An image
-  may be public under that tag. Do not move or delete the tag. Fix the cause
-  (for example, the package access below), then open the run and use
-  **Re-run failed jobs**.
+
+**It failed at or after "Build and push the multi-arch image".** An image may
+be public under that tag. Do not move or delete the tag.
+
+- The cause is outside the code (for example, the package access below): fix
+  it, then use **Re-run failed jobs**. A re-run uses the workflow and the code
+  at the tag.
+- The fix needs a change to the code or the workflow: release `vX.Y.(Z+1)`
+  instead.
 
 ---
 
 ## The first release to a new package
+
+The package `llm-scaling-manager` already exists for this repository: it is
+public, and this repository has Write access to it. Nothing needs doing unless
+that changes, for example after a move to another owner.
 
 The release pushes with the built-in `GITHUB_TOKEN`. No `GHCR_TOKEN` secret is
 used. If the repository has no Write access to the package, the run fails at
@@ -119,7 +147,7 @@ A package GitHub creates on the first push is **private**. Users then get
 to **Public**.
 
 Make the first release after this workflow lands an `-rc1` tag. It tests the
-package access and visibility without moving `latest`.
+release run end to end without moving `latest`.
 
 ---
 
