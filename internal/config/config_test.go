@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/throughput"
 )
 
@@ -22,6 +23,17 @@ func TestThroughputAnalyzerName_MatchesCanonical(t *testing.T) {
 	if throughputAnalyzerName != throughput.AnalyzerName {
 		t.Fatalf("throughputAnalyzerName = %q, want %q (canonical throughput.AnalyzerName); the duplicated literal has drifted",
 			throughputAnalyzerName, throughput.AnalyzerName)
+	}
+}
+
+// TestSLOAnalyzerName_MatchesCanonical guards sloAnalyzerName, duplicated in
+// internal/config for the same reason as throughputAnalyzerName, against
+// domain.SLOAnalyzerName: a rename that drifted would make every policy's slo
+// analyzer read as not listed.
+func TestSLOAnalyzerName_MatchesCanonical(t *testing.T) {
+	if sloAnalyzerName != domain.SLOAnalyzerName {
+		t.Fatalf("sloAnalyzerName = %q, want %q (canonical domain.SLOAnalyzerName); the duplicated literal has drifted",
+			sloAnalyzerName, domain.SLOAnalyzerName)
 	}
 }
 

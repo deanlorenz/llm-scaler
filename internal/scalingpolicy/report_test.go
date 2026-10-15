@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
@@ -51,14 +53,14 @@ func TestChangeReporter_EachMethodKeepsItsOwnKey(t *testing.T) {
 	assert.Len(t, r.seen, 4)
 	assert.Equal(t, "unknown|gold", r.seen["ns/v"])
 	assert.Equal(t, "conflict|gold|gold,silver", r.seen["ns|m"])
-	assert.Equal(t, "gold|0.000|0.000|0.000|0.000|0|false", r.seen["effective|ns|m"])
+	assert.Equal(t, "gold|0.000|0.000|0.000|0.000|0|false|off", r.seen["effective|ns|m"])
 	assert.Equal(t, "false", r.seen["accel|ns/v"])
 }
 
 func TestChangeReporter_AModelOnNoTierIsReportedAsTheDefaultEntry(t *testing.T) {
 	r := NewChangeReporter()
 	r.ReportEffectivePolicy(context.Background(), "ns", "m", "", config.ScalingPolicy{})
-	assert.Equal(t, "(default entry)|0.000|0.000|0.000|0.000|0|false", r.seen["effective|ns|m"],
+	assert.Equal(t, "(default entry)|0.000|0.000|0.000|0.000|0|false|off", r.seen["effective|ns|m"],
 		"an empty tier name reads as the default entry, not as an empty string")
 }
 
@@ -184,4 +186,44 @@ func TestChangeReporter_ATierConflictAndASeedConflictCoexist(t *testing.T) {
 	// Neither re-fires now that each owns its record.
 	assert.False(t, r.changed("ns|m", "conflict|gold|gold,silver"))
 	assert.False(t, r.changed("outputSeed|ns|m", "6000|250,6000"))
+}
+
+func TestChangeReporter_AHalfConfiguredSLOIsReportedOncePerChange(t *testing.T) {
+	ctx := context.Background()
+	r := NewChangeReporter()
+	r.ReportSLOMisconfiguration(ctx, "ns", "m", "targets without the analyzer")
+	assert.Equal(t, "targets without the analyzer", r.seen["slo|ns|m"])
+	assert.False(t, r.changed("slo|ns|m", "targets without the analyzer"), "the same problem is not reported twice")
+
+	// Fixed, then broken again: the fix is recorded, so the same problem
+	// returning is a change and is reported.
+	r.ReportSLOMisconfiguration(ctx, "ns", "m", "")
+	assert.Equal(t, "", r.seen["slo|ns|m"])
+	assert.True(t, r.changed("slo|ns|m", "targets without the analyzer"))
+}
+
+func TestChangeReporter_TheEffectivePolicyChangesWithItsSLO(t *testing.T) {
+	ctx := context.Background()
+	r := NewChangeReporter()
+	cfg := config.ScalingPolicy{ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70}
+	r.ReportEffectivePolicy(ctx, "ns", "m", "gold", cfg)
+	first := r.seen["effective|ns|m"]
+
+	cfg.Analyzers = []config.AnalyzerScoreConfig{{Name: "saturation"}, {Name: "slo"}}
+	r.ReportEffectivePolicy(ctx, "ns", "m", "gold", cfg)
+	assert.NotEqual(t, first, r.seen["effective|ns|m"],
+		"listing the slo analyzer is a new resolution and must be reported")
+}
+
+func TestChangeReporter_AFixedSLOLogsNothing(t *testing.T) {
+	var lines []string
+	ctx := logr.NewContext(context.Background(),
+		funcr.New(func(_, args string) { lines = append(lines, args) }, funcr.Options{}))
+	r := NewChangeReporter()
+	r.ReportSLOMisconfiguration(ctx, "ns", "m", "targets without the analyzer")
+	assert.Len(t, lines, 1, "the problem is reported")
+	r.ReportSLOMisconfiguration(ctx, "ns", "m", "")
+	assert.Len(t, lines, 1, "its fix is recorded, not reported as a problem with no text")
+	r.ReportSLOMisconfiguration(ctx, "ns", "m", "")
+	assert.Len(t, lines, 1)
 }

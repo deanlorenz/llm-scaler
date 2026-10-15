@@ -176,17 +176,23 @@ def check_row_scope(name, dashboard, fail):
                  f"matcher, so it ignores the Namespace variable it appears to follow")
 
 
-METRIC_CONSTANTS = ROOT / "internal" / "constants" / "metrics.go"
+# Every non-test file of the constants package: the utilization-share and SLO
+# metrics are declared in files of their own, and a panel on one of them was
+# otherwise reported as naming a metric that does not exist.
+METRIC_CONSTANTS = ROOT / "internal" / "constants"
 WVA_METRIC = re.compile(r"\b(wva_[a-z0-9_]+)\b")
 HISTOGRAM_SUFFIXES = ("_bucket", "_sum", "_count")
 
 
 def declared_metrics():
     """Every wva_* metric name the controller declares, or None if unreadable."""
-    if not METRIC_CONSTANTS.is_file():
+    files = [f for f in sorted(METRIC_CONSTANTS.glob("*.go")) if not f.name.endswith("_test.go")]
+    if not files:
         return None
-    return set(re.findall(r'"(wva_[a-z0-9_]+)"',
-                          METRIC_CONSTANTS.read_text(encoding="utf-8")))
+    names = set()
+    for f in files:
+        names |= set(re.findall(r'"(wva_[a-z0-9_]+)"', f.read_text(encoding="utf-8")))
+    return names
 
 
 def check_metric_names(name, dashboard, fail):

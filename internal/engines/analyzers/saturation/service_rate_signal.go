@@ -23,12 +23,7 @@ import (
 // holds, and 0 when there is no window. Read after noteITL has added and
 // pruned this cycle's readings, so it counts what a fit would have used.
 func (a *SaturationAnalyzer) itlWindowLen(key string) int {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if w, ok := a.itlWindows[key]; ok {
-		return w.Len()
-	}
-	return 0
+	return a.itlTracker.WindowLen(key)
 }
 
 // attachServiceRates sets each variant's ServiceRate from what this cycle

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -34,6 +35,13 @@ const (
 	DriverImage = "registry.access.redhat.com/ubi9/python-311:latest"
 
 	driverScriptSuffix = "-driver-script"
+
+	// driverPolicySuffix names the NetworkPolicy that admits the relay port.
+	driverPolicySuffix = "-driver-ingress"
+
+	// driverLabel is carried by every relay Pod, valued with the driver's
+	// name. It is the only label the driver's own NetworkPolicy selects on.
+	driverLabel = "http-driver"
 )
 
 // driverScript relays one request and reports what happened, INCLUDING the
@@ -121,7 +129,12 @@ func CreateHTTPDriver(ctx context.Context, clientset *kubernetes.Clientset, spec
 		return fmt.Errorf("create driver script: %w", err)
 	}
 
-	labels := map[string]string{"http-driver": spec.Name}
+	// Before the Pod, so the relay port is admitted by the time it is Ready.
+	if err := createDriverNetworkPolicy(ctx, clientset, spec); err != nil {
+		return err
+	}
+
+	labels := map[string]string{driverLabel: spec.Name}
 	for k, v := range spec.Labels {
 		labels[k] = v
 	}
@@ -159,7 +172,48 @@ func CreateHTTPDriver(ctx context.Context, clientset *kubernetes.Clientset, spec
 	return nil
 }
 
-// DeleteHTTPDriver removes a relay and its script.
+// createDriverNetworkPolicy admits the relay port on this one driver.
+//
+// A driver wearing the controller's labels (ControllerDriverLabels) is selected
+// by the shipped external-scaler NetworkPolicy whenever the controller runs in
+// the driver's namespace, and that policy admits :8443, :8081 and :9090 only.
+// The test reaches the relay on :8080 through the API server's pod proxy, so
+// without an allow of its own the relay is cut off from its only caller.
+// kindnetd skips traffic that originates on the control-plane node itself,
+// which is why a relay scheduled there answered and one on a worker timed out
+// with `dial tcp <pod-ip>:8080: i/o timeout`.
+//
+// NetworkPolicy allows are additive, so a second policy that selects only this
+// driver and admits :8080 opens the relay port without touching the product's
+// policy. It has no `from:`, because the pod proxy arrives from the control
+// plane, which no peer selector can name. It is created for every driver, not
+// only controller-labelled ones: which shipped policies select a driver is the
+// product's business, and the relay port has to answer either way.
+func createDriverNetworkPolicy(ctx context.Context, clientset *kubernetes.Clientset, spec DriverSpec) error {
+	tcp := corev1.ProtocolTCP
+	port := intstrFromInt(driverPort)
+	policy := &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      spec.Name + driverPolicySuffix,
+			Namespace: spec.Namespace,
+			Labels:    map[string]string{driverLabel: spec.Name},
+		},
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{driverLabel: spec.Name}},
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+			Ingress: []networkingv1.NetworkPolicyIngressRule{{
+				Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: &port}},
+			}},
+		},
+	}
+	if _, err := clientset.NetworkingV1().NetworkPolicies(spec.Namespace).Create(
+		ctx, policy, metav1.CreateOptions{}); err != nil && !errors.IsAlreadyExists(err) {
+		return fmt.Errorf("create driver network policy %s: %w", policy.Name, err)
+	}
+	return nil
+}
+
+// DeleteHTTPDriver removes a relay, its script and its NetworkPolicy.
 func DeleteHTTPDriver(ctx context.Context, clientset *kubernetes.Clientset, spec DriverSpec) error {
 	if err := clientset.CoreV1().Pods(spec.Namespace).Delete(ctx, spec.Name,
 		metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
@@ -168,6 +222,10 @@ func DeleteHTTPDriver(ctx context.Context, clientset *kubernetes.Clientset, spec
 	if err := clientset.CoreV1().ConfigMaps(spec.Namespace).Delete(ctx, spec.Name+driverScriptSuffix,
 		metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
 		return fmt.Errorf("delete driver script: %w", err)
+	}
+	if err := clientset.NetworkingV1().NetworkPolicies(spec.Namespace).Delete(ctx, spec.Name+driverPolicySuffix,
+		metav1.DeleteOptions{}); err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("delete driver network policy: %w", err)
 	}
 	return nil
 }
@@ -212,8 +270,10 @@ func DriverCallTimeout(
 		return PodProxyResult{}, fmt.Errorf("encode relay request: %w", err)
 	}
 
-	// The relay itself is reached through the API server, which is fine: a
-	// driver Pod is not what the pool's NetworkPolicy guards.
+	// The relay itself is reached through the API server. The pool's
+	// NetworkPolicy does not select a driver, and the driver's own policy
+	// (createDriverNetworkPolicy) admits this port even where the shipped
+	// external-scaler policy selects the driver by the controller's labels.
 	relayed, err := PodProxy(ctx, clientset, namespace, driver, driverPort, "POST", "/", string(call))
 	if err != nil {
 		return PodProxyResult{}, fmt.Errorf("reach relay %s: %w", driver, err)

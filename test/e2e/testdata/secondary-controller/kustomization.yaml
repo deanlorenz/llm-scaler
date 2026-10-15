@@ -27,3 +27,18 @@ components:
 - ../../../../config/components/unauthenticated-metrics/
 
 namePrefix: wva-
+
+# The base config verifies Prometheus TLS, and the kind Prometheus serves a
+# self-signed certificate the controller has no CA for. The installer turns
+# verification off for the primary controller; this one is applied without the
+# installer, so it says the same thing itself. Env beats the config file.
+patches:
+- patch: |-
+    - op: add
+      path: /spec/template/spec/containers/0/env/-
+      value:
+        name: PROMETHEUS_TLS_INSECURE_SKIP_VERIFY
+        value: "true"
+  target:
+    kind: Deployment
+    name: controller-manager

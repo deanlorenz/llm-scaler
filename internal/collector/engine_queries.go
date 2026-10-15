@@ -35,16 +35,10 @@ var engineSpecificReplicaQueries = []string{
 	registration.QueryRequestRate,
 }
 
-// agnosticReplicaQueries are the logical query names collected per replica whose
-// metric source is engine-independent (the EPP inference scheduler). They are
-// refreshed once and shared across engines.
-//
-// Empty today. Its only member was the EPP's per-pod dispatch rate, removed
-// because nothing consumed it: the demand floor and the throughput analyzer both
-// size from the MODEL-level arrival rate (QueryModelArrivalRate), and the
-// per-variant figure the throughput analyzer displays falls back to the engine's
-// own completion rate. The extension point stays because the next engine-agnostic
-// per-replica metric belongs here.
+// agnosticReplicaQueries are the logical query names collected per replica that
+// have no per-engine variant: each is registered once under its bare name and
+// refreshed once, whatever engines the model runs. Today they are all vLLM
+// series an SGLang fleet simply does not publish (see each entry).
 var agnosticReplicaQueries = []string{
 	// vLLM publishes the prefill computed-token counter; SGLang publishes no
 	// per-stage prefill figure at all (sgl-project/sglang issue #14303). So it

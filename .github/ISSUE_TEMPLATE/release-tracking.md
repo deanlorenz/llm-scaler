@@ -19,111 +19,42 @@ This document defines the process for releasing llm-scaling-manager.
 
 ## Prerequisites
 
-1. Permissions to push to the llm-scaling-manager repository.
+1. Permissions to push tags to the llm-scaling-manager repository and to publish
+   GitHub Releases.
 
-1. Choose whether you are releasing a release candidate or an official release, and set the environment variables accordingly:
+1. Set the version you are releasing:
 
-   - For a **Release Candidate** (e.g. `v0.9.0-rc.1`):
-     ```shell
-     export VERSION=v0.9.0-rc.1
-     export BRANCH_VERSION=0.9
-     export REMOTE=upstream
-     ```
-
-   - For an **Official Release** (e.g. `v0.9.0`):
-     ```shell
-     export VERSION=v0.9.0
-     export BRANCH_VERSION=0.9
-     export REMOTE=upstream
-     export FORK_REMOTE=origin
-     ```
+   ```shell
+   export VERSION=v0.9.0-rc1   # a release candidate; v0.9.0 for a final release
+   ```
 
 1. If needed, clone the llm-scaling-manager [repo].
 
    ```shell
-   git clone -o ${REMOTE} git@github.com:ev-shindin/llm-scaling-manager.git
+   git clone -o origin git@github.com:ev-shindin/llm-scaling-manager.git
    ```
 
 ## Release Process
 
-### Before Creating the Release Branch
+Follow [the release process](https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/developer-guide/release-process.md).
+There is no release branch: only `main` can be released, and the
+[CI release workflow] refuses a tag that is not on `main` or whose commit does
+not pin `newTag: ${VERSION}`.
 
-1. If you already have the repo cloned, ensure it's up-to-date and your local branch is clean.
+- [ ] 1. Release PR to `main`: `newTag: ${VERSION}` in
+      `config/base/manager/kustomization.yaml`; merge it.
+- [ ] 2. Tag the merge commit of the release PR, check it, push the tag
+      ([step 1](https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/developer-guide/release-process.md#1-push-the-tag)).
+- [ ] 3. Wait for the [CI release workflow] to succeed.
+- [ ] 4. Reset PR to `main`: `newTag: main` again, only after the run succeeded.
+- [ ] 5. Publish the GitHub Release with the release notes ([new release]);
+      mark a release candidate as a pre-release. Verify the signature.
+- [ ] 6. Run the [install guide](https://github.com/ev-shindin/llm-scaling-manager/tree/main/docs/guides/install-in-namespace)
+      against the released image.
 
-1. Create a new branch from the `main` branch and name it `pre-release-${BRANCH_VERSION}` (e.g., `pre-release-0.9`):
-
-1. Pin the following dependencies:
-    - [ ] Set `newTag` to `${VERSION}` in `config/base/manager/kustomization.yaml` for the manager image.
-
-1. Commit and push the changes:
-
-   ```shell
-   git add config/base/manager/kustomization.yaml
-   git commit -m "Prepare for release ${VERSION}" -s -S
-   git push ${REMOTE} pre-release-${BRANCH_VERSION}
-   ```
-
-### Create or Checkout branch
-
-1. Release Branch Handling:
-   - For a Release Candidate:
-     Create a new release branch from the `main` branch. The branch should be named `release-${BRANCH_VERSION}`, for example, `release-0.9`:
-
-     ```shell
-     git checkout -b release-${BRANCH_VERSION}
-     ```
-
-   - For a Major, Minor or Patch Release:
-     A release branch should already exist. In this case, check out the existing branch:
-
-     ```shell
-     git checkout release-${BRANCH_VERSION} ${REMOTE}/release-${BRANCH_VERSION}
-     ```
-
-1. Push your release branch to the llm-scaling-manager remote.
-
-    ```shell
-    git push ${REMOTE} release-${BRANCH_VERSION}
-    ```
-
-### Tag commit and trigger image build
-
-1. Tag the head of your release branch with the version:
-
-     ```shell
-     git tag -s -a ${VERSION} -m "llm-scaling-manager ${VERSION} Release"
-     ```
-
-1. Push the tag to the llm-scaling-manager repo:
-
-     ```shell
-     git push ${REMOTE} ${VERSION}
-     ```
-
-1. Pushing the tag triggers CI action to build and publish the llm-scaling-manager image (`ghcr.io/ev-shindin/llm-scaling-manager`) to the [ghcr registry].
-1. Verify the [CI release workflow] completed successfully before proceeding.
-1. Run the [install guide](https://github.com/ev-shindin/llm-scaling-manager/tree/main/docs/guides/install-in-namespace) against the tagged image.
-
-### Create the release!
-
-1. Create a [new release]:
-    1. Choose the tag that you created for the release.
-    1. Use the tag as the release title `${VERSION}`
-    1. Click "Generate release notes" to auto-populate the list of PRs and contributors.
-    1. Summarize the release notes using an LLM of your choice (e.g., Gemini, Copilot, ChatGPT) with the following prompt:
-
-       ```text
-       Please summarize these release notes into three clear sections:
-       1. Highlights (key features, performance wins, bug fixes)
-       2. Upgrade Steps & Deprecations (configuration changes, deprecated flags/metrics)
-       3. Known Issues (if any, otherwise omit)
-       Provide results in markdown format, with each section clearly labeled and bulleted where appropriate.
-       ```
-
-       Review the generated content, edit it if necessary to ensure accuracy, and then copy and prepend this summary at the very top of the release description box on GitHub.
-    1. If this is a release candidate, select the "This is a pre-release" checkbox.
-1. If you find any bugs in this process, create an [issue].
-
+If the run fails, see
+[If the release fails](https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/developer-guide/release-process.md#if-the-release-fails).
+If you find a bug in this process, create an [issue].
 
 ## After the Release
 

@@ -1,5 +1,11 @@
 apiVersion: v1
 kind: ConfigMap
+# A REFERENCE, not something to `kubectl apply` over an install. It has no
+# `limiters:`, so applying it replaces the `default` entry the installer wrote
+# and removes the GPU limit with it. Edit the installed ConfigMap instead
+# (kubectl edit configmap wva-scaling-policy-config -n <controller-namespace>),
+# or re-run the install with WVA_LIMITER. See docs/reference/scaling-policy.md.
+#
 # This ConfigMap defines saturation-based scaling thresholds for model variants.
 # Saturation scaling is enabled by default and uses KV cache utilization and queue length
 # metrics to determine when replicas are saturated and when to scale up.

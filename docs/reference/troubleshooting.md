@@ -29,6 +29,7 @@ LOGS="kubectl logs -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler 
 | cluster policy not applied | `WVAPolicyNamespaceUnverified`; `wva_policy_namespace_unverified == 1` | the controller may not read Namespaces, so it runs on its own ConfigMap | [policy namespace unverified](#cluster-policy-is-not-applied-policy-namespace-unverified) |
 | ScaledObject `READY False` or `TARGETS <unknown>` | `kubectl get scaledobject,hpa -n <ns>` | `scalerAddress` names a namespace with no scaler, `modelID` missing, the controller not Ready, KEDA backing off after a reinstall | [ScaledObject](#scaledobject-ready-false-or-targets-unknown) |
 | capacity priced high after a restart | TTFT worse after an upgrade or leader change; `P3-k2`/`P4-k1` in `k2-decision` where `P1-obs` was before | `LEARNED_STATE_SNAPSHOT` off, the Role missing, an engine configuration that changed or could not be read | [after a restart](#capacity-priced-high-after-a-restart) |
+| misses its SLO, or is never judged | `WVAModelSLOMissed`; `WVAModelSLOUnjudged`; an empty SLO dashboard row | tier thresholds too loose for the SLO (observe only), a fleet that never holds still, too little traffic, the router not scraped or not streaming | [SLO](#a-model-misses-or-is-never-judged-against-its-slo) |
 | utilization-share optimizer does nothing | `wva_utilization_share_mode`, `wva_utilization_share_actionable` | shadow mode, not planned, held, swinging | [optimizer](#the-optimizer-evaluates-but-never-moves-anything) |
 
 Alerts that point here are listed in [Prometheus: the shipped alerts](prometheus.md#the-shipped-alerts).
@@ -469,6 +470,7 @@ kill %1
 | pod restarts (`CrashLoopBackOff`) at startup, log `Shutdown requested during startup` after Prometheus connection errors, exit code 143 (read it with `kubectl get pod <pod> -n "$NS" -o jsonpath='{.status.containerStatuses[0].lastState.terminated.exitCode}'`) | the controller cannot reach Prometheus at startup and keeps retrying. Its health endpoint is not served yet, so the startup probe kills it after about 60s and the pod restarts | make Prometheus reachable: check the URL, TLS settings and network policy ([Prometheus](prometheus.md#configuration)). The restarts stop once it connects |
 | `CrashLoopBackOff`, log names a Prometheus setting | a plain `http://` URL without `PROMETHEUS_ALLOW_HTTP=true`, or TLS settings combined with plain HTTP | fix the Prometheus settings ([Prometheus](prometheus.md#configuration)) |
 | `CrashLoopBackOff`, `unknown flag` | the image is older than the manifests | deploy an image built from the same release as the manifests ([Upgrade](upgrade-and-uninstall.md)) |
+| `CrashLoopBackOff`, `x509: certificate signed by unknown authority` | verification is on by default now, and a private CA signed the Prometheus certificate | mount the CA, then re-run the install with `PROMETHEUS_CA_CERT_PATH=<file>` and every other variable you installed with. The re-run restarts the controller ([TLS configuration](prometheus.md#tls-configuration)) |
 
 ## Cluster policy is not applied (policy namespace unverified)
 
@@ -520,6 +522,137 @@ kubectl get endpoints -n "$NS" wva-external-scaler
 
 More rows: [First-line troubleshooting](operations.md#first-line-troubleshooting).
 Removing or reinstalling the controller: [Upgrade and uninstall](upgrade-and-uninstall.md).
+
+## A model misses, or is never judged against, its SLO
+
+**Symptom**: `WVAModelSLOMissed` (warning) or `WVAModelSLOUnjudged` (info)
+fires, or the SLO dashboard row stays empty for a model whose policy sets
+targets. Both alerts carry `component: slo`, so they can be routed apart from
+pages.
+
+**On this release the slo analyzer only observes**, so neither alert means the
+autoscaler failed: the fleet is sized by the saturation analyzer, and a miss
+says that tier's thresholds do not meet the SLO. It is a tuning finding to act
+on in working hours, not an outage. Set up in
+[`slo` (observe only)](scaling-policy.md#slo-observe-only).
+
+The `wva_slo_*` series carry the model's namespace as `exported_namespace`
+(see [the labels](prometheus.md#slo-analyzer-metrics)); filter on that, not on
+`namespace`.
+
+### `WVAModelSLOMissed`
+
+At least half of the judged minutes of the last 30, and at least 5, were over
+target.
+
+**1. Check the target can be met at all.** If it cannot, more replicas do not
+help: loosen the target, or move the model to faster hardware.
+
+```promql
+# tpot: 1 for "infeasible" -- even an almost empty replica is over the target
+wva_slo_source{model_name="<model>", source="infeasible"} == 1
+# ttft: prefill time per pod (vLLM), queue left out; at or above the TTFT
+# target, no replica count meets it
+rate(vllm:request_prefill_time_seconds_sum{namespace="<ns>"}[5m]) / rate(vllm:request_prefill_time_seconds_count{namespace="<ns>"}[5m])
+```
+
+`infeasible` read from a `pinned-default` line is not reliable: that line's
+intercept is a default for no particular card.
+
+**2. If it can, mitigate:** give the model more capacity than saturation asks
+for:
+
+- raise its floor: `minReplicaCount` on each variant's ScaledObject
+  (`kubectl edit scaledobject <so> -n <ns>`; where a tool generates the
+  ScaledObject, change it there, or the next apply undoes it), or
+- lower the tier's `scaleUpThreshold` (and write the tier's other fields out,
+  see [Turn it on](scaling-policy.md#slo-observe-only), step 3).
+
+**3. Then find the cause**, per objective:
+
+```promql
+# tpot: the mean ITL the variant would show sized for the target, against the target
+wva_slo_predicted_itl_seconds{model_name="<model>"}
+wva_slo_target_seconds{model_name="<model>", objective="tpot"}
+# and the fill the target allows, before headroom: below kvCacheThreshold
+# (0.80 by default), the target needs more replicas than the tier gives
+wva_slo_fill{model_name="<model>"}
+# ttft: the engine's queue wait against its prefill time, per pod (vLLM)
+rate(vllm:request_queue_time_seconds_sum{namespace="<ns>"}[5m]) / rate(vllm:request_queue_time_seconds_count{namespace="<ns>"}[5m])
+rate(vllm:request_prefill_time_seconds_sum{namespace="<ns>"}[5m]) / rate(vllm:request_prefill_time_seconds_count{namespace="<ns>"}[5m])
+```
+
+A queue that grows while prefill time stays flat is a capacity miss; a prefill
+time that grows is a slow prefill (long prompts, a cold prefix cache). The
+router's TTFT pools every priority band, so where its flow control holds a
+low-priority band back on purpose, that wait counts as a miss too. Only
+completed requests count, so under shedding the alert can resolve while
+requests are refused: read `llm_d_epp_request_error_total` too.
+
+The alert resolves once the judged minutes that meet the target outnumber the
+misses in the last 30, so it stays up for a while after a fix. Changing the
+tier's TTFT percentile leaves the old percentile's alert up for about 5 minutes.
+
+### `WVAModelSLOUnjudged`, or nothing judged at all
+
+A target set for 55 of the last 60 minutes, and no window judged in the hour. The alert
+needs `wva_slo_target_seconds`, which exists only when the policy is right, so
+**for the alert, skip to the router side below**. For an empty dashboard row
+with no alert, start with the policy side -- the model's last
+`Effective scaling policy` line in the controller log (logged when the policy
+changes, so on a long-running controller it may have rotated out; restarting
+the controller logs it again):
+
+```bash
+$LOGS | grep 'Effective scaling policy' | grep '"modelID": "<model>"' | tail -1
+```
+
+| the line shows | means |
+| --- | --- |
+| `"scalingPolicy"` is not the tier you set | the model's variants do not all name it (the alphabetically first name wins), or the tier is defined only in the global map and the namespace has its own map, which replaces it whole |
+| `"slo": "off"` | the tier it reached has no `slo` block, and does not list the analyzer |
+| `"slo"` ends `(analyzer not listed)` | targets set, `slo` not under `analyzers:` (also logged as `SLO policy is half-configured`) |
+| `"slo"` ends `(observe)` | the policy is right: read the router side below |
+
+Then the router side:
+
+```promql
+wva_slo_window_requests{model_name="<model>"}   # requests the router recorded, per objective
+wva_slo_excluded{model_name="<model>"} == 1     # the reason a window is not judged
+# the share of the last day it was not excluded (for either objective)
+1 - avg_over_time(max by (exported_namespace, model_name) (wva_slo_excluded{model_name="<model>"})[1d:5m])
+```
+
+| what you see | means | fix |
+| --- | --- | --- |
+| `excluded` 1 for `starting` or `zero-replicas`, most of the time | the fleet never holds still for the window plus its grace: constant scale-ups, or a replica that keeps starting | check the starts are real (`kubectl get pods -n <ns>`). If the replica count goes up and down (`wva_desired_replicas`), the fleet flaps, which is a tuning question for the tier's band, not for the SLO. If it only climbs, it is growing, and the model is judged once it settles. Silence the alert meanwhile |
+| `excluded` 1 for `unobserved` | the analyzer did not analyze the model on the cycle before: just after a controller restart, or the engine keeps skipping the model | if it persists, the model's replicas lack metrics on some cycles: [metrics](#metrics-stale-or-missing) |
+| requests present but low, nothing excluded | too little traffic: a p90 needs 100 requests in the 5-minute window, a p95 200, a p99 1000, a TPOT mean 50 | nothing to do: the alert does not fire for this, and the model is judged once traffic returns |
+| `tpot` requests `0` while the router serves streaming requests | clients do not send `stream_options.include_usage`; or the router does not publish `llm_d_epp_request_streaming_tpot_seconds`; or the router's TPOT query fails (`wva_metrics_collection_errors_total{query_type="router_latency"}` rising) | have clients send it, or run vLLM with `--enable-force-include-usage`; check the router publishes the series (`count(llm_d_epp_request_streaming_tpot_seconds_count{namespace="<ns>"})`); for a failing query, [metrics](#metrics-stale-or-missing) |
+| no `window_requests` series at all | the router's histograms are not read | below |
+
+When there is no `window_requests` series, check:
+
+```promql
+# Does Prometheus have the router's histogram for the model, and where?
+sum by (namespace, model_name, target_model_name, streaming) (rate(llm_d_epp_request_ttft_seconds_count[5m]))
+```
+
+Here `namespace` is right: it is the router's own scrape label.
+
+- **No series anywhere**: the router (EPP) is not scraped, or is too old to
+  publish `llm_d_epp_*`. Check its ServiceMonitor / PodMonitor and version.
+- **A series in another namespace**: the EPP runs outside the model's
+  namespace. That is not supported: the analyzer reads the router in the
+  model's namespace only, and nothing configures another. Run the EPP in the
+  model's namespace.
+- **Only `streaming="false"`**: the clients do not stream; only streaming
+  requests are counted.
+- **A series under another name**: the analyzer takes the model from
+  `target_model_name`, or `model_name` where that is empty; clients that address
+  an alias or an objective name show up under it, not under the model ID the
+  controller logs. So do requests to a LoRA adapter: they are counted under the
+  adapter's name, never the base model's.
 
 ## Utilization-Share Optimizer
 

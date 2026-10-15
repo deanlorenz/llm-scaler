@@ -35,6 +35,9 @@
 # it above the controller's cycle interval).
 set -euo pipefail
 
+# shellcheck source=lib/pod_writer.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/pod_writer.sh"
+
 KUBECTL_TIMEOUT="${KUBECTL_TIMEOUT:-30s}"
 CONTROLLER_DEPLOY="${CONTROLLER_DEPLOY:-wva-controller-manager}"
 CONTROLLER_CONTAINER="${CONTROLLER_CONTAINER:-manager}"
@@ -68,10 +71,18 @@ us_doc_count() {
 
 # us_limiter_kind -- quota, inventory or none: the budget the optimizer would
 # share. A list holding both is a quota: the controller then builds only the
-# quota limiter.
+# quota limiter. A list holding a type the controller does not know is none:
+# its validation rejects the whole policy and it runs with no limiter
+# (internal/config/saturation_scaling.go), so there is no budget to share.
 us_limiter_kind() {
-    local types
+    local types t
     types="$(yq -r '[.limiters[]?.type] | join(" ")')" || return 1
+    for t in $types; do
+        case "$t" in
+            quota|gpu-inventory|inventory) ;;
+            *) echo none; return 0 ;;
+        esac
+    done
     case " $types " in
         *" quota "*) echo quota ;;
         *" gpu-inventory "*|*" inventory "*) echo inventory ;;
@@ -85,32 +96,62 @@ us_quota_keys() {
     yq -r '[.limiters[]? | select(.type == "quota") | .. | select(tag == "!!int") | path | .[-1]] | unique | .[]'
 }
 
-# us_block_state -- off, shadow or active, or other:<type> for an optimizer
-# block this script does not own (other:not-a-map when it is not a map). Then a
-# second word: physical when the block also plans inventory-only groups.
-us_block_state() {
-    local p tag type shadow physical mode
+# us_budget_scope -- whether namespaces share a budget, the way the controller
+# builds its share groups (internal/engines/allocation/utilization_share_groups.go):
+#
+#   cluster    some namespaces share one group per accelerator
+#   namespace  every planned namespace has its own budget
+#   none       no group at all, so nothing is shared
+#
+# With a quota entry, only quota entries count: the controller builds no
+# gpu-inventory limiter beside one, and ignores physicalGroups. A namespace
+# that a namespace-scoped entry covers -- listed, or by `default`, or not at
+# all, which is a zero budget -- gets its own group. So the cluster group holds
+# every namespace when there is no namespace-scoped entry, and otherwise only
+# the namespaces excluded from EVERY namespace-scoped entry
+# (us_excluded_namespaces) -- and those only when a `scope: cluster` quota
+# entry bounds them. Without one, an excluded namespace is in no group at all:
+# the sum of the namespace quotas is not a budget for a namespace they do not
+# cap (the controller logs it as unshared and keeps today's optimizer for it).
+# Without a quota, the inventory forms a cluster group only with
+# physicalGroups: true, and no limiter forms none.
+us_budget_scope() {
+    local p kind out
     p="$(cat)"
-    tag="$(printf '%s\n' "$p" | yq -r '.optimizer | tag')" || return 1
-    case "$tag" in
-        '!!null') echo "off plain"; return 0 ;;
-        '!!map') ;;
-        *) echo "other:not-a-map plain"; return 0 ;;
+    kind="$(printf '%s\n' "$p" | us_limiter_kind)" || return 1
+    case "$kind" in
+        none) echo none; return 0 ;;
+        inventory)
+            out="$(printf '%s\n' "$p" | yq -r '.optimizer.utilizationShare.physicalGroups == true')" || return 1
+            if [ "$out" = true ]; then echo cluster; else echo none; fi
+            return 0
+            ;;
     esac
-    type="$(printf '%s\n' "$p" | yq -r '.optimizer.type // ""')" || return 1
-    shadow="$(printf '%s\n' "$p" | yq -r '(.optimizer.utilizationShare.shadow // false) | tostring')" || return 1
-    physical="$(printf '%s\n' "$p" | yq -r '(.optimizer.utilizationShare.physicalGroups // false) | tostring')" || return 1
-    if [ -z "$type" ]; then
-        mode=off
-    elif [ "$type" != utilizationShare ]; then
-        mode="other:$type"
-    elif [ "$shadow" = true ]; then
-        mode=shadow
-    else
-        mode=active
-    fi
-    if [ "$physical" = true ]; then echo "$mode physical"; else echo "$mode plain"; fi
+    out="$(printf '%s\n' "$p" | yq -r '[.limiters[]? | select(.type == "quota" and .scope == "namespace")] | length')" || return 1
+    if [ "$out" = 0 ]; then echo cluster; return 0; fi
+    out="$(printf '%s\n' "$p" | us_excluded_namespaces)" || return 1
+    if [ -z "$out" ]; then echo namespace; return 0; fi
+    out="$(printf '%s\n' "$p" | yq -r '[.limiters[]? | select(.type == "quota" and .scope == "cluster")] | length')" || return 1
+    if [ "$out" = 0 ]; then echo namespace; else echo cluster; fi
 }
+
+# us_excluded_namespaces -- the namespaces excluded from every namespace-scoped
+# quota entry, one per line: under a quota with namespace-scoped entries, the
+# only namespaces that can share the cluster group. Matched by equality: an
+# array contains test matches substrings, so an exclude of team-a-prod read as
+# excluding team-a.
+us_excluded_namespaces() {
+    yq -r '[.limiters[]? | select(.type == "quota" and .scope == "namespace") | (.exclude // [])] as $e
+        | ($e[0] // []) | .[] | select(. as $n | ($e | map(select(any_c(. == $n))) | length) == ($e | length))'
+}
+
+# us_cluster_namespaces -- the block's clusterNamespaces, one per line: the only
+# namespaces a cluster budget's groups plan when it lists any.
+us_cluster_namespaces() {
+    yq -r '(.optimizer.utilizationShare.clusterNamespaces // [])[]'
+}
+
+# us_block_state lives in lib/pod_writer.sh, which the installer shares.
 
 # us_policy_with_mode <shadow|active|off> [physical] -- the policy with the
 # block in that mode. Every other key, of the block and of the policy, is kept.
@@ -532,17 +573,87 @@ verb_shadow() {
     info "shadow computes and reports and moves nothing. Read 'status' over a few bursts before 'activate'."
 }
 
+# warn_ungranted_namespaces -- activate grants only in NS, and the optimizer
+# also moves pods in the other namespaces of the same budget. So it names each
+# of those it can see -- a namespace holding a ScaledObject that calls this
+# controller -- where the controller may not patch pods, with the command that
+# grants it there. It grants nothing there itself.
+#
+# Which namespaces share the budget, from the policy (us_budget_scope): none
+# when every planned namespace has its own budget or no group forms; under
+# namespace-scoped quotas, only the namespaces excluded from all of them, and
+# only when a cluster-scoped quota bounds them; otherwise every namespace.
+# clusterNamespaces, when the block lists some, narrows either. A cluster budget is split per accelerator, which this script
+# cannot see, so the warning says "if". A list it cannot read is said, not
+# taken for none.
+warn_ungranted_namespaces() {
+    local list ns only excluded odd
+    case "$(printf '%s\n' "$POLICY" | us_budget_scope)" in
+        namespace)
+            info "every planned namespace has its own quota, and one the quota excludes is shared only under a cluster-scoped quota, so no other namespace shares this budget"
+            return 0 ;;
+        none)
+            info "this limiter forms no shared group, so no other namespace shares this budget"
+            return 0 ;;
+    esac
+    only="$(printf '%s\n' "$POLICY" | us_cluster_namespaces)" || die "could not parse the policy in $POLICY_NS/$POLICY_CM"
+    excluded="$(printf '%s\n' "$POLICY" | us_excluded_namespaces)" || die "could not parse the policy in $POLICY_NS/$POLICY_CM"
+    if ! list="$(wva_pod_writer_namespaces "$CONTROLLER_NS" models 2>&1)"; then
+        warn "could not list ScaledObjects cluster-wide, so other namespaces sharing this budget are unknown (${list:0:300}). Run activate in each of them, or the optimizer cannot move their pods"
+        return 0
+    fi
+    if odd="$(wva_pod_writer_namespaces "$CONTROLLER_NS" unattributed 2>/dev/null)" && [ -n "$odd" ]; then
+        warn "ScaledObjects whose scalerAddress does not say which controller they call: $(printf '%s\n' "$odd" | awk '{printf "%s (%s) ", $1, $2}'). If one calls this controller and shares this budget, run activate in its namespace too"
+    fi
+    for ns in $list; do
+        [ "$ns" != "$NS" ] || continue
+        if [ -n "$only" ] && ! grep -qxF -- "$ns" <<<"$only"; then
+            continue
+        fi
+        if [ -n "$excluded" ] && ! grep -qxF -- "$ns" <<<"$excluded"; then
+            continue
+        fi
+        case "$(wva_pod_writes_allowed "$ns" "$CONTROLLER_NS")" in
+            yes) ;;
+            no) warn "the controller may not patch pods in $ns. If its models use the same accelerator, they share this budget and the optimizer cannot move their pods. Run: $(us_activate_cmd "$ns")" ;;
+            *) warn "could not tell whether the controller may patch pods in $ns. If its models use the same accelerator, they share this budget; run: $(us_activate_cmd "$ns")" ;;
+        esac
+    done
+}
+
+# us_activate_cmd <ns> -- the make command that runs activate in <ns> for this
+# controller and policy.
+us_activate_cmd() {
+    printf 'make utilization-share-activate NAMESPACE=%s CONTROLLER_NAMESPACE=%s%s\n' "$1" "$CONTROLLER_NS" \
+        "${POLICY_NS:+ POLICY_NAMESPACE=$POLICY_NS}"
+}
+
 verb_activate() {
     local state
     read_policy
     [ "$POLICY_FOUND" -eq 1 ] || die "no scaling policy in $POLICY_NS: there is nothing to activate"
     state="$(block_state)"
     case "${state% *}" in
-        active) ok "already active"; return 0 ;;
-        shadow) ;;
+        active|shadow) ;;
         off) die "no optimizer block: run shadow first and read what it would move" ;;
         *) die "the policy has an optimizer block this script does not own (${state% *}); it will not replace it" ;;
     esac
+    # Active moves pods' deletion cost, which is a patch. The controller's
+    # ClusterRole only reads pods, so the write is granted here, in this
+    # namespace alone (lib/pod_writer.sh), before the mode that needs it --
+    # and also when the block is already active, which is how a second
+    # namespace sharing one budget gets its grant.
+    wva_ensure_pod_writes "$NS" "$CONTROLLER_NS" \
+        || die "could not grant the controller patch on pods in $NS (role/wva-pod-writer): ${WVA_POD_WRITER_ERR}. This needs create on roles and rolebindings there; or an admin runs: $(wva_pod_writer_admin_hint "$NS" "$CONTROLLER_NS")"
+    case "$WVA_POD_WRITER_RESULT" in
+        already) ok "the controller in $CONTROLLER_NS can already patch pods in $NS" ;;
+        *) ok "the controller in $CONTROLLER_NS may patch pods in $NS (role/wva-pod-writer)" ;;
+    esac
+    warn_ungranted_namespaces
+    if [ "${state% *}" = active ]; then
+        ok "already active"
+        return 0
+    fi
     set_mode active
     info "for two to three minutes nothing in the group scales (quiet-period); the same follows every controller restart"
 }
