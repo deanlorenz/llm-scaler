@@ -34,20 +34,27 @@ func (a *SaturationAnalyzer) itlWindowLen(key string) int {
 // priced it on: the line fitLines resolved for it (own or borrowed), how many
 // readings its own window holds, and the median saturated completion rate of
 // its own replicas.
+//
+// The line and its sample count only while the variant has replicas
+// reporting. One parked at zero beside serving siblings still has a window --
+// its readings take 30 minutes to age out -- and may still be lent a line, but
+// nothing prices it on either now, and published they read as a parked
+// variant still fitting.
 func (c *cycle) attachServiceRates(variants []domain.VariantCapacity, caps []capacity.ReplicaCapacity) {
 	kPrice := pricingK(c.cfg)
 	for i := range variants {
 		name := variants[i].VariantName
 		sig := &domain.ServiceRateSignal{Role: canonicalRole(c.rolesByVariant[name])}
+		serving := variants[i].ObservedReplicas > 0
 		// Present for every variant that keeps a window, zero included. A
 		// window holding nothing is the commonest reason a decode variant has
 		// no line -- the ~28 cycles a fit takes from load start -- and a
 		// series that vanished with the line could not say so.
-		if n, ok := c.itlSamples[name]; ok {
+		if n, ok := c.itlSamples[name]; ok && serving {
 			sig.ITLWindowed = true
 			sig.LineSamples = n
 		}
-		if line, ok := c.itlModels[name]; ok && !line.IsZero() {
+		if line, ok := c.itlModels[name]; ok && serving && !line.IsZero() {
 			sig.HasLine = true
 			sig.LineSlope = line.A
 			sig.LineIntercept = line.B

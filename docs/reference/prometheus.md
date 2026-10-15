@@ -1257,7 +1257,7 @@ per pod.
 
 ### `wva_itl_line_slope`
 - **Type**: Gauge
-- **Description**: Slope A of the line ITL(k) = A*k + B a decode variant would derive its service rate from, in seconds per unit of KV utilization. Whether the derived rate is the one in use is `wva_service_rate_per_replica`'s `source`: an own measured window with enough readings wins over it. The line is the variant's own fit, or one borrowed from a sibling with the same engine configuration (only when `enableLearnedStateReuse` is on). Absent while the variant has no line.
+- **Description**: Slope A of the line ITL(k) = A*k + B a decode variant would derive its service rate from, in seconds per unit of KV utilization. Whether the derived rate is the one in use is `wva_service_rate_per_replica`'s `source`: an own measured window with enough readings wins over it. The line is the variant's own fit, or one borrowed from a sibling with the same engine configuration (only when `enableLearnedStateReuse` is on). Absent while the variant has no line, and while none of its replicas reports (a variant parked at zero keeps its window for up to 30 minutes, and publishes none of it).
 - **Labels**:
   - `namespace`: the model's namespace (scraped as `exported_namespace`)
   - `model_name`: model ID
@@ -1278,7 +1278,7 @@ per pod.
 
 ### `wva_itl_line_samples`
 - **Type**: Gauge
-- **Description**: How many (k, ITL) readings a decode variant's **own** ITL window holds, published while it has no line too, zero included. A line needs enough readings spread far enough apart in k; a variant priced on a borrowed line still reports its own count here.
+- **Description**: How many (k, ITL) readings a decode variant's **own** ITL window holds, published while it has no line too, zero included, and absent while none of its replicas reports. A line needs enough readings spread far enough apart in k; a variant priced on a borrowed line still reports its own count here.
 - **Labels**: as `wva_itl_line_slope`
 - **Use Case**: Explain an absent line. A fleet with no line produces no derived service rate, and the reason is almost always this count or the spread of k rather than anything wrong. A fresh fleet takes about 28 cycles from load start to fit.
 - **Example**: decode variants still without a line of their own:

@@ -206,6 +206,38 @@ func TestServiceRateSignal_EmptyWindowAndPrefill(t *testing.T) {
 	assert.Equal(t, domain.RolePrefill, p.Role)
 }
 
+// A decode variant parked at zero while a sibling serves keeps its window and
+// its line for up to 30 minutes, and publishes neither: nothing prices it on
+// them, and a slope still published for it would read as a variant fitting.
+func TestServiceRateSignal_ParkedVariantPublishesNoLine(t *testing.T) {
+	const (
+		serving = "decode-serving"
+		parked  = "decode-parked"
+	)
+	a := srAnalyzer(serving, parked)
+	both := []domain.VariantReplicaState{
+		{VariantName: serving, Role: domain.RoleDecode, AcceleratorName: srAccel, CurrentReplicas: 10, GPUsPerReplica: 1},
+		{VariantName: parked, Role: domain.RoleDecode, AcceleratorName: srAccel, CurrentReplicas: 10, GPUsPerReplica: 1},
+	}
+	ctx, _ := observedCtx(t)
+	res, err := a.Analyze(ctx, makeAnalyzerInput(append(srReadings(serving, 10), srReadings(parked, 10)...), both))
+	require.NoError(t, err)
+	require.True(t, srSignal(t, res, parked).HasLine, "the fixture must give the variant a line of its own first")
+
+	afterPark := []domain.VariantReplicaState{
+		both[0],
+		{VariantName: parked, Role: domain.RoleDecode, AcceleratorName: srAccel, CurrentReplicas: 0, GPUsPerReplica: 1},
+	}
+	res, err = a.Analyze(ctx, makeAnalyzerInput(srReadings(serving, 10), afterPark))
+	require.NoError(t, err)
+
+	sig := srSignal(t, res, parked)
+	assert.False(t, sig.HasLine, "a parked variant's aging line was published as if it were fitting")
+	assert.False(t, sig.ITLWindowed, "a parked variant's sample count was published")
+	assert.Empty(t, sig.RateSource, "no replica, no rate")
+	assert.True(t, srSignal(t, res, serving).HasLine, "the serving sibling keeps its line")
+}
+
 // The rate's source, per case, and what is left out of the median.
 func TestVariantServiceRate(t *testing.T) {
 	rc := func(variant string, rate float64, mut func(*capacity.ReplicaCapacity)) capacity.ReplicaCapacity {
