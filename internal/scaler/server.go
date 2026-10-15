@@ -155,7 +155,7 @@ func (s *Server) Start(ctx context.Context) error {
 	defer s.listening.Store(false)
 	s.refusals = newRefusalLog(nil)
 
-	full :=NewHandler(s.Client, nil, s.Registry).WithElected(s.Elected).WithDecisionInterval(s.DecisionInterval)
+	full := NewHandler(s.Client, nil, s.Registry).WithElected(s.Elected).WithDecisionInterval(s.DecisionInterval)
 	// Only the full handler ever answers without a decision; the standby
 	// refuses instead, so its set would always read empty.
 	metrics.SetScalerUndecidedTargetsSource(full.UndecidedTargets)
