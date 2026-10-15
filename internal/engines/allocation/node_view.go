@@ -49,8 +49,9 @@ import (
 // the nodes it touched, not a copy of every node.
 //
 // Every debit is charged to an owner -- the model being placed, or a holder
-// of GPUs whose pods hold no node yet -- so what one owner placed can be told
-// apart from the rest.
+// of GPUs whose pods hold no node yet -- so a reader can take back what one
+// owner placed (DebitsExcept, without): the utilization share plans the models
+// it owns on the view less what today's optimizer placed for them.
 type NodeView struct {
 	// slots is the snapshot as built, in node-name order, shared by clones and
 	// never written. A node is its index in it.
@@ -285,6 +286,44 @@ func (v *NodeView) setOwner(owner string) string {
 	return prev
 }
 
+// DebitsExcept is the GPUs the view debited per node for every owner exclude
+// does not name. Nil for a nil view.
+func (v *NodeView) DebitsExcept(exclude func(owner string) bool) map[string]int {
+	if v == nil {
+		return nil
+	}
+	out := map[string]int{}
+	for owner, perNode := range v.owned {
+		if exclude != nil && exclude(owner) {
+			continue
+		}
+		for i, g := range perNode {
+			out[v.slots[i].name] += g
+		}
+	}
+	return out
+}
+
+// without is a copy of v with what the owners exclude names were charged
+// taken back. Nil for a nil view.
+func (v *NodeView) without(exclude func(owner string) bool) *NodeView {
+	if v == nil {
+		return nil
+	}
+	c := v.Clone()
+	for owner, perNode := range v.owned {
+		if !exclude(owner) {
+			continue
+		}
+		for i, g := range perNode {
+			if c.debit[i] -= g; c.debit[i] <= 0 {
+				delete(c.debit, i)
+			}
+		}
+	}
+	return c
+}
+
 // PromisedOwner is the owner the GPUs the utilization share promised to a
 // receiver are charged to (ReservePromised).
 const PromisedOwner = "promised"
@@ -345,6 +384,28 @@ func (v *NodeView) free(i int) int {
 		f -= v.debit[i]
 	}
 	return max(0, f)
+}
+
+// Holes returns, per node accelerator, the free GPUs of each schedulable node
+// with any free, after this view's debits: what the warm pool may still place
+// into. Nil for a nil view.
+func (v *NodeView) Holes() map[string]decision.NodeHoles {
+	if v == nil {
+		return nil
+	}
+	out := map[string]decision.NodeHoles{}
+	for i := range v.slots {
+		n := &v.slots[i]
+		if n.unschedulable {
+			continue
+		}
+		h := out[n.accelerator]
+		if f := v.free(i); f > 0 {
+			h.Free = append(h.Free, f)
+		}
+		out[n.accelerator] = h
+	}
+	return out
 }
 
 // eligible is, in order, the nodes a pod of accelerator acc with these

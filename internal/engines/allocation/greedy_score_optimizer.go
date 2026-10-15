@@ -6,6 +6,7 @@ import (
 	"math"
 	"slices"
 	"sort"
+	"time"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 
@@ -29,6 +30,16 @@ type GreedyByScoreOptimizer struct {
 	// keeps the additive fair-share behaviour unchanged.
 	Rescale RescaleFlags
 
+	// pass is what the last pass left of the budgets, for the warm pool's
+	// headroom (RepublishHeadroom) and the utilization share (LastPass);
+	// dropped when the next pass starts.
+	pass *passHeadroom
+
+	// spends is what this pass took from the budgets, in order, per model:
+	// replayed to take back what the pass ordered for a model whose target the
+	// utilization share overrides (passHeadroom.without).
+	spends []spendOp
+
 	// Nodes is the cycle's per-node picture of free GPUs (set by the engine
 	// before Optimize), nil when no physical limiter bounds the cycle. With
 	// it, a replica must fit a node, not just the pool: "no node holds a whole
@@ -38,6 +49,18 @@ type GreedyByScoreOptimizer struct {
 	// place on the holes an earlier one already took (the engine sets a fresh
 	// one every cycle). What the pass left is kept in its headroom.
 	Nodes *NodeView
+}
+
+// spendOp is one debit a pass made: gpus from key of the cluster budget (ns
+// "") or of namespace ns's, for model (namespace/modelID).
+type spendOp struct {
+	model, ns, key string
+	gpus           int
+}
+
+// spend records a debit the pass made, for model.
+func (o *GreedyByScoreOptimizer) spend(model, ns, key string, gpus int) {
+	o.spends = append(o.spends, spendOp{model: model, ns: ns, key: key, gpus: gpus})
 }
 
 // NewGreedyByScoreOptimizer creates a new GreedyByScoreOptimizer.
@@ -98,9 +121,9 @@ func (o *GreedyByScoreOptimizer) Optimize(
 	constraints []*ResourceConstraints,
 ) []domain.VariantDecision {
 	logger := ctrl.LoggerFrom(ctx).WithName(o.Name())
-	// One pass consumes one node view; what it left is in o.pass. A shadow
-	// pass runs on a copy and does not touch it.
+	// One pass consumes one node view; what it left is in o.pass.
 	defer func() { o.Nodes = nil }()
+	o.pass, o.spends = nil, nil
 	declared := declaredAccelerators(requests)
 	available := mergeConstraints(constraints, declared...)
 	availableByNS := mergeNamespaceConstraints(constraints, declared...)
@@ -110,6 +133,8 @@ func (o *GreedyByScoreOptimizer) Optimize(
 		// available it falls back to the cost-aware optimizer, its unlimited path.
 		available = map[string]int{}
 	}
+	// The budgets as the pass found them, to replay its spends on (spends).
+	start, startByNS := maps.Clone(available), cloneNamespaceBudgets(availableByNS)
 
 	// Rescale pre-pass: for enabled, contended (type, budget-scope) groups, compute
 	// priority-weighted targets and produce reclaim/fill decisions, consuming free
@@ -186,7 +211,40 @@ func (o *GreedyByScoreOptimizer) Optimize(
 	}
 
 	allDecisions = append(allDecisions, rescaleDecisions...)
+
+	// The warm pool's headroom, from what this pass left: every replica it
+	// ordered is debited, from the budgets and from the nodes.
+	if len(constraints) > 0 {
+		o.pass = &passHeadroom{available: available, byNamespace: availableByNS, nodes: o.Nodes,
+			version: poolsVersionOf(constraints), start: start, startByNS: startByNS, spends: o.spends}
+		o.pass.publish(time.Now())
+	}
 	return allDecisions
+}
+
+// RepublishHeadroom publishes the last pass's headroom again, less what the
+// pass ordered for the models in planned (namespace/modelID: the ones the
+// utilization share plans, whose targets it overrides), with promised GPUs
+// (scope "" for the cluster, else a namespace -> accelerator -> GPUs) also
+// withheld, from the pools and, held on the freest nodes, from the node holes:
+// those the utilization-share optimizer promised after the pass, which a warm
+// pool must not take before their receiver does. Reports false when there is
+// no pass to republish.
+func (o *GreedyByScoreOptimizer) RepublishHeadroom(planned map[string]bool, promised map[string]map[string]int, now time.Time) bool {
+	if o.pass == nil {
+		return false
+	}
+	o.pass.without(planned).withheld(promised).publish(now)
+	return true
+}
+
+// LastPass is what the last pass left, for the utilization share's step that
+// follows it; nil when there was none.
+func (o *GreedyByScoreOptimizer) LastPass() *PassLeft {
+	if o.pass == nil {
+		return nil
+	}
+	return &PassLeft{h: o.pass}
 }
 
 // buildScaleUpWork creates a single work unit for a scale-up request.
@@ -337,11 +395,16 @@ func (o *GreedyByScoreOptimizer) allocateForModel(
 		// closed, which need not be the cluster pool's: resolve by identity.
 		// debitBudget also debits the family key that covers this one, and
 		// leaves a nil (unbounded) cluster budget nil.
-		debitBudget(available, budgetKey(available, accType), consumed)
+		key := budgetKey(available, accType)
+		debitBudget(available, key, consumed)
+		o.spend(modelKey(w.req), "", key, consumed)
 		// The namespace budget the same way: accType is its own key, and a
 		// family key the namespace also lists draws down with it. The
 		// unlimited sentinel (negative) is never drawn down.
 		debitBudget(nsBudget, accType, consumed)
+		if nsBudget != nil {
+			o.spend(modelKey(w.req), w.req.Namespace, accType, consumed)
+		}
 	}
 
 	// Recompute w.remaining for fair-share ordering.

@@ -314,9 +314,19 @@ func (o *GreedyByScoreOptimizer) applyRescale(
 
 		freeThisCycle := fillable
 		for _, req := range reqs {
+			before := freeThisCycle
 			d := o.rescaleModelDecisions(ctx, req, constraints, k.accType, targets[modelKey(req)], &freeThisCycle)
 			decisions = append(decisions, d...)
 			handled[modelKey(req)] = true
+			// Recorded per model, as the group's debit below charges it.
+			if took := before - freeThisCycle; took > 0 {
+				if k.scope != "" {
+					o.spend(modelKey(req), k.scope, k.accType, took)
+					o.spend(modelKey(req), "", clusterKey, took)
+				} else {
+					o.spend(modelKey(req), "", k.accType, took)
+				}
+			}
 		}
 
 		if consumed := fillable - freeThisCycle; consumed > 0 {

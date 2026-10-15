@@ -1692,7 +1692,11 @@ func (e *Engine) publishHeadroomForIdleFleet(ctx context.Context) {
 		allocation.PublishUnboundedHeadroom(views.PoolsVersion, time.Now())
 		return
 	}
-	allocation.PublishNamespaceHeadroom(constraints, time.Now())
+	now := time.Now()
+	// Nothing is being ordered, so the nodes' holes are as observed.
+	nodes, reason := allocation.NodeViewFor(constraints, e.utilizationShare.nodes, now)
+	e.reportNodeFitSkipped(ctx, allocation.PhysicalBounds(constraints), reason)
+	allocation.PublishNamespaceHeadroomOnNodes(constraints, nodes, now)
 }
 
 // publishWarmPoolSupply records what BRIDGES are contributing to each variant.

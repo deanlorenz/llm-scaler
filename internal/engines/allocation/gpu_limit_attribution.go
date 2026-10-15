@@ -1,7 +1,9 @@
 package allocation
 
 import (
+	"maps"
 	"math"
+	"slices"
 	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
@@ -81,15 +83,12 @@ func applyGPULimitAttribution(
 	// and publishing only the non-empty ones would leave the last contended
 	// reading standing forever, holding warm pools down long after the burst.
 	contended := map[string]map[string]bool{}
-	// Headroom rides along with contention, from the one place that sees every
-	// constraint provider at once. They answer different questions and the warm
-	// pool needs both: contention says a model replica is being denied RIGHT NOW,
-	// which is a reason to yield ground already held; headroom says the allowance
-	// is spent, which is a reason not to ask for more in the first place.
+	// Headroom is published once the pass is over (publishPassHeadroom), from
+	// what the pass left: published here, per model, it read the constraints
+	// as they were before any model's growth was debited, and a warm pool
+	// sized on it took GPUs the pass had just ordered for a model.
 	defer func() {
-		now := time.Now()
-		decision.PublishGPUContention(contended, now)
-		decision.PublishHeadroom(namespaceHeadroom(constraints), poolsVersionOf(constraints), now)
+		decision.PublishGPUContention(contended, time.Now())
 	}()
 
 	if len(limited) == 0 {
@@ -123,44 +122,75 @@ func applyGPULimitAttribution(
 }
 
 // namespaceHeadroom is how many GPUs of each accelerator each namespace may
-// still take, across every provider, tightest bound winning.
+// still take, across every provider, tightest bound winning -- the closed
+// cluster-scope bound (clusterHeadroom) included, as GPUBudgets bounds a
+// namespace's allowance by the cluster pools: a namespace may not be granted
+// more than the cluster has free.
 //
-// Only namespaces some provider actually CAPS appear. A namespace nobody bounds
+// Only namespaces some provider actually CAPS appear. A namespace nobody caps
 // is absent rather than present-with-a-large-number, because "unconstrained" and
 // "a lot left" are different answers and a caller has to be able to tell them
-// apart -- a warm pool must grow freely in the first case.
+// apart -- a warm pool must grow freely in the first case. It is still bounded
+// by the cluster figure, which is published beside this (Headroom.Cluster).
 //
-// Mirrors effectiveAvailable: a negative Limit is the unlimited sentinel and
-// imposes no bound, and an accelerator a namespace's allowlist does not name is
-// a hard deny, which is zero rather than absent.
+// Mirrors effectiveAvailable and GPUBudgets: a negative Limit is the unlimited
+// sentinel and imposes no namespace bound, an accelerator a namespace's
+// allowlist does not name is a hard deny, which is zero rather than absent, and
+// a type the cluster bounds do not list is zero too however the namespace lists
+// it (clusterBudgetFor) -- a physical pool of {H100: 8} leaves a namespace
+// allowance of {A100: 4}, or of unlimited A100s, nothing to place.
 func namespaceHeadroom(constraints []*ResourceConstraints) map[string]map[string]int {
-	out := map[string]map[string]int{}
-	for _, c := range constraints {
-		if c == nil {
-			continue
-		}
-		for ns, perType := range c.NamespacePools {
-			free, ok := out[ns]
-			if !ok {
-				free = map[string]int{}
-				out[ns] = free
+	out := namespaceAllowance(constraints)
+	cluster := clusterHeadroom(constraints)
+	for _, perType := range out {
+		for accType, free := range perType {
+			cv, bounded := clusterBudgetFor(cluster, accType)
+			if !bounded || cv == math.MaxInt {
+				continue
 			}
-			for accType, rp := range perType {
-				if rp.Limit < 0 {
-					continue // unlimited for this (namespace, type)
-				}
-				avail := rp.Limit - rp.Used
-				if avail < 0 {
-					// Over-committed already. Zero, not negative: the answer a
-					// caller needs is "nothing more", and a negative number
-					// invites arithmetic that accidentally grants some back.
-					avail = 0
-				}
-				if prev, seen := free[accType]; !seen || avail < prev {
-					free[accType] = avail
-				}
+			if free < 0 {
+				// Unlimited in the namespace: the cluster figure is the bound.
+				perType[accType] = cv
+			} else {
+				perType[accType] = min(free, cv)
 			}
 		}
+	}
+	return out
+}
+
+// clusterHeadroom is the free GPUs per accelerator under every cluster bound
+// (the physical inventory, a cluster-scope quota), merged as the optimizer
+// merges them, or nil when none is in force. A namespace-scope quota bounds a
+// namespace through that namespace's own allowance instead.
+func clusterHeadroom(constraints []*ResourceConstraints) map[string]int {
+	return mergeConstraints(constraints)
+}
+
+// publishHeadroom publishes the warm pool's headroom from one cycle's
+// constraints: each capped namespace's allowance and the closed cluster-scope
+// bound.
+func publishHeadroom(constraints []*ResourceConstraints, now time.Time) {
+	decision.PublishHeadroomBounds(namespaceHeadroom(constraints), clusterHeadroom(constraints),
+		poolsVersionOf(constraints), now)
+}
+
+// namespaceAllowance is the free GPUs per (namespace, accelerator) under the
+// namespace pools alone: mergeNamespaceConstraints, the optimizer's own merge,
+// so the warm pool cannot read a type the optimizer refuses. An unlimited type
+// is decision.HeadroomUnlimited -- skipping it would leave the type absent from
+// a present namespace, which a reader takes as DENIED.
+func namespaceAllowance(constraints []*ResourceConstraints) map[string]map[string]int {
+	out := mergeNamespaceConstraints(constraints)
+	for _, perType := range out {
+		for accType, free := range perType {
+			if free < 0 {
+				perType[accType] = decision.HeadroomUnlimited
+			}
+		}
+	}
+	if out == nil {
+		out = map[string]map[string]int{}
 	}
 	return out
 }
@@ -218,6 +248,154 @@ func bindingProvider(constraints []*ResourceConstraints, namespace, accType stri
 	return name
 }
 
+// passHeadroom is what an optimizer pass left of the budgets: the cluster
+// budget and the namespace budgets after every replica the pass ordered was
+// debited, and the node view after its placements. The warm pool's headroom is
+// published from it, not from the constraints the pass started with: the GPUs
+// ordered are not held yet, and a pool growing into them leaves the model's
+// replica Pending.
+type passHeadroom struct {
+	available   map[string]int
+	byNamespace map[string]map[string]int
+	nodes       *NodeView
+	version     uint64
+	// start and startByNS are the budgets as the pass found them, and spends
+	// what it took from them, in order: without replays them less a model's.
+	start     map[string]int
+	startByNS map[string]map[string]int
+	spends    []spendOp
+}
+
+// cloneNamespaceBudgets copies a namespace -> accelerator -> GPUs map, nil for
+// nil.
+func cloneNamespaceBudgets(byNS map[string]map[string]int) map[string]map[string]int {
+	if byNS == nil {
+		return nil
+	}
+	out := make(map[string]map[string]int, len(byNS))
+	for ns, perType := range byNS {
+		out[ns] = maps.Clone(perType)
+	}
+	return out
+}
+
+// replay applies the pass's spends to available and byNS, in the order the
+// pass made them, skipping every model in exclude (namespace/modelID).
+func replay(spends []spendOp, available map[string]int, byNS map[string]map[string]int, exclude map[string]bool) {
+	for _, s := range spends {
+		if exclude[s.model] {
+			continue
+		}
+		if s.ns == "" {
+			debitBudget(available, s.key, s.gpus)
+		} else {
+			debitBudget(byNS[s.ns], s.key, s.gpus)
+		}
+	}
+}
+
+// without returns a copy of h as if the pass had ordered nothing for the
+// models in exclude (namespace/modelID): their spends are not replayed and
+// their node placements are taken back. h itself when exclude is empty.
+func (h passHeadroom) without(exclude map[string]bool) passHeadroom {
+	if len(exclude) == 0 {
+		return h
+	}
+	out := h
+	out.available = maps.Clone(h.start)
+	out.byNamespace = cloneNamespaceBudgets(h.startByNS)
+	replay(h.spends, out.available, out.byNamespace, exclude)
+	out.nodes = h.nodes.without(func(owner string) bool { return exclude[owner] })
+	return out
+}
+
+// withheld returns a copy of h with promised GPUs (scope "" for the cluster,
+// else a namespace -> accelerator -> GPUs) debited too, as WithholdPromised
+// charges them: a namespace promise to the namespace and the cluster budget, a
+// cluster promise to the cluster budget alone; and held on the nodes
+// (ReservePromised).
+func (h passHeadroom) withheld(promised map[string]map[string]int) passHeadroom {
+	out := h
+	out.available = maps.Clone(h.available)
+	out.byNamespace = cloneNamespaceBudgets(h.byNamespace)
+	for _, scope := range slices.Sorted(maps.Keys(promised)) {
+		for _, acc := range slices.Sorted(maps.Keys(promised[scope])) {
+			g := promised[scope][acc]
+			if g <= 0 {
+				continue
+			}
+			if scope != "" {
+				if nsBudget, ok := out.byNamespace[scope]; ok {
+					debitBudget(nsBudget, budgetKey(nsBudget, acc), g)
+				}
+			}
+			debitBudget(out.available, budgetKey(out.available, acc), g)
+		}
+	}
+	if out.nodes != nil && len(promised) > 0 {
+		out.nodes = out.nodes.Clone()
+		ReservePromised(out.nodes, promised)
+	}
+	return out
+}
+
+// PassLeft is what an optimizer pass left, for the utilization share's step
+// that follows it (GreedyByScoreOptimizer.LastPass): the share plans the
+// models it owns on the cycle's budgets and nodes less what the pass ordered
+// for every OTHER model, not on the raw constraints -- planned on those, its
+// idle fill counted free the GPUs and node holes the pass had just ordered for
+// another model.
+type PassLeft struct {
+	h *passHeadroom
+}
+
+// Replay debits from available and byNS (the share's own merge of the
+// cycle's constraints) what the pass ordered for every model not in exclude
+// (namespace/modelID).
+func (p *PassLeft) Replay(available map[string]int, byNS map[string]map[string]int, exclude map[string]bool) {
+	if p == nil {
+		return
+	}
+	replay(p.h.spends, available, byNS, exclude)
+}
+
+// NodeDebits is the GPUs the pass's node view debited per node for every
+// owner other than the models in exclude (namespace/modelID) and the promised
+// GPUs (PromisedOwner): the in-flight ledger's holes and the other models'
+// placements. Nil when the pass had no node view.
+func (p *PassLeft) NodeDebits(exclude map[string]bool) map[string]int {
+	if p == nil {
+		return nil
+	}
+	return p.h.nodes.DebitsExcept(func(owner string) bool { return owner == PromisedOwner || exclude[owner] })
+}
+
+// publish records h as the warm pool's headroom: each capped namespace's
+// allowance bounded by the cluster budget (as namespaceHeadroom bounds it),
+// the cluster budget, and the nodes' holes.
+func (h passHeadroom) publish(now time.Time) {
+	free := make(map[string]map[string]int, len(h.byNamespace))
+	for ns, perType := range h.byNamespace {
+		inner := make(map[string]int, len(perType))
+		for acc, v := range perType {
+			cv, bounded := clusterBudgetFor(h.available, acc)
+			bounded = bounded && cv != math.MaxInt
+			switch {
+			case v < 0 && bounded:
+				inner[acc] = cv
+			case v < 0:
+				inner[acc] = decision.HeadroomUnlimited
+			case bounded:
+				inner[acc] = min(v, cv)
+			default:
+				inner[acc] = v
+			}
+		}
+		free[ns] = inner
+	}
+	decision.PublishHeadroomBoundsOnNodes(free, h.available, h.nodes.Holes(), h.version, now)
+}
+
 // PublishNamespaceHeadroom records what each namespace may still take, from a
 // caller that built constraints outside an optimization pass.
 //
@@ -232,7 +410,14 @@ func bindingProvider(constraints []*ResourceConstraints, namespace, accType stri
 // constraints to headroom stays in one place and every publisher agrees about
 // what an absent namespace means.
 func PublishNamespaceHeadroom(constraints []*ResourceConstraints, now time.Time) {
-	decision.PublishHeadroom(namespaceHeadroom(constraints), poolsVersionOf(constraints), now)
+	publishHeadroom(constraints, now)
+}
+
+// PublishNamespaceHeadroomOnNodes is PublishNamespaceHeadroom with the nodes'
+// holes (decision.Headroom.Nodes) from nodes; a nil view publishes none.
+func PublishNamespaceHeadroomOnNodes(constraints []*ResourceConstraints, nodes *NodeView, now time.Time) {
+	decision.PublishHeadroomBoundsOnNodes(namespaceHeadroom(constraints), clusterHeadroom(constraints),
+		nodes.Holes(), poolsVersionOf(constraints), now)
 }
 
 // PublishUnboundedHeadroom records that NO limiter bounds any namespace, as of

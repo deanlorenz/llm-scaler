@@ -1316,17 +1316,12 @@ func (e *Engine) selectV2Optimizer(
 	if g, ok := optimizer.(*allocation.GreedyByScoreOptimizer); ok {
 		g.Nodes = nodes.WithLayoutLog(&e.layouts)
 	}
-	// What each namespace may still take, for the warm pool -- published HERE,
-	// once per cycle, from the constraints every provider agreed on. The
-	// optimizer publishes it too, but only from the attribution pass of a model
-	// that is scaling UP: a fleet of steady models never took that branch, the
-	// fleet was not idle either, and so a live cluster with one no-change variant
-	// never published headroom at all -- the pool read "unknown" forever and
-	// grew past a one-GPU quota unopposed.
-	// GPUs the utilization-share optimizer has promised to a receiver are
-	// withheld from the pool (section 6.3 of its proposal).
-	now := time.Now()
-	allocation.PublishNamespaceHeadroom(allocation.WithholdPromised(constraints, decision.LatestSharePromised(now)), now)
+	// What each namespace may still take, for the warm pool, is published by
+	// the optimizer once its pass is over -- every pass, a fleet of steady
+	// models included -- from what the pass left (decideV2 republishes it
+	// with the utilization share's new promises withheld). Published here, it
+	// was the figure before the pass, which still counted the GPUs the pass
+	// was about to order as free.
 	return optimizer, constraints
 }
 

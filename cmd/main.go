@@ -1442,6 +1442,11 @@ func runWarmPool(
 	reconciler.Headroom = func(namespace, accelerator string, poolsVersion uint64) (int, decision.HeadroomState) {
 		return decision.GPUHeadroomReading(namespace, accelerator, poolsVersion, warmpool.ContentionMaxAge, time.Now())
 	}
+	// And in whole Pods per node, when a physical limiter bounds the cluster:
+	// the GPUs a namespace may take are no use in holes smaller than a Pod.
+	reconciler.NodeUnits = func(accelerator string, unitGPUs int, poolsVersion uint64) (int, bool) {
+		return decision.GPUHeadroomUnits(accelerator, unitGPUs, poolsVersion, warmpool.ContentionMaxAge, time.Now())
+	}
 	// Which model the optimizer says should be awake in a pool. Nothing
 	// publishes one yet -- the rule that decides is the open half of this
 	// design -- so today it is always absent and every pool decides from demand

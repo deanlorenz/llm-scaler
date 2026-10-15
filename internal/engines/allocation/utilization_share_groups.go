@@ -10,6 +10,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils"
 )
 
 // MaxShareBudgetGPUs bounds the budget a group is evaluated over. No cluster
@@ -191,6 +192,25 @@ type ShareGroupOptions struct {
 	// can grow into GPUs the optimizer would otherwise fill (proposal section
 	// 7.2).
 	PoolUnheld map[string]map[string]int
+	// Left is what today's optimizer pass left, when one ran before: every
+	// group's budget and ClusterFree are then net of what the pass ordered for
+	// the models it does NOT plan -- the frozen ones, the other accelerators',
+	// the excluded namespaces'. What it ordered for a planned model is not
+	// taken: the share overrides that model's target. Nil plans on the
+	// constraints as they are.
+	Left *PassLeft
+}
+
+// PlannedModels is the models (namespace/modelID) the groups plan: every
+// model a role of which is in some group.
+func PlannedModels(groups []ShareGroup) map[string]bool {
+	out := map[string]bool{}
+	for _, g := range groups {
+		for _, o := range g.Origins {
+			out[utils.GetNamespacedKey(o.Namespace, o.ModelID)] = true
+		}
+	}
+	return out
 }
 
 // BuildShareGroups turns one cycle's requests and constraints into the groups
@@ -320,6 +340,27 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 	keys := slices.SortedFunc(maps.Keys(groups), func(a, b key) int {
 		return cmp.Or(cmp.Compare(a.acc, b.acc), cmp.Compare(a.scope, b.scope))
 	})
+	freeOf := func(k key) (int, bool) {
+		free, ok := available[k.acc]
+		if k.scope != "" {
+			free, ok = availableByNS[k.scope][k.acc]
+		}
+		// Unlimited, unknown, or no real bound: nothing to "use all of"
+		// (proposal §7.3).
+		return free, ok && free >= 0 && free <= MaxShareBudgetGPUs
+	}
+	if opts.Left != nil {
+		// What the pass ordered for the models no group plans is spent; what
+		// it ordered for a planned model the share decides again.
+		var kept []ShareGroup
+		for _, k := range keys {
+			if _, ok := freeOf(k); ok {
+				kept = append(kept, *groups[k])
+			}
+		}
+		available, availableByNS = maps.Clone(available), cloneNamespaceBudgets(availableByNS)
+		opts.Left.Replay(available, availableByNS, PlannedModels(kept))
+	}
 	// Every group draws on the same cluster budget: a namespace group may fill
 	// up to its own namespace's free quota, and every GPU it places is also
 	// charged to the cluster budget (a cluster quota counts every namespace).
@@ -333,13 +374,15 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 	// nothing is left either way.) This keeps the cluster group from counting
 	// GPUs a namespace group may also fill. A claim is charged to the cluster
 	// key that bounds the namespace group's type (budgetKey), the key the
-	// cluster group of that type is formed on. The namespace groups are
-	// bounded against each other, and against the cluster group, by
-	// splitClusterFree.
+	// cluster group of that type is formed on, and is net of what the pass
+	// left (opts.Left). The namespace groups are bounded against each other,
+	// and against the cluster group, by splitClusterFree.
 	claimed := map[string]int{}
 	for _, k := range keys {
-		nsFree, ok := availableByNS[k.scope][k.acc]
-		if k.scope != "" && ok && nsFree >= 0 && nsFree <= MaxShareBudgetGPUs {
+		if k.scope == "" {
+			continue
+		}
+		if nsFree, ok := freeOf(k); ok {
 			// a namespace group formed over a finite budget
 			if step := smallestReplicaGPUs(groups[k]); step > 0 {
 				nsFree -= nsFree % step
@@ -351,12 +394,9 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 	out := make([]ShareGroup, 0, len(groups))
 	for _, k := range keys {
 		g := groups[k]
-		free, ok := available[k.acc]
-		if k.scope != "" {
-			free, ok = availableByNS[k.scope][k.acc]
-		}
-		if !ok || free < 0 || free > MaxShareBudgetGPUs {
-			continue // unlimited, unknown, or no real bound: nothing to "use all of" (proposal §7.3)
+		free, ok := freeOf(k)
+		if !ok {
+			continue
 		}
 		clusterFree := math.MaxInt
 		if cf, bounded := clusterBudgetFor(available, k.acc); bounded && cf >= 0 && cf < math.MaxInt {
