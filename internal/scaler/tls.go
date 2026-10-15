@@ -63,6 +63,40 @@ func NewTLSConfig(getCertificate func(*tls.ClientHelloInfo) (*tls.Certificate, e
 	return cfg, nil
 }
 
+// TLSFlags are the external scaler's TLS flags as given on the command line.
+// ClientCASet and ClientSANSet say whether --external-scaler-client-ca and
+// --external-scaler-client-san were passed at all, empty or not.
+type TLSFlags struct {
+	CertPath     string
+	ClientCA     string
+	ClientCASet  bool
+	ClientSAN    string
+	ClientSANSet bool
+}
+
+// CheckTLSFlags validates the external scaler's TLS flags and returns the
+// client identities to accept. A flag passed with a value that means nothing
+// is an error, not the default: an empty --external-scaler-client-ca next to a
+// serving certificate would serve TLS without mutual TLS, and a
+// --external-scaler-client-san of only commas and spaces would accept any
+// certificate the client CA signed. Both read as a pinned client and are not.
+func CheckTLSFlags(f TLSFlags) ([]string, error) {
+	if f.ClientCA != "" && f.CertPath == "" {
+		return nil, errors.New("--external-scaler-client-ca needs --external-scaler-cert-path: mutual TLS needs a serving certificate")
+	}
+	if f.ClientCASet && strings.TrimSpace(f.ClientCA) == "" && f.CertPath != "" {
+		return nil, errors.New("--external-scaler-client-ca was passed empty: give the client CA bundle, or drop the flag to serve TLS without mutual TLS")
+	}
+	allowed := ParseClientIdentities(f.ClientSAN)
+	if f.ClientSANSet && len(allowed) == 0 {
+		return nil, fmt.Errorf("--external-scaler-client-san=%q names no client identity: give one or more, comma-separated, or drop the flag", f.ClientSAN)
+	}
+	if len(allowed) > 0 && f.ClientCA == "" {
+		return nil, errors.New("--external-scaler-client-san needs --external-scaler-client-ca: a client name is verified only under mutual TLS")
+	}
+	return allowed, nil
+}
+
 // ParseClientIdentities splits a comma-separated identity list, trimming
 // spaces and dropping empty entries.
 func ParseClientIdentities(s string) []string {
