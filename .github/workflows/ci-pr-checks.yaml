@@ -76,26 +76,37 @@ jobs:
 
   lint-and-test:
     runs-on: ubuntu-latest
+    # Skipped step by step, not by a job-level `if`, on a docs-only PR: a job
+    # skipped as a whole reports no conclusion, which a required check reads as
+    # never arriving, and e2e-tests-full needs lint-and-test. On push and
+    # dispatch has_code_changes is always true, so everything runs there.
+    needs: check-code-changes
     steps:
       - name: Checkout source
+        if: needs.check-code-changes.outputs.has_code_changes == 'true'
         uses: actions/checkout@v6
 
       - name: Sanity check repo contents
+        if: needs.check-code-changes.outputs.has_code_changes == 'true'
         run: ls -la
 
       - name: Extract Go version from go.mod
+        if: needs.check-code-changes.outputs.has_code_changes == 'true'
         run: sed -En 's/^go (.*)$/GO_VERSION=\1/p' go.mod >> $GITHUB_ENV
 
       - name: Set up Go with cache
+        if: needs.check-code-changes.outputs.has_code_changes == 'true'
         uses: actions/setup-go@v6
         with:
           go-version: "${{ env.GO_VERSION }}"
           cache-dependency-path: ./go.sum
 
       - name: Install dependencies
+        if: needs.check-code-changes.outputs.has_code_changes == 'true'
         run: go mod download
 
       - name: Install golangci-lint
+        if: needs.check-code-changes.outputs.has_code_changes == 'true'
         uses: golangci/golangci-lint-action@v8
         with:
           version: v2.8.0
@@ -107,19 +118,27 @@ jobs:
           verify: false
 
       - name: Run make build
+        if: needs.check-code-changes.outputs.has_code_changes == 'true'
         shell: bash
         run: |
           make build
 
       - name: Run make test
+        if: needs.check-code-changes.outputs.has_code_changes == 'true'
         shell: bash
         run: |
           make test
 
   deploy-scripts-check:
     runs-on: ubuntu-latest
+    # Skipped step by step, not by a job-level `if`, on a docs-only PR: a job
+    # skipped as a whole reports no conclusion, which a required check reads as
+    # never arriving, and e2e-tests-full needs lint-and-test. On push and
+    # dispatch has_code_changes is always true, so everything runs there.
+    needs: check-code-changes
     steps:
       - name: Checkout source
+        if: needs.check-code-changes.outputs.has_code_changes == 'true'
         uses: actions/checkout@v6
 
       # The deploy libraries are ~5k lines of shell that no Go test covers, and
@@ -135,6 +154,7 @@ jobs:
       # PR went red before a single check had run. --retry-all-errors covers
       # HTTP 5xx, which plain --retry does not; the six attempts span ~2 min.
       - name: Install yq
+        if: needs.check-code-changes.outputs.has_code_changes == 'true'
         run: |
           sudo curl -fsSL --retry 6 --retry-delay 10 --retry-all-errors -o /usr/local/bin/yq \
             https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
@@ -142,6 +162,7 @@ jobs:
           yq --version
 
       - name: Run make lint-deploy-scripts
+        if: needs.check-code-changes.outputs.has_code_changes == 'true'
         run: make lint-deploy-scripts
 
   docs-check:
@@ -175,25 +196,36 @@ jobs:
 
   kustomize-build:
     runs-on: ubuntu-latest
+    # Skipped step by step, not by a job-level `if`, on a docs-only PR: a job
+    # skipped as a whole reports no conclusion, which a required check reads as
+    # never arriving, and e2e-tests-full needs lint-and-test. On push and
+    # dispatch has_code_changes is always true, so everything runs there.
+    needs: check-code-changes
     steps:
       - name: Checkout source
+        if: needs.check-code-changes.outputs.has_code_changes == 'true'
         uses: actions/checkout@v6
 
       - name: Install kustomize
+        if: needs.check-code-changes.outputs.has_code_changes == 'true'
         run: make kustomize
 
       - name: Build kubernetes overlay
+        if: needs.check-code-changes.outputs.has_code_changes == 'true'
         run: bin/kustomize build config/overlays/cluster-scoped/kubernetes > /dev/null
 
       - name: Build openshift overlay
+        if: needs.check-code-changes.outputs.has_code_changes == 'true'
         run: bin/kustomize build config/overlays/namespace-scoped/openshift > /dev/null
 
       - name: Build namespace-scoped kubernetes overlay
+        if: needs.check-code-changes.outputs.has_code_changes == 'true'
         run: bin/kustomize build config/overlays/namespace-scoped/kubernetes > /dev/null
 
       # The builds above prove each overlay renders; this asserts what it
       # renders. Same yq pin and retries as deploy-scripts-check.
       - name: Install yq
+        if: needs.check-code-changes.outputs.has_code_changes == 'true'
         run: |
           sudo curl -fsSL --retry 6 --retry-delay 10 --retry-all-errors -o /usr/local/bin/yq \
             https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
@@ -201,6 +233,7 @@ jobs:
           yq --version
 
       - name: Check the rendered manifests
+        if: needs.check-code-changes.outputs.has_code_changes == 'true'
         run: KUSTOMIZE=bin/kustomize bash hack/check-rendered-manifests.sh
 
   # E2E smoke tests - run automatically on every PR with code changes.
