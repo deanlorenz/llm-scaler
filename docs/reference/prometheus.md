@@ -332,11 +332,11 @@ across a restart, are otherwise visible only in the logs.
 
 ### `wva_learned_state_borrowed`
 - **Type**: Gauge
-- **Description**: 1 while a variant is priced from a figure a sibling variant learned, on a replica of its own that reported this cycle. Absent when the variant uses only its own figures, or has no replica reporting.
+- **Description**: 1 while a variant is priced from a figure a sibling variant learned, on a replica that reported this cycle. That is a replica of its own; or, for a `k2` borrow, a warm-pool bridge while the bridge is all that carries the variant, since the variant's capacity is then the bridge's. Absent when the variant uses only its own figures, or has no replica reporting.
 - **Labels**:
   - `namespace` (scraped as `exported_namespace`), `model_name`, `variant_name`: the variant that borrows
   - `quantity`: `k2` -- a sibling's measured k2, used only where it is lower than this variant's own capacity (`P2-borrow` in the [cycle log](cycle-log.md)); or `itl-line` -- a sibling's fitted ITL line, shared when `enableLearnedStateReuse` is on ([scaling policy](scaling-policy.md))
-  - `donor`, `donor_namespace`: the sibling variant it was learned on. A k2 is borrowed only within the variant's own namespace; an ITL line is shared by engine configuration, so its lender can be a variant of the same name in another namespace
+  - `donor`, `donor_namespace`: the sibling variant it was learned on. A k2 is borrowed only within the variant's own namespace. An ITL line is shared by engine configuration -- same model, accelerator, GPU count and configuration fingerprint -- so its lender can be any such variant, in this namespace or another, whatever its name
 - **Use Case**: Answers "is this variant priced from its own measurement?" A canary or a newly scaled-out variant borrows until it saturates and measures for itself; one that borrows for days never saturates, which is the case the k2 borrow's relaxation exists for:
   ```promql
   wva_learned_state_borrowed{quantity="k2"}
