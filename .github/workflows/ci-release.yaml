@@ -11,8 +11,14 @@ on:
 permissions:
   contents: read
 
+# One group for every release, not one per tag. Two tags released side by side
+# each decide whether they are the highest from the tags they fetched; the
+# older run could finish last and move `latest` back. In one group the runs go
+# one at a time, and each sees every tag pushed before it started. GitHub keeps
+# one run waiting: a third tag pushed meanwhile replaces the waiting one, which
+# must then be re-run by hand. hack/check-release-latest.sh checks this block.
 concurrency:
-  group: ci-release-${{ github.ref }}
+  group: ci-release
   cancel-in-progress: false
 
 jobs:
@@ -45,6 +51,23 @@ jobs:
           # highest final release. A shallow checkout has none of the others.
           fetch-depth: 0
           fetch-tags: true
+
+      # Only a commit on main is released. Anyone who may push a tag could
+      # otherwise publish, sign and move `latest` to a commit no review has
+      # seen. The full checkout above already holds origin/main; it is fetched
+      # only if not. hack/check-release-latest.sh runs this step too.
+      - name: Refuse a tag that is not on main
+        id: onmain
+        run: |
+          set -euo pipefail
+          if ! git rev-parse --verify -q refs/remotes/origin/main >/dev/null; then
+            git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
+            echo "::error::tag ${GITHUB_REF_NAME} points at ${GITHUB_SHA}, which is not on main; refusing to release it"
+            exit 1
+          fi
+          echo "${GITHUB_SHA} is on main"
 
       # The image goes to the repository owner's namespace, as ci-main-image.yaml
       # does: ghcr.io/ev-shindin/llm-scaling-manager here, which is what
@@ -154,12 +177,16 @@ jobs:
         with:
           image: release-scan:${{ steps.meta.outputs.version }}
 
+      # The built-in token only. `packages: write` above scopes it to this
+      # repository's packages, for this run. A GHCR_TOKEN secret used to win over
+      # it: a long-lived token, wider than one package, handed to a job that
+      # builds whatever the tagged commit says.
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       # One multi-arch build and push, with an SBOM and a max-mode provenance
       # attestation attached to the index.

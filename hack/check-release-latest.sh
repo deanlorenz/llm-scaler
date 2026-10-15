@@ -17,7 +17,7 @@ ROOT="${CHECK_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 WORKFLOW="$ROOT/.github/workflows/ci-release.yaml"
 # One ok or FAIL per case. A run that stops early otherwise passes having
 # checked less than it says. Change this deliberately with the cases.
-EXPECT_CASES=7
+EXPECT_CASES=11
 PASS=0
 FAIL=0
 
@@ -102,6 +102,60 @@ if [ "$rc" -ne 0 ] && printf '%s\n' "$log" | grep -q 'tags were not fetched'; th
     ok "a checkout with no tags refuses, rather than guessing"
 else
     fail "with no tags fetched the step must refuse (rc=$rc, tags=$(tags))" "$log"
+fi
+
+# One concurrency group for every release. Per tag, two releases ran side by
+# side, and the older one could finish last and move latest back.
+group="$(yq '.concurrency.group' "$WORK/release.yaml")"
+cancel="$(yq '.concurrency."cancel-in-progress"' "$WORK/release.yaml")"
+case "$group" in
+    *'${{'*|''|null) fail "the release concurrency group must be one fixed name for every run (got '$group')" ;;
+    *) if [ "$cancel" = false ]; then
+           ok "releases share one concurrency group ($group) and never cancel a running one"
+       else
+           fail "cancel-in-progress must be false, or a running release is killed mid-push (got '$cancel')"
+       fi ;;
+esac
+
+# Only the built-in token logs in to the registry.
+password="$(yq '.jobs.release.steps[] | select(.uses == "docker/login-action*") | .with.password' "$WORK/release.yaml")"
+if [ "$password" = '${{ secrets.GITHUB_TOKEN }}' ]; then
+    ok "the registry login uses the built-in GITHUB_TOKEN alone"
+else
+    fail "the registry login must use secrets.GITHUB_TOKEN only (got '$password')"
+fi
+
+# Only a commit on main is released. The step runs against a clone whose
+# origin has main, and a commit on a side branch.
+yq '.jobs.release.steps[] | select(.id == "onmain") | .run' "$WORK/release.yaml" > "$WORK/onmain.sh"
+if ! grep -q 'merge-base --is-ancestor' "$WORK/onmain.sh"; then
+    fail "could not read the on-main step out of $WORKFLOW"
+    fail "(the on-main step was not run)"
+else
+    G=(git -c user.name=check -c user.email=check@example.invalid)
+    rm -rf "$WORK/origin" "$WORK/clone"
+    git init -q -b main "$WORK/origin"
+    "${G[@]}" -C "$WORK/origin" commit -q --allow-empty -m one
+    "${G[@]}" -C "$WORK/origin" commit -q --allow-empty -m two
+    git clone -q "$WORK/origin" "$WORK/clone"
+    "${G[@]}" -C "$WORK/clone" checkout -q -b side
+    "${G[@]}" -C "$WORK/clone" commit -q --allow-empty -m unreviewed
+    main_sha="$(git -C "$WORK/origin" rev-parse HEAD~1)"
+    side_sha="$(git -C "$WORK/clone" rev-parse HEAD)"
+    # Without origin/main in the checkout, the step must fetch it.
+    git -C "$WORK/clone" update-ref -d refs/remotes/origin/main
+    onmain_log="$(cd "$WORK/clone" && env GITHUB_SHA="$main_sha" GITHUB_REF_NAME=v1.0.0 bash "$WORK/onmain.sh" 2>&1)"
+    if [ $? -eq 0 ]; then
+        ok "a tag on a commit of main is released (origin/main fetched when missing)"
+    else
+        fail "a commit on main must pass the on-main step" "$onmain_log"
+    fi
+    onmain_log="$(cd "$WORK/clone" && env GITHUB_SHA="$side_sha" GITHUB_REF_NAME=v1.0.1 bash "$WORK/onmain.sh" 2>&1)"
+    if [ $? -ne 0 ] && printf '%s\n' "$onmain_log" | grep -q 'not on main'; then
+        ok "a tag on a commit that is not on main is refused"
+    else
+        fail "a commit off main must be refused" "$onmain_log"
+    fi
 fi
 
 echo ""

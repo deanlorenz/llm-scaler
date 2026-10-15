@@ -33,11 +33,14 @@ the tag.
 
 - **Permissions:** ability to push tags and to create/publish GitHub Releases.
 - **Registry credentials:** none to configure. The workflow pushes with the
-  built-in `GITHUB_TOKEN` (`packages: write`); a `GHCR_TOKEN` secret, if one is
-  set, is used instead.
-- **State of the tagged commit:** the workflow runs the PR checks again on it
-  (below), so a commit that does not pass them cannot be released. It does not
-  run the kind e2e suites; tag a commit whose PR e2e runs were green.
+  built-in `GITHUB_TOKEN` (`packages: write`) only; a `GHCR_TOKEN` secret is not
+  used. If the package was first pushed by a personal token and the push is
+  refused, give this repository write access in the package's settings
+  (**Manage Actions access**).
+- **State of the tagged commit:** it must be on `main`; a tag anywhere else is
+  refused. The workflow runs the PR checks again on it (below), so a commit that
+  does not pass them cannot be released. It does not run the kind e2e suites;
+  tag a commit whose PR e2e runs were green.
 
 ---
 
@@ -81,15 +84,18 @@ new tag name; publishing creates the tag, which starts the same workflow.
 
 [`.github/workflows/ci-release.yaml`](../../.github/workflows/ci-release.yaml) runs
 once per tag push (it no longer also runs on `release: published`, which built and
-pushed every release twice):
+pushed every release twice). Releases run one at a time, so an older tag cannot
+finish last and move `latest` back. GitHub keeps one run waiting: if you push a
+third tag while one runs and one waits, the waiting run is cancelled. Re-run it
+from the Actions tab.
 
 1. **Gate.** Calls [`ci-pr-checks.yaml`](../../.github/workflows/ci-pr-checks.yaml)
    on the tagged commit: `golangci-lint`, `make build`, `make test`,
    `make lint-deploy-scripts`, the docs checks and the kustomize builds. Nothing
    is built for release unless they pass.
-2. **Validate the tag and the pin.** Anything other than
-   `vMAJOR.MINOR.PATCH[-PRERELEASE]` is refused, and so is a tagged commit whose
-   kustomization `newTag` is not the tag.
+2. **Validate the tag and the pin.** A tag whose commit is not on `main` is
+   refused. So is anything other than `vMAJOR.MINOR.PATCH[-PRERELEASE]`, and a
+   tagged commit whose kustomization `newTag` is not the tag.
 3. **Scan before push.** Builds the `linux/amd64` image into the runner's Docker
    daemon only and scans it with Trivy. A **fixable CRITICAL** vulnerability fails
    the release (`ignore-unfixed: true`: a CRITICAL with no upstream fix cannot be
@@ -101,7 +107,7 @@ pushed every release twice):
 5. **Tags.** Always `:<version>`. `:latest` moves only for the highest final
    release in the repository. A tag with a prerelease suffix (`v0.6.0-rc1`)
    never touches `latest`, and neither does a backport (`v0.5.3` tagged after
-   `v0.6.0`). `hack/check-release-latest.sh` tests this.
+   `v0.6.0`, on an older commit of `main`; there is no release-branch flow). `hack/check-release-latest.sh` tests this.
 6. **Sign.** Keyless `cosign sign` of the pushed digest, with the workflow's OIDC
    identity as the signer. The run summary prints the digest and the verify
    command.
