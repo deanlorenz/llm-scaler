@@ -56,10 +56,11 @@ Read the review first; the implementation design says what was built.
   why a parked model needs a push, and where it comes from.
 - **[Priority scoping](priority-scoping.md)** — parked. Read before redesigning.
 - **[Kueue borrowing, and limiters that compose](kueue-borrowing-and-limiter-composition.md)**
-  — proposed, revision 6, rescoped after implementation review (fork #136,
-  upstream WVA #1003). PR-A makes every declared limiter bound together; PR-B
-  counts borrowable cohort capacity where Kueue governs the pods and a GPU bound
-  is declared. Release to lenders that cannot reclaim is opt-in.
+  — proposed, revision 8 (fork #136, upstream WVA #1003). #164 makes every
+  declared limiter bound together and a replica fit a node; PR-B counts
+  borrowable cohort capacity from lenders Kueue would reclaim for, where Kueue
+  governs the pods and a GPU bound is declared. Counting other lenders is an
+  opt-in follow-up.
 - **[Utilization-share optimizer](utilization-share-optimizer.md)** — built:
   shadow mode and actuation (stages 1 and 2); the short window for urgent
   transfers (stage 3) is design. Spend the whole quota: every model gets what it
