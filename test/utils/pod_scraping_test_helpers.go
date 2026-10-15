@@ -467,7 +467,7 @@ func CreateInClusterScrapingTestJob(
 					Containers: []corev1.Container{
 						{
 							Name:  "scraper",
-							Image: "curlimages/curl:8.11.1",
+							Image: "quay.io/curl/curl:8.11.1",
 							Env: []corev1.EnvVar{
 								{
 									Name:  "TARGET_URL",

@@ -81,7 +81,7 @@ over it via shared free functions in `internal/engines/allocation/`.
 
 | Concept | Definition |
 |---|---|
-| **Analyzer** | Implementation of `domain.Analyzer`. Examples: saturation (kv-token capacity, package `saturation`), throughput (RPS/ITL-derived). |
+| **Analyzer** | Implementation of `domain.Analyzer`. Built in: saturation (kv-token capacity, package `saturation`), which sizes the fleet, and `slo` (package `slo`, [its page](slo-analyzer.md)), which observes. External: throughput (RPS/ITL-derived). |
 | **`VariantCapacity`** | Per-variant primitives: `ReplicaCount`, `PendingReplicas`, `PerReplicaCapacity` (analyzer-specific units), `Role`, `TotalDemand`, and the warm-pool trio `WarmPoolReplicas` / `WarmPoolPerReplicaCapacity` / `WarmPoolCapacity`. `Cost` and `AcceleratorName` are **not** on this struct — the optimizer reads them from `VariantMetadata`. |
 | **`AnalyzerResult`** | Per-(model, analyzer) output: the pure (D, P) signal — `VariantCapacities[]`, `TotalDemand`, `RoleDemand`. It has **no** supply or scaling-signal fields; those live on `NamedAnalyzerResult` and are the builder's. |
 | **`RoleCapacity`** | Per-role aggregate within an `AnalyzerResult`: `TotalSupply`, `TotalDemand`, `TotalAnticipatedSupply`, `RequiredCapacity` / `SpareCapacity` (engine-written). Used for P/D disaggregated models only. |
@@ -174,7 +174,8 @@ type.
 - **Registration** — `internal/engines/steadystate/engine.go`:
   `RegisterAnalyzer(name, analyzer) error`. `cmd/main.go` registers external
   analyzers (e.g., throughput) before `StartOptimizeLoop`. The saturation analyzer is
-  pre-registered at slot 0. The registry is snapshotted at `StartOptimizeLoop`;
+  pre-registered at slot 0, and the slo analyzer after it; an external analyzer
+  named `slo` is not run. The registry is snapshotted at `StartOptimizeLoop`;
   late registration returns an error.
 - **Engine post-step** — `internal/engines/steadystate/engine_v2.go`:
   `applyUniversalThreshold(*allocation.NamedAnalyzerResult, scaleUp, scaleDown)`,

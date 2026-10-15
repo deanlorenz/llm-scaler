@@ -135,6 +135,19 @@ wva_resolve_install_phase() {
         return 0
     fi
 
+    # KEDA_HELM_INSTALL=true asks THIS run to install KEDA, and only the
+    # prereqs half does that. Resolved to `wva`, an admin re-run whose RBAC was
+    # already in place skipped deploy_keda and then failed the KEDA check it
+    # had asked to satisfy. Kept unless the KEDA CRD is confirmed present; an
+    # unreadable one is not taken for absent or present -- `all` is the phase
+    # that can act either way, and its KEDA check says which it is.
+    if [ "${SCALER_BACKEND:-keda}" = "keda" ] && [ "${KEDA_HELM_INSTALL:-false}" = "true" ] \
+        && [ "${ENVIRONMENT:-kubernetes}" != "openshift" ] \
+        && ! kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1; then
+        log_info "Running both phases: KEDA_HELM_INSTALL=true and KEDA is not confirmed installed, and only the cluster-admin phase installs it."
+        return 0
+    fi
+
     [ -z "$(wva_missing_prereqs)" ] || return 0
     INSTALL_PHASE=wva
     export INSTALL_PHASE
@@ -212,7 +225,14 @@ print_prereqs_summary() {
     wva_rendered_prereq_objects \
         | if [ "${WVA_SCALER_NP_APPLIED:-true}" = "false" ]; then grep -vx 'NetworkPolicy wva-external-scaler' || true; else cat; fi \
         | sed 's|^\([^ ]*\) |    \1/|'
-    echo "    plus the scaler backend and monitoring, if this cluster had none"
+    # What happened to KEDA, as measured -- not "if this cluster had none", which
+    # promised an install the platform paths never do.
+    case "${WVA_KEDA_STATE:-unknown}" in
+        present)           echo "    KEDA: already on the cluster" ;;
+        absent-installing) echo "    KEDA: installed by this run (Helm)" ;;
+        skipped)           echo "    KEDA: not managed by this install (SCALER_BACKEND=${SCALER_BACKEND:-})" ;;
+        *)                 echo "    KEDA: could not be verified (see the warning above)" ;;
+    esac
     if [ "${WVA_SCALER_NP_APPLIED:-true}" = "false" ]; then
         echo ""
         case "${WVA_SCALER_NP_STATE:-}" in
@@ -237,6 +257,49 @@ print_prereqs_summary() {
     echo "  Re-run this phase only when the WVA version changes what it needs"
     echo "  cluster-wide (new RBAC rules), not for an ordinary controller upgrade."
     echo ""
+}
+
+# wva_run_prereqs_phase runs the cluster-admin half, in dependency order.
+#
+# The scaler backend comes BEFORE the controller. It used to come last, so a
+# cluster without KEDA reached deploy_keda's refusal with the controller already
+# applied and running -- a half-install, and exactly the state the preflight
+# exists to prevent. After the monitoring stack, because KEDA's Helm install
+# creates ServiceMonitors and needs their CRD.
+wva_run_prereqs_phase() {
+    local phase="$1"
+    create_namespaces
+
+    deploy_monitoring_stack
+
+    deploy_scaler_backend
+
+    # Environment-specific WVA prerequisites (on OpenShift: the SA token
+    # Secret and the service-ca bundle the ServiceMonitor authenticates with).
+    if [ "$DEPLOY_WVA" = "true" ]; then
+        deploy_wva_prerequisites
+
+        # A cluster policy published BEFORE this install granted its read to
+        # the controllers that existed then, not to this one -- which would
+        # resolve to that policy and refuse to start for want of a RoleBinding.
+        #
+        # BEFORE deploy_wva_controller: with INSTALL_PHASE=all that call also
+        # applies the Deployment, and a grant made after it raced the first
+        # pod, which could resolve the policy, find no RoleBinding and refuse
+        # to start. A RoleBinding may name a ServiceAccount that does not exist
+        # yet, so nothing here needs the controller to be applied first.
+        if [ "$(wva_install_scope)" = "namespace" ]; then
+            pl_grant_published_policy_read "$WVA_NS" "${WVA_WATCH_NS:-$WVA_NS}"
+        fi
+        WVA_APPLY_SCOPE=$([ "$phase" = "all" ] && echo all || echo prereqs) \
+            deploy_wva_controller
+
+        # KEDA's side of the scaler TLS, when the certificates were written
+        # before KEDA's API was served.
+        if declare -F wva_scaler_tls_after_keda >/dev/null; then
+            wva_scaler_tls_after_keda
+        fi
+    fi
 }
 
 main() {
@@ -306,6 +369,9 @@ main() {
         wva_resolve_install_phase
         check_permissions
         check_single_installation
+        # KEDA is as much a prerequisite as the RBAC above: WVA cannot actuate
+        # without it, and the install checks it at the same point.
+        check_keda_prerequisite
         wva_report_prometheus
         # "Prometheus: <url>" answers whether an endpoint resolved, which reads as
         # though it answered whether the metrics WVA needs are in it. They are
@@ -425,6 +491,13 @@ main() {
         fi
     fi
 
+    # Before anything is created, like the checks above. This used to be found
+    # only by deploy_keda, which ran AFTER the controller was applied, so a cluster
+    # without KEDA got namespaces, RBAC and a running controller and then exit 1.
+    if [ "$SKIP_CHECKS" != "true" ]; then
+        check_keda_prerequisite
+    fi
+
     set_wva_logging_level
 
     if [ "${WVA_ENV_SOURCED:-false}" = "true" ]; then
@@ -476,40 +549,17 @@ main() {
         *)       log_error "INSTALL_PHASE must be prereqs, wva or all (got '$phase')" ;;
     esac
 
+    # The controller's live Prometheus TLS settings, read and judged before
+    # EITHER phase writes anything. Inside deploy_wva_controller the refusal
+    # came after the prereqs phase had already applied namespaces, RBAC and
+    # Prometheus, and still said "Nothing was changed".
+    if [ "$do_wva" = true ] && [ "$DEPLOY_WVA" = "true" ]; then
+        wva_read_live_prometheus_tls "$WVA_NS"
+        wva_refuse_unknown_prometheus_tls
+    fi
+
     if [ "$do_prereqs" = true ]; then
-        create_namespaces
-
-        deploy_monitoring_stack
-
-        # Environment-specific WVA prerequisites (on OpenShift: the SA token
-        # Secret and the service-ca bundle the ServiceMonitor authenticates with).
-        if [ "$DEPLOY_WVA" = "true" ]; then
-            deploy_wva_prerequisites
-        fi
-
-        if [ "$DEPLOY_WVA" = "true" ]; then
-            # A cluster policy published BEFORE this install granted its read to
-            # the controllers that existed then, not to this one -- which would
-            # resolve to that policy and refuse to start for want of a RoleBinding.
-            #
-            # BEFORE deploy_wva_controller: with INSTALL_PHASE=all that call also
-            # applies the Deployment, and a grant made after it raced the first
-            # pod, which could resolve the policy, find no RoleBinding and refuse
-            # to start. A RoleBinding may name a ServiceAccount that does not exist
-            # yet, so nothing here needs the controller to be applied first.
-            if [ "$(wva_install_scope)" = "namespace" ]; then
-                pl_grant_published_policy_read "$WVA_NS" "${WVA_WATCH_NS:-$WVA_NS}"
-            fi
-            WVA_APPLY_SCOPE=$([ "$phase" = "all" ] && echo all || echo prereqs) \
-                deploy_wva_controller
-        fi
-
-        deploy_scaler_backend
-
-        # KEDA's side of the scaler TLS, when this install just put KEDA there.
-        if [ "$DEPLOY_WVA" = "true" ] && declare -F wva_scaler_tls_after_keda >/dev/null; then
-            wva_scaler_tls_after_keda
-        fi
+        wva_run_prereqs_phase "$phase"
     fi
 
     if [ "$do_wva" = true ]; then
@@ -526,8 +576,8 @@ main() {
             wva_scaler_tls_finish
         fi
 
-        # After the scaler backend: a ScaledObject is meaningless until KEDA is there
-        # to reconcile it.
+        # After the scaler backend (wva_run_prereqs_phase installs or confirms it):
+        # a ScaledObject is meaningless until KEDA is there to reconcile it.
         install_default_scaledobjects
 
         # Opt-in scraping for FMA launcher pods, into the WORKLOAD namespace —

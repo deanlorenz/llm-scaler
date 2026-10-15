@@ -95,6 +95,7 @@ verify_deployment() {
             log_warning "  Last lines from the container:"
             printf '%s\n' "$logs" | sed 's/^/      /' >&2
         fi
+        wva_hint_untrusted_prometheus_cert "$(printf '%s\n%s\n' "$reason" "$logs")"
 
         log_warning "  Full logs: kubectl -n $WVA_NS logs -l $WVA_CONTROLLER_LABEL_SELECTOR --tail=50 --previous"
         log_warning "  Events:    kubectl -n $WVA_NS get events --sort-by=.lastTimestamp | tail -20"
@@ -587,8 +588,16 @@ print_summary() {
     else
         echo "  Prometheus:   ${PROMETHEUS_URL:-<the shipped default>} (not deployed by this install)"
     fi
+    # The TLS warning scrolled past long before this summary; repeat its point.
+    [ -z "${WVA_TLS_SUMMARY:-}" ] || echo "  TLS:          the controller $WVA_TLS_SUMMARY"
     if [ "$SCALER_BACKEND" = "keda" ]; then
-        echo "  KEDA:         installed or already present"
+        # The measured answer from check_keda_prerequisite / deploy_keda. This
+        # line used to print "installed or already present" whatever was true.
+        case "${WVA_KEDA_STATE:-unknown}" in
+            present)           echo "  KEDA:         present on the cluster" ;;
+            absent-installing) echo "  KEDA:         installed by this run" ;;
+            *)                 echo "  KEDA:         not verified by this run (check: kubectl get crd scaledobjects.keda.sh)" ;;
+        esac
     else
         echo "  KEDA:         skipped (SCALER_BACKEND=$SCALER_BACKEND) — WVA needs KEDA to actuate"
     fi

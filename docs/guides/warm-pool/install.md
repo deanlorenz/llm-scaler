@@ -18,10 +18,9 @@
   make model-cache NAMESPACE=<namespace> WVA_MODEL_PVC_SIZE=<size> WVA_MODEL_PVC_CLASS=<rwx-class>
   ```
 
-- [ ] RBAC that lets the scaling manager `patch` Pods. The shipped ClusterRole
-  has it. If yours was scoped by hand, the scaling manager refuses to start the
-  pool and says so: it will not hold accelerators to warm models it could never
-  lend.
+- [ ] You can create Roles and RoleBindings in the pool's namespace, and patch
+  Pods there. If you cannot, `create` stops before creating anything and prints
+  the command for an admin ([why](#the-pod-patch-grant)).
 - [ ] **Two container images, from two owners** (below), pullable from the pool
   nodes.
 
@@ -265,6 +264,23 @@ repeat. Models still naming that pool are then warmed by nothing; `plan` lists
 them.
 
 ## Details
+
+### The pod patch grant
+
+- The scaling manager must `patch` pool Pods to lend them. Its ClusterRole
+  only reads Pods.
+- `deploy/warmpool.sh create` grants `patch` in the pool's namespace alone
+  (Role `wva-pod-writer`), before it creates the pool. Kubernetes lets you grant
+  only what you hold, so you need `patch` on Pods there too.
+- A namespace-scoped scaling manager already has `patch` in its own Role.
+  `create` sees that only if you may impersonate its ServiceAccount
+  (`kubectl auth can-i --as`). If you may not, it makes the grant anyway, which
+  does no harm.
+- Without the grant, the scaling manager refuses to start the pool. It will
+  not hold accelerators to warm models it could never lend.
+- `deploy/warmpool.sh delete` keeps the grant, because other pools and the
+  utilization-share optimizer may use it. It warns, and prints the commands
+  that remove it. The uninstall removes it.
 
 ### Picking the cache claim
 

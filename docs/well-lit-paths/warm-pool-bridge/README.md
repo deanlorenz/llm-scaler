@@ -80,8 +80,10 @@ Each item is detailed in the [guide's prerequisites](../../guides/warm-pool/inst
   the three is never warmed by that pool; fix the configuration.
 - A shared model cache (a ReadWriteMany claim), so a warm copy loads from
   local storage rather than a download.
-- RBAC letting the scaling manager `patch` Pods. The shipped ClusterRole has
-  it; without it the scaling manager refuses to start the pool.
+- The right to create Roles in the pool's namespace. `deploy/warmpool.sh create`
+  grants the scaling manager `patch` on Pods there (Role `wva-pod-writer`); its
+  ClusterRole only reads Pods. Without the grant it refuses to start the pool
+  ([prerequisites](../../guides/warm-pool/install.md#prerequisites)).
 - Two images. The proxy is ours (`ghcr.io/ev-shindin/llm-scaler/warmpool-proxy`,
   or your `--proxy-image`). A pool of Pods runs upstream Fast Model
   Actuation's launcher (`ghcr.io/llm-d-incubation/llm-d-fast-model-actuation/launcher`,

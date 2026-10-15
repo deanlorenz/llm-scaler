@@ -30,6 +30,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/slo"
 )
 
 // spyAnalyzer is a minimal domain.Analyzer used in registration tests.
@@ -57,15 +58,18 @@ func (s *spyAnalyzer) Analyze(_ context.Context, in domain.AnalyzerInput) (*doma
 var _ = Describe("Engine analyzer registry", func() {
 
 	Describe("NewEngine", func() {
-		It("pre-registers the V2 saturation analyzer at slot 0", func() {
+		It("pre-registers the V2 saturation analyzer at slot 0, then the slo analyzer", func() {
 			sourceRegistry := source.NewSourceRegistry()
 			Expect(sourceRegistry.Register("prometheus", source.NewNoOpSource())).To(Succeed())
 			testConfig := config.NewTestConfig()
 			engine := NewEngine(k8sClient, k8sClient, k8sClient.Scheme(), nil, sourceRegistry, testConfig, allocation.NewNoOpLimiter("test"))
 
-			Expect(engine.analyzers).To(HaveLen(1))
+			Expect(engine.analyzers).To(HaveLen(2))
 			Expect(engine.analyzers[0].name).To(Equal(domain.SaturationAnalyzerName))
 			Expect(engine.analyzers[0].analyzer).To(BeIdenticalTo(engine.saturationV2Analyzer))
+			// Built in and always registered; it runs only where a policy lists it.
+			Expect(engine.analyzers[1].name).To(Equal(domain.SLOAnalyzerName))
+			Expect(engine.analyzers[1].analyzer).To(BeAssignableToTypeOf(&slo.Analyzer{}))
 		})
 	})
 
@@ -122,7 +126,7 @@ var _ = Describe("Engine analyzer registry", func() {
 			engine := NewEngine(k8sClient, k8sClient, k8sClient.Scheme(), nil, sourceRegistry, testConfig, allocation.NewNoOpLimiter("test"))
 
 			Expect(engine.RegisterAnalyzer("throughput", &spyAnalyzer{name: "throughput"})).To(Succeed())
-			Expect(engine.RegisterAnalyzer("slo", &spyAnalyzer{name: "slo"})).To(Succeed())
+			Expect(engine.RegisterAnalyzer("spy", &spyAnalyzer{name: "spy"})).To(Succeed())
 
 			// Cancel context so the executor's polling loop exits immediately.
 			startCtx, cancelStart := context.WithCancel(context.Background())

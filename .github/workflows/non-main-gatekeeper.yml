@@ -3,6 +3,12 @@ on:
   pull_request:
     types: [opened, edited, synchronize, reopened]
 
+# The reusable workflow adds one label, which is the issues API; the same pair
+# prow-pr-remove-lgtm.yml declares for the same kind of action.
+permissions:
+  issues: write
+  pull-requests: write
+
 jobs:
   gatekeeper:
     # Same-repo branches only, for the reason in prow-pr-remove-lgtm.yml: this
@@ -11,4 +17,4 @@ jobs:
     # advisory anyway — the base-branch rule it enforces is unchanged, and a
     # same-repo PR still gets held.
     if: github.event.pull_request.head.repo.full_name == github.repository
-    uses: llm-d/llm-d-infra/.github/workflows/reusable-non-main-gatekeeper.yaml@main
+    uses: llm-d/llm-d-infra/.github/workflows/reusable-non-main-gatekeeper.yaml@49a41ad0160a60f8838f541173ecc4ff87bc2632 # main as of 2026-10-12

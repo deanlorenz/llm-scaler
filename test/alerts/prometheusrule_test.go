@@ -117,6 +117,11 @@ func TestExtractMetricNamesIgnoresLabelMatcherContents(t *testing.T) {
 			want: []string{"wva_metrics_collection_errors_total"},
 		},
 		{
+			name: "a subquery's range and step are not metric names",
+			expr: `count_over_time((wva_slo_observed_seconds > wva_slo_target_seconds)[30m:1m]) >= 10`,
+			want: []string{"wva_slo_observed_seconds", "wva_slo_target_seconds"},
+		},
+		{
 			name: "multiple metrics are all found",
 			expr: `wva_current_replicas == 0 and on() wva_desired_replicas > 0`,
 			want: []string{"wva_current_replicas", "wva_desired_replicas"},

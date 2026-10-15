@@ -67,6 +67,7 @@ deployment, pass `IMG=<repo>@sha256:<digest>` or a release tag.
 | `WVA_SCALER_TLS_MIGRATE` | `true` moves the ScaledObjects that name this scaler with it when its TLS mode changes: to `wva-external-scaler.<ns>.svc:9090` with KEDA's `authenticationRef`, or back. Without it, such ScaledObjects keep the default on plaintext, and make an explicit `WVA_SCALER_TLS` a refusal | `false` |
 | `KEDA_HELM_INSTALL` | Install KEDA with Helm rather than assuming it is present | `false` |
 | `KEDA_CHART_VERSION` | KEDA Helm chart version | `2.19.0` |
+| `KUBE_PROMETHEUS_STACK_CHART_VERSION` | kube-prometheus-stack Helm chart version, when the install deploys Prometheus. Unset, a newer release already installed is kept rather than downgraded, with a warning | `92.7.0` |
 | `UNDEPLOY` | Remove instead of install (`install.sh` doubles as the uninstaller) | `false` |
 | `DELETE_NAMESPACES` | With `UNDEPLOY=true`, also delete the scaling manager and monitoring namespaces | `false` |
 | `DELETE_LLMD_NS` | With `DELETE_NAMESPACES=true`, also delete `LLMD_NS`. Separate because that namespace holds the model servers: deleting it takes the workloads with it | `false` |
@@ -295,7 +296,8 @@ shipped default and **exits at startup** if nothing answers there
 |----------|-------------|---------|
 | `PROMETHEUS_URL` | Full base URL, e.g. `https://prom.monitoring.svc.cluster.local:9090` | the kube-prometheus-stack this install deploys |
 | `PROMETHEUS_SA` | `<namespace>/<serviceaccount>` of the Prometheus that scrapes the controller's `/metrics`; it is bound to the metrics-reader ClusterRole. Unset, the installer picks only from sources you set, never an auto-detected Prometheus or `default`, and otherwise creates no binding and says so (`--check` lists it as optional). A `make setup-prereqs` re-run without it keeps an existing binding; `make deploy-wva` never touches it. Full rules: [who `metrics-reader` is bound to](security-model.md#namespace-scoped-kubernetes) | none |
-| `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY` | Connect without verifying the server certificate. The installer warns when an HTTPS install ends up unverified; see [TLS configuration](prometheus.md#tls-configuration) for the production setting | `true` in the shipped Kubernetes config, `false` on OpenShift |
+| `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY` | Connect without verifying the server certificate. The installer warns when an HTTPS install ends up unverified, and when it verifies with no CA set; see [TLS configuration](prometheus.md#tls-configuration) for the production setting | `false`; `true` for the Prometheus this install deploys or, on an upgrade, a Prometheus the controller already ran unverified with no CA. See [TLS configuration](prometheus.md#tls-configuration) |
+| `PROMETHEUS_CA_CERT_PATH` | File, inside the controller, of the CA that signed the Prometheus certificate. You mount it ([TLS configuration](prometheus.md#tls-configuration)); setting it turns verification on. Unset, a re-run keeps the one the controller runs with | unset |
 | `DEPLOY_PROMETHEUS` | Deploy a Prometheus stack when the cluster has none of its own — see [Deployment flags](#deployment-flags) | `true` |
 
 ## Which namespace is which

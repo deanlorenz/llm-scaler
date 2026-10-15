@@ -25,6 +25,8 @@ NC='[0m'
 source "$HERE/lib/common.sh"
 # shellcheck source=lib/scaler_tls.sh
 source "$HERE/lib/scaler_tls.sh"
+# shellcheck source=lib/pod_writer.sh
+source "$HERE/lib/pod_writer.sh"
 # NOTE: log_error EXITS. Nothing may follow it that needs to run.
 
 NAMESPACE=""
@@ -556,10 +558,37 @@ $(warmpool_networkpolicy)"
 $(warmpool_podmonitor)"
   fi
 
+  # Lending a pool Pod means patching it: the InferencePool's selector labels
+  # and a deletion cost. The controller's ClusterRole only READS pods, so the
+  # write is granted here, in this namespace alone (lib/pod_writer.sh). Without
+  # it the controller's preflight finds it cannot patch and disables the pool.
+  #
+  # Its own apply, BEFORE the pool's, and only when the controller cannot
+  # already patch here (a namespace-scoped controller's Role has it). It used
+  # to be the first document of the pool's apply, so a user who may not create
+  # Roles got a raw Forbidden with the pool half-applied behind it.
+  local grant
   if [ "$APPLY" -eq 0 ]; then
-    printf '%s\n' "$manifest"
+    grant="$(wva_pod_writer_manifest "$NAMESPACE" "$WVA_NAMESPACE")" \
+      || log_error "could not render role/wva-pod-writer (above); nothing was printed"
+    printf '%s\n---\n%s\n' "$grant" "$manifest"
     return 0
   fi
+
+  if ! wva_ensure_pod_writes "$NAMESPACE" "$WVA_NAMESPACE"; then
+    case "$WVA_POD_WRITER_RESULT" in
+      forbidden)
+        log_error "Nothing was created. The controller in ${WVA_NAMESPACE} needs patch on pods in ${NAMESPACE} to lend pool Pods, and you may not grant it (${WVA_POD_WRITER_ERR}). Ask an admin for create on roles and rolebindings in ${NAMESPACE}, or to run:
+    $(wva_pod_writer_admin_hint "$NAMESPACE" "$WVA_NAMESPACE")
+Then re-run this command." ;;
+      *)
+        log_error "Nothing was created: could not grant the controller in ${WVA_NAMESPACE} patch on pods in ${NAMESPACE} (role/wva-pod-writer): ${WVA_POD_WRITER_ERR}" ;;
+    esac
+  fi
+  case "$WVA_POD_WRITER_RESULT" in
+    already) log_info "The controller in ${WVA_NAMESPACE} can already patch pods in ${NAMESPACE}; no role/wva-pod-writer needed" ;;
+    granted) log_info "The controller in ${WVA_NAMESPACE} may now patch pods in ${NAMESPACE} (role/wva-pod-writer)" ;;
+  esac
 
   printf '%s\n' "$manifest" | kubectl apply -f - >/dev/null
   log_success "Pool '${POOL_NAME}' created in ${NAMESPACE}: ${POOL_REPLICAS} Pods (max ${POOL_MAX}), reserve ${RESERVE}, ${GPUS_PER_POD} GPU each, ${memory} per Pod"
@@ -1607,6 +1636,22 @@ cmd_delete() {
   # operator: a scrape config left behind selects Pods that no longer exist.
   kubectl delete podmonitor "wva-warm-pool-${POOL_NAME}" -n "$NAMESPACE" --ignore-not-found >/dev/null 2>&1 || true
   log_success "Pool '${POOL_NAME}' removed from ${NAMESPACE}: ScaledObject, workload, NetworkPolicy and PodMonitor"
+  # Not the pod-write grant: another pool, or the utilization-share optimizer,
+  # may still need it in this namespace, and nothing here can tell.
+  # This controller's binding by its exact name, which needs --wva-namespace;
+  # without it, a placeholder rather than a pattern that matches every
+  # controller's binding here.
+  local binding="wva-pod-writer-<suffix; pass --wva-namespace for the name>"
+  if [ -n "$WVA_NAMESPACE" ]; then
+    binding="$(wva_pod_writer_binding "$WVA_NAMESPACE" 2>/dev/null)" || binding="wva-pod-writer-<suffix>"
+  fi
+  # A warning, not info: the grant outlives the pool, and it lets the
+  # controller patch any Pod here until someone removes it.
+  log_warning "Kept role/wva-pod-writer and rolebinding/${binding} in ${NAMESPACE}: the controller can still patch pods here. With no other pool and no utilization-share optimizer in this namespace, remove this controller's binding:"
+  log_warning "    kubectl delete rolebinding ${binding} -n ${NAMESPACE}"
+  log_warning "  and the Role too, once no other controller's binding remains (this lists none):"
+  log_warning "    kubectl get rolebinding -n ${NAMESPACE} -o name | grep /wva-pod-writer-"
+  log_warning "    kubectl delete role wva-pod-writer -n ${NAMESPACE}"
 }
 
 if [ $# -lt 1 ]; then

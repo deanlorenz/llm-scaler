@@ -158,7 +158,24 @@ func (p *ChangeReporter) ReportEffectivePolicy(ctx context.Context, namespace, m
 		// but a typo in the key name is silently nothing, and silently nothing
 		// now means "still off". This line is the only place that confirms it
 		// either way.
-		"enableLearnedStateReuse", cfg.EnableLearnedStateReuse)
+		"enableLearnedStateReuse", cfg.EnableLearnedStateReuse,
+		// The SLO targets and whether the analyzer that reads them is listed:
+		// both halves resolve through the overlay separately, and this is the
+		// one place that shows the model ended up with both.
+		"slo", cfg.SLOSummary())
+}
+
+// ReportSLOMisconfiguration warns, once per change, that a model's resolved
+// policy has half an SLO: targets the slo analyzer is not listed to read, or
+// the analyzer listed with no targets. Reported here, from the resolved
+// policy, and not by the analyzer: the analyzer runs only when it is listed,
+// so it could never report the first half.
+func (p *ChangeReporter) ReportSLOMisconfiguration(ctx context.Context, namespace, modelID, problem string) {
+	if !p.changed("slo|"+namespace+"|"+modelID, problem) || problem == "" {
+		return
+	}
+	ctrl.LoggerFrom(ctx).Info("SLO policy is half-configured",
+		"namespace", namespace, "modelID", modelID, "problem", problem)
 }
 
 // formatBand renders the fields that make two resolutions meaningfully different,
@@ -168,9 +185,9 @@ func formatBand(cfg config.ScalingPolicy) string {
 	// toggling it would log nothing: the readout fires only when this string
 	// changes, so a field reported but not keyed is reported once and then
 	// never again when it actually changes.
-	return fmt.Sprintf("%.3f|%.3f|%.3f|%.3f|%d|%t",
+	return fmt.Sprintf("%.3f|%.3f|%.3f|%.3f|%d|%t|%s",
 		cfg.ScaleUpThreshold, cfg.ScaleDownBoundary, cfg.KvCacheThreshold, cfg.Priority,
-		cfg.DefaultOutputTokens, cfg.EnableLearnedStateReuse)
+		cfg.DefaultOutputTokens, cfg.EnableLearnedStateReuse, cfg.SLOSummary())
 }
 
 // joinSorted renders a deterministic list, so a set of policies reported in a

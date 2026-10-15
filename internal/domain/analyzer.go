@@ -5,6 +5,11 @@ import (
 	"time"
 )
 
+// SLOAnalyzerName is the name the SLO analyzer registers under and the name a
+// scaling policy lists in its analyzers: section to run it. Reserved: an
+// external analyzer of the same name is never run.
+const SLOAnalyzerName = "slo"
+
 // Analyzer is the common interface for all scaling analyzers.
 // Each analyzer observes workload metrics and produces capacity signals
 // (required_capacity, spare_capacity) that the engine combines into

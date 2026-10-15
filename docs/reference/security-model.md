@@ -34,7 +34,8 @@ the controller can bound the person who can edit it**. See
 | ServiceAccount `wva-controller-manager` | the prereqs phase (`make setup-prereqs`) | everything the controller does against the API server, and its queries to Prometheus (`PROMETHEUS_TOKEN_PATH` points at this SA's projected token) |
 | ServiceAccount `wva-epp-metrics-reader` | the prereqs phase | scraping EPP `/metrics`. Bound cluster-wide to `get` on the non-resource URL `/metrics` |
 | Secret `wva-epp-metrics-token` | the prereqs phase | a **legacy, non-expiring** `kubernetes.io/service-account-token` for `wva-epp-metrics-reader`, mounted into the controller at `/var/run/secrets/epp-metrics` |
-| Secret `wva-controller-manager-token` | the prereqs phase, **OpenShift only** | a **legacy, non-expiring** token for the controller SA, referenced by the ServiceMonitor's `bearerTokenSecret` so user-workload Prometheus can scrape `:8443` |
+| ServiceAccount `wva-metrics-scraper` | the prereqs phase, **OpenShift only** | the identity user-workload Prometheus scrapes the controller's `:8443` with. Its only grant is `get` on `/metrics` (the repointed `metrics-reader`) |
+| Secret `wva-metrics-scraper-token` | the prereqs phase, **OpenShift only** | a **legacy, non-expiring** token for `wva-metrics-scraper`, referenced by the ServiceMonitor's `bearerTokenSecret` (the prometheus-operator can only read a Secret) |
 
 About the token Secrets:
 
@@ -45,15 +46,16 @@ About the token Secrets:
   that can `get /metrics` on every component that authorizes `/metrics` through
   the API server, the API server included.
 
-**On OpenShift, `wva-controller-manager-token` is the controller's own identity.**
-Whoever can read Secrets in the controller's namespace holds everything that
-ServiceAccount holds: `patch` on pods and reads of every ConfigMap in the
-managed namespace, cluster-wide node and Kueue read, `get /metrics` cluster-wide
-(the repointed `metrics-reader`), and `cluster-monitoring-view`, which can query
-the platform Prometheus / Thanos for **every namespace's** series. In the
-tenant-owned shape that reader is the tenant. On a shared OpenShift cluster,
-keep the controller
-[out of the tenant's reach](../guides/admin-cluster-setup/README.md#keeping-the-controller-out-of-the-tenants-reach).
+**On OpenShift the scrape token is not the controller's identity.** It used to
+be (`wva-controller-manager-token`, a non-expiring token for the controller's
+own ServiceAccount); the installer deletes that Secret on upgrade and on
+uninstall. Whoever can read Secrets in the controller's namespace still holds
+`wva-epp-metrics-token` and `wva-metrics-scraper-token`, both `get /metrics`
+only. The controller's own token stays projected and short-lived, and it
+carries `cluster-monitoring-view`, which lets it query the platform
+Prometheus / Thanos for **every namespace's** series. Keep the controller
+[out of the tenant's reach](../guides/admin-cluster-setup/README.md#keeping-the-controller-out-of-the-tenants-reach)
+on a shared OpenShift cluster.
 
 ## Permissions
 
@@ -160,7 +162,7 @@ Everything in the Kubernetes table, plus:
 | Verbs | Resource | Scope | Why |
 | --- | --- | --- | --- |
 | (OpenShift's role) | ClusterRoleBinding to `cluster-monitoring-view` | **cluster** | querying Thanos Querier with the controller's own token — which reads the platform Prometheus series of **every** namespace, not just the managed one. That role is reported to carry `get` on namespaces, which would let the controller read Namespace objects on OpenShift; nothing in this repository pins the role's contents, so verify on your cluster with `kubectl auth can-i get namespaces --as=system:serviceaccount:<controller namespace>:wva-controller-manager` |
-| get | non-resource URL `/metrics` | **cluster** (`metrics-reader`) | repointed at the controller's own SA, whose token Secret the ServiceMonitor uses to scrape `:8443` |
+| get | non-resource URL `/metrics` | **cluster** (`metrics-reader`) | repointed at `wva-metrics-scraper`, whose token Secret the ServiceMonitor uses to scrape `:8443`. Not the controller: its token no longer sits in a Secret |
 
 Because of `cluster-monitoring-view`, a namespace-scoped install on OpenShift
 always needs a cluster admin, and the installer's preflight says so.
@@ -173,7 +175,7 @@ cluster-wide. The differences that matter for review:
 | Verbs | Resource | Scope | Note |
 | --- | --- | --- | --- |
 | get, list, watch | **configmaps** | **every namespace** | the controller's cache filters ConfigMaps by label, but the grant does not: it can read any ConfigMap in the cluster |
-| get, list, watch, **patch** | **pods** | **every namespace** | the code patches only pods of workloads it manages and warm-pool pods, but the grant reaches every pod, `kube-system` included |
+| get, list, watch | **pods** | **every namespace** | read only. `patch` is granted per namespace by Role `wva-pod-writer`, made where it is used (see [Grants made after install](#grants-made-after-install)) |
 | get, list, watch | namespaces, nodes, nodes/status | cluster | |
 | get, list | clusterqueues, localqueues, resourceflavors | cluster | |
 
@@ -186,6 +188,7 @@ binding and the `metrics-reader` repoint are added as above.
 
 | Command | Grants | To whom |
 | --- | --- | --- |
+| `deploy/warmpool.sh create`, `make utilization-share-activate`, and `make deploy-wva` for a cluster-scoped install in the `all` or `prereqs` phase only (where a warm pool or utilization-share marks of this controller are, and every namespace of its models when the optimizer is active) | Role `wva-pod-writer` (patch on pods) and a RoleBinding, in the pool's or the models' namespace only. `deploy/warmpool.sh create` and `make utilization-share-activate` skip it where the controller can already patch pods | `wva-controller-manager` of the controller namespace given. Needed by a cluster-scoped controller; a namespace-scoped one already has it in its Role. `make undeploy-wva` removes them |
 | `make enable-physical-limiter` (gpu-inventory) | ClusterRole + binding: get, list, watch on nodes | the ServiceAccount of each targeted controller |
 | `make enable-physical-limiter WVA_LIMITER_TYPE=quota WVA_QUOTAS='<type>=-1' WVA_QUOTA_KUEUE=true` | ClusterRole + binding: get, list on clusterqueues, resourceflavors; get on Namespaces, by name: the namespace a namespace-scoped controller (tenant-owned or out of reach) manages, the same grant `make setup-prereqs` renders. Every Namespace only for a cluster-scoped controller whose ServiceAccount already reads every Namespace (an installer-made one does, through its manager ClusterRole) or whose namespace `WVA_LIMITER_TARGETS` names; a controller that looks cluster-scoped without that read is warned about, with the `make setup-prereqs` run for that install | the same |
 | `make enable-physical-limiter`, and `make setup-prereqs` when the policy namespace already exists | Role `wva-policy-reader` in the policy namespace (`wva-policy`, or the one a `wva.llmd.ai/policy-namespace` label names): get, list, watch on **all** ConfigMaps there, plus RoleBinding `wva-policy-reader-<suffix>` | each controller that reads policy from that namespace. `make setup-prereqs` grants it only to a controller that manages its own namespace. `make undeploy-wva` leaves both ([cleanup](upgrade-and-uninstall.md#policy-namespace-and-limiter-leftovers-cluster-admin)) |
@@ -214,6 +217,14 @@ ScaledObjects or HPAs**. KEDA does the scaling. What it does write:
 
 A cluster-scoped grant to patch pods is therefore a grant to change which pods
 an InferencePool serves from, wherever warm pools exist.
+
+**Residual risk of the per-namespace grant.** `patch` on pods can change a
+running pod's container image. So whoever holds the controller's token can run
+code as any ServiceAccount used by a pod in a namespace with
+`wva-pod-writer`. The grant is limited to those namespaces, not removed. Grant
+it only where a warm pool or the utilization-share optimizer needs it, and
+delete it when they go
+([leftover pod-write grants](upgrade-and-uninstall.md#leftover-pod-write-grants)).
 
 ## Network exposure
 
@@ -361,9 +372,13 @@ The warm-pool **proxy**, a separate image inside pool pods, does forward live
 requests; it is part of the data plane, not the controller.
 
 The controller sends its own ServiceAccount token to Prometheus on every query.
-The shipped Kubernetes config sets `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY: "true"`,
-so that token goes to whatever answers at the configured address. Set it to
-`false` and give a CA with `PROMETHEUS_CA_CERT_PATH`.
+The shipped config verifies the Prometheus certificate. The installer turns
+verification off only for the kube-prometheus-stack it deploys on Kubernetes,
+which has no CA to give the controller, or, on an upgrade, a Prometheus the
+controller already ran unverified with no CA. There the token goes to whatever
+answers at that address. Set `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY` to
+`false` and give a CA with `PROMETHEUS_CA_CERT_PATH`. See
+[TLS configuration](prometheus.md#tls-configuration).
 
 ## Supply chain
 

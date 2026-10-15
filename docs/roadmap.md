@@ -19,9 +19,10 @@ gaps themselves are summarized in [known gaps](why.md#known-gaps).
 
 - **Scale to a latency target.** Tiers set how full a replica may run, not a
   TTFT or TPOT target; an operator with an SLO translates it into thresholds by
-  hand. Planned: a tier may declare a latency target, and the controller derives
-  the fill that meets it from measured latency, keeping variants, P/D pairing
-  and the GPU budget.
+  hand. A tier can already declare a latency target and see it judged
+  ([observe only](reference/scaling-policy.md#slo-observe-only)). Planned: the
+  controller derives the fill that meets it from measured latency, keeping
+  variants, P/D pairing and the GPU budget.
   [#141](https://github.com/ev-shindin/llm-scaling-manager/issues/141)
 
 - **Price prefill from the router's prompt tokens.** The router knows the

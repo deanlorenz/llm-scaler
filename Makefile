@@ -415,6 +415,10 @@ check-doc-comment-owner: ## Fail on a doc comment describing a different declara
 .PHONY: test
 test: manifests generate fmt vet setup-envtest helm check-import-direction check-doc-comment-owner ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" PATH="$(LOCALBIN):$(PATH)" go test $$(go list ./... | grep -v /e2e | grep -v /benchmark) ./test/e2e/fixtures/ -coverprofile cover.out
+	@# The race detector on the packages whose concurrency spec only it can
+	@# check (a few seconds): without -race that spec proves no deadlock and
+	@# nothing more.
+	CGO_ENABLED=1 go test -race -count=1 ./internal/engines/analyzers/slo/ ./internal/signals/itl/
 
 # Creates a multi-node Kind cluster
 # Adds emulated GPU labels and capacities per node
@@ -601,12 +605,19 @@ INSTALL_PHASE_ARG = $(if $(filter command line environment,$(origin INSTALL_PHAS
 # which any authenticated user may read) and uses kubernetes otherwise.
 ENVIRONMENT_INSTALL = $(if $(filter command line environment,$(origin ENVIRONMENT)),$(ENVIRONMENT),)
 
+# The install targets apply the COMMITTED manifests. They used to depend on
+# `manifests kustomize`: a go install of controller-gen, a type-check of ./...,
+# and a rewrite of the tracked config/base/rbac/manager-clusterrole.yaml from
+# whatever checkout ran the install -- so an operator with kubectl, helm, yq and
+# jq passed check-prereqs and then failed on `go: command not found`, and the
+# downloaded kustomize was never used (the install runs `kubectl kustomize`).
+# Regenerating is a development step: `make manifests`.
 .PHONY: setup-prereqs
-setup-prereqs: manifests kustomize ## Phase 2 (CLUSTER ADMIN). ENVIRONMENT=kubernetes|openshift, SCOPE=namespace|cluster.
+setup-prereqs: ## Phase 2 (CLUSTER ADMIN). ENVIRONMENT=kubernetes|openshift, SCOPE=namespace|cluster.
 	$(call wva_phase,prereqs,$(ENVIRONMENT_INSTALL))
 
 .PHONY: deploy-wva
-deploy-wva: manifests kustomize ## Install WVA. ENVIRONMENT=kubernetes|openshift, SCOPE=namespace|cluster, INSTALL_PHASE=all|prereqs|wva, IMG=<your build>, WVA_LIMITER=none|gpu-inventory|quota (quota needs WVA_QUOTAS).
+deploy-wva: ## Install WVA. ENVIRONMENT=kubernetes|openshift, SCOPE=namespace|cluster, INSTALL_PHASE=all|prereqs|wva, IMG=<your build>, WVA_LIMITER=none|gpu-inventory|quota (quota needs WVA_QUOTAS).
 	$(call wva_phase,$(INSTALL_PHASE_ARG),$(ENVIRONMENT_INSTALL))
 
 .PHONY: undeploy-wva
@@ -614,11 +625,11 @@ undeploy-wva: ## Remove WVA. Pass the same ENVIRONMENT, SCOPE and namespace you 
 	export KIND=$(KIND) KUBECTL=$(KUBECTL) $(if $(ENVIRONMENT_INSTALL),ENVIRONMENT=$(ENVIRONMENT_INSTALL),) $(if $(filter command line environment,$(origin WVA_NS)),WVA_NS=$(WVA_NS),) WVA_SCOPE=$(SCOPE) && 		deploy/install.sh --undeploy
 
 .PHONY: deploy-wva-on-k8s
-deploy-wva-on-k8s: manifests kustomize ## Install WVA on Kubernetes. SCOPE=namespace|cluster, INSTALL_PHASE=all|prereqs|wva, IMG=<your build>, WVA_LIMITER (quota needs WVA_QUOTAS). Prometheus and the namespace are detected.
+deploy-wva-on-k8s: ## Install WVA on Kubernetes. SCOPE=namespace|cluster, INSTALL_PHASE=all|prereqs|wva, IMG=<your build>, WVA_LIMITER (quota needs WVA_QUOTAS). Prometheus and the namespace are detected.
 	$(call wva_phase,$(INSTALL_PHASE_ARG),kubernetes)
 
 .PHONY: deploy-wva-on-openshift
-deploy-wva-on-openshift: manifests kustomize ## Install WVA on OpenShift. SCOPE=namespace|cluster, INSTALL_PHASE=all|prereqs|wva, IMG=<your build>, WVA_LIMITER=none|gpu-inventory|quota (quota needs WVA_QUOTAS).
+deploy-wva-on-openshift: ## Install WVA on OpenShift. SCOPE=namespace|cluster, INSTALL_PHASE=all|prereqs|wva, IMG=<your build>, WVA_LIMITER=none|gpu-inventory|quota (quota needs WVA_QUOTAS).
 	$(call wva_phase,$(INSTALL_PHASE_ARG),openshift)
 
 ## Removing. Pass the SAME SCOPE and namespace you installed with — an uninstall
@@ -856,6 +867,25 @@ engine-cache-delete: ## Drop the engine-cache claim, volume and preparer in NAME
 engine-cache-publish: ## Fill the seed claim from every prepared node, then re-seed every node, so no node starts an engine configuration cold. Run it once each configuration has started somewhere. NAMESPACE=<ns>
 	@test -n "$(prepull_namespace_given)" || { echo "engine-cache-publish: set NAMESPACE=<ns> (the Makefile default is not taken here)" >&2; exit 1; }
 	@bash deploy/enginecache.sh publish -n "$(NAMESPACE)"
+
+## Check the cache without starting an engine a second time: start each engine
+## configuration once, print the key it compiled under with engine-cache-keys,
+## then engine-cache-verify reads that key on every usable node, through the
+## preparer pod there (kubectl exec; no GPU). It fails on a node that lacks a
+## key, a node with no Ready preparer, and a read that could not be made.
+ENGINE_CACHE_KEYS ?=
+ENGINE_CACHE_PODS ?=
+ENGINE_CACHE_UID ?=
+.PHONY: engine-cache-keys engine-cache-verify
+engine-cache-keys: ## Print the compile cache key(s) running engine pods used. NAMESPACE=<ns> ENGINE_CACHE_PODS='<pod> [<pod>...]'
+	@test -n "$(prepull_namespace_given)" || { echo "engine-cache-keys: set NAMESPACE=<ns> (the Makefile default is not taken here)" >&2; exit 1; }
+	@test -n "$(ENGINE_CACHE_PODS)" || { echo "engine-cache-keys: set ENGINE_CACHE_PODS='<engine pod> [<engine pod>...]', one pod per engine configuration (prefill and decode differ)" >&2; exit 1; }
+	@bash deploy/enginecache.sh keys -n "$(NAMESPACE)" $(foreach p,$(ENGINE_CACHE_PODS),"$(p)")
+
+engine-cache-verify: ## Per usable accelerator node: is every compile cache key present and readable. NAMESPACE=<ns> ENGINE_CACHE_KEYS='<key>[,<key>]' [ENGINE_CACHE_UID=<uid the engines run as>]
+	@test -n "$(prepull_namespace_given)" || { echo "engine-cache-verify: set NAMESPACE=<ns> (the Makefile default is not taken here)" >&2; exit 1; }
+	@test -n "$(ENGINE_CACHE_KEYS)" || { echo "engine-cache-verify: set ENGINE_CACHE_KEYS='<key>[,<key>]' (make engine-cache-keys prints them)" >&2; exit 1; }
+	@$(if $(ENGINE_CACHE_UID),ENGINE_CACHE_UID="$(ENGINE_CACHE_UID)",) bash deploy/enginecache.sh verify -n "$(NAMESPACE)" --keys "$(ENGINE_CACHE_KEYS)" $(if $(WEIGHTS_NODE_SELECTOR),--node-selector "$(WEIGHTS_NODE_SELECTOR)",)
 
 .PHONY: workload-patch
 workload-patch: ## Write a patch for model servers that do not drain on scale-down, download weights outside every volume they mount, or compile their kernels on every start. NAMESPACE=<ns> scopes it; WVA_WORKLOAD_PATCH_APPLY=true applies the drain half live (add WVA_WORKLOAD_PATCH_APPLY_WEIGHTS=true for the weights volume, after `make model-cache`; WVA_WORKLOAD_PATCH_APPLY_ENGINE_CACHE=true for the engine-cache volume, after `make engine-cache`).
@@ -2667,6 +2697,10 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@bash -n hack/benchmark/sample_replicas.sh
 	@bash -n hack/benchmark/tail_wva_logs.sh
 	@bash -n hack/benchmark/file_capture.sh
+	@bash -n hack/check-install-flow.sh
+	@bash -n hack/check-e2e-images.sh
+	@bash -n hack/check-policy-apply-docs.sh
+	@bash -n hack/check-release-latest.sh
 	@for script in deploy/lib/*.sh; do bash -n "$$script"; done
 	@for script in deploy/*/install.sh; do if [ -f "$$script" ]; then bash -n "$$script"; fi; done
 	@for script in deploy/kind-emulator/*.sh; do if [ -f "$$script" ]; then bash -n "$$script"; fi; done
@@ -2710,6 +2744,10 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# a certificate naming the wrong host, a re-install that drops TLS, or a
 	@# foreign Secret overwritten all install cleanly.
 	@KUSTOMIZE=$(KUSTOMIZE) bash hack/check-scaler-tls.sh
+	@# An alert that errors at evaluation, or never fires, loads cleanly; promtool
+	@# evaluates the shipped rules on synthetic series.
+	@$(MAKE) --no-print-directory promtool
+	@PROMTOOL=$(PROMTOOL) bash hack/check-alert-rules.sh
 	@echo "Checking what warmpool.sh actually emits..."
 	@# Renders the pool manifests and asserts their shape. Every bug this covers
 	@# parses fine: one container with the proxy image under the supervisor's
@@ -2802,6 +2840,20 @@ lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and 
 	@# controller-only upgrade, bounds the namespace at nothing. The
 	@# preflight must refuse that phase; executed against a stub kubectl.
 	@bash hack/check-kueue-namespace-grant.sh
+	@echo "Checking the installer's decisions against a stubbed cluster..."
+	@# KEDA preflight and install order, image pinning, chart pinning, TLS
+	@# verification, uninstall grants and summaries: each parses and is wrong.
+	@bash hack/check-install-flow.sh
+	@echo "Checking every image the e2e Go code names has a registry host..."
+	@# AGENTS.md: never docker.io in e2e. An image with no host resolves there.
+	@bash hack/check-e2e-images.sh
+	@echo "Checking no doc applies the sample scaling policy over an install..."
+	@# The sample has no limiters: applying it removes the GPU limit.
+	@bash hack/check-policy-apply-docs.sh
+	@echo "Checking only the highest final release tag moves latest..."
+	@# Runs the release workflow step against a scratch repository. A backport
+	@# tagged after a newer release used to move latest back to the old line.
+	@bash hack/check-release-latest.sh
 	@echo "Checking the tenant Role still covers the generated ClusterRole..."
 	@# The ClusterRole is GENERATED from kubebuilder markers; the namespaced Role
 	@# the tenant overlay installs is maintained by hand, so it does not move when
@@ -2919,6 +2971,8 @@ CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
 HELM ?= $(LOCALBIN)/helm
+# The version is in the name, so raising PROMTOOL_VERSION installs it afresh.
+PROMTOOL ?= $(LOCALBIN)/promtool-$(PROMTOOL_VERSION)
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.6.0
@@ -2929,6 +2983,8 @@ ENVTEST_VERSION ?= $(shell go list -m -f "{{ .Version }}" sigs.k8s.io/controller
 ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -F'[v.]' '{printf "1.%d", $$3}')
 GOLANGCI_LINT_VERSION ?= v2.8.0
 HELM_VERSION ?= v3.17.1
+# PROMTOOL_VERSION is a Prometheus release; promtool comes from its tarball.
+PROMTOOL_VERSION ?= 2.54.1
 
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
@@ -2948,6 +3004,11 @@ setup-envtest: envtest ## Download the binaries required for ENVTEST in the loca
 		echo "Error: Failed to set up envtest binaries for version $(ENVTEST_K8S_VERSION)."; \
 		exit 1; \
 	}
+
+.PHONY: promtool
+promtool: $(PROMTOOL) ## Download promtool locally if necessary.
+$(PROMTOOL): $(LOCALBIN)
+	@bash hack/install-promtool.sh $(PROMTOOL) $(PROMTOOL_VERSION)
 
 .PHONY: envtest
 envtest: $(ENVTEST) ## Download setup-envtest locally if necessary.

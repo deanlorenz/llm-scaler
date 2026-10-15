@@ -10,6 +10,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/slo"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 )
 
@@ -31,6 +32,19 @@ var _ = Describe("learned-state horizons reach the analyzer the engine builds", 
 		Expect(ok).To(BeTrue(), "the V2 analyzer is the one that owns the horizons")
 		return sat
 	}
+
+	It("gives the slo analyzer the same variant timeout", func() {
+		cfg := config.NewTestConfig()
+		config.SetLearnedStateHorizonsForTest(cfg, 90*time.Minute, 72*time.Hour, 240*time.Hour)
+		sourceRegistry := source.NewSourceRegistry()
+		Expect(sourceRegistry.Register("prometheus", source.NewNoOpSource())).To(Succeed())
+		engine := NewEngine(k8sClient, k8sClient, k8sClient.Scheme(), nil, sourceRegistry, cfg,
+			allocation.NewNoOpLimiter("test"))
+		a, ok := engine.sloAnalyzer.(*slo.Analyzer)
+		Expect(ok).To(BeTrue())
+		Expect(a.StateTimeout()).To(Equal(72*time.Hour),
+			"LEARNED_STATE_VARIANT_TIMEOUT governs the slo analyzer's lines too")
+	})
 
 	It("passes the configured horizons through", func() {
 		cfg := config.NewTestConfig()

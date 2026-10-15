@@ -81,8 +81,17 @@ Environment Variables:
   DEPLOY_PROMETHEUS            Deploy the Prometheus stack (default: true). Skipped automatically when the
                                cluster already has a Prometheus outside MONITORING_NAMESPACE.
   PROMETHEUS_FORCE_INSTALL     Install even then (default: false). Two operators will contend over the same CRs.
+  KUBE_PROMETHEUS_STACK_CHART_VERSION
+                               Chart version the Prometheus stack is installed at (default: 92.7.0).
+                               A newer release already installed is kept unless you set this.
   PROMETHEUS_URL               Where WVA reads metrics from. Required when Prometheus is not deployed here.
-  PROMETHEUS_TLS_INSECURE_SKIP_VERIFY  Skip Prometheus certificate verification (default: the shipped config, true on Kubernetes)
+  PROMETHEUS_TLS_INSECURE_SKIP_VERIFY
+                               Skip verifying the Prometheus certificate. Default false; true for the
+                               Prometheus this install deploys. See TLS configuration in
+                               docs/reference/prometheus.md.
+  PROMETHEUS_CA_CERT_PATH      CA file the controller verifies Prometheus with. Mount it yourself.
+                               Unset, a re-run keeps the one the controller runs with, for the
+                               same PROMETHEUS_URL.
   DEPLOY_OPERATIONAL_DASHBOARD Publish the WVA Grafana dashboard (default: true). Works against an
                                existing Grafana — it is a sidecar-labelled ConfigMap.
   DASHBOARD_NS                 Namespace to publish the dashboard into (default: MONITORING_NAMESPACE)
@@ -102,8 +111,11 @@ Environment Variables:
                                docs/guides/warm-pool/README.md
 
  Scaler backend and CRDs
-  SCALER_BACKEND               keda (default) or none. WVA needs KEDA to actuate.
-  KEDA_HELM_INSTALL            Install KEDA via Helm on kubernetes (default: false — assumes cluster KEDA)
+  SCALER_BACKEND               keda (default) or none. WVA needs KEDA to actuate; the preflight
+                               checks for it before anything is created. KEDA older than 2.17
+                               works, with a warning: its ScaledObjects get no fallback.
+  KEDA_HELM_INSTALL            Install KEDA via Helm on kubernetes (default: false — assumes cluster KEDA).
+                               Never on OpenShift: install the Custom Metrics Autoscaler operator there.
   KEDA_NAMESPACE               Namespace for KEDA (default: keda-system). Also the one the
                                external-scaler NetworkPolicy admits (written by the admin
                                phase, setup-prereqs); unset, the namespace serving the
@@ -131,7 +143,7 @@ Environment Variables:
   DELETE_LLMD_NS               Also delete NAMESPACE — it holds the model servers (default: false)
 
  Other
-  NAMESPACE                      Namespace used for EPP/model-server setup by the e2e and sample paths.
+  NAMESPACE                    Namespace used for EPP/model-server setup by the e2e and sample paths.
                                It does NOT scope what WVA manages: WVA has no watch and no listing, and
                                learns of a workload only when KEDA calls it about one.
 
@@ -232,7 +244,7 @@ parse_args() {
         ;;
       -u|--undeploy)          UNDEPLOY=true; shift ;;
       -e|--environment)
-        ENVIRONMENT="$2" ; shift 2
+        ENVIRONMENT="$2" ; ENVIRONMENT_EXPLICIT="$2" ; shift 2
         if ! containsElement "$ENVIRONMENT" "${COMPATIBLE_ENV_LIST[@]}"; then
           log_error "Invalid environment: $ENVIRONMENT. Valid options are: ${COMPATIBLE_ENV_LIST[*]}"
         fi

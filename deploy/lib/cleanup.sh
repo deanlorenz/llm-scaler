@@ -107,6 +107,8 @@ EOF
     # delete below -- it removes what is rendered, and these are not. Without this
     # they survive every uninstall, forever.
     wva_delete_legacy_crbs "$WVA_NS"
+    # Same for the controller token Secret the OpenShift overlay used to render.
+    wva_delete_legacy_controller_token "$WVA_NS"
 
     # Render and FILTER, rather than `kubectl delete -k`. One kind in the rendered
     # set does not belong to this install and must survive it:
@@ -156,11 +158,28 @@ EOF
         wva_scaler_tls_undeploy
     fi
 
+    # The pod-write grant deploy/warmpool.sh, utilization-share activate and
+    # an upgrade made in workload namespaces. Not rendered, so the delete
+    # above never names it. See lib/pod_writer.sh. Removed after that delete,
+    # and only once the controller's Deployment is gone: a delete that failed
+    # leaves a running controller, whose warm pools and optimizer still need it.
+    if kc_capture get deployment wva-controller-manager -n "$WVA_NS" -o name; then
+        log_warning "The controller Deployment is still in $WVA_NS, so its patch on pods (role/${WVA_POD_WRITER_ROLE}) was kept. Re-run the uninstall once the Deployment is gone."
+    elif ! kc_not_found "$KC_ERR"; then
+        log_warning "Could not tell whether the controller Deployment in $WVA_NS is gone ($KC_ERR), so its patch on pods (role/${WVA_POD_WRITER_ROLE}) was kept. Re-run the uninstall once it is."
+    elif [ "$(wva_install_scope)" = "namespace" ]; then
+        wva_remove_pod_writers "$WVA_NS" "$WVA_NS" "${WVA_WATCH_NS:-}"
+    else
+        wva_remove_pod_writers "$WVA_NS"
+    fi
+
     # The utilization-share need history is written by the controller, not
     # rendered, so the filtered delete above never names it. Left behind, a
     # reinstall would restore peaks recorded before the uninstall. Deleted
-    # after the Deployment and the Role that let it write, so a pod still
-    # terminating cannot write it back.
+    # after the delete above, so a controller pod that is gone cannot write
+    # it back. When that delete failed and the Deployment is still there (the
+    # pod-write grant was kept, above), a running controller may write it
+    # again; the re-run that warning asks for removes it then.
     local history_cm=wva-utilization-share-history history_err
     history_err="$(kubectl delete configmap "$history_cm" -n "$WVA_NS" --ignore-not-found 2>&1 >/dev/null)" && history_err=""
     if [ -n "$history_err" ]; then

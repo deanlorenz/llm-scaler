@@ -51,6 +51,11 @@ rules:
 # and taking it back out. Without `patch` the controller starts, sees it could
 # never complete a borrow, and disables the pool -- correctly, but after the
 # pool has been created and is already holding its accelerators.
+#
+# This is the one rule the generated ClusterRole does NOT carry: there, a
+# cluster-wide patch on pods reached every Pod in the cluster, so the cluster-
+# scoped install gets it per namespace from role/wva-pod-writer instead
+# (deploy/lib/pod_writer.sh). Here it is namespaced already.
 - apiGroups:
   - ""
   resources:
