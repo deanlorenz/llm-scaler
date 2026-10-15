@@ -74,6 +74,18 @@ func TestIgnoredFieldIsReportedLikeAnUnknownKey(t *testing.T) {
 		t.Error("a 4000-byte tenant value was reported in full")
 	}
 
+	// Fixed: the count drops to 0, a reading, not an absent series.
+	cm.Data = map[string]string{config.GlobalDefaultsKey: quotaDefault}
+	if err := f.c.Update(ctx, cm); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.r.Reconcile(ctx, ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatal(err)
+	}
+	if got := gaugeValue(t, registry, "wva_config_ignored_fields"); got != 0 {
+		t.Errorf("wva_config_ignored_fields = %v after the fields were fixed, want 0", got)
+	}
+
 	// A deleted ConfigMap's count is not reported on.
 	if err := f.c.Delete(ctx, cm); err != nil {
 		t.Fatal(err)
