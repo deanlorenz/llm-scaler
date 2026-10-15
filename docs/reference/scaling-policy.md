@@ -1366,7 +1366,8 @@ One thing about turning it on **can** change scaling: a tier that lists
 - The **SLO** row of the operational dashboard (collapsed by default): observed
   against target per objective, what it judged and why it did not.
 - The series under [SLO Analyzer Metrics](prometheus.md#slo-analyzer-metrics),
-  and, if installed, two alerts, `WVAModelSLOMissed` and `WVAModelSLOUnjudged`.
+  and, if installed, three alerts, `WVAModelSLOAttainmentLow` (TTFT),
+  `WVAModelSLOMissed` (TPOT) and `WVAModelSLOUnjudged`.
   Their runbook is
   [A model misses, or is never judged against, its SLO](troubleshooting.md#a-model-misses-or-is-never-judged-against-its-slo).
 - The first judged point comes a window plus its grace after you turn it on
