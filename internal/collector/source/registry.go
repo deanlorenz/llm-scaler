@@ -67,21 +67,39 @@ func (r *SourceRegistry) List() []string {
 // This operation is idempotent - it succeeds even if the source is not registered.
 // This makes deletion paths clean and idempotent, especially useful for reconcile
 // retries and race conditions where PoolDelete may be called multiple times.
+//
+// A removed source that implements Closer is closed.
 func (r *SourceRegistry) Unregister(name string) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-
+	old := r.sources[name]
 	// Idempotent: no-op if source doesn't exist
 	delete(r.sources, name)
+	r.mu.Unlock()
+
+	closeSource(old)
 	return nil
 }
 
 // Update replaces an existing source or registers a new one.
 // Unlike Register, this method does not return an error if the source already exists.
+// A replaced source that implements Closer is closed, so its background work
+// (the cache cleanup goroutine) stops with it.
 func (r *SourceRegistry) Update(name string, source MetricsSource) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-
+	old := r.sources[name]
 	r.sources[name] = source
+	r.mu.Unlock()
+
+	if old != source {
+		closeSource(old)
+	}
 	return nil
+}
+
+// closeSource closes s when it owns background work. Called outside the
+// registry lock so a slow Close cannot stall readers.
+func closeSource(s MetricsSource) {
+	if c, ok := s.(Closer); ok {
+		c.Close()
+	}
 }

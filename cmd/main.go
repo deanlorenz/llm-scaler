@@ -65,6 +65,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/steadystate"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/gpunodes"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/gpuusage"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/kubecache"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	prometheusutil "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/prometheus"
@@ -523,6 +524,11 @@ func main() {
 			},
 		}
 	}
+	// Both shapes: keep only what readers use of each cached object. On a
+	// cluster-scoped install the Pod, Deployment and Node informers are
+	// cluster-wide and cannot be label-filtered (the GPU usage walk counts every
+	// Pod on a GPU node), so trimming is what bounds their memory.
+	kubecache.Trim(&mgrOptions.Cache)
 
 	mgr, err := ctrl.NewManager(restConfig, mgrOptions)
 	if err != nil {
@@ -635,9 +641,27 @@ func main() {
 	//
 	// Re-read every tick, because the limiters list is live: switching it must not
 	// need a restart.
+	usageDiscovery := gpunodes.NewK8sWithGpuOperator(mgr.GetClient())
+	if watchNS != "" {
+		// The cache holds this namespace's Pods only, and a usage walk through it
+		// counts other tenants' GPUs on the same nodes as free. Read Pods uncached;
+		// when that is Forbidden the walk falls back to the cache and says so
+		// (wva_pod_access_denied) while a physical limiter reads the result. The
+		// limiter list is live, so that is asked per list, not decided here.
+		usageDiscovery = usageDiscovery.WithPodReader(mgr.GetAPIReader()).
+			WithPhysicalLimiterCheck(func() bool { return allocation.PhysicalUsageConfigured(cfg) })
+	}
 	usageRefresher := &gpuusage.Refresher{
-		Discovery: gpunodes.NewK8sWithGpuOperator(mgr.GetClient()),
-		Periodic:  func() bool { return allocation.NodeUsageWanted(cfg, watchNS != "") },
+		Discovery: usageDiscovery,
+		Periodic: func() bool {
+			if watchNS != "" && !allocation.PhysicalUsageConfigured(cfg) {
+				// The walk stops when the physical limiter goes, and nothing
+				// else would clear a denial it reported: without the limiter
+				// the undercount bounds nothing.
+				usageDiscovery.ResetPodAccessDenied()
+			}
+			return allocation.NodeUsageWanted(cfg, watchNS != "")
+		},
 	}
 	if err := mgr.Add(usageRefresher); err != nil {
 		setupLog.Error(err, "unable to add the GPU usage refresher to the manager")
@@ -734,6 +758,7 @@ func main() {
 		engine.Variants = registry.Default
 		engine.Status = controllerStatus
 		engine.VariantEnricher = registry.NewEnricher(mgr.GetAPIReader(), registry.Default, registry.DefaultTargetMaxAge)
+		engine.VariantEnricher.Recorder = mgr.GetEventRecorderFor("workload-variant-autoscaler-registry")
 		// The registry is also what tells the datastore which namespaces to load
 		// configuration for. That used to come from a ScaledObject reconciler, whose
 		// watch was a cluster-wide informer; the registry knows the same thing for a
@@ -785,6 +810,7 @@ func main() {
 		// other has just read.
 		engine.Variants = registry.Default
 		engine.VariantEnricher = registry.NewEnricher(mgr.GetAPIReader(), registry.Default, registry.DefaultTargetMaxAge)
+		engine.VariantEnricher.Recorder = mgr.GetEventRecorderFor("workload-variant-autoscaler-registry")
 		// Let the engine bring the usage picture up to date immediately before it
 		// places a wake. The periodic observation alone can be a full interval old
 		// at the moment it is consulted, and a workload that has just started
@@ -1004,8 +1030,16 @@ func main() {
 	}
 
 	if err = inferencePoolReconciler.SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create inferencePool controller")
-		os.Exit(1)
+		if !errors.Is(err, controller.ErrInferencePoolCRDNotServed) {
+			setupLog.Error(err, "unable to create inferencePool controller")
+			os.Exit(1)
+		}
+		// Starting without it beats the alternative: a controller for an unserved
+		// kind never syncs, and once this replica wins the lease the manager exits
+		// on the cache-sync timeout, a crash loop that only shows after election.
+		setupLog.Error(err, "InferencePool CRD not found: the InferencePool controller is NOT running, so no "+
+			"EPP pool is tracked and EPP queue metrics are unavailable. Install the Gateway API Inference "+
+			"Extension CRDs and restart the controller.", "poolGroup", poolGKNN.Group)
 	}
 
 	if err = configMapReconciler.SetupWithManager(mgr); err != nil {

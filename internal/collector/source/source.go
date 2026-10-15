@@ -28,6 +28,17 @@ type MetricsSource interface {
 	Get(queryName string, params map[string]string) *CachedValue
 }
 
+// Closer is implemented by a MetricsSource that owns background work, such as
+// its cache's cleanup goroutine. Close stops that work and is idempotent. The
+// SourceRegistry closes a source when Update replaces it or Unregister removes
+// it, so a source built per reconcile does not outlive its registration.
+//
+// It is a separate interface rather than a MetricsSource method so that sources
+// with nothing to stop need not implement it.
+type Closer interface {
+	Close()
+}
+
 // MetricValue represents a single metric value with its metadata.
 type MetricValue struct {
 	// Value is the metric value (scalar).

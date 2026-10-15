@@ -112,6 +112,12 @@ func (p *PodScrapingSource) QueryList() *source.QueryList {
 	return p.registry
 }
 
+// Close stops the source's cache cleanup goroutine. The registry calls it when
+// the source is replaced or removed. Idempotent.
+func (p *PodScrapingSource) Close() {
+	p.cache.Close()
+}
+
 // Refresh executes queries and updates the cache.
 // Called by engine/reconciler on-demand.
 func (p *PodScrapingSource) Refresh(ctx context.Context, spec source.RefreshSpec) (map[string]*source.MetricResult, error) {
