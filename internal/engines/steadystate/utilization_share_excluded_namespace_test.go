@@ -75,7 +75,7 @@ func TestUtilizationShareReportsAnExcludedNamespaceUnshared(t *testing.T) {
 	ctx, logs := observe(t)
 	e := &Engine{Config: namespaceQuotaConfig(t)}
 	idle := shadowRequest("X", "", 100, 14)
-	idle.Namespace = "ns-x"
+	idle.Namespace = excludedNamespace
 	reqs := []allocation.ModelScalingRequest{idle}
 	q := e.Config.EffectiveQuotaEntries()
 	if len(q) != 1 {
@@ -83,7 +83,7 @@ func TestUtilizationShareReportsAnExcludedNamespaceUnshared(t *testing.T) {
 	}
 	rc, err := allocation.NewDefaultLimiter(q[0].Name, allocation.NewQuotaInventory(q[0])).ComputeConstraints(
 		context.Background(), map[string]int{"A100": 18},
-		map[string]map[string]int{"team-a": {"A100": 2}, "team-b": {"A100": 2}, "ns-x": {"A100": 14}})
+		map[string]map[string]int{"team-a": {"A100": 2}, "team-b": {"A100": 2}, excludedNamespace: {"A100": 14}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,10 @@ func TestUtilizationShareReportsAnExcludedNamespaceUnshared(t *testing.T) {
 	}
 }
 
-const unsharedMessage = "Utilization share: not sharing models no quota bounds; today's optimizer keeps them"
+// excludedNamespace is the namespace namespaceQuotaDoc excludes.
+const excludedNamespace = "ns-x"
+
+const unsharedMessage ="Utilization share: not sharing models no quota bounds; today's optimizer keeps them"
 
 // Two unshared models reported in either order are the same set: one line,
 // the models sorted.
@@ -125,15 +128,15 @@ func TestUtilizationShareReportsUnsharedModelsOnceInAnyOrder(t *testing.T) {
 	ctx, logs := observe(t)
 	e := &Engine{Config: namespaceQuotaConfig(t)}
 	x := shadowRequest("X", "", 100, 2)
-	x.Namespace = "ns-x"
+	x.Namespace = excludedNamespace
 	y := shadowRequest("Y", "", 100, 2)
-	y.Namespace = "ns-x"
+	y.Namespace = excludedNamespace
 	q := e.Config.EffectiveQuotaEntries()
 	if len(q) != 1 {
 		t.Fatalf("want one quota entry, got %d", len(q))
 	}
 	rc, err := allocation.NewDefaultLimiter(q[0].Name, allocation.NewQuotaInventory(q[0])).ComputeConstraints(
-		context.Background(), map[string]int{"A100": 4}, map[string]map[string]int{"ns-x": {"A100": 4}})
+		context.Background(), map[string]int{"A100": 4}, map[string]map[string]int{excludedNamespace: {"A100": 4}})
 	if err != nil {
 		t.Fatal(err)
 	}
