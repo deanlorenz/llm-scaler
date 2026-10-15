@@ -806,6 +806,12 @@ test install whose controller ran in `workload-variant-autoscaler-system`:
 - **Labels**: `namespace`, `configmap`, optional `controller_instance`
 - **Use Case**: a value above 0 is usually a misspelled key whose setting is not in force. The `ConfigEntryUnknownKeys` event names it and its line.
 
+### `wva_config_ignored_fields`
+- **Type**: Gauge
+- **Description**: fields in a scaling-policy ConfigMap's entries whose value cannot be used, at its last load: a `scaleToZero.retentionPeriod` that is not a duration or is under 30s, or a negative `shapeChangeHoldSeconds`. Each acts as unset, so the layer below applies; the entries still apply. The series is removed when the ConfigMap is deleted.
+- **Labels**: `namespace`, `configmap`, optional `controller_instance`
+- **Use Case**: a value above 0 means a setting you wrote is not in force. The `ConfigFieldIgnored` event names the entry, field and value. Each field is also counted in `wva_errors_total{error_type="Ignored unusable saturation scaling config field"}`.
+
 ### `wva_node_access_denied`
 - **Type**: Gauge
 - **Description**: `1` while a configured physical GPU limiter cannot read nodes, `0` when it can. Absent when no physical limiter is configured — nothing is asking for them.

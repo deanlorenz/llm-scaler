@@ -61,9 +61,15 @@ kubectl edit configmap wva-scaling-policy-config -n <wva-namespace>
 - The model's own entry is a per-model entry whose body names its `model_id` and
   `namespace`.
 - A named tier can carry `scaleToZero` too. If a model's variants name
-  different tiers, the model parks only if every one of them allows it.
+  different tiers, the model parks only if every one of them allows it, and
+  waits for the longest `retentionPeriod` among them. A variant that names no
+  tier follows the ones that do.
+- `retentionPeriod` must be at least 30s. A shorter or misspelled value is
+  skipped, and the model uses the tier's, then `default`'s, then 10m. The
+  `ConfigFieldIgnored` event on the ConfigMap says so.
 - Re-running `make deploy-wva` resets the `default` entry, which drops
-  `scaleToZero`. Put it on a per-model entry to keep it, or repeat the edit.
+  `scaleToZero`. Put it on a per-model entry or a named tier to keep it, or
+  repeat the edit.
 - Out-of-reach controller: it reads its own ConfigMap only at start, so restart
   it after the edit:
   `kubectl rollout restart deploy/wva-controller-manager -n <wva-namespace>`.
@@ -163,16 +169,17 @@ kubectl edit configmap wva-scaling-policy-config -n <wva-namespace>
 
 ## When a model will not park
 
-Two settings are valid, cost money, and show no symptom: the model just keeps
+These settings are valid, cost money, and show no symptom: the model just keeps
 serving.
 
 | What you set | What happens |
 | --- | --- |
 | scale-to-zero on, one variant with `minReplicaCount > 0` | the model never reaches zero; idle accelerators stay billed |
 | every variant at `minReplicaCount: 0`, scale-to-zero off | the scaling manager keeps the model up |
+| every variant at `minReplicaCount: 0`, scale-to-zero on in `default` but off in a tier one variant names | the model never reaches zero: every tier its variants name must allow it. Enable `scaleToZero` on every such tier. The log line `Scale-to-zero is disabled by the scaling policy of a tier` names them (`disabledBy`) |
 
 The second is most misleading with a **single variant**, where
-`minReplicaCount: 0` looks like a request to park. Neither is rejected. Both
+`minReplicaCount: 0` looks like a request to park. None is rejected. All
 show on `wva_model_scaling_blocked`, and the controller logs once when the
 answer changes.
 
