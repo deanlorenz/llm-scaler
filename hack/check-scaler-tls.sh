@@ -1059,6 +1059,10 @@ ok '[ "$(grep -c "whether its scaler serves TLS is unknown" "$WORK/wp.err")" = 1
 
 echo "== make verify-deployment loads the scaler TLS checks"
 ok 'grep -A8 "^verify-deployment:" "$ROOT/Makefile" | grep -q "source deploy/lib/scaler_tls.sh"' "the verify-deployment recipe does not source scaler_tls.sh, so its scaler TLS checks never run"
+# KEDA_NAMESPACE given by the caller is trusted as where KEDA runs (the restart
+# command), and OpenShift is told apart (the service CA KEDA must trust).
+ok 'grep -A8 "^verify-deployment:" "$ROOT/Makefile" | grep -qF "KEDA_NAMESPACE_EXPLICIT=false; [ -z \"\$\${KEDA_NAMESPACE:-}\" ] || KEDA_NAMESPACE_EXPLICIT=true;"' "the verify-deployment recipe does not set KEDA_NAMESPACE_EXPLICIT from KEDA_NAMESPACE"
+ok 'grep -A8 "^verify-deployment:" "$ROOT/Makefile" | grep -qF "\$(if \$(ENVIRONMENT_INSTALL),ENVIRONMENT=\$(ENVIRONMENT_INSTALL),)" && grep -A8 "^verify-deployment:" "$ROOT/Makefile" | grep -qF "[ -n \"\$\${ENVIRONMENT:-}\" ] || ! wva_is_openshift || ENVIRONMENT=openshift;"' "the verify-deployment recipe does not pass ENVIRONMENT, or does not detect OpenShift when it is unset"
 
 # ---------------------------------------------------------------- Forbidden is never NotFound
 # probe_* print what a reader concluded, for the cases below.
