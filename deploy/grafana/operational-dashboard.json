@@ -83,6 +83,35 @@
         "type": "query"
       },
       {
+        "datasource": {
+          "type": "prometheus",
+          "uid": "$datasource_uid"
+        },
+        "hide": 0,
+        "includeAll": true,
+        "label": "SLO model",
+        "multi": true,
+        "name": "slo_model",
+        "query": {
+          "query": "label_values(wva_slo_target_seconds{$namespace_label=~\"$namespace\"}, model_name)",
+          "refId": "var"
+        },
+        "refresh": 2,
+        "skipUrlSync": false,
+        "type": "query",
+        "definition": "label_values(wva_slo_target_seconds{$namespace_label=~\"$namespace\"}, model_name)",
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "description": "Models the SLO row shows: those whose policy sets slo targets."
+      },
+      {
         "name": "controller_instance",
         "label": "Controller",
         "type": "query",
@@ -2682,7 +2711,7 @@
           },
           "targets": [
             {
-              "expr": "max by ($namespace_label, model_name, objective, statistic) (wva_slo_observed_seconds{$namespace_label=~\"$namespace\", objective=\"ttft\"})",
+              "expr": "max by ($namespace_label, model_name, objective, statistic) (wva_slo_observed_seconds{$namespace_label=~\"$namespace\", model_name=~\"$slo_model\", objective=\"ttft\"})",
               "legendFormat": "{{$namespace_label}}/{{model_name}} {{objective}} {{statistic}}",
               "refId": "A",
               "datasource": {
@@ -2691,7 +2720,7 @@
               }
             },
             {
-              "expr": "max by ($namespace_label, model_name, objective, statistic) (wva_slo_target_seconds{$namespace_label=~\"$namespace\", objective=\"ttft\"})",
+              "expr": "max by ($namespace_label, model_name, objective, statistic) (wva_slo_target_seconds{$namespace_label=~\"$namespace\", model_name=~\"$slo_model\", objective=\"ttft\"})",
               "legendFormat": "{{$namespace_label}}/{{model_name}} {{objective}} target",
               "refId": "B",
               "datasource": {
@@ -2729,7 +2758,7 @@
           },
           "targets": [
             {
-              "expr": "max by ($namespace_label, model_name, objective, statistic) (wva_slo_observed_seconds{$namespace_label=~\"$namespace\", objective=\"tpot\"})",
+              "expr": "max by ($namespace_label, model_name, objective, statistic) (wva_slo_observed_seconds{$namespace_label=~\"$namespace\", model_name=~\"$slo_model\", objective=\"tpot\"})",
               "legendFormat": "{{$namespace_label}}/{{model_name}} {{objective}} {{statistic}}",
               "refId": "A",
               "datasource": {
@@ -2738,7 +2767,7 @@
               }
             },
             {
-              "expr": "max by ($namespace_label, model_name, objective, statistic) (wva_slo_target_seconds{$namespace_label=~\"$namespace\", objective=\"tpot\"})",
+              "expr": "max by ($namespace_label, model_name, objective, statistic) (wva_slo_target_seconds{$namespace_label=~\"$namespace\", model_name=~\"$slo_model\", objective=\"tpot\"})",
               "legendFormat": "{{$namespace_label}}/{{model_name}} {{objective}} target",
               "refId": "B",
               "datasource": {
@@ -2776,7 +2805,7 @@
           },
           "targets": [
             {
-              "expr": "wva_slo_window_requests{$namespace_label=~\"$namespace\"}",
+              "expr": "max by ($namespace_label, model_name, objective, statistic) (wva_slo_window_requests{$namespace_label=~\"$namespace\", model_name=~\"$slo_model\"})",
               "legendFormat": "{{$namespace_label}}/{{model_name}} {{objective}} requests",
               "refId": "A",
               "datasource": {
@@ -2814,7 +2843,7 @@
           },
           "targets": [
             {
-              "expr": "wva_slo_attainment_ratio{$namespace_label=~\"$namespace\"}",
+              "expr": "max by ($namespace_label, model_name, objective, statistic) (wva_slo_attainment_ratio{$namespace_label=~\"$namespace\", model_name=~\"$slo_model\"})",
               "legendFormat": "{{$namespace_label}}/{{model_name}} {{statistic}}",
               "refId": "A",
               "datasource": {
@@ -2843,7 +2872,7 @@
           "id": 80,
           "title": "Fill the TPOT target allows, per variant",
           "type": "timeseries",
-          "description": "The KV fill, as a fraction of physical KV, at which the variant's mean inter-token latency meets the TPOT target. Above the tier's kvCacheThreshold x scaleUpThreshold (0.68 by default): the target would let it run fuller; below: the tier is too loose for it. An estimate, not checked against a live fleet yet: known to be off under speculative decoding, a high prefix-cache hit rate, and a pod running several data-parallel ranks behind one API server.",
+          "description": "The KV fill, as a fraction of physical KV, at which the variant's mean inter-token latency meets the TPOT target. Before any scale-up headroom, so compare it with the tier's kvCacheThreshold (0.80 by default), the fill saturation prices a replica at: below it, the target needs more replicas than the tier gives. Clamped to [0.15, 0.80] and capped by max_num_seqs, so at the clamp or the cap the line's ITL is below the target. An estimate, not checked against a live fleet yet: known to be off under speculative decoding, a high prefix-cache hit rate, and a pod running several data-parallel ranks behind one API server.",
           "gridPos": {
             "h": 8,
             "w": 12,
@@ -2852,7 +2881,7 @@
           },
           "targets": [
             {
-              "expr": "wva_slo_fill{$namespace_label=~\"$namespace\"}",
+              "expr": "max by ($namespace_label, model_name, variant_name) (wva_slo_fill{$namespace_label=~\"$namespace\", model_name=~\"$slo_model\", variant_name=~\"$variant\"})",
               "legendFormat": "{{$namespace_label}}/{{model_name}}/{{variant_name}}",
               "refId": "A",
               "datasource": {
@@ -2890,7 +2919,7 @@
           },
           "targets": [
             {
-              "expr": "wva_slo_predicted_itl_seconds{$namespace_label=~\"$namespace\"}",
+              "expr": "max by ($namespace_label, model_name, variant_name) (wva_slo_predicted_itl_seconds{$namespace_label=~\"$namespace\", model_name=~\"$slo_model\", variant_name=~\"$variant\"})",
               "legendFormat": "{{$namespace_label}}/{{model_name}}/{{variant_name}}",
               "refId": "A",
               "datasource": {
@@ -2928,7 +2957,7 @@
           },
           "targets": [
             {
-              "expr": "max by ($namespace_label, model_name, variant_name) ((wva_slo_source{$namespace_label=~\"$namespace\", source=\"own\"} == 1) * 1 or (wva_slo_source{$namespace_label=~\"$namespace\", source=\"pinned\"} == 1) * 2 or (wva_slo_source{$namespace_label=~\"$namespace\", source=\"pinned-default\"} == 1) * 3 or (wva_slo_source{$namespace_label=~\"$namespace\", source=\"no-line\"} == 1) * 4 or (wva_slo_source{$namespace_label=~\"$namespace\", source=\"declined\"} == 1) * 5 or (wva_slo_source{$namespace_label=~\"$namespace\", source=\"no-output-length\"} == 1) * 6 or (wva_slo_source{$namespace_label=~\"$namespace\", source=\"infeasible\"} == 1) * 7 or (wva_slo_source{$namespace_label=~\"$namespace\", source=\"input-invalid\"} == 1) * 8)",
+              "expr": "max by ($namespace_label, model_name, variant_name) ((wva_slo_source{$namespace_label=~\"$namespace\", model_name=~\"$slo_model\", variant_name=~\"$variant\", source=\"own\"} == 1) * 1 or (wva_slo_source{$namespace_label=~\"$namespace\", model_name=~\"$slo_model\", variant_name=~\"$variant\", source=\"pinned\"} == 1) * 2 or (wva_slo_source{$namespace_label=~\"$namespace\", model_name=~\"$slo_model\", variant_name=~\"$variant\", source=\"pinned-default\"} == 1) * 3 or (wva_slo_source{$namespace_label=~\"$namespace\", model_name=~\"$slo_model\", variant_name=~\"$variant\", source=\"no-line\"} == 1) * 4 or (wva_slo_source{$namespace_label=~\"$namespace\", model_name=~\"$slo_model\", variant_name=~\"$variant\", source=\"declined\"} == 1) * 5 or (wva_slo_source{$namespace_label=~\"$namespace\", model_name=~\"$slo_model\", variant_name=~\"$variant\", source=\"no-output-length\"} == 1) * 6 or (wva_slo_source{$namespace_label=~\"$namespace\", model_name=~\"$slo_model\", variant_name=~\"$variant\", source=\"infeasible\"} == 1) * 7 or (wva_slo_source{$namespace_label=~\"$namespace\", model_name=~\"$slo_model\", variant_name=~\"$variant\", source=\"input-invalid\"} == 1) * 8)",
               "legendFormat": "{{$namespace_label}}/{{model_name}}/{{variant_name}}",
               "refId": "A",
               "datasource": {
@@ -3021,7 +3050,7 @@
           },
           "targets": [
             {
-              "expr": "max by ($namespace_label, model_name, objective, reason) (wva_slo_excluded{$namespace_label=~\"$namespace\"}) == 1",
+              "expr": "max by ($namespace_label, model_name, objective, reason) (wva_slo_excluded{$namespace_label=~\"$namespace\", model_name=~\"$slo_model\"}) == 1",
               "legendFormat": "{{$namespace_label}}/{{model_name}} {{objective}}: {{reason}}",
               "refId": "A",
               "datasource": {

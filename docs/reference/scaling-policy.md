@@ -1172,62 +1172,106 @@ digest alone — and, for the ITL line, `unresolved` empty on both sides.
 
 Latency targets, and the analyzer that judges a model against them. **On this
 release it reports and does not decide**: replica counts still come from the
-saturation analyzer, and a policy written now keeps only observing when
-enforcement ships, because enforcing will need an explicit `slo.mode: enforce`.
-Use it to see whether a tier meets an SLO before any of it sizes a fleet.
+saturation analyzer. A policy written now stays observe-only when enforcement
+ships, because enforcing will need an explicit `slo.mode: enforce`. Use it to
+see whether a tier meets an SLO before anything sizes a fleet from one.
+Experimental: its figures have not been checked against a live router yet.
 
-One thing about turning it on **can** change scaling: a tier that lists
-`analyzers:` resets its band -- its `scaleUpThreshold` and `scaleDownBoundary`
-(step 2 below). Copy the band and you are safe.
+One thing about turning it on **can** change scaling: a tier's own entry takes
+built-in defaults for every field it leaves unset, and those override
+`default`'s (step 3 below).
 
 **Before you start**
 
 - [ ] The llm-d router (EPP) runs in the model's namespace and Prometheus
-      scrapes it. It must publish `llm_d_epp_request_ttft_seconds`; an older
-      router that publishes no such series leaves the SLO unjudged, with no
-      error.
+      scrapes it. It must publish `llm_d_epp_request_ttft_seconds` (for TTFT)
+      and `llm_d_epp_request_streaming_tpot_seconds` (for TPOT); an older router
+      without them leaves the SLO unjudged, with no error. Check:
+      `sum by (model_name) (rate(llm_d_epp_request_ttft_seconds_count{namespace="<ns>", streaming="true"}[5m]))`
+      returns the model.
 - [ ] Clients **stream**. Only streaming requests are counted.
 - [ ] For a TPOT target: clients send `stream_options.include_usage`, or vLLM
       runs with `--enable-force-include-usage`. Without it TTFT is judged and
       TPOT is not.
-- [ ] Every variant of the model names the same tier (a model has one SLO).
+- [ ] Enough traffic. A window is judged from 5 minutes of completed streaming
+      requests: at least 50 for TPOT, and `max(50, 1000 ÷ (100 − p))` for a
+      TTFT percentile p -- 100 at p90, 200 at p95, 1000 at p99. Below that the
+      model is never judged and no alert fires, on purpose.
+- [ ] For the alerts: the controller is installed with
+      `DEPLOY_ALERTING_RULES=true` ([Installing the alerts](prometheus.md#installing-the-alerts)).
+      They are off by default.
 
 **Turn it on**
 
-1. Add the targets and the analyzer to a tier:
+1. **Save the model's current `Effective scaling policy` line**, to compare
+   with in step 5. It is logged when the resolved policy changes, not every
+   cycle:
+
+   ```bash
+   kubectl logs -n <controller-ns> deploy/<controller> | grep 'Effective scaling policy' | grep '"<model>"' | tail -1
+   ```
+
+2. **Pick the tier.** Three ways, each needing no restart:
+   - a new tier, named by each of the model's ScaledObjects (step 4);
+   - the tier the model already uses: add to it, and keep its own values;
+   - `default`, which turns it on for every model that uses `default`.
+
+3. **Write the tier with every field it relies on.** Read `default` first:
+   `kubectl get configmap wva-scaling-policy-config -n <controller-ns> -o yaml`
+   (or the namespace-local map, if the model's namespace has one). A tier's
+   entry does not inherit what it leaves unset: `kvCacheThreshold`,
+   `queueLengthThreshold` and `priority` take built-in defaults, and an entry
+   with an `analyzers:` list takes the built-in band too
+   ([#149](https://github.com/ev-shindin/llm-scaling-manager/issues/149)). The
+   list also replaces saturation's inherited `parameters:` and `score`. So copy
+   from `default` every one of those the tier does not already set, and keep
+   the tier's own values where it does:
 
    ```yaml
-   interactive: |
-     scaleUpThreshold: 0.85        # step 2: copy these from default
+   slo-watch: |
+     scaleUpThreshold: 0.85        # copied from default
      scaleDownBoundary: 0.70
+     kvCacheThreshold: 0.80
+     queueLengthThreshold: 5
+     priority: 1.0
      analyzers:
-       - name: saturation          # keep it: this list replaces the inherited one
+       - name: saturation          # keep it, with default's score and parameters
+         score: 1.0
        - name: slo
      slo:
        tpot: {target: 100ms}                  # a mean
-       ttft: {target: 3s, percentile: 90}     # a percentile
+       ttft: {target: 2s, percentile: 95}     # a percentile, in whole percent
    ```
 
-2. **Copy the band, and saturation's whole entry, from `default` into the
-   tier.** An entry with an `analyzers:` list is given `scaleUpThreshold: 0.85`
-   / `scaleDownBoundary: 0.70` when parsed, and those override a band tuned on
-   `default`; the list also replaces saturation's inherited `parameters:` and
-   `score`. Read them from the `default` key (`kubectl get configmap
-   wva-scaling-policy-config -o yaml`). This is
-   [#149](https://github.com/ev-shindin/llm-scaling-manager/issues/149).
-3. **Check nothing moved.** Before the change, save the model's last
-   `Effective scaling policy` line (it is logged when the resolved policy
-   changes, not every cycle). After it, the new line's band must match the
-   saved one, and its `slo` field shows the targets, for example
-   `tpot mean<=100ms, ttft p90<=3s (observe)`. Saturation's `parameters:` and
-   `score` are not in that line: compare those in the ConfigMap.
+4. **Point the model at the tier** (a new tier only): set
+   `scalingPolicy: slo-watch` in the trigger metadata of every one of the
+   model's ScaledObjects ([Named Policy Tiers](#3-named-policy-tiers)).
+
+5. **Check nothing moved.** The model's new `Effective scaling policy` line
+   must match the one saved in step 1 in every field but `slo`, which shows
+   the targets, for example `tpot mean<=100ms, ttft p95<=2s (observe)`.
+   `"scalingPolicy": "(default entry)"` means step 4 did not take. Saturation's
+   `parameters:`, `score` and `queueLengthThreshold` are not in that line:
+   compare those in the ConfigMap.
 
 **See the result**
 
+- Is it met? `wva_slo_observed_seconds` against `wva_slo_target_seconds`, per
+  objective:
+
+  ```promql
+  max by (exported_namespace, model_name, objective) (wva_slo_observed_seconds)
+    > on (exported_namespace, model_name, objective)
+  max by (exported_namespace, model_name, objective) (wva_slo_target_seconds)
+  ```
+
+  returns the objectives missed in the last window; `wva_slo_attainment_ratio`
+  is the share of requests whose TTFT met the target.
 - The **SLO** row of the operational dashboard (collapsed by default): observed
   against target per objective, what it judged and why it did not.
 - The series under [SLO Analyzer Metrics](prometheus.md#slo-analyzer-metrics),
-  and two alerts, `WVAModelSLOMissed` and `WVAModelSLOUnjudged`. Their runbook is
+  and, if installed, two alerts, `WVAModelSLOMissed` and `WVAModelSLOUnjudged`.
+  Their runbook is
   [A model misses, or is never judged against, its SLO](troubleshooting.md#a-model-misses-or-is-never-judged-against-its-slo).
 - The first judged point comes a window plus its grace after you turn it on
   (7 to 35 minutes; see below), and again after every controller restart. No
@@ -1251,10 +1295,11 @@ request, at most 30 minutes.
 - **Capacity that cannot be placed is judged, not excluded** -- at once for a
   Deployment, late for a LeaderWorkerSet. A Pod that cannot be scheduled is not
   "starting", so a scale-up of a Deployment blocked on quota or nodes shows up
-  as misses from the next window. A LeaderWorkerSet group lists no Pod ages, so
-  its pending replicas count as starting until they have been pending for 30
-  minutes: a whole-node P/D scale-up blocked on nodes shows misses only after
-  about 30 + 5 + the grace, some 45 minutes in the example below.
+  as misses from the next window. A multi-Pod LeaderWorkerSet group lists no Pod
+  ages, so its pending replicas count as starting until they have been pending
+  continuously for 30 minutes: a whole-node P/D scale-up blocked on nodes shows
+  misses only after about 30 + 5 + the grace, some 45 minutes in the example
+  below.
 
 On a whole-node P/D model this is long. With a 4-minute replica start and a mean
 request of 400 s (a ~6 000-token generation at ~60 ms per token, plus its
@@ -1262,8 +1307,15 @@ prefill and queue time), one scale-up
 leaves the model unjudged for about 4 + 5 + 10 = 19 minutes, for TTFT on a
 prefill or decode start and for TPOT on a decode start. A fleet that scales up
 more often than that is never judged, and `WVAModelSLOUnjudged` says so. The
-share of the last day a model was judged is
-`1 - avg_over_time(max by (exported_namespace, model_name) (wva_slo_excluded)[1d:5m])`.
+share of the last day a model was not excluded, for either objective, is
+`1 - avg_over_time(max by (exported_namespace, model_name) (wva_slo_excluded)[1d:5m])`
+(not the share judged: a window with too few requests is not excluded, and not
+judged either).
+
+**Judged attainment reads higher than what users saw.** The windows left out are
+the ones around a scale-up, which are when misses happen, so attainment and
+`WVAModelSLOMissed` describe the fleet in steady state. To score what clients
+got over a whole run, score their own per-request records.
 
 **Rules**
 
@@ -1271,10 +1323,13 @@ share of the last day a model was judged is
   It is the mean over requests of the router's per-request TPOT, so a target
   like "p90 TPOT under 50 ms" cannot be expressed: a mean of 40 ms can hide a
   tail well above 50.
-- **TTFT is a percentile**, a whole number from 50 to 99, default 90.
-  Attainment is exact when the target is one of the router's bucket bounds and
-  interpolated between them otherwise; the upstream router's bounds near common
-  targets are 1, 1.25, 1.5, 2, 3, 4 and 5 s (check your router version's).
+- **TTFT is a percentile**, a whole number from 50 to 99, default 90. A
+  fraction (`0.95`) or a decimal (`99.9`) is refused. Attainment is exact when
+  the target is one of the router's bucket bounds and interpolated between them
+  otherwise; the upstream router's bounds near common targets are 1, 1.25, 1.5,
+  2, 3, 4 and 5 s (check your router version's). Between bounds, in a tail the
+  interpolation reads attainment a little low and the percentile a little high,
+  so pick a bound where you can.
 - **Targets are Go durations** (`100ms`, `3s`). A bare number is refused rather
   than read as nanoseconds. Like every validation error, a malformed `slo` block
   drops the whole entry it is on.
@@ -1295,9 +1350,10 @@ share of the last day a model was judged is
   namespace's `default` and loses its `slo` block (reported as an unknown policy).
 - **The name `slo` is reserved.** An external analyzer named `slo` is not run,
   and the controller logs so once.
-- **It costs nothing where no policy lists it**: no router query, no `wva_slo_*`
-  series, and the two replica queries only it reads (prefill and engine-queue
-  time) are fetched only in a namespace where a model ran it.
+- **It costs nothing where no policy lists it**: no router query and no
+  `wva_slo_*` series.
+- **Unknown keys are ignored**, as everywhere in this map: `quantile: 95` sets
+  nothing and leaves p90. The `slo` field of the policy line is where to check.
 
 **Details: what the router measures**
 
@@ -1308,6 +1364,15 @@ share of the last day a model was judged is
   token; the value recorded is still its TTFT.
 - **The router's TTFT includes its flow-control queue**; the engine's own TTFT
   does not.
+- **Every priority band is pooled.** The TTFT percentile is over all of the
+  model's streaming requests, so where the router's flow control queues a
+  low-priority band on purpose, that queueing counts against the target.
+- **LoRA adapters are counted under the adapter's name.** The router labels a
+  request with the model it was sent to, which for an adapter is the adapter,
+  so a base model is judged on its own requests alone, not its adapters'.
+- **Non-streaming requests are not counted**, and TPOT only counts responses
+  that carry `usage`. `wva_slo_window_requests` is the judged count; nothing
+  publishes the share of the model's traffic it is.
 
 **Details: what the TPOT target would ask of each variant**
 
@@ -1326,7 +1391,14 @@ not readings of the fleet:
   the fleet spans enough fill to fit again -- on a whole-node replica, which
   rarely spans it, possibly for good. Read `pinned-default` as not a
   measurement: on an accelerator whose real floor is well above the default, it
-  can call a target feasible that no fill meets.
+  can call a target feasible that no fill meets. With no line: `no-line` (too
+  few readings -- warming up, or replicas idle below a fill of 0.15) or
+  `declined` (enough readings, and the fit refused them: most often a card whose
+  ITL sits below the default intercept).
+- `wva_slo_fill` is before any scale-up headroom: compare it with
+  `kvCacheThreshold` (0.80 by default). Lower means the target needs more
+  replicas than the tier gives. It is also lowered where `max_num_seqs` binds
+  first, so the line's ITL there is at or below the target.
 - Its demand and per-replica capacity are published as `wva_analyzer_demand` /
   `wva_analyzer_target` with `analyzer_name="slo"`, in output tokens per second.
   For one generating variant, `demand ÷ (target × scaleUpThreshold)` is the
@@ -1349,7 +1421,10 @@ not readings of the fleet:
   and TTFT is judged but not priced. Pods lent by a warm pool (bridges) are left
   out, so a variant served only by bridges reads `no-line` or
   `no-output-length`.
-- Each cycle logs `slo-model` and `slo-variant` lines at verbosity 3.
+- Each cycle logs `slo-model`, `slo-variant` and `slo-transient` lines at
+  verbosity 3: the judged figures; each variant's line (its key, A, B, and what
+  the window was offered and held) and the fill before the clamp; and why a
+  window is excluded, since when, and for how long.
 
 ### Default Configuration
 
@@ -1376,8 +1451,9 @@ reviewable.
 ## Multi-Analyzer Registration
 
 The V2 engine carries an analyzer registry so external analyzers (e.g.
-throughput, SLO) can be plugged in without the engine package knowing the
-concrete type. Each cycle the engine iterates every registered analyzer in
+throughput) can be plugged in without the engine package knowing the concrete
+type. The built-in `slo` analyzer is registered by the engine itself, and the
+name is reserved. Each cycle the engine iterates every registered analyzer in
 registration order and invokes its `Analyze` method.
 
 > **Scope note.** Saturation drives every scaling decision on its own.

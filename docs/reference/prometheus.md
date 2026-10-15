@@ -987,18 +987,41 @@ is computed from them.
 The router records a request when its stream **completes**, so every judged
 figure below counts completed streaming requests only. A request that is shed,
 times out or is abandoned is not in it, so attainment reads high under
-overload.
+overload. And the windows around a scale-up are not judged, which is when
+misses happen, so judged attainment describes the fleet in steady state and
+reads higher than what clients saw over a whole run.
 
 | metric | type | labels | meaning | read it when |
 | --- | --- | --- | --- | --- |
 | `wva_slo_target_seconds` | gauge | `namespace`, `model_name`, `objective`, `statistic` | The target the policy declares. `objective` is `ttft` or `tpot`; `statistic` is `mean` for TPOT and `p90` (or the configured percentile) for TTFT. | Plotting the observed figure against it. |
-| `wva_slo_observed_seconds` | gauge | `namespace`, `model_name`, `objective`, `statistic` | What the router (the llm-d EPP) measured over 5 minutes. For TPOT, the request-weighted mean; for TTFT, the percentile. The router's TTFT starts before its flow-control queue, so it includes the time a request waited there. `+Inf` when the percentile falls past the router's largest bucket; Grafana does not plot `+Inf`, so on the dashboard it is a gap like "not judged" -- read `wva_slo_attainment_ratio` beside it. **Absent** in three cases: fewer than `max(50, 10 ÷ (1 − p))` requests completed in the window (100 at p90; 50 for the TPOT mean); the window is excluded (`wva_slo_excluded`); or the router reports nothing for the objective. | Above the target: the SLO is being missed. |
+| `wva_slo_observed_seconds` | gauge | `namespace`, `model_name`, `objective`, `statistic` | What the router (the llm-d EPP) measured over 5 minutes. For TPOT, the request-weighted mean; for TTFT, the percentile. The router's TTFT starts before its flow-control queue, so it includes the time a request waited there. `+Inf` when the percentile falls past the router's largest bucket; Grafana does not plot `+Inf`, so on the dashboard it is a gap like "not judged" -- read `wva_slo_attainment_ratio` beside it. **Absent** in three cases: fewer than `max(50, 1000 ÷ (100 − p))` requests completed in the window (100 at p90, 200 at p95, 1000 at p99; 50 for the TPOT mean); the window is excluded (`wva_slo_excluded`); or the router reports nothing for the objective. | Above the target: the SLO is being missed. |
 | `wva_slo_attainment_ratio` | gauge | `namespace`, `model_name`, `objective`, `statistic` | TTFT only: the share of completed streaming requests whose TTFT was within the target. Exact when the target is a bucket bound of the router's histogram, interpolated between bounds otherwise; the upstream router's bounds near common targets are 1, 1.25, 1.5, 2, 3, 4 and 5 s. Absent in the same cases as `observed`. | Below the percentile (0.90 for `statistic="p90"`): the target is missed for more requests than the SLO allows. |
-| `wva_slo_window_requests` | gauge | `namespace`, `model_name`, `objective`, `statistic` | Requests the router recorded for **this objective** over the window, judged or not. Present whenever the router reported that objective's histogram. For TPOT it is `0`, not absent, when the router reports TTFT but clients do not send `stream_options.include_usage` (the router needs the usage block to count output tokens). | Present with `observed` absent and `excluded` all 0: too few requests to judge. Absent on a busy model: the router's histograms are not scraped. |
-| `wva_slo_excluded` | gauge | `namespace`, `model_name`, `objective`, `reason` | Per objective, `1` for the reason its window is not judged this cycle, `0` for the others; all `0` while it is judged. `reason`: `zero-replicas` (waking from zero), `starting` (a replica starting, which covers a scale-up until its replicas serve), or `unobserved` (the analyzer did not analyze the model on the cycle before: after a controller restart or leader change, after its first configuration, or after a cycle the engine skipped it, as it does a woken model whose Pods have no metrics yet). Capacity that cannot be placed is judged, not excluded: an unschedulable Pod is not starting, at once; a LeaderWorkerSet group, which lists no Pod ages, counts as starting until it has been pending for 30 minutes, so on a LeaderWorkerSet a blocked scale-up is judged only after 30 minutes plus the window and grace. A window stays excluded for the window plus a grace after the transient: the longer of 120 s and 1.5 times the longest mean request duration, at most 30 minutes, because its requests complete, and are recorded, after it. TTFT is excluded on a transient of any variant (decode back-pressure delays first tokens); TPOT only on a transient of a decode or aggregated variant, so a prefill replica starting leaves TPOT judged. A Pod that was Ready and failed its probe is a flap, not a start: only Pods younger than 30 minutes count as starting. | Expected around every wake and scale-up. The share of time excluded is `avg_over_time(max by (exported_namespace, model_name) (wva_slo_excluded)[1d:])`. Near 1: the fleet never holds still long enough to be judged. |
-| `wva_slo_fill` | gauge | `namespace`, `model_name`, `variant_name`, `objective` | The KV fill, as a fraction of physical KV, at which the variant's mean inter-token latency meets the TPOT target. Clamped to [0.15, 0.80], and lowered to the fill the engine can reach when `max_num_seqs` binds. Absent when the variant could not be priced: see `wva_slo_source`. | Compare with the static scale-out point, `kvCacheThreshold × scaleUpThreshold` (0.68 by default). Higher: the target would let the variant run fuller than the tier does. Lower: the tier is too loose for it. |
+| `wva_slo_window_requests` | gauge | `namespace`, `model_name`, `objective`, `statistic` | Requests the router recorded for **this objective** over the window, judged or not. Present whenever the router reported that objective's histogram. For TPOT it is `0`, not absent, when clients do not send `stream_options.include_usage` (the router needs the usage block to count output tokens). Counts streaming requests only: nothing publishes the share of the model's traffic it is. | Present with `observed` absent and `excluded` all 0: too few requests to judge. Absent on a busy model: the router's histograms are not scraped. |
+| `wva_slo_excluded` | gauge | `namespace`, `model_name`, `objective`, `reason` | `1` for the reason this objective's window is not judged this cycle, `0` for the others; all `0` while it is judged. The reasons and rules are listed below the table. | Expected around every wake and scale-up. The share of time excluded, for either objective, is `avg_over_time(max by (exported_namespace, model_name) (wva_slo_excluded)[1d:5m])`. Near 1: the fleet never holds still long enough to be judged. |
+| `wva_slo_fill` | gauge | `namespace`, `model_name`, `variant_name`, `objective` | The KV fill, as a fraction of physical KV, the variant's SLO capacity is priced at, before any scale-up headroom: where its mean inter-token latency meets the TPOT target, clamped to [0.15, 0.80], and lowered to the fill the engine can reach when `max_num_seqs` binds. Clamped or capped, the line's ITL there is below the target. Absent when the variant could not be priced: see `wva_slo_source`. | Compare with `kvCacheThreshold` (0.80 by default), the fill saturation prices a replica at before headroom. Lower: the target needs more replicas than the tier gives; [scaling-policy](scaling-policy.md#slo-observe-only) has the query for how many. |
 | `wva_slo_predicted_itl_seconds` | gauge | `namespace`, `model_name`, `variant_name` | The mean inter-token latency the variant's fitted line predicts at the fill it would actually run at, once `scaleUpThreshold` headroom is applied, never below the bottom of the fitted range. | It is the latency margin an SLO tier would really have. It differs per accelerator for the same `scaleUpThreshold`. |
 | `wva_slo_source` | gauge | `namespace`, `model_name`, `variant_name`, `source` | `1` for where the variant's SLO pricing came from, `0` for the others. See the source values below. Absent for a variant not priced for TPOT (a prefill variant). | See the source values below. |
+
+The `wva_slo_excluded` reasons and rules:
+
+- **`zero-replicas`:** waking from zero.
+- **`starting`:** a replica not yet Ready and younger than 30 minutes. An older
+  not-Ready Pod was Ready and failed its probe: a flap, and not a start.
+- **`unobserved`:** the analyzer did not analyze the model on the cycle before:
+  after a controller restart or leader change, after its first configuration,
+  or after a cycle the engine skipped it, as it does a woken model whose Pods
+  have no metrics yet.
+- **How long:** the window (5 minutes), then a grace of the longer of 120 s and
+  1.5 times the longest mean request, at most 30 minutes, because the window's
+  requests complete, and are recorded, after it.
+- **Which objective:** TTFT on a transient of any variant (decode back-pressure
+  delays first tokens); TPOT only on one of a decode or aggregated variant, so a
+  prefill replica starting leaves TPOT judged.
+- **Unschedulable capacity is judged.** A Deployment Pod that cannot be
+  scheduled is never "starting". A multi-Pod LeaderWorkerSet group, which lists
+  no Pod ages, stops counting as starting after 30 minutes pending
+  continuously, so its blocked scale-up is judged after 30 minutes plus the
+  window and grace.
 
 The `wva_slo_source` values:
 
@@ -1008,12 +1031,17 @@ The `wva_slo_source` values:
   Normal for long stretches on a balanced fleet.
 - **`pinned-default`:** the same, pinned to the built-in 6 ms floor, because no
   full fit has happened since the controller started or since the variant's
-  line was last forgotten (after 24 hours unseen), including after every
-  controller restart. Not a measurement: on a large accelerator the real
+  line was last forgotten (unseen for `LEARNED_STATE_VARIANT_TIMEOUT`, 24 hours
+  by default), including after every controller restart. Not a measurement: on a large accelerator the real
   intercept is several times 6 ms, so `wva_slo_fill` reads low, and a target
   below the real floor can read feasible when no fill meets it. A whole-node
   replica rarely spans enough fill for a full fit, so it can stay here.
-- **`no-line`:** too few readings yet.
+- **`no-line`:** too few readings in the window: a new variant warming up, or
+  replicas that report no inter-token latency or run below a fill of 0.15 (an
+  idle fleet), which can last. The `slo-variant` log line counts which.
+- **`declined`:** enough readings, and the fit refused them: most often a card
+  whose latency sits below the 6 ms default intercept, so the slope comes out
+  negative. It lasts; the variant is not priced.
 - **`no-output-length`:** no replica has reported an output length, so neither
   demand nor the per-request footprint is known. `wva_analyzer_demand` for
   `analyzer_name="slo"` then reads `0`, meaning unknown, not idle.
@@ -1022,84 +1050,17 @@ The `wva_slo_source` values:
 - **`input-invalid`:** a reading was missing or non-finite.
 
 **Alerting.** Two alerts ship (see [the shipped alerts](#the-shipped-alerts)):
-`WVAModelSLOMissed` and `WVAModelSLOUnjudged`. Write your own on the same
-pattern. Five things that pattern gets right, each of which a simpler rule got
-wrong:
+`WVAModelSLOMissed` and `WVAModelSLOUnjudged`. To write your own, copy their
+gates from `config/components/prometheus-alerts/prometheusrule.yaml`, whose
+comments say why each is there:
 
-- **`max by (exported_namespace, model_name, objective, statistic)` on each
-  side of a join.** A controller restart or leader change leaves the old pod's
-  series in place for a while beside the new one's. Without the `max by`, the
-  join holds two series per group and errors with "many-to-many matching not
-  allowed", so the rule can neither fire nor resolve. With `CONTROLLER_INSTANCE`
-  set and two controllers managing one model, add `controller_instance` to the
-  `by` and the `on`.
-- **Count misses against judged minutes; do not bridge gaps.** The observed and
-  attainment series disappear below the sample minimum and while a window is
-  excluded, and an absent series resets an alert's `for:`. On a whole-node
-  model one exclusion lasts a replica's start time plus the window plus its
-  grace, often over ten minutes, so no `last_over_time` range is safely long
-  enough. Count the minutes in which a judged value missed, and divide by the
-  minutes that were judged at all. A fixed count of wall-clock minutes is
-  wrong too: a fleet that misses while a replica starts every ten minutes is
-  judged for only a few minutes in each ten, and never reaches it.
-
-  ```promql
-  # misses: minutes in which a judged value was above its target
-  count_over_time((
-      max by (exported_namespace, model_name, objective, statistic) (wva_slo_observed_seconds)
-    > on (exported_namespace, model_name, objective, statistic)
-      max by (exported_namespace, model_name, objective, statistic) (wva_slo_target_seconds)
-  )[30m:1m])
-  # divided by judged minutes, at least half, and at least 5 misses
-    / on (exported_namespace, model_name, objective, statistic)
-  count_over_time(max by (exported_namespace, model_name, objective, statistic) (wva_slo_observed_seconds)[30m:1m])
-    >= 0.5
-  ```
-
-  `WVAModelSLOMissed` adds `and` the misses count `>= 5`, so a model judged
-  for two minutes does not page on one. One expression covers both
-  objectives: a TTFT percentile above its target is the same miss as
-  attainment below the percentile.
-- **Gate on the analyzer still publishing.** A model the engine skipped (a
-  Prometheus outage, or a policy that stopped listing `slo`) keeps its series
-  for ten minutes at their last values:
-
-  ```promql
-  and on (exported_namespace, model_name, objective, statistic)
-    max by (exported_namespace, model_name, objective, statistic) (changes(wva_slo_window_requests[5m])) > 0
-  ```
-
-- **Gate on replicas.** Then a model that parked just after a miss does not
-  keep the alert firing:
-
-  ```promql
-  and on (exported_namespace, model_name) sum by (exported_namespace, model_name) (wva_model_replicas) > 0
-  ```
-
-- **Alert on "unjudged" too, but not on quiet.** A fleet that scales up more
-  often than once every window-plus-grace is never judged, which is exactly
-  when misses happen. `WVAModelSLOUnjudged` fires when a target has been set for
-  the whole last hour, the model has replicas, nothing was judged in that hour,
-  and the cause is one to act on: the window was excluded for at least half of
-  it, the objective's router series are missing, or TPOT saw no requests while
-  TTFT did (no `include_usage`). Too little traffic -- a quiet model, a diurnal
-  lull -- is left unjudged without firing it. The target term counts the target
-  over the hour, so a newly deployed model, a new target, or one removed and set
-  again stays quiet until it has been set for the whole hour. (`offset 1h`
-  would check one instant: a target set an hour ago, removed, and set again a
-  minute ago would pass.) Its core:
-
-  ```promql
-  max by (exported_namespace, model_name, objective, statistic) (wva_slo_target_seconds)
-    unless on (exported_namespace, model_name, objective, statistic)
-  max by (exported_namespace, model_name, objective, statistic) (last_over_time(wva_slo_observed_seconds[1h]))
-    and on (exported_namespace, model_name, objective, statistic)
-  count_over_time(max by (exported_namespace, model_name, objective, statistic) (wva_slo_target_seconds)[1h:1m]) >= 60
-  ```
-
-  The shipped rule adds the cause terms and the replicas gate; the runbook's
-  table reads `wva_slo_window_requests` and `wva_slo_excluded` to tell the
-  causes apart.
+- `max by (exported_namespace, model_name, objective, statistic)` on each side
+  of every join, so a controller restart's overlapping series still join;
+- misses counted against judged minutes, never against wall-clock minutes;
+- `changes(wva_slo_window_requests[5m]) > 0`, so frozen series cannot fire;
+- `max_over_time(wva_model_replicas[5m])`, so a parked model does not fire and
+  a restart's gap does not resolve a firing alert;
+- for "unjudged", a cause to act on, so a quiet model does not fire.
 
 ### Utilization-Share Optimizer Metrics
 

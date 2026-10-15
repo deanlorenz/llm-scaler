@@ -548,8 +548,21 @@ for:
 - raise its floor: `minReplicaCount` on each variant's ScaledObject
   (`kubectl edit scaledobject <so> -n <ns>`; where a tool generates the
   ScaledObject, change it there, or the next apply undoes it), or
-- lower the tier's `scaleUpThreshold` (and copy the band, see
-  [#149](https://github.com/ev-shindin/llm-scaling-manager/issues/149)).
+- lower the tier's `scaleUpThreshold` (and write the tier's other fields out,
+  see [Turn it on](scaling-policy.md#slo-observe-only), step 3).
+
+**First, rule out a target no capacity can meet.** More replicas do not help
+then: loosen the target, or move the model to faster hardware.
+
+```promql
+# tpot: 1 for "infeasible" -- even an almost empty replica is over the target
+wva_slo_source{model_name="<model>", source="infeasible"} == 1
+# ttft: a prefill as slow as the target, per pod (vLLM), queue left out
+rate(vllm:request_prefill_time_seconds_sum{namespace="<ns>"}[5m]) / rate(vllm:request_prefill_time_seconds_count{namespace="<ns>"}[5m])
+```
+
+`infeasible` read from a `pinned-default` line is not reliable: that line's
+intercept is a default for no particular card.
 
 Then find the cause, per objective:
 
@@ -557,9 +570,8 @@ Then find the cause, per objective:
 # tpot: the mean ITL the variant would show sized for the target, against the target
 wva_slo_predicted_itl_seconds{model_name="<model>"}
 wva_slo_target_seconds{model_name="<model>", objective="tpot"}
-# and the fill the target allows: below the tier's static point
-# (kvCacheThreshold x scaleUpThreshold, 0.68 by default), the tier runs decode
-# fuller than the target allows
+# and the fill the target allows, before headroom: below kvCacheThreshold
+# (0.80 by default), the target needs more replicas than the tier gives
 wva_slo_fill{model_name="<model>"}
 # ttft: the engine's queue wait against its prefill time, per pod (vLLM)
 rate(vllm:request_queue_time_seconds_sum{namespace="<ns>"}[5m]) / rate(vllm:request_queue_time_seconds_count{namespace="<ns>"}[5m])
@@ -567,11 +579,11 @@ rate(vllm:request_prefill_time_seconds_sum{namespace="<ns>"}[5m]) / rate(vllm:re
 ```
 
 A queue that grows while prefill time stays flat is a capacity miss; a prefill
-time that grows is a slow prefill (long prompts, a cold prefix cache). Only
+time that grows is a slow prefill (long prompts, a cold prefix cache). The
+router's TTFT pools every priority band, so where its flow control holds a
+low-priority band back on purpose, that wait counts as a miss too. Only
 completed requests count, so under shedding the alert can resolve while
-requests are refused: read `llm_d_epp_request_error_total` too. After a
-controller restart the old and new series overlap for a few minutes; the alert
-already handles that.
+requests are refused: read `llm_d_epp_request_error_total` too.
 
 The alert resolves once the judged minutes that meet the target outnumber the
 misses in the last 30, so it stays up for a while after a fix. Changing the
@@ -579,9 +591,13 @@ tier's TTFT percentile leaves the old percentile's alert up for about 5 minutes.
 
 ### `WVAModelSLOUnjudged`, or nothing judged at all
 
-A target set for the whole last hour, and no window judged in it. First, the
-policy side -- the model's last `Effective scaling policy` line in the
-controller log:
+A target set for the whole last hour, and no window judged in it. The alert
+needs `wva_slo_target_seconds`, which exists only when the policy is right, so
+**for the alert, skip to the router side below**. For an empty dashboard row
+with no alert, start with the policy side -- the model's last
+`Effective scaling policy` line in the controller log (logged when the policy
+changes, so on a long-running controller it may have rotated out; restarting
+the controller logs it again):
 
 ```bash
 $LOGS | grep 'Effective scaling policy' | grep '"modelID": "<model>"' | tail -1
@@ -599,16 +615,16 @@ Then the router side:
 ```promql
 wva_slo_window_requests{model_name="<model>"}   # requests the router recorded, per objective
 wva_slo_excluded{model_name="<model>"} == 1     # the reason a window is not judged
-# the share of the last day it was judged
+# the share of the last day it was not excluded (for either objective)
 1 - avg_over_time(max by (exported_namespace, model_name) (wva_slo_excluded{model_name="<model>"})[1d:5m])
 ```
 
 | what you see | means | fix |
 | --- | --- | --- |
-| `excluded` 1 for `starting` or `zero-replicas`, most of the time | the fleet never holds still for the window plus its grace: constant scale-ups, or a replica that keeps starting | expected on a fleet that keeps scaling; check the starts are real (`kubectl get pods -n <ns>`) |
+| `excluded` 1 for `starting` or `zero-replicas`, most of the time | the fleet never holds still for the window plus its grace: constant scale-ups, or a replica that keeps starting | check the starts are real (`kubectl get pods -n <ns>`). If the replica count goes up and down (`wva_desired_replicas`), the fleet flaps, which is a tuning question for the tier's band, not for the SLO. If it only climbs, it is growing, and the model is judged once it settles. Silence the alert meanwhile |
 | `excluded` 1 for `unobserved` | the analyzer did not analyze the model on the cycle before: just after a controller restart, or the engine keeps skipping the model | if it persists, the model's replicas lack metrics on some cycles: [metrics](#metrics-stale-or-missing) |
-| requests present but low, nothing excluded | too little traffic: a p90 needs 100 requests in the 5-minute window, a TPOT mean 50 | nothing to do: the alert does not fire for this, and the model is judged once traffic returns |
-| `tpot` requests `0`, `ttft` requests high | clients do not send `stream_options.include_usage`, or the router's TPOT query fails (`wva_metrics_collection_errors_total{query_type="router_latency"}` rising) | have clients send it, or run vLLM with `--enable-force-include-usage`; for a failing query, [metrics](#metrics-stale-or-missing) |
+| requests present but low, nothing excluded | too little traffic: a p90 needs 100 requests in the 5-minute window, a p95 200, a p99 1000, a TPOT mean 50 | nothing to do: the alert does not fire for this, and the model is judged once traffic returns |
+| `tpot` requests `0` while the router serves streaming requests | clients do not send `stream_options.include_usage`; or the router does not publish `llm_d_epp_request_streaming_tpot_seconds`; or the router's TPOT query fails (`wva_metrics_collection_errors_total{query_type="router_latency"}` rising) | have clients send it, or run vLLM with `--enable-force-include-usage`; check the router publishes the series (`count(llm_d_epp_request_streaming_tpot_seconds_count{namespace="<ns>"})`); for a failing query, [metrics](#metrics-stale-or-missing) |
 | no `window_requests` series at all | the router's histograms are not read | below |
 
 When there is no `window_requests` series, check:
@@ -623,13 +639,16 @@ Here `namespace` is right: it is the router's own scrape label.
 - **No series anywhere**: the router (EPP) is not scraped, or is too old to
   publish `llm_d_epp_*`. Check its ServiceMonitor / PodMonitor and version.
 - **A series in another namespace**: the EPP runs outside the model's
-  namespace. The analyzer reads the router in the model's namespace only.
+  namespace. That is not supported: the analyzer reads the router in the
+  model's namespace only, and nothing configures another. Run the EPP in the
+  model's namespace.
 - **Only `streaming="false"`**: the clients do not stream; only streaming
   requests are counted.
 - **A series under another name**: the analyzer takes the model from
   `target_model_name`, or `model_name` where that is empty; clients that address
   an alias or an objective name show up under it, not under the model ID the
-  controller logs.
+  controller logs. So do requests to a LoRA adapter: they are counted under the
+  adapter's name, never the base model's.
 
 ## Utilization-Share Optimizer
 
