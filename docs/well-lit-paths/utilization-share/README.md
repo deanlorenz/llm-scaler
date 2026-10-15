@@ -41,8 +41,8 @@ is out of your reach, see [Details](#when-the-controller-is-out-of-your-reach).
 
 - **Headroom held ahead of need.** In the early runs, when the whole spare was
   spread, that was 24% and 66% more GPU-seconds than today's optimizer. On
-  the current build, the two P/D runs cost 36% and 39% more, using every GPU
-  the quota allowed. The current build's cost without P/D has not been
+  the current build, the three P/D runs cost 36%, 39% and 43% more, using up to
+  every GPU the quota allowed. The current build's cost without P/D has not been
   measured.
 - **A donor replica,** with its in-flight requests. They survive only as well
   as the model server drains.
@@ -63,8 +63,10 @@ Eight benchmark runs so far, on H200s, two 8B models at 1 GPU per replica,
   (287 s), median 144 s against 215 s. GPU cost not measured.
 - **Both models P/D, latest run (15 000-token prompts):** with sharing,
   output-heavy p95 0.090 s against 51 s, prompt-heavy p95 6.0 s against 96 s
-  with no dropped requests; +39% GPU-seconds. One run, one rise per model;
-  shadow alone differed from today by 24 s on the prompt-heavy model. At
+  with no dropped requests; +39% GPU-seconds. A repeat run agreed: 0.093 s
+  against 73 s, 3.5 s against 100 s, no failed requests against 123, +43%
+  GPU-seconds. Two runs, one rise per model each; shadow alone differed from
+  today by 24 s and 32 s on the prompt-heavy model. At
   20 000-token prompts the prompt-heavy burst was overloaded in every arm.
 - Not yet measured: whole-node or multi-GPU pods, a cluster-wide quota, and
   the physical GPU limiter.
@@ -85,10 +87,11 @@ and acting (`share`).
 | With the headroom cap | First burst 0.07 s against 41 s; second reached its fleet sooner; +34% GPU-seconds, mostly an idle-fill bug. |
 | With the idle-fill fix (2026-10-12) | First burst 0.07 s against 25.6 s; second no worse; GPU cost lost to a sampling gap. |
 | Both models P/D, four roles, 10-GPU quota, 20 000-token prompts | Output-heavy burst p95 0.095 s against 42 s; prompt-heavy burst overloaded in every arm (p95 59 s against 73 s); +36% GPU-seconds. Run on vLLM v0.31.0 ([why](measured.md#why-vllm-v0310)). |
-| The same, 15 000-token prompts | Output-heavy burst p95 0.090 s against 51 s; prompt-heavy burst 6.0 s against 96 s, with no failed requests against 116; +39% GPU-seconds. |
+| The same, 15 000-token prompts | Output-heavy burst p95 0.090 s against 51 s; prompt-heavy burst 6.0 s against 96 s, with no failed requests against 116; +39% GPU-seconds. A repeat agreed: 0.093 s against 73 s, 3.5 s against 100 s, +43%. |
 
-Both [P/D runs](measured.md#pd-two-disaggregated-models-under-one-quota) are
-valid; a repeat at 15 000-token prompts was in progress on 2026-10-15.
+All three [P/D runs](measured.md#pd-two-disaggregated-models-under-one-quota)
+are valid. One more attempt was discarded because other workloads preempted
+its engine Pods.
 
 ### Why it exists
 
