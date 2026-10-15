@@ -47,11 +47,14 @@ spec:
       name: wva-external-scaler
       metricType: AverageValue               # the default; never Value, see "Before the first decision"
       metadata:
-        scalerAddress: wva-external-scaler.<controller-namespace>.svc.cluster.local:9090
+        scalerAddress: wva-external-scaler.<controller-namespace>.svc:9090
         modelID: "Qwen/Qwen3-32B"            # = the engine's --served-model-name
         variantCost: "10.0"
         # scalingPolicy: "interactive"       # only once that tier exists in the ConfigMap
         defaultOutputTokens: "6000"          # long generations; seed only
+      authenticationRef:      # TLS, the default. Plaintext install: ...svc.cluster.local:9090 and no authenticationRef
+        name: wva-external-scaler-<controller-namespace>
+        kind: ClusterTriggerAuthentication
 ```
 
 ## Model keys

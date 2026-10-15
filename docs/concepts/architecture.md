@@ -50,9 +50,12 @@ spec:
   triggers:
     - type: external-push
       metadata:
-        scalerAddress: wva-external-scaler.<controller-namespace>.svc.cluster.local:9090
+        scalerAddress: wva-external-scaler.<controller-namespace>.svc:9090
         modelID: meta-llama/Llama-3.1-8B-Instruct
         variantCost: "10"        # relative cost of one replica of this variant
+      authenticationRef:      # TLS, the default. Plaintext install: ...svc.cluster.local:9090 and no authenticationRef
+        name: wva-external-scaler-<controller-namespace>
+        kind: ClusterTriggerAuthentication
 ```
 
 You rarely write this by hand: `make scaledobjects-plan` lists the model

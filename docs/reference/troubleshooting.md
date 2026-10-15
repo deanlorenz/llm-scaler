@@ -486,6 +486,8 @@ kubectl get endpoints -n "$NS" wva-external-scaler
 | sign | cause | fix |
 | --- | --- | --- |
 | `scalerAddress` names a namespace where no scaler runs | the ScaledObject points at another or a removed install | `make scaledobjects-repoint` |
+| `make verify-deployment` names the ScaledObject as not reaching the scaler over TLS | the scaler serves mutual TLS, and the trigger uses the plaintext address or lacks KEDA's `authenticationRef` | `make deploy-wva WVA_SCALER_TLS=true WVA_SCALER_TLS_MIGRATE=true`, or edit the trigger ([what it needs](configuration.md#external-scaler-mutual-tls)) |
+| `make verify-deployment` says KEDA's side is not usable | the cluster admin has not run `make setup-prereqs` since TLS was turned on, or KEDA's copy of the client certificate expired | (cluster admin) `make setup-prereqs` with the install's variables |
 | the trigger has no `modelID` | the controller cannot tell which model to answer for | set `modelID` to what the container serves; `make verify-scaledobjects` |
 | `wva-external-scaler` has no endpoints | the controller is not Ready | [controller not Ready](#the-controller-is-not-ready-or-crash-looping) |
 | `make verify-deployment` warns that the external scaler NetworkPolicy admits `:9090` ONLY from a namespace KEDA does not run in | the NetworkPolicy admits the wrong namespace, so KEDA's calls are dropped while the controller reads healthy | (cluster admin) `KEDA_NAMESPACE=<namespace KEDA runs in> make setup-prereqs` with the install's other variables ([details](upgrade-and-uninstall.md#the-external-scaler-networkpolicy)) |

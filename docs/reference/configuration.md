@@ -62,8 +62,9 @@ deployment, pass `IMG=<repo>@sha256:<digest>` or a release tag.
 | `SCALER_BACKEND` | `keda` or `none` (use a pre-installed backend) | `keda` |
 | `KEDA_NAMESPACE` | Namespace KEDA is installed in. Set explicitly, it is also the namespace the external-scaler NetworkPolicy admits. Unset, that namespace is detected, never guessed; with no answer **no NetworkPolicy is applied**, and the installer warns that `:9090` is reachable from every Pod and prints the fix for the install's shape. How it is detected, and which existing policies are left as `state UNKNOWN`: [the external-scaler NetworkPolicy](upgrade-and-uninstall.md#the-external-scaler-networkpolicy). The policy is an admin-phase object (`make setup-prereqs`); `make check-prereqs` and `INSTALL_PHASE=wva` treat it as optional. `make verify-deployment` warns when the policy and KEDA's namespace differ, and prints `No NetworkPolicy: scaler port open` when there is none | `keda-system` for the KEDA install; detected for the NetworkPolicy |
 | `WVA_SCALER_NETWORKPOLICY` | Install the NetworkPolicy that admits the external scaler port (`:9090`) **only from KEDA's namespace**; metrics (`:8443`) and probes (`:8081`) stay open. `false` leaves `:9090` open to every Pod that can reach the controller, which can then rewrite any workload's trigger metadata and read every scaling decision. `false` removes an existing policy only in the admin phase (`make setup-prereqs`, or `INSTALL_PHASE=all`); the controller-only `make deploy-wva` leaves it in place and reports it `state UNKNOWN`, printing the admin's `make setup-prereqs WVA_SCALER_NETWORKPOLICY=false` command | `true` |
-| `WVA_SCALER_TLS` | Serve the external scaler (`:9090`) over **mutual TLS**, with certificates the installer provisions: a serving certificate for `wva-external-scaler.<ns>.svc` and `.svc.cluster.local`, and a client certificate for KEDA (identity `wva-keda-client`, which the controller then requires). **Turning it on breaks every ScaledObject that has no TriggerAuthentication** — the installer does not attach one yet; see [Advanced](#advanced). Unset, a re-install keeps what the running controller has | `false` |
+| `WVA_SCALER_TLS` | Serve the external scaler (`:9090`) over **mutual TLS**. Unset: TLS when KEDA's side is in place and no ScaledObject would be left on plaintext; otherwise plaintext, and the installer says why. `true`: the same, but a refusal instead of plaintext. `false`: plaintext. A controller that already has TLS keeps it. [How it works](#external-scaler-mutual-tls) | unset: TLS when it can |
 | `WVA_SCALER_TLS_PROVIDER` | Who issues those certificates: `cert-manager`, `openssl` (a private CA the installer keeps in a Secret), or `auto` — cert-manager when it is installed. On OpenShift the serving certificate always comes from the service CA. Unset, a re-install keeps the running controller's provider | `auto` |
+| `WVA_SCALER_TLS_MIGRATE` | `true` moves the ScaledObjects that name this scaler with it when its TLS mode changes: to `wva-external-scaler.<ns>.svc:9090` with KEDA's `authenticationRef`, or back. Without it, such ScaledObjects keep the default on plaintext, and make an explicit `WVA_SCALER_TLS` a refusal | `false` |
 | `KEDA_HELM_INSTALL` | Install KEDA with Helm rather than assuming it is present | `false` |
 | `KEDA_CHART_VERSION` | KEDA Helm chart version | `2.19.0` |
 | `UNDEPLOY` | Remove instead of install (`install.sh` doubles as the uninstaller) | `false` |
@@ -475,91 +476,129 @@ the controller's own environment, so set them on its Deployment
 (`kubectl set env deployment/<controller> -n <controller-namespace> LEARNED_STATE_SNAPSHOT=true`),
 which restarts it.
 
-The external scaler serves **plaintext** gRPC by default and relies on the
-NetworkPolicy above. Three controller flags add TLS, all off by default and not
-set by the shipped manifests:
+### External scaler mutual TLS
+
+KEDA calls the scaling manager's external scaler on `:9090`. By default the
+install serves it over **mutual TLS**: the scaler proves who it is to KEDA, and
+KEDA proves who it is to the scaler. Nothing else can register a workload or
+read a decision.
+
+**What you do:** nothing, on a new install. The installer turns TLS on when it
+can, and says why when it cannot.
+
+**When it stays on plaintext** (the installer prints which one, and the fix):
+
+- KEDA is not installed, or the installer cannot tell where it runs. Fix: set
+  `KEDA_NAMESPACE`.
+- The cluster admin has not written KEDA's side yet (a tenant's
+  `make deploy-wva` cannot). Fix: the admin runs `make setup-prereqs`.
+- You may not create what it needs (below).
+- ScaledObjects already point at the scaler in plaintext. Fix: re-run with
+  `WVA_SCALER_TLS_MIGRATE=true`, which moves them with it.
+
+`WVA_SCALER_TLS=true` turns each of these into a refusal. `WVA_SCALER_TLS=false`
+stays on plaintext. A controller that already has TLS keeps it.
+
+**What a ScaledObject needs** on a TLS install. The installer writes this into
+every ScaledObject it creates or adopts, and the warm pool's:
+
+```yaml
+triggers:
+  - type: external-push
+    metadata:
+      scalerAddress: wva-external-scaler.<controller namespace>.svc:9090
+    authenticationRef:
+      name: wva-external-scaler-<controller namespace>
+      kind: ClusterTriggerAuthentication
+```
+
+Use that address exactly. A plaintext ScaledObject uses
+`...svc.cluster.local:9090` instead. KEDA keeps one connection per address
+string, built for whichever ScaledObject connected first, and never closes it.
+So the two modes need two different addresses for the same Service. A
+ScaledObject that mixes them is not-Ready, and nothing it targets scales;
+`make verify-deployment` names it.
+
+**Moving existing ScaledObjects.** Re-run the install with
+`WVA_SCALER_TLS_MIGRATE=true`. Once the controller has TLS, it rewrites each
+ScaledObject's scaler trigger in place: the address, and the
+`authenticationRef`. Each is not-Ready for a few seconds while the two catch
+up; the fallback holds its replicas. The same flag with `WVA_SCALER_TLS=false`
+moves them back. A ScaledObject managed by GitOps is put back by GitOps:
+change it at the source.
+
+**Who writes what:**
+
+| Object | Written by | Where |
+| --- | --- | --- |
+| Serving certificate, Secret `wva-external-scaler-tls` | both phases | controller namespace. From cert-manager if installed, else a private CA kept in Secret `wva-external-scaler-ca`. On OpenShift, the service CA |
+| KEDA's client certificate, Secret `wva-external-scaler-client-tls` | both phases | controller namespace. Identity `wva-keda-client`, the only client the scaler accepts |
+| A copy of that Secret, named `wva-external-scaler-<controller namespace>` | admin (`make setup-prereqs`) | KEDA's namespace. A ClusterTriggerAuthentication can read only there |
+| ClusterTriggerAuthentication `wva-external-scaler-<controller namespace>` | admin | cluster-scoped |
+| ConfigMap `wva-scaler-keda-auth` | admin | controller namespace. Tells the controller phase that KEDA's side is in place |
+
+The copy never goes to a model namespace: whoever can read it can call the
+scaler as KEDA.
+
+**Permissions.** Only when `WVA_SCALER_TLS=true` or TLS is already on does
+`make check-prereqs` ask for them. Without them the default stays on
+plaintext.
+
+- Controller phase: `create` on Secrets in the controller namespace. With
+  cert-manager, also on its `Issuers` and `Certificates` there.
+- Admin phase: also `create` on ConfigMaps there,
+  `clustertriggerauthentications.keda.sh`, and Secrets in KEDA's namespace.
+
+**Rotation.**
+
+- cert-manager renews its certificates. The controller reloads the serving
+  certificate without a restart, and restarts only when the CA changes.
+- Without cert-manager, re-run `make deploy-wva`. It re-issues a certificate
+  that expires within 30 days or names the wrong hosts.
+- KEDA's copy is refreshed only by `make setup-prereqs`. An older copy keeps
+  working until it expires. `make verify-deployment` warns 30 days before.
+
+**Check it.** `make verify-deployment` prints:
+
+- the mode (plaintext, TLS, mutual TLS);
+- the certificates' expiry;
+- whether KEDA's side is in place;
+- every ScaledObject that would not reach the scaler.
+
+**Undo.** `make undeploy-wva` removes what carries the `wva.llmd.ai/scaler-tls`
+label. The admin's uninstall also removes KEDA's side. The installer refuses
+to overwrite a Secret, Issuer, Certificate or ClusterTriggerAuthentication
+without that label, or one it cannot read.
+
+<details>
+<summary>Details: the controller flags, and setting TLS up by hand</summary>
+
+The installer sets three controller flags. Set by hand, the installer refuses
+to drop them until you choose: `WVA_SCALER_TLS=true` takes them over and lists
+what it replaced, `WVA_SCALER_TLS=false` removes them.
 
 - `--external-scaler-cert-path`: a directory holding `tls.crt` and `tls.key`,
-  reloaded on rotation. Serves TLS; KEDA then needs `caCert` in the trigger's
-  TriggerAuthentication.
-- `--external-scaler-client-ca`: a PEM bundle, read once. Every client must also
-  present a certificate it signed (KEDA's `tlsClientCert` and `tlsClientKey`).
+  reloaded on rotation. Mount it as a Secret volume: the root filesystem is
+  read-only.
+- `--external-scaler-client-ca`: a PEM bundle, read once. Every client must
+  present a certificate it signed. The CA must be KEDA's alone: any
+  certificate it signed is accepted.
 - `--external-scaler-client-san` (comma-separated): accepts only clients whose
   certificate carries one of those names as a DNS SAN, URI SAN or Common Name.
 
-`WVA_SCALER_TLS=true make deploy-wva` sets all three for you:
+In KEDA v2.18 the external scaler dials TLS when the authentication sets
+`caCert`, when it sets **both** `tlsClientCert` and `tlsClientKey` (one alone
+leaves the connection plaintext), or when the trigger sets `enableTLS: "true"`.
+The serving certificate must name the host in `scalerAddress`.
 
-| | Where it comes from |
-| --- | --- |
-| Serving certificate, Secret `wva-external-scaler-tls` | cert-manager if installed, else a private CA the installer keeps in Secret `wva-external-scaler-ca`. On OpenShift, the service CA (an annotation on the Service). |
-| KEDA's client certificate, Secret `wva-external-scaler-client-tls` (`tls.crt`, `tls.key`, `ca.crt`) | cert-manager, or the installer's CA. Its name, `wva-keda-client`, is the one identity the controller accepts. |
-
-- **Rotation.** cert-manager renews its certificates itself. Without it, re-run
-  `make deploy-wva`: it re-issues a certificate that expires within 30 days or
-  names the wrong hosts, and leaves good ones alone. The controller reloads the
-  serving certificate without a restart; it restarts only when the CA changes.
-- **Ownership.** The installer labels what it creates
-  (`wva.llmd.ai/scaler-tls`) and refuses to overwrite a Secret, Issuer or
-  Certificate without that label, or one it cannot read.
-- **Who runs it.** The controller phase (`make deploy-wva`), so it needs
-  `create` on Secrets in the controller namespace, and on cert-manager
-  `Issuers` and `Certificates` there when cert-manager issues; `make
-  check-prereqs` asks. `make undeploy-wva` removes what carries the label.
-- **Check it.** `make verify-deployment` prints the mode (plaintext, TLS,
-  mutual TLS), the certificate's expiry and names, and every ScaledObject that
-  would still dial plaintext.
-
-Before turning TLS on:
-
-- **Every ScaledObject that names this scaler needs a TriggerAuthentication
-  first.** Those `make scaledobjects-apply` generates or adopts carry no
-  `authenticationRef`, so with `--external-scaler-cert-path` set KEDA keeps
-  dialling plaintext and every one goes not-Ready. In KEDA v2.18 the external
-  scaler dials TLS when `caCert` is set, when **both** `tlsClientCert` and
-  `tlsClientKey` are set (one alone leaves the connection plaintext), or when
-  the trigger's metadata sets `enableTLS: "true"`:
-  ```yaml
-  apiVersion: keda.sh/v1alpha1
-  kind: TriggerAuthentication
-  metadata:
-    name: wva-external-scaler-tls
-    namespace: <model namespace>          # the ScaledObject's namespace
-  spec:
-    secretTargetRef:
-    - {parameter: caCert,        name: wva-external-scaler-client-tls, key: ca.crt}
-    - {parameter: tlsClientCert, name: wva-external-scaler-client-tls, key: tls.crt}   # mutual TLS only
-    - {parameter: tlsClientKey,  name: wva-external-scaler-client-tls, key: tls.key}   # mutual TLS only
-  ```
-  A TriggerAuthentication reads Secrets in its own namespace only, so copy the
-  installer's `wva-external-scaler-client-tls` there (or use a
-  `ClusterTriggerAuthentication`, which reads from KEDA's namespace). On
-  OpenShift, `caCert` is the service CA instead: ConfigMap
-  `openshift-service-ca.crt`, key `service-ca.crt`, present in every
-  namespace. Copy it into the Secret's `ca.crt`; whether the Custom Metrics
-  Autoscaler's TriggerAuthentication can read a ConfigMap directly is not
-  verified here.
-  Then set, on each trigger, `authenticationRef: {name: wva-external-scaler-tls}`. An
-  adopt merge-patches `triggers` as a whole, so re-running
-  `make scaledobjects-apply` on an adopted object drops the reference; check
-  it afterwards.
-- **The serving certificate must name the Service KEDA dials**:
-  `wva-external-scaler.<controller namespace>.svc`, and
-  `wva-external-scaler.<controller namespace>.svc.cluster.local`, the host in
-  the `scalerAddress` the installer writes.
-- **Mount the certificate** as a Secret volume (`tls.crt`, `tls.key`) on the
-  `manager` container, at the directory passed to `--external-scaler-cert-path`,
-  for example `/etc/wva/scaler-tls`. The root filesystem is read-only, so the
-  files must arrive by a mount. A client CA for `--external-scaler-client-ca`
-  is mounted the same way.
+</details>
 
 What the NetworkPolicy does not cover:
 
 - It is enforced only by a CNI that implements NetworkPolicy. Without one, `:9090`
-  is open to every Pod; use the scaler TLS and client CA above.
+  is open to every Pod; mutual TLS (above) still holds.
 - It admits every Pod in KEDA's namespace, and most CNIs also let node and
   `hostNetwork` traffic through.
-- The client CA must be dedicated to KEDA: any certificate it signed is accepted.
-  Pass `--external-scaler-client-san` to pin KEDA's identity.
 
 ### Learned state across a restart
 

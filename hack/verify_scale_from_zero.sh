@@ -189,6 +189,14 @@ echo "  pool endpoints remaining: ${eps:-0}"
 [ "${eps:-0}" = "0" ] || skip "the pool still has ${eps} endpoint(s) after parking every variant -- a bound FMA launcher carries llm-d.ai/inferenceServing=true and serves, so requests are routed rather than queued and no wake is needed"
 
 echo "=== 3. attach a zero-capable scaler, and PROVE the HPA is zero-capable ==="
+# The scaler's address and KEDA's authenticationRef follow its TLS mode
+# (deploy/lib/scaler_tls.sh, "KEDA's side").
+SCALER_ADDR="wva-external-scaler.${CTL_NS}.svc.cluster.local:9090"
+SCALER_AUTH=""
+if kubectl get deployment wva-controller-manager -n "$CTL_NS" -o jsonpath='{.spec.template.metadata.annotations.wva\.llmd\.ai/scaler-tls}' 2>/dev/null | grep -q .; then
+    SCALER_ADDR="wva-external-scaler.${CTL_NS}.svc:9090"
+    SCALER_AUTH="      authenticationRef: {name: wva-external-scaler-${CTL_NS}, kind: ClusterTriggerAuthentication}"
+fi
 kubectl apply -f - >/dev/null 2>&1 <<YAML
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
@@ -203,8 +211,9 @@ spec:
     - type: external-push
       name: wva-external-scaler
       metadata:
-        scalerAddress: "wva-external-scaler.${CTL_NS}.svc.cluster.local:9090"
+        scalerAddress: "${SCALER_ADDR}"
         modelID: "${MODEL}"
+${SCALER_AUTH}
 YAML
 # NOT an HPA check. KEDA's HPA always carries minReplicas: 1 -- KEDA does 0<->1
 # itself by scaling the Deployment and uses the HPA only for 1..max -- so

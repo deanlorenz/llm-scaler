@@ -157,6 +157,28 @@ they enable. Do this, in order:
        -o jsonpath='{.data.policyNamespace} {.data.limiter} {.data.policyAccepted}{"\n"}'
      ```
 
+### External scaler TLS on upgrade
+
+Mutual TLS on the scaler port is now the default. An upgrade from a plaintext
+install turns it on only if nothing would break:
+
+- KEDA's side must be in place. A cluster admin writes it with
+  `make setup-prereqs`. A tenant's `make deploy-wva` cannot, and stays on
+  plaintext until the admin has.
+- No ScaledObject may still name the scaler on the plaintext address. If any
+  do, the upgrade stays on plaintext and lists them. To move them too:
+
+  ```bash
+  make deploy-wva WVA_SCALER_TLS=true WVA_SCALER_TLS_MIGRATE=true
+  ```
+
+  Each is not-Ready for a few seconds while it moves. ScaledObjects that GitOps
+  manages must be changed at the source: the
+  [new trigger](configuration.md#external-scaler-mutual-tls).
+
+To stay on plaintext, set `WVA_SCALER_TLS=false`. Check the result with
+`make verify-deployment`.
+
 ### The external-scaler NetworkPolicy
 
 `wva-external-scaler` admits `:9090` only from KEDA's namespace. The admin phase
