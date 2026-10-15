@@ -155,6 +155,11 @@ func addBorrowing(rc *ResourceConstraints, bi BorrowingInventory, activeNamespac
 	if p, ok := bi.(interface{ BorrowNamespacesSet() bool }); ok {
 		rc.BorrowNamespacesSet = p.BorrowNamespacesSet()
 	}
+	if p, ok := bi.(interface {
+		NamespaceNominal([]string) map[string]map[string]NominalFigures
+	}); ok {
+		rc.NamespaceNominal = p.NamespaceNominal(activeNamespaces)
+	}
 	byNS, pools, cohorts := bi.Borrowing(activeNamespaces)
 	if len(byNS) == 0 {
 		return

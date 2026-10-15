@@ -57,7 +57,11 @@ type nsBorrowLeft struct {
 // newModelPlacer, drawsByVariant) accept a nil receiver and then answer "no
 // borrowing"; the others are reached only through a non-nil state.
 type borrowState struct {
-	borrow  map[string]map[string]*nsBorrowLeft
+	borrow map[string]map[string]*nsBorrowLeft
+	// lent is, for a namespace read and not counted, the nominal of its
+	// reclaiming queues a peer holds still to grow into (its lentOut; cap
+	// unused): such growth, like a counted namespace's, needs no node hole.
+	lent    map[string]map[string]*nsBorrowLeft
 	reach   map[string]map[string]int
 	chunks  []*SharedPoolChunk
 	cohorts map[string][]string
@@ -109,6 +113,27 @@ func newBorrowState(constraints []*ResourceConstraints, nodes *NodeView) *borrow
 			}
 		}
 	}
+	bs.lent = map[string]map[string]*nsBorrowLeft{}
+	for _, c := range constraints {
+		if c == nil {
+			continue
+		}
+		for ns, perType := range c.NamespaceNominal {
+			if _, counted := bs.borrow[ns]; counted {
+				continue
+			}
+			if bs.lent[ns] == nil {
+				bs.lent[ns] = map[string]*nsBorrowLeft{}
+			}
+			for accType, f := range perType {
+				if prev, seen := bs.lent[ns][accType]; seen {
+					prev.lentOut = min(prev.lentOut, f.LentOut)
+					continue
+				}
+				bs.lent[ns][accType] = &nsBorrowLeft{lentOut: f.LentOut}
+			}
+		}
+	}
 	reach := mergeNamespaceConstraints(reachConstraints(constraints))
 	bs.reach = map[string]map[string]int{}
 	for ns := range bs.borrow {
@@ -156,9 +181,34 @@ func (bs *borrowState) debitPool(ns, acc string, n int) {
 	}
 }
 
+// saveLeft copies a per-namespace allowance map by value, co-resource
+// allowances included.
+func saveLeft(m map[string]map[string]*nsBorrowLeft) map[string]map[string]nsBorrowLeft {
+	out := make(map[string]map[string]nsBorrowLeft, len(m))
+	for ns, perType := range m {
+		out[ns] = make(map[string]nsBorrowLeft, len(perType))
+		for t, b := range perType {
+			c := *b
+			c.coHeadroom, c.coKept = maps.Clone(b.coHeadroom), maps.Clone(b.coKept)
+			out[ns][t] = c
+		}
+	}
+	return out
+}
+
+// restoreLeft puts saveLeft's values back.
+func restoreLeft(m map[string]map[string]*nsBorrowLeft, s map[string]map[string]nsBorrowLeft) {
+	for ns, perType := range s {
+		for t, b := range perType {
+			*m[ns][t] = b
+		}
+	}
+}
+
 // borrowSave is a borrowState taken before a tentative placement.
 type borrowSave struct {
 	borrow     map[string]map[string]nsBorrowLeft
+	lent       map[string]map[string]nsBorrowLeft
 	free       []int
 	coFree     []map[string]int64
 	nodes      viewDebits
@@ -167,15 +217,7 @@ type borrowSave struct {
 }
 
 func (bs *borrowState) save(guaranteed map[string]int) borrowSave {
-	s := borrowSave{borrow: map[string]map[string]nsBorrowLeft{}, nodes: bs.nodes.saveDebits(), draws: len(bs.draws), guaranteed: maps.Clone(guaranteed)}
-	for ns, perType := range bs.borrow {
-		s.borrow[ns] = map[string]nsBorrowLeft{}
-		for t, b := range perType {
-			c := *b
-			c.coHeadroom, c.coKept = maps.Clone(b.coHeadroom), maps.Clone(b.coKept)
-			s.borrow[ns][t] = c
-		}
-	}
+	s := borrowSave{borrow: saveLeft(bs.borrow), lent: saveLeft(bs.lent), nodes: bs.nodes.saveDebits(), draws: len(bs.draws), guaranteed: maps.Clone(guaranteed)}
 	for _, c := range bs.chunks {
 		s.free = append(s.free, c.Free)
 		s.coFree = append(s.coFree, maps.Clone(c.CoFree))
@@ -186,11 +228,8 @@ func (bs *borrowState) save(guaranteed map[string]int) borrowSave {
 // restore puts the state back as save took it; the node view's debits and the
 // owners they were charged to with it.
 func (bs *borrowState) restore(s borrowSave, guaranteed map[string]int) {
-	for ns, perType := range s.borrow {
-		for t, b := range perType {
-			*bs.borrow[ns][t] = b
-		}
-	}
+	restoreLeft(bs.borrow, s.borrow)
+	restoreLeft(bs.lent, s.lent)
 	for i, c := range bs.chunks {
 		c.Free = s.free[i]
 		c.CoFree = s.coFree[i]
@@ -371,7 +410,16 @@ func (p *modelPlacer) placeReplica(variant string, r replicaFit, g int, requests
 		}
 	}
 	if left < 0 || left >= g {
-		reclaim := borrow != nil && borrow.lentOut > 0
+		// Growth into nominal a reclaiming queue lent out: the namespace's
+		// own, counted or not (W1). A lender at zero whose nodes borrowers
+		// fill must still order the replica Kueue preempts them for.
+		lent := borrow
+		if lent == nil {
+			if k, ok := accelerator.FindKey(bs.lent[p.namespace], acc); ok {
+				lent = bs.lent[p.namespace][k]
+			}
+		}
+		reclaim := lent != nil && lent.lentOut > 0
 		if !bs.coGuaranteed(p.namespace, acc, borrow, requests, reclaim) { // K2c
 			return p.refuse(variant, false), false
 		}
@@ -382,8 +430,8 @@ func (p *modelPlacer) placeReplica(variant string, r replicaFit, g int, requests
 			p.guaranteed[key] = left - g
 		}
 		if reclaim {
-			n := min(g, borrow.lentOut)
-			borrow.lentOut -= n
+			n := min(g, lent.lentOut)
+			lent.lentOut -= n
 			bs.debitPool(p.namespace, acc, n)
 		}
 		return true, false

@@ -43,8 +43,39 @@ type tickNodeView struct {
 func (e *Engine) beginTick() {
 	e.wakeMu.Lock()
 	defer e.wakeMu.Unlock()
-	e.tickWakes = nil
+	e.tickWakes, e.tickReclaimed = nil, nil
 	e.tickNodes.built, e.tickNodes.view = false, nil
+}
+
+// debitReclaimed records what a wake took of its namespace's reclaimable
+// nominal. Caller holds wakeMu.
+func (e *Engine) debitReclaimed(namespace string, took map[string]int) {
+	if len(took) == 0 {
+		return
+	}
+	if e.tickReclaimed == nil {
+		e.tickReclaimed = map[string]map[string]int{}
+	}
+	if e.tickReclaimed[namespace] == nil {
+		e.tickReclaimed[namespace] = map[string]int{}
+	}
+	for t, n := range took {
+		e.tickReclaimed[namespace][t] += n
+	}
+}
+
+// reclaimableLeft is reclaimable less what this tick's earlier wakes of
+// namespace took of it. Caller holds wakeMu.
+func (e *Engine) reclaimableLeft(namespace string, reclaimable map[string]int) map[string]int {
+	took := e.tickReclaimed[namespace]
+	if len(took) == 0 || len(reclaimable) == 0 {
+		return reclaimable
+	}
+	out := make(map[string]int, len(reclaimable))
+	for t, n := range reclaimable {
+		out[t] = max(0, n-took[t])
+	}
+	return out
 }
 
 // decideWake judges a model's wake and, when it selects a set, records what
@@ -57,6 +88,7 @@ func (e *Engine) decideWake(ctx context.Context, group modelGroup, candidates []
 		place.constraints = allocation.WithholdPromised(place.constraints, e.tickWakes)
 		place.nodes = e.tickNodeViewFor(ctx, place.constraints)
 	}
+	place.reclaimable = e.reclaimableLeft(group.namespace, place.reclaimable)
 	selected, outcome := e.selectOrClaim(ctx, group, candidates, covered, place)
 	if len(selected) > 0 {
 		e.recordWake(ctx, group, place, selected)

@@ -119,6 +119,12 @@ type SelectionInput struct {
 	// fits by pools alone. A set fits only if each member's replica lands on a
 	// node: free GPUs as 4+4+8 hold one 8-GPU replica, not a P/D pair.
 	Nodes *allocation.NodeView
+	// Reclaimable is, per accelerator type, the nominal of the namespace's
+	// reclaiming queues that a peer holds now (allocation.ReclaimableNominal),
+	// less what this tick's earlier wakes took of it: a replica no node holds
+	// still fits while it covers its GPUs, since Kueue preempts the borrowers
+	// filling those nodes to admit it.
+	Reclaimable map[string]int
 	// RequirePrefill refuses a decode-only wake for a disaggregated model.
 	RequirePrefill bool
 }
@@ -262,7 +268,8 @@ func fits(in SelectionInput, set []Candidate) bool {
 	if !allocation.FitsGPUBudget(in.Constraints, in.Namespace, demand) {
 		return false
 	}
-	return in.Nodes.PlaceReplicas(replicaShapes(in.Namespace, set), false)
+	ok, _ := in.Nodes.PlaceReplicasReclaiming(replicaShapes(in.Namespace, set), false, in.Reclaimable)
+	return ok
 }
 
 // replicaShapes is one replica of each candidate of set as the node view fits

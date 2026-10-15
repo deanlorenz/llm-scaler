@@ -73,6 +73,9 @@ type QuotaInventory struct {
 	// engine-side one, or stale. Kept beside borrow, which is nil when no
 	// namespace is counted.
 	withheld map[string]string
+	// nominal is, per namespace read and not counted, its queues' nominal
+	// figures (uncountedNominal); nil after a stale read.
+	nominal map[string]map[string]NominalFigures
 	// now is the clock the staleness of a snapshot is judged by; nil is
 	// time.Now.
 	now func() time.Time
@@ -379,6 +382,10 @@ func (q *QuotaInventory) Refresh(ctx context.Context) error {
 		view, effective = &frozen, last.effective
 	}
 	q.withheld = q.withheldReasons(ext, view, frozenWhy)
+	q.nominal = nil
+	if frozenWhy == "" && q.countsBorrowing() && !ext.ObservedAt.IsZero() {
+		q.nominal = q.uncountedNominal(ext, view, effective)
+	}
 	q.logBorrowing(logger, ext, view, frozenWhy)
 	if view != nil && len(view.byNS) == 0 {
 		// Nothing counted: the entry caps at nominal, exactly as with

@@ -239,6 +239,10 @@ type placement struct {
 	// reclaim: its within-nominal figure, which the wake is checked against,
 	// is below its nominal.
 	nominalLentOut bool
+	// reclaimable is, per type, the nominal the namespace's reclaiming queues
+	// lent out (allocation.ReclaimableNominal): a wake into it needs no node
+	// hole. decideWake takes off what this tick's earlier wakes used.
+	reclaimable map[string]int
 }
 
 // placementFor computes the placement basis for namespace; see gpuConstraints.
@@ -296,7 +300,12 @@ func (e *Engine) placementFor(ctx context.Context, namespace string) placement {
 	// wake does not create a pod Kueue would hold at its gate. A refusal then
 	// says why (OutcomeNominalLentOut).
 	p.nominalLentOut = allocation.NominalLentOut(constraints, namespace) > 0
-	constraints = allocation.WithinNominal(constraints)
+	// Nominal a reclaiming queue of the namespace lent out is its to take
+	// back: Kueue preempts the borrowers whose pods fill those GPUs and nodes
+	// to admit the wake, so neither the cluster bounds nor the node view
+	// refuse it for their being in use (W1).
+	p.reclaimable = allocation.ReclaimableNominal(constraints, namespace)
+	constraints = allocation.CreditReclaimable(allocation.WithinNominal(constraints), p.reclaimable)
 	e.logBudgets(ctx, namespace, constraints, views, skipped, snapshotAge)
 	p.constraints = constraints
 	return p

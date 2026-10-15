@@ -8,6 +8,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 )
 
@@ -62,6 +63,42 @@ func (v *NodeView) eligibleFit(r replicaFit) []int {
 		v.elig.mu.Unlock()
 	}
 	return nodes
+}
+
+// PlaceReplicasReclaiming is PlaceReplicas for a wake that may grow into
+// nominal its namespace's reclaiming queues lent out (reclaimable, per type;
+// ReclaimableNominal): a replica no node holds still places while what is
+// left of reclaimable covers its GPUs -- Kueue preempts the borrowers whose
+// pods fill those nodes to admit it -- and is taken from it. A replica a node
+// holds is debited there and takes nothing. It reports whether every replica
+// placed and, per key of reclaimable, what the placement took from it. A nil
+// view places everything and takes nothing.
+func (v *NodeView) PlaceReplicasReclaiming(reps []ReplicaShape, commit bool, reclaimable map[string]int) (bool, map[string]int) {
+	if v == nil {
+		return true, nil
+	}
+	trial := v.Clone()
+	left := maps.Clone(reclaimable)
+	var took map[string]int
+	for _, r := range reps {
+		if trial.place(trial.fitOf(r)) {
+			continue
+		}
+		k, ok := accelerator.FindKey(left, r.Accelerator)
+		g := max(r.GPUs, 1)
+		if !ok || left[k] < g {
+			return false, nil
+		}
+		left[k] -= g
+		if took == nil {
+			took = map[string]int{}
+		}
+		took[k] += g
+	}
+	if commit {
+		v.adopt(trial)
+	}
+	return true, took
 }
 
 // admitsPlacement reports whether a node already eligible for the pod's

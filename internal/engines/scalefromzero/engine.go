@@ -176,6 +176,9 @@ type Engine struct {
 	wakeMu    sync.Mutex
 	tickWakes map[string]map[string]int
 	tickNodes tickNodeView
+	// tickReclaimed is, per namespace and type, the lent-out nominal this
+	// tick's wakes grew into without a node hole (placement.reclaimable).
+	tickReclaimed map[string]map[string]int
 	// layouts remembers the variants whose unknown pod layout this engine's
 	// node views have logged, so each is logged once, not once per tick.
 	layouts allocation.LayoutLog
@@ -733,9 +736,13 @@ func (e *Engine) recordWake(ctx context.Context, group modelGroup, place placeme
 	// in use -- the transfer, not the ledger, holds that hole); and a wake
 	// checked against a remembered snapshot, or not at all, which has no node
 	// view (decideWake builds one for this tick's constraints only).
-	if place.nodes.PlaceReplicas(replicaShapes(group.namespace, selected), true) && place.nodes != nil {
+	// A wake into lent-out nominal places without a hole (fits); what it took
+	// of the namespace's reclaimable nominal is gone for this tick's next wake.
+	placed, took := place.nodes.PlaceReplicasReclaiming(replicaShapes(group.namespace, selected), true, place.reclaimable)
+	if placed && place.nodes != nil {
 		e.admitInFlight(group.namespace, selected)
 	}
+	e.debitReclaimed(group.namespace, took)
 	if place.unchecked {
 		metrics.CountScaleFromZeroWakeUnchecked(group.namespace)
 		log.FromContext(ctx).Info("Scale-from-zero: woke WITHOUT a GPU capacity check; every declared limiter is unavailable and no recent snapshot exists",
@@ -757,6 +764,7 @@ func (e *Engine) selectOrClaim(ctx context.Context, group modelGroup, candidates
 		Constraints:    place.constraints,
 		Admitted:       place.admitted,
 		Nodes:          place.nodes,
+		Reclaimable:    place.reclaimable,
 		RequirePrefill: e.requirePrefill(group),
 	})
 	if len(selected) == 0 && outcome == OutcomeNoCapacity {

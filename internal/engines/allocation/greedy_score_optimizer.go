@@ -450,7 +450,10 @@ func (o *GreedyByScoreOptimizer) allocateForModel(
 	if reach != nil {
 		sizing = reach
 	}
-	effAvail := effectiveAvailable(available, sizing)
+	// The cluster bounds count, for a namespace growing into nominal its
+	// reclaiming queues lent out, the GPUs the borrowers hold there as free:
+	// Kueue preempts them to admit it (withLent).
+	effAvail := effectiveAvailable(bs.withLent(w.req.Namespace, available), sizing)
 
 	// Unified path: fairShareRolePick behind the RolePickFn interface.
 	// α logic removed in commit 3.
@@ -678,7 +681,7 @@ func anyBudgetLeft(active []*modelWork, available map[string]int, availableByNS 
 		if reach := bs.reachFor(w.req.Namespace); reach != nil {
 			sizing = reach
 		}
-		if budgetTotal(effectiveAvailable(available, sizing)) > 0 {
+		if budgetTotal(effectiveAvailable(bs.withLent(w.req.Namespace, available), sizing)) > 0 {
 			return true
 		}
 	}

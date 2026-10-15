@@ -134,6 +134,14 @@ type ResourceConstraints struct {
 	// Set even when no namespace counts borrowing; read only to report
 	// (LimiterBudgets), never to decide.
 	BorrowWithheld map[string]string
+	// NamespaceNominal is, per active namespace a Kueue-reading provider reads
+	// cohort borrowing for and does NOT count it (withheld, not selected), and
+	// per accelerator type (NamespacePools' spelling), its queues' nominal
+	// figures (NominalFigures): the nominal a peer holds that Kueue reclaims
+	// for it, and what it can reach without borrowing. Set even when no
+	// namespace counts borrowing. A counted namespace carries the same figures
+	// in NamespaceBorrow.
+	NamespaceNominal map[string]map[string]NominalFigures
 	// BorrowNamespacesSet is set on a provider whose quota entry names
 	// kueue.borrowNamespaces (a pilot), so two entries over one cohort that
 	// disagree can be warned about (BorrowNamespacesSplit).
