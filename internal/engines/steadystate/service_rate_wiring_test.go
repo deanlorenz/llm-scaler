@@ -116,18 +116,20 @@ func TestPruneAnalyzerSeries_DeletesTheServiceRateOfADepartedModel(t *testing.T)
 // be dropped from it alone.
 func TestOnNothingObserved_SkippedModel(t *testing.T) {
 	e, registry := engineConfigEngine(t)
+	// Both models name their variant "v": a variant name is unique within a
+	// model, not a namespace, so every delete must match on the model too.
 	for _, m := range []string{"m1", "m2"} {
-		nr := serviceRateResult(0.68, "v-"+m)
+		nr := serviceRateResult(0.68, "v")
 		nr.Result.VariantCapacities[0].ObservedReplicas = 3
 		e.recordAnalyzerMetrics("ns", m, []allocation.NamedAnalyzerResult{nr})
 	}
-	require.Equal(t, map[string]float64{"v-m1": 3, "v-m2": 3},
-		gaugeValues(t, registry, constants.WVAAnalyzerObservedReplicas, constants.LabelVariantName))
+	require.Equal(t, map[string]float64{"m1": 3, "m2": 3},
+		gaugeValues(t, registry, constants.WVAAnalyzerObservedReplicas, constants.LabelModelName))
 
 	e.onNothingObserved("ns", "m2")
 
-	assert.Equal(t, map[string]float64{"v-m1": 3, "v-m2": 0},
-		gaugeValues(t, registry, constants.WVAAnalyzerObservedReplicas, constants.LabelVariantName),
+	assert.Equal(t, map[string]float64{"m1": 3, "m2": 0},
+		gaugeValues(t, registry, constants.WVAAnalyzerObservedReplicas, constants.LabelModelName),
 		"a skipped cycle must read as nothing observed for that model only")
 	assert.Equal(t, map[string]float64{"m1": 4.5},
 		gaugeValues(t, registry, constants.WVAServiceRatePerReplica, constants.LabelModelName),
@@ -141,7 +143,7 @@ func TestOnNothingObserved_SkippedModel(t *testing.T) {
 		seriesLabels(t, registry, constants.WVAAnalyzerTarget, constants.LabelModelName),
 		"the target series are kept through a skipped cycle")
 
-	e.recordAnalyzerMetrics("ns", "m2", []allocation.NamedAnalyzerResult{serviceRateResult(0.68, "v-m2")})
+	e.recordAnalyzerMetrics("ns", "m2", []allocation.NamedAnalyzerResult{serviceRateResult(0.68, "v")})
 	for _, name := range append(serviceRateFamilies, constants.WVAPricingK) {
 		assert.ElementsMatch(t, []string{"m1", "m2"}, seriesLabels(t, registry, name, constants.LabelModelName),
 			"%s: the next analyzed cycle publishes again", name)

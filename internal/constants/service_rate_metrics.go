@@ -31,7 +31,8 @@ const (
 	// completion rate (requests/s) one replica is priced at -- the median over
 	// the variant's own replicas that have one. One series per variant;
 	// source names the path that answered (derived, borrowed-line, measured,
-	// neighbour).
+	// neighbour) for the median replica -- with an even count the rate
+	// averages the central pair, and source is the lower one's.
 	// Absent while no own replica has a rate. Labels: namespace, model_name,
 	// variant_name, role, source.
 	WVAServiceRatePerReplica = "wva_service_rate_per_replica"

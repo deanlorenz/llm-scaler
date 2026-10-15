@@ -1269,13 +1269,13 @@ per pod.
 
 ### `wva_itl_line_intercept`
 - **Type**: Gauge
-- **Description**: Intercept B of the same line, in seconds: the inter-token latency the line predicts at an empty cache. It is not always a fitted hardware floor: when the readings span too little of k for a free fit, the intercept is pinned to a learned or default value and only the slope is fitted, and a free fit on noisy readings can put it below zero. Absent while the variant has no line.
+- **Description**: Intercept B of the same line, in seconds: the inter-token latency the line predicts at an empty cache. It is not always a fitted hardware floor: when the readings span too little of k for a free fit, the intercept is pinned to a learned or default value and only the slope is fitted, and a free fit on noisy readings can put it below zero. Present and absent with `wva_itl_line_slope`.
 - **Labels**: as `wva_itl_line_slope`
 - **Use Case**: Compare a variant's floor across accelerators; an intercept far from the card's usual figure is a fit on too narrow a range of k.
 
 ### `wva_itl_seconds_at_pricing_k`
 - **Type**: Gauge
-- **Description**: The line evaluated at `wva_pricing_k`, in seconds: the inter-token latency the derived service rate is priced at. Absent while the variant has no line. A line that is zero or negative at the pricing k cannot derive a rate, and none of the three line series is published for it; `wva_itl_line_samples` still is.
+- **Description**: The line evaluated at `wva_pricing_k`, in seconds: the inter-token latency a derived service rate would be priced at. Present and absent with `wva_itl_line_slope`. A line that is zero or negative at the pricing k cannot derive a rate, and none of the three line series is published for it; `wva_itl_line_samples` still is.
 - **Labels**: as `wva_itl_line_slope`
 - **Use Case**: Compare against the ITL the engines report under load. A priced ITL well below the observed one means the derived rate over-states what a replica completes.
 
@@ -1291,7 +1291,7 @@ per pod.
 
 ### `wva_service_rate_per_replica`
 - **Type**: Gauge
-- **Description**: The saturated completion rate one replica of a variant is priced at, in requests per second: the median over the variant's own replicas that have one, never a warm pool bridge. One series per variant; `source` names the path that answered for the median replica. Absent while no replica has a rate.
+- **Description**: The saturated completion rate one replica of a variant is priced at, in requests per second: the median over the variant's own replicas that have one, never a warm pool bridge. One series per variant; `source` names the path that answered for the median replica. With an even replica count the rate averages the central pair, and `source` is the lower reading's, so a variant with one `measured` and one `derived` reading publishes a rate between the two, labelled with the source of the lower. Absent while no replica has a rate.
 - **Labels**:
   - `namespace`, `model_name`, `variant_name`: as `wva_itl_line_slope`
   - `role`: `prefill`, `decode` or `both`

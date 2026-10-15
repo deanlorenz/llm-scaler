@@ -55,12 +55,12 @@ func registerServiceRateMetrics(registry prometheus.Registerer) error {
 			"at wva_pricing_k, and while none of its replicas reports; see wva_itl_line_samples.",
 		variantLabels)
 	itlLineIntercept = gauge(constants.WVAITLLineIntercept,
-		"Intercept B of the ITL(k) line a decode variant is priced on, in seconds: the inter-token latency at an "+
-			"empty cache. Absent while the variant has no line.",
+		"Intercept B of the ITL(k) line a decode variant would derive its service rate from, in seconds: the "+
+			"inter-token latency the line predicts at an empty cache. Same absence as wva_itl_line_slope.",
 		variantLabels)
 	itlSecondsAtPricingK = gauge(constants.WVAITLSecondsAtPricingK,
 		"The ITL(k) line evaluated at wva_pricing_k, in seconds: the inter-token latency a derived service rate "+
-			"is priced at. Absent while the variant has no line.",
+			"would be priced at. Same absence as wva_itl_line_slope.",
 		variantLabels)
 	itlLineSamples = gauge(constants.WVAITLLineSamples,
 		"How many (k, ITL) readings a decode variant's own ITL window holds, while its replicas report. Published "+
@@ -71,7 +71,8 @@ func registerServiceRateMetrics(registry prometheus.Registerer) error {
 		"Saturated completion rate (requests/s) one replica of a variant is priced at: the median over its own "+
 			"replicas, never a bridge. source is derived (from the variant's own ITL line), borrowed-line (from a "+
 			"line a sibling with the same engine configuration fitted), measured (the variant's own saturated "+
-			"window for the shape served) or neighbour (a neighbouring shape bucket's window). "+
+			"window for the shape served) or neighbour (a neighbouring shape bucket's window); with an even "+
+			"replica count the rate averages the central pair and source is the lower one's. "+
 			"Absent while no replica has a rate. A diagnostic, not a scaling input.",
 		rateLabels)
 	pricingK = gauge(constants.WVAPricingK,
