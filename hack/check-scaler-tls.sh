@@ -509,7 +509,7 @@ ok '[ "$RC" = 1 ] && grep -q "Cannot read" "$WORK/refusal" && [ ! -s "$WORK/writ
 echo "== openssl: refuses clearly when openssl is missing"
 reset_store
 mkdir -p "$WORK/noopenssl"
-for t in jq grep head sed tr awk cat; do ln -sf "$(command -v "$t")" "$WORK/noopenssl/$t"; done
+for t in jq grep head sed tr awk cat mktemp rm sort; do ln -sf "$(command -v "$t")" "$WORK/noopenssl/$t"; done
 run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' WVA_SCALER_TLS=true STUB_CM=absent "PATH=$WORK/noopenssl"
 ok '[ "$RC" = 1 ] && grep -q "openssl" "$WORK/refusal" && [ ! -s "$WORK/writes" ]' "no openssl: exit $RC, $(cat "$WORK/refusal")"
 
@@ -950,6 +950,73 @@ jq -n --arg n "$CTA" '{kind: "Secret", metadata: {name: $n}, data: {}}' >"$STORE
 run wva_scaler_tls_undeploy STUB_CM=absent
 ok '[ -f "$STORE/clustertriggerauthentications.keda.sh__$CTA.json" ] && ! grep -q "^delete clustertriggerauthentications" "$WORK/kubectl.log"' "undeploy deleted a foreign ClusterTriggerAuthentication: $(grep '^delete' "$WORK/kubectl.log" | tr '\n' ';')"
 ok '[ -f "$STORE/secret@keda__$CTA.json" ] && grep -q "ClusterTriggerAuthentication $CTA was not created by this installer" "$WORK/warnings"' "undeploy deleted a foreign copy, or did not say it left the ClusterTriggerAuthentication: $(cat "$WORK/warnings")"
+
+# ---------------------------------------------------------------- stranded ScaledObjects, every plaintext exit
+# stranded_case <label> <run args...>: a plaintext controller, a ScaledObject on
+# the TLS address, and a run that stays on plaintext must name it.
+stranded_case() {
+    local label="$1"
+    shift
+    echo "== plaintext because $label: ScaledObjects on the TLS address are named"
+    reset_store
+    fresh_k
+    put_deploy plaintext
+    so_fixture app-so "$SO_TLS_ADDR" "{\"name\":\"$CTA\",\"kind\":\"ClusterTriggerAuthentication\"}"
+    run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' "$@"
+    ok '[ "$RC" = 0 ] && [ "$WVA_SCALER_TLS_ON" = false ] && grep -q "stays on plaintext, so they are not-Ready" "$WORK/warnings" && grep -q "apps/app-so" "$WORK/stderr"' "$label: exit $RC, on=$WVA_SCALER_TLS_ON, stranded ScaledObject not named: $(cat "$WORK/warnings" "$WORK/refusal")"
+}
+stranded_case "openssl is missing" STUB_CM=absent "PATH=$WORK/noopenssl"
+stranded_case "Secrets may not be created" STUB_CM=absent STUB_CANI=no
+stranded_case "cert-manager is unknown" STUB_CM=error
+stranded_case "WVA_SCALER_TLS=false" WVA_SCALER_TLS=false
+
+echo "== verify: a plaintext controller names ScaledObjects on the TLS address"
+reset_store
+put_deploy plaintext
+so_fixture app-so "$SO_TLS_ADDR" "{\"name\":\"$CTA\",\"kind\":\"ClusterTriggerAuthentication\"}"
+run wva_verify_scaler_tls
+ok '[ "$RC" = 0 ] && grep -q "is on plaintext, but these ScaledObjects use its TLS address" "$WORK/warnings" && grep -q "apps/app-so" "$WORK/stderr"' "verify plaintext: stranded ScaledObject not named: $(cat "$WORK/warnings")"
+
+# ---------------------------------------------------------------- the CA KEDA trusts, from the controller phase
+# store_tls_controller: the admin and controller phases have run, and the
+# Deployment in the store is what the TLS overlay renders.
+store_tls_controller() {
+    reset_store
+    fresh_k
+    run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' WVA_SCALER_TLS=true STUB_CM=absent
+    rm -rf "$WORK/render"
+    mkdir -p "$WORK/render"
+    ln -s "$ROOT/config/overlays/namespace-scoped/kubernetes" "$WORK/render/base"
+    cp "$WORK/k/kustomization.yaml" "$WORK/render/kustomization.yaml"
+    if render "$WORK/render" "$WORK/rendered.yaml" 2>"$WORK/err"; then
+        yq -o=json 'select(.kind == "Deployment" and .metadata.name == "wva-controller-manager")' "$WORK/rendered.yaml" \
+            >"$STORE/deployment__wva-controller-manager.json"
+    else
+        fail "the TLS overlay does not render: $(head -3 "$WORK/err")"
+    fi
+}
+# marker_edit <jq program>: rewrites the marker in the store.
+marker_edit() {
+    jq "$1" "$STORE/configmap__wva-scaler-keda-auth.json" >"$WORK/m.json" && mv "$WORK/m.json" "$STORE/configmap__wva-scaler-keda-auth.json"
+}
+
+echo "== controller phase: KEDA trusts an old CA: warn, with the admin command and the KEDA restart"
+store_tls_controller
+marker_edit '.data.caSha256 = "0000"'
+fresh_k
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' WVA_APPLY_SCOPE=controller STUB_CM=absent
+ok '[ "$RC" = 0 ] && grep -q "KEDA trusts a different CA" "$WORK/warnings" && grep -q "setup-prereqs" "$WORK/warnings" && grep -q "rollout restart deployment/keda-operator -n keda" "$WORK/warnings"' "controller phase, stale CA: exit $RC, $(cat "$WORK/warnings" "$WORK/refusal")"
+
+echo "== controller phase and verify: a marker with no caSha256 is reported as cannot tell"
+marker_edit 'del(.data.caSha256)'
+fresh_k
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' WVA_APPLY_SCOPE=controller STUB_CM=absent
+ok '[ "$RC" = 0 ] && grep -q "Cannot tell which CA KEDA trusts" "$WORK/warnings" && grep -q "setup-prereqs" "$WORK/warnings"' "controller phase, marker without caSha256: $(cat "$WORK/warnings" "$WORK/refusal")"
+run wva_verify_scaler_tls
+ok 'grep -q "Cannot tell which CA KEDA trusts" "$WORK/warnings"' "verify, marker without caSha256: $(cat "$WORK/warnings")"
+
+echo "== make verify-deployment loads the scaler TLS checks"
+ok 'grep -A8 "^verify-deployment:" "$ROOT/Makefile" | grep -q "source deploy/lib/scaler_tls.sh"' "the verify-deployment recipe does not source scaler_tls.sh, so its scaler TLS checks never run"
 
 # ---------------------------------------------------------------- Forbidden is never NotFound
 # probe_* print what a reader concluded, for the cases below.

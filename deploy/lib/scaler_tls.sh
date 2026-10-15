@@ -1186,6 +1186,10 @@ wva_scaler_tls_prepare() {
                 [ "$scope" = prereqs ] && return 0
                 wva_scaler_tls_check_scaledobjects plaintext || return 0
                 log_warning "WVA_SCALER_TLS=false: the external scaler goes back to PLAINTEXT gRPC. Its certificates and KEDA's ClusterTriggerAuthentication stay; undeploy removes them." ;;
+            *)
+                # Plaintext stays plaintext (WVA_SCALER_TLS=false, or the
+                # default gave up): ScaledObjects on the TLS address are stuck.
+                wva_scaler_tls_stay_plaintext ;;
         esac
         return 0
     fi
@@ -1193,12 +1197,14 @@ wva_scaler_tls_prepare() {
     # client CA with it: needed on both paths.
     if ! command -v openssl >/dev/null 2>&1; then
         wva_scaler_tls_skip "openssl is not on PATH (it mints the scaler certificates when there is no cert-manager, and digests the client CA either way)"
+        wva_scaler_tls_stay_plaintext
         return 0
     fi
     # The default asks for no rights the permission check did not: without them
     # it stays on plaintext.
     if [ "$WVA_SCALER_TLS_DEFAULTED" = true ] && ! kubectl auth can-i create secrets -n "$WVA_NS" >/dev/null 2>&1; then
         wva_scaler_tls_skip "you may not create Secrets in $WVA_NS"
+        wva_scaler_tls_stay_plaintext
         return 0
     fi
     if [ "$WVA_SCALER_TLS_PROVIDER_RESOLVED" = openssl ]; then
@@ -1228,8 +1234,11 @@ wva_scaler_tls_prepare() {
                 else
                     wva_scaler_keda_not_ready "$WVA_SCALER_KEDA_WHY; a cluster admin runs:  $(wva_make_cmd setup-prereqs)"
                 fi
-            elif [ "$WVA_SCALER_KEDA_STALE" = true ]; then
-                log_warning "KEDA holds an older client certificate than the one in $WVA_NS (it expires ${WVA_SCALER_KEDA_NOT_AFTER}). It still works until then; a cluster admin refreshes it with:  $(wva_make_cmd setup-prereqs)"
+            else
+                if [ "$WVA_SCALER_KEDA_STALE" = true ]; then
+                    log_warning "KEDA holds an older client certificate than the one in $WVA_NS (it expires ${WVA_SCALER_KEDA_NOT_AFTER}). It still works until then; a cluster admin refreshes it with:  $(wva_make_cmd setup-prereqs)"
+                fi
+                wva_scaler_keda_ca_report log_warning
             fi ;;
     esac
     [ "$scope" != prereqs ] || return 0
@@ -1264,6 +1273,26 @@ wva_scaler_tls_prepare() {
         log_info "External scaler TLS: mutual TLS, certificates from $WVA_SCALER_TLS_PROVIDER_RESOLVED; ScaledObjects reach it at $(wva_scaler_address "$WVA_NS" tls) with authenticationRef $(wva_scaler_keda_auth_name)"
     fi
     wva_append_scaler_tls_patch "$kustomization"
+}
+
+# wva_scaler_keda_ca_report reports, through log function $1, what
+# wva_scaler_keda_marker_state found about the CA KEDA trusts: nothing when it
+# is current, the fix when it moved on, and "cannot tell" when the marker does
+# not record it.
+wva_scaler_keda_ca_report() {
+    local say="$1"
+    case "${WVA_SCALER_KEDA_CA_STALE:-false}" in
+        true)
+            "$say" "KEDA trusts a different CA than the one that signs the scaler's certificate now (on OpenShift the service CA rotates by itself), so every handshake fails and nothing scales. A cluster admin runs:  $(wva_make_cmd setup-prereqs)  and then restarts KEDA's operator:  $(wva_scaler_keda_restart_cmd)" ;;
+        unknown)
+            "$say" "Cannot tell which CA KEDA trusts: ConfigMap $WVA_SCALER_KEDA_MARKER in $WVA_NS was written by an older installer and does not record it. A cluster admin re-runs:  $(wva_make_cmd setup-prereqs)" ;;
+    esac
+}
+
+# wva_scaler_tls_stay_plaintext names the ScaledObjects a plaintext scaler
+# strands (wva_scaler_tls_warn_stranded), from every phase but the admin's.
+wva_scaler_tls_stay_plaintext() {
+    [ "${WVA_APPLY_SCOPE:-all}" = prereqs ] || wva_scaler_tls_warn_stranded
 }
 
 # wva_scaler_tls_warn_stranded warns about ScaledObjects on the TLS address or

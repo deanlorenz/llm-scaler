@@ -647,11 +647,18 @@ check-prereqs: ## Phase 1, read-only: tools, permissions, the namespace and the 
 ## no install attached. `kubectl rollout status` returns immediately when the
 ## rollout is already complete, so this doesn't sit around waiting on a
 ## controller that has been healthy for days.
+##
+## scaler_tls.sh is sourced too: without it the scaler TLS checks (KEDA's side,
+## its certificate's expiry, a rotated CA, stranded ScaledObjects) are skipped.
+## ENVIRONMENT, when not given, is detected only as far as "openshift", which
+## decides the CA KEDA must trust.
 .PHONY: verify-deployment
 verify-deployment: ## Is the controller running, and are metrics flowing? Read-only. WVA_NS=<ns>, NAMESPACE=<ns>.
-	@$(if $(filter command line environment,$(origin WVA_NS)),WVA_NS=$(WVA_NS),) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) WVA_SCOPE=$(SCOPE) \
-		bash -c 'source deploy/lib/common.sh; source deploy/lib/constants.sh; source deploy/lib/infra_monitoring.sh; source deploy/lib/verify.sh; \
+	@$(if $(filter command line environment,$(origin WVA_NS)),WVA_NS=$(WVA_NS),) $(if $(filter command line environment,$(origin NAMESPACE)),NAMESPACE=$(NAMESPACE),) WVA_SCOPE=$(SCOPE) $(if $(ENVIRONMENT_INSTALL),ENVIRONMENT=$(ENVIRONMENT_INSTALL),) \
+		bash -c 'source deploy/lib/common.sh; source deploy/lib/constants.sh; source deploy/lib/infra_monitoring.sh; source deploy/lib/verify.sh; source deploy/lib/scaler_tls.sh; \
 			export DEPLOY_PROMETHEUS=$${DEPLOY_PROMETHEUS:-true}; export DEPLOY_OPERATIONAL_DASHBOARD=$${DEPLOY_OPERATIONAL_DASHBOARD:-true}; export SCALER_BACKEND=$${SCALER_BACKEND:-keda}; export MONITORING_NAMESPACE=$${MONITORING_NAMESPACE:-workload-variant-autoscaler-monitoring}; \
+			KEDA_NAMESPACE_EXPLICIT=false; [ -z "$${KEDA_NAMESPACE:-}" ] || KEDA_NAMESPACE_EXPLICIT=true; \
+			[ -n "$${ENVIRONMENT:-}" ] || ! wva_is_openshift || ENVIRONMENT=openshift; \
 			wva_bootstrap_env; verify_deployment'
 
 ## List the llm-d model servers WVA would create ScaledObjects for, and stop.

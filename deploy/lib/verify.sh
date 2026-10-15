@@ -424,6 +424,16 @@ wva_verify_scaler_tls() {
     san="$(wva_scaler_flag_of "$dep" --external-scaler-client-san)"
     if [ -z "$cert_path" ]; then
         log_info "External scaler: plaintext gRPC (no TLS). WVA_SCALER_TLS=true serves mutual TLS; see docs/reference/security-model.md#network-exposure."
+        # ScaledObjects on the TLS address or reference cannot reach it.
+        if declare -F wva_scaler_plaintext_scaledobjects >/dev/null; then
+            rc=0
+            unauth="$(wva_scaler_plaintext_scaledobjects plaintext)" || rc=$?
+            if [ "$rc" = 0 ] && [ -n "$unauth" ]; then
+                log_warning "The external scaler is on plaintext, but these ScaledObjects use its TLS address or authenticationRef $(wva_scaler_keda_auth_name): they go not-Ready, so NOTHING they target scales:"
+                printf '%s\n' "$unauth" | head -10 | sed 's/^/    /' >&2
+                log_warning "  Turn TLS on, or move them back:  $(wva_make_cmd deploy-wva WVA_SCALER_TLS=false WVA_SCALER_TLS_MIGRATE=true)"
+            fi
+        fi
         return 0
     fi
     if [ -z "$client_ca" ]; then
@@ -479,9 +489,7 @@ wva_verify_scaler_tls() {
             if [ "$WVA_SCALER_KEDA_STALE" = true ]; then
                 log_info "  KEDA holds an older client certificate than the one in $WVA_NS; it works until it expires. Refresh:  $(wva_make_cmd setup-prereqs)"
             fi
-            if [ "$WVA_SCALER_KEDA_CA_STALE" = true ]; then
-                log_warning "  KEDA trusts a different CA than the one that signs the scaler's certificate now (on OpenShift the service CA rotates). Handshakes fail. A cluster admin runs $(wva_make_cmd setup-prereqs), then restarts KEDA's operator."
-            fi
+            wva_scaler_keda_ca_report log_warning
             if [ "$WVA_SCALER_KEDA_EXPIRING" = true ]; then
                 log_warning "  KEDA's client certificate expires within ${WVA_SCALER_RENEW_DAYS} days (${WVA_SCALER_KEDA_NOT_AFTER}). After that nothing scales. A cluster admin refreshes it with:  $(wva_make_cmd setup-prereqs)"
             fi
@@ -492,7 +500,7 @@ wva_verify_scaler_tls() {
         return 0
     fi
     # Hand-set TLS flags: KEDA's side is whoever set them, not this installer's.
-    if [ -z "$(printf '%s' "$dep" | jq -r '.spec.template.metadata.annotations["wva.llmd.ai/scaler-tls"] // ""')" ]; then
+    if [ -z "$(printf '%s' "$dep" | jq -r --arg a "$WVA_SCALER_TLS_ANNOTATION" '.spec.template.metadata.annotations[$a] // ""')" ]; then
         log_info "  TLS was set up by hand, so ScaledObjects are not checked against this installer's address and ClusterTriggerAuthentication."
         return 0
     fi
