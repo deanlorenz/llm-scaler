@@ -126,8 +126,11 @@
 #   --keys KEY[,KEY...]         verify: the compile cache keys to look for,
 #                               as `keys` prints them -- a directory under
 #                               VLLM_CACHE_ROOT such as
-#                               torch_compile_cache/1a2b3c4d5e (a bare hash
-#                               means torch_compile_cache/<hash>)
+#                               torch_compile_cache/1a2b3c4d5e@rank_0_0+rank_1_0:
+#                               the key, then every rank directory the engine
+#                               wrote under it, each of which must be there.
+#                               Without @ranks any rank will do; a bare hash
+#                               means torch_compile_cache/<hash>
 #   --container C               keys: the engine container (default vllm)
 #
 # Checking the cache without a second GPU start. Start each engine
@@ -924,30 +927,50 @@ EOF
     log_success "published from ${i} node(s) into ${seed} (stamp ${stamp}); every preparer merges it on restart"
 }
 
-# KEY_RE matches the compile cache directory in an engine's log. vLLM logs
-# "Using cache directory: <VLLM_CACHE_ROOT>/torch_compile_cache/<hash>/rank_<r>_<dp>/<prefix>"
-# (torch_aot_compile/<hash>/rank_... for an AOT compile); the key is the
-# <dir>/<hash> part, the same directory on every node and every rank.
-KEY_RE='/[A-Za-z0-9._/-]*/(torch_compile_cache|torch_aot_compile)/[A-Za-z0-9_-]+/rank_'
+# KEY_RE matches a compile cache path in an engine's log, up to its rank
+# directory. vLLM (v0.31.0) builds two layouts under VLLM_CACHE_ROOT:
+#   torch_compile_cache/<hash>/rank_<r>_<dp>/<prefix>         backends.py, logged as
+#     "Using cache directory: %s for vLLM's torch.compile"
+#   torch_compile_cache/torch_aot_compile/<hash>/rank_<r>_<dp>/model
+#                                                             decorators.py (VLLM_USE_AOT_COMPILE), logged as
+#     "Directly load AOT compilation from path %s" or "saved AOT compiled function to %s"
+# The key is the path between VLLM_CACHE_ROOT and the rank directory; the
+# root is whatever precedes the first /torch_compile_cache/.
+KEY_RE='/[A-Za-z0-9._/-]*/torch_compile_cache/(torch_aot_compile/)?[A-Za-z0-9_-]+/rank_[0-9]+_[0-9]+'
 
-# normalize_key prints KEY as a directory under VLLM_CACHE_ROOT: a bare hash
-# is torch_compile_cache/<hash>. Refuses anything that could leave the cache.
+# normalize_key prints KEY[@RANK[+RANK...]] with KEY as a directory under
+# VLLM_CACHE_ROOT: a bare hash is torch_compile_cache/<hash>. Each RANK is a
+# rank directory (rank_<r>_<dp>) verify requires under the key. Refuses
+# anything that could leave the cache.
 normalize_key() {
-    case "$1" in
-        ""|/*|*/|*..*|*//*|*[!A-Za-z0-9._/-]*) log_error "--keys: not a compile cache key: '${1}' (torch_compile_cache/<hash>, as enginecache.sh keys prints it, or the bare hash)" ;;
-        */*) printf '%s' "$1" ;;
-        *) printf 'torch_compile_cache/%s' "$1" ;;
+    local spec="$1" key ranks="" r
+    key="${spec%%@*}"
+    if [ "$key" != "$spec" ]; then
+        ranks="${spec#*@}"
+        local IFS=+
+        for r in $ranks; do
+            [[ "$r" =~ ^rank_[0-9]+_[0-9]+$ ]] || log_error "--keys: not a rank directory: '${r}' in '${spec}' (KEY@rank_<r>_<dp>[+rank_<r>_<dp>...], as enginecache.sh keys prints it)"
+        done
+        [[ "$ranks" =~ ^rank_[0-9]+_[0-9]+(\+rank_[0-9]+_[0-9]+)*$ ]] || log_error "--keys: not a rank list: '${ranks}' in '${spec}' (rank_<r>_<dp>[+rank_<r>_<dp>...])"
+    fi
+    case "$key" in
+        ""|/*|*/|*..*|*//*|.|./*|*/.|*/./*|*[!A-Za-z0-9._/-]*) log_error "--keys: not a compile cache key: '${spec}' (torch_compile_cache/<hash>[@rank_0_0+...], as enginecache.sh keys prints it, or the bare hash)" ;;
+        */*) printf '%s' "$key" ;;
+        *) printf 'torch_compile_cache/%s' "$key" ;;
     esac
+    [ -z "$ranks" ] || printf '@%s' "$ranks"
 }
 
 # cmd_keys prints the compile cache key(s) each named engine pod used, one per
-# line, read off its log. A key the engine wrote outside VLLM_CACHE_ROOT (the
-# guard fell back to the engine default) is still printed -- it is the same
-# hash -- with a warning that this start did not land on the node cache.
+# line, read off its log, as KEY@RANK[+RANK...]: every rank directory the log
+# names under that key, so verify can require each of them. A key the engine
+# wrote outside VLLM_CACHE_ROOT (the guard fell back to the engine default) is
+# still printed -- it is the same hash -- with a warning that this start did
+# not land on the node cache.
 cmd_keys() {
     [ -n "$NAMESPACE" ] || log_error "keys needs -n NAMESPACE"
     [ "${#PODS[@]}" -gt 0 ] || log_error "keys needs the engine pod(s): enginecache.sh keys -n NAMESPACE POD [POD...]"
-    local pod root log found dir key all="" rc=0 err_file
+    local pod root log found path base rest pairs="" warned all rc=0 err_file
     err_file="$(mktemp)"
     for pod in "${PODS[@]}"; do
         if ! root="$(kubectl get pod -n "$NAMESPACE" "$pod" -o jsonpath="{.spec.containers[?(@.name==\"${CONTAINER}\")].env[?(@.name==\"VLLM_CACHE_ROOT\")].value}" 2>"$err_file")"; then
@@ -958,32 +981,47 @@ cmd_keys() {
             log_warning "cannot read the log of ${pod} (container ${CONTAINER}): $(tr '\n' ' ' < "$err_file")"
             rc=1; continue
         fi
-        found="$(printf '%s\n' "$log" | grep -oE "$KEY_RE" | sed 's#/rank_$##' | sort -u || true)"
+        found="$(printf '%s\n' "$log" | grep -oE "$KEY_RE" || true)"
         if [ -z "$found" ]; then
-            log_warning "${pod}: no compile cache directory in its log (no \"Using cache directory\" line: the log rotated, or the engine does not compile)"
+            log_warning "${pod}: no compile cache directory in its log (no \"Using cache directory\" or AOT load/save line under a torch_compile_cache directory: the log rotated, the engine does not compile, or its cache_dir is set by hand)"
             rc=1; continue
         fi
-        for dir in $found; do
-            key="${dir#"${dir%/*/*}"/}"
+        while [ "${root%/}" != "$root" ]; do root="${root%/}"; done
+        warned=" "
+        for path in $found; do
+            base="${path%%/torch_compile_cache/*}"
+            rest="${path#"$base"/}"
+            # one "KEY RANK" line per rank directory the log names
+            pairs="${pairs}${rest%/*} ${rest##*/}"$'\n'
+            case "$warned" in *" ${base} "*) continue ;; esac
+            warned="${warned}${base} "
             if [ -z "$root" ]; then
-                log_warning "${pod}: container ${CONTAINER} sets no VLLM_CACHE_ROOT; it compiled under ${dir%/*/*}, which may not be the node cache"
-            elif [ "${dir%/*/*}" != "$root" ]; then
-                log_warning "${pod}: compiled under ${dir%/*/*}, not VLLM_CACHE_ROOT=${root} -- the cache root was not writable and the engine fell back; this start did not fill the node cache"
+                log_warning "${pod}: container ${CONTAINER} sets no VLLM_CACHE_ROOT; it compiled under ${base}, which may not be the node cache"
+            elif [ "$base" != "$root" ]; then
+                log_warning "${pod}: compiled under ${base}, not VLLM_CACHE_ROOT=${root} -- the cache root was not writable and the engine fell back; this start did not fill the node cache"
             fi
-            case ",${all}," in *",${key},"*) ;; *) all="${all:+$all,}${key}"; printf '%s\n' "$key" ;; esac
         done
     done
     rm -f "$err_file"
-    [ -z "$all" ] || echo "check every node with: make engine-cache-verify NAMESPACE=${NAMESPACE} ENGINE_CACHE_KEYS=${all}" >&2
+    # KEY@RANK+RANK, keys and ranks in the order the logs first name them
+    all="$(printf '%s' "$pairs" | awk 'NF == 2 {
+            if (!($1 in seen)) { seen[$1] = 1; order[++n] = $1; ranks[$1] = "" }
+            if (!(($1, $2) in got)) { got[$1, $2] = 1; ranks[$1] = ranks[$1] (ranks[$1] == "" ? "" : "+") $2 }
+        } END { for (i = 1; i <= n; i++) print order[i] "@" ranks[order[i]] }')"
+    if [ -n "$all" ]; then
+        printf '%s\n' "$all"
+        echo "check every node with: make engine-cache-verify NAMESPACE=${NAMESPACE} ENGINE_CACHE_KEYS=$(printf '%s' "$all" | tr '\n' ',')" >&2
+    fi
     return $rc
 }
 
 # verify_script runs inside a preparer pod (kubectl exec, no GPU) as
-# `sh -c SCRIPT sh ROOT KEY...`: per key, one line "ecv <result> <key> [detail]"
-# -- present (with the file count), absent, empty, or unreadable (with the
-# first path that could not be read). Every file is read in full, so a
-# directory listed but unreadable is not called present. A quoted heredoc,
-# like the others; dash has `local`.
+# `sh -c SCRIPT sh ROOT SPEC...`, each SPEC a KEY[@RANK[+RANK...]]: per
+# spec, one line "ecv <result> <spec> [detail]" -- present (with the file
+# count), absent (with the rank directories missing, when ranks were named),
+# empty, or unreadable (with the first path that could not be read). Every
+# file is read in full, so a directory listed but unreadable is not called
+# present. A quoted heredoc, like the others; dash has `local`.
 verify_script() {
     cat <<'VERIFY'
 root="$1"; shift
@@ -1000,14 +1038,32 @@ walk() {
     [ -z "$bad" ] || return 0
   done
 }
-for k in "$@"; do
-  d="$root/$k"; files=""; bad=""
-  if [ -L "$d" ] || { [ -e "$d" ] && [ ! -d "$d" ]; }; then echo "ecv unreadable $k not-a-directory"; continue; fi
-  if [ ! -e "$d" ]; then echo "ecv absent $k"; continue; fi
+hasfile() {
+  local e
+  for e in "$1"/* "$1"/.[!.]*; do
+    [ -L "$e" ] && continue
+    [ -f "$e" ] && return 0
+    [ -d "$e" ] && hasfile "$e" && return 0
+  done
+  return 1
+}
+for s in "$@"; do
+  k="${s%%@*}"; ranks=""; [ "$k" = "$s" ] || ranks="${s#*@}"
+  d="$root/$k"; files=""; bad=""; missing=""
+  if [ -L "$d" ] || { [ -e "$d" ] && [ ! -d "$d" ]; }; then echo "ecv unreadable $s not-a-directory"; continue; fi
+  if [ ! -e "$d" ]; then echo "ecv absent $s"; continue; fi
   walk "$d"
-  if [ -n "$bad" ]; then echo "ecv unreadable $k ${bad#"$root"/}"
-  elif [ -z "$files" ]; then echo "ecv empty $k"
-  else echo "ecv present $k ${#files}"; fi
+  old="$IFS"; IFS=+
+  for r in $ranks; do
+    IFS="$old"
+    if [ -L "$d/$r" ] || [ ! -d "$d/$r" ]; then missing="$missing${missing:+,}$r"
+    elif ! hasfile "$d/$r"; then missing="$missing${missing:+,}$r(empty)"; fi
+  done
+  IFS="$old"
+  if [ -n "$bad" ]; then echo "ecv unreadable $s ${bad#"$root"/}"
+  elif [ -n "$missing" ]; then echo "ecv absent $s $missing"
+  elif [ -z "$files" ]; then echo "ecv empty $s"
+  else echo "ecv present $s ${#files}"; fi
 done
 VERIFY
 }
@@ -1064,7 +1120,7 @@ cmd_verify() {
             result="${line%% *}"; detail="${line#* }"
             case "$result" in
                 present) printf '  %-28s %-20s %s\n' "$node" "present" "$k  (${detail} files)"; present=$((present + 1)) ;;
-                absent) printf '  %-28s %-20s %s\n' "$node" "ABSENT" "$k"; absent=$((absent + 1)) ;;
+                absent) printf '  %-28s %-20s %s\n' "$node" "ABSENT" "$k${detail:+  (rank directory missing or empty: ${detail})}"; absent=$((absent + 1)) ;;
                 empty) printf '  %-28s %-20s %s\n' "$node" "ABSENT" "$k  (an empty directory)"; absent=$((absent + 1)) ;;
                 unreadable) printf '  %-28s %-20s %s\n' "$node" "UNREADABLE" "$k  (${detail})"; unreadable=$((unreadable + 1)) ;;
                 *) printf '  %-28s %-20s %s\n' "$node" "COULD NOT CHECK" "$k"; unchecked=$((unchecked + 1))

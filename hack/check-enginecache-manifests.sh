@@ -688,7 +688,7 @@ ecv() {  # ecv OUTFILE ARGS... -- verify against the fixture; prints the exit co
         PATH="$STUB_PATH" bash deploy/enginecache.sh verify -n check-ns "$@" > "$out" 2>&1
     echo $?
 }
-ecv_row() { grep -qE "^  $2 +$3 +$4( |\$)" "$1"; }  # ecv_row FILE NODE RESULT KEY
+ecv_row() { grep -qE "^  $2 +$3 +${4//+/\\+}( |\$)" "$1"; }  # ecv_row FILE NODE RESULT KEY (a + in KEY is literal)
 # every node has every key: a pass, a bare hash taken as torch_compile_cache/<hash>
 ecv_reset
 rc="$(ecv "$T/ecv-all.out" --keys "3f2a9c1d0e,$K2")"
@@ -705,6 +705,21 @@ if [ "$rc" != 0 ] && ecv_row "$T/ecv-miss.out" n-b ABSENT "$K2" && ecv_row "$T/e
     && grep -q '5 present, 1 absent, 0 unreadable, 0 could not check' "$T/ecv-miss.out" && grep -q 'NOT VERIFIED' "$T/ecv-miss.out"; then
     ok "verify: a node missing a key fails, and names the node and the key (n-b $K2)"
 else fail "verify one missing: rc=$rc $(grep -E 'n-b|present,' "$T/ecv-miss.out" | tr '\n' ';')"; fi
+# one rank directory missing: the key with its ranks is absent, naming the
+# rank; the plain key (any rank) still passes
+ecv_reset; rm -rf "$T/ecv/ec-a/vllm/$K1/rank_1_0"
+rc="$(ecv "$T/ecv-rank.out" --keys "$K1@rank_0_0+rank_1_0")"
+if [ "$rc" != 0 ] && grep -qE "^  n-a +ABSENT +$K1@rank_0_0\+rank_1_0  \(rank directory missing or empty: rank_1_0\)" "$T/ecv-rank.out" \
+    && ecv_row "$T/ecv-rank.out" n-b present "$K1@rank_0_0+rank_1_0" && grep -q '2 present, 1 absent, 0 unreadable, 0 could not check' "$T/ecv-rank.out"; then
+    ok "verify: a key whose rank directory is missing on a node is absent there, naming the rank (n-a rank_1_0)"
+else fail "verify missing rank: rc=$rc $(grep -E 'n-a|present,' "$T/ecv-rank.out" | tr '\n' ';')"; fi
+rc="$(ecv "$T/ecv-anyrank.out" --keys "$K1")"
+[ "$rc" = 0 ] && ecv_row "$T/ecv-anyrank.out" n-a present "$K1" && ok "verify: a plain key (no ranks) is present with any rank directory" || fail "verify plain key, one rank: rc=$rc $(grep n-a "$T/ecv-anyrank.out")"
+# a rank directory that holds no file is not that rank
+ecv_reset; rm -rf "$T/ecv/ec-c/vllm/$K2/rank_1_0"; mkdir -p "$T/ecv/ec-c/vllm/$K2/rank_1_0/backbone"
+rc="$(ecv "$T/ecv-rankempty.out" --keys "$K2@rank_0_0+rank_1_0")"
+[ "$rc" != 0 ] && grep -qE "^  n-c +ABSENT +$K2@rank_0_0\+rank_1_0  \(rank directory missing or empty: rank_1_0\(empty\)\)" "$T/ecv-rankempty.out" \
+    && ok "verify: a rank directory with no file in it is absent, naming the rank" || fail "verify empty rank: rc=$rc $(grep n-c "$T/ecv-rankempty.out")"
 # an empty key directory is not a cache
 ecv_reset; rm -rf "$T/ecv/ec-c/vllm/$K1"; mkdir -p "$T/ecv/ec-c/vllm/$K1/rank_0_0"
 rc="$(ecv "$T/ecv-empty.out" --keys "$K1")"
@@ -755,6 +770,10 @@ refuse "a key with '..'" verify -n check-ns --keys "torch_compile_cache/../x"
 refuse "an absolute key" verify -n check-ns --keys /engine-cache/vllm/x
 refuse "a key with a space" verify -n check-ns --keys "a b"
 refuse "an empty key in the list" verify -n check-ns --keys "a,,b"
+refuse "a rank that is not rank_<r>_<dp>" verify -n check-ns --keys "$K1@rank_x"
+refuse "an empty rank list" verify -n check-ns --keys "$K1@"
+refuse "an empty rank in the list" verify -n check-ns --keys "$K1@rank_0_0++rank_1_0"
+refuse "a rank that climbs out" verify -n check-ns --keys "$K1@../rank_0_0"
 refuse "--keys on status" status -n check-ns --keys a
 refuse "keys without a pod" keys -n check-ns
 refuse "a pod name that is not one" keys -n check-ns 'Pod;x'
@@ -767,21 +786,38 @@ EOF
 cat > "$T/engine-logs/pd-prefill-0" <<'EOF'
 INFO 10-14 [backends.py:550] Using cache directory: /engine-cache/vllm/torch_compile_cache/77b0e1aa42/rank_0_0/backbone for vLLM's torch.compile
 EOF
+# the guard the scenarios put before the engine prints this when the cache
+# root is not writable, then unsets VLLM_CACHE_ROOT (pd-disaggregation.yaml)
 cat > "$T/engine-logs/fell-back" <<'EOF'
-WARNING engine cache: /engine-cache/vllm not writable; unsetting VLLM_CACHE_ROOT
+engine cache VLLM_CACHE_ROOT=/engine-cache/vllm is not writable; using the engine default instead
 INFO 10-14 [backends.py:550] Using cache directory: /root/.cache/vllm/torch_compile_cache/3f2a9c1d0e/rank_0_0/backbone for vLLM's torch.compile
 EOF
+# VLLM_USE_AOT_COMPILE (vLLM v0.31.0 decorators.py): the artefact sits at
+# VLLM_CACHE_ROOT/torch_compile_cache/torch_aot_compile/<sha256>/rank_<r>_<dp>/model
+AOT=torch_compile_cache/torch_aot_compile/9c4e1f0a7b3d2c5e8f6a1b4d7c0e3f2a5b8d1c4e7f0a3b6d9c2e5f8a1b4d7c0e
+cat > "$T/engine-logs/aot" <<EOF
+INFO 10-14 [decorators.py:313] Directly load AOT compilation from path /engine-cache/vllm/$AOT/rank_0_0/model
+INFO 10-14 [decorators.py:313] Directly load AOT compilation from path /engine-cache/vllm/$AOT/rank_1_0/model
+EOF
 printf 'INFO 10-14 Starting vLLM API server\n' > "$T/engine-logs/no-compile"
-for p in pd-decode-0 pd-prefill-0 fell-back no-compile; do printf /engine-cache/vllm > "$T/engine-root/$p"; done
+for p in pd-decode-0 pd-prefill-0 fell-back no-compile aot; do printf /engine-cache/vllm > "$T/engine-root/$p"; done
 PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns pd-decode-0 > "$T/keys1.out" 2> "$T/keys1.err"; rc=$?
-[ "$rc" = 0 ] && [ "$(cat "$T/keys1.out")" = "$K1" ] && grep -q "make engine-cache-verify NAMESPACE=check-ns ENGINE_CACHE_KEYS=$K1\$" "$T/keys1.err" && ! grep -q WARNING "$T/keys1.err" \
-    && ok "keys: one key per configuration, every rank folded into it, and the verify line to run" || fail "keys one pod: rc=$rc out=$(tr '\n' ' ' < "$T/keys1.out") err=$(tr '\n' ' ' < "$T/keys1.err")"
+[ "$rc" = 0 ] && [ "$(cat "$T/keys1.out")" = "$K1@rank_0_0+rank_1_0" ] && grep -q "make engine-cache-verify NAMESPACE=check-ns ENGINE_CACHE_KEYS=$K1@rank_0_0+rank_1_0\$" "$T/keys1.err" && ! grep -q WARNING "$T/keys1.err" \
+    && ok "keys: one key per configuration, naming every rank directory its log shows, and the verify line to run" || fail "keys one pod: rc=$rc out=$(tr '\n' ' ' < "$T/keys1.out") err=$(tr '\n' ' ' < "$T/keys1.err")"
 PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns pd-decode-0 pd-prefill-0 > "$T/keys2.out" 2> "$T/keys2.err"; rc=$?
-[ "$rc" = 0 ] && [ "$(tr '\n' ' ' < "$T/keys2.out")" = "$K1 $K2 " ] && grep -q "ENGINE_CACHE_KEYS=$K1,$K2\$" "$T/keys2.err" \
+[ "$rc" = 0 ] && [ "$(tr '\n' ' ' < "$T/keys2.out")" = "$K1@rank_0_0+rank_1_0 $K2@rank_0_0 " ] && grep -q "ENGINE_CACHE_KEYS=$K1@rank_0_0+rank_1_0,$K2@rank_0_0\$" "$T/keys2.err" \
     && ok "keys: prefill and decode give two keys, joined for verify" || fail "keys two pods: rc=$rc out=$(tr '\n' ' ' < "$T/keys2.out") err=$(tail -1 "$T/keys2.err")"
 PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns fell-back > "$T/keys3.out" 2> "$T/keys3.err"; rc=$?
-[ "$(cat "$T/keys3.out")" = "$K1" ] && grep -q 'compiled under /root/.cache/vllm, not VLLM_CACHE_ROOT=/engine-cache/vllm' "$T/keys3.err" \
+[ "$(cat "$T/keys3.out")" = "$K1@rank_0_0" ] && grep -q 'compiled under /root/.cache/vllm, not VLLM_CACHE_ROOT=/engine-cache/vllm' "$T/keys3.err" \
     && ok "keys: an engine that fell back off the cache root still names its key, and says the start did not fill the node cache" || fail "keys fell back: out=$(cat "$T/keys3.out") err=$(tr '\n' ' ' < "$T/keys3.err")"
+PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns aot > "$T/keys-aot.out" 2> "$T/keys-aot.err"; rc=$?
+[ "$rc" = 0 ] && [ "$(cat "$T/keys-aot.out")" = "$AOT@rank_0_0+rank_1_0" ] && ! grep -q WARNING "$T/keys-aot.err" \
+    && ok "keys: an AOT compile names its key under the cache root (torch_compile_cache/torch_aot_compile/<hash>), with its ranks" || fail "keys AOT: rc=$rc out=$(cat "$T/keys-aot.out") err=$(tr '\n' ' ' < "$T/keys-aot.err")"
+printf /engine-cache/vllm/ > "$T/engine-root/pd-prefill-0"
+PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns pd-prefill-0 > "$T/keys-slash.out" 2> "$T/keys-slash.err"; rc=$?
+[ "$rc" = 0 ] && [ "$(cat "$T/keys-slash.out")" = "$K2@rank_0_0" ] && ! grep -q WARNING "$T/keys-slash.err" \
+    && ok "keys: a VLLM_CACHE_ROOT with a trailing / is the same root, not a fall-back" || fail "keys trailing slash: rc=$rc err=$(tr '\n' ' ' < "$T/keys-slash.err")"
+printf /engine-cache/vllm > "$T/engine-root/pd-prefill-0"
 if PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns no-compile > "$T/keys4.out" 2>&1; then fail "keys must fail on a log with no cache directory"; else
     grep -q 'no compile cache directory in its log' "$T/keys4.out" && ok "keys: a log with no cache directory is a failure, not an empty answer" || fail "keys no line: $(tail -1 "$T/keys4.out")"; fi
 if STUB_ENGINE_LOG_ERROR='Error from server (Forbidden): pods "pd-decode-0" is forbidden: cannot get resource "pods/log"' PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns pd-decode-0 > "$T/keys5.out" 2>&1; then fail "keys must fail when the log cannot be read"; else
