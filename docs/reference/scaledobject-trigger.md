@@ -1,11 +1,10 @@
 # ScaledObject trigger metadata
 
-A model is registered with the scaling manager by a KEDA `ScaledObject` whose
-trigger is `type: external-push` and points at the scaling manager's external
-scaler. KEDA hands the trigger's `metadata` map to the scaling manager on every
-call, so the keys on this page are the whole per-workload configuration
-surface: there are no annotations to set and nothing else is read from the
-ScaledObject or the workload for these values.
+A model is registered with the scaling manager by a KEDA `ScaledObject` with a
+`type: external-push` trigger that points at the scaling manager's external
+scaler. KEDA passes the trigger's `metadata` map on every call. The keys on this
+page are the whole per-workload configuration: there are no annotations, and
+nothing else on the ScaledObject or the workload is read for these values.
 
 The keys are parsed in `internal/registry/scalermeta.go`. KEDA metadata is a map
 of strings, so quote every value (`"10.0"`, `"6000"`).
@@ -72,24 +71,28 @@ These appear on a ScaledObject that scales a model server.
 `scalerAddress` is KEDA's own key (where to dial); the scaling manager never
 reads it. Its value is `wva-external-scaler.<controller-namespace>.svc.cluster.local:9090`.
 
-**A bad value freezes the model at its current count.** If `modelID` is empty or
-`variantCost`, `warmPoolCopies` or `defaultOutputTokens` does not parse, the
-workload is skipped entirely (`internal/utils/variant.go`): the scaling manager
-never plans it, so it never makes a decision for it, and `GetMetrics` keeps
-answering the target's current replica count ([before the first
-decision](#before-the-first-decision-and-the-fallback)) for as long as the typo
-stands. The HPA holds whatever count the workload had, under any load, and KEDA
-reports nothing wrong. Three things do: the gauge
-`wva_scaler_undecided_targets` stays above 0 for the namespace, the counter
-`wva_scaler_undecided_answers_total{reason="not-managed"}` keeps growing, and
-the controller logs `external scaler has no decision for this target` once for
-that ScaledObject, with `reason` `not-managed`, at the default verbosity.
-The cause is a controller log line at verbosity 4, which the default
-verbosity (2) hides: add `--v=4` to the controller Deployment's `args` (see
+**A bad value freezes the model at its current count.** If `modelID` is empty,
+or `variantCost`, `warmPoolCopies` or `defaultOutputTokens` does not parse, the
+workload is skipped (`internal/utils/variant.go`). The scaling manager never
+plans it, so `GetMetrics` keeps answering the target's current replica count
+([before the first decision](#before-the-first-decision-and-the-fallback)). The
+HPA holds whatever count the workload had, under any load, for as long as the
+typo stands.
+
+KEDA shows nothing on the ScaledObject. Three things do:
+
+- the gauge `wva_scaler_undecided_targets` stays above 0 for the namespace;
+- the counter `wva_scaler_undecided_answers_total{reason="not-managed"}` keeps
+  growing;
+- the controller logs `external scaler has no decision for this target` once
+  for that ScaledObject, with `reason` `not-managed`, at the default verbosity.
+
+The cause is in a log line at verbosity 4, which the default (2) hides. Add
+`--v=4` to the controller Deployment's `args` (see
 [configuration](configuration.md)) and look for
-`Skipping a registered workload with unusable trigger metadata`, with the
-ScaledObject in `scaledObject` and the key and value in `error`. If a
-registered model never gets a decision, check these values first.
+`Skipping a registered workload with unusable trigger metadata`: the
+ScaledObject is in `scaledObject`, the key and value in `error`. If a registered
+model never gets a decision, check these values first.
 
 ## Warm-pool keys
 
@@ -141,10 +144,13 @@ two ways:
     '[{"op":"add","path":"/spec/triggers/0/metadata/defaultOutputTokens","value":"6000"}]'
   ```
 
-  `scaledobjects-apply` with `apply: yes` skips a workload that already has a
-  ScaledObject, so a hand-added key survives it. `apply: adopt` does not: it
-  replaces the trigger list with the plan's keys, and hand-added keys must be
-  patched back.
+  Re-running `scaledobjects-plan` and `scaledobjects-apply` keeps it.
+  `apply: yes` skips a workload that already has a ScaledObject. `apply: adopt`
+  writes the plan's `scalerAddress`, `modelID`, `variantCost` and
+  `scalingPolicy`, and carries over every other key of a trigger that already
+  points at the scaling manager, such as `defaultOutputTokens` or `warmPool`. For
+  such a trigger the plan also proposes the `modelID` it already has. Adopting
+  from a different trigger (`prometheus`, `cpu`) carries nothing over.
 
 ## Scaling behavior
 
@@ -156,11 +162,11 @@ ScaledObject that points at the scaling manager, hand-written or adopted:
 | scale-up | 0 s | `Percent 100` every 5 s |
 | scale-down | 300 s | `Percent 100` every 120 s |
 
-Scale-up acts on the current answer because the wait for a new replica is
-already paid in its start time. Scale-down waits for 300 s of sustained lower
-answers; after a restart or leader change it also guards the first decisions a
-new leader makes, which rest on a short history. Removing a replica too early
-costs a cold start on the next burst; keeping one too long costs only money.
+Scale-up acts on the current answer: a new replica already pays its start time.
+Scale-down waits for 300 s of lower answers. After a restart or leader change
+the window also guards the new leader's first decisions, which rest on a short
+history. Removing a replica too early costs a cold start; keeping one too long
+only costs money.
 
 Override the defaults per install with
 `WVA_SO_SCALE_{UP,DOWN}_{PERIOD,STABILIZATION}`, or replace the shape with
@@ -255,8 +261,9 @@ can, or a template supplies one. A plan whose every entry renders from
 and leaves one that has a fallback exactly as it is, with a warning if that
 fallback is the zero-replica shape on a floor of 0, or if its `replicas` is
 above the `minReplicaCount` the plan sets (KEDA holds at least that many during
-an outage). An object the installer cannot read keeps whatever it has, and the
-apply line says `(fallback unchanged: could not read it)`. A
+an outage). The fallback is not a trigger key, so keeping the trigger's
+hand-set keys does not touch it. An object the installer cannot read is not
+patched at all. A
 `WVA_DEFAULT_SO_TEMPLATE` owns its own fallback; the shipped sample has none,
 and the installer refuses to render a template whose ScaledObject document has
 a fallback that comes out as `replicas: 0` on a floor of 0, or that `yq` cannot

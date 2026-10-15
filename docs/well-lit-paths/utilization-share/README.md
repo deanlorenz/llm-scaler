@@ -1,88 +1,128 @@
 # Share one GPU quota between models
 
+When several models share one GPU quota and peak at different times, this
+optimizer shares the quota on purpose instead of first come, first served.
+Each model gets what it needs, the rest is spread as headroom by weight, and
+GPUs move between models as demand shifts. For GPUs that are paid for whether
+used or not (on-prem, a reservation, a team allotment).
+
+**Maturity:** **Experimental.** One run per configuration, on 1 GPU per Pod
+([Evidence](#evidence)). The defaults are starting points.
+
+## When not to take it
+
+- There is nothing to share: one model per quota gains only headroom.
+- You want idle GPUs given back. It holds headroom on purpose
+  ([What it costs](#what-it-costs)).
+- The model that rises when load swaps cannot wait about 5.5 minutes longer
+  than today, or load swings back faster than a move lands (about twelve
+  minutes).
+- More cases are in [Details](#more-cases-where-it-does-not-fit).
+
 ## Start here
 
-- **Status:** Experimental: one run per configuration, 1 GPU per Pod (below).
-- **You need:**
-  - two or more models scaled by the scaling manager under one limiter ([What it needs](#what-it-needs)): a quota on the controller's own install (namespace owner; tenant-editable), or the physical GPU inventory published as cluster policy (cluster admin).
-  - model servers that drain on termination; `kubectl`, `jq`, `yq` and `make` in a checkout of this repository.
-  - **Not enforcement:** the limiter is advisory; back each tenant namespace with a GPU `ResourceQuota` ([bound at admission](../../guides/admin-cluster-setup/README.md#bound-the-namespaces-gpus-at-admission)).
-- **Do this** ([Turn on the utilization-share optimizer, safely](../../guides/utilization-share/)). Steps 2 and 3 are run by whoever owns the policy: the namespace owner for an own-install quota, the cluster admin for a policy in `wva-policy`.
-  1. (namespace owner) Install with a quota: [install in a namespace](../../guides/install-in-namespace/) with `WVA_LIMITER=quota WVA_QUOTAS='<accelerator>=<n>'` ([configuration](../../reference/configuration.md#core-configuration)), or stand up the guide's [two-model trial](../../guides/utilization-share/README.md#prerequisites).
-  2. `make utilization-share-check`: is there a budget to share ([Prerequisites](../../guides/utilization-share/README.md#prerequisites)).
-  3. `make utilization-share-shadow`, read what it would move, then `make utilization-share-activate` ([Installation](../../guides/utilization-share/README.md#installation-instructions)).
-  The `optimizer:` block lives in the policy's `default` entry, and re-running `make deploy-wva` resets that entry in the controller's own ConfigMap to the shipped one, without the block and without the limiter unless `WVA_LIMITER`/`WVA_QUOTAS` are passed again. After an upgrade, repeat steps 2 and 3; shadow also clears transfer marks the active optimizer left ([why](../../reference/scaling-policy.md#re-running-the-installer-resets-the-default-entry)).
-- **Check it works:** `make utilization-share-status`; `wva_utilization_share_mode` reads `active`, and transfers end `done` ([Verification](../../guides/utilization-share/README.md#verification)).
-- **Undo:** `make utilization-share-off`: back through shadow, marks cleared, block removed ([Cleanup](../../guides/utilization-share/README.md#cleanup)). If you stood up the guide's two-model trial, also `make benchmark-two-model-teardown`: it holds GPUs until you do.
+You need two or more models scaled by the scaling manager under one limiter,
+model servers that drain on termination, and `kubectl`, `jq`, `yq` and `make`
+in a checkout of this repository. Every step is in
+[Turn on the utilization-share optimizer, safely](../../guides/utilization-share/).
+Steps 2 to 4 are run by whoever owns the policy: the namespace owner for an
+own-install quota, the cluster admin for a policy in `wva-policy` or `wva-<ns>`.
 
-## What it is
+1. Namespace owner: [install with a quota](../../guides/install-in-namespace/), adding `WVA_LIMITER=quota WVA_QUOTAS='<accelerator>=<n>'`, or stand up the guide's [two-model trial](../../guides/utilization-share/README.md#prerequisites).
+2. [Check there is a budget to share](../../guides/utilization-share/README.md#prerequisites).
+3. [Turn it on in shadow, read what it would move, then activate it](../../guides/utilization-share/README.md#installation-instructions).
+4. [Check it works](../../guides/utilization-share/README.md#verification): the mode reads `active` and transfers end `done`.
 
-> **Experimental.** Measured on H200s at 1 GPU per Pod, one run per
-> configuration ([what was measured](measured.md)): two aggregated models, and
-> two P/D-disaggregated models whose four roles share one quota (two runs, at
-> two prompt lengths; [P/D results](measured.md#pd-two-disaggregated-models-under-one-quota)).
-> Not yet measured with
-> this optimizer: whole-node or multi-GPU pods, and a cluster-wide quota. The
-> defaults are starting points.
+To undo, see [Cleanup](../../guides/utilization-share/README.md#cleanup). The
+guide's two-model trial holds GPUs until you tear it down. If the controller
+is out of your reach, see [Details](#when-the-controller-is-out-of-your-reach).
 
-Several models share one GPU quota, and their traffic peaks at different times.
-Today's optimizer hands the quota out first come, first served: a model that
-scaled up earlier keeps its GPUs, and a model that needs them later is refused,
-even when the quota as a whole has room for both. The worst case is a swap — one
-model's load falls while the other's rises, and the rising model is refused for
-the falling model's whole scale-down window. The utilization-share optimizer
-shares the quota on purpose: each model gets what it needs, the rest is spread
-as headroom by weight, and GPUs move from one model to another when the shares
-drift ([how](#how-it-shares-the-quota)).
+## What it costs
 
-**Use it when** two or more models scale under one quota, their demand moves
-between them over hours rather than minutes, and the GPUs are paid for whether
-used or not (on-prem hardware, a reservation, a team allotment), so idle
-headroom costs nothing extra.
+- **Headroom held ahead of need.** In the early runs, when the whole spare was
+  spread, that was 24% and 66% more GPU-seconds than today's optimizer. The
+  current build's cost has not been measured.
+- **A donor replica,** with its in-flight requests. They survive only as well
+  as the model server drains.
+- **Waiting.** The receiver waits for the donor's scale-down window, its drain,
+  then its own start. Turning it on freezes the group for about three minutes.
+- More costs, and traffic shapes that still lose something, are in
+  [Details](#more-costs).
 
-**Do not use it when:**
+## Evidence
 
-- **There is nothing to share.** One model per quota gains only headroom.
+Seven benchmark runs so far, on H200s, two 8B models at 1 GPU per replica,
+**each arm run once**. Every number, table and timeline is in
+[measured](measured.md); all seven runs are summarised [below](#all-seven-runs).
+
+- **Latest aggregated run (2026-10-12):** the model that burst first was
+  served at once, median TTFT (time to first token) 0.07 s against 25.6 s with
+  the same fleet planned but not moved. The second was no worse: same p95
+  (287 s), median 144 s against 215 s. GPU cost not measured.
+- **Both models P/D, latest run (15 000-token prompts):** both bursts were
+  served with sharing: output-heavy p95 0.090 s against 51 s, prompt-heavy
+  p95 6.0 s against 96 s; +39% GPU-seconds. At 20 000-token prompts the
+  prompt-heavy burst was overloaded in every arm.
+- Not yet measured: whole-node or multi-GPU pods, a cluster-wide quota, and
+  the physical GPU limiter.
+
+## Details
+
+### All seven runs
+
+[Two models, anti-phase bursts, under one quota](../../guides/benchmarking/two-model-utilization-share.md)
+runs the same traffic three times: no `optimizer:` block (`today`), `shadow`,
+and acting (`share`).
+
+| Run | What it showed |
+| --- | --- |
+| Same-shape bursts, 4-GPU quota | The first model to rise had headroom serving; the model rising at the swap grew about 5.5 minutes late; +24% GPU-seconds. |
+| Different shapes, 10-GPU quota (two runs) | The second model to burst ran on 3 of its 8 replicas (median 575 s, then 564 s, against 1 s). Fixed since. |
+| With those fixes | First burst gained (12 s against 35 s); second lost (p95 313 s against 139 s): the spare sat on the idle model, draining long outputs. Led to the headroom cap. |
+| With the headroom cap | First burst 0.07 s against 41 s; second reached its fleet sooner; +34% GPU-seconds, mostly an idle-fill bug. |
+| With the idle-fill fix (2026-10-12) | First burst 0.07 s against 25.6 s; second no worse; GPU cost lost to a sampling gap. |
+| Both models P/D, four roles, 10-GPU quota, 20 000-token prompts | Output-heavy burst p95 0.095 s against 42 s; prompt-heavy burst overloaded in every arm (p95 59 s against 73 s); +36% GPU-seconds. Run on vLLM v0.31.0 ([why](measured.md#why-vllm-v0310)). |
+| The same, 15 000-token prompts | Output-heavy burst p95 0.090 s against 51 s; prompt-heavy burst 6.0 s against 96 s, with no failed requests against 116; +39% GPU-seconds. |
+
+Both [P/D runs](measured.md#pd-two-disaggregated-models-under-one-quota) are
+valid; a repeat at 15 000-token prompts is in progress.
+
+### Why it exists
+
+Today's optimizer hands the quota out first come, first served. A model that
+scaled up earlier keeps its GPUs, and one that needs them later is refused,
+even when the quota has room for both. The worst case is a swap: one model's
+load falls while the other's rises, and the rising model is refused for the
+falling model's whole scale-down window.
+
+### More cases where it does not fit
+
 - **There is no limiter.** Without a `limiters:` list the optimizer has no
   budget and stays off (mode `invalid`).
-- **You want idle GPUs given back.** It holds headroom on purpose
-  ([What it costs](#what-it-costs)).
-- **The model that rises at a swap cannot wait.** GPUs held by another model
-  move only through that model's scale-down window: about 5.5 minutes later
-  than today's optimizer in the first benchmark.
-- **Load swings back faster than a move lands.** A move takes about twelve
-  minutes with default settings. Standing still beats moving when load
-  reverses within roughly 100 minutes
+- **A move lands too slowly.** Standing still beats moving when load reverses
+  within roughly 100 minutes
   ([proposal §6.7](../../proposals/utilization-share-optimizer.md#67-why-it-does-not-oscillate-and-what-it-cannot-follow)).
-- **The donors cannot be steered.** A Deployment that is often mid-rollout, or
-  has pods Pending or not Ready, is refused as a donor (`donor-not-steerable`).
+- **The donors cannot be steered.** A Deployment often mid-rollout, or with
+  pods Pending or not Ready, is refused as a donor (`donor-not-steerable`).
 - **The real limit is something else.** If a Kubernetes `ResourceQuota` or
-  unmanaged workloads are what stop pods, a donor's freed GPUs can be taken by
-  a pod the scaling manager did not place (`release-taken`).
+  unmanaged workloads stop pods, a donor's freed GPUs can be taken by a pod the
+  scaling manager did not place (`release-taken`).
 - **A model runs on more than one accelerator type.** It is never planned; it
   stays on today's optimizer.
 
-What it buys: on the most recent aggregated run (2026-10-12), the model that
-burst first was served at once — median time to first token 0.07 s, against
-25.6 s with the same fleet planned but not moved — because GPUs were already
-waiting for it. The model that burst second was no worse off: the same p95
-(287 s), and a median of 144 s against 215 s. That run's GPU cost was not
-measured. On the latest P/D run, both bursts were served with sharing: p95
-90 ms against 51 s for the output-heavy model, and 6.0 s against 96 s for the
-prompt-heavy one, for 39 % more GPU-seconds.
-
-## What it needs
+### What it needs
 
 - A limiter in the **cluster default** policy entry, with accelerators that
-  resolve. Either a quota, which
-  [cap what each tenant may take](../tenant-gpu-quotas/) declares (its key must
-  be the accelerator name the controller logs for your variants, for example
-  `H200` on one cluster and `NVIDIA-H200` on another; its numbers can also be
-  read from Kueue's ClusterQueues: [bound tenants by the quotas Kueue already
-  holds](../kueue-bounded-quotas/)), or the physical GPU inventory that [bound-by-gpus](../bound-by-gpus/) declares, with
-  `physicalGroups: true` in the block. Only the quota has been measured; under
-  the physical limiter the budget is every GPU of a type on the cluster
+  resolve. Either a quota ([cap what each tenant may take](../tenant-gpu-quotas/),
+  or numbers read from [Kueue](../kueue-bounded-quotas/)), or the physical GPU
+  inventory from [bound-by-gpus](../bound-by-gpus/) with `physicalGroups: true`
+  in the block. The quota's key must be the accelerator name the controller
+  logs (for example `H200` on one cluster, `NVIDIA-H200` on another). Only the
+  quota has been measured. Under the physical limiter the budget is every GPU
+  of a type on the cluster
   ([what differs](../../guides/utilization-share/README.md#under-the-physical-gpu-limiter)).
+- The limiter is advisory. Back each tenant namespace with a GPU
+  `ResourceQuota` ([bound at admission](../../guides/admin-cluster-setup/README.md#bound-the-namespaces-gpus-at-admission)).
 - Model servers that drain on termination (`preStop` and
   `terminationGracePeriodSeconds`): a transfer removes a donor pod through an
   ordinary scale-down.
@@ -92,7 +132,15 @@ prompt-heavy one, for 39 % more GPU-seconds.
   nodes, so it plans by GPU count alone and never reports `release-taken`,
   `release-shape-mismatch` or `wrong-pod`.
 
-## How it shares the quota
+### When the controller is out of your reach
+
+With the controller in `wva-<ns>`, the quota and the `optimizer:` block are
+the cluster admin's, in `wva-<ns>`. That controller reads them only at start,
+so the admin runs each step with `RESTART=1`. Your
+[namespace-local map](../../reference/scaling-policy.md#namespace-local-scaling-policy-map)
+sets your models' share weights only.
+
+### How it shares the quota
 
 In the order it is applied:
 
@@ -101,29 +149,32 @@ In the order it is applied:
 2. **The rest is headroom,** shared in proportion to each model's weight
    (`standard` 1, `important` 2, `critical` 4). While the quota cannot hold
    every model's recent peak at once, headroom is capped at
-   `maxHeadroomReplicas` (default 1) times the weight, and the rest stays
+   `maxHeadroomReplicas` (default 1) times the weight. The rest stays
    unassigned, so a model whose demand rises starts pods into it at once.
 3. **A model too far from its share gets GPUs through a transfer:** the
    optimizer marks one donor pod, lowers the donor, waits until the GPUs are
    actually free, and only then raises the receiver. The scale-down always
    comes first.
 
-## Declaring it
+### Declaring it
 
 One `optimizer:` block in the scaling policy's `default` entry, beside the
-limiter, rolled out in two steps: **shadow** (it computes and reports, and
-moves nothing), then **active**. Each step is one `make` target
-(`utilization-share-check`, `-shadow`, `-activate`, `-status`, `-off`) that
-writes the block, waits for the controller to read it and reports a refusal.
-The guide has them in order:
-[Turn on the utilization-share optimizer, safely](../../guides/utilization-share/).
+limiter. It rolls out in two steps, each one `make` target in the guide:
+**shadow** (it computes and reports, and moves nothing), then **active**.
+
+Re-running `make deploy-wva` resets the `default` entry in the controller's
+own ConfigMap to the shipped one, without the block; the limiter is kept
+unless `WVA_LIMITER` says otherwise. After an upgrade, repeat the check,
+shadow and activate steps. Shadow also clears transfer marks the active
+optimizer left
+([why](../../reference/scaling-policy.md#re-running-the-installer-resets-the-default-entry)).
 
 Model owners choose a weight on their own policy entry (`weightClass:
 important`, or `weight:`). A weight buys a larger share of the spare, not
 protection: only a floor (`minReplicaCount`) is never taken
 ([for model owners](../../reference/scaling-policy.md#for-model-owners-what-the-optimizer-may-take-and-how-to-protect-a-model)).
 
-## Four things that surprise people
+### Four things that surprise people
 
 **A missing `shadow` key acts.** `shadow` defaults to `false`, so a block
 without it moves replicas from the next cycle. Write `shadow: true` until you
@@ -134,58 +185,32 @@ acting, after a controller restart or leader change, and when a group first
 appears, every planned model holds what it runs for one fill timeout and shows
 the blocked reason `quiet-period`. Expect it on every upgrade.
 
-**A model that just gave GPUs cannot get them back for a while, even when it is
+**A model that just gave GPUs cannot get them back for a while, even when
 short.** The reversal hold (`reversal-hold`) lasts about twice a release time,
-on the order of 12 minutes with a 300 s scale-down window. Only a hard
-imbalance skips it: the short model at 0.9 or more of its scale-up threshold
-while a donor would stay at 0.6 or less (`stabilization.skipWaitsWhen`).
+around 12 minutes with a 300 s scale-down window. Only a hard imbalance skips
+it: the short model at 0.9 or more of its scale-up threshold while a donor
+would stay at 0.6 or less (`stabilization.skipWaitsWhen`).
 
 **One slow donor slows the whole group.** Release and fill timeouts come from
 the slowest donor in the group: one model with a 30-minute scale-down window
 stretches every transfer. `wva_utilization_share_effective_seconds` shows the
 values in force.
 
-## Verifying it
+### More costs
 
-```promql
-# the mode in force: exactly one series is 1 — off, invalid, shadow or active
-wva_utilization_share_mode{namespace="<controller-namespace>"} == 1
-
-# once active: transfers that ended, by outcome (done is healthy)
-sum by (outcome) (increase(wva_utilization_share_transfers_total{scope="<quota-namespace>"}[1h]))
-```
-
-`namespace` on the mode is the controller's namespace and `scope` is the
-quota's; on a namespace-scoped install both are yours. Rising `aborted`, `fill-timeout` or `wrong-pod` outcomes mean transfers are not
-landing. The guide's [Verification](../../guides/utilization-share/#verification)
-has the check for each rollout step, both ways to read the metrics (Prometheus,
-scoped to your namespace, as a tenant; the controller's endpoint as a cluster
-admin) and what quiet-but-healthy looks like. When it evaluates but never moves
-anything, see
-[troubleshooting](../../reference/troubleshooting.md#the-optimizer-evaluates-but-never-moves-anything).
-
-## What it costs
-
-- **Headroom held ahead of need.** While every peak fits, the fleet holds the
-  whole quota; while they contend, each model holds up to
-  `maxHeadroomReplicas` times its weight above its need. That is the point of
-  the mode, and a cost wherever GPUs could be given back: 24% and 66% more
-  GPU-seconds than today's optimizer in the early runs, when the whole spare
-  was spread. The current build's cost has not been measured.
+- **How much headroom.** While every peak fits, the fleet holds the whole
+  quota. While they contend, each model holds up to `maxHeadroomReplicas`
+  times its weight above its need.
 - **Spare given back, then started again.** While the quota is contended, a
   model above its need plus headroom returns the extra after
   `consecutiveCyclesBeforeMove` cycles, once its load is at or below
-  `stabilization.returnSpareWhenLoadAtMost`. While more than 0.6 x
-  `queueLengthThreshold` requests (3 by default) wait on one of its pods — a
-  P/D decode pod only while its KV cache is full, prefill pods not at all — the
-  return waits, for at most its scale-down window. If its demand comes back
-  after the drain, it starts a pod again, cold
+  `stabilization.returnSpareWhenLoadAtMost`. The return waits, for at most its
+  scale-down window, while more than 0.6 x `queueLengthThreshold` requests (3
+  by default) wait on one of its pods. A P/D decode pod counts only while its
+  KV cache is full; prefill pods not at all. If demand comes back after the
+  drain, it starts a pod again, cold
   ([troubleshooting](../../reference/troubleshooting.md#a-model-shrinks-while-no-other-model-grows)).
-- **A donor replica, with its in-flight requests.** Requests survive only as
-  well as the model server drains.
-- **The receiver waits for the release:** the donor's scale-down window, its
-  drain, then the receiver's own start.
-- **The freeze and the hold** above.
+- **The reversal hold** above.
 - **Capped headroom while no history is stored.** For a new group, or after a
   restart that finds no history in the ConfigMap
   `wva-utilization-share-history`, every model counts at its `maxReplicas`
@@ -195,12 +220,12 @@ anything, see
   version without the optimizer leaves them behind
   ([how to remove them](../../reference/troubleshooting.md#transfer-marks-left-on-pods-after-a-downgrade)).
 
-Some traffic shapes still lose something, in simulation (share of demand left
-unserved). If a model of yours looks like one of these, give it a floor
+Some traffic shapes still lose something in simulation (share of demand left
+unserved). If a model looks like one of these, give it a floor
 ([for model owners](../../reference/scaling-policy.md#for-model-owners-what-the-optimizer-may-take-and-how-to-protect-a-model)):
 
-- **A noisy model beside one that bursts for long.** The noisy model gets its
-  headroom on its average demand rather than at each crest (blocked reason
+- **A noisy model beside one that bursts for long.** The noisy model gets
+  headroom on its average demand, not at each crest (blocked reason
   `fast-swing-capped`): 0.02 to 0.06 more unserved, while the bursting model
   goes from 0.33 to 0.21.
 - **Whole-node models bursting for 20 to 30 minutes in a tight quota.** Moves
@@ -211,26 +236,18 @@ unserved). If a model of yours looks like one of these, give it a floor
   cold-starts them when demand returns (0.038 unserved for a 12-minute dip).
   Stored history avoids it after a restart.
 
-## How it is benchmarked
+### Verifying it
 
-[Two models, anti-phase bursts, under one quota](../../guides/benchmarking/two-model-utilization-share.md)
-runs the same traffic three times, differing only in the `optimizer:` block:
-none (`today`), `shadow`, and acting (`share`). Six runs so far, each arm once,
-two 8B models at 1 GPU per replica:
+The guide's [Verification](../../guides/utilization-share/#verification) has
+the queries for each rollout step, for tenants and admins. Exactly one
+`wva_utilization_share_mode` series is 1 (`off`, `invalid`, `shadow` or
+`active`). Once active, `wva_utilization_share_transfers_total` by `outcome`
+should show `done`; rising `aborted`, `fill-timeout` or `wrong-pod` mean
+transfers are not landing. Its `namespace` label is the controller's and
+`scope` is the quota's. When it evaluates but never moves anything, see
+[troubleshooting](../../reference/troubleshooting.md#the-optimizer-evaluates-but-never-moves-anything).
 
-| Run | What it showed |
-| --- | --- |
-| Same-shape bursts, 4-GPU quota | The first model to rise had headroom serving; the model rising at the swap grew about 5.5 minutes late; +24% GPU-seconds. |
-| Different shapes, 10-GPU quota (two runs) | The second model to burst ran on 3 of its 8 replicas (median 575 s, then 564 s, against 1 s). Fixed since. |
-| With those fixes | First burst gained (12 s against 35 s); second lost (p95 313 s against 139 s): the spare sat on the idle model, draining long outputs. Led to the headroom cap. |
-| With the headroom cap | First burst 0.07 s against 41 s; second reached its fleet sooner; +34% GPU-seconds, mostly an idle-fill bug. |
-| With the idle-fill fix | First burst 0.07 s against 25.6 s; second no worse; GPU cost lost to a sampling gap. |
-| Both models P/D, four roles, 10-GPU quota, 20 000-token prompts | Output-heavy burst 0.095 s against 42 s; prompt-heavy burst overloaded in every arm (p95 59 s against 73 s); +36% GPU-seconds. Run on vLLM v0.31.0 ([why](measured.md#why-vllm-v0310)). |
-| The same, 15 000-token prompts | Output-heavy burst 0.090 s against 51 s; prompt-heavy burst 6.0 s against 96 s, with no failed requests against 116; +39% GPU-seconds. |
-
-Every number, table and timeline is in [measured](measured.md).
-
-## How it is tested
+### How it is tested
 
 - Unit: configuration (`internal/config/utilization_share*_test.go`),
   planning (`internal/engines/allocation/utilization_share_*_test.go`) and the
@@ -246,15 +263,15 @@ Every number, table and timeline is in [measured](measured.md).
   pods under real load; a cluster quota and the `clusterNamespaces` canary
   (unit only); a restart that rebuilds transfers from pod marks (unit only).
 
-## Tuning it
+### Tuning it
 
 Every key (`tolerance`, `reserveGPUs`, `maxHeadroomReplicas`, `shadow`,
 `physicalGroups`, `weightClasses`, `namespaces`, `clusterNamespaces`,
 `stabilization`) and what the optimizer writes on pods:
 [`optimizer` in the scaling policy](../../reference/scaling-policy.md#optimizer-cluster-default-only-live).
-Every metric, transfer outcome and blocked reason:
+Metrics, transfer outcomes and blocked reasons:
 [utilization-share metrics](../../reference/prometheus.md#utilization-share-optimizer-metrics).
 Events: [monitoring](../../reference/monitoring.md#events-on-the-models-scale-targets).
-When it does not do what you expect:
+When it misbehaves:
 [troubleshooting](../../reference/troubleshooting.md#utilization-share-optimizer).
 The design and its simulators: [the proposal](../../proposals/utilization-share-optimizer.md).

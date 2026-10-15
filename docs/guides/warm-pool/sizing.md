@@ -4,29 +4,26 @@
 
 ## Sizing
 
-Two numbers, now in the same object, and they have to agree:
-
-`warmPoolSleepMinSize` is the **reserve**: Pods kept free for the next spike. The
-pool may only warm models into what is left over, so:
+Two numbers sit in the pool's ScaledObject, and they must agree.
+`warmPoolSleepMinSize` is the **reserve**: Pods kept free for the next spike.
+The pool warms models only into what is left over, so:
 
 > **maxReplicaCount must be greater than warmPoolSleepMinSize.**
 
-At equality there is nothing left over, so the pool warms nothing for its entire
-life while holding every accelerator it has. Nothing about it looks like an
-error, because nothing is wrong — the reserve is doing exactly what it was told.
-The scaling manager reports it rather than letting you find out from the bill.
+At equality the pool warms nothing, ever, while holding every accelerator it
+has. Nothing looks like an error, because the reserve is doing what it was told.
+The scaling manager reports it, so you do not find out from the bill.
 
-It is the **ceiling** that matters, not the pool's size right now: a pool
-momentarily at its reserve simply grows on the next pass, but a pool whose
-ceiling *is* its reserve can never grow past it. This is easiest to get wrong
-with a pinned pool, where `min == max` makes the ceiling the only number there is.
+The **ceiling** is what matters, not the current size. A pool momentarily at its
+reserve grows on the next pass; a pool whose ceiling *is* its reserve never can.
+This is easiest to get wrong on a pinned pool (`min == max`).
 
 Start with `maxReplicaCount: 6`, `warmPoolSleepMinSize: "1"`, and raise the
 ceiling if you see borrows blocked.
 
 ### How many models fit in one Pod
 
-A third number, and it lives in the pod template rather than in the trigger:
+A third number lives in the pod template, not the trigger:
 
 ```yaml
 resources:
@@ -34,37 +31,32 @@ resources:
   requests: { memory: 128Gi }
 ```
 
-**This is the warm-set budget.** A level-1 sleeper moves its weights into shared
-memory and the container's cgroup is charged for all of it, so what a Pod can
-hold is decided here and nowhere else. Measured on an H100, a resident model
-costs roughly **2.6 GiB + 1.4× its weights**:
+**This is the warm-set budget.** Measured on an H100, a resident model costs
+about **2.6 GiB + 1.4× its weights**:
 
 | model | weights | charged while asleep | fit in 128Gi |
 | --- | --- | --- | --- |
 | 0.6B | 1.1 GiB | 4.1 GiB | ~30 (capped at 16) |
 | 8B | 14.9 GiB | 23.4 GiB | ~5 |
 
-There is a hard ceiling of 16 instances per Pod, but for anything above about a
-3B model **memory binds first** — you will run out of budget long before ports.
+The hard ceiling is 16 instances per Pod, but above about 3B **memory runs out
+first**.
 
-Two things follow:
-
-- Getting it wrong is the expensive mistake. One model too many does not fail
-  its own admission; it OOM-kills the launcher and takes **every model already
-  resident in that Pod** with it. The scaling manager will not admit against a budget larger
-  than the limit for exactly this reason.
-- Unlike the trigger metadata, changing it **rolls the pool** — it is a
-  pod-template field, so every Pod restarts and every resident model is loaded
-  again. Size it at deploy time; the trigger keys are what is free to retune.
+- **Getting it wrong is expensive.** One model too many does not fail its own
+  admission: it OOM-kills the launcher and takes **every model already resident
+  in that Pod** with it. That is why the scaling manager never admits against a
+  budget larger than the limit.
+- **Changing it rolls the pool.** It is a pod-template field, so every Pod
+  restarts and every resident model loads again. Size it at deploy time; the
+  trigger keys are the ones that are free to retune.
 
 Watch `memory.current`, not `anon`: a sleeper's anonymous memory barely moves,
-so anything watching `anon` reports it as costing nothing.
+so `anon` reports it as costing nothing.
 
 ## Tuning
 
-Everything else is trigger metadata on the pool's ScaledObject. Edits take
-effect on the next reconcile and do **not** restart Pods, so retuning a live
-pool costs nothing.
+Everything else is trigger metadata on the pool's ScaledObject. Edits apply on
+the next reconcile and do **not** restart Pods, so retuning a live pool is free.
 
 | key | does |
 | --- | --- |
@@ -74,41 +66,27 @@ pool costs nothing.
 | `warmPoolPreloadTop` | warm this many of the busiest variants without waiting for a miss |
 | `warmPoolGPUMemoryUtilization` | how much of the card a warm copy claims |
 
-A value that cannot be read refuses the **whole** pool rather than being
-skipped: these decide how many accelerators it holds, so applying some of them
-would leave you reading a number that is in force nowhere. The scaling manager names the pool
-and the key.
+- A value that cannot be read refuses the **whole** pool, and the scaling
+  manager names the pool and the key. These values decide how many accelerators
+  it holds, so applying only some would show you numbers that are in force
+  nowhere.
+- `max-hold` covers an ordinary replica that never arrives, so a failing
+  scale-up cannot turn your reserve into permanent capacity for one variant.
+- `gpu-memory-utilization` trades KV cache for warm-set size. A workload's own
+  value usually claims nearly the whole card, leaving no room for sleepers beside
+  an awake engine, so the pool's default is lower.
 
-`max-hold` bounds the case where the ordinary replica never arrives, so a
-failing scale-up cannot turn your reserve into permanent capacity for one
-variant.
-
-`gpu-memory-utilization` trades KV cache for warm-set size. A workload's own
-value is usually sized for a Pod running one engine and claims nearly the whole
-card, which leaves no room for sleepers beside an awake one; the pool's default
-is lower for that reason.
-
-What you do **not** configure here: how many accelerators a Pod holds and how
-much memory it may use. Both are read from the pool Pod's own spec, so they
-cannot disagree with it — but the memory limit is still a decision, and a
-load-bearing one. See [How many models fit in one Pod](#how-many-models-fit-in-one-pod).
-
-**Why the tuning is not on the Deployment.** A warm pool is a scaling-manager concept that
-happens to have Pods, not a workload the scaling manager happens to manage: nothing outside the scaling manager
-reads one or creates one. Declaring it through a trigger keeps one rule with no
-exceptions — the scaling manager manages what it is called about — and puts the reserve beside
-the ceiling it has to fit inside.
+You do **not** set here how many accelerators a Pod holds or how much memory it
+may use. Both are read from the pool Pod's own spec, so they cannot disagree with
+it. The memory limit is still a load-bearing decision: see [How many models fit
+in one Pod](#how-many-models-fit-in-one-pod).
 
 ## Letting the pool resize itself
 
-The pool is scaled the same way every other workload here is: **the scaling manager computes a
-size, KEDA writes it.** `config/warmpool` ships a ScaledObject for the pool
-alongside its Deployment, and it is not optional: the trigger is what
-**declares** the pool to the scaling manager. Delete it and you do not get a fixed-size pool,
-you get no pool at all — a Deployment holding accelerators that the scaling manager reports as
-undeclared and will never warm anything into. To pin the size, set
-`minReplicaCount` equal to `maxReplicaCount` and leave the ScaledObject in
-place.
+The pool scales like every other workload here: **the scaling manager computes a
+size, KEDA writes it.** `config/warmpool` ships a ScaledObject beside the
+Deployment, and it is not optional: the trigger **declares** the pool. To pin
+the size, see [Keeping the pool a fixed size](#keeping-the-pool-a-fixed-size).
 
 ```yaml
 spec:
@@ -126,40 +104,21 @@ spec:
         warmPoolName: default   # must match the Deployment's llm-d.ai/warm-pool
 ```
 
-The scaling manager publishes `lent + reserve + 1`: enough Pods to keep the reserve free
-alongside whatever is currently bridging, plus the one spare that makes
-admission possible at all.
+The scaling manager publishes `lent + reserve + 1`: the Pods now bridging, the
+free reserve, and one spare that makes admission possible at all.
 
-Three things follow from scaling it this way, and they are the reason for it:
+- **`minReplicaCount` must exceed the reserve**, or the pool spends every quiet
+  period unable to warm anything.
+- **Grow fast, shrink slowly** is the `behavior` block above. Too small costs
+  latency on every spike; too large costs money; growing back costs a full model
+  load.
 
-- **the scaling manager needs no permission to resize anything.** Its ClusterRole stays
-  read-only. A cluster-wide licence to change replica counts is the permission a
-  cluster admin is most right to refuse, and the pool no longer asks for one.
-- **The asymmetry lives where you can see it.** Grow promptly, shrink slowly —
-  because a pool that is too small costs latency on every spike it cannot cover,
-  one that is too large costs money, and paying a full model load to grow back
-  is the worst of both. That is the `behavior` block, not something buried in
-  the controller.
-- **`minReplicaCount` must exceed the reserve.** Otherwise the pool spends every
-  quiet period in the one state where it can never warm anything.
-
-**Under a quota the pool asks only for what the namespace can pay for.** A
-pool that cannot yet name its accelerator — no readable Pod, or Pods on nodes
-without a product label — holds at its current size under a bounded namespace
-until it can; without a limiter it grows regardless. A pool already above its
-allowance (a quota lowered after the fact) is not shrunk by this; it simply
-does not grow. The pool's GPUs are charged against the same allowance
-as model replicas, and the size the scaling manager publishes is capped at what it holds plus
-what that allowance leaves — the log line is
-`warm pool is not growing: the namespace has no GPU allowance left for it`,
-with the figures. The check is ordered, not merely present: after the pool
-charges a new Pod it holds its size for one optimize cycle, until the
-allowance has accounted for that Pod (`warm pool is holding its size until the
-namespace allowance has accounted for the Pods it holds`), and only then grows
-or is capped. Without that hold a pool that had just taken its first Pod sized
-itself against an allowance that still credited the namespace with it, and a
-one-GPU quota ended up with three Pods. Without a limiter nothing bounds the
-pool and it grows straight to `lent + reserve + 1`.
+**Under a quota the pool asks only for what the namespace can pay for.** Its
+GPUs count against the same allowance as model replicas, and the published size
+is capped at what it holds plus what the allowance leaves. The log then says
+`warm pool is not growing: the namespace has no GPU allowance left for it`, with
+the figures. Without a limiter nothing bounds the pool and it grows straight to
+`lent + reserve + 1`. See [Details](#details) for the edge cases.
 
 ### Keeping the pool a fixed size
 
@@ -170,23 +129,38 @@ minReplicaCount: 3
 maxReplicaCount: 3
 ```
 
-KEDA accepts it, the HPA is created with min and max both 3, and the pool stays
-there whatever the scaling manager publishes.
+KEDA creates the HPA with min and max both 3, and the pool stays there whatever
+the scaling manager publishes.
 
-This is the **only** way to pin a pool. Deleting the ScaledObject does not give
-you a fixed pool — it gives you no pool at all, because the trigger is what
-declares it. The Deployment keeps its accelerators and the scaling manager reports it as
-undeclared.
+- This is the **only** way to pin a pool. Deleting the ScaledObject gives you no
+  pool at all: the Deployment keeps its accelerators and the scaling manager
+  reports it as undeclared.
+- With `min == max`, `maxReplicaCount` must still exceed `warmPoolSleepMinSize`.
+- A pinned pool never relieves its own blocked borrows: `outcome="blocked"` keeps
+  appearing until you raise the numbers. A fixed GPU budget is easier to reason
+  about, and that is a fair trade.
+- Never scale the pool to zero. The first spike after a quiet period then pays a
+  full cold start, and the pool is ready just after the spike is over.
 
-Watch the ceiling when you pin: with `min == max`, `maxReplicaCount` is the only
-number there is, so it must still exceed `warmPoolSleepMinSize` or the pool can
-never warm anything.
+## Details
 
-A pinned pool never relieves its own blocked borrows: if `outcome="blocked"`
-appears, it will keep appearing until you raise the numbers. That is the trade
-you are choosing, and it is a legitimate one — a fixed GPU budget is easier to
-reason about than an elastic one.
-
-Never scale the pool to zero. A pool at zero holds nothing warm, so the first
-spike after a quiet period pays a full cold start — and then the pool grows,
-loads a model, and is ready exactly in time for the spike that is already over.
+- **Why memory is the budget.** A level-1 sleeper moves its weights into shared
+  memory, and the container's cgroup is charged for all of it. What a Pod can
+  hold is decided by its memory limit and nothing else.
+- **Why the tuning is on the trigger, not the Deployment.** A warm pool is a
+  scaling-manager concept that happens to have Pods; nothing outside the scaling
+  manager reads or creates one. Declaring it through a trigger keeps one rule
+  (the scaling manager manages what it is called about) and puts the reserve
+  beside the ceiling it must fit inside.
+- **Why KEDA resizes it.** The scaling manager's ClusterRole stays read-only. A
+  cluster-wide licence to change replica counts is the permission an admin is
+  most right to refuse, and the pool does not ask for one.
+- **Quota edge cases.** A pool that cannot yet name its accelerator (no readable
+  Pod, or Pods on nodes without a product label) holds its size under a bounded
+  namespace until it can; without a limiter it grows regardless. A pool already
+  above its allowance (a quota lowered later) is not shrunk; it just does not
+  grow. After the pool charges a new Pod it holds its size for one optimize
+  cycle, until the allowance has counted that Pod (`warm pool is holding its size
+  until the namespace allowance has accounted for the Pods it holds`). Without
+  that hold, a pool that had just taken its first Pod sized itself against an
+  allowance that still credited it, and a one-GPU quota ended up with three Pods.

@@ -1,182 +1,167 @@
 # Run the scaling manager locally for debugging (connects to Cluster & Prometheus)
 
-This guide shows how to run the llm-scaling-manager locally while letting it communicate with your Kubernetes/OpenShift cluster and Prometheus using an SSH tunnel and a ServiceMonitor.
-
-### Quick summary
-- Purpose: Run the scaling manager locally (IDE or terminal) and let Prometheus in-cluster scrape the local /metrics endpoint via an SSH tunnel.
-- Outcome: Prometheus scrapes your local controller instance's metrics and the scaling manager can query Prometheus in the cluster.
+Run the llm-scaling-manager on your machine (IDE or terminal) against a real
+cluster. An SSH tunnel lets the cluster reach your process: Prometheus scrapes
+its `/metrics`, and KEDA can call its external scaler. Your process queries the
+cluster's Prometheus through a port-forward.
 
 [![debugging-with-remote-clusters.png](debugging-with-remote-clusters.png)](debugging-with-remote-clusters.png)
 
-### Prerequisites
-- kubectl configured to talk to the target cluster (set KUBECONFIG if needed)
-- A local shell that can run ssh and kubectl
-- The scaling manager is installed but scaled down to zero replicas in the cluster
+## Prerequisites
 
-### Steps
+- `kubectl` configured for the target cluster (set `KUBECONFIG` if needed).
+- A shell that can run `ssh` and `kubectl`.
+- The scaling manager installed in the cluster, scaled to zero replicas.
 
-1) Create a secret `ssh-key` in a namespace of your choice (e.g., `debugging`):
-```yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: ssh-key
-type: Opaque
-stringData:
-  id_ed25519.pub: |
-    <your-ssh-public-key-here>
-```
+## Steps
 
-2) Deploy helper manifests
+1. Create a Secret `ssh-key` with your public key, in a namespace of your
+   choice (here `debugging`):
 
-Apply the manifests that create the SSH gateway (SSH server) and the RBAC objects in the cluster. See `debugging-ssh-tunnel.yaml` in this directory for an example manifest:
+   ```yaml
+   apiVersion: v1
+   kind: Secret
+   metadata:
+     name: ssh-key
+   type: Opaque
+   stringData:
+     id_ed25519.pub: |
+       <your-ssh-public-key-here>
+   ```
 
-```shell
-kubectl apply -f debugging-ssh-tunnel.yaml
-```
+2. Deploy the SSH gateway and its RBAC
+   ([`debugging-ssh-tunnel.yaml`](debugging-ssh-tunnel.yaml) in this directory).
+   Its Service exposes `22` (ssh), `8443` (metrics) and `9090` (external scaler):
 
-3) Create a token for the `ssh-gateway` ServiceAccount
+   ```shell
+   kubectl apply -f debugging-ssh-tunnel.yaml
+   ```
 
-This token will be used by the ServiceMonitor and by in-cluster curl checks to authenticate to your local controller metrics endpoint:
+3. Create a token for the `ssh-gateway` ServiceAccount. The ServiceMonitor and
+   the curl checks below use it:
 
-```shell
-kubectl -n debugging create token ssh-gateway --duration=24h > /tmp/wva.token
-```
+   ```shell
+   kubectl -n debugging create token ssh-gateway --duration=24h > /tmp/wva.token
+   ```
 
-4) Port-forward Prometheus (thanos-querier) and the SSH gateway service
+4. Port-forward Prometheus (thanos-querier) and the SSH gateway:
 
-We forward the thanos-querier so the scaling manager (running locally) can query Prometheus via localhost, and forward the SSH gateway service so an SSH tunnel can be established.
+   ```shell
+   # Prometheus at localhost:9091, for your local process
+   kubectl port-forward -n openshift-monitoring svc/thanos-querier 9091:9091
 
-```shell
-# forward thanos-querier => local 9091
-kubectl port-forward -n openshift-monitoring svc/thanos-querier 9091:9091
+   # SSH gateway at localhost:2222
+   kubectl port-forward -n debugging svc/ssh-gateway 2222:22 &
+   ```
 
-# forward ssh-gateway service => local 2222 (run in background if desired)
-kubectl port-forward -n debugging svc/ssh-gateway 2222:22 &
-```
+5. Open a reverse SSH tunnel from the cluster to your machine. Keep the session
+   open while you debug:
 
-5) Create a reverse SSH tunnel (cluster -> local)
+   ```shell
+   ssh -o StrictHostKeyChecking=no \
+       -o UserKnownHostsFile=/dev/null \
+       -p 2222 \
+       -R 0.0.0.0:8443:localhost:8443 \
+       -R 0.0.0.0:9090:localhost:9090 \
+       linuxserver.io@localhost
+   ```
 
-From your local machine, open an SSH connection to the SSH Gateway pod and set up reverse port forwarding so the cluster can reach your the scaling manager metrics endpoint at https://localhost:8443.
+   Each `-R 0.0.0.0:<port>:localhost:<port>` opens that port on the gateway pod
+   for other pods: `8443` for metrics, `9090` for the external scaler.
 
-```shell
-ssh -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
-    -p 2222 \
-    -R 0.0.0.0:8443:localhost:8443 \
-    linuxserver.io@localhost
-```
+6. Create a ServiceMonitor so the in-cluster Prometheus scrapes your metrics
+   through the gateway:
 
-Notes:
-- The `-R 0.0.0.0:8443:localhost:8443` exposes port 8443 on the remote (cluster) side so other pods (and Prometheus) can reach your local controller.
-- Keep the SSH session open while debugging.
+   ```yaml
+   apiVersion: monitoring.coreos.com/v1
+   kind: ServiceMonitor
+   metadata:
+     name: tunnel-metrics-monitor
+     namespace: openshift-user-workload-monitoring
+   spec:
+     endpoints:
+       - bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+         interval: 10s
+         path: /metrics
+         port: metrics
+         scheme: https
+         tlsConfig:
+           insecureSkipVerify: true
+     namespaceSelector:
+       matchNames:
+         - debugging
+     selector:
+       matchLabels:
+         app: ssh-gateway
+   ```
 
-6) Create a ServiceMonitor (example)
+7. Set the environment:
 
-Use this ServiceMonitor (or adapt it) so the in-cluster Prometheus scrapes the SSH Gateway service which forwards to your local controller metrics:
+   ```shell
+   export GLOBAL_OPT_INTERVAL=60s
+   export KUBECONFIG=/path/to/your/kubeconfig
+   export PROMETHEUS_BASE_URL=https://127.0.0.1:9091
+   export PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true
+   export PROMETHEUS_BEARER_TOKEN="$(</tmp/wva.token)"
+   export WVA_SCALE_TO_ZERO=false
+   ```
 
-```yaml
-apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
-metadata:
-  name: tunnel-metrics-monitor
-  namespace: openshift-user-workload-monitoring
-spec:
-  endpoints:
-    - bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
-      interval: 10s
-      path: /metrics
-      port: metrics
-      scheme: https
-      tlsConfig:
-        insecureSkipVerify: true
-  namespaceSelector:
-    matchNames:
-      - debugging
-  selector:
-    matchLabels:
-      app: ssh-gateway
-```
+8. Run the scaling manager:
 
-Apply it (if you need to):
+   ```shell
+   /path/to/wva/binary --metrics-bind-address :8443 --metrics-secure=true --v=4
+   ```
 
-```shell
-kubectl apply -f path/to/your/servicemonitor.yaml
-```
+   Metrics are served on `https://localhost:8443`, and in the cluster at
+   `https://ssh-gateway.debugging.svc.cluster.local:8443`. The external scaler
+   listens on `:9090` (`--external-scaler-bind-address`).
 
-7) Environment variables — set these before running the scaling manager locally
+9. Point a workload at your process. The controller scales only what KEDA asks
+   it about, and KEDA dials the address in each ScaledObject's
+   `scalerAddress` (normally the in-cluster `wva-external-scaler` Service on
+   `9090`). Set that field on one ScaledObject to
+   `ssh-gateway.debugging.svc.cluster.local:9090`.
 
-Example (adjust paths and values as needed):
+Log verbosity comes only from `--v=N` (`cmd/main.go`, default 2); `--v=4` shows
+debug lines. `config/base/manager/deployment.yaml` sets `LOG_LEVEL: info`, but no
+code reads it. To raise verbosity in a cluster, add `--v=4` to the manager
+container's `args`.
 
-```shell
-export GLOBAL_OPT_INTERVAL=60s
-export KUBECONFIG=/path/to/your/kubeconfig
-export PROMETHEUS_BASE_URL=https://127.0.0.1:9091
-export PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true
-export PROMETHEUS_BEARER_TOKEN="$(</tmp/wva.token)"
-export WVA_SCALE_TO_ZERO=false
-```
-
-8) Run the scaling manager locally
-
-Start the scaling manager from your IDE or terminal. With the environment variables above, the scaling manager should query Prometheus via the forwarded thanos-querier and expose metrics on https://localhost:8443, reachable from the cluster via the SSH tunnel at https://ssh-gateway.debugging.svc.cluster.local:8443.
-
-```shell
-/path/to/wva/binary --metrics-bind-address :8443 --metrics-secure=true --v=4
-```
-
-Log verbosity is set only by the `--v=N` flag (`cmd/main.go`, default 2);
-`--v=4` shows debug lines. There is no log-level environment variable:
-`config/base/manager/deployment.yaml` still sets `LOG_LEVEL: info`, but no code
-path reads it, and changing it changes nothing. To raise verbosity in a cluster,
-add `--v=4` to the manager container's `args`.
-
-A controller run this way decides nothing on its own. Workloads register only
-through KEDA's external-scaler calls, and KEDA dials the in-cluster
-`wva-external-scaler:9090` Service named in each ScaledObject's
-`scalerAddress`, not your machine. To have the local process size a workload,
-point that ScaledObject's `scalerAddress` at it (for example through the SSH
-tunnel above).
-
-### Troubleshooting / verification
-
-
-- Check the local metrics endpoint (from your machine):
+## Verification
 
 ```shell
+# From your machine
 curl -k https://localhost:8443/metrics -H "Authorization: Bearer $(</tmp/wva.token)"
-```
 
-- From inside the SSH Gateway pod (verify it reaches your local controller):
-
-```shell
+# From the gateway pod (proves the tunnel reaches your process)
 kubectl exec -n debugging deploy/ssh-gateway -- \
   curl -k https://localhost:8443/metrics -H "Authorization: Bearer $(</tmp/wva.token)"
 ```
 
-- From another pod in the cluster (replace service/namespace if needed):
+From any other pod: `https://ssh-gateway.debugging.svc.cluster.local:8443/metrics`.
 
-```text
-https://ssh-gateway.debugging.svc.cluster.local:8443/metrics
-```
+If something does not work:
 
-#### Troubleshooting checklist
+- Are the port-forwards still running? Re-run them.
+- Is the SSH session still connected?
+- Read your local logs for TLS or auth errors.
+- Read the Prometheus and Prometheus Operator logs in `openshift-monitoring`
+  and `openshift-user-workload-monitoring`.
+- A 401/403 from the ServiceMonitor: the token in `/tmp/wva.token` must belong
+  to the ServiceAccount the ServiceMonitor uses.
 
-- Are port-forward sessions running? Use `ps` or re-run the `kubectl port-forward` commands.
-- Is the SSH tunnel open and active? The SSH client should be connected and not exited.
-- Inspect local controller logs for errors and TLS/auth issues.
-- Check Prometheus / Prometheus Operator logs in `openshift-monitoring` and `openshift-user-workload-monitoring`.
-- If the ServiceMonitor returns 401/403, ensure the token at `/tmp/wva.token` matches the ServiceAccount used by the ServiceMonitor.
+**Security.** These steps skip TLS verification and use a 24h token, for a
+local debug loop only. Do not use them in production.
 
-#### Security notes
+## FAQ
 
-- The examples use insecure TLS settings (insecureSkipVerify) for convenience in a local debug flow — do not use these in production.
-- The token created is short-lived in the example (24h). Rotate or revoke tokens as appropriate.
-
-### FAQ / tips
-
-- Q: Why forward thanos-querier? A: The scaling manager queries Prometheus via the thanos-querier endpoint in the cluster; forwarding makes that endpoint available at localhost for local debugging.
-- Q: Why use reverse SSH (-R)? A: It lets the cluster reach your local service without exposing your machine directly to the cluster network. The scaling manager exposes metrics to actuate scaling decisions.
-- Q: I can't create the service account or the related cluster-wide roles and rolebindings as I do not have sufficient permissions in the cluster. A: You can use an existing service account with sufficient permissions instead. Just ensure the SSH Gateway deployment uses that service account and creates a token for that service account for running the scaling manager.
-
----
+- **Why forward thanos-querier?** The scaling manager reads metrics from
+  Prometheus; the port-forward makes the cluster's endpoint reachable on
+  localhost.
+- **Why a reverse SSH tunnel?** It lets the cluster reach your process without
+  exposing your machine to the cluster network. Actuation goes through the
+  gRPC external scaler: KEDA calls it and scales the workload. `/metrics` is
+  for observation only.
+- **I may not create the ServiceAccount or the cluster roles.** Use an existing
+  ServiceAccount with enough permissions: run the gateway Deployment under it
+  and create the token for it.

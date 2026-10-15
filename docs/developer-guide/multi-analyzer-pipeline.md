@@ -381,11 +381,7 @@ inside the scale-down gate. (Saturation's separate role as the shared
 metrics-collection layer — cache size, replica cost, etc., feeding every
 analyzer and the cost optimizer — is unaffected; that collection either
 succeeds for everyone or, if it fails, every analyzer ends up non-live and
-the safety floor below applies.) The queueing-model optimize path
-(`optimizeQueueingModel`) is a separate, older code path that does not yet
-run through this liveness tracking; its `NamedAnalyzerResult` sets `Live:
-true` statically so it keeps scaling down as before. It will pick up real
-liveness tracking when it becomes a first-class multi-analyzer participant.
+the safety floor below applies.)
 
 Liveness reflects whether an analyzer has a current *capacity* (supply-side)
 signal — it does not gate on the *demand* signal. A falsely-low demand value
