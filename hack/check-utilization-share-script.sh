@@ -54,6 +54,18 @@ optimizer:
     shadow: true
     maxHeadroomReplicas: 2"
 
+CLUSTER_POLICY='scaleUpThreshold: 0.85
+limiters:
+  - name: cluster-quota
+    type: quota
+    scope: cluster
+    quotas:
+      NVIDIA-H200: 16
+optimizer:
+  type: utilizationShare
+  utilizationShare:
+    shadow: true'
+
 expect() { # expect <name> <want> <got>
     case_
     if [ "$2" = "$3" ]; then ok "$1"; else fail "$1: want [$2], got [$3]"; fi
@@ -69,6 +81,8 @@ expect "quota keys" "NVIDIA-H200" "$(printf '%s\n' "$QUOTA_POLICY" | us_quota_ke
 expect "state: no block" "off plain" "$(printf '%s\n' "$QUOTA_POLICY" | us_block_state)"
 expect "state: tuned shadow" "shadow plain" "$(printf '%s\n' "$TUNED_POLICY" | us_block_state)"
 expect "state: another optimizer" "other:fancy plain" "$(printf 'optimizer:\n  type: fancy\n' | us_block_state)"
+expect "budget: quotas per namespace share nothing" namespace "$(printf '%s\n' "$QUOTA_POLICY" | us_budget_scope)"
+expect "budget: a cluster quota is shared" cluster "$(printf '%s\n' "$CLUSTER_POLICY" | us_budget_scope)"
 
 out="$(printf '%s\n' "$TUNED_POLICY" | us_policy_with_mode active)"
 expect "active: shadow false" false "$(printf '%s\n' "$out" | yq '.optimizer.utilizationShare.shadow')"
@@ -290,10 +304,10 @@ fresh "$TUNED_POLICY"; echo yes > "$STATE/cani.team-a"; run activate
 vcase "activate: no grant where the controller can already patch pods" \
     eval '[ $RC -eq 0 ] && ! grep -q "^kind: Role$" "$STATE/applied" 2>/dev/null && says "can already patch pods in team-a"'
 
-# The budget spans namespaces; activate grants only in its own. Each other
-# namespace whose models call this controller and where it may not patch is
-# named, with the command -- and nothing is granted there.
-fresh "$TUNED_POLICY"
+# A cluster budget spans namespaces; activate grants only in its own. Each
+# other namespace whose models call this controller and where it may not patch
+# is named, with the command -- and nothing is granted there.
+fresh "$CLUSTER_POLICY"
 printf '%s\n' \
     'team-a wva-external-scaler.team-a.svc.cluster.local:9090 -' \
     'team-b wva-external-scaler.team-a.svc.cluster.local:9090 -' \
@@ -304,9 +318,39 @@ echo yes > "$STATE/cani.team-c"
 run activate
 vcase "activate: warns about each other namespace of the budget without a grant, and grants only its own" \
     eval '[ $RC -eq 0 ] && says "may not patch pods in team-b" && says "activate -n team-b --controller-namespace team-a" && ! says "pods in team-c" && ! says "pods in team-d" && ! says "pods in team-e" && ! grep -q "namespace: team-b" "$STATE/applied"'
-fresh "$TUNED_POLICY"; touch "$STATE/sos.forbidden"; run activate
+fresh "$CLUSTER_POLICY"; touch "$STATE/sos.forbidden"; run activate
 vcase "activate: an unreadable ScaledObject list is warned as unknown, not taken for none" \
     eval '[ $RC -eq 0 ] && says "other namespaces sharing this budget are unknown"'
+
+# Only the namespaces of THIS budget. Quotas per namespace share nothing, so
+# team-b, scaled by the same controller, is not this budget's concern.
+fresh "$TUNED_POLICY"
+printf '%s\n' \
+    'team-a wva-external-scaler.team-a.svc.cluster.local:9090 -' \
+    'team-b wva-external-scaler.team-a.svc.cluster.local:9090 -' \
+    'team-c wva-external-scaler.team-a.svc.cluster.local:9090 -' \
+    'team-d wva-external-scaler.team-a.svc.cluster.local:9090 pool' \
+    'team-e wva-external-scaler.other.svc.cluster.local:9090 -' > "$STATE/sos"
+run activate
+vcase "activate: quotas per namespace warn about no other namespace" \
+    eval '[ $RC -eq 0 ] && ! says "pods in team-b" && says "no other namespace shares this budget"'
+# clusterNamespaces limits a cluster budget to the namespaces it lists.
+fresh "$(printf '%s\n' "$CLUSTER_POLICY" | yq '.optimizer.utilizationShare.clusterNamespaces = ["team-a", "team-c"]')"
+printf '%s\n' \
+    'team-a wva-external-scaler.team-a.svc.cluster.local:9090 -' \
+    'team-b wva-external-scaler.team-a.svc.cluster.local:9090 -' \
+    'team-c wva-external-scaler.team-a.svc.cluster.local:9090 -' \
+    'team-d wva-external-scaler.team-a.svc.cluster.local:9090 pool' \
+    'team-e wva-external-scaler.other.svc.cluster.local:9090 -' > "$STATE/sos"
+run activate
+vcase "activate: clusterNamespaces limits the warning to the namespaces it lists" \
+    eval '[ $RC -eq 0 ] && ! says "pods in team-b"'
+# A trigger whose address names no controller cannot be attributed: warned.
+fresh "$CLUSTER_POLICY"
+printf '%s\n' 'team-a wva-external-scaler.team-a.svc.cluster.local:9090 -' 'team-g 10.1.2.3:9090 - llama' > "$STATE/sos"
+run activate
+vcase "activate: a ScaledObject whose address names no controller is warned about" \
+    eval '[ $RC -eq 0 ] && says "team-g (10.1.2.3:9090)"'
 
 fresh "$TUNED_POLICY"; run activate
 vcase "activate: from shadow sets shadow false, keeps tuning" \
@@ -468,7 +512,7 @@ vcase "logs: every controller pod is read, not one that may be a standby" eval '
 fresh "$QUOTA_POLICY"; echo '{"level":"info","msg":"x","accelerator":"NVIDIA-H200"}' > "$STATE/logs"; run check
 vcase "check: reads accelerators from a json-encoded log" eval '[ $RC -eq 0 ] && says "resolves: NVIDIA-H200"'
 
-CASES_EXPECTED=73
+CASES_EXPECTED=78
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. A case was added or removed; update CASES_EXPECTED deliberately."
 fi

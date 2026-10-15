@@ -88,6 +88,23 @@ us_quota_keys() {
     yq -r '[.limiters[]? | select(.type == "quota") | .. | select(tag == "!!int") | path | .[-1]] | unique | .[]'
 }
 
+# us_budget_scope -- namespace when every quota entry is per namespace, so no
+# two namespaces share a budget; cluster otherwise (a cluster quota, or the
+# inventory, which is cluster-wide).
+us_budget_scope() {
+    local p scopes
+    p="$(cat)"
+    [ "$(printf '%s\n' "$p" | us_limiter_kind)" = quota ] || { echo cluster; return 0; }
+    scopes="$(printf '%s\n' "$p" | yq -r '[.limiters[]? | select(.type == "quota") | .scope // ""] | unique | join(" ")')" || return 1
+    if [ "$scopes" = namespace ]; then echo namespace; else echo cluster; fi
+}
+
+# us_cluster_namespaces -- the block's clusterNamespaces, one per line: the only
+# namespaces a cluster budget's groups plan when it lists any.
+us_cluster_namespaces() {
+    yq -r '(.optimizer.utilizationShare.clusterNamespaces // [])[]'
+}
+
 # us_block_state lives in lib/pod_writer.sh, which the installer shares.
 
 # us_policy_with_mode <shadow|active|off> [physical] -- the policy with the
@@ -510,24 +527,40 @@ verb_shadow() {
     info "shadow computes and reports and moves nothing. Read 'status' over a few bursts before 'activate'."
 }
 
-# warn_ungranted_namespaces -- the optimizer moves pods in every namespace whose
-# models share the budget, and activate grants only in NS. So it names each
-# other namespace it can see -- one holding a ScaledObject that calls this
+# warn_ungranted_namespaces -- activate grants only in NS, and the optimizer
+# also moves pods in the other namespaces of the same budget. So it names each
+# of those it can see -- a namespace holding a ScaledObject that calls this
 # controller -- where the controller may not patch pods, with the command that
-# grants it there. It grants nothing there itself. A list it cannot read is
-# said, not taken for none.
+# grants it there. It grants nothing there itself.
+#
+# Which namespaces share the budget, from the policy: none when every quota is
+# per namespace; with a cluster quota or the inventory, every namespace, or
+# only those in clusterNamespaces when the block lists some. A cluster budget
+# is split per accelerator, which this script cannot see, so the warning says
+# "if". A list it cannot read is said, not taken for none.
 warn_ungranted_namespaces() {
-    local list ns
+    local list ns only odd
+    if [ "$(printf '%s\n' "$POLICY" | us_budget_scope)" = namespace ]; then
+        info "every quota is per namespace, so no other namespace shares this budget"
+        return 0
+    fi
+    only="$(printf '%s\n' "$POLICY" | us_cluster_namespaces)" || die "could not parse the policy in $POLICY_NS/$POLICY_CM"
     if ! list="$(wva_pod_writer_namespaces "$CONTROLLER_NS" models 2>&1)"; then
         warn "could not list ScaledObjects cluster-wide, so other namespaces sharing this budget are unknown (${list:0:300}). Run activate in each of them, or the optimizer cannot move their pods"
         return 0
     fi
+    if odd="$(wva_pod_writer_namespaces "$CONTROLLER_NS" unattributed 2>/dev/null)" && [ -n "$odd" ]; then
+        warn "ScaledObjects whose scalerAddress does not say which controller they call: $(printf '%s\n' "$odd" | awk '{printf "%s (%s) ", $1, $2}'). If one calls this controller and shares this budget, run activate in its namespace too"
+    fi
     for ns in $list; do
         [ "$ns" != "$NS" ] || continue
+        if [ -n "$only" ] && ! grep -qxF -- "$ns" <<<"$only"; then
+            continue
+        fi
         case "$(wva_pod_writes_allowed "$ns" "$CONTROLLER_NS")" in
             yes) ;;
-            no) warn "the controller may not patch pods in $ns, where it also scales models: the optimizer cannot move their pods. Run: deploy/utilization-share.sh activate -n $ns --controller-namespace $CONTROLLER_NS" ;;
-            *) warn "could not tell whether the controller may patch pods in $ns, where it also scales models. If they share this budget, run: deploy/utilization-share.sh activate -n $ns --controller-namespace $CONTROLLER_NS" ;;
+            no) warn "the controller may not patch pods in $ns. If its models use the same accelerator, they share this budget and the optimizer cannot move their pods. Run: deploy/utilization-share.sh activate -n $ns --controller-namespace $CONTROLLER_NS" ;;
+            *) warn "could not tell whether the controller may patch pods in $ns. If its models use the same accelerator, they share this budget; run: deploy/utilization-share.sh activate -n $ns --controller-namespace $CONTROLLER_NS" ;;
         esac
     done
 }
