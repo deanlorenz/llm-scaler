@@ -6,6 +6,23 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 )
 
+// maxReplicaCount bounds every replica count converted from a float. A
+// float64 at or above 2^63 converts to an int that is negative on amd64, and
+// the guards below then read a need that overflowed as no need at all.
+const maxReplicaCount = math.MaxInt32
+
+// replicaCount converts a non-negative replica count to an int, at most
+// maxReplicaCount. A NaN or a negative count is 0.
+func replicaCount(x float64) int {
+	if !(x > 0) {
+		return 0
+	}
+	if x >= maxReplicaCount {
+		return maxReplicaCount
+	}
+	return int(x)
+}
+
 // replicasForDemand returns ceil(demand/prc) — the single shared definition
 // of "how many replicas does this demand need at this per-replica capacity".
 // Every partial-replica-rounding site
@@ -15,16 +32,12 @@ import (
 // Returns 0 when prc <= 0 (no capacity to divide by — the same "no basis"
 // reading roleBottleneckReplicas and safeRemovalReplicasForRole already use)
 // or when the result would be negative (a negative demand is not a
-// meaningful replica count).
+// meaningful replica count), and at most maxReplicaCount.
 func replicasForDemand(demand, prc float64) int {
 	if prc <= 0 {
 		return 0
 	}
-	n := int(math.Ceil(demand / prc))
-	if n < 0 {
-		return 0
-	}
-	return n
+	return replicaCount(math.Ceil(demand / prc))
 }
 
 // safeReplicasForSpare returns floor(spare/prc) — the single shared
@@ -40,11 +53,7 @@ func safeReplicasForSpare(spare, prc float64) int {
 	if prc <= 0 {
 		return 0
 	}
-	n := int(math.Floor(spare / prc))
-	if n < 0 {
-		return 0
-	}
-	return n
+	return replicaCount(math.Floor(spare / prc))
 }
 
 // demandForRoleOrModel returns nr's demand for role — the single shared

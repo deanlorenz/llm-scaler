@@ -1,14 +1,16 @@
 package domain
 
-// RoleOfVC canonicalizes a VariantCapacity's role: an empty role is
-// domain.RoleBoth, matching aggregation.AggregateByRole's convention.
-//
-// This is the only copy of this logic. It lives in domain, not steadystate,
-// because steadystate already imports allocation and allocation calls this
-// too; allocation importing steadystate would be an import cycle.
-func RoleOfVC(vc VariantCapacity) string {
-	if vc.Role == "" {
+// CanonicalRole reads an empty role as RoleBoth. Every role comparison goes
+// through it -- the analyzers, aggregation and the composite -- so a variant
+// with no role label is keyed the same way everywhere.
+func CanonicalRole(role string) string {
+	if role == "" {
 		return RoleBoth
 	}
-	return vc.Role
+	return role
+}
+
+// RoleOfVC is vc's role, canonicalized (CanonicalRole).
+func RoleOfVC(vc VariantCapacity) string {
+	return CanonicalRole(vc.Role)
 }

@@ -106,7 +106,7 @@ func (e *Engine) runV2AnalysisOnly(
 		return nil, fmt.Errorf("V2 saturation analysis failed: %w", err)
 	}
 
-	// Analysis results are logged by the caller (runAnalyzersAndScore) after the
+	// Analysis results are logged by the caller (runAnalyzers) after the
 	// applyUniversalThreshold post-step, so the single Info line can include the
 	// real RequiredCapacity/SpareCapacity. They are left zero here, so logging
 	// them at this point would always report 0 and be misleading.
@@ -157,13 +157,9 @@ func (e *Engine) runAnalyzers(
 	}
 	satUp, satDown := config.AnalyzerThresholds(domain.SaturationAnalyzerName)
 
-	// Build AnalyzerInput once; shared by all non-saturation analyzers.
-	// Note: &config has had saturation's per-entry threshold overrides applied
-	// (the loop above). Non-saturation analyzers therefore receive the
-	// saturation-adjusted config rather than the original. This is harmless
-	// on this branch (their results are discarded), and the clean fix —
-	// engine applies thresholds universally after each analyzer runs —
-	// is tracked on multi-analyzer-threshold (PR #1228).
+	// Build AnalyzerInput once; shared by all non-saturation analyzers. Each
+	// reports demand and capacity only: the engine applies the thresholds
+	// after it runs (buildNamedResult).
 	input := domain.AnalyzerInput{
 		ModelID:        modelID,
 		Namespace:      namespace,

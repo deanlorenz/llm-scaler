@@ -65,7 +65,7 @@ import (
 )
 
 // analyzerEntry binds a registered analyzer to its name. The engine stores
-// these in registration order so runAnalyzersAndScore iterates analyzers
+// these in registration order so runAnalyzers iterates analyzers
 // deterministically.
 type analyzerEntry struct {
 	name     string
@@ -263,11 +263,10 @@ type Engine struct {
 	analyzers []analyzerEntry
 
 	// analyzersSnapshot is the frozen, registration-ordered view that
-	// runAnalyzersAndScore iterates. Built from analyzers in StartOptimizeLoop
-	// before the goroutine launches. Saturation always runs and drives scaling
-	// decisions; other registered analyzers are invoked but their results are
-	// not consumed yet — combine and per-analyzer threshold logic lands in
-	// follow-up PRs.
+	// runAnalyzers iterates. Built from analyzers in StartOptimizeLoop
+	// before the goroutine launches. Saturation always runs; every other
+	// registered analyzer runs when the policy lists it, and the composite
+	// combines what they return (buildComposite).
 	analyzersSnapshot []analyzerEntry
 
 	// started transitions to true in StartOptimizeLoop. Late RegisterAnalyzer
@@ -638,7 +637,7 @@ func toExternalDefinition(label string, def config.ExternalAnalyzerDef) (externa
 // It runs until the context is cancelled.
 //
 // Before launching the goroutine, the registered analyzers are snapshotted
-// to a frozen slice that runAnalyzersAndScore iterates. The started flag is
+// to a frozen slice that runAnalyzers iterates. The started flag is
 // flipped so subsequent RegisterAnalyzer calls return an error. The snapshot is the
 // natural place to invoke any future per-analyzer Init(ctx) hook.
 func (e *Engine) StartOptimizeLoop(ctx context.Context) {

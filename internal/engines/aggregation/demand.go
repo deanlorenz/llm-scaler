@@ -25,9 +25,7 @@ import "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 //     "prefill" asked of a non-disaggregated result): not present — a
 //     non-disaggregated analyzer never had an opinion about that role.
 func DemandForRole(result *domain.AnalyzerResult, role string) (value float64, present bool) {
-	if role == "" {
-		role = domain.RoleBoth
-	}
+	role = domain.CanonicalRole(role)
 	if result.RoleDemand == nil {
 		if role == domain.RoleBoth {
 			return result.TotalDemand, true

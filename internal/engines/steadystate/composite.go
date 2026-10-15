@@ -62,11 +62,13 @@ func buildComposite(
 	logger := ctrl.LoggerFrom(ctx)
 	sat := findSaturation(namedResults)
 	// No saturation entry: nothing to express demand in. Unreachable in
-	// production, where runAnalyzersAndScore fails before building any entry
+	// production, where runAnalyzers fails before building any entry
 	// without one; every test builds its own slice.
 	if sat == nil || sat.Result == nil {
 		return emptyComposite()
 	}
+
+	warnModelLevelOnly(ctx, *sat, eligibleAnalyzers)
 
 	demandByRole := make(map[string]float64)
 	for _, role := range rolesPresent(sat.Result.VariantCapacities) {
@@ -135,6 +137,22 @@ func buildComposite(
 	composite.Remaining = composite.RequiredCapacity
 	composite.Spare = composite.SpareCapacity
 	return composite
+}
+
+// warnModelLevelOnly logs each listed analyzer that cannot size a P/D model:
+// one that reports model-level demand only (no RoleDemand) defines no need for
+// any prefill or decode variant, so on P/D it is listed and silently has no
+// effect.
+func warnModelLevelOnly(ctx context.Context, sat allocation.NamedAnalyzerResult, eligible []allocation.NamedAnalyzerResult) {
+	if len(sat.Result.RoleDemand) == 0 {
+		return
+	}
+	for _, e := range eligible {
+		if e.Name != sat.Name && allocation.Eligible(e) && len(e.Result.RoleDemand) == 0 {
+			ctrl.LoggerFrom(ctx).Info("listed analyzer reports no per-role demand, so it cannot size this P/D model",
+				"modelID", sat.Result.ModelID, "namespace", sat.Result.Namespace, "analyzer", e.Name)
+		}
+	}
 }
 
 // compositeHolds returns what each role is forbidden this cycle, or nil.

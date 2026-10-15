@@ -223,7 +223,7 @@ func saturatedCompletionRate(rm domain.ReplicaMetrics, role string, fleetOutput,
 	// and prefill holds nothing that long. Prefill's own counterpart is prompt
 	// tokens per second, from prompt_tokens_total keyed by input length, which
 	// the collector does not gather today (item 1 of the proposal).
-	if canonicalRole(role) == domain.RolePrefill {
+	if domain.CanonicalRole(role) == domain.RolePrefill {
 		// Prompt tokens per second, converted to the requests/s the floor
 		// divides by at the shape now arriving. This is the figure the
 		// paragraph above said the collector did not gather; it does now
@@ -618,11 +618,11 @@ func holdFleetFloor(roleDemand map[string]float64, variants []domain.VariantCapa
 	// split by the measurement the hold has just declared stale.
 	for i := range variants {
 		vc := &variants[i]
-		held, ok := raised[canonicalRole(vc.Role)]
+		held, ok := raised[domain.CanonicalRole(vc.Role)]
 		if !ok {
 			continue
 		}
-		rc := byRole[canonicalRole(vc.Role)]
+		rc := byRole[domain.CanonicalRole(vc.Role)]
 		supply := float64(vc.ReplicaCount) * vc.PerReplicaCapacity
 		if supply <= 0 || rc.TotalSupply <= 0 {
 			continue

@@ -134,7 +134,7 @@ func capacityTokensFor(params *capacity.EngineParams, liveTokens int64) float64 
 func (a *SaturationAnalyzer) noteLineMismatch(model itl.Model, params *capacity.EngineParams,
 	rm domain.ReplicaMetrics, role string, kvReq float64, borrowedFrom string,
 	logger logr.Logger) {
-	if rm.FromWarmPool || canonicalRole(role) != domain.RoleDecode {
+	if rm.FromWarmPool || domain.CanonicalRole(role) != domain.RoleDecode {
 		return
 	}
 	capacityTokens := capacityTokensFor(params, rm.TotalKvCapacityTokens)
