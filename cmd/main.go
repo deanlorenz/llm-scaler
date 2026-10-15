@@ -159,7 +159,10 @@ type optimizeLooper interface {
 // runnable was finished while the loop was starting.
 //
 // A setup error is returned, never os.Exit: the manager stops on a runnable's
-// error, releases the lease and returns it from mgr.Start.
+// error, releases the lease and returns it from mgr.Start. So is a loop that
+// returns before ctx ends: returning nil would leave the manager running, and
+// holding the lease, with no engine -- a leader that scales nothing while no
+// other replica may take over.
 func optimizeLoopRunnable(setup func(ctx context.Context) (optimizeLooper, error)) manager.RunnableFunc {
 	return func(ctx context.Context) error {
 		engine, err := setup(ctx)
@@ -167,6 +170,9 @@ func optimizeLoopRunnable(setup func(ctx context.Context) (optimizeLooper, error
 			return err
 		}
 		engine.StartOptimizeLoop(ctx)
+		if ctx.Err() == nil {
+			return fmt.Errorf("the %T optimize loop stopped while the manager is running", engine)
+		}
 		return nil
 	}
 }
@@ -1135,7 +1141,7 @@ func main() {
 		// Only deleting the pod would, and a transient Forbidden during RBAC
 		// propagation would have parked the controller permanently.
 		if err := nodeReadProbe(req.Context(), policyProbe); err != nil {
-			return fmt.Errorf("cluster policy declares a gpu-inventory limiter but this controller may not list nodes: %w. "+
+			return fmt.Errorf("cluster policy declares a gpu-inventory limiter but this controller cannot confirm it may list nodes: %w. "+
 				"Every variant would be charged to no accelerator pool, receive no GPU budget and never scale up. "+
 				"Grant its ServiceAccount get/list/watch on nodes, or remove the limiter from cluster policy", err)
 		}
@@ -1212,6 +1218,13 @@ const nodeReadProbeTimeout = 2 * time.Second
 // external-scaler Service: with one replica that is the only endpoint KEDA can
 // reach, so an API-server blip became an actuation outage. Such an error keeps
 // the last verdict, Ready or not, and is retried after the TTL.
+//
+// Until the first definite answer there is no verdict to keep, and the probe
+// reports not ready: Ready before anyone has asked whether the controller may
+// list nodes would put a controller with no node access into service. Each
+// probe asks again until an answer arrives (the TTL applies only to answers).
+// This cannot hold up startup: the startup and liveness probes read /healthz,
+// not /readyz, so a slow API server delays readiness and kills nothing.
 func nodeReadProbe(ctx context.Context, c client.Reader) error {
 	nodeReadProbeMu.Lock()
 	defer nodeReadProbeMu.Unlock()
@@ -1222,13 +1235,18 @@ func nodeReadProbe(ctx context.Context, c client.Reader) error {
 	defer cancel()
 	nodes := &corev1.NodeList{}
 	err := c.List(listCtx, nodes, client.Limit(1))
-	nodeReadProbeAt, nodeReadProbeOnce = time.Now(), true
 	switch {
 	case err == nil, apierrors.IsForbidden(err), apierrors.IsUnauthorized(err):
+		nodeReadProbeAt, nodeReadProbeOnce = time.Now(), true
 		nodeReadProbeErr = err
+	case !nodeReadProbeOnce:
+		ctrl.Log.WithName("setup").Info("node-list readiness probe has had no answer yet; "+
+			"not ready until one arrives. No action unless it persists", "err", err.Error())
+		return fmt.Errorf("no answer yet from the API server on whether nodes may be listed: %w", err)
 	default:
+		nodeReadProbeAt = time.Now()
 		ctrl.Log.WithName("setup").Info("node-list readiness probe could not get an answer; "+
-			"keeping the previous verdict", "err", err.Error())
+			"keeping the previous verdict. No action unless it persists", "err", err.Error())
 	}
 	return nodeReadProbeErr
 }

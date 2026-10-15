@@ -42,17 +42,19 @@ func nodesForbidden() error {
 // failing readiness on one removes the only external-scaler endpoint KEDA can
 // reach -- an actuation outage caused by the check meant to prevent one.
 func TestNodeReadProbeIgnoresTransientErrors(t *testing.T) {
+	for _, transient := range []error{
+		apierrors.NewTimeoutError("node list timed out", 1),
+		apierrors.NewServiceUnavailable("apiserver restarting"),
+	} {
+		resetNodeReadProbe()
+		assert.NoError(t, nodeReadProbe(context.Background(), &listReader{}), "setup: a first answer, Ready")
+		nodeReadProbeMu.Lock()
+		nodeReadProbeAt = nodeReadProbeAt.Add(-2 * nodeReadProbeTTL)
+		nodeReadProbeMu.Unlock()
+		assert.NoError(t, nodeReadProbe(context.Background(), &listReader{err: transient}),
+			"%v says nothing about RBAC, so it must not take the pod out of service", transient)
+	}
 	resetNodeReadProbe()
-	t.Cleanup(resetNodeReadProbe)
-
-	transient := &listReader{err: apierrors.NewTimeoutError("node list timed out", 1)}
-	assert.NoError(t, nodeReadProbe(context.Background(), transient),
-		"a timeout says nothing about RBAC, so it must not take the pod out of service")
-
-	resetNodeReadProbe()
-	unavailable := &listReader{err: apierrors.NewServiceUnavailable("apiserver restarting")}
-	assert.NoError(t, nodeReadProbe(context.Background(), unavailable),
-		"a 503 says nothing about RBAC either")
 }
 
 func TestNodeReadProbeFailsOnForbidden(t *testing.T) {
