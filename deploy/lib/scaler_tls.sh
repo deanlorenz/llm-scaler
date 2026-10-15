@@ -738,7 +738,7 @@ wva_scaler_trigger_auth_json() {
 }
 
 # wva_scaler_install_puts_keda succeeds when this install itself installs KEDA,
-# which deploy_scaler_backend does after the controller: on kind, and on
+# which deploy_scaler_backend does before the controller: on kind, and on
 # Kubernetes with KEDA_HELM_INSTALL=true.
 wva_scaler_install_puts_keda() {
     [ "${SCALER_BACKEND:-keda}" = keda ] || return 1
@@ -1369,8 +1369,9 @@ wva_scaler_tls_prepare() {
     fi
 
     # KEDA's side, checked before anything is written: a refusal there leaves
-    # nothing behind. The admin phase writes it after the certificates, now when
-    # KEDA is there, or after this install puts KEDA there
+    # nothing behind. The admin phase writes it after the certificates. KEDA is
+    # normally there by now: this install puts it in before the controller. If
+    # its API is not served yet, it is written after the controller
     # (wva_scaler_tls_after_keda). The controller phase reads what the admin left.
     local keda_side=none
     case "$scope" in
@@ -1508,9 +1509,10 @@ wva_scaler_tls_warn_stranded() {
     log_warning "  Fix what keeps TLS off (above), or move them back:  $(wva_scaler_tls_migrate_cmd false)"
 }
 
-# wva_scaler_tls_after_keda writes KEDA's side when this install put KEDA
-# there after the controller (KEDA_HELM_INSTALL=true on a cluster without it).
-# The controller was already given TLS on the promise, so this is a refusal
+# wva_scaler_tls_after_keda writes KEDA's side when this install put KEDA in
+# but its API was not served yet when the certificates were written. A
+# fallback: KEDA is installed before the controller, so this is rare. The
+# controller was already given TLS on the promise, so this is a refusal
 # whatever WVA_SCALER_TLS says.
 wva_scaler_tls_after_keda() {
     [ "${WVA_SCALER_KEDA_DEFERRED:-false}" = true ] || return 0

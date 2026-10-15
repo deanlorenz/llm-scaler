@@ -837,7 +837,7 @@ jq '.data.clusterTriggerAuthentication = "someone-else"' "$STORE/configmap__wva-
 run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent WVA_APPLY_SCOPE=controller
 ok '[ "$WVA_SCALER_TLS_ON" = false ] && grep -q "someone-else" "$WORK/warnings"' "controller, marker for another install: on=$WVA_SCALER_TLS_ON"
 
-echo "== kind: this install puts KEDA in after the controller, so TLS goes on and KEDA's side follows"
+echo "== kind: this install puts KEDA in but its API is not served yet, so TLS goes on and KEDA's side follows"
 reset_store
 fresh_k
 run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' STUB_CM=absent STUB_KEDA=absent ENVIRONMENT=kind-emulator
