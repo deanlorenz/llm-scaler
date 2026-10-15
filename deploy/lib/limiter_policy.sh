@@ -438,6 +438,35 @@ $2"
     printf '%s\n' "$out"
 }
 
+# policy_counts_borrowing reads a policy's default entry on stdin and echoes yes
+# when it counts Kueue cohort borrowing -- some quota entry has kueue.enabled
+# and a countBorrowable that is not false (the controller default is true) --
+# and no when it does not. Fails, printing nothing, when the entry does not
+# parse: a policy nobody could read is not one that counts nothing. Pure, so
+# the hack checks execute it offline.
+#
+# It decides whether a controller gets the cluster-wide Workload and LocalQueue
+# read (pl_grant_kueue_borrow_read): that read reaches every tenant's Workloads,
+# so it is granted only to a controller whose policy needs it.
+policy_counts_borrowing() {
+    local n
+    n="$(yq '[.limiters[]? | select(.type == "quota" and .kueue.enabled == true and .kueue.countBorrowable != false)] | length' 2>/dev/null)" || return 1
+    case "$n" in
+        0) echo no ;;
+        ''|null|*[!0-9]*) return 1 ;;
+        *) echo yes ;;
+    esac
+}
+
+# policy_kueue_namespace reads a policy's default entry on stdin and echoes the
+# kueue.controllerNamespace of its first quota entry that sets one, or nothing.
+# The installer grants the Kueue controller read in that namespace when
+# KUEUE_NAMESPACE is not given, so a re-run does not put it back in
+# kueue-system for a Kueue installed elsewhere.
+policy_kueue_namespace() {
+    yq -r '[.limiters[]? | select(.type == "quota") | .kueue.controllerNamespace | select(. != null and . != "")] | .[0] // ""' 2>/dev/null || true
+}
+
 # policy_declared_limiters <limiter type> <current policy yaml> -- the policy with this
 # install's limiter declared, in POLICY_DECLARED. It does not RETURN on failure:
 # every refusal goes through log_error, which exits -- which is the whole design

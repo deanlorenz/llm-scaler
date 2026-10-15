@@ -21,22 +21,26 @@ command -v yq >/dev/null 2>&1 || { printf 'FATAL: yq is required.\n' >&2; exit 1
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
-for lib in common.sh prereqs.sh; do
+for lib in common.sh limiter_policy.sh prereqs.sh; do
     tr -d '\r' < "$ROOT/deploy/lib/$lib" > "$WORK/$lib"
 done
 BLUE='' GREEN='' YELLOW='' RED='' NC=''
+unset WVA_QUOTA_KUEUE_BORROW KUEUE_NAMESPACE
 # shellcheck source=/dev/null
 source "$WORK/common.sh"
 # shellcheck source=/dev/null
+source "$WORK/limiter_policy.sh"
+# shellcheck source=/dev/null
 source "$WORK/prereqs.sh"
-for fn in wva_check_kueue_namespace_read wva_check_kueue_cohort_read wva_kueue_source_configured check_permissions; do
+for fn in wva_check_kueue_namespace_read wva_check_kueue_cohort_read wva_kueue_source_configured check_permissions \
+          wva_kueue_borrow_wanted wva_check_kueue_borrow_read; do
     declare -F "$fn" >/dev/null || {
         printf 'FATAL: %s is not defined after sourcing the library.\n' "$fn" >&2
         exit 1
     }
 done
 
-EXPECT_CASES=40
+EXPECT_CASES=57
 RAN=0
 FAILED=0
 
@@ -346,6 +350,65 @@ check 'cohort list: no Kueue source asks nothing' \
 check 'cohort list: an unreadable policy asks nothing (the namespace check warns)' \
     'OK -' "$(run_check CHECK_FN=wva_check_kueue_cohort_read WVA_LIMITER=none WVA_QUOTA_KUEUE=false STUB_CM_FORBIDDEN=wva-policy)"
 
+# R2-1: the admin phase grants the cluster-wide Workload read only when a policy
+# of this install counts cohort borrowing (wva_kueue_borrow_wanted), and the
+# Kueue controller read goes to the namespace a kept controllerNamespace names
+# (R2-6). run_borrow echoes the decision and that namespace (- for none).
+POLICY_NO_BORROW='limiters:
+- name: q
+  type: quota
+  kueue:
+    enabled: true
+    countBorrowable: false'
+POLICY_KUEUE_OPS='limiters:
+- name: q
+  type: quota
+  kueue:
+    enabled: true
+    controllerNamespace: kueue-ops'
+run_borrow() {
+    (
+        log_info() { :; }
+        log_success() { :; }
+        log_warning() { :; }
+        log_error() { echo REFUSED; exit 1; }
+        kubectl() { stub_kubectl "$@"; }
+        WVA_NS=wva-ctl WVA_WATCH_NS='' WVA_SCOPE=namespace
+        WVA_LIMITER='' WVA_QUOTA_KUEUE=false WVA_QUOTA_KUEUE_BORROW='' STUB_POLICY=''
+        local kv
+        for kv in "$@"; do eval "$kv"; done
+        wva_kueue_borrow_wanted
+        printf '%s %s' "$WVA_KUEUE_BORROW_WANTED" "${WVA_KUEUE_KEPT_NS:--}"
+    )
+}
+check 'borrow read: no policy and no limiter -> not granted' 'no -' "$(run_borrow)"
+check 'borrow read: WVA_LIMITER=quota with Kueue -> granted' 'yes -' \
+    "$(run_borrow WVA_LIMITER=quota WVA_QUOTA_KUEUE=true)"
+check 'borrow read: WVA_QUOTA_KUEUE_BORROW=false -> revoked' 'no -' \
+    "$(run_borrow WVA_LIMITER=quota WVA_QUOTA_KUEUE=true WVA_QUOTA_KUEUE_BORROW=false)"
+check 'borrow read: WVA_LIMITER=none over a live borrowing policy -> revoked' 'no -' \
+    "$(run_borrow WVA_LIMITER=none "STUB_OWN='$POLICY_WITH_KUEUE'")"
+check 'borrow read: a kept countBorrowable: false stays false' 'no -' \
+    "$(run_borrow WVA_LIMITER=quota WVA_QUOTA_KUEUE=true "STUB_OWN='$POLICY_NO_BORROW'")"
+check 'borrow read: WVA_QUOTA_KUEUE_BORROW=true overrides the kept false' 'yes -' \
+    "$(run_borrow WVA_LIMITER=quota WVA_QUOTA_KUEUE=true WVA_QUOTA_KUEUE_BORROW=true "STUB_OWN='$POLICY_NO_BORROW'")"
+check 'borrow read: WVA_LIMITER unset keeps a live borrowing policy' 'yes -' \
+    "$(run_borrow "STUB_OWN='$POLICY_WITH_KUEUE'")"
+check 'borrow read: a self-managed controller reading a borrowing cluster policy' 'yes -' \
+    "$(run_borrow "STUB_POLICY='$POLICY_WITH_KUEUE'")"
+check 'borrow read: an admin-owned controller never reads wva-policy' 'no -' \
+    "$(run_borrow WVA_WATCH_NS=tenant-a "STUB_POLICY='$POLICY_WITH_KUEUE'")"
+check 'borrow read: an unreadable policy is unknown, never no' 'unknown -' \
+    "$(run_borrow STUB_CM_FORBIDDEN=wva-ctl)"
+check 'borrow read: the kept controllerNamespace is read' 'yes kueue-ops' \
+    "$(run_borrow "STUB_OWN='$POLICY_KUEUE_OPS'")"
+check 'borrow read, tenant phase: not granted -> warned' \
+    'WARNED list workloads.kueue.x-k8s.io' "$(run_check CHECK_FN=wva_check_kueue_borrow_read)"
+check 'borrow read, tenant phase: granted -> proceeds' \
+    'OK list workloads.kueue.x-k8s.io' "$(run_check CHECK_FN=wva_check_kueue_borrow_read STUB_CANI=yes)"
+check 'borrow read, tenant phase: WVA_QUOTA_KUEUE_BORROW=false asks nothing' \
+    'OK -' "$(run_check CHECK_FN=wva_check_kueue_borrow_read WVA_QUOTA_KUEUE_BORROW=false)"
+
 # Wired into check_permissions -- which --check and the install both run --
 # BEFORE the tenant early-return, or the namespace-scoped default never reaches it.
 body="$(tr -d '\r' < "$ROOT/deploy/lib/prereqs.sh" | sed -n '/^check_permissions() {/,/^}/p')"
@@ -357,6 +420,16 @@ check 'before the tenant early-return' 'yes' \
 cohort_line="$(printf '%s\n' "$body" | grep -n '^[[:space:]]*wva_check_kueue_cohort_read$' | head -1 | cut -d: -f1)"
 check 'check_permissions calls the cohort check before the tenant early-return' 'yes' \
     "$([ -n "$cohort_line" ] && [ -n "$tenant_line" ] && [ "$cohort_line" -lt "$tenant_line" ] && echo yes || echo no)"
+borrow_line="$(printf '%s\n' "$body" | grep -n '^[[:space:]]*wva_check_kueue_borrow_read$' | head -1 | cut -d: -f1)"
+check 'check_permissions calls the borrow-read check before the tenant early-return' 'yes' \
+    "$([ -n "$borrow_line" ] && [ -n "$tenant_line" ] && [ "$borrow_line" -lt "$tenant_line" ] && echo yes || echo no)"
+# And the admin phase acts on it: wva_run_prereqs_phase syncs the grant from
+# the decision, and passes the kept controllerNamespace to the controller read.
+prereqs_body="$(tr -d '\r' < "$ROOT/deploy/lib/install_core.sh" | sed -n '/^wva_run_prereqs_phase() {/,/^}/p')"
+check 'the prereqs phase syncs the borrowing read from wva_kueue_borrow_wanted' '2' \
+    "$(printf '%s\n' "$prereqs_body" | grep -c '^[[:space:]]*wva_kueue_borrow_wanted$\|pl_sync_kueue_borrow_read "$WVA_NS"')"
+check 'the prereqs phase grants the Kueue controller read in the kept namespace' '1' \
+    "$(printf '%s\n' "$prereqs_body" | grep -c 'pl_grant_kueue_controller_read "$WVA_NS" wva-controller-manager "$WVA_KUEUE_KEPT_NS"')"
 
 if [ "$FAILED" -gt 0 ]; then
     printf '\n%d Kueue namespace-grant assertion(s) failed.\n' "$FAILED" >&2

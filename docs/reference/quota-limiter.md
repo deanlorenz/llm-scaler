@@ -332,7 +332,7 @@ quota, exactly as with `countBorrowable: false`.
 | Borrowing needs | Reason when it fails |
 |---|---|
 | The namespace is in the entry's `borrowNamespaces`, when that list is set | `not-selected` |
-| Kueue Workloads are read cluster-wide, without error. Every install reads them cluster-wide; a namespace-scoped one once a cluster admin has re-run the admin phase ([RBAC](#rbac)). A Forbidden or a failed list cannot see a lender wait | `lenders-unreadable` |
+| Kueue Workloads are read cluster-wide, without error. Every install reads them cluster-wide; a namespace-scoped one once a cluster admin has re-run the admin phase with a policy that counts borrowing ([RBAC](#rbac)). A Forbidden or a failed list cannot see a lender wait | `lenders-unreadable` |
 | Kueue charges every GPU pod in the namespace: a Workload owned by the pod, or by an owner up its chain, has quota reserved (for a pod at Kueue's admission gate, the Workload exists). The Workload must request a GPU and be owned by a kind a Kueue integration owns Workloads by: Pod, batch Job, JobSet, LeaderWorkerSet or StatefulSet; the reserved Workloads must request at least the GPUs their owners' running pods do, each Workload counted once and at the pod count Kueue admitted. GPU work of other integrations (Kubeflow, Ray, AppWrapper) reads as not managed, as do GPUs asked for only through pod-level resources or DRA claims, and a pod whose owner the controller may not read. Kueue's labels and gate alone are not enough, since a tenant can write them | `not-kueue-managed` |
 | The namespace's ResourceQuotas are readable (Forbidden at once; any other failure after five refresh intervals of failing) | `resourcequota-unreadable` |
 | Something checks that borrowed GPUs exist: a `gpu-inventory` limiter, or a GPU `ResourceQuota` whose `hard` is at most nominal plus `borrowingLimit` | `no-gpu-bound` |
@@ -584,18 +584,22 @@ through its Role (`wva-manager-role`), and the cluster-scoped kinds
 Namespace, from `components/kueue-reader`. Borrowing also needs, from the
 same prereqs phase:
 
-- `get`/`list`/`watch` on `workloads` in every namespace, from the same
-  `components/kueue-reader` ClusterRole: a lender's pending Workload can be in
-  any namespace. Without it borrowing is withheld as `lenders-unreadable`;
-- a Role in the Kueue namespace (`kueue-system`, or `kueue.controllerNamespace`)
+- `get`/`list`/`watch` on `workloads` and `get`/`list` on `localqueues` in
+  every namespace: a lender's pending Workload can be in any namespace. This
+  is its own ClusterRole, `wva-kueue-borrow-reader-role-<hash>`, which the
+  installer grants only while a limiter policy of the install counts
+  borrowing, and revokes when none does. Without it borrowing is withheld as
+  `lenders-unreadable`;
+- a Role in the Kueue namespace (`KUEUE_NAMESPACE`, else the entry's
+  `kueue.controllerNamespace`, else `kueue-system`)
   to `get` the `kueue-controller-manager` Deployment and its leader-election
   Lease (`coordination.k8s.io`). Without it the controller cannot tell Kueue
   runs, and borrowing freezes as `kueue-controller-down`.
 
 The prereqs phase applies these, so an install that predates them needs a
-cluster admin to re-run it, with the variables the install used. Where Kueue
-runs elsewhere than `kueue-system`, name its namespace, or the Role lands in
-`kueue-system`:
+cluster admin to re-run it, with the variables the install used: it reads the
+install's policy to decide the Workload read. Where Kueue runs elsewhere than
+`kueue-system` and the entry names no `controllerNamespace`, name it:
 
 ```bash
 KUEUE_NAMESPACE=<kueue-ns> NAMESPACE=<namespace> make setup-prereqs
@@ -604,8 +608,9 @@ KUEUE_NAMESPACE=<kueue-ns> NAMESPACE=<namespace> make setup-prereqs
 The tenant's `make deploy-wva` does not apply Roles. A rule naming an API
 group the cluster does not serve is inert, so the grant is harmless without
 Kueue. The Workload read is cluster-wide, pod templates included: see
-[the security model](security-model.md). An install that must not read other
-namespaces cannot count borrowing safely; set `countBorrowable: false`.
+[the security model](security-model.md#kueue-borrowing). An install that must
+not read other namespaces cannot count borrowing safely; set
+`countBorrowable: false`, and a re-run of the admin phase revokes the read.
 
 To publish a Kueue-backed quota and grant the same reader to each target
 controller (`WVA_LIMITER_TYPE` defaults to `gpu-inventory`, so name `quota`):

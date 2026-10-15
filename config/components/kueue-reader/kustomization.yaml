@@ -11,11 +11,13 @@ kind: Component
 # reader gets and lists them on demand — no watch, no write.
 #
 # Cohort borrowing also reads Workloads (get, list, watch) and LocalQueues (get,
-# list) in EVERY namespace, whatever the install's scope: a lender waiting in
-# another namespace must stop new borrowing. The tenant Role grants both in the
-# install's own namespace only, so the cluster-wide read is granted here.
-# Denied, borrowing is withheld as lenders-unreadable. Workloads carry their
-# pod templates.
+# list) in EVERY namespace: a lender waiting in another namespace must stop new
+# borrowing. That read reaches every tenant's Workloads, pod templates
+# included, so it is NOT granted here. The installer grants it as its own
+# ClusterRole (wva-kueue-borrow-reader-role-<suffix>) only when a limiter
+# policy of the install counts borrowing, and revokes it when none does
+# (pl_grant_kueue_borrow_read). Denied, borrowing is withheld as
+# lenders-unreadable; the nominal bound is unaffected.
 #
 # Part of the namespace-scoped overlays and, like node-reader, created by the
 # PREREQS phase: it is cluster-scoped RBAC, an admin's to grant. Harmless on a

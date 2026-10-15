@@ -22,11 +22,19 @@ prerequisites:
       kubectl auth can-i list resourcequotas -n <namespace> --as="$SA"
   grant:
     note: >-
-      (cluster admin) Any no above: re-run the admin phase, with the variables the
-      install used. It grants the cluster-wide Workload read and the Role in the Kueue
-      namespace. KUEUE_NAMESPACE puts that Role where Kueue runs.
+      (cluster admin) Any no above: re-run the admin phase with the limiter the install
+      declares. It grants the cluster-wide Workload read only because that limiter counts
+      borrowing, and the Role in the Kueue namespace. KUEUE_NAMESPACE puts that Role where
+      Kueue runs; unset, the entry's kueue.controllerNamespace does.
     run: |
-      KUEUE_NAMESPACE=<kueue-ns> NAMESPACE=<namespace> make setup-prereqs
+      KUEUE_NAMESPACE=<kueue-ns> NAMESPACE=<namespace> make setup-prereqs \
+        WVA_LIMITER=gpu-inventory,quota WVA_QUOTAS='<accelerator>=-1' WVA_QUOTA_KUEUE=true
+  grantcluster:
+    note: >-
+      (cluster admin) A cluster-scoped install instead: re-apply its manifests. Its
+      manager ClusterRole carries every read above.
+    run: |
+      make setup-prereqs SCOPE=cluster WVA_NS=<wva-namespace>
   bound:
     note: >-
       Borrowing needs a GPU bound. Print the queue's nominal and borrowingLimit per

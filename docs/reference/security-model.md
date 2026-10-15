@@ -114,7 +114,7 @@ Role and its binding in the managed namespace).
 | get, list, watch | inferencepools (both InferencePool API groups) | managed namespace | which EPP queue a workload sits behind |
 | get | scaledobjects (keda.sh) | managed namespace | the scale target behind a KEDA call |
 | get, list | localqueues (kueue.x-k8s.io) | managed namespace | the Kueue quota source |
-| get, list, watch | workloads (kueue.x-k8s.io) | managed namespace | cohort borrowing; also granted cluster-wide below |
+| get, list, watch | workloads (kueue.x-k8s.io) | managed namespace | cohort borrowing; granted cluster-wide below only when a policy counts borrowing |
 | get, list, watch | leaderworkersets; get leaderworkersets/scale | managed namespace | LWS scale targets |
 | get, list, watch | servicemonitors | managed namespace | preflight of what is scraped |
 | get, list, watch, create, update, patch, delete | leases | own namespace (`leader-election-role`) | leader election |
@@ -126,7 +126,7 @@ Role and its binding in the managed namespace).
 | get, list, watch | nodes, nodes/status | **cluster** (`node-reader-role`) | resolving a variant's accelerator; required by the `gpu-inventory` limiter |
 | get, list | clusterqueues, cohorts, resourceflavors | **cluster** (`kueue-reader-role`) | the Kueue quota source; cohorts for cohort borrowing. Inert on a cluster without Kueue |
 | get | namespaces, by name: the managed one only | **cluster** (`kueue-reader-role`) | its labels, to evaluate a ClusterQueue `namespaceSelector` |
-| get, list, watch | workloads (kueue.x-k8s.io) | **cluster** (`kueue-reader-role`) | cohort borrowing: a lender's pending Workload can be in any namespace. Reaches **every tenant's** Kueue Workloads, pod templates included (see [Kueue borrowing](#kueue-borrowing)). Inert without Kueue |
+| get, list, watch on workloads; get, list on localqueues (kueue.x-k8s.io) | **cluster** (`wva-kueue-borrow-reader-role-<suffix>`) | cohort borrowing: a lender's pending Workload can be in any namespace. Reaches **every tenant's** Kueue Workloads, pod templates included (see [Kueue borrowing](#kueue-borrowing)). **Not rendered.** The installer grants it only while a limiter policy of the install counts borrowing, and revokes it otherwise |
 | get | the `kueue-controller-manager` Deployment and the Lease `c1f6bfd2.kueue.x-k8s.io`, by name | Kueue namespace (Role `wva-kueue-controller-reader-<suffix>`, labelled with the suffix) | the Kueue version, and whether Kueue runs. Made by the prereqs phase in `KUEUE_NAMESPACE` (default `kueue-system`); removed by `make undeploy-wva` and by `make disable-limiter WVA_LIMITER_TYPE=quota` |
 | get | namespaces, by name: its own, the managed one, `wva-policy` and the namespace the managed one is labelled with | **cluster** (`policy-namespace-reader-role`) | finding a published cluster policy — see [Multi-tenancy](#multi-tenancy) |
 | create | tokenreviews, subjectaccessreviews | **cluster** (`metrics-auth-role`) | authenticating and authorizing scrapes of `:8443` |
@@ -183,7 +183,7 @@ cluster-wide. The differences that matter for review:
 | get, list, watch | **pods** | **every namespace** | read only. `patch` is granted per namespace by Role `wva-pod-writer`, made where it is used (see [Grants made after install](#grants-made-after-install)) |
 | get, list, watch | namespaces, nodes, nodes/status | cluster | |
 | get, list | clusterqueues, cohorts, localqueues, resourceflavors | cluster | Kueue's queues and flavors |
-| get, list, watch | workloads | cluster | reaches **every namespace's** Kueue Workloads: their pod sets (full pod templates), priority and admission, not only the managed models'. Watched through an informer that holds them in memory, started on the first borrowing check |
+| get, list, watch | workloads | cluster | reaches **every namespace's** Kueue Workloads: their pod sets (full pod templates), priority and admission, not only the managed models'. Watched through an informer that holds them in memory, started on the first borrowing check. At this scope the read is part of `manager-role` and is held whether or not borrowing is counted |
 | get, list | **events** | **every namespace** | read for the cluster autoscaler's `TriggeredScaleUp` on a borrowed pod; the grant reaches every Event in the cluster, whose messages can name objects and carry error text |
 
 `node-reader` and `kueue-reader` are not rendered at this scope; `manager-role`
@@ -198,6 +198,7 @@ binding and the `metrics-reader` repoint are added as above.
 | `deploy/warmpool.sh create`, `make utilization-share-activate`, and `make deploy-wva` for a cluster-scoped install in the `all` or `prereqs` phase only (where a warm pool or utilization-share marks of this controller are, and every namespace of its models when the optimizer is active) | Role `wva-pod-writer` (patch on pods) and a RoleBinding, in the pool's or the models' namespace only. `deploy/warmpool.sh create` and `make utilization-share-activate` skip it where the controller can already patch pods | `wva-controller-manager` of the controller namespace given. Needed by a cluster-scoped controller; a namespace-scoped one already has it in its Role. `make undeploy-wva` removes them |
 | `make enable-physical-limiter` (gpu-inventory) | ClusterRole + binding: get, list, watch on nodes | the ServiceAccount of each targeted controller |
 | `make enable-physical-limiter WVA_LIMITER_TYPE=quota WVA_QUOTAS='<type>=-1' WVA_QUOTA_KUEUE=true` | ClusterRole + binding: get, list on clusterqueues, cohorts, resourceflavors; get on Namespaces, by name: the namespace a namespace-scoped controller (tenant-owned or out of reach) manages, the same grant `make setup-prereqs` renders. Every Namespace only for a cluster-scoped controller whose ServiceAccount already reads every Namespace (an installer-made one does, through its manager ClusterRole) or whose namespace `WVA_LIMITER_TARGETS` names; a controller that looks cluster-scoped without that read is warned about, with the `make setup-prereqs` run for that install | the same |
+| `make setup-prereqs` (namespace scope) and `make enable-physical-limiter WVA_LIMITER_TYPE=quota`, when a limiter policy the controller reads counts cohort borrowing (a quota entry with `kueue.enabled` and `countBorrowable` not `false`) | ClusterRole `wva-kueue-borrow-reader-role-<suffix>` + binding: get, list, watch on Kueue Workloads and get, list on LocalQueues, in **every namespace**. Revoked by the same commands when no policy counts borrowing (`WVA_QUOTA_KUEUE_BORROW=false`, a kept `countBorrowable: false`, a quota without Kueue), by `make disable-limiter WVA_LIMITER_TYPE=quota` and by `make undeploy-wva`. Left as it is, with a warning, when the policy cannot be read | the install's controller (`make setup-prereqs`), or each targeted controller (`make enable-physical-limiter`) |
 | `make enable-physical-limiter`, and `make setup-prereqs` when the policy namespace already exists | Role `wva-policy-reader` in the policy namespace (`wva-policy`, or the one a `wva.llmd.ai/policy-namespace` label names): get, list, watch on **all** ConfigMaps there, plus RoleBinding `wva-policy-reader-<suffix>` | each controller that reads policy from that namespace. `make setup-prereqs` grants it only to a controller that manages its own namespace. `make undeploy-wva` leaves both ([cleanup](upgrade-and-uninstall.md#policy-namespace-and-limiter-leftovers-cluster-admin)) |
 | `make dashboard` (OpenShift only; **not** part of a default install) | ServiceAccount `wva-grafana-datasource` with a **third legacy, non-expiring** token Secret (`wva-grafana-datasource-token`); RoleBinding to `view` on the namespace; a Role with get, list, **create** on `metrics.k8s.io` pods (the Thanos tenancy port checks `create` because Grafana POSTs) | the Grafana datasource, in the namespace the dashboard is created in. Whoever reads Secrets there can query that namespace's metrics and `view` its objects |
 
@@ -419,12 +420,16 @@ A cluster-scoped or out-of-reach controller always logs the own-namespace line.
   commands, arguments, inline environment values, requests and priorities.
   A cluster-scoped install also reads Events in every namespace. Through a
   Role in the Kueue namespace, it reads the `kueue-controller-manager`
-  Deployment and its leader-election Lease. All read-only. For a
-  namespace-scoped install, the cluster-wide Workload read comes from the
-  `kueue-reader` ClusterRole that `make setup-prereqs` grants. An install that
-  must not read other namespaces' Workloads cannot count borrowing safely:
-  without the read it is withheld (`lenders-unreadable`); set
-  `countBorrowable: false` there.
+  Deployment and its leader-election Lease. All read-only.
+- **Who gets the cluster-wide Workload read.** A cluster-scoped install always
+  has it, in its manager ClusterRole. A namespace-scoped install gets it only
+  while one of its limiter policies counts borrowing: `make setup-prereqs` and
+  `make enable-physical-limiter WVA_LIMITER_TYPE=quota` grant it as its own
+  ClusterRole, `wva-kueue-borrow-reader-role-<suffix>`, and revoke it when no
+  policy counts borrowing. `WVA_LIMITER=none`, a quota without Kueue and
+  `countBorrowable: false` (`WVA_QUOTA_KUEUE_BORROW=false`) all go without
+  it. Without the read, borrowing is withheld (`lenders-unreadable`) and the
+  nominal cap applies.
 - **The cluster autoscaler's Events are trusted.** A `TriggeredScaleUp` Event
   on an unplaced pod stretches its placement timeout up to three times. The
   Event's source is not verified, so anyone who may create Events in the

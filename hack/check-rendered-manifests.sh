@@ -47,7 +47,7 @@ source "$WORK/limiter_policy.sh"
 source "$WORK/physical_limiter.sh"
 for fn in wva_append_crb_name_patches wva_append_metrics_reader_subject_patch \
           wva_append_kueue_reader_scope_patch wva_append_policy_namespace_reader_scope_patch \
-          wva_append_install_kueue_reader_scope_patch wva_kueue_reader_names pl_grant_kueue_read \
+          wva_append_install_kueue_reader_scope_patch wva_kueue_reader_names pl_grant_kueue_read pl_grant_kueue_borrow_read \
           wva_rendered_prereq_objects wva_prometheus_scraper_sa wva_missing_prereqs; do
     declare -F "$fn" >/dev/null || {
         printf 'FATAL: %s is not defined after sourcing the library.\n' "$fn" >&2
@@ -55,7 +55,7 @@ for fn in wva_append_crb_name_patches wva_append_metrics_reader_subject_patch \
     }
 done
 
-EXPECT_CASES=52
+EXPECT_CASES=51
 RAN=0
 FAILED=0
 
@@ -243,6 +243,15 @@ render_kueue_role() {
     wva_append_kueue_reader_scope_patch "$dir/kustomization.yaml" wns "$managed"
     "${KBUILD[@]}" "$dir" | yq -N "select(.kind == \"ClusterRole\" and .metadata.name == \"wva-kueue-reader-role-$(wva_ns_suffix wns)\")"
 }
+# render_kueue_all <overlay> renders the whole namespace-scoped overlay.
+render_kueue_all() {
+    local dir
+    dir="$(mktemp -d "$WORK/ovl.XXXXXX")"
+    ln -s "$ROOT/config/overlays/$1" "$dir/base"
+    printf 'namespace: wns\nresources:\n- ./base\n' > "$dir/kustomization.yaml"
+    wva_append_crb_name_patches "$dir/kustomization.yaml" wns
+    "${KBUILD[@]}" "$dir"
+}
 for overlay in namespace-scoped/kubernetes namespace-scoped/openshift; do
     role="$(render_kueue_role "$overlay" tenant-a)" || role=''
     [ -n "$role" ] || { printf 'FATAL: no kueue-reader ClusterRole rendered for %s.\n' "$overlay" >&2; exit 1; }
@@ -250,13 +259,12 @@ for overlay in namespace-scoped/kubernetes namespace-scoped/openshift; do
         "$(printf '%s\n' "$role" | yq -r '.rules[] | select(.resources[] == "namespaces") | .resourceNames | join(",")')"
     check "$overlay: kueue-reader Kueue rules stay unnamed" 'true' \
         "$(printf '%s\n' "$role" | yq -r '[.rules[] | select(.apiGroups[] == "kueue.x-k8s.io") | has("resourceNames") | not] | all')"
-    # Cohort borrowing reads every namespace Workloads (watched by a
-    # cluster-wide informer) and the LocalQueues they queue through, whatever
-    # the install scope; the tenant Role reaches its own namespace only.
-    check "$overlay: kueue-reader reads Workloads cluster-wide" 'get,list,watch' \
-        "$(printf '%s\n' "$role" | yq -r '.rules[] | select(.resources[] == "workloads") | .verbs | sort | join(",")')"
-    check "$overlay: kueue-reader lists LocalQueues cluster-wide" 'get,list' \
-        "$(printf '%s\n' "$role" | yq -r '.rules[] | select(.resources[] == "localqueues") | .verbs | sort | join(",")')"
+    # The cluster-wide Workload and LocalQueue read reaches every tenant, so
+    # the overlay never grants it: the installer does, and only when a policy
+    # counts borrowing (pl_grant_kueue_borrow_read). An overlay that renders
+    # it hands it to every namespace-scoped install, WVA_LIMITER=none included.
+    check "$overlay: no rendered ClusterRole reads Kueue Workloads or LocalQueues" '0' \
+        "$(render_kueue_all "$overlay" | yq -N 'select(.kind == "ClusterRole") | [.rules[] | select(.resources[] == "workloads" or .resources[] == "localqueues")] | length' | grep -cv '^0$')"
 done
 
 # ----------------------------------------------------------------------------
@@ -337,14 +345,19 @@ rules:
 CREOF
 check 'install/enable/install over an admin-added name: kept by both' \
     'foo,admin-added foo,admin-added foo,admin-added' "$(seq_run wva-foo foo)"
-# enable-physical-limiter writes the same Workload and LocalQueue rules the
-# installer renders, or the next enable takes the lender signal away.
+# enable-physical-limiter writes the kueue-reader role without the Workload
+# and LocalQueue rules too, as the overlay renders it; the borrowing read is
+# its own role (pl_grant_kueue_borrow_read), which carries both and no more.
 : > "$LIVE_ROLE"
 seq_enable wva-foo foo
-check 'enable grants Workloads cluster-wide, as the installer does' 'get,list,watch' \
+check 'enable writes no Workload or LocalQueue rule into the kueue-reader role' '0' \
+    "$(yq '[.rules[] | select(.resources[] == "workloads" or .resources[] == "localqueues")] | length' "$LIVE_ROLE")"
+: > "$LIVE_ROLE"
+( kubectl() { seq_kubectl "$@"; }; pl_grant_kueue_borrow_read wva-foo wva-controller-manager )
+check 'the borrowing role reads Workloads cluster-wide' 'get,list,watch' \
     "$(yq -r '.rules[] | select(.resources[] == "workloads") | .verbs | sort | join(",")' "$LIVE_ROLE")"
-check 'enable grants LocalQueues cluster-wide, as the installer does' 'get,list' \
-    "$(yq -r '.rules[] | select(.resources[] == "localqueues") | .verbs | sort | join(",")' "$LIVE_ROLE")"
+check 'the borrowing role lists LocalQueues cluster-wide, and reads nothing else' 'get,list 2' \
+    "$(yq -r '.rules[] | select(.resources[] == "localqueues") | .verbs | sort | join(",")' "$LIVE_ROLE") $(yq '.rules | length' "$LIVE_ROLE")"
 
 # ----------------------------------------------------------------------------
 # The namespace-scoped policy-namespace reader gets only the Namespaces it reads

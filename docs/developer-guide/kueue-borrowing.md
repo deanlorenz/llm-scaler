@@ -75,7 +75,10 @@ with their source path and the Kueue version they were copied from.
   (`borrowReleaseLedger`).
 - **Installer:** `deploy/lib/cli.sh` (`WVA_QUOTA_KUEUE_BORROW`),
   `deploy/lib/limiter_policy.sh` (the entry it writes), `deploy/lib/prereqs.sh`;
-  `config/components/kueue-reader` and the Role in the Kueue namespace.
+  `config/components/kueue-reader`; `deploy/lib/physical_limiter.sh`
+  (`pl_grant_kueue_borrow_read`, the cluster-wide Workload read, granted only
+  when `policy_counts_borrowing` says a policy counts borrowing;
+  `pl_grant_kueue_controller_read`, the Role in the Kueue namespace).
 
 ## Mechanics
 

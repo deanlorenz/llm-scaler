@@ -49,8 +49,9 @@ CLUSTER_SCOPED = {
     # Kueue ClusterQueues and ResourceFlavors: read only by a quota entry with
     # kueue.enabled, granted by components/kueue-reader (prereqs phase). The
     # namespaced half, localqueues and workloads, is in the tenant Role and is
-    # checked; components/kueue-reader also grants both cluster-wide, which
-    # cohort borrowing reads whatever the install's scope.
+    # checked. Their cluster-wide read, which cohort borrowing needs, is NOT in
+    # any component: the installer grants it only to a controller whose policy
+    # counts borrowing (see NO_COMPONENT_GRANTS below).
     ("kueue.x-k8s.io", "clusterqueues"),
     ("kueue.x-k8s.io", "resourceflavors"),
     # Kueue Cohorts: listed to tell a flat cohort from a nested one, granted by
@@ -90,9 +91,54 @@ TENANT_REQUIRED = {
 }
 
 
+# Grants no ClusterRole in config/components may carry. Every component
+# ClusterRole is rendered into the namespace-scoped overlays, so whatever one
+# grants, every namespace-scoped install gets -- WVA_LIMITER=none included.
+# Kueue Workloads and LocalQueues cluster-wide reach every tenant's Workloads,
+# pod templates included; deploy/lib/physical_limiter.sh grants them
+# (pl_grant_kueue_borrow_read) only when a policy counts cohort borrowing.
+NO_COMPONENT_GRANTS = {
+    ("kueue.x-k8s.io", "workloads"),
+    ("kueue.x-k8s.io", "localqueues"),
+}
+COMPONENTS = ROOT / "config" / "components"
+
+
+def component_cluster_role_problems():
+    """Component ClusterRoles that carry a NO_COMPONENT_GRANTS resource."""
+    problems = []
+    checked = 0
+    for path in sorted(COMPONENTS.glob("*/*.yaml")):
+        for doc in yaml.safe_load_all(path.read_text(encoding="utf-8")):
+            if not isinstance(doc, dict) or doc.get("kind") != "ClusterRole":
+                continue
+            checked += 1
+            for rule in doc.get("rules") or []:
+                for group in rule.get("apiGroups") or [""]:
+                    for resource in rule.get("resources") or []:
+                        if (group, resource) in NO_COMPONENT_GRANTS:
+                            problems.append(
+                                "  %s grants %s/%s cluster-wide to every namespace-scoped "
+                                "install; only the installer may grant it, when a policy "
+                                "counts Kueue borrowing" % (path.relative_to(ROOT), group, resource))
+    if checked == 0:
+        raise SystemExit("found no ClusterRole under %s -- the scan found nothing, "
+                         "which would pass any grant." % COMPONENTS.relative_to(ROOT))
+    return problems, checked
+
+
 def main():
     cluster = grants(CLUSTER_ROLE)
     tenant = grants(TENANT_ROLE)
+
+    comp_problems, comp_checked = component_cluster_role_problems()
+    if comp_problems:
+        print("ERROR: a component ClusterRole grants a read that must be conditional:",
+              file=sys.stderr)
+        print("\n".join(comp_problems), file=sys.stderr)
+        return 1
+    print("no component ClusterRole grants Kueue Workloads or LocalQueues (%d checked)"
+          % comp_checked)
 
     problems = []
     for key, verbs in sorted(TENANT_REQUIRED.items()):

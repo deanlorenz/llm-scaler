@@ -20,7 +20,9 @@
 #   cohorts               applied by the prereqs phase like node-reader. The
 #                         namespaced half, localqueues and workloads, is below;
 #                         cohort borrowing reads both in every namespace,
-#                         which components/kueue-reader grants.
+#                         which the installer grants as its own ClusterRole
+#                         only when a policy counts borrowing
+#                         (pl_grant_kueue_borrow_read).
 #   leases, and the       in the KUEUE namespace, read by name for Kueue
 #   kueue-controller-     borrowing (liveness and version): a Role there that
 #   manager Deployment    the prereqs phase creates

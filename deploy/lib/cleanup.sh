@@ -176,6 +176,11 @@ EOF
         log_warning "Could not remove the Kueue controller read (Role/RoleBinding wva-kueue-controller-reader-$(wva_ns_suffix "$WVA_NS")): $kueue_err"
         log_warning "  A cluster admin removes it with: kubectl delete role,rolebinding -A -l ${WVA_KUEUE_CONTROLLER_READER_LABEL}=$(wva_ns_suffix "$WVA_NS")"
     fi
+    # The cluster-wide Kueue borrowing read is granted by the installer, not
+    # rendered (pl_grant_kueue_borrow_read), so the delete above never names it.
+    if ! kueue_err="$(pl_revoke_kueue_borrow_read "$WVA_NS")"; then
+        log_warning "Could not remove the Kueue borrowing read: $kueue_err"
+    fi
 
     # The utilization-share need history is written by the controller, not
     # rendered, so the filtered delete above never names it. Left behind, a

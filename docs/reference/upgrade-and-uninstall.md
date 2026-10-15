@@ -90,7 +90,8 @@ only to change it. Limiters an admin published in a policy namespace
 ### Upgrading to this release
 
 This release adds two cluster-scoped grants (`wva-policy-namespace-reader-*`,
-`wva-kueue-reader-*`) and a namespaced Role (`wva-controller-status-role`, for
+`wva-kueue-reader-*`), a third made only where a policy counts Kueue borrowing
+(`wva-kueue-borrow-reader-*`), and a namespaced Role (`wva-controller-status-role`, for
 the status ConfigMap). It also moves the external-scaler NetworkPolicy into the
 admin phase. `make check-prereqs` reports all three grants as **optional**, so a
 tenant's upgrade goes ahead without them and the controller runs without what
@@ -172,13 +173,26 @@ they enable. Do this, in order:
 >
 > 1. **(cluster admin) Re-run `make setup-prereqs`** for every
 >    namespace-scoped install ([step 1 above](#upgrading-to-this-release)).
->    It adds the cluster-wide Workload read and a Role in the Kueue namespace
->    to read the `kueue-controller-manager` Deployment and its leader Lease.
+>    It adds a Role in the Kueue namespace to read the
+>    `kueue-controller-manager` Deployment and its leader Lease and, only
+>    where a limiter policy of the install counts borrowing, the cluster-wide
+>    Workload read (ClusterRole `wva-kueue-borrow-reader-role-<hash>`).
 >    Where Kueue runs elsewhere than `kueue-system`, add
->    `KUEUE_NAMESPACE=<kueue-ns>`. Without that Role, borrowing stops with
+>    `KUEUE_NAMESPACE=<kueue-ns>`, or set `kueue.controllerNamespace` on the
+>    entry, which a re-run then uses. Without that Role, borrowing stops with
 >    `kueue-controller-down`; without the Workload read, with
 >    `lenders-unreadable`. The Workload read reaches every tenant's Workloads,
->    pod templates included ([security model](security-model.md#kueue-borrowing)).
+>    pod templates included ([security model](security-model.md#kueue-borrowing)),
+>    so it is revoked when no policy counts borrowing: on a re-run with
+>    `WVA_QUOTA_KUEUE_BORROW=false`, on `make disable-limiter
+>    WVA_LIMITER_TYPE=quota`, and on uninstall.
+>
+>    **A cluster-scoped install** re-applies its manifests instead; its
+>    manager ClusterRole gains every read borrowing needs, Workloads in every
+>    namespace included, whether or not borrowing is counted:
+>    ```bash
+>    make setup-prereqs SCOPE=cluster WVA_NS=<controller namespace>   # (cluster admin)
+>    ```
 > 2. **Check the node read** for every policy that declares `gpu-inventory`
 >    beside `quota` (below).
 > 3. **Choose, per Kueue-backed entry**:
@@ -310,8 +324,10 @@ cluster-wide, watched through an informer), the `kueue-controller-manager`
 Deployment and its leader Lease in the Kueue namespace, and in the managed
 namespace `resourcequotas`, `events`, and the owners of GPU pods
 (`replicasets`, `statefulsets`, `jobs`, `leaderworkersets`). A cluster-scoped
-install gets them from the install itself. **A namespace-scoped install needs a cluster admin to re-run
-`make setup-prereqs`** (step 1 above). Until then borrowing is withheld or
+install gets them from the install itself, Workloads in every namespace
+included. **A namespace-scoped install needs a cluster admin to re-run
+`make setup-prereqs`** (step 1 above), which grants the cluster-wide Workload
+read only while a policy of the install counts borrowing. Until then borrowing is withheld or
 frozen, with the reasons the box lists, and the nominal cap applies.
 
 **Rolling back past this release**: first turn borrowing off

@@ -73,16 +73,31 @@ kubectl auth can-i list resourcequotas -n <namespace> --as="$SA"
 
 <!-- guide:prerequisites.grant start -->
 ```bash
-# (cluster admin) Any no above: re-run the admin phase, with the variables the install used. It grants the cluster-wide Workload read and the Role in the Kueue namespace. KUEUE_NAMESPACE puts that Role where Kueue runs.
-KUEUE_NAMESPACE=<kueue-ns> NAMESPACE=<namespace> make setup-prereqs
+# (cluster admin) Any no above: re-run the admin phase with the limiter the install declares. It grants the cluster-wide Workload read only because that limiter counts borrowing, and the Role in the Kueue namespace. KUEUE_NAMESPACE puts that Role where Kueue runs; unset, the entry's kueue.controllerNamespace does.
+KUEUE_NAMESPACE=<kueue-ns> NAMESPACE=<namespace> make setup-prereqs \
+  WVA_LIMITER=gpu-inventory,quota WVA_QUOTAS='<accelerator>=-1' WVA_QUOTA_KUEUE=true
 ```
 <!-- guide:prerequisites.grant end -->
 
   If the controller runs in a namespace of its own, apart from the models,
-  add `WVA_NS=wva-<namespace> WVA_WATCH_NS=<namespace>`. The grant lets the
-  controller read every tenant's Kueue Workloads, pod templates included
-  ([security model](../../reference/security-model.md)). Where that is not
-  acceptable, borrowing cannot be counted safely: set `countBorrowable: false`.
+  add `WVA_NS=wva-<namespace> WVA_WATCH_NS=<namespace>`. The Workload read
+  lets the controller read every tenant's Kueue Workloads, pod templates
+  included ([security model](../../reference/security-model.md#kueue-borrowing)),
+  so it is granted only while the install's limiter counts borrowing. Re-run
+  with `WVA_QUOTA_KUEUE_BORROW=false`, `make disable-limiter
+  WVA_LIMITER_TYPE=quota`, or an uninstall, and it is revoked. Where the read
+  is not acceptable, borrowing cannot be counted safely: set
+  `countBorrowable: false`.
+
+  A cluster-scoped install has every read above in its manager ClusterRole;
+  after an upgrade, re-apply its manifests:
+
+<!-- guide:prerequisites.grantcluster start -->
+```bash
+# (cluster admin) A cluster-scoped install instead: re-apply its manifests. Its manager ClusterRole carries every read above.
+make setup-prereqs SCOPE=cluster WVA_NS=<wva-namespace>
+```
+<!-- guide:prerequisites.grantcluster end -->
 
 - [ ] **A GPU bound.** Something must check that borrowed GPUs exist: a
   `gpu-inventory` limiter (it needs the node read `make setup-prereqs`
