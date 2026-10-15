@@ -58,7 +58,11 @@ func borrowingOf(t *testing.T, snap config.ExternalQuotas) (free int, borrows bo
 	inv := NewQuotaInventoryWithSource(e, src)
 	inv.now = func() time.Time { return snap.ObservedAt.Add(10 * time.Second) }
 	inv.EnableBorrowing(BorrowOptions{Physical: true, Eligibility: noEligibilityLimits{}})
-	c, err := NewDefaultLimiter(e.Name, inv).ComputeConstraints(context.Background(), nil, map[string]map[string]int{"serve": {}})
+	active := map[string]map[string]int{}
+	for ns := range snap.Borrow {
+		active[ns] = map[string]int{}
+	}
+	c, err := NewDefaultLimiter(e.Name, inv).ComputeConstraints(context.Background(), nil, active)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,6 +96,51 @@ func TestBorrowCountsOnlyWhatLendersCanReclaim(t *testing.T) {
 		free, borrows, why := borrowingOf(t, lenderSnapshot(at, lender("batch-cq", kueue.ReclaimAny, 8)))
 		if free != 8 || !borrows || why != "" {
 			t.Errorf("counted %d (borrows %t, withheld %q), want 8, borrowing, not withheld", free, borrows, why)
+		}
+	})
+
+	// Kueue preempts, for a LowerPriority lender, a borrowed Workload of lower
+	// priority than the lender's: what it lends is borrowable while the lender
+	// outranks at least one Workload of the borrowing namespaces.
+	lowerPriority := func(lenderPriority int32, borrowerLowest *int32) config.ExternalQuotas {
+		l := lender("batch-cq", kueue.ReclaimLowerPriority, 8)
+		l.Priority = &lenderPriority
+		snap := lenderSnapshot(at, l)
+		if borrowerLowest != nil {
+			snap.NamespaceLowestPriority = map[string]int32{"serve": *borrowerLowest}
+		}
+		return snap
+	}
+	p := func(n int32) *int32 { return &n }
+	t.Run("a lender on LowerPriority that outranks one borrowing Workload (100) but not the other (1000) counts", func(t *testing.T) {
+		free, borrows, why := borrowingOf(t, lowerPriority(500, p(100)))
+		if free != 8 || !borrows || why != "" {
+			t.Errorf("counted %d (borrows %t, withheld %q), want 8: Kueue reclaims from the Workload at 100", free, borrows, why)
+		}
+		// The same across two borrowing namespaces: serve's Workloads at
+		// 1000, canary's at 100.
+		snap := lowerPriority(500, p(1000))
+		canary := snap.Borrow["serve"][0]
+		canary.Queue = "canary-cq"
+		snap.Borrow["canary"] = []config.ExternalBorrow{canary}
+		for _, m := range []map[string]config.ExternalCaps{snap.Namespace, snap.NamespaceGuaranteed, snap.NamespaceWithinNominal} {
+			m["canary"] = m["serve"]
+		}
+		snap.SharedPools[0].Lenders = append(snap.SharedPools[0].Lenders, config.ExternalLender{Queue: "canary-cq", Reclaim: kueue.ReclaimNever})
+		snap.NamespaceLowestPriority["canary"] = 100
+		free, borrows, why = borrowingOf(t, snap)
+		if free != 8 || !borrows || why != "" {
+			t.Errorf("two borrowing namespaces: counted %d (borrows %t, withheld %q), want 8: Kueue reclaims from canary's Workload at 100",
+				free, borrows, why)
+		}
+	})
+	t.Run("a lender on LowerPriority that outranks no borrowing Workload counts nothing", func(t *testing.T) {
+		for name, lowest := range map[string]*int32{"outranked": p(1000), "equal": p(500), "borrowers unread": nil} {
+			free, borrows, why := borrowingOf(t, lowerPriority(500, lowest))
+			if free != 0 || borrows || why != string(kueue.ReasonLenderCannotReclaim) {
+				t.Errorf("%s: counted %d (borrows %t, withheld %q), want 0, withheld as %s",
+					name, free, borrows, why, kueue.ReasonLenderCannotReclaim)
+			}
 		}
 	})
 

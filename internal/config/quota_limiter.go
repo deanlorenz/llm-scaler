@@ -147,8 +147,8 @@ type KueueQuotaSource struct {
 	BorrowCooldown string `yaml:"borrowCooldown,omitempty" json:"borrowCooldown,omitempty"`
 
 	// LenderDebounce is how long a lender must read as waiting, over at least
-	// two fresh reads, before it counts as waiting (B6); a Go duration. Empty
-	// means DefaultLenderDebounce.
+	// two fresh reads, before it counts as waiting; a Go duration. Empty means
+	// DefaultLenderDebounce.
 	LenderDebounce string `yaml:"lenderDebounce,omitempty" json:"lenderDebounce,omitempty"`
 
 	// BorrowNamespaces, when set, limits counting borrowable capacity to these
@@ -374,6 +374,17 @@ type ExternalQuotas struct {
 	// borrowing row then carries the stale reason, and a quota entry that counts
 	// borrowing treats the snapshot as stale -- it freezes, never shrinks.
 	BorrowStale bool
+	// KueueControllerDown is set when the Kueue controller's Deployment reports
+	// no ready replica, or is gone, while Kueue's API still answers: the
+	// figures are readable but stop moving. A quota entry that counts
+	// borrowing freezes, as on a stale snapshot, and reports every governed
+	// namespace withheld with reason kueue-controller-down.
+	KueueControllerDown bool
+	// NamespaceLowestPriority is, per namespace, the lowest spec.priority of
+	// its Workloads read that request a GPU, reserved or pending. A lender on reclaimWithinCohort LowerPriority gets
+	// back what a borrowing namespace holds only when it outranks one of them.
+	// A namespace none of whose Workloads was read is absent.
+	NamespaceLowestPriority map[string]int32
 }
 
 // ExternalSharedPool is one cohort's free capacity of one flavor and GPU
@@ -401,10 +412,11 @@ type ExternalSharedPool struct {
 // ExternalLender is one cohort member as a lender of one flavor and resource.
 type ExternalLender struct {
 	Queue string `json:"queue"`
-	// Waiting is the raw per-read predicate: pending workloads while
-	// reserving less than nominal.
+	// Waiting is the raw per-read predicate: a pending Workload that asks for
+	// this GPU resource and fits within the nominal it does not hold.
 	Waiting bool `json:"waiting,omitempty"`
-	// CanReclaim is whether Kueue preempts borrowers for it.
+	// CanReclaim is whether Kueue preempts borrowers for it (Any, or
+	// LowerPriority while its pending Workload outranks the borrowers).
 	CanReclaim bool `json:"canReclaim,omitempty"`
 	// LentOut is the nominal it does not hold now.
 	LentOut int `json:"lentOut"`
@@ -412,6 +424,8 @@ type ExternalLender struct {
 	Reclaim string `json:"reclaim,omitempty"`
 	// Unused is what it lends and does not use itself.
 	Unused int `json:"unused,omitempty"`
+	// Priority is the highest priority of its Workloads read; nil when none.
+	Priority *int32 `json:"priority,omitempty"`
 }
 
 // ExternalBorrow is one queue's borrowing figures for one flavor and GPU

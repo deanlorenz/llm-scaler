@@ -32,9 +32,18 @@ func createdReplicas(requests []allocation.ModelScalingRequest) map[string]int {
 //
 // The models the utilization share plans are left out: a fill's hole is held
 // as a promise (allocation.ReservePromised) until its receiver's pods land.
+//
+// A variant with borrowed growth in flight (allocation.BorrowInFlight) has its
+// holes held on its Kueue flavor's nodes, where the placer fitted them, with
+// its pod templates' placement (borrowedFlavors). The ledger holds the node;
+// the shared pool's GPUs are held apart, by the borrowed draw until the pods
+// exist and by the gated-pod deduction while Kueue's admission gate holds them
+// (prepareBorrowing): one is a hole on a node, the other GPUs of a cohort's
+// pool, so neither is counted twice.
 func (e *Engine) admitInFlight(requests []allocation.ModelScalingRequest, decisions []domain.VariantDecision,
 	planned map[string]bool, scaleTargets map[string]scaletarget.ScaleTargetAccessor, now time.Time) {
 	states := map[string]domain.VariantReplicaState{}
+	flavors := e.borrowedFlavors()
 	for _, req := range requests {
 		if planned[utils.GetNamespacedKey(req.Namespace, req.ModelID)] {
 			continue
@@ -61,8 +70,11 @@ func (e *Engine) admitInFlight(requests []allocation.ModelScalingRequest, decisi
 			c := e.client
 			placed = func() (int, bool) { return variantmeta.PlacedReplicas(context.Background(), c, ns, acc) }
 		}
-		allocation.DefaultInFlight.Admit(key, allocation.ReplicaShape{Variant: key, Accelerator: d.AcceleratorName,
-			PodGPUs: st.PodGPUs, GPUs: max(st.GPUsPerReplica, 1), Tolerations: st.Tolerations, DomainKey: st.TopologyKey},
-			d.TargetReplicas, placedNow, placed, now)
+		shape := allocation.ReplicaShape{Variant: key, Accelerator: d.AcceleratorName,
+			PodGPUs: st.PodGPUs, GPUs: max(st.GPUsPerReplica, 1), Tolerations: st.Tolerations, DomainKey: st.TopologyKey}
+		if f, ok := flavors[key]; ok {
+			shape.Placements, shape.Flavor = st.Placements, f
+		}
+		allocation.DefaultInFlight.Admit(key, shape, d.TargetReplicas, placedNow, placed, now)
 	}
 }

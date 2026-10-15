@@ -40,12 +40,12 @@ type NamespaceBorrow struct {
 	// Frozen marks a namespace whose ResourceQuota read failed for a reason
 	// that may pass: its figures are the last it read, and nothing new is
 	// borrowed for it (its draw allowance is 0) until a read passes. What it
-	// holds stays, and releases to a waiting lender still apply to it.
+	// holds stays, and its placement-timeout releases still apply.
 	Frozen bool
 	// Withheld is, on a Frozen namespace whose borrowing is withheld (say
 	// not-kueue-managed) while it still holds borrowed GPUs, why: it borrows
-	// nothing new, and what it holds can still be released to a waiting lender.
-	// Empty otherwise.
+	// nothing new, and its cohort's lenders are still read, so their wait still
+	// stops new borrowing. Empty otherwise.
 	Withheld string
 }
 
@@ -60,7 +60,7 @@ type SharedPoolChunk struct {
 	// Free is what the chunk still holds.
 	Free int
 	// Lenders are the cohort's members declaring this flavor and resource, as
-	// the read saw them; the release of borrowed capacity (B6) debounces them.
+	// the read saw them; the governor debounces their waiting.
 	Lenders []kueue.LenderState
 	// ReadAt is when the Kueue snapshot behind the chunk was read.
 	ReadAt time.Time
@@ -195,7 +195,11 @@ func reachConstraints(constraints []*ResourceConstraints) []*ResourceConstraints
 // mergeSharedPools collects every provider's chunks, one per cohort, flavor and
 // resource at the smallest figure any provider gives, in a stable order, and the
 // namespaces' cohorts. Two Kueue-backed entries read the same cohorts; their
-// chunks are one pool, not two.
+// chunks are one pool, not two. The merge takes the cautious side of every
+// field: stale when either read is, the older read time (a lender's read is
+// new only once both entries read past it), the union of the lenders -- a
+// lender seen by both waits when either saw it wait, counts as reclaiming
+// when either says so, and has lent out the smaller figure.
 func mergeSharedPools(constraints []*ResourceConstraints) ([]*SharedPoolChunk, map[string][]string) {
 	byKey := map[string]*SharedPoolChunk{}
 	cohorts := map[string][]string{}
@@ -205,10 +209,11 @@ func mergeSharedPools(constraints []*ResourceConstraints) ([]*SharedPoolChunk, m
 		}
 		for _, p := range c.SharedPools {
 			if prev, ok := byKey[p.key()]; ok {
-				prev.Free = min(prev.Free, p.Free)
+				mergeChunk(prev, p)
 				continue
 			}
 			chunk := p
+			chunk.Lenders = slices.Clone(p.Lenders)
 			byKey[p.key()] = &chunk
 		}
 		for ns, cs := range c.NamespaceCohorts {
@@ -224,4 +229,26 @@ func mergeSharedPools(constraints []*ResourceConstraints) ([]*SharedPoolChunk, m
 		return cmp.Or(strings.Compare(a.Cohort, b.Cohort), strings.Compare(a.Flavor, b.Flavor), strings.Compare(a.Resource, b.Resource))
 	})
 	return chunks, cohorts
+}
+
+// mergeChunk folds p, another provider's read of the same chunk, into prev
+// (mergeSharedPools).
+func mergeChunk(prev *SharedPoolChunk, p SharedPoolChunk) {
+	prev.Free = min(prev.Free, p.Free)
+	prev.Stale = prev.Stale || p.Stale
+	if !p.ReadAt.IsZero() && (prev.ReadAt.IsZero() || p.ReadAt.Before(prev.ReadAt)) {
+		prev.ReadAt = p.ReadAt
+	}
+	for _, l := range p.Lenders {
+		i := slices.IndexFunc(prev.Lenders, func(o kueue.LenderState) bool { return o.Queue == l.Queue })
+		if i < 0 {
+			prev.Lenders = append(prev.Lenders, l)
+			continue
+		}
+		o := &prev.Lenders[i]
+		o.Waiting = o.Waiting || l.Waiting
+		o.CanReclaim = o.CanReclaim || l.CanReclaim
+		o.LentOut = min(o.LentOut, l.LentOut)
+	}
+	slices.SortFunc(prev.Lenders, func(a, b kueue.LenderState) int { return strings.Compare(a.Queue, b.Queue) })
 }
