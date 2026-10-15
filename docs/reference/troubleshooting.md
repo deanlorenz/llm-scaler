@@ -195,7 +195,7 @@ wva_model_scaling_blocked{model_name="<model>"}
 | reason | fix |
 | --- | --- |
 | `variant-floor` | a variant still has `minReplicaCount > 0`; set every variant to 0 |
-| `policy-forbids-zero` | the model's resolved policy has `scaleToZero` off; turn it on on the `default` entry (or its `defaultPolicy` tier) or the model's per-model entry, or accept that it stays up |
+| `policy-forbids-zero` | the model's resolved policy has `scaleToZero` off; turn it on for every tier the model's variants name (the `default` entry or its `defaultPolicy` tier when they name none), or on the model's per-model entry, or accept that it stays up |
 | `activation-retention` | just woken and held for its retention period; clears by itself |
 | `engine-unsupported` | the model runs both vLLM and SGLang; run one engine per model |
 
@@ -393,11 +393,33 @@ With it on, the log says what happened (logger `learned-state`):
   or after a flush. Expected once.
 - `Learned state: snapshot restored` -- read back; `pendingVariants` wait for
   their first cycle, and `aged`, `unusable` and `unattributable` count entries
-  not restored. Then, per variant on its first cycle, `learned state restored`,
-  or `learned state not restored: the variant's engine configuration differs
-  from the one it was learned under, or could not be read completely` -- a
-  flag such as `--max-num-seqs $VLLM_MAX_NUM_SEQS` whose value comes from an
-  `envFrom`. Nothing is restored for that variant, by design.
+  not restored. Then, per variant on its first cycle, one of:
+  - `learned state restored`;
+  - `learned state restored without the ITL baseline: the engine image
+    changed, the arguments did not` -- a new release rolled out while the
+    controller was down. Capacity, throughput and start time are kept;
+  - `learned state not restored: the variant's engine arguments changed; its
+    k2 is kept as a lower-only prior for the buckets it was measured in` --
+    its flags changed while the controller was down. The old capacity is used
+    only where it is lower, and expires (30 minutes from a bucket's first use,
+    then a 6-hour relaxation);
+  - `learned state not restored: the variant's engine arguments changed, and
+    no k2 window was recent enough, on the hardware it runs now, to keep as a
+    prior` -- the same, with nothing to keep: the windows were old, or were
+    measured on another accelerator or GPU count;
+  - `learned state not restored: the variant's engine configuration could not
+    be read completely, so it could not be checked` -- a flag such as
+    `--max-num-seqs $VLLM_MAX_NUM_SEQS` whose value comes from an `envFrom`.
+    Nothing is restored for that variant, by design. `wva_engine_config`'s
+    `unresolved` label names the flag;
+  - `learned state not restored: the variant's engine configuration differs
+    from the one it was learned under` -- a snapshot written by an older
+    release. Expect it for every variant after an upgrade of the scaling
+    manager that changes the `fingerprint_version` label of
+    `wva_engine_config` -- this release moves it from 2 to 3, once.
+
+  Each of these lines carries an `outcome` field: `whole`, `args`, `prior`,
+  `incomplete` or `differs`.
 - `Learned state: could not read the snapshot; nothing restored, and nothing
   will be written until a read succeeds` -- typically Forbidden: the Role
   `wva-learned-state-role` or its binding is missing. Ask an admin to re-run
@@ -440,10 +462,11 @@ kill %1
 
 | failing check, or log line | means | fix |
 | --- | --- | --- |
-| `gpu-policy`: `cluster policy declares a gpu-inventory limiter but this controller may not list nodes` | a limiter was added to cluster policy and this controller lacks node read. Kept NotReady on purpose: otherwise every variant would silently stop scaling up. `wva_node_access_denied` and `WVANodeAccessDenied` report the same | (cluster admin) grant node read: `make enable-physical-limiter` grants every controller it finds and verifies when it runs, so re-run it after a new install. Or remove the limiter |
+| `gpu-policy`: `cluster policy declares a gpu-inventory limiter but this controller cannot confirm it may list nodes` | a limiter is in cluster policy and the node list failed. Kept NotReady on purpose: otherwise every variant would silently stop scaling up. `wva_node_access_denied` and `WVANodeAccessDenied` report the same. The error after the colon says which: `forbidden` is missing node read; `Unauthorized` means the API server rejected the controller's credentials; `no answer yet` means the API server has not answered since the pod started (2s timeout per try) | Forbidden: (cluster admin) grant node read: `make enable-physical-limiter` grants every controller it finds and verifies when it runs, so re-run it after a new install. Or remove the limiter. Unauthorized: check the controller's ServiceAccount token, then restart the pod. No answer yet: check the API server; no action unless it persists ([details](gpu-limiter.md#when-policy-demands-a-limiter-the-controller-cannot-serve)) |
 | `readyz`: `initial ConfigMap bootstrap not complete`, with `cannot read cluster policy from <ns>/<name>, refusing to start unbounded` in the log | the controller cannot read the cluster policy ConfigMap in the policy namespace (`wva-policy` by default). It refuses to run without its limits | (cluster admin) grant it get/list/watch on ConfigMaps there; `make enable-physical-limiter` does this for every controller it finds and verifies when it runs (re-run it after a new install) |
 | `CrashLoopBackOff`, log `refusing to start unbounded: the "default" entry of ConfigMap <ns>/<name> is invalid` | the `default` entry of the ConfigMap the limiters come from has an invalid value. It carries the GPU limits, so the controller will not start without it. The entry was often edited while the controller ran: then the old entry stayed in force, and a `ConfigEntryRejected` event warned that the next restart would fail | fix the entry the log names, then let the pod restart. The line before it gives the reason: `Scaling-policy entry rejected: entry "default" rejected (<reason>)` |
 | `external-scaler` | the gRPC scaler KEDA calls is not serving | read the log around startup for the bind error |
+| pod restarts (`CrashLoopBackOff`) at startup, log `Shutdown requested during startup` after Prometheus connection errors, exit code 143 (read it with `kubectl get pod <pod> -n "$NS" -o jsonpath='{.status.containerStatuses[0].lastState.terminated.exitCode}'`) | the controller cannot reach Prometheus at startup and keeps retrying. Its health endpoint is not served yet, so the startup probe kills it after about 60s and the pod restarts | make Prometheus reachable: check the URL, TLS settings and network policy ([Prometheus](prometheus.md#configuration)). The restarts stop once it connects |
 | `CrashLoopBackOff`, log names a Prometheus setting | a plain `http://` URL without `PROMETHEUS_ALLOW_HTTP=true`, or TLS settings combined with plain HTTP | fix the Prometheus settings ([Prometheus](prometheus.md#configuration)) |
 | `CrashLoopBackOff`, `unknown flag` | the image is older than the manifests | deploy an image built from the same release as the manifests ([Upgrade](upgrade-and-uninstall.md)) |
 

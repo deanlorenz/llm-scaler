@@ -19,6 +19,7 @@ package scalefromzero
 import (
 	"sort"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/variantmeta"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils"
@@ -34,6 +35,17 @@ type modelGroup struct {
 	namespace string
 	modelID   string
 	variants  []wvav1alpha1.VariantAutoscaling
+}
+
+// tiers returns the policy tiers the model is resolved under: the ones its
+// variants name, or "" (the default entry) when none names one
+// (config.ModelTiers).
+func (g modelGroup) tiers() []string {
+	named := make([]string, 0, len(g.variants))
+	for i := range g.variants {
+		named = append(named, g.variants[i].Spec.ScalingPolicy)
+	}
+	return config.ModelTiers(named)
 }
 
 // key identifies the group for coverage lookups.

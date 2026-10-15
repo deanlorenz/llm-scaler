@@ -19,8 +19,9 @@ package datastore
 import (
 	"context"
 	"errors"
-	"fmt"
+	"maps"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 
@@ -104,16 +105,22 @@ func NewDatastore(cfg *config.Config) Datastore {
 		pools:      &sync.Map{},
 		registry:   source.NewSourceRegistry(),
 		config:     cfg,
-		namespaces: &sync.Map{},
+		namespaces: make(map[string]map[string]map[string]struct{}),
 	}
 	return store
 }
 
 type datastore struct {
-	pools      *sync.Map
-	registry   *source.SourceRegistry
-	config     *config.Config // Unified configuration (injected from main.go)
-	namespaces *sync.Map      // namespace -> map[resourceType]map[resourceName]bool
+	pools    *sync.Map
+	registry *source.SourceRegistry
+	config   *config.Config // Unified configuration (injected from main.go)
+
+	// namespacesMu guards namespaces. One lock, not nested sync.Maps: Untrack's
+	// "is the namespace now empty, then drop it" is a check-then-act that must
+	// not interleave with a Track into the same namespace, or the Track lands in
+	// a map that is then detached and the namespace reads as untracked.
+	namespacesMu sync.RWMutex
+	namespaces   map[string]map[string]map[string]struct{} // namespace -> resourceType -> resource names
 }
 
 // Datastore operations
@@ -225,67 +232,54 @@ func (ds *datastore) Clear() {
 
 // NamespaceTrack adds a resource to the namespace tracker.
 // Idempotent: tracking the same resource multiple times (e.g., on retry) has no effect.
-// Thread-safe.
+// Thread-safe: the whole update runs under namespacesMu.
 func (ds *datastore) NamespaceTrack(resourceType, resourceName, namespace string) {
 	if namespace == "" || resourceName == "" || resourceType == "" {
 		return
 	}
 
-	// Get or create namespace map
-	nsMapRaw, _ := ds.namespaces.LoadOrStore(namespace, &sync.Map{})
-	nsMap := nsMapRaw.(*sync.Map)
+	ds.namespacesMu.Lock()
+	defer ds.namespacesMu.Unlock()
 
-	// Get or create resource type map
-	typeMapRaw, _ := nsMap.LoadOrStore(resourceType, &sync.Map{})
-	typeMap := typeMapRaw.(*sync.Map)
-
-	// Use namespaced name for clarity and to avoid collisions
-	resourceNamespacedName := fmt.Sprintf("%s/%s", namespace, resourceName)
-	typeMap.Store(resourceNamespacedName, true)
+	types := ds.namespaces[namespace]
+	if types == nil {
+		types = make(map[string]map[string]struct{})
+		ds.namespaces[namespace] = types
+	}
+	names := types[resourceType]
+	if names == nil {
+		names = make(map[string]struct{})
+		types[resourceType] = names
+	}
+	names[resourceName] = struct{}{}
 }
 
 // NamespaceUntrack removes a resource from the namespace tracker.
 // When the namespace has no more tracked resources, it is removed from tracking.
-// Thread-safe.
+// Thread-safe: the removal and the emptiness check run under one lock, so a
+// concurrent NamespaceTrack is either seen by the check or lands afterwards.
 func (ds *datastore) NamespaceUntrack(resourceType, resourceName, namespace string) {
 	if namespace == "" || resourceName == "" || resourceType == "" {
 		return
 	}
 
-	nsMapRaw, exists := ds.namespaces.Load(namespace)
-	if !exists {
+	ds.namespacesMu.Lock()
+	defer ds.namespacesMu.Unlock()
+
+	types, ok := ds.namespaces[namespace]
+	if !ok {
 		return
 	}
-	nsMap := nsMapRaw.(*sync.Map)
-
-	typeMapRaw, exists := nsMap.Load(resourceType)
-	if !exists {
+	names, ok := types[resourceType]
+	if !ok {
 		return
 	}
-	typeMap := typeMapRaw.(*sync.Map)
-
-	// Use namespaced name to match what was stored in NamespaceTrack
-	resourceNamespacedName := fmt.Sprintf("%s/%s", namespace, resourceName)
-	typeMap.Delete(resourceNamespacedName)
-
-	// Check if resource type map is empty
-	empty := true
-	typeMap.Range(func(_, _ interface{}) bool {
-		empty = false
-		return false // Stop iteration
-	})
-	if empty {
-		nsMap.Delete(resourceType)
+	delete(names, resourceName)
+	if len(names) == 0 {
+		delete(types, resourceType)
 	}
-
-	// Check if namespace map is empty
-	empty = true
-	nsMap.Range(func(_, _ interface{}) bool {
-		empty = false
-		return false // Stop iteration
-	})
-	if empty {
-		ds.namespaces.Delete(namespace)
+	if len(types) == 0 {
+		delete(ds.namespaces, namespace)
 	}
 }
 
@@ -296,17 +290,16 @@ func (ds *datastore) IsNamespaceTracked(namespace string) bool {
 		return false
 	}
 
-	_, exists := ds.namespaces.Load(namespace)
+	ds.namespacesMu.RLock()
+	defer ds.namespacesMu.RUnlock()
+	_, exists := ds.namespaces[namespace]
 	return exists
 }
 
 // ListTrackedNamespaces returns all namespaces that have tracked resources.
 // Thread-safe.
 func (ds *datastore) ListTrackedNamespaces() []string {
-	var namespaces []string
-	ds.namespaces.Range(func(key, _ interface{}) bool {
-		namespaces = append(namespaces, key.(string))
-		return true
-	})
-	return namespaces
+	ds.namespacesMu.RLock()
+	defer ds.namespacesMu.RUnlock()
+	return slices.Collect(maps.Keys(ds.namespaces))
 }

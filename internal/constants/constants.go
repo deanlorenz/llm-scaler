@@ -182,6 +182,10 @@ const (
 	// one of whose entries carries keys the schema does not define; the entry
 	// applies with them ignored.
 	K8SEventConfigEntryUnknownKeys = "ConfigEntryUnknownKeys"
+	// K8SEventConfigFieldIgnored is a Warning on a scaling-policy ConfigMap one
+	// of whose entries has a field whose value cannot be used; that field acts
+	// as unset and the rest of the entry applies.
+	K8SEventConfigFieldIgnored = "ConfigFieldIgnored"
 	// K8SEventInvalidTriggerMetadata is a Warning on a ScaledObject whose WVA
 	// trigger metadata cannot be parsed; the workload is not scaled until fixed.
 	K8SEventInvalidTriggerMetadata = "InvalidTriggerMetadata"

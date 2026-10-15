@@ -175,7 +175,7 @@ func (r *ConfigMapReconciler) bootstrapClusterPolicy(ctx context.Context) error 
 	logger.Info("No cluster policy ConfigMap in the policy namespace: no limiters or quotas are in force",
 		"policyNamespace", policyNS, "expectedNames", config.ScalingPolicyConfigMapNames())
 	r.Config.UpdateClusterPolicy(&config.ScalingPolicy{})
-	r.Status.RecordPolicy(r.Config, policyNS, config.ScalingPolicyConfigMapName(), "", nil)
+	r.Status.RecordClusterPolicy(r.Config, policyNS, config.ScalingPolicyConfigMapName(), "", nil)
 	return nil
 }
 

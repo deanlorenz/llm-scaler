@@ -55,7 +55,17 @@ func (e *Engine) runV2AnalysisOnly(
 		// Get accelerator name from scale target nodeSelector/nodeAffinity or VA label
 		accelerator := accelerator.GetAcceleratorNameFromScaleTarget(va, scaleTarget)
 		gpuCount := scaleTarget.GetTotalGPUsPerReplica()
-		e.capacityStore.LoadFromScaleTarget(namespace, modelID, va.Name, accelerator, gpuCount, scaleTarget)
+		// Published, and filed, under the accelerator the learned-state key is
+		// built with, not the raw reading: the two differ on a fleet whose pods
+		// disagree, and that is the fleet an operator is reading this metric to
+		// understand -- and the one where a record filed under the raw value
+		// was missed by the analyzer's stabilised lookup. A missing analyzer
+		// leaves the raw value, which is what a test-built engine gets.
+		publishAccel := accelerator
+		if s, ok := e.saturationV2Analyzer.(acceleratorStabiliser); ok {
+			publishAccel = s.StableAcceleratorFor(namespace, va.Name, accelerator)
+		}
+		e.capacityStore.LoadFromScaleTarget(namespace, modelID, va.Name, publishAccel, gpuCount, scaleTarget)
 		logger.V(logging.DEBUG).Info("Pre-populated capacity store from scale target",
 			"variant", va.Name, "accelerator", accelerator, "gpuCount", gpuCount)
 		// Publish the engine-configuration fingerprint. Read back from the
@@ -69,16 +79,6 @@ func (e *Engine) runV2AnalysisOnly(
 		// configuration the parser could not fully read is published WITH its
 		// unresolved label and withheld as a sharing key, so a variant can
 		// appear here and have no learned state filed under it.
-		//
-		// Published under the accelerator the learned-state key is built with,
-		// not the raw reading: the two differ on a fleet whose pods disagree,
-		// and that is the fleet an operator is reading this metric to
-		// understand. A missing analyzer leaves the raw value, which is what
-		// a test-built engine gets.
-		publishAccel := accelerator
-		if s, ok := e.saturationV2Analyzer.(acceleratorStabiliser); ok {
-			publishAccel = s.StableAcceleratorFor(namespace, va.Name, accelerator)
-		}
 		e.publishEngineConfig(namespace, modelID, va.Name, publishAccel, gpuCount)
 	}
 
@@ -230,6 +230,11 @@ type analyzerSeries struct {
 	modelID   string
 	demand    map[analyzerDemandSeries]struct{}
 	target    map[analyzerTargetSeries]struct{}
+	// serviceRate holds the variants whose service-rate signal was published,
+	// and pricingK whether the model's wva_pricing_k was. Per variant, not per
+	// analyzer: only the saturation analyzer prices a service rate.
+	serviceRate map[string]struct{}
+	pricingK    bool
 }
 
 // recordAnalyzerMetrics publishes the wva_analyzer_demand / wva_analyzer_target
@@ -246,10 +251,11 @@ type analyzerSeries struct {
 // could tell it apart from a live reading.
 func (e *Engine) recordAnalyzerMetrics(namespace, modelID string, results []allocation.NamedAnalyzerResult) {
 	current := analyzerSeries{
-		namespace: namespace,
-		modelID:   modelID,
-		demand:    make(map[analyzerDemandSeries]struct{}),
-		target:    make(map[analyzerTargetSeries]struct{}),
+		namespace:   namespace,
+		modelID:     modelID,
+		demand:      make(map[analyzerDemandSeries]struct{}),
+		target:      make(map[analyzerTargetSeries]struct{}),
+		serviceRate: make(map[string]struct{}),
 	}
 
 	for _, nr := range results {
@@ -269,6 +275,17 @@ func (e *Engine) recordAnalyzerMetrics(namespace, modelID string, results []allo
 			e.metricsEmitter.RecordAnalyzerTarget(nr.Name, namespace, modelID, vc.VariantName, vc.PerReplicaCapacity)
 			e.metricsEmitter.RecordAnalyzerObservedReplicas(nr.Name, namespace, modelID, vc.VariantName, vc.ObservedReplicas)
 			current.target[analyzerTargetSeries{analyzer: nr.Name, variant: vc.VariantName}] = struct{}{}
+			// Beside the target it explains, from the struct the analyzer
+			// priced with (domain.ServiceRateSignal), so the published line
+			// and rate are the ones the target came from.
+			if vc.ServiceRate != nil {
+				e.metricsEmitter.RecordServiceRateSignal(namespace, modelID, vc.VariantName, *vc.ServiceRate)
+				current.serviceRate[vc.VariantName] = struct{}{}
+			}
+		}
+		if nr.Result.PricingK > 0 {
+			e.metricsEmitter.RecordPricingK(namespace, modelID, nr.Result.PricingK)
+			current.pricingK = true
 		}
 	}
 
@@ -453,6 +470,7 @@ func (e *Engine) evictStaleLearnedState(ctx context.Context) {
 			"k2History", history.K2History,
 			"muWindows", history.MuWindows,
 			"k2Borrows", history.K2Borrows,
+			"k2Priors", history.K2Priors,
 			"pendingRestores", history.PendingRestores,
 			"itlWindows", history.ITLWindows,
 			"itlBaselines", history.ITLBaselines,
@@ -470,6 +488,23 @@ func (e *Engine) evictStaleLearnedState(ctx context.Context) {
 	}
 }
 
+// onNothingObserved is what a cycle whose collection returned no replica rows
+// does to the analyzer series, for a model scaled to zero or one whose pods
+// are not scraped. The analyzers do not run on that cycle, so without it:
+//   - the observed-replicas series keeps last cycle's count for as long as
+//     the gap lasts, reading as a fully scraped fleet in exactly the case it
+//     exists to expose (zeroObservedReplicas);
+//   - the service rate and its line read as a parked fleet still priced at
+//     its last rate for as long as it stays parked (dropServiceRateSeries).
+//
+// One call, so the two cannot be separated at the call site. A cycle whose
+// collection or analysis FAILS does not come here: it leaves every analyzer
+// series at its last value, wva_analyzer_target included.
+func (e *Engine) onNothingObserved(namespace, modelID string) {
+	e.zeroObservedReplicas(namespace, modelID)
+	e.dropServiceRateSeries(namespace, modelID)
+}
+
 // zeroObservedReplicas sets wva_analyzer_observed_replicas to 0 for every
 // (analyzer, variant) this model published last cycle. Called on the cycle
 // that skips analysis because the model had no replica rows at all: the
@@ -480,6 +515,29 @@ func (e *Engine) zeroObservedReplicas(namespace, modelID string) {
 	for prev := range e.lastAnalyzerSeries[modelKey].target {
 		e.metricsEmitter.RecordAnalyzerObservedReplicas(prev.analyzer, namespace, modelID, prev.variant, 0)
 	}
+}
+
+// dropServiceRateSeries deletes every service-rate series this model
+// published last cycle, wva_pricing_k included, and forgets them. Called from
+// onNothingObserved beside zeroObservedReplicas, and unlike it deletes rather
+// than zeroes: a rate of 0 would read as a replica that completes nothing, and
+// "absent" is what the series document for a variant nothing priced. The next
+// cycle that analyzes the model publishes them again.
+func (e *Engine) dropServiceRateSeries(namespace, modelID string) {
+	modelKey := utils.GetNamespacedKey(namespace, modelID)
+	series, ok := e.lastAnalyzerSeries[modelKey]
+	if !ok {
+		return
+	}
+	for prev := range series.serviceRate {
+		e.metricsEmitter.DeleteServiceRateSignal(namespace, modelID, prev)
+	}
+	if series.pricingK {
+		e.metricsEmitter.DeletePricingK(namespace, modelID)
+	}
+	series.serviceRate = make(map[string]struct{})
+	series.pricingK = false
+	e.lastAnalyzerSeries[modelKey] = series
 }
 
 // evictStaleAnalyzerSeries deletes the analyzer series this model published on
@@ -502,6 +560,14 @@ func (e *Engine) evictStaleAnalyzerSeries(namespace, modelID string, current ana
 			// idempotent when several analyzers report the same variant.
 			e.metricsEmitter.DeleteEngineConfig(namespace, modelID, prev.variant)
 		}
+	}
+	for prev := range e.lastAnalyzerSeries[modelKey].serviceRate {
+		if _, still := current.serviceRate[prev]; !still {
+			e.metricsEmitter.DeleteServiceRateSignal(namespace, modelID, prev)
+		}
+	}
+	if e.lastAnalyzerSeries[modelKey].pricingK && !current.pricingK {
+		e.metricsEmitter.DeletePricingK(namespace, modelID)
 	}
 	e.lastAnalyzerSeries[modelKey] = current
 }
@@ -526,6 +592,7 @@ func (e *Engine) pruneAnalyzerSeries(activeKeys map[string]bool) {
 		if !activeKeys[modelKey] {
 			e.metricsEmitter.DeleteAnalyzerSeriesForModel(series.namespace, series.modelID)
 			e.metricsEmitter.DeleteEngineConfigForModel(series.namespace, series.modelID)
+			e.metricsEmitter.DeleteServiceRateSeriesForModel(series.namespace, series.modelID)
 			delete(e.lastAnalyzerSeries, modelKey)
 		}
 	}
@@ -541,6 +608,7 @@ func (e *Engine) evictAllAnalyzerSeries() {
 	for modelKey, series := range e.lastAnalyzerSeries {
 		e.metricsEmitter.DeleteAnalyzerSeriesForModel(series.namespace, series.modelID)
 		e.metricsEmitter.DeleteEngineConfigForModel(series.namespace, series.modelID)
+		e.metricsEmitter.DeleteServiceRateSeriesForModel(series.namespace, series.modelID)
 		delete(e.lastAnalyzerSeries, modelKey)
 	}
 }

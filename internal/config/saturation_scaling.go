@@ -1,9 +1,12 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"time"
+	"unicode/utf8"
 )
 
 // DefaultPriority is the default model priority multiplier.
@@ -469,16 +472,16 @@ func (c *ScalingPolicy) Normalize() error {
 	return nil
 }
 
-// ApplyDefaults fills in zero-valued fields with their defaults.
-// The capacity thresholds (KvCacheThreshold, QueueLengthThreshold) are always
-// defaulted when zero — the analyzer needs them to size per-replica capacity.
-// The scaling band (ScaleUpThreshold, ScaleDownBoundary) and the Analyzers list
-// are defaulted only for V2-shaped configs, so that an entry which does not set
-// them keeps them zero — this is deliberate: entries are ApplyDefaults()'d
-// individually at parse time, and defaulting the band on a partial override
-// would clobber a tuned global value during Merge(). The final resolved config
-// is instead calibrated post-merge via ApplyV2ThresholdDefaults(). Must be
-// called before Validate() to handle omitempty zero-values correctly.
+// ApplyDefaults fills in zero-valued fields of a RESOLVED policy with their
+// defaults. Priority and the capacity thresholds (KvCacheThreshold,
+// QueueLengthThreshold) are always defaulted when zero — the analyzer needs them
+// to size per-replica capacity. The scaling band (ScaleUpThreshold,
+// ScaleDownBoundary) and the Analyzers list are defaulted only for V2-shaped
+// configs (see ApplyEntryDefaults). A stored ConfigMap entry is never
+// defaulted (it is validated as a defaulted copy, ValidateEntry), so the
+// fields it leaves out stay zero and Merge() inherits them; the final resolved
+// config is defaulted here and calibrated post-merge via
+// ApplyV2ThresholdDefaults().
 func (c *ScalingPolicy) ApplyDefaults() {
 	if c.Priority == 0 {
 		c.Priority = DefaultPriority
@@ -490,6 +493,18 @@ func (c *ScalingPolicy) ApplyDefaults() {
 	if c.QueueLengthThreshold == 0 {
 		c.QueueLengthThreshold = DefaultQueueLengthThreshold
 	}
+	c.ApplyEntryDefaults()
+}
+
+// ApplyEntryDefaults fills what a V2-shaped policy needs to validate and run:
+// its band and its analyzer list. ApplyDefaults calls it on the resolved
+// policy; ValidateEntry calls it on a copy of one stored entry.
+//
+// It is never applied to a stored entry itself. Zero and empty are "unset" to
+// Merge, so a defaulted band or analyzer list on a tier that only said
+// `analyzerName: saturation` replaced the default entry's tuned band and
+// analyzer list during the merge.
+func (c *ScalingPolicy) ApplyEntryDefaults() {
 	if c.IsV2() {
 		if c.ScaleUpThreshold == 0 {
 			c.ScaleUpThreshold = DefaultScaleUpThreshold
@@ -504,6 +519,10 @@ func (c *ScalingPolicy) ApplyDefaults() {
 				{Name: "saturation", Score: 1.0, Enabled: &enabled},
 			}
 		}
+		// The list may be shared with a stored entry (Merge and struct copies
+		// do not copy slices). Defaulting it in place would write to the
+		// stored entry, from many goroutines at once.
+		c.Analyzers = slices.Clone(c.Analyzers)
 		// Apply per-entry defaults
 		for i := range c.Analyzers {
 			if c.Analyzers[i].Score == 0 {
@@ -515,6 +534,15 @@ func (c *ScalingPolicy) ApplyDefaults() {
 			}
 		}
 	}
+}
+
+// ValidateEntry validates one stored ConfigMap entry as it would run: a copy
+// gets the entry defaults (ApplyEntryDefaults) and is validated. The entry
+// itself is left as written, so the fields it does not set stay unset and a
+// tier or per-model override inherits them from the layer below in Merge.
+func (c ScalingPolicy) ValidateEntry() error {
+	c.ApplyEntryDefaults()
+	return c.Validate()
 }
 
 // ApplyV2ThresholdDefaults fills zero-valued V2 thresholds (ScaleUpThreshold,
@@ -572,10 +600,8 @@ func (c *ScalingPolicy) Merge(override ScalingPolicy) {
 	// for -- the single direction would have pointed at "off, permanently, for
 	// everyone", which is not a switch.
 	//
-	// DisableShapeChangeHold and ShapeChangeHoldSeconds have the same gap and
-	// are deliberately left alone here: they are not this change's to fix, and
-	// fixing them silently would alter behaviour for configs that already rely
-	// on the current scope.
+	// DisableShapeChangeHold and ShapeChangeHoldSeconds had the same gap and are
+	// merged too, below: a tier or a per-model override can set the hold.
 	if override.EnableLearnedStateReuse {
 		c.EnableLearnedStateReuse = true
 	}
@@ -606,6 +632,22 @@ func (c *ScalingPolicy) Merge(override ScalingPolicy) {
 	if override.ScaleFromZero != nil {
 		c.ScaleFromZero = override.ScaleFromZero
 	}
+	// The shape-change hold is per-workload tuning: a long-context tier is the
+	// natural place to raise the hold, and a single misbehaving model the natural
+	// place to switch it off. The flag is a plain bool, so an entry can turn the
+	// hold off but cannot turn back on a hold the default disabled.
+	if override.DisableShapeChangeHold {
+		c.DisableShapeChangeHold = true
+	}
+	if override.ShapeChangeHoldSeconds != 0 {
+		c.ShapeChangeHoldSeconds = override.ShapeChangeHoldSeconds
+	}
+	// Not merged, each on purpose:
+	//   EnableRescale, AnalyzerDefinitions, DefaultPolicy -- read from the
+	//     "default" entry only (budget scope / fleet-wide fallback), never from a
+	//     resolved policy.
+	//   DefaultOutputTokens -- not a ConfigMap field; folded in from the model's
+	//     trigger metadata after resolution.
 	// Limiters is intentionally NOT merged: it is a cluster-"default"-scope setting
 	// read only from the global default entry (see Config.EffectiveLimiterMode), so
 	// a per-model override's limiters would never be consumed. Optimizer is not
@@ -689,6 +731,80 @@ func (c *ScalingPolicy) Validate() error {
 	}
 
 	return nil
+}
+
+// MaxIgnoredValueLen is the most bytes of a value an IgnoredField keeps.
+const MaxIgnoredValueLen = 64
+
+// TruncateIgnoredValue cuts a value written in a ConfigMap to
+// MaxIgnoredValueLen bytes, on a character boundary, and says how much was cut.
+// The value is reported in the log, an Event and the controller status on every
+// read of the ConfigMap; written by a tenant it may be any length.
+func TruncateIgnoredValue(v string) string {
+	if len(v) <= MaxIgnoredValueLen {
+		return v
+	}
+	cut := MaxIgnoredValueLen
+	for cut > 0 && !utf8.RuneStart(v[cut]) {
+		cut--
+	}
+	return fmt.Sprintf("%s...(%d more bytes)", v[:cut], len(v)-cut)
+}
+
+// IgnoredField is one setting ResetUnusableFields cleared.
+type IgnoredField struct {
+	// Field is the YAML path of the setting, e.g. "scaleToZero.retentionPeriod".
+	Field string
+	// Value is the value as the operator wrote it, truncated
+	// (TruncateIgnoredValue). Reason never repeats it.
+	Value string
+	// Reason says why the value cannot be used.
+	Reason error
+}
+
+// String formats the field as `<field>="<value>": <reason>`, the form the
+// controller-status ConfigMap reports it in.
+func (f IgnoredField) String() string {
+	return fmt.Sprintf("%s=%q: %v", f.Field, f.Value, f.Reason)
+}
+
+// ResetUnusableFields clears each setting whose value cannot be used, so the
+// entry behaves as if that one field were unset, and returns what it cleared.
+// The caller warns with the result on every read of the ConfigMap, counts each
+// field as an error, and reports the "default" entry's in the controller
+// status.
+//
+// These are reset instead of failing Validate because a failing entry is
+// dropped whole. For the "default" entry that drops its limiters too, so a typo
+// in a retention period would quietly switch off GPU quota enforcement.
+//
+// Cleared:
+//   - scaleToZero.retentionPeriod that does not parse or is shorter than
+//     MinScaleToZeroRetentionPeriod. Left
+//     in place it passed load and was reported on every cycle for every model
+//     resolving to it, then fell back to the default anyway.
+//   - shapeChangeHoldSeconds below zero. Merge copies any non-zero value, so a
+//     negative one replaced the default entry's hold, and the getters then
+//     honour only positive values: the operator's hold was silently lost.
+func (c *ScalingPolicy) ResetUnusableFields() []IgnoredField {
+	var ignored []IgnoredField
+	if c.ScaleToZero != nil && c.ScaleToZero.RetentionPeriod != "" {
+		if _, err := ValidateRetentionPeriod(c.ScaleToZero.RetentionPeriod); err != nil {
+			ignored = append(ignored, IgnoredField{
+				Field: "scaleToZero.retentionPeriod", Value: TruncateIgnoredValue(c.ScaleToZero.RetentionPeriod), Reason: err,
+			})
+			c.ScaleToZero.RetentionPeriod = ""
+		}
+	}
+	if c.ShapeChangeHoldSeconds < 0 {
+		ignored = append(ignored, IgnoredField{
+			Field:  "shapeChangeHoldSeconds",
+			Value:  strconv.Itoa(c.ShapeChangeHoldSeconds),
+			Reason: errors.New("must be >= 0"),
+		})
+		c.ShapeChangeHoldSeconds = 0
+	}
+	return ignored
 }
 
 // validateLimiters checks the inline Limiters list. gpu-inventory/inventory

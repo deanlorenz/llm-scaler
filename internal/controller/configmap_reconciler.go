@@ -157,7 +157,7 @@ func (r *ConfigMapReconciler) handleConfigMapDeletion(ctx context.Context, name,
 			// to this controller's own namespace, handing limit-setting to whoever
 			// writes that — the party the policy namespace exists to take it from.
 			r.Config.UpdateClusterPolicy(&config.ScalingPolicy{})
-			r.Status.RecordPolicy(r.Config, namespace, name, "", nil)
+			r.Status.RecordClusterPolicy(r.Config, namespace, name, "", nil)
 			logger.Info("Cluster policy ConfigMap deleted: no limiters or quotas are in force",
 				"policyNamespace", namespace, "configMap", name)
 		}
@@ -264,7 +264,10 @@ func (r *ConfigMapReconciler) supersededByCurrentName(ctx context.Context, cm *c
 func (r *ConfigMapReconciler) handleClusterPolicyConfigMap(ctx context.Context, cm *corev1.ConfigMap) error {
 	logger := log.FromContext(ctx)
 
-	configs, _, rejected := parseScalingPolicyConfigRejects(cm.Data, logger)
+	// Fields ignored here are not reported at all, not in the log, the error
+	// metric or the status: only limiters and the optimizer are read from this
+	// ConfigMap, and no field that can be ignored is one of them.
+	configs, _, rejected, _ := parseScalingPolicyConfigRejects(cm.Data, logger)
 	r.reportUnknownKeys(ctx, cm)
 	policy, ok := configs[config.GlobalDefaultsKey]
 	if !ok {
@@ -275,7 +278,7 @@ func (r *ConfigMapReconciler) handleClusterPolicyConfigMap(ctx context.Context, 
 			// first load) does the controller run unbounded, said below.
 			if previous, had := r.Config.ClusterPolicy(); had {
 				r.reportRejectedEntries(ctx, cm, rejected, map[string]bool{config.GlobalDefaultsKey: true}, true)
-				r.Status.RecordPolicy(r.Config, cm.GetNamespace(), cm.GetName(), cm.GetResourceVersion(), rerr)
+				r.Status.RecordClusterPolicy(r.Config, cm.GetNamespace(), cm.GetName(), cm.GetResourceVersion(), rerr)
 				// reportRejectedEntries has already logged the rejection as an
 				// error. This line only says what stays in force.
 				logger.Info("Keeping the cluster policy already in force",
@@ -285,7 +288,7 @@ func (r *ConfigMapReconciler) handleClusterPolicyConfigMap(ctx context.Context, 
 			}
 			if !r.Config.ConfigMapsBootstrapComplete() {
 				r.reportRejectedEntries(ctx, cm, rejected, nil, true)
-				r.Status.RecordPolicy(r.Config, cm.GetNamespace(), cm.GetName(), cm.GetResourceVersion(), rerr)
+				r.Status.RecordClusterPolicy(r.Config, cm.GetNamespace(), cm.GetName(), cm.GetResourceVersion(), rerr)
 				return errUnboundedAtStartup(cm, rerr)
 			}
 		}
@@ -299,7 +302,7 @@ func (r *ConfigMapReconciler) handleClusterPolicyConfigMap(ctx context.Context, 
 		// limit-setting away from.
 		r.reportRejectedEntries(ctx, cm, rejected, nil, true)
 		r.Config.UpdateClusterPolicy(&config.ScalingPolicy{})
-		r.Status.RecordPolicy(r.Config, cm.GetNamespace(), cm.GetName(), cm.GetResourceVersion(),
+		r.Status.RecordClusterPolicy(r.Config, cm.GetNamespace(), cm.GetName(), cm.GetResourceVersion(),
 			rejected[config.GlobalDefaultsKey])
 		logger.Info("Policy namespace ConfigMap has no usable default entry: no cluster limiters or quotas are in force",
 			"policyNamespace", cm.GetNamespace(), "configMap", cm.GetName())
@@ -308,7 +311,7 @@ func (r *ConfigMapReconciler) handleClusterPolicyConfigMap(ctx context.Context, 
 
 	r.reportRejectedEntries(ctx, cm, rejected, nil, true)
 	r.Config.UpdateClusterPolicy(&policy)
-	r.Status.RecordPolicy(r.Config, cm.GetNamespace(), cm.GetName(), cm.GetResourceVersion(), nil)
+	r.Status.RecordClusterPolicy(r.Config, cm.GetNamespace(), cm.GetName(), cm.GetResourceVersion(), nil)
 	logger.Info("Loaded cluster policy from the policy namespace",
 		"policyNamespace", cm.GetNamespace(), "configMap", cm.GetName(),
 		"limiters", len(policy.Limiters), "limiterMode", r.Config.EffectiveLimiterMode())
@@ -436,7 +439,8 @@ func (r *ConfigMapReconciler) handleScalingPolicyConfigMap(ctx context.Context, 
 	}
 
 	// Parse scaling policy entries
-	configs, count, rejected := parseScalingPolicyConfigRejects(cm.Data, logger)
+	configs, count, rejected, ignored := parseScalingPolicyConfigRejects(cm.Data, logger)
+	r.reportIgnoredFields(ctx, cm, ignored)
 	// The surviving entries replace the live set wholesale, so a rejected
 	// key would otherwise vanish: a bad "default" took every limiter and tuned
 	// threshold with it. The entry previously in force under that key stays.
@@ -480,11 +484,13 @@ func (r *ConfigMapReconciler) handleScalingPolicyConfigMap(ctx context.Context, 
 		// This ConfigMap is the cluster policy only when no policy namespace is
 		// separate; otherwise that one's version is the one recorded, and this
 		// edit cannot move the limiter or the optimizer, which are read there.
+		// Its ignored fields are recorded either way: retention and the hold
+		// are read from this ConfigMap, never from the policy namespace's.
 		if r.Config.PolicyNamespaceIsSeparate() {
-			r.Status.ObserveConfig(r.Config)
+			r.Status.RecordIgnored(r.Config, namespace, cm.GetName(), ignored[config.GlobalDefaultsKey])
 		} else {
 			r.Status.RecordPolicy(r.Config, namespace, cm.GetName(), cm.GetResourceVersion(),
-				rejected[config.GlobalDefaultsKey])
+				rejected[config.GlobalDefaultsKey], ignored[config.GlobalDefaultsKey])
 		}
 		logger.Info("Updated global scaling policy from ConfigMap", "entries", count)
 		r.warnIfThroughputRegistrationDiverged(logger, cm)

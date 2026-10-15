@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	accel "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/datastore"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
@@ -429,20 +430,28 @@ func (e *Engine) placementBasisChanged(namespace, summary string) bool {
 
 // requirePrefill reports whether the model refuses a decode-only wake.
 //
-// Resolution goes through ScalingPolicy.Merge — the same overlay every
-// other per-entry setting uses — rather than a hand-rolled precedence check, so
-// there is one implementation of "model-specific entry wins over default" and it
-// cannot drift from the rest of the config. Only the merge is run, not
-// ApplyDefaults/ApplyV2ThresholdDefaults, which calibrate scaling thresholds that
-// have no bearing on this field.
-func (e *Engine) requirePrefill(modelID, namespace string) bool {
+// Resolved through config.ResolveScalingPolicyForTier, the resolver every other
+// per-model setting goes through: the default entry, then the policy tier the
+// variant selected, then the model's override -- found by the model_id and
+// namespace in its BODY, since a ConfigMap key cannot carry a "#" or "/" and so
+// can never name the model. It used to be looked up under the key
+// "{modelID}#{namespace}", which no ConfigMap can contain, so only the default
+// entry ever applied.
+//
+// When the model's variants selected different tiers, any one of them requiring
+// prefill is enough: the setting states a time-to-first-token requirement, and a
+// decode-only wake is the thing it forbids. A variant that names no tier
+// follows the ones that do (config.ModelTiers).
+func (e *Engine) requirePrefill(group modelGroup) bool {
 	if e.config == nil {
 		return false
 	}
-	entries := e.config.ScalingPolicyConfigForNamespace(namespace)
-	resolved := entries["default"] // zero value when absent, which reads as false
-	if override, ok := entries[modelID+"#"+namespace]; ok {
-		resolved.Merge(override)
+	entries := e.config.ScalingPolicyConfigForNamespace(group.namespace)
+	for _, tier := range group.tiers() {
+		resolved := config.ResolveScalingPolicyForTier(entries, group.modelID, group.namespace, tier)
+		if resolved.RequirePrefillOnScaleFromZero() {
+			return true
+		}
 	}
-	return resolved.RequirePrefillOnScaleFromZero()
+	return false
 }

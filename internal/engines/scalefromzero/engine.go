@@ -38,7 +38,6 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
-	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/common"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/executor"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/gpuusage"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
@@ -53,11 +52,9 @@ import (
 
 // Constants for condition
 const (
-	MetricsReasonAvailable  = "ScaleFromZero"
-	MetricsMessageAvailable = "Scaled from zero due to pending requests"
-	reasonDetails           = ": pending request - scale-up"
-	targetEPPMetricLabel    = "target_model_name"
-	metricNameLabel         = "__name__"
+	reasonDetails        = ": pending request - scale-up"
+	targetEPPMetricLabel = "target_model_name"
+	metricNameLabel      = "__name__"
 )
 
 // targetEPPMetricNames are the EPP flow-control queue-depth gauges the engine
@@ -570,14 +567,13 @@ func (e *Engine) processInactiveModel(
 }
 
 // publishActivation records the wake for one selected variant: it publishes the
-// activation decision KEDA acts on, then updates the shared decision cache and
-// the variant's status.
+// activation decision KEDA acts on, then updates the variant's status and
+// records the event.
 //
 // It returns nothing on purpose. Everything after the decision.Set below is
 // bookkeeping, and an early return there would leave the target woken with no
-// cache entry, status, or event — a half-applied state the 100ms loop would then
-// repeat forever. Failures that used to abort are handled in place instead (see
-// resolveVariantCost).
+// status or event — a half-applied state the 100ms loop would then repeat
+// forever.
 func (e *Engine) publishActivation(
 	ctx context.Context,
 	scaleTargets map[string]scaletarget.ScaleTargetAccessor,
@@ -595,6 +591,11 @@ func (e *Engine) publishActivation(
 	// NOT patch the scale subresource itself — KEDA/HPA is the single writer, and
 	// a direct patch here would fight the HPA that owns the same field.
 	// TODO: Right now we are scaling all the VA for the same target model. We need to scale only the VA that has the lowest cost.
+	//
+	// Read before the write so the event below fires on the wake itself, not on
+	// every 100ms tick that republishes the same activation while KEDA catches up.
+	prev, hadPrev := decision.Get(va.Namespace, objName)
+	changed := !hadPrev || prev.DesiredReplicas != int32(targetWorkloadReplicas)
 	decision.Set(va.Namespace, objName, int32(targetWorkloadReplicas))
 	// Acknowledge the wake so scale-to-zero leaves the model alone for its
 	// retention period. The model has served nothing yet — the request that
@@ -606,9 +607,8 @@ func (e *Engine) publishActivation(
 		"variant", va.Name, "target VA model", va.Spec.ModelID,
 		"inferencepool", pool.EndpointPicker.ServiceName, "servingSet", string(outcome))
 
-	// 2. Create or update VariantDecision
+	// 2. Determine accelerator - try status first, then labels
 	va.Status.Actuation.Applied = false
-	// Determine accelerator - try status first, then labels
 	var accelerator string
 	accelerator = va.Status.DesiredOptimizedAlloc.Accelerator
 	if accelerator == "" {
@@ -619,55 +619,6 @@ func (e *Engine) publishActivation(
 		} else {
 			// Deployment/LWS not cached, fall back to VA label via nil deployment/LWS
 			accelerator = accel.GetAcceleratorNameFromScaleTarget(&va, nil)
-		}
-	}
-
-	decision, hasDecision := common.DecisionCache.Get(va.Name, va.Namespace)
-	if !hasDecision {
-		// variantCost falls back to the project default rather than erroring.
-		// VariantCost is optional, and failing here would abort AFTER the
-		// activation and the retention mark have already been published: the
-		// target gets woken but never receives its decision-cache entry, status,
-		// or event, and hasDecision stays false so the same half-applied pass
-		// repeats every 100ms forever. This now agrees with buildCandidates,
-		// which deliberately keeps such a variant as a candidate.
-		cost := resolveVariantCost(ctx, va)
-		d := domain.VariantDecision{
-			VariantName:        va.Name,
-			Namespace:          va.Namespace,
-			ModelID:            va.Spec.ModelID,
-			Cost:               cost,
-			TargetReplicas:     targetWorkloadReplicas, // Scale up to 1 replica
-			CurrentReplicas:    targetWorkloadReplicas,
-			DesiredReplicas:    targetWorkloadReplicas,
-			LastRunTime:        metav1.Now(),
-			SaturationBased:    false,
-			SafetyOverride:     false,
-			ModelBasedDecision: false,
-			AcceleratorName:    accelerator,
-			MetricsAvailable:   true,
-			MetricsReason:      MetricsReasonAvailable,
-			MetricsMessage:     MetricsMessageAvailable,
-		}
-		d.SetDecisionReason(domain.ActionScaleUp, domain.DecisionReasonScaleFromZero, string(domain.DecisionReasonScaleFromZero)+reasonDetails)
-		common.DecisionCache.Set(va.Name, va.Namespace, d)
-	} else {
-		if decision.CurrentReplicas == 0 {
-			decision.TargetReplicas = targetWorkloadReplicas
-			decision.CurrentReplicas = targetWorkloadReplicas
-			decision.DesiredReplicas = targetWorkloadReplicas
-			decision.LastRunTime = metav1.Now()
-			decision.SaturationBased = false
-			decision.SafetyOverride = false
-			decision.ModelBasedDecision = false
-			decision.SetDecisionReason(domain.ActionScaleUp, domain.DecisionReasonScaleFromZero, string(domain.DecisionReasonScaleFromZero)+reasonDetails)
-			decision.AcceleratorName = accelerator
-			decision.MetricsAvailable = true
-			decision.MetricsReason = MetricsReasonAvailable
-			decision.MetricsMessage = MetricsMessageAvailable
-			common.DecisionCache.Set(va.Name, va.Namespace, decision)
-		} else {
-			logger.Info("Target variant decision.CurrentReplicas is not zero", "value", decision.CurrentReplicas)
 		}
 	}
 
@@ -686,8 +637,12 @@ func (e *Engine) publishActivation(
 		"ScaleFromZeroMode",
 		"scalefromzero decision: "+string(domain.DecisionReasonScaleFromZero)+reasonDetails)
 
-	// Record event just before Actuation.Applied = true
-	if hasDecision && targetWorkloadReplicas > 0 {
+	// Record event just before Actuation.Applied = true. Only when this call
+	// changed the published decision: the loop republishes the same activation
+	// every tick until KEDA has scaled the target off zero. A wake always
+	// publishes at least one replica (the only caller passes 1), so a changed
+	// decision is always a scale-up.
+	if changed {
 		e.recorder.Eventf(&va, corev1.EventTypeNormal, constants.K8SEventScaledUp, string(domain.DecisionReasonScaleFromZero)+reasonDetails)
 	}
 	va.Status.Actuation.Applied = true
@@ -744,7 +699,7 @@ func (e *Engine) selectOrClaim(ctx context.Context, group modelGroup, candidates
 		DecodeCovered:  covered.decode,
 		PrefillCovered: covered.prefill,
 		Constraints:    constraints,
-		RequirePrefill: e.requirePrefill(group.modelID, group.namespace),
+		RequirePrefill: e.requirePrefill(group),
 	})
 	if len(selected) == 0 && outcome == OutcomeNoCapacity {
 		if set, ok := e.claimShareTransfer(ctx, group, candidates, constraints, covered); ok {

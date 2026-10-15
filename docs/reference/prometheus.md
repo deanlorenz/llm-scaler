@@ -344,6 +344,27 @@ test install whose controller ran in `workload-variant-autoscaler-system`:
   }
   ```
 
+### `wva_engine_config`
+- **Type**: Gauge
+- **Description**: The engine configuration each variant runs, as the scaling manager read it from the scale target's launch flags (value is always 1). One series per variant.
+- **Labels**:
+  - `namespace` (scraped as `exported_namespace`), `model_name`, `variant_name`: the variant
+  - `accelerator`, `gpus`: the hardware its learned state is filed under. On a fleet whose pods sit on two GPU products this is the last product that resolved, not this cycle's reading, so it can differ from what discovery reports for the same variant
+  - `fingerprint`: a 16-hex-digit digest of the labels below. Two variants of one model on the same `accelerator` and `gpus` with the same `fingerprint` run the same engine configuration as far as the scaling manager can tell, and may share a learned latency line when `enableLearnedStateReuse` is on ([scaling policy](scaling-policy.md))
+  - `fingerprint_version`: the digest's format. A new version changes every fingerprint at once, so learned state keyed on the old ones starts cold after an upgrade
+  - `engine`, `weight_dtype`, `quantization`, `gpu_memory_utilization`, `block_size`, `kv_cache_dtype`, `tensor_parallel_size`, `num_gpu_blocks_override`, `total_kv_tokens_override`, `effective_max_batched_tokens`, `max_num_seqs`, `max_model_len`, `enforce_eager`: the flags that are hashed, after defaults
+  - `unresolved`: the flags the scaling manager could not read, for example a value given as an unexpanded `$VARIABLE`. Those flags carry their defaults in the labels above. **Empty is the good case.** A variant with anything here is not used as a key for sharing a latency line
+  - `image`: the engine container's image. Two variants with identical flags on different engine releases get different fingerprints
+  - `data_parallel_size`, `pipeline_parallel_size`, `expert_parallel`, `speculative_config`, `kv_connector`, `kv_offloading_size`, `kv_offloading_backend`, `prefix_caching_disabled`: the layout and features of a wide-EP or P/D engine, also hashed. `speculative_config` is vLLM's `--speculative-config` re-encoded with sorted keys, or SGLang's `--speculative-*` flags as `key=value` pairs; `kv_connector` is the `kv_connector` of `--kv-transfer-config`, or SGLang's `--disaggregation-transfer-backend`
+  - `model`, `model_revision`: the checkpoint served (vLLM's positional model or `--model`, SGLang's `--model-path`, and `--revision`). `model_unresolved` is `true` when it was given as a variable the scaling manager could not resolve, or after the flags where a flag may have taken it as its value; such a variant is not used as a key for sharing a latency line, and does not take another variant's measured capacity (two unread checkpoints may be an FP8 and a BF16 build of one model), though its own learned state is still restored after a restart
+  - `sharing_unresolved`: flags read for identity whose value could not be interpreted, each as `flag="value as written"` -- typically a parallel size computed when the pod starts, such as `data_parallel_size="$((LWS_GROUP_SIZE * DP_SIZE_LOCAL))"`. As with `model_unresolved`, such a variant does not share a latency line or take another variant's measured capacity -- the same text can be a 2x8 group in one LeaderWorkerSet and a 4x8 group in another -- and its own learned state is still restored after a restart. vLLM's `-tp`, `-dp` and `-pp` and its `--speculative-config.<key>` spelling are read
+  - `memory_layout`: flags that size or reshape what one replica holds and that no other label names, as sorted `key=value` pairs: vLLM's `--kv-cache-memory-bytes`, `--enable-eplb`, `--num-redundant-experts`, `--eplb-config` (re-encoded with sorted keys) and `--all2all-backend`, the `VLLM_ALL2ALL_BACKEND` env var (`env.VLLM_ALL2ALL_BACKEND`), and SGLang's `--enable-dp-attention` and `--moe-a2a-backend`. Empty is the common case. A value that cannot be read, including the env var set by `valueFrom`, goes to `sharing_unresolved` instead; one set by `envFrom` is not seen
+  - Only the leader pod's flags are read; the workers of a LeaderWorkerSet group are taken to run the same ones
+- **Use Case**: Answers "why did these two variants share (or not share) what they learned?" and "did the scaling manager read this engine's configuration correctly?". Compare `fingerprint` across variants of a model, and alert on a non-empty `unresolved`:
+  ```promql
+  wva_engine_config{unresolved!=""}
+  ```
+
 ### `wva_config_optimization_interval_seconds`
 - **Type**: Gauge
 - **Description**: Optimization interval in seconds
@@ -806,6 +827,12 @@ test install whose controller ran in `workload-variant-autoscaler-system`:
 - **Labels**: `namespace`, `configmap`, optional `controller_instance`
 - **Use Case**: a value above 0 is usually a misspelled key whose setting is not in force. The `ConfigEntryUnknownKeys` event names it and its line.
 
+### `wva_config_ignored_fields`
+- **Type**: Gauge
+- **Description**: fields in a scaling-policy ConfigMap's entries whose value cannot be used, at its last load: a `scaleToZero.retentionPeriod` that is not a duration or is under 30s, or a negative `shapeChangeHoldSeconds`. Each acts as unset, so the layer below applies; the entries still apply. The series is removed when the ConfigMap is deleted.
+- **Labels**: `namespace`, `configmap`, optional `controller_instance`
+- **Use Case**: a value above 0 means a setting you wrote is not in force. The `ConfigFieldIgnored` event names the entry, field and value. Each field is also counted in `wva_errors_total{error_type="Ignored unusable saturation scaling config field"}`.
+
 ### `wva_node_access_denied`
 - **Type**: Gauge
 - **Description**: `1` while a configured physical GPU limiter cannot read nodes, `0` when it can. Absent when no physical limiter is configured — nothing is asking for them.
@@ -1099,7 +1126,7 @@ Every reason the controller sets:
 | reason | set by | means | do |
 | --- | --- | --- | --- |
 | `variant-floor` | scale-to-zero policy | scale-to-zero is on, but a variant has `minReplicaCount > 0`, so the model never parks | set every variant's `minReplicaCount` to 0, or turn scale-to-zero off for the model. Alert: `WVAModelWillNotScaleToZero` |
-| `policy-forbids-zero` | scale-to-zero policy | every variant allows 0, but the model's resolved policy disables scale-to-zero | enable `scaleToZero` on the `default` entry (or its `defaultPolicy` tier) or the model's per-model entry, or raise `minReplicaCount`. Alert: `WVAModelWillNotScaleToZero` |
+| `policy-forbids-zero` | scale-to-zero policy | every variant allows 0, but the model's resolved policy disables scale-to-zero | enable `scaleToZero` for every tier the model's variants name (the `default` entry or its `defaultPolicy` tier when they name none), or on the model's per-model entry, or raise `minReplicaCount`. Alert: `WVAModelWillNotScaleToZero` |
 | `engine-unsupported` | scale-to-zero policy | the model runs both vLLM and SGLang, so no single request counter measures idleness; it is not parked | run one engine per model. Not alerted on by design |
 | `activation-retention` | scale-to-zero policy | just woken from zero and held for its retention period | nothing; clears by itself |
 | `no-wake-signal` | scale-from-zero | EPP exports no flow-control queue metric at all, so a parked model cannot wake | enable the EPP `flowControl` feature gate and restart the EPP. Alert: `WVAModelHasNoWakeSignal` |
@@ -1296,6 +1323,81 @@ For the scale-to-zero reasons, see also
     ]
   }
   ```
+
+### Service rate
+
+What the saturation analyzer priced a variant's service rate on this cycle:
+the ITL(k) line, the point it is evaluated at, and the per-replica completion
+rate that comes out. They explain `wva_analyzer_target` and the throughput
+floor rather than drive anything: these are observations of arithmetic the
+analyzer already does, and none of them is a scaling input for KEDA or an HPA
+to threshold. All are set from one record per variant per cycle, beside
+`wva_analyzer_target`, and a series is deleted when its variant or model stops
+being analyzed, and on a cycle whose collection returned no replica rows (a
+model scaled to zero, or one whose pods are not scraped), so a parked fleet
+does not keep its last rate. A cycle whose metrics query or analysis fails
+deletes nothing: these series keep their last values, as `wva_analyzer_target`
+does, so during a Prometheus outage they show the last cycle that priced the
+model, not the current one.
+
+Labels are the ones `wva_analyzer_target` and `wva_engine_config` carry, so the
+three join directly. `namespace` is the **model's** namespace and arrives in
+Prometheus as `exported_namespace` (see the note on namespaces above), plus
+`controller_instance` when `CONTROLLER_INSTANCE` is set. Every value here is a
+variant-level reading; the `derived-mu` log line carries the same quantities
+per pod.
+
+### `wva_itl_line_slope`
+- **Type**: Gauge
+- **Description**: Slope A of the line ITL(k) = A*k + B a decode variant would derive its service rate from, in seconds per unit of KV utilization. Whether the derived rate is the one in use is `wva_service_rate_per_replica`'s `source`: an own measured window with enough readings wins over it. The line is the variant's own fit, or one borrowed from a sibling with the same engine configuration (only when `enableLearnedStateReuse` is on). Absent while the variant has no line, and while none of its replicas reports (a variant parked at zero keeps its window for up to 30 minutes, and publishes none of it).
+- **Labels**:
+  - `namespace`: the model's namespace (scraped as `exported_namespace`)
+  - `model_name`: model ID
+  - `variant_name`: variant name
+- **Use Case**: Watch the contention term a derived service rate rests on. The series does not say whose line it is: a slope that jumps can be the variant's own line refitted on different load, or the variant switching between its own line and a borrowed one. `wva_service_rate_per_replica{source="borrowed-line"}` tells the two apart while the borrowed line is the one in use.
+
+### `wva_itl_line_intercept`
+- **Type**: Gauge
+- **Description**: Intercept B of the same line, in seconds: the inter-token latency the line predicts at an empty cache. It is not always a fitted hardware floor: when the readings span too little of k for a free fit, the intercept is pinned to a learned or default value and only the slope is fitted, and a free fit on noisy readings can put it below zero. Present and absent with `wva_itl_line_slope`.
+- **Labels**: as `wva_itl_line_slope`
+- **Use Case**: Compare a variant's floor across accelerators; an intercept far from the card's usual figure is a fit on too narrow a range of k.
+
+### `wva_itl_seconds_at_pricing_k`
+- **Type**: Gauge
+- **Description**: The line evaluated at `wva_pricing_k`, in seconds: the inter-token latency a derived service rate would be priced at. Present and absent with `wva_itl_line_slope`. A line that is zero or negative at the pricing k cannot derive a rate, and none of the three line series is published for it; `wva_itl_line_samples` still is.
+- **Labels**: as `wva_itl_line_slope`
+- **Use Case**: Compare against the ITL the engines report under load. A priced ITL well below the observed one means the derived rate over-states what a replica completes.
+
+### `wva_itl_line_samples`
+- **Type**: Gauge
+- **Description**: How many (k, ITL) readings a decode variant's **own** ITL window holds, published while it has no line too, zero included, and absent while none of its replicas reports. A line needs enough readings spread far enough apart in k; a variant priced on a borrowed line still reports its own count here.
+- **Labels**: as `wva_itl_line_slope`
+- **Use Case**: Explain an absent line. A fleet with no line produces no derived service rate, and the reason is almost always this count or the spread of k rather than anything wrong. A fresh fleet takes about 28 cycles from load start to fit.
+- **Example**: serving decode variants with no usable line this cycle, their own or a borrowed one:
+  ```promql
+  wva_itl_line_samples unless on (exported_namespace, model_name, variant_name) wva_itl_line_slope
+  ```
+
+### `wva_service_rate_per_replica`
+- **Type**: Gauge
+- **Description**: The saturated completion rate one replica of a variant is priced at, in requests per second: the median over the variant's own replicas that have one, never a warm pool bridge. One series per variant; `source` names the path that answered for the median replica. With an even replica count the rate averages the central pair, and `source` is the lower reading's, so a variant with one `measured` and one `derived` reading publishes a rate between the two, labelled with the source of the lower. Absent while no replica has a rate.
+- **Labels**:
+  - `namespace`, `model_name`, `variant_name`: as `wva_itl_line_slope`
+  - `role`: `prefill`, `decode` or `both`
+  - `source`: `derived` (from the variant's own ITL line at the pricing k), `borrowed-line` (the same, from a line a sibling with the same engine configuration fitted), `measured` (the variant's own saturated window for the output length being served) or `neighbour` (a neighbouring output-length bucket's window, used until the served bucket has its own). The throughput floor may hold a fleet on a `borrowed-line` or `neighbour` rate but not grow one -- nor on a `measured` window with too few readings, which the floor's `heldWhy=single-sample` reports
+- **Use Case**: What one replica of the variant is priced to complete at saturation. It is the variant's own figure, not the floor's divisor: the floor works per role, takes the median over the role's replicas that read their own bucket (dropping neighbour and borrowed-line readings whenever one does), and adds the backlog. On a role with one variant and readings of one kind the two agree. A `source` that stays `neighbour` after a shape change means the fleet has not yet measured itself under the new shape.
+- **Example**: variants priced on a neighbouring bucket's reading, and for how long:
+  ```promql
+  wva_service_rate_per_replica{source="neighbour"}
+  ```
+
+### `wva_pricing_k`
+- **Type**: Gauge
+- **Description**: The KV utilization an ITL line is evaluated at to derive a decode replica's service rate, published for every model the saturation analyzer runs on, including those with no decode role: `kvCacheThreshold` x `scaleUpThreshold`, clamped to the range a line is fitted over. Composed, so 0.68 with the shipped defaults, not the 0.85 that `k_sat` suggests.
+- **Labels**:
+  - `namespace`: the model's namespace (scraped as `exported_namespace`)
+  - `model_name`: model ID
+- **Use Case**: Settle which utilization the autoscaler targets when pricing a replica, without recomputing it from configuration.
 
 ## Example Queries
 

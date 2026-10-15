@@ -261,6 +261,7 @@ kubectl get cm wva-controller-status -n "$NS" -o jsonpath='{.data}{"\n"}'
 | `policyResourceVersion` | `metadata.resourceVersion` of the policy ConfigMap last **loaded**, accepted or rejected. Written only once that content is in force, so after an edit, a match with the ConfigMap's own `resourceVersion` means the controller runs with it. Empty when no policy ConfigMap is in force. Compare for equality only |
 | `policyAccepted` | `true`, or `false` when the `default` entry was rejected; the controller then runs without it |
 | `policyError` | why the `default` entry was rejected; empty when accepted |
+| `policyIgnored` | values in the `default` entry that could not be used, as `<namespace>/<name>: ` (the ConfigMap) then `<field>="<value>": <reason>`, separated by `; `. Values are cut to 64 bytes; at most 10 fields, then `+<n> more`. The rest of the entry applies. Empty when none. Always the controller's own ConfigMap, even with a separate policy namespace. It describes the entry parsed in the latest read: when that `default` entry is rejected and the previous one stays, it is empty and `policyAccepted`/`policyError` say why |
 | `limiter` | the limiter in force, `<mode>/<entry names>`, e.g. `quota/install-quota`, or `none` |
 | `utilizationShare` | the optimizer's mode: `off`, `invalid`, `shadow` or `active` |
 | `utilizationShareError` | the optimizer block's error when the mode is `invalid` |
@@ -273,6 +274,28 @@ logged and retried and never stops scaling. A missing ConfigMap means the
 controller predates it or lacks the `wva-controller-status-role` grant (a
 cluster admin re-runs `make setup-prereqs`). It does not mean scaling stopped.
 
+**Stopping takes up to 40s.** On SIGTERM the controller finishes the running
+cycle, stops (up to 25s) and releases its lease, so the next leader starts at
+once. The Deployment allows 40s (`terminationGracePeriodSeconds`).
+
+On a slow API server the lease release itself can take up to `RenewDeadline`
+(50s by default). The kubelet kills the pod at 40s, so the release may not
+finish. The next leader then waits for the lease to expire (`LeaseDuration`,
+60s by default) before it takes over. Scaling decisions pause for that minute;
+nothing else is lost.
+
+A kustomize patch that keeps `terminationGracePeriodSeconds` at 10 is no worse
+than before the upgrade. It only loses the faster failover: the pod is killed
+before it releases the lease, and the next leader waits out `LeaseDuration`.
+
+<details>
+<summary>Details</summary>
+
+The release is one Get and one Update of the Lease, bounded together by
+`RenewDeadline` (client-go `LeaderElector.release`); controller-runtime gives
+each request a timeout of `RenewDeadline/2`.
+
+</details>
 ## Command cheatsheet
 
 ```bash
