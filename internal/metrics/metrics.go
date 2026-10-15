@@ -314,14 +314,14 @@ func InitMetrics(registry prometheus.Registerer) error {
 	learnedStateK2Source = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: constants.WVALearnedStateK2Source,
-			Help: "1 for the source of the k2 a variant is priced on, as the cycle log names it: P1-obs (measured this cycle), P2-hist (the variant's own earlier measurement), P2-borrow (a sibling's), P3-k2 (derived from engine flags) or P4-k1 (the KV cache alone). Taken from the replica the variant's capacity comes from. Absent when no replica of the variant reported this cycle.",
+			Help: "1 for the source of the k2 a variant is priced on, as the cycle log names it: P1-obs (measured this cycle), P2-hist (the variant's own earlier measurement), P2-borrow (a sibling's), P3-k2 (derived from engine flags) or P4-k1 (no k2: the KV cache, or the stored estimate for an engine that publishes no cache config); k1-bound when the k2 is at or above k1, so the KV cache prices the replica. Taken from the lower-median replica, the one the cycle log's reason names. Absent when no replica of the variant reported this cycle.",
 		},
 		learnedK2Labels,
 	)
 	learnedStateK2Age = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: constants.WVALearnedStateK2AgeSeconds,
-			Help: "Seconds since the k2 a variant is priced on was last measured -- written, not read: a figure in use every cycle is read every cycle and still ages. The variant's own window for source P1-obs and P2-hist, the donor's for P2-borrow; absent for P3-k2 and P4-k1, which come from no measurement.",
+			Help: "Seconds since the k2 a variant is priced on was last measured -- written, not read: a figure in use every cycle is read every cycle and still ages. The variant's own window for source P1-obs and P2-hist, the donor's for P2-borrow; absent for P3-k2, P4-k1 and k1-bound, where no measured k2 prices the replica. Keeps its last value through a cycle whose collection or analysis failed.",
 		},
 		learnedK2Labels,
 	)

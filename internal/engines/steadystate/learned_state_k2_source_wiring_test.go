@@ -104,6 +104,28 @@ func TestRecordAnalyzerMetrics_ReplacesTheK2SourceWhenItChanges(t *testing.T) {
 		"a variant priced from no replica kept its last source")
 }
 
+// A variant whose role changes under the same source moves its series: the
+// old role's source and age are not left beside the new ones.
+func TestRecordAnalyzerMetrics_MovesTheK2SourceWhenTheRoleChanges(t *testing.T) {
+	e, registry := engineConfigEngine(t)
+	e.recordAnalyzerMetrics("ns", "m", []allocation.NamedAnalyzerResult{
+		withK2(namedResult("saturation", nil, 5, "canary"), map[string]k2Of{
+			"canary": {role: "decode", source: "P2-hist", age: time.Hour, hasAge: true},
+		}),
+	})
+	e.recordAnalyzerMetrics("ns", "m", []allocation.NamedAnalyzerResult{
+		withK2(namedResult("saturation", nil, 5, "canary"), map[string]k2Of{
+			"canary": {role: "prefill", source: "P2-hist", age: time.Hour, hasAge: true},
+		}),
+	})
+	assert.ElementsMatch(t, []string{"prefill"},
+		seriesLabels(t, registry, constants.WVALearnedStateK2Source, constants.LabelRole),
+		"the role the variant left kept its k2 source")
+	assert.ElementsMatch(t, []string{"prefill"},
+		seriesLabels(t, registry, constants.WVALearnedStateK2AgeSeconds, constants.LabelRole),
+		"the role the variant left kept its k2 age")
+}
+
 // Another analyzer reporting the same variant with no k2 must not unpublish
 // the saturation analyzer's source.
 func TestRecordAnalyzerMetrics_GathersTheK2SourceAcrossAnalyzers(t *testing.T) {

@@ -110,6 +110,24 @@ var _ = Describe("the source and age of the k2 a variant is priced on", func() {
 		Expect(got.HasK2Age).To(BeFalse(), "k1 is no measurement, and has no age")
 	})
 
+	// k1 is 0.8 x 16000 = 12800. A saturated replica holding 14000 tokens is
+	// a legitimate P1-obs reading above k1, and the replica is then priced at
+	// k1: the age of a k2 that prices nothing would send an operator after
+	// the wrong figure.
+	It("names k1 when the k2 is at or above it, with no age", func() {
+		got := cycle(14000, 6, 1000, 0)["variant-a"]
+
+		Expect(got.Reason).To(Equal("P1-obs"), "precondition: the cycle log names the k2's source")
+		Expect(got.K2Source).To(Equal("k1-bound"), "a k2 above k1 was reported as the figure the price carries")
+		Expect(got.HasK2Age).To(BeFalse(), "a k2 that prices nothing was given an age")
+
+		// The same figure from the window on a later cycle.
+		got = cycle(1000, 0, 1000, 0)["variant-a"]
+		Expect(got.Reason).To(Equal("P2-hist"))
+		Expect(got.K2Source).To(Equal("k1-bound"))
+		Expect(got.HasK2Age).To(BeFalse())
+	})
+
 	It("reports nothing for a variant with no replica reporting", func() {
 		parked := []domain.VariantReplicaState{
 			{VariantName: "variant-a", AcceleratorName: "H100", CurrentReplicas: 1, GPUsPerReplica: 1},

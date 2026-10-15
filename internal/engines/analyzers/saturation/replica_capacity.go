@@ -841,8 +841,24 @@ func k2SourceLabel(replicas []capacity.ReplicaCapacity) string {
 	return domain.ReasonError
 }
 
+// k2SourceK1Bound is the k2 source published for a variant whose k2, from
+// whichever source, is at or above k1: the KV cache prices the replica, and
+// the k2's own source and age say nothing about the price. The cycle log's
+// Reason still names the k2 source.
+const k2SourceK1Bound = "k1-bound"
+
+// k2DoesNotBind reports whether row's k2 is at or above its k1, so that k1
+// is what prices it. A P4-k1 row is its own answer: its k2 is k1 by
+// construction, and on the store fallback both are the stored estimate.
+func k2DoesNotBind(row *capacity.ReplicaCapacity) bool {
+	return row.K2Priority != capacity.K2SrcFallback &&
+		row.ComputeBoundCapacity >= row.MemoryBoundCapacity
+}
+
 // medianK2Row is the replica k2SourceLabel names: the lower median by
-// EffectiveCapacity, from a sorted copy. Nil when replicas is empty.
+// EffectiveCapacity, from a sorted copy. Nil when replicas is empty. With an
+// even count the variant's price averages the central pair, so this row is
+// the lower of the two figures it averages.
 func medianK2Row(replicas []capacity.ReplicaCapacity) *capacity.ReplicaCapacity {
 	if len(replicas) == 0 {
 		return nil

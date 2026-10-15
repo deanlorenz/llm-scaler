@@ -301,7 +301,9 @@ type VariantCapacity struct {
 
 	// K2Source is the k2 source (P1-obs, P2-hist, P2-borrow, P3-k2, P4-k1) of
 	// the replica the variant's per-replica capacity was taken from -- the
-	// replica Reason names. K2Age is how long ago the window that figure came
+	// lower-median replica, the one Reason names -- or k1-bound when that
+	// replica's k2 is at or above its k1, so the KV cache prices it and the
+	// k2 has no age worth reporting. K2Age is how long ago the window that figure came
 	// from was last WRITTEN, when HasK2Age: the variant's own window for
 	// P1-obs and P2-hist, the donor's for P2-borrow; P3-k2 and P4-k1 come
 	// from no window. A read does not make a figure younger. K2Source is

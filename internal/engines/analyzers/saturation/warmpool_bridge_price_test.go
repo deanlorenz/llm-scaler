@@ -2,6 +2,7 @@ package saturation
 
 import (
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 
@@ -161,6 +162,37 @@ func TestAVariantCarriedOnlyByABridgeReportsItsBorrow(t *testing.T) {
 		nil, oneVariantState(1), "model", "ns", 0.9, false, logr.Discard())
 	if len(got[0].Borrowed) != 0 {
 		t.Errorf("Borrowed = %+v, want none: the own replica set the price", got[0].Borrowed)
+	}
+}
+
+// The k2 source and age of a variant carried only by a bridge are the
+// bridge's: it is the row the variant's price came from. With an own replica
+// reporting, they are the own replica's.
+func TestAVariantCarriedOnlyByABridgeReportsItsK2Source(t *testing.T) {
+	a := NewSaturationAnalyzer(capacity.NewStore())
+
+	bridge := pricedReplica("pool-0", 300, 600, true)
+	bridge.ComputeBoundCapacity, bridge.EffectiveCapacity = 400, 400
+	bridge.K2Priority = capacity.K2SrcBorrowed
+	bridge.K2BorrowedFrom = "main"
+	bridge.K2WriteAge, bridge.K2WriteAgeKnown = 2*time.Hour, true
+
+	got := a.aggregateByVariant([]capacity.ReplicaCapacity{bridge},
+		nil, oneVariantState(0), "model", "ns", 0.9, false, logr.Discard())
+	if got[0].K2Source != "P2-borrow" || !got[0].HasK2Age || got[0].K2Age != 2*time.Hour {
+		t.Errorf("K2Source = %q, age %v (known %v), want P2-borrow, 2h: the bridge's k2 is the variant's price",
+			got[0].K2Source, got[0].K2Age, got[0].HasK2Age)
+	}
+
+	own := pricedReplica("variant-a-0", 100, 1000, false)
+	own.ComputeBoundCapacity, own.EffectiveCapacity = 800, 800
+	own.K2Priority = capacity.K2SrcObserved
+	own.K2WriteAgeKnown = true
+	got = a.aggregateByVariant([]capacity.ReplicaCapacity{own, bridge},
+		nil, oneVariantState(1), "model", "ns", 0.9, false, logr.Discard())
+	if got[0].K2Source != "P1-obs" || got[0].K2Age != 0 {
+		t.Errorf("K2Source = %q, age %v, want P1-obs, 0: the own replica set the price",
+			got[0].K2Source, got[0].K2Age)
 	}
 }
 

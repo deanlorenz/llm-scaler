@@ -222,13 +222,17 @@ func (a *SaturationAnalyzer) aggregateByVariant(
 		totalCapacity := float64(replicaCount) * perReplicaCapacity
 
 		// The replica Reason names, so the source and age published for the
-		// variant describe the figure its price carries.
+		// variant describe the figure its price carries -- unless that figure
+		// is a k2 at or above k1, which prices nothing: the KV cache does.
 		var k2Source string
 		var k2Age time.Duration
 		var hasK2Age bool
 		if row := medianK2Row(pricedRows); row != nil {
 			k2Source = row.K2Priority.String()
 			k2Age, hasK2Age = row.K2WriteAge, row.K2WriteAgeKnown
+			if k2DoesNotBind(row) {
+				k2Source, k2Age, hasK2Age = k2SourceK1Bound, 0, false
+			}
 		}
 
 		var utilization float64
