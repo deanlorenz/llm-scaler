@@ -547,9 +547,8 @@ leader pod, the check covers only the leader's ranks.
   missing rank. It means: if that rank starts on this node, it recompiles
   torch.compile. On a multi-node engine, a node often lacks ranks that never
   run there; publish to fill them in.
-- `UNREADABLE`: a file under the key cannot be read, other users cannot read
-  it, or it is a symbolic link. The engine may run as a different user than
-  the check.
+- `UNREADABLE`: a file under the key cannot be read, the engine's user could
+  not read it (the line names that UID), or it is a symbolic link.
 - `COULD NOT CHECK`: no Ready preparer on the node, the exec failed, was
   Forbidden, or timed out. This is never reported as absent.
 
@@ -580,12 +579,25 @@ read as `torch_compile_cache/<hash>`) is present when any rank is there.
 
 The check runs in the preparer pod already on each node (`kubectl exec`, no
 GPU). That pod runs as root on Kubernetes, so it can read any file. To catch
-files the engine could not read, it also reports any file without read
-permission for other users, and any directory without read and search
-permission for them. This mode check is conservative. It looks only at the
-bits for other users. An engine running as root, or as the owning user or
-group (for example a `1770` directory shared by one UID), can read files the
-check calls `UNREADABLE`.
+files the engine could not read, it also checks the permissions for the
+engine's user:
+
+- By default the engine's user is the owner of the key directory: the engine
+  that wrote the key. A file it owns needs owner read. A file owned by
+  another user needs group read if it is in the key directory's group, and
+  read for others if not. Directories need read and search the same way.
+- vLLM writes its AOT files (`.../rank_0_0/model`) as mode `600`. That is
+  fine when the engine owns them, which it does when it wrote them. They are
+  `present`.
+- Set `ENGINE_CACHE_UID=<uid>` when the engines run as a different user than
+  the one that owns the keys. A seeded node is the usual case: the preparer
+  copied the keys there as root. The check then reads the permissions for
+  that UID: owner read if it owns the file, read for others if not. Its
+  groups are not known, so group permissions are not counted.
+
+```bash
+make engine-cache-verify NAMESPACE=<ns> ENGINE_CACHE_KEYS='<key>' ENGINE_CACHE_UID=1001
+```
 
 vLLM writes no symbolic links. A link under the key, or a linked directory on
 the way to it, is `UNREADABLE` and is never followed.
@@ -595,8 +607,8 @@ the way to it, is `UNREADABLE` and is never followed.
 the engine compiled again. It warns instead.
 
 The read stops after 300 seconds, and after 280 inside the pod when its
-image has `timeout`. The image needs `find` to read file modes; without it
-every key is `COULD NOT CHECK`.
+image has `timeout`. The image needs `find` (with `-user`) and `ls` to read
+file modes and owners; without them every key is `COULD NOT CHECK`.
 
 </details>
 

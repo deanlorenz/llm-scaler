@@ -755,25 +755,109 @@ if [ "$rc" != 0 ] && ecv_row "$T/ecv-nopod.out" n-d "COULD NOT CHECK" "$K1" && e
     && ecv_row "$T/ecv-nopod.out" n-a present "$K1" && ! grep -q '^exec -n check-ns ec-d' "$T/calls"; then
     ok "verify: a node with no Ready preparer (not ready, or no pod) fails as could-not-check, and is not exec-ed into"
 else fail "verify no Ready preparer: rc=$rc $(grep -E 'n-d|n-e' "$T/ecv-nopod.out" | tr '\n' ';')"; fi
-# a file only its owner may read: the check runs as root in the preparer and
-# reads it, but an engine running as another UID cannot -- unreadable, for
-# any check runner (the owner reads it here too)
+# The modes are read for the engine's UID: the owner of the key directory
+# (the engine that wrote it), or ENGINE_CACHE_UID. vLLM v0.31.0 writes its
+# AOT files 600 under 755 key directories, all owned by the engine (measured
+# on a cluster, as root): readable by that engine, so present -- this was
+# UNREADABLE on every node when only the bits for other users were read.
+ME="$(id -u)"; OTHER=$((ME + 4242))
+AOTK=torch_compile_cache/torch_aot_compile/5d1e0c9b8a
+ecv_aot() {  # every node holds AOTK, as vLLM writes it
+    local p
+    for p in ec-a ec-b ec-c; do
+        mkdir -p "$T/ecv/$p/vllm/$AOTK/rank_0_0" "$T/ecv/$p/vllm/$AOTK/modelinfos"
+        echo aot > "$T/ecv/$p/vllm/$AOTK/rank_0_0/model"; echo meta > "$T/ecv/$p/vllm/$AOTK/modelinfos/m.json"
+        chmod 755 "$T/ecv/$p/vllm/$AOTK" "$T/ecv/$p/vllm/$AOTK/rank_0_0" "$T/ecv/$p/vllm/$AOTK/modelinfos"
+        chmod 600 "$T/ecv/$p/vllm/$AOTK/rank_0_0/model" "$T/ecv/$p/vllm/$AOTK/modelinfos/m.json"
+    done
+}
+ecv_reset; ecv_aot
+rc="$(ecv "$T/ecv-aot600.out" --keys "$AOTK@rank_0_0")"
+[ "$rc" = 0 ] && ecv_row "$T/ecv-aot600.out" n-a present "$AOTK@rank_0_0" && grep -q '3 usable node(s) x 1 key(s): 3 present, 0 absent, 0 unreadable, 0 could not check' "$T/ecv-aot600.out" \
+    && grep -q 'VERIFIED: every key is on every usable node' "$T/ecv-aot600.out" && grep -q 'modes read for the owner of each key directory' "$T/ecv-aot600.out" \
+    && ok "verify: vLLM's 600 AOT files under a 755 key directory, owned by the key's owner (uid ${ME}), are present" || fail "verify AOT 600: rc=$rc $(grep -E 'n-a|present,' "$T/ecv-aot600.out" | tr '\n' ';')"
+rc="$(ENGINE_CACHE_UID="$ME" ecv "$T/ecv-aotme.out" --keys "$AOTK@rank_0_0")"
+[ "$rc" = 0 ] && grep -q '3 present, 0 absent, 0 unreadable' "$T/ecv-aotme.out" && grep -q "modes read for uid ${ME} (ENGINE_CACHE_UID)" "$T/ecv-aotme.out" \
+    && ok "verify: ENGINE_CACHE_UID equal to the owner of the 600 files (${ME}) is present" || fail "verify ENGINE_CACHE_UID=owner: rc=$rc $(grep -E 'n-a|present,|modes' "$T/ecv-aotme.out" | tr '\n' ';')"
+rc="$(ENGINE_CACHE_UID="$OTHER" ecv "$T/ecv-aotother.out" --keys "$AOTK@rank_0_0")"
+[ "$rc" != 0 ] && grep -qE "^  n-b +UNREADABLE +$AOTK@rank_0_0  \($AOTK/(rank_0_0/model|modelinfos/m\.json): not readable by uid $OTHER \(ENGINE_CACHE_UID\)\)" "$T/ecv-aotother.out" \
+    && grep -q '0 present, 0 absent, 3 unreadable, 0 could not check' "$T/ecv-aotother.out" && grep -q 'NOT VERIFIED' "$T/ecv-aotother.out" \
+    && ok "verify: ENGINE_CACHE_UID=${OTHER}, not the owner of the 600 files, is unreadable on every node, naming the uid" || fail "verify ENGINE_CACHE_UID=other: rc=$rc $(grep -E 'n-b|present,' "$T/ecv-aotother.out" | tr '\n' ';')"
+rc="$(ENGINE_CACHE_UID="00${ME}" ecv "$T/ecv-aotzeros.out" --keys "$AOTK@rank_0_0")"
+[ "$rc" = 0 ] && grep -q "modes read for uid ${ME} (ENGINE_CACHE_UID)" "$T/ecv-aotzeros.out" \
+    && ok "verify: ENGINE_CACHE_UID with leading zeros is that uid, not octal" || fail "verify ENGINE_CACHE_UID=00${ME}: rc=$rc $(grep -E 'modes|present,' "$T/ecv-aotzeros.out" | tr '\n' ';')"
+for bad in abc 12a -1 1.5 99999999999 4294967295; do
+    : > "$T/calls"
+    rc="$(ENGINE_CACHE_UID="$bad" ecv "$T/ecv-baduid.out" --keys "$K1")"
+    [ "$rc" != 0 ] && grep -q "ENGINE_CACHE_UID must be a" "$T/ecv-baduid.out" && ! grep -q '^exec' "$T/calls" \
+        && ok "verify: ENGINE_CACHE_UID='${bad}' is refused before any exec" || fail "verify ENGINE_CACHE_UID='${bad}': rc=$rc $(tail -1 "$T/ecv-baduid.out")"
+done
+# the default UID is the key directory's owner: a 600 file the runner owns
+# is present; under ENGINE_CACHE_UID=another, unreadable
 ecv_reset; chmod 600 "$T/ecv/ec-a/vllm/$K1/rank_1_0/backbone/model.py"
 rc="$(ecv "$T/ecv-mode.out" --keys "$K1")"
-[ "$rc" != 0 ] && grep -qE "^  n-a +UNREADABLE +$K1  \($K1/rank_1_0/backbone/model.py: not readable by other users \(the engine may run as another UID\)\)" "$T/ecv-mode.out" \
-    && grep -q '2 present, 0 absent, 1 unreadable, 0 could not check' "$T/ecv-mode.out" \
-    && ok "verify: a file not readable by other users is unreadable, naming the file (the read itself runs as root)" || fail "verify mode 600: rc=$rc $(grep -E 'n-a|present,' "$T/ecv-mode.out" | tr '\n' ';')"
+[ "$rc" = 0 ] && grep -q '3 present, 0 absent, 0 unreadable, 0 could not check' "$T/ecv-mode.out" \
+    && ok "verify: a 600 file owned by the key directory's owner is present" || fail "verify mode 600, owner: rc=$rc $(grep -E 'n-a|present,' "$T/ecv-mode.out" | tr '\n' ';')"
+rc="$(ENGINE_CACHE_UID="$OTHER" ecv "$T/ecv-mode2.out" --keys "$K1")"
+[ "$rc" != 0 ] && grep -qE "^  n-a +UNREADABLE +$K1  \($K1/rank_1_0/backbone/model.py: not readable by uid $OTHER \(ENGINE_CACHE_UID\)\)" "$T/ecv-mode2.out" \
+    && grep -q '2 present, 0 absent, 1 unreadable, 0 could not check' "$T/ecv-mode2.out" \
+    && ok "verify: a 600 file another UID (ENGINE_CACHE_UID) would run as is unreadable, naming the file and the uid" || fail "verify mode 600, other uid: rc=$rc $(grep -E 'n-a|present,' "$T/ecv-mode2.out" | tr '\n' ';')"
 ecv_reset; chmod 700 "$T/ecv/ec-b/vllm/$K2/rank_0_0"
 rc="$(ecv "$T/ecv-dmode.out" --keys "$K2")"
-[ "$rc" != 0 ] && grep -qE "^  n-b +UNREADABLE +$K2  \($K2/rank_0_0: not readable by other users" "$T/ecv-dmode.out" \
-    && ok "verify: a directory other users cannot search is unreadable, naming it" || fail "verify dir mode 700: rc=$rc $(grep n-b "$T/ecv-dmode.out")"
+[ "$rc" = 0 ] && ecv_row "$T/ecv-dmode.out" n-b present "$K2" \
+    && ok "verify: a 700 directory owned by the key directory's owner is present" || fail "verify dir mode 700, owner: rc=$rc $(grep n-b "$T/ecv-dmode.out")"
+rc="$(ENGINE_CACHE_UID="$OTHER" ecv "$T/ecv-dmode2.out" --keys "$K2")"
+[ "$rc" != 0 ] && grep -qE "^  n-b +UNREADABLE +$K2  \($K2/rank_0_0: not readable by uid $OTHER \(ENGINE_CACHE_UID\)\)" "$T/ecv-dmode2.out" \
+    && ok "verify: a 700 directory another UID cannot search is unreadable, naming it and the uid" || fail "verify dir mode 700, other uid: rc=$rc $(grep n-b "$T/ecv-dmode2.out")"
+# mixed owners under one key, with the default UID: needs files owned by
+# other UIDs, so a root runner. The key directory is uid/gid 4243; a file
+# owned by 4242 is readable through the group when it is in group 4243 and
+# g+r, through other when it is not -- and never through the bit of the
+# class it is not in.
+if [ "$ME" != 0 ]; then ok "verify: (the mixed-owner cases need a root check runner)"; else
+    mixed() {  # mixed OWNER:GROUP MODE WANT -- the file under ec-a K1, the rest 4243:4243
+        ecv_reset; chown -R 4243:4243 "$T/ecv/ec-a/vllm/$K1"
+        local f="$T/ecv/ec-a/vllm/$K1/rank_1_0/backbone/model.py"
+        chown "$1" "$f"; chmod "$2" "$f"
+        rc="$(ecv "$T/ecv-mixed.out" --keys "$K1")"
+        if [ "$3" = present ]; then
+            [ "$rc" = 0 ] && ecv_row "$T/ecv-mixed.out" n-a present "$K1" && ok "verify: a $2 file owned by $1 under a 4243:4243 key is present" || fail "verify mixed $1 $2: rc=$rc $(grep n-a "$T/ecv-mixed.out")"
+        else
+            [ "$rc" != 0 ] && grep -qE "^  n-a +UNREADABLE +$K1  \($K1/rank_1_0/backbone/model.py: not readable by uid 4243, the owner of the key directory" "$T/ecv-mixed.out" \
+                && ok "verify: a $2 file owned by $1 under a 4243:4243 key is unreadable for uid 4243" || fail "verify mixed $1 $2: rc=$rc $(grep n-a "$T/ecv-mixed.out")"
+        fi
+    }
+    mixed 4242:4243 640 present
+    mixed 4242:4243 604 unreadable
+    mixed 4242:4244 640 unreadable
+    mixed 4242:4244 604 present
+    mixed 4242:4244 600 unreadable
+    mixed 4243:4244 600 present
+    mixed 4243:4244 044 unreadable
+    ecv_reset; chown -R 4243:4243 "$T/ecv/ec-a/vllm/$K1"; chown 4242:4244 "$T/ecv/ec-a/vllm/$K1/rank_1_0"; chmod 750 "$T/ecv/ec-a/vllm/$K1/rank_1_0"
+    rc="$(ecv "$T/ecv-mixeddir.out" --keys "$K1")"
+    [ "$rc" != 0 ] && grep -qE "^  n-a +UNREADABLE +$K1  \($K1/rank_1_0: not readable by uid 4243" "$T/ecv-mixeddir.out" \
+        && ok "verify: a 750 directory owned by another uid and group under the key is unreadable for the key's owner" || fail "verify mixed dir: rc=$rc $(grep n-a "$T/ecv-mixeddir.out")"
+fi
+# a preparer whose find takes no -user cannot read the owners: could not check
+mkdir -p "$T/nofinduser"
+printf '#!/bin/sh\ncase " $* " in *" -user "*) echo "find: unrecognized: -user" >&2; exit 1 ;; esac\nexec %s "$@"\n' "$(command -v find)" > "$T/nofinduser/find"; chmod +x "$T/nofinduser/find"
+ecv_reset
+rc="$(STUB_EXEC_PATH="$T/nofinduser:$PATH" ecv "$T/ecv-nofinduser.out" --keys "$K1")"
+[ "$rc" != 0 ] && grep -qE "^  n-a +COULD NOT CHECK +$K1  \(the preparer image's find takes no -user" "$T/ecv-nofinduser.out" && grep -q '0 present, 0 absent, 0 unreadable, 3 could not check' "$T/ecv-nofinduser.out" \
+    && ok "verify: a find without -user is could-not-check, never present" || fail "verify find without -user: rc=$rc $(grep -E 'n-a|present,' "$T/ecv-nofinduser.out" | tr '\n' ';')"
+# the make target passes ENGINE_CACHE_UID through only when it is set
+if env -u ENGINE_CACHE_UID make -n engine-cache-verify NAMESPACE=ns ENGINE_CACHE_KEYS=k ENGINE_CACHE_UID=1001 2>/dev/null | grep -q 'ENGINE_CACHE_UID="1001" bash deploy/enginecache.sh verify' \
+    && ! env -u ENGINE_CACHE_UID make -n engine-cache-verify NAMESPACE=ns ENGINE_CACHE_KEYS=k 2>/dev/null | grep -q 'ENGINE_CACHE_UID='; then
+    ok "engine-cache-verify: ENGINE_CACHE_UID reaches the script when set, and only then"
+else fail "engine-cache-verify: ENGINE_CACHE_UID pass-through: $(env -u ENGINE_CACHE_UID make -n engine-cache-verify NAMESPACE=ns ENGINE_CACHE_KEYS=k ENGINE_CACHE_UID=1001 2>&1 | tail -1)"; fi
 # a file no one but root can read: as root the read passes and the mode
-# check names it; as any other runner the read itself fails -- unreadable
-# either way, never present
+# check names it (owner read is missing); as any other runner the read
+# itself fails -- unreadable either way, never present
 ecv_reset; chmod 000 "$T/ecv/ec-a/vllm/$K1/rank_1_0/backbone/model.py"
 rc="$(ecv "$T/ecv-unread.out" --keys "$K1")"
 chmod 644 "$T/ecv/ec-a/vllm/$K1/rank_1_0/backbone/model.py"
-if [ "$(id -u)" = 0 ]; then why000='not readable by other users \(the engine may run as another UID\)'; else why000='cannot be read'; fi
+if [ "$ME" = 0 ]; then why000='not readable by uid 0, the owner of the key directory \(taken as the engine.s UID; ENGINE_CACHE_UID names another\)'; else why000='cannot be read'; fi
 [ "$rc" != 0 ] && grep -qE "^  n-a +UNREADABLE +$K1  \($K1/rank_1_0/backbone/model.py: $why000\)" "$T/ecv-unread.out" \
     && ok "verify: a file with mode 000 is unreadable, naming the file (runner uid $(id -u): ${why000//\\/})" || fail "verify unreadable: rc=$rc $(grep n-a "$T/ecv-unread.out")"
 # vLLM writes no symbolic link: one under the key is unreadable, never
