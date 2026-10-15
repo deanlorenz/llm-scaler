@@ -85,7 +85,10 @@ done
 NS=wva-check
 STORE="$WORK/store"
 
-forbidden() { echo 'Error from server (Forbidden): secrets is forbidden: User "tenant" cannot get resource' >&2; }
+# forbidden is kubectl's Forbidden text, naming the namespace STUB_FORBID_NS
+# (default the controller's): a namespace called notfound-prod must not turn it
+# into NotFound.
+forbidden() { echo "Error from server (Forbidden): secrets is forbidden: User \"tenant\" cannot get resource \"secrets\" in API group \"\" in the namespace \"${STUB_FORBID_NS:-$NS}\"" >&2; }
 notfound() { echo 'Error from server (NotFound): not found' >&2; }
 
 # store_get <resource> <name>: the stored object, or NotFound.
@@ -162,6 +165,9 @@ cm_issue() {
 #   STUB_CANI          no makes every `auth can-i` answer no
 #   STUB_CANI_CTA      no makes only `auth can-i create clustertriggerauthentications` no
 #   STUB_SERVICE_CA    the OpenShift service CA ConfigMap content (default FAKE-SERVICE-CA)
+#   STUB_CTA           FORBIDDEN makes the ClusterTriggerAuthentication unreadable
+#   STUB_CONFIGMAPS    FORBIDDEN makes ConfigMaps in the controller namespace unreadable
+#   STUB_FORBID_NS     the namespace a Forbidden message names
 stub_kubectl() {
     printf '%s\n' "$*" >>"$WORK/kubectl.log"
     local a="$*" tmp name
@@ -185,6 +191,7 @@ stub_kubectl() {
         "auth can-i "*) [ "${STUB_CANI:-yes}" = yes ] ;;
         "get configmap openshift-service-ca.crt -n $NS -o jsonpath="*) printf '%s\n' "${STUB_SERVICE_CA:-FAKE-SERVICE-CA}" ;;
         "get clustertriggerauthentications.keda.sh "*" -o json")
+            [ "${STUB_CTA:-}" != FORBIDDEN ] || { forbidden; return 1; }
             set -- $a
             store_get clustertriggerauthentications.keda.sh "$3"
             ;;
@@ -217,6 +224,7 @@ stub_kubectl() {
         "get "*" -n $NS -o json")
             set -- $a
             if [ "$2" = secret ] && [ "${STUB_SECRETS:-}" = FORBIDDEN ]; then forbidden; return 1; fi
+            if [ "$2" = configmap ] && [ "${STUB_CONFIGMAPS:-}" = FORBIDDEN ]; then forbidden; return 1; fi
             store_get "$2" "$3"
             ;;
         "apply --server-side "*)
@@ -842,6 +850,41 @@ ok 'grep -q "^delete secret -n $NS -l wva.llmd.ai/scaler-tls" "$WORK/kubectl.log
 ok 'grep -q "^delete clustertriggerauthentications.keda.sh $CTA" "$WORK/kubectl.log" && grep -q "^delete secret $CTA -n keda" "$WORK/kubectl.log"' "undeploy, admin: KEDA's side not removed: $(tr '\n' ';' <"$WORK/kubectl.log")"
 run wva_scaler_tls_undeploy STUB_CM=present WVA_APPLY_SCOPE=controller
 ok '! grep -q "clustertriggerauthentications\|-n keda" "$WORK/kubectl.log"' "undeploy, controller phase: touched KEDA's side: $(tr '\n' ';' <"$WORK/kubectl.log")"
+
+# ---------------------------------------------------------------- Forbidden is never NotFound
+# probe_* print what a reader concluded, for the cases below.
+probe_object() { wva_scaler_object_state secret "$CLIENT"; echo "state=$WVA_OBJ_STATE"; }
+probe_live() { wva_scaler_tls_read_live; echo "live=$WVA_SCALER_TLS_LIVE"; }
+probe_mode() { echo "mode=$(wva_scaler_mode_of "$NS")"; }
+probe_marker() { wva_scaler_keda_marker_state; echo "ready=$WVA_SCALER_KEDA_READY why=$WVA_SCALER_KEDA_WHY"; }
+
+echo "== a Forbidden read in a namespace named notfound-prod stays unreadable"
+reset_store
+put_deploy openssl
+run probe_object STUB_SECRETS=FORBIDDEN STUB_FORBID_NS=notfound-prod
+ok 'grep -qx "state=unreadable" "$WORK/stdout"' "Forbidden Secret read as '$(cat "$WORK/stdout")', want unreadable"
+run probe_live STUB_DEPLOY=FORBIDDEN STUB_FORBID_NS=notfound-prod
+ok 'grep -qx "live=unreadable" "$WORK/stdout"' "Forbidden Deployment read as '$(cat "$WORK/stdout")', want unreadable"
+run probe_mode STUB_DEPLOY=FORBIDDEN STUB_FORBID_NS=notfound-prod
+ok 'grep -qx "mode=unknown" "$WORK/stdout"' "Forbidden Deployment mode '$(cat "$WORK/stdout")', want unknown (plaintext would write the wrong address)"
+run probe_marker STUB_CONFIGMAPS=FORBIDDEN STUB_FORBID_NS=notfound-prod
+ok 'grep -q "could not be read" "$WORK/stdout"' "Forbidden marker read as '$(cat "$WORK/stdout")', want could not be read"
+fresh_k
+run 'wva_scaler_tls_prepare "$WORK/k/kustomization.yaml"' WVA_SCALER_TLS=true STUB_CM=absent STUB_CTA=FORBIDDEN STUB_FORBID_NS=notfound-prod
+ok '[ "$RC" = 1 ] && grep -q "Cannot read ClusterTriggerAuthentication" "$WORK/refusal" && ! grep -q "cta/" "$WORK/keda-writes"' "Forbidden ClusterTriggerAuthentication: exit $RC, wrote '$(tr '\n' ' ' <"$WORK/keda-writes")': $(cat "$WORK/refusal")"
+
+# ---------------------------------------------------------------- the client identity
+echo "== WVA_SCALER_CLIENT_SAN must be one DNS name"
+reset_store
+NL='
+'
+run wva_resolve_scaler_tls WVA_SCALER_TLS=true STUB_CM=absent WVA_SCALER_CLIENT_SAN=keda.client-1
+ok '[ "$RC" = 0 ]' "a valid client SAN was refused: $(cat "$WORK/refusal")"
+# Each is eval'd by run as WVA_SCALER_CLIENT_SAN=<it>, so quoted where it must be.
+for bad in 'a,DNS:evil' 'Upper' '-lead' '"two words"' '"ok${NL}evil"'; do
+    run wva_resolve_scaler_tls WVA_SCALER_TLS=true STUB_CM=absent "WVA_SCALER_CLIENT_SAN=$bad"
+    ok '[ "$RC" = 1 ] && grep -q "WVA_SCALER_CLIENT_SAN must be one lowercase DNS name" "$WORK/refusal"' "client SAN $bad accepted (exit $RC)"
+done
 
 echo ""
 if [ "$FAIL" -gt 0 ]; then

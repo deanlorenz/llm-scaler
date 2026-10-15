@@ -54,9 +54,10 @@ WVA_SCALER_CLIENT_CA_DIR=/etc/wva/scaler-client-ca
 WVA_SCALER_CLIENT_SAN_DEFAULT=wva-keda-client
 WVA_SCALER_LEAF_DAYS=365
 WVA_SCALER_CA_DAYS=3650
-# KEDA reads its client certificate once per scaler connection and never
-# again, so it lives as long as the CA: a renewed one would not reach KEDA
-# until KEDA restarts (see "KEDA's side").
+# KEDA reads its client certificate when it first dials a scaler address and
+# keeps that connection until its operator restarts, so the certificate lives
+# as long as the CA: a renewed one would not reach KEDA before a restart (see
+# "KEDA's side").
 WVA_SCALER_CLIENT_DAYS=$WVA_SCALER_CA_DAYS
 WVA_SCALER_RENEW_DAYS=30
 
@@ -73,6 +74,24 @@ wva_scaler_client_san() {
     printf '%s\n' "${WVA_SCALER_CLIENT_SAN:-$WVA_SCALER_CLIENT_SAN_DEFAULT}"
 }
 
+# wva_scaler_check_client_san refuses a WVA_SCALER_CLIENT_SAN that is not one
+# lowercase DNS name. The value goes into an openssl config, a YAML manifest and
+# a controller flag; a comma, a newline or a space would add names or keys there.
+wva_scaler_check_client_san() {
+    local san="${WVA_SCALER_CLIENT_SAN:-}" re='^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'
+    [ -n "$san" ] || return 0
+    [[ "$san" =~ $re ]] && return 0
+    log_error "WVA_SCALER_CLIENT_SAN must be one lowercase DNS name: letters, digits, dots and hyphens, starting and ending with a letter or digit (got: ${san})."
+}
+
+# wva_scaler_not_found succeeds when kubectl error text $1 is the API server
+# saying the object or resource does not exist. Anchored on kubectl's own
+# "(NotFound)", never on the bare word: a namespace or object named notfound-prod
+# appears in a Forbidden message too, and Forbidden is "unknown", never "absent".
+wva_scaler_not_found() {
+    printf '%s' "$1" | grep -qF '(NotFound)'
+}
+
 # wva_scaler_tls_read_live sets WVA_SCALER_TLS_LIVE from the running controller
 # Deployment:
 #   absent      no Deployment yet (a new install)
@@ -87,7 +106,7 @@ wva_scaler_tls_read_live() {
     WVA_SCALER_TLS_LIVE_FLAGS=""
     out="$(kubectl get deployment wva-controller-manager -n "$WVA_NS" -o json 2>&1)" || rc=$?
     if [ "$rc" != 0 ]; then
-        if printf '%s' "$out" | grep -qi 'notfound'; then
+        if wva_scaler_not_found "$out"; then
             return 0
         fi
         WVA_SCALER_TLS_LIVE=unreadable
@@ -119,7 +138,7 @@ wva_cert_manager_api() {
     out="$(kubectl get --raw /apis/cert-manager.io 2>&1)" || rc=$?
     if [ "$rc" = 0 ]; then
         WVA_CERT_MANAGER_API=present
-    elif printf '%s' "$out" | grep -qi 'notfound\|could not find the requested resource'; then
+    elif wva_scaler_not_found "$out"; then
         WVA_CERT_MANAGER_API=absent
     else
         WVA_CERT_MANAGER_API=unknown
@@ -137,7 +156,7 @@ wva_scaler_object_state() {
     WVA_OBJ_ERR=""
     out="$(kubectl get "$resource" "$name" -n "$WVA_NS" -o json 2>&1)" || rc=$?
     if [ "$rc" != 0 ]; then
-        if printf '%s' "$out" | grep -qi 'notfound'; then
+        if wva_scaler_not_found "$out"; then
             return 0
         fi
         WVA_OBJ_STATE=unreadable
@@ -614,7 +633,7 @@ wva_scaler_mode_of() {
     local out rc=0
     out="$(kubectl get deployment wva-controller-manager -n "$1" -o json 2>&1)" || rc=$?
     if [ "$rc" != 0 ]; then
-        if printf '%s' "$out" | grep -qi notfound; then echo plaintext; else echo unknown; fi
+        if wva_scaler_not_found "$out"; then echo plaintext; else echo unknown; fi
         return 0
     fi
     printf '%s' "$out" | jq -r --arg a "$WVA_SCALER_TLS_ANNOTATION" '
@@ -677,7 +696,7 @@ wva_scaler_keda_api() {
     local out rc=0
     out="$(kubectl get --raw /apis/keda.sh/v1alpha1 2>&1)" || rc=$?
     if [ "$rc" != 0 ]; then
-        if printf '%s' "$out" | grep -qi 'notfound\|could not find the requested resource'; then echo absent; else echo unknown; fi
+        if wva_scaler_not_found "$out"; then echo absent; else echo unknown; fi
         return 0
     fi
     if printf '%s' "$out" | jq -e '[.resources[]?.name] | index("clustertriggerauthentications")' >/dev/null 2>&1; then
@@ -756,8 +775,8 @@ wva_scaler_keda_auth_apply() {
     if [ "$rc" = 0 ]; then
         printf '%s' "$out" | jq -e --arg k "$WVA_SCALER_TLS_LABEL" '.metadata.labels[$k] // empty' >/dev/null 2>&1 \
             || { rm -rf "$d"; log_error "ClusterTriggerAuthentication $name was not created by this installer (no $WVA_SCALER_TLS_LABEL label); refusing to overwrite it. Remove or rename it, or set WVA_SCALER_TLS=false."; }
-    elif ! printf '%s' "$out" | grep -qi notfound; then
-        rm -rf "$d"
+    elif ! wva_scaler_not_found "$out"; then
+        wva_scaler_drop_tmp
         log_error "Cannot read ClusterTriggerAuthentication $name ($(printf '%s\n' "$out" | head -1)). Grant get on clustertriggerauthentications.keda.sh, or set WVA_SCALER_TLS=false."
     fi
 
@@ -833,7 +852,7 @@ wva_scaler_keda_marker_state() {
     WVA_SCALER_KEDA_CA_STALE=false
     out="$(kubectl get configmap "$WVA_SCALER_KEDA_MARKER" -n "$WVA_NS" -o json 2>&1)" || rc=$?
     if [ "$rc" != 0 ]; then
-        if printf '%s' "$out" | grep -qi notfound; then
+        if wva_scaler_not_found "$out"; then
             WVA_SCALER_KEDA_WHY="the cluster admin has not written KEDA's side yet"
         else
             WVA_SCALER_KEDA_WHY="ConfigMap $WVA_SCALER_KEDA_MARKER in $WVA_NS could not be read"
@@ -959,6 +978,7 @@ wva_resolve_scaler_tls() {
     WVA_SCALER_TLS_WANTED=false
     WVA_SCALER_TLS_DEFAULTED=false
     WVA_SCALER_TLS_PROVIDER_RESOLVED=""
+    wva_scaler_check_client_san
     wva_scaler_tls_read_live
     case "${WVA_SCALER_TLS:-}" in
         true)
