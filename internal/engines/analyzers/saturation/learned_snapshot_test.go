@@ -8,8 +8,12 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
 )
 
 // Carrying learned state across a controller restart (issue #137): a restart,
@@ -74,6 +78,7 @@ var _ = Describe("learned state across a restart", func() {
 	It("does not restore into a variant whose engine configuration changed", func() {
 		first := newProcess(params(256))
 		saved := carry(learn(first))
+		saved.Args = nil // a document from before the arguments were recorded
 
 		second := newProcess(params(64))
 		second.RestoreLearnedState(saved)
@@ -82,6 +87,7 @@ var _ = Describe("learned state across a restart", func() {
 		second.mu.Lock()
 		defer second.mu.Unlock()
 		Expect(second.pendingRestore).To(BeEmpty(), "checked once, and dropped")
+		Expect(second.priorK2).To(BeEmpty(), "an older document takes no prior: it cannot say the arguments differed")
 	})
 
 	It("does not restore an entry past its horizon", func() {
@@ -159,6 +165,75 @@ var _ = Describe("learned state across a restart", func() {
 		first.mu.Lock()
 		defer first.mu.Unlock()
 		Expect(first.pendingRestore).To(BeEmpty())
+	})
+
+	It("tags what it learned after a rollout with the arguments it was learned under", func() {
+		// The scale target as the engine reads it every cycle.
+		load := func(store *capacity.Store, maxNumSeqs string) {
+			store.LoadFromScaleTarget("test-ns", "test-model", "variant-a", "H100", 1,
+				scaletarget.NewDeploymentAccessor(&appsv1.Deployment{Spec: appsv1.DeploymentSpec{
+					Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+						Name: "vllm", Command: []string{"vllm", "serve", "test-model"},
+						Args: []string{"--max-num-seqs", maxNumSeqs},
+					}}}},
+				}}))
+		}
+		saturate := func(a *SaturationAnalyzer) {
+			_, err := a.Analyze(context.Background(), makeAnalyzerInput(
+				[]domain.ReplicaMetrics{makeReplicaMetrics("pod-a", "variant-a", 4000, 16000, 6, 100, 50)}, states))
+			Expect(err).NotTo(HaveOccurred())
+		}
+		store := capacity.NewStore()
+		load(store, "256")
+		first := NewSaturationAnalyzer(store)
+		saturate(first)
+		before := carry(first.ExportLearnedState()).Config["test-ns/variant-a"]
+		Expect(before).NotTo(BeEmpty(), "precondition: the configuration was recorded")
+
+		load(store, "64") // the rollout, read on the next cycle
+		saturate(first)
+		saved := carry(first.ExportLearnedState())
+		Expect(saved.Config["test-ns/variant-a"]).NotTo(Equal(before),
+			"the snapshot tagged figures learned after the rollout with the arguments it replaced")
+
+		restarted := capacity.NewStore()
+		load(restarted, "64")
+		second := NewSaturationAnalyzer(restarted)
+		second.RestoreLearnedState(saved)
+		Expect(capacityOf(second)).To(Equal(float64(4000)),
+			"a restart on the arguments the figures were learned under restored nothing")
+	})
+
+	It("tags what it learned after an image-only rollout with the new image", func() {
+		load := func(store *capacity.Store, image string) {
+			store.LoadFromScaleTarget("test-ns", "test-model", "variant-a", "H100", 1,
+				scaletarget.NewDeploymentAccessor(&appsv1.Deployment{Spec: appsv1.DeploymentSpec{
+					Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+						Name: "vllm", Image: image, Command: []string{"vllm", "serve", "test-model"},
+						Args: []string{"--max-num-seqs", "256"},
+					}}}},
+				}}))
+		}
+		saturate := func(a *SaturationAnalyzer) {
+			_, err := a.Analyze(context.Background(), makeAnalyzerInput(
+				[]domain.ReplicaMetrics{makeReplicaMetrics("pod-a", "variant-a", 4000, 16000, 6, 100, 50)}, states))
+			Expect(err).NotTo(HaveOccurred())
+		}
+		store := capacity.NewStore()
+		load(store, "registry.example/vllm:v0.11.0")
+		first := NewSaturationAnalyzer(store)
+		saturate(first)
+
+		load(store, "registry.example/vllm:v0.11.1")
+		saturate(first)
+		saved := carry(first.ExportLearnedState())
+
+		restarted := capacity.NewStore()
+		load(restarted, "registry.example/vllm:v0.11.1")
+		second := NewSaturationAnalyzer(restarted)
+		second.RestoreLearnedState(saved)
+		Expect(capacityOf(second)).To(Equal(float64(4000)),
+			"the snapshot named the replaced release, and a restart on the new one restored nothing")
 	})
 
 	It("writes back what is still pending, so a second restart does not lose it", func() {

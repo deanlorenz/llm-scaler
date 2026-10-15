@@ -1767,11 +1767,9 @@ func (e *Engine) prepareModelData(
 				"modelID", modelID,
 				"namespace", namespace)
 		}
-		// Nothing was observed, and the observed-replicas series must say so:
-		// the analyzers do not run on this path, so without this the series
-		// keeps last cycle's count for as long as the gap lasts -- reading as
-		// a fully scraped fleet in exactly the case it exists to expose.
-		e.zeroObservedReplicas(namespace, modelID)
+		// The analyzers do not run on this path, so the series they set must
+		// be told here that nothing was observed.
+		e.onNothingObserved(namespace, modelID)
 		return nil, nil // nil modelData signals skip
 	}
 	// Measurable this cycle. Reset the gauge rather than leaving the last bad

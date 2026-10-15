@@ -690,11 +690,30 @@ controller reads it on its first cycle.
 
 What is restored, and what is not:
 
-- a variant's measured capacity, saturated throughput, ITL baseline and
-  replica start estimate are restored **only if it runs the same engine
-  configuration** as when they were learned, read completely: a deployment
-  whose flags come from a variable the controller cannot resolve restores
-  nothing, because a changed value would look identical;
+- a variant's measured capacity, saturated throughput and replica start
+  estimate are restored **if it runs the same engine arguments** as when they
+  were learned, read completely: a deployment whose flags come from a
+  variable the controller cannot resolve restores nothing, because a changed
+  value would look identical. A new engine image with the same arguments
+  keeps them; only the ITL baseline, a latency figure, needs the same image
+  too;
+- a variant whose arguments changed while the controller was down restores
+  only its old measured capacity, and only as a **lower-only, expiring
+  prior**: it is used where it is below what the variant would otherwise be
+  priced at, for 30 minutes at full strength, then relaxes to the variant's
+  own figure over 6 hours -- the same rule as a capacity borrowed from a
+  sibling. The 30 minutes start when an output-length bucket first uses it,
+  not at the restart; a prior no bucket uses goes after the bucket retention.
+  The prior is written back with its clock, so another restart inside those
+  hours resumes it. Nothing else is restored for it;
+- a parallel size computed when the pod starts -- llm-d's wide-EP
+  LeaderWorkerSet passes `--data-parallel-size $((LWS_GROUP_SIZE *
+  DP_SIZE_LOCAL))` -- does not stop a variant restoring its own state: the
+  expression is compared as written. It only keeps the variant from sharing a
+  latency line with another (`wva_engine_config`'s `sharing_unresolved`);
+- the first restart after an upgrade that changes how the configuration is
+  identified (the `fingerprint_version` label of `wva_engine_config`) starts
+  every variant cold once;
 - the ages travel with the figures, so a restore never makes a figure younger,
   and one past its horizon above is not restored;
 - a figure the new controller has already measured is never replaced.

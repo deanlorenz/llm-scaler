@@ -71,6 +71,10 @@ type k2Borrow struct {
 	donorK2 int64         // what the donor measured
 	relaxed float64       // 0 at full strength, 1 when fully relaxed to own
 	age     time.Duration // how long this variant has been borrowing
+	// prior is true when the figure is the variant's own, measured under the
+	// engine arguments it ran before a restart found them changed
+	// (installPriorsLocked); donor is then the variant itself.
+	prior bool
 }
 
 // splitVariantKey splits a historyKey into its namespace, variant and the rest
@@ -101,7 +105,13 @@ func splitVariantKey(key string) (namespace, variant, rest string, ok bool) {
 // k2 above k1 was "lower", was reported as P2-borrow and started the clock,
 // while capacity -- clamped to k1 either way -- did not move. ok is false when
 // there is nothing to borrow, or the relaxation has run its course.
-func (a *SaturationAnalyzer) borrowedK2(ownKey, modelID string, own int64, ownParams *capacity.EngineParams) (k2Borrow, bool) {
+//
+// armClock false is a row that may not record the variant's k2 (a warm-pool
+// bridge, a Pod that is not Ready): it reads a borrow on the clock as it
+// stands, and when no clock has started it reads the borrow at full hold
+// without starting one. The hold is the variant's own replicas' to spend, not
+// a bridge's.
+func (a *SaturationAnalyzer) borrowedK2(ownKey, modelID string, own int64, ownParams *capacity.EngineParams, armClock bool) (k2Borrow, bool) {
 	if own <= 0 || ownParams == nil {
 		return k2Borrow{}, false
 	}
@@ -125,6 +135,13 @@ func (a *SaturationAnalyzer) borrowedK2(ownKey, modelID string, own int64, ownPa
 			candidates = append(candidates, candidate{variant: v, k2: k2})
 		}
 	}
+	// The variant's own figure from before its arguments changed. It needs
+	// no compatibility check -- that the arguments differ is the point -- and
+	// takes the same two rules as a sibling's: lower only, and it expires.
+	var prior int64
+	if p, ok := a.priorK2[ownKey]; ok && p.k2 > 0 && p.k2 < own {
+		prior = p.k2
+	}
 	a.mu.Unlock()
 
 	// The store has its own lock; checked outside a.mu.
@@ -138,6 +155,10 @@ func (a *SaturationAnalyzer) borrowedK2(ownKey, modelID string, own int64, ownPa
 			best = c
 		}
 	}
+	fromPrior := false
+	if prior > best.k2 {
+		best, fromPrior = candidate{variant: variant, k2: prior}, true
+	}
 	if best.k2 == 0 {
 		return k2Borrow{}, false
 	}
@@ -148,7 +169,9 @@ func (a *SaturationAnalyzer) borrowedK2(ownKey, modelID string, own int64, ownPa
 	since, started := a.k2BorrowedSince[clockKey]
 	if !started {
 		since = now
-		a.k2BorrowedSince[clockKey] = since
+		if armClock {
+			a.k2BorrowedSince[clockKey] = since
+		}
 	}
 	a.mu.Unlock()
 
@@ -166,6 +189,7 @@ func (a *SaturationAnalyzer) borrowedK2(ownKey, modelID string, own int64, ownPa
 		donorK2: best.k2,
 		relaxed: f,
 		age:     age,
+		prior:   fromPrior,
 	}, true
 }
 
@@ -177,7 +201,7 @@ func logBorrowedK2(logger logr.Logger, b k2Borrow, modelID, namespace, variantNa
 	logger.V(logging.DEFAULT).Info("k2-decision",
 		"modelID", modelID, "namespace", namespace, "variant", variantName,
 		"priority", capacity.K2SrcBorrowed.String(), "historyKey", historyKey,
-		"donor", b.donor, "donorK2", b.donorK2,
+		"donor", b.donor, "donorK2", b.donorK2, "priorConfiguration", b.prior,
 		"ownCapacity", own, "ownPriority", ownSource.String(),
 		"relaxed", b.relaxed, "borrowAgeSeconds", int64(b.age.Seconds()),
 		"k2", b.k2)

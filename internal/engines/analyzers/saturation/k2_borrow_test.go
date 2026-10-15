@@ -69,7 +69,7 @@ var _ = Describe("borrowing a sibling's k2", func() {
 			"variant-b's own figure is k1 = 12800; the sibling measured 4000 on the same engine")
 		Expect(capacityOf(result, "variant-a")).To(Equal(float64(4000)),
 			"the donor reads its own window, unchanged by lending it")
-		b, ok := a.borrowedK2(keyOf("variant-b"), "test-model", 12800, params(256))
+		b, ok := a.borrowedK2(keyOf("variant-b"), "test-model", 12800, params(256), true)
 		Expect(ok).To(BeTrue())
 		Expect(b.donor).To(Equal("variant-a"), "the donor is named, so the borrow can be traced")
 	})
@@ -121,7 +121,7 @@ var _ = Describe("borrowing a sibling's k2", func() {
 			ra.Add(4000)
 			a.computeCapacityHistory[donor] = ra
 		})
-		borrow := func() (k2Borrow, bool) { return a.borrowedK2(own, "test-model", 12800, params(256)) }
+		borrow := func() (k2Borrow, bool) { return a.borrowedK2(own, "test-model", 12800, params(256), true) }
 
 		It("holds, then relaxes linearly to the variant's own figure, then stops", func() {
 			b, ok := borrow()
@@ -172,7 +172,7 @@ var _ = Describe("borrowing a sibling's k2", func() {
 			// would read test-ns's variant-a window under other-ns's record.
 			store.Update("other-ns", "test-model", "variant-a", capacity.Record{EngineParams: params(256)})
 			other := a.historyKey("test-model", "other-ns", "variant-b", "H100", 1, domain.RoleBoth, 50, 5)
-			_, ok := a.borrowedK2(other, "test-model", 12800, params(256))
+			_, ok := a.borrowedK2(other, "test-model", 12800, params(256), true)
 			Expect(ok).To(BeFalse())
 		})
 
@@ -213,7 +213,7 @@ var _ = Describe("borrowing a sibling's k2", func() {
 			_, ok = borrow()
 			Expect(ok).To(BeFalse(), "precondition: fully relaxed in the first bucket")
 
-			b, ok := a.borrowedK2(longOwn, "test-model", 12800, params(256))
+			b, ok := a.borrowedK2(longOwn, "test-model", 12800, params(256), true)
 			Expect(ok).To(BeTrue(), "a bucket the variant never measured went straight to k1")
 			Expect(b.k2).To(Equal(int64(4000)), "from full strength, for the new bucket")
 
@@ -233,7 +233,7 @@ var _ = Describe("borrowing a sibling's k2", func() {
 			store.Update("test-ns", "test-model", "variant-c", capacity.Record{EngineParams: params(256)})
 			seed("variant-a", 50, 3000)
 			seed("variant-c", 50, 6000)
-			b, ok := a.borrowedK2(keyOf("variant-b"), "test-model", 12800, params(256))
+			b, ok := a.borrowedK2(keyOf("variant-b"), "test-model", 12800, params(256), true)
 			Expect(ok).To(BeTrue())
 			Expect(b.k2).To(Equal(int64(6000)), "the least far below own: the fewest replicas spent on someone else's figure")
 			Expect(b.donor).To(Equal("variant-c"))
@@ -243,7 +243,7 @@ var _ = Describe("borrowing a sibling's k2", func() {
 			// A k2 is occupancy at saturation, and how much a saturated replica
 			// holds depends on how long its answers are.
 			seed("variant-a", 5000, 4000)
-			_, ok := a.borrowedK2(keyOf("variant-b"), "test-model", 12800, params(256))
+			_, ok := a.borrowedK2(keyOf("variant-b"), "test-model", 12800, params(256), true)
 			Expect(ok).To(BeFalse())
 		})
 	})

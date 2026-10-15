@@ -1,7 +1,9 @@
 # llm-scaling-manager Cycle Log
 
-Each reconcile cycle, the saturation engine writes two INFO lines per model.
-They show what the analyzer and optimizer computed, with no debug logging needed.
+Each reconcile cycle, the saturation engine writes two INFO lines per model,
+and a third, `throughput-demand-floor`, on a cycle where the throughput floor
+changes a role's demand. They show what the analyzer and optimizer computed,
+with no debug logging needed.
 
 The log uses zap's development **console** format, not JSON: timestamp, level,
 caller, message, then the fields as one JSON object. A line looks like this
@@ -79,6 +81,48 @@ One line per model, after the optimizer chose each variant's replica target.
 | `decisions[].action` | `scale-up`, `scale-down`, or `no-change` |
 | `decisions[].atMax` | `true` when the target is the variant's `maxReplicaCount`; absent otherwise. Same as `wva_variant_at_max_replicas` |
 
+### `throughput-demand-floor`
+
+Emitted per role during the analysis, so before that model's
+`analyzer-result`, and only on a cycle where the
+throughput floor changed that role's demand. The floor takes the larger of
+the resident KV demand (occupancy with the queues' residency charge removed,
+since the queue is priced as a backlog instead) and what the arrival rate and
+the queue ask for at the throughput one replica sustains
+(`saturatedThroughput`). So the line also appears when that LOWERS demand: a
+queue priced as a backlog can be worth less than its residency charge. Most
+cycles of a fleet that is coping have none.
+
+| Field | Description |
+|---|---|
+| `role` | `prefill`, `decode` or `both` |
+| `demandBeforeFloor`, `flooredTo` | the role's demand before and after the floor, in the same unit as `analyzer-result`'s `demand` |
+| `residentDemand` | `demandBeforeFloor` with the queues' residency charge removed: what the replicas hold now |
+| `perReplicaCapacity` | the per-replica capacity the floor converts replicas into demand with |
+| `arrivalRate`, `saturatedThroughput`, `replicasImplied` | the requests per second arriving, what one replica completes at saturation, and the replicas their ratio asks for |
+| `backlogRequests`, `projectedBacklog`, `drainSeconds` | the queue measured, the queue the floor priced over the next replica's start time, and how fast it is to be drained |
+| `heldAtFleet` | `true` when the floor was capped at what the current fleet supplies at the scale-up threshold: it may hold the fleet up, but not order more replicas |
+| `heldWhy` | why it was capped; see below. Empty when `heldAtFleet` is `false` |
+| `mayOrder`, `borrowedOnly` | whether the role's rate is one the floor may order on, and whether every rate it has is borrowed rather than measured by the role's own replicas |
+| `orderedBehindQueue`, `queueJustifiedReplicas` | whether a held floor still ordered behind a standing queue, and how many replicas the queue was worth when it did |
+
+On a disaggregated fleet the per-role lines do not add up to the model's
+total, so a second line, `throughput-demand-floor-total`, gives it:
+`modelTotalBefore` and `modelTotalAfter`, and the `roles` the floor moved.
+
+**`heldWhy` values.** Each says which reading the floor would not order on:
+
+| Value | Meaning | What changes it |
+| --- | --- | --- |
+| `single-sample` | the role's own throughput window holds one reading | more saturated readings |
+| `borrowed` | the only rate is borrowed from a neighbouring output-length bucket | a reading in the bucket the traffic is in now |
+| `borrowed-line` | the rate is derived from an inter-token-latency line another variant fitted (shared because `enableLearnedStateReuse` is on) | the variant fitting its own line |
+| `shape-change` | the traffic's shape changed and the rate was measured on the old one | the new shape settling |
+| `borrowed+shape-change`, `borrowed-line+shape-change` | both at once; the borrow is named first because it is the one that does not go away on its own | as above, both |
+
+A borrowed figure never orders replicas here: it can hold demand up while the
+role measures itself, never raise it above what the fleet already supplies.
+
 ---
 
 ## Reason values (`reason` field)
@@ -102,6 +146,7 @@ variant's `reason`, because no capacity comes from them:
 | --- | --- |
 | `P1-obs-invalid` | an observation above the KV cache's **physical** ceiling was discarded as a scrape artifact. The bound is the ceiling, not k1: k1 is the ceiling times `kvCacheThreshold` (0.80 by default), so occupancy between the two is kept. The analyzer falls through to the next priority |
 | `P1-obs-downstream` | a **prefill** replica's saturated queue was not recorded because a **decode** replica was full and queued (resident KV at its k1, queue at the threshold) in the same cycle or the last minute (the collector's row window). Prefill finishes a request only when decode pulls its KV, so with decode saturated, prefill's KV, queue and completion rate measure decode, not prefill. Neither k2 nor the saturated throughput (`throughput-demand-floor`) is recorded; the analyzer falls through, and prefill's demand is held for the cycle, neither ordering nor releasing (`prefill-demand-held`). A decode queue of only KV transfers in flight (KV under k1) does not count. Both roles saturate at once only when decode is short at prefill's completion rate; prefill's reading then waits for decode to recover |
+| `P1-obs-unadmitted` | a saturated queue on a **warm-pool bridge** or a pod that is **not Ready** was not recorded as the variant's k2. A bridge runs the pool's engine configuration (a lower `--gpu-memory-utilization`, a different batch ceiling); a pod that is not Ready gets no traffic, so its queue and resident KV are left over or frozen. These are the rows the saturated throughput already skips. A k2 recorded from them would be too low, and a k2 that is too low never corrects itself, because it orders replicas and nothing saturates again. The analyzer falls through to the next priority. For a **bridge** whose reading is lower than what that gives, a second `P1-obs-unadmitted` line (`chainK2`, `chainPriority`) says the row is priced at the reading for this cycle only, and the variant's reason can read `P1-obs-unadmitted`: a variant only a saturated bridge is carrying is priced at what the bridge holds, not at k1. A pod that is not Ready is priced at what the chain gives: its reading may be a hang with frozen gauges, and would be re-read every cycle. Nothing is recorded either way, and the borrow clock is not started. A pod that fails its readiness probe under load does not record k2 either; if `P1-obs-unadmitted` names a pod of the variant's own during a load peak, its readiness probe is timing out. When the controller cannot list a namespace's Pods it treats every Pod as Ready, so these readings are recorded; `wva_metrics_collection_errors_total{query_type="pod_list"}` counts those cycles |
 | `no-data` | no ready replicas, no stored record, no compatible variant: capacity is 0 this cycle (normal for a new variant) |
 | `error` | K2 priority not in the known set: an unlabelled code path. Should not occur |
 

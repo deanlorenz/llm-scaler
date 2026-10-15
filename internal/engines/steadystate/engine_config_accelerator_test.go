@@ -105,6 +105,14 @@ func TestPublishedAcceleratorIsTheOneTheKeyUses(t *testing.T) {
 			"learned-state key is built from")
 	assert.Equal(t, []string{"ns/v1=" + raw}, spy.asked,
 		"the publish site must ask the analyzer, passing the reading it has")
+
+	// The deployment-derived capacity record is filed under the same value:
+	// filed under the raw reading, it was missed by the analyzer's lookups,
+	// which go by the stable one.
+	rec := e.capacityStore.Get("ns", "m", "v1")
+	require.NotNil(t, rec, "precondition: the scale target was loaded into the store")
+	assert.Equal(t, spy.stable, rec.AcceleratorName,
+		"the capacity record was filed under the raw reading")
 }
 
 // TestPublishedAcceleratorFallsBackWithoutAStabiliser pins the other half: an

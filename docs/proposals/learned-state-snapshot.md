@@ -64,6 +64,7 @@ one JSON document under the data key `v1`:
   "writer": {"namespace": "<controller namespace>", "identity": "<pod hostname>"},
   "state": {
     "config": {"<ns>/<variant>": "<configuration fingerprint>"},
+    "args":   {"<ns>/<variant>": "<the same fingerprint without the image>"},
     "k2":         {"<key>": {"values": [4000, 4100], "lastUsed": "...", "lastWritten": "..."}},
     "throughput": {"<key>": {"values": [3.2], "lastUsed": "...", "lastWritten": "...", "sampledAt": "...", "lastRead": 3.2}},
     "itlBaseline":  {"<key>": 0.0118},
@@ -91,7 +92,15 @@ stored, so a restart does not restart a borrow at full strength.
    restore rejects one whose variant now runs a different configuration**
    (issue #137). The identity is the configuration fingerprint of #126, read
    for the entry's variant from the scale target, so the check runs when the
-   variant is first analysed after the restart rather than at load. An entry
+   variant is first analysed after the restart rather than at load. Built
+   (#151): the check is by how much still holds. The same arguments on a new
+   image restore everything but the ITL baseline, as a live capacity record
+   survives a routine image bump; changed arguments restore only the old k2,
+   as a lower-only prior that expires like a borrowed k2 (#132), and nothing
+   else. A document with no `args` keeps the whole-configuration rule. The
+   prior is written back with its borrow clock, so a second restart inside its
+   life resumes it; its life runs on that clock from a bucket's first use, and
+   a prior no bucket uses goes after the bucket retention. An entry
    whose variant cannot be named -- a key from before per-variant keys (#132)
    -- cannot be checked, and is not restored. Nor is one whose configuration
    was not read **completely**, on either side: a flag the controller could
