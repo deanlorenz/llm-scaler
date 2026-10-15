@@ -43,6 +43,9 @@ type nsBorrowLeft struct {
 	lentOut int
 	// priority is NamespaceBorrow.HighestPriority, the higher of two entries'.
 	priority *int32
+	// coHeadroom and coKept are NamespaceBorrow.CoHeadroom and CoKept still
+	// to spend (K2).
+	coHeadroom, coKept map[string]int64
 }
 
 // borrowState is one optimizer pass's borrowing: what each namespace may still
@@ -91,9 +94,12 @@ func newBorrowState(constraints []*ResourceConstraints, nodes *NodeView) *borrow
 				}
 				prev, seen := bs.borrow[ns][accType]
 				if !seen {
-					bs.borrow[ns][accType] = &nsBorrowLeft{cap: drawable, lentOut: b.LentOut, priority: b.HighestPriority}
+					bs.borrow[ns][accType] = &nsBorrowLeft{cap: drawable, lentOut: b.LentOut, priority: b.HighestPriority,
+						coHeadroom: maps.Clone(b.CoHeadroom), coKept: maps.Clone(b.CoKept)}
 					continue
 				}
+				prev.coHeadroom = tighterCo(prev.coHeadroom, b.CoHeadroom, true)
+				prev.coKept = tighterCo(prev.coKept, b.CoKept, false)
 				// Two Kueue-backed entries hold the namespace: the tighter cap.
 				prev.cap = tighterBudget(prev.cap, drawable)
 				prev.lentOut = max(prev.lentOut, b.LentOut)
@@ -165,7 +171,9 @@ func (bs *borrowState) save(guaranteed map[string]int) borrowSave {
 	for ns, perType := range bs.borrow {
 		s.borrow[ns] = map[string]nsBorrowLeft{}
 		for t, b := range perType {
-			s.borrow[ns][t] = *b
+			c := *b
+			c.coHeadroom, c.coKept = maps.Clone(b.coHeadroom), maps.Clone(b.coKept)
+			s.borrow[ns][t] = c
 		}
 	}
 	for _, c := range bs.chunks {
@@ -364,6 +372,9 @@ func (p *modelPlacer) placeReplica(variant string, r replicaFit, g int, requests
 	}
 	if left < 0 || left >= g {
 		reclaim := borrow != nil && borrow.lentOut > 0
+		if !bs.coGuaranteed(p.namespace, acc, borrow, requests, reclaim) { // K2c
+			return p.refuse(variant, false), false
+		}
 		if !bs.nodes.place(r) && !reclaim {
 			return p.refuse(variant, true), false
 		}
@@ -398,7 +409,8 @@ func (p *modelPlacer) placeReplica(variant string, r replicaFit, g int, requests
 		}
 		open = true
 		// K1: a LowerPriority lender's GPUs only for a model it outranks.
-		if c.drawable(p.class, borrow.priority) < need || !coFits(c.CoFree, requests) {
+		if c.drawable(p.class, borrow.priority) < need || !coFitsKept(c.CoFree, borrow.coKept, requests) ||
+			!coWithin(borrow.coHeadroom, requests) { // K2b
 			continue // the GPUs, or a co-resource of the flavor's group (B1), would hold it back
 		}
 		// place commits only when every pod fits, so one call both probes
@@ -410,9 +422,7 @@ func (p *modelPlacer) placeReplica(variant string, r replicaFit, g int, requests
 			continue
 		}
 		c.Free -= need
-		for res := range c.CoFree {
-			c.CoFree[res] -= requests[res]
-		}
+		spendCo(borrow, c, requests)
 		if borrow.cap >= 0 {
 			borrow.cap -= need
 		}
@@ -430,19 +440,6 @@ func (p *modelPlacer) placeReplica(variant string, r replicaFit, g int, requests
 		return p.refuse("", false), false
 	}
 	return p.refuse(variant, byNodes), false
-}
-
-// coFits reports whether one replica's requests fit a chunk's free pool of
-// every co-resource it holds. A co-resource the replica does not request is
-// taken as 0 here: a variant whose request of one is unknown is withheld
-// before the pass (WithholdByVariants).
-func coFits(coFree map[string]int64, requests map[string]int64) bool {
-	for res, free := range coFree {
-		if requests[res] > free {
-			return false
-		}
-	}
-	return true
 }
 
 // drawsByVariant folds the pass's draws into one per variant and chunk.

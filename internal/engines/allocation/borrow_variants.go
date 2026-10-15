@@ -50,7 +50,8 @@ func WithholdByVariants(constraints []*ResourceConstraints, requests []ModelScal
 				if !ok {
 					continue
 				}
-				reason := variantReason(perType[key], st, coResources(chunks, c.NamespaceCohorts[req.Namespace], acc))
+				coRes, unbound := coResources(chunks, c.NamespaceCohorts[req.Namespace], acc)
+				reason := variantReason(perType[key], st, coRes, unbound)
 				if reason == "" {
 					continue
 				}
@@ -136,8 +137,9 @@ func BorrowNamespacesSplit(constraints []*ResourceConstraints) []BorrowSplit {
 }
 
 // variantReason is the B1 reason one variant breaks, or empty: of the two
-// that hold, the first in the table order.
-func variantReason(nb NamespaceBorrow, st domain.VariantReplicaState, coRes []string) kueue.Reason {
+// that hold, the first in the table order. unbound is set when a pool it could
+// borrow from charges a co-resource on a flavor not known (K2a).
+func variantReason(nb NamespaceBorrow, st domain.VariantReplicaState, coRes []string, unbound bool) kueue.Reason {
 	var reasons []kueue.Reason
 	if nb.PinRequired && !slices.ContainsFunc(nb.PinLabels, func(l map[string]string) bool { return pinsLabels(st.Placements, l) }) {
 		reasons = append(reasons, kueue.ReasonFlavorUnpinned)
@@ -148,17 +150,21 @@ func variantReason(nb NamespaceBorrow, st domain.VariantReplicaState, coRes []st
 			break
 		}
 	}
+	if unbound {
+		reasons = append(reasons, kueue.ReasonCoResourceBound)
+	}
 	return kueue.Precedence(reasons...)
 }
 
 // coResources is the co-resources the shared pools of cohorts serving acc
-// cover, sorted.
-func coResources(chunks []*SharedPoolChunk, cohorts []string, acc string) []string {
-	var out []string
+// cover, sorted, and whether one of those pools charges a co-resource on a
+// flavor not known (SharedPoolChunk.CoUnbound).
+func coResources(chunks []*SharedPoolChunk, cohorts []string, acc string) (out []string, unbound bool) {
 	for _, ch := range chunks {
 		if !slices.Contains(cohorts, ch.Cohort) || !ch.serves(acc) {
 			continue
 		}
+		unbound = unbound || len(ch.CoUnbound) > 0
 		for res := range ch.CoFree {
 			if !slices.Contains(out, res) {
 				out = append(out, res)
@@ -166,7 +172,7 @@ func coResources(chunks []*SharedPoolChunk, cohorts []string, acc string) []stri
 		}
 	}
 	slices.Sort(out)
-	return out
+	return out, unbound
 }
 
 // pinsLabels reports whether every pod template of a replica pins a node

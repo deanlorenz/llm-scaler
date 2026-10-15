@@ -160,19 +160,40 @@ type QueueState struct {
 	PinRequired bool
 	// Resources are the GPU resources the queue declares, per flavor.
 	Resources map[ResourceKey]QueueResource
-	// CoResources are the other resources (CPU, memory, ...) the resource
-	// group of a GPU flavor covers, per flavor, in milli-units: Kueue admits a
-	// Workload only when every covered resource fits.
+	// CoResources are the other resources (CPU, memory, ...) any of the
+	// queue's resource groups covers, per flavor, in milli-units: Kueue admits
+	// a Workload only when every resource it requests fits (K2).
 	CoResources map[ResourceKey]CoQuota
+	// CoFlavors is, per co-resource, the flavors of the resource group that
+	// covers it, in spec order; CoWithGPU marks a co-resource whose group
+	// covers a GPU resource too, so it is assigned the GPU's flavor
+	// (coFlavor).
+	CoFlavors map[string][]string
+	CoWithGPU map[string]bool
 }
 
-// CoQuota is one ClusterQueue's quota and reservation of a non-GPU resource a
-// GPU flavor's resource group covers, in milli-units (resource.Quantity's
-// MilliValue), so CPU and memory share one scale.
+// coFlavor is the flavor a replica on GPU flavor gpuFlavor is charged res on:
+// the GPU's own flavor when res shares its resource group, the one flavor of
+// res's group otherwise, and "" when that group offers several -- Kueue then
+// picks the first that fits, which is not known here (co-resource-bound).
+func (q QueueState) coFlavor(res, gpuFlavor string) string {
+	if q.CoWithGPU[res] {
+		return gpuFlavor
+	}
+	if fs := q.CoFlavors[res]; len(fs) == 1 {
+		return fs[0]
+	}
+	return ""
+}
+
+// CoQuota is one ClusterQueue's quota and reservation of a non-GPU resource,
+// in milli-units (resource.Quantity's MilliValue), so CPU and memory share one
+// scale.
 type CoQuota struct {
-	Nominal      int64
-	LendingLimit *int64
-	Reserved     int64
+	Nominal        int64
+	LendingLimit   *int64
+	BorrowingLimit *int64
+	Reserved       int64
 }
 
 // lent is the co-resource's L and G, as QueueResource.lent.
@@ -285,6 +306,9 @@ type QueueFigures struct {
 	GuaranteedReason Reason
 	// PinRequired is the queue's QueueState.PinRequired.
 	PinRequired bool
+	// CoHeadroom and CoKept are coReach for this key's flavor, in
+	// milli-units; nil while Reason is set.
+	CoHeadroom, CoKept map[string]int64
 }
 
 // SharedPool is one cohort's free capacity of one flavor and GPU resource,
@@ -317,6 +341,9 @@ type SharedPool struct {
 	// formula as Free; 0 when Reason is set. A borrowed replica must fit every
 	// one of them as well as the GPUs (B3, co-resources).
 	CoFree map[string]int64
+	// CoUnbound are the co-resources a member charges on a flavor not known
+	// here: the resource group covering it offers several flavors (K2a).
+	CoUnbound []string
 }
 
 // LenderState is one cohort member as a lender of one flavor and GPU resource.
@@ -438,6 +465,7 @@ func ComputeBorrowing(t Topology, stale bool) Borrowing {
 				f.CohortFree = cohortFree(members[q.Cohort], key)
 				f.Guaranteed, f.Borrowable = reach(q, r, f.CohortFree)
 				f.WithinNominal, f.LentOut = withinNominal(q, r, f.CohortFree)
+				f.CoHeadroom, f.CoKept = coReach(q, key.Flavor)
 				if f.Guaranteed < r.Nominal {
 					f.GuaranteedReason = ReasonNominalLentOut
 				}
@@ -462,7 +490,7 @@ func ComputeBorrowing(t Topology, stale bool) Borrowing {
 			p := SharedPool{Cohort: cohort, ResourceKey: key, FlavorPlacement: t.Flavors[key.Flavor], Reason: cohortReason[cohort]}
 			if p.Reason == "" {
 				p.Free = cohortFree(qs, key)
-				p.CoFree = cohortCoFree(qs, key.Flavor)
+				p.CoFree, p.CoUnbound = cohortCoFree(qs, key.Flavor)
 			}
 			for _, q := range qs {
 				r, declares := q.Resources[key]
@@ -564,36 +592,79 @@ func withheldReason(t Topology, cohort string, qs []QueueState, stale bool) Reas
 	return Precedence(rs...)
 }
 
-// cohortCoFree is, per co-resource the members cover beside flavor's GPUs,
-// max(0, Σ L_m − Σ max(0, U_m − G_m)) in milli-units, over every member that
-// declares it: the same free pool as cohortFree, per co-resource. Nil when no
-// member covers one.
-func cohortCoFree(qs []QueueState, flavor string) map[string]int64 {
+// cohortCoFree is, per co-resource a replica on GPU flavor gpuFlavor is
+// charged (K2a: whichever resource group covers it), max(0, Σ L_m −
+// Σ max(0, U_m − G_m)) in milli-units over every member that declares it on
+// the flavor it is charged on: the same free pool as cohortFree. A co-resource
+// whose group offers several flavors, for some member, is unbound instead:
+// which flavor Kueue charges is not known, and a variant borrowing there is
+// withheld (co-resource-bound). Nil maps when no member covers one.
+func cohortCoFree(qs []QueueState, gpuFlavor string) (free map[string]int64, unbound []string) {
 	type sums struct{ lent, used int64 }
 	by := map[string]*sums{}
+	ambiguous := map[string]bool{}
 	for _, q := range qs {
-		for key, c := range q.CoResources {
-			if key.Flavor != flavor {
+		for res := range q.CoFlavors {
+			f := q.coFlavor(res, gpuFlavor)
+			if f == "" {
+				ambiguous[res] = true
 				continue
 			}
-			s := by[key.Resource]
+			c, ok := q.CoResources[ResourceKey{Flavor: f, Resource: res}]
+			if !ok {
+				continue
+			}
+			s := by[res]
 			if s == nil {
 				s = &sums{}
-				by[key.Resource] = s
+				by[res] = s
 			}
 			l, g := c.lent()
 			s.lent += l
 			s.used += max(0, c.Reserved-g)
 		}
 	}
+	for res := range ambiguous {
+		delete(by, res)
+		unbound = append(unbound, res)
+	}
+	slices.Sort(unbound)
 	if len(by) == 0 {
-		return nil
+		return nil, unbound
 	}
-	out := make(map[string]int64, len(by))
+	free = make(map[string]int64, len(by))
 	for res, s := range by {
-		out[res] = max(0, s.lent-s.used)
+		free[res] = max(0, s.lent-s.used)
 	}
-	return out
+	return free, unbound
+}
+
+// coReach is, per co-resource a replica of q on GPU flavor gpuFlavor is
+// charged, how far q's usage of it may still grow (K2b): its nominal plus
+// borrowingLimit less what it uses, absent where borrowingLimit is unset (no
+// limit); and what it keeps unlent and does not use, max(0, G - U), which no
+// peer borrows.
+func coReach(q QueueState, gpuFlavor string) (headroom, kept map[string]int64) {
+	for res := range q.CoFlavors {
+		f := q.coFlavor(res, gpuFlavor)
+		c, ok := q.CoResources[ResourceKey{Flavor: f, Resource: res}]
+		if f == "" || !ok {
+			continue
+		}
+		if c.BorrowingLimit != nil {
+			if headroom == nil {
+				headroom = map[string]int64{}
+			}
+			headroom[res] = max(0, c.Nominal+max(*c.BorrowingLimit, 0)-c.Reserved)
+		}
+		if _, g := c.lent(); g > c.Reserved {
+			if kept == nil {
+				kept = map[string]int64{}
+			}
+			kept[res] = g - c.Reserved
+		}
+	}
+	return headroom, kept
 }
 
 // cohortFree is max(0, Σ L_m − Σ max(0, U_m − G_m)) over every member that

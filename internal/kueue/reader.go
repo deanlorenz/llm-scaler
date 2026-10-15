@@ -476,6 +476,7 @@ func sharedPools(b Borrowing, flavorType map[string]string) []config.ExternalSha
 			Lenders:        externalLenders(p.Lenders),
 			PendingGPUs:    p.PendingGPUs,
 			CoFree:         maps.Clone(p.CoFree),
+			CoUnbound:      slices.Clone(p.CoUnbound),
 		})
 	}
 	return out
@@ -514,6 +515,8 @@ func borrowRows(b Borrowing, t Topology, flavorType map[string]string, nsQueues 
 					SourceBorrowed: f.KueueBorrowed,
 					Reason:         string(reason),
 					PinRequired:    f.PinRequired,
+					CoHeadroom:     maps.Clone(f.CoHeadroom),
+					CoKept:         maps.Clone(f.CoKept),
 				})
 			}
 		}
@@ -608,6 +611,36 @@ func (r *Reader) queueState(cq *unstructured.Unstructured, flavorType map[string
 	for _, g := range groups {
 		group, _ := g.(map[string]interface{})
 		flavors, _, _ := unstructured.NestedSlice(group, "flavors")
+		// What the group covers, and its flavors in order: a co-resource is
+		// charged on the GPU's flavor when its group covers a GPU too, else
+		// on its own group's flavor (K2a, coFlavor).
+		var covered, flavorNames []string
+		for _, f := range flavors {
+			flavor, _ := f.(map[string]interface{})
+			name, _, _ := unstructured.NestedString(flavor, "name")
+			flavorNames = append(flavorNames, name)
+			resources, _, _ := unstructured.NestedSlice(flavor, "resources")
+			for _, res := range resources {
+				rq, _ := res.(map[string]interface{})
+				resName, _, _ := unstructured.NestedString(rq, "name")
+				if !slices.Contains(covered, resName) {
+					covered = append(covered, resName)
+				}
+			}
+		}
+		groupHasGPU := slices.ContainsFunc(covered, func(res string) bool { return r.gpuNames[res] })
+		for _, res := range covered {
+			if r.gpuNames[res] {
+				continue
+			}
+			if q.CoFlavors == nil {
+				q.CoFlavors, q.CoWithGPU = map[string][]string{}, map[string]bool{}
+			}
+			if _, twice := q.CoFlavors[res]; twice {
+				q.Malformed = true // Kueue's webhook admits a resource in one group only
+			}
+			q.CoFlavors[res], q.CoWithGPU[res] = flavorNames, groupHasGPU
+		}
 		for _, f := range flavors {
 			flavor, _ := f.(map[string]interface{})
 			name, _, _ := unstructured.NestedString(flavor, "name")
@@ -615,27 +648,20 @@ func (r *Reader) queueState(cq *unstructured.Unstructured, flavorType map[string
 				q.Inactive = true
 			}
 			resources, _, _ := unstructured.NestedSlice(flavor, "resources")
-			gpuFlavor := slices.ContainsFunc(resources, func(res interface{}) bool {
-				rq, _ := res.(map[string]interface{})
-				resName, _, _ := unstructured.NestedString(rq, "name")
-				return r.gpuNames[resName]
-			})
 			for _, res := range resources {
 				rq, _ := res.(map[string]interface{})
 				resName, _, _ := unstructured.NestedString(rq, "name")
 				if !r.gpuNames[resName] {
-					if gpuFlavor {
-						// A co-resource of the GPU flavor's resource group:
-						// Kueue admits only when it fits as well (B1).
-						c, err := coQuota(rq)
-						if err != nil {
-							q.Malformed = true
-						}
-						if q.CoResources == nil {
-							q.CoResources = map[ResourceKey]CoQuota{}
-						}
-						q.CoResources[ResourceKey{Flavor: name, Resource: resName}] = c
+					// A co-resource: Kueue admits only when it fits as well
+					// (B1), whichever group covers it (K2a).
+					c, err := coQuota(rq)
+					if err != nil {
+						q.Malformed = true
 					}
+					if q.CoResources == nil {
+						q.CoResources = map[ResourceKey]CoQuota{}
+					}
+					q.CoResources[ResourceKey{Flavor: name, Resource: resName}] = c
 					continue
 				}
 				if gpuFlavors[resName] == nil {
@@ -741,19 +767,24 @@ func optionalQuantity(m map[string]interface{}, field string) (*int, error) {
 	return &n, nil
 }
 
-// coQuota reads a co-resource's nominalQuota and lendingLimit, in milli-units.
-// A field that does not parse is an error; the figures read stand.
+// coQuota reads a co-resource's nominalQuota, lendingLimit and borrowingLimit,
+// in milli-units. A field that does not parse is an error; the figures read
+// stand.
 func coQuota(rq map[string]interface{}) (CoQuota, error) {
 	var c CoQuota
 	nominal, errN := optionalMilli(rq, "nominalQuota")
 	c.Nominal = nominal
-	var errL error
-	if raw, ok := rq["lendingLimit"]; ok && raw != nil {
-		var l int64
-		l, errL = optionalMilli(rq, "lendingLimit")
-		c.LendingLimit = &l
+	limit := func(field string) (*int64, error) {
+		if raw, ok := rq[field]; !ok || raw == nil {
+			return nil, nil
+		}
+		n, err := optionalMilli(rq, field)
+		return &n, err
 	}
-	return c, errors.Join(errN, errL)
+	var errL, errB error
+	c.LendingLimit, errL = limit("lendingLimit")
+	c.BorrowingLimit, errB = limit("borrowingLimit")
+	return c, errors.Join(errN, errL, errB)
 }
 
 // optionalMilli parses a resource.Quantity field in milli-units; 0 when absent.

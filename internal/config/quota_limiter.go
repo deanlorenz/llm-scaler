@@ -450,6 +450,9 @@ type ExternalSharedPool struct {
 	// CoFree is the cohort's free pool of every other resource the flavor's
 	// resource group covers (CPU, memory, ...), in milli-units.
 	CoFree map[string]int64 `json:"coFree,omitempty"`
+	// CoUnbound are the co-resources charged on a flavor not known: the
+	// resource group covering them offers several flavors.
+	CoUnbound []string `json:"coUnbound,omitempty"`
 }
 
 // ExternalLender is one cohort member as a lender of one flavor and resource.
@@ -494,6 +497,12 @@ type ExternalBorrow struct {
 	// borrowing to be counted: the queue offers more than one flavor for the
 	// GPU, or sets flavorFungibility.whenCanBorrow Borrow or MayStopSearch.
 	PinRequired bool `json:"pinRequired,omitempty"`
+	// CoHeadroom is, per co-resource, how far the queue's usage of it may
+	// still grow: nominal plus borrowingLimit less usage, in milli-units;
+	// absent where borrowingLimit is unset. CoKept is what it keeps unlent and
+	// does not use.
+	CoHeadroom map[string]int64 `json:"coHeadroom,omitempty"`
+	CoKept     map[string]int64 `json:"coKept,omitempty"`
 }
 
 // Counted reports whether the row's borrowing is counted: no reason, or only

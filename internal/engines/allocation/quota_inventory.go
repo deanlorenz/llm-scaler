@@ -603,7 +603,7 @@ func (q *QuotaInventory) computeBorrowing(ctx context.Context, ext config.Extern
 		view.pools = append(view.pools, SharedPoolChunk{
 			Cohort: p.Cohort, Flavor: p.Flavor, Resource: p.Resource, Free: pools.free[poolKey(p)],
 			Lenders: lenders, ReadAt: ext.ObservedAt,
-			PendingGPUs: p.PendingGPUs, CoFree: maps.Clone(p.CoFree),
+			PendingGPUs: p.PendingGPUs, CoFree: maps.Clone(p.CoFree), CoUnbound: slices.Clone(p.CoUnbound),
 			Restricted: slices.Clone(pools.restricted[poolKey(p)]), ClassPriority: maps.Clone(ext.ClassPriority),
 			FlavorPlacement: kueue.FlavorPlacement{
 				AcceleratorType: p.Accelerator, NodeLabels: maps.Clone(p.NodeLabels), Tolerations: slices.Clone(p.Tolerations),
@@ -819,7 +819,36 @@ func (q *QuotaInventory) namespaceBorrow(ns, accType string, guaranteed int, row
 	if !unlimited {
 		b.Cap = max(0, reach-guaranteed)
 	}
+	counted := slices.DeleteFunc(slices.Clone(matched), func(r config.ExternalBorrow) bool { return !r.Counted() })
+	b.CoHeadroom = sumCo(counted, func(r config.ExternalBorrow) map[string]int64 { return r.CoHeadroom }, true)
+	b.CoKept = sumCo(counted, func(r config.ExternalBorrow) map[string]int64 { return r.CoKept }, false)
 	return b, true
+}
+
+// sumCo sums one co-resource figure over a namespace's rows. With everyRow, a
+// co-resource some row lacks is left out: that queue does not bound it, so
+// neither does the sum (K2b headroom).
+func sumCo(rows []config.ExternalBorrow, of func(config.ExternalBorrow) map[string]int64, everyRow bool) map[string]int64 {
+	var out map[string]int64
+	for _, r := range rows {
+		for res, n := range of(r) {
+			if out == nil {
+				out = map[string]int64{}
+			}
+			out[res] += n
+		}
+	}
+	if everyRow {
+		for res := range out {
+			for _, r := range rows {
+				if _, ok := of(r)[res]; !ok {
+					delete(out, res)
+					break
+				}
+			}
+		}
+	}
+	return out
 }
 
 // resourceQuotaBounds reports whether a namespace ResourceQuota is a GPU bound

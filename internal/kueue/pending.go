@@ -430,11 +430,11 @@ func pendingOn(q QueueState, key ResourceKey, nodeLabels map[string]string) int 
 // fitsCoResources reports whether w's request of each co-resource q covers
 // beside flavor's GPUs fits q's unused nominal of it.
 func fitsCoResources(q QueueState, flavor string, w PendingWorkload) bool {
-	for key, c := range q.CoResources {
-		if key.Flavor != flavor {
-			continue
-		}
-		if w.Requests[key.Resource] > max(0, c.Nominal-c.Reserved) {
+	for res := range q.CoFlavors {
+		// A co-resource charged on a flavor not known here is taken as
+		// fitting: the cautious side, which counts the Workload as waiting.
+		c, ok := q.CoResources[ResourceKey{Flavor: q.coFlavor(res, flavor), Resource: res}]
+		if ok && w.Requests[res] > max(0, c.Nominal-c.Reserved) {
 			return false
 		}
 	}

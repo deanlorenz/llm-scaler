@@ -55,6 +55,12 @@ type NamespaceBorrow struct {
 	// listed.
 	PinRequired bool
 	PinLabels   []map[string]string
+	// CoHeadroom is, per co-resource, how far the namespace's queues may still
+	// grow their usage of it, in milli-units: nominal plus borrowingLimit less
+	// usage (K2b). A co-resource absent is bounded by the pool alone. CoKept
+	// is the part of it they keep unlent and do not use, which no pool holds.
+	// Every replica placed while the namespace counts borrowing spends both.
+	CoHeadroom, CoKept map[string]int64
 	// HighestPriority is the highest priority of the namespace's unfinished
 	// GPU Workloads, nil when none was read: the priority of a model whose
 	// pod template names no priority class (SharedPoolChunk.drawable).
@@ -87,6 +93,10 @@ type SharedPoolChunk struct {
 	// cohort's free pool of it in milli-units: a borrowed replica must fit it
 	// too, and is debited its per-replica request (B1).
 	CoFree map[string]int64
+	// CoUnbound are co-resources charged on a flavor not known here (their
+	// resource group offers several): a variant that could borrow from the
+	// chunk is withheld as co-resource-bound (K2a).
+	CoUnbound []string
 	// Restricted are the GPUs of Free that lenders on reclaimWithinCohort
 	// LowerPriority lend: Kueue takes them back only from a Workload of lower
 	// priority than the lender's, so only a model of lower priority may draw
@@ -96,6 +106,87 @@ type SharedPoolChunk struct {
 	// priority Kueue gives a Workload of that class, as read from the
 	// Workloads. A model's priority is looked up here.
 	ClassPriority map[string]int32
+}
+
+// coWithin reports whether one replica's requests fit a namespace's
+// co-resource headroom (NamespaceBorrow.CoHeadroom, K2b).
+func coWithin(headroom, requests map[string]int64) bool {
+	for res, h := range headroom {
+		if requests[res] > h {
+			return false
+		}
+	}
+	return true
+}
+
+// coFitsKept reports whether one replica's requests fit, per co-resource the
+// chunk's pool holds, that pool plus what the namespace keeps unlent. A
+// co-resource the replica does not request is taken as 0 here: a variant
+// whose request of one is unknown is withheld before the pass
+// (WithholdByVariants).
+func coFitsKept(free, kept, requests map[string]int64) bool {
+	for res, f := range free {
+		if requests[res] > f+kept[res] {
+			return false
+		}
+	}
+	return true
+}
+
+// spendCo debits one replica's co-resource requests: the namespace's
+// headroom in full, and of each request what the namespace keeps first, the
+// rest from chunk c's pool (none when c is nil).
+func spendCo(b *nsBorrowLeft, c *SharedPoolChunk, requests map[string]int64) {
+	for res, n := range requests {
+		if h, ok := b.coHeadroom[res]; ok {
+			b.coHeadroom[res] = h - n
+		}
+		k := min(b.coKept[res], n)
+		if k > 0 {
+			b.coKept[res] -= k
+		}
+		if c == nil {
+			continue
+		}
+		if f, ok := c.CoFree[res]; ok {
+			c.CoFree[res] = f - (n - k)
+		}
+	}
+}
+
+// coGuaranteed fits one replica placed within the guaranteed figure to the
+// co-resources (K2c): Kueue admits it only when every resource it requests
+// fits, its CPU and memory as much as its GPUs. It must fit the namespace's
+// headroom and, unless the queue reclaims what it lent (reclaim: Kueue
+// preempts borrowers of it), one of its cohorts' chunks serving acc --
+// pool plus what the namespace keeps -- which it is debited. b nil (the
+// namespace counts no borrowing) checks nothing.
+func (bs *borrowState) coGuaranteed(ns, acc string, b *nsBorrowLeft, requests map[string]int64, reclaim bool) bool {
+	if b == nil {
+		return true
+	}
+	if !coWithin(b.coHeadroom, requests) {
+		return false
+	}
+	var withCo []*SharedPoolChunk
+	if !reclaim {
+		for _, c := range bs.cohortChunks(ns, acc) {
+			if len(c.CoFree) > 0 {
+				withCo = append(withCo, c)
+			}
+		}
+	}
+	if len(withCo) == 0 {
+		spendCo(b, nil, requests)
+		return true
+	}
+	for _, c := range withCo {
+		if coFitsKept(c.CoFree, b.coKept, requests) {
+			spendCo(b, c, requests)
+			return true
+		}
+	}
+	return false
 }
 
 // PriorityLend is what one LowerPriority lender lends into a chunk: GPUs a
@@ -295,6 +386,7 @@ func mergeSharedPools(constraints []*ResourceConstraints) ([]*SharedPoolChunk, m
 			chunk := p
 			chunk.Lenders = slices.Clone(p.Lenders)
 			chunk.CoFree = maps.Clone(p.CoFree)
+			chunk.CoUnbound = slices.Clone(p.CoUnbound)
 			chunk.Restricted = slices.Clone(p.Restricted)
 			chunk.ClassPriority = maps.Clone(p.ClassPriority)
 			byKey[p.key()] = &chunk
@@ -327,6 +419,12 @@ func mergeChunk(prev *SharedPoolChunk, p SharedPoolChunk) {
 			prev.CoFree[res] = n
 		}
 	}
+	for _, res := range p.CoUnbound {
+		if !slices.Contains(prev.CoUnbound, res) {
+			prev.CoUnbound = append(prev.CoUnbound, res)
+		}
+	}
+	slices.Sort(prev.CoUnbound)
 	prev.Stale = prev.Stale || p.Stale
 	if !p.ReadAt.IsZero() && (prev.ReadAt.IsZero() || p.ReadAt.Before(prev.ReadAt)) {
 		prev.ReadAt = p.ReadAt
@@ -360,4 +458,27 @@ func mergeChunk(prev *SharedPoolChunk, p SharedPoolChunk) {
 			prev.ClassPriority[class] = n
 		}
 	}
+}
+
+// tighterCo merges two entries' co-resource figures for one namespace: per
+// co-resource the smaller. For headroom, a co-resource one entry leaves
+// unbounded takes the other's bound (union); for what is kept, only one both
+// read counts (intersection).
+func tighterCo(a, b map[string]int64, union bool) map[string]int64 {
+	out := map[string]int64{}
+	for res, n := range a {
+		if m, ok := b[res]; ok {
+			out[res] = min(n, m)
+		} else if union {
+			out[res] = n
+		}
+	}
+	if union {
+		for res, m := range b {
+			if _, ok := a[res]; !ok {
+				out[res] = m
+			}
+		}
+	}
+	return out
 }
