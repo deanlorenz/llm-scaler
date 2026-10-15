@@ -157,6 +157,33 @@ they enable. Do this, in order:
        -o jsonpath='{.data.policyNamespace} {.data.limiter} {.data.policyAccepted}{"\n"}'
      ```
 
+#### Policy that starts to apply
+
+Some settings in named tiers and per-model entries were ignored before. They
+now apply. Before you upgrade, read your `wva-scaling-policy-config` and check:
+
+- [ ] Each named tier and per-model entry that sets `scaleToZero`,
+      `scaleFromZero.requirePrefill`, `shapeChangeHoldSeconds` or
+      `disableShapeChangeHold`. A tier's value for these was ignored, and so
+      was a per-model value for all but `scaleToZero`. Now the entry's own
+      value is used. A model parks only if every tier its
+      variants name allows it, and waits for prefill if any of them requires it.
+- [ ] Each tier and per-model entry that leaves out `kvCacheThreshold`,
+      `queueLengthThreshold` or `priority` while `default` sets them. These
+      entries used to get 0.80, 5 and 1.0. Now they inherit the values from
+      `default`.
+- [ ] Any kustomize patch that sets the controller's
+      `terminationGracePeriodSeconds` below 25. The controller now takes up to
+      40s to stop (it finishes the running cycle, then releases its lease).
+      Raise the patch to 40, or remove it.
+
+An unusable `scaleToZero.retentionPeriod` or a negative
+`shapeChangeHoldSeconds` no longer needs fixing before the upgrade: it is
+ignored, and the rest of the entry applies. It shows in the log, in
+`wva_errors_total{error_type="Ignored unusable saturation scaling config field"}`,
+and in the `policyIgnored` key of the
+[`wva-controller-status` ConfigMap](operations.md#what-the-controller-is-running-with).
+
 ### The external-scaler NetworkPolicy
 
 `wva-external-scaler` admits `:9090` only from KEDA's namespace. The admin phase

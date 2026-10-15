@@ -94,7 +94,8 @@ You can see a skipped value in three places:
   This key shows only the `default` entry of the controller's own ConfigMap.
 
 With a separate policy namespace, the ConfigMap there supplies only limiters and
-the optimizer. A `retentionPeriod` in it has no effect.
+the optimizer. A `retentionPeriod` in it has no effect, and a bad one there is
+not reported.
 
 #### How long until a model actually reaches zero
 

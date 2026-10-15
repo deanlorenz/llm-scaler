@@ -230,6 +230,11 @@ times:
   (`make enable-physical-limiter` restarts it). The pod goes NotReady, which is
   visible and alertable.
 
+Only an RBAC denial (Forbidden or Unauthorized) makes the check fail. The
+check lists nodes with a 2s timeout and asks again at most every 30s. If the
+API server is slow or returns another error, the check keeps its last answer.
+Before the first answer arrives it reports Ready.
+
 Without this, every variant would be charged to no accelerator pool, get no GPU
 budget, and never scale up again, which looks exactly like an idle cluster.
 

@@ -261,7 +261,7 @@ kubectl get cm wva-controller-status -n "$NS" -o jsonpath='{.data}{"\n"}'
 | `policyResourceVersion` | `metadata.resourceVersion` of the policy ConfigMap last **loaded**, accepted or rejected. Written only once that content is in force, so after an edit, a match with the ConfigMap's own `resourceVersion` means the controller runs with it. Empty when no policy ConfigMap is in force. Compare for equality only |
 | `policyAccepted` | `true`, or `false` when the `default` entry was rejected; the controller then runs without it |
 | `policyError` | why the `default` entry was rejected; empty when accepted |
-| `policyIgnored` | fields of the `default` entry in the controller's own ConfigMap whose value could not be used, as `<field>="<value>": <reason>`, joined by `; `. The entry still applies; those fields act as unset. Empty when none. With a separate policy namespace this is not the ConfigMap `policyConfigMap` names: the fields that can be ignored (retention, the shape-change hold) are read from the controller's own ConfigMap only |
+| `policyIgnored` | values in the `default` entry that could not be used, as `<field>="<value>": <reason>`, separated by `; `. The rest of the entry applies. Empty when none. Always the controller's own ConfigMap, even with a separate policy namespace |
 | `limiter` | the limiter in force, `<mode>/<entry names>`, e.g. `quota/install-quota`, or `none` |
 | `utilizationShare` | the optimizer's mode: `off`, `invalid`, `shadow` or `active` |
 | `utilizationShareError` | the optimizer block's error when the mode is `invalid` |
@@ -273,6 +273,13 @@ Only the leader writes it, and only when a value changes. A failed write is
 logged and retried and never stops scaling. A missing ConfigMap means the
 controller predates it or lacks the `wva-controller-status-role` grant (a
 cluster admin re-runs `make setup-prereqs`). It does not mean scaling stopped.
+
+**Stopping takes up to 40s.** On SIGTERM the controller finishes the running
+cycle, stops (up to 25s) and releases its lease, so the next leader starts at
+once. The Deployment allows 40s (`terminationGracePeriodSeconds`). On a slow
+API server the lease release can take longer, up to half of `RenewDeadline`, and
+then the kubelet kills the pod first: the next leader waits for the lease to
+expire instead.
 
 ## Command cheatsheet
 
