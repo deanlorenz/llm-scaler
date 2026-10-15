@@ -7,8 +7,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"os"
+	"reflect"
 	"slices"
 	"time"
 
@@ -108,7 +108,7 @@ type learnedStater interface {
 	ExportLearnedState() saturation.LearnedState
 	RestoreLearnedState(saturation.LearnedState) saturation.RestoreReport
 	ForgetLearnedState()
-	TakeRestoreOutcomes() (installed, rejected int)
+	TakeRestoreOutcomes() map[string]int
 }
 
 // Pinned at compile time: the assertion below fails silently at run time.
@@ -214,7 +214,8 @@ func (e *Engine) restoreLearnedState(ctx context.Context, now time.Time) {
 	logger.Info("Learned state: snapshot restored",
 		"writtenAt", doc.WrittenAt, "writer", doc.Writer.Identity,
 		"pendingVariants", rep.PendingVariants, "itlLines", rep.ITLLines,
-		"aged", rep.Aged, "unusable", rep.Unusable, "unattributable", rep.Unattributable)
+		"aged", rep.Aged, "unusable", rep.Unusable, "unattributable", rep.Unattributable,
+		"lowerBounds", rep.BorrowClocks, "forgotten", rep.Forgotten, "stashed", rep.Stashed)
 }
 
 // rejected says why a document will not be restored, or "".
@@ -342,12 +343,43 @@ func learnedStateDigest(s saturation.LearnedState) string {
 		w.LastUsed = time.Time{}
 		s.Throughput[k] = w
 	}
+	for k, w := range s.K2Stash {
+		w.LastUsed = time.Time{}
+		s.K2Stash[k] = w
+	}
+	// A put-aside throughput window's held time moves on every serving cycle
+	// the floor holds a fleet on it; the same trade as a bound's tick.
+	for k, w := range s.ThroughputStash {
+		w.LastUsed, w.HeldSeconds = time.Time{}, 0
+		s.ThroughputStash[k] = w
+	}
 	for k, m := range s.Accelerators {
 		m.LastUsed = time.Time{}
 		s.Accelerators[k] = m
 	}
 	for k := range s.VariantSeenAt {
 		s.VariantSeenAt[k] = time.Time{}
+	}
+	// A lower bound's tick moves on every serving cycle and its seen on every
+	// cycle its variant exists, as a forget mark's seen does: kept in, they
+	// changed the digest every interval and rewrote the document every
+	// minute for as long as any bound or forget existed. Left out, a running
+	// bound's tick is written at least every learnedStateRefresh; a restart
+	// reads the part since then as a pause, which keeps the bound slightly
+	// longer, never shorter. The start, which a pause moves, stays in.
+	for k, lb := range s.LowerBounds {
+		lb.Tick, lb.Seen, lb.PriorUsed = time.Time{}, time.Time{}, time.Time{}
+		s.LowerBounds[k] = lb
+	}
+	for k, m := range s.Forgotten {
+		m.Seen = time.Time{}
+		s.Forgotten[k] = m
+	}
+	// The rollback copy of a previous figure is dated from its last use,
+	// which moves with the bound's PriorUsed.
+	for k, p := range s.PriorK2 {
+		p.InstalledAt = time.Time{}
+		s.PriorK2[k] = p
 	}
 	raw, err := json.Marshal(s)
 	if err != nil {
@@ -393,19 +425,24 @@ func encodeLearnedState(s saturation.LearnedState, now time.Time, budget int) (s
 	return string(raw), dropped, nil
 }
 
-// cloneLearnedState copies the state's maps, so leaving entries out of the
-// copy cannot reach the original. The values are plain data, except the
-// window values, which nothing here writes into.
+// cloneLearnedState copies every map of the state, so leaving entries out of
+// the copy cannot reach the original. Every map field, by reflection: a list
+// of fields written by hand missed two of the four the learned-state PRs
+// added, and the trim then reached the caller's maps. The values are plain
+// data, except the window values, which nothing here writes into.
 func cloneLearnedState(s saturation.LearnedState) saturation.LearnedState {
-	s.K2 = maps.Clone(s.K2)
-	s.Throughput = maps.Clone(s.Throughput)
-	s.ITLBaseline = maps.Clone(s.ITLBaseline)
-	s.StartSeconds = maps.Clone(s.StartSeconds)
-	s.VariantSeenAt = maps.Clone(s.VariantSeenAt)
-	s.Accelerators = maps.Clone(s.Accelerators)
-	s.ITLLines = maps.Clone(s.ITLLines)
-	s.K2BorrowedSince = maps.Clone(s.K2BorrowedSince)
-	s.Config = maps.Clone(s.Config)
+	v := reflect.ValueOf(&s).Elem()
+	for i := range v.NumField() {
+		f := v.Field(i)
+		if f.Kind() != reflect.Map || f.IsNil() {
+			continue
+		}
+		c := reflect.MakeMapWithSize(f.Type(), f.Len())
+		for it := f.MapRange(); it.Next(); {
+			c.SetMapIndex(it.Key(), it.Value())
+		}
+		f.Set(c)
+	}
 	return s
 }
 
@@ -419,12 +456,27 @@ type learnedStateEntry struct {
 // learnedStateEntries lists the state's entries, least recently used first.
 func learnedStateEntries(s saturation.LearnedState) []learnedStateEntry {
 	out := make([]learnedStateEntry, 0, len(s.K2)+len(s.Throughput)+len(s.VariantSeenAt)+
-		len(s.ITLLines)+len(s.Accelerators)+len(s.K2BorrowedSince))
+		len(s.ITLLines)+len(s.Accelerators)+len(s.LowerBounds)+len(s.K2BorrowedSince)+len(s.Forgotten)+
+		len(s.K2Stash)+len(s.ThroughputStash))
+	// A window goes with the arguments it was written under.
 	for k, w := range s.K2 {
-		out = append(out, learnedStateEntry{w.LastUsed, func() { delete(s.K2, k) }})
+		out = append(out, learnedStateEntry{w.LastUsed, func() {
+			delete(s.K2, k)
+			delete(s.K2Args, k)
+		}})
 	}
 	for k, w := range s.Throughput {
-		out = append(out, learnedStateEntry{w.LastUsed, func() { delete(s.Throughput, k) }})
+		out = append(out, learnedStateEntry{w.LastUsed, func() {
+			delete(s.Throughput, k)
+			delete(s.ThroughputArgs, k)
+		}})
+	}
+	// A window put aside goes on its own clock, like the windows.
+	for k, w := range s.K2Stash {
+		out = append(out, learnedStateEntry{w.LastUsed, func() { delete(s.K2Stash, k) }})
+	}
+	for k, w := range s.ThroughputStash {
+		out = append(out, learnedStateEntry{w.LastUsed, func() { delete(s.ThroughputStash, k) }})
 	}
 	for k, seen := range s.VariantSeenAt {
 		out = append(out, learnedStateEntry{seen, func() {
@@ -439,9 +491,55 @@ func learnedStateEntries(s saturation.LearnedState) []learnedStateEntry {
 	for k, m := range s.Accelerators {
 		out = append(out, learnedStateEntry{m.LastUsed, func() { delete(s.Accelerators, k) }})
 	}
+	// A lower bound is one entry, ordered by when its variant was last seen,
+	// not by its start: a running bound, or one holding a previous figure, is
+	// kept for its variant's life, so its start is the oldest time in the
+	// document and would go first. Its rollback copies (K2BorrowedSince,
+	// PriorK2) go with it. A SPENT bound holding no figure goes before
+	// everything else: it only keeps a borrow from re-arming without new
+	// evidence, which costs replicas for a bounded time, where a k2 window
+	// dropped for it priced its bucket at derived or k1 when the traffic came
+	// back. Ordered by Seen, which NoteVariantsPresent refreshes every cycle
+	// a variant exists, every spent bound outlived the windows of buckets
+	// served two days ago. A spent bound is exported ARMED, its start a
+	// whole hold and relaxation before its last tick (the analyzer keeps
+	// it so, to judge new evidence against); one never armed holding no
+	// figure is as dispensable.
+	for k, lb := range s.LowerBounds {
+		at := lb.Seen
+		if lb.Prior <= 0 && (!lb.Armed || spentBound(lb)) {
+			at = time.Time{}
+		}
+		out = append(out, learnedStateEntry{at, func() {
+			delete(s.LowerBounds, k)
+			delete(s.K2BorrowedSince, k)
+			delete(s.PriorK2, k)
+		}})
+	}
 	for k, since := range s.K2BorrowedSince {
+		if _, bound := s.LowerBounds[k]; bound {
+			continue
+		}
 		out = append(out, learnedStateEntry{since, func() { delete(s.K2BorrowedSince, k) }})
+	}
+	for k, m := range s.Forgotten {
+		out = append(out, learnedStateEntry{m.Seen, func() { delete(s.Forgotten, k) }})
+	}
+	// A PR #151 document's previous figures, where no bound holds the key;
+	// one a bound holds goes with it.
+	for k, p := range s.PriorK2 {
+		if _, bound := s.LowerBounds[k]; bound {
+			continue
+		}
+		out = append(out, learnedStateEntry{p.InstalledAt, func() { delete(s.PriorK2, k) }})
 	}
 	slices.SortStableFunc(out, func(a, b learnedStateEntry) int { return cmp.Compare(a.at.UnixNano(), b.at.UnixNano()) })
 	return out
+}
+
+// spentBound reports an armed lower bound whose hold and relaxation have run
+// their course: its serving time, tick minus since, is the whole of both.
+func spentBound(lb saturation.LowerBoundSnapshot) bool {
+	return lb.Armed && !lb.Since.IsZero() && !lb.Tick.IsZero() &&
+		lb.Tick.Sub(lb.Since) >= saturation.BorrowedK2Hold+saturation.BorrowedK2Relax
 }

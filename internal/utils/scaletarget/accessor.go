@@ -97,6 +97,20 @@ func IsLeaderWorkerSet(acc ScaleTargetAccessor) bool {
 // new ReplicaSet whose pods do not exist yet -- or whose controller has not yet
 // observed its latest spec (a template change not acted on yet; a scale too,
 // briefly), or a LeaderWorkerSet whose UpdateInProgress condition is True.
+//
+// For a LeaderWorkerSet the condition is the whole test, and the status
+// counts are not. The LWS controller (v0.8.0, updateConditions) skips a group
+// whose worker StatefulSet does not exist yet, while Status.Replicas is the
+// leader StatefulSet's and counts a Pending leader -- and the worker
+// StatefulSet is created only once the leader is Ready (startup policy
+// LeaderReady) or scheduled (exclusive placement). So UpdatedReplicas <
+// Replicas on every scale-up of such a set: read as a rollout, it held back
+// every reading of the variant for as long as the new group took to start,
+// which is when it saturates. UpdateInProgress counts only groups that exist.
+// Nor do the conditions carry an ObservedGeneration (makeCondition sets
+// none), so a template change the controller has not acted on yet cannot be
+// told from the status: the pods' own revisions tell it, once any group has
+// moved (the analyzer's revision check, ReplicaMetrics.Revision).
 func RollingOut(acc ScaleTargetAccessor) bool {
 	switch a := acc.(type) {
 	case *deploymentAccessor:

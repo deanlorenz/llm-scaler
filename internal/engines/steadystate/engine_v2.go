@@ -12,6 +12,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/annotations"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
@@ -53,6 +54,10 @@ func (e *Engine) runV2AnalysisOnly(
 				"variant", va.Name, "scaleTargetKey", key)
 			continue
 		}
+		// Before the record is loaded and before Analyze, so a forgotten
+		// variant's capacity record is refiled from the scale target this
+		// cycle and nothing restored for it is installed.
+		e.forgetOnRequest(ctx, namespace, modelID, va.Name, scaleTarget)
 		// Get accelerator name from scale target nodeSelector/nodeAffinity or VA label
 		accelerator := accelerator.GetAcceleratorNameFromScaleTarget(va, scaleTarget)
 		gpuCount := scaleTarget.GetTotalGPUsPerReplica()
@@ -376,6 +381,33 @@ type staleHistoryEvictor interface {
 	EvictStaleHistory() saturation.Evicted
 }
 
+// variantForgetter is the part of the saturation analyzer forgetOnRequest
+// needs, reached through an assertion like the others here.
+type variantForgetter interface {
+	ForgottenToken(namespace, variant string) string
+	ForgetVariant(namespace, modelID, variant, token string) int
+}
+
+// Pinned at compile time, for the same reason as presenceNoter.
+var _ variantForgetter = (*saturation.SaturationAnalyzer)(nil)
+
+// forgetOnRequest forgets one variant's learned state when its scale target
+// carries the ForgetLearnedState annotation with a token not yet acted on.
+func (e *Engine) forgetOnRequest(ctx context.Context, namespace, modelID, variant string, target scaletarget.ScaleTargetAccessor) {
+	token := scaletarget.Annotations(target)[annotations.ForgetLearnedState]
+	if token == "" {
+		return
+	}
+	f, ok := e.saturationV2Analyzer.(variantForgetter)
+	if !ok || f.ForgottenToken(namespace, variant) == token {
+		return
+	}
+	n := f.ForgetVariant(namespace, modelID, variant, token)
+	ctrl.LoggerFrom(ctx).Info("Learned state forgotten for one variant, on request",
+		"namespace", namespace, "modelID", modelID, "variant", variant,
+		"annotation", annotations.ForgetLearnedState, "token", token, "entries", n)
+}
+
 // presenceNoter is the part of the saturation analyzer notePresentVariants
 // needs, reached through an assertion for the same reason as
 // staleHistoryEvictor.
@@ -562,6 +594,7 @@ func (e *Engine) evictStaleLearnedState(ctx context.Context) {
 			"decodeSaturation", history.DecodeSaturation,
 			"fleetShapes", history.FleetShapes,
 			"variantStamps", history.VariantStamps,
+			"stashedWindows", history.StashedWindows,
 			"capacityRecords", records,
 
 			"recordTimeout", capacity.EvictionTimeout)

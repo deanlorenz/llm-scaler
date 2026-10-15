@@ -154,21 +154,19 @@ func TestDeletingLearnedStateBorrowsIsScopedToTheModel(t *testing.T) {
 // controller reads 0 rather than nothing.
 func TestLearnedStateCountersStartAtZeroAndCount(t *testing.T) {
 	emitter, registry := engineConfigEmitter(t)
-	for _, o := range []string{LearnedStateRestoreInstalled, LearnedStateRestoreRejected} {
+	for _, o := range LearnedStateRestoreOutcomes {
 		if v, ok := seriesValue(t, registry, constants.WVALearnedStateRestoresTotal,
 			map[string]string{constants.LabelOutcome: o}); !ok || v != 0 {
 			t.Fatalf("%s restores = %v (present %v) before any restore, want 0", o, v, ok)
 		}
 	}
-	emitter.AddLearnedStateRestores(3, 1)
+	emitter.AddLearnedStateRestores(map[string]int{"whole": 3, "prior": 1})
 	emitter.IncLearnedStateSnapshotError(LearnedStateOpRead)
-	if v, _ := seriesValue(t, registry, constants.WVALearnedStateRestoresTotal,
-		map[string]string{constants.LabelOutcome: LearnedStateRestoreInstalled}); v != 3 {
-		t.Fatalf("installed = %v, want 3", v)
-	}
-	if v, _ := seriesValue(t, registry, constants.WVALearnedStateRestoresTotal,
-		map[string]string{constants.LabelOutcome: LearnedStateRestoreRejected}); v != 1 {
-		t.Fatalf("rejected = %v, want 1", v)
+	for o, want := range map[string]float64{"whole": 3, "prior": 1, "args": 0} {
+		if v, _ := seriesValue(t, registry, constants.WVALearnedStateRestoresTotal,
+			map[string]string{constants.LabelOutcome: o}); v != want {
+			t.Fatalf("%s restores = %v, want %v", o, v, want)
+		}
 	}
 	if v, _ := seriesValue(t, registry, constants.WVALearnedStateSnapshotErrorsTotal,
 		map[string]string{constants.LabelOperation: LearnedStateOpRead}); v != 1 {

@@ -34,13 +34,14 @@ var _ = Describe("learned state across a restart", func() {
 		store.Update("test-ns", "test-model", "variant-a", capacity.Record{EngineParams: p})
 		return NewSaturationAnalyzer(store)
 	}
-	capacityOf := func(a *SaturationAnalyzer) float64 {
+	decisionOf := func(a *SaturationAnalyzer) domain.VariantCapacity {
 		result, err := a.Analyze(context.Background(), makeAnalyzerInput(
 			[]domain.ReplicaMetrics{makeReplicaMetrics("pod-a", "variant-a", 1000, 16000, 0, 100, 50)}, states))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.VariantCapacities).To(HaveLen(1))
-		return result.VariantCapacities[0].PerReplicaCapacity
+		return result.VariantCapacities[0]
 	}
+	capacityOf := func(a *SaturationAnalyzer) float64 { return decisionOf(a).PerReplicaCapacity }
 	// learn saturates variant-a at 4000 tokens, against a k1 of 12800, so a
 	// process that remembers it prices the replica at 4000 and one that does
 	// not prices it at k1.
@@ -75,21 +76,23 @@ var _ = Describe("learned state across a restart", func() {
 			"the restart forgot k2 and priced the replica at k1 -- three times the capacity")
 	})
 
-	It("does not restore into a variant whose engine configuration changed", func() {
+	It("restores into a variant whose engine configuration changed only a lower-only previous figure", func() {
 		first := newProcess(params(256))
 		saved := carry(learn(first))
 		saved.Args = nil // a document from before the arguments were recorded
 
 		second := newProcess(params(64))
 		second.RestoreLearnedState(saved)
-		Expect(capacityOf(second)).To(Equal(float64(12800)),
-			"a k2 measured under --max-num-seqs=256 priced an engine running 64")
-		installed, rejected := second.TakeRestoreOutcomes()
-		Expect([]int{installed, rejected}).To(Equal([]int{0, 1}), "the rejection was not counted")
+		vc := decisionOf(second)
+		Expect(vc.K2Source).To(Equal(capacity.K2SrcPrior.String()),
+			"a k2 measured under --max-num-seqs=256 was taken as the 64-sequence engine's own, or dropped")
+		Expect(vc.PerReplicaCapacity).To(Equal(float64(4000)))
+		Expect(second.TakeRestoreOutcomes()).To(Equal(map[string]int{string(RestoredDiffers): 1}), "the outcome was not counted")
+		Expect(previousFigures(second)).To(HaveLen(1))
 		second.mu.Lock()
 		defer second.mu.Unlock()
 		Expect(second.pendingRestore).To(BeEmpty(), "checked once, and dropped")
-		Expect(second.priorK2).To(BeEmpty(), "an older document takes no prior: it cannot say the arguments differed")
+		Expect(second.computeCapacityHistory).To(BeEmpty(), "an older document's window was installed as the variant's own")
 	})
 
 	It("counts each installed restore once", func() {
@@ -98,10 +101,8 @@ var _ = Describe("learned state across a restart", func() {
 		second.RestoreLearnedState(saved)
 		capacityOf(second)
 		capacityOf(second) // a second cycle installs nothing more
-		installed, rejected := second.TakeRestoreOutcomes()
-		Expect([]int{installed, rejected}).To(Equal([]int{1, 0}))
-		installed, rejected = second.TakeRestoreOutcomes()
-		Expect([]int{installed, rejected}).To(Equal([]int{0, 0}), "the counts were not reset when taken")
+		Expect(second.TakeRestoreOutcomes()).To(Equal(map[string]int{string(RestoredWhole): 1}))
+		Expect(second.TakeRestoreOutcomes()).To(BeEmpty(), "the counts were not reset when taken")
 	})
 
 	It("does not restore an entry past its horizon", func() {
@@ -267,7 +268,9 @@ var _ = Describe("learned state across a restart", func() {
 
 	It("does not take a configuration it could not read completely as a match", func() {
 		// --max-num-seqs $VLLM_MAX_NUM_SEQS from an envFrom: both processes
-		// hash the default, whatever the value is.
+		// hash the default, whatever the value is. Not a match: what was
+		// learned comes back only as a lower-only previous figure (P2-prior),
+		// never as the variant's own window (P2-hist).
 		unread := func() *capacity.EngineParams {
 			p := params(256)
 			p.Unresolved = []string{"--max-num-seqs"}
@@ -277,15 +280,17 @@ var _ = Describe("learned state across a restart", func() {
 		saved := carry(learn(first))
 		second := newProcess(unread())
 		second.RestoreLearnedState(saved)
-		Expect(capacityOf(second)).To(Equal(float64(12800)),
-			"k2 installed under a configuration this process could not read")
+		Expect(decisionOf(second).K2Source).To(Equal(capacity.K2SrcPrior.String()),
+			"k2 installed as its own under a configuration this process could not read")
 
 		incomplete := newProcess(unread())
 		_, err := incomplete.Analyze(context.Background(), makeAnalyzerInput(
 			[]domain.ReplicaMetrics{makeReplicaMetrics("pod-a", "variant-a", 4000, 16000, 6, 100, 50)}, states))
 		Expect(err).NotTo(HaveOccurred())
-		Expect(incomplete.ExportLearnedState().Config).NotTo(HaveKey("test-ns/variant-a"),
-			"an incompletely read configuration recorded as the one k2 was learned under")
+		// Exported under it, tagged as unread: it restores only into the
+		// same unread configuration, never as a complete one's.
+		Expect(incomplete.ExportLearnedState().Args).To(HaveKeyWithValue("test-ns/variant-a", HavePrefix(incompletePrefix)),
+			"an incompletely read configuration exported as a complete one")
 
 		// A document that does carry such a fingerprint -- hand-edited, or
 		// written by a build without the check above -- equal on both sides.
@@ -293,7 +298,7 @@ var _ = Describe("learned state across a restart", func() {
 		forged.Config["test-ns/variant-a"] = unread().Fingerprint()
 		both := newProcess(unread())
 		both.RestoreLearnedState(forged)
-		Expect(capacityOf(both)).To(Equal(float64(12800)),
+		Expect(decisionOf(both).K2Source).To(Equal(capacity.K2SrcPrior.String()),
 			"two unread configurations with equal fingerprints were taken as the same")
 	})
 
@@ -321,19 +326,32 @@ var _ = Describe("learned state across a restart", func() {
 	It("checks the accelerator memo against the configuration like any per-variant entry", func() {
 		saved := carry(learn(newProcess(params(256))))
 		Expect(saved.Accelerators).To(HaveKey("test-ns/variant-a"), "precondition: the memo was exported")
+		memo := func(a *SaturationAnalyzer) bool {
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			_, ok := a.lastAccelerator["test-ns/variant-a"]
+			return ok
+		}
 
+		// Other arguments on the same hardware: the restored windows are
+		// installed as previous figures under the stable accelerator, and
+		// the memo with them, so a cycle that reads no accelerator finds
+		// them.
 		changed := newProcess(params(64))
 		changed.RestoreLearnedState(saved)
-		changed.mu.Lock()
-		_, installed := changed.lastAccelerator["test-ns/variant-a"]
-		changed.mu.Unlock()
-		Expect(installed).To(BeFalse(), "a memo installed before its variant's configuration was checked")
+		Expect(memo(changed)).To(BeFalse(), "a memo installed before its variant's configuration was checked")
 		_, done := changed.installRestored("test-ns", "test-model", "variant-a")
 		Expect(done).To(BeTrue())
-		changed.mu.Lock()
-		_, installed = changed.lastAccelerator["test-ns/variant-a"]
-		changed.mu.Unlock()
-		Expect(installed).To(BeFalse(), "a memo installed under a changed configuration")
+		Expect(memo(changed)).To(BeTrue(), "the memo left out where the previous figures were installed")
+
+		// Other hardware: neither the windows nor the memo describe it.
+		store := capacity.NewStore()
+		store.Update("test-ns", "test-model", "variant-a", capacity.Record{AcceleratorName: "A100", EngineParams: params(64)})
+		moved := NewSaturationAnalyzer(store)
+		moved.RestoreLearnedState(saved)
+		_, done = moved.installRestored("test-ns", "test-model", "variant-a")
+		Expect(done).To(BeTrue())
+		Expect(memo(moved)).To(BeFalse(), "a memo naming H100 installed for a variant that runs on A100")
 	})
 
 	It("keeps a parked variant's pending entries past the bucket retention while it is noted present", func() {

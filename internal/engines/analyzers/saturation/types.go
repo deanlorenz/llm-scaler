@@ -17,10 +17,27 @@ type admission struct {
 	// engine's, so it files no capacity record, and only its saturated
 	// reading may price its own cycle (lower-only) without being recorded.
 	bridge bool
+	// rollout is the variant mid-rollout (capacity.Record.InRollout): any
+	// rollout its scale target reports, image-only included. A saturated
+	// reading may be an old pod's, so it is not recorded, and the variant
+	// is priced from what it already holds. Since nothing can be recorded,
+	// the bound's clock does not run either (serving).
+	rollout bool
 }
 
-// admitted reports a row whose reading may be recorded.
+// admitted reports a row whose reading may be recorded, rollout aside: a Ready
+// Pod of the variant's own.
 func (ad admission) admitted() bool { return ad.why == "" }
+
+// serving reports a row that runs a lower bound's clock, and arms, re-arms or
+// ends a bound: admitted, and not mid-rollout. With every saturated reading
+// held back for the rollout, a clock that ran would relax the bound toward
+// derived or k1 above what the fleet demonstrably holds -- for as long as a
+// rollout stuck on a pending surge pod or held at a partition lasted -- and a
+// normal-length one would hand the new arguments only what was left of their
+// hold. Frozen, a bound the arguments' change restarted keeps its whole hold
+// for the first serving cycle after the rollout (notePreviousFigureLocked).
+func (ad admission) serving() bool { return ad.why == "" && !ad.rollout }
 
 // admissionOf is the admission rule: a row's reading is the variant's own
 // only from a Ready Pod of the variant's own -- the rows its saturated
@@ -35,6 +52,26 @@ func admissionOf(rm domain.ReplicaMetrics) admission {
 		return admission{why: "the pod is not Ready: no traffic is routed to it, so its queue and resident KV do not measure this variant's saturation"}
 	}
 	return admission{}
+}
+
+// revisionsMixed names the variants whose own replicas -- warm-pool bridges
+// aside, which run the pool's template -- report more than one pod template
+// revision (domain.ReplicaMetrics.Revision). A replica that reports none is
+// not counted: an unknown is not a second revision.
+func revisionsMixed(rows []domain.ReplicaMetrics) map[string]bool {
+	first := map[string]string{}
+	mixed := map[string]bool{}
+	for _, rm := range rows {
+		if rm.FromWarmPool || rm.Revision == "" {
+			continue
+		}
+		if seen, ok := first[rm.VariantName]; !ok {
+			first[rm.VariantName] = rm.Revision
+		} else if seen != rm.Revision {
+			mixed[rm.VariantName] = true
+		}
+	}
+	return mixed
 }
 
 // k2ReasonObsImplausible labels the diagnostic emitted when an observation is
@@ -60,6 +97,14 @@ const k2ReasonObsDownstream = "P1-obs-downstream"
 // where the reading is lower than what that gives, it prices the row for the
 // cycle as capacity.K2SrcUnadmitted, whose label this is.
 var k2ReasonObsUnadmitted = capacity.K2SrcUnadmitted.String()
+
+// k2ReasonObsRollout labels the diagnostic emitted when a saturated reading is
+// left unrecorded because the variant is mid-rollout (admission.rollout): the
+// pod may be an old one. The chain goes on and the replica is priced from what
+// the variant already holds; where the reading is lower than that, it prices
+// the row for this cycle only, as capacity.K2SrcUnadmitted (unadmittedPrice).
+// Nothing is written. Not a capacity.K2Source.
+const k2ReasonObsRollout = "P1-obs-rollout"
 
 const (
 	satReasonP0Store = "P0-store" // capacity from store or compatible-variant record; no live replicas
