@@ -346,32 +346,32 @@ it, the PRC of each variant another analyzer decided, and the holds:
   policy lists it (`ScalingPolicy.SaturationListed`: listed and enabled, or no
   `analyzers` section at all), and `slo` never is: it only observes. `Reason`
   records the path: `C0-agree` (several), `C1-single`, `C4-no-signal` (none).
-- **Demand** (`scaleDemand`), in saturation's units. A role's demand is the
-  largest of `D_sat[role]`, exactly, when saturation contributed for one of
-  its variants, and `N x PRC_sat(variant)` for each variant another analyzer's
-  `N` was read for (`Decision.Others`). The second holds when `D_sat[role]` is
-  zero, so another analyzer can grow a role saturation sees as idle. A need on
-  a variant saturation has no PRC for, or whose demand overflows, adds no
-  demand. The model's `TotalDemand` moves with the role (or is the role's
-  demand, aggregated); the role's variants share it in saturation's
-  proportions (evenly when saturation attributed none), and their utilization
-  is recomputed from it. `HeldRoleDemand` is raised to the other analyzers'
-  demand where it is larger, and dropped where the hold did not set the
-  demand: a role saturation did not size, or one where the others ask for at
-  least the held figure (kept, the share optimizer would give nothing from
-  the role).
-- **PRC** (`priceVariants`). In a role the demand step sized, each variant
-  whose need `N` another analyzer decided gets `PRC = D[role] / N`, so it
-  needs exactly `N` replicas, and variants on different accelerators keep the
-  deciding analyzer's view of their relative worth. Converting every need at
-  saturation's PRC instead over-provisioned the cheaper accelerator when the
-  analyzers disagreed on that ratio. Saturation's PRC is kept exactly where
-  saturation decided the variant and the role's demand is saturation's, and
-  for a variant no listed analyzer sized. With one variant per role,
-  `D / N = N x PRC_sat / N`, so the PRC is saturation's anyway. A need on a
-  variant saturation has no PRC for adds no demand, but in a sized role it
-  prices the variant (`effectiveNeed`). A need whose demand overflows sizes
-  nothing.
+- **Pricing** (`priceRole`, per role). The role is priced in one frame,
+  saturation's or the other analyzers' (`Decision.Others`), whichever needs
+  more replicas for the fleet the role runs: the lower coverage, the sum over
+  its variants of replicas / N (1 per variant when it runs none), saturation's
+  on a tie. A variant the others do not size is read at saturation's ratio to
+  the variant they do. Mixing the two per variant asked for more than either
+  analyzer when saturation decided one accelerator and another analyzer the
+  other.
+  - *Saturation's frame:* its demand and PRCs stand. `HeldRoleDemand` is
+    raised to the others' need in saturation's units,
+    `D_sat x coverage_sat / coverage_others`, and dropped when that reaches
+    `D_sat`: the hold no longer sets the demand, and kept, the share optimizer
+    would give nothing from the role.
+  - *The others' frame:* the role's demand is the largest `N x PRC_sat` over
+    the variants they size, defined when `D_sat[role]` is zero, so another
+    analyzer can grow a role saturation sees as idle. Each variant they size
+    gets `PRC = D / N`, so it needs exactly `N`, and variants on different
+    accelerators keep their view of the relative worth. A variant they do not
+    size keeps saturation's PRC. The model's `TotalDemand` moves with the role
+    (or is the role's demand, aggregated), the role's variants share it in
+    saturation's proportions (evenly when it attributed none), their
+    utilization follows, and `HeldRoleDemand` is dropped.
+  - With one variant per role either frame gives saturation's PRC. A need
+    whose demand at saturation's PRC overflows is no reading. A need on a
+    variant saturation has no PRC for is carried only in the others' frame;
+    in saturation's it is logged as dropped.
 - **Holds** (`compositeHolds`, `allocation.RoleHold`, per role). With
   saturation unlisted, a role none of whose variants has a need is held both
   ways, and on P/D every other role is held against growth too, as the share
@@ -383,9 +383,9 @@ it, the PRC of each variant another analyzer decided, and the holds:
   (per role, and model-level when every role is held that way); the share
   optimizer reads `Holds` itself, freezing the model on `NoScaleUp` and
   raising the role's floor to what it has on `NoScaleDown`. Greedy's rescale
-  pass (`rescaleModelDecisions`) also reads them: a role held both ways keeps
-  its GPUs and the other roles split the rest of the model's target, and no
-  role is reclaimed or filled in a direction it is held against.
+  pass (`rescaleModelDecisions`) also reads them: a role held both ways freezes
+  the model there, as in the share optimizer, and no role is reclaimed or
+  filled in a direction it is held against.
 - **Warm-pool pressure** (`publishVariantPressure`) is published from the
   composite, after it is built, with saturation's scale-up threshold; a role
   held against growth never reports `NeedsScaleUp`. Warm-pool supply is still
