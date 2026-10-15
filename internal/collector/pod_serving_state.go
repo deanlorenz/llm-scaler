@@ -5,7 +5,13 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 )
 
 // podServingState is what a Pod's own object says about whether it can serve.
@@ -59,19 +65,32 @@ type namespacePods struct {
 //
 // A LIST rather than a Get per Pod, and an UNCACHED read rather than the
 // manager's client. One call per namespace per cycle answers for every Pod at
-// once, where a Get per reporting Pod would be dozens; and the manager's cache
-// holds no Pods, so reading through it would start a Pod informer -- namespace
-// -wide on a scoped install, CLUSTER-wide on a cluster-scoped one, which is
-// exactly the memory cost the ConfigMap cache is configured to avoid.
+// once, where a Get per reporting Pod would be dozens. The read is uncached
+// for freshness, not memory: the manager's cache does hold Pods (discovery and
+// the GPU usage walk list them through it, cluster-wide on a cluster-scoped
+// install, trimmed by internal/kubecache), but a deletion is the one event this
+// must never miss behind an informer's lag.
 //
 // These facts are also MUTABLE, which is why they are not put in the locator's
 // resolution cache beside the scale target and labels. That cache is correct
 // precisely because what it holds -- ownerReferences -- cannot change. Readiness
 // changes minute to minute, and a deletion is the one event that must never be
 // served from a cache.
+//
+// A failed listing is counted (wva_metrics_collection_errors_total,
+// query_type=pod_list) and logged. Every caller fails OPEN on it -- every Pod
+// reads Ready and present -- which is the safe answer for supply, but it also
+// lets a not-Ready Pod's saturated reading become the variant's k2, which the
+// analyzer otherwise refuses (P1-obs-unadmitted). Silent, that is a low k2 no
+// one can trace back to an RBAC change. The listing is memoised per namespace
+// per cycle (servingState), so this fires once per namespace per cycle.
 func podStates(ctx context.Context, reader client.Reader, namespace string) namespacePods {
 	var pods corev1.PodList
 	if err := reader.List(ctx, &pods, client.InNamespace(namespace)); err != nil {
+		reason := podListErrorReason(err)
+		metrics.IncMetricsCollectionErrors(constants.QueryTypePodList, reason)
+		ctrl.LoggerFrom(ctx).V(logging.DEFAULT).Info("pod listing failed; every Pod in the namespace is treated as Ready and present this cycle",
+			"namespace", namespace, "reason", reason, "error", err.Error())
 		return namespacePods{listed: false}
 	}
 	out := make(map[string]podServingState, len(pods.Items))
@@ -88,6 +107,20 @@ func podStates(ctx context.Context, reader client.Reader, namespace string) name
 		out[p.Name] = state
 	}
 	return namespacePods{byName: out, listed: true}
+}
+
+// podListErrorReason names a failed Pod listing for the reason label of
+// wva_metrics_collection_errors_total.
+func podListErrorReason(err error) string {
+	switch {
+	case apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err):
+		return "forbidden"
+	case apierrors.IsTimeout(err) || apierrors.IsServerTimeout(err) ||
+		apierrors.IsServiceUnavailable(err) || apierrors.IsTooManyRequests(err):
+		return "unavailable"
+	default:
+		return "other"
+	}
 }
 
 // podStartSeconds is how long the Pod took to become Ready, from its own

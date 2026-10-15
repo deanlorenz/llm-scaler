@@ -72,6 +72,11 @@ type SaturationAnalyzer struct {
 	// measured gets its own clock: see k2_borrow.go for why per bucket and not
 	// per variant. Swept a retention after the relaxation ended.
 	k2BorrowedSince map[string]time.Time
+	// priorK2 is, per own historyKey, a k2 restored from before the variant's
+	// engine arguments changed (installRestored), kept as a lower-only prior
+	// that borrowedK2 takes like a sibling's figure. Swept PriorK2Life after
+	// it was installed.
+	priorK2 map[string]priorK2
 	// pendingRestore is learned state restored after a controller restart and
 	// not yet installed, keyed namespace/variant: it waits for its variant's
 	// first cycle, when the engine configuration it runs is known, and is
@@ -202,6 +207,9 @@ type Evicted struct {
 	MuWindows int
 	// K2Borrows is the per-variant start of a borrowed k2 (borrowedK2).
 	K2Borrows int
+	// K2Priors is a variant's own k2 from before its arguments changed, kept
+	// as a prior after a restart (priorK2).
+	K2Priors int
 	// PendingRestores is restored learned state whose variant never came back.
 	PendingRestores int
 	// ITLWindows and ITLBaselines are the fitted ITL(k) state; StartEstimates
@@ -233,7 +241,7 @@ type Evicted struct {
 
 // Any reports whether the sweep evicted anything at all.
 func (e Evicted) Any() bool {
-	return e.K2History > 0 || e.MuWindows > 0 || e.K2Borrows > 0 || e.PendingRestores > 0 || e.ITLWindows > 0 ||
+	return e.K2History > 0 || e.MuWindows > 0 || e.K2Borrows > 0 || e.K2Priors > 0 || e.PendingRestores > 0 || e.ITLWindows > 0 ||
 		e.ITLBaselines > 0 || e.StartEstimates > 0 || e.StartOutliers > 0 ||
 		e.Pods > 0 || e.ITLLines > 0 || e.Accelerators > 0 || e.DecodeSaturation > 0 ||
 		e.FleetShapes > 0 || e.VariantStamps > 0
@@ -266,6 +274,7 @@ func NewSaturationAnalyzer(store *capacity.Store) *SaturationAnalyzer {
 		lastAccelerator:        make(map[string]acceleratorMemo),
 		saturatedThroughput:    make(map[string]*capacity.RollingAverage),
 		k2BorrowedSince:        make(map[string]time.Time),
+		priorK2:                make(map[string]priorK2),
 		pendingRestore:         make(map[string]*pendingVariant),
 		throughputSampledAt:    make(map[string]time.Time),
 		throughputLastRead:     make(map[string]float64),
@@ -585,6 +594,17 @@ func (a *SaturationAnalyzer) EvictStaleHistory() Evicted {
 			evicted.K2Borrows++
 		}
 	}
+	// A prior goes on its borrow clock once used, not on when it was
+	// installed: a bucket first priced hours after a restart would otherwise
+	// lose its prior part way through the relaxation, and capacity would jump
+	// to the variant's own figure in one cycle.
+	for key, p := range a.priorK2 {
+		since, used := a.k2BorrowedSince[key]
+		if priorExpired(p, since, used, a.now(), bucketRetention) {
+			delete(a.priorK2, key)
+			evicted.K2Priors++
+		}
+	}
 	// Restored entries for a variant that has not been analysed since the
 	// restore. A retention later, any entry in them is past its own horizon
 	// too, so none could have been installed.
@@ -793,7 +813,14 @@ func (a *SaturationAnalyzer) engineFingerprint(namespace, modelID, variantName s
 	// The cost is that such a fleet gets no cross-variant head start, which is
 	// the feature degrading to its pre-existing behaviour rather than
 	// misfiring. wva_engine_config's `unresolved` label says why.
-	if !rec.EngineParams.Complete() {
+	//
+	// An unread checkpoint withholds the key too, on the same reasoning: two
+	// variants serving `$MODEL` agree on an empty model whichever checkpoints
+	// they load. So does a parallel size computed at start-up
+	// (SharingUnresolved): two groups written as the same expression agree on
+	// its text whatever it evaluates to. Both withhold only sharing; the
+	// variant's own restore is gated on Complete() alone.
+	if !rec.EngineParams.Complete() || rec.EngineParams.ModelUnresolved || len(rec.EngineParams.SharingUnresolved) > 0 {
 		return ""
 	}
 	return rec.EngineParams.Fingerprint()

@@ -551,9 +551,10 @@ def render_report(events, start, stop, cycle_gap, workload_line=None):
                      "Priority lists every k2 tier that fired across N replicas this cycle "
                      "(P1-obs=observed, P2-hist=historical average, P2-borrow=a compatible "
                      "sibling's lower figure, relaxing to this variant's own, P3-k2=derived from deployment "
-                     "args, P4-k1=no signal, memory-bound only; P1-obs-invalid and "
-                     "P1-obs-downstream mark an observation that was NOT recorded -- above the "
-                     "KV ceiling, or a prefill saturation while decode was saturated -- and are "
+                     "args, P4-k1=no signal, memory-bound only; P1-obs-invalid, "
+                     "P1-obs-downstream and P1-obs-unadmitted mark an observation that was NOT "
+                     "recorded -- above the KV ceiling, a prefill saturation while decode was "
+                     "saturated, or a warm-pool bridge or not-Ready pod -- and are "
                      "followed by the tier it fell through to). Time is HH:MM:SS on the run date "
                      "above.")
         lines.append("")

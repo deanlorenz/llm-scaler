@@ -821,6 +821,34 @@ func (c *Config) PolicyNamespaceIsSeparate() bool {
 	return c.PolicyNamespace() != SystemNamespace()
 }
 
+// ScalingPolicyEntry returns the entry stored under key in one namespace's own
+// scaling-policy set, or in the global set when namespace is empty. Unlike
+// ScalingPolicyConfigForNamespace it never falls back from a namespace to the
+// global set: it answers what that ConfigMap last put in force.
+// Thread-safe.
+func (c *Config) ScalingPolicyEntry(namespace, key string) (ScalingPolicy, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	set := c.saturation.global
+	if namespace != "" {
+		set = c.saturation.namespaceConfigs[namespace]
+	}
+	p, ok := set[key]
+	return p, ok
+}
+
+// ClusterPolicy returns the policy read from the policy namespace, and false
+// when none is separated (UpdateClusterPolicy(nil) or never set).
+// Thread-safe.
+func (c *Config) ClusterPolicy() (ScalingPolicy, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.saturation.clusterPolicy == nil {
+		return ScalingPolicy{}, false
+	}
+	return *c.saturation.clusterPolicy, true
+}
+
 // UpdateClusterPolicy replaces the limiters and quotas read from the policy
 // namespace. Passing a nil policy clears the separation, restoring the global
 // entry as the source.

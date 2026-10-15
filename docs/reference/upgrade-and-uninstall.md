@@ -270,6 +270,88 @@ It prints each namespace it granted in. Then read its warnings:
 A cluster without the ScaledObject kind (`SCALER_BACKEND=none`) has no warm
 pools or models to grant for, and the upgrade says nothing.
 
+#### Policy that starts to apply
+
+Some settings in named tiers and per-model entries were ignored or replaced
+before. They now apply. Before you upgrade, read your
+`wva-scaling-policy-config` **and** every namespace-local scaling-policy
+ConfigMap, and work through this list.
+
+1. **Fields a tier or per-model entry leaves out.** They now come from the
+   layer below (the tier, then `default`), not from built-in values.
+
+   | field the entry leaves out | tier before | per-model before | now |
+   | --- | --- | --- | --- |
+   | `kvCacheThreshold` | 0.80 | 0.80 | the layer below |
+   | `queueLengthThreshold` | 5 | 5 | the layer below |
+   | `priority` | 1.0 | 1.0 | the layer below |
+   | `scaleUpThreshold`, `scaleDownBoundary` (entry sets `analyzerName: saturation` or `analyzers`) | 0.85, 0.70 | 0.85, 0.70 | the layer below |
+   | `analyzers` (entry sets `analyzerName: saturation`) | `[saturation]` | `[saturation]` | the layer below |
+
+   To keep the old behaviour, set the old value in the entry explicitly, for
+   example `kvCacheThreshold: 0.80`.
+
+2. **Settings that were ignored in a tier or per-model entry.**
+
+   | field | tier before | per-model before | now |
+   | --- | --- | --- | --- |
+   | `scaleToZero` | ignored | applied | applied; a model parks only if every tier its variants name allows it, and waits for the longest `retentionPeriod` |
+   | `scaleFromZero.requirePrefill` | ignored | ignored | applied; a model waits for prefill if any of its tiers requires it |
+   | `shapeChangeHoldSeconds` | ignored | ignored | applied |
+   | `disableShapeChangeHold` | ignored | ignored | applied |
+
+   Nothing reports these the first time they take effect. To keep the old
+   behaviour, remove the field from the tier or per-model entry.
+
+   Two consequences to check:
+
+   - A tier that disables `scaleToZero` now keeps its models up, even when
+     `default` enables it. `WVAModelWillNotScaleToZero` may start firing for
+     those models (reason `policy-forbids-zero`). Enable `scaleToZero` on the
+     tier, or accept the alert.
+   - A tier or per-model `requirePrefill: true` now applies. A P/D model whose
+     prefill cannot be placed stays at zero rather than waking decode alone.
+
+   A variant that names no tier follows the variants of its model that do. If
+   only the decode of a P/D model names a tier, the prefill now follows that
+   tier too.
+
+3. **`scaleToZero.retentionPeriod` values that cannot be used.** An unusable
+   value (not a duration, such as `5 minutes`) used to fall back to 10m. It now
+   falls back to the value of the layer below (the tier, then `default`, then
+   10m), so the model may wait longer or shorter than before. Values under 30s
+   are now unusable too. Fix the value. A skipped value is reported as a
+   `ConfigFieldIgnored` event on the ConfigMap, in `wva_config_ignored_fields`,
+   in the log, and for the `default` entry in the `policyIgnored` key of the
+   [`wva-controller-status` ConfigMap](operations.md#what-the-controller-is-running-with).
+   A negative `shapeChangeHoldSeconds` is skipped and reported the same way.
+
+4. **`terminationGracePeriodSeconds` patches below 40.** The controller now
+   takes up to 40s to stop: it finishes the running cycle, then releases its
+   lease. Raise the patch to 40, or remove it. A patch left at 10 is no worse
+   than before; it only loses the faster failover
+   ([details](operations.md#what-the-controller-is-running-with)).
+
+After the upgrade, compare the controller's `Effective scaling policy` log
+lines with the ones from before. Each names a model and its
+`scaleUpThreshold`, `scaleDownBoundary`, `kvCacheThreshold` and `priority`:
+
+```bash
+kubectl logs -n "$NS" deploy/wva-controller-manager | grep 'Effective scaling policy'
+```
+
+Save the same output before you upgrade, so you have something to compare.
+
+Other changes you may notice:
+
+- A scale-from-zero wake records one `ScaledUp` Event. It used to record one
+  on every 100ms tick until KEDA scaled the target, so a dashboard that counts
+  `ScaledUp` Events will show far fewer.
+- A SIGTERM during startup, for example from the startup probe after about 60s
+  while Prometheus is unreachable, is now logged as
+  `Shutdown requested during startup` and exits 143. Previously the process was
+  killed by the signal with no log line; the exit code was 143 as well.
+
 ### The external-scaler NetworkPolicy
 
 `wva-external-scaler` admits `:9090` only from KEDA's namespace. The admin phase

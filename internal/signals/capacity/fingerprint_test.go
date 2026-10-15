@@ -36,6 +36,26 @@ var fingerprintHashed = []string{
 	// same unreadable flag still agree here -- which is why sharing also gates
 	// on Complete(); see the field's comment in deployment_parser.go.
 	"Unresolved",
+	// The engine's code, which no flag describes.
+	"Image",
+	// What one replica of a wide-EP or P/D engine holds and how fast it
+	// drains, which no flag above describes.
+	"DataParallelSize",
+	"PipelineParallelSize",
+	"ExpertParallel",
+	"SpeculativeConfig",
+	"KVConnector",
+	"KVOffloadingSize",
+	"KVOffloadingBackend",
+	"PrefixCachingDisabled",
+	// The checkpoint, and whether it could be read.
+	"ModelPath",
+	"ModelRevision",
+	"ModelUnresolved",
+	// What was read for identity and not interpreted, as written.
+	"SharingUnresolved",
+	// Flags that size or reshape what one replica holds.
+	"MemoryLayout",
 }
 
 // All three are excluded on one rule: they exist only to resolve
@@ -127,6 +147,22 @@ func TestFingerprintChangesWithEveryHashedField(t *testing.T) {
 		"Unresolved": func(p *EngineParams) {
 			p.Unresolved = []string{"block_size"}
 		},
+		"Image":                 func(p *EngineParams) { p.Image = "vllm/vllm-openai:v0.11.0" },
+		"DataParallelSize":      func(p *EngineParams) { p.DataParallelSize = 8 },
+		"PipelineParallelSize":  func(p *EngineParams) { p.PipelineParallelSize = 2 },
+		"ExpertParallel":        func(p *EngineParams) { p.ExpertParallel = true },
+		"SpeculativeConfig":     func(p *EngineParams) { p.SpeculativeConfig = testSpeculativeConfig },
+		"KVConnector":           func(p *EngineParams) { p.KVConnector = testKVConnector },
+		"KVOffloadingSize":      func(p *EngineParams) { p.KVOffloadingSize = 64 },
+		"KVOffloadingBackend":   func(p *EngineParams) { p.KVOffloadingBackend = testOffloadBackend },
+		"PrefixCachingDisabled": func(p *EngineParams) { p.PrefixCachingDisabled = true },
+		"ModelPath":             func(p *EngineParams) { p.ModelPath = testModelPath },
+		"ModelRevision":         func(p *EngineParams) { p.ModelRevision = testModelRevision },
+		"ModelUnresolved":       func(p *EngineParams) { p.ModelUnresolved = true },
+		"SharingUnresolved": func(p *EngineParams) {
+			p.SharingUnresolved = []string{"data_parallel_size=$((LWS_GROUP_SIZE * 8))"}
+		},
+		"MemoryLayout": func(p *EngineParams) { p.MemoryLayout = testMemoryLayout },
 	}
 
 	if len(mutations) != len(fingerprintHashed) {
@@ -331,6 +367,22 @@ func TestFingerprintLabelsDescribeTheirValues(t *testing.T) {
 		"unresolved": func(p *EngineParams) {
 			p.Unresolved = []string{"block_size"}
 		},
+		"image":                   func(p *EngineParams) { p.Image = "vllm/vllm-openai:v0.11.0" },
+		"data_parallel_size":      func(p *EngineParams) { p.DataParallelSize = 8 },
+		"pipeline_parallel_size":  func(p *EngineParams) { p.PipelineParallelSize = 2 },
+		"expert_parallel":         func(p *EngineParams) { p.ExpertParallel = true },
+		"speculative_config":      func(p *EngineParams) { p.SpeculativeConfig = testSpeculativeConfig },
+		"kv_connector":            func(p *EngineParams) { p.KVConnector = testKVConnector },
+		"kv_offloading_size":      func(p *EngineParams) { p.KVOffloadingSize = 64 },
+		"kv_offloading_backend":   func(p *EngineParams) { p.KVOffloadingBackend = testOffloadBackend },
+		"prefix_caching_disabled": func(p *EngineParams) { p.PrefixCachingDisabled = true },
+		"model":                   func(p *EngineParams) { p.ModelPath = testModelPath },
+		"model_revision":          func(p *EngineParams) { p.ModelRevision = testModelRevision },
+		"model_unresolved":        func(p *EngineParams) { p.ModelUnresolved = true },
+		"sharing_unresolved": func(p *EngineParams) {
+			p.SharingUnresolved = []string{"data_parallel_size=$((LWS_GROUP_SIZE * 8))"}
+		},
+		"memory_layout": func(p *EngineParams) { p.MemoryLayout = testMemoryLayout },
 	}
 
 	names := FingerprintFields()

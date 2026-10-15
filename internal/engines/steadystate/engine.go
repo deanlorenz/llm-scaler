@@ -1004,18 +1004,95 @@ func (e *Engine) modelOutputSeed(
 // Ties break on the lexicographically smallest name so a conflict resolves the
 // same way on every cycle and every replica of the controller: an allocation that
 // flips between tiers as map order changes would be worse than either tier.
+//
+// The choice is config.ModelPolicyTier, shared with the scale-from-zero wake
+// claim so the two cannot weigh a model under different tiers.
 func modelPolicy(vas []llmdVariantAutoscalingV1alpha1.VariantAutoscaling) (string, []string) {
-	var named []string
+	named := make([]string, 0, len(vas))
 	for i := range vas {
-		if p := vas[i].Spec.ScalingPolicy; p != "" && !slices.Contains(named, p) {
-			named = append(named, p)
-		}
+		named = append(named, vas[i].Spec.ScalingPolicy)
 	}
-	if len(named) == 0 {
+	tier := config.ModelPolicyTier(named)
+	if tier == "" {
 		return "", nil
 	}
-	slices.Sort(named)
-	return named[0], named
+	return tier, config.ModelTiers(named)
+}
+
+// variantTiers returns every policy tier a model's variants selected
+// (config.ModelTiers). A variant that names no tier follows the ones that do,
+// as it does for the thresholds (modelPolicy); "" stands for the default entry
+// and its defaultPolicy only when no variant names a tier.
+//
+// It used to keep "" beside the named tiers, so a P/D model with only its
+// decode tagged was also folded with the default entry: its thresholds
+// followed the decode's tier while a default that disabled scale-to-zero kept
+// the whole model, every GPU of it, from ever parking.
+func variantTiers(vas []llmdVariantAutoscalingV1alpha1.VariantAutoscaling) []string {
+	named := make([]string, 0, len(vas))
+	for i := range vas {
+		named = append(named, vas[i].Spec.ScalingPolicy)
+	}
+	return config.ModelTiers(named)
+}
+
+// scaleToZeroPolicy resolves the scale-to-zero half of a model's policy from
+// the tier each of its variants selected.
+//
+// Parking takes the WHOLE model to zero, so it is resolved more strictly than
+// the thresholds, which take one tier for the model (see modelPolicy): a model
+// may park only if EVERY tier its variants selected allows scale-to-zero, and it
+// is held for the LONGEST retention among them. Parking is the action an
+// operator cannot undo from the outside -- a variant on a tier that forbids it
+// would otherwise be parked by a sibling on a tier that allows it. When every
+// variant names the same tier, as is normal, this is exactly that tier's
+// resolution.
+//
+// The result is the first tier's resolved entry with its scaleToZero envelope
+// replaced by the folded verdict; the enforcer and the blocked-reason readout
+// read only that envelope, so both see the same answer. disabledBy lists the
+// tiers whose resolution disables scale-to-zero ("" for the default entry), so
+// a policy-forbids-zero on a model with mixed tiers can be traced to one.
+func scaleToZeroPolicy(
+	cfg *config.Config,
+	configMap map[string]config.ScalingPolicy,
+	modelID, namespace string,
+	tiers []string,
+) (policy config.ScalingPolicy, disabledBy []string) {
+	if len(tiers) == 0 {
+		tiers = []string{""}
+	}
+	var out config.ScalingPolicy
+	enabled := true
+	var retention time.Duration
+	for i, tier := range tiers {
+		resolved := config.ResolveScalingPolicyForTier(configMap, modelID, namespace, tier)
+		if i == 0 {
+			out = resolved
+		}
+		if !config.ResolveScaleToZeroEnabled(cfg, &resolved) {
+			enabled = false
+			disabledBy = append(disabledBy, tier)
+		}
+		retention = max(retention, config.ResolveScaleToZeroRetention(&resolved))
+	}
+	out.ScaleToZero = &config.ScaleToZeroEnvelope{
+		Enabled:         &enabled,
+		RetentionPeriod: retention.String(),
+	}
+	return out, disabledBy
+}
+
+// tierNames spells policy tiers for a log line: "" is the default entry.
+func tierNames(tiers []string) []string {
+	out := make([]string, 0, len(tiers))
+	for _, tier := range tiers {
+		if tier == "" {
+			tier = config.GlobalDefaultsKey
+		}
+		out = append(out, tier)
+	}
+	return out
 }
 
 // selectV2Optimizer chooses the optimizer and GPU constraints for a V2
@@ -1225,6 +1302,9 @@ func (e *Engine) optimizeV2(
 	// its Deployment (a KEDA-discovered variant is named after its
 	// ScaledObject).
 	variantScaleTargets := make(map[string]scaletarget.ScaleTargetAccessor)
+	// modelTiers carries the policy tiers each model's variants selected into
+	// stage 3, for the same reason: scale-to-zero is resolved from them there.
+	modelTiers := make(map[string][]string)
 
 	for groupKey, modelVAs := range modelGroups {
 		modelID := modelVAs[0].Spec.ModelID
@@ -1277,6 +1357,7 @@ func (e *Engine) optimizeV2(
 				variantScaleTargets[utils.GetNamespacedKey(va.Namespace, va.Name)] = t
 			}
 		}
+		modelTiers[utils.GetNamespacedKey(namespace, modelID)] = variantTiers(modelVAs)
 	}
 
 	if len(requests) == 0 {
@@ -1356,6 +1437,7 @@ func (e *Engine) optimizeV2(
 	for _, req := range requests {
 		e.applyScaleToZeroEnforcement(
 			ctx, req.ModelID, req.Namespace, optimizer.Name(),
+			modelTiers[utils.GetNamespacedKey(req.Namespace, req.ModelID)],
 			allDecisions,
 			modelScaleTargets[utils.GetNamespacedKey(req.Namespace, req.ModelID)],
 			req.VariantStates,
@@ -1507,6 +1589,10 @@ func soleEngineFor(scaleTargets map[string]scaletarget.ScaleTargetAccessor) (inf
 // reached. The engine is detected here and passed to the enforcer, which asks for
 // the counter that matches.
 //
+// tiers are the policy tiers the model's variants selected (see variantTiers);
+// nil resolves the default entry alone. The scale-to-zero policy is resolved from
+// them by scaleToZeroPolicy, the same tier-aware resolution the thresholds use.
+//
 // Decisions are mutated in place; returns true if the model was scaled to zero.
 //
 // Both optimize paths (saturation, queueing-model) funnel their enforcement through
@@ -1516,6 +1602,7 @@ func soleEngineFor(scaleTargets map[string]scaletarget.ScaleTargetAccessor) (inf
 func (e *Engine) applyScaleToZeroEnforcement(
 	ctx context.Context,
 	modelID, namespace, optimizerName string,
+	tiers []string,
 	decisions []domain.VariantDecision,
 	scaleTargets map[string]scaletarget.ScaleTargetAccessor,
 	variantStates []domain.VariantReplicaState,
@@ -1523,11 +1610,12 @@ func (e *Engine) applyScaleToZeroEnforcement(
 	logger := ctrl.LoggerFrom(ctx)
 
 	// The resolved scaling entry carries the whole scale-to-zero policy: enabled
-	// and retention, tiered namespace-local → global and merged with this model's
-	// override. Resolved before the gates below, not after, because the gates are
-	// half of what decides whether this model can ever park and the policy is the
-	// other half — reporting one without the other cannot say which is binding.
-	satConfig := config.ResolveScalingPolicy(e.Config.ScalingPolicyConfigForNamespace(namespace), modelID, namespace)
+	// and retention, tiered namespace-local → global, layered with the policy tier
+	// the model's variants selected, and merged with this model's override.
+	// Resolved before the gates below, not after, because the gates are half of
+	// what decides whether this model can ever park and the policy is the other
+	// half — reporting one without the other cannot say which is binding.
+	satConfig, disabledBy := scaleToZeroPolicy(e.Config, e.Config.ScalingPolicyConfigForNamespace(namespace), modelID, namespace, tiers)
 	scaleToZeroEnabled := config.ResolveScaleToZeroEnabled(e.Config, &satConfig)
 	modelEngine, engineSupported := soleEngineFor(scaleTargets)
 
@@ -1550,6 +1638,18 @@ func (e *Engine) applyScaleToZeroEnforcement(
 		constants.ScalingBlockedReasonsPolicy, blockedReasons)
 	if e.recordBlockedModel(namespace, modelID, blockedReasons) {
 		scalingpolicy.LogBlockedTransition(ctx, namespace, modelID, blockedReasons)
+	}
+	// policy-forbids-zero names no tier, and with mixed tiers the operator
+	// cannot tell which one disabled it. Said once per change of that set.
+	var forbiddenBy []string
+	if slices.Contains(blockedReasons, constants.ScalingBlockedPolicyForbidsZero) {
+		forbiddenBy = tierNames(disabledBy)
+	}
+	if e.recordForbiddenBy(namespace, modelID, forbiddenBy) && len(forbiddenBy) > 0 {
+		logger.Info("Scale-to-zero is disabled by the scaling policy of a tier this model's variants name; "+
+			"enable scaleToZero on every such tier",
+			"modelID", modelID, "namespace", namespace,
+			"tiers", tierNames(tiers), "disabledBy", forbiddenBy)
 	}
 
 	if len(decisions) == 0 {
@@ -1767,11 +1867,9 @@ func (e *Engine) prepareModelData(
 				"modelID", modelID,
 				"namespace", namespace)
 		}
-		// Nothing was observed, and the observed-replicas series must say so:
-		// the analyzers do not run on this path, so without this the series
-		// keeps last cycle's count for as long as the gap lasts -- reading as
-		// a fully scraped fleet in exactly the case it exists to expose.
-		e.zeroObservedReplicas(namespace, modelID)
+		// The analyzers do not run on this path, so the series they set must
+		// be told here that nothing was observed.
+		e.onNothingObserved(namespace, modelID)
 		return nil, nil // nil modelData signals skip
 	}
 	// Measurable this cycle. Reset the gauge rather than leaving the last bad
@@ -1994,12 +2092,11 @@ func (e *Engine) applySaturationDecisions(
 		// Stage the just-computed decision on the in-memory VA so that
 		// act.EmitMetrics below — which reads
 		// Status.DesiredOptimizedAlloc.{NumReplicas,Accelerator}
-		// (see actuator.EmitMetrics) — publishes the fresh target rather than
-		// whatever was last persisted by the controller. This object is local
-		// to the engine; CRD persistence happens later, via the cache write
-		// (DecisionCache.Set) → controller patch path.
-		// Sanitize the sentinel out of the staged value so neither EmitMetrics
-		// nor the cache (which reuses statusAccelerator) ever sees it.
+		// (see actuator.EmitMetrics) — publishes the fresh target. This object
+		// is local to the engine and never persisted: the decision store that
+		// EmitMetrics writes is the only output.
+		// Sanitize the sentinel out of the staged value so EmitMetrics never
+		// sees it.
 		numReplicas := int32(targetReplicas)
 		statusAccelerator := acceleratorName
 		if !constants.IsAcceleratorResolved(statusAccelerator) {

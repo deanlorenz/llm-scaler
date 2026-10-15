@@ -22,13 +22,12 @@ import (
 // cold once" as the expected cost.
 //
 // AND IT COVERS MORE THAN THE FIELD LIST. Changing how a hashed value is
-// DERIVED changes every digest just as surely as adding a field, and this PR
-// did it twice after bumping to 2 -- splitting the unresolved key sets per
-// engine, and recording string-flag failures. Two builds both stamped v=2
-// therefore produce different digests for the same Deployment. Nothing
-// persists a digest across a restart today, so no further bump is owed; the
-// rule to carry forward is that the version tracks the field list and the
-// values' derivation together.
+// DERIVED changes every digest just as surely as adding a field. The rule is
+// that the version tracks the field list and the values' derivation together.
+// It matters more now than when version 2 was cut: the learned-state snapshot
+// stores a digest per variant across a restart, so a change that moves
+// digests without a bump makes a restart reject what it should have
+// restored, with nothing to say why.
 //
 // Version 2 adds the unresolved-flag set. Measured on a cluster: an
 // llm-d/llmdbench Deployment passes `--block-size $VLLM_BLOCK_SIZE`, the
@@ -36,7 +35,18 @@ import (
 // 128, and the digest asserted an equality it had never verified. The set is
 // hashed so an incompletely-read configuration can never collide with a
 // fully-read one.
-const FingerprintVersion = 2
+//
+// Version 3 adds the engine image. Two engines with identical flags on
+// different engine releases hashed identically, so a canary on a new release
+// would have borrowed the old release's measured latency line as its own. The
+// same version adds the parallel layout (data and pipeline parallel sizes,
+// expert parallelism), speculative decoding, the KV connector, KV offloading,
+// prefix caching and the checkpoint served -- one bump for both, so the one
+// cold start after the upgrade is paid once -- and the flags read for identity
+// but not interpreted (SharingUnresolved) and the memory layout
+// (MemoryLayout), within the same version since no release carried version 3
+// without them.
+const FingerprintVersion = 3
 
 // fingerprintLength is how much of the digest reaches the label. 16 hex
 // characters is 64 bits: for the few hundred distinct engine configurations a
@@ -113,6 +123,27 @@ func (p *EngineParams) Fingerprint() string {
 		// sharing -- callers gate on Complete() as well. Comma-joined over a
 		// sorted, deduplicated list, so it is stable.
 		"unresolved=" + strings.Join(p.Unresolved, ","),
+		// The engine's code, which no flag describes. A tag that changes on
+		// every rebuild splits the key on each rollout: the safe direction,
+		// since the cost is that the new image learns its own line.
+		"image=" + p.Image,
+		"data_parallel_size=" + strconv.Itoa(parallelSize(p.DataParallelSize)),
+		"pipeline_parallel_size=" + strconv.Itoa(parallelSize(p.PipelineParallelSize)),
+		"expert_parallel=" + strconv.FormatBool(p.ExpertParallel),
+		"speculative_config=" + p.SpeculativeConfig,
+		"kv_connector=" + p.KVConnector,
+		"kv_offloading_size=" + canonicalFloat(p.KVOffloadingSize),
+		"kv_offloading_backend=" + p.KVOffloadingBackend,
+		"prefix_caching_disabled=" + strconv.FormatBool(p.PrefixCachingDisabled),
+		"model=" + p.ModelPath,
+		"model_revision=" + p.ModelRevision,
+		// Hashed for the reason Unresolved is: an unread checkpoint must not
+		// collide with a read one.
+		"model_unresolved=" + strconv.FormatBool(p.ModelUnresolved),
+		// The text of what was read but not interpreted, so a changed
+		// expression is a changed configuration.
+		"sharing_unresolved=" + joinQuoted(p.SharingUnresolved),
+		"memory_layout=" + p.MemoryLayout,
 	}
 
 	h := sha256.New()
@@ -132,6 +163,27 @@ func (p *EngineParams) Fingerprint() string {
 		h.Write([]byte{0})
 	}
 	return hex.EncodeToString(h.Sum(nil))[:fingerprintLength]
+}
+
+// ArgsFingerprint is the fingerprint of the engine's arguments alone: the
+// configuration with the image left out. It is THE definition of "the same
+// arguments": sameArguments (store.go), which decides whether a rollout keeps
+// a live record, is equality of this digest, and so is the restore's
+// arguments gate. A learned capacity, throughput or start time survives a
+// routine image bump as a live record does; a latency line does not, and is
+// keyed on Fingerprint.
+//
+// What it covers is Fingerprint's field list less the image, so it shares
+// Fingerprint's exclusions: MaxNumBatchedTokens, IsV1Engine and
+// ChunkedPrefillEnabled count only through the EffectiveMaxBatchedTokens they
+// resolve to. Writing the default budget out explicitly is not a change.
+func (p *EngineParams) ArgsFingerprint() string {
+	if p == nil {
+		return ""
+	}
+	q := *p
+	q.Image = ""
+	return q.Fingerprint()
 }
 
 // canonicalFloat renders a float so that equal values always produce equal
@@ -189,7 +241,32 @@ func (p *EngineParams) FingerprintValues() []string {
 		strconv.FormatInt(p.MaxModelLen, 10),
 		strconv.FormatBool(p.EnforceEager),
 		strings.Join(p.Unresolved, ","),
+		p.Image,
+		strconv.Itoa(parallelSize(p.DataParallelSize)),
+		strconv.Itoa(parallelSize(p.PipelineParallelSize)),
+		strconv.FormatBool(p.ExpertParallel),
+		p.SpeculativeConfig,
+		p.KVConnector,
+		canonicalFloat(p.KVOffloadingSize),
+		p.KVOffloadingBackend,
+		strconv.FormatBool(p.PrefixCachingDisabled),
+		p.ModelPath,
+		p.ModelRevision,
+		strconv.FormatBool(p.ModelUnresolved),
+		joinQuoted(p.SharingUnresolved),
+		p.MemoryLayout,
 	}
+}
+
+// joinQuoted joins quoted entries with commas: an entry is a flag's value as
+// written and may hold a comma itself, which a plain join would let two lists
+// share.
+func joinQuoted(entries []string) string {
+	q := make([]string, len(entries))
+	for i, e := range entries {
+		q[i] = strconv.Quote(e)
+	}
+	return strings.Join(q, ",")
 }
 
 // LearnedStateKey composes the key that learned per-configuration state is

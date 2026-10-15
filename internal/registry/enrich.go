@@ -6,8 +6,10 @@ import (
 	"time"
 
 	kedav1alpha1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -42,6 +44,9 @@ const DefaultTargetMaxAge = 30 * time.Second
 type Enricher struct {
 	Reader   client.Reader
 	Registry *Registry
+	// Recorder, if set, receives a Warning event on a ScaledObject whose trigger
+	// metadata cannot be used. See reportMetadata.
+	Recorder record.EventRecorder
 	// MaxAge is how stale a target read may be before it is refreshed. Zero uses
 	// DefaultTargetMaxAge.
 	MaxAge time.Duration
@@ -140,7 +145,7 @@ func (e *Enricher) Refresh(ctx context.Context) {
 		default:
 		}
 
-		target, err := e.readTarget(ctx, entry.Namespace, entry.Name)
+		so, target, err := e.readTarget(ctx, entry.Namespace, entry.Name)
 		switch {
 		case apierrors.IsNotFound(err):
 			// KEDA can still be mid-reconcile against an object it has just lost,
@@ -154,6 +159,7 @@ func (e *Enricher) Refresh(ctx context.Context) {
 			failed++
 		default:
 			e.Registry.SetTarget(entry.Namespace, entry.Name, target)
+			e.reportMetadata(ctx, entry, so)
 			read++
 		}
 	}
@@ -164,13 +170,53 @@ func (e *Enricher) Refresh(ctx context.Context) {
 	}
 }
 
-// readTarget resolves one ScaledObject into the fields WVA needs.
-func (e *Enricher) readTarget(ctx context.Context, namespace, name string) (Target, error) {
+// readTarget resolves one ScaledObject into the fields WVA needs, and returns
+// the object itself for reportMetadata.
+func (e *Enricher) readTarget(ctx context.Context, namespace, name string) (*kedav1alpha1.ScaledObject, Target, error) {
 	var so kedav1alpha1.ScaledObject
 	if err := e.Reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &so); err != nil {
-		return Target{}, err
+		return nil, Target{}, err
 	}
-	return TargetFromScaledObject(&so), nil
+	return &so, TargetFromScaledObject(&so), nil
+}
+
+// reportMetadata says, at the default log level and as a Warning event on the
+// ScaledObject, when an entry's trigger metadata cannot be used, and says once
+// more when it can be again.
+//
+// Every engine skips such an entry, so nothing decides its target: the external
+// scaler answers its current replica count and the workload stays at whatever
+// size it had, indefinitely. KEDA shows nothing about a scaler's opinion of its
+// trigger, and the skip itself is logged at DEBUG because the scale-from-zero
+// loop reaches it at 10Hz, so without this a one-character typo in a trigger
+// key was invisible at the shipped verbosity.
+//
+// Reported once per change of the problem (Registry.NoteMetadataProblem), on
+// the enrichment cadence, so a standing misconfiguration is one log line and
+// one event, not one per pass. A warm pool's trigger passes ParseMeta, which
+// returns early for one.
+func (e *Enricher) reportMetadata(ctx context.Context, entry Entry, so *kedav1alpha1.ScaledObject) {
+	problem := ""
+	_, perr := ParseMeta(entry.Metadata)
+	if perr != nil {
+		problem = perr.Error()
+	}
+	if !e.Registry.NoteMetadataProblem(entry.Namespace, entry.Name, problem) {
+		return
+	}
+	logger := log.FromContext(ctx)
+	if perr == nil {
+		logger.Info("Trigger metadata is usable again; the workload is scaled from the next cycle",
+			"namespace", entry.Namespace, "scaledObject", entry.Name)
+		return
+	}
+	logger.Info("WARNING: trigger metadata cannot be used, so WVA does not scale this workload; "+
+		"the external scaler holds it at its current replica count until the trigger is fixed",
+		"namespace", entry.Namespace, "scaledObject", entry.Name, "error", problem)
+	if e.Recorder != nil && so != nil {
+		e.Recorder.Event(so, corev1.EventTypeWarning, constants.K8SEventInvalidTriggerMetadata,
+			"WVA cannot use this trigger's metadata and does not scale the workload until it is fixed: "+problem)
+	}
 }
 
 // TargetFromScaledObject extracts the scale target and replica envelope,
@@ -178,6 +224,7 @@ func (e *Enricher) readTarget(ctx context.Context, namespace, name string) (Targ
 // minimal `scaleTargetRef: {name: x}` resolves the same way KEDA resolves it.
 func TargetFromScaledObject(so *kedav1alpha1.ScaledObject) Target {
 	t := Target{
+		UID:         so.UID,
 		Labels:      maps.Clone(so.Labels),
 		MinReplicas: so.Spec.MinReplicaCount,
 		// GetHPAMaxReplicas applies KEDA's default rather than reporting nil, so

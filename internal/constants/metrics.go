@@ -316,6 +316,33 @@ const (
 	// until someone turns the limiter on, and then it is load-bearing.
 	WVANodeAccessDenied = "wva_node_access_denied"
 
+	// WVAPodAccessDenied is 1 while the GPU usage walk of a namespace-scoped
+	// controller may not list Pods cluster-wide and a physical limiter reads
+	// that walk, and 0 otherwise. Absent on a
+	// cluster-scoped controller, whose cache already holds every Pod. While it is
+	// 1 the usage walk counts only the controller's own namespace, so GPUs other
+	// namespaces hold on shared nodes read as free.
+	WVAPodAccessDenied = "wva_pod_access_denied"
+
+	// WVAConfigRejectedEntries is the number of entries of one scaling-policy
+	// ConfigMap that were rejected at its last load (labels: namespace,
+	// configmap). A rejected entry keeps the previous entry under its key in
+	// force when there was one; either way the ConfigMap does not say what is
+	// running, so any value above 0 needs fixing.
+	WVAConfigRejectedEntries = "wva_config_rejected_entries"
+
+	// WVAConfigUnknownKeys is the number of keys, across the entries of one
+	// scaling-policy ConfigMap, that the schema does not define (labels:
+	// namespace, configmap). The entries apply with those keys ignored; a key
+	// counted here is usually a misspelling of one that was meant to apply.
+	WVAConfigUnknownKeys = "wva_config_unknown_keys"
+
+	// WVAConfigIgnoredFields is the number of fields, across the entries of one
+	// scaling-policy ConfigMap, whose value could not be used and act as unset
+	// (labels: namespace, configmap). The entries still apply; the setting the
+	// operator wrote does not.
+	WVAConfigIgnoredFields = "wva_config_ignored_fields"
+
 	// WVAPolicyNamespaceUnverified is 1 when the controller fell back to its own
 	// ConfigMap for limiters and quotas because reading the Namespaces that decide
 	// the policy source was Forbidden, and 0 otherwise. Set once at startup.
@@ -907,6 +934,11 @@ const (
 	QueryTypeRequestCount = "request_count"
 	QueryTypeCacheConfig  = "cache_config"
 	QueryTypeArrivalRate  = "arrival_rate"
+	// QueryTypePodList is the collector's per-namespace Pod listing, which
+	// supplies readiness and deletion state. Not a Prometheus query: a failure
+	// is a Kubernetes API error (reason forbidden, unavailable or other), and
+	// the collector then treats every Pod as Ready and present for the cycle.
+	QueryTypePodList = "pod_list"
 )
 
 // Value for the LabelUnit Prometheus label: the metric carries an absolute
@@ -950,4 +982,29 @@ var EngineConfigFlagLabels = []string{
 	// invisible: a block_size of 16 reads identically whether the engine
 	// runs 16 or the flag was "$VLLM_BLOCK_SIZE" and nothing resolved it.
 	"unresolved",
+	// The engine container's image: the engine's code, which no flag
+	// describes. One value per configuration, so no cardinality beyond the
+	// configurations themselves.
+	"image",
+	"data_parallel_size",
+	"pipeline_parallel_size",
+	"expert_parallel",
+	"speculative_config",
+	"kv_connector",
+	"kv_offloading_size",
+	"kv_offloading_backend",
+	"prefix_caching_disabled",
+	// The checkpoint served, and whether it could be read: a model given as
+	// an unresolved variable is not used as a key for sharing.
+	"model",
+	"model_revision",
+	"model_unresolved",
+	// Flags read for identity whose value could not be interpreted, as
+	// written: a parallel size computed at start-up. A variant with anything
+	// here is not used as a key for sharing a latency line.
+	"sharing_unresolved",
+	// Flags that size or reshape what one replica holds and that no label
+	// above names (--kv-cache-memory-bytes, redundant experts, the expert
+	// all-to-all backend, SGLang's DP attention), as sorted key=value pairs.
+	"memory_layout",
 }

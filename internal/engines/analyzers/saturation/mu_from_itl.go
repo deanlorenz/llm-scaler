@@ -64,8 +64,9 @@ type derivedMu struct {
 // reading first, the deployment flag only where there is no live reading.
 //
 // The precedence used to be the other way round, which inverted the capacity
-// store's own rule -- LoadFromScaleTarget refuses to overwrite a live record,
-// and folds TotalKvTokensOverride in only on the deployment-derived path.
+// store's own rule -- LoadFromScaleTarget keeps a live record while the engine
+// runs the arguments it was measured on, and folds TotalKvTokensOverride in
+// only on the deployment-derived path.
 // SGLang's --max-total-tokens is parsed off the Deployment into EngineParams
 // for every record, live or not, so as an override it displaced the engine's
 // own reported capacity on every cycle of every SGLang variant.

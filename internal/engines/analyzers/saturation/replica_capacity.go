@@ -84,7 +84,22 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	}
 	historyKey := a.historyKey(modelID, namespace, rm.VariantName, accelerator, gpuCount, role,
 		rm.AvgOutputTokens, config.QueueLengthThreshold)
-	k2, k2Priority := a.computeK2(
+	// The rows whose saturated reading may become the variant's k2 are the
+	// rows whose saturated throughput may become its mu, below: Ready, and
+	// the variant's own. A warm-pool bridge is filed under the variant it is
+	// lent to but runs its engine on the pool's terms (a lower
+	// --gpu-memory-utilization, a different batch ceiling), so its occupancy
+	// at saturation is the pool engine's, not this variant's. A Pod that is
+	// not Ready is not routed to; a queue on it is what it held when it was,
+	// or a hang, and its resident KV is frozen with it. Either one recorded
+	// lowers the window, and a low k2 never corrects itself: it orders
+	// replicas, so nothing saturates to write a higher one, and every read
+	// keeps the window alive (Priority 2's Touch). Unadmitted rows still read
+	// the window; they only do not write it. admissionOf is the one place the
+	// rule is spelled: the k2 write, the throughput write below, the borrow
+	// clock and the capacity-store update all read adm.
+	adm := admissionOf(rm)
+	k2, k2Priority, k2Recordable := a.computeK2(
 		historyKey,
 		modelID, namespace, rm.VariantName,
 		rm.QueueLength, rm.TokensInUse,
@@ -95,6 +110,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 		rm.TotalKvCapacityTokens,
 		role,
 		downstreamSaturated,
+		adm,
 		logger,
 	)
 	// The same saturated moment that yields a k2 observation yields the
@@ -155,7 +171,7 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 	}
 	throughputKey := a.throughputKey(modelID, namespace, rm.VariantName, accelerator, gpuCount, role,
 		keyInput, shapeKeyOutput, config.QueueLengthThreshold)
-	if k2Priority == capacity.K2SrcObserved && rm.Ready && !rm.FromWarmPool {
+	if k2Priority == capacity.K2SrcObserved && adm.admitted() {
 		// keyInput is the effective prompt length this key was built with, so
 		// the token rate is converted to requests/s at the same figure the
 		// window is keyed by -- a rate divided by one shape and stored under
@@ -234,20 +250,50 @@ func (a *SaturationAnalyzer) computeReplicaCapacity(
 
 	// Update capacity store with live data, preserving EngineParams from any
 	// existing record (parsed from deployment args and needed for FindCompatible).
-	var existingParams *capacity.EngineParams
-	if existing := a.capacityStore.Get(namespace, modelID, rm.VariantName); existing != nil && existing.EngineParams != nil {
-		existingParams = existing.EngineParams
+	//
+	// Not from a warm-pool bridge. Its KV cache and capacity are the pool
+	// engine's, and a record filed live under the variant it is lent to
+	// would price that variant -- once parked, and as a compatible sibling's
+	// clamp -- on an engine it does not run.
+	//
+	// A not-Ready Pod files its cache, which is the variant's own engine's
+	// -- so the gate here is adm.bridge, not adm.admitted() -- but at the
+	// capacity the chain gave, never at a reading it may not record.
+	//
+	// During a rollout the record already carries the NEW arguments
+	// (LoadFromScaleTarget runs first in the cycle) while old pods still
+	// report, so a figure measured on an old pod is filed under the new
+	// arguments and fingerprint. The new pods' readings replace it as they
+	// are priced; only a variant parked before any new pod reported keeps it.
+	//
+	// Filed under the STABLE accelerator, as the k2 and throughput keys are
+	// and as every reader of the store looks it up: the raw reading flips to
+	// unresolved with pod placement on a fleet spread over two products, and
+	// a record filed under whichever value the last cycle saw was missed by
+	// the next lookup that saw the other.
+	//
+	// The cost, the same compromise the k2 keys make: on a variant whose pods
+	// sit on two products, the record holds whichever replica was priced last
+	// under the product last RESOLVED, so a compatible sibling parked on one
+	// product can be bounded or estimated from the other's capacity. It needs
+	// a mixed fleet and a compatible parked sibling on the same model; filed
+	// under the raw reading instead, the record matched no sibling at all.
+	if !adm.bridge {
+		var existingParams *capacity.EngineParams
+		if existing := a.capacityStore.Get(namespace, modelID, rm.VariantName); existing != nil && existing.EngineParams != nil {
+			existingParams = existing.EngineParams
+		}
+		a.capacityStore.Update(namespace, modelID, rm.VariantName, capacity.Record{
+			AcceleratorName:       a.StableAcceleratorFor(namespace, rm.VariantName, accelerator),
+			GpuCount:              gpuCount,
+			NumGpuBlocks:          rm.NumGpuBlocks,
+			BlockSize:             rm.BlockSize,
+			TotalKvCapacityTokens: rm.TotalKvCapacityTokens,
+			EffectiveCapacity:     min(k1, k2Recordable),
+			EngineParams:          existingParams,
+			LearnedFrom:           capacity.LearnedFromLive,
+		})
 	}
-	a.capacityStore.Update(namespace, modelID, rm.VariantName, capacity.Record{
-		AcceleratorName:       accelerator,
-		GpuCount:              gpuCount,
-		NumGpuBlocks:          rm.NumGpuBlocks,
-		BlockSize:             rm.BlockSize,
-		TotalKvCapacityTokens: rm.TotalKvCapacityTokens,
-		EffectiveCapacity:     effectiveCapacity,
-		EngineParams:          existingParams,
-		LearnedFrom:           capacity.LearnedFromLive,
-	})
 
 	return &capacity.ReplicaCapacity{
 		PodName:                     rm.PodName,
@@ -387,9 +433,14 @@ const derivedBucket = "derived"
 // 2. Historical → rolling average from previous observations
 // 3. Derived (from deployment args) → formula-based estimate
 // 4. Fallback → k1 (memory-bound only)
-// Returns the k2 value and the priority level (1–4) that produced it.
+// Returns the k2 the replica is priced on this cycle, the source that produced
+// it, and the k2 the chain gave -- the figure the capacity store may keep. The
+// first and last differ only for an unadmitted row (unadmittedPrice).
 // historyKey is the replica's bucket from historyKey(); modelID, namespace
-// and variantName are for the log lines only.
+// and variantName are for the log lines only. adm is the row's admission
+// (admissionOf): a row that is not admitted has its saturated reading logged
+// as P1-obs-unadmitted, and the chain falls through, as for a prefill reading
+// under a saturated decode.
 func (a *SaturationAnalyzer) computeK2(
 	historyKey string,
 	modelID, namespace, variantName string,
@@ -401,8 +452,78 @@ func (a *SaturationAnalyzer) computeK2(
 	kvCeiling int64,
 	role string,
 	downstreamSaturated bool,
+	adm admission,
+	logger logr.Logger,
+) (k2 int64, src capacity.K2Source, recordable int64) {
+	chain, chainSrc := a.k2Chain(historyKey, modelID, namespace, variantName, queueLen, tokensInUse,
+		avgOutput, avgInput, queueThreshold, engineParams, k1, kvCeiling, role, downstreamSaturated,
+		adm, logger)
+	return a.unadmittedPrice(chain, chainSrc, historyKey, modelID, namespace, variantName,
+		queueLen, tokensInUse, queueThreshold, kvCeiling, downstreamSaturated, adm, logger)
+}
+
+// unadmittedPrice returns the k2 a row is priced on this cycle, its source,
+// and the k2 the chain gave, which is what the capacity store may keep.
+//
+// The two differ only for a warm-pool bridge that is saturated. Its reading
+// may not be written -- it describes the pool's engine -- but it is what the
+// bridge is holding NOW, and for a variant a bridge alone is carrying it is
+// the only reading there is: falling through to derived, or to k1 for
+// prefill, priced the bridge higher in the very cycle that showed it full, so
+// fewer of the variant's own replicas were ordered while the bridge was its
+// only supply and was saturated. So the bridge is priced at its reading for
+// this cycle, and only where that is LOWER than the chain -- a reading may
+// only make one cycle more conservative, never a record.
+//
+// A Pod of the variant's own that is not Ready is priced at the chain. Its
+// reading is not what it is holding now but what it held when it stopped
+// being routed to, or a hang with its gauges frozen, and a frozen reading
+// would price it low for as long as the hang lasts: every cycle re-reads it.
+func (a *SaturationAnalyzer) unadmittedPrice(
+	chain int64, chainSrc capacity.K2Source,
+	historyKey, modelID, namespace, variantName string,
+	queueLen int, tokensInUse int64,
+	queueThreshold float64,
+	kvCeiling int64,
+	downstreamSaturated bool,
+	adm admission,
+	logger logr.Logger,
+) (k2 int64, src capacity.K2Source, recordable int64) {
+	saturated := queueLen >= int(queueThreshold) && tokensInUse > 0
+	plausible := kvCeiling <= 0 || tokensInUse <= kvCeiling
+	if !adm.bridge || downstreamSaturated || !saturated || !plausible || tokensInUse >= chain {
+		return chain, chainSrc, chain
+	}
+	logger.V(logging.DEFAULT).Info("k2-decision",
+		"modelID", modelID, "namespace", namespace, "variant", variantName,
+		"priority", capacity.K2SrcUnadmitted.String(), "historyKey", historyKey,
+		"reason", "priced this cycle at the saturated reading, lower than the chain; not recorded",
+		"k2", tokensInUse, "chainK2", chain, "chainPriority", chainSrc.String())
+	return tokensInUse, capacity.K2SrcUnadmitted, chain
+}
+
+// k2Chain is the priority chain itself: P1 (a saturated reading, recorded),
+// P2 (the variant's window), P3 (derived) and P4 (k1), with the lower-only
+// borrow from a compatible sibling after P3 and P4. A row that is not
+// admitted never writes the window and never starts the variant's borrow
+// clock: a bridge serving a variant whose own Pods are pending would
+// otherwise spend the borrow's hold before the variant ran a replica of its
+// own.
+func (a *SaturationAnalyzer) k2Chain(
+	historyKey string,
+	modelID, namespace, variantName string,
+	queueLen int, tokensInUse int64,
+	avgOutput, avgInput float64,
+	queueThreshold float64,
+	engineParams *capacity.EngineParams,
+	k1 int64,
+	kvCeiling int64,
+	role string,
+	downstreamSaturated bool,
+	adm admission,
 	logger logr.Logger,
 ) (int64, capacity.K2Source) {
+	armBorrowClock := adm.admitted()
 	// Priority 1: Observed (queue saturated)
 	//
 	// A reading above the KV cache's PHYSICAL ceiling is a scrape artifact
@@ -492,14 +613,23 @@ func (a *SaturationAnalyzer) computeK2(
 	// recorded. A decode bound by its sequence ceiling before its KV does
 	// not gate; that is a prefill mislearned low, which costs money, where
 	// a prefill that cannot be ordered costs latency.
-	if queueLen >= int(queueThreshold) && tokensInUse > 0 && downstreamSaturated {
+	saturatedReading := queueLen >= int(queueThreshold) && tokensInUse > 0
+	switch {
+	case saturatedReading && downstreamSaturated:
 		logger.V(logging.DEFAULT).Info("k2-decision",
 			"modelID", modelID, "namespace", namespace, "variant", variantName,
 			"priority", k2ReasonObsDownstream, "historyKey", historyKey,
 			"queueLength", queueLen, "queueThreshold", queueThreshold,
 			"reason", "queue saturated while the decode role is; a prefill completes only when decode admits it, so this is decode's saturation seen from prefill; not recorded",
 			"tokensInUse", tokensInUse, "k1", k1)
-	} else if queueLen >= int(queueThreshold) && tokensInUse > 0 {
+	case saturatedReading && !adm.admitted():
+		logger.V(logging.DEFAULT).Info("k2-decision",
+			"modelID", modelID, "namespace", namespace, "variant", variantName,
+			"priority", k2ReasonObsUnadmitted, "historyKey", historyKey,
+			"queueLength", queueLen, "queueThreshold", queueThreshold,
+			"reason", adm.why+"; not recorded",
+			"tokensInUse", tokensInUse, "k1", k1)
+	case saturatedReading:
 		k2Observed := tokensInUse
 		if kvCeiling > 0 && k2Observed > kvCeiling {
 			logger.V(logging.DEFAULT).Info("k2-decision",
@@ -634,7 +764,7 @@ func (a *SaturationAnalyzer) computeK2(
 	isPrefill := canonicalRole(role) == domain.RolePrefill
 	if !isPrefill {
 		if k2Derived := estimateCapacityFromParams(engineParams, avgInput, avgOutput); k2Derived > 0 {
-			if b, ok := a.borrowedK2(historyKey, modelID, min(k1, k2Derived), engineParams); ok {
+			if b, ok := a.borrowedK2(historyKey, modelID, min(k1, k2Derived), engineParams, armBorrowClock); ok {
 				logBorrowedK2(logger, b, modelID, namespace, variantName, historyKey, min(k1, k2Derived), capacity.K2SrcDerived)
 				return b.k2, capacity.K2SrcBorrowed
 			}
@@ -648,7 +778,7 @@ func (a *SaturationAnalyzer) computeK2(
 	}
 
 	// Priority 4: Fallback to k1
-	if b, ok := a.borrowedK2(historyKey, modelID, k1, engineParams); ok {
+	if b, ok := a.borrowedK2(historyKey, modelID, k1, engineParams, armBorrowClock); ok {
 		logBorrowedK2(logger, b, modelID, namespace, variantName, historyKey, k1, capacity.K2SrcFallback)
 		return b.k2, capacity.K2SrcBorrowed
 	}
@@ -694,7 +824,10 @@ func (a *SaturationAnalyzer) lookupCompatibleCapacity(namespace, modelID, varian
 // it tries to compute a better estimate using the k2 derivation formula with
 // model-level workload averages, bounded by:
 //  1. A compatible variant's live EffectiveCapacity (already min(k1,k2))
-//  2. Own k1 if TotalKvCapacityTokens is known (from num_gpu_blocks_override)
+//  2. Own k1 if TotalKvCapacityTokens is known (from num_gpu_blocks_override,
+//     or the measured total carried across a flag change)
+//  3. Own PriorLiveCapacity: what the variant was last measured at before a
+//     rollout changed its arguments (boundedBy=prior-live)
 //
 // Falls back to stored EffectiveCapacity (EffectiveMaxBatchedTokens) when no
 // workload data is available.
@@ -743,6 +876,15 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 				}
 			}
 
+			// Bound by what this variant was last measured at, under
+			// arguments a rollout has since replaced: a ceiling only, so a
+			// parked variant whose cache changed shape is never priced above
+			// its last measurement, and never held below a smaller derivation.
+			if rec.PriorLiveCapacity > 0 && rec.PriorLiveCapacity < bounded {
+				bounded = rec.PriorLiveCapacity
+				boundedBy = "prior-live"
+			}
+
 			// Bound by compatible variant's live EffectiveCapacity (already min(k1,k2))
 			//
 			// The reuse switch DELIBERATELY DOES NOT REACH HERE, and a
@@ -761,7 +903,13 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 			// variant's answer -- the shared ITL line, and
 			// lookupCompatibleCapacity, where the record IS the estimate -- and
 			// leaves every clamp alone.
-			if compatible := a.capacityStore.FindCompatible(modelID, accelerator, gpuCount, rec.EngineParams); compatible != nil && compatible.LearnedFrom == capacity.LearnedFromLive && compatible.EffectiveCapacity > 0 {
+			//
+			// For the same reason the clamp is found under the looser equality
+			// (FindClampBound): the borrow's equality compares the parallel
+			// layout, speculative decoding, the KV connector, offloading, prefix
+			// caching and the checkpoint, and refusing a sibling on those removed
+			// the ceiling rather than tightening it.
+			if compatible := a.capacityStore.FindClampBound(namespace, modelID, accelerator, gpuCount, rec.EngineParams); compatible != nil && compatible.LearnedFrom == capacity.LearnedFromLive && compatible.EffectiveCapacity > 0 {
 				if compatible.EffectiveCapacity < bounded {
 					bounded = compatible.EffectiveCapacity
 					boundedBy = "compatible-variant-live"
@@ -777,13 +925,18 @@ func (a *SaturationAnalyzer) estimateStoredCapacity(
 		}
 	}
 
-	// Fallback: stored EffectiveCapacity (EffectiveMaxBatchedTokens from LoadFromDeployment)
+	// Fallback: stored EffectiveCapacity (EffectiveMaxBatchedTokens from
+	// LoadFromDeployment), under the same prior-live ceiling.
+	fallback := rec.EffectiveCapacity
+	if rec.PriorLiveCapacity > 0 && rec.PriorLiveCapacity < fallback {
+		fallback = rec.PriorLiveCapacity
+	}
 	logger.Info("zero-replica-capacity-estimate",
 		"modelID", modelID, "namespace", namespace, "variant", variantName,
 		"source", "deployment-stored-fallback",
 		"reason", "no workload averages or derivation available; using raw stored EffectiveMaxBatchedTokens",
-		"perReplicaCapacity", rec.EffectiveCapacity)
-	return float64(rec.EffectiveCapacity)
+		"perReplicaCapacity", fallback)
+	return float64(fallback)
 }
 
 // estimateCapacityFromParams computes a capacity estimate using the k2 derivation

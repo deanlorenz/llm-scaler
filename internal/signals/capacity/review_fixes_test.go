@@ -302,10 +302,17 @@ func TestTheValueKeySetMatchesBothApplyFunctions(t *testing.T) {
 		"gpu_memory_utilization", "block_size", "kv_cache_dtype", "dtype",
 		"quantization", "tensor_parallel_size", "num_gpu_blocks_override",
 		"max_num_batched_tokens", "max_num_seq", "max_num_seqs", "max_model_len",
+		"data_parallel_size", "pipeline_parallel_size", "speculative_config",
+		"kv_transfer_config", "kv_offloading_size", "kv_offloading_backend",
+		"kv_cache_memory_bytes", "num_redundant_experts", "eplb_config", "all2all_backend",
 		// SGLang
 		"mem_fraction_static", "page_size", "tp_size", "tp",
 		"max_running_requests", "max_total_tokens", "context_length",
 		"max_prefill_tokens", "chunked_prefill_size",
+		"dp_size", "pp_size", "ep_size", "ep", "expert_parallel_size", "hicache_size",
+		"speculative_algorithm", "speculative_num_steps", "speculative_num_draft_tokens",
+		"speculative_eagle_topk", "speculative_draft_model_path",
+		"disaggregation_transfer_backend", "moe_a2a_backend",
 	}
 	for _, k := range handled {
 		if _, ok := mappedValueKeys[k]; !ok {
