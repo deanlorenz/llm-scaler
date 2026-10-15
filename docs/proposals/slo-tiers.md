@@ -678,7 +678,8 @@ N_i(SO)      = D_i[role(SO)] ÷ P_i(SO)                each eligible analyzer, i
 N_com(SO)    = max over contributors of N_i(SO)        undefined skipped; P ≤ 0 or Reason no-data/error is undefined
                saturation contributes when listed; unlisted, a role nothing sized holds
 D_com[role]  = max(D_sat[role] if saturation contributed, max over SO of N_i(SO) × P_sat(SO) for i ≠ sat)
-               saturation's PRC is never rewritten
+P_com(SO)    = D_com[role] ÷ N_com(SO) where another analyzer decided SO, so SO needs exactly N_com(SO);
+               P_sat(SO) where saturation decided it and D_com = D_sat, or nothing sized it
 RC, SC       = applyUniversalThreshold on D_com, with the model-level scaleUp / scaleDown
 ```
 

@@ -336,7 +336,7 @@ analyzer's; an analyzer normally has no reason to call them.
 optimizer receives one result, built in `collectV2ModelRequest` from every
 analyzer that ran. It starts as a copy of saturation's `AnalyzerResult` (every
 field, maps and slices cloned) and changes the need, the demand that carries
-it, and the holds. Every PRC stays saturation's:
+it, the PRC of each variant another analyzer decided, and the holds:
 
 - **Need.** `allocation.ResolveSO` takes, for each eligible analyzer
   (`allocation.Eligible`: live, informative, non-nil) that has the variant
@@ -351,8 +351,8 @@ it, and the holds. Every PRC stays saturation's:
   its variants, and `N x PRC_sat(variant)` for each variant another analyzer's
   `N` was read for (`Decision.Others`). The second holds when `D_sat[role]` is
   zero, so another analyzer can grow a role saturation sees as idle. A need on
-  a variant saturation has no PRC for, or whose demand overflows, sizes
-  nothing. The model's `TotalDemand` moves with the role (or is the role's
+  a variant saturation has no PRC for, or whose demand overflows, adds no
+  demand. The model's `TotalDemand` moves with the role (or is the role's
   demand, aggregated); the role's variants share it in saturation's
   proportions (evenly when saturation attributed none), and their utilization
   is recomputed from it. `HeldRoleDemand` is raised to the other analyzers'
@@ -360,8 +360,18 @@ it, and the holds. Every PRC stays saturation's:
   demand: a role saturation did not size, or one where the others ask for at
   least the held figure (kept, the share optimizer would give nothing from
   the role).
-  PRC is never rewritten, so variants on different accelerators keep their
-  relative worth in the cost-aware optimizer.
+- **PRC** (`priceVariants`). In a role the demand step sized, each variant
+  whose need `N` another analyzer decided gets `PRC = D[role] / N`, so it
+  needs exactly `N` replicas, and variants on different accelerators keep the
+  deciding analyzer's view of their relative worth. Converting every need at
+  saturation's PRC instead over-provisioned the cheaper accelerator when the
+  analyzers disagreed on that ratio. Saturation's PRC is kept exactly where
+  saturation decided the variant and the role's demand is saturation's, and
+  for a variant no listed analyzer sized. With one variant per role,
+  `D / N = N x PRC_sat / N`, so the PRC is saturation's anyway. A need on a
+  variant saturation has no PRC for adds no demand, but in a sized role it
+  prices the variant (`effectiveNeed`). A need whose demand overflows sizes
+  nothing.
 - **Holds** (`compositeHolds`, `allocation.RoleHold`, per role). With
   saturation unlisted, a role none of whose variants has a need is held both
   ways, and on P/D every other role is held against growth too, as the share

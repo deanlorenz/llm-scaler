@@ -79,16 +79,19 @@ thing here.
                {"name":"v2","prc":403391,"role":"both","reason":"C1-single"}]}
 ```
 
-`demand` is in **saturation's units** always, and `prc` is always
-saturation's, so the numbers here are directly comparable to saturation's own
-`analyzer-result` line above. When another analyzer asks for more replicas
-than saturation, the composite raises `demand` to what that many replicas are
-worth at saturation's `prc`, so on this line `demand` is a target, not a
+`demand` is in **saturation's units** always, so the numbers here are directly
+comparable to saturation's own `analyzer-result` line above. When another
+analyzer asks for more replicas than saturation, the composite raises `demand`
+to what that many replicas are worth at saturation's `prc`, so on this line
+`demand` is a target, not a
 measurement. Above, another analyzer needs 2.33 `primary` replicas, which at
 1152000 each is 2688000 against saturation's measured 2240000. This is the
 same cycle as the saturation line: `supply` is the same one `primary` at
 1152000 plus three `v2` at 403391, and the higher `demand` turns saturation's
-`rc` of 273121 into 800180.
+`rc` of 273121 into 800180. `prc` is saturation's here because each role has one
+variant. Where a role has variants on two accelerators and another analyzer
+decides them, each gets the `prc` at which `demand` needs exactly the replicas
+that analyzer asked of it, so its `prc` can differ from saturation's.
 
 `variants[].reason` on the composite row is **not** an analyzer's capacity
 provenance (`P0-store`, `T1-ols`, ...) — it is the composite's own decision
