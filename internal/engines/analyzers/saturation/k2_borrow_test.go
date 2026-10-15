@@ -300,8 +300,9 @@ var _ = Describe("borrowing a sibling's k2", func() {
 			// must not start.
 			cycle(14000, 6, 1000, 16000, 0)
 			result := cycle(1000, 0, 1000, 16000, 0)
+			borrower := states[1].VariantName
 			for _, vc := range result.VariantCapacities {
-				if vc.VariantName == "variant-b" {
+				if vc.VariantName == borrower {
 					Expect(vc.Reason).NotTo(Equal("P2-borrow"))
 				}
 			}
