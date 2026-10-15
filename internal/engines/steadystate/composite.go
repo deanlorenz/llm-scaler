@@ -41,12 +41,14 @@ import (
 //     with no reading: it cannot ask for more this cycle, so the roles it
 //     covers do not shrink until its grace runs out.
 //
-// Each role is then priced in one frame, saturation's or the other analyzers',
-// whichever needs more replicas for the fleet the role runs (priceRole). In
-// the others' frame the role's demand, in saturation's units, is the largest
-// N x PRC_sat over the variants they size, defined when saturation sees the
-// role as idle too, and each variant they size is priced at D / N so it needs
-// exactly the N they asked.
+// Each role is then priced in one analyzer's frame, whichever needs more
+// replicas for the fleet the role runs (priceRole; one frame per listed
+// analyzer, roleFrames). In another analyzer's frame the role's demand, in
+// saturation's units, is the largest N x PRC_sat over the variants it sizes,
+// defined when saturation sees the role as idle too, and each variant it sizes
+// is priced at D / N so it needs exactly the N it asked. A scale-down is then
+// capped so it is safe in every frame (boundAllSpare: the spare, the release
+// bound, and a scale-down hold for the optimizers that read neither).
 //
 // eligibleAnalyzers is the analyzers the policy lists: namedResults less the
 // observe-only slo analyzer, less saturation when the policy does not list
@@ -147,8 +149,21 @@ func buildComposite(
 		Holds:             compositeHolds(*sat, eligibleAnalyzers, roles, sized),
 	}
 	buildCapacities(ctx, &composite, nil, scaleUp, scaleDown)
-	boundAllSpare(&composite, pricings, scaleDown)
+	bounded := boundAllSpare(&composite, pricings, scaleDown)
 	applyHolds(&composite, roles)
+	// A role whose release another frame capped is held against scale-down
+	// for the optimizers that size from demand and never read the spare: the
+	// share optimizer and rescale would otherwise give what the bound
+	// refused. Added after applyHolds, so cost-aware and greedy keep the
+	// bounded spare rather than none.
+	for _, role := range bounded {
+		if composite.Holds == nil {
+			composite.Holds = make(map[string]allocation.RoleHold)
+		}
+		h := composite.Holds[role]
+		h.NoScaleDown = true
+		composite.Holds[role] = h
+	}
 	for role, h := range composite.Holds {
 		logger.Info("composite holds a role",
 			"modelID", sat.Result.ModelID, "namespace", sat.Result.Namespace, "role", role,
@@ -436,33 +451,52 @@ func boundSpare(p rolePricing, result *domain.AnalyzerResult, spare, scaleDown f
 // role's own on P/D, the model's on an aggregated model, which has no role
 // capacities. On P/D the model-level spare is then capped at the roles' sum
 // when a bound lowered one, so it cannot release what the roles may not.
-func boundAllSpare(nr *allocation.NamedAnalyzerResult, pricings []rolePricing, scaleDown float64) {
+//
+// It returns the roles a bound lowered. Each also gets a ReleaseBound, so
+// the optimizer's release budget, the larger of the spare and the
+// releasable capacity, is capped too: capping the spare alone left the
+// releasable figure, computed at a release target above the boundary, to
+// shed what the bound refused.
+func boundAllSpare(nr *allocation.NamedAnalyzerResult, pricings []rolePricing, scaleDown float64) []string {
+	var lowered []string
+	bound := func(role string, b float64) {
+		if nr.ReleaseBound == nil {
+			nr.ReleaseBound = make(map[string]float64)
+		}
+		nr.ReleaseBound[role] = b
+		lowered = append(lowered, role)
+	}
 	if len(nr.RoleCapacities) == 0 {
 		for _, p := range pricings {
-			if p.role == domain.RoleBoth {
-				nr.SpareCapacity = boundSpare(p, nr.Result, nr.SpareCapacity, scaleDown)
+			if p.role != domain.RoleBoth {
+				continue
+			}
+			if b := boundSpare(p, nr.Result, nr.SpareCapacity, scaleDown); b < nr.SpareCapacity {
+				nr.SpareCapacity = b
+				bound(p.role, b)
 			}
 		}
-		return
+		return lowered
 	}
-	lowered := false
 	for _, p := range pricings {
 		rc, ok := nr.RoleCapacities[p.role]
 		if !ok {
 			continue
 		}
 		if b := boundSpare(p, nr.Result, rc.SpareCapacity, scaleDown); b < rc.SpareCapacity {
-			rc.SpareCapacity, lowered = b, true
+			rc.SpareCapacity = b
 			nr.RoleCapacities[p.role] = rc
+			bound(p.role, b)
 		}
 	}
-	if lowered {
+	if len(lowered) > 0 {
 		var sum float64
 		for _, rc := range nr.RoleCapacities {
 			sum += rc.SpareCapacity
 		}
 		nr.SpareCapacity = min(nr.SpareCapacity, sum)
 	}
+	return lowered
 }
 
 // logPricing logs, at VERBOSE, the frame each role is priced in, every

@@ -219,6 +219,9 @@ func initRoleState(e *NamedAnalyzerResult) (roles []string, pickerState RolePair
 			// means "computed, and it is nothing", which it must honour.
 			if rc.TotalSupply > 0 {
 				e.RoleReleasable[role] = releasableFor(rc.TotalSupply, rc.TotalDemand, target)
+				if b, ok := e.ReleaseBound[role]; ok {
+					e.RoleReleasable[role] = min(e.RoleReleasable[role], b)
+				}
 			}
 			roleSet[role] = struct{}{}
 		}
@@ -235,6 +238,9 @@ func initRoleState(e *NamedAnalyzerResult) (roles []string, pickerState RolePair
 		if e.Result != nil && e.TotalSupply > 0 {
 			e.RoleReleasable[domain.RoleBoth] = releasableFor(
 				e.TotalSupply, e.Result.TotalDemand, e.releaseTargetUtilization())
+			if b, ok := e.ReleaseBound[domain.RoleBoth]; ok {
+				e.RoleReleasable[domain.RoleBoth] = min(e.RoleReleasable[domain.RoleBoth], b)
+			}
 		}
 		roleSet[domain.RoleBoth] = struct{}{}
 	}

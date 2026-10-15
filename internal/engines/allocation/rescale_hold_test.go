@@ -98,6 +98,67 @@ func TestRescaleInputHoldsAPinnedModelAtWhatItHas(t *testing.T) {
 	assert.Equal(t, 8, sum, "it contends for what it holds")
 }
 
+// TestRescaleWeighsAOneWayHeldModelOnDemand: a role held one way does not pin
+// the model. Its water-fill input still follows demand, and its other role
+// still moves.
+func TestRescaleWeighsAOneWayHeldModelOnDemand(t *testing.T) {
+	up := map[string]RoleHold{domain.RolePrefill: {NoScaleUp: true}}
+	in, _ := rescaleInputsForGroup([]ModelScalingRequest{pdRescaleRequest(up)}, "A100", 16)
+	assert.Equal(t, 7, in[0].CapGPUs, "prefill 1 + decode 6 from demand, not the 8 it holds")
+	assert.Greater(t, rescaleTargets(pdRescaleRequest(up), 16, 8)["d"], 4, "decode still fills")
+}
+
+// TestRoundFillsToReplicas: on 8-GPU pods a model given 8 more GPUs, split
+// +1 and +7 between its roles, adds one decode pod; split as GPUs, neither
+// role reached a pod and the 8 GPUs stayed free every cycle.
+func TestRoundFillsToReplicas(t *testing.T) {
+	req := pdRescaleRequest(nil)
+	for i := range req.VariantStates {
+		req.VariantStates[i].GPUsPerReplica = 8
+	}
+	records := buildVariantRecords(req, req.CompositeSignal.Result)
+	stateMap := buildStateMap(req.VariantStates)
+	roles := []string{domain.RoleDecode, domain.RolePrefill}
+
+	tgt := map[string]int{domain.RolePrefill: 17, domain.RoleDecode: 23}
+	roundFillsToReplicas(records, stateMap, "A100", roles, tgt, map[string]int{domain.RolePrefill: 16, domain.RoleDecode: 16})
+	assert.Equal(t, map[string]int{domain.RolePrefill: 16, domain.RoleDecode: 24}, tgt)
+
+	// A cut too small for any pod stays unspent rather than overshooting.
+	tgt = map[string]int{domain.RolePrefill: 19, domain.RoleDecode: 19}
+	roundFillsToReplicas(records, stateMap, "A100", roles, tgt, map[string]int{domain.RolePrefill: 16, domain.RoleDecode: 16})
+	assert.Equal(t, map[string]int{domain.RolePrefill: 16, domain.RoleDecode: 16}, tgt)
+
+	// One-GPU replicas are left as split.
+	one := pdRescaleRequest(nil)
+	tgt = map[string]int{domain.RolePrefill: 5, domain.RoleDecode: 7}
+	roundFillsToReplicas(buildVariantRecords(one, one.CompositeSignal.Result), buildStateMap(one.VariantStates),
+		"A100", roles, tgt, map[string]int{domain.RolePrefill: 4, domain.RoleDecode: 4})
+	assert.Equal(t, map[string]int{domain.RolePrefill: 5, domain.RoleDecode: 7}, tgt)
+}
+
+// TestRescaleFillsWholePods: rescale rounds a role's share to whole pods.
+// With 8-GPU pods, 2 each, demand weighing the 40-GPU target 17:23, the
+// split was +1 prefill and +7 decode, neither a pod, and the 8 free GPUs went
+// unused every cycle; rounded, decode gets one pod.
+func TestRescaleFillsWholePods(t *testing.T) {
+	req := pdRescaleRequest(nil)
+	req.CompositeSignal.Result.RoleDemand = map[string]float64{domain.RolePrefill: 1700, domain.RoleDecode: 2300}
+	req.CompositeSignal.RoleCapacities = map[string]domain.RoleCapacity{
+		domain.RolePrefill: {Role: domain.RolePrefill, TotalDemand: 1700, TotalSupply: 200},
+		domain.RoleDecode:  {Role: domain.RoleDecode, TotalDemand: 2300, TotalSupply: 200},
+	}
+	for i := range req.VariantStates {
+		req.VariantStates[i].GPUsPerReplica, req.VariantStates[i].CurrentReplicas = 8, 2
+	}
+	for i := range req.CompositeSignal.Result.VariantCapacities {
+		req.CompositeSignal.Result.VariantCapacities[i].ReplicaCount = 2
+	}
+	got := rescaleTargets(req, 40, 8)
+	assert.Equal(t, 2, got["p"])
+	assert.Equal(t, 3, got["d"], "8 free GPUs buy one decode pod")
+}
+
 // TestRescaleDoesNotFillAHeldRole: a role held against growth is not filled,
 // though its share and the free GPUs would allow it.
 func TestRescaleDoesNotFillAHeldRole(t *testing.T) {

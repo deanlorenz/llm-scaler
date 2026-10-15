@@ -388,6 +388,7 @@ func (o *GreedyByScoreOptimizer) rescaleModelDecisions(
 	tgtByRole := curByRole
 	if !pinned {
 		tgtByRole = distributeGPUsByWeight(targetGPUs, roles, demByRole, curByRole, floorByRole)
+		roundFillsToReplicas(records, stateMap, accType, roles, tgtByRole, curByRole)
 	}
 
 	limited := make(gpuLimitTracker)
@@ -793,6 +794,45 @@ func roleFloorGPUs(records []variantRecord, stateMap map[string]domain.VariantRe
 		}
 	}
 	return total
+}
+
+// roundFillsToReplicas rounds each growing role's share in tgt up from cur to
+// whole replicas of the variant fillRole would add first, and spends the GPUs
+// the rounding left over on whole replicas of the roles whose share was cut
+// most. The GPU split ignores replica size, so with 8-GPU pods a model given
+// 8 more GPUs split them +1 and +7 between its roles, neither a replica, and
+// the GPUs sat free every cycle.
+func roundFillsToReplicas(records []variantRecord, stateMap map[string]domain.VariantReplicaState,
+	accType string, roles []string, tgt, cur map[string]int) {
+	size := make(map[string]int, len(roles))
+	cut := make(map[string]int, len(roles))
+	leftover := 0
+	for _, role := range roles {
+		want := tgt[role] - cur[role]
+		if want <= 0 {
+			continue
+		}
+		if _, g, ok := bestVariantForRole(records, stateMap, accType, role); ok && g > 1 {
+			size[role] = g
+			cut[role] = want % g
+			tgt[role] -= cut[role]
+			leftover += cut[role]
+		}
+	}
+	for leftover > 0 {
+		best := ""
+		for _, role := range roles {
+			if g := size[role]; g > 0 && g <= leftover && cut[role] > 0 && (best == "" || cut[role] > cut[best]) {
+				best = role
+			}
+		}
+		if best == "" {
+			return
+		}
+		tgt[best] += size[best]
+		leftover -= size[best]
+		cut[best] = 0
+	}
 }
 
 // distributeGPUsByWeight splits total GPUs across roles: each role is first reserved
