@@ -518,7 +518,7 @@ borrowed is taken away.
 
 | reason | what it means | what to do |
 | --- | --- | --- |
-| `lender-cannot-reclaim` | the cohort's only unused capacity belongs to lenders Kueue would not reclaim for: `reclaimWithinCohort: Never`, or `LowerPriority` whose Workloads do not outrank this model's. The namespace stays counted, at its guaranteed figure | set `reclaimWithinCohort: Any` on the lender's ClusterQueue, if serving may use its capacity; or give the serving model a lower `WorkloadPriorityClass` than the lender |
+| `lender-cannot-reclaim` | the cohort's only unused capacity belongs to lenders Kueue would not reclaim for: `reclaimWithinCohort: Never`, or `LowerPriority` whose Workloads do not outrank this model's. A `LowerPriority` lender with no GPU Workloads at all (idle) has no priority to compare, so it counts as cannot-reclaim too, even though its capacity is free. The namespace stays counted, at its guaranteed figure | set `reclaimWithinCohort: Any` on the lender's ClusterQueue, if serving may use its capacity; or give the serving model a lower `WorkloadPriorityClass` than the lender |
 | `lender-waiting` | a lender waits for capacity it lent. What is borrowed stays until Kueue preempts it; nothing new is borrowed in the cohort, until `borrowCooldown` after the wait ends | nothing: Kueue reclaims for the lender. If it lasts, see [WVAKueueLenderWaitingPastCooldown](#wvakueuelenderwaitingpastcooldown) |
 | `cohort-pool-empty` | the cohort's free pool holds no GPUs, after what is in flight and held at Kueue's gate | nothing: the cohort is in use |
 | `no-borrow-cap` | `borrowingLimit`, the static entry or the namespace ResourceQuota stops the namespace at guaranteed | raise the one that binds, if borrowing is wanted |
