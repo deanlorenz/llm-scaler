@@ -375,17 +375,7 @@ func smallestReplicaGPUs(g *ShareGroup) int {
 // that sum never counts, so the cluster group planned over it would grow its
 // budget one for one with what that namespace holds.
 func clusterBudgets(constraints []*ResourceConstraints) (map[string]int, bool) {
-	var cluster []*ResourceConstraints
-	namespaced := false
-	for _, c := range constraints {
-		switch {
-		case c == nil:
-		case c.NamespaceScoped || len(c.NamespacePools) > 0:
-			namespaced = true
-		default:
-			cluster = append(cluster, c)
-		}
-	}
+	cluster, namespaced := clusterProviders(constraints)
 	return mergeConstraints(cluster), namespaced
 }
 

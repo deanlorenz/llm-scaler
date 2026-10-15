@@ -137,7 +137,9 @@ func namespaceHeadroom(constraints []*ResourceConstraints) map[string]map[string
 // that carries a closed allowlist for this namespace is judged on that allowlist
 // alone (its per-type Pools are the aggregate *derived* from it, so counting
 // both would weigh one provider twice), and a type the namespace does not list
-// is a hard deny — availability 0, the tightest bound there is.
+// is a hard deny — availability 0, the tightest bound there is. A namespace
+// quota that does not cap the namespace is skipped, as the optimizer skips it
+// (excludedNamespaceBudgets).
 //
 // Unlimited sentinels (Limit < 0) impose no bound and are skipped. Returns ""
 // when no provider finitely bounds the type, which leaves LimitedBy empty rather
@@ -162,6 +164,11 @@ func bindingProvider(constraints []*ResourceConstraints, namespace, accType stri
 			case pool.Limit >= 0:
 				consider(pool.Available(), c.ProviderName)
 			}
+			continue
+		}
+		if c.NamespaceScoped || len(c.NamespacePools) > 0 {
+			// A namespace quota that does not cap this namespace excludes
+			// it: its pools are the other tenants' quota, not this one's.
 			continue
 		}
 		if pool, ok := c.Pools[accType]; ok && pool.Limit >= 0 {

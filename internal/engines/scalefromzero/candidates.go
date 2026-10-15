@@ -343,9 +343,9 @@ func (e *Engine) freshUsage(
 // handed to the provider, and both producers build theirs from what is currently
 // HOLDING GPUs — so a namespace whose fleet is entirely parked, which is every
 // namespace this engine asks about, would be absent and its quota simply would not
-// apply. The wake would then be judged against the cluster aggregate instead: it
-// could exceed the namespace's own cap, or be refused because a DIFFERENT namespace
-// is full. Present with zero usage is the accurate statement.
+// apply. The wake would then be judged as one in a namespace the quota excludes:
+// it could exceed the namespace's own cap. Present with zero usage is the
+// accurate statement.
 func withNamespace(byNamespace map[string]map[string]int, namespace string) map[string]map[string]int {
 	if _, present := byNamespace[namespace]; present {
 		return byNamespace

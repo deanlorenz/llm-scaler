@@ -332,7 +332,7 @@ reports `invalid`) and the controller logs
 namespace that a namespace quota lists in `exclude`, add a finite
 `scope: cluster` quota for their accelerator type. A cluster quota of `-1` is
 unlimited and counts as none. Without one, their models stay on today's
-optimizer, and the controller logs them once:
+optimizer, which does not limit them at all, and the controller logs them once:
 `Utilization share: not sharing models no quota bounds`. No line says when they
 are shared again; their role series appear instead.
 

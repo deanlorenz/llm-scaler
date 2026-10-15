@@ -41,15 +41,22 @@ var _ = Describe("bindingProvider", func() {
 			"an unlisted type is availability 0, the tightest bound there is")
 	})
 
-	It("falls back to a provider's cluster pool for a namespace it does not scope", func() {
+	// A namespace quota's pools are the other tenants' free quota; a namespace
+	// it excludes is not bound by them (#169), so they are never credited.
+	It("credits only a provider over every namespace for a namespace a namespace quota excludes", func() {
 		constraints := []*ResourceConstraints{
 			{ProviderName: "namespace-quota",
 				Pools:          map[string]ResourcePool{"A100": {Limit: 8, Used: 3}},
 				NamespacePools: map[string]map[string]ResourcePool{"team-a": {"A100": {Limit: 1}}},
 			},
 		}
-		Expect(bindingProvider(constraints, "team-z", "A100")).To(Equal("namespace-quota"),
-			"team-z is open (excluded), so the cluster pool is what bounds it")
+		Expect(bindingProvider(constraints, "team-z", "A100")).To(BeEmpty(),
+			"team-z is excluded and no other provider bounds it")
+
+		constraints = append(constraints, &ResourceConstraints{ProviderName: "cluster-quota",
+			Pools: map[string]ResourcePool{"A100": {Limit: 64, Used: 3}}})
+		Expect(bindingProvider(constraints, "team-z", "A100")).To(Equal("cluster-quota"),
+			"the cluster quota bounds team-z, though the namespace quota's pool is tighter")
 	})
 
 	It("skips unlimited sentinels and returns empty when nothing finitely bounds the type", func() {

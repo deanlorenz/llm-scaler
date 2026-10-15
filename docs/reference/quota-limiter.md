@@ -132,7 +132,10 @@ When the allocator evaluates a request for namespace `N` and type `T` in
 
 1. If `N` appears in `exclude`, the limiter **passes through** — the request is
    returned unchanged and no usage is recorded. Other limiters in the chain
-   still apply. The utilization-share optimizer does not share an excluded
+   still apply. Only a `scope: cluster` quota or the physical inventory bounds
+   `N`, in the optimizer and in scale-from-zero wakes. The other tenants' free
+   quota does not: `N` neither draws on it nor is refused by it. With neither,
+   the scaling manager does not limit `N`. The utilization-share optimizer does not share an excluded
    namespace unless a finite `scope: cluster` quota also covers its
    accelerator type: this quota does not bound it, so there is no budget to
    share
@@ -441,8 +444,11 @@ closed-allowlist semantics:
   quota (no cross-namespace leak). An **unlimited** (`-1`) per-namespace entry is
   carried as a sentinel and bounds the model only by the cluster budget for that
   type (or is unbounded if the cluster does not cap it). An **excluded**
-  namespace is omitted entirely, so it is "open" and bound only by the cluster
-  constraint.
+  namespace is omitted entirely, so it is "open". It is bound only by the
+  providers that bound every namespace: a cluster-scoped quota or the physical
+  inventory. A namespace-scoped quota's per-type `Pools` (the sum of the
+  tenants' caps) do not bound it. Every GPU it takes is charged to those
+  providers, so tenants and excluded namespaces still share a cluster quota.
 - **Multi-entry (composite)** quota configs are fully consulted: the engine
   computes constraints from *each* constituent of a `CompositeLimiter`.
 
@@ -462,7 +468,9 @@ Remaining boundaries:
   the relevant type does not scale under the V2 `GreedyByScore` optimizer (its
   fair-share loop stops when the finite cluster aggregate is zero). This is a
   benign under-provision, not an isolation breach; configure a finite cluster or
-  per-namespace cap for any type you expect to scale under V2.
+  per-namespace cap for any type you expect to scale under V2. In a cycle where
+  a model of an excluded namespace also scales with no cluster quota, the loop
+  keeps going and the unlimited namespace scales too.
 - An **unlimited (`-1`) cluster-scope** quota scales up: `GetResourcePools`
   emits it as a sentinel pool that `mergeConstraints` carries through as an
   unbounded budget, so the type allocates up to demand. (This differs from the
@@ -487,16 +495,20 @@ not inputs to it. Two properties follow from that:
 > **Ceilings, not reservations.** A finite per-namespace cap guarantees a tenant
 > will never *exceed* it — it does **not** guarantee the tenant can *reach* it.
 > Under V2 the cluster aggregate is the **sum of the finite namespace caps**, and
-> under today's optimizer an **unlimited (`-1`)** or **excluded** namespace
-> competing for the same accelerator type draws from that shared aggregate
-> without contributing to it,
+> under today's optimizer an **unlimited (`-1`)** namespace competing for the
+> same accelerator type draws from that shared aggregate without contributing
+> to it,
 > so it can consume budget a finite-capped peer would otherwise have used (no
 > isolation breach — nobody exceeds their own authorization — but a real fairness
 > footgun). If you need a tenant's cap to behave like a floor, avoid mixing
-> unlimited/excluded namespaces on the same type, and give every type a finite
-> cluster-scope cap. The utilization-share optimizer does not share an excluded
-> namespace unless a `scope: cluster` quota covers it (see #169 for today's
-> optimizer).
+> unlimited namespaces on the same type, and give every type a finite
+> cluster-scope cap.
+>
+> An **excluded** namespace does not draw from that aggregate. Only a
+> `scope: cluster` quota or the physical inventory bounds it. Without one, the
+> scaling manager does not limit it. With one, tenants and the excluded namespace share it, so a
+> tenant may still not reach its cap. The utilization-share optimizer does not
+> share an excluded namespace unless a `scope: cluster` quota covers it.
 
 When a model is capped below its fair-share slot it takes only up to its quota;
 the unused remainder is **released to subsequent rounds**, where the
@@ -581,7 +593,7 @@ discovery or API calls are needed.
 Every namespace being decided about must be **present** in that map, with an
 empty inner map when it holds nothing. `NamespaceResourcePools` builds caps only
 for the namespaces it is given, so an absent one silently loses its quota and is
-judged against the cluster aggregate. Both callers guarantee it: the saturation
+judged as an excluded namespace: by a cluster quota or the inventory alone. Both callers guarantee it: the saturation
 engine for every namespace it optimizes, the scale-from-zero engine for the
 namespace it places into.
 

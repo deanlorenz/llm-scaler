@@ -1004,9 +1004,9 @@ func atLeastZero(v float64) float64 {
 // optimized must be PRESENT in the per-namespace map, with an empty inner map if
 // it holds nothing. A namespace-scoped quota is materialised only for namespaces
 // that appear there (see DefaultLimiter.ComputeConstraints), so a namespace whose
-// fleet currently holds no GPUs would silently lose its cap and be judged against
-// the cluster aggregate — able to exceed its own limit, or refused because a
-// different namespace is full. The population sum gives this by construction; a
+// fleet currently holds no GPUs would silently lose its cap and be judged as a
+// namespace the quota excludes — able to exceed its own limit. The population
+// sum gives this by construction; a
 // discovered view cannot, because it only sees namespaces holding a GPU right now.
 func gpuUsageViews(requests []allocation.ModelScalingRequest) allocation.GPUUsageViews {
 	views := allocation.GPUUsageViews{

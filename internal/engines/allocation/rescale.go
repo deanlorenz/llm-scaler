@@ -200,8 +200,13 @@ func apportionLeftover(out map[string]int, remainder map[string]float64, leftove
 // applyRescale runs the priority-weighted rescale pass for enabled, contended
 // (accelerator type, budget scope) groups. It returns the decisions it produced and
 // the set of model IDs it handled (which the caller excludes from the additive path).
-// Fills consume free GPUs from `available` / `availableByNS` in place; reclaims do not
-// free budget this cycle (usage is CurrentReplicas-based), so fills never over-subscribe.
+// Fills consume free GPUs from `available` / `availableByNS` / `open` in place; reclaims
+// do not free budget this cycle (usage is CurrentReplicas-based), so fills never
+// over-subscribe.
+//
+// open, when non-nil, is the budget of the namespaces a namespace-scoped quota excludes
+// (see excludedNamespaceBudgets): the cluster-scope groups are planned over it instead
+// of `available`, and every fill draws it down.
 //
 // P/D models are handled: a model's GPU target is split across its roles by role
 // demand, and reclaim/fill run per role. Multi-accelerator models (variants spanning
@@ -212,6 +217,7 @@ func (o *GreedyByScoreOptimizer) applyRescale(
 	constraints []*ResourceConstraints,
 	available map[string]int,
 	availableByNS map[string]map[string]int,
+	open map[string]int,
 ) ([]domain.VariantDecision, map[string]bool) {
 	logger := ctrl.LoggerFrom(ctx).WithName("rescale")
 	handled := make(map[string]bool)
@@ -255,8 +261,11 @@ func (o *GreedyByScoreOptimizer) applyRescale(
 	for _, k := range keys {
 		reqs := groups[k]
 		free := available[k.accType]
-		if k.scope != "" {
+		switch {
+		case k.scope != "":
 			free = availableByNS[k.scope][k.accType]
+		case open != nil:
+			free = open[k.accType]
 		}
 		// Skip unlimited/unknown budgets — there is nothing to redistribute.
 		if free < 0 || free == math.MaxInt {
@@ -301,6 +310,9 @@ func (o *GreedyByScoreOptimizer) applyRescale(
 			if cur, ok := available[k.accType]; ok && cur != math.MaxInt {
 				fillable = min(fillable, cur)
 			}
+			if cur, ok := open[k.accType]; ok && cur != math.MaxInt {
+				fillable = min(fillable, cur)
+			}
 		}
 
 		freeThisCycle := fillable
@@ -321,6 +333,13 @@ func (o *GreedyByScoreOptimizer) applyRescale(
 				if cur, ok := available[k.accType]; ok && cur != math.MaxInt {
 					available[k.accType] -= consumed
 				}
+				if cur, ok := open[k.accType]; ok && cur != math.MaxInt {
+					open[k.accType] -= consumed
+				}
+			} else if open != nil {
+				// An excluded namespace spends the budget over every
+				// namespace, not the namespace quota's.
+				open[k.accType] -= consumed
 			} else {
 				available[k.accType] -= consumed
 			}
