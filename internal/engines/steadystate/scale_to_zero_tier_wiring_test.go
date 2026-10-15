@@ -3,6 +3,7 @@ package steadystate
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -73,6 +74,41 @@ func (variantOfPodLocator) GetPodLabels(context.Context, string, string) map[str
 	return nil
 }
 
+// variantTier is one variant and the policy tier it selects.
+type variantTier struct {
+	variant, tier string
+}
+
+// tierWiringCase is one case of TestOptimizeV2ResolvesScaleToZeroFromTheVariantsTier.
+type tierWiringCase struct {
+	name     string
+	policies map[string]config.ScalingPolicy
+	// tiers lists the model's variants in the order the cycle receives them.
+	tiers       []variantTier
+	wantBlocked bool
+	// wantWindow is the retention the idle check must span; 0 skips it.
+	wantWindow time.Duration
+}
+
+// inBothOrders returns each case as given and, when it has more than one
+// variant, again with the variants reversed. A bug that lets the first
+// variant decide then fails in one of the two runs, whatever the order.
+func inBothOrders(cases []tierWiringCase) []tierWiringCase {
+	out := make([]tierWiringCase, 0, 2*len(cases))
+	for _, tc := range cases {
+		out = append(out, tc)
+		if len(tc.tiers) < 2 {
+			continue
+		}
+		reversed := tc
+		reversed.name += ", variants reversed"
+		reversed.tiers = slices.Clone(tc.tiers)
+		slices.Reverse(reversed.tiers)
+		out = append(out, reversed)
+	}
+	return out
+}
+
 // The tiers a model's variants name must reach the scale-to-zero stage of a
 // real cycle. scaleToZeroPolicy is correct on its own (scale_to_zero_tier_test.go),
 // but optimizeV2 collects the tiers in stage 1 and reads them back in stage 3;
@@ -88,22 +124,14 @@ func TestOptimizeV2ResolvesScaleToZeroFromTheVariantsTier(t *testing.T) {
 	)
 	on, off := true, false
 
-	for _, tc := range []struct {
-		name     string
-		policies map[string]config.ScalingPolicy
-		// tiers maps each variant's name to the tier it selects.
-		tiers       map[string]string
-		wantBlocked bool
-		// wantWindow is the retention the idle check must span; 0 skips it.
-		wantWindow time.Duration
-	}{
+	for _, tc := range inBothOrders([]tierWiringCase{
 		{
 			name: "default allows, the variant's tier forbids",
 			policies: map[string]config.ScalingPolicy{
 				config.GlobalDefaultsKey: {ScaleToZero: &config.ScaleToZeroEnvelope{Enabled: &on, RetentionPeriod: "1m"}},
 				"interactive":            {ScaleToZero: &config.ScaleToZeroEnvelope{Enabled: &off}},
 			},
-			tiers:       map[string]string{"chat-a": "interactive"},
+			tiers:       []variantTier{{"chat-a", "interactive"}},
 			wantBlocked: true,
 		},
 		{
@@ -112,7 +140,7 @@ func TestOptimizeV2ResolvesScaleToZeroFromTheVariantsTier(t *testing.T) {
 				config.GlobalDefaultsKey: {ScaleToZero: &config.ScaleToZeroEnvelope{Enabled: &off}},
 				"batch":                  {ScaleToZero: &config.ScaleToZeroEnvelope{Enabled: &on, RetentionPeriod: "1m"}},
 			},
-			tiers:       map[string]string{"chat-a": "batch"},
+			tiers:       []variantTier{{"chat-a", "batch"}},
 			wantBlocked: false,
 			wantWindow:  time.Minute,
 		},
@@ -125,7 +153,7 @@ func TestOptimizeV2ResolvesScaleToZeroFromTheVariantsTier(t *testing.T) {
 				"batch":                  {ScaleToZero: &config.ScaleToZeroEnvelope{Enabled: &on, RetentionPeriod: "1m"}},
 				"interactive":            {ScaleToZero: &config.ScaleToZeroEnvelope{Enabled: &off}},
 			},
-			tiers:       map[string]string{"chat-a": "batch", "chat-b": "interactive"},
+			tiers:       []variantTier{{"chat-a", "batch"}, {"chat-b", "interactive"}},
 			wantBlocked: true,
 		},
 		{
@@ -135,16 +163,17 @@ func TestOptimizeV2ResolvesScaleToZeroFromTheVariantsTier(t *testing.T) {
 				"batch":                  {ScaleToZero: &config.ScaleToZeroEnvelope{Enabled: &on, RetentionPeriod: "1m"}},
 				"overnight":              {ScaleToZero: &config.ScaleToZeroEnvelope{Enabled: &on, RetentionPeriod: "7m"}},
 			},
-			tiers:       map[string]string{"chat-a": "batch", "chat-b": "overnight"},
+			tiers:       []variantTier{{"chat-a", "batch"}, {"chat-b", "overnight"}},
 			wantBlocked: false,
 			wantWindow:  7 * time.Minute,
 		},
-	} {
+	}) {
 		t.Run(tc.name, func(t *testing.T) {
 			objs := make([]client.Object, 0, len(tc.tiers))
 			pods := make([]string, 0, len(tc.tiers))
 			vas := make([]llmdVariantAutoscalingV1alpha1.VariantAutoscaling, 0, len(tc.tiers))
-			for variant, tier := range tc.tiers {
+			for _, vt := range tc.tiers {
+				variant, tier := vt.variant, vt.tier
 				objs = append(objs, &appsv1.Deployment{
 					ObjectMeta: metav1.ObjectMeta{Name: variant, Namespace: namespace},
 					Spec: appsv1.DeploymentSpec{
