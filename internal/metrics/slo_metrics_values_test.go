@@ -113,6 +113,23 @@ var _ = Describe("PublishSLO values", func() {
 		}
 	})
 
+	It("publishes the objective ratio for a TTFT percentile and not for a TPOT mean", func() {
+		registry := prometheus.NewRegistry()
+		Expect(InitMetrics(registry)).To(Succeed())
+		PublishSLO(SLOModelSnapshot{
+			Namespace: "ns", ModelName: "m",
+			Objectives: []SLOObjectiveReading{
+				{Objective: constants.SLOObjectiveTTFT, Statistic: "p90", TargetSeconds: 3, Observed: 1.2,
+					Attainment: 0.96, ObjectiveRatio: 0.9, Requests: 300, WindowSeconds: 300},
+				{Objective: constants.SLOObjectiveTPOT, Statistic: "mean", TargetSeconds: 0.1, Observed: 0.05,
+					Requests: 300, WindowSeconds: 300},
+			},
+		}, t0)
+		m := only(registry, constants.WVASLOObjectiveRatio)
+		Expect(m.GetGauge().GetValue()).To(Equal(0.9))
+		Expect(labelOf(m, constants.LabelObjective)).To(Equal(constants.SLOObjectiveTTFT))
+	})
+
 	It("lists every source the analyzer can report, so none goes unpublished", func() {
 		Expect(constants.SLOSources).To(ConsistOf(
 			constants.SLOSourceOwn, constants.SLOSourcePinned, constants.SLOSourcePinnedDefault,

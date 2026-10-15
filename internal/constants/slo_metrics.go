@@ -14,6 +14,12 @@ const (
 	// Absent below the sample minimum, never 0 or 1 by default.
 	// Labels: namespace, model_name, objective, statistic.
 	WVASLOAttainmentRatio = "wva_slo_attainment_ratio"
+	// WVASLOObjectiveRatio is the share of requests a TTFT objective promises
+	// within its target: 0.90 for p90. The attainment alert compares the
+	// request-weighted attainment with it, since the percentile is otherwise
+	// only in the statistic label's text. Published for TTFT only.
+	// Labels: namespace, model_name, objective, statistic.
+	WVASLOObjectiveRatio = "wva_slo_objective_ratio"
 	// WVASLOFill is the KV fill, as a fraction of physical KV, a variant's SLO
 	// capacity is priced at: where its mean inter-token latency meets the TPOT
 	// target, clamped to [0.15, 0.80] and lowered where max_num_seqs binds

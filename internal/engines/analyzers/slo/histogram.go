@@ -1,6 +1,7 @@
 package slo
 
 import (
+	"cmp"
 	"math"
 	"slices"
 
@@ -29,15 +30,7 @@ func newHistogram(in []domain.LatencyBucket) (histogram, bool) {
 		}
 		bs = append(bs, b)
 	}
-	slices.SortFunc(bs, func(x, y domain.LatencyBucket) int {
-		switch {
-		case x.UpperBound < y.UpperBound:
-			return -1
-		case x.UpperBound > y.UpperBound:
-			return 1
-		}
-		return 0
-	})
+	slices.SortFunc(bs, func(x, y domain.LatencyBucket) int { return cmp.Compare(x.UpperBound, y.UpperBound) })
 	if len(bs) == 0 || !math.IsInf(bs[len(bs)-1].UpperBound, 1) {
 		return histogram{}, false
 	}
