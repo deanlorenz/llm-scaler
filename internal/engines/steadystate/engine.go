@@ -121,6 +121,14 @@ type Engine struct {
 	limiterSig     string
 	limiterMu      sync.Mutex
 
+	// nodeFitSkipped is why the last cycle bounded by the physical limiter
+	// fitted replicas to the pool and not to nodes ("" when it did fit them),
+	// logged when it changes. Written only from the optimize goroutine.
+	nodeFitSkipped string
+	// layouts remembers the variants whose unknown pod layout this engine's
+	// node views have logged, so each is logged once, not once per cycle.
+	layouts allocation.LayoutLog
+
 	// metricsRegistry is used to access metrics sources for request count queries
 	metricsRegistry *source.SourceRegistry
 	// Variants is the set of workloads KEDA has called WVA about — discovery. Nil
@@ -892,6 +900,17 @@ func modeLabelForAnalyzer(analyzerName string) string {
 	}
 }
 
+// constrainedMessage is a ResourceConstrained event's message: the decision's
+// reason and what held it back (LimitedBy) -- a limiter's name, or
+// allocation.NodeFitLimiterName when the pools held the GPUs but no node held
+// a whole replica.
+func constrainedMessage(d *domain.VariantDecision) string {
+	if d.LimitedBy == "" {
+		return d.Reason()
+	}
+	return fmt.Sprintf("%s (limited by %s)", d.Reason(), d.LimitedBy)
+}
+
 // recordEvent ensures only one event is recorded per VA in an optimization cycle.
 // Exception: K8SEventResourceConstrained events bypass deduplication and can be
 // recorded alongside other event types (e.g., ScaledUp + ResourceConstrained).
@@ -1297,6 +1316,14 @@ func (e *Engine) selectV2Optimizer(
 		allocation.PublishUnboundedHeadroom(views.PoolsVersion, time.Now())
 		return allocation.NewCostAwareOptimizer(), nil
 	}
+	// With the physical limiter among the constraints, a replica must fit a
+	// node, not just the pool. A physical limiter that was skipped is not
+	// among them, and its node fit goes with it.
+	nodes, reason := allocation.NodeViewFor(constraints, e.utilizationShare.nodes, time.Now())
+	e.reportNodeFitSkipped(ctx, allocation.PhysicalBounds(constraints), reason)
+	if g, ok := optimizer.(*allocation.GreedyByScoreOptimizer); ok {
+		g.Nodes = nodes.WithLayoutLog(&e.layouts)
+	}
 	// What each namespace may still take, for the warm pool -- published HERE,
 	// once per cycle, from the constraints every provider agreed on. The
 	// optimizer publishes it too, but only from the attribution pass of a model
@@ -1309,6 +1336,28 @@ func (e *Engine) selectV2Optimizer(
 	now := time.Now()
 	allocation.PublishNamespaceHeadroom(allocation.WithholdPromised(constraints, decision.LatestSharePromised(now)), now)
 	return optimizer, constraints
+}
+
+// reportNodeFitSkipped logs, when it changes, that the physical limiter bounds
+// the cycle (bounded) but replicas are fitted to the pool and not to nodes,
+// and why; and once more when nodes are fitted again. A cycle the physical
+// limiter does not bound fits nothing to nodes and says nothing: no physical
+// limiter is not "fitted again", and the next skip is reported afresh.
+func (e *Engine) reportNodeFitSkipped(ctx context.Context, bounded bool, reason string) {
+	if !bounded {
+		e.nodeFitSkipped = ""
+		return
+	}
+	if reason == e.nodeFitSkipped {
+		return
+	}
+	logger := ctrl.LoggerFrom(ctx)
+	if reason != "" {
+		logger.Info("Physical limiter: replicas are not fitted to nodes this cycle", "reason", reason)
+	} else {
+		logger.Info("Physical limiter: replicas are fitted to nodes again")
+	}
+	e.nodeFitSkipped = reason
 }
 
 // resolveRescaleFlags builds the scope-coupled rescale enablement for this cycle:
@@ -2262,7 +2311,7 @@ func (e *Engine) applySaturationDecisions(
 				// Emit Kubernetes event for observability
 				e.recordScalingEvent(&updateVa, decision.Action, decision.TargetReplicas, decision.Reason())
 				if decision.WasLimited {
-					e.recordEvent(va, corev1.EventTypeWarning, constants.K8SEventResourceConstrained, decision.Reason())
+					e.recordEvent(va, corev1.EventTypeWarning, constants.K8SEventResourceConstrained, constrainedMessage(&decision))
 				}
 
 				logger.Info("Successfully emitted metrics",

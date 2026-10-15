@@ -108,7 +108,7 @@ func LimiterSignature(cfg *config.Config) string {
 func newInventoryLimiter(kubeClient client.Client) Limiter {
 	gpuDiscovery := gpunodes.NewK8sWithGpuOperator(kubeClient)
 	gpuInventory := NewTypeInventoryWithUsage("cluster-gpu-inventory", gpuDiscovery)
-	return NewDefaultLimiter("gpu-limiter", gpuInventory)
+	return NewDefaultLimiter(PhysicalLimiterName, gpuInventory)
 }
 
 // newQuotaLimiter builds one DefaultLimiter per QuotaLimiterConfig entry, each

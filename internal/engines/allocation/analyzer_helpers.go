@@ -466,7 +466,30 @@ func roleAtCeiling(
 // partner; then the role holding the most GPUs gives one replica at a time
 // until the group fits, which can move the ratio further. A role whose k is
 // already 0 stays 0.
+//
+// Then, with a node view (fit.nodes, built when a physical limiter bounds the
+// cycle), the roles must also fit the NODES together (fitPairToNodes): a pool
+// of 16 free GPUs as 4+4+8 holds one 8-GPU replica, not a prefill and a decode.
+// That applies to a single role too. Not even one replica of each placing is
+// scarcity, as above; what places is debited from the view.
 func fitPairToBudget(
+	picked []string,
+	kByRole map[string]int,
+	variantByRole map[string]string,
+	variants []variantRecord,
+	stateMap map[string]domain.VariantReplicaState,
+	available map[string]int,
+	fit nodeFit,
+) bool {
+	if !fitPairToPools(picked, kByRole, variantByRole, variants, stateMap, available) {
+		return false
+	}
+	return fitPairToNodes(picked, kByRole, variantByRole, variants, stateMap, fit)
+}
+
+// fitPairToPools is fitPairToBudget's pool half: the roles that draw on one
+// budget key fit it together.
+func fitPairToPools(
 	picked []string,
 	kByRole map[string]int,
 	variantByRole map[string]string,
@@ -541,6 +564,90 @@ func fitPairToBudget(
 	return true
 }
 
+// nodeFit is what fitting replicas to nodes needs: the cycle's node view, nil
+// when no physical limiter bounds the cycle, the namespace of the model being
+// placed (for its variants' log key), and the model's limit tracker, which
+// records a cut the nodes made as node fit's (markNodeFit).
+type nodeFit struct {
+	nodes     *NodeView
+	namespace string
+	limited   gpuLimitTracker
+}
+
+// replica is one replica of variant v as the view places it: its pods
+// (NodeView.replicaPods), tolerations and topology key.
+func (f nodeFit) replica(variants []variantRecord, stateMap map[string]domain.VariantReplicaState, v string) replicaFit {
+	st := stateMap[v]
+	return f.nodes.fitOf(ReplicaShape{Variant: f.namespace + "/" + v, Accelerator: accFromVCs(variants, v),
+		PodGPUs: st.PodGPUs, GPUs: gpusPerReplicaFromState(stateMap, v), Tolerations: st.Tolerations, DomainKey: st.TopologyKey})
+}
+
+// fitPairToNodes places the picked roles' replicas on a copy of the node view,
+// a replica of the role furthest behind its share of kByRole at a time, until
+// every role has its k or one does not place. kByRole is lowered to what
+// placed, and the copy's debits are committed to the view. Reports false, and
+// commits nothing, when some role with k > 0 placed no replica: a P/D pair
+// needs both of its roles placed. A role the nodes held back is marked as
+// held back by node fit.
+//
+// Stopping at the first role that does not place keeps the pair's ratio
+// roughly: the other role is not grown alone into holes its partner cannot
+// follow into.
+func fitPairToNodes(
+	picked []string,
+	kByRole map[string]int,
+	variantByRole map[string]string,
+	variants []variantRecord,
+	stateMap map[string]domain.VariantReplicaState,
+	fit nodeFit,
+) bool {
+	if fit.nodes == nil {
+		return true
+	}
+	trial := fit.nodes.Clone()
+	reps := make(map[string]replicaFit, len(picked))
+	for _, role := range picked {
+		reps[role] = fit.replica(variants, stateMap, variantByRole[role])
+	}
+	placed := make(map[string]int, len(picked))
+	short := ""
+	for {
+		next := ""
+		for _, role := range picked {
+			k := kByRole[role]
+			if placed[role] >= k {
+				continue
+			}
+			// The role with the smallest placed/k fraction, compared exactly.
+			if next == "" || placed[role]*kByRole[next] < placed[next]*k {
+				next = role
+			}
+		}
+		if next == "" {
+			break
+		}
+		if !trial.place(reps[next]) {
+			short = next
+			break
+		}
+		placed[next]++
+	}
+	if short != "" {
+		// The pools held this role's k; the nodes did not.
+		fit.limited.markNodeFit(variantByRole[short])
+	}
+	for _, role := range picked {
+		if kByRole[role] > 0 && placed[role] == 0 {
+			return false
+		}
+	}
+	for _, role := range picked {
+		kByRole[role] = placed[role]
+	}
+	fit.nodes.adopt(trial)
+	return true
+}
+
 // RolePickFn is the role-generic optimizer variant selector for the unified
 // allocateForModelPaired loop. Called once per role per iteration; returns the
 // chosen variant and its resource cap. Returning ("", 0) signals no variant
@@ -568,11 +675,8 @@ type RolePickFn func(
 // one replica through a 1119-deep queue while decode sat at its ceiling
 // (docs/proposals/prefill-starved-by-exhausted-role.md).
 //
-// It returns the GPUs it spent per key of available, as debited -- once per
-// spend, under the key the pick read. A caller that reconciles another budget
-// must use these rather than the change in available: debitBudget also draws
-// down every key that covers the one spent, so the per-key change counts a GPU
-// spent under a long spelling again under its short name.
+// It fits pools only; allocateForModelPairedOn fits nodes too and returns what
+// was spent.
 func allocateForModelPaired(
 	ctx context.Context,
 	e *NamedAnalyzerResult,
@@ -583,6 +687,30 @@ func allocateForModelPaired(
 	pick RolePickFn,
 	pickerState RolePairedState,
 	roles []string,
+) {
+	allocateForModelPairedOn(ctx, e, variants, stateMap, available, targets, pick, pickerState, roles, nodeFit{})
+}
+
+// allocateForModelPairedOn is allocateForModelPaired fitting every commit to
+// the nodes as well (fit.nodes, see fitPairToBudget); a zero nodeFit fits
+// pools only.
+//
+// It returns the GPUs it spent per key of available, as debited -- once per
+// spend, under the key the pick read. A caller that reconciles another budget
+// must use these rather than the change in available: debitBudget also draws
+// down every key that covers the one spent, so the per-key change counts a GPU
+// spent under a long spelling again under its short name.
+func allocateForModelPairedOn(
+	ctx context.Context,
+	e *NamedAnalyzerResult,
+	variants []variantRecord,
+	stateMap map[string]domain.VariantReplicaState,
+	available map[string]int,
+	targets map[string]int,
+	pick RolePickFn,
+	pickerState RolePairedState,
+	roles []string,
+	fit nodeFit,
 ) map[string]int {
 	logger := ctrl.LoggerFrom(ctx)
 	spent := map[string]int{}
@@ -693,7 +821,7 @@ func allocateForModelPaired(
 		// Each role was sized against the whole budget on its own; the pair
 		// must fit it together. Not even one replica of each fitting together
 		// is SCARCITY, and ends the pass the same way.
-		if !fitPairToBudget(picked, kByRole, variantByRole, variants, stateMap, available) {
+		if !fitPairToBudget(picked, kByRole, variantByRole, variants, stateMap, available, fit) {
 			break
 		}
 

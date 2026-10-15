@@ -20,22 +20,53 @@ import (
 // the two bounds before marking.
 //
 // Keyed by variant name, which is unique within a model. Trackers are per-model
-// so names never collide across models or namespaces.
-type gpuLimitTracker map[string]bool
+// so names never collide across models or namespaces. The value is what cut
+// the variant short: a pool (the provider bindingProvider names), or node fit.
+type gpuLimitTracker map[string]limitCause
+
+// limitCause is what cut a variant's scale-up short.
+type limitCause int
+
+const (
+	// limitedByPool: a GPU budget ran out.
+	limitedByPool limitCause = iota
+	// limitedByNodeFit: the pools had the GPUs, but no node held a whole
+	// replica (NodeView).
+	limitedByNodeFit
+)
+
+// NodeFitLimiterName is what LimitedBy, the ResourceConstrained event and the
+// limiter_name label of wva_decisions_limited_total carry when node fit, not a
+// pool, cut a scale-up short: the pools held the GPUs, but no schedulable node
+// held a whole replica. It names no limiter entry: node fit belongs to the
+// physical limiter (PhysicalLimiterName), and is told apart from its pool
+// running out because the remedy differs -- defragment or add a node of the
+// right size, not add GPUs.
+const NodeFitLimiterName = "node-fit"
 
 // mark records that variantName wanted more replicas than the GPU budget allowed.
 // Repeated marks are idempotent — a variant clamped in several fair-share
-// iterations is still one constrained decision.
+// iterations is still one constrained decision — and the last cut names the
+// cause: the budgets only shrink within a pass, so the last bound met is the one
+// that held.
 func (t gpuLimitTracker) mark(variantName string) {
 	if t != nil {
-		t[variantName] = true
+		t[variantName] = limitedByPool
+	}
+}
+
+// markNodeFit records that node fit, not a pool, held variantName back.
+func (t gpuLimitTracker) markNodeFit(variantName string) {
+	if t != nil {
+		t[variantName] = limitedByNodeFit
 	}
 }
 
 // applyGPULimitAttribution stamps the resource-constraint signal onto a model's
 // decisions: WasLimited for every variant the tracker recorded, and LimitedBy
-// naming the provider whose pool bound it. It also emits the
-// decisions_limited_total metric, once per constrained decision.
+// naming the provider whose pool bound it, or NodeFitLimiterName when node fit
+// did. It also emits the decisions_limited_total metric, once per constrained
+// decision.
 //
 // Decisions of every action carry the signal, not just scale-ups: a variant that
 // wanted to grow and was denied every GPU ends up at ActionNoChange, and that is
@@ -67,11 +98,16 @@ func applyGPULimitAttribution(
 	emitter := metrics.NewMetricsEmitter()
 	for i := range decisions {
 		d := &decisions[i]
-		if !limited[d.VariantName] {
+		cause, ok := limited[d.VariantName]
+		if !ok {
 			continue
 		}
 		d.WasLimited = true
-		d.LimitedBy = bindingProvider(constraints, d.Namespace, d.AcceleratorName)
+		if cause == limitedByNodeFit {
+			d.LimitedBy = NodeFitLimiterName
+		} else {
+			d.LimitedBy = bindingProvider(constraints, d.Namespace, d.AcceleratorName)
+		}
 		emitter.RecordDecisionsLimitedTotalMetric(d.VariantName, d.Namespace, d.LimitedBy)
 
 		// A warm pool of this accelerator type, in this namespace, should stop

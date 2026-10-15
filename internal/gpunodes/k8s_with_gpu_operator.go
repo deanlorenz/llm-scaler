@@ -177,6 +177,7 @@ func (d *K8sWithGpuOperator) listGPUNodes(ctx context.Context) (map[string]NodeI
 					Labels:        copyStringMap(node.Labels),
 					Accelerators:  make(map[string]AcceleratorModelInfo),
 					Unschedulable: refusesNewPods(&node),
+					Taints:        placementTaints(&node),
 				}
 			}
 			// i915 and xe resources use the same gpu.intel.com/product label, so
@@ -271,7 +272,10 @@ func (d *K8sWithGpuOperator) DiscoverUsage(ctx context.Context) (map[string]int,
 // Counts REQUESTS, not allocations, and includes pods that are scheduled but not
 // yet running (Spec.NodeName set, not Succeeded/Failed): the scheduler has already
 // committed those GPUs, so treating them as free would let two wakes place onto
-// the same device. Unscheduled pods hold nothing and are skipped.
+// the same device. A Pending pod the scheduler has nominated a node for
+// (Status.NominatedNodeName, after preempting pods there) is counted on that
+// node too: the hole it is waiting for is not free to anyone else. Other
+// unscheduled pods hold nothing and are skipped.
 func (d *K8sWithGpuOperator) DiscoverUsageByNamespace(ctx context.Context) (map[string]int, map[string]map[string]int, error) {
 	nodeGPUType, err := d.discoverNodeGPUTypes(ctx)
 	if err != nil {
@@ -304,6 +308,7 @@ func (d *K8sWithGpuOperator) DiscoverUsageWithNodes(ctx context.Context) (map[st
 			Used:          byNode[name],
 			Labels:        nodes[name].Labels,
 			Unschedulable: nodes[name].Unschedulable,
+			Taints:        nodes[name].Taints,
 		}
 	}
 	return byType, byNamespace, out, nil
@@ -322,14 +327,15 @@ func (d *K8sWithGpuOperator) usageWalk(ctx context.Context, nodeGPUType map[stri
 	usageByNode := make(map[string]int)
 
 	for _, pod := range pods {
-		if pod.Spec.NodeName == "" {
+		node := occupiedNode(&pod)
+		if node == "" {
 			continue
 		}
 		if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
 			continue
 		}
 
-		gpuType, ok := nodeGPUType[pod.Spec.NodeName]
+		gpuType, ok := nodeGPUType[node]
 		if !ok {
 			// Node doesn't have GPUs, skip
 			continue
@@ -340,7 +346,7 @@ func (d *K8sWithGpuOperator) usageWalk(ctx context.Context, nodeGPUType map[stri
 			continue
 		}
 		usageByType[gpuType] += gpuCount
-		usageByNode[pod.Spec.NodeName] += gpuCount
+		usageByNode[node] += gpuCount
 		perType, seen := usageByNamespace[pod.Namespace]
 		if !seen {
 			perType = make(map[string]int)
@@ -350,6 +356,19 @@ func (d *K8sWithGpuOperator) usageWalk(ctx context.Context, nodeGPUType map[stri
 	}
 
 	return usageByType, usageByNamespace, usageByNode, nil
+}
+
+// occupiedNode is the node whose GPUs pod holds or is about to: the node it is
+// scheduled to, else, while Pending, the node the scheduler nominated for it.
+// "" for a pod that holds no node.
+func occupiedNode(pod *corev1.Pod) string {
+	if pod.Spec.NodeName != "" {
+		return pod.Spec.NodeName
+	}
+	if pod.Status.Phase == corev1.PodPending {
+		return pod.Status.NominatedNodeName
+	}
+	return ""
 }
 
 // listPods returns every Pod the usage walk considers: through Client, or,
@@ -516,8 +535,8 @@ var nodeRemovalTaints = map[string]bool{
 // (node.kubernetes.io/...: not-ready, unreachable, a pressure) or an
 // autoscaler's removal taint. A placement
 // that counted on its free GPUs would open a hole nobody can use. Other taints
-// are not read: a GPU pool's own taint is tolerated by the pods it exists for,
-// and matching a receiver's tolerations is not built.
+// are kept apart (placementTaints): a GPU pool's own taint is tolerated by the
+// pods it exists for, and node fit matches it against each pod's tolerations.
 func refusesNewPods(node *corev1.Node) bool {
 	if node.Spec.Unschedulable {
 		return true
@@ -536,4 +555,21 @@ func refusesNewPods(node *corev1.Node) bool {
 		}
 	}
 	return false
+}
+
+// placementTaints is node's NoSchedule and NoExecute taints that refusesNewPods
+// does not already judge: the ones a pod's tolerations decide, such as a
+// dedicated GPU pool's. Nil when there are none.
+func placementTaints(node *corev1.Node) []corev1.Taint {
+	var out []corev1.Taint
+	for _, t := range node.Spec.Taints {
+		if t.Effect != corev1.TaintEffectNoSchedule && t.Effect != corev1.TaintEffectNoExecute {
+			continue
+		}
+		if strings.HasPrefix(t.Key, "node.kubernetes.io/") || nodeRemovalTaints[t.Key] {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
 }

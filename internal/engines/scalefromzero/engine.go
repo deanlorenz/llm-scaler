@@ -693,12 +693,16 @@ func observeCompletedWakes(
 // the selection's either way.
 func (e *Engine) selectOrClaim(ctx context.Context, group modelGroup, candidates []Candidate, covered coverage,
 	constraints []*allocation.ResourceConstraints) ([]Candidate, SelectionOutcome) {
+	// With the physical limiter among the constraints, each member of a wake
+	// must also land on a node.
+	nodes, _ := allocation.NodeViewFor(constraints, nil, time.Now())
 	selected, outcome := selectServingSet(SelectionInput{
 		Namespace:      group.namespace,
 		Candidates:     candidates,
 		DecodeCovered:  covered.decode,
 		PrefillCovered: covered.prefill,
 		Constraints:    constraints,
+		Nodes:          nodes,
 		RequirePrefill: e.requirePrefill(group),
 	})
 	if len(selected) == 0 && outcome == OutcomeNoCapacity {

@@ -28,6 +28,16 @@ type GreedyByScoreOptimizer struct {
 	// current cycle (set by the engine before Optimize). Zero value = off, which
 	// keeps the additive fair-share behaviour unchanged.
 	Rescale RescaleFlags
+
+	// Nodes is the cycle's per-node picture of free GPUs (set by the engine
+	// before Optimize), nil when no physical limiter bounds the cycle. With
+	// it, a replica must fit a node, not just the pool: "no node holds a whole
+	// replica" is scarcity, a P/D pair needs both roles placed, and every
+	// replica ordered is debited from its node for the rest of the pass. A
+	// pass consumes it: Optimize clears it when done, so a later pass does not
+	// place on the holes an earlier one already took (the engine sets a fresh
+	// one every cycle). What the pass left is kept in its headroom.
+	Nodes *NodeView
 }
 
 // NewGreedyByScoreOptimizer creates a new GreedyByScoreOptimizer.
@@ -88,6 +98,9 @@ func (o *GreedyByScoreOptimizer) Optimize(
 	constraints []*ResourceConstraints,
 ) []domain.VariantDecision {
 	logger := ctrl.LoggerFrom(ctx).WithName(o.Name())
+	// One pass consumes one node view; what it left is in o.pass. A shadow
+	// pass runs on a copy and does not touch it.
+	defer func() { o.Nodes = nil }()
 	declared := declaredAccelerators(requests)
 	available := mergeConstraints(constraints, declared...)
 	availableByNS := mergeNamespaceConstraints(constraints, declared...)
@@ -291,9 +304,14 @@ func (o *GreedyByScoreOptimizer) allocateForModel(
 
 	// Unified path: fairShareRolePick behind the RolePickFn interface.
 	// α logic removed in commit 3.
-	pick := fairShareRolePick(target, w.roles, w.limited)
-	spent := allocateForModelPaired(ctx, w.e, w.records, stateMap, effAvail,
-		w.targets, pick, ps, w.roles)
+	fit := nodeFit{nodes: o.Nodes, namespace: w.req.Namespace, limited: w.limited}
+	// Whatever this model places on the nodes is charged to it, so a later
+	// reader can take back the placements of a model whose target the
+	// utilization share overrides.
+	defer o.Nodes.setOwner(o.Nodes.setOwner(modelKey(w.req)))
+	pick := fairShareRolePickOn(target, w.roles, w.limited, fit)
+	spent := allocateForModelPairedOn(ctx, w.e, w.records, stateMap, effAvail,
+		w.targets, pick, ps, w.roles, fit)
 
 	// Reconcile: apply what was spent to the cluster-wide budget and, where
 	// this namespace caps the type, to the namespace budget. What was spent, not
@@ -392,6 +410,13 @@ func effectiveAvailable(available, nsBudget map[string]int) map[string]int {
 // afterwards can carry WasLimited / LimitedBy. A variant stopped by its own
 // MaxReplicas ceiling is never recorded: that is user intent, not scarcity.
 func fairShareRolePick(target float64, roles []string, limited gpuLimitTracker) RolePickFn {
+	return fairShareRolePickOn(target, roles, limited, nodeFit{})
+}
+
+// fairShareRolePickOn is fairShareRolePick that also caps a variant at the
+// replicas the nodes hold (fit.nodes): a variant no node holds a whole replica
+// of is held back by scarcity, as one the pool cannot fit is.
+func fairShareRolePickOn(target float64, roles []string, limited gpuLimitTracker, fit nodeFit) RolePickFn {
 	_ = roles // roles available for future per-role budget splitting
 	return func(
 		role string,
@@ -404,8 +429,9 @@ func fairShareRolePick(target float64, roles []string, limited gpuLimitTracker) 
 		// Variants the GPU budget could not fit even one replica of. They only
 		// count as constrained if the role goes unserved below — a variant
 		// skipped while a cheaper sibling still satisfies the role's demand was
-		// not the thing scarcity held back.
-		var gpuBlocked []string
+		// not the thing scarcity held back. nodeBlocked are those the pools
+		// held but no node did: node fit is then the cause named.
+		var gpuBlocked, nodeBlocked []string
 		for _, vc := range sortByCostEfficiencyAsc(roleVCs) {
 			if vc.PerReplicaCapacity <= 0 {
 				continue
@@ -430,12 +456,29 @@ func fairShareRolePick(target float64, roles []string, limited gpuLimitTracker) 
 				}
 				capN = min(capN, headroom)
 			}
+			nodeCut := false
+			if fit.nodes != nil && capN > 0 {
+				// The nodes may hold fewer whole replicas than the pool has
+				// GPUs for; that is scarcity too, of nodes rather than GPUs.
+				onNodes := fit.nodes.fits(fit.replica(variants, stateMap, vc.VariantName), capN)
+				if onNodes == 0 {
+					nodeBlocked = append(nodeBlocked, vc.VariantName)
+					continue
+				}
+				if onNodes < capN {
+					capN, gpuCap, nodeCut = onNodes, onNodes, true
+				}
+			}
 			if capN > 0 {
 				// The variant grew, but short of the fair share it asked for
 				// because the GPU budget ran out first. capN != gpuCap means
 				// MaxReplicas was the tighter bound, which is not scarcity.
 				if gpuCap < fairShareCap && capN == gpuCap {
-					limited.mark(vc.VariantName)
+					if nodeCut {
+						limited.markNodeFit(vc.VariantName)
+					} else {
+						limited.mark(vc.VariantName)
+					}
 				}
 				return vc.VariantName, capN
 			}
@@ -444,6 +487,9 @@ func fairShareRolePick(target float64, roles []string, limited gpuLimitTracker) 
 		// really was held back by scarcity.
 		for _, v := range gpuBlocked {
 			limited.mark(v)
+		}
+		for _, v := range nodeBlocked {
+			limited.markNodeFit(v)
 		}
 		return "", 0
 	}

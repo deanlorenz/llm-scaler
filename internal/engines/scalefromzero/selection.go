@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"sort"
 
+	corev1 "k8s.io/api/core/v1"
+
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
@@ -42,6 +44,11 @@ type Candidate struct {
 	// PodGPUs is each pod's GPUs in that replica, leader first; nil when no
 	// pod requests a GPU explicitly.
 	PodGPUs []int
+	// Tolerations are its pods' (scaletarget.PodTolerations), and DomainKey
+	// the node label all of a replica's pods must share a value of (an
+	// exclusive-topology LeaderWorkerSet): which nodes node fit may place it on.
+	Tolerations []corev1.Toleration
+	DomainKey   string
 	// Cost is the variant's declared cost, used to rank equally-feasible options.
 	Cost float64
 }
@@ -92,6 +99,11 @@ type SelectionInput struct {
 	// Constraints are the GPU/quota constraints to place within. Empty means
 	// unknown, which FitsGPUBudget treats as permissive.
 	Constraints []*allocation.ResourceConstraints
+	// Nodes is the per-node picture of free GPUs when the physical limiter
+	// bounds the wake; nil fits by pools alone. A set fits only if each
+	// member's replica lands on a node: free GPUs as 4+4+8 hold one 8-GPU
+	// replica, not a P/D pair.
+	Nodes *allocation.NodeView
 	// RequirePrefill refuses a decode-only wake for a disaggregated model.
 	RequirePrefill bool
 }
@@ -228,7 +240,31 @@ func cheapestFeasiblePair(in SelectionInput, decodes, prefills []Candidate) ([]C
 // fits reports whether the set can be placed within the GPU budget, testing the
 // combined demand rather than each member alone.
 func fits(in SelectionInput, set []Candidate) bool {
-	return allocation.FitsGPUBudget(in.Constraints, in.Namespace, demandOf(set))
+	if !allocation.FitsGPUBudget(in.Constraints, in.Namespace, demandOf(set)) {
+		return false
+	}
+	return in.Nodes.PlaceReplicas(replicaShapes(in.Namespace, set), false)
+}
+
+// replicaShapes is one replica of each candidate of set as the node view fits
+// it. A candidate whose accelerator is unresolved is left out, as demandOf
+// leaves it out of the budget: its placement is unknown, and unknown does not
+// block.
+func replicaShapes(namespace string, set []Candidate) []allocation.ReplicaShape {
+	out := make([]allocation.ReplicaShape, 0, len(set))
+	for _, c := range set {
+		if !constants.IsAcceleratorResolved(c.Accelerator) {
+			continue
+		}
+		out = append(out, shapeOf(namespace, c))
+	}
+	return out
+}
+
+// shapeOf is one replica of c as the node view fits it.
+func shapeOf(namespace string, c Candidate) allocation.ReplicaShape {
+	return allocation.ReplicaShape{Variant: namespace + "/" + c.VariantName, Accelerator: c.Accelerator,
+		PodGPUs: c.PodGPUs, GPUs: max(c.GPUsPerReplica, 1), Tolerations: c.Tolerations, DomainKey: c.DomainKey}
 }
 
 // demandOf sums one replica of each candidate, keyed by accelerator type. Two

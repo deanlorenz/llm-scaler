@@ -370,6 +370,8 @@ func (o *GreedyByScoreOptimizer) rescaleModelDecisions(
 	tgtByRole := distributeGPUsByWeight(targetGPUs, roles, demByRole, curByRole, floorByRole)
 
 	limited := make(gpuLimitTracker)
+	// grown is what each role's fill added, per variant, in the order added.
+	grown := map[string][]roleGrowth{}
 	for _, role := range roles {
 		rt, rc := tgtByRole[role], curByRole[role]
 		switch {
@@ -384,12 +386,21 @@ func (o *GreedyByScoreOptimizer) rescaleModelDecisions(
 			if gpuCapped {
 				want = *freeThisCycle
 			}
+			before := maps.Clone(targets)
 			*freeThisCycle -= fillRole(records, role, stateMap, targets, want)
 			if gpuCapped {
 				markRoleGPULimited(records, role, stateMap, targets, limited)
 			}
+			for _, vc := range sortByCostEfficiencyAsc(variantsForRole(records, role)) {
+				if n := targets[vc.VariantName] - before[vc.VariantName]; n > 0 {
+					grown[role] = append(grown[role], roleGrowth{variant: vc.VariantName, n: n})
+				}
+			}
 		}
 	}
+	// With a node view the fills must also land on nodes, as the additive
+	// path's do: what does not place is given back to the cycle's free GPUs.
+	*freeThisCycle += o.fitRescaleToNodes(req, records, stateMap, targets, roles, grown, limited)
 
 	decisions := buildDecisionsWithOptimizer(req, stateMap, vcMap, targets, "rescale")
 	applyGPULimitAttribution(decisions, limited, constraints)
@@ -400,6 +411,94 @@ func (o *GreedyByScoreOptimizer) rescaleModelDecisions(
 		}
 	}
 	return decisions
+}
+
+// roleGrowth is n replicas a rescale fill added to variant.
+type roleGrowth struct {
+	variant string
+	n       int
+}
+
+// fitRescaleToNodes places a rescale fill's replicas (grown, per role) on the
+// cycle's node view, as fitPairToNodes places the additive path's: one replica
+// at a time, of the role furthest behind its share first, each pod best-fit,
+// until every role has its replicas or one does not place. A model filling
+// more than one role -- a P/D pair -- grows only if every such role placed at
+// least one replica: it never grows half a pair. What places is debited from
+// the view, charged to the model; what does not is taken back off targets, its
+// variant marked as held back by node fit, and its GPUs returned. Without a
+// node view it does nothing and returns 0.
+func (o *GreedyByScoreOptimizer) fitRescaleToNodes(req ModelScalingRequest, records []variantRecord,
+	stateMap map[string]domain.VariantReplicaState, targets map[string]int, roles []string,
+	grown map[string][]roleGrowth, limited gpuLimitTracker) int {
+	if o.Nodes == nil || len(grown) == 0 {
+		return 0
+	}
+	fit := nodeFit{nodes: o.Nodes, namespace: req.Namespace, limited: limited}
+	filling := make([]string, 0, len(grown))
+	want := map[string]int{}
+	for _, role := range roles {
+		for _, g := range grown[role] {
+			want[role] += g.n
+		}
+		if want[role] > 0 {
+			filling = append(filling, role)
+		}
+	}
+	trial := o.Nodes.Clone()
+	placed := map[string]int{}        // per role
+	placedVariant := map[string]int{} // per variant
+	short := ""
+	for {
+		next := ""
+		for _, role := range filling {
+			if placed[role] >= want[role] {
+				continue
+			}
+			// The role with the smallest placed/want fraction, compared exactly.
+			if next == "" || placed[role]*want[next] < placed[next]*want[role] {
+				next = role
+			}
+		}
+		if next == "" {
+			break
+		}
+		// The role's replicas in the order its fill added them.
+		v, i := "", placed[next]
+		for _, g := range grown[next] {
+			if i < g.n {
+				v = g.variant
+				break
+			}
+			i -= g.n
+		}
+		if !trial.place(fit.replica(records, stateMap, v)) {
+			short = v
+			break
+		}
+		placed[next]++
+		placedVariant[v]++
+	}
+	if short != "" {
+		limited.markNodeFit(short)
+	}
+	if len(filling) > 1 && slices.ContainsFunc(filling, func(role string) bool { return placed[role] == 0 }) {
+		clear(placedVariant) // half a pair is no pair: nothing grows
+	} else {
+		defer o.Nodes.setOwner(o.Nodes.setOwner(modelKey(req)))
+		o.Nodes.adopt(trial)
+	}
+	// A variant belongs to one role and is grown once per fill.
+	refund := 0
+	for _, role := range filling {
+		for _, g := range grown[role] {
+			if back := g.n - placedVariant[g.variant]; back > 0 {
+				targets[g.variant] -= back
+				refund += back * gpusPerReplicaFromState(stateMap, g.variant)
+			}
+		}
+	}
+	return refund
 }
 
 // reclaimRole sheds up to deltaGPUs worth of a role's replicas, most-expensive-first,

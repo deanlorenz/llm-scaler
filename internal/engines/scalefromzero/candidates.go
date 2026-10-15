@@ -123,6 +123,8 @@ func (e *Engine) buildCandidates(
 			Accelerator:     candidateAccelerator(&va, scaleTarget),
 			GPUsPerReplica:  scaleTarget.GetTotalGPUsPerReplica(),
 			PodGPUs:         scaletarget.PodGPUs(scaleTarget),
+			Tolerations:     scaletarget.PodTolerations(scaleTarget),
+			DomainKey:       scaletarget.ExclusiveTopology(scaleTarget),
 			Cost:            resolveVariantCost(ctx, va),
 		})
 	}

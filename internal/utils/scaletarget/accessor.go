@@ -84,6 +84,22 @@ func PodGPUs(acc ScaleTargetAccessor) []int {
 	return nil
 }
 
+// PodTolerations returns the tolerations of a replica's pods as node fit judges
+// them: the leader's template, or the worker's when it has none of its own. A
+// LeaderWorkerSet's workers are judged by its leader's. Nil for a nil acc.
+func PodTolerations(acc ScaleTargetAccessor) []corev1.Toleration {
+	if acc == nil {
+		return nil
+	}
+	if t := acc.GetLeaderPodTemplateSpec(); t != nil {
+		return t.Spec.Tolerations
+	}
+	if t := acc.GetWorkerPodTemplateSpec(); t != nil {
+		return t.Spec.Tolerations
+	}
+	return nil
+}
+
 // IsLeaderWorkerSet reports whether acc is a LeaderWorkerSet. Group size is not
 // the test: an LWS of size 1 is still an LWS, whose pods belong to a
 // StatefulSet and are named by group index, not to a ReplicaSet.
