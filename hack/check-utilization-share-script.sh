@@ -83,6 +83,14 @@ expect "state: tuned shadow" "shadow plain" "$(printf '%s\n' "$TUNED_POLICY" | u
 expect "state: another optimizer" "other:fancy plain" "$(printf 'optimizer:\n  type: fancy\n' | us_block_state)"
 expect "budget: quotas per namespace share nothing" namespace "$(printf '%s\n' "$QUOTA_POLICY" | us_budget_scope)"
 expect "budget: a cluster quota is shared" cluster "$(printf '%s\n' "$CLUSTER_POLICY" | us_budget_scope)"
+# Models outside the quota namespaces still form a cluster group, under a
+# gpu-inventory limiter beside the quotas or with physicalGroups: true.
+expect "budget: quotas per namespace beside gpu-inventory are shared" cluster \
+    "$(printf '%s\n  - name: p\n    type: gpu-inventory\n' "$QUOTA_POLICY" | us_budget_scope)"
+expect "budget: quotas per namespace with physicalGroups are shared" cluster \
+    "$(printf '%s\n' "$TUNED_POLICY" | yq '.optimizer.utilizationShare.physicalGroups = true' | us_budget_scope)"
+expect "budget: physicalGroups false shares nothing" namespace \
+    "$(printf '%s\n' "$TUNED_POLICY" | yq '.optimizer.utilizationShare.physicalGroups = false' | us_budget_scope)"
 
 out="$(printf '%s\n' "$TUNED_POLICY" | us_policy_with_mode active)"
 expect "active: shadow false" false "$(printf '%s\n' "$out" | yq '.optimizer.utilizationShare.shadow')"
@@ -514,7 +522,7 @@ vcase "logs: every controller pod is read, not one that may be a standby" eval '
 fresh "$QUOTA_POLICY"; echo '{"level":"info","msg":"x","accelerator":"NVIDIA-H200"}' > "$STATE/logs"; run check
 vcase "check: reads accelerators from a json-encoded log" eval '[ $RC -eq 0 ] && says "resolves: NVIDIA-H200"'
 
-CASES_EXPECTED=78
+CASES_EXPECTED=81
 if [ "$CASES" -ne "$CASES_EXPECTED" ]; then
     fail "$CASES cases ran, not $CASES_EXPECTED. A case was added or removed; update CASES_EXPECTED deliberately."
 fi

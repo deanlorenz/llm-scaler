@@ -88,15 +88,20 @@ us_quota_keys() {
     yq -r '[.limiters[]? | select(.type == "quota") | .. | select(tag == "!!int") | path | .[-1]] | unique | .[]'
 }
 
-# us_budget_scope -- namespace when every quota entry is per namespace, so no
-# two namespaces share a budget; cluster otherwise (a cluster quota, or the
-# inventory, which is cluster-wide).
+# us_budget_scope -- namespace when every quota entry is per namespace and
+# nothing else forms a cluster group, so no two namespaces share a budget;
+# cluster otherwise (a cluster quota, the inventory, which is cluster-wide, or
+# per-namespace quotas beside a gpu-inventory limiter or physicalGroups: true).
 us_budget_scope() {
-    local p scopes
+    local p scopes extra
     p="$(cat)"
     [ "$(printf '%s\n' "$p" | us_limiter_kind)" = quota ] || { echo cluster; return 0; }
     scopes="$(printf '%s\n' "$p" | yq -r '[.limiters[]? | select(.type == "quota") | .scope // ""] | unique | join(" ")')" || return 1
-    if [ "$scopes" = namespace ]; then echo namespace; else echo cluster; fi
+    [ "$scopes" = namespace ] || { echo cluster; return 0; }
+    # A gpu-inventory limiter beside them, or physicalGroups: true, plans the
+    # models outside those namespaces in one cluster group per accelerator.
+    extra="$(printf '%s\n' "$p" | yq -r '([.limiters[]? | select(.type == "gpu-inventory" or .type == "inventory")] | length > 0) or (.optimizer.utilizationShare.physicalGroups == true)')" || return 1
+    if [ "$extra" = true ]; then echo cluster; else echo namespace; fi
 }
 
 # us_cluster_namespaces -- the block's clusterNamespaces, one per line: the only
@@ -533,11 +538,12 @@ verb_shadow() {
 # controller -- where the controller may not patch pods, with the command that
 # grants it there. It grants nothing there itself.
 #
-# Which namespaces share the budget, from the policy: none when every quota is
-# per namespace; with a cluster quota or the inventory, every namespace, or
-# only those in clusterNamespaces when the block lists some. A cluster budget
-# is split per accelerator, which this script cannot see, so the warning says
-# "if". A list it cannot read is said, not taken for none.
+# Which namespaces share the budget, from the policy (us_budget_scope): none
+# when every quota is per namespace and nothing else forms a cluster group;
+# otherwise every namespace, or only those in clusterNamespaces when the block
+# lists some. A cluster budget is split per accelerator, which this script
+# cannot see, so the warning says "if". A list it cannot read is said, not
+# taken for none.
 warn_ungranted_namespaces() {
     local list ns only odd
     if [ "$(printf '%s\n' "$POLICY" | us_budget_scope)" = namespace ]; then
