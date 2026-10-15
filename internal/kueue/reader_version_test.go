@@ -6,13 +6,18 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 )
 
 // kueueController is the Kueue controller Deployment in ns, running image.
@@ -187,6 +192,107 @@ var _ = Describe("Reader checks the Kueue controller version", func() {
 		Expect(unstructured.SetNestedField(notReady.Object, int64(0), "status", "readyReplicas")).To(Succeed())
 		Expect(down(notReady, leaderLease(leaseNow.Add(-time.Second), 15))).To(BeFalse(), "the Lease wins over readyReplicas")
 	})
+
+	// K7: a controller run with leader election off leaves the Lease of an
+	// earlier one behind, never renewed again. A Lease last renewed long
+	// before the Deployment last rolled out says nothing; readyReplicas does.
+	It("falls back to readyReplicas when the Lease predates the Deployment's last rollout", func() {
+		down := func(objs ...client.Object) bool {
+			snap, err := NewReader(versionClient(nil, append(docsExample(v, "cohortName"), objs...)...),
+				Options{now: func() time.Time { return leaseNow }}).Quotas(context.Background())
+			Expect(err).NotTo(HaveOccurred())
+			return snap.KueueControllerDown
+		}
+		rolledOut := func(ready int64, created, progressed time.Time) *unstructured.Unstructured {
+			d := kueueController("kueue-system", "registry.k8s.io/kueue/kueue:v0.20.0")
+			d.SetCreationTimestamp(metav1.NewTime(created))
+			Expect(unstructured.SetNestedField(d.Object, ready, "status", "readyReplicas")).To(Succeed())
+			if !progressed.IsZero() {
+				Expect(unstructured.SetNestedSlice(d.Object, []interface{}{map[string]interface{}{
+					"type": "Progressing", "status": "True", "lastUpdateTime": progressed.Format(time.RFC3339),
+				}}, "status", "conditions")).To(Succeed())
+			}
+			return d
+		}
+		old := leaderLease(leaseNow.Add(-48*time.Hour), 15)
+		Expect(down(rolledOut(1, leaseNow.Add(-24*time.Hour), time.Time{}), old)).To(BeFalse(),
+			"created a day after the Lease was last renewed, one ready replica: up")
+		Expect(down(rolledOut(0, leaseNow.Add(-24*time.Hour), time.Time{}), old)).To(BeTrue(),
+			"the same with no ready replica: down")
+		Expect(down(rolledOut(1, leaseNow.Add(-72*time.Hour), leaseNow.Add(-time.Hour)), old)).To(BeFalse(),
+			"rolled out an hour ago, Lease two days old: the rollout, not the creation, decides")
+		Expect(down(rolledOut(1, leaseNow.Add(-72*time.Hour), leaseNow.Add(-72*time.Hour)), leaderLease(leaseNow.Add(-time.Hour), 15))).
+			To(BeTrue(), "control: a Lease renewed after the rollout and then not for an hour is a leader gone")
+	})
+
+	// R2: wva_kueue_controller_version_known reads as the borrowing reasons
+	// do -- an untagged image the operator vouches for is known -- and exists
+	// only while the entry counts borrowing and its read checked the
+	// controller. It published Known alone, so the documented fix
+	// (assumeTestedVersion) never cleared the alert, and it paged for entries
+	// that count no borrowing.
+	It("publishes the version as known to borrowing, only while the entry counts it", func() {
+		reg := prometheus.NewRegistry()
+		Expect(metrics.InitMetrics(reg)).To(Succeed())
+		defer metrics.PublishKueueVersionKnown("r2", false, false)
+		gauge := func() []float64 {
+			mfs, err := reg.Gather()
+			Expect(err).NotTo(HaveOccurred())
+			var out []float64
+			for _, mf := range mfs {
+				if mf.GetName() == constants.WVAKueueControllerVersionKnown {
+					for _, m := range mf.GetMetric() {
+						out = append(out, m.GetGauge().GetValue())
+					}
+				}
+			}
+			return out
+		}
+		read := func(opts Options, objs ...client.Object) {
+			opts.Entry = "r2"
+			_, err := NewReader(versionClient(nil, objs...), opts).Quotas(context.Background())
+			Expect(err).NotTo(HaveOccurred())
+		}
+		digestOnly := append(docsExample(v, "cohortName"), kueueController("kueue-system", "registry.k8s.io/kueue/kueue@sha256:0123"))
+		read(Options{CountsBorrowing: true}, digestOnly...)
+		Expect(gauge()).To(Equal([]float64{0}), "untagged and not vouched for: unknown")
+		read(Options{CountsBorrowing: true, AssumeTestedVersion: true}, digestOnly...)
+		Expect(gauge()).To(Equal([]float64{1}), "assumeTestedVersion is the documented fix: known")
+		read(Options{}, digestOnly...)
+		Expect(gauge()).To(BeEmpty(), "an entry that counts no borrowing pages for nothing")
+		read(Options{CountsBorrowing: true}, digestOnly...)
+		Expect(gauge()).To(Equal([]float64{0}))
+		noCohort := []client.Object{flavor(v, "h100", map[string]interface{}{"nvidia.com/gpu.product": h100Product}),
+			clusterQueue(v, "solo-cq", flavorQuotas("h100", quota("nvidia.com/gpu", "8"))),
+			kueueController("kueue-system", "registry.k8s.io/kueue/kueue@sha256:0123")}
+		read(Options{CountsBorrowing: true}, noCohort...)
+		Expect(gauge()).To(BeEmpty(), "no cohort, the controller not checked: no stale value")
+	})
+
+	// G2: a Forbidden Deployment (a namespace-scoped install whose Role names
+	// only the Lease, or a narrowed one) is cached for forbiddenTTL on its own;
+	// the Lease is still read every refresh, so a leader that stops renewing
+	// is seen within one refresh, not after ten minutes.
+	It("re-reads the Lease every refresh while the Deployment is Forbidden", func() {
+		now := leaseNow
+		deploymentDenied := &interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, o client.Object, opts ...client.GetOption) error {
+			if o.GetObjectKind().GroupVersionKind().Kind == "Deployment" {
+				return forbidden("deployments")
+			}
+			return c.Get(ctx, key, o, opts...)
+		}}
+		lease := leaderLease(leaseNow.Add(-time.Second), 15)
+		c := versionClient(deploymentDenied, append(docsExample(v, "cohortName"), lease)...)
+		r := NewReader(c, Options{AssumeTestedVersion: true, now: func() time.Time { return now }})
+		down := func() bool {
+			snap, err := r.Quotas(context.Background())
+			Expect(err).NotTo(HaveOccurred())
+			return snap.KueueControllerDown
+		}
+		Expect(down()).To(BeFalse(), "the Lease is renewed")
+		now = now.Add(2 * time.Minute)
+		Expect(down()).To(BeTrue(), "not renewed for two minutes: the next refresh reads it, Deployment Forbidden or not")
+	})
 })
 
 var _ = Describe("ParseControllerVersion and VersionTested", func() {
@@ -201,6 +307,9 @@ var _ = Describe("ParseControllerVersion and VersionTested", func() {
 		Entry("no v", "kueue:0.19.3", "v0.19.3", true, true),
 		Entry("tag and digest", "r.io/kueue:v0.20.1@sha256:ab", "v0.20.1", true, true),
 		Entry("pre-release of an untested minor", "r.io/kueue:v0.21.0-rc.1", "v0.21.0-rc.1", true, false),
+		// K6: a pre-release of a tested minor is not that minor's release.
+		Entry("pre-release of a tested minor", "r.io/kueue:v0.20.0-rc.1", "v0.20.0-rc.1", true, false),
+		Entry("build metadata on a tested release", "r.io/kueue:v0.20.1+build.7", "v0.20.1+build.7", true, true),
 		Entry("older minor", "r.io/kueue:v0.18.9", "v0.18.9", true, false),
 		Entry("v1", "r.io/kueue:v1.0.0", "v1.0.0", true, false),
 		Entry("registry port, no tag", "localhost:5000/kueue", "", false, false),

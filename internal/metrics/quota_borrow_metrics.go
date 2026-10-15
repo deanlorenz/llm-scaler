@@ -187,19 +187,46 @@ var (
 	kueueBorrowedGPUsSeries seriesSet
 )
 
-// PublishKueueVersionKnown sets wva_kueue_controller_version_known. Call it on
-// each Kueue read that checks the controller.
-func PublishKueueVersionKnown(known bool) {
+// versionKnownBy holds, per Kueue reader (by its quota entry), whether the
+// controller's version counts as known to it, for the readers whose entry
+// counts borrowing and whose read checked the controller (R2).
+var versionKnownBy = struct {
+	sync.Mutex
+	m map[string]bool
+}{m: map[string]bool{}}
+
+// PublishKueueVersionKnown records reader source's answer and sets
+// wva_kueue_controller_version_known: 1 while every reader that counts
+// borrowing knows the version -- read from the image, or vouched for by
+// kueue.assumeTestedVersion, the operator's documented fix -- and 0 while one
+// does not. counting false drops the reader's answer: its entry counts no
+// borrowing, or its read found no cohort and did not check the controller,
+// so it has nothing to page about. With no reader left the series is
+// deleted, rather than left at a stale value.
+func PublishKueueVersionKnown(source string, known, counting bool) {
+	versionKnownBy.Lock()
+	defer versionKnownBy.Unlock()
+	if counting {
+		versionKnownBy.m[source] = known
+	} else {
+		delete(versionKnownBy.m, source)
+	}
 	if kueueVersionKnown == nil {
 		return
-	}
-	v := 0.0
-	if known {
-		v = 1
 	}
 	l := prometheus.Labels{}
 	if controllerInstance != "" {
 		l[constants.LabelControllerInstance] = controllerInstance
+	}
+	if len(versionKnownBy.m) == 0 {
+		kueueVersionKnown.Delete(l)
+		return
+	}
+	v := 1.0
+	for _, k := range versionKnownBy.m {
+		if !k {
+			v = 0
+		}
 	}
 	kueueVersionKnown.With(l).Set(v)
 }

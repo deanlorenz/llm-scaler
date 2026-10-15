@@ -37,11 +37,18 @@ var _ = Describe("Kueue borrowing gauges, stage 2", func() {
 		return out
 	}
 
-	It("publishes whether the Kueue controller's version is known", func() {
-		PublishKueueVersionKnown(false)
+	// R2: the series pages only while some entry counts borrowing, and 0
+	// while one of them does not know the version.
+	It("publishes whether the Kueue controller's version is known to every entry that counts borrowing", func() {
+		PublishKueueVersionKnown("a", false, true)
 		Expect(series(constants.WVAKueueControllerVersionKnown)).To(Equal(map[string]float64{"": 0}))
-		PublishKueueVersionKnown(true)
+		PublishKueueVersionKnown("b", true, true)
+		Expect(series(constants.WVAKueueControllerVersionKnown)).To(Equal(map[string]float64{"": 0}), "a still does not know it")
+		PublishKueueVersionKnown("a", true, true)
 		Expect(series(constants.WVAKueueControllerVersionKnown)).To(Equal(map[string]float64{"": 1}))
+		PublishKueueVersionKnown("a", false, false)
+		PublishKueueVersionKnown("b", false, false)
+		Expect(series(constants.WVAKueueControllerVersionKnown)).To(BeEmpty(), "no entry counts borrowing: no series to page on")
 	})
 
 	It("publishes the cooldown in force while borrowing is counted, and removes it after", func() {

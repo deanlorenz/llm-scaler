@@ -73,10 +73,12 @@ func ParseControllerVersion(image string) (string, bool) {
 }
 
 // VersionTested reports whether version, as ParseControllerVersion returns
-// it, is a release of a minor in TestedKueueVersions.
+// it, is a release of a minor in TestedKueueVersions. A pre-release of a
+// tested minor (v0.20.0-rc.1) is not that minor's release, and is not tested
+// (K6); build metadata (+...) does not make one.
 func VersionTested(version string) bool {
 	m := semverTag.FindStringSubmatch(version)
-	if m == nil {
+	if m == nil || strings.HasPrefix(m[4], "-") {
 		return false
 	}
 	major, _ := strconv.Atoi(m[1])
@@ -110,25 +112,34 @@ func outcomeOf(err error) readOutcome {
 
 // controllerVersion reads the Kueue controller's version from its Deployment's
 // image, and whether a leader runs from its leader-election Lease, falling
-// back to the Deployment's ready replicas when there is no Lease. Both are
-// read on every refresh; a Forbidden answer is kept for forbiddenTTL. A
-// failure that may pass keeps the last answer. Callers must hold r.mu.
+// back to the Deployment's ready replicas when there is no Lease, or when the
+// Lease was last renewed long before the Deployment last rolled out (K7: a
+// controller run with leader election off leaves the old Lease behind). Both
+// are read on every refresh. A Forbidden get is not repeated for forbiddenTTL,
+// each object on its own (G2): a Forbidden Deployment never freezes the
+// Lease, which shows whether a leader runs. A failure that may pass keeps the
+// last answer. Callers must hold r.mu.
 func (r *Reader) controllerVersion(ctx context.Context) ControllerVersion {
 	now := r.opts.now()
-	if r.versionForbidden && now.Sub(r.versionAt) < forbiddenTTL {
-		return r.version
-	}
 	ns := r.opts.ControllerNamespace
 	if ns == "" {
 		ns = DefaultControllerNamespace
 	}
-	d := &unstructured.Unstructured{}
-	d.SetGroupVersionKind(schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"})
-	dErr := r.client.Get(ctx, client.ObjectKey{Namespace: ns, Name: ControllerDeployment}, d)
-	lease := &unstructured.Unstructured{}
-	lease.SetGroupVersionKind(schema.GroupVersionKind{Group: "coordination.k8s.io", Version: "v1", Kind: "Lease"})
-	lErr := r.client.Get(ctx, client.ObjectKey{Namespace: ns, Name: ControllerLease}, lease)
-	dOut, lOut := outcomeOf(dErr), outcomeOf(lErr)
+	get := func(gvk schema.GroupVersionKind, name string, deniedAt *time.Time) (*unstructured.Unstructured, readOutcome) {
+		if !deniedAt.IsZero() && now.Sub(*deniedAt) < forbiddenTTL {
+			return nil, readForbidden
+		}
+		u := &unstructured.Unstructured{}
+		u.SetGroupVersionKind(gvk)
+		out := outcomeOf(r.client.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, u))
+		*deniedAt = time.Time{}
+		if out == readForbidden {
+			*deniedAt = now
+		}
+		return u, out
+	}
+	d, dOut := get(schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"}, ControllerDeployment, &r.deploymentDeniedAt)
+	lease, lOut := get(schema.GroupVersionKind{Group: "coordination.k8s.io", Version: "v1", Kind: "Lease"}, ControllerLease, &r.leaseDeniedAt)
 	if dOut == readTransient || lOut == readTransient {
 		return r.version // may pass: asked again next read
 	}
@@ -138,6 +149,12 @@ func (r *Reader) controllerVersion(ctx context.Context) ControllerVersion {
 		v = versionOf(d)
 	}
 	switch {
+	case lOut == readOK && dOut == readOK && leaseOrphaned(lease, d):
+		// The Lease predates the running Deployment by far: the controller
+		// runs without leader election, so the Deployment says whether it
+		// runs.
+		ready, _, _ := unstructured.NestedInt64(d.Object, "status", "readyReplicas")
+		v.Down = ready < 1
 	case lOut == readOK:
 		v.Down = leaseExpired(lease, now)
 	case lOut == readForbidden:
@@ -182,7 +199,6 @@ func (r *Reader) controllerVersion(ctx context.Context) ControllerVersion {
 		}
 	}
 	r.version, r.versionAt = v, now
-	r.versionForbidden = dOut == readForbidden || lOut == readForbidden
 	return v
 }
 
@@ -199,23 +215,60 @@ func readName(o readOutcome) string {
 	return "failed"
 }
 
+// leaseRenewal is a leader-election Lease's renewTime and duration; ok is
+// false when it has none that parses (never held).
+func leaseRenewal(lease *unstructured.Unstructured) (renewed time.Time, duration time.Duration, ok bool) {
+	raw, _, _ := unstructured.NestedString(lease.Object, "spec", "renewTime")
+	if raw == "" {
+		return time.Time{}, 0, false
+	}
+	renewed, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return time.Time{}, 0, false
+	}
+	duration = defaultLeaseDuration
+	if secs, found, _ := unstructured.NestedInt64(lease.Object, "spec", "leaseDurationSeconds"); found && secs > 0 {
+		duration = time.Duration(secs) * time.Second
+	}
+	return renewed, duration, true
+}
+
 // leaseExpired reports whether a leader-election Lease has not been renewed
 // for twice its duration: no leader runs. A Lease without a renewTime has
 // never been held.
 func leaseExpired(lease *unstructured.Unstructured, now time.Time) bool {
-	raw, _, _ := unstructured.NestedString(lease.Object, "spec", "renewTime")
-	if raw == "" {
-		return true
+	renewed, duration, ok := leaseRenewal(lease)
+	return !ok || now.Sub(renewed) > 2*duration
+}
+
+// orphanedAfter is how long before the Deployment's last rollout a Lease must
+// have been renewed last to be read as left behind (leaseOrphaned): far past
+// any handover between an old leader and a new one.
+const orphanedAfter = 10 * time.Minute
+
+// leaseOrphaned reports whether the Lease was last renewed long before the
+// Deployment last rolled out -- its Progressing condition's lastUpdateTime, or
+// its creation when it records none (K7). Every leader of the running
+// Deployment would have renewed it since, so none uses it: the controller
+// runs with leader election off, and the stale Lease says nothing.
+func leaseOrphaned(lease, d *unstructured.Unstructured) bool {
+	renewed, duration, ok := leaseRenewal(lease)
+	if !ok {
+		return false
 	}
-	renewed, err := time.Parse(time.RFC3339Nano, raw)
-	if err != nil {
-		return true
+	rollout := d.GetCreationTimestamp().Time
+	conds, _, _ := unstructured.NestedSlice(d.Object, "status", "conditions")
+	for _, raw := range conds {
+		c, _ := raw.(map[string]interface{})
+		if c["type"] != "Progressing" {
+			continue
+		}
+		s, _ := c["lastUpdateTime"].(string)
+		if at, err := time.Parse(time.RFC3339, s); err == nil && at.After(rollout) {
+			rollout = at
+		}
 	}
-	duration := defaultLeaseDuration
-	if secs, found, _ := unstructured.NestedInt64(lease.Object, "spec", "leaseDurationSeconds"); found && secs > 0 {
-		duration = time.Duration(secs) * time.Second
-	}
-	return now.Sub(renewed) > 2*duration
+	return !rollout.IsZero() && rollout.Sub(renewed) > max(orphanedAfter, 2*duration)
 }
 
 // versionOf reads the version from a Kueue controller Deployment: the image of

@@ -89,6 +89,15 @@ type Options struct {
 	// can: a Deployment that cannot be read is kueue-controller-down.
 	AssumeTestedVersion bool
 
+	// CountsBorrowing is set when the quota entry the reader serves counts
+	// cohort borrowing: only then does it publish
+	// wva_kueue_controller_version_known (R2).
+	CountsBorrowing bool
+
+	// Entry names the quota entry the reader serves, for the metrics it
+	// publishes. Not part of the options' identity.
+	Entry string `json:"-"`
+
 	// Workloads, when set, is where Workloads are read; nil reads through
 	// WorkloadsVia at the time of the read. Not part of the options' identity.
 	Workloads WorkloadSource `json:"-"`
@@ -122,10 +131,13 @@ type Reader struct {
 	// has been logged.
 	warnedPending bool
 	// version is the Kueue controller's version and liveness as last read, at
-	// versionAt; versionForbidden is set when that read was Forbidden.
-	version          ControllerVersion
-	versionAt        time.Time
-	versionForbidden bool
+	// versionAt. deploymentDeniedAt and leaseDeniedAt are when a get of the
+	// Deployment or of the Lease was last Forbidden, each kept on its own
+	// (G2): a Forbidden Deployment does not stop the Lease being read.
+	version            ControllerVersion
+	versionAt          time.Time
+	deploymentDeniedAt time.Time
+	leaseDeniedAt      time.Time
 }
 
 // NewReader constructs a Reader over the given client. Reads of unstructured
@@ -317,7 +329,9 @@ func (r *Reader) read(ctx context.Context) (config.ExternalQuotas, error) {
 		// does not lift.
 		topo.VersionUnknown = !version.Down && !version.Known && !r.opts.AssumeTestedVersion
 		controllerDown = version.Down
-		metrics.PublishKueueVersionKnown(version.Known)
+		// Known as the borrowing reasons read it: an image that names no
+		// version is known once the operator vouches for it (R2).
+		metrics.PublishKueueVersionKnown(r.opts.Entry, version.Known || r.opts.AssumeTestedVersion, r.opts.CountsBorrowing)
 		pending, unreadable := r.readPending(ctx, localQueues)
 		topo.LendersUnreadable = unreadable
 		classPriority, highest = pending.classPriority, pending.highestByNamespace
@@ -328,6 +342,10 @@ func (r *Reader) read(ctx context.Context) (config.ExternalQuotas, error) {
 			}
 			topo.Queues[name] = q
 		}
+	} else {
+		// No cohort, so the controller was not checked: the answer of an
+		// earlier read with cohorts no longer holds, and nothing borrows.
+		metrics.PublishKueueVersionKnown(r.opts.Entry, false, false)
 	}
 	// A read cut short by the caller is not a snapshot, even when every call
 	// it made happened to return: a client that ignores ctx (or one that turned

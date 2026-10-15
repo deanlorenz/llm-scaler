@@ -103,6 +103,10 @@ func sharedKueue(entry config.QuotaLimiterConfig, kubeClient client.Client, name
 		opts.ControllerNamespace = entry.Kueue.ControllerNamespace
 		opts.AssumeTestedVersion = entry.Kueue.AssumeTestedVersion
 	}
+	// As QuotaInventory.countsBorrowing reads the entry: the version series
+	// pages only for an entry that counts borrowing (R2).
+	opts.CountsBorrowing = entry.KueueCountsBorrowable() && entry.Scope == config.QuotaScopeNamespace
+	opts.Entry = entry.Name
 	key, _ := json.Marshal(opts)
 	kueueReaders.Lock()
 	defer kueueReaders.Unlock()
