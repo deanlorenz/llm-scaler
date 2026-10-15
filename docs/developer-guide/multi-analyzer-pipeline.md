@@ -342,19 +342,31 @@ field, maps and slices cloned) and changes three things per variant:
   without `ReasonNoData`/`ReasonError`, `N = D[role] / PRC` from the
   analyzer's own demand and capacity (`allocation.TotalReplicas`), and keeps
   the largest finite, non-negative one. Saturation is eligible only when the
-  policy lists it (`excludeByName`); with no contributor at all, saturation's
-  own `N` is the fallback. `Reason` records the path: `C0-agree` (several),
-  `C1-single`, `C2-sat-fallback`, `C4-no-signal`.
+  policy lists it (`ScalingPolicy.SaturationListed`: listed and enabled, or no
+  `analyzers` section at all), and `slo` never is: it only observes. `Reason`
+  records the path: `C0-agree` (several), `C1-single`, `C4-no-signal` (none).
 - **PRC.** `D_sat[role] / N`, the capacity at which saturation's demand needs
   `N` replicas. Saturation's own PRC is kept when saturation set `N` (`D/(D/P)`
   is not always `P`), when `D_sat[role]` is zero, and on `C4-no-signal`.
 - **Utilization**, recomputed from that PRC.
+- **Holds** (`compositeHolds`, `allocation.RoleHold`, per role). With
+  saturation unlisted, a role none of whose variants has a need is held both
+  ways. A listed analyzer other than saturation that is live but not eligible
+  -- inside its staleness grace with no reading, or returned nothing this
+  cycle (`listedInGrace` adds an entry with no `Result`) -- blocks scale-down
+  of the roles it reports variants for, or of every role when it reports
+  none. `applyHolds` zeroes the forbidden `RequiredCapacity`/`SpareCapacity`
+  (per role, and model-level when every role is held that way); the share
+  optimizer reads `Holds` itself, freezing the model on `NoScaleUp` and
+  raising the role's floor to what it has on `NoScaleDown`.
 
 The composite is judged against saturation's thresholds
 (`AnalyzerThresholds(saturation)`), and recorded in the same
 `recordAnalyzerMetrics` call as the analyzers, once a cycle, as analyzer
-`composite`. Its `Score` is the largest analyzer score, which the cross-model
-fair share reads. `allocation.CompositeHasSignal` is false when every variant
+`CompositeSignal`. Its `Score` is the largest score among the analyzers that
+contributed a need, saturation's when none did; the cross-model fair share
+reads it. It is live when any analyzer contributed a need, and as live as
+saturation otherwise. `allocation.CompositeHasSignal` is false when every variant
 is `C4-no-signal`; the engine then sets the `no-composite-signal` blocked
 reason (`reportSignalReason`), and clears it on every cycle that builds no
 composite.

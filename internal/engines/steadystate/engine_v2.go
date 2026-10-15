@@ -742,6 +742,49 @@ func (e *Engine) evictAllAnalyzerSeries() {
 	}
 }
 
+// livenessThreshold is how long an analyzer stays live after its last
+// informative result: analyzerLivenessStaleCycles optimization intervals.
+//
+// Config is nil in unit tests that construct a minimal Engine directly
+// (bypassing NewEngine, which panics on a nil Config in production). A present
+// Config returning a non-positive interval falls back to the same 30s default —
+// a zero/negative interval would otherwise zero the threshold and latch every
+// analyzer non-live, blocking all scale-down.
+func (e *Engine) livenessThreshold() time.Duration {
+	interval := 30 * time.Second
+	if e.Config != nil && e.Config.OptimizationInterval() > 0 {
+		interval = e.Config.OptimizationInterval()
+	}
+	return analyzerLivenessStaleCycles * interval
+}
+
+// listedInGrace returns an entry with no Result, and Live set, for each
+// analyzer the policy lists -- saturation and slo aside -- that returned
+// nothing this cycle while its last informative result is still inside the
+// staleness window. A failed run leaves no entry behind, so without this the
+// composite could not tell an analyzer inside its grace from one never listed.
+func (e *Engine) listedInGrace(namespace, modelID string, policy config.ScalingPolicy,
+	ran []allocation.NamedAnalyzerResult) []allocation.NamedAnalyzerResult {
+	perAnalyzer := e.lastGoodAnalysis[utils.GetNamespacedKey(namespace, modelID)]
+	threshold, now := e.livenessThreshold(), time.Now()
+	var out []allocation.NamedAnalyzerResult
+	for _, a := range policy.Analyzers {
+		name := a.EffectiveType()
+		named := func(nr allocation.NamedAnalyzerResult) bool { return nr.Name == name }
+		switch {
+		case name == domain.SaturationAnalyzerName || name == domain.SLOAnalyzerName,
+			!policy.AnalyzerEnabled(name),
+			slices.ContainsFunc(ran, named),
+			slices.ContainsFunc(out, named):
+			continue
+		}
+		if lastGood, ok := perAnalyzer[name]; ok && now.Sub(lastGood) <= threshold {
+			out = append(out, allocation.NamedAnalyzerResult{Name: name, Live: true})
+		}
+	}
+	return out
+}
+
 // updateLivenessAndSetLive refreshes e.lastGoodAnalysis for this model with
 // every informative result's AnalyzedAt (or the current time, as a fail-safe,
 // when an informative result carries a zero-valued AnalyzedAt), then sets
@@ -763,17 +806,8 @@ func (e *Engine) updateLivenessAndSetLive(
 	}
 	perAnalyzer := e.lastGoodAnalysis[modelKey]
 
-	// Config is nil in unit tests that construct a minimal Engine directly
-	// (bypassing NewEngine, which panics on a nil Config in production). A present
-	// Config returning a non-positive interval falls back to the same 30s default —
-	// a zero/negative interval would otherwise zero the threshold below and latch
-	// every analyzer non-live, blocking all scale-down.
-	interval := 30 * time.Second
-	if e.Config != nil && e.Config.OptimizationInterval() > 0 {
-		interval = e.Config.OptimizationInterval()
-	}
 	now := time.Now()
-	threshold := analyzerLivenessStaleCycles * interval
+	threshold := e.livenessThreshold()
 
 	for i := range namedResults {
 		nr := &namedResults[i]
@@ -1243,9 +1277,10 @@ func (e *Engine) collectV2ModelRequest(
 	// per-analyzer override included: the composite's demand is saturation's,
 	// and the warm pool's pressure reads the same pair.
 	eligibleAnalyzers := excludeByName(namedResults, domain.SLOAnalyzerName)
-	if !config.AnalyzerEnabled(domain.SaturationAnalyzerName) {
+	if !config.SaturationListed() {
 		eligibleAnalyzers = excludeByName(eligibleAnalyzers, domain.SaturationAnalyzerName)
 	}
+	eligibleAnalyzers = append(eligibleAnalyzers, e.listedInGrace(namespace, modelID, config, namedResults)...)
 	satUp, satDown := config.AnalyzerThresholds(domain.SaturationAnalyzerName)
 	composite := buildComposite(ctx, namedResults, eligibleAnalyzers, satUp, satDown)
 

@@ -79,6 +79,23 @@ type NamedAnalyzerResult struct {
 	// error state, never analyzed) cannot block scale-down. Recovery is automatic: a
 	// fresh informative result makes it live again on the next cycle.
 	Live bool
+
+	// Holds is what the composite forbids each role this cycle, keyed by role
+	// (domain.RoleBoth on an aggregated model); nil when nothing is held. The
+	// engine has already zeroed the forbidden RequiredCapacity or
+	// SpareCapacity; an optimizer that sizes from demand directly reads it here.
+	Holds map[string]RoleHold
+}
+
+// RoleHold is what the composite forbids one role this cycle.
+type RoleHold struct {
+	// NoScaleUp: no analyzer the policy lists can size the role, so nothing
+	// may grow it.
+	NoScaleUp bool
+	// NoScaleDown: no analyzer the policy lists can size the role, or one
+	// that sized it is inside its staleness grace with no reading, so nothing
+	// may shrink it.
+	NoScaleDown bool
 }
 
 // ModelScalingRequest bundles the analyzer result with variant state for one model.

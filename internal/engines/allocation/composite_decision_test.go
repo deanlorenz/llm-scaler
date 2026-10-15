@@ -193,9 +193,10 @@ var _ = Describe("buildComposite's contributor/decision logic (via resolveSOForT
 		})
 	})
 
-	Describe("C2-sat-fallback", func() {
-		// No other contributor for this SO, so saturation is the fallback.
-		It("falls back to saturation when no other analyzer contributes for this SO", func() {
+	Describe("saturation not listed", func() {
+		// Saturation outside entries (the policy does not list it) never
+		// sizes a variant, however usable its own reading.
+		It("does not fall back to saturation when no listed analyzer contributes", func() {
 			sat := makeAnalyzer(domain.SaturationAnalyzerName, 1000, 200) // N=5
 			otherNoData := NamedAnalyzerResult{
 				Name: "throughput",
@@ -204,20 +205,17 @@ var _ = Describe("buildComposite's contributor/decision logic (via resolveSOForT
 					VariantCapacities: []domain.VariantCapacity{{VariantName: "v", Reason: "T1-ols"}}, // informative but no PRC for v -> undefined N
 				},
 			}
-			// throughput is NOT an eligibleAnalyzers member with a defined
-			// contribution here (its own per-SO Reason check and TotalReplicas
-			// both fail it), and sat itself is not in "entries" (excluded
-			// upstream, mirroring sat being disabled) -- so the fallback fires.
 			d := resolveSOForTest([]NamedAnalyzerResult{otherNoData}, &sat, "v")
-			Expect(d.ok).To(BeTrue())
-			Expect(d.path).To(Equal(DecisionSatFallback))
-			Expect(d.n).To(Equal(5.0))
-			Expect(d.contributors).To(ConsistOf(domain.SaturationAnalyzerName))
+			Expect(d.ok).To(BeFalse())
+			Expect(d.path).To(Equal(DecisionNoSignal))
+			Expect(d.contributors).To(BeEmpty())
 		})
+	})
 
+	Describe("P0-store", func() {
 		// Idle SO with its own store record -- PRC from P0-store, N defined,
-		// composite scales up via the fallback path.
-		It("scales up from an idle SO's P0-store PRC via the fallback path", func() {
+		// and it contributes like a measured one.
+		It("scales up from an idle SO's P0-store PRC", func() {
 			sat := NamedAnalyzerResult{
 				Name: domain.SaturationAnalyzerName,
 				Live: true,
@@ -228,9 +226,9 @@ var _ = Describe("buildComposite's contributor/decision logic (via resolveSOForT
 					},
 				},
 			}
-			d := resolveSOForTest(nil, &sat, "v")
+			d := resolveSOForTest([]NamedAnalyzerResult{sat}, &sat, "v")
 			Expect(d.ok).To(BeTrue())
-			Expect(d.path).To(Equal(DecisionSatFallback))
+			Expect(d.path).To(Equal(DecisionSingle))
 			Expect(d.n).To(Equal(5.0))
 		})
 
@@ -247,9 +245,9 @@ var _ = Describe("buildComposite's contributor/decision logic (via resolveSOForT
 					},
 				},
 			}
-			d := resolveSOForTest(nil, &satBorrowed, "v")
+			d := resolveSOForTest([]NamedAnalyzerResult{satBorrowed}, &satBorrowed, "v")
 			Expect(d.ok).To(BeTrue())
-			Expect(d.path).To(Equal(DecisionSatFallback))
+			Expect(d.path).To(Equal(DecisionSingle))
 			Expect(d.n).To(Equal(2.0)) // 500/250, exactly as reported -- no clamp/discount
 		})
 	})
@@ -267,7 +265,7 @@ var _ = Describe("buildComposite's contributor/decision logic (via resolveSOForT
 					},
 				},
 			}
-			d := resolveSOForTest(nil, &sat, "v")
+			d := resolveSOForTest([]NamedAnalyzerResult{sat}, &sat, "v")
 			Expect(d.ok).To(BeFalse())
 			Expect(d.path).To(Equal(DecisionNoSignal))
 		})
@@ -281,27 +279,20 @@ var _ = Describe("buildComposite's contributor/decision logic (via resolveSOForT
 		It("records no-signal when saturation itself is not eligible and nothing else contributes", func() {
 			sat := makeAnalyzer(domain.SaturationAnalyzerName, 1000, 200)
 			sat.Live = false // not eligible
-			d := resolveSOForTest(nil, &sat, "v")
+			d := resolveSOForTest([]NamedAnalyzerResult{sat}, &sat, "v")
 			Expect(d.ok).To(BeFalse())
 			Expect(d.path).To(Equal(DecisionNoSignal))
 		})
 
 		// Regression guard: sat disabled (excluded from eligibleAnalyzers/
 		// "entries" upstream) AND !Eligible(sat) (here: stale) with no other
-		// contributor must record DecisionNoSignal, never
-		// DecisionSatFallback. A sat with no real result -- nil, erroring,
-		// no-data, or stale -- must never participate in scaling decisions,
-		// fallback or otherwise. Without the Eligible(sat) guard on the
-		// fallback, this case falls back.
-		It("never falls back to a disabled-and-stale sat, even with no other contributor (regression guard)", func() {
+		// contributor must record DecisionNoSignal. A sat with no real result
+		// -- nil, erroring, no-data, or stale -- must never participate in
+		// scaling decisions.
+		It("never sizes on a disabled-and-stale sat, even with no other contributor (regression guard)", func() {
 			disabledAndStaleSat := makeAnalyzer(domain.SaturationAnalyzerName, 1000, 200) // N=5, would satisfy TotalReplicas if reached
 			disabledAndStaleSat.Live = false                                              // stale -- fails Eligible()
-			// sat excluded from "entries" (mirrors being excluded from
-			// eligibleAnalyzers upstream for being disabled) AND not itself
-			// Eligible -- both conditions the regression guard needs.
 			d := resolveSOForTest(nil, &disabledAndStaleSat, "v")
-			Expect(d.path).ToNot(Equal(DecisionSatFallback),
-				"a sat with no real result must never produce a fallback value")
 			Expect(d.path).To(Equal(DecisionNoSignal))
 			Expect(d.ok).To(BeFalse())
 			Expect(d.contributors).To(BeEmpty())
@@ -311,12 +302,12 @@ var _ = Describe("buildComposite's contributor/decision logic (via resolveSOForT
 	Describe("eligibility gating", func() {
 		// Non-live analyzer -> not a contributor.
 		It("excludes a non-live analyzer from contributing", func() {
-			sat := makeAnalyzer(domain.SaturationAnalyzerName, 1000, 200) // N=5, fallback-eligible
+			sat := makeAnalyzer(domain.SaturationAnalyzerName, 1000, 200) // N=5
 			other := makeAnalyzer("throughput", 2400, 200)                // N=12, but non-live
 			other.Live = false
-			d := resolveSOForTest([]NamedAnalyzerResult{other}, &sat, "v")
+			d := resolveSOForTest([]NamedAnalyzerResult{sat, other}, &sat, "v")
 			Expect(d.ok).To(BeTrue())
-			Expect(d.path).To(Equal(DecisionSatFallback))
+			Expect(d.path).To(Equal(DecisionSingle))
 			Expect(d.n).To(Equal(5.0))
 			Expect(d.contributors).To(ConsistOf(domain.SaturationAnalyzerName))
 		})
@@ -333,9 +324,9 @@ var _ = Describe("buildComposite's contributor/decision logic (via resolveSOForT
 					VariantCapacities: []domain.VariantCapacity{{VariantName: "v", PerReplicaCapacity: 200, Reason: ReasonNoData}},
 				},
 			}
-			d := resolveSOForTest([]NamedAnalyzerResult{other}, &sat, "v")
+			d := resolveSOForTest([]NamedAnalyzerResult{sat, other}, &sat, "v")
 			Expect(d.ok).To(BeTrue())
-			Expect(d.path).To(Equal(DecisionSatFallback))
+			Expect(d.path).To(Equal(DecisionSingle))
 			Expect(d.n).To(Equal(5.0))
 		})
 
@@ -343,7 +334,7 @@ var _ = Describe("buildComposite's contributor/decision logic (via resolveSOForT
 		// contributors, regardless of what its per-SO Reason says, because
 		// Eligible() is the loop's first, unconditional check.
 		It("excludes a stale (!Live) analyzer even though its per-SO Reason looks perfectly usable (regression guard)", func() {
-			sat := makeAnalyzer(domain.SaturationAnalyzerName, 1000, 200) // N=5, fallback-eligible
+			sat := makeAnalyzer(domain.SaturationAnalyzerName, 1000, 200) // N=5
 			staleButOtherwiseUsable := NamedAnalyzerResult{
 				Name: "throughput",
 				Live: false, // stale -- must be excluded by Eligible(), never reaching the per-SO Reason check
@@ -352,11 +343,11 @@ var _ = Describe("buildComposite's contributor/decision logic (via resolveSOForT
 					VariantCapacities: []domain.VariantCapacity{{VariantName: "v", PerReplicaCapacity: 200, Reason: reasonMeasured}}, // N=12, looks perfectly fine per-SO
 				},
 			}
-			d := resolveSOForTest([]NamedAnalyzerResult{staleButOtherwiseUsable}, &sat, "v")
+			d := resolveSOForTest([]NamedAnalyzerResult{sat, staleButOtherwiseUsable}, &sat, "v")
 			Expect(d.contributors).ToNot(ContainElement("throughput"),
 				"a stale analyzer must never contribute, regardless of its per-SO Reason")
-			Expect(d.path).To(Equal(DecisionSatFallback),
-				"with the stale analyzer excluded, only sat's fallback contribution remains")
+			Expect(d.path).To(Equal(DecisionSingle),
+				"with the stale analyzer excluded, only sat's contribution remains")
 			Expect(d.n).To(Equal(5.0))
 		})
 	})
@@ -365,8 +356,8 @@ var _ = Describe("buildComposite's contributor/decision logic (via resolveSOForT
 	It("is unit-independent: scaling demand and PRC by the same constant leaves the decision unchanged", func() {
 		sat := makeAnalyzer(domain.SaturationAnalyzerName, 1000, 200) // N=5
 		scaledSat := makeAnalyzer(domain.SaturationAnalyzerName, 1000*13, 200*13)
-		d1 := resolveSOForTest(nil, &sat, "v")
-		d2 := resolveSOForTest(nil, &scaledSat, "v")
+		d1 := resolveSOForTest([]NamedAnalyzerResult{sat}, &sat, "v")
+		d2 := resolveSOForTest([]NamedAnalyzerResult{scaledSat}, &scaledSat, "v")
 		Expect(d1.ok).To(BeTrue())
 		Expect(d2.ok).To(BeTrue())
 		Expect(d2.n).To(Equal(d1.n))
@@ -411,7 +402,7 @@ var _ = Describe("buildComposite's contributor/decision logic (via resolveSOForT
 				},
 			},
 		}
-		d := resolveSOForTest(nil, &sat, "p1")
+		d := resolveSOForTest([]NamedAnalyzerResult{sat}, &sat, "p1")
 		Expect(d.ok).To(BeFalse())
 		Expect(d.path).To(Equal(DecisionNoSignal))
 	})
@@ -434,7 +425,7 @@ var _ = Describe("buildComposite's contributor/decision logic (via resolveSOForT
 				},
 			},
 		}
-		d := resolveSOForTest(nil, &sat, "decode-variant-that-does-not-exist")
+		d := resolveSOForTest([]NamedAnalyzerResult{sat}, &sat, "decode-variant-that-does-not-exist")
 		Expect(d.ok).To(BeFalse())
 		Expect(d.path).To(Equal(DecisionNoSignal))
 		Expect(d.contributors).To(BeEmpty())

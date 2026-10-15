@@ -32,17 +32,13 @@ var scaleCfg = config.ScalingPolicy{ScaleUpThreshold: 0.85, ScaleDownBoundary: 0
 // Regression guard: with saturation alone, the composite must be numerically
 // identical to saturation's own entry (namedResults[0]).
 //
-// This whole Describe block runs on the DecisionSatFallback path, not
-// DecisionSingle: scaleCfg (below) has an empty Analyzers slice, so
-// config.AnalyzerEnabled(domain.SaturationAnalyzerName) is false (an absent
-// analyzer does not participate) — satOnlyEngine never puts saturation in
-// eligibleAnalyzers, so every SO here falls back to sat alone rather than
-// reaching it through the ordinary contributor loop. The fixtures' decision
-// path (composite.Result.VariantCapacities[0].Reason) is "C2-sat-fallback".
-// The DecisionSingle case is covered separately below.
-var _ = Describe("buildComposite — sat-only regression, DecisionSatFallback path", func() {
+// scaleCfg (above) has an empty Analyzers slice: a policy with no analyzers
+// section runs saturation alone (config.ScalingPolicy.SaturationListed), so
+// saturation is the sole contributor (DecisionSingle). The case where it is
+// listed explicitly is covered separately below.
+var _ = Describe("buildComposite — sat-only regression, no analyzers section", func() {
 
-	It("is numerically identical to saturation's own entry when saturation is the only analyzer (DecisionSatFallback: sat disabled via config, sole contributor by fallback)", func() {
+	It("is numerically identical to saturation's own entry when the policy lists no analyzers", func() {
 		satResult := &domain.AnalyzerResult{
 			AnalyzerName: domain.SaturationAnalyzerName,
 			ModelID:      "m",
@@ -64,13 +60,14 @@ var _ = Describe("buildComposite — sat-only regression, DecisionSatFallback pa
 		Expect(err).NotTo(HaveOccurred())
 		composite := req.CompositeSignal
 
-		Expect(composite.Result.VariantCapacities[0].Reason).To(Equal(string(allocation.DecisionSatFallback)),
-			"scaleCfg's empty Analyzers disables sat, so this SO reaches PRC identity via the fallback path, not the ordinary contributor loop")
+		Expect(composite.Result.VariantCapacities[0].Reason).To(Equal(string(allocation.DecisionSingle)),
+			"a policy with no analyzers section lists saturation alone")
+		Expect(composite.Holds).To(BeNil())
 		Expect(composite.Result.TotalDemand).To(Equal(baseline.Result.TotalDemand))
 		Expect(composite.Result.VariantCapacities).To(HaveLen(len(baseline.Result.VariantCapacities)))
 		Expect(composite.Result.VariantCapacities[0].PerReplicaCapacity).
 			To(Equal(baseline.Result.VariantCapacities[0].PerReplicaCapacity),
-				"PRC_com must equal PRC_sat exactly on the sat-only path, DecisionSatFallback case")
+				"PRC_com must equal PRC_sat exactly on the sat-only path, no analyzers section")
 		Expect(composite.TotalSupply).To(Equal(baseline.TotalSupply))
 		Expect(composite.TotalAnticipatedSupply).To(Equal(baseline.TotalAnticipatedSupply))
 		Expect(composite.Utilization).To(Equal(baseline.Utilization))
@@ -129,14 +126,10 @@ var _ = Describe("buildComposite — sat-only regression, DecisionSatFallback pa
 	})
 })
 
-// Regression guard: the same sat-sole-contributor PRC identity as the
-// DecisionSatFallback block above, but reached through
-// the ordinary contributor loop (DecisionSingle) rather than the fallback
-// branch. This requires sat to be explicitly enabled via config — unlike
-// scaleCfg above, satEnabledCfg lists domain.SaturationAnalyzerName in
-// Analyzers, so config.AnalyzerEnabled(sat) is true and eligibleAnalyzers
-// includes sat; with no other analyzer registered, sat is the loop's sole
-// contributor.
+// Regression guard: the same sat-sole-contributor PRC identity as the block
+// above, with saturation listed explicitly: satEnabledCfg lists
+// domain.SaturationAnalyzerName in Analyzers, and with no other analyzer
+// registered, sat is the loop's sole contributor.
 var satEnabledCfg = config.ScalingPolicy{
 	ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70,
 	Analyzers: []config.AnalyzerScoreConfig{{Name: domain.SaturationAnalyzerName}},

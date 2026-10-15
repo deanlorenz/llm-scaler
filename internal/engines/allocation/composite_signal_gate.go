@@ -19,11 +19,12 @@ package allocation
 // ResultIsInformative here would always report "usable" regardless of
 // whether any SO actually had a signal.
 //
-// A model whose composite fails this check had no analyzer able to size any
-// variant this cycle. The engine reports it as no-composite-signal; the
-// optimizer still sizes it on saturation's measured capacity, and its
-// replicas are still charged to a quota (measuredThisCycle), since they hold
-// their GPUs either way.
+// A model whose composite fails this check had no listed analyzer able to
+// size any variant this cycle. The engine reports it as no-composite-signal.
+// With saturation listed, the optimizer still sizes it on saturation's
+// measured capacity; without, every role is held (RoleHold). Its replicas are
+// charged to a quota either way (measuredThisCycle), since they hold their
+// GPUs.
 func CompositeHasSignal(composite NamedAnalyzerResult) bool {
 	if composite.Result == nil {
 		return false

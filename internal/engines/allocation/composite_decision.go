@@ -7,15 +7,15 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/aggregation"
 )
 
-// DecisionPath names how one SO's composite replica need was reached, in
-// the same free-text style as domain.VariantCapacity.Reason for analyzers.
-// It is logged per SO through the same function analyzers use, so a
-// decision is traceable end to end.
+// DecisionPath names how one variant's composite replica need was reached,
+// carried in the composite's VariantCapacity.Reason and logged with the
+// analyzer results, so a decision is traceable end to end.
 //
-// There is deliberately no C3 path for a default PRC: saturation's P0-store
-// ladder is the only source of estimated PRCs for an idle or never-seen SO,
-// and its estimate contributes like any other rather than through a
-// separate composite-level default.
+// There is no path for a default PRC: saturation's P0-store ladder is the
+// only source of estimated PRCs for an idle or never-seen variant, and its
+// estimate contributes like any other. There is no saturation fallback
+// either: saturation sizes a variant only when the policy lists it, and then
+// it contributes like any other analyzer.
 type DecisionPath string
 
 const (
@@ -24,15 +24,10 @@ const (
 	DecisionAgree DecisionPath = "C0-agree"
 	// DecisionSingle means exactly one analyzer contributed a defined N(SO).
 	DecisionSingle DecisionPath = "C1-single"
-	// DecisionSatFallback means no non-saturation analyzer contributed a
-	// defined N(SO) for this SO, and saturation itself was eligible, so its
-	// N(SO) was used as the fallback. Saturation is a fallback, not a floor:
-	// it participates here only because nothing else did.
-	DecisionSatFallback DecisionPath = "C2-sat-fallback"
-	// DecisionNoSignal means no analyzer at all — including saturation —
-	// produced a defined N(SO) for this SO. There is no usable signal, and
-	// this must not be treated as a scale-to-zero decision; it is "no
-	// evidence", handled by the gate in composite_signal_gate.go.
+	// DecisionNoSignal means no listed analyzer produced a defined N(SO) for
+	// this SO. There is no usable signal, and this must not be treated as a
+	// scale-to-zero decision; it is "no evidence", handled by the gate in
+	// composite_signal_gate.go.
 	DecisionNoSignal DecisionPath = "C4-no-signal"
 )
 
@@ -71,10 +66,11 @@ type Decision struct {
 }
 
 // ResolveSO decides one variant's replica need from entries, the analyzers
-// eligible to contribute, falling back to sat when none does. Each eligible
-// analyzer with a finite, non-negative TotalReplicas for the variant
-// contributes, and N is the largest. A non-finite need is no reading: one
-// analyzer's +Inf demand would otherwise price every replica at zero.
+// the policy lists. Each eligible one with a finite, non-negative
+// TotalReplicas for the variant contributes, and N is the largest. A
+// non-finite need is no reading: one analyzer's +Inf demand would otherwise
+// price every replica at zero. sat only names saturation's entry, for
+// FromSaturation; saturation contributes only from entries.
 func ResolveSO(entries []NamedAnalyzerResult, sat *NamedAnalyzerResult, variant string) Decision {
 	var d Decision
 	for _, e := range entries {
@@ -101,17 +97,6 @@ func ResolveSO(entries []NamedAnalyzerResult, sat *NamedAnalyzerResult, variant 
 	switch len(d.Contributors) {
 	case 0:
 		d.Path = DecisionNoSignal
-		if sat == nil || !Eligible(*sat) {
-			return d
-		}
-		satVC, present := FindVariantCapacity(sat.Result, variant)
-		if !present {
-			return d
-		}
-		if n, ok := finiteNeed(sat.Result, satVC); ok {
-			return Decision{N: n, OK: true, Path: DecisionSatFallback, Contributors: []string{sat.Name}, FromSaturation: true}
-		}
-		return d
 	case 1:
 		d.Path = DecisionSingle
 	default:

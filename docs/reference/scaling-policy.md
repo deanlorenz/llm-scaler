@@ -1584,11 +1584,22 @@ registration order and invokes its `Analyze` method.
 > scale-up follows the analyzer asking for most, and scale-down waits until
 > every listed analyzer agrees. Demand stays in saturation's units:
 > saturation runs for every model, listed or not, and when it is not listed
-> it only supplies the units and the variants. A variant no listed analyzer
-> can size falls back to saturation's own need; with that missing too, the
-> model reports `no-composite-signal`
-> ([Prometheus](prometheus.md#wva_model_scaling_blocked)). The decision is the
-> `composite` analyzer in `wva_analyzer_*` and in the cycle log.
+> it only supplies the units and the variants. A policy with no `analyzers`
+> section lists saturation alone. `slo` never sizes anything: it only
+> observes.
+>
+> - **Nothing listed can size a role.** With saturation unlisted, the role
+>   holds where it is: no scale-up, no scale-down. When that is every
+>   variant, the model reports `no-composite-signal`
+>   ([Prometheus](prometheus.md#wva_model_scaling_blocked)).
+> - **A listed analyzer misses a cycle.** While it is inside its staleness
+>   grace, the roles it covers do not scale down, so one missed scrape from
+>   the analyzer asking for most replicas does not shrink the fleet.
+>   Scale-up still follows the others. Saturation's own grace works as it
+>   always has.
+>
+> The decision is the `CompositeSignal` analyzer in `wva_analyzer_*` and in
+> the cycle log, and each held role logs `composite holds a role`.
 
 ### Registering Analyzers
 

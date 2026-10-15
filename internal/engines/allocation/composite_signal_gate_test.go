@@ -33,7 +33,7 @@ var _ = Describe("CompositeHasSignal", func() {
 			Name: "CompositeSignal",
 			Result: &domain.AnalyzerResult{
 				TotalDemand:       500,
-				VariantCapacities: []domain.VariantCapacity{{VariantName: "v", PerReplicaCapacity: 100, Reason: string(DecisionSatFallback)}},
+				VariantCapacities: []domain.VariantCapacity{{VariantName: "v", PerReplicaCapacity: 100, Reason: string(DecisionSingle)}},
 			},
 		}
 		Expect(CompositeHasSignal(composite)).To(BeTrue())

@@ -29,9 +29,14 @@ import (
 //   - one contributor: its N (DecisionSingle);
 //   - several: the largest (DecisionAgree), so scale-up follows the analyzer
 //     asking for most, and scale-down needs every one of them to agree;
-//   - none, with saturation itself eligible: saturation's N
-//     (DecisionSatFallback);
-//   - none at all: DecisionNoSignal, and saturation's PRC is kept.
+//   - none: DecisionNoSignal, and saturation's PRC is kept.
+//
+// Two rules hold a role whatever the needs say (compositeHolds):
+//   - saturation is not listed and no variant of the role has a need: nothing
+//     the policy lists can size it, so it neither grows nor shrinks;
+//   - a listed analyzer other than saturation is inside its staleness grace
+//     with no reading: it cannot ask for more this cycle, so the roles it
+//     covers do not shrink until its grace runs out.
 //
 // The PRC that makes saturation's demand need N replicas is D_sat[role] / N.
 // It is used only when N came from another analyzer and D_sat[role] is
@@ -41,9 +46,11 @@ import (
 // would read as "no basis to size" and hold the model, below what either
 // analyzer asks for.
 //
-// eligibleAnalyzers is namedResults less the observe-only slo analyzer, and
-// less saturation when the policy does not list it (the caller decides that
-// once); saturation remains the identity source either way.
+// eligibleAnalyzers is the analyzers the policy lists: namedResults less the
+// observe-only slo analyzer, less saturation when the policy does not list
+// it, plus an entry with no Result for each listed analyzer that returned
+// nothing this cycle but is still inside its grace (the caller decides that
+// once). Saturation remains the identity source either way.
 //
 // Every slice and map is copied, so the optimizer's bookkeeping on the
 // composite cannot reach back into an analyzer's own result.
@@ -67,6 +74,8 @@ func buildComposite(
 		demandByRole[role] = d
 	}
 
+	sized := make(map[string]bool)
+	contributors := make(map[string]bool)
 	compositeVCs := make([]domain.VariantCapacity, 0, len(sat.Result.VariantCapacities))
 	for _, source := range sat.Result.VariantCapacities {
 		vc := source
@@ -77,6 +86,12 @@ func buildComposite(
 
 		d := allocation.ResolveSO(eligibleAnalyzers, sat, vc.VariantName)
 		vc.Reason = string(d.Path)
+		if d.OK {
+			sized[domain.RoleOfVC(vc)] = true
+		}
+		for _, name := range d.Contributors {
+			contributors[name] = true
+		}
 		if r := demandByRole[domain.RoleOfVC(vc)]; d.OK && !d.FromSaturation && d.N > 0 && r > 0 {
 			vc.PerReplicaCapacity = r / d.N
 			vc.Utilization = 0
@@ -100,29 +115,113 @@ func buildComposite(
 	result.RoleStartSeconds = maps.Clone(sat.Result.RoleStartSeconds)
 	result.VariantBusiestQueueLoad = maps.Clone(sat.Result.VariantBusiestQueueLoad)
 
+	roles := rolesPresent(sat.Result.VariantCapacities)
 	composite := allocation.NamedAnalyzerResult{
 		Name:              allocation.CompositeSignalName,
 		Result:            &result,
-		Score:             maxScore(namedResults),
+		Score:             maxScore(*sat, eligibleAnalyzers, contributors),
 		ScaleUpThreshold:  scaleUp,
 		ScaleDownBoundary: scaleDown,
-		Live:              compositeLive(*sat, eligibleAnalyzers),
+		Live:              len(contributors) > 0 || sat.Live,
+		Holds:             compositeHolds(*sat, eligibleAnalyzers, roles, sized),
 	}
 	buildCapacities(ctx, &composite, nil, scaleUp, scaleDown)
+	applyHolds(&composite, roles)
+	for role, h := range composite.Holds {
+		logger.Info("composite holds a role",
+			"modelID", sat.Result.ModelID, "namespace", sat.Result.Namespace, "role", role,
+			"noScaleUp", h.NoScaleUp, "noScaleDown", h.NoScaleDown)
+	}
 	composite.Remaining = composite.RequiredCapacity
 	composite.Spare = composite.SpareCapacity
 	return composite
 }
 
-// compositeLive is whether the composite takes part in scale-down: when any
-// contributing analyzer is live, by the engine's liveness rule (its staleness
-// grace included). With no contributor at all, saturation's own liveness, as
-// when the optimizer consumed saturation alone.
-func compositeLive(sat allocation.NamedAnalyzerResult, eligible []allocation.NamedAnalyzerResult) bool {
-	if len(eligible) == 0 {
-		return sat.Live
+// compositeHolds returns what each role is forbidden this cycle, or nil.
+//
+// Saturation unlisted: a role none of whose variants a listed analyzer could
+// size is held both ways. Saturation still supplies the units and the
+// variants, but sizing the role on it would be sizing on an analyzer the
+// policy left out.
+//
+// A listed analyzer other than saturation that is live (inside its staleness
+// grace) but has no reading this cycle blocks scale-down of the roles it
+// reports variants for, or of every role when it reports none. Without this,
+// one missed scrape from the analyzer asking for most replicas let the
+// others' smaller need shrink the fleet for a cycle. Saturation's own grace
+// is left as it was before the composite existed.
+func compositeHolds(sat allocation.NamedAnalyzerResult, eligible []allocation.NamedAnalyzerResult,
+	roles []string, sized map[string]bool) map[string]allocation.RoleHold {
+	holds := make(map[string]allocation.RoleHold)
+	satListed := slices.ContainsFunc(eligible, func(e allocation.NamedAnalyzerResult) bool { return e.Name == sat.Name })
+	if !satListed {
+		for _, role := range roles {
+			if !sized[role] {
+				holds[role] = allocation.RoleHold{NoScaleUp: true, NoScaleDown: true}
+			}
+		}
 	}
-	return slices.ContainsFunc(eligible, func(e allocation.NamedAnalyzerResult) bool { return e.Live })
+	satRole := make(map[string]string, len(sat.Result.VariantCapacities))
+	for _, vc := range sat.Result.VariantCapacities {
+		satRole[vc.VariantName] = domain.RoleOfVC(vc)
+	}
+	for _, e := range eligible {
+		if e.Name == sat.Name || !e.Live || allocation.Eligible(e) {
+			continue
+		}
+		covered := make(map[string]bool)
+		if e.Result != nil {
+			for _, vc := range e.Result.VariantCapacities {
+				if role, ok := satRole[vc.VariantName]; ok {
+					covered[role] = true
+				}
+			}
+		}
+		for _, role := range roles {
+			if len(covered) == 0 || covered[role] {
+				h := holds[role]
+				h.NoScaleDown = true
+				holds[role] = h
+			}
+		}
+	}
+	if len(holds) == 0 {
+		return nil
+	}
+	return holds
+}
+
+// applyHolds zeroes the signal each hold forbids: a role's RequiredCapacity
+// for NoScaleUp, its SpareCapacity for NoScaleDown, and the model-level one
+// when every role in roles is held that way. An aggregated model has one
+// role, domain.RoleBoth, and only the model-level signals.
+func applyHolds(nr *allocation.NamedAnalyzerResult, roles []string) {
+	if len(nr.Holds) == 0 {
+		return
+	}
+	allUp, allDown := true, true
+	for _, role := range roles {
+		h := nr.Holds[role]
+		allUp = allUp && h.NoScaleUp
+		allDown = allDown && h.NoScaleDown
+		rc, ok := nr.RoleCapacities[role]
+		if !ok {
+			continue
+		}
+		if h.NoScaleUp {
+			rc.RequiredCapacity = 0
+		}
+		if h.NoScaleDown {
+			rc.SpareCapacity = 0
+		}
+		nr.RoleCapacities[role] = rc
+	}
+	if allUp {
+		nr.RequiredCapacity = 0
+	}
+	if allDown {
+		nr.SpareCapacity = 0
+	}
 }
 
 // findSaturation returns the saturation entry from namedResults, or nil.
@@ -159,15 +258,19 @@ func rolesPresent(vcs []domain.VariantCapacity) []string {
 	return out
 }
 
-// maxScore is the composite's Score: the largest of the analyzers' scores,
-// which is saturation's when it runs alone. The cross-model fair share reads
-// it (greedy_score_optimizer.go).
-func maxScore(namedResults []allocation.NamedAnalyzerResult) float64 {
-	best := 0.0
-	for i, nr := range namedResults {
-		if i == 0 || nr.Score > best {
-			best = nr.Score
+// maxScore is the composite's Score: the largest score among the analyzers
+// that contributed a need this cycle, or saturation's when none did. The
+// cross-model fair share reads it (greedy_score_optimizer.go), so an analyzer
+// that sized nothing cannot raise it.
+func maxScore(sat allocation.NamedAnalyzerResult, eligible []allocation.NamedAnalyzerResult, contributors map[string]bool) float64 {
+	best, found := 0.0, false
+	for _, e := range eligible {
+		if contributors[e.Name] && (!found || e.Score > best) {
+			best, found = e.Score, true
 		}
+	}
+	if !found {
+		return sat.Score
 	}
 	return best
 }

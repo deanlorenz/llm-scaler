@@ -76,7 +76,7 @@ thing here.
   "analyzer": "CompositeSignal", "live": true, "supply": 658534, "demand": 1041047, "util": 1.58,
   "rc": 0, "sc": 50000, "scaleUpThreshold": 1.1, "scaleDownBoundary": 0.7,
   "variants": [{"name":"primary","prc":960000,"role":"both","reason":"C0-agree"},
-               {"name":"v2","prc":403391,"role":"both","reason":"C2-sat-fallback"}]}
+               {"name":"v2","prc":403391,"role":"both","reason":"C1-single"}]}
 ```
 
 `demand` is in **saturation's units** (`D_sat`) always — the composite holds
@@ -210,12 +210,22 @@ analyzer's own capacity provenance:
 |---|---|
 | `C0-agree` | more than one analyzer produced a usable signal for this variant; the aggregate is the max across them |
 | `C1-single` | exactly one analyzer produced a usable signal for this variant |
-| `C2-sat-fallback` | no other analyzer had a usable signal for this variant, so saturation's own signal was used — saturation is a fallback here, not a floor: with another contributor present the aggregate can land below saturation's own value |
-| `C4-no-signal` | no analyzer — saturation included — had a usable signal for this variant; the composite carries no capacity opinion for it, and downstream consumers must treat that exactly like an absent result: no decision, no quota charge |
+| `C4-no-signal` | no listed analyzer had a usable signal for this variant. With saturation listed, the variant is sized on saturation's measured capacity as before; with saturation unlisted, its role holds where it is |
 
-`C4-no-signal` on every variant is what disables the engine-side GPU-quota
-guard for a model: it means the model was not usefully measured this cycle,
-so its replica counts are not evidence of anything.
+`C4-no-signal` on every variant reports the model as `no-composite-signal`.
+Its replicas are still charged to a GPU quota, since they hold their GPUs
+either way.
+
+A role the composite holds logs one line a cycle:
+
+```text
+INFO  composite holds a role  {"modelID": "my-model", "namespace": "default", "role": "decode",
+  "noScaleUp": false, "noScaleDown": true}
+```
+
+`noScaleUp` and `noScaleDown` both true: no listed analyzer can size the role.
+`noScaleDown` alone: a listed analyzer is inside its staleness grace with no
+reading, and the role waits for it before shrinking.
 
 ---
 
