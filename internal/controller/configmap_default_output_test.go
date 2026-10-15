@@ -9,10 +9,9 @@ import (
 )
 
 // defaultOutputTokens rides ScaledObject trigger metadata, not this ConfigMap.
-// The risk worth a test is the one that is silent: yaml.Unmarshal is NOT strict
-// here -- nothing in this repo calls KnownFields -- so an entry carrying the key
-// parses, defaults, validates and logs exactly like one that does not, whichever
-// way the field is tagged. Without these specs, re-adding a yaml tag would make
+// The risk worth a test is the one that is silent: unknown keys are reported
+// (config.UnknownScalingPolicyKeys) but this one is not, so an entry carrying it
+// parses, defaults, validates and logs exactly like one that does not. Without these specs, re-adding a yaml tag would make
 // a stale ConfigMap key quietly start overriding the trigger, and removing one
 // would quietly stop a working config working.
 var _ = Describe("defaultOutputTokens is not a ConfigMap key", func() {

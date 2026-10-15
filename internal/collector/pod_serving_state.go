@@ -59,10 +59,11 @@ type namespacePods struct {
 //
 // A LIST rather than a Get per Pod, and an UNCACHED read rather than the
 // manager's client. One call per namespace per cycle answers for every Pod at
-// once, where a Get per reporting Pod would be dozens; and the manager's cache
-// holds no Pods, so reading through it would start a Pod informer -- namespace
-// -wide on a scoped install, CLUSTER-wide on a cluster-scoped one, which is
-// exactly the memory cost the ConfigMap cache is configured to avoid.
+// once, where a Get per reporting Pod would be dozens. The read is uncached
+// for freshness, not memory: the manager's cache does hold Pods (discovery and
+// the GPU usage walk list them through it, cluster-wide on a cluster-scoped
+// install, trimmed by internal/kubecache), but a deletion is the one event this
+// must never miss behind an informer's lag.
 //
 // These facts are also MUTABLE, which is why they are not put in the locator's
 // resolution cache beside the scale target and labels. That cache is correct

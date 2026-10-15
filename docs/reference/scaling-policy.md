@@ -1000,8 +1000,10 @@ llama-8b-prod:
 ```
 
 Both `model_id` and `namespace` are required: an entry missing either matches
-no model. It does not fail loudly: the parse is not strict, so an entry naming no
-model becomes a selectable policy **tier** under its own key. Full schema:
+no model. An entry whose body names no model becomes a selectable policy
+**tier** under its own key. A misspelled key, such as the trigger's `modelID:`
+in place of `model_id:`, is ignored and reported; see
+[Example Validation Errors](#example-validation-errors). Full schema:
 [Per-Model Overrides](#4-per-model-overrides).
 
 The granularity is `(model_id, namespace)`, not a variant. Decode and prefill of
@@ -1733,6 +1735,27 @@ The controller validates all configuration entries on load. Invalid entries are 
 > simply ignored at runtime, so externally-registered analyzers and newer built-ins do not fail validation.
 
 ### Example Validation Errors
+
+A key the schema does not define (`scaleUpThreshhold`, `modelID`) is ignored
+and the rest of the entry applies. It is logged, recorded as a
+`ConfigEntryUnknownKeys` Warning event on the ConfigMap, and counted in
+`wva_config_unknown_keys`.
+
+An entry with an invalid value or a wrong type is rejected. The entry
+previously in force under the same key stays. Each rejection is logged,
+recorded as a `ConfigEntryRejected` Warning event, and counted in
+`wva_config_rejected_entries`.
+
+At startup there is no previous entry. If the `default` entry of the ConfigMap
+the limiters come from is invalid, the controller refuses to start (`refusing
+to start unbounded`) rather than run without its GPU bound. That ConfigMap is
+the policy-namespace one when a policy namespace is in use, otherwise the
+controller's own.
+
+So a bad `default` there is safe only until the next restart. While the
+controller runs, the old entry stays in force. Once it restarts, there is no
+old entry, and it will not start until you fix the entry. The
+`ConfigEntryRejected` event and the log line both say so.
 
 **Invalid entry (logged and skipped):**
 ```yaml

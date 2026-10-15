@@ -28,6 +28,11 @@ import (
 // namespace, keda.sh/v1alpha1 is in the scheme, and it is where an operator
 // looks: `kubectl describe scaledobject` shows these.
 //
+// The reference carries the ScaledObject's UID, which the synthesized variant
+// takes from the registry's enrichment. kubectl describe lists the events whose
+// involvedObject.uid matches the object it describes, so an event recorded
+// without one appeared only in `kubectl get events`, never in describe.
+//
 // It lives here, beside the type and the scheme note that explains the absence,
 // because the collector and the engine both need it and two copies would have to
 // be kept in step -- the engine already went one release without a fix the
@@ -41,6 +46,7 @@ func EventTarget(va *VariantAutoscaling) *kedav1alpha1.ScaledObject {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      va.Name,
 			Namespace: va.Namespace,
+			UID:       va.UID,
 		},
 	}
 }

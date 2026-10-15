@@ -236,6 +236,16 @@ budget, and never scale up again, which looks exactly like an idle cluster.
 Fix: grant the node read (`make setup-prereqs` creates the node-reader
 ClusterRole and binding), or remove the limiter from cluster policy.
 
+A namespace-scoped controller also counts the GPUs that Pods in **other
+namespaces** hold on the same nodes. Its cache holds only its own namespace, so
+it lists Pods uncached and cluster-wide. That needs `list` on `pods` cluster-wide,
+which the node-reader grant does not include. Without it the list is Forbidden,
+and usage counts only the controller's own namespace, so GPUs other namespaces
+hold on those nodes read as free. While a `gpu-inventory` limiter is in force,
+`wva_pod_access_denied` is **1** and an error is logged. Grant `list` on `pods`
+cluster-wide, or bound with a quota limiter. Under a quota limiter, or none, the
+undercount bounds nothing: the gauge stays 0 and the log says so once at info.
+
 ### What this does and does not bound
 
 **A guardrail, not an enforcement boundary.** Whoever owns the controller's

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync/atomic"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/accelerator"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
@@ -12,15 +13,36 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/resources"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // K8sWithGpuOperator implements CapacityDiscovery for Kubernetes clusters with GPU Operator
 type K8sWithGpuOperator struct {
 	Client         client.Client
 	metricsEmitter *metrics.MetricsEmitter
+
+	// podReader lists the Pods the usage walk counts; nil reads through Client.
+	// See WithPodReader.
+	podReader client.Reader
+	// physicalLimiterInForce reports whether a physical GPU limiter reads the
+	// usage walk right now; nil means always. See WithPhysicalLimiterCheck.
+	physicalLimiterInForce func() bool
+	// podsDenied remembers how the last Forbidden pod list was reported
+	// (podsDeniedNone, podsDeniedInfo or podsDeniedError), so it is logged when
+	// it starts or changes rather than on every refresh.
+	podsDenied atomic.Int32
 }
+
+// How a Forbidden cluster-wide pod list was last reported.
+const (
+	podsDeniedNone int32 = iota
+	podsDeniedInfo
+	podsDeniedError
+)
 
 // NewK8sWithGpuOperator creates a new K8sWithGpuOperator instance.
 func NewK8sWithGpuOperator(client client.Client) *K8sWithGpuOperator {
@@ -28,6 +50,35 @@ func NewK8sWithGpuOperator(client client.Client) *K8sWithGpuOperator {
 		Client:         client,
 		metricsEmitter: metrics.NewMetricsEmitter(),
 	}
+}
+
+// WithPodReader makes the usage walk list Pods through r, outside the
+// controller's cache, instead of through Client, and returns d.
+//
+// A namespace-scoped controller needs it. Its cache holds Pods of the managed
+// namespace only, and a list through it answers silently with that subset, so
+// GPUs that other tenants' Pods hold on the same nodes read as free and a
+// scale-up is admitted onto a full node. Reading uncached, the walk sees every
+// Pod on the GPU nodes when RBAC lets it list Pods cluster-wide. The list is
+// served from the API server's watch cache, not etcd; see listAllPods. When it does
+// not, the walk falls back to the cache and, while a physical limiter reads it,
+// reports the undercount (wva_pod_access_denied and an error log); see listPods.
+func (d *K8sWithGpuOperator) WithPodReader(r client.Reader) *K8sWithGpuOperator {
+	d.podReader = r
+	return d
+}
+
+// WithPhysicalLimiterCheck sets how listPods learns whether a physical GPU
+// limiter is in force, and returns d. The limiter list is live, so inForce is
+// asked on every Forbidden list.
+//
+// Only a physical limiter reads the per-node usage the walk produces. With a
+// quota limiter, or none, the undercount a Forbidden list causes bounds
+// nothing, so it is not reported as a failure: no error log, and
+// wva_pod_access_denied stays 0.
+func (d *K8sWithGpuOperator) WithPhysicalLimiterCheck(inForce func() bool) *K8sWithGpuOperator {
+	d.physicalLimiterInForce = inForce
+	return d
 }
 
 // listGPUNodes queries GPU-bearing nodes across all supported vendors
@@ -261,16 +312,16 @@ func (d *K8sWithGpuOperator) DiscoverUsageWithNodes(ctx context.Context) (map[st
 // usageWalk is the one pod walk behind every usage view: GPUs requested by
 // pods occupying GPU nodes, per accelerator type, per namespace and per node.
 func (d *K8sWithGpuOperator) usageWalk(ctx context.Context, nodeGPUType map[string]string) (map[string]int, map[string]map[string]int, map[string]int, error) {
-	var podList corev1.PodList
-	if err := d.Client.List(ctx, &podList); err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to list pods: %w", err)
+	pods, err := d.listPods(ctx)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 
 	usageByType := make(map[string]int)
 	usageByNamespace := make(map[string]map[string]int)
 	usageByNode := make(map[string]int)
 
-	for _, pod := range podList.Items {
+	for _, pod := range pods {
 		if pod.Spec.NodeName == "" {
 			continue
 		}
@@ -299,6 +350,101 @@ func (d *K8sWithGpuOperator) usageWalk(ctx context.Context, nodeGPUType map[stri
 	}
 
 	return usageByType, usageByNamespace, usageByNode, nil
+}
+
+// listPods returns every Pod the usage walk considers: through Client, or,
+// when a pod reader is set, through it (listAllPods).
+//
+// A Forbidden list through the pod reader falls back to Client, which counts
+// the Pods this controller's cache holds and no others, and says so. While a
+// physical limiter is in force, the wva_pod_access_denied gauge reads 1 and an
+// error is logged when the denial starts. Otherwise the undercount bounds
+// nothing: the gauge reads 0 and the denial is logged once at info. The fallback is a deliberate choice over publishing nothing. An
+// absent usage view sends the optimizer to its unlimited posture
+// (GPUUsageViews.MissingBasis), which bounds less than a known-low count does;
+// a reported undercount keeps the cap at the nodes' capacity and is visible.
+func (d *K8sWithGpuOperator) listPods(ctx context.Context) ([]corev1.Pod, error) {
+	if d.podReader != nil {
+		pods, err := listAllPods(ctx, d.podReader)
+		if err == nil {
+			metrics.SetPodAccessDenied(false)
+			d.podsDenied.Store(podsDeniedNone)
+			return pods, nil
+		}
+		if !apierrors.IsForbidden(err) {
+			return nil, fmt.Errorf("failed to list pods cluster-wide: %w", err)
+		}
+		d.reportPodsDenied(ctx, err)
+	}
+	var list corev1.PodList
+	if err := d.Client.List(ctx, &list); err != nil {
+		return nil, fmt.Errorf("failed to list pods: %w", err)
+	}
+	return list.Items, nil
+}
+
+// ResetPodAccessDenied clears a reported pod-list denial: wva_pod_access_denied
+// reads 0, and the next Forbidden list is logged again as if it were the first.
+//
+// Call it when the walk stops because no physical limiter reads it. Nothing
+// else would clear the gauge then, and without clearing the remembered level,
+// a physical limiter turned off and on again would not log the denial again.
+func (d *K8sWithGpuOperator) ResetPodAccessDenied() {
+	metrics.SetPodAccessDenied(false)
+	d.podsDenied.Store(podsDeniedNone)
+}
+
+// reportPodsDenied reports a Forbidden cluster-wide pod list: as a failure
+// while a physical limiter is in force, and as information otherwise.
+func (d *K8sWithGpuOperator) reportPodsDenied(ctx context.Context, err error) {
+	physical := d.physicalLimiterInForce == nil || d.physicalLimiterInForce()
+	metrics.SetPodAccessDenied(physical)
+	level := podsDeniedInfo
+	if physical {
+		level = podsDeniedError
+	}
+	if d.podsDenied.Swap(level) == level {
+		return
+	}
+	logger := log.FromContext(ctx)
+	if physical {
+		logger.Error(err, "Cannot list Pods cluster-wide. GPU usage counts only the Pods in "+
+			"this controller's own namespace, so GPUs other namespaces hold on the same nodes read as FREE "+
+			"and the physical limiter can admit scale-ups onto full nodes. Grant list on pods cluster-wide, "+
+			"or bound with a quota limiter instead.",
+			"metric", constants.WVAPodAccessDenied)
+		return
+	}
+	logger.Info("Cannot list Pods cluster-wide, so GPU usage counts only this controller's own namespace. "+
+		"No physical GPU limiter is in force, so this bounds nothing. A physical limiter would need list "+
+		"on pods cluster-wide.", "error", err.Error())
+}
+
+// listAllPods lists every Pod through r in one request, with resourceVersion
+// "0".
+//
+// "0" lets the API server answer from its watch cache instead of reading etcd,
+// which matters because this runs every refresh interval and lists every Pod in
+// the cluster. The answer may be slightly behind etcd, by as much as the watch
+// cache is; the usage walk is a periodic observation and tolerates that.
+//
+// It does not page. A paged list from the watch cache is not supported on every
+// API server version, and paging through etcd instead adds a failure this
+// path would need its own fallback for: a continue token that expires between
+// pages (410 Gone) on a large cluster.
+func listAllPods(ctx context.Context, r client.Reader) ([]corev1.Pod, error) {
+	var list corev1.PodList
+	if err := r.List(ctx, &list, podListFromWatchCache()); err != nil {
+		return nil, err
+	}
+	return list.Items, nil
+}
+
+// podListFromWatchCache is the list option listAllPods sends. A new one per
+// call: the client writes into Raw while building the request, so a shared one
+// would race between concurrent refreshes.
+func podListFromWatchCache() *client.ListOptions {
+	return &client.ListOptions{Raw: &metav1.ListOptions{ResourceVersion: "0"}}
 }
 
 // discoverNodeGPUTypes returns a map of node name to GPU type (model name).

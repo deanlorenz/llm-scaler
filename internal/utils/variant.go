@@ -229,10 +229,10 @@ func registrySourcedVariants(ctx context.Context, reg *registry.Registry) []wvav
 		}
 		meta, err := registry.ParseMeta(entry.Metadata)
 		if err != nil {
-			// The operator's only view of this: KEDA does not surface a scaler's
-			// opinion of its trigger metadata anywhere on the ScaledObject. Logged
-			// at DEBUG because the scale-from-zero loop reaches here at 10Hz and a
-			// standing misconfiguration would otherwise flood the log.
+			// Logged at DEBUG because the scale-from-zero loop reaches here at
+			// 10Hz. The operator-facing report -- a default-level log line and a
+			// Warning event on the ScaledObject, once per change -- is the
+			// Enricher's (registry.Enricher.reportMetadata).
 			logger.V(logging.DEBUG).Info("Skipping a registered workload with unusable trigger metadata",
 				"namespace", entry.Namespace, "scaledObject", entry.Name, "error", err.Error())
 			continue
@@ -250,6 +250,10 @@ func registrySourcedVariants(ctx context.Context, reg *registry.Registry) []wvav
 				// The ScaledObject names the variant: there is one per scale target.
 				Name:      entry.Name,
 				Namespace: entry.Namespace,
+				// And lends it its UID, which is what lets an event recorded
+				// against the ScaledObject (variant.EventTarget) show up in
+				// `kubectl describe scaledobject`.
+				UID: target.UID,
 				// The ScaledObject's labels come along: the accelerator lookup falls
 				// back to them when the pod template names no GPU product, and
 				// multi-controller isolation filters on the controller-instance
