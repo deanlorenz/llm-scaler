@@ -10,8 +10,13 @@ import (
 // map for emptiness and then delete the namespace in separate steps, so a Track
 // in between stored into a map that was then detached, and the namespace read as
 // untracked although a live resource was registered in it.
+//
+// The race is caught by volume, not forced. Against the old code 20000 rounds
+// lost the namespace only 1 to 9 times per run, close enough to zero that a
+// slower runner could miss it. At 100000 rounds it lost it 35 to 62 times per
+// run with GOMAXPROCS=2, in under half a second.
 func TestNamespaceTrackConcurrentWithUntrackKeepsNamespaceTracked(t *testing.T) {
-	const rounds = 20000
+	const rounds = 100000
 	ds := NewDatastore(nil)
 
 	lost := 0
