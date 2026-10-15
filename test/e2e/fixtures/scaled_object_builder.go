@@ -164,7 +164,7 @@ func WithPlaintextScalerTrigger() ScaledObjectOption {
 		if so.Annotations == nil {
 			so.Annotations = make(map[string]string)
 		}
-		so.Annotations[plaintextScalerKey] = "true"
+		so.Annotations[plaintextScalerKey] = defaultLabelValueTrue
 	}
 }
 
