@@ -636,8 +636,9 @@ From the router, per model and objective, over 5 minutes:
   starting (a not-Ready Pod younger than 30 minutes; an older one was Ready and
   failed its probe, a flap, not a start), nor for a grace after: its requests complete,
   and are recorded, after the transient. The grace is the longer of 120 s and
-  1.5 times the longest mean request duration among the ready replicas,
-  because a request queued through a wake is recorded only when its whole
+  1.5 times the longest mean request duration among the ready replicas, at
+  most 30 minutes (a bogus service time must not leave a model unjudged for
+  hours), because a request queued through a wake is recorded only when its whole
   generation ends. A rise is not a reason of its own: its new replicas are
   "starting" until they serve, and excluding it after that would drop exactly
   the windows in which the new sizing is being tested, biasing attainment up. The
