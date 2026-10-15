@@ -79,17 +79,22 @@ model's variants name different tiers, the model parks only if every one of
 those tiers allows it. It then waits for the longest `retentionPeriod` among
 them.
 
-A `retentionPeriod` that is not a positive duration (for example `5 minutes` or
-`0s`) is ignored and treated as unset. The rest of the entry still applies.
-You can see it in three places:
+**A bad `retentionPeriod` is skipped, not fatal.** If the value is not a
+positive duration (for example `5 minutes` or `0s`), the scaling manager acts as
+if the entry did not set it. The model then gets the `retentionPeriod` of the
+layer below: the tier, then `default`, then 10m if no layer sets one. Everything
+else in the entry still applies.
 
-- the controller log, on every read of the ConfigMap;
+You can see a skipped value in three places:
+
+- the controller log, each time the ConfigMap is read;
 - `wva_errors_total{error_type="Ignored unusable saturation scaling config field"}`;
 - the `policyIgnored` key of the
-  [controller-status ConfigMap](operations.md#what-the-controller-is-running-with),
-  for the `default` entry of the controller's own ConfigMap only. This holds
-  with a separate policy namespace too. That namespace's ConfigMap supplies
-  only limiters and the optimizer, so `retentionPeriod` has no effect there.
+  [controller-status ConfigMap](operations.md#what-the-controller-is-running-with).
+  This key shows only the `default` entry of the controller's own ConfigMap.
+
+With a separate policy namespace, the ConfigMap there supplies only limiters and
+the optimizer. A `retentionPeriod` in it has no effect.
 
 #### How long until a model actually reaches zero
 
@@ -129,6 +134,11 @@ scaleFromZero: { requirePrefill: true }
 | key | default | meaning |
 | --- | --- | --- |
 | `requirePrefill` | `false` | Refuse to wake a P/D-disaggregated model unless a prefill variant can be placed alongside decode. |
+
+You can set it in `default`, in a named tier, or in a per-model entry. The more
+specific one wins: `default`, then the tier, then the per-model entry. When a
+model's variants name different tiers, the model waits for prefill if any one
+of them resolves to `requirePrefill: true`.
 
 **Why the default is `false`.** When waking a model, decode is mandatory and
 prefill is best-effort. That follows the llm-d router: with no prefill endpoint
@@ -935,8 +945,8 @@ These parameters apply when `analyzerName: "saturation"` is set or when the `ana
 | `analyzerName` | string | Legacy selector, retained for backward compatibility: `"saturation"` names the token-based analyzer, which also runs when the field is empty. Prefer the `analyzers:` list, which the shipped default uses. | `""` |
 | `priority` | float64 | Multiplier for this model's scaling urgency in fair-share GPU allocation | 1.0 |
 | `analyzers` | list | Multi-analyzer pipeline registration — see [Multi-Analyzer Registration](#multi-analyzer-registration) | `[{name: "saturation", score: 1.0}]` |
-| `shapeChangeHoldSeconds` | int | How long the fleet is held back from scale-down after the workload's shape changes. Raise it for long generations (long context, long chain-of-thought). A tier or a per-model override can set it. A negative value is ignored, with a warning each time the ConfigMap is read. | `0` (5 minutes) |
-| `disableShapeChangeHold` | bool | Turns the shape-change hold off. A tier or a per-model override can turn it off; it cannot turn back on a hold the `default` entry turned off. | `false` |
+| `shapeChangeHoldSeconds` | int | How long the fleet is held back from scale-down after the workload's shape changes. Raise it for long generations (long context, long chain-of-thought). A tier or a per-model override can set it. A negative value is ignored and the layer below applies. It shows in the log each time the ConfigMap is read, in `wva_errors_total{error_type="Ignored unusable saturation scaling config field"}`, and, for the `default` entry, in `policyIgnored`. | `0` (5 minutes) |
+| `disableShapeChangeHold` | bool | Turns the shape-change hold off. A tier or a per-model override can turn it off. It cannot turn back on a hold that a lower layer (`default` or the tier) turned off. | `false` |
 
 ### Expected output length
 
@@ -1650,7 +1660,9 @@ Two failure modes resolve deterministically, and both are reported:
   entry.` (once per change, with `scalingPolicy` and `knownPolicies` fields).
 - **Disagreeing variants.** When variants of one model name different tiers, the
   lexicographically smallest wins, so every cycle and replica resolves the same
-  way instead of flipping with map order.
+  way instead of flipping with map order. This picks the thresholds. Two
+  settings look at every tier instead: the model parks only if every tier
+  allows it, and it waits for prefill if any tier sets `requirePrefill: true`.
 
 ### 4. Per-Model Overrides
 
