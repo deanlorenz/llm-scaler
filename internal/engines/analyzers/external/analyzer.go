@@ -213,13 +213,12 @@ func (a *Analyzer) selectBody(engine string) (Body, string, bool) {
 // queryDemand runs the given query name for (modelID, namespace) and returns the
 // sum of all returned series — the model-level total demand.
 //
-// A failed query is an error, never zero demand. Zero demand permits a
-// scale-down, so reading a Prometheus outage as zero would shrink a busy model
-// at the moment nothing can be measured. The engine discards an analyzer
-// result that errors (runRegisteredAnalyzer), so this analyzer reports nothing
-// for the model this cycle and its wva_analyzer_demand series is dropped
-// rather than set to 0. A query that returned no result at all, which a
-// source does only for a query it did not run, still reads as zero.
+// A failed query is an error, never zero demand: an outage is not a
+// measurement. The engine discards an analyzer result that errors
+// (runRegisteredAnalyzer), so this analyzer reports nothing for the model this
+// cycle and its wva_analyzer_demand series is dropped rather than set to 0.
+// A query that returned no result at all, which a source does only for a query
+// it did not run, still reads as zero.
 func (a *Analyzer) queryDemand(ctx context.Context, qName, modelID, namespace string) (float64, error) {
 	results, err := a.source.Refresh(ctx, source.RefreshSpec{
 		Queries: []string{qName},

@@ -265,6 +265,18 @@ var _ = Describe("external.Analyzer", func() {
 			Expect(res).To(BeNil())
 		})
 
+		// A source returns no result only for a query it did not run. That is
+		// not a failure, so it reads as zero demand rather than an error.
+		It("reads a query with no result at all as zero demand", func() {
+			a, _ := external.New(agnosticDef(), fs)
+			Expect(fs.results).NotTo(HaveKey(agnosticQueryName), "fixture: the query must have no result")
+
+			res, err := a.Analyze(context.Background(), domain.AnalyzerInput{ModelID: "m", Namespace: "ns"})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).NotTo(BeNil())
+			Expect(res.TotalDemand).To(BeZero())
+		})
+
 		It("propagates a source Refresh error", func() {
 			a, _ := external.New(agnosticDef(), fs)
 			fs.err = errors.New("prometheus unreachable")
