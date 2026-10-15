@@ -44,8 +44,9 @@ type modelGroup struct {
 // variants name, or "" (the default entry) when none names one
 // (config.ModelTiers).
 //
-// The tiers come from all of the model's variants, running ones included, as
-// the steady-state planner resolves them. The inactive variants alone are not
+// The tiers come from all of the model's variants, running ones included. (The
+// steady-state planner sees only running variants, so until a parked variant is
+// up it may weigh the model under fewer tiers.) The inactive variants alone are not
 // enough: a P/D model whose decode is tagged and running and whose prefill is
 // untagged and parked would otherwise wake its prefill under the default entry.
 func (g modelGroup) tiers() []string {
@@ -73,7 +74,7 @@ func modelKey(namespace, modelID string) string {
 //
 // active are the variants that are running. They form no group, but they name
 // tiers too: each group's tiers come from all of its model's variants, so a
-// wake resolves the model under the same tiers as the planner.
+// tagged variant that is running still counts when its untagged sibling wakes.
 func groupInactiveByModel(inactive, active []wvav1alpha1.VariantAutoscaling) []modelGroup {
 	byKey := make(map[string]*modelGroup)
 	named := make(map[string][]string)
