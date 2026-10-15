@@ -164,6 +164,7 @@ func (q *QuotaInventory) EnableBorrowing(opts BorrowOptions) {
 }
 
 // countsBorrowing reports whether this entry may count borrowing at all.
+// Callers must hold q.mu (borrowOpts).
 func (q *QuotaInventory) countsBorrowing() bool {
 	return q.borrowOpts.Eligibility != nil && q.static.KueueCountsBorrowable() && q.static.Scope == config.QuotaScopeNamespace
 }
@@ -293,11 +294,17 @@ func (q *QuotaInventory) Refresh(ctx context.Context) error {
 	// the API server. A namespace whose ResourceQuota read may pass by the
 	// next cycle freezes alone (computeBorrowing); only a stale Kueue read, or
 	// a Kueue controller that is down, freezes the whole entry.
+	//
+	// The borrowing options and the clock are read under the lock (G6):
+	// EnableBorrowing writes them under it.
+	q.mu.RLock()
+	opts, counts, memKey, now := q.borrowOpts, q.countsBorrowing(), q.memoryKey(), q.clock()
+	q.mu.RUnlock()
 	var view *borrowView
 	var frozenWhy kueue.Reason
-	if q.countsBorrowing() && !ext.ObservedAt.IsZero() {
+	if counts && !ext.ObservedAt.IsZero() {
 		switch {
-		case q.snapshotStale(ext, err):
+		case q.snapshotStale(ext, err, now):
 			frozenWhy = kueue.ReasonStale
 		case ext.KueueControllerDown:
 			frozenWhy = kueue.ReasonKueueControllerDown
@@ -307,9 +314,9 @@ func (q *QuotaInventory) Refresh(ctx context.Context) error {
 			last, managed := q.borrow, q.managedNS
 			q.mu.RUnlock()
 			if last == nil {
-				last = q.borrowOpts.Memory.load(q.memoryKey())
+				last = opts.Memory.load(memKey)
 			}
-			view = q.computeBorrowing(ctx, ext, last, managed)
+			view = q.computeBorrowing(ctx, opts, ext, last, managed)
 		}
 	}
 	// Maps marshal with sorted keys, so equal snapshots fingerprint equal.
@@ -389,7 +396,7 @@ func (q *QuotaInventory) Refresh(ctx context.Context) error {
 
 // memoryKey identifies what a remembered borrowing view was computed for: the
 // static entry and whether a physical limiter is the GPU bound. A rebuild that
-// changed either does not freeze at the old figures.
+// changed either does not freeze at the old figures. Callers must hold q.mu.
 func (q *QuotaInventory) memoryKey() string {
 	key, _ := json.Marshal(struct {
 		Entry    config.QuotaLimiterConfig
@@ -436,8 +443,8 @@ func (m *borrowMemory) load(key string) *borrowView {
 // snapshotStale reports whether a Kueue snapshot is stale (B1): the last read
 // failed, its borrowing half failed (a transient Cohort list error), or the
 // snapshot is older than twice the refresh interval.
-func (q *QuotaInventory) snapshotStale(ext config.ExternalQuotas, readErr error) bool {
-	return readErr != nil || ext.BorrowStale || q.clock().Sub(ext.ObservedAt) > 2*q.static.KueueRefreshInterval()
+func (q *QuotaInventory) snapshotStale(ext config.ExternalQuotas, readErr error, now time.Time) bool {
+	return readErr != nil || ext.BorrowStale || now.Sub(ext.ObservedAt) > 2*q.static.KueueRefreshInterval()
 }
 
 // computeBorrowing derives the borrowing this entry counts from a fresh
@@ -467,7 +474,8 @@ func (q *QuotaInventory) snapshotStale(ext config.ExternalQuotas, readErr error)
 // Frozen and carrying its reason (NamespaceBorrow.Withheld), so its cohort's
 // pool and lenders are still read and a waiting lender still stops new
 // borrowing in the cohort.
-func (q *QuotaInventory) computeBorrowing(ctx context.Context, ext config.ExternalQuotas, last *borrowView, managed map[string]bool) (view *borrowView) {
+func (q *QuotaInventory) computeBorrowing(ctx context.Context, opts BorrowOptions, ext config.ExternalQuotas, last *borrowView,
+	managed map[string]bool) (view *borrowView) {
 	candidates := make([]string, 0, len(ext.Borrow))
 	// toEvaluate are the candidates borrowNamespaces selects: only they cost
 	// an eligibility read.
@@ -493,7 +501,7 @@ func (q *QuotaInventory) computeBorrowing(ctx context.Context, ext config.Extern
 	}
 	slices.Sort(candidates)
 	slices.Sort(toEvaluate)
-	elig := q.borrowOpts.Eligibility.Evaluate(ctx, toEvaluate)
+	elig := opts.Eligibility.Evaluate(ctx, toEvaluate)
 
 	view = &borrowView{withheld: map[string]string{}, cohorts: map[string][]string{}}
 	counted, frozen, heldWithheld := map[string]bool{}, map[string]bool{}, map[string]string{}
@@ -507,7 +515,7 @@ func (q *QuotaInventory) computeBorrowing(ctx context.Context, ext config.Extern
 			engineReason, frozen[ns] = "", true
 		}
 		var gpuBound kueue.Reason
-		if !q.borrowOpts.Physical && !resourceQuotaBounds(ext.Borrow[ns], e.GPUQuota) && e.Reason != kueue.ReasonNotSelected {
+		if !opts.Physical && !resourceQuotaBounds(ext.Borrow[ns], e.GPUQuota) && e.Reason != kueue.ReasonNotSelected {
 			gpuBound = kueue.ReasonNoGPUBound
 		}
 		reason := string(kueue.Precedence(engineReason, gpuBound, kueue.Reason(rowsReason(ext.Borrow[ns]))))

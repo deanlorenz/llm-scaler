@@ -116,14 +116,18 @@ func (e *Engine) borrowReasons(req allocation.ModelScalingRequest, constraints [
 			lentOut = true
 		}
 	}
+	// A slice, not a map: the reasons come out in this fixed order.
 	var out []string
-	for reason, on := range map[string]bool{
-		constants.ScalingBlockedBorrowUnplaced:  unplaced,
-		constants.ScalingBlockedLenderReclaimed: reclaimed,
-		constants.ScalingBlockedNominalLentOut:  lentOut,
+	for _, r := range []struct {
+		reason string
+		on     bool
+	}{
+		{constants.ScalingBlockedBorrowUnplaced, unplaced},
+		{constants.ScalingBlockedLenderReclaimed, reclaimed},
+		{constants.ScalingBlockedNominalLentOut, lentOut},
 	} {
-		if on {
-			out = append(out, reason)
+		if r.on {
+			out = append(out, r.reason)
 		}
 	}
 	return out
