@@ -184,7 +184,7 @@ func TestKeptDefaultWarnsOfTheRestart(t *testing.T) {
 // be about this start, not the next one.
 func TestRejectedDefaultAtStartupSaysItStopsStartup(t *testing.T) {
 	got := rejectedEntryOutcome(config.GlobalDefaultsKey, false, true, false)
-	if !strings.Contains(got, "refuses to start until it is fixed") {
+	if !strings.Contains(got, "refuses to start while the bounding \"default\" entry is invalid") {
 		t.Errorf("startup outcome = %q, want it to say the controller refuses to start", got)
 	}
 }

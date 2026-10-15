@@ -276,8 +276,10 @@ func (r *ConfigMapReconciler) handleClusterPolicyConfigMap(ctx context.Context, 
 			if previous, had := r.Config.ClusterPolicy(); had {
 				r.reportRejectedEntries(ctx, cm, rejected, map[string]bool{config.GlobalDefaultsKey: true}, true)
 				r.Status.RecordPolicy(r.Config, cm.GetNamespace(), cm.GetName(), cm.GetResourceVersion(), rerr)
-				logger.Error(rerr, "Policy namespace ConfigMap default entry is invalid; keeping the cluster policy "+
-					"already in force", "policyNamespace", cm.GetNamespace(), "configMap", cm.GetName(),
+				// reportRejectedEntries has already logged the rejection as an
+				// error. This line only says what stays in force.
+				logger.Info("Keeping the cluster policy already in force",
+					"policyNamespace", cm.GetNamespace(), "configMap", cm.GetName(),
 					"limiters", len(previous.Limiters), "limiterMode", r.Config.EffectiveLimiterMode())
 				return nil
 			}
@@ -413,10 +415,10 @@ func rejectedEntryOutcome(key string, kept, boundSource, bootstrapComplete bool)
 		if kept {
 			return outcome
 		}
-		return "this entry carries the cluster's GPU limits, so the controller refuses to start until it is fixed"
+		return "the controller refuses to start while the bounding \"default\" entry is invalid"
 	}
-	return outcome + "; this entry carries the cluster's GPU limits, so the next time the controller " +
-		"restarts it will refuse to start until the entry is fixed"
+	return outcome + "; the controller refuses to start while the bounding \"default\" entry is invalid, " +
+		"so on its next restart it will refuse to start until the entry is fixed"
 }
 
 // handleScalingPolicyConfigMap handles updates to the scaling-policy ConfigMap.
