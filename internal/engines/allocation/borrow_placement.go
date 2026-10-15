@@ -267,6 +267,7 @@ type borrowSave struct {
 	borrow     map[string]map[string]nsBorrowLeft
 	lent       map[string]map[string]nsBorrowLeft
 	free       []int
+	closed     []bool
 	coFree     []map[string]int64
 	nodes      viewDebits
 	draws      int
@@ -437,6 +438,7 @@ func (bs *borrowState) save(guaranteed map[string]int) borrowSave {
 	s := borrowSave{borrow: saveLeft(bs.borrow), lent: saveLeft(bs.lent), nodes: bs.nodes.saveDebits(), draws: len(bs.draws), guaranteed: maps.Clone(guaranteed), credit: cloneCredit(bs.credit), flavors: len(bs.flavors), reclaims: len(bs.reclaims)}
 	for _, c := range bs.chunks {
 		s.free = append(s.free, c.Free)
+		s.closed = append(s.closed, c.restrictedClosed)
 		s.coFree = append(s.coFree, maps.Clone(c.CoFree))
 	}
 	return s
@@ -449,6 +451,7 @@ func (bs *borrowState) restore(s borrowSave, guaranteed map[string]int) {
 	restoreLeft(bs.lent, s.lent)
 	for i, c := range bs.chunks {
 		c.Free = s.free[i]
+		c.restrictedClosed = s.closed[i]
 		c.CoFree = s.coFree[i]
 	}
 	bs.nodes.restoreDebits(s.nodes)
@@ -785,6 +788,11 @@ func (p *modelPlacer) placeReplica(variant string, r replicaFit, g int, requests
 		fromOwn := min(own, need)
 		if fromOwn > 0 {
 			bs.credit[p.namespace+"/"+variant][c.key()] -= fromOwn
+		}
+		if c.drawable(p.class, borrow.priority) < c.Free {
+			// A model some LowerPriority lender does not outrank drew here:
+			// its restricted part closes for every model this pass (K2-2).
+			c.restrictedClosed = true
 		}
 		c.Free -= need - fromOwn
 		spendCo(borrow, c, requests)

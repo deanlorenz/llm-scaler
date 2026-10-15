@@ -118,6 +118,15 @@ type SharedPoolChunk struct {
 	// priority Kueue gives a Workload of that class, as read from the
 	// Workloads. A model's priority is looked up here.
 	ClassPriority map[string]int32
+	// restrictedClosed is set, for the rest of the pass, once a model that
+	// some Restricted lender does not outrank drew on the chunk (K2-2): Kueue
+	// does not say whose lending a borrowed GPU is, and preempts the lowest
+	// priority first when any lender reclaims. Were a model it outranks to
+	// draw the restricted part after, an Any lender's reclaim would take that
+	// model, and the LowerPriority lender could never take back what the
+	// outranking model holds. Closed, the restricted part is drawable by no
+	// model, whatever the placement order.
+	restrictedClosed bool
 }
 
 // coWithin reports whether one replica's requests fit a namespace's
@@ -228,7 +237,7 @@ func (c *SharedPoolChunk) drawable(class string, fallback *int32) int {
 	}
 	free := c.Free
 	for _, r := range c.Restricted {
-		if !known || !kueue.Reclaims(kueue.ReclaimLowerPriority, &r.Below, &prio) {
+		if c.restrictedClosed || !known || !kueue.Reclaims(kueue.ReclaimLowerPriority, &r.Below, &prio) {
 			free -= r.GPUs
 		}
 	}
