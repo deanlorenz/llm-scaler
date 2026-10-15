@@ -812,12 +812,14 @@ done; done
 rc="$(ECV_PATH="$T/notimeout" ecv "$T/ecv-notimeout.out" --keys "$K1")"
 [ "$rc" = 0 ] && grep -q 'no timeout command here (stock macOS has none' "$T/ecv-notimeout.out" \
     && ok "verify: without a timeout command it warns there is no limit on this side, and still checks" || fail "verify no timeout: rc=$rc $(grep -iE 'timeout|VERIFIED' "$T/ecv-notimeout.out" | tr '\n' ';')"
-# the preparer's timeout ends the read: 124 from GNU timeout, 143 or 137
-# (the TERM or KILL status of the script) from busybox timeout -- each is
-# timed out, could not check, never absent
+# the preparer's timeout ends the read: 124 from GNU timeout is timed out;
+# 143 or 137 (the TERM or KILL status of the script) is busybox timeout OR a
+# killed or rolled preparer, so it says both -- each is could not check, never absent
 for code in 124 143 137; do
     rc="$(STUB_EXEC_EXIT="ec-b:$code" ecv "$T/ecv-rto-$code.out" --keys "$K1")"
-    if [ "$rc" != 0 ] && ecv_row "$T/ecv-rto-$code.out" n-b "COULD NOT CHECK" "$K1" && grep -q 'the read on ec-b timed out (280 s in the preparer, 300 s here)' "$T/ecv-rto-$code.out" \
+    if [ "$code" = 124 ]; then want='the read on ec-b timed out (280 s in the preparer, 300 s here)'
+    else want="the read on ec-b timed out or was killed (exit ${code})"; fi
+    if [ "$rc" != 0 ] && ecv_row "$T/ecv-rto-$code.out" n-b "COULD NOT CHECK" "$K1" && grep -qF "$want" "$T/ecv-rto-$code.out" \
         && ! grep -q ABSENT "$T/ecv-rto-$code.out" && grep -q '2 present, 0 absent, 0 unreadable, 1 could not check' "$T/ecv-rto-$code.out"; then
         ok "verify: a read the preparer ends with exit ${code} is timed out, could not check"
     else fail "verify remote exit ${code}: rc=$rc $(grep -E 'n-b|ec-b|present,' "$T/ecv-rto-$code.out" | tr '\n' ';')"; fi
@@ -930,6 +932,12 @@ PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns fell-back > "$T/ke
 grep -q 'compiled under /root/.cache/vllm, not VLLM_CACHE_ROOT=/ ' "$T/keys-rsf.err" && ! grep -q 'sets no VLLM_CACHE_ROOT' "$T/keys-rsf.err" \
     && ok "keys: an engine that fell back off VLLM_CACHE_ROOT=/ is told apart from one with no VLLM_CACHE_ROOT" || fail "keys root / fell back: err=$(tr '\n' ' ' < "$T/keys-rsf.err")"
 printf /engine-cache/vllm > "$T/engine-root/fell-back"
+# a relative VLLM_CACHE_ROOT: the key is found, and the warning says the root is relative, not that it fell back
+printf "INFO 10-14 [backends.py:550] Using cache directory: cache/%s/rank_0_0/backbone for vLLM's torch.compile\n" "$K1" > "$T/engine-logs/rel-root"
+printf cache > "$T/engine-root/rel-root"
+PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns rel-root > "$T/keys-rel.out" 2> "$T/keys-rel.err"; rc=$?
+[ "$rc" = 0 ] && [ "$(cat "$T/keys-rel.out")" = "$K1@rank_0_0" ] && grep -q 'VLLM_CACHE_ROOT=cache is a relative path' "$T/keys-rel.err" && ! grep -q 'fell back' "$T/keys-rel.err" \
+    && ok "keys: a relative VLLM_CACHE_ROOT finds the key and says the root is relative, not that it fell back" || fail "keys relative root: rc=$rc out=$(cat "$T/keys-rel.out") err=$(tr '\n' ' ' < "$T/keys-rel.err")"
 if PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns no-compile > "$T/keys4.out" 2>&1; then fail "keys must fail on a log with no cache directory"; else
     grep -q 'no compile cache directory in its log' "$T/keys4.out" && ok "keys: a log with no cache directory is a failure, not an empty answer" || fail "keys no line: $(tail -1 "$T/keys4.out")"; fi
 if STUB_ENGINE_LOG_ERROR='Error from server (Forbidden): pods "pd-decode-0" is forbidden: cannot get resource "pods/log"' PATH="$STUB_PATH" bash deploy/enginecache.sh keys -n check-ns pd-decode-0 > "$T/keys5.out" 2>&1; then fail "keys must fail when the log cannot be read"; else

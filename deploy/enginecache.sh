@@ -1015,6 +1015,9 @@ cmd_keys() {
             warned="${warned}${base} "
             if [ -z "$root" ]; then
                 log_warning "${pod}: container ${CONTAINER} sets no VLLM_CACHE_ROOT; it compiled under ${base}, which may not be the node cache"
+            elif [ "${root#/}" = "$root" ]; then
+                # a relative root is resolved against the engine working directory, which the log does not show
+                log_warning "${pod}: VLLM_CACHE_ROOT=${root} is a relative path, so whether this start filled the node cache cannot be told; set it to the absolute mount path"
             elif [ "$base" != "$root" ]; then
                 log_warning "${pod}: compiled under ${base}, not VLLM_CACHE_ROOT=${root} -- the cache root was not writable and the engine fell back; this start did not fill the node cache"
             fi
@@ -1174,10 +1177,12 @@ cmd_verify() {
         why=""
         if grep -q Forbidden "$err_file"; then
             why="exec Forbidden: reading the cache needs pods/exec on the preparer pods in ${NAMESPACE}"
-        elif [ "$xrc" -eq 124 ] || [ "$xrc" -eq 143 ] || [ "$xrc" -eq 137 ]; then
-            # 124: GNU timeout here or in the preparer; 143/137: busybox
-            # timeout, which exits with the TERM/KILL status of the script
+        elif [ "$xrc" -eq 124 ]; then
+            # 124: GNU timeout, here or in the preparer
             why="the read on ${pod} timed out (${VERIFY_REMOTE_SECONDS} s in the preparer, 300 s here): a stuck mount, or a cache too large to read in that time"
+        elif [ "$xrc" -eq 143 ] || [ "$xrc" -eq 137 ]; then
+            # busybox timeout exits with the signal status; so does a killed or rolled preparer
+            why="the read on ${pod} timed out or was killed (exit ${xrc}): a stuck mount, a cache too large to read in ${VERIFY_REMOTE_SECONDS} s, or the preparer was restarted (engine-cache-publish rolls them) -- run verify again once they are Ready"
         elif [ "$xrc" -ne 0 ]; then
             why="exec into ${pod} failed (exit ${xrc}): $(head -1 "$err_file")"
         fi
