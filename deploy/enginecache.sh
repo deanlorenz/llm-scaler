@@ -145,8 +145,9 @@
 # engine's UID: the owner of the key directory (the engine that wrote it), or
 # ENGINE_CACHE_UID=<uid> in the environment when the engines run as another
 # UID than the one that owns the key (a seeded node: the preparer copied it
-# as root). A file that UID cannot read (or a directory it cannot read and
-# search, under the key or on the way to it from the volume mount) is
+# as root). A file that UID cannot read (or a directory under the key it
+# cannot read and search, or one on the way to it from the volume mount it
+# cannot search) is
 # reported unreadable, naming the UID. vLLM's AOT files are 600, which is
 # fine for the engine that owns them. A seeded or published key is owned by
 # root, so without ENGINE_CACHE_UID it is judged for root. Without it every
@@ -1204,14 +1205,25 @@ linked() {
     if [ -L "$p" ]; then echo "$p"; return; fi
   done
 }
-# private ROOT KEY prints "ok UID" when UID can read every file under the
-# key directory ROOT/KEY and read and search every directory from the parent
-# of ROOT (the volume mount) down to it and under it, else "no UID PATH" for
-# the first one it cannot -- UID
+# above DIR UID GID prints DIR when it is a directory UID cannot search: the
+# directories above a key are only passed through, so x is all they need (a
+# 711 volume mount is fine). GID empty: only u and o count.
+above() {
+  if [ -n "$3" ]; then
+    find "$1" -prune -type d \( \( -user "$2" ! -perm -100 \) -o \( ! -user "$2" -group "$3" ! -perm -010 \) -o \( ! -user "$2" ! -group "$3" ! -perm -001 \) \) 2> /dev/null
+  else
+    find "$1" -prune -type d \( \( -user "$2" ! -perm -100 \) -o \( ! -user "$2" ! -perm -001 \) \) 2> /dev/null
+  fi
+}
+# private ROOT KEY prints "ok UID" when UID can search every directory from
+# the parent of ROOT (the volume mount) down to the key directory ROOT/KEY,
+# and read every file and read and search every directory from the key
+# directory down, else "no UID PATH" for the first one it cannot -- UID
 # being $euid when set, else the owner of the key directory, the engine
 # that wrote the key (root, for a seeded or published copy). A path owned by
 # UID needs u+r; one in the key directory's group, g+r (the engine is taken
-# to be in that group); any other, o+r (directories: r and x likewise). With
+# to be in that group); any other, o+r (directories: r and x likewise; above
+# the key directory, x alone). With
 # $euid the UID's groups are not known, so only u and o count. "? WHY" when
 # the modes or the owner cannot be read -- including a find that rejects any
 # part of the expression, probed whole before it is trusted: an expression
@@ -1238,15 +1250,16 @@ private() {
     echo "? no-find-modes$miss"; return
   fi
   # the directories on the way: the volume mount (the cache root's parent),
-  # the cache root, then each component of KEY
+  # the cache root, then each component of KEY above the key directory:
+  # search only
   a="${root%/*}"
   if [ -n "$a" ]; then
-    f="$(find "$a" -prune \( "$@" \) 2> /dev/null)"
+    f="$(above "$a" "$u" "$g")"
     [ -z "$f" ] || { echo "no $u $f"; return; }
   fi
   a="$root"
   while :; do
-    f="$(find "$a" -prune \( "$@" \) 2> /dev/null)"
+    f="$(above "$a" "$u" "$g")"
     [ -z "$f" ] || { echo "no $u $f"; return; }
     [ -n "$rest" ] || break
     c="${rest%%/*}"
@@ -1440,8 +1453,10 @@ cmd_verify() {
     # user may have changed. Name the UIDs assumed, every time.
     local ulist="" nuid=0 uwho=""
     if [ -z "$ENGINE_UID" ] && [ "$assumed" -gt 0 ]; then
-        ulist="$(tr ' ' '\n' <<< "$uids" | grep . | sort -n -u | paste -sd, -)"
-        nuid="$(tr ',' '\n' <<< "$ulist" | grep -c .)"
+        # grep finding nothing must not abort under pipefail: an empty list
+        # is reported as such, not as a dead script
+        ulist="$(tr ' ' '\n' <<< "$uids" | { grep . || true; } | sort -n -u | paste -sd, -)"
+        nuid="$(tr ',' '\n' <<< "$ulist" | { grep -c . || true; })"
         ulist="${ulist//,/, }"
         if [ "$nuid" -gt 1 ]; then uwho="uids ${ulist}"; else uwho="uid ${ulist}"; fi
         echo "  WARNING: ${assumed} of ${total} node/key checks were judged for the owner of the key directory (${uwho}), taken as the engines' UID."

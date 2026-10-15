@@ -614,11 +614,13 @@ leader pod, the check covers only the leader's ranks.
 When `ENGINE_CACHE_UID` is not set, each key is judged for the user that owns
 it. That is your engines' user only if they wrote the key. A seeded or
 published key is owned by root. A key can also belong to another deployment
-sharing the cache, or to the engines' old user if the image changed it. So the
-summary always warns, says how many node/key checks it judged that way, and
-names the UIDs it assumed. The last line names them too: `VERIFIED for root`,
-`VERIFIED for uid 1000`, or `VERIFIED for uids 0, 1000`. More than one UID
-means the keys have different owners. The engines of one configuration all run
+sharing the cache, or to the engines' old user if the image changed it. So
+whenever a key was judged for the owner of its key directory (a `present`
+line, or an `UNREADABLE` one for its modes), the summary warns, says how many
+node/key checks it judged that way, and names the UIDs it assumed. The last
+line names them too: `VERIFIED for root`, `VERIFIED for uid 1000`, or
+`VERIFIED for uids 0, 1000`. More than one UID means the keys have different
+owners. The engines of one configuration all run
 as one UID, so at least one line was judged for the wrong user. These verdicts
 still exit zero. Re-run with `ENGINE_CACHE_UID` to check your engines' user;
 only then does the last line say plain `VERIFIED`.
@@ -657,9 +659,10 @@ engine's user:
   that wrote the key. A file it owns needs owner read. A file owned by
   another user needs group read if it is in the key directory's group, and
   read for others if not. The check assumes the engine is in the key
-  directory's group. Directories need read and search the same way, both
-  under the key and on the way to it, from the volume mount (`/engine-cache`)
-  down.
+  directory's group. The directories above a key, from the volume mount
+  (`/engine-cache`) down, need only search (`x`) the same way: a `711`
+  mount is fine. The key directory and every directory under it need read
+  and search.
 - vLLM writes its AOT files (`.../rank_0_0/model`) as mode `600`. That is
   fine when the engine owns them, which it does when it wrote them. They are
   `present`.

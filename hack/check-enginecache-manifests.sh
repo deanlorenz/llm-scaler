@@ -1095,6 +1095,23 @@ chmod 755 "$T/ecv/ec-c"
 [ "$rc" != 0 ] && grep -qE "^  n-c +UNREADABLE +$AOTK@rank_0_0  \($T/ecv/ec-c: not readable by uid $OTHER \(ENGINE_CACHE_UID\)\)" "$T/ecv-anc5.out" \
     && ecv_row "$T/ecv-anc5.out" n-c UNREADABLE "$AOTK@rank_0_0" \
     && ok "verify: a 700 volume mount above the cache root another UID cannot search is unreadable, naming it" || fail "verify mount root 700: rc=$rc $(grep n-c "$T/ecv-anc5.out")"
+# the directories above a key are only passed through: search is enough, so
+# a 711 volume mount another UID cannot list is no reason to call it unreadable
+ecv_reset; chmod 711 "$T/ecv/ec-c" "$T/ecv/ec-c/vllm"
+rc="$(ENGINE_CACHE_UID="$OTHER" ecv "$T/ecv-anc711.out" --keys "$K1")"
+chmod 755 "$T/ecv/ec-c" "$T/ecv/ec-c/vllm"
+[ "$rc" = 0 ] && ecv_row "$T/ecv-anc711.out" n-c present "$K1" && grep -q '^  VERIFIED: every key is on every usable node$' "$T/ecv-anc711.out" \
+    && ok "verify: a 711 volume mount and cache root above a readable key are present for another UID" || fail "verify mount root 711, other uid: rc=$rc $(grep -E 'n-c|VERIFIED' "$T/ecv-anc711.out" | tr '\n' ';')"
+if [ "$ME" = 0 ]; then
+    # a root 711 mount root above keys owned by 1000, judged for their owner
+    ecv_reset; ecv_aot; for p in ec-a ec-b ec-c; do chown -R 1000:1000 "$T/ecv/$p/vllm/$AOTK"; done; chmod 711 "$T/ecv/ec-a"
+    rc="$(ecv "$T/ecv-anc711r.out" --keys "$AOTK@rank_0_0")"
+    chmod 755 "$T/ecv/ec-a"
+    [ "$rc" = 0 ] && ecv_row "$T/ecv-anc711r.out" n-a present "$AOTK@rank_0_0" \
+        && grep -q '^  VERIFIED for uid 1000: every key is on every usable node, readable by uid 1000' "$T/ecv-anc711r.out" \
+        && ok "verify: a root 711 volume mount above a 1000:1000 key is present, VERIFIED for uid 1000" \
+        || fail "verify root 711 mount root, owner 1000: rc=$rc $(grep -E 'n-a|VERIFIED' "$T/ecv-anc711r.out" | tr '\n' ';')"
+fi
 if [ "$ME" = 0 ]; then
     # a root 700 mount root above keys owned by 1000, judged for their owner
     ecv_reset; ecv_aot; chown -R 1000:1000 "$T/ecv/ec-a/vllm/$AOTK"; chmod 700 "$T/ecv/ec-a"
