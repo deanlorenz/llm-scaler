@@ -1320,6 +1320,9 @@ YAML
 pool_scaler_addr() {
     local mode
     mode="$(wva_scaler_mode_of "$WVA_NAMESPACE")"
+    if [ "$mode" = unknown ]; then
+        log_warning "Cannot read Deployment wva-controller-manager in $WVA_NAMESPACE, so whether its scaler serves TLS is unknown. The pool uses the plaintext address; on a TLS install it stays not-Ready."
+    fi
     [ "$mode" = tls ] || mode=plaintext
     wva_scaler_address "$WVA_NAMESPACE" "$mode"
 }

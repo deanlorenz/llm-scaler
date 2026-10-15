@@ -54,6 +54,10 @@ WVA_SCALER_CLIENT_CA_DIR=/etc/wva/scaler-client-ca
 WVA_SCALER_CLIENT_SAN_DEFAULT=wva-keda-client
 WVA_SCALER_LEAF_DAYS=365
 WVA_SCALER_CA_DAYS=3650
+# KEDA reads its client certificate once per scaler connection and never
+# again, so it lives as long as the CA: a renewed one would not reach KEDA
+# until KEDA restarts (see "KEDA's side").
+WVA_SCALER_CLIENT_DAYS=$WVA_SCALER_CA_DAYS
 WVA_SCALER_RENEW_DAYS=30
 
 # wva_scaler_dns_names echoes the names the serving certificate must carry: the
@@ -156,8 +160,10 @@ wva_scaler_require_writable() {
     case "$WVA_OBJ_STATE" in
         absent|ours) return 0 ;;
         unreadable)
+            wva_scaler_drop_tmp
             log_error "Cannot read $resource/$name in $WVA_NS ($WVA_OBJ_ERR), so whether this installer created it is unknown. Grant get on $resource there, or set WVA_SCALER_TLS=false." ;;
         *)
+            wva_scaler_drop_tmp
             log_error "$resource/$name in $WVA_NS was not created by this installer (no $WVA_SCALER_TLS_LABEL label); refusing to overwrite it. Remove or rename it, or set WVA_SCALER_TLS=false." ;;
     esac
 }
@@ -237,7 +243,14 @@ wva_scaler_write_secret() {
                      labels: {"app.kubernetes.io/managed-by": "llm-scaling-manager", ($l): $r}},
           data: {"tls.crt": ($crt | @base64), "tls.key": ($key | @base64), "ca.crt": ($ca | @base64)}}' \
         | kubectl apply --server-side --force-conflicts --field-manager=llm-scaling-manager -f - >/dev/null \
-        || log_error "Could not write Secret $name in $WVA_NS."
+        || { wva_scaler_drop_tmp; log_error "Could not write Secret $name in $WVA_NS."; }
+}
+
+# wva_scaler_drop_tmp removes the directory in WVA_SCALER_TMPD, which holds
+# private keys while certificates are minted, before a refusal exits.
+wva_scaler_drop_tmp() {
+    [ -z "${WVA_SCALER_TMPD:-}" ] || rm -rf "$WVA_SCALER_TMPD"
+    WVA_SCALER_TMPD=""
 }
 
 # wva_scaler_sha256 echoes the SHA-256 of file $1.
@@ -272,6 +285,7 @@ wva_scaler_tls_provision_openssl() {
     [ "${ENVIRONMENT:-}" = openshift ] && serving=false
     d="$(mktemp -d)"
     chmod 700 "$d"
+    WVA_SCALER_TMPD="$d"
 
     # Every refusal first, so none leaves a private key behind in $d.
     wva_scaler_require_writable secret "$WVA_SCALER_CA_SECRET"
@@ -321,7 +335,7 @@ wva_scaler_tls_provision_openssl() {
     san="$(wva_scaler_client_san)"
     if [ "$ca_new" = true ] || ! wva_scaler_cert_ok "$d/client.old" "$d/ca.crt" "$san" \
         || ! cmp -s "$d/client-ca.old" "$d/ca.crt"; then
-        wva_scaler_new_leaf "$d" client "$san" clientAuth "$san" \
+        WVA_SCALER_LEAF_DAYS="$WVA_SCALER_CLIENT_DAYS" wva_scaler_new_leaf "$d" client "$san" clientAuth "$san" \
             || { rm -rf "$d"; log_error "openssl could not mint the KEDA client certificate."; }
         wva_scaler_write_secret "$WVA_SCALER_CLIENT_SECRET" client "$d/client.crt" "$d/client.key" "$d/ca.crt"
         issued="$issued client"
@@ -330,7 +344,7 @@ wva_scaler_tls_provision_openssl() {
     fi
 
     WVA_SCALER_CLIENT_CA_HASH="$(wva_scaler_sha256 "$d/ca.crt")"
-    rm -rf "$d"
+    wva_scaler_drop_tmp
     [ -z "$issued" ] || log_info "  issued:${issued} (openssl; leaves valid ${WVA_SCALER_LEAF_DAYS} days, re-issued by a re-install within ${WVA_SCALER_RENEW_DAYS} days of expiry)"
     [ -z "$kept" ] || log_info "  kept, still valid:${kept}"
     if [ "$serving" = false ]; then
@@ -402,7 +416,7 @@ spec:
   dnsNames:
   - ${san}
   secretName: ${WVA_SCALER_CLIENT_SECRET}
-  duration: $((WVA_SCALER_LEAF_DAYS * 24))h
+  duration: $((WVA_SCALER_CLIENT_DAYS * 24))h
   renewBefore: $((WVA_SCALER_RENEW_DAYS * 24))h
   usages:
   - client auth
@@ -616,15 +630,35 @@ wva_scaler_trigger_auth_json() {
     jq -nc --arg n "$(wva_scaler_keda_auth_name "$1")" '{name: $n, kind: "ClusterTriggerAuthentication"}'
 }
 
+# wva_scaler_install_puts_keda succeeds when this install itself installs KEDA,
+# which deploy_scaler_backend does after the controller: on kind, and on
+# Kubernetes with KEDA_HELM_INSTALL=true.
+wva_scaler_install_puts_keda() {
+    [ "${SCALER_BACKEND:-keda}" = keda ] || return 1
+    case "${ENVIRONMENT:-}" in
+        kind-emulator) return 0 ;;
+        kubernetes) [ "${KEDA_HELM_INSTALL:-false}" = true ] ;;
+        *) return 1 ;;
+    esac
+}
+
 # wva_scaler_keda_object_ns sets WVA_SCALER_KEDA_OBJ_NS to the namespace KEDA
-# reads a ClusterTriggerAuthentication's Secrets from, or to empty when KEDA's
-# namespace is not known (wva_resolve_scaler_keda_namespace says why).
+# reads a ClusterTriggerAuthentication's Secrets from, or to empty when it is
+# not known. The private key is copied there, so only sources a tenant cannot
+# choose count: KEDA_NAMESPACE set by the caller, the namespace serving the
+# external-metrics APIService, or the namespace this install puts KEDA in.
+# Never the NetworkPolicy in WVA_NS, which that namespace's admin can edit.
 wva_scaler_keda_object_ns() {
-    local kns="${WVA_SCALER_KEDA_NS:-}" out rc=0 env
+    local kns="" out rc=0 env
     WVA_SCALER_KEDA_OBJ_NS=""
-    if [ -z "$kns" ] && declare -F wva_resolve_scaler_keda_namespace >/dev/null; then
-        wva_resolve_scaler_keda_namespace >/dev/null 2>&1
-        kns="${WVA_SCALER_KEDA_NS:-}"
+    if [ "${KEDA_NAMESPACE_EXPLICIT:-false}" = true ]; then
+        kns="${KEDA_NAMESPACE:-}"
+    elif declare -F wva_keda_apiservice_ns >/dev/null && kns="$(wva_keda_apiservice_ns 2>/dev/null)"; then
+        :
+    elif wva_scaler_install_puts_keda; then
+        kns="${KEDA_NAMESPACE:-}"
+    else
+        kns=""
     fi
     [ -n "$kns" ] || return 0
     # The operator may move its object namespace; a value from a fieldRef is
@@ -680,6 +714,7 @@ wva_scaler_keda_auth_apply() {
 
     d="$(mktemp -d)"
     chmod 700 "$d"
+    WVA_SCALER_TMPD="$d"
     wva_scaler_object_state secret "$WVA_SCALER_CLIENT_SECRET"
     if [ "$WVA_OBJ_STATE" != ours ]; then
         rm -rf "$d"
@@ -704,6 +739,14 @@ wva_scaler_keda_auth_apply() {
     # The copy and the ClusterTriggerAuthentication: absent or ours only.
     WVA_NS="$WVA_SCALER_KEDA_OBJ_NS" wva_scaler_object_state secret "$name"
     obj_state="$WVA_OBJ_STATE"
+    local changed=false
+    if [ "$obj_state" = ours ]; then
+        # KEDA builds a scaler connection's TLS once and keeps it until KEDA
+        # restarts, so a changed copy does not reach a connection already open.
+        wva_scaler_secret_field tls.crt "$d/old.crt"
+        wva_scaler_secret_field ca.crt "$d/old.ca"
+        cmp -s "$d/old.crt" "$d/tls.crt" && cmp -s "$d/old.ca" "$d/ca.crt" || changed=true
+    fi
     case "$obj_state" in
         absent|ours) ;;
         unreadable) rm -rf "$d"; log_error "Cannot read Secret $name in $WVA_SCALER_KEDA_OBJ_NS ($WVA_OBJ_ERR). Grant get on secrets there, or set WVA_SCALER_TLS=false." ;;
@@ -743,14 +786,24 @@ wva_scaler_keda_auth_apply() {
     # expiry with openssl rather than parsing a date.
     jq -n --arg ns "$WVA_NS" --arg l "$WVA_SCALER_TLS_LABEL" --arg m "$WVA_SCALER_KEDA_MARKER" \
         --arg cta "$name" --arg on "$WVA_SCALER_KEDA_OBJ_NS" --arg sha "$sha" --rawfile crt "$d/tls.crt" \
+        --arg cas "$(wva_scaler_sha256 "$d/ca.crt")" \
         '{apiVersion: "v1", kind: "ConfigMap",
           metadata: {name: $m, namespace: $ns, labels: {"app.kubernetes.io/managed-by": "llm-scaling-manager", ($l): "keda-client"}},
-          data: {clusterTriggerAuthentication: $cta, secretNamespace: $on, clientCertSha256: $sha, clientCert: $crt}}' \
+          data: {clusterTriggerAuthentication: $cta, secretNamespace: $on, clientCertSha256: $sha, clientCert: $crt, caSha256: $cas}}' \
         | kubectl apply --server-side --force-conflicts --field-manager=llm-scaling-manager -f - >/dev/null \
         || { rm -rf "$d"; log_error "Could not write ConfigMap $WVA_SCALER_KEDA_MARKER in $WVA_NS."; }
-    rm -rf "$d"
+    wva_scaler_drop_tmp
     WVA_SCALER_KEDA_READY=true
     log_success "KEDA's side of the scaler TLS: ClusterTriggerAuthentication $name, reading Secret $name in $WVA_SCALER_KEDA_OBJ_NS (client certificate expires $not_after; KEDA trusts ${ca_src})"
+    if [ "$changed" = true ]; then
+        log_warning "KEDA's client certificate or the CA it trusts changed. KEDA keeps the TLS of a connection it already has until it restarts, so restart KEDA's operator now:  kubectl rollout restart deployment -n $(wva_scaler_keda_operator_ns) -l app=keda-operator"
+    fi
+}
+
+# wva_scaler_keda_operator_ns echoes the namespace KEDA's operator runs in,
+# for a message: the object namespace unless KEDA_NAMESPACE names another.
+wva_scaler_keda_operator_ns() {
+    printf '%s\n' "${KEDA_NAMESPACE:-$WVA_SCALER_KEDA_OBJ_NS}"
 }
 
 # wva_scaler_keda_not_ready reports that KEDA's side could not be written: a
@@ -777,6 +830,7 @@ wva_scaler_keda_marker_state() {
     WVA_SCALER_KEDA_STALE=false
     WVA_SCALER_KEDA_NOT_AFTER=""
     WVA_SCALER_KEDA_EXPIRING=false
+    WVA_SCALER_KEDA_CA_STALE=false
     out="$(kubectl get configmap "$WVA_SCALER_KEDA_MARKER" -n "$WVA_NS" -o json 2>&1)" || rc=$?
     if [ "$rc" != 0 ]; then
         if printf '%s' "$out" | grep -qi notfound; then
@@ -809,6 +863,20 @@ wva_scaler_keda_marker_state() {
     [ -s "$d/tls.crt" ] && cur="$(wva_scaler_sha256 "$d/tls.crt")"
     rm -rf "$d"
     [ -z "$cur" ] || [ "$cur" = "$sha" ] || WVA_SCALER_KEDA_STALE=true
+    # The CA KEDA trusts against the one that signs the serving certificate
+    # now. The OpenShift service CA rotates on its own.
+    local cas want
+    cas="$(printf '%s' "$out" | jq -r '.data.caSha256 // ""')"
+    d="$(mktemp -d)"
+    if [ "${ENVIRONMENT:-}" = openshift ]; then
+        kubectl get configmap openshift-service-ca.crt -n "$WVA_NS" -o jsonpath='{.data.service-ca\.crt}' > "$d/ca" 2>/dev/null || : > "$d/ca"
+    else
+        wva_scaler_secret_field ca.crt "$d/ca"
+    fi
+    want=""
+    [ -s "$d/ca" ] && want="$(wva_scaler_sha256 "$d/ca")"
+    rm -rf "$d"
+    [ -z "$cas" ] || [ -z "$want" ] || [ "$cas" = "$want" ] || WVA_SCALER_KEDA_CA_STALE=true
 }
 
 # wva_scaler_plaintext_scaledobjects echoes <namespace>/<name> of every
@@ -818,13 +886,20 @@ wva_scaler_keda_marker_state() {
 # With $1 = plaintext, the reverse: triggers still on the TLS address or
 # reference. Exits 2 when the ScaledObjects cannot be read: unknown, not none.
 wva_scaler_plaintext_scaledobjects() {
-    local want="${1:-tls}" out rc=0
+    local want="${1:-tls}" out rc=0 err
+    err="$(mktemp)"
     if [ "$(wva_install_scope)" = "namespace" ]; then
-        out="$(kubectl get scaledobjects.keda.sh -n "${WVA_WATCH_NS:-$WVA_NS}" -o json 2>/dev/null)" || rc=$?
+        out="$(kubectl get scaledobjects.keda.sh -n "${WVA_WATCH_NS:-$WVA_NS}" -o json 2>"$err")" || rc=$?
     else
-        out="$(kubectl get scaledobjects.keda.sh -A -o json 2>/dev/null)" || rc=$?
+        out="$(kubectl get scaledobjects.keda.sh -A -o json 2>"$err")" || rc=$?
     fi
-    [ "$rc" = 0 ] || return 2
+    if [ "$rc" != 0 ]; then
+        # KEDA not installed yet: there can be no ScaledObjects.
+        if grep -qi "doesn.t have a resource type" "$err"; then rm -f "$err"; return 0; fi
+        rm -f "$err"
+        return 2
+    fi
+    rm -f "$err"
     printf '%s' "$out" | jq -r --arg p "wva-external-scaler.${WVA_NS}." \
         --arg a "$(wva_scaler_address "$WVA_NS" tls)" --arg n "$(wva_scaler_keda_auth_name)" --arg w "$want" '
         [.items[]? | . as $so | (.spec.triggers // [])[]
@@ -1041,7 +1116,7 @@ wva_scaler_tls_prepare() {
         prereqs|all)
             if [ "$(wva_scaler_keda_api)" = present ]; then
                 wva_scaler_keda_auth_apply
-            elif [ "${KEDA_HELM_INSTALL:-false}" = true ]; then
+            elif wva_scaler_install_puts_keda; then
                 WVA_SCALER_KEDA_DEFERRED=true
                 WVA_SCALER_KEDA_READY=true
             else
@@ -1061,6 +1136,7 @@ wva_scaler_tls_prepare() {
     esac
     [ "$scope" != prereqs ] || return 0
     if [ "$WVA_SCALER_KEDA_READY" != true ] && [ "$WVA_SCALER_TLS_KEPT" != true ]; then
+        wva_scaler_tls_warn_stranded
         return 0
     fi
 
@@ -1080,7 +1156,7 @@ wva_scaler_tls_prepare() {
             fi
         fi
     else
-        wva_scaler_tls_check_scaledobjects tls || return 0
+        wva_scaler_tls_check_scaledobjects tls || { wva_scaler_tls_warn_stranded; return 0; }
     fi
 
     WVA_SCALER_TLS_ON=true
@@ -1090,6 +1166,17 @@ wva_scaler_tls_prepare() {
         log_info "External scaler TLS: mutual TLS, certificates from $WVA_SCALER_TLS_PROVIDER_RESOLVED; ScaledObjects reach it at $(wva_scaler_address "$WVA_NS" tls) with authenticationRef $(wva_scaler_keda_auth_name)"
     fi
     wva_append_scaler_tls_patch "$kustomization"
+}
+
+# wva_scaler_tls_warn_stranded warns about ScaledObjects on the TLS address or
+# reference while the scaler stays on plaintext: they are not-Ready.
+wva_scaler_tls_warn_stranded() {
+    local rows rc=0
+    rows="$(wva_scaler_plaintext_scaledobjects plaintext)" || rc=$?
+    [ "$rc" = 0 ] && [ -n "$rows" ] || return 0
+    log_warning "These ScaledObjects use the scaler's TLS address or authenticationRef, but it stays on plaintext, so they are not-Ready:"
+    printf '%s\n' "$rows" | head -20 | sed 's/^/    /' >&2
+    log_warning "  Fix what keeps TLS off (above), or move them back:  $(wva_scaler_tls_migrate_cmd false)"
 }
 
 # wva_scaler_tls_after_keda writes KEDA's side when this install put KEDA
@@ -1157,9 +1244,10 @@ wva_scaler_tls_undeploy() {
     fi
     kubectl delete secret -n "$WVA_NS" -l "$WVA_SCALER_TLS_LABEL" --ignore-not-found >/dev/null 2>&1 \
         || log_warning "Could not remove the external scaler certificate Secrets (label $WVA_SCALER_TLS_LABEL) in $WVA_NS."
-    kubectl delete configmap "$WVA_SCALER_KEDA_MARKER" -n "$WVA_NS" --ignore-not-found >/dev/null 2>&1 || true
-    # KEDA's side is the admin's: only an uninstall that may write it removes it.
+    # KEDA's side, and the marker that records it, are the admin's: only an
+    # uninstall that may write them removes them.
     [ "${WVA_APPLY_SCOPE:-all}" != controller ] || return 0
+    kubectl delete configmap "$WVA_SCALER_KEDA_MARKER" -n "$WVA_NS" --ignore-not-found >/dev/null 2>&1 || true
     local name
     name="$(wva_scaler_keda_auth_name)"
     kubectl delete clustertriggerauthentications.keda.sh "$name" --ignore-not-found >/dev/null 2>&1 || true

@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"os"
 	"strings"
 	"time"
 
@@ -39,6 +40,10 @@ func configureScalerTLS() {
 	}
 	scalerTLSOn = provider != "" && certFlag
 	if !scalerTLSOn {
+		// CI sets this, so an install that quietly fell back to plaintext fails
+		// the run instead of skipping the TLS spec.
+		Expect(os.Getenv("E2E_EXPECT_SCALER_TLS")).NotTo(Equal("true"),
+			"E2E_EXPECT_SCALER_TLS=true, but the controller serves the external scaler in plaintext; the install log says why")
 		GinkgoWriter.Printf("External scaler: plaintext\n")
 		return
 	}
@@ -98,6 +103,12 @@ var _ = Describe("External scaler mutual TLS", Label("smoke", "full"), Ordered, 
 					"KEDA got a metric spec over plaintext from a scaler that should require mutual TLS")
 			}
 		}, 90*time.Second, 10*time.Second).Should(Succeed())
+
+		// No External metric could also mean KEDA built no HPA at all. KEDA
+		// builds one either way; on a refused metric spec it falls back to CPU.
+		By("KEDA did build the plaintext ScaledObject's HPA, on the CPU fallback")
+		latched, carried, why := hpaOnCPUDefault(cfg.LLMDNamespace, plainTarget)
+		Expect(latched).To(BeTrue(), "expected an HPA on the CPU fallback; carried %v %s", carried, why)
 	})
 })
 

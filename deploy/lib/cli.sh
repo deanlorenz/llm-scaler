@@ -111,9 +111,12 @@ Environment Variables:
                                none of those, NO policy is written and :9090 stays open (warned)
   WVA_SCALER_NETWORKPOLICY     false skips the NetworkPolicy that admits :9090 only from KEDA
                                (default: true)
-  WVA_SCALER_TLS               true serves the external scaler over mutual TLS, with certificates
-                               the installer provisions (default: false for a new install; a
-                               re-install keeps what the running controller has)
+  WVA_SCALER_TLS               unset (default): mutual TLS on the external scaler when KEDA's side
+                               is in place and no ScaledObject is left behind, else plaintext with
+                               a warning. true: the same, but refuse instead. false: plaintext.
+                               A controller that already has TLS keeps it
+  WVA_SCALER_TLS_MIGRATE       true moves the ScaledObjects that name the scaler with it when its
+                               TLS mode changes (default: false)
   WVA_SCALER_TLS_PROVIDER      auto (default) | cert-manager | openssl: who issues those
                                certificates. auto uses cert-manager when it is installed
   CRD_INSTALL                  if-missing (default) | always | never. Gateway API and GAIE CRDs are

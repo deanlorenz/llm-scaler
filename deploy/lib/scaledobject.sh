@@ -61,6 +61,9 @@ so_scaler_addr() {
     local mode=plaintext
     if declare -F wva_scaler_mode_of >/dev/null; then
         mode="$(wva_scaler_mode_of "$1")"
+        if [ "$mode" = unknown ]; then
+            log_warning "Cannot read Deployment wva-controller-manager in $1, so whether its scaler serves TLS is unknown. Writing the plaintext address; if it serves TLS, these ScaledObjects stay not-Ready (make verify-deployment names them)."
+        fi
         [ "$mode" = tls ] || mode=plaintext
     fi
     if declare -F wva_scaler_address >/dev/null; then

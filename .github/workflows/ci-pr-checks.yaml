@@ -249,6 +249,9 @@ jobs:
           CREATE_CLUSTER: "true"
           SCALER_BACKEND: keda
           LLM_D_ROUTER_VERSION: "v0.9.0"
+          # The install turns the scaler's mutual TLS on by default; fail, not
+          # skip, if it fell back to plaintext.
+          E2E_EXPECT_SCALER_TLS: "true"
           WVA_E2E_SECONDARY_OVERLAY_PATH: ${{ github.workspace }}/test/e2e/testdata/secondary-controller
           IMG: ${{ steps.build-image.outputs.image }}
           SKIP_BUILD: "true"
@@ -375,6 +378,9 @@ jobs:
           CREATE_CLUSTER: "true"
           SCALER_BACKEND: keda
           LLM_D_ROUTER_VERSION: "v0.9.0"
+          # The install turns the scaler's mutual TLS on by default; fail, not
+          # skip, if it fell back to plaintext.
+          E2E_EXPECT_SCALER_TLS: "true"
           DEPLOY_LWS: "true"
           IMG: ${{ steps.build-image.outputs.image }}
           SKIP_BUILD: "true"

@@ -479,6 +479,9 @@ wva_verify_scaler_tls() {
             if [ "$WVA_SCALER_KEDA_STALE" = true ]; then
                 log_info "  KEDA holds an older client certificate than the one in $WVA_NS; it works until it expires. Refresh:  $(wva_make_cmd setup-prereqs)"
             fi
+            if [ "$WVA_SCALER_KEDA_CA_STALE" = true ]; then
+                log_warning "  KEDA trusts a different CA than the one that signs the scaler's certificate now (on OpenShift the service CA rotates). Handshakes fail. A cluster admin runs $(wva_make_cmd setup-prereqs), then restarts KEDA's operator."
+            fi
             if [ "$WVA_SCALER_KEDA_EXPIRING" = true ]; then
                 log_warning "  KEDA's client certificate expires within ${WVA_SCALER_RENEW_DAYS} days (${WVA_SCALER_KEDA_NOT_AFTER}). After that nothing scales. A cluster admin refreshes it with:  $(wva_make_cmd setup-prereqs)"
             fi
@@ -486,6 +489,11 @@ wva_verify_scaler_tls() {
     fi
 
     if ! declare -F wva_scaler_plaintext_scaledobjects >/dev/null; then
+        return 0
+    fi
+    # Hand-set TLS flags: KEDA's side is whoever set them, not this installer's.
+    if [ -z "$(printf '%s' "$dep" | jq -r '.spec.template.metadata.annotations["wva.llmd.ai/scaler-tls"] // ""')" ]; then
+        log_info "  TLS was set up by hand, so ScaledObjects are not checked against this installer's address and ClusterTriggerAuthentication."
         return 0
     fi
     rc=0
