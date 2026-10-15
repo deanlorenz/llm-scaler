@@ -323,7 +323,8 @@ func (o *GreedyByScoreOptimizer) applyRescale(
 		}
 
 		if consumed := fillable - freeThisCycle; consumed > 0 {
-			if k.scope != "" {
+			switch {
+			case k.scope != "":
 				if availableByNS[k.scope] != nil {
 					availableByNS[k.scope][k.accType] -= consumed
 				}
@@ -336,11 +337,11 @@ func (o *GreedyByScoreOptimizer) applyRescale(
 				if cur, ok := open[k.accType]; ok && cur != math.MaxInt {
 					open[k.accType] -= consumed
 				}
-			} else if open != nil {
+			case open != nil:
 				// An excluded namespace spends the budget over every
 				// namespace, not the namespace quota's.
 				open[k.accType] -= consumed
-			} else {
+			default:
 				available[k.accType] -= consumed
 			}
 		}
