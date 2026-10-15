@@ -2,6 +2,7 @@ package itl
 
 import (
 	"maps"
+	"math"
 	"sync"
 	"time"
 
@@ -63,7 +64,7 @@ type Reading struct {
 // fits ITL(k) = A*k + B over it.
 //
 // A row is a reading when it is the variant's, Ready and not lent by the warm
-// pool, with a positive ITL and a k in (0, DefaultMaxObservableK]; the window
+// pool, with a finite positive ITL and a k in (0, DefaultMaxObservableK]; the window
 // itself drops a k below DefaultMinObservableK. A full fit is taken when the
 // window is Ready, and its B is remembered when positive. Otherwise, with at
 // least DefaultMinSamples readings, A alone is fitted with B pinned to the
@@ -87,7 +88,8 @@ func (t *Tracker) Observe(key, variant string, rows []domain.ReplicaMetrics, now
 		switch {
 		case !rm.Ready || rm.FromWarmPool:
 			r.NotReady++
-		case !(rm.AvgITL > 0):
+		case !(rm.AvgITL > 0) || math.IsInf(rm.AvgITL, 1):
+			// +Inf passes "> 0": a rate over a window with no tokens in it.
 			r.NoITL++
 		case !(rm.KvUsageInstant > 0):
 			r.NoK++

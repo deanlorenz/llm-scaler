@@ -1,6 +1,7 @@
 package itl
 
 import (
+	"math"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -38,13 +39,14 @@ var _ = Describe("Tracker", func() {
 			{PodName: "starting", VariantName: "v", KvUsageInstant: 0.5, AvgITL: 0.02},
 			{PodName: "pool", VariantName: "v", Ready: true, FromWarmPool: true, KvUsageInstant: 0.5, AvgITL: 0.02},
 			row("no-itl", 0.5, 0),
+			row("inf-itl", 0.5, math.Inf(1)),
 			row("no-k", 0, 0.02),
 			row("above", 0.9, 0.02),
 			row("below", 0.05, 0.02),
 		}, now)
-		Expect(r.Considered).To(Equal(7), "another variant's row is not considered at all")
+		Expect(r.Considered).To(Equal(8), "another variant's row is not considered at all")
 		Expect(r.NotReady).To(Equal(2))
-		Expect(r.NoITL).To(Equal(1))
+		Expect(r.NoITL).To(Equal(2), "an infinite ITL is not a reading either")
 		Expect(r.NoK).To(Equal(1))
 		Expect(r.AboveBand).To(Equal(1))
 		Expect(r.Offered).To(Equal(2), "the reading below the band is offered")
