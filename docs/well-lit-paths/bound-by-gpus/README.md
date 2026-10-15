@@ -25,8 +25,9 @@ You need a cluster admin, and controllers installed by
 2. Cluster admin: run [`make enable-physical-limiter`](../../guides/admin-gpu-bounding/README.md#installation-instructions). Read the list it prints first: some controllers will be restarted ([details](#what-the-command-restarts)).
 3. [Check it works](../../guides/admin-gpu-bounding/README.md#verification): each controller reports the limiter `inventory/<name>`, not `none`.
 
-To undo, the admin runs `make disable-physical-limiter`
-([Cleanup](../../guides/admin-gpu-bounding/README.md#cleanup)). To bound one
+To undo, the admin runs `make disable-limiter`
+([Cleanup](../../guides/admin-gpu-bounding/README.md#cleanup)). It removes only
+the physical limiter; a quota in the same policy stays. To bound one
 install instead, its namespace owner adds `WVA_LIMITER=gpu-inventory` to
 `make deploy-wva` ([configuration](../../reference/configuration.md#core-configuration));
 the same owner can edit it away.
@@ -73,14 +74,14 @@ this run and every later one. Leave a namespace out of `WVA_LIMITER_TARGETS`
 where that restart is not acceptable now. A later `make deploy-wva` without
 `WVA_LIMITER` keeps the limiter and says so; `WVA_LIMITER=none` removes it
 ([why](../../reference/scaling-policy.md#re-running-the-installer-resets-the-default-entry)).
-`make disable-physical-limiter` leaves the node-read RBAC in place.
+`make disable-limiter` leaves the node-read RBAC in place.
 
 ### Which limiter
 
-**Declare one, not both.** The controller builds a single limiter. When the
-`limiters:` list holds both kinds, the quota wins and the physical limiter is
-dropped (logged as `notEnforced`). A `ResourceQuota` is the backstop for the
-other question.
+**You can declare both.** Every limiter in the `limiters:` list is built, and a
+model must fit all of them. Enabling one kind keeps the other. Declare both when
+the allowance can exceed the GPUs that exist, for example a Kueue quota on a
+shared cluster.
 
 | | `gpu-inventory` | `quota` |
 | --- | --- | --- |
