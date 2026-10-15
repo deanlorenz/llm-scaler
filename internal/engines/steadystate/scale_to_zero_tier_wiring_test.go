@@ -2,6 +2,8 @@ package steadystate
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,6 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector"
@@ -23,19 +26,24 @@ import (
 	llmdVariantAutoscalingV1alpha1 "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/variant"
 )
 
-// oneReplicaSource is a metrics source that reports one vLLM replica of the
-// model, so a cycle gets past collection and reaches the scale-to-zero stage.
-type oneReplicaSource struct {
-	modelID, pod string
+// replicaSource is a metrics source that reports one vLLM replica of the model
+// per pod, so a cycle gets past collection and reaches the scale-to-zero stage.
+type replicaSource struct {
+	modelID string
+	pods    []string
 }
 
-func (s oneReplicaSource) QueryList() *source.QueryList { return source.NewQueryList() }
+func (s replicaSource) QueryList() *source.QueryList { return source.NewQueryList() }
 
-func (s oneReplicaSource) Refresh(context.Context, source.RefreshSpec) (map[string]*source.MetricResult, error) {
-	labels := map[string]string{"model_name": s.modelID, "pod": s.pod, "instance": "10.0.0.1:8000"}
+func (s replicaSource) Refresh(context.Context, source.RefreshSpec) (map[string]*source.MetricResult, error) {
 	now := time.Now()
 	sample := func(v float64) *source.MetricResult {
-		return &source.MetricResult{Values: []source.MetricValue{{Labels: labels, Value: v, Timestamp: now}}}
+		r := &source.MetricResult{}
+		for i, pod := range s.pods {
+			labels := map[string]string{"model_name": s.modelID, "pod": pod, "instance": fmt.Sprintf("10.0.0.%d:8000", i+1)}
+			r.Values = append(r.Values, source.MetricValue{Labels: labels, Value: v, Timestamp: now})
+		}
+		return r
 	}
 	return map[string]*source.MetricResult{
 		"kv_cache_usage":        sample(0.1),
@@ -45,39 +53,47 @@ func (s oneReplicaSource) Refresh(context.Context, source.RefreshSpec) (map[stri
 	}, nil
 }
 
-func (s oneReplicaSource) Get(string, map[string]string) *source.CachedValue { return nil }
+func (s replicaSource) Get(string, map[string]string) *source.CachedValue { return nil }
 
-// onePodLocator attributes every pod to one variant.
-type onePodLocator struct{ variant string }
+// podSuffix is the suffix every test pod name adds to its variant's name.
+const podSuffix = "-0"
 
-func (l onePodLocator) Locate(_ context.Context, namespace, _ string) (*locator.ManagedScaler, error) {
-	return &locator.ManagedScaler{Namespace: namespace, Name: l.variant}, nil
+// variantOfPodLocator attributes pod "<variant>-0" to that variant.
+type variantOfPodLocator struct{}
+
+func (variantOfPodLocator) Locate(_ context.Context, namespace, pod string) (*locator.ManagedScaler, error) {
+	return &locator.ManagedScaler{Namespace: namespace, Name: strings.TrimSuffix(pod, podSuffix)}, nil
 }
 
-func (l onePodLocator) ResolveScaleTarget(context.Context, string, string) (autoscalingv2.CrossVersionObjectReference, bool, error) {
+func (variantOfPodLocator) ResolveScaleTarget(context.Context, string, string) (autoscalingv2.CrossVersionObjectReference, bool, error) {
 	return autoscalingv2.CrossVersionObjectReference{}, false, nil
 }
 
-func (l onePodLocator) GetPodLabels(context.Context, string, string) map[string]string { return nil }
+func (variantOfPodLocator) GetPodLabels(context.Context, string, string) map[string]string { return nil }
 
 // The tiers a model's variants name must reach the scale-to-zero stage of a
 // real cycle. scaleToZeroPolicy is correct on its own (scale_to_zero_tier_test.go),
 // but optimizeV2 collects the tiers in stage 1 and reads them back in stage 3;
 // dropping either half resolves the default entry alone, and every function-level
 // test still passes.
+//
+// With variants on different tiers the model parks only if every tier allows
+// it, and the idle check spans the longest retention among them.
 func TestOptimizeV2ResolvesScaleToZeroFromTheVariantsTier(t *testing.T) {
 	const (
 		modelID   = "m"
 		namespace = "chat"
-		variant   = "chat-a"
 	)
 	on, off := true, false
 
 	for _, tc := range []struct {
-		name        string
-		policies    map[string]config.ScalingPolicy
-		tier        string
+		name     string
+		policies map[string]config.ScalingPolicy
+		// tiers maps each variant's name to the tier it selects.
+		tiers       map[string]string
 		wantBlocked bool
+		// wantWindow is the retention the idle check must span; 0 skips it.
+		wantWindow time.Duration
 	}{
 		{
 			name: "default allows, the variant's tier forbids",
@@ -85,7 +101,7 @@ func TestOptimizeV2ResolvesScaleToZeroFromTheVariantsTier(t *testing.T) {
 				config.GlobalDefaultsKey: {ScaleToZero: &config.ScaleToZeroEnvelope{Enabled: &on, RetentionPeriod: "1m"}},
 				"interactive":            {ScaleToZero: &config.ScaleToZeroEnvelope{Enabled: &off}},
 			},
-			tier:        "interactive",
+			tiers:       map[string]string{"chat-a": "interactive"},
 			wantBlocked: true,
 		},
 		{
@@ -94,49 +110,83 @@ func TestOptimizeV2ResolvesScaleToZeroFromTheVariantsTier(t *testing.T) {
 				config.GlobalDefaultsKey: {ScaleToZero: &config.ScaleToZeroEnvelope{Enabled: &off}},
 				"batch":                  {ScaleToZero: &config.ScaleToZeroEnvelope{Enabled: &on, RetentionPeriod: "1m"}},
 			},
-			tier:        "batch",
+			tiers:       map[string]string{"chat-a": "batch"},
 			wantBlocked: false,
+			wantWindow:  time.Minute,
+		},
+		{
+			// One sibling's tier allowing parking must not park a variant
+			// whose tier forbids it: parking takes the whole model down.
+			name: "one variant's tier allows, its sibling's forbids",
+			policies: map[string]config.ScalingPolicy{
+				config.GlobalDefaultsKey: {ScaleToZero: &config.ScaleToZeroEnvelope{Enabled: &on, RetentionPeriod: "1m"}},
+				"batch":                  {ScaleToZero: &config.ScaleToZeroEnvelope{Enabled: &on, RetentionPeriod: "1m"}},
+				"interactive":            {ScaleToZero: &config.ScaleToZeroEnvelope{Enabled: &off}},
+			},
+			tiers:       map[string]string{"chat-a": "batch", "chat-b": "interactive"},
+			wantBlocked: true,
+		},
+		{
+			name: "both tiers allow, with different retentions",
+			policies: map[string]config.ScalingPolicy{
+				config.GlobalDefaultsKey: {ScaleToZero: &config.ScaleToZeroEnvelope{Enabled: &off}},
+				"batch":                  {ScaleToZero: &config.ScaleToZeroEnvelope{Enabled: &on, RetentionPeriod: "1m"}},
+				"overnight":              {ScaleToZero: &config.ScaleToZeroEnvelope{Enabled: &on, RetentionPeriod: "7m"}},
+			},
+			tiers:       map[string]string{"chat-a": "batch", "chat-b": "overnight"},
+			wantBlocked: false,
+			wantWindow:  7 * time.Minute,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			deployment := &appsv1.Deployment{
-				ObjectMeta: metav1.ObjectMeta{Name: variant, Namespace: namespace},
-				Spec: appsv1.DeploymentSpec{
-					Replicas: utils.Ptr(int32(1)),
-					Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: "server", Image: "vllm/vllm-openai:latest"}},
-					}},
-				},
-				Status: appsv1.DeploymentStatus{Replicas: 1, ReadyReplicas: 1},
+			var (
+				objs []client.Object
+				pods []string
+				vas  []llmdVariantAutoscalingV1alpha1.VariantAutoscaling
+			)
+			for variant, tier := range tc.tiers {
+				objs = append(objs, &appsv1.Deployment{
+					ObjectMeta: metav1.ObjectMeta{Name: variant, Namespace: namespace},
+					Spec: appsv1.DeploymentSpec{
+						Replicas: utils.Ptr(int32(1)),
+						Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "server", Image: "vllm/vllm-openai:latest"}},
+						}},
+					},
+					Status: appsv1.DeploymentStatus{Replicas: 1, ReadyReplicas: 1},
+				})
+				pods = append(pods, variant+podSuffix)
+				vas = append(vas, llmdVariantAutoscalingV1alpha1.VariantAutoscaling{
+					ObjectMeta: metav1.ObjectMeta{Name: variant, Namespace: namespace},
+					Spec: llmdVariantAutoscalingV1alpha1.VariantAutoscalingSpec{
+						ModelID:        modelID,
+						ScalingPolicy:  tier,
+						MaxReplicas:    4,
+						ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{Kind: "Deployment", Name: variant, APIVersion: "apps/v1"},
+					},
+				})
 			}
-			k8s := fake.NewClientBuilder().WithScheme(clientgoscheme.Scheme).WithObjects(deployment).Build()
+			k8s := fake.NewClientBuilder().WithScheme(clientgoscheme.Scheme).WithObjects(objs...).Build()
 
 			cfg := config.NewTestConfig()
 			cfg.UpdateScalingPolicyConfigForNamespace(namespace, tc.policies)
 
-			src := oneReplicaSource{modelID: modelID, pod: variant + "-0"}
+			src := replicaSource{modelID: modelID, pods: pods}
 			registry := source.NewSourceRegistry()
 			registry.MustRegister("prometheus", src)
 			e := NewEngine(k8s, k8s, clientgoscheme.Scheme, nil, registry, cfg, allocation.NewNoOpLimiter("test"))
-			e.ReplicaMetricsCollector = collector.NewReplicaMetricsCollector(src, k8s, nil, nil, onePodLocator{variant: variant})
+			e.ReplicaMetricsCollector = collector.NewReplicaMetricsCollector(src, k8s, nil, nil, variantOfPodLocator{})
+			var windows []time.Duration
 			e.ScaleToZeroEnforcer = allocation.NewEnforcer(
-				func(context.Context, inferenceengine.Engine, string, string, time.Duration) (float64, error) {
+				func(_ context.Context, _ inferenceengine.Engine, _, _ string, window time.Duration) (float64, error) {
+					windows = append(windows, window)
 					return 0, nil // idle
 				},
 				nil,
 			)
 
-			va := llmdVariantAutoscalingV1alpha1.VariantAutoscaling{
-				ObjectMeta: metav1.ObjectMeta{Name: variant, Namespace: namespace},
-				Spec: llmdVariantAutoscalingV1alpha1.VariantAutoscalingSpec{
-					ModelID:        modelID,
-					ScalingPolicy:  tc.tier,
-					MaxReplicas:    4,
-					ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{Kind: "Deployment", Name: variant, APIVersion: "apps/v1"},
-				},
-			}
 			decisions := e.optimizeV2(context.Background(), map[string][]llmdVariantAutoscalingV1alpha1.VariantAutoscaling{
-				utils.GetNamespacedKey(namespace, modelID): {va},
+				utils.GetNamespacedKey(namespace, modelID): vas,
 			}, nil)
 
 			ref, seen := e.lastBlockedModels[utils.GetNamespacedKey(namespace, modelID)]
@@ -147,12 +197,22 @@ func TestOptimizeV2ResolvesScaleToZeroFromTheVariantsTier(t *testing.T) {
 			if blocked != tc.wantBlocked {
 				t.Errorf("blocked reasons = %q, want policy-forbids-zero = %v", ref.reasons, tc.wantBlocked)
 			}
-			if len(decisions) == 0 {
-				t.Fatal("the cycle produced no decision to enforce on")
+			if len(decisions) != len(tc.tiers) {
+				t.Fatalf("the cycle produced %d decisions, want one per variant (%d): %+v", len(decisions), len(tc.tiers), decisions)
 			}
+			// Parked means the whole model is at zero. One variant at zero
+			// beside a sibling still serving is the optimizer consolidating the
+			// load, not parking.
+			parked := true
 			for _, d := range decisions {
-				if parked := d.TargetReplicas == 0; parked == tc.wantBlocked {
-					t.Errorf("variant %s: target %d, want parked = %v", d.VariantName, d.TargetReplicas, !tc.wantBlocked)
+				parked = parked && d.TargetReplicas == 0
+			}
+			if parked == tc.wantBlocked {
+				t.Errorf("model parked = %v, want %v (decisions: %+v)", parked, !tc.wantBlocked, decisions)
+			}
+			if tc.wantWindow > 0 {
+				if len(windows) != 1 || windows[0] != tc.wantWindow {
+					t.Errorf("idle check windows = %v, want one over %v", windows, tc.wantWindow)
 				}
 			}
 		})
