@@ -187,12 +187,13 @@ func (a *Analyzer) Analyze(ctx context.Context, input domain.AnalyzerInput) (*do
 				// Which line, and what it was fitted from: the window's key,
 				// the coefficients, and what the window was offered and held.
 				"lineKey", key, "lineA", d.line.Model.A, "lineB", d.line.Model.B, "lineTier", d.line.Tier,
-				"held", d.line.Held, "offered", d.line.Offered, "belowBand", d.line.BelowBand,
+				"considered", d.line.Considered, "held", d.line.Held, "kept", d.line.Offered,
+				"belowBand", d.line.BelowBand,
 				"aboveBand", d.line.AboveBand, "noK", d.line.NoK, "noITL", d.line.NoITL,
 				"notReady", d.line.NotReady, "declined", d.line.Declined,
 				// The fill before the clamp and the batch cap, and the cap's inputs.
 				"targetFill", d.targetFill, "capacityTokens", d.capTokens, "kvTokensPerRequest", fleet.shape.KVreq,
-				"maxNumSeqs", d.maxSeqs)
+				"maxNumSeqs", d.maxSeqs, "scaleUpThreshold", scaleUp)
 		}
 	}
 

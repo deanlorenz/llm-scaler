@@ -141,6 +141,10 @@ type Engine struct {
 	// learned state whether or not any model runs it. Nil in tests that build
 	// an Engine by hand.
 	sloAnalyzer sloStateKeeper
+	// sloFailedSince is when the current run of failed cycles began, zero
+	// while cycles succeed. Read by beginSLOCycle, written by optimize: both
+	// on the executor's goroutine.
+	sloFailedSince time.Time
 	// reportedCollisions is the external analyzer labels already logged as
 	// taken by a built-in, so each is logged once.
 	reportedCollisions map[string]bool
@@ -693,6 +697,9 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 		status := "success"
 		if retErr != nil {
 			status = "error"
+			if e.sloFailedSince.IsZero() {
+				e.sloFailedSince = start
+			}
 		}
 		metrics.ObserveOptimizationDuration(time.Since(start).Seconds(), status)
 		metrics.SetModelsProcessed(modelsProcessed)

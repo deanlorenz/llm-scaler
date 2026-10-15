@@ -121,6 +121,24 @@ var _ = Describe("Analyzer state and inputs", func() {
 			"parked past the timeout but present: it wakes keyed where its line is")
 	})
 
+	It("forgets an accelerator memo unused for the timeout, and counts it", func() {
+		a := newAt(nil)
+		warmWith(a, noop)
+		ev := a.EvictStale(clock.Add(defaultStateTimeout + time.Minute))
+		Expect(ev.Accelerators).To(Equal(1))
+		Expect(Evicted{Accelerators: 1}.Any()).To(BeTrue(), "an accelerator memo alone is an eviction to log")
+		unresolved := agg
+		unresolved.AcceleratorName = constants.UnresolvedAcceleratorType
+		Expect(a.variantKey("ns", "m", unresolved)).To(Equal(windowKey("ns", "m", unresolved)),
+			"the memo is gone: an unresolved reading keys on itself again")
+	})
+
+	It("treats a line no cycle ever stamped as stale", func() {
+		a := newAt(nil)
+		a.lines.Observe("ns|m|stray|H100|1", "agg", cycleRows("agg", 0), clock)
+		Expect(a.EvictStale(clock).Lines).To(Equal(1), "a key with no stamp is not one anything still uses")
+	})
+
 	Context("engine params from the capacity store", func() {
 		store := func(params capacity.EngineParams) *capacity.Store {
 			s := capacity.NewStore()

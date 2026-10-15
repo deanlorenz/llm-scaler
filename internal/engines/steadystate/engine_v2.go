@@ -365,10 +365,33 @@ type presenceNoter interface {
 // which a model it did not analyze on the cycle before is unobserved. Called
 // once per cycle that gets past its error returns: on the no-model return, and
 // before the models are analyzed.
+//
+// Failed cycles do not count, so a failure and the executor's retry a moment
+// later are one cycle. But failures that went on for an optimization interval
+// or more are cycles nobody saw: they count as one skipped cycle, so a model
+// is not judged on recovery as if it had been watched throughout. A slow cycle
+// that succeeds is not a failure and counts once, however long it took.
 func (e *Engine) beginSLOCycle() {
-	if e.sloAnalyzer != nil {
+	failedSince := e.sloFailedSince
+	e.sloFailedSince = time.Time{}
+	if e.sloAnalyzer == nil {
+		return
+	}
+	if !failedSince.IsZero() && time.Since(failedSince) >= e.sloMissedAfter() {
 		e.sloAnalyzer.BeginCycle()
 	}
+	e.sloAnalyzer.BeginCycle()
+}
+
+// sloMissedAfter is how long a run of failed cycles lasts before it counts as
+// a skipped cycle: one optimization interval, or 30s when none is configured.
+func (e *Engine) sloMissedAfter() time.Duration {
+	if e.Config != nil {
+		if d := e.Config.OptimizationInterval(); d > 0 {
+			return d
+		}
+	}
+	return 30 * time.Second
 }
 
 // sloStateKeeper is the part of the slo analyzer the per-cycle sweeps need:
@@ -448,7 +471,7 @@ func (e *Engine) notePresentVariants(
 // decode-saturation memory. The capacity store's EvictStale takes its records,
 // and the slo analyzer's EvictStale its lines, accelerator memos and
 // transient memos, on the same variant timeout.
-// Both are keyed by variant, so until now a renamed, deleted or recreated
+// All are keyed by variant, so until now a renamed, deleted or recreated
 // variant left its entry behind for the lifetime of the process -- exactly the
 // leak the analyzer's own comment describes: "one window per variant that has
 // EVER been seen, including deleted and renamed ones".
@@ -839,10 +862,11 @@ func runRegisteredAnalyzer(
 ) (result *domain.AnalyzerResult) {
 	defer func() {
 		if r := recover(); r != nil {
-			// Plugin failure is non-fatal; log at debug to avoid spamming
-			// operator logs every optimize cycle.
-			logger.V(logging.DEBUG).Info("registered analyzer panicked; result discarded",
-				"name", entry.name, "modelID", modelID, "panic", fmt.Sprintf("%v", r))
+			// Non-fatal, and logged where an operator sees it: a built-in
+			// analyzer (slo) runs through here too, and a panic at debug left
+			// its series stale with nothing in a default log to say why.
+			logger.Error(fmt.Errorf("%v", r), "registered analyzer panicked; result discarded",
+				"name", entry.name, "modelID", modelID)
 			result = nil
 		}
 	}()

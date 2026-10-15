@@ -94,7 +94,7 @@
         "name": "slo_model",
         "query": {
           "query": "label_values(wva_slo_target_seconds{$namespace_label=~\"$namespace\"}, model_name)",
-          "refId": "var"
+          "refId": "slo_model"
         },
         "refresh": 2,
         "skipUrlSync": false,
@@ -109,7 +109,8 @@
             "$__all"
           ]
         },
-        "description": "Models the SLO row shows: those whose policy sets slo targets."
+        "description": "Models the SLO row shows: those whose policy sets slo targets.",
+        "allValue": ".*"
       },
       {
         "name": "controller_instance",

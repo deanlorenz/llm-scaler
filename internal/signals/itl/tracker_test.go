@@ -43,14 +43,18 @@ var _ = Describe("Tracker", func() {
 			row("no-k", 0, 0.02),
 			row("above", 0.9, 0.02),
 			row("below", 0.05, 0.02),
+			row("below-too", 0.10, 0.02),
+			row("nan-k", math.NaN(), 0.02),
+			row("nan-itl", 0.5, math.NaN()),
 		}, now)
-		Expect(r.Considered).To(Equal(8), "another variant's row is not considered at all")
+		Expect(r.Considered).To(Equal(11), "another variant's row is not considered at all")
 		Expect(r.NotReady).To(Equal(2))
-		Expect(r.NoITL).To(Equal(2), "an infinite ITL is not a reading either")
-		Expect(r.NoK).To(Equal(1))
+		Expect(r.NoITL).To(Equal(3), "an infinite or NaN ITL is not a reading either")
+		Expect(r.NoK).To(Equal(2), "nor is a NaN fill")
 		Expect(r.AboveBand).To(Equal(1))
+		// Counts that differ, so a swap of the two shows.
 		Expect(r.Offered).To(Equal(1), "the reading the window kept")
-		Expect(r.BelowBand).To(Equal(1), "the one below the band, which the window itself drops")
+		Expect(r.BelowBand).To(Equal(2), "the two below the band, which the window itself drops")
 		Expect(r.Held).To(Equal(1))
 		Expect(r.Tier).To(BeEmpty())
 	})

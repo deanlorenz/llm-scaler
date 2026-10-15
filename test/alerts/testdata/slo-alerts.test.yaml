@@ -470,3 +470,86 @@ tests:
         alertname: WVAModelSLOUnjudged
         exp_alerts:
           - exp_labels: {severity: info, component: slo, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
+
+  # 23. As 21, with the router recording the request under an alias it
+  #     rewrote to the model: target_model_name names the model, as the
+  #     collector resolves it. Fires.
+  - interval: 1m
+    input_series:
+      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
+        values: '0.1x150'
+      - series: 'wva_slo_excluded{exported_namespace="ns",model_name="m",objective="tpot",reason="starting"}'
+        values: '0x150'
+      - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
+        values: '2x150'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
+        values: '0x150'
+      - series: 'llm_d_epp_request_ttft_seconds_count{namespace="ns",model_name="alias",target_model_name="m",streaming="true"}'
+        values: '0+60x150'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: WVAModelSLOUnjudged
+        exp_alerts:
+          - exp_labels: {severity: info, component: slo, exported_namespace: ns, model_name: m, objective: tpot, statistic: mean}
+
+  # 24. As 21, but the router serves only non-streaming requests: TPOT is
+  #     streaming-only, so no requests is no traffic to judge, not a client
+  #     missing include_usage. Quiet.
+  - interval: 1m
+    input_series:
+      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
+        values: '0.1x150'
+      - series: 'wva_slo_excluded{exported_namespace="ns",model_name="m",objective="tpot",reason="starting"}'
+        values: '0x150'
+      - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
+        values: '2x150'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
+        values: '0x150'
+      - series: 'llm_d_epp_request_ttft_seconds_count{namespace="ns",model_name="m",streaming="false"}'
+        values: '0+60x150'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: WVAModelSLOUnjudged
+        exp_alerts: []
+
+  # 25. TPOT has requests but too few to judge, the router busy: the
+  #     include_usage cause needs TPOT at zero. Quiet.
+  - interval: 1m
+    input_series:
+      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
+        values: '0.1x150'
+      - series: 'wva_slo_excluded{exported_namespace="ns",model_name="m",objective="tpot",reason="starting"}'
+        values: '0x150'
+      - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
+        values: '2x150'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="tpot",statistic="mean"}'
+        values: '30x150'
+      - series: 'llm_d_epp_request_ttft_seconds_count{namespace="ns",model_name="m",streaming="true"}'
+        values: '0+60x150'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: WVAModelSLOUnjudged
+        exp_alerts: []
+
+  # 26. A model that parks while the miss fires: replicas 0 from 30m, the
+  #     analyzer stops publishing. The 5-minute replicas lookback that carries
+  #     the alert through a restart also keeps it up for that long after a
+  #     park; it clears by 36m.
+  - interval: 1m
+    input_series:
+      - series: 'wva_slo_observed_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '5x29 stale'
+      - series: 'wva_slo_target_seconds{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '3x29 stale'
+      - series: 'wva_slo_window_requests{exported_namespace="ns",model_name="m",objective="ttft",statistic="p90"}'
+        values: '300+1x29 stale'
+      - series: 'wva_model_replicas{exported_namespace="ns",model_name="m"}'
+        values: '2x29 0x60'
+    alert_rule_test:
+      - eval_time: 29m
+        alertname: WVAModelSLOMissed
+        exp_alerts:
+          - exp_labels: {severity: warning, component: slo, exported_namespace: ns, model_name: m, objective: ttft, statistic: p90}
+      - eval_time: 36m
+        alertname: WVAModelSLOMissed
+        exp_alerts: []

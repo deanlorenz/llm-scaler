@@ -123,7 +123,8 @@ spec:
     # - The replicas gate reads max_over_time over 5m: on a restart or a
     #   leader change the old pod's series go stale at once, and an instant
     #   read is empty until the new leader publishes, which resolved every
-    #   firing alert and fired it again.
+    #   firing alert and fired it again. The price: a model that parks while
+    #   the alert fires keeps it up for up to those 5 minutes.
     # - test/alerts/testdata/slo-alerts.test.yaml pins each of these.
     - alert: WVAModelSLOMissed
       expr: (count_over_time((max by (exported_namespace, model_name, objective, statistic) (wva_slo_observed_seconds) > on (exported_namespace, model_name, objective, statistic) max by (exported_namespace, model_name, objective, statistic) (wva_slo_target_seconds))[30m:1m]) / on (exported_namespace, model_name, objective, statistic) count_over_time(max by (exported_namespace, model_name, objective, statistic) (wva_slo_observed_seconds)[30m:1m]) >= 0.5) and on (exported_namespace, model_name, objective, statistic) count_over_time((max by (exported_namespace, model_name, objective, statistic) (wva_slo_observed_seconds) > on (exported_namespace, model_name, objective, statistic) max by (exported_namespace, model_name, objective, statistic) (wva_slo_target_seconds))[30m:1m]) >= 5 and on (exported_namespace, model_name, objective, statistic) max by (exported_namespace, model_name, objective, statistic) (changes(wva_slo_window_requests[5m])) > 0 and on (exported_namespace, model_name) sum by (exported_namespace, model_name) (max_over_time(wva_model_replicas[5m])) > 0
@@ -136,7 +137,7 @@ spec:
       annotations:
         runbook_url: "https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/reference/troubleshooting.md#a-model-misses-or-is-never-judged-against-its-slo"
         summary: "Model {{ $labels.exported_namespace }}/{{ $labels.model_name }} missed its {{ $labels.objective }} SLO ({{ $labels.statistic }}) in {{ $value | humanizePercentage }} of judged minutes"
-        description: "In the last 30 minutes the router-measured {{ $labels.objective }} {{ $labels.statistic }} was over target in at least half of the judged minutes, and in at least 5. Minutes around a wake or a starting replica are not judged and count neither way. Only completed requests count, so under shedding the alert can clear while requests fail: read llm_d_epp_request_error_total. The slo analyzer only observes on this release: the tier's thresholds miss the SLO; the autoscaler did not fail. First check the target is reachable at all (the runbook says how); if it is, raise the floor or lower scaleUpThreshold. Resolves once judged minutes that meet the target outnumber the misses."
+        description: "In the last 30 minutes the router-measured {{ $labels.objective }} {{ $labels.statistic }} was over target in at least half of the judged minutes, and in at least 5. Minutes around a wake or a starting replica are not judged and count neither way. Only completed requests count, so under shedding the alert can clear while requests fail: read llm_d_epp_request_error_total. On this release the analyzer only observes: the fleet the tier sizes misses the SLO; the autoscaler did not fail. First check the target can be met at all (the runbook says how); if it can, raise the floor or lower scaleUpThreshold. Resolves once judged minutes that meet the target outnumber the misses."
 
     # Fires only when there is something to act on: the fleet was excluded for
     # at least half the hour (it never holds still), the router's series are
@@ -157,7 +158,7 @@ spec:
       annotations:
         runbook_url: "https://github.com/ev-shindin/llm-scaling-manager/blob/main/docs/reference/troubleshooting.md#a-model-misses-or-is-never-judged-against-its-slo"
         summary: "Model {{ $labels.exported_namespace }}/{{ $labels.model_name }} has had no judged {{ $labels.objective }} window for an hour"
-        description: "The model's policy has set a {{ $labels.objective }} target for the whole last hour and the model has replicas, but no window was judged in it, and not for lack of traffic: either the fleet was excluded for at least half of it, never holding still for a window plus its grace (wva_slo_excluded says why), or the router's series for the objective are missing (router not scraped, not in the model's namespace, or clients not streaming), or TPOT saw no requests while the router served streaming requests (clients do not send stream_options.include_usage, or the router does not publish its TPOT series). The runbook has a table of each case."
+        description: "The model's policy has set a {{ $labels.objective }} target for 55 of the last 60 minutes and the model has replicas, but no window was judged in it, and not for lack of traffic: either the fleet was excluded for at least half of it, never holding still for a window plus its grace (wva_slo_excluded says why), or the router's series for the objective are missing (router not scraped, not in the model's namespace, or clients not streaming), or TPOT saw no requests while the router served streaming requests (clients do not send stream_options.include_usage, or the router does not publish its TPOT series). The runbook has a table of each case."
 
     - alert: WVAModelParkedWhileRequestsRefused
       expr: (sum by (exported_namespace, model_name) (wva_model_replicas) == 0) and on (model_name) (sum by (model_name) (rate(llm_d_epp_request_error_total{error_code="ServiceUnavailable"}[5m])) > 0)

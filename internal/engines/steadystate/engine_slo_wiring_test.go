@@ -236,6 +236,35 @@ func TestAFailedCycleAndItsRetryAreOneSLOCycle(t *testing.T) {
 	if spy.cycles != 0 {
 		t.Fatalf("a cycle that failed before its models counted %d slo cycles, want 0", spy.cycles)
 	}
+	if err := e.optimize(context.Background()); err != nil {
+		t.Fatalf("the retry: %v", err)
+	}
+	if spy.cycles != 1 {
+		t.Fatalf("a failure and its retry counted %d slo cycles, want 1", spy.cycles)
+	}
+}
+
+// TestALongRunOfFailedCyclesIsASkippedCycle pins the other side: failures
+// that lasted an interval or more are cycles nobody saw, so the cycle after
+// them counts as two and every model is unobserved. Counting none, a model
+// starting through a half-hour API outage was judged on recovery as one
+// pending all along.
+func TestALongRunOfFailedCyclesIsASkippedCycle(t *testing.T) {
+	e := sloWiringEngine(t)
+	spy := &sloKeeperSpy{}
+	e.sloAnalyzer = spy
+	e.Variants.Observe("ns", "m-wva", map[string]string{registry.ModelIDKey: "m"})
+	e.Variants.SetTarget("ns", "m-wva", registry.Target{APIVersion: "apps/v1", Kind: "Deployment", Name: "m"})
+	e.sloFailedSince = time.Now().Add(-30 * time.Minute)
+	if err := e.optimize(context.Background()); err != nil {
+		t.Fatalf("optimize: %v", err)
+	}
+	if spy.cycles != 2 {
+		t.Fatalf("the cycle after 30 minutes of failures counted %d slo cycles, want 2", spy.cycles)
+	}
+	if !e.sloFailedSince.IsZero() {
+		t.Fatal("a successful cycle must end the run of failures")
+	}
 }
 
 // fixedRouter returns the same router latency on every call.
@@ -248,72 +277,79 @@ func (r fixedRouter) CollectRouterLatency(context.Context, string, string) *doma
 
 // TestListingSLOLeavesTheDecisionUnchanged pins the observe-only promise where
 // the decision is made: the request the optimizer receives for a model is the
-// same whether or not its policy lists slo and sets targets, with the real
-// analyzer pricing and judging from live inputs. A change that lets the slo
-// result into the request -- a composite, a merge, the wrong entry picked --
-// fails here.
+// same whether or not its policy lists slo and sets targets. The analyzer is
+// the real one, warmed until it prices the variant, with a demand and a
+// per-replica capacity of its own that differ from saturation's -- so a change
+// that lets its result into the request (the wrong entry picked, a composite
+// taking the larger demand or the smaller capacity) fails here.
 func TestListingSLOLeavesTheDecisionUnchanged(t *testing.T) {
-	reg := promclient.NewRegistry()
-	if err := metrics.InitMetrics(reg); err != nil {
+	if err := metrics.InitMetrics(promclient.NewRegistry()); err != nil {
 		t.Fatal(err)
 	}
-	row := func(pod string, k, itlSec float64) domain.ReplicaMetrics {
-		return domain.ReplicaMetrics{PodName: pod, ModelID: "m", Namespace: "ns", VariantName: "v", Ready: true,
-			KvUsageInstant: k, AvgITL: itlSec, AvgOutputTokens: 200, AvgInputTokens: 1000, RequestRate: 2,
-			TotalKvCapacityTokens: 100000}
+	// Readings on ITL = 0.04*k + 0.02, two replicas a cycle, k climbing 0.1 a
+	// cycle: six cycles fill the window and span 0.55 of k, a full fit.
+	rows := func(i int) []domain.ReplicaMetrics {
+		row := func(pod string, k float64) domain.ReplicaMetrics {
+			return domain.ReplicaMetrics{PodName: pod, ModelID: "m", Namespace: "ns", VariantName: "v", Ready: true,
+				KvUsageInstant: k, AvgITL: 0.04*k + 0.02, AvgOutputTokens: 200, AvgInputTokens: 1000, RequestRate: 1.5,
+				TotalKvCapacityTokens: 100000}
+		}
+		return []domain.ReplicaMetrics{row("p0", 0.20+0.1*float64(i)), row("p1", 0.25+0.1*float64(i))}
 	}
-	rows := []domain.ReplicaMetrics{row("p0", 0.3, 0.02), row("p1", 0.6, 0.03)}
 	states := []domain.VariantReplicaState{{VariantName: "v", Role: domain.RoleBoth, CurrentReplicas: 2}}
 	router := fixedRouter{domain.RouterLatency{WindowSeconds: 300,
 		TTFTBuckets: []domain.LatencyBucket{{UpperBound: 1, Rate: 1}, {UpperBound: 3, Rate: 2}, {UpperBound: math.Inf(1), Rate: 2}},
 		TPOTSumRate: 0.08, TPOTCountRate: 2}}
-	request := func(policy config.ScalingPolicy) *allocation.ModelScalingRequest {
-		t.Helper()
+	newEngine := func(a domain.Analyzer) *Engine {
 		sat := &fakeAnalyzerWithResult{analyzerName: domain.SaturationAnalyzerName, result: &domain.AnalyzerResult{
 			AnalyzerName: domain.SaturationAnalyzerName, ModelID: "m", Namespace: "ns", TotalDemand: 400,
+			// Above what slo prices (about 1200), so a composite taking the
+			// smaller of the two would change it.
 			VariantCapacities: []domain.VariantCapacity{{VariantName: "v", Role: domain.RoleBoth, ReplicaCount: 2,
-				PerReplicaCapacity: 300, ObservedReplicas: 2}}}}
-		e := &Engine{saturationV2Analyzer: sat, started: true, analyzersSnapshot: []analyzerEntry{
-			{name: domain.SaturationAnalyzerName, analyzer: sat}, {name: domain.SLOAnalyzerName, analyzer: slo.New(router, nil)}}}
-		req, err := e.collectV2ModelRequest(context.Background(), "m", "ns", rows, policy, states, nil, nil, nil, nil, 2)
-		if err != nil || req == nil {
-			t.Fatalf("collectV2ModelRequest: %v, %v", req, err)
-		}
-		return req
+				PerReplicaCapacity: 5000, ObservedReplicas: 2}}}}
+		return &Engine{saturationV2Analyzer: sat, started: true, analyzersSnapshot: []analyzerEntry{
+			{name: domain.SaturationAnalyzerName, analyzer: sat}, {name: domain.SLOAnalyzerName, analyzer: a}}}
 	}
 	plain := config.ScalingPolicy{ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70,
 		Analyzers: []config.AnalyzerScoreConfig{{Name: domain.SaturationAnalyzerName}}}
 	withSLO := plain
 	withSLO.Analyzers = []config.AnalyzerScoreConfig{{Name: domain.SaturationAnalyzerName}, {Name: domain.SLOAnalyzerName}}
 	withSLO.SLO = &config.SLOPolicy{
-		TPOT: &config.SLOObjective{Target: config.SLODuration{Duration: 50 * time.Millisecond}},
+		TPOT: &config.SLOObjective{Target: config.SLODuration{Duration: 44 * time.Millisecond}},
 		TTFT: &config.SLOObjective{Target: config.SLODuration{Duration: 2 * time.Second}},
 	}
-	without := request(plain)
-	sloRan := false
-	mfs, err := reg.Gather()
+	// ArrivalRate 3 x 200 output tokens: the slo analyzer's demand is 600,
+	// saturation's (the fake's) 400.
+	const arrival = 3
+	analyzer := slo.New(router, nil)
+	without, with := newEngine(slo.New(router, nil)), newEngine(analyzer)
+	for i := range 6 {
+		a, err := without.collectV2ModelRequest(context.Background(), "m", "ns", rows(i), plain, states, nil, nil, nil, nil, arrival)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := with.collectV2ModelRequest(context.Background(), "m", "ns", rows(i), withSLO, states, nil, nil, nil, nil, arrival)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(a, b) {
+			t.Fatalf("cycle %d: listing slo changed the optimizer's request:\nwithout %+v\nwith    %+v",
+				i, a.CompositeSignal, b.CompositeSignal)
+		}
+	}
+	// The comparison proves something only if the analyzer priced and its
+	// figures differ from saturation's.
+	res, err := analyzer.Analyze(context.Background(), domain.AnalyzerInput{ModelID: "m", Namespace: "ns",
+		Config: &withSLO, ArrivalRate: arrival, VariantStates: states, ReplicaMetrics: rows(5)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, mf := range mfs {
-		sloRan = sloRan || strings.HasPrefix(mf.GetName(), "wva_slo_")
+	if len(res.VariantCapacities) != 1 || !(res.VariantCapacities[0].PerReplicaCapacity > 0) {
+		t.Fatalf("setup: the slo analyzer did not price the variant: %+v", res.VariantCapacities)
 	}
-	if sloRan {
-		t.Fatal("setup: the slo analyzer published for a policy that does not list it")
-	}
-	with := request(withSLO)
-	if mfs, err = reg.Gather(); err != nil {
-		t.Fatal(err)
-	}
-	for _, mf := range mfs {
-		sloRan = sloRan || strings.HasPrefix(mf.GetName(), "wva_slo_")
-	}
-	if !sloRan {
-		t.Fatal("setup: the slo analyzer did not run, so the comparison proves nothing")
-	}
-	if !reflect.DeepEqual(without, with) {
-		t.Fatalf("listing slo changed the optimizer's request:\nwithout %+v\nwith    %+v",
-			without.CompositeSignal, with.CompositeSignal)
+	if res.TotalDemand == 400 || !(res.VariantCapacities[0].PerReplicaCapacity < 5000) {
+		t.Fatalf("setup: the slo analyzer's demand equals saturation's or its capacity is not below it (demand %v, capacity %v), so a merge would not show",
+			res.TotalDemand, res.VariantCapacities[0].PerReplicaCapacity)
 	}
 }
 

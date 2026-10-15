@@ -81,7 +81,8 @@ type Observation struct {
 // Nothing clears the window when the workload shape changes: it is pruned by
 // age (Prune) and bounded in size, so a new shape replaces the old within
 // DefaultWindowMaxSize readings or DefaultObservationMaxAge.
-// Observations outside the valid k range [minK, maxK] are silently ignored.
+// Observations outside the valid k range [minK, maxK] are dropped, and Add
+// reports each drop.
 //
 // Not safe for concurrent use: the owner serialises access.
 type Window struct {

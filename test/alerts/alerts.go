@@ -105,8 +105,11 @@ var ExternalMetrics = map[string]bool{
 	"llm_d_epp_request_error_total": true,
 	// EPP's TTFT histogram, the series the slo analyzer judges TTFT from.
 	// WVAModelSLOUnjudged reads its streaming request count to tell clients
-	// without include_usage from an idle model, on the namespace label the
-	// collector's router queries already select on.
+	// without include_usage from an idle model. Like the error counter, the
+	// EPP's own exposition has no namespace label; the join uses the one
+	// Prometheus adds from the scrape target, which the collector's router
+	// queries already select on, so it holds wherever the analyzer judges at
+	// all.
 	"llm_d_epp_request_ttft_seconds": true,
 }
 
