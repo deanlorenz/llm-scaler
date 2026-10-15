@@ -99,7 +99,9 @@ check("trap 'exit 0' TERM" in script and "sleep 3600" in script, "then the pod s
 check(c["command"] == ["/bin/sh", "-c"], "sh -c with the script as args")
 probe = c["readinessProbe"]["exec"]["command"]
 check(probe == ["/bin/sh", "-c", "test -f /engine-cache/.prepared && test -w /engine-cache/vllm"], "Ready is the marker AND the directory writable by this UID: %s" % probe)
-check("$HOSTNAME" in script, "the command is rendered as written, not evaluated on the operator's machine")
+check("$NODE_NAME" in script, "the command is rendered as written, not evaluated on the operator's machine")
+check(env.get("NODE_NAME", {}).get("valueFrom") == {"fieldRef": {"fieldPath": "spec.nodeName"}} and "$HOSTNAME" not in script,
+      "the preparer's log names the node (NODE_NAME from spec.nodeName), not the pod (HOSTNAME): %s" % env.get("NODE_NAME"))
 res = c.get("resources", {})
 for section in ("requests", "limits"):
     for k in res.get(section, {}):
@@ -147,7 +149,7 @@ i_ok = script.index('if [ "$complete" = 1 ]; then\n'); i_mark = script.index('ec
 check(i_loop < i_ok < i_mark and '|| { complete=0; rm -f "$t"; }' in script and 'else complete=0; rm -rf "$t"; fi' in script, "the marker is written only after every copy succeeded; a failed copy is removed and the seed retried next start")
 probe_seed = seed["containers"][0]["readinessProbe"]["exec"]["command"][2]
 check(probe_seed.endswith('&& grep -qx -e "workload-pvc:engine-cache" -e "workload-pvc:engine-cache@[0-9]*" -e "none:workload-pvc:engine-cache" /engine-cache/.seeded'), "with a seed, Ready also requires the node to carry that seed (as published, or before any publish), or the record that it had nothing to seed: %s" % probe_seed)
-env = {e["name"]: e["value"] for e in seed["containers"][0]["env"]}
+env = {e["name"]: e.get("value") for e in seed["containers"][0]["env"]}
 check(env.get("SEED_MARKER") == ".seeded" and env.get("SEED_ID") == "workload-pvc:engine-cache" and env.get("SEED_SUBPATH") == "engine-cache", "the seed marker's name, the seed's identity and its subPath come from the environment: %s" % env)
 check("$(" not in script and "$$" not in script, "still no $( or $$ in the command")
 plain_ps = plain["spec"]["template"]["spec"]
@@ -173,6 +175,8 @@ SEED_MARKER=.seeded SEED_ID=shared:x MARKER=.prepared HOSTNAME=n1 "$SH" "$M/p.sh
 grep -q "2 file(s) copied" "$M/run1.out" && ok "merge: two files copied on the first run, and the message says files" || fail "merge run 1 message: $(cat "$M/run1.out")"
 SEED_MARKER=.seeded SEED_ID=shared:x MARKER=.prepared HOSTNAME=n1 "$SH" "$M/p.sh" > "$M/run2.out" 2>&1
 grep -q "seeded on" "$M/run2.out" && fail "merge: the same seed was copied again" || ok "merge: the same seed is not copied again"
+SEED_MARKER=.seeded SEED_ID=shared:x MARKER=.prepared NODE_NAME=node-a HOSTNAME=engine-cache-x7k2p "$SH" "$M/p.sh" > "$M/run2n.out" 2>&1
+grep -q "prepared on node-a:" "$M/run2n.out" && ! grep -q engine-cache-x7k2p "$M/run2n.out" && ok "preparer: its log names the node, not the pod" || fail "preparer log names: $(cat "$M/run2n.out")"
 mkdir -p "$M/seed/vllm/torch_compile_cache/keyC"; echo c > "$M/seed/vllm/torch_compile_cache/keyC/f"
 SEED_MARKER=.seeded SEED_ID=shared:y MARKER=.prepared HOSTNAME=n1 "$SH" "$M/p.sh" > "$M/run3.out" 2>&1
 [ "$(cat "$M/cache/vllm/torch_compile_cache/keyC/f")" = c ] && [ "$(cat "$M/cache/.seeded")" = shared:y ] && grep -q "1 file(s) copied" "$M/run3.out" && ok "merge: a changed seed adds its new key and rewrites the marker" || fail "merge run 3: $(cat "$M/run3.out")"
@@ -228,7 +232,7 @@ if [ -z "$probe_f" ] || ! sh -c "$probe_f"; then fail "probe: the rendered probe
     echo 20261014120000 > "$F/seed/engine-cache/.published"
     mkdir -p "$F/seed/engine-cache/vllm/torch_compile_cache/keyFAIL"; echo x > "$F/seed/engine-cache/vllm/torch_compile_cache/keyFAIL/f"
     PATH="$T/failcp:$PATH" SEED_MARKER=.seeded SEED_ID=workload-pvc:engine-cache SEED_SUBPATH=engine-cache MARKER=.prepared HOSTNAME=n1 "$SH" "$F/p.sh" > "$F/run5.out" 2>&1
-    if grep -q "did not complete" "$F/run5.out" && ! sh -c "$probe_f" && [ ! -e "$F/cache/vllm/torch_compile_cache/keyFAIL" ]; then
+    if grep -q "did not complete" "$F/run5.out" && ! sh -c "$probe_f" 2>/dev/null && [ ! -e "$F/cache/vllm/torch_compile_cache/keyFAIL" ]; then
         ok "seed: a newer stamp that fails to merge leaves the node not Ready, not Ready on the stamp before"
     else
         fail "seed: a failed merge of a newer stamp left the node Ready (marker: $(cat "$F/cache/.seeded" 2>&1)): $(cat "$F/run5.out")"

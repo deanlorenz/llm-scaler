@@ -339,7 +339,7 @@ if [ -d /seed ] && [ ! -d "$seed_dir" ]; then
   if [ "$seeded_from" != "none:$SEED_ID" ] && [ "$seeded_from" != "$SEED_ID" ]; then
     echo "none:$SEED_ID" > "/engine-cache/$SEED_MARKER" || exit 1
   fi
-  echo "engine cache: no seed on $HOSTNAME: $SEED_ID has no $seed_dir yet; nothing to seed"
+  echo "engine cache: no seed on $NODE_NAME: $SEED_ID has no $seed_dir yet; nothing to seed"
 elif [ -d /seed ] && [ "$seeded_from" != "$want" ]; then
   # Drop the old marker first. If this merge fails, the node must be not
   # Ready -- not Ready on the stamp it merged before.
@@ -352,13 +352,13 @@ elif [ -d /seed ] && [ "$seeded_from" != "$want" ]; then
   merge_report
   if [ "$complete" = 1 ]; then
     echo "$want" > "/engine-cache/$SEED_MARKER" || exit 1
-    echo "engine cache: seeded on $HOSTNAME from $want: ${#added} file(s) copied; what the node already had is kept"
+    echo "engine cache: seeded on $NODE_NAME from $want: ${#added} file(s) copied; what the node already had is kept"
   else
-    echo "engine cache: seeding on $HOSTNAME from $want did not complete (a copy failed and was removed); it is retried when this pod next starts"
+    echo "engine cache: seeding on $NODE_NAME from $want did not complete (a copy failed and was removed); it is retried when this pod next starts"
   fi
 fi
 touch "/engine-cache/$MARKER" || exit 1
-echo "engine cache: prepared on $HOSTNAME: /engine-cache/{vllm,flashinfer,triton}"
+echo "engine cache: prepared on $NODE_NAME: /engine-cache/{vllm,flashinfer,triton}"
 trap 'exit 0' TERM; while :; do sleep 3600 & wait; done
 SCRIPT
 }
@@ -541,6 +541,11 @@ $(preparer_script | sed 's/^/              /')
               value: "${SEED_CLAIM}${SEED_SUBPATH:+:$SEED_SUBPATH}"
             - name: SEED_SUBPATH
               value: "${SEED_SUBPATH}"
+            # The node, for the log: HOSTNAME is the pod's name.
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
             # Engine images bake in NVIDIA_VISIBLE_DEVICES=all, and the NVIDIA
             # runtime honours it from a container that requested no GPU.
             - name: NVIDIA_VISIBLE_DEVICES
