@@ -140,11 +140,11 @@ check(mounts.get("seed") == {"name": "seed", "mountPath": "/seed", "readOnly": T
 m2 = {m["name"]: m for m in seed2["containers"][0]["volumeMounts"]}
 check("subPath" not in m2.get("seed", {}), "no subPath when none was given: %s" % m2.get("seed"))
 script = seed["containers"][0]["args"][0]
-check('merge() {' in script and 'local e n t' in script and 'merge "$e" "$t"' in script and 'elif [ ! -e "$t" ]' in script and 'cp -a --no-preserve=ownership "$e" "$2/"' in script, "the seed is merged file by file, descending directories both sides have: what the node has is kept, what it lacks is copied")
+check('merge() {' in script and 'local e n t' in script and 'merge "$e" "$t"' in script and 'elif [ -e "$t" ] || [ -L "$t" ]' in script and 'cp -a --no-preserve=ownership "$e" "$t"' in script, "the seed is merged file by file, descending directories both sides have: what the node has is kept, what it lacks is copied")
 check(script.index("if [ -d /seed ]") < script.index('touch "/engine-cache/$MARKER"'), "the seed is copied before the prepared marker is written")
 check('[ "$seeded_from" != "$want" ]' in script and 'echo "$want" > "/engine-cache/$SEED_MARKER"' in script and 'want="$SEED_ID@$stamp"' in script, "the seed marker records the seed and its publish stamp, and a different seed or a new stamp is merged in")
-i_ok = script.index('if [ "$complete" = 1 ]'); i_mark = script.index('echo "$want" > "/engine-cache/$SEED_MARKER"'); i_loop = script.index('if cp -a --no-preserve=ownership')
-check(i_loop < i_ok < i_mark and 'else complete=0; rm -rf "$t"' in script, "the marker is written only after every copy succeeded; a failed copy is removed and the seed retried next start")
+i_ok = script.index('if [ "$complete" = 1 ]; then\n'); i_mark = script.index('echo "$want" > "/engine-cache/$SEED_MARKER"'); i_loop = script.index('cp -a --no-preserve=ownership "$e" "$t"')
+check(i_loop < i_ok < i_mark and '|| { complete=0; rm -f "$t"; }' in script and 'else complete=0; rm -rf "$t"; fi' in script, "the marker is written only after every copy succeeded; a failed copy is removed and the seed retried next start")
 probe_seed = seed["containers"][0]["readinessProbe"]["exec"]["command"][2]
 check(probe_seed.endswith('&& grep -qx -e "workload-pvc:engine-cache" -e "workload-pvc:engine-cache@[0-9]*" -e "none:workload-pvc:engine-cache" /engine-cache/.seeded'), "with a seed, Ready also requires the node to carry that seed (as published, or before any publish), or the record that it had nothing to seed: %s" % probe_seed)
 env = {e["name"]: e["value"] for e in seed["containers"][0]["env"]}
@@ -170,12 +170,12 @@ SH=sh; command -v dash >/dev/null 2>&1 && SH=dash
 SEED_MARKER=.seeded SEED_ID=shared:x MARKER=.prepared HOSTNAME=n1 "$SH" "$M/p.sh" > "$M/run1.out" 2>&1
 [ "$(cat "$M/cache/vllm/torch_compile_cache/keyA/f")" = old ] && [ "$(cat "$M/cache/vllm/torch_compile_cache/keyB/f")" = b ] && [ "$(cat "$M/cache/triton/x/f")" = t ] && [ "$(cat "$M/cache/.seeded")" = shared:x ] \
     && ok "merge ($SH): the node's key kept, the seed's other key added beside it, triton added, the marker records the seed" || fail "merge run 1: $(cat "$M/run1.out"; ls -R "$M/cache" | head -20)"
-grep -q "2 entries added" "$M/run1.out" && ok "merge: two entries added on the first run" || fail "merge run 1 message: $(cat "$M/run1.out")"
+grep -q "2 file(s) copied" "$M/run1.out" && ok "merge: two files copied on the first run, and the message says files" || fail "merge run 1 message: $(cat "$M/run1.out")"
 SEED_MARKER=.seeded SEED_ID=shared:x MARKER=.prepared HOSTNAME=n1 "$SH" "$M/p.sh" > "$M/run2.out" 2>&1
 grep -q "seeded on" "$M/run2.out" && fail "merge: the same seed was copied again" || ok "merge: the same seed is not copied again"
 mkdir -p "$M/seed/vllm/torch_compile_cache/keyC"; echo c > "$M/seed/vllm/torch_compile_cache/keyC/f"
 SEED_MARKER=.seeded SEED_ID=shared:y MARKER=.prepared HOSTNAME=n1 "$SH" "$M/p.sh" > "$M/run3.out" 2>&1
-[ "$(cat "$M/cache/vllm/torch_compile_cache/keyC/f")" = c ] && [ "$(cat "$M/cache/.seeded")" = shared:y ] && grep -q "1 entries added" "$M/run3.out" && ok "merge: a changed seed adds its new key and rewrites the marker" || fail "merge run 3: $(cat "$M/run3.out")"
+[ "$(cat "$M/cache/vllm/torch_compile_cache/keyC/f")" = c ] && [ "$(cat "$M/cache/.seeded")" = shared:y ] && grep -q "1 file(s) copied" "$M/run3.out" && ok "merge: a changed seed adds its new key and rewrites the marker" || fail "merge run 3: $(cat "$M/run3.out")"
 # a copy that cannot complete: an unreadable seed entry (the preparer's own
 # chmod 1777 would undo a read-only target directory)
 mkdir -p "$M/seed/triton/y"; echo y > "$M/seed/triton/y/f"; chmod 000 "$M/seed/triton/y"
@@ -202,7 +202,7 @@ sed -n "/^publish_script() {/,/^SCRIPT$/p" deploy/enginecache.sh | sed '1,2d;$d'
 grep -q 'cp -a' "$P/pub.sh" || fail "publish: no publish_script extracted"
 SEED_SUBPATH=engine-cache NODE_NAME=n1 "$SH" "$P/pub.sh" > "$P/pub.out" 2>&1; rc=$?
 [ "$rc" = 0 ] && [ "$(cat "$P/seed/engine-cache/vllm/torch_compile_cache/keyN/f")" = n ] && [ "$(cat "$P/seed/engine-cache/triton/t/f")" = t ] \
-    && [ "$(cat "$P/seed/engine-cache/vllm/torch_compile_cache/keyS/f")" = s ] && grep -q "published from n1: 2 entries" "$P/pub.out" \
+    && [ "$(cat "$P/seed/engine-cache/vllm/torch_compile_cache/keyS/f")" = s ] && grep -q "published from n1: 2 file(s) copied" "$P/pub.out" \
     && ok "publish: a node's caches are merged into the seed, the seed's own entries kept" || fail "publish run: rc=$rc $(cat "$P/pub.out")"
 # the node seeded before the publish ($F, marker workload-pvc:engine-cache) merges again once the seed is stamped
 echo 20261013120000 > "$F/seed/engine-cache/.published"
@@ -237,6 +237,58 @@ if [ -z "$probe_f" ] || ! sh -c "$probe_f"; then fail "probe: the rendered probe
     [ "$(cat "$F/cache/.seeded" 2>/dev/null)" = "workload-pvc:engine-cache@20261014120000" ] && sh -c "$probe_f" \
         && ok "seed: the failed stamp is merged at the next start, and the node is Ready again" || fail "seed retry after a failed stamp: $(cat "$F/run6.out")"
 fi
+# the preparer and the publisher merge with the same code
+m_prep="$(sed -n '/^preparer_script() {/,/^SCRIPT$/p' deploy/enginecache.sh | sed -n '/^cpa=0$/,/^merge_report() {/p')"
+m_pub="$(sed -n '/^publish_script() {/,/^SCRIPT$/p' deploy/enginecache.sh | sed -n '/^cpa=0$/,/^merge_report() {/p')"
+[ -n "$m_prep" ] && [ "$m_prep" = "$m_pub" ] && ok "merge: the preparer and the publisher run the same merge" || fail "merge: the preparer's and the publisher's merge differ, or neither was found"
+# a busybox cp, which refuses --no-preserve: seeding and publish still
+# complete, with a plain cp. The fake logs every call, so the run shows it
+# was the cp in use.
+mkdir -p "$T/bbcp"
+cat > "$T/bbcp/cp" <<EOF
+#!/bin/sh
+echo "\$*" >> "$T/bbcp.log"
+for a in "\$@"; do case "\$a" in --no-preserve*) echo "cp: unrecognized option '\$a'" >&2; exit 1 ;; esac; done
+exec "$REAL_CP" "\$@"
+EOF
+chmod +x "$T/bbcp/cp"; : > "$T/bbcp.log"
+B="$T/bb"; mkdir -p "$B/seed/vllm/torch_compile_cache/keyB/rank_0_0" "$B/cache"
+echo b > "$B/seed/vllm/torch_compile_cache/keyB/rank_0_0/f"
+sed -n "/^preparer_script() {/,/^SCRIPT$/p" deploy/enginecache.sh | sed '1,2d;$d' | sed "s|/seed|$B/seed|g; s|/engine-cache|$B/cache|g; s|^trap .*||" > "$B/p.sh"
+PATH="$T/bbcp:$PATH" SEED_MARKER=.seeded SEED_ID=shared:bb MARKER=.prepared HOSTNAME=n1 "$SH" "$B/p.sh" > "$B/run.out" 2>&1
+grep -q -- '--no-preserve' "$T/bbcp.log" && [ "$(cat "$B/cache/vllm/torch_compile_cache/keyB/rank_0_0/f" 2>/dev/null)" = b ] && [ "$(cat "$B/cache/.seeded" 2>/dev/null)" = shared:bb ] \
+    && ok "merge: with a busybox cp (no --no-preserve) the seed is merged and the node marked seeded" || fail "merge with busybox cp: $(cat "$B/run.out"; cat "$T/bbcp.log")"
+BP="$T/bbpub"; mkdir -p "$BP/node/vllm/torch_compile_cache/keyN/rank_0_0" "$BP/seed"
+echo n > "$BP/node/vllm/torch_compile_cache/keyN/rank_0_0/f"
+sed -n "/^publish_script() {/,/^SCRIPT$/p" deploy/enginecache.sh | sed '1,2d;$d' | sed "s|/seed|$BP/seed|g; s|/engine-cache|$BP/node|g" > "$BP/pub.sh"
+PATH="$T/bbcp:$PATH" SEED_SUBPATH=engine-cache NODE_NAME=n1 "$SH" "$BP/pub.sh" > "$BP/pub.out" 2>&1; rc=$?
+[ "$rc" = 0 ] && [ "$(cat "$BP/seed/engine-cache/vllm/torch_compile_cache/keyN/rank_0_0/f" 2>/dev/null)" = n ] \
+    && ok "publish: with a busybox cp the node's caches reach the seed" || fail "publish with busybox cp: rc=$rc $(cat "$BP/pub.out")"
+# symlinks are never copied, at any depth, by either merge; a file only its
+# owner can read is copied readable by every user, and both are reported
+L="$T/links"; LK="$L/seed/vllm/torch_compile_cache/keyL"
+mkdir -p "$LK/rank_0_0" "$L/cache" "$L/elsewhere"
+echo l > "$LK/rank_0_0/f"; echo s > "$L/elsewhere/s"; echo p > "$LK/rank_0_0/private"; chmod 600 "$LK/rank_0_0/private"
+ln -s "$L/elsewhere/s" "$LK/rank_0_0/link"; ln -s "$L/elsewhere" "$LK/linkdir"
+sed -n "/^preparer_script() {/,/^SCRIPT$/p" deploy/enginecache.sh | sed '1,2d;$d' | sed "s|/seed|$L/seed|g; s|/engine-cache|$L/cache|g; s|^trap .*||" > "$L/p.sh"
+SEED_MARKER=.seeded SEED_ID=shared:l MARKER=.prepared HOSTNAME=n1 "$SH" "$L/p.sh" > "$L/run.out" 2>&1
+LC="$L/cache/vllm/torch_compile_cache/keyL"
+if [ "$(cat "$LC/rank_0_0/f" 2>/dev/null)" = l ] && [ ! -e "$LC/rank_0_0/link" ] && [ ! -L "$LC/rank_0_0/link" ] && [ ! -e "$LC/linkdir" ] && [ ! -L "$LC/linkdir" ] \
+    && grep -q '2 symlink(s) skipped' "$L/run.out" && grep -q "skipped $LK/linkdir: a symlink" "$L/run.out" && [ "$(cat "$L/cache/.seeded" 2>/dev/null)" = shared:l ]; then
+    ok "merge: symlinks in the seed, to a file or a directory, are skipped and named; the rest is merged and the node seeded"
+else
+    fail "merge copied a symlink, or did not say so: $(ls -lR "$LC" 2>&1 | head -12; cat "$L/run.out")"
+fi
+ls -ld "$LC/rank_0_0/private" 2>/dev/null | grep -q '^-......r' && grep -q '1 file(s) only their owner could read were copied readable by every user' "$L/run.out" \
+    && ok "merge: a file only its owner could read is copied readable by every user, and counted" || fail "merge: private file: $(ls -ld "$LC/rank_0_0/private" 2>&1); $(cat "$L/run.out")"
+LP="$T/linkpub"; mkdir -p "$LP/node/vllm/torch_compile_cache/keyM" "$LP/seed"
+echo m > "$LP/node/vllm/torch_compile_cache/keyM/f"; echo q > "$LP/node/vllm/torch_compile_cache/keyM/private"; chmod 600 "$LP/node/vllm/torch_compile_cache/keyM/private"
+ln -s /etc/hostname "$LP/node/vllm/torch_compile_cache/keyM/link"
+sed -n "/^publish_script() {/,/^SCRIPT$/p" deploy/enginecache.sh | sed '1,2d;$d' | sed "s|/seed|$LP/seed|g; s|/engine-cache|$LP/node|g" > "$LP/pub.sh"
+SEED_SUBPATH=engine-cache NODE_NAME=n1 "$SH" "$LP/pub.sh" > "$LP/pub.out" 2>&1; rc=$?
+LS="$LP/seed/engine-cache/vllm/torch_compile_cache/keyM"
+[ "$rc" = 0 ] && [ "$(cat "$LS/f" 2>/dev/null)" = m ] && [ ! -L "$LS/link" ] && [ ! -e "$LS/link" ] && ls -ld "$LS/private" 2>/dev/null | grep -q '^-......r' && grep -q '1 symlink(s) skipped' "$LP/pub.out" \
+    && ok "publish: a node's symlink never reaches the seed, and a private file reaches it readable" || fail "publish with a symlink and a private file: rc=$rc $(ls -l "$LS" 2>&1); $(cat "$LP/pub.out")"
 # the readiness probe accepts every marker form the preparer writes
 for m in "workload-pvc:engine-cache" "workload-pvc:engine-cache@20261013120000" "none:workload-pvc:engine-cache"; do
     echo "$m" > "$T/marker"

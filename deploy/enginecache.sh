@@ -275,21 +275,50 @@ for d in vllm flashinfer triton; do
   mkdir -p "/engine-cache/$d" || exit 1
   chmod 1777 "/engine-cache/$d" 2>/dev/null || true
 done
-# merge SRC DST: an entry the node has is kept, one it lacks is copied, a
-# directory both have is descended -- so a second engine config's key lands
-# beside the node's own. A copy that fails is removed and the seed marked
-# incomplete.
+# cp -a without ownership is GNU only; busybox cp refuses the option. Try it
+# once; without it a plain cp copies the content and mode, not the times.
+cpa=0
+: > /tmp/.ec-cp-check 2>/dev/null && cp -a --no-preserve=ownership /tmp/.ec-cp-check /tmp/.ec-cp-check.2 2>/dev/null && cpa=1
+rm -f /tmp/.ec-cp-check /tmp/.ec-cp-check.2
+# merge SRC DST: an entry DST has is kept, one it lacks is copied, a directory
+# both have is descended -- so a second engine config's key lands beside the
+# node's own. It walks every directory and copies one file at a time:
+#  * a symlink is skipped and logged: vLLM writes none, and a link is not
+#    the cache (it would point at whatever the target is on each node);
+#  * a file only its owner can read is copied readable by every user, and
+#    counted: the engine may run as another UID;
+#  * a new directory is removed whole when any copy under it fails, so no
+#    half-copied key is left behind, and the merge is marked incomplete;
+#    a directory that cannot be listed is a failed copy, not an empty one.
+# The copier owns every copy, whatever owned the original.
 merge() {
-  local e n t
+  local e n t was
+  # a directory that cannot be listed would glob to nothing and read as empty
+  ls -a "$1" >/dev/null || { complete=0; return; }
   for e in "$1"/* "$1"/.[!.]*; do
-    [ -e "$e" ] || continue
+    [ -e "$e" ] || [ -L "$e" ] || continue
     n="${e##*/}"; t="$2/$n"
-    if [ -d "$e" ] && [ ! -L "$e" ] && [ -d "$t" ] && [ ! -L "$t" ]; then
-      merge "$e" "$t"
-    elif [ ! -e "$t" ]; then
-      if cp -a --no-preserve=ownership "$e" "$2/"; then added="$added."; else complete=0; rm -rf "$t"; fi
+    if [ -L "$e" ]; then
+      links="$links."; echo "engine cache: skipped $e: a symlink, not cache content"
+    elif [ -e "$t" ] || [ -L "$t" ]; then
+      if [ -d "$e" ] && [ -d "$t" ] && [ ! -L "$t" ]; then merge "$e" "$t"; fi
+    elif [ -d "$e" ]; then
+      was="$complete"; complete=1
+      mkdir "$t" && chmod a+rx "$t" || complete=0
+      [ "$complete" = 0 ] || merge "$e" "$t"
+      if [ "$complete" = 1 ]; then complete="$was"; else complete=0; rm -rf "$t"; fi
+    elif [ -f "$e" ]; then
+      ls -ld "$e" | grep -q '^-......r' || { private="$private."; [ -n "$private_eg" ] || private_eg="$e"; }
+      if [ "$cpa" = 1 ]; then cp -a --no-preserve=ownership "$e" "$t"; else cp "$e" "$t"; fi && chmod a+r "$t" && added="$added." || { complete=0; rm -f "$t"; }
+    else
+      echo "engine cache: skipped $e: not a file or a directory"
     fi
   done
+}
+# merge_report prints what the merge skipped or changed.
+merge_report() {
+  [ -z "$links" ] || echo "engine cache: ${#links} symlink(s) skipped (named above)"
+  [ -z "$private" ] || echo "engine cache: ${#private} file(s) only their owner could read were copied readable by every user, for example $private_eg"
 }
 seeded_from=""
 [ ! -f "/engine-cache/$SEED_MARKER" ] || read -r seeded_from < "/engine-cache/$SEED_MARKER" || seeded_from=""
@@ -315,14 +344,15 @@ elif [ -d /seed ] && [ "$seeded_from" != "$want" ]; then
   # Drop the old marker first. If this merge fails, the node must be not
   # Ready -- not Ready on the stamp it merged before.
   rm -f "/engine-cache/$SEED_MARKER" || exit 1
-  complete=1; added=""
+  complete=1; added=""; links=""; private=""; private_eg=""
   for d in vllm flashinfer triton; do
     [ -d "$seed_dir/$d" ] || continue
     merge "$seed_dir/$d" "/engine-cache/$d"
   done
+  merge_report
   if [ "$complete" = 1 ]; then
     echo "$want" > "/engine-cache/$SEED_MARKER" || exit 1
-    echo "engine cache: seeded on $HOSTNAME from $want: ${#added} entries added, what the node already had kept"
+    echo "engine cache: seeded on $HOSTNAME from $want: ${#added} file(s) copied; what the node already had is kept"
   else
     echo "engine cache: seeding on $HOSTNAME from $want did not complete (a copy failed and was removed); it is retried when this pod next starts"
   fi
@@ -766,26 +796,60 @@ publish_script() {
     cat <<'SCRIPT'
 dst="/seed${SEED_SUBPATH:+/$SEED_SUBPATH}"
 mkdir -p "$dst" || exit 1
+# cp -a without ownership is GNU only; busybox cp refuses the option. Try it
+# once; without it a plain cp copies the content and mode, not the times.
+cpa=0
+: > /tmp/.ec-cp-check 2>/dev/null && cp -a --no-preserve=ownership /tmp/.ec-cp-check /tmp/.ec-cp-check.2 2>/dev/null && cpa=1
+rm -f /tmp/.ec-cp-check /tmp/.ec-cp-check.2
+# merge SRC DST: an entry DST has is kept, one it lacks is copied, a directory
+# both have is descended -- so a second engine config's key lands beside the
+# node's own. It walks every directory and copies one file at a time:
+#  * a symlink is skipped and logged: vLLM writes none, and a link is not
+#    the cache (it would point at whatever the target is on each node);
+#  * a file only its owner can read is copied readable by every user, and
+#    counted: the engine may run as another UID;
+#  * a new directory is removed whole when any copy under it fails, so no
+#    half-copied key is left behind, and the merge is marked incomplete;
+#    a directory that cannot be listed is a failed copy, not an empty one.
+# The copier owns every copy, whatever owned the original.
 merge() {
-  local e n t
+  local e n t was
+  # a directory that cannot be listed would glob to nothing and read as empty
+  ls -a "$1" >/dev/null || { complete=0; return; }
   for e in "$1"/* "$1"/.[!.]*; do
-    [ -e "$e" ] || continue
+    [ -e "$e" ] || [ -L "$e" ] || continue
     n="${e##*/}"; t="$2/$n"
-    if [ -d "$e" ] && [ ! -L "$e" ] && [ -d "$t" ] && [ ! -L "$t" ]; then
-      merge "$e" "$t"
-    elif [ ! -e "$t" ]; then
-      if cp -a --no-preserve=ownership "$e" "$2/"; then added="$added."; else complete=0; rm -rf "$t"; fi
+    if [ -L "$e" ]; then
+      links="$links."; echo "engine cache: skipped $e: a symlink, not cache content"
+    elif [ -e "$t" ] || [ -L "$t" ]; then
+      if [ -d "$e" ] && [ -d "$t" ] && [ ! -L "$t" ]; then merge "$e" "$t"; fi
+    elif [ -d "$e" ]; then
+      was="$complete"; complete=1
+      mkdir "$t" && chmod a+rx "$t" || complete=0
+      [ "$complete" = 0 ] || merge "$e" "$t"
+      if [ "$complete" = 1 ]; then complete="$was"; else complete=0; rm -rf "$t"; fi
+    elif [ -f "$e" ]; then
+      ls -ld "$e" | grep -q '^-......r' || { private="$private."; [ -n "$private_eg" ] || private_eg="$e"; }
+      if [ "$cpa" = 1 ]; then cp -a --no-preserve=ownership "$e" "$t"; else cp "$e" "$t"; fi && chmod a+r "$t" && added="$added." || { complete=0; rm -f "$t"; }
+    else
+      echo "engine cache: skipped $e: not a file or a directory"
     fi
   done
 }
-complete=1; added=""
+# merge_report prints what the merge skipped or changed.
+merge_report() {
+  [ -z "$links" ] || echo "engine cache: ${#links} symlink(s) skipped (named above)"
+  [ -z "$private" ] || echo "engine cache: ${#private} file(s) only their owner could read were copied readable by every user, for example $private_eg"
+}
+complete=1; added=""; links=""; private=""; private_eg=""
 for d in vllm flashinfer triton; do
   [ -d "/engine-cache/$d" ] || continue
   mkdir -p "$dst/$d" || exit 1
   merge "/engine-cache/$d" "$dst/$d"
 done
+merge_report
 [ "$complete" = 1 ] || { echo "engine cache: publishing from $NODE_NAME did not complete (a copy failed and was removed)"; exit 1; }
-echo "engine cache: published from $NODE_NAME: ${#added} entries added to the seed"
+echo "engine cache: published from $NODE_NAME: ${#added} file(s) copied into the seed; what the seed already had is kept"
 SCRIPT
 }
 
