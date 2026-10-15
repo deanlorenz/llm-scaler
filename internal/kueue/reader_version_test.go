@@ -20,10 +20,13 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 )
 
+// deploymentKind is the kind the Kueue controller runs as.
+const deploymentKind = "Deployment"
+
 // kueueController is the Kueue controller Deployment in ns, running image.
 func kueueController(ns, image string) *unstructured.Unstructured {
 	d := &unstructured.Unstructured{}
-	d.SetGroupVersionKind(schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"})
+	d.SetGroupVersionKind(schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: deploymentKind})
 	d.SetNamespace(ns)
 	d.SetName("kueue-controller-manager")
 	Expect(unstructured.SetNestedSlice(d.Object, []interface{}{
@@ -52,7 +55,7 @@ func leaderLease(renewed time.Time, seconds int64) *unstructured.Unstructured {
 // versionClient serves the Kueue kinds, Deployments and Leases.
 func versionClient(funcs *interceptor.Funcs, objs ...client.Object) client.Client {
 	m := cohortMapper("v1beta2").(*meta.DefaultRESTMapper)
-	m.Add(schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"}, meta.RESTScopeNamespace)
+	m.Add(schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: deploymentKind}, meta.RESTScopeNamespace)
 	m.Add(schema.GroupVersionKind{Group: "coordination.k8s.io", Version: "v1", Kind: "Lease"}, meta.RESTScopeNamespace)
 	b := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithRESTMapper(m).WithObjects(objs...)
 	if funcs != nil {
@@ -114,7 +117,7 @@ var _ = Describe("Reader checks the Kueue controller version", func() {
 			"the override applies to a version that cannot be read")
 
 		denied := &interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, o client.Object, opts ...client.GetOption) error {
-			if k := o.GetObjectKind().GroupVersionKind().Kind; k == "Deployment" || k == "Lease" {
+			if k := o.GetObjectKind().GroupVersionKind().Kind; k == deploymentKind || k == "Lease" {
 				return forbidden("deployments")
 			}
 			return c.Get(ctx, key, o, opts...)
@@ -162,7 +165,7 @@ var _ = Describe("Reader checks the Kueue controller version", func() {
 			return snap.KueueControllerDown
 		}
 		denied := &interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, o client.Object, opts ...client.GetOption) error {
-			if k := o.GetObjectKind().GroupVersionKind().Kind; k == "Deployment" || k == "Lease" {
+			if k := o.GetObjectKind().GroupVersionKind().Kind; k == deploymentKind || k == "Lease" {
 				return forbidden("deployments")
 			}
 			return c.Get(ctx, key, o, opts...)
@@ -214,7 +217,7 @@ var _ = Describe("Reader checks the Kueue controller version", func() {
 			}
 			return d
 		}
-		old := leaderLease(leaseNow.Add(-48*time.Hour), 15)
+		old := leaderLease(leaseNow.Add(-48*time.Hour), 30)
 		Expect(down(rolledOut(1, leaseNow.Add(-24*time.Hour), time.Time{}), old)).To(BeFalse(),
 			"created a day after the Lease was last renewed, one ready replica: up")
 		Expect(down(rolledOut(0, leaseNow.Add(-24*time.Hour), time.Time{}), old)).To(BeTrue(),
@@ -276,7 +279,7 @@ var _ = Describe("Reader checks the Kueue controller version", func() {
 	It("re-reads the Lease every refresh while the Deployment is Forbidden", func() {
 		now := leaseNow
 		deploymentDenied := &interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, o client.Object, opts ...client.GetOption) error {
-			if o.GetObjectKind().GroupVersionKind().Kind == "Deployment" {
+			if o.GetObjectKind().GroupVersionKind().Kind == deploymentKind {
 				return forbidden("deployments")
 			}
 			return c.Get(ctx, key, o, opts...)

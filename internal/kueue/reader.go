@@ -633,7 +633,8 @@ func (r *Reader) queueState(cq *unstructured.Unstructured, flavorType map[string
 		// What the group covers, and its flavors in order: a co-resource is
 		// charged on the GPU's flavor when its group covers a GPU too, else
 		// on its own group's flavor (K2a, coFlavor).
-		var covered, flavorNames []string
+		var covered []string
+		flavorNames := make([]string, 0, len(flavors))
 		for _, f := range flavors {
 			flavor, _ := f.(map[string]interface{})
 			name, _, _ := unstructured.NestedString(flavor, "name")

@@ -7,9 +7,10 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
-// withCo gives q a co-resource res of quota c on flavor, in a resource group
+// withCPU gives q the co-resource cpu, of quota c on flavor, in a resource group
 // that covers a GPU (withGPU) or of its own with that one flavor.
-func withCo(q QueueState, flavor, res string, c CoQuota, withGPU bool) QueueState {
+func withCPU(q QueueState, flavor string, c CoQuota, withGPU bool) QueueState {
+	const res = "cpu"
 	if q.CoResources == nil {
 		q.CoResources = map[ResourceKey]CoQuota{}
 		q.CoFlavors, q.CoWithGPU = map[string][]string{}, map[string]bool{}
@@ -24,7 +25,7 @@ func withCo(q QueueState, flavor, res string, c CoQuota, withGPU bool) QueueStat
 // h100) and whose CPU in another, offered on cpuFlavors -- the common shape
 // of a queue sharing a CPU pool across GPU flavors.
 func splitGroups(cpuFlavors ...string) *unstructured.Unstructured {
-	var flavors []interface{}
+	flavors := make([]interface{}, 0, len(cpuFlavors))
 	for _, f := range cpuFlavors {
 		flavors = append(flavors, map[string]interface{}{"name": f, "resources": []interface{}{
 			map[string]interface{}{"name": "cpu", "nominalQuota": "64", "borrowingLimit": "16"},
@@ -59,7 +60,7 @@ func TestCoResourcesOfEveryGroupAreRead(t *testing.T) {
 	}
 	a := one
 	a.Name, a.HasStatus = "a", true
-	b := withCo(member("b", QueueResource{Nominal: 8}), "cpu-a", "cpu", CoQuota{Nominal: 64000, Reserved: 40000}, false)
+	b := withCPU(member("b", QueueResource{Nominal: 8}), "cpu-a", CoQuota{Nominal: 64000, Reserved: 40000}, false)
 	pools := ComputeBorrowing(topology(a, b), false).Pools
 	if len(pools) != 1 || pools[0].CoFree["cpu"] != 128000-40000 || len(pools[0].CoUnbound) != 0 {
 		t.Errorf("pool = %+v, want cpu free 88000 milli from the cpu-a flavor, nothing unbound", pools)
@@ -87,8 +88,8 @@ func TestCoResourceReachStopsAtBorrowingLimit(t *testing.T) {
 	}
 	c.Reserved = 70000
 	q.CoResources[ResourceKey{Flavor: "cpu-a", Resource: "cpu"}] = c
-	q.Name, q.HasStatus = "a", true
-	f := figures2(t, ComputeBorrowing(topology(q, member("b", QueueResource{Nominal: 8})), false), "a")
+	q.Name, q.HasStatus = "x", true
+	f := figures2(t, ComputeBorrowing(topology(q, member("b", QueueResource{Nominal: 8})), false), "x")
 	if f.CoHeadroom["cpu"] != 10000 {
 		t.Errorf("cpu headroom = %v, want 10000 milli (64 + 16 - 70)", f.CoHeadroom)
 	}

@@ -150,8 +150,8 @@ func TestCoResourcesAreReadAndPooled(t *testing.T) {
 	if !q.CoWithGPU["cpu"] || len(q.CoFlavors["cpu"]) != 1 {
 		t.Fatalf("cpu shares the GPU's group: charged on the GPU's flavor; got %v %v", q.CoWithGPU, q.CoFlavors)
 	}
-	a := withCo(member("a", QueueResource{Nominal: 8}), "h100", "cpu", CoQuota{Nominal: 64000, Reserved: 70000}, true)
-	b := withCo(member("b", QueueResource{Nominal: 8}), "h100", "cpu", CoQuota{Nominal: 64000, Reserved: 0}, true)
+	a := withCPU(member("a", QueueResource{Nominal: 8}), "h100", CoQuota{Nominal: 64000, Reserved: 70000}, true)
+	b := withCPU(member("b", QueueResource{Nominal: 8}), "h100", CoQuota{Nominal: 64000, Reserved: 0}, true)
 	pools := ComputeBorrowing(topology(a, b), false).Pools
 	if len(pools) != 1 || pools[0].CoFree["cpu"] != 128000-70000 {
 		t.Errorf("cpu free = %+v, want 58000 milli (128 CPUs lent, 70 used past what a keeps)", pools)
@@ -162,7 +162,7 @@ func TestCoResourcesAreReadAndPooled(t *testing.T) {
 // nominal of every covered co-resource, and only on a flavor its node
 // selection allows.
 func TestLenderWaitsOnlyOnAllowedFlavorAndCoResources(t *testing.T) {
-	q := withCo(member("lender", QueueResource{Nominal: 8}), "h100", "cpu", CoQuota{Nominal: 16000}, true)
+	q := withCPU(member("lender", QueueResource{Nominal: 8}), "h100", CoQuota{Nominal: 16000}, true)
 	w := pendingGPU(8, 0)
 	w.Requests = map[string]int64{"cpu": 8000}
 	q.PendingWorkloads = []PendingWorkload{w}

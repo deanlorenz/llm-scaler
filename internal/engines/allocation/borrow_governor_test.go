@@ -39,7 +39,7 @@ func (w govWorld) constraints() []*ResourceConstraints {
 }
 
 // never is a waiting lender that cannot reclaim.
-func never(lentOut int) kueue.LenderState {
+func never() kueue.LenderState {
 	return kueue.LenderState{Queue: "lender", Waiting: true, Reclaim: kueue.ReclaimNever}
 }
 
@@ -122,7 +122,7 @@ var _ = Describe("BorrowGovernor", func() {
 		It("blocks new borrowing at the first sighting, and counts the wait only after two fresh reads 60s apart", func() {
 			g := NewBorrowGovernor(settings)
 			reqs := []ModelScalingRequest{govModel("m", 4, 8)}
-			w := govWorld{lenders: []kueue.LenderState{never(8)}, used: 32}
+			w := govWorld{lenders: []kueue.LenderState{never()}, used: 32}
 			for _, d := range []time.Duration{0, 30 * time.Second} {
 				w.readAt = t0.Add(d)
 				run(g, w, t0.Add(d), reqs)
@@ -148,13 +148,13 @@ var _ = Describe("BorrowGovernor", func() {
 		})
 
 		It("hands nothing back to a waiting lender that cannot reclaim, and closes the cohort to new borrowing", func() {
-			g, rel, now := warm(govWorld{lenders: []kueue.LenderState{never(8)}, used: 32},
+			g, rel, now := warm(govWorld{lenders: []kueue.LenderState{never()}, used: 32},
 				[]ModelScalingRequest{govModel("m", 4, 8)})
 			Expect(rel).To(BeEmpty(), "what it lent was never counted as borrowable")
 			Expect(g.BlockedCohorts(now)).To(HaveKey("c"), "no new borrowing while the lender waits")
 			Expect(g.WaitingLenders(now)).To(HaveLen(1), "the wait is reported")
 			reqs := []ModelScalingRequest{govModel("m", 4, 8)}
-			c := BorrowCycle{Now: now, Constraints: govWorld{lenders: []kueue.LenderState{never(8)}, used: 32, readAt: now}.constraints(),
+			c := BorrowCycle{Now: now, Constraints: govWorld{lenders: []kueue.LenderState{never()}, used: 32, readAt: now}.constraints(),
 				Requests: reqs}
 			g.Observe(c)
 			ds := decisionsOf(reqs)
@@ -163,7 +163,7 @@ var _ = Describe("BorrowGovernor", func() {
 		})
 
 		It("releases nothing for a lender that can reclaim, and closes the cohort to new borrowing", func() {
-			l := never(8)
+			l := never()
 			l.Reclaim = kueue.ReclaimAny
 			g, rel, now := warm(govWorld{lenders: []kueue.LenderState{l}, used: 32}, []ModelScalingRequest{govModel("m", 4, 8)})
 			Expect(rel).To(BeEmpty(), "Kueue preempts for it")
@@ -173,7 +173,7 @@ var _ = Describe("BorrowGovernor", func() {
 
 	It("freezes the lender's wait on a stale read", func() {
 		reqs := []ModelScalingRequest{govModel("m", 4, 8)}
-		w := govWorld{lenders: []kueue.LenderState{never(32)}, used: 32}
+		w := govWorld{lenders: []kueue.LenderState{never()}, used: 32}
 		g, _, now := warm(w, reqs)
 		w.stale = true
 		w.lenders = []kueue.LenderState{{Queue: "lender"}} // the frozen read
@@ -187,7 +187,7 @@ var _ = Describe("BorrowGovernor", func() {
 
 	Describe("cooldowns", func() {
 		It("keeps the cohort closed for the cooldown after its lender stopped waiting", func() {
-			w := govWorld{lenders: []kueue.LenderState{never(8)}, used: 32}
+			w := govWorld{lenders: []kueue.LenderState{never()}, used: 32}
 			g, _, now := warm(w, []ModelScalingRequest{govModel("m", 4, 8)})
 			w.lenders = []kueue.LenderState{{Queue: "lender"}}
 			w.readAt = now.Add(30 * time.Second)

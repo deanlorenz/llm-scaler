@@ -196,7 +196,7 @@ type PriorityLend struct {
 	GPUs  int
 }
 
-// drawable is what a model of priority class class may draw on the chunk: Free
+// drawable is what a model of the given priority class may draw on the chunk: Free
 // less the restricted GPUs whose lender does not outrank it. A class whose
 // priority is not known may draw on none of them.
 //

@@ -288,7 +288,7 @@ var _ = Describe("BorrowGovernor release units", func() {
 	Describe("the ledger", func() {
 		It("forgets the wait of a lender that left the pool", func() {
 			g := NewBorrowGovernor(settings)
-			w := govWorld{lenders: []kueue.LenderState{never(32)}, used: 32}
+			w := govWorld{lenders: []kueue.LenderState{never()}, used: 32}
 			reqs := []ModelScalingRequest{govModel("m", 4, 8)}
 			now := t0
 			for _, d := range []time.Duration{0, 30 * time.Second, 61 * time.Second} {
