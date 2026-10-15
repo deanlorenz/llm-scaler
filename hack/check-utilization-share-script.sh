@@ -334,7 +334,9 @@ printf '%s\n' \
 run activate
 vcase "activate: quotas per namespace warn about no other namespace" \
     eval '[ $RC -eq 0 ] && ! says "pods in team-b" && says "no other namespace shares this budget"'
-# clusterNamespaces limits a cluster budget to the namespaces it lists.
+# clusterNamespaces limits a cluster budget to the namespaces it lists. team-c
+# is listed and has no grant, so it is still warned about: a warning about
+# nobody must not pass.
 fresh "$(printf '%s\n' "$CLUSTER_POLICY" | yq '.optimizer.utilizationShare.clusterNamespaces = ["team-a", "team-c"]')"
 printf '%s\n' \
     'team-a wva-external-scaler.team-a.svc.cluster.local:9090 -' \
@@ -344,7 +346,7 @@ printf '%s\n' \
     'team-e wva-external-scaler.other.svc.cluster.local:9090 -' > "$STATE/sos"
 run activate
 vcase "activate: clusterNamespaces limits the warning to the namespaces it lists" \
-    eval '[ $RC -eq 0 ] && ! says "pods in team-b"'
+    eval '[ $RC -eq 0 ] && ! says "pods in team-b" && says "may not patch pods in team-c"'
 # A trigger whose address names no controller cannot be attributed: warned.
 fresh "$CLUSTER_POLICY"
 printf '%s\n' 'team-a wva-external-scaler.team-a.svc.cluster.local:9090 -' 'team-g 10.1.2.3:9090 - llama' > "$STATE/sos"
