@@ -688,12 +688,22 @@ func allocateForModelPaired(
 	pickerState RolePairedState,
 	roles []string,
 ) {
-	allocateForModelPairedOn(ctx, e, variants, stateMap, available, targets, pick, pickerState, roles, nodeFit{})
+	allocateForModelPairedOn(ctx, e, variants, stateMap, available, targets, pick, pickerState, roles, nodeFit{}, nil)
 }
 
 // allocateForModelPairedOn is allocateForModelPaired fitting every commit to
 // the nodes as well (fit.nodes, see fitPairToBudget); a zero nodeFit fits
 // pools only.
+//
+// With a placer (a pass that counts cohort borrowing), each iteration's commit
+// is placed replica by replica before it is committed: against the namespace's
+// guaranteed budget, then the cohort's shared pools, and on the nodes of
+// fit.nodes (modelPlacer.placeUnit). The flat budget alone cannot say that a
+// borrowed replica must land whole on one flavor's nodes. The placer then owns
+// the node fit for the commit, so the view is debited once; a unit that does
+// not place is trimmed at its shape, and one that cannot place one replica of
+// each role ends the pass, as scarcity does. A nil placer is node fit through
+// fitPairToBudget exactly.
 //
 // It returns the GPUs it spent per key of available, as debited -- once per
 // spend, under the key the pick read. A caller that reconciles another budget
@@ -711,6 +721,7 @@ func allocateForModelPairedOn(
 	pickerState RolePairedState,
 	roles []string,
 	fit nodeFit,
+	placer *modelPlacer,
 ) map[string]int {
 	logger := ctrl.LoggerFrom(ctx)
 	spent := map[string]int{}
@@ -821,7 +832,17 @@ func allocateForModelPairedOn(
 		// Each role was sized against the whole budget on its own; the pair
 		// must fit it together. Not even one replica of each fitting together
 		// is SCARCITY, and ends the pass the same way.
-		if !fitPairToBudget(picked, kByRole, variantByRole, variants, stateMap, available, fit) {
+		//
+		// With a placer the placer fits the nodes, replica by replica, and
+		// the budget check fits the pools only: the view is debited once.
+		pairFit := fit
+		if placer != nil {
+			pairFit.nodes = nil
+		}
+		if !fitPairToBudget(picked, kByRole, variantByRole, variants, stateMap, available, pairFit) {
+			break
+		}
+		if placer != nil && !placer.placeUnit(picked, kByRole, variantByRole, variants, stateMap) {
 			break
 		}
 

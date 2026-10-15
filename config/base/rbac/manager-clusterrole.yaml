@@ -83,10 +83,17 @@ rules:
   - cohorts
   - localqueues
   - resourceflavors
+  verbs:
+  - get
+  - list
+- apiGroups:
+  - kueue.x-k8s.io
+  resources:
   - workloads
   verbs:
   - get
   - list
+  - watch
 - apiGroups:
   - leaderworkerset.x-k8s.io
   resources:
