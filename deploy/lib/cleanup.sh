@@ -170,8 +170,10 @@ EOF
     # The utilization-share need history is written by the controller, not
     # rendered, so the filtered delete above never names it. Left behind, a
     # reinstall would restore peaks recorded before the uninstall. Deleted
-    # after the Deployment and the Role that let it write, so a pod still
-    # terminating cannot write it back.
+    # after the delete above, so a controller pod that is gone cannot write
+    # it back. When that delete failed and the Deployment is still there (the
+    # pod-write grant was kept, above), a running controller may write it
+    # again; the re-run that warning asks for removes it then.
     local history_cm=wva-utilization-share-history history_err
     history_err="$(kubectl delete configmap "$history_cm" -n "$WVA_NS" --ignore-not-found 2>&1 >/dev/null)" && history_err=""
     if [ -n "$history_err" ]; then

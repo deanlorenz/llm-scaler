@@ -25,8 +25,8 @@
   namespace-scoped scaling manager already has the patch in its own Role.
   `create` sees that only if you may impersonate its ServiceAccount
   (`kubectl auth can-i --as`); if you may not, it makes the grant anyway,
-  which does no harm. If you may not create Roles, `create` stops before creating anything and prints
-  the command to ask an admin to run. Without the grant, the scaling manager
+  which does no harm. If you may not create Roles, `create` stops before
+  creating anything and prints the command to ask an admin to run. Without the grant, the scaling manager
   refuses to start the pool: it will not hold accelerators to warm models it
   could never lend.
 - [ ] **Two container images, from two owners** (below), pullable from the pool
