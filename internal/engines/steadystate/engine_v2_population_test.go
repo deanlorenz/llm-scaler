@@ -106,6 +106,14 @@ var _ = Describe("Engine config-population helpers", func() {
 		})
 	})
 
+	// spec test 16: these 3 Its were Skip()-ed pending the composite-analyzer
+	// mission ("WIP single-analyzer refactor... rewrite once the
+	// multi-analyzer story is redesigned"). Unskipped with zero test-body
+	// changes: they exercise runAnalyzersAndScore directly (Score
+	// population/defaulting, per-analyzer threshold override), a layer
+	// beneath composite construction that this mission does not change
+	// (composite construction happens after these values are already set,
+	// and runAnalyzersAndScore's return type is unchanged).
 	Describe("runAnalyzersAndScore config-bridge", func() {
 
 		// minEngine builds a minimal Engine suitable for calling runAnalyzersAndScore.
@@ -128,7 +136,6 @@ var _ = Describe("Engine config-population helpers", func() {
 		}
 
 		It("populates Score from AnalyzerScoreConfig.Score into the returned slice", func() {
-			Skip("WIP single-analyzer refactor: non-saturation analyzer results not yet forwarded to optimizer; rewrite once the multi-analyzer story is redesigned")
 			spy := &fakeAnalyzerWithResult{
 				analyzerName: "spy",
 				result:       &domain.AnalyzerResult{},
@@ -152,7 +159,6 @@ var _ = Describe("Engine config-population helpers", func() {
 		})
 
 		It("defaults Score to 1.0 when the analyzer has no Analyzers entry", func() {
-			Skip("WIP single-analyzer refactor: non-saturation analyzer results not yet forwarded to optimizer; rewrite once the multi-analyzer story is redesigned")
 			spy := &fakeAnalyzerWithResult{
 				analyzerName: "spy",
 				result:       &domain.AnalyzerResult{},
@@ -176,7 +182,6 @@ var _ = Describe("Engine config-population helpers", func() {
 		})
 
 		It("applies per-analyzer ScaleUpThreshold override into RequiredCapacity", func() {
-			Skip("WIP single-analyzer refactor: non-saturation analyzer results not yet forwarded to optimizer; rewrite once the multi-analyzer story is redesigned")
 			// spy returns TotalDemand=100, everything else zero.
 			spy := &fakeAnalyzerWithResult{
 				analyzerName: "spy",

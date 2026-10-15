@@ -27,11 +27,21 @@ var _ = Describe("gpuUsageViews", func() {
 	AfterEach(func() { decision.DefaultGPUUsage.Reset() })
 
 	// managedRequest is one variant holding replicas GPUs of the given type.
+	// CompositeSignal.Result carries one VariantCapacity with a real decision
+	// path (not C4-no-signal) so the request passes computeCurrentGPUUsage's
+	// usable-signal gate (allocation.CompositeHasSignal) exactly as a real
+	// per-cycle composite would — an empty *domain.AnalyzerResult{} has no
+	// capacity signal at all and is correctly excluded from the quota charge.
 	managedRequest := func(namespace, accelerator string, replicas int) allocation.ModelScalingRequest {
 		return allocation.ModelScalingRequest{
 			Namespace: namespace,
 			CompositeSignal: allocation.NamedAnalyzerResult{
-				Name: domain.SaturationAnalyzerName, Result: &domain.AnalyzerResult{},
+				Name: domain.SaturationAnalyzerName,
+				Result: &domain.AnalyzerResult{
+					VariantCapacities: []domain.VariantCapacity{
+						{VariantName: "v", PerReplicaCapacity: 100, Reason: string(allocation.DecisionSingle)},
+					},
+				},
 			},
 			Variants: []domain.VariantMetadata{
 				{VariantName: "v", AcceleratorName: accelerator},
@@ -123,6 +133,79 @@ var _ = Describe("gpuUsageViews", func() {
 		physical := allocation.NewDefaultLimiter("gpu", allocation.NewTypeInventory("gpu", nil))
 		byType, _ = views.For(physical)
 		Expect(byType).To(HaveKeyWithValue("A100", 6), "a physical inventory sees every GPU held")
+	})
+})
+
+// computeCurrentGPUUsage/computeCurrentGPUUsageByNamespace gate on
+// allocation.CompositeHasSignal directly (spec §5.1.3/A11') so the quota
+// guard tests "is there a usable signal", never "is this specifically
+// saturation" — the check the old, pre-rename implementation used, which the
+// composite's rename (spec §8) breaks. hasSaturationResult, the thin
+// sat-named wrapper this test block used to exercise, has been deleted (its
+// name violated the mission's "sat invisible downstream" rule even though
+// its body already only called allocation.CompositeHasSignal); these cases
+// now exercise the gate through its real callers directly.
+var _ = Describe("quota usage gate (allocation.CompositeHasSignal, post-rename)", func() {
+	requestWithComposite := func(composite allocation.NamedAnalyzerResult, replicas int) allocation.ModelScalingRequest {
+		return allocation.ModelScalingRequest{
+			Namespace:       "team-a",
+			CompositeSignal: composite,
+			Variants:        []domain.VariantMetadata{{VariantName: "v", AcceleratorName: "A100"}},
+			VariantStates:   []domain.VariantReplicaState{{VariantName: "v", CurrentReplicas: replicas, GPUsPerReplica: 1}},
+		}
+	}
+
+	informativeComposite := func(name string) allocation.NamedAnalyzerResult {
+		return allocation.NamedAnalyzerResult{
+			Name: name,
+			Result: &domain.AnalyzerResult{
+				VariantCapacities: []domain.VariantCapacity{
+					{VariantName: "v", PerReplicaCapacity: 100, Reason: string(allocation.DecisionSingle)},
+				},
+			},
+		}
+	}
+
+	// test 14: renamed composite -> the guard still fires (charges the
+	// quota) — the guard-not-silently-disabled test. Before the rename this
+	// request would have been charged because Name == "saturation"; after
+	// the rename Name == "CompositeSignal", and the OLD name-checking
+	// hasSaturationResult would have wrongly excluded it, silently
+	// disabling the quota guard it protects.
+	It("still charges usage for a request whose composite is named CompositeSignal, not saturation (test 14)", func() {
+		req := requestWithComposite(informativeComposite("CompositeSignal"), 3)
+		usage := computeCurrentGPUUsage([]allocation.ModelScalingRequest{req})
+		Expect(usage).To(HaveKeyWithValue("A100", 3))
+	})
+
+	// test 8d: no signal at all -> no autoscaling, and specifically here, no
+	// quota charge for a request that was not usefully measured this cycle.
+	// The composite's own Reason vocabulary is the decision path (C0-agree,
+	// C1-single, C2-sat-fallback, C4-no-signal — spec §5.1.2), not an
+	// analyzer's no-data/error/P0-store sentinels: a real composite with no
+	// usable signal for an SO records allocation.DecisionNoSignal there.
+	It("does not charge usage for a request whose composite carries no usable signal (test 8d)", func() {
+		noSignal := allocation.NamedAnalyzerResult{
+			Name: "CompositeSignal",
+			Result: &domain.AnalyzerResult{
+				VariantCapacities: []domain.VariantCapacity{{VariantName: "v", Reason: string(allocation.DecisionNoSignal)}},
+			},
+		}
+		req := requestWithComposite(noSignal, 3)
+		usage := computeCurrentGPUUsage([]allocation.ModelScalingRequest{req})
+		Expect(usage).ToNot(HaveKey("A100"))
+	})
+
+	It("does not charge usage for a request with a nil composite Result (absent — not measured this cycle)", func() {
+		req := requestWithComposite(allocation.NamedAnalyzerResult{Name: "CompositeSignal", Result: nil}, 3)
+		usage := computeCurrentGPUUsage([]allocation.ModelScalingRequest{req})
+		Expect(usage).ToNot(HaveKey("A100"))
+	})
+
+	It("applies the same guard in the per-namespace view", func() {
+		req := requestWithComposite(informativeComposite("CompositeSignal"), 2)
+		usage := computeCurrentGPUUsageByNamespace([]allocation.ModelScalingRequest{req})
+		Expect(usage["team-a"]).To(HaveKeyWithValue("A100", 2))
 	})
 })
 

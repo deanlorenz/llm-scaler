@@ -263,16 +263,13 @@ func initRoleState(e *NamedAnalyzerResult) (roles []string, pickerState RolePair
 type RolePairedState map[string]float64
 
 // roleBottleneckReplicas returns ceil(state[role] / PRC[v]) for the single
-// entry. Returns 0 if the entry has no result or PRC ≤ 0.
+// entry, via the shared replicasForDemand (spec §5.5/D3's one rounding
+// definition). Returns 0 if the entry has no result or PRC ≤ 0.
 func roleBottleneckReplicas(e NamedAnalyzerResult, state RolePairedState, role, v string) int {
 	if e.Result == nil {
 		return 0
 	}
-	prc := prcForVariant(e.Result, v)
-	if prc <= 0 {
-		return 0
-	}
-	return int(math.Ceil(state[role] / prc))
+	return replicasForDemand(state[role], prcForVariant(e.Result, v))
 }
 
 // roleAggRemaining returns the remaining demand for role from the picker state.
@@ -345,11 +342,7 @@ func safeRemovalReplicasForRole(e NamedAnalyzerResult, v, role string) int {
 	if rel, ok := e.RoleReleasable[role]; ok && rel > budget {
 		budget = rel
 	}
-	n := int(math.Floor(budget / prc))
-	if n < 0 {
-		return 0
-	}
-	return n
+	return safeReplicasForSpare(budget, prc)
 }
 
 // applyDeallocationForRole charges n replicas of variant v against this role's

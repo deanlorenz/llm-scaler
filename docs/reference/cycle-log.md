@@ -29,7 +29,7 @@ post-step. The values are what the optimizer receives.
 
 ```text
 2026-10-14T09:12:03.512Z  INFO  analyzer-result  {"modelID": "my-model", "namespace": "default",
-  "analyzer": "saturation", "supply": 2362173, "demand": 2240000, "util": 0.95, "rc": 273121,
+  "analyzer": "saturation", "live": true, "supply": 2362173, "demand": 2240000, "util": 0.95, "rc": 273121,
   "sc": 0, "scaleUpThreshold": 0.85, "scaleDownBoundary": 0.7,
   "variants": [{"name":"primary","prc":1152000,"role":"both","reason":"P3-k2","observed":1},
                {"name":"v2","prc":403391,"role":"both","reason":"P1-obs","observed":3}]}
@@ -43,6 +43,7 @@ capacity the optimizer branches on.
 | `modelID` | the scaling manager model ID (unique within a namespace) |
 | `namespace` | Kubernetes namespace |
 | `analyzer` | Analyzer name, e.g. `"saturation"`, `"throughput"` |
+| `live` | Whether this analyzer currently contributes to the composite aggregation and the scale-down veto. `false` does not mean the other fields on this line are missing or stale-looking — they are this analyzer's real numbers; `live` alone says whether they currently count |
 | `supply` | Total token supply across ready replicas (readyCount × perReplicaCapacity) |
 | `demand` | Total token demand. For saturation V2 it is the sum of three terms: resident KV tokens; a role-aware projection of requests waiting in each replica's engine queue; and a model-level, prefix-cache-discounted projection of requests still queued in llm-d flow control (`SchedulerQueue`, not attributed to any variant). See [scaling-policy-config.md](scaling-policy.md) |
 | `util` | `demand / supply`; > 1.0 means the model is over capacity |
@@ -60,6 +61,36 @@ capacity the optimizer branches on.
 An analyzer that computes no per-variant capacity writes an empty `variants`
 array. With several analyzers enabled there are several `analyzer-result` lines,
 each with the same `modelID`/`namespace` and its own `analyzer`.
+
+#### The composite row
+
+One additional `analyzer-result` line appears every cycle with
+`"analyzer": "CompositeSignal"` — the single reduced signal the optimizer
+actually consumes, never saturation's raw result even when saturation is the
+only analyzer enabled. It is emitted through the exact same log line as any
+analyzer, not a separate line shape, so every field above means the same
+thing here.
+
+```text
+2026-10-14T09:12:03.512Z  INFO  analyzer-result  {"modelID": "my-model", "namespace": "default",
+  "analyzer": "CompositeSignal", "live": true, "supply": 658534, "demand": 1041047, "util": 1.58,
+  "rc": 0, "sc": 50000, "scaleUpThreshold": 1.1, "scaleDownBoundary": 0.7,
+  "variants": [{"name":"primary","prc":960000,"role":"both","reason":"C0-agree"},
+               {"name":"v2","prc":403391,"role":"both","reason":"C2-sat-fallback"}]}
+```
+
+`demand` is in **saturation's units** (`D_sat`) always — the composite holds
+demand fixed at saturation's own value and lets the aggregated replica count
+determine `prc` per variant, so the numbers here are directly comparable to
+saturation's own `analyzer-result` line above. `prc` may differ from
+saturation's for a variant another analyzer disagreed with (`primary` above:
+960000 vs. saturation's 1152000, because another analyzer asked for more
+replicas than saturation alone would have).
+
+`variants[].reason` on the composite row is **not** an analyzer's capacity
+provenance (`P0-store`, `T1-ols`, ...) — it is the composite's own decision
+path (see the table below), naming how that variant's aggregated replica
+count was reached, not how any one analyzer measured its own capacity.
 
 ### `scaling-decision`
 
@@ -171,6 +202,21 @@ The throughput analyzer uses:
 
 Other analyzers may set their own values or leave `reason` empty.
 
+The **composite row's** `reason` values are a different vocabulary — the
+decision path that produced that variant's aggregated replica count, not any
+analyzer's own capacity provenance:
+
+| Reason | Meaning |
+|---|---|
+| `C0-agree` | more than one analyzer produced a usable signal for this variant; the aggregate is the max across them |
+| `C1-single` | exactly one analyzer produced a usable signal for this variant |
+| `C2-sat-fallback` | no other analyzer had a usable signal for this variant, so saturation's own signal was used — saturation is a fallback here, not a floor: with another contributor present the aggregate can land below saturation's own value |
+| `C4-no-signal` | no analyzer — saturation included — had a usable signal for this variant; the composite carries no capacity opinion for it, and downstream consumers must treat that exactly like an absent result: no decision, no quota charge |
+
+`C4-no-signal` on every variant is what disables the engine-side GPU-quota
+guard for a model: it means the model was not usefully measured this cycle,
+so its replica counts are not evidence of anything.
+
 ---
 
 ## Grep patterns
@@ -187,6 +233,9 @@ $LOGS | grep analyzer-result | grep '"analyzer": "saturation"'
 # Scale-up decisions only
 $LOGS | grep scaling-decision | grep '"action":"scale-up"'
 
+# The composite signal only (what the optimizer actually consumed)
+$LOGS | grep analyzer-result | grep '"analyzer": "CompositeSignal"'
+
 # Full cycle for one model (both lines)
 $LOGS | grep -E 'analyzer-result|scaling-decision' | grep '"modelID": "my-model"'
 ```
@@ -202,7 +251,10 @@ In one reconcile cycle, for one model:
 
 1. One `analyzer-result` line per enabled analyzer (saturation first, then the
    others in registration order).
-2. One `scaling-decision` line, after the optimizer has processed every model in
+2. One more `analyzer-result` line for the composite
+   (`"analyzer": "CompositeSignal"`). It is built from all of them, so it is
+   always last.
+3. One `scaling-decision` line, after the optimizer has processed every model in
    the cycle.
 
 The two are not adjacent in the log: other models' lines can fall between them.

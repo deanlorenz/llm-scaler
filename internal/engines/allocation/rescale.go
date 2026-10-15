@@ -700,23 +700,15 @@ func modelDemandGPUs(satNamed NamedAnalyzerResult, records []variantRecord, stat
 
 // roleDemandGPUs converts a role's token demand to a GPU count via the role's most
 // cost-efficient variant's per-replica capacity. The synthetic "both" role uses the
-// model-level TotalDemand; a P/D role uses its RoleCapacities demand.
+// model-level TotalDemand; a P/D role uses its RoleCapacities demand (via
+// demandForRoleOrModel — spec §5.5/D3's shared role-vs-model demand fallback).
 func roleDemandGPUs(satNamed NamedAnalyzerResult, records []variantRecord, stateMap map[string]domain.VariantReplicaState, accType, role string) int {
-	demand := satNamed.Result.TotalDemand
-	if role != domain.RoleBoth {
-		if rc, ok := satNamed.RoleCapacities[role]; ok {
-			demand = rc.TotalDemand
-		}
-	}
+	demand := demandForRoleOrModel(satNamed, role)
 	best, bestGPUs, ok := bestVariantForRole(records, stateMap, accType, role)
 	if !ok {
 		return 0
 	}
-	replicas := int(math.Ceil(demand / best.PerReplicaCapacity))
-	if replicas < 0 {
-		replicas = 0
-	}
-	return replicas * bestGPUs
+	return replicasForDemand(demand, best.PerReplicaCapacity) * bestGPUs
 }
 
 // bestVariantForRole returns a role's most cost-efficient variant on accType
