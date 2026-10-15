@@ -15,7 +15,7 @@ var _ = Describe("CompositeHasSignal", func() {
 
 	It("is true for a composite with at least one SO reaching a real decision path, regardless of its Name", func() {
 		composite := NamedAnalyzerResult{
-			Name: "CompositeSignal", // not "saturation" -- the whole point of the rename (spec §8)
+			Name: "CompositeSignal", // not "saturation": the composite carries its own name
 			Result: &domain.AnalyzerResult{
 				VariantCapacities: []domain.VariantCapacity{
 					{VariantName: "v", PerReplicaCapacity: 100, Reason: string(DecisionSingle)},
@@ -25,12 +25,10 @@ var _ = Describe("CompositeHasSignal", func() {
 		Expect(CompositeHasSignal(composite)).To(BeTrue())
 	})
 
-	// test 14: renamed composite -> the quota guard still fires. This is the
-	// direct behavioral assertion that A11's fix-by-intent survives the
-	// rename: the OLD hasSaturationResult (Name == domain.SaturationAnalyzerName
-	// && Result != nil) would go permanently false here since Name is no
-	// longer "saturation" -- CompositeHasSignal must not care.
-	It("is true for a renamed composite carrying a usable signal (test 14 — guard not silently disabled)", func() {
+	// A composite not named "saturation" still passes the quota guard. A
+	// name check (Name == domain.SaturationAnalyzerName && Result != nil)
+	// would be permanently false here -- CompositeHasSignal must not care.
+	It("is true for a renamed composite carrying a usable signal (guard not silently disabled)", func() {
 		composite := NamedAnalyzerResult{
 			Name: "CompositeSignal",
 			Result: &domain.AnalyzerResult{
@@ -43,9 +41,9 @@ var _ = Describe("CompositeHasSignal", func() {
 			"the test is only meaningful if the composite's name really is not saturation's")
 	})
 
-	// test 8d: no signal at all -> no autoscaling. Every SO's decision path
-	// bottomed out at C4-no-signal.
-	It("is false when every VariantCapacity's decision path is C4-no-signal (test 8d — no signal at all)", func() {
+	// No signal at all -> no autoscaling. Every SO's decision path bottomed
+	// out at C4-no-signal.
+	It("is false when every VariantCapacity's decision path is C4-no-signal (no signal at all)", func() {
 		composite := NamedAnalyzerResult{
 			Name: "CompositeSignal",
 			Result: &domain.AnalyzerResult{
@@ -79,8 +77,7 @@ var _ = Describe("CompositeHasSignal", func() {
 		Expect(CompositeHasSignal(composite)).To(BeTrue())
 	})
 
-	// The regression this fix exists to catch: an analyzer-style no-data
-	// sentinel string is NOT the same thing as the composite's own
+	// An analyzer-style no-data sentinel string is NOT the same thing as the composite's own
 	// DecisionNoSignal marker, and the two must never be conflated -- a
 	// composite Reason of anything other than literally "C4-no-signal" (even
 	// an analyzer sentinel string used by mistake) must count as usable,

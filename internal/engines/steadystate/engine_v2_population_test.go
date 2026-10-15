@@ -106,14 +106,10 @@ var _ = Describe("Engine config-population helpers", func() {
 		})
 	})
 
-	// spec test 16: these 3 Its were Skip()-ed pending the composite-analyzer
-	// mission ("WIP single-analyzer refactor... rewrite once the
-	// multi-analyzer story is redesigned"). Unskipped with zero test-body
-	// changes: they exercise runAnalyzersAndScore directly (Score
-	// population/defaulting, per-analyzer threshold override), a layer
-	// beneath composite construction that this mission does not change
-	// (composite construction happens after these values are already set,
-	// and runAnalyzersAndScore's return type is unchanged).
+	// These exercise runAnalyzersAndScore directly (Score
+	// population/defaulting, per-analyzer threshold override), the layer
+	// beneath composite construction: the composite is built after these
+	// values are set.
 	Describe("runAnalyzersAndScore config-bridge", func() {
 
 		// minEngine builds a minimal Engine suitable for calling runAnalyzersAndScore.
@@ -150,7 +146,7 @@ var _ = Describe("Engine config-population helpers", func() {
 				},
 			}
 
-			results, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
+			results, err := e.runAnalyzersAndScore(context.Background(), "m", cfg)
 			Expect(err).NotTo(HaveOccurred())
 
 			byName := namedByName(results)
@@ -173,7 +169,7 @@ var _ = Describe("Engine config-population helpers", func() {
 				},
 			}
 
-			results, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
+			results, err := e.runAnalyzersAndScore(context.Background(), "m", cfg)
 			Expect(err).NotTo(HaveOccurred())
 
 			byName := namedByName(results)
@@ -197,7 +193,7 @@ var _ = Describe("Engine config-population helpers", func() {
 					{Name: "spy"},
 				},
 			}
-			resultsGlobal, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfgGlobal, nil, nil, nil, nil, nil, 0)
+			resultsGlobal, err := e.runAnalyzersAndScore(context.Background(), "m", cfgGlobal)
 			Expect(err).NotTo(HaveOccurred())
 
 			// Per-analyzer ScaleUpThreshold=1.10 → RC = 100/1.10 ≈ 90.9
@@ -209,7 +205,7 @@ var _ = Describe("Engine config-population helpers", func() {
 					{Name: "spy", ScaleUpThreshold: &overrideThreshold},
 				},
 			}
-			resultsOverride, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, cfgOverride, nil, nil, nil, nil, nil, 0)
+			resultsOverride, err := e.runAnalyzersAndScore(context.Background(), "m", cfgOverride)
 			Expect(err).NotTo(HaveOccurred())
 
 			rcGlobal := namedByName(resultsGlobal)["spy"].Remaining

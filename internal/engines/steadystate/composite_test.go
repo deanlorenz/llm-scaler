@@ -29,23 +29,18 @@ func satOnlyEngine(satResult *domain.AnalyzerResult) *Engine {
 
 var scaleCfg = config.ScalingPolicy{ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70}
 
-// Test 1: the non-negotiable regression guard. Sat-only ⇒ the composite must
-// be numerically identical to what namedResults[0] (saturation's own entry)
-// would have been -- the PR #34 behavior this mission changes the compose
-// site of, but must not change the VALUE of, on this path.
+// Regression guard: with saturation alone, the composite must be numerically
+// identical to saturation's own entry (namedResults[0]).
 //
 // This whole Describe block runs on the DecisionSatFallback path, not
 // DecisionSingle: scaleCfg (below) has an empty Analyzers slice, so
-// config.AnalyzerEnabled(domain.SaturationAnalyzerName) is false ("absent →
-// opt-in: does not participate", saturation_scaling.go:657-667) — satOnlyEngine
-// never puts saturation in eligibleAnalyzers, so every SO here falls back to
-// sat alone (composite-signal-redesign.md §2.1(c)) rather than reaching it
-// through the ordinary contributor loop. Confirmed by reading the actual
-// decision path composite.Result.VariantCapacities[0].Reason carries in this
-// block's fixtures: "C2-sat-fallback". This is one of the redesign's two
-// non-negotiable regression-guard cases (spec §2.9) — the other,
-// DecisionSingle, is covered separately below.
-var _ = Describe("buildComposite — sat-only regression, DecisionSatFallback path (test 1)", func() {
+// config.AnalyzerEnabled(domain.SaturationAnalyzerName) is false (an absent
+// analyzer does not participate) — satOnlyEngine never puts saturation in
+// eligibleAnalyzers, so every SO here falls back to sat alone rather than
+// reaching it through the ordinary contributor loop. The fixtures' decision
+// path (composite.Result.VariantCapacities[0].Reason) is "C2-sat-fallback".
+// The DecisionSingle case is covered separately below.
+var _ = Describe("buildComposite — sat-only regression, DecisionSatFallback path", func() {
 
 	It("is numerically identical to saturation's own entry when saturation is the only analyzer (DecisionSatFallback: sat disabled via config, sole contributor by fallback)", func() {
 		satResult := &domain.AnalyzerResult{
@@ -59,16 +54,13 @@ var _ = Describe("buildComposite — sat-only regression, DecisionSatFallback pa
 		}
 		e := satOnlyEngine(satResult)
 
-		// The pre-composite baseline: what runAnalyzersAndScore's own
-		// namedResults[0] looks like, built the same way
-		// collectV2ModelRequest used to hand it straight to the optimizer.
-		namedResults, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, scaleCfg,
-			nil, nil, nil, nil, nil, 0)
+		// The baseline: saturation's own entry, namedResults[0] from
+		// runAnalyzersAndScore.
+		namedResults, err := e.runAnalyzersAndScore(context.Background(), "m", scaleCfg)
 		Expect(err).NotTo(HaveOccurred())
 		baseline := namedResults[0]
 
-		req, err := e.collectV2ModelRequest(context.Background(), "m", "ns", nil, scaleCfg,
-			nil, nil, nil, nil, nil, 0)
+		req, err := e.collectV2ModelRequest(context.Background(), "m", "ns", nil, scaleCfg, nil, nil, nil, nil, nil, 0)
 		Expect(err).NotTo(HaveOccurred())
 		composite := req.CompositeSignal
 
@@ -78,7 +70,7 @@ var _ = Describe("buildComposite — sat-only regression, DecisionSatFallback pa
 		Expect(composite.Result.VariantCapacities).To(HaveLen(len(baseline.Result.VariantCapacities)))
 		Expect(composite.Result.VariantCapacities[0].PerReplicaCapacity).
 			To(Equal(baseline.Result.VariantCapacities[0].PerReplicaCapacity),
-				"PRC_com must equal PRC_sat exactly on the sat-only path (spec §4.4 identity), DecisionSatFallback case")
+				"PRC_com must equal PRC_sat exactly on the sat-only path, DecisionSatFallback case")
 		Expect(composite.TotalSupply).To(Equal(baseline.TotalSupply))
 		Expect(composite.TotalAnticipatedSupply).To(Equal(baseline.TotalAnticipatedSupply))
 		Expect(composite.Utilization).To(Equal(baseline.Utilization))
@@ -89,7 +81,7 @@ var _ = Describe("buildComposite — sat-only regression, DecisionSatFallback pa
 		Expect(composite.Live).To(Equal(baseline.Live))
 	})
 
-	It("holds even for a zero-demand SO with a real, measured PRC (PRC_com undefined at N_com=0, but supply must not vanish) (test 17)", func() {
+	It("holds even for a zero-demand SO with a real, measured PRC (PRC_com undefined at N_com=0, but supply must not vanish)", func() {
 		satResult := &domain.AnalyzerResult{
 			AnalyzerName: domain.SaturationAnalyzerName,
 			ModelID:      "m",
@@ -101,24 +93,21 @@ var _ = Describe("buildComposite — sat-only regression, DecisionSatFallback pa
 		}
 		e := satOnlyEngine(satResult)
 
-		namedResults, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, scaleCfg,
-			nil, nil, nil, nil, nil, 0)
+		namedResults, err := e.runAnalyzersAndScore(context.Background(), "m", scaleCfg)
 		Expect(err).NotTo(HaveOccurred())
 		baseline := namedResults[0]
 
-		req, err := e.collectV2ModelRequest(context.Background(), "m", "ns", nil, scaleCfg,
-			nil, nil, nil, nil, nil, 0)
+		req, err := e.collectV2ModelRequest(context.Background(), "m", "ns", nil, scaleCfg, nil, nil, nil, nil, nil, 0)
 		Expect(err).NotTo(HaveOccurred())
 		composite := req.CompositeSignal
 
-		// spec test 17: demand==0 flows through to the composite as a literal
-		// 0, never manufactured into a placeholder (the exact bug the
-		// deferred normalization branch's 77f21355 had to fix).
+		// demand==0 flows through to the composite as a literal 0, never
+		// manufactured into a placeholder.
 		Expect(composite.Result.TotalDemand).To(BeZero(),
 			"zero demand must flow through to the composite as a literal 0, never manufactured")
 
 		// The critical assertion: PRC must NOT be zeroed just because demand
-		// is zero (PRC and demand are independent, spec §2.4) -- the
+		// is zero (PRC and demand are independent) -- the
 		// composite must fall through to the SO's own measured PRC when
 		// PRC_com is undefined, preserving real supply exactly.
 		Expect(composite.Result.VariantCapacities[0].PerReplicaCapacity).
@@ -127,7 +116,7 @@ var _ = Describe("buildComposite — sat-only regression, DecisionSatFallback pa
 		Expect(composite.SpareCapacity).To(Equal(baseline.SpareCapacity))
 	})
 
-	It("has the composite's own name, not saturation's (spec §8)", func() {
+	It("has the composite's own name, not saturation's", func() {
 		satResult := &domain.AnalyzerResult{
 			TotalDemand:       100,
 			VariantCapacities: []domain.VariantCapacity{{VariantName: "v1", ReplicaCount: 1, PerReplicaCapacity: 100, Reason: "P1-obs"}},
@@ -140,8 +129,8 @@ var _ = Describe("buildComposite — sat-only regression, DecisionSatFallback pa
 	})
 })
 
-// The redesign's other non-negotiable regression-guard case (spec §2.9): the
-// same sat-sole-contributor PRC identity as test 1 above, but reached through
+// Regression guard: the same sat-sole-contributor PRC identity as the
+// DecisionSatFallback block above, but reached through
 // the ordinary contributor loop (DecisionSingle) rather than the fallback
 // branch. This requires sat to be explicitly enabled via config — unlike
 // scaleCfg above, satEnabledCfg lists domain.SaturationAnalyzerName in
@@ -167,16 +156,13 @@ var _ = Describe("buildComposite — sat-only regression, DecisionSingle path", 
 		}
 		e := satOnlyEngine(satResult)
 
-		// The pre-composite baseline: what runAnalyzersAndScore's own
-		// namedResults[0] looks like, built the same way collectV2ModelRequest
-		// used to hand it straight to the optimizer.
-		namedResults, err := e.runAnalyzersAndScore(context.Background(), "m", "ns", nil, satEnabledCfg,
-			nil, nil, nil, nil, nil, 0)
+		// The baseline: saturation's own entry, namedResults[0] from
+		// runAnalyzersAndScore.
+		namedResults, err := e.runAnalyzersAndScore(context.Background(), "m", satEnabledCfg)
 		Expect(err).NotTo(HaveOccurred())
 		baseline := namedResults[0]
 
-		req, err := e.collectV2ModelRequest(context.Background(), "m", "ns", nil, satEnabledCfg,
-			nil, nil, nil, nil, nil, 0)
+		req, err := e.collectV2ModelRequest(context.Background(), "m", "ns", nil, satEnabledCfg, nil, nil, nil, nil, nil, 0)
 		Expect(err).NotTo(HaveOccurred())
 		composite := req.CompositeSignal
 
@@ -186,7 +172,7 @@ var _ = Describe("buildComposite — sat-only regression, DecisionSingle path", 
 		Expect(composite.Result.VariantCapacities).To(HaveLen(len(baseline.Result.VariantCapacities)))
 		Expect(composite.Result.VariantCapacities[0].PerReplicaCapacity).
 			To(Equal(baseline.Result.VariantCapacities[0].PerReplicaCapacity),
-				"PRC_com must equal PRC_sat exactly on the sat-only path (spec §4.4 identity), DecisionSingle case")
+				"PRC_com must equal PRC_sat exactly on the sat-only path, DecisionSingle case")
 		Expect(composite.TotalSupply).To(Equal(baseline.TotalSupply))
 		Expect(composite.TotalAnticipatedSupply).To(Equal(baseline.TotalAnticipatedSupply))
 		Expect(composite.Utilization).To(Equal(baseline.Utilization))
@@ -198,17 +184,14 @@ var _ = Describe("buildComposite — sat-only regression, DecisionSingle path", 
 	})
 })
 
-// Test 8d, end-to-end through the real compose path (not a hand-built
-// fixture): a composite whose only SO has no usable signal must correctly
-// report CompositeHasSignal == false (and SOHasSignal == false for that SO),
-// so the quota guard fires. This regression-tests a real bug found while
-// building buildComposite: an analyzer's own no-data/error sentinel strings
-// are NOT the same values as the composite's decision-path markers
-// (DecisionNoSignal == "C4-no-signal"), so a naive reuse of the
-// analyzer-level informativeness check against the composite's own Reason
-// values would have always reported "usable" -- silently defeating this
-// exact gate.
-var _ = Describe("buildComposite — no-signal end to end (test 8d)", func() {
+// End-to-end through the real compose path (not a hand-built fixture): a
+// composite whose only SO has no usable signal must report
+// CompositeHasSignal == false, so the quota guard fires. An analyzer's own
+// no-data/error sentinel strings are NOT the composite's decision-path
+// markers (DecisionNoSignal == "C4-no-signal"), so reusing the
+// analyzer-level informativeness check on the composite's Reason would
+// always report "usable" -- silently defeating this gate.
+var _ = Describe("buildComposite — no-signal end to end", func() {
 	It("reports CompositeHasSignal == false when saturation itself has no-data for the only SO", func() {
 		satResult := &domain.AnalyzerResult{
 			VariantCapacities: []domain.VariantCapacity{
@@ -224,9 +207,9 @@ var _ = Describe("buildComposite — no-signal end to end (test 8d)", func() {
 	})
 })
 
-// Test 24: deep-copy isolation. Mutating the composite must never reach back
-// into saturation's own result.
-var _ = Describe("buildComposite — deep-copy isolation (test 24)", func() {
+// Deep-copy isolation. Mutating the composite must never reach back into
+// saturation's own result.
+var _ = Describe("buildComposite — deep-copy isolation", func() {
 	It("does not mutate the source saturation entry when the composite's VariantCapacities are edited", func() {
 		satResult := &domain.AnalyzerResult{
 			TotalDemand: 500,
@@ -283,9 +266,8 @@ var _ = Describe("buildComposite — deep-copy isolation (test 24)", func() {
 	})
 })
 
-// Test 13: Score has no effect on the composite. Non-negotiable regression
-// guard #2.
-var _ = Describe("buildComposite — Score has no effect (test 13)", func() {
+// Regression guard: Score has no effect on the composite's sizing.
+var _ = Describe("buildComposite — Score has no effect", func() {
 	It("produces the identical composite for scores 1,1 and for scores 1,5", func() {
 		makeEngine := func() *Engine {
 			fakeSat := &fakeAnalyzerWithResult{
@@ -342,16 +324,16 @@ var _ = Describe("buildComposite — Score has no effect (test 13)", func() {
 		Expect(c1.RequiredCapacity).To(Equal(c2.RequiredCapacity))
 		Expect(c1.SpareCapacity).To(Equal(c2.SpareCapacity))
 		Expect(c1.TotalSupply).To(Equal(c2.TotalSupply))
-		// The legacy Score field itself DOES differ (A9''': max over
-		// contributors' Scores) -- that is the one place Score is allowed to
-		// show up, and only in a field nothing in the new aggregation reads.
+		// The Score field itself DOES differ (the max over the analyzers'
+		// Scores) -- that is the one place Score is allowed to show up, and
+		// the per-variant aggregation never reads it.
 		Expect(c1.Score).To(Equal(1.0))
 		Expect(c2.Score).To(Equal(5.0))
 	})
 })
 
-// Test 15: end-to-end collectV2ModelRequest -> optimizer with nonzero demand.
-var _ = Describe("buildComposite — end-to-end with a higher-demand contributor (test 15)", func() {
+// End-to-end collectV2ModelRequest -> optimizer with nonzero demand.
+var _ = Describe("buildComposite — end-to-end with a higher-demand contributor", func() {
 	It("raises the composite's replica sizing above saturation's own when another analyzer demands more", func() {
 		fakeSat := &fakeAnalyzerWithResult{
 			analyzerName: domain.SaturationAnalyzerName,
@@ -392,13 +374,12 @@ var _ = Describe("buildComposite — end-to-end with a higher-demand contributor
 	})
 })
 
-// Test 25 (write-back half; the read half lives in
-// aggregation.PRCCom's own tests): the composite writes its result back in
-// the SAME layout it read demand in (spec §2.3/A13) -- a non-disaggregated
+// The composite writes its result back in the SAME layout it read demand in
+// (the read half is aggregation.DemandForRole's tests) -- a non-disaggregated
 // model's composite has RoleDemand == nil with demand in TotalDemand, never
 // a synthetic "both" map key, and a disaggregated model's composite has a
 // real RoleDemand map.
-var _ = Describe("buildComposite — write-back layout parity (test 25)", func() {
+var _ = Describe("buildComposite — write-back layout parity", func() {
 	It("writes RoleDemand == nil with demand in TotalDemand for a non-disaggregated source", func() {
 		satResult := &domain.AnalyzerResult{
 			TotalDemand: 500,

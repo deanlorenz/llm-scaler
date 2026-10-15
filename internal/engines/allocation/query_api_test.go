@@ -79,8 +79,8 @@ var _ = Describe("demandForRoleOrModel", func() {
 	})
 
 	It("never consults RoleCapacities for domain.RoleBoth even if a \"both\" entry exists", func() {
-		// Mirrors roleDemandGPUs's original behavior exactly: the "both" role
-		// always reads the model-level scalar, unconditionally.
+		// As roleDemandGPUs needs: the "both" role always reads the
+		// model-level scalar, unconditionally.
 		nr := NamedAnalyzerResult{
 			Result:         &domain.AnalyzerResult{TotalDemand: 500},
 			RoleCapacities: map[string]domain.RoleCapacity{domain.RoleBoth: {TotalDemand: 999}},
@@ -122,7 +122,7 @@ var _ = Describe("requiredSpareForRoleOrModel", func() {
 	// disaggregated model may still carry a "both" RoleCapacities entry,
 	// e.g. an empty-Role variant mapped in alongside prefill/decode), unlike
 	// demandForRoleOrModel which never consults RoleCapacities for
-	// RoleBoth. Each mirrors its own original call site's exact behavior.
+	// RoleBoth. Each matches what its own call sites need.
 	It("DOES consult RoleCapacities for domain.RoleBoth when a \"both\" entry exists", func() {
 		nr := NamedAnalyzerResult{
 			RequiredCapacity: 9999, SpareCapacity: 8888,
@@ -134,14 +134,12 @@ var _ = Describe("requiredSpareForRoleOrModel", func() {
 	})
 })
 
-// Test 26 (scoped to the two categories actually in this mission — D3
-// excludes ReplicasToCloseGap/GPUsToCloseGap/bounds helpers entirely, so
-// there is no third helper to check these two against): consistency within
-// each category. replicasForDemand is the ONLY rounding definition
+// Consistency within each category of helper: rounding, and the
+// role-vs-model fallback. replicasForDemand is the ONLY rounding definition
 // roleDemandGPUs/roleBottleneckReplicas/safeRemovalReplicasForRole go
 // through, so any two of them fed the same (demand, prc) cannot disagree --
 // there is no second implementation left to drift.
-var _ = Describe("query API consistency (test 26)", func() {
+var _ = Describe("query API consistency", func() {
 	It("replicasForDemand and safeReplicasForSpare agree on direction: ceil >= floor for the same inputs", func() {
 		demand, prc := 1000.0, 300.0
 		Expect(replicasForDemand(demand, prc)).To(BeNumerically(">=", safeReplicasForSpare(demand, prc)))
@@ -159,8 +157,8 @@ var _ = Describe("query API consistency (test 26)", func() {
 	})
 
 	It("demandForRoleOrModel and requiredSpareForRoleOrModel agree on which source wins for the same role", func() {
-		// Both helpers implement the same role-vs-model fallback shape
-		// (spec §5.5/D3, category 2): when a role has an explicit
+		// Both helpers implement the same role-vs-model fallback shape:
+		// when a role has an explicit
 		// RoleCapacities entry, both read from it rather than the
 		// model-level scalars, for the same role, on the same NamedAnalyzerResult.
 		nr := NamedAnalyzerResult{
@@ -177,11 +175,11 @@ var _ = Describe("query API consistency (test 26)", func() {
 	})
 })
 
-// Test 27: repeatable. Every query-API helper here is a pure function over
-// its arguments -- no mutable state, no hidden clock -- so calling it twice
-// on the same inputs must give the same answer, unlike the optimizer's
-// mutable Remaining/RoleSpare fields (spec §5.5/A20').
-var _ = Describe("query API repeatability (test 27)", func() {
+// Every query-API helper here is a pure function over its arguments -- no
+// mutable state, no hidden clock -- so calling it twice on the same inputs
+// must give the same answer, unlike the optimizer's mutable
+// Remaining/RoleSpare fields.
+var _ = Describe("query API repeatability", func() {
 	It("replicasForDemand gives the same answer on repeated calls with the same inputs", func() {
 		first := replicasForDemand(1000, 333)
 		second := replicasForDemand(1000, 333)

@@ -7,16 +7,15 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/aggregation"
 )
 
-// DecisionPath categorizes how one SO's CompositeTotalReplicas was reached
-// (spec §5.1.2, A19'): free text naming how one SO's N_com was reached,
-// mirroring domain.VariantCapacity.Reason's style for analyzers. Logged per
-// SO through the same function analyzers use (spec §6), so a decision is
-// traceable end to end.
+// DecisionPath names how one SO's composite replica need was reached, in
+// the same free-text style as domain.VariantCapacity.Reason for analyzers.
+// It is logged per SO through the same function analyzers use, so a
+// decision is traceable end to end.
 //
-// There is deliberately no C3-default-prc: per spec §5.1.4/D2, saturation's
-// existing P0-store ladder is the only source of estimated PRCs for an idle
-// or never-seen-before SO, and it flows through as an ordinary contribution
-// (A27/A28) rather than as a separate composite-level default mechanism.
+// There is deliberately no C3 path for a default PRC: saturation's P0-store
+// ladder is the only source of estimated PRCs for an idle or never-seen SO,
+// and its estimate contributes like any other rather than through a
+// separate composite-level default.
 type DecisionPath string
 
 const (
@@ -27,13 +26,13 @@ const (
 	DecisionSingle DecisionPath = "C1-single"
 	// DecisionSatFallback means no non-saturation analyzer contributed a
 	// defined N(SO) for this SO, and saturation itself was eligible, so its
-	// N(SO) was used as the fallback (spec §5.1: saturation is a fallback,
-	// not a floor — it participates here only because nothing else did).
+	// N(SO) was used as the fallback. Saturation is a fallback, not a floor:
+	// it participates here only because nothing else did.
 	DecisionSatFallback DecisionPath = "C2-sat-fallback"
 	// DecisionNoSignal means no analyzer at all — including saturation —
 	// produced a defined N(SO) for this SO. There is no usable signal, and
-	// per spec §5.1.3 this must not be treated as a scale-to-zero decision;
-	// it is "no evidence", handled by the gate in composite_signal_gate.go.
+	// this must not be treated as a scale-to-zero decision; it is "no
+	// evidence", handled by the gate in composite_signal_gate.go.
 	DecisionNoSignal DecisionPath = "C4-no-signal"
 )
 

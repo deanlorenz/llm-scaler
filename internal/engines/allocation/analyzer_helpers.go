@@ -263,8 +263,8 @@ func initRoleState(e *NamedAnalyzerResult) (roles []string, pickerState RolePair
 type RolePairedState map[string]float64
 
 // roleBottleneckReplicas returns ceil(state[role] / PRC[v]) for the single
-// entry, via the shared replicasForDemand (spec §5.5/D3's one rounding
-// definition). Returns 0 if the entry has no result or PRC ≤ 0.
+// entry, via replicasForDemand, the one shared rounding rule. Returns 0 if
+// the entry has no result or PRC ≤ 0.
 func roleBottleneckReplicas(e NamedAnalyzerResult, state RolePairedState, role, v string) int {
 	if e.Result == nil {
 		return 0

@@ -305,8 +305,7 @@ func buildDecisionsWithOptimizer(
 		if role == "" {
 			role = domain.RoleBoth
 		}
-		// Role-vs-model fallback via the shared requiredSpareForRoleOrModel
-		// (spec §5.5/D3's one role-vs-model definition for RC/SC).
+		// The role's capacities when it has them, else the model-level ones.
 		decision.RequiredCapacity, decision.SpareCapacity = requiredSpareForRoleOrModel(satNamed, role)
 		// The demand that PRICED the target, so a later stage re-pricing a
 		// different replica count uses the same figure: model-level (or per-role

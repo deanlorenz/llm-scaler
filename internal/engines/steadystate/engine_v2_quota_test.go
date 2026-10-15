@@ -28,10 +28,8 @@ var _ = Describe("gpuUsageViews", func() {
 
 	// managedRequest is one variant holding replicas GPUs of the given type.
 	// CompositeSignal.Result carries one VariantCapacity with a real decision
-	// path (not C4-no-signal) so the request passes computeCurrentGPUUsage's
-	// usable-signal gate (allocation.CompositeHasSignal) exactly as a real
-	// per-cycle composite would — an empty *domain.AnalyzerResult{} has no
-	// capacity signal at all and is correctly excluded from the quota charge.
+	// path (not C4-no-signal), as a real per-cycle composite would. The usage
+	// views charge any request whose Result is non-nil (measuredThisCycle).
 	managedRequest := func(namespace, accelerator string, replicas int) allocation.ModelScalingRequest {
 		return allocation.ModelScalingRequest{
 			Namespace: namespace,
@@ -136,15 +134,10 @@ var _ = Describe("gpuUsageViews", func() {
 	})
 })
 
-// computeCurrentGPUUsage/computeCurrentGPUUsageByNamespace gate on
-// allocation.CompositeHasSignal directly (spec §5.1.3/A11') so the quota
-// guard tests "is there a usable signal", never "is this specifically
-// saturation" — the check the old, pre-rename implementation used, which the
-// composite's rename (spec §8) breaks. hasSaturationResult, the thin
-// sat-named wrapper this test block used to exercise, has been deleted (its
-// name violated the mission's "sat invisible downstream" rule even though
-// its body already only called allocation.CompositeHasSignal); these cases
-// now exercise the gate through its real callers directly.
+// computeCurrentGPUUsage/computeCurrentGPUUsageByNamespace charge a request
+// when it carries a result this cycle (measuredThisCycle), never by checking
+// whether the result is specifically saturation's: the composite carries its
+// own name. These cases exercise that gate through its real callers.
 var _ = Describe("quota usage gate (measuredThisCycle, post-rename)", func() {
 	requestWithComposite := func(composite allocation.NamedAnalyzerResult, replicas int) allocation.ModelScalingRequest {
 		return allocation.ModelScalingRequest{
@@ -166,25 +159,21 @@ var _ = Describe("quota usage gate (measuredThisCycle, post-rename)", func() {
 		}
 	}
 
-	// test 14: renamed composite -> the guard still fires (charges the
-	// quota) — the guard-not-silently-disabled test. Before the rename this
-	// request would have been charged because Name == "saturation"; after
-	// the rename Name == "CompositeSignal", and the OLD name-checking
-	// hasSaturationResult would have wrongly excluded it, silently
-	// disabling the quota guard it protects.
-	It("still charges usage for a request whose composite is named CompositeSignal, not saturation (test 14)", func() {
+	// A composite named "CompositeSignal" still charges the quota. A check
+	// for Name == "saturation" would wrongly exclude it, silently disabling
+	// the quota guard.
+	It("still charges usage for a request whose composite is named CompositeSignal, not saturation", func() {
 		req := requestWithComposite(informativeComposite("CompositeSignal"), 3)
 		usage := computeCurrentGPUUsage([]allocation.ModelScalingRequest{req})
 		Expect(usage).To(HaveKeyWithValue("A100", 3))
 	})
 
-	// test 8d, revised on the port to main: no signal at all -> no autoscaling
-	// decision, but the replicas still hold their GPUs, so the quota is still
-	// charged for them. Charging them nothing published headroom the warm
-	// pool then grew into (TestASteadyFleetStillPublishesHeadroom, added on
-	// main after this branch forked). The decision gate is
+	// No signal at all -> no autoscaling decision, but the replicas still
+	// hold their GPUs, so the quota is still charged for them. Charging them
+	// nothing publishes headroom the warm pool then grows into
+	// (TestASteadyFleetStillPublishesHeadroom). The decision gate is
 	// allocation.CompositeHasSignal; the accounting gate is a result at all.
-	It("still charges usage for a request whose composite carries no usable signal (test 8d)", func() {
+	It("still charges usage for a request whose composite carries no usable signal", func() {
 		noSignal := allocation.NamedAnalyzerResult{
 			Name: "CompositeSignal",
 			Result: &domain.AnalyzerResult{

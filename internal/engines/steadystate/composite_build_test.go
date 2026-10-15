@@ -17,6 +17,18 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 )
 
+// runAnalyzersAndScore runs every analyzer for model modelID in namespace "ns"
+// and records their series, as one engine cycle does before the composite is
+// built, with no metrics, metadata or scale targets.
+func (e *Engine) runAnalyzersAndScore(ctx context.Context, modelID string, cfg config.ScalingPolicy) ([]allocation.NamedAnalyzerResult, error) {
+	results, err := e.runAnalyzers(ctx, modelID, "ns", nil, cfg, nil, nil, nil, nil, nil, 0)
+	if err != nil {
+		return nil, err
+	}
+	e.recordAnalyzerMetrics("ns", modelID, results)
+	return results, nil
+}
+
 // liveEntry is an eligible analyzer entry for one non-disaggregated variant
 // "v1" with demand and per-replica capacity prc.
 func liveEntry(name string, demand, prc float64) allocation.NamedAnalyzerResult {
@@ -173,12 +185,13 @@ func TestExcludeByName(t *testing.T) {
 		{"first", []allocation.NamedAnalyzerResult{a, b}, "a", []string{"b"}},
 		{"last", []allocation.NamedAnalyzerResult{a, b}, "b", []string{"a"}},
 		{"every copy", []allocation.NamedAnalyzerResult{a, b, a}, "a", []string{"b"}},
-		{"empty", nil, "a", nil},
+		{"empty", nil, "a", []string{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			before := len(tc.in)
-			var names []string
-			for _, nr := range excludeByName(tc.in, tc.drop) {
+			out := excludeByName(tc.in, tc.drop)
+			names := make([]string, 0, len(out))
+			for _, nr := range out {
 				names = append(names, nr.Name)
 			}
 			assert.Equal(t, tc.names, names)

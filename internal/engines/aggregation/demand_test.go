@@ -85,13 +85,12 @@ var _ = Describe("DemandForRole", func() {
 		})
 	})
 
-	// spec test 22 (§2.4's SO-independence structural invariant): demand is
-	// per (model, role) and does not depend on which SOs exist. Adding or
+	// Demand is per (model, role) and does not depend on which SOs exist. Adding or
 	// removing a VariantCapacities entry (an SO) for a role must never
 	// change that role's DemandForRole reading, because the accessor reads
 	// only RoleDemand/TotalDemand -- never VariantCapacities -- by
 	// construction.
-	It("is independent of which SOs (VariantCapacities entries) exist for the role (test 22)", func() {
+	It("is independent of which SOs (VariantCapacities entries) exist for the role", func() {
 		before := &domain.AnalyzerResult{
 			RoleDemand:        map[string]float64{"prefill": 400},
 			VariantCapacities: []domain.VariantCapacity{{VariantName: "p1", Role: "prefill", PerReplicaCapacity: 100}},

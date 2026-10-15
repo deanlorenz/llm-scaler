@@ -120,31 +120,6 @@ func (e *Engine) runV2AnalysisOnly(
 // TODO: make configurable if needed.
 const analyzerLivenessStaleCycles = 3
 
-// runAnalyzersAndScore runs every analyzer (runAnalyzers) and records their
-// wva_analyzer_* series. collectV2ModelRequest does not use it: it records
-// once, with the composite it builds included, so a cycle's two calls cannot
-// evict each other's series.
-func (e *Engine) runAnalyzersAndScore(
-	ctx context.Context,
-	modelID, namespace string,
-	replicaMetrics []domain.ReplicaMetrics,
-	config config.ScalingPolicy,
-	variantStates []domain.VariantReplicaState,
-	variantMetadata []domain.VariantMetadata,
-	scaleTargets map[string]scaletarget.ScaleTargetAccessor,
-	variantAutoscalings map[string]*llmdVariantAutoscalingV1alpha1.VariantAutoscaling,
-	schedulerQueue *domain.SchedulerQueueMetrics,
-	arrivalRate float64,
-) ([]allocation.NamedAnalyzerResult, error) {
-	namedResults, err := e.runAnalyzers(ctx, modelID, namespace, replicaMetrics, config,
-		variantStates, variantMetadata, scaleTargets, variantAutoscalings, schedulerQueue, arrivalRate)
-	if err != nil {
-		return nil, err
-	}
-	e.recordAnalyzerMetrics(namespace, modelID, namedResults)
-	return namedResults, nil
-}
-
 // runAnalyzers runs the V2 saturation analyzer plus every other registered,
 // enabled analyzer, builds a NamedAnalyzerResult for each, runs liveness
 // tracking and logs each, and returns the full slice. It records no metrics:
@@ -1601,8 +1576,8 @@ func logAnalyzerResult(ctx context.Context, modelID, namespace string, nr alloca
 		"namespace", namespace,
 		"analyzer", nr.Name,
 		// live surfaces whether THIS analyzer currently contributes to the
-		// composite aggregation and the scale-down veto (eligible(), spec
-		// composite-analyzer §5.1.1) -- without it, "why didn't the
+		// composite aggregation and the scale-down veto
+		// (allocation.Eligible) -- without it, "why didn't the
 		// composite pick up this analyzer's signal" or "why is this
 		// analyzer's non-live result still showing real numbers here" is
 		// undiagnosable from the log: a stale analyzer's Result/RC/SC are

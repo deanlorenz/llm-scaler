@@ -7,8 +7,8 @@ import (
 )
 
 // replicasForDemand returns ceil(demand/prc) — the single shared definition
-// of "how many replicas does this demand need at this per-replica capacity"
-// (spec §5.5/D3, category 1: rounding). Every partial-replica-rounding site
+// of "how many replicas does this demand need at this per-replica capacity".
+// Every partial-replica-rounding site
 // in the optimizer goes through this one function, so a change to the
 // rounding rule cannot land in one site and drift from another.
 //
@@ -29,8 +29,8 @@ func replicasForDemand(demand, prc float64) int {
 
 // safeReplicasForSpare returns floor(spare/prc) — the single shared
 // definition of "how many replicas can safely be removed for this much
-// spare capacity at this per-replica capacity" (spec §5.5/D3, category 1's
-// other rounding direction: safeRemovalReplicasForRole's floor).
+// spare capacity at this per-replica capacity", the rounding-down
+// counterpart of replicasForDemand (used by safeRemovalReplicasForRole).
 //
 // Returns 0 when prc <= 0 or the result would be negative, mirroring
 // replicasForDemand's guards — rounding DOWN is the conservative direction
@@ -48,8 +48,7 @@ func safeReplicasForSpare(spare, prc float64) int {
 }
 
 // demandForRoleOrModel returns nr's demand for role — the single shared
-// definition of the role-vs-model demand-read fallback (spec §5.5/D3,
-// category 2): domain.RoleBoth (or an empty role) reads the model-level
+// definition of the role-vs-model demand-read fallback: domain.RoleBoth (or an empty role) reads the model-level
 // TotalDemand directly; any other role reads the ENGINE-BUILT
 // RoleCapacities[role].TotalDemand, falling back to the model-level
 // TotalDemand only on a genuine map miss. Returns 0 when nr has no Result.
@@ -80,9 +79,9 @@ func demandForRoleOrModel(nr NamedAnalyzerResult, role string) float64 {
 
 // requiredSpareForRoleOrModel returns nr's RequiredCapacity/SpareCapacity for
 // role, falling back to the model-level scalars exactly as
-// demandForRoleOrModel does for demand (spec §5.5/D3, category 2 — the same
-// role-vs-model fallback shape, applied to the engine-built RC/SC pair
-// rather than analyzer-owned demand). RoleCapacities is engine-built
+// demandForRoleOrModel does for demand (the same role-vs-model fallback
+// shape, applied to the engine-built RC/SC pair rather than analyzer-owned
+// demand). RoleCapacities is engine-built
 // (buildRoleCapacities), so there is no accessor to share with
 // demandForRoleOrModel the way DemandForRole is shared — this is its own
 // small helper, but the SAME fallback shape, so a caller cannot special-case

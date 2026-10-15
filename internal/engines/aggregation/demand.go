@@ -16,7 +16,7 @@ import "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
 //
 // present distinguishes four states a caller must not conflate:
 //   - role absent from a non-nil RoleDemand: not present (analyzer said
-//     nothing about this role — domain.go's A4: silence is not zero).
+//     nothing about this role, and silence is not zero).
 //   - role present with value 0: present, value 0 (an ordinary zero
 //     demand — never treated as absent).
 //   - RoleDemand nil and role canonicalizes to domain.RoleBoth: present, value

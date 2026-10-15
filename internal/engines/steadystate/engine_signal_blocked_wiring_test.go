@@ -10,15 +10,14 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 )
 
-// The optimizeV2 loop publishes ScalingBlockedNoCompositeSignal (spec
-// composite-analyzer §5.1.3/D2) through the same wva_model_scaling_blocked
-// metric the scale-to-zero policy/wake reasons already use, via
-// metrics.SetModelScalingBlockedReasons with the ScalingBlockedReasonsSignal
-// ownership set. These specs pin the metric plumbing directly — the same
-// approach engine_scaling_blocked_wiring_test.go's "leaves the wake reason
-// alone" case uses to test one producer without invoking the others — since
-// driving the full per-model collection loop end to end belongs to the
-// composite's own end-to-end test (spec test 15) once the composite exists.
+// The optimizeV2 loop publishes ScalingBlockedNoCompositeSignal through the
+// same wva_model_scaling_blocked metric the scale-to-zero policy/wake reasons
+// already use, via metrics.SetModelScalingBlockedReasons with the
+// ScalingBlockedReasonsSignal ownership set. These specs pin the metric
+// plumbing directly — the same approach engine_scaling_blocked_wiring_test.go's
+// "leaves the wake reason alone" case uses to test one producer without
+// invoking the others; the full per-model collection loop is covered by the
+// composite's end-to-end tests in composite_test.go.
 var _ = Describe("no-composite-signal blocked-reason plumbing", func() {
 	const (
 		modelID   = "signal-wired-model"

@@ -752,7 +752,7 @@ const (
 	ScalingBlockedNoWakeSignal = "no-wake-signal"
 
 	// ScalingBlockedNoCompositeSignal indicates the model's composite analyzer
-	// result (spec composite-analyzer §5.1.3, decision path C4-no-signal) carries
+	// result (every variant on decision path C4-no-signal) carries
 	// no usable capacity signal this cycle: no analyzer — saturation included —
 	// produced an informative result. The model was not usefully measured, so no
 	// decision was made for it; this is that condition surfaced on the existing

@@ -78,8 +78,8 @@ var _ = Describe("TotalReplicas", func() {
 		Expect(n).To(Equal(3.0))
 	})
 
-	// spec test 21: PRC > 0 with demand(role(SO)) == 0 is explicitly legal.
-	It("is defined and zero when demand is a real zero (test 21)", func() {
+	// PRC > 0 with demand(role(SO)) == 0 is legal.
+	It("is defined and zero when demand is a real zero", func() {
 		result := &domain.AnalyzerResult{
 			TotalDemand:       0,
 			VariantCapacities: []domain.VariantCapacity{{VariantName: "v", PerReplicaCapacity: 200}},
@@ -90,8 +90,8 @@ var _ = Describe("TotalReplicas", func() {
 		Expect(n).To(BeZero())
 	})
 
-	// spec test 18: PRC == 0, demand > 0 -> undefined, no division by zero.
-	It("is undefined when PRC is zero (test 18)", func() {
+	// PRC == 0, demand > 0 -> undefined, no division by zero.
+	It("is undefined when PRC is zero", func() {
 		vc := domain.VariantCapacity{VariantName: "v", PerReplicaCapacity: 0}
 		result := &domain.AnalyzerResult{TotalDemand: 500, VariantCapacities: []domain.VariantCapacity{vc}}
 		_, ok := TotalReplicas(result, vc)
@@ -105,8 +105,8 @@ var _ = Describe("TotalReplicas", func() {
 		Expect(ok).To(BeFalse())
 	})
 
-	// spec test 19: both zero -> no panic, no NaN/Inf, just undefined.
-	It("is undefined, not NaN, when both PRC and demand are zero (test 19)", func() {
+	// Both zero -> no panic, no NaN/Inf, just undefined.
+	It("is undefined, not NaN, when both PRC and demand are zero", func() {
 		vc := domain.VariantCapacity{VariantName: "v", PerReplicaCapacity: 0}
 		result := &domain.AnalyzerResult{TotalDemand: 0, VariantCapacities: []domain.VariantCapacity{vc}}
 		n, ok := TotalReplicas(result, vc)
@@ -114,8 +114,8 @@ var _ = Describe("TotalReplicas", func() {
 		Expect(n).To(BeZero()) // zero value, not NaN — ok is the authority, not n
 	})
 
-	// spec §5.4/A4: an analyzer silent about a role does not participate in it.
-	It("is undefined when the analyzer never attributed demand to the variant's role (A4)", func() {
+	// An analyzer silent about a role does not participate in it.
+	It("is undefined when the analyzer never attributed demand to the variant's role", func() {
 		vc := domain.VariantCapacity{VariantName: "p1", Role: "prefill", PerReplicaCapacity: 100}
 		result := &domain.AnalyzerResult{
 			RoleDemand:        map[string]float64{"decode": 900}, // says nothing about prefill
@@ -130,9 +130,9 @@ var _ = Describe("TotalReplicas", func() {
 		Expect(ok).To(BeFalse())
 	})
 
-	// spec test 9: unit independence — scaling both D and PRC by the same
-	// constant k must leave TotalReplicas unchanged.
-	It("is unit-independent: scaling demand and PRC by the same constant leaves N unchanged (test 9)", func() {
+	// Unit independence: scaling both D and PRC by the same constant k must
+	// leave TotalReplicas unchanged.
+	It("is unit-independent: scaling demand and PRC by the same constant leaves N unchanged", func() {
 		baseVC := domain.VariantCapacity{VariantName: "v", PerReplicaCapacity: 200}
 		base := &domain.AnalyzerResult{TotalDemand: 1000, VariantCapacities: []domain.VariantCapacity{baseVC}}
 		scaledVC := domain.VariantCapacity{VariantName: "v", PerReplicaCapacity: 200 * 37}
@@ -145,10 +145,8 @@ var _ = Describe("TotalReplicas", func() {
 		Expect(nScaled).To(Equal(nBase))
 	})
 
-	// AggN's max-over-contributors behavior (formerly a separate function,
-	// now step 5's inline switch in buildComposite) reduces to a single
-	// TotalReplicas call when there is exactly one contributor -- ported here
-	// since AggN itself is deleted.
+	// The max over contributors reduces to a single TotalReplicas call when
+	// there is exactly one contributor.
 	It("reduces to the single contributor's N when called on its own result (formerly AggN's single-contributor case)", func() {
 		vc := domain.VariantCapacity{VariantName: "v", PerReplicaCapacity: 200}
 		result := &domain.AnalyzerResult{TotalDemand: 1000, VariantCapacities: []domain.VariantCapacity{vc}}
@@ -158,10 +156,8 @@ var _ = Describe("TotalReplicas", func() {
 	})
 })
 
-// The following port composite_decision_test.go's original ResolveSO/
-// SODecision cases onto resolveSOForTest, which exercises the same
-// contributor-collection + decision-switch logic now inlined in
-// steadystate.buildComposite (composite-signal-redesign.md §2.1(b)-(d)).
+// These exercise ResolveSO's contributor collection and decision switch,
+// which steadystate.buildComposite applies to each variant.
 var _ = Describe("buildComposite's contributor/decision logic (via resolveSOForTest)", func() {
 
 	Describe("C0-agree / C1-single", func() {
@@ -174,7 +170,7 @@ var _ = Describe("buildComposite's contributor/decision logic (via resolveSOForT
 			Expect(d.contributors).To(ConsistOf("throughput"))
 		})
 
-		It("records C0-agree with more than one contributor, taking the max (test 2)", func() {
+		It("records C0-agree with more than one contributor, taking the max", func() {
 			sat := makeAnalyzer(domain.SaturationAnalyzerName, 1000, 200) // N=5
 			other := makeAnalyzer("throughput", 2400, 200)                // N=12
 			d := resolveSOForTest([]NamedAnalyzerResult{sat, other}, &sat, "v")
@@ -184,10 +180,10 @@ var _ = Describe("buildComposite's contributor/decision logic (via resolveSOForT
 			Expect(d.contributors).To(ConsistOf(domain.SaturationAnalyzerName, "throughput"))
 		})
 
-		// spec test 3: sat is a fallback, not a floor — a lower-N contributor
-		// can pull the composite below sat's own value when sat also
-		// qualifies as an ordinary contributor.
-		It("allows the aggregate to fall below saturation's own N when both are ordinary contributors (test 3)", func() {
+		// Sat is a fallback, not a floor — a lower-N contributor can pull the
+		// composite below sat's own value when sat also qualifies as an
+		// ordinary contributor.
+		It("allows the aggregate to fall below saturation's own N when both are ordinary contributors", func() {
 			sat := makeAnalyzer(domain.SaturationAnalyzerName, 2400, 200) // N=12
 			other := makeAnalyzer("throughput", 1000, 200)                // N=5
 			d := resolveSOForTest([]NamedAnalyzerResult{sat, other}, &sat, "v")
@@ -198,8 +194,7 @@ var _ = Describe("buildComposite's contributor/decision logic (via resolveSOForT
 	})
 
 	Describe("C2-sat-fallback", func() {
-		// spec test 8: no other contributor for this SO, saturation used as
-		// fallback.
+		// No other contributor for this SO, so saturation is the fallback.
 		It("falls back to saturation when no other analyzer contributes for this SO", func() {
 			sat := makeAnalyzer(domain.SaturationAnalyzerName, 1000, 200) // N=5
 			otherNoData := NamedAnalyzerResult{
@@ -220,9 +215,9 @@ var _ = Describe("buildComposite's contributor/decision logic (via resolveSOForT
 			Expect(d.contributors).To(ConsistOf(domain.SaturationAnalyzerName))
 		})
 
-		// spec test 8a: idle SO, own store record -- PRC from P0-store, N
-		// defined, composite scales up via the fallback path.
-		It("scales up from an idle SO's P0-store PRC via the fallback path (test 8a)", func() {
+		// Idle SO with its own store record -- PRC from P0-store, N defined,
+		// composite scales up via the fallback path.
+		It("scales up from an idle SO's P0-store PRC via the fallback path", func() {
 			sat := NamedAnalyzerResult{
 				Name: domain.SaturationAnalyzerName,
 				Live: true,
@@ -239,9 +234,9 @@ var _ = Describe("buildComposite's contributor/decision logic (via resolveSOForT
 			Expect(d.n).To(Equal(5.0))
 		})
 
-		// spec test 8b: never-seen-before SO -- borrowed EffectiveCapacity
-		// (also P0-store) contributes normally, not discounted or clamped.
-		It("does not discount a borrowed P0-store PRC for a never-seen-before SO (test 8b)", func() {
+		// Never-seen-before SO -- borrowed EffectiveCapacity (also P0-store)
+		// contributes normally, not discounted or clamped.
+		It("does not discount a borrowed P0-store PRC for a never-seen-before SO", func() {
 			satBorrowed := NamedAnalyzerResult{
 				Name: domain.SaturationAnalyzerName,
 				Live: true,
@@ -260,9 +255,9 @@ var _ = Describe("buildComposite's contributor/decision logic (via resolveSOForT
 	})
 
 	Describe("C4-no-signal", func() {
-		// spec test 8c: no-data (PRC=0) -- N undefined, contribution
-		// skipped, decision path records it, no division/panic.
-		It("records no-signal when saturation is present but has no-data for this SO (test 8c)", func() {
+		// No-data (PRC=0) -- N undefined, contribution skipped, decision
+		// path records it, no division/panic.
+		It("records no-signal when saturation is present but has no-data for this SO", func() {
 			sat := NamedAnalyzerResult{
 				Name: domain.SaturationAnalyzerName,
 				Live: true,
@@ -291,21 +286,19 @@ var _ = Describe("buildComposite's contributor/decision logic (via resolveSOForT
 			Expect(d.path).To(Equal(DecisionNoSignal))
 		})
 
-		// Regression guard (spec §2.9, corrected 2026-09-14): sat disabled
-		// (excluded from eligibleAnalyzers/"entries" upstream) AND
-		// !Eligible(sat) (here: stale) with no other contributor must record
-		// DecisionNoSignal, never DecisionSatFallback. A sat with no real
-		// result -- nil, erroring, no-data, or stale -- must never
-		// participate in scaling decisions, fallback or otherwise, ever.
-		// This is the exact gap make test caught in the first version of
-		// step 5's switch, which was missing the Eligible(sat) guard.
-		It("never falls back to a disabled-and-stale sat, even with no other contributor (regression guard, spec §2.9)", func() {
+		// Regression guard: sat disabled (excluded from eligibleAnalyzers/
+		// "entries" upstream) AND !Eligible(sat) (here: stale) with no other
+		// contributor must record DecisionNoSignal, never
+		// DecisionSatFallback. A sat with no real result -- nil, erroring,
+		// no-data, or stale -- must never participate in scaling decisions,
+		// fallback or otherwise. Without the Eligible(sat) guard on the
+		// fallback, this case falls back.
+		It("never falls back to a disabled-and-stale sat, even with no other contributor (regression guard)", func() {
 			disabledAndStaleSat := makeAnalyzer(domain.SaturationAnalyzerName, 1000, 200) // N=5, would satisfy TotalReplicas if reached
 			disabledAndStaleSat.Live = false                                              // stale -- fails Eligible()
 			// sat excluded from "entries" (mirrors being excluded from
 			// eligibleAnalyzers upstream for being disabled) AND not itself
-			// Eligible -- both conditions spec §2.9 requires for the
-			// regression guard.
+			// Eligible -- both conditions the regression guard needs.
 			d := resolveSOForTest(nil, &disabledAndStaleSat, "v")
 			Expect(d.path).ToNot(Equal(DecisionSatFallback),
 				"a sat with no real result must never produce a fallback value")
@@ -315,9 +308,9 @@ var _ = Describe("buildComposite's contributor/decision logic (via resolveSOForT
 		})
 	})
 
-	Describe("eligibility gating (test 6, 7)", func() {
-		// spec test 6: non-live analyzer -> not a contributor.
-		It("excludes a non-live analyzer from contributing (test 6)", func() {
+	Describe("eligibility gating", func() {
+		// Non-live analyzer -> not a contributor.
+		It("excludes a non-live analyzer from contributing", func() {
 			sat := makeAnalyzer(domain.SaturationAnalyzerName, 1000, 200) // N=5, fallback-eligible
 			other := makeAnalyzer("throughput", 2400, 200)                // N=12, but non-live
 			other.Live = false
@@ -328,9 +321,9 @@ var _ = Describe("buildComposite's contributor/decision logic (via resolveSOForT
 			Expect(d.contributors).To(ConsistOf(domain.SaturationAnalyzerName))
 		})
 
-		// spec test 7: non-informative analyzer (Reason=no-data/error) -> not
-		// a contributor.
-		It("excludes a non-informative analyzer from contributing (test 7)", func() {
+		// Non-informative analyzer (Reason=no-data/error) -> not a
+		// contributor.
+		It("excludes a non-informative analyzer from contributing", func() {
 			sat := makeAnalyzer(domain.SaturationAnalyzerName, 1000, 200) // N=5
 			other := NamedAnalyzerResult{
 				Name: "throughput",
@@ -346,11 +339,10 @@ var _ = Describe("buildComposite's contributor/decision logic (via resolveSOForT
 			Expect(d.n).To(Equal(5.0))
 		})
 
-		// Regression guard (spec §2.9): a stale analyzer must never appear in
-		// contributors, regardless of what its per-SO Reason says -- this is
-		// the gap this mission's spec-correction round closed (Eligible() as
-		// the loop's first, unconditional check).
-		It("excludes a stale (!Live) analyzer even though its per-SO Reason looks perfectly usable (regression guard, spec §2.9)", func() {
+		// Regression guard: a stale analyzer must never appear in
+		// contributors, regardless of what its per-SO Reason says, because
+		// Eligible() is the loop's first, unconditional check.
+		It("excludes a stale (!Live) analyzer even though its per-SO Reason looks perfectly usable (regression guard)", func() {
 			sat := makeAnalyzer(domain.SaturationAnalyzerName, 1000, 200) // N=5, fallback-eligible
 			staleButOtherwiseUsable := NamedAnalyzerResult{
 				Name: "throughput",
@@ -369,8 +361,8 @@ var _ = Describe("buildComposite's contributor/decision logic (via resolveSOForT
 		})
 	})
 
-	// spec test 9: unit independence at the decision level too.
-	It("is unit-independent: scaling demand and PRC by the same constant leaves the decision unchanged (test 9)", func() {
+	// Unit independence at the decision level too.
+	It("is unit-independent: scaling demand and PRC by the same constant leaves the decision unchanged", func() {
 		sat := makeAnalyzer(domain.SaturationAnalyzerName, 1000, 200) // N=5
 		scaledSat := makeAnalyzer(domain.SaturationAnalyzerName, 1000*13, 200*13)
 		d1 := resolveSOForTest(nil, &sat, "v")
@@ -381,9 +373,9 @@ var _ = Describe("buildComposite's contributor/decision logic (via resolveSOForT
 		Expect(d2.path).To(Equal(d1.path))
 	})
 
-	// spec test 10: perturbing PRC_sat must not change another analyzer's
-	// contribution to the composite.
-	It("PRC_sat independence: perturbing saturation's own PRC does not change another analyzer's N (test 10)", func() {
+	// Perturbing PRC_sat must not change another analyzer's contribution to
+	// the composite.
+	It("PRC_sat independence: perturbing saturation's own PRC does not change another analyzer's N", func() {
 		other := makeAnalyzer("throughput", 2400, 200) // N=12, independent of sat entirely
 
 		satLowPRC := makeAnalyzer(domain.SaturationAnalyzerName, 1000, 50)   // N=20
@@ -406,9 +398,9 @@ var _ = Describe("buildComposite's contributor/decision logic (via resolveSOForT
 		Expect(dHigh.n).To(Equal(12.0)) // other's N wins once sat's own N drops to 2
 	})
 
-	// spec test 11: analyzer with no RoleDemand for a role -> not a
-	// contributor for that role (A4).
-	It("excludes an analyzer that never attributed demand to this SO's role (test 11)", func() {
+	// Analyzer with no RoleDemand for a role -> not a contributor for that
+	// role.
+	It("excludes an analyzer that never attributed demand to this SO's role", func() {
 		sat := NamedAnalyzerResult{
 			Name: domain.SaturationAnalyzerName,
 			Live: true,
@@ -424,13 +416,13 @@ var _ = Describe("buildComposite's contributor/decision logic (via resolveSOForT
 		Expect(d.path).To(Equal(DecisionNoSignal))
 	})
 
-	// spec test 23: a role carrying demand but currently served by no SO at
-	// all -- no crash, and the decision reflects a genuinely uncovered role
-	// (C4-no-signal) rather than a spurious full coverage. Distinct from
-	// test 11: here the role's demand IS attributed (RoleDemand has a real
-	// entry), but nothing in VariantCapacities serves it, so there is no SO
-	// to even ask the question of.
-	It("does not crash and records no-signal for a role with demand but no serving SO (test 23)", func() {
+	// A role carrying demand but currently served by no SO at all -- no
+	// crash, and the decision reflects a genuinely uncovered role
+	// (C4-no-signal) rather than a spurious full coverage. Unlike the case
+	// above, the role's demand IS attributed (RoleDemand has a real entry),
+	// but nothing in VariantCapacities serves it, so there is no SO to even
+	// ask the question of.
+	It("does not crash and records no-signal for a role with demand but no serving SO", func() {
 		sat := NamedAnalyzerResult{
 			Name: domain.SaturationAnalyzerName,
 			Live: true,
@@ -448,10 +440,9 @@ var _ = Describe("buildComposite's contributor/decision logic (via resolveSOForT
 		Expect(d.contributors).To(BeEmpty())
 	})
 
-	// spec test 4 (ported from prc_com_test.go, deleted with PRCCom): disaggregated,
-	// per-role aggregation where another analyzer is higher for ONE role only --
+	// Disaggregated, per-role aggregation where another analyzer is higher for ONE role only --
 	// the other role must be unaffected.
-	It("aggregates independently per role: a higher contributor for prefill only raises the decision there, not for decode (test 4)", func() {
+	It("aggregates independently per role: a higher contributor for prefill only raises the decision there, not for decode", func() {
 		sat := NamedAnalyzerResult{
 			Name: domain.SaturationAnalyzerName,
 			Live: true,
@@ -483,10 +474,8 @@ var _ = Describe("buildComposite's contributor/decision logic (via resolveSOForT
 		Expect(dDecode.ok).To(BeTrue())
 		Expect(dDecode.n).To(Equal(3.0), "decode must be untouched by other's prefill-only disagreement")
 
-		// The read half of old prc_com_test.go's assertion: PRC_com computed
-		// from these N's, using aggregation.DemandForRole directly (the
-		// PRC line itself is now inlined in buildComposite, not a separate
-		// function to call here).
+		// PRC_com computed from these N's as buildComposite does: the role's
+		// demand divided by the composite N.
 		prefillDemand, ok := aggregation.DemandForRole(sat.Result, "prefill")
 		Expect(ok).To(BeTrue())
 		Expect(prefillDemand/dPrefill.n).To(Equal(50.0), "400/8 -- lower than sat's own PRC of 100")

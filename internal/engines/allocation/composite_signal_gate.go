@@ -1,36 +1,29 @@
 package allocation
 
 // CompositeHasSignal reports whether composite carries a real capacity
-// signal (spec §5.1.3, A11'): a non-nil Result with at least one
-// VariantCapacity whose decision path (spec §5.1.2 — Reason on the
-// composite carries C0-agree/C1-single/C2-sat-fallback/C4-no-signal, not an
-// analyzer's own no-data/error/P0-store vocabulary) is not C4-no-signal.
+// signal: a non-nil Result with at least one VariantCapacity whose decision
+// path is not C4-no-signal. On the composite, Reason carries the decision
+// path (C0-agree/C1-single/C2-sat-fallback/C4-no-signal), not an analyzer's
+// own no-data/error/P0-store vocabulary.
 //
-// This replaces hasSaturationResult's broken identity check
-// (CompositeSignal.Name == domain.SaturationAnalyzerName && Result != nil).
-// That check tested "is this specifically saturation", which silently goes
-// false the moment the composite carries its own name (spec §8) — the very
-// rename this mission makes. The fix is by intent, not identity (A11): test
-// what the gate actually needs, which is a usable signal to charge a quota
-// against, never which analyzer produced it. Per spec §6.1 the optimizer's
-// input is always the composite, so a name check there was never meaningful
-// even before the rename.
+// It tests whether the composite carries a usable signal, never which
+// analyzer produced it. A check like
+// CompositeSignal.Name == domain.SaturationAnalyzerName is always false,
+// because the composite carries its own name.
 //
 // Deliberately NOT ResultIsInformative: that function's no-data/error
 // sentinel check is calibrated to an ANALYZER's own Reason vocabulary. The
 // composite's Reason means something different (which decision path
 // produced this SO's N_com, not how PRC was measured) and DecisionNoSignal
 // ("C4-no-signal") does not equal either analyzer sentinel string — reusing
-// ResultIsInformative here would silently always report "usable" regardless
-// of whether every SO actually had a signal, defeating the very rename this
-// function exists to survive.
+// ResultIsInformative here would always report "usable" regardless of
+// whether any SO actually had a signal.
 //
-// A model whose composite fails this check was not usefully measured this
-// cycle — every SO's decision path bottomed out at C4-no-signal — so its
-// replica counts are not evidence of anything and callers must treat it
-// exactly as the absent-Result case they already guard (uniformly safe
-// today per the zero-signal survey): skip the model, charge it nothing,
-// decide nothing.
+// A model whose composite fails this check had no analyzer able to size any
+// variant this cycle. The engine reports it as no-composite-signal; the
+// optimizer still sizes it on saturation's measured capacity, and its
+// replicas are still charged to a quota (measuredThisCycle), since they hold
+// their GPUs either way.
 func CompositeHasSignal(composite NamedAnalyzerResult) bool {
 	if composite.Result == nil {
 		return false

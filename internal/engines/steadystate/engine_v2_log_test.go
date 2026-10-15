@@ -78,12 +78,11 @@ func TestLogAnalyzerResult_EmitsRequiredFields(t *testing.T) {
 
 // Live must be on the line for every entry, matching or not: it is the only
 // field that says whether THIS analyzer currently contributes to the
-// composite aggregation and the scale-down veto (eligible(), spec
-// composite-analyzer §5.1.1). The line itself has no Live guard, so a
-// reader must be able to see both a non-live analyzer's real numbers AND
-// that they are not currently being counted -- omitting the field would
-// make "why didn't the composite pick this signal up" undiagnosable from
-// the log alone (composite-analyzer mission, observability audit, item 11).
+// composite aggregation and the scale-down veto (allocation.Eligible). The
+// line itself has no Live guard, so a reader must be able to see both a
+// non-live analyzer's real numbers AND that they are not currently being
+// counted -- omitting the field would make "why didn't the composite pick
+// this signal up" undiagnosable from the log alone.
 func TestLogAnalyzerResult_EmitsLiveField(t *testing.T) {
 	ctx, logs := zapObserverCtx(t)
 
