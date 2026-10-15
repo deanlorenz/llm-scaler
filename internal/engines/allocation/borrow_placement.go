@@ -41,6 +41,8 @@ type nsBorrowLeft struct {
 	cap int
 	// lentOut is guaranteed growth still to debit from the pool.
 	lentOut int
+	// priority is NamespaceBorrow.HighestPriority, the higher of two entries'.
+	priority *int32
 }
 
 // borrowState is one optimizer pass's borrowing: what each namespace may still
@@ -89,12 +91,15 @@ func newBorrowState(constraints []*ResourceConstraints, nodes *NodeView) *borrow
 				}
 				prev, seen := bs.borrow[ns][accType]
 				if !seen {
-					bs.borrow[ns][accType] = &nsBorrowLeft{cap: drawable, lentOut: b.LentOut}
+					bs.borrow[ns][accType] = &nsBorrowLeft{cap: drawable, lentOut: b.LentOut, priority: b.HighestPriority}
 					continue
 				}
 				// Two Kueue-backed entries hold the namespace: the tighter cap.
 				prev.cap = tighterBudget(prev.cap, drawable)
 				prev.lentOut = max(prev.lentOut, b.LentOut)
+				if b.HighestPriority != nil && (prev.priority == nil || *b.HighestPriority > *prev.priority) {
+					prev.priority = b.HighestPriority
+				}
 			}
 		}
 	}
@@ -208,6 +213,9 @@ type modelPlacer struct {
 	// node fit refused it.
 	cut        string
 	cutByNodes bool
+	// class is the priority class of the variant being placed
+	// (domain.VariantReplicaState.PriorityClass).
+	class string
 }
 
 // newModelPlacer returns the placer for one model, or nil when the pass counts
@@ -285,6 +293,7 @@ func (p *modelPlacer) tryUnit(picked []string, kByRole map[string]int, variantBy
 		r := p.replica(variants, stateMap, v)
 		g := gpusPerReplicaFromState(stateMap, v)
 		requests := stateMap[v].ReplicaRequests
+		p.class = stateMap[v].PriorityClass // K1: whose LowerPriority lending it may draw on
 		for i := 0; i < kByRole[role]; i++ {
 			placed, drew := p.placeReplica(v, r, g, requests, p.targets[v]+kByRole[role])
 			if !placed {
@@ -388,7 +397,8 @@ func (p *modelPlacer) placeReplica(variant string, r replicaFit, g int, requests
 			continue // backed off in this cohort (B12)
 		}
 		open = true
-		if c.Free < need || !coFits(c.CoFree, requests) {
+		// K1: a LowerPriority lender's GPUs only for a model it outranks.
+		if c.drawable(p.class, borrow.priority) < need || !coFits(c.CoFree, requests) {
 			continue // the GPUs, or a co-resource of the flavor's group (B1), would hold it back
 		}
 		// place commits only when every pod fits, so one call both probes

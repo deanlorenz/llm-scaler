@@ -94,6 +94,11 @@ type VariantMetadata struct {
 	// is not counted for a co-resource it is (co-resource-bound). Nil when the
 	// template could not be read.
 	ReplicaRequests map[string]int64
+	// PriorityClass is the Kueue priority class a replica's Workload gets
+	// from the pod template (kueue.TemplatePriorityClass): its
+	// WorkloadPriorityClass label, else its priorityClassName, else
+	// kueue.PriorityClassNone. Empty when the template could not be read.
+	PriorityClass string
 	// MinReplicas/MaxReplicas are the scaling bounds; nil means unset.
 	MinReplicas *int
 	MaxReplicas *int
@@ -140,6 +145,7 @@ func (m VariantMetadata) ToReplicaState() VariantReplicaState {
 		TopologyKey:      m.TopologyKey,
 		Placements:       m.Placements,
 		ReplicaRequests:  m.ReplicaRequests,
+		PriorityClass:    m.PriorityClass,
 		UnplacedReplicas: m.UnplacedReplicas,
 		UnplacedSince:    m.UnplacedSince,
 		UnplacedPods:     m.UnplacedPods,

@@ -112,9 +112,10 @@ var _ = Describe("ComputeBorrowing", func() {
 		It("LowerPriority: a lender is not one that can reclaim", func() {
 			lender := withReclaim(member("lender", QueueResource{Nominal: 8, Reserved: 3}), ReclaimLowerPriority)
 			lender.PendingWorkloads = []PendingWorkload{pendingGPU(2, 7)}
+			lender.LenderPriority = priorityOf(7)
 			b := ComputeBorrowing(topology(lender, member("a", QueueResource{Nominal: 0, Reserved: 4})), false)
 			Expect(b.Pools).To(HaveLen(1))
-			Expect(b.Pools[0].Lenders).To(ContainElement(LenderState{Queue: "lender", Waiting: true, CanReclaim: false, LentOut: 5,
+			Expect(b.Pools[0].Lenders).To(ContainElement(LenderState{Queue: "lender", Waiting: true,
 				Reclaim: ReclaimLowerPriority, Unused: 5, Priority: priorityOf(7)}))
 		})
 
@@ -236,8 +237,8 @@ var _ = Describe("ComputeBorrowing", func() {
 		b := ComputeBorrowing(topology(withReclaim(waiting, ReclaimAny), member("a", QueueResource{Nominal: 0, Reserved: 4})), false)
 		Expect(b.Pools).To(HaveLen(1))
 		Expect(b.Pools[0].Lenders).To(Equal([]LenderState{
-			{Queue: "a", LentOut: 0, Reclaim: ReclaimNever},
-			{Queue: "lender", Waiting: true, CanReclaim: true, LentOut: 5, Reclaim: ReclaimAny, Unused: 5, Priority: priorityOf(0)},
+			{Queue: "a", Reclaim: ReclaimNever},
+			{Queue: "lender", Waiting: true, Reclaim: ReclaimAny, Unused: 5},
 		}))
 	})
 
@@ -297,7 +298,7 @@ var _ = Describe("ComputeBorrowing", func() {
 		Expect(b.Pools[0].WaitingLenders).To(BeEmpty())
 		Expect(b.Pools[0].Lenders).To(Equal([]LenderState{
 			{Queue: "a", Reclaim: ReclaimNever},
-			{Queue: "held", LentOut: 8, Reclaim: ReclaimNever, Unused: 8},
+			{Queue: "held", Reclaim: ReclaimNever, Unused: 8},
 		}), "the held queue lends what it does not use, and never waits")
 	})
 

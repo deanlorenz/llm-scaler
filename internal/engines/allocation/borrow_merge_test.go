@@ -48,10 +48,10 @@ var _ = Describe("mergeSharedPools", func() {
 	}
 
 	It("takes the cautious side of two entries' reads of one pool", func() {
-		a := read(6, t0.Add(time.Minute), false, kueue.LenderState{Queue: "l1", LentOut: 8})
+		a := read(6, t0.Add(time.Minute), false, kueue.LenderState{Queue: "l1"})
 		b := read(4, t0, true,
-			kueue.LenderState{Queue: "l1", Waiting: true, CanReclaim: true, LentOut: 4},
-			kueue.LenderState{Queue: "l2", LentOut: 2})
+			kueue.LenderState{Queue: "l1", Waiting: true},
+			kueue.LenderState{Queue: "l2"})
 		chunks, _ := mergeSharedPools([]*ResourceConstraints{a, b})
 		Expect(chunks).To(HaveLen(1))
 		ch := chunks[0]
@@ -59,10 +59,10 @@ var _ = Describe("mergeSharedPools", func() {
 		Expect(ch.Stale).To(BeTrue(), "stale when either read is")
 		Expect(ch.ReadAt).To(Equal(t0), "the older read")
 		Expect(ch.Lenders).To(Equal([]kueue.LenderState{
-			{Queue: "l1", Waiting: true, CanReclaim: true, LentOut: 4},
-			{Queue: "l2", LentOut: 2},
+			{Queue: "l1", Waiting: true},
+			{Queue: "l2"},
 		}), "the union of the lenders")
-		Expect(a.SharedPools[0].Lenders).To(Equal([]kueue.LenderState{{Queue: "l1", LentOut: 8}}), "the inputs are not written")
+		Expect(a.SharedPools[0].Lenders).To(Equal([]kueue.LenderState{{Queue: "l1"}}), "the inputs are not written")
 	})
 
 	It("keeps the older ReadAt whichever entry comes first", func() {

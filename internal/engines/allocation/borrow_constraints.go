@@ -55,6 +55,10 @@ type NamespaceBorrow struct {
 	// listed.
 	PinRequired bool
 	PinLabels   []map[string]string
+	// HighestPriority is the highest priority of the namespace's unfinished
+	// GPU Workloads, nil when none was read: the priority of a model whose
+	// pod template names no priority class (SharedPoolChunk.drawable).
+	HighestPriority *int32
 }
 
 // SharedPoolChunk is one cohort's free GPUs of one flavor and GPU resource. A
@@ -83,6 +87,49 @@ type SharedPoolChunk struct {
 	// cohort's free pool of it in milli-units: a borrowed replica must fit it
 	// too, and is debited its per-replica request (B1).
 	CoFree map[string]int64
+	// Restricted are the GPUs of Free that lenders on reclaimWithinCohort
+	// LowerPriority lend: Kueue takes them back only from a Workload of lower
+	// priority than the lender's, so only a model of lower priority may draw
+	// on them (drawable).
+	Restricted []PriorityLend
+	// ClassPriority is, per priority class (kueue.TemplatePriorityClass), the
+	// priority Kueue gives a Workload of that class, as read from the
+	// Workloads. A model's priority is looked up here.
+	ClassPriority map[string]int32
+}
+
+// PriorityLend is what one LowerPriority lender lends into a chunk: GPUs a
+// model may borrow only when its priority is below Below.
+type PriorityLend struct {
+	Queue string
+	Below int32
+	GPUs  int
+}
+
+// drawable is what a model of priority class class may draw on the chunk: Free
+// less the restricted GPUs whose lender does not outrank it. A class whose
+// priority is not known may draw on none of them.
+//
+// A template that names no class (kueue.PriorityClassNone) may still run at a
+// class set on the scale target object itself, which the template does not
+// show, so its priority is the higher of the no-class Workloads' and
+// fallback, the highest priority of its namespace's Workloads (nil when none
+// was read): the side that draws less.
+func (c *SharedPoolChunk) drawable(class string, fallback *int32) int {
+	prio, known := c.ClassPriority[class]
+	if class == kueue.PriorityClassNone && fallback != nil {
+		if !known || *fallback > prio {
+			prio = *fallback
+		}
+		known = true
+	}
+	free := c.Free
+	for _, r := range c.Restricted {
+		if !known || !kueue.Reclaims(kueue.ReclaimLowerPriority, &r.Below, &prio) {
+			free -= r.GPUs
+		}
+	}
+	return max(0, free)
 }
 
 // key identifies a chunk across providers that read the same cohort.
@@ -230,8 +277,9 @@ func reachConstraints(constraints []*ResourceConstraints) []*ResourceConstraints
 // chunks are one pool, not two. The merge takes the cautious side of every
 // field: stale when either read is, the older read time (a lender's read is
 // new only once both entries read past it), the union of the lenders -- a
-// lender seen by both waits when either saw it wait, counts as reclaiming
-// when either says so, and has lent out the smaller figure.
+// lender seen by both waits when either saw it wait -- and of the restricted
+// GPUs, each at the larger figure and the lower lender priority, and per
+// priority class the higher priority.
 func mergeSharedPools(constraints []*ResourceConstraints) ([]*SharedPoolChunk, map[string][]string) {
 	byKey := map[string]*SharedPoolChunk{}
 	cohorts := map[string][]string{}
@@ -247,6 +295,8 @@ func mergeSharedPools(constraints []*ResourceConstraints) ([]*SharedPoolChunk, m
 			chunk := p
 			chunk.Lenders = slices.Clone(p.Lenders)
 			chunk.CoFree = maps.Clone(p.CoFree)
+			chunk.Restricted = slices.Clone(p.Restricted)
+			chunk.ClassPriority = maps.Clone(p.ClassPriority)
 			byKey[p.key()] = &chunk
 		}
 		for ns, cs := range c.NamespaceCohorts {
@@ -289,8 +339,25 @@ func mergeChunk(prev *SharedPoolChunk, p SharedPoolChunk) {
 		}
 		o := &prev.Lenders[i]
 		o.Waiting = o.Waiting || l.Waiting
-		o.CanReclaim = o.CanReclaim || l.CanReclaim
-		o.LentOut = min(o.LentOut, l.LentOut)
 	}
 	slices.SortFunc(prev.Lenders, func(a, b kueue.LenderState) int { return strings.Compare(a.Queue, b.Queue) })
+	// Restricted GPUs: the cautious side is the larger figure and the lower
+	// lender priority, so fewer models may draw on them.
+	for _, r := range p.Restricted {
+		i := slices.IndexFunc(prev.Restricted, func(o PriorityLend) bool { return o.Queue == r.Queue })
+		if i < 0 {
+			prev.Restricted = append(prev.Restricted, r)
+			continue
+		}
+		o := &prev.Restricted[i]
+		o.GPUs, o.Below = max(o.GPUs, r.GPUs), min(o.Below, r.Below)
+	}
+	for class, n := range p.ClassPriority {
+		if have, ok := prev.ClassPriority[class]; !ok || n > have {
+			if prev.ClassPriority == nil {
+				prev.ClassPriority = map[string]int32{}
+			}
+			prev.ClassPriority[class] = n
+		}
+	}
 }

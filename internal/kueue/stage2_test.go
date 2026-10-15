@@ -200,10 +200,23 @@ func TestPoolCarriesEveryMembersPendingGPUs(t *testing.T) {
 	}
 }
 
-// B3: the Workloads read of a namespace-scoped reader is not cluster-wide.
-func TestReadPendingNamespaceScopedIsUnreadable(t *testing.T) {
-	r := &Reader{opts: Options{Namespace: "team-a"}, gpuNames: map[string]bool{"nvidia.com/gpu": true}}
-	if _, unreadable := r.readPending(context.Background(), nil); !unreadable {
-		t.Error("a namespace-scoped read must report the lenders unreadable")
+// D1: a namespace-scoped reader reads the Workloads, and the LocalQueues they
+// queue through, cluster-wide, as the proposal's prerequisites grant: a
+// lender's wait in another namespace is seen. Before, it returned unreadable
+// without reading, so a namespace-scoped install could never borrow.
+func TestReadPendingNamespaceScopedReadsClusterWide(t *testing.T) {
+	const v = "v1beta2"
+	w := obj(v, KindWorkload, "team-b", "train", map[string]interface{}{})
+	spec := podSetsRequesting(map[string]interface{}{"nvidia.com/gpu": "4"})
+	spec["queueName"] = "lq"
+	w.Object["spec"] = spec
+	c := newCohortClient(v, append(docsExample(v, "cohortName"), w)...)
+	r := NewReader(c, Options{Namespace: "team-a"})
+	got, unreadable := r.readPending(context.Background(), nil)
+	if unreadable {
+		t.Fatal("a namespace-scoped read reported the lenders unreadable without a failed read")
+	}
+	if n := len(got.byQueue["team-b-cq"]); n != 1 {
+		t.Errorf("team-b-cq has %d pending Workloads read, want the one in team-b, another namespace", n)
 	}
 }

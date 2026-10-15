@@ -289,7 +289,7 @@ var _ = Describe("QuotaInventory counting Kueue borrowing", func() {
 			"team-a": {ByType: map[string]int{"H100": 8}}, "team-b": {ByType: map[string]int{"H100": 8}}}
 		two.Borrow = map[string][]config.ExternalBorrow{"team-a": {row}, "team-b": {rowB}}
 		two.SharedPools = []config.ExternalSharedPool{{Cohort: "c", Flavor: "h100", Resource: "nvidia.com/gpu",
-			Accelerator: "H100", Free: 0, Lenders: []config.ExternalLender{{Queue: "lender-cq", Waiting: true, LentOut: 16}}}}
+			Accelerator: "H100", Free: 0, Lenders: []config.ExternalLender{{Queue: "lender-cq", Waiting: true}}}}
 
 		// A fresh inventory and no borrowing memory: the first read after a
 		// restart, team-b's ResourceQuota list failing from the start.
@@ -317,7 +317,7 @@ var _ = Describe("QuotaInventory counting Kueue borrowing", func() {
 		snap.NamespaceWithinNominal = map[string]config.ExternalCaps{"team-b": {ByType: map[string]int{"H100": 8}}}
 		snap.Borrow = map[string][]config.ExternalBorrow{"team-b": {rowB}}
 		snap.SharedPools = []config.ExternalSharedPool{{Cohort: "c", Flavor: "h100", Resource: "nvidia.com/gpu",
-			Accelerator: "H100", Free: 0, Lenders: []config.ExternalLender{{Queue: "lender-cq", Waiting: true, LentOut: 16}}}}
+			Accelerator: "H100", Free: 0, Lenders: []config.ExternalLender{{Queue: "lender-cq", Waiting: true}}}}
 
 		elig := &fakeEligibility{byNS: map[string]kueue.NamespaceEligibility{"team-b": {Reason: kueue.ReasonResourceQuotaUnreadable}}}
 		b := build(entry(nil), elig, true, snap)

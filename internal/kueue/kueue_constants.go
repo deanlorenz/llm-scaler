@@ -64,6 +64,26 @@ const (
 	ReclaimAny           = "Any"
 )
 
+// Priority classes. A Workload's priority comes from the WorkloadPriorityClass
+// its object's priority-class label names, else from the pod priorityClassName
+// (pkg/controller/constants/constants.go, WorkloadPriorityClassLabel). Kueue
+// writes the class on the Workload: spec.priorityClassName and
+// spec.priorityClassSource in v1beta1, spec.priorityClassRef{group, name} in
+// v1beta2 (apis/kueue/v1beta1 and v1beta2 workload_types.go).
+const (
+	PriorityClassLabel = "kueue.x-k8s.io/priority-class"
+	// WorkloadPriorityClassGroup and PodPriorityClassGroup are the groups a
+	// class is named under (v1beta2 PriorityClassGroup).
+	WorkloadPriorityClassGroup = "kueue.x-k8s.io"
+	PodPriorityClassGroup      = "scheduling.k8s.io"
+	// WorkloadPriorityClassSource is the v1beta1 priorityClassSource of a
+	// WorkloadPriorityClass; any other non-empty one is a pod PriorityClass.
+	WorkloadPriorityClassSource = "kueue.x-k8s.io/workloadpriorityclass"
+	// PriorityClassNone is the class of a Workload, or pod template, that
+	// names none.
+	PriorityClassNone = "none"
+)
+
 // Workload condition types and the eviction reason of a preemption
 // (apis/kueue/v1beta1/workload_types.go).
 const (

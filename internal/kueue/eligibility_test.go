@@ -264,14 +264,16 @@ var _ = Describe("Eligibility: the engine-side borrowing conditions", func() {
 		Expect(e.Evaluate(context.Background(), []string{eligNS})[eligNS].Reason).To(BeEmpty())
 	})
 
-	It("reads a Forbidden Workload list as not managed", func() {
+	// G4: Forbidden is not absent. The pods are shown neither managed nor
+	// unmanaged, so the reason is the read's, never not-kueue-managed.
+	It("reads a Forbidden Workload list as lenders-unreadable", func() {
 		funcs := &interceptor.Funcs{List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 			if u, ok := list.(*unstructured.UnstructuredList); ok && u.GetKind() == KindWorkload+"List" {
 				return apierrors.NewForbidden(schema.GroupResource{Group: Group, Resource: "workloads"}, "", errors.New("no RBAC"))
 			}
 			return cl.List(ctx, list, opts...)
 		}}
-		Expect(evaluate(eligibilityClient(funcs, chargedPod("p")...)).Reason).To(Equal(ReasonNotKueueManaged))
+		Expect(evaluate(eligibilityClient(funcs, chargedPod("p")...)).Reason).To(Equal(ReasonLendersUnreadable))
 	})
 
 	It("keeps the previous answer for a namespace with no GPU pod", func() {

@@ -41,7 +41,7 @@ var _ = Describe("a waiting reclaiming lender in the steady-state cycle", func()
 			SharedPools: []allocation.SharedPoolChunk{{
 				Cohort: "c", Flavor: "h100", Resource: "nvidia.com/gpu", Free: 8, ReadAt: readAt,
 				FlavorPlacement: kueue.FlavorPlacement{AcceleratorType: "H100"},
-				Lenders:         []kueue.LenderState{{Queue: "lender", Waiting: lenderWaiting, CanReclaim: true, LentOut: 8}},
+				Lenders:         []kueue.LenderState{{Queue: "lender", Waiting: lenderWaiting}},
 			}},
 		}}
 	}

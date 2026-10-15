@@ -15,7 +15,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -242,7 +241,7 @@ const forgetAfter = time.Hour
 // evaluate runs both checks for one namespace.
 func (e *Eligibility) evaluate(ctx context.Context, ns string, prev NamespaceEligibility, seen bool, now time.Time) NamespaceEligibility {
 	got := NamespaceEligibility{}
-	managed, known := e.managed(ctx, ns)
+	managed, known, forbidden := e.managed(ctx, ns)
 	switch {
 	case known:
 		got.managed = managed
@@ -262,6 +261,11 @@ func (e *Eligibility) evaluate(ctx context.Context, ns string, prev NamespaceEli
 	failingTooLong := e.interval > 0 && !got.failingSince.IsZero() &&
 		now.Sub(got.failingSince) >= unreadableAfter*e.interval
 	switch {
+	case forbidden:
+		// The Workloads could not be read (G4): Forbidden is not absent, and it
+		// shows no pod to be unmanaged either. The reason is the read's, as
+		// for the lender signal.
+		got.Reason = ReasonLendersUnreadable
 	case !got.managed:
 		got.Reason = ReasonNotKueueManaged
 	case apierrors.IsForbidden(err):
@@ -289,7 +293,8 @@ func (e *Eligibility) evaluate(ctx context.Context, ns string, prev NamespaceEli
 
 // managed reports whether every GPU pod in ns is charged to Kueue, and whether
 // that was known: false when the namespace has no GPU pod, or its pods or its
-// Workloads could not be listed for a reason that may pass.
+// Workloads could not be listed for a reason that may pass. forbidden is set
+// when the Workloads read was Forbidden: known, and proving nothing.
 //
 // A pod counts only when Kueue has a Workload for it: a Workload owned by the
 // pod itself (the pod integration), or by an object up its controller chain (a
@@ -318,10 +323,10 @@ func (e *Eligibility) evaluate(ctx context.Context, ns string, prev NamespaceEli
 //
 // Workloads are looked up by owner (workloadIndex), only when the namespace
 // has a GPU pod; an owner is read only when no Workload matched below it.
-func (e *Eligibility) managed(ctx context.Context, ns string) (bool, bool) {
+func (e *Eligibility) managed(ctx context.Context, ns string) (managed, known, forbidden bool) {
 	var pods corev1.PodList
 	if err := e.client.List(ctx, &pods, client.InNamespace(ns)); err != nil {
-		return false, false
+		return false, false, false
 	}
 	owners := map[types.UID]*unstructured.Unstructured{}
 	var idx *workloadIndex
@@ -342,15 +347,15 @@ func (e *Eligibility) managed(ctx context.Context, ns string) (bool, bool) {
 		if idx == nil {
 			var known bool
 			if idx, known = e.newWorkloadIndex(ctx, ns); !known {
-				return false, false
+				return false, false, false
 			}
 		}
 		owner, ok, known := e.chargingOwner(ctx, ns, pod, owners, idx)
 		if !known {
-			return false, false
+			return false, false, false
 		}
 		if !ok {
-			return false, true
+			return false, true, idx.forbidden
 		}
 		if !PodGated(pod) && pod.DeletionTimestamp == nil {
 			used[owner] += podGPUs(&pod.Spec, e.gpuNames)
@@ -360,16 +365,16 @@ func (e *Eligibility) managed(ctx context.Context, ns string) (bool, bool) {
 	for owner, n := range used {
 		group, known := idx.group(owner)
 		if !known {
-			return false, false
+			return false, false, false
 		}
 		byGroup[group] += n
 	}
 	for group, n := range byGroup {
 		if n > idx.groupGPUs[group] {
-			return false, true // the reserved Workloads cover fewer GPUs than the pods hold
+			return false, true, false // the reserved Workloads cover fewer GPUs than the pods hold
 		}
 	}
-	return found, found
+	return found, found, false
 }
 
 // StoppedByKueue reports whether Kueue is deleting pod: it is terminating and
@@ -469,7 +474,10 @@ type workloadIndex struct {
 	ns       string
 	gpuNames map[string]bool
 	// whole is set when byOwner holds every Workload of the namespace.
-	whole     bool
+	whole bool
+	// forbidden is set when a Workloads read was Forbidden: known and empty,
+	// so every GPU pod reads as not charged, for want of a read (G4).
+	forbidden bool
 	byOwner   map[types.UID][]*workloadCharge
 	looked    map[types.UID]bool
 	charges   map[string]*workloadCharge
@@ -491,6 +499,7 @@ func (e *Eligibility) newWorkloadIndex(ctx context.Context, ns string) (*workloa
 	items, err := idx.src.Workloads(ctx, ns, "")
 	idx.whole = true
 	if err != nil {
+		idx.forbidden = apierrors.IsForbidden(err)
 		return idx, workloadsAbsent(err)
 	}
 	for i := range items {
@@ -552,7 +561,7 @@ func (idx *workloadIndex) owned(uid types.UID) ([]*workloadCharge, bool) {
 			return nil, false
 		}
 		// Known and empty for every owner from now on.
-		idx.whole = true
+		idx.whole, idx.forbidden = true, apierrors.IsForbidden(err)
 		return nil, true
 	}
 	idx.looked[uid] = true
@@ -623,56 +632,35 @@ func workloadGPUs(w *unstructured.Unstructured, gpuNames map[string]bool) int64 
 			admitted[name] = count
 		}
 	}
-	podSets, _, _ := unstructured.NestedSlice(w.Object, "spec", "podSets")
 	var total int64
-	for _, raw := range podSets {
-		ps, _ := raw.(map[string]interface{})
-		spec, _, _ := unstructured.NestedMap(ps, "template", "spec")
-		var pod corev1.PodSpec
-		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(spec, &pod); err != nil {
-			continue
-		}
-		name, _, _ := unstructured.NestedString(ps, "name")
-		count, ok := admitted[name]
+	for _, s := range decodePodSets(w) {
+		count, ok := admitted[s.name]
 		if !ok {
-			var found bool
-			var err error
-			if count, found, err = unstructured.NestedInt64(ps, "count"); !found || err != nil {
-				count = 1
-			}
+			count = s.count
 		}
-		total += max(count, 0) * podGPUs(&pod, gpuNames)
+		total += max(count, 0) * podGPUs(&s.spec, gpuNames)
 	}
 	return total
 }
 
-// podGPUs is the GPUs of the named resources one pod of spec requests, as the
-// scheduler accounts them: regular containers add up, and init containers,
-// which run one at a time before them, count only the largest. A container
-// that sets only a limit on an extended resource requests that limit.
+// podGPUs is the GPUs of the named resources one pod of spec requests, from
+// PodRequestsMilli: regular containers add up, an init container counts only
+// when larger, per resource, and a container that sets only a limit on an
+// extended resource requests that limit, as the API server defaults it.
+//
+// resources.PodGPURequests, which the GPU usage walk counts pods by, differs
+// in that one respect: it reads requests only, so a limit-only container
+// counts nothing there. A pod here and there could therefore disagree only
+// for a pod spec the API server has not defaulted (a Workload's pod set
+// template is not defaulted), and here the limit counts, as Kueue counts it.
 func podGPUs(spec *corev1.PodSpec, gpuNames map[string]bool) int64 {
-	of := func(c *corev1.Container) int64 {
-		var n int64
-		for name := range gpuNames {
-			rn := corev1.ResourceName(name)
-			q, ok := c.Resources.Requests[rn]
-			if !ok {
-				q, ok = c.Resources.Limits[rn]
-			}
-			if ok {
-				n += q.Value()
-			}
+	var n int64
+	for name, milli := range PodRequestsMilli(spec) {
+		if gpuNames[name] {
+			n += (milli + 999) / 1000
 		}
-		return n
 	}
-	var regular, initMax int64
-	for i := range spec.Containers {
-		regular += of(&spec.Containers[i])
-	}
-	for i := range spec.InitContainers {
-		initMax = max(initMax, of(&spec.InitContainers[i]))
-	}
-	return max(regular, initMax)
+	return n
 }
 
 // workloadReserved reports whether Kueue has reserved quota for a Workload or

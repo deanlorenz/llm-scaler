@@ -44,12 +44,12 @@ var _ = Describe("Lender waiting from its pending Workloads", func() {
 	}
 	borrower := member("a", QueueResource{Nominal: 0, Reserved: 4, Borrowed: 4})
 
-	It("carries the lender's highest Workload priority, reserved or pending, for the reclaim judgement", func() {
+	It("carries the lender's priority as read, for the reclaim judgement", func() {
 		l := withReclaim(lender(pendingGPU(2, 1000), pendingGPU(9, 50)), ReclaimLowerPriority)
-		l.ReservedPriority = p(500)
+		l.LenderPriority = p(50)
 		got := lenderOf(l, borrower)
-		Expect(got).To(Equal(LenderState{Queue: "lender", Waiting: true, LentOut: 5, Reclaim: ReclaimLowerPriority,
-			Unused: 5, Priority: p(1000)}))
+		Expect(got).To(Equal(LenderState{Queue: "lender", Waiting: true, Reclaim: ReclaimLowerPriority,
+			Unused: 5, Priority: p(50)}))
 	})
 
 	It("carries no priority when none of its Workloads was read", func() {

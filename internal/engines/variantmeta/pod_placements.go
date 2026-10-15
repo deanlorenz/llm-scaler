@@ -64,6 +64,19 @@ func replicaRequests(acc scaletarget.ScaleTargetAccessor) map[string]int64 {
 	return out
 }
 
+// priorityClass is the Kueue priority class of one replica's Workload, read
+// from its leader template, or its worker template when it has no leader
+// (domain.VariantMetadata.PriorityClass). Empty when there is no template.
+func priorityClass(acc scaletarget.ScaleTargetAccessor) string {
+	if acc == nil {
+		return ""
+	}
+	if t := acc.GetLeaderPodTemplateSpec(); t != nil {
+		return kueue.TemplatePriorityClass(t)
+	}
+	return kueue.TemplatePriorityClass(acc.GetWorkerPodTemplateSpec())
+}
+
 func containsPlacement(ps []domain.PodPlacement, p domain.PodPlacement) bool {
 	for _, q := range ps {
 		if reflect.DeepEqual(q, p) {

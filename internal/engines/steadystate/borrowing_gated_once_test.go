@@ -62,7 +62,7 @@ func TestAGatedBorrowedReplicaIsDebitedOnce(t *testing.T) {
 			NamespaceCohorts: map[string][]string{"a": {"c"}, "b": {"c"}},
 			SharedPools: []allocation.SharedPoolChunk{{Cohort: "c", Flavor: "h100", Resource: "nvidia.com/gpu",
 				FlavorPlacement: flavor, Free: 24, ReadAt: now,
-				Lenders: []kueue.LenderState{{Queue: "lender", CanReclaim: true, LentOut: 24}}}},
+				Lenders: []kueue.LenderState{{Queue: "lender"}}}},
 		}
 		physical := &allocation.ResourceConstraints{ProviderName: allocation.PhysicalLimiterName,
 			Pools: map[string]allocation.ResourcePool{"H100": {Limit: 24}}}

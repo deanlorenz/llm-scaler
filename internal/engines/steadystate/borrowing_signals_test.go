@@ -144,7 +144,7 @@ var _ = Describe("what on-call sees of borrowing, engine side", func() {
 	It("hands nothing back to a waiting lender: it stops new borrowing and reports the wait", func() {
 		rec := record.NewFakeRecorder(10)
 		e := &Engine{Config: config.NewTestConfig(), Recorder: rec}
-		lender := kueue.LenderState{Queue: "team-b-cq", Waiting: true, LentOut: 8}
+		lender := kueue.LenderState{Queue: "team-b-cq", Waiting: true}
 		reqs := model(time.Time{})
 		var cs []*allocation.ResourceConstraints
 		var ds []domain.VariantDecision

@@ -130,8 +130,8 @@ var _ = Describe("Reader borrowing figures", func() {
 		Expect(snap.SharedPools).To(Equal([]config.ExternalSharedPool{{
 			Cohort: "c", Flavor: "h100", Resource: "nvidia.com/gpu", Accelerator: h100Product,
 			NodeLabels: map[string]string{"nvidia.com/gpu.product": h100Product}, Free: 21,
-			Lenders: []config.ExternalLender{{Queue: "team-a-cq", LentOut: 9, Reclaim: "Never", Unused: 9},
-				{Queue: "team-b-cq", LentOut: 12, Reclaim: "Never", Unused: 12}},
+			Lenders: []config.ExternalLender{{Queue: "team-a-cq", Reclaim: "Never", Unused: 9},
+				{Queue: "team-b-cq", Reclaim: "Never", Unused: 12}},
 		}}))
 	})
 
@@ -173,9 +173,11 @@ var _ = Describe("Reader borrowing figures", func() {
 	})
 
 	// B3: a cluster whose Workloads cannot be read cluster-wide -- not
-	// served, Forbidden, or a namespace-scoped install -- cannot see a lender
-	// wait, so borrowing is withheld; it wins over the cohort's reasons below
-	// it in the table.
+	// served, or Forbidden -- cannot see a lender wait, so borrowing is
+	// withheld; it wins over the cohort's reasons below it in the table. A
+	// namespace-scoped install reads them cluster-wide too (D1), with the
+	// LocalQueues they queue through, through the grant its prerequisites
+	// make.
 	It("withholds as lenders-unreadable when the Workloads are not read cluster-wide", func() {
 		const v = "v1beta2"
 		reason := func(c client.Client, opts Options) string {
@@ -197,7 +199,20 @@ var _ = Describe("Reader borrowing figures", func() {
 			}).Build()
 		Expect(reason(denied, Options{})).To(Equal(string(ReasonLendersUnreadable)), "Forbidden is not absent")
 		Expect(reason(newCohortClient(v, docsExample(v, "cohortName")...), Options{Namespace: "team-a"})).
-			To(Equal(string(ReasonLendersUnreadable)), "a namespace-scoped controller sees its own namespace only")
+			To(Equal(string(ReasonNominalLentOut)), "a namespace-scoped controller reads the Workloads cluster-wide (D1)")
+		lqDenied := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithRESTMapper(cohortMapper(v)).
+			WithObjects(docsExample(v, "cohortName")...).
+			WithInterceptorFuncs(interceptor.Funcs{
+				List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+					if u, ok := list.(*unstructured.UnstructuredList); ok && u.GetKind() == KindLocalQueue+"List" &&
+						(&client.ListOptions{}).ApplyOptions(opts).Namespace == "" {
+						return apierrors.NewForbidden(schema.GroupResource{Group: Group, Resource: "localqueues"}, "", errors.New("no RBAC"))
+					}
+					return cl.List(ctx, list, opts...)
+				},
+			}).Build()
+		Expect(reason(lqDenied, Options{Namespace: "team-a"})).To(Equal(string(ReasonLendersUnreadable)),
+			"a namespace-scoped controller that may not list LocalQueues cluster-wide cannot attribute a lender's wait")
 		Expect(reason(newCohortClient(v, docsExample(v, "cohortName")...), Options{})).
 			To(Equal(string(ReasonNominalLentOut)), "control: read cluster-wide, counted")
 	})

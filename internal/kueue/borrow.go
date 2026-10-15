@@ -88,9 +88,11 @@ const (
 	ReasonNotSelected Reason = "not-selected"
 	// ReasonLenderCannotReclaim: the cohort's free pool is lent by queues
 	// Kueue would not reclaim for -- reclaimWithinCohort Never, or
-	// LowerPriority below every borrowing Workload -- and only by them. What
-	// such a lender lends is not counted (it could never get it back), so the
-	// pool counted is 0 although Kueue's is not.
+	// LowerPriority with no priority read -- and only by them. What such a
+	// lender lends is not counted (it could never get it back), so the pool
+	// counted is 0 although Kueue's is not. The namespace stays counted at its
+	// guaranteed figure and borrows nothing new. What a LowerPriority lender
+	// lends is counted only for the models it outranks (Reclaims).
 	ReasonLenderCannotReclaim Reason = "lender-cannot-reclaim"
 )
 
@@ -129,9 +131,12 @@ type QueueState struct {
 	// PendingWorkloads are the queue's pending Workloads that request a GPU
 	// resource, read from the Workloads themselves (readPending).
 	PendingWorkloads []PendingWorkload
-	// ReservedPriority is the highest spec.priority of a Workload Kueue has
-	// reserved quota for in the queue; nil when none was read.
-	ReservedPriority *int32
+	// LenderPriority is the lowest spec.priority of the queue's unfinished
+	// Workloads that request a GPU, pending or reserved; nil when none was
+	// read. As a LowerPriority lender, Kueue reclaims for the queue's incoming
+	// Workload from a borrowed one of lower priority: the lowest it runs is
+	// the cautious stand-in for what it will ask for next.
+	LenderPriority *int32
 	// HasStatus is false when Kueue never wrote status.flavorsReservation.
 	HasStatus bool
 	// FairSharing is true when status.fairSharing is present.
@@ -179,35 +184,33 @@ func (c CoQuota) lent() (lent, kept int64) {
 	return lent, c.Nominal - lent
 }
 
+// Reclaims is the one definition of whether Kueue takes back, for a lender on
+// reclaimWithinCohort policy, what a borrower holds: Any always does, Never
+// never does, and LowerPriority does when the lender's priority is above the
+// borrower's. A priority not known (nil) is read as Never, the side that
+// borrows less.
+func Reclaims(policy string, lender, borrower *int32) bool {
+	switch policy {
+	case ReclaimAny:
+		return true
+	case ReclaimLowerPriority:
+		return lender != nil && borrower != nil && *lender > *borrower
+	}
+	return false
+}
+
 // CanReclaim reports whether the queue may preempt borrowers to get its
-// nominal quota back, whatever they run: only under ReclaimAny.
+// nominal quota back, whatever they run (Reclaims with no priority known):
+// only under ReclaimAny.
 //
 // ReclaimLowerPriority is read as ReclaimNever for the guaranteed and
 // within-nominal figures: Kueue then preempts only borrowed workloads of lower
 // priority than the one it admits, and with serving above batch (the
 // documented setup) a batch lender never reclaims from serving. As a lender,
 // whether Kueue reclaims for a LowerPriority queue depends on whose Workloads
-// borrow, which the caller judges (LenderState.Priority).
+// borrow, which the engine judges per model (LenderState.Priority).
 func (q QueueState) CanReclaim() bool {
-	return q.Reclaim == ReclaimAny
-}
-
-// highestPriority is the highest spec.priority among the queue's Workloads
-// read: those Kueue reserved quota for, and its pending ones that request a GPU.
-// Nil when none was read.
-func (q QueueState) highestPriority() *int32 {
-	var out *int32
-	if q.ReservedPriority != nil {
-		p := *q.ReservedPriority
-		out = &p
-	}
-	for _, w := range q.PendingWorkloads {
-		if out == nil || w.Priority > *out {
-			p := w.Priority
-			out = &p
-		}
-	}
-	return out
+	return Reclaims(q.Reclaim, nil, nil)
 }
 
 // CohortState is one Cohort object. A cohort named by a ClusterQueue with no
@@ -321,22 +324,16 @@ type LenderState struct {
 	Queue string
 	// Waiting is LenderWaiting in this read, not debounced.
 	Waiting bool
-	// CanReclaim is whether Kueue preempts borrowers for it whatever they run:
-	// reclaimWithinCohort Any.
-	CanReclaim bool
-	// LentOut is the nominal it does not hold now: max(0, N - U), the most it
-	// may be waiting for.
-	LentOut int
 	// Reclaim is its spec.preemption.reclaimWithinCohort: whether Kueue would
-	// take back what it lends, judged against the borrowers' Workloads.
+	// take back what it lends (Reclaims).
 	Reclaim string
 	// Unused is what it lends and does not use itself:
 	// max(0, N - max(U, G)), its part of the cohort's free pool before what
 	// the borrowers hold is taken off.
 	Unused int
-	// Priority is the highest spec.priority among its Workloads read, reserved
-	// or pending: under LowerPriority, Kueue reclaims for it from a borrowed
-	// Workload of lower priority. Nil when none was read.
+	// Priority is QueueState.LenderPriority: under LowerPriority, Kueue
+	// reclaims for it from a borrowed Workload of lower priority. Nil when
+	// none was read.
 	Priority *int32
 }
 
@@ -474,8 +471,12 @@ func ComputeBorrowing(t Topology, stale bool) Borrowing {
 				}
 				// An inactive queue still lends (cohortFree counts it), but
 				// never waits. A pending Workload counts only on the flavors
-				// its node selection allows (B6).
-				waiting := !q.Inactive && LenderWaitingOn(q, key, t.Flavors[key.Flavor].NodeLabels)
+				// its node selection allows (B6), and only when the cohort's
+				// free pool does not cover it (A8): Kueue admits one it covers
+				// without anything given back, and PendingGPUs keeps new
+				// borrowing off it meanwhile.
+				need := lenderPendingOn(q, key, t.Flavors[key.Flavor].NodeLabels)
+				waiting := !q.Inactive && need > 0 && need > p.Free
 				if !q.Inactive {
 					p.PendingGPUs = addCapped(p.PendingGPUs, pendingOn(q, key, t.Flavors[key.Flavor].NodeLabels))
 				}
@@ -483,8 +484,7 @@ func ComputeBorrowing(t Topology, stale bool) Borrowing {
 					p.WaitingLenders = append(p.WaitingLenders, q.Name)
 				}
 				p.Lenders = append(p.Lenders, LenderState{Queue: q.Name, Waiting: waiting,
-					CanReclaim: q.CanReclaim(), LentOut: max(0, r.Nominal-r.Reserved),
-					Reclaim: q.Reclaim, Unused: r.unused(), Priority: q.highestPriority()})
+					Reclaim: q.Reclaim, Unused: r.unused(), Priority: q.LenderPriority})
 			}
 			slices.Sort(p.WaitingLenders)
 			slices.SortFunc(p.Lenders, func(a, b LenderState) int { return strings.Compare(a.Queue, b.Queue) })

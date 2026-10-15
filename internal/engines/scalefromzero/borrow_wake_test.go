@@ -33,8 +33,8 @@ func (p borrowingProvider) ComputeConstraints(context.Context, map[string]int, m
 			Cohort: "c", Flavor: "h100", Resource: "nvidia.com/gpu", Free: 8,
 			FlavorPlacement: kueue.FlavorPlacement{AcceleratorType: "H100"},
 			Lenders: []kueue.LenderState{
-				{Queue: "idle-a", CanReclaim: true, LentOut: 4},
-				{Queue: "idle-b", CanReclaim: false, LentOut: 4},
+				{Queue: "idle-a"},
+				{Queue: "idle-b"},
 			},
 		}},
 	}, nil

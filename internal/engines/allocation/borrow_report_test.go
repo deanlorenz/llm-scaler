@@ -70,7 +70,7 @@ var _ = Describe("what on-call sees of borrowing", func() {
 	})
 
 	Describe("the governor's status of a variant", func() {
-		lender := kueue.LenderState{Queue: "lender", Waiting: true, LentOut: 8}
+		lender := kueue.LenderState{Queue: "lender", Waiting: true}
 		cycle := func(g *BorrowGovernor, now time.Time, reqs []ModelScalingRequest, used int) []BorrowRelease {
 			c := BorrowCycle{Now: now, Constraints: govWorld{readAt: now, lenders: []kueue.LenderState{lender}, used: used}.constraints(),
 				Requests: reqs}

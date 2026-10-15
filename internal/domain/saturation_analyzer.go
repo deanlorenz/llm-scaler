@@ -278,6 +278,9 @@ type VariantReplicaState struct {
 	// ReplicaRequests is what one replica requests of each resource; see
 	// VariantMetadata.ReplicaRequests.
 	ReplicaRequests map[string]int64
+	// PriorityClass is the replica's Kueue priority class; see
+	// VariantMetadata.PriorityClass.
+	PriorityClass string
 	// UnplacedReplicas, UnplacedSince, UnplacedPods and UnplacedAt: see
 	// VariantMetadata.UnplacedReplicas.
 	UnplacedReplicas int

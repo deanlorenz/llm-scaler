@@ -302,7 +302,7 @@ func (r *Reader) read(ctx context.Context) (config.ExternalQuotas, error) {
 	// counted namespace to nominal over a blip.
 	topo.Cohorts, topo.CohortsUnreadable = cohorts, unreadable
 	controllerDown := false
-	var lowest map[string]int32
+	var classPriority, highest map[string]int32
 	if slices.ContainsFunc(slices.Collect(maps.Values(topo.Queues)), func(q QueueState) bool { return q.Cohort != "" }) {
 		// Only borrowing depends on the controller (its version, whether it
 		// runs) and on the Workloads, and only a queue in a cohort can borrow
@@ -318,11 +318,11 @@ func (r *Reader) read(ctx context.Context) (config.ExternalQuotas, error) {
 		metrics.PublishKueueVersionKnown(version.Known)
 		pending, unreadable := r.readPending(ctx, localQueues)
 		topo.LendersUnreadable = unreadable
-		lowest = pending.lowestByNamespace
+		classPriority, highest = pending.classPriority, pending.highestByNamespace
 		for name, q := range topo.Queues {
 			q.PendingWorkloads = pending.byQueue[name]
-			if p, ok := pending.reservedPriority[name]; ok {
-				q.ReservedPriority = &p
+			if p, ok := pending.lenderPriority[name]; ok {
+				q.LenderPriority = &p
 			}
 			topo.Queues[name] = q
 		}
@@ -351,15 +351,16 @@ func (r *Reader) read(ctx context.Context) (config.ExternalQuotas, error) {
 		return config.ExternalQuotas{}, err
 	}
 	return config.ExternalQuotas{
-		Namespace:               byNamespace,
-		Cluster:                 cluster,
-		Borrow:                  borrowRows(borrowing, topo, flavorType, nsQueues),
-		NamespaceGuaranteed:     guaranteed,
-		NamespaceWithinNominal:  within,
-		SharedPools:             sharedPools(borrowing, flavorType),
-		BorrowStale:             cohortsStale,
-		KueueControllerDown:     controllerDown,
-		NamespaceLowestPriority: lowest,
+		Namespace:                byNamespace,
+		Cluster:                  cluster,
+		Borrow:                   borrowRows(borrowing, topo, flavorType, nsQueues),
+		NamespaceGuaranteed:      guaranteed,
+		NamespaceWithinNominal:   within,
+		SharedPools:              sharedPools(borrowing, flavorType),
+		BorrowStale:              cohortsStale,
+		KueueControllerDown:      controllerDown,
+		ClassPriority:            classPriority,
+		NamespaceHighestPriority: highest,
 	}, nil
 }
 
@@ -450,7 +451,7 @@ func externalLenders(ls []LenderState) []config.ExternalLender {
 	}
 	out := make([]config.ExternalLender, 0, len(ls))
 	for _, l := range ls {
-		out = append(out, config.ExternalLender{Queue: l.Queue, Waiting: l.Waiting, CanReclaim: l.CanReclaim, LentOut: l.LentOut,
+		out = append(out, config.ExternalLender{Queue: l.Queue, Waiting: l.Waiting,
 			Reclaim: l.Reclaim, Unused: l.Unused, Priority: l.Priority})
 	}
 	return out

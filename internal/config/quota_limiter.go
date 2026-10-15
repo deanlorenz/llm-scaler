@@ -410,11 +410,17 @@ type ExternalQuotas struct {
 	// borrowing freezes, as on a stale snapshot, and reports every governed
 	// namespace withheld with reason kueue-controller-down.
 	KueueControllerDown bool
-	// NamespaceLowestPriority is, per namespace, the lowest spec.priority of
-	// its Workloads read that request a GPU, reserved or pending. A lender on reclaimWithinCohort LowerPriority gets
-	// back what a borrowing namespace holds only when it outranks one of them.
-	// A namespace none of whose Workloads was read is absent.
-	NamespaceLowestPriority map[string]int32
+	// ClassPriority is, per priority class ("<group>/<name>", or "none"; see
+	// kueue.TemplatePriorityClass), the highest spec.priority of an unfinished
+	// GPU Workload of that class. A lender on reclaimWithinCohort LowerPriority
+	// gets back what a model holds only when it outranks the model's own
+	// Workloads, whose priority is looked up here by the model's class.
+	ClassPriority map[string]int32
+	// NamespaceHighestPriority is, per namespace, the highest spec.priority of
+	// its unfinished GPU Workloads: the priority of a model whose pod template
+	// names no class, read cautiously. A namespace none of whose Workloads was
+	// read is absent.
+	NamespaceHighestPriority map[string]int32
 }
 
 // ExternalSharedPool is one cohort's free capacity of one flavor and GPU
@@ -452,16 +458,12 @@ type ExternalLender struct {
 	// Waiting is the raw per-read predicate: a pending Workload that asks for
 	// this GPU resource and fits within the nominal it does not hold.
 	Waiting bool `json:"waiting,omitempty"`
-	// CanReclaim is whether Kueue preempts borrowers for it (Any, or
-	// LowerPriority while its pending Workload outranks the borrowers).
-	CanReclaim bool `json:"canReclaim,omitempty"`
-	// LentOut is the nominal it does not hold now.
-	LentOut int `json:"lentOut"`
-	// Reclaim is its reclaimWithinCohort policy.
+	// Reclaim is its reclaimWithinCohort policy (kueue.Reclaims).
 	Reclaim string `json:"reclaim,omitempty"`
 	// Unused is what it lends and does not use itself.
 	Unused int `json:"unused,omitempty"`
-	// Priority is the highest priority of its Workloads read; nil when none.
+	// Priority is the lowest priority of its unfinished GPU Workloads, pending
+	// or reserved; nil when none was read.
 	Priority *int32 `json:"priority,omitempty"`
 }
 

@@ -41,6 +41,11 @@ var _ = Describe("Reader reads a lender as waiting from its pending Workloads", 
 		// team-a holds 10 of nominal 9: it borrows 1.
 		res := a.Object["status"].(map[string]interface{})["flavorsReservation"].([]interface{})[0].(map[string]interface{})["resources"].([]interface{})[0].(map[string]interface{})
 		res["total"], res["borrowed"] = "10", "1"
+		// team-b uses 8 of its 12: the cohort's free pool is 21 - 18 = 3, so a
+		// pending Workload of 4, within team-b's unused 4, is not covered by
+		// it and makes team-b wait (A8).
+		resB := b.Object["status"].(map[string]interface{})["flavorsReservation"].([]interface{})[0].(map[string]interface{})["resources"].([]interface{})[0].(map[string]interface{})
+		resB["total"] = "8"
 		// team-b reports pending Workloads, as Kueue counts any.
 		b.Object["status"].(map[string]interface{})["pendingWorkloads"] = int64(1)
 		if lenderPolicy != "" {
@@ -70,7 +75,13 @@ var _ = Describe("Reader reads a lender as waiting from its pending Workloads", 
 	})
 
 	It("does not wait for a pending GPU Workload larger than its unused nominal", func() {
-		Expect(read("", workload("team-b", "huge", 0, gpus("13"), "")).Waiting).To(BeFalse())
+		Expect(read("", workload("team-b", "huge", 0, gpus("5"), "")).Waiting).To(BeFalse())
+	})
+
+	// A8: Kueue admits a pending Workload the cohort's free pool covers without
+	// anything given back, so it closes nothing.
+	It("does not wait for a pending GPU Workload the cohort's free pool covers", func() {
+		Expect(read("", workload("team-b", "small", 0, gpus("3"), "")).Waiting).To(BeFalse())
 	})
 
 	It("waits for a pending GPU Workload that fits, queued through its LocalQueue", func() {
@@ -83,22 +94,43 @@ var _ = Describe("Reader reads a lender as waiting from its pending Workloads", 
 		Expect(read("", workload("team-b", "running", 0, gpus("4"), "team-b-cq")).Waiting).To(BeFalse())
 	})
 
-	It("carries a LowerPriority lender's policy and its highest Workload priority", func() {
+	finished := func(w *unstructured.Unstructured) *unstructured.Unstructured {
+		st := w.Object["status"].(map[string]interface{})
+		st["conditions"] = append(st["conditions"].([]interface{}),
+			map[string]interface{}{"type": "Finished", "status": "True"})
+		return w
+	}
+	classed := func(w *unstructured.Unstructured, group, name string) *unstructured.Unstructured {
+		Expect(unstructured.SetNestedMap(w.Object, map[string]interface{}{"group": group, "name": name},
+			"spec", "priorityClassRef")).To(Succeed())
+		return w
+	}
+
+	// K1/G1: a LowerPriority lender is judged by the lowest priority it runs or
+	// queues, not its highest; a Finished Workload keeps status.admission and
+	// is neither.
+	It("carries a LowerPriority lender's policy and the lowest priority of its unfinished GPU Workloads", func() {
 		borrower := workload("team-a", "serve", 100, gpus("10"), "team-a-cq")
-		l := read("LowerPriority", workload("team-b", "train", 1000, gpus("4"), ""), borrower)
+		l := read("LowerPriority",
+			workload("team-b", "train", 1000, gpus("4"), ""),
+			workload("team-b", "eval", 600, gpus("2"), "team-b-cq"),
+			finished(workload("team-b", "done", 0, gpus("2"), "team-b-cq")),
+			borrower)
 		Expect(l.Waiting).To(BeTrue())
 		Expect(l.Reclaim).To(Equal("LowerPriority"))
-		Expect(l.CanReclaim).To(BeFalse(), "only Any reclaims whatever the borrower runs")
-		Expect(l.Priority).To(HaveValue(Equal(int32(1000))))
+		Expect(l.Priority).To(HaveValue(Equal(int32(600))), "the finished Workload at 0 is not the lender's")
 	})
 
-	It("reads each namespace's lowest Workload priority, reserved or pending with a GPU request", func() {
+	It("reads each class's priority and each namespace's highest, from unfinished GPU Workloads", func() {
 		read("",
-			workload("team-a", "serve", 100, gpus("8"), "team-a-cq"),
+			classed(workload("team-a", "serve", 1000, gpus("8"), "team-a-cq"), WorkloadPriorityClassGroup, "serving"),
 			workload("team-a", "canary", 40, gpus("2"), "team-a-cq"),
-			workload("team-a", "cpu-job", 1, cpu, ""),
-			workload("team-b", "train", 1000, gpus("4"), ""))
-		Expect(snap.NamespaceLowestPriority).To(Equal(map[string]int32{"team-a": 40, "team-b": 1000}),
-			"a pending CPU-only Workload is no GPU borrower")
+			workload("team-a", "cpu-job", 5000, cpu, ""),
+			finished(workload("team-a", "old", 9000, gpus("2"), "team-a-cq")),
+			workload("team-b", "train", 500, gpus("4"), ""))
+		Expect(snap.ClassPriority).To(Equal(map[string]int32{
+			WorkloadPriorityClassGroup + "/serving": 1000, PriorityClassNone: 500}))
+		Expect(snap.NamespaceHighestPriority).To(Equal(map[string]int32{"team-a": 1000, "team-b": 500}),
+			"a CPU-only Workload is no GPU borrower, and a finished one no borrower at all")
 	})
 })

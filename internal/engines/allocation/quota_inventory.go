@@ -530,13 +530,12 @@ func (q *QuotaInventory) computeBorrowing(ctx context.Context, ext config.Extern
 		if heldWithheld[ns] != "" || !pools.cannotReclaimOnly(rowCohorts(ext.Borrow[ns])) {
 			continue
 		}
+		// Counted, but 0 this cycle (A2): the namespace stays at its
+		// guaranteed figure and borrows nothing new, as under lender-waiting.
+		// Dropping it from the counted set would cap it at nominal instead,
+		// and order growth into nominal a peer holds and it cannot reclaim.
 		reason := string(kueue.ReasonLenderCannotReclaim)
 		view.withheld[ns] = reason
-		if !holdsBorrowed(ext.Borrow[ns]) {
-			delete(counted, ns)
-			delete(frozen, ns)
-			continue
-		}
 		frozen[ns], heldWithheld[ns] = true, reason
 	}
 	if len(counted) == 0 {
@@ -573,6 +572,9 @@ func (q *QuotaInventory) computeBorrowing(ctx context.Context, ext config.Extern
 				b.WithinNominal = within.NamespaceQuotas[ns][key]
 			}
 			b.Frozen, b.Withheld = frozen[ns], heldWithheld[ns]
+			if p, ok := ext.NamespaceHighestPriority[ns]; ok {
+				b.HighestPriority = &p
+			}
 			perType[accType] = b
 		}
 		view.byNS[ns] = perType
@@ -595,13 +597,14 @@ func (q *QuotaInventory) computeBorrowing(ctx context.Context, ext config.Extern
 		}
 		lenders := make([]kueue.LenderState, 0, len(p.Lenders))
 		for _, l := range p.Lenders {
-			lenders = append(lenders, kueue.LenderState{Queue: l.Queue, Waiting: l.Waiting, CanReclaim: l.CanReclaim, LentOut: l.LentOut,
+			lenders = append(lenders, kueue.LenderState{Queue: l.Queue, Waiting: l.Waiting,
 				Reclaim: l.Reclaim, Unused: l.Unused, Priority: l.Priority})
 		}
 		view.pools = append(view.pools, SharedPoolChunk{
 			Cohort: p.Cohort, Flavor: p.Flavor, Resource: p.Resource, Free: pools.free[poolKey(p)],
 			Lenders: lenders, ReadAt: ext.ObservedAt,
 			PendingGPUs: p.PendingGPUs, CoFree: maps.Clone(p.CoFree),
+			Restricted: slices.Clone(pools.restricted[poolKey(p)]), ClassPriority: maps.Clone(ext.ClassPriority),
 			FlavorPlacement: kueue.FlavorPlacement{
 				AcceleratorType: p.Accelerator, NodeLabels: maps.Clone(p.NodeLabels), Tolerations: slices.Clone(p.Tolerations),
 			},
@@ -615,6 +618,10 @@ func (q *QuotaInventory) computeBorrowing(ctx context.Context, ext config.Extern
 // free in Kueue and count nothing only because their lenders cannot reclaim.
 type countedPools struct {
 	free map[string]int
+	// restricted is, per pool, what LowerPriority lenders lend: counted in
+	// free, and drawable only by a model they outrank
+	// (SharedPoolChunk.drawable).
+	restricted map[string][]PriorityLend
 	// zeroed is, per cohort, whether a pool of it was zeroed that way; open
 	// is whether one counts anything.
 	zeroed, open map[string]bool
@@ -628,11 +635,16 @@ func poolKey(p config.ExternalSharedPool) string {
 // reclaimablePools counts, per shared pool, only what Kueue would reclaim for
 // its lender: a lender's unused nominal (ExternalLender.Unused) is borrowable
 // only when, were the lender to need it back, Kueue would preempt the
-// borrowers for it (lenderReclaims). Borrowing what a lender on
+// borrowers for it (kueue.Reclaims). Borrowing what a lender on
 // reclaimWithinCohort Never lends would hold its nominal until the borrower
 // shrinks on its own, so that part leaves the pool:
 //
 //	free = max(0, Kueue's free - Σ Unused of the lenders that cannot reclaim)
+//
+// A lender on LowerPriority reclaims only from a borrowed Workload of lower
+// priority than its own (K1): what it lends stays in free but is restricted to
+// the models it outranks, judged per model when a replica is placed
+// (SharedPoolChunk.drawable). One without a priority read cannot reclaim.
 //
 // The borrowers are the namespaces counted (the frozen withheld ones aside),
 // and their own queues are not lenders here: their unused nominal is theirs.
@@ -640,26 +652,25 @@ func poolKey(p config.ExternalSharedPool) string {
 // cautious side: Kueue does not say whose lending a borrowed GPU is.
 func reclaimablePools(ext config.ExternalQuotas, counted map[string]bool, heldWithheld map[string]string) countedPools {
 	own := map[string]bool{}
-	// lowest is, per cohort, the lowest priority of a Workload of a namespace
-	// that borrows in it.
-	lowest := map[string]*int32{}
 	for ns := range counted {
 		if heldWithheld[ns] != "" {
 			continue
 		}
-		p, known := ext.NamespaceLowestPriority[ns]
 		for _, r := range ext.Borrow[ns] {
 			own[r.Queue] = true
-			if have := lowest[r.Cohort]; known && (have == nil || p < *have) {
-				lowest[r.Cohort] = &p
-			}
 		}
 	}
-	out := countedPools{free: map[string]int{}, zeroed: map[string]bool{}, open: map[string]bool{}}
+	out := countedPools{free: map[string]int{}, restricted: map[string][]PriorityLend{},
+		zeroed: map[string]bool{}, open: map[string]bool{}}
 	for _, p := range ext.SharedPools {
 		cannot := 0
 		for _, l := range p.Lenders {
-			if !own[l.Queue] && !lenderReclaims(l, lowest[p.Cohort]) {
+			switch {
+			case own[l.Queue] || l.Unused <= 0 || kueue.Reclaims(l.Reclaim, nil, nil):
+			case l.Reclaim == kueue.ReclaimLowerPriority && l.Priority != nil:
+				out.restricted[poolKey(p)] = append(out.restricted[poolKey(p)],
+					PriorityLend{Queue: l.Queue, Below: *l.Priority, GPUs: l.Unused})
+			default:
 				cannot += l.Unused
 			}
 		}
@@ -686,23 +697,6 @@ func (c countedPools) cannotReclaimOnly(cohorts []string) bool {
 		zeroed = zeroed || c.zeroed[co]
 	}
 	return zeroed
-}
-
-// lenderReclaims reports whether Kueue would take back for lender l what it
-// lends to the borrowers, whose lowest Workload priority is borrowers (nil
-// when none was read). reclaimWithinCohort Any always does and Never never
-// does. Under LowerPriority Kueue preempts a borrowed Workload of lower
-// priority than the lender's, so it does when the lender outranks at least
-// one borrowing Workload; with either priority unknown it is read as Never,
-// the side that borrows less.
-func lenderReclaims(l config.ExternalLender, borrowers *int32) bool {
-	switch l.Reclaim {
-	case kueue.ReclaimAny:
-		return true
-	case kueue.ReclaimLowerPriority:
-		return l.Priority != nil && borrowers != nil && *l.Priority > *borrowers
-	}
-	return false
 }
 
 // pinLabels is, for one type of a namespace, whether a variant must pin a

@@ -40,7 +40,7 @@ func (w govWorld) constraints() []*ResourceConstraints {
 
 // never is a waiting lender that cannot reclaim.
 func never(lentOut int) kueue.LenderState {
-	return kueue.LenderState{Queue: "lender", Waiting: true, LentOut: lentOut, Reclaim: kueue.ReclaimNever}
+	return kueue.LenderState{Queue: "lender", Waiting: true, Reclaim: kueue.ReclaimNever}
 }
 
 // seenPast runs c once at an earlier time, so the namespaces c sees past
@@ -136,14 +136,14 @@ var _ = Describe("BorrowGovernor", func() {
 
 			// The lender stops waiting: the raw block lifts at once, the
 			// cooldown its debounced wait started stays.
-			w.lenders = []kueue.LenderState{{Queue: "lender", LentOut: 8, Reclaim: kueue.ReclaimNever}}
+			w.lenders = []kueue.LenderState{{Queue: "lender", Reclaim: kueue.ReclaimNever}}
 			w.readAt = t0.Add(90 * time.Second)
 			run(g, w, t0.Add(90*time.Second), reqs)
 			Expect(g.BlockedCohorts(t0.Add(90*time.Second))).To(HaveKey("c"), "the cohort cooldown after the wait is kept")
 			Expect(g.BlockedCohorts(t0.Add(61*time.Second + settings.Cooldown))).To(BeEmpty())
 
 			fresh := NewBorrowGovernor(settings)
-			run(fresh, govWorld{lenders: []kueue.LenderState{{Queue: "lender", LentOut: 8}}, used: 32, readAt: t0}, t0, reqs)
+			run(fresh, govWorld{lenders: []kueue.LenderState{{Queue: "lender"}}, used: 32, readAt: t0}, t0, reqs)
 			Expect(fresh.BlockedCohorts(t0)).To(BeEmpty(), "control: no lender waits, nothing blocked")
 		})
 
@@ -164,7 +164,7 @@ var _ = Describe("BorrowGovernor", func() {
 
 		It("releases nothing for a lender that can reclaim, and closes the cohort to new borrowing", func() {
 			l := never(8)
-			l.CanReclaim = true
+			l.Reclaim = kueue.ReclaimAny
 			g, rel, now := warm(govWorld{lenders: []kueue.LenderState{l}, used: 32}, []ModelScalingRequest{govModel("m", 4, 8)})
 			Expect(rel).To(BeEmpty(), "Kueue preempts for it")
 			Expect(g.BlockedCohorts(now)).To(HaveKey("c"))
@@ -176,7 +176,7 @@ var _ = Describe("BorrowGovernor", func() {
 		w := govWorld{lenders: []kueue.LenderState{never(32)}, used: 32}
 		g, _, now := warm(w, reqs)
 		w.stale = true
-		w.lenders = []kueue.LenderState{{Queue: "lender", LentOut: 32}} // the frozen read
+		w.lenders = []kueue.LenderState{{Queue: "lender"}} // the frozen read
 		w.readAt = now.Add(time.Hour)
 		for i := 0; i < 3; i++ {
 			now = now.Add(30 * time.Second)
@@ -189,7 +189,7 @@ var _ = Describe("BorrowGovernor", func() {
 		It("keeps the cohort closed for the cooldown after its lender stopped waiting", func() {
 			w := govWorld{lenders: []kueue.LenderState{never(8)}, used: 32}
 			g, _, now := warm(w, []ModelScalingRequest{govModel("m", 4, 8)})
-			w.lenders = []kueue.LenderState{{Queue: "lender", LentOut: 0}}
+			w.lenders = []kueue.LenderState{{Queue: "lender"}}
 			w.readAt = now.Add(30 * time.Second)
 			run(g, w, now.Add(30*time.Second), []ModelScalingRequest{govModel("m", 3, 8)})
 			Expect(g.WaitingLenders(now.Add(30*time.Second))).To(BeEmpty(), "reset when the lender stops waiting")

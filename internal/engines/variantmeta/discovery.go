@@ -135,6 +135,7 @@ func Discover(
 			TopologyKey:     scaletarget.ExclusiveTopology(scaleTarget),
 			Placements:      podPlacements(scaleTarget),
 			ReplicaRequests: replicaRequests(scaleTarget),
+			PriorityClass:   priorityClass(scaleTarget),
 			MinReplicas:     minReplicas,
 			MaxReplicas:     maxReplicas,
 
