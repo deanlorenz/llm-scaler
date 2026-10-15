@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -520,8 +521,8 @@ func preemptedPod(p *corev1.Pod) (time.Time, bool) {
 // preempted Workload, and the UIDs that identify the preemption: the pods it
 // is owned by, so a pod seen through its TerminationTarget condition is not
 // counted twice. A LeaderWorkerSet owner matches its scale target by name and
-// UID; a pod by its name, <deployment>-<hash>-<id> or <lws>-<group>, the
-// longest scale-target prefix winning.
+// UID; a pod by its name, <deployment>-<hash>-<id>, the Deployment matched
+// exactly (modelByPodName).
 func modelOfOwners(requests []allocation.ModelScalingRequest, scaleTargets map[string]scaletarget.ScaleTargetAccessor,
 	ns string, owners []metav1.OwnerReference) (string, []types.UID) {
 	model := ""
@@ -545,7 +546,8 @@ func modelOfOwners(requests []allocation.ModelScalingRequest, scaleTargets map[s
 
 // modelOfPod is "namespace/model" of the variant whose scale target owns a
 // pod: a LeaderWorkerSet's pods by their set-name label, a Deployment's by
-// name prefix.
+// its ReplicaSet owner, <deployment>-<pod-template-hash> exactly, or, with no
+// such owner, by its name's form (modelByPodName).
 func modelOfPod(requests []allocation.ModelScalingRequest, scaleTargets map[string]scaletarget.ScaleTargetAccessor,
 	ns string, p *corev1.Pod) string {
 	if set := p.Labels[lwsv1.SetNameLabelKey]; set != "" {
@@ -557,20 +559,50 @@ func modelOfPod(requests []allocation.ModelScalingRequest, scaleTargets map[stri
 		})
 		return model
 	}
+	if hash := p.Labels[appsv1.DefaultDeploymentUniqueLabelKey]; hash != "" {
+		for _, o := range p.OwnerReferences {
+			if o.Kind != "ReplicaSet" {
+				continue
+			}
+			dep, ok := strings.CutSuffix(o.Name, "-"+hash)
+			if !ok {
+				continue
+			}
+			return deploymentModel(requests, scaleTargets, ns, dep)
+		}
+	}
 	return modelByPodName(requests, scaleTargets, ns, p.Name)
 }
 
-// modelByPodName matches a pod name to the longest "<scale target>-" prefix.
+// modelByPodName is "namespace/model" of the Deployment a pod's name names:
+// <deployment>-<pod-template-hash>-<suffix>, neither hash nor suffix holding
+// a dash, so the Deployment is the name less its last two segments, matched
+// exactly. A prefix match picked the wrong model when one scale target's
+// name begins another's ("chat" and "chat-large").
 func modelByPodName(requests []allocation.ModelScalingRequest, scaleTargets map[string]scaletarget.ScaleTargetAccessor,
 	ns, pod string) string {
-	best, bestLen := "", 0
+	i := strings.LastIndexByte(pod, '-')
+	if i <= 0 {
+		return ""
+	}
+	j := strings.LastIndexByte(pod[:i], '-')
+	if j <= 0 {
+		return ""
+	}
+	return deploymentModel(requests, scaleTargets, ns, pod[:j])
+}
+
+// deploymentModel is "namespace/model" of the variant whose scale target is
+// the Deployment named name; "" when none is.
+func deploymentModel(requests []allocation.ModelScalingRequest, scaleTargets map[string]scaletarget.ScaleTargetAccessor,
+	ns, name string) string {
+	model := ""
 	forEachTarget(requests, scaleTargets, ns, func(m string, acc scaletarget.ScaleTargetAccessor) {
-		prefix := acc.GetName() + "-"
-		if strings.HasPrefix(pod, prefix) && len(prefix) > bestLen {
-			best, bestLen = m, len(prefix)
+		if !scaletarget.IsLeaderWorkerSet(acc) && acc.GetName() == name {
+			model = m
 		}
 	})
-	return best
+	return model
 }
 
 // forEachTarget calls f with "namespace/model" and the scale target of every
@@ -698,9 +730,27 @@ func (e *Engine) unplacedPodUIDs(ctx context.Context, reader client.Reader, ns s
 	return out
 }
 
-// fromClusterAutoscaler reports whether the cluster autoscaler reported ev.
+// fromClusterAutoscaler reports whether ev names the cluster autoscaler as its
+// reporter: client-go's event recorder, which the cluster autoscaler uses,
+// writes its component to both Source.Component and ReportingController, so
+// one of them must name it and neither may name another component.
+//
+// Trust assumption (review S2): nothing in a core/v1 Event proves who wrote
+// it. Its reporter fields are whatever its creator set, and a tenant that may
+// create Events in its namespace can write one naming the cluster autoscaler.
+// The read is therefore bounded, not trusted: an Event counts only for a pod
+// of the variant's own unplaced borrowed replicas that it names by UID as
+// well as name (scaleUpPending); its only effect is to stretch that replica's
+// placement timeout to three times its setting, after which the release runs
+// regardless; and Kueue's own reclaim for a waiting lender is untouched. A
+// tenant can thus delay the release of its own borrowed capacity by at most
+// two placement timeouts, never hold another namespace's.
 func fromClusterAutoscaler(ev *corev1.Event) bool {
-	return ev.Source.Component == clusterAutoscaler || ev.ReportingController == clusterAutoscaler
+	src, rep := ev.Source.Component, ev.ReportingController
+	if (src != "" && src != clusterAutoscaler) || (rep != "" && rep != clusterAutoscaler) {
+		return false
+	}
+	return src == clusterAutoscaler || rep == clusterAutoscaler
 }
 
 // eventTime is an Event's latest occurrence: lastTimestamp, else eventTime,

@@ -45,7 +45,17 @@ func TestModelOfPodAndPreemptedPod(t *testing.T) {
 		preempted bool
 		preemptAt time.Time
 	}{
-		{name: "a Deployment's pod, matched by name prefix, preempted",
+		// Go nit: matched by exact identity, not by name prefix. An unmanaged
+		// Deployment whose name begins a managed one's is not that model.
+		{name: "an unmanaged Deployment chat-large's pod is not chat's",
+			pod:   corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "chat-large-7d9f-abc"}},
+			model: ""},
+		{name: "a Deployment's pod, matched by its ReplicaSet owner, whatever its name",
+			pod: corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "renamed-0",
+				Labels:          map[string]string{appsv1.DefaultDeploymentUniqueLabelKey: "7d9f"},
+				OwnerReferences: []metav1.OwnerReference{{Kind: "ReplicaSet", Name: "chat-7d9f"}}}},
+			model: "b/chat"},
+		{name: "a Deployment's pod, matched by its name's form, preempted",
 			pod: corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "chat-7d9f-abc"},
 				Status: corev1.PodStatus{Conditions: terminating("WorkloadEvictedDueToPreempted", "")}},
 			model: "b/chat", preempted: true, preemptAt: at.Time},
@@ -68,24 +78,24 @@ func TestModelOfPodAndPreemptedPod(t *testing.T) {
 		// preemption, is one; any other eviction reason is not, whatever its
 		// message says.
 		{name: "evicted for an admission check is not preempted",
-			pod: corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "chat-a"},
+			pod: corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "chat-7d9f-a"},
 				Status: corev1.PodStatus{Conditions: terminating("WorkloadEvictedDueToAdmissionCheck", "")}},
 			model: "b/chat"},
 		{name: "evicted by a stopped ClusterQueue is not preempted, even with Preempted in its message",
-			pod: corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "chat-b"},
+			pod: corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "chat-7d9f-b"},
 				Status: corev1.PodStatus{Conditions: terminating("WorkloadEvictedDueToClusterQueueStopped",
 					"The ClusterQueue is stopped; the workload was Preempted earlier")}},
 			model: "b/chat"},
 		{name: "evicted as an inactive Workload is not preempted",
-			pod: corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "chat-c"},
+			pod: corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "chat-7d9f-c"},
 				Status: corev1.PodStatus{Conditions: terminating("WorkloadEvictedDueToInactiveWorkload", "Preempted")}},
 			model: "b/chat"},
 		{name: "a reason that only contains Preempted is not the preemption reason",
-			pod: corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "chat-d"},
+			pod: corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "chat-7d9f-d"},
 				Status: corev1.PodStatus{Conditions: terminating("NotPreempted", "")}},
 			model: "b/chat"},
 		{name: "a TerminationTarget condition that is not True is not preempted",
-			pod: corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "chat-x"}, Status: corev1.PodStatus{Conditions: []corev1.PodCondition{
+			pod: corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "chat-7d9f-x"}, Status: corev1.PodStatus{Conditions: []corev1.PodCondition{
 				{Type: kueue.TerminationTargetCondition, Status: corev1.ConditionFalse, Reason: "WorkloadEvictedDueToPreempted"}}}},
 			model: "b/chat"},
 	} {
@@ -101,6 +111,28 @@ func TestModelOfPodAndPreemptedPod(t *testing.T) {
 	}
 	if got := modelOfPod(requests, targets, "other-ns", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "chat-1"}}); got != "" {
 		t.Errorf("a pod of another namespace matched %q", got)
+	}
+}
+
+// Review S2: an Event counts as the cluster autoscaler's only when no
+// reporter field names another component; the read stays bounded, not
+// trusted (fromClusterAutoscaler).
+func TestFromClusterAutoscaler(t *testing.T) {
+	for name, tc := range map[string]struct {
+		component, controller string
+		want                  bool
+	}{
+		"both name it":                         {"cluster-autoscaler", "cluster-autoscaler", true},
+		"the recorder's component alone":       {"cluster-autoscaler", "", true},
+		"the reporting controller alone":       {"", "cluster-autoscaler", true},
+		"one names another component":          {"cluster-autoscaler", "tenant-operator", false},
+		"the other way round":                  {"tenant-operator", "cluster-autoscaler", false},
+		"neither names the cluster autoscaler": {"kubelet", "", false},
+	} {
+		ev := &corev1.Event{Source: corev1.EventSource{Component: tc.component}, ReportingController: tc.controller}
+		if got := fromClusterAutoscaler(ev); got != tc.want {
+			t.Errorf("%s: fromClusterAutoscaler = %t, want %t", name, got, tc.want)
+		}
 	}
 }
 
