@@ -35,6 +35,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/variantmeta"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/gpuusage"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/kueue"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
 	poolutil "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/pool"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
@@ -243,6 +244,9 @@ type placement struct {
 	// lent out (allocation.ReclaimableNominal): a wake into it needs no node
 	// hole. decideWake takes off what this tick's earlier wakes used.
 	reclaimable map[string]int
+	// queueFlavor is SelectionInput.QueueFlavor, read from the constraints
+	// before the wake's within-nominal view drops their borrowing figures.
+	queueFlavor func(accelerator string) *kueue.FlavorPlacement
 }
 
 // placementFor computes the placement basis for namespace; see gpuConstraints.
@@ -312,6 +316,10 @@ func (e *Engine) placementFor(ctx context.Context, namespace string) placement {
 	// to admit the wake, so neither the cluster bounds nor the node view
 	// refuse it for their being in use (W1).
 	p.reclaimable = allocation.ReclaimableNominal(constraints, namespace)
+	// Kueue admits the wake's pods on the queue's flavor, within nominal too:
+	// the node fit lands them only where it does (W5), as the steady placer
+	// fits a guaranteed replica.
+	p.queueFlavor = allocation.QueueFlavorOf(constraints, namespace)
 	record := allocation.DefaultBorrowInFlight
 	constraints = allocation.CreditReclaimable(
 		allocation.WithinNominalNow(constraints, record.Unreserved(now), record.Blocked(now)), p.reclaimable)

@@ -267,6 +267,28 @@ func (bs *borrowState) queueFlavor(ns, acc string) *kueue.FlavorPlacement {
 	return got
 }
 
+// QueueFlavorOf is queueFlavor for the scale-from-zero wake: per accelerator,
+// the flavor Kueue admits ns's replicas on within its queues, which the wake's
+// node fit applies as the steady placer does to a guaranteed replica (W5).
+// Nil when no constraint reads ns's queues (neither counted nor carrying
+// their nominal figures).
+func QueueFlavorOf(constraints []*ResourceConstraints, ns string) func(acc string) *kueue.FlavorPlacement {
+	read := slices.ContainsFunc(constraints, func(c *ResourceConstraints) bool {
+		if c == nil {
+			return false
+		}
+		_, counted := c.NamespaceBorrow[ns]
+		_, nominal := c.NamespaceNominal[ns]
+		return counted || nominal
+	})
+	if !read {
+		return nil
+	}
+	bs := &borrowState{borrow: map[string]map[string]*nsBorrowLeft{ns: nil}}
+	bs.chunks, bs.cohorts = mergeSharedPools(constraints)
+	return func(acc string) *kueue.FlavorPlacement { return bs.queueFlavor(ns, acc) }
+}
+
 // PlacedFlavors is, per "namespace/variant", the Kueue flavor the last pass
 // placed the most of its replicas' GPUs on (guaranteed or borrowed), the
 // first on a tie; nil when it placed none on a flavor. The in-flight ledger

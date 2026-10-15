@@ -770,9 +770,9 @@ func (e *Engine) recordWake(ctx context.Context, group modelGroup, place placeme
 	// view (decideWake builds one for this tick's constraints only).
 	// A wake into lent-out nominal places without a hole (fits); what it took
 	// of the namespace's reclaimable nominal is gone for this tick's next wake.
-	placed, took := place.nodes.PlaceReplicasReclaiming(replicaShapes(group.namespace, selected), true, place.reclaimable)
+	placed, took := place.nodes.PlaceReplicasReclaiming(replicaShapes(group.namespace, selected, place.queueFlavor), true, place.reclaimable)
 	if placed && place.nodes != nil {
-		e.admitInFlight(group.namespace, selected)
+		e.admitInFlight(group.namespace, selected, place.queueFlavor)
 	}
 	e.debitReclaimed(group.namespace, took)
 	if place.unchecked {
@@ -797,6 +797,7 @@ func (e *Engine) selectOrClaim(ctx context.Context, group modelGroup, candidates
 		Admitted:       place.admitted,
 		Nodes:          place.nodes,
 		Reclaimable:    place.reclaimable,
+		QueueFlavor:    place.queueFlavor,
 		RequirePrefill: e.requirePrefill(group),
 	})
 	if len(selected) == 0 && outcome == OutcomeNoCapacity {

@@ -10,6 +10,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/allocation"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/variantmeta"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/kueue"
 )
 
 // A wake is judged against fresh constraints: the usage the cluster reports
@@ -97,8 +98,9 @@ func (e *Engine) decideWake(ctx context.Context, group modelGroup, candidates []
 }
 
 // admitInFlight holds each woken replica's node hole in the in-flight ledger
-// until its pods hold a node. Caller holds wakeMu.
-func (e *Engine) admitInFlight(namespace string, selected []Candidate) {
+// until its pods hold a node, on its queue's flavor when flavorOf names one.
+// Caller holds wakeMu.
+func (e *Engine) admitInFlight(namespace string, selected []Candidate, flavorOf func(string) *kueue.FlavorPlacement) {
 	now := time.Now()
 	for _, c := range selected {
 		if !constants.IsAcceleratorResolved(c.Accelerator) {
@@ -109,7 +111,7 @@ func (e *Engine) admitInFlight(namespace string, selected []Candidate) {
 			placed = func() (int, bool) { return variantmeta.PlacedReplicas(context.Background(), cl, namespace, acc) }
 		}
 		key := namespace + "/" + c.VariantName
-		allocation.DefaultInFlight.Admit(key, shapeOf(namespace, c), 1, 0, placed, now)
+		allocation.DefaultInFlight.Admit(key, shapeOf(namespace, c, flavorOf), 1, 0, placed, now)
 	}
 }
 
