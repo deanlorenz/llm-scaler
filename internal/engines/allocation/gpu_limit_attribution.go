@@ -8,6 +8,7 @@ import (
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/domain"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/kueue"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 )
 
@@ -39,7 +40,26 @@ const (
 	// whole, and its next pair would straddle guaranteed and borrowed
 	// capacity.
 	limitedByPairWhole
+	// limitedByLenderCannotReclaim: a rule, not scarcity: the GPUs the
+	// replica needed were there, lent only by LowerPriority lenders that do
+	// not outrank the model, which Kueue would never reclaim them from.
+	limitedByLenderCannotReclaim
 )
+
+// LenderCannotReclaimName is what LimitedBy carries when a borrowed replica
+// was refused because the only GPUs that would have held it are lent by
+// LowerPriority lenders that do not outrank its model (K1): Kueue could never
+// reclaim them for their lender. It is kueue.ReasonLenderCannotReclaim, the
+// namespace-level reason for the same rule.
+const LenderCannotReclaimName = string(kueue.ReasonLenderCannotReclaim)
+
+// markLenderCannotReclaim records that only lending Kueue could never reclaim
+// from variantName's model held the GPUs it needed.
+func (t gpuLimitTracker) markLenderCannotReclaim(variantName string) {
+	if t != nil {
+		t[variantName] = limitedByLenderCannotReclaim
+	}
+}
 
 // PairBorrowsWholeName is what LimitedBy carries when the rule that a P/D
 // pair borrows only whole (the Kueue borrowing proposal, B9) -- not a pool,
@@ -123,9 +143,12 @@ func applyGPULimitAttribution(
 		switch cause {
 		case limitedByNodeFit:
 			d.LimitedBy = NodeFitLimiterName
-		case limitedByPairWhole:
+		case limitedByPairWhole, limitedByLenderCannotReclaim:
 			// A rule held it back, not scarcity: no warm pool contends.
 			d.LimitedBy = PairBorrowsWholeName
+			if cause == limitedByLenderCannotReclaim {
+				d.LimitedBy = LenderCannotReclaimName
+			}
 			emitter.RecordDecisionsLimitedTotalMetric(d.VariantName, d.Namespace, d.LimitedBy)
 			continue
 		default:

@@ -860,7 +860,7 @@ across a restart, are otherwise visible only in the logs.
 - **Labels**:
   - `variant_name`: Name of the variant
   - `namespace`: Kubernetes namespace
-  - `limiter_name`: Name of the limiter that constrained the decision, or `node-fit` when the pools held the GPUs but no node held a whole replica ([A replica must fit one node](gpu-limiter.md#a-replica-must-fit-one-node))
+  - `limiter_name`: Name of the limiter that constrained the decision, or `node-fit` when the pools held the GPUs but no node held a whole replica ([A replica must fit one node](gpu-limiter.md#a-replica-must-fit-one-node)). Two Kueue borrowing rules, not scarcity, are named too: `pd-pair-borrows-whole` (a P/D pair borrows only whole, and its next pair would straddle guaranteed and borrowed capacity) and `lender-cannot-reclaim` (the free GPUs are lent only by `LowerPriority` lenders that do not outrank the model) ([quota limiter](quota-limiter.md))
 - **Use Case**: Monitor how frequently resource limiters are constraining scaling decisions to understand capacity bottlenecks
 - **Example**:
   ```json

@@ -413,7 +413,9 @@ replica start, or leave the feature off.
   lender's, since Kueue reclaims only for a Workload that outranks the
   borrower; never under `Never`, and never when either priority is unknown.
   One low-priority Workload elsewhere in the cohort opens nothing for the
-  other models. Borrowing what a
+  other models. A model held back only by such lending -- the GPUs are free,
+  and no lender of them outranks it -- is limited by `lender-cannot-reclaim`,
+  not by the pool. Borrowing what a
   lender cannot get back would hold its nominal until the borrower shrinks on
   its own. The borrowing namespaces' own queues are not lenders here: their
   unused nominal is theirs. What the borrowers hold is taken from the counted

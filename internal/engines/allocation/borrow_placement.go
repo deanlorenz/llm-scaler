@@ -388,10 +388,12 @@ type modelPlacer struct {
 	// marked there, as node fit's when the pools held its GPUs and no node
 	// did, else as the pools'.
 	limited gpuLimitTracker
-	// cut is the variant of the last replica refused, and cutByNodes whether
-	// node fit refused it.
-	cut        string
-	cutByNodes bool
+	// cut is the variant of the last replica refused, cutByNodes whether
+	// node fit refused it, and cutOutranked whether only LowerPriority
+	// lending that does not outrank the model held the GPUs it needed.
+	cut          string
+	cutByNodes   bool
+	cutOutranked bool
 	// class is the priority class of the variant being placed
 	// (domain.VariantReplicaState.PriorityClass).
 	class string
@@ -429,7 +431,7 @@ func (p *modelPlacer) placeUnit(picked []string, kByRole map[string]int, variant
 	gpus := func(role string) int { return gpusPerReplicaFromState(stateMap, variantByRole[role]) }
 	for {
 		saved := p.bs.save(p.guaranteed)
-		p.cut, p.cutByNodes, p.straddled = "", false, false
+		p.cut, p.cutByNodes, p.cutOutranked, p.straddled = "", false, false, false
 		if p.tryUnit(picked, kByRole, variantByRole, variants, stateMap) {
 			return true
 		}
@@ -464,9 +466,12 @@ func (p *modelPlacer) markCut() {
 	if p.cut == "" {
 		return
 	}
-	if p.cutByNodes {
+	switch {
+	case p.cutOutranked:
+		p.limited.markLenderCannotReclaim(p.cut)
+	case p.cutByNodes:
 		p.limited.markNodeFit(p.cut)
-	} else {
+	default:
 		p.limited.mark(p.cut)
 	}
 }
@@ -558,7 +563,7 @@ func (p *modelPlacer) replica(variants []variantRecord, stateMap map[string]doma
 // refuse records that variant's replica did not place, and why, and reports
 // false. An empty variant records a refusal that marks nothing.
 func (p *modelPlacer) refuse(variant string, byNodes bool) bool {
-	p.cut, p.cutByNodes = variant, byNodes
+	p.cut, p.cutByNodes, p.cutOutranked = variant, byNodes, false
 	return false
 }
 
@@ -644,6 +649,9 @@ func (p *modelPlacer) placeReplica(variant string, r replicaFit, g int, requests
 		return p.refuse(variant, false), false
 	}
 	byNodes, open := false, false
+	// outranked: a chunk held the GPUs only as LowerPriority lending that
+	// does not outrank the model; scarce: one did not hold them at all.
+	outranked, scarce := false, false
 	chunks := bs.cohortChunks(p.namespace, acc)
 	for _, c := range chunks {
 		if bs.blockedIn != nil && bs.blockedIn(p.namespace, p.modelID, c.Cohort) {
@@ -653,9 +661,17 @@ func (p *modelPlacer) placeReplica(variant string, r replicaFit, g int, requests
 		// The variant's own draw in flight on this chunk is its to re-place.
 		own := bs.credit[p.namespace+"/"+variant][c.key()]
 		// K1: a LowerPriority lender's GPUs only for a model it outranks.
-		if c.drawable(p.class, borrow.priority)+own < need || !coFitsKept(c.CoFree, borrow.coKept, requests) ||
-			!coWithin(borrow.coHeadroom, requests) { // K2b
-			continue // the GPUs, or a co-resource of the flavor's group (B1), would hold it back
+		if c.drawable(p.class, borrow.priority)+own < need {
+			if c.Free+own >= need {
+				outranked = true
+			} else {
+				scarce = true
+			}
+			continue
+		}
+		if !coFitsKept(c.CoFree, borrow.coKept, requests) || !coWithin(borrow.coHeadroom, requests) { // K2b
+			scarce = true
+			continue // a co-resource of the flavor's group (B1) would hold it back
 		}
 		// place commits only when every pod fits, so one call both probes
 		// and debits.
@@ -691,6 +707,14 @@ func (p *modelPlacer) placeReplica(variant string, r replicaFit, g int, requests
 		// Backed off in every cohort it could draw on: a rule, not
 		// scarcity, as for a blocked variant above.
 		return p.refuse("", false), false
+	}
+	if outranked && !scarce && !byNodes {
+		// The GPUs are there, lent only by LowerPriority lenders that do not
+		// outrank the model: Kueue would never reclaim them for their lender.
+		// A rule, not scarcity (lender-cannot-reclaim).
+		p.refuse(variant, false)
+		p.cutOutranked = true
+		return false, false
 	}
 	return p.refuse(variant, byNodes), false
 }
