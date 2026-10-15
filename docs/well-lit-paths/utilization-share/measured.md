@@ -63,6 +63,12 @@ than under `today`.
 
 ## Time to first token
 
+**How it is measured.** Every time to first token on this page is measured at
+the client: by the load generator, on streamed responses, sent through the
+gateway. So it includes router queueing, the KV transfer on P/D, and the
+engine. The load generator runs in the cluster, so it does not include the
+network between a user and the cluster.
+
 ![p95 (bar) and p50 (tick) TTFT per rise window, per arm](figures/ttft-rises.svg)
 
 Per rise, in ms. Each row is ONE scale-up event, so the requests inside a
@@ -493,6 +499,7 @@ differences above.
 | schedule | 0.25 rps each at rest. B bursts at 1 rps from 120 s to 1320 s; A bursts at 4 rps from 1620 s to 2820 s. 6810 requests per arm |
 | router | EPP v0.11.0, flow control on, `defaultRequestTTL: 60s` |
 | engine CPU | 4 CPU requested per Pod, no CPU limit |
+| time to first token | measured at the client: the load generator, on streamed responses, through the gateway |
 | guards | each arm was checked for outside disruption: no engine preempted, nothing outside the benchmark scaled a role down, and no role at 0 ready Pods for over 120 s. All three arms passed |
 
 ### Time to first token, per rise (ms)
