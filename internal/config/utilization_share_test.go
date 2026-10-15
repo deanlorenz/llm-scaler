@@ -454,7 +454,7 @@ var _ = Describe("Config.UtilizationShareWakeScores", func() {
 		Expect(math.IsInf(zCl, 1)).To(BeTrue(), "a tenant-set weight claims nothing cluster-wide")
 	})
 
-	It("weighs the model under its tiers, the highest weight winning", func() {
+	It("weighs the model under the tier the planner uses, the smallest named", func() {
 		c := NewTestConfig()
 		p := parsePolicy(quotaLimiters)
 		p.Optimizer = &OptimizerConfig{Type: OptimizerTypeUtilizationShare}
@@ -463,12 +463,20 @@ var _ = Describe("Config.UtilizationShareWakeScores", func() {
 			"bulk":            {WeightClass: "best-effort"},
 			"hot":             {WeightClass: "critical"},
 		})
-		crit := DefaultWeightClasses["critical"]
-		for _, tiers := range [][]string{{"hot"}, {"bulk", "hot"}, {"hot", "bulk"}} {
-			zNs, zCl, ok := c.UtilizationShareWakeScores("ns", "m", tiers)
+		for _, tc := range []struct {
+			tiers []string
+			class string
+		}{
+			{[]string{"hot"}, "critical"},
+			{[]string{"bulk", "hot"}, "best-effort"},
+			{[]string{"hot", "", "bulk"}, "best-effort"},
+			{nil, "standard"},
+		} {
+			want := -DefaultWeightClasses[tc.class]
+			zNs, zCl, ok := c.UtilizationShareWakeScores("ns", "m", tc.tiers)
 			Expect(ok).To(BeTrue())
-			Expect(zNs).To(Equal(-crit), "tiers %v", tiers)
-			Expect(zCl).To(Equal(-crit), "tiers %v", tiers)
+			Expect(zNs).To(Equal(want), "tiers %v", tc.tiers)
+			Expect(zCl).To(Equal(want), "tiers %v", tc.tiers)
 		}
 	})
 

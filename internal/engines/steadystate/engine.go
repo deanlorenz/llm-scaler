@@ -1004,18 +1004,19 @@ func (e *Engine) modelOutputSeed(
 // Ties break on the lexicographically smallest name so a conflict resolves the
 // same way on every cycle and every replica of the controller: an allocation that
 // flips between tiers as map order changes would be worse than either tier.
+//
+// The choice is config.ModelPolicyTier, shared with the scale-from-zero wake
+// claim so the two cannot weigh a model under different tiers.
 func modelPolicy(vas []llmdVariantAutoscalingV1alpha1.VariantAutoscaling) (string, []string) {
-	var named []string
+	named := make([]string, 0, len(vas))
 	for i := range vas {
-		if p := vas[i].Spec.ScalingPolicy; p != "" && !slices.Contains(named, p) {
-			named = append(named, p)
-		}
+		named = append(named, vas[i].Spec.ScalingPolicy)
 	}
-	if len(named) == 0 {
+	tier := config.ModelPolicyTier(named)
+	if tier == "" {
 		return "", nil
 	}
-	slices.Sort(named)
-	return named[0], named
+	return tier, config.ModelTiers(named)
 }
 
 // variantTiers returns every policy tier a model's variants selected

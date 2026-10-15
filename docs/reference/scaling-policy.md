@@ -1707,7 +1707,8 @@ Two failure modes resolve deterministically, and both are reported:
   way instead of flipping with map order. This picks the thresholds. Two
   settings look at every tier instead: the model parks only if every tier
   allows it, and it waits for prefill if any tier sets `requirePrefill: true`.
-  A utilization-share wake claims with the highest weight among its tiers.
+  The utilization-share weight comes from the same tier as the thresholds,
+  for the planner and for a scale-from-zero wake alike.
 
 ### 4. Per-Model Overrides
 

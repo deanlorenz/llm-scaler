@@ -53,6 +53,19 @@ func ModelTiers(named []string) []string {
 	return tiers
 }
 
+// ModelPolicyTier returns the one tier a model's thresholds and weight resolve
+// under, given the tier each of its variants names: the lexicographically
+// smallest named tier, or "" (the default entry and its defaultPolicy) when
+// none names one. Smallest, so a conflict resolves the same way on every cycle
+// and every replica.
+//
+// The steady-state planner and a scale-from-zero wake claim both use it: the
+// claim wins back what the planner would give, so both must weigh the model
+// under the same tier.
+func ModelPolicyTier(named []string) string {
+	return ModelTiers(named)[0]
+}
+
 // PolicyEntryKey reports whether a ConfigMap entry names a policy tier, rather
 // than the default entry or a per-model override.
 //
