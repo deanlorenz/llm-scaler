@@ -285,41 +285,45 @@ func (r fixedRouter) CollectRouterLatency(context.Context, string, string) *doma
 	return &rl
 }
 
+// recordingAnalyzer passes through to an analyzer and keeps what it returned.
+type recordingAnalyzer struct {
+	domain.Analyzer
+	results []*domain.AnalyzerResult
+}
+
+func (r *recordingAnalyzer) Analyze(ctx context.Context, in domain.AnalyzerInput) (*domain.AnalyzerResult, error) {
+	res, err := r.Analyzer.Analyze(ctx, in)
+	r.results = append(r.results, res)
+	return res, err
+}
+
 // TestListingSLOLeavesTheDecisionUnchanged pins the observe-only promise where
 // the decision is made: the request the optimizer receives for a model is the
 // same whether or not its policy lists slo and sets targets. The analyzer is
-// the real one, warmed until it prices the variant, with a demand and a
-// per-replica capacity of its own that differ from saturation's -- so a change
-// that lets its result into the request (the wrong entry picked, a composite
-// taking the larger demand or the smaller capacity) fails here.
+// the real one, and the test checks it priced on the very cycles compared,
+// with figures on both sides of saturation's -- so any merge of its result
+// into the request (the wrong entry picked; a composite taking the larger or
+// the smaller demand or capacity; its per-role demand on a P/D model) fails
+// here.
 func TestListingSLOLeavesTheDecisionUnchanged(t *testing.T) {
 	if err := metrics.InitMetrics(promclient.NewRegistry()); err != nil {
 		t.Fatal(err)
 	}
-	// Readings on ITL = 0.04*k + 0.02, two replicas a cycle, k climbing 0.1 a
-	// cycle: six cycles fill the window and span 0.55 of k, a full fit.
+	// Readings on ITL = 0.04*k + 0.02 for variant v, two replicas a cycle, k
+	// climbing 0.05 a cycle. The slo analyzer prices v at about 1240 tokens/s
+	// per replica, and its demand is ArrivalRate 3 x 200 output tokens = 600.
 	rows := func(i int) []domain.ReplicaMetrics {
 		row := func(pod string, k float64) domain.ReplicaMetrics {
 			return domain.ReplicaMetrics{PodName: pod, ModelID: "m", Namespace: "ns", VariantName: "v", Ready: true,
 				KvUsageInstant: k, AvgITL: 0.04*k + 0.02, AvgOutputTokens: 200, AvgInputTokens: 1000, RequestRate: 1.5,
 				TotalKvCapacityTokens: 100000}
 		}
-		return []domain.ReplicaMetrics{row("p0", 0.20+0.1*float64(i)), row("p1", 0.25+0.1*float64(i))}
+		return []domain.ReplicaMetrics{row("p0", 0.20+0.05*float64(i)), row("p1", 0.25+0.05*float64(i))}
 	}
-	states := []domain.VariantReplicaState{{VariantName: "v", Role: domain.RoleBoth, CurrentReplicas: 2}}
+	const arrival, cycles = 3, 10
 	router := fixedRouter{domain.RouterLatency{WindowSeconds: 300,
 		TTFTBuckets: []domain.LatencyBucket{{UpperBound: 1, Rate: 1}, {UpperBound: 3, Rate: 2}, {UpperBound: math.Inf(1), Rate: 2}},
 		TPOTSumRate: 0.08, TPOTCountRate: 2}}
-	newEngine := func(a domain.Analyzer) *Engine {
-		sat := &fakeAnalyzerWithResult{analyzerName: domain.SaturationAnalyzerName, result: &domain.AnalyzerResult{
-			AnalyzerName: domain.SaturationAnalyzerName, ModelID: "m", Namespace: "ns", TotalDemand: 400,
-			// Above what slo prices (about 1200), so a composite taking the
-			// smaller of the two would change it.
-			VariantCapacities: []domain.VariantCapacity{{VariantName: "v", Role: domain.RoleBoth, ReplicaCount: 2,
-				PerReplicaCapacity: 5000, ObservedReplicas: 2}}}}
-		return &Engine{saturationV2Analyzer: sat, started: true, analyzersSnapshot: []analyzerEntry{
-			{name: domain.SaturationAnalyzerName, analyzer: sat}, {name: domain.SLOAnalyzerName, analyzer: a}}}
-	}
 	plain := config.ScalingPolicy{ScaleUpThreshold: 0.85, ScaleDownBoundary: 0.70,
 		Analyzers: []config.AnalyzerScoreConfig{{Name: domain.SaturationAnalyzerName}}}
 	withSLO := plain
@@ -328,38 +332,80 @@ func TestListingSLOLeavesTheDecisionUnchanged(t *testing.T) {
 		TPOT: &config.SLOObjective{Target: config.SLODuration{Duration: 44 * time.Millisecond}},
 		TTFT: &config.SLOObjective{Target: config.SLODuration{Duration: 2 * time.Second}},
 	}
-	// ArrivalRate 3 x 200 output tokens: the slo analyzer's demand is 600,
-	// saturation's (the fake's) 400.
-	const arrival = 3
-	analyzer := slo.New(router, nil)
-	without, with := newEngine(slo.New(router, nil)), newEngine(analyzer)
-	for i := range 6 {
-		a, err := without.collectV2ModelRequest(context.Background(), "m", "ns", rows(i), plain, states, nil, nil, nil, nil, arrival)
-		if err != nil {
-			t.Fatal(err)
-		}
-		b, err := with.collectV2ModelRequest(context.Background(), "m", "ns", rows(i), withSLO, states, nil, nil, nil, nil, arrival)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !reflect.DeepEqual(a, b) {
-			t.Fatalf("cycle %d: listing slo changed the optimizer's request:\nwithout %+v\nwith    %+v",
-				i, a.CompositeSignal, b.CompositeSignal)
-		}
+	aggregated := []domain.VariantReplicaState{{VariantName: "v", Role: domain.RoleBoth, CurrentReplicas: 2}}
+	disaggregated := []domain.VariantReplicaState{
+		{VariantName: "v", Role: domain.RoleDecode, CurrentReplicas: 2},
+		{VariantName: "p", Role: domain.RolePrefill, CurrentReplicas: 1},
 	}
-	// The comparison proves something only if the analyzer priced and its
-	// figures differ from saturation's.
-	res, err := analyzer.Analyze(context.Background(), domain.AnalyzerInput{ModelID: "m", Namespace: "ns",
-		Config: &withSLO, ArrivalRate: arrival, VariantStates: states, ReplicaMetrics: rows(5)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(res.VariantCapacities) != 1 || !(res.VariantCapacities[0].PerReplicaCapacity > 0) {
-		t.Fatalf("setup: the slo analyzer did not price the variant: %+v", res.VariantCapacities)
-	}
-	if res.TotalDemand == 400 || !(res.VariantCapacities[0].PerReplicaCapacity < 5000) {
-		t.Fatalf("setup: the slo analyzer's demand equals saturation's or its capacity is not below it (demand %v, capacity %v), so a merge would not show",
-			res.TotalDemand, res.VariantCapacities[0].PerReplicaCapacity)
+	for _, leg := range []struct {
+		name     string
+		states   []domain.VariantReplicaState
+		demand   float64 // saturation's
+		capacity float64 // saturation's, per replica of v
+		roleDem  map[string]float64
+		sloAbove bool // slo's demand above saturation's and its capacity below
+	}{
+		{name: "slo demand above, capacity below", states: aggregated, demand: 400, capacity: 5000, sloAbove: true},
+		{name: "slo demand below, capacity above", states: aggregated, demand: 800, capacity: 500},
+		{name: "P/D, per-role demand", states: disaggregated, demand: 500, capacity: 5000, sloAbove: true,
+			roleDem: map[string]float64{domain.RoleDecode: 400, domain.RolePrefill: 100}},
+	} {
+		t.Run(leg.name, func(t *testing.T) {
+			newEngine := func(a domain.Analyzer) *Engine {
+				sat := &fakeAnalyzerWithResult{analyzerName: domain.SaturationAnalyzerName, result: &domain.AnalyzerResult{
+					AnalyzerName: domain.SaturationAnalyzerName, ModelID: "m", Namespace: "ns",
+					TotalDemand: leg.demand, RoleDemand: leg.roleDem,
+					VariantCapacities: []domain.VariantCapacity{{VariantName: "v", Role: leg.states[0].Role, ReplicaCount: 2,
+						PerReplicaCapacity: leg.capacity, ObservedReplicas: 2}}}}
+				return &Engine{saturationV2Analyzer: sat, started: true, analyzersSnapshot: []analyzerEntry{
+					{name: domain.SaturationAnalyzerName, analyzer: sat}, {name: domain.SLOAnalyzerName, analyzer: a}}}
+			}
+			rec := &recordingAnalyzer{Analyzer: slo.New(router, nil)}
+			without, with := newEngine(slo.New(router, nil)), newEngine(rec)
+			for i := range cycles {
+				a, err := without.collectV2ModelRequest(context.Background(), "m", "ns", rows(i), plain, leg.states, nil, nil, nil, nil, arrival)
+				if err != nil {
+					t.Fatal(err)
+				}
+				b, err := with.collectV2ModelRequest(context.Background(), "m", "ns", rows(i), withSLO, leg.states, nil, nil, nil, nil, arrival)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(a, b) {
+					t.Fatalf("cycle %d: listing slo changed the optimizer's request:\nwithout %+v\nwith    %+v",
+						i, a.CompositeSignal, b.CompositeSignal)
+				}
+			}
+			// The comparison proves something only on cycles where slo priced,
+			// with figures on the side of saturation's this leg is about.
+			if len(rec.results) != cycles {
+				t.Fatalf("setup: the slo analyzer ran %d times in %d cycles", len(rec.results), cycles)
+			}
+			priced := 0
+			for i, res := range rec.results {
+				var vc *domain.VariantCapacity
+				for j := range res.VariantCapacities {
+					if res.VariantCapacities[j].VariantName == "v" {
+						vc = &res.VariantCapacities[j]
+					}
+				}
+				if vc == nil || !(vc.PerReplicaCapacity > 0) {
+					continue
+				}
+				priced++
+				if leg.sloAbove != (res.TotalDemand > leg.demand) || leg.sloAbove != (vc.PerReplicaCapacity < leg.capacity) {
+					t.Fatalf("setup, cycle %d: slo demand %v and capacity %v are not on the intended side of %v and %v",
+						i, res.TotalDemand, vc.PerReplicaCapacity, leg.demand, leg.capacity)
+				}
+				if leg.roleDem != nil && res.RoleDemand[domain.RoleDecode] == leg.roleDem[domain.RoleDecode] {
+					t.Fatalf("setup, cycle %d: slo's decode demand equals saturation's", i)
+				}
+			}
+			if priced < cycles/2 {
+				t.Fatalf("setup: the slo analyzer priced on %d of the %d compared cycles, want at least %d",
+					priced, cycles, cycles/2)
+			}
+		})
 	}
 }
 
