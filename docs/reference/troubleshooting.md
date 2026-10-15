@@ -29,7 +29,7 @@ LOGS="kubectl logs -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler 
 | cluster policy not applied | `WVAPolicyNamespaceUnverified`; `wva_policy_namespace_unverified == 1` | the controller may not read Namespaces, so it runs on its own ConfigMap | [policy namespace unverified](#cluster-policy-is-not-applied-policy-namespace-unverified) |
 | ScaledObject `READY False` or `TARGETS <unknown>` | `kubectl get scaledobject,hpa -n <ns>` | `scalerAddress` names a namespace with no scaler, `modelID` missing, the controller not Ready, KEDA backing off after a reinstall | [ScaledObject](#scaledobject-ready-false-or-targets-unknown) |
 | capacity priced high after a restart | TTFT worse after an upgrade or leader change; `P3-k2`/`P4-k1` in `k2-decision` where `P1-obs` was before | `LEARNED_STATE_SNAPSHOT` off, the Role missing, an engine configuration that changed or could not be read | [after a restart](#capacity-priced-high-after-a-restart) |
-| one variant held larger than its load needs | `k2-decision` keeps `P2-hist` or `P2-borrow` for one variant while its replicas run light | `P2-hist`: a k2 learned from a bad reading. `P2-borrow`: a sibling's figure that does not fit this variant | `P2-hist`: [reset one variant](#reset-one-variants-learned-state). `P2-borrow`: [`disableK2Borrow`](scaling-policy.md#disablek2borrow) |
+| one variant held larger than its load needs | `k2-decision` keeps `P2-hist`, `P2-prior` or `P2-borrow` for one variant while its replicas run light | `P2-hist`: a k2 learned from a bad reading. `P2-prior`: the variant's own k2 from before its engine arguments changed; expected after a rollout that changes them, held for 30 minutes of serving, then relaxed over 6 hours of serving. `P2-borrow`: a sibling's figure that does not fit this variant | `P2-hist` or `P2-prior`: [reset one variant](#reset-one-variants-learned-state) (`disableK2Borrow` does not affect `P2-prior`). `P2-borrow`: [`disableK2Borrow`](scaling-policy.md#disablek2borrow) |
 | misses its SLO, or is never judged | `WVAModelSLOMissed`; `WVAModelSLOUnjudged`; an empty SLO dashboard row | tier thresholds too loose for the SLO (observe only), a fleet that never holds still, too little traffic, the router not scraped or not streaming | [SLO](#a-model-misses-or-is-never-judged-against-its-slo) |
 | utilization-share optimizer does nothing | `wva_utilization_share_mode`, `wva_utilization_share_actionable` | shadow mode, not planned, held, swinging | [optimizer](#the-optimizer-evaluates-but-never-moves-anything) |
 
@@ -407,23 +407,45 @@ failed reads and writes, and the log says why (logger `learned-state`):
     for the buckets they were measured in` -- its flags changed while the
     controller was down. The old capacity is used only where it is lower, and
     expires (30 minutes of serving from a bucket's first use, then a 6-hour
-    relaxation). A saturated throughput already measured under the flags it
-    runs now -- a rollback made while the controller was down -- is kept;
+    relaxation). The old service rate comes back too, and holds the
+    throughput floor hold-only -- it may keep the fleet, never grow it -- for
+    the same 30 minutes plus 6 hours of serving at most, until the new flags
+    measure their own. A saturated throughput already measured under the
+    flags it runs now -- a rollback made while the controller was down -- is
+    kept as its own;
   - `learned state restored under the unread configuration: ...` -- a flag
     such as `--max-num-seqs $VLLM_MAX_NUM_SEQS` whose value comes from an
     `envFrom`. Its windows are its own only if the variant runs the same
-    unread configuration, and lower-only figures otherwise.
+    unread configuration, and lower-only figures otherwise (with the old
+    service rate holding the floor hold-only, as above).
     `wva_engine_config`'s `unresolved` label names the flag;
   - `learned state restored as lower-only figures: the document recorded no
     engine arguments and its configuration differs, ...` -- a snapshot
     written by an older release. Expect it for every variant after an upgrade
-    of the scaling manager that changes the `fingerprint_version` label of
-    `wva_engine_config` -- this release moves it from 2 to 3, once;
+    from a release that did not record engine arguments, or one with another
+    `fingerprint_version` label on `wva_engine_config`. Only the k2 is kept;
+    the old service rate is not;
+  - `learned state restored as a hold-only service rate: no k2 window was
+    recent enough, ...` -- a lower-only case where no k2 could be kept, but
+    the old saturated throughput could: it holds the throughput floor,
+    hold-only, until the new arguments measure their own. Nothing to do;
   - `learned state not restored: the variant's engine configuration changed,
     and no k2 window was recent enough, on the hardware it runs now, to keep
-    as a lower-only figure` -- any of the last three, with nothing to keep:
-    the windows were old, or were measured on another accelerator or GPU
-    count.
+    as a lower-only figure` -- one of the two lower-only cases above, with
+    nothing to keep: the windows were old, or were measured on another
+    accelerator or GPU count;
+  - `learned state not restored: the variant's engine configuration could not
+    be read completely, and no k2 window was recent enough, on the hardware
+    it runs now, to keep` -- the unread-configuration case with nothing to
+    keep, for the same reasons. Nothing to do; the variant learns again;
+  - `learned state not restored: the variant's engine configuration could not
+    be read completely, and the snapshot recorded no engine arguments to check
+    its windows against` -- an unread configuration and a snapshot from a
+    release that did not record arguments: nothing can be matched, so nothing
+    is kept. To restore it next time, make the configuration readable: give
+    flags literal values in the container's `args` or `env` rather than from
+    an `envFrom` or another source the controller cannot resolve
+    (`wva_engine_config`'s `unresolved` label names them).
 
   Each of these lines carries an `outcome` field: `whole`, `args`, `prior`,
   `incomplete` or `differs`.
@@ -454,10 +476,17 @@ with no store. To forget one variant instead, see the next section.
 
 Use this when one variant is priced from its own history you no longer trust:
 it holds more replicas than its load needs, and `k2-decision` shows `P2-hist`
-for it. It forgets that variant only; every other variant keeps what it has
-learned. If `k2-decision` shows `P2-borrow` (a sibling's figure), set
-[`disableK2Borrow`](scaling-policy.md#disablek2borrow) for the model instead:
-forgetting does not stop a borrow.
+or `P2-prior` for it. It forgets that variant only; every other variant keeps
+what it has learned.
+
+- `P2-hist` is the variant's own measured k2.
+- `P2-prior` is its own k2 from before its engine arguments changed. It is
+  expected after a rollout that changes them, and wears off by itself: held
+  for 30 minutes of serving, then relaxed over 6 hours of serving. Forget it
+  only to end it sooner; `disableK2Borrow` does not affect it.
+- `P2-borrow` is a sibling's figure. Forgetting ends a running borrow, but the
+  variant can borrow again on new evidence. To stop borrowing, set
+  [`disableK2Borrow`](scaling-policy.md#disablek2borrow) for the model instead.
 
 1. Annotate the variant's scale target -- the Deployment or LeaderWorkerSet
    itself, not its pod template, so nothing restarts. The value is any string;
@@ -474,7 +503,9 @@ forgetting does not stop a borrow.
 
 What is forgotten: the variant's measured k2 and throughput, its ITL line
 (including one it lent to siblings), its replica start estimate, and its
-capacity record. The variant then prices as a new variant would until it
+capacity record. Also its previous k2 (`P2-prior`), the old service rate that
+holds the throughput floor after a change of arguments, and the windows set
+aside under earlier arguments for a rollback. The variant then prices as a new variant would until it
 saturates again: from its deployment-derived figure, or from a lower measured
 k2 of a compatible sibling where one exists (the k2 borrow), which orders more
 replicas, not fewer. Expect more replicas or a higher price for a while,

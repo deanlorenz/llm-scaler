@@ -299,15 +299,15 @@ const (
 	WVALearnedStateK2Source = "wva_learned_state_k2_source"
 	// WVALearnedStateK2AgeSeconds is how long ago the k2 a variant is priced
 	// on was last measured -- written, not read. Same labels as
-	// WVALearnedStateK2Source; present only for P1-obs, P2-hist and
-	// P2-borrow, the sources that read a measured window. Like every
+	// WVALearnedStateK2Source; present only for P1-obs, P2-hist, P2-borrow
+	// and P2-prior, the sources that read a measured window. Like every
 	// analyzer series it keeps its last value through a cycle whose
 	// collection or analysis failed.
 	WVALearnedStateK2AgeSeconds = "wva_learned_state_k2_age_seconds"
-	// WVALearnedStateRestoresTotal counts variants whose learned state was
-	// restored from the snapshot (LEARNED_STATE_SNAPSHOT), by outcome:
-	// installed, or rejected because the engine configuration differed or
-	// could not be read completely.
+	// WVALearnedStateRestoresTotal counts variants whose restored learned
+	// state was checked against their engine configuration
+	// (LEARNED_STATE_SNAPSHOT), by outcome: whole, args, prior, incomplete or
+	// differs (saturation.RestoreOutcome).
 	WVALearnedStateRestoresTotal = "wva_learned_state_restores_total"
 	// WVALearnedStateSnapshotErrorsTotal counts failed reads and writes of
 	// the learned-state snapshot ConfigMap, by operation (read or write).

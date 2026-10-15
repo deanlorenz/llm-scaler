@@ -179,6 +179,27 @@ they enable. Do this, in order:
   default `92.7.0`). A newer release already installed is kept, with a
   warning. Set the variable to install that exact version, including an older
   one.
+- **`wva_learned_state_restores_total` has new `outcome` values.** `installed`
+  and `rejected` are gone; the label is now `whole`, `args`, `prior`,
+  `incomplete` or `differs`
+  ([the metric](prometheus.md#wva_learned_state_restores_total)). `installed`
+  is `whole` plus `args`; `rejected` is `prior`, `incomplete` and `differs`.
+  Rewrite queries and alerts:
+  ```promql
+  # was: wva_learned_state_restores_total{outcome="installed"}
+  sum without (outcome) (wva_learned_state_restores_total{outcome=~"whole|args"})
+  # was: wva_learned_state_restores_total{outcome="rejected"}
+  sum without (outcome) (wva_learned_state_restores_total{outcome=~"prior|incomplete|differs"})
+  ```
+- **Before rolling the controller back to an earlier release, remove the
+  `llm-d.ai/forget-learned-state` annotation** from every scale target that
+  carries it. The earlier release rewrites the learned-state snapshot without
+  the record of which value was acted on, so upgrading again with the
+  annotation still in place forgets the variant a second time
+  ([reset one variant](troubleshooting.md#reset-one-variants-learned-state)):
+  ```bash
+  kubectl annotate deployment <name> -n <namespace> llm-d.ai/forget-learned-state-
+  ```
 
 #### Prometheus TLS verification is on by default
 

@@ -540,6 +540,10 @@ so TTFT suffers after every upgrade or leader change until the fleet has
 saturated once more. With it on, the acting controller writes what it learned
 to the ConfigMap `wva-learned-state` at most once a minute, and the next
 controller reads it on its first cycle.
+If that read fails it is retried every minute; until it succeeds, for at
+most 10 minutes, a lower bound (`P2-borrow`, `P2-prior`) is read at full
+strength and none is started or moved, so one started before the read
+cannot replace the stored one.
 
 What is restored, and what is not:
 
@@ -558,15 +562,24 @@ What is restored, and what is not:
   serving at full strength, then relaxes to the variant's own figure over 6
   hours of serving -- the same rule as a capacity borrowed from a sibling.
   The 30 minutes start when an output-length bucket first uses it, not at the
-  restart; one no bucket uses goes after the bucket retention. It is written
+  restart; one no bucket uses goes after the bucket retention. Serving means a
+  Ready replica of the variant's own with requests on it: one idle at
+  `minReplicas` overnight does not use up the hold. It is written
   back with its clock, so another restart inside those hours resumes it.
-  Nothing else is restored for it, except a saturated throughput measured
-  under the arguments it runs now. The same happens without a restart: a
-  rollout that changes the arguments while the controller runs turns the old
-  capacity into the same lower-only figure, and the old saturated throughput
-  is no longer read. A change of arguments restarts the 30 minutes. The
-  figure is the one measured last, under the arguments just left, and a
-  later change replaces it; it goes a bucket retention after it was last used;
+  Its old saturated throughput comes back too, but only to hold the
+  throughput floor: it may keep the fleet, never grow it, for at most 30
+  minutes plus 6 hours of serving, until the new arguments measure their
+  own. A saturated throughput measured under the arguments it runs now is
+  restored as its own. Its start estimate and ITL baseline are not restored.
+  The same happens without a restart: a rollout that changes the arguments
+  while the controller runs turns the old capacity into the same lower-only
+  figure, and the old saturated throughput into the same hold-only floor
+  (below). A newer figure -- the variant saturated under the arguments it
+  then changes away from -- replaces it and restarts the 30 minutes; a
+  change that measured nothing new does not, so one figure is held for at
+  most 6.5 hours of serving however often the arguments change. The figure
+  is the one measured last, and it goes a bucket retention after it was last
+  used. The ITL line is fitted afresh under the new arguments;
 - a **rollback** to engine arguments a variant ran before gets back the
   capacity and saturated throughput it measured under them, as its own, for
   as long as they would have been retained (the bucket retention), across a
@@ -577,7 +590,9 @@ What is restored, and what is not:
   before it until the new pods saturate after it ends. A replica that is
   saturated below that figure is priced at its reading for that cycle only
   (`P1-obs-unadmitted`), and nothing is kept of it -- so a bucket with no
-  figure at all is not priced at k1 while it shows full. A lower-only figure
+  figure at all is not priced at k1 while it shows full. A pod that is not
+  Ready -- an old one draining, a new one failing its readiness probe -- is
+  never priced at its reading. The ITL line takes no readings either. A lower-only figure
   from a change of arguments waits for the rollout, and its 30 minutes start
   when the rollout ends, however long it stalled. A LeaderWorkerSet held
   part way by a partition learns nothing until it is let through. An undo or a restart in mid-rollout is a rollout
@@ -604,15 +619,20 @@ What is restored, and what is not:
   from a release that did not record the engine arguments, restores each
   variant's measured capacity only as that lower-only figure
   (`restores_total{outcome="differs"}`, or `"prior"`, and `P2-prior` in the
-  cycle log); its saturated throughput, start time and latency baseline are
-  not restored, as for any change of arguments;
-- **rolling the controller back** to a release from before these records
-  starts every variant cold once: that release identifies configurations
-  differently, so it restores nothing, and it rewrites the document in its own
-  format. Upgrading again restores what it wrote as lower-only figures. The
-  exception is a variant's previous lower-only figure, which is also written
-  in the form the release before this one reads, so a rollback to it keeps
-  that figure. The
+  cycle log). With `differs`, its saturated throughput, start time and
+  latency baseline are not restored; with `prior`, as for any change of
+  arguments, the old saturated throughput holds the floor hold-only (above);
+- **rolling the controller back** to the previous release, which already
+  records engine arguments under the same `fingerprint_version` (3), restores
+  each variant whose configuration it can read whole, as an ordinary restart
+  does. It does not see what only this release writes: the windows set aside
+  under other arguments for a rollback, the new fields of a k2 lower bound,
+  or the record of a forget annotation acted on. A variant's previous
+  lower-only figure survives only because this release also writes it in the
+  form the previous one reads. Upgrading again restores what the previous
+  release wrote, whole. Only a rollback to a release that did not record
+  engine arguments, or that has another `fingerprint_version`, starts every
+  variant cold once, and upgrading from it restores lower-only figures. The
   document keeps one key across releases on purpose: under a new key, the
   older release would read the document it wrote before the upgrade and
   install figures days stale as its own;
