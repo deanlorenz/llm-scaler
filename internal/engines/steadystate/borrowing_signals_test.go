@@ -149,21 +149,30 @@ var _ = Describe("what on-call sees of borrowing, engine side", func() {
 		var cs []*allocation.ResourceConstraints
 		var ds []domain.VariantDecision
 		now := t0
-		for _, d := range []time.Duration{0, 30 * time.Second, 61 * time.Second} {
-			now = t0.Add(d)
+		// Review T4: every cycle, not only after the debounce. The cohort is
+		// closed from the first sighting; the wait is published once it is
+		// debounced (60s), with its age.
+		for _, step := range []struct {
+			d    time.Duration
+			wait map[string]float64
+		}{
+			{0, map[string]float64{}},
+			{30 * time.Second, map[string]float64{}},
+			{61 * time.Second, map[string]float64{"c,team-b-cq": 61}},
+		} {
+			now = t0.Add(step.d)
 			cs = e.prepareBorrowing(ctx, world(16, now, lender), reqs, targets, now)
 			ds = decisionsFor()
 			e.releaseBorrowed(ctx, reqs, ds, targets, now)
+			e.publishBorrowSignals(cs, reqs, ds, now)
+			Expect(series(constants.WVAKueueLenderWaitingSeconds, constants.LabelCohort, constants.LabelClusterQueue)).To(
+				Equal(step.wait), "the lender-waiting series at %v", step.d)
+			Expect(series(constants.WVAQuotaBorrowWithheld, constants.LabelNamespace, constants.LabelReason)).To(
+				Equal(map[string]float64{"a,lender-waiting": 1}), "the cohort is closed to new borrowing at %v", step.d)
 		}
 		Expect(rec.Events).NotTo(Receive(), "no release, so no BorrowedCapacityReleased Event")
 		Expect(ds[0].TargetReplicas).To(Equal(2), "the borrower keeps its replicas")
-
-		e.publishBorrowSignals(cs, reqs, ds, now)
 		Expect(reasons()).To(BeEmpty(), "nothing holds the model down")
-		Expect(series(constants.WVAKueueLenderWaitingSeconds, constants.LabelCohort, constants.LabelClusterQueue)).To(
-			Equal(map[string]float64{"c,team-b-cq": 61}), "the wait is published")
-		Expect(series(constants.WVAQuotaBorrowWithheld, constants.LabelNamespace, constants.LabelReason)).To(
-			Equal(map[string]float64{"a,lender-waiting": 1}), "and the cohort is closed to new borrowing")
 	})
 
 	It("publishes a never-read Kueue entry whether or not the cycle borrows, and clears it once read", func() {

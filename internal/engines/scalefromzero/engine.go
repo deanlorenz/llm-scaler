@@ -179,6 +179,9 @@ type Engine struct {
 	// tickReclaimed is, per namespace and type, the lent-out nominal this
 	// tick's wakes grew into without a node hole (placement.reclaimable).
 	tickReclaimed map[string]map[string]int
+	// lentOutBlocked is the models (modelGroup.key) this loop set
+	// nominal-lent-out on wva_model_scaling_blocked for (reportLentOutBlocked).
+	lentOutBlocked sync.Map
 	// layouts remembers the variants whose unknown pod layout this engine's
 	// node views have logged, so each is logged once, not once per tick.
 	layouts allocation.LayoutLog
@@ -525,12 +528,7 @@ func (e *Engine) processInactiveModel(
 			"metric", pending.Labels, "value", pending.Value)
 	}
 
-	place, selected, outcome := e.decideWake(ctx, group, candidates, covered)
-	if len(selected) == 0 && outcome == OutcomeNoCapacity && place.nominalLentOut {
-		// The budget it missed is within nominal, short of nominal because a
-		// peer holds what the queue lent and need not give it back (B10).
-		outcome = OutcomeNominalLentOut
-	}
+	place, selected, outcome := e.wakeVerdict(ctx, group, candidates, covered)
 	constraints := place.constraints
 	if len(selected) == 0 {
 		if outcome == OutcomeAlreadyServing {
@@ -591,6 +589,40 @@ func (e *Engine) processInactiveModel(
 		e.publishActivation(ctx, scaleTargets, va, pool, 1, outcome)
 	}
 	return nil
+}
+
+// wakeVerdict is decideWake with the refusal named: a no-capacity refusal in a
+// namespace whose queue lent nominal it cannot reclaim is nominal-lent-out
+// (B10), the same reason wva_model_scaling_blocked then carries for the model.
+func (e *Engine) wakeVerdict(ctx context.Context, group modelGroup, candidates []Candidate,
+	covered coverage) (placement, []Candidate, SelectionOutcome) {
+	place, selected, outcome := e.decideWake(ctx, group, candidates, covered)
+	if len(selected) == 0 && outcome == OutcomeNoCapacity && place.nominalLentOut {
+		// The budget it missed is within nominal, short of nominal because a
+		// peer holds what the queue lent and need not give it back (B10).
+		outcome = OutcomeNominalLentOut
+	}
+	e.reportLentOutBlocked(group, len(selected) == 0 && outcome == OutcomeNominalLentOut)
+	return place, selected, outcome
+}
+
+// reportLentOutBlocked sets nominal-lent-out on wva_model_scaling_blocked for a
+// model at zero whose wake it refuses, every tick it is refused, and clears
+// only what it set once the model wakes or is refused for another reason:
+// the steady-state engine sets the same reason for a capped serving model,
+// and its series is not this loop's to delete.
+func (e *Engine) reportLentOutBlocked(group modelGroup, on bool) {
+	key := group.key()
+	if on {
+		e.lentOutBlocked.Store(key, true)
+		metrics.SetModelScalingBlockedReasons(group.namespace, group.modelID,
+			constants.ScalingBlockedReasonsWakeBorrowing, []string{constants.ScalingBlockedNominalLentOut})
+		return
+	}
+	if _, set := e.lentOutBlocked.LoadAndDelete(key); set {
+		metrics.SetModelScalingBlockedReasons(group.namespace, group.modelID,
+			constants.ScalingBlockedReasonsWakeBorrowing, nil)
+	}
 }
 
 // publishActivation records the wake for one selected variant: it publishes the

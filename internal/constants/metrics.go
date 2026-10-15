@@ -902,6 +902,14 @@ var ScalingBlockedReasonsBorrowing = []string{
 	ScalingBlockedNominalLentOut,
 }
 
+// ScalingBlockedReasonsWakeBorrowing is what the scale-from-zero loop decides
+// from cohort borrowing: a wake refused within nominal because the queue lent
+// nominal it cannot reclaim. It sets the reason every tick it refuses, and
+// clears only what it set.
+var ScalingBlockedReasonsWakeBorrowing = []string{
+	ScalingBlockedNominalLentOut,
+}
+
 // Kueue cohort borrowing metrics
 // (the Kueue borrowing proposal, PR #161, Part C). Every
 // other borrowing condition is a reason on WVAModelScalingBlocked.

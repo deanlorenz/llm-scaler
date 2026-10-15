@@ -89,13 +89,13 @@ func LimiterBudgets(constraints []*ResourceConstraints, blocked map[string]bool)
 					b.Borrowable, b.Reason = borrowableNow(c, ns, t, nb, blocked)
 					if w := c.BorrowWithheld[ns]; w != "" {
 						// Counted only to keep what it holds, or frozen: no
-						// new borrowing, and one reason, the first in the
-						// table. A freeze shows its own cause, not the stale
-						// pools it leaves behind.
-						if b.Reason == string(kueue.ReasonStale) && w == string(kueue.ReasonKueueControllerDown) {
-							b.Reason = w
-						}
-						b.Borrowable, b.Reason = 0, kueue.PrecedenceOf(w, b.Reason)
+						// new borrowing, and the entry's one reason, which it
+						// picked by kueue.Precedence (withheldReasons) -- the
+						// order's one source. Every counted-but-0 reason the
+						// pools could add ranks after it; the stale pools a
+						// freeze leaves behind are its symptom, not a second
+						// cause, so a controller that is down shows as such.
+						b.Borrowable, b.Reason = 0, w
 					}
 				case c.BorrowWithheld[ns] != "":
 					b.Reason = c.BorrowWithheld[ns]
