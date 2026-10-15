@@ -2,12 +2,15 @@ package kueue
 
 import (
 	"context"
+	"errors"
 	"sync"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/cache/informertest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -102,7 +105,7 @@ var _ = Describe("InformerWorkloads", func() {
 		got, err := src.Workloads(ctx, eligNS, p.UID)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(got).To(HaveLen(1))
-		Expect(apiLists).To(Equal(1), "not synced: the API server answers")
+		Expect(apiLists).To(Equal(2), "the cluster-wide probe, then, not synced, the API server answers")
 		Expect(src.Indexed()).To(BeFalse())
 
 		inf, err := fc.FakeInformerFor(ctx, idxObj)
@@ -111,7 +114,7 @@ var _ = Describe("InformerWorkloads", func() {
 		got, err = src.Workloads(ctx, eligNS, p.UID)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(got).To(HaveLen(1))
-		Expect(apiLists).To(Equal(1), "synced: no API call")
+		Expect(apiLists).To(Equal(2), "synced: no API call")
 		Expect(fc.lists).To(Equal(1))
 		Expect(fc.indexed).To(BeTrue())
 		Expect(src.Indexed()).To(BeTrue())
@@ -119,6 +122,26 @@ var _ = Describe("InformerWorkloads", func() {
 		got, err = src.Workloads(ctx, eligNS, "someone-else")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(got).To(BeEmpty())
+	})
+
+	// D1: a namespace-scoped install whose admin has not granted the
+	// cluster-wide Workload read must not start an informer that can never
+	// list -- it would retry and log forever -- and must answer Forbidden,
+	// which withholds borrowing as lenders-unreadable.
+	It("starts no informer while a cluster-wide list is Forbidden, and answers Forbidden", func() {
+		api := eligibilityClient(&interceptor.Funcs{List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if (&client.ListOptions{}).ApplyOptions(opts).Namespace == "" {
+				return apierrors.NewForbidden(schema.GroupResource{Group: Group, Resource: "workloads"}, "", errors.New("no RBAC"))
+			}
+			return cl.List(ctx, list, opts...)
+		}})
+		fc := &fakeWorkloadCache{FakeInformers: &informertest.FakeInformers{Scheme: runtime.NewScheme()}}
+		src := NewInformerWorkloads(fc, api)
+		_, err := src.Workloads(context.Background(), "", "")
+		Expect(apierrors.IsForbidden(err)).To(BeTrue(), "Forbidden is not absent")
+		Expect(fc.InformersByGVK).To(BeEmpty(), "no informer started")
+		_, err = src.Workloads(context.Background(), eligNS, "")
+		Expect(err).NotTo(HaveOccurred(), "its own namespace is still read, from the API server")
 	})
 
 	It("reports a Kueue that does not serve Workloads as the error it is", func() {

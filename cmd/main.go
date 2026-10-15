@@ -184,6 +184,14 @@ func optimizeLoopRunnable(setup func(ctx context.Context) (optimizeLooper, error
 // Returned, not os.Exit: this runs inside a manager runnable, and exiting there
 // skipped graceful shutdown and the lease release, so the successor waited out
 // the full LeaseDuration.
+// kueueWorkloadCache runs the cluster-wide Kueue Workload cache of a
+// namespace-scoped install on every replica, not only the leader: a cache
+// added to the manager would otherwise start only once leadership is won.
+type kueueWorkloadCache struct{ cache.Cache }
+
+// NeedLeaderElection implements manager.LeaderElectionRunnable.
+func (kueueWorkloadCache) NeedLeaderElection() bool { return false }
+
 func registerMetricsSource(reg *source.SourceRegistry, name string, src source.MetricsSource) error {
 	if err := reg.Register(name, src); err != nil {
 		return fmt.Errorf("registering the %s metrics source: %w", name, err)
@@ -601,12 +609,35 @@ func main() {
 	}
 
 	// Kueue Workloads -- the borrowing managed check, the preemption check and
-	// the lender-waiting signal -- are read through an informer of this cache,
-	// indexed on owner UID. It starts on the first read, so a cluster without
-	// Kueue, or a policy that does not count borrowing, starts none and needs
-	// no watch on Workloads; until it syncs, reads go to the API server. A
-	// namespace-scoped install caches its own namespace only, as for pods.
-	kueue.UseWorkloadSource(kueue.NewInformerWorkloads(mgr.GetCache(), mgr.GetClient()))
+	// the lender-waiting signal -- are read through an informer, indexed on
+	// owner UID. It starts on the first read, so a cluster without Kueue, or a
+	// policy that does not count borrowing, starts none and needs no watch on
+	// Workloads; until it syncs, reads go to the API server.
+	//
+	// The lender signal needs every namespace's Workloads, whatever the
+	// install's scope (D1): a lender waiting in another namespace must stop
+	// new borrowing. A namespace-scoped manager's cache holds its own
+	// namespace only, and a list from it would answer for that namespace
+	// alone, so such an install reads Workloads through a cache of its own,
+	// cluster-wide, holding Workloads only. Its read is granted by the
+	// admin-applied kueue-reader ClusterRole; without it the informer is never
+	// started (kueue.InformerWorkloads probes first) and the read reports
+	// Forbidden, which withholds borrowing as lenders-unreadable.
+	workloadCache := mgr.GetCache()
+	if watchNS != "" {
+		wc, err := cache.New(restConfig, cache.Options{Scheme: mgr.GetScheme(), Mapper: mgr.GetRESTMapper(),
+			DefaultTransform: kubecache.StripUnused})
+		if err != nil {
+			setupLog.Error(err, "unable to create the cluster-wide Kueue Workload cache")
+			os.Exit(1)
+		}
+		if err := mgr.Add(kueueWorkloadCache{wc}); err != nil {
+			setupLog.Error(err, "unable to add the cluster-wide Kueue Workload cache")
+			os.Exit(1)
+		}
+		workloadCache = wc
+	}
+	kueue.UseWorkloadSource(kueue.NewInformerWorkloads(workloadCache, mgr.GetClient()))
 
 	// Initialize metrics
 	setupLog.Info("Creating metrics emitter instance")

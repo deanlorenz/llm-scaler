@@ -74,7 +74,9 @@ type Options struct {
 	// A namespace-scoped controller can list LocalQueues nowhere else, and a
 	// cluster-wide list from it would be Forbidden — an error, not an empty
 	// result (Forbidden is not absent). ClusterQueues and ResourceFlavors are
-	// cluster-scoped and are always listed cluster-wide.
+	// cluster-scoped and are always listed cluster-wide. Cohort borrowing
+	// reads Workloads and their LocalQueues cluster-wide whatever this says
+	// (readPending), through the grant of components/kueue-reader.
 	Namespace string
 
 	// ControllerNamespace is where the Kueue controller's Deployment is read

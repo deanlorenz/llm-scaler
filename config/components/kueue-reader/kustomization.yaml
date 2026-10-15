@@ -7,9 +7,15 @@ kind: Component
 #
 # ClusterQueues carry the nominal quotas and ResourceFlavors name the
 # accelerator behind each flavor; Cohorts tell a flat cohort from a nested one
-# for borrowing. All three are cluster-scoped, so no Role can reach them.
-# LocalQueues and Workloads are namespaced and come with the tenant Role
-# instead. The reader gets and lists on demand — no watch, no write.
+# for borrowing. All three are cluster-scoped, so no Role can reach them. The
+# reader gets and lists them on demand — no watch, no write.
+#
+# Cohort borrowing also reads Workloads (get, list, watch) and LocalQueues (get,
+# list) in EVERY namespace, whatever the install's scope: a lender waiting in
+# another namespace must stop new borrowing. The tenant Role grants both in the
+# install's own namespace only, so the cluster-wide read is granted here.
+# Denied, borrowing is withheld as lenders-unreadable. Workloads carry their
+# pod templates.
 #
 # Part of the namespace-scoped overlays and, like node-reader, created by the
 # PREREQS phase: it is cluster-scoped RBAC, an admin's to grant. Harmless on a

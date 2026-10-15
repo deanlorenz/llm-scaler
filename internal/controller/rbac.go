@@ -97,8 +97,10 @@ package controller
 // (kueue.ControllerLease) in the Kueue namespace: get only. A namespace-scoped
 // install gets it, with the kueue-controller-manager Deployment, from a Role in
 // the Kueue namespace the prereqs phase creates; without either, borrowing
-// freezes (kueue-controller-down).
-// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get
+// freezes (kueue-controller-down). Limited by name to that Lease
+// (kueue.ControllerLease), as the namespace-scoped Role is: the cluster-scoped
+// install reads no other Lease through this rule.
+// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,resourceNames=c1f6bfd2.kueue.x-k8s.io,verbs=get
 //
 // The placement timeout of a borrowed replica waits while the cluster
 // autoscaler reports TriggeredScaleUp on its pod (B5): Events are read, get and

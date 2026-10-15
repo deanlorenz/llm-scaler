@@ -18,7 +18,9 @@
 #   clusterqueues,        Kueue quotas. Needed ONLY by a quota entry with
 #   resourceflavors,      `kueue.enabled`; components/kueue-reader grants them,
 #   cohorts               applied by the prereqs phase like node-reader. The
-#                         namespaced half, localqueues and workloads, is below.
+#                         namespaced half, localqueues and workloads, is below;
+#                         cohort borrowing reads both in every namespace,
+#                         which components/kueue-reader grants.
 #   leases, and the       in the KUEUE namespace, read by name for Kueue
 #   kueue-controller-     borrowing (liveness and version): a Role there that
 #   manager Deployment    the prereqs phase creates

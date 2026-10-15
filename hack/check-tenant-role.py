@@ -49,7 +49,8 @@ CLUSTER_SCOPED = {
     # Kueue ClusterQueues and ResourceFlavors: read only by a quota entry with
     # kueue.enabled, granted by components/kueue-reader (prereqs phase). The
     # namespaced half, localqueues and workloads, is in the tenant Role and is
-    # checked.
+    # checked; components/kueue-reader also grants both cluster-wide, which
+    # cohort borrowing reads whatever the install's scope.
     ("kueue.x-k8s.io", "clusterqueues"),
     ("kueue.x-k8s.io", "resourceflavors"),
     # Kueue Cohorts: listed to tell a flat cohort from a nested one, granted by

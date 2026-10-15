@@ -55,7 +55,7 @@ for fn in wva_append_crb_name_patches wva_append_metrics_reader_subject_patch \
     }
 done
 
-EXPECT_CASES=46
+EXPECT_CASES=52
 RAN=0
 FAILED=0
 
@@ -250,6 +250,13 @@ for overlay in namespace-scoped/kubernetes namespace-scoped/openshift; do
         "$(printf '%s\n' "$role" | yq -r '.rules[] | select(.resources[] == "namespaces") | .resourceNames | join(",")')"
     check "$overlay: kueue-reader Kueue rules stay unnamed" 'true' \
         "$(printf '%s\n' "$role" | yq -r '[.rules[] | select(.apiGroups[] == "kueue.x-k8s.io") | has("resourceNames") | not] | all')"
+    # Cohort borrowing reads every namespace Workloads (watched by a
+    # cluster-wide informer) and the LocalQueues they queue through, whatever
+    # the install scope; the tenant Role reaches its own namespace only.
+    check "$overlay: kueue-reader reads Workloads cluster-wide" 'get,list,watch' \
+        "$(printf '%s\n' "$role" | yq -r '.rules[] | select(.resources[] == "workloads") | .verbs | sort | join(",")')"
+    check "$overlay: kueue-reader lists LocalQueues cluster-wide" 'get,list' \
+        "$(printf '%s\n' "$role" | yq -r '.rules[] | select(.resources[] == "localqueues") | .verbs | sort | join(",")')"
 done
 
 # ----------------------------------------------------------------------------
@@ -330,6 +337,14 @@ rules:
 CREOF
 check 'install/enable/install over an admin-added name: kept by both' \
     'foo,admin-added foo,admin-added foo,admin-added' "$(seq_run wva-foo foo)"
+# enable-physical-limiter writes the same Workload and LocalQueue rules the
+# installer renders, or the next enable takes the lender signal away.
+: > "$LIVE_ROLE"
+seq_enable wva-foo foo
+check 'enable grants Workloads cluster-wide, as the installer does' 'get,list,watch' \
+    "$(yq -r '.rules[] | select(.resources[] == "workloads") | .verbs | sort | join(",")' "$LIVE_ROLE")"
+check 'enable grants LocalQueues cluster-wide, as the installer does' 'get,list' \
+    "$(yq -r '.rules[] | select(.resources[] == "localqueues") | .verbs | sort | join(",")' "$LIVE_ROLE")"
 
 # ----------------------------------------------------------------------------
 # The namespace-scoped policy-namespace reader gets only the Namespaces it reads

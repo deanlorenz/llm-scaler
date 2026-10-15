@@ -63,6 +63,8 @@ rules:
   - get
 - apiGroups:
   - coordination.k8s.io
+  resourceNames:
+  - c1f6bfd2.kueue.x-k8s.io
   resources:
   - leases
   verbs:

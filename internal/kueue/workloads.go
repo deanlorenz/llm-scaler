@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -131,13 +132,14 @@ func workloadOwnerUIDs(o client.Object) []string {
 	return out
 }
 
-// InformerWorkloads reads Workloads from an informer of the manager's cache,
-// started on first use, with an index on owner UID. The cache's namespaces are
-// the informer's: a cluster-scoped install caches every namespace's Workloads,
-// a namespace-scoped one only its own. Until the informer has synced -- and
-// for good, if it never does (no watch permission, say) -- every read goes to
-// the API server instead, so a Forbidden or a missing Kueue surfaces as the
-// error it is rather than as an empty cache.
+// InformerWorkloads reads Workloads from an informer of a cache, started on
+// first use, with an index on owner UID. The cache must cover every namespace:
+// the controller hands a namespace-scoped install a cluster-wide cache of its
+// own (cmd/main.go), since the lender signal reads every namespace (D1). The
+// informer starts only after a cluster-wide list has not been Forbidden.
+// Until it has synced -- and for good, if it never does (no watch permission,
+// say) -- every read goes to the API server instead, so a Forbidden or a
+// missing Kueue surfaces as the error it is rather than as an empty cache.
 type InformerWorkloads struct {
 	cache cache.Cache
 	api   client.Client
@@ -149,7 +151,14 @@ type InformerWorkloads struct {
 	startedAt time.Time
 	indexed   bool
 	warned    bool
+	// deniedAt is when a cluster-wide list was last Forbidden; the informer
+	// is not started until a later probe passes.
+	deniedAt time.Time
 }
+
+// deniedRetryAfter is how long a Forbidden probe holds the informer back
+// before it is asked again: RBAC changes rarely.
+const deniedRetryAfter = 5 * time.Minute
 
 // NewInformerWorkloads returns a source over the manager's cache c; api
 // resolves the Workload kind and serves the reads until the informer syncs.
@@ -173,6 +182,20 @@ func (w *InformerWorkloads) synced(ctx context.Context) (schema.GroupVersionKind
 	obj := &unstructured.Unstructured{}
 	obj.SetGroupVersionKind(gvk)
 	if w.informer == nil || w.gvk != gvk {
+		if !w.deniedAt.IsZero() && w.now().Sub(w.deniedAt) < deniedRetryAfter {
+			return gvk, false, false, nil // the API serves, and says Forbidden
+		}
+		// An informer that may not list never syncs, and its reflector
+		// retries and logs for as long as the process runs: a
+		// namespace-scoped install whose admin has not granted the
+		// cluster-wide read (D1). One cheap list asks first.
+		probe := &unstructured.UnstructuredList{}
+		probe.SetGroupVersionKind(gvk.GroupVersion().WithKind(KindWorkload + "List"))
+		if err := w.api.List(ctx, probe, client.Limit(1)); apierrors.IsForbidden(err) {
+			w.deniedAt = w.now()
+			return gvk, false, false, nil
+		}
+		w.deniedAt = time.Time{}
 		inf, err := w.cache.GetInformer(ctx, obj, cache.BlockUntilSynced(false))
 		if err != nil {
 			return gvk, false, false, nil // the API serves meanwhile

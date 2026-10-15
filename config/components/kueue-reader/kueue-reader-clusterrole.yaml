@@ -23,3 +23,25 @@ rules:
   - namespaces
   verbs:
   - get
+# Workloads and LocalQueues of every namespace, for Kueue cohort borrowing: a
+# lender waiting in another namespace must stop new borrowing, and a
+# LowerPriority lender is judged by its Workloads' priorities. Read whatever
+# the install's scope; a namespace-scoped controller watches Workloads through
+# a cluster-wide informer of its own. Denied, borrowing is withheld as
+# lenders-unreadable; the nominal bound is unaffected. Kept after the
+# namespaces rule: the installer patches rules/1 by index.
+- apiGroups:
+  - kueue.x-k8s.io
+  resources:
+  - workloads
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - kueue.x-k8s.io
+  resources:
+  - localqueues
+  verbs:
+  - get
+  - list
