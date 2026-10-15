@@ -60,10 +60,12 @@ type Decision struct {
 	Path DecisionPath
 	// Contributors names every analyzer whose need was considered.
 	Contributors []string
-	// Saturation is whether saturation is among the contributors. Its need is
-	// its own demand, which the composite keeps exactly rather than as
-	// N x PRC.
-	Saturation bool
+	// Saturation is whether saturation is among the contributors, and
+	// SaturationN its need when it is. Where saturation's need is N, the
+	// composite keeps saturation's own PRC exactly rather than D / N, which
+	// is not always bit-identical to it.
+	Saturation  bool
+	SaturationN float64
 	// Others is the largest need among the contributors other than
 	// saturation; defined only when OthersOK.
 	Others   float64
@@ -95,7 +97,7 @@ func ResolveSO(entries []NamedAnalyzerResult, sat *NamedAnalyzerResult, variant 
 			d.N, d.OK = n, true
 		}
 		if sat != nil && e.Name == sat.Name {
-			d.Saturation = true
+			d.Saturation, d.SaturationN = true, n
 		} else if !d.OthersOK || n > d.Others {
 			d.Others, d.OthersOK = n, true
 		}

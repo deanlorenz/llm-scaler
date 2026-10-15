@@ -60,11 +60,32 @@ func twoVariantEntry(name string, d1, d2, prc1, prc2 float64) allocation.NamedAn
 	}
 }
 
-// TestCompositeKeepsEachVariantsPRC: two accelerators serving one role keep
-// their own capacities when another analyzer sets the need. Rewritten as
-// D_sat / N, both read 800/30 here and the cost-aware optimizer saw a 200 and
-// a 100 as the same replica.
-func TestCompositeKeepsEachVariantsPRC(t *testing.T) {
+// TestCompositeSizesEachVariantToItsDecidingNeed: two accelerators serving
+// one role are each priced so the role's demand needs exactly what the
+// deciding analyzer asked of that variant. Converting both needs at
+// saturation's PRC instead took the larger, 160, which at A's 10 is 16
+// replicas where the analyzer needs 10.
+func TestCompositeSizesEachVariantToItsDecidingNeed(t *testing.T) {
+	sat := twoVariantEntry(domain.SaturationAnalyzerName, 30, 10, 10, 8) // needs 4 of A, 5 of B
+	other := twoVariantEntry("throughput", 50, 50, 10, 5)                // needs 10 of A, 20 of B
+	named := []allocation.NamedAnalyzerResult{sat, other}
+
+	composite := buildComposite(context.Background(), named, named, 0.85, 0.7)
+
+	vcs := composite.Result.VariantCapacities
+	require.Len(t, vcs, 2)
+	d := composite.Result.TotalDemand
+	assert.InDelta(t, 160, d, 1e-9, "20 of B at saturation's 8")
+	assert.InDelta(t, 10, d/vcs[0].PerReplicaCapacity, 1e-9)
+	assert.InDelta(t, 20, d/vcs[1].PerReplicaCapacity, 1e-9)
+	assert.InDelta(t, 120, vcs[0].TotalDemand, 1e-9, "saturation's 3:1 attribution is kept")
+	assert.InDelta(t, vcs[0].TotalDemand/(2*vcs[0].PerReplicaCapacity), vcs[0].Utilization, 1e-9)
+}
+
+// TestCompositeKeepsTheDecidersRatio: where the deciding analyzer rates two
+// accelerators alike, so does the composite, though saturation rates one
+// twice the other.
+func TestCompositeKeepsTheDecidersRatio(t *testing.T) {
 	sat := twoVariantEntry(domain.SaturationAnalyzerName, 500, 300, 200, 100)
 	other := twoVariantEntry("throughput", 1500, 1500, 100, 100) // needs 30 of either
 	named := []allocation.NamedAnalyzerResult{sat, other}
@@ -72,16 +93,27 @@ func TestCompositeKeepsEachVariantsPRC(t *testing.T) {
 	composite := buildComposite(context.Background(), named, named, 0.85, 0.7)
 
 	vcs := composite.Result.VariantCapacities
-	require.Len(t, vcs, 2)
-	assert.Equal(t, 200.0, vcs[0].PerReplicaCapacity)
-	assert.Equal(t, 100.0, vcs[1].PerReplicaCapacity)
-	// 30 replicas of v1 are 6000 of saturation's units, 30 of v2 are 3000:
-	// the role takes the larger.
-	assert.InDelta(t, 6000, composite.Result.TotalDemand, 1e-9)
-	assert.InDelta(t, 6000*5.0/8, vcs[0].TotalDemand, 1e-9, "saturation's 5:3 attribution is kept")
-	assert.InDelta(t, 6000*3.0/8, vcs[1].TotalDemand, 1e-9)
-	assert.InDelta(t, vcs[0].TotalDemand/(2*200), vcs[0].Utilization, 1e-9)
-	assert.InDelta(t, vcs[1].TotalDemand/(2*100), vcs[1].Utilization, 1e-9)
+	d := composite.Result.TotalDemand
+	assert.InDelta(t, 30, d/vcs[0].PerReplicaCapacity, 1e-9)
+	assert.InDelta(t, 30, d/vcs[1].PerReplicaCapacity, 1e-9)
+}
+
+// TestCompositePricesAVariantSaturationCannot: in a role another analyzer
+// sizes, a variant saturation has no PRC for is priced from that analyzer's
+// need, and is not reported as dropped.
+func TestCompositePricesAVariantSaturationCannot(t *testing.T) {
+	const msg = "a listed analyzer's need is dropped: saturation has no per-replica capacity for the variant"
+	sat := twoVariantEntry(domain.SaturationAnalyzerName, 300, 0, 200, 0)
+	other := twoVariantEntry("throughput", 30, 30, 10, 10) // needs 6 of either
+	named := []allocation.NamedAnalyzerResult{sat, other}
+	ctx, logs := zapObserverCtx(t)
+
+	composite := buildComposite(ctx, named, named, 0.85, 0.7)
+
+	d := composite.Result.TotalDemand
+	assert.InDelta(t, 1200, d, 1e-9)
+	assert.InDelta(t, 6, d/composite.Result.VariantCapacities[1].PerReplicaCapacity, 1e-9)
+	assert.Empty(t, logs.FilterMessage(msg).All())
 }
 
 // TestCompositeSizesPrefillSaturationSeesAsIdle: on P/D, another analyzer's
@@ -174,6 +206,8 @@ func TestCompositeSplitsNewDemandEvenly(t *testing.T) {
 	assert.InDelta(t, 1200, composite.Result.TotalDemand, 1e-9)
 	assert.InDelta(t, 600, vcs[0].TotalDemand, 1e-9)
 	assert.InDelta(t, 600, vcs[1].TotalDemand, 1e-9)
+	assert.Equal(t, 100.0, vcs[1].PerReplicaCapacity, "no listed analyzer sized v2")
+	assert.InDelta(t, 600.0/(2*100), vcs[1].Utilization, 1e-9, "its utilization follows its new demand")
 }
 
 // TestCompositeIgnoresANeedItCannotPrice: a need whose demand at
@@ -195,6 +229,7 @@ func TestCompositeIgnoresANeedItCannotPrice(t *testing.T) {
 
 			listed := buildComposite(context.Background(), named, named, 0.85, 0.7)
 			assert.Equal(t, 800.0, listed.Result.TotalDemand)
+			assert.Equal(t, tc.satPRC, listed.Result.VariantCapacities[0].PerReplicaCapacity, "saturation's PRC is kept")
 			assert.False(t, math.IsInf(listed.Result.VariantCapacities[0].Utilization, 0))
 
 			unlisted := buildComposite(context.Background(), named, []allocation.NamedAnalyzerResult{tc.other}, 0.85, 0.7)

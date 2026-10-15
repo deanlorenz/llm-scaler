@@ -22,9 +22,9 @@ import (
 // composite starts as a copy of saturation's result -- every field saturation
 // set, so supply, holds, start times and queue loads reach the optimizer as
 // they did when it consumed saturation alone -- and changes only what it
-// decides: each role's demand, the model's, and each variant's share of it
-// and utilization, and each variant's Reason, which names the decision path.
-// Every per-replica capacity (PRC) is saturation's.
+// decides: each role's demand, the model's, each variant's share of it, its
+// per-replica capacity (PRC) where another analyzer decided it, its
+// utilization, and its Reason, which names the decision path.
 //
 // Per variant, every eligible analyzer that defines a replica need N
 // (allocation.TotalReplicas) contributes, and the composite takes the largest:
@@ -40,16 +40,16 @@ import (
 //     with no reading: it cannot ask for more this cycle, so the roles it
 //     covers do not shrink until its grace runs out.
 //
-// A need is expressed in demand, never in capacity: every PRC stays as
-// saturation measured it, so variants of one role on different accelerators
-// keep their relative worth, and each role's demand becomes the largest of
+// Each role's demand, in saturation's units, becomes the largest of
 //   - saturation's own demand, D_sat[role], exactly, when saturation
 //     contributed for one of the role's variants;
 //   - N x PRC_sat(variant) for each variant another analyzer's need N was
 //     read for.
 //
 // The second holds when D_sat[role] is zero too, so another analyzer can grow
-// a role saturation sees as idle (scaleDemand).
+// a role saturation sees as idle (scaleDemand). Each variant another analyzer
+// decided is then priced at D[role] / N, so it needs exactly N replicas
+// (priceVariants).
 //
 // eligibleAnalyzers is the analyzers the policy lists: namedResults less the
 // observe-only slo analyzer, less saturation when the policy does not list
@@ -89,6 +89,7 @@ func buildComposite(
 	needs := make(map[string]roleNeed)
 	contributors := make(map[string]bool)
 	compositeVCs := make([]domain.VariantCapacity, 0, len(sat.Result.VariantCapacities))
+	decisions := make([]allocation.Decision, 0, len(sat.Result.VariantCapacities))
 	for _, source := range sat.Result.VariantCapacities {
 		vc := source
 		vc.PendingAges = slices.Clone(source.PendingAges)
@@ -105,17 +106,13 @@ func buildComposite(
 		if _, ok := satDemand[role]; ok {
 			needs[role] = needs[role].add(d, vc.PerReplicaCapacity)
 		}
-		if d.OthersOK && !(vc.PerReplicaCapacity > 0) {
-			logger.Info("a listed analyzer's need is dropped: saturation has no per-replica capacity for the variant",
-				"modelID", sat.Result.ModelID, "namespace", sat.Result.Namespace,
-				"variant", vc.VariantName, "totalReplicas", d.Others)
-		}
 
 		logger.V(logging.VERBOSE).Info("composite-contributors",
 			"modelID", sat.Result.ModelID, "namespace", sat.Result.Namespace,
 			"variant", vc.VariantName, "decisionPath", d.Path,
 			"contributors", d.Contributors, "totalReplicas", d.N)
 		compositeVCs = append(compositeVCs, vc)
+		decisions = append(decisions, d)
 	}
 
 	result := *sat.Result
@@ -126,6 +123,11 @@ func buildComposite(
 	result.RoleStartSeconds = maps.Clone(sat.Result.RoleStartSeconds)
 	result.VariantBusiestQueueLoad = maps.Clone(sat.Result.VariantBusiestQueueLoad)
 	scaleDemand(&result, satDemand, needs)
+	for _, i := range priceVariants(&result, decisions, satDemand, needs) {
+		logger.Info("a listed analyzer's need is dropped: saturation has no per-replica capacity for the variant",
+			"modelID", sat.Result.ModelID, "namespace", sat.Result.Namespace,
+			"variant", result.VariantCapacities[i].VariantName, "totalReplicas", decisions[i].Others)
+	}
 
 	sized := make(map[string]bool, len(needs))
 	for role, n := range needs {
@@ -179,8 +181,21 @@ type roleNeed struct {
 	othersOK   bool
 }
 
+// effectiveNeed is the variant's need the composite acts on, given
+// saturation's PRC for it: the larger of saturation's need and the others',
+// leaving out an others' need whose demand at that PRC overflows, which is no
+// reading. An others' need on a variant saturation cannot price (PRC <= 0)
+// stands: it sizes the variant (priceVariants), though it adds no demand.
+func effectiveNeed(d allocation.Decision, prc float64) (float64, bool) {
+	n, ok := d.SaturationN, d.Saturation
+	if d.OthersOK && (!(prc > 0) || !math.IsInf(d.Others*prc, 0)) && (!ok || d.Others > n) {
+		n, ok = d.Others, true
+	}
+	return n, ok
+}
+
 // add folds in one variant's decision. A need on a variant saturation cannot
-// price (PRC <= 0), or one whose demand is not finite, is no reading.
+// price (PRC <= 0), or one whose demand is not finite, adds no demand.
 func (n roleNeed) add(d allocation.Decision, prc float64) roleNeed {
 	n.saturation = n.saturation || d.Saturation
 	if !d.OthersOK || prc <= 0 {
@@ -245,6 +260,50 @@ func scaleDemand(result *domain.AnalyzerResult, satDemand map[string]float64, ne
 		}
 		redistributeVariantDemand(result.VariantCapacities, role, target)
 	}
+}
+
+// priceVariants sets, for each variant of a role scaleDemand sized, the PRC at
+// which the role's demand D needs exactly the variant's decided N replicas:
+// D / N. Each variant is then sized to what its deciding analyzer asked, and
+// variants on different accelerators keep the deciding analyzer's view of
+// their relative worth. Converting every need at saturation's PRC instead
+// over-provisioned the cheaper accelerator about twice over when the
+// analyzers disagreed on that ratio.
+//
+// Saturation's own PRC is kept exactly where saturation decided the variant
+// and the role's demand is saturation's (D/(D/P) is not always P, and a
+// replica count at a boundary would flip), and for a variant no listed
+// analyzer sized, which is priced in saturation's units as before. Each
+// changed variant's utilization is recomputed.
+//
+// It returns the index of each variant whose need another analyzer defined
+// but nothing could carry: saturation has no PRC for it and its role was not
+// sized.
+func priceVariants(result *domain.AnalyzerResult, decisions []allocation.Decision,
+	satDemand map[string]float64, needs map[string]roleNeed) (dropped []int) {
+	for i := range result.VariantCapacities {
+		vc := &result.VariantCapacities[i]
+		d := decisions[i]
+		role := domain.RoleOfVC(*vc)
+		if !needs[role].sized() {
+			if d.OthersOK && !(vc.PerReplicaCapacity > 0) {
+				dropped = append(dropped, i)
+			}
+			continue
+		}
+		demand, _ := aggregation.DemandForRole(result, role)
+		n, ok := effectiveNeed(d, vc.PerReplicaCapacity)
+		satExact := demand == satDemand[role] && d.Saturation && n == d.SaturationN
+		if satExact || !ok || !(n > 0) || !(demand > 0) {
+			continue
+		}
+		vc.PerReplicaCapacity = demand / n
+		vc.Utilization = 0
+		if vc.ReplicaCount > 0 {
+			vc.Utilization = vc.TotalDemand / (float64(vc.ReplicaCount) * vc.PerReplicaCapacity)
+		}
+	}
+	return dropped
 }
 
 // redistributeVariantDemand sets the TotalDemand of role's variants in vcs to
