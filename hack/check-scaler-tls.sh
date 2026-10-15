@@ -1015,6 +1015,16 @@ ok '[ "$RC" = 0 ] && grep -q "Cannot tell which CA KEDA trusts" "$WORK/warnings"
 run wva_verify_scaler_tls
 ok 'grep -q "Cannot tell which CA KEDA trusts" "$WORK/warnings"' "verify, marker without caSha256: $(cat "$WORK/warnings")"
 
+echo "== warmpool.sh reads the controller once: one warning when it cannot"
+# A kubectl that is Forbidden everything, so the controller's mode is unknown.
+mkdir -p "$WORK/kbin"
+printf '#!/bin/sh\necho "Error from server (Forbidden): deployments.apps is forbidden in the namespace notfound-prod" >&2\nexit 1\n' >"$WORK/kbin/kubectl"
+chmod +x "$WORK/kbin/kubectl"
+PATH="$WORK/kbin:$PATH" bash "$ROOT/deploy/warmpool.sh" create -n tenant --name pool \
+    --proxy-image example.invalid/proxy:v1 --wva-namespace wva-system \
+    --models 2 --model-size 8B --accelerator NVIDIA-H100-80GB-HBM3 --dry-run >"$WORK/wp.out" 2>"$WORK/wp.err"
+ok '[ "$(grep -c "whether its scaler serves TLS is unknown" "$WORK/wp.err")" = 1 ] && grep -q "scalerAddress: wva-external-scaler.wva-system.svc.cluster.local:9090" "$WORK/wp.out" && ! grep -q "authenticationRef" "$WORK/wp.out"' "warmpool: the unknown-mode warning printed $(grep -c "whether its scaler serves TLS is unknown" "$WORK/wp.err") times (want 1), or the plaintext trigger is wrong: $(grep -n "scalerAddress\|authenticationRef" "$WORK/wp.out" | tr '\n' ' ')"
+
 echo "== make verify-deployment loads the scaler TLS checks"
 ok 'grep -A8 "^verify-deployment:" "$ROOT/Makefile" | grep -q "source deploy/lib/scaler_tls.sh"' "the verify-deployment recipe does not source scaler_tls.sh, so its scaler TLS checks never run"
 

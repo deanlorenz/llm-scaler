@@ -529,6 +529,7 @@ cmd_create() {
   fi
 
   local manifest
+  pool_resolve_scaler_addr
   if [ "$GROUP_SIZE" -gt 1 ]; then
     manifest=$(warmpool_group_manifest "$memory")
   else
@@ -1315,16 +1316,25 @@ $(pool_trigger_auth)
 YAML
 }
 
-# pool_scaler_addr echoes the scaler's address for the pool's ScaledObject: the
-# TLS form when the controller serves this installer's TLS (scaler_tls.sh).
-pool_scaler_addr() {
+# pool_resolve_scaler_addr sets POOL_SCALER_ADDR, the scaler's address for the
+# pool's ScaledObject: the TLS form when the controller serves this installer's
+# TLS (scaler_tls.sh). Once per run, in the calling shell, so the controller is
+# read and any warning printed once, not per use in the manifest.
+pool_resolve_scaler_addr() {
+    [ -z "${POOL_SCALER_ADDR:-}" ] || return 0
     local mode
     mode="$(wva_scaler_mode_of "$WVA_NAMESPACE")"
     if [ "$mode" = unknown ]; then
         log_warning "Cannot read Deployment wva-controller-manager in $WVA_NAMESPACE, so whether its scaler serves TLS is unknown. The pool uses the plaintext address; on a TLS install it stays not-Ready."
     fi
     [ "$mode" = tls ] || mode=plaintext
-    wva_scaler_address "$WVA_NAMESPACE" "$mode"
+    POOL_SCALER_ADDR="$(wva_scaler_address "$WVA_NAMESPACE" "$mode")"
+}
+
+# pool_scaler_addr echoes POOL_SCALER_ADDR, resolving it when no caller has.
+pool_scaler_addr() {
+    pool_resolve_scaler_addr
+    printf '%s\n' "$POOL_SCALER_ADDR"
 }
 
 # pool_trigger_auth emits the trigger's authenticationRef, at the trigger's
