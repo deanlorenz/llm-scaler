@@ -478,8 +478,10 @@ ran twice. The second run, on 2026-10-14 to 2026-10-15, is the result below.
 It sent Llama shorter prompts (15 000 tokens) and let the router queue a
 request for 60 s. The [first run](#the-first-pd-run-20-000-token-prompts-30-s-router-ttl)
 sent 20 000-token prompts and dropped requests after 30 s; it is kept below.
-Both runs used the same controller, deployed by digest (`sha256:13c196c6…`), and the
-scenario `hack/benchmark/scenarios/guides/two-model-shapes-pd.yaml`.
+Both runs used the same controller, deployed by digest
+(`sha256:13c196c6…`), and the same scenario file,
+`hack/benchmark/scenarios/guides/two-model-shapes-pd.yaml`, with the
+differences above.
 
 | | |
 | --- | --- |
@@ -517,10 +519,10 @@ Qwen 21 716 / 14 041 / 87 ms.
 
 ### What the optimizer did
 
-In the share arm, 10 transfers completed, none aborted and none timed out
-filling. The share arm held models back for 2880 model-seconds: 2730 s
-`floor-pinned` and 150 s `awaiting-release`. The shadow arm planned moves for
-2790 s and made none.
+In the share arm, sharing moved a GPU 10 times, and every move finished.
+For 2880 model-seconds a model was kept from growing: 2730 s because its floor
+was pinned (`floor-pinned`) and 150 s while a GPU was being released
+(`awaiting-release`). The shadow arm planned moves for 2790 s and made none.
 
 ### What this says, and how far it goes
 
@@ -529,19 +531,21 @@ filling. The share arm held models back for 2880 model-seconds: 2730 s
   96 s today, and no failed requests against 116.
 - **Sharing cost 39% more GPU-seconds.** The quota was binding (peak 10 of 10)
   in every arm. The extra GPU-seconds are GPUs the quota allowed and today's
-  optimizer did not use. Sharing makes bursts faster; it does not save GPUs.
+  optimizer did not use. Here sharing made bursts faster and cost GPUs; it
+  did not save any.
 - **The failures are requests the router dropped.** Every failed request was a
-  429 `request evicted from queue: request TTL expired`, after 60 s in the
-  router's queue. A dropped request is missing from the percentiles, so today's
+  429 (the report files it as "Rate Limit"); the load generator's per-request
+  records give the router's reason, `request evicted from queue: request TTL
+  expired`, after 60 s in its queue. A dropped request is missing from the percentiles, so today's
   and shadow's Llama p95 are lower bounds.
 - **The spread between arms is large.** Shadow moves nothing, so it should
   match today, yet its Llama p95 was 24 s lower. The share arm's gap (96 s to
   6 s) is far larger than that, but this is one run with one rise per model.
-- **This is a lighter load than the first run.** In the first run, with
-  20 000-token prompts, Llama's burst was overloaded in every arm, share
-  included (p95 59 s). At 15 000 tokens, sharing gave Llama enough GPUs to
-  keep up; without sharing it still could not. A second run at this load is
-  in progress.
+- **The two runs cannot be compared on prompt length alone.** In the first
+  run, with 20 000-token prompts, Llama's burst was overloaded in every arm,
+  share included (p95 59 s). This run changed two things: shorter prompts and
+  a longer router TTL (and the first run's CPU setting is not recorded). A
+  second run at this load was in progress on 2026-10-15.
 
 ### The first P/D run (20 000-token prompts, 30 s router TTL)
 
