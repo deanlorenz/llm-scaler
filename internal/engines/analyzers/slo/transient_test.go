@@ -201,17 +201,18 @@ var _ = Describe("Analyze with a transient", func() {
 					vs(domain.RoleDecode, 2, decodePending, 0)},
 			})
 			Expect(err).NotTo(HaveOccurred())
-			excluded := func(objective string) float64 {
-				v, ok := gaugeIn(registry, constants.WVASLOExcluded, map[string]string{
-					constants.LabelObjective: objective, constants.LabelReason: constants.SLOExcludedStarting})
-				Expect(ok).To(BeTrue(), objective)
-				return v
-			}
 			for objective, want := range map[string]bool{constants.SLOObjectiveTTFT: true, constants.SLOObjectiveTPOT: tpotExcluded} {
 				_, observed := gaugeIn(registry, constants.WVASLOObservedSeconds,
 					map[string]string{constants.LabelObjective: objective})
 				Expect(observed).To(Equal(!want), objective+" observed")
-				Expect(excluded(objective) == 1).To(Equal(want), objective+" excluded")
+				v, ok := gaugeIn(registry, constants.WVASLOExcluded, map[string]string{
+					constants.LabelObjective: objective, constants.LabelReason: constants.SLOExcludedStarting})
+				Expect(ok).To(BeTrue(), objective)
+				wantValue := 0.0
+				if want {
+					wantValue = 1
+				}
+				Expect(v).To(Equal(wantValue), objective+" excluded")
 			}
 		},
 		Entry("a prefill replica starting delays first tokens, not the tokens after", 1, 0, false),
