@@ -55,9 +55,7 @@ var _ = Describe("learned state restored by engine arguments", func() {
 		return back
 	}
 	itlBaselines := func(a *SaturationAnalyzer) int {
-		a.mu.Lock()
-		defer a.mu.Unlock()
-		return len(a.itlBaseline)
+		return len(a.itlBaselines())
 	}
 
 	It("restores everything under the same arguments and image", func() {
