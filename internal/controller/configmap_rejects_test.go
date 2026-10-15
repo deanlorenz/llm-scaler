@@ -128,6 +128,67 @@ func TestRejectedDefaultKeepsTheLimiterInForce(t *testing.T) {
 	}
 }
 
+// TestKeptDefaultWarnsOfTheRestart: a bad "default" in the ConfigMap the
+// limiters come from is survivable at runtime, where the previous entry is
+// kept, and fatal on the next restart, where there is none to keep. The
+// warning must say so, and only for that entry of that ConfigMap.
+func TestKeptDefaultWarnsOfTheRestart(t *testing.T) {
+	const restartWarning = "will refuse to start until the entry is fixed"
+	cases := []struct {
+		name        string
+		policyNS    bool   // a separate policy namespace is in use
+		applyNS     string // the ConfigMap the bad entry is applied to
+		key         string // the entry that is rejected
+		wantWarning bool
+	}{
+		{name: "default in the controller's own ConfigMap", applyNS: rejectsSystemNS,
+			key: config.GlobalDefaultsKey, wantWarning: true},
+		{name: "default in the policy namespace", policyNS: true, applyNS: rejectsPolicyNS,
+			key: config.GlobalDefaultsKey, wantWarning: true},
+		{name: "default in the controller's own ConfigMap while policy is separate", policyNS: true,
+			applyNS: rejectsSystemNS, key: config.GlobalDefaultsKey, wantWarning: false},
+		{name: "an entry other than default", applyNS: rejectsSystemNS, key: "some-tier", wantWarning: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRejectsFixture(t)
+			if tc.policyNS {
+				f.cfg.SetPolicyNamespace(rejectsPolicyNS, config.PolicySourceWellKnown)
+			}
+			f.cfg.MarkConfigMapsBootstrapComplete()
+			good := map[string]string{config.GlobalDefaultsKey: quotaDefault, "some-tier": quotaDefault}
+			f.apply(tc.applyNS, good)
+			_ = f.events()
+
+			bad := map[string]string{config.GlobalDefaultsKey: quotaDefault, "some-tier": quotaDefault}
+			bad[tc.key] = invalidQuotaDefault
+			f.apply(tc.applyNS, bad)
+			var rejected []string
+			for _, e := range f.events() {
+				if strings.Contains(e, constants.K8SEventConfigEntryRejected) {
+					rejected = append(rejected, e)
+				}
+			}
+			if len(rejected) != 1 {
+				t.Fatalf("want one %s event, got %v", constants.K8SEventConfigEntryRejected, rejected)
+			}
+			if got := strings.Contains(rejected[0], restartWarning); got != tc.wantWarning {
+				t.Errorf("event warns of the restart = %v, want %v: %s", got, tc.wantWarning, rejected[0])
+			}
+		})
+	}
+}
+
+// TestRejectedDefaultAtStartupSaysItStopsStartup: the startup refusal exits
+// the process, and the event may never be sent. What it says must therefore
+// be about this start, not the next one.
+func TestRejectedDefaultAtStartupSaysItStopsStartup(t *testing.T) {
+	got := rejectedEntryOutcome(config.GlobalDefaultsKey, false, true, false)
+	if !strings.Contains(got, "refuses to start until it is fixed") {
+		t.Errorf("startup outcome = %q, want it to say the controller refuses to start", got)
+	}
+}
+
 // TestUnknownKeyIsAppliedAndReported: a misspelled key used to be dropped
 // without a word. It must be reported, and it must NOT cost the entry: an
 // unknown key in "default" that rejected the entry would drop the limiters with

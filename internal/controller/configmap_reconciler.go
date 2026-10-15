@@ -267,7 +267,7 @@ func (r *ConfigMapReconciler) handleClusterPolicyConfigMap(ctx context.Context, 
 			// typo must not lift a quota. Only with nothing in force yet (the
 			// first load) does the controller run unbounded, said below.
 			if previous, had := r.Config.ClusterPolicy(); had {
-				r.reportRejectedEntries(ctx, cm, rejected, map[string]bool{config.GlobalDefaultsKey: true})
+				r.reportRejectedEntries(ctx, cm, rejected, map[string]bool{config.GlobalDefaultsKey: true}, true)
 				r.Status.RecordPolicy(r.Config, cm.GetNamespace(), cm.GetName(), cm.GetResourceVersion(), rerr)
 				logger.Error(rerr, "Policy namespace ConfigMap default entry is invalid; keeping the cluster policy "+
 					"already in force", "policyNamespace", cm.GetNamespace(), "configMap", cm.GetName(),
@@ -275,7 +275,7 @@ func (r *ConfigMapReconciler) handleClusterPolicyConfigMap(ctx context.Context, 
 				return nil
 			}
 			if !r.Config.ConfigMapsBootstrapComplete() {
-				r.reportRejectedEntries(ctx, cm, rejected, nil)
+				r.reportRejectedEntries(ctx, cm, rejected, nil, true)
 				r.Status.RecordPolicy(r.Config, cm.GetNamespace(), cm.GetName(), cm.GetResourceVersion(), rerr)
 				return errUnboundedAtStartup(cm, rerr)
 			}
@@ -288,7 +288,7 @@ func (r *ConfigMapReconciler) handleClusterPolicyConfigMap(ctx context.Context, 
 		// "not separated" and sends the limiter accessors back to the
 		// controller's own ConfigMap, the one the policy namespace exists to take
 		// limit-setting away from.
-		r.reportRejectedEntries(ctx, cm, rejected, nil)
+		r.reportRejectedEntries(ctx, cm, rejected, nil, true)
 		r.Config.UpdateClusterPolicy(&config.ScalingPolicy{})
 		r.Status.RecordPolicy(r.Config, cm.GetNamespace(), cm.GetName(), cm.GetResourceVersion(),
 			rejected[config.GlobalDefaultsKey])
@@ -297,7 +297,7 @@ func (r *ConfigMapReconciler) handleClusterPolicyConfigMap(ctx context.Context, 
 		return nil
 	}
 
-	r.reportRejectedEntries(ctx, cm, rejected, nil)
+	r.reportRejectedEntries(ctx, cm, rejected, nil, true)
 	r.Config.UpdateClusterPolicy(&policy)
 	r.Status.RecordPolicy(r.Config, cm.GetNamespace(), cm.GetName(), cm.GetResourceVersion(), nil)
 	logger.Info("Loaded cluster policy from the policy namespace",
@@ -361,25 +361,55 @@ func keepPreviousEntries(configs config.ScalingPolicySet, rejected map[string]er
 // error log: a Warning event on the ConfigMap per rejected key, saying whether
 // the previous entry stays in force, and wva_config_rejected_entries for the
 // ConfigMap, which returns to 0 once every entry parses.
+//
+// boundSource says cm is the ConfigMap the cluster's limiters are read from.
+// Its "default" entry is the one an invalid value stops startup over
+// (errUnboundedAtStartup), so a rejected default there is reported as such:
+// at startup the controller is refusing to start, and at runtime, where the
+// previous entry is kept, it will refuse on its next restart. The log line
+// carries the same text as the event, because at startup the process exits
+// right after and the event may never be sent.
 func (r *ConfigMapReconciler) reportRejectedEntries(ctx context.Context, cm *corev1.ConfigMap,
-	rejected map[string]error, kept map[string]bool) {
+	rejected map[string]error, kept map[string]bool, boundSource bool) {
 	metrics.SetConfigRejectedEntries(cm.GetNamespace(), cm.GetName(), len(rejected))
 	if len(rejected) == 0 {
 		return
 	}
 	logger := log.FromContext(ctx)
 	for _, key := range slices.Sorted(maps.Keys(rejected)) {
-		outcome := "there is no previous entry under this key, so it is not in force"
-		if kept[key] {
-			outcome = "the previous entry under this key stays in force"
+		outcome := rejectedEntryOutcome(key, kept[key], boundSource, r.Config.ConfigMapsBootstrapComplete())
+		msg := fmt.Sprintf("entry %q rejected (%v); %s", key, rejected[key], outcome)
+		if boundSource && key == config.GlobalDefaultsKey {
+			logger.Error(rejected[key], "Scaling-policy entry rejected: "+msg,
+				"namespace", cm.GetNamespace(), "configMap", cm.GetName(), "entry", key)
+		} else {
+			logger.Info("WARNING: scaling-policy entry rejected: "+msg,
+				"namespace", cm.GetNamespace(), "configMap", cm.GetName(), "entry", key)
 		}
-		logger.Info("WARNING: scaling-policy entry rejected; "+outcome,
-			"namespace", cm.GetNamespace(), "configMap", cm.GetName(), "entry", key, "error", rejected[key].Error())
 		if r.Recorder != nil {
-			r.Recorder.Eventf(cm, corev1.EventTypeWarning, constants.K8SEventConfigEntryRejected,
-				"entry %q rejected (%v); %s", key, rejected[key], outcome)
+			r.Recorder.Event(cm, corev1.EventTypeWarning, constants.K8SEventConfigEntryRejected, msg)
 		}
 	}
+}
+
+// rejectedEntryOutcome says what a rejected entry under key means for the
+// controller. See reportRejectedEntries for boundSource.
+func rejectedEntryOutcome(key string, kept, boundSource, bootstrapComplete bool) string {
+	outcome := "there is no previous entry under this key, so it is not in force"
+	if kept {
+		outcome = "the previous entry under this key stays in force"
+	}
+	if !boundSource || key != config.GlobalDefaultsKey {
+		return outcome
+	}
+	if !bootstrapComplete {
+		if kept {
+			return outcome
+		}
+		return "this entry carries the cluster's GPU limits, so the controller refuses to start until it is fixed"
+	}
+	return outcome + "; this entry carries the cluster's GPU limits, so the next time the controller " +
+		"restarts it will refuse to start until the entry is fixed"
 }
 
 // handleScalingPolicyConfigMap handles updates to the scaling-policy ConfigMap.
@@ -408,7 +438,7 @@ func (r *ConfigMapReconciler) handleScalingPolicyConfigMap(ctx context.Context, 
 	kept := keepPreviousEntries(configs, rejected, func(key string) (config.ScalingPolicy, bool) {
 		return r.Config.ScalingPolicyEntry(setNamespace, key)
 	})
-	r.reportRejectedEntries(ctx, cm, rejected, kept)
+	r.reportRejectedEntries(ctx, cm, rejected, kept, isGlobal && !r.Config.PolicyNamespaceIsSeparate())
 	r.reportUnknownKeys(ctx, cm)
 
 	// Only the ConfigMap limiters are read from can leave the controller

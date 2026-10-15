@@ -1752,6 +1752,11 @@ to start unbounded`) rather than run without its GPU bound. That ConfigMap is
 the policy-namespace one when a policy namespace is in use, otherwise the
 controller's own.
 
+So a bad `default` there is safe only until the next restart. While the
+controller runs, the old entry stays in force. Once it restarts, there is no
+old entry, and it will not start until you fix the entry. The
+`ConfigEntryRejected` event and the log line both say so.
+
 **Invalid entry (logged and skipped):**
 ```yaml
   invalid-config: |
