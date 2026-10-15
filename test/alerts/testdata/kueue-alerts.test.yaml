@@ -39,15 +39,15 @@ tests:
         exp_alerts: []
 
   # 1b. The per-namespace alert waits until the namespace is the entry's only
-  #     stale one: team-b recovers after 3 minutes, and team-a, alone from
-  #     then, fires 5 minutes later. The entry-wide alert never reaches 5
-  #     minutes with two.
+  #     stale one: team-b recovers after 3 minutes (its series deleted, so a
+  #     stale marker), and team-a, alone from then, fires 5 minutes later.
+  #     The entry-wide alert never reaches 5 minutes with two.
   - interval: 1m
     input_series:
       - series: 'wva_quota_borrow_withheld{limiter_name="kq",exported_namespace="team-a",accelerator="H100",reason="stale",pod="wva-a"}'
         values: '1x20'
       - series: 'wva_quota_borrow_withheld{limiter_name="kq",exported_namespace="team-b",accelerator="H100",reason="stale",pod="wva-a"}'
-        values: '1x3 _x16'
+        values: '1x3 stale'
     alert_rule_test:
       - eval_time: 4m
         alertname: WVAKueueReaderStaleNamespace
