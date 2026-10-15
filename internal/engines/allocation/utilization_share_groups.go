@@ -293,17 +293,24 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 	// charged to the cluster budget (a cluster quota counts every namespace).
 	// So the cluster group gets only what the cluster budget leaves after the
 	// namespace groups' largest claim: the cluster free less, per accelerator
-	// type, the sum of the namespace groups' free quota, floored at 0. (Capping
-	// each claim at the cluster free first gives the same remainder: once one
-	// claim reaches it, nothing is left either way.) The namespace groups keep
-	// the whole cluster free as their PhysicalFree; together they claim at
-	// most their sum. Planned fills across every group then stay within the
-	// cluster free.
+	// type, the sum of the namespace groups' claims, floored at 0. A group
+	// claims its free quota in whole replicas of its smallest variant: with
+	// 8-GPU replicas, 4 free GPUs place nothing, and claiming them would
+	// leave a free node unused by every group. (Capping each claim at the
+	// cluster free first gives the same remainder: once one claim reaches it,
+	// nothing is left either way.) This keeps the cluster group from counting
+	// GPUs a namespace group may also fill. It does not bound the namespace
+	// groups against each other: each keeps the whole cluster free as its
+	// PhysicalFree.
 	claimed := map[string]int{}
 	for _, k := range keys {
 		nsFree, ok := availableByNS[k.scope][k.acc]
 		if k.scope != "" && ok && nsFree >= 0 && nsFree <= MaxShareBudgetGPUs {
-			claimed[k.acc] += nsFree // a namespace group formed over a finite budget
+			// a namespace group formed over a finite budget
+			if step := smallestReplicaGPUs(groups[k]); step > 0 {
+				nsFree -= nsFree % step
+			}
+			claimed[k.acc] += nsFree
 		}
 	}
 
@@ -344,6 +351,20 @@ func BuildShareGroups(requests []ModelScalingRequest, constraints []*ResourceCon
 		out = append(out, *g)
 	}
 	return out
+}
+
+// smallestReplicaGPUs is the fewest GPUs one replica of any of g's variants
+// takes: the smallest step g can grow by. It is 0 when no variant says.
+func smallestReplicaGPUs(g *ShareGroup) int {
+	step := 0
+	for _, vs := range g.Variants {
+		for _, v := range vs {
+			if v.GPUs > 0 && (step == 0 || v.GPUs < step) {
+				step = v.GPUs
+			}
+		}
+	}
+	return step
 }
 
 // clusterBudgets returns, per accelerator type, the free GPUs of the providers

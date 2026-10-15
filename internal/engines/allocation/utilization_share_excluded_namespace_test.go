@@ -56,6 +56,12 @@ var _ = Describe("BuildShareGroups: a namespace a namespace quota excludes", fun
 			shareReq("mx", "ns-x", 100, held), // nearly idle: a need of 0.125 GPU
 		}
 	}
+	// node is a model whose one replica takes a whole 8-GPU node.
+	node := func(id, ns string, replicas int) ModelScalingRequest {
+		req := shareReq(id, ns, 9000, replicas)
+		req.VariantStates[0].GPUsPerReplica = 8
+		return req
+	}
 	excluded := []string{"ns-x/mx: " + UnsharedExcludedNamespace("A100")}
 	// expectNotPlanned checks that no group plans a role or a variant of the
 	// excluded namespace, not only that the cluster group is absent.
@@ -233,11 +239,6 @@ var _ = Describe("BuildShareGroups: a namespace a namespace quota excludes", fun
 				"team-b": {"A100": {Limit: 16, Used: 8}},
 			}},
 		}
-		node := func(id, ns string, replicas int) ModelScalingRequest {
-			req := shareReq(id, ns, 9000, replicas)
-			req.VariantStates[0].GPUsPerReplica = 8
-			return req
-		}
 		reqs := []ModelScalingRequest{node("ma", "team-a", 1), node("mb", "team-b", 1), node("mx", "ns-x", 2)}
 		groups, _ := build(reqs, cons, ShareGroupOptions{ClusterIsQuota: true})
 		Expect(groups).To(HaveKey(""))
@@ -245,6 +246,39 @@ var _ = Describe("BuildShareGroups: a namespace a namespace quota excludes", fun
 		Expect(groups[""].PhysicalFree).To(Equal(0))
 		Expect(groups["team-a"].PhysicalFree).To(Equal(8))
 		Expect(groups["team-b"].PhysicalFree).To(Equal(8))
+	})
+
+	// A tenant claims its free quota in whole replicas only. With 8-GPU
+	// replicas, team-a's 4 free GPUs place nothing; counting them against the
+	// cluster free left one free node that no group could fill: idle 4 in the
+	// cluster group and 4 in team-a's, and neither fits an 8-GPU replica.
+	It("claims a tenant's free quota in whole replicas, so a free node stays usable", func() {
+		for _, c := range []struct {
+			teamALimit, clusterIdle, teamIdle int
+		}{
+			{teamALimit: 12, clusterIdle: 8, teamIdle: 4}, // 4 free: no whole replica, claims 0
+			{teamALimit: 16, clusterIdle: 0, teamIdle: 8}, // 8 free: one replica, claims 8
+		} {
+			cons := []*ResourceConstraints{
+				{Pools: map[string]ResourcePool{"A100": {Limit: 48, Used: 40}}},
+				{NamespaceScoped: true, NamespacePools: map[string]map[string]ResourcePool{
+					"team-a": {"A100": {Limit: c.teamALimit, Used: 8}},
+				}},
+			}
+			reqs := []ModelScalingRequest{node("ma", "team-a", 1), node("mx", "ns-x", 1)}
+			groups, unshared := build(reqs, cons, ShareGroupOptions{ClusterIsQuota: true})
+			Expect(unshared).To(BeEmpty())
+			idle := map[string]int{}
+			for scope, g := range groups {
+				committed := 0
+				for _, n := range g.Committed {
+					committed += n
+				}
+				idle[scope] = max(0, min(g.Budget-committed, g.PhysicalFree))
+			}
+			Expect(idle).To(Equal(map[string]int{"": c.clusterIdle, "team-a": c.teamIdle}),
+				"team-a limit %d", c.teamALimit)
+		}
 	})
 
 	It("reports nothing unshared without a namespace quota", func() {

@@ -349,7 +349,14 @@ quota. So the cluster group gets only what the cluster quota leaves after the
 tenants' claims: its free GPUs, less every tenant group's free quota, never
 below zero. For example, a cluster quota of 20
 with 6 held and 14 free, and tenants with 6 and 4 free: the cluster group may
-fill 4, and the groups together fill at most 14.
+fill 4.
+
+A tenant claims only whole replicas. With 8-GPU replicas, a tenant with 4 free
+GPUs claims none of them, so the cluster group can still fill a free node.
+
+This stops the cluster group from counting GPUs a tenant may also fill. It does
+not bound the tenants against each other: each tenant's group is bounded only by
+its own free quota and the whole cluster free.
 
 </details>
 
