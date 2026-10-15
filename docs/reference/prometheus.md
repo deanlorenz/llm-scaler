@@ -482,9 +482,9 @@ across a restart, are otherwise visible only in the logs.
   - `whole`: the configuration matched; everything was restored;
   - `args`: the arguments matched on another engine image; everything but the ITL baseline was restored;
   - `prior`: the arguments differed; only the measured capacity was kept, as a lower-only figure (`P2-prior`);
-  - `incomplete`: the configuration could not be read completely; nothing was restored;
-  - `differs`: a snapshot from an older release whose configuration differs; nothing was restored.
-- **Use Case**: After a restart, `incomplete` or `differs` well above `whole` and `args` means the snapshot was mostly not used -- flags the controller cannot resolve, or an upgrade that changed how configurations are identified. Many `prior` means many rollouts while the controller was down ([troubleshooting](troubleshooting.md#capacity-priced-high-after-a-restart)).
+  - `incomplete`: the configuration could not be read completely; only the measured capacity was kept -- as the variant's own when it runs the same unread configuration it was saved under, and as a lower-only figure otherwise;
+  - `differs`: a snapshot from an older release whose configuration differs; only the measured capacity was kept, as a lower-only figure.
+- **Use Case**: After a restart, `incomplete` or `differs` well above `whole` and `args` means the snapshot was mostly kept as lower-only figures -- flags the controller cannot resolve, or an upgrade that changed how configurations are identified. Many `prior` means many rollouts while the controller was down ([troubleshooting](troubleshooting.md#capacity-priced-high-after-a-restart)).
 
 ### `wva_learned_state_snapshot_errors_total`
 - **Type**: Counter

@@ -334,7 +334,7 @@ func InitMetrics(registry prometheus.Registerer) error {
 	learnedStateRestores = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: constants.WVALearnedStateRestoresTotal,
-			Help: "Variants whose restored learned state was checked against their engine configuration after a controller restart (LEARNED_STATE_SNAPSHOT), by outcome: whole (the configuration matched; everything installed), args (the arguments matched on another engine image; everything but the ITL baseline installed), prior (the arguments differed; only the k2 windows installed, as lower-only figures), incomplete (the configuration could not be read completely; nothing installed) or differs (a document from before the arguments were recorded, whose configuration differs; nothing installed).",
+			Help: "Variants whose restored learned state was checked against their engine configuration after a controller restart (LEARNED_STATE_SNAPSHOT), by outcome: whole (the configuration matched; everything installed), args (the arguments matched on another engine image; everything but the ITL baseline installed), prior (the arguments differed; only the k2 windows installed, as lower-only figures), incomplete (the configuration could not be read completely; only the k2 windows installed, as the variant's own under the same unread configuration and as lower-only figures otherwise) or differs (a document from before the arguments were recorded, whose configuration differs; only the k2 windows installed, as lower-only figures).",
 		},
 		[]string{constants.LabelOutcome},
 	)
