@@ -6,8 +6,10 @@ package prometheus
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"sync"
 	"time"
 
@@ -37,12 +39,17 @@ func DefaultPrometheusSourceConfig() PrometheusSourceConfig {
 }
 
 // PrometheusSource implements MetricsSource for Prometheus backend.
+//
+// It holds no lock of its own. api, registry and config are not changed after
+// construction, the query registry and the cache synchronise themselves, and a
+// refresh writes each result into the cache as one Set. A lock held across
+// Refresh, as there used to be, serialised every refresh end to end and made
+// every cached Get wait behind an in-flight query of up to QueryTimeout.
 type PrometheusSource struct {
 	api      promv1.API
 	registry *source.QueryList // registry stores query templates for this source
 	config   PrometheusSourceConfig
 
-	mu    sync.RWMutex // protects the cache and refresh operations
 	cache *source.Cache
 }
 
@@ -62,12 +69,19 @@ func (p *PrometheusSource) QueryList() *source.QueryList {
 	return p.registry
 }
 
+// Close stops the source's cache cleanup goroutine. Idempotent.
+func (p *PrometheusSource) Close() {
+	p.cache.Close()
+}
+
 // Refresh executes queries and updates the cache.
 // If spec.Queries is empty, refreshes all registered queries for this source.
+//
+// Each query's own failure is in its result's Error. When every query failed,
+// Refresh also returns an error, with the results: Prometheus is then
+// unreachable or rejecting everything, and a caller that only checked the
+// returned error, as the collector's error counter does, never saw an outage.
 func (p *PrometheusSource) Refresh(ctx context.Context, spec source.RefreshSpec) (map[string]*source.MetricResult, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	logger := ctrl.LoggerFrom(ctx)
 
 	// Determine which queries to execute
@@ -106,11 +120,31 @@ func (p *PrometheusSource) Refresh(ctx context.Context, spec source.RefreshSpec)
 
 	wg.Wait()
 
+	succeeded := countSuccessful(results)
 	logger.V(logging.DEBUG).Info("Refreshed Prometheus metrics",
 		"queriesExecuted", len(queryNames),
-		"queriesSucceeded", countSuccessful(results))
+		"queriesSucceeded", succeeded)
 
+	if succeeded == 0 {
+		return results, fmt.Errorf("all %d Prometheus queries failed: %w", len(queryNames), firstError(results))
+	}
 	return results, nil
+}
+
+// firstError returns the error of the alphabetically first failed result, so
+// the error Refresh reports does not depend on map order.
+func firstError(results map[string]*source.MetricResult) error {
+	names := make([]string, 0, len(results))
+	for name, r := range results {
+		if r != nil && r.Error != nil {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return errors.New("no result")
+	}
+	slices.Sort(names)
+	return results[names[0]].Error
 }
 
 // executeQuery builds and executes a single query.
@@ -253,9 +287,6 @@ func (p *PrometheusSource) parseMatrix(matrix model.Matrix) []source.MetricValue
 // The cache key is constructed from both queryName and params.
 // Returns nil if not cached or expired.
 func (p *PrometheusSource) Get(queryName string, params map[string]string) *source.CachedValue {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
 	cacheKey := source.BuildCacheKey(queryName, params)
 	cached, ok := p.cache.Get(cacheKey)
 	if !ok {

@@ -22,14 +22,20 @@ type Cache struct {
 
 	// cleanupInterval is how often to run cleanup of expired entries
 	cleanupInterval time.Duration
+
+	// stop ends the cleanup goroutine. See Close.
+	stop context.CancelFunc
 }
 
-// NewCache creates a new in-memory cache
+// NewCache creates a new in-memory cache. Its cleanup goroutine runs until ctx
+// is done or Close is called, whichever comes first.
 func NewCache(ctx context.Context, configuredTTL time.Duration, cleanupInterval time.Duration) *Cache {
+	ctx, stop := context.WithCancel(ctx)
 	c := &Cache{
 		configuredTTL:   configuredTTL,
 		cleanupInterval: cleanupInterval,
 		cache:           make(map[CacheKey]*CachedValue),
+		stop:            stop,
 	}
 
 	// Start background cleanup if interval is set
@@ -38,6 +44,17 @@ func NewCache(ctx context.Context, configuredTTL time.Duration, cleanupInterval 
 	}
 
 	return c
+}
+
+// Close stops the cleanup goroutine. It is idempotent, and the cache stays
+// readable afterwards; only expiry sweeping stops.
+//
+// A cache built per InferencePool reconcile is handed the reconcile's context,
+// which controller-runtime does not cancel when the reconcile returns, so without
+// Close every rebuild left one ticking goroutine behind for the life of the
+// process.
+func (c *Cache) Close() {
+	c.stop()
 }
 
 // get retrieves cached metrics by key

@@ -83,6 +83,15 @@ type Refresher struct {
 	// freshMu serialises on-demand refreshes so concurrent callers collapse onto
 	// one observation. See EnsureFresh.
 	freshMu sync.Mutex
+	// failedAt is when the last on-demand refresh failed, failures how many have
+	// failed in a row, and failedOver the TakenAt of the observation published
+	// when the last one failed (zero if none was). All are guarded by freshMu.
+	// See retryWait.
+	failedAt   time.Time
+	failures   int
+	failedOver time.Time
+	// now reads the clock for the retry wait. Nil means time.Now.
+	now func() time.Time
 }
 
 // DecisionMaxAge is how stale an observation may be at the moment a placement
@@ -96,9 +105,15 @@ type Refresher struct {
 // waking onto an accelerator that a just-started workload had already filled.
 //
 // Small enough that a decision effectively sees the current cluster, large enough
-// to bound the work: the observation walks the pod informer's cache, so a refresh
-// costs no API call, and this caps it at one walk every two seconds however hard
-// the 10Hz loop asks.
+// to bound the work: this caps on-demand observations at one every two seconds
+// however hard the 10Hz loop asks.
+//
+// An observation is not always free. On a cluster-scoped install it walks the
+// pod informer's cache and costs no API call. On a namespace-scoped install it
+// sends one LIST of every Pod in the cluster to the API server (answered from its
+// watch cache; see gpunodes.K8sWithGpuOperator.WithPodReader), so this cap is
+// also a cap on that LIST. A failed observation does not reset the clock, so
+// EnsureFresh waits before trying again; see retryWait.
 const DecisionMaxAge = 2 * time.Second
 
 // EnsureFresh takes a new observation if the published one is older than maxAge,
@@ -114,6 +129,11 @@ const DecisionMaxAge = 2 * time.Second
 // the consumer's own staleness bound still applies, so the decision degrades the
 // same way it would have without this call; failing the placement instead would
 // turn a transient blip into a refusal to wake.
+//
+// A failure publishes nothing, so the published observation stays old and every
+// later call would try again at once. Instead, after a failure EnsureFresh does
+// not try again until the wait retryWait gives has passed. A forced call
+// (maxAge of zero or less) does not wait.
 func (r *Refresher) EnsureFresh(ctx context.Context, maxAge time.Duration) {
 	if r == nil {
 		return
@@ -136,16 +156,54 @@ func (r *Refresher) EnsureFresh(ctx context.Context, maxAge time.Duration) {
 	// Re-check under the lock: whoever held it may have just refreshed. Skipped
 	// for a forced refresh, which is a caller saying it needs an observation of
 	// its own rather than someone else's.
-	if maxAge > 0 {
-		if snap, ok := r.store().Get(); ok && time.Since(snap.TakenAt) <= maxAge {
-			return
-		}
+	var takenAt time.Time // zero while nothing has been published
+	if snap, ok := r.store().Get(); ok {
+		takenAt = snap.TakenAt
+	}
+	if maxAge > 0 && !takenAt.IsZero() && time.Since(takenAt) <= maxAge {
+		return
+	}
+	// An observation published since the last failure, by the timer or a forced
+	// call, ends the run of failures.
+	if !takenAt.Equal(r.failedOver) {
+		r.failures = 0
+	}
+	if maxAge > 0 && r.failures > 0 && r.clock().Sub(r.failedAt) < r.retryWait(maxAge) {
+		return
 	}
 	if err := r.Refresh(ctx); err != nil {
+		r.failedAt = r.clock()
+		r.failedOver = takenAt
+		r.failures++
 		log.FromContext(ctx).V(logging.DEBUG).Info(
 			"On-demand GPU usage refresh failed; deciding against the previous observation",
-			"error", err.Error())
+			"error", err.Error(), "failuresInARow", r.failures, "retryIn", r.retryWait(maxAge).String())
+		return
 	}
+	r.failures = 0
+}
+
+// retryWait is how long EnsureFresh waits after a failed observation before it
+// tries again. It starts at maxAge and doubles with each failure in a row, up to
+// the periodic interval (or maxAge, if that is longer).
+//
+// Without it, a failing observation is retried on every call. The 10Hz loop then
+// sends a cluster-wide Pod LIST back to back for as long as the API server
+// fails, which is exactly when it can least afford the load.
+func (r *Refresher) retryWait(maxAge time.Duration) time.Duration {
+	limit := max(r.interval(), maxAge)
+	wait := max(maxAge, 0)
+	for i := 1; i < r.failures && wait < limit; i++ {
+		wait *= 2
+	}
+	return min(wait, limit)
+}
+
+func (r *Refresher) clock() time.Time {
+	if r.now != nil {
+		return r.now()
+	}
+	return time.Now()
 }
 
 // Refresh takes one observation and publishes it.

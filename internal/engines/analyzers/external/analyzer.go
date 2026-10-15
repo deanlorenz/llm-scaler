@@ -211,8 +211,14 @@ func (a *Analyzer) selectBody(engine string) (Body, string, bool) {
 }
 
 // queryDemand runs the given query name for (modelID, namespace) and returns the
-// sum of all returned series — the model-level total demand. A missing or failed
-// query this cycle yields zero observed demand.
+// sum of all returned series — the model-level total demand.
+//
+// A failed query is an error, never zero demand: an outage is not a
+// measurement. The engine discards an analyzer result that errors
+// (runRegisteredAnalyzer), so this analyzer reports nothing for the model this
+// cycle and its wva_analyzer_demand series is dropped rather than set to 0.
+// A query that returned no result at all, which a source does only for a query
+// it did not run, still reads as zero.
 func (a *Analyzer) queryDemand(ctx context.Context, qName, modelID, namespace string) (float64, error) {
 	results, err := a.source.Refresh(ctx, source.RefreshSpec{
 		Queries: []string{qName},
@@ -226,8 +232,14 @@ func (a *Analyzer) queryDemand(ctx context.Context, qName, modelID, namespace st
 	}
 
 	res := results[qName]
-	if res == nil || res.HasError() {
+	if res == nil {
 		return 0, nil
+	}
+	// Prometheus already returns an error above when this, its only query,
+	// failed. This covers a source that reports a query's failure only in the
+	// result.
+	if res.HasError() {
+		return 0, fmt.Errorf("external analyzer %q: demand query: %w", a.def.Label, res.Error)
 	}
 	var demand float64
 	for _, v := range res.Values {

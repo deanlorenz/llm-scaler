@@ -424,9 +424,9 @@ test install whose controller ran in `workload-variant-autoscaler-system`:
 - **Type**: Counter
 - **Description**: Total number of metrics collection errors
 - **Labels**:
-  - `query_type`: Type of metrics query that failed
-  - `reason`: Reason for the error
-- **Use Case**: Track metrics collection failures and identify problematic queries
+  - `query_type`: Type of metrics query that failed. `pod_list` is the controller's per-namespace Pod listing, a Kubernetes API read rather than a Prometheus query
+  - `reason`: Reason for the error. For `pod_list`: `forbidden`, `unavailable` or `other`
+- **Use Case**: Track metrics collection failures and identify problematic queries. A failed `pod_list` makes the controller treat every Pod in that namespace as Ready and present for the cycle, so a not-Ready Pod's saturated reading can become its variant's k2; a steady rate of `pod_list` errors (`reason="forbidden"` after an RBAC change) is worth an alert
 - **Example**:
   ```json
   {
@@ -808,6 +808,24 @@ test install whose controller ran in `workload-variant-autoscaler-system`:
     ]
   }
   ```
+
+### `wva_pod_access_denied`
+- **Type**: Gauge
+- **Description**: `1` while a namespace-scoped controller with a `gpu-inventory` limiter in force may not list Pods cluster-wide, so the GPUs other namespaces hold on shared nodes cannot be counted; `0` otherwise. Under a quota limiter, or none, nothing reads that count, so it stays `0`. Absent on a cluster-scoped controller.
+- **Labels**: optional `controller_instance`
+- **Use Case**: while `1`, GPU usage counts only the controller's own namespace, so the physical limiter can admit scale-ups onto nodes other namespaces fill. See [GPU limiter](gpu-limiter.md#when-policy-demands-a-limiter-the-controller-cannot-serve).
+
+### `wva_config_rejected_entries`
+- **Type**: Gauge
+- **Description**: entries of a scaling-policy ConfigMap rejected at its last load (an invalid value or wrong type). A rejected entry keeps the previous entry under its key, if there was one. The series is removed when the ConfigMap is deleted.
+- **Labels**: `namespace`, `configmap`, optional `controller_instance`
+- **Use Case**: any value above 0 means the ConfigMap does not say what is running. The `ConfigEntryRejected` event on the ConfigMap names the entry.
+
+### `wva_config_unknown_keys`
+- **Type**: Gauge
+- **Description**: keys in a scaling-policy ConfigMap's entries that the schema does not define, at its last load. They are ignored; the entries still apply. The series is removed when the ConfigMap is deleted.
+- **Labels**: `namespace`, `configmap`, optional `controller_instance`
+- **Use Case**: a value above 0 is usually a misspelled key whose setting is not in force. The `ConfigEntryUnknownKeys` event names it and its line.
 
 ### `wva_node_access_denied`
 - **Type**: Gauge

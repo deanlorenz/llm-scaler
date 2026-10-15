@@ -316,6 +316,27 @@ const (
 	// until someone turns the limiter on, and then it is load-bearing.
 	WVANodeAccessDenied = "wva_node_access_denied"
 
+	// WVAPodAccessDenied is 1 while the GPU usage walk of a namespace-scoped
+	// controller may not list Pods cluster-wide and a physical limiter reads
+	// that walk, and 0 otherwise. Absent on a
+	// cluster-scoped controller, whose cache already holds every Pod. While it is
+	// 1 the usage walk counts only the controller's own namespace, so GPUs other
+	// namespaces hold on shared nodes read as free.
+	WVAPodAccessDenied = "wva_pod_access_denied"
+
+	// WVAConfigRejectedEntries is the number of entries of one scaling-policy
+	// ConfigMap that were rejected at its last load (labels: namespace,
+	// configmap). A rejected entry keeps the previous entry under its key in
+	// force when there was one; either way the ConfigMap does not say what is
+	// running, so any value above 0 needs fixing.
+	WVAConfigRejectedEntries = "wva_config_rejected_entries"
+
+	// WVAConfigUnknownKeys is the number of keys, across the entries of one
+	// scaling-policy ConfigMap, that the schema does not define (labels:
+	// namespace, configmap). The entries apply with those keys ignored; a key
+	// counted here is usually a misspelling of one that was meant to apply.
+	WVAConfigUnknownKeys = "wva_config_unknown_keys"
+
 	// WVAPolicyNamespaceUnverified is 1 when the controller fell back to its own
 	// ConfigMap for limiters and quotas because reading the Namespaces that decide
 	// the policy source was Forbidden, and 0 otherwise. Set once at startup.
@@ -907,6 +928,11 @@ const (
 	QueryTypeRequestCount = "request_count"
 	QueryTypeCacheConfig  = "cache_config"
 	QueryTypeArrivalRate  = "arrival_rate"
+	// QueryTypePodList is the collector's per-namespace Pod listing, which
+	// supplies readiness and deletion state. Not a Prometheus query: a failure
+	// is a Kubernetes API error (reason forbidden, unavailable or other), and
+	// the collector then treats every Pod as Ready and present for the cycle.
+	QueryTypePodList = "pod_list"
 )
 
 // Value for the LabelUnit Prometheus label: the metric carries an absolute

@@ -5,11 +5,19 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 )
 
 func servingPod(name string, ready bool, terminating bool) *corev1.Pod {
@@ -126,6 +134,53 @@ func TestAFailedListingKeepsEverything(t *testing.T) {
 		t.Error("a failed listing must not publish every Pod as unready: zero is a " +
 			"load-bearing answer meaning the replicas are demonstrably not serving")
 	}
+}
+
+// forbiddenReader is a Reader whose List fails as an RBAC refusal does.
+type forbiddenReader struct{ client.Reader }
+
+func (forbiddenReader) List(context.Context, client.ObjectList, ...client.ListOption) error {
+	return apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "", errors.New("no list"))
+}
+
+// A failed listing is not silent. Every Pod reads Ready on it, which lets a
+// not-Ready Pod's saturated reading become its variant's k2 -- so it is
+// counted, once per namespace per cycle, with the reason it failed.
+func TestAFailedListingIsCounted(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	require.NoError(t, metrics.InitMetrics(registry))
+	count := func(reason string) float64 {
+		families, err := registry.Gather()
+		require.NoError(t, err)
+		for _, f := range families {
+			if f.GetName() != constants.WVAMetricsCollectionErrorsTotal {
+				continue
+			}
+			for _, m := range f.GetMetric() {
+				labels := map[string]string{}
+				for _, l := range m.GetLabel() {
+					labels[l.GetName()] = l.GetValue()
+				}
+				if labels[constants.LabelQueryType] == constants.QueryTypePodList && labels[constants.LabelReason] == reason {
+					return m.GetCounter().GetValue()
+				}
+			}
+		}
+		return 0
+	}
+
+	c := NewReplicaMetricsCollector(nil, nil, forbiddenReader{}, nil, nil)
+	c.BeginCycle()
+	ctx := context.Background()
+	for range 3 {
+		assert.True(t, c.podReady(ctx, "tenant", "anything"), "still fails open")
+	}
+	assert.InDelta(t, 1, count("forbidden"), 0, "one listing per namespace per cycle, one count")
+
+	c = NewReplicaMetricsCollector(nil, nil, failingReader{}, nil, nil)
+	c.BeginCycle()
+	c.podReady(ctx, "tenant", "anything")
+	assert.InDelta(t, 1, count("other"), 0)
 }
 
 // With no reader wired at all, nothing is filtered. Keeps every existing caller

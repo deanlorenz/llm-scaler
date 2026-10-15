@@ -282,6 +282,71 @@ var _ = Describe("Refresher", func() {
 			Expect(snap.ByType).To(HaveKeyWithValue("A100", 2))
 		})
 
+		It("waits after a failed look instead of retrying on every call", func() {
+			// A namespace-scoped install sends a cluster-wide Pod LIST per look. A
+			// failed look publishes nothing, so without a wait the 10Hz loop sent
+			// that LIST back to back for as long as the API server failed.
+			now := time.Unix(1000, 0)
+			r.now = func() time.Time { return now }
+			r.Interval = 15 * time.Second
+			disc.err = errors.New("the API server is overloaded")
+			const maxAge = 2 * time.Second
+
+			for range 50 {
+				r.EnsureFresh(ctx, maxAge)
+			}
+			Expect(disc.Calls()).To(Equal(1), "one look per wait, however often the loop asks")
+
+			now = now.Add(maxAge)
+			for range 50 {
+				r.EnsureFresh(ctx, maxAge)
+			}
+			Expect(disc.Calls()).To(Equal(2), "the first wait is maxAge")
+
+			// The wait doubles with each failure in a row: 4s after the second.
+			now = now.Add(maxAge)
+			r.EnsureFresh(ctx, maxAge)
+			Expect(disc.Calls()).To(Equal(2), "the second wait is twice maxAge")
+			now = now.Add(maxAge)
+			r.EnsureFresh(ctx, maxAge)
+			Expect(disc.Calls()).To(Equal(3))
+
+			// It stops growing at the periodic interval.
+			for range 10 {
+				now = now.Add(r.Interval)
+				r.EnsureFresh(ctx, maxAge)
+			}
+			Expect(disc.Calls()).To(Equal(13), "the wait must not grow past the periodic interval")
+		})
+
+		It("forgets a failure once an observation is published", func() {
+			now := time.Unix(1000, 0)
+			r.now = func() time.Time { return now }
+			disc.err = errors.New("transient")
+			r.EnsureFresh(ctx, time.Minute)
+			Expect(disc.Calls()).To(Equal(1))
+
+			// The timer's own look succeeds and publishes.
+			disc.err = nil
+			disc.byType = map[string]int{"A100": 1}
+			Expect(r.Refresh(ctx)).To(Succeed())
+			Expect(disc.Calls()).To(Equal(2))
+
+			// Once that observation is stale, the next look is not held back by
+			// the earlier failure. The frozen clock means any wait still counted
+			// from it would never end.
+			time.Sleep(10 * time.Millisecond)
+			r.EnsureFresh(ctx, time.Millisecond)
+			Expect(disc.Calls()).To(Equal(3), "a published observation must end the run of failures")
+		})
+
+		It("does not wait on a forced look after a failure", func() {
+			disc.err = errors.New("transient")
+			r.EnsureFresh(ctx, 0)
+			r.EnsureFresh(ctx, 0)
+			Expect(disc.Calls()).To(Equal(2), "a caller that forces a look must get one")
+		})
+
 		It("is a no-op on a nil Refresher", func() {
 			// The engine field is optional; a nil receiver must not panic the 10Hz
 			// loop.

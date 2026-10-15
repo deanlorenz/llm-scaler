@@ -248,13 +248,13 @@ var _ = Describe("learned state restored by engine arguments", func() {
 		ownParams := params(64, "vllm:v1")
 
 		// The control: a prior below what the variant would get is taken.
-		b, ok := second.borrowedK2(key, "test-model", 5000, ownParams)
+		b, ok := second.borrowedK2(key, "test-model", 5000, ownParams, true)
 		Expect(ok).To(BeTrue())
 		Expect(b.k2).To(Equal(int64(4000)))
 		Expect(b.prior).To(BeTrue())
 
 		// Above it, not: 4000 against an own capacity of 3000 would raise it.
-		_, ok = second.borrowedK2(key, "test-model", 3000, ownParams)
+		_, ok = second.borrowedK2(key, "test-model", 3000, ownParams, true)
 		Expect(ok).To(BeFalse(), "a prior raised capacity")
 	})
 
