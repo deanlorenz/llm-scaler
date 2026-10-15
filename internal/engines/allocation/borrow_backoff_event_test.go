@@ -21,6 +21,22 @@ func TestATimeoutReleaseInAPreemptionCooldownIsTheSameEvent(t *testing.T) {
 		t.Fatalf("a timeout release 5m into the preemption's cooldown left it %v, want 10m: one event", got)
 	}
 
+	// Across a restart: the ledger keeps what started the cooldown.
+	raw, err := g.MarshalLedger()
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := UnmarshalBorrowLedger(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewBorrowGovernor(DefaultBorrowSettings())
+	restarted.Restore(l)
+	restarted.markBackoff("b/m", []string{"c"}, t0.Add(6*time.Minute), false)
+	if got := restarted.backoff["b/m@c"].Until.Sub(t0); got != 10*time.Minute {
+		t.Fatalf("after a restart a timeout release in the preemption's cooldown left it %v, want 10m", got)
+	}
+
 	// Control: after the cooldown ended, within one more, a release repeats.
 	at := t0.Add(12 * time.Minute)
 	g.markBackoff("b/m", []string{"c"}, at, false)

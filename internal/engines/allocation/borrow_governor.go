@@ -272,7 +272,8 @@ func (g *BorrowGovernor) ledgerLocked() BorrowLedger {
 			if until.Before(e.Until) {
 				until = until.Add(time.Minute)
 			}
-			out.Backoff[k] = BackoffEntry{Until: until.UTC(), Level: e.Level, LastAt: e.LastAt.Truncate(time.Second).UTC()}
+			out.Backoff[k] = BackoffEntry{Until: until.UTC(), Level: e.Level, LastAt: e.LastAt.Truncate(time.Second).UTC(),
+				Preempted: e.Preempted}
 		}
 	}
 	return out
