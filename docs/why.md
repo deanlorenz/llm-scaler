@@ -5,35 +5,36 @@ what it costs, how mature each part is, and how to try it and back out.
 
 ## The problem
 
-Serving LLMs on Kubernetes, the signals a general-purpose autoscaler reads do
-not say how much capacity a model needs. Two requests to one model can differ
-by a thousand times in work. A running-request threshold, llm-d's default
-trigger, is a per-replica constant that holds for one request shape. In one
-benchmark the request rate never changed and no queue ever formed, and a
-KV-occupancy trigger (as in llm-d's token-aware decode recipe) would have read
-5–15 % and said one replica would do; the first request shape needed two, and
-the second needed three. Scale
-late and time to first token spikes for the
-minutes a new replica spends loading. Scale early, or keep a floor, and GPUs
-sit idle. With several models on one GPU budget, whichever scales first takes
-the GPUs.
+The signals a general-purpose autoscaler reads do not say how much capacity an
+LLM needs. Two requests to one model can differ by orders of magnitude in work.
+llm-d's default trigger, a running-request threshold, is a per-replica constant
+that holds for one request shape.
+
+In one benchmark (Qwen3-0.6B at a constant 6 req/s) the request rate never
+changed and no queue formed. KV-cache use read 5–15 %, which a KV-occupancy
+trigger (as in llm-d's token-aware recipe) would size as one replica; that is
+computed, not a measured arm. The first request shape needed two replicas, the
+second needed three.
+
+Scale late, and time to first token spikes for the minutes a new replica spends
+loading. Scale early, or keep a floor, and GPUs sit idle. With several models
+on one GPU budget, whichever scales first takes the GPUs.
 
 ## What it does
 
 llm-scaling-manager computes each model's replica count from a capacity model
-(KV cache, queues and token throughput, per replica) and decides for every
-model and variant together, inside a GPU budget when you declare one
-(opt-in; off by default). KEDA and the HPA carry the
-decision out. Around that core:
+(KV cache, queues and token throughput, per replica). It decides for every
+model and variant together, inside a GPU budget when you declare one (opt-in;
+off by default). KEDA and the HPA carry the decision out. Around that core:
 
 - a **warm pool** of sleeping models that covers the minutes a new replica takes
   to load;
 - **scale to zero** through KEDA's own mechanism, with activation pushed to
-  KEDA within about 100 ms of a request queuing for the model;
+  KEDA within about 100 ms of a request queuing;
 - **GPU budgets**: the GPUs physically free, per-namespace or cluster quotas,
-  or quotas read from Kueue, and an experimental optimizer that shares one
-  quota between models;
-- **prefill and decode** scaled as separate roles.
+  or quotas read from Kueue (experimental), and an experimental optimizer that
+  shares one quota between models;
+- **prefill and decode** scaled as separate roles (experimental).
 
 [How it fits together](concepts/architecture.md) has the diagrams.
 
@@ -41,85 +42,89 @@ decision out. Around that core:
 
 Teams that run [llm-d](https://llm-d.ai) on Kubernetes or OpenShift, with
 several models or several ways of serving one, a GPU budget that binds, and
-KEDA on the cluster.
+KEDA on the cluster. One model on one GPU type, or a latency-SLO target, is
+better served by llm-d's own recipes ([below](#against-the-alternatives)).
 
 ## What operators need, and what it gives them
 
-| What an operator running LLMs on Kubernetes needs | What llm-scaling-manager does |
+| Need | What llm-scaling-manager does |
 | --- | --- |
-| **New replicas that serve fast when traffic rises.** A replica can take minutes to load, and the spike does not wait. | A [warm pool](well-lit-paths/warm-pool-bridge/) of sleeping models serves during those minutes: measured p95 TTFT per scale-up of 0.11–0.83 s instead of 5.2–8.8 s, within 50 ms of a two-replica floor on 3 of 4 rises (831 ms against 127 ms on the fourth). `make prepull`, `make weights` and `make engine-cache` take image pulls, weight downloads and kernel compilation off the [start path](reference/workload-preparation.md). |
-| **Scaling early enough**, because by the time a queue forms the new replica is minutes late. | Demand is priced from the throughput one replica sustains, so a change in request shape can order capacity before a queue exists. Measured once on the experimental P/D path, and repeated a day later: the third replica was ordered about four minutes after the shape change, once that shape's throughput was measured; KV-cache use peaked at 62 %, and no queue formed in the second phase. That was the second exposure; a controller that has never seen a shape saturated sizes it from occupancy first ([known gaps](#known-gaps)). |
-| **Load measured as work, not as requests.** One request can cost a thousand times another. | Sized from KV-cache use, queues and token throughput per replica, never from request counts. Measured on the P/D path: it held 2 replicas at 5–15 % KV-cache use, where a KV threshold would drop to 1, because the load needed 2 in throughput. |
-| **Idle models off the GPUs, back when needed.** Most models in a large catalogue are idle most of the time. | [Scale to zero](well-lit-paths/scale-to-zero/) is KEDA's own mechanism; the controller reads the router's queue every 100 ms and pushes activation to KEDA for the first queued request, instead of waiting for KEDA's next poll. A wake from zero is a cold start (about 41 s, measured on an H100 test cluster); a model already resident in a [warm-pool](well-lit-paths/warm-pool-bridge/) Pod switches in about 437 ms instead. |
-| **Prefill and decode sized for their own bottlenecks.** | [P/D roles](well-lit-paths/pd-disaggregation/) are sized separately from their own demand and committed together, so one role cannot outrun the other. The joint commit is unit-tested only, and the P/D benchmark never ordered a second prefill replica. |
-| **Many models on one GPU fleet**, where one model's growth is another's shrink. | Every model and variant is decided together, inside a GPU budget when you declare one (opt-in; off by default). Two opt-in mechanisms move GPUs between models as demand shifts: priority-weighted rescale (`enableRescale`, built and off by default, acts only under a GPU budget, unit-tested only and not benchmarked) and the experimental [utilization-share optimizer](well-lit-paths/utilization-share/). |
-| **Mixed GPU generations.** | Each [variant](well-lit-paths/accelerator-variants/) carries its own per-replica capacity and cost; the optimizer grows the one with the lowest cost per unit of capacity. Not measured across two GPU types: the two-variant benchmark varies tensor parallelism on one GPU type. Unit specs assert the cost order; no end-to-end spec asserts which variant grows. |
-| **Per-team GPU budgets.** | Advisory budgets; the hard bound is a namespace GPU `ResourceQuota` ([bound the namespace's GPUs at admission](guides/admin-cluster-setup/README.md#bound-the-namespaces-gpus-at-admission)). [Quotas per namespace or per cluster](well-lit-paths/tenant-gpu-quotas/), [quotas read from Kueue](well-lit-paths/kueue-bounded-quotas/), or the [GPUs physically free](well-lit-paths/bound-by-gpus/). Every model is fitted inside the budget before KEDA sees a number; a capped decision raises `wva_decisions_limited_total` and a `ResourceConstrained` Event, though a fully spent quota can record neither ([monitoring](reference/monitoring.md)). The GPU bound has an end-to-end suite. Tenant quotas are unit-tested, and end-to-end: the refusal path, a Kueue-bounded entry and the share optimizer; none bounds the default optimizer by a static quota. On this release, Kueue grants are honoured only where tenants cannot create LocalQueues on queues not meant for them. |
+| **New replicas that serve fast when traffic rises.** | A [warm pool](well-lit-paths/warm-pool-bridge/) serves while a replica loads: p95 TTFT per scale-up of 0.11–0.83 s instead of 5.2–8.8 s, within 50 ms of a two-replica floor on 3 of 4 rises (831 ms against 127 ms on the fourth). `make prepull`, `make weights` and `make engine-cache` shorten the [start path](reference/workload-preparation.md). |
+| **Scaling before a queue forms.** | Demand is priced from the throughput one replica sustains, so a new request shape can order capacity before a queue exists. On the experimental P/D path (conditions [below](#what-it-was-measured-to-do)) the third replica came about four minutes after the shape change, once that shape's throughput was measured, and no queue formed. That was the second exposure; a controller that has never seen a shape saturated sizes it from occupancy first ([known gaps](#known-gaps)). |
+| **Load measured as work.** One request can cost orders of magnitude more than another. | Sized from KV-cache use, queues and token throughput per replica, and from request rates priced by what one replica completes at that request shape, not by a fixed per-replica request threshold. On the P/D run it held 2 replicas at 5–15 % KV-cache use because the load needed 2 in throughput. |
+| **Idle models off the GPUs, back when needed.** | [Scale to zero](well-lit-paths/scale-to-zero/) is KEDA's own mechanism; the controller polls the router queue every 100 ms and pushes activation without waiting for KEDA's poll. A wake from zero is a cold start (about 41 s on an H100 test cluster); a model resident in a [warm-pool](well-lit-paths/warm-pool-bridge/) Pod switches in about 437 ms. |
+| **Prefill and decode sized apart.** | [P/D roles](well-lit-paths/pd-disaggregation/) (experimental) are sized from their own demand and committed together. The joint commit is unit-tested only; the P/D benchmark never ordered a second prefill replica. |
+| **Many models on one GPU fleet.** | Every model and variant is decided together, inside a GPU budget when you declare one. Two opt-in ways move GPUs between models: priority-weighted rescale (`enableRescale`, off by default, acts only under a budget, unit-tested only) and the experimental [utilization-share optimizer](well-lit-paths/utilization-share/), which holds headroom in advance and slows the second model to rise (≈5.5 min in the first run). |
+| **Mixed GPU generations.** | Each [variant](well-lit-paths/accelerator-variants/) carries its own per-replica capacity and cost; the cheapest per unit of capacity grows. Unit specs assert the cost order; no end-to-end spec asserts which variant grows, and the benchmark used one GPU type ([#142](https://github.com/ev-shindin/llm-scaling-manager/issues/142)). |
+| **Per-team GPU budgets.** | [Quotas per namespace or cluster](well-lit-paths/tenant-gpu-quotas/), [from Kueue](well-lit-paths/kueue-bounded-quotas/) (experimental), or [the GPUs physically free](well-lit-paths/bound-by-gpus/). Budgets are advisory; the hard bound is a namespace GPU `ResourceQuota` ([bound at admission](guides/admin-cluster-setup/README.md#bound-the-namespaces-gpus-at-admission)). A capped decision raises `wva_decisions_limited_total` and a `ResourceConstrained` Event; a fully spent quota can record neither ([monitoring](reference/monitoring.md)). On this release, Kueue grants are honoured only where tenants cannot create LocalQueues on queues not meant for them. |
 | **Different urgency for interactive and batch work.** | [Workload classes](well-lit-paths/workload-classes/): named threshold tiers, set per ScaledObject. |
-| **Decisions an operator can trust and explain**, when every replica costs dollars an hour. | A closed-form capacity model, two log lines per model per cycle that say why ([cycle log](reference/cycle-log.md)), Events and metrics for every decision. It decides; KEDA acts, so nothing new runs your pods. |
+| **Decisions you can explain.** | A closed-form capacity model, two log lines per model per cycle that say why ([cycle log](reference/cycle-log.md)), Events and metrics. It decides; KEDA acts. |
 
-**Not covered yet:** forecasting load ahead of time, scaling to an SLA target
+**Not covered yet:** forecasting load, scaling to an SLA target
 ([#141](https://github.com/ev-shindin/llm-scaling-manager/issues/141)),
 pre-scaling before planned maintenance, and telling a failed node from a
 replica that is still starting.
 
 ## What it was measured to do
 
-All on H200 nodes unless noted. Each row is a single run per arm unless it
-says otherwise; the linked page has the method and every caveat.
+All on H200 nodes unless noted. One run per arm unless it says otherwise; the
+linked page has the method and every caveat.
 
 | Result | Number | Conditions | Source |
 | --- | --- | --- | --- |
-| The warm pool covers scale-ups | p95 time to first token per rise: 5.2–8.8 s without it, 0.11–0.83 s with a one-Pod pool; within 50 ms of a floor of 2 replicas on 3 of 4 rises, 831 ms against 127 ms on the fourth | two 8B models bursting out of phase, 1 GPU per replica, 4 rises per arm | [warm pool, measured](well-lit-paths/warm-pool-bridge/measured.md) |
-| ... and costs less than a floor | 14 138 GPU-seconds against 16 080 for a floor of 2 replicas (12 % less); 17 % more than no pool (12 129) | same run | [warm pool, measured](well-lit-paths/warm-pool-bridge/measured.md) |
-| It sizes for a request shape, not only for a queue | at a constant 6 req/s: through the first phase it held 2 decode replicas while 5–15 % KV use alone said 1; about four minutes after the shape change, once that shape's throughput was measured, it ordered a 3rd (KV peaked at 62 %); no queue formed in the second phase. p95 TTFT 155 ms, 0 errors in 13 288 requests, on the second exposure (both shapes already seen). A cold controller: p95 204 ms, p99 3.9 s, and its first five-minute window ranged from 0.25 s to 5.6 s across the two runs | Qwen3-0.6B, P/D path (experimental); **run twice, a day apart**, within a tenth except that cold window | [P/D path, measured](well-lit-paths/pd-disaggregation/#measured) |
-| A warm Pod switches models fast | about 437 ms (four switches: 435, 439, 440, 435 ms) against about 41 s cold | H100 test cluster, two models resident in one pool Pod | [warm pool](well-lit-paths/warm-pool-bridge/); measurement in [fast model loading](proposals/fast-model-loading.md#27-the-pool-was-built-and-measured-2026-08-21) |
-| Sharing one quota serves the first burst at once | p95 TTFT of the model whose burst comes first: 95 ms with sharing, 42 s without. The other model's burst was overloaded in every arm: 177–257 of its 960 requests shed by the router, so its p95 (59 s with sharing, 73 s without) is a floor, censored by the router's 30 s queue TTL. An earlier, aggregated run lost the second burst (p95 313 s against 139 s) | two P/D 8B models, four roles under one 10-GPU quota; costs 36 % more GPU-seconds | [utilization share, measured](well-lit-paths/utilization-share/measured.md) |
+| The warm pool covers scale-ups | p95 TTFT per rise: 5.2–8.8 s without it, 0.11–0.83 s with a one-Pod pool; within 50 ms of a 2-replica floor on 3 of 4 rises, 831 ms against 127 ms on the fourth | two 8B models bursting out of phase, 1 GPU per replica, 4 rises per arm | [warm pool, measured](well-lit-paths/warm-pool-bridge/measured.md) |
+| ... and costs less than a floor | 14 138 GPU-seconds against 16 080 for the floor (12 % less); 17 % more than no pool (12 129) | same run | [warm pool, measured](well-lit-paths/warm-pool-bridge/measured.md) |
+| It sizes for a request shape | first phase: 2 decode replicas held at 5–15 % KV (a KV threshold would read 1: computed, not measured; llm-d's default running-request trigger would likely have ordered more, unmeasured); a 3rd about four minutes after the shape change (KV peak 62 %); no queue. Second exposure: p95 TTFT 155 ms, 0 errors in 13 288 requests. Cold controller: p95 204 ms, p99 3.9 s; its first five-minute window ranged 0.25–5.6 s across the two runs | Qwen3-0.6B, constant 6 req/s, experimental P/D path; tuned HPA (180 s scale-down window, 50 % per 120 s); build `f5f98761`, 2026-09-23; **run twice, a day apart**, within a tenth except that cold window | [P/D path, measured](well-lit-paths/pd-disaggregation/measured.md) |
+| A warm Pod switches models fast | about 437 ms (435, 439, 440, 435 ms) against about 41 s cold. This is the engine switch itself; in the warm-pool benchmark the lend waits for the scale-up decision and was first seen 33–143 s after each traffic rise | H100 test cluster, two models resident in one pool Pod | [fast model loading](proposals/fast-model-loading.md#27-the-pool-was-built-and-measured-2026-08-21); [warm pool, measured](well-lit-paths/warm-pool-bridge/measured.md) |
+| Sharing one quota serves the first burst at once | p95 TTFT of the first model to burst: 95 ms with sharing, 42 s without. The other burst was overloaded in every arm (177–257 of 960 requests shed), so its p95 (59 s against 73 s) is a floor, censored by the router's 30 s queue TTL. An earlier aggregated run lost the second burst (p95 313 s against 139 s) | two P/D 8B models, four roles under one 10-GPU quota; 36 % more GPU-seconds | [utilization share, measured](well-lit-paths/utilization-share/measured.md) |
 
 ![Warm pool: p95 time to first token per scale-up against GPU-seconds for autoscaling alone, a one-Pod warm pool, and a floor of 2 replicas](figures/warm-pool-latency-vs-cost.svg)
 
-**Not yet measured:** a head-to-head of the default saturation scaling against
-plain KEDA or HPA thresholds on this engine, and repeated runs with confidence
-intervals for the warm pool.
+**Not yet measured:** the default scaling head to head against plain KEDA or
+HPA thresholds on this engine, and repeated warm-pool runs with confidence
+intervals.
 
 ## What it costs
 
 - **The controller** is one Deployment that reads Prometheus. It holds no GPUs.
-- **The warm pool** holds its GPUs continuously: in the run above, 17 % more
-  GPU-seconds than scaling without one, 12 % fewer than a replica floor.
+- **The warm pool** holds its GPUs continuously: 17 % more GPU-seconds than no
+  pool in the run above, 12 % fewer than a replica floor.
 - **Sharing a quota** spends idle quota as headroom: 24–81 % more GPU-seconds
   in the measured runs (the 81 % approximate; one run's cost was not measured).
 - **Adopting it** takes a one-time cluster-admin setup per namespace, the EPP's
-  `flowControl` feature gate, Prometheus scraping the model servers, and per
-  workload: a ScaledObject (generated for you), a drain hook and fast starts.
-- **It answers 0 until it has decided.** After a restart or leader change,
-  KEDA reads 0 for a model until the first decision for it; the 300 s
-  scale-down window on generated ScaledObjects holds the count through that gap
-  ([scaling behavior](reference/scaledobject-trigger.md#scaling-behavior)).
-- **What it learned is held in memory**, so a restart or leader change learns
-  it again ([#137](https://github.com/ev-shindin/llm-scaling-manager/issues/137)).
+  `flowControl` gate, Prometheus scraping the model servers, and per workload a
+  ScaledObject (generated for you), a drain hook and fast starts.
+- **A restart is a short scaler outage.** While no replica holds the leader
+  lease, KEDA's reads fail; the KEDA `fallback` on generated ScaledObjects
+  holds the count then. After that, until its first decision for a model, the
+  scaler answers the current replica count, so the HPA holds
+  ([before the first decision](reference/scaledobject-trigger.md#before-the-first-decision-and-the-fallback)).
+- **What it learned is held in memory** by default, so a restart or leader
+  change learns it again. `LEARNED_STATE_SNAPSHOT=true` carries it across
+  ([learned state across a restart](reference/configuration.md#learned-state-across-a-restart);
+  [#137](https://github.com/ev-shindin/llm-scaling-manager/issues/137)).
 - **One more port.** The scaler port is plaintext and unauthenticated by
-  default. `make setup-prereqs` writes a NetworkPolicy admitting it only from
-  KEDA's namespace when it knows that namespace, and warns when it does not;
-  mutual TLS is opt-in and wired by hand
-  ([network exposure](reference/security-model.md#network-exposure));
+  default. `make setup-prereqs` writes a NetworkPolicy admitting only KEDA's
+  namespace when it knows that namespace, and warns when it does not; mutual
+  TLS is opt-in and manual
+  ([network exposure](reference/security-model.md#network-exposure);
   [#138](https://github.com/ev-shindin/llm-scaling-manager/issues/138) makes
-  it the default.
+  it the default).
 
 ## How mature each part is
 
 | Scenario | Status | Evidence |
 | --- | --- | --- |
-| [Scale on saturation](well-lit-paths/scale-on-saturation/) | Stable | end-to-end suites; one historical single-run study against a KEDA threshold (July 2026, older controller) |
+| [Scale on saturation](well-lit-paths/scale-on-saturation/) | Stable | end-to-end suites; one July 2026 study of five scenarios, one run each, against a KEDA threshold, on an older controller |
 | [Scale to zero](well-lit-paths/scale-to-zero/) | Stable | end-to-end suites, cluster-verified |
 | [Warm pool](well-lit-paths/warm-pool-bridge/) | Stable | end-to-end suites; one benchmark run per arm |
 | [Bound by GPUs](well-lit-paths/bound-by-gpus/) | Stable | end-to-end suites |
-| [Tenant quotas](well-lit-paths/tenant-gpu-quotas/) | Stable | unit tests; end-to-end: the warm pool's refusal path (`warm_pool_quota_test.go`), a Kueue-bounded quota entry (`kueue_quota_test.go`), and the utilization-share optimizer under a spent namespace quota (`utilization_share_test.go`) |
-| [Workload classes](well-lit-paths/workload-classes/) | Stable | end-to-end suite (runs only with the simulator) |
-| [Accelerator variants](well-lit-paths/accelerator-variants/) | Stable (control path); variant choice asserted by unit specs, not end to end | a benchmark scenario and one written-up run; unit specs assert the cost order (`cost_aware_optimizer_test.go`); `limiter_test.go` runs two variants end to end, but no end-to-end spec asserts which one grows |
+| [Tenant quotas](well-lit-paths/tenant-gpu-quotas/) | Stable (control path); no end-to-end spec bounds the default optimizer | unit tests; end-to-end: the warm pool's refusal path (`warm_pool_quota_test.go`), a Kueue-bounded quota entry (`kueue_quota_test.go`), the utilization-share optimizer under a spent quota (`utilization_share_test.go`) |
+| [Workload classes](well-lit-paths/workload-classes/) | Stable | end-to-end suite (simulator only) |
+| [Accelerator variants](well-lit-paths/accelerator-variants/) | Stable (control path); variant choice asserted by unit specs only | a benchmark scenario and one written-up run on one GPU type; `limiter_test.go` runs two variants end to end but does not assert which grows |
 | [P/D disaggregation](well-lit-paths/pd-disaggregation/) | Experimental | benchmark run twice |
 | [Kueue quotas](well-lit-paths/kueue-bounded-quotas/) | Experimental | unit and API-server tests; no live Kueue run |
-| [Retained pool](well-lit-paths/retained-pool/) | Experimental | unit tests, a benchmark scenario and one end-to-end spec (`warm_pool_retained_test.go`, simulator only) |
+| [Retained pool](well-lit-paths/retained-pool/) | Experimental | unit tests, a benchmark scenario, one end-to-end spec (simulator only) |
 | [Sharing a quota](well-lit-paths/utilization-share/) | Experimental | unit and end-to-end tests; single benchmark runs |
 
 Each path's *How it is tested* section names its suites and what they do not
@@ -127,28 +132,27 @@ cover.
 
 ## Against the alternatives
 
-- **Plain KEDA or HPA on a metric** (running requests, queue length, KV use):
-  llm-d now recommends this, with the router's queue and running requests. Its
-  running-request trigger moves before a queue forms, but each threshold is per
-  workload and has to be re-tuned per model, accelerator and parallelism
-  (llm-d's own caveat), and again when the request shape changes. A GPU budget
-  sits below it, in Kueue, where demand over budget waits as Pending Pods
-  rather than entering the decision. llm-d covers fair sharing with Kueue below
-  the autoscaler; this sizes inside the budget so demand is not left Pending.
-  [KEDA alone](comparison/keda-alone.md)
-  compares it need by need. Measured head to head once, in July 2026, on an older
-  controller and recipe.
+- **llm-d's KEDA recipes** (running requests, queue length, KV use): what llm-d
+  now recommends. Each threshold is per workload and has to be re-tuned per
+  model, accelerator and parallelism (llm-d's own caveat), and again when the
+  request shape changes. A GPU budget sits below it, in Kueue, where demand over
+  budget waits as Pending Pods; this project sizes inside the budget instead.
+  llm-d's [FMA + KEDA](comparison/keda-alone.md#fast-model-actuation-what-we-kept-and-what-we-replaced)
+  attacks the cold start with sleeping engines, and its SLO-aware recipe scales
+  one variant to a latency target, which this project does not yet do.
+  [KEDA alone](comparison/keda-alone.md) compares them need by need; the only
+  head-to-head is one July 2026 study of five scenarios, one run each, on an
+  older controller and recipe.
 - **llm-d's workload-variant-autoscaler**: the project this one forked from,
-  now deprecated upstream in favour of the KEDA recipes above (`v0.9.0` is its
-  final release; llm-d advises staying on it for now where cost-aware placement
-  across variants is needed, which the recipes do not offer). Upstream already had GPU budgets (the inventory and quota
-  limiters) and scale-from-zero. This fork adds a KEDA external scaler over
-  gRPC with pushed activation, quotas read from Kueue, the utilization-share
-  optimizer, the warm pool, the install tooling, and a capacity model that
-  prices demand from measured throughput and holds through a request-shape
-  change.
-- **NVIDIA Dynamo Planner**: forecasts load and profiles before deployment, for
-  one model on one GPU type. [The comparison](comparison/) has the detail.
+  deprecated upstream (`v0.9.0` is final; llm-d advises staying on it where
+  cost-aware placement across variants is needed). Upstream already had GPU
+  budgets and scale-from-zero. This fork adds the KEDA external scaler with
+  pushed activation, Kueue quotas, the utilization-share optimizer, the warm
+  pool, the install tooling, and throughput-priced demand.
+- **NVIDIA Dynamo Planner**: SLA-driven: it forecasts load and profiles before
+  deployment, for one model on one GPU type. SLA-target scaling is on this
+  project's roadmap ([#141](https://github.com/ev-shindin/llm-scaling-manager/issues/141)).
+  [The comparison](comparison/) has the detail.
 
 ## Known gaps
 
@@ -159,14 +163,16 @@ P/D result above is the second exposure, and the cold pass before it ordered a
 spare replica and reached a 3.9 s p99. The warm pool and P/D numbers are single
 runs per arm on one cluster type (the P/D pair repeated once).
 
-- After a restart or leader change, the scaler answers 0 for a model until its
-  first decision; only a scale-down window holds the count through that gap.
-- Learned capacity is held in memory and re-learned after a restart
+- While no replica holds the leader lease, as during a restart, KEDA cannot
+  read the scaler. Only a KEDA `fallback` holds the count then, and a
+  ScaledObject with a floor of 0 gets none
+  ([before the first decision](reference/scaledobject-trigger.md#before-the-first-decision-and-the-fallback)).
+- Learned capacity is re-learned after a restart unless the opt-in
+  `LEARNED_STATE_SNAPSHOT` is on
   ([#137](https://github.com/ev-shindin/llm-scaling-manager/issues/137)).
 - The scaler port is plaintext by default; a NetworkPolicy is shipped and
   mutual TLS is opt-in and manual
-  ([#138](https://github.com/ev-shindin/llm-scaling-manager/issues/138) makes
-  it the default).
+  ([#138](https://github.com/ev-shindin/llm-scaling-manager/issues/138)).
 - The Kueue quota source counts nominal quota only, not capacity a queue could
   borrow from its cohort
   ([#136](https://github.com/ev-shindin/llm-scaling-manager/issues/136)).

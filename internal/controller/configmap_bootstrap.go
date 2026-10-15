@@ -145,7 +145,12 @@ func (r *ConfigMapReconciler) bootstrapClusterPolicy(ctx context.Context) error 
 		cm := &corev1.ConfigMap{}
 		err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: policyNS}, cm)
 		if err == nil {
-			r.handleClusterPolicyConfigMap(ctx, cm)
+			if err := r.handleClusterPolicyConfigMap(ctx, cm); err != nil {
+				logger.Error(err, "Cannot start: the cluster policy's default entry is invalid",
+					"policyNamespace", policyNS, "configMap", name)
+				r.Config.MarkConfigMapsBootstrapFailed(err)
+				return err
+			}
 			return nil
 		}
 		if apierrors.IsNotFound(err) {
@@ -170,7 +175,7 @@ func (r *ConfigMapReconciler) bootstrapClusterPolicy(ctx context.Context) error 
 	logger.Info("No cluster policy ConfigMap in the policy namespace: no limiters or quotas are in force",
 		"policyNamespace", policyNS, "expectedNames", config.ScalingPolicyConfigMapNames())
 	r.Config.UpdateClusterPolicy(&config.ScalingPolicy{})
-	r.Status.RecordPolicy(r.Config, policyNS, config.ScalingPolicyConfigMapName(), "", nil)
+	r.Status.RecordClusterPolicy(r.Config, policyNS, config.ScalingPolicyConfigMapName(), "", nil)
 	return nil
 }
 
@@ -186,7 +191,11 @@ func (r *ConfigMapReconciler) bootstrapConfigMap(ctx context.Context, name, name
 	}
 
 	if slices.Contains(config.ScalingPolicyConfigMapNames(), name) {
-		r.handleScalingPolicyConfigMap(ctx, cm, namespace, isGlobal)
+		if err := r.handleScalingPolicyConfigMap(ctx, cm, namespace, isGlobal); err != nil {
+			logger.Error(err, "Cannot start: the scaling policy's default entry is invalid",
+				"namespace", namespace, "configMap", name)
+			return err
+		}
 	} else {
 		logger.V(1).Info("Ignoring unrecognized bootstrap ConfigMap", "name", name, "namespace", namespace)
 	}

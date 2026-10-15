@@ -1,9 +1,8 @@
 # Roadmap
 
 Planned work that changes what an operator can rely on. Each item links the
-GitHub issue that tracks it; the issue has the detail and the current state.
-[Known gaps](why.md#known-gaps) lists the main gaps; the planned work is here,
-each with its issue, alongside the evidence work.
+GitHub issue or PR that tracks it, with the detail and the current state. The
+gaps themselves are summarized in [known gaps](why.md#known-gaps).
 
 ## GPU budgets
 
@@ -34,11 +33,13 @@ each with its issue, alongside the evidence work.
 
 ## Resilience
 
-- **Learned capacity survives a restart.** What the controller learns about a
-  model's capacity lives in memory, so a restart or a leader hand-off re-learns
-  it, and a request shape it had already priced is sized from occupancy again.
-  Planned: the leader writes its fitted state to a ConfigMap keyed on the engine's
-  configuration, and a new leader recalls only entries that match and are fresh.
+- **Learned capacity survives a restart.** By default what the controller
+  learns about a model's capacity lives in memory, so a restart or a leader
+  hand-off re-learns it, and a request shape it had already priced is sized from
+  occupancy again. `LEARNED_STATE_SNAPSHOT=true` keeps it in the ConfigMap
+  `wva-learned-state` and restores only figures learned under the same engine
+  configuration; it is off by default
+  ([learned state across a restart](reference/configuration.md#learned-state-across-a-restart)).
   [#137](https://github.com/ev-shindin/llm-scaling-manager/issues/137)
 
 ## Security

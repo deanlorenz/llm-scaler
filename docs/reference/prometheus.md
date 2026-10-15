@@ -1,6 +1,9 @@
 # Prometheus Integration
 
-The scaling manager integrates with Prometheus to collect metrics from different sources such as vLLM inference servers, and expose internal as well as custom autoscaling metrics. This guide covers Prometheus configuration, metric collection, and security best practices.
+The scaling manager reads its inputs (vLLM, EPP) from Prometheus and publishes
+its own metrics for Prometheus to scrape. This page covers connecting it to
+Prometheus, securing that connection, every metric it publishes, and the shipped
+alerts.
 
 ## Configuration
 
@@ -8,7 +11,8 @@ The scaling manager supports two methods for configuring Prometheus connectivity
 
 ### 1. Environment Variables (Recommended)
 
-Set Prometheus configuration via environment variables in the scaling manager deployment:
+Set the Prometheus settings as environment variables on the controller
+Deployment:
 
 ```yaml
 apiVersion: apps/v1
@@ -66,9 +70,9 @@ spec:
 
 ### 2. ConfigMap Configuration
 
-Alternatively, configure Prometheus in the controller's ConfigMap. The settings
-sit inside its `config.yaml` key, which is mounted at `/etc/wva/config.yaml`.
-They are read at startup: restart the controller after a change.
+Or set them in the controller's ConfigMap, inside its `config.yaml` key (mounted
+at `/etc/wva/config.yaml`). They are read at startup, so restart the controller
+after a change.
 
 ```yaml
 apiVersion: v1
@@ -86,17 +90,18 @@ data:
     PROMETHEUS_SERVER_NAME: "prometheus-k8s.monitoring.svc.cluster.local"
 ```
 
-Do not put a bearer token in the ConfigMap; use the Secret-backed env variable above.
-**Configuration Priority:**
-1. Environment variables (checked first)
-2. ConfigMap values (fallback)
-3. Error if neither provides `PROMETHEUS_BASE_URL`
-   
+Do not put a bearer token in the ConfigMap; use the Secret-backed env variable
+above.
+
+**Priority:** environment variables first, then the ConfigMap. With neither
+setting `PROMETHEUS_BASE_URL`, the controller fails to start.
+
 ### Metrics Endpoint
-The metrics are served at `/metrics` on port 8443 over HTTPS (`--metrics-secure=true`),
-behind the Service `wva-controller-manager-metrics-service`. A caller needs a bearer
-token whose identity may `get` the non-resource URL `/metrics`; anything else gets
-`401`/`403`. To read them by hand, see
+
+The controller serves `/metrics` on port 8443 over HTTPS (`--metrics-secure=true`),
+behind the Service `wva-controller-manager-metrics-service`. A caller needs a
+bearer token whose identity may `get` the non-resource URL `/metrics`; anything
+else gets `401`/`403`. To read it by hand, see
 [Monitoring](monitoring.md#the-metrics-that-answer-specific-questions).
 
 ### ServiceMonitor Configuration
@@ -129,15 +134,33 @@ spec:
 
 Prometheus scrapes with its own ServiceAccount token, so that account needs the
 install's metrics-reader ClusterRole (`wva-metrics-reader-<hash>`, `get` on
-`/metrics`; the suffix is per install). On Kubernetes the install binds it to
-`PROMETHEUS_SA` when set, else to the one non-default account of the Prometheus
-CRs in the namespace an explicitly set `PROMETHEUS_URL` addresses, else to the
-kube-prometheus-stack this install deploys (`DEPLOY_PROMETHEUS=true`, with the
-URL in `MONITORING_NAMESPACE`). A Prometheus the installer only detected is never
-granted. Otherwise it creates no binding and warns (`make check-prereqs` lists the
-binding as optional); pass
+`/metrics`; the suffix is per install). Pass
 `PROMETHEUS_SA=<namespace>/<serviceaccount>` to grant your Prometheus
-([configuration](configuration.md)).
+([configuration](configuration.md)). On Kubernetes the install binds it to the
+first of these trusted sources:
+
+1. `PROMETHEUS_SA`, when set;
+2. the one non-default account of the Prometheus CRs in the namespace an
+   explicitly set `PROMETHEUS_URL` addresses;
+3. the kube-prometheus-stack this install deploys (`DEPLOY_PROMETHEUS=true`,
+   with the URL in `MONITORING_NAMESPACE`).
+
+A Prometheus the installer only detected is never granted. With none of the
+three, it creates no binding and warns; `make check-prereqs` lists the binding
+as optional.
+
+Only those sources write or repoint the binding:
+
+- A `make setup-prereqs` re-run with none of them (say an upgrade that left out
+  the first install's `PROMETHEUS_SA` or `PROMETHEUS_URL`) **keeps** an existing
+  binding and warns. The warning names the bound account, how to repoint it
+  (`PROMETHEUS_SA=<namespace>/<serviceaccount>`, printed as the install's own
+  `make setup-prereqs` command) and how to remove it
+  (`kubectl delete clusterrolebinding wva-metrics-reader-rolebinding-<suffix>`).
+- A binding the re-run cannot read is left alone and reported as unknown, with
+  a `kubectl get clusterrolebinding <name> -o yaml` to check it.
+- The controller-only phase (`make deploy-wva`) never reads, reports or patches
+  the binding.
 
 
 
@@ -146,27 +169,49 @@ binding as optional); pass
 ### TLS Configuration
 
 **What ships:** the Kubernetes overlays set `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY: "true"`
-in the manager ConfigMap. The installer has no CA to hand the controller there: the
-kube-prometheus-stack it deploys serves a self-signed certificate, and nothing mounts
-it into the controller, so verification on by default would stop every such install
-with `x509: certificate signed by unknown authority`. The OpenShift overlays verify
-against the service CA and ship `false`. The installer prints a warning at the end of
-any install that will connect over HTTPS without verifying.
+in the manager ConfigMap. The kube-prometheus-stack the installer deploys serves
+a self-signed certificate that nothing mounts into the controller, so verifying
+by default would fail every such install with `x509: certificate signed by
+unknown authority`. The OpenShift overlays verify against the service CA and ship
+`false`. The installer warns at the end of any install that connects over HTTPS
+without verifying.
 
 **Production Deployments:**
 - Always use HTTPS endpoints (`https://`)
-- Mount the CA that signed the Prometheus certificate into the controller (a ConfigMap
-  or Secret volume), and set `PROMETHEUS_CA_CERT_PATH` to the file and
-  `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY` to `"false"` in the manager ConfigMap
-  (`wva-manager-config`, key `config.yaml`)
+- Mount the CA that signed the Prometheus certificate into the controller, then point
+  the controller at it (steps below)
 - Never set `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true` in production
 
-The controller's own `/metrics` endpoint is the other direction: the shipped
-ServiceMonitor scrapes it with `insecureSkipVerify: true` because the controller
-generates a self-signed serving certificate in memory. To verify that scrape, start
-the controller with `--metrics-cert-path` pointing at a mounted certificate and
-replace `tlsConfig` in the ServiceMonitor with its CA, as the OpenShift overlay does
-with the service CA.
+**Mounting a Prometheus CA.** The controller runs with a read-only root filesystem,
+so the CA must arrive as a volume. With the CA in `ca.crt` and the controller in
+`$WVA_NS`:
+
+```bash
+# Store the CA in a Secret next to the controller
+kubectl create secret generic prometheus-ca -n "$WVA_NS" --from-file=ca.crt=ca.crt
+
+# Mount it into the manager container
+kubectl patch deployment wva-controller-manager -n "$WVA_NS" --type=json -p='[
+  {"op":"add","path":"/spec/template/spec/volumes/-","value":{"name":"prometheus-ca","secret":{"secretName":"prometheus-ca"}}},
+  {"op":"add","path":"/spec/template/spec/containers/0/volumeMounts/-","value":{"name":"prometheus-ca","mountPath":"/etc/prometheus-certs","readOnly":true}}]'
+```
+
+Then, in the manager ConfigMap (`wva-manager-config`, key `config.yaml`), set
+`PROMETHEUS_CA_CERT_PATH: "/etc/prometheus-certs/ca.crt"` and
+`PROMETHEUS_TLS_INSECURE_SKIP_VERIFY: "false"`, and restart the controller
+(`kubectl rollout restart deployment/wva-controller-manager -n "$WVA_NS"`).
+
+- **GitOps:** put the same volume and mount in a kustomize patch, as
+  `config/components/openshift/deployment-patch.yaml` does for its serving cert.
+- **Installer re-runs** re-apply the manager ConfigMap from the overlay and reset
+  both keys. Set them again afterwards, or keep them in your own overlay.
+
+**The other direction, the controller's `/metrics`:** the shipped ServiceMonitor
+scrapes it with `insecureSkipVerify: true`, because the controller generates a
+self-signed serving certificate in memory. To verify that scrape, start the
+controller with `--metrics-cert-path` pointing at a mounted certificate and put
+its CA in the ServiceMonitor's `tlsConfig`, as the OpenShift overlay does with
+the service CA.
 
 **Development/Testing:**
 - You may set `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true` for local clusters
@@ -179,14 +224,13 @@ with the service CA.
   export PROMETHEUS_BASE_URL=https://127.0.0.1:9091
   export PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true
   ```
-- If your Prometheus is only reachable over plain HTTP (e.g. `kube-prometheus-stack`'s
+- If your Prometheus is reachable only over plain HTTP (e.g. `kube-prometheus-stack`'s
   default in-cluster service), set `PROMETHEUS_ALLOW_HTTP=true` and use an
-  `http://` `PROMETHEUS_BASE_URL` instead of standing up a TLS-terminating proxy.
-  This cannot be combined with `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY`,
-  `PROMETHEUS_SERVER_NAME`, any `PROMETHEUS_CA_CERT_PATH`/client cert settings, or
-  bearer token auth — the scaling manager refuses to start if those are set alongside a plain HTTP
-  URL. Note that credentials and metrics are sent in cleartext, so use this only
-  on a trusted network (dev/test or a secured in-cluster path).
+  `http://` `PROMETHEUS_BASE_URL`. The controller refuses to start if
+  `PROMETHEUS_TLS_INSECURE_SKIP_VERIFY`, `PROMETHEUS_SERVER_NAME`, any
+  `PROMETHEUS_CA_CERT_PATH`/client cert setting, or bearer token auth is set
+  alongside it. Everything travels in cleartext, so use it only on a trusted
+  network (dev/test or a secured in-cluster path).
 
 ### EPP metrics token
 
@@ -194,25 +238,25 @@ The controller scrapes the EPP's `/metrics` with the token of a dedicated
 ServiceAccount, `wva-epp-metrics-reader`, whose only grant is `get` on the
 `/metrics` non-resource URL. The token comes from a legacy
 `kubernetes.io/service-account-token` Secret, `wva-epp-metrics-token`, mounted at
-`/var/run/secrets/epp-metrics/token`. Such a token **does not expire**.
+`/var/run/secrets/epp-metrics/token`. It **does not expire**, and it can read
+`/metrics` endpoints and nothing else.
 
-It is kept rather than replaced with a projected token because a projected volume
-can only issue tokens for the Pod's own ServiceAccount: moving to one means binding
-the reader role to the controller's ServiceAccount and dropping the dedicated one,
-and the documented `kubectl get secret wva-epp-metrics-token` reads (this page's
-monitoring examples, the scale-to-zero and utilization-share guides) and the e2e
-suite all use the Secret today.
+**To rotate it**, delete the Secret and re-apply the install (or `kubectl apply`
+the Secret again). The token controller fills in a new token, and the old one
+stops working once the Secret is gone. The controller re-reads the file on every
+EPP scrape, so it picks up the new token once the kubelet updates the volume
+(typically within a minute), with no restart.
 
-What limits it: the token reads `/metrics` endpoints and nothing else. To rotate it,
-delete the Secret and re-apply the install (or `kubectl apply` the Secret again);
-the token controller fills in a new token and the old one stops working once the
-Secret is gone. The controller re-reads the file on every EPP scrape, so it picks
-up the new token as soon as the kubelet updates the mounted volume (typically
-within a minute), without a restart.
+**Why not a projected token:** a projected volume issues tokens only for the
+Pod's own ServiceAccount. Switching would mean binding the reader role to the
+controller's ServiceAccount and dropping the dedicated one, and the documented
+`kubectl get secret wva-epp-metrics-token` reads (this page's monitoring
+examples, the scale-to-zero and utilization-share guides) and the e2e suite all
+use the Secret today.
 
 ### PromQL Injection Prevention
 
-The scaling manager implements security measures to prevent PromQL injection attacks:
+The scaling manager guards its queries against PromQL injection:
 
 1. **Parameter Escaping**: All query parameters (namespace, model ID, variant name) are automatically escaped:
    - Backslashes are escaped: `\` → `\\`
@@ -235,19 +279,20 @@ query := fmt.Sprintf(`vllm_kv_cache_usage{namespace="%s"}`, escapedNamespace)
 // Prometheus treats this as a literal string, preventing injection
 ```
 
-**Why This Matters:**
-- Prevents unauthorized access to metrics from other namespaces
-- Blocks label injection attacks that could manipulate query results
-- Ensures multi-tenant deployments remain isolated
+This stops a crafted value from reading another namespace's metrics or adding
+label matchers that change a query's result.
 
 
 
 ## llm-scaling-manager Metrics
 
-The scaling manager exposes metrics providing insights into autoscaling behavior and optimization performance. These metrics are exposed via Prometheus at the `/metrics` endpoint.
+The metrics below describe the scaling manager's decisions and its own health.
+All are served at `/metrics`.
 
 ### Notes on **name_space**s in metrics
-With the scaling manager metrics, the value for the label `namespace` is the scaling manager controller namespace, not the workload's namespace. The workload's namespace is the label `exported_namespace`. Here's an example (from a test install whose controller namespace was `workload-variant-autoscaler-system`):
+On the scaling manager's metrics, `namespace` is the **controller's**
+namespace. The workload's namespace is `exported_namespace`. An example, from a
+test install whose controller ran in `workload-variant-autoscaler-system`:
 ```text
 {
   "metric": "wva_desired_replicas",
@@ -255,12 +300,12 @@ With the scaling manager metrics, the value for the label `namespace` is the sca
     "accelerator_type": "A100",
     "container": "manager",
     "endpoint": "https",
-    "exported_namespace": "llm-d-sim",    <==== VA namespace
+    "exported_namespace": "llm-d-sim",    <==== model namespace
     "instance": "10.244.0.73:8443",
-    "job": "workload-variant-autoscaler-metrics",
+    "job": "wva-controller-manager-metrics-service",
     "namespace": "workload-variant-autoscaler-system",  <=== controller namespace
-    "pod": "workload-variant-autoscaler-controller-manager-75b45dd7c-89g5s",
-    "service": "workload-variant-autoscaler-metrics",
+    "pod": "wva-controller-manager-<hash>",
+    "service": "wva-controller-manager-metrics-service",
     "variant_name": "workload-variant-autoscaler-va"
   },
   "value": "2"
@@ -285,18 +330,39 @@ With the scaling manager metrics, the value for the label `namespace` is the sca
       "container": "manager",
       "endpoint": "https",
       "instance": "10.244.2.55:8443",
-      "job": "workload-variant-autoscaler-metrics",
+      "job": "wva-controller-manager-metrics-service",
       "limiter_enabled": "false",
       "namespace": "workload-variant-autoscaler-system",
-      "pod": "workload-variant-autoscaler-controller-manager-6ddfbddf57-l5ptf",
+      "pod": "wva-controller-manager-<hash>",
       "scale_to_zero_enabled": "false",
-      "service": "workload-variant-autoscaler-metrics"
+      "service": "wva-controller-manager-metrics-service"
     },
     "value": [
       1778846184.925,
       "1"
     ]
   }
+  ```
+
+### `wva_engine_config`
+- **Type**: Gauge
+- **Description**: The engine configuration each variant runs, as the scaling manager read it from the scale target's launch flags (value is always 1). One series per variant.
+- **Labels**:
+  - `namespace` (scraped as `exported_namespace`), `model_name`, `variant_name`: the variant
+  - `accelerator`, `gpus`: the hardware its learned state is filed under. On a fleet whose pods sit on two GPU products this is the last product that resolved, not this cycle's reading, so it can differ from what discovery reports for the same variant
+  - `fingerprint`: a 16-hex-digit digest of the labels below. Two variants of one model on the same `accelerator` and `gpus` with the same `fingerprint` run the same engine configuration as far as the scaling manager can tell, and may share a learned latency line when `enableLearnedStateReuse` is on ([scaling policy](scaling-policy.md))
+  - `fingerprint_version`: the digest's format. A new version changes every fingerprint at once, so learned state keyed on the old ones starts cold after an upgrade
+  - `engine`, `weight_dtype`, `quantization`, `gpu_memory_utilization`, `block_size`, `kv_cache_dtype`, `tensor_parallel_size`, `num_gpu_blocks_override`, `total_kv_tokens_override`, `effective_max_batched_tokens`, `max_num_seqs`, `max_model_len`, `enforce_eager`: the flags that are hashed, after defaults
+  - `unresolved`: the flags the scaling manager could not read, for example a value given as an unexpanded `$VARIABLE`. Those flags carry their defaults in the labels above. **Empty is the good case.** A variant with anything here is not used as a key for sharing a latency line
+  - `image`: the engine container's image. Two variants with identical flags on different engine releases get different fingerprints
+  - `data_parallel_size`, `pipeline_parallel_size`, `expert_parallel`, `speculative_config`, `kv_connector`, `kv_offloading_size`, `kv_offloading_backend`, `prefix_caching_disabled`: the layout and features of a wide-EP or P/D engine, also hashed. `speculative_config` is vLLM's `--speculative-config` re-encoded with sorted keys, or SGLang's `--speculative-*` flags as `key=value` pairs; `kv_connector` is the `kv_connector` of `--kv-transfer-config`, or SGLang's `--disaggregation-transfer-backend`
+  - `model`, `model_revision`: the checkpoint served (vLLM's positional model or `--model`, SGLang's `--model-path`, and `--revision`). `model_unresolved` is `true` when it was given as a variable the scaling manager could not resolve, or after the flags where a flag may have taken it as its value; such a variant is not used as a key for sharing a latency line, and does not take another variant's measured capacity (two unread checkpoints may be an FP8 and a BF16 build of one model), though its own learned state is still restored after a restart
+  - `sharing_unresolved`: flags read for identity whose value could not be interpreted, each as `flag="value as written"` -- typically a parallel size computed when the pod starts, such as `data_parallel_size="$((LWS_GROUP_SIZE * DP_SIZE_LOCAL))"`. As with `model_unresolved`, such a variant does not share a latency line or take another variant's measured capacity -- the same text can be a 2x8 group in one LeaderWorkerSet and a 4x8 group in another -- and its own learned state is still restored after a restart. vLLM's `-tp`, `-dp` and `-pp` and its `--speculative-config.<key>` spelling are read
+  - `memory_layout`: flags that size or reshape what one replica holds and that no other label names, as sorted `key=value` pairs: vLLM's `--kv-cache-memory-bytes`, `--enable-eplb`, `--num-redundant-experts`, `--eplb-config` (re-encoded with sorted keys) and `--all2all-backend`, the `VLLM_ALL2ALL_BACKEND` env var (`env.VLLM_ALL2ALL_BACKEND`), and SGLang's `--enable-dp-attention` and `--moe-a2a-backend`. Empty is the common case. A value that cannot be read, including the env var set by `valueFrom`, goes to `sharing_unresolved` instead; one set by `envFrom` is not seen
+  - Only the leader pod's flags are read; the workers of a LeaderWorkerSet group are taken to run the same ones
+- **Use Case**: Answers "why did these two variants share (or not share) what they learned?" and "did the scaling manager read this engine's configuration correctly?". Compare `fingerprint` across variants of a model, and alert on a non-empty `unresolved`:
+  ```promql
+  wva_engine_config{unresolved!=""}
   ```
 
 ### `wva_config_optimization_interval_seconds`
@@ -312,10 +378,10 @@ With the scaling manager metrics, the value for the label `namespace` is the sca
       "container": "manager",
       "endpoint": "https",
       "instance": "10.244.2.55:8443",
-      "job": "workload-variant-autoscaler-metrics",
+      "job": "wva-controller-manager-metrics-service",
       "namespace": "workload-variant-autoscaler-system",
-      "pod": "workload-variant-autoscaler-controller-manager-6ddfbddf57-l5ptf",
-      "service": "workload-variant-autoscaler-metrics"
+      "pod": "wva-controller-manager-<hash>",
+      "service": "wva-controller-manager-metrics-service"
     },
     "value": [
       1778846184.925,
@@ -397,12 +463,12 @@ across a restart, are otherwise visible only in the logs.
       "container": "manager",
       "endpoint": "https",
       "instance": "10.244.2.55:8443",
-      "job": "workload-variant-autoscaler-metrics",
+      "job": "wva-controller-manager-metrics-service",
       "le": "0.001",
       "namespace": "workload-variant-autoscaler-system",
-      "pod": "workload-variant-autoscaler-controller-manager-6ddfbddf57-l5ptf",
+      "pod": "wva-controller-manager-<hash>",
       "query_type": "cache_config",
-      "service": "workload-variant-autoscaler-metrics"
+      "service": "wva-controller-manager-metrics-service"
     },
     "value": [
       1778846184.925,
@@ -415,9 +481,9 @@ across a restart, are otherwise visible only in the logs.
 - **Type**: Counter
 - **Description**: Total number of metrics collection errors
 - **Labels**:
-  - `query_type`: Type of metrics query that failed
-  - `reason`: Reason for the error
-- **Use Case**: Track metrics collection failures and identify problematic queries
+  - `query_type`: Type of metrics query that failed. `pod_list` is the controller's per-namespace Pod listing, a Kubernetes API read rather than a Prometheus query
+  - `reason`: Reason for the error. For `pod_list`: `forbidden`, `unavailable` or `other`
+- **Use Case**: Track metrics collection failures and identify problematic queries. A failed `pod_list` makes the controller treat every Pod in that namespace as Ready and present for the cycle, so a not-Ready Pod's saturated reading can become its variant's k2; a steady rate of `pod_list` errors (`reason="forbidden"` after an RBAC change) is worth an alert
 - **Example**:
   ```json
   {
@@ -426,12 +492,12 @@ across a restart, are otherwise visible only in the logs.
       "container": "manager",
       "endpoint": "https",
       "instance": "10.244.2.59:8443",
-      "job": "workload-variant-autoscaler-metrics",
+      "job": "wva-controller-manager-metrics-service",
       "namespace": "workload-variant-autoscaler-system",
-      "pod": "workload-variant-autoscaler-controller-manager-f9fdb95df-wvd9p",
+      "pod": "wva-controller-manager-<hash>",
       "query_type": "kv_cache",
       "reason": "bad_data",
-      "service": "workload-variant-autoscaler-metrics"
+      "service": "wva-controller-manager-metrics-service"
     },
     "value": [
       1778854211.669,
@@ -455,10 +521,10 @@ across a restart, are otherwise visible only in the logs.
       "endpoint": "https",
       "exported_namespace": "llm-d-sim-dual",
       "instance": "10.244.2.55:8443",
-      "job": "workload-variant-autoscaler-metrics",
+      "job": "wva-controller-manager-metrics-service",
       "namespace": "workload-variant-autoscaler-system",
-      "pod": "workload-variant-autoscaler-controller-manager-6ddfbddf57-l5ptf",
-      "service": "workload-variant-autoscaler-metrics"
+      "pod": "wva-controller-manager-<hash>",
+      "service": "wva-controller-manager-metrics-service"
     },
     "value": [
       1778846184.925,
@@ -482,10 +548,10 @@ across a restart, are otherwise visible only in the logs.
       "container": "manager",
       "endpoint": "https",
       "instance": "10.244.2.55:8443",
-      "job": "workload-variant-autoscaler-metrics",
+      "job": "wva-controller-manager-metrics-service",
       "namespace": "workload-variant-autoscaler-system",
-      "pod": "workload-variant-autoscaler-controller-manager-6ddfbddf57-l5ptf",
-      "service": "workload-variant-autoscaler-metrics",
+      "pod": "wva-controller-manager-<hash>",
+      "service": "wva-controller-manager-metrics-service",
       "status": "fresh",
       "variant_name": "smoke-test-dual-shared-va"
     },
@@ -511,12 +577,12 @@ across a restart, are otherwise visible only in the logs.
       "container": "manager",
       "endpoint": "https",
       "instance": "10.244.2.59:8443",
-      "job": "workload-variant-autoscaler-metrics",
+      "job": "wva-controller-manager-metrics-service",
       "namespace": "workload-variant-autoscaler-system",
-      "pod": "workload-variant-autoscaler-controller-manager-f9fdb95df-wvd9p",
+      "pod": "wva-controller-manager-<hash>",
       "exported_namespace": "llm-d-sim",
       "reason": "unresolved",
-      "service": "workload-variant-autoscaler-metrics"
+      "service": "wva-controller-manager-metrics-service"
     },
     "value": [
       1778854211.669,
@@ -524,6 +590,36 @@ across a restart, are otherwise visible only in the logs.
     ]
   }
   ```
+
+### KEDA External Scaler Metrics
+
+### `wva_scaler_undecided_answers_total`
+- **Type**: Counter
+- **Description**: `GetMetrics` answers the KEDA external scaler gave with no usable decision behind them. Without one the scaler answers the target's current replica count, so the HPA holds; this counts those answers. See [before the first decision](scaledobject-trigger.md#before-the-first-decision-and-the-fallback).
+- **Labels**:
+  - `namespace`: the ScaledObject's namespace (scraped as `exported_namespace`; see the note on namespaces above)
+  - `reason`: `no-decision` (a target the scaling manager plans but has not decided yet, normally the first cycle after a restart or a leader change), `stale` (its last decision is older than the decision TTL, 60 s or three optimization intervals, whichever is longer: no engine is republishing it), or `not-managed` (the trigger metadata does not parse, so no engine will ever decide it)
+- **Use Case**: Which reason, and how fast. A counter grows on every poll of every undecided target, so its rate says more about polling than about how many models are frozen: alert on `wva_scaler_undecided_targets`, not on this.
+
+### `wva_scaler_undecided_targets`
+- **Type**: Gauge
+- **Description**: ScaledObjects the KEDA external scaler is currently answering without a usable decision (with the target's current replica count). A ScaledObject enters on an undecided `GetMetrics` answer and leaves on the next decided one, when it is no longer registered, or two minutes after its last undecided answer (KEDA stops asking about a target parked at zero or deleted). Read at scrape time; a namespace with none has no series.
+- **Labels**:
+  - `namespace`: the ScaledObject's namespace (scraped as `exported_namespace`)
+- **Use Case**: Non-zero for a cycle or two after a restart or leader change is expected. Alert when it stays above 0 for 10 minutes: those models' replica counts are frozen. The shipped rules do, as `WVAScalerTargetsUndecided` (see [Alerting Rules](#alerting-rules)). `wva_scaler_undecided_answers_total` says why. The controller logs `external scaler has no decision for this target` each time a ScaledObject enters the set, naming it, and `external scaler has a decision for this target again` when it leaves on a decision.
+
+  ```yaml
+  - alert: WVAScalerTargetsUndecided
+    expr: max by (exported_namespace) (wva_scaler_undecided_targets) > 0
+    for: 10m
+  ```
+
+### `wva_scaler_panics_total`
+- **Type**: Counter
+- **Description**: Panics in the KEDA external scaler's gRPC handlers that were recovered and answered with `Internal`, so one failing call does not take the controller down. Any non-zero value is a bug; the stack trace is in the controller log under `KEDA external scaler handler panicked`.
+- **Labels**:
+  - `method`: the full gRPC method, for example `/externalscaler.ExternalScaler/GetMetrics`
+- **Use Case**: Alert on any increase.
 
 ### Optimization Metrics
 
@@ -542,11 +638,11 @@ across a restart, are otherwise visible only in the logs.
       "container": "manager",
       "endpoint": "https",
       "instance": "10.244.2.55:8443",
-      "job": "workload-variant-autoscaler-metrics",
+      "job": "wva-controller-manager-metrics-service",
       "le": "0.01",
       "namespace": "workload-variant-autoscaler-system",
-      "pod": "workload-variant-autoscaler-controller-manager-6ddfbddf57-l5ptf",
-      "service": "workload-variant-autoscaler-metrics",
+      "pod": "wva-controller-manager-<hash>",
+      "service": "wva-controller-manager-metrics-service",
       "status": "success"
     },
     "value": [
@@ -569,10 +665,10 @@ across a restart, are otherwise visible only in the logs.
       "container": "manager",
       "endpoint": "https",
       "instance": "10.244.2.55:8443",
-      "job": "workload-variant-autoscaler-metrics",
+      "job": "wva-controller-manager-metrics-service",
       "namespace": "workload-variant-autoscaler-system",
-      "pod": "workload-variant-autoscaler-controller-manager-6ddfbddf57-l5ptf",
-      "service": "workload-variant-autoscaler-metrics"
+      "pod": "wva-controller-manager-<hash>",
+      "service": "wva-controller-manager-metrics-service"
     },
     "value": [
       1778846184.925,
@@ -602,11 +698,11 @@ across a restart, are otherwise visible only in the logs.
       "endpoint": "https",
       "exported_namespace": "llm-d-sim-dual",
       "instance": "10.244.2.55:8443",
-      "job": "workload-variant-autoscaler-metrics",
+      "job": "wva-controller-manager-metrics-service",
       "model_name": "unsloth/Meta-Llama-3.1-8B",
       "namespace": "workload-variant-autoscaler-system",
-      "pod": "workload-variant-autoscaler-controller-manager-6ddfbddf57-l5ptf",
-      "service": "workload-variant-autoscaler-metrics",
+      "pod": "wva-controller-manager-<hash>",
+      "service": "wva-controller-manager-metrics-service",
       "variant_name": "smoke-test-dual-shared-va"
     },
     "value": [
@@ -635,11 +731,11 @@ across a restart, are otherwise visible only in the logs.
       "endpoint": "https",
       "exported_namespace": "llm-d-sim-dual",
       "instance": "10.244.2.55:8443",
-      "job": "workload-variant-autoscaler-metrics",
+      "job": "wva-controller-manager-metrics-service",
       "model_name": "unsloth/Meta-Llama-3.1-8B",
       "namespace": "workload-variant-autoscaler-system",
-      "pod": "workload-variant-autoscaler-controller-manager-6ddfbddf57-l5ptf",
-      "service": "workload-variant-autoscaler-metrics",
+      "pod": "wva-controller-manager-<hash>",
+      "service": "wva-controller-manager-metrics-service",
       "variant_name": "smoke-test-dual-shared-va"
     },
     "value": [
@@ -667,11 +763,11 @@ across a restart, are otherwise visible only in the logs.
       "endpoint": "https",
       "exported_namespace": "llm-d-sim-dual",
       "instance": "10.244.2.55:8443",
-      "job": "workload-variant-autoscaler-metrics",
+      "job": "wva-controller-manager-metrics-service",
       "model_name": "unsloth/Meta-Llama-3.1-8B",
       "namespace": "workload-variant-autoscaler-system",
-      "pod": "workload-variant-autoscaler-controller-manager-6ddfbddf57-l5ptf",
-      "service": "workload-variant-autoscaler-metrics",
+      "pod": "wva-controller-manager-<hash>",
+      "service": "wva-controller-manager-metrics-service",
       "variant_name": "smoke-test-dual-shared-va"
     },
     "value": [
@@ -698,11 +794,11 @@ across a restart, are otherwise visible only in the logs.
       "endpoint": "https",
       "exported_namespace": "llm-d-sim-dual",
       "instance": "10.244.2.55:8443",
-      "job": "workload-variant-autoscaler-metrics",
+      "job": "wva-controller-manager-metrics-service",
       "model_name": "unsloth/Meta-Llama-3.1-8B",
       "namespace": "workload-variant-autoscaler-system",
-      "pod": "workload-variant-autoscaler-controller-manager-6ddfbddf57-l5ptf",
-      "service": "workload-variant-autoscaler-metrics",
+      "pod": "wva-controller-manager-<hash>",
+      "service": "wva-controller-manager-metrics-service",
       "variant_name": "smoke-test-dual-shared-va"
     },
     "value": [
@@ -731,11 +827,11 @@ across a restart, are otherwise visible only in the logs.
       "endpoint": "https",
       "exported_namespace": "llm-d-sim-dual",
       "instance": "10.244.2.60:8443",
-      "job": "workload-variant-autoscaler-metrics",
+      "job": "wva-controller-manager-metrics-service",
       "limiter_name": "gpu-limiter",
       "namespace": "workload-variant-autoscaler-system",
-      "pod": "workload-variant-autoscaler-controller-manager-659d5c9dcf-w6cw7",
-      "service": "workload-variant-autoscaler-metrics",
+      "pod": "wva-controller-manager-<hash>",
+      "service": "wva-controller-manager-metrics-service",
       "variant_name": "smoke-test-dual-shared-va"
     },
     "value": [
@@ -758,10 +854,10 @@ across a restart, are otherwise visible only in the logs.
       "container": "manager",
       "endpoint": "https",
       "instance": "10.244.2.55:8443",
-      "job": "workload-variant-autoscaler-metrics",
+      "job": "wva-controller-manager-metrics-service",
       "namespace": "workload-variant-autoscaler-system",
-      "pod": "workload-variant-autoscaler-controller-manager-6ddfbddf57-l5ptf",
-      "service": "workload-variant-autoscaler-metrics"
+      "pod": "wva-controller-manager-<hash>",
+      "service": "wva-controller-manager-metrics-service"
     },
     "value": [
       1778846184.925,
@@ -769,6 +865,30 @@ across a restart, are otherwise visible only in the logs.
     ]
   }
   ```
+
+### `wva_pod_access_denied`
+- **Type**: Gauge
+- **Description**: `1` while a namespace-scoped controller with a `gpu-inventory` limiter in force may not list Pods cluster-wide, so the GPUs other namespaces hold on shared nodes cannot be counted; `0` otherwise. Under a quota limiter, or none, nothing reads that count, so it stays `0`. Absent on a cluster-scoped controller.
+- **Labels**: optional `controller_instance`
+- **Use Case**: while `1`, GPU usage counts only the controller's own namespace, so the physical limiter can admit scale-ups onto nodes other namespaces fill. See [GPU limiter](gpu-limiter.md#when-policy-demands-a-limiter-the-controller-cannot-serve).
+
+### `wva_config_rejected_entries`
+- **Type**: Gauge
+- **Description**: entries of a scaling-policy ConfigMap rejected at its last load (an invalid value or wrong type). A rejected entry keeps the previous entry under its key, if there was one. The series is removed when the ConfigMap is deleted.
+- **Labels**: `namespace`, `configmap`, optional `controller_instance`
+- **Use Case**: any value above 0 means the ConfigMap does not say what is running. The `ConfigEntryRejected` event on the ConfigMap names the entry.
+
+### `wva_config_unknown_keys`
+- **Type**: Gauge
+- **Description**: keys in a scaling-policy ConfigMap's entries that the schema does not define, at its last load. They are ignored; the entries still apply. The series is removed when the ConfigMap is deleted.
+- **Labels**: `namespace`, `configmap`, optional `controller_instance`
+- **Use Case**: a value above 0 is usually a misspelled key whose setting is not in force. The `ConfigEntryUnknownKeys` event names it and its line.
+
+### `wva_config_ignored_fields`
+- **Type**: Gauge
+- **Description**: fields in a scaling-policy ConfigMap's entries whose value cannot be used, at its last load: a `scaleToZero.retentionPeriod` that is not a duration or is under 30s, or a negative `shapeChangeHoldSeconds`. Each acts as unset, so the layer below applies; the entries still apply. The series is removed when the ConfigMap is deleted.
+- **Labels**: `namespace`, `configmap`, optional `controller_instance`
+- **Use Case**: a value above 0 means a setting you wrote is not in force. The `ConfigFieldIgnored` event names the entry, field and value. Each field is also counted in `wva_errors_total{error_type="Ignored unusable saturation scaling config field"}`.
 
 ### `wva_node_access_denied`
 - **Type**: Gauge
@@ -812,10 +932,10 @@ across a restart, are otherwise visible only in the logs.
         "container": "manager",
         "endpoint": "https",
         "instance": "10.244.2.55:8443",
-        "job": "workload-variant-autoscaler-metrics",
+        "job": "wva-controller-manager-metrics-service",
         "namespace": "workload-variant-autoscaler-system",
-        "pod": "workload-variant-autoscaler-controller-manager-6ddfbddf57-l5ptf",
-        "service": "workload-variant-autoscaler-metrics"
+        "pod": "wva-controller-manager-<hash>",
+        "service": "wva-controller-manager-metrics-service"
       },
       "value": [
         1778847371.083,
@@ -838,11 +958,11 @@ across a restart, are otherwise visible only in the logs.
       "container": "manager",
       "endpoint": "https",
       "instance": "10.244.2.62:8443",
-      "job": "workload-variant-autoscaler-metrics",
+      "job": "wva-controller-manager-metrics-service",
       "namespace": "workload-variant-autoscaler-system",
-      "pod": "workload-variant-autoscaler-controller-manager-c8b9c74b5-82t2c",
+      "pod": "wva-controller-manager-<hash>",
       "policy_type": "scale_to_zero",
-      "service": "workload-variant-autoscaler-metrics"
+      "service": "wva-controller-manager-metrics-service"
     },
     "value": [
       1778859222.859,
@@ -865,11 +985,11 @@ across a restart, are otherwise visible only in the logs.
       "container": "manager",
       "endpoint": "https",
       "instance": "10.244.2.55:8443",
-      "job": "workload-variant-autoscaler-metrics",
+      "job": "wva-controller-manager-metrics-service",
       "namespace": "workload-variant-autoscaler-system",
       "optimizer_name": "cost-aware",
-      "pod": "workload-variant-autoscaler-controller-manager-6ddfbddf57-l5ptf",
-      "service": "workload-variant-autoscaler-metrics"
+      "pod": "wva-controller-manager-<hash>",
+      "service": "wva-controller-manager-metrics-service"
     },
     "value": [
       1778846184.925,
@@ -903,15 +1023,16 @@ is set, and is scraped with the workload's namespace as `exported_namespace`.
 ### Utilization-Share Optimizer Metrics
 
 Published when the [utilization-share optimizer](scaling-policy.md#optimizer-cluster-default-only-live)
-is selected, except `wva_utilization_share_mode`, which the leader publishes
-every cycle, from its first, including cycles with no active model. The
-**gauges** are replaced each cycle, so a model or group that leaves takes its
-gauge series with it, and switching the optimizer off, a cycle with no quota
-read, or a cycle with no active model deletes them all. The **counters and histograms** (`_transfers_total`,
-`_starts_total`, `_withheld_total`, `_claims_total`, `_donors_per_transfer`, `_release_seconds`)
-are never deleted: they keep their last values after the optimizer is switched
-off, as counters do. Use `rate()` or `increase()` on them, not their raw value, to
-judge whether the optimizer is doing anything now.
+is selected. The exception is `wva_utilization_share_mode`, which the leader
+publishes every cycle from its first, even with no active model.
+
+- **Gauges** are replaced each cycle. A model or group that leaves takes its
+  series with it. Switching the optimizer off, a cycle with no quota read, or a
+  cycle with no active model deletes them all.
+- **Counters and histograms** (`_transfers_total`, `_starts_total`,
+  `_withheld_total`, `_claims_total`, `_donors_per_transfer`, `_release_seconds`)
+  are never deleted and keep their last values after the optimizer is off. Use
+  `rate()` or `increase()` to judge whether it is doing anything now.
 
 The mode gauge:
 
@@ -929,12 +1050,12 @@ Two label sets for every other series, plus the optional `controller_instance` o
   namespace quota group, or `cluster` for the cluster group. They carry no
   workload namespace; their `namespace` label is the controller's.
 
-Published in shadow mode as well as when acting. While acting,
-`_target_gpus`, `_actionable` and `_replicas_to_move` (and the blocked reasons)
-are the planner's evaluation, which caps headroom at `maxHeadroomReplicas` only
-while the quota is contended (`wva_utilization_share_headroom_capped`). Shadow
-mode has no contention test and always caps, so on a quota whose peaks fit,
-its targets are lower than what acting would move to:
+Published in shadow mode and when acting. While acting, `_target_gpus`,
+`_actionable` and `_replicas_to_move` (and the blocked reasons) come from the
+planner, which caps headroom at `maxHeadroomReplicas` only while the quota is
+contended (`wva_utilization_share_headroom_capped`). Shadow mode has no
+contention test and always caps, so on a quota whose peaks fit, its targets are
+lower than what acting would move to:
 
 | metric | type | labels | meaning |
 | --- | --- | --- | --- |
@@ -975,80 +1096,78 @@ Transfer `outcome` values:
 | `wrong-pod` | The donor shrank by a pod other than the one marked, so the GPUs did not come free where the receiver was planned; the receiver is not raised, and the donor stays one replica lower. Detected only for a transfer planned with node information, which names the pods that must go. Without it (a namespace-scoped install, or a transfer planned by count alone) a release is judged by count: another of the donor's pods leaving counts as the release. |
 
 A sustained rise in `aborted`, `fill-timeout` or `wrong-pod` means transfers are
-not landing; alert on `increase()` of those outcomes (see
+not landing. Alert on `increase()` of those outcomes (see
 [monitoring](monitoring.md#the-metrics-that-answer-specific-questions)), and read
 the blocked reasons below for which models are affected.
 
-At most two transfers with a donor run per group at once
-(`wva_utilization_share_in_flight` counts them with idle fills included), and a
-role gives or receives at most two replicas per cycle. Two kinds of move are
-outside both limits, so `in_flight{state="releasing"}` can read above `2`:
+**Limits.** At most two transfers with a donor run per group at once
+(`wva_utilization_share_in_flight` counts them, idle fills included), and a role
+gives or receives at most two replicas per cycle. Two kinds of move are outside
+both limits, so `in_flight{state="releasing"}` can read above `2`:
 
 - **A move that skipped the waits, from its second cycle.** It starts without
-  consulting the limit, but it counts in it: other moves wait until it lands. A
-  move that skipped the waits on its first cycle is paced and limited as any
-  other. When a receiver is
-  at its scale-up threshold and a donor stays calm
-  (`stabilization.skipWaitsWhen`; the donor judged on the higher of its
-  current need and its peak need -- two readings in a row -- over its
-  scale-down window, unless the receiver's bursts outlast a move), the first cycle
-  moves at the usual pace. If
-  the imbalance holds a second consecutive cycle, the receiver takes every
-  replica it is short of its need in that cycle, from one donor or several
-  (`starts_total{skipped_waits="true"}`). Its need here is the higher of its
-  current need and, for a model planned on its average because its demand
-  swings, that average. The replica of headroom above its need is an ordinary,
-  paced move.
+  consulting the limit but counts in it, so other moves wait until it lands. When
+  a receiver is at its scale-up threshold and a donor stays calm
+  (`stabilization.skipWaitsWhen`; the donor judged on the higher of its current
+  and peak need, two readings in a row, over its scale-down window, unless the
+  receiver's bursts outlast a move), the first cycle moves at the usual pace and
+  is limited as any other move. If the imbalance holds a second consecutive
+  cycle, the receiver takes every replica it is short of its need in that cycle,
+  from one donor or several (`starts_total{skipped_waits="true"}`). Its need
+  here is the higher of its current need and, for a model planned on its average
+  because its demand swings, that average. The replica of headroom above its
+  need is an ordinary, paced move.
 - **A spare return** (below). It never counts against the limit.
 
-A model that is still giving GPUs -- a transfer, a return or a refill still
-releasing -- is not raised, by a transfer or by a fill, until that release
-lands. This also keeps a move that skipped the waits from sending GPUs back to
-a model mid-drain.
+**No raise while giving.** A model still giving GPUs (a transfer, return or
+refill still releasing) is not raised, by a transfer or a fill, until that
+release lands. This also stops a move that skipped the waits from sending GPUs
+back to a model mid-drain.
 
-Idle fills move nothing from another model and are not limited by the
-concurrency limit. A fill raises a model below its need by everything it is
-short at once, and a model at or above its need by at most two replicas per
-cycle. The planner counts what the fill will give a receiver -- only replicas
-whose pods fit free GPUs, where node information exists -- before it asks any
-donor to shrink.
+**Idle fills** move nothing from another model and are outside the concurrency
+limit. A fill raises a model below its need by its whole shortfall at once, and a
+model at or above its need by at most two replicas per cycle. The planner counts
+what fills will give a receiver (only replicas whose pods fit free GPUs, where
+node information exists) before it asks any donor to shrink.
 
-A **spare return** -- a model giving what it holds above its need plus its
+**A spare return** is a model giving what it holds above its need plus its
 headroom (`utilizationShare.maxHeadroomReplicas` times its weight) back to the
-quota group's unassigned GPUs -- is a transfer with a donor and no receiver
-(`starts_total{kind="return"}`). Headroom is capped, and so returned, only while
-the quota is contended: it cannot hold every model at its peak need over the
-last `stabilization.flappingWindow` at the same time
-(`wva_utilization_share_headroom_capped`; while no model's peak is known, as
-for a new group or after a restart that finds no stored need history, until a
-window of history exists, each counts at its `maxReplicas`). A model is never capped below what the other models' peaks
-leave of the quota, so a model that bursts alone keeps its spare. A return
-starts once the model has held that extra for
-`stabilization.consecutiveCyclesBeforeMove` cycles in a row, while no model
-that can grow is short of its need, and only while the model's load would stay
-at or below `stabilization.returnSpareWhenLoadAtMost`; then all of the extra
-goes in one cycle. While more than `returnSpareWhenLoadAtMost` x
-`queueLengthThreshold` requests are waiting on one of its pods, for those
-cycles in a row, the return waits for at most the model's scale-down window
-(`return-pod-busy`). The release itself waits the model's scale-down window, as
-a scale-down does. Its GPUs are not unassigned until its pod is gone: no model is raised
-into them before that, and the model giving them back is not raised by a fill
-while its return is releasing. It shows in `wva_utilization_share_in_flight{state="releasing"}` until the
-donor's pod is gone, then ends in the cycle that sees the release -- it never
-reads as `filling`, since there is no receiver to wait for -- counted as
-`wva_utilization_share_transfers_total{outcome="done", urgent="false"}`, and
-its release time is observed in `wva_utilization_share_release_seconds`. If the
-model's demand comes back while the release is still free (inside the donor's
-scale-down window) -- it is short of its target again, or busier than
-`returnSpareWhenLoadAtMost` on what it keeps -- the return is called off and
-counted `outcome="cancelled"`. A return survives a controller restart: the mark
-on its pod records that it is a return, and a mark that claims a return with a
-receiver is rejected. A return is never handed to another model: if one turns
-short while a return is still releasing, the returned GPUs reach it through
-the idle fill once the replica is released.
-The controller logs `Utilization share: spare returned to the quota` (with
-`donor` and `gpus`) when it is released, and its `transfer started` line
-carries `returned` set to true.
+quota group's unassigned GPUs: a transfer with a donor and no receiver
+(`starts_total{kind="return"}`).
+
+- **When.** Only while the quota is contended: it cannot hold every model at its
+  peak need over the last `stabilization.flappingWindow` at once
+  (`wva_utilization_share_headroom_capped`). While no model's peak is known (a
+  new group, or after a restart that finds no stored need history, until a
+  window of history exists), each counts at its `maxReplicas`. A model is never
+  capped below what the other models' peaks leave of the quota, so a model that
+  bursts alone keeps its spare.
+- **Start.** Once the model has held the extra for
+  `stabilization.consecutiveCyclesBeforeMove` cycles in a row, while no model
+  that can grow is short of its need, and while its load would stay at or below
+  `stabilization.returnSpareWhenLoadAtMost`. Then all the extra goes in one
+  cycle. While more than `returnSpareWhenLoadAtMost` x `queueLengthThreshold`
+  requests wait on one of its pods for those cycles in a row, the return waits
+  for at most the model's scale-down window (`return-pod-busy`).
+- **Release.** It waits the model's scale-down window, as a scale-down does. Its
+  GPUs stay assigned until its pod is gone: no model is raised into them before
+  that, and the giving model is not raised by a fill meanwhile. It shows in
+  `wva_utilization_share_in_flight{state="releasing"}` until the pod is gone and
+  never reads as `filling` (there is no receiver). It ends in the cycle that sees
+  the release, counted as
+  `wva_utilization_share_transfers_total{outcome="done", urgent="false"}`, with
+  its release time in `wva_utilization_share_release_seconds`.
+- **Called off.** If the model's demand comes back inside the donor's scale-down
+  window (short of its target again, or busier than `returnSpareWhenLoadAtMost`
+  on what it keeps), the return is called off and counted `outcome="cancelled"`.
+- **Restarts.** A return survives one: the mark on its pod records that it is a
+  return, and a mark that claims a return with a receiver is rejected.
+- **Never handed over.** If another model turns short while a return is
+  releasing, the GPUs reach it through the idle fill once the replica is
+  released.
+- **Logs.** `Utilization share: spare returned to the quota` (with `donor` and
+  `gpus`) when released; the `transfer started` line carries `returned` set to
+  true.
 
 Transfers are also recorded as Kubernetes Events on the scale targets they move;
 see [Events](monitoring.md#events-on-the-models-scale-targets).
@@ -1064,7 +1183,7 @@ Every reason the controller sets:
 | reason | set by | means | do |
 | --- | --- | --- | --- |
 | `variant-floor` | scale-to-zero policy | scale-to-zero is on, but a variant has `minReplicaCount > 0`, so the model never parks | set every variant's `minReplicaCount` to 0, or turn scale-to-zero off for the model. Alert: `WVAModelWillNotScaleToZero` |
-| `policy-forbids-zero` | scale-to-zero policy | every variant allows 0, but the model's resolved policy disables scale-to-zero | enable `scaleToZero` on the `default` entry (or its `defaultPolicy` tier) or the model's per-model entry, or raise `minReplicaCount`. Alert: `WVAModelWillNotScaleToZero` |
+| `policy-forbids-zero` | scale-to-zero policy | every variant allows 0, but the model's resolved policy disables scale-to-zero | enable `scaleToZero` for every tier the model's variants name (the `default` entry or its `defaultPolicy` tier when they name none), or on the model's per-model entry, or raise `minReplicaCount`. Alert: `WVAModelWillNotScaleToZero` |
 | `engine-unsupported` | scale-to-zero policy | the model runs both vLLM and SGLang, so no single request counter measures idleness; it is not parked | run one engine per model. Not alerted on by design |
 | `activation-retention` | scale-to-zero policy | just woken from zero and held for its retention period | nothing; clears by itself |
 | `no-wake-signal` | scale-from-zero | EPP exports no flow-control queue metric at all, so a parked model cannot wake | enable the EPP `flowControl` feature gate and restart the EPP. Alert: `WVAModelHasNoWakeSignal` |
@@ -1130,10 +1249,10 @@ For the scale-to-zero reasons, see also
       "endpoint": "https",
       "exported_namespace": "llm-d-sim-dual",
       "instance": "10.244.2.55:8443",
-      "job": "workload-variant-autoscaler-metrics",
+      "job": "wva-controller-manager-metrics-service",
       "namespace": "workload-variant-autoscaler-system",
-      "pod": "workload-variant-autoscaler-controller-manager-6ddfbddf57-l5ptf",
-      "service": "workload-variant-autoscaler-metrics",
+      "pod": "wva-controller-manager-<hash>",
+      "service": "wva-controller-manager-metrics-service",
       "variant_name": "smoke-test-dual-shared-va"
     },
     "value": [
@@ -1161,10 +1280,10 @@ For the scale-to-zero reasons, see also
       "endpoint": "https",
       "exported_namespace": "llm-d-sim-dual",
       "instance": "10.244.2.55:8443",
-      "job": "workload-variant-autoscaler-metrics",
+      "job": "wva-controller-manager-metrics-service",
       "namespace": "workload-variant-autoscaler-system",
-      "pod": "workload-variant-autoscaler-controller-manager-6ddfbddf57-l5ptf",
-      "service": "workload-variant-autoscaler-metrics",
+      "pod": "wva-controller-manager-<hash>",
+      "service": "wva-controller-manager-metrics-service",
       "variant_name": "smoke-test-dual-shared-va"
     },
     "value": [
@@ -1192,10 +1311,10 @@ For the scale-to-zero reasons, see also
       "endpoint": "https",
       "exported_namespace": "llm-d-sim-dual",
       "instance": "10.244.2.55:8443",
-      "job": "workload-variant-autoscaler-metrics",
+      "job": "wva-controller-manager-metrics-service",
       "namespace": "workload-variant-autoscaler-system",
-      "pod": "workload-variant-autoscaler-controller-manager-6ddfbddf57-l5ptf",
-      "service": "workload-variant-autoscaler-metrics",
+      "pod": "wva-controller-manager-<hash>",
+      "service": "wva-controller-manager-metrics-service",
       "variant_name": "smoke-test-dual-shared-va"
     },
     "value": [
@@ -1250,10 +1369,10 @@ For the scale-to-zero reasons, see also
       "endpoint": "https",
       "error_type": "Failed to parse saturation scaling config entry",
       "instance": "10.244.2.55:8443",
-      "job": "workload-variant-autoscaler-metrics",
+      "job": "wva-controller-manager-metrics-service",
       "namespace": "workload-variant-autoscaler-system",
-      "pod": "workload-variant-autoscaler-controller-manager-6ddfbddf57-l5ptf",
-      "service": "workload-variant-autoscaler-metrics"
+      "pod": "wva-controller-manager-<hash>",
+      "service": "wva-controller-manager-metrics-service"
     },
     "value": [
       1778850096.639,
@@ -1261,6 +1380,81 @@ For the scale-to-zero reasons, see also
     ]
   }
   ```
+
+### Service rate
+
+What the saturation analyzer priced a variant's service rate on this cycle:
+the ITL(k) line, the point it is evaluated at, and the per-replica completion
+rate that comes out. They explain `wva_analyzer_target` and the throughput
+floor rather than drive anything: these are observations of arithmetic the
+analyzer already does, and none of them is a scaling input for KEDA or an HPA
+to threshold. All are set from one record per variant per cycle, beside
+`wva_analyzer_target`, and a series is deleted when its variant or model stops
+being analyzed, and on a cycle whose collection returned no replica rows (a
+model scaled to zero, or one whose pods are not scraped), so a parked fleet
+does not keep its last rate. A cycle whose metrics query or analysis fails
+deletes nothing: these series keep their last values, as `wva_analyzer_target`
+does, so during a Prometheus outage they show the last cycle that priced the
+model, not the current one.
+
+Labels are the ones `wva_analyzer_target` and `wva_engine_config` carry, so the
+three join directly. `namespace` is the **model's** namespace and arrives in
+Prometheus as `exported_namespace` (see the note on namespaces above), plus
+`controller_instance` when `CONTROLLER_INSTANCE` is set. Every value here is a
+variant-level reading; the `derived-mu` log line carries the same quantities
+per pod.
+
+### `wva_itl_line_slope`
+- **Type**: Gauge
+- **Description**: Slope A of the line ITL(k) = A*k + B a decode variant would derive its service rate from, in seconds per unit of KV utilization. Whether the derived rate is the one in use is `wva_service_rate_per_replica`'s `source`: an own measured window with enough readings wins over it. The line is the variant's own fit, or one borrowed from a sibling with the same engine configuration (only when `enableLearnedStateReuse` is on). Absent while the variant has no line, and while none of its replicas reports (a variant parked at zero keeps its window for up to 30 minutes, and publishes none of it).
+- **Labels**:
+  - `namespace`: the model's namespace (scraped as `exported_namespace`)
+  - `model_name`: model ID
+  - `variant_name`: variant name
+- **Use Case**: Watch the contention term a derived service rate rests on. The series does not say whose line it is: a slope that jumps can be the variant's own line refitted on different load, or the variant switching between its own line and a borrowed one. `wva_service_rate_per_replica{source="borrowed-line"}` tells the two apart while the borrowed line is the one in use.
+
+### `wva_itl_line_intercept`
+- **Type**: Gauge
+- **Description**: Intercept B of the same line, in seconds: the inter-token latency the line predicts at an empty cache. It is not always a fitted hardware floor: when the readings span too little of k for a free fit, the intercept is pinned to a learned or default value and only the slope is fitted, and a free fit on noisy readings can put it below zero. Present and absent with `wva_itl_line_slope`.
+- **Labels**: as `wva_itl_line_slope`
+- **Use Case**: Compare a variant's floor across accelerators; an intercept far from the card's usual figure is a fit on too narrow a range of k.
+
+### `wva_itl_seconds_at_pricing_k`
+- **Type**: Gauge
+- **Description**: The line evaluated at `wva_pricing_k`, in seconds: the inter-token latency a derived service rate would be priced at. Present and absent with `wva_itl_line_slope`. A line that is zero or negative at the pricing k cannot derive a rate, and none of the three line series is published for it; `wva_itl_line_samples` still is.
+- **Labels**: as `wva_itl_line_slope`
+- **Use Case**: Compare against the ITL the engines report under load. A priced ITL well below the observed one means the derived rate over-states what a replica completes.
+
+### `wva_itl_line_samples`
+- **Type**: Gauge
+- **Description**: How many (k, ITL) readings a decode variant's **own** ITL window holds, published while it has no line too, zero included, and absent while none of its replicas reports. A line needs enough readings spread far enough apart in k; a variant priced on a borrowed line still reports its own count here.
+- **Labels**: as `wva_itl_line_slope`
+- **Use Case**: Explain an absent line. A fleet with no line produces no derived service rate, and the reason is almost always this count or the spread of k rather than anything wrong. A fresh fleet takes about 28 cycles from load start to fit.
+- **Example**: serving decode variants with no usable line this cycle, their own or a borrowed one:
+  ```promql
+  wva_itl_line_samples unless on (exported_namespace, model_name, variant_name) wva_itl_line_slope
+  ```
+
+### `wva_service_rate_per_replica`
+- **Type**: Gauge
+- **Description**: The saturated completion rate one replica of a variant is priced at, in requests per second: the median over the variant's own replicas that have one, never a warm pool bridge. One series per variant; `source` names the path that answered for the median replica. With an even replica count the rate averages the central pair, and `source` is the lower reading's, so a variant with one `measured` and one `derived` reading publishes a rate between the two, labelled with the source of the lower. Absent while no replica has a rate.
+- **Labels**:
+  - `namespace`, `model_name`, `variant_name`: as `wva_itl_line_slope`
+  - `role`: `prefill`, `decode` or `both`
+  - `source`: `derived` (from the variant's own ITL line at the pricing k), `borrowed-line` (the same, from a line a sibling with the same engine configuration fitted), `measured` (the variant's own saturated window for the output length being served) or `neighbour` (a neighbouring output-length bucket's window, used until the served bucket has its own). The throughput floor may hold a fleet on a `borrowed-line` or `neighbour` rate but not grow one -- nor on a `measured` window with too few readings, which the floor's `heldWhy=single-sample` reports
+- **Use Case**: What one replica of the variant is priced to complete at saturation. It is the variant's own figure, not the floor's divisor: the floor works per role, takes the median over the role's replicas that read their own bucket (dropping neighbour and borrowed-line readings whenever one does), and adds the backlog. On a role with one variant and readings of one kind the two agree. A `source` that stays `neighbour` after a shape change means the fleet has not yet measured itself under the new shape.
+- **Example**: variants priced on a neighbouring bucket's reading, and for how long:
+  ```promql
+  wva_service_rate_per_replica{source="neighbour"}
+  ```
+
+### `wva_pricing_k`
+- **Type**: Gauge
+- **Description**: The KV utilization an ITL line is evaluated at to derive a decode replica's service rate, published for every model the saturation analyzer runs on, including those with no decode role: `kvCacheThreshold` x `scaleUpThreshold`, clamped to the range a line is fitted over. Composed, so 0.68 with the shipped defaults, not the 0.85 that `k_sat` suggests.
+- **Labels**:
+  - `namespace`: the model's namespace (scraped as `exported_namespace`)
+  - `model_name`: model ID
+- **Use Case**: Settle which utilization the autoscaler targets when pricing a replica, without recomputing it from configuration.
 
 ## Example Queries
 
@@ -1395,22 +1589,26 @@ controller's namespace. They are off by default.
 
 ### The shipped alerts
 
-T = troubleshooting runbook on [Troubleshooting](troubleshooting.md).
+T = troubleshooting runbook on [Troubleshooting](troubleshooting.md). Each alert
+also carries its runbook link in a `runbook_url` annotation, so Alertmanager
+notifications link to it.
 
 | alert | severity | for | fires when | what to do | runbook |
 | --- | --- | --- | --- | --- | --- |
 | `WVANodeAccessDenied` | critical | 2m | a `gpu-inventory` limiter is configured and the controller may not list nodes. **No variant scales up.** | grant the controller's ServiceAccount get/list/watch on nodes (cluster admin: `make enable-physical-limiter` grants every controller it finds and verifies when it runs; re-run it after a new install), or remove the limiter | [T: controller not Ready](troubleshooting.md#the-controller-is-not-ready-or-crash-looping) |
 | `WVAModelParkedWhileRequestsRefused` | critical | 5m | a model has 0 replicas and EPP returns `ServiceUnavailable` for it: traffic is being dropped | read `wva_model_scaling_blocked` for the model first | [T: will not wake](troubleshooting.md#a-model-will-not-wake-from-zero) |
 | `WVAModelHasNoWakeSignal` | warning | 10m | blocked reason `no-wake-signal`: EPP exports no flow-control queue, so a parked model cannot wake | enable the EPP `flowControl` feature gate, then restart the EPP Deployment (it reads its config once at start) | [T: will not wake](troubleshooting.md#a-model-will-not-wake-from-zero) |
+| `WVAScalerTargetsUndecided` | warning | 10m | `wva_scaler_undecided_targets` above 0 in a namespace: the scaler answers those ScaledObjects their current count, so their replica counts are frozen | `wva_scaler_undecided_answers_total` says why; the log line `external scaler has no decision for this target` names each one | [T: ScaledObject](troubleshooting.md#scaledobject-ready-false-or-targets-unknown) |
 | `WVAHighErrorRate` | warning | 5m | `wva_errors_total` above 6/min for one `component`/`error_type` | grep the controller log for the `error_type` text | [Logs](monitoring.md#the-logs) |
 | `WVAMetricsCollectionFailing` | warning | 5m | `wva_metrics_collection_errors_total` above 5/min for one `query_type`/`reason`: decisions run on stale data | check Prometheus reachability and the controller's Prometheus settings | [T: metrics stale](troubleshooting.md#metrics-stale-or-missing) |
-| `WVAGPUResourceExhausted` | warning | 5m | GPU-labeled nodes report zero allocatable GPUs of a type. Only with a `gpu-inventory` limiter | check GPU node status and device-plugin pods. No alert does not mean GPUs are free: the metric exists only with that limiter | [T: GPUs held](troubleshooting.md#gpus-held-or-quota-spent) |
+| `WVAPolicyNamespaceUnverified` | warning | 10m | the controller may not read Namespaces, so it cannot tell whether an admin published cluster policy for it. It runs on its own ConfigMap, which may be weaker than the admin intends | (cluster admin) `NAMESPACE=<ns> make setup-prereqs`, then restart the controller: the value is set once at startup | [T: policy namespace unverified](troubleshooting.md#cluster-policy-is-not-applied-policy-namespace-unverified) |
+| `WVAGPUResourceExhausted` | warning | 5m | GPU-labeled nodes report zero allocatable GPUs of a type. Only with a `gpu-inventory` limiter | (cluster admin) check the nodes' allocatable GPUs and the device-plugin pods. No alert does not mean GPUs are free: the metric exists only with that limiter | [T: GPUs held](troubleshooting.md#gpus-held-or-quota-spent) |
 | `WVAReplicaScalingThrashing` | warning | 10m | more than 2 cycles per minute for one variant whose decision was not `no-change`. The counter rises on every such cycle, so it fires on flapping **and** on a scale-up the workload never catches up with: actuation stuck, Pods Pending, slow replica starts | read the model's `scaling-decision` lines: `tgt` alternating is flapping; `tgt` steady above `curr` is actuation not landing | [T: flapping](troubleshooting.md#a-model-is-flapping), [T: actuation stuck](troubleshooting.md#desired-is-not-current-actuation-stuck) |
 | `WVAModelWillNotScaleToZero` | info | 15m | blocked reason `variant-floor` or `policy-forbids-zero`: the configuration asks to park and forbids it | make the two halves agree | [will not park](../guides/scale-to-zero/README.md#when-a-model-will-not-park) |
 | `WVAOptimizationLoopStalled` | info | 15m | `wva_models_processed` is 0 or absent for 10 minutes | expected when no ScaledObject names this scaler. Otherwise check the controller pod, its log and Prometheus | [T: controller not Ready](troubleshooting.md#the-controller-is-not-ready-or-crash-looping) |
 
-There is deliberately no alert on `engine-unsupported`: it is a standing property
-of a model, not an event, and would never clear.
+There is no alert on `engine-unsupported` on purpose: it is a standing property
+of a model and would never clear.
 
 ### Installing the alerts
 
@@ -1421,15 +1619,17 @@ the `prometheus-alerts` component to the overlay it renders:
 DEPLOY_ALERTING_RULES=true make deploy-wva NAMESPACE=<namespace>
 ```
 
-Re-running the install with `DEPLOY_ALERTING_RULES=false` (the default) deletes
-an existing `controller-manager-alerts`. So set it on **every** later install
-and upgrade, or the alerts disappear.
+Set it on **every** later install and upgrade: a re-run with
+`DEPLOY_ALERTING_RULES=false` (the default) deletes `controller-manager-alerts`.
 
-Prerequisites: the `PrometheusRule` CRD (Prometheus Operator), rights to create
-a PrometheusRule in the controller's namespace, and a Prometheus that selects
-it. The rule carries `release: kube-prometheus-stack`; a Prometheus with a
-different `ruleSelector` or `ruleNamespaceSelector` will not load it. On
-OpenShift, user-workload monitoring loads PrometheusRules from user namespaces.
+Prerequisites:
+
+- the `PrometheusRule` CRD (Prometheus Operator);
+- rights to create a PrometheusRule in the controller's namespace;
+- a Prometheus that selects it. The rule carries `release:
+  kube-prometheus-stack`; a different `ruleSelector` or `ruleNamespaceSelector`
+  will not load it. On OpenShift, user-workload monitoring loads
+  PrometheusRules from user namespaces.
 
 To apply the rule by hand into an existing install instead:
 
@@ -1460,8 +1660,8 @@ curl -s http://localhost:9090/api/v1/alerts | jq '.data.alerts[] | select(.label
 
 ### Consider adding
 
-These are **not shipped**. They cover silent failures the shipped rules miss.
-Tune the `for:` to your cycle and start times.
+These are **not shipped**. They catch silent failures the shipped rules miss.
+Tune each `for:` to your cycle and start times.
 
 ```promql
 # Requests queue for a model the scaling manager cannot see (for: 5m).
@@ -1486,7 +1686,14 @@ wva_desired_replicas != wva_current_replicas
 
 ### Alerting Rules E2E Test
 
-E2E tests for the rules are in `test/e2e/prometheus_alerts_test.go`. They check
-that the PrometheusRule is created, that every expected rule is defined and well
-formed, and that the expressions reference only known metrics. `make test-e2e-smoke-with-setup` installs the rules and runs them; see
-[Testing](../developer-guide/testing.md).
+Two layers test the rules, and both read the alert list from
+`config/components/prometheus-alerts/prometheusrule.yaml`, so a new alert needs no
+test edit:
+
+- `test/alerts` (run by `make test`, no cluster) checks that every expression names
+  only metrics the controller defines, or a short list of EPP metrics.
+- `test/e2e/prometheus_alerts_test.go` checks the rule **as deployed**: it exists,
+  holds exactly the alerts in the manifest, each is well formed, and, when
+  Prometheus is reachable, every rule is loaded and healthy. It runs only with
+  `DEPLOY_ALERTING_RULES=true`; `make test-e2e-smoke-with-setup` sets that up. See
+  [Testing](../developer-guide/testing.md).

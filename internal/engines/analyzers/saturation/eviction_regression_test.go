@@ -45,7 +45,7 @@ var _ = Describe("what the per-cycle sweep must not change", func() {
 		// this comment asserted the general rule. k1 is the bound that holds.
 		const historyKey = "hist-key"
 		k2From := func(a *SaturationAnalyzer) (int64, capacity.K2Source) {
-			k2, src, _ := a.computeK2(historyKey, model, ns, variant,
+			k2, src, _, _ := a.computeK2(historyKey, model, ns, variant,
 				0,     // queueLen: not saturated, so Priority 1 cannot fire
 				0,     // tokensInUse
 				600,   // avgOutput
@@ -54,7 +54,7 @@ var _ = Describe("what the per-cycle sweep must not change", func() {
 				nil,   // engineParams: nil so Priority 3 has nothing but the k1 fallback
 				90000, // k1
 				90000, // kvCeiling
-				domain.RoleDecode, false, logr.Discard())
+				domain.RoleDecode, false, admission{}, logr.Discard())
 			return k2, src
 		}
 
@@ -130,12 +130,12 @@ var _ = Describe("what the per-cycle sweep must not change", func() {
 			// max_num_seqs=16 binds hard: derived is 16*(1000+3000) = 64,000,
 			// below the 95,000 on record.
 			params := &capacity.EngineParams{EffectiveMaxBatchedTokens: 8192, MaxNumSeqs: 16}
-			k2, src, _ := a.computeK2(historyKey, model, ns, variant,
+			k2, src, _, _ := a.computeK2(historyKey, model, ns, variant,
 				0, 0, 6000, 1000, 10,
 				params,
 				919859, // k1: large, so it clamps neither figure
 				919859,
-				domain.RoleDecode, false, logr.Discard())
+				domain.RoleDecode, false, admission{}, logr.Discard())
 
 			Expect(src).To(Equal(capacity.K2SrcHistorical))
 			Expect(k2).To(BeNumerically("==", 95000),
@@ -146,9 +146,9 @@ var _ = Describe("what the per-cycle sweep must not change", func() {
 			// And the figure it displaced, to pin the direction rather than
 			// assert it: the same call with no history reaches Priority 3.
 			fresh := NewSaturationAnalyzer(capacity.NewStore())
-			derived, derivedSrc, _ := fresh.computeK2(historyKey, model, ns, variant,
+			derived, derivedSrc, _, _ := fresh.computeK2(historyKey, model, ns, variant,
 				0, 0, 6000, 1000, 10, params, 919859, 919859,
-				domain.RoleDecode, false, logr.Discard())
+				domain.RoleDecode, false, admission{}, logr.Discard())
 			Expect(derivedSrc).To(Equal(capacity.K2SrcDerived))
 			Expect(derived).To(BeNumerically("<", k2),
 				"derived below measured is what makes the general claim false")

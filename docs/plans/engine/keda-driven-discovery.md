@@ -164,6 +164,11 @@ exactly the state WVA is already in before its first optimization cycle:
 `GetMetrics` returns 0 and HPA holds the target at `minReplicaCount`. No new
 failure mode, and no persistence needed.
 
+> **Changed since:** `GetMetrics` no longer returns 0 before the first decision;
+> it answers the target's current replica count from the `scale` subresource,
+> so the HPA holds the target where it is. See
+> [before the first decision](../../reference/scaledobject-trigger.md#before-the-first-decision-and-the-fallback).
+
 ## Consequence: the Prometheus-trigger delivery mode is gone
 
 WVA could be delivered two ways: KEDA calls WVA's external scaler over gRPC, or

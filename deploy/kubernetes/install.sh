@@ -19,7 +19,6 @@ PROMETHEUS_PORT="9090"
 PROMETHEUS_URL=${PROMETHEUS_URL:-"$PROMETHEUS_BASE_URL:$PROMETHEUS_PORT"}
 DEPLOY_PROMETHEUS=${DEPLOY_PROMETHEUS:-"true"}
 DEPLOY_OPERATIONAL_DASHBOARD=${DEPLOY_OPERATIONAL_DASHBOARD:-"true"}
-SKIP_TLS_VERIFY=${SKIP_TLS_VERIFY:-"true"}
 
 check_specific_prerequisites() {
     log_info "No Kubernetes-specific prerequisites needed other than common prerequisites"

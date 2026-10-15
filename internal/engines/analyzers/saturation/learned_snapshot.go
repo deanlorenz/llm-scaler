@@ -3,9 +3,11 @@ package saturation
 import (
 	"maps"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/capacity"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/signals/itl"
 )
@@ -19,13 +21,30 @@ import (
 // and the horizons are applied to them on the way in, exactly as the sweep
 // would have applied them had the controller not stopped.
 //
-// A PER-VARIANT ENTRY IS INSTALLED ONLY UNDER THE ENGINE CONFIGURATION IT WAS
+// A PER-VARIANT ENTRY IS INSTALLED ONLY UNDER THE ENGINE ARGUMENTS IT WAS
 // LEARNED UNDER. The configuration a variant runs is known only once its scale
 // target has been read, which happens per cycle in the engine, so restored
 // per-variant entries wait as pending and are installed, or rejected, the first
 // time Analyze sees their variant (installRestored). An entry whose variant
 // cannot be named from its key, or whose variant had no configuration when it
 // was written, cannot be checked and is not restored.
+//
+// Three outcomes, by how much of the configuration still holds:
+//
+//   - the whole configuration, image included: everything is installed;
+//   - the arguments but not the image (a rollout of a new release while the
+//     controller was down): the capacity, throughput and start-time figures
+//     are installed, as a live record keeps them across a routine image bump,
+//     and the per-variant ITL baseline is not -- latency is the engine's code;
+//   - neither: nothing is installed but the old k2, and that only as a PRIOR:
+//     lower-only and expiring, as a sibling's k2 is borrowed (k2_borrow.go).
+//     A figure measured under other arguments may only make the variant more
+//     conservative, and for a bounded time. A prior is itself exported, with
+//     its borrow clock, so a second restart inside its life keeps it rather
+//     than dropping the variant to its own figure at once.
+//
+// A document written before the arguments were recorded (no Args entry) gets
+// the old rule: the whole configuration or nothing.
 //
 // "The configuration" means one this controller read COMPLETELY. A flag it
 // could not resolve -- `--max-num-seqs $VLLM_MAX_NUM_SEQS` from an envFrom --
@@ -34,6 +53,14 @@ import (
 // sequences installed on a 64-sequence engine prices it too high. Such a
 // variant's state is neither recorded nor installed (engineFingerprint makes
 // the same call for sharing).
+//
+// The tag is the configuration the variant runs at export, not the one each
+// figure was learned under. The capacity record follows a rollout, so k2 and
+// throughput entries learned before it go out under the new fingerprint. That
+// is deliberate: those keys carry no fingerprint, so the running process goes
+// on using the same mixed history after the rollout, and a restore gives what
+// not restarting would have given. A rollout made while the controller was
+// down is the case the check exists for.
 //
 // Pending entries are exported until they are installed or rejected. The first
 // write after a restart happens a minute in, and a variant that has not been
@@ -59,9 +86,15 @@ type LearnedState struct {
 	Accelerators    map[string]AcceleratorSnapshot `json:"accelerators,omitempty"`
 	ITLLines        map[string]LineSnapshot        `json:"itlLines,omitempty"`
 	K2BorrowedSince map[string]time.Time           `json:"k2BorrowedSince,omitempty"`
+	// PriorK2 is the priors (priorK2) still alive, keyed by the variant's own
+	// k2 key. Their clocks are in K2BorrowedSince, once they have been used.
+	PriorK2 map[string]PriorK2Snapshot `json:"priorK2,omitempty"`
 	// Config is the engine-configuration fingerprint each variant ran when
 	// this was exported, keyed namespace/variant.
 	Config map[string]string `json:"config,omitempty"`
+	// Args is the same configuration without the image
+	// (EngineParams.ArgsFingerprint), keyed alike.
+	Args map[string]string `json:"args,omitempty"`
 }
 
 // ThroughputSnapshot is a saturated-throughput window with the two side
@@ -70,6 +103,13 @@ type ThroughputSnapshot struct {
 	capacity.RollingAverageSnapshot
 	SampledAt time.Time `json:"sampledAt"`
 	LastRead  float64   `json:"lastRead"`
+}
+
+// PriorK2Snapshot is a prior k2 as exported: the figure and when it was
+// installed.
+type PriorK2Snapshot struct {
+	K2          int64     `json:"k2"`
+	InstalledAt time.Time `json:"installedAt"`
 }
 
 // AcceleratorSnapshot is the last accelerator that resolved for a variant.
@@ -124,19 +164,94 @@ func windowClocks(w capacity.RollingAverageSnapshot, now time.Time) (capacity.Ro
 	return w, ok1 && ok2
 }
 
+// RestoreOutcome is which of installRestored's rules a variant's entries
+// met.
+type RestoreOutcome string
+
+const (
+	// RestoredWhole: the whole configuration matched; everything installed.
+	RestoredWhole RestoreOutcome = "whole"
+	// RestoredArgs: the arguments matched on another image; everything but
+	// the ITL baseline installed.
+	RestoredArgs RestoreOutcome = "args"
+	// RestoredPrior: the arguments differed; the old k2 kept as priors
+	// (possibly none, when no window was recent enough or none can be read
+	// on the hardware the variant runs now).
+	RestoredPrior RestoreOutcome = "prior"
+	// RestoredIncomplete: the configuration the variant runs now was not read
+	// completely, so nothing could be checked against it.
+	RestoredIncomplete RestoreOutcome = "incomplete"
+	// RestoredDiffers: a document from before the arguments were recorded,
+	// whose whole configuration differs.
+	RestoredDiffers RestoreOutcome = "differs"
+)
+
 // RestoredVariant is what installRestored did with one variant's entries.
 type RestoredVariant struct {
 	Namespace, Variant string
-	// Installed is false when the configuration differed.
+	// Outcome is the rule the entries met; the fields below are its detail.
+	Outcome RestoreOutcome
+	// Installed is false when the arguments differed.
 	Installed bool
+	// ImageChanged is true when they were installed under the same arguments
+	// on another image, so the ITL baseline was left out.
+	ImageChanged bool
+	// Priors is how many k2 windows were kept as lower-only priors when the
+	// arguments differed.
+	Priors int
 	// Entries is how many entries were installed, or rejected.
 	Entries int
 }
 
+// priorK2 is a k2 measured under the arguments a variant ran before the ones
+// it runs now, kept after a restart as a lower-only, expiring prior: borrowedK2
+// takes it as it takes a sibling's figure.
+type priorK2 struct {
+	k2          int64
+	installedAt time.Time
+}
+
+// PriorK2Life is how long a prior k2 is kept once it is first used: the
+// borrow's hold and relaxation, on the borrow clock (k2BorrowedSince), after
+// which it could not be used anyway. A prior never used is kept a bucket
+// retention from when it was installed, as the window it came from would have
+// been: a bucket the variant reaches hours after a restart still holds and
+// relaxes from it, instead of losing it part way through the relaxation.
+const PriorK2Life = BorrowedK2Hold + BorrowedK2Relax
+
+// priorExpired says whether a prior can no longer be used: past its life on
+// its borrow clock once used, or past the bucket retention since it was
+// installed when not.
+func priorExpired(p priorK2, since time.Time, used bool, now time.Time, retention time.Duration) bool {
+	if used {
+		return now.Sub(since) > PriorK2Life
+	}
+	return now.Sub(p.installedAt) > retention
+}
+
+// priorKeyRuns says whether a k2 key can be read by the variant on the
+// hardware its record names now. A key filed under another accelerator or GPU
+// count is never looked up again, so keeping it as a prior keeps nothing; an
+// unknown on either side is not a difference.
+func priorKeyRuns(key string, rec *capacity.Record) bool {
+	f := strings.Split(key, "|")
+	if len(f) < 5 {
+		return false
+	}
+	if constants.IsAcceleratorResolved(f[3]) && constants.IsAcceleratorResolved(rec.AcceleratorName) && f[3] != rec.AcceleratorName {
+		return false
+	}
+	if g, err := strconv.Atoi(f[4]); err == nil && g > 0 && rec.GpuCount > 0 && g != rec.GpuCount {
+		return false
+	}
+	return true
+}
+
 // pendingVariant is one variant's restored entries awaiting the check.
 type pendingVariant struct {
-	expect string // the fingerprint they were learned under
-	state  LearnedState
+	expect     string // the fingerprint they were learned under
+	expectArgs string // the same without the image; empty in an older document
+	state      LearnedState
 }
 
 // alive says whether any of the entries could still be installed: one within
@@ -173,6 +288,11 @@ func (p *pendingVariant) alive(now, wall time.Time, h capacity.Horizons) bool {
 			return true
 		}
 	}
+	for _, p := range s.PriorK2 {
+		if within(p.InstalledAt, now, h.BucketRetention) {
+			return true
+		}
+	}
 	return false
 }
 
@@ -196,7 +316,8 @@ func within(t, ref time.Time, horizon time.Duration) bool {
 
 func (p *pendingVariant) size() int {
 	s := p.state
-	return len(s.K2) + len(s.Throughput) + len(s.VariantSeenAt) + len(s.K2BorrowedSince) + len(s.Accelerators)
+	return len(s.K2) + len(s.Throughput) + len(s.VariantSeenAt) + len(s.K2BorrowedSince) + len(s.Accelerators) +
+		len(s.PriorK2)
 }
 
 // variantOfKey names the variant (namespace/variant) and model a learned-state
@@ -237,7 +358,9 @@ func (a *SaturationAnalyzer) ExportLearnedState() LearnedState {
 		Accelerators:    make(map[string]AcceleratorSnapshot, len(a.lastAccelerator)),
 		ITLLines:        make(map[string]LineSnapshot, len(a.itlLines)),
 		K2BorrowedSince: make(map[string]time.Time, len(a.k2BorrowedSince)),
+		PriorK2:         make(map[string]PriorK2Snapshot, len(a.priorK2)),
 		Config:          map[string]string{},
+		Args:            map[string]string{},
 	}
 	for k, ra := range a.computeCapacityHistory {
 		s.K2[k] = ra.Snapshot()
@@ -267,6 +390,9 @@ func (a *SaturationAnalyzer) ExportLearnedState() LearnedState {
 	for k, v := range a.k2BorrowedSince {
 		s.K2BorrowedSince[k] = v
 	}
+	for k, p := range a.priorK2 {
+		s.PriorK2[k] = PriorK2Snapshot{K2: p.k2, InstalledAt: p.installedAt}
+	}
 	a.mu.Unlock()
 
 	// The configuration each variant runs, read outside a.mu: the store has
@@ -287,10 +413,14 @@ func (a *SaturationAnalyzer) ExportLearnedState() LearnedState {
 	for k := range s.VariantSeenAt {
 		note(k)
 	}
+	for k := range s.PriorK2 {
+		note(k)
+	}
 	for v, m := range models {
 		ns, name, _ := strings.Cut(v, "/")
 		if rec := a.capacityStore.Get(ns, m, name); rec != nil && rec.EngineParams.Complete() {
 			s.Config[v] = rec.EngineParams.Fingerprint()
+			s.Args[v] = rec.EngineParams.ArgsFingerprint()
 		}
 	}
 
@@ -313,12 +443,18 @@ func (a *SaturationAnalyzer) ExportLearnedState() LearnedState {
 			dropVariant(&s, v)
 		}
 		s.Config[v] = p.expect
+		if p.expectArgs != "" {
+			s.Args[v] = p.expectArgs
+		} else {
+			delete(s.Args, v)
+		}
 		mergeAbsent(s.K2, p.state.K2)
 		mergeAbsent(s.Throughput, p.state.Throughput)
 		mergeAbsent(s.VariantSeenAt, p.state.VariantSeenAt)
 		mergeAbsent(s.ITLBaseline, p.state.ITLBaseline)
 		mergeAbsent(s.StartSeconds, p.state.StartSeconds)
 		mergeAbsent(s.K2BorrowedSince, p.state.K2BorrowedSince)
+		mergeAbsent(s.PriorK2, p.state.PriorK2)
 		mergeAbsent(s.Accelerators, p.state.Accelerators)
 	}
 	return s
@@ -333,6 +469,7 @@ func dropVariant(s *LearnedState, v string) {
 	maps.DeleteFunc(s.ITLBaseline, func(k string, _ float64) bool { return of(k) })
 	maps.DeleteFunc(s.StartSeconds, func(k string, _ float64) bool { return of(k) })
 	maps.DeleteFunc(s.K2BorrowedSince, func(k string, _ time.Time) bool { return of(k) })
+	maps.DeleteFunc(s.PriorK2, func(k string, _ PriorK2Snapshot) bool { return of(k) })
 	delete(s.Accelerators, v)
 }
 
@@ -383,7 +520,7 @@ func (a *SaturationAnalyzer) RestoreLearnedState(s LearnedState) RestoreReport {
 		}
 		p := a.pendingRestore[v]
 		if p == nil {
-			p = &pendingVariant{expect: expect}
+			p = &pendingVariant{expect: expect, expectArgs: s.Args[v]}
 			a.pendingRestore[v] = p
 		}
 		return p
@@ -446,6 +583,14 @@ func (a *SaturationAnalyzer) RestoreLearnedState(s LearnedState) RestoreReport {
 			p.state.K2BorrowedSince[k] = since
 		}
 	}
+	for k, prior := range s.PriorK2 {
+		if p := pending(k); p != nil {
+			if p.state.PriorK2 == nil {
+				p.state.PriorK2 = map[string]PriorK2Snapshot{}
+			}
+			p.state.PriorK2[k] = prior
+		}
+	}
 	for v, p := range a.pendingRestore {
 		if !p.alive(now, time.Now(), a.horizons) {
 			rep.Aged += p.size()
@@ -474,26 +619,72 @@ func (a *SaturationAnalyzer) installRestored(namespace, modelID, variant string)
 		return RestoredVariant{}, false
 	}
 	// A configuration not read completely does not match, even an equal
-	// fingerprint: see the package comment.
-	match := rec.EngineParams.Complete() && rec.EngineParams.Fingerprint() == p.expect
+	// fingerprint: see the package comment. Nor does it take a prior: a
+	// figure is only known to come from OTHER arguments when both sides were
+	// read.
+	complete := rec.EngineParams.Complete()
+	whole := complete && rec.EngineParams.Fingerprint() == p.expect
+	args := complete && !whole && p.expectArgs != "" && rec.EngineParams.ArgsFingerprint() == p.expectArgs
+	prior := complete && !whole && !args && p.expectArgs != ""
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	delete(a.pendingRestore, key)
 	out := RestoredVariant{Namespace: namespace, Variant: variant, Entries: p.size()}
-	if !match {
-		return out, true
+	switch {
+	case whole:
+		out.Outcome, out.Installed = RestoredWhole, true
+		out.Entries = a.installLocked(p.state, true)
+	case args:
+		out.Outcome, out.Installed, out.ImageChanged = RestoredArgs, true, true
+		out.Entries = a.installLocked(p.state, false)
+	case prior:
+		out.Outcome = RestoredPrior
+		out.Priors = a.installPriorsLocked(p.state.K2, rec)
+	case !complete:
+		out.Outcome = RestoredIncomplete
+	default:
+		out.Outcome = RestoredDiffers
 	}
-	out.Installed = true
-	out.Entries = a.installLocked(p.state)
 	return out, true
+}
+
+// installPriorsLocked keeps each restored k2 window within the bucket
+// retention as a prior for its key, unless the key already has a window of its
+// own or is filed under hardware the variant no longer runs on (rec). Priors
+// from arguments older still are not carried: a prior's own clock is not
+// installed on this path, so it would hold at full strength again. Callers
+// hold a.mu.
+func (a *SaturationAnalyzer) installPriorsLocked(k2 map[string]capacity.RollingAverageSnapshot, rec *capacity.Record) int {
+	if a.priorK2 == nil {
+		a.priorK2 = map[string]priorK2{}
+	}
+	wall := time.Now()
+	kept := 0
+	for k, w := range k2 {
+		w, inTime := windowClocks(w, wall)
+		if _, live := a.computeCapacityHistory[k]; live || !inTime || wall.Sub(w.LastUsed) > a.horizons.BucketRetention ||
+			!priorKeyRuns(k, rec) {
+			continue
+		}
+		ra, ok := capacity.RestoreRollingAverage(w, capacity.RollingAverageWindowSize)
+		if !ok || ra.Len() == 0 {
+			continue
+		}
+		if v := int64(ra.Average()); v > 0 {
+			a.priorK2[k] = priorK2{k2: v, installedAt: a.now()}
+			kept++
+		}
+	}
+	return kept
 }
 
 // installLocked applies the horizons to a checked variant's entries, keeps
 // what is still within them and returns how many it kept. Callers hold a.mu.
 // The windows and the memo age on the wall clock, as they do live; the rest on
-// the analyzer's.
-func (a *SaturationAnalyzer) installLocked(s LearnedState) int {
+// the analyzer's. latency is false when the image changed: the ITL baseline,
+// a latency figure, is then left out.
+func (a *SaturationAnalyzer) installLocked(s LearnedState, latency bool) int {
 	now := a.now()
 	wall := time.Now()
 	h := a.horizons
@@ -541,7 +732,7 @@ func (a *SaturationAnalyzer) installLocked(s LearnedState) int {
 		}
 		a.variantSeenAt[k] = seen
 		kept++
-		if b, ok := s.ITLBaseline[k]; ok && finitePositive(b) {
+		if b, ok := s.ITLBaseline[k]; ok && latency && finitePositive(b) {
 			if _, have := a.itlBaseline[k]; !have {
 				a.itlBaseline[k] = b
 			}
@@ -559,6 +750,28 @@ func (a *SaturationAnalyzer) installLocked(s LearnedState) int {
 			continue
 		}
 		a.k2BorrowedSince[k] = since
+		kept++
+	}
+	// Priors installed after a previous restart, under these same arguments:
+	// their clocks were installed just above, so one already in use resumes
+	// its relaxation where it was. Kept on their own clocks, as the sweep
+	// would have kept them.
+	if len(s.PriorK2) > 0 && a.priorK2 == nil {
+		a.priorK2 = map[string]priorK2{}
+	}
+	for k, sp := range s.PriorK2 {
+		installedAt, inTime := notFuture(sp.InstalledAt, now)
+		_, live := a.computeCapacityHistory[k]
+		_, have := a.priorK2[k]
+		if live || have || sp.K2 <= 0 || sp.InstalledAt.IsZero() || !inTime {
+			continue
+		}
+		p := priorK2{k2: sp.K2, installedAt: installedAt}
+		since, used := a.k2BorrowedSince[k]
+		if priorExpired(p, since, used, now, h.BucketRetention) {
+			continue
+		}
+		a.priorK2[k] = p
 		kept++
 	}
 	return kept
@@ -615,5 +828,6 @@ func (a *SaturationAnalyzer) ForgetLearnedState() {
 	clear(a.lastAccelerator)
 	clear(a.itlLines)
 	clear(a.k2BorrowedSince)
+	clear(a.priorK2)
 	clear(a.pendingRestore)
 }

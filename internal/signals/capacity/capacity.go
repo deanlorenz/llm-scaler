@@ -25,11 +25,18 @@ const (
 	// it is checked after P3/P4 have produced the variant's own figure, and
 	// can only lower it. Numbered last so the others keep their values.
 	K2SrcBorrowed
+	// K2SrcUnadmitted is a saturated reading from a row that may not write
+	// the variant's k2 -- a warm-pool bridge, or a Pod that is not Ready --
+	// used to price that row for the cycle it was read in, and only where it
+	// is LOWER than what the chain gave. Never recorded: not in the window,
+	// not in the capacity store, and no saturated throughput is learned from
+	// it.
+	K2SrcUnadmitted
 )
 
 // String is the log label of a K2Source; the labels are what the k2 decision
 // log line and the analyzer result's Reason carry. Empty for a source that is
-// none of the five.
+// none of the six.
 func (s K2Source) String() string {
 	switch s {
 	case K2SrcObserved:
@@ -42,6 +49,8 @@ func (s K2Source) String() string {
 		return "P4-k1"
 	case K2SrcBorrowed:
 		return "P2-borrow"
+	case K2SrcUnadmitted:
+		return "P1-obs-unadmitted"
 	}
 	return ""
 }

@@ -1,11 +1,10 @@
 # ScaledObject trigger metadata
 
-A model is registered with the scaling manager by a KEDA `ScaledObject` whose
-trigger is `type: external-push` and points at the scaling manager's external
-scaler. KEDA hands the trigger's `metadata` map to the scaling manager on every
-call, so the keys on this page are the whole per-workload configuration
-surface: there are no annotations to set and nothing else is read from the
-ScaledObject or the workload for these values.
+A model is registered with the scaling manager by a KEDA `ScaledObject` with a
+`type: external-push` trigger that points at the scaling manager's external
+scaler. KEDA passes the trigger's `metadata` map on every call. The keys on this
+page are the whole per-workload configuration: there are no annotations, and
+nothing else on the ScaledObject or the workload is read for these values.
 
 The keys are parsed in `internal/registry/scalermeta.go`. KEDA metadata is a map
 of strings, so quote every value (`"10.0"`, `"6000"`).
@@ -46,6 +45,7 @@ spec:
   triggers:
     - type: external-push
       name: wva-external-scaler
+      metricType: AverageValue               # the default; never Value, see "Before the first decision"
       metadata:
         scalerAddress: wva-external-scaler.<controller-namespace>.svc.cluster.local:9090
         modelID: "Qwen/Qwen3-32B"            # = the engine's --served-model-name
@@ -71,19 +71,28 @@ These appear on a ScaledObject that scales a model server.
 `scalerAddress` is KEDA's own key (where to dial); the scaling manager never
 reads it. Its value is `wva-external-scaler.<controller-namespace>.svc.cluster.local:9090`.
 
-**A bad value pins the model at `minReplicaCount`.** If `modelID` is empty or
-`variantCost`, `warmPoolCopies` or `defaultOutputTokens` does not parse, the
-workload is skipped entirely (`internal/utils/variant.go`): the scaling manager
-never plans it, so it never makes a decision for it, and `GetMetrics` keeps
-answering 0, which the HPA reads as "go to `minReplicaCount`" for as long as the
-typo stands. A typo such as `variantCost: "$10"` therefore pins the model at
-`minReplicaCount` under any load. KEDA shows nothing on the ScaledObject. The
-only trace is a controller log line at verbosity 4, which the default
-verbosity (2) hides: add `--v=4` to the controller Deployment's `args` (see
+**A bad value freezes the model at its current count.** If `modelID` is empty,
+or `variantCost`, `warmPoolCopies` or `defaultOutputTokens` does not parse, the
+workload is skipped (`internal/utils/variant.go`). The scaling manager never
+plans it, so `GetMetrics` keeps answering the target's current replica count
+([before the first decision](#before-the-first-decision-and-the-fallback)). The
+HPA holds whatever count the workload had, under any load, for as long as the
+typo stands.
+
+KEDA shows nothing on the ScaledObject. Three things do:
+
+- the gauge `wva_scaler_undecided_targets` stays above 0 for the namespace;
+- the counter `wva_scaler_undecided_answers_total{reason="not-managed"}` keeps
+  growing;
+- the controller logs `external scaler has no decision for this target` once
+  for that ScaledObject, with `reason` `not-managed`, at the default verbosity.
+
+The cause is in a log line at verbosity 4, which the default (2) hides. Add
+`--v=4` to the controller Deployment's `args` (see
 [configuration](configuration.md)) and look for
-`Skipping a registered workload with unusable trigger metadata`, with the
-ScaledObject in `scaledObject` and the key and value in `error`. If a
-registered model never gets a decision, check these values first.
+`Skipping a registered workload with unusable trigger metadata`: the
+ScaledObject is in `scaledObject`, the key and value in `error`. If a registered
+model never gets a decision, check these values first.
 
 ## Warm-pool keys
 
@@ -135,10 +144,13 @@ two ways:
     '[{"op":"add","path":"/spec/triggers/0/metadata/defaultOutputTokens","value":"6000"}]'
   ```
 
-  `scaledobjects-apply` with `apply: yes` skips a workload that already has a
-  ScaledObject, so a hand-added key survives it. `apply: adopt` does not: it
-  replaces the trigger list with the plan's keys, and hand-added keys must be
-  patched back.
+  Re-running `scaledobjects-plan` and `scaledobjects-apply` keeps it.
+  `apply: yes` skips a workload that already has a ScaledObject. `apply: adopt`
+  writes the plan's `scalerAddress`, `modelID`, `variantCost` and
+  `scalingPolicy`, and carries over every other key of a trigger that already
+  points at the scaling manager, such as `defaultOutputTokens` or `warmPool`. For
+  such a trigger the plan also proposes the `modelID` it already has. Adopting
+  from a different trigger (`prometheus`, `cpu`) carries nothing over.
 
 ## Scaling behavior
 
@@ -150,21 +162,109 @@ ScaledObject that points at the scaling manager, hand-written or adopted:
 | scale-up | 0 s | `Percent 100` every 5 s |
 | scale-down | 300 s | `Percent 100` every 120 s |
 
-Scale-up acts on the current answer because the wait for a new replica is
-already paid in its start time. Scale-down waits for 300 s of sustained lower
-answers, and that window does more than smooth noise: **until the scaling
-manager has made its first decision for a model, it answers KEDA's
-`GetMetrics` with 0**, which the HPA reads as "go to `minReplicaCount`". That
-happens after every controller restart and leader change. With a 300 s
-scale-down window the HPA keeps its recent highest recommendation through that
-gap; with no window it can shed a model's replicas in the first seconds after a
-restart. Removing a replica too early costs a cold start on the next burst;
-keeping one too long costs only money.
+Scale-up acts on the current answer: a new replica already pays its start time.
+Scale-down waits for 300 s of lower answers. After a restart or leader change
+the window also guards the new leader's first decisions, which rest on a short
+history. Removing a replica too early costs a cold start; keeping one too long
+only costs money.
 
 Override the defaults per install with
 `WVA_SO_SCALE_{UP,DOWN}_{PERIOD,STABILIZATION}`, or replace the shape with
 `WVA_DEFAULT_SO_TEMPLATE`. `apply: adopt` keeps the existing ScaledObject's
 `advanced` block, so an adopted object keeps whatever behavior it had; check it.
-The template sample also adds a `fallback` (`currentReplicasIfHigher`) so that
-an unreachable scaler holds the current count instead of collapsing to
-`minReplicaCount`.
+
+### Before the first decision, and the fallback
+
+After every controller restart and every leader change, the new leader has no
+decision until its first cycle completes. **Until then it answers KEDA's
+`GetMetrics` with the scale target's current replica count**, read from the
+target's `scale` subresource, the same place KEDA and the HPA read it, so a
+custom resource whose replica count lives somewhere other than `spec.replicas`
+is read correctly. With the metric's target of 1 the HPA computes the
+count it already has and holds: nothing scales down on a number nobody decided,
+and KEDA sees no error. Each such answer increments
+`wva_scaler_undecided_answers_total{reason="no-decision"}`, and the ScaledObject
+counts in `wva_scaler_undecided_targets` until its first decided answer.
+`IsActive` and the push stream behave the same
+way: before the first decision they report the target active if it has
+replicas. Only when the current count cannot be read does `GetMetrics` fail,
+with the code of the failed read. A target kind with no `scale` subresource
+cannot be held this way and fails.
+
+A decision that stops being republished is treated the same way. A positive
+decision older than 60 s, or three optimization intervals if that is longer, is
+**stale**: `IsActive` stops honouring it and `GetMetrics` answers the current
+count instead (`reason="stale"`), so the HPA holds rather than following a
+number no engine stands behind.
+
+This holds only with the trigger's `metricType` at its default,
+`AverageValue`. The scaler answers a replica count, and with `AverageValue` the
+HPA computes `ceil(value / 1)`, the count itself. With `metricType: Value` it
+computes `ceil(current replicas × value)`, so a decision of 3 on 3 replicas
+asks for 9 and a held count squares. The installer writes
+`metricType: AverageValue` explicitly on the triggers it generates, including
+when it adopts a ScaledObject (adoption replaces the triggers), and warns about
+a `Value` trigger when it renders a ScaledObject template.
+
+A standby replica, one that does not hold the leader lease, still refuses
+`GetMetrics` and `IsActive` with `Unavailable`: the leader may have decided
+something else. KEDA records a trigger error and takes no scaling action, and
+its connection moves to the leader within seconds.
+
+The generator writes a KEDA `fallback` into every ScaledObject with a
+`minReplicaCount` of 1 or more:
+
+```yaml
+fallback:
+  failureThreshold: 3              # WVA_SO_FALLBACK_FAILURES
+  replicas: <minReplicaCount>
+  behavior: currentReplicasIfHigher
+```
+
+It covers a controller that is down or unreachable, which the scaler cannot
+answer for. Each failed read of the metric by the HPA, about one every 15 s,
+counts as a failure. Once more than `failureThreshold` reads have failed in a
+row, KEDA stops passing the error on and feeds the HPA
+`max(current replicas, replicas)` instead. With the default of 3 that is the
+fourth failed read, about a minute in. Since `replicas` is the object's own
+`minReplicaCount`, that is the current count: the fallback never scales anything
+up or down. What it changes is that the HPA keeps recording a recommendation
+while the scaler is away, so the 300 s scale-down window still covers the
+moment the scaler returns, and the ScaledObject's `Fallback` condition says it
+is in effect. A fleet does not shed replicas on the first answer after an
+outage longer than the window.
+
+**A `minReplicaCount` of 0 gets no fallback.** KEDA treats an erroring trigger
+as inactive, and with `fallback.replicas: 0` its scale loop takes the
+scale-to-zero path: a model that is serving is parked once `cooldownPeriod`
+passes, with no `failureThreshold` in the way. With no `fallback` the same
+error only marks the trigger failing and scales nothing, so a scale-to-zero
+model is safer without one. The plan table and the apply lines show
+`(no fallback: floor 0)` for those entries.
+
+`behavior` needs KEDA 2.17 or later (the installer pins 2.19). Once per plan or
+apply the installer asks whether the ScaledObject schema has the field, first
+with `kubectl explain scaledobjects.spec.fallback.behavior`, which reads the
+published OpenAPI and works for any authenticated user, and then, if that
+cannot answer, by reading the ScaledObject CRD. It writes no fallback at all,
+with a warning, when the field is missing, shown as
+`(no fallback: KEDA < 2.17)`, or when neither read answers, shown as
+`(no fallback: KEDA version unknown)`. The warning says when the CRD read was
+`Forbidden`. An older KEDA drops `behavior`, and the static fallback left behind
+would force `minReplicaCount` whatever the fleet is running. A tenant install
+normally gets its answer from the OpenAPI, and so a fallback; if its identity
+cannot read that either, its ScaledObjects get none until it is run as one that
+can, or a template supplies one. A plan whose every entry renders from
+`WVA_DEFAULT_SO_TEMPLATE` writes no fallback and is not probed.
+
+`apply: adopt` adds the same fallback to an adopted ScaledObject that has none,
+and leaves one that has a fallback exactly as it is, with a warning if that
+fallback is the zero-replica shape on a floor of 0, or if its `replicas` is
+above the `minReplicaCount` the plan sets (KEDA holds at least that many during
+an outage). The fallback is not a trigger key, so keeping the trigger's
+hand-set keys does not touch it. An object the installer cannot read is not
+patched at all. A
+`WVA_DEFAULT_SO_TEMPLATE` owns its own fallback; the shipped sample has none,
+and the installer refuses to render a template whose ScaledObject document has
+a fallback that comes out as `replicas: 0` on a floor of 0, or that `yq` cannot
+read.

@@ -106,12 +106,16 @@ func canonicalRole(role string) string {
 // here). The queue alone would not do: a decode request waiting for its
 // remote KV sits in vLLM's waiting count, so a slow transfer keeps a queue
 // on a decode that is admitting fine. A row with no cache size cannot be
-// judged and does not count. Every row counts, bridges included: a
-// warm-pool Pod lent to decode that is full and queued is decode saturated
-// as much as one of its own replicas is.
+// judged and does not count. Bridges count: a warm-pool Pod lent to decode
+// that is full and queued, and Ready, is decode saturated as much as one of
+// its own replicas is -- prefill's KV is pulled by whichever decode Pod is
+// routed the request. A Pod that is not Ready does not: nothing is routed to
+// it, so its queue and resident KV are left over or frozen (the rows
+// computeK2 does not record from), and counting it would gate prefill's
+// learning and hold prefill's demand for as long as the Pod sat unready.
 func roleSaturated(metrics []domain.ReplicaMetrics, rolesByVariant map[string]string, role string, queueThreshold, kvCacheThreshold float64) bool {
 	for _, rm := range metrics {
-		if canonicalRole(rolesByVariant[rm.VariantName]) != role {
+		if !rm.Ready || canonicalRole(rolesByVariant[rm.VariantName]) != role {
 			continue
 		}
 		if rm.QueueLength >= int(queueThreshold) && kvFull(rm, kvCacheThreshold) {

@@ -18,14 +18,23 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/datastore"
 	poolutils "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/pool"
-	"k8s.io/apimachinery/pkg/api/errors"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	v1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	"sigs.k8s.io/gateway-api-inference-extension/apix/v1alpha2"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/common"
@@ -58,7 +67,7 @@ func (c *InferencePoolReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// 2. Perform a single, generic fetch for the object.
 	if err := c.Get(ctx, req.NamespacedName, obj); err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			logger.Info("InferencePool not found. Removing pool from datastore")
 			c.Datastore.PoolDelete(req.Namespace + "/" + req.Name)
 			return ctrl.Result{}, nil
@@ -102,17 +111,101 @@ func (c *InferencePoolReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	return ctrl.Result{}, nil
 }
 
+// ErrInferencePoolCRDNotServed is returned by SetupWithManager when the API
+// server does not serve the InferencePool kind of the configured group. The
+// controller is then not registered.
+var ErrInferencePoolCRDNotServed = errors.New("InferencePool CRD is not served")
+
+// SetupWithManager registers the reconciler for the InferencePool group in
+// PoolGKNN, after checking that the API server serves that kind.
+//
+// The check is what keeps a missing CRD from becoming a crash loop. A
+// controller for an unserved kind cannot sync its source: once the replica wins
+// the lease it fails after CacheSyncTimeout and the manager exits, so the
+// failure shows only after election. When the kind is not served this returns
+// an error wrapping ErrInferencePoolCRDNotServed and registers nothing; any
+// other lookup error is returned as is.
 func (c *InferencePoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	var obj client.Object
+	var gv schema.GroupVersion
 	switch c.PoolGKNN.Group {
 	case v1alpha2.GroupName:
-		return ctrl.NewControllerManagedBy(mgr).
-			For(&v1alpha2.InferencePool{}).
-			Complete(c)
+		obj, gv = &v1alpha2.InferencePool{}, v1alpha2.SchemeGroupVersion
 	case v1.GroupName:
-		return ctrl.NewControllerManagedBy(mgr).
-			For(&v1.InferencePool{}).
-			Complete(c)
+		obj, gv = &v1.InferencePool{}, v1.SchemeGroupVersion
 	default:
 		return fmt.Errorf("unknown group %s", c.PoolGKNN.Group)
 	}
+
+	gk := schema.GroupKind{Group: gv.Group, Kind: inferencePoolKind}
+	if _, err := mgr.GetRESTMapper().RESTMapping(gk, gv.Version); err != nil {
+		if meta.IsNoMatchError(err) {
+			return fmt.Errorf("%w: %s %s: %w", ErrInferencePoolCRDNotServed, gv, inferencePoolKind, err)
+		}
+		return fmt.Errorf("looking up %s %s: %w", gv, inferencePoolKind, err)
+	}
+
+	return ctrl.NewControllerManagedBy(mgr).
+		For(obj, builder.WithPredicates(inferencePoolPredicate())).
+		// The EPP metrics port comes from the endpoint picker's Service, not
+		// from the pool, so a change to it bumps no pool generation. Before the
+		// predicate it reached Reconcile only by accident: the next status write
+		// on the pool, or the cache resync hours later. Watching the Service
+		// makes it prompt. The manager already caches Services (Reconcile and
+		// the scrape source read them through it), so this adds no informer.
+		Watches(&corev1.Service{}, handler.EnqueueRequestsFromMapFunc(c.poolsForService)).
+		Complete(c)
+}
+
+// poolsForService maps an endpoint picker Service to the pools of this
+// reconciler's group, in the same namespace, that reference it.
+func (c *InferencePoolReconciler) poolsForService(ctx context.Context, svc client.Object) []reconcile.Request {
+	var refs []types.NamespacedName
+	switch c.PoolGKNN.Group {
+	case v1.GroupName:
+		var pools v1.InferencePoolList
+		if err := c.List(ctx, &pools, client.InNamespace(svc.GetNamespace())); err != nil {
+			log.FromContext(ctx).Error(err, "Listing InferencePools for a changed endpoint picker Service",
+				"namespace", svc.GetNamespace(), "service", svc.GetName())
+			return nil
+		}
+		for i := range pools.Items {
+			if string(pools.Items[i].Spec.EndpointPickerRef.Name) == svc.GetName() {
+				refs = append(refs, client.ObjectKeyFromObject(&pools.Items[i]))
+			}
+		}
+	case v1alpha2.GroupName:
+		var pools v1alpha2.InferencePoolList
+		if err := c.List(ctx, &pools, client.InNamespace(svc.GetNamespace())); err != nil {
+			log.FromContext(ctx).Error(err, "Listing InferencePools for a changed endpoint picker Service",
+				"namespace", svc.GetNamespace(), "service", svc.GetName())
+			return nil
+		}
+		for i := range pools.Items {
+			if string(pools.Items[i].Spec.ExtensionRef.Name) == svc.GetName() {
+				refs = append(refs, client.ObjectKeyFromObject(&pools.Items[i]))
+			}
+		}
+	}
+	reqs := make([]reconcile.Request, 0, len(refs))
+	for _, nn := range refs {
+		reqs = append(reqs, reconcile.Request{NamespacedName: nn})
+	}
+	return reqs
+}
+
+// inferencePoolKind is the kind SetupWithManager checks for and watches.
+const inferencePoolKind = "InferencePool"
+
+// inferencePoolPredicate admits creates, deletes and spec changes only.
+//
+// Of the pool, Reconcile reads nothing but the spec (selector, endpoint picker
+// reference); the rest of what it reads, the endpoint picker Service, has its
+// own watch in SetupWithManager. It rebuilds the pool's scrape source on every
+// call, so a status write by a gateway controller, the common update, rebuilt
+// it for nothing. Setting a
+// deletionTimestamp bumps metadata.generation, so a pending deletion still gets
+// through, and a failed reconcile is requeued without passing the predicate.
+func inferencePoolPredicate() predicate.Predicate {
+	return predicate.GenerationChangedPredicate{}
 }

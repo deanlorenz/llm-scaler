@@ -1,36 +1,58 @@
 # Give classes of workloads different scaling behaviour
 
+A **tier** is a named, reusable policy entry (`interactive`, `standard`,
+`batch`) that a model selects by name. One tier serves many models, so
+retuning the tier retunes all of them at once. For anyone whose models fall
+into a few classes of urgency, such as an interactive assistant and an
+overnight batch job.
+
+**Maturity:** Stable.
+
+## When not to take it
+
+- One model really needs its own numbers. Use a per-model override, which wins
+  over any tier. Reach for it deliberately, not as the way to configure
+  everything.
+
 ## Start here
 
-- **Status:** Stable.
-- **You need:** [the saturation path](../scale-on-saturation/#start-here) in place, and edit rights on a scaling-policy ConfigMap (`wva-scaling-policy-config`) the controller reads. That is the one in the controller's namespace — the namespace owner's in the default install. When a cluster admin keeps the controller out of your reach, you cannot edit that one: create a [namespace-local `wva-scaling-policy-config`](../../reference/scaling-policy.md#namespace-local-scaling-policy-map) in your own namespace (it replaces the global map whole for your models), or ask the admin.
-- **Do this** (no guide covers this path; the steps are on this page):
-  1. (owner of that ConfigMap) Add the tier entries, and a `defaultPolicy` naming one that exists ([What it needs](#what-it-needs); the shipped numbers in [Choosing a tier](#choosing-a-tier)).
-  2. (namespace owner) Name a tier on each variant: `scalingPolicy: <tier>` in its trigger metadata, or in its entry in [the ScaledObject plan](../../reference/configuration.md#default-scaledobjects) before `make scaledobjects-apply`.
-  Re-running `make deploy-wva` resets the `default` entry of the controller's own ConfigMap, and `defaultPolicy` with it: re-apply `defaultPolicy` afterwards. The tier entries are other keys, and the installer keeps them ([why](../../reference/scaling-policy.md#re-running-the-installer-resets-the-default-entry)).
-- **Check it works:** `Effective scaling policy` in the controller log names the tier, and there is no `Scaling policy not found` ([Verifying it](#verifying-it)).
-- **Undo:** remove `scalingPolicy` from the trigger; the variant scales under the `default` entry again. The policy is read live, with no restart.
+You need [the saturation path](../scale-on-saturation/#start-here) in place,
+and edit rights on a `wva-scaling-policy-config` the controller reads. No
+guide covers this path, so the steps are here.
 
-## What it is
+1. Owner of that ConfigMap: add the tier entries and a `defaultPolicy` naming one of them ([example](#what-it-needs)). No tier exists until you add it.
+2. Namespace owner: name a tier on each variant with `scalingPolicy: <tier>` in its trigger metadata ([example](#what-it-needs)).
+3. Check it works: the controller log line `Effective scaling policy` names the tier; out of your reach, the log is the admin's ([Verifying it](#verifying-it)).
 
-An interactive assistant and an overnight batch job should not be scaled the
-same way, and neither should be configured one model at a time. A **tier** is a
-named, reusable policy entry — `interactive`, `standard`, `batch` — that a
-variant selects by name from its own ScaledObject. A tier carries no model
-identity, which is the entire point: one tier serves many models, and retuning
-the tier retunes all of them at once.
+To undo, remove `scalingPolicy` from the trigger; the variant scales under
+the `default` entry again, with no restart. Controller out of your reach? See
+[Details](#where-the-policy-lives).
 
-**Use it when** your models fall into a small number of classes with different
-urgency, and you would rather change a class than edit every model in it.
+## What it costs
 
-**Do not use it when** one model genuinely needs its own numbers. That is a
-per-model override, and it wins over any tier the variant names — reach for it
-deliberately, not as the way you configure everything.
+- Nothing to run. The tiers themselves trade money for latency: a lower
+  `scaleUpThreshold` holds more idle KV cache, a higher one queues more
+  requests while a replica starts.
+- Under a binding GPU budget, a low-`priority` tier gets fewer replicas than
+  its demand asks, paid in queueing and TTFT (time to first token). Priority
+  is the weight in the fair-share split (`fairShareValue` in
+  `internal/engines/allocation/`), so it is what a class is worth under
+  contention ([bound a fleet by real GPUs](../bound-by-gpus/)).
+- A naming decision. A tier promises that every model wearing it wants the
+  same behaviour. Once that stops being true, somebody adds a per-model
+  override and the class stops meaning anything.
 
-## What it needs
+## Evidence
 
-- Tier entries in the scaling-policy ConfigMap. An entry **is** a tier when its
-  key is not `default` and its body sets no `model_id`:
+No benchmark run. One end-to-end suite covers the behaviour, on the simulator
+only ([How it is tested](#how-it-is-tested)).
+
+## Details
+
+### What it needs
+
+Tier entries in the scaling-policy ConfigMap. An entry **is** a tier when its
+key is not `default` and its body sets no `model_id`:
 
 ```yaml
 data:
@@ -50,17 +72,17 @@ data:
     priority: 0.5
 ```
 
-  The numbers are the shipped examples from the table under
-  [Choosing a tier](#choosing-a-tier). **`defaultPolicy` must name a tier that
-  exists.** Unlike a tier named on a trigger, a `defaultPolicy` naming no entry is
-  never reported: every variant that names no tier silently scales under the
-  bare `default` entry. Here `standard` repeats the default numbers, so it is
-  only a place to retune the unnamed fleet later; delete it and `defaultPolicy`
-  together, never one without the other.
+**`defaultPolicy` must name a tier that exists.** A `defaultPolicy` naming no
+entry is never reported: every variant that names no tier silently scales
+under the bare `default` entry. Here `standard` repeats the default numbers,
+so it is only a place to retune the unnamed fleet later. Delete it and
+`defaultPolicy` together, never one without the other.
 
-- A `scalingPolicy` key in each variant's KEDA trigger metadata. The trigger is
-  already the registration, so selecting a tier needs nothing watched, listed or
-  matched:
+A `scalingPolicy` key in each variant's KEDA trigger metadata selects the
+tier. The trigger is already the registration, so nothing is watched, listed
+or matched. Set it on the trigger, or in the variant's entry in
+[the ScaledObject plan](../../reference/configuration.md#default-scaledobjects)
+before `make scaledobjects-apply`:
 
 ```yaml
 triggers:
@@ -70,14 +92,33 @@ triggers:
       scalingPolicy: interactive
 ```
 
-## Choosing a tier
+### Where the policy lives
+
+In the default install, the ConfigMap is in the controller's namespace. The
+policy is read live, with no restart. If the controller is out of your reach,
+create a
+[namespace-local one](../../reference/scaling-policy.md#namespace-local-scaling-policy-map)
+in your namespace; it replaces the global map whole for your models and is
+also read live. Or ask the admin, who must restart the controller after
+editing its own ConfigMap: run out of the tenant's reach (`WVA_WATCH_NS`), it
+reads that ConfigMap only at start
+([why](../../reference/scaling-policy.md#limiters-cluster-default-only-live)).
+
+Re-running `make deploy-wva` resets the `default` entry of the controller's
+own ConfigMap, and `defaultPolicy` with it: re-apply `defaultPolicy`
+afterwards. The tier entries are other keys, and the installer keeps them
+([why](../../reference/scaling-policy.md#re-running-the-installer-resets-the-default-entry)).
+The full field list is in [the scaling policy reference](../../reference/scaling-policy.md).
+
+### Choosing a tier
 
 **No tier exists until you add it.** The shipped policy ConfigMap
 (`config/base/manager/scaling-policy-configmap.yaml`) carries `interactive` and
 `batch` only as commented-out examples, and `deploy/configmap-scaling-policy.yaml`
 carries none. Until the entry is in the ConfigMap, `scalingPolicy: interactive`
-on a trigger does nothing except log `Scaling policy not found` and scale under
-the default entry. The shipped examples, against the default entry:
+only logs `Scaling policy not found` and scales under the default entry. To
+use one, copy it out of the comment into `data:` of the ConfigMap. The
+shipped examples, against the default entry:
 
 | | `default` (shipped) | `interactive` (example) | `batch` (example) |
 | --- | --- | --- | --- |
@@ -85,60 +126,43 @@ the default entry. The shipped examples, against the default entry:
 | `scaleDownBoundary` | 0.70 | 0.45 | inherits 0.70 |
 | `priority` | 1.0 | 2.0 | 0.5 |
 
-The `scaleToZero` of a tier a variant names is not read: parking reads only the
-`default` entry, the tier `default.defaultPolicy` names, or a per-model entry,
-never the variant's `scalingPolicy` (`ResolveScalingPolicy` in
-`internal/config/scaling_policy.go`). Put it on a per-model entry instead
-([scale to zero](../scale-to-zero/#start-here)).
-
 What the scale-up threshold buys:
 
-- **Lower** (`interactive`): the model scales out at a lower utilization, so a
-  new replica is starting while the existing ones still have room. You pay in
-  idle KV cache: more replicas for the same traffic, all of them less full.
-  Lower `scaleDownBoundary` with it, or the band between the two collapses and
-  the model scales down as soon as it scaled up.
+- **Lower** (`interactive`): the model scales out earlier, so a new replica
+  starts while the others still have room. You pay in idle KV cache: more
+  replicas, all less full. Lower `scaleDownBoundary` with it, or the band
+  collapses and the model scales down as soon as it scaled up.
 - **Higher** (`batch`): replicas are packed harder before another is ordered.
   Fewer GPUs for the same traffic, at the price of queueing and TTFT while a
-  replica starts, since the scale-out begins later.
+  replica starts.
 
-Utilization here is against `kvCacheThreshold`-scaled capacity, so the
-effective scale-out point is `kvCacheThreshold × scaleUpThreshold` of physical
-KV: 0.80 × 0.85 = 0.68 with the defaults, 0.48 for the `interactive` example.
+Utilization is measured against `kvCacheThreshold`-scaled capacity, so the
+real scale-out point is `kvCacheThreshold × scaleUpThreshold` of physical KV:
+0.80 × 0.85 = 0.68 with the defaults, 0.48 for the `interactive` example.
 
-To use one, copy it out of the comment into `data:` of the ConfigMap in the
-controller's namespace, then set `scalingPolicy` on the trigger and check the
-logs as in [Verifying it](#verifying-it).
+A tier can also carry `scaleToZero`, so a class decides whether its models may
+park. A model parks only if every tier its variants name allows it. It then
+waits for the longest `retentionPeriod` among those tiers. A per-model entry
+still overrides the tier
+([scale to zero](../scale-to-zero/#start-here)).
 
-## How a variant's policy is resolved
+### How a variant's policy is resolved
 
-Most specific wins: **per-model override → named tier → `default.defaultPolicy`
-→ `default`**. `defaultPolicy` is read from the `default` entry only, because a
-fallback chosen by a tier would be that tier choosing for everyone but itself.
+Most specific wins: **per-model override → named tier →
+`default.defaultPolicy` → `default`**. `defaultPolicy` is read from the
+`default` entry only, because a fallback chosen by a tier would be that tier
+choosing for everyone but itself.
 
-Two things that could be silent are not:
-
-- **A tier that does not exist** falls back to `default` — the right outcome and
-  the wrong silence, so it is logged against the variants that asked for it,
-  listing the tiers that do exist. This covers a tier named in `scalingPolicy`
-  only: a `defaultPolicy` naming a missing tier falls back the same way and is
-  **not** logged (`internal/engines/steadystate/engine.go`,
-  `resolveModelPolicy`). The `Effective scaling policy` line does not tell the
-  two apart either: for a variant naming no tier it reads
-  `scalingPolicy="(default entry)"` whether or not `defaultPolicy` resolved, so
-  check the thresholds and `priority` it prints against the tier you meant.
+- **A tier that does not exist** falls back to `default`, and is logged
+  against the variants that asked for it, listing the tiers that do exist.
+  This covers a tier named in `scalingPolicy` only. A `defaultPolicy` naming a
+  missing tier falls back the same way and is **not** logged
+  (`resolveModelPolicy` in `internal/engines/steadystate/engine.go`).
 - **Variants of one model naming different tiers** resolve to the
-  lexicographically smallest, so the allocation comes out the same on every
-  cycle rather than flipping with map order.
+  lexicographically smallest, so the allocation is the same every cycle
+  rather than flipping with map order.
 
-## Setting it up
-
-The tier surface, the full field list and the per-model override that outranks
-it are in [the scaling policy reference](../../reference/scaling-policy.md).
-Tiers are edited in place: the policy is dynamic configuration, so the engine
-picks up a changed ConfigMap without a restart.
-
-## Verifying it
+### Verifying it
 
 ```bash
 # which tier each model resolved to, and the thresholds it got (logged once per change)
@@ -147,39 +171,22 @@ kubectl logs -n <controller-namespace> deploy/<wva> | grep "Effective scaling po
 kubectl logs -n <controller-namespace> deploy/<wva> | grep "Scaling policy not found"
 ```
 
-`Effective scaling policy` carries `scalingPolicy` (the tier name, or
-`(default entry)`), `scaleUpThreshold`, `scaleDownBoundary`, `kvCacheThreshold`
-and `priority`. The per-cycle `analyzer-result` line carries the
-`scaleUpThreshold` and `scaleDownBoundary` in force but **no policy name**, so
-use it to confirm the numbers, not the tier. A `Scaling policy not found` line
-means the variant named a tier the ConfigMap does not declare and is scaling
-under the default entry; its `knownPolicies` field lists the tiers that exist.
+The log is the admin's when the controller is out of your reach; a tenant
+watches `wva_desired_replicas{exported_namespace="<ns>"}` move at the tier's
+thresholds. `Effective scaling policy` prints the tier (or `(default entry)`),
+both thresholds, `kvCacheThreshold` and `priority`. For a variant naming no
+tier it reads `(default entry)` whether or not `defaultPolicy` resolved, so
+check the printed numbers. `Scaling policy not found` lists the tiers that
+exist in `knownPolicies`. The per-cycle `analyzer-result` line has the
+thresholds in force but **no policy name**.
 
-## What it costs
+### How it is tested
 
-Nothing to run, but the tiers themselves trade money for latency: a lower
-`scaleUpThreshold` holds more idle KV, a higher one queues more requests while a
-replica starts. Under a binding GPU budget a low-`priority` tier also gets fewer
-replicas than its demand asks for, and that shortfall is paid in queueing and
-TTFT. The other cost is a naming decision: a tier is a promise that every
-model wearing it wants the same behaviour, and the moment that stops being true
-somebody adds a per-model override and the class stops meaning anything.
-
-## How it is tested
-
-End-to-end: `test/e2e/scaling_policy_tier_test.go` — a named tier taking a
-workload where the default entry would not, fallback when the tier does not
-exist, a per-model override beating the tier, and the tier's thresholds
-resuming once that override is removed.
+End-to-end: `test/e2e/scaling_policy_tier_test.go`. It covers a named tier
+taking a workload where the default entry would not, fallback when the tier
+does not exist, a per-model override beating the tier, and the tier's
+thresholds resuming once that override is removed.
 
 **The suite needs `USE_SIMULATOR=true`** and skips without it: it drives
 `llm-d-inference-sim --fake-metrics`, which real vLLM rejects. A run without
 the simulator is green while covering none of this.
-
-## Tuning it
-
-Priorities interact with the limiter. When there are not enough accelerators
-for every model's demand, priority is the weight in the fair-share split
-(`fairShareValue` in `internal/engines/allocation/`) — so a tier's `priority`
-is what a class is worth under contention, not just how eagerly it scales when
-there is room. See [bounding a fleet by real GPUs](../bound-by-gpus/).

@@ -60,7 +60,12 @@ func (a *SaturationAnalyzer) aggregateByVariant(
 		// accelerator is an analyzer input (discovery-resolved, on VariantReplicaState),
 		// used below for cross-variant capacity lookup. It is NOT emitted on the output;
 		// the capacity builder fills per-variant identity from discovery.
-		accelerator := vs.AcceleratorName
+		//
+		// Stabilised, as the capacity store's records are filed: discovery
+		// reads a variant whose pods sit on two products as unresolved, and
+		// that flips with placement. A raw lookup then missed a record filed
+		// under the product on alternate cycles.
+		accelerator := a.StableAcceleratorFor(namespace, vs.VariantName, vs.AcceleratorName)
 
 		readyCount := vs.CurrentReplicas - vs.PendingReplicas
 		if readyCount < 0 {
@@ -141,9 +146,11 @@ func (a *SaturationAnalyzer) aggregateByVariant(
 				pricedRows = ownRows
 			} else {
 				// Only bridges reported. The variant's own per-replica capacity is
-				// unmeasured this cycle, and the bridge's reading is the closest
-				// thing to it that was actually observed -- lower than the truth,
-				// which asks for one replica too many rather than one too few.
+				// unmeasured this cycle, and the bridge's is the closest thing to
+				// it -- lower than the truth, which asks for one replica too many
+				// rather than one too few. A saturated bridge is priced at its
+				// reading for the cycle where that is lower than the chain
+				// (K2SrcUnadmitted), though the reading is never recorded.
 				// Zero would be worse than either: the optimizer skips a variant
 				// whose per-replica capacity is <= 0 (cost_aware_optimizer.go), so
 				// a variant a bridge is currently carrying would stop being scaled

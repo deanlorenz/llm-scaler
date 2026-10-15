@@ -23,7 +23,7 @@
 #
 #   enginecache.sh apply  -n NS --path DIR --image IMG [--seed-claim PVC[:SUBPATH]] [--dry-run]
 #                                                                     prepare DIR/engine-cache on every accelerator node
-#   enginecache.sh status -n NS [--node-selector KEY=VALUE]           which nodes are prepared, which are not, and why
+#   enginecache.sh status -n NS [--node-selector KEY=VALUE[,...]]     which nodes are prepared, which are not, and why
 #   enginecache.sh delete -n NS [--dry-run]                           drop the claim, volume and preparer (the caches stay)
 #   enginecache.sh publish -n NS [--dry-run]                          fill the seed claim from every prepared node, then re-seed every node
 #                                                                     (run once each engine configuration has started somewhere)
@@ -79,7 +79,13 @@
 #                               choice, and it is then held on the node as a
 #                               side effect
 #   --capacity SIZE             the volume's declared capacity (default 200Gi;
-#                               it is a declaration, hostPath has no quota)
+#                               it is a declaration, hostPath has no quota).
+#                               A re-apply keeps an existing claim's size
+#                               when this is not given, and refuses a SIZE
+#                               that differs from it: a claim on a static
+#                               volume cannot be resized (delete first).
+#                               --dry-run reads no cluster, so it renders
+#                               SIZE or the default
 #   --seed-claim PVC[:SUBPATH]  a claim in the namespace holding caches to
 #                               copy onto each node before it is prepared --
 #                               the shared claim the caches lived on before,
@@ -100,11 +106,16 @@
 #                               A changed seed is merged in too (the marker
 #                               records the seed). A subPath that does not
 #                               exist yet is nothing to seed, not an error.
-#   --node-selector KEY=VALUE   which nodes count as accelerator nodes. The
+#   --node-selector KEY=VALUE[,KEY=VALUE...]
+#                               which nodes count as accelerator nodes. The
 #                               default is any node carrying a known GPU
 #                               product label (deploy/lib/accelerator_nodes.sh);
 #                               set this to what your model servers select
-#                               on when they select on something
+#                               on when they select on something.
+#                               One or more KEY=VALUE pairs, comma
+#                               separated, no spaces: a node must carry
+#                               every one (k1=v1,k2=v2 is k1=v1 AND
+#                               k2=v2, as in a nodeSelector)
 #   --toleration KEY            tolerate a taint with KEY (any value, any
 #                               effect); nvidia.com/gpu is always tolerated
 #   --dry-run                   apply: print the manifests instead of
@@ -168,6 +179,7 @@ NAMESPACE=""
 NODE_PATH=""
 IMAGE=""
 CAPACITY="200Gi"
+CAPACITY_GIVEN=false
 NODE_SELECTOR=""          # empty: every node carrying a known GPU product label
 NODE_SELECTOR_GIVEN=false
 TOLERATIONS=("nvidia.com/gpu")
@@ -525,6 +537,8 @@ cmd_apply() {
         seed_phase="$(kubectl get pvc -n "$NAMESPACE" "$SEED_CLAIM" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
         [ "$seed_phase" = Bound ] || log_error "--seed-claim ${SEED_CLAIM}: no Bound claim of that name in ${NAMESPACE} (found: '${seed_phase:-none}'); the preparer would mount it and never start"
     fi
+    # an existing claim keeps its size (deploy/lib/nodedir.sh says why)
+    nodedir_claim_capacity "$NAMESPACE" "$CLAIM" "$CAPACITY_GIVEN" "enginecache.sh delete -n ${NAMESPACE}"
     render | kubectl apply -f - >/dev/null
     log_info "preparing ${NODE_PATH}/${SUBDIR} on $(accelerator_selector_text "$NODE_SELECTOR"); claim ${CLAIM}${SEED_CLAIM:+, seeded from ${SEED_CLAIM}${SEED_SUBPATH:+:$SEED_SUBPATH}} -- mount it read-write and point VLLM_CACHE_ROOT, FLASHINFER_WORKSPACE_DIR and TRITON_CACHE_DIR under it"
     if kubectl api-resources --api-group=security.openshift.io 2>/dev/null | grep -q securitycontextconstraints; then
@@ -560,7 +574,7 @@ cmd_status() {
         # the flag before it reaches kubectl (a tenant can edit the object).
         selector="$(kubectl get daemonset -n "$NAMESPACE" "$CLAIM" \
             -o jsonpath='{.spec.template.spec.nodeSelector}' 2>/dev/null \
-            | jq -r 'to_entries | map(.key + "=" + .value) | first // ""' 2>/dev/null || true)"
+            | accelerator_selector_from_json || true)"
         local why
         if ! why="$(accelerator_selector_ok "$selector")"; then
             [ "$mode" = report ] || log_error "DaemonSet ${CLAIM} carries a nodeSelector this script did not write (${why}); pass --node-selector to report on it"
@@ -896,7 +910,7 @@ while [ $# -gt 0 ]; do
         -n|--namespace) NAMESPACE="$2"; shift 2 ;;
         --path) NODE_PATH="$2"; shift 2 ;;
         --image) IMAGE="$2"; shift 2 ;;
-        --capacity) CAPACITY="$2"; shift 2 ;;
+        --capacity) CAPACITY="$2"; CAPACITY_GIVEN=true; shift 2 ;;
         --seed-claim) check_seed "$2"; shift 2 ;;
         --node-selector) NODE_SELECTOR="$2"; NODE_SELECTOR_GIVEN=true; shift 2 ;;
         --toleration) accelerator_check_toleration "$2"; TOLERATIONS+=("$2"); shift 2 ;;

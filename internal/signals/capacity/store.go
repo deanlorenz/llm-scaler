@@ -2,10 +2,12 @@ package capacity
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/inferenceengine"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
 )
@@ -45,6 +47,21 @@ type Record struct {
 	// variant at: min(k1, k2) when learned live, a conservative lower bound
 	// (the per-step token budget) when derived from a deployment.
 	EffectiveCapacity int64
+	// PriorLiveCapacity is the EffectiveCapacity the variant was last
+	// measured at under engine arguments it no longer runs, kept when
+	// LoadFromScaleTarget replaces a live record after a rollout. It is only
+	// ever a CEILING on the estimate a parked variant is priced from
+	// (estimateStoredCapacity), never a floor and never k1. The next live
+	// write builds a fresh record and so drops it. A move to other hardware
+	// drops it too: it was measured on hardware the variant no longer runs on.
+	PriorLiveCapacity int64
+	// PriorLiveAt is when PriorLiveCapacity was measured: the replaced live
+	// record's LearnedAt, kept as the ceiling is carried from cycle to cycle.
+	// LoadFromScaleTarget rewrites the record every cycle, so its own
+	// LearnedAt never ages; this clock does, and the ceiling is dropped once
+	// it is older than EvictionTimeout, as the live record itself would have
+	// been.
+	PriorLiveAt time.Time
 	// EngineParams are the parsed deployment params for k2 derivation.
 	EngineParams *EngineParams
 	// LearnedFrom is LearnedFromLive for a record written from live metrics,
@@ -85,7 +102,9 @@ func storeKey(namespace, modelID, variantName string) string {
 // Update stores or overwrites a capacity record for a specific variant and
 // stamps LearnedAt. Live data is always authoritative and should always be
 // written via Update, with LearnedFrom set to LearnedFromLive by the caller:
-// that is what stops LoadFromScaleTarget overwriting it.
+// that is what stops LoadFromScaleTarget overwriting it while the variant runs
+// the arguments and hardware it was measured on (LoadFromScaleTarget replaces
+// it when either changes).
 func (s *Store) Update(namespace, modelID, variantName string, record Record) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -125,8 +144,11 @@ func (s *Store) Get(namespace, modelID, variantName string) *Record {
 //   - estimateStoredCapacity's live branch, on the zero-replica path, which
 //     returns rec.EffectiveCapacity directly. That figure was min(k1, k2) when
 //     it was written, on the hardware it was written on -- not against
-//     anything current -- and LoadFromScaleTarget refuses to overwrite a live
-//     record, so a redeploy onto a smaller cache does not correct it.
+//     anything current. LoadFromScaleTarget replaces a live record when the
+//     engine arguments or the hardware change, keeping the old figure only as
+//     a ceiling (PriorLiveCapacity); a redeploy that changes neither -- the
+//     same flags on a card with less free memory -- is not seen, and does not
+//     correct it.
 //
 // The real reason is what the alternative is. A nil record on the zero-replica
 // path falls to lookupCompatibleCapacity and then to perReplicaCapacity = 0,
@@ -151,8 +173,10 @@ func (s *Store) IsStale(namespace, modelID, variantName string) bool {
 
 // LoadFromScaleTarget parses the engine args from a scale target (dispatching by
 // detected engine via ParseEngineArgs) and stores an estimated capacity record for
-// the variant. It does NOT overwrite an existing "live" record — scale
-// target-derived data is a fallback only.
+// the variant. Scale-target-derived data is a fallback only: an existing
+// "live" record is kept while the variant runs the arguments and hardware it
+// was measured on (an image-only change re-tags its parameters), and replaced
+// when either changes.
 func (s *Store) LoadFromScaleTarget(namespace, modelID, variantName, accelerator string, gpuCount int, scaleTarget scaletarget.ScaleTargetAccessor) {
 	if scaleTarget == nil {
 		return
@@ -162,27 +186,98 @@ func (s *Store) LoadFromScaleTarget(namespace, modelID, variantName, accelerator
 	defer s.mu.Unlock()
 
 	key := storeKey(namespace, modelID, variantName)
-
-	// Don't overwrite live data
-	if existing, ok := s.records[key]; ok && existing.LearnedFrom == LearnedFromLive {
-		return
-	}
-
 	params := ParseEngineArgs(inferenceengine.Detect(scaleTarget), scaleTarget)
+
+	// Live data is not overwritten -- while it describes the engine that is
+	// running. The live write carries the existing EngineParams forward, so
+	// without this check the parameters were frozen on the first live record:
+	// a rollout that changed the engine's arguments left the record, its
+	// fingerprint and every compatibility match describing the old
+	// configuration for as long as the variant kept serving. The live
+	// capacity figures go too, not just the parameters: they were measured
+	// under the old arguments, and a parked variant is priced from them.
+	// The next live cycle measures the new configuration.
+	//
+	// The image is not one of the arguments here. It is part of the
+	// fingerprint, so a new release does not share a latency line, but a
+	// routine image bump with the same flags is not a new capacity, as
+	// IsCapacityCompatible already holds -- and replacing the record on it
+	// priced a variant parked at zero from the derived figure on every
+	// rollout: 320,000 tokens against a measured 12,800 at the defaults, so
+	// its first scale-from-zero order was sized ~25x too small. The
+	// PARAMETERS do take the new image: left on the old one, the
+	// fingerprint, wva_engine_config and the snapshot's configuration tag
+	// kept naming the old release, and the next restart, reading the new
+	// image, restored nothing.
+	//
+	// The hardware is compared too: a variant moved to another GPU product,
+	// or to another GPU count, was measured on hardware it no longer runs on.
+	// An unresolved accelerator on either side is not a move. A reshape of
+	// the data or pipeline parallelism is an argument change and replaces the
+	// record like any other; the GPU count itself still comes from the pod's
+	// GPU request, so one made through a DRA claim reads as unknown.
+	//
+	// This function writes the record afresh every cycle, so what it carried
+	// from the live record it replaced is carried again from its own record
+	// on the next cycle; otherwise the bound held for one cycle only.
+	var carriedKv, priorLive int64
+	var priorLiveAt time.Time
+	existing, ok := s.records[key]
+	sameHW := ok && sameHardware(existing, accelerator, gpuCount)
+	if ok && existing.LearnedFrom == LearnedFromLive {
+		if existing.EngineParams == nil {
+			return
+		}
+		if sameHW && sameArguments(*existing.EngineParams, params) {
+			if existing.EngineParams.Image != params.Image {
+				// A copy: Get hands out the store's own record.
+				swapped := *existing
+				swapped.EngineParams = &params
+				s.records[key] = &swapped
+			}
+			return
+		}
+		// What the variant was last measured at stays a ceiling on what it
+		// is priced at until it is measured again. The derived estimate it
+		// falls back to otherwise has no bound at all when the cache's
+		// geometry changed and no sibling runs the new flags yet. Not across
+		// a hardware move: a figure measured on other hardware bounds nothing.
+		if sameHW {
+			priorLive, priorLiveAt = existing.EffectiveCapacity, existing.LearnedAt
+		}
+	} else if ok && sameHW && time.Since(existing.PriorLiveAt) <= EvictionTimeout {
+		priorLive, priorLiveAt = existing.PriorLiveCapacity, existing.PriorLiveAt
+	}
+	if priorLive == 0 {
+		priorLiveAt = time.Time{}
+	}
+	// What the KV cache holds is a property of the memory, not of the
+	// scheduler flags. While nothing that shapes it changed, the measured
+	// total stays this variant's k1, so the derived estimate a parked variant
+	// falls back to is bounded by it (estimateStoredCapacity's own-k1 bound).
+	if sameHW && existing.EngineParams != nil && kvTotalCarries(*existing.EngineParams, params) {
+		carriedKv = existing.TotalKvCapacityTokens
+	}
 	record := &Record{
-		AcceleratorName: accelerator,
-		GpuCount:        gpuCount,
-		EngineParams:    &params,
-		LearnedFrom:     "deployment", // same for deployment and LWS
-		LearnedAt:       time.Now(),
+		AcceleratorName:   accelerator,
+		GpuCount:          gpuCount,
+		EngineParams:      &params,
+		PriorLiveCapacity: priorLive,
+		PriorLiveAt:       priorLiveAt,
+		LearnedFrom:       "deployment", // same for deployment and LWS
+		LearnedAt:         time.Now(),
 	}
 
-	// If num_gpu_blocks_override is set (vLLM), we can estimate k1.
-	if params.NumGpuBlocksOverride > 0 {
+	// k1: the measured KV total carried across a flag change, or, if
+	// num_gpu_blocks_override is set (vLLM), an estimate from it.
+	switch {
+	case carriedKv > 0:
+		record.TotalKvCapacityTokens = carriedKv
+	case params.NumGpuBlocksOverride > 0:
 		record.NumGpuBlocks = params.NumGpuBlocksOverride
 		record.BlockSize = params.BlockSize
 		record.TotalKvCapacityTokens = params.NumGpuBlocksOverride * params.BlockSize
-	} else if params.TotalKvTokensOverride > 0 {
+	case params.TotalKvTokensOverride > 0:
 		// SGLang exposes total KV token capacity directly via --max-total-tokens.
 		record.TotalKvCapacityTokens = params.TotalKvTokensOverride
 	}
@@ -226,6 +321,59 @@ func (s *Store) EvictStale(timeout time.Duration) int {
 // ones), or nil if no compatible record exists. As with Get, the record is
 // the store's own.
 func (s *Store) FindCompatible(modelID, accelerator string, gpuCount int, params *EngineParams) *Record {
+	return s.findCompatible(modelID, accelerator, gpuCount, params, (*EngineParams).IsCapacityCompatible)
+}
+
+// FindClampBound returns the live record whose measured capacity bounds a
+// zero-replica estimate from above, under the looser equality a max clamp
+// takes (EngineParams.IsCapacityClampCompatible): a sibling that differs in
+// the layout or feature flags the borrow's equality compares is still a
+// ceiling.
+//
+// Among several, the LOWEST live EffectiveCapacity is taken, from namespace's
+// own variants when any qualify and from every namespace otherwise; ties go
+// to the smaller key. It took the first match in map order, so with several
+// candidates the ceiling changed from cycle to cycle. The lowest is the
+// tightest ceiling, and a ceiling only lowers an estimate.
+func (s *Store) FindClampBound(namespace, modelID, accelerator string, gpuCount int, params *EngineParams) *Record {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var best, bestOwnNS *Record
+	var bestKey, bestOwnNSKey string
+	lower := func(rec *Record, key string, cur *Record, curKey string) bool {
+		return cur == nil || rec.EffectiveCapacity < cur.EffectiveCapacity ||
+			(rec.EffectiveCapacity == cur.EffectiveCapacity && key < curKey)
+	}
+	for key, rec := range s.records {
+		parts := strings.SplitN(key, "|", 3)
+		if len(parts) < 3 || parts[1] != modelID {
+			continue
+		}
+		if rec.AcceleratorName != accelerator || rec.GpuCount != gpuCount {
+			continue
+		}
+		if rec.LearnedFrom != LearnedFromLive || rec.EffectiveCapacity <= 0 {
+			continue
+		}
+		if rec.EngineParams == nil || !rec.EngineParams.IsCapacityClampCompatible(params) {
+			continue
+		}
+		if lower(rec, key, best, bestKey) {
+			best, bestKey = rec, key
+		}
+		if parts[0] == namespace && lower(rec, key, bestOwnNS, bestOwnNSKey) {
+			bestOwnNS, bestOwnNSKey = rec, key
+		}
+	}
+	if bestOwnNS != nil {
+		return bestOwnNS
+	}
+	return best
+}
+
+func (s *Store) findCompatible(modelID, accelerator string, gpuCount int, params *EngineParams,
+	compatible func(*EngineParams, *EngineParams) bool) *Record {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -288,7 +436,7 @@ func (s *Store) FindCompatible(modelID, accelerator string, gpuCount int, params
 		// LearnedFrom, which made the one place the uncertainty is acted on
 		// the one place it was invisible -- so the mitigation this paragraph
 		// offers for not gating on completeness was not actually there.
-		if rec.EngineParams == nil || !rec.EngineParams.IsCapacityCompatible(params) {
+		if rec.EngineParams == nil || !compatible(rec.EngineParams, params) {
 			continue
 		}
 
@@ -304,4 +452,61 @@ func (s *Store) FindCompatible(modelID, accelerator string, gpuCount int, params
 	}
 
 	return best
+}
+
+// sameArguments reports whether two parses describe the same engine arguments,
+// leaving out the image: see LoadFromScaleTarget. It is ArgsFingerprint
+// equality, the one definition the restore's arguments gate uses too -- a
+// change the live path keeps a record across is a change a restart restores
+// across. It was a DeepEqual over the struct, which also compared the inputs
+// EffectiveMaxBatchedTokens is resolved from, so writing the default budget
+// out explicitly replaced a live record that a restart would have restored.
+func sameArguments(a, b EngineParams) bool {
+	return a.ArgsFingerprint() == b.ArgsFingerprint()
+}
+
+// sameHardware reports whether a record was learned on the hardware a
+// variant now runs on. An unresolved accelerator, or an unknown GPU count, on
+// either side is not taken as a difference: the reading flips with pod
+// placement, and a move is only a move when both ends are known.
+func sameHardware(rec *Record, accelerator string, gpuCount int) bool {
+	if constants.IsAcceleratorResolved(rec.AcceleratorName) && constants.IsAcceleratorResolved(accelerator) &&
+		rec.AcceleratorName != accelerator {
+		return false
+	}
+	return rec.GpuCount <= 0 || gpuCount <= 0 || rec.GpuCount == gpuCount
+}
+
+// kvTotalCarries reports whether a KV total measured under prev still bounds
+// an engine started with cur, so it may stand as the new engine's k1.
+//
+// The cache must be sized alike: the engine, the checkpoint and its dtypes and
+// quantization, the memory share, the block size, the parallel layout
+// (tensor, data and pipeline, and expert parallelism, which moves the
+// weights), speculative decoding (a draft model's weights and cache), CUDA
+// graphs, and the overrides that set it outright. The image is not
+// compared: a release can move the cache a little either way, and the
+// carried total is then off by as much -- the same allowance
+// IsCapacityCompatible makes.
+//
+// The per-step budgets are compared one way. vLLM sizes the cache from what
+// its profiling run leaves free, and that run's peak grows with the batch-token
+// budget and, through the CUDA graphs it captures, with --max-num-seqs. A
+// smaller budget leaves the cache no smaller, so the old total under-states
+// it and orders more replicas, not fewer; a larger one can shrink it, and the
+// old total would over-state it, so it is not carried. The context length
+// decides how the cache is used, not how big it is.
+func kvTotalCarries(prev, cur EngineParams) bool {
+	return prev.Engine == cur.Engine &&
+		prev.WeightDtype == cur.WeightDtype && prev.Quantization == cur.Quantization &&
+		prev.GpuMemoryUtilization == cur.GpuMemoryUtilization && prev.BlockSize == cur.BlockSize &&
+		prev.KvCacheDtype == cur.KvCacheDtype && prev.TensorParallelSize == cur.TensorParallelSize &&
+		prev.NumGpuBlocksOverride == cur.NumGpuBlocksOverride && prev.TotalKvTokensOverride == cur.TotalKvTokensOverride &&
+		prev.EnforceEager == cur.EnforceEager &&
+		parallelSize(prev.DataParallelSize) == parallelSize(cur.DataParallelSize) &&
+		parallelSize(prev.PipelineParallelSize) == parallelSize(cur.PipelineParallelSize) &&
+		prev.ExpertParallel == cur.ExpertParallel && prev.SpeculativeConfig == cur.SpeculativeConfig &&
+		prev.ModelPath == cur.ModelPath && prev.ModelRevision == cur.ModelRevision &&
+		slices.Equal(prev.SharingUnresolved, cur.SharingUnresolved) && prev.MemoryLayout == cur.MemoryLayout &&
+		cur.EffectiveMaxBatchedTokens <= prev.EffectiveMaxBatchedTokens && cur.MaxNumSeqs <= prev.MaxNumSeqs
 }

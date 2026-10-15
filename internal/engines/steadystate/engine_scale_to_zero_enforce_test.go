@@ -79,7 +79,7 @@ var _ = Describe("applyScaleToZeroEnforcement", func() {
 	It("zeroes an idle all-vLLM model (canary: the enforcer does run when ungated)", func() {
 		e := engineWithIdleEnforcer()
 		d := decisions()
-		scaledToZero := e.applyScaleToZeroEnforcement(ctx, modelID, namespace, "v1-saturation",
+		scaledToZero := e.applyScaleToZeroEnforcement(ctx, modelID, namespace, "v1-saturation", nil,
 			d, map[string]scaletarget.ScaleTargetAccessor{"a": target("vllm/vllm-openai:latest")}, nil)
 		Expect(scaledToZero).To(BeTrue())
 		Expect(d[0].TargetReplicas).To(Equal(0))
@@ -95,7 +95,7 @@ var _ = Describe("applyScaleToZeroEnforcement", func() {
 
 		e := engineWithIdleEnforcer() // configured retention: 10m
 		d := decisions()
-		scaledToZero := e.applyScaleToZeroEnforcement(ctx, modelID, namespace, "v2-saturation",
+		scaledToZero := e.applyScaleToZeroEnforcement(ctx, modelID, namespace, "v2-saturation", nil,
 			d, map[string]scaletarget.ScaleTargetAccessor{"a": target("vllm/vllm-openai:latest")}, nil)
 		Expect(scaledToZero).To(BeFalse())
 		Expect(d[0].TargetReplicas).To(Equal(2),
@@ -110,7 +110,7 @@ var _ = Describe("applyScaleToZeroEnforcement", func() {
 
 		e := engineWithIdleEnforcer()
 		d := decisions()
-		scaledToZero := e.applyScaleToZeroEnforcement(ctx, modelID, namespace, "v2-saturation",
+		scaledToZero := e.applyScaleToZeroEnforcement(ctx, modelID, namespace, "v2-saturation", nil,
 			d, map[string]scaletarget.ScaleTargetAccessor{"a": target("vllm/vllm-openai:latest")}, nil)
 		Expect(scaledToZero).To(BeTrue())
 		Expect(d[0].TargetReplicas).To(Equal(0))
@@ -124,7 +124,7 @@ var _ = Describe("applyScaleToZeroEnforcement", func() {
 	It("zeroes an idle SGLang model, measured by its own request counter", func() {
 		e := engineWithIdleEnforcer()
 		d := decisions()
-		scaledToZero := e.applyScaleToZeroEnforcement(ctx, modelID, namespace, "v2-saturation",
+		scaledToZero := e.applyScaleToZeroEnforcement(ctx, modelID, namespace, "v2-saturation", nil,
 			d, map[string]scaletarget.ScaleTargetAccessor{"a": target("lmsysorg/sglang:latest")}, nil)
 		Expect(scaledToZero).To(BeTrue(), "SGLang has sglang:num_requests_total and can be measured")
 		Expect(d[0].TargetReplicas).To(Equal(0))
@@ -136,7 +136,7 @@ var _ = Describe("applyScaleToZeroEnforcement", func() {
 	It("does NOT zero a mixed vLLM+SGLang model", func() {
 		e := engineWithIdleEnforcer()
 		d := decisions()
-		scaledToZero := e.applyScaleToZeroEnforcement(ctx, modelID, namespace, "queueing-model",
+		scaledToZero := e.applyScaleToZeroEnforcement(ctx, modelID, namespace, "queueing-model", nil,
 			d, map[string]scaletarget.ScaleTargetAccessor{
 				"a": target("vllm/vllm-openai:latest"),
 				"b": target("lmsysorg/sglang:latest"),
@@ -149,7 +149,7 @@ var _ = Describe("applyScaleToZeroEnforcement", func() {
 		e := engineWithIdleEnforcer()
 		d := decisions()
 		min := 1
-		scaledToZero := e.applyScaleToZeroEnforcement(ctx, modelID, namespace, "v1-saturation",
+		scaledToZero := e.applyScaleToZeroEnforcement(ctx, modelID, namespace, "v1-saturation", nil,
 			d, map[string]scaletarget.ScaleTargetAccessor{"a": target("vllm/vllm-openai:latest")},
 			[]domain.VariantReplicaState{{VariantName: "v1", MinReplicas: &min}})
 		Expect(scaledToZero).To(BeFalse())
@@ -178,7 +178,7 @@ var _ = Describe("applyScaleToZeroEnforcement", func() {
 			},
 		})
 		d := decisions()
-		scaledToZero := e.applyScaleToZeroEnforcement(ctx, modelID, namespace, "v2-saturation",
+		scaledToZero := e.applyScaleToZeroEnforcement(ctx, modelID, namespace, "v2-saturation", nil,
 			d, map[string]scaletarget.ScaleTargetAccessor{"a": target("vllm/vllm-openai:latest")}, nil)
 		Expect(scaledToZero).To(BeFalse())
 		Expect(d[0].TargetReplicas).To(Equal(2), "a per-model scaleToZero:false must override the default entry")

@@ -70,6 +70,10 @@ var (
 	sfzQueueFallbackActive              *prometheus.GaugeVec
 	nodeAccessDenied                    *prometheus.GaugeVec
 	policyNamespaceUnverified           *prometheus.GaugeVec
+	configRejectedEntries               *prometheus.GaugeVec
+	configUnknownKeys                   *prometheus.GaugeVec
+	configIgnoredFields                 *prometheus.GaugeVec
+	podAccessDenied                     *prometheus.GaugeVec
 	enforcerModificationsTotal          *prometheus.CounterVec
 	optimizerActive                     *prometheus.GaugeVec
 	configInfoGauge                     *prometheus.GaugeVec
@@ -79,6 +83,8 @@ var (
 	metricsPodsDiscovered               *prometheus.GaugeVec
 	metricsFreshnessStatus              *prometheus.GaugeVec
 	podMappingMissTotal                 *prometheus.CounterVec
+	scalerUndecidedAnswersTotal         *prometheus.CounterVec
+	scalerPanicsTotal                   *prometheus.CounterVec
 
 	// Saturation and capacity metrics
 	saturationUtilization *prometheus.GaugeVec
@@ -585,6 +591,46 @@ func InitMetrics(registry prometheus.Registerer) error {
 		policyNamespaceUnverifiedLabels,
 	)
 
+	podAccessDeniedLabels := []string{}
+	if controllerInstance != "" {
+		podAccessDeniedLabels = append(podAccessDeniedLabels, constants.LabelControllerInstance)
+	}
+	podAccessDenied = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: constants.WVAPodAccessDenied,
+			Help: "1 while a namespace-scoped controller may not list Pods cluster-wide, so GPU usage counts its own namespace only and other namespaces' GPUs on shared nodes read as free",
+		},
+		podAccessDeniedLabels,
+	)
+
+	configRejectedEntriesLabels := []string{constants.LabelNamespace, "configmap"}
+	if controllerInstance != "" {
+		configRejectedEntriesLabels = append(configRejectedEntriesLabels, constants.LabelControllerInstance)
+	}
+	configRejectedEntries = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: constants.WVAConfigRejectedEntries,
+			Help: "Entries of a scaling-policy ConfigMap rejected at its last load; a rejected entry keeps the previous one under its key, if any",
+		},
+		configRejectedEntriesLabels,
+	)
+
+	configUnknownKeys = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: constants.WVAConfigUnknownKeys,
+			Help: "Keys of a scaling-policy ConfigMap's entries that the schema does not define; ignored, the entries still apply",
+		},
+		configRejectedEntriesLabels,
+	)
+
+	configIgnoredFields = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: constants.WVAConfigIgnoredFields,
+			Help: "Fields of a scaling-policy ConfigMap's entries whose value cannot be used; they act as unset, the entries still apply",
+		},
+		configRejectedEntriesLabels,
+	)
+
 	sfzQueueFallbackLabels := []string{"pool"}
 	if controllerInstance != "" {
 		sfzQueueFallbackLabels = append(sfzQueueFallbackLabels, constants.LabelControllerInstance)
@@ -708,6 +754,27 @@ func InitMetrics(registry prometheus.Registerer) error {
 		podMappingMissLabels,
 	)
 
+	scalerUndecidedLabels := []string{constants.LabelNamespace, constants.LabelReason}
+	scalerPanicLabels := []string{constants.LabelMethod}
+	if controllerInstance != "" {
+		scalerUndecidedLabels = append(scalerUndecidedLabels, constants.LabelControllerInstance)
+		scalerPanicLabels = append(scalerPanicLabels, constants.LabelControllerInstance)
+	}
+	scalerUndecidedAnswersTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: constants.WVAScalerUndecidedAnswersTotal,
+			Help: "Total number of KEDA GetMetrics answers given without a WVA decision (the scale target's current replica count)",
+		},
+		scalerUndecidedLabels,
+	)
+	scalerPanicsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: constants.WVAScalerPanicsTotal,
+			Help: "Total number of panics recovered in the KEDA external scaler's gRPC handlers",
+		},
+		scalerPanicLabels,
+	)
+
 	// Register metrics with the registry
 	if err := registry.Register(replicaScalingTotal); err != nil {
 		return fmt.Errorf("failed to register replicaScalingTotal metric: %w", err)
@@ -778,6 +845,18 @@ func InitMetrics(registry prometheus.Registerer) error {
 	if err := registry.Register(policyNamespaceUnverified); err != nil {
 		return fmt.Errorf("failed to register policyNamespaceUnverified metric: %w", err)
 	}
+	if err := registry.Register(podAccessDenied); err != nil {
+		return fmt.Errorf("failed to register podAccessDenied metric: %w", err)
+	}
+	if err := registry.Register(configRejectedEntries); err != nil {
+		return fmt.Errorf("failed to register configRejectedEntries metric: %w", err)
+	}
+	if err := registry.Register(configUnknownKeys); err != nil {
+		return fmt.Errorf("failed to register configUnknownKeys metric: %w", err)
+	}
+	if err := registry.Register(configIgnoredFields); err != nil {
+		return fmt.Errorf("failed to register configIgnoredFields metric: %w", err)
+	}
 	if err := registry.Register(sfzQueueFallbackActive); err != nil {
 		return fmt.Errorf("failed to register sfzQueueFallbackActive metric: %w", err)
 	}
@@ -804,6 +883,15 @@ func InitMetrics(registry prometheus.Registerer) error {
 	}
 	if err := registry.Register(podMappingMissTotal); err != nil {
 		return fmt.Errorf("failed to register podMappingMissTotal metric: %w", err)
+	}
+	if err := registry.Register(scalerUndecidedAnswersTotal); err != nil {
+		return fmt.Errorf("failed to register scalerUndecidedAnswersTotal metric: %w", err)
+	}
+	if err := registry.Register(scalerPanicsTotal); err != nil {
+		return fmt.Errorf("failed to register scalerPanicsTotal metric: %w", err)
+	}
+	if err := registry.Register(newScalerUndecidedTargetsCollector(controllerInstance)); err != nil {
+		return fmt.Errorf("failed to register scalerUndecidedTargets metric: %w", err)
 	}
 	if err := registry.Register(metricsFreshnessStatus); err != nil {
 		return fmt.Errorf("failed to register metricsFreshnessStatus metric: %w", err)
@@ -845,6 +933,9 @@ func InitMetrics(registry prometheus.Registerer) error {
 		return fmt.Errorf("failed to register analyzerTarget metric: %w", err)
 	}
 	if err := registerUtilizationShareMetrics(registry); err != nil {
+		return err
+	}
+	if err := registerServiceRateMetrics(registry); err != nil {
 		return err
 	}
 
@@ -1367,6 +1458,85 @@ func SetPolicyNamespaceUnverified(unverified bool) {
 	policyNamespaceUnverified.With(labels).Set(value)
 }
 
+// SetPodAccessDenied records whether the GPU usage walk was refused a
+// cluster-wide Pod list.
+func SetPodAccessDenied(denied bool) {
+	if podAccessDenied == nil {
+		return
+	}
+	labels := prometheus.Labels{}
+	if controllerInstance != "" {
+		labels[constants.LabelControllerInstance] = controllerInstance
+	}
+	value := 0.0
+	if denied {
+		value = 1.0
+	}
+	podAccessDenied.With(labels).Set(value)
+}
+
+// SetConfigRejectedEntries records how many entries of the scaling-policy
+// ConfigMap namespace/name were rejected at its last load. Set on every load,
+// so a fixed ConfigMap reads 0.
+func SetConfigRejectedEntries(namespace, name string, rejected int) {
+	if configRejectedEntries == nil {
+		return
+	}
+	labels := prometheus.Labels{constants.LabelNamespace: namespace, "configmap": name}
+	if controllerInstance != "" {
+		labels[constants.LabelControllerInstance] = controllerInstance
+	}
+	configRejectedEntries.With(labels).Set(float64(rejected))
+}
+
+// SetConfigUnknownKeys records how many keys the schema does not define the
+// scaling-policy ConfigMap namespace/name carried at its last load.
+func SetConfigUnknownKeys(namespace, name string, unknown int) {
+	if configUnknownKeys == nil {
+		return
+	}
+	labels := prometheus.Labels{constants.LabelNamespace: namespace, "configmap": name}
+	if controllerInstance != "" {
+		labels[constants.LabelControllerInstance] = controllerInstance
+	}
+	configUnknownKeys.With(labels).Set(float64(unknown))
+}
+
+// SetConfigIgnoredFields records how many fields of the scaling-policy
+// ConfigMap namespace/name could not be used at its last load. Set on every
+// load, so a fixed ConfigMap reads 0.
+func SetConfigIgnoredFields(namespace, name string, ignored int) {
+	if configIgnoredFields == nil {
+		return
+	}
+	labels := prometheus.Labels{constants.LabelNamespace: namespace, "configmap": name}
+	if controllerInstance != "" {
+		labels[constants.LabelControllerInstance] = controllerInstance
+	}
+	configIgnoredFields.With(labels).Set(float64(ignored))
+}
+
+// DeleteConfigEntryGauges removes the wva_config_rejected_entries,
+// wva_config_unknown_keys and wva_config_ignored_fields series of the
+// scaling-policy ConfigMap namespace/name. Called when the ConfigMap is
+// deleted: a deleted ConfigMap has no entries, and its last count would
+// otherwise be reported for as long as the controller runs.
+func DeleteConfigEntryGauges(namespace, name string) {
+	labels := prometheus.Labels{constants.LabelNamespace: namespace, "configmap": name}
+	if controllerInstance != "" {
+		labels[constants.LabelControllerInstance] = controllerInstance
+	}
+	if configRejectedEntries != nil {
+		configRejectedEntries.Delete(labels)
+	}
+	if configUnknownKeys != nil {
+		configUnknownKeys.Delete(labels)
+	}
+	if configIgnoredFields != nil {
+		configIgnoredFields.Delete(labels)
+	}
+}
+
 // SetScaleFromZeroQueueFallbackActive records whether scale-from-zero is reading
 // the EPP flow-control queue from Prometheus (true) or scraping the EPP directly
 // (false), per pool. It is a gauge rather than a counter because what matters is
@@ -1513,6 +1683,97 @@ func IncPodMappingMiss(namespace, reason string) {
 		labels[constants.LabelControllerInstance] = controllerInstance
 	}
 	podMappingMissTotal.With(labels).Inc()
+}
+
+// IncScalerUndecidedAnswer counts one GetMetrics answer the KEDA external
+// scaler gave without a WVA decision behind it. reason is one of the
+// constants.ScalerUndecided* values.
+func IncScalerUndecidedAnswer(namespace, reason string) {
+	if scalerUndecidedAnswersTotal == nil {
+		return
+	}
+	labels := prometheus.Labels{
+		constants.LabelNamespace: namespace,
+		constants.LabelReason:    reason,
+	}
+	if controllerInstance != "" {
+		labels[constants.LabelControllerInstance] = controllerInstance
+	}
+	scalerUndecidedAnswersTotal.With(labels).Inc()
+}
+
+var (
+	// scalerUndecidedTargetsMu guards scalerUndecidedTargetsFn.
+	scalerUndecidedTargetsMu sync.Mutex
+	// scalerUndecidedTargetsFn reports, per namespace, how many ScaledObjects
+	// the external scaler is currently answering without a decision. Read at
+	// scrape time, so the gauge never outlives the state it reports.
+	scalerUndecidedTargetsFn func() map[string]int
+)
+
+// SetScalerUndecidedTargetsSource sets the function wva_scaler_undecided_targets
+// is read from at scrape time (scaler.Handler.UndecidedTargets). Nil reports
+// nothing.
+func SetScalerUndecidedTargetsSource(fn func() map[string]int) {
+	scalerUndecidedTargetsMu.Lock()
+	defer scalerUndecidedTargetsMu.Unlock()
+	scalerUndecidedTargetsFn = fn
+}
+
+// scalerUndecidedTargetsCollector emits wva_scaler_undecided_targets from
+// scalerUndecidedTargetsFn on every scrape. A collector rather than a GaugeVec:
+// the set is pruned when read, so a namespace whose last undecided target is
+// deleted drops out of the scrape instead of keeping a series set by a call
+// that will never come again.
+type scalerUndecidedTargetsCollector struct {
+	desc     *prometheus.Desc
+	instance string
+}
+
+func newScalerUndecidedTargetsCollector(instance string) *scalerUndecidedTargetsCollector {
+	labels := []string{constants.LabelNamespace}
+	if instance != "" {
+		labels = append(labels, constants.LabelControllerInstance)
+	}
+	return &scalerUndecidedTargetsCollector{
+		desc: prometheus.NewDesc(constants.WVAScalerUndecidedTargets,
+			"Number of ScaledObjects the KEDA external scaler is currently answering without a WVA decision (with the scale target's current replica count)",
+			labels, nil),
+		instance: instance,
+	}
+}
+
+// Describe implements prometheus.Collector.
+func (c *scalerUndecidedTargetsCollector) Describe(ch chan<- *prometheus.Desc) { ch <- c.desc }
+
+// Collect implements prometheus.Collector.
+func (c *scalerUndecidedTargetsCollector) Collect(ch chan<- prometheus.Metric) {
+	scalerUndecidedTargetsMu.Lock()
+	fn := scalerUndecidedTargetsFn
+	scalerUndecidedTargetsMu.Unlock()
+	if fn == nil {
+		return
+	}
+	for ns, n := range fn() {
+		values := []string{ns}
+		if c.instance != "" {
+			values = append(values, c.instance)
+		}
+		ch <- prometheus.MustNewConstMetric(c.desc, prometheus.GaugeValue, float64(n), values...)
+	}
+}
+
+// IncScalerPanic counts one panic recovered in a KEDA external scaler gRPC
+// handler. method is the full gRPC method name.
+func IncScalerPanic(method string) {
+	if scalerPanicsTotal == nil {
+		return
+	}
+	labels := prometheus.Labels{constants.LabelMethod: method}
+	if controllerInstance != "" {
+		labels[constants.LabelControllerInstance] = controllerInstance
+	}
+	scalerPanicsTotal.With(labels).Inc()
 }
 
 // SetMetricsPodsDiscovered sets the number of pods discovered in a namespace.

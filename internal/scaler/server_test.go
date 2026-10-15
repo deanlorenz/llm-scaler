@@ -10,6 +10,7 @@ import (
 
 	kedav1alpha1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 	pb "github.com/kedacore/keda/v2/pkg/scalers/externalscaler"
+	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -17,7 +18,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/decision"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/metrics"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/registry"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/scaler"
 )
@@ -31,6 +34,79 @@ func freePort() string {
 	addr := l.Addr().String()
 	Expect(l.Close()).To(Succeed())
 	return addr
+}
+
+// A panic in one call must cost that call, not the process: the server is in
+// the same binary as every engine, so an unrecovered panic in one workload's
+// GetMetrics stops scaling for the whole fleet.
+var _ = Describe("Server panic recovery", func() {
+	It("answers a panicking call with Internal and keeps serving", func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		promReg := prometheus.NewRegistry()
+		Expect(metrics.InitMetrics(promReg)).To(Succeed())
+
+		addr := freePort()
+		// No client: resolving the scale target dereferences it, which panics in
+		// the handler goroutine -- the stand-in for any bug in a handler.
+		srv := &scaler.Server{Addr: addr, Registry: registry.New(time.Minute)}
+		done := make(chan error, 1)
+		go func() { done <- srv.Start(ctx) }()
+
+		conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		Expect(err).NotTo(HaveOccurred())
+		defer func() { Expect(conn.Close()).To(Succeed()) }()
+		cli := pb.NewExternalScalerClient(conn)
+
+		Eventually(func() error {
+			_, err := cli.GetMetricSpec(ctx, ref("chat-decode", nil))
+			return err
+		}, 5*time.Second).Should(Succeed())
+
+		By("unary: GetMetrics panics and is answered Internal")
+		_, err = cli.GetMetrics(ctx, &pb.GetMetricsRequest{ScaledObjectRef: ref("chat-decode", nil)})
+		Expect(status.Code(err)).To(Equal(codes.Internal), "got %v", err)
+
+		By("stream: StreamIsActive panics and is answered Internal")
+		stream, err := cli.StreamIsActive(ctx, ref("chat-decode", nil))
+		Expect(err).NotTo(HaveOccurred())
+		_, err = stream.Recv()
+		Expect(status.Code(err)).To(Equal(codes.Internal), "got %v", err)
+
+		By("each recovered panic is counted under its method")
+		Expect(panicsCounted(promReg)).To(Equal(map[string]float64{
+			"/externalscaler.ExternalScaler/GetMetrics":     1,
+			"/externalscaler.ExternalScaler/StreamIsActive": 1,
+		}))
+
+		By("the server is still up")
+		_, err = cli.GetMetricSpec(ctx, ref("chat-decode", nil))
+		Expect(err).NotTo(HaveOccurred())
+
+		cancel()
+		Eventually(done, 10*time.Second).Should(Receive(BeNil()))
+	})
+})
+
+// panicsCounted reads wva_scaler_panics_total from reg, by method.
+func panicsCounted(reg *prometheus.Registry) map[string]float64 {
+	GinkgoHelper()
+	mfs, err := reg.Gather()
+	Expect(err).NotTo(HaveOccurred())
+	out := map[string]float64{}
+	for _, mf := range mfs {
+		if mf.GetName() != constants.WVAScalerPanicsTotal {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() == constants.LabelMethod {
+					out[l.GetValue()] = m.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	return out
 }
 
 // The Server runs in two phases over one address: a standby phase until the

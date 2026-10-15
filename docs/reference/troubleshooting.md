@@ -25,7 +25,8 @@ LOGS="kubectl logs -n $NS -l app.kubernetes.io/name=workload-variant-autoscaler 
 | desired is not current | `wva_desired_replicas != wva_current_replicas` for many cycles | HPA stabilization window, KEDA not reaching the scaler, Pods Pending (GPUs, ResourceQuota), slow starts | [actuation stuck](#desired-is-not-current-actuation-stuck) |
 | GPUs held / quota spent | `ResourceConstrained` Event; `wva_decisions_limited_total` rising; `wva_model_scaling_blocked{reason="quota-short"}` | the quota or GPU inventory is used up, unresolved accelerators, a lowered quota (it does not evict) | [GPUs held](#gpus-held-or-quota-spent) |
 | metrics stale or missing | `MetricsUnavailable` Event; `wva_metrics_freshness_status{status!="fresh"} > 0`; `WVAMetricsCollectionFailing`; `wva_unmeasured_queue > 0` | ServiceMonitor or PodMonitor not selecting the pods, Prometheus unreachable, FMA launcher pods not scraped | [metrics](#metrics-stale-or-missing) |
-| controller not Ready or crash-looping | pod `0/1` or `CrashLoopBackOff`; log `refusing to start unbounded`; readiness check `gpu-policy` failing | cluster policy unreadable, a `gpu-inventory` limiter with no node read, a Prometheus setting it refuses, an image older than the manifests | [controller not Ready](#the-controller-is-not-ready-or-crash-looping) |
+| controller not Ready or crash-looping | pod `0/1` or `CrashLoopBackOff`; log `refusing to start unbounded`; readiness check `gpu-policy` failing | cluster policy unreadable, an invalid `default` entry in the ConfigMap the limiters come from, a `gpu-inventory` limiter with no node read, a Prometheus setting it refuses, an image older than the manifests | [controller not Ready](#the-controller-is-not-ready-or-crash-looping) |
+| cluster policy not applied | `WVAPolicyNamespaceUnverified`; `wva_policy_namespace_unverified == 1` | the controller may not read Namespaces, so it runs on its own ConfigMap | [policy namespace unverified](#cluster-policy-is-not-applied-policy-namespace-unverified) |
 | ScaledObject `READY False` or `TARGETS <unknown>` | `kubectl get scaledobject,hpa -n <ns>` | `scalerAddress` names a namespace with no scaler, `modelID` missing, the controller not Ready, KEDA backing off after a reinstall | [ScaledObject](#scaledobject-ready-false-or-targets-unknown) |
 | capacity priced high after a restart | TTFT worse after an upgrade or leader change; `P3-k2`/`P4-k1` in `k2-decision` where `P1-obs` was before | `LEARNED_STATE_SNAPSHOT` off, the Role missing, an engine configuration that changed or could not be read | [after a restart](#capacity-priced-high-after-a-restart) |
 | utilization-share optimizer does nothing | `wva_utilization_share_mode`, `wva_utilization_share_actionable` | shadow mode, not planned, held, swinging | [optimizer](#the-optimizer-evaluates-but-never-moves-anything) |
@@ -128,19 +129,17 @@ and `wva_scale_from_zero_queue_fallback_active{pool="..."}` is `1`.
 
 **What it means**: the scaling manager reads the flow-control queue by scraping
 the EPP pod **directly** (pod IP, EPP metrics port, bearer token projected at
-`/var/run/secrets/epp-metrics/token`). Everything else comes from Prometheus, so
-this one path can fail on its own. When it does, the scaling manager reads the
-same metric from Prometheus so models still wake, only slower: bounded by the
-scrape interval instead of a 100 ms loop. A sample older than 90 s is ignored,
-so a queue that has already drained cannot wake anything.
+`/var/run/secrets/epp-metrics/token`). Only this path bypasses Prometheus, so it
+can fail alone. Then the scaling manager reads the same metric from Prometheus:
+models still wake, but at the scrape interval instead of a 100 ms loop. A sample
+older than 90 s is ignored, so a drained queue cannot wake anything.
 
 Check, in order:
 
 1. **The token.** `Failed to read EPP metrics token` in the log means the
-   projected volume is missing; the scrape then goes unauthenticated and the
-   EPP rejects it.
-   The image is distroless, so there is no shell to `exec` into. Check the
-   Secret has a token, and that the Deployment mounts it:
+   projected volume is missing, so the unauthenticated scrape is rejected. The
+   image has no shell, so check the Secret has a token and the Deployment
+   mounts it:
    ```bash
    kubectl get secret wva-epp-metrics-token -n "$NS" -o jsonpath='{.data.token}' | wc -c
    kubectl get deploy wva-controller-manager -n "$NS" \
@@ -148,18 +147,16 @@ Check, in order:
    ```
    A count of `0` means the token controller never filled the Secret; an
    empty second line means the volume is missing from the Deployment.
-2. **The EPP's tokenreview RBAC** (cluster admin), which authorizes the
-   controller's token. It is bound per EPP release name, so a renamed or
-   reinstalled EPP release leaves the binding pointing at nothing.
+2. **The EPP's tokenreview RBAC** (cluster admin). It is bound per EPP release
+   name, so a renamed or reinstalled EPP release leaves it pointing at nothing.
    ```bash
    kubectl get clusterrolebinding | grep epp-tokenreview
    ```
-3. **Network reachability to the EPP pod IP.** Prometheus scrapes the EPP too,
-   so a NetworkPolicy that admits the monitoring namespace but not the
-   controller's breaks exactly this path and no other.
+3. **Network reachability to the EPP pod IP.** A NetworkPolicy that admits the
+   monitoring namespace but not the controller's breaks this path only.
 
-The gauge returns to `0` and the log reports the scrape recovered once the
-direct path works.
+Once the direct path works, the gauge returns to `0` and the log says the scrape
+recovered.
 
 ### Slow wakes
 
@@ -172,8 +169,8 @@ shows the time from activation to serving.
   ```bash
   kubectl set env -n "$NS" deploy/wva-controller-manager SCALE_FROM_ZERO_ENGINE_MAX_CONCURRENCY=50
   ```
-  This restarts the controller. Check it is still set after each later
-  `make deploy-wva`, which re-applies the Deployment.
+  This restarts the controller. A later `make deploy-wva` re-applies the
+  Deployment, so check it is still set.
 - **The replica itself starts slowly.** Compare with `wva_replica_start_seconds`;
   see [Preparing a workload](workload-preparation.md).
 - **Requests bypass the gateway.** Requests sent straight to model pods never
@@ -181,7 +178,11 @@ shows the time from activation to serving.
 
 ### E2E and infra-only deploys
 
-For e2e-style deploys, **`deploy/install-epp.sh`** enables EPP flow control when `ENABLE_SCALE_TO_ZERO=true` (adds the `flowControl` feature gate to the GAIE standalone chart). The **InferenceObjective** `e2e-default` is created by the scale-from-zero e2e tests (`test/e2e/fixtures`), not by the install scripts. See [deploy/install-epp.sh](../../deploy/install-epp.sh).
+- [`deploy/install-epp.sh`](../../deploy/install-epp.sh) turns on EPP flow
+  control when `ENABLE_SCALE_TO_ZERO=true` (it adds the `flowControl` feature
+  gate to the GAIE standalone chart).
+- The **InferenceObjective** `e2e-default` comes from the scale-from-zero e2e
+  tests (`test/e2e/fixtures`), not from the install scripts.
 
 ## A model will not park at zero
 
@@ -194,14 +195,14 @@ wva_model_scaling_blocked{model_name="<model>"}
 | reason | fix |
 | --- | --- |
 | `variant-floor` | a variant still has `minReplicaCount > 0`; set every variant to 0 |
-| `policy-forbids-zero` | the model's resolved policy has `scaleToZero` off; turn it on on the `default` entry (or its `defaultPolicy` tier) or the model's per-model entry, or accept that it stays up |
+| `policy-forbids-zero` | the model's resolved policy has `scaleToZero` off; turn it on for every tier the model's variants name (the `default` entry or its `defaultPolicy` tier when they name none), or on the model's per-model entry, or accept that it stays up |
 | `activation-retention` | just woken and held for its retention period; clears by itself |
 | `engine-unsupported` | the model runs both vLLM and SGLang; run one engine per model |
 
-No reason at all, and still not parked: a model that has never served a request
-has no request counter yet, so the controller keeps it where it is. Send one
-request. The full runbook is in the
-[scale-to-zero guide](../guides/scale-to-zero/README.md#when-a-model-will-not-park).
+No reason, and still not parked? A model that has never served a request has
+no request counter yet, so the controller keeps it where it is. Send one
+request. Full runbook: [scale-to-zero
+guide](../guides/scale-to-zero/README.md#when-a-model-will-not-park).
 
 ## A model is flapping
 
@@ -209,10 +210,10 @@ request. The full runbook is in the
 fires at more than two decisions a minute for one variant.
 
 That alert is not proof of flapping. Its counter, `wva_replica_scaling_total`,
-rises on every cycle whose decision is not `no-change`, so a scale-up that keeps
-being asked for and never lands fires it too: actuation stuck, Pods Pending, or
-replicas that take minutes to start. Step 1 tells the two apart; if `tgt` is
-steady above `curr`, go to [actuation stuck](#desired-is-not-current-actuation-stuck).
+rises on every cycle that is not `no-change`. A scale-up that is asked for and
+never lands fires it too (actuation stuck, Pods Pending, slow starts). Step 1
+tells them apart: if `tgt` is steady above `curr`, go to [actuation
+stuck](#desired-is-not-current-actuation-stuck).
 
 1. **Read what the controller decided**, cycle by cycle:
    ```bash
@@ -257,18 +258,18 @@ steady above `curr`, go to [actuation stuck](#desired-is-not-current-actuation-s
 **Symptom**: `wva_variant_at_max_replicas == 1`, or `"atMax":true` in
 `scaling-decision`, and latency is high.
 
-At max on its own is normal: a well-sized variant under load sits there. It is a
-problem only when `util` in `analyzer-result` is still above `scaleUpThreshold`.
-That is demand going unserved, and more GPUs will not help: the ceiling is yours.
+At max is normal for a well-sized variant under load. It is a problem only when
+`util` in `analyzer-result` is still above `scaleUpThreshold`: demand goes
+unserved, and more GPUs will not help. Raise the ceiling.
 
 ```bash
 kubectl get scaledobject <name> -n <ns> -o jsonpath='{.spec.maxReplicaCount}'
 kubectl patch scaledobject <name> -n <ns> --type=merge -p '{"spec":{"maxReplicaCount":<n>}}'
 ```
 
-Check the GPUs first: a higher ceiling with no free GPUs turns into Pending
-pods ([GPUs held](#gpus-held-or-quota-spent)). A benchmark run pinned at its
-ceiling measures the ceiling, not the autoscaler.
+Check for free GPUs first; without them a higher ceiling gives Pending pods
+([GPUs held](#gpus-held-or-quota-spent)). A benchmark pinned at its ceiling
+measures the ceiling, not the autoscaler.
 
 ## Desired is not current (actuation stuck)
 
@@ -317,13 +318,11 @@ model cannot grow while others hold GPUs.
 | `wva_unattributed_gpus > 0` | GPUs held by workloads whose accelerator did not resolve, charged to no pool, so every pool looks freer than it is |
 | `wva_model_scaling_blocked{reason="quota-short"}` | under the utilization-share optimizer, the whole group is short |
 
-A quota that is **fully** spent can show none of these: the decision lands at
-`no-change` (`tgt` equal to `curr` with `util` over the threshold) and no Event
-is recorded. Compare the quota with what the models hold:
-
-First find where the limiters come from. When a policy namespace governs this
-controller (`wva-policy` by default), the limiters are read there and any in the
-controller's own ConfigMap are ignored:
+A **fully** spent quota can show none of these: the decision is `no-change`
+(`tgt` equals `curr` with `util` over the threshold) and no Event is recorded.
+Compare the quota with what the models hold. First find where the limiters come
+from: when a policy namespace governs this controller (`wva-policy` by default),
+the limiters there apply and any in the controller's own ConfigMap are ignored:
 
 ```bash
 $LOGS | grep -E 'Cluster policy comes from|Loaded cluster policy from the policy namespace|Ignoring limiters in the controller.s own ConfigMap' | tail -5
@@ -341,6 +340,15 @@ What to do:
   each workload (`AcceleratorNotResolved` Event names them).
 - A `gpu-inventory` limiter counts allocatable GPUs on nodes, not GPUs free
   for scheduling.
+- `WVAGPUResourceExhausted` (zero allocatable GPUs of a type): **(cluster admin)**
+  check what the nodes advertise and that the device plugin runs on them. A node
+  that is NotReady, or has no running device plugin, advertises zero.
+  ```bash
+  kubectl get nodes -L nvidia.com/gpu.product \
+    -o custom-columns='NAME:.metadata.name,READY:.status.conditions[?(@.type=="Ready")].status,GPUS:.status.allocatable.nvidia\.com/gpu'
+  kubectl get pods -A -o wide | grep -i device-plugin
+  ```
+  On AMD nodes read `amd\.com/gpu` instead.
 
 See [the GPU limiter](gpu-limiter.md) and [the quota limiter](quota-limiter.md).
 
@@ -366,9 +374,8 @@ on the ScaledObject; `WVAMetricsCollectionFailing` firing.
    ```bash
    kubectl get events -n <ns> --field-selector reason=UnattributedReadyPods
    ```
-   The serving pods are not scraped or their
-   ownerReferences do not reach the scale target. On FMA, see
-   [FMA launcher pods](operations.md#fma-launcher-pods).
+   The serving pods are not scraped, or their ownerReferences do not reach the
+   scale target. On FMA, see [FMA launcher pods](operations.md#fma-launcher-pods).
 
 While a variant's metrics are unavailable it keeps its current replica count.
 Details: [Metrics health](metrics.md).
@@ -388,11 +395,33 @@ failed reads and writes, and the log says why (logger `learned-state`):
   or after a flush. Expected once.
 - `Learned state: snapshot restored` -- read back; `pendingVariants` wait for
   their first cycle, and `aged`, `unusable` and `unattributable` count entries
-  not restored. Then, per variant on its first cycle, `learned state restored`,
-  or `learned state not restored: the variant's engine configuration differs
-  from the one it was learned under, or could not be read completely` -- a
-  flag such as `--max-num-seqs $VLLM_MAX_NUM_SEQS` whose value comes from an
-  `envFrom`. Nothing is restored for that variant, by design.
+  not restored. Then, per variant on its first cycle, one of:
+  - `learned state restored`;
+  - `learned state restored without the ITL baseline: the engine image
+    changed, the arguments did not` -- a new release rolled out while the
+    controller was down. Capacity, throughput and start time are kept;
+  - `learned state not restored: the variant's engine arguments changed; its
+    k2 is kept as a lower-only prior for the buckets it was measured in` --
+    its flags changed while the controller was down. The old capacity is used
+    only where it is lower, and expires (30 minutes from a bucket's first use,
+    then a 6-hour relaxation);
+  - `learned state not restored: the variant's engine arguments changed, and
+    no k2 window was recent enough, on the hardware it runs now, to keep as a
+    prior` -- the same, with nothing to keep: the windows were old, or were
+    measured on another accelerator or GPU count;
+  - `learned state not restored: the variant's engine configuration could not
+    be read completely, so it could not be checked` -- a flag such as
+    `--max-num-seqs $VLLM_MAX_NUM_SEQS` whose value comes from an `envFrom`.
+    Nothing is restored for that variant, by design. `wva_engine_config`'s
+    `unresolved` label names the flag;
+  - `learned state not restored: the variant's engine configuration differs
+    from the one it was learned under` -- a snapshot written by an older
+    release. Expect it for every variant after an upgrade of the scaling
+    manager that changes the `fingerprint_version` label of
+    `wva_engine_config` -- this release moves it from 2 to 3, once.
+
+  Each of these lines carries an `outcome` field: `whole`, `args`, `prior`,
+  `incomplete` or `differs`.
 - `Learned state: could not read the snapshot; nothing restored, and nothing
   will be written until a read succeeds` -- typically Forbidden: the Role
   `wva-learned-state-role` or its binding is missing. Ask an admin to re-run
@@ -435,11 +464,42 @@ kill %1
 
 | failing check, or log line | means | fix |
 | --- | --- | --- |
-| `gpu-policy`: `cluster policy declares a gpu-inventory limiter but this controller may not list nodes` | a limiter was added to cluster policy and this controller lacks node read. Kept NotReady on purpose: otherwise every variant would silently stop scaling up. `wva_node_access_denied` and `WVANodeAccessDenied` report the same | (cluster admin) grant node read: `make enable-physical-limiter` grants every controller it finds and verifies when it runs, so re-run it after a new install. Or remove the limiter |
+| `gpu-policy`: `cluster policy declares a gpu-inventory limiter but this controller cannot confirm it may list nodes` | a limiter is in cluster policy and the node list failed. Kept NotReady on purpose: otherwise every variant would silently stop scaling up. `wva_node_access_denied` and `WVANodeAccessDenied` report the same. The error after the colon says which: `forbidden` is missing node read; `Unauthorized` means the API server rejected the controller's credentials; `no answer yet` means the API server has not answered since the pod started (2s timeout per try) | Forbidden: (cluster admin) grant node read: `make enable-physical-limiter` grants every controller it finds and verifies when it runs, so re-run it after a new install. Or remove the limiter. Unauthorized: check the controller's ServiceAccount token, then restart the pod. No answer yet: check the API server; no action unless it persists ([details](gpu-limiter.md#when-policy-demands-a-limiter-the-controller-cannot-serve)) |
 | `readyz`: `initial ConfigMap bootstrap not complete`, with `cannot read cluster policy from <ns>/<name>, refusing to start unbounded` in the log | the controller cannot read the cluster policy ConfigMap in the policy namespace (`wva-policy` by default). It refuses to run without its limits | (cluster admin) grant it get/list/watch on ConfigMaps there; `make enable-physical-limiter` does this for every controller it finds and verifies when it runs (re-run it after a new install) |
+| `CrashLoopBackOff`, log `refusing to start unbounded: the "default" entry of ConfigMap <ns>/<name> is invalid` | the `default` entry of the ConfigMap the limiters come from has an invalid value. It carries the GPU limits, so the controller will not start without it. The entry was often edited while the controller ran: then the old entry stayed in force, and a `ConfigEntryRejected` event warned that the next restart would fail | fix the entry the log names, then let the pod restart. The line before it gives the reason: `Scaling-policy entry rejected: entry "default" rejected (<reason>)` |
 | `external-scaler` | the gRPC scaler KEDA calls is not serving | read the log around startup for the bind error |
+| pod restarts (`CrashLoopBackOff`) at startup, log `Shutdown requested during startup` after Prometheus connection errors, exit code 143 (read it with `kubectl get pod <pod> -n "$NS" -o jsonpath='{.status.containerStatuses[0].lastState.terminated.exitCode}'`) | the controller cannot reach Prometheus at startup and keeps retrying. Its health endpoint is not served yet, so the startup probe kills it after about 60s and the pod restarts | make Prometheus reachable: check the URL, TLS settings and network policy ([Prometheus](prometheus.md#configuration)). The restarts stop once it connects |
 | `CrashLoopBackOff`, log names a Prometheus setting | a plain `http://` URL without `PROMETHEUS_ALLOW_HTTP=true`, or TLS settings combined with plain HTTP | fix the Prometheus settings ([Prometheus](prometheus.md#configuration)) |
 | `CrashLoopBackOff`, `unknown flag` | the image is older than the manifests | deploy an image built from the same release as the manifests ([Upgrade](upgrade-and-uninstall.md)) |
+
+## Cluster policy is not applied (policy namespace unverified)
+
+**Symptom**: `WVAPolicyNamespaceUnverified` firing, or
+`wva_policy_namespace_unverified == 1`.
+
+The controller may not read Namespaces, so it cannot see whether a cluster
+admin published policy for it. It runs on the ConfigMap in its own namespace,
+and any limiters or quotas an admin published are **not** in force for it.
+
+```bash
+$LOGS | grep -E 'Cannot tell whether a cluster admin published policy|Could not read the managed Namespace' | tail -3
+```
+
+Fix **(cluster admin)**: grant the Namespace read, then restart the controller.
+The gauge is set once at startup.
+
+```bash
+NAMESPACE=<controller namespace> make setup-prereqs
+kubectl rollout restart deployment/wva-controller-manager -n "$NS"
+```
+
+After the restart, the log says where policy comes from:
+
+| log line | policy in force |
+| --- | --- |
+| `Cluster policy comes from the namespace this one is labelled with` | the admin's, from the namespace in the `wva.llmd.ai/policy-namespace` label |
+| `Cluster policy comes from the well-known namespace` | the admin's, from `wva-policy` |
+| `Cluster policy comes from this controller's own namespace` | this controller's own ConfigMap; no admin policy exists. Logged at `-v=1`, which the default `-v=2` shows |
 
 ## ScaledObject READY False or TARGETS `<unknown>`
 
@@ -456,6 +516,8 @@ kubectl get endpoints -n "$NS" wva-external-scaler
 | `wva-external-scaler` has no endpoints | the controller is not Ready | [controller not Ready](#the-controller-is-not-ready-or-crash-looping) |
 | `make verify-deployment` warns that the external scaler NetworkPolicy admits `:9090` ONLY from a namespace KEDA does not run in | the NetworkPolicy admits the wrong namespace, so KEDA's calls are dropped while the controller reads healthy | (cluster admin) `KEDA_NAMESPACE=<namespace KEDA runs in> make setup-prereqs` with the install's other variables ([details](upgrade-and-uninstall.md#the-external-scaler-networkpolicy)) |
 | `TARGETS` reads `cpu: <unknown>/80%` | KEDA never got a metric spec and fell back to CPU | one of the above |
+| the replica count never moves, and `wva_scaler_undecided_targets` stays above 0 for the namespace | the scaler answers the current count because the model has no usable decision. For a cycle or two after a controller restart or leader change that is normal. `wva_scaler_undecided_answers_total` says why: `reason="not-managed"`, or `no-decision` that never stops, means the model is never planned, usually a trigger value that does not parse; `stale` means its decision stopped being republished, so read that model's `scaling-decision` lines | [a bad value freezes the model](scaledobject-trigger.md#model-keys); `external scaler has no decision for this target` names the ScaledObject, and the controller log at `--v=4` names the key |
+| the `Fallback` condition `True`, or `KEDAScalerFailed` that persists | KEDA cannot reach the scaler: the controller is down or not Ready, or the Service has no endpoints | [controller not Ready](#the-controller-is-not-ready-or-crash-looping) |
 | `no children to pick from` in KEDA's log, after an uninstall and reinstall | KEDA's gRPC client is still backing off on a name that did not resolve | (cluster admin) restart the KEDA operator ([details](operations.md#no-children-to-pick-from-after-a-reinstall)) |
 
 More rows: [First-line troubleshooting](operations.md#first-line-troubleshooting).
@@ -470,191 +532,195 @@ Metrics and blocked reasons: [utilization-share metrics](prometheus.md#utilizati
 
 Work down the list in order.
 
-1. **Is it selected at all?** `wva_utilization_share_mode` says: `off`,
-   `invalid`, `shadow` or `active` is `1`. For `invalid` or `off`, the log says
-   why: `Utilization share: invalid optimizer block; keeping today's optimizer`
-   (a misspelled key, a value out of range, an empty `clusterNamespaces` entry,
-   or `needs a limiters: list`, no budget to share). A block in a
-   namespace-local scaling-policy map is ignored:
-   `ignoring optimizer blocks in namespace-local scaling-policy maps`. On a
-   namespace-scoped install that reads its cluster policy from a separate policy
-   namespace, an edit there is read only when the controller starts: restart it
-   after changing the block.
-2. **Is it in shadow mode?** `wva_utilization_share_mode{mode="shadow"} == 1`;
-   the log says `Utilization share: would rebalance (shadow)` rather than
-   `Utilization share: rebalancing`, and `wva_utilization_share_promised_gpus` is
-   absent: it is published only while the optimizer acts. Set `shadow: false`
-   (or remove the key) to act. Both lines are written when the set of actionable
-   roles changes, not every cycle, so a quiet log is not a stopped optimizer.
+1. **Is it selected at all?** Exactly one `wva_utilization_share_mode` series
+   is `1`: `off`, `invalid`, `shadow` or `active`.
+   - For `invalid` or `off`, the log says why: `Utilization share: invalid
+     optimizer block; keeping today's optimizer` (a misspelled key, a value out
+     of range, an empty `clusterNamespaces` entry, or `needs a limiters: list`,
+     no budget to share).
+   - A block in a namespace-local scaling-policy map is ignored: `ignoring
+     optimizer blocks in namespace-local scaling-policy maps`.
+   - A namespace-scoped install that reads cluster policy from a separate policy
+     namespace reads an edit there only at start. Restart it after the change.
+2. **Is it in shadow mode?** `wva_utilization_share_mode{mode="shadow"} == 1`.
+   The log says `Utilization share: would rebalance (shadow)`, not `Utilization
+   share: rebalancing`, and `wva_utilization_share_promised_gpus` is absent (it
+   is published only while acting). Set `shadow: false` (or remove the key) to
+   act. Both lines are written when the set of actionable roles changes, not
+   every cycle, so a quiet log is not a stopped optimizer.
 3. **Is the model planned?** The two lines above, and at `--v=4` the per-cycle
-   `Utilization share: evaluation`, carry a `frozen` field listing the
+   `Utilization share: evaluation`, carry a `frozen` field. It lists the
    group's models left to today's optimizer this cycle, with the reason: no live
    analyzer result, a role with demand but no measured capacity, a
    namespace-local scaling-policy map (not planned in the cluster group), or a
-   namespace not in `clusterNamespaces`. A model whose variants run on more than
-   one accelerator type, one in a namespace with
-   `enabled: false`, or one under only a `gpu-inventory` limiter without
-   `physicalGroups: true` is in no group at all and publishes no role series.
+   namespace not in `clusterNamespaces`. These models are in no group at all
+   and publish no role series: variants on more than one accelerator type, a
+   namespace with `enabled: false`, or only a `gpu-inventory` limiter without
+   `physicalGroups: true`.
 4. **Is any role actionable?** `wva_utilization_share_actionable` is `1` only
    for a role outside its tolerance band *and* off its whole-replica target. All
-   `0` means the fleet is already where the optimizer wants it, or every
-   imbalance is smaller than one replica; `wva_utilization_share_withheld_total{reason="not-actionable"}`
-   counts the latter.
+   `0` means the fleet is where the optimizer wants it, or every imbalance is
+   under one replica (counted by
+   `wva_utilization_share_withheld_total{reason="not-actionable"}`).
 5. **Does it stay actionable?** A role must be actionable on **two consecutive
-   cycles** before a transfer is planned for it, so a role that flickers in and
-   out of band never moves. A hard imbalance (step 6) does not wait for the
-   second cycle. At most two replicas move per role per cycle and two
-   transfers run per group at once.
+   cycles** before a transfer is planned, so a role that flickers never moves.
+   A hard imbalance (step 6) does not wait. At most two replicas move per role
+   per cycle, and two transfers run per group at once.
 6. **Is it held?** `withheld_total{reason="reversal-hold"}` rising, or the
-   model's blocked reason `reversal-hold`, means a role that just gave is being
-   kept from receiving (or the reverse) until the hold in
-   `wva_utilization_share_effective_seconds{param="reversal-hold"}` passes. That
-   is the anti-oscillation rule working, not a fault. The hold lasts about twice
-   a release time from the start of the transfer it gave in; with a 300 s
-   scale-down window that is on the order of 12 minutes. It is lifted for a
-   **hard imbalance**: a role whose load is at least 0.9 of its scale-up
-   threshold receives at once from a role whose load, after giving, is at most
-   0.6 of its own (`utilizationShare.stabilization.skipWaitsWhen`); the
-   controller logs that transfer with `skippedWaits=true`, and the role does not show
-   `reversal-hold` while such a donor exists. So a role held below its need for
-   the whole hold means no other role is that lightly loaded. A cancelled transfer holds only its own
-   donor -> receiver pair from starting again; each role can still move with
-   any other role. The counter also counts moves withheld by a donor's
-   back-off after an aborted release, or by a donor that has given all it can.
-   A donor's calm is judged on the higher of its current need and its peak
-   need -- two readings in a row -- over its scale-down window, so a model
-   read in a trough of its normal demand is not a "lightly loaded" donor.
-   For a receiving model whose bursts outlast a move, the donor is judged on
-   its current need alone: the move lands inside the burst.
-   Two more reasons on the same counter are not holds: `donor-peak` (while the
-   quota holds every model's peak, a model already at its need takes no
-   headroom that would leave its donor below the donor's own recent peak, by
-   a single move or a donor set) and `awaiting-return` (a short model is
-   credited with returns still releasing whose pods hold its pods, in whole
-   replicas, and
-   only the rest is funded by draining other models; the model itself shows
-   blocked reason `awaiting-release`). A third, `scale-down-band`, counts a
-   return a model did not make because it would take the model lower than
-   today's optimizer scales down to (demand a quarter of the way up from
-   `scaleDownBoundary` to `scaleUpThreshold`): a return is today's
-   scale-down, and goes no lower.
-7. **Is it swinging, paced, or at the transfer limit?** Blocked reason `swinging`
-   (`wva_utilization_share_swinging == 1`) means the role reversed direction
-   twice within the swing window and is planned on its mean need, not its
-   current one, so it may look short and still not receive. `transfer-limit`
-   means the group already runs two transfers with a donor; it clears as they
-   land. `burst-ending` means the role is short with a hard imbalance, but
-   its model's burst is expected to end -- by the length of its last
-   completed burst -- before a transfer lands, so it receives a replica a
-   cycle at the usual pace instead of its whole shortfall at once.
-   `fast-swing-capped` means the role swings faster than a move while another
-   model bursts for longer than one: its headroom is capped on its mean need,
-   so it serves each crest from what it holds. Both are passing states; give
-   the model a floor if it must not lag.
-8. **Did the controller just restart?** After a restart -- and after the
-   optimizer starts acting, or a group first appears -- every planned model of
-   the group holds what it runs (or its restored target) for one fill timeout,
-   about three minutes with default timings, and nothing in it scales:
-   a fill in flight before the restart has no mark, and its receiver's pods
-   must not lose their GPUs meanwhile. Expect this freeze on every upgrade or
-   leader change. Every planned model of the group shows the blocked reason
-   `quiet-period` while it lasts, and the log line
-   `Utilization share: ledger started` carries `planningFrom`. A freeze that
-   does not end shows `marks-unreadable` instead: the controller cannot read
-   the transfer marks on the donors' pods, and the Error line
-   `Utilization share: could not read transfer marks; retrying next cycle` says
-   why, typically a missing RBAC grant to list pods in one model's namespace.
-   The models' demand history survives the restart in the ConfigMap
-   `wva-utilization-share-history` in the controller's namespace, and the log
-   line `Utilization share: need history restored` says it was read back:
-   `rolesKnownNow` counts the roles whose peaks are known at once, and
-   `peaksKnownAt` is when the first restored role's peak is known (a time in
-   the past when some are known now). When it was not -- no stored history, or
-   one ending more than ten minutes before the restart -- the headroom cap is
-   on until a `stabilization.flappingWindow` of history exists and the models'
-   peaks are known again (`wva_utilization_share_headroom_capped` is not
-   published during the quiet period, when the planner does not plan)
-   ([a model shrinks while no other model grows](#a-model-shrinks-while-no-other-model-grows)).
-   A history that covers less than today's `flappingWindow` -- the window was
-   raised since it was written -- is restored, but its peaks are known only
-   once today's window is covered. `Utilization share: stored need history not
-   used` says why a stored entry was ignored (`reason`; `older than its window`
-   when every sample in it has aged out). The Error line `Utilization share:
-   could not read the stored need history; the models' peaks are unknown for a
-   swing window and their headroom is capped meanwhile. Retrying every minute;
-   nothing is written until a read succeeds` (with the `group`) means the read
-   failed with something other than NotFound -- typically Forbidden: the Role
-   `wva-utilization-share-history-role` or its binding is missing. On an
-   install upgraded from before the store existed, the controller-only
-   `make deploy-wva` reports both as optional prerequisites and installs
-   without them; ask an admin to re-run `NAMESPACE=<controller-namespace> make
-   setup-prereqs` to enable the store. Nothing is restored, and nothing is
-   written until a read succeeds, so the stored history is not overwritten.
-   `Utilization share: could not store the need history; a restart now forgets
-   the models' peaks` is the same for the write. Both are logged per group,
-   once per change of the error, and `Utilization share: the need history
-   store works again` marks that group's recovery.
-   The ConfigMap is bounded below the API server's 1 MiB object limit: at most
-   128 models' roles per group, and each group written gets an equal share of
-   900 KiB. A group over either bound leaves out the roles with the smallest
-   stored peaks, which count at their `maxReplicas` after a restart:
-   `Utilization share: need history truncated; the roles left out count at
-   their ceiling after a restart` names them (`dropped`, the first ten) and is
-   logged once per change.
-   To flush the history -- after a model's load has changed for good, say, and
-   its old peaks keep the cap on -- delete the ConfigMap:
+   blocked reason `reversal-hold`, means a role that just gave is kept from
+   receiving (or the reverse) until the hold in
+   `wva_utilization_share_effective_seconds{param="reversal-hold"}` passes. This
+   is the anti-oscillation rule working, not a fault.
+   - The hold lasts about twice a release time from the start of the transfer
+     it gave in: about 12 minutes with a 300 s scale-down window.
+   - It is lifted for a **hard imbalance**: a role at 0.9 or more of its
+     scale-up threshold receives at once from a role at 0.6 or less of its own
+     after giving (`utilizationShare.stabilization.skipWaitsWhen`). The log
+     shows `skippedWaits=true`, and the role does not show `reversal-hold`
+     while such a donor exists. A role held short for the whole hold means no
+     other role is that lightly loaded.
+   - A cancelled transfer holds only its own donor -> receiver pair; each role
+     can still move with any other role.
+   - The counter also counts moves withheld by a donor's back-off after an
+     aborted release, or by a donor that has given all it can.
+   - A donor's calm is judged on the higher of its current and peak need (two
+     readings in a row) over its scale-down window, so a model in a trough of
+     its normal demand is not "lightly loaded". For a receiver whose bursts
+     outlast a move, the donor is judged on its current need alone: the move
+     lands inside the burst.
+
+   Three more reasons on the same counter are not holds:
+   - `donor-peak`: while the quota holds every model's peak, a model already at
+     its need takes no headroom that would leave its donor below the donor's
+     own recent peak, by a single move or a donor set.
+   - `awaiting-return`: a short model is credited with returns still releasing
+     whose pods hold its pods, in whole replicas; only the rest is funded by
+     draining other models. The model shows blocked reason `awaiting-release`.
+   - `scale-down-band`: a return the model did not make because it would go
+     lower than today's optimizer scales down to (demand a quarter of the way
+     from `scaleDownBoundary` to `scaleUpThreshold`). A return is today's
+     scale-down, and goes no lower.
+7. **Is it swinging, paced, or at the transfer limit?** Blocked reasons:
+   - `swinging` (`wva_utilization_share_swinging == 1`): the role reversed
+     direction twice within the swing window and is planned on its mean need,
+     so it may look short and still not receive.
+   - `transfer-limit`: the group already runs two transfers with a donor;
+     clears as they land.
+   - `burst-ending`: the role is short with a hard imbalance, but its model's
+     burst should end (by the length of its last completed burst) before a
+     transfer lands, so it receives one replica a cycle instead of its whole
+     shortfall.
+   - `fast-swing-capped`: the role swings faster than a move while another model
+     bursts for longer than one; its headroom is capped on its mean need, and it
+     serves each crest from what it holds.
+
+   `burst-ending` and `fast-swing-capped` are passing states; give the model a
+   floor if it must not lag.
+8. **Did the controller just restart?** After a restart, after the optimizer
+   starts acting, or when a group first appears, every planned model of the
+   group holds what it runs (or its restored target) for one fill timeout, about
+   three minutes by default, and nothing in it scales. A fill in flight before
+   the restart has no mark, and its receiver's pods must not lose their GPUs
+   meanwhile. Expect this on every upgrade or leader change.
+   - While it lasts, every planned model shows blocked reason `quiet-period`,
+     and the log line `Utilization share: ledger started` carries
+     `planningFrom`.
+   - A freeze that does not end shows `marks-unreadable`: the controller cannot
+     read the transfer marks on the donors' pods. The Error line `Utilization
+     share: could not read transfer marks; retrying next cycle` says why,
+     typically a missing RBAC grant to list pods in one model's namespace.
+
+   **The need history.** The models' demand history survives a restart in the
+   ConfigMap `wva-utilization-share-history` in the controller's namespace.
+   - `Utilization share: need history restored` says it was read back.
+     `rolesKnownNow` counts roles whose peaks are known at once; `peaksKnownAt`
+     is when the first restored role's peak is known (in the past when some are
+     known now).
+   - With no usable history (none stored, or one ending more than ten minutes
+     before the restart), the headroom cap is on until a
+     `stabilization.flappingWindow` of history exists and the peaks are known
+     ([a model shrinks while no other model grows](#a-model-shrinks-while-no-other-model-grows)).
+     `wva_utilization_share_headroom_capped` is not published during the quiet
+     period, when the planner does not plan.
+   - A history shorter than today's `flappingWindow` (the window was raised
+     since) is restored, but its peaks are known only once today's window is
+     covered. `Utilization share: stored need history not used` says why an
+     entry was ignored (`reason`; `older than its window` when every sample has
+     aged out).
+   - `Utilization share: could not read the stored need history; the models'
+     peaks are unknown for a swing window and their headroom is capped
+     meanwhile. Retrying every minute; nothing is written until a read
+     succeeds` (with the `group`): the read failed with something other than
+     NotFound, typically Forbidden because the Role
+     `wva-utilization-share-history-role` or its binding is missing. Nothing is
+     restored or written until a read succeeds, so the stored history is not
+     overwritten. `Utilization share: could not store the need history; a
+     restart now forgets the models' peaks` is the same for the write. Both are
+     logged per group, once per change of the error; `Utilization share: the
+     need history store works again` marks recovery.
+   - On an install upgraded from before the store existed, the controller-only
+     `make deploy-wva` reports the Role and binding as optional and installs
+     without them. Ask an admin to re-run `make setup-prereqs` in the install's
+     shape: `NAMESPACE=<ns> make setup-prereqs`; out of reach
+     `NAMESPACE=<managed ns> make setup-prereqs WVA_NS=wva-<managed ns> WVA_WATCH_NS=<managed ns>`;
+     cluster-scoped `make setup-prereqs SCOPE=cluster WVA_NS=<controller ns>`.
+   - The ConfigMap stays below the API server's 1 MiB limit: at most 128 roles
+     per group, and an equal share of 900 KiB per group written. A group over
+     either bound leaves out the roles with the smallest stored peaks, which
+     count at their `maxReplicas` after a restart. `Utilization share: need
+     history truncated; the roles left out count at their ceiling after a
+     restart` names them (`dropped`, the first ten), once per change.
+
+   To flush the history (say a model's load changed for good and its old peaks
+   keep the cap on), delete the ConfigMap:
    ```bash
    kubectl delete configmap wva-utilization-share-history -n <controller-namespace>
    ```
-   The running controller notices on its next read or write of it (within a
-   minute or so) and forgets its in-memory history too, rather than writing it
-   straight back: `Utilization share: the need history ConfigMap was deleted;
-   every model's need history is forgotten`. The cap then judges every model
-   as after a restart with nothing stored, for one window. Editing one group's
-   key by hand does not flush it: the controller's next write of that group
-   replaces it from memory. Entries the controller cannot parse are removed by
-   its next write, and entries of another format version once a week old.
-   Uninstalling with `make undeploy-wva` deletes the ConfigMap.
+   The controller notices on its next read or write (within a minute or so) and
+   forgets its in-memory history too, instead of writing it back: `Utilization
+   share: the need history ConfigMap was deleted; every model's need history is
+   forgotten`. For one window the cap then treats every model as after a
+   restart with nothing stored. Editing one group's key by hand does not flush
+   it; the next write replaces it from memory. Entries the controller cannot
+   parse are removed by its next write, and entries of another format version
+   once a week old. `make undeploy-wva` deletes the ConfigMap.
 9. **Could it not mark the donor?** `Utilization share: could not mark a donor pod;
-   transfer not started` means the donor's pod could not be steered by a fault:
-   a sibling's deletion cost leaves no room for the mark (see
-   [which pod leaves](scaling-policy.md#for-model-owners-what-the-optimizer-may-take-and-how-to-protect-a-model)),
-   or the patch failed. The donor backs off, shows the blocked reason
+   transfer not started` means a fault stopped the donor's pod being steered: a
+   sibling's deletion cost leaves no room for the mark (see [which pod
+   leaves](scaling-policy.md#for-model-owners-what-the-optimizer-may-take-and-how-to-protect-a-model)),
+   or the patch failed. The donor backs off, shows blocked reason
    `donor-not-steerable`, gets a `UtilizationShareDonorNotSteerable` Event naming
    the cause and the end of the back-off, and is retried after it.
 
-   A donor whose workload is changing is held, not failed: mid-rollout (by its
-   status, pods of two ReplicaSets, or LWS groups of two revisions at or above
-   its partition), a pod not yet created, scheduled or Ready, or an LWS group
-   missing or being replaced. Its receiver tries another donor; it counts no
-   abort, does not back off and gets no Event or blocked reason; at `--v=4` the
-   log says `Utilization share: donor's workload is changing; transfer not
-   started`. A paused Deployment or a held LWS canary rollout stays "changing",
-   and does not give, until it is resumed or finished.
+   Two donor states are holds, not failures. In both, the receiver tries another
+   donor, and the donor counts no abort, does not back off, and gets no Event or
+   blocked reason:
+   - **Its workload is changing:** mid-rollout (by its status, pods of two
+     ReplicaSets, or LWS groups of two revisions at or above its partition), a
+     pod not yet created, scheduled or Ready, or an LWS group missing or being
+     replaced. At `--v=4`: `Utilization share: donor's workload is changing;
+     transfer not started`. A paused Deployment or a held LWS canary rollout
+     stays "changing", and does not give, until resumed or finished.
+   - **It has nothing left:** every pod (or LWS group) is already given to
+     transfers in flight. It is held until one of those releases lands, or for
+     one release timeout, and is not counted as `reversal-hold`. At `--v=4`:
+     `Utilization share: donor has nothing left to give; transfer not started`.
 
-   A donor whose every pod (or LWS group) is already given to transfers still in
-   flight is not broken, only exhausted: it is held until one of those releases
-   lands, or for one release timeout, so its receiver tries another donor, but
-   it counts no abort, does not back off, shows no blocked reason, gets no Event
-   and is not counted as `reversal-hold`; at `--v=4` the log says
-   `Utilization share: donor has nothing left to give; transfer not started`.
+Other cases:
 
-If a model shows `whole-replica-short`, it serves below its need while the
-quota covers the needs in fractions but not in whole replicas: with 8-GPU
-replicas, a quota a few GPUs short of every model's need rounded up to whole
-nodes. Moves go to the model that is worse off by weight, and this one gave.
-Raise the quota by a replica, lower a floor, or accept the trade.
-
-If a P/D model shows a blocked reason, `wva_model_scaling_blocked` does not say
-which role it came from (it has no `role` label); read
-`wva_utilization_share_headroom` and `wva_utilization_share_actionable` by `role`.
-
-If a lowered quota does not shrink the fleet: the optimizer does not evict to
-meet a quota. A group whose quota is now below what it holds plans over what it
-holds, and moves back under the quota only as models scale down.
-
-If transfers do start but the model still does not grow, read its
-`wva_model_scaling_blocked` reasons.
+- **`whole-replica-short`:** the model serves below its need because the quota
+  covers the needs in fractions but not in whole replicas (with 8-GPU replicas,
+  a quota a few GPUs short of every need rounded up to whole nodes). Moves go to
+  the model worse off by weight, and this one gave. Raise the quota by a
+  replica, lower a floor, or accept the trade.
+- **A P/D model with a blocked reason:** `wva_model_scaling_blocked` has no
+  `role` label. Read `wva_utilization_share_headroom` and
+  `wva_utilization_share_actionable` by `role`.
+- **A lowered quota does not shrink the fleet:** the optimizer does not evict.
+  A group above its quota plans over what it holds and moves back under only as
+  models scale down.
+- **Transfers start but the model does not grow:** read its
+  `wva_model_scaling_blocked` reasons.
 
 ### A model shrinks while no other model grows
 
@@ -662,43 +728,48 @@ If transfers do start but the model still does not grow, read its
 replicas, at least a few cycles plus one scale-down window after its load fell, and no other
 model in the quota group grows to take the GPUs.
 
-**What it means**: the model gave headroom back to the quota. This happens
-only while the quota is **contended**: it cannot hold every model at its peak
-need over the last `stabilization.flappingWindow` at the same time (a peak
-counts once two readings in a row reach it). While no model's peak is known --
-a new group, or every model after a controller restart that found no usable
-stored history (see step 8 above), until a `flappingWindow` of history exists
--- each counts at its `maxReplicas` (the whole quota without one), so the cap
-is on until a full window of history shows the peaks fit. A model that joins a group whose peaks are
-known counts at what it holds, and does not turn the cap on by itself. While the
-peaks fit, the whole spare stays spread by weight and nothing is given back.
-While contended, the optimizer gives each model (each role of a P/D model) at most `maxHeadroomReplicas`
-replicas (default `1`) times its weight, rounded up, above what it needs, and
-leaves the rest of the quota unassigned, so that a model whose demand rises can
-start pods into it at once instead of waiting for another model's pods to
-finish their requests. A model that has held more than its need plus its
-headroom for `stabilization.consecutiveCyclesBeforeMove` cycles in a row (two
-by default) -- typically one that grew for a burst that has ended -- starts
-giving all of the extra back in one cycle; the release then waits its
-scale-down window, as today's scale-down would. It does so only while no model in the group that can grow is short of
-its need, and
-only while its load would stay at or below
-`stabilization.returnSpareWhenLoadAtMost` (default `0.6`) on what it keeps,
-not counting its headroom. While more than 0.6 x `queueLengthThreshold`
-requests (3 by default) are waiting on one of its pods, for
-`consecutiveCyclesBeforeMove` cycles in a row, the return also waits -- for at
-most its scale-down window, after which it goes. A decode pod of a P/D model
-counts only while its KV cache is full; prefill pods are not counted. It never goes below its need (the higher of its
-current and average need while it swings) plus its headroom, below what the
-other models' recent peaks leave of the quota in whole replicas, its
-`minReplicaCount` or its last replica: a model that bursts alone keeps its
-spare, and GPUs are returned only when another model's recent peak could use
-them. If, while the release is still in its
-scale-down window, the model is short of its target again or busier than that
-load on what it keeps, the return is called off and the model keeps the
-replica. If another model turns short while the return is still releasing,
-the returned GPUs go to the unassigned GPUs as usual, and the idle fill raises
-that model into them once the replica is released.
+**What it means**: the model gave headroom back to the quota. This happens only
+while the quota is **contended**.
+
+- **Contended** means the quota cannot hold every model at its peak need over
+  the last `stabilization.flappingWindow` at once (a peak counts once two
+  readings in a row reach it). While the peaks fit, the whole spare stays spread
+  by weight and nothing is given back.
+- **Unknown peaks count high.** While no model's peak is known (a new group, or
+  every model after a restart with no usable stored history, see step 8 above),
+  each counts at its `maxReplicas` (the whole quota without one) until a
+  `flappingWindow` of history shows the peaks fit. A model that joins a group
+  whose peaks are known counts at what it holds, and does not turn the cap on
+  by itself.
+- **The cap.** While contended, each model (each role of a P/D model) keeps at
+  most `maxHeadroomReplicas` (default `1`) times its weight, rounded up, above
+  its need. The rest of the quota stays unassigned, so a model whose demand
+  rises can start pods at once instead of waiting for another model's pods to
+  finish their requests.
+- **The return.** A model that held more than its need plus headroom for
+  `stabilization.consecutiveCyclesBeforeMove` cycles in a row (two by default),
+  typically after a burst ended, gives all the extra back in one cycle. The
+  release then waits its scale-down window, as today's scale-down would. It
+  returns only while:
+  - no model in the group that can grow is short of its need;
+  - its load would stay at or below `stabilization.returnSpareWhenLoadAtMost`
+    (default `0.6`) on what it keeps, not counting headroom.
+
+  While more than 0.6 x `queueLengthThreshold` requests (3 by default) wait on
+  one of its pods for `consecutiveCyclesBeforeMove` cycles in a row, the return
+  also waits, for at most its scale-down window. A decode pod of a P/D model
+  counts only while its KV cache is full; prefill pods are not counted.
+- **The floor.** It never goes below its need (the higher of current and
+  average need while it swings) plus headroom, below what the other models'
+  recent peaks leave of the quota in whole replicas, its `minReplicaCount`, or
+  its last replica. A model that bursts alone keeps its spare; GPUs are returned
+  only when another model's recent peak could use them.
+- **Calling it off.** If, during the scale-down window, the model is short of
+  its target again or busier than that load on what it keeps, the return is
+  called off and it keeps the replica. If another model turns short while the
+  return is still releasing, the returned GPUs go to the unassigned GPUs as
+  usual, and the idle fill raises that model into them once the replica is
+  released.
 
 **How to tell**: the donor's scale target carries a `UtilizationShareGiving`
 Event that names "the quota group's unassigned GPUs" and says "because it holds more headroom than maxHeadroomReplicas gives it while no model is short, and stays calm without it; the replica drains after its scale-down window, and is kept if its demand comes back before then; a model whose demand rises takes the GPUs at once". A return called off carries a
@@ -739,23 +810,25 @@ group's series.
 
 ```bash
 kubectl get events -n <model-namespace> --field-selector reason=UtilizationShareGiving | grep unassigned
-kubectl logs -n <controller-namespace> -l app.kubernetes.io/name=workload-variant-autoscaler | grep 'spare returned to the quota'
-kubectl logs -n <controller-namespace> -l app.kubernetes.io/name=workload-variant-autoscaler | grep -E 'recent peaks|peaks are not known'
+kubectl logs -n <controller-namespace> -l app.kubernetes.io/name=workload-variant-autoscaler --tail=-1 | grep 'spare returned to the quota'
+kubectl logs -n <controller-namespace> -l app.kubernetes.io/name=workload-variant-autoscaler --tail=-1 | grep -E 'recent peaks|peaks are not known'
 ```
 
-**What to do**: nothing, if the model still serves within its targets: the
-GPUs are free for whichever model needs them next, and this model takes them
-back the same way when its own demand rises. To keep more spare on each model,
-raise `utilizationShare.maxHeadroomReplicas`; a value as large as the models'
-`maxReplicas` spreads the whole spare by weight even while contended, as before
-the key existed, and leaves little to return, at the price that a model whose demand rises must
-wait for another model's pods to drain before it grows. To make a model keep
-replicas longer after its demand falls, lower
-`stabilization.returnSpareWhenLoadAtMost`. To protect one model only, raise its
-`minReplicaCount`. A higher `weightClass` gives it more headroom replicas
-(weight times `maxHeadroomReplicas`, rounded up) but does not shield that
-headroom from another model's need. See the
-[scaling policy reference](scaling-policy.md#optimizer-cluster-default-only-live).
+**What to do**: nothing, if the model still serves within its targets. The GPUs
+are free for whichever model needs them next, and this model takes them back the
+same way when its demand rises. Otherwise:
+
+- **More spare on each model:** raise `utilizationShare.maxHeadroomReplicas`. A
+  value as large as the models' `maxReplicas` spreads the whole spare by weight
+  even while contended and leaves little to return, but a model whose demand
+  rises must then wait for another model's pods to drain.
+- **Keep replicas longer after demand falls:** lower
+  `stabilization.returnSpareWhenLoadAtMost`.
+- **Protect one model:** raise its `minReplicaCount`. A higher `weightClass`
+  gives it more headroom replicas (weight times `maxHeadroomReplicas`, rounded
+  up) but does not shield them from another model's need.
+
+See the [scaling policy reference](scaling-policy.md#optimizer-cluster-default-only-live).
 
 ### A model shows `no-compatible-donor`
 
@@ -763,16 +836,14 @@ headroom from another model's need. See the
 model that is short, while other models on the same accelerator type hold more
 than they need.
 
-**What it means**: every one of the model's pods needs a donor pod at least as
-large to take its place: a 4-GPU pod cannot be funded by two 2-GPU pods, since
-nothing shows the two share a node. Here no donor in the group has pods large
-enough, so no transfer can be planned for this model.
+**What it means**: each of the model's pods needs a donor pod at least as large.
+A 4-GPU pod cannot be funded by two 2-GPU pods, since nothing shows they share a
+node. No donor in the group has pods large enough.
 
-**What to do**: the optimizer has no setting that changes this. Give the model
-GPUs another way: raise the quota for that accelerator type, or lower a model
-whose pods are at least as large. If the model has pods of more than one size
-(P/D roles with different GPU counts), each role is judged on its own pods; check
-which role is short with `wva_utilization_share_headroom < 0`.
+**What to do**: no optimizer setting changes this. Raise the quota for that
+accelerator type, or lower a model whose pods are at least as large. With pods
+of more than one size (P/D roles with different GPU counts), each role is judged
+on its own pods; find the short one with `wva_utilization_share_headroom < 0`.
 
 ### Transfer marks left on pods after a downgrade
 
@@ -786,12 +857,11 @@ name stay.
 
 **Prevention**: before downgrading (or renaming `CONTROLLER_INSTANCE`), set
 `shadow: true` (or remove the `optimizer:` block) and wait one optimization
-cycle. The controller removes the marks it wrote and restores each pod's previous
-deletion cost. On a namespace-scoped install that reads its cluster policy from a
-separate policy namespace, that edit takes effect only after a controller
-restart: edit, restart, then wait a cycle. Check that none are left. Both
-commands below read every namespace (cluster admin); a tenant replaces `-A`
-with `-n <ns>` for each namespace it manages:
+cycle. The controller removes its marks and restores each pod's previous
+deletion cost. A namespace-scoped install that reads cluster policy from a
+separate policy namespace needs a restart for the edit: edit, restart, wait a
+cycle. Then check none are left. Both commands below read every namespace
+(cluster admin); a tenant uses `-n <ns>` instead of `-A`:
 
 ```bash
 kubectl get pods -A -o json | jq -r '.items[]

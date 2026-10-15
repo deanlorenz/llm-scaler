@@ -15,6 +15,8 @@ type blockedModelRef struct {
 	modelID   string
 	// reasons is the last published set, joined, purely for comparison.
 	reasons string
+	// forbiddenBy is the tiers last logged as disabling scale-to-zero, joined.
+	forbiddenBy string
 }
 
 // recordBlockedModel notes that this engine has published reasons for a model,
@@ -38,11 +40,25 @@ func (e *Engine) recordBlockedModel(namespace, modelID string, reasons []string)
 	// model to say nothing is wrong.
 	changed = joined != prev.reasons || (!seen && joined != "")
 
-	e.lastBlockedModels[key] = blockedModelRef{
-		namespace: namespace,
-		modelID:   modelID,
-		reasons:   joined,
+	prev.namespace, prev.modelID, prev.reasons = namespace, modelID, joined
+	e.lastBlockedModels[key] = prev
+	return changed
+}
+
+// recordForbiddenBy notes which of a model's tiers disable scale-to-zero while
+// that is what blocks it, and reports whether the set changed. It shares
+// recordBlockedModel's bookkeeping, so prune and evict cover it too; call it
+// after recordBlockedModel.
+func (e *Engine) recordForbiddenBy(namespace, modelID string, tiers []string) (changed bool) {
+	if e.lastBlockedModels == nil {
+		e.lastBlockedModels = make(map[string]blockedModelRef)
 	}
+	key := utils.GetNamespacedKey(namespace, modelID)
+	joined := strings.Join(tiers, ",")
+	prev := e.lastBlockedModels[key]
+	changed = joined != prev.forbiddenBy
+	prev.namespace, prev.modelID, prev.forbiddenBy = namespace, modelID, joined
+	e.lastBlockedModels[key] = prev
 	return changed
 }
 

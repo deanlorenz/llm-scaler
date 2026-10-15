@@ -49,7 +49,7 @@ var _ = Describe("learned state ages on last use, not last write", func() {
 		//     horizon any more: a retained measurement always answers.
 		const historyKey = "hist-key"
 		k2With := func(a *SaturationAnalyzer, params *capacity.EngineParams, k1 int64) (int64, capacity.K2Source) {
-			k2, src, _ := a.computeK2(historyKey, model, ns, variant,
+			k2, src, _, _ := a.computeK2(historyKey, model, ns, variant,
 				0,    // queueLen: not saturated, so Priority 1 cannot fire
 				0,    // tokensInUse
 				600,  // avgOutput
@@ -58,7 +58,7 @@ var _ = Describe("learned state ages on last use, not last write", func() {
 				params,
 				k1,
 				k1, // kvCeiling
-				domain.RoleDecode, false, logr.Discard())
+				domain.RoleDecode, false, admission{}, logr.Discard())
 			return k2, src
 		}
 		withHistory := func(k2 float64) (*SaturationAnalyzer, *capacity.RollingAverage) {
@@ -165,13 +165,13 @@ var _ = Describe("learned state ages on last use, not last write", func() {
 				"but nothing has been WRITTEN for a day, and that is the write path's question")
 
 			// Now the queue saturates and today's true figure is much lower.
-			_, src, _ := a.computeK2(historyKey, model, ns, variant,
+			_, src, _, _ := a.computeK2(historyKey, model, ns, variant,
 				50,    // queueLen over threshold: Priority 1 fires
 				10000, // tokensInUse -> k2Observed well below the stored 90,000
 				600, 1000, 10,
 				nil,
 				1000000, 1000000,
-				domain.RoleDecode, false, logr.Discard())
+				domain.RoleDecode, false, admission{}, logr.Discard())
 			Expect(src).To(Equal(capacity.K2SrcObserved))
 
 			// Re-read from the MAP: a reset stores a new window, so the handle
