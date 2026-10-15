@@ -274,6 +274,8 @@ logged and retried and never stops scaling. A missing ConfigMap means the
 controller predates it or lacks the `wva-controller-status-role` grant (a
 cluster admin re-runs `make setup-prereqs`). It does not mean scaling stopped.
 
+## Stopping and leader handover
+
 **Stopping takes up to 40s.** On SIGTERM the controller finishes the running
 cycle, stops (up to 25s) and releases its lease, so the next leader starts at
 once. The Deployment allows 40s (`terminationGracePeriodSeconds`).
@@ -296,6 +298,7 @@ The release is one Get and one Update of the Lease, bounded together by
 each request a timeout of `RenewDeadline/2`.
 
 </details>
+
 ## Command cheatsheet
 
 ```bash

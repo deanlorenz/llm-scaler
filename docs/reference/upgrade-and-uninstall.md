@@ -112,6 +112,10 @@ they enable. Do this, in order:
      install first used). Without one, the re-run keeps the existing
      `metrics-reader` binding unchanged and warns which account it names
      ([Prometheus](prometheus.md)).
+
+   Before this step, save the controller's `Effective scaling policy` log
+   lines, to compare after the upgrade
+   ([Policy that starts to apply](#policy-that-starts-to-apply)).
 2. **Policy may move.** After its next restart, a controller that manages its
    own namespace can read Namespaces, so it finds a published cluster policy:
    the namespace its `wva.llmd.ai/policy-namespace` label names, else
@@ -159,6 +163,18 @@ they enable. Do this, in order:
 
 #### Policy that starts to apply
 
+Before you upgrade, save what the controller resolves today:
+
+```bash
+kubectl logs -n "$NS" deploy/wva-controller-manager | grep 'Effective scaling policy' > before.txt
+```
+
+Each line names a model and its `scaleUpThreshold`, `scaleDownBoundary`,
+`kvCacheThreshold` and `priority`. It does not show `queueLengthThreshold` or
+`analyzers`. A line is logged once per change, not every cycle, so a
+controller whose log has rotated may print nothing. If `before.txt` is empty,
+keep a copy of your ConfigMaps instead.
+
 Some settings in named tiers and per-model entries were ignored or replaced
 before. They now apply. Before you upgrade, read your
 `wva-scaling-policy-config` **and** every namespace-local scaling-policy
@@ -182,20 +198,28 @@ ConfigMap, and work through this list.
 
    | field | tier before | per-model before | now |
    | --- | --- | --- | --- |
-   | `scaleToZero` | ignored | applied | applied; a model parks only if every tier its variants name allows it, and waits for the longest `retentionPeriod` |
+   | `scaleToZero` | ignored (except the tier `default.defaultPolicy` names) | applied | applied; a model parks only if every tier its variants name allows it, and waits for the longest `retentionPeriod` |
    | `scaleFromZero.requirePrefill` | ignored | ignored | applied; a model waits for prefill if any of its tiers requires it |
    | `shapeChangeHoldSeconds` | ignored | ignored | applied |
    | `disableShapeChangeHold` | ignored | ignored | applied |
 
    Nothing reports these the first time they take effect. To keep the old
-   behaviour, remove the field from the tier or per-model entry.
+   behaviour, remove the field from the tier (from a per-model entry, only for
+   the rows marked ignored there).
 
-   Two consequences to check:
+   Consequences to check:
 
+   - A tier that enables `scaleToZero` now parks its models after
+     `retentionPeriod`, even when `default` disables it. The first request
+     after that waits for a cold start. Disable `scaleToZero` on the tier to
+     keep them up.
    - A tier that disables `scaleToZero` now keeps its models up, even when
      `default` enables it. `WVAModelWillNotScaleToZero` may start firing for
-     those models (reason `policy-forbids-zero`). Enable `scaleToZero` on the
-     tier, or accept the alert.
+     those models (reason `policy-forbids-zero`). The controller log line
+     `Scale-to-zero is disabled by the scaling policy of a tier` lists the
+     tiers in `disabledBy`. Enable `scaleToZero` on each, or on the model's
+     per-model entry, or accept the alert. If the per-model entry is what
+     disables it, the line says so (`disabledByPerModelEntry=true`).
    - A tier or per-model `requirePrefill: true` now applies. A P/D model whose
      prefill cannot be placed stays at zero rather than waking decode alone.
 
@@ -217,17 +241,15 @@ ConfigMap, and work through this list.
    takes up to 40s to stop: it finishes the running cycle, then releases its
    lease. Raise the patch to 40, or remove it. A patch left at 10 is no worse
    than before; it only loses the faster failover
-   ([details](operations.md#what-the-controller-is-running-with)).
+   ([details](operations.md#stopping-and-leader-handover)).
 
 After the upgrade, compare the controller's `Effective scaling policy` log
-lines with the ones from before. Each names a model and its
-`scaleUpThreshold`, `scaleDownBoundary`, `kvCacheThreshold` and `priority`:
+lines with the ones you saved in `before.txt`:
 
 ```bash
-kubectl logs -n "$NS" deploy/wva-controller-manager | grep 'Effective scaling policy'
+kubectl logs -n "$NS" deploy/wva-controller-manager | grep 'Effective scaling policy' > after.txt
+diff before.txt after.txt
 ```
-
-Save the same output before you upgrade, so you have something to compare.
 
 Other changes you may notice:
 
@@ -238,6 +260,16 @@ Other changes you may notice:
   while Prometheus is unreachable, is now logged as
   `Shutdown requested during startup` and exits 143. Previously the process was
   killed by the signal with no log line; the exit code was 143 as well.
+- A scale-from-zero wake claims a utilization-share transfer with the weight of
+  the model's tier, as the planner does. It used to use the `default` weight.
+- The `gpu-policy` readiness check no longer goes NotReady on a passing error
+  when listing nodes, such as a timeout. It is not ready until the API server
+  first answers. When it is not ready, its message now reads
+  `cannot confirm it may list nodes` (it read `may not list nodes`).
+- A P/D model whose idle role's pool is empty may now scale up its other role.
+  The idle role used to block it.
+- A decode-only model with `requirePrefill: true` now claims utilization-share
+  transfers for its decode. It used to claim none.
 
 ### The external-scaler NetworkPolicy
 

@@ -232,7 +232,8 @@ times:
 
 The check lists nodes with a 2s timeout and asks again at most every 30s.
 
-- **Forbidden**: the controller may not list nodes. It stays not ready.
+- **Forbidden**: the controller may not list nodes. It is not ready until node
+  read is granted.
 - **Unauthorized**: the API server did not accept the controller's credentials.
   This is an authentication problem, not missing RBAC. It stays not ready.
 - **Any other error** (slow or restarting API server): the check keeps its last
