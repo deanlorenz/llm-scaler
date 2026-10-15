@@ -94,13 +94,15 @@ when no variant of the model names a tier.
 - A number that is not finite (YAML `.inf`, `-.inf` or `.nan`) in `priority`,
   `kvCacheThreshold`, `queueLengthThreshold`, `scaleUpThreshold`,
   `scaleDownBoundary`, or an analyzer's `score`, `scaleUpThreshold` or
-  `scaleDownBoundary`. Do not use `.inf` for precedence: a finite `priority`
-  such as 5 already gives strict precedence under a GPU limiter.
+  `scaleDownBoundary`. Do not use `.inf` to give a model precedence:
+  `priority` multiplies the model's weight in the fair share (priority x
+  demand), so a finite value such as 5 weighs it five times as heavily.
 - An analyzer `score` below zero. It is read as 1, as before; the change is
   that it is now reported.
-- A `priority` or analyzer `score` above 1000000. A `priority` of 5 already
-  gives strict precedence, and a larger value only risks overflowing the
-  fair-share arithmetic that every model in the GPU budget shares.
+- A `priority` or analyzer `score` above 1000000. A weight a million times
+  another model's already takes the whole contended budget; a larger value
+  only risks overflowing the fair-share arithmetic that every model in the GPU
+  budget shares.
 
 The scaling manager acts as if the entry did not set the field. The model then
 gets the value of the layer below: the tier, then `default`, then the built-in

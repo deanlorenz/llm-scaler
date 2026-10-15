@@ -795,9 +795,10 @@ func TruncateIgnoredValue(v string) string {
 // number.
 var errNotFinite = errors.New("must be a finite number")
 
-// MaxPrecedence is the largest priority or analyzer score a policy may set. A
-// priority of 5 already gives strict precedence under a GPU limiter, so the
-// bound loses nothing, and it keeps priority x score x demand finite: a
+// MaxPrecedence is the largest priority or analyzer score a policy may set.
+// Both multiply a model's weight in the fair share (priority x score x
+// demand), and a weight a million times another's already takes the whole
+// contended budget, so the bound loses nothing; it keeps the product finite: a
 // priority of 1e308 overflowed it to +Inf, and with rescale on the NaN share
 // that followed corrupted the GPU target of every model in the budget.
 const MaxPrecedence = 1e6
