@@ -27,8 +27,7 @@ func TestK2BorrowOfReportsTheLeastRelaxedReplica(t *testing.T) {
 		"a variant that borrowed nothing reported a borrow")
 }
 
-// A bridge is a warm-pool Pod lent to the variant; it does not borrow the
-// variant's learned state.
+// A bridge is a warm-pool Pod lent to the variant; ownRowsOf leaves it out.
 func TestOwnRowsOfLeavesOutBridges(t *testing.T) {
 	rows := []capacity.ReplicaCapacity{
 		{PodName: "own", K2Priority: capacity.K2SrcBorrowed, K2BorrowedFrom: "main"},

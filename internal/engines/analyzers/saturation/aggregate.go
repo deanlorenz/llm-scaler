@@ -82,6 +82,9 @@ func (a *SaturationAnalyzer) aggregateByVariant(
 		observedReplicas := 0
 
 		var capacityLabel string
+		// The rows the variant's price was taken from, so the borrow reported
+		// for it is the one that price carries.
+		var pricedRows []capacity.ReplicaCapacity
 		if len(replicas) > 0 {
 			// BRIDGES count toward demand and not toward supply.
 			//
@@ -134,6 +137,7 @@ func (a *SaturationAnalyzer) aggregateByVariant(
 			if len(ownCapacities) > 0 {
 				perReplicaCapacity = float64(median(ownCapacities))
 				capacityLabel = k2SourceLabel(ownRows)
+				pricedRows = ownRows
 			} else {
 				// Only bridges reported. The variant's own per-replica capacity is
 				// unmeasured this cycle, and the bridge's reading is the closest
@@ -145,6 +149,10 @@ func (a *SaturationAnalyzer) aggregateByVariant(
 				// at all -- exactly while it is short.
 				perReplicaCapacity = bridgePerReplica
 				capacityLabel = k2SourceLabel(replicas)
+				// A bridge is priced under the variant's own learned state, so
+				// its k2 can be a sibling's borrowed one, and that is the price
+				// the variant is sized on this cycle.
+				pricedRows = replicas
 			}
 			// Prefer the live count over readyCount: it is what actually reported
 			// capacity this cycle, where readyCount is (lagging) scale-target status.
@@ -238,7 +246,7 @@ func (a *SaturationAnalyzer) aggregateByVariant(
 			TotalDemand:                totalDemand,
 			Utilization:                utilization,
 			Reason:                     capacityLabel,
-			Borrowed:                   k2BorrowOf(namespace, ownRowsOf(replicas)),
+			Borrowed:                   k2BorrowOf(namespace, pricedRows),
 		})
 		if warmPoolReplicas > 0 {
 			logger.Info("warm-pool-bridge-supply",
@@ -310,8 +318,10 @@ func median(values []int64) int64 {
 	return sorted[n/2]
 }
 
-// ownRowsOf is a variant's own replicas: the bridges a warm pool lent it do
-// not borrow anything of its learned state.
+// ownRowsOf is a variant's own replicas, without the bridges a warm pool lent
+// it. A bridge is priced under the variant's own learned state -- its k2 and
+// ITL line -- but the throughput floor skips bridges, so a line a bridge was
+// priced from is not one the variant's fleet is held on.
 func ownRowsOf(replicas []capacity.ReplicaCapacity) []capacity.ReplicaCapacity {
 	own := make([]capacity.ReplicaCapacity, 0, len(replicas))
 	for _, rc := range replicas {

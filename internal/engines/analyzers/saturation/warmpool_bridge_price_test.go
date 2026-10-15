@@ -128,6 +128,42 @@ func TestAVariantCarriedOnlyByABridgeIsStillPriced(t *testing.T) {
 	}
 }
 
+// A VARIANT CARRIED ONLY BY A BRIDGE REPORTS THE BORROW ITS PRICE CAME FROM.
+//
+// A bridge is priced under the variant's own learned state, so its k2 can be
+// a sibling's, borrowed. With no own replica reporting, that bridge's reading
+// IS the variant's price (and the cycle log says P2-borrow), so the borrow is
+// reported too -- otherwise the metric says "own figures" while the variant is
+// sized on a sibling's.
+func TestAVariantCarriedOnlyByABridgeReportsItsBorrow(t *testing.T) {
+	a := NewSaturationAnalyzer(capacity.NewStore())
+
+	bridge := pricedReplica("pool-0", 400, 600, true)
+	bridge.K2Priority = capacity.K2SrcBorrowed
+	bridge.K2BorrowedFrom = "main"
+	bridge.K2BorrowRelaxed = 0.25
+
+	got := a.aggregateByVariant([]capacity.ReplicaCapacity{bridge},
+		nil, oneVariantState(0), "model", "ns", 0.9, false, logr.Discard())
+
+	want := []domain.LearnedStateBorrow{
+		{Quantity: domain.BorrowedK2, Donor: "main", DonorNamespace: "ns", Relaxed: 0.25},
+	}
+	if len(got[0].Borrowed) != 1 || got[0].Borrowed[0] != want[0] {
+		t.Errorf("Borrowed = %+v, want %+v: the bridge's borrowed k2 is the variant's price",
+			got[0].Borrowed, want)
+	}
+
+	// With an own replica reporting, the price is the own replica's, and a
+	// bridge's borrow is not the variant's.
+	own := pricedReplica("variant-a-0", 100, 1000, false)
+	got = a.aggregateByVariant([]capacity.ReplicaCapacity{own, bridge},
+		nil, oneVariantState(1), "model", "ns", 0.9, false, logr.Discard())
+	if len(got[0].Borrowed) != 0 {
+		t.Errorf("Borrowed = %+v, want none: the own replica set the price", got[0].Borrowed)
+	}
+}
+
 // ANTICIPATED SUPPLY IS STILL COMPUTED, AND AT THE OWN PRICE.
 //
 // It is (ReplicaCount + PendingReplicas) x P, and a replica that is still

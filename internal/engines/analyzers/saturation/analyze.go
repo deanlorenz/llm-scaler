@@ -519,8 +519,9 @@ func (c *cycle) settleShape(caps []capacity.ReplicaCapacity) {
 }
 
 // variantsPricedFromBorrowedLine is the set of variants at least one of whose
-// own replicas was priced from a sibling's ITL line this cycle. A bridge does
-// not count: it reads nothing of the variant's learned state.
+// own replicas was priced from a sibling's ITL line this cycle. A bridge reads
+// the variant's line too, but does not count: the throughput floor, the one
+// consumer of a derived rate, skips bridges.
 func variantsPricedFromBorrowedLine(caps []capacity.ReplicaCapacity) map[string]bool {
 	out := make(map[string]bool)
 	for _, rc := range ownRowsOf(caps) {
