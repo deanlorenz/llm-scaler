@@ -146,11 +146,13 @@
 # ENGINE_CACHE_UID=<uid> in the environment when the engines run as another
 # UID than the one that owns the key (a seeded node: the preparer copied it
 # as root). A file that UID cannot read (or a directory it cannot read and
-# search, under the key or on the way to it) is reported unreadable, naming
-# the UID. vLLM's AOT files are 600, which is fine for the engine that owns
-# them. A seeded or published key is owned by root, so without
-# ENGINE_CACHE_UID it is judged for root: every line names the UID it was
-# judged for, and the summary warns and says "VERIFIED for root". It checks the
+# search, under the key or on the way to it from the volume mount) is
+# reported unreadable, naming the UID. vLLM's AOT files are 600, which is
+# fine for the engine that owns them. A seeded or published key is owned by
+# root, so without ENGINE_CACHE_UID it is judged for root. Without it every
+# line names the UID it was judged for, the summary warns and names the UIDs
+# it assumed, and the verdict says which ("VERIFIED for uid 1000",
+# "VERIFIED for root"); a plain VERIFIED needs ENGINE_CACHE_UID. It checks the
 # torch.compile cache only: the flashinfer/ and triton/ directories beside
 # vllm/ are not read.
 #
@@ -1091,8 +1093,9 @@ linked() {
   done
 }
 # private ROOT KEY prints "ok UID" when UID can read every file under the
-# key directory ROOT/KEY and read and search every directory from ROOT down
-# to it and under it, else "no UID PATH" for the first one it cannot -- UID
+# key directory ROOT/KEY and read and search every directory from the parent
+# of ROOT (the volume mount) down to it and under it, else "no UID PATH" for
+# the first one it cannot -- UID
 # being $euid when set, else the owner of the key directory, the engine
 # that wrote the key (root, for a seeded or published copy). A path owned by
 # UID needs u+r; one in the key directory's group, g+r (the engine is taken
@@ -1122,7 +1125,13 @@ private() {
     find "$d" -prune -perm -400 > /dev/null 2>&1 || miss="$miss -perm"
     echo "? no-find-modes$miss"; return
   fi
-  # the directories on the way: the cache root, then each component of KEY
+  # the directories on the way: the volume mount (the cache root's parent),
+  # the cache root, then each component of KEY
+  a="${root%/*}"
+  if [ -n "$a" ]; then
+    f="$(find "$a" -prune \( "$@" \) 2> /dev/null)"
+    [ -z "$f" ] || { echo "no $u $f"; return; }
+  fi
   a="$root"
   while :; do
     f="$(find "$a" -prune \( "$@" \) 2> /dev/null)"
@@ -1231,7 +1240,9 @@ cmd_verify() {
     fi
     printf '  %-28s %-20s %s\n' NODE RESULT KEY
     accelerator_print_excluded "$EC_EXCLUDED"
-    local present=0 absent=0 unreadable=0 unchecked=0 nodes=0 rootkeys=0
+    # assumed: node/key checks judged for the key directory's owner (no
+    # ENGINE_CACHE_UID); uids: the distinct owners they were judged for
+    local present=0 absent=0 unreadable=0 unchecked=0 nodes=0 assumed=0 uids=""
     local node pod ready phase out xrc why line result detail vuid
     while IFS=$'\x1f' read -r node pod ready phase; do
         nodes=$((nodes + 1))
@@ -1267,7 +1278,7 @@ cmd_verify() {
                     vuid="${detail#* }"; detail="${detail%% *}"
                     if [ -n "$ENGINE_UID" ]; then detail="${detail} files; for uid ${vuid}, ENGINE_CACHE_UID"
                     else detail="${detail} files; for uid ${vuid}, the key directory's owner"
-                        [ "$vuid" != 0 ] || rootkeys=$((rootkeys + 1)); fi
+                        assumed=$((assumed + 1)); uids="${uids} ${vuid}"; fi
                     printf '  %-28s %-20s %s\n' "$node" "present" "$k  (${detail})"; present=$((present + 1)) ;;
                 absent) printf '  %-28s %-20s %s\n' "$node" "ABSENT" "$k${detail:+  (rank directory missing or empty: ${detail})}"; absent=$((absent + 1)) ;;
                 empty) printf '  %-28s %-20s %s\n' "$node" "ABSENT" "$k  (an empty directory)"; absent=$((absent + 1)) ;;
@@ -1276,7 +1287,7 @@ cmd_verify() {
                         "read "*) detail="${detail#read }: cannot be read" ;;
                         "mode "*) detail="${detail#mode }"
                             if [ -n "$ENGINE_UID" ]; then detail="${detail#* }: not readable by uid ${detail%% *} (ENGINE_CACHE_UID)"
-                            else [ "${detail%% *}" != 0 ] || rootkeys=$((rootkeys + 1))
+                            else assumed=$((assumed + 1)); uids="${uids} ${detail%% *}"
                                 detail="${detail#* }: not readable by uid ${detail%% *}, the owner of the key directory (taken as the engine's UID; ENGINE_CACHE_UID names another)"; fi ;;
                         "link "*) detail="${detail#link }: a symlink under the cache; vLLM writes none" ;;
                         not-a-directory) detail="not a directory" ;;
@@ -1310,21 +1321,38 @@ cmd_verify() {
     rm -f "$pods_file" "$err_file"
     local total=$((nodes * ${#keys[@]}))
     echo "  ${nodes} usable node(s) x ${#keys[@]} key(s): ${present} present, ${absent} absent, ${unreadable} unreadable, ${unchecked} could not check"
-    # A key owned by root was copied there by the preparer (a seed merge or a
-    # publish) or written by a root engine; read for its owner, it passes
-    # whatever user the engines really run as. Say so.
-    if [ "$rootkeys" -gt 0 ]; then
-        echo "  WARNING: ${rootkeys} key(s) checked are owned by root (a seeded or published copy, or a root engine), so the check assumed the engines run as root."
-        echo "  If your engines run as another user, run again with ENGINE_CACHE_UID=\$(kubectl exec -n ${NAMESPACE} <engine pod> -- id -u)"
+    # Without ENGINE_CACHE_UID each key was read for its owner, which is the
+    # engines' UID only when they wrote it: a key owned by root was copied by
+    # the preparer (a seed merge or a publish) or written by a root engine, and
+    # one owned by another UID may be another deployment's, or the image's
+    # user may have changed. Name the UIDs assumed, every time.
+    local ulist="" nuid=0 uwho=""
+    if [ -z "$ENGINE_UID" ] && [ "$assumed" -gt 0 ]; then
+        ulist="$(tr ' ' '\n' <<< "$uids" | grep . | sort -n -u | paste -sd, -)"
+        nuid="$(tr ',' '\n' <<< "$ulist" | grep -c .)"
+        ulist="${ulist//,/, }"
+        if [ "$nuid" -gt 1 ]; then uwho="uids ${ulist}"; else uwho="uid ${ulist}"; fi
+        echo "  WARNING: ${assumed} of ${total} node/key checks were judged for the owner of the key directory (${uwho}), taken as the engines' UID."
+        case ", ${ulist}, " in *", 0, "*)
+            echo "  A key owned by root (uid 0) is a seeded or published copy, or a root engine's: it passes for root whatever user the engines run as." ;;
+        esac
+        if [ "$nuid" -gt 1 ]; then
+            echo "  The keys have ${nuid} different owners. The engines of one configuration all run as one UID, so at least one line was judged for the wrong user (unless the keys belong to engines that run as different users: check each with its own ENGINE_CACHE_UID)."
+        fi
+        echo "  To check for the user your engines run as, run again with ENGINE_CACHE_UID=\$(kubectl exec -n ${NAMESPACE} <engine pod> -- id -u)"
     fi
     if [ "$present" -ne "$total" ] || [ "$total" -eq 0 ]; then
         echo "  NOT VERIFIED: a start on a node above that lacks a key compiles, or a node could not be checked"
         return 1
     fi
-    if [ "$rootkeys" -gt 0 ]; then
-        echo "  VERIFIED for root: every key is on every usable node, readable by root -- not checked for any other user (see the warning above)"
-    else
+    if [ -z "$uwho" ]; then
         echo "  VERIFIED: every key is on every usable node"
+    elif [ "$uwho" = "uid 0" ]; then
+        echo "  VERIFIED for root: every key is on every usable node, readable by root -- not checked for any other user (see the warning above)"
+    elif [ "$nuid" -eq 1 ]; then
+        echo "  VERIFIED for ${uwho}: every key is on every usable node, readable by ${uwho} -- not checked for any other user (see the warning above)"
+    else
+        echo "  VERIFIED for ${uwho}: every key is on every usable node, each readable by the owner of its key directory -- not checked for any one user (see the warning above)"
     fi
 }
 

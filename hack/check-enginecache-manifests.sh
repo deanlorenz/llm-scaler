@@ -696,10 +696,12 @@ ecv() {  # ecv OUTFILE ARGS... -- verify against the fixture; prints the exit co
     echo $?
 }
 ecv_row() { grep -qE "^  $2 +$3 +${4//+/\\+}( |\$)" "$1"; }  # ecv_row FILE NODE RESULT KEY (a + in KEY is literal)
-# The fixture's keys are owned by the runner; a root runner's keys are
-# judged for root, which the verdict says (VERIFIED for root)
+# The fixture's keys are owned by the runner, and without ENGINE_CACHE_UID
+# they are judged for that owner, which the verdict names (VERIFIED for
+# root, VERIFIED for uid 1000)
 ME="$(id -u)"; OTHER=$((ME + 4242))
-if [ "$ME" = 0 ]; then VOK='VERIFIED for root: every key is on every usable node'; else VOK='VERIFIED: every key is on every usable node'; fi
+if [ "$ME" = 0 ]; then VOK='VERIFIED for root: every key is on every usable node'; else VOK="VERIFIED for uid ${ME}: every key is on every usable node"; fi
+HINT='run again with ENGINE_CACHE_UID=$(kubectl exec -n check-ns <engine pod> -- id -u)'
 # every node has every key: a pass, a bare hash taken as torch_compile_cache/<hash>
 ecv_reset
 rc="$(ecv "$T/ecv-all.out" --keys "3f2a9c1d0e,$K2")"
@@ -780,29 +782,57 @@ rc="$(ecv "$T/ecv-aot600.out" --keys "$AOTK@rank_0_0")"
     && grep -q "$VOK" "$T/ecv-aot600.out" && grep -q 'modes read for the owner of each key directory' "$T/ecv-aot600.out" \
     && grep -qE "^  n-a +present +$AOTK@rank_0_0  \(2 files; for uid ${ME}, the key directory's owner\)" "$T/ecv-aot600.out" \
     && ok "verify: vLLM's 600 AOT files under a 755 key directory, owned by the key's owner (uid ${ME}), are present, for that uid" || fail "verify AOT 600: rc=$rc $(grep -E 'n-a|present,' "$T/ecv-aot600.out" | tr '\n' ';')"
-# a key owned by root (a seeded or published copy: the preparer copies as
-# root, modes kept) is judged for root by default -- every line says so, and
-# the summary warns and qualifies the verdict; a non-root owner gets neither
+# Without ENGINE_CACHE_UID each key is judged for its owner, which is the
+# engines' UID only when they wrote it: a key owned by root (a seeded or
+# published copy: the preparer copies as root, modes kept), or by another
+# deployment's UID, passes for that owner. So the summary always warns, names
+# the UIDs it assumed, and the verdict names them; a plain VERIFIED needs
+# ENGINE_CACHE_UID.
+grep -qF "WARNING: 3 of 3 node/key checks were judged for the owner of the key directory (uid ${ME}), taken as the engines' UID." "$T/ecv-aot600.out" \
+    && grep -qF "$HINT" "$T/ecv-aot600.out" && ! grep -q 'different owners' "$T/ecv-aot600.out" \
+    && ok "verify: keys owned by uid ${ME}, no ENGINE_CACHE_UID: a warning naming uid ${ME} (3 of 3 node/key checks), the id -u hint, and ${VOK%%:*}" \
+    || fail "verify owner warning: $(grep -E 'WARNING|run again|VERIFIED' "$T/ecv-aot600.out" | tr '\n' ';')"
 if [ "$ME" = 0 ]; then
-    grep -q "WARNING: 3 key(s) checked are owned by root (a seeded or published copy, or a root engine)" "$T/ecv-aot600.out" \
-        && grep -qF 'run again with ENGINE_CACHE_UID=$(kubectl exec -n check-ns <engine pod> -- id -u)' "$T/ecv-aot600.out" \
-        && ok "verify: root-owned keys (seeded, 755 key, 600 files), no ENGINE_CACHE_UID: present for uid 0, a warning, and VERIFIED for root" \
-        || fail "verify root-owned warning: $(grep -E 'WARNING|run again|VERIFIED' "$T/ecv-aot600.out" | tr '\n' ';')"
+    grep -q "A key owned by root (uid 0) is a seeded or published copy, or a root engine's" "$T/ecv-aot600.out" \
+        && ok "verify: root-owned keys (seeded, 755 key, 600 files), no ENGINE_CACHE_UID: the warning says what a root key is" \
+        || fail "verify root-owned warning: $(grep -E 'WARNING|root|VERIFIED' "$T/ecv-aot600.out" | tr '\n' ';')"
     rc="$(ENGINE_CACHE_UID=1000 ecv "$T/ecv-aotseed.out" --keys "$AOTK@rank_0_0")"
     [ "$rc" != 0 ] && grep -qE "^  n-a +UNREADABLE +$AOTK@rank_0_0  \($AOTK/(rank_0_0/model|modelinfos/m\.json): not readable by uid 1000 \(ENGINE_CACHE_UID\)\)" "$T/ecv-aotseed.out" \
-        && ! grep -q 'WARNING: .* owned by root' "$T/ecv-aotseed.out" \
+        && ! grep -q 'WARNING:' "$T/ecv-aotseed.out" \
         && ok "verify: the same root-owned keys with ENGINE_CACHE_UID=1000 are unreadable, naming uid 1000" || fail "verify seeded, uid 1000: rc=$rc $(grep -E 'n-a|present,' "$T/ecv-aotseed.out" | tr '\n' ';')"
     rc="$(ENGINE_CACHE_UID=0 ecv "$T/ecv-aotroot.out" --keys "$AOTK@rank_0_0")"
-    [ "$rc" = 0 ] && grep -q 'VERIFIED: every key is on every usable node' "$T/ecv-aotroot.out" && ! grep -q 'WARNING: .* owned by root' "$T/ecv-aotroot.out" \
+    [ "$rc" = 0 ] && grep -q '^  VERIFIED: every key is on every usable node' "$T/ecv-aotroot.out" && ! grep -q 'WARNING:' "$T/ecv-aotroot.out" \
         && grep -qE "^  n-a +present +$AOTK@rank_0_0  \(2 files; for uid 0, ENGINE_CACHE_UID\)" "$T/ecv-aotroot.out" \
         && ok "verify: ENGINE_CACHE_UID=0 names root: VERIFIED, no warning" || fail "verify ENGINE_CACHE_UID=0: rc=$rc $(grep -E 'n-a|WARNING|VERIFIED' "$T/ecv-aotroot.out" | tr '\n' ';')"
-else
-    ! grep -q 'WARNING: .* owned by root' "$T/ecv-aot600.out" && ok "verify: keys owned by uid ${ME}, not root: no root warning" \
-        || fail "verify non-root owner warned: $(grep WARNING "$T/ecv-aot600.out")"
+    # a key owned by a non-root UID that may not be the engines' (another
+    # deployment, or a changed image user): VERIFIED for that uid, warned
+    ecv_reset; ecv_aot; for p in ec-a ec-b ec-c; do chown -R 1000:1000 "$T/ecv/$p/vllm/$AOTK"; done
+    rc="$(ecv "$T/ecv-own1000.out" --keys "$AOTK@rank_0_0")"
+    [ "$rc" = 0 ] && grep -q '^  VERIFIED for uid 1000: every key is on every usable node, readable by uid 1000' "$T/ecv-own1000.out" \
+        && grep -qF "WARNING: 3 of 3 node/key checks were judged for the owner of the key directory (uid 1000)" "$T/ecv-own1000.out" \
+        && grep -qF "$HINT" "$T/ecv-own1000.out" && ! grep -q 'A key owned by root' "$T/ecv-own1000.out" && ! grep -q 'different owners' "$T/ecv-own1000.out" \
+        && ok "verify: keys owned by uid 1000, no ENGINE_CACHE_UID: VERIFIED for uid 1000, a warning and the id -u hint" \
+        || fail "verify owner 1000: rc=$rc $(grep -E 'WARNING|run again|VERIFIED' "$T/ecv-own1000.out" | tr '\n' ';')"
+    rc="$(ENGINE_CACHE_UID=1000 ecv "$T/ecv-own1000u.out" --keys "$AOTK@rank_0_0")"
+    [ "$rc" = 0 ] && grep -q '^  VERIFIED: every key is on every usable node$' "$T/ecv-own1000u.out" && ! grep -q 'WARNING:' "$T/ecv-own1000u.out" \
+        && ok "verify: the same keys with ENGINE_CACHE_UID=1000: a plain VERIFIED, no warning" \
+        || fail "verify owner 1000, ENGINE_CACHE_UID=1000: rc=$rc $(grep -E 'WARNING|VERIFIED' "$T/ecv-own1000u.out" | tr '\n' ';')"
+    # the same key owned by 1000 on one node and 2000 on the others: both
+    # named, and said plainly that one of them is the wrong user
+    chown -R 2000:2000 "$T/ecv/ec-b/vllm/$AOTK" "$T/ecv/ec-c/vllm/$AOTK"
+    rc="$(ecv "$T/ecv-ownmix.out" --keys "$AOTK@rank_0_0")"
+    [ "$rc" = 0 ] && grep -q '^  VERIFIED for uids 1000, 2000: every key is on every usable node, each readable by the owner of its key directory' "$T/ecv-ownmix.out" \
+        && grep -qF "WARNING: 3 of 3 node/key checks were judged for the owner of the key directory (uids 1000, 2000)" "$T/ecv-ownmix.out" \
+        && grep -qF "The keys have 2 different owners. The engines of one configuration all run as one UID, so at least one line was judged for the wrong user" "$T/ecv-ownmix.out" \
+        && grep -qF "$HINT" "$T/ecv-ownmix.out" \
+        && ok "verify: one key owned by 1000 on one node and 2000 on two: VERIFIED for uids 1000, 2000, and at least one line judged for the wrong user" \
+        || fail "verify mixed owners across nodes: rc=$rc $(grep -E 'WARNING|owners|VERIFIED' "$T/ecv-ownmix.out" | tr '\n' ';')"
+    ecv_reset; ecv_aot  # back to keys the runner owns
 fi
 rc="$(ENGINE_CACHE_UID="$ME" ecv "$T/ecv-aotme.out" --keys "$AOTK@rank_0_0")"
 [ "$rc" = 0 ] && grep -q '3 present, 0 absent, 0 unreadable' "$T/ecv-aotme.out" && grep -q "modes read for uid ${ME} (ENGINE_CACHE_UID)" "$T/ecv-aotme.out" \
-    && ok "verify: ENGINE_CACHE_UID equal to the owner of the 600 files (${ME}) is present" || fail "verify ENGINE_CACHE_UID=owner: rc=$rc $(grep -E 'n-a|present,|modes' "$T/ecv-aotme.out" | tr '\n' ';')"
+    && grep -q '^  VERIFIED: every key is on every usable node$' "$T/ecv-aotme.out" && ! grep -q 'WARNING:' "$T/ecv-aotme.out" \
+    && ok "verify: ENGINE_CACHE_UID equal to the owner of the 600 files (${ME}) is present: a plain VERIFIED, no warning" || fail "verify ENGINE_CACHE_UID=owner: rc=$rc $(grep -E 'n-a|present,|modes|VERIFIED|WARNING' "$T/ecv-aotme.out" | tr '\n' ';')"
 rc="$(ENGINE_CACHE_UID="$OTHER" ecv "$T/ecv-aotother.out" --keys "$AOTK@rank_0_0")"
 [ "$rc" != 0 ] && grep -qE "^  n-b +UNREADABLE +$AOTK@rank_0_0  \($AOTK/(rank_0_0/model|modelinfos/m\.json): not readable by uid $OTHER \(ENGINE_CACHE_UID\)\)" "$T/ecv-aotother.out" \
     && grep -q '0 present, 0 absent, 3 unreadable, 0 could not check' "$T/ecv-aotother.out" && grep -q 'NOT VERIFIED' "$T/ecv-aotother.out" \
@@ -899,6 +929,23 @@ rc="$(ENGINE_CACHE_UID="$OTHER" ecv "$T/ecv-anc3.out" --keys "$AOTK@rank_0_0")"
 chmod 755 "$T/ecv/ec-c/vllm"
 [ "$rc" != 0 ] && grep -qE "^  n-c +UNREADABLE +$AOTK@rank_0_0  \($T/ecv/ec-c/vllm: not readable by uid $OTHER \(ENGINE_CACHE_UID\)\)" "$T/ecv-anc3.out" \
     && ok "verify: a cache root another UID cannot search is unreadable, naming it" || fail "verify cache root 700: rc=$rc $(grep n-c "$T/ecv-anc3.out")"
+# the volume mount above the cache root (/engine-cache; here the pod
+# directory) is on the way too
+ecv_reset; ecv_aot; chmod 700 "$T/ecv/ec-c"
+rc="$(ENGINE_CACHE_UID="$OTHER" ecv "$T/ecv-anc5.out" --keys "$AOTK@rank_0_0")"
+chmod 755 "$T/ecv/ec-c"
+[ "$rc" != 0 ] && grep -qE "^  n-c +UNREADABLE +$AOTK@rank_0_0  \($T/ecv/ec-c: not readable by uid $OTHER \(ENGINE_CACHE_UID\)\)" "$T/ecv-anc5.out" \
+    && ecv_row "$T/ecv-anc5.out" n-c UNREADABLE "$AOTK@rank_0_0" \
+    && ok "verify: a 700 volume mount above the cache root another UID cannot search is unreadable, naming it" || fail "verify mount root 700: rc=$rc $(grep n-c "$T/ecv-anc5.out")"
+if [ "$ME" = 0 ]; then
+    # a root 700 mount root above keys owned by 1000, judged for their owner
+    ecv_reset; ecv_aot; chown -R 1000:1000 "$T/ecv/ec-a/vllm/$AOTK"; chmod 700 "$T/ecv/ec-a"
+    rc="$(ecv "$T/ecv-anc6.out" --keys "$AOTK@rank_0_0")"
+    chmod 755 "$T/ecv/ec-a"
+    [ "$rc" != 0 ] && grep -qE "^  n-a +UNREADABLE +$AOTK@rank_0_0  \($T/ecv/ec-a: not readable by uid 1000, the owner of the key directory" "$T/ecv-anc6.out" \
+        && ok "verify: a root 700 volume mount above a 1000:1000 key is unreadable for uid 1000, naming the mount" \
+        || fail "verify root 700 mount root, owner 1000: rc=$rc $(grep n-a "$T/ecv-anc6.out")"
+fi
 if [ "$ME" = 0 ]; then
     # the reviewer's case: torch_aot_compile root 700, the key 1000:1000
     ecv_reset; ecv_aot; chown -R 1000:1000 "$T/ecv/ec-a/vllm/$AOTK"; chmod 700 "$T/ecv/ec-a/vllm/torch_compile_cache/torch_aot_compile"
@@ -953,6 +1000,10 @@ rc="$(ECV_PATH="$T/tbin:$STUB_PATH" ecv "$T/ecv-timeout.out" --keys "$K1")"
 mkdir -p "$T/notimeout"
 IFS=: read -r -a pdirs <<< "$STUB_PATH"
 for d in "${pdirs[@]}"; do for f in "$d"/*; do
+    # an empty PATH directory leaves "$d/*" unexpanded: no command, skip it
+    # (linked, it was a dangling "*" that every later empty directory tried
+    # to link again: "ln: ... File exists")
+    [ -e "$f" ] || continue
     b="${f##*/}"; [ "$b" = timeout ] || [ -e "$T/notimeout/$b" ] || ln -s "$f" "$T/notimeout/$b"
 done; done
 [ ! -e "$T/notimeout/timeout" ] || fail "verify no timeout: the stripped PATH still has timeout"

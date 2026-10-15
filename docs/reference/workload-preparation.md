@@ -560,10 +560,17 @@ leader pod, the check covers only the leader's ranks.
 - `COULD NOT CHECK`: no Ready preparer on the node, the exec failed, was
   Forbidden, or timed out. This is never reported as absent.
 
-When `ENGINE_CACHE_UID` is not set and a key is owned by root (a seeded or
-published copy, or a root engine), the summary warns and the last line says
-`VERIFIED for root`. That still exits zero: re-run with `ENGINE_CACHE_UID` to
-check your engines' user.
+When `ENGINE_CACHE_UID` is not set, each key is judged for the user that owns
+it. That is your engines' user only if they wrote the key. A seeded or
+published key is owned by root. A key can also belong to another deployment
+sharing the cache, or to the engines' old user if the image changed it. So the
+summary always warns, says how many node/key checks it judged that way, and
+names the UIDs it assumed. The last line names them too: `VERIFIED for root`,
+`VERIFIED for uid 1000`, or `VERIFIED for uids 0, 1000`. More than one UID
+means the keys have different owners. The engines of one configuration all run
+as one UID, so at least one line was judged for the wrong user. These verdicts
+still exit zero. Re-run with `ENGINE_CACHE_UID` to check your engines' user;
+only then does the last line say plain `VERIFIED`.
 
 It exits non-zero unless every key is present on every node. It needs
 `pods/exec` in the namespace, plus the node list `engine-cache-status` needs.
@@ -600,13 +607,15 @@ engine's user:
   another user needs group read if it is in the key directory's group, and
   read for others if not. The check assumes the engine is in the key
   directory's group. Directories need read and search the same way, both
-  under the key and on the way to it, from the cache root down.
+  under the key and on the way to it, from the volume mount (`/engine-cache`)
+  down.
 - vLLM writes its AOT files (`.../rank_0_0/model`) as mode `600`. That is
   fine when the engine owns them, which it does when it wrote them. They are
   `present`.
 - A seeded or published key is owned by root: the preparer copied it there as
   root, keeping the modes. By default it is judged for root, which can read
-  it, so it is `present (... for uid 0, ...)` and the summary warns.
+  it, so it is `present (... for uid 0, ...)`, the summary warns, and the
+  last line says `VERIFIED for root`.
 - Set `ENGINE_CACHE_UID=<uid>` when the engines run as a different user than
   the one that owns the keys. The check then reads the permissions for
   that UID: owner read if it owns the file, read for others if not. Its

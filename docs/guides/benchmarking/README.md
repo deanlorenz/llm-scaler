@@ -396,8 +396,9 @@ what the first starts compiled. For a multi-node engine, name the leader and
 every worker pod; the check then passes only after a publish. A published key
 is owned by root: if the engines do not run as root, add
 `ENGINE_CACHE_UID=$(kubectl exec -n $BENCHMARK_NAMESPACE <engine pod> -- id -u)`,
-or the check judges it for root. The check does not cover the FlashInfer and
-Triton caches. What each result means:
+or the check judges it for root. Without it, the last line names the user the
+check assumed (`VERIFIED for root`, `VERIFIED for uid 1000`). The check does
+not cover the FlashInfer and Triton caches. What each result means:
 [Check the cache without a second start](../../reference/workload-preparation.md#check-the-cache-without-a-second-start).
 
 After a standup, check what was rendered:
