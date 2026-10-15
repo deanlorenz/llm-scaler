@@ -22,8 +22,10 @@
   The scaling manager must `patch` pool Pods to lend them, and its ClusterRole
   only reads Pods. `deploy/warmpool.sh create` grants the patch in this
   namespace alone (Role `wva-pod-writer`), before it creates the pool. A
-  namespace-scoped scaling manager already has it, and nothing is granted. If
-  you may not create Roles, `create` stops before creating anything and prints
+  namespace-scoped scaling manager already has the patch in its own Role.
+  `create` sees that only if you may impersonate its ServiceAccount
+  (`kubectl auth can-i --as`); if you may not, it makes the grant anyway,
+  which does no harm. If you may not create Roles, `create` stops before creating anything and prints
   the command to ask an admin to run. Without the grant, the scaling manager
   refuses to start the pool: it will not hold accelerators to warm models it
   could never lend.
