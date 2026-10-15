@@ -76,6 +76,19 @@ var _ = Describe("forgetting one variant", func() {
 		Expect(a.ForgottenToken("test-ns", "variant-b")).To(Equal("t1"))
 	})
 
+	It("drops the variant's ITL baseline, which the tracker holds and not a map of the analyzer's", func() {
+		key := func(v string) string { return a.itlWindowKey("test-ns", "test-model", v, "H100", 1) }
+		for _, v := range variants {
+			a.itlTracker.SetBaseline(key(v), 0.011)
+		}
+		a.ForgetVariant("test-ns", "test-model", "variant-b", "t1")
+
+		Expect(a.itlBaselines()).NotTo(HaveKey(key("variant-b")),
+			"a forgotten variant would pin its next ITL fit to the intercept it learned before")
+		Expect(a.itlBaselines()).To(HaveKey(key("variant-a")))
+		Expect(a.itlBaselines()).To(HaveKey(key("variant-b2")), "variant-b2 matched variant-b's prefix")
+	})
+
 	It("drops what a restore was holding for the variant", func() {
 		saved := a.ExportLearnedState()
 		second := NewSaturationAnalyzer(capacity.NewStore())
